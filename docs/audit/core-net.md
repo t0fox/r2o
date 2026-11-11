@@ -877,6 +877,47 @@ mismatches: нет
 - `volume.c` — evidence-функции покрыты unit-тестами, но лестница HEAD/повторов и resource-retry сверяются только косвенно.
 - Диагностические тексты (`props_findings`, `verdict_name`, `prop_word`, `reason`-форматы) в Rust не воспроизведены дословно — это `N`/`P`, не влияющие на сетевой datapath, но влияющие на CLI/лог-паритет.
 
+## Углублённая сверка оставшихся 10 N
+
+- **`d2k_tls12_prf_for_test` (tls12.c 214–218):** тестовый экспорт
+  `prf`, используется только `test_tls12.c:44,58`. R2O использует
+  `rustls` TLS1.2 PRF; отдельного экспорта/вектора нет. N — тестовый хук.
+- **`d2k_verify_tcp_timestamps_get` (verify.c 829):** геттер глобального
+  `g_verify_tcp_timestamps`, используется `test_sched.c:409`. В R2O
+  профиль TS берётся из `PacketInput`/`tcp_profile_from_has_timestamp`,
+  глобального getter нет. N — диагностический/тестовый API.
+- **`d2k_httpsprobe_lost` (httpsprobe.c 460–466):** счётчик потерянных
+  результатов HTTPS-проб, читается `d2kc.c:349` для сводки. В
+  `https_probe.rs` отдельного счётчика `lost` нет. N — диагностика.
+- **`d2k_httpsearch_test_add_failures` (httpsearch.c 555–566) и
+  `d2k_httpsearch_test_add_records` (569–576):** существуют только под
+  `D2K_HS_TESTING`, наполняют таблицу для тестов. В production R2O не
+  нужны; Rust-тесты создают состояние иначе. N — тестовые хуки.
+- **`d2k_qw_retry_build` (quicwire.c 481–521):** собирает серверный QUIC
+  Retry (version/DCID/SCID/token). R2O — клиентский datapath: он умеет
+  разбирать/учитывать Retry (`r2o_quic_http3`), но не строит серверный
+  Retry. N — серверная роль, не клиентский обход.
+- **`d2k_quic_props_findings` (quicprobe.c 2274–2323):** формирует
+  текстовые выводы по split/2 datagrams/v2/fixed bit/port и т.п. для
+  журнала планировщика (`sched.c:11506`). В R2O есть `ClassifyResult`/
+  `classify_json`, но отдельного генератора этих строк нет. N —
+  диагностический текст.
+- **`prop_word` (quicarms.c 244, static):** `prop_word()` переводит
+  tri-state в слово для лога. R2O использует свои строки в
+  `discovery`/`classify_json`; отдельной функции нет. N — диагностика.
+- **`d2k_vol_verdict_name` (volume.c 215):** текстовые имена вердиктов
+  `unreachable/cut/passed/short/unknown`, используются `d2kfetch`.
+  В R2O вердикты `VolumeVerdict` есть, но отдельного
+  `d2k_vol_verdict_name`/побайтового текста нет. N — CLI-текст.
+- **`voice_ask_real` (voice.c 365):** возвращает function pointer
+  `voice_ask` для подмены oracle в тестах (`test_voice.c:744`). R2O
+  `voice_measure` вызывает замер напрямую; N — тестовый seam, не
+  поведение.
+
+**Итог:** 10 N — 4 тестовых хука/экспорта, 5 диагностических текстов/
+счётчиков и 1 серверный Retry. Клиентский packet-path не затронут;
+архитектурные N остаются только 6 raw-UDP/TTL функций.
+
 ## Классификация N (16 функций)
 
 Не все N означают пропущенный обход. Разбивка по влиянию:
