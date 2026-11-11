@@ -102,7 +102,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-11)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 621 / P 1319 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 629 / P 1311 /
 N 40 / ? 2**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -126,6 +126,10 @@ P означает неполное доказательство ветвей, N
 | 16 | Binding | `tcp_profile` хранится, `family` default 4 (`catalog.c:834-890`) | `Binding` без `tcp_profile`, `family` default 0 (`catalog.rs:165-181`) | `core-state.md` |
 | 17 | plan identity | FNV-1a `plan-%08x` в TLV (`compose.c:218-240`) | trial-id 16 байт (`discovery.rs:1450`) | `core-state.md` |
 | 18 | P-256 | production TLS1.2 ECDHE (`tls12.c:650-655`) | `ring`; прямых C/Rust-векторов нет | `core-state.md` |
+| 19 | HTTP-search `probe_run` | 403 с телом РКН → `INJECTED`; 101/битый CL/TE → CUT; `head` включает тело | Rust не классифицирует тело, 101 → `Empty`, битый CL/TE → `InvalidData`; judge видит только заголовки | `deep-core-verify.md` |
+| 20 | HTTP-search кандидаты | `CANDS[]`: split, disorder, fake-badsum, fake-seqshift (4) | 5 кандидатов, включая `fake-badsum-whole`, другой порядок | `deep-core-verify.md` |
+| 21 | HTTP-search save | файл `d2k-http-plans 1`, `fflush/fsync/rename` | JSON-каталог, отдельного файла/формата нет | `deep-core-verify.md` |
+| 22 | verify page budget | бюджетный повтор шлёт фактический `req`, дедлайн сбрасывается | повтор строит запрос из `options.path`, общий deadline; redirect только при `complete` | `deep-core-verify.md` |
 
 ### Остаточные P (не доказано, не значит «сломано»)
 
@@ -174,6 +178,13 @@ P означает неполное доказательство ветвей, N
 | datapath-core: d2kd/session/hold/udp/nfq/… | 400 | `docs/audit/datapath-core.md` | готов |
 | datapath-plan: plans/ctl/raw/route/… | 183 | `docs/audit/datapath-plan.md` | готов |
 | detect: trigger/poison/raw/classify/response | 159 | `docs/audit/detect.md` | готов |
+
+Глубокая повторная проверка: `deep-core-net.md`, `deep-core-verify.md`,
+`deep-datapath-core.md`, `deep-detect-plan.md`. `deep-core-verify.md`
+интегрирован в `core-net.md` (E→P: `request_page_budget`,
+`d2k_hs_probe_run`, `d2k_hs_candidate_count/key`, `d2k_httpsearch_save`).
+Линии `httpsearch.c` в реестре/CSV местами сдвинуты на +2 относительно
+фактического файла a378; в `deep-core-verify.md` указаны фактические.
 
 ## Уже подтверждённые differential-контракты (контекст, не заменяет аудит)
 

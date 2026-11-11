@@ -24,7 +24,9 @@ PARTS = ["core-net", "core-state", "datapath-core", "datapath-plan", "detect"]
 RANGE_RE = re.compile(r"^(?P<start>\d+)\s*(?:(?:\.\.|–|-|—)\s*(?P<end>\d+))?\s*$")
 NAME_RE = re.compile(r"^`?[A-Za-z_][A-Za-z0-9_]*`?(?:\s|\||$)")
 CELL_SPLIT_RE = re.compile(r"(?<!\\)\|")
-HEADING_RE = re.compile(r"^###\s+`(?P<file>[^`]+)`\s*$")
+HEADING_RE = re.compile(
+    r"^(?:##|###)\s+`?(?P<file>[A-Za-z0-9_./*+-]+\.(?:c|h))`?(?:\s|\(|$)"
+)
 
 
 def split_row(line: str) -> list[str]:
