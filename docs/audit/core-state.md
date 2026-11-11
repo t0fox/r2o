@@ -406,7 +406,7 @@
 | `d2k_link_set_name_probe_trial` | 659–668 | 10 | SET_NAME_PROBE с trial_id | control::encode_set_name_probe | **P** | unit-тест; C/Rust diff нет |
 | `area_context_valid` | 670–675 | 6 | допустимая комбинация transport/shape/family для области | control::valid_domain_area_context | **P*** | static-хелпер |
 | `d2k_link_set_suffix_family` | 677–684 | 8 | SET_SUFFIX с планом | control::encode_set_suffix | **P** | кодировщик есть; точный C/Rust differential области не заявлен |
-| `d2k_link_set_https` | 686–705 | 20 | SET_HTTPS имя+ttl | control::encode_set_https | **P** | unit encodes_the_exact_https_name_and_ttl; C/Rust diff нет |
+| `d2k_link_set_https` | 686–705 | 20 | SET_HTTPS имя+ttl | `control.rs:1777-1790` `encode_set_https` | **P** | **Расхождение:** C-link проверяет только имя (1..253) и кодирует любой `u32 ttl`; обрезку до `D2K_HTTPS_TTL_MAX_S` делает датапат (`ctlsrv.c:446`). Rust-link отвергает `ttl > MAX_HTTPS_TTL_SECONDS` (6 ч) ещё на кодировании. Наблюдаемый итог для сверх-6ч различается стадией (C: обрезка, R2O: отказ). Unit `encodes_the_exact_https_name_and_ttl` покрывает только допустимый TTL. |
 | `d2k_link_set_stall_budgets` | 707–729 | 23 | SET_STALL_BUDGETS список бюджетов | control::encode_set_tcp_stall_budgets | **P** | unit бюджеты tcp/reset; C/Rust diff нет |
 | `send_area_key` | 731–752 | 22 | общий кодировщик domain-area команд (name/key/area_id) | control::encode_domain_area_key | **P*** | static-хелпер |
 | `d2k_link_del_suffix_family` | 754–757 | 4 | DEL_SUFFIX | control::encode_delete_suffix | **P** | кодировщик есть; C/Rust differential нет |
@@ -422,10 +422,10 @@
 | `d2k_link_del_addr_probe` | 911–917 | 7 | DEL_ADDR_PROBE IPv4 | control::encode_delete_addr_probe | **P** | unit-тест; C/Rust diff нет |
 | `d2k_link_del_addr_probe_family` | 919–937 | 19 | DEL_ADDR_PROBE family 4/6 | control::encode_delete_addr_probe | **P** | unit-тест; C/Rust diff нет |
 | `d2k_link_arm_shape` | 939–942 | 4 | ARM_SHAPE IPv4 | control::encode_arm_shape | **P** | unit arm_shape_roundtrip; C/Rust diff нет |
-| `d2k_link_arm_shape_family` | 944–979 | 36 | ARM_SHAPE family 4/6 | control::encode_arm_shape | **P** | unit-тест; C/Rust diff нет |
+| `d2k_link_arm_shape_family` | 944–979 | 36 | ARM_SHAPE: имя, transport 6/17, family 4/6 | `control.rs:902-915` `encode_arm_shape` | **P** | Кодирование совпадает: C и Rust принимают transport 6/17, family 4/6, имя до 253/255. **Но** датапат R2O `arm_client_shape` (`control.rs:2002`) отвергает transport 17, а C `ctlsrv.c:329` принимает 6/17 — это уже зафиксированное расхождение конца пути, не link-кодера. |
 | `d2k_link_del_name_family` | 981–1012 | 32 | DEL_NAME с shape/family | control::encode_delete_name | **P** | unit-тест; C/Rust diff нет |
 | `d2k_link_del_name_probe` | 1014–1018 | 5 | DEL_NAME_PROBE IPv4 | control::encode_delete_name_probe | **P** | кодировщик есть; unit/дифференциала именно для DEL_NAME_PROBE не найдено |
-| `d2k_link_del_name_probe_family` | 1020–1049 | 30 | DEL_NAME_PROBE family 4/6 + local port | control::encode_delete_name_probe | **P** | используется question_retire; точный кадр не сравнивался |
+| `d2k_link_del_name_probe_family` | 1020–1049 | 30 | DEL_NAME_PROBE: имя, shape, family 4/6, source port | `control.rs:1906-1926` `encode_delete_name_probe` | **P** | **Расхождение:** C-link не проверяет `shape` вовсе (только имя/порт/family), Rust требует `valid_tcp_probe_shape(shape)` и отвергает неизвестную форму. C-датапат всё равно отверг бы такую команду, но отказ происходит позже. Точный кадр C/Rust не сравнивался. |
 | `d2k_link_del_addr` | 1051–1054 | 4 | DEL_ADDR IPv4 | control::encode_delete_addr | **P** | unit-тест; C/Rust diff нет |
 | `d2k_link_del_addr_family` | 1056–1076 | 21 | DEL_ADDR family 4/6 | control::encode_delete_addr | **P** | unit-тест; C/Rust diff нет |
 | `d2k_ev_outer_appdata` | 1079–1094 | 16 | есть ли в обмене TLS application data (бит 23) | r2k_core::control event seen_types | **P*** | static-хелпер; events tests |
@@ -988,6 +988,30 @@
 - **Вывод:** статусы E для 20 функций оставлены; единственное отличие —
   ранний отказ R2O на тексте, который C-компилятор пропускает, но
   `plan_parse.c` D2O всё равно отвергает.
+
+## Углублённая сверка: link.c (43 функции)
+
+- **Открытие/чтение кадра:** `d2k_link_open`, `d2k_link_close`,
+  `d2k_link_peer_closed`, `wait_readable`, `read_exact`, `write_all`,
+  `hex_nibble`, `hex_decode` сверены с `ControlClient`/`read_frame`/
+  `write_frame`. `d2k_link_next` (300 строк) декодирует HELLO/HTTP/SUSPECT/
+  STATS/EXCHANGE/CLIENT_TCP/SHAPE/ACK/APPLIED/PROTO/REFUSED; на него есть
+  `d2o_control_differential.c` + `tests/control.rs` — статус E. Остальные
+  хелперы P: C/Rust differential на ошибки connect/HUP нет.
+- **Кодировщики name/area/addr:** `send_name_plan`, `send_area_key`,
+  `d2k_link_set_name*`, `d2k_link_set_suffix/bypass`, `d2k_link_set_addr*`,
+  `d2k_link_arm_shape*`, `d2k_link_del_*` собраны по тем же полям и порядку,
+  что `control.rs::encode_*`; точные кадры проверяются unit-тестами
+  `tests/control.rs`, но C/Rust differential кодирования не заявлен.
+- **Подтверждённые расхождения:**
+  1. `SET_HTTPS`: C-link кодирует любой `u32 ttl` и оставляет обрезку
+     датапату; Rust `encode_set_https` отвергает `ttl > 6ч`.
+  2. `DEL_NAME_PROBE`: C-link не проверяет `shape`; Rust требует
+     `valid_tcp_probe_shape` и отвергает неизвестную форму раньше.
+  3. `ARM_SHAPE`: кодировщики совпадают (transport 6/17), но датапат R2O
+     `arm_client_shape` принимает только 6, тогда как C `ctlsrv.c:329` — 6/17.
+- `d2k_ev_outer_appdata`: бит 23 (`application data`) в `seen_types`;
+  перенесён в `control::decode_*`, отдельного differential нет.
 
 ## Проверка полноты
 
