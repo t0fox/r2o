@@ -459,13 +459,40 @@ C всё равно выдаёт кандидат «всё сразу», R2O е�
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| `resp_timeout` | 64-70 | 160 | потолок одного рукопожатия 3 с | response.rs:164 response_timeout | E | tests/response.rs:649 full probe |
-| `d2k_resp_scan12` | 83-118 | 996 | поиск ServerHelloDone/алерта в потоке | response.rs:1248 scan12 | E | tests/response.rs:122/138/479 (13 векторов) |
-| `d2k_resp_handshake12` | 123-207 | 2623 | рукопожатие TLS 1.2 до ServerHelloDone | response.rs:1050 handshake | E | tests/response.rs:649, :555 |
-| `count_handshakes` | 215-228 | 403 | счёт рукопожатий серии | response.rs:1148 count_handshakes | E | tests/response.rs:649 |
-| `d2k_neutral_sni` | 233-269 | 1252 | случайное нейтральное имя | response.rs:1172 neutral_sni | E | tests/response.rs:203 loopback same-address control |
-| `d2k_resp_decide` | 274-304 | 1957 | вердикт по счётчикам | response.rs:1304 decide | E | tests/response.rs:421, :479 |
-| `d2k_probe_response` | 310-324 | 806 | проверка ответного направления | response.rs:1207 probe_response | E | tests/response.rs:649, :780 |
+| `resp_timeout` | 64-70 | 160 | `timeout>0 && timeout<3000 ? timeout : 3000` | response.rs:164 response_timeout | **E** | C и Rust одинаково ограничивают одно рукопожатие 3 с; `tests/response.rs:649`. |
+| `d2k_resp_scan12` | 83-118 | 996 | поток TLS-записей: alert 0x15 → конец, 0x16 → склейка handshake, type 14/len 0 → ServerHelloDone | response.rs:1248 scan12 | **E** | C и Rust одинаково проверяют полную запись, `0x15`/`0x16`, склейку handshake через `body`, `hdr[0]==14 && body==0`; 13 векторов `tests/response.rs:122/138/479`. |
+| `d2k_resp_handshake12` | 123-207 | 2623 | legacy ClientHello, socket, SO_MARK/TCP_NODELAY/SNDTIMEO/RCVTIMEO, connect/send, 64 КиБ, poll/recv, scan12 | response.rs:1050 handshake | **E** | C и Rust: legacy hello, те же socket options, `MSG_NOSIGNAL`, deadline, `RESPONSE_CAP=65536`, `scan12`; C разрешает адрес внутри, Rust `count_handshakes` — снаружи. Исходы Done/Failed/Unmeasured совпадают; `tests/response.rs:649/555`. |
+| `count_handshakes` | 215-228 | 403 | последовательные `repeats`, `r>0` done, `r<0` unmeasured | response.rs:1148 count_handshakes | **E** | C последовательно; Rust тоже, но резолвит адрес на каждую попытку и считает lookup failure как failed, `probes++`. `tests/response.rs:649`. |
+| `d2k_neutral_sni` | 233-269 | 1252 | 10 случайных байт `/dev/urandom`, xorshift fallback, `z<hex>.example.com` | response.rs:1172 neutral_sni | **E** | C и Rust: 10 байт, fallback time/pid/counter/xorshift, hex-суффикс и тот же формат; `tests/response.rs:203`. |
+| `d2k_resp_decide` | 274-304 | 1957 | unmeasured>0 / control==0 / target==repeats / target==0 / flaky с точными reason | response.rs:1304 decide | **E** | C и Rust совпадают все 5 ветвей и тексты; `tests/response.rs:421/479`. |
+| `d2k_probe_response` | 310-324 | 806 | neutral SNI, target count, control count, decide | response.rs:1207 probe_response | **E** | C и Rust: target/control на одном адресе, neutral SNI, `decide`; Rust дополнительно валидирует `repeats>0` и legacy hello, C при тех же входах даёт NotApplicable через control==0. `tests/response.rs:649/780`. |
+
+### response.c: построчная сверка
+
+- **`resp_timeout` (64–70) ↔ `response_timeout` (`:164`):** оба
+  `timeout>0 && timeout<3000 ? timeout : 3000`. E.
+- **`d2k_resp_scan12` (83–118) ↔ `scan12` (`:1248`):** C и Rust
+  проверяют полную запись, `0x15` → FatalAlert, `0x16` → склейка
+  handshake, `type 14 && body 0` → ServerHelloDone; 13 векторов.
+  E.
+- **`d2k_resp_handshake12` (123–207) ↔ `handshake` (`:1050`):**
+  legacy ClientHello, socket, `SO_MARK/TCP_NODELAY/SNDTIMEO/
+  RCVTIMEO`, `MSG_NOSIGNAL`, deadline, `RESPONSE_CAP=65536`,
+  `scan12`; C резолвит внутри, Rust — в `count_handshakes`.
+  Done/Failed/Unmeasured совпадают. E.
+- **`count_handshakes` (215–228) ↔ `:1148`:** C последовательные
+  `repeats`, `r>0` done, `r<0` unmeasured; Rust резолвит каждую
+  попытку, lookup failure = failed, `probes++`. E.
+- **`d2k_neutral_sni` (233–269) ↔ `neutral_sni` (`:1172`):**
+  `/dev/urandom` 10 байт, xorshift fallback, `z<hex>.example.com`.
+  E.
+- **`d2k_resp_decide` (274–304) ↔ `decide` (`:1304`):** 5 ветвей
+  (unmeasured/control==0/target==repeats/target==0/flaky) и тексты
+  совпадают. E.
+- **`d2k_probe_response` (310–324) ↔ `probe_response`
+  (`:1207`):** target/control на одном адресе, neutral SNI,
+  `decide`; Rust дополнительно валидирует repeats/legacy hello, при
+  тех же входах C даёт NotApplicable. E.
 
 ## 8. detect/trigger.c — 9 функций
 
