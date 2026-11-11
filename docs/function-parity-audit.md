@@ -1045,6 +1045,31 @@ mismatches: нет
 - `volume.c` — evidence-функции покрыты unit-тестами, но лестница HEAD/повторов и resource-retry сверяются только косвенно.
 - Диагностические тексты (`props_findings`, `verdict_name`, `prop_word`, `reason`-форматы) в Rust не воспроизведены дословно — это `N`/`P`, не влияющие на сетевой datapath, но влияющие на CLI/лог-паритет.
 
+## Проверки, выполненные в этой сессии
+
+Агент-аудитор тесты не запускал. Координатор дополнительно прогнал на
+закреплённом D2O `a378e230` и текущем R2O:
+
+```text
+test-controller-clienthello-differential.sh      PASS (56 кейсов)
+r2o-tls-verify-differential.sh                   PASS 16/16
+r2o-ech-rx-ladder-differential.sh                PASS
+r2o-layered-rx-differential.sh                   PASS
+r2o-quic-hello-differential.sh                   PASS
+r2o-quic-local-address-differential.sh           PASS
+r2o-discovery-quic-stop-differential.sh          PASS
+r2o-quic-stun-watch-differential.sh              PASS
+test-quic-http3-full-stage-differential.sh       18/18 PASS
+test-quic-app-bytes-differential.sh              VERDICT|match
+test-quic-budget-init-differential.sh            все значения совпали
+test-quic-short-control-differential.sh          VERDICT|match
+```
+
+Эти прогоны покрывают ядро `hello/tls/ech/quic/http3/voice`, но не каждый
+E-ряд: если в строке назван другой тест, он не перезапускался и помечен как
+«тест есть, прогон не заявлен». Замена C-стеков на `rustls`/`quinn` остаётся
+P: end-to-end исходы сверяются, record-layer и коды ошибок — нет.
+
 ## Что не проверялось
 
 - Прогон `cargo test`, дифференциалов и cross-build OpenWrt/musl в этом проходе не выполнялся.
