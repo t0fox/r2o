@@ -102,7 +102,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-11)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 629 / P 1311 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 628 / P 1312 /
 N 40 / ? 2**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -217,10 +217,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 221 | 313 | 13 | 1 |
 | core-state | 692 | 127 | 564 | 1 | 0 |
-| datapath-core | 400 | 126 | 263 | 11 | 0 |
+| datapath-core | 400 | 125 | 264 | 11 | 0 |
 | datapath-plan | 183 | 105 | 72 | 5 | 1 |
 | detect | 159 | 49 | 100 | 10 | 0 |
-| **Итого** | **1982** | **628** | **1312** | **40** | **2** |
+| **Итого** | **1982** | **627** | **1313** | **40** | **2** |
 
 
 ---
@@ -3450,18 +3450,60 @@ R2O заменил структуру на `HashMap`, сохранив ключ,
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
-| `r32` (static) | 17 | 1 | big-endian u32 | `packet.rs:236 read_u32` | P | — |
-| `same` (static) | 18–20 | 3 | сравнение ключей | `TcpFlowKey` Eq | E | — |
-| `d2k_hold_parse` | 21–40 | 20 | разбор TCP-заголовка и полей hold | `hold.rs:1249 parse_tcp` | P | D6 |
-| `d2k_hold_new` | 41 | 1 | создание | `HoldTable::default` (`hold.rs:194`) | E | RAII |
-| `d2k_hold_free` | 42 | 1 | освобождение | `Drop` | E | RAII |
-| `release_slot` (static) | 43–51 | 9 | вернуть ID, forget capture, pending-- | `hold.rs:1236 release_held_packets`, `:1229 remove_slot` | P | — |
-| `d2k_hold_flush` | 52–72 | 21 | таймаут/смена ревизии/всё: release + статистика | `hold.rs:888 flush` | E | `hold.rs:2200 timeout_and_revision_change_fail_open...`, D6 |
-| `d2k_hold_next` | 73–80 | 8 | ближайший дедлайн | `hold.rs:958 timeout_ms` | P | — |
-| `d2k_hold_get_stats` | 81–84 | 4 | снимок статистики | `hold.rs:200 r2o_hold_stats` | P | — |
-| `d2k_hold_verdicts` | 85–92 | 8 | выдать вердикт пачке ID | `main.rs:4335 release_with`, `:4308 release_many` | P | — |
-| `http_ready` (static) | 93–100 | 8 | готовность HTTP-заголовка (или конфликт) | `hold.rs:695 http_ready`, `:1343 incomplete_http_head` | P | `hold.rs:2374 timeout_reports_unassembled_http_headers` |
-| `d2k_hold_feed` | 101–236 | 136 | приём сегмента: слот, side, лимиты, capture, порядок, синтетическая голова | `hold.rs:356 feed_observing_mode`, `:1348 synthetic_packet` | E | `hold.rs:1458/2126/2167` (split head, out-of-order, order), D6 |
+| `r32` (static) | 17 | 1 | big-endian u32 | `packet.rs:236 read_u32` | **P** | Формула совпадает; Rust `read_u32` дополнительно проверяет границы через `get`. `parse_tcp` получает `sequence/acknowledgment` уже из `TcpSegmentView`; отдельного теста `r32` нет. |
+| `same` (static) | 18–20 | 3 | сравнение ключей | `TcpFlowKey` Eq | **E** | C `d2k_key_equal`, Rust derived `Eq`; используется всеми hold-тестами. |
+| `d2k_hold_parse` | 21–40 | 20 | разбор TCP-заголовка и полей hold: ihl/header/total/payload/src_low/seq/ack/flags/dst/dst_be/sport_be | `hold.rs:1249 parse_tcp` | **P** | Используемые поля эквивалентны: `ihl=view.l4_offset`, `header=tcp.payload.start`, `total=view.total_len`, `payload=tcp.payload.len`, `src_low = source==key.low`, `seq/ack/flags` из `TcpSegmentView`. Rust не материализует `dst_be`/`sport_be`; в `hold.c` они только записываются и не читаются. C отвергает fragment `&0x3fff`, Rust — то же; D6. |
+| `d2k_hold_new` | 41 | 1 | `calloc` таблицы | `HoldTable::default` (`hold.rs:194`) | **E** | RAII; C при OOM возвращает NULL, Rust `Default` может аварийно завершиться — отличие только в OOM-ветви. |
+| `d2k_hold_free` | 42 | 1 | `free` | `Drop` | **E** | RAII; C-контракт «flush ALL first» в Rust обеспечивается владельцем/Drop. |
+| `release_slot` (static) | 43–51 | 9 | вернуть каждый ID с байтами, `stats.released++`, `capture_forget`, `pending-=count` | `hold.rs:1229 remove_slot`, `:1236 release_held_packets` | **P** | C вызывает callback на каждый пакет; Rust возвращает `Vec<u32>` ID, а owned-пакеты кладёт в `owned_releases`. `pending`/`released` считаются так же; `capture.forget` в Rust вызывает вызывающий (в части веток — после `remove_slot`). P — разный контракт владения. |
+| `d2k_hold_flush` | 52–72 | 21 | `all`/deadline/смена ревизии: release + `dropped_all`/`plan_changed`/`timed_out`/`timed_out_pkts` | `hold.rs:888 flush` | **E** | Условия и счётчики совпадают; Rust дополнительно складывает `R2oIncompleteCaptureDiagnostic` для истёкших TLS/HTTP, если поток не controller_probe. Тесты `hold.rs:2200`, `:2231`, `:2249`. |
+| `d2k_hold_next` | 73–80 | 8 | абсолютный минимальный deadline (ns), 0 если слотов нет | `hold.rs:958 timeout_ms` | **P** | C отдаёт абсолютное время в наносекундах; Rust — относительные миллисекунды до ближайшего deadline с ограничением `max_ms`, `0` при `deadline<=now` или `max_ms<=0`. Для poll-таймаута эквивалентно, отдельного absolute-getter нет. |
+| `d2k_hold_get_stats` | 81–84 | 4 | снимок `d2k_hold_stats` | `hold.rs:200 r2o_hold_stats` | **P** | Поля совпадают: `started, ready, released, full, timed_out, timed_out_pkts/timed_out_packets, plan_changed, dropped_all, joined, mismatched, sided, pending`. Rust возвращает `R2oHoldStats` по значению; отдельного теста снимка нет. |
+| `d2k_hold_verdicts` | 85–92 | 8 | выдать вердикт всем ID, считать ошибки, продолжить после отказа | `main.rs:4308 release_many`, `:4319 release_many_with` | **P** | C проходит все ID и возвращает число ошибок; Rust `release_many_with` тоже продолжает после ошибки, но возвращает первую `io::Error`. Семантика «попробовать все» совпадает, форма результата иная. |
+| `http_ready` (static) | 93–100 | 8 | готовность HTTP-заголовка; полный заголовок без Host → -1 | `hold.rs:695 http_ready`, `:1343 incomplete_http_head` | **P** | C `d2k_http_request` vs Rust `request_host_range`: Rust требует полностью закрытые заголовки (`find_crlf`), C может вернуть 1 при завершённой строке Host без пустой строки; Rust отвергает `#` и target ≥2048, C — нет; см. также `capture.c`. Тест `hold.rs:2374`. |
+| `d2k_hold_feed` | 101–236 | 136 | приём сегмента: flush, слот/сторона, лимиты 8×1600, capture, выбор головы, порядок оригиналов, синтетическая голова | `hold.rs:356 feed_observing_mode`, `:1348 synthetic_packet` | **P** | **Совпадает:** константы `HOLD_SLOTS=16`, `HOLD_PACKETS=8`, `HOLD_PACKET_BYTES=1600`, `HOLD_WAIT=100 мс`; флаги `~0x18`/ACK, `ack`, лимит пакетов, capture TLS/HTTP, поиск головы по sequence, stable-сортировка оригиналов по `seq-hello_seq`, synthetic head и пересчёт IP total. **Отличия:** C получает готовый `allow_start` и `anchor/have_anchor` от сессии; Rust сам ведёт `syns`/`http_requests`, проверяет `attempted/saw_hello`, различает `observe_tls/observe_http/own_packets` и поддерживает `OwnedReady`/HTTP-response. Ветви старта/якоря/наблюдения/owned не покрыты одним C/Rust differential; тесты `hold.rs:1458/2126/2167` подтверждают split/out-of-order/order. P. |
+
+### hold.c: построчная сверка
+
+- **`r32` (17) ↔ `packet.rs:236`:** BE u32; Rust bounds-checked.
+  P — отдельного теста helper'а нет, но `parse_tcp` получает поля из
+  проверенного `TcpSegmentView`.
+- **`same` (18–20) ↔ `TcpFlowKey: Eq`:** E.
+- **`d2k_hold_parse` (21–40) ↔ `hold.rs:1249 parse_tcp`:** C
+  материализует `ihl/header/total/payload/src_low/seq/ack/flags/dst/
+  dst_be/sport_be`; Rust отдаёт `PacketView`/`TcpSegmentView`/ключ/
+  endpoints. Используемые поля эквивалентны; `dst_be`/`sport_be` в
+  `hold.c` только записываются и не читаются. P, D6.
+- **`d2k_hold_new/free` (41–42) ↔ `HoldTable::default`/`Drop`:** E;
+  отличие только в OOM-ветви `calloc`.
+- **`release_slot` (43–51) ↔ `remove_slot`/`release_held_packets`:**
+  C отдаёт каждый ID с байтами через callback; Rust возвращает ID, а
+  owned-пакеты складывает в `owned_releases`. `pending/released`
+  считаются одинаково. P — разный контракт владения.
+- **`d2k_hold_flush` (52–72) ↔ `hold.rs:888`:** условия
+  `all/deadline/revision` и счётчики совпадают; Rust добавляет
+  incomplete-диагностику для истёкших TLS/HTTP. E, тесты `:2200`,
+  `:2231`, `:2249`.
+- **`d2k_hold_next` (73–80) ↔ `timeout_ms`:** C — абсолютный ns,
+  Rust — относительные ms с cap и `0` при истёкшем deadline. P.
+- **`d2k_hold_get_stats` (81–84) ↔ `r2o_hold_stats`:** поля
+  `started/ready/released/full/timed_out/timed_out_pkts/plan_changed/
+  dropped_all/joined/mismatched/sided/pending` совпадают. P — нет
+  отдельного теста снимка.
+- **`d2k_hold_verdicts` (85–92) ↔ `release_many_with`:** оба проходят
+  все ID и продолжают после ошибки; C возвращает число ошибок, Rust —
+  первую `io::Error`. P.
+- **`http_ready` (93–100) ↔ `hold.rs:695`:** C `d2k_http_request` vs
+  Rust `request_host_range`; различия в полноте заголовков, `#`,
+  target ≥2048. P; тест `hold.rs:2374`.
+- **`d2k_hold_feed` (101–236) ↔ `feed_observing_mode`:** константы
+  `16/8/1600/100 мс`, флаги `~0x18`/ACK, `ack`, capture TLS/HTTP,
+  поиск головы по sequence, stable-порядок оригиналов и synthetic head
+  совпадают. C получает `allow_start`/anchor от сессии, Rust сам ведёт
+  `syns`/`http_requests`, различает `observe_*`/`own_packets` и умеет
+  `OwnedReady`/HTTP-response. Ветви старта/якоря/наблюдения/owned не
+  покрыты одним C/Rust differential; split/out-of-order/order
+  подтверждены `hold.rs:1458/2126/2167`. P.
 
 ## udp_hold.c (10 функций)
 
