@@ -2019,6 +2019,45 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_quic_original_measure` | 80–83 | `quic_replay.rs` original arms | **P** | Обёртка над `wire_measure`; эквивалентна. |
 | `d2k_quic_strategy_measure` | 88–91 | `quic_replay.rs` strategy arms | **P** | Обёртка над `wire_measure`; эквивалентна. |
 
+## Углублённая сверка: CLI d2kfetch/d2kvoice/d2kask (34 функции)
+
+| C-функция | строки | R2O-аналог | статус | доказательство / пробел |
+|---|---:|---|---|---|
+| `json_string` (static) | 41–62 | `r2o-fetch.rs` JSON-вывод | **P** | C вручную проверяет UTF-8, экранирует `"`/`\`, управляющие байты и невалидные последовательности как `\u00xx`; Rust формирует JSON через строковые шаблоны/serde. Побайтовое совпадение экранирования не проверено. |
+| `vol_verdict_code` (static) | 64–72 | `r2o_volume`/`r2o-fetch` verdict | **P** | Коды `unreachable/cut/passed/short/unknown` перенесены; тексты и JSON-поля сверяются косвенно. |
+| `usage` (static) | 74–102 | `r2o-fetch.rs:694-718` | **P** | Rust поддерживает `--name/--ip/--port/--path/--wire/--snapshot/--tls12/--deadline/--mark/--json/--version/--ladder/--quic`, добавляет `--control` и `--quic-budget`; текст помощи другой. |
+| `resolve_first` (static) | 104–114 | `ToSocketAddrs`/`resolve` в `r2o-fetch.rs` | **P** | C берёт первый адрес `getaddrinfo`; Rust резолвит через std и фильтрует семейство. Порядок/выбор адреса может отличаться. |
+| `snapshot_wire` (static) | 117–155 | `r2o-fetch.rs` snapshot-ветка | **P** | ARM_SHAPE(name,6), ожидание `EV_SHAPE` transport 6 и бюджет `wait_ms` перенесены; отдельного C/Rust differential на таймаут/чужое событие нет. |
+| `main` | 157–356 | `crates/r2o-controller/src/bin/r2o-fetch.rs:11` | **P** | Флаги и режимы (ladder/quic/tls12/json/snapshot) есть; C `--snapshot` взводит ARM_SHAPE, Rust использует control-сокет. Коды выхода 0/1/2 и полный JSON-schema не сверялись. |
+| `usage` (static) | 22–37 | `voice_measure.rs:100-135` | **P** | Rust разбирает `--addr/--control/--conntrack/--wait/--mark/--discovery`; `--list` обрабатывается отдельно в `main.rs:258`. Текст помощи другой. |
+| `split_hostport` (static) | 39–48 | `voice_measure.rs:806-815` `SocketAddrV4` | **P** | C режет по последнему `:`, принимает только IPv4 через `d2k_ip4_parse`; Rust требует `IPv4:port`. Эквивалентно, но leading-zero IPv4 унаследует расхождение `net4`. |
+| `verdict_word` (static) | 50–61 | `voice_measure.rs` verdict-тексты | **P** | Семь вердиктов CLEAR/BLOCKED/NO_UDP/NO_CALL/FLAKY/NO_ORACLE/UNMEASURED; тексты Rust отличаются. |
+| `main` | 63–135 | `voice_measure.rs:95-135`, `main.rs:252-258` | **P** | `--list`, `--addr`, `--control`, `--conntrack`, `--wait`, `--mark`, `--discovery` есть; код выхода `CLEAR?0:1` и печать приёма не сверялись побайтно. |
+| `need_value` (static) | 120–128 | `ask.rs:62-95` parser | **P** | Проверка «флаг без значения» есть; текст ошибки другой. |
+| `parse_flag_u16` (static) | 134–149 | `ask.rs` `parse_port` | **P** | C: 1..65535, только base 10, отказ на `-`, хвост, ERANGE. Rust-парсер проверяет диапазон; точные тексты/ветви не сверялись. |
+| `parse_flag_u32` (static) | 157–172 | `ask.rs` `parse_mark` | **P** | C: base 0, запрет `-`, ERANGE; Rust принимает `0x`/десятичное, диапазон u32. |
+| `parse_flag_ms` (static) | 179–194 | `ask.rs` `parse_positive_ms` | **P** | C: положительное `long`, base 10; Rust `parse_positive_ms` — положительное; эквивалентно. |
+| `parse_args` | 202–301 | `ask.rs:62-140` | **P** | Набор флагов и взаимоисключения (`--hello-hex`/`--arm-wait-ms`, `--control-hex`/`--control-sni`, `--control-sni` требует `--arm-wait-ms`) перенесены. R2O-парсер возвращает `Result`, тексты иных. |
+| `hex_nibble` (static) | 315–320 | `ask.rs` hex-парсер | **P** | 0-9/a-f/A-F; эквивалентно. |
+| `save_hex` (static) | 329–349 | `ask.rs` save snapshot | **P** | Формат `# комментарий` + hex по 32 байта; Rust сохраняет снимок, но точный формат/обработка ошибок записи не сверялись. |
+| `read_hex_file` (static) | 361–414 | `ask.rs` hex reader | **P** | Комментарии `#`, пробелы, нечётное число цифр, пустой файл, cap 2048 — перенесены; точные тексты ошибок другие. |
+| `wait_shape` (static) | 424–455 | `ask.rs` wait event | **P** | Бюджет по времени, пропуск чужих событий, отказ при `shape_len>cap` — перенесены; C/Rust differential на таймаут нет. |
+| `pval_str` (static) | 462–468 | `ask.rs` `D2K_P_*` | **P** | «да/нет/не измерено»; тексты совпадают. |
+| `print_header` (static) | 470–476 | `ask.rs` вывод | **P** | Печать цели/SNI/сокета/метки; формат Rust иной. |
+| `print_snapshot` (static) | 482–502 | `ask.rs` вывод снимка | **P** | Печать длины, SNI и MODERN/LEGACY/UNKNOWN; формат Rust иной. |
+| `pos_decided` (static) | 519–528 | `ask.rs`/`classify` props | **P** | Спецслучай checksum при `parses_l7=YES` перенесён; прямой unit есть, C/Rust diff нет. |
+| `pos_value` (static) | 530–539 | `ask.rs` props | **P** | Отображение позиции в поле; эквивалентно. |
+| `step_rc_str` (static) | 547–561 | `ask.rs` step rc | **P** | 10 кодов `D2K_STEP_*`; тексты Rust иные. |
+| `ack_code_str` (static) | 565–573 | `ask.rs` ACK codes | **P** | OK/BAD_PLAN/BAD_ARGS/NO_ROOM; тексты иные. |
+| `print_seen_types` (static) | 579–594 | `ask.rs` TLS record mask | **P** | Типы 20/21/22/23 и «ни одной»; формат иной. |
+| `print_step` (static) | 597–624 | `ask.rs` step output | **P** | План/обмен/причина; формат Rust иной. |
+| `print_question` (static) | 632–674 | `ask.rs` question output | **P** | Пять вопросов, «спрошен: нет/да», примечания checksum/parse; тексты Rust иные. |
+| `all_unknown` (static) | 676–682 | `ask.rs` props vector | **P** | Все пять полей UNKNOWN; эквивалентно. |
+| `print_not_asked_at_all` (static) | 684–696 | `ask.rs` output | **P** | Пять причин «не задан»; формат иной. |
+| `print_vector` (static) | 698–705 | `ask.rs` output | **P** | Пять полей вектора; формат иной. |
+| `print_plans` (static) | 707–725 | `ask.rs` plan output | **P** | До 8 планов, построчная печать; формат Rust иной. |
+| `main` | 736–913 | `main.rs:315-332` `run_r2o_ask` | **P** | Последовательность parse→snapshot→props→compose→print перенесена; Rust-вывод и коды возврата (0/1/2) не сверялись побайтно. Отдельно: C `main` всегда возвращает 0 после успешного прогона, Rust возвращает код ошибки/успеха. |
+
 ## Проверка полноты
 
 Строк среза: 692. Строк в таблицах: 692. E=127, P=564, N=1, ?=0; E+P+N+?=692. `E*`/`P*` учтены в E/P соответственно (static-хелперы).
