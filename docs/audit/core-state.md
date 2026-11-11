@@ -1092,6 +1092,47 @@
 - **`d2k_catalog_memory_bytes`/`free_box`/`d2k_catalog_free`:** оценка
   памяти косвенная (`diagnostics catalog_bytes`), освобождение — RAII; P*.
 
+## Углублённая сверка: compose.c (53 функции)
+
+- **Белый список и TLV-билдеры:** `d2k_net_whitelist_count/name`,
+  `wr16be`, `rd16be`, `wr32be`, `tlv_rec`, `tlv_header`, `to_hex` сверены с
+  `r2o_rx_volume`/`plan_text`; список 266 имён и порядок покрыты unit
+  `r2o_rx_volume`, TLV-билдеры используются в C-тестах и прямого
+  C/Rust differential не имеют (P/P*).
+- **`plan_tlv_stamp_ident`:** C считает FNV-1a по байтам TLV с нулевым
+  `REC_ID` и вписывает `plan-%08x` (12 байт + NUL) в запись ID. Rust
+  `discovery.rs:1450 plan_text_for_trial` подставляет в текст переданный
+  вызывающим 16-байтный trial-id; функции, повторяющей FNV-1a-штамп именно
+  в TLV, нет. Это реальное различие идентичности плана/атрибуции APPLIED:
+  статус P, нужен differential `plan_tlv_stamp_ident` ↔ R2O trial-id.
+- **Сборка TLV-планов:** `overlap_plan_tlv`, `reorder_plan_tlv`,
+  `badsum_fake_plan_tlv`, `checksum_plan_tlv` — только C-тестовые билдеры;
+  Rust собирает текст и компилирует `plan_text::compile_text`. Прямого
+  TLV-differential нет, статус P.
+- **События/contact:** `ev_matches_flow`, `wait_for_event3`,
+  `wait_for_event`, `props_bind_any`, `d2k_props_bind*`,
+  `d2k_props_contact*`, `tcp_timestamps_read/write`,
+  `connect_with_tcp_profile`, `d2k_props_contact_on_family_tcp_profile`
+  перенесены в `main.rs`/`ask.rs`; C/Rust differential на все errno,
+  гонку tcp_timestamps и восстановление профиля не заявлен — P.
+- **Вопросы свойств:** `build_fake_body`, `d2k_props_question_plan`,
+  `d2k_props_question_passed`, `question_retire`, `d2k_props_ask`,
+  `step_rc`, `d2k_props_ask_traced` сверены с `ask.rs::question_plan/
+  record_question_passed` и `main.rs::run_r2o_ask`. Порядок пяти вопросов,
+  остановка на первом прошедшем, NO_ACK/UNSENT/APPLIED/REFUSED и снятие
+  плана перенесены; CLI differential не сравнивает stdout/exit, отдельные
+  ветви — unit. P.
+- **Текстовые планы и fallback:** `append_fmt`, `emit_header*`,
+  `append_hex`, `overlap_plan_text`, `reorder_plan_text`,
+  `badsum_fake_plan_text`, `checksum_plan_text`, `build_decoy_hello`,
+  `parse_protocol_plan_text`, `duplicates_plan_text`, `body_room`,
+  `everything_plan_text`, `d2k_fallback_arms`, `fb_arm_at`,
+  `d2k_fallback_plan`, `d2k_compose` — E по `d2o_compose_differential.c`,
+  `r2o-fallback-differential.sh` и unit `fallback_plans_match_donor`.
+  `d2k_arm_plan` (200 строк) — P: `r2o_fallback::arm_plan`/`classify_measured`
+  покрывают 50 arm и 5 `send_cap`, но произвольные сочетания
+  disorder/oob/seqovl/fake/ttl/tcpts/ipidzero не сравнивались.
+
 ## Проверка полноты
 
 Строк среза: 692. Строк в таблицах: 692. E=127, P=564, N=1, ?=0; E+P+N+?=692. `E*`/`P*` учтены в E/P соответственно (static-хелперы).
