@@ -195,14 +195,42 @@ CLI `d2k-detect` и форматы вывода. R2O использует дру
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| `usage` | 19-49 | 3084 | справка CLI | main.rs:1721-1739 help | P | форма CLI иная (--classify вместо подкоманды), текст другой |
-| `print_json_str` | 51-65 | 338 | экранирование JSON-строки | serde_json (classify_json.rs:71) | P | наследует print_json, прямого теста нет |
-| `print_tri` | 67-73 | 181 | необязательное трёхзначное поле | classify_json.rs:4 insert_tri_state | P | наследует print_json |
-| `print_json` | 75-187 | 4176 | JSON-отчёт | classify_json.rs:18 result_json_value | P | нет notes и covers_tls12; порядок ключей иной (serde_json сортирует), тексты причин иные |
-| `print_progress` | 193-199 | 271 | прогресс зондов в stderr | main.rs:1187 report_progress | P | без столбца err, печатаются только завершённые наблюдения |
-| `tri_word` | 201-205 | 156 | слово для трёхзначного свойства | main.rs:811 r2o_tri_state | P | теста нет |
-| `print_human` | 207-275 | 3700 | человеческий отчёт | main.rs:1254-1302 | P | нет блока свойств, notes и имени/длины триггера |
-| `main` | 277-450 | 8186 | CLI классификатора | main.rs:1104-1306, 1555/1586 | P | флаг --classify вместо подкоманды, часть флагов и умолчаний иная |
+| `usage` | 19-49 | 3084 | справка `d2k-detect classify`: `--sni/--raw/--repeats/--timeout/--only/--skip/--control-sni/--white/--control-raw/--hello/--no-raw/--mark/--allow-loopback/--json/--progress/--dump-trigger` | main.rs:1721-1739 help | **P** | C — подкоманда `classify` и полный текст справки; Rust — `--classify HOST PORT` и другой набор/текст флагов. Функциональное соответствие, не построчное; часть флагов (`--dump-trigger`, `--white`) и умолчаний иная. |
+| `print_json_str` | 51-65 | 338 | JSON-строка: `"`/`\` экранируются, control <0x20 → `\u%04x`, UTF-8 как есть | `serde_json` (`classify_json.rs:71`) | **P** | C ручное экранирование; Rust `serde_json`. Для UTF-8/control результат эквивалентен, но прямой тест на все байты отсутствует. |
+| `print_tri` | 67-73 | 181 | необязательное tri-поле: UNSET пропуск, TRUE/FALSE → true/false | `classify_json.rs:4 insert_tri_state` | **P** | C `print_tri`; Rust `insert_tri_state` в `result_json_value`. Наследует JSON-тест, отдельного нет. |
+| `print_json` | 75-187 | 4176 | JSON: target/verdict/reason/repeats/probes/duration/trigger_len/boundary/split_pos/reassembles/strategy/notes/response/covers_tls12/props/path/composed/raw_usable/trace | `classify_json.rs:18 result_json_value` | **P** | C печатает `notes[]`, `covers_tls12`, `response{verdict,reason,target,control}`, trace с cuts/delay/err; Rust `result_json_value` **не имеет notes/covers_tls12**, форма `response` иная, порядок ключей serde_json, тексты причин иные. P. |
+| `print_progress` | 193-199 | 271 | stderr: `[сек] probe прошло/не прошло err` | main.rs:1187 report_progress | **P** | C печатает время, имя, pass/fail и `err`; Rust `report_progress` — только завершённые наблюдения, без столбца `err`. P. |
+| `tri_word` | 201-205 | 156 | «не измерено/да/нет» | main.rs:811 r2o_tri_state | **P** | C точные русские слова; Rust `r2o_tri_state`; отдельного теста нет. |
+| `print_human` | 207-275 | 3700 | человеческий отчёт: target/trigger/verdict/reason/probes/duration/repeats/boundary/reassembly/strategy+пояснение/response/notes/opaque warning/properties/trace | main.rs:1254-1302 | **P** | C содержит блок свойств коробки, `notes`, имя/длину триггера, пояснение стратегии и предупреждение `raw_usable`; Rust human-отчёт этих блоков не имеет, тексты иные. P. |
+| `main` | 277-450 | 8186 | CLI: `classify host:port`, разбор флагов, trigger/control/white, dump/json/progress, `d2k_classify_run` | main.rs:1104-1306, 1555/1586 | **P** | C `--hello modern|legacy` (без both), control по умолчанию `d2k_trigger_control("d2k")` (legacy), mark default `0x40000000`, `--dump-trigger`; Rust `--classify`, control через `classify_control_trigger` (tls13), mark `0x2d`, иной набор флагов/валидаций. P. |
+
+### main.c: построчная сверка
+
+- **`usage` (19–49) ↔ `print_help` (`main.rs:1721`):** C —
+  подкоманда `classify` и полный список флагов; Rust — `--classify`
+  и иной набор/текст. P, функциональное соответствие.
+- **`print_json_str`/`print_tri` (51–73) ↔ serde_json/
+  `insert_tri_state`:** C ручное экранирование и tri-поле; Rust
+  serde_json и `insert_tri_state`. Для UTF-8/control эквивалентно,
+  прямого теста на все байты нет. P.
+- **`print_json` (75–187) ↔ `result_json_value`
+  (`classify_json.rs:18`):** C печатает `notes[]`, `covers_tls12`,
+  `response{verdict,reason,target,control}` и trace с cuts/delay/err;
+  Rust **не имеет notes/covers_tls12**, форма response и порядок
+  ключей иные, тексты причин иные. P.
+- **`print_progress` (193–199) ↔ `report_progress`
+  (`main.rs:1187`):** C stderr `[сек] probe pass/fail err`; Rust —
+  только завершённые наблюдения, без `err`. P.
+- **`tri_word`/`print_human` (201–275) ↔ `r2o_tri_state`/
+  `main.rs:1254-1302`:** C человеческий отчёт содержит блок свойств
+  коробки, `notes`, имя/длину триггера, пояснение стратегии и
+  предупреждение `raw_usable`; Rust этих блоков не имеет. P.
+- **`main` (277–450) ↔ `main.rs:1104-1306/1555/1586`:** C
+  `classify host:port`, `--hello modern|legacy` (без both), control
+  по умолчанию `d2k_trigger_control("d2k")` (legacy), mark
+  `0x40000000`, `--dump-trigger`; Rust `--classify`, control через
+  `classify_control_trigger` (tls13), mark `0x2d`, иной набор
+  флагов/валидаций. P.
 
 ## 4. detect/poison.c — 12 функций
 
