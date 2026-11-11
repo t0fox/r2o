@@ -292,15 +292,45 @@ C всё равно выдаёт кандидат «всё сразу», R2O е�
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| `d2k_trigger_tls` | 21-50 | 1378 | ClientHello из снятого профиля с SNI | classify.rs:87 Trigger::tls, :96 Trigger::tls13, hello.rs:549 | E | tests/hello.rs:42 legacy и :50 modern byte-for-byte, :62 fake, tests/classify.rs:946; смещения SNI пересчитываются hello::sni_bounds |
-| `hexval` | 52-58 | 203 | значение hex-цифры | trigger.rs:11 inline | E | tests/trigger.rs:41 |
-| `d2k_trigger_raw_hex` | 67-108 | 1322 | триггер из hex-строки | classify.rs:77 Trigger::raw_hex, trigger.rs:4 parse_raw_hex | E | tests/trigger.rs:41-58 |
-| `d2k_trigger_control` | 118-128 | 376 | заведомо безобидный контроль | main.rs:1555 classify_control_trigger | P | только на уровне CLI; имя и accept совпали |
-| `d2k_opts_decoy` | 130-136 | 153 | приманка: decoy или контроль | raw_probe.rs:602 select_bridge_decoy | P | отдельного opt.decoy нет, fallback на контроль есть |
-| `d2k_trigger_host_ts_override` | 156-156 | 66 | переопределение «стек предлагает метку» | `ClassifyOptions.client_tcp_has_timestamps` (`classify.rs:833`), `raw_offer_timestamps` (`raw_probe.rs:673`) | **P** | Ось реализована через параметр профиля клиента, а не глобальный сеттер; CLI-флага и теста на override нет. Поведение «стек предлагает метку» выражается, но не тем же API. |
-| `host_offers_ts` | 158-178 | 638 | читает tcp_timestamps один раз | raw_probe.rs:673 raw_offer_timestamps | P | OnceLock, без override |
-| `d2k_trigger_offers_ts` | 180-199 | 615 | предлагает ли клиент метку времени | raw_probe.rs:673/731 | P | передаётся bool из снятого профиля, байты опций не разбираются |
-| `d2k_trigger_allows_poison` | 201-207 | 165 | совместима ли гипотеза с профилем клиента | raw_probe.rs:731 raw_profile_allows, :967 fallback | P | та же логика в иной форме |
+| `d2k_trigger_tls` | 21-50 | 1378 | ClientHello из снятого профиля (legacy/modern) с SNI; n≥16; name `tls:<sni>`; accept ServerHello; sni_off/len | classify.rs:87 Trigger::tls, :96 Trigger::tls13, hello.rs:549 | **E** | C `d2k_hello_from_profile(legacy?LEGACY:MODERN, sni)`, пустой SNI/ошибка/n<16 → -1, затем `d2k_hello_sni`. Rust `Trigger::tls`/`tls13` через `legacy_client_hello`/`modern_client_hello`, name/accept те же; смещения SNI — `hello::sni_bounds` на месте вызова. Байты совпадают: `tests/hello.rs:42` legacy, `:50` modern, `:62` fake; `tests/classify.rs:946`. |
+| `hexval` | 52-58 | 203 | значение hex-цифры 0-9/a-f/A-F | trigger.rs:11 inline | **E** | C `hexval`; Rust match в `parse_raw_hex`. `tests/trigger.rs:41`. |
+| `d2k_trigger_raw_hex` | 67-108 | 1322 | hex-триггер: разделители `space/tab/nl/cr/:/ -`, нечётный/битый/короткий/длинный отказ; name `raw:NB`; accept Any | classify.rs:77 Trigger::raw_hex, trigger.rs:4 parse_raw_hex | **E** | C пропускает те же разделители, `n<2`/нечётный/битый/`n>=sizeof payload` → ошибка, name `raw:%dB`, accept ANY. Rust `TRIGGER_MAX=16384`, те же проверки, name/accept те же. `tests/trigger.rs:41-58`. |
+| `d2k_trigger_control` | 118-128 | 376 | контроль: `probe-<tag>.invalid-control.example`, legacy TLS, name `control`, accept TLSRecord | main.rs:1555 classify_control_trigger | **P** | C строит legacy-приветствие с тегом из аргумента; Rust `classify_control_trigger` использует `--control-sni`/`--control-raw`, по умолчанию имя `probe-d2k.invalid-control.example` (тег фиксирован) и **`Trigger::tls13` (modern)**; control_raw — raw_hex + name control + `TlsRecord`. Имя/профиль/источник различаются. |
+| `d2k_opts_decoy` | 130-136 | 153 | приманка: `o->decoy`, если len≥2, иначе `o->control` | raw_probe.rs:602 select_bridge_decoy | **P** | C просто выбирает готовый `decoy`/`control` без trigger. Rust `select_bridge_decoy(trigger,control,trigger_snapped)` возвращает fallback control≥2 либо **клонирует trigger с SNI из control**; это другая конструкция. Прямого `options.decoy`/селектора нет; fallback на control есть. |
+| `d2k_trigger_host_ts_override` | 156-156 | 66 | глобальный сеттер `host_ts_override` | `ClassifyOptions.client_tcp_has_timestamps` (`classify.rs:833`), `raw_offer_timestamps` (`raw_probe.rs:673`) | **P** | C статический `host_ts_override` (-1/0/1), влияет на `host_offers_ts`. Rust передаёт `Option<bool>` явно; глобального сеттера/CLI-override нет. Поведение выражается, API иное. |
+| `host_offers_ts` | 158-178 | 638 | override → cached чтение `/proc/sys/net/ipv4/tcp_timestamps`, default 1 | raw_probe.rs:673 raw_offer_timestamps | **P** | C `host_ts_override>=0` затем `static cached`; Rust `HOST_TCP_TIMESTAMPS OnceLock`, парсит тот же файл, default 1. Кэш/дефолт совпадают, override отсутствует. |
+| `d2k_trigger_offers_ts` | 180-199 | 615 | нет профиля → host_offers_ts; иначе разбор TCP-опций, kind 8/10 → 1 | raw_probe.rs:673/731 | **P** | C парсит `client_tcp_options` байт за байтом (kind 0 break, 1 skip, неверная длина →0, 8/10 →1). Rust `raw_offer_timestamps(Option<bool>)` использует готовый bool из профиля, байты не разбирает; расхождение представления, не результата для уже снятого профиля. |
+| `d2k_trigger_allows_poison` | 201-207 | 165 | `!p->tcp_ts || offers_ts(t)` | raw_probe.rs:731 raw_profile_allows, :967 fallback | **P** | Формула `!tcp_ts || offer_ts` совпадает. Но Rust `property_probe_poison` при `WhiteTimestamp`, если TS не предложен и checksum не validated, **заменяет** poison: `tcp_ts=false`, `badsum=true`; C просто возвращает 0. Это дополнительная fallback-ветвь, не входящая в `d2k_trigger_allows_poison`. |
+
+### trigger.c: построчная сверка
+
+- **`d2k_trigger_tls` (21–50) ↔ `Trigger::tls/tls13`
+  (`classify.rs:87/96`):** C legacy/modern через
+  `d2k_hello_from_profile`, SNI nonempty, `n>=16`, name `tls:<sni>`,
+  accept ServerHello, `sni_off/len` из `d2k_hello_sni`; Rust те же
+  name/accept и байты (`tests/hello.rs:42/50/62`), `sni_bounds` на
+  месте вызова. E.
+- **`hexval`/`d2k_trigger_raw_hex` (52–108) ↔ `parse_raw_hex`
+  (`trigger.rs:4`):** те же разделители, лимит 16384, отказ
+  нечётному/битому/короткому, name `raw:NB`, accept Any;
+  `tests/trigger.rs:41-58`. E.
+- **`d2k_trigger_control` (118–128) ↔ `classify_control_trigger`
+  (`main.rs:1555`):** C legacy-приветствие с тегом из аргумента;
+  Rust по умолчанию `probe-d2k.invalid-control.example` и
+  **tls13/modern**, control_raw — raw_hex. P — имя/профиль/источник
+  различаются.
+- **`d2k_opts_decoy` (130–136) ↔ `select_bridge_decoy` (`:602`):**
+  C выбирает готовый `decoy`/`control`; Rust клонирует trigger с SNI
+  из control. Это другая конструкция, прямого `options.decoy` нет. P.
+- **`host_ts_override/host_offers_ts/offers_ts` (156–199) ↔
+  `raw_offer_timestamps` (`:673`):** C глобальный override + cached
+  чтение `/proc/sys/net/ipv4/tcp_timestamps`, затем разбор TCP-опций
+  (kind 8/10); Rust `HOST_TCP_TIMESTAMPS OnceLock` и `Option<bool>` из
+  профиля, без override и без разбора байтов на этом уровне. P.
+- **`d2k_trigger_allows_poison` (201–207) ↔ `raw_profile_allows`
+  (`:731`):** формула `!tcp_ts || offer_ts` совпадает; Rust
+  `property_probe_poison` добавляет fallback WhiteTimestamp →
+  `tcp_ts=false,badsum=true`, которого в C-функции нет. P.
 
 ## 9. detect/include/d2k_detect.h — 1 функция
 

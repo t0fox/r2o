@@ -1588,6 +1588,73 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 - Живой роутер, реальные провайдерские блокировки, Discord/YouTube production-сценарии, timing и память не измерялись.
 - Для `E` доказательством считается наличие теста/дифференциала в репозитории; его актуальный результат не перепроверялся.
 
+## Глубокая сверка QUIC ask/questions (по `deep-core-verify.md`)
+
+- **`qp_open_fresh` (637–697) ↔ `r2o_quic_http3_udp_socket_fresh`
+  (`:71-125`):** C свежий порт, `SO_MARK` best-effort, 16 попыток,
+  окно 480 с; Rust те же 4096/480 с/16 попыток. **Нет** параметра
+  `src_port`/bind (вопрос низкого порта невозможен), C держит
+  отвергнутые fd до конца, Rust закрывает после успеха. Отдельного
+  differential нет. P.
+- **`qp_send_one` (716–789) ↔ `QuicReplayProbe` (`quic_replay.rs:647`):**
+  C умеет prefix/junk, `prefix_ttl`, `prefix_copies`, `src_port`,
+  `split`, `longer`, `crypto_split`; Rust перезапечатывает снимок и
+  шлёт датаграммы подряд, этих режимов нет. `ECONNREFUSED` на send в
+  Rust попадает в `err`, в C — в `refused`. P.
+- **`qp_recv_ttl` (937–997): N.** Во всём `crates/` нет `recvmsg`,
+  `IP_RECVTTL`, `IPV6_HOPLIMIT`; `R2oQuicHttp3Result` и
+  `R2oQuicRawAskResult` не содержат TTL/hoplimit. TTL-плечо и
+  residual TTL не измеряются.
+- **`qp_send_fragmented` (1004–1040) ↔ `build_udp_fragments`
+  (`wire.rs:294`):** C шлёт IP-фрагменты из контроллера, проверяет
+  форму 1..4, connected rx и fresh-port; Rust только формирует
+  директивы `ipfrag`, фрагменты строит/шлёт датапат
+  (`engine.rs:1753`). Raw-отправки из контроллера нет. P.
+- **`quic_ask_core` (1064–1403) ↔ `r2o_quic_ask_donor_parallel`
+  (`:901`):** параллельная отправка, poll/recv, pass/fail/err/refused,
+  RTT и marked в целом повторены. **Пробелы:** нет отказа при
+  `repeats > D2K_QUIC_MAX_ADDRS`; нет TTL/prefix/fragment/longer/
+  split/fresh_sni; neutral control собирается заранее тремя снимками
+  (`:139`), а не новой CH на каждый повтор; `ECONNREFUSED` на send —
+  `err`, не `refused`; нет `ttl_in_out`. P.
+- **`d2k_quic_data_stage` (1591–1829) ↔
+  `r2o_quic_http3_measure...` (`:847`):** сильный дифференциал
+  `r2o_http3_full_data_stage_matches_d2o...` (`tests:1444`) покрывает
+  complete/no-growth/refusal/slow/drop/close, 451, stall/one-way,
+  Content-Length, oversized headers. **Но:** `app_bytes` для oversized
+  headers документирован как разрыв (`tests:2137-2141`), `reason`
+  тексты не сверяются, `head_full` не выносится,
+  `datagrams_before` сбрасывается после первого запроса (`:1053`), а
+  C считает tx/rx от начала stage; h3 crate сам создаёт control-потоки,
+  C явно шлёт SETTINGS и ждёт 400 мс. P.
+- **`budget_left` (1984–1999) / `d2k_quic_budget_ms` (2096–2105):**
+  C `limit_ms==0` — всегда исчерпан, иначе `elapsed<=limit`;
+  `budget_ms = budget_s*1000` либо
+  `wait_ms + 35*(dyn_wait + 60 мс)` (`QP_RUN_DYN_POLLS=2+9+18+6`).
+  Rust — остаток 10-минутного task lifetime с yield и per-phase
+  timeouts; `limit_ms/start` и точная формула не портированы.
+  `arm_budget_spent` отсутствует. P.
+- **`qp_questions_step` (2118–2269):** C задаёт 6 вопросов: мусор,
+  два кадра CRYPTO, две датаграммы, погашенный fixed bit, низкий
+  исходный порт, удлинение. Rust покрывает junk (`Clearance`), кадры
+  (`SplitCrypto`), длину (`UdpLength`), фрагменты; **нет**
+  двухдатаграммного split, clear-fixed-bit и low-source-port; нет
+  `qprops/qtrace/probes`, счётчиков budget/addr/unbuilt и текста
+  «вопросы(N): взяли …». P.
+- **`classify_run` (2337–2918) ↔ `r2o_run_quic_discovery_trial`
+  (`main.rs:20499`):** Rust покрывает base/VN, data-stage, strategy
+  arms, fallback, fragment control/forms. **Пробелы:** нет
+  `arm->data_cut` (`data_cut=2` запрещает alternative path; есть
+  только `stall_cut`), `base_seed/run_seeded`, env
+  `d2k_quic_allow_local`, итогового `d2k_vres` с verdict/reason/
+  qtrace; не все opaque/residual/address ветви. P.
+- **`d2k_quic_props_findings` (2275–2324) и `prop_word`
+  (`quicarms.c:244-246`): N.** Тексты «приветствие, разложенное на два
+  кадра…», «две датаграммы…», «вторая версия…», «погашенный fixed
+  bit…», «низкий порт…», «фальшивый Initial…» и «прошло/не прошло/
+  ответа нет» не портированы. Имена `r2o_quic_blob_name` их не
+  заменяют.
+
 
 ---
 
