@@ -79,7 +79,9 @@ def main() -> int:
         + f"\n| **Итого** | **{total_rows}** | **{total_counts['E']}** | **{total_counts['P']}** | "
         f"**{total_counts['N']}** | **{total_counts['?']}** |\n"
     )
-    OUT.write_text(header + summary + "".join(parts_text), encoding="utf-8")
+    spot = AUDIT / "spot-checks.md"
+    spot_text = f"\n\n---\n\n{spot.read_text(encoding='utf-8').strip()}\n" if spot.exists() else ""
+    OUT.write_text(header + summary + spot_text + "".join(parts_text), encoding="utf-8")
     print(f"rows={total_rows} counts={total_counts} out={OUT}")
     return 0
 
