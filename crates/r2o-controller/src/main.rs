@@ -3643,7 +3643,11 @@ fn matching_domain_recovery_candidates(
     const MAX_CANDIDATES: usize = 8;
 
     let Some(group) = matching_domain_group(catalog, target) else {
-        return Vec::new();
+        // Для эфемерных голосовых узлов вида *.discord.media группа ещё не
+        // успевает образоваться (Discord выдаёт новое имя на каждый регион),
+        // но план, подтверждённый на соседнем узле, почти наверняка подходит.
+        // Пробуем его сразу, не дожидаясь полной классификации.
+        return matching_sibling_recovery_candidates(catalog, target);
     };
     let Some(state) = catalog.domain_state.as_ref() else {
         return Vec::new();
@@ -3721,9 +3725,108 @@ fn matching_domain_recovery_candidates(
     candidates
 }
 
+/// Быстрый кандидат для эфемерного голосового узла `*.discord.media`:
+/// план, уже подтверждённый на соседнем узле того же суффикса. Возвращается
+/// только для голосового суффикса и только после сигнала молчания TCP, чтобы
+/// не вмешиваться в заведомо рабочие соединения.
+#[cfg(unix)]
+fn matching_sibling_recovery_candidates(
+    catalog: &Catalog,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+) -> Vec<R2oFamilyRecoveryCandidate> {
+    const MAX_CANDIDATES: usize = 8;
+
+    if target.shape == SHAPE_QUIC {
+        return Vec::new();
+    }
+    let Some(suffix) = r2o_controller::domain::registrable_domain(&target.host) else {
+        return Vec::new();
+    };
+    if suffix != "discord.media" {
+        return Vec::new();
+    }
+    let mut candidates = Vec::new();
+    for box_record in &catalog.boxes {
+        for binding in &box_record.bindings {
+            if !binding.enabled
+                || binding.level < 3
+                || binding.recheck_since.is_some()
+                || binding.kind != "name"
+                || !binding.ech_origin.is_empty()
+            {
+                continue;
+            }
+            let Ok(name) = normalize(&binding.target) else {
+                continue;
+            };
+            if name == target.host {
+                continue;
+            }
+            if r2o_controller::domain::registrable_domain(&name).as_deref() != Some(suffix.as_str())
+            {
+                continue;
+            }
+            let transport = if binding.transport == 0 {
+                6
+            } else {
+                binding.transport
+            };
+            let family = if binding.family == 0 {
+                4
+            } else {
+                binding.family
+            };
+            if transport != 6
+                || family != target.family
+                || group_path(transport, &binding.probe_path) != "/"
+            {
+                continue;
+            }
+            if binding.shape != 0 && !group_shape_fits(binding.shape, target.shape) {
+                continue;
+            }
+            let Some(saved_plan) = box_record
+                .plans
+                .iter()
+                .find(|plan| plan.id == binding.plan_id && plan.enabled)
+            else {
+                continue;
+            };
+            if saved_plan.proto != "tls" || saved_plan.text.len() >= 4096 {
+                continue;
+            }
+            let Ok(bytes) = compile_text(&saved_plan.text) else {
+                continue;
+            };
+            let Ok(plan) = Plan::parse(&bytes) else {
+                continue;
+            };
+            if !shape_matches_plan(target.shape, &plan)
+                || r2o_datapath::engine::validate_runtime_plan(&plan).is_err()
+                || candidates
+                    .iter()
+                    .any(|candidate: &R2oFamilyRecoveryCandidate| {
+                        candidate.plan_text == saved_plan.text
+                    })
+            {
+                continue;
+            }
+            candidates.push(R2oFamilyRecoveryCandidate {
+                plan_id: plan.id,
+                plan_text: saved_plan.text.clone(),
+                group_plan: false,
+                probe_path: "/".into(),
+            });
+            if candidates.len() == MAX_CANDIDATES {
+                return candidates;
+            }
+        }
+    }
+    candidates
+}
+
 #[cfg(unix)]
 const CATALOG_SYNC_CHUNK: usize = 8;
-
 #[cfg(unix)]
 struct PendingCatalogSyncCommand {
     host: String,
@@ -18297,7 +18400,7 @@ impl ControlClient {
                                     "классификация {} пропущена: IPv{} недавно завершил TCP-рукопожатие без плана",
                                     target.host, target.family
                                 );
-                            } else if let Some((worker, catalog, _, _)) = &mut discovery {
+                            } else if let Some((worker, catalog, _, mark)) = &mut discovery {
                                 if r2o_controller::discovery::has_usable_binding(catalog, &target)
                                     || r2o_controller::discovery::has_covering_binding(
                                         catalog, &target,
@@ -18307,22 +18410,35 @@ impl ControlClient {
                                         "молчание без плана для {} не создаёт повторную задачу: каталог уже содержит применимое решение",
                                         target.host
                                     );
-                                } else if self.r2o_queue_tcp_suspect(
-                                    worker,
-                                    target.clone(),
-                                    r2o_discovery_suspect_signal(3, 0, 0, 0, 0),
-                                    R2oSuspectQueueMode::Normal,
-                                    false,
-                                ) {
-                                    println!(
-                                        "молчание TCP без чистого рукопожатия поставило {} в очередь классификации",
-                                        target.host
-                                    );
                                 } else {
-                                    println!(
-                                        "классификация {} после молчания пропущена: задача уже выполняется, повтор запрещён или очередь занята",
-                                        target.host
-                                    );
+                                    let candidates =
+                                        matching_sibling_recovery_candidates(catalog, &target);
+                                    let family_queued = !candidates.is_empty()
+                                        && family_recovery.as_mut().is_some_and(|worker| {
+                                            worker.queue(target.clone(), candidates, *mark)
+                                        });
+                                    if family_queued {
+                                        println!(
+                                            "молчание TCP: для {} сначала проверяется план соседнего голосового узла *.discord.media",
+                                            target.host
+                                        );
+                                    } else if self.r2o_queue_tcp_suspect(
+                                        worker,
+                                        target.clone(),
+                                        r2o_discovery_suspect_signal(3, 0, 0, 0, 0),
+                                        R2oSuspectQueueMode::Normal,
+                                        false,
+                                    ) {
+                                        println!(
+                                            "молчание TCP без чистого рукопожатия поставило {} в очередь классификации",
+                                            target.host
+                                        );
+                                    } else {
+                                        println!(
+                                            "классификация {} после молчания пропущена: задача уже выполняется, повтор запрещён или очередь занята",
+                                            target.host
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -23419,15 +23535,15 @@ mod tests {
         classify_control_trigger, classify_target_trigger, compile_text, encode_set_name,
         failed_http_programs, flow_socket_addresses, http_baseline_failure_action,
         http_search_candidates, http_search_key, matching_domain_group,
-        matching_domain_recovery_candidates, measured_http_candidate_keys, normalize_plan_target,
-        parse_classify_options, parse_serve_options, print_flow_journal,
-        r2o_candidate_confirmation_mark, r2o_catalog_mark_flow_unfit,
-        r2o_discovery_failure_retry_due, r2o_family_applied_flow_matches,
-        r2o_family_recovery_decision, r2o_handle_client_shape_event, r2o_http_failed_disposition,
-        r2o_http_live_cut_recheck, r2o_plan_wire_shape, r2o_quic_binding_blocks_retry,
-        r2o_tcp_stall_budgets, r2o_tcp_stall_budgets_for_name, r2o_tcp_stall_in_name_band,
-        r2o_voice_proof_matches_target, r2o_voice_suspect_frame_is_udp, save_plan_file,
-        shape_matches_plan,
+        matching_domain_recovery_candidates, matching_sibling_recovery_candidates,
+        measured_http_candidate_keys, normalize_plan_target, parse_classify_options,
+        parse_serve_options, print_flow_journal, r2o_candidate_confirmation_mark,
+        r2o_catalog_mark_flow_unfit, r2o_discovery_failure_retry_due,
+        r2o_family_applied_flow_matches, r2o_family_recovery_decision,
+        r2o_handle_client_shape_event, r2o_http_failed_disposition, r2o_http_live_cut_recheck,
+        r2o_plan_wire_shape, r2o_quic_binding_blocks_retry, r2o_tcp_stall_budgets,
+        r2o_tcp_stall_budgets_for_name, r2o_tcp_stall_in_name_band, r2o_voice_proof_matches_target,
+        r2o_voice_suspect_frame_is_udp, save_plan_file, shape_matches_plan,
     };
     use r2k_core::control::{
         Ack, BindingContext, COMMAND_DEL_NAME_PROBE, COMMAND_DEL_VOICE_ADDR_PROBE,
@@ -38425,6 +38541,49 @@ mod tests {
                 }
             )
             .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn соседний_голосовой_узел_берёт_план_подтверждённого_discord_media() {
+        let catalog = Catalog::parse(
+            br#"{"boxes":[{"id":"box-1","created":"2026-10-18T00:00:00Z","updated":"2026-10-18T00:00:00Z","plans":[{"id":"11111111111111111111111111111111","proto":"tls","text":"r2o-plan 1 11\nid 11111111111111111111111111111111\nproto tcp tls\nsplit sni_middle +0\n","added":"2026-10-18T00:00:00Z","successes":3,"enabled":true}],"bindings":[{"kind":"name","target":"finland14104.discord.media","plan_id":"11111111111111111111111111111111","level":3,"confirmed":"2026-10-18T00:00:00Z","successes":2,"enabled":true,"transport":6,"family":4,"shape":1,"verified_by":1,"input":1}]}]}"#,
+        )
+        .unwrap();
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "finland14105.discord.media".into(),
+            endpoint: "203.0.113.1:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+
+        let candidates = matching_sibling_recovery_candidates(&catalog, &target);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].plan_id, [0x11; 16]);
+        assert!(!candidates[0].group_plan);
+        assert_eq!(candidates[0].probe_path, "/");
+
+        // Чужая зона и точное имя не должны получать чужой план.
+        assert!(
+            matching_sibling_recovery_candidates(
+                &catalog,
+                &r2o_controller::discovery::DiscoveryTarget {
+                    host: "finland14105.discordapp.com".into(),
+                    ..target.clone()
+                }
+            )
+            .is_empty()
+        );
+        assert!(
+            matching_sibling_recovery_candidates(
+                &catalog,
+                &r2o_controller::discovery::DiscoveryTarget {
+                    host: "finland14104.discord.media".into(),
+                    ..target
+                }
+            )
+            .is_empty()
         );
     }
 
