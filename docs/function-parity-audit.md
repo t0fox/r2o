@@ -2235,6 +2235,39 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
   покрывают 50 arm и 5 `send_cap`, но произвольные сочетания
   disorder/oob/seqovl/fake/ttl/tcpts/ipidzero не сравнивались.
 
+## Углублённая сверка: d2kc.c (28 функций)
+
+- **Сигналы/время/сохранение:** `on_signal`, `now_ms` — P* (atomic/Instant);
+  `save_atomic` — E (`r2o-catalog-persist-differential.sh`).
+- **Память/журнал:** `self_mem` читает `/proc/self/status` (RSS/HWM/VmData/
+  Threads); Rust `diagnostics::process_memory` читает те же поля, но набор
+  точек и формат различаются, C/Rust differential нет — P. `sched_say`/`hs_say`
+  — P* (лог-колбэки).
+- **HTTP-поиск:** `http_search_portal`, `hs_open_port`, `hs_close_port`,
+  `hs_hex`, `hs_set_probe`, `hs_del_probe`, `hs_set_plan`, `hs_del_plan`,
+  `hs_start`, `hs_changed` перенесены в `http_search.rs`/`main.rs`; кодирование
+  команд покрыто `control.rs` unit, но C/Rust differential на порт/марку/
+  сохранение `http-plans.txt` не заявлен — P.
+- **HTTP-портал/HTTPS:** `http_portal`, `http_push`, `http_save`,
+  `http_probe_done`, `poison_cmp`, `hs_measured_poisons` — P; HTTPS-кэш и
+  порядок poison по `successes` проверяются косвенно
+  (`r2o-httpsprobe`/`http-search` differentials).
+- **CLI/самопроверка:** `usage`/`offline_self_check` — P. R2O `--serve`
+  принимает `СОКЕТ КАТАЛОГ.json [--discover] [--mark N]`, но **не имеет**
+  `--measure-mark`, `--log`, `--health-file`, `--https-cache=`,
+  `--release-id`, `--self-check` и периодической сводки событий, которые
+  есть у `d2kc`; SHA-256(abc) покрыт crypto differential, отдельного
+  `--self-check` CLI нет.
+- **Диагностика:** `diagnostic_event`, `diagnostic_limit`, `diagnostic_tick`
+  — P; `Recorder::record/record_limit/tick/write_report` перенесены,
+  `diagnostic_tick_lifecycle_matches_d2o` покрывает жизненный цикл, но
+  C/Rust differential сравнивает только часть JSON.
+- **`main` (462 строки):** P. Каталог, link, sched, https/httpsearch, poll,
+  sync, save/live/report, health, graceful stop и exit 1 при потере link
+  перенесены в `serve_catalog`/`ControlClient`/`R2oCatalogPersistence`/
+  `diagnostics`; полного CLI-паритета нет (см. флаги выше), `--serve`
+  имеет другую форму.
+
 ## Проверка полноты
 
 Строк среза: 692. Строк в таблицах: 692. E=127, P=564, N=1, ?=0; E+P+N+?=692. `E*`/`P*` учтены в E/P соответственно (static-хелперы).
