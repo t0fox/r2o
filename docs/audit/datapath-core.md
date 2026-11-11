@@ -536,13 +536,47 @@ R2O: `main.rs` (`r2o_release_udp_batch*`, `r2o_udp_handle_late_tail`),
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
-| `d2k_udp_path_release` | 6–13 | 8 | закрыть hold и выпустить пачку ACCEPT | `main.rs:153 r2o_release_udp_batch`, `:200 batches` | P | — |
-| `d2k_udp_path_pre` | 15–33 | 19 | flush истёкших, hold_begin, feed; откат при отказе | `main.rs:1590-1630` hold/feed/overflow | P | `r2o-udp-session-table-check.sh` |
-| `d2k_udp_path_post` | 35–60 | 26 | HELD/REPLAY/LOST/RECLAIMED по результату сессии | `main.rs:1600-2200` (ready/replay/late) | P | — |
-| `d2k_udp_path_read` | 62–67 | 6 | новый receive-seq | `main.rs` `udp_receive_seq` | P | — |
-| `d2k_udp_path_expire` | 69–74 | 6 | flush по таймеру с seq | `main.rs:1330` flush + release | P | — |
-| `d2k_udp_path_passed` | 76–88 | 13 | пассивный проход: neutral + follow_mark | `main.rs:108 r2o_udp_mark_plain_pass` | P | — |
-| `d2k_udp_path_planned` | 90–97 | 8 | плановая посылка: neutral + follow_mark(at) | `main.rs:131 r2o_udp_mark_planned` | P | — |
+| `d2k_udp_path_release` | 6–13 | 8 | закрыть session-hold и выпустить пачку `NF_ACCEPT` | `main.rs:153 r2o_release_udp_batch`, `:200 r2o_release_udp_batches` | **P** | C вызывает `d2k_session_udp_hold_end(&b->key)` и `d2k_udp_out_batch(..., NF_ACCEPT, 0, now, now, seq)`. Rust `r2o_release_udp_batch` отпускает голову/хвосты через `r2o_release_batch_with`, помечает follow и логирует ошибки, но **прямого `hold_end` нет**: `r2o_udp_sessions` не хранит `udp_hold_active`, а `r2o_begin_hold` ограничивает попытки через `hold_attempts/hello_seen/plan_applied`. P — разный жизненный цикл hold. |
+| `d2k_udp_path_pre` | 15–33 | 19 | flush истёкших, `session_udp_hold_begin`, `hold_feed_marked`; при отказе feed — `hold_end` | `main.rs:1560-1635` flush/release + begin_hold + feed | **P** | C: flush с release-callback → `hold_begin` → `feed_marked`; при отказе feed вызывает `hold_end`. Rust: `r2o_flush(now)` + `r2o_release_udp_batches`, затем `r2o_begin_hold` и `r2o_feed`; `Held` без собранного ClientHello делает `continue` без отката, `Overflow` отпускает пачку, `Refused` ничего; `hold_end` отсутствует. Логика близка, но ветви rollback/held-без-hello различаются. |
+| `d2k_udp_path_post` | 35–60 | 26 | `udp_hold_wait` → HELD/NORMAL; `udp_hold_ready` → take/replay → REPLAY, иначе LOST; `fed` → take/release → RECLAIMED | `main.rs:1600-2210` (late tail/replay/release) | **P** | C возвращает один из четырёх кодов и явно вызывает `hold_replay`/`hold_end`. Rust разносит это по веткам `PacketDecision`, `r2o_udp_handle_late_tail`, `r2o_mark_hold_replay_first` и `r2o_release_udp_batch`; отдельной функции с теми же четырьмя исходами нет. P — нужен differential на HELD/REPLAY/LOST/RECLAIMED. |
+| `d2k_udp_path_read` | 62–67 | 6 | `rseq++`, `seq=rseq`, `now_ns` | `main.rs:1340` `udp_receive_seq` | **P** | C инкрементирует `rseq` без защиты от нуля; Rust `wrapping_add(1).max(1)` — при переполнении C даёт `seq=0`, Rust `1`. На практике 64-битный счётчик не переполняется; отличие зафиксировано. |
+| `d2k_udp_path_expire` | 69–74 | 6 | `seq = read_follows ? rseq+1 : NONE`, flush по таймеру | `main.rs:1330-1345` flush + release + `follow.age` | **P** | C `D2K_UDP_SEQ_NONE` для отсутствия чтения; Rust `follow_receive_seq = received ? udp_receive_seq : 0`, затем `r2o_flush`/`r2o_release_udp_batches`/`r2o_age`. Семантика 0/NONE совпадает, но `max(1)` и порядок flush/release/age разнесены. |
+| `d2k_udp_path_passed` | 76–88 | 13 | пассивный проход: IPv4, len≥20, `udp_opening`, neutral, follow_mark(0,seq) | `main.rs:108 r2o_udp_mark_plain_pass` | **P** | Rust дополнительно требует `view.protocol==17` и `fragment & 0x3fff == 0` через `PacketView`, C проверяет только `len>=20` и версию IPv4; C `d2k_udp_out_neutral` и Rust `r2o_udp_packet_is_neutral` учитывают route/probe mark. `follow_mark(...,0,seq)` ↔ `follow.r2o_mark(packet, now, None, receive_seq)`. P. |
+| `d2k_udp_path_planned` | 90–97 | 8 | плановая посылка: те же проверки + follow_mark(at_ns,seq) | `main.rs:131 r2o_udp_mark_planned` | **P** | То же отличие proto/fragment; `at_ns` ↔ `Option<Instant> at`, `seq` ↔ `receive_seq`. Отдельного differential на planned-путь с `at` нет. |
+
+### udp_path.c: построчная сверка
+
+- **`d2k_udp_path_release` (6–13) ↔ `r2o_release_udp_batch`
+  (`main.rs:153`):** C закрывает session-hold (`udp_hold_active=0`) и
+  отдаёт всю пачку `NF_ACCEPT` через `d2k_udp_out_batch`. Rust
+  отпускает голову/хвосты через `r2o_release_batch_with`, помечает
+  follow и пишет ошибки; **прямого `hold_end` нет** — состояние hold
+  в `r2o_udp_sessions` выражено через `hold_attempts/hello_seen/
+  plan_applied`. P.
+- **`d2k_udp_path_pre` (15–33) ↔ `main.rs:1560-1635`:** оба делают
+  flush истёкших, `begin_hold`, `feed`. C при отказе feed вызывает
+  `hold_end`; Rust `Held` без ClientHello делает `continue` без
+  отката, `Overflow` отпускает пачку, `Refused` ничего. P.
+- **`d2k_udp_path_post` (35–60) ↔ `main.rs:1600-2210`:** C возвращает
+  `HELD/REPLAY/LOST/RECLAIMED` одной функцией; Rust разносит исходы по
+  `PacketDecision`, `r2o_udp_handle_late_tail`,
+  `r2o_mark_hold_replay_first` и `r2o_release_udp_batch`. P.
+- **`d2k_udp_path_read` (62–67) ↔ `udp_receive_seq`:** C `rseq++` без
+  защиты от 0; Rust `wrapping_add(1).max(1)`. При переполнении
+  `u64` C даёт 0, Rust — 1; практически недостижимо. P.
+- **`d2k_udp_path_expire` (69–74) ↔ `main.rs:1330-1345`:** C
+  `seq = read_follows ? rseq+1 : NONE`, затем flush; Rust
+  `follow_receive_seq = received ? udp_receive_seq : 0`, затем
+  `r2o_flush` → release → `r2o_age`. Семантика 0/NONE совпадает,
+  порядок и `max(1)` отличаются. P.
+- **`d2k_udp_path_passed` (76–88) ↔ `r2o_udp_mark_plain_pass`:** Rust
+  дополнительно проверяет `protocol==17` и `fragment & 0x3fff == 0`
+  через `PacketView`; C — только `len>=20` и IPv4. Neutral учитывает
+  route/probe mark в обоих. `follow_mark(...,0,seq)` ↔
+  `follow.r2o_mark(..., None, receive_seq)`. P.
+- **`d2k_udp_path_planned` (90–97) ↔ `r2o_udp_mark_planned`:** те же
+  отличия proto/fragment; `at_ns` ↔ `Option<Instant>`, `seq` ↔
+  `receive_seq`. P.
 
 ## udp_release.c (34 функции)
 
