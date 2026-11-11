@@ -378,6 +378,63 @@ Rtnetlink: дампы правил, одиночный поиск маршрут
 **Итог:** 5 N — четыре диагностических/API-величины и один реально
 ненаблюдаемый счётчик `shape_misses`; packet-path они не меняют.
 
+## 9b. Углублённая сверка plans/plan_parse/ctl/raw/routemark
+
+- **`plans.c` (75 функций):** `d2k_plantab_new/free`,
+  `bind_context`, `name_eq`, `shape_transport`, `area_name_valid`,
+  `suffix_member`, `area_exact/set/del/bypassed/match`,
+  `d2k_plantab_set/del_{suffix,bypass}_family`, `revision`,
+  `find/scan_name/scan_addr`, `oldest`, `take_free_or_evict`,
+  `set_name*`, `set_addr*`, `drop`, `del_*`, `probe_*`, `shape_fits`,
+  `find_target`, `count/capacity/binding/trial` сверены с
+  `control.rs NamePlans`/`select`/`find_in_domain`/`binding_for_plan`.
+  Ёмкости совпадают: suffix 64, bypass 256, name plans 2048; LRU-
+  вытеснение (`oldest`/`take_free_or_evict`) и `touch` покрыты
+  `name_plan_table_evicts_lru_and_delete_releases_a_slot`,
+  `exact_name_addr_probe_tables_share_lru_capacity`. **Пробелы:**
+  `shape_misses` C инкрементирует, R2O — нет (N); `has_ech_target` —
+  отдельного предиката нет (`?`); `find_target` (QUIC-first по sport,
+  ECH→modern/grandfather, suffix, addr fallback) сложнее `select` и
+  полного differential не имеет — P.
+- **`plan_parse.c` (17 функций):** `rd16/rd32`, `fail`, `scan`,
+  `check_refs`, `d2k_find_payload/poison`, `d2k_plan_load/free`,
+  `poison_used/flow_needs/quic_deny/guards/transport/proto/stream_input/
+  id` сверены с `r2k-core/src/plan.rs Plan::parse(_wire)` и
+  `engine.rs` `flow_needs`/`quic_deny`. Счётчики записей, ссылки
+  payload/poison, флаги и `minexec` проверяются; P — побайтового
+  C/Rust differential парсера нет, только общие plan/apply тесты.
+- **`ctl.c`/`ctlsrv.c`:** `say`, `set_nonblock`, `d2k_ctl_open/close/
+  listen_fd/peer_fd/set_disconnect_hook/accept/drop_peer/flush/event/poll/
+  dropped/sent` и `d2k_ctlsrv_*` сверены с `control.rs ControlServer`.
+  **Расхождения:** C `D2K_CTL_OUT_RING=65536` (`ctl.c:21`), Rust
+  `MAX_CONTROL_OUTPUT=128*1024` (`control.rs:28`) — R2O держит вдвое
+  больший выходной буфер; `listen_fd`/`peer_fd`/`sent` отсутствуют
+  (N); `d2k_ctl_open` удаляет свой путь и `listen(1)`, Rust ставит
+  права 0600/backlog и не удаляет чужой не-сокет (P). Команды
+  `SET_HTTPS`/`ARM_SHAPE`/адресные опыты — см. строки и раздел 10.
+- **`raw.c` (17 функций):** `if_mtu`, `pick_maxlen`, `route_mtu`,
+  `d2k_raw_open/close/limits/maxlen/adopt_egress/route_maxlen(_family)/
+  prepare/send/sent/errors/busy` сверены с `r2o-datapath/src/raw.rs`.
+  **Расхождения:** C допускает `mark=0` и не ставит `SO_MARK`; Rust
+  требует ненулевой mark (`raw.rs:55-59`). C ставит `IP_NODEFRAG` и
+  держит отдельные IPv4/IPv6/fragment-сокеты лениво; в Rust
+  `IP_NODEFRAG` отсутствует, один сокет на семейство, mark обязателен.
+  `d2k_raw_limits` (`CANT_IPID|CANT_IPSUM`) отдельного API не имеет:
+  R2O отвергает `IPID_ZERO` в `engine.rs:2091`, суммы считает `wire.rs`.
+  Route-MTU cache 16 и `EMSGSIZE`-понижение есть, тесты raw/route; P.
+- **`routemark.c`/`routemark_nl.c` (31 функция):** `init/request/parse/
+  lookup_request/lookup_parse/watch_relevant/clear_oifs/set_oifs/set/
+  merge/set_policy/policy_match/routed/client/gate/describe` и
+  `r2o_route.rs` (`r2o_set_rules/refresh/route_mark`) — P.
+  **Расхождения:** C `d2k_routemark_merge` считает `found/truncated`,
+  сохраняет правила упавшего семейства и `rules_read4/6`; Rust
+  `r2o_set_rules` заменяет семейство без статуса `found/truncated`.
+  `d2k_routemark_describe` — N; признак изменения набора правил и
+  `merge`-статус не перенесены.
+- **Вывод:** новый подтверждённый пробел — control-ring 64 КиБ vs
+  128 КиБ; raw mark=0/`IP_NODEFRAG`; routemark merge status. Остальное —
+  P на сложные ветви/дифференциалы.
+
 ## 10. Итоговые пробелы (что мешает ставить E)
 
 1. **Счётчик промахов по форме мёртв.** `d2k_plantab_shape_misses` в R2O всегда 0 —
