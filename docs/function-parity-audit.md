@@ -2060,6 +2060,37 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `print_plans` (static) | 707–725 | `ask.rs` plan output | **P** | До 8 планов, построчная печать; формат Rust иной. |
 | `main` | 736–913 | `main.rs:315-332` `run_r2o_ask` | **P** | Последовательность parse→snapshot→props→compose→print перенесена; Rust-вывод и коды возврата (0/1/2) не сверялись побайтно. Отдельно: C `main` всегда возвращает 0 после успешного прогона, Rust возвращает код ошибки/успеха. |
 
+## Углублённая сверка: plantlv.c (20 функций)
+
+- **Декодеры и числовые хелперы:** `b64_value`, `parse_base64`, `hex_nib`,
+  `parse_hex`, `anchor_by_name`, `split_fields`, `parse_uint`, `parse_int`,
+  `kv_u32`, `str_u32` сверены с `plan_text.rs::base64_value/base64/hex_nibble/
+  hex/anchor/number/kv_number`; правила паддинга base64, hex, шесть якорей,
+  лимит 8 полей и запрет знака у `parse_uint` совпадают. `plan_free`
+  заменён RAII (`Drop`/`Vec`).
+- **`parse_text`:** набор директив, лимиты (payload/poison/split/fake 8,
+  seqovl 4), проверки `payload-pad` (префикс не длиннее выхода),
+  `payload-slice` (источник уже разобран), `oob` (ровно один байт),
+  `fake` (`tlsmod` требует minexec≥8), `autottl/min-max` и финальные
+  minexec-инварианты перенесены. **Нюанс:** C `sscanf("%d,%u-%u")`
+  принимает хвостовой мусор (`autottl=1,2-12junk`), Rust строго отвергает.
+  Это не дефект R2O: `scripts/fixtures/plantlv_stricter_cases.txt` и
+  `test-controller-plantlv-differential.sh` фиксируют, что R2O строже
+  ровно настолько, насколько строг `datapath/plan_parse.c` самого D2O;
+  end-to-end исход (план не исполняется) совпадает, различается стадия
+  отказа.
+- **Сборщики TLV:** `put`, `put_u8`, `put_u16`, `put_u32`, `put_rec`,
+  `d2k_plan_text_to_tlv`, `d2k_plan_text_to_hex` сверены с
+  `plan_text.rs::push_u16/push_u32` и порядком записей: ID, PROTO,
+  payload, poison+autottl, split, fake, seqovl, ORDER, PACE, INPUT,
+  SETTLE, SEGMENT, INPUT_TLS, DELAY, WIRE, IPFRAG, UDPLEN, QSPLIT,
+  QDENY, OOB, GUARD. `recOrder` пишется безусловно; `Plan::parse`
+  повторно проверяет собранный TLV. `test-controller-plantlv-differential.sh`
+  сравнивает C/Rust на двух фикстурах и отдельно проверяет stricter-случаи.
+- **Вывод:** статусы E для 20 функций оставлены; единственное отличие —
+  ранний отказ R2O на тексте, который C-компилятор пропускает, но
+  `plan_parse.c` D2O всё равно отвергает.
+
 ## Проверка полноты
 
 Строк среза: 692. Строк в таблицах: 692. E=127, P=564, N=1, ?=0; E+P+N+?=692. `E*`/`P*` учтены в E/P соответственно (static-хелперы).
