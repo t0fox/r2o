@@ -785,6 +785,48 @@ Inline-решения QUIC-зонда: суд этапа данных, stall-д�
 |---|---|---:|---|---|---|---|
 | `d2k_arm_segment` | 78-83 | 6 | размер сегмента ARM с учётом send_cap | `r2k-core/src/plan/apply.rs:660 segment` (иная семантика) | P | расчёт размера посылки есть в плане; ARM-сегментация контроллера не вынесена, target-теста нет |
 
+## Углублённая сверка: udpplan.c и udpruntime.c (20 функций)
+
+- **Текстовые сборщики `udpplan.c`:** `append_fmt`, `emit_header_proto`,
+  `append_hex`, `quic_arm_found`, `quic_split_plan_text`, `quic_plan_text`,
+  `d2k_quic_arm_plan`, `d2k_quic_compose_plan`, `d2k_quic_delay_plan`,
+  `d2k_voice_arm_plan`, `d2k_voice_plan`, `d2k_quic_question_plan` сверены с
+  `r2o_fallback`/`classify_measured`/`r2o_quic_http3`. Формы quicsplit 1,
+  ipfrag 1–4, udplen, fake/ttl/copies, voice-план и «нет воздействия» =
+  `order forward` перенесены; отличия — заголовок `r2o-plan` вместо
+  `d2k-plan` и иной слой сборки. C/Rust differential на все комбинации
+  arm/props не заявлен, статусы P.
+- **`udp_next_fragment_id` (22–30):** C под pthread-mutex берёт random
+  seed из TLS RNG и выдаёт ненулевой 32-битный IPv4 fragment id. В R2O
+  отдельного UDP-fragment-id генератора нет; raw-фрагментация UDP-планов
+  не портирована — N.
+- **`d2k_udp_batch_free`/`d2k_udp_plan_build` (32–93):** C компилирует
+  текст плана в TLV, применяет `d2k_plan_apply`, отказывает при >1 payload,
+  `POISON_IPID_ZERO` (SOCK_DGRAM не может сохранить IP ID), собирает
+  IPv4/IPv6-фрагменты (`d2k_udpfrag_build_ex`/`d2k_udpfrag6_build_ex`) или
+  `d2k_wire_build_udp`, а для `ORIG_PASS` добавляет оригинал ровно один раз.
+  В R2O аналога нет: QUIC-план исполняет датапат, контроллер шлёт датаграммы
+  напрямую — N.
+- **`udp_raw_init`/`udp_raw_close`/`udp_raw_prepare`/`udp_raw_send`
+  (101–139):** C на Linux открывает `AF_INET/SOCK_RAW/IPPROTO_RAW`, ставит
+  `IP_HDRINCL`, `IP_NODEFRAG` и `SO_MARK`; для IPv6 использует
+  `d2k_ip6frag_sender`; ошибка raw-prepare = UNSENT, без fallback на
+  обычный датаграммный сокет. В R2O `raw_probe.rs:1876` ставит
+  `IP_HDRINCL` только для TCP; UDP raw-sink, `IP_NODEFRAG` и IPv6-frag
+  sender в контроллере отсутствуют — N.
+- **`d2k_udp_plan_send` (147–190):** C берёт `IP_TTL`/`IPV6_UNICAST_HOPS`
+  с исходного сокета, собирает batch, для фрагментов шлёт raw, для обычных
+  посылок временно ставит TTL из пакета и восстанавливает исходный TTL даже
+  после ошибки; `ECONNREFUSED` → `-2`. R2O шлёт QUIC обычным `UdpSocket`
+  (`r2o_quic_http3.rs`/`quic_replay.rs`), без TTL/hoplimit и без
+  восстановления — N.
+- **`qp_recv_ttl` (937–997, `quicprobe.c`):** C принимает TTL/hoplimit
+  через `recvmsg` (`IP_TTL`/`IPV6_HOPLIMIT`). В R2O приёма TTL нет — N.
+- **Итог:** 12 текстовых сборщиков — P (формы перенесены, полного
+  differential нет); 8 функций raw-UDP runtime/фрагментов/TTL — N.
+  Это архитектурный пробел: R2O не исполняет UDP-плановые посылки с
+  контроллера так, как C `d2k_udp_plan_send`, и не измеряет TTL ответа.
+
 ## Проверка полноты среза
 
 Сверка выполнена скриптом: для каждого заголовка `## <файл>` считается число строк таблицы, начинающихся с `| \`имя\``; результат сравнивается с числом функций файла в `slice-core-net.csv`.
