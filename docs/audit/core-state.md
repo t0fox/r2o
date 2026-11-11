@@ -312,9 +312,9 @@
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `copy` | 98–104 | 7 | копирование строки с обрезкой по UTF-8 | diagnostics::truncate_utf8 | **P*** | static-хелпер |
-| `js` | 105–130 | 26 | JSON-экранирование с проверкой UTF-8 | serde_json | **P*** | static-хелпер; serde_json иначе обрабатывает невалидные последовательности |
-| `number` | 131–131 | 1 | число или null для отрицательного | serde_json::Value | **P*** | static-хелпер |
+| `copy` | 98–104 | 7 | копия в `cap`, обрезка до `cap-1`, откат с continuation-байта UTF-8 | diagnostics::truncate_utf8 (`:1313`) | **P*** | C `while(n && (s[n]&0xc0)==0x80)n--` — отступает только если `cap-1` попал внутрь символа; Rust `is_char_boundary` — тот же результат. Пределы полей задаёт вызывающий. |
+| `js` | 105–130 | 26 | JSON-строка: `"`/`\\`, `\\n`, control→`?`, валидный UTF-8 как есть, иначе `\\ufffd` | serde_json + `d2o_event_text` (`:1324`) | **P*** | C сам валидирует UTF-8 (overlong/surrogate/>0x10ffff) и печатает `\ufffd`; Rust строки всегда валидны, `d2o_event_text` режет по NUL и control→`?`. Для валидных строк вывод эквивалентен; raw-байты C вне UTF-8 Rust не получает. |
+| `number` | 131–131 | 1 | `<0` → `null`, иначе число | serde_json `Value` | **P*** | C отрицательные даёт `null`; Rust использует `Option`/`null`, для счётчиков `u64`. |
 | `d2k_diag_new` | 132–132 | 1 | создать диагностическийリング | diagnostics::Recorder::new | **P*** | static-хелпер жизненного цикла |
 | `d2k_diag_free` | 133–133 | 1 | освободить диагностику | Drop | **P*** | static-хелпер |
 | `d2k_diag_bytes` | 134–134 | 1 | размер диагностической структуры | size_of::<Recorder> | **P*** | static-хелпер |
@@ -333,7 +333,7 @@
 | `d2k_diag_set_madvise` | 180–180 | 1 | сохранить статистику madvise | Recorder::set_madvise | **P** | unit memory_tracking_and_madvise_json_match_d2o_shape |
 | `record_anomaly` | 181–187 | 7 | записать аномалию в кольцо (12 слотов) | Recorder::record_anomaly | **P*** | static-хелпер |
 | `d2k_diag_record_write_error` | 188–191 | 4 | записать ошибку записи отчёта | Recorder::record_write_error | **P** | unit records_only_while_enabled |
-| `d2k_diag_record` | 192–201 | 10 | записать событие поиска в кольцо (64) | Recorder::record | **P** | differential сравнивает event_json частично |
+| `d2k_diag_record` | 192–201 | 10 | записать событие в кольцо 64: id/at/family/trigger/elapsed/queue/units/target/ip/path/kind/shape/protocol/outcome/reason; пределы target 255, protocol 15, outcome 31, **reason 255**, ip 47, path 15, kind 7 | Recorder::record (`:754`) | **P** | **Подтверждённое расхождение:** C `reason[256]` → `copy` режет до **255** байт; Rust явно задаёт `("reason", 1024)` (`diagnostics.rs:768`). Остальные пределы совпадают. Rust сам добавляет `id`, если его нет, и всегда перезаписывает `at`; C берёт id/at из структуры. C не проверяет `enabled` (это делает вызывающий), Rust `record` выходит при `!enabled` — эквивалентно при штатном включении. |
 | `d2k_diag_record_limit` | 202–212 | 11 | записать переход лимита (32) | Recorder::record_limit | **P** | unit/differential частично |
 | `value` | 213–217 | 5 | число после ключа в /proc | diagnostics::meminfo/read_number | **P*** | static-хелпер |
 | `compact_kib` | 218–220 | 3 | сжать KiB в i32 или -1 | diagnostics compact | **P*** | static-хелпер |
@@ -342,7 +342,7 @@
 | `compact_count` | 223–223 | 1 | счётчик в u8 с насыщением | diagnostics compact | **P*** | static-хелпер |
 | `proc_pid_dir_present` | 225–229 | 5 | существует ли /proc/<pid> как каталог | diagnostics::process_detail | **P*** | static-хелпер |
 | `optional_proc_status` | 230–237 | 8 | различить unsupported/unavailable для smaps_rollup | diagnostics::read_smaps_rollup | **P*** | static-хелпер |
-| `read_proc` | 238–259 | 22 | pid из pid-файла, comm, VmRSS/HWM/Anon/Threads/VmData/VmSwap | diagnostics::process_memory | **P** | unit process_memory_follows_pidfiles_and_restarts; C-oracle нет |
+| `read_proc` | 238–259 | 22 | pid из pid-файла, comm, VmRSS/HWM/RssAnon/Threads/VmData/VmSwap | diagnostics::process_memory (`:1411`) | **P** | C требует **точного** `comm == names[i]` и читает только основной pid-файл; Rust принимает `name == spec.comm || name.starts_with(spec.comm)` (из-за усечения comm до 15 байт) и пробует `fallback_pidfile` (`r2o-controller4.pid` и т.п.). Поля status читаются теми же ключами; unit `process_memory_follows_pidfiles_and_restarts`, C-oracle нет. |
 | `read_detail` | 260–304 | 45 | stat starttime, VmSize/Data/Stk/Swap, fd_count, smaps_rollup | diagnostics::process_detail | **P** | unit first_process_detail_survives_process_exit |
 | `read_status` | 305–309 | 5 | код статуса smaps_rollup в строку | diagnostics::read_status | **P*** | static-хелпер |
 | `write_detail` | 310–328 | 19 | JSON memory_detail процесса | diagnostics memory_details | **P** | unit/differential частично |
@@ -351,8 +351,8 @@
 | `write_memory_tracking` | 357–369 | 13 | JSON memory_tracking (сайты, coverage) | diagnostics::memory_tracking_json | **P** | unit memory_tracking_and_madvise_json_match_d2o_shape |
 | `write_madvise` | 370–381 | 12 | JSON madvise (success/fail/errno-гистограмма) | diagnostics::madvise_json | **P** | unit |
 | `write_anomalies` | 382–394 | 13 | JSON аномалий и счётчиков перезаписи | Recorder::write_report | **P** | unit records_only_while_enabled |
-| `d2k_diag_sample` | 395–468 | 74 | сэмпл раз в 60 с: meminfo, conntrack, процессы, история памяти, детектор неучтённого RSS-роста | Recorder::tick/process_memory | **P** | unit d2o_periodic_rss_sample_matches_c и first_process_detail; полный C differential не сравнивает все поля |
-| `d2k_diag_write` | 469–605 | 137 | сериализация report.json schema=1 (события, лимиты, память, сэмплы, процессы) | Recorder::write_report + serde_json | **P** | r2o-diagnostics-differential.sh сравнивает ring_bytes/event/snapshots/http_records; остальные поля — unit, не C/Rust diff |
+| `d2k_diag_sample` | 395–468 | 74 | раз в 60 с: meminfo, conntrack, процессы, first/latest detail, память-история 1440, детектор RSS-роста | `Recorder::tick` (`:790`) + `process_memory`/`process_detail` | **P** | **Подтверждённые расхождения в `memory_history`:** (1) C пишет фактические `rollup_status`, `rollup_errno` и `rollup[5]` первичного процесса; Rust жёстко кладёт `0`, `null`, `null` — поля `smaps_rollup_status_code`/`errno`/`kib` в истории всегда пустые. (2) C `compact_kib` даёт `-1` (JSON `null`) для недоступного RSS/VmData/VmSwap/RssAnon; Rust `unwrap_or(0)` даёт **0**. Остальное совпадает: интервал 60 с, окно 10 точек, `rising>=7`, `span>=9 мин`, `rss_delta>=1024`, `accounted<rss/4`, cooldown 30 мин, epoch при смене pid/start_ticks. Unit `d2o_periodic_rss_sample_matches_c`, `first_process_detail_survives_process_exit`. |
+| `d2k_diag_write` | 469–605 | 137 | report.json schema=1: controller_pid/release/ring_bytes/capacities/overwritten, http_storage_limits, memory_tracking, madvise, anomalies, events, limit_transitions, memory_history, samples, memory_details | `Recorder::write_report` (`:1179`) + serde_json | **P** | Поля и константы совпадают: schema 1, capacities 64/32/120/1440/60 с, overwritten, memory_tracking, madvise, anomalies, events, limits, samples, memory_details, `smaps_status:not-read`. **Отличия:** C пишет `http_storage_limits` только при `d->ns>0`, Rust — всегда; C выводит `reason_source` из `protocol=="http"` (`terminal-code`/`last-classifier-context`), Rust берёт поле из события и не добавляет его сам. `r2o-diagnostics-differential.sh` сравнивает ring_bytes/event/snapshots/http_records; остальные поля — unit, не C/Rust diff. |
 
 ### `core/domain.c`
 
@@ -1045,30 +1045,37 @@
   `MEMORY_HISTORY_CAPACITY=1440`, `ANOMALY_CAPACITY=8`, `GROWTH_CAPACITY=10`,
   `D2O_PROCESS_CAPACITY=3`. `MADVISE_ERRNO_SLOTS=4` и
   `MEMORY_SITE_COUNT=6` тоже совпадают.
-- **`copy`/`js`:** C `copy` обрезает строку по байтам и может разрезать
-  UTF-8; `js` затем экранирует невалидные байты как `\u00xx`. Rust
-  `truncate_utf8` отступает до границы символа, а строки из `/proc` читает
-  через `read_to_string` (невалидный UTF-8 → пустая строка/ошибка). Это
-  реальное различие для не-UTF-8 `comm`/`status`, но не для штатных ASCII
-  имён процессов; статусы P сохранены.
-- **`read_proc`/`read_detail`/`d2k_diag_sample`:** чтение pid-файлов,
-  `VmRSS/HWM/Anon/Threads/VmData/VmSwap`, `stat` starttime, fd_count,
-  `smaps_rollup`, 60-секундный сэмпл, история 1440 и детектор неучтённого
-  RSS-роста перенесены в `diagnostics.rs::process_memory/process_detail/
-  Recorder::tick`. Есть unit-тесты `process_memory_follows_pidfiles_and_restarts`,
+- **`copy`/`js`:** C `copy` режет до `cap-1` и отступает на continuation-
+  байт UTF-8, `js` сам валидирует UTF-8 (overlong/surrogate/>0x10ffff) и
+  печатает `\ufffd`; Rust `truncate_utf8`/`d2o_event_text` работают с уже
+  валидными `String`, control→`?`, NUL обрезается. Для валидных строк
+  эквивалентно; невалидные байты Rust не получает. P*.
+- **`read_proc`/`read_detail`/`d2k_diag_sample`:** C требует точного
+  `comm == names[i]` (`d2kc`/`d2kd`/`d2kpanel`) и одного pid-файла; Rust
+  принимает префикс comm (усечение до 15 байт) и fallback
+  `*-controller4.pid` и т.п. Поля status, `stat` starttime, fd_count,
+  `smaps_rollup` и 60-секундный интервал совпадают; unit
+  `process_memory_follows_pidfiles_and_restarts`,
   `first_process_detail_survives_process_exit`,
-  `d2o_periodic_rss_sample_matches_c`; полного C/Rust differential всех полей нет.
+  `d2o_periodic_rss_sample_matches_c`.
+  **Подтверждённые расхождения истории памяти:** C пишет фактические
+  `rollup_status/errno/rollup[5]`, Rust — `0/null/null`; C даёт `null`
+  для недоступных RSS/VmData/VmSwap/RssAnon, Rust — `0` (`unwrap_or(0)`).
+  P.
 - **`d2k_diag_write`:** C вручную пишет `report.json` schema=1 с лимитом
-  448 КиБ; Rust сериализует `Recorder::write_report` через serde_json с тем же
-  `REPORT_MAX`. `r2o-diagnostics-differential.sh` сравнивает
-  `ring_bytes/event/snapshots/http_records`, остальные поля — unit-тесты, не
-  C-oracle. Порядок ключей JSON может отличаться, но JSON-объект от порядка
-  не зависит.
+  448 КиБ; Rust сериализует `Recorder::write_report` через serde_json с тем
+  же `REPORT_MAX`. **Отличия:** C пишет `http_storage_limits` только при
+  `ns>0`, Rust — всегда; C выводит `reason_source` из `protocol=="http"`,
+  Rust берёт его из события. `r2o-diagnostics-differential.sh` сравнивает
+  `ring_bytes/event/snapshots/http_records`; остальные поля — unit, не
+  C-oracle. P.
 - **`d2k_diag_record`/`record_limit`/`record_anomaly`/`write_anomalies`:**
   кольца и счётчики `event_total/limit_total/anomaly_total/write_failures`
-  перенесены; `record_anomaly` пишет kind/code/rss_delta/accounted_delta/stage
-  в кольцо 8. Статусы P, отдельного C/Rust differential на переполнение колец
-  нет.
+  перенесены; `record_anomaly` пишет kind/code/rss_delta/accounted_delta/
+  stage в кольцо 8. **Подтверждённое расхождение:** предел `reason` —
+  255 байт в C (`reason[256]`) и **1024** в Rust (`diagnostics.rs:768`);
+  остальные пределы совпадают. P, отдельного C/Rust differential на
+  переполнение колец нет.
 
 ## Углублённая сверка: catalog.c (60 функций)
 
