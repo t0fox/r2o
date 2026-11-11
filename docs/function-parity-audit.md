@@ -3980,7 +3980,7 @@ observation), `control.rs` (https names), `http_replace.rs` (пакеты),
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
-| `d2k_http_trace` | 9–50 | 42 | строка `d2kd: HTTP execution host=... hook=... status=...` по пакету и исходу | нет: grep `HTTP execution` по R2O пуст | N | текстовый трейс HTTP-исполнения отсутствует; события портала/ответа есть, но это другой контракт |
+| `d2k_http_trace` | 9–50 | 42 | строка `d2kd: HTTP execution host=... IPv4/6 [src]:cport -> [dst]:80 seq=... hook/mark/outdev/status/prepared/plan/execution/planned/raw_sent/queued/original/output_failed/reason` | нет: grep `HTTP execution` по R2O пуст | **N** | C: TCP/80, method заглавными + пробел, `d2k_http_request` иначе `host=<unparsed>`, `inet_ntop`, plan hex или `-`, status `OBSERVE/SKIPPED/FAILED/PENDING/COMPLETE`, seq/hook/mark/outdev, execution, planned/sent/queued, original `ACCEPT/DROP`, output_failed, reason; возвращает длину с усечением до `cap-1`. В R2O есть события портала/ответа и журнал, но **нет** этой текстовой строки; N подтверждён. |
 
 ## journal.c (14 функций)
 
@@ -3995,9 +3995,9 @@ execution/binding, added/dropped. R2O: `flow_journal.rs`.
 | `d2k_refuse_text` | 55–68 | 14 | тексты REFUSE_* (7 кодов + default) | `:45 r2o_refuse_text` | E | `:1027` |
 | `add_entry` (static) | 76–130 | 55 | общая запись: added/dropped, note по умолчанию, чистка имени | `flow_journal.rs:565-582` `push`, `:530-543` `default_journal_note`, `:184-196` `set_name` | **P** | Санитизация совпадает: байты 0x20..0x7e как есть, остальные → `.`, предел 63 (`journal.c:111-123`). Заметки: SUSPECT→`suspect_text`, UNSENT/DAMAGED→`refuse_text`, DONE→«план доисполнен» — совпадает с C. Отдельного теста на непечатаемое имя нет. |
 | `d2k_journal_add` | 132–137 | 6 | добавить наблюдение | `:565 push` | P | — |
-| `d2k_journal_add_applied` | 139–149 | 11 | APPLIED + plan/trial | `:650 record_applied` | P | D22 |
+| `d2k_journal_add_applied` | 139–149 | 11 | `PLAN_APPLIED` + plan_id/trial_id | `flow_journal.rs:667-683 record_plan_prepared` | **P** | C пишет kind `D2K_JRN_PLAN_APPLIED`; Rust `record_plan_prepared` — `PlanApplied`. `record_applied` (`:650`) — это `PlanDone` и соответствует C `d2k_journal_add_fate_bound(...PLAN_DONE...)`, а не этой функции. Отдельного теста prepared нет. |
 | `d2k_journal_add_refused` | 151–158 | 8 | REFUSED + code/plan/trial | `flow_journal.rs:684-720` `record_plan_refused` | **P** | **Расхождение:** Rust принимает только `NOT_APPLIED|FLOW_UNFIT` и валидный ключ/привязку; C `refuse_coded` вызывается с `NOT_APPLIED/FLOW_UNFIT` (`session.c:1364,2445,2481`) и с `NONE` через `refuse()` (`:417`). Отказ `NONE` R2O отправляет событием, но в журнал не пишет. D22 покрывает основные коды. |
-| `d2k_journal_add_fate_bound` | 160–176 | 17 | DONE/UNSENT/DAMAGED + execution/binding | `flow_journal.rs:722-757` `record_execution_failure`, `:667-683` `record_plan_prepared` | **P** | **Расхождение:** C пишет ровно один kind на вызов (DONE, UNSENT или DAMAGED); Rust `record_execution_failure` всегда пишет `PlanUnsent` и при `damaged` **дополнительно** `PlanDamaged` — для повреждённого потока в R2O две записи против одной в C. `record_plan_prepared` соответствует локальной C-записи `PLAN_APPLIED`. |
+| `d2k_journal_add_fate_bound` | 160–176 | 17 | один fate-kind за вызов: DONE/UNSENT/DAMAGED + plan/trial/execution/binding | `flow_journal.rs:722-757` `record_execution_failure`, `:650` `record_applied` | **P** | C `add_fate_bound` пишет **один** kind за вызов. Rust `record_execution_failure` за один вызов пишет `PlanUnsent` и при `damaged` **дополнительно** `PlanDamaged`. **Но** C `d2k_session_exec_failed` делает два отдельных вызова: `d2k_session_unsent` (`session.c:3533`, `PLAN_UNSENT`) и `PLAN_DAMAGED` (`session.c:3493`), поэтому итоговый журнал повреждённого потока содержит те же две записи. Отличается гранулярность API, не итог. `record_applied` (`PlanDone`) соответствует C `PLAN_DONE`; `record_plan_prepared` — `PLAN_APPLIED`. |
 | `d2k_journal_add_fate` | 178–182 | 5 | fate без execution | те же без execution | P | — |
 | `d2k_journal_count` | 184–186 | 3 | число записей | `:990 count` | E | — |
 | `d2k_journal_at` | 188–196 | 9 | запись от старой к новой | `flow_journal.rs:994-1004 get`, `:1014-1020 iter` | **P** | Порядок совпадает: C отдаёт от `head` при заполненном кольце, Rust `VecDeque`-подобное кольцо с `head/length`; `get(i)` и `iter()` идут от старой к новой. Отдельного теста порядка нет. |
@@ -4110,9 +4110,12 @@ flow-брони).
   умолчанию (`:530-543`) повторяют C. **Расхождения:** (1)
   `record_plan_refused` принимает только `NOT_APPLIED|FLOW_UNFIT`
   (`:684-706`), тогда как C `refuse()` пишет и `NONE` (`session.c:417`);
-  (2) `record_execution_failure` для повреждённого потока пишет
-  `PlanUnsent` **и** `PlanDamaged` (`:722-757`), а C — ровно один
-  `PLAN_DAMAGED` (`session.c:3493`); (3) числовые kind'ы R2O
+  (2) `record_execution_failure` за один вызов пишет `PlanUnsent` **и**
+  при `damaged` `PlanDamaged` (`:722-757`); C `d2k_journal_add_fate_bound`
+  пишет один kind за вызов, но `d2k_session_exec_failed` делает два
+  вызова — `d2k_session_unsent` (`PLAN_UNSENT`, `session.c:3533`) и
+  `PLAN_DAMAGED` (`session.c:3493`), поэтому итоговый журнал
+  повреждённого потока совпадает, а гранулярность API — нет; (3) числовые kind'ы R2O
   (`PlanApplied=2`, `PlanDone=7`) не равны C (`PLAN_APPLIED=3`,
   `PLAN_DONE=8`), но `EVENT_R2O_JOURNAL_ENTRY` в D2O отсутствует
   (grep по `datapath/`, `core/` пуст), а v22-транслятор журнал не
