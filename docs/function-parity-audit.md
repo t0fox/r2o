@@ -1087,6 +1087,52 @@ Inline-решения QUIC-зонда: суд этапа данных, stall-д�
   замена, а не отсутствие функциональности; для E нужны адресные
   differentials на record layer/ACK-loss/HRR/key update.
 
+## Углублённая сверка: hello/tls13core/h3/httpup_logic (67)
+
+- **`hello.c` (19):** `rd16`, `rd24`, `skip_u8_vec`, `skip_u16_vec`,
+  `parse_hello`, `d2k_hello_complete`, `d2k_hello_shape`, `d2k_hello_sni`,
+  `d2k_hello_ech_offer` — E: побайтовые порты в `hello.rs`, дифференциал
+  `test-controller-clienthello-differential.sh` (24+ кейса: длины,
+  усечения, SNI, ECH). `d2k_hello_from_profile` — E (профили
+  modern/legacy, unit). **P:** `wr16`/`wr24` (нет прямого теста записи
+  длин); `d2k_hello_alpn`/`d2k_alpn_is_http` — Rust
+  `r2o_tls_client_hello_non_http_alpn` возвращает только не-HTTP список и
+  отвергает ECH, сырого списка/кодов C нет; `splice_sni`/`d2k_hello_rename`
+  — порт есть, побайтового differential на пересчёт 6 длин нет;
+  `d2k_hello_without_sni` — TLS-путь отдельной функции не имеет, только
+  QUIC-путь `r2k_quic_client_hello_rename_sni(..., None)`; hex-хелперы
+  отличаются обработкой комментариев/пробелов.
+- **`tls13core.c` (24):** `put16`, `get16`, `der_len`, `ascii_lower`,
+  `name_matches`, `cert_name_ok`, `d2k_t13_cert_name_ok12/ok`,
+  `d2k_t13_ch_build` — E: SAN/DER/wildcard и сборка ClientHello сверены
+  `tests/response.rs::d2o_shared_tls_response_vectors_match`,
+  `tests/r2o_tls.rs` (padding/session_id/ALPN), `d2o_verify_differential`.
+  **P:** `d2k_t13_random` (источник заменён `rustls`/`getrandom`);
+  `d2k_t13_derive_secret/schedule_hs/schedule_ap/finished_mac` — key
+  schedule внутри rustls, C-векторов нет; `d2k_t13_sh_version/sh_parse/
+  flight_next` — разбор ServerHello/итератор отдан rustls, полного
+  C/Rust differential нет; `ech_host_ok`/`d2k_ech_config_parse` — Rust
+  получает ECHConfig из HTTPS RR (`ech.rs:158`), а C разбирает wire
+  ECHConfigList; выбор первого валидного/лимиты не сверялись;
+  `hpke_extract/expand/ech_hpke` — заменены crate `hpke`; `d2k_t13_ech_build`
+  — Rust собирает ECH через rustls, байтовая раскладка C не повторена;
+  `d2k_t13_ech_accepted` — проверка делегирована rustls
+  (`fetch.rs:986`), C-оракул на accept_confirmation не подключён.
+- **`h3.c` (9):** `d2k_h3_control`, `prefix_int(_read)`, `d2k_h3_request`,
+  `huff_status`, `static_status`, `name_is_status`, `decode_section`,
+  `d2k_h3_status` — все E: `scripts/test-controller-h3-httpup-differential.sh`
+  и unit `h3.rs` (static/literal/post-base/Huffman, request/control).
+- **`httpup_logic.c` (15):** `ascii_alnum`, `dns_host`, `host_equal`,
+  `known_portal_host`, `find_crlf`, `parse_request`,
+  `d2k_httpup_request_safe`, `build_redirect`, `portal_marker`,
+  `redirect_location_host`, `portal_answer`,
+  `d2k_httpup_portal_response/request_target/portal_location/
+  redirect_https` — все E: `tests/httpup.rs` (safe bodyless,
+  ambiguous rejection, portal/307, exact Location/target, DNS-метки).
+- **Вывод:** 67 функций; 9 h3 + 15 httpup + 13 hello + 7 tls13core — E,
+  остальные P на ALPN/rename/without_sni/key schedule/ECH-байты.
+  Новых N в блоке нет.
+
 ## Проверка полноты среза
 
 Сверка выполнена скриптом: для каждого заголовка `## <файл>` считается число строк таблицы, начинающихся с `| \`имя\``; результат сравнивается с числом функций файла в `slice-core-net.csv`.
