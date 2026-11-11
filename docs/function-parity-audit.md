@@ -5793,17 +5793,54 @@ CLI `d2k-detect` и форматы вывода. R2O использует дру
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `d2k_poison_supports_family` | 17-22 | 290 | допустимость гипотезы для семейства | classify.rs:389 poison_supports_family | E | tests/classify.rs:861 (проверка ipid на IPv6) |
-| `d2k_poison_has_fake` | 24-40 | 1239 | несёт ли гипотеза фальшивку | classify.rs:382 poison_has_fake | P | не учитывает autottl (datapath-detect-audit.md, п. 13), тест покрывает badsum/ts |
+| `d2k_poison_has_fake` | 24-40 | 1239 | фальшивка, если не syn_data/oob/fake_between и есть badsum/md5/ttl/autottl/seq_shift/tcp_ts | classify.rs:382 poison_has_fake | **P** | **Расхождение:** C возвращает true при `p->autottl` (`poison.c:38`); Rust `Poison` не имеет `autottl`/`tcp_ts_up` и возвращает `badsum||md5||ttl>0||seq_shift!=0||tcp_ts`. Для autottl-only гипотезы C считает «есть фальшивка», Rust — нет. Тест покрывает badsum/ts. |
 | `add` | 47-60 | 335 | добавить гипотезу в список | classify.rs:215 add_poison | E | tests/classify.rs:861 порядок и 85 записей |
-| `d2k_poison_same` | 62-70 | 300 | сравнение гипотез без имени | classify.rs:200 same_hypothesis | P | C сравнивает memcmp с указателем decoy, Rust — поля |
+| `d2k_poison_same` | 62-70 | 300 | сравнение без имени: name занулён, repeats≤1→1, затем `memcmp` всего struct | classify.rs:200 same_hypothesis | **P** | C сравнивает **все** поля `d2k_poison`, включая `autottl/autottl_delta/min/max/tcp_ts_up/split_pos`; Rust `same_hypothesis` сравнивает подмножество полей `Poison` (autottl/tcp_ts_up отсутствуют). На текущем каталоге расхождений нет, для произвольной гипотезы — есть. |
 | `already_listed` | 73-82 | 248 | отсев уже перечисленной гипотезы | classify.rs:327-330 | E | tests/classify.rs:861 все 85 уникальны |
 | `init_poisons` | 84-180 | 5674 | полный список гипотез в порядке стоимости | classify.rs:223 build_poisons | E | tests/classify.rs:861 |
 | `d2k_poisons` | 182-189 | 284 | неизменяемый список гипотез | classify.rs:377 poisons | E | tests/classify.rs:861 |
 | `d2k_note_props_hit` | 194-208 | 540 | свойства по проходу гипотезы | classify.rs:173 note_props_hit | E | tests/classify.rs:907 poison_outcomes_update_only_properties_they_prove |
 | `d2k_note_props_miss` | 216-223 | 242 | свойства по промаху гипотезы | classify.rs:189 note_props_miss | E | tests/classify.rs:907 |
 | `d2k_strategy_for_poison` | 226-398 | 7211 | строка стратегии nfqws2 | classify.rs:394 strategy_for_poison | E | tests/classify.rs:879; raw emission differential |
-| `d2k_strategy_for` | 401-404 | 144 | стратегия разреза unknown | classify.rs:1933 strategy_for | P | теста строки нет |
-| `d2k_arm_from_poison` | 413-475 | 4050 | перевод гипотезы в язык плана | classify_measured.rs:30 plan_text_for_poison, :50 measured_plan_text, r2k-core plan.rs | P | дифференцированы split и badsum, не все поля и отказы |
+| `d2k_strategy_for` | 401-404 | 144 | `--lua-desync=multisplit:payload=unknown:dir=out:pos=%d` | classify.rs:1933 strategy_for | **P** | C и Rust формируют ту же строку; отдельного теста строки нет. P. |
+| `d2k_arm_from_poison` | 413-475 | 4050 | гипотеза → `d2k_arm`: oob, badsum/md5, repeats, gap, disorder/pos, between, ttl, autottl/delta/min/max, seq_out, decoy, tcpts/tcpts_up, ipidzero, split_pos, seqovl_hello/seqovl | classify_measured.rs:30 plan_text_for_poison, :50 measured_plan_text, r2k-core plan.rs | **P** | C переносит **autottl** и **tcp_ts_up** отдельными осями; Rust `Poison` (classify.rs) этих полей не имеет, `plan_text_for_poison/measured_plan_text` покрывают split/badsum и основные флаги. Для autottl/tcp_ts_up план не выражается; дифференциалы split/badsum есть, полного набора полей/отказов нет. |
+
+### poison.c: построчная сверка
+
+- **`d2k_poison_supports_family` (17–22) ↔
+  `poison_supports_family` (`:389`):** C `family==4` или
+  `family==6 && !ip_id_zero`; Rust то же. E.
+- **`d2k_poison_has_fake` (24–40) ↔ `poison_has_fake`
+  (`:382`):** C учитывает `badsum/md5/ttl/autottl/seq_shift/tcp_ts`;
+  Rust `Poison` не имеет `autottl/tcp_ts_up` и проверяет
+  `badsum/md5/ttl/seq_shift/tcp_ts`. autottl-only: C true, Rust
+  false. P.
+- **`add`/`already_listed`/`init_poisons`/`d2k_poisons` (47–189):**
+  C cap 128 и 85 гипотез, `pthread_once`; Rust `Vec`/`OnceLock`,
+  `build_poisons` 85 в том же порядке, `same_hypothesis` для дедупа.
+  E, `tests/classify.rs:861`.
+- **`d2k_poison_same` (62–70) ↔ `same_hypothesis` (`:200`):** C
+  `memcmp` всего struct после зануления имени и нормализации repeats;
+  Rust сравнивает подмножество полей `Poison`; autottl/tcp_ts_up не
+  входят. Для каталога совпадает, для произвольной гипотезы — нет. P.
+- **`d2k_note_props_hit/miss` (194–223) ↔ `note_props_hit/miss`:**
+  C и Rust одинаковые ветви badsum/ttl/disorder/seqovl/decoy;
+  miss не выводит `validates_checksum=true`. E,
+  `tests/classify.rs:907`.
+- **`d2k_strategy_for_poison` (226–398) ↔ `strategy_for_poison`
+  (`:394`):** строки стратегий совпадают (syndata/oob/fakedsplit/
+  fake+seqovl/multisplit/multidisorder/fake+repeats/ts/ipid/badsum/
+  md5/seq_shift/ttl/decoy), `tests/classify.rs:879` + raw emission.
+  C возвращает пустую строку, Rust `None` для невыразимого — контракт
+  «нет стратегии» эквивалентен. E.
+- **`d2k_strategy_for` (401–404) ↔ `strategy_for` (`:1933`):** та же
+  строка `multisplit:payload=unknown:...`, теста нет. P.
+- **`d2k_arm_from_poison` (413–475) ↔ `plan_text_for_poison/
+  measured_plan_text`:** C переносит oob/badsum/md5/repeats/gap/
+  disorder/between/ttl/autottl/delta/min/max/seq_out/decoy/tcpts/
+  tcpts_up/ipidzero/split_pos/seqovl_hello/seqovl; Rust `Poison`
+  не имеет autottl/tcp_ts_up, эти оси не выражаются. Дифференциалы
+  split/badsum есть, полного набора нет. P.
 
 ## 5. detect/props.c — 7 функций
 

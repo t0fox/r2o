@@ -300,13 +300,44 @@ C всё равно выдаёт кандидат «всё сразу», R2O е�
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| `prop_probes` | 49-196 | 9436 | 12 вопросов о свойствах | raw_probe.rs:840 property_probes | P | состав совпадает, полного differential списка нет |
-| `apply_set` | 198-257 | 2251 | запись ответа вопроса в вектор | raw_probe.rs:1005 apply_property | P | тест покрывает только white-ts |
-| `d2k_run_properties` | 261-265 | 216 | обёртка вопросов для IPv4 | raw_probe.rs:85-87 (семейство из адреса) | P | отдельной обёртки нет: семейство всегда берётся из адреса цели |
-| `d2k_run_properties_family` | 267-416 | 9648 | цикл вопросов о свойствах | raw_probe.rs:189-345 | P | логика встроена в sweep, не выделена |
-| `tri_no` | 418-418 | 60 | проверка «нет» | inline == TriState::False | P | хелпер заменён сравнением |
-| `tri_yes` | 419-419 | 59 | проверка «да» | inline == TriState::True | P | хелпер заменён сравнением |
-| `d2k_compose_from_props` | 426-498 | 3144 | сборка кандидатов из вектора свойств | `raw_probe.rs:1047` `compose_from_props` | P | При `control=None` C всегда создаёт кандидат «всё сразу» (`props.c:477-486`), R2O его не выдаёт (`raw_probe.rs:1094-1096`). Остальные правила размещения/порогов перенесены. |
+| `prop_probes` | 49-196 | 9436 | 12 вопросов в порядке стоимости: seqovl-1, disorder, badsum, badsum+hello, badsum-x2-g20, md5, seq-out-of-window, ts, seqovl-sni, badsum-x7, white-hello-ts, syndata | raw_probe.rs:840 property_probes | **P** | C и Rust совпадают по составу, порядку, label/name и полям poison; вопросы autottl/tcp_ts_up сняты в обоих. Полного C/Rust differential списка нет; тесты покрывают ECH-вопрос и self-test. |
+| `apply_set` | 198-257 | 2251 | ответ вопроса → поле `d2k_dprops`: overlap/reorder/checksum/parses_l7/duplicates/syn/md5/seq_window/timestamps/overlap_sni/dense/white_ts | raw_probe.rs:1005 apply_property | **P** | Все ветви совпадают с Rust: false/true по проходу, `ParsesL7` также ставит `validates_checksum=false`, `WhiteTimestamp` — parses_l7 + timestamps/checksum по фактическим осям. Тест покрывает только white-ts; остальные ветви без unit. |
+| `d2k_run_properties` | 261-265 | 216 | обёртка `run_properties_family(...,4,...)` | raw_probe.rs:85-87 (семейство из адреса) | **P** | C отдельная IPv4-обёртка; Rust семейство берёт из адреса цели, отдельного символа нет. |
+| `d2k_run_properties_family` | 267-416 | 9648 | цикл вопросов: stop/skip, tcp_ts fallback, overlap SNI, decoy/white, label, majority, local_err, apply_set, acceptable-hit | raw_probe.rs:189-345 | **P** | Логика встроена в `sweep_poisons`: те же 12 вопросов, `poison_selected`, `raw_profile_allows`/WhiteTimestamp fallback, `sni_bounds` для seqovl-sni, `select_bridge_decoy`, majority `pass>total/2`, local error в трассу, `apply_property`, `executable_poison_hit`. Отдельной функции/полного differential нет. |
+| `tri_no` | 418-418 | 60 | `t == D2K_TRI_FALSE` | inline `== TriState::False` | **P** | Хелпер заменён сравнением; отдельного теста нет. |
+| `tri_yes` | 419-419 | 59 | `t == D2K_TRI_TRUE` | inline `== TriState::True` | **P** | Хелпер заменён сравнением; отдельного теста нет. |
+| `d2k_compose_from_props` | 426-498 | 3144 | сборка: base badsum/decoy, duplicates×2, left-overlap, reorder, fallback «всё сразу», decoy/seqovl из control | `raw_probe.rs:1047` `compose_from_props` | **P** | **Подтверждено:** C при `n==0 && cap>0` всегда создаёт «СОБРАНО: всё сразу», даже при `ctl=NULL` (`props.c:477-486`); Rust создаёт его только `if control.is_some()` (`raw_probe.rs:1094-1096`). Остальные правила (badsum при `validates_checksum!=TRUE`, decoy при `parses_l7`, серия×2, overlap, reorder) совпадают. C `cap` и привязка `decoy/seqovl` в конце; Rust `Vec` и control.len. P. |
+
+### props.c: построчная сверка
+
+- **`prop_probes` (49–196) ↔ `property_probes` (`:840`):** 12
+  вопросов в одном порядке и с теми же label/name/полями: seqovl-1,
+  disorder, badsum, badsum+hello, badsum-x2-g20, md5,
+  seq-out-of-window, ts, seqovl-sni, badsum-x7, white-hello-ts,
+  syndata. Вопросы autottl/tcp_ts_up сняты в обоих. P — полного
+  differential списка нет.
+- **`apply_set` (198–257) ↔ `apply_property` (`:1005`):** все ветви
+  совпадают (left overlap/reorder/checksum/parses_l7/duplicates/
+  syn/md5/seq window/timestamps/overlap_sni/dense/white_ts);
+  `ParsesL7` ставит `validates_checksum=false`, `WhiteTimestamp` —
+  по фактическим осям. Тест только white-ts. P.
+- **`d2k_run_properties`/`_family` (261–416) ↔ `sweep_poisons`
+  (`:189-345`):** wrapper IPv4; цикл встроен в sweep: stop/skip,
+  `raw_profile_allows`/WhiteTimestamp fallback, `sni_bounds` для
+  seqovl-sni, `select_bridge_decoy`, majority `pass>total/2`,
+  local error в трассу, `apply_property`, `executable_poison_hit`.
+  Отдельной функции/полного differential нет. P.
+- **`tri_no`/`tri_yes` (418–419):** inline сравнения с
+  `TriState::False/True`; хелперы заменены. P.
+- **`d2k_compose_from_props` (426–498) ↔ `compose_from_props`
+  (`:1047`):** base `badsum = validates_checksum!=TRUE`,
+  `decoy_hello = parses_l7==TRUE`; duplicates×2 (2/20 и 7/0),
+  left-overlap (seqovl_exact+decoy, repeats 7), reorder (disorder,
+  repeats 7) — совпадают. **Расхождение:** при `n==0` C всегда
+  создаёт «СОБРАНО: всё сразу» (`badsum+decoy+seqovl_exact+disorder`,
+  repeats 7) даже при `ctl=NULL`; Rust создаёт его только
+  `if control.is_some()`. C `cap` и привязка decoy/seqovl в конце,
+  Rust `Vec`/control.len. P; header, п. 6.
 
 ## 6. detect/raw.c — 62 функции
 
