@@ -766,3 +766,48 @@ packet-path-пробел (`shape_tcp_options_family`). Счётчики собы
   (TCP options, полная таблица, редкие таймауты); wire TCP — E, wire UDP —
   P из-за IPID_ZERO/TOS.
 
+## Углублённая сверка: nfq/udp_hold/udp_path/udp_release/http80
+
+- **`nfq.c`:** `say`, `nl_write`, `await_ack`, `send_and_ack`, `set_rcvbuf`,
+  `d2k_nfq_open/close/fd`, `d2k_nfq_recv`, `d2k_nfq_verdict(_payload)`,
+  `d2k_nfq_lost` сверены с `nfqueue.rs`/`netlink.rs`. Bind/params/ACK,
+  `SO_RCVBUF(FORCE)`, очередь и счётчик `lost` покрыты netlink/NFQUEUE
+  тестами. **Расхождение ENOBUFS:** C `d2k_nfq_recv` при `ENOBUFS`
+  возвращает `-2`, `d2kd.c:1590` делает `d2k_hold_flush(..., all=1)` для
+  TCP и только `d2k_udp_path_expire(..., read_follows=0)` для UDP; R2O
+  `ReceiveError::LostPackets` (`main.rs:1312-1335`) вызывает
+  `holding.flush(..., all=true)` **и** `udp_holds.r2o_drain()` +
+  `udp_deferred_verdicts/resends.r2o_drain_accept()`, то есть сбрасывает
+  все UDP-удержания, а не только истёкшие. P, конкретный behavioural gap.
+  EINTR: C возвращает 0, R2O `ReceiveError::Wait`; `receive_error_requires_flush`
+  для `Wait` = false, поэтому наблюдаемое поведение цикла совпадает.
+- **`udp_hold.c`:** `same_key`, `clear_slot`, `release_slot`, `new/free/
+  flush/feed/feed_marked/take/next_ns` сверены с `r2o_udp_hold.rs`:
+  `SLOTS=16`, `PACKETS=8`, `PACKET_MAX=1600`, `WAIT=100ms` совпадают;
+  release/follow slots 16/8 и 256. P на редкие переполнения/метки.
+- **`udp_path.c`:** `d2k_udp_path_pre/post/read/expire/passed/planned`
+  перенесены в UDP-цикл `main.rs`/`r2o_udp_sessions`; проверка 5-мс follow
+  и «номер чтения» реализована. P, полного C/Rust differential нет.
+- **`udp_release.c`:** `d2k_udp_release_new/free/enqueue/flush/next_ns`,
+  `d2k_udp_replay_fates`, `release_batch`, `follow_*`, `d2k_udp_send_busy`,
+  `d2k_udp_out_*` сверены с `main.rs`/`r2o_udp_hold.rs`. `send_busy`
+  (EAGAIN/EWOULDBLOCK/ENOBUFS) — E (`r2o_udp_send_busy`); остальное P.
+  ENOBUFS-дренаж см. выше.
+- **`http80.c`:** `d2k_http80_new/free/get_stats/set_https/https`,
+  `executed/delivered/sweep/packet/swap`, `d2k_http_request/hello`.
+  **Ёмкость/вытеснение:** C `D2K_HTTP80_FLOWS=128`, `NAMES=256`; `make`
+  вытесняет самый старый поток (`http80.c:217-236`). R2O
+  `HTTP_FLOW_CAPACITY=1024` (`hold.rs:20`) и при заполнении **не
+  вытесняет**, а отказывает новому потоку (`hold.rs:1080-1084`). Это
+  реальное расхождение: R2O дольше держит старые HTTP-потоки и иначе
+  ведёт себя при переполнении. `set_https` C 256 имён с вытеснением
+  `min(expires)`; R2O `control.rs:1055-1088` — те же 256 и
+  `min_by_key(expires)`, совпадает.
+  Состояния `ST_FREE/…/ST_SWAP` и D17-дифференциал покрывают портал/307/
+  поздний ответ/дубль; полный набор C-состояний не доказан — P.
+  `http80_log` — событие вместо текста, `http_trace` — N (см. выше).
+- **Вывод:** nfq/udp/http80 — P с двумя конкретными расхождениями:
+  ENOBUFS-дренаж всех UDP-удержаний и HTTP80 1024-без-вытеснения против
+  128-с-вытеснением. Остальное — архитектурная замена/неполные
+  differentials.
+
