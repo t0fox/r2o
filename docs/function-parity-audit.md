@@ -4306,13 +4306,40 @@ ECH, середина приветствия. R2O: `r2k-core/src/tls.rs`.
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
-| `rd16` (static) | 30–32 | 3 | big-endian u16 | `tls.rs:129 read_u16` | E | `tls.rs` тесты |
-| `skip_u8_vec` (static) | 36–46 | 11 | пропуск вектора с u8-длиной | `:141 skip_u8_vector` | E | `:367` |
-| `skip_u16_vec` (static) | 48–58 | 11 | пропуск вектора с u16-длиной | `:158 skip_u16_vector` | E | `:367` |
-| `has_ech_offer` (static) | 72–87 | 16 | структурно целый ECH (0xfe0d) | `:230 has_ech_offer` | E | `:466 recognizes_only_structurally_consistent_ech_offer` |
-| `has_tls13` (static) | 105–129 | 25 | supported_versions 0x0304, key_share на обрыве | `:175 has_tls13` | E | `:411`, `:438` |
-| `find_sni` (static) | 131–177 | 47 | server_name/host_name, отказ пустому/битому | `:274 find_sni` | E | `:445`, `:455` |
-| `d2k_tls_parse` | 179–361 | 183 | весь разбор, ServerHello ≥38, hello_middle, record_end | `tls.rs:32 parse` | E | `:367`-`:525` + сверка с `tls_parser` `:394` + fuzz-префиксы `:503` |
+| `rd16` (static) | 30–32 | 3 | big-endian u16 | `tls.rs:129 read_u16` | **E** | C `p[0]<<8|p[1]`; Rust `read_u16` с проверкой границ через `get`. |
+| `skip_u8_vec` (static) | 36–46 | 11 | пропуск вектора с u8-длиной | `:141 skip_u8_vector` | **E** | C `off+1>len`/`off+1+n>len`; Rust `get`+`checked_add`, затем `next>end`. Эквивалентно; `:367`. |
+| `skip_u16_vec` (static) | 48–58 | 11 | пропуск вектора с u16-длиной | `:158 skip_u16_vector` | **E** | C `rd16`+те же две проверки; Rust `read_u16`+checked. `:367`. |
+| `has_ech_offer` (static) | 72–87 | 16 | структурно целый ECH 0xfe0d: type, n≥10, b[off]==0, enc≤n-10, payload>0 и ==n-10-enc | `:230 has_ech_offer` | **E** | C и Rust проверяют те же поля/границы; Rust checked-арифметика. Тест `:466`. |
+| `has_tls13` (static) | 105–129 | 25 | supported_versions содержит 0x0304; если блок оборван — key_share | `:175 has_tls13` | **E** | C: `key_share` ставится до проверки длины, supported_versions с list_len и чётными версиями, иначе `truncated && key_share`; Rust тот же порядок и эвристика. `:411`, `:438`. |
+| `find_sni` (static) | 131–177 | 47 | server_name→host_name; пустое/битое имя — отказ | `:274 find_sni` | **E** | C возвращает -1 при выходе extension/list/name за границы и при nlen==0; Rust `Option`/None с теми же проверками. `:445`, `:455`. |
+| `d2k_tls_parse` | 179–361 | 183 | запись TLS, claimed/avail, ServerHello≥38, ClientHello, hello_middle, extensions, ECH/TLS1.3/SNI | `tls.rs:32 parse` | **E** | Построчно совпадает: `len<3`/`b[1]!=3`, `record_type`, `record_end` при полной записи, `record_type!=0x16`, `end=min(claimed,avail)`, ServerHello `sh_len>=38 && off+4+sh_len<=claimed`, ClientHello `hs_end<=claimed`, `hello_middle=off+hs_len/2` только при полном hello, 34 байта version/random, skip session/ciphers/compression, exts_len/claimed, `exts_truncated` при exts_end>hs_end, затем has_tls13/ECH/find_sni. Тесты `:367`-`:525`, `tls_parser` `:394`, fuzz-префиксы `:503`. |
+
+### tls.c: построчная сверка
+
+- **`rd16` (30–32) ↔ `tls.rs:129`:** BE u16; Rust с bounds-check.
+  E.
+- **`skip_u8_vec/skip_u16_vec` (36–58) ↔ `skip_u8_vector/
+  skip_u16_vector`:** C две проверки `off+len`/`off+prefix+len`; Rust
+  `get`+`checked_add`+`next>end`. Эквивалентно; `:367`. E.
+- **`has_ech_offer` (72–87) ↔ `:230`:** type 0xfe0d, `n>=10`,
+  `b[off]==0`, `enc<=n-10`, `payload>0 && payload==n-10-enc`;
+  те же границы, Rust checked. `:466`. E.
+- **`has_tls13` (105–129) ↔ `:175`:** `key_share` фиксируется до
+  проверки длины; supported_versions с `list_len` и чётными версиями
+  0x0304; иначе `truncated && key_share`. Порядок и эвристика
+  совпадают; `:411`, `:438`. E.
+- **`find_sni` (131–177) ↔ `:274`:** обход extensions, SNI list,
+  host_name; выход за extension/list/name или `nlen==0` → отказ.
+  C -1, Rust None. `:445`, `:455`. E.
+- **`d2k_tls_parse` (179–361) ↔ `parse` (`:32`):** совпадают
+  `len<3`/`b[1]!=3`, `record_type`, `record_end` только при полной
+  записи, `record_type!=0x16`, `end=min(claimed,avail)`,
+  ServerHello `sh_len>=38 && off+4+sh_len<=claimed`,
+  ClientHello `hs_end<=claimed`, `hello_middle` только при полном
+  hello, 34 байта version/random, skip session/ciphers/compression,
+  `exts_len`/`claimed`, `exts_truncated` при `exts_end>hs_end`,
+  затем has_tls13/ECH/find_sni. Тесты `:367`-`:525`, независимый
+  `tls_parser` `:394`, fuzz-префиксы `:503`. E.
 
 ## include/*.h (14 inline-функций)
 
