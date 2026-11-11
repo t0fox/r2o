@@ -358,9 +358,27 @@
       var tls = node.querySelectorAll(".box-card, .family-card");
       for (var ti = 0; ti < tls.length; ti++) if (tls[ti].__tl) tls[ti].__tl.kill();
     }
+    /* Пересборка не должна проигрывать переходы раскрытия заново: открытые
+       карточки на миг схлопывались в 0fr и разворачивались обратно. Пока
+       секция собирается, переходы выключены; снимаем запрет после кадра. */
+    node.setAttribute("data-rerender", "");
     node.replaceChildren.apply(node, fresh);
     var again = node.querySelectorAll("details[data-key]");
-    for (var j = 0; j < again.length; j++) if (open[again[j].getAttribute("data-key")]) again[j].open = true;
+    for (var j = 0; j < again.length; j++) {
+      if (!open[again[j].getAttribute("data-key")]) continue;
+      /* Программное раскрытие не должно запускать анимацию появления
+         содержимого: это выглядело как быстрое сворачивание и разворот. */
+      again[j].__restoring = true;
+      again[j].open = true;
+    }
+    var view = (node.ownerDocument && node.ownerDocument.defaultView) || global;
+    if (view.requestAnimationFrame) {
+      view.requestAnimationFrame(function () {
+        view.requestAnimationFrame(function () { node.removeAttribute("data-rerender"); });
+      });
+    } else {
+      node.removeAttribute("data-rerender");
+    }
     node.__r2oKey = key;
     return true;
   }
@@ -989,8 +1007,13 @@
         add(card, top, value, el(doc, "div", "metric-note", item.note));
         metrics.appendChild(card);
       });
-      if (Motion.on() && metrics.children.length) {
+      if (Motion.on() && metrics.children.length && !metrics.__r2oSeen) {
+        /* Появление карточек — только при первом построении. При каждом
+           обновлении цифр повторять его нельзя: сетка мигает на опросе. */
+        metrics.__r2oSeen = true;
         Motion.g.fromTo(metrics.children, { y: 4, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.2, stagger: 0.02, ease: "power2.out", clearProps: "all" });
+      } else if (metrics.children.length) {
+        metrics.__r2oSeen = true;
       }
     }
 
@@ -2140,6 +2163,7 @@
         wrap.appendChild(inner);
         card.append(summary, wrap);
         card.addEventListener("toggle", function () {
+          if (card.__restoring) { card.__restoring = false; return; }
           if (!card.open || !Motion.on()) return;
           var bits = card.querySelectorAll(".family-tree li, .family-plan > *");
           if (bits.length) Motion.g.fromTo(bits, { y: 7, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.32, stagger: 0.025, ease: "power3.out", clearProps: "all" });
@@ -2414,6 +2438,7 @@
     wrap.appendChild(inner);
     add(card, summary, wrap);
     card.addEventListener("toggle", function () {
+      if (card.__restoring) { card.__restoring = false; return; }
       if (!card.open || !Motion.on()) return;
       var bits = card.querySelectorAll(".box-aside > *, .bindings tbody tr, .covered");
       if (bits.length) Motion.g.fromTo(bits, { y: 8, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.32, stagger: 0.018, ease: "power3.out", clearProps: "all" });

@@ -200,6 +200,11 @@ button { color: inherit; }
   position: absolute; width: 1px; height: 1px; overflow: hidden;
   clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
 }
+
+/* Пока секция пересобирается, её переходы выключены: открытые details
+   не должны схлопываться в 0fr и разворачиваться на каждом обновлении. */
+[data-rerender] *,
+[data-rerender] { transition: none !important; }
 .skip {
   position: fixed; left: 14px; top: -70px; z-index: 100;
   display: inline-flex; align-items: center;
