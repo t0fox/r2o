@@ -504,9 +504,9 @@
 | `pt_mul` | 235–246 | 12 | скалярное умножение точки P-256 | hpke/ring | **P*** | static-хелпер |
 | `pt_affine` | 249–260 | 12 | перевод точки в аффинные координаты | hpke/ring | **P*** | static-хелпер |
 | `scalar_ok` | 262–266 | 5 | проверка скаляра 0<k<N | hpke/ring | **P*** | static-хелпер |
-| `d2k_p256_public` | 268–280 | 13 | P-256 public key из приватного скаляра | hpke::kem (P-256 нет), ring ECDH | **P** | отдельного P-256 API в R2O нет; используется ring/rustls при TLS1.2 ECDHE, прямых C/Rust векторов не найдено |
-| `d2k_p256_keypair` | 282–289 | 8 | генерация ключевой пары P-256 с отбраковкой скаляра | ring::agreement::EphemeralPrivateKey | **P** | генерация внутри rustls/ring; retry-политика 16 попыток не воспроизведена явно |
-| `d2k_p256_ecdh` | 291–316 | 26 | ECDH P-256 с проверкой точки на кривой | ring::agreement (P256) | **P** | проверка точки делегирована ring; C-векторы ECDH не найдены |
+| `d2k_p256_public` | 268–280 | 13 | P-256 public key из приватного скаляра | `ring` SECP256R1 / `r2o_tls.rs:95,101,288` | **P** | Production-путь: `core/tls12.c:655` вызывает keypair/ecdh для ECDHE secp256r1. Отдельного публичного P-256 API в R2O нет; `d2k_p256_public` используется внутри `d2k_p256_keypair`, прямых C/Rust-векторов нет. |
+| `d2k_p256_keypair` | 282–289 | 8 | генерация ключевой пары P-256 с отбраковкой скаляра (до 16 попыток) | `ring::agreement::EphemeralPrivateKey` | **P** | **Production:** `core/tls12.c:650-655` (ECDHE TLS 1.2). R2O генерирует ключ внутри `ring`; явная retry-политика 16 попыток и C-векторы не проверены. |
+| `d2k_p256_ecdh` | 291–316 | 26 | ECDH P-256 с проверкой точки на кривой | `ring::agreement` (P256) | **P** | **Production:** `core/tls12.c:655`. Проверка точки делегирована `ring`; C-векторы ECDH и поведение при точке не на кривой не сравнивались. |
 
 ### `core/plantlv.c`
 

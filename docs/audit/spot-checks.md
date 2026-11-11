@@ -13,7 +13,7 @@
 | `datapath/ctlsrv.c::d2k_ctlsrv_pump` | 511–694 (184) | `r2o-datapath/src/main.rs` — журнал/события (1162, 1393 `control.send_event`), `flow_journal.rs` | **P** | События HELLO/SUSPECT/APPLIED/REFUSED и курсор `seen` перенесены в журнал/control. Нет отдельного differential на все виды событий и на потерю/переполнение журнала в этом цикле. |
 | `core/crypto.c::d2k_aes128_ecb` | 167–171 (5) | QUIC header protection через `quinn-proto`/`ring`; `r2o-datapath/src/r2o_quic.rs` | **E** | Используется только для QUIC header protection (`quicwire.c:388,404`). R2O использует проверенную библиотеку; 18/18 HTTP/3 full-stage и QUIC differential проходят. Отдельного вектора AES-ECB в R2O нет, но поведение покрыто QUIC-тестами. |
 | `core/x25519.c::d2k_x25519` / `d2k_x25519_base` | 119–168 (50) | `ring`/`x25519-dalek` в QUIC и ECH; `r2o-controller/src/ech.rs` HPKE (9, 22) | **E** | Секрет X25519 для QUIC initial и ECH HPKE. Покрыто QUIC full-stage, ECH-тестами и `test-ech`. |
-| `core/p256.c::d2k_p256_keypair` / `d2k_p256_ecdh` | 282–316 (35) | `ring` SECP256R1 в `r2o_tls.rs` (95, 101, 288) | **N** | В production C вызовов `d2k_p256_*` не найдено — только `test_p256.c`; TLS-путь использует `ring`. Функция не является router-runtime контрактом R2O. |
+| `core/p256.c::d2k_p256_keypair` / `d2k_p256_ecdh` | 282–316 (35) | `ring` SECP256R1 в `r2o_tls.rs` (95, 101, 288) | **P** | **Исправлено:** это production-путь TLS 1.2 ECDHE — `core/tls12.c:650-655` вызывает `d2k_p256_keypair` и `d2k_p256_ecdh`, если сервер выбрал secp256r1. R2O делегирует генерацию/ECDH `ring`, проверка точки на кривой — внутри `ring`; прямых C/Rust-векторов P-256 и явной retry-политики 16 попыток нет. |
 | `core/httpsprobe.c::d2k_httpsprobe_done` | 430–449 (20) | `r2o-controller/src/https_probe.rs`, `response.rs::HttpsProbeState` (75) | **P** | Состояние/завершение HTTPS-пробы и кэш состояний есть; отдельного differential на `done`/persist нет. |
 | `datapath/routemark.c::d2k_routemark_describe` | 327–343 (17) | `r2o-datapath/src/r2o_route.rs` (`r2o_route_mark`, 175), `netlink.rs` | **N** | Маршрутная метка/ifindex и выбор egress есть, но функции диагностического описания `describe` в R2O нет; на packet path это не влияет. |
 | `core/quicconn.c::d2k_qc_dgrams` / `d2k_qc_ping` | 1438–1458 (8) | `r2o-controller/src/r2o_quic_http3.rs`, `quic_replay.rs` | **P** | Обмен датаграммами и ping/ack покрыты HTTP/3 full-stage 18/18; отдельных функций с теми же именами нет, поэтому построчная сверка ветвей не выполнена. |
@@ -31,8 +31,10 @@
   C/Rust-тестов на отдельные функции: `d2k_meas` (AND-метка серии),
   `d2k_resp_handshake12` (граница 65 536/таймаут), `d2k_ctlsrv_pump`
   (полный набор событий), `httpsprobe_done` (persist/state), `routemark_describe`.
-- `d2k_p256_*` в production C не вызывается; это тестовый/резервный код,
-  поэтому его отсутствие в R2O не является функциональным пробелом.
+- `d2k_p256_*` **вызывается в production**: `core/tls12.c:655` использует
+  `d2k_p256_keypair`/`d2k_p256_ecdh` для ECDHE, если сервер выбрал secp256r1.
+  R2O закрывает это `ring`, но прямых C/Rust-векторов P-256 нет — статус P,
+  не N.
 
 ## Подтверждённые расхождения из отчёта datapath-plan
 
