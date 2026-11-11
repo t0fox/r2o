@@ -88,11 +88,11 @@ recheck 1982 1982 equal True
 | core-state | 692 | 127 | 564 | 1 | 0 |
 | datapath-core | 400 | 120 | 270 | 10 | 0 |
 | datapath-plan | 183 | 108 | 69 | 5 | 1 |
-| detect | 159 | 49 | 98 | 12 | 0 |
-| **Итого** | **1982** | **624** | **1312** | **44** | **2** |
+| detect | 159 | 49 | 100 | 10 | 0 |
+| **Итого** | **1982** | **624** | **1314** | **42** | **2** |
 
-Это не оценка паритета: 1313 P означают «код есть, доказательство ветвей
-неполное», 44 N — в основном диагностические/CLI-функции и несколько реальных
+Это не оценка паритета: 1314 P означают «код есть, доказательство ветвей
+неполное», 42 N — в основном диагностические/CLI-функции и несколько реальных
 расхождений (`SET_HTTPS` TTL, `ARM_SHAPE` UDP, `wire_udp` IPID_ZERO,
 `udpruntime` raw UDP, `tls12/tls13` record-layer).
 
@@ -143,8 +143,8 @@ recheck 1982 1982 equal True
 | core-state | 692 | 127 | 564 | 1 | 0 |
 | datapath-core | 400 | 120 | 270 | 10 | 0 |
 | datapath-plan | 183 | 108 | 69 | 5 | 1 |
-| detect | 159 | 49 | 98 | 12 | 0 |
-| **Итого** | **1982** | **624** | **1312** | **44** | **2** |
+| detect | 159 | 49 | 100 | 10 | 0 |
+| **Итого** | **1982** | **624** | **1314** | **42** | **2** |
 
 
 ---
@@ -192,8 +192,10 @@ recheck 1982 1982 equal True
 Проверено по исходникам, не только по словам агента:
 
 - **`SET_HTTPS` TTL.** C `datapath/ctlsrv.c:446` обрезает TTL до
-  `D2K_HTTPS_TTL_MAX_S`; R2O `control.rs:1070` возвращает `ACK_BAD_ARGS` при
-  `ttl > MAX_HTTPS_TTL_SECONDS`. Это реальное расхождение поведения, статус P.
+  `D2K_HTTPS_TTL_MAX_S` = **7 суток** (`d2k_ctl.h:231`); R2O
+  `control.rs:1070,1781` возвращает `ACK_BAD_ARGS` при
+  `ttl > MAX_HTTPS_TTL_SECONDS` = **6 часов**. Это реальное расхождение
+  поведения, статус P.
 - **`ARM_SHAPE` транспорт.** C `datapath/ctlsrv.c:329` принимает транспорт 6 и
   17; R2O `control.rs:2002` отвергает всё, кроме 6. Для UDP/QUIC-снимков это
   может быть функциональным пробелом, статус P.
@@ -1591,7 +1593,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_link_set_name_probe_trial` | 659–668 | 10 | SET_NAME_PROBE с trial_id | control::encode_set_name_probe | **P** | unit-тест; C/Rust diff нет |
 | `area_context_valid` | 670–675 | 6 | допустимая комбинация transport/shape/family для области | control::valid_domain_area_context | **P*** | static-хелпер |
 | `d2k_link_set_suffix_family` | 677–684 | 8 | SET_SUFFIX с планом | control::encode_set_suffix | **P** | кодировщик есть; точный C/Rust differential области не заявлен |
-| `d2k_link_set_https` | 686–705 | 20 | SET_HTTPS имя+ttl | `control.rs:1777-1790` `encode_set_https` | **P** | **Расхождение:** C-link проверяет только имя (1..253) и кодирует любой `u32 ttl`; обрезку до `D2K_HTTPS_TTL_MAX_S` делает датапат (`ctlsrv.c:446`). Rust-link отвергает `ttl > MAX_HTTPS_TTL_SECONDS` (6 ч) ещё на кодировании. Наблюдаемый итог для сверх-6ч различается стадией (C: обрезка, R2O: отказ). Unit `encodes_the_exact_https_name_and_ttl` покрывает только допустимый TTL. |
+| `d2k_link_set_https` | 686–705 | 20 | SET_HTTPS имя+ttl | `control.rs:1777-1790` `encode_set_https` | **P** | **Расхождение:** C-link проверяет только имя (1..253) и кодирует любой `u32 ttl`; обрезку до `D2K_HTTPS_TTL_MAX_S` = **7 суток** (`d2k_ctl.h:231`) делает датапат (`ctlsrv.c:446`). Rust-link отвергает `ttl > MAX_HTTPS_TTL_SECONDS` = **6 часов** ещё на кодировании. Наблюдаемый итог для сверх-6ч различается стадией (C: обрезка до 7 суток, R2O: отказ). Unit `encodes_the_exact_https_name_and_ttl` покрывает только допустимый TTL. |
 | `d2k_link_set_stall_budgets` | 707–729 | 23 | SET_STALL_BUDGETS список бюджетов | control::encode_set_tcp_stall_budgets | **P** | unit бюджеты tcp/reset; C/Rust diff нет |
 | `send_area_key` | 731–752 | 22 | общий кодировщик domain-area команд (name/key/area_id) | control::encode_domain_area_key | **P*** | static-хелпер |
 | `d2k_link_del_suffix_family` | 754–757 | 4 | DEL_SUFFIX | control::encode_delete_suffix | **P** | кодировщик есть; C/Rust differential нет |
@@ -2190,7 +2192,8 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
   `tests/control.rs`, но C/Rust differential кодирования не заявлен.
 - **Подтверждённые расхождения:**
   1. `SET_HTTPS`: C-link кодирует любой `u32 ttl` и оставляет обрезку
-     датапату; Rust `encode_set_https` отвергает `ttl > 6ч`.
+     датапату до **7 суток** (`d2k_ctl.h:231`); Rust `encode_set_https`
+     отвергает `ttl > 6 часов`.
   2. `DEL_NAME_PROBE`: C-link не проверяет `shape`; Rust требует
      `valid_tcp_probe_shape` и отвергает неизвестную форму раньше.
   3. `ARM_SHAPE`: кодировщики совпадают (transport 6/17), но датапат R2O
@@ -3264,7 +3267,7 @@ R2O-аналог — `crates/r2o-datapath/src/control.rs` (`ControlServer`), п�
 | canonical_address | 152-157 | 6 | static: family 4 требует нулевой хвост 16-байтного адреса | `control.rs:1612` `addr_plan_key` | E | `удаление_адреса_разделяет_формы_и_удаляет_одну` (control.rs:2793): `body[5]=1` даёт `ACK_BAD_ARGS`. |
 | addr_shape_valid | 163-167 | 5 | допустимые формы адресной привязки (1,2,3,5,6) | `control.rs:1628` `valid_addr_shape`, `:1635` `addr_plan_matches_shape` | P | Валидные формы покрыты тестами адресов; отказа для недопустимой формы (0/4/7) в тестах не найдено. |
 | read_probe_flow | 169-187 | 19 | static: разобрать flow адресного опыта, отвергнуть неканонический IPv4 | `control.rs:1695` `r2o_udp_addr_probe_flow_key` + `r2k-core/control.rs:1701` `valid_udp_addr_probe_flow` | P | Код есть, тестов SET/DEL/FIND адресного опыта (COMMAND_*_ADDR_PROBE) в дереве не найдено. |
-| d2k_ctlsrv_command | 189-509 | 321 | диспетчер команд, разбор тел, ACK, установка в таблицу | `control.rs:260` `NamePlans::handle`; `main.rs:68` `handle_control_command` (stall budgets); `control.rs:1988` `arm_client_shape` | P | Покрыты SET_NAME/BOUND/PROBE/ADDR/SUFFIX/BYPASS/DEL_*/HTTPS/ARM_SHAPE (control.rs:2633-3896). Пробелы: C `SET_HTTPS` обрезает TTL до максимума, R2O отвергает (`ACK_BAD_ARGS`) — control.rs:1070; `arm_client_shape` отвергает транспорт 17 (control.rs:2002), C принимает 6/17; адресные опыты не тестированы. |
+| d2k_ctlsrv_command | 189-509 | 321 | диспетчер команд, разбор тел, ACK, установка в таблицу | `control.rs:260` `NamePlans::handle`; `main.rs:68` `handle_control_command` (stall budgets); `control.rs:1988` `arm_client_shape` | P | Покрыты SET_NAME/BOUND/PROBE/ADDR/SUFFIX/BYPASS/DEL_*/HTTPS/ARM_SHAPE (control.rs:2633-3896). Пробелы: C `SET_HTTPS` обрезает TTL до **7 суток** (`D2K_HTTPS_TTL_MAX_S`, `d2k_ctl.h:231`, `ctlsrv.c:446`), R2O отвергает `ttl > 6 часов` (`ACK_BAD_ARGS`) — control.rs:64,1070,1781; `arm_client_shape` отвергает транспорт 17 (control.rs:2002), C принимает 6/17; адресные опыты не тестированы. |
 | d2k_ctlsrv_pump | 511-694 | 184 | выгрузить новые записи журнала в события с раскладкой по типам | `main.rs:2728` `send_journal_updates`, `:2709` `send_journal_snapshot`; `flow_journal.rs:202` `to_event_frame` | P | `flow_journal` round-trip тесты и `d2o_control_frames_match_donor_wire_decoding` (tests/control.rs:47). Пробелы: v22-трансляция `EVENT_LEGACY_CLIENT_TCP` шлёт пустые TCP-опции (r2k-core/control.rs:1212-1215), C шлёт реальные; набор видов журнала уже C (нет отдельного CLIENT_TCP в v48). |
 | d2k_ctlsrv_http80_event | 697-731 | 35 | событие HTTP-портала/ответа с измерениями | `control.rs:3136` `send_http_portal_event`, `:3148` `send_http_response_event`; `r2k-core/control.rs:852` `HttpResponseEvent::event_body` | P | `decodes_r2o_http_response_context_and_measurements` (tests/control.rs:977), `control_decoder_accepts_http_portal_response_events` (tests/capture_shape.rs:150). Отличие: R2O кодирует `code 1..4` и всегда несёт хвост status/body/request_no; C для портала без ответа хвост не шлёт. |
 
@@ -3304,12 +3307,13 @@ UDP, пустые TCP-опции в v22 CLIENT_TCP, адресные опыты 
 | emit_vec_free | 268-272 | 5 | static: освободить массив посылок и owned_bytes | `plan/apply.rs:61` `Emission` (Vec) + `Drop` | E | Владение выражено типами (`Vec<u8>`, `Vec<Emission>`); утечек нет по построению, отдельный free не нужен. |
 | emit_overhead | 285-295 | 11 | static: заголовки IP+TCP/UDP, MD5/TS-опция | `plan/apply.rs:737` `emit_overhead` | E | `max_emit`-тест (tests/apply.rs:251) и `route_segment_cap...` (tests/apply.rs). |
 | d2k_plan_max_emit | 297-341 | 45 | верхняя оценка одной посылки плана | `plan/apply.rs:418` `Plan::max_emit` | E | `assert_eq!(plan.max_emit(), 171)` (tests/apply.rs:251); используется в `r2o_plan_valid`. |
-| d2k_plan_apply | 343-873 | 531 | превратить план+пакет в посылки, судьбу оригинала и причину отказа | `plan/apply.rs:155` `Plan::apply` | P | 17 тестов tests/apply.rs покрывают split/fake/overlay/order/pace/settle/delay/udplen/qsplit/qdeny/oob/metric. Пробелы: `MAX_EMISSIONS = 26` (apply.rs:9) против 65536 в C (`plan_apply.c:830`) — R2O отвергает раньше; однако D2O на выдаче в session тоже ограничивает 26 (`D2K_RESULT_MAX`, session.c:2517), поэтому наблюдаемый отказ совпадает, различаются слой и текст ошибки. В OOB-ветви `suffix.wire_profile` остаётся 0 (apply.rs:280-291), тогда как C проставляет профиль всем посылкам на `finalize`. |
+| d2k_plan_apply | 343-873 | 531 | превратить план+пакет в посылки, судьбу оригинала и причину отказа | `plan/apply.rs:155` `Plan::apply` | P | 17 тестов tests/apply.rs покрывают split/fake/overlay/order/pace/settle/delay/udplen/qsplit/qdeny/oob/metric. Пробелы: `MAX_EMISSIONS = 26` (apply.rs:9) против 65536 в C (`plan_apply.c:830`) — R2O отвергает раньше; однако D2O на выдаче в session тоже ограничивает 26 (`D2K_RESULT_MAX`, session.c:2517), поэтому наблюдаемый отказ совпадает, различаются слой и текст ошибки. В OOB-ветви `suffix.wire_profile` остаётся 0 (apply.rs:280-291), тогда как C проставляет профиль всем посылкам на `finalize`; qsplit-ветвь обходит `delay_us`. Лимит 26 — слой R2O: D2O `plan_apply.c` допускает до 65536, но `session.c:2517` всё равно отказывает при >26, поэтому наблюдаемый отказ совпадает. |
 | d2k_actions_cancel | 891-921 | 31 | правила отмены недосланного исполнения | `plan/apply.rs:104` `Actions::cancel` | E | `cancellation_drops_only_after_payload_bytes_were_emitted` (tests/apply.rs). |
 | d2k_actions_free | 923-931 | 9 | освободить посылки | `plan/apply.rs:61` `Emission` + `Actions` (RAII) | E | Освобождение автоматическое; отдельных ошибок/утечек нет по типам. |
 
-Итог по файлу: E 14, P 1, N 0. Главные отличия — место отказа при >26 посылках (D2O тоже
-отказывает в session, но позже) и потеря `wire_profile` в OOB-суффиксе.
+Итог по файлу: E 14, P 1, N 0. Главные отличия — потеря `wire_profile` в OOB-суффиксе,
+обход `delay_us` в qsplit и место отказа при >26 посылках (D2O тоже отказывает в session,
+но позже).
 у OOB-суффикса.
 
 ---
@@ -3566,8 +3570,8 @@ Rtnetlink: дампы правил, одиночный поиск маршрут
 7. **Legacy-удаления «все формы» отсутствуют**: `del_name`/`del_addr`/`del_*_family`
    удаляют один shape-ключ; по сокету C тоже шлёт форму, но внутренние вызовы C шире.
 8. **Управляющий слой:** нет `listen_fd`/`peer_fd` и счётчика `sent`; disconnect-hook
-   реализован в цикле; `SET_HTTPS` отвергает TTL > max вместо обрезки; ARM_SHAPE не
-   обслуживает UDP; v22 CLIENT_TCP идёт с пустыми TCP-опциями.
+   реализован в цикле; `SET_HTTPS` отвергает TTL > 6 часов вместо обрезки до 7 суток;
+   ARM_SHAPE не обслуживает UDP; v22 CLIENT_TCP идёт с пустыми TCP-опциями.
 9. **raw:** один сокет на семейство, обязательный mark, нет `IP_NODEFRAG` и ленивого
    fragment/IPv6-сокета; реальная отправка в тестах не выполнялась (нужен root).
 10. **routemark:** нет `describe`, нет `found/truncated` статуса merge и признака изменения
@@ -3626,28 +3630,28 @@ Static-хелперы наследуют статус владельца; в к�
 | Статус | Кол-во |
 |---|---:|
 | E | 49 |
-| P | 98 |
-| N | 12 |
+| P | 100 |
+| N | 10 |
 | ? | 0 |
 | **Всего** | **159** |
 
-Доли: E — 30.8 % (49/159); E или P — 92.5 % (147/159); N — 7.5 % (12/159).
+Доли: E — 30.8 % (49/159); E или P — 93.7 % (149/159); N — 6.3 % (10/159).
 P не считается доказанным паритетом: это покрытие без полного доказательства ветвей.
 
 По файлам:
 
 | Файл | Функций | E | P | N |
 |---|---:|---:|---:|---:|
-| detect/bridge.c | 17 | 2 | 13 | 2 |
+| detect/bridge.c | 17 | 2 | 14 | 1 |
 | detect/classify.c | 36 | 16 | 18 | 2 |
 | detect/main.c | 8 | 0 | 8 | 0 |
 | detect/poison.c | 12 | 8 | 4 | 0 |
 | detect/props.c | 7 | 0 | 7 | 0 |
 | detect/raw.c | 62 | 13 | 42 | 7 |
 | detect/response.c | 7 | 7 | 0 | 0 |
-| detect/trigger.c | 9 | 3 | 5 | 1 |
+| detect/trigger.c | 9 | 3 | 6 | 0 |
 | detect/include/d2k_detect.h | 1 | 0 | 1 | 0 |
-| **Всего** | **159** | **49** | **98** | **12** |
+| **Всего** | **159** | **49** | **100** | **10** |
 
 ---
 
@@ -3663,7 +3667,7 @@ P не считается доказанным паритетом: это пок
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| `d2k_detect_stop_all` | 45-45 | 50 | липкий общий флаг остановки службы | — | N | глобального stop-all нет: отмена только через AtomicBool задачи |
+| `d2k_detect_stop_all` | 45-45 | 50 | липкий общий флаг остановки службы | `Drop for DiscoveryWorker` (`main.rs:14251-14261`) | **P** | Отдельного глобального флага нет, но остановка службы достижима: `Drop` взводит `cancel` и все `active_cancels`, будит jobs и join-ит потоки. Нет C/Rust differential на «остановить все» и липкость флага. |
 | `stop_asked` | 50-55 | 156 | две причины броска: флаг задачи и службы | classify.rs:1041 stopped, raw_probe.rs:641 is_cancelled | P | один AtomicBool вместо двух источников; общего флага службы нет |
 | `plannable_hit` | 76-93 | 540 | фильтр находок: невыразимое планом не обрывает перебор | raw_probe.rs:1122 executable_poison_hit, classify.rs:1252 append_reason | E | tests/classify.rs:599 accepted_but_unplannable_poison_keeps_opaque_verdict_and_search_ownership; scripts/r2o-measured-split-differential.sh |
 | `map_verdict` | 95-112 | 953 | перевод D2K_DV_* в D2K_V_* | classify.rs:894 Verdict, :1657 ветка Poisonable | P | единое перечисление; отдельного второго enum и таблицы соответствия нет |
@@ -3725,7 +3729,7 @@ P не считается доказанным паритетом: это пок
 | `raw_recheck` | 867-880 | 544 | немедленная перепроверка слоя | raw_probe.rs:746 raw_recheck | E | raw_probe.rs:2513 + R2O_RAW_RECHECK_C_OUTPUT |
 | `sweep_poisons` | 887-1076 | 8251 | перебор: свойства, сборка, список гипотез | raw_probe.rs:78 sweep_poisons | P | нет trace о непринятом RST-правиле, иной текст selftest, compose без контроля |
 | `cross_check_tls12` | 1084-1092 | 367 | проверка покрытия TLS 1.2 | — | N | C-заглушка не перенесена, поля covers_tls12 нет |
-| `d2k_classify_run` | 1095-1476 | 22179 | дерево зондов и вердикт | classify.rs:1298 run_with_backend_progress | P | нет notes/covers_tls12, иной счёт probes ответного направления |
+| `d2k_classify_run` | 1095-1476 | 22179 | дерево зондов и вердикт | `classify.rs:1298` `run_with_backend_progress` | P | Нет notes/`covers_tls12`, иной счёт probes ответного направления. **Ключевое:** production-discovery использует `full_detect_semantics=false`, `confirm_clear=true` (`classify.rs:869-870`, `main.rs:15380-15391`), то есть не donor-семантику C: нет удвоенного dial-retry, иначе обрабатываются частичные transport-ошибки, control без `until_pass`, добавлен whole-confirm. Существующие дифференциалы идут с `full_detect_semantics=true` и этот путь не покрывают. |
 | `d2k_send_nosig` | 1481-1494 | 309 | запись без SIGPIPE | libc::send MSG_NOSIGNAL (response.rs:815/1100) | P | ветки SO_NOSIGPIPE для macOS нет |
 
 ## 3. detect/main.c — 8 функций
@@ -3782,7 +3786,7 @@ C всё равно выдаёт кандидат «всё сразу», R2O е�
 | `d2k_run_properties_family` | 267-416 | 9648 | цикл вопросов о свойствах | raw_probe.rs:189-345 | P | логика встроена в sweep, не выделена |
 | `tri_no` | 418-418 | 60 | проверка «нет» | inline == TriState::False | P | хелпер заменён сравнением |
 | `tri_yes` | 419-419 | 59 | проверка «да» | inline == TriState::True | P | хелпер заменён сравнением |
-| `d2k_compose_from_props` | 426-498 | 3144 | сборка кандидатов из вектора свойств | raw_probe.rs:1047 compose_from_props | P | при control=None C выдаёт «всё сразу», R2O не выдаёт |
+| `d2k_compose_from_props` | 426-498 | 3144 | сборка кандидатов из вектора свойств | `raw_probe.rs:1047` `compose_from_props` | P | При `control=None` C всегда создаёт кандидат «всё сразу» (`props.c:477-486`), R2O его не выдаёт (`raw_probe.rs:1094-1096`). Остальные правила размещения/порогов перенесены. |
 
 ## 6. detect/raw.c — 62 функции
 
@@ -3834,7 +3838,7 @@ C всё равно выдаёт кандидат «всё сразу», R2O е�
 | `tcp_checksum_family` | 738-747 | 447 | контрольная сумма TCP для IPv4/IPv6 | raw_probe.rs:1328 (псевдозаголовок IPv6), wire.rs:516 pseudo_sum | E | raw_probe.rs:2896 builds_an_ipv6_syn_with_valid_tcp_checksum |
 | `build_ip_tcp` | 750-771 | 1183 | сборка IP/TCP любого семейства | raw_probe.rs:1350 (IPv4/IPv6) | E | raw_probe.rs:2550/2896 |
 | `raw_sendto` | 773-791 | 629 | отправка собранного пакета | raw_probe.rs:2002 send_ip_packet | P | сокетного теста нет |
-| `d2k_raw_set_segment_max` | 814-814 | 89 | потолок сегмента под датапат | — | N | фиксированные 1400 (classify_measured.rs:12), сеттера нет |
+| `d2k_raw_set_segment_max` | 814-814 | 89 | потолок сегмента под датапат | — | N | **Production-вызов:** `core/d2kc.c:575,789` ставит `d2k_arm_segment(send_maxlen)`. R2O `classify_measured.rs:12,143` жёстко пишет `segment 1400`; discovery-split `main.rs:6300` считает `send_cap-72 min 1400`. На узком канале measured-poison план может быть отвергнут вместо нарезки. Сеттера нет. |
 | `raw_send` | 830-858 | 847 | запись нагрузки на провод | raw_probe.rs:1213 (план), :1195 (syn_data) | P | плановый путь E, syn_data шлётся одним пакетом вместо нарезки |
 | `raw_send_syn` | 864-896 | 1552 | SYN с профилем опций клиента | raw_probe.rs:723 raw_syn_options, :1953 SYN | E | scripts/r2o-raw-profile-differential.sh, RAW_SYN_PROFILE |
 | `raw_recv` | 900-949 | 1970 | приём и фильтрация сегмента | raw_probe.rs:2041 receive_segment | P | фильтрация строже (длины, фрагменты, локальный адрес) |
@@ -3846,7 +3850,7 @@ C всё равно выдаёт кандидат «всё сразу», R2O е�
 | `raw_send_plan` | 1209-1262 | 2910 | исполнить измеренный план | raw_probe.rs:1213-1259, :1267 emit_plan_packets, r2k-core plan.rs:190 Plan::parse | E | scripts/r2o-raw-emission-cancel-differential.sh; raw_probe.rs:2550/2819 |
 | `d2k_raw_probe_poison_family` | 1272-1321 | 1828 | один зонд отравления | raw_probe.rs:1174 raw_probe_once | P | плановая часть покрыта, сетевой путь нет |
 | `d2k_raw_supported` | 1328-1328 | 41 | stub вне Linux | classify.rs:751-754 cfg(not(linux)) | P | возвращает false через cfg |
-| `d2k_raw_set_segment_max` | 1329-1329 | 57 | stub вне Linux | — | N | сеттера нет и в Linux-ветке |
+| `d2k_raw_set_segment_max` | 1329-1329 | 57 | stub вне Linux | — | N | Не-Linux заглушка; в R2O сеттера нет ни в одной ветке. |
 | `d2k_raw_rst_fail_count` | 1330-1330 | 56 | stub вне Linux | raw_probe.rs:54 | E | тот же счётчик, что в Linux-ветке; raw_probe.rs:2770 |
 | `d2k_raw_dial_count` | 1331-1331 | 52 | stub вне Linux | raw_probe.rs:58 | P | thread-local счётчик |
 | `d2k_raw_flush_pending` | 1332-1332 | 35 | stub вне Linux | raw_probe.rs:1745 | P | функция есть |
@@ -3887,7 +3891,7 @@ C всё равно выдаёт кандидат «всё сразу», R2O е�
 | `d2k_trigger_raw_hex` | 67-108 | 1322 | триггер из hex-строки | classify.rs:77 Trigger::raw_hex, trigger.rs:4 parse_raw_hex | E | tests/trigger.rs:41-58 |
 | `d2k_trigger_control` | 118-128 | 376 | заведомо безобидный контроль | main.rs:1555 classify_control_trigger | P | только на уровне CLI; имя и accept совпали |
 | `d2k_opts_decoy` | 130-136 | 153 | приманка: decoy или контроль | raw_probe.rs:602 select_bridge_decoy | P | отдельного opt.decoy нет, fallback на контроль есть |
-| `d2k_trigger_host_ts_override` | 156-156 | 66 | переопределение «стек предлагает метку» | — | N | сеттера нет |
+| `d2k_trigger_host_ts_override` | 156-156 | 66 | переопределение «стек предлагает метку» | `ClassifyOptions.client_tcp_has_timestamps` (`classify.rs:833`), `raw_offer_timestamps` (`raw_probe.rs:673`) | **P** | Ось реализована через параметр профиля клиента, а не глобальный сеттер; CLI-флага и теста на override нет. Поведение «стек предлагает метку» выражается, но не тем же API. |
 | `host_offers_ts` | 158-178 | 638 | читает tcp_timestamps один раз | raw_probe.rs:673 raw_offer_timestamps | P | OnceLock, без override |
 | `d2k_trigger_offers_ts` | 180-199 | 615 | предлагает ли клиент метку времени | raw_probe.rs:673/731 | P | передаётся bool из снятого профиля, байты опций не разбираются |
 | `d2k_trigger_allows_poison` | 201-207 | 165 | совместима ли гипотеза с профилем клиента | raw_probe.rs:731 raw_profile_allows, :967 fallback | P | та же логика в иной форме |
@@ -3908,7 +3912,10 @@ C всё равно выдаёт кандидат «всё сразу», R2O е�
   `g_stop_all`, который читает `stop_asked` вместе с флагом задачи. R2O
   отменяет только конкретную задачу через `AtomicBool`
   (`classify.rs:603,1041`); глобального «остановить все классификаторы»
-  нет. Для одиночного CLI-прогона эквивалентно, для службы — N.
+  нет. Для одиночного CLI-прогона эквивалентно; для службы остановка
+  достижима через `Drop for DiscoveryWorker` (`main.rs:14251-14261`),
+  который взводит `cancel`/`active_cancels` и join-ит потоки. P: липкость
+  общего флага и C/Rust differential не проверены.
 - **`trace_questions` (classify.c 284–309):** C складывает qtrace вопросов
   свойств в `d2k_vres`. R2O наблюдения остаются в `ClassifyResult.trace`,
   отдельного qtrace-формата нет. N — диагностика.
@@ -3933,33 +3940,39 @@ C всё равно выдаёт кандидат «всё сразу», R2O е�
   отложенных снятий RST-правил. R2O геттера не имеет; отложенные снятия
   живут внутри `raw_probe`/`RST_RULE_FAILURES`. N — диагностика.
 - **`d2k_raw_set_segment_max` (raw.c 814, stub 1329):** C-сеттер
-  `seg_max` (по умолчанию 1400, датапат ставит по MTU). В R2O
-  `classify_measured.rs` использует фиксированные 1400, но discovery-план
-  `r2o_discovery_measured_split_plan` считает `send_cap-72 min 1400`;
-  production-путь сегмента поэтому покрыт, а CLI/тестового сеттера нет. N.
+  `seg_max` (по умолчанию 1400) — **production-вызов**:
+  `core/d2kc.c:575,789` ставит `d2k_arm_segment(send_maxlen)` при старте и
+  при смене `send_maxlen`. R2O `classify_measured.rs:12,143` жёстко пишет
+  `segment 1400`, а discovery-split `main.rs:6300` считает
+  `send_cap-72 min 1400`. На узком канале measured-poison план может быть
+  отвергнут вместо нарезки. N — реальный packet-path пробел для
+  measured-планов, не тестовый сеттер.
 - **`d2k_trigger_host_ts_override` (trigger.c 156):** C-сеттер
-  `host_ts_override` для CLI/тестов («стек предлагает метку»). В
-  production C вызовов нет; R2O использует `client_tcp_has_timestamps`/
-  `tcp_profile_from_has_timestamp`. N — тестовый сеттер.
+  `host_ts_override` для CLI/тестов («стек предлагает метку»). Ось
+  реализована в R2O через `ClassifyOptions.client_tcp_has_timestamps`
+  (`classify.rs:833`) и `raw_offer_timestamps` (`raw_probe.rs:673`), но
+  глобального сеттера/CLI-флага и теста на override нет. P, не N.
 
-**Итог:** 12 N — 10 диагностических/тестовых и 3 функции разбора чужих
-RST-правил (`parse_rst_rule`, `parse_stale_rst_rule`, `rst_rule_stale`),
-которые действительно не портированы. Ни одна не является ветвью
-классификации пакета.
+**Итог:** 12 строк N-среза = 10 функций; после проверки 10 строк (8
+функций) остались N, а `d2k_detect_stop_all` и
+`d2k_trigger_host_ts_override` переведены в P. Из N: 4 диагностических
+геттера/заглушки, 3 функции разбора чужих RST-правил
+(`parse_rst_rule`, `parse_stale_rst_rule`, `rst_rule_stale`) и
+production-сеттер `raw_set_segment_max`. Ни одна N не является ветвью
+классификации пакета, кроме последствий `segment_max` для measured-планов.
 
 ## Главные пробелы (N)
 
-12 строк среза соответствуют 10 отсутствующим функциям: пары Linux/#else в `raw.c` дают дубли
-у `pending_count` и `set_segment_max`.
+10 строк среза соответствуют 8 отсутствующим функциям: пары Linux/#else в `raw.c` дают дубли
+у `pending_count` и `set_segment_max`. `d2k_detect_stop_all` и
+`d2k_trigger_host_ts_override` после проверки переведены в P.
 
-1. `d2k_detect_stop_all` — нет общего липкого флага остановки службы; отмена только по задаче.
-2. `trace_questions` — нет `qtrace`-аналога: ответы вопросов остаются в `ClassifyResult.trace` и не уходят планировщику как отдельный журнал.
-3. `note_gap_loss` — нет оговорки о том, что найденный приём опирался на паузу между копиями.
-4. `cross_check_tls12` и поле `covers_tls12` — не перенесены (в C это честная заглушка).
-5. `d2k_parse_rst_rule`, `d2k_parse_stale_rst_rule`, `d2k_rst_rule_stale` — R2O не разбирает строки iptables и не снимает чужие/legacy-правила по владельцу.
-6. `d2k_raw_pending_count` (обе ветки) — геттера отложенных снятий нет.
-7. `d2k_raw_set_segment_max` (обе ветки) — потолок сегмента не настраивается: в плане жёстко 1400 (`classify_measured.rs:12`).
-8. `d2k_trigger_host_ts_override` — нет переопределения «стек предлагает метку времени».
+1. `trace_questions` — нет `qtrace`-аналога: ответы вопросов остаются в `ClassifyResult.trace` и не уходят планировщику как отдельный журнал.
+2. `note_gap_loss` — нет оговорки о том, что найденный приём опирался на паузу между копиями.
+3. `cross_check_tls12` и поле `covers_tls12` — не перенесены (в C это честная заглушка).
+4. `d2k_parse_rst_rule`, `d2k_parse_stale_rst_rule`, `d2k_rst_rule_stale` — R2O не разбирает строки iptables и не снимает чужие/legacy-правила по владельцу.
+5. `d2k_raw_pending_count` (обе ветки) — геттера отложенных снятий нет.
+6. `d2k_raw_set_segment_max` (обе ветки) — production-сеттер `seg_max` не перенесён: measured-план жёстко 1400 (`classify_measured.rs:12`), discovery-split считает `send_cap-72`. На узком канале measured-poison план отвергается вместо нарезки.
 
 ## Ключевые частичные пробелы (P)
 
@@ -3998,15 +4011,20 @@ r2o-tls-verify-differential.sh                       16/16 PASS
   `covers_tls12` в R2O нет; это не функциональный пробел обхода.
 - `d2k_raw_pending_count` — только диагностический геттер отложенных снятий;
   на packet path не влияет.
-- `d2k_raw_set_segment_max` — production-вызовов в D2O нет (grep по `detect/`,
-  `files/`, `scripts/`), значение по умолчанию 1400 совпадает с R2O
-  (`classify_measured.rs:12`). N относится к тестовому/CLI-сеттеру, а не к
-  поведению живого датапата.
-- `d2k_trigger_host_ts_override` — CLI/тестовое переопределение; в production
-  вызовов нет, но для воспроизведения тестов D2O его отсутствие важно.
-- `d2k_detect_stop_all` — глобальный липкий флаг; R2O отменяет задачу через
-  `AtomicBool` (`classify.rs:603,1041`). Для одиночного CLI-прогона поведение
-  эквивалентно, для «остановить все классификаторы» — нет.
+- `d2k_raw_set_segment_max` — **production-вызов**, не тестовый сеттер:
+  `core/d2kc.c:575,789` ставит `d2k_arm_segment(send_maxlen)` при старте и
+  при смене предела. R2O measured-план жёстко пишет `segment 1400`
+  (`classify_measured.rs:12,143`), discovery-split считает
+  `send_cap-72 min 1400` (`main.rs:6300`). N остаётся, но это
+  packet-path-риск для measured-планов на узком канале.
+- `d2k_trigger_host_ts_override` — переведён в P: ось реализована через
+  `ClassifyOptions.client_tcp_has_timestamps` (`classify.rs:833`) и
+  `raw_offer_timestamps` (`raw_probe.rs:673`); глобального сеттера/CLI и
+  теста на override нет.
+- `d2k_detect_stop_all` — переведён в P: отдельного липкого флага нет, но
+  остановка службы достижима через `Drop for DiscoveryWorker`
+  (`main.rs:14251-14261`), который взводит `cancel`/`active_cancels` и
+  join-ит потоки. C/Rust differential на «остановить все» отсутствует.
 
 
 
@@ -4019,9 +4037,11 @@ r2o-tls-verify-differential.sh                       16/16 PASS
 ## Итог
 
 - Полностью подтверждено разбором и наличием профильного теста/дифференциала (E): **49 из 159 (30.8 %)**.
-- Покрыто реализацией, но без полного доказательства ветвей (P): **98 из 159**.
-- Не перенесено (N): **12 из 159 (7.5 %)**, но часть N — диагностические
-  геттеры/CLI-сеттеры (`d2k_raw_pending_count`, `d2k_raw_set_segment_max`,
-  `cross_check_tls12`), а не packet-path обход.
+- Покрыто реализацией, но без полного доказательства ветвей (P): **100 из 159**.
+- Не перенесено (N): **10 из 159 (6.3 %)**. Из них 4 — диагностические
+  геттеры/заглушки (`trace_questions`, `note_gap_loss`, `cross_check_tls12`,
+  `d2k_raw_pending_count`), 3 — разбор чужих RST-правил, 2 строки —
+  `d2k_raw_set_segment_max` (production-сеттер, packet-path-риск для
+  measured-планов), 1 — не-Linux stub.
 - Не установлено (?): **0**.
-- Для паритета среза остаётся закрыть 12 N и доказать ветви у 98 P; один только факт наличия теста в дереве не заменяет прогон.
+- Для паритета среза остаётся закрыть 10 N и доказать ветви у 100 P; один только факт наличия теста в дереве не заменяет прогон.

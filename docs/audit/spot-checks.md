@@ -41,8 +41,10 @@
 Проверено по исходникам, не только по словам агента:
 
 - **`SET_HTTPS` TTL.** C `datapath/ctlsrv.c:446` обрезает TTL до
-  `D2K_HTTPS_TTL_MAX_S`; R2O `control.rs:1070` возвращает `ACK_BAD_ARGS` при
-  `ttl > MAX_HTTPS_TTL_SECONDS`. Это реальное расхождение поведения, статус P.
+  `D2K_HTTPS_TTL_MAX_S` = **7 суток** (`d2k_ctl.h:231`); R2O
+  `control.rs:1070,1781` возвращает `ACK_BAD_ARGS` при
+  `ttl > MAX_HTTPS_TTL_SECONDS` = **6 часов**. Это реальное расхождение
+  поведения, статус P.
 - **`ARM_SHAPE` транспорт.** C `datapath/ctlsrv.c:329` принимает транспорт 6 и
   17; R2O `control.rs:2002` отвергает всё, кроме 6. Для UDP/QUIC-снимков это
   может быть функциональным пробелом, статус P.

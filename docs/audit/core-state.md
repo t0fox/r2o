@@ -406,7 +406,7 @@
 | `d2k_link_set_name_probe_trial` | 659–668 | 10 | SET_NAME_PROBE с trial_id | control::encode_set_name_probe | **P** | unit-тест; C/Rust diff нет |
 | `area_context_valid` | 670–675 | 6 | допустимая комбинация transport/shape/family для области | control::valid_domain_area_context | **P*** | static-хелпер |
 | `d2k_link_set_suffix_family` | 677–684 | 8 | SET_SUFFIX с планом | control::encode_set_suffix | **P** | кодировщик есть; точный C/Rust differential области не заявлен |
-| `d2k_link_set_https` | 686–705 | 20 | SET_HTTPS имя+ttl | `control.rs:1777-1790` `encode_set_https` | **P** | **Расхождение:** C-link проверяет только имя (1..253) и кодирует любой `u32 ttl`; обрезку до `D2K_HTTPS_TTL_MAX_S` делает датапат (`ctlsrv.c:446`). Rust-link отвергает `ttl > MAX_HTTPS_TTL_SECONDS` (6 ч) ещё на кодировании. Наблюдаемый итог для сверх-6ч различается стадией (C: обрезка, R2O: отказ). Unit `encodes_the_exact_https_name_and_ttl` покрывает только допустимый TTL. |
+| `d2k_link_set_https` | 686–705 | 20 | SET_HTTPS имя+ttl | `control.rs:1777-1790` `encode_set_https` | **P** | **Расхождение:** C-link проверяет только имя (1..253) и кодирует любой `u32 ttl`; обрезку до `D2K_HTTPS_TTL_MAX_S` = **7 суток** (`d2k_ctl.h:231`) делает датапат (`ctlsrv.c:446`). Rust-link отвергает `ttl > MAX_HTTPS_TTL_SECONDS` = **6 часов** ещё на кодировании. Наблюдаемый итог для сверх-6ч различается стадией (C: обрезка до 7 суток, R2O: отказ). Unit `encodes_the_exact_https_name_and_ttl` покрывает только допустимый TTL. |
 | `d2k_link_set_stall_budgets` | 707–729 | 23 | SET_STALL_BUDGETS список бюджетов | control::encode_set_tcp_stall_budgets | **P** | unit бюджеты tcp/reset; C/Rust diff нет |
 | `send_area_key` | 731–752 | 22 | общий кодировщик domain-area команд (name/key/area_id) | control::encode_domain_area_key | **P*** | static-хелпер |
 | `d2k_link_del_suffix_family` | 754–757 | 4 | DEL_SUFFIX | control::encode_delete_suffix | **P** | кодировщик есть; C/Rust differential нет |
@@ -1005,7 +1005,8 @@
   `tests/control.rs`, но C/Rust differential кодирования не заявлен.
 - **Подтверждённые расхождения:**
   1. `SET_HTTPS`: C-link кодирует любой `u32 ttl` и оставляет обрезку
-     датапату; Rust `encode_set_https` отвергает `ttl > 6ч`.
+     датапату до **7 суток** (`d2k_ctl.h:231`); Rust `encode_set_https`
+     отвергает `ttl > 6 часов`.
   2. `DEL_NAME_PROBE`: C-link не проверяет `shape`; Rust требует
      `valid_tcp_probe_shape` и отвергает неизвестную форму раньше.
   3. `ARM_SHAPE`: кодировщики совпадают (transport 6/17), но датапат R2O

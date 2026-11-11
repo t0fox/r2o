@@ -97,7 +97,7 @@ R2O-аналог — `crates/r2o-datapath/src/control.rs` (`ControlServer`), п�
 | canonical_address | 152-157 | 6 | static: family 4 требует нулевой хвост 16-байтного адреса | `control.rs:1612` `addr_plan_key` | E | `удаление_адреса_разделяет_формы_и_удаляет_одну` (control.rs:2793): `body[5]=1` даёт `ACK_BAD_ARGS`. |
 | addr_shape_valid | 163-167 | 5 | допустимые формы адресной привязки (1,2,3,5,6) | `control.rs:1628` `valid_addr_shape`, `:1635` `addr_plan_matches_shape` | P | Валидные формы покрыты тестами адресов; отказа для недопустимой формы (0/4/7) в тестах не найдено. |
 | read_probe_flow | 169-187 | 19 | static: разобрать flow адресного опыта, отвергнуть неканонический IPv4 | `control.rs:1695` `r2o_udp_addr_probe_flow_key` + `r2k-core/control.rs:1701` `valid_udp_addr_probe_flow` | P | Код есть, тестов SET/DEL/FIND адресного опыта (COMMAND_*_ADDR_PROBE) в дереве не найдено. |
-| d2k_ctlsrv_command | 189-509 | 321 | диспетчер команд, разбор тел, ACK, установка в таблицу | `control.rs:260` `NamePlans::handle`; `main.rs:68` `handle_control_command` (stall budgets); `control.rs:1988` `arm_client_shape` | P | Покрыты SET_NAME/BOUND/PROBE/ADDR/SUFFIX/BYPASS/DEL_*/HTTPS/ARM_SHAPE (control.rs:2633-3896). Пробелы: C `SET_HTTPS` обрезает TTL до максимума, R2O отвергает (`ACK_BAD_ARGS`) — control.rs:1070; `arm_client_shape` отвергает транспорт 17 (control.rs:2002), C принимает 6/17; адресные опыты не тестированы. |
+| d2k_ctlsrv_command | 189-509 | 321 | диспетчер команд, разбор тел, ACK, установка в таблицу | `control.rs:260` `NamePlans::handle`; `main.rs:68` `handle_control_command` (stall budgets); `control.rs:1988` `arm_client_shape` | P | Покрыты SET_NAME/BOUND/PROBE/ADDR/SUFFIX/BYPASS/DEL_*/HTTPS/ARM_SHAPE (control.rs:2633-3896). Пробелы: C `SET_HTTPS` обрезает TTL до **7 суток** (`D2K_HTTPS_TTL_MAX_S`, `d2k_ctl.h:231`, `ctlsrv.c:446`), R2O отвергает `ttl > 6 часов` (`ACK_BAD_ARGS`) — control.rs:64,1070,1781; `arm_client_shape` отвергает транспорт 17 (control.rs:2002), C принимает 6/17; адресные опыты не тестированы. |
 | d2k_ctlsrv_pump | 511-694 | 184 | выгрузить новые записи журнала в события с раскладкой по типам | `main.rs:2728` `send_journal_updates`, `:2709` `send_journal_snapshot`; `flow_journal.rs:202` `to_event_frame` | P | `flow_journal` round-trip тесты и `d2o_control_frames_match_donor_wire_decoding` (tests/control.rs:47). Пробелы: v22-трансляция `EVENT_LEGACY_CLIENT_TCP` шлёт пустые TCP-опции (r2k-core/control.rs:1212-1215), C шлёт реальные; набор видов журнала уже C (нет отдельного CLIENT_TCP в v48). |
 | d2k_ctlsrv_http80_event | 697-731 | 35 | событие HTTP-портала/ответа с измерениями | `control.rs:3136` `send_http_portal_event`, `:3148` `send_http_response_event`; `r2k-core/control.rs:852` `HttpResponseEvent::event_body` | P | `decodes_r2o_http_response_context_and_measurements` (tests/control.rs:977), `control_decoder_accepts_http_portal_response_events` (tests/capture_shape.rs:150). Отличие: R2O кодирует `code 1..4` и всегда несёт хвост status/body/request_no; C для портала без ответа хвост не шлёт. |
 
@@ -137,12 +137,13 @@ UDP, пустые TCP-опции в v22 CLIENT_TCP, адресные опыты 
 | emit_vec_free | 268-272 | 5 | static: освободить массив посылок и owned_bytes | `plan/apply.rs:61` `Emission` (Vec) + `Drop` | E | Владение выражено типами (`Vec<u8>`, `Vec<Emission>`); утечек нет по построению, отдельный free не нужен. |
 | emit_overhead | 285-295 | 11 | static: заголовки IP+TCP/UDP, MD5/TS-опция | `plan/apply.rs:737` `emit_overhead` | E | `max_emit`-тест (tests/apply.rs:251) и `route_segment_cap...` (tests/apply.rs). |
 | d2k_plan_max_emit | 297-341 | 45 | верхняя оценка одной посылки плана | `plan/apply.rs:418` `Plan::max_emit` | E | `assert_eq!(plan.max_emit(), 171)` (tests/apply.rs:251); используется в `r2o_plan_valid`. |
-| d2k_plan_apply | 343-873 | 531 | превратить план+пакет в посылки, судьбу оригинала и причину отказа | `plan/apply.rs:155` `Plan::apply` | P | 17 тестов tests/apply.rs покрывают split/fake/overlay/order/pace/settle/delay/udplen/qsplit/qdeny/oob/metric. Пробелы: `MAX_EMISSIONS = 26` (apply.rs:9) против 65536 в C (`plan_apply.c:830`) — R2O отвергает раньше; однако D2O на выдаче в session тоже ограничивает 26 (`D2K_RESULT_MAX`, session.c:2517), поэтому наблюдаемый отказ совпадает, различаются слой и текст ошибки. В OOB-ветви `suffix.wire_profile` остаётся 0 (apply.rs:280-291), тогда как C проставляет профиль всем посылкам на `finalize`. |
+| d2k_plan_apply | 343-873 | 531 | превратить план+пакет в посылки, судьбу оригинала и причину отказа | `plan/apply.rs:155` `Plan::apply` | P | 17 тестов tests/apply.rs покрывают split/fake/overlay/order/pace/settle/delay/udplen/qsplit/qdeny/oob/metric. Пробелы: `MAX_EMISSIONS = 26` (apply.rs:9) против 65536 в C (`plan_apply.c:830`) — R2O отвергает раньше; однако D2O на выдаче в session тоже ограничивает 26 (`D2K_RESULT_MAX`, session.c:2517), поэтому наблюдаемый отказ совпадает, различаются слой и текст ошибки. В OOB-ветви `suffix.wire_profile` остаётся 0 (apply.rs:280-291), тогда как C проставляет профиль всем посылкам на `finalize`; qsplit-ветвь обходит `delay_us`. Лимит 26 — слой R2O: D2O `plan_apply.c` допускает до 65536, но `session.c:2517` всё равно отказывает при >26, поэтому наблюдаемый отказ совпадает. |
 | d2k_actions_cancel | 891-921 | 31 | правила отмены недосланного исполнения | `plan/apply.rs:104` `Actions::cancel` | E | `cancellation_drops_only_after_payload_bytes_were_emitted` (tests/apply.rs). |
 | d2k_actions_free | 923-931 | 9 | освободить посылки | `plan/apply.rs:61` `Emission` + `Actions` (RAII) | E | Освобождение автоматическое; отдельных ошибок/утечек нет по типам. |
 
-Итог по файлу: E 14, P 1, N 0. Главные отличия — место отказа при >26 посылках (D2O тоже
-отказывает в session, но позже) и потеря `wire_profile` в OOB-суффиксе.
+Итог по файлу: E 14, P 1, N 0. Главные отличия — потеря `wire_profile` в OOB-суффиксе,
+обход `delay_us` в qsplit и место отказа при >26 посылках (D2O тоже отказывает в session,
+но позже).
 у OOB-суффикса.
 
 ---
@@ -399,8 +400,8 @@ Rtnetlink: дампы правил, одиночный поиск маршрут
 7. **Legacy-удаления «все формы» отсутствуют**: `del_name`/`del_addr`/`del_*_family`
    удаляют один shape-ключ; по сокету C тоже шлёт форму, но внутренние вызовы C шире.
 8. **Управляющий слой:** нет `listen_fd`/`peer_fd` и счётчика `sent`; disconnect-hook
-   реализован в цикле; `SET_HTTPS` отвергает TTL > max вместо обрезки; ARM_SHAPE не
-   обслуживает UDP; v22 CLIENT_TCP идёт с пустыми TCP-опциями.
+   реализован в цикле; `SET_HTTPS` отвергает TTL > 6 часов вместо обрезки до 7 суток;
+   ARM_SHAPE не обслуживает UDP; v22 CLIENT_TCP идёт с пустыми TCP-опциями.
 9. **raw:** один сокет на семейство, обязательный mark, нет `IP_NODEFRAG` и ленивого
    fragment/IPv6-сокета; реальная отправка в тестах не выполнялась (нужен root).
 10. **routemark:** нет `describe`, нет `found/truncated` статуса merge и признака изменения
