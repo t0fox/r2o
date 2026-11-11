@@ -217,11 +217,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 221 | 313 | 13 | 1 |
-| core-state | 692 | 127 | 564 | 1 | 0 |
+| core-state | 692 | 128 | 563 | 1 | 0 |
 | datapath-core | 400 | 122 | 267 | 11 | 0 |
 | datapath-plan | 183 | 105 | 72 | 5 | 1 |
 | detect | 159 | 49 | 100 | 10 | 0 |
-| **Итого** | **1982** | **624** | **1316** | **40** | **2** |
+| **Итого** | **1982** | **625** | **1315** | **40** | **2** |
 
 
 ---
@@ -1776,8 +1776,8 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `handle_domain_observation` | 953–970 | 18 | поля domain observation: name/plan_id/key/evidence/at | catalog::DomainObservation serde | **P** | unit groups/catalog |
 | `parse_domain_observations` | 972–989 | 18 | массив наблюдений до 256 | Vec<DomainObservation> | **P** | unit groups |
 | `handle_net_whitelist_key` | 991–999 | 9 | поля network_whitelist: name/searched/tx_only/confirmed_utc | catalog::NetworkWhitelist | **P** | unit catalog |
-| `handle_catalog_key` | 1001–1027 | 27 | корневые ключи: boxes/domain_*/network_whitelist, неизвестные пропускаются | catalog::Catalog serde | **P** | unit skips_unknown_fields |
-| `parse_catalog_obj` | 1028–1034 | 7 | разобрать корневой объект | catalog::Catalog::parse | **P*** | static-хелпер |
+| `handle_catalog_key` | 1001–1027 | 27 | корневые ключи: `boxes`, `domain_observations`, `domain_groups_frozen`, `domain_groups_disabled`, `domain_groups_disabled_at`, `network_whitelist`; `schema`/`updated`/`domain_groups` пропускаются | `CatalogInput` (`catalog.rs:1226-1239`) → `Catalog.domain_state` (`:364-381`), `CatalogOutput` (`:1240+`) | **E** | C разбирает те же top-level поля; `domain_observations` ≤256, frozen/disabled/disabled_at, network_whitelist. Rust `CatalogInput` читает их, `schema != 1` отвергает, неизвестные ключи игнорирует, конвертирует в `DomainState`; `CatalogOutput` пишет обратно. Есть `skips_unknown_fields`, persist differential и `validate` лимитов. |
+| `parse_catalog_obj` | 1028–1034 | 7 | `memset`, `parse_object` с глубиной 1 | `Catalog::parse` (`catalog.rs:344-389`) | **P** | C стартует глубину с 1; Rust `check_json_depth` (64) + serde_json. Разбор верхнего объекта эквивалентен; отдельного кода функции нет. |
 | `prune_unavailable_domain_groups` | 1036–1053 | 18 | удалить группы, чей план отключён/отсутствует | catalog::validate/derive groups | **P** | unit derived_domain_groups_are_ignored |
 | `free_box` | 1062–1070 | 9 | освободить планы/привязки коробки | Drop | **P*** | static-хелпер |
 | `d2k_catalog_free` | 1072–1082 | 11 | освободить каталог | Drop | **P*** | static-хелпер |
@@ -2062,13 +2062,13 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_link_next` | 223–522 | 300 | прочитать кадр 6+plen, разобрать ключ потока и все типы событий (HELLO/HTTP/SUSPECT/STATS/EXCHANGE/CLIENT_TCP/SHAPE/ACK/APPLIED/PROTO/REFUSED) | r2k_core::control::{read_frame,decode_*} | **E** | d2o_control_differential.c + tests/control.rs; декодирование APPLIED/REFUSED/ACK покрыто отдельно |
 | `d2k_link_set_name` | 524–527 | 4 | SET_NAME без пробного порта | control::encode_set_name | **P** | точный кадр проверен tests/control.rs; C/Rust differential кодирования не найден |
 | `d2k_link_set_name_probe` | 531–536 | 6 | SET_NAME_PROBE с local port | control::encode_set_name_probe | **P** | unit-тест; C/Rust differential кодирования не найден |
-| `send_name_plan` | 538–630 | 93 | общий кодировщик name-команды: имя/shape/family/plan hex/trial id, проверки | control::encode_set_name* | **P*** | static-хелпер; точные кадры в tests/control.rs, C/Rust diff нет |
-| `d2k_link_set_name_family` | 632–637 | 6 | SET_NAME/SET_NAME_PROBE по family | control::encode_set_name | **P** | unit-тест; C/Rust diff нет |
-| `d2k_link_set_name_bound` | 639–643 | 5 | SET_NAME_BOUND с identity | control::encode_set_name_bound | **P** | unit bound_set_name_round_trips; C/Rust diff нет |
-| `d2k_link_del_name_bound` | 645–657 | 13 | условное удаление name binding | control::encode_delete_name_bound | **P** | unit encodes_a_bounded_exact_name_binding_delete; C/Rust diff нет |
-| `d2k_link_set_name_probe_trial` | 659–668 | 10 | SET_NAME_PROBE с trial_id | control::encode_set_name_probe | **P** | unit-тест; C/Rust diff нет |
-| `area_context_valid` | 670–675 | 6 | допустимая комбинация transport/shape/family для области | control::valid_domain_area_context | **P*** | static-хелпер |
-| `d2k_link_set_suffix_family` | 677–684 | 8 | SET_SUFFIX с планом | control::encode_set_suffix | **P** | кодировщик есть; точный C/Rust differential области не заявлен |
+| `send_name_plan` | 538–630 | 93 | общий кодировщик name-команды: family 4/6, fd, имя 1..255, transport 6/17, hex plan, sport, trial, кадр | control::encode_set_name* | **P** | **Подтверждённое расхождение:** C **не проверяет `shape` вовсе** и кодирует любое значение `g_scratch[o++]=shape` (`link.c:591`); Rust `encode_set_name` отвергает форму вне `{1,2,3,4,5,6,7} ∪ {8..13}`. C также не проверяет совместимость плана с формой; Rust `valid_name_probe_plan_records`/`valid_domain_plan_records` проверяют transport/proto. Точные кадры валидных команд совпадают (tests/control.rs), C/Rust differential нет. |
+| `d2k_link_set_name_family` | 632–637 | 6 | SET_NAME/SET_NAME_PROBE по family | control::encode_set_name | **P** | Тонкая обёртка выбирает команду по `sport_be`; наследует расхождение `send_name_plan` (C не проверяет shape). |
+| `d2k_link_set_name_bound` | 639–643 | 5 | SET_NAME_BOUND с identity: только `token != NULL`, затем `send_name_plan` | control::encode_set_name_bound | **P** | **Подтверждённое расхождение:** C принимает любую `shape` и любой `token` (в т.ч. нулевой); Rust требует **`shape == SHAPE_HTTP`** и **ненулевой trial_id** (`control.rs:1399-1406`), иначе отказ. C-датапат (`ctlsrv.c`) может отвергнуть позже; стадия отказа иная. |
+| `d2k_link_del_name_bound` | 645–657 | 13 | условное удаление name binding: имя/transport/known/kind NAME/!temporary | control::encode_delete_name_bound | **P** | Построчно совпадает: `family` не передаётся (C не проверяет), Rust `encode_delete_name_bound` проверяет transport 6/17, `binding.is_known()`, `kind==1`, `!temporary`. Тест `encodes_a_bounded_exact_name_binding_delete`; C/Rust diff нет. |
+| `d2k_link_set_name_probe_trial` | 659–668 | 10 | SET_NAME_PROBE с trial_id: требует `sport_be != 0` | control::encode_set_name_probe | **P** | C проверяет только ненулевой порт; Rust дополнительно требует `valid_name_probe_plan_records(shape, plan)` и family 4/6, trial не проверяет. Для валидного плана кадр совпадает; набор отказов шире. |
+| `area_context_valid` | 670–675 | 6 | допустимая комбинация transport/shape/family для области | control::valid_domain_area_context | **P*** | static-хелпер; формула сверена ниже (P). |
+| `d2k_link_set_suffix_family` | 677–684 | 8 | SET_SUFFIX с планом | control::encode_set_suffix | **P** | **Подтверждённое расхождение:** C `send_name_plan(..., SET_SUFFIX)` проверяет только имя/family/transport/hex; Rust `encode_set_suffix` дополнительно проверяет shape (1/2/3/6 или 8–13), family и **`valid_domain_plan_records`** (transport/proto плана). C кодирует несовместимый план, Rust отвергает. |
 | `d2k_link_set_https` | 686–705 | 20 | SET_HTTPS имя+ttl | `control.rs:1777-1790` `encode_set_https` | **P** | **Расхождение:** C-link проверяет только имя (1..253) и кодирует любой `u32 ttl`; обрезку до `D2K_HTTPS_TTL_MAX_S` = **7 суток** (`d2k_ctl.h:231`) делает датапат (`ctlsrv.c:446`). Rust-link отвергает `ttl > MAX_HTTPS_TTL_SECONDS` = **6 часов** ещё на кодировании. Наблюдаемый итог для сверх-6ч различается стадией (C: обрезка до 7 суток, R2O: отказ). Unit `encodes_the_exact_https_name_and_ttl` покрывает только допустимый TTL. |
 | `d2k_link_set_stall_budgets` | 707–729 | 23 | SET_STALL_BUDGETS список бюджетов | control::encode_set_tcp_stall_budgets | **P** | unit бюджеты tcp/reset; C/Rust diff нет |
 | `send_area_key` | 731–752 | 22 | общий кодировщик domain-area команд (name/key/area_id) | control::encode_domain_area_key | **P*** | static-хелпер |
@@ -2076,17 +2076,17 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_link_set_bypass_family` | 758–761 | 4 | SET_BYPASS | control::encode_set_bypass | **P** | кодировщик есть; differential нет |
 | `d2k_link_del_bypass_family` | 762–765 | 4 | DEL_BYPASS | control::encode_delete_bypass | **P** | кодировщик есть; differential нет |
 | `d2k_link_area_identified` | 767–777 | 11 | area-команда с identity/area_id | control::encode_set_suffix/encode_domain_area_key | **P** | unit area_ack_round_trips; C/Rust differential нет |
-| `addr_shape_ok` | 783–787 | 5 | допустимая форма адресной привязки | control::valid_addr_shape | **P*** | static-хелпер |
-| `d2k_link_set_addr` | 789–792 | 4 | SET_ADDR IPv4 | control::encode_set_addr | **P** | unit-тест адресных планов; C/Rust diff нет |
-| `d2k_link_set_addr_family` | 794–848 | 55 | SET_ADDR family 4/6, проверка shape/hex/размера | control::encode_set_addr | **P** | unit-тест; C/Rust diff нет |
-| `addr_probe_flow_bytes` | 852–866 | 15 | 38-байтный ключ UDP-потока для addr-probe | control::udp_addr_probe_flow | **P*** | static-хелпер; control tests |
-| `d2k_link_set_addr_probe` | 868–875 | 8 | SET_ADDR_PROBE IPv4 | control::encode_set_addr_probe | **P** | unit/quic_replay/voice tests; C/Rust diff нет |
-| `d2k_link_set_addr_probe_family` | 877–909 | 33 | SET_ADDR_PROBE с lease/trial/plan | control::encode_set_addr_probe | **P** | unit-тест; C/Rust diff нет |
-| `d2k_link_del_addr_probe` | 911–917 | 7 | DEL_ADDR_PROBE IPv4 | control::encode_delete_addr_probe | **P** | unit-тест; C/Rust diff нет |
-| `d2k_link_del_addr_probe_family` | 919–937 | 19 | DEL_ADDR_PROBE family 4/6 | control::encode_delete_addr_probe | **P** | unit-тест; C/Rust diff нет |
+| `addr_shape_ok` | 783–787 | 5 | допустима форма 1/2/3(QUIC)/5(VOICE)/6(ECH_TCP)/**8–13** | control::valid_addr_shape | **P*** | **Подтверждённое расхождение:** C принимает контекстные TCP-формы `8..13` (`d2k_link.h:311-328`, `link.c:786`); Rust `valid_addr_shape` — только `{1,2,3,5,6}` (`control.rs:1462-1467`). `SET_ADDR`/`DEL_ADDR` с формой 8–13 C кодирует, Rust отвергает. |
+| `d2k_link_set_addr` | 789–792 | 4 | SET_ADDR IPv4 | control::encode_set_addr | **P** | Тонкая обёртка family=4; наследует расхождение `addr_shape_ok`. |
+| `d2k_link_set_addr_family` | 794–848 | 55 | SET_ADDR family 4/6: shape, hex, 16-байтный адрес, план без проверки совместимости | control::encode_set_addr | **P** | C проверяет `addr_shape_ok` (включая 8–13), кодирует `family + 16 байт + shape + hex`; Rust дополнительно вызывает `valid_addr_plan_records` (transport/proto плана) и не принимает 8–13. Для формы 1/2/3/5/6 и совместимого плана кадр совпадает. |
+| `addr_probe_flow_bytes` | 852–866 | 15 | 38-байтный ключ UDP: family, src/dst, **src_port_be может быть 0**, dst_port≠0, transport 17 | control::udp_addr_probe_flow | **P*** | **Подтверждённое расхождение:** C явно допускает `src_port_be=0` — «голосовой опыт на любой клиентский порт» (`link.c:855`); Rust `udp_addr_probe_flow` требует `source.port() != 0` (`control.rs:1677`). `SET_ADDR_PROBE`/`DEL_ADDR_PROBE` voice с нулевым исходным портом C кодирует, Rust отвергает. |
+| `d2k_link_set_addr_probe` | 868–875 | 8 | SET_ADDR_PROBE IPv4 | control::encode_set_addr_probe | **P** | Обёртка family=4; наследует расхождение `src_port=0` и проверку плана. |
+| `d2k_link_set_addr_probe_family` | 877–909 | 33 | SET_ADDR_PROBE: fd/trial/lease≤MAX/flow/hex, trial≠0 | control::encode_set_addr_probe | **P** | C проверяет `trial_id`, `lease_ms 1..MAX`, transport 17, dst_port≠0; Rust дополнительно требует `source.port()!=0`, ненулевые/не-unspecified адреса и `valid_addr_plan_records(SHAPE_QUIC)`. C не проверяет план. Кадр при валидных входах совпадает. |
+| `d2k_link_del_addr_probe` | 911–917 | 7 | DEL_ADDR_PROBE IPv4 | control::encode_delete_addr_probe | **P** | Обёртка family=4; наследует `src_port=0`. |
+| `d2k_link_del_addr_probe_family` | 919–937 | 19 | DEL_ADDR_PROBE: flow + trial≠0 | control::encode_delete_addr_probe | **P** | C требует transport 17, dst_port≠0, trial≠0; Rust дополнительно `source.port()!=0`, ненулевые адреса, одинаковое семейство. Кадр при валидных входах совпадает. |
 | `d2k_link_arm_shape` | 939–942 | 4 | ARM_SHAPE IPv4 | control::encode_arm_shape | **P** | unit arm_shape_roundtrip; C/Rust diff нет |
 | `d2k_link_arm_shape_family` | 944–979 | 36 | ARM_SHAPE: имя, transport 6/17, family 4/6 | `control.rs:902-915` `encode_arm_shape` | **P** | Кодирование совпадает: C и Rust принимают transport 6/17, family 4/6, имя до 253/255. **Но** датапат R2O `arm_client_shape` (`control.rs:2002`) отвергает transport 17, а C `ctlsrv.c:329` принимает 6/17 — это уже зафиксированное расхождение конца пути, не link-кодера. |
-| `d2k_link_del_name_family` | 981–1012 | 32 | DEL_NAME с shape/family | control::encode_delete_name | **P** | unit-тест; C/Rust diff нет |
+| `d2k_link_del_name_family` | 981–1012 | 32 | DEL_NAME: fd, имя 1..255, family 4/6, transport 6/17, **shape != 0** (без сверки пары) | control::encode_delete_name | **P** | **Подтверждённое расхождение:** C принимает любую пару `transport`+`shape!=0` (например, 17 + shape 1); Rust `encode_delete_name` требует `transport==6 && shape ∈ {1,2,4,6,7,8..13}` или `transport==17 && shape ∈ {3,5}`. C шире, отказ переносится на датапат. Кадр для допустимой пары совпадает. |
 | `d2k_link_del_name_probe` | 1014–1018 | 5 | DEL_NAME_PROBE IPv4 | control::encode_delete_name_probe | **P** | кодировщик есть; unit/дифференциала именно для DEL_NAME_PROBE не найдено |
 | `d2k_link_del_name_probe_family` | 1020–1049 | 30 | DEL_NAME_PROBE: имя, shape, family 4/6, source port | `control.rs:1906-1926` `encode_delete_name_probe` | **P** | **Расхождение:** C-link не проверяет `shape` вовсе (только имя/порт/family), Rust требует `valid_tcp_probe_shape(shape)` и отвергает неизвестную форму. C-датапат всё равно отверг бы такую команду, но отказ происходит позже. Точный кадр C/Rust не сравнивался. |
 | `d2k_link_del_addr` | 1051–1054 | 4 | DEL_ADDR IPv4 | control::encode_delete_addr | **P** | unit-тест; C/Rust diff нет |
@@ -2664,15 +2664,38 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 - **Кодировщики name/area/addr:** `send_name_plan`, `send_area_key`,
   `d2k_link_set_name*`, `d2k_link_set_suffix/bypass`, `d2k_link_set_addr*`,
   `d2k_link_arm_shape*`, `d2k_link_del_*` собраны по тем же полям и порядку,
-  что `control.rs::encode_*`; точные кадры проверяются unit-тестами
-  `tests/control.rs`, но C/Rust differential кодирования не заявлен.
+  что `control.rs::encode_*`; точные кадры валидных команд проверяются
+  unit-тестами `tests/control.rs`, но C/Rust differential кодирования нет.
+  Построчная сверка выявила систематическое отличие: **C-link почти не
+  валидирует поля, которые проверяет Rust-кодировщик**. Отказ C переносится
+  на датапат (`ctlsrv.c`), поэтому для валидных команд кадры совпадают, а
+  для невалидных различается стадия и код ошибки.
 - **Подтверждённые расхождения:**
   1. `SET_HTTPS`: C-link кодирует любой `u32 ttl` и оставляет обрезку
      датапату до **7 суток** (`d2k_ctl.h:231`); Rust `encode_set_https`
      отвергает `ttl > 6 часов`.
-  2. `DEL_NAME_PROBE`: C-link не проверяет `shape`; Rust требует
+  2. `send_name_plan`: C не проверяет `shape` (`link.c:591` кодирует
+     любой байт); Rust `encode_set_name` отвергает форму вне
+     `{1,2,3,4,5,6,7} ∪ {8..13}`. C также не проверяет совместимость
+     плана с формой, Rust проверяет `valid_name_probe_plan_records`.
+  3. `SET_NAME_BOUND`: C требует только `token != NULL`; Rust
+     `encode_set_name_bound` требует `shape == SHAPE_HTTP` и ненулевой
+     trial_id (`control.rs:1399-1406`).
+  4. `SET_SUFFIX`: C `send_name_plan` не проверяет план; Rust
+     `encode_set_suffix` требует shape/family и
+     `valid_domain_plan_records` (transport/proto плана).
+  5. `addr_shape_ok`: C принимает контекстные TCP-формы **8–13**
+     (`d2k_link.h:311-328`); Rust `valid_addr_shape` — только
+     `{1,2,3,5,6}`. `SET_ADDR`/`DEL_ADDR` 8–13 C кодирует, Rust нет.
+  6. `addr_probe_flow_bytes`: C допускает `src_port_be=0` для голосового
+     опыта «на любой клиентский порт» (`link.c:855`); Rust
+     `udp_addr_probe_flow` требует `source.port()!=0`.
+  7. `DEL_NAME`: C принимает любую пару `transport`+`shape!=0`; Rust
+     `encode_delete_name` требует конкретные пары (6 с 1/2/4/6/7/8–13,
+     17 с 3/5).
+  8. `DEL_NAME_PROBE`: C не проверяет `shape`; Rust требует
      `valid_tcp_probe_shape` и отвергает неизвестную форму раньше.
-  3. `ARM_SHAPE`: кодировщики совпадают (transport 6/17), но датапат R2O
+  9. `ARM_SHAPE`: кодировщики совпадают (transport 6/17), но датапат R2O
      `arm_client_shape` принимает только 6, тогда как C `ctlsrv.c:329` — 6/17.
 - `d2k_ev_outer_appdata`: бит 23 (`application data`) в `seen_types`;
   перенесён в `control::decode_*`, отдельного differential нет.
