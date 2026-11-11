@@ -100,6 +100,49 @@ recheck 1982 1982 equal True
 больше не считается статусом, экранированные `\|` не сдвигают колонки.
 
 
+## Итог и подтверждённые расхождения (2026-11-11)
+
+Покрытие реестра: **1982/1982** функций. Статусы: **E 621 / P 1319 /
+N 40 / ? 2**. Это не 100 % паритет: E требует целевого теста/дифференциала,
+P означает неполное доказательство ветвей, N — отсутствие реализации.
+
+| # | Область | D2O | R2O | Подтверждение |
+|---|---|---|---|---|
+| 1 | `SET_HTTPS` TTL | обрезает до **7 суток** (`d2k_ctl.h:231`, `ctlsrv.c:446`) | отвергает `> 6 часов` (`control.rs:64,1070,1781`) | `deep-detect-plan.md`, `deep-datapath-core.md` |
+| 2 | `ARM_SHAPE` | принимает transport 6 и 17 (`ctlsrv.c:329`) | только 6 (`control.rs:2002`) | `deep-datapath-core.md` |
+| 3 | `wire_udp` IPv4 | `POISON_IPID_ZERO` разрешён, ID=0 (`wire_udp.c:75,136`); TOS из пакета | любой poison отвергнут (`wire.rs:213`), TOS иной | C/Rust harness 4 poison-кейса |
+| 4 | raw UDP/TTL | `IP_HDRINCL`+`IP_NODEFRAG`+TTL get/set/restore, `qp_recv_ttl` | `IP_NODEFRAG` отсутствует, TTL не принимается; датапат raw без controller API | `deep-core-net.md` |
+| 5 | production classify | donor-семантика C | discovery: `full_detect_semantics=false`, `confirm_clear=true` (`classify.rs:869-870`, `main.rs:15380-15391`), дифференциалы идут с `true` | `deep-detect-plan.md` |
+| 6 | `d2k_compose_from_props` | при `control=None` всегда «всё сразу» (`props.c:477-486`) | кандидат не выдаётся (`raw_probe.rs:1094-1096`) | `deep-detect-plan.md` |
+| 7 | `d2k_raw_set_segment_max` | production `d2kc.c:575,789` ставит `d2k_arm_segment(send_maxlen)` | measured-план жёстко 1400 (`classify_measured.rs:12,143`) | `deep-detect-plan.md` |
+| 8 | HTTP80 capacity | 128 потоков **с вытеснением** (`http80.h:40-41`, `http80.c:217-236`) | 1024 потока **без вытеснения** (`hold.rs:20,1080-1084`) | `deep-datapath-core.md` |
+| 9 | ENOBUFS | TCP hold flush all, UDP — только истёкшие (`d2kd.c:1590`) | дренирует **все** UDP hold/deferred (`main.rs:1312-1335`) | `deep-datapath-core.md` |
+| 10 | TCP options shape | `shape_opts[4][40]` полный набор (`session.c:142,2258,2982`) | `ClientShapeEvent` только ClientHello + bool TS (`control.rs:421-433`) | `deep-datapath-core.md` |
+| 11 | HTTP live failures | `failures/addr/binding/execution/request_ms` (`httpsearch.c:520-550`) | `HttpSearchRecord` только cut/repeat_path/repro_gap (`main.rs:4468-4472`); счётчики диагностики 0 | `deep-core-net.md` |
+| 12 | QUIC cert-name | `qc_peer_name` возвращает `name_ok`, handshake продолжается (`quicconn.c:1430,1195-1197`) | `R2oQuicHttp3Result` без `name_ok`; webpki рвёт handshake (`r2o_quic_http3.rs:890`) | `deep-core-net.md` |
+| 13 | TLS 1.2 | CH без ALPN, P-384 объявлен/отвергнут, открытый HTTP — отдельная ошибка | ALPN `http/1.1`, P-384 разрешён, открытый HTTP — общий rustls error; `rx_record_missing` только bool | `deep-core-net.md` |
+| 14 | ctl output ring | 64 КиБ (`ctl.c:21`) | 128 КиБ (`control.rs:28`) | `datapath-plan.md` |
+| 15 | raw mark | допускает `mark=0` (`raw.c:193`) | требует ненулевой mark (`raw.rs:55-59`) | `datapath-plan.md` |
+| 16 | Binding | `tcp_profile` хранится, `family` default 4 (`catalog.c:834-890`) | `Binding` без `tcp_profile`, `family` default 0 (`catalog.rs:165-181`) | `core-state.md` |
+| 17 | plan identity | FNV-1a `plan-%08x` в TLV (`compose.c:218-240`) | trial-id 16 байт (`discovery.rs:1450`) | `core-state.md` |
+| 18 | P-256 | production TLS1.2 ECDHE (`tls12.c:650-655`) | `ring`; прямых C/Rust-векторов нет | `core-state.md` |
+
+### Остаточные P (не доказано, не значит «сломано»)
+
+- `rustls`/`quinn` record layer, HRR/key update/resumption, ACK/loss/Retry/
+  transport params — end-to-end исходы есть, построчного паритета нет.
+- `sched.c` (282) — полная матрица состояний и редкие комбинации
+  ECH+volume/addr+voice/QUIC-deny не доказаны.
+- HTTP-search — переходы/таймеры задач, live failures, диагностические
+  счётчики; HTTPS-probe — live-тайминги и `lost`.
+- datapath — сложные ветви session/hold/capture, `nfq` ENOBUFS, HTTP80
+  capacity; detect — bridge/CLI, autottl/tsup, handshake12.
+- core-state — CLI-флаги/вывод, PSL/catalog-парсер, crypto HKDF-границы,
+  voice-blob, volume resource-retry.
+- `?` (2): `d2k_plantab_has_ech_target` (предиката нет, поведение может
+  покрываться общим hold) и ложное срабатывание парсера
+  `d2k_props_contact_on_family_tcp_profile`.
+
 ## Отчёты групп
 
 | Группа | Функций | Отчёт | Состояние |
