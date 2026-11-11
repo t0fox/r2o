@@ -870,6 +870,87 @@ observation), `control.rs` (https names), `http_replace.rs` (пакеты),
 | `d2k_http_request` | 551–632 | 82 | строгий разбор запроса: метод, origin-form, Host:80, LDH, не IPv4 | `httpup.rs:180 r2o_http_plan_request`, `:220 parse_request` | P | тесты httpup; полный набор отказов C не сверен |
 | `d2k_http_hello` | 634–640 | 7 | host_off/host_len из запроса | `httpup.rs:175 request_host_range` | P | — |
 
+### http80.c: построчная сверка
+
+- **`d2k_http80_new/free/get_stats` (67–79) ↔ `HoldTable` +
+  `NamePlans`:** C один `calloc` на 128 flow + 256 имён; Rust
+  `HoldTable`/`NamePlans` раздельно, HTTP-потоков до 1024 без
+  вытеснения (см. header, п. 8). `free` — RAII; `get_stats` —
+  композиция `r2o_hold_stats` + control stats, состав иной. P.
+- **`name_norm` (83–95) ↔ `control.rs:2233 canonical_name`:** C
+  снимает одну хвостовую точку, принимает LDH/точки, **односложные и
+  числовые** имена; Rust требует ≥2 метки и хотя бы одну нецифровую.
+  Подтверждённое расхождение для `SET_HTTPS`/`SET_SUFFIX`/`SET_BYPASS`.
+- **`d2k_http80_set_https/https` (97–129) ↔ `control.rs:1055/590`:**
+  C: add/remove по `expires==0`, 256 имён, вытеснение `min(expires)`;
+  Rust `set_https`/`has_verified_https` с теми же лимитами, но
+  канонизация имени строже (см. выше). P.
+- **`wr16/wr32/sum16/fold/rd32` (133–147, 190–192) ↔
+  `wire.rs:552/556/534/545`, `packet.rs:236`:** точные BE-записи,
+  RFC1071 и свёртка; E.
+- **`build` (156–188) ↔ `http_replace.rs:79 build_segment`:** C
+  собирает IPv4/IPv6 IP+TCP без опций, TOS/TTL/flow label/ip_id,
+  307/RST, пересчитывает суммы; Rust то же, тесты `:219`
+  (v4/v6+суммы). E.
+- **`stale/find/make` (196–236):** C линейный поиск 128 flow по
+  family/портам/адресам, stale по `IDLE`, вытеснение самого старого
+  с `evicted++`; Rust `hold.rs:1225 slot_index`/HTTP `Vec`, stale и
+  вытеснение выражены иначе, лимит 1024. P.
+- **`d2k_http80_executed` (238–254) ↔ `hold.rs:209
+  note_http_execution`:** C требует `state==ST_REQUEST` и
+  `request_seq==seq`, затем пишет execution/binding/plan/trial; Rust
+  ищет flow по key+request_sequence и `!response_reported`, пишет
+  `applied`. P — эквивалентно для нормального запроса, но проверка
+  состояния/seq иная.
+- **`request_result` (256–265) ↔ `finish_http_response`
+  (`hold.rs:1269`):** C заполняет family/client/server/ports/
+  execution/binding/request_ms/request_no/status/body_bytes/plan/
+  trial/request_path/host; Rust формирует `HttpResponseEvent` с
+  теми же полями, `request_path` только для GET без `?/#/\`. P.
+- **`d2k_http80_delivered` (267–276) ↔ `reject_http_response`
+  (`hold.rs:220`):** C при отказе доставки ставит `reply.invalid=1`,
+  `complete=0`, `state=ST_DONE`, `response=2`; Rust сбрасывает
+  `ready_for_next`, не меняя response/state. P — разный контракт
+  отказа.
+- **`seq_after` (281) ↔ `hold.rs:1318`:** точное `wrapping_sub`/i32.
+  E.
+- **`delivered/cut_pending/cut_result/sweep` (285–323) ↔
+  `hold.rs:255-293`:** C `delivered=max(acked,reply_next)`,
+  `cut_pending` требует `ST_REQUEST/body_end_known/!cut_told/
+  header_done/!complete/!invalid/body_end>delivered`,
+  `cut_result` считает `body_bytes=max(got,r->body_bytes)`, rtt,
+  `DONE`; `sweep` — `quiet=3*rtt`, минимум 2 с. Rust
+  `sweep_http_responses` `finish_http_response(flow,4,...)` +
+  `reject_http_response`; тест `hold.rs:2082`. P — формулы совпадают,
+  представление состояния и `response=4`/CUT иное.
+- **`request_prefix/request_feed` (327–347) ↔ `httpup.rs:180/116`:**
+  C `d2k_http_request` + GET/HEAD, target без `<=0x20/0x7f/#`,
+  `host_len<256`, stream parser `header_done && !invalid &&
+  !past_end && next==end`; Rust `r2o_http_plan_request`/
+  `observe_detailed` с другими границами (target<2048, `#`
+  отвергается, полные заголовки). P.
+- **`d2k_http80_packet` (349–525) ↔ `hold.rs:1088
+  observe_http_response` + `:356 feed_observing_mode`:** C
+  state-machine `FREE/SYN/OPEN/IDLE/REQUEST/INJECTED/SWAP/ANSWERED/
+  DONE`, RTT по SYN/SYN-ACK (в т.ч. kernel timestamps), портал по
+  Location+`dt<rtt/2`, body_end/cut, RST/ACK, замена; Rust
+  `HttpRequestFlow`/`SynAnchor`, portal/late/response tracking.
+  D17 paired differential покрывает портал/307/поздний/дубль, полный
+  набор C-состояний (INJECTED/SWAP/ANSWERED, overlap/gap, kernel
+  timestamps) не доказан. P.
+- **`d2k_http80_swap` (527–545) ↔ `main.rs:2093/2114`:** C
+  `verdict_payload(out)` + `send_rst`, при ошибке `ANSWERED`,
+  `swap_failed++`, `verdict_accept`; Rust `send_replacement` +
+  `mark_http_response_answered`, RST отдельно. P — сокет-путь не
+  покрыт paired differential.
+- **`lc` (549) ↔ `u8::to_ascii_lowercase`:** E.
+- **`d2k_http_request` (551–632) ↔ `httpup.rs:180/220`:** C method
+  1..20 uppercase, origin-form, ровно `HTTP/1.0|1.1`, ровно один
+  `Host` с портом 80, LDH, последняя метка не all-digits, затем
+  stream parser для `end_known`; Rust `parse_plan_request` добавляет
+  `#`/target<2048, требует полные заголовки, иначе обрабатывает
+  Host/CL/TE. P — полный набор отказов C не сверен.
+
 ## http_trace.c (1 функция)
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
