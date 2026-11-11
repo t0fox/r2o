@@ -27,7 +27,9 @@ def table_status(line: str) -> str | None:
     if not line.lstrip().startswith("|"):
         return None
     cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-    if not cells or all(set(cell) <= set("-: ") for cell in cells):
+    if len(cells) < 6 or not re.match(
+        r"^`?[A-Za-z_][A-Za-z0-9_]*`?(?:\s|\||$)", cells[0]
+    ):
         return None
     for cell in cells:
         match = STATUS_RE.match(cell)
@@ -37,6 +39,7 @@ def table_status(line: str) -> str | None:
 
 
 def main() -> int:
+    allow_partial = "--allow-partial" in sys.argv[1:]
     header = (AUDIT / "header.md").read_text(encoding="utf-8")
     summary_rows = []
     parts_text = []
@@ -45,8 +48,11 @@ def main() -> int:
     for name, expected in PARTS:
         path = AUDIT / f"{name}.md"
         if not path.exists():
-            print(f"missing part: {path}", file=sys.stderr)
-            return 1
+            if not allow_partial:
+                print(f"missing part: {path}", file=sys.stderr)
+                return 1
+            summary_rows.append(f"| {name} (не готов) | — | — | — | — | — |")
+            continue
         text = path.read_text(encoding="utf-8")
         counts = {key: 0 for key in "EPN?"}
         rows = 0
@@ -58,6 +64,11 @@ def main() -> int:
             rows += 1
             counts[status] += 1
         if rows != expected:
+            if allow_partial:
+                summary_rows.append(
+                    f"| {name} (в работе: {rows}/{expected}) | — | — | — | — | — |"
+                )
+                continue
             print(
                 f"{name}: expected {expected} function rows, found {rows}",
                 file=sys.stderr,
