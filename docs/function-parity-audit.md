@@ -3647,6 +3647,66 @@ R2O: `main.rs` (`r2o_release_udp_batch*`, `r2o_udp_handle_late_tail`),
 | `d2k_udp_out_batch` | 442–473 | 32 | выпуск пачки: may, marked, follow, failed | `main.rs:153 r2o_release_udp_batch` | P | — |
 | `d2k_udp_out_late` | 475–509 | 35 | поздний хвост: follow, defer, resend | `main.rs:226 r2o_udp_handle_late_tail` | P | — |
 
+### udp_release.c: построчная сверка
+
+- **Очередь `d2k_udp_release_new/enqueue/next_due/flush/next_ns`
+  (29–133) ↔ `R2oUdpDeferredVerdicts` (`r2o_udp_hold.rs:283`):** C
+  принимает `slots×batch_size`, проверяет переполнение `slots*batch`,
+  хранит `key/token/seq`, `next_seq++`; Rust фиксирован на 16×8,
+  `flow_key` выводит из пакета, `order++`, token отсутствует. `next_due`
+  C — минимум `(due,seq)` среди `due<=now`; Rust `r2o_flush` —
+  `min_by_key((due,order))`, формула совпадает, отдельного теста на
+  равные `due` нет. `flush`: C считает `complete/sent` и вызывает
+  `done(ctx,key,token,complete,sent)`; Rust отправляет все ID, копит
+  `first_error`, возвращает число пачек — callback и `token` отсутствуют.
+  `next_ns` C — абсолютные ns; Rust `timeout_ms` — относительные ms.
+  P.
+- **`d2k_udp_replay_fates`/`d2k_udp_release_batch`/`release_batch`
+  (135–247) ↔ `r2o_release_batch_with` (`:72`):** C строит массивы
+  `verdicts[]/resend[]`: owned head → DROP, хвосты → DROP+resend при
+  `can_resend`, иначе ACCEPT; `may[]` запрещает raw для ненейтральной
+  метки, `defer` откладывает вердикт за отложенной головой, `owned`
+  форсирует `can_resend`. Rust: `head_succeeded`, затем для каждого
+  хвоста `can_send_raw = head_succeeded && can_resend && neutral`;
+  при ошибке raw — ACCEPT, `resend_failed/resend_busy`,
+  `on_permanent_failure`; при ошибке DROP-вердикта — повтор с ACCEPT.
+  **Отличия:** Rust не имеет `may[]`, `defer`-callback и `owned`-
+  параметра; `resend_failed` считает только ошибки raw, а C
+  `fell_back` — ещё и ненейтральные метки; ненейтральный хвост C может
+  отложить через `defer`, Rust в `release_batch_with` сразу отдаёт
+  ACCEPT. P.
+- **`follow_stale/follow_drop/follow_age/live/busy/queue_full/refused`
+  (272–296) ↔ `R2oUdpFollowTable` (`:420`):** формула stale совпадает:
+  `now>=until && !same_seq && (seq==0 || (seq!=0 && entry.seq<seq))`.
+  C останавливает обход при `live==0`, Rust проходит все слоты; live--
+  и saturating_sub эквивалентны. Счётчики busy/queue_full/refused —
+  E; `refused_flow` (425–430) считает **каждый** отказ
+  (`++follow->refused`) и логирует первые 64, Rust `r2o_mark_failed`
+  считает **один раз на поток** (`if !failed`), поэтому семантика
+  счётчика разная. P.
+- **`follow_tuple/same_tuple/follow_mark/follow_put/follow_find/
+  follow_match` (302–378) ↔ `R2oUdpFollowKey`/`r2o_mark`/`r2o_match`:**
+  C `d2k_packet_parse` + proto 17, отвергает IPv4 MF, v4
+  `dst[0]>=224`, v6 `dst[0]==0xff`; Rust `from_packet` требует
+  `fragment & 0x3fff == 0` (эквивалентно MF+offset) и те же multicast.
+  `until = max(at,now)+5 мс`, `at_ns = at>now ? at : 0` ↔
+  `deferred_at = at>now`, `anchor = deferred_at.unwrap_or(now)`.
+  Rust не хранит `noted`; `follow_find` C возвращает `at_ns`, Rust
+  `r2o_match` — `Option<{at,failed}>`. P.
+- **`out_resend/out_owned_emit/refused_flow/out_verdict/
+  out_neutral/out_batch/out_late` (388–509):** C `out_resend` умеет
+  `send_at_owned` (deferred queue забирает ID, `taken=1`), `send_at`,
+  `send_now`, `ENOSPC`→`queue_full`, busy→`busy`, иначе первый
+  `failed_pkt`; `out_batch` считает `may[]`, `marked_tail`,
+  `defer_verdict`, `follow_put` с `at`, `noted/failed`; `out_late`
+  отдельно обрабатывает follow-match, marked, `defer_verdict` и
+  `out_resend`. Rust разносит это между `r2o_release_batch_with`
+  (immediate raw), `r2o_udp_handle_late_tail` (deferred_resends/
+  deferred_verdicts), `r2o_udp_packet_is_neutral` и
+  `r2o_mark_failed`; **нет** `send_at_owned/taken` в release-пути,
+  нет `noted`, `marked`-callback и `defer` в `release_batch_with`.
+  P — нужен differential на late-tail/ENOSPC/owned.
+
 ## nfq.c (12 функций)
 
 NFQUEUE: netlink bind/params с ACK, SO_RCVBUF(FORCE), recv ENOBUFS, вердикты.
