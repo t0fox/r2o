@@ -1702,7 +1702,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_props_bind_family` | 530–532 | 3 | bind TCP family 4/6 | main.rs bind helpers | **P*** | static-хелпер |
 | `d2k_props_bind_udp` | 534–536 | 3 | bind IPv4 UDP | main.rs bind helpers | **P*** | static-хелпер |
 | `d2k_props_bind_udp_family` | 538–540 | 3 | bind UDP family 4/6 | main.rs bind helpers | **P*** | static-хелпер |
-| `d2k_props_contact` | 542–545 | 4 | TCP-обращение к цели IPv4 с отправкой приветствия | main.rs ask contact | **P** | перенесено; C/Rust differential нет |
+| `d2k_props_contact` | 542–545 | 4 | TCP-обращение к цели IPv4 с отправкой приветствия | CLI `run_r2o_ask` (`main.rs:332-737`) | **P** | Реализовано только в CLI-опросе; production-discovery R2O этим путём вопросы не задаёт (см. `prop_send_next`). C/Rust differential контакта нет. |
 | `d2k_props_contact_on` | 547–551 | 5 | то же с готовым fd | main.rs ask contact | **P*** | static-хелпер |
 | `d2k_props_contact_on_family` | 553–558 | 6 | то же для family 4/6 | main.rs ask contact | **P*** | static-хелпер |
 | `tcp_timestamps_read` | 567–578 | 12 | прочитать /proc/sys/net/ipv4/tcp_timestamps | main.rs tcp profile probe | **P*** | static-хелпер Linux |
@@ -1713,7 +1713,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_props_question_plan` | 798–841 | 44 | план одного из 5 вопросов свойств (overlap/reorder/checksum/protocol/duplicates) | ask::question_plan | **P** | unit question_order_and_plan_parameters; C/Rust differential планов вопросов не найден |
 | `d2k_props_question_passed` | 845–864 | 20 | записать ответ вопроса в d2k_props (parse снимает checksum) | ask::record_question_passed | **P** | unit protocol_parse_requires_control_and_success_updates_only_its_proven_fields |
 | `question_retire` | 874–879 | 6 | снять пробный план вопроса с датапата | main.rs ask question retire | **P*** | static-хелпер |
-| `d2k_props_ask` | 881–884 | 4 | опрос свойств без трассировки | ask::compose_plan_texts/run_r2o_ask | **P** | обёртка; см. d2k_props_ask_traced |
+| `d2k_props_ask` | 881–884 | 4 | опрос свойств без трассировки | `run_r2o_ask` (`main.rs:332`), `ask::question_plan` | **P** | Обёртка существует только в CLI; в discovery C-опрос заменён raw-пробами (см. `prop_send_next`). |
 | `step_rc` | 889–898 | 10 | записать rc/err шага | ask::AskStep | **P*** | static-хелпер |
 | `d2k_props_ask_traced` | 900–1191 | 292 | 5 вопросов по очереди: bind порт, SET_NAME_PROBE, ACK, contact, EXCHANGE/APPLIED/REFUSED, остановка на первом прошедшем | main.rs run_r2o_ask + ask.rs | **P** | логика перенесена; CLI differential не сравнивает stdout, отдельные ветви NO_ACK/UNSENT/APPLIED проверены unit |
 | `append_fmt` | 1203–1213 | 11 | дописать форматированный текст | String::push_str | **E*** | static-хелпер |
@@ -2198,8 +2198,8 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `box_injects_rst` | 3834–3840 | 7 | коробка имеет сигнал rst | main.rs discovery box_injects_rst | **P*** | static-хелпер |
 | `rst_guard_wanted` | 3842–3847 | 6 | нужен guard rst_alien для RST-триггеров | main.rs discovery rst_guard | **P*** | static-хелпер |
 | `plan_arm_rst_guard` | 3853–3860 | 8 | добавить guard rst_alien в план | plan_text guard | **P*** | static-хелпер; classifier tests |
-| `prop_send_next` | 3864–3970 | 107 | следующий вопрос свойств: план, bind, mark, SET_NAME, JOB_CONTACT | main.rs discovery prop_send_next | **P** | логика перенесена; ask/scheduler differentials частично |
-| `prop_finish` | 3974–3989 | 16 | завершить опрос свойств и запросить sync | main.rs discovery prop_finish | **P*** | static-хелпер |
+| `prop_send_next` | 3864–3970 | 107 | следующий вопрос свойств: план, bind, mark, SET_NAME, JOB_CONTACT | `ask::question_plan` + CLI `run_r2o_ask` (`main.rs:469`); discovery — `raw_probe::sweep_poisons` | **P** | **Расхождение слоя:** C вызывает это в production-discovery при `verdict==OPAQUE && transport==6 && !have_arm && !owns_search` (`sched.c:11462-11474`, `:12182-12200`) и ставит временный план через управляющий сокет; R2O discovery вопросов через control не задаёт — только raw-пробы (12 свойств, `raw_probe.rs:840`), а `question_plan`/`wait_for_ask_proof` есть лишь в CLI `--ask` (`main.rs:469,646`). На роутере без raw-сокета C всё равно получает вектор, R2O — нет. |
+| `prop_finish` | 3974–3989 | 16 | завершить опрос свойств: снять последний план вопроса, закрыть fd, sync | CLI `run_r2o_ask`: `question_retire` (`main.rs:737`); в discovery аналога нет | **P*** | static-хелпер; в production-discovery R2O снимать нечего, потому что control-план вопроса не ставится. Снятие временного плана после raw-пробы не требуется. |
 | `task_fail` | 3993–4030 | 38 | завершить задачу неудачей: join, report, cleanup, cooldown/rest | main.rs discovery task_fail | **P** | scheduler differentials покрывают основные ветви |
 | `quic_deny_find` | 4032–4038 | 7 | найти QUIC-deny слот | main.rs discovery quic deny ring | **P*** | static-хелпер |
 | `quic_deny_install` | 4040–4112 | 73 | поставить quicdeny-план, backoff и пометить привязки на recheck | main.rs discovery quic deny | **P** | есть QUIC-deny тесты; C/Rust differential частичный |
@@ -2794,6 +2794,38 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 - **Вывод:** 26 AES/SHA/HMAC/HKDF/GCM функций — E (кроме двух
   HKDF-границ P), 22 P-256 и 11 X25519 — P; N в блоке нет.
 
+## Карта состояний sched.c → Rust
+
+C-машина состояний: `task_state` (`sched.c:596-635`), 15 значений. R2O не имеет
+единого enum: состояние выражено очередью, фазой диагностики (`phase:
+&'static str`), задачами воркера, каталогом и голосовыми контекстами.
+
+| C-состояние | вход C | что означает | Rust-эквивалент | статус/пробел |
+|---|---|---|---|---|
+| `T_FREE` | `sched.c:597` | слот свободен | нет записи в `R2oDiscoverySearches.entries`/`task_slots` | P*: явного слота нет, память освобождает `HashMap` |
+| `T_QUEUED` | `sched.c:8053` | подозрение сохранено, ждёт безопасного слота; поля `queued_ms/queued_event/hot_event/hot_count` (`:663-673`) | `R2oDiscoveryQueue` (`main.rs:7883`): `enqueue_with_planned` (`:9004`), `promote_with_planned` (`:9085`), `pop_with_tcp_preference_and_planned` (`:9155-9180`, ключ `(Reverse(hot_event), queued_event)`), `r2o_expire` (`:9060`) | P: порядок «горячие→FIFO» и TTL совпадают; C отдельно считает безопасный слот по `measurements_in_flight`, R2O — через `R2O_DISCOVERY_TASK_CAPACITY` и permit-гейт |
+| `T_ASKING` | `sched.c:7287,7311` | сетевой оракул в потоке | `R2oDiscoverySearches::set_asking` (`main.rs:8112`), `searches.asking.contains` (`:9424`), фаза «распознаём поведение» | E/P: classifier differentials; отдельного состояния нет |
+| `T_SHAPE_WAIT` | `sched.c:7157` | QUIC: снимок заказан, ждём `EV_SHAPE`; событие — `:8994-9008` | `R2oPendingQuicDiscovery` + `r2o_take_ready_quic_discovery` (`main.rs:9182-9216`), `queued_quic_snapshots` (`:12753`) | P: отдельного состояния нет; ожидание выражено очередью+permit, `T_SHAPE_WAIT` существует только для QUIC |
+| `T_PROPS_CONTACT` | `sched.c:3962`, тик `:11530-11562` | план-вопрос отправлен, обращение к цели в потоке | `main.rs` discovery → `raw_probe::sweep_poisons`; control-путь `question_plan` только CLI (`main.rs:469`) | **P с пробелом:** C задаёт 5 вопросов через управляющий сокет при `OPAQUE && TCP && !have_arm && !owns_search` (`:11462-11474`, `:12182-12200`); R2O discovery делает только raw-пробы, control-опрос в production отсутствует |
+| `T_PROPS_WAIT` | `sched.c:11562` | обращение состоялось, ждём обмен по своему потоку | обработчик `sched.c:10260-10300`; в Rust — `wait_for_ask_proof` (`main.rs:20194`), но только в CLI `--ask` | **P:** в discovery нет ожидания APPLIED на потоке вопроса; критерий «ServerHello + APPLIED» из C не воспроизведён в control-слое |
+| `T_PLANNING` | `sched.c:4465,4503,9150,11526` | вектор собран, ставим планы | генерация кандидатов `main.rs:10892-11900` (`known_plans/own_first/compose`) | P: набор источников совпадает, единой `verdict_to_plans` нет |
+| `T_TRIAL_SETTLE` | `sched.c:12345` | план записан, ждём принятия датапатом; предел `SCHED_TRIAL_SETTLE_MS=50` | `exchange_candidate_probe_with_settle` (`main.rs:22209`), `D2O_TRIAL_SETTLE_MS=50` (`:141`) | E/P: тест `d2o_missing_candidate_ack_expires_after_settle_window` |
+| `T_VERIFY` | `sched.c:4534,12050` | кандидат стоит, зонд в потоке | `r2o_run_discovery_candidate_trial_with_retries` (`main.rs:5785`) | P: retry/bare-retry/arm-retry перенесены, полного differential нет |
+| `T_VERIFY_WAIT` | `sched.c:11805,11975` | зонд вернулся, ждём APPLIED его потока; предел `SCHED_VERIFY_STEP_MS=5000` | сбор APPLIED `r2o_collect_controller_applied_events_until` (`main.rs:5661`), сверка `r2o_family_applied_flow_matches` (`:5705`), `wait_for_ask_proof` (`:20194`) | P: APPLIED сверяется по plan/trial/key, но отдельного состояния/таймаута 5 с нет |
+| `T_WATCHING` | `sched.c:8144,9621` | подтверждено, смотрим живой трафик | привязка каталога + live-группы (`r2o_confirm_discovery_outcome`, `main.rs:5347`) | P: подтверждение/привязка есть, наблюдение живой цели — через `live.rs` |
+| `T_RESTING` | `sched.c:4025` | неудача, цель отдыхает | `R2oDiscoveryCooldownRing` (`main.rs:8509`), `R2oDeadAddressCache` (`:8312`), `r2o_record_discovery_cooldown` (`:12608`) | E/P: cooldown differentials |
+| `T_VOICE_MEASURE` | `sched.c:7502` | C voice/STUN замер в воркере | `R2oVoiceLatestQueue` (`main.rs:9552`), `r2o_measure_voice_for_flow`; правило «другие endpoint'ы отбрасываются» — `:9556` | P: очередь/дедуп/срок совпадают, C/Rust differential замера частичный |
+| `T_VOICE_TRIAL` | `sched.c:7603` | временный arm на конкретной пятёрке, lease | `R2oVoiceTrialContext` (`main.rs:9735`), `install_r2o_voice_trial` (`:16264`), продление `:16318-16327` | P: lease/продление/снятие перенесены, точные коды NAK/истечения — unit |
+| `T_VOICE_WATCH` | `sched.c:9784` | приём применился к разговору, ждём ответа/молчания | `r2o_take_silent_voice_trial` (`main.rs:10192`), `R2O_VOICE_PENDING_GRACE=120с` (`:9667`) | P: тишина/истечение есть, полного differential нет |
+
+**Итог по карте:** переходы C в основном воспроизведены, но не одним автоматом:
+`T_QUEUED/T_SHAPE_WAIT` → очередь и permit-гейт, `T_PROPS_*` → raw-пробы
+(control-путь только в CLI), `T_PLANNING` → генераторы кандидатов,
+`T_TRIAL_SETTLE/T_VERIFY*` → `exchange_candidate_probe_with_settle` +
+сбор APPLIED, `T_RESTING` → cooldown-ring/dead-address, `T_VOICE_*` →
+голосовые контексты. Полной матрицы «состояние × событие × таймаут» нет —
+статус P для `d2k_sched_tick` остаётся обоснованным.
+
 ## Проверка полноты
 
 Строк среза: 692. Строк в таблицах: 692. E=127, P=564, N=1, ?=0; E+P+N+?=692. `E*`/`P*` учтены в E/P соответственно (static-хелперы).
@@ -3331,18 +3363,18 @@ execution/binding, added/dropped. R2O: `flow_journal.rs`.
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
-| `d2k_journal_new` | 16–31 | 16 | кольцо cap (0 — выключен) | `flow_journal.rs:552 with_capacity` | P | cap=0 в R2O — ошибка, а не «выключен» |
+| `d2k_journal_new` | 16–31 | 16 | кольцо cap (0 — журнал ничего не хранит, но считает added) | `flow_journal.rs:552-564` `with_capacity`, `:565-582` `push` | **P** | Поведение совпадает: `with_capacity(0)` возвращает `Ok`, `push` инкрементирует `added` и выходит при `capacity == 0`. Прежнее утверждение «cap=0 — ошибка» неверно. Отдельного теста cap=0 нет. |
 | `d2k_journal_free` | 33–39 | 7 | освобождение | `Drop` | E | RAII |
 | `d2k_suspect_text` | 41–53 | 13 | тексты SUSPECT_* (8 кодов + default) | `flow_journal.rs:28 r2o_suspect_text` | E | `:1027 journal_note_texts_match_d2o` |
 | `d2k_refuse_text` | 55–68 | 14 | тексты REFUSE_* (7 кодов + default) | `:45 r2o_refuse_text` | E | `:1027` |
-| `add_entry` (static) | 76–130 | 55 | общая запись: added/dropped, note по умолчанию, чистка имени | `:565 push` (note default `:530`), `:184 set_name` | P | очистка имени реализована, счётчики added/dropped есть |
+| `add_entry` (static) | 76–130 | 55 | общая запись: added/dropped, note по умолчанию, чистка имени | `flow_journal.rs:565-582` `push`, `:530-543` `default_journal_note`, `:184-196` `set_name` | **P** | Санитизация совпадает: байты 0x20..0x7e как есть, остальные → `.`, предел 63 (`journal.c:111-123`). Заметки: SUSPECT→`suspect_text`, UNSENT/DAMAGED→`refuse_text`, DONE→«план доисполнен» — совпадает с C. Отдельного теста на непечатаемое имя нет. |
 | `d2k_journal_add` | 132–137 | 6 | добавить наблюдение | `:565 push` | P | — |
 | `d2k_journal_add_applied` | 139–149 | 11 | APPLIED + plan/trial | `:650 record_applied` | P | D22 |
-| `d2k_journal_add_refused` | 151–158 | 8 | REFUSED + code/plan/trial | `:684 record_plan_refused` | P | D22 |
-| `d2k_journal_add_fate_bound` | 160–176 | 17 | DONE/UNSENT/DAMAGED + execution/binding | `:722 record_execution_failure`, `:667 record_plan_prepared` | P | три вида разнесены по вызывающим |
+| `d2k_journal_add_refused` | 151–158 | 8 | REFUSED + code/plan/trial | `flow_journal.rs:684-720` `record_plan_refused` | **P** | **Расхождение:** Rust принимает только `NOT_APPLIED|FLOW_UNFIT` и валидный ключ/привязку; C `refuse_coded` вызывается с `NOT_APPLIED/FLOW_UNFIT` (`session.c:1364,2445,2481`) и с `NONE` через `refuse()` (`:417`). Отказ `NONE` R2O отправляет событием, но в журнал не пишет. D22 покрывает основные коды. |
+| `d2k_journal_add_fate_bound` | 160–176 | 17 | DONE/UNSENT/DAMAGED + execution/binding | `flow_journal.rs:722-757` `record_execution_failure`, `:667-683` `record_plan_prepared` | **P** | **Расхождение:** C пишет ровно один kind на вызов (DONE, UNSENT или DAMAGED); Rust `record_execution_failure` всегда пишет `PlanUnsent` и при `damaged` **дополнительно** `PlanDamaged` — для повреждённого потока в R2O две записи против одной в C. `record_plan_prepared` соответствует локальной C-записи `PLAN_APPLIED`. |
 | `d2k_journal_add_fate` | 178–182 | 5 | fate без execution | те же без execution | P | — |
 | `d2k_journal_count` | 184–186 | 3 | число записей | `:990 count` | E | — |
-| `d2k_journal_at` | 188–196 | 9 | запись от старой к новой | `:994 get`, `:1014 iter` | P | кольцо заменено VecDeque с вытеснением |
+| `d2k_journal_at` | 188–196 | 9 | запись от старой к новой | `flow_journal.rs:994-1004 get`, `:1014-1020 iter` | **P** | Порядок совпадает: C отдаёт от `head` при заполненном кольце, Rust `VecDeque`-подобное кольцо с `head/length`; `get(i)` и `iter()` идут от старой к новой. Отдельного теста порядка нет. |
 | `d2k_journal_dropped` | 198–200 | 3 | вытеснено | `:1006 dropped` | E | — |
 | `d2k_journal_added` | 202–204 | 3 | добавлено всего | `:1010 added` | E | — |
 
@@ -3440,7 +3472,51 @@ flow-брони).
 | `sum16` (static) | 31–40 | 10 | RFC1071 | `:534 sum16` | E | — |
 | `fold` (static) | 42–47 | 6 | свёртка | `:545 checksum_value` | E | — |
 | `pseudo_sum` (static) | 57–65 | 9 | псевдозаголовок UDP | `build_udp_packet` внутри (`:271-285`) | P | вынесенной функции нет |
-| `d2k_wire_build_udp` | 67–207 | 141 | сборка UDP, запрет pre/seq_shift/TS/BADSUM, сумма всегда | `wire.rs:213 build_udp_packet` | P | `crates/r2o-datapath/tests/raw.rs:181` собирает пакет; divergence: R2O отвергает **любой** poison, включая IPID_ZERO, который C для IPv4 допускает, и заполняет TOS из пакета |
+| `d2k_wire_build_udp` | 67–207 | 141 | сборка UDP, запрет pre/seq_shift/TS/BADSUM, сумма всегда | `wire.rs:213-305 build_udp_packet` | **P** | **Подтверждённые расхождения:** (1) C для IPv4 допускает `POISON_IPID_ZERO` и пишет ID=0 (`wire_udp.c:136-137`), для IPv6 отвергает (`:75`); R2O отвергает **любой** `emission.poison != 0` (`wire.rs:222-231`), то есть IPv4 IPID_ZERO не поддерживается. (2) C ставит TOS=0 (`wire_udp.c:130`), R2O копирует `view.traffic_class` (`wire.rs:244`). (3) C отвергает только `TCPTS_BACK|BADSUM` (`:106-109`) и молча игнорирует TS_UP/MD5; R2O отвергает все poison-биты. TTL: C `e->ttl ?: c->ttl ?: 64` (`:148`), R2O `emission_ttl(emission, view.hop_limit)` (`wire.rs:425-433`) — эквивалентно, если `c->ttl` снят из пакета. Сумма всегда, 0→0xffff, проверки длины и IPv6-запрет IPID_ZERO совпадают. `crates/r2o-datapath/tests/raw.rs:181` собирает пакет, но divergence не покрывает. |
+
+## Углублённая сверка: journal/nl/icmpguard/wire_udp
+
+- **`journal.c` (14):** `d2k_journal_new` подтверждает, что C `cap=0` — это
+  «ничего не хранить, но считать added»; Rust `with_capacity(0)` +
+  `push` (`flow_journal.rs:552-582`) ведёт себя так же. `add_entry`:
+  санитизация имени 0x20..0x7e, иначе `.`, предел 63 (`journal.c:111-123`)
+  совпадает с `set_name` (`flow_journal.rs:184-196`); заметки по
+  умолчанию (`:530-543`) повторяют C. **Расхождения:** (1)
+  `record_plan_refused` принимает только `NOT_APPLIED|FLOW_UNFIT`
+  (`:684-706`), тогда как C `refuse()` пишет и `NONE` (`session.c:417`);
+  (2) `record_execution_failure` для повреждённого потока пишет
+  `PlanUnsent` **и** `PlanDamaged` (`:722-757`), а C — ровно один
+  `PLAN_DAMAGED` (`session.c:3493`); (3) числовые kind'ы R2O
+  (`PlanApplied=2`, `PlanDone=7`) не равны C (`PLAN_APPLIED=3`,
+  `PLAN_DONE=8`), но `EVENT_R2O_JOURNAL_ENTRY` в D2O отсутствует
+  (grep по `datapath/`, `core/` пуст), а v22-транслятор журнал не
+  пересылает (`control.rs:1783-1794`) — это R2O-локальный формат;
+  (4) `c_name` для `PlanDone` пуст (`flow_journal.rs:93`), поэтому
+  строка лога датапата для DONE печатает пустой вид (`main.rs:1168`).
+- **`nl.c` (19):** `MessageIter`/`QueuePacket::parse`/`verdict`/
+  `verdict_payload`/`config_command`/`config_params` сверены с
+  `netlink.rs`; тесты `:304` (verdict), `:321` (payload), `:332`
+  (config/attrs), `:355` (iterator), `:371` (packet attrs), `:403`
+  (payload range), `:429` (kernel error). Атрибуты `NFQA_HDR/PAYLOAD/
+  CAP_LEN/TS/MARK/OIF`, выравнивание и big-endian/host-endian
+  разложены так же; расхождений не найдено. E оставлены.
+- **`icmpguard.c` (7):** `parse_ip` (IPv4: n≥20, hl≥20, маска
+  `0x1fff` — не первый фрагмент; IPv6: n≥40; proto 6/17; n≥hl+8),
+  `d2k_icmpguard_note` (TTL ниже исходного, кольцо 256, `now?1`,
+  `have_id` для IPv4 при ip_id≠0) и `d2k_icmpguard_check` (IPv4:
+  proto 1, маска `0x3fff`, type 11/code 0; IPv6: len≥48, next=58,
+  type 3/code 0; сравнение family/proto/src/dst/sport/dport/l4word/
+  ip_len/optional ip_id/`q.ttl≤s->ttl`) построчно совпадают с
+  `r2o_icmp_guard.rs:44-140`. Rust добавляет счётчик `seen` и
+  `stats_line` — расширение, не пробел. Дифференциал
+  `test-icmp-guard-current-differential.sh` есть, не перезапускался;
+  статусы P сохранены.
+- **`wire_udp.c` (5):** подтверждены четыре различия сборки:
+  IPv4 `POISON_IPID_ZERO` (C разрешает, R2O отвергает любой poison),
+  TOS (C 0, R2O из пакета), набор отвергаемых poison-битов (C только
+  `TCPTS_BACK|BADSUM`, R2O все) и TTL (C `c->ttl`, R2O
+  `view.hop_limit`; эквивалентно при снятом TTL). Сумма всегда,
+  `0→0xffff`, длины и IPv6-запрет IPID_ZERO совпадают.
 
 ## addr.c (3 функции)
 

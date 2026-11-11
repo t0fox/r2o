@@ -526,18 +526,18 @@ execution/binding, added/dropped. R2O: `flow_journal.rs`.
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
-| `d2k_journal_new` | 16–31 | 16 | кольцо cap (0 — выключен) | `flow_journal.rs:552 with_capacity` | P | cap=0 в R2O — ошибка, а не «выключен» |
+| `d2k_journal_new` | 16–31 | 16 | кольцо cap (0 — журнал ничего не хранит, но считает added) | `flow_journal.rs:552-564` `with_capacity`, `:565-582` `push` | **P** | Поведение совпадает: `with_capacity(0)` возвращает `Ok`, `push` инкрементирует `added` и выходит при `capacity == 0`. Прежнее утверждение «cap=0 — ошибка» неверно. Отдельного теста cap=0 нет. |
 | `d2k_journal_free` | 33–39 | 7 | освобождение | `Drop` | E | RAII |
 | `d2k_suspect_text` | 41–53 | 13 | тексты SUSPECT_* (8 кодов + default) | `flow_journal.rs:28 r2o_suspect_text` | E | `:1027 journal_note_texts_match_d2o` |
 | `d2k_refuse_text` | 55–68 | 14 | тексты REFUSE_* (7 кодов + default) | `:45 r2o_refuse_text` | E | `:1027` |
-| `add_entry` (static) | 76–130 | 55 | общая запись: added/dropped, note по умолчанию, чистка имени | `:565 push` (note default `:530`), `:184 set_name` | P | очистка имени реализована, счётчики added/dropped есть |
+| `add_entry` (static) | 76–130 | 55 | общая запись: added/dropped, note по умолчанию, чистка имени | `flow_journal.rs:565-582` `push`, `:530-543` `default_journal_note`, `:184-196` `set_name` | **P** | Санитизация совпадает: байты 0x20..0x7e как есть, остальные → `.`, предел 63 (`journal.c:111-123`). Заметки: SUSPECT→`suspect_text`, UNSENT/DAMAGED→`refuse_text`, DONE→«план доисполнен» — совпадает с C. Отдельного теста на непечатаемое имя нет. |
 | `d2k_journal_add` | 132–137 | 6 | добавить наблюдение | `:565 push` | P | — |
 | `d2k_journal_add_applied` | 139–149 | 11 | APPLIED + plan/trial | `:650 record_applied` | P | D22 |
-| `d2k_journal_add_refused` | 151–158 | 8 | REFUSED + code/plan/trial | `:684 record_plan_refused` | P | D22 |
-| `d2k_journal_add_fate_bound` | 160–176 | 17 | DONE/UNSENT/DAMAGED + execution/binding | `:722 record_execution_failure`, `:667 record_plan_prepared` | P | три вида разнесены по вызывающим |
+| `d2k_journal_add_refused` | 151–158 | 8 | REFUSED + code/plan/trial | `flow_journal.rs:684-720` `record_plan_refused` | **P** | **Расхождение:** Rust принимает только `NOT_APPLIED|FLOW_UNFIT` и валидный ключ/привязку; C `refuse_coded` вызывается с `NOT_APPLIED/FLOW_UNFIT` (`session.c:1364,2445,2481`) и с `NONE` через `refuse()` (`:417`). Отказ `NONE` R2O отправляет событием, но в журнал не пишет. D22 покрывает основные коды. |
+| `d2k_journal_add_fate_bound` | 160–176 | 17 | DONE/UNSENT/DAMAGED + execution/binding | `flow_journal.rs:722-757` `record_execution_failure`, `:667-683` `record_plan_prepared` | **P** | **Расхождение:** C пишет ровно один kind на вызов (DONE, UNSENT или DAMAGED); Rust `record_execution_failure` всегда пишет `PlanUnsent` и при `damaged` **дополнительно** `PlanDamaged` — для повреждённого потока в R2O две записи против одной в C. `record_plan_prepared` соответствует локальной C-записи `PLAN_APPLIED`. |
 | `d2k_journal_add_fate` | 178–182 | 5 | fate без execution | те же без execution | P | — |
 | `d2k_journal_count` | 184–186 | 3 | число записей | `:990 count` | E | — |
-| `d2k_journal_at` | 188–196 | 9 | запись от старой к новой | `:994 get`, `:1014 iter` | P | кольцо заменено VecDeque с вытеснением |
+| `d2k_journal_at` | 188–196 | 9 | запись от старой к новой | `flow_journal.rs:994-1004 get`, `:1014-1020 iter` | **P** | Порядок совпадает: C отдаёт от `head` при заполненном кольце, Rust `VecDeque`-подобное кольцо с `head/length`; `get(i)` и `iter()` идут от старой к новой. Отдельного теста порядка нет. |
 | `d2k_journal_dropped` | 198–200 | 3 | вытеснено | `:1006 dropped` | E | — |
 | `d2k_journal_added` | 202–204 | 3 | добавлено всего | `:1010 added` | E | — |
 
@@ -635,7 +635,51 @@ flow-брони).
 | `sum16` (static) | 31–40 | 10 | RFC1071 | `:534 sum16` | E | — |
 | `fold` (static) | 42–47 | 6 | свёртка | `:545 checksum_value` | E | — |
 | `pseudo_sum` (static) | 57–65 | 9 | псевдозаголовок UDP | `build_udp_packet` внутри (`:271-285`) | P | вынесенной функции нет |
-| `d2k_wire_build_udp` | 67–207 | 141 | сборка UDP, запрет pre/seq_shift/TS/BADSUM, сумма всегда | `wire.rs:213 build_udp_packet` | P | `crates/r2o-datapath/tests/raw.rs:181` собирает пакет; divergence: R2O отвергает **любой** poison, включая IPID_ZERO, который C для IPv4 допускает, и заполняет TOS из пакета |
+| `d2k_wire_build_udp` | 67–207 | 141 | сборка UDP, запрет pre/seq_shift/TS/BADSUM, сумма всегда | `wire.rs:213-305 build_udp_packet` | **P** | **Подтверждённые расхождения:** (1) C для IPv4 допускает `POISON_IPID_ZERO` и пишет ID=0 (`wire_udp.c:136-137`), для IPv6 отвергает (`:75`); R2O отвергает **любой** `emission.poison != 0` (`wire.rs:222-231`), то есть IPv4 IPID_ZERO не поддерживается. (2) C ставит TOS=0 (`wire_udp.c:130`), R2O копирует `view.traffic_class` (`wire.rs:244`). (3) C отвергает только `TCPTS_BACK|BADSUM` (`:106-109`) и молча игнорирует TS_UP/MD5; R2O отвергает все poison-биты. TTL: C `e->ttl ?: c->ttl ?: 64` (`:148`), R2O `emission_ttl(emission, view.hop_limit)` (`wire.rs:425-433`) — эквивалентно, если `c->ttl` снят из пакета. Сумма всегда, 0→0xffff, проверки длины и IPv6-запрет IPID_ZERO совпадают. `crates/r2o-datapath/tests/raw.rs:181` собирает пакет, но divergence не покрывает. |
+
+## Углублённая сверка: journal/nl/icmpguard/wire_udp
+
+- **`journal.c` (14):** `d2k_journal_new` подтверждает, что C `cap=0` — это
+  «ничего не хранить, но считать added»; Rust `with_capacity(0)` +
+  `push` (`flow_journal.rs:552-582`) ведёт себя так же. `add_entry`:
+  санитизация имени 0x20..0x7e, иначе `.`, предел 63 (`journal.c:111-123`)
+  совпадает с `set_name` (`flow_journal.rs:184-196`); заметки по
+  умолчанию (`:530-543`) повторяют C. **Расхождения:** (1)
+  `record_plan_refused` принимает только `NOT_APPLIED|FLOW_UNFIT`
+  (`:684-706`), тогда как C `refuse()` пишет и `NONE` (`session.c:417`);
+  (2) `record_execution_failure` для повреждённого потока пишет
+  `PlanUnsent` **и** `PlanDamaged` (`:722-757`), а C — ровно один
+  `PLAN_DAMAGED` (`session.c:3493`); (3) числовые kind'ы R2O
+  (`PlanApplied=2`, `PlanDone=7`) не равны C (`PLAN_APPLIED=3`,
+  `PLAN_DONE=8`), но `EVENT_R2O_JOURNAL_ENTRY` в D2O отсутствует
+  (grep по `datapath/`, `core/` пуст), а v22-транслятор журнал не
+  пересылает (`control.rs:1783-1794`) — это R2O-локальный формат;
+  (4) `c_name` для `PlanDone` пуст (`flow_journal.rs:93`), поэтому
+  строка лога датапата для DONE печатает пустой вид (`main.rs:1168`).
+- **`nl.c` (19):** `MessageIter`/`QueuePacket::parse`/`verdict`/
+  `verdict_payload`/`config_command`/`config_params` сверены с
+  `netlink.rs`; тесты `:304` (verdict), `:321` (payload), `:332`
+  (config/attrs), `:355` (iterator), `:371` (packet attrs), `:403`
+  (payload range), `:429` (kernel error). Атрибуты `NFQA_HDR/PAYLOAD/
+  CAP_LEN/TS/MARK/OIF`, выравнивание и big-endian/host-endian
+  разложены так же; расхождений не найдено. E оставлены.
+- **`icmpguard.c` (7):** `parse_ip` (IPv4: n≥20, hl≥20, маска
+  `0x1fff` — не первый фрагмент; IPv6: n≥40; proto 6/17; n≥hl+8),
+  `d2k_icmpguard_note` (TTL ниже исходного, кольцо 256, `now?1`,
+  `have_id` для IPv4 при ip_id≠0) и `d2k_icmpguard_check` (IPv4:
+  proto 1, маска `0x3fff`, type 11/code 0; IPv6: len≥48, next=58,
+  type 3/code 0; сравнение family/proto/src/dst/sport/dport/l4word/
+  ip_len/optional ip_id/`q.ttl≤s->ttl`) построчно совпадают с
+  `r2o_icmp_guard.rs:44-140`. Rust добавляет счётчик `seen` и
+  `stats_line` — расширение, не пробел. Дифференциал
+  `test-icmp-guard-current-differential.sh` есть, не перезапускался;
+  статусы P сохранены.
+- **`wire_udp.c` (5):** подтверждены четыре различия сборки:
+  IPv4 `POISON_IPID_ZERO` (C разрешает, R2O отвергает любой poison),
+  TOS (C 0, R2O из пакета), набор отвергаемых poison-битов (C только
+  `TCPTS_BACK|BADSUM`, R2O все) и TTL (C `c->ttl`, R2O
+  `view.hop_limit`; эквивалентно при снятом TTL). Сумма всегда,
+  `0→0xffff`, длины и IPv6-запрет IPID_ZERO совпадают.
 
 ## addr.c (3 функции)
 
@@ -678,6 +722,52 @@ ECH, середина приветствия. R2O: `r2k-core/src/tls.rs`.
 | `d2k_packet_u16` (inline) | 20–22 | 3 | big-endian u16 | `packet.rs:231 read_u16` | E | `packet.rs` тесты |
 | `d2k_packet_parse` (inline) | 24–70 | 47 | разбор IPv4/IPv6, опции, ext-заголовки, L4 | `packet.rs:69 PacketView::parse` | E | `r2k-core/tests/network.rs:36+` |
 | `d2k_key_equal` (inline) | 76–83 | 8 | равенство ключа | `#[derive(PartialEq)]` (`engine.rs:41`, `capture.rs:13`) | E | — |
+
+## Углублённая сверка: nat/ctq/sched/addr/tls/include
+
+- **`nat.c` (5):** `parse_ip4` — P (strict IPv4 без inet_pton,
+  `r2o-nat-proc-differential.sh`; unit на переполнение/хвост нет);
+  `field_after` — P (R2O парсит `key=value` токенами строже C);
+  `d2k_nat_outside`/`parse_address` — P* (обёртки);
+  `d2k_nat_outside_family` — E: проход файла, прямой/обратный кортеж,
+  best TTL, коды -1/0/1; differential + unit
+  `отличает_отсутствие_таблицы_от_отсутствия_записи`.
+- **`ctq.c` (20):** E — `align4`, `wr16h/wr32h/rd16h/rd64be/rd32be`,
+  `put`, `d2k_ct_get_req`, `counter`, `tcp_state`: encode test
+  `conntrack.rs:543`, counters `:487`, 32-bit `:529`. **P:**
+  `open_nest/close_nest` (length-prefix вместо отдельных функций),
+  `d2k_ct_info_parse` (C-коды -1/0/1/2 заменены `Option`/`info=None`),
+  `d2k_ct_counters_parse`, `d2k_ct_query_info_fd` (C: send + до 8 recv
+  без ожидания; Rust: `query_entry`/`receive_entry` с poll),
+  `d2k_ct_query_fd`, `reply_errno`, `d2k_ct_probe_fd`
+  (`r2o-conntrack-ctget-differential.sh`), `d2k_ct_open` (netlink
+  SOCK_NONBLOCK/bind). Не-Linux `d2k_ct_open` — E-заглушка.
+- **`sched.c` (16):** E — `d2k_sched_new` (ёмкость/freelist,
+  `scheduler.rs:89`), `free` (RAII), `earlier` (due,seq),
+  `d2k_sched_push`, `pop_due`, `next_ns`, `count`, `refusals`
+  (тесты `:526/:563`). **P:** `grow_slot_size` (Vec не копирует),
+  `sift_up/down` (отсортированный Vec), `push_serial` (execution →
+  ticket), `push_owned`, `pop_due_serial/ex` (ветка `OversizedOwned`
+  не тестирована; D21 покрывает базовый oversized).
+- **`addr.c` (3):** `d2k_addr_parse` — E (`addr.rs:11`, тесты
+  `network.rs:6/22`, включая `%zone`); `d2k_addr_text` — P (C
+  возвращает 0 при нехватке cap, Rust `Display` не усекает);
+  `d2k_addr_equal` — E (`PartialEq`, `network.rs:16`).
+- **`tls.c` (7):** все E — `rd16`, `skip_u8/u16_vec`, `has_ech_offer`,
+  `has_tls13`, `find_sni`, `d2k_tls_parse`: `tls.rs` тесты
+  (`:367-:525`), сверка с `tls_parser` (`:394`), fuzz-префиксы (`:503`).
+- **`include/*.h` (14):** E — `d2k_packet_u16/parse` (`packet.rs`,
+  `tests/network.rs:36+`), `d2k_key_equal` (`PartialEq`). **P:**
+  `d2k_ctl_binding_write/read` (формат совпадает, отдельного unit на
+  раскладку нет), `d2k_http_request_stream_init/line/feed`
+  (`httpup.rs`, `hold.rs:2401` косвенно), `d2k_hr_decimal/token/field/
+  extensions/headers` (`http_response.rs:281/360/372`;
+  `test-http-chunk-framing-differential.sh`),
+  `d2k_http_response_feed` (`http_response.rs:55`, `hold.rs` косвенно).
+- **Вывод:** 65 функций; E — nat main, ctq кодирование/счётчики,
+  sched базовые, addr parse/equal, весь tls, packet/key; P — CT-разбор/
+  query, sched owned/oversized, addr text, inline HTTP/binding.
+  Новых N нет.
 
 ## Углублённая сверка: 11 N-функций
 
