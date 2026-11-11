@@ -34,6 +34,13 @@ SHA-256 тела. В реестр входят только `core`, `datapath` �
 `panel` и Telegram-донор `src/` исключены (для Telegram источником является
 z2kOW, а не C11 D2O).
 
+Повторный запуск на том же дереве даёт тот же результат:
+
+```text
+functions=1982 files=96 out=/tmp/audit-recheck.json
+recheck 1982 1982 equal True
+```
+
 ## Статусы
 
 | Код | Значение | Что требуется для доказательства |
