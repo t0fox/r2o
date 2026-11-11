@@ -80,32 +80,35 @@ recheck 1982 1982 equal True
 
 ### Текущий прогресс (2026-11-11)
 
-Проверены четыре группы из пяти, **1290 из 1982** функций:
+Проверены все пять групп, **1982 из 1982** функций:
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 220 | 311 | 16 | 1 |
+| core-state | 692 | 127 | 564 | 1 | 0 |
 | datapath-core | 400 | 120 | 270 | 10 | 0 |
 | datapath-plan | 183 | 108 | 69 | 5 | 1 |
 | detect | 159 | 49 | 98 | 12 | 0 |
-| **Итого проверено** | **1290** | **497** | **748** | **43** | **2** |
-| core-state (в работе) | 692 | — | — | — | — |
+| **Итого** | **1982** | **624** | **1312** | **44** | **2** |
 
-Это не оценка паритета: 748 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 1313 P означают «код есть, доказательство ветвей
 неполное», 44 N — в основном диагностические/CLI-функции и несколько реальных
 расхождений (`SET_HTTPS` TTL, `ARM_SHAPE` UDP, `wire_udp` IPID_ZERO,
 `udpruntime` raw UDP, `tls12/tls13` record-layer).
+
+Статусы пересчитаны строго по колонке «статус»: описание вида «N цифр подряд»
+больше не считается статусом, экранированные `\|` не сдвигают колонки.
 
 
 ## Отчёты групп
 
 | Группа | Функций | Отчёт | Состояние |
 |---|---:|---|---|
-| core-net: TLS/HTTP/ECH/QUIC/voice/verify | 548 | `docs/audit/core-net.md` | готовится |
-| core-state: catalog/sched/diagnostics/link/… | 692 | `docs/audit/core-state.md` | готовится |
-| datapath-core: d2kd/session/hold/udp/nfq/… | 400 | `docs/audit/datapath-core.md` | готовится |
-| datapath-plan: plans/ctl/raw/route/… | 183 | `docs/audit/datapath-plan.md` | готовится |
-| detect: trigger/poison/raw/classify/response | 159 | `docs/audit/detect.md` | готовится |
+| core-net: TLS/HTTP/ECH/QUIC/voice/verify | 548 | `docs/audit/core-net.md` | готов |
+| core-state: catalog/sched/diagnostics/link/… | 692 | `docs/audit/core-state.md` | готов |
+| datapath-core: d2kd/session/hold/udp/nfq/… | 400 | `docs/audit/datapath-core.md` | готов |
+| datapath-plan: plans/ctl/raw/route/… | 183 | `docs/audit/datapath-plan.md` | готов |
+| detect: trigger/poison/raw/classify/response | 159 | `docs/audit/detect.md` | готов |
 
 ## Уже подтверждённые differential-контракты (контекст, не заменяет аудит)
 
@@ -137,11 +140,11 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 220 | 311 | 16 | 1 |
-| core-state | 692 | 126 | 565 | 1 | 0 |
+| core-state | 692 | 127 | 564 | 1 | 0 |
 | datapath-core | 400 | 120 | 270 | 10 | 0 |
 | datapath-plan | 183 | 108 | 69 | 5 | 1 |
 | detect | 159 | 49 | 98 | 12 | 0 |
-| **Итого** | **1982** | **623** | **1313** | **44** | **2** |
+| **Итого** | **1982** | **624** | **1312** | **44** | **2** |
 
 
 ---
@@ -1124,8 +1127,8 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `core/link.c` | 43 | 2 | 41 | 0 | 0 | `r2k-core/control.rs` (decode/encode), `main.rs::ControlClient` |
 | `core/match.c` | 3 | 0 | 3 | 0 | 0 | `catalog.rs` (`is_compatible_with`, `match_fingerprint`) |
 | `core/meas.c` | 13 | 0 | 12 | 1 | 0 | `response.rs`, `raw_probe.rs`, `classify.rs`, `r2o_quic_http3.rs` |
-| `core/measured.c` | 11 | 1 | 10 | 0 | 0 | `classify_measured.rs`, `r2o_rx_volume.rs` |
-| `core/net4.c` | 4 | 4 | 0 | 0 | 0 | `std::net`, `quic_replay.rs`, `discovery.rs` |
+| `core/measured.c` | 11 | 3 | 8 | 0 | 0 | `classify_measured.rs`, `r2o_rx_volume.rs` |
+| `core/net4.c` | 4 | 3 | 1 | 0 | 0 | `std::net`, `quic_replay.rs`, `discovery.rs` |
 | `core/p256.c` | 22 | 0 | 22 | 0 | 0 | `hpke`/`ring` (P-256 в rustls) |
 | `core/plantlv.c` | 20 | 20 | 0 | 0 | 0 | `plan_text.rs` |
 | `core/props.c` | 5 | 0 | 5 | 0 | 0 | `quic_replay.rs`, `r2o_quic_http3.rs` |
@@ -1134,7 +1137,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `core/x25519.c` | 11 | 0 | 11 | 0 | 0 | `hpke`/`x25519-dalek` (X25519) |
 | `core/include/d2k_link.h` | 3 | 3 | 0 | 0 | 0 | `r2k-core/control.rs` |
 | `core/include/d2k_resource.h` | 6 | 0 | 6 | 0 | 0 | `r2o_resource.rs` |
-| **Итого** | **692** | **126** | **565** | **1** | **0** | |
+| **Итого** | **692** | **127** | **564** | **1** | **0** | |
 
 ## Ключевые пробелы (P/N)
 
@@ -1541,17 +1544,17 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 |---|---:|---:|---|---|---|---|
 | `nap_us` | 52–55 | 4 | пауза между кусками отправки | std::thread::sleep | **P*** | static-хелпер; тайминг не сравнивался |
 | `d2k_mark_real` | 61–70 | 10 | SO_MARK на сокете зонда | setsockopt в response/raw_probe | **P*** | static-хелпер платформенного слоя |
-| `d2k_accept_serverhello` | 87–94 | 8 | принять только TLS ServerHello | classify::trigger_accepts(Accept::ServerHello) | **P** | правило перенесено, тест classify.rs; отдельного C/Rust differential именно для accept нет |
-| `d2k_accept_tls_record` | 96–99 | 4 | принять TLS handshake/alert запись | classify::trigger_accepts(Accept::TlsRecord) | **P** | unit-тест classify.rs; C/Rust differential не найден |
-| `d2k_accept_any` | 101–104 | 4 | принять любой непустой ответ | classify::trigger_accepts(Accept::Any) | **P** | unit-тест classify.rs |
-| `cuts_valid` | 109–116 | 8 | проверка возрастающих разрезов внутри приветствия | classify::split_offsets + валидация | **P*** | static-хелпер; ветви отказов покрыты classifier differential частично |
-| `send_all` | 124–136 | 13 | доотправка буфера с учётом partial write | response::probe_trigger send-loop | **P*** | static-хелпер; EINTR/send-timeout покрыты r2o-meas-differential.sh |
-| `connect_bounded` | 142–173 | 32 | неблокирующий connect с poll и SO_ERROR | response::dial_probe_target | **P** | реализовано; отдельного differential на все errno-ветви нет |
-| `d2k_meas_once` | 175–267 | 93 | один TCP-замер: connect, разрезы, пауза, приём и accept-фильтр | response::probe_trigger / raw_probe::probe_tcp_split | **P** | r2o-meas-differential.sh покрывает send-timeout, recv-EINTR и send-EINTR; полный набор connect/accept/raw-ветвей не сравнивался |
-| `d2k_meas` | 269–293 | 25 | серия повторов замера и tally pass/fail/unproven/marked | classify::measure + Tally | **P** | счётчики и повторы используются в classifier differential; отдельного C/Rust теста tally нет |
-| `udp_now_ms` | 307–311 | 5 | монотонное время для реестра UDP-портов | std::time::Instant | **P*** | static-хелпер |
-| `d2k_udp_port_claim` | 313–339 | 27 | недавно занятый локальный UDP-порт (анти-residual), кольцо 16 | r2o_quic_http3::r2o_quic_port_was_recently_claimed | **P** | реализовано в QUIC-сокете; тест r2o_quic_http3.rs на свежие порты, отдельного C/Rust differential нет |
-| `d2k_udp_port_forget_all` | 341–346 | 6 | сброс реестра недавних UDP-портов | нет прямого аналога | **N** | в R2O реестр живёт в static Mutex и не сбрасывается; используется только тестами/перезапуском |
+| `d2k_accept_serverhello` | 87–94 | 8 | принять только TLS ServerHello | `classify.rs:543-547` `trigger_accepts(Accept::ServerHello)` | **P** | Байтовое правило совпадает: `len>=6`, record type `0x16`, major `0x03`, handshake type `0x02`. Целевого C/Rust differential нет; правило используется в `response.rs:882` и покрыто тестами `response.rs:1442-1463`. |
+| `d2k_accept_tls_record` | 96–99 | 4 | принять TLS handshake/alert запись | `classify.rs:548-550` `trigger_accepts(Accept::TlsRecord)` | **P** | Совпадает: `len>=3`, type `0x16|0x15`, major `0x03`. Используется для белого ClientHello (`main.rs:34054`), но отдельного C/Rust differential на accept нет. |
+| `d2k_accept_any` | 101–104 | 4 | принять любой непустой ответ | `classify.rs:551` `trigger_accepts(Accept::Any)` | **P** | Совпадает: `!bytes.is_empty()`. Покрыто сокетными тестами `response.rs:1480-1528`, не C-оракулом. |
+| `cuts_valid` | 109–116 | 8 | проверка строго возрастающих разрезов внутри приветствия; любой плохой разрез — отказ всего опыта | `classify.rs:28-56` `split_offsets` фильтрует/сортирует; `raw_probe.rs:1150` требует ровно один разрез | **P** | **Расхождение:** C отвергает весь опыт при `cut<=prev` или `cut>=len`; R2O `split_offsets` молча выбрасывает такие разрезы, сортирует и берёт первые 8. Raw-путь R2O при `cuts.len()!=1` возвращает `Local("invalid cut")`, тогда как C штатно шлёт несколько разрезов через сокет. Нужен differential на несколько/невалидные разрезы. |
+| `send_all` | 124–136 | 13 | доотправка буфера с учётом partial write; ошибка отправки — сбой опыта, не «молчание» цели | `response.rs:795-839` send-loop в `probe_trigger` | **P*** | partial write обрабатывается циклом, `EAGAIN` — через `poll_one(POLLOUT)`, `EINTR` возвращает `Transport("write: ...")`, как C `n<=0` возвращает `-1`. Отличие: C блокирующий сокет с `SO_SNDTIMEO`, R2O — неблокирующий с явным poll. `r2o-meas-differential.sh` покрывает send-timeout/EINTR. |
+| `connect_bounded` | 142–173 | 32 | неблокирующий connect с poll и SO_ERROR | `response.rs:254-300` `connect_until` | **P** | Проверка `EINPROGRESS/EALREADY/EINTR`, poll по `POLLOUT`, затем `SO_ERROR` — совпадает. C после успеха возвращает блокирующий режим; R2O сокет остаётся неблокирующим (`probe_socket`, `SOCK_NONBLOCK`), а send/recv обходят `EAGAIN` через poll. Поведение эквивалентно, но отдельного differential на все errno-ветви нет. |
+| `d2k_meas_once` | 175–267 | 93 | один TCP-замер: literal IPv4/IPv6, connect, разрезы, пауза, recv 512, accept | `response.rs:776-892` `probe_trigger`; `raw_probe.rs:1140` `probe_tcp_split` | **P** | **Расхождение пути:** C всегда шлёт разрезы обычным TCP-сокетом; R2O на Linux при непустых `cuts` уходит в raw-путь `probe_tcp_split` (только один разрез). C отвергает IPv6 zone-id (`%`), R2O резолвит host через `ToSocketAddrs` и фильтрует по семейству. `SO_MARK`, `TCP_NODELAY`, `SO_RCVTIMEO`, recv 512 и accept-фильтр перенесены. `r2o-meas-differential.sh` покрывает send/recv EINTR и таймауты, но не multi-cut и не IPv6 zone. |
+| `d2k_meas` | 269–293 | 25 | серия повторов, `pass/fail/err/unproven`, метка серии — AND по всем дозвонам | `classify.rs:992-1000` `Tally`, `:1076-1240` `measure`, `:628-636` `with_mark_status` | **P** | Логика совпадает: `repeats<=0 -> 3`, `ERR` даёт `errors+1` и `fail+1`, `UNPROVEN` даёт `unproven+1` и `fail+1`, `unmarked` становится sticky. Тесты `classify.rs:2129-2171`, `2303-2361` проверяют unmarked/unproven. Отдельного C/Rust differential на серию нет. |
+| `udp_now_ms` | 307–311 | 5 | монотонное время для реестра UDP-портов | `std::time::Instant` | **P*** | static-хелпер; монотонность обеспечена `Instant`, прямого сравнения с `CLOCK_MONOTONIC` нет. |
+| `d2k_udp_port_claim` | 313–339 | 27 | недавно занятый локальный UDP-порт (анти-residual): кольцо 4096, возраст 480 с | `r2o_quic_http3.rs:16,19,127-147` `r2o_quic_port_was_recently_claimed` | **P** | C: `UDP_RECENT_CAP=4096` (`meas.c:300`), `D2K_UDP_RESIDUAL_MS=480000` (`d2k_meas.h:196`); R2O: `R2O_QUIC_RECENT_PORTS=4096`, `R2O_QUIC_RESIDUAL_PORT_AGE=480s`. API отличается (C принимает fd, R2O — port), но правило «недавно занят → отвергнуть и держать сокет» перенесено в цикл `r2o_quic_http3.rs:108-121`. Отдельного C/Rust differential нет. |
+| `d2k_udp_port_forget_all` | 341–346 | 6 | сброс реестра недавних UDP-портов | нет прямого аналога | **N** | Подтверждено: единственный вызов в D2O — `core/test_quic_arm_data.c:440`; production-вызовов нет. В R2O реестр живёт в `static OnceLock<Mutex<...>>` (`r2o_quic_http3.rs:21`) и не сбрасывается. Это тестовый сброс, не packet-path контракт. |
 
 ### `core/measured.c`
 
@@ -1559,21 +1562,21 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 |---|---:|---:|---|---|---|---|
 | `append_fmt` | 10–20 | 11 | дописать форматированный текст в буфер с проверкой места | String::push_str / write! | **P*** | static-хелпер |
 | `append_hex` | 22–28 | 7 | дописать байты как hex | hex-хелпер в classify_measured | **P*** | static-хелпер |
-| `d2k_white_decoy_hello` | 33–44 | 12 | собрать белое ClientHello с подменой SNI | r2o_rx_volume::r2o_rx_volume_plan* + hello::modern_client_hello | **P** | план сверяется C-фикстурой для вариантов 0/4; сама сборка hello тестами не сравнивалась |
-| `template_plan` | 57–82 | 26 | шаблон tcp-template-v1 с badsum/tcpts/autottl | classify_measured::measured_plan_text | **P** | фикстуры C покрывают часть вариантов; ветви tcpts/autottl/minexec проверены unit |
-| `d2k_rx_volume_plan_named` | 84–88 | 5 | RX-volume план с явным именем | r2o_rx_volume::r2o_rx_volume_plan | **P** | C-фикстуры покрывают варианты 0 и 4; варианты 1/2/3 проверены unit, не C-оракулом |
-| `d2k_rx_volume_plan_client` | 90–110 | 21 | RX-volume план с учётом наличия TCP timestamps | r2o_rx_volume::r2o_rx_volume_plan_for_client | **P** | фикстуры покрывают только client_has_ts=1 (split2/split5); ветка autottl без TS проверена unit |
+| `d2k_white_decoy_hello` | 33–44 | 12 | собрать белое ClientHello с подменой SNI | `hello.rs:598` `r2o_rx_fake_client_hello` (профиль `profiles/r2o_rx_fake.hex`) | **E** | Прямая C-фикстура: `main.rs:34050-34061` сравнивает `r2o_discovery_white_trigger("hcaptcha.com").payload` с `tests/fixtures/r2o-rx-fake-hcaptcha-c.bin`; длинное имя покрыто C-фикстурой плана `r2o_rx_volume.rs:165-177`. |
+| `template_plan` | 57–82 | 26 | шаблон tcp-template-v1: hello в payload, poison badsum/tcpts/autottl, fake ×8, split | `r2o_rx_volume.rs:26-58` `r2o_rx_volume_plan_for_client` | **P** | C-фикстуры `r2o-rx-volume-hcaptcha-split2-c.txt` и `split5-c.txt` покрывают ветку `tcpts` (client_has_ts=1) и точный текст; ветка `autottl=1,2-12` проверена unit-тестом `r2o_rx_volume.rs:112-128`, но не C-фикстурой. C `badsum`-ветка в этом шаблоне не покрыта. |
+| `d2k_rx_volume_plan_named` | 84–88 | 5 | RX-volume план с явным именем (всегда client_has_ts=1) | `r2o_rx_volume.rs:21-23` `r2o_rx_volume_plan` | **P** | Обёртка `for_client(..., true)` совпадает; C-фикстуры покрывают variant 0/4 и длинное имя, варианты 1/2/3 — только unit `r2o_rx_volume.rs:94-110`. C дополнительно проверяет `shape==MODERN`; в Rust параметра shape нет (см. `client`). |
+| `d2k_rx_volume_plan_client` | 90–110 | 21 | RX-volume план с учётом TCP timestamps клиента | `r2o_rx_volume.rs:26-58` `r2o_rx_volume_plan_for_client` | **P** | **Расхождение сигнатуры:** C отвергает `shape != D2K_SHAPE_MODERN` (`measured.c:96-98`), R2O shape не принимает и всегда строит modern-план. Ветка `client_has_ts=0` (autottl) есть только в unit-тесте `r2o_rx_volume.rs:112-128`, C-фикстуры для неё нет. |
 | `d2k_rx_volume_plan` | 114–117 | 4 | RX-volume план для hcaptcha.com | r2o_rx_volume::r2o_rx_volume_plan | **E** | та же C-фикстура варианта 0 |
-| `measured_payload` | 121–138 | 18 | payload-pad64 с base64-префиксом | classify_measured::append_measured_payload | **P** | unit/фикстуры покрывают часть; base64-границы не сравнивались |
-| `d2k_tcp_split_plan` | 140–151 | 12 | план split payload_start с gap | classify_measured / plan_text | **P** | используется classifier и проверяется plan_text; прямого C/Rust differential нет |
-| `d2k_arm_plan_measured_cap` | 153–385 | 233 | сборка измеренного плана из arm с учётом send_cap (oob/disorder/seqovl/fake/ttl/md5/tcpts/autottl) | classify_measured::plan_text_for_poison | **P** | много ветвей; differential покрывает обычные fake/split/oob, редкие md5/autottl/seqovl проверены unit, не C-oracle |
-| `d2k_arm_plan_measured` | 387–390 | 4 | измеренный план без ограничения send_cap | classify_measured::plan_text_for_poison | **P** | обёртка; см. d2k_arm_plan_measured_cap |
+| `measured_payload` | 121–138 | 18 | `payload-pad64 ID LEN 15 [base64(prefix)]`, префикс обрезается до LEN | `classify_measured.rs:381-399` `append_measured_payload`, `:401-425` `base64` | **P** | Формат и обрезка `prefix_len>len` совпадают; base64-таблица стандартная, паддинг `=` для 1/2 байт. C-фикстуры покрывают обычные payload, но не границы 1/2/3 байта и не пустой префикс; отдельного C/Rust differential нет. |
+| `d2k_tcp_split_plan` | 140–151 | 12 | план split payload_start с gap и сегментом под `send_cap` | `main.rs:6292` `r2o_discovery_measured_split_plan` | **E** | `scripts/r2o-measured-split-differential.sh` компилирует `tests/d2o_measured_split_differential.c` с `core/measured.c` и сравнивает вывод с Rust для `send_cap` 0/1492/1280/100/72, split 0/1/1024, verdict prefix/whole. Тест `main.rs:28767` формирует тот же вывод; сегмент `send_cap-72 min 1400` совпадает с `d2k_arm_segment`. |
+| `d2k_arm_plan_measured_cap` | 153–385 | 233 | сборка измеренного плана: split-only, template, disorder, oob, fake/between/seqovl, ttl/md5/tcpts/tsup/ipidzero/autottl, выбор minexec и segment | `classify_measured.rs:45-378` `measured_plan_text` | **P** | **Конкретные пробелы:** (1) `Poison` (`classify.rs:127-146`) не содержит `autottl` и `tcpts_up`, поэтому R2O не может собрать ветви `a->autottl` (C `measured.c:343-345`) и `a->tcpts_up` (`:349`); (2) `segment` жёстко 1400 (`classify_measured.rs:12,143`), тогда как C берёт `d2k_arm_segment(send_cap)` (`measured.c:170`, `d2k_arm.h:79-82`) — на `send_cap=1280` C даёт 1208; (3) C `minexec=13` при autottl, Rust — 5/12. Остальные ветви (split/oob/disorder/seqovl/md5/tcpts/ipidzero) перенесены; C-фикстуры покрывают обычные fake/split/oob, редкие — unit. |
+| `d2k_arm_plan_measured` | 387–390 | 4 | обёртка `d2k_arm_plan_measured_cap(..., send_cap=0)` | `classify_measured.rs:30-37` `plan_text_for_poison(..., send_cap=0)` | **P** | Обёртка совпадает; все пробелы те же, что у `d2k_arm_plan_measured_cap`. |
 
 ### `core/net4.c`
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `d2k_ip4_parse` | 7–30 | 24 | строгий разбор IPv4-литерала в сетевой порядок | std::net::Ipv4Addr::from_str | **E** | scripts/test-core-net4-differential.sh + crates/r2k-core/tests/network.rs |
+| `d2k_ip4_parse` | 7–30 | 24 | строгий разбор IPv4-литерала в сетевой порядок | std::net::Ipv4Addr::from_str | **P** | **Расхождение:** C принимает ведущие нули (`010.0.0.1`), Rust 1.98 — `Err(AddrParseError(Ipv4))` (проверено `rustc`). `test-core-net4-differential.sh` покрывает обычные/битые литералы, но не ведущие нули. |
 | `d2k_ip4_text` | 32–38 | 7 | IPv4 в текст | std::net::Ipv4Addr Display | **E** | test-core-net4-differential.sh |
 | `d2k_ip4_private` | 40–51 | 12 | классификация приватных/специальных IPv4 (loopback, RFC1918, link-local, CGNAT, 0) | r2o_quic_address_is_local / is_private | **E** | test-core-net4-differential.sh; политика локальных адресов также покрыта r2o-quic-local-address-differential.sh |
 | `d2k_ip6_private` | 53–64 | 12 | классификация приватных/специальных IPv6 (::, ::1, ULA, link-local, mcast, v4-mapped) | std::net::Ipv6Addr::is_unique_local/is_unicast_link_local + v4-mapped проверка | **E** | test-core-net4-differential.sh |
@@ -1974,9 +1977,51 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_resource_tag` | 74–113 | 40 | завершить тег и извлечь stylesheet | R2oResourceScan::r2o_finish_tag | **P*** | static inline |
 | `d2k_resource_feed` | 114–159 | 46 | потоковый разбор HTML на публичные пути | R2oResourceScan::feed | **P** | unit r2o_resource; C/Rust differential нет |
 
+## Углублённая сверка: domain/groups/match/net4/verdict/props (37 функций)
+
+| C-функция | строки | R2O-аналог | статус | доказательство / пробел |
+|---|---:|---|---|---|
+| `d2k_domain_normalize` | 6–29 | `domain.rs:8-58` `normalize` | **P** | C принимает односоставное нечисловое имя (`localhost`), Rust требует ≥2 метки (`domain.rs:52-54`). Для `d2k_domain_base/member` это не проявляется (там нужен известный PSL-суффикс), но прямой контракт функции различается. |
+| `rule_exists` (static) | 31–40 | `domain.rs:63-69` `psl::suffix/domain` | **P*** | C ищет правило в зашитом `psl_index.h`; Rust использует crate `psl`. Совпадение снимка PSL не доказано. |
+| `d2k_domain_base` | 42–64 | `domain.rs:61-71` `registrable_domain` | **P** | Логика «longest rule, exception, wildcard, unknown TLD → отказ» соответствует `psl::domain` + `is_known()`. C/Rust differential на PSL-набор не найден. |
+| `d2k_domain_member` | 66–72 | `domain.rs:74-86` `is_member` | **P** | C требует, чтобы `suffix` имел известный base; Rust делает то же через `registrable_domain(suffix).is_none()`. Зависит от совпадения PSL. |
+| `d2k_group_key_make` | 9–17 | `catalog::GroupKey` (struct, `catalog.rs`) | **P** | Поля transport/family/shape/probe_path/ech_origin и лимиты строк перенесены; отдельной функции-конструктора нет. |
+| `d2k_group_key_same` | 19–23 | `PartialEq for GroupKey` | **P** | Сравнение всех пяти полей эквивалентно; тест — unit групп/catalog. |
+| `valid` (static) | 24–36 | `groups.rs:60-100` `learn` + `validate_key` | **P** | Проверки family 4/6, transport 6/17, shape, evidence 1/2/4/8 и непустого plan_id для BLOCKED/FAILED перенесены. |
+| `member` (static) | 38–41 | `domain::is_member` | **P** | Сравнение суффикса по границе точки совпадает; зависит от PSL. |
+| `votes` (static) | 45–60 | `groups.rs:484` `votes` | **P** | Правило `live>=2 && live>stale && live+stale>=3`, stale при PLAN_FAILED/DIRECT_CLEAR, latest по `at` перенесено. |
+| `failures` (static) | 61–71 | `groups.rs` `failures`/`add_group` | **P** | Считает PLAN_FAILED по name/key/plan_id; используется при выборе группы. |
+| `add_group` (static) | 72–102 | `groups.rs:544` `add_group` | **P** | Детерминированные выборы по failures/count/at/plan_id, вытеснение вложенной группы и `frozen` при MAX_GROUPS перенесены. |
+| `rebuild` (static) | 103–120 | `groups.rs:326` `rebuild` | **P** | Пересборка по BLOCKED-наблюдениям, `base`, перебор суффиксов и `votes` совпадает. |
+| `cover` (static) | 122–132 | `groups.rs:450` `covering_group` | **P** | Самый длинныйcovering-суффикс по key; отключённое состояние и лимит групп учтены. |
+| `d2k_group_learn` | 133–245 | `groups.rs:60-269` `learn` | **P** | Слот same-plan/any/replace, frozen/reclaim, disabled/disabled_at, admitted clear, PLAN_FAILED как exception и дедупликация — перенесены. R2O добавляет OPERATOR_REJECT, которого нет в C (расширение, не пробел). C/Rust differential нет. |
+| `d2k_group_restore` | 246–273 | `groups.rs:14-58` `restore` | **P** | Канонизация evidence, проверка дублей и `rebuild` совпадают; отдельного C/Rust теста нет. |
+| `d2k_group_match` | 274–293 | `catalog.rs:287` `match_domain` | **P** | Исключения DIRECT_CLEAR/PLAN_FAILED и выбор самого длинного суффикса перенесены. |
+| `d2k_group_forget` | 294–310 | `groups.rs:271` `forget_failures` | **P** | Удаление только PLAN_FAILED по name/transport/family и `rebuild` совпадают. |
+| `d2k_group_expire` | 311–324 | `groups.rs:304` `expire_failures` | **P** | Удаление PLAN_FAILED старше `now-max_age` и `rebuild` совпадают. |
+| `same_evidence` (static) | 38–73 | `catalog.rs:1077-1090` `same_signal` | **P** | volume/rx-volume: `\|d\|<=4`; ttl: `\|d\|<=2`; tos/ipid точно — совпадает с C. Тестов/дифференциала именно на эту функцию нет. |
+| `d2k_fp_same` | 75–125 | `catalog.rs:59-84` `Fingerprint::is_compatible_with` | **P** | Направленный обход b→a, все приметы одного рода, `kind_seen && !agreed → false`, `common>0` — совпадает. |
+| `d2k_catalog_match` | 127–136 | `catalog.rs:537-541` `match_fingerprint` | **P** | Первый совместимый индекс; эквивалентно. |
+| `d2k_ip4_parse` | 7–30 | `std::net::Ipv4Addr::from_str` (`examples/m5_net4_trace.rs:15`) | **P** | **Подтверждённое расхождение:** C принимает ведущие нули (`010.0.0.1` → 10.0.0.1), Rust 1.98 даёт `Err(AddrParseError(Ipv4))` (проверено `rustc`). `test-core-net4-differential.sh` покрывает только обычные/битые литералы, не ведущие нули. |
+| `d2k_ip4_text` | 32–38 | `Ipv4Addr::Display` | **E** | `scripts/test-core-net4-differential.sh` сравнивает C `d2k_ip4_text` и Rust `Display` на валидных адресах. |
+| `d2k_ip4_private` | 40–51 | `quic_replay.rs:23-46` `ipv4_is_local` | **E** | Differential покрывает 0/8? (C только `v==0`), 10/8, 127/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10 и public 8.8.8.8. Rust-диапазоны совпадают. |
+| `d2k_ip6_private` | 53–64 | `quic_replay.rs:47-58` IPv6-ветка | **E** | Differential покрывает ::, ::1, fc00::, fe80::, ff02::, IPv4-mapped private/public, 2001:db8::1. |
+| `looks_like_tls` (static) | 33–35 | выбор `Accept` в `classify.rs:61-65`, `response.rs:882` | **P** | C решает по `h.bytes[0]==0x16`; Rust использует поле `Trigger.accept`, выставляемое конструктором. Для штатных конструкторов эквивалентно, но прямой differential на «первый байт ≠ 0x16 при accept=ServerHello» отсутствует. |
+| `reverse_note` (static) | 53–62 | `classify.rs` reason-строки | **P** | C различает MODERN/LEGACY/UNKNOWN по `d2k_hello_shape`; Rust формирует оговорку по разобранной форме. Тексты не сравнивались побайтно. |
+| `pause_note` (static) | 74–80 | `classify.rs` reason-строки | **P** | Формат «замерено без пауз/с паузой N мкс» перенесён; C-буфер 96 байт, Rust `String` без обрезки. |
+| `stop_requested` (static) | 92–94 | `classify.rs` `stopped(options)` | **P** | Проверка atomic-флага отмены эквивалентна. |
+| `classify_cancelled` (static) | 96–102 | `classify.rs` cancel-ветка | **P** | VERDICT=INCONCLUSIVE, marked=(mark!=0)&&all_marked, reason про снимок клиента — перенесено. |
+| `d2k_classify_cancelable` | 104–334 | `classify.rs:1250-1900` | **P** | Дерево base→confirm→split1→control, CLEAR_CONFIRM_REPEATS=2, UNREACHABLE/FLAKY/CLEAR/PREFIX/OPAQUE/INCONCLUSIVE и AND-метка перенесены; тесты `classify.rs:2096-2444`. Отличия: R2O имеет ветку `neutral_ack` и режим `full_detect_semantics`; полного C/Rust differential дерева нет. |
+| `d2k_classify` | 336–342 | `classify.rs` публичный `classify` | **P** | Обёртка с `stop=NULL`; эквивалентна. |
+| `original_probe` (static) | 35–44 | `quic_replay.rs`/`r2o_quic_http3.rs` | **P** | Выбор SNI (`q->control` → NULL, иначе target_sni) и вызов wire-hook перенесены; отдельного differential нет. |
+| `original_data` (static) | 47–50 | `quic_replay.rs` data-stage | **P** | Те же target_sni/path/port/wait/mark; построчно не сверялось. |
+| `wire_measure` (static) | 52–78 | `quic_replay.rs`/`r2o_quic_http3.rs` | **P** | Копирование context, подмена probe/data, path и next/marked; C/Rust differential на все поля нет. |
+| `d2k_quic_original_measure` | 80–83 | `quic_replay.rs` original arms | **P** | Обёртка над `wire_measure`; эквивалентна. |
+| `d2k_quic_strategy_measure` | 88–91 | `quic_replay.rs` strategy arms | **P** | Обёртка над `wire_measure`; эквивалентна. |
+
 ## Проверка полноты
 
-Строк среза: 692. Строк в таблицах: 692. E=126, P=565, N=1, ?=0; E+P+N+?=692. `E*`/`P*` учтены в E/P соответственно (static-хелперы).
+Строк среза: 692. Строк в таблицах: 692. E=127, P=564, N=1, ?=0; E+P+N+?=692. `E*`/`P*` учтены в E/P соответственно (static-хелперы).
 
 
 ---

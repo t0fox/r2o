@@ -77,6 +77,11 @@ def main() -> int:
             if heading:
                 current_file = heading.group("file").strip()
                 continue
+            if re.match(r"^##\s", line):
+                # Новый раздел (например, углублённая сверка) — таблицы ниже
+                # уже не относятся к предыдущему файлу среза.
+                current_file = None
+                continue
             if not line.lstrip().startswith("|"):
                 continue
             cells = split_row(line)
