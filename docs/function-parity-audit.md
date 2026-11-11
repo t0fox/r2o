@@ -3841,9 +3841,9 @@ R2O-аналог — `crates/r2o-datapath/src/control.rs` (`ControlServer`), п�
 | d2k_ctlsrv_peer_closed | 147-150 | 4 | снять пробные планы при отключении контроллера | `main.rs:1415` `name_plans.clear_probes()`; `control.rs:600` `clear_probes` | E | `clearing_disconnected_http_probes_keeps_the_permanent_plan` (control.rs:3703). |
 | canonical_address | 152-157 | 6 | static: family 4 требует нулевой хвост 16-байтного адреса | `control.rs:1612` `addr_plan_key` | E | `удаление_адреса_разделяет_формы_и_удаляет_одну` (control.rs:2793): `body[5]=1` даёт `ACK_BAD_ARGS`. |
 | addr_shape_valid | 163-167 | 5 | допустимые формы адресной привязки (1,2,3,5,6) | `control.rs:1628` `valid_addr_shape`, `:1635` `addr_plan_matches_shape` | P | Валидные формы покрыты тестами адресов; отказа для недопустимой формы (0/4/7) в тестах не найдено. |
-| read_probe_flow | 169-187 | 19 | static: разобрать flow адресного опыта, отвергнуть неканонический IPv4 | `control.rs:1695` `r2o_udp_addr_probe_flow_key` + `r2k-core/control.rs:1701` `valid_udp_addr_probe_flow` | P | Код есть, тестов SET/DEL/FIND адресного опыта (COMMAND_*_ADDR_PROBE) в дереве не найдено. |
-| d2k_ctlsrv_command | 189-509 | 321 | диспетчер команд, разбор тел, ACK, установка в таблицу | `control.rs:260` `NamePlans::handle`; `main.rs:68` `handle_control_command` (stall budgets); `control.rs:1988` `arm_client_shape` | P | Покрыты SET_NAME/BOUND/PROBE/ADDR/SUFFIX/BYPASS/DEL_*/HTTPS/ARM_SHAPE (control.rs:2633-3896). Пробелы: C `SET_HTTPS` обрезает TTL до **7 суток** (`D2K_HTTPS_TTL_MAX_S`, `d2k_ctl.h:231`, `ctlsrv.c:446`), R2O отвергает `ttl > 6 часов` (`ACK_BAD_ARGS`) — control.rs:64,1070,1781; `arm_client_shape` отвергает транспорт 17 (control.rs:2002), C принимает 6/17; адресные опыты не тестированы. |
-| d2k_ctlsrv_pump | 511-694 | 184 | выгрузить новые записи журнала в события с раскладкой по типам | `main.rs:2728` `send_journal_updates`, `:2709` `send_journal_snapshot`; `flow_journal.rs:202` `to_event_frame` | P | `flow_journal` round-trip тесты и `d2o_control_frames_match_donor_wire_decoding` (tests/control.rs:47). Пробелы: v22-трансляция `EVENT_LEGACY_CLIENT_TCP` шлёт пустые TCP-опции (r2k-core/control.rs:1212-1215), C шлёт реальные; набор видов журнала уже C (нет отдельного CLIENT_TCP в v48). |
+| read_probe_flow | 169-187 | 19 | static: разобрать flow адресного опыта, отвергнуть неканонический IPv4 | `control.rs:1695` `r2o_udp_addr_probe_flow_key` + `r2k-core/control.rs:1701` `valid_udp_addr_probe_flow` | **P** | **Расхождение:** C допускает `src_port=0` — голосовой опыт «любой клиентский порт» (`ctlsrv.c:302-304`), и не требует ненулевых адресов; Rust `valid_udp_addr_probe_flow` требует оба порта ≠0 и ненулевые адреса. R2O вынес голос в отдельную `SET_VOICE_ADDR_PROBE` (0x0095), которой в C нет: C-команды заканчиваются на 0x0093. Тестов SET/DEL/FIND адресного опыта в дереве нет. |
+| d2k_ctlsrv_command | 189-509 | 321 | диспетчер команд, разбор тел, ACK, установка в таблицу | `control.rs:260` `NamePlans::handle`; `main.rs:68` `handle_control_command` (stall budgets); `control.rs:1988` `arm_client_shape` | **P** | Покрыты SET_NAME/BOUND/PROBE/ADDR/SUFFIX/BYPASS/DEL_*/HTTPS/ARM_SHAPE/STALL_BUDGETS (control.rs:2633-3896). **Подтверждённые расхождения:** (1) `SET_HTTPS`: C обрезает TTL до **7 суток** (`d2k_ctl.h:231`, `ctlsrv.c:446`), R2O отвергает `> 6 часов` (`control.rs:64,1070,1781`); (2) `ARM_SHAPE`: C принимает transport 6/17 (`ctlsrv.c:341`), R2O — только 6 (`control.rs:2002`); (3) `SET_ADDR_PROBE`: C допускает `src_port=0` для голоса (`ctlsrv.c:302-304`), R2O generic-проба требует оба порта ≠0, а голос вынесен в `SET_VOICE_ADDR_PROBE` 0x0095, отсутствующую в C; (4) `DEL_NAME_PROBE`: C не проверяет shape (`ctlsrv.c:422-437`), R2O проверяет; (5) адресные опыты не тестированы. C `DEL_NAME_BOUND`/`DEL_ADDR_PROBE` идемпотентны и всегда ACK OK — R2O так же. |
+| d2k_ctlsrv_pump | 511-694 | 184 | выгрузить новые записи журнала в события с раскладкой по типам | `main.rs:2728` `send_journal_updates`, `:2709` `send_journal_snapshot`; `flow_journal.rs:202` `to_event_frame` | **P** | C: `PLAN_APPLIED` не отдаётся вовсе (`ctlsrv.c:566-568`), `PLAN_DONE→APPLIED`, `REFUSED/UNSENT/DAMAGED→REFUSED`, `SHAPE→CLIENT_TCP+SHAPE`, `HELLO/SUSPECT/EXCHANGE` — своими типами. R2O `send_journal_updates` шлёт каждую запись как `EVENT_R2O_JOURNAL_ENTRY`, а dedicated-события (`EVENT_APPLIED/REFUSED/CLIENT_SHAPE/HELLO`) идут отдельными путями; контроллер декодирует journal entry только для печати (`main.rs:7148,17948`), доказательства — через dedicated. `PlanApplied` не становится `EVENT_APPLIED` ни там, ни там. Пробел v22: `EVENT_LEGACY_CLIENT_TCP` шлёт пустые TCP-опции (`r2k-core/control.rs:1212-1215`), C — реальные. |
 | d2k_ctlsrv_http80_event | 697-731 | 35 | событие HTTP-портала/ответа с измерениями | `control.rs:3136` `send_http_portal_event`, `:3148` `send_http_response_event`; `r2k-core/control.rs:852` `HttpResponseEvent::event_body` | P | `decodes_r2o_http_response_context_and_measurements` (tests/control.rs:977), `control_decoder_accepts_http_portal_response_events` (tests/capture_shape.rs:150). Отличие: R2O кодирует `code 1..4` и всегда несёт хвост status/body/request_no; C для портала без ответа хвост не шлёт. |
 
 Итог по файлу: E 6, P 6, N 0. Пробелы: TTL HTTPS (обрезка vs отказ), ARM_SHAPE для
@@ -3882,7 +3882,7 @@ UDP, пустые TCP-опции в v22 CLIENT_TCP, адресные опыты 
 | emit_vec_free | 268-272 | 5 | static: освободить массив посылок и owned_bytes | `plan/apply.rs:61` `Emission` (Vec) + `Drop` | E | Владение выражено типами (`Vec<u8>`, `Vec<Emission>`); утечек нет по построению, отдельный free не нужен. |
 | emit_overhead | 285-295 | 11 | static: заголовки IP+TCP/UDP, MD5/TS-опция | `plan/apply.rs:737` `emit_overhead` | E | `max_emit`-тест (tests/apply.rs:251) и `route_segment_cap...` (tests/apply.rs). |
 | d2k_plan_max_emit | 297-341 | 45 | верхняя оценка одной посылки плана | `plan/apply.rs:418` `Plan::max_emit` | E | `assert_eq!(plan.max_emit(), 171)` (tests/apply.rs:251); используется в `r2o_plan_valid`. |
-| d2k_plan_apply | 343-873 | 531 | превратить план+пакет в посылки, судьбу оригинала и причину отказа | `plan/apply.rs:155` `Plan::apply` | P | 17 тестов tests/apply.rs покрывают split/fake/overlay/order/pace/settle/delay/udplen/qsplit/qdeny/oob/metric. Пробелы: `MAX_EMISSIONS = 26` (apply.rs:9) против 65536 в C (`plan_apply.c:830`) — R2O отвергает раньше; однако D2O на выдаче в session тоже ограничивает 26 (`D2K_RESULT_MAX`, session.c:2517), поэтому наблюдаемый отказ совпадает, различаются слой и текст ошибки. В OOB-ветви `suffix.wire_profile` остаётся 0 (apply.rs:280-291), тогда как C проставляет профиль всем посылкам на `finalize`; qsplit-ветвь обходит `delay_us`. Лимит 26 — слой R2O: D2O `plan_apply.c` допускает до 65536, но `session.c:2517` всё равно отказывает при >26, поэтому наблюдаемый отказ совпадает. |
+| d2k_plan_apply | 343-873 | 531 | превратить план+пакет в посылки, судьбу оригинала и причину отказа | `plan/apply.rs:155` `Plan::apply` | P | 17 тестов tests/apply.rs покрывают split/fake/overlay/order/pace/settle/delay/udplen/qsplit/qdeny/oob/metric. Пробелы: `MAX_EMISSIONS = WIRE_BATCH_MAX = 26` (`plan.rs:10`, `apply.rs:9`) против 65536 в C (`plan_apply.c:830`) — R2O отвергает раньше; однако D2O на выдаче в session тоже ограничивает 26 (`D2K_RESULT_MAX`, session.c:2517), поэтому наблюдаемый отказ совпадает, различаются слой и текст ошибки. В OOB-ветви `suffix.wire_profile` остаётся 0: Rust ставит профиль только `first` и `urgent` (`apply.rs:284-285`), а `suffix` создан без него; C на `finalize` проставляет профиль **всем** посылкам (`plan_apply.c:812`). qsplit-ветвь обходит `delay_us`: Rust возвращает `Actions` в `apply.rs:203-260` до блоков pace/settle/delay (`:640-657`), тогда как C применяет `delay_us` после цикла кусков, включая qsplit (`plan_apply.c:803-809`). Лимит 26 — слой R2O: D2O `plan_apply.c` допускает до 65536, но `session.c:2517` всё равно отказывает при >26, поэтому наблюдаемый отказ совпадает. |
 | d2k_actions_cancel | 891-921 | 31 | правила отмены недосланного исполнения | `plan/apply.rs:104` `Actions::cancel` | E | `cancellation_drops_only_after_payload_bytes_were_emitted` (tests/apply.rs). |
 | d2k_actions_free | 923-931 | 9 | освободить посылки | `plan/apply.rs:61` `Emission` + `Actions` (RAII) | E | Освобождение автоматическое; отдельных ошибок/утечек нет по типам. |
 
@@ -3892,6 +3892,60 @@ UDP, пустые TCP-опции в v22 CLIENT_TCP, адресные опыты 
 у OOB-суффикса.
 
 ---
+
+### Углублённая сверка plan_apply.c (15 функций)
+
+- **`anchor_offset` (26–80) ↔ `apply.rs:862`:** якоря 0/payload_start,
+  1/sni_start, 2/sni_end, 3/hello_middle, 4/record_end (отказ),
+  5/sni_middle. C зажимает середину имени `<2→2`, `>=payload_len→
+  payload_len-1`; Rust — те же зажимы, но `sni_off+sni_len` через
+  `checked_add` и ошибка `invalid-sni`. Для валидного входа
+  эквивалентно; на 32-битной сборке C-сложение без проверки — P.
+- **`split_points` (90–118) ↔ `apply.rs:908`:** якорь+offset, отброс
+  `v<=0 || v>=payload_len`, сортировка и дедуп. Совпадает; C
+  `long v = (long)base + offset` на 32-битном `long` может
+  переполниться при экстремальном offset, Rust — checked. P.
+- **`tls_ch_layout` (120–154) ↔ `apply.rs:970`:** `n>=44`, `0x16`,
+  major 3, `b[5]==1`; `rec_len+5==hs_len+9`; `n>rec_len+5` — отказ;
+  `allow_prefix` решает, можно ли начало приветствия; session-id
+  `<=32` и в пределах пришедших байт. Три разных текста отказа
+  сохранены. Совпадает.
+- **`random_bytes`/`wr16`/`wr24` (156–171) ↔ `apply.rs:1019/1036/
+  1041`:** `/dev/urandom` заменён `getrandom`; запись u16/u24 BE
+  совпадает.
+- **`fake_tls_bytes` (173–237) ↔ `apply.rs:531`:** `TLS_MOD_RND`
+  рандомизирует random и session id; `TLS_MOD_DUPSID` копирует SID
+  клиента с пересчётом длин записи/рукопожатия. Для
+  `WIRE_TCP_TEMPLATE` C не меняет длину, копирует SID только при
+  равной длине и повторяет ту же мутацию при `repeats`; Rust
+  `append_fake_repeats` делает то же. Совпадает.
+- **`emit_fake` (239–266) ↔ `apply.rs:486`:** payload по id,
+  `tls_mod`, затем ttl/poison/seq_shift/ts_up/autottl
+  (delta/min/max). Совпадает.
+- **`emit_overhead`/`d2k_plan_max_emit` (285–341) ↔ `apply.rs:737/
+  418`:** IP 20 + TCP 20/UDP 8, MD5 +20, TCPTS_BACK +12; fake
+  body `payload + (DUPSID?32:0)`, ограничение `segment_size`;
+  seqovl считается только приставкой; `udplen` — `1200+udplen` для
+  QUIC (`proto==2`) или `1+udplen`. Rust `emit_overhead`/`max_emit`
+  те же; тест `max_emit()==171` (`tests/apply.rs:251`).
+- **`d2k_plan_apply` (343–873) ↔ `apply.rs:155`:** проверены ветви
+  пустой нагрузки, proto HTTP mismatch, `qdeny→DROP`, HTTP+
+  input/udplen/qsplit отказ, `input_tls`, `input_len` (префикс
+  приветствия с проверкой объявленной длины/SNI/разреза),
+  OOB-три посылки, split, `owns_payload`, fake before/between,
+  reverse только payload, pace/settle/delay, finalize
+  `wire_profile`, сегментация prefix+body, fate DROP/PASS.
+  **Расхождения:** OOB `suffix.wire_profile=0`; qsplit обходит
+  `delay_us`; `MAX_EMISSIONS=26` против 65536 в C (наблюдаемый
+  отказ совпадает из-за `D2K_RESULT_MAX=26` в session).
+- **`d2k_actions_cancel` (891–921) ↔ `apply.rs:104`:** `partial =
+  emitted<n`; `stream_damaged = payload_out && partial`; fate
+  DROP при отправленной нагрузке, иначе PASS. Совпадает.
+- **`d2k_actions_free` (923–931):** RAII `Vec<Emission>`; утечек
+  нет по построению.
+
+**Итог:** 13 helper'ов/обёрток — E/P, `d2k_plan_apply` — P с тремя
+подтверждёнными расхождениями; новых N нет.
 
 ## 5. datapath/plan_parse.c — 17 функций
 
@@ -4179,6 +4233,55 @@ Rtnetlink: дампы правил, одиночный поиск маршрут
 - **Вывод:** новый подтверждённый пробел — control-ring 64 КиБ vs
   128 КиБ; raw mark=0/`IP_NODEFRAG`; routemark merge status. Остальное —
   P на сложные ветви/дифференциалы.
+
+## 9c. Углублённая сверка ctlsrv.c (12 функций)
+
+- **`put_key` (23–37):** 38-байтовый ключ полями: family, low/high адрес
+  (4/16), low/high порт BE, proto. Совпадает с `TcpFlowKey::wire_key`
+  (`capture.rs:51`) и `r2o_udp_flow_wire_key` (`control.rs:1644`);
+  E, фикстуры `tests/control.rs:47`.
+- **`d2k_plan_fits` (39–72):** `limits==0` → пропуск; `POISON_IPID_ZERO`
+  при `CANT_IPID` → отказ; `maxlen>0 && max_emit>maxlen` → отказ. R2O:
+  `r2o_plan_valid` + `max_emit` (`control.rs:255`, `main.rs:986`);
+  ветвь длины покрыта `name_plan_отклоняется_..._mtu` (`control.rs:2766`),
+  ветвь IPID_ZERO тестом не покрыта — P.
+- **`ack`/`ack_trial` (84–123):** тело key38 + type2 + ok1 + reason1,
+  опционально area_id16 (SUFFIX..DEL_BYPASS, SET_NAME_PROBE/BOUND) и
+  binding28 (SET_NAME_BOUND); `ack_trial` всегда несёт trial16. R2O
+  `send_ack`/`encode_ack_with_identifiers_profile` и `encode_ack_for_trial`;
+  E по фикстурам.
+- **`d2k_ctlsrv_greet` (125–145):** PROTO: key38 + version2 + maxlen4 +
+  release-len1 + release. R2O `encode_greeting_profile`; E.
+- **`d2k_ctlsrv_peer_closed` (147–150):** снимает пробные планы
+  (`d2k_plantab_clear_probes`). R2O `name_plans.clear_probes()`
+  (`main.rs:1415`); E.
+- **`canonical_address` (152–157) / `addr_shape_valid` (163–167):**
+  IPv4-хвост 16-байтного адреса обязан быть нулевым; формы
+  1/2/3/5/6. R2O `addr_plan_key`/`valid_addr_shape` (`control.rs:1612,
+  1628`); canonical — E, shape — P (нет теста на 0/4/7).
+- **`read_probe_flow` (169–187):** разбор 38-байтового flow; **C
+  допускает `src_port=0`** (голос «любой клиентский порт»), Rust
+  `valid_udp_addr_probe_flow` требует оба порта ≠0 и ненулевые адреса.
+  Это подтверждённое расхождение (см. строку).
+- **`d2k_ctlsrv_command` (189–509):** 13 команд. Сверены тела, точные
+  длины, ACK-коды, идемпотентные DEL. Расхождения: SET_HTTPS 7 суток
+  vs 6 часов; ARM_SHAPE 6/17 vs 6; SET_ADDR_PROBE `src_port=0` vs
+  требование ≠0 + отдельная 0x0095; DEL_NAME_PROBE shape не
+  проверяется в C. Остальные ветви (SET_NAME/BOUND/PROBE/ADDR,
+  SUFFIX/BYPASS, DEL_*, STALL_BUDGETS) совпадают по полям и ACK.
+- **`d2k_ctlsrv_pump` (511–694):** C раскладывает journal kind в
+  события; `PLAN_APPLIED` не отдаёт, `PLAN_DONE→APPLIED`,
+  `REFUSED/UNSENT/DAMAGED→REFUSED`, `SHAPE→CLIENT_TCP+SHAPE`,
+  `HELLO/SUSPECT/EXCHANGE` — своими типами. R2O шлёт journal entries
+  как R2O-only `EVENT_R2O_JOURNAL_ENTRY` (контроллер только печатает),
+  а dedicated-события — отдельно; доказательства не подменяются.
+  Пробел v22: пустые TCP-опции в `EVENT_LEGACY_CLIENT_TCP`.
+- **`d2k_ctlsrv_http80_event` (697–731):** тело: key38 + code1 +
+  host-len1 + host + execution8 + plan16 + trial16 + request_ms8 +
+  path-len2 + path + binding28; при `response` — status2 +
+  body_bytes8 + request_no8. R2O `HttpResponseEvent::event_body`
+  (`r2k-core/control.rs:852`); P: R2O всегда несёт хвост, C для
+  портала без ответа его не шлёт; код ответа кодируется иначе.
 
 ## 10. Итоговые пробелы (что мешает ставить E)
 
