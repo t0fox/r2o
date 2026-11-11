@@ -4110,6 +4110,64 @@ UDP, пустые TCP-опции в v22 CLIENT_TCP, адресные опыты 
 Итог по файлу: E 14, P 3, N 0. Пробелы: текст ошибок, `flow_needs` как отдельная
 функция, прямой тест `stream_input`.
 
+### Углублённая сверка plan_parse.c (17 функций)
+
+- **`rd16`/`rd32` (23–30) ↔ `plan.rs:892/902`:** big-endian
+  `read_u16`/`read_u32`, точные границы; E.
+- **`fail` (32–36) ↔ `PlanError::new` (`plan.rs:67`):** текст
+  ошибки другой, факт отказа тот же; P.
+- **`scan` (45–220) ↔ `plan.rs:687-845`:** построчно совпадает:
+  заголовок записи 4 байта и проверка `off+ln<=len`; `INPUT/
+  SETTLE/SEGMENT` требуют minexec≥3; `IPFRAG` ≥7 и форма 1..4;
+  `UDPLEN` ≥9 и ненулевой прирост; `QSPLIT` ≥10 форма 1;
+  `QDENY` ≥11 форма 1; `OOB` ≥8, якорь ≤5, ровно один байт,
+  не более одной записи; `ID` 16; `PROTO` 2, HTTP требует TCP
+  и minexec≥11; `PAYLOAD` ≥2; `POISON` 8, MD5 требует ≥12;
+  `AUTOTTL` ≥13, 5 байт, min≤max; `SPLIT` 4; `FAKE` 10/11,
+  tlsmod≥8 и только RND/DUPSID; `SEQOVL` 4; `ORDER` 1; `PACE` 4;
+  `DELAY` ≥6 и ненулевой; `INPUT` 12, `input_len!=0`,
+  `sni_off<=input_len`, `sni_len<=input_len-sni_off`; `WIRE` ≥4,
+  профиль 1/2, template≥8; `INPUT_TLS` ≥5 и пустая; `SETTLE` 4
+  ненулевая; `SEGMENT` 4, 1..65535; `GUARD` 1, только
+  `RST_ALIEN`; неизвестный тип — отказ; записей ≤65535.
+  **Отличие:** C `REC_AUTOTTL` при повторе для той же порчи
+  действует «последний побеждает» (`plan_parse.c:482`), Rust
+  отвергает повтор (`plan.rs:307`, `autottl.replace`).
+- **`check_refs` (224–325) ↔ `plan.rs:499-685`:** совпадает:
+  MD5 требует minexec≥12, TCP и detect-tcp; ipfrag — UDP без
+  TCP-операций; udplen — UDP без ipfrag/разрезов/seqovl/order/
+  input/settle/segment/wire/guards/oob; qsplit — UDP без
+  ipfrag/udplen/прочих; qdeny — UDP и план без воздействий;
+  oob — minexec≥8, TCP, `proto=1`, `input_tls`, wire, без
+  splits/seqovl/fakes/ipfrag/pace/settle/delay; ссылки
+  fake/seqovl на существующие payload/poison; `PLACE_BETWEEN`
+  требует разрезов; placement только before/between; order
+  forward/reverse; seqovl ≤1. Rust дополнительно проверяет
+  autottl minexec/диапазон в `check_references`, но те же
+  условия уже есть в `scan`.
+- **`d2k_find_payload`/`d2k_find_poison` (327–343) ↔
+  `payloads.iter().find`/`poisons.iter().find`:** эквивалентно;
+  E.
+- **`d2k_plan_load` (345–566) ↔ `plan.rs:167 parse_wire`,
+  `:190 parse`:** C принимает только `D2KP`; Rust `parse` — только
+  `R2OP`, а `parse_wire` принимает **оба** (legacy `D2KP`
+  переклеивает magic). R2O принимает надмножество. Повторные
+  `ipfrag/udplen/qsplit/qdeny` C отвергает в `scan`, Rust —
+  `set_once_*`; повторный `autottl` — см. выше. Массивы calloc
+  заменены `Vec` с capacity.
+- **`d2k_plan_free` (568–581):** RAII; E.
+- **`d2k_plan_poison_used`/`quic_deny`/`guards`/`transport`/
+  `proto`/`id`:** прямые методы `plan.rs:327/333/134/135/133`,
+  E. `flow_needs` — P: логика `wire_profile==TEMPLATE &&
+  TCPTS_BACK` размазана по `engine.rs:1860-1869` и не имеет
+  отдельной функции/теста. `stream_input` — P: тело тождественно
+  `plan.rs:337`, используется `control.rs:614-621`, прямого
+  теста предиката нет.
+
+**Итог:** 14 E, 3 P, 0 N. Новые подтверждённые отличия —
+legacy-`D2KP` принимается только через `parse_wire`, а повторный
+`autottl` R2O отвергает, C — нет.
+
 ## 6. datapath/plans.c — 75 функций
 
 Таблица планов по целям: ключи имя/адрес/суффикс, LRU-вытеснение, точные пробы, поиск на
