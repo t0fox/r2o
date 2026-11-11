@@ -103,8 +103,8 @@
 | `handle_plan_key` | 798–816 | 19 | поля plan: id/proto/text/added/successes/enabled | catalog::Plan serde | **P** | unit round_trips_known_measurement_context |
 | `parse_plan` | 817–820 | 4 | разобрать plan | catalog::Plan | **P*** | static-хелпер |
 | `elem_plan` | 821–823 | 3 | элемент массива plans | Vec<Plan> | **P*** | static-хелпер |
-| `handle_binding_key` | 834–885 | 52 | поля binding: kind/target/plan_id/level/confirmed/transport/family/shape/tcp_profile/... | catalog::Binding serde + validate | **P** | unit rejects unknown/invalid binding fields |
-| `parse_binding` | 886–890 | 5 | разобрать binding, family по умолчанию 4 | catalog::Binding | **P*** | static-хелпер |
+| `handle_binding_key` | 834–885 | 52 | поля binding: kind/target/plan_id/level/confirmed/transport/family/shape/tcp_profile/... | catalog::Binding serde + validate | **P** | **Пробел:** C разбирает и проверяет `tcp_profile` (0/1/2) и сохраняет его; в Rust `Binding` (`catalog.rs:165-198`) поля `tcp_profile` нет — serde молча игнорирует его как неизвестное, при сохранении значение теряется. Для старых каталогов с shape 1/2 и tcp_profile 1/2 это потеря измеренного TS-профиля; R2O может вывести его из shape только для shape 8–13. |
+| `parse_binding` | 886–890 | 5 | разобрать binding; `family` по умолчанию 4 | `catalog.rs:165-181` `Binding` | **P*** | **Расхождение default:** C `memset` + `out->family=4`, затем поле перезаписывается, если есть. Rust `Binding` выводит `Default` (family=0), `#[serde(default)]` не подставляет 4; `serialize_family` пишет 0 как 4 только при сохранении, `validate` family не нормализует. Старый каталог без `family` загрузится с family=0 в памяти. |
 | `elem_binding` | 891–893 | 3 | элемент массива bindings | Vec<Binding> | **P*** | static-хелпер |
 | `d2k_cat_shape_fits` | 905–912 | 8 | совместимость форм: 0 подходит любой, иначе равенство | catalog shape-fits helper | **P*** | static-хелпер; используется group/own-first тестами |
 | `handle_box_key` | 918–939 | 22 | поля box: id/created/updated/fingerprint/plans/bindings | catalog::BoxRecord serde | **P** | unit round_trips |
@@ -1045,6 +1045,52 @@
   перенесены; `record_anomaly` пишет kind/code/rss_delta/accounted_delta/stage
   в кольцо 8. Статусы P, отдельного C/Rust differential на переполнение колец
   нет.
+
+## Углублённая сверка: catalog.c (60 функций)
+
+- **JSON-парсер:** `jpeek`, `jeat`, `jeat_null_if_present`, `jparse_raw_int`,
+  `jparse_i32/u8/u16`, `jparse_bool_i`, `jparse_string_dyn/fixed`,
+  `jparse_rfc3339`, `jskip_value`, `parse_object`, `parse_array`, `grow`,
+  `read_fixed_digits`, `eat_lit`, `floor_div`, `days_from_civil`,
+  `civil_from_days` заменены `serde_json` + `CatalogInput` + `validate`.
+  Неизвестные ключи C пропускает через `jskip_value`, serde — через
+  отсутствие `deny_unknown_fields`; null→пусто через `null_to_default`;
+  глубина/размеры ограничены (`MAX_CATALOG_BYTES`, `check_json_depth`).
+  `format_rfc3339` — E (persist differential).
+- **`handle_signal_key`/`parse_signal`/`handle_fp_key`/`parse_fp`:**
+  kind/ttl/ttl_delta/tos/ipid/volume/seen/packets и method/signals
+  перенесены; лимит 8 сигналов проверяется в `validate`.
+- **`handle_plan_key`/`parse_plan`/`elem_plan`:**
+  id/proto/text/added/successes/enabled перенесены; `Plan` serde.
+- **`handle_binding_key`/`parse_binding`/`elem_binding`:**
+  kind/target/plan_id/level/confirmed/successes/enabled/transport/family/
+  shape/verified_by/input/probe_path/ech_origin/recheck_since/budget
+  перенесены. **Два пробела:** (1) C хранит и проверяет `tcp_profile`
+  (0/1/2), в Rust `Binding` этого поля нет — значение теряется при
+  load/save; (2) C по умолчанию ставит `family=4`, Rust `Binding::default`
+  даёт 0, `serialize_family` пишет 0 как 4 только при сохранении, `validate`
+  family не нормализует. Старый каталог без `family` загрузится с 0.
+- **`handle_box_key`/`parse_box`/`elem_box`/`d2k_cat_shape_fits`:**
+  boxes/fingerprint/plans/bindings и правило shape 0→любая, иначе равенство
+  перенесены (`discovery.rs`/`live.rs` `group_shape_fits`).
+- **`handle_domain_observation`/`parse_domain_observations`/
+  `handle_net_whitelist_key`/`handle_catalog_key`/`parse_catalog_obj`/
+  `prune_unavailable_domain_groups`:** domain_state/observations до 256,
+  network_whitelist и отбрасывание групп без включённого плана перенесены
+  в `catalog.rs`/`groups.rs`; unit `derived_domain_groups_are_ignored`.
+- **`read_whole_file`/`d2k_catalog_load`:** загрузка, schema=1, запрет
+  мусора после объекта — E (`r2o-catalog-persist-differential.sh`,
+  `tests/catalog.rs`).
+- **`write_json_string`/`wr_indent`/`write_json_array`/`write_signal_elem`/
+  `write_fp`/`write_plan_elem`/`write_binding_elem`/`write_box_elem`/
+  `write_domain_key`/`write_domain_observation`/`write_domain_group`/
+  `d2k_catalog_save`:** serde_json pretty с теми же полями; `packets`
+  только при nonzero, `family` 0→4. Полный побайтовый формат save не
+  сравнивался, persist differential проверяет save_atomic — P.
+- **`d2k_catalog_save_atomic`:** `.new` + rename + fsync каталога — E
+  (persist differential, включая конкурентное обновление).
+- **`d2k_catalog_memory_bytes`/`free_box`/`d2k_catalog_free`:** оценка
+  памяти косвенная (`diagnostics catalog_bytes`), освобождение — RAII; P*.
 
 ## Проверка полноты
 
