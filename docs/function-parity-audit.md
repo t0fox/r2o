@@ -2190,7 +2190,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `sched_quic_yield` | 2707–2729 | 23 | уступить слот TCP во время QUIC-вопроса и измерить паузу | main.rs discovery quic yield | **P** | r2o-scheduler-concurrent-endpoint/queue differentials частично |
 | `sched_quic_progress` | 2731–2733 | 3 | передать прогресс QUIC-вопроса | main.rs discovery progress | **P*** | static-хелпер |
 | `sched_mono_ms` | 2735–2739 | 5 | монотонное время мс | std::time::Instant | **P*** | static-хелпер |
-| `worker_run_body` | 2741–3253 | 513 | тело worker: VOICE/VERIFY/CONTACT/addr-recheck/ECH/baseline/volume/classify и фиксация результата | main.rs discovery worker + classify/verify/voice/fetch | **P** | крупная функция; ветви покрыты множеством differentials, но не все комбинации ECH/volume/addr |
+| `worker_run_body` | 2741–3253 | 513 | тело worker: VOICE/VERIFY/CONTACT/addr-recheck/ECH GREASE+real/baseline/own-first base/volume first+after+carried/QUIC arm/TCP white/seed/classify и фиксация результата | `main.rs:15311 r2o_discovery_ech_grease_fallback`, `:15322 r2o_discovery_ech_replay_required`, `:15274 r2o_classify_discovery_target_with_client_hello_and_ech`, `:15396 r2o_classify_discovery_target_with_client_hello_and_ech_progress`, `r2o_discovery_volume_*`, `r2o_measure_voice_for_flow`, `r2o_quic_*`, `fetch` | **P** | C-ветви: VOICE (2769-2787), VERIFY (2789-2901: `layered_rx`, verifier по `rx_phase`/`rx_cut`, budget/TS/QUIC-form, ECH replay/ALPN/path), CONTACT (2903-2921), addr-recheck (2934-2965), ECH GREASE/real (2966-3041), ECH baseline (3042-3058), `own_first==1` base (3059-3074), volume_first/after/carried (3077-3103, 3205-3239), QUIC arm (3109-3169), TCP white/seed (3170-3203), результат (3241-3252). Rust покрывает ветви отдельными функциями; **не сопоставлено:** точная матрица verifier'ов (`rx_phase`, `layered_rx`, `measure_path`, ALPN) и комбинации ECH+volume, addr+voice, QUIC deny recheck; C `volume_carried && CLEAR` (3228-3239) отдельной ветвью в Rust не найдена; `own_first==1` base hook не сверен. |
 | `worker_run` | 3255–3270 | 16 | обёртка worker: executing, время последнего замера | main.rs discovery worker life | **P** | worker-permit/memory differentials |
 | `quic_text_is_split` | 3276–3278 | 3 | план содержит quicsplit | main.rs discovery quic plan check | **P*** | static-хелпер |
 | `quic_client_multi` | 3280–3286 | 7 | имя замечено как multi-datagram QUIC | main.rs discovery quic_multi ring | **P*** | static-хелпер |
@@ -2930,6 +2930,29 @@ volume-recovery (`:14628`) и каталог.
 `arm_path`, `stall_cut`) и раскладка RX-лестницы (`plan_boxes`,
 `net_probe_name`, `rx_volume_candidate_pending`) в Rust не найдены в том же
 виде. Полной матрицы «вердикт × источник × порядок» нет — P обоснован.
+
+## Углублённая сверка sched.c: worker_run_body
+
+| C-ветвь | строки | Rust | статус/пробел |
+|---|---:|---|---|
+| JOB_VOICE: `d2k_sched_voice_hook` | 2769–2787 | `voice_measure::r2o_measure_voice_for_flow`/`R2oVoiceOptions` | P: опции mark/discovery/known_prefix/flow передаются; полного differential нет |
+| JOB_VERIFY: выбор verifier | 2789–2901 | `r2o_family_recovery_sibling_trial*`, `fetch` | P: C выбирает `rx_gzip`/`rx`/`ver`/`replay`/`alpn`/`path`/`quic_replay` по `rx_phase`, `layered_rx`, `rx_cut`, `measure_path`, ECH; в Rust это разнесено, полной матрицы нет |
+| VERIFY: budget/TS/QUIC-form | 2816–2832 | `r2o_discovery_classify_options`, `fetch` | P: per-call настройки C заменены полями `FetchOptions`; сброс после вызова не нужен |
+| JOB_CONTACT | 2903–2921 | `ask.rs`/`run_r2o_ask` | P: contact и reserved fd есть только в CLI-опросе; production-discovery вопросов не задаёт (см. `prop_send_next`) |
+| addr-recheck | 2934–2965 | `response::probe_neutral_ack` | P: C rc>0→ack, rc==0→ADDRESS, rc<0→не подтверждён/не снят; Rust возвращает `ProbeOutcome`/`neutral_ack`, точные коды не сверены |
+| ECH GREASE/real | 2966–3041 | `r2o_discovery_ech_grease_fallback` (`:15311`), `r2o_discovery_ech_replay_required` (`:15322`) | P: C различает real/GREASE по public_name и свидетелю, ставит `ech_grease`/`ech_replay`/`ech_regrade`; Rust-флаги/переходы иные |
+| ECH baseline | 3042–3058 | `r2o_discovery_ech_config`/`witness`, `r2o_ech_rx_ladder` | P: C `ech_trial=1` при не-CLEAR baseline и уровне ≠CHALLENGE; отдельного `ech_trial` в Rust не найдено |
+| `own_first==1` base | 3059–3074 | `r2o_discovery_base`/`classify` (не сверено) | P |
+| volume_first | 3077–3103 | `r2o_discovery_volume_*`, `r2o_discovery_volume_recovery` (`:14628`) | P: условия `rx_volume_only`/`family_reuse` и INCONCLUSIVE-ветви не сопоставлены один-в-один |
+| QUIC arm | 3109–3169 | `r2o_quic_*`, `r2o_quic_discovery_candidates` | P: C `arm.data_cut`/`budget_pk`/seeded/deny_recheck; Rust-поля и порядок иные |
+| TCP white/seed | 3170–3203 | `r2o_rx_volume`/`hello`, `compose` | P: ECH-приманка даётся всегда, seeded/white hooks; Rust-путь есть, полного differential нет |
+| volume_after | 3205–3227 | `r2o_discovery_volume_recovery_eligible` | P: C разрешает FLAKY при late-volume suspicion и не-dial-deadline; Rust-условия не сверены |
+| volume_carried && CLEAR | 3228–3239 | `cached_volume_cut` (`:11025/11217/11354`) | P: C сохраняет доказанный обрыв при CLEAR; отдельной ветви в Rust не найдено |
+| результат | 3241–3252 | `DiscoveryOutcome` | P: `res`, `ask_settle`, wake; Rust-поля и тайминги иные |
+
+**Итог:** ветви перенесены, но матрица «verifier × вход × состояние» и
+особые случаи (`volume_carried && CLEAR`, `ech_trial`, `own_first base`)
+не доказаны. P обоснован.
 
 ## Проверка полноты
 
