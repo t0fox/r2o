@@ -3294,9 +3294,9 @@ CLI-логирования, health-файла, duration и состава сво
 | `d2k_session_note_unassembled` | 2753–2784 | 32 | «составное приветствие не собралось» один раз + HTTP-ветка | `hold.rs:235 r2o_take_incomplete_diagnostics`, `main.rs:544` | P | `hold.rs:2249 timeout_reports_unassembled_tls_record...` |
 | `d2k_session_hold_candidate` | 2794–2924 | 131 | право начать TCP-hold: SYN, окно 16 КБ, форма, HTTP-кандидат | `hold.rs:298 feed` + `HoldOptions.allow_tls`, `:356 feed_observing_mode` | P | D6; HTTP80-кандидат разнесён между hold/control |
 | `d2k_session_want_shape` | 2926–2929 | 4 | запрос снимка формы (family=4) | API «взведи ожидание» нет; снимок уходит событием HELLO (`main.rs:3093 send_hello_event`, `control.rs HelloEvent`) | P | механизм иной: R2O отдаёт снимок сразу, без отложенного запроса |
-| `d2k_session_want_shape_family` | 2931–2960 | 30 | отдать last_hello или взвести ожидание по transport/family | там же; per-flow capture вместо сессионного слота | P | повторный запрос после утери потока снимок не вернёт |
+| `d2k_session_want_shape_family` | 2931–2960 | 30 | отдать last_hello или взвести ожидание по transport/family; копирует и полный набор TCP-опций | `main.rs` `r2o_capture_client_shape`/`arm_client_shape`; `control.rs:1988` | **P** | C хранит `last_hello/last_name/last_opts` на слот `(transport,family)`; Rust — `ClientShapeEvent`/`last_client_shapes`. **Пробел:** полный `shape_opts` не передаётся, только `tcp_has_timestamp` (см. `d2k_session_shape_tcp_options_family` — N). Повторный запрос после утери потока снимок не вернёт. |
 | `d2k_session_shape` | 2962–2964 | 3 | снимок формы TCP | `capture.rs:170 tcp_hello_from_packet`, `r2o_quic.rs:180 capture_hello` | P | снимок берётся из capture/события, не из сессионного буфера |
-| `d2k_session_shape_family` | 2966–2980 | 15 | снимок формы по family | `capture.rs:170`, `r2o_quic.rs:180` (family в ключе потока) | P | — |
+| `d2k_session_shape_family` | 2966–2980 | 15 | снимок формы по transport/family | `capture.rs:170`, `r2o_quic.rs:180` (family в ключе потока), `control.rs` `ClientShapeEvent` | **P** | C отдаёт `shape[k]` и длину; Rust — ClientHello из `ClientShapeEvent`/кэша. Полный набор TCP-опций не хранится. |
 | `d2k_session_shape_tcp_options_family` | 2982–2990 | 9 | опции TCP к снимку | `control.rs ClientShapeEvent.tcp_has_timestamp` (только bool) | **N** | C хранит `shape_opts[4][40]` и отдаёт полный набор TCP-опций; R2O `ClientShapeEvent` несёт ClientHello + только булев `tcp_has_timestamp`, а v22 `CLIENT_TCP` уходит с пустыми TCP options. Произвольные опции (MD5/порядок TS и др.) не передаются; D2O-контроллер получает `NO_TS` для TS-клиента. |
 | `d2k_session_plans` | 2992–2994 | 3 | таблица планов | `control.rs` NamePlans | P | — |
 | `d2k_session_plan_count` | 2996–2998 | 3 | число планов | `control.rs` NamePlans len | P | — |
@@ -3314,18 +3314,18 @@ CLI-логирования, health-файла, duration и состава сво
 | `tcp_in_band` (static) | 3263–3269 | 7 | оценка в полосе бюджета ±3 | `engine.rs` `TCP_STALL_PACKET_SLACK` | P | — |
 | `tcp_band_top` (static) | 3271–3277 | 7 | верх полосы бюджетов | `engine.rs` budgets | P | — |
 | `ct_tcp_flow` (static) | 3279–3328 | 50 | TCP stall: ESTABLISHED, 3 пакета, RTO, полоса | `engine.rs` conntrack stall detection | P | `test-tcp-stall*`/`r2o-tcp-silence`; полный differential не подтверждён |
-| `d2k_session_set_stall_budgets` | 3330–3343 | 14 | до 8 ненулевых бюджетов, пусто → полевой | `engine.rs:451 set_tcp_stall_budgets` | E | `engine.rs` unit на отказ нулевого/превышения |
-| `d2k_session_stall_budgets` | 3345–3351 | 7 | чтение бюджетов | `engine.rs` поле `tcp_stall_budgets` | P | — |
+| `d2k_session_set_stall_budgets` | 3330–3343 | 14 | до 8 ненулевых бюджетов, пусто → полевой 25 | `engine.rs:451-460 set_tcp_stall_budgets` | **E** | Точное совпадение: `>8` или любой `0` → отказ; пустой список → `[25]`; иначе копия. Тесты `engine.rs:2431-2434` (нулевой/9/пусто/25). |
+| `d2k_session_stall_budgets` | 3345–3351 | 7 | чтение бюджетов (до cap) | `engine.rs:371/850` поле `tcp_stall_budgets` | **P** | Поле есть и используется (`:880`), отдельного getter с cap нет; эквивалентно для чтения. |
 | `d2k_session_sweep` | 3353–3370 | 18 | обход TCP+UDP и ct-детекторов | `main.rs` periodic sweep, `engine.rs`/`r2o_quic.rs` | P | — |
 | `d2k_session_expire` | 3372–3395 | 24 | remove_if(FIN) + expire TCP с callback + UDP | `engine.rs:698 expire_with_silent`, `r2o_udp_sessions.rs:456 expire` | P | — |
 | `d2k_session_flows` | 3397–3399 | 3 | сумма потоков TCP+UDP | `main.rs:668 r2o_log_flow_table_stats` | P | — |
 | `d2k_session_send_pending` | 3401–3405 | 5 | есть ли незавершённые посылки | `scheduler.rs:342 has_pending` | P | — |
-| `d2k_session_sent` | 3407–3428 | 22 | учёт отправки, PLAN_DONE, sent_lost | `main.rs:411 r2o_finish_tcp_execution` | P | — |
-| `d2k_session_exec_failed` | 3449–3501 | 53 | общий исход отказа, damaged, UDP replan | `main.rs:468 r2o_fail_pending_applied`, `:446` | P | `test-raw-emission-cancel-differential.sh` |
-| `d2k_session_guards` | 3503–3507 | 5 | guards потока | `engine.rs` `session.guards` | P | — |
-| `d2k_session_client_shape` | 3509–3513 | 5 | форма клиента потока | `engine.rs` `client_shape` | P | — |
-| `d2k_session_damaged` | 3515–3523 | 9 | пометить поток damaged | `engine.rs:672 r2o_mark_damaged_for_execution` | P | — |
-| `d2k_session_unsent` | 3525–3539 | 15 | PLAN_UNSENT + обнулить sends | `main.rs` refused/damaged journal | P | D22 |
+| `d2k_session_sent` | 3407–3428 | 22 | учёт отправки: `sends_left--`, `sends_done++`, при нуле `done++` + PLAN_DONE; иначе `sent_lost++` | `engine.rs:627-653 r2o_mark_plan_done_for_execution` | **P** | C ведёт счётчик посылок на попытку; Rust завершает попытку одним `plan_done=true`/`r2o_execution_pending=false` при совпадении key/execution/pending/!damaged. **`sends_left`/`sends_done`/`sent_lost` в R2O не найдены** (grep пуст). Для одной посылки эквивалентно, для многопосылочного плана — нет. |
+| `d2k_session_exec_failed` | 3449–3501 | 53 | общий исход отказа: UNSENT один раз; UDP original-lost→`udp_replan`; damaged→`damaged_flows++`, `guards=0`, PLAN_DAMAGED один раз | `main.rs:411-430 r2o_finish_tcp_execution`, `:433-446 r2o_release_damaged_tcp_hold`, `:468 r2o_fail_pending_applied`; `engine.rs:672-690 r2o_mark_damaged_for_execution` | **P** | Совпадает: `r2o_mark_damaged_for_execution` ставит `damaged=true`, `pending=false`, **`guards=0`**; `r2o_finish_tcp_execution` выбирает done/damaged/failed по `payload_on_wire`/`original_spent`/`original_taken`. **Не найдено:** `udp_replan`, `sends_done`, `damaged_flows` (grep пуст). `record_execution_failure` пишет PlanUnsent **всегда** и добавляет PlanDamaged — C пишет одну запись. `test-raw-emission-cancel-differential.sh`. |
+| `d2k_session_guards` | 3503–3507 | 5 | guards потока | `engine.rs` `session.guards` | **P** | Поле есть; `r2o_mark_damaged_for_execution` обнуляет, как C. Отдельного getter нет. |
+| `d2k_session_client_shape` | 3509–3513 | 5 | форма клиента потока | `engine.rs` `session.client_shape` | **P** | Поле есть; заполняется из ClientHello. Полный набор TCP-опций не хранится (см. форму — N). |
+| `d2k_session_damaged` | 3515–3523 | 9 | пометить поток damaged при совпадении execution | `engine.rs:672-690 r2o_mark_damaged_for_execution` | **P** | C ставит только `damaged=1`; Rust дополнительно сбрасывает `r2o_execution_pending` и `guards=0`. Для флага эквивалентно, для guards — Rust сбрасывает раньше, чем C в `exec_failed`. |
+| `d2k_session_unsent` | 3525–3539 | 15 | PLAN_UNSENT + `sends_left=0`/`sends_failed=1` | `main.rs:468 r2o_fail_pending_applied`, `r2o_datapath::flow_journal::record_execution_failure` | **P** | C пишет PLAN_UNSENT и обнуляет счётчики; Rust `sends_left/sends_failed` не имеет, UNSENT — часть `record_execution_failure` (PlanUnsent). D22. |
 | `d2k_session_applied` | 3541–3543 | 3 | счётчик applied | агрегата нет; APPLIED — только события/журнал | N | счётчик не ведётся |
 | `d2k_session_done` | 3545–3547 | 3 | счётчик done | агрегата нет; PLAN_DONE — событие журнала | N | счётчик не ведётся |
 | `d2k_session_damaged_count` | 3549–3551 | 3 | число damaged-потоков | флаг `damaged` на потоке есть, агрегата нет | N | счётчик не ведётся |
@@ -3843,6 +3843,38 @@ ECH, середина приветствия. R2O: `r2k-core/src/tls.rs`.
   sched базовые, addr parse/equal, весь tls, packet/key; P — CT-разбор/
   query, sched owned/oversized, addr text, inline HTTP/binding.
   Новых N нет.
+
+## Углублённая сверка session.c: форма и учёт исполнения
+
+- **Слоты формы:** C хранит `last_hello/last_name/last_opts` и
+  `shape/shape_name/shape_opts` на `(transport,family)` (`session.c:140-143,
+  2931-2990`); `want_shape` отдаёт сохранённое при совпадении имени и
+  взводит ожидание иначе. Rust — `ClientShapeEvent`/`last_client_shapes`
+  (`control.rs:1765-1774`) и `r2o_capture_client_shape`; **полный
+  `shape_opts` не передаётся**, только `tcp_has_timestamp`
+  (`r2o_session_shape_tcp_options_family` — N).
+- **Stall-бюджеты:** `d2k_session_set_stall_budgets` точно совпадает с
+  `TcpSessions::set_tcp_stall_budgets` (`engine.rs:451-460`): ≤8,
+  любой 0 — отказ, пусто → `[25]`; тесты `engine.rs:2431-2434` — E.
+- **`d2k_session_sent`:** C ведёт `sends_left/sends_done/sent_lost/done`
+  и пишет PLAN_DONE при `sends_left==0`. Rust завершает попытку одним
+  `plan_done=true`/`r2o_execution_pending=false`
+  (`engine.rs:627-653`); `sends_left/sends_done/sent_lost` не найдены.
+- **`d2k_session_exec_failed`:** C различает UDP original-lost
+  (`udp_replan`) и damaged (`damaged_flows++`, `guards=0`,
+  PLAN_DAMAGED один раз). Rust `r2o_finish_tcp_execution`
+  (`main.rs:411-430`) + `r2o_mark_damaged_for_execution`
+  (`engine.rs:672-690`, `guards=0`) + `record_execution_failure`;
+  `udp_replan`/`damaged_flows` не найдены; для damaged Rust пишет
+  PlanUnsent **и** PlanDamaged, C — одну запись.
+- **`guards`/`client_shape`/`damaged`/`unsent`:** поля/методы есть;
+  `damaged` в Rust дополнительно сбрасывает pending/guards;
+  `sends_left/sends_failed` не портированы, UNSENT — часть
+  `record_execution_failure`.
+- **Счётчики `applied/done/damaged/sent_lost/suspects/exchanges`:** в
+  R2O остаются событиями/журналом, сводных геттеров нет — N (см.
+  N-раздел). `payload_stats` — `r2o_tcp_payload_stats`
+  (`engine.rs:534-542`), P; журнал — `R2oFlowJournal`, P.
 
 ## Углублённая сверка: 11 N-функций
 
