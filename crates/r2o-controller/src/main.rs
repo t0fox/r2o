@@ -3739,12 +3739,8 @@ fn matching_sibling_recovery_candidates(
     if target.shape == SHAPE_QUIC {
         return Vec::new();
     }
-    let Some(suffix) = r2o_controller::domain::registrable_domain(&target.host) else {
-        return Vec::new();
-    };
-    if suffix != "discord.media" {
-        return Vec::new();
-    }
+    let suffix = r2o_controller::domain::registrable_domain(&target.host);
+    let voice_suffix = suffix.as_deref() == Some("discord.media");
     let mut candidates = Vec::new();
     for box_record in &catalog.boxes {
         for binding in &box_record.bindings {
@@ -3760,11 +3756,20 @@ fn matching_sibling_recovery_candidates(
                 continue;
             };
             if name == target.host {
-                continue;
-            }
-            if r2o_controller::domain::registrable_domain(&name).as_deref() != Some(suffix.as_str())
-            {
-                continue;
+                // Тот же хост, но другая форма ClientHello: пробуем уже
+                // подтверждённый план, вместо повторной классификации.
+                if binding.shape == 0 || binding.shape == target.shape {
+                    continue;
+                }
+            } else {
+                // Соседний узел — только для эфемерных голосовых имён.
+                if !voice_suffix
+                    || r2o_controller::domain::registrable_domain(&name).as_deref()
+                        != suffix.as_deref()
+                    || (binding.shape != 0 && !group_shape_fits(binding.shape, target.shape))
+                {
+                    continue;
+                }
             }
             let transport = if binding.transport == 0 {
                 6
@@ -3780,9 +3785,6 @@ fn matching_sibling_recovery_candidates(
                 || family != target.family
                 || group_path(transport, &binding.probe_path) != "/"
             {
-                continue;
-            }
-            if binding.shape != 0 && !group_shape_fits(binding.shape, target.shape) {
                 continue;
             }
             let Some(saved_plan) = box_record
@@ -10518,7 +10520,15 @@ impl DiscoveryWorker {
                 let direct_ech_config = known_origin_config
                     .is_none()
                     .then(|| r2o_discovery_ech_config(&target, mark).ok().flatten())
-                    .flatten();
+                    .flatten()
+                    // D2O (core/sched.c, ветка «настоящий ECH без своего
+                    // свидетеля»): если HTTPS RR имени несёт ECH-конфигурацию
+                    // с public_name, равным самому имени, то имя снаружи —
+                    // это public_name, а не origin. Обычным приветствием
+                    // такого имени не меряем: повторяем байты клиента
+                    // (ech_replay), иначе зонды уходят на несуществующий
+                    // «сайт» внешнего имени (cloudflare-ech.com).
+                    .filter(|config| r2o_ech_direct_config_usable(&target, config));
                 let ech_configuration_proven =
                     direct_ech_config.is_some() || known_origin_config.is_some();
                 let witness_search = if ech_configuration_proven {
@@ -15283,6 +15293,18 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech(
             &mut |_, _, _, _| {},
         );
     (outcome, probes)
+}
+
+/// D2O считает HTTPS RR имени доказательством «настоящего ECH» только когда
+/// `public_name` конфигурации не совпадает с самим именем: тогда имя — origin,
+/// а снаружи уходит public_name. Если же `public_name == name`, это внешнее
+/// имя ECH; обычный замер по нему бессмыслен, нужен повтор байтов клиента.
+#[cfg(unix)]
+fn r2o_ech_direct_config_usable(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    config: &r2o_controller::ech::R2oEchConfig,
+) -> bool {
+    !config.public_name.eq_ignore_ascii_case(&target.host)
 }
 
 #[cfg(unix)]
@@ -23538,7 +23560,7 @@ mod tests {
         matching_domain_recovery_candidates, matching_sibling_recovery_candidates,
         measured_http_candidate_keys, normalize_plan_target, parse_classify_options,
         parse_serve_options, print_flow_journal, r2o_candidate_confirmation_mark,
-        r2o_catalog_mark_flow_unfit, r2o_discovery_failure_retry_due,
+        r2o_catalog_mark_flow_unfit, r2o_discovery_failure_retry_due, r2o_ech_direct_config_usable,
         r2o_family_applied_flow_matches, r2o_family_recovery_decision,
         r2o_handle_client_shape_event, r2o_http_failed_disposition, r2o_http_live_cut_recheck,
         r2o_plan_wire_shape, r2o_quic_binding_blocks_retry, r2o_tcp_stall_budgets,
@@ -38546,9 +38568,37 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn ech_public_name_equal_to_host_uses_snapshot_replay() {
+        let target = DiscoveryTarget {
+            host: "cloudflare-ech.com".into(),
+            endpoint: "203.0.113.1:443".into(),
+            family: 4,
+            shape: SHAPE_ECH_TCP,
+        };
+        let outer = r2o_controller::ech::R2oEchConfig {
+            public_name: "cloudflare-ech.com".into(),
+            origin_name: "cloudflare-ech.com".into(),
+            config_list: Vec::new(),
+        };
+        assert!(!r2o_ech_direct_config_usable(&target, &outer));
+
+        let origin = DiscoveryTarget {
+            host: "example.com".into(),
+            ..target
+        };
+        let inner = r2o_controller::ech::R2oEchConfig {
+            public_name: "cloudflare-ech.com".into(),
+            origin_name: "example.com".into(),
+            config_list: Vec::new(),
+        };
+        assert!(r2o_ech_direct_config_usable(&origin, &inner));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn соседний_голосовой_узел_берёт_план_подтверждённого_discord_media() {
         let catalog = Catalog::parse(
-            br#"{"boxes":[{"id":"box-1","created":"2026-10-18T00:00:00Z","updated":"2026-10-18T00:00:00Z","plans":[{"id":"11111111111111111111111111111111","proto":"tls","text":"r2o-plan 1 11\nid 11111111111111111111111111111111\nproto tcp tls\nsplit sni_middle +0\n","added":"2026-10-18T00:00:00Z","successes":3,"enabled":true}],"bindings":[{"kind":"name","target":"finland14104.discord.media","plan_id":"11111111111111111111111111111111","level":3,"confirmed":"2026-10-18T00:00:00Z","successes":2,"enabled":true,"transport":6,"family":4,"shape":1,"verified_by":1,"input":1}]}]}"#,
+            br#"{"boxes":[{"id":"box-1","created":"2026-10-18T00:00:00Z","updated":"2026-10-18T00:00:00Z","plans":[{"id":"11111111111111111111111111111111","proto":"tls","text":"r2o-plan 1 11\nid 11111111111111111111111111111111\nproto tcp tls\nsplit sni_middle +0\n","added":"2026-10-18T00:00:00Z","successes":3,"enabled":true}],"bindings":[{"kind":"name","target":"finland14104.discord.media","plan_id":"11111111111111111111111111111111","level":3,"confirmed":"2026-10-18T00:00:00Z","successes":2,"enabled":true,"transport":6,"family":4,"shape":1,"verified_by":1,"input":1},{"kind":"name","target":"www.youtube.com","plan_id":"11111111111111111111111111111111","level":3,"confirmed":"2026-10-18T00:00:00Z","successes":2,"enabled":true,"transport":6,"family":4,"shape":6,"verified_by":1,"input":1}]}]}"#,
         )
         .unwrap();
         let target = r2o_controller::discovery::DiscoveryTarget {
@@ -38580,11 +38630,24 @@ mod tests {
                 &catalog,
                 &r2o_controller::discovery::DiscoveryTarget {
                     host: "finland14104.discord.media".into(),
-                    ..target
+                    ..target.clone()
                 }
             )
             .is_empty()
         );
+
+        // Тот же хост, другая форма ClientHello: подтверждённый ECH-план
+        // пробуется на обычном TLS 1.3, чтобы не запускать классификацию.
+        let cross_shape = r2o_controller::discovery::DiscoveryTarget {
+            host: "www.youtube.com".into(),
+            endpoint: "203.0.113.2:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let cross = matching_sibling_recovery_candidates(&catalog, &cross_shape);
+        assert_eq!(cross.len(), 1);
+        assert_eq!(cross[0].plan_id, [0x11; 16]);
+        assert!(!cross[0].group_plan);
     }
 
     #[test]
