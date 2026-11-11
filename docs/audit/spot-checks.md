@@ -15,7 +15,7 @@
 | `core/x25519.c::d2k_x25519` / `d2k_x25519_base` | 119–168 (50) | `ring`/`x25519-dalek` в QUIC и ECH; `r2o-controller/src/ech.rs` HPKE (9, 22) | **E** | Секрет X25519 для QUIC initial и ECH HPKE. Покрыто QUIC full-stage, ECH-тестами и `test-ech`. |
 | `core/p256.c::d2k_p256_keypair` / `d2k_p256_ecdh` | 282–316 (35) | `ring` SECP256R1 в `r2o_tls.rs` (95, 101, 288) | **N** | В production C вызовов `d2k_p256_*` не найдено — только `test_p256.c`; TLS-путь использует `ring`. Функция не является router-runtime контрактом R2O. |
 | `core/httpsprobe.c::d2k_httpsprobe_done` | 430–449 (20) | `r2o-controller/src/https_probe.rs`, `response.rs::HttpsProbeState` (75) | **P** | Состояние/завершение HTTPS-пробы и кэш состояний есть; отдельного differential на `done`/persist нет. |
-| `datapath/routemark.c::d2k_routemark_describe` | 327–343 (17) | `r2o-datapath/src/r2o_route.rs` (`r2o_route_mark`, 175), `netlink.rs` | **P** | Маршрутная метка/ifindex и выбор egress есть; функция `describe` — диагностическое описание, отдельного аналога по имени нет. Проверить, нужна ли она панели/журналу. |
+| `datapath/routemark.c::d2k_routemark_describe` | 327–343 (17) | `r2o-datapath/src/r2o_route.rs` (`r2o_route_mark`, 175), `netlink.rs` | **N** | Маршрутная метка/ifindex и выбор egress есть, но функции диагностического описания `describe` в R2O нет; на packet path это не влияет. |
 | `core/quicconn.c::d2k_qc_dgrams` / `d2k_qc_ping` | 1438–1458 (8) | `r2o-controller/src/r2o_quic_http3.rs`, `quic_replay.rs` | **P** | Обмен датаграммами и ping/ack покрыты HTTP/3 full-stage 18/18; отдельных функций с теми же именами нет, поэтому построчная сверка ветвей не выполнена. |
 | `core/quicsnap.c::d2k_qsnap_form` | 91–105 (15) | `r2k-core/src/quic_snapshot.rs::r2k_quic_snapshot_parse` (50), `R2kQuicSnapshot::datagrams` (17) | **P** | Форма снимка (n, длина датаграммы, ClientHello) восстанавливается из `quic_snapshot`; отдельного differential именно на `form` нет. |
 | `datapath/nl.c::d2k_nl_errno` | 163–180 (18) | `r2o-datapath/src/netlink.rs::kernel_error` (183) | **E** | Разбор `NLMSG_ERROR` с отрицательным errno совпадает по коду; netlink-тесты и `test-nfq-*` покрывают ошибочные ответы. |
@@ -33,3 +33,25 @@
   (полный набор событий), `httpsprobe_done` (persist/state), `routemark_describe`.
 - `d2k_p256_*` в production C не вызывается; это тестовый/резервный код,
   поэтому его отсутствие в R2O не является функциональным пробелом.
+
+## Подтверждённые расхождения из отчёта datapath-plan
+
+Проверено по исходникам, не только по словам агента:
+
+- **`SET_HTTPS` TTL.** C `datapath/ctlsrv.c:446` обрезает TTL до
+  `D2K_HTTPS_TTL_MAX_S`; R2O `control.rs:1070` возвращает `ACK_BAD_ARGS` при
+  `ttl > MAX_HTTPS_TTL_SECONDS`. Это реальное расхождение поведения, статус P.
+- **`ARM_SHAPE` транспорт.** C `datapath/ctlsrv.c:329` принимает транспорт 6 и
+  17; R2O `control.rs:2002` отвергает всё, кроме 6. Для UDP/QUIC-снимков это
+  может быть функциональным пробелом, статус P.
+- **`d2k_plantab_shape_misses`.** В R2O поле `shape_misses` объявлено и
+  читается, но не инкрементируется ни в одной ветви (`control.rs:92,166,193`);
+  счётчик всегда 0. Это диагностическое расхождение, статус N.
+- **`d2k_plantab_has_ech_target`.** Отдельного предиката нет; R2O собирает
+  неполный ClientHello общим `capture.rs`/`engine.rs`. Поведение может быть
+  покрыто, но адресного differential нет — статус `?`, не N.
+- **`MAX_EMISSIONS = 26`.** Это не функциональный пробел: D2O тоже ограничивает
+  выдачу 26 посылками в `datapath/session.c:2517` (`D2K_RESULT_MAX`). R2O
+  отказывает раньше, в `Plan::apply`; наблюдаемый отказ совпадает, различаются
+  слой и текст ошибки.
+
