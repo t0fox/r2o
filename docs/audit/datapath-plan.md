@@ -133,12 +133,12 @@ transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-со�
 
 ## 3. datapath/include/d2k_plans.h — 2 функции
 
-**Прочитано построчно: 2/2 функции, 381 строка C (1–381).**
+**Прочитано построчно: 2/2 функции, 381 строка C (1–381).** Сверено с `r2k-core/control.rs:306-320` (`BindingContext`, `is_known`) и `delete_name_bound`/`binding_for_plan` (проверки `kind/family/shape/temporary/epoch`).
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| d2k_binding_known | 98-102 | 5 | static inline: identity известна (generation, kind, epoch) | `r2k-core/control.rs:315` `BindingContext::is_known` + покомпонентные проверки в `control.rs:1446-1461` | P | `conditional_http_delete_preserves_replacements_and_removes_only_its_binding` (control.rs:3587). Отличие: R2O `is_known` не проверяет `kind`; `kind==1` проверяется отдельно в `delete_name_bound`. |
-| d2k_binding_equal | 103-108 | 6 | static inline: совпадение generation/kind/family/shape/temporary/epoch | `control.rs:1468-1475` (epoch, generation, transport, shape через ключ) | P | Тот же тест. Отдельной функции сравнения нет: `family` берётся из ключа, `kind` проверяется как `==1`, `temporary` — как `false`. |
+| d2k_binding_known | 98-102 | 5 | static inline: `b`, `generation!=0`, `kind!=0`, хотя бы один ненулевой байт `epoch` | `r2k-core/control.rs:317-319 BindingContext::is_known` | **P** | **Подтверждённое отличие:** R2O `is_known` проверяет только `generation != 0 && epoch.iter().any(!=0)`, **без `kind != 0`**. C при `kind=0` считает identity неизвестной. В `delete_name_bound`/`binding_for_plan` `kind` проверяется отдельно (`==1/2/...`), но сам предикат известности шире. Тест `control.rs:3587`. |
+| d2k_binding_equal | 103-108 | 6 | static inline: обе identity known; generation/kind/family/shape/temporary равны; epoch 16 байт равны | `BindingContext` derived `Eq/PartialEq` (`control.rs:306`) + проверки в `delete_name_bound` | **P** | R2O сравнивает `BindingContext` целиком через derived `PartialEq`, включая `kind/family/shape/temporary/epoch`; C дополнительно требует `d2k_binding_known` для обеих сторон. Отдельной функции «equal with known» нет: вызывающий проверяет `is_known` отдельно, а `is_known` не требует `kind`. Для известных контекстов с `kind!=0` результаты совпадают. |
 
 Итог: E 0, P 2, N 0. Обе функции — inline-предикаты identity; поведение распределено по
 `delete_name_bound` и `binding_for_plan`.
