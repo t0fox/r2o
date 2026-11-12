@@ -834,13 +834,13 @@
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `looks_like_tls` | 33–35 | 3 | выбрать accept-фильтр по первому байту приветствия | classify::Trigger::accept | **P*** | static-хелпер; в R2O accept задаётся при сборке Trigger |
-| `reverse_note` | 53–62 | 10 | пояснение о непроверенном обратном направлении | classify.rs reason | **P*** | static-хелпер; текст причины не совпадает дословно |
-| `pause_note` | 74–80 | 7 | текст о паузе между кусками | classify.rs reason | **P*** | static-хелпер; текст причины не совпадает |
-| `stop_requested` | 92–94 | 3 | проверка флага отмены | AtomicBool cancel | **P*** | static-хелпер |
-| `classify_cancelled` | 96–102 | 7 | вердикт inconclusive при отмене | classify::finish_cancelled | **P** | реализовано; API/текст отличаются, C-путь verdict.c в d2kc не используется |
-| `d2k_classify_cancelable` | 104–334 | 231 | дерево классификации TCP: база, подтверждение clear, разрез 1, контроль, prefix/opaque/inconclusive | classify::run_with_backend + measure + finish | **P** | дерево перенесено в classify.rs (full_detect_semantics и response-стадии добавлены); classifier differentials покрывают базовые вердикты, но не все тексты/отмену исходного API |
-| `d2k_classify` | 336–342 | 7 | обёртка классификации без отмены | classify::run | **P** | см. d2k_classify_cancelable |
+| `looks_like_tls` | 33–35 | 3 | `bytes[0] == 0x16` → ServerHello, иначе Any | `Trigger::accept` (`classify.rs:73-103`) | **P** | **Подтверждённое расхождение:** C выбирает accept **по первому байту** (raw-триггер с `0x16` получает ServerHello); Rust `Trigger::raw_hex` всегда ставит `Accept::Any`, `tls/tls13` — ServerHello. Для raw-hex `0x16` набор принимаемых ответов шире, чем у C. C-вердиктное дерево production-вызовов не имеет (только `core/test_verdict.c`), но контракт функции различается. |
+| `reverse_note` | 53–62 | 10 | MODERN → "", LEGACY → «обратное направление не проверено», UNKNOWN → «вид не разобран…» | classify.rs reason | **P*** | C-тексты фиксированы; Rust формирует причину иначе, дословного сравнения нет. |
+| `pause_note` | 74–80 | 7 | `gap_us==0` → «без пауз», иначе «с паузой N мкс»; буфер 96 | classify.rs reason | **P*** | C `snprintf` в 96 байт; Rust `String` без обрезки. Текст и границы не сравнивались. |
+| `stop_requested` | 92–94 | 3 | `stop && *stop` (volatile sig_atomic) | `AtomicBool::load`/cancel (`classify.rs:1041`) | **P*** | C указатель может быть NULL; Rust `Option<&AtomicBool>`/cancel-флаг. Эквивалентно. |
+| `classify_cancelled` | 96–102 | 7 | verdict=INCONCLUSIVE, `marked=(mark!=0)&&all_marked`, reason «профильный замер отменён…» | `finish_cancelled` (`classify.rs:1952`) | **P** | C текст и явный `marked`; Rust ставит Inconclusive и reason «замер брошен по требованию остановки на N-м зонде…», `finish` не выставляет `marked` в этой функции. C-путь не production (только test_verdict.c). |
+| `d2k_classify_cancelable` | 104–334 | 231 | дерево: guard len<2 → FLAKY; база; `err==repeats` → UNREACHABLE; частичный pass → FLAKY; полный → confirm 2 → CLEAR/INCONCLUSIVE; иначе разрез 1 → PREFIX/FLAKY/контроль → OPAQUE/INCONCLUSIVE; метка по AND | `run_with_backend_progress` (`classify.rs:1298`) + `measure`/`finish` | **P** | Ветви и порядок совпадают, но production discovery использует `full_detect_semantics=false`, `confirm_clear=true` (`classify.rs:869-870`, `main.rs:15380-15391`): нет удвоенного dial-retry, иначе обрабатываются частичные transport-ошибки, control без `until_pass`, добавлен whole-confirm. Дифференциалы идут с `true` и этот путь не покрывают. |
+| `d2k_classify` | 336–342 | 7 | обёртка `d2k_classify_cancelable(..., stop=NULL)` | `classify::run` (`:1929`) | **P** | C-обёртка без отмены; Rust `run` → `run_with_backend(TcpProbeBackend)`. C-путь production-вызовов не имеет. |
 
 ### `core/x25519.c`
 
@@ -906,7 +906,7 @@
 | `d2k_ip4_text` | 32–38 | `Ipv4Addr::Display` | **E** | `scripts/test-core-net4-differential.sh` сравнивает C `d2k_ip4_text` и Rust `Display` на валидных адресах. |
 | `d2k_ip4_private` | 40–51 | `quic_replay.rs:23-46` `ipv4_is_local` | **E** | Differential покрывает 0/8? (C только `v==0`), 10/8, 127/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10 и public 8.8.8.8. Rust-диапазоны совпадают. |
 | `d2k_ip6_private` | 53–64 | `quic_replay.rs:47-58` IPv6-ветка | **E** | Differential покрывает ::, ::1, fc00::, fe80::, ff02::, IPv4-mapped private/public, 2001:db8::1. |
-| `looks_like_tls` (static) | 33–35 | выбор `Accept` в `classify.rs:61-65`, `response.rs:882` | **P** | C решает по `h.bytes[0]==0x16`; Rust использует поле `Trigger.accept`, выставляемое конструктором. Для штатных конструкторов эквивалентно, но прямой differential на «первый байт ≠ 0x16 при accept=ServerHello» отсутствует. |
+| `looks_like_tls` (static) | 33–35 | `Trigger::accept` (`classify.rs:73-103`) | **P** | **Подтверждённое расхождение:** C выбирает accept по первому байту (`0x16` → ServerHello); Rust `Trigger::raw_hex` всегда `Accept::Any`, `tls/tls13` — ServerHello. Для raw-hex `0x16` Rust принимает любой непустой ответ, C — только ServerHello. C-дерево production-вызовов не имеет (только `test_verdict.c`). |
 | `reverse_note` (static) | 53–62 | `classify.rs` reason-строки | **P** | C различает MODERN/LEGACY/UNKNOWN по `d2k_hello_shape`; Rust формирует оговорку по разобранной форме. Тексты не сравнивались побайтно. |
 | `pause_note` (static) | 74–80 | `classify.rs` reason-строки | **P** | Формат «замерено без пауз/с паузой N мкс» перенесён; C-буфер 96 байт, Rust `String` без обрезки. |
 | `stop_requested` (static) | 92–94 | `classify.rs` `stopped(options)` | **P** | Проверка atomic-флага отмены эквивалентна. |

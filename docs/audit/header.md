@@ -131,6 +131,7 @@ P означает неполное доказательство ветвей, N
 | 21 | HTTP-search save | файл `d2k-http-plans 1`, `fflush/fsync/rename` | JSON-каталог, отдельного файла/формата нет | `deep-core-verify.md` |
 | 22 | verify page budget | бюджетный повтор шлёт фактический `req`, дедлайн сбрасывается | повтор строит запрос из `options.path`, общий deadline; redirect только при `complete` | `deep-core-verify.md` |
 | 23 | detect mark | `D2K_BYPASS_MARK=0x40000000` (`detect/include/d2k_detect.h:34`) | `BYPASS_MARK=0x2d` (`raw_probe.rs:23`, `response.rs:71`) | `detect.md` |
+| 24 | raw-hex accept | первый байт `0x16` → `accept_serverhello` (`verdict.c:33-35,126-129`) | `Trigger::raw_hex` всегда `Accept::Any` (`classify.rs:77-83`) | `core-state.md` |
 
 ### Остаточные P (не доказано, не значит «сломано»)
 
