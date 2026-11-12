@@ -548,9 +548,14 @@ impl NamePlans {
             if !tls.is_client_hello || tls.extensions_truncated {
                 return None;
             }
-            return self
+            let plan = self
                 .find_addr(view.dst, shape)
                 .or_else(|| self.find_addr(view.dst, bridge_shape));
+            if plan.is_none() && self.addr_plans.keys().any(|key| key.address == view.dst) {
+                self.shape_misses
+                    .set(self.shape_misses.get().saturating_add(1));
+            }
+            return plan;
         };
         if let Some(probe) = self
             .probes
@@ -576,7 +581,8 @@ impl NamePlans {
             Self::touch_probe(probe, self.next_plan_clock());
             return Some(&probe.plan);
         }
-        self.find(sni, view.family, shape)
+        let plan = self
+            .find(sni, view.family, shape)
             .or_else(|| self.find(sni, view.family, bridge_shape))
             .or_else(|| fallback_shape.and_then(|fallback| self.find(sni, view.family, fallback)))
             .or_else(|| self.find(sni, view.family, SHAPE_GRANDFATHER))
@@ -587,7 +593,31 @@ impl NamePlans {
                     .and_then(|fallback| self.find_in_domain(sni, view.family, fallback, 6))
             })
             .or_else(|| self.find_addr_fallback(view.dst, Some(sni), view.family, shape, 6))
-            .or_else(|| self.find_addr_fallback(view.dst, Some(sni), view.family, bridge_shape, 6))
+            .or_else(|| self.find_addr_fallback(view.dst, Some(sni), view.family, bridge_shape, 6));
+        if plan.is_none() {
+            self.note_tcp_shape_miss(sni, view.dst, view.family);
+        }
+        plan
+    }
+
+    /// Счётчик C `shape_misses`: цель известна, но плана наблюдаемой формы нет
+    /// (`plans.c:1177-1234`). Для TCP проверяются name-записи (кроме HTTP) и
+    /// адресные; UDP-переход `goto check_addr` пока не воспроизведён.
+    fn note_tcp_shape_miss(&self, host: &[u8], address: Address, family: u8) {
+        if let Some(host) = canonical_name(host)
+            && self
+                .plans
+                .keys()
+                .any(|key| key.host == host && key.family == family && key.shape != SHAPE_HTTP)
+        {
+            self.shape_misses
+                .set(self.shape_misses.get().saturating_add(1));
+            return;
+        }
+        if self.addr_plans.keys().any(|key| key.address == address) {
+            self.shape_misses
+                .set(self.shape_misses.get().saturating_add(1));
+        }
     }
 
     pub const fn revision(&self) -> u64 {
@@ -3833,6 +3863,19 @@ mod tests {
             plans.select(&packet).map(|selected| selected.id),
             Some(permanent_id)
         );
+    }
+
+    #[test]
+    fn shape_misses_count_known_name_with_wrong_tcp_shape() {
+        let mut plans = NamePlans::default();
+        assert!(
+            plans
+                .handle(&set_name_shape("example.test", SHAPE_LEGACY, [0x77; 16]))
+                .ok
+        );
+        let packet = tcp_tls_packet("example.test");
+        assert!(plans.select(&packet).is_none());
+        assert_eq!(plans.r2o_shape_misses(), 1);
     }
 
     #[test]
