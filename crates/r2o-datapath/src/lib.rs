@@ -23,5 +23,6 @@ pub mod r2o_udp_sessions;
 pub mod r2o_voice;
 #[cfg(target_os = "linux")]
 pub mod raw;
+pub mod reason_stats;
 pub mod scheduler;
 pub mod session_stats;

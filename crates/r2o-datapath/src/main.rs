@@ -638,6 +638,19 @@ mod app {
         );
     }
 
+    fn r2o_log_reason_stats() {
+        let reasons = r2o_datapath::reason_stats::reason_snapshot();
+        if reasons.is_empty() {
+            return;
+        }
+        let text = reasons
+            .iter()
+            .map(|(reason, count)| format!("{reason}: {count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!("r2o-datapath: пропуски по причинам: {text}");
+    }
+
     fn r2o_log_queue_stats(socket: &QueueSocket) {
         let stats = socket.stats();
         eprintln!(
@@ -1179,6 +1192,7 @@ mod app {
                 r2o_log_flow_table_stats(&tcp_sessions, &udp_sessions);
                 r2o_log_scheduler_stats(&scheduled);
                 r2o_log_session_stats(&tcp_sessions, &udp_sessions);
+                r2o_log_reason_stats();
                 r2o_log_payload_stats(&tcp_sessions);
                 r2o_log_capture_stats(&tcp_sessions);
                 r2o_log_hold_stats(&holding);
@@ -1344,9 +1358,11 @@ mod app {
                 Err(error) => {
                     match error {
                         ReceiveError::LostPackets => {
+                            r2o_datapath::reason_stats::record_reason("ядро не отдало пакет");
                             eprintln!("r2o-datapath: ядро сообщило о потере NFQUEUE пакетов");
                         }
                         ReceiveError::Io(error) => {
+                            r2o_datapath::reason_stats::record_reason("ядро не отдало пакет");
                             eprintln!("r2o-datapath: ошибка чтения NFQUEUE: {error}");
                         }
                         ReceiveError::Wait(_) => unreachable!("poll errors do not flush packets"),
@@ -1511,6 +1527,9 @@ mod app {
                         packet.payload.map(|bytes| bytes.len()),
                         packet.truncated,
                     );
+                    if packet.truncated {
+                        r2o_datapath::reason_stats::record_reason("пакет обрезан copy_range");
+                    }
                     let queue_hook = packet.hook;
                     if let Some(bytes) = packet.payload
                         && let Some(drop) = icmp_guard.r2o_handle_at_hook(

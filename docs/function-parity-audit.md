@@ -86,10 +86,10 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 196 | 351 | 1 | 0 |
 | core-state | 692 | 182 | 509 | 0 | 0 |
-| datapath-core | 400 | 154 | 244 | 2 | 0 |
+| datapath-core | 400 | 155 | 244 | 1 | 0 |
 | datapath-plan | 183 | 164 | 19 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **754** | **1225** | **3** | **0** |
+| **Итого** | **1982** | **755** | **1225** | **2** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,8 +103,8 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 754 / P 1225 /
-N 3 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
+Покрытие реестра: **1982/1982** функций. Статусы: **E 755 / P 1225 /
+N 2 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
 | # | Область | D2O | R2O | Подтверждение |
@@ -346,10 +346,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 196 | 351 | 1 | 0 |
 | core-state | 692 | 182 | 510 | 0 | 0 |
-| datapath-core | 400 | 154 | 244 | 2 | 0 |
+| datapath-core | 400 | 155 | 244 | 1 | 0 |
 | datapath-plan | 183 | 164 | 19 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **754** | **1225** | **3** | **0** |
+| **Итого** | **1982** | **755** | **1225** | **2** | **0** |
 
 
 ---
@@ -3612,11 +3612,11 @@ C-хелперы без собственного состояния наслед
 ## Сводка
 
 - Всего функций: **400**.
-- **E: 154 (38,50 %)**; **P: 244 (61,00 %)**; **N: 2 (0,50 %)**; **?: 0**.
-- Полностью отсутствуют: `count_reason` (гистограмма причин пропуска в сводке)
-  и `d2k_http_trace` (текстовый HTTP-трейс). Агрегатные счётчики applied/done/
-  damaged/sent_lost/exchanges/suspects, NAT-статистика, TCP-опции снимка и
-  `--offline-self-check` теперь есть.
+- **E: 155 (38,75 %)**; **P: 244 (61,00 %)**; **N: 1 (0,25 %)**; **?: 0**.
+- Полностью отсутствует: `d2k_http_trace` (текстовый HTTP-трейс). Агрегатные
+  счётчики applied/done/damaged/sent_lost/exchanges/suspects, NAT-статистика,
+  TCP-опции снимка, `--offline-self-check` и гистограмма причин пропуска
+  теперь есть.
 - Неподтверждённые ветви (P) сосредоточены в `session.c` (97), `d2kd.c` (41),
   `http80.c` (22), `udp_release.c` (20): в основном это склейка/loop-код,
   у которого проверены ключевые ветви, но не весь набор краевых условий C.
@@ -3691,7 +3691,7 @@ R2O-владелец: `crates/r2o-datapath/src/main.rs` (`run`, `parse_options`,
 | `self_cost` (static) | 68-110 | 43 | CPU/RSS из `/proc/self/stat` (поля 14/15) и `statm` (resident) | `main.rs:569 r2o_process_cost_from_proc`, `:605 r2o_process_cost` | **P** | **Ветви сверены:** C читает `/proc/self/stat` в `buf[1024]`, ищет последнюю `)`, считает поля от 2, берёт utime(14)/stime(15), `cpu_ms=(ut+st)*1000/hz`; `/proc/self/statm` — `total/resident`, `rss_kb=resident*page/1024`. Rust `r2o_process_cost_from_proc`/`r2o_process_cost` те же поля/формулы; `test-datapath-process-stats-differential.sh`. |
 | `now_ns` (static) | 112-116 | 5 | `CLOCK_MONOTONIC` в наносекундах | `std::time::Instant` | **P** | C `clock_gettime(CLOCK_MONOTONIC)`, `tv_sec*NS_PER_S+tv_nsec`; Rust `Instant`/`Duration`. Контракт «целые нс» заменён на `Duration`; абсолютные значения не сравнимы, разности монотонны. |
 | `tls_route_segment_cap` (static) | 123-151 | 29 | MTU маршрута минус IP+32 только для TLS ClientHello | `raw.rs:130 tls_route_segment_cap`, `:119 packet_route_maxlen` | **P** | **Ветви сверены:** C `len<40` → 0; IPv4 `ihl>=20 && len>=ihl+20 && proto==6`, dst=+16; IPv6 `len>=60 && next==6`, dst=+24, ihl=40; `tcp_len>=20 && len>=tcp_off+tcp_len+5 && p[tcp]==0x16 && p[tcp+1]==3`; `mtu=route_maxlen_family(dst)`; `overhead=ihl+32`; `mtu>overhead?mtu-overhead:0`. Rust `raw.rs` воспроизводит «только для 0x16/0x03»; unit-тесты route cap. |
-| `count_reason` (static) | 165-186 | 22 | гистограмма причин пропуска (до 32), сравнение по указателю затем `strcmp` | нет прямого аналога | **N** | C ищет по `text==r`, затем `strcmp`, добавляет до 32; печатается в сводке. В R2O нет таблицы причин в сводке; причины уходят в `RefusedEvent`/журнал. |
+| `count_reason` (static) | 165-186 | 22 | гистограмма причин пропуска (до 32), сравнение по указателю затем `strcmp` | `reason_stats.rs` `record_reason`/`reason_snapshot` | E | C ищет по `text==r`, затем `strcmp`, добавляет до 32; печатается в сводке. Rust `Reason`-гистограмма хранит `(&'static str,u64)`, сравнивает по содержимому (наблюдаемо то же), после 32 новых не заводит; `record_reason` подключён к обрезанию NFQUEUE и ошибкам чтения, `r2o_log_reason_stats` печатает сводку. Тест `count_reason_merges_equal_text_and_caps_at_32`. |
 | `icmp_step` (static) | 220-248 | 29 | ICMP time-exceeded: DROP только на свою фальшивку, иначе ACCEPT | `r2o_icmp_guard.rs:127 r2o_handle_at_hook`, вызов в `main.rs` | **P** | **Ветви сверены:** C требует payload/len, IPv4 proto 1 (len>=20) или IPv6 next 58 (len>=40); `st.icmp_seen++`; inbound FORWARD/INPUT; `icmpguard_check` → DROP/ACCEPT; лог при первом drop с адресом; `nfq_verdict`; счётчики. Rust `r2o_handle_at_hook`; `scripts/test-icmp-guard-current-differential.sh`; unit-тестов в модуле нет. |
 | `log_send_fail` (static) | 253-261 | 9 | лог отказа raw; busy(EAGAIN/ENOBUFS) — максимум 16 строк | `main.rs:186/192` eprintln | **P** | C `d2k_udp_send_busy(e)` → `++st.busy_lines>16` → return; иначе строка + на 16-й «дальше только счётчик»; не-busy — обычная строка. Rust eprintln без лимита строк; счётчик busy есть в `RawSendStats`. |
 | `routes_routed` (static) | 278-280 | 3 | предикат «метка выбирает политику» | `r2o_route.rs:175 r2o_mark_is_routed` | **P** | C обёртка `d2k_routemark_routed(r,ipver,mark)`. Rust `r2o_mark_is_routed`; unit-тесты `r2o_route.rs:982+`; семантика маски совпадает. |
@@ -3816,7 +3816,7 @@ R2O-владелец: `crates/r2o-datapath/src/main.rs` (`run`, `parse_options`,
   дренирует sched так, как C. Остальные ветви (NFQUEUE, raw, control,
   hold/release, HTTP, ICMP, stats, route/cap) перенесены — P.
 
-**Итог:** 44 функции; N — `count_reason`, `d2k_http_trace`
+**Итог:** 44 функции; N — `d2k_http_trace`
 (диагностика/CLI), остальные P/E с подтверждёнными пробелами
 CLI-логирования, health-файла, duration, состава сводки,
 `EVENT_STATS` и shutdown-дренажа sched.
