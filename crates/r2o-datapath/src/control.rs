@@ -597,7 +597,20 @@ impl NamePlans {
     }
 
     /// Удаляет временные испытания после отключения контроллера.
+    ///
+    /// C `d2k_plantab_clear_probes` снимает ещё и постоянные name-записи с
+    /// `qdeny`: запрет QUIC — не знание каталога, и без контроллера снимать
+    /// его некому (`plans.c:897-910`).
     pub fn clear_probes(&mut self) {
+        let mut cleared = false;
+        self.plans.retain(|_, entry| {
+            if entry.plan.quic_deny() {
+                cleared = true;
+                false
+            } else {
+                true
+            }
+        });
         if !self.probes.is_empty()
             || !self.voice_addr_probes.is_empty()
             || !self.addr_probes.is_empty()
@@ -605,6 +618,9 @@ impl NamePlans {
             self.probes.clear();
             self.voice_addr_probes.clear();
             self.addr_probes.clear();
+            cleared = true;
+        }
+        if cleared {
             self.revision = self.revision.wrapping_add(1);
         }
     }
@@ -2289,6 +2305,14 @@ mod tests {
         bytes.extend_from_slice(&[0x01, 0x0f, 0x00, 0x01, 0x01]);
         bytes
     }
+    fn quic_deny_plan_records(id: [u8; 16]) -> Vec<u8> {
+        let mut bytes = plan_header(11, 3);
+        bytes.extend_from_slice(&[0x00, 0x01, 0x00, 0x10]);
+        bytes.extend_from_slice(&id);
+        bytes.extend_from_slice(&[0x00, 0x02, 0x00, 0x02, 0x11, 0x02]);
+        bytes.extend_from_slice(&[0x01, 0x10, 0x00, 0x01, 0x01]);
+        bytes
+    }
     fn r2o_quic_clearance_plan_records(id: [u8; 16]) -> Vec<u8> {
         let mut bytes = plan_header(10, 4);
         bytes.extend_from_slice(&[0x00, 0x01, 0x00, 0x10]);
@@ -3773,6 +3797,35 @@ mod tests {
             plans.select(&packet).map(|selected| selected.id),
             Some(permanent_id)
         );
+    }
+
+    #[test]
+    fn clearing_probes_removes_quic_deny_name_plans_like_d2o() {
+        let mut plans = NamePlans::default();
+        let mut deny_body = vec![b"deny.test".len() as u8];
+        deny_body.extend_from_slice(b"deny.test");
+        deny_body.extend_from_slice(&[SHAPE_QUIC, 4]);
+        deny_body.extend_from_slice(&quic_deny_plan_records([0x44; 16]));
+        assert!(
+            plans
+                .handle(&Frame {
+                    kind: COMMAND_SET_NAME,
+                    body: deny_body,
+                })
+                .ok
+        );
+        assert!(
+            plans
+                .handle(&set_name_shape("keep.test", SHAPE_MODERN, [0x55; 16]))
+                .ok
+        );
+        assert_eq!(plans.r2o_plan_count(), 2);
+
+        plans.clear_probes();
+
+        assert_eq!(plans.r2o_plan_count(), 1);
+        assert!(plans.find(b"keep.test", 4, SHAPE_MODERN).is_some());
+        assert!(plans.find(b"deny.test", 4, SHAPE_QUIC).is_none());
     }
 
     fn http_tcp_packet(host: &[u8], source_port: u16) -> Vec<u8> {
