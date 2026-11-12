@@ -102,7 +102,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-11)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 603 / P 1337 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 620 / P 1320 /
 N 42 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -2015,7 +2015,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_diag_memory_enable` | 138–138 | 1 | включить учёт аллокаций | diagnostics::memory_enable | **P** | unit recorder_toggles_memory_tracking; C/Rust дифференциала нет |
 | `d2k_diag_memory_active` | 139–139 | 1 | включён ли учёт аллокаций | diagnostics::memory_active | **P*** | static-хелпер |
 | `atomic_read` | 140–140 | 1 | атомарное чтение счётчика | AtomicU32::load | **P*** | static-хелпер |
-| `atomic_peak` | 141–144 | 4 | CAS-обновление пика | AtomicU32::fetch_max | **P*** | static-хелпер |
+| `atomic_peak` | 141–144 | 4 | CAS-цикл: поднять пик до `live`, при гонке перечитать | CAS-цикл в `memory_acquire` (`diagnostics.rs:178-189`) | **P*** | Алгоритм тот же (compare-exchange до `live`), отдельной функции нет. |
 | `d2k_diag_memory_acquire` | 145–151 | 7 | учесть выделение сайта | diagnostics::memory_acquire | **P** | unit memory_tracking_and_madvise_json_match_d2o_shape |
 | `d2k_diag_memory_release` | 152–156 | 5 | учесть освобождение сайта | diagnostics::memory_release | **P** | тот же unit |
 | `d2k_diag_memory_alloc_failure` | 157–160 | 4 | учесть отказ аллокатора | diagnostics::memory_alloc_failure | **P** | тот же unit |
@@ -2023,7 +2023,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_diag_memory_counts` | 170–179 | 10 | суммарные tracked tcp/tls/quic bytes | diagnostics::tracked_memory_bytes | **P** | unit |
 | `d2k_diag_set_madvise` | 180–180 | 1 | сохранить статистику madvise | Recorder::set_madvise | **P** | unit memory_tracking_and_madvise_json_match_d2o_shape |
 | `record_anomaly` | 181–187 | 7 | записать аномалию в кольцо (12 слотов) | Recorder::record_anomaly | **P*** | static-хелпер |
-| `d2k_diag_record_write_error` | 188–191 | 4 | записать ошибку записи отчёта | Recorder::record_write_error | **P** | unit records_only_while_enabled |
+| `d2k_diag_record_write_error` | 188–191 | 4 | `write_failures++` и аномалия kind=2 с **кодом ошибки** `error` | `Recorder::record_write_error` (`diagnostics.rs:1165-1176`) | **P** | **Подтверждённое расхождение:** C сохраняет `error` в `anomaly.code`, `write_anomalies` печатает его как `error_code` (`diagnostics.c:388`); Rust-функция принимает только `stage` и всегда пишет `"error_code": null`. Все вызовы (`path/serialize/size-limit/open-temp/flush-close/rename`) теряют errno/код. Unit `records_only_while_enabled`; C/Rust differential на код ошибки нет. |
 | `d2k_diag_record` | 192–201 | 10 | записать событие в кольцо 64: id/at/family/trigger/elapsed/queue/units/target/ip/path/kind/shape/protocol/outcome/reason; пределы target 255, protocol 15, outcome 31, **reason 255**, ip 47, path 15, kind 7 | Recorder::record (`:754`) | **P** | **Подтверждённое расхождение:** C `reason[256]` → `copy` режет до **255** байт; Rust явно задаёт `("reason", 1024)` (`diagnostics.rs:768`). Остальные пределы совпадают. Rust сам добавляет `id`, если его нет, и всегда перезаписывает `at`; C берёт id/at из структуры. C не проверяет `enabled` (это делает вызывающий), Rust `record` выходит при `!enabled` — эквивалентно при штатном включении. |
 | `d2k_diag_record_limit` | 202–212 | 11 | записать переход лимита (32) | Recorder::record_limit | **P** | unit/differential частично |
 | `value` | 213–217 | 5 | число после ключа в /proc | diagnostics::meminfo/read_number | **P*** | static-хелпер |
@@ -2763,10 +2763,13 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 - **`d2k_diag_record`/`record_limit`/`record_anomaly`/`write_anomalies`:**
   кольца и счётчики `event_total/limit_total/anomaly_total/write_failures`
   перенесены; `record_anomaly` пишет kind/code/rss_delta/accounted_delta/
-  stage в кольцо 8. **Подтверждённое расхождение:** предел `reason` —
+  stage в кольцо 8. **Подтверждённые расхождения:** (1) предел `reason` —
   255 байт в C (`reason[256]`) и **1024** в Rust (`diagnostics.rs:768`);
-  остальные пределы совпадают. P, отдельного C/Rust differential на
-  переполнение колец нет.
+  (2) `d2k_diag_record_write_error` в C сохраняет код ошибки в
+  `anomaly.code` и печатает `error_code`, Rust `record_write_error(stage)`
+  всегда пишет `null` (`diagnostics.rs:1165-1176`) — errno/код теряются.
+  Остальные пределы совпадают. P, отдельного C/Rust differential на
+  переполнение колец и код ошибки нет.
 
 ## Углублённая сверка: catalog.c (60 функций)
 
