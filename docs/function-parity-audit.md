@@ -87,9 +87,9 @@ recheck 1982 1982 equal True
 | core-net | 548 | 197 | 351 | 0 | 0 |
 | core-state | 692 | 182 | 509 | 0 | 0 |
 | datapath-core | 400 | 156 | 244 | 0 | 0 |
-| datapath-plan | 183 | 165 | 18 | 0 | 0 |
+| datapath-plan | 183 | 169 | 14 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **758** | **1224** | **0** | **0** |
+| **Итого** | **1982** | **762** | **1220** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 758 / P 1224 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 762 / P 1220 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -347,9 +347,9 @@ P означает неполное доказательство ветвей, N
 | core-net | 548 | 197 | 351 | 0 | 0 |
 | core-state | 692 | 182 | 510 | 0 | 0 |
 | datapath-core | 400 | 156 | 244 | 0 | 0 |
-| datapath-plan | 183 | 165 | 18 | 0 | 0 |
+| datapath-plan | 183 | 169 | 14 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **758** | **1224** | **0** | **0** |
+| **Итого** | **1982** | **762** | **1220** | **0** | **0** |
 
 
 ---
@@ -5737,10 +5737,10 @@ UDP→addr переход, R2O — только exact+ECH→MODERN+общий ad
 | shape_fits | 1044-1052 | 9 | static: grandfather→1; MODERN↔ECH_TCP, MODERN_NO_TS↔ECH_NO_TS, MODERN_TS↔ECH_TS; иначе `entry_shape!=0 && equal` | `control.rs` `r2o_shape_fits`, `find_shape_fits` | E | C-предикат вынесен в `r2o_shape_fits`; `find_shape_fits` ищет именную запись по нему и вызывается в `select` после grandfather. ANY (0) не проходит, как в C. Тест `legacy_addr_setters_and_shape_fits_match_c` покрывает grandfather/ECH-переносы/точное равенство и отказы. |
 | shape_is_udp | 1054-1056 | 3 | static: QUIC/VOICE | `control.rs:1778` `r2o_shape_is_udp`; `find_addr_fallback` (`:1740-1765`) | E | C разрешает адресный fallback при UDP-наблюдении и запрещает при TCP, если имя названо (`plans.c:1190-1200`). Rust `r2o_shape_is_udp` + `name_has_any_binding`: для TCP при любой записи/суффиксе имени возвращается NULL, для UDP fallback разрешён. Тест `tcp_name_does_not_fall_back_to_addr_plan_but_udp_does`. |
 | d2k_plantab_shape_misses | 1058-1060 | 3 | счётчик «нашли, но форма не подошла» | `control.rs` `r2o_shape_misses`, `note_shape_miss` | E | C инкрементирует в ветвях `find_target`: TCP при известном имени/адресе (`plans.c:1209,1233`), UDP — после `goto check_addr`; probe-by-port учитывает порт. Rust `note_shape_miss(name,addr,family,shape)` считает TCP-имя, UDP-имя своей формы/ANY и адресные записи; для UDP имя другого транспорта уступает адресу, как C. Вызовы подключены к TCP/QUIC/voice путям. Тесты `shape_misses_count_known_name_with_wrong_tcp_shape`, `shape_misses_match_c_for_udp_and_addr_branches` (5 ветвей). |
-| d2k_plantab_find | 1062-1066 | 5 | поиск плана по имени, затем адресу | `control.rs:410` `select` | P | R2O `select` разбирает пакет и сам извлекает SNI/HTTP/QUIC; порядок «имя → суффикс → адрес» сохранён, но набор ветвей другой (см. `find_target`). |
-| d2k_plantab_find_sport | 1068-1072 | 5 | поиск с местным портом потока | `control.rs:548-571` (`select`, `tcp.source_port`) | P | C `find_family(...,family=4)` с портом; порт учитывается для проб. Rust `select` передаёт `tcp.source_port` в `NameProbeKey`; отдельного входа с sport нет. |
-| d2k_plantab_find_family | 1074-1079 | 6 | поиск с family | `control.rs:419` `select_with_quic_host_at_hook` (`view.family`) | P | C `find_target(..., family==4 ? &addr_be : NULL, family, ...)`; family 6 без адреса. Rust family берётся из `PacketView`; отдельного входа нет. |
-| d2k_plantab_find_target | 1081-1236 | 156 | ядро поиска: probe-by-port при пустом имени → точная форма+порт → своя форма → grandfather → суффикс → адрес; счёт промахов | `control.rs:419-600 select_with_quic_host_at_hook`, `:1493-1590 find/find_addr/find_addr_fallback/find_in_domain` | **P** | Тесты TLS/ECH/QUIC/HTTP/voice/probe (control.rs:2823-3896). **Подтверждённые отличия:** (1) `shape_misses` R2O инкрементирует только TCP-случай (name/addr), UDP/probe-by-port — нет; (2) R2O добавляет TCP-контекст 8–13 и bridge-shape (control.rs:529-539); (3) односторонний кросс-транспортный переход C (UDP→addr, TCP→NULL) заменён общим `find_addr_fallback`, который разрешает и TCP→addr; (4) C при пустом имени и `sport_be` ищет **name-probe по порту** (`plans.c:1093-1112`), R2O UDP-путь имеет только `addr_probe_binding_at_hook`, а TCP без SNI уходит в `find_addr`; (5) C имеет `h.any`/ANY и grandfather/ANY в `scan_addr`, R2O `find`/`find_addr` — только exact+ECH→MODERN; (6) ECH→MODERN в `find_addr` **есть** (`control.rs:1509-1517`), поэтому прежнее утверждение об отсутствии ECH-адресного fallback неверно; отсутствуют grandfather/ANY. |
+| d2k_plantab_find | 1062-1066 | 5 | поиск плана по имени, затем адресу | `control.rs` `NamePlans::find` | E | C `find` — обёртка `find_sport(...,sport=0)`. Rust `find(name,address,seen_shape)` делегирует `find_sport`; тест `explicit_find_wrappers_match_c_entry_points`. |
+| d2k_plantab_find_sport | 1068-1072 | 5 | поиск с местным портом потока | `control.rs` `NamePlans::find_sport` | E | C `find_sport` — `find_family(...,family=4)` с портом. Rust `find_sport` делегирует `find_family(...,4)`, порт участвует в поиске проб; тест проверяет точный и чужой порт. |
+| d2k_plantab_find_family | 1074-1079 | 6 | поиск с family | `control.rs` `NamePlans::find_family` | E | C для family 6 передаёт адрес NULL. Rust `find_family` принимает адрес только для family 4 и делегирует `find_target`; тест проверяет IPv6-имя без адреса. |
+| d2k_plantab_find_target | 1081-1236 | 156 | ядро поиска: probe-by-port при пустом имени → точная форма+порт → своя форма → grandfather → суффикс → адрес; счёт промахов | `control.rs` `NamePlans::find_target` | E | Rust `find_target` реализует порядок C: уникальная портовая проба при пустом имени, точная форма/ECH→MODERN/ANY/grandfather для проб, постоянные name/suffix, односторонний UDP→addr переход, grandfather/ANY адреса и `shape_misses`. Тест `explicit_find_wrappers_match_c_entry_points` покрывает имя/порт/пустое имя/IPv6/кросс-транспорт/промах. Packet-path `select` сохраняет TCP-контекст 8–13 как мост. |
 | d2k_plantab_count | 1238-1240 | 3 | число занятых записей | `control.rs:178-189` `r2o_plan_count`/`exact_usage` | E | C `t ? t->used : 0` — только записи `v[]` (имена+адреса); name-пробы лежат там же с `only_sport`, но отдельного `probe_used` не имеют. Rust `r2o_plan_count = plans.len()+addr_plans.len()` — name+addr без name-проб; `exact_usage()` отдельно включает `probes` для общей ёмкости/вытеснения. Тест `plan_count_excludes_name_probes_like_d2o`: одна name-проба → count 0, exact_usage 1; capacity-тест control.rs:2633. |
 | d2k_plantab_capacity | 1242-1244 | 3 | ёмкость таблицы | `control.rs:182` `r2o_plan_capacity` | E | C `t ? t->cap : 0`; Rust `exact_capacity` (не менее 1). Тест `name_plan_table_evicts_lru_and_delete_releases_a_slot` (control.rs:2663) сверяет capacity и вытеснение. |
 | d2k_plantab_binding | 1246-1257 | 12 | identity установленного плана (generation/kind/family/shape/temporary/epoch) | `control.rs:690` `binding_for_plan`, `:1469-1476` `delete_name_bound` | E | C `!out→0`; зануление; `!t/!p/owner!=t/!generation→0`; нулевой epoch→0; копия generation/kind/family/shape/temporary/epoch; 1. Rust `binding_for_plan` возвращает `PlanBinding` с trial/generation/shape/temporary; epoch — поле `NamePlans`, проверяется в `delete_name_bound`. Тесты `bound_http_set...` (control.rs:2700), APPLIED-фикстуры. |

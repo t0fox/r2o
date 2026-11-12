@@ -466,7 +466,7 @@ impl NamePlans {
                     return Some(r2o_plan);
                 }
                 let plan = self
-                    .find(b"@discord-voice", view.family, SHAPE_VOICE)
+                    .find_exact(b"@discord-voice", view.family, SHAPE_VOICE)
                     .or_else(|| {
                         self.find_addr_fallback(
                             view.dst,
@@ -513,7 +513,7 @@ impl NamePlans {
             let quic_host = quic_host.or(derived_quic_host.as_deref());
             return if let Some(quic_host) = quic_host {
                 let plan = self
-                    .find(quic_host, view.family, SHAPE_QUIC)
+                    .find_exact(quic_host, view.family, SHAPE_QUIC)
                     .or_else(|| self.find_in_domain(quic_host, view.family, SHAPE_QUIC, 17))
                     .or_else(|| {
                         self.find_addr_fallback(
@@ -557,7 +557,7 @@ impl NamePlans {
                 Self::touch_probe(probe, self.next_plan_clock());
                 return Some(&probe.plan);
             }
-            return self.find(payload.get(host_range)?, view.family, SHAPE_HTTP);
+            return self.find_exact(payload.get(host_range)?, view.family, SHAPE_HTTP);
         }
         let tls = r2k_core::tls::parse(payload);
         let sni = tls
@@ -626,10 +626,12 @@ impl NamePlans {
             return Some(&probe.plan);
         }
         let plan = self
-            .find(sni, view.family, shape)
-            .or_else(|| self.find(sni, view.family, bridge_shape))
-            .or_else(|| fallback_shape.and_then(|fallback| self.find(sni, view.family, fallback)))
-            .or_else(|| self.find(sni, view.family, SHAPE_GRANDFATHER))
+            .find_exact(sni, view.family, shape)
+            .or_else(|| self.find_exact(sni, view.family, bridge_shape))
+            .or_else(|| {
+                fallback_shape.and_then(|fallback| self.find_exact(sni, view.family, fallback))
+            })
+            .or_else(|| self.find_exact(sni, view.family, SHAPE_GRANDFATHER))
             .or_else(|| self.find_shape_fits(sni, view.family, shape))
             .or_else(|| self.find_in_domain(sni, view.family, shape, 6))
             .or_else(|| self.find_in_domain(sni, view.family, bridge_shape, 6))
@@ -1910,7 +1912,7 @@ impl NamePlans {
         Some(&entry.plan)
     }
 
-    fn find(&self, bytes: &[u8], family: u8, shape: u8) -> Option<&Plan> {
+    fn find_exact(&self, bytes: &[u8], family: u8, shape: u8) -> Option<&Plan> {
         let host = canonical_plan_name(bytes, shape)?;
         let entry = self.plans.get(&NamePlanKey {
             host,
@@ -1919,6 +1921,186 @@ impl NamePlans {
         })?;
         Self::touch(entry, self.next_plan_clock());
         Some(&entry.plan)
+    }
+
+    /// C `d2k_plantab_find`: IPv4, без порта.
+    pub fn find(
+        &self,
+        name: Option<&[u8]>,
+        address: Option<Address>,
+        seen_shape: u8,
+    ) -> Option<&Plan> {
+        self.find_sport(name, address, seen_shape, 0)
+    }
+
+    /// C `d2k_plantab_find_sport`: IPv4, с портом.
+    pub fn find_sport(
+        &self,
+        name: Option<&[u8]>,
+        address: Option<Address>,
+        seen_shape: u8,
+        source_port: u16,
+    ) -> Option<&Plan> {
+        self.find_family(name, address, seen_shape, source_port, 4)
+    }
+
+    /// C `d2k_plantab_find_family`: IPv6 ищет без адреса.
+    pub fn find_family(
+        &self,
+        name: Option<&[u8]>,
+        address: Option<Address>,
+        seen_shape: u8,
+        source_port: u16,
+        family: u8,
+    ) -> Option<&Plan> {
+        if !matches!(family, 4 | 6) {
+            return None;
+        }
+        let address = if family == 4 { address } else { None };
+        self.find_target(name, address, family, seen_shape, source_port)
+    }
+
+    /// C `d2k_plantab_find_target`: полный поиск без разбора пакета.
+    pub fn find_target(
+        &self,
+        name: Option<&[u8]>,
+        address: Option<Address>,
+        family: u8,
+        seen_shape: u8,
+        source_port: u16,
+    ) -> Option<&Plan> {
+        if !matches!(family, 4 | 6) {
+            return None;
+        }
+        let host = name.and_then(canonical_name);
+        let no_name = name.is_none_or(|value| value.is_empty());
+
+        // C: пустое имя + порт — уникальная портовая проба подходящей формы.
+        if no_name && source_port != 0 {
+            let mut found: Option<&ProbePlan> = None;
+            for (key, probe) in &self.probes {
+                if key.name.family == family
+                    && key.source_port == source_port
+                    && r2o_shape_fits(key.name.shape, seen_shape)
+                {
+                    if found.is_some() {
+                        return None;
+                    }
+                    found = Some(probe);
+                }
+            }
+            if let Some(probe) = found {
+                Self::touch_probe(probe, self.next_plan_clock());
+                return Some(&probe.plan);
+            }
+        }
+
+        if let Some(host) = host.as_deref() {
+            if source_port != 0 {
+                let mut probe: Option<(&NameProbeKey, &ProbePlan)> = None;
+                // Точная форма, затем ECH→MODERN, ANY→любая, grandfather.
+                for (key, value) in &self.probes {
+                    if key.name.host == host
+                        && key.name.family == family
+                        && key.source_port == source_port
+                        && key.name.shape == seen_shape
+                    {
+                        probe = Some((key, value));
+                        break;
+                    }
+                }
+                if probe.is_none() && seen_shape == SHAPE_ECH_TCP {
+                    for (key, value) in &self.probes {
+                        if key.name.host == host
+                            && key.name.family == family
+                            && key.source_port == source_port
+                            && key.name.shape == SHAPE_MODERN
+                        {
+                            probe = Some((key, value));
+                            break;
+                        }
+                    }
+                }
+                if probe.is_none() && seen_shape == 0 {
+                    for (key, value) in &self.probes {
+                        if key.name.host == host
+                            && key.name.family == family
+                            && key.source_port == source_port
+                        {
+                            probe = Some((key, value));
+                            break;
+                        }
+                    }
+                }
+                if probe.is_none() {
+                    for (key, value) in &self.probes {
+                        if key.name.host == host
+                            && key.name.family == family
+                            && key.source_port == source_port
+                            && key.name.shape == SHAPE_GRANDFATHER
+                        {
+                            probe = Some((key, value));
+                            break;
+                        }
+                    }
+                }
+                if let Some((key, value)) = probe {
+                    Self::touch_probe(value, self.next_plan_clock());
+                    if (seen_shape == 0 && key.source_port == source_port)
+                        || r2o_shape_fits(key.name.shape, seen_shape)
+                    {
+                        return Some(&value.plan);
+                    }
+                    if r2o_shape_is_udp(seen_shape) && !r2o_shape_is_udp(key.name.shape) {
+                        // C: goto check_addr — имя другого транспорта уступает адресу.
+                    } else {
+                        self.increment_shape_misses();
+                        return None;
+                    }
+                }
+            }
+
+            let transport = if r2o_shape_is_udp(seen_shape) { 17 } else { 6 };
+            let plan = self
+                .find_exact(host.as_bytes(), family, seen_shape)
+                .or_else(|| {
+                    (seen_shape == SHAPE_ECH_TCP)
+                        .then(|| self.find_exact(host.as_bytes(), family, SHAPE_MODERN))
+                        .flatten()
+                })
+                .or_else(|| self.find_exact(host.as_bytes(), family, SHAPE_GRANDFATHER))
+                .or_else(|| self.find_shape_fits(host.as_bytes(), family, seen_shape))
+                .or_else(|| self.find_in_domain(host.as_bytes(), family, seen_shape, transport));
+            if let Some(plan) = plan {
+                return Some(plan);
+            }
+            if !r2o_shape_is_udp(seen_shape) {
+                if self.name_has_any_binding(host.as_bytes(), family) {
+                    self.increment_shape_misses();
+                }
+                return None;
+            }
+            if self.name_has_udp_binding(host.as_bytes(), family) {
+                self.increment_shape_misses();
+                return None;
+            }
+        }
+
+        let Some(address) = address else {
+            return None;
+        };
+        let plan = self
+            .find_addr(address, seen_shape)
+            .or_else(|| self.find_addr_shape_fits(address, seen_shape));
+        if plan.is_none() && self.addr_plans.keys().any(|key| key.address == address) {
+            self.increment_shape_misses();
+        }
+        plan
+    }
+
+    fn increment_shape_misses(&self) {
+        self.shape_misses
+            .set(self.shape_misses.get().saturating_add(1));
     }
 
     /// C `d2k_plantab_del_name_family`: снять все постоянные записи имени
@@ -5112,8 +5294,8 @@ mod tests {
         plans.clear_probes();
 
         assert_eq!(plans.r2o_plan_count(), 1);
-        assert!(plans.find(b"keep.test", 4, SHAPE_MODERN).is_some());
-        assert!(plans.find(b"deny.test", 4, SHAPE_QUIC).is_none());
+        assert!(plans.find_exact(b"keep.test", 4, SHAPE_MODERN).is_some());
+        assert!(plans.find_exact(b"deny.test", 4, SHAPE_QUIC).is_none());
     }
 
     fn http_tcp_packet(host: &[u8], source_port: u16) -> Vec<u8> {
@@ -5820,6 +6002,145 @@ mod tests {
             address,
             4,
             r2k_core::control::SHAPE_MODERN,
+        );
+        assert_eq!(plans.shape_misses.get(), before + 1);
+    }
+
+    #[test]
+    fn explicit_find_wrappers_match_c_entry_points() {
+        let mut plans = NamePlans::default();
+        plans.plans.insert(
+            NamePlanKey {
+                host: "entry.example".into(),
+                family: 4,
+                shape: SHAPE_LEGACY,
+            },
+            InstalledPlan {
+                plan: Plan {
+                    id: [0xE1; 16],
+                    ..Plan::default()
+                },
+                generation: 1,
+                last_used: std::cell::Cell::new(0),
+            },
+        );
+        assert_eq!(
+            plans
+                .find(Some(b"entry.example"), None, SHAPE_LEGACY)
+                .map(|plan| plan.id),
+            Some([0xE1; 16])
+        );
+        assert!(
+            plans
+                .find(Some(b"entry.example"), None, SHAPE_MODERN)
+                .is_none()
+        );
+
+        plans.probes.insert(
+            NameProbeKey {
+                name: NamePlanKey {
+                    host: "probe.example".into(),
+                    family: 4,
+                    shape: SHAPE_MODERN,
+                },
+                source_port: 40_000,
+            },
+            ProbePlan {
+                plan: Plan {
+                    id: [0xE2; 16],
+                    ..Plan::default()
+                },
+                trial_id: [1; 16],
+                generation: 2,
+                last_used: std::cell::Cell::new(0),
+            },
+        );
+        assert_eq!(
+            plans
+                .find_sport(Some(b"probe.example"), None, SHAPE_MODERN, 40_000)
+                .map(|plan| plan.id),
+            Some([0xE2; 16])
+        );
+        assert!(
+            plans
+                .find_sport(Some(b"probe.example"), None, SHAPE_MODERN, 40_001)
+                .is_none()
+        );
+        // Пустое имя + уникальная портовая проба.
+        assert_eq!(
+            plans
+                .find_target(None, None, 4, SHAPE_MODERN, 40_000)
+                .map(|plan| plan.id),
+            Some([0xE2; 16])
+        );
+
+        plans.plans.insert(
+            NamePlanKey {
+                host: "v6.example".into(),
+                family: 6,
+                shape: SHAPE_QUIC,
+            },
+            InstalledPlan {
+                plan: Plan {
+                    id: [0xE3; 16],
+                    ..Plan::default()
+                },
+                generation: 3,
+                last_used: std::cell::Cell::new(0),
+            },
+        );
+        let v6 = super::Address::new(super::IpAddr::V6(super::Ipv6Addr::LOCALHOST));
+        assert_eq!(
+            plans
+                .find_family(Some(b"v6.example"), Some(v6), SHAPE_QUIC, 0, 6)
+                .map(|plan| plan.id),
+            Some([0xE3; 16])
+        );
+
+        let address =
+            super::Address::new(super::IpAddr::V4(super::Ipv4Addr::new(198, 51, 100, 30)));
+        plans.plans.insert(
+            NamePlanKey {
+                host: "cross.example".into(),
+                family: 4,
+                shape: SHAPE_MODERN,
+            },
+            InstalledPlan {
+                plan: Plan {
+                    id: [0xE4; 16],
+                    ..Plan::default()
+                },
+                generation: 4,
+                last_used: std::cell::Cell::new(0),
+            },
+        );
+        plans.addr_plans.insert(
+            super::AddrPlanKey {
+                address,
+                shape: SHAPE_QUIC,
+            },
+            InstalledPlan {
+                plan: Plan {
+                    id: [0xE5; 16],
+                    ..Plan::default()
+                },
+                generation: 5,
+                last_used: std::cell::Cell::new(0),
+            },
+        );
+        // UDP-наблюдение: TCP-запись имени уступает адресу.
+        assert_eq!(
+            plans
+                .find_target(Some(b"cross.example"), Some(address), 4, SHAPE_QUIC, 0)
+                .map(|plan| plan.id),
+            Some([0xE5; 16])
+        );
+        // TCP-наблюдение: имя названо, адресный план не берётся, промах учтён.
+        let before = plans.shape_misses.get();
+        assert!(
+            plans
+                .find_target(Some(b"cross.example"), Some(address), 4, SHAPE_LEGACY, 0)
+                .is_none()
         );
         assert_eq!(plans.shape_misses.get(), before + 1);
     }
