@@ -5829,12 +5829,12 @@ Rtnetlink: дампы правил, одиночный поиск маршрут
 
 # Аудит паритета: detect — измеритель DPI (D2O C → R2O Rust)
 
-Дата: 2026-11-11. Проход только по исходникам: код не менялся, роутер не затрагивался.
+Дата: 2026-11-11; построчная сверка продолжена 2026-11-12. Код D2O не менялся, роутер не затрагивался.
 
 ## Baseline
 
 - D2O (oracle): `E:\d2o-a378w`, SHA `a378e230947ebfd011439e1cac0f1e994d883aae`.
-- R2O: `E:\r2o`, HEAD `9272eafa7992e88dff99cd25056e93157008a3d5` (ветка `main`).
+- R2O: `E:\r2o`, ветка `main`; проход 2026-11-12 велся от HEAD `0f59821`.
   Ссылки на строки даны по рабочему дереву; в нём возможны незакоммиченные правки других сессий.
 - Срез: E:\r2o-tooling\audit\slice-detect.csv — **159 функций** из 9 файлов:
   `detect/raw.c` (62), `detect/classify.c` (36), `detect/bridge.c` (17), `detect/poison.c` (12),
@@ -5844,11 +5844,12 @@ Rtnetlink: дампы правил, одиночный поиск маршрут
   `crates/`, а не только по кандидатам CSV; проверялись ветви, коды ошибок, таймауты,
   отмена и побочные эффекты.
 
-> Ограничение этого прохода: `git` и `cargo` в среде отсутствуют, тесты **не запускались**.
+> Ограничение прохода 2026-11-11: `git` и `cargo` в среде отсутствовали, тесты не запускались.
+> В проходе 2026-11-12 исходники прочитаны построчно, `cargo test -p r2o-controller --test classify`
+> дал 35 passed; detect-differential скрипты в этом проходе не перезапускались.
 > Статус E означает «Rust-реализация совпадает по разобранным ветвям и в дереве есть
 > профильный юнит-тест или C/Rust-дифференциал, названный в колонке доказательства».
-> Факт успешного прогона теста здесь не заявляется; production- и аппаратные сценарии
-> (реальный DPI, OpenWrt/musl, mipsel) не проверялись.
+> Production- и аппаратные сценарии (реальный DPI, OpenWrt/musl, mipsel) не проверялись.
 
 ## Статусы
 
@@ -5900,6 +5901,14 @@ P не считается доказанным паритетом: это пок
 фильтра невыразимых находок и гейта socket-only split (`scripts/r2o-measured-split-differential.sh`,
 `scripts/r2o-bridge-clone-decoy-differential.sh`).
 
+**Прочитано построчно: 17/17 функций, 641 строка C (1–641).** Сверены: вход `bridge_input`
+(триггер 2..16384 + accept ServerHello, контроль TLSRecord/vouched=0, клон приманки через
+`d2k_hello_rename`, white, repeats/write_gap/timeout/mark/cancel, IPv6-адрес); `sched_tcp`
+(bridge_input → seed → classify_run → stopped→Inconclusive → map_verdict → socket-only split gate →
+refused unplannable → raw_selftest/RST owns_search → arm_from_poison/arm_input); хуки
+`sched_tcp*`; базовый вопрос (`tr.name=""`, no_raw, base_seen/base_stop, ответ "whole",
+base.valid/base_blocked) и neutral-ack.
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `d2k_detect_stop_all` | 45-45 | 50 | липкий общий флаг остановки службы | `Drop for DiscoveryWorker` (`main.rs:14251-14261`) | **P** | Отдельного глобального флага нет, но остановка службы достижима: `Drop` взводит `cancel` и все `active_cancels`, будит jobs и join-ит потоки. Нет C/Rust differential на «остановить все» и липкость флага. |
@@ -5927,6 +5936,14 @@ P не считается доказанным паритетом: это пок
 покрыты тестами и C/Rust-дифференциалами. Слабые: нет `notes`/`covers_tls12`, нет trace о непринятом
 правиле RST, текст причины при отказе сырого слоя и счёт probes ответного направления отличаются,
 `note_gap_loss` отсутствует вовсе.
+
+**Прочитано построчно: 36/36 функций, 1494 строки C (1–1494).** Сверены: имена вердиктов/ответа,
+часы/сон/отмена, accept-критерии, опции и skip/only, трасса/notes, split_offsets, dial с SO_MARK и
+require_mark, once_probe (raw-split и сокетный путь), TIOCOUTQ/SO_NWRITE, neutral-ack, measure с
+seed и transport-retry, decoy, selftest-кэш `(family, offer_ts)`/TTL/серия ошибок, raw_doubted/
+raw_recheck, sweep_poisons (свойства → compose → перебор), cross_check_tls12, полное дерево
+`d2k_classify_run` (база/удвоенный срок/ответное направление/разрез/контроль/neutral-ack/RST/
+пересборка/бинарный поиск границы) и `d2k_send_nosig`.
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -6022,16 +6039,18 @@ CLI `d2k-detect` и форматы вывода. R2O использует дру
 поэтому соответствие функциональное, а не построчное. В JSON R2O нет массива `notes` и поля `covers_tls12`,
 порядок ключей и форма `response` иные; в человеческом отчёте нет блока свойств коробки и оговорок.
 
+**Прочитано построчно: 8/8 функций, 450 строк C (1–450).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `usage` | 19-49 | 3084 | справка `d2k-detect classify`: `--sni/--raw/--repeats/--timeout/--only/--skip/--control-sni/--white/--control-raw/--hello/--no-raw/--mark/--allow-loopback/--json/--progress/--dump-trigger` | main.rs:1721-1739 help | **P** | C — подкоманда `classify` и полный текст справки; Rust — `--classify HOST PORT` и другой набор/текст флагов. Функциональное соответствие, не построчное; часть флагов (`--dump-trigger`, `--white`) и умолчаний иная. |
 | `print_json_str` | 51-65 | 338 | JSON-строка: `"`/`\` экранируются, control <0x20 → `\u%04x`, UTF-8 как есть | `serde_json` (`classify_json.rs:71`) | **P** | C ручное экранирование; Rust `serde_json`. Для UTF-8/control результат эквивалентен, но прямой тест на все байты отсутствует. |
 | `print_tri` | 67-73 | 181 | необязательное tri-поле: UNSET пропуск, TRUE/FALSE → true/false | `classify_json.rs:4 insert_tri_state` | **P** | C `print_tri`; Rust `insert_tri_state` в `result_json_value`. Наследует JSON-тест, отдельного нет. |
-| `print_json` | 75-187 | 4176 | JSON: target/verdict/reason/repeats/probes/duration/trigger_len/boundary/split_pos/reassembles/strategy/notes/response/covers_tls12/props/path/composed/raw_usable/trace | `classify_json.rs:18 result_json_value` | **P** | C печатает `notes[]`, `covers_tls12`, `response{verdict,reason,target,control}`, trace с cuts/delay/err; Rust `result_json_value` **не имеет notes/covers_tls12**, форма `response` иная, порядок ключей serde_json, тексты причин иные. P. |
+| `print_json` | 75-187 | 4176 | JSON: target/verdict/reason/repeats/probes/duration/trigger_len/boundary/split_pos/reassembles/strategy/notes/response/covers_tls12/props/path/composed/raw_usable/trace | `classify_json.rs:18 result_json_value` | **P** | **Совпадает:** target/verdict/reason/repeats/probes/duration/trigger_len/boundary>0/split_pos>0/reassembles/strategy/response{verdict,reason,target,control}/props(7 полей+hop_ttl)/path/composed/raw_usable/trace(cuts/delay_ms/pass/fail/err). **Отличия:** Rust не печатает `notes[]` и `covers_tls12` (в C они есть, `print_json:106-124`); порядок ключей задаёт serde_json (`BTreeMap`), у C фиксированный; тексты причин классификатора/ответа иные. `classify_json.rs` не имеет отдельного теста на полный набор полей. |
 | `print_progress` | 193-199 | 271 | stderr: `[сек] probe прошло/не прошло err` | main.rs:1187 report_progress | **P** | C печатает время, имя, pass/fail и `err`; Rust `report_progress` — только завершённые наблюдения, без столбца `err`. P. |
 | `tri_word` | 201-205 | 156 | «не измерено/да/нет» | main.rs:811 r2o_tri_state | **P** | C точные русские слова; Rust `r2o_tri_state`; отдельного теста нет. |
-| `print_human` | 207-275 | 3700 | человеческий отчёт: target/trigger/verdict/reason/probes/duration/repeats/boundary/reassembly/strategy+пояснение/response/notes/opaque warning/properties/trace | main.rs:1254-1302 | **P** | C содержит блок свойств коробки, `notes`, имя/длину триггера, пояснение стратегии и предупреждение `raw_usable`; Rust human-отчёт этих блоков не имеет, тексты иные. P. |
-| `main` | 277-450 | 8186 | CLI: `classify host:port`, разбор флагов, trigger/control/white, dump/json/progress, `d2k_classify_run` | main.rs:1104-1306, 1555/1586 | **P** | C `--hello modern|legacy` (без both), control по умолчанию `d2k_trigger_control("d2k")` (legacy), mark default `0x40000000`, `--dump-trigger`; Rust `--classify`, control через `classify_control_trigger` (tls13), mark `0x2d`, иной набор флагов/валидаций. P. |
+| `print_human` | 207-275 | 3700 | человеческий отчёт: target/trigger/verdict/reason/probes/duration/repeats/boundary/reassembly/strategy+пояснение/response/notes/opaque warning/properties/trace | main.rs:1254-1305 | **P** | C печатает `Цель/Триггер (имя+длина)/Вердикт/Зондов (повторы)/Граница/Пересборка/Стратегия+пояснение по path/Ответ/Оговорки/ВНИМАНИЕ raw_usable/Свойства коробки (6 полей+hop_ttl)/Трасса`. Rust печатает `цель/вердикт/причина/зонды/время`, при наличии — `отказов RST`, `граница`, `пересборка`, `стратегия`, `ответное направление` (русские имена), trace, `замер прерван`, предупреждение о сырых зондах. **Отличия:** нет имени/длины триггера, числа повторов, `notes[]`, блока свойств и пояснения стратегии; R2O добавляет rst_failures/stopped. Тексты иные. |
+| `main` | 277-450 | 8186 | CLI: `classify host:port`, разбор флагов, trigger/control/white, dump/json/progress, `d2k_classify_run` | main.rs:1104-1306, 1356-1553, 1555/1586 | **P** | C: `classify <host:port>`, флаги `--sni/--raw/--repeats/--timeout/--write-gap/--long-gap/--only/--skip/--control-sni/--white/--control-raw/--hello/--no-raw/--mark/--allow-loopback/--json/--dump-trigger/--progress`; `memset(opt,0)` затем `d2k_classify_run` вызывает `d2k_opts_defaults` (repeats 3, timeout 6000, write 60, long 700, mark `0x40000000`), `--mark` через `strtoul`, `--repeats/--timeout` через `atoi`, `--hello modern|legacy` (без both), control по умолчанию `d2k_trigger_control("d2k")` — **modern** TLS, `signal(SIGPIPE,SIG_IGN)`. Rust: `--classify HOST PORT [SNI]`, те же основные флаги плюс `--modern/--legacy/--save-plan/--arm`, REPEATS можно позиционно; `parse_classify_options` валидирует числа/метку, значения ≤0 отбрасывает, mark `None` → `0x2d` (#23), `full_detect_semantics=true`, `confirm_clear=false`, control через `classify_control_trigger` (tls13/modern), `--dump-trigger` до контроля, SIGPIPE не игнорируется глобально (MSG_NOSIGNAL на отправке). P — CLI/умолчания/API различаются. |
 
 ### main.c: построчная сверка
 
@@ -6054,12 +6073,17 @@ CLI `d2k-detect` и форматы вывода. R2O использует дру
   `main.rs:1254-1302`:** C человеческий отчёт содержит блок свойств
   коробки, `notes`, имя/длину триггера, пояснение стратегии и
   предупреждение `raw_usable`; Rust этих блоков не имеет. P.
-- **`main` (277–450) ↔ `main.rs:1104-1306/1555/1586`:** C
-  `classify host:port`, `--hello modern|legacy` (без both), control
-  по умолчанию `d2k_trigger_control("d2k")` (legacy), mark
-  `0x40000000`, `--dump-trigger`; Rust `--classify`, control через
-  `classify_control_trigger` (tls13), mark `0x2d`, иной набор
-  флагов/валидаций. P.
+- **`main` (277–450) ↔ `main.rs:1104-1306/1356-1553/1555/1586`:**
+  C `classify host:port`, `--hello modern|legacy` (без both), control
+  по умолчанию `d2k_trigger_control("d2k")` — **modern** TLS,
+  `memset(opt,0)` + `d2k_opts_defaults` внутри `d2k_classify_run`
+  (repeats 3, timeout 6000, write 60, long 700, mark `0x40000000`),
+  `strtoul`/`atoi` без строгой проверки, `signal(SIGPIPE,SIG_IGN)`.
+  Rust `--classify HOST PORT [SNI]`, флаги `--modern/--legacy/
+  --save-plan/--arm`, строгая валидация чисел/метки, mark `None` →
+  `0x2d` (#23), `full_detect_semantics=true`, control через
+  `classify_control_trigger` (tls13/modern), SIGPIPE не игнорируется
+  глобально. P — CLI/умолчания/API различаются.
 
 ## 4. detect/poison.c — 12 функций
 
@@ -6067,6 +6091,11 @@ CLI `d2k-detect` и форматы вывода. R2O использует дру
 и закреплены тестом. `poison_has_fake` и `arm_from_poison` не знают осей `autottl`/`tcp_ts_up`,
 которые есть в C-структуре; на текущем каталоге это не проявляется, но функция не эквивалентна для
 произвольного `d2k_poison`.
+
+**Прочитано построчно: 12/12 функций, 475 строк C (1–475).** Список `init_poisons` сверен с
+`build_poisons` (`classify.rs:229-380`) по каждой из 85 записей: имена, порядок, ttl/repeats/gap_ms,
+seqovl/seqovl_exact, decoy_hello, badsum/md5/disorder/disorder_pos, syn_data/oob/fake_between,
+tcp_ts/ip_id_zero/seq_shift — совпадают; дедупликация `badsum-xN-gG` повторяет C.
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -6081,7 +6110,7 @@ CLI `d2k-detect` и форматы вывода. R2O использует дру
 | `d2k_note_props_miss` | 216-223 | 242 | свойства по промаху гипотезы | classify.rs:189 note_props_miss | E | tests/classify.rs:907 |
 | `d2k_strategy_for_poison` | 226-398 | 7211 | строка стратегии nfqws2 | classify.rs:394 strategy_for_poison | E | tests/classify.rs:879; raw emission differential |
 | `d2k_strategy_for` | 401-404 | 144 | `--lua-desync=multisplit:payload=unknown:dir=out:pos=%d` | classify.rs:1933 strategy_for | **P** | C и Rust формируют ту же строку; отдельного теста строки нет. P. |
-| `d2k_arm_from_poison` | 413-475 | 4050 | гипотеза → `d2k_arm`: oob, badsum/md5, repeats, gap, disorder/pos, between, ttl, autottl/delta/min/max, seq_out, decoy, tcpts/tcpts_up, ipidzero, split_pos, seqovl_hello/seqovl | classify_measured.rs:30 plan_text_for_poison, :50 measured_plan_text, r2k-core plan.rs | **P** | C переносит **autottl** и **tcp_ts_up** отдельными осями; Rust `Poison` (classify.rs) этих полей не имеет, `plan_text_for_poison/measured_plan_text` покрывают split/badsum и основные флаги. Для autottl/tcp_ts_up план не выражается; дифференциалы split/badsum есть, полного набора полей/отказов нет. |
+| `d2k_arm_from_poison` | 413-475 | 4050 | гипотеза → `d2k_arm`: oob, badsum/md5, repeats, gap, disorder/pos, between, ttl, autottl/delta/min/max, seq_out, decoy, tcpts/tcpts_up, ipidzero, split_pos, seqovl_hello/seqovl | classify_measured.rs:30 plan_text_for_poison, :50 measured_plan_text, r2k-core plan.rs | **P** | **Совпадает:** `syn_data` → отказ (`classify_measured.rs:62-64`); `seq_shift != 0 && != -66000` → отказ с тем же смыслом (`:65-70`); `repeats=0` + fake → 1 (`:93-99`); `gap_ms*1000`; `seqovl_exact` → длина приманки; `between` отключает fake/disorder; badsum/md5/ttl/seq_out/decoy/tcpts/ipidzero/disorder_pos/split_pos/seqovl переносятся. **Отличия:** (1) C переносит **autottl** и **tcp_ts_up** отдельными осями (`poison.c:442-445,460`), Rust `Poison` этих полей не имеет — план не выражается; (2) C `oob` ставит флаг, Rust отдельная ветка oob есть в `measured_plan_text`; (3) C `a->name=NULL`, имя хранится в `d2k_vres.arm_name`, Rust `PoisonHit.name`. Дифференциалы split/badsum есть, полного набора полей/отказов нет. |
 
 ### poison.c: построчная сверка
 
@@ -6126,6 +6155,13 @@ CLI `d2k-detect` и форматы вывода. R2O использует дру
 встроены в `raw_probe::sweep_poisons`; отдельного дифференциала на весь список вопросов нет,
 покрыт только составной ECH-вопрос и перепроверка самопроверки. Расхождение: при `control = None`
 C всё равно выдаёт кандидат «всё сразу», R2O его не выдаёт.
+
+**Прочитано построчно: 7/7 функций, 498 строк C (1–498).** Все 12 вопросов `prop_probes`
+(`props.c:49-196`) сверены с `property_probes` (`raw_probe.rs:840-965`): порядок, label, имя,
+ttl/repeats/gap_ms, seqovl/seqovl_exact, decoy_hello, badsum/md5/tcp_ts/seq_shift/split_pos,
+syn_data — совпадают. Все ветви `apply_set` (`props.c:198-257`) совпадают с `apply_property`
+(`raw_probe.rs:1005-1045`), включая `ParsesL7 → validates_checksum=false` и условные
+`WhiteTimestamp → timestamps/checksum`.
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -6175,6 +6211,16 @@ C всё равно выдаёт кандидат «всё сразу», R2O е�
 (`r2o-raw-emission-cancel-differential.sh`, `r2o-raw-profile-differential.sh`). Слабая — уборка
 брошенных правил: R2O не разбирает строки iptables, чистит только собственный тег `r2o-rst`,
 не знает legacy-формы без комментария и не проверяет диапазон портов 30000..54999.
+
+**Прочитано построчно: 62/62 функции, 1377 строк C (1–1377).** Проверены обе ветви
+`__linux__`/`!__linux__`: разбор `RST_PREFIX`/legacy/owned-тега и диапазон 30000..54999;
+fork/setpgid/close fd/дедлайн 5000 мс/kill группы; nft `add/delete/get` с timeout 300s и
+iptables `-w -I/-D/-C`; pending-очередь 64/5 попыток/atexit; потоковые счётчики и порт
+30000..54999; `build_ipv4_tcp` (опции TS/MD5-замещение, badsum xor 0xbeef, IP/TCP суммы);
+IPv6-обёртка и pseudo-header; raw_send с нарезкой `seg_max`; SYN-профили с TS/без TS и RTO
+1000→2000; raw_recv/read_payload с якорем `c->ack`; raw_dial с SO_MARK/HDRINCL/подавлением RST;
+raw_send_plan (arm → text → TLV → load → apply → wire_build → send, delay_us, disorder 12 мс,
+seq += len + oob); probe_poison (plan для выразимых, raw_send только для `none`/syn_data).
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -6390,6 +6436,9 @@ C всё равно выдаёт кандидат «всё сразу», R2O е�
 
 Единственная функция заголовка — правило большинства для вопросов о свойствах.
 
+**Прочитано построчно: 1/1 функция (`d2k_prop_majority`, 490–493); остальные строки заголовка —
+typedef/#define/прототипы, сверены по использованиям в `detect/*.c`.**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `d2k_prop_majority` | 490-493 | 108 | `repeats>0 && pass>repeats/2` | raw_probe.rs:665 majority | **P** | C inline и Rust `majority` дают `total!=0 && pass>total/2` — эквивалентно. Отдельного unit нет; используется в цикле свойств (`props.c`/`sweep_poisons`) и проверяется косвенно в property-тестах. |
@@ -6567,7 +6616,10 @@ production-сеттер `raw_set_segment_max`. Ни одна N не являет
 
 ## Проверки, выполненные в этой сессии
 
-Агент-аудитор тесты не запускал. Дополнительно координатор прогнал на закреплённом
+В проходе 2026-11-11 агент-аудитор тесты не запускал. В проходе 2026-11-12 выполнены
+`cargo fmt --check` и `cargo test -p r2o-controller --test classify` — **35 passed**
+(включая `raw_hex_acceptance_matches_the_detect_trigger`). Detect-differential скрипты
+в этом проходе не перезапускались. Ранее координатор прогнал на закреплённом
 D2O `a378e230` и текущем R2O следующие differential-сценарии, которые покрывают
 ядро `classify`/`trigger`/`response`/`raw`:
 
