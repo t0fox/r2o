@@ -87,11 +87,11 @@ recheck 1982 1982 equal True
 | core-net | 548 | 186 | 349 | 13 | 0 |
 | core-state | 692 | 176 | 512 | 4 | 0 |
 | datapath-core | 400 | 145 | 244 | 11 | 0 |
-| datapath-plan | 183 | 95 | 84 | 4 | 0 |
+| datapath-plan | 183 | 96 | 83 | 4 | 0 |
 | detect | 159 | 47 | 102 | 10 | 0 |
-| **Итого** | **1982** | **649** | **1291** | **42** | **0** |
+| **Итого** | **1982** | **650** | **1290** | **42** | **0** |
 
-Это не оценка паритета: 1291 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 1290 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
 расхождений (`ARM_SHAPE` UDP, `wire_udp` IPID_ZERO, `udpruntime` raw UDP,
 `tls12/tls13` record-layer). `SET_HTTPS` TTL закрыт 2026-11-12 и в список
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 649 / P 1291 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 650 / P 1290 /
 N 42 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -347,9 +347,9 @@ P означает неполное доказательство ветвей, N
 | core-net | 548 | 186 | 349 | 13 | 0 |
 | core-state | 692 | 176 | 512 | 4 | 0 |
 | datapath-core | 400 | 145 | 244 | 11 | 0 |
-| datapath-plan | 183 | 95 | 84 | 4 | 0 |
+| datapath-plan | 183 | 96 | 83 | 4 | 0 |
 | detect | 159 | 47 | 102 | 10 | 0 |
-| **Итого** | **1982** | **649** | **1291** | **42** | **0** |
+| **Итого** | **1982** | **650** | **1290** | **42** | **0** |
 
 
 ---
@@ -5342,8 +5342,8 @@ Static-хелперы наследуют статус владельца (вла
 
 | Статус | Кол-во |
 |---|---:|
-| E | 95 |
-| P | 84 |
+| E | 96 |
+| P | 83 |
 | N | 4 |
 | ? | 0 |
 | **Всего** | **183** |
@@ -5352,7 +5352,7 @@ Static-хелперы наследуют статус владельца (вла
 
 | Файл | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| datapath/plans.c | 75 | 34 | 41 | 0 | 0 |
+| datapath/plans.c | 75 | 35 | 40 | 0 | 0 |
 | datapath/routemark.c | 23 | 15 | 7 | 1 | 0 |
 | datapath/plan_parse.c | 17 | 14 | 3 | 0 | 0 |
 | datapath/raw.c | 17 | 8 | 9 | 0 | 0 |
@@ -5701,7 +5701,7 @@ UDP→addr переход, R2O — только exact+ECH→MODERN+общий ad
 | find_name | 369-371 | 3 | static: запись имени без порта | `control.rs:1493` `find` | E | C `find_name_skip(...,0)`: первая не-портовая запись имени любой формы. Rust `find(bytes,family,shape)` ищет точный `(host,family,shape)`; в `select` перед ним перебираются shape/bridge/fallback/grandfather, что покрывает прежний выбор. Тесты TLS/ECH/HTTP (control.rs:2823-3896). |
 | find_name_shape_port | 385-395 | 11 | static: запись ровно (имя, форма, порт, family) | `control.rs:1493` `find` + `probes` (`NameProbeKey`) | E | C цикл `used`: `kind==NAME`, `family`, `shape`, `only_sport==sport`, `name_eq`. Rust пробная запись — `NameProbeKey{name:{host,family,shape},source_port}` в `probes`; точное совпадение. Тест `tls_probe_plan_matches_only_its_source_port_and_reports_temporary_applied` (control.rs:3637). |
 | find_name_port | 401-412 | 12 | static: портовая запись имени при неизвестной форме | `control.rs:548-571` — поиск probe по `(host,family,shape)` и bridge-shape | E | C `!sport→NULL`; цикл `used`, `kind==NAME`, `family`, `only_sport==sport`, `shape!=HTTP`, `name_eq`; первая. Rust в `select` ищет `NameProbeKey` с точной shape, затем с bridge-shape; для `seen_shape==ANY` отдельной ветки нет (R2O не ставит ANY). Тест control.rs:3637. |
-| d2k_plantab_http_candidate | 414-422 | 9 | префильтр HTTP: exact name+family+SHAPE_HTTP+`only_sport==sport`+`proto==HTTP` | `control.rs:624-628` `has_http_candidate(family)` | **P** | **Расхождение:** Rust проверяет только family+SHAPE_HTTP, без `sport` и `proto==HTTP`; префильтр шире C. C для неверного порта/прото вернёт 0, R2O — true. Вызывается `main.rs:1701`. |
+| d2k_plantab_http_candidate | 414-422 | 9 | префильтр HTTP: exact name+family+SHAPE_HTTP+`only_sport==sport`+`proto==HTTP` | `control.rs:647-662` `has_http_candidate(family, source_port)` | E | C: `KEY_NAME`, `family`, `SHAPE_HTTP`, `only_sport==sport`, `proto==HTTP` → 1. Rust `has_http_candidate(family, source_port)`: при `0` — постоянные `plans` с shape HTTP (`only_sport=0`), при ненулевом — `probes` с точным `source_port`; proto HTTP гарантирован `set_name`/`set_name_probe`. `main.rs:1701` передаёт sport только для `controller_probe`, иначе 0 — как `session.c:2821`. Тест `http_candidate_respects_source_port_like_d2o`: постоянный план → `(4,0)` true, `(4,40000)` false; проба → `(4,40000)` true, `(6,40000)` false. |
 | d2k_plantab_find_http | 424-431 | 8 | план для HTTP-запроса: проба своего порта, иначе постоянная | `control.rs:495-509` (`select` + `NameProbeKey` для порта 80) | E | C `!t/!name/!len→NULL`; `find_name_shape_port(HTTP,sport,family)`; если нет или `proto!=HTTP` → NULL; иначе `last_used_ns=now`, план. Rust при `request_host_range` и `destination_port==80` сначала ищет `probes` по `(host,family,HTTP,source_port)`, иначе `find(host,family,HTTP)`. Тест `http_probe_plan_matches_only_its_source_port_and_acknowledges_trial_id` (control.rs:3489). |
 | find_addr_shape | 439-450 | 12 | static: адресная запись ровно (адрес, family, форма) | `control.rs:1505` `find_addr` | E | C `!addr`/family не 4/6 → NULL; цикл `used`, `kind==ADDR`, `family`, `any_shape \|\| shape`, `memcmp` 4/16 байт. Rust `AddrPlanKey{address,shape}` в `addr_plans`, точный поиск; `find_addr` дополнительно при `shape==ECH_TCP` берёт `MODERN`. Тесты `discord_voice...` (control.rs:3186), `удаление_адреса...` (control.rs:2793). |
 | find_addr | 452-454 | 3 | static: любая форма адреса (для снятия/учёта промаха) | `control.rs:1505` `find_addr` (с ECH-fallback) | P | C `find_addr_shape(..., any_shape=1, 0)`: первая запись адреса любой формы. Rust `find_addr(address,shape)` требует точную форму и лишь `ECH_TCP→MODERN`; «любой формы» нет — широкое удаление адреса в R2O заменено точным `delete_addr`. Тесты control.rs:2793/3186 покрывают точные формы. |
@@ -5752,7 +5752,7 @@ UDP→addr переход, R2O — только exact+ECH→MODERN+общий ad
 | d2k_plantab_set_name_trial | 1259-1267 | 9 | поставить пробный план с trial id | `control.rs:1093` `set_name_probe` | E | C `!sport \|\| !trial_id → free/-2`; `set_name_family`; при успехе копирует 16 байт trial в binding. Rust `set_name_probe` требует `trial_id: Some`, `source_port!=0`, `valid_tcp_probe_shape`; сохраняет trial в `ProbePlan`. Тесты control.rs:3489/3637. |
 | d2k_plantab_trial | 1268-1273 | 6 | trial id установленного временного плана | `control.rs:690` `binding_for_plan` (`PlanBinding.trial_id`) | E | C зануляет out; при `t && p && owner==t && temporary` копирует `binding_trial_id`. Rust `binding_for_plan` для `probes`/`voice_addr_probes`/`addr_probes` возвращает trial_id и temporary=true, для постоянных — нули/false. Тест `tls_probe_plan...reports_temporary_applied` (control.rs:3637), voice control.rs:3239. |
 
-Итог по файлу: E 34, P 41, N 0, ? 0. Ключевые пробелы: счётчик промахов по форме частичен (TCP);
+Итог по файлу: E 35, P 40, N 0, ? 0. Ключевые пробелы: счётчик промахов по форме частичен (TCP);
 нет ECH-удержания; адресные опыты без тестов; префильтры кандидатов грубее C; legacy-удаления
 «все формы» отсутствуют; поиск ядра отличается набором ветвей.
 

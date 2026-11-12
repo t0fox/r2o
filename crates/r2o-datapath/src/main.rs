@@ -1691,14 +1691,25 @@ mod app {
                                 }
                             }
                         }
-                        let family =
-                            r2k_core::packet::PacketView::parse(bytes).map(|view| view.family);
+                        let packet_view = r2k_core::packet::PacketView::parse(bytes);
+                        let family = packet_view.as_ref().map(|view| view.family);
                         let allow_tls = options.mode == RuntimeMode::Apply
                             && (is_tls_plan(&plan)
                                 || family
                                     .is_some_and(|family| name_plans.has_tls_candidate(family)));
+                        let http_source_port = if controller_probe {
+                            packet_view
+                                .as_ref()
+                                .and_then(|view| view.tcp_segment(bytes))
+                                .map(|tcp| tcp.source_port)
+                                .unwrap_or(0)
+                        } else {
+                            0
+                        };
                         let allow_http = options.mode == RuntimeMode::Apply
-                            && family.is_some_and(|family| name_plans.has_http_candidate(family));
+                            && family.is_some_and(|family| {
+                                name_plans.has_http_candidate(family, http_source_port)
+                            });
                         let observe_tls = !controller_probe
                             && (control.as_ref().is_some_and(ControlServer::is_connected)
                                 || r2o_snapshot_control

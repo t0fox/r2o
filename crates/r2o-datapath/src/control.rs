@@ -674,10 +674,21 @@ impl NamePlans {
         })
     }
 
-    pub fn has_http_candidate(&self, family: u8) -> bool {
-        self.plans
-            .keys()
-            .any(|key| key.family == family && key.shape == SHAPE_HTTP)
+    /// C `d2k_plantab_http_candidate`: при `sport==0` подходит постоянная
+    /// HTTP-запись (`only_sport==0`), при ненулевом — только проба этого порта
+    /// (`plans.c:414-422`; `session.c:2821-2822`).
+    pub fn has_http_candidate(&self, family: u8, source_port: u16) -> bool {
+        if source_port == 0 {
+            self.plans
+                .keys()
+                .any(|key| key.family == family && key.shape == SHAPE_HTTP)
+        } else {
+            self.probes.keys().any(|key| {
+                key.name.family == family
+                    && key.name.shape == SHAPE_HTTP
+                    && key.source_port == source_port
+            })
+        }
     }
 
     pub fn has_quic_candidate(&self, family: u8) -> bool {
@@ -2318,8 +2329,8 @@ fn canonical_name(bytes: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AddrProbePlan, ControlServer, NamePlanKey, NamePlans, NameProbeKey, ProbePlan,
-        VoiceProbeKey, VoiceProbePlan,
+        AddrProbePlan, ControlServer, InstalledPlan, NamePlanKey, NamePlans, NameProbeKey,
+        ProbePlan, VoiceProbeKey, VoiceProbePlan,
     };
     use r2k_core::control::BindingContext;
     use r2k_core::plan::Plan;
@@ -3863,6 +3874,44 @@ mod tests {
             plans.select(&packet).map(|selected| selected.id),
             Some(permanent_id)
         );
+    }
+
+    #[test]
+    fn http_candidate_respects_source_port_like_d2o() {
+        let mut plans = NamePlans::default();
+        plans.plans.insert(
+            NamePlanKey {
+                host: "permanent.example".into(),
+                family: 4,
+                shape: SHAPE_HTTP,
+            },
+            InstalledPlan {
+                plan: Plan::default(),
+                generation: 1,
+                last_used: std::cell::Cell::new(0),
+            },
+        );
+        assert!(plans.has_http_candidate(4, 0));
+        assert!(!plans.has_http_candidate(4, 40_000));
+
+        plans.probes.insert(
+            NameProbeKey {
+                name: NamePlanKey {
+                    host: "probe.example".into(),
+                    family: 4,
+                    shape: SHAPE_HTTP,
+                },
+                source_port: 40_000,
+            },
+            ProbePlan {
+                plan: Plan::default(),
+                trial_id: [0x44; 16],
+                generation: 2,
+                last_used: std::cell::Cell::new(0),
+            },
+        );
+        assert!(plans.has_http_candidate(4, 40_000));
+        assert!(!plans.has_http_candidate(6, 40_000));
     }
 
     #[test]
