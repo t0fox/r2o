@@ -585,6 +585,8 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 
 Лестница arm-стратегий QUIC: перебор blob/копий/TTL/IP-фрагментации, затем стратегии clearance/split/longer/frag. R2O: `r2o-controller/src/quic_replay.rs` (`r2o_quic_discovery_candidates`, `r2o_quic_original_fallback_candidates`, `r2o_quic_strategy_attempt_decision`). Дифференциал `r2o-diagnostics-differential.sh` (C `quicarms.c` + `d2o_quic_base_differential.c`) покрывает профиль/verify/parallel/VN/base, но не всю лестницу.
 
+**Прочитано построчно: 8/8 функций, 396 строк C (1–396).**
+
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `d2k_quic_original_blob` | 12-17 | 6 | 5 blob'ов: quic5, quic_google, quic_rutracker, fake_default_quic (620×0x40), 16 нулей | `quic_replay.rs:586-630 r2o_quic_blob_candidate/blob_name` | **E** | Rust: 4 файла `R2O_QUIC_ORIGINAL_BLOBS` + `blob==4` → `[0;16]`, имена те же (`quic5`/`google`/`rutracker`/`fake_default`/`безобидная`). `quic_default.bin` соответствует 620×0x40 (profile differential). |
