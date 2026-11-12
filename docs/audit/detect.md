@@ -554,7 +554,7 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
 разбор TCP-опций клиента в R2O перенесены не как отдельные функции: контроль собран в CLI,
 признак метки передаётся булевым `client_tcp_has_timestamps`, переопределения нет.
 
-**Прочитано построчно: 9/9 функций, 207 строк C (1–207).**
+**Прочитано построчно: 9/9 функций, 207 строк C (1–207).** Сверено с `classify.rs:60-108` (`Accept`, `Trigger::{raw_hex,tls,tls13}`), `trigger.rs:4` (`parse_raw_hex`), `raw_probe.rs:602-629` (`select_bridge_decoy`), `:673-683` (`raw_offer_timestamps`), `:731-733` (`raw_profile_allows`), `:967-985` (`property_probe_poison`), `main.rs:1555` (`classify_control_trigger`).
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
