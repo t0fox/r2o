@@ -1493,6 +1493,39 @@ quicdeny/recheck, каталог/области/исключения, `stall_bud
 - **Вывод:** 26 AES/SHA/HMAC/HKDF/GCM функций — E (кроме двух
   HKDF-границ P), 22 P-256 и 11 X25519 — P; N в блоке нет.
 
+### Построчная таблица `core/crypto.c` (28 функций)
+
+| C-функция | строки | R2O-аналог | статус | доказательство / пробел |
+|---|---:|---|---|---|
+| `xtime` | 33–36 | `aes` crate (`Aes128`) | **P*** | C constant-time `x*2` в GF(2^8) с маской `0x1B`; Rust использует внутреннюю арифметику `aes`. Отдельного вызова/теста хелпера нет. |
+| `d2k_aes_sbox_byte` | 70–72 | `aes` crate | **P*** | C-таблица Rijndael 256 байт; Rust S-box внутри `aes`, наружу не экспортируется. Таблица C независимо проверена `test_crypto.c`; C/Rust-дифференциал покрывает результат AES, не сам S-box. |
+| `aes128_key_expand` | 80–110 | `aes` crate | **E*** | FIPS-197 key schedule; Rust `Aes128` внутри. Вектор `aes128-ecb` в `test-core-crypto-differential.sh` доказывает итоговый шифр. |
+| `sub_bytes` | 112–116 | `aes` crate | **E*** | Раундовое преобразование; покрыто `aes128-ecb`. |
+| `shift_rows` | 121–129 | `aes` crate | **E*** | Column-major `st[r+4c]`; покрыто `aes128-ecb`. |
+| `mix_columns` | 131–140 | `aes` crate | **E*** | Формулы через `xtime`; покрыто `aes128-ecb`. |
+| `add_round_key` | 142–146 | `aes` crate | **E*** | XOR 16 байт; покрыто `aes128-ecb`. |
+| `aes128_encrypt_block` | 151–165 | `aes` crate | **E*** | 10 раундов, только прямой шифр; покрыто `aes128-ecb`. |
+| `d2k_aes128_ecb` | 167–171 | `Aes128` (`m6_crypto_trace.rs:85`) | **E** | `scripts/test-core-crypto-differential.sh`, case `aes128-ecb` (пин D2O `a378e230`). |
+| `rotr32` | 175–177 | `sha2` crate | **P*** | Rotate-right helper; Rust `sha2` внутри. Отдельного differential нет. |
+| `sha256_compress` | 201–228 | `sha2` crate | **E*** | FIPS 180-4, 64 раунда; покрыто `sha256-abc`/`sha256-100`. |
+| `sha256_init` | 230–238 | `sha2` crate | **E*** | IV `h0[8]`; покрыто теми же векторами. |
+| `sha256_update` | 242–265 | `sha2` crate | **E*** | Потоковый вход кусками; покрыто `sha256-100` (несколько блоков). |
+| `sha256_final` | 267–290 | `sha2` crate | **E*** | Паддинг `0x80`, 64-битная длина; покрыто `sha256-abc`/`sha256-100`. |
+| `d2k_sha256` | 292–297 | `Sha256::digest` (`m6_crypto_trace.rs:43`) | **E** | Differential cases `sha256-abc`, `sha256-100`. |
+| `d2k_hmac_sha256` | 301–327 | `hmac` crate | **E** | Differential `hmac-*` (ключи короткий/пустой/длиннее блока). |
+| `d2k_hkdf_extract` | 331–339 | `hkdf` crate | **E** | Differential `hkdf-extract`, `hkdf-client-in`, `hkdf-quic-key`. |
+| `d2k_hkdf_expand_label` | 350–353 | `quic.rs:893-906 expand_label` | **P** | C-обёртка `_ctx` с пустым контекстом; Rust `expand_label` всегда пишет `ctx_len=0`. Production-метки QUIC совпадают, но C-границы label/context иные (см. ниже). |
+| `d2k_hkdf_expand_label_ctx` | 355–427 | `quic.rs:893-906 expand_label`; `examples/m6_crypto_trace.rs:24-36` | **P** | **Подтверждённые отличия:** C допускает `label <= D2K_HKDF_LABEL_MAX` (58) и `ctx_len <= 32`, пишет контекст в HkdfLabel; Rust `expand_label` всегда `ctx_len=0` и допускает label до 249 (`u8::try_from(6+len)`), а пример m6 кодирует `context.len()` без проверки >255. Production-метки/пустой контекст совпадают; границы и непустой контекст — нет. |
+| `gf128_h_table` | 449–461 | `aes-gcm` crate | **E*** | Таблица сдвигов H; покрыто GCM-векторами `gcm-ciphertext`/`gcm-tag`. |
+| `gf128_mul_fast` | 463–474 | `aes-gcm` crate | **E*** | Умножение GF(2^128) по таблице; покрыто GCM-векторами. |
+| `ghash` | 479–535 | `aes-gcm` crate | **E*** | AAD/шифротекст/длины, паддинг; покрыто `gcm-ciphertext`/`gcm-tag`/`gcm-opened`/`gcm-bad-tag`. |
+| `d2k_ghash_for_test` | 538–541 | нет отдельного экспорта; `aes-gcm` | **P*** | Тестовая обёртка C; Rust не экспортирует GHASH, проверка идёт через GCM-дифференциал. |
+| `inc32` | 547–554 | `aes-gcm` crate | **E*** | Инкремент младших 32 бит; покрыто GCM-векторами. |
+| `gctr` | 560–578 | `aes-gcm` crate | **E*** | AES-CTR поток; покрыто `gcm-ciphertext`/`gcm-opened`. |
+| `consttime_eq16` | 584–590 | `aes-gcm` crate | **E*** | Постоянное сравнение тега; покрыто `gcm-bad-tag` (отказ без изменения out). |
+| `d2k_aes128_gcm_encrypt` | 596–625 | `Aes128Gcm` (`quic.rs:591,949,996`) | **E** | Differential `gcm-ciphertext`, `gcm-tag`; QUIC production использует `aes-gcm`. |
+| `d2k_aes128_gcm_decrypt` | 627–671 | `Aes128Gcm` | **E** | Differential `gcm-opened`, `gcm-bad-tag`; C не трогает `out` при неверном теге, Rust `aes-gcm` возвращает ошибку до расшифровки. |
+
 ## Карта состояний sched.c → Rust
 
 C-машина состояний: `task_state` (`sched.c:596-635`), 15 значений. R2O не имеет
