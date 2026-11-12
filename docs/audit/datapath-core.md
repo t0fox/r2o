@@ -133,7 +133,7 @@ R2O-владелец: `crates/r2o-datapath/src/main.rs` (`run`, `parse_options`,
 | `release_original` (static) | 518–542 | 25 | таймаут: закрыть UDP-hold, note_unassembled, observe, resend/ACCEPT | `hold.rs:888 flush`, `main.rs:433 r2o_release_damaged_tcp_hold` | P | порядок side effects воспроизведён в main; D6 |
 | `ct_query` (static) | 561–571 | 11 | ctnetlink GET по кортежу + лог «нет acct» | `conntrack.rs:297 query`, `:309 probe` | P | codec-тесты conntrack.rs; реальный GET не тестируется |
 | `ct_probe` (static) | 578–595 | 18 | одноразовая проба ctnetlink, вкл/выкл детекторы | `conntrack.rs:309 probe` (в `open`) | P | `r2o-conntrack-ctget-differential.sh`; лог-строки иные |
-| `out_verdict` (static) | 597–599 | 3 | обёртка вердикта | `main.rs:4335 release_with` | P | — |
+| `out_verdict` (static) | 432–435 | 4 | адаптер вердикта | `queue.send_verdict` | **E** | Тонкий адаптер. |
 | `out_fail` (static) | 603–607 | 5 | учесть отказ переиздания, сохранить errno | `main.rs:272` eprintln + `follow.r2o_note_busy` | P | errno-классификация есть (`r2o_udp_send_busy`) |
 | `out_marked` (static) | 615–635 | 21 | лог «метка клиента → хвосты ядром» | `main.rs:88 r2o_udp_packet_is_neutral`, `r2o_route` gate | P | счётчик `udp_marked_kept` не выводится отдельно |
 | `out_defer` (static) | 640–647 | 8 | вердикт позже, за отложенной головой | `r2o_udp_hold.rs:291 R2oUdpDeferredVerdicts::r2o_enqueue` | P | `hold` D6; unit-теста именно на очередь вердиктов нет |
@@ -609,40 +609,40 @@ R2O: `main.rs` (`r2o_release_udp_batch*`, `r2o_udp_handle_late_tail`),
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
-| `d2k_udp_release_new` | 29–51 | 23 | очередь slots×batch, защита от переполнения | `r2o_udp_hold.rs:283 R2oUdpDeferredVerdicts::new` (фикс. 16×8) | P | параметры стали константами |
-| `d2k_udp_release_free` | 53–59 | 7 | освобождение | `Drop` | E | RAII |
-| `d2k_udp_release_enqueue` | 61–81 | 21 | положить пачку ID+вердиктов с due/seq/token | `:291 r2o_enqueue` (due+order, flow_key) | P | token/seq заменены order |
-| `next_due` (static) | 83–94 | 12 | минимальный (due,seq) | `:355` min_by_key(due,order) | P | порядок реализован; отдельного теста на равенство due нет |
-| `d2k_udp_release_flush` | 96–122 | 27 | выдать созревшие, done(complete,sent) | `:345 r2o_flush` | P | callback done отсутствует; ошибки собираются в first_error |
-| `d2k_udp_release_next_ns` | 124–133 | 10 | ближайший due | `:392 timeout_ms` | P | — |
-| `d2k_udp_replay_fates` | 135–154 | 20 | судьбы: owned head DROP, tails resend/ACCEPT | `:72 r2o_release_batch_with` (инлайн) | P | `owned`-ветка head_already_released |
-| `plain_verdict` (static) | 174–177 | 4 | адаптер verdict | замыкание `send_verdict` | E | — |
-| `plain_resend` (static) | 178–182 | 5 | адаптер resend без ID | замыкание `resend` | E | — |
-| `d2k_udp_release_batch` | 184–192 | 9 | обёртка release_batch | `:72 r2o_release_batch_with` | P | — |
-| `release_batch` (static) | 194–247 | 54 | ядро: may/defer/owned/resend/verdict/fallback | `:72 r2o_release_batch_with` | P | нет `may[]`/defer/owned; часть в main |
-| `follow_stale` (static) | 272–275 | 4 | устаревание окна по времени и seq | `:550 r2o_match` (stale), `:602 r2o_age` | P | формула совпадает |
-| `follow_drop` (static) | 277–280 | 4 | снять запись, live-- | `:565`/`:611` | E | — |
-| `d2k_udp_follow_age` | 282–287 | 6 | обход устаревших | `:602 r2o_age` | P | — |
-| `d2k_udp_follow_live` | 289 | 1 | live | `:490 r2o_stats` | E | `:830 follow_stats_*` |
-| `d2k_udp_follow_busy` | 290 | 1 | busy | `:490` | E | `:830` |
-| `d2k_udp_follow_queue_full` | 291 | 1 | queue_full | `:490` | E | `:830` |
-| `d2k_udp_follow_refused` | 292 | 1 | refused | `:490` | E | `:830` |
-| `d2k_udp_send_busy` | 294–296 | 3 | EAGAIN/EWOULDBLOCK/ENOBUFS | `:799 r2o_udp_send_busy` | E | `:852` busy vs permanent |
-| `d2k_udp_follow_new` | 298 | 1 | создание | `:480 new` | E | — |
-| `d2k_udp_follow_free` | 300 | 1 | освобождение | `Drop` | E | — |
-| `follow_tuple` (static) | 302–319 | 18 | кортеж UDP, отказ фрагментам/мультикасту | `:428 R2oUdpFollowKey::from_packet` | P | — |
-| `same_tuple` (static) | 321–324 | 4 | сравнение кортежа | `Eq` | E | — |
-| `d2k_udp_follow_mark` | 329–332 | 4 | поставить окно | `:508 r2o_mark` | P | — |
-| `follow_put` (static) | 334–355 | 22 | выбрать слот/вытеснить, until/at/seq | `:508 r2o_mark` | P | вытеснение по min(until) |
-| `follow_find` (static) | 357–370 | 14 | найти окно, попутно истекая | `:550 r2o_match` | P | — |
-| `d2k_udp_follow_match` | 372–378 | 7 | match + at_ns | `:550 r2o_match` → `R2oUdpFollowMatch` | E | `main.rs:4922` unit, D6 |
-| `out_resend` (static) | 388–415 | 28 | resend с учётом at/owned/ENOSPC/busy | `main.rs:226 r2o_udp_handle_late_tail`, `:250` deferred | P | — |
-| `d2k_udp_out_owned_emit` | 417–421 | 5 | вердикт владеемой посылки | `main.rs:4335 release_with` | P | — |
-| `refused_flow` (static) | 425–430 | 6 | счётчик + первый лог на поток | `main.rs:285 follow.r2o_mark_failed` | P | — |
-| `out_verdict` (static) | 432–435 | 4 | адаптер вердикта | `queue.send_verdict` | E | — |
-| `d2k_udp_out_neutral` | 437–440 | 4 | mark 0/нейтральный/не routed | `main.rs:88 r2o_udp_packet_is_neutral` | P | семантика совпадает |
-| `d2k_udp_out_batch` | 442–473 | 32 | выпуск пачки: may, marked, follow, failed | `main.rs:153 r2o_release_udp_batch` | P | — |
-| `d2k_udp_out_late` | 475–509 | 35 | поздний хвост: follow, defer, resend | `main.rs:226 r2o_udp_handle_late_tail` | P | — |
+| `d2k_udp_release_new` | 29–51 | 23 | очередь `slots×batch_size`, проверка `slots*batch_size`/нулей, три `calloc`, раскладка указателей | `r2o_udp_hold.rs:283 R2oUdpDeferredVerdicts::new` (16×8) | **P** | **Совпадает:** ёмкость очереди и проверка нулей. **Отличие:** C принимает `slots`/`batch_size` параметрами и считает `slots*batch_size` с защитой от переполнения; Rust фиксирован на 16 слотах по 8 ID. OOM-ветка C отдельная, Rust `Vec::with_capacity` может паниковать. |
+| `d2k_udp_release_free` | 53–59 | 7 | освободить verdicts/ids/slot/queue | `Drop` | **E** | RAII; C освобождает три массива, Rust — владеющие `Vec`/`Box`. |
+| `d2k_udp_release_enqueue` | 61–81 | 21 | проверить аргументы и `count<=batch`, найти свободный слот, скопировать ids/verdicts, `due/seq=next_seq++/key/token/count` | `r2o_udp_hold.rs:291 r2o_enqueue` | **P** | **Совпадает:** поиск свободного слота, копирование ID/вердиктов, отказ при полной очереди. **Отличия:** C хранит `seq` и `token` (номер поколения/исполнения), Rust — `order` и `flow_key`; C `next_seq++` без защиты от переполнения, Rust wrapping; C возвращает -1/0, Rust `bool`/`Option`. |
+| `next_due` (static) | 83–94 | 12 | минимальный `(due_ns, seq)` среди `due<=now` | `r2o_udp_hold.rs:355` (`min_by_key(due,order)`) | **P** | **Совпадает:** выбирается созревший слот с минимальным `(due,seq)`. Rust использует `(due,order)` и `min_by_key`; при равных due порядок стабилен. Отдельного теста на равные due нет. |
+| `d2k_udp_release_flush` | 96–122 | 27 | выдать все созревшие: `send` каждый ID, `complete=0` при ошибке, `done(key,token,complete,sent)`, освободить слот | `r2o_udp_hold.rs:345 r2o_flush` | **P** | **Совпадает:** цикл по созревшим, отправка каждого ID, освобождение слота. **Отличия:** C вызывает `done(ctx,key,token,complete,sent)` и считает `sent`; Rust собирает `first_error`, возвращает число пачек, callback `done`/`token` отсутствуют. C продолжает после ошибки `send`, Rust тоже; форма результата иная. |
+| `d2k_udp_release_next_ns` | 124–133 | 10 | абсолютный минимальный due (ns), 0 если пусто | `r2o_udp_hold.rs:392 timeout_ms` | **P** | C отдаёт абсолютные ns; Rust — относительные ms с `max_ms` и `0` при `deadline<=now`. Для poll эквивалентно, отдельного absolute-getter нет. |
+| `d2k_udp_replay_fates` | 135–154 | 20 | судьбы пачки: owned head → DROP; хвост при `can_resend` → DROP+resend; иначе ACCEPT; вернуть число повторных | `r2o_udp_hold.rs:72 r2o_release_batch_with` (инлайн) | **P** | **Совпадает:** owned голова не повторяется (DROP), хвосты при возможности уходят raw (DROP+resend), иначе ACCEPT. **Отличия:** C отдельная функция с массивами `verdicts[]/resend[]`; Rust вычисляет `can_send_raw` в цикле и учитывает `head_succeeded`, `neutral`, `resend_busy/failed`; `owned` форсирует `can_resend` в C, Rust `head_succeeded`. |
+| `plain_verdict` (static) | 174–177 | 4 | адаптер `verdict(ctx,id,v)` | замыкание `send_verdict` | **E** | Тонкий адаптер без логики; C и Rust вызывают один и тот же вердикт. |
+| `plain_resend` (static) | 178–182 | 5 | адаптер `resend(ctx,pkt,len)` без ID | замыкание `resend` | **E** | C игнорирует `id` и возвращает 0/-1; Rust замыкание возвращает `io::Result`. Семантика та же. |
+| `d2k_udp_release_batch` | 184–192 | 9 | обёртка `release_batch` с plain-адаптерами | `r2o_udp_hold.rs:72 r2o_release_batch_with` | **P** | C-обёртка передаёт `verdict/resend` через `plain_ctx`; Rust вызывает `r2o_release_batch_with` напрямую. Логика в `release_batch`/`r2o_release_batch_with`; P наследуется. |
+| `release_batch` (static) | 194–247 | 54 | ядро: `replay_fates`, fallback при `vfail&&!owned`, `may[]`→ACCEPT+defer, resend 1/0/-1, verdict, счётчики | `r2o_udp_hold.rs:72 r2o_release_batch_with` | **P** | **Подтверждённые отличия:** (1) C имеет `may[]` (ненейтральная метка) и при `defer` откладывает ACCEPT; Rust `r2o_release_batch_with` не имеет `may[]`/defer и сразу отдаёт ACCEPT ненейтральному хвосту; (2) C `owned` форсирует `can_resend` и при `vfail&&!owned` откатывает raw-хвост в ACCEPT; Rust учитывает `head_succeeded`/`resend_busy`/`resend_failed`; (3) C `resend` возвращает 1 — ID забирает очередь, 0 — отправлено, -1 — откат; Rust `r2o_release_batch_with` различает `resend_failed`/`resend_busy` и `on_permanent_failure`; (4) C считает `fell_back` включая ненейтральные, Rust `resend_failed` — только ошибки raw. |
+| `follow_stale` (static) | 272–275 | 4 | устаревание: `now>=until` и не та же пачка `seq`, затем `e.seq==0` или `seq!=0 && e.seq<seq` | `r2o_udp_hold.rs:550 r2o_match` (stale) | **E*** | **Точное совпадение формулы:** C (`udp_release.c:272-275`) и Rust `r2o_match`/`r2o_age` используют те же условия: запись живёт до `until`, совпадающая текущая пачка (`seq`) её не старит, запись без seq старится только при seq=0, иначе — при меньшем seq. Отдельного differential нет. |
+| `follow_drop` (static) | 277–280 | 4 | `used=0`, `live--` | `r2o_udp_hold.rs:565/611` | **E** | C уменьшает `live` только если был used; Rust `retain`/`Option` и `saturating_sub`. Эквивалентно. |
+| `d2k_udp_follow_age` | 282–287 | 6 | обход слотов, снять stale | `r2o_udp_hold.rs:602 r2o_age` | **P** | C останавливает обход при `live==0`; Rust проходит все слоты и удаляет stale. Набор удалённых тот же; порядок/стоимость иные. |
+| `d2k_udp_follow_live` | 289 | 1 | число живых записей | `r2o_udp_hold.rs:490 r2o_stats` | **E** | Прямой getter; тест `:830 follow_stats_*`. |
+| `d2k_udp_follow_busy` | 290 | 1 | счётчик busy | `:490 r2o_stats` | **E** | Прямой getter; `:830`. |
+| `d2k_udp_follow_queue_full` | 291 | 1 | счётчик queue_full | `:490 r2o_stats` | **E** | Прямой getter; `:830`. |
+| `d2k_udp_follow_refused` | 292 | 1 | счётчик refused | `:490 r2o_stats` | **E** | Прямой getter; `:830`. |
+| `d2k_udp_send_busy` | 294–296 | 3 | EAGAIN/EWOULDBLOCK/ENOBUFS | `main.rs:799 r2o_udp_send_busy` | **E** | **Точное совпадение:** C `err == EAGAIN || EWOULDBLOCK || ENOBUFS`; Rust `r2o_udp_send_busy` те же errno. Тест `:852`. |
+| `d2k_udp_follow_new` | 298 | 1 | `calloc` таблицы | `:480 new` | **E** | C `calloc`/NULL при OOM; Rust `Default`/`new`. Обычный путь эквивалентен. |
+| `d2k_udp_follow_free` | 300 | 1 | `free` | `Drop` | **E** | RAII. |
+| `follow_tuple` (static) | 302–319 | 18 | UDP-кортеж; отказ IPv4 MF, broadcast/multicast, иным proto | `:428 R2oUdpFollowKey::from_packet` | **P** | **Совпадает:** proto 17, отказ IPv4-фрагмента (MF), v4 `dst[0]>=224`, v6 `dst[0]==0xff`. **Отличие:** C проверяет `d2k_packet_parse` (принимает первый фрагмент), Rust `PacketView::parse` + `fragment & 0x3fff == 0`, то есть отвергает и смещённые фрагменты; для первого фрагмента с MF оба отказывают. |
+| `same_tuple` (static) | 321–324 | 4 | family/src/dst/ports | `#[derive(Eq)]` | **E** | C `memcmp` 16+16+4 и family; Rust типизированный `Eq`. |
+| `d2k_udp_follow_mark` | 329–332 | 4 | поставить окно, 0/-1 | `:508 r2o_mark` | **P** | C `follow_put` возвращает запись/NULL → 0/-1; Rust `r2o_mark` возвращает `bool`/`Result`. Семантика та же. |
+| `follow_put` (static) | 334–355 | 22 | `until=max(now,at)+5мс`, `at_ns=at>now?at:0`, поиск same-tuple или свободного/самого раннего, live++ | `:508 r2o_mark` | **P** | **Совпадает:** окно 5 мс, `at` только если в будущем, same-tuple переиспользуется, вытеснение по `until`, `live++` для новой. **Отличия:** C хранит `seq/at_ns/noted/failed`; Rust `R2oUdpFollowEntry` — `deferred_at/failed/noted?`; C выбирает свободный слот раньше самого раннего, Rust — по `min_by_key`. |
+| `follow_find` (static) | 357–370 | 14 | найти окно, попутно снять stale, вернуть `at_ns` | `:550 r2o_match` | **P** | **Совпадает:** stale удаляется на ходу; запись считается действующей при `e.seq==seq` или `now<until`; сравнение кортежа. **Отличие:** C возвращает `at_ns` через `d2k_udp_follow_match`, Rust — `Option<R2oUdpFollowMatch { at, failed }>`. |
+| `d2k_udp_follow_match` | 372–378 | 7 | match + `at_ns` | `:550 r2o_match` → `R2oUdpFollowMatch` | **E*** | **Совпадает:** при найденном окне возвращает `at_ns`; Rust `r2o_match` возвращает `Option` с `at`/`failed`. Unit `main.rs:4922`, D6. |
+| `out_resend` (static) | 388–415 | 28 | raw по `send_at_owned`/`send_at`/`send_now`; ENOSPC→queue_full, busy→busy, иначе первый failed; 1/0/-1 | `main.rs:226 r2o_udp_handle_late_tail`, `:250` deferred | **P** | **Совпадает:** при `at>now` и наличии `send_at_owned` ID забирает очередь (`taken=1`), иначе `send_at`/`send_now`; ENOSPC и busy считаются отдельно; первый постоянный отказ запоминается. **Отличия:** C возвращает 1/0/-1, Rust `io::Result`/`bool`; C `at>now && !send_at` → -1, Rust `None` → `NotConnected`; C `errno` сохраняется, Rust `io::Error`. |
+| `d2k_udp_out_owned_emit` | 417–421 | 5 | вердикт владеемой посылки: busy→busy++; err→ACCEPT, иначе DROP | `main.rs:4335 release_with` | **P** | **Совпадает:** ошибка → ACCEPT (копия идёт ядром), успех → DROP (копия снята); busy учитывается. **Отличие:** C возвращает -1/0, Rust `release_with` возвращает `Result`; отдельного имени нет. |
+| `refused_flow` (static) | 425–430 | 6 | `++follow->refused` на **каждый** отказ; лог первых `D2K_UDP_REFUSED_LOG` | `main.rs:285 follow.r2o_mark_failed` | **P** | **Подтверждённое отличие счётчика:** C увеличивает `refused` **на каждый** отказ и логирует первые 64; Rust `r2o_mark_failed` ставит `failed` один раз на поток и возвращает `bool`, поэтому повторные отказы того же потока не увеличивают `refused`. Число в сводке может отличаться. |
+| `out_verdict` (static) | 432–435 | 4 | адаптер вердикта | `queue.send_verdict` | **E** | Тонкий адаптер. |
+| `d2k_udp_out_neutral` | 437–440 | 4 | mark 0/neutral_mark → 1; иначе routed и не routed-политика | `main.rs:88 r2o_udp_packet_is_neutral` | **P** | **Совпадает:** mark 0 и neutral_mark нейтральны; иначе neutral только если метка не выбирает политику (`routed`). **Отличие:** C принимает `ipver`/`routes`; Rust проверяет `r2o_mark_is_routed`/policy, набор аргументов иной. |
+| `d2k_udp_out_batch` | 442–473 | 32 | выпуск пачки: `may[]`, `marked_tail`, `release_batch`, `refused_flow`, `follow_put` головы с at/seq | `main.rs:153 r2o_release_udp_batch` | **P** | **Совпадает:** нейтральность каждой датаграммы, raw-хвосты, отметка marked при первом ненейтральном хвосте, follow-запись головы, счётчик отказа. **Отличия:** C `release_batch` с `may[]`/defer; Rust `r2o_release_batch_with` без `may[]`/defer, `mark_failed` один раз; C `at`/`seq` для follow, Rust `R2oUdpFollowTable` и `deferred_at`. |
+| `d2k_udp_out_late` | 475–509 | 35 | поздний хвост: follow-match, failed→0, marked/defer→ACCEPT, resend, verdict | `main.rs:226 r2o_udp_handle_late_tail` | **P** | **Совпадает:** без follow/failed — обычный путь; ненейтральная метка помечается и при отложенной голове уходит ACCEPT через `defer`; иначе raw-resend, при ошибке ACCEPT/отметка failed. **Отличия:** C `defer_verdict` с `at_ns`; Rust `r2o_deferred_verdicts`/`r2o_deferred_resends`; C `e->failed` на потоке, Rust `follow.r2o_mark_failed`; возврат 0/1 и `verdict_failed`. |
 
 ### datapath/udp_release.c: построчная сверка
 
