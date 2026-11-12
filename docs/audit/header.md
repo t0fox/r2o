@@ -138,6 +138,8 @@ P означает неполное доказательство ветвей, N
 | 28 | HTTPS result loss | `done[17]`; при переполнении `lost++`, результат отбрасывается (`httpsprobe.c:337-340`) | `sync_channel(16)` + блокирующий `send`, счётчика `lost` нет (`https_probe.rs:132,181-183`) | `core-net.md` |
 | 29 | HTTP-upgrade 307 | `X-D2K-HTTP-Upgrade: provider-portal` (`httpup_logic.c:145`) | `X-R2O-HTTP-Upgrade: provider-portal` (`httpup.rs:513`), закреплено тестом | `core-net.md` |
 | 30 | HTTP-search plan identity | `d2k-plan 1 11` + FNV-префикс `d2k-http:` (`httpsearch.c:300,330-333`) | `r2o-plan 1 11` + префикс `r2o-http:` (`http_search.rs:686,784`) | `core-net.md` |
+| 31 | QUIC is_initial | только структура заголовка, без AEAD (`quic.c:182-185`) | `is_authenticated_initial` требует успешного open/AEAD (`quic.rs:107-127`) | `core-net.md` |
+| 32 | QUIC Initial build | v1/v2, DCID 8..20, SCID из снимка, longer=1300, clear-fixed, two-datagram split (`quichello.c:124-455`) | `initial_build` только v1, DCID 8, SCID = аргумент, всегда 1200, без clear-fixed/two-datagram (`quic.rs:261-336`, `quic_replay.rs:98-135`) | `core-net.md` |
 
 ### Остаточные P (не доказано, не значит «сломано»)
 

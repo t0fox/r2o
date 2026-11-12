@@ -102,7 +102,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-11)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 618 / P 1320 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 613 / P 1325 /
 N 42 / ? 2**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -138,6 +138,8 @@ P означает неполное доказательство ветвей, N
 | 28 | HTTPS result loss | `done[17]`; при переполнении `lost++`, результат отбрасывается (`httpsprobe.c:337-340`) | `sync_channel(16)` + блокирующий `send`, счётчика `lost` нет (`https_probe.rs:132,181-183`) | `core-net.md` |
 | 29 | HTTP-upgrade 307 | `X-D2K-HTTP-Upgrade: provider-portal` (`httpup_logic.c:145`) | `X-R2O-HTTP-Upgrade: provider-portal` (`httpup.rs:513`), закреплено тестом | `core-net.md` |
 | 30 | HTTP-search plan identity | `d2k-plan 1 11` + FNV-префикс `d2k-http:` (`httpsearch.c:300,330-333`) | `r2o-plan 1 11` + префикс `r2o-http:` (`http_search.rs:686,784`) | `core-net.md` |
+| 31 | QUIC is_initial | только структура заголовка, без AEAD (`quic.c:182-185`) | `is_authenticated_initial` требует успешного open/AEAD (`quic.rs:107-127`) | `core-net.md` |
+| 32 | QUIC Initial build | v1/v2, DCID 8..20, SCID из снимка, longer=1300, clear-fixed, two-datagram split (`quichello.c:124-455`) | `initial_build` только v1, DCID 8, SCID = аргумент, всегда 1200, без clear-fixed/two-datagram (`quic.rs:261-336`, `quic_replay.rs:98-135`) | `core-net.md` |
 
 ### Остаточные P (не доказано, не значит «сломано»)
 
@@ -223,12 +225,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 202 | 332 | 13 | 1 |
+| core-net | 548 | 198 | 336 | 13 | 1 |
 | core-state | 692 | 135 | 554 | 3 | 0 |
 | datapath-core | 400 | 122 | 267 | 11 | 0 |
 | datapath-plan | 183 | 105 | 72 | 5 | 1 |
 | detect | 159 | 49 | 100 | 10 | 0 |
-| **Итого** | **1982** | **613** | **1325** | **42** | **2** |
+| **Итого** | **1982** | **609** | **1329** | **42** | **2** |
 
 
 ---
@@ -738,7 +740,7 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 | `rd16` | 97-99 | 3 | big-endian u16 | `u16::from_be_bytes` | E | хелпер; владельцы покрыты RFC-тестами |
 | `read_varint` | 110-125 | 16 | QUIC varint | `quic.rs:1057 read_varint` | E | RFC-тесты Initial |
 | `parse_initial_header` | 149-180 | 32 | long header только Initial v1/v2 | `quic.rs:796 parse_initial_header` | E | test `splits_rfc_9001_initial_without_changing_datagram_length`, v2-тест |
-| `d2k_quic_is_initial` | 182-185 | 4 | предикат Initial | `quic.rs:107 is_authenticated_initial` | E | строже C (проверяет AEAD); тест `refuses_when_authenticated_initial_is_modified` |
+| `d2k_quic_is_initial` | 182-185 | 4 | предикат: только структура long header Initial v1/v2, без ключей/AEAD | `quic.rs:107-127 is_authenticated_initial` | **P** | **Подтверждённое расхождение:** C возвращает 1 для структурно корректного Initial **с любым шифртекстом/битым тегом**; Rust `is_authenticated_initial` выводит ключи, снимает HP и проверяет AEAD, поэтому такой пакет даёт 0. Тест `refuses_when_authenticated_initial_is_modified` закрепляет более строгий контракт Rust. |
 | `decrypt_initial` | 191-216 | 26 | вывести client Initial keys и открыть пакет | `quic.rs:908 open_initial` | E | RFC-тесты split/SNI |
 | `collect_crypto_frames` | 239-416 | 178 | разбор CRYPTO/ACK/PING/CONNECTION_CLOSE, сборка потока | `quic.rs:632 collect_initial_crypto_frames` | E | RFC-тест `opened_frames`/`crypto_stream` |
 | `skip_u8_vec` | 434-444 | 11 | пропуск TLS-вектора u8 | `quic.rs:1321 skip_u8_vector` | E | хелпер; владелец `find_client_hello_sni`, RFC-тест SNI |
@@ -763,19 +765,19 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| `select_probe_profile` | 34-45 | 12 | копия профиля + MIPS-замена cipher list | `quic_replay.rs:98 r2o_quic_profile_snapshot` | E | тот же MIPS-переключатель `[0x13,0x03,0x13,0x01,0x13,0x02]`; профиль 275 байт проверяется |
-| `split_point` | 69-77 | 9 | точка разреза CH по середине SNI | `quic.rs:167 initial_split_crypto` (поиск mid SNI) | E | test `splits_rfc_9001_initial_without_changing_datagram_length` |
-| `put_crypto` | 80-95 | 16 | CRYPTO-фрейм в буфер | `quic.rs:1085 append_crypto_frame` | E | helper; владелец `d2k_quic_hello_ask`, RFC split-тест |
-| `prepare` | 124-175 | 52 | разобрать Initial, извлечь CH, переименовать SNI, новые DCID/SCID/keys | `r2k_quic_initial_build` + `r2k_quic_client_hello_rename_sni` | E | test rename/reseal, профиль; IP-target удаление SNI покрыто `quic_client_hello_rename_sni(..., None)` |
-| `seal_one` | 183-228 | 46 | собрать long header + padding до want + seal | `quic.rs:261 r2k_quic_initial_build` | E | test `создаёт_аутентифицированный_quic_initial...` (len 1200) |
-| `probe_initial_sized` | 235-274 | 40 | Initial заданной длины из профиля с X25519 и SNI | `quic_replay.rs:98 r2o_quic_profile_snapshot` | E | профиль+rename+build(1200); длина и SNI проверяются |
-| `d2k_quic_probe_initial` | 276-279 | 4 | Initial минимальной длины (1200) | `r2o_quic_profile_snapshot` | E | test `initial.len() == 1200` |
-| `d2k_quic_probe_initial_longer` | 281-285 | 5 | Initial длиной INITIAL_LONGER | `quic.rs:261 r2k_quic_initial_build` (target_len) | P | Rust-обёртка всегда 1200; длинная цель не вызывается и не тестируется |
-| `d2k_quic_prepare_target` | 287-310 | 24 | переименовать снятый Initial или собрать из профиля | `r2k_quic_client_hello_rename_sni` + `r2k_quic_initial_build` | P | композиция есть в `quic_replay.rs`, отдельной функции нет; fallback-порядок не тестирован |
-| `d2k_quic_hello_rename` | 312-321 | 10 | переименовать CH внутри Initial | `quic.rs:1113 r2k_quic_client_hello_rename_sni` | E | tests `quic.rs:1398-1420` (rename/без SNI/повтор) |
-| `d2k_quic_hello_ask` | 330-391 | 62 | варианты: plain/v2/split/longer/clear-fixed-bit | `initial_split_crypto`, `r2k_quic_initial_build` | P | v2-сборка и clear-fixed-bit в Rust не вынесены; split покрыт |
-| `d2k_quic_hello_split` | 412-455 | 44 | два Initial: хвост CH и голова CH | нет прямого (split одним пакетом) | P | двухдатаграммный вариант не найден; `initial_split_crypto` даёт один пакет |
-| `d2k_quic_hello_recid` | 457-548 | 92 | перешифровать Initial с новым DCID, сохранив длины | `quic.rs:338 r2k_quic_initial_reseal_for_dcid` | E | tests `quic.rs` (reseal сохраняет форму) + `quic_snapshot.rs:30` |
+| `select_probe_profile` | 34-45 | 12 | копия профиля + MIPS-замена cipher list по `[0,6]` на `[0x1303,0x1301,0x1302]` | `quic_replay.rs:98-135 r2o_quic_profile_snapshot` | **E** | Rust: профиль 275 байт, MIPS-ветка `get(39..41)==[0,6]` → те же три cipher suite, random/SCID/key_share обновляются. Эквивалентно. |
+| `split_point` | 69-77 | 9 | первый SNI начиная с i=1 → `i+m/2`, иначе `n/2` | `quic.rs:167-196 initial_split_crypto` | **E** | Rust ищет SNI в собранном ClientHello, `middle=sni_offset+sni_len/2`, затем кадр, содержащий middle; при отсутствии — `NoNameInDatagram`. C fallback `n/2` относится к другому сценарию (нет имени), Rust в этом случае отказывает. Тест split. |
+| `put_crypto` | 80-95 | 16 | CRYPTO: 0x06, offset varint, len varint, data | `quic.rs:1085-1105 append_crypto_frame` | **E** | Та же раскладка/проверки; используется split. |
+| `prepare` | 124-175 | 52 | разобрать Initial, извлечь CH, IP→удалить SNI иначе rename, DCID 8..20 (иначе 8), SCID из снимка, ver = V2 или версия снимка, ключи | `quic.rs:261-336 r2k_quic_initial_build` + `:1113 r2k_quic_client_hello_rename_sni` | **P** | **Подтверждённые отличия:** Rust `initial_build` всегда **QUIC v1**, генерирует **DCID ровно 8 байт**, берёт **SCID = source_connection_id** от вызывающего (а не из снимка) и не имеет `want_v2`. C сохраняет версию/длину DCID (8..20)/SCID снимка и умеет V2. Композиция rename+build в `r2o_quic_profile_snapshot` покрывает только v1/8/профиль. |
+| `seal_one` | 183-228 | 46 | итеративная добивка PADDING до want, long header, опционально погасить fixed bit до seal | `quic.rs:261-336` (`target_len` + `seal_initial`) | **P** | **Подтверждённые отличия:** Rust подбирает ширину length под `target_len` и всегда v1, fixed bit не гасит; C умеет v1/v2 и `clear_fixed`. Для `want=1200`, v1, fixed=1 результат эквивалентен (тест 1200). |
+| `probe_initial_sized` | 235-274 | 40 | профиль + X25519 + random/SCID + rename (IP→без SNI) + CRYPTO + seal ровно want | `quic_replay.rs:98-135 r2o_quic_profile_snapshot` | **E** | Rust делает те же шаги для want=1200 v1: профиль 275, random 32, SCID 8, X25519 pub, IP→`rename_sni(None)`, иначе rename, `initial_build(1200)`. Длина/SNI проверяются. |
+| `d2k_quic_probe_initial` | 276-279 | 4 | обёртка want=1200 | `r2o_quic_profile_snapshot` | **E** | Test `initial.len() == 1200`. |
+| `d2k_quic_probe_initial_longer` | 281-285 | 5 | обёртка want=1300 (questions.go:237) | `quic.rs:261 r2k_quic_initial_build` (target_len=1200) | **P** | **Подтверждённое отличие:** Rust-владелец всегда вызывает `initial_build(..., 1200)`; вариант 1300 не портирован и не тестируется. |
+| `d2k_quic_prepare_target` | 287-310 | 24 | отказ на QSN, попытка rename снятого Initial, иначе профиль 1200 | `r2k_quic_client_hello_rename_sni` + `r2k_quic_initial_build` | **P** | Композиция есть в `quic_replay.rs` (снимок QSN, профиль), отдельной функции с тем же fallback-порядком нет; QSN-отказ/порядок не тестированы. |
+| `d2k_quic_hello_rename` | 312-321 | 10 | отказ на QSN, `hello_ask(PLAIN)` → prepare+rename внутри Initial | `quic.rs:1113-1160 r2k_quic_client_hello_rename_sni` | **P** | **Отличие уровня API:** C принимает готовый Initial и пересобирает его; Rust принимает **ClientHello** и возвращает CH. Пересборка Initial — отдельно `initial_build`/`reseal`; прямой C-функции «Initial→Initial rename» нет. Тесты rename/без SNI/повтор. |
+| `d2k_quic_hello_ask` | 330-391 | 62 | PLAIN/V2/SPLIT/longer/clear-fixed; split — два CRYPTO в одном пакете, tail первым | `quic.rs:167 initial_split_crypto`, `:261 initial_build` | **P** | **Подтверждённые отличия:** Rust умеет split одного пакета и v1 build; **v2, longer=1300, clear-fixed-bit** не вынесены. C split режет по `split_point` (SNI или n/2), Rust — только по SNI и иначе отказ. |
+| `d2k_quic_hello_split` | 412-455 | 44 | два Initial с одним DCID: tail (PN=1) и head (PN=0), каждый ≥1200 | нет прямого | **P** | Двухдатаграммного варианта в Rust нет; `initial_split_crypto` даёт один пакет. |
+| `d2k_quic_hello_recid` | 457-548 | 92 | QSN-отказ, Initial v1/v2, свежий DCID той же длины, SCID из снимка, pn_len из Length, fixed bit из снимка, reseal с той же длиной | `quic.rs:338-372 r2k_quic_initial_reseal_for_dcid` | **E** | Rust: parse Initial, open старыми ключами, reseal новым DCID, `clear_header[0]=input[0]&0xf0` (fixed bit сохранён), новые ключи, проверка длины/length_width. Tests reseal/`quic_snapshot.rs:30`. |
 
 ## core/quicsnap.c (6 функций)
 
