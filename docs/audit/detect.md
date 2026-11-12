@@ -263,7 +263,7 @@ CLI `d2k-detect` и форматы вывода. R2O использует дру
 которые есть в C-структуре; на текущем каталоге это не проявляется, но функция не эквивалентна для
 произвольного `d2k_poison`.
 
-**Прочитано построчно: 12/12 функций, 475 строк C (1–475).** Список `init_poisons` сверен с
+**Прочитано построчно: 12/12 функций, 475 строк C (1–475).** Сверено с `classify.rs:178-201` (`note_props_hit/miss`), `:203-219` (`same_hypothesis`), `:221-380` (`build_poisons`, 85 записей), `:382-397` (`poison_has_fake`/`poison_supports_family`), `:399-540` (`strategy_for_poison`/`overlap_fake`/`disorder_fake`), `:1939-1941` (`strategy_for`), `classify_measured.rs:30-379` (`arm_from_poison` → план). Список `init_poisons` сверен с
 `build_poisons` (`classify.rs:229-380`) по каждой из 85 записей: имена, порядок, ttl/repeats/gap_ms,
 seqovl/seqovl_exact, decoy_hello, badsum/md5/disorder/disorder_pos, syn_data/oob/fake_between,
 tcp_ts/ip_id_zero/seq_shift — совпадают; дедупликация `badsum-xN-gG` повторяет C.
