@@ -2222,6 +2222,8 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 
 ### `core/groups.c`
 
+**Прочитано построчно: 14/14 функций, 324 строки C (1–324).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
 | `d2k_group_key_make` | 9-17 | 9 | ключ области: transport/family/shape/path/ech_origin; path/origin короче полей, иначе -1 | `catalog::GroupKey` + `validate_key` (`groups.rs:424-441`) | **P** | C: `!key/!path/!origin` → -1; `strlen(path)>=sizeof probe_path` или `strlen(origin)>=sizeof ech_origin` → -1; `memset`; копия transport/family/shape и `strcpy` path/origin. Rust `validate_key` проверяет контекст сразу: transport 6 + shape 1/2/6/8–13, transport 17 + shape 3, family 4/6, path/origin ≤255 без NUL. Для штатных вызовов результат тот же; C/Rust differential групп нет. |
