@@ -1559,14 +1559,17 @@ ECH, середина приветствия. R2O: `r2k-core/src/tls.rs`.
 
 ## Углублённая сверка: 11 N-функций
 
+**Прочитано построчно: 11/11 N-функций; тела прочитаны по указанным строкам, отсутствие/частичность аналогов в R2O подтверждены поиском по `crates/`.**
+
 - **`count_reason` (static, 165–186):** гистограмма причин отказа по
   указателю/строке, до 32 записей, печатается в итоговой сводке `d2kd`.
   R2O причины передаёт в `RefusedEvent`/журнал, но агрегированной таблицы
   и печати нет. N — диагностика, packet-path не меняет.
 - **`offline_self_check` (static, 1118–1123):** `--offline-self-check`
   проверяет `D2K_CTL_PROTO_VERSION == D2K_RUNTIME_WIRE` и SHA-256("abc")
-  по эталону. R2O SHA-256 покрыт `test-core-crypto-differential.sh`, но
-  самой CLI-опции нет. N — CLI/self-check.
+  по эталону. R2O SHA-256 покрыт `test-core-crypto-differential.sh`; своя
+  offline-самопроверка есть у панели (`r2o-panel/tests/cli.rs:135`), но у
+  `r2o-datapath` (преемник `d2kd`) этой CLI-опции нет. N — CLI/self-check.
 - **`d2k_session_nat_stats` (650–656):** глобальные `nat_ok/miss/none/
   retried`; R2O `proc_nat` эти счётчики не ведёт. N — диагностика NAT.
 - **`d2k_session_applied` (3541–3543):** агрегат `s->applied`; R2O
