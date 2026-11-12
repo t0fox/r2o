@@ -638,6 +638,46 @@ mod app {
         );
     }
 
+    fn r2o_log_http_trace(
+        name_plans: &NamePlans,
+        plan: &Plan,
+        packet: &[u8],
+        decision: &PacketDecision,
+        mode: RuntimeMode,
+        hook: Option<u8>,
+        mark: Option<u32>,
+        outdev: Option<u32>,
+    ) {
+        let selected = name_plans
+            .select_with_quic_host(packet, None)
+            .unwrap_or(plan);
+        if selected.proto != r2k_core::plan::PROTO_HTTP {
+            return;
+        }
+        let applied = matches!(
+            decision,
+            PacketDecision::Drop | PacketDecision::Replace(_) | PacketDecision::Transmit { .. }
+        );
+        let result = r2o_datapath::http_trace::HttpTraceResult {
+            applied,
+            plan_id: selected.id,
+            execution_id: 0,
+            skipped: None,
+        };
+        let outcome = r2o_datapath::http_trace::HttpTraceOutcome {
+            apply: mode == RuntimeMode::Apply,
+            hook: hook.unwrap_or(0),
+            mark: mark.unwrap_or(0),
+            outdev: outdev.unwrap_or(0),
+            verdict: u32::from(matches!(decision, PacketDecision::Accept)),
+            ..r2o_datapath::http_trace::HttpTraceOutcome::default()
+        };
+        let line = r2o_datapath::http_trace::http_trace(packet, &result, &outcome, 1600);
+        if !line.is_empty() {
+            eprintln!("{}", String::from_utf8_lossy(&line));
+        }
+    }
+
     fn r2o_log_reason_stats() {
         let reasons = r2o_datapath::reason_stats::reason_snapshot();
         if reasons.is_empty() {
@@ -1531,6 +1571,8 @@ mod app {
                         r2o_datapath::reason_stats::record_reason("пакет обрезан copy_range");
                     }
                     let queue_hook = packet.hook;
+                    let queue_mark = packet.mark;
+                    let queue_outdev = packet.output_device;
                     if let Some(bytes) = packet.payload
                         && let Some(drop) = icmp_guard.r2o_handle_at_hook(
                             bytes,
@@ -1954,6 +1996,16 @@ mod app {
                                         tcp_syn_ack_seen,
                                     )
                                 };
+                                r2o_log_http_trace(
+                                    &name_plans,
+                                    &plan,
+                                    &packet,
+                                    &decision,
+                                    options.mode,
+                                    queue_hook,
+                                    queue_mark,
+                                    queue_outdev,
+                                );
                                 batch_ids = ids;
                                 synthetic = Some(packet);
                                 decision
@@ -2011,6 +2063,16 @@ mod app {
                                         tcp_syn_ack_seen,
                                     )
                                 };
+                                r2o_log_http_trace(
+                                    &name_plans,
+                                    &plan,
+                                    &packet,
+                                    &decision,
+                                    options.mode,
+                                    queue_hook,
+                                    queue_mark,
+                                    queue_outdev,
+                                );
                                 batch_ids = ids;
                                 batch_owned_originals = Some(originals);
                                 synthetic = Some(packet);

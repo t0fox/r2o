@@ -86,10 +86,10 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 196 | 351 | 1 | 0 |
 | core-state | 692 | 182 | 509 | 0 | 0 |
-| datapath-core | 400 | 155 | 244 | 1 | 0 |
+| datapath-core | 400 | 156 | 244 | 0 | 0 |
 | datapath-plan | 183 | 164 | 19 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **755** | **1225** | **2** | **0** |
+| **Итого** | **1982** | **756** | **1225** | **1** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,8 +103,8 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 755 / P 1225 /
-N 2 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
+Покрытие реестра: **1982/1982** функций. Статусы: **E 756 / P 1225 /
+N 1 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
 | # | Область | D2O | R2O | Подтверждение |
@@ -346,10 +346,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 196 | 351 | 1 | 0 |
 | core-state | 692 | 182 | 510 | 0 | 0 |
-| datapath-core | 400 | 155 | 244 | 1 | 0 |
+| datapath-core | 400 | 156 | 244 | 0 | 0 |
 | datapath-plan | 183 | 164 | 19 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **755** | **1225** | **2** | **0** |
+| **Итого** | **1982** | **756** | **1225** | **1** | **0** |
 
 
 ---
@@ -3612,10 +3612,10 @@ C-хелперы без собственного состояния наслед
 ## Сводка
 
 - Всего функций: **400**.
-- **E: 155 (38,75 %)**; **P: 244 (61,00 %)**; **N: 1 (0,25 %)**; **?: 0**.
-- Полностью отсутствует: `d2k_http_trace` (текстовый HTTP-трейс). Агрегатные
-  счётчики applied/done/damaged/sent_lost/exchanges/suspects, NAT-статистика,
-  TCP-опции снимка, `--offline-self-check` и гистограмма причин пропуска
+- **E: 156 (39,00 %)**; **P: 244 (61,00 %)**; **N: 0 (0,00 %)**; **?: 0**.
+- Полностью отсутствующих функций нет. Агрегатные счётчики applied/done/
+  damaged/sent_lost/exchanges/suspects, NAT-статистика, TCP-опции снимка,
+  `--offline-self-check`, гистограмма причин пропуска и текстовый HTTP-трейс
   теперь есть.
 - Неподтверждённые ветви (P) сосредоточены в `session.c` (97), `d2kd.c` (41),
   `http80.c` (22), `udp_release.c` (20): в основном это склейка/loop-код,
@@ -3816,8 +3816,7 @@ R2O-владелец: `crates/r2o-datapath/src/main.rs` (`run`, `parse_options`,
   дренирует sched так, как C. Остальные ветви (NFQUEUE, raw, control,
   hold/release, HTTP, ICMP, stats, route/cap) перенесены — P.
 
-**Итог:** 44 функции; N — `d2k_http_trace`
-(диагностика/CLI), остальные P/E с подтверждёнными пробелами
+**Итог:** 44 функции; N нет, остальные P/E с подтверждёнными пробелами
 CLI-логирования, health-файла, duration, состава сводки,
 `EVENT_STATS` и shutdown-дренажа sched.
 
@@ -4563,7 +4562,7 @@ observation), `control.rs` (https names), `http_replace.rs` (пакеты),
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
-| `d2k_http_trace` | 9–50 | 42 | строка `d2kd: HTTP execution host=... IPv4/6 [src]:cport -> [dst]:80 seq=... hook/mark/outdev/status/prepared/plan/execution/planned/raw_sent/queued/original/output_failed/reason` | нет: grep `HTTP execution` по R2O пуст | **N** | C: TCP/80, method заглавными + пробел, `d2k_http_request` иначе `host=<unparsed>`, `inet_ntop`, plan hex или `-`, status `OBSERVE/SKIPPED/FAILED/PENDING/COMPLETE`, seq/hook/mark/outdev, execution, planned/sent/queued, original `ACCEPT/DROP`, output_failed, reason; возвращает длину с усечением до `cap-1`. В R2O есть события портала/ответа и журнал, но **нет** этой текстовой строки; N подтверждён. |
+| `d2k_http_trace` | 9–50 | 42 | строка `d2kd: HTTP execution host=... IPv4/6 [src]:cport -> [dst]:80 seq=... hook/mark/outdev/status/prepared/plan/execution/planned/raw_sent/queued/original/output_failed/reason` | `http_trace.rs` `http_trace`; вызов в `main.rs` `r2o_log_http_trace` | **E** | C: TCP/80, method заглавными + пробел, `d2k_http_request` иначе `host=<unparsed>`, `inet_ntop`, plan hex или `-`, status `OBSERVE/SKIPPED/FAILED/PENDING/COMPLETE`, seq/hook/mark/outdev, execution, planned/sent/queued, original `ACCEPT/DROP`, output_failed, reason; усечение до `cap-1`. Rust `http_trace` повторяет формат и все статусы, не печатает URL/cookies; `r2o_log_http_trace` вызывается на HTTP-решении. Тесты `http_trace_matches_donor_statuses_and_hides_secrets`, `http_trace_rejects_other_ports_and_truncates_to_cap` (IPv4/IPv6, порт 81, cap). |
 
 ## datapath/journal.c (14 функций)
 

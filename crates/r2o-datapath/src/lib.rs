@@ -8,6 +8,7 @@ pub mod flow_capacity;
 pub mod flow_journal;
 pub mod hold;
 pub mod http_replace;
+pub mod http_trace;
 pub mod netlink;
 #[cfg(target_os = "linux")]
 pub mod nfqueue;
