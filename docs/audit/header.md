@@ -260,6 +260,8 @@ P означает неполное доказательство ветвей, N
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-catalog-sync-differential.sh` —
   **PASS** (area ACK/deadline, удаление после отключения группы, swap-with-last
   при удалении, асинхронные HTTP bound set/delete кадры).
+- `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-control-dropped-differential.sh` —
+  **PASS** (учёт control-событий без подключённого peer как dropped).
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-diagnostics-differential.sh` —
   **не выполнен**: сборка донорского `test_httpsearch` падает на duplicate
   symbols `d2k_plan_apply`, `d2k_plan_max_emit`, `d2k_actions_cancel`,
