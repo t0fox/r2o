@@ -131,7 +131,7 @@ P означает неполное доказательство ветвей, N
 | 21 | HTTP-search save | файл `d2k-http-plans 1`, `fflush/fsync/rename` | JSON-каталог, отдельного файла/формата нет | `deep-core-verify.md` |
 | 22 | verify page budget | бюджетный повтор шлёт фактический `req`, дедлайн сбрасывается | повтор строит запрос из `options.path`, общий deadline; redirect только при `complete` | `deep-core-verify.md` |
 | 23 | detect mark | `D2K_BYPASS_MARK=0x40000000` (`detect/include/d2k_detect.h:34`) | `BYPASS_MARK=0x2d` (`raw_probe.rs:23`, `response.rs:71`) | `detect.md` |
-| 24 | raw-hex accept | первый байт `0x16` → `accept_serverhello` (`verdict.c:33-35,126-129`) | `Trigger::raw_hex` всегда `Accept::Any` (`classify.rs:77-83`) | `core-state.md` |
+| 24 | raw-hex accept | первый байт `0x16` → `accept_serverhello` (`verdict.c:33-35,126-129`) | **закрыто 2026-11-12:** `Trigger::raw_hex` ставит `Accept::ServerHello` при `0x16`, иначе `Accept::Any` (`classify.rs:77-96`), тест `raw_hex_acceptance_follows_the_first_byte` | `core-state.md` |
 | 25 | endpoint role | `server_is_low` по эфемерному диапазону ≥32768 для любого порта (`sched.c:1798-1805`) | `DiscoveryTarget::from_event` только 443, `from_http_portal` только 80 (`discovery.rs:355-460`) | `core-state.md` |
 | 26 | HTTPS probe non-upgrade | `http_probe_done`: SET_HTTPS только для `SERVED`/`TLS_BLOCKED`, иначе `http_search_portal` (`d2kc.c:331-344`) | `main.rs:17033` шлёт `SET_HTTPS(host, ttl_seconds)` для любого результата; у не-upgrade `ttl_seconds=0` (`https_probe.rs:170-178`), HTTP-поиск только через `pending_http_searches` | `core-net.md` |
 | 27 | HTTPS first flight | донорский `modern` ClientHello из `d2k_hello_from_profile` (`httpsprobe.c:171-177`) | rustls-сгенерированный ClientHello (`response.rs:572-605`) | `core-net.md` |
@@ -227,11 +227,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 191 | 344 | 13 | 0 |
-| core-state | 692 | 152 | 537 | 3 | 0 |
+| core-state | 692 | 153 | 536 | 3 | 0 |
 | datapath-core | 400 | 122 | 267 | 11 | 0 |
 | datapath-plan | 183 | 102 | 76 | 5 | 0 |
 | detect | 159 | 49 | 100 | 10 | 0 |
-| **Итого** | **1982** | **616** | **1324** | **42** | **0** |
+| **Итого** | **1982** | **617** | **1323** | **42** | **0** |
 
 
 ---
@@ -2565,7 +2565,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `looks_like_tls` | 33–35 | 3 | `bytes[0] == 0x16` → ServerHello, иначе Any | `Trigger::accept` (`classify.rs:73-103`) | **P** | **Подтверждённое расхождение:** C выбирает accept **по первому байту** (raw-триггер с `0x16` получает ServerHello); Rust `Trigger::raw_hex` всегда ставит `Accept::Any`, `tls/tls13` — ServerHello. Для raw-hex `0x16` набор принимаемых ответов шире, чем у C. C-вердиктное дерево production-вызовов не имеет (только `core/test_verdict.c`), но контракт функции различается. |
+| `looks_like_tls` | 33–35 | 3 | `bytes[0] == 0x16` → ServerHello, иначе Any | `Trigger::raw_hex` (`classify.rs:77-96`) | **E** | **Расхождение закрыто 2026-11-12:** `raw_hex` ставит `Accept::ServerHello`, если первый байт `0x16`, иначе `Accept::Any`; `tls/tls13` остаются ServerHello. Тест `raw_hex_acceptance_follows_the_first_byte`; `trigger_acceptance_matches_the_donor_rules` проверяет критерии ответа. |
 | `reverse_note` | 53–62 | 10 | MODERN → "", LEGACY → «обратное направление не проверено», UNKNOWN → «вид не разобран…» | `classify.rs` CLEAR/`probe_response` | **P*** | **Подтверждённое расхождение:** C добавляет оговорку к CLEAR по `d2k_hello_shape` (LEGACY/UNKNOWN); Rust по форме приветствия оговорку не строит — при наличии SNI запускает `probe_response` и может вернуть `Response`, иначе при `Accept::ServerHello` добавляет «(ответное направление не проверено: нет SNI)». Текст C «форма TLS 1.2 — обратное направление не проверено» не воспроизводится. |
 | `pause_note` | 74–80 | 7 | `gap_us==0` → «без пауз», иначе «с паузой N мкс»; буфер 96 | classify.rs reason | **P*** | C `snprintf` в 96 байт; Rust `String` без обрезки. Текст и границы не сравнивались. |
 | `stop_requested` | 92–94 | 3 | `stop && *stop` (volatile sig_atomic) | `AtomicBool::load`/cancel (`classify.rs:1041`) | **P*** | C указатель может быть NULL; Rust `Option<&AtomicBool>`/cancel-флаг. Эквивалентно. |
@@ -2639,7 +2639,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_ip4_text` | 32–38 | `Ipv4Addr::Display` | **E** | `scripts/test-core-net4-differential.sh` сравнивает C `d2k_ip4_text` и Rust `Display` на валидных адресах. |
 | `d2k_ip4_private` | 40–51 | `quic_replay.rs:23-46` `ipv4_is_local` | **E** | Differential покрывает 0/8? (C только `v==0`), 10/8, 127/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10 и public 8.8.8.8. Rust-диапазоны совпадают. |
 | `d2k_ip6_private` | 53–64 | `quic_replay.rs:47-58` IPv6-ветка | **E** | Differential покрывает ::, ::1, fc00::, fe80::, ff02::, IPv4-mapped private/public, 2001:db8::1. |
-| `looks_like_tls` (static) | 33–35 | `Trigger::accept` (`classify.rs:73-103`) | **P** | **Подтверждённое расхождение:** C выбирает accept по первому байту (`0x16` → ServerHello); Rust `Trigger::raw_hex` всегда `Accept::Any`, `tls/tls13` — ServerHello. Для raw-hex `0x16` Rust принимает любой непустой ответ, C — только ServerHello. C-дерево production-вызовов не имеет (только `test_verdict.c`). |
+| `looks_like_tls` (static) | 33–35 | `Trigger::raw_hex` (`classify.rs:77-96`) | **E** | `raw_hex` выбирает accept по первому байту (`0x16` → ServerHello, иначе Any); тест `raw_hex_acceptance_follows_the_first_byte`. C-дерево production-вызовов не имеет, но контракт совпадает. |
 | `reverse_note` (static) | 53–62 | `classify.rs` CLEAR/`probe_response` | **P** | C добавляет оговорку к CLEAR по `d2k_hello_shape` (LEGACY/UNKNOWN); Rust по форме оговорку не строит — при SNI запускает `probe_response` (может вернуть `Response`), иначе при `Accept::ServerHello` пишет «ответное направление не проверено: нет SNI». Текст C не воспроизводится. |
 | `pause_note` (static) | 74–80 | `classify.rs` reason-строки | **P** | Формат «замерено без пауз/с паузой N мкс» перенесён; C-буфер 96 байт, Rust `String` без обрезки. |
 | `stop_requested` (static) | 92–94 | `classify.rs` `stopped(options)` | **P** | Проверка atomic-флага отмены эквивалентна. |

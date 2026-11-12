@@ -73,13 +73,22 @@ pub struct Trigger {
 }
 
 impl Trigger {
-    /// Build the donor's arbitrary-byte trigger from its command-line hex form.
+    /// Собрать триггер из произвольных байт, заданных hex-строкой.
+    ///
+    /// Критерий приёмки — как у C-оракула: если первый байт является записью
+    /// рукопожатия TLS (0x16), доказательством прохода считается только
+    /// ServerHello; иначе принимается любой непустой ответ.
     pub fn raw_hex(hex: &str) -> Result<Self, &'static str> {
         let payload = crate::trigger::parse_raw_hex(hex)?;
+        let accept = if payload.first() == Some(&0x16) {
+            Accept::ServerHello
+        } else {
+            Accept::Any
+        };
         Ok(Self {
             name: format!("raw:{}B", payload.len()),
             payload,
-            accept: Accept::Any,
+            accept,
         })
     }
 

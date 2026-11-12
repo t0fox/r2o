@@ -102,7 +102,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-11)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 616 / P 1324 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 617 / P 1323 /
 N 42 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -131,7 +131,7 @@ P означает неполное доказательство ветвей, N
 | 21 | HTTP-search save | файл `d2k-http-plans 1`, `fflush/fsync/rename` | JSON-каталог, отдельного файла/формата нет | `deep-core-verify.md` |
 | 22 | verify page budget | бюджетный повтор шлёт фактический `req`, дедлайн сбрасывается | повтор строит запрос из `options.path`, общий deadline; redirect только при `complete` | `deep-core-verify.md` |
 | 23 | detect mark | `D2K_BYPASS_MARK=0x40000000` (`detect/include/d2k_detect.h:34`) | `BYPASS_MARK=0x2d` (`raw_probe.rs:23`, `response.rs:71`) | `detect.md` |
-| 24 | raw-hex accept | первый байт `0x16` → `accept_serverhello` (`verdict.c:33-35,126-129`) | `Trigger::raw_hex` всегда `Accept::Any` (`classify.rs:77-83`) | `core-state.md` |
+| 24 | raw-hex accept | первый байт `0x16` → `accept_serverhello` (`verdict.c:33-35,126-129`) | **закрыто 2026-11-12:** `Trigger::raw_hex` ставит `Accept::ServerHello` при `0x16`, иначе `Accept::Any` (`classify.rs:77-96`), тест `raw_hex_acceptance_follows_the_first_byte` | `core-state.md` |
 | 25 | endpoint role | `server_is_low` по эфемерному диапазону ≥32768 для любого порта (`sched.c:1798-1805`) | `DiscoveryTarget::from_event` только 443, `from_http_portal` только 80 (`discovery.rs:355-460`) | `core-state.md` |
 | 26 | HTTPS probe non-upgrade | `http_probe_done`: SET_HTTPS только для `SERVED`/`TLS_BLOCKED`, иначе `http_search_portal` (`d2kc.c:331-344`) | `main.rs:17033` шлёт `SET_HTTPS(host, ttl_seconds)` для любого результата; у не-upgrade `ttl_seconds=0` (`https_probe.rs:170-178`), HTTP-поиск только через `pending_http_searches` | `core-net.md` |
 | 27 | HTTPS first flight | донорский `modern` ClientHello из `d2k_hello_from_profile` (`httpsprobe.c:171-177`) | rustls-сгенерированный ClientHello (`response.rs:572-605`) | `core-net.md` |

@@ -830,6 +830,14 @@ fn cancellation_marks_the_result_and_skips_all_network_probes() {
 }
 
 #[test]
+fn raw_hex_acceptance_follows_the_first_byte() {
+    let handshake = Trigger::raw_hex("1603010000").unwrap();
+    assert_eq!(handshake.accept, Accept::ServerHello);
+    let plain = Trigger::raw_hex("5741").unwrap();
+    assert_eq!(plain.accept, Accept::Any);
+}
+
+#[test]
 fn trigger_acceptance_matches_the_donor_rules() {
     assert!(trigger_accepts(Accept::Any, b"x"));
     assert!(!trigger_accepts(Accept::Any, b""));
