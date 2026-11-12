@@ -227,11 +227,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 195 | 340 | 13 | 0 |
-| core-state | 692 | 153 | 536 | 3 | 0 |
+| core-state | 692 | 152 | 537 | 3 | 0 |
 | datapath-core | 400 | 122 | 267 | 11 | 0 |
 | datapath-plan | 183 | 102 | 76 | 5 | 0 |
 | detect | 159 | 49 | 100 | 10 | 0 |
-| **Итого** | **1982** | **621** | **1319** | **42** | **0** |
+| **Итого** | **1982** | **620** | **1320** | **42** | **0** |
 
 
 ---
@@ -1773,17 +1773,17 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `days_from_civil` | 156–163 | 8 | дни от гражданской даты (алгоритм Ховарда Хиннанта) | time crate | **P*** | static-хелпер |
 | `civil_from_days` | 166–178 | 13 | гражданская дата из числа дней | time crate | **P*** | static-хелпер |
 | `format_rfc3339` | 185–195 | 11 | epoch в RFC3339 UTC | time::format_description | **E*** | static-хелпер; persist differential сравнивает поля added/confirmed |
-| `jparse_raw_int` | 207–239 | 33 | строгий целый JSON без float/exponent, до 18 цифр | serde_json + validate | **P*** | static-хелпер; R2O отвергает float через типы/validate |
-| `jparse_i32` | 241–250 | 10 | int32 из JSON | serde_json i32 | **P*** | static-хелпер |
-| `jparse_u8` | 252–261 | 10 | u8 0..255 из JSON | serde_json u8 + validate | **P*** | static-хелпер |
-| `jparse_u16` | 263–272 | 10 | u16 0..65535 из JSON | serde_json u16 | **P*** | static-хелпер |
-| `jparse_bool_i` | 274–284 | 11 | true/false в int | serde_json bool | **P*** | static-хелпер |
-| `jparse_string_dyn` | 305–402 | 98 | разбор JSON-строки с escape/\u и запретом NUL/суррогатов | serde_json String + validate | **P*** | static-хелпер; serde_json допускает суррогатные пары, R2O проверяет NUL отдельно |
-| `jparse_string_fixed` | 408–422 | 15 | строка в фиксированный буфер | String + validate_string | **P*** | static-хелпер |
-| `read_fixed_digits` | 428–445 | 18 | N цифр подряд | time crate | **P*** | static-хелпер |
-| `eat_lit` | 447–454 | 8 | ожидать литерал времени | time crate | **P*** | static-хелпер |
-| `jparse_rfc3339` | 462–500 | 39 | строгий RFC3339 с дробной частью и диапазонами | catalog::parse_timestamp | **P*** | static-хелпер; unit accepts_old_catalogs/rejects_trailing |
-| `jskip_value` | 545–611 | 67 | пропуск произвольного JSON-значения с ограничением глубины 24 | serde_json + check_json_depth | **P*** | static-хелпер; unit rejects_excessive_nesting |
+| `jparse_raw_int` | 207–239 | 33 | `-`? + цифры, **не более 18**; `.`/`e`/`E` → отказ; вызывается и из `jskip_value`, т.е. float запрещён в **любом** поле | типы serde (`i32/u8/u16/i64`) + `validate` | **P** | **Совпадает для известных полей:** диапазоны i32/u8/u16 проверяются типами, float в них отвергается. **Подтверждённое отличие:** C отвергает float/exponent и 19-значное целое **и в неизвестных полях** через `jskip_value`; serde_json неизвестные поля пропускает без проверки грамматики числа, поэтому `"future":1.5` C отвергнет, Rust примет. Тест на этот вход не найден. |
+| `jparse_i32` | 241–250 | 10 | int64 → проверка `INT_MIN..INT_MAX` | serde_json `i32` | **P*** | Диапазон тот же; C сначала парсит int64 с 18-цифровым пределом, Rust — типом. |
+| `jparse_u8` | 252–261 | 10 | 0..255 | serde_json `u8` | **P*** | Диапазон тот же. |
+| `jparse_u16` | 263–272 | 10 | 0..65535 | serde_json `u16` | **P*** | Диапазон тот же. |
+| `jparse_bool_i` | 274–284 | 11 | ровно `true`/`false` | serde_json `bool` | **P*** | Эквивалентно. |
+| `jparse_string_dyn` | 305–402 | 98 | escape `\" \\ \/ \b \f \n \r \t \uXXXX`; **U+0000 и любая суррогатная половина → отказ**; неэкранированные <0x20 → отказ | serde_json `String` + `validate_string` | **P** | **Совпадает:** escape-набор, отказ на битом `\u`, запрет управляющих байтов. **Отличия:** (1) serde_json отвергает одиночный суррогат, но **принимает `\u0000`**; (2) NUL отвергается только для строк, прошедших `validate_string` (`catalog.rs:1095-1104`), а неизвестные поля пропускаются — C отвергает файл целиком; (3) C не собирает суррогатные пары и отвергает их, Rust собирает валидную пару. Для известных полей с NUL поведение совпадает. |
+| `jparse_string_fixed` | 408–422 | 15 | динамический разбор, затем `n+1 > outcap` → отказ (без обрезки) | `String` + `validate_string` в `Catalog::validate` (`catalog.rs:543-625`) | **P** | Лимиты совпадают с C-буферами: box.id 39, plan.id 39, proto 7, signal.kind 23, binding kind 7/target 255/plan_id 39/probe_path 511/ech_origin 255, domain name/suffix 255, plan_id 39. `plan.text` без предела, как и C. Проверка выполняется после разбора, а не в момент строки; на отказ файла это не влияет. |
+| `read_fixed_digits` | 428–445 | 18 | ровно N цифр без пропуска пробелов | `time` Rfc3339 | **P*** | Разбор даты/времени целиком передан `time`; отдельного шага нет. |
+| `eat_lit` | 447–454 | 8 | ожидать конкретный символ с отказом | `time` Rfc3339 | **P*** | То же. |
+| `jparse_rfc3339` | 462–500 | 39 | `YYYY-MM-DDTHH:MM:SS[.дробь]Z`; проверка только `month 1..12`, `day 1..31`, `hour<=23`, `min<=59`, `sec<=60` — **без календарной сверки** | `catalog::parse_timestamp` (`catalog.rs:1156-1164`) | **P** | **Подтверждённое отличие:** C принимает 31 февраля и секунду 60 (нормализует через `days_from_civil`), Rust `time::OffsetDateTime` отвергает несуществующую дату и, вероятно, секунду 60. Для реальных каталогов совпадает; unit `accepts_old_catalogs`/`rejects_trailing`. |
+| `jskip_value` | 545–611 | 67 | пропуск любого JSON-значения; глубина **64** (`D2K_JSON_MAX_DEPTH`, `catalog.c:531`); числа — тем же `jparse_raw_int`, т.е. float → отказ | serde_json (ignore unknown) + `check_json_depth` (`catalog.rs:1126-1153`) | **P** | **Совпадает:** глубина 64, неизвестные поля не ломают разбор. **Подтверждённое отличие:** float/exponent в неизвестном поле C отвергает, serde_json принимает и отбрасывает. Ограничение глубины Rust считает по сырому тексту (скобки в строках игнорируются), C — по фактическому спуску; на валидном JSON эквивалентно. Unit `rejects_excessive_nesting`. |
 | `parse_object` | 629–655 | 27 | обход JSON-объекта с обработчиком ключей | serde_json derive | **P*** | static-хелпер |
 | `grow` | 667–678 | 12 | рост динамического массива вдвое | Vec::push | **P*** | static-хелпер |
 | `parse_array` | 692–717 | 26 | разбор JSON-массива в C-массив с null=>пусто | serde_json Vec | **P*** | static-хелпер |
@@ -1794,37 +1794,37 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `handle_plan_key` | 798–816 | 19 | поля plan: id/proto/text/added/successes/enabled | catalog::Plan serde | **P** | unit round_trips_known_measurement_context |
 | `parse_plan` | 817–820 | 4 | разобрать plan | catalog::Plan | **P*** | static-хелпер |
 | `elem_plan` | 821–823 | 3 | элемент массива plans | Vec<Plan> | **P*** | static-хелпер |
-| `handle_binding_key` | 834–885 | 52 | поля binding: kind/target/plan_id/level/confirmed/successes/enabled/transport/family/shape/tcp_profile/verified_by/input/probe_path/ech_origin/recheck_since/budget | catalog::Binding serde + validate | **P** | C `family` принимает только 4/6 (`catalog.c:852-859`), `tcp_profile` — только 0/1/2 (`:862-869`), затем пишет все поля. Rust `Binding` (`catalog.rs:166-198`) **не имеет `tcp_profile`**: serde молча игнорирует ключ, при save поле теряется. `family` в `Binding` есть, но без C-валидации 4/6 в `validate`. Для старых каталогов shape 1/2 + tcp_profile 1/2 теряется измеренный TS-профиль; R2O выводит его из shape только для 8–13. |
-| `parse_binding` | 886–890 | 5 | `memset`, `out->family=4`, затем `parse_object` | `catalog.rs:166-198` `Binding` | **P** | C явно ставит `family=4` до разбора (`catalog.c:887-888`) и валидирует 4/6 при наличии. Rust `#[derive(Default)]` + `#[serde(default)]` даёт family=0; `serialize_family` пишет 0 как 4 **только при сохранении**, `validate` не нормализует. Старый каталог без `family` в памяти получает 0; поведение потребителей family=0 отличается от C. |
+| `handle_binding_key` | 834–885 | 52 | поля binding: kind/target/plan_id/level/confirmed/successes/enabled/transport/family(4/6)/shape/tcp_profile(0..2)/verified_by/input/probe_path/ech_origin/recheck_since/budget | `catalog.rs:166-198 Binding` + validate | **P** | **Подтверждённое расхождение:** C хранит и проверяет `tcp_profile` (`catalog.c:862-869`), family только 4/6 (`:852-859`); Rust `Binding` (`catalog.rs:166-198`) **не имеет `tcp_profile`** — serde молча игнорирует ключ, при save поле теряется. `family` в `Binding` есть, но без C-валидации 4/6 в `validate`. Для старых каталогов shape 1/2 + tcp_profile 1/2 теряется измеренный TS-профиль. |
+| `parse_binding` | 886–890 | 5 | `memset`, `out->family=4`, затем `parse_object` | `catalog.rs:166-198 Binding` | **P** | C явно ставит `family=4` до разбора (`catalog.c:887-888`) и валидирует 4/6 при наличии. Rust `#[derive(Default)]` + `#[serde(default)]` даёт family=0; `serialize_family` пишет 0 как 4 только при сохранении, `validate` не нормализует. Старый каталог без `family` в памяти получает 0; поведение потребителей family=0 отличается от C. |
 | `elem_binding` | 891–893 | 3 | элемент массива bindings | Vec<Binding> | **P*** | static-хелпер |
-| `d2k_cat_shape_fits` | 905–912 | 8 | совместимость форм: 0 подходит любой, иначе **только равенство** | `group_shape_fits` (`live.rs:284`, `main.rs:3023`) | **P** | **Подтверждённое расхождение:** C `stored==0 || got==0 ? 1 : stored==got`; Rust дополнительно принимает `saved==SHAPE_MODERN && observed==SHAPE_ECH_TCP` (`1` vs `6`). C-вызовы `sched.c:3522/5088/7858` такую пару отвергают, Rust — нет. Используется для сопоставления binding/наблюдения. |
-| `handle_box_key` | 918–939 | 22 | поля box: id/created/updated/fingerprint/plans/bindings | catalog::BoxRecord serde | **P** | unit round_trips |
-| `parse_box` | 940–943 | 4 | разобрать box | catalog::BoxRecord | **P*** | static-хелпер |
-| `elem_box` | 944–946 | 3 | элемент массива boxes | Vec<BoxRecord> | **P*** | static-хелпер |
-| `handle_domain_observation` | 953–970 | 18 | поля domain observation: name/plan_id/key/evidence/at | catalog::DomainObservation serde | **P** | unit groups/catalog |
-| `parse_domain_observations` | 972–989 | 18 | массив наблюдений до 256 | Vec<DomainObservation> | **P** | unit groups |
-| `handle_net_whitelist_key` | 991–999 | 9 | поля network_whitelist: name/searched/tx_only/confirmed_utc | catalog::NetworkWhitelist | **P** | unit catalog |
-| `handle_catalog_key` | 1001–1027 | 27 | корневые ключи: `boxes`, `domain_observations`, `domain_groups_frozen`, `domain_groups_disabled`, `domain_groups_disabled_at`, `network_whitelist`; `schema`/`updated`/`domain_groups` пропускаются | `CatalogInput` (`catalog.rs:1226-1239`) → `Catalog.domain_state` (`:364-381`), `CatalogOutput` (`:1240+`) | **E** | C разбирает те же top-level поля; `domain_observations` ≤256, frozen/disabled/disabled_at, network_whitelist. Rust `CatalogInput` читает их, `schema != 1` отвергает, неизвестные ключи игнорирует, конвертирует в `DomainState`; `CatalogOutput` пишет обратно. Есть `skips_unknown_fields`, persist differential и `validate` лимитов. |
-| `parse_catalog_obj` | 1028–1034 | 7 | `memset`, `parse_object` с глубиной 1 | `Catalog::parse` (`catalog.rs:344-389`) | **P** | C стартует глубину с 1; Rust `check_json_depth` (64) + serde_json. Разбор верхнего объекта эквивалентен; отдельного кода функции нет. |
-| `prune_unavailable_domain_groups` | 1036–1053 | 18 | после restore удалить группу, если нет **enabled** плана с тем же `plan_id` и proto (`transport 17` → `quic`, иначе `tls`) | `DomainState::restore` (`groups.rs:15`) → `rebuild` | **P** | **Подтверждённое расхождение:** C после `d2k_group_restore` проходит по группам и удаляет те, чей план отключён/отсутствует в каталоге (`catalog.c:1036-1053`). Rust `restore`/`rebuild` работают только с `DomainState` и не видят `boxes`, поэтому группа, выведенная из наблюдения, остаётся даже при отключённом/удалённом плане. Unit `derived_domain_groups_are_ignored` покрывает недоверие сохранённым `domain_groups`, но не prune по плану. |
-| `free_box` | 1062–1070 | 9 | освободить планы/привязки коробки | Drop | **P*** | static-хелпер |
-| `d2k_catalog_free` | 1072–1082 | 11 | освободить каталог | Drop | **P*** | static-хелпер |
+| `d2k_cat_shape_fits` | 905–912 | 8 | `stored==0 или got==0` → 1; иначе **только равенство** | `group_shape_fits` (`live.rs:284`, `main.rs:3023`) | **P** | **Подтверждённое расхождение:** C `stored==0 || got==0 || stored==got`; Rust дополнительно принимает `saved==SHAPE_MODERN && observed==SHAPE_ECH_TCP` (`1` vs `6`). C-вызовы `sched.c:3522/5088/7858` такую пару отвергают, Rust — нет. |
+| `handle_box_key` | 918–939 | 22 | id (fixed 39), created/updated (RFC3339), fingerprint, plans и bindings (null→пусто) | `catalog.rs:31-43 BoxRecord` | **P** | Поля/порядок совпадают, `BoxRecord` содержит `bindings` (`catalog.rs:41-42`), `null_to_default` для plans/bindings; id ≤39, timestamps через `parse_timestamp`; unit `round_trips`. |
+| `parse_box` | 940–943 | 4 | `memset` + объект box | `BoxRecord` + `#[serde(default)]` | **P*** | C обнуляет поля до разбора (нет поля → 0), Rust default; эквивалентно. |
+| `elem_box` | 944–946 | 3 | элемент массива boxes | `Vec<BoxRecord>` | **P*** | Тонкий адаптер; лимита числа коробок в C нет, в Rust тоже. |
+| `handle_domain_observation` | 953–970 | 18 | name[256]/plan_id[40], key transport/family/shape, probe_path[256], ech_origin[256], evidence u8, at RFC3339 | `catalog.rs:213-226 DomainObservation`, `:199-207 GroupKey` | **P** | Лимиты совпадают (255/39/255/255), поля те же; Rust `GroupKey` flatten. Unit `groups`. |
+| `parse_domain_observations` | 972–989 | 18 | массив наблюдений; **256** максимум (`D2K_GROUP_OBSERVATION_MAX`) | `CatalogInput.domain_observations` + `MAX_DOMAIN_OBSERVATIONS=256` (`catalog.rs:17,357-361`) | **P** | Лимит и глубина совпадают; Rust отвергает 257-е наблюдение в `parse` и `validate`. Отдельного differential на ровно 256/257 нет. |
+| `handle_net_whitelist_key` | 991–999 | 9 | name[256], searched, tx_only, confirmed_utc | `catalog.rs:242-256 NetworkWhitelist` | **P** | Поля/лимит 255 совпадают; `confirmed_utc` → `Option<i64>` с `optional_timestamp`, `tx_only` пишется только true. Unit catalog. |
+| `handle_catalog_key` | 1001–1027 | 27 | корневые ключи: `boxes`, `domain_observations`, `domain_groups_frozen`, `domain_groups_disabled`, `domain_groups_disabled_at`, `network_whitelist`; `schema`/`updated`/`domain_groups` пропускаются | `CatalogInput` (`catalog.rs:1222-1239`) → `Catalog.domain_state` (`:364-381`), `CatalogOutput` (`:1240+`) | **E** | C разбирает те же top-level поля; `domain_observations` ≤256, frozen/disabled/disabled_at, network_whitelist. Rust `CatalogInput` читает их, `schema != 1` отвергает, неизвестные ключи игнорирует, конвертирует в `DomainState`; `CatalogOutput` пишет обратно. Есть `skips_unknown_fields`, persist differential и `validate` лимитов. |
+| `parse_catalog_obj` | 1028–1034 | 7 | `memset`, `parse_object` с глубиной 1 | `Catalog::parse` (`catalog.rs:344-389`) | **P** | C стартует глубину с 1; Rust `check_json_depth` (64) + serde_json. **Отличие:** Rust дополнительно отвергает файл >64 МиБ (`MAX_CATALOG_BYTES`), у C предела размера нет. Разбор верхнего объекта эквивалентен. |
+| `prune_unavailable_domain_groups` | 1036–1053 | 18 | после restore удалить группу, если нет **enabled** плана с тем же `plan_id` и proto (`transport 17` → `quic`, иначе `tls`) | `DomainState::restore` (`groups.rs:15`) → `rebuild` | **P** | **Подтверждённое расхождение:** C после `d2k_group_restore` проходит по группам и удаляет те, чей план отключён/отсутствует в каталоге (`catalog.c:1036-1053`). Rust `restore`/`rebuild` работают только с `DomainState` и не видят `boxes`, поэтому группа остаётся при отключённом/удалённом плане. Unit `derived_domain_groups_are_ignored` покрывает недоверие сохранённым `domain_groups`, но не prune по плану. |
+| `free_box` | 1062–1070 | 9 | освободить планы/привязки коробки | `Drop`/`Vec` | **P*** | Ручное освобождение заменено владением; утечек нет. |
+| `d2k_catalog_free` | 1072–1082 | 11 | освободить каталог | `Drop` | **P*** | То же. |
 | `d2k_catalog_memory_bytes` | 1084–1097 | 14 | память каталога: `n_boxes*sizeof`, планы/привязки, `strlen(text)+1`, `sizeof(groups)` | `catalog_bytes` = длина `to_json_at()` (`main.rs:16768`) | **P** | **Расхождение метрики:** C считает **in-memory** размер структур и текстов; Rust — длину **сериализованного JSON**. Числа систематически разные (JSON включает ключи/форматирование, но не capacity Vec). Для диагностического поля `catalog_bytes` смысл меняется; C/Rust differential на объём нет. |
-| `read_whole_file` | 1103–1143 | 41 | прочитать файл целиком | std::fs::read | **P*** | static-хелпер |
-| `d2k_catalog_load` | 1145–1191 | 47 | загрузка каталога: JSON, domain observations, prune, запрет мусора после объекта | catalog::Catalog::load | **E** | r2o-catalog-persist-differential.sh + tests/catalog.rs (старые каталоги, null, trailing garbage) |
-| `write_json_string` | 1198–1218 | 21 | JSON-строка с escape | serde_json | **P*** | static-хелпер |
-| `wr_indent` | 1220–1222 | 3 | отступ 2 пробела | serde_json::to_string_pretty | **P*** | static-хелпер |
-| `write_json_array` | 1230–1240 | 11 | массив с отступами | serde_json | **P*** | static-хелпер |
-| `write_signal_elem` | 1242–1257 | 16 | JSON signal, packets только при nonzero | catalog::Signal serde | **P** | persist differential сравнивает каталог частично |
-| `write_fp` | 1259–1266 | 8 | JSON fingerprint | catalog::Fingerprint serde | **P** | то же |
-| `write_plan_elem` | 1268–1280 | 13 | JSON plan с RFC3339 added | catalog::Plan serde | **P** | то же |
-| `write_binding_elem` | 1282–1332 | 51 | JSON binding: kind/target/plan_id/level/confirmed/successes/enabled/transport/family/shape/**tcp_profile**/verified_by/input/probe_path/ech_origin/recheck_since/budget; family 0→4 | catalog::Binding serde | **P** | C всегда пишет `tcp_profile` (`catalog.c:1307`) и `family ? family : 4` (`:1300`). Rust `Binding` не имеет `tcp_profile`, поэтому ключ исчезает при save; `serialize_family` даёт 4 для 0, это совпадает. Полный побайтовый формат save не сравнивался (persist differential — save_atomic), статус P. |
-| `write_box_elem` | 1334–1351 | 18 | JSON box с fingerprint/plans/bindings | catalog::BoxRecord serde | **P** | то же |
-| `write_domain_key` | 1353–1358 | 6 | JSON-поля ключа области | GroupKey serde | **P*** | static-хелпер |
-| `write_domain_observation` | 1359–1366 | 8 | JSON наблюдения области | DomainObservation serde | **P*** | static-хелпер |
-| `write_domain_group` | 1367–1372 | 6 | JSON производной группы | DomainGroup serde | **P*** | static-хелпер |
-| `d2k_catalog_save` | 1374–1442 | 69 | сохранение каталога schema=1 с flush/fsync | catalog::Catalog::to_json_at | **P** | persist differential проверяет save_atomic; отдельная сверка полного формата save не заявлена |
-| `d2k_catalog_save_atomic` | 1445–1477 | 33 | сохранение в .new, rename и fsync каталога | catalog::Catalog::save_atomic | **E** | r2o-catalog-persist-differential.sh (включая конкурентное внешнее обновление) |
+| `read_whole_file` | 1103–1143 | 41 | fopen/fseek/ftell/fread весь файл | `std::fs::read` (`catalog.rs:396`) | **P*** | Чтение целиком эквивалентно; **отличие:** C не ограничивает размер, Rust `Catalog::load` отвергает >64 МиБ до чтения (`catalog.rs:391-396`). |
+| `d2k_catalog_load` | 1145–1191 | 47 | разбор JSON, restore групп, prune, запрет мусора после `}`, освобождение при ошибке | `Catalog::load`/`parse` (`catalog.rs:344-404`) | **P** | **Совпадает:** schema=1, null→пусто, restore наблюдений, запрет trailing garbage (serde_json `from_slice`), освобождение через Err. **Подтверждённые отличия:** (1) нет `prune_unavailable_domain_groups`; (2) файл >64 МиБ отвергается, C читает любой; (3) `d2k_group_restore` и `DomainState::restore` могут расходиться в деталях ранжирования. Persist differential покрывает старые каталоги/trailing garbage, но не prune и не 64 МиБ. |
+| `write_json_string` | 1198–1218 | 21 | escape `\" \\ \n \r \t \b \f`, control <0x20 → `\u00xx`, UTF-8 как есть | `serde_json` | **P*** | Набор escape совпадает; serde_json может выбрать `\u001f`/короткие формы так же. Побайтовая сверка не заявлена. |
+| `wr_indent` | 1220–1222 | 3 | 2 пробела на глубину | `serde_json::to_string_pretty` (2 пробела) | **P*** | Тот же отступ; порядок/форматирование массивов проверяются persist differential частично. |
+| `write_json_array` | 1230–1240 | 11 | `[]` или многострочный список с запятыми без последней | `serde_json` pretty | **P*** | Семантика та же; байтовый формат массивов не сверялся целиком. |
+| `write_signal_elem` | 1242–1257 | 16 | kind/ttl/ttl_delta/tos/ipid/volume/seen; `packets` только при nonzero | `catalog.rs:139-150 Signal` (`packets` skip if zero) | **P*** | Порядок полей и пропуск нулевого `packets` совпадают; persist differential частичный. |
+| `write_fp` | 1259–1266 | 8 | method + signals | `catalog.rs:46-49 Fingerprint` | **P** | Поля/порядок те же; signals ≤8 проверяется `validate`. |
+| `write_plan_elem` | 1268–1280 | 13 | id/proto/text/added(RFC3339)/successes/enabled | `catalog.rs:153-163 Plan` | **P** | Поля/порядок те же; `added` форматируется `time` вместо ручного `format_rfc3339`. Persist differential частичный. |
+| `write_binding_elem` | 1282–1332 | 51 | kind/target/plan_id/level/confirmed/successes/enabled/transport/family/shape/**tcp_profile**/verified_by/input/probe_path/ech_origin/recheck_since/budget; family 0→4; необязательные только при значении | `catalog.rs:165-198 Binding` | **P** | **Подтверждённый пробел:** C всегда пишет `tcp_profile` (`catalog.c:1307`); в Rust `Binding` поля нет, ключ исчезает при save. Остальное совпадает: `serialize_family` 0→4, `probe_path`/`ech_origin` только непустые, `recheck_since`/`budget` только ненулевые. Полный побайтовый формат save не сравнивался. |
+| `write_box_elem` | 1334–1351 | 18 | id/created/updated/fingerprint/plans/bindings | `catalog.rs:31-43 BoxRecord` | **P** | Поля/порядок те же; timestamps форматируются `time`. Persist differential — через save_atomic. |
+| `write_domain_key` | 1353–1358 | 6 | `transport/family/shape/probe_path/ech_origin` | `GroupKey` (`catalog.rs:199-207`) | **P*** | JSON-поля те же; C пишет в одну строку, serde — pretty. |
+| `write_domain_observation` | 1359–1366 | 8 | name/plan_id/key/evidence/at | `DomainObservation` (`catalog.rs:211-220`) | **P*** | Поля те же; форматирование pretty иное. |
+| `write_domain_group` | 1367–1372 | 6 | suffix/plan_id/key/evidence_count | `DomainGroup` (`catalog.rs:223-233`), `at` skip | **P*** | Поля те же, `at` не пишется в обоих. |
+| `d2k_catalog_save` | 1374–1442 | 69 | schema=1, updated=now, boxes, domain_groups/observations/frozen/disabled/disabled_at, network_whitelist; проверка каждой записи + fflush/fsync/fclose | `Catalog::to_json_at(updated)` (`catalog.rs:445-487`) | **P** | **Семантика полей совпадает** (schema 1, derived groups, conditional whitelist). **Отличия:** C выставляет `updated=time(NULL)` внутри и пишет поверх файла; Rust принимает `updated` параметром и отдельного не-атомарного save нет — только `save_atomic`. Побайтовый формат save не сравнивался. |
+| `d2k_catalog_save_atomic` | 1445–1477 | 33 | путь ≤255, запись `.new`, save, rename, fsync каталога, удаление tmp при ошибке | `Catalog::save_atomic` (`catalog.rs:489-541`) | **E** | `r2o-catalog-persist-differential.sh` (включая конкурентное внешнее обновление). **Отличия реализации:** Rust tmp `.new.<pid>.<nonce>` + `create_new`, C фиксированный `.new`; оба fsync-ят файл и каталог, удаляют tmp при ошибке. |
 
 ### `core/compose.c`
 
@@ -2807,8 +2807,10 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
   C после restore удаляет группы без enabled-плана в каталоге; Rust
   `restore`/`rebuild` не видят `boxes` и такого prune не делают.
 - **`read_whole_file`/`d2k_catalog_load`:** загрузка, schema=1, запрет
-  мусора после объекта — E (`r2o-catalog-persist-differential.sh`,
-  `tests/catalog.rs`).
+  мусора после объекта — P: `r2o-catalog-persist-differential.sh` и
+  `tests/catalog.rs` покрывают старые каталоги, null и trailing garbage, но
+  **не покрывают** отсутствие `prune_unavailable_domain_groups` и предел
+  64 МиБ (Rust отвергает больший файл, C — нет).
 - **`write_json_string`/`wr_indent`/`write_json_array`/`write_signal_elem`/
   `write_fp`/`write_plan_elem`/`write_binding_elem`/`write_box_elem`/
   `write_domain_key`/`write_domain_observation`/`write_domain_group`/
