@@ -52,7 +52,7 @@ Static-хелперы наследуют статус владельца (вла
 
 ---
 
-## 1. datapath/ctl.c — 14 функций
+## datapath/ctl.c (14 функций)
 
 Транспорт управляющего сокета: открытие, один пир, кольцо исходящих кадров, разбор кадров.
 R2O-аналог — `crates/r2o-datapath/src/control.rs` (`ControlServer`), плюс цикл в
@@ -92,7 +92,7 @@ R2O-аналог — `crates/r2o-datapath/src/control.rs` (`ControlServer`), п�
 
 ---
 
-## 2. datapath/ctlsrv.c — 12 функций
+## datapath/ctlsrv.c (12 функций)
 
 Смысл команд и событий управляющего протокола. R2O: `NamePlans::handle` +
 `ControlServer` (`crates/r2o-datapath/src/control.rs`), кодеки — `crates/r2k-core/src/control.rs`,
@@ -131,7 +131,7 @@ transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-со�
 
 ---
 
-## 3. datapath/include/d2k_plans.h — 2 функции
+## datapath/include/d2k_plans.h (2 функции)
 
 **Прочитано построчно: 2/2 функции, 381 строка C (1–381).** Сверено с `r2k-core/control.rs:306-320` (`BindingContext`, `is_known`) и `delete_name_bound`/`binding_for_plan` (проверки `kind/family/shape/temporary/epoch`).
 
@@ -145,7 +145,7 @@ transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-со�
 
 ---
 
-## 4. datapath/plan_apply.c — 15 функций
+## datapath/plan_apply.c (15 функций)
 
 Компиляция проверенного плана в список посылок. R2O: `crates/r2k-core/src/plan/apply.rs`
 (`impl Plan`, `Actions`, `Emission`).
@@ -245,7 +245,7 @@ transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-со�
 **Итог:** 13 helper'ов/обёрток — E/P, `d2k_plan_apply` — P с тремя
 подтверждёнными расхождениями; новых N нет.
 
-## 5. datapath/plan_parse.c — 17 функций
+## datapath/plan_parse.c (17 функций)
 
 Разбор канонического плана. R2O: `crates/r2k-core/src/plan.rs` (`Plan::parse`, `scan`,
 `check_references`), поля `Plan`.
@@ -342,7 +342,7 @@ transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-со�
 legacy-`D2KP` принимается только через `parse_wire`, а повторный
 `autottl` R2O отвергает, C — нет.
 
-## 6. datapath/plans.c — 75 функций
+## datapath/plans.c (75 функций)
 
 Таблица планов по целям: ключи имя/адрес/суффикс, LRU-вытеснение, точные пробы, поиск на
 пакетном пути. R2O-аналог — `NamePlans` в `crates/r2o-datapath/src/control.rs`
@@ -446,7 +446,7 @@ UDP→addr переход, R2O — только exact+ECH→MODERN+общий ad
 
 ---
 
-## 7. datapath/raw.c — 17 функций
+## datapath/raw.c (17 функций)
 
 Сырой сокет: пределы длины, MTU маршрута, отправка без ожидания. R2O:
 `crates/r2o-datapath/src/raw.rs` (`RawSocket`).
@@ -487,7 +487,7 @@ mark, нет `IP_NODEFRAG`, нет ленивого открытия, нет м�
 
 ---
 
-## 8. datapath/routemark.c — 23 функции
+## datapath/routemark.c (23 функции)
 
 Сопоставление fwmark/выходных интерфейсов и политика Keenetic. R2O:
 `crates/r2o-datapath/src/r2o_route.rs` (`R2oRouteGate`, `R2oRoutePolicy`, парсеры).
@@ -526,7 +526,7 @@ Rust ошибается), отсутствие текстового описан
 
 ---
 
-## 9. datapath/routemark_nl.c — 8 функций
+## datapath/routemark_nl.c (8 функций)
 
 Rtnetlink: дампы правил, одиночный поиск маршрута, подписка на изменения. R2O:
 `R2oRouteMonitor` в `crates/r2o-datapath/src/r2o_route.rs`.
