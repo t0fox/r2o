@@ -4943,12 +4943,16 @@ ECH, середина приветствия. R2O: `r2k-core/src/tls.rs`.
 
 ## datapath/include/d2k_ctl.h (2 inline-функции)
 
+**Прочитано построчно: 2/2 функции, 99 строк C (1–99).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
 | `d2k_ctl_binding_write` (inline) | 86–90 | 5 | запись binding: BE u64 generation, kind/family/shape/temporary, 16-байтная epoch | `r2k-core/src/control.rs:330-347 AppliedEvent::event_body`, `:305 BindingContext`, `:2016/2051 encode_ack_with_binding` | **P** | Раскладка построчно совпадает (BE u64 + 4 байта + epoch). Roundtrip-тесты APPLIED/REFUSED/ACK (`:2528-2607`, `:2770+`, `:2168-2337`) проверяют кодирование/декодирование, но **C/Rust byte-differential отсутствует**; отдельного теста на все три места записи нет. |
 | `d2k_ctl_binding_read` (inline) | 91–99 | 9 | чтение/валидация binding: n=28, kind≤4, family 0/4/6, shape≤MAX, temporary≤1 | `control.rs:2373 decode_applied`, `:2445 decode_refused`, `:3104 valid_binding` | **P** | Валидации совпадают: `kind<=4`, `family in {0,4,6}`, `shape<=SHAPE_ECH_TS`, temporary только 0/1. Тесты: REFUSED roundtrip/truncated (`:2528-2607`), APPLIED; ветки `kind=5`, `family=1`, `shape>MAX` отдельным тестом не покрыты. |
 
 ## datapath/include/d2k_http_request_stream.h (3 inline-функции)
+
+**Прочитано построчно: 3/3 функции, 87 строк C (1–87).**
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
@@ -4957,6 +4961,8 @@ ECH, середина приветствия. R2O: `r2k-core/src/tls.rs`.
 | `d2k_http_request_stream_feed` (inline) | 31–86 | 56 | потоковый разбор заголовка: CRLF, token, Host, CL, TE/Upgrade, end/past_end/invalid | `httpup.rs:116 observe_detailed`, `:73 candidate`, `:263-316 boundary_known` | **P** | **Расхождения:** C отвергает TE/Upgrade (`invalid`), Rust только `end_offset=None`; C отвергает управляющие байты и неверные имена полей, Rust помечает лишь `boundary_known=false` и продолжает; C ограничивает CL 10 цифрами, Rust — `usize`; C не валидирует DNS-значение Host, Rust требует `valid_dns_host`, снимает `:80` и точку. C игнорирует полностью старые байты, Rust — `candidate_state`; обе стороны считают `end<=0x7fffffff`. Отдельного C/Rust differential для потока нет. |
 
 ## datapath/include/d2k_http_response.h (6 inline-функций)
+
+**Прочитано построчно: 6/6 функций, 161 строка C (1–161).**
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
@@ -4969,12 +4975,16 @@ ECH, середина приветствия. R2O: `r2k-core/src/tls.rs`.
 
 ## datapath/include/d2k_packet.h (2 inline-функции)
 
+**Прочитано построчно: 2/2 функции, 72 строки C (1–72).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
 | `d2k_packet_u16` (inline) | 20–22 | 3 | big-endian u16 | `packet.rs:231 read_u16` | **E** | **Построчно совпадает:** C-строка `((unsigned)p[0]<<8)\|p[1]`; Rust `read_u16` — `from_be_bytes` с bounds-check. Используется `parse_ipv4`/`parse_ipv6`; тесты `tests/network.rs:36+`. |
 | `d2k_packet_parse` (inline) | 24–70 | 47 | разбор IPv4/IPv6, fragment, extension headers, только Pad1/PadN, L4 minimum | `packet.rs:69 PacketView::parse`, `:152 parse_ipv4`, `:172 parse_ipv6`, `:203 has_only_padding_options` | E | IPv4: IHL/ total / fragment offset / ID / proto / TTL / TOS / адреса совпадают. IPv6: payload≠0, total=40+payload, TC/flow label, до 8 extension headers, Pad1/PadN; иные опции отвергаются. Тесты `r2k-core/tests/network.rs:36+`. |
 
 ## datapath/include/d2k_track.h (1 inline-функция)
+
+**Прочитано построчно: 1/1 функция, 83 строки C (1–83).**
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
