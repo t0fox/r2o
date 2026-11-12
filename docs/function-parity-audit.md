@@ -84,12 +84,12 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 193 | 349 | 6 | 0 |
+| core-net | 548 | 195 | 351 | 4 | 0 |
 | core-state | 692 | 179 | 511 | 2 | 0 |
 | datapath-core | 400 | 153 | 244 | 3 | 0 |
 | datapath-plan | 183 | 138 | 45 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **721** | **1250** | **11** | **0** |
+| **Итого** | **1982** | **723** | **1252** | **7** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,8 +103,8 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 721 / P 1250 /
-N 11 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
+Покрытие реестра: **1982/1982** функций. Статусы: **E 723 / P 1252 /
+N 7 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
 | # | Область | D2O | R2O | Подтверждение |
@@ -344,12 +344,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 193 | 349 | 6 | 0 |
+| core-net | 548 | 195 | 351 | 2 | 0 |
 | core-state | 692 | 179 | 511 | 2 | 0 |
 | datapath-core | 400 | 153 | 244 | 3 | 0 |
 | datapath-plan | 183 | 138 | 45 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **721** | **1250** | **11** | **0** |
+| **Итого** | **1982** | **723** | **1252** | **7** | **0** |
 
 
 ---
@@ -766,10 +766,10 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `rec_find` | 468-475 | 8 | линейный поиск записи `family + host` без регистра | `main.rs:4464 HttpSearchRecordCache` (HashMap, ключ lower-case) | **P** | C `strcasecmp` по массиву записей; Rust `HashMap<(String,u8),…>` с ключом `(target.host.to_ascii_lowercase(), family)` (`main.rs:4475-4478,4491-4495`). Для нормализованного host эквивалентно; отдельной функции нет. |
 | `rec_get` | 477-496 | 20 | создание записи с лимитом `D2K_HS_RECORD_MAX_BYTES`, удвоением и счётчиками отказов | `main.rs:4436-4453,4480-4496 HttpSearchRecordCache` | **P** | **Совпадают ёмкости:** 256 КиБ/1480 = 177 записей, очередь 32 КиБ/273 = 120, удвоение 16→…; тест `http_record_and_queue_caps_match_d2o_storage_limits` (`main.rs:25019`). **Отличие:** C ведёт `record_limit_hits`/`record_alloc_failures` (`httpsearch.c:482-491`); в Rust эти диагностические поля остаются 0 (`main.rs:16762` и ниже), счётчиков отказов нет. |
 | `same_program` | 500-508 | 9 | эквивалентность планов: компиляция обоих текстов в TLV и сравнение | `http_search.rs:775-778 candidate_program`, `main.rs:4594-4634 failed_http_programs` | **P** | C компилирует `d2k_hs_candidate_text` обоих ключей в TLV и сравнивает байты; ошибка компиляции → -1 «неизвестно» (`httpsearch.c:502-509`). Rust `candidate_program` компилирует текст в program bytes (`http_search.rs:775-778`), `failed_http_programs` сравнивает `Vec<Vec<u8>>` через `contains` и при ошибке ставит `evidence_lost`. Результат для валидных ключей эквивалентен, отдельной функции `same_program` нет. |
-| `failed_live` | 510-519 | 10 | поиск живого отказа по ключу/адресу, `same_program<0` → evidence_lost | нет | **N** | `HttpSearchRecord` (`main.rs:4468-4472`) содержит только `cut/repeat_path/repro_gap`; массива `failures` и полей addr/binding/execution/request_ms нет. `HttpLiveFailures` (`:4457-4460`) — только `programs`/`evidence_lost`; `failed_http_programs` (`:4594`) читает выключенные привязки каталога, а не живые отказы. |
-| `remember_live_failure` | 520-550 | 31 | учёт живого отказа: addr/binding/execution/request_ms, лимиты байт | нет | **N** | C хранит `live_failure[]` на запись с адресом, binding, execution и request_ms, лимитами `D2K_HS_FAILURE_*` и счётчиками (`httpsearch.c:522-550`). В Rust этих полей/массивов нет; `HttpLiveFailures` строится из выключенных привязок каталога, а `r2o_catalog_mark_flow_unfit` ставит только `recheck_since`. |
-| `d2k_httpsearch_test_add_failures` | 553-567 | 15 | тестовое заполнение `live_failure[]` | нет (только C `D2K_HS_TESTING`) | **N** | C под `#ifdef D2K_HS_TESTING`: `rec_get(host,family)`, key `fake-badsum`, до `count` вызовов `remember_live_failure` с addr/binding/execution/request_ms, возврат прироста. Rust тестового API и массива `live_failure[]` нет. |
-| `d2k_httpsearch_test_add_records` | 569-578 | 10 | тестовое заполнение кэша записей | нет (только C `D2K_HS_TESTING`) | **N** | C под `#ifdef D2K_HS_TESTING`: до `count` имён `record-%zu.example`, `rec_get(host,4)`, счётчик added. Rust тестового API нет; ёмкость проверяется прямым заполнением кеша в `main.rs:25019`. |
+| `failed_live` | 510-519 | 10 | поиск живого отказа по ключу/адресу, `same_program<0` → evidence_lost | `main.rs` `HttpSearchRecordCache::failed_live` | P | C `same_program` компилирует канонический текст в TLV и сравнивает; при ошибке ставит `evidence_lost/repro_gap`. Rust `failed_live` перебирает `HttpLiveFailure`, сравнивает addr и TLV через `candidate_text`+`compile_text`, ставит `evidence_lost`; тест `http_live_failure_hooks_match_donor`. **Пробел:** production HTTP-search ещё не вызывает его при выборе кандидата. |
+| `remember_live_failure` | 520-550 | 31 | учёт живого отказа: addr/binding/execution/request_ms, лимиты байт | `main.rs` `HttpSearchRecordCache::remember_live_failure` | P | C хранит `live_failure[]` с addr/binding/execution/request_ms, дедупом через `failed_live` и лимитами 8 КиБ/64 КиБ, счётчиками limit/alloc. Rust `HttpLiveFailure` и `remember_live_failure` реализуют поля, дедуп, `evidence_lost`, лимиты и счётчики; тест `http_live_failure_hooks_match_donor`. **Пробел:** production-путь отказа HTTP ещё не пишет сюда. |
+| `d2k_httpsearch_test_add_failures` | 553-567 | 15 | тестовое заполнение `live_failure[]` | `main.rs` `HttpSearchRecordCache::test_add_failures` | E | C под `D2K_HS_TESTING`: key `fake-badsum`, addr из номера, binding, execution/request_ms, возврат прироста. Rust `#[cfg(test)] test_add_failures` делает то же через `remember_live_failure`; тест `http_live_failure_hooks_match_donor` (3 записи, дубль не добавляется). |
+| `d2k_httpsearch_test_add_records` | 569-578 | 10 | тестовое заполнение кэша записей | `main.rs` `HttpSearchRecordCache::test_add_records` | E | C под `D2K_HS_TESTING`: `record-%zu.example`, family 4, счётчик added до заполнения. Rust `#[cfg(test)] test_add_records` делает то же через `record_name`/`has_room_for`; тест `http_live_failure_hooks_match_donor` проверяет частичное заполнение (added > 0 и < 500). |
 | `d2k_httpsearch_measured_poison` | 579-606 | 28 | регистрация измеренной poison-спеки: канонический ключ, алиасы, дедуп, максимум 8 | `http_search.rs:719-772 measured_poison_keys`, `main.rs:4565-4591 measured_http_candidate_keys` | **P** | C: spec → ключ `fake:...`, алиасы `fake:badsum`→`fake-badsum`, `fake:seqshift=-66000`→`fake-seqshift`, `known_key`, дедуп, `measured[8]` (`httpsearch.c:581-608`). Rust `measured_poison_keys` возвращает канонические ключи из текста TLS-плана, `measured_http_candidate_keys` сортирует по `successes` и ограничивает 8; отдельного состояния `measured` нет. Тест `candidate_tests::measured_poison_requires_tls_and_an_actual_fake_reference`. |
 | `d2k_hs_plan_poisons` | 608-642 | 35 | poison-спеки, на которые ссылается fake в TLS-плане | `http_search.rs:719-772 measured_poison_keys` | **P** | C возвращает **спеки** (`ttl=64 badsum`), затем вызывающий регистрирует их; Rust сразу возвращает канонические **ключи** (`fake:ttl=64+badsum`). Условия совпадают: только `proto tcp tls`, `poison N`, ссылка `poison=N` в строке `fake `. Тот же тест; представление/API различаются. |
 | `d2k_httpsearch_new` | 644-650 | 7 | создать состояние поиска, `cur.fd=-1` | `main.rs:4464 HttpSearchRecordCache` + `HttpSearchWorker` | **P** | C единый объект `d2k_httpsearch` с записями, очередью и текущим состоянием; Rust состояние разнесено на `HttpSearchRecordCache`, канал задач `HttpSearchWorker` и локальные переменные задачи. |

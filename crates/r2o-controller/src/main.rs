@@ -4454,7 +4454,29 @@ struct HttpLiveFailures {
 
 #[cfg(unix)]
 #[derive(Default)]
-struct HttpSearchRecordCache(HashMap<(String, u8), HttpSearchRecord>);
+struct HttpSearchFailureStats {
+    live_failure_bytes: usize,
+    live_failure_count: u64,
+    failure_record_limit_hits: u64,
+    failure_limit_hits: u64,
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct HttpSearchRecordCache(
+    HashMap<(String, u8), HttpSearchRecord>,
+    HttpSearchFailureStats,
+);
+
+#[cfg(unix)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HttpLiveFailure {
+    key: String,
+    addr: [u8; 16],
+    binding: r2k_core::control::BindingContext,
+    execution: u64,
+    request_ms: i64,
+}
 
 #[cfg(unix)]
 #[derive(Default)]
@@ -4462,12 +4484,155 @@ struct HttpSearchRecord {
     cut: bool,
     repeat_path: Vec<u8>,
     repro_gap: bool,
+    failures: Vec<HttpLiveFailure>,
+    evidence_lost: bool,
 }
 
 #[cfg(unix)]
 impl HttpSearchRecordCache {
     fn key(target: &r2o_controller::discovery::DiscoveryTarget) -> (String, u8) {
         (target.host.to_ascii_lowercase(), target.family)
+    }
+
+    /// C `same_program`: сравнить канонический текст кандидата по TLV.
+    fn same_program(left: &str, right: &str) -> Option<bool> {
+        if left == right {
+            return Some(true);
+        }
+        let left = r2o_controller::http_search::candidate_text(left, None)?;
+        let left = r2o_controller::plan_text::compile_text(&left).ok()?;
+        let right = r2o_controller::http_search::candidate_text(right, None)?;
+        let right = r2o_controller::plan_text::compile_text(&right).ok()?;
+        Some(left == right)
+    }
+
+    /// C `failed_live`: найти живой отказ по ключу/адресу.
+    fn failed_live(&mut self, host: &str, family: u8, key: &str, addr: Option<&[u8]>) -> bool {
+        let Some(record) = self.0.get_mut(&(host.to_ascii_lowercase(), family)) else {
+            return false;
+        };
+        let width = if family == 6 { 16 } else { 4 };
+        let mut lost = false;
+        let mut found = false;
+        for failure in &record.failures {
+            if addr.is_some_and(|addr| failure.addr[..width] != addr[..width]) {
+                continue;
+            }
+            match Self::same_program(&failure.key, key) {
+                Some(true) => {
+                    found = true;
+                    break;
+                }
+                None => {
+                    lost = true;
+                    break;
+                }
+                Some(false) => {}
+            }
+        }
+        if lost {
+            record.evidence_lost = true;
+            record.repro_gap = true;
+        }
+        found
+    }
+
+    /// C `remember_live_failure`: сохранить отказ с лимитами.
+    fn remember_live_failure(
+        &mut self,
+        host: &str,
+        family: u8,
+        key: &str,
+        addr: &[u8],
+        binding: r2k_core::control::BindingContext,
+        execution: u64,
+        request_ms: i64,
+    ) -> bool {
+        let record_key = (host.to_ascii_lowercase(), family);
+        if !self.0.contains_key(&record_key) {
+            return false;
+        }
+        if self.failed_live(host, family, key, Some(addr)) {
+            return true;
+        }
+        let Some(record) = self.0.get_mut(&record_key) else {
+            return false;
+        };
+        if record.evidence_lost {
+            return false;
+        }
+        let slot = std::mem::size_of::<HttpLiveFailure>();
+        let max_slots = R2O_HTTP_FAILURE_RECORD_LIMIT_BYTES / slot;
+        if record.failures.len() >= max_slots {
+            record.evidence_lost = true;
+            record.repro_gap = true;
+            self.1.failure_record_limit_hits = self.1.failure_record_limit_hits.saturating_add(1);
+            return false;
+        }
+        let free_slots =
+            R2O_HTTP_FAILURE_LIMIT_BYTES.saturating_sub(self.1.live_failure_bytes) / slot;
+        if record.failures.len() >= free_slots {
+            record.evidence_lost = true;
+            record.repro_gap = true;
+            self.1.failure_limit_hits = self.1.failure_limit_hits.saturating_add(1);
+            return false;
+        }
+        let mut copied = [0_u8; 16];
+        let width = if family == 6 { 16 } else { 4 };
+        copied[..width].copy_from_slice(&addr[..width]);
+        record.failures.push(HttpLiveFailure {
+            key: key.to_owned(),
+            addr: copied,
+            binding,
+            execution,
+            request_ms,
+        });
+        self.1.live_failure_bytes = self.1.live_failure_bytes.saturating_add(slot);
+        self.1.live_failure_count = self.1.live_failure_count.saturating_add(1);
+        true
+    }
+
+    /// C `d2k_httpsearch_test_add_failures`: заполнить `live_failure[]`.
+    #[cfg(test)]
+    fn test_add_failures(&mut self, host: &str, family: u8, count: usize) -> usize {
+        self.record_name(host, family);
+        let key = (host.to_ascii_lowercase(), family);
+        let before = self.0.get(&key).map_or(0, |record| record.failures.len());
+        let binding = r2k_core::control::BindingContext::default();
+        for index in 0..count {
+            let mut addr = [0_u8; 16];
+            let width = if family == 6 { 16 } else { 4 };
+            for byte in 0..width {
+                addr[byte] = ((index >> (byte * 8)) & 0xff) as u8;
+            }
+            if !self.remember_live_failure(
+                host,
+                family,
+                "fake-badsum",
+                &addr,
+                binding,
+                index as u64 + 1,
+                index as i64 + 1,
+            ) {
+                break;
+            }
+        }
+        self.0.get(&key).map_or(0, |record| record.failures.len()) - before
+    }
+
+    /// C `d2k_httpsearch_test_add_records`: заполнить кэш записей.
+    #[cfg(test)]
+    fn test_add_records(&mut self, count: usize) -> usize {
+        let mut added = 0;
+        for index in 0..count {
+            let before = self.0.len();
+            self.record_name(&format!("record-{index}.example"), 4);
+            if self.0.len() == before {
+                break;
+            }
+            added += 1;
+        }
+        added
     }
 
     fn has_room_for(&self, key: &(String, u8)) -> bool {
@@ -23553,6 +23718,17 @@ fn r2o_quic_binding_blocks_retry(binding_exists: bool, planned: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn http_live_failure_hooks_match_donor() {
+        let mut cache = super::HttpSearchRecordCache::default();
+        assert_eq!(cache.test_add_failures("live.example", 4, 3), 3);
+        assert!(cache.failed_live("live.example", 4, "fake-badsum", Some(&[0, 0, 0, 0])));
+        assert_eq!(cache.test_add_failures("live.example", 4, 1), 0);
+        let added = cache.test_add_records(500);
+        assert!(added > 0 && added < 500);
+    }
+
     #[cfg(unix)]
     use super::locked_catalog;
     #[cfg(unix)]
