@@ -1031,7 +1031,7 @@ impl NamePlans {
         if name_len == 0 || name_len > control::MAX_DNS_NAME_LEN || body.len() <= fields_end {
             return (false, control::ACK_BAD_ARGS);
         }
-        let Some(suffix) = canonical_name(&body[1..1 + name_len]) else {
+        let Some(suffix) = canonical_area_name(&body[1..1 + name_len]) else {
             return (false, control::ACK_BAD_ARGS);
         };
         let shape = body[1 + name_len];
@@ -1088,7 +1088,7 @@ impl NamePlans {
         if name_len == 0 || name_len > control::MAX_DNS_NAME_LEN || body.len() != name_len + 4 {
             return (false, control::ACK_BAD_ARGS);
         }
-        let Some(name) = canonical_name(&body[1..1 + name_len]) else {
+        let Some(name) = canonical_area_name(&body[1..1 + name_len]) else {
             return (false, control::ACK_BAD_ARGS);
         };
         let transport = body[1 + name_len];
@@ -1121,7 +1121,7 @@ impl NamePlans {
         if name_len == 0 || name_len > control::MAX_DNS_NAME_LEN || body.len() != name_len + 4 {
             return (false, control::ACK_BAD_ARGS);
         }
-        let Some(name) = canonical_name(&body[1..1 + name_len]) else {
+        let Some(name) = canonical_area_name(&body[1..1 + name_len]) else {
             return (false, control::ACK_BAD_ARGS);
         };
         let transport = body[1 + name_len];
@@ -1227,11 +1227,13 @@ impl NamePlans {
             return (false, control::ACK_BAD_PLAN);
         }
         // D2O `set_name_trial` снимает прежнюю пробную запись того же
-        // (name, family, port) перед вставкой новой формы.
-        self.probes.retain(|old, _| {
+        // (name, family, port) и того же транспорта (`probe_transport`).
+        let transport = r2o_probe_transport(&plan, shape);
+        self.probes.retain(|old, probe| {
             old.name.host != key.name.host
                 || old.name.family != key.name.family
                 || old.source_port != key.source_port
+                || r2o_probe_transport(&probe.plan, old.name.shape) != transport
         });
         if !self.probes.contains_key(&key) && !self.make_room_exact() {
             return (false, control::ACK_NO_ROOM);
@@ -1775,12 +1777,31 @@ impl NamePlans {
     }
 }
 
+/// C `shape_transport` (`plans.c:169-175`): QUIC → 17, TLS/ECH/контекст → 6,
+/// остальные формы → 0.
+fn r2o_shape_transport(shape: u8) -> u8 {
+    match shape {
+        SHAPE_QUIC => 17,
+        SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP => 6,
+        _ if is_tcp_context_shape(shape) => 6,
+        _ => 0,
+    }
+}
+
+/// C `probe_transport` (`plans.c:584-588`): объявленный транспорт плана,
+/// иначе QUIC/VOICE → 17, всё остальное → 6.
+fn r2o_probe_transport(plan: &Plan, shape: u8) -> u8 {
+    if plan.transport != 0 {
+        plan.transport
+    } else if matches!(shape, SHAPE_QUIC | SHAPE_VOICE) {
+        17
+    } else {
+        6
+    }
+}
+
 fn valid_domain_area_context(transport: u8, shape: u8, family: u8) -> bool {
-    matches!(family, 4 | 6)
-        && ((transport == 6
-            && (matches!(shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP)
-                || is_tcp_context_shape(shape)))
-            || (transport == 17 && shape == SHAPE_QUIC))
+    matches!(family, 4 | 6) && transport != 0 && transport == r2o_shape_transport(shape)
 }
 
 fn domain_suffix_member(name: &str, suffix: &str) -> bool {
@@ -2539,6 +2560,39 @@ fn canonical_name(bytes: &[u8]) -> Option<String> {
         return None;
     }
     Some(value.to_ascii_lowercase())
+}
+
+/// C `area_name_valid` (`plans.c:177-191`): суффикс/исключение допускает
+/// односложные и чисто цифровые имена, но не пустые метки, крайние дефисы и
+/// метки длиннее 63 байт. Точные имена проверяются отдельно `canonical_name`.
+fn canonical_area_name(bytes: &[u8]) -> Option<String> {
+    if bytes.is_empty() || bytes.len() > 253 || !bytes.is_ascii() {
+        return None;
+    }
+    let mut label_len = 0usize;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if byte == b'.' {
+            if label_len == 0 || bytes[index - 1] == b'-' {
+                return None;
+            }
+            label_len = 0;
+        } else {
+            if !(byte.is_ascii_alphanumeric() || byte == b'-') {
+                return None;
+            }
+            if label_len == 0 && byte == b'-' {
+                return None;
+            }
+            label_len += 1;
+            if label_len > 63 {
+                return None;
+            }
+        }
+    }
+    if label_len == 0 || bytes[bytes.len() - 1] == b'-' {
+        return None;
+    }
+    Some(std::str::from_utf8(bytes).ok()?.to_ascii_lowercase())
 }
 
 #[cfg(test)]
@@ -4828,5 +4882,88 @@ mod tests {
     #[test]
     fn control_out_ring_matches_c_65536_bytes() {
         assert_eq!(super::MAX_CONTROL_OUTPUT, 65536);
+    }
+
+    #[test]
+    fn area_names_allow_single_label_and_numeric_like_d2o() {
+        let records = tls_plan_records([0x31; 16]);
+        for name in ["localhost", "12345", "a"] {
+            let bytes = r2k_core::control::encode_set_suffix(
+                name,
+                r2k_core::control::SHAPE_MODERN,
+                4,
+                &records,
+            )
+            .unwrap();
+            let mut frame =
+                r2k_core::control::read_frame(&mut std::io::Cursor::new(bytes)).unwrap();
+            // R2O-контроллер оборачивает area-команды `control_frame_with_area_id`.
+            frame.body.extend_from_slice(&[0; 16]);
+            let ack = NamePlans::default().handle(&frame);
+            assert!(ack.ok, "suffix {name}: reason={}", ack.reason);
+        }
+        for name in ["-bad", "bad-", "a..b", "a_b", "a."] {
+            let bytes = r2k_core::control::encode_set_suffix(
+                name,
+                r2k_core::control::SHAPE_MODERN,
+                4,
+                &records,
+            )
+            .unwrap();
+            let mut frame =
+                r2k_core::control::read_frame(&mut std::io::Cursor::new(bytes)).unwrap();
+            frame.body.extend_from_slice(&[0; 16]);
+            assert!(
+                !NamePlans::default().handle(&frame).ok,
+                "suffix {name} должен быть отвергнут"
+            );
+        }
+
+        let bytes =
+            r2k_core::control::encode_set_bypass("12345", 6, r2k_core::control::SHAPE_MODERN, 4)
+                .unwrap();
+        let mut frame = r2k_core::control::read_frame(&mut std::io::Cursor::new(bytes)).unwrap();
+        frame.body.extend_from_slice(&[0; 16]);
+        assert!(NamePlans::default().handle(&frame).ok);
+    }
+
+    #[test]
+    fn exact_names_match_case_insensitively_like_name_eq() {
+        let mut plans = NamePlans::default();
+        assert!(plans.handle(&set_name("Example.Test")).ok);
+        assert!(plans.select(&tcp_tls_packet("example.test")).is_some());
+        assert!(plans.select(&tcp_tls_packet("EXAMPLE.TEST")).is_some());
+    }
+
+    #[test]
+    fn shape_transport_and_probe_transport_match_c() {
+        use r2k_core::control::{
+            SHAPE_ECH_NO_TS, SHAPE_ECH_TCP, SHAPE_ECH_TS, SHAPE_LEGACY, SHAPE_LEGACY_NO_TS,
+            SHAPE_LEGACY_TS, SHAPE_MODERN, SHAPE_MODERN_NO_TS, SHAPE_MODERN_TS, SHAPE_QUIC,
+            SHAPE_VOICE,
+        };
+        for shape in [
+            SHAPE_MODERN,
+            SHAPE_LEGACY,
+            SHAPE_ECH_TCP,
+            SHAPE_MODERN_NO_TS,
+            SHAPE_LEGACY_NO_TS,
+            SHAPE_ECH_NO_TS,
+            SHAPE_MODERN_TS,
+            SHAPE_LEGACY_TS,
+            SHAPE_ECH_TS,
+        ] {
+            assert_eq!(super::r2o_shape_transport(shape), 6, "shape {shape}");
+        }
+        assert_eq!(super::r2o_shape_transport(SHAPE_QUIC), 17);
+        assert_eq!(super::r2o_shape_transport(SHAPE_VOICE), 0);
+        assert_eq!(super::r2o_shape_transport(0), 0);
+
+        let mut plan = Plan::default();
+        assert_eq!(super::r2o_probe_transport(&plan, SHAPE_QUIC), 17);
+        assert_eq!(super::r2o_probe_transport(&plan, SHAPE_VOICE), 17);
+        assert_eq!(super::r2o_probe_transport(&plan, SHAPE_MODERN), 6);
+        plan.transport = 6;
+        assert_eq!(super::r2o_probe_transport(&plan, SHAPE_QUIC), 6);
     }
 }
