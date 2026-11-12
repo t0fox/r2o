@@ -1252,6 +1252,8 @@ mismatches: нет
 
 ## Углублённая сверка N-функций (финальные 12)
 
+**Прочитано построчно: 12/12 N-функций; тела прочитаны по указанным строкам, отсутствие аналогов в `crates/` подтверждено поиском.**
+
 - **`d2k_tls12_prf_for_test` (tls12.c 214–218):** тестовый экспорт PRF,
   используется `test_tls12.c:44,58`. R2O использует `rustls` TLS1.2 PRF;
   отдельного экспорта/вектора нет. **Не под `#ifdef`** — это обычный
@@ -1281,10 +1283,10 @@ mismatches: нет
   (`ttl_in_out`, 1315-1329), питая TTL-плечо. Во всём R2O нет
   `recvmsg`/`IP_RECVTTL`/`IPV6_HOPLIMIT`; quinn/`UdpSocket` TTL не
   отдают. N — packet-path.
-- **`d2k_quic_props_findings` (2275–2324):** текстовые выводы по
-  split/2 datagrams/v2/fixed bit/port для журнала (`sched.c:11506`).
-  В R2O есть имена кандидатов (`quic_replay.rs:628`), но нет функции
-  выводов. N — диагностический текст.
+- **`d2k_quic_props_findings` (`quicprobe.c` 2275–2324):** текстовые
+  выводы по split/2 datagrams/v2/fixed bit/port для журнала
+  (`sched.c:11506`). В R2O есть имена кандидатов (`quic_replay.rs:628`),
+  но нет функции выводов. N — диагностический текст.
 - **`prop_word` (quicarms.c 244, static):** tri-state → слово для лога.
   R2O использует свои reason-строки; отдельной функции нет. N —
   диагностика.
@@ -1298,11 +1300,12 @@ mismatches: нет
   `"tls13"`, не QUIC. R2O проверяет цепочку/имя через webpki
   (`r2o_quic_http3.rs:890`) и при mismatch рвёт handshake. N —
   controller/QUIC-поведение.
-- **`remember_live_failure` (httpsearch.c 520–550):** C хранит
+- **`remember_live_failure` (`httpsearch.c` 522–552):** C хранит
   addr/binding/execution/request_ms и лимиты байт. `HttpSearchRecord`
   (`main.rs:4468-4472`) содержит только `cut/repeat_path/repro_gap`;
-  `HttpLiveFailures` строится из `failed_http_programs` (выключенные
-  привязки каталога), а не из живых отказов. N — HTTP-search state.
+  `HttpLiveFailures` (`main.rs:4457-4460`) — только `programs/evidence_lost`
+  и строится из `failed_http_programs` (`main.rs:4594-4634`, каталожные
+  привязки), а не из живых отказов. N — HTTP-search state.
 
 Raw-UDP (`udp_raw_*`, `d2k_udp_plan_send`) после проверки — **P**:
 `IP_HDRINCL`/`IPV6_HDRINCL`/`SO_MARK` есть (`raw.rs:75,77,80`), но
@@ -1311,6 +1314,8 @@ Raw-UDP (`udp_raw_*`, `d2k_udp_plan_send`) после проверки — **P**
 `r2o_label` содержит те же состояния, отличается только «цель»/«мишень».
 
 ## Классификация N (12 функций)
+
+**Прочитано построчно: 12/12 N-функций; классификация причин сверена с телами и R2O-структурами.**
 
 | Причина | Функции | Влияние на packet path |
 |---|---|---|
