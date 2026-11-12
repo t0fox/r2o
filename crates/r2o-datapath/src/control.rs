@@ -694,6 +694,56 @@ impl NamePlans {
         })
     }
 
+    /// C `stream_candidate_target`: префильтр с именем/адресом/портом,
+    /// `only_sport` и BYPASS для не-точных записей.
+    pub fn has_tls_candidate_target(
+        &self,
+        name: Option<&[u8]>,
+        address: Option<Address>,
+        family: u8,
+        source_port: u16,
+    ) -> bool {
+        let host = name.and_then(canonical_name);
+        let exact = host.as_ref().is_some_and(|host| {
+            self.plans.iter().any(|(key, entry)| {
+                key.family == family
+                    && key.shape != SHAPE_HTTP
+                    && key.host == *host
+                    && entry.plan.stream_input()
+            })
+        });
+        let probes = host.as_ref().is_some_and(|host| {
+            self.probes.iter().any(|(key, probe)| {
+                key.name.family == family
+                    && key.name.shape != SHAPE_HTTP
+                    && key.name.host == *host
+                    && key.source_port == source_port
+                    && probe.plan.stream_input()
+            })
+        });
+        let suffix = host.as_ref().is_some_and(|host| {
+            self.suffix_plans.iter().any(|(key, entry)| {
+                key.transport == 6
+                    && key.family == family
+                    && entry.plan.stream_input()
+                    && domain_suffix_member(host, &key.suffix)
+                    && !self.name_is_bypassed(host.as_bytes(), family, key.shape, 6)
+            })
+        });
+        let addr = address.is_some_and(|address| {
+            self.addr_plans.iter().any(|(key, entry)| {
+                key.address == address
+                    && key.address.family() == family
+                    && matches!(key.shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP)
+                    && entry.plan.stream_input()
+                    && host.as_ref().is_none_or(|host| {
+                        !self.name_is_bypassed(host.as_bytes(), family, key.shape, 6)
+                    })
+            })
+        });
+        exact || probes || suffix || addr
+    }
+
     /// C `d2k_plantab_http_candidate`: при `sport==0` подходит постоянная
     /// HTTP-запись (`only_sport==0`), при ненулевом — только проба этого порта
     /// (`plans.c:414-422`; `session.c:2821-2822`).
@@ -5384,6 +5434,75 @@ mod tests {
         }
         let ack = NamePlans::default().handle(&frame(r2k_core::control::SHAPE_MODERN, &quic));
         assert!(!ack.ok, "чужой транспорт плана должен быть отвергнут");
+    }
+
+    fn stream_input_tls_plan() -> Plan {
+        let mut bytes = plan_header(5, 4);
+        bytes.extend_from_slice(&[0x00, 0x01, 0x00, 0x10]);
+        bytes.extend_from_slice(&[0; 16]);
+        bytes.extend_from_slice(&[0x00, 0x02, 0x00, 0x02, 0x06, 0x01]);
+        bytes.extend_from_slice(&[
+            0x01, 0x09, 0x00, 0x01, 0x01, // wire detect-tcp-v1
+            0x01, 0x06, 0x00, 0x0c, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]);
+        Plan::parse_wire(&bytes).unwrap()
+    }
+
+    #[test]
+    fn tls_candidate_target_filters_name_suffix_bypass_and_addr() {
+        let plan = stream_input_tls_plan();
+        let mut plans = NamePlans::default();
+        plans.plans.insert(
+            NamePlanKey {
+                host: "hold.example".into(),
+                family: 4,
+                shape: r2k_core::control::SHAPE_MODERN,
+            },
+            InstalledPlan {
+                plan: plan.clone(),
+                generation: 1,
+                last_used: std::cell::Cell::new(0),
+            },
+        );
+        assert!(plans.has_tls_candidate_target(Some(b"hold.example"), None, 4, 0));
+        assert!(!plans.has_tls_candidate_target(Some(b"other.example"), None, 4, 0));
+
+        plans.suffix_plans.insert(
+            super::SuffixPlanKey {
+                suffix: "hold.example".into(),
+                transport: 6,
+                family: 4,
+                shape: r2k_core::control::SHAPE_MODERN,
+            },
+            InstalledPlan {
+                plan: plan.clone(),
+                generation: 2,
+                last_used: std::cell::Cell::new(0),
+            },
+        );
+        assert!(plans.has_tls_candidate_target(Some(b"sub.hold.example"), None, 4, 0));
+        plans.domain_bypasses.insert(super::DomainBypassKey {
+            name: "sub.hold.example".into(),
+            transport: 6,
+            family: 4,
+            shape: r2k_core::control::SHAPE_MODERN,
+        });
+        assert!(!plans.has_tls_candidate_target(Some(b"sub.hold.example"), None, 4, 0));
+
+        let address =
+            super::Address::new(super::IpAddr::V4(super::Ipv4Addr::new(198, 51, 100, 24)));
+        plans.addr_plans.insert(
+            super::AddrPlanKey {
+                address,
+                shape: r2k_core::control::SHAPE_MODERN,
+            },
+            InstalledPlan {
+                plan,
+                generation: 3,
+                last_used: std::cell::Cell::new(0),
+            },
+        );
+        assert!(plans.has_tls_candidate_target(None, Some(address), 4, 0));
     }
 
     #[test]

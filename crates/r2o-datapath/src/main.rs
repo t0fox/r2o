@@ -1729,10 +1729,24 @@ mod app {
                         name_plans.prune_expired_probes(now);
                         let packet_view = r2k_core::packet::PacketView::parse(bytes);
                         let family = packet_view.as_ref().map(|view| view.family);
+                        let tls_source_port = packet_view
+                            .as_ref()
+                            .and_then(|view| view.tcp_segment(bytes))
+                            .map(|tcp| tcp.source_port)
+                            .unwrap_or(0);
+                        let tls_host = tcp_hello_from_packet(bytes).and_then(|hello| hello.host);
+                        let tls_address = packet_view.as_ref().map(|view| view.dst);
                         let allow_tls = options.mode == RuntimeMode::Apply
                             && (is_tls_plan(&plan)
-                                || family
-                                    .is_some_and(|family| name_plans.has_tls_candidate(family)));
+                                || family.is_some_and(|family| match tls_host.as_deref() {
+                                    Some(host) => name_plans.has_tls_candidate_target(
+                                        Some(host),
+                                        tls_address,
+                                        family,
+                                        tls_source_port,
+                                    ),
+                                    None => name_plans.has_tls_candidate(family),
+                                }));
                         let http_source_port = if controller_probe {
                             packet_view
                                 .as_ref()

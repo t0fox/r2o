@@ -87,9 +87,9 @@ recheck 1982 1982 equal True
 | core-net | 548 | 195 | 351 | 4 | 0 |
 | core-state | 692 | 179 | 511 | 2 | 0 |
 | datapath-core | 400 | 153 | 244 | 3 | 0 |
-| datapath-plan | 183 | 155 | 28 | 0 | 0 |
+| datapath-plan | 183 | 158 | 25 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **740** | **1235** | **7** | **0** |
+| **Итого** | **1982** | **743** | **1232** | **7** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 740 / P 1235 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 743 / P 1232 /
 N 7 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -347,9 +347,9 @@ P означает неполное доказательство ветвей, N
 | core-net | 548 | 195 | 351 | 2 | 0 |
 | core-state | 692 | 179 | 511 | 2 | 0 |
 | datapath-core | 400 | 153 | 244 | 3 | 0 |
-| datapath-plan | 183 | 155 | 28 | 0 | 0 |
+| datapath-plan | 183 | 158 | 25 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **740** | **1235** | **7** | **0** |
+| **Итого** | **1982** | **743** | **1232** | **7** | **0** |
 
 
 ---
@@ -5341,8 +5341,8 @@ Static-хелперы наследуют статус владельца (вла
 
 | Статус | Кол-во |
 |---|---:|
-| E | 155 |
-| P | 28 |
+| E | 158 |
+| P | 25 |
 | N | 0 |
 | ? | 0 |
 | **Всего** | **183** |
@@ -5692,9 +5692,9 @@ UDP→addr переход, R2O — только exact+ECH→MODERN+общий ad
 | area_match | 275-284 | 10 | static: самый длинный подходящий суффикс при точном `(shape, family)` и `suffix_member` | `control.rs:1569-1590` `find_in_domain` (`max_by_key(len)`) | E | Логика совпадает: точные `transport/family/shape`, `domain_suffix_member`, максимум по длине. Тест `план_суффикса_наследуется_поддоменом_и_не_совпадает_с_похожим_именем` устанавливает `googlevideo.com` и `video.googlevideo.com` и подтверждает, что `rr-new.video.googlevideo.com` получает план более длинного суффикса, а `rr-new.googlevideo.com` — внешнего. |
 | d2k_plantab_revision | 286-286 | 1 | ревизия таблицы | `control.rs:586` `revision` | E | C `return t ? t->revision : 0`; `revision++` в `area_set`/`area_del`/`set_name_family`/`set_addr_shaped`/`drop`/`probe_drop`/`set_addr_probe`. Rust поле `revision`, `revision()`; инкремент в `clear_probes`/`delete_name_bound`/`set_name`? Проверяется `conditional_http_delete...` (control.rs:3587) до/после. |
 | d2k_plantab_has_ech_target | 288-314 | 27 | есть ли ECH-привязка имени/адреса для трёх ECH-форм, с учётом `only_sport` и BYPASS; затем суффиксы | `control.rs` `NamePlans::has_ech_target` | E | C перебирает name/addr/probe записи трёх ECH-форм, учитывает `only_sport`, BYPASS для не-точных и суффиксы. Rust `has_ech_target(name,addr,family,sport)` проверяет постоянные имена/адреса, пробы по порту, суффиксы и BYPASS; точное имя BYPASS не гасит. Тест `has_ech_target_matches_c_entries_addr_and_bypass`. |
-| d2k_plantab_stream_candidate | 316-319 | 4 | префильтр: есть ли потоковый план по имени/адресу | `control.rs:612` `has_tls_candidate(family)` | P | C вызывает `stream_candidate_family(..., family=4)`: имя/адрес/sport/`only_sport`/bypass/`stream_input`. Rust `has_tls_candidate(family)` смотрит только family и `plan.stream_input()` по `plans/suffix_plans/addr_plans`, без имени, адреса и порта. Префильтр R2O шире: может вернуть true для цели без плана. Используется в `main.rs:1699`. |
-| d2k_plantab_stream_candidate_family | 321-325 | 5 | то же с family | `control.rs:612` `has_tls_candidate` | P | C передаёт `addr` только для family 4, затем `stream_candidate_target`. Rust — та же family-проверка без имени/адреса/порта; тестов на точность префильтра нет. |
-| d2k_plantab_stream_candidate_target | 327-350 | 24 | family, bypass для не-точных, `stream_input`, `only_sport`, имя/адрес/sport, суффиксы transport 6 + stream_input + suffix_member + bypass | `control.rs:612-637` `has_tls_candidate` | **P** | **Расхождения:** Rust проверяет plans family + shape!=HTTP + `stream_input`, suffix transport 6/family/`stream_input`, addr shapes MODERN/LEGACY/ECH; **не проверяет bypass, имя/адрес/sport**. Поэтому `has_tls_candidate` может вернуть true для исключённого имени и не различает пробный порт; C для не-точных записей bypass учитывает. |
+| d2k_plantab_stream_candidate | 316-319 | 4 | префильтр: есть ли потоковый план по имени/адресу | `control.rs` `has_tls_candidate_target`; `main.rs` префильтр | E | C вызывает `stream_candidate_family(..., family=4)` с именем/адресом/sport. Rust в main при известном SNI вызывает `has_tls_candidate_target(name,address,family,source_port)`, иначе — широкий `has_tls_candidate(family)` для неразобранного обрывка. Тест `tls_candidate_target_filters_name_suffix_bypass_and_addr`. |
+| d2k_plantab_stream_candidate_family | 321-325 | 5 | то же с family | `control.rs` `has_tls_candidate_target` | E | C передаёт `addr` только для family 4, затем target. Rust target принимает `address` и проверяет `key.address.family()==family`; main передаёт family из `PacketView`. Тот же тест. |
+| d2k_plantab_stream_candidate_target | 327-350 | 24 | family, bypass для не-точных, `stream_input`, `only_sport`, имя/адрес/sport, суффиксы transport 6 + stream_input + suffix_member + bypass | `control.rs` `has_tls_candidate_target` | E | Rust проверяет exact name/probe по `source_port`, suffix с `suffix_member` и BYPASS, addr по адресу/family/shape и BYPASS, `stream_input` у всех. Тест `tls_candidate_target_filters_name_suffix_bypass_and_addr` покрывает имя, суффикс, bypass и адрес. |
 | find_name_skip | 357-367 | 11 | static: запись имени без порта; опционально мимо HTTP | `control.rs` `find_name_skip` | E | C цикл `used`: `kind==NAME`, `family`, `only_sport==0`, `!(skip_http && shape==HTTP)`, `name_eq`; первая подходящая любой формы. Rust `find_name_skip(host,family,skip_http)` ищет по `plans` с теми же условиями и используется grandfather-правилом. Тест `grandfather_updates_measured_name_and_find_name_skip_matches_c` (HTTP пропускается при `skip_http=true`). |
 | find_name | 369-371 | 3 | static: запись имени без порта | `control.rs:1493` `find` | E | C `find_name_skip(...,0)`: первая не-портовая запись имени любой формы. Rust `find(bytes,family,shape)` ищет точный `(host,family,shape)`; в `select` перед ним перебираются shape/bridge/fallback/grandfather, что покрывает прежний выбор. Тесты TLS/ECH/HTTP (control.rs:2823-3896). |
 | find_name_shape_port | 385-395 | 11 | static: запись ровно (имя, форма, порт, family) | `control.rs:1493` `find` + `probes` (`NameProbeKey`) | E | C цикл `used`: `kind==NAME`, `family`, `shape`, `only_sport==sport`, `name_eq`. Rust пробная запись — `NameProbeKey{name:{host,family,shape},source_port}` в `probes`; точное совпадение. Тест `tls_probe_plan_matches_only_its_source_port_and_reports_temporary_applied` (control.rs:3637). |
