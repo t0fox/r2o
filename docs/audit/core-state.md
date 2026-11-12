@@ -1405,18 +1405,21 @@ quicdeny/recheck, каталог/области/исключения, `stall_bud
   `r2o-queue-order/coalesce`, `r2o-own-first`, `r2o-ech-rx-ladder`,
   `r2o-resource-limit`, `r2o-discord-*`; полной матрицы всех переходов и
   редких комбинаций (ECH+volume, addr+voice, QUIC deny recheck) нет.
-- **`refuse_is_permanent` (301–309):** C считает постоянными `TOO_LONG`,
-  `NOT_APPLIED`, `FLOW_UNIT` и использует это в 4487/9901/10113. Rust
-  разложил это на `main.rs:19091-19095` (`TOO_LONG|NOT_APPLIED →
-  record_client_unfit`) и отдельную ветку `FLOW_UNFIT → каталог/повторный
-  замер` (`19097-19170`). Семантика постоянства сохранена, но единой
-  функции/таблицы нет — P.
-- **`refuse_is_damage` (320–322):** C `DAMAGED` используется при объяснении
-  недосланного (`4522`), чтобы в журнале было «поток повреждён», а не
-  «посылка не ушла». В Rust `flow_journal.rs` есть
-  `R2O_JOURNAL_REFUSE_DAMAGED`/`PlanDamaged`/текст, но в главном цикле
-  контроллера (`main.rs:19086-19175`) отдельной ветки `DAMAGED` нет — код
-  только печатается. Статус P, нужна проверка журнальной ветки.
+- **`refuse_is_permanent` (301–312):** C считает постоянными `TOO_LONG`,
+  `NOT_APPLIED` и `FLOW_UNFIT` (`sched.c:310-311`) и использует это в
+  `4487`, `9901`, `10113`. Rust разложил предикат на две ветки:
+  `TOO_LONG|NOT_APPLIED → record_client_unfit` (`main.rs:19089-19096`) и
+  `FLOW_UNFIT → каталог/повторный замер` (`19097-19172`). Набор кодов
+  совпадает, порядок обработки `FLOW_UNFIT` отдельный. Единой функции нет —
+  **P**, поведение по кодам подтверждено, полного differential нет.
+- **`refuse_is_damage` (320–322):** C распознаёт только `DAMAGED` и
+  использует его в `local_refusal_verdict` (`4522`), чтобы напечатать
+  «поток испорчен недоисполнением плана» вместо «посылка не ушла». В Rust
+  есть `R2O_JOURNAL_REFUSE_DAMAGED=4`, `PlanDamaged` и тексты
+  (`flow_journal.rs:21,70,95,111`), но в `EVENT_REFUSED` главного цикла
+  (`main.rs:19086-19178`) отдельной ветки `DAMAGED` нет: код только
+  печатается и не меняет формулировку/журнал. **P**, подтверждённый пробел
+  именно в объяснении недосланного.
 - **`verdict_to_plans` (5209–5551, 343 строки):** C собирает ECH trial,
   QUIC arm, known plans, measured arm, RX-лестницу, split, fallback и
   compose. Rust не имеет одной функции: это `discovery.rs::known_plans/
