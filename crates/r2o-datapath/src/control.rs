@@ -3599,6 +3599,16 @@ mod tests {
             Some([0x31; 16])
         );
 
+        // Чужой trial не снимает запись, но DEL остаётся идемпотентным OK.
+        let mut wrong_trial = key.to_vec();
+        wrong_trial.extend_from_slice(&[0x22; 16]);
+        let ack = plans.handle(&Frame {
+            kind: control::COMMAND_DEL_ADDR_PROBE,
+            body: wrong_trial,
+        });
+        assert!(ack.ok);
+        assert_eq!(plans.voice_addr_probes.len(), 1);
+
         let mut delete = key.to_vec();
         delete.extend_from_slice(&trial_id);
         let ack = plans.handle(&Frame {
