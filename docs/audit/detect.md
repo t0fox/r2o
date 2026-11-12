@@ -35,13 +35,13 @@ Static-хелперы наследуют статус владельца; в к�
 
 | Статус | Кол-во |
 |---|---:|
-| E | 49 |
-| P | 100 |
+| E | 47 |
+| P | 102 |
 | N | 10 |
 | ? | 0 |
 | **Всего** | **159** |
 
-Доли: E — 30.8 % (49/159); E или P — 93.7 % (149/159); N — 6.3 % (10/159).
+Доли: E — 29.6 % (47/159); E или P — 93.7 % (149/159); N — 6.3 % (10/159).
 P не считается доказанным паритетом: это покрытие без полного доказательства ветвей.
 
 По файлам:
@@ -54,10 +54,10 @@ P не считается доказанным паритетом: это пок
 | detect/poison.c | 12 | 8 | 4 | 0 |
 | detect/props.c | 7 | 0 | 7 | 0 |
 | detect/raw.c | 62 | 13 | 42 | 7 |
-| detect/response.c | 7 | 7 | 0 | 0 |
+| detect/response.c | 7 | 5 | 2 | 0 |
 | detect/trigger.c | 9 | 3 | 6 | 0 |
 | detect/include/d2k_detect.h | 1 | 0 | 1 | 0 |
-| **Всего** | **159** | **49** | **100** | **10** |
+| **Всего** | **159** | **47** | **102** | **10** |
 
 ---
 
@@ -457,15 +457,17 @@ C всё равно выдаёт кандидат «всё сразу», R2O е�
 счёт серии, нейтральное имя и решение покрыты юнит-тестами и общими C-векторами
 (`tests/fixtures/d2o/tls-response-vectors.tsv`, `d2o_response_fixture.c`, EINTR-дифференциал).
 
+**Прочитано построчно: 7/7 функций, 324 строки C (1–324).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `resp_timeout` | 64-70 | 160 | `timeout>0 && timeout<3000 ? timeout : 3000` | response.rs:164 response_timeout | **E** | C и Rust одинаково ограничивают одно рукопожатие 3 с; `tests/response.rs:649`. |
 | `d2k_resp_scan12` | 83-118 | 996 | поток TLS-записей: alert 0x15 → конец, 0x16 → склейка handshake, type 14/len 0 → ServerHelloDone | response.rs:1248 scan12 | **E** | C и Rust одинаково проверяют полную запись, `0x15`/`0x16`, склейку handshake через `body`, `hdr[0]==14 && body==0`; 13 векторов `tests/response.rs:122/138/479`. |
-| `d2k_resp_handshake12` | 123-207 | 2623 | legacy ClientHello, socket, SO_MARK/TCP_NODELAY/SNDTIMEO/RCVTIMEO, connect/send, 64 КиБ, poll/recv, scan12 | response.rs:1050 handshake | **E** | C и Rust: legacy hello, те же socket options, `MSG_NOSIGNAL`, deadline, `RESPONSE_CAP=65536`, `scan12`; C разрешает адрес внутри, Rust `count_handshakes` — снаружи. Исходы Done/Failed/Unmeasured совпадают; `tests/response.rs:649/555`. |
-| `count_handshakes` | 215-228 | 403 | последовательные `repeats`, `r>0` done, `r<0` unmeasured | response.rs:1148 count_handshakes | **E** | C последовательно; Rust тоже, но резолвит адрес на каждую попытку и считает lookup failure как failed, `probes++`. `tests/response.rs:649`. |
+| `d2k_resp_handshake12` | 123-207 | 2623 | legacy ClientHello, socket, SO_MARK/TCP_NODELAY/SNDTIMEO/RCVTIMEO, connect/send, 64 КиБ, poll/recv, scan12 | response.rs:1050 handshake | **P** | Ветви совпадают: legacy hello, family по наличию `:` в хосте, socket options, `MSG_NOSIGNAL`, deadline, `RESPONSE_CAP=65536`, poll/recv/scan12, `have==CAP → Unmeasured`, alert → Failed, ServerHelloDone → Done. **Отличие:** C при `mark==0` подставляет `D2K_BYPASS_MARK=0x40000000`, Rust `ResponseOptions::default().mark=None` → `BYPASS_MARK=0x2d` (header, п. 23). При явно одинаковой метке путь эквивалентен; `tests/response.rs:649/555`. |
+| `count_handshakes` | 215-228 | 403 | последовательные `repeats`, `r>0` done, `r<0` unmeasured | response.rs:1148 count_handshakes | **E** | C последовательно; Rust тоже, резолвит адрес на каждую попытку, lookup failure = failed (C `getaddrinfo` failure → 0), `probes++` — расширение R2O. `tests/response.rs:649`. |
 | `d2k_neutral_sni` | 233-269 | 1252 | 10 случайных байт `/dev/urandom`, xorshift fallback, `z<hex>.example.com` | response.rs:1172 neutral_sni | **E** | C и Rust: 10 байт, fallback time/pid/counter/xorshift, hex-суффикс и тот же формат; `tests/response.rs:203`. |
 | `d2k_resp_decide` | 274-304 | 1957 | unmeasured>0 / control==0 / target==repeats / target==0 / flaky с точными reason | response.rs:1304 decide | **E** | C и Rust совпадают все 5 ветвей и тексты; `tests/response.rs:421/479`. |
-| `d2k_probe_response` | 310-324 | 806 | neutral SNI, target count, control count, decide | response.rs:1207 probe_response | **E** | C и Rust: target/control на одном адресе, neutral SNI, `decide`; Rust дополнительно валидирует `repeats>0` и legacy hello, C при тех же входах даёт NotApplicable через control==0. `tests/response.rs:649/780`. |
+| `d2k_probe_response` | 310-324 | 806 | neutral SNI, target count, control count, decide | response.rs:1207 probe_response | **P** | Для валидных входов target/control на одном адресе, neutral SNI, `decide` совпадают. **Отличия:** (1) Rust валидирует `repeats>0` и legacy hello до зондов и возвращает NotApplicable с другим текстом; C при `repeats<=0` делает 0 попыток и приходит к NotApplicable через `control==0`; (2) наследует метку #23. `tests/response.rs:649/780`. |
 
 ### response.c: построчная сверка
 
@@ -476,10 +478,13 @@ C всё равно выдаёт кандидат «всё сразу», R2O е�
   handshake, `type 14 && body 0` → ServerHelloDone; 13 векторов.
   E.
 - **`d2k_resp_handshake12` (123–207) ↔ `handshake` (`:1050`):**
-  legacy ClientHello, socket, `SO_MARK/TCP_NODELAY/SNDTIMEO/
-  RCVTIMEO`, `MSG_NOSIGNAL`, deadline, `RESPONSE_CAP=65536`,
-  `scan12`; C резолвит внутри, Rust — в `count_handshakes`.
-  Done/Failed/Unmeasured совпадают. E.
+  legacy ClientHello, family по `:` в хосте, socket,
+  `SO_MARK/TCP_NODELAY/SNDTIMEO/RCVTIMEO`, `MSG_NOSIGNAL`,
+  deadline, `RESPONSE_CAP=65536`, `scan12`; C резолвит внутри,
+  Rust — в `count_handshakes`. Done/Failed/Unmeasured совпадают.
+  **P:** C при `mark==0` подставляет `D2K_BYPASS_MARK=0x40000000`,
+  Rust при `None` — `BYPASS_MARK=0x2d` (header, п. 23); при
+  одинаковой метке путь эквивалентен.
 - **`count_handshakes` (215–228) ↔ `:1148`:** C последовательные
   `repeats`, `r>0` done, `r<0` unmeasured; Rust резолвит каждую
   попытку, lookup failure = failed, `probes++`. E.
@@ -490,9 +495,11 @@ C всё равно выдаёт кандидат «всё сразу», R2O е�
   (unmeasured/control==0/target==repeats/target==0/flaky) и тексты
   совпадают. E.
 - **`d2k_probe_response` (310–324) ↔ `probe_response`
-  (`:1207`):** target/control на одном адресе, neutral SNI,
-  `decide`; Rust дополнительно валидирует repeats/legacy hello, при
-  тех же входах C даёт NotApplicable. E.
+  (`:1207`):** для валидных входов target/control на одном адресе,
+  neutral SNI, `decide` совпадают. **P:** Rust до зондов валидирует
+  `repeats>0` и legacy hello (NotApplicable с другим текстом), C при
+  `repeats<=0` делает 0 попыток и приходит к NotApplicable через
+  `control==0`; наследует метку #23.
 
 ## 8. detect/trigger.c — 9 функций
 
