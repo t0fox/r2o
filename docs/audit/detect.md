@@ -383,7 +383,7 @@ syn_data — совпадают. Все ветви `apply_set` (`props.c:198-257
 брошенных правил: R2O не разбирает строки iptables, чистит только собственный тег `r2o-rst`,
 не знает legacy-формы без комментария и не проверяет диапазон портов 30000..54999.
 
-**Прочитано построчно: 62/62 функции, 1377 строк C (1–1377).** Проверены обе ветви
+**Прочитано построчно: 62/62 функции, 1377 строк C (1–1377).** Сверено с `raw_probe.rs:54-58` (счётчики), `:120-186` (selftest), `:602-760` (decoy/offer/selftest), `:1213-1321` (send/plan/probe), `:1350-1463` (build/checksum/local addr), `:1478-1745` (RstRule/RstGuard/sweep/pending), `:1841-2041` (RawConn/recv), `:2156` (read_payload), `classify_measured.rs:12,143` (segment 1400). Проверены обе ветви
 `__linux__`/`!__linux__`: разбор `RST_PREFIX`/legacy/owned-тега и диапазон 30000..54999;
 fork/setpgid/close fd/дедлайн 5000 мс/kill группы; nft `add/delete/get` с timeout 300s и
 iptables `-w -I/-D/-C`; pending-очередь 64/5 попыток/atexit; потоковые счётчики и порт
