@@ -222,6 +222,16 @@ P означает неполное доказательство ветвей, N
   **PASS** (ACK/APPLIED, candidate ACK, lost-ACK settle).
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-catalog-persist-differential.sh` —
   **PASS** (save_atomic, конкурентное внешнее обновление).
+- `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-known-plans-differential.sh` —
+  **PASS** (совместимость known-plan, tried hashes, volume bucket, порядок успехов,
+  стабильная дедупликация, лимит 8 планов).
+- `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-meas-differential.sh` —
+  **PASS** (send/receive interruption: C/Rust `ERROR` и `REJECTED` совпадают).
+- `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-queue-order-differential.sh` —
+  **PASS** (queue expiry/order, QUIC-yield TCP priority).
+- `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-measured-split-differential.sh` —
+  **PASS** (measured split, bridge raw-split gate, unplannable-hit fallback,
+  scheduler adapter contracts).
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-diagnostics-differential.sh` —
   **не выполнен**: сборка донорского `test_httpsearch` падает на duplicate
   symbols `d2k_plan_apply`, `d2k_plan_max_emit`, `d2k_actions_cancel`,
