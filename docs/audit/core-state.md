@@ -862,20 +862,20 @@
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `d2k_link_shape_tcp_profile` | 309–319 | 11 | профиль TCP (unknown/no-ts/ts) из wire-shape | r2k_core::control::r2k_link_shape_tcp_profile | **E*** | static inline; unit tcp_shape_context_table_matches_d2o |
-| `d2k_link_shape_tcp_base` | 321–331 | 11 | базовая TLS-форма из wire-shape | r2k_core::control::r2k_link_shape_tcp_base | **E*** | static inline; unit |
-| `d2k_link_shape_tcp_context` | 333–339 | 7 | wire-shape из базовой формы и TCP-профиля | r2k_core::control::r2k_link_shape_tcp_context | **E** | unit tcp_shape_context_table_matches_d2o (таблица против C) |
+| `d2k_link_shape_tcp_profile` | 309–319 | 11 | 8/9/10 → NO_TS(1), 11/12/13 → TS(2), иначе UNKNOWN(0) | `control.rs:99-107` `r2k_link_shape_tcp_profile` | **E*** | C switch и Rust match совпадают; unit `tcp_shape_context_table_matches_d2o`. |
+| `d2k_link_shape_tcp_base` | 321–331 | 11 | 8/11→1, 9/12→2, 10/13→6, иначе shape как есть | `control.rs:108-118` `r2k_link_shape_tcp_base` | **E*** | Точное совпадение; unit таблицы. |
+| `d2k_link_shape_tcp_context` | 333–339 | 7 | профиль UNKNOWN → shape; 1/2/6 + TS/NO_TS → 8..13; иначе shape | `control.rs:119-147` `r2k_link_shape_tcp_context` | **E** | C и Rust: три базовые формы, TS→*_TS, NO_TS→*_NO_TS, прочие без изменений; unit `tcp_shape_context_table_matches_d2o` (таблица против C). |
 
 ### `core/include/d2k_resource.h`
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `d2k_resource_word` | 27–35 | 9 | сравнить слово в буфере (CSS-токен) без регистра | `r2o_resource.rs:407-413` `r2o_resource_word` | **P*** | Совпадает: равна длина и каждый байт `eq_ignore_ascii_case`. Отдельного теста хелпера нет. |
-| `d2k_resource_space` | 36–38 | 3 | пробельный символ | `r2o_resource.rs:415-417` `r2o_resource_space` | **P*** | Совпадает: `' '`, `\t`, `\r`, `\n`, `\x0c`. |
-| `d2k_resource_path_ok` | 39–50 | 12 | допустимый публичный путь: непустой, <512, `/`, не `//`, без `/../` и `/./`, только `[A-Za-z0-9/._-]`, кончается `.css` | `r2o_resource.rs:309-330` `r2o_resource_path_ok`/`path_bytes_ok` | **P** | Построчно совпадает (Rust использует `windows(4)`/`windows(3)` вместо `strstr`, `.css` — `eq_ignore_ascii_case`). Целевого C/Rust differential нет. |
-| `d2k_resource_add` | 51–73 | 23 | добавить абсолютную https/`//`-ссылку: публичный путь, хост <256, без ведущей/хвостовой точки, LDH+`.`, lower-case, один ресурс на хост, максимум 2 | `r2o_resource.rs:255-305` `r2o_add_url`/`r2o_add_url_bytes` | **P*** | Построчно совпадает; Rust дополнительно останавливает `feed` при `resources.len() >= 2`. |
-| `d2k_resource_tag` | 74–113 | 40 | завершить тег: raw `script`/`style`, `body` → лимит 32768, `link` с одним `href`/`rel=stylesheet`, href <1024 | `r2o_resource.rs:188-236` `r2o_finish_tag`, `:332-405` `r2o_link_stylesheet_href` | **P*** | Построчно совпадает, включая один `href`/`rel`, отказ при незакрытой кавычке и лимит 1024. |
-| `d2k_resource_feed` | 114–159 | 46 | потоковый разбор HTML: лимит 32768, сбор URL по `h`, теги/комментарии/кавычки, `>` завершает тег | `r2o_resource.rs:140-186` `R2oResourceScan::feed` | **P** | Построчно совпадает; Rust останавливается также по достижении 2 ресурсов (C — в `add`). Целевого C/Rust differential нет. |
+| `d2k_resource_word` | 27–35 | 9 | равная длина, ASCII lower-case `s[i]`, сравнение с `word[i]` | `r2o_resource.rs:407-413` `r2o_resource_word` | **P*** | Совпадает: длина + `eq_ignore_ascii_case` по байтам. Отдельного теста хелпера нет. |
+| `d2k_resource_space` | 36–38 | 3 | `' '`, `\\t`, `\\r`, `\\n`, `\\f` | `r2o_resource.rs:415-417` `r2o_resource_space` | **P*** | Совпадает посимвольно. |
+| `d2k_resource_path_ok` | 39–50 | 12 | непустой, <512, `/`, не `//`, без `/../` и `/./`, `[A-Za-z0-9/._-]`, кончается `.css` | `r2o_resource.rs:309-330` `r2o_resource_path_ok`/`path_bytes_ok` | **P** | Построчно совпадает; Rust `windows(4)`/`windows(3)` вместо `strstr`, `.css` — `eq_ignore_ascii_case`. Целевого C/Rust differential нет. |
+| `d2k_resource_add` | 51–73 | 23 | https/`//`: путь, хост <256, без ведущей/хвостовой точки, LDH+`.`, lower-case, один ресурс на хост, максимум 2 | `r2o_resource.rs:255-305` `r2o_add_url`/`r2o_add_url_bytes` | **P*** | Построчно совпадает: strip_prefix, первый `/`, host/path checks, lower-case, dedupe по host, push. Rust дополнительно останавливает `feed` при 2 ресурсах (C — в `add`). |
+| `d2k_resource_tag` | 74–113 | 40 | завершить тег: raw `/script`/`/style`, script/style/body, `link` с одним `href`/`rel=stylesheet`, href <1024 | `r2o_resource.rs:188-236` `r2o_finish_tag`, `:332-405` `r2o_link_stylesheet_href` | **P*** | Построчно совпадает, включая префикс `/script`/`/style` (case-sensitive), один `href`/`rel`, отказ при незакрытой кавычке и лимит 1024. |
+| `d2k_resource_feed` | 114–159 | 46 | лимит 32768, сбор URL по байту `h`, теги/комментарии/кавычки, `>` завершает тег | `r2o_resource.rs:140-186` `R2oResourceScan::feed` | **P** | Построчно совпадает; **отличие:** Rust прерывает обход при `resources.len() >= 2`, C продолжает до 32768, а лишние ресурсы отбрасывает в `add`. Итоговый набор тот же, объём сканирования разный. Целевого C/Rust differential нет. |
 
 ## Углублённая сверка: domain/groups/match/net4/verdict/props (37 функций)
 
