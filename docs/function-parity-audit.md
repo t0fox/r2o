@@ -84,12 +84,12 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 195 | 351 | 4 | 0 |
+| core-net | 548 | 196 | 351 | 1 | 0 |
 | core-state | 692 | 179 | 511 | 2 | 0 |
 | datapath-core | 400 | 154 | 244 | 2 | 0 |
 | datapath-plan | 183 | 164 | 19 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **750** | **1226** | **6** | **0** |
+| **Итого** | **1982** | **751** | **1226** | **5** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,8 +103,8 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 750 / P 1226 /
-N 6 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
+Покрытие реестра: **1982/1982** функций. Статусы: **E 751 / P 1226 /
+N 5 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
 | # | Область | D2O | R2O | Подтверждение |
@@ -344,12 +344,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 195 | 351 | 2 | 0 |
+| core-net | 548 | 196 | 351 | 1 | 0 |
 | core-state | 692 | 179 | 511 | 2 | 0 |
 | datapath-core | 400 | 154 | 244 | 2 | 0 |
 | datapath-plan | 183 | 164 | 19 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **750** | **1226** | **6** | **0** |
+| **Итого** | **1982** | **751** | **1226** | **5** | **0** |
 
 
 ---
@@ -864,7 +864,7 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 | `d2k_qw_seal` | 351-394 | 44 | long/short header: AEAD seal (AAD=hdr+pn), tag за ct, HP-маска 0x0f/0x1f, sample pn+4 | `quic.rs:968-1020 seal_initial` | **P** | **C-ветви проверены:** ключи/hdr/out, `pn_len 1..4`, `total=hdr+pn+payload+16<=cap`, `pn_len+payload+16>=20`, запись младших битов `pn_len-1`, PN BE, nonce, AAD=hdr+pn, AES-128-GCM, тег сразу за ct, sample `hdr+4`, HP-маска `0x0f` long/`0x1f` short. **Rust `seal_initial` — только long Initial**, маска `0x0f`; совпадают pn_len/AAD/тег/sample/маска для Initial. Short-header сборка не портирована. RFC-тест split Initial. |
 | `d2k_qw_open` | 396-450 | 55 | long/short: HP, PN decode от `largest_pn`, AEAD open, reserved-биты после расшифровки | `quic.rs:908-966 open_initial` | **P** | **C-ветви проверены:** отказ Retry, sample `pn_offset+4`, HP-маска `0x0f/0x1f`, `pn_len=byte0&3+1`, PN из маскированных байт, `ct_len` long=`length-pn`/short=`packet-pn_offset-pn`, `ct>=16`, `pn_decode(largest_pn,...)`, AAD с восстановленным byte0/PN, AES-GCM open, reserved `0x0c/0x18`. **Rust `open_initial` — только Initial**, `decode_packet_number(0,...)` жёстко, reserved `0x0c`; для первого полёта/снимка совпадает, short header/largest>0 не доказаны. Тест `refuses_when_authenticated_initial_is_modified`. |
 | `d2k_qw_retry_verify` | 454-479 | 26 | Retry integrity: pseudo=`odcid_len‖odcid‖retry[..-16]`, AES-128-GCM key/nonce v1/v2, constant-time tag compare | `quic.rs:569-603 retry_integrity_valid` | **E** | **Совпадает:** `retry_len>=17`, `retry_len+1+odcid<=MAX_DGRAM`, pseudo, ключ/nonce v1/v2, tag 16 байт. C шифрует пустой plaintext и сравнивает тег побайтно; Rust `Aes128Gcm::decrypt` с `plain.is_empty()`. Тест `quic.rs` (valid/corrupted retry). |
-| `d2k_qw_retry_build` | 481-521 | 41 | собрать Retry: long header типа Retry, DCID/SCID/token, integrity tag | нет | **N** | C проверяет `out/odcid/dcid/scid`, `token_len && !token`, CID≤20, `body+16<=cap`, `body+16+1+odcid<=MAX_DGRAM`; пишет `0xc0 \| wire_type<<4`, version, DCID/SCID/token, pseudo `odcid_len‖odcid‖header`, тег AES-128-GCM v1/v2. Rust только проверяет Retry (`retry_integrity_valid`); серверная сборка клиентскому datapath не нужна. |
+| `d2k_qw_retry_build` | 481-521 | 41 | собрать Retry: long header типа Retry, DCID/SCID/token, integrity tag | `quic.rs` `build_retry` | E | C проверяет CID≤20/буфер, пишет `0xc0 \| wire_type<<4`, version, DCID/SCID/token, pseudo `odcid_len‖odcid‖header`, тег AES-128-GCM v1/v2. Rust `build_retry` повторяет все ветви, включая v2 нулевой тип/ключ; тест `d2k_qw_retry_build_собирает_ровно_как_c` проверяет точные байты, `retry_integrity_valid`, малый cap, CID>20 и v1/v2. |
 | `d2k_qw_ranges_reset` | 525-527 | 3 | сброс набора диапазонов | нет (quinn reassembly) | **P** | C `if (r) memset(r,0,sizeof *r)`. Rust собственной структуры `d2k_qw_ranges` не имеет: пересборку/границы потоков ведёт quinn (`RecvStream`), отдельного сброса диапазонов нет. |
 | `d2k_qw_ranges_add` | 529-558 | 30 | добавить/слить диапазон, `fin`/`fin_off`, предел `D2K_QW_RANGES_MAX` | нет (quinn) | **P** | C вставка с сортировкой/слиянием пересекающихся и касающихся диапазонов, `end<off` → отказ, `len==0` только fin, предел 32; Rust reassembly/quinn. |
 | `d2k_qw_ranges_bytes` | 560-564 | 5 | сумма покрытых байт | `r2o_quic_http3.rs` app-bytes (иной смысл) | **P** | C суммирует `r->end[i]-r->start[i]` по всем диапазонам. Rust `app_bytes` считает уникальные байты counted-stream по offset из QUIC-кадров, а не по массиву диапазонов; семантика близка, структура/точки учёта иные. |

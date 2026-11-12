@@ -566,6 +566,75 @@ fn parse_long_header_ids(input: &[u8]) -> Option<LongHeaderIds> {
     })
 }
 
+/// C `d2k_qw_retry_build` (`core/quicwire.c:481-521`): собрать Retry с
+/// integrity tag RFC 9001 §5.8. ODCID в пакет не попадает, только в метку.
+///
+/// Возвращает `None` при переполнении/некорректном вводе.
+pub fn build_retry(
+    version: u32,
+    original_dcid: &[u8],
+    dcid: &[u8],
+    scid: &[u8],
+    token: &[u8],
+    cap: usize,
+) -> Option<Vec<u8>> {
+    if original_dcid.len() > MAX_CID
+        || dcid.len() > MAX_CID
+        || scid.len() > MAX_CID
+        || token.len() > MAX_DATAGRAM
+    {
+        return None;
+    }
+    // C `long_type_wire`: в v2 Retry — нулевой тип, во всех прочих — 3.
+    let wire_type = if version == QUIC_V2 { 0 } else { 3 };
+    let body_len = 1usize
+        .checked_add(4)?
+        .checked_add(1)?
+        .checked_add(dcid.len())?
+        .checked_add(1)?
+        .checked_add(scid.len())?
+        .checked_add(token.len())?;
+    let total = body_len.checked_add(16)?;
+    if total > cap || total.checked_add(1 + original_dcid.len())? > MAX_DATAGRAM {
+        return None;
+    }
+
+    let mut out = Vec::with_capacity(total);
+    out.push(0xc0 | (wire_type << 4));
+    out.extend_from_slice(&version.to_be_bytes());
+    out.push(dcid.len() as u8);
+    out.extend_from_slice(dcid);
+    out.push(scid.len() as u8);
+    out.extend_from_slice(scid);
+    out.extend_from_slice(token);
+
+    let mut pseudo = Vec::with_capacity(1 + original_dcid.len() + out.len());
+    pseudo.push(original_dcid.len() as u8);
+    pseudo.extend_from_slice(original_dcid);
+    pseudo.extend_from_slice(&out);
+    // C для любой версии кроме v2 берёт ключ/нонс v1.
+    let (key, nonce) = if version == QUIC_V2 {
+        (&RETRY_KEY_V2, &RETRY_NONCE_V2)
+    } else {
+        (&RETRY_KEY_V1, &RETRY_NONCE_V1)
+    };
+    let cipher = Aes128Gcm::new_from_slice(key).ok()?;
+    let tag = cipher
+        .encrypt(
+            Nonce::from_slice(nonce),
+            Payload {
+                msg: &[],
+                aad: &pseudo,
+            },
+        )
+        .ok()?;
+    if tag.len() != 16 {
+        return None;
+    }
+    out.extend_from_slice(&tag);
+    Some(out)
+}
+
 fn retry_integrity_valid(version: u32, original_dcid: &[u8], retry: &[u8]) -> bool {
     use aes_gcm::aead::{Aead, Payload};
 
@@ -1675,6 +1744,46 @@ mod tests {
         let mut corrupted = RFC_9001_INITIAL.to_vec();
         corrupted[600] ^= 1;
         assert_eq!(super::initial_client_hello_sni(&corrupted), None);
+    }
+
+    #[test]
+    fn d2k_qw_retry_build_собирает_ровно_как_c() {
+        let odcid = [0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87];
+        let dcid = [0, 1, 2, 3, 4, 5, 6, 7];
+        let scid = [8, 9, 10, 11];
+        let token = [0xaa, 0xbb, 0xcc];
+
+        let built = super::build_retry(super::QUIC_V1, &odcid, &dcid, &scid, &token, 128).unwrap();
+        assert_eq!(built.len(), 1 + 4 + 1 + 8 + 1 + 4 + 3 + 16);
+        assert_eq!(built[0], 0xf0);
+        assert_eq!(&built[1..5], &super::QUIC_V1.to_be_bytes());
+        assert_eq!(built[5], 8);
+        assert_eq!(&built[6..14], &dcid);
+        assert_eq!(built[14], 4);
+        assert_eq!(&built[15..19], &scid);
+        assert_eq!(&built[19..22], &token);
+        assert!(super::retry_integrity_valid(super::QUIC_V1, &odcid, &built));
+
+        // C отвергает cap меньше body+16 и CID длиннее 20.
+        assert!(
+            super::build_retry(
+                super::QUIC_V1,
+                &odcid,
+                &dcid,
+                &scid,
+                &token,
+                built.len() - 1
+            )
+            .is_none()
+        );
+        assert!(super::build_retry(super::QUIC_V1, &[0; 21], &dcid, &scid, &token, 128).is_none());
+
+        // v2: нулевой тип и ключ/нонс v2.
+        let v2 = super::build_retry(super::QUIC_V2, &odcid, &dcid, &scid, &token, 128).unwrap();
+        assert_eq!(v2[0], 0xc0);
+        assert_eq!(&v2[1..5], &super::QUIC_V2.to_be_bytes());
+        assert!(super::retry_integrity_valid(super::QUIC_V2, &odcid, &v2));
+        assert!(!super::retry_integrity_valid(super::QUIC_V1, &odcid, &v2));
     }
 
     #[test]
