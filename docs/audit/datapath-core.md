@@ -109,6 +109,8 @@ C-хелперы без собственного состояния наслед
 R2O-владелец: `crates/r2o-datapath/src/main.rs` (`run`, `parse_options`,
 `r2o_log_*`), `raw.rs`, `scheduler.rs`, `hold.rs`, `r2o_route.rs`.
 
+**Прочитано построчно: 44/44 функции, 2415 строк C (1–2415).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
 | `on_signal` (static) | 62 | 1 | SIGINT/SIGTERM → `stop_flag` | `main.rs:3762 install_signal_handlers`, `main.rs:55 STOP` | P | обработчик ставит только atomic-флаг; отдельного теста на сигнал нет |
