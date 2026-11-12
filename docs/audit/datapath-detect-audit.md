@@ -516,7 +516,7 @@
 | `d2k_trigger_control` | `classify_control_trigger` (`main.rs:1327`), `hello::legacy_client_hello` | CLI/дерево | `probe-d2k.invalid-control.example`, Accept::TlsRecord | C `probe-%s.invalid-control.example` (tag `d2k`); R2O default SNI `probe-d2k.invalid-control.example` (`main.rs:1345`) — совпадает | `main.rs:1327` tests, shared fixtures | partial |
 | `d2k_opts_decoy` | `ClassifyOptions::decoy`? (`classify.rs`), `select_bridge_decoy` (`raw_probe.rs:602`) | tree | decoy vs control | R2O `decoy` в bridge выбирает client clone/control | `raw_probe` unit | partial |
 | `d2k_trigger_host_ts_override`, `host_offers_ts` (static), `d2k_trigger_offers_ts` | `HOST_TCP_TIMESTAMPS`/`raw_offer_timestamps` (`raw_probe.rs:673`) | raw profile | `/proc/sys/net/ipv4/tcp_timestamps`, override для тестов | C static cache + override setter; R2O `OnceLock`, нет публичного override (тесты используют `client_tcp_has_timestamps`) | `raw_probe.rs:2461 white_hello_ts...`, `test-classifier-white-decoy-differential.sh` | partial |
-| `d2k_trigger_allows_poison` | `raw_profile_allows` (`raw_probe.rs:731`) | sweep | `!p->tcp_ts || offers_ts` | — | raw profile tests | partial |
+| `d2k_trigger_allows_poison` | `raw_profile_allows` (`raw_probe.rs:731`) | sweep | `!p->tcp_ts \|\| offers_ts` | — | raw profile tests | partial |
 
 ### response.c (7 функций)
 
