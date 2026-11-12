@@ -71,6 +71,14 @@ P не считается доказанным паритетом: это пок
 фильтра невыразимых находок и гейта socket-only split (`scripts/r2o-measured-split-differential.sh`,
 `scripts/r2o-bridge-clone-decoy-differential.sh`).
 
+**Прочитано построчно: 17/17 функций, 641 строка C (1–641).** Сверены: вход `bridge_input`
+(триггер 2..16384 + accept ServerHello, контроль TLSRecord/vouched=0, клон приманки через
+`d2k_hello_rename`, white, repeats/write_gap/timeout/mark/cancel, IPv6-адрес); `sched_tcp`
+(bridge_input → seed → classify_run → stopped→Inconclusive → map_verdict → socket-only split gate →
+refused unplannable → raw_selftest/RST owns_search → arm_from_poison/arm_input); хуки
+`sched_tcp*`; базовый вопрос (`tr.name=""`, no_raw, base_seen/base_stop, ответ "whole",
+base.valid/base_blocked) и neutral-ack.
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `d2k_detect_stop_all` | 45-45 | 50 | липкий общий флаг остановки службы | `Drop for DiscoveryWorker` (`main.rs:14251-14261`) | **P** | Отдельного глобального флага нет, но остановка службы достижима: `Drop` взводит `cancel` и все `active_cancels`, будит jobs и join-ит потоки. Нет C/Rust differential на «остановить все» и липкость флага. |
@@ -309,6 +317,13 @@ tcp_ts/ip_id_zero/seq_shift — совпадают; дедупликация `ba
 встроены в `raw_probe::sweep_poisons`; отдельного дифференциала на весь список вопросов нет,
 покрыт только составной ECH-вопрос и перепроверка самопроверки. Расхождение: при `control = None`
 C всё равно выдаёт кандидат «всё сразу», R2O его не выдаёт.
+
+**Прочитано построчно: 7/7 функций, 498 строк C (1–498).** Все 12 вопросов `prop_probes`
+(`props.c:49-196`) сверены с `property_probes` (`raw_probe.rs:840-965`): порядок, label, имя,
+ttl/repeats/gap_ms, seqovl/seqovl_exact, decoy_hello, badsum/md5/tcp_ts/seq_shift/split_pos,
+syn_data — совпадают. Все ветви `apply_set` (`props.c:198-257`) совпадают с `apply_property`
+(`raw_probe.rs:1005-1045`), включая `ParsesL7 → validates_checksum=false` и условные
+`WhiteTimestamp → timestamps/checksum`.
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
