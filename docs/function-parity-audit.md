@@ -2568,6 +2568,8 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_resource_tag` | 74–113 | 40 | завершить тег: raw `/script`/`/style`, script/style/body, `link` с одним `href`/`rel=stylesheet`, href <1024 | `r2o_resource.rs:188-236` `r2o_finish_tag`, `:332-405` `r2o_link_stylesheet_href` | **P*** | Построчно совпадает, включая префикс `/script`/`/style` (case-sensitive), один `href`/`rel`, отказ при незакрытой кавычке и лимит 1024. |
 | `d2k_resource_feed` | 114–159 | 46 | лимит 32768, сбор URL по байту `h`, теги/комментарии/кавычки, `>` завершает тег | `r2o_resource.rs:140-186` `R2oResourceScan::feed` | **P** | Построчно совпадает; **отличие:** Rust прерывает обход при `resources.len() >= 2`, C продолжает до 32768, а лишние ресурсы отбрасывает в `add`. Итоговый набор тот же, объём сканирования разный. Целевого C/Rust differential нет. |
 
+**Прочитано построчно:** `include/d2k_link.h` 3/3 (521 строка), `include/d2k_resource.h` 6/6 (160 строк).
+
 ## Углублённая сверка: domain/groups/match/net4/verdict/props (37 функций)
 
 | C-функция | строки | R2O-аналог | статус | доказательство / пробел |
@@ -2983,6 +2985,8 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 
 ## Углублённая сверка: crypto.c / p256.c / x25519.c (61 функция)
 
+**Прочитано построчно: 61/61 функций, 1185 строк C (crypto.c 671, p256.c 316, x25519.c 198).**
+
 - **AES-128/ECB:** `xtime`, `d2k_aes_sbox_byte`, `aes128_key_expand`,
   `sub_bytes`, `shift_rows`, `mix_columns`, `add_round_key`,
   `aes128_encrypt_block`, `d2k_aes128_ecb` заменены crate `aes`/`Aes128`;
@@ -2993,8 +2997,12 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
   `d2k_sha256`, `d2k_hmac_sha256`, `d2k_hkdf_extract` покрыты
   `sha2`/`hmac`/`hkdf` и differential-кейсами `sha256-abc`, `sha256-100`,
   `hmac-*`, `hkdf-extract`, `hkdf-client-in`, `hkdf-quic-key` — E.
-  `d2k_hkdf_expand_label`/`_ctx` — P: границы `label>249`/`ctx>32` в
-  Rust-обёртке не сравнивались.
+  `d2k_hkdf_expand_label`/`_ctx` — P: C ограничивает label ≤58
+  (`d2k_crypto.h:88`) и ctx ≤32; Rust `quic.rs:893-906` допускает label до
+  249 (`u8::try_from(6+len)`) и всегда пишет `ctx_len=0`;
+  `examples/m6_crypto_trace.rs:24-36` принимает ctx, но кодирует его как
+  `context.len() as u8` без проверки >255. Production-метки совпадают,
+  границы и контекст — нет.
 - **AES-128-GCM:** `gf128_h_table`, `gf128_mul_fast`, `ghash`,
   `d2k_ghash_for_test`, `inc32`, `gctr`, `consttime_eq16`,
   `d2k_aes128_gcm_encrypt/decrypt` заменены `aes-gcm`; differential
