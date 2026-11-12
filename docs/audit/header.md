@@ -249,6 +249,9 @@ P означает неполное доказательство ветвей, N
   **PASS** (политика локального адреса QUIC).
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-layered-rx-differential.sh` —
   **PASS** (own-first layered RX identity-repeat, gzip-control, inconclusive-plan).
+- `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-ech-rx-ladder-differential.sh` —
+  **PASS** (порядок refill ECH RX-лестницы, батчи по 8 планов, курсор,
+  отсутствие fallback-плеч).
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-diagnostics-differential.sh` —
   **не выполнен**: сборка донорского `test_httpsearch` падает на duplicate
   symbols `d2k_plan_apply`, `d2k_plan_max_emit`, `d2k_actions_cancel`,
