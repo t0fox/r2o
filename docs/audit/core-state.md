@@ -960,6 +960,8 @@
 
 ## Углублённая сверка: plantlv.c (20 функций)
 
+**Прочитано построчно: 20/20 функций, 863 строки C (1–863).**
+
 - **Декодеры и числовые хелперы:** `b64_value`, `parse_base64`, `hex_nib`,
   `parse_hex`, `anchor_by_name`, `split_fields`, `parse_uint`, `parse_int`,
   `kv_u32`, `str_u32` сверены с `plan_text.rs::base64_value/base64/hex_nibble/
