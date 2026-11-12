@@ -1915,10 +1915,8 @@ pub fn encode_delete_name_probe(
     if name.is_empty() || name.len() > u8::MAX as usize {
         return Err("имя должно занимать от 1 до 255 байт");
     }
-    if !valid_tcp_probe_shape(shape) || !matches!(family, 4 | 6) || source_port == 0 {
-        return Err(
-            "удаление временной TCP-пробы требует поддерживаемую форму, IP family и ненулевой source port",
-        );
+    if !matches!(family, 4 | 6) || source_port == 0 {
+        return Err("удаление временной TCP-пробы требует IP family и ненулевой source port");
     }
     let mut body = Vec::with_capacity(5 + name.len());
     body.push(name.len() as u8);
@@ -1926,10 +1924,6 @@ pub fn encode_delete_name_probe(
     body.extend_from_slice(&[shape, family]);
     body.extend_from_slice(&source_port.to_be_bytes());
     encode_frame(COMMAND_DEL_NAME_PROBE, &body)
-}
-
-fn valid_tcp_probe_shape(shape: u8) -> bool {
-    is_tcp_plan_shape(shape)
 }
 
 fn valid_name_probe_plan_records(shape: u8, records: &[u8]) -> bool {

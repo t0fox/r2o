@@ -1396,7 +1396,9 @@ impl NamePlans {
         };
         let family = body[2 + name_len];
         let source_port = u16::from_be_bytes([body[3 + name_len], body[4 + name_len]]);
-        if !valid_tcp_probe_shape(shape) || !matches!(family, 4 | 6) || source_port == 0 {
+        // C `d2k_plantab_del_name_probe_family` форму не проверяет: чужая
+        // форма просто не совпадает и ACK остаётся OK (`plans.c:808-828`).
+        if !matches!(family, 4 | 6) || source_port == 0 {
             return (false, control::ACK_BAD_ARGS);
         }
         self.probes.remove(&NameProbeKey {
@@ -3831,6 +3833,21 @@ mod tests {
             plans.select(&packet).map(|selected| selected.id),
             Some(permanent_id)
         );
+    }
+
+    #[test]
+    fn delete_name_probe_accepts_unknown_shape_like_d2o() {
+        let mut plans = NamePlans::default();
+        let mut body = vec![b"example.test".len() as u8];
+        body.extend_from_slice(b"example.test");
+        body.extend_from_slice(&[0, 4]);
+        body.extend_from_slice(&40_000_u16.to_be_bytes());
+        let ack = plans.handle(&Frame {
+            kind: COMMAND_DEL_NAME_PROBE,
+            body,
+        });
+        assert!(ack.ok);
+        assert_eq!(ack.reason, control::ACK_OK);
     }
 
     #[test]
