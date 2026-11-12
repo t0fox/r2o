@@ -1326,6 +1326,8 @@ Inline-решения QUIC-зонда: суд этапа данных, stall-д�
 
 ## Углублённая сверка: udpplan.c и udpruntime.c (20 функций)
 
+**Прочитано построчно: 20/20 функций, 456 строк C (`udpplan.c` 1–266, `udpruntime.c` 1–190).** Сверены: сборщики quicsplit/ipfrag/udplen/fake/ttl/copies/voice/«нет воздействия», проверки arm/props, `d2k_udp_plan_build` (TLV → apply → >1 payload/IPID_ZERO/фрагменты/ORIG_PASS), raw-sink `AF_INET/SOCK_RAW/IPPROTO_RAW` + `IP_HDRINCL`/`IP_NODEFRAG`/`SO_MARK`, IPv6-frag sender, TTL/hoplimit get/set/restore, `ECONNREFUSED → -2`.
+
 - **Текстовые сборщики `udpplan.c`:** `append_fmt`, `emit_header_proto`,
   `append_hex`, `quic_arm_found`, `quic_split_plan_text`, `quic_plan_text`,
   `d2k_quic_arm_plan`, `d2k_quic_compose_plan`, `d2k_quic_delay_plan`,
@@ -1554,6 +1556,8 @@ mismatches: нет
 
 ## Углублённая сверка N-функций (финальные 12)
 
+**Прочитано построчно: 12/12 N-функций; тела прочитаны по указанным строкам, отсутствие аналогов в `crates/` подтверждено поиском.**
+
 - **`d2k_tls12_prf_for_test` (tls12.c 214–218):** тестовый экспорт PRF,
   используется `test_tls12.c:44,58`. R2O использует `rustls` TLS1.2 PRF;
   отдельного экспорта/вектора нет. **Не под `#ifdef`** — это обычный
@@ -1583,10 +1587,10 @@ mismatches: нет
   (`ttl_in_out`, 1315-1329), питая TTL-плечо. Во всём R2O нет
   `recvmsg`/`IP_RECVTTL`/`IPV6_HOPLIMIT`; quinn/`UdpSocket` TTL не
   отдают. N — packet-path.
-- **`d2k_quic_props_findings` (2275–2324):** текстовые выводы по
-  split/2 datagrams/v2/fixed bit/port для журнала (`sched.c:11506`).
-  В R2O есть имена кандидатов (`quic_replay.rs:628`), но нет функции
-  выводов. N — диагностический текст.
+- **`d2k_quic_props_findings` (`quicprobe.c` 2275–2324):** текстовые
+  выводы по split/2 datagrams/v2/fixed bit/port для журнала
+  (`sched.c:11506`). В R2O есть имена кандидатов (`quic_replay.rs:628`),
+  но нет функции выводов. N — диагностический текст.
 - **`prop_word` (quicarms.c 244, static):** tri-state → слово для лога.
   R2O использует свои reason-строки; отдельной функции нет. N —
   диагностика.
@@ -1600,11 +1604,12 @@ mismatches: нет
   `"tls13"`, не QUIC. R2O проверяет цепочку/имя через webpki
   (`r2o_quic_http3.rs:890`) и при mismatch рвёт handshake. N —
   controller/QUIC-поведение.
-- **`remember_live_failure` (httpsearch.c 520–550):** C хранит
+- **`remember_live_failure` (`httpsearch.c` 522–552):** C хранит
   addr/binding/execution/request_ms и лимиты байт. `HttpSearchRecord`
   (`main.rs:4468-4472`) содержит только `cut/repeat_path/repro_gap`;
-  `HttpLiveFailures` строится из `failed_http_programs` (выключенные
-  привязки каталога), а не из живых отказов. N — HTTP-search state.
+  `HttpLiveFailures` (`main.rs:4457-4460`) — только `programs/evidence_lost`
+  и строится из `failed_http_programs` (`main.rs:4594-4634`, каталожные
+  привязки), а не из живых отказов. N — HTTP-search state.
 
 Raw-UDP (`udp_raw_*`, `d2k_udp_plan_send`) после проверки — **P**:
 `IP_HDRINCL`/`IPV6_HDRINCL`/`SO_MARK` есть (`raw.rs:75,77,80`), но
@@ -1613,6 +1618,8 @@ Raw-UDP (`udp_raw_*`, `d2k_udp_plan_send`) после проверки — **P**
 `r2o_label` содержит те же состояния, отличается только «цель»/«мишень».
 
 ## Классификация N (12 функций)
+
+**Прочитано построчно: 12/12 N-функций; классификация причин сверена с телами и R2O-структурами.**
 
 | Причина | Функции | Влияние на packet path |
 |---|---|---|
@@ -2730,6 +2737,17 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 
 ## Углублённая сверка: link.c (43 функции)
 
+**Прочитано построчно: 43/43 функции, 1094 строки C (1–1094).** Сверены:
+`d2k_link_open/close/peer_closed`, `wait_readable`, `read_exact`, `write_all`,
+`hex_nibble`, `hex_decode`; полный декодер `d2k_link_next` (HELLO,
+HTTP_RESPONSE/HTTP_PORTAL, SUSPECT, STATS, EXCHANGE, CLIENT_TCP, SHAPE, ACK,
+APPLIED, PROTO, REFUSED, default); `send_name_plan` (имя 1..255, transport
+6/17, hex, shape/family, optional sport, plan, optional trial/area_id);
+`send_area_key`, `area_context_valid`, все `set/del_*` name/suffix/bypass/
+addr/addr_probe/arm_shape/del_name/del_name_probe; `d2k_link_set_https`,
+`d2k_link_set_stall_budgets`; `d2k_ev_outer_appdata`. Подтверждённые отличия
+перечислены ниже.
+
 - **Открытие/чтение кадра:** `d2k_link_open`, `d2k_link_close`,
   `d2k_link_peer_closed`, `wait_readable`, `read_exact`, `write_all`,
   `hex_nibble`, `hex_decode` сверены с `ControlClient`/`read_frame`/
@@ -2778,6 +2796,13 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 
 ## Углублённая сверка: diagnostics.c (41 функция)
 
+**Прочитано построчно: 41/41 функция, 605 строк C (1–605).** Сверены: кольца
+events/limits/samples/memory_history/anomalies/growth, счётчики памяти по 6 сайтам,
+`copy`/`js`/`number`, `read_proc`/`read_detail`/`read_status`, 60-секундный sample,
+история памяти и аномалия роста RSS, `d2k_diag_write` (schema=1, memory_tracking,
+madvise, anomalies, events, limit_transitions, memory_history, samples,
+memory_details).
+
 - **Ёмкости колец совпадают:** C `EVENTS=64`, `LIMIT_EVENTS=32`, `SAMPLES=120`,
   `MEMORY_HISTORY=1440`, `ANOMALIES=8`, `GROWTH_POINTS=10`, `PROCESS_COUNT=3`;
   Rust `EVENT_CAPACITY=64`, `LIMIT_CAPACITY=32`, `SAMPLE_CAPACITY=120`,
@@ -2798,13 +2823,15 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
   `first_process_detail_survives_process_exit`,
   `d2o_periodic_rss_sample_matches_c`.
   **Подтверждённые расхождения истории памяти:** C пишет фактические
-  `rollup_status/errno/rollup[5]`, Rust — `0/null/null`; C даёт `null`
-  для недоступных RSS/VmData/VmSwap/RssAnon, Rust — `0` (`unwrap_or(0)`).
-  P.
+  `rollup_status/errno/rollup[5]` (`diagnostics.c:426-433`), Rust в
+  memory_history кладёт `0/null/null` (`diagnostics.rs:949-968`); C даёт
+  `null` для недоступных RSS/VmData/VmSwap/RssAnon, Rust — `0`
+  (`unwrap_or(0)`, `diagnostics.rs:938-941`). P.
 - **`d2k_diag_write`:** C вручную пишет `report.json` schema=1 с лимитом
   448 КиБ; Rust сериализует `Recorder::write_report` через serde_json с тем
   же `REPORT_MAX`. **Отличия:** C пишет `http_storage_limits` только при
-  `ns>0`, Rust — всегда; C выводит `reason_source` из `protocol=="http"`,
+  `ns>0` (`diagnostics.c:476-481`), Rust — всегда (`diagnostics.rs:1130-1135`);
+  C выводит `reason_source` из `protocol=="http"` (`diagnostics.c:493`),
   Rust берёт его из события. `r2o-diagnostics-differential.sh` сравнивает
   `ring_bytes/event/snapshots/http_records`; остальные поля — unit, не
   C-oracle. P.
@@ -2812,7 +2839,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
   кольца и счётчики `event_total/limit_total/anomaly_total/write_failures`
   перенесены; `record_anomaly` пишет kind/code/rss_delta/accounted_delta/
   stage в кольцо 8. **Подтверждённые расхождения:** (1) предел `reason` —
-  255 байт в C (`reason[256]`) и **1024** в Rust (`diagnostics.rs:768`);
+  255 байт в C (`reason[256]`) и **1024** в Rust (`diagnostics.rs:766-772`);
   (2) `d2k_diag_record_write_error` в C сохраняет код ошибки в
   `anomaly.code` и печатает `error_code`, Rust `record_write_error(stage)`
   всегда пишет `null` (`diagnostics.rs:1165-1176`) — errno/код теряются.
@@ -2820,6 +2847,13 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
   переполнение колец и код ошибки нет.
 
 ## Углублённая сверка: catalog.c (60 функций)
+
+**Прочитано построчно: 60/60 функций, 1477 строк C (1–1477).** Сверены:
+JSON-курсор/числа/строки/RFC3339/пропуск/предел глубины, `parse_object`/
+`parse_array`/`grow`, signal/fingerprint/plan/binding/box/domain/
+network_whitelist/catalog handlers, `prune_unavailable_domain_groups`, free/
+memory_bytes, load с проверкой хвоста, все writer'ы, `d2k_catalog_save` и
+`d2k_catalog_save_atomic`.
 
 - **JSON-парсер:** `jpeek`, `jeat`, `jeat_null_if_present`, `jparse_raw_int`,
   `jparse_i32/u8/u16`, `jparse_bool_i`, `jparse_string_dyn/fixed`,
@@ -2846,9 +2880,11 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 - **`handle_box_key`/`parse_box`/`elem_box`/`d2k_cat_shape_fits`:**
   boxes/fingerprint/plans/bindings перенесены (`BoxRecord` serde);
   **`d2k_cat_shape_fits` — подтверждённое расхождение:** C принимает
-  только `stored==0 || got==0 || stored==got`, Rust `group_shape_fits`
-  дополнительно принимает `saved==MODERN && observed==ECH_TCP`
-  (`live.rs:284`, `main.rs:3023`).
+  `stored==0 || got==0 || stored==got` (`catalog.c:905-912`); Rust
+  `group_shape_fits` (`live.rs:284-288`, `main.rs:3023`) принимает
+  `saved==0 || saved==observed || (saved==MODERN && observed==ECH_TCP)` —
+  то есть **не принимает `got==0`** при ненулевом `stored` и дополнительно
+  принимает modern→ECH_TCP.
 - **`handle_domain_observation`/`parse_domain_observations`/
   `handle_net_whitelist_key`/`handle_catalog_key`/`parse_catalog_obj`:**
   domain_state/observations до 256, network_whitelist и top-level
@@ -2877,6 +2913,13 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
   систематически разные; C/Rust differential на объём нет. P.
 
 ## Углублённая сверка: compose.c (53 функции)
+
+**Прочитано построчно: 53/53 функции, 1799 строк C (1–1799).** Сверены:
+белый список 266 имён, TLV-билдеры (`tlv_rec`/`tlv_header`/`plan_tlv_stamp_ident`),
+пять планов вопросов (overlap/reorder/badsum/checksum/protocol), `ev_matches_flow`,
+`wait_for_event3`/`wait_for_event`, bind/contact и TCP-profile connect,
+`d2k_props_ask_traced` (applied+server_hello+unsent, ключ потока, снятие пробы),
+текстовые планы и fallback-перебор, `d2k_arm_plan`, `d2k_compose`.
 
 - **Белый список и TLV-билдеры:** `d2k_net_whitelist_count/name`,
   `wr16be`, `rd16be`, `wr32be`, `tlv_rec`, `tlv_header`, `to_hex` сверены с
@@ -2976,6 +3019,15 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 
 ## Углублённая сверка: sched.c (282 функции)
 
+**Прочитано построчно: 282/282 функции, 12 364 строки C (1–12364).** Проверены:
+ресурсные хелперы (`/proc/stat`, `meminfo`, conntrack, EWMA, AIMD-предел),
+все состояния `T_*` (включая `T_SHAPE_WAIT`, voice/QUIC), кольца cooldown/
+dead-address/late-RST/clean-handshake, ECH-свидетели и RR, QUIC named/multi и
+quicdeny/recheck, каталог/области/исключения, `stall_budgets_push`,
+`known_plans`/`own_first_plans`/`refill_from_fallback`/RX-лестница и подбор
+белого имени, `on_suspect`/`on_shape`/`on_applied`/`on_refused`/`on_exchange`,
+`verify_confirm`, `worker_run_body`, `d2k_sched_tick` целиком.
+
 - **Карта состояний:** C `T_ASKING → T_PROPS_* → T_PLANNING →
   T_TRIAL_SETTLE → T_VERIFY* → T_WATCHING`, очередь, cooldown, dead-address,
   ECH-лестница и voice перенесены в `R2oDiscoverySearches`/
@@ -3023,7 +3075,10 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 - **Остальные 274 функции:** статические хелперы (CPU/meminfo/conntrack,
   cooldown/dead, fingerprint, task slots, worker args, plan ident/stamp,
   close/reset) наследуют статус владельца; E/P выставлены по наличию
-  differential/unit, без полного C/Rust построчного diff.
+  differential/unit. **После построчного прохода 2026-11-12** все 282 функции
+  прочитаны; новых подтверждённых расхождений сверх перечисленных выше не
+  найдено. Полного C/Rust byte-diff по-прежнему нет — это ограничение
+  доказательств, а не скрытый пробел.
 
 ## Углублённая сверка: crypto.c / p256.c / x25519.c (61 функция)
 
@@ -4803,14 +4858,17 @@ ECH, середина приветствия. R2O: `r2k-core/src/tls.rs`.
 
 ## Углублённая сверка: 11 N-функций
 
+**Прочитано построчно: 11/11 N-функций; тела прочитаны по указанным строкам, отсутствие/частичность аналогов в R2O подтверждены поиском по `crates/`.**
+
 - **`count_reason` (static, 165–186):** гистограмма причин отказа по
   указателю/строке, до 32 записей, печатается в итоговой сводке `d2kd`.
   R2O причины передаёт в `RefusedEvent`/журнал, но агрегированной таблицы
   и печати нет. N — диагностика, packet-path не меняет.
 - **`offline_self_check` (static, 1118–1123):** `--offline-self-check`
   проверяет `D2K_CTL_PROTO_VERSION == D2K_RUNTIME_WIRE` и SHA-256("abc")
-  по эталону. R2O SHA-256 покрыт `test-core-crypto-differential.sh`, но
-  самой CLI-опции нет. N — CLI/self-check.
+  по эталону. R2O SHA-256 покрыт `test-core-crypto-differential.sh`; своя
+  offline-самопроверка есть у панели (`r2o-panel/tests/cli.rs:135`), но у
+  `r2o-datapath` (преемник `d2kd`) этой CLI-опции нет. N — CLI/self-check.
 - **`d2k_session_nat_stats` (650–656):** глобальные `nat_ok/miss/none/
   retried`; R2O `proc_nat` эти счётчики не ведёт. N — диагностика NAT.
 - **`d2k_session_applied` (3541–3543):** агрегат `s->applied`; R2O
@@ -5490,6 +5548,8 @@ Rtnetlink: дампы правил, одиночный поиск маршрут
 
 ## 9a. Углублённая сверка 5 N-функций
 
+**Прочитано построчно: 5/5 N-функций (`ctl.c:143-144,316`; `plans.c:1058-1060` + инкременты `:1140,:1209,:1233`; `routemark.c:327-343`).** В R2O подтверждено отсутствие отдельных геттеров `listen_fd`/`peer_fd`/`sent` и текстового `describe`; `shape_misses` объявлен, но не инкрементируется.
+
 - **`d2k_ctl_listen_fd`/`d2k_ctl_peer_fd` (ctl.c 143–144):** C отдаёт
   наружу listen/peer fd для внешнего poll-цикла. R2O инкапсулирует оба
   дескриптора в `ControlServer` (`control.rs`), а `main.rs:1388` вызывает
@@ -5571,6 +5631,12 @@ Rtnetlink: дампы правил, одиночный поиск маршрут
   P на сложные ветви/дифференциалы.
 
 ## 9c. Углублённая сверка ctlsrv.c (12 функций)
+
+**Прочитано построчно: 12/12 функций, 731 строка C (1–731).** Сверены тела
+`put_key`, `d2k_plan_fits`, `ack`/`ack_trial`, `d2k_ctlsrv_greet`,
+`d2k_ctlsrv_peer_closed`, `canonical_address`/`addr_shape_valid`,
+`read_probe_flow`, `d2k_ctlsrv_command` (13 команд), `d2k_ctlsrv_pump` и
+`d2k_ctlsrv_http80_event`; подтверждённые отличия перечислены ниже.
 
 - **`put_key` (23–37):** 38-байтовый ключ полями: family, low/high адрес
   (4/16), low/high порт BE, proto. Совпадает с `TcpFlowKey::wire_key`
@@ -6446,6 +6512,8 @@ typedef/#define/прототипы, сверены по использовани
 ---
 
 ## Углублённая сверка 12 N-функций
+
+**Прочитано построчно: 12/12 строк N-среза (10 функций); тела прочитаны, R2O-отсутствие/частичность подтверждены поиском по `crates/`.**
 
 - **`d2k_detect_stop_all` (bridge.c 45):** C ставит липкий
   `g_stop_all`, который читает `stop_asked` вместе с флагом задачи. R2O

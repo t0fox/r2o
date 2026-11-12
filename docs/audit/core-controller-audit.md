@@ -1,5 +1,9 @@
 # Аудит паритета D2O (C) → R2O (Rust): core и controller
 
+> Исторический отчёт (2026-11-07). Актуальный построчный реестр всех 1982 функций —
+> `header.md` и групповые файлы `core-state.md`, `core-net.md`, `datapath-core.md`,
+> `datapath-plan.md`, `detect.md`; статусы ниже могут быть устаревшими.
+
 Дата аудита: 2026-11-07. Источники: production-файлы `E:\d2o\core\*.c` (без `test_*`), `E:\r2o\crates\r2o-controller/src`, `E:\r2o\crates\r2k-core/src`, тесты и дифференциалы `E:\r2o\crates\*/tests`, `E:\r2o\scripts`, документы `functional-parity-matrix.md` и `parity-function-inventory.md`.
 
 Аудит выполнен только по исходникам и существующим тестам. Ничего не собиралось и не запускалось: в PATH нет `git`, `cargo`, `rustc`. Все «исторические» доказательства помечены явно; они не перепроверены в этом окружении.
