@@ -7,6 +7,14 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 const R2O_ROUTE_MTU_CACHE_CAPACITY: usize = 16;
 const R2O_RAW_MTU_FLOOR: usize = 576;
+/// C `D2K_RAW_CANT_IPID | D2K_RAW_CANT_IPSUM` (`d2k_raw.h`).
+pub const R2O_RAW_CANT_IPID: u32 = 1;
+pub const R2O_RAW_CANT_IPSUM: u32 = 2;
+pub const R2O_RAW_LIMITS: u32 = R2O_RAW_CANT_IPID | R2O_RAW_CANT_IPSUM;
+
+fn r2o_raw_mark_option(mark: u32) -> Option<u32> {
+    (mark != 0).then_some(mark)
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RawSendStats {
@@ -52,13 +60,6 @@ impl RawSocket {
                 "raw-отправка поддерживает только IPv4 или IPv6",
             ));
         }
-        if mark == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "для raw-отправки нужна ненулевая --mark",
-            ));
-        }
-
         let fd = unsafe {
             libc::socket(
                 family,
@@ -77,7 +78,9 @@ impl RawSocket {
             (libc::IPPROTO_IPV6, libc::IPV6_HDRINCL)
         };
         set_option(fd.as_raw_fd(), level, option, &one)?;
-        set_option(fd.as_raw_fd(), libc::SOL_SOCKET, libc::SO_MARK, &mark)?;
+        if let Some(mark) = r2o_raw_mark_option(mark) {
+            set_option(fd.as_raw_fd(), libc::SOL_SOCKET, libc::SO_MARK, &mark)?;
+        }
         let maxlen_declared = interface.is_some_and(|name| !name.is_empty());
         let maxlen = r2o_pick_maxlen(interface);
         Ok(Self {
@@ -99,6 +102,11 @@ impl RawSocket {
 
     pub fn send_stats(&self) -> RawSendStats {
         self.send_stats.get()
+    }
+
+    /// C `d2k_raw_limits`: маска того, чего этот способ отправки не умеет.
+    pub fn limits(&self) -> u32 {
+        R2O_RAW_LIMITS
     }
 
     /// Подстраивает общий предел под MTU интерфейсов текущих выходных маршрутов.
@@ -498,7 +506,9 @@ fn r2o_route_mtu(mark: u32, family: u8, destination: [u8; 16]) -> usize {
         return 0;
     }
     let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
-    let _ = set_option(fd.as_raw_fd(), libc::SOL_SOCKET, libc::SO_MARK, &mark);
+    if let Some(mark) = r2o_raw_mark_option(mark) {
+        let _ = set_option(fd.as_raw_fd(), libc::SOL_SOCKET, libc::SO_MARK, &mark);
+    }
     let mut address: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
     let (address_len, level, option) = if family == 4 {
         let address = unsafe { &mut *(&mut address as *mut _ as *mut libc::sockaddr_in) };
@@ -670,9 +680,10 @@ fn set_option<T>(fd: i32, level: i32, option: i32, value: &T) -> io::Result<()> 
 #[cfg(test)]
 mod tests {
     use super::{
-        R2O_ROUTE_MTU_CACHE_CAPACITY, R2oRouteMtuCache, outgoing_packet,
-        r2o_effective_route_maxlen, r2o_parse_interface_flags, r2o_select_egress_mtu,
-        r2o_tls_route_segment_cap_with,
+        R2O_RAW_CANT_IPID, R2O_RAW_CANT_IPSUM, R2O_RAW_LIMITS, R2O_ROUTE_MTU_CACHE_CAPACITY,
+        R2oRouteMtuCache, outgoing_packet, r2o_effective_route_maxlen, r2o_interface_mtu,
+        r2o_packet_route_key, r2o_parse_interface_flags, r2o_pick_maxlen, r2o_raw_mark_option,
+        r2o_select_egress_mtu, r2o_tls_route_segment_cap_with,
     };
     use proptest::prelude::*;
     use r2k_core::plan::{Emission, EmitKind};
@@ -904,6 +915,43 @@ mod tests {
                 outgoing_packet(&packet, family).unwrap().family,
                 if family == libc::AF_INET { 4 } else { 6 }
             );
+        }
+    }
+
+    #[test]
+    fn raw_mark_zero_is_allowed_and_limits_match_c_mask() {
+        assert_eq!(r2o_raw_mark_option(0), None);
+        assert_eq!(r2o_raw_mark_option(0x2e), Some(0x2e));
+        assert_eq!(R2O_RAW_LIMITS, R2O_RAW_CANT_IPID | R2O_RAW_CANT_IPSUM);
+        assert_eq!(R2O_RAW_LIMITS, 3);
+    }
+
+    #[test]
+    fn packet_route_key_extracts_ipv4_and_ipv6_destination() {
+        let mut v4 = vec![0; 20];
+        v4[0] = 0x45;
+        v4[16..20].copy_from_slice(&[198, 51, 100, 2]);
+        let mut expected = [0; 16];
+        expected[..4].copy_from_slice(&[198, 51, 100, 2]);
+        assert_eq!(r2o_packet_route_key(&v4), Some((4, expected)));
+
+        let mut v6 = vec![0; 40];
+        v6[0] = 0x60;
+        let address = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+        v6[24..40].copy_from_slice(&address);
+        assert_eq!(r2o_packet_route_key(&v6), Some((6, address)));
+
+        assert_eq!(r2o_packet_route_key(&[0x30; 20]), None);
+        assert_eq!(r2o_packet_route_key(&[0x45; 10]), None);
+    }
+
+    #[test]
+    fn interface_mtu_reads_sysfs_and_named_limit_uses_it() {
+        assert_eq!(r2o_interface_mtu("../lo"), None);
+        assert_eq!(r2o_interface_mtu("."), None);
+        if let Some(mtu) = r2o_interface_mtu("lo") {
+            assert!(mtu > 0);
+            assert_eq!(r2o_pick_maxlen(Some("lo")), mtu);
         }
     }
 

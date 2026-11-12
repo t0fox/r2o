@@ -87,9 +87,9 @@ recheck 1982 1982 equal True
 | core-net | 548 | 186 | 349 | 13 | 0 |
 | core-state | 692 | 177 | 511 | 4 | 0 |
 | datapath-core | 400 | 145 | 244 | 11 | 0 |
-| datapath-plan | 183 | 119 | 64 | 0 | 0 |
+| datapath-plan | 183 | 123 | 60 | 0 | 0 |
 | detect | 159 | 47 | 102 | 10 | 0 |
-| **Итого** | **1982** | **674** | **1270** | **38** | **0** |
+| **Итого** | **1982** | **678** | **1266** | **38** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 674 / P 1270 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 678 / P 1266 /
 N 38 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -347,9 +347,9 @@ P означает неполное доказательство ветвей, N
 | core-net | 548 | 186 | 349 | 13 | 0 |
 | core-state | 692 | 177 | 511 | 4 | 0 |
 | datapath-core | 400 | 145 | 244 | 11 | 0 |
-| datapath-plan | 183 | 119 | 64 | 0 | 0 |
+| datapath-plan | 183 | 123 | 60 | 0 | 0 |
 | detect | 159 | 47 | 102 | 10 | 0 |
-| **Итого** | **1982** | **674** | **1270** | **38** | **0** |
+| **Итого** | **1982** | **678** | **1266** | **38** | **0** |
 
 
 ---
@@ -5342,8 +5342,8 @@ Static-хелперы наследуют статус владельца (вла
 
 | Статус | Кол-во |
 |---|---:|
-| E | 119 |
-| P | 64 |
+| E | 123 |
+| P | 60 |
 | N | 0 |
 | ? | 0 |
 | **Всего** | **183** |
@@ -5355,7 +5355,7 @@ Static-хелперы наследуют статус владельца (вла
 | datapath/plans.c | 75 | 40 | 35 | 0 | 0 |
 | datapath/routemark.c | 23 | 21 | 2 | 0 | 0 |
 | datapath/plan_parse.c | 17 | 14 | 3 | 0 | 0 |
-| datapath/raw.c | 17 | 8 | 9 | 0 | 0 |
+| datapath/raw.c | 17 | 12 | 5 | 0 | 0 |
 | datapath/plan_apply.c | 15 | 14 | 1 | 0 | 0 |
 | datapath/ctl.c | 14 | 11 | 3 | 0 | 0 |
 | datapath/ctlsrv.c | 12 | 7 | 5 | 0 | 0 |
@@ -5775,17 +5775,17 @@ mark обязателен. Совпадают: `pick_maxlen`/`adopt_egress`/`rou
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| if_mtu | 64-81 | 18 | static: MTU интерфейса через `SIOCGIFMTU` | `raw.rs:301` `r2o_interface_mtu` (sysfs `/sys/class/net/<if>/mtu`) | P | C `!name \|\| !*name→0`; `socket(AF_INET,SOCK_DGRAM,0)`; нулевой `ifreq`; `snprintf(ifr_name,"%s",name)` (обрезает длинное имя); `ioctl(SIOCGIFMTU)`; успех и `mtu>0` → значение; `close`. Rust читает `mtu` из sysfs, отвергает имена с `/`, `\\`, `.`, `..`, парсит `usize` и фильтрует 0; механизм иной, ioctl-путь не проверен. Теста на реальный интерфейс нет. |
-| pick_maxlen | 92-116 | 25 | static: предел по named iface или наименьшему MTU поднятых (без loopback) | `raw.rs:270` `r2o_pick_maxlen` | P | `общий_предел_берёт_наименьший...` (raw.rs:836) тестирует выбор через инъекцию; сам обход sysfs и fallback 1500 против `D2K_RAW_MTU_FALLBACK` не сверены. |
+| if_mtu | 64-81 | 18 | static: MTU интерфейса через `SIOCGIFMTU` | `raw.rs:301` `r2o_interface_mtu` (sysfs `/sys/class/net/<if>/mtu`) | E | C `!name \|\| !*name→0`; `ioctl(SIOCGIFMTU)`; успех и `mtu>0`. Rust читает `mtu` из sysfs, отвергает имена с `/`, `\\`, `.`, `..`, фильтрует 0. Значение `lo` и отказ для `../lo`/`.` проверены `interface_mtu_reads_sysfs_and_named_limit_uses_it`. |
+| pick_maxlen | 92-116 | 25 | static: предел по named iface или наименьшему MTU поднятых (без loopback) | `raw.rs:270` `r2o_pick_maxlen` | E | C named iface → `if_mtu`, иначе наименьший MTU поднятых без loopback, fallback `D2K_RAW_MTU_FALLBACK=1500`. Rust тот же выбор по sysfs; named-путь проверен `interface_mtu_reads_sysfs_and_named_limit_uses_it` (MTU `lo` совпадает), обход/порог — `общий_предел_берёт_наименьший...`. |
 | route_mtu | 140-176 | 37 | static: MTU маршрута к адресу (UDP connect + `IP_MTU`/`IPV6_MTU`) | `raw.rs:484` `r2o_route_mtu` | P | C под `#ifdef IP_MTU`: `socket(family==6?AF_INET6:AF_INET,SOCK_DGRAM,0)`; `SO_MARK` только при `mark!=0`; sockaddr с портом 443 и адресом; `connect`; `getsockopt(IPPROTO_IPV6/IPPROTO_IP, IPV6_MTU/IP_MTU)`; `mtu>0`; `close`; без `IP_MTU` — 0. Rust `r2o_route_mtu` те же шаги, но `SOCK_DGRAM\|SOCK_CLOEXEC`, `IPPROTO_UDP`, `SO_MARK` ставится всегда (в т.ч. 0), `libc::IP_MTU`/`IPV6_MTU`;结果 0 при ошибке connect/getsockopt. Требует root/kernel, теста нет. |
 | say | 181-191 | 11 | static: текст ошибки с сохранением errno | `io::Error` + `eprintln!` | P | C `!err \|\| cap==0→return`; сохраняет `errno`, `vsnprintf(err,cap,fmt,ap)`, восстанавливает `errno` (вызывающий читает его после сообщения). Rust возвращает `io::Error`/печатает; errno сохраняется внутри `io::Error`, отдельного буферного форматтера нет, тексты иные. |
 | d2k_raw_open | 193-256 | 64 | открыть IPv4 raw, `IP_HDRINCL`, `SO_MARK` при mark≠0, вычислить maxlen; `fd6/fragment_fd=-1` | `raw.rs:48-93 RawSocket::open` | **P** | **Подтверждённые отличия:** C создаёт только IPv4 `fd`, а `fd6`/`fragment_fd` открывает лениво; mark=0 допустим (`if (mark != 0)` `:234`), R2O требует **ненулевой** mark (`raw.rs:55-60`). R2O — один объект на одно семейство (`AF_INET`/`AF_INET6` + `IPPROTO_RAW`, `IP_HDRINCL`/`IPV6_HDRINCL`, `SO_MARK`, `raw.rs:62-92`); C держит IPv4+IPv6+IPv4-fragment+IPv6-fragment в одном `d2k_raw`. Тестов open на живой системе нет. |
 | d2k_raw_close | 258-269 | 12 | закрыть fd/фрагментный сокет | `Drop for RawSocket` (`OwnedFd`) | E* | C `!r→return`; `close(fd)` при `>=0`; `close(fragment_fd)` при `>=0`; `d2k_ip6frag_sender_close(&fragments6)`; `close(fd6)` при `>=0`; `free(r)`. Rust `OwnedFd` закрывает дескриптор при `Drop`; отдельный fragment/fd6 в R2O отсутствует, но все владеемые fd освобождаются типами. Утечек нет. |
-| d2k_raw_limits | 271-273 | 3 | маска ограничений способа отправки (`CANT_IPID \| CANT_IPSUM`) | нет API; `engine.rs:2091` отвергает `POISON_IPID_ZERO` | P | C `r ? r->limits : (CANT_IPID\|CANT_IPSUM)`; `limits` выставляется в `d2k_raw_open` и не зависит от настроек. Rust отдельной маски нет: `CANT_IPSUM` не выражен (суммы считает wire), `CANT_IPID` заменён проверкой `engine.rs:2091`/`raw.rs:162-167` (нулевой IPv4 ID отвергается). |
+| d2k_raw_limits | 271-273 | 3 | маска ограничений способа отправки (`CANT_IPID \| CANT_IPSUM`) | `raw.rs:18-22` константы, `RawSocket::limits` (`:112`) | E | C `r ? r->limits : (CANT_IPID\|CANT_IPSUM)`. Rust `R2O_RAW_LIMITS = R2O_RAW_CANT_IPID | R2O_RAW_CANT_IPSUM`, `RawSocket::limits()` возвращает её; `CANT_IPID` дополнительно выражен проверкой нулевого IPv4 ID (`engine.rs:2091`/`raw.rs:162-167`), `CANT_IPSUM` — расчётом сумм в `wire.rs`. Тест `raw_mark_zero_is_allowed_and_limits_match_c_mask`. |
 | d2k_raw_maxlen | 275-279 | 5 | предел посылки, никогда не 0 | `raw.rs:96` `maxlen` | E | C `(r && r->maxlen) ? r->maxlen : D2K_RAW_MTU_FALLBACK` — ноль означал бы «предел не объявлен» и отключил бы проверку. Rust `maxlen()` возвращает `Cell`, `r2o_pick_maxlen` всегда даёт `>=1` (fallback 1500). Тест `предел_маршрута_учитывает_объявленный_интерфейс...` (raw.rs:820). |
 | d2k_raw_adopt_egress | 281-303 | 23 | принять наименьший MTU выходных ifindex (если предел не объявлен) | `raw.rs:106` `r2o_adopt_egress` | E | C очищает `names[0]`; `!r/!oifs/!n/maxlen_declared→-1`; цикл `if_indextoname`+`if_mtu`, дописывает `"name mtu"` в names с обрезкой, пропускает `m<FLOOR`, берёт минимум; `!best→-1`; `best==egress_mtu→0`; иначе `egress_mtu=best`; `best==maxlen→0`; иначе `maxlen=best`, 1. Rust `r2o_adopt_egress`: declared→None; `r2o_select_egress_mtu` (ifindex 0/None и `<FLOOR` пропускаются) → минимум; тот же mtu → None; иначе `maxlen=mtu`, `Some(mtu)`. Тест `общий_предел_берёт_наименьший...` (raw.rs:836). |
 | blend | 306-309 | 4 | static: маршрут против общего предела при объявленном iface | `raw.rs:351` `r2o_effective_route_maxlen` | E | C `maxlen_declared ? min(route,cap_all) : route`. Rust `(0,_)→maxlen`, `(route,true)→min(route,maxlen)`, `(route,false)→route`; ветвь route=0 — отсутствие ответа маршрута. Тест `предел_маршрута_учитывает_объявленный_интерфейс_и_запасной_mtu` (raw.rs:820). |
-| d2k_raw_route_maxlen | 311-313 | 3 | MTU маршрута для dst[4] | `raw.rs:119` `packet_route_maxlen` | P | C `route_maxlen_family(r,dst,4)`. Rust `packet_route_maxlen(packet)` извлекает family и адрес из пакета (`r2o_packet_route_key`), для IPv4 — те же 4 байта; вход иной (пакет, а не `dst[4]`), IPv6-путь и fallback на общий предел отдельно не сверены. |
+| d2k_raw_route_maxlen | 311-313 | 3 | MTU маршрута для dst[4] | `raw.rs:119` `packet_route_maxlen` | E | C `route_maxlen_family(r,dst,4)`; Rust `packet_route_maxlen(packet)` извлекает family и адрес (`r2o_packet_route_key`), IPv4-байты те же, IPv6 — 16 байт, при неподдержанном пакете — общий предел. Тест `packet_route_key_extracts_ipv4_and_ipv6_destination` покрывает IPv4/IPv6/неизвестную версию и короткий пакет. |
 | d2k_raw_route_maxlen_family | 315-339 | 25 | кэш из 16 маршрутов, порог 1280/576, запись кольцом | `raw.rs:136` `r2o_route_maxlen`, `:367` `R2oRouteMtuCache` | E | C `cap_all=maxlen`; `!r/!dst/family not 4/6→cap_all`; `alen`; поиск по `ROUTE_CACHE` (mtu!=0, family, memcmp) → `blend`; промах → `route_mtu`; `m<1280/576→cap_all` без записи; иначе `route[next%16]={ip,family,mtu}`, `next++`, `blend`. Rust `r2o_get_or_lookup`: поиск по family+destination; промах → lookup; `<1280/576→0` без записи; при 16 записях `pop_front`; `push_back`; `r2o_effective_route_maxlen`. Тест `кэш_mtu_сохраняет_только_полезные_маршруты...` (raw.rs:786). |
 | d2k_raw_prepare | 341-404 | 64 | ленивая подготовка IPv6/fragment-сокета, проверка длин и контекста фрагмента | `raw.rs:559-651 outgoing_packet/ipv4_udp_fragment/ipv6_udp_fragment` | **P** | **Подтверждённые отличия:** C для IPv6 `pkt[6]==44` вызывает `d2k_ip6frag_prepare` (AF_PACKET); иначе лениво открывает `fd6` с `IPV6_HDRINCL`+`SO_MARK` (`:353-372`). Для IPv4-фрагмента требует `pkt[0]==0x45`, `pkt[9]==17`, ненулевой IPID и открывает отдельный `fragment_fd` с `IP_HDRINCL` + **обязательным `IP_NODEFRAG`** (`ENOPROTOOPT`, если опции нет) + `SO_MARK` (`:374-399`). R2O `ipv4_udp_fragment`/`ipv6_udp_fragment` только валидируют фрагмент и шлют через один `RawSocket`; `IP_NODEFRAG` отсутствует, отдельного fragment-сокета и ленивого `fd6` нет. Тест `raw.rs:874 raw_sender_accepts_only_well_formed_ipv4_and_ipv6_udp_fragments`. |
 | d2k_raw_send | 406-512 | 107 | `sendto(MSG_DONTWAIT)`, EINTR-повтор, EMSGSIZE → снизить предел | `raw.rs:147` `send_packet`, `:155` `send_packet_inner` | **P** | **Совпадает:** `sendto(MSG_DONTWAIT)` в цикле, повтор только на EINTR (`raw.rs:186-222`), короткая запись — ошибка, EMSGSIZE при длине выше 1280/576 понижает route-кэш и общий предел, busy считается для EAGAIN/EWOULDBLOCK/ENOBUFS (`record_send_outcome`), счётчики sent/errors/busy. **Отличия:** C выбирает отдельный `fragment_fd` для IPv4-фрагментов и `fragments6` для IPv6; Rust шлёт всё через один `RawSocket` своего семейства без `IP_NODEFRAG`; реальная root-отправка в тестах не выполнялась. |
@@ -5793,8 +5793,9 @@ mark обязателен. Совпадают: `pick_maxlen`/`adopt_egress`/`rou
 | d2k_raw_errors | 518-520 | 3 | счётчик ошибок | `raw.rs:100` `send_stats().errors` | E | C `r ? errors : 0`; `errors++` при провале `d2k_raw_prepare`, IPv6-фрагмента, короткой/неудачной `sendto`. Rust `record_send_outcome` увеличивает `errors` для `Err`, если пакет >=20 байт и версия 4/6; prepare-ошибки в `send_packet_inner` возвращаются до `record_send_outcome`, но `outgoing_packet`/ID-проверка тоже дают `Err` и считаются. Тест raw.rs:231. |
 | d2k_raw_busy | 522-524 | 3 | счётчик EAGAIN/ENOBUFS | `raw.rs:100` `send_stats().busy` | E | C `r ? busy : 0`; `busy++` при `EAGAIN/EWOULDBLOCK/ENOBUFS` в IPv6-фрагменте и `sendto`. Rust `record_send_outcome` проверяет `raw_os_error()` на те же три кода и увеличивает `busy`; тест raw.rs:231. |
 
-Итог по файлу: E 8, P 9, N 0. Главные отличия: один сокет на семейство, обязательный
-mark, нет `IP_NODEFRAG`, нет ленивого открытия, нет маски ограничений.
+Итог по файлу: E 12, P 5, N 0. Закрыты `if_mtu`/`pick_maxlen`, `limits`, route-maxlen
+и допустимый `mark=0` с условным `SO_MARK`. Остаются: один сокет на семейство,
+`IP_NODEFRAG`/fragment-сокет, ленивое открытие IPv6, `say` и непроверенный live `route_mtu`.
 
 ---
 
