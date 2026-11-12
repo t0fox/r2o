@@ -271,6 +271,9 @@ P означает неполное доказательство ветвей, N
   **PASS** (безопасный LAN-выбор панели и умолчания bind).
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-scheduler-concurrent-endpoint-differential.sh` —
   **PASS** (конкурентный опрос одного endpoint при свободных слотах).
+- `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-raw-connect-fallback-differential.sh` —
+  **PASS**, 18 тестов (raw-connect timeout recovery, control/retry на том же peer,
+  отмена на каждой стадии, CLEAR-подтверждение, seeded baseline, transport-ошибки).
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-diagnostics-differential.sh` —
   **не выполнен**: сборка донорского `test_httpsearch` падает на duplicate
   symbols `d2k_plan_apply`, `d2k_plan_max_emit`, `d2k_actions_cancel`,
