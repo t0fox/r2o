@@ -279,6 +279,11 @@ P означает неполное доказательство ветвей, N
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-raw-emission-cancel-differential.sh` —
   **PASS** (production tcp-split packets после нормализации IPv4 ID/checksum;
   отмена raw-эмиссии: `result=cancelled packets=2 waited_ms=20`).
+- `R2O_DONOR_CORE=/mnt/e/d2o-a378w/core
+  R2O_EXPECTED_DONOR_SHA=a378e230947ebfd011439e1cac0f1e994d883aae
+  sh scripts/r2o-discord-voice-lifecycle-helper.sh` —
+  **PASS** (endpoint lifecycle A→B, очередь, lease, proof, persistence;
+  address-план и общий `@discord-voice`).
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-diagnostics-differential.sh` —
   **не выполнен**: сборка донорского `test_httpsearch` падает на duplicate
   symbols `d2k_plan_apply`, `d2k_plan_max_emit`, `d2k_actions_cancel`,
