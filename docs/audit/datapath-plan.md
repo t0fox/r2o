@@ -30,24 +30,24 @@ Static-хелперы наследуют статус владельца (вла
 
 | Статус | Кол-во |
 |---|---:|
-| E | 105 |
-| P | 72 |
+| E | 93 |
+| P | 85 |
 | N | 5 |
-| ? | 1 |
+| ? | 0 |
 | **Всего** | **183** |
 
 По файлам:
 
 | Файл | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| datapath/plans.c | 75 | 34 | 39 | 1 | 1 |
-| datapath/routemark.c | 23 | 19 | 3 | 1 | 0 |
-| datapath/plan_parse.c | 17 | 14 | 3 | 0 | 0 |
+| datapath/plans.c | 75 | 34 | 40 | 1 | 0 |
+| datapath/routemark.c | 23 | 15 | 7 | 1 | 0 |
+| datapath/plan_parse.c | 17 | 13 | 4 | 0 | 0 |
 | datapath/raw.c | 17 | 8 | 9 | 0 | 0 |
-| datapath/plan_apply.c | 15 | 14 | 1 | 0 | 0 |
-| datapath/ctl.c | 14 | 8 | 3 | 3 | 0 |
+| datapath/plan_apply.c | 15 | 8 | 7 | 0 | 0 |
+| datapath/ctl.c | 14 | 6 | 5 | 3 | 0 |
 | datapath/ctlsrv.c | 12 | 6 | 6 | 0 | 0 |
-| datapath/routemark_nl.c | 8 | 2 | 6 | 0 | 0 |
+| datapath/routemark_nl.c | 8 | 3 | 5 | 0 | 0 |
 | datapath/include/d2k_plans.h | 2 | 0 | 2 | 0 | 0 |
 
 ---
@@ -154,21 +154,21 @@ transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-со�
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| anchor_offset | 26-80 | 55 | static: вычислить якорь разреза или отказать | `plan/apply.rs:862` `anchor_offset` | E | `sni_middle_anchor_is_clamped_inside_short_payload_and_requires_sni` (tests/apply.rs:96). |
-| cmp_size | 82-85 | 4 | static: qsort-компаратор size_t | `plan/apply.rs:920` `points.sort_unstable()` | E | `split_owns_original_and_reverse_order_preserves_sequence_ranges` (tests/apply.rs) — порядок кусков. |
-| split_points | 90-118 | 29 | static: якорь+смещение, сортировка, дедуп, отброс краёв | `plan/apply.rs:908` `split_points` | E | Тот же тест: куски и их границы. |
-| tls_ch_layout | 120-154 | 35 | static: разметка ClientHello (rnd/session id), три разных отказа | `plan/apply.rs:970` `tls_client_hello_layout` | E | `tls_fake_modifiers_copy_session_id_randomize_and_keep_repeat_bytes_equal` (tests/apply.rs). |
-| random_bytes | 156-163 | 8 | static: 32 случайных байта из `/dev/urandom` | `plan/apply.rs:1019` `secure_random` (`getrandom`) | E | Тот же тест: `TLS_MOD_RND` меняет random/SID. |
-| wr16 | 165-167 | 3 | static: записать u16 BE | `plan/apply.rs:1036` `write_u16` | E | Наследует тест `tls_fake_modifiers...` (перезапись длин записи). |
-| wr24 | 168-171 | 4 | static: записать u24 BE | `plan/apply.rs:1041` `write_u24` | E | Тот же тест (длина рукопожатия). |
-| fake_tls_bytes | 173-237 | 65 | static: собрать копию приманки с правкой random/SID | `plan/apply.rs:531` `fake_tls_bytes` | E | `tls_fake_modifiers...` (tests/apply.rs) — оба профиля, DUPSID и RND. |
-| emit_fake | 239-266 | 28 | static: заполнить `d2k_emit` из приманки и порчи | `plan/apply.rs:486` `emit_fake` | E | `no_action_plan_passes_original_and_fake_only_plan_keeps_original`, `interleaved_fakes...` (tests/apply.rs). |
-| emit_vec_free | 268-272 | 5 | static: освободить массив посылок и owned_bytes | `plan/apply.rs:61` `Emission` (Vec) + `Drop` | E | Владение выражено типами (`Vec<u8>`, `Vec<Emission>`); утечек нет по построению, отдельный free не нужен. |
-| emit_overhead | 285-295 | 11 | static: заголовки IP+TCP/UDP, MD5/TS-опция | `plan/apply.rs:737` `emit_overhead` | E | `max_emit`-тест (tests/apply.rs:251) и `route_segment_cap...` (tests/apply.rs). |
-| d2k_plan_max_emit | 297-341 | 45 | верхняя оценка одной посылки плана | `plan/apply.rs:418` `Plan::max_emit` | E | `assert_eq!(plan.max_emit(), 171)` (tests/apply.rs:251); используется в `r2o_plan_valid`. |
+| anchor_offset | 26-80 | 55 | static: вычислить якорь разреза или отказать | `plan/apply.rs:862` `anchor_offset` | P | **Ветви C:** 0→0; 1 требует `have_sni`, иначе «начало имени: имени нет»; 2 требует `have_sni`, `sni_off+sni_len`; 3→`payload_len/2`; 5 требует `have_sni`, `sni_off+sni_len/2`, зажим `<2→2`, `>=payload_len→payload_len-1`; 4→отказ «конец записи TLS не поддержан»; default→«якорь не известен». Rust те же семь ветвей (`apply.rs:862-906`); для 2/5 `checked_add`, для 5 нижний зажим и `saturating_sub(1)` (при `payload_len=0` C уходит в `SIZE_MAX`, Rust даёт 0; `split_points` в обоих случаях точку отбрасывает). **Покрытие:** `split_owns...` — якорь 1; `interleaved...`/`settle...`/`route_segment...` — якорь 0; `sni_middle_anchor...` — якорь 5 и отсутствие SNI. Ветви 2/3/4/default отдельным тестом не покрыты — поэтому P. |
+| cmp_size | 82-85 | 4 | static: qsort-компаратор size_t | `plan/apply.rs:920` `points.sort_unstable()` | E* | C возвращает -1/0/1 строгим сравнением `size_t`; Rust сортирует `Vec<usize>` тем же отношением. `interleaved_fakes...` (tests/apply.rs:53) задаёт разрезы 3 и 6 и проверяет возрастающие куски под `order reverse`; `split_owns...` (:31) — один разрез. Отдельного C/Rust differential нет. |
+| split_points | 90-118 | 29 | static: якорь+смещение, сортировка, дедуп, отброс краёв | `plan/apply.rs:908` `split_points` | P | **Ветви C:** цикл `n_splits`; `anchor_offset(...)` ошибка → -1; `long v=base+offset`; `v<=0` или `(size_t)v>=payload_len` → `continue` (разрез вне нагрузки — не отказ); `pts[n++]=(size_t)v`; при `n>1` `qsort(cmp_size)` и дедуп соседних; `*n_out=n`. Rust (`apply.rs:908-923`): `i128`-сложение, тот же отбор `point>0 && point<len`, `try_reserve_exact`, `sort_unstable`, `dedup`. **Покрытие:** `split_owns...` (якорь 1, смещение 0) и `interleaved...` (якоря 0, смещения 3/6) проверяют нарезку/порядок; дедуп одинаковых точек и отброс `v<=0`/`v>=len` отдельным тестом не покрыты — P. |
+| tls_ch_layout | 120-154 | 35 | static: разметка ClientHello (rnd/session id), три разных отказа | `plan/apply.rs:970` `tls_client_hello_layout` | P | **Ветви C:** `!b`/`n<44`/`b[0]!=0x16`/`b[1]!=3`/`b[5]!=1` → «не ClientHello или короче 44»; `rec_len=b[3..5]`, `hs_len=b[6..9]`; `rec_len+5!=hs_len+9` → «длины не сходятся»; `n>rec_len+5` → «пришло больше»; `!allow_prefix && (hs_len>n-9 \|\| rec_len>n-5)` → «только начало»; `sl=b[43]`; `sl>32 \|\| sl>n-44` → «session id выходит»; `rnd_off=11,sid_off=44,sid_len=sl`. Rust (`apply.rs:970-1012`) те же проверки и смещения; тексты длиннее, третий отказ назван отдельно. **Покрытие:** успешный путь — `tls_fake_modifiers...`; три отказа и `allow_prefix`/шаблонный профиль отдельными тестами не покрыты — P. |
+| random_bytes | 156-163 | 8 | static: 32 случайных байта из `/dev/urandom` | `plan/apply.rs:1019` `secure_random` (`getrandom`) | E* | C `fopen("/dev/urandom","rb")`; `fread(out,1,n)`; `ferror`; `fclose`; успех только `got==n && !bad`. Rust `getrandom::getrandom(output)` с ошибкой `random-source`. `tls_fake_modifiers...` проверяет, что `TLS_MOD_RND` меняет random и session id; отказ источника не тестируется (внешнее состояние ОС). |
+| wr16 | 165-167 | 3 | static: записать u16 BE | `plan/apply.rs:1036` `write_u16` | E* | C `b[off]=v>>8; b[off+1]=v`. Rust те же два байта. `tls_fake_modifiers...` с `DUPSID` проверяет перезапись длины записи после вставки session id; дифференциала нет. |
+| wr24 | 168-171 | 4 | static: записать u24 BE | `plan/apply.rs:1041` `write_u24` | E* | C три байта `v>>16`, `v>>8`, `v`; Rust идентично. Покрыт тем же `tls_fake_modifiers...` (длина рукопожатия). |
+| fake_tls_bytes | 173-237 | 65 | static: собрать копию приманки с правкой random/SID | `plan/apply.rs:531` `fake_tls_bytes` | P | **Ветви C:** `!in->is_tls13 && wire_profile!=TCP_TEMPLATE` → отказ; `tls_ch_layout` для входа (allow_prefix только у шаблона) и приманки; шаблон: `malloc(pl->len)`, копия; `RND` → 32 байта в `fake_rnd` и `fake_sid_len` в SID; `DUPSID` только при равенстве длин SID; иначе: при `DUPSID` `out_len=pl->len-fake_sid_len+real_sid_len`, границы `>65540/<9/-5>65535/-9>0xffffff`; копия головы/SID/хвоста, `b[fake_sid-1]=real_sid_len`, `wr16(3)`/`wr24(6)`; `RND` → 32 байта в `fake_rnd`. Rust (`apply.rs:531-603`) те же ветви и границы; `checked_sub/checked_add`; `ptr`-арифметика заменена срезами. **Покрытие:** `tls_fake_modifiers...` — нешаблонный профиль, RND+DUPSID при равных SID; шаблонная ветвь, неравные SID и три отказа отдельно не покрыты — P. |
+| emit_fake | 239-266 | 28 | static: заполнить `d2k_emit` из приманки и порчи | `plan/apply.rs:486` `emit_fake` | E | **Ветви C:** найти payload, иначе «фальшивка ссылается на нагрузку, которой нет»; `po = poison_id ? find : NULL`; `memset`; kind FAKE; `delay_us`; `seq`; `bytes/len` приманки; при `tls_mod` — `fake_tls_bytes`, `bytes=owned`; при порче — `ttl/flags/seq_shift/ts_up/autottl/autottl_delta/min/max`. Rust (`apply.rs:486-528`) те же шаги; `wire_profile` ставится сразу, C — на `finalize` всем посылкам; autottl вычисляется из `input.reference_ttl` в `poison_ttl` (`apply.rs:764-783`), C хранит поля и пересчитывает при отправке. `no_action...fake_only`, `tls_fake_modifiers...`, `interleaved...` покрывают fake/delay/ttl/poison/порядок. |
+| emit_vec_free | 268-272 | 5 | static: освободить массив посылок и owned_bytes | `plan/apply.rs:61` `Emission` (Vec) + `Drop` | E* | C `if(!v) return`; цикл `free(v[i].owned_bytes)`; `free(v)`. Rust владеет байтами через `Vec<u8>` в `Emission`, массив — `Vec<Emission>`; освобождение при `Drop`, отдельных утечек нет по типам. Теста на освобождение нет — свойство выражено типами. |
+| emit_overhead | 285-295 | 11 | static: заголовки IP+TCP/UDP, MD5/TS-опция | `plan/apply.rs:737` `emit_overhead` | P* | **Ветви C:** `hdr=20 + (transport==17 ? 8 : 20)`; при `po && transport!=17`: `MD5 → +20`, иначе `TCPTS_BACK → +12`; транспорт 0 считается TCP. Rust (`apply.rs:737-753`) те же константы и порядок `MD5`/`TCPTS_BACK`; `poison.map_or(0,...)` при `Some` всегда даёт флаги. **Покрытие:** `assert_eq!(plan.max_emit(), 171)` проверяет ветвь с порчей; UDP и `TCPTS_BACK` отдельно не проверены — P*. |
+| d2k_plan_max_emit | 297-341 | 45 | верхняя оценка одной посылки плана | `plan/apply.rs:418` `Plan::max_emit` | P | **Ветви C:** `!p→0`; для каждой fake: payload, `body=pl->len + (DUPSID?32:0)`, зажим `segment_size`, `emit_overhead(po)+body`; для каждого seqovl: payload, зажим, overhead+body (только приставка); при `udplen`: `body=(proto==2?1200:1)+udplen`, `emit_overhead(NULL)+body`; максимум. Rust (`apply.rs:418-461`) те же три цикла и формула; `segment_body` = `min(segment_size)`; `udplen` — `usize::from`. **Покрытие:** `assert_eq!(plan.max_emit(), 171)` (`tests/apply.rs:251`) проверяет fake+DUPSID+overhead; seqovl и udplen-ветви отдельно не проверены — P. |
 | d2k_plan_apply | 343-873 | 531 | превратить план+пакет в посылки, судьбу оригинала и причину отказа | `plan/apply.rs:155` `Plan::apply` | **P** | 17 тестов tests/apply.rs покрывают split/fake/overlay/order/pace/settle/delay/udplen/qsplit/qdeny/oob/metric. **Подтверждённые расхождения:** (1) OOB-ветвь: Rust ставит `wire_profile` только `first`/`urgent` (`apply.rs:284-285`); `suffix` и его сегменты остаются с 0, C на `finalize` проставляет профиль **всем** посылкам (`plan_apply.c:812`). (2) qsplit-ветвь возвращает `Actions` в `apply.rs:203-250` до `apply_timing`/`wire_profile` (`:636-657`, `:403-405`), поэтому `delay_us` и `wire_profile` к qsplit-посылке не применяются; C применяет оба после цикла (`plan_apply.c:803-812`). (3) `MAX_EMISSIONS = 26` в Rust (`plan.rs:10`, `apply.rs:9,335,704`); C в `plan_apply.c` не ограничивает число посылок 26 — предел 65536 относится только к числу сегментов (`:830`), а отказ >26 приходит позже из `session.c:2517` (`D2K_RESULT_MAX`). Наблюдаемый отказ сессии совпадает, слой и текст ошибки различаются. `emit_fake` C копирует `ts_up/autottl`-поля, Rust переносит `ts_up` через флаг `POISON_TS_UP`, а autottl вычисляет в `ttl` по `reference_ttl` (`apply.rs:764-781`); для одного и того же `reference_ttl` результат совпадает, при смене TTL между apply и отправкой C пересчитал бы, Rust — нет. |
 | d2k_actions_cancel | 891-921 | 31 | правила отмены недосланного исполнения | `plan/apply.rs:104` `Actions::cancel` | E | `cancellation_drops_only_after_payload_bytes_were_emitted` (tests/apply.rs). |
-| d2k_actions_free | 923-931 | 9 | освободить посылки | `plan/apply.rs:61` `Emission` + `Actions` (RAII) | E | Освобождение автоматическое; отдельных ошибок/утечек нет по типам. |
+| d2k_actions_free | 923-931 | 9 | освободить посылки | `plan/apply.rs:61` `Emission` + `Actions` (RAII) | E* | C `if(!a) return`; цикл `free(a->v[i].owned_bytes)`; `free(a->v)`; `v=NULL`, `n=0`. Rust `Actions` владеет `Vec<Emission>`, каждый `Emission` — `Vec<u8>`; освобождение при `Drop`, повторный вызов невозможен по заимствованию. Отдельного теста нет — свойство типов. |
 
 Итог по файлу: E 14, P 1, N 0. Главные отличия — потеря `wire_profile` в OOB-суффиксе,
 обход `delay_us` в qsplit и место отказа при >26 посылках (D2O тоже отказывает в session,
