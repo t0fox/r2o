@@ -215,7 +215,8 @@ pub fn build_udp_packet(input: &[u8], emission: &Emission, out: &mut [u8]) -> Op
     if view.protocol != 17
         || view.total_len != input.len()
         || view.udp_payload_range(input).is_none()
-        || emission.poison != 0
+        || emission.poison & (POISON_TCPTS_BACK | POISON_BADSUM) != 0
+        || (view.family == 6 && emission.poison & POISON_IPID_ZERO != 0)
         || emission.seq_shift != 0
         || emission.wire_profile != 0
         || emission.ipfrag != 0
@@ -243,7 +244,12 @@ pub fn build_udp_packet(input: &[u8], emission: &Emission, out: &mut [u8]) -> Op
         out[0] = 0x45;
         out[1] = view.traffic_class;
         write_u16(&mut out[2..4], total_len as u16);
-        write_u16(&mut out[4..6], view.ip_id.wrapping_add(1));
+        let ip_id = if emission.poison & POISON_IPID_ZERO != 0 {
+            0
+        } else {
+            view.ip_id.wrapping_add(1)
+        };
+        write_u16(&mut out[4..6], ip_id);
         write_u16(&mut out[6..8], 0x4000);
         out[8] = emission_ttl(emission, view.hop_limit);
         out[9] = 17;

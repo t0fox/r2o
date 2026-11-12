@@ -77,6 +77,94 @@ fn build(input: &[u8], emitted: &Emission) -> Option<Vec<u8>> {
     Some(out[..len].to_vec())
 }
 
+fn udp_v4(ip_id: u16, payload: &[u8]) -> Vec<u8> {
+    let mut packet = vec![0; 20 + 8 + payload.len()];
+    packet[0] = 0x45;
+    let total_len = packet.len() as u16;
+    packet[2..4].copy_from_slice(&total_len.to_be_bytes());
+    packet[4..6].copy_from_slice(&ip_id.to_be_bytes());
+    packet[8] = 64;
+    packet[9] = 17;
+    packet[12..16].copy_from_slice(&[192, 168, 1, 67]);
+    packet[16..20].copy_from_slice(&[1, 2, 3, 4]);
+    packet[20..22].copy_from_slice(&12345u16.to_be_bytes());
+    packet[22..24].copy_from_slice(&443u16.to_be_bytes());
+    packet[24..26].copy_from_slice(&(8 + payload.len() as u16).to_be_bytes());
+    packet[28..].copy_from_slice(payload);
+    packet
+}
+
+fn udp_v6(payload: &[u8]) -> Vec<u8> {
+    let mut packet = vec![0; 40 + 8 + payload.len()];
+    packet[0] = 0x60;
+    packet[4..6].copy_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+    packet[6] = 17;
+    packet[7] = 32;
+    packet[8..24].copy_from_slice(&[0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    packet[24..40].copy_from_slice(&[0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+    packet[40..42].copy_from_slice(&12345u16.to_be_bytes());
+    packet[42..44].copy_from_slice(&443u16.to_be_bytes());
+    packet[44..46].copy_from_slice(&(8 + payload.len() as u16).to_be_bytes());
+    packet[48..].copy_from_slice(payload);
+    packet
+}
+
+fn build_udp(input: &[u8], emitted: &Emission) -> Option<Vec<u8>> {
+    let mut out = [0; 256];
+    let len = wire::build_udp_packet(input, emitted, &mut out)?;
+    Some(out[..len].to_vec())
+}
+
+#[test]
+fn udp_ipv4_ipid_zero_sets_zero_id() {
+    let input = udp_v4(0x1234, &[0xde, 0xad, 0xbe, 0xef]);
+    let mut emitted = emission(&[0xde, 0xad, 0xbe, 0xef]);
+    emitted.poison = POISON_IPID_ZERO;
+    let built = build_udp(&input, &emitted).unwrap();
+    assert_eq!(&built[4..6], &[0, 0]);
+    assert_eq!(&built[12..16], &input[12..16]);
+    assert_eq!(&built[20..26], &input[20..26]);
+    assert_ne!(&built[26..28], &[0, 0]);
+}
+
+#[test]
+fn udp_ipv4_normal_build_uses_next_ip_id() {
+    let input = udp_v4(0x1234, &[0x11]);
+    let emitted = emission(&[0x11]);
+    let built = build_udp(&input, &emitted).unwrap();
+    assert_eq!(&built[4..6], &0x1235u16.to_be_bytes());
+}
+
+#[test]
+fn udp_ipv6_ipid_zero_is_rejected() {
+    let input = udp_v6(&[0xde, 0xad]);
+    let mut emitted = emission(&[0xde, 0xad]);
+    emitted.poison = POISON_IPID_ZERO;
+    assert!(build_udp(&input, &emitted).is_none());
+}
+
+#[test]
+fn udp_badsum_and_tcpts_back_are_rejected() {
+    for packet in [udp_v4(1, &[0x11]), udp_v6(&[0x11])] {
+        for poison in [POISON_BADSUM, POISON_TCPTS_BACK] {
+            let mut emitted = emission(&[0x11]);
+            emitted.poison = poison;
+            assert!(build_udp(&packet, &emitted).is_none());
+        }
+    }
+}
+
+#[test]
+fn udp_ignores_md5_and_ts_up_like_d2o() {
+    for poison in [POISON_MD5, POISON_TS_UP] {
+        let input = udp_v4(7, &[0x22]);
+        let mut emitted = emission(&[0x22]);
+        emitted.poison = poison;
+        let built = build_udp(&input, &emitted).unwrap();
+        assert_eq!(&built[4..6], &8u16.to_be_bytes());
+    }
+}
+
 #[test]
 fn clean_ipv4_matches_the_r2o_golden_packet() {
     let packet = original_v4(&[]);
