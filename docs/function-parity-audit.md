@@ -87,11 +87,11 @@ recheck 1982 1982 equal True
 | core-net | 548 | 186 | 349 | 13 | 0 |
 | core-state | 692 | 176 | 512 | 4 | 0 |
 | datapath-core | 400 | 145 | 244 | 11 | 0 |
-| datapath-plan | 183 | 92 | 86 | 5 | 0 |
+| datapath-plan | 183 | 93 | 85 | 5 | 0 |
 | detect | 159 | 47 | 102 | 10 | 0 |
-| **Итого** | **1982** | **646** | **1293** | **43** | **0** |
+| **Итого** | **1982** | **647** | **1292** | **43** | **0** |
 
-Это не оценка паритета: 1293 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 1292 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
 расхождений (`ARM_SHAPE` UDP, `wire_udp` IPID_ZERO, `udpruntime` raw UDP,
 `tls12/tls13` record-layer). `SET_HTTPS` TTL закрыт 2026-11-12 и в список
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 646 / P 1293 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 647 / P 1292 /
 N 43 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -347,9 +347,9 @@ P означает неполное доказательство ветвей, N
 | core-net | 548 | 186 | 349 | 13 | 0 |
 | core-state | 692 | 176 | 512 | 4 | 0 |
 | datapath-core | 400 | 145 | 244 | 11 | 0 |
-| datapath-plan | 183 | 92 | 86 | 5 | 0 |
+| datapath-plan | 183 | 93 | 85 | 5 | 0 |
 | detect | 159 | 47 | 102 | 10 | 0 |
-| **Итого** | **1982** | **646** | **1293** | **43** | **0** |
+| **Итого** | **1982** | **647** | **1292** | **43** | **0** |
 
 
 ---
@@ -5342,8 +5342,8 @@ Static-хелперы наследуют статус владельца (вла
 
 | Статус | Кол-во |
 |---|---:|
-| E | 92 |
-| P | 86 |
+| E | 93 |
+| P | 85 |
 | N | 5 |
 | ? | 0 |
 | **Всего** | **183** |
@@ -5352,7 +5352,7 @@ Static-хелперы наследуют статус владельца (вла
 
 | Файл | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| datapath/plans.c | 75 | 31 | 43 | 1 | 0 |
+| datapath/plans.c | 75 | 32 | 42 | 1 | 0 |
 | datapath/routemark.c | 23 | 15 | 7 | 1 | 0 |
 | datapath/plan_parse.c | 17 | 14 | 3 | 0 | 0 |
 | datapath/raw.c | 17 | 8 | 9 | 0 | 0 |
@@ -5738,7 +5738,7 @@ UDP→addr переход, R2O — только exact+ECH→MODERN+общий ad
 | find_probe | 978-1006 | 29 | static: поиск опыта, ленивое истечение, wildcard-порт только для голоса | `control.rs:804` `addr_probe_binding_at_hook`, `:764` `voice_address_binding` | P | C `!t/!flow/!src_port→NULL`; цикл по `cap`; истёкшие `probe_drop`; wildcard `src_port==0` совпадает только при `voice`, с копией flow и `src_port=0`; иначе точное равенство; копирует trial_id. Rust: `addr_probe_binding_at_hook` требует QUIC client direction + authenticated Initial + точный ключ; `voice_address_binding` — IPv4/UDP/без фрагмента, STUN/Discord, wildcard выражен отсутствием клиентского порта в `VoiceProbeKey`. Тесты voice control.rs:3239/3278; адресные — нет. |
 | d2k_plantab_find_addr_probe | 1008-1012 | 5 | поиск точного адресного опыта | `control.rs:804` `addr_probe_binding_at_hook` | P | C `find_probe(...,voice=0)`: wildcard-записи (src_port=0) не совпадают. Rust `addr_probe_binding_at_hook` ищет `addr_probes` по ключу, дополнительно требует authenticated Initial и клиентское направление; тестов нет. |
 | d2k_plantab_find_voice_probe | 1014-1018 | 5 | поиск голосового опыта (wildcard клиентского порта) | `control.rs:764` `voice_address_binding` | E | `временная_voice_запись_соответствует_только_с_заданным_и_целым_адресом` (control.rs:3239), `stun_...` (3278). Ключ R2O не содержит клиентского порта — wildcard выражен структурно. |
-| d2k_plantab_probe_count | 1020-1022 | 3 | число всех пробных записей (`probe_used`, включая voice) | `control.rs:186-191` `r2o_probe_count` | **P** | C считает все занятые `probes[]` (QUIC и VOICE); Rust `r2o_probe_count` — только `addr_probes` (voice не входит), причём только неистёкшие. Числа расходятся. Тестов нет. |
+| d2k_plantab_probe_count | 1020-1022 | 3 | число всех пробных записей (`probe_used`, включая voice) | `control.rs:186-194` `r2o_probe_count` | E | C `t ? t->probe_used : 0`: `probe_used` растёт в `set_addr_probe` и падает в `probe_drop`; истёкшие удаляются лениво (`find_probe`/`set_addr_probe`), поэтому счётчик включает и их. Rust `r2o_probe_count = addr_probes.len()+voice_addr_probes.len()` — обе карты, без фильтра по времени; `clear_probes` обнуляет. Тест `probe_count_counts_addr_and_voice_probes_like_d2o`: 1 addr + 1 voice → 2, после `clear_probes` → 0. |
 | shape_fits | 1044-1052 | 9 | static: grandfather→1; MODERN↔ECH_TCP, MODERN_NO_TS↔ECH_NO_TS, MODERN_TS↔ECH_TS; иначе `entry_shape!=0 && equal` | `control.rs:569-581` — цепочка exact/bridge/fallback/grandfather | **P** | C-предикат расщеплён на цепочку поисков; ECH-перенос и grandfather покрыты тестами (control.rs:2823). В C `entry_shape==0` (ANY) не проходит `shape_fits` — ANY используется отдельной ветвью `h.any`; в R2O отдельного предиката и ANY-ветки нет. |
 | shape_is_udp | 1054-1056 | 3 | static: QUIC/VOICE | `matches!(shape, SHAPE_QUIC \| SHAPE_VOICE)` + `find_addr_fallback` (`control.rs:1522-1540`) | **P** | **Одностороннее правило C:** при UDP-наблюдении и TCP-записи имени разрешается адресный fallback (`goto check_addr`, `plans.c:1190-1200`); при TCP-наблюдении и UDP-записи — нет (`shape_misses++`, NULL). Rust `find_addr_fallback` проверяет только наличие привязки **того же** транспорта, поэтому TCP-поток к имени, у которого есть только QUIC/VOICE-план, может получить адресный план, чего C не делает. |
 | d2k_plantab_shape_misses | 1058-1060 | 3 | счётчик «нашли, но форма не подошла» | `control.rs:193` `r2o_shape_misses` | N | Поле `shape_misses` объявлено и читается, но **нигде не инкрементируется** (grep по `shape_misses` — только объявление/инициализация/геттер) → всегда 0. |
@@ -5752,7 +5752,7 @@ UDP→addr переход, R2O — только exact+ECH→MODERN+общий ad
 | d2k_plantab_set_name_trial | 1259-1267 | 9 | поставить пробный план с trial id | `control.rs:1093` `set_name_probe` | E | C `!sport \|\| !trial_id → free/-2`; `set_name_family`; при успехе копирует 16 байт trial в binding. Rust `set_name_probe` требует `trial_id: Some`, `source_port!=0`, `valid_tcp_probe_shape`; сохраняет trial в `ProbePlan`. Тесты control.rs:3489/3637. |
 | d2k_plantab_trial | 1268-1273 | 6 | trial id установленного временного плана | `control.rs:690` `binding_for_plan` (`PlanBinding.trial_id`) | E | C зануляет out; при `t && p && owner==t && temporary` копирует `binding_trial_id`. Rust `binding_for_plan` для `probes`/`voice_addr_probes`/`addr_probes` возвращает trial_id и temporary=true, для постоянных — нули/false. Тест `tls_probe_plan...reports_temporary_applied` (control.rs:3637), voice control.rs:3239. |
 
-Итог по файлу: E 31, P 43, N 1, ? 0. Ключевые пробелы: счётчик промахов по форме мёртв;
+Итог по файлу: E 32, P 42, N 1, ? 0. Ключевые пробелы: счётчик промахов по форме мёртв;
 нет ECH-удержания; адресные опыты без тестов; префильтры кандидатов грубее C; legacy-удаления
 «все формы» отсутствуют; поиск ядра отличается набором ветвей.
 
@@ -6125,8 +6125,10 @@ Rtnetlink: дампы правил, одиночный поиск маршрут
   клиентского порта; Rust `voice_address_binding` — ключ без
   клиентского порта. E (voice-тесты control.rs:3239/3278).
 - **`d2k_plantab_probe_count` (1020–1022):** C считает все
-  занятые `probes[]` (QUIC+VOICE); Rust `r2o_probe_count` — только
-  неистёкшие `addr_probes`. P.
+  занятые `probes[]` (QUIC+VOICE), включая лениво истёкшие; Rust
+  `r2o_probe_count` теперь складывает `addr_probes` и
+  `voice_addr_probes` без фильтра. E, тест
+  `probe_count_counts_addr_and_voice_probes_like_d2o`.
 
 ## 9g. Углублённая сверка plans.c: area/stream/http
 

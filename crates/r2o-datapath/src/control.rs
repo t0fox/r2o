@@ -183,11 +183,11 @@ impl NamePlans {
         self.exact_capacity
     }
 
-    pub fn r2o_probe_count(&self, now: Instant) -> usize {
-        self.addr_probes
-            .values()
-            .filter(|probe| probe.expires > now)
-            .count()
+    /// Число занятых адресных опытов так, как его видит C: `probe_used`
+    /// включает QUIC- и VOICE-записи, а истёкшие удаляются лениво, поэтому
+    /// счётчик не фильтрует по времени (`plans.c:1020-1022`).
+    pub fn r2o_probe_count(&self, _now: Instant) -> usize {
+        self.addr_probes.len() + self.voice_addr_probes.len()
     }
 
     pub fn r2o_shape_misses(&self) -> u64 {
@@ -2278,7 +2278,9 @@ fn canonical_name(bytes: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ControlServer, NamePlanKey, NamePlans};
+    use super::{
+        AddrProbePlan, ControlServer, NamePlanKey, NamePlans, VoiceProbeKey, VoiceProbePlan,
+    };
     use r2k_core::control::BindingContext;
     use r2k_core::plan::Plan;
 
@@ -3821,6 +3823,37 @@ mod tests {
             plans.select(&packet).map(|selected| selected.id),
             Some(permanent_id)
         );
+    }
+
+    #[test]
+    fn probe_count_counts_addr_and_voice_probes_like_d2o() {
+        let now = std::time::Instant::now();
+        let mut plans = NamePlans::default();
+        plans.addr_probes.insert(
+            [0x11; control::KEY_LEN],
+            AddrProbePlan {
+                plan: Plan::default(),
+                trial_id: [0x21; 16],
+                generation: 1,
+                expires: now,
+            },
+        );
+        plans.voice_addr_probes.insert(
+            VoiceProbeKey {
+                client: Ipv4Addr::new(192, 0, 2, 1),
+                server: Ipv4Addr::new(198, 51, 100, 2),
+                server_port: 443,
+            },
+            VoiceProbePlan {
+                plan: Plan::default(),
+                trial_id: [0x22; 16],
+                generation: 2,
+                expires: now,
+            },
+        );
+        assert_eq!(plans.r2o_probe_count(now), 2);
+        plans.clear_probes();
+        assert_eq!(plans.r2o_probe_count(now), 0);
     }
 
     #[test]
