@@ -1894,6 +1894,7 @@ mod app {
                                 {
                                     hello.tcp_has_timestamp = tcp_sessions
                                         .r2o_client_offers_tcp_timestamps_for_packet(&packet);
+                                    record_shape_tcp_options(&mut control, &hello);
                                     send_hello_event(
                                         &mut control,
                                         &mut r2o_snapshot_control,
@@ -1950,6 +1951,7 @@ mod app {
                                 {
                                     hello.tcp_has_timestamp = tcp_sessions
                                         .r2o_client_offers_tcp_timestamps_for_packet(&packet);
+                                    record_shape_tcp_options(&mut control, &hello);
                                     send_hello_event(
                                         &mut control,
                                         &mut r2o_snapshot_control,
@@ -2000,6 +2002,7 @@ mod app {
                                 if !controller_probe {
                                     hello.tcp_has_timestamp = tcp_sessions
                                         .r2o_client_offers_tcp_timestamps_for_packet(bytes);
+                                    record_shape_tcp_options(&mut control, &hello);
                                     send_hello_event(
                                         &mut control,
                                         &mut r2o_snapshot_control,
@@ -3156,6 +3159,17 @@ mod app {
                 || plan.r2k_is_quic_fallback_ttl_probe()
                 || plan.r2k_is_quic_fake_probe()
                 || has_control)
+    }
+
+    fn record_shape_tcp_options(
+        control: &mut Option<ControlServer>,
+        hello: &r2o_datapath::capture::TcpHello,
+    ) {
+        if let Some(options) = hello.tcp_options.as_deref()
+            && let Some(control) = control.as_mut()
+        {
+            control.record_shape_tcp_options(hello.key.low_address.family(), options);
+        }
     }
 
     fn send_hello_event(

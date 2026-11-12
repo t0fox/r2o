@@ -69,6 +69,8 @@ pub struct TcpHello {
     pub client_hello: Option<Vec<u8>>,
     /// Есть ли TCP timestamp option на сегменте ClientHello; runtime заменяет значение на опции SYN.
     pub tcp_has_timestamp: Option<bool>,
+    /// Полный набор TCP-опций клиента (C `shape_opts[k]`, не более 40 байт).
+    pub tcp_options: Option<Vec<u8>>,
 }
 
 impl TcpHello {
@@ -120,6 +122,7 @@ pub fn tcp_http_hello_from_bytes(key: TcpFlowKey, bytes: &[u8]) -> Option<TcpHel
         r2o_wire_len: None,
         client_hello: None,
         tcp_has_timestamp: None,
+        tcp_options: None,
     })
 }
 
@@ -164,6 +167,7 @@ pub fn tcp_hello_from_bytes(key: TcpFlowKey, bytes: &[u8]) -> Option<TcpHello> {
             .and_then(|length| bytes.get(..length))
             .map(<[u8]>::to_vec),
         tcp_has_timestamp: None,
+        tcp_options: None,
     })
 }
 
@@ -175,7 +179,10 @@ pub fn tcp_hello_from_packet(packet: &[u8]) -> Option<TcpHello> {
     let tcp = view.tcp_segment(packet)?;
     let key = TcpFlowKey::from_packet(packet)?;
     let mut hello = tcp_hello_from_bytes(key, packet.get(tcp.payload)?)?;
-    hello.tcp_has_timestamp = Some(tcp_timestamp_option_present(packet.get(tcp.options)?));
+    let options = packet.get(tcp.options)?;
+    hello.tcp_has_timestamp = Some(tcp_timestamp_option_present(options));
+    // C `shape_opts[4][40]`: набор опций ограничен 40 байтами.
+    hello.tcp_options = Some(options[..options.len().min(40)].to_vec());
     Some(hello)
 }
 

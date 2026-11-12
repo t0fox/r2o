@@ -35,11 +35,10 @@ C-хелперы без собственного состояния наслед
 ## Сводка
 
 - Всего функций: **400**.
-- **E: 153 (38,25 %)**; **P: 244 (61,00 %)**; **N: 3 (0,75 %)**; **?: 0**.
-- Полностью отсутствуют: `count_reason` (гистограмма причин пропуска в сводке),
-  `d2k_session_shape_tcp_options_family` (TCP-опции из снимка) и
-  `d2k_http_trace` (текстовый HTTP-трейс). Агрегатные счётчики applied/done/
-  damaged/sent_lost/exchanges/suspects, NAT-статистика и
+- **E: 154 (38,50 %)**; **P: 244 (61,00 %)**; **N: 2 (0,50 %)**; **?: 0**.
+- Полностью отсутствуют: `count_reason` (гистограмма причин пропуска в сводке)
+  и `d2k_http_trace` (текстовый HTTP-трейс). Агрегатные счётчики applied/done/
+  damaged/sent_lost/exchanges/suspects, NAT-статистика, TCP-опции снимка и
   `--offline-self-check` теперь есть.
 - Неподтверждённые ветви (P) сосредоточены в `session.c` (97), `d2kd.c` (41),
   `http80.c` (22), `udp_release.c` (20): в основном это склейка/loop-код,
@@ -240,8 +239,7 @@ R2O-владелец: `crates/r2o-datapath/src/main.rs` (`run`, `parse_options`,
   дренирует sched так, как C. Остальные ветви (NFQUEUE, raw, control,
   hold/release, HTTP, ICMP, stats, route/cap) перенесены — P.
 
-**Итог:** 44 функции; N — `count_reason`,
-`d2k_session_shape_tcp_options_family`, `d2k_http_trace`
+**Итог:** 44 функции; N — `count_reason`, `d2k_http_trace`
 (диагностика/CLI), остальные P/E с подтверждёнными пробелами
 CLI-логирования, health-файла, duration, состава сводки,
 `EVENT_STATS` и shutdown-дренажа sched.
@@ -314,7 +312,7 @@ CLI-логирования, health-файла, duration, состава свод
 | `d2k_session_want_shape_family` | 2931–2960 | 30 | валидация family 4/6, transport 6/17, имени; при готовом `last_hello` — копия hello + всех TCP-опций и снятие armed; иначе armed=1 и запоминание имени | `main.rs:20162-20192 r2o_capture_client_shape`, `control.rs:1988 ClientShapeEvent`, `arm_client_shape` | **P** | **Ветви сверены:** C `!s \|\| (family!=4 && family!=6) \|\| (transport!=6 && transport!=17) \|\| (!name && len)` → 0; `k=shape_slot(transport,family)`; `len>sizeof shape_name[k]` → clamp; если `last_hello_len[k]>0 && (len==0 \|\| name_same(last_name...,name,len))` → копия `shape=last_hello`, `shape_opts=last_opts`, `armed=0`, return 1; иначе `armed=1`, `shape_len=0`, `shape_name_len=len`, копия имени, return 0. Rust `arm_client_shape`/`r2o_capture_client_shape` отдаёт `ClientShapeEvent`; **отличия:** (1) C копирует полный набор TCP-опций (`shape_opts[4][40]`), Rust — только `tcp_has_timestamp: Option<bool>`; (2) C `shape_armed`/`shape_name` на 4 слота (transport×family), Rust кэш по family+host без transport; (3) C при `len=0` принимает любой `last_hello`, Rust arm по имени/семейству; (4) датапат R2O отвергает transport 17 (`control.rs:2002`), C принимает 6/17. |
 | `d2k_session_shape` | 2962–2964 | 3 | снимок формы TCP (family=4) | `capture.rs:170 tcp_hello_from_packet`, `r2o_quic.rs:180 capture_hello` | **P** | C-обёртка: `return d2k_session_shape_family(s,transport,4,len);` — family фиксирована 4. Rust снимок берётся из capture/`ClientShapeEvent`, не из сессионного `shape[4]`; для TCP/4 результат тот же при наличии снимка. |
 | `d2k_session_shape_family` | 2966–2980 | 15 | вернуть `shape[k]`/длину по transport/family; неверные family/transport или пустой слот → NULL | `capture.rs:170`, `r2o_quic.rs:180`, `control.rs ClientShapeEvent` | **P** | **Ветви сверены:** C `len=0`; `!s \|\| (family!=4 && family!=6) \|\| (transport!=6 && transport!=17)` → NULL; `k=shape_slot(transport,family)`; `shape_len[k]==0` → NULL; `*len=shape_len[k]`; return `shape[k]`. Rust отдаёт ClientHello из `ClientShapeEvent`/кэша; **отличия:** C снимок в сессии на 4 слота, Rust — по потоку/событию; полный набор TCP-опций не хранится. |
-| `d2k_session_shape_tcp_options_family` | 2982–2990 | 9 | вернуть полный набор TCP-опций слота формы (до 40 байт) | `control.rs ClientShapeEvent.tcp_has_timestamp` (только bool) | **N** | **Ветви сверены:** C `len=0`; `!s \|\| (family!=4 && family!=6)` → NULL; `k=shape_slot(6,family)`; `shape_len[k]==0` → NULL; `*len=shape_opts_len[k]`; return `shape_opts[k]`. **Подтверждённый пробел:** Rust `ClientShapeEvent`/`HelloEvent` передаёт только `Option<bool>` «есть TS»; полного набора опций (MD5, порядок TS, NOP и т.п.) нет, v22 `CLIENT_TCP` уходит с пустыми/шаблонными опциями. |
+| `d2k_session_shape_tcp_options_family` | 2982–2990 | 9 | вернуть полный набор TCP-опций слота формы (до 40 байт) | `control.rs` `shape_tcp_options_family`/`record_shape_tcp_options`; `capture.rs TcpHello.tcp_options` | E | C: негодное семейство или отсутствие снимка формы → NULL; иначе `*len=shape_opts_len` и указатель на опции. Rust `TcpHello.tcp_options` собирает опции (≤40), `ControlServer::record_shape_tcp_options` кэширует их по семейству, `shape_tcp_options_family` возвращает `None` без снимка и `Some(&[])`/опции при снимке; v22 `CLIENT_TCP` теперь несёт эти опции перед `SHAPE`. Тест `shape_tcp_options_family_matches_c_and_v22_client_tcp_carries_them`. |
 | `d2k_session_plans` | 2992-2994 | 3 | вернуть таблицу планов `d2k_plantab*` | `control.rs:80 NamePlans` | **P** | C `s ? s->plans : NULL`; Rust `NamePlans` — отдельная структура в `run`, единого `d2k_session_plans` нет; эквивалент по назначению. |
 | `d2k_session_plan_count` | 2996-2998 | 3 | число активных планов | `control.rs:178 NamePlans::r2o_plan_count` | **E*** | C `return s ? d2k_plantab_count(s->plans) : 0`. Rust `NamePlans::r2o_plan_count()` считает активные записи таблицы; unit `r2o_plan_count`. |
 | `d2k_session_plan_capacity` | 3000–3002 | 3 | ёмкость планов | `control.rs:182 r2o_plan_capacity` | **E*** | C `d2k_plantab_capacity`; Rust `NamePlans::r2o_plan_capacity()`. Ёмкость выводится из `--r2o-flow-capacity`; тест `control.rs:2670-2671`. |

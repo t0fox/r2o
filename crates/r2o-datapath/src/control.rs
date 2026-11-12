@@ -2364,6 +2364,8 @@ pub struct ControlServer {
     /// совместима с `d2k_qsnap_pack`, а событие для v22 — `EV_SHAPE`.
     last_quic_shapes: VecDeque<CachedQuicShape>,
     armed_quic_shapes: [Option<Vec<u8>>; 2],
+    /// C `shape_opts[shape_slot(6,family)]`: TCP-опции клиента для формы TCP.
+    shape_tcp_options: [Option<Vec<u8>>; 2],
 }
 
 const CLIENT_SHAPE_CACHE_MAX: usize = 512;
@@ -2492,6 +2494,7 @@ impl ControlServer {
             armed_client_shapes: [None, None],
             last_quic_shapes: VecDeque::new(),
             armed_quic_shapes: [None, None],
+            shape_tcp_options: [None, None],
         })
     }
 
@@ -2525,13 +2528,58 @@ impl ControlServer {
         self.flush()
     }
 
+    /// C `d2k_session_shape_tcp_options_family`: опции TCP клиента для
+    /// семейства. `None` — снимка формы нет; `Some(&[])` — снимок есть,
+    /// но опций не было (C возвращает указатель с `len=0`).
+    pub fn shape_tcp_options_family(&self, family: u8) -> Option<&[u8]> {
+        if !matches!(family, 4 | 6) {
+            return None;
+        }
+        if !self
+            .last_client_shapes
+            .iter()
+            .any(|cached| cached.family == family)
+        {
+            return None;
+        }
+        Some(
+            self.shape_tcp_options[shape_family_slot(family)]
+                .as_deref()
+                .unwrap_or(&[]),
+        )
+    }
+
+    /// Запомнить набор TCP-опций наблюдённого ClientHello (C `shape_opts[k]`).
+    pub fn record_shape_tcp_options(&mut self, family: u8, options: &[u8]) {
+        if matches!(family, 4 | 6) {
+            let slot = shape_family_slot(family);
+            self.shape_tcp_options[slot] = Some(options[..options.len().min(40)].to_vec());
+        }
+    }
+
+    fn v22_frames_with_shape_options(&self, kind: u16, body: &[u8]) -> Vec<(u16, Vec<u8>)> {
+        let mut frames = v22_event_frames(kind, body);
+        if kind == control::EVENT_CLIENT_SHAPE
+            && let Some(family) = body.first().copied()
+            && let Some(options) = self.shape_tcp_options_family(family)
+            && options.len() <= 40
+            && let Some((_, tcp_body)) = frames
+                .iter_mut()
+                .find(|(kind, _)| *kind == control::EVENT_LEGACY_CLIENT_TCP)
+        {
+            // C отправляет CLIENT_TCP перед SHAPE с тем же ключом.
+            tcp_body.extend_from_slice(options);
+        }
+        frames
+    }
+
     pub fn send_event(&mut self, kind: u16, body: &[u8]) -> io::Result<()> {
         if self.peer.is_none() {
             self.dropped_events = self.dropped_events.saturating_add(1);
             return Ok(());
         }
         if self.wire_profile == control::WireProfile::V22 {
-            for (legacy_kind, legacy_body) in v22_event_frames(kind, body) {
+            for (legacy_kind, legacy_body) in self.v22_frames_with_shape_options(kind, body) {
                 let bytes = control::encode_frame(legacy_kind, &legacy_body)
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
                 self.enqueue(bytes);
@@ -2551,7 +2599,7 @@ impl ControlServer {
             return Ok(false);
         }
         let frames = if self.wire_profile == control::WireProfile::V22 {
-            v22_event_frames(kind, body)
+            self.v22_frames_with_shape_options(kind, body)
         } else {
             vec![(kind, body.to_vec())]
         };
@@ -3888,6 +3936,74 @@ mod tests {
             Some([0; 16]),
             "точная привязка должна иметь приоритет над suffix-планом"
         );
+    }
+
+    #[test]
+    fn shape_tcp_options_family_matches_c_and_v22_client_tcp_carries_them() {
+        let options = [1, 1, 8, 10, 0, 0, 0, 1, 0, 0, 0, 2];
+        let hello = super::super::capture::tcp_hello_from_packet(&tcp_tls_packet_with_options(
+            "opts.example",
+            &options,
+        ))
+        .unwrap();
+        assert_eq!(hello.tcp_options.as_deref(), Some(&options[..]));
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("r2o-control-opts-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("control.sock");
+        let mut server = ControlServer::open_with_profile(
+            &path,
+            u16::MAX as u32,
+            control::WireProfile::V22,
+            control::RELEASE_ID,
+        )
+        .unwrap();
+        let mut client = UnixStream::connect(&path).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        assert!(server.poll().unwrap().is_empty());
+        assert_eq!(
+            control::read_frame(&mut client).unwrap().kind,
+            control::EVENT_PROTOCOL
+        );
+
+        // C: без снимка формы — NULL для обоих семейств и негодных семейств.
+        assert!(server.shape_tcp_options_family(4).is_none());
+        assert!(server.shape_tcp_options_family(6).is_none());
+        assert!(server.shape_tcp_options_family(5).is_none());
+        server.record_shape_tcp_options(4, &options);
+        assert!(
+            server.shape_tcp_options_family(4).is_none(),
+            "опции без снимка формы не отдаются"
+        );
+
+        let shape_body = hello.shape_event_body().unwrap();
+        assert!(server.observe_client_shape(&shape_body).unwrap().is_none());
+        assert_eq!(server.shape_tcp_options_family(4), Some(&options[..]));
+        assert!(server.shape_tcp_options_family(6).is_none());
+
+        server
+            .send_event(control::EVENT_CLIENT_SHAPE, &shape_body)
+            .unwrap();
+        let client_tcp = control::read_frame(&mut client).unwrap();
+        assert_eq!(client_tcp.kind, control::EVENT_LEGACY_CLIENT_TCP);
+        assert_eq!(
+            &client_tcp.body[..control::KEY_LEN],
+            &shape_body[..control::KEY_LEN]
+        );
+        assert_eq!(&client_tcp.body[control::KEY_LEN..], &options);
+        let shape = control::read_frame(&mut client).unwrap();
+        assert_eq!(shape.kind, control::EVENT_LEGACY_SHAPE);
+
+        drop(client);
+        drop(server);
+        std::fs::remove_dir(&directory).unwrap();
     }
 
     #[test]
