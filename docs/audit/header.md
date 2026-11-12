@@ -210,6 +210,27 @@ P означает неполное доказательство ветвей, N
 - Живые: RuTracker 157/157 изображений, Rutor 786/786, YouTube video
   `readyState=4`, Discord `READY`, голос `RTC_CONNECTED` и RTP 26–37 мс.
 
+## Фактические прогоны этого прохода (2026-11-12)
+
+Выполнены на закреплённом доноре `a378e230947ebfd011439e1cac0f1e994d883aae`:
+
+- `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/test-core-crypto-differential.sh` —
+  **PASS**, 13 кейсов (SHA-256/HMAC/HKDF/AES-128-ECB/GCM).
+- `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-fallback-differential.sh` —
+  **PASS** (`family=0 result=-1`; `family=4/6 result=0 dropped=7 sent=19`).
+- `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-control-events-differential.sh` —
+  **PASS** (ACK/APPLIED, candidate ACK, lost-ACK settle).
+- `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-catalog-persist-differential.sh` —
+  **PASS** (save_atomic, конкурентное внешнее обновление).
+- `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-diagnostics-differential.sh` —
+  **не выполнен**: сборка донорского `test_httpsearch` падает на duplicate
+  symbols `d2k_plan_apply`, `d2k_plan_max_emit`, `d2k_actions_cancel`,
+  `d2k_actions_free` (archive `libd2k_udp.a` и объект того же файла).
+  Это ограничение донорского Makefile, а не отказ R2O; R2O-тесты не запускались.
+
+Эти прогоны усиливают соответствующие E-строки, но не заменяют перечисленные
+в таблицах пробелы (P/N) и не покрывают живые/аппаратные сценарии.
+
 ## Как читать таблицы
 
 Каждая строка — одна C-функция. Колонка «строки» — диапазон `line..end_line`
