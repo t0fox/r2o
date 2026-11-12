@@ -754,7 +754,7 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 
 Сборка IPv4/IPv6 UDP-фрагментов по 4 формам (прямой/обратный порядок, 3 фрагмента с перекрытием), контрольные суммы. Порт: `crates/r2k-core/src/wire.rs:294 build_udp_fragments_with_capacity`, `:380 udp_fragment_cuts`. Дифференциал: `crates/r2k-core/tests/ipfrag.rs::d2o_ipfrag_builder_matches_r2o_on_ipv4_ipv6_shapes` (C-оракул `tests/d2o_ipfrag_oracle.c`).
 
-**Прочитано построчно: 8/8 функций, 129 строк C (1–129).** Различий в shape/cuts/выравнивании/перекрытиях/checksum/UDP6-заголовке не найдено. C-оракул сравнивает offsets/lengths и байты IPv4/IPv6 для shape 1..4.
+**Прочитано построчно: 8/8 функций, 129 строк C (1–129).** Сверено с `wire.rs:294-420` (`build_udp_fragments_with_capacity`, `udp_fragment_cuts`): shape 1..4, `first=8/16`, `reverse=shape>1`, `three` при 3/4, `second=32/48`, перекрытия 8, выравнивание `&~7`, проверки `total>65515`/`total<=24`/`off3`; IPv4-заголовок 20 байт, ID/checksum, IPv6 48 байт, flow/tc/hop/id. C-оракул `tests/ipfrag.rs:239` сравнивает offsets/lengths и байты IPv4/IPv6 для shape 1..4.
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
