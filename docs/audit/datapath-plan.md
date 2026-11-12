@@ -30,8 +30,8 @@ Static-хелперы наследуют статус владельца (вла
 
 | Статус | Кол-во |
 |---|---:|
-| E | 93 |
-| P | 85 |
+| E | 94 |
+| P | 84 |
 | N | 5 |
 | ? | 0 |
 | **Всего** | **183** |
@@ -40,7 +40,7 @@ Static-хелперы наследуют статус владельца (вла
 
 | Файл | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| datapath/plans.c | 75 | 32 | 42 | 1 | 0 |
+| datapath/plans.c | 75 | 33 | 41 | 1 | 0 |
 | datapath/routemark.c | 23 | 15 | 7 | 1 | 0 |
 | datapath/plan_parse.c | 17 | 14 | 3 | 0 | 0 |
 | datapath/raw.c | 17 | 8 | 9 | 0 | 0 |
@@ -434,13 +434,13 @@ UDP→addr переход, R2O — только exact+ECH→MODERN+общий ad
 | d2k_plantab_find_sport | 1068-1072 | 5 | поиск с местным портом потока | `control.rs:548-571` (`select`, `tcp.source_port`) | P | C `find_family(...,family=4)` с портом; порт учитывается для проб. Rust `select` передаёт `tcp.source_port` в `NameProbeKey`; отдельного входа с sport нет. |
 | d2k_plantab_find_family | 1074-1079 | 6 | поиск с family | `control.rs:419` `select_with_quic_host_at_hook` (`view.family`) | P | C `find_target(..., family==4 ? &addr_be : NULL, family, ...)`; family 6 без адреса. Rust family берётся из `PacketView`; отдельного входа нет. |
 | d2k_plantab_find_target | 1081-1236 | 156 | ядро поиска: probe-by-port при пустом имени → точная форма+порт → своя форма → grandfather → суффикс → адрес; счёт промахов | `control.rs:419-600 select_with_quic_host_at_hook`, `:1493-1590 find/find_addr/find_addr_fallback/find_in_domain` | **P** | Тесты TLS/ECH/QUIC/HTTP/voice/probe (control.rs:2823-3896). **Подтверждённые отличия:** (1) `shape_misses` C инкрементирует, R2O — нет; (2) R2O добавляет TCP-контекст 8–13 и bridge-shape (control.rs:529-539); (3) односторонний кросс-транспортный переход C (UDP→addr, TCP→NULL) заменён общим `find_addr_fallback`, который разрешает и TCP→addr; (4) C при пустом имени и `sport_be` ищет **name-probe по порту** (`plans.c:1093-1112`), R2O UDP-путь имеет только `addr_probe_binding_at_hook`, а TCP без SNI уходит в `find_addr`; (5) C имеет `h.any`/ANY и grandfather/ANY в `scan_addr`, R2O `find`/`find_addr` — только exact+ECH→MODERN; (6) ECH→MODERN в `find_addr` **есть** (`control.rs:1509-1517`), поэтому прежнее утверждение об отсутствии ECH-адресного fallback неверно; отсутствуют grandfather/ANY. |
-| d2k_plantab_count | 1238-1240 | 3 | число занятых записей | `control.rs:178` `r2o_plan_count` | P | C `t ? t->used : 0` — только записи `v[]` (имена+адреса), пробы в `probes[]` не входят. Rust `r2o_plan_count = plans.len()+addr_plans.len()+probes.len()` — включает name-пробы; при активной пробе числа расходятся. Тест control.rs:2633 сверяет ёмкость/вытеснение, не равенство counts с C. |
+| d2k_plantab_count | 1238-1240 | 3 | число занятых записей | `control.rs:178-189` `r2o_plan_count`/`exact_usage` | E | C `t ? t->used : 0` — только записи `v[]` (имена+адреса); name-пробы лежат там же с `only_sport`, но отдельного `probe_used` не имеют. Rust `r2o_plan_count = plans.len()+addr_plans.len()` — name+addr без name-проб; `exact_usage()` отдельно включает `probes` для общей ёмкости/вытеснения. Тест `plan_count_excludes_name_probes_like_d2o`: одна name-проба → count 0, exact_usage 1; capacity-тест control.rs:2633. |
 | d2k_plantab_capacity | 1242-1244 | 3 | ёмкость таблицы | `control.rs:182` `r2o_plan_capacity` | E | C `t ? t->cap : 0`; Rust `exact_capacity` (не менее 1). Тест `name_plan_table_evicts_lru_and_delete_releases_a_slot` (control.rs:2663) сверяет capacity и вытеснение. |
 | d2k_plantab_binding | 1246-1257 | 12 | identity установленного плана (generation/kind/family/shape/temporary/epoch) | `control.rs:690` `binding_for_plan`, `:1469-1476` `delete_name_bound` | E | C `!out→0`; зануление; `!t/!p/owner!=t/!generation→0`; нулевой epoch→0; копия generation/kind/family/shape/temporary/epoch; 1. Rust `binding_for_plan` возвращает `PlanBinding` с trial/generation/shape/temporary; epoch — поле `NamePlans`, проверяется в `delete_name_bound`. Тесты `bound_http_set...` (control.rs:2700), APPLIED-фикстуры. |
 | d2k_plantab_set_name_trial | 1259-1267 | 9 | поставить пробный план с trial id | `control.rs:1093` `set_name_probe` | E | C `!sport \|\| !trial_id → free/-2`; `set_name_family`; при успехе копирует 16 байт trial в binding. Rust `set_name_probe` требует `trial_id: Some`, `source_port!=0`, `valid_tcp_probe_shape`; сохраняет trial в `ProbePlan`. Тесты control.rs:3489/3637. |
 | d2k_plantab_trial | 1268-1273 | 6 | trial id установленного временного плана | `control.rs:690` `binding_for_plan` (`PlanBinding.trial_id`) | E | C зануляет out; при `t && p && owner==t && temporary` копирует `binding_trial_id`. Rust `binding_for_plan` для `probes`/`voice_addr_probes`/`addr_probes` возвращает trial_id и temporary=true, для постоянных — нули/false. Тест `tls_probe_plan...reports_temporary_applied` (control.rs:3637), voice control.rs:3239. |
 
-Итог по файлу: E 32, P 42, N 1, ? 0. Ключевые пробелы: счётчик промахов по форме мёртв;
+Итог по файлу: E 33, P 41, N 1, ? 0. Ключевые пробелы: счётчик промахов по форме мёртв;
 нет ECH-удержания; адресные опыты без тестов; префильтры кандидатов грубее C; legacy-удаления
 «все формы» отсутствуют; поиск ядра отличается набором ветвей.
 

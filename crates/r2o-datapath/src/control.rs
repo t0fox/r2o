@@ -175,7 +175,14 @@ impl NamePlans {
         self.send_maxlen = maxlen;
     }
 
+    /// Число записей `v[]` в терминах C: имена и адреса. Name-пробы в C
+    /// лежат в `v[]` с `only_sport`, но отдельного `probe_used` не имеют,
+    /// поэтому в этот счётчик не входят (`plans.c:1238-1240`).
     pub fn r2o_plan_count(&self) -> usize {
+        self.plans.len() + self.addr_plans.len()
+    }
+
+    fn exact_usage(&self) -> usize {
         self.plans.len() + self.addr_plans.len() + self.probes.len()
     }
 
@@ -232,7 +239,7 @@ impl NamePlans {
     }
 
     fn make_room_exact(&mut self) -> bool {
-        if self.r2o_plan_count() < self.exact_capacity {
+        if self.exact_usage() < self.exact_capacity {
             return true;
         }
         match self.exact_victim() {
@@ -2279,7 +2286,8 @@ fn canonical_name(bytes: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AddrProbePlan, ControlServer, NamePlanKey, NamePlans, VoiceProbeKey, VoiceProbePlan,
+        AddrProbePlan, ControlServer, NamePlanKey, NamePlans, NameProbeKey, ProbePlan,
+        VoiceProbeKey, VoiceProbePlan,
     };
     use r2k_core::control::BindingContext;
     use r2k_core::plan::Plan;
@@ -3823,6 +3831,29 @@ mod tests {
             plans.select(&packet).map(|selected| selected.id),
             Some(permanent_id)
         );
+    }
+
+    #[test]
+    fn plan_count_excludes_name_probes_like_d2o() {
+        let mut plans = NamePlans::default();
+        plans.probes.insert(
+            NameProbeKey {
+                name: NamePlanKey {
+                    host: "probe.example".into(),
+                    family: 4,
+                    shape: SHAPE_MODERN,
+                },
+                source_port: 40_000,
+            },
+            ProbePlan {
+                plan: Plan::default(),
+                trial_id: [0x33; 16],
+                generation: 1,
+                last_used: std::cell::Cell::new(0),
+            },
+        );
+        assert_eq!(plans.r2o_plan_count(), 0);
+        assert_eq!(plans.exact_usage(), 1);
     }
 
     #[test]
