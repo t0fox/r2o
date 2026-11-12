@@ -474,12 +474,14 @@
 
 ### `core/net4.c`
 
+**Прочитано построчно: 4/4 функции, 64 строки C (1–64).** Сверено с `quic_replay.rs:22-53 r2o_quic_address_is_local` и `scripts/test-core-net4-differential.sh` (C-оракул `crates/r2k-core/tests/d2o_net4_differential.c`, донор закреплён на `a378e230…`).
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `d2k_ip4_parse` | 7–30 | 24 | 4 октета по 1–3 цифры, 0..255, ровно точки/конец, старший байт вперёд | `Ipv4Addr::from_str` (`examples/m5_net4_trace.rs:15`) | **P** | **Подтверждённое расхождение:** C принимает ведущие нули (`010.0.0.1` → 10.0.0.1), Rust 1.98 — `Err(AddrParseError)`. Остальное совпадает: 1–3 цифры, ≤255, ровно 4 октета, конец строки. `test-core-net4-differential.sh` (пин a378) покрывает обычные/битые литералы, но не ведущие нули. |
-| `d2k_ip4_text` | 32–38 | 7 | 4 байта → `%u.%u.%u.%u`, 0 при нехватке cap | `Ipv4Addr::Display` | **E** | `test-core-net4-differential.sh` сравнивает текст на валидных адресах; контракт `cap` не нужен Rust `Display`. |
-| `d2k_ip4_private` | 40–51 | 12 | 127/8, 10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10, 0.0.0.0 | `quic_replay.rs:24-33` `ipv4_is_local` | **E** | Диапазоны совпадают посимвольно: `a==10/127`, `172 && b∈16..=31`, `192.168`, `169.254`, `100 && b∈64..=127`, `is_unspecified`. `test-core-net4-differential.sh` + `r2o-quic-local-address-differential.sh`. |
-| `d2k_ip6_private` | 53–64 | 12 | `::`/`::1`, fc00::/7, fe80::/10, ff00::/8, v4-mapped → ip4_private | `quic_replay.rs:37-51` IPv6-ветка | **E** | C: 15 нулевых байт + `ip[15]<=1`; `(ip[0]&0xfe)==0xfc`; `ip[0]==0xfe && (ip[1]&0xc0)==0x80`; `ip[0]==0xff`; `::ffff:` → ip4. Rust: `is_unspecified/is_loopback`, те же маски, mapped_v4. `test-core-net4-differential.sh`. |
+| `d2k_ip4_parse` | 7–30 | 24 | 4 октета по 1–3 цифры, 0..255, ровно точки/конец, старший байт вперёд | `Ipv4Addr::from_str` (`examples/m5_net4_trace.rs:15`) | **P** | **Подтверждённое расхождение:** C принимает ведущие нули (`010.0.0.1` → 10.0.0.1; `001.002.003.004`), Rust 1.98 — `Err(AddrParseError)` (проверено `rustc`). Остальное совпадает: 1–3 цифры, ≤255, ровно 4 октета, конец строки, старший байт вперёд. `test-core-net4-differential.sh` (пин a378) покрывает `0.0.0.0/127.0.0.1/192.168.1.1/255.255.255.255` и битые литералы, но **не ведущие нули**. |
+| `d2k_ip4_text` | 32–38 | 7 | 4 байта → `%u.%u.%u.%u`, 0 при нехватке cap или ошибке | `Ipv4Addr::Display` (`examples/m5_net4_trace.rs`) | **E** | Для валидных адресов текст совпадает; C возвращает 0 при `n<0`/`n>=cap`, Rust `Display` пишет в `String` без предела. `test-core-net4-differential.sh` сравнивает `parse→text` на валидных адресах. |
+| `d2k_ip4_private` | 40–51 | 12 | 127/8, 10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10, 0.0.0.0 | `quic_replay.rs:24-33 ipv4_is_local` | **E** | Диапазоны совпадают: `is_unspecified`, `a==10/127`, `172 && b∈16..=31`, `192.168`, `169.254`, `100 && b∈64..=127`. C собирает `v` из big-endian байт; Rust работает по `octets()`. `test-core-net4-differential.sh` + `r2o-quic-local-address-differential.sh`. |
+| `d2k_ip6_private` | 53–64 | 12 | `::`/`::1`, fc00::/7, fe80::/10, ff00::/8, v4-mapped → ip4_private | `quic_replay.rs:35-52` IPv6-ветка | **E** | C: `NULL→1`; 15 нулевых байт + `ip[15]<=1`; `(ip[0]&0xfe)==0xfc`; `ip[0]==0xfe && (ip[1]&0xc0)==0x80`; `ip[0]==0xff`; `::ffff:` → `ip4_private`. Rust: `is_unspecified/is_loopback`, те же маски, `mapped_v4` = 10 нулей + `ff ff`, затем `ipv4_is_local`. Единственное отличие — C трактует `NULL` как private, Rust принимает значение. `test-core-net4-differential.sh`. |
 
 ### `core/p256.c`
 
