@@ -308,6 +308,8 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 
 Поиск HTTP-обхода: база → свои планы → split/checksum/продукт → fallback, с подтверждением APPLIED и живой привязкой. В R2O: `r2o-controller/src/http_search.rs` (judge, кандидаты, id, чтение ответа) и `main.rs` (`HttpSearchRecordCache:4464`, `run_http_search_task:22901`, `begin_http_search:19542`, `http_baseline_failure_action:22853`). Дифференциалы: `scripts/r2o-http-search-differential.sh` (набор C-фикстур `d2o_http_*_differential.c` против Rust-тестов), `tests/http_search.rs`.
 
+**Прочитано построчно: 66/66 функций, 1593 строки C (1–1593).** Строки в таблице — реестровые/CSV; фактические строки C в `a378` на **+2** больше (сдвиг extractor, см. `deep-core-verify.md`). Например, `d2k_httpsearch_save` фактически 1446–1473, `d2k_httpsearch_load` — 1475–1514, `d2k_hs_candidate_text` — 296–326.
+
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `mono_ms` | 37-41 | 5 | монотонное время, мс | `std::time::Instant` | P | инфраструктурный хелпер |
@@ -369,7 +371,7 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `d2k_httpsearch_tick` | 1397-1427 | 31 | таймауты ACK/APPLIED/BASE/RUN | `main.rs` deadline handling | P | таймеры на task/timeout, не tick |
 | `d2k_httpsearch_push_all` | 1429-1442 | 14 | переустановить все сохранённые планы | `main.rs` restore/install loop | P | покрыто durable-тестом частично |
 | `d2k_httpsearch_save` | 1444-1471 | 28 | атомарная запись `d2k-http-plans 1`: `host family key wall`, `fflush/fsync/fclose/rename`, `unlink(tmp)` при ошибке | `main.rs`/`catalog.rs` persist (JSON-каталог) | **P** | C пишет отдельный файл `d2k-http-plans 1` с точным форматом и атомарной заменой; Rust сохраняет каталог JSON, файла и формата `d2k-http-plans` нет. C/Rust durable-дифференциал `d2o_http_durable_differential.c` сравнивает только маркер `persisted_before_flush=yes`, а не содержимое/формат файла; тест `confirmed_http_candidate_is_durable_before_catalog_flush_interval` проверяет каталог. **Фактические строки в a378 — 1446–1473; в реестре/CSV 1444–1471 (сдвиг extractor +2, см. `deep-core-verify.md`).** |
-| `d2k_httpsearch_load` | 1473-1512 | 40 | разбор файла планов, known_key, install | `catalog.rs:391 load` (HTTP-планы) | P | отдельного загрузчика `d2k-http-plans` с теми же правилами не найдено |
+| `d2k_httpsearch_load` | 1473-1512 | 40 | разбор файла планов, known_key, install | `catalog.rs:391 load` (HTTP-планы) | P | отдельного загрузчика `d2k-http-plans` с теми же правилами не найдено. **Фактические строки в a378 — 1475–1514; в реестре/CSV 1473–1512 (сдвиг extractor +2).** |
 | `runner_main` | 1525-1537 | 13 | поток однократного зонда | `std::thread`/async task | P | отдельной структуры нет |
 | `d2k_hs_runner_new` | 1539-1553 | 15 | создать runner с pipe/cond | `std::thread` + канал | P | RAII |
 | `d2k_hs_runner_free` | 1555-1562 | 8 | join/close/destroy | `JoinHandle`/Drop | P | RAII |
