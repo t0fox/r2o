@@ -255,6 +255,8 @@ P означает неполное доказательство ветвей, N
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-raw-profile-differential.sh` —
   **PASS** (SYN-профили family 4/6 с TS и без, selftest key 0/1/2/3,
   инвалидация после 3 ошибок, white-TS без client timestamps, recheck).
+- `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-scheduler-cooldown-differential.sh` —
+  **PASS** (challenge cooldown: сигнал/endpoint, late-RST, exhausted).
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-diagnostics-differential.sh` —
   **не выполнен**: сборка донорского `test_httpsearch` падает на duplicate
   symbols `d2k_plan_apply`, `d2k_plan_max_emit`, `d2k_actions_cancel`,
