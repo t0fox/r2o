@@ -465,7 +465,7 @@ impl NamePlans {
                 if let Some((r2o_plan, _, _, _)) = self.voice_address_binding(packet) {
                     return Some(r2o_plan);
                 }
-                return self
+                let plan = self
                     .find(b"@discord-voice", view.family, SHAPE_VOICE)
                     .or_else(|| {
                         self.find_addr_fallback(
@@ -476,12 +476,25 @@ impl NamePlans {
                             17,
                         )
                     });
+                if plan.is_none() {
+                    self.note_shape_miss(
+                        Some(b"@discord-voice"),
+                        view.dst,
+                        view.family,
+                        SHAPE_VOICE,
+                    );
+                }
+                return plan;
             }
             if r2k_core::stun::is_binding_request(payload) {
                 if let Some((r2o_plan, _, _, _)) = self.voice_address_binding(packet) {
                     return Some(r2o_plan);
                 }
-                return self.find_addr(view.dst, SHAPE_VOICE);
+                let plan = self.find_addr(view.dst, SHAPE_VOICE);
+                if plan.is_none() {
+                    self.note_shape_miss(None, view.dst, view.family, SHAPE_VOICE);
+                }
+                return plan;
             }
             let source_port = packet
                 .get(view.l4_offset..view.l4_offset + 2)
@@ -499,7 +512,8 @@ impl NamePlans {
                 .flatten();
             let quic_host = quic_host.or(derived_quic_host.as_deref());
             return if let Some(quic_host) = quic_host {
-                self.find(quic_host, view.family, SHAPE_QUIC)
+                let plan = self
+                    .find(quic_host, view.family, SHAPE_QUIC)
                     .or_else(|| self.find_in_domain(quic_host, view.family, SHAPE_QUIC, 17))
                     .or_else(|| {
                         self.find_addr_fallback(
@@ -509,11 +523,19 @@ impl NamePlans {
                             SHAPE_QUIC,
                             17,
                         )
-                    })
+                    });
+                if plan.is_none() {
+                    self.note_shape_miss(Some(quic_host), view.dst, view.family, SHAPE_QUIC);
+                }
+                plan
             } else {
-                r2k_core::quic::is_authenticated_initial(payload)
+                let plan = r2k_core::quic::is_authenticated_initial(payload)
                     .then(|| self.find_addr(view.dst, SHAPE_QUIC))
-                    .flatten()
+                    .flatten();
+                if plan.is_none() {
+                    self.note_shape_miss(None, view.dst, view.family, SHAPE_QUIC);
+                }
+                plan
             };
         }
         if view.protocol != 6 {
@@ -574,9 +596,8 @@ impl NamePlans {
                 .find_addr(view.dst, shape)
                 .or_else(|| self.find_addr(view.dst, bridge_shape))
                 .or_else(|| self.find_addr_shape_fits(view.dst, shape));
-            if plan.is_none() && self.addr_plans.keys().any(|key| key.address == view.dst) {
-                self.shape_misses
-                    .set(self.shape_misses.get().saturating_add(1));
+            if plan.is_none() {
+                self.note_shape_miss(None, view.dst, view.family, shape);
             }
             return plan;
         };
@@ -620,24 +641,49 @@ impl NamePlans {
             .or_else(|| self.find_addr_fallback(view.dst, Some(sni), view.family, bridge_shape, 6))
             .or_else(|| self.find_addr_shape_fits(view.dst, shape));
         if plan.is_none() {
-            self.note_tcp_shape_miss(sni, view.dst, view.family);
+            self.note_shape_miss(Some(sni), view.dst, view.family, shape);
         }
         plan
     }
 
-    /// Счётчик C `shape_misses`: цель известна, но плана наблюдаемой формы нет
-    /// (`plans.c:1177-1234`). Для TCP проверяются name-записи (кроме HTTP) и
-    /// адресные; UDP-переход `goto check_addr` пока не воспроизведён.
-    fn note_tcp_shape_miss(&self, host: &[u8], address: Address, family: u8) {
-        if self.find_any_name(host, family).is_some() {
-            self.shape_misses
-                .set(self.shape_misses.get().saturating_add(1));
-            return;
+    /// C `scan_name`/`scan_addr` + `find_target`: цель известна, но плана
+    /// наблюдаемой формы нет (`plans.c:1209,1233`).
+    ///
+    /// TCP: любая запись имени (кроме HTTP) уже даёт промах.
+    /// UDP: запись имени другого транспорта не мешает адресному переходу;
+    /// промах считается, если у имени есть своя UDP/ANY-запись или у адреса
+    /// есть любая запись, не подошедшая по форме.
+    fn note_shape_miss(&self, host: Option<&[u8]>, address: Address, family: u8, seen_shape: u8) {
+        if let Some(host) = host {
+            if self.name_has_udp_binding(host, family) {
+                self.shape_misses
+                    .set(self.shape_misses.get().saturating_add(1));
+                return;
+            }
+            if !r2o_shape_is_udp(seen_shape) && self.name_has_any_binding(host, family) {
+                self.shape_misses
+                    .set(self.shape_misses.get().saturating_add(1));
+                return;
+            }
         }
         if self.addr_plans.keys().any(|key| key.address == address) {
             self.shape_misses
                 .set(self.shape_misses.get().saturating_add(1));
         }
+    }
+
+    /// Есть ли у имени своя UDP-запись (QUIC/VOICE) или ANY, не подошедшая
+    /// по форме. TCP-запись сюда не входит: для UDP она уступает адресу.
+    fn name_has_udp_binding(&self, bytes: &[u8], family: u8) -> bool {
+        let Some(host) = canonical_name(bytes) else {
+            return false;
+        };
+        self.plans.keys().any(|key| {
+            key.host == host
+                && key.family == family
+                && key.shape != SHAPE_HTTP
+                && (r2o_shape_is_udp(key.shape) || key.shape == 0)
+        })
     }
 
     pub const fn revision(&self) -> u64 {
@@ -5769,8 +5815,122 @@ mod tests {
         let address =
             super::Address::new(super::IpAddr::V4(super::Ipv4Addr::new(198, 51, 100, 22)));
         let before = plans.shape_misses.get();
-        plans.note_tcp_shape_miss(b"any.example", address, 4);
+        plans.note_shape_miss(
+            Some(b"any.example"),
+            address,
+            4,
+            r2k_core::control::SHAPE_MODERN,
+        );
         assert_eq!(plans.shape_misses.get(), before + 1);
+    }
+
+    #[test]
+    fn shape_misses_match_c_for_udp_and_addr_branches() {
+        let address =
+            super::Address::new(super::IpAddr::V4(super::Ipv4Addr::new(198, 51, 100, 25)));
+
+        // UDP + только TCP-запись имени + нет адресной записи: не промах.
+        let mut plans = NamePlans::default();
+        plans.plans.insert(
+            NamePlanKey {
+                host: "voice.example".into(),
+                family: 4,
+                shape: r2k_core::control::SHAPE_MODERN,
+            },
+            InstalledPlan {
+                plan: Plan::default(),
+                generation: 1,
+                last_used: std::cell::Cell::new(0),
+            },
+        );
+        let before = plans.shape_misses.get();
+        plans.note_shape_miss(
+            Some(b"voice.example"),
+            address,
+            4,
+            r2k_core::control::SHAPE_QUIC,
+        );
+        assert_eq!(plans.shape_misses.get(), before);
+
+        // Та же UDP-цель, но у адреса есть любая запись: промах.
+        plans.addr_plans.insert(
+            super::AddrPlanKey {
+                address,
+                shape: r2k_core::control::SHAPE_MODERN,
+            },
+            InstalledPlan {
+                plan: Plan::default(),
+                generation: 2,
+                last_used: std::cell::Cell::new(0),
+            },
+        );
+        plans.note_shape_miss(
+            Some(b"voice.example"),
+            address,
+            4,
+            r2k_core::control::SHAPE_QUIC,
+        );
+        assert_eq!(plans.shape_misses.get(), before + 1);
+
+        // Своя UDP-запись имени не подошла — промах без адреса.
+        let mut udp_name = NamePlans::default();
+        udp_name.plans.insert(
+            NamePlanKey {
+                host: "voice.example".into(),
+                family: 4,
+                shape: r2k_core::control::SHAPE_VOICE,
+            },
+            InstalledPlan {
+                plan: Plan::default(),
+                generation: 3,
+                last_used: std::cell::Cell::new(0),
+            },
+        );
+        udp_name.note_shape_miss(
+            Some(b"voice.example"),
+            address,
+            4,
+            r2k_core::control::SHAPE_QUIC,
+        );
+        assert_eq!(udp_name.shape_misses.get(), 1);
+
+        // TCP-наблюдение с известным именем — промах даже без адреса.
+        let mut tcp_name = NamePlans::default();
+        tcp_name.plans.insert(
+            NamePlanKey {
+                host: "voice.example".into(),
+                family: 4,
+                shape: r2k_core::control::SHAPE_LEGACY,
+            },
+            InstalledPlan {
+                plan: Plan::default(),
+                generation: 4,
+                last_used: std::cell::Cell::new(0),
+            },
+        );
+        tcp_name.note_shape_miss(
+            Some(b"voice.example"),
+            address,
+            4,
+            r2k_core::control::SHAPE_MODERN,
+        );
+        assert_eq!(tcp_name.shape_misses.get(), 1);
+
+        // Без имени, но с адресной записью другой формы — промах.
+        let mut addr_only = NamePlans::default();
+        addr_only.addr_plans.insert(
+            super::AddrPlanKey {
+                address,
+                shape: r2k_core::control::SHAPE_QUIC,
+            },
+            InstalledPlan {
+                plan: Plan::default(),
+                generation: 5,
+                last_used: std::cell::Cell::new(0),
+            },
+        );
+        addr_only.note_shape_miss(None, address, 4, r2k_core::control::SHAPE_VOICE);
+        assert_eq!(addr_only.shape_misses.get(), 1);
     }
 
     #[test]
