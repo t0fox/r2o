@@ -37,6 +37,14 @@ static RST_COMMENT_SUPPORTED: AtomicBool = AtomicBool::new(true);
 static RST_STALE_RULE_SWEEP: Once = Once::new();
 static RST_ABANDON_REPORTED: Once = Once::new();
 
+// C `detect/raw.c:57-61`: нормализованная iptables-строка правила подавления
+// RST. Legacy-форма не несёт владельца; owned-форма несёт `d2k-rst:PID`.
+const RST_PREFIX: &str = "-A OUTPUT -p tcp -m tcp --sport ";
+const RST_LEGACY_SUFFIX: &str = " --tcp-flags RST RST -j DROP";
+const RST_OWNED_MID: &str = " --tcp-flags RST RST -m comment --comment ";
+const RST_OWNED_TAG: &str = "d2k-rst:";
+const RST_OWNED_SUFFIX: &str = " -j DROP";
+
 struct RawSelftestState {
     checked_at: [Option<Instant>; 4],
     error_streak: [usize; 4],
@@ -1757,6 +1765,85 @@ pub(crate) fn flush_pending_rst_releases() {
     retry_pending_rst_releases(false);
 }
 
+fn parse_long_exact(bytes: &[u8]) -> Option<i64> {
+    if bytes.is_empty() || bytes.len() >= 32 || !bytes.iter().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    std::str::from_utf8(bytes).ok()?.parse().ok()
+}
+
+/// C `d2k_parse_rst_rule` (`detect/raw.c:79-118`): наше ли правило, порт и
+/// необязательный PID владельца. Разбор чисто строчный, без iptables.
+fn parse_rst_rule(line: &str) -> Option<(u16, Option<i64>)> {
+    let line = line.trim_matches(|c| matches!(c, ' ' | '\t' | '\r' | '\n'));
+    if !line.starts_with(RST_PREFIX) {
+        return None;
+    }
+    let rest = &line[RST_PREFIX.len()..];
+    let digits_end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    if digits_end == 0 {
+        return None;
+    }
+    let port = parse_long_exact(&rest.as_bytes()[..digits_end])?;
+    if !(30000..=54999).contains(&port) {
+        return None;
+    }
+    let after = &rest[digits_end..];
+    if after == RST_LEGACY_SUFFIX {
+        return Some((port as u16, None));
+    }
+    if after.len() > RST_OWNED_MID.len() + RST_OWNED_TAG.len() + RST_OWNED_SUFFIX.len()
+        && after.starts_with(RST_OWNED_MID)
+        && line.ends_with(RST_OWNED_SUFFIX)
+    {
+        let mut owner = &after[RST_OWNED_MID.len()..after.len() - RST_OWNED_SUFFIX.len()];
+        if owner.starts_with('"') {
+            if owner.len() < 2 || !owner.ends_with('"') {
+                return None;
+            }
+            owner = &owner[1..owner.len() - 1];
+        }
+        if !owner.starts_with(RST_OWNED_TAG) {
+            return None;
+        }
+        let pid = parse_long_exact(owner[RST_OWNED_TAG.len()..].as_bytes())?;
+        if pid <= 0 {
+            return None;
+        }
+        return Some((port as u16, Some(pid)));
+    }
+    None
+}
+
+/// C `d2k_parse_stale_rst_rule`: порт нашего правила любого формата.
+fn parse_stale_rst_rule(line: &str) -> Option<u16> {
+    parse_rst_rule(line).map(|(port, _)| port)
+}
+
+fn pid_alive(pid: i64) -> bool {
+    if pid <= 0 || pid > i32::MAX as i64 {
+        return false;
+    }
+    let alive = unsafe { libc::kill(pid as i32, 0) == 0 };
+    alive || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// C `d2k_rst_rule_stale`: правило разобралось, владельца нет или он мёртв.
+fn rst_rule_stale_with(line: &str, alive: impl Fn(i64) -> bool) -> Option<(u16, Option<i64>)> {
+    let (port, owner) = parse_rst_rule(line)?;
+    match owner {
+        None => Some((port, None)),
+        Some(pid) if !alive(pid) => Some((port, Some(pid))),
+        _ => None,
+    }
+}
+
+fn rst_rule_stale(line: &str) -> Option<(u16, Option<i64>)> {
+    rst_rule_stale_with(line, pid_alive)
+}
+
 fn sweep_stale_iptables() {
     for program in ["iptables", "ip6tables"] {
         let args: Vec<String> = vec!["-w".into(), "-S".into(), "OUTPUT".into()];
@@ -1788,10 +1875,34 @@ fn sweep_stale_iptables() {
             continue;
         };
         let rules = String::from_utf8_lossy(&output.stdout);
-        for line in rules
-            .lines()
-            .filter(|line| line.contains("--comment r2o-rst:"))
-        {
+        for line in rules.lines() {
+            // Legacy-правило без метки и owned-правило `d2k-rst:PID` —
+            // только брошенные (`detect/raw.c:137-143`).
+            if let Some((port, owner)) = rst_rule_stale(line) {
+                let mut args = vec![
+                    "-w".to_string(),
+                    "-D".to_string(),
+                    "OUTPUT".to_string(),
+                    "-p".to_string(),
+                    "tcp".to_string(),
+                    "--sport".to_string(),
+                    port.to_string(),
+                    "--tcp-flags".to_string(),
+                    "RST".to_string(),
+                    "RST".to_string(),
+                ];
+                if let Some(pid) = owner {
+                    args.extend([
+                        "-m".to_string(),
+                        "comment".to_string(),
+                        "--comment".to_string(),
+                        format!("d2k-rst:{pid}"),
+                    ]);
+                }
+                args.extend(["-j".to_string(), "DROP".to_string()]);
+                let _ = run_command(program, &args);
+                continue;
+            }
             let Some((_, owner)) = line.split_once("--comment r2o-rst:") else {
                 continue;
             };
@@ -2901,6 +3012,44 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2)),
             &packet[20..]
         ));
+    }
+
+    #[test]
+    fn rst_rule_parser_matches_donor_legacy_and_owned_forms() {
+        let legacy = "-A OUTPUT -p tcp -m tcp --sport 40000 --tcp-flags RST RST -j DROP";
+        assert_eq!(parse_rst_rule(legacy), Some((40000, None)));
+        assert_eq!(parse_stale_rst_rule(legacy), Some(40000));
+
+        let owned = "-A OUTPUT -p tcp -m tcp --sport 40001 --tcp-flags RST RST -m comment --comment d2k-rst:1234 -j DROP";
+        assert_eq!(parse_rst_rule(owned), Some((40001, Some(1234))));
+        let quoted = "-A OUTPUT -p tcp -m tcp --sport 40002 --tcp-flags RST RST -m comment --comment \"d2k-rst:4321\" -j DROP";
+        assert_eq!(parse_rst_rule(quoted), Some((40002, Some(4321))));
+
+        assert_eq!(
+            parse_rst_rule("-A OUTPUT -p tcp -m tcp --sport 29999 --tcp-flags RST RST -j DROP"),
+            None
+        );
+        assert_eq!(
+            parse_rst_rule("-A OUTPUT -p tcp -m tcp --sport 55000 --tcp-flags RST RST -j DROP"),
+            None
+        );
+        assert_eq!(
+            parse_rst_rule("-A OUTPUT -p tcp -m tcp --sport 40000 --tcp-flags RST RST -j ACCEPT"),
+            None
+        );
+        assert_eq!(
+            parse_rst_rule(
+                "-A OUTPUT -p tcp -m tcp --sport 40000 --tcp-flags RST RST -m comment --comment d2k-rst:0 -j DROP"
+            ),
+            None
+        );
+
+        assert_eq!(rst_rule_stale_with(legacy, |_| false), Some((40000, None)));
+        assert_eq!(
+            rst_rule_stale_with(owned, |_| false),
+            Some((40001, Some(1234)))
+        );
+        assert_eq!(rst_rule_stale_with(owned, |_| true), None);
     }
 
     #[test]

@@ -88,8 +88,8 @@ recheck 1982 1982 equal True
 | core-state | 692 | 177 | 511 | 4 | 0 |
 | datapath-core | 400 | 145 | 244 | 11 | 0 |
 | datapath-plan | 183 | 138 | 45 | 0 | 0 |
-| detect | 159 | 51 | 102 | 6 | 0 |
-| **Итого** | **1982** | **697** | **1251** | **34** | **0** |
+| detect | 159 | 55 | 101 | 3 | 0 |
+| **Итого** | **1982** | **701** | **1250** | **31** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,8 +103,8 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 697 / P 1251 /
-N 34 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
+Покрытие реестра: **1982/1982** функций. Статусы: **E 701 / P 1250 /
+N 31 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
 | # | Область | D2O | R2O | Подтверждение |
@@ -348,8 +348,8 @@ P означает неполное доказательство ветвей, N
 | core-state | 692 | 177 | 511 | 4 | 0 |
 | datapath-core | 400 | 145 | 244 | 11 | 0 |
 | datapath-plan | 183 | 138 | 45 | 0 | 0 |
-| detect | 159 | 51 | 102 | 6 | 0 |
-| **Итого** | **1982** | **697** | **1251** | **34** | **0** |
+| detect | 159 | 55 | 101 | 3 | 0 |
+| **Итого** | **1982** | **701** | **1250** | **31** | **0** |
 
 
 ---
@@ -6263,9 +6263,9 @@ Static-хелперы наследуют статус владельца; в к�
 
 | Статус | Кол-во |
 |---|---:|
-| E | 51 |
-| P | 102 |
-| N | 6 |
+| E | 55 |
+| P | 101 |
+| N | 3 |
 | ? | 0 |
 | **Всего** | **159** |
 
@@ -6623,10 +6623,10 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `parse_long_exact` | 63-77 | 15 | точное десятичное `long`: длина 1..31, первая цифра, `strtol`, `errno==0`, `end` в конце | `raw_probe.rs:1689` (`owner.parse::<i32>()`) | **P** | C копирует в `buf[32]`, требует `len>0 && len<32`, первую цифру, `strtol(base 10)`, `errno==0`, `end!=buf`, `*end==0`. Rust в `sweep_stale_iptables` берёт `owner.split_whitespace().next()` и `parse::<i32>()` — строже по десятичности, но без C-предела 31 и с иным API; отдельной функции нет. |
-| `d2k_parse_rst_rule` | 79-118 | 39 | разбор строки iptables: префикс `-A OUTPUT -p tcp -m tcp --sport `, порт 30000..54999, legacy-суффикс или owned-форма `--comment d2k-rst:PID` (кавычки допустимы), PID>0 | нет | **N** | C разбирает `iptables -S OUTPUT` построчно, проверяет точный префикс/суффикс/тег и извлекает port/PID (`raw.c:79-118`). В R2O нет разбора строк iptables: `RstRule` строится типизированно из `source_port`/`destination` (`raw_probe.rs:1478-1509`), а `sweep_stale_iptables` фильтрует только `--comment r2o-rst:` (`:1782`). Legacy-правила без метки не распознаются. |
-| `d2k_parse_stale_rst_rule` | 121-124 | 4 | прежний вход: наше ли правило, порт | нет | **N** | C-обёртка `d2k_parse_rst_rule(line,port,NULL)`. В R2O нет ни разбора строк, ни этой обёртки; уборка использует `--comment r2o-rst:` напрямую. |
-| `pid_alive` | 128-132 | 5 | жив ли PID: крючок, иначе `kill(pid,0)==0` или EPERM | `raw_probe.rs:1791-1794` (inline) | **P** | C `d2k_raw_alive_hook` или `kill(pid,0)==0` или `errno==EPERM`. Rust в `sweep_stale_iptables` делает тот же `kill(pid,0)` и считает EPERM живым (`:1791-1794`); отдельной функции/крючка нет. |
-| `d2k_rst_rule_stale` | 137-143 | 7 | брошенное правило: разобралось и владелец 0/мёртв | нет | **N** | C `d2k_parse_rst_rule(line,&port,&owner)==0 && (owner==0 \|\| !pid_alive(owner))`. Rust не разбирает строки legacy-правил и не классифицирует по владельцу; `sweep_stale_iptables` ищет только `--comment r2o-rst:PID`. |
+| `d2k_parse_rst_rule` | 79-118 | 39 | разбор строки iptables: префикс `-A OUTPUT -p tcp -m tcp --sport `, порт 30000..54999, legacy-суффикс или owned-форма `--comment d2k-rst:PID` (кавычки допустимы), PID>0 | `raw_probe.rs` `parse_rst_rule` | E | C разбирает строку построчно: trim, точный префикс, цифровой порт 30000..54999, legacy-суффикс либо `d2k-rst:PID` (с кавычками), PID>0. Rust `parse_rst_rule` повторяет все ветви; тест `rst_rule_parser_matches_donor_legacy_and_owned_forms` проверяет legacy/owned/quoted и отказы. |
+| `d2k_parse_stale_rst_rule` | 121-124 | 4 | прежний вход: наше ли правило, порт | `raw_probe.rs` `parse_stale_rst_rule` | E | C-обёртка `d2k_parse_rst_rule(line,port,NULL)`. Rust `parse_stale_rst_rule(line)` возвращает только порт; тест `rst_rule_parser_matches_donor_legacy_and_owned_forms`. |
+| `pid_alive` | 128-132 | 5 | жив ли PID: крючок, иначе `kill(pid,0)==0` или EPERM | `raw_probe.rs` `pid_alive` | E | C `d2k_raw_alive_hook` или `kill(pid,0)==0` или `errno==EPERM`. Rust `pid_alive(pid)` делает тот же `kill(pid,0)` и считает EPERM живым; используется `rst_rule_stale`; тест `rst_rule_parser_matches_donor_legacy_and_owned_forms` проверяет живого/мёртвого владельца через инъекцию. |
+| `d2k_rst_rule_stale` | 137-143 | 7 | брошенное правило: разобралось и владелец 0/мёртв | `raw_probe.rs` `rst_rule_stale`/`rst_rule_stale_with` | E | C `parse_rst_rule(...) && (owner==0 \|\| !pid_alive(owner))`. Rust `rst_rule_stale` возвращает `Some((port,owner))` только для legacy или мёртвого владельца; `pid_alive` учитывает EPERM. Тест `rst_rule_parser_matches_donor_legacy_and_owned_forms`; `sweep_stale_iptables` снимает и legacy/`d2k-rst:` правила. |
 | `d2k_raw_supported` | 164-164 | 1 | Linux: сырой слой доступен | `raw_probe.rs` cfg(target_os="linux") | **P** | C `return 1` под `__linux__`/`D2K_RAW_UNIT_TEST`. Rust raw-модуль компилируется под Linux; отдельной функции `raw_supported` нет, ветка выбирается `cfg`. |
 | `raw_rule_system` | 224-255 | 32 | запуск команды правила: fork/setpgid, закрыть fd 3+, `execl("/bin/sh","-c")`, waitpid с дедлайном 5 с, SIGKILL группе | `raw_probe.rs:1497` `run_command`, `COMMAND_TIMEOUT` | **P** | **Ветви сверены:** C fork; в ребёнке `setpgid(0,0)`, закрывает fd 3..max, `execl("/bin/sh","sh","-c",cmd)`, `_exit(127)`; родитель `setpgid(pid,pid)`, `waitpid(WNOHANG)` до `deadline=now+5000`, по сроку `kill(-pid,SIGKILL)`+`kill(pid,SIGKILL)`+wait, возврат `D2K_RAW_RULE_KILLED`. Rust `run_command` (Command) с `COMMAND_TIMEOUT`, `try_wait`/kill; API/код возврата иные, но дедлайн/убийство есть. |
 | `d2k_raw_rst_fail_count` | 262-262 | 1 | счётчик отказов RST-правила текущего потока | `raw_probe.rs:58 RST_RULE_FAILURES` | **E** | C `return t_rst_rule_failures` (thread-local). Rust `thread_local! Cell<u64>` `RST_RULE_FAILURES`, инкремент в `RstGuard`; тест `raw_probe.rs:2770`. |
