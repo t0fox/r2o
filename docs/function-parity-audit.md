@@ -284,6 +284,28 @@ P означает неполное доказательство ветвей, N
   sh scripts/r2o-discord-voice-lifecycle-helper.sh` —
   **PASS** (endpoint lifecycle A→B, очередь, lease, proof, persistence;
   address-план и общий `@discord-voice`).
+- `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/test-quic-app-bytes-differential.sh` —
+  **PASS** (`VERDICT|match`; уникальные QUIC stream bytes совпадают, включая
+  смещения >32 бит: `4294967306`, `8589934602`).
+- `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/test-quic-budget-init-differential.sh` —
+  **PASS** (budget 0/1/25/2^31-1/2^31/2^32-1; `need` 50/2/50/4294967294/0/4294967294).
+- `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/test-quic-short-control-differential.sh` —
+  **PASS** (`VERDICT|match`; partial→NOT_RUN, complete→PASS, stalled/refused→CUT).
+- `R2O_DONOR_CORE=/mnt/e/d2o-a378w/core sh scripts/r2o-discovery-quic-stop-differential.sh` —
+  **PASS** (host lifecycle-тест планировщика C: «все проверки прошли»; Rust-тест
+  «остановка QUIC worker обслуживает удаление временной пробы»).
+- `R2O_DONOR_DATAPATH=/mnt/e/d2o-a378w/datapath
+  sh scripts/r2o-quic-stun-watch-differential.sh` —
+  **PASS** (C `test_quic_session`: «все проверки прошли»; C/Rust исключают STUN
+  и Discord Discovery из QUIC conntrack-stall).
+- `R2O_DONOR_CORE=/mnt/e/d2o-a378w/core
+  R2O_EXPECTED_DONOR_SHA=a378e230947ebfd011439e1cac0f1e994d883aae
+  sh scripts/r2o-discord-discovery-differential.sh` —
+  **PASS**, 23 теста (RTP/RTCP, SSRC, capacity, control reconnect, повторный
+  discovery, смена endpoint, истечение voice proof).
+- `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/test-discord-scheduled-udp-differential.sh` —
+  **PASS** (UDP emission `delay_us=15000` и packet bytes совпали;
+  `METRICS queue=1 refusals=1`).
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-diagnostics-differential.sh` —
   **не выполнен**: сборка донорского `test_httpsearch` падает на duplicate
   symbols `d2k_plan_apply`, `d2k_plan_max_emit`, `d2k_actions_cancel`,
@@ -1894,7 +1916,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `set_err` | 55-61 | 7 | записать текст ошибки через `vsnprintf`; молчание при `!err` или `cap==0` | `Result<_, CatalogError>` | **P*** | C `if (!err || cap == 0) return; va_start; vsnprintf(err,cap,fmt,ap); va_end`. Rust ошибки возвращает `Err(CatalogError)`; отдельной функции форматирования в буфер нет, тексты ошибок иные. |
+| `set_err` | 55-61 | 7 | записать текст ошибки через `vsnprintf`; молчание при `!err` или `cap==0` | `Result<_, CatalogError>` | **P*** | C `if (!err || cap == 0) return; va_start(ap,fmt); vsnprintf(err,cap,fmt,ap); va_end(ap)`. Rust ошибки возвращает `Err(CatalogError)`; отдельной функции форматирования в буфер нет, тексты ошибок иные. |
 | `jpeek` | 79-87 | 9 | пропустить SP/TAB/NL/CR и вернуть следующий байт, не потребляя; -1 на конце | `serde_json::Deserializer` | **P*** | C `while(i<len)` пропускает `' ','\t','\n','\r'`, затем возвращает `(unsigned char)s[i]` или -1. Rust-парсер serde_json сам пропускает те же четыре пробельных байта; отдельной функции нет. |
 | `jeat` | 92-104 | 13 | потребовать ровно `want` после пропуска пробелов; ошибка называет ожидание/встреченный символ/позицию | `serde_json` | **P*** | C `jpeek`; при несовпадении `set_err` с «ожидался '%c', встречен … (позиция %zu)», -1; иначе `i++`. Rust serde_json возвращает свои `expected value`/`trailing characters`; тексты/позиции иные. |
 | `jeat_null_if_present` | 110-117 | 8 | после `jpeek` распознать буквально `null` и сдвинуть курсор на 4 | `#[serde(default)]`/`null` в serde | **P*** | C `jpeek` (сдвигает за пробелы), `memcmp("null",4)` при `i+4<=len`, `i+=4`, 1; иначе 0. Rust для `Option`/`Vec` `null` обрабатывает serde; отдельной функции нет. |
@@ -1904,8 +1926,8 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `format_rfc3339` | 185-195 | 11 | epoch → `YYYY-MM-DDTHH:MM:SSZ` без дробной доли | `time::format_description` | **E*** | C `floor_div(epoch,86400)`, `sod`, `civil_from_days`, `snprintf("%04lld-%02u-%02uT%02u:%02u:%02uZ")`. Rust `time` форматирует RFC3339; `r2o-catalog-persist-differential.sh` сравнивает added/confirmed. |
 | `jparse_raw_int` | 207-239 | 33 | `-`? + цифры, **не более 18**; `.`/`e`/`E` → отказ | типы serde (`i32/u8/u16/i64`) + `validate` | **P** | **Совпадает для известных полей:** диапазоны i32/u8/u16 проверяются типами, float в них отвергается. **Подтверждённое отличие:** C отвергает float/exponent и 19-значное целое **и в неизвестных полях** через `jskip_value`; serde_json неизвестные поля пропускает без проверки грамматики числа, поэтому `"future":1.5` C отвергнет, Rust примет. Тест на этот вход не найден. |
 | `jparse_i32` | 241-250 | 10 | int64 → проверка `INT_MIN..INT_MAX` | `serde_json` `i32` | **P*** | C `jparse_raw_int` → `int64_t v`; `v<INT_MIN || v>INT_MAX` → `set_err` и -1; `*out=(int)v`. Rust десериализует в `i32`, тот же диапазон; 18-значный предел C — деталь парсера. |
-| `jparse_u8` | 252-261 | 10 | 0..255 | `serde_json` `u8` | **P*** | C `jparse_raw_int` → `v`; `v<0 || v>255` → ошибка; `*out=(uint8_t)v`. Rust `u8` — тот же диапазон. |
-| `jparse_u16` | 263-272 | 10 | 0..65535 | `serde_json` `u16` | **P*** | C `jparse_raw_int` → `v`; `v<0 || v>65535` → ошибка; `*out=(uint16_t)v`. Rust `u16` — тот же диапазон. |
+| `jparse_u8` | 252-261 | 10 | 0..255 | `serde_json` `u8` | **P*** | C `jparse_raw_int` → `v`; `v<0 || v>255` → `set_err` и -1; `*out=(uint8_t)v`. Rust `u8` — тот же диапазон. |
+| `jparse_u16` | 263-272 | 10 | 0..65535 | `serde_json` `u16` | **P*** | C `jparse_raw_int` → `v`; `v<0 || v>65535` → `set_err` и -1; `*out=(uint16_t)v`. Rust `u16` — тот же диапазон. |
 | `jparse_bool_i` | 274-284 | 11 | ровно `true`/`false` | `serde_json` `bool` | **P*** | C `jpeek`; `memcmp("true",4)` → 1, `memcmp("false",5)` → 0, иначе ошибка с полем/позицией. Rust `bool` принимает те же литералы; тексты ошибок иные. |
 | `jparse_string_dyn` | 305-402 | 98 | escape `\" \\ \/ \b \f \n \r \t \uXXXX`; **U+0000 и любая суррогатная половина → отказ**; неэкранированные <0x20 → отказ | `serde_json` `String` + `validate_string` | **P** | **Ветви сверены:** C `jeat('"')`; буфер 32, рост ×2 при `len+4>cap`; цикл до `"`; `\` + 8 коротких escape; `\u` 4 hex; `cp==0` → отказ; `0xD800..0xDFFF` → отказ; UTF-8 1/2/3 байта; `<0x20` без escape → отказ; `buf[len]=0`. **Отличия:** (1) serde_json отвергает одиночный суррогат, но **принимает `\u0000`**; (2) NUL отвергается только для строк, прошедших `validate_string` (`catalog.rs:1095-1104`), неизвестные поля пропускаются — C отвергает файл целиком; (3) C не собирает суррогатные пары и отвергает их, Rust собирает валидную пару; (4) C растёт динамически, serde_json — внутри. Для известных полей с NUL поведение совпадает. |
 | `jparse_string_fixed` | 408-422 | 15 | динамический разбор, затем `n+1 > outcap` → отказ (без обрезки) | `String` + `validate_string` в `Catalog::validate` (`catalog.rs:543-625`) | **P** | C `jparse_string_dyn`, `strlen`, `n+1>outcap` → ошибка с полем/длиной/буфером, иначе `memcpy n+1`. Rust-лимиты совпадают с C-буферами: box.id 39, plan.id 39, proto 7, signal.kind 23, binding kind 7/target 255/plan_id 39/probe_path 511/ech_origin 255, domain name/suffix 255, plan_id 39; `plan.text` без предела. Проверка в Rust после разбора; на отказ файла это не влияет. |
@@ -1919,7 +1941,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `handle_signal_key` | 723-742 | 20 | поля signal: kind/ttl/ttl_delta/tos/ipid/volume/seen/packets; неизвестное — skip | `catalog::Signal` serde (`catalog.rs:139-150`) | **P** | C `strcmp` по 8 ключам: kind — fixed 23, ttl/tos u8, ttl_delta/volume/seen/packets i32, ipid u16; иначе `jskip_value(depth+1)`. Rust `Signal` с `#[serde(default)]` и `packets` skip-if-zero; поля/типы те же. Unit `round_trips_known_measurement_context`. |
 | `parse_signal` | 743-746 | 4 | `memset` + `parse_object(handle_signal_key)` | `catalog::Signal` | **P*** | C `memset(out,0,sizeof *out)`, `parse_object(...,handle_signal_key,...)`. Rust `Signal` с `#[serde(default)]`; те же поля/типы, неизвестные ключи пропускаются. |
 | `handle_fp_key` | 756-788 | 33 | поля fingerprint: method/signals до 8 | `catalog::Fingerprint` | **P** | C `method` i32; `signals`: глубина+1, `null`→пусто, `[`, пустой `]`, цикл с отказом при `n_sig>=8`, `memset` слота, `n_sig++`, `parse_signal(depth+2)`, `,`/`]`; неизвестное — skip. Rust `Fingerprint { method, signals: Vec<Signal> }` + `validate` ≤8; девятая примета — ошибка. Unit `rejects ... ninth_signal`. |
-| `parse_fp` | 789-792 | 4 | `memset` + объект fingerprint | `catalog::Fingerprint` | **P*** | C `memset`, `parse_object(handle_fp_key)`. Rust serde; поля method/signals те же, signals ≤8 проверяется `validate`. |
+| `parse_fp` | 789-792 | 4 | `memset` + объект fingerprint | `catalog::Fingerprint` | **P*** | C `memset(out,0,sizeof *out)`, `parse_object(...,handle_fp_key,...)`. Rust serde; поля method/signals те же, signals ≤8 проверяется `validate`. |
 | `handle_plan_key` | 798-816 | 19 | поля plan: id/proto/text/added/successes/enabled | `catalog::Plan` serde (`catalog.rs:153-163`) | **P** | C `id` fixed 39, `proto` fixed 7, `text` dyn (старый `free` перед заменой — защита от дубля), `added` RFC3339, `successes` i32, `enabled` bool; иначе skip. Rust `Plan` те же поля/типы, `text` `String`; дубль ключа serde отвергает/перезаписывает по правилам. Unit `round_trips_known_measurement_context`. |
 | `parse_plan` | 817-820 | 4 | `memset` + объект plan | `catalog::Plan` | **P*** | C `memset`, `parse_object(handle_plan_key)`. Rust serde; поля id/proto/text/added/successes/enabled те же. |
 | `elem_plan` | 821-823 | 3 | элемент массива plans | `Vec<Plan>` | **P*** | Тонкий адаптер `parse_plan`; Rust `Vec<Plan>` через serde, лимит задан capacity массива. |
