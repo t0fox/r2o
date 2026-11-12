@@ -766,25 +766,25 @@ Netlink/NFQUEUE кодек: итератор сообщений, атрибут�
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
-| `align4` (static) | 16 | 1 | `(n+3)&~3` | `netlink.rs:291 align4` | **E** | Точное совпадение для длин netlink-сообщений; Rust использует checked-арифметику, переполнение недостижимо. |
-| `h16` (static) | 16 | 1 | host u16 | `from_ne_bytes` (`netlink.rs:95`) | E | тесты конфигурации |
-| `h32` (static) | 17 | 1 | host u32 | `from_ne_bytes` (`:88`) | E | `:355` iterator test |
-| `wh16` (static) | 18 | 1 | запись host u16 | `to_ne_bytes` (`:266`) | E | — |
-| `wh32` (static) | 19 | 1 | запись host u32 | `to_ne_bytes` (`:284`) | E | — |
-| `n16` (static) | 22–24 | 3 | сетевой u16 | `from_be_bytes` (`:143`) | E | `:371` parser test |
-| `n32` (static) | 25–28 | 4 | сетевой u32 | `from_be_bytes` (`:141`) | E | `:371` |
-| `wn16` (static) | 29–31 | 3 | запись сетевого u16 | `to_be_bytes` (`:228`) | E | `:332` |
-| `wn32` (static) | 32–35 | 4 | запись сетевого u32 | `to_be_bytes` (`:196`) | E | `:304` |
-| `d2k_nl_iter_init` | 37–43 | 7 | инициализация итератора | `MessageIter::new` (`:64`) | E | `:355` |
-| `d2k_nl_next` | 45–77 | 33 | следующее сообщение, битые длины → стоп | `MessageIter::next` (`:76`) | E | `:355` (unpadded/bad length) |
-| `d2k_nl_packet` | 79–161 | 83 | атрибуты NFQA: hdr/payload/cap/ts/mark/oif | `netlink.rs:125 QueuePacket::parse` | **P** | Все поля совпадают: `PACKET_HDR` (id/hw_protocol/hook при vlen≥7), `PAYLOAD`, `CAP_LEN`, `SKB_INFO`, `MARK`, `TIMESTAMP` (sec/usec, границы), `IFINDEX_OUTDEV`. **Расхождение `truncated`:** C `out->truncated = cap_len > payload_len` даже при отсутствии `PAYLOAD` (`payload_len=0`), Rust `cap_len.zip(payload).is_some_and(cap>len)` — без `PAYLOAD` даёт `false`. Тесты `:371`, `:403` этот случай не покрывают. |
-| `d2k_nl_errno` | 163–176 | 14 | знаковый errno из NLMSG_ERROR | `netlink.rs:183 kernel_error` | E | `:429 kernel_error_reads...` |
-| `hdr_init` (static) | 181–197 | 17 | nlmsghdr+nfgenmsg | `netlink.rs:263 header` | E | `:332` |
-| `put_attr` (static) | 200–216 | 17 | атрибут + zero padding | `netlink.rs:274 push_attr` | E | `:321` |
-| `d2k_nl_verdict` | 218–234 | 17 | VERDICT | `netlink.rs:188 verdict` | E | `:304` |
-| `d2k_nl_verdict_payload` | 236–252 | 17 | VERDICT+PAYLOAD | `netlink.rs:203 verdict_payload` | E | `:321` |
-| `d2k_nl_cfg_cmd` | 254–273 | 20 | CONFIG BIND/UNBIND, ACK | `netlink.rs:219 config_command` | E | `:332` |
-| `d2k_nl_cfg_params` | 275–309 | 35 | PARAMS/MAXLEN/FLAGS/MASK | `netlink.rs:234 config_params` | E | `:332` |
+| `align4` (static) | 10-12 | 3 | `(n+3)&~3` | `netlink.rs:291-293 align4` | **E** | C без проверки переполнения; Rust `checked_add(3)` + `& !3`, возвращает `Option`. Для длин netlink-сообщений (≤65535) результат тот же. |
+| `h16` (static) | 16-16 | 1 | host u16 через `memcpy` | `from_ne_bytes` (`netlink.rs:95`) | **E** | Тесты итератора/сборки netlink. |
+| `h32` (static) | 17-17 | 1 | host u32 через `memcpy` | `from_ne_bytes` (`netlink.rs:88,97-98`) | **E** | Тест `netlink.rs:355`. |
+| `wh16` (static) | 18-18 | 1 | запись host u16 | `to_ne_bytes` (`netlink.rs:265-266,276-277`) | **E** | Заголовок/атрибуты собираются теми же NE-байтами. |
+| `wh32` (static) | 19-19 | 1 | запись host u32 | `to_ne_bytes` (`netlink.rs:267,284`) | **E** | seq/длина заголовка. |
+| `n16` (static) | 22-24 | 3 | сетевой u16 | `from_be_bytes` (`netlink.rs:142-143`) | **E** | `hw_protocol`; тест парсера `:371`. |
+| `n32` (static) | 25-28 | 4 | сетевой u32 | `from_be_bytes` (`netlink.rs:141,148,151,154,165`) | **E** | id/cap_len/skb_info/mark/outdev; тест `:371`. |
+| `wn16` (static) | 29-31 | 3 | запись сетевого u16 | `to_be_bytes` (`netlink.rs:228,270`) | **E** | `res_id`, `pf`; тест `:332`. |
+| `wn32` (static) | 32-35 | 4 | запись сетевого u32 | `to_be_bytes` (`netlink.rs:196-197,248,251-258`) | **E** | verdict/copy_range/maxlen/flags/mask; тест `:304`. |
+| `d2k_nl_iter_init` | 37-43 | 7 | инициализация итератора; NULL-буфер → пусто | `MessageIter::new` (`netlink.rs:64-70`) | **E** | C `it->p=buf`, `left=buf?len:0`. Rust `bytes`, `offset=0`, `stopped=false`; пустой срез даёт те же «нет сообщений». |
+| `d2k_nl_next` | 45-77 | 33 | следующее сообщение; `left<16`/`mlen<16`/`mlen>left` → стоп; `step=align4`; `step>=left` → конец | `MessageIter::next` (`netlink.rs:76-107`) | **E** | **Ветви сверены:** C `!it||!m||left<16` → 0 (left=0); `mlen=h32`; `mlen<16 || mlen>left` → left=0; type/flags/seq/pid/body; `step=align4(mlen)`; `step>=left` → left=0, иначе `p+=step`, `left-=step`. Rust `stopped`, `remaining`, `message_len` в `16..=remaining`, те же поля, `step>=remaining` → `bytes.len()`, иначе `offset+step`. Тест `:355` (unpadded/bad length). |
+| `d2k_nl_packet` | 79-161 | 83 | атрибуты NFQA: hdr/payload/cap/skb/ts/mark/oif, `truncated` | `netlink.rs:125-180 QueuePacket::parse` | **P** | **Ветви сверены:** C `!m||!out` → -1; `body_len<4` → -1; `pos=align4(4)`; цикл `pos+4<=body_len`; `alen`, `atype&0x3fff`; `alen<4 || alen>body_len-pos` → break; value; PACKET_HDR vlen≥7 → id/hw_protocol/hook; PAYLOAD → срез; CAP_LEN/SKB_INFO/MARK vlen≥4; TIMESTAMP vlen≥16 → sec/usec BE, `sec && usec<1e6 && sec<18e9`; IFINDEX_OUTDEV vlen≥4; `step=align4`, `step>body_len-pos` → break. Rust те же поля/границы; `Option` вместо `have_*`; `checked_mul/add` для ns. **Расхождение `truncated`:** C `cap_len > payload_len` даже без PAYLOAD (`payload_len=0`) даёт `true` при `cap_len>0`; Rust `cap_len.zip(payload).is_some_and(...)` без PAYLOAD даёт `false`. Тесты `:371`, `:403` этот случай не покрывают. |
+| `d2k_nl_errno` | 163-176 | 14 | знаковый errno из `NLMSG_ERROR` | `netlink.rs:183-186 kernel_error` | **E** | C требует `type==NLMSG_ERROR && body_len>=4`, читает host-int32, возвращает 0; иначе -1. Rust `(kind==NLMSG_ERROR && body.len()>=4).then(|| i32::from_ne_bytes(...))`; `None` вместо -1. Тест `:429`. |
+| `hdr_init` (static) | 181-197 | 17 | `nlmsghdr` + `nfgenmsg`: type/flags/seq/pid=0, family 0, v0, queue BE | `netlink.rs:263-272 header` | **E** | C `need=20`, `memset`, wh16 type/flags, wh32 seq, pid=0, `o[16]=0`, `o[17]=V0`, wn16 queue. Rust `vec![0;20]`, те же поля/смещения, pid остаётся 0. |
+| `put_attr` (static) | 200-216 | 17 | атрибут `len/type/value` + нулевой padding | `netlink.rs:274-280 push_attr` | **E** | C `alen=4+vlen`, `step=align4`, проверка `pos+step<=cap`, `wh16(len/type)`, `memcpy`, `memset` хвоста. Rust `extend` len/type/value, `resize(align4)`, нули; лимит `Vec` вместо cap. |
+| `d2k_nl_verdict` | 218-234 | 17 | `VERDICT`: `VERDICT_HDR` (action, pkt_id BE) | `netlink.rs:188-201 verdict` | **E** | C `hdr_init` type `NFQ_TYPE(VERDICT)`/REQUEST, attr `VERDICT_HDR` 8 байт action+pkt_id BE, длина. Rust те же поля/порядок; тест `:304`. |
+| `d2k_nl_verdict_payload` | 236-252 | 17 | `VERDICT` + `PAYLOAD`; пустой/`>0xffff-4` → 0 | `netlink.rs:203-217 verdict_payload` | **E** | C отвергает `!payload || len==0 || len>0xffff-4`, затем verdict + attr payload, длина. Rust те же проверки, `Option`; тест `:321`. Различие ёмкости вызывающего буфера (`nfq.c`) учтено в строке `d2k_nfq_verdict_payload`. |
+| `d2k_nl_cfg_cmd` | 254-273 | 20 | `CONFIG` BIND/UNBIND с ACK, `CFG_CMD` (cmd,0,pf BE) | `netlink.rs:219-232 config_command` | **E** | C `hdr_init(REQUEST|ACK)`, attr 4 байта `cmd/0/pf BE`. Rust те же type/флаги/attr; тест `:332`. |
+| `d2k_nl_cfg_params` | 275-309 | 35 | `PARAMS`/`QUEUE_MAXLEN`/`FLAGS`/`MASK` | `netlink.rs:234-261 config_params` | **E** | C `params[5]`: copy_range BE32 + copy_mode, затем maxlen/flags/mask BE32 в этом порядке. Rust те же четыре атрибута/порядок/значения; `fail_open` в flags, маска `FAIL_OPEN|GSO`; тест `:332`. |
 
 ### datapath/nl.c: построчная сверка
 
