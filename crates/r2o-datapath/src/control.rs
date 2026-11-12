@@ -1831,6 +1831,10 @@ pub struct ControlServer {
     // вытеснило приветствие другого клиента, и Discovery шёл без ClientHello.
     last_client_shapes: VecDeque<CachedClientShape>,
     armed_client_shapes: [Option<Vec<u8>>; 2],
+    /// QUIC-снимки C `last_hello[shape_slot(17, family)]`: QSN-пачка
+    /// совместима с `d2k_qsnap_pack`, а событие для v22 — `EV_SHAPE`.
+    last_quic_shapes: VecDeque<CachedQuicShape>,
+    armed_quic_shapes: [Option<Vec<u8>>; 2],
 }
 
 const CLIENT_SHAPE_CACHE_MAX: usize = 512;
@@ -1840,6 +1844,16 @@ struct CachedClientShape {
     host: Vec<u8>,
     family: u8,
     event_body: Vec<u8>,
+}
+
+#[derive(Clone)]
+struct CachedQuicShape {
+    host: Vec<u8>,
+    family: u8,
+    /// R2O-событие `EVENT_HELLO` с QSN-снимком.
+    event_body: Vec<u8>,
+    /// Голый QSN-снимок для C `EV_SHAPE` (v22).
+    snapshot: Vec<u8>,
 }
 
 fn shape_family_slot(family: u8) -> usize {
@@ -1856,7 +1870,8 @@ fn v22_event_frames(kind: u16, body: &[u8]) -> Vec<(u16, Vec<u8>)> {
         | control::EVENT_APPLIED
         | control::EVENT_PROTOCOL
         | control::EVENT_HTTP_PORTAL
-        | control::EVENT_HTTP_RESPONSE => vec![(kind, body.to_vec())],
+        | control::EVENT_HTTP_RESPONSE
+        | control::EVENT_LEGACY_SHAPE => vec![(kind, body.to_vec())],
         _ => control::translate_event_to_v22(kind, body),
     }
 }
@@ -1944,6 +1959,8 @@ impl ControlServer {
             dropped_events: 0,
             last_client_shapes: VecDeque::new(),
             armed_client_shapes: [None, None],
+            last_quic_shapes: VecDeque::new(),
+            armed_quic_shapes: [None, None],
         })
     }
 
@@ -2051,69 +2068,82 @@ impl ControlServer {
         self.dropped_events
     }
 
-    /// ARM_SHAPE: serve a matching cached TCP ClientHello immediately or arm one capture.
-    pub fn arm_client_shape(&mut self, frame: &Frame) -> (Ack, Option<Vec<u8>>) {
+    fn arm_ack(ok: bool, reason: u8) -> Ack {
+        Ack {
+            command: COMMAND_ARM_SHAPE,
+            ok,
+            reason,
+            trial_id: None,
+            area_id: None,
+            binding_context: None,
+        }
+    }
+
+    /// ARM_SHAPE: serve a matching cached ClientHello immediately or arm one capture.
+    ///
+    /// C хранит снимки отдельно по транспорту и семейству (`shape_slot`);
+    /// пустое имя — wildcard, подходящий любому сохранённому приветствию
+    /// (`session.c:2931-2959`).
+    pub fn arm_client_shape(&mut self, frame: &Frame) -> (Ack, Option<(u16, Vec<u8>)>) {
         let Ok(command) = decode_arm_shape(frame) else {
-            return (
-                Ack {
-                    command: COMMAND_ARM_SHAPE,
-                    ok: false,
-                    reason: control::ACK_BAD_ARGS,
-                    trial_id: None,
-                    area_id: None,
-                    binding_context: None,
-                },
-                None,
-            );
+            return (Self::arm_ack(false, control::ACK_BAD_ARGS), None);
         };
-        if command.transport != 6 {
-            return (
-                Ack {
-                    command: COMMAND_ARM_SHAPE,
-                    ok: false,
-                    reason: control::ACK_BAD_ARGS,
-                    trial_id: None,
-                    area_id: None,
-                    binding_context: None,
-                },
-                None,
-            );
-        }
         let slot = shape_family_slot(command.family);
-        if let Some(position) = self.last_client_shapes.iter().position(|cached| {
-            cached.family == command.family && cached.host.eq_ignore_ascii_case(&command.name)
-        }) {
-            let cached = self
-                .last_client_shapes
-                .remove(position)
-                .expect("позиция кэша ClientHello только что найдена");
-            // Свежий запрос продлевает жизнь снимка в LRU.
-            let body = cached.event_body.clone();
-            self.last_client_shapes.push_back(cached);
-            return (
-                Ack {
-                    command: COMMAND_ARM_SHAPE,
-                    ok: true,
-                    reason: control::ACK_OK,
-                    trial_id: None,
-                    area_id: None,
-                    binding_context: None,
-                },
-                Some(body),
-            );
+        match command.transport {
+            6 => {
+                if let Some(position) = self.last_client_shapes.iter().position(|cached| {
+                    cached.family == command.family
+                        && (command.name.is_empty()
+                            || cached.host.eq_ignore_ascii_case(&command.name))
+                }) {
+                    let cached = self
+                        .last_client_shapes
+                        .remove(position)
+                        .expect("позиция кэша ClientHello только что найдена");
+                    // Свежий запрос продлевает жизнь снимка в LRU.
+                    let body = cached.event_body.clone();
+                    self.last_client_shapes.push_back(cached);
+                    return (
+                        Self::arm_ack(true, control::ACK_OK),
+                        Some((control::EVENT_CLIENT_SHAPE, body)),
+                    );
+                }
+                self.armed_client_shapes[slot] = Some(command.name);
+                (Self::arm_ack(true, control::ACK_OK), None)
+            }
+            17 => {
+                if let Some(position) = self.last_quic_shapes.iter().position(|cached| {
+                    cached.family == command.family
+                        && (command.name.is_empty()
+                            || cached.host.eq_ignore_ascii_case(&command.name))
+                }) {
+                    let cached = self
+                        .last_quic_shapes
+                        .remove(position)
+                        .expect("позиция кэша QUIC-снимка только что найдена");
+                    let event = self.quic_shape_event(&cached);
+                    self.last_quic_shapes.push_back(cached);
+                    return (Self::arm_ack(true, control::ACK_OK), Some(event));
+                }
+                self.armed_quic_shapes[slot] = Some(command.name);
+                (Self::arm_ack(true, control::ACK_OK), None)
+            }
+            _ => (Self::arm_ack(false, control::ACK_BAD_ARGS), None),
         }
-        self.armed_client_shapes[slot] = Some(command.name);
-        (
-            Ack {
-                command: COMMAND_ARM_SHAPE,
-                ok: true,
-                reason: control::ACK_OK,
-                trial_id: None,
-                area_id: None,
-                binding_context: None,
-            },
-            None,
-        )
+    }
+
+    /// Событие снимка для контроллера: C `EV_SHAPE` в v22 или R2O
+    /// `EVENT_HELLO` с QSN-пачкой в v48.
+    fn quic_shape_event(&self, cached: &CachedQuicShape) -> (u16, Vec<u8>) {
+        if self.wire_profile == control::WireProfile::V22 {
+            let mut body = vec![0; control::KEY_LEN];
+            body[0] = cached.family;
+            body[control::KEY_LEN - 1] = 17;
+            body.extend_from_slice(&cached.snapshot);
+            (control::EVENT_LEGACY_SHAPE, body)
+        } else {
+            (control::EVENT_HELLO, cached.event_body.clone())
+        }
     }
 
     /// Retain the latest TCP ClientHello per family and satisfy a matching one-shot arm.
@@ -2139,13 +2169,60 @@ impl ControlServer {
         }
         if self.armed_client_shapes[slot]
             .as_ref()
-            .is_some_and(|host| host.eq_ignore_ascii_case(&event.host))
+            .is_some_and(|host| host.is_empty() || host.eq_ignore_ascii_case(&event.host))
         {
             self.armed_client_shapes[slot] = None;
             Ok(Some(body.to_vec()))
         } else {
             Ok(None)
         }
+    }
+
+    /// Сохранить QUIC-снимок и, если он ждали, отдать событие немедленно.
+    ///
+    /// C `d2k_session_shape_family` возвращает QSN-пачку в `EV_SHAPE`
+    /// (`session.c:2966-2980`); R2O `QSN`-формат побайтно совпадает с
+    /// `d2k_qsnap_pack`. В v48 обычный `EVENT_HELLO` уже уходит вызывающим,
+    /// поэтому дополнительное событие не дублируется.
+    pub fn observe_quic_hello(
+        &mut self,
+        hello: &crate::capture::QuicHello,
+    ) -> Option<(u16, Vec<u8>)> {
+        if hello.key[37] != 17 {
+            return None;
+        }
+        let snapshot = hello.snapshot.as_ref()?;
+        let event_body = hello.event_body()?;
+        let family = hello.key[0];
+        if let Some(position) = self.last_quic_shapes.iter().position(|cached| {
+            cached.family == family && cached.host.eq_ignore_ascii_case(&hello.host)
+        }) {
+            self.last_quic_shapes.remove(position);
+        }
+        self.last_quic_shapes.push_back(CachedQuicShape {
+            host: hello.host.clone(),
+            family,
+            event_body,
+            snapshot: snapshot.clone(),
+        });
+        while self.last_quic_shapes.len() > CLIENT_SHAPE_CACHE_MAX {
+            self.last_quic_shapes.pop_front();
+        }
+        let slot = shape_family_slot(family);
+        if self.armed_quic_shapes[slot]
+            .as_ref()
+            .is_some_and(|host| host.is_empty() || host.eq_ignore_ascii_case(&hello.host))
+        {
+            self.armed_quic_shapes[slot] = None;
+            if self.wire_profile == control::WireProfile::V22 {
+                let cached = self
+                    .last_quic_shapes
+                    .back()
+                    .expect("QUIC-снимок только что добавлен");
+                return Some(self.quic_shape_event(cached));
+            }
+        }
+        None
     }
 
     fn accept_peer(&mut self) {
@@ -2390,9 +2467,10 @@ mod tests {
         self, Ack, COMMAND_ARM_SHAPE, COMMAND_CLEAR, COMMAND_DEL_ADDR, COMMAND_DEL_BYPASS,
         COMMAND_DEL_NAME, COMMAND_DEL_NAME_PROBE, COMMAND_DEL_SUFFIX, COMMAND_SET_ADDR,
         COMMAND_SET_BYPASS, COMMAND_SET_NAME, COMMAND_SET_NAME_BOUND, COMMAND_SET_NAME_PROBE,
-        COMMAND_SET_SUFFIX, EVENT_HELLO, Frame, SHAPE_ECH_TCP, SHAPE_GRANDFATHER, SHAPE_HTTP,
-        SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, encode_delete_addr, encode_set_addr,
-        encode_set_voice_addr, encode_set_voice_addr_probe,
+        COMMAND_SET_SUFFIX, EVENT_CLIENT_SHAPE, EVENT_HELLO, EVENT_LEGACY_SHAPE, Frame,
+        SHAPE_ECH_TCP, SHAPE_GRANDFATHER, SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC,
+        SHAPE_VOICE, encode_delete_addr, encode_set_addr, encode_set_voice_addr,
+        encode_set_voice_addr_probe,
     };
     use std::net::{IpAddr, Ipv4Addr};
     use std::os::unix::fs::PermissionsExt;
@@ -2499,12 +2577,87 @@ mod tests {
         });
         assert!(ack.ok);
         assert_eq!(
-            cached.as_deref(),
-            Some(first.as_slice()),
+            cached.as_ref().map(|(kind, body)| (*kind, body.as_slice())),
+            Some((EVENT_CLIENT_SHAPE, first.as_slice())),
             "снимок старой цели должен отдаваться из кэша, а не теряться"
         );
 
         drop(server);
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn arm_shape_serves_quic_snapshot_and_empty_name_is_wildcard() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "r2o-control-quic-shape-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("control.sock");
+        let mut server = ControlServer::open(&path, u16::MAX as u32).unwrap();
+        let packet = udp_packet(
+            include_bytes!("../../r2k-core/tests/fixtures/quic_v1_initial.bin"),
+            443,
+        );
+        let hello = crate::capture::quic_hello_from_packet(&packet).unwrap();
+        assert!(!hello.host.is_empty());
+        assert!(hello.snapshot.is_some());
+
+        // ARM_SHAPE 17 с точным именем: снимка ещё нет — только взвод.
+        let mut arm = vec![hello.host.len() as u8];
+        arm.extend_from_slice(&hello.host);
+        arm.extend_from_slice(&[17, 4]);
+        let (ack, cached) = server.arm_client_shape(&Frame {
+            kind: COMMAND_ARM_SHAPE,
+            body: arm,
+        });
+        assert!(ack.ok);
+        assert!(cached.is_none());
+
+        // v48: обычный EVENT_HELLO уже уходит вызывающим, дубля нет.
+        assert!(server.observe_quic_hello(&hello).is_none());
+
+        // Пустое имя — wildcard: снимок отдаётся из кэша сразу.
+        let (ack, cached) = server.arm_client_shape(&Frame {
+            kind: COMMAND_ARM_SHAPE,
+            body: vec![0, 17, 4],
+        });
+        assert!(ack.ok);
+        let (kind, body) = cached.expect("снимок QUIC должен быть в кэше");
+        assert_eq!(kind, EVENT_HELLO);
+        assert_eq!(Some(body), hello.event_body());
+
+        // v22: C-контроллер ждёт EV_SHAPE с QSN-пачкой и ключом transport=17.
+        let path22 = directory.join("control22.sock");
+        let mut server22 = ControlServer::open_with_profile(
+            &path22,
+            u16::MAX as u32,
+            control::WireProfile::V22,
+            control::RELEASE_ID,
+        )
+        .unwrap();
+        let (ack, cached) = server22.arm_client_shape(&Frame {
+            kind: COMMAND_ARM_SHAPE,
+            body: vec![0, 17, 4],
+        });
+        assert!(ack.ok);
+        assert!(cached.is_none());
+        let (kind, body) = server22
+            .observe_quic_hello(&hello)
+            .expect("взведённый ARM_SHAPE 17 должен отдать снимок");
+        assert_eq!(kind, EVENT_LEGACY_SHAPE);
+        let mut expected = vec![0; control::KEY_LEN];
+        expected[0] = hello.key[0];
+        expected[control::KEY_LEN - 1] = 17;
+        expected.extend_from_slice(hello.snapshot.as_ref().unwrap());
+        assert_eq!(body, expected);
+
+        drop(server);
+        drop(server22);
         std::fs::remove_dir(&directory).unwrap();
     }
 

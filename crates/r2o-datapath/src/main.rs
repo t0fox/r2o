@@ -1388,9 +1388,8 @@ mod app {
                 for command in control.poll()? {
                     let ack = if command.kind == r2k_core::control::COMMAND_ARM_SHAPE {
                         let (ack, captured) = control.arm_client_shape(&command);
-                        if let Some(body) = captured
-                            && let Err(error) =
-                                control.send_event(r2k_core::control::EVENT_CLIENT_SHAPE, &body)
+                        if let Some((kind, body)) = captured
+                            && let Err(error) = control.send_event(kind, &body)
                         {
                             eprintln!(
                                 "r2o-datapath: сохранённый ClientHello не отправлен: {error}"
@@ -1757,9 +1756,16 @@ mod app {
                         }
                         if !controller_probe
                             && observe_tls
-                            && let Some(body) =
-                                quic_hello.as_ref().and_then(|hello| hello.event_body())
+                            && let Some(hello) = quic_hello.as_ref()
+                            && let Some(body) = hello.event_body()
                         {
+                            // ARM_SHAPE transport 17: C отдаёт QSN-пачку как
+                            // EV_SHAPE, R2O кэширует её для того же запроса.
+                            if let Some(control) = control.as_mut()
+                                && let Some((kind, response)) = control.observe_quic_hello(hello)
+                            {
+                                let _ = control.send_event(kind, &response);
+                            }
                             send_hello_event(
                                 &mut control,
                                 &mut r2o_snapshot_control,
@@ -5663,7 +5669,10 @@ mod app {
             };
             let (cached_ack, cached_body) = control.as_mut().unwrap().arm_client_shape(&cached_arm);
             assert!(cached_ack.ok);
-            assert_eq!(cached_body, Some(captured_shape.body));
+            assert_eq!(
+                cached_body,
+                Some((r2k_core::control::EVENT_CLIENT_SHAPE, captured_shape.body))
+            );
             for reader in [&mut controller, &mut browser_capture] {
                 let frame = r2k_core::control::read_frame(reader).unwrap();
                 assert_eq!(frame.kind, r2k_core::control::EVENT_HELLO);

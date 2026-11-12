@@ -93,7 +93,7 @@ recheck 1982 1982 equal True
 
 Это не оценка паритета: 1290 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
-расхождений (`ARM_SHAPE` UDP, `wire_udp` IPID_ZERO, `udpruntime` raw UDP,
+расхождений (`wire_udp` IPID_ZERO, `udpruntime` raw UDP,
 `tls12/tls13` record-layer). `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -110,7 +110,7 @@ P означает неполное доказательство ветвей, N
 | # | Область | D2O | R2O | Подтверждение |
 |---|---|---|---|---|
 | 1 | `SET_HTTPS` TTL | обрезает до **7 суток** (`d2k_ctl.h:231`, `ctlsrv.c:446`) | **закрыто 2026-11-12:** датапат обрезает до 7 суток, кодировщик принимает любой `u32`; тесты `encodes_the_exact_https_name_and_ttl_for_the_datapath`, `set_https_command_accepts_an_exact_name_with_a_bounded_ttl` | `core-state.md`, `datapath-plan.md` |
-| 2 | `ARM_SHAPE` | принимает transport 6 и 17 (`ctlsrv.c:329`) | только 6 (`control.rs:2002`) | `deep-datapath-core.md` |
+| 2 | `ARM_SHAPE` | принимает transport 6 и 17 (`ctlsrv.c:329`) | **закрыто 2026-11-12:** R2O принимает 6/17, кэширует QSN-снимок и отдаёт `EV_SHAPE` (v22)/`EVENT_HELLO` (v48), пустое имя — wildcard; тест `arm_shape_serves_quic_snapshot_and_empty_name_is_wildcard` | `deep-datapath-core.md` |
 | 3 | `wire_udp` IPv4 | `POISON_IPID_ZERO` разрешён, ID=0 (`wire_udp.c:75,136`); TOS из пакета | любой poison отвергнут (`wire.rs:213`), TOS иной | C/Rust harness 4 poison-кейса |
 | 4 | raw UDP/TTL | `IP_HDRINCL`+`IP_NODEFRAG`+TTL get/set/restore, `qp_recv_ttl` | `IP_NODEFRAG` отсутствует, TTL не принимается; датапат raw без controller API | `deep-core-net.md` |
 | 5 | production classify | donor-семантика C | discovery: `full_detect_semantics=false`, `confirm_clear=true` (`classify.rs:869-870`, `main.rs:15380-15391`), дифференциалы идут с `true` | `deep-detect-plan.md` |
@@ -163,9 +163,8 @@ P означает неполное доказательство ветвей, N
 перехожу к фиксу. Приоритет:
 
 1. **Packet-path/безопасность:** `wire_udp` IPID_ZERO/TOS; raw UDP/TTL
-   (`IP_NODEFRAG`, `qp_recv_ttl`); `ARM_SHAPE` transport 17;
-   `raw_set_segment_max`; полный `shape_opts`; HTTP80 capacity 128/1024;
-   ENOBUFS-дренаж только истёкших.
+   (`IP_NODEFRAG`, `qp_recv_ttl`); `raw_set_segment_max`; полный
+   `shape_opts`; HTTP80 capacity 128/1024; ENOBUFS-дренаж только истёкших.
 2. **Данные/каталог:** `Binding.tcp_profile` и default `family=4` закрыты
    для load/save, но sched/discovery-сравнения профиля ещё не учитывают;
    FNV `plan-%08x`; HTTP live failures/счётчики; QUIC `name_ok`; TLS 1.2

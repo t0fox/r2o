@@ -902,12 +902,10 @@ impl HttpResponseEvent {
 
 /// Request one retained or future ClientHello snapshot for a name and address family.
 pub fn encode_arm_shape(name: &str, transport: u8, family: u8) -> Result<Vec<u8>, &'static str> {
-    if name.is_empty()
-        || name.len() > MAX_DNS_NAME_LEN
-        || !matches!(transport, 6 | 17)
-        || !matches!(family, 4 | 6)
-    {
-        return Err("запрос снимка требует имя, транспорт и IP family из протокола");
+    // Пустое имя — wildcard C `d2k_session_want_shape_family` (len==0
+    // подходит любому сохранённому приветствию, `session.c:2938-2958`).
+    if name.len() > MAX_DNS_NAME_LEN || !matches!(transport, 6 | 17) || !matches!(family, 4 | 6) {
+        return Err("запрос снимка требует транспорт и IP family из протокола");
     }
     let mut body = Vec::with_capacity(name.len() + 3);
     body.push(name.len() as u8);
@@ -921,8 +919,7 @@ pub fn decode_arm_shape(frame: &Frame) -> Result<ArmShapeCommand, &'static str> 
         return Err("неверная команда ARM_SHAPE");
     }
     let name_len = usize::from(frame.body[0]);
-    if name_len == 0
-        || name_len > MAX_DNS_NAME_LEN
+    if name_len > MAX_DNS_NAME_LEN
         || frame.body.len() != name_len + 3
         || !matches!(frame.body[name_len + 1], 6 | 17)
         || !matches!(frame.body[name_len + 2], 4 | 6)
@@ -3478,10 +3475,20 @@ mod arm_shape_command_tests {
     }
 
     #[test]
-    fn arm_shape_rejects_invalid_transport_family_and_empty_name() {
-        assert!(encode_arm_shape("", 6, 4).is_err());
+    fn arm_shape_accepts_empty_name_wildcard_and_rejects_invalid_transport_family() {
+        let bytes = encode_arm_shape("", 17, 4).unwrap();
+        let frame = super::read_frame(&mut std::io::Cursor::new(bytes)).unwrap();
+        assert_eq!(
+            decode_arm_shape(&frame),
+            Ok(super::ArmShapeCommand {
+                name: Vec::new(),
+                transport: 17,
+                family: 4,
+            })
+        );
         assert!(encode_arm_shape("ask.example", 17, 4).is_ok());
         assert!(encode_arm_shape("ask.example", 6, 5).is_err());
+        assert!(encode_arm_shape("ask.example", 5, 4).is_err());
 
         let frame = Frame {
             kind: COMMAND_ARM_SHAPE,
