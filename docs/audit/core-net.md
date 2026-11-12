@@ -255,6 +255,8 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 
 Асинхронный HTTPS-зонд (TCP 443 → first flight → TLS1.3/1.2) и кэш состояний `d2k-https`. В R2O: `r2o-controller/src/https_probe.rs` (воркер, кэш, save/load), `response.rs` (классификация и TLS-проба). Дифференциал: `scripts/test-controller-httpsprobe-differential.sh` (C `httpsprobe.o` против `examples/tg_cl13_httpsprobe_trace.rs`, кэш/состояния/загрузка).
 
+**Прочитано построчно: 22/22 функций, 564 строки C (1–564).**
+
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `d2k_https_classify` | 32-40 | 9 | REFUSED→CLOSED; не CONNECTED→UNCONFIRMED; !server_tls→TLS_BLOCKED; !tls_ok→UNCONFIRMED; peer 1→SERVED, 0→OTHER_NAME, иначе UNCONFIRMED | `response.rs:90-107 classify_https_probe` | **E** | Построчно совпадает; differential httpsprobe + unit `classify_matches_d2o_https_state_machine`. |
