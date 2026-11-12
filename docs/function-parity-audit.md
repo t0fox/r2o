@@ -78,21 +78,21 @@ recheck 1982 1982 equal True
 Точные суммы по файлам и группам — в отчётах ниже. Итоговые counts E/P/N/?
 считаются сборщиком `scripts/audit/render_audit.py` из таблиц групп.
 
-### Текущий прогресс (2026-11-11)
+### Текущий прогресс (2026-11-12)
 
 Проверены все пять групп, **1982 из 1982** функций:
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 226 | 308 | 13 | 1 |
-| core-state | 692 | 127 | 564 | 1 | 0 |
-| datapath-core | 400 | 120 | 269 | 11 | 0 |
-| datapath-plan | 183 | 105 | 72 | 5 | 1 |
-| detect | 159 | 49 | 100 | 10 | 0 |
-| **Итого** | **1982** | **627** | **1313** | **40** | **2** |
+| core-net | 548 | 182 | 353 | 13 | 0 |
+| core-state | 692 | 153 | 535 | 4 | 0 |
+| datapath-core | 400 | 122 | 267 | 11 | 0 |
+| datapath-plan | 183 | 102 | 76 | 5 | 0 |
+| detect | 159 | 47 | 102 | 10 | 0 |
+| **Итого** | **1982** | **606** | **1333** | **43** | **0** |
 
-Это не оценка паритета: 1313 P означают «код есть, доказательство ветвей
-неполное», 40 N — в основном диагностические/CLI-функции и несколько реальных
+Это не оценка паритета: 1333 P означают «код есть, доказательство ветвей
+неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
 расхождений (`SET_HTTPS` TTL, `ARM_SHAPE` UDP, `wire_udp` IPID_ZERO,
 `udpruntime` raw UDP, `tls12/tls13` record-layer).
 
@@ -227,11 +227,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 182 | 353 | 13 | 0 |
-| core-state | 692 | 153 | 535 | 4 | 0 |
+| core-state | 692 | 149 | 539 | 4 | 0 |
 | datapath-core | 400 | 122 | 267 | 11 | 0 |
-| datapath-plan | 183 | 102 | 76 | 5 | 0 |
+| datapath-plan | 183 | 99 | 79 | 5 | 0 |
 | detect | 159 | 47 | 102 | 10 | 0 |
-| **Итого** | **1982** | **606** | **1333** | **43** | **0** |
+| **Итого** | **1982** | **599** | **1340** | **43** | **0** |
 
 
 ---
@@ -2180,98 +2180,106 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `nap_us` | 52–55 | 4 | `nanosleep` на us (сек+нс) | `std::thread::sleep(Duration::from_micros)` (`raw_probe.rs:1238`, `response.rs:856`) | **P*** | C округляет в нс, Rust — Duration; фактическая пауза не измерялась/не сравнивалась. |
-| `d2k_mark_real` | 61–70 | 10 | `setsockopt(SO_MARK, int mark)`, вне Linux -1 | `setsockopt(SO_MARK)` в `response.rs`/`raw_probe.rs` | **P*** | C `int m=(int)mark`; Rust `u32`→`c_int`, ошибка возвращается. Платформенная ветка та же; отдельного differential нет. |
-| `d2k_accept_serverhello` | 87–94 | 8 | `len>=6 && b[0]==0x16 && b[1]==0x03 && b[5]==0x02` | `classify.rs:543-547` `trigger_accepts(Accept::ServerHello)` | **P** | Байтовое правило совпадает посимвольно. Целевого C/Rust differential нет; используется в `response.rs:882`/`raw_probe.rs:1264` и покрыто `response.rs:1442-1463`. |
-| `d2k_accept_tls_record` | 96–99 | 4 | `len>=3` и `b[0]` равен `0x16` или `0x15`, и `b[1]==0x03` | `classify.rs:548-550` `trigger_accepts(Accept::TlsRecord)` | **P** | Совпадает; используется для белого ClientHello (`main.rs:34054`), отдельного C/Rust differential нет. |
-| `d2k_accept_any` | 101–104 | 4 | `len>0` | `classify.rs:551` `trigger_accepts(Accept::Any)` | **P** | Совпадает: `!bytes.is_empty()`. Покрыто сокетными тестами `response.rs:1480-1528`, не C-оракулом. |
-| `cuts_valid` | 109–116 | 8 | строго возрастающие `0<cut<len`; любой плохой разрез — отказ всего опыта | `classify.rs:28-56` `split_offsets`; `raw_probe.rs:1150` требует ровно один разрез | **P** | **Подтверждённое расхождение:** C отвергает весь опыт при `cut<=prev \|\| cut>=len`; Rust `split_offsets` молча фильтрует `cut>0 && cut<len`, берёт первые 8, сортирует и дедуплицирует, строит диапазоны. Raw-путь R2O при `cuts.len()!=1` возвращает `Local("invalid cut")`, C штатно шлёт несколько разрезов. Нужен differential на несколько/невалидные разрезы. |
-| `send_all` | 124–136 | 13 | доотправка буфера с учётом partial write; ошибка отправки — сбой опыта, не «молчание» цели | `response.rs:795-839` send-loop в `probe_trigger` | **P*** | partial write обрабатывается циклом, `EAGAIN` — через `poll_one(POLLOUT)`, `EINTR` возвращает `Transport("write: ...")`, как C `n<=0` возвращает `-1`. Отличие: C блокирующий сокет с `SO_SNDTIMEO`, R2O — неблокирующий с явным poll. `r2o-meas-differential.sh` покрывает send-timeout/EINTR. |
-| `connect_bounded` | 142–173 | 32 | неблокирующий connect с poll и SO_ERROR | `response.rs:254-300` `connect_until` | **P** | Проверка `EINPROGRESS/EALREADY/EINTR`, poll по `POLLOUT`, затем `SO_ERROR` — совпадает. C после успеха возвращает блокирующий режим; R2O сокет остаётся неблокирующим (`probe_socket`, `SOCK_NONBLOCK`), а send/recv обходят `EAGAIN` через poll. Поведение эквивалентно, но отдельного differential на все errno-ветви нет. |
-| `d2k_meas_once` | 175–267 | 93 | один TCP-замер: literal IPv4/IPv6, connect, разрезы, пауза, recv 512, accept | `response.rs:776-892` `probe_trigger`; `raw_probe.rs:1140` `probe_tcp_split` | **P** | **Расхождение пути:** C всегда шлёт разрезы обычным TCP-сокетом; R2O на Linux при непустых `cuts` уходит в raw-путь `probe_tcp_split` (только один разрез). C отвергает IPv6 zone-id (`%`), R2O резолвит host через `ToSocketAddrs` и фильтрует по семейству. `SO_MARK`, `TCP_NODELAY`, `SO_RCVTIMEO`, recv 512 и accept-фильтр перенесены. `r2o-meas-differential.sh` покрывает send/recv EINTR и таймауты, но не multi-cut и не IPv6 zone. |
-| `d2k_meas` | 269–293 | 25 | серия повторов, `pass/fail/err/unproven`, метка серии — AND по всем дозвонам | `classify.rs:992-1000` `Tally`, `:1076-1240` `measure`, `:628-636` `with_mark_status` | **P** | Логика совпадает: `repeats<=0 -> 3`, `ERR` даёт `errors+1` и `fail+1`, `UNPROVEN` даёт `unproven+1` и `fail+1`, `unmarked` становится sticky. Тесты `classify.rs:2129-2171`, `2303-2361` проверяют unmarked/unproven. Отдельного C/Rust differential на серию нет. |
-| `udp_now_ms` | 307–311 | 5 | монотонное время для реестра UDP-портов | `std::time::Instant` | **P*** | static-хелпер; монотонность обеспечена `Instant`, прямого сравнения с `CLOCK_MONOTONIC` нет. |
-| `d2k_udp_port_claim` | 313–339 | 27 | недавно занятый локальный UDP-порт (анти-residual): кольцо 4096, возраст 480 с | `r2o_quic_http3.rs:16,19,127-147` `r2o_quic_port_was_recently_claimed` | **P** | C: `UDP_RECENT_CAP=4096` (`meas.c:300`), `D2K_UDP_RESIDUAL_MS=480000` (`d2k_meas.h:196`); R2O: `R2O_QUIC_RECENT_PORTS=4096`, `R2O_QUIC_RESIDUAL_PORT_AGE=480s`. API отличается (C принимает fd, R2O — port), но правило «недавно занят → отвергнуть и держать сокет» перенесено в цикл `r2o_quic_http3.rs:108-121`. Отдельного C/Rust differential нет. |
-| `d2k_udp_port_forget_all` | 341–346 | 6 | сброс реестра недавних UDP-портов | нет прямого аналога | **N** | Подтверждено: единственный вызов в D2O — `core/test_quic_arm_data.c:440`; production-вызовов нет. В R2O реестр живёт в `static OnceLock<Mutex<...>>` (`r2o_quic_http3.rs:21`) и не сбрасывается. Это тестовый сброс, не packet-path контракт. |
+| `nap_us` | 52–55 | 4 | `nanosleep` на us: `tv_sec=us/1e6`, `tv_nsec=(us%1e6)*1000` | `std::thread::sleep(Duration::from_micros)` (`raw_probe.rs:1238` в `emit_plan_packets`, `response.rs:856` в `probe_trigger`) | **P*** | C округляет в нс; Rust `Duration::from_micros` точен до нс. Оба игнорируют результат прерывания (C `nanosleep` → `(void)`, Rust sleep не возвращает ошибку). Фактическая пауза не измерялась. |
+| `d2k_mark_real` | 61–70 | 10 | `setsockopt(SO_MARK, int mark)`; вне Linux/без `SO_MARK` → -1 | `response.rs:289-310 probe_socket` (`SO_MARK` c_int), `:303-307`; `raw_probe.rs` RawConn | **P*** | C приводит `u32`→`int`, возвращает результат `setsockopt`; R2O `probe_socket` ставит тот же `SO_MARK` и **игнорирует** ошибку, а признак `marked` вычисляется отдельно через `get_socket_mark` (`response.rs:803-805`). C при ошибке метки продолжает опыт с `marked=0`; R2O — тоже (проба идёт, `marked=false`). Платформенная ветка та же; отдельного differential нет. |
+| `d2k_accept_serverhello` | 87–94 | 8 | `len>=6 && b[0]==0x16 && b[1]==0x03 && b[5]==0x02` | `classify.rs:549-553 trigger_accepts(ServerHello)` | **P** | Байтовое правило совпадает посимвольно. Целевого C/Rust differential нет; используется в `response.rs:882` и `raw_probe.rs:1264`; сокетные тесты `response.rs:1442-1463`. |
+| `d2k_accept_tls_record` | 96–99 | 4 | `len>=3`, `b[0]` ∈ {0x16,0x15}, `b[1]==0x03` | `classify.rs:554-556 trigger_accepts(TlsRecord)` | **P** | Совпадает, включая Alert 0x15 и версию только по старшему байту 0x03. Используется для белого ClientHello (`main.rs:34054`); отдельного C/Rust differential нет. |
+| `d2k_accept_any` | 101–104 | 4 | `len>0` | `classify.rs:557 trigger_accepts(Any)` | **P** | Совпадает: `!bytes.is_empty()`. Покрыто сокетными тестами `response.rs:1480-1528`, не C-оракулом. |
+| `cuts_valid` | 109–116 | 8 | строго возрастающие `0<cut<len`; любой плохой разрез — отказ всего опыта | `classify.rs:28-56 split_offsets`; `raw_probe.rs:1150-1152` | **P** | **Подтверждённое расхождение:** C отвергает **весь** опыт при `cut<=prev` или `cut>=len`; Rust `split_offsets` молча фильтрует такие разрезы, берёт первые 8, сортирует и дедуплицирует, затем строит диапазоны. Raw-путь R2O (`probe_tcp_split`) требует **ровно один** разрез (`cuts.len()!=1 → Local("invalid cut")`), C штатно шлёт несколько. Дифференциала на multi-cut/невалидные разрезы нет. |
+| `send_all` | 124–136 | 13 | доотправка куска до `len`; `send()<=0` → -1 (сбой опыта, не «молчание») | `response.rs:807-847` send-loop в `probe_trigger` | **P*** | partial write обрабатывается циклом в обоих. `MSG_NOSIGNAL` есть. C блокирующий с `SO_SNDTIMEO=8 с`; Rust неблокирующий: `EAGAIN` → `poll(POLLOUT, PROBE_SEND_TIMEOUT)`, `EINTR` → `Transport("write: ...")`, `send==0` → `Local`. `r2o-meas-differential.sh` покрывает send-timeout/EINTR. |
+| `connect_bounded` | 142–173 | 32 | fcntl nonblock; connect; immediate success → restore flags; EINPROGRESS → poll(POLLOUT,timeout) → SO_ERROR; restore flags | `response.rs:254-287 connect_until`, `:289-310 probe_socket` | **P** | Ветви совпадают: `EINPROGRESS/EALREADY/EINTR`, poll по `POLLOUT` до дедлайна, затем `SO_ERROR`. C восстанавливает исходные `fcntl` flags и работает блокирующе; R2O `SOCK_NONBLOCK` оставляет сокет неблокирующим, а send/recv обходят `EAGAIN` через poll. Поведение эквивалентно; differential на все errno-ветви не заявлен. |
+| `d2k_meas_once` | 175–267 | 93 | literal IPv4/IPv6 (zone-id отвергнут), mark, TCP_NODELAY, SO_SNDTIMEO 8 с, SO_RCVTIMEO wait (0/>5000→5000), connect 8 с, разрезы+gap, recv 512, accept | `response.rs:776-889 probe_trigger`; `raw_probe.rs:1140-1172 probe_tcp_split` | **P** | **Расхождения:** (1) C всегда обычный TCP-сокет; R2O на Linux при непустых `cuts` и `!no_raw` уходит в raw-путь, который принимает только один разрез; (2) C отвергает IPv6 zone-id (`%`), R2O резолвит host через `ToSocketAddrs` и фильтрует семейство; (3) C `marked_out=(mark==0)`, при `mark!=0` ставит метку; R2O `expected_mark=mark.unwrap_or(BYPASS_MARK=0x2d)` и проверяет `get_socket_mark`, `Some(0)` отключает маркировку. Перенесены: TCP_NODELAY, send/recv 512, accept-фильтр, gap, `SO_SNDTIMEO`/`SO_RCVTIMEO` через poll/дедлайн. `r2o-meas-differential.sh` покрывает send/recv EINTR и таймауты, не multi-cut/zone. |
+| `d2k_meas` | 269–293 | 25 | серия: `repeats<=0→3`; ERR→err+fail; PASS→pass; UNPROVEN→unproven+fail; SILENT→fail; `marked` — AND | `classify.rs:997-1005 Tally`, `:1082-1240 measure`, `:634-642 with_mark_status` | **P** | Логика совпадает: `unmarked` sticky по серии, ERR→`errors+1`/`fail+1`, UNPROVEN→`unproven+1`/`fail+1`, PASS→`pass+1`. Тесты `classify.rs:2135-2178`, `2309-2361` проверяют unmarked/unproven. Отдельного C/Rust differential на серию нет. |
+| `udp_now_ms` | 307–311 | 5 | `CLOCK_MONOTONIC` в мс | `std::time::Instant` | **P*** | static-хелпер; монотонность `Instant`, прямого сравнения с `CLOCK_MONOTONIC` нет. |
+| `d2k_udp_port_claim` | 313–339 | 27 | `getsockname(fd)` → порт; `port==0→-1`; кольцо 4096, возраст 480 с; недавний → 1 без записи, иначе запись/0 | `r2o_quic_http3.rs:16-22,127-148 r2o_quic_port_was_recently_claimed` | **P** | C: `UDP_RECENT_CAP=4096` (`meas.c:300`), `D2K_UDP_RESIDUAL_MS=480000`; Rust: `R2O_QUIC_RECENT_PORTS=4096`, `R2O_QUIC_RESIDUAL_PORT_AGE=480s`, `VecDeque` + `Instant`. API иной: C принимает fd, Rust — порт; Rust-цикл `udp_socket_fresh` держит до 16 старых сокетов, чтобы не переиспользовать порт (`:82-124`). Отдельного C/Rust differential нет. |
+| `d2k_udp_port_forget_all` | 341–346 | 6 | сброс реестра недавних UDP-портов | нет прямого аналога | **N** | Подтверждено: единственный вызов в D2O — `core/test_quic_arm_data.c:440`; production-вызовов нет. В R2O реестр живёт в `static OnceLock<Mutex<...>>` (`r2o_quic_http3.rs:21-22`) и не сбрасывается. Это тестовый сброс, не packet-path контракт. |
 
 ### `core/measured.c`
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `append_fmt` | 10–20 | 11 | дописать форматированный текст в буфер с проверкой места | String::push_str / write! | **P*** | static-хелпер |
-| `append_hex` | 22–28 | 7 | дописать байты как hex | hex-хелпер в classify_measured | **P*** | static-хелпер |
-| `d2k_white_decoy_hello` | 33–44 | 12 | собрать белое ClientHello с подменой SNI | `hello.rs:598` `r2o_rx_fake_client_hello` (профиль `profiles/r2o_rx_fake.hex`) | **E** | Прямая C-фикстура: `main.rs:34050-34061` сравнивает `r2o_discovery_white_trigger("hcaptcha.com").payload` с `tests/fixtures/r2o-rx-fake-hcaptcha-c.bin`; длинное имя покрыто C-фикстурой плана `r2o_rx_volume.rs:165-177`. |
-| `template_plan` | 57–82 | 26 | tcp-template-v1: `d2k-plan 1 {13 при autottl, иначе 8}`, segment `d2k_arm_segment(send_cap)`, hello в payload, `poison 1 [badsum][tcpts][autottl=1,2-12]`, fake ×8, split | `r2o_rx_volume.rs:26-58` `r2o_rx_volume_plan_for_client` | **P** | C-фикстуры `r2o-rx-volume-hcaptcha-split2-c.txt`/`split5-c.txt` покрывают `tcpts` и точный текст; autottl-ветка — unit `r2o_rx_volume.rs:112-128`. **Отличия:** C `badsum`-ветка в RX-плане не имеет Rust-аналога (R2O всегда tcpts/autottl); Rust `R2O_RX_VOLUME_SEGMENT=1400` фиксирован, C `d2k_arm_segment(send_cap)` может быть меньше при узком канале. |
-| `d2k_rx_volume_plan_named` | 84–88 | 5 | `..._client(..., client_has_ts=1)` | `r2o_rx_volume.rs:21-23` `r2o_rx_volume_plan` | **P** | Обёртка `for_client(..., true)` совпадает; C-фикстуры variant 0/4 и длинное имя, варианты 1/2/3 — unit `r2o_rx_volume.rs:94-110`. C проверяет `shape==MODERN`; Rust shape не принимает. |
-| `d2k_rx_volume_plan_client` | 90–110 | 21 | variant 0..4 → split `{2,1,3,4,5}`, shape только MODERN, name→white hello, `client_has_ts` выбирает tcpts или autottl | `r2o_rx_volume.rs:26-58` `r2o_rx_volume_plan_for_client` | **P** | **Подтверждённое расхождение сигнатуры:** C отвергает `shape != D2K_SHAPE_MODERN` (`measured.c:96-98`), Rust shape не принимает и всегда строит modern-план. Остальное совпадает: split-таблица, проверка variant, имя через `r2o_rx_fake_client_hello`, `send_cap - hello >= 132`, minexec 8/13, `poison tcpts` или `autottl=1,2-12`, fake ×8, split/order. C-фикстуры только ts=1; autottl — unit. |
-| `d2k_rx_volume_plan` | 114–117 | 4 | RX-volume план для hcaptcha.com | r2o_rx_volume::r2o_rx_volume_plan | **E** | та же C-фикстура варианта 0 |
-| `measured_payload` | 121–138 | 18 | `payload-pad64 ID LEN 15 [base64(prefix)]`, префикс обрезается до LEN | `classify_measured.rs:381-399` `append_measured_payload`, `:401-425` `base64` | **P** | Формат и обрезка `prefix_len>len` совпадают; base64-таблица стандартная, паддинг `=` для 1/2 байт. C-фикстуры покрывают обычные payload, но не границы 1/2/3 байта и не пустой префикс; отдельного C/Rust differential нет. |
-| `d2k_tcp_split_plan` | 140–151 | 12 | план split payload_start с gap и сегментом под `send_cap` | `main.rs:6292` `r2o_discovery_measured_split_plan` | **E** | `scripts/r2o-measured-split-differential.sh` компилирует `tests/d2o_measured_split_differential.c` с `core/measured.c` и сравнивает вывод с Rust для `send_cap` 0/1492/1280/100/72, split 0/1/1024, verdict prefix/whole. Тест `main.rs:28767` формирует тот же вывод; сегмент `send_cap-72 min 1400` совпадает с `d2k_arm_segment`. |
-| `d2k_arm_plan_measured_cap` | 153–385 | 233 | сборка измеренного плана: split-only, template, disorder, oob, fake/between/seqovl, ttl/md5/tcpts/tsup/ipidzero/autottl, выбор minexec и segment | `classify_measured.rs:45-378` `measured_plan_text` | **P** | **Конкретные пробелы:** (1) `Poison` (`classify.rs:127-146`) не содержит `autottl` и `tcpts_up`, поэтому R2O не может собрать ветви `a->autottl` (C `measured.c:343-345`) и `a->tcpts_up` (`:349`); (2) `segment` жёстко 1400 (`classify_measured.rs:12,143`), тогда как C берёт `d2k_arm_segment(send_cap)` (`measured.c:170`, `d2k_arm.h:79-82`) — на `send_cap=1280` C даёт 1208; (3) C `minexec=13` при autottl, Rust — 5/12; (4) составной template-план C принимает `decoy_hello && (tcpts \|\| badsum)` (`measured.c:180-188`), Rust — только `tcp_ts` и явно отвергает `badsum` (`classify_measured.rs:148-170`), поэтому измеренный badsum-композит нечем собрать. Остальные ветви (split/oob/disorder/seqovl/md5/tcpts/ipidzero) перенесены; C-фикстуры покрывают обычные fake/split/oob, редкие — unit. |
-| `d2k_arm_plan_measured` | 387–390 | 4 | обёртка `d2k_arm_plan_measured_cap(..., send_cap=0)` | `classify_measured.rs:30-37` `plan_text_for_poison(..., send_cap=0)` | **P** | Обёртка совпадает; все пробелы те же, что у `d2k_arm_plan_measured_cap`. |
+| `append_fmt` | 10–20 | 11 | `vsnprintf` в `buf+pos` с `cap-pos`; `n<0` или `n>=cap-pos` → -1; иначе `pos+=n` | `String` + `write!` (`classify_measured.rs:142-378`), финальный `checked_text` (`:430-434`) | **P*** | C проверяет место на каждом добавлении и отвергает усечение; Rust пишет в неограниченный `String`, а предел 8191 проверяет один раз в `checked_text` (`:431-433`). Для планов <8192 байт результат совпадает; при переполнении C вернул бы -1 раньше, Rust — `Err` в конце. |
+| `append_hex` | 22–28 | 7 | каждый байт как `%02x`, ошибка добавления пробрасывается | `classify_measured.rs:422-428 hex` | **P*** | Формат тот же (`{byte:02x}`); Rust собирает в `String`, C — в буфер с проверкой cap. Отдельного differential нет. |
+| `d2k_white_decoy_hello` | 33–44 | 12 | проверить `out/cap>=5/name`; `hello_rename` тела профиля `rx_fake` (SNI), копия первых 3 байт записи, длина записи `hl` | `hello.rs:598-600 r2o_rx_fake_client_hello` → `client_hello_from_profile` | **E** | C переименовывает тело `d2k_rx_fake_template+5` и восстанавливает 5-байтную запись; Rust `client_hello_from_profile` переименовывает полный профиль `profiles/r2o_rx_fake.hex`, сохраняя запись. C-фикстура `main.rs:34050-34061` сравнивает payload с `tests/fixtures/r2o-rx-fake-hcaptcha-c.bin`; длинное имя — C-фикстура плана (`r2o_rx_volume.rs:165-177`). |
+| `template_plan` | 57–82 | 26 | tcp-template-v1: minexec 13 при autottl иначе 8; segment `d2k_arm_segment(send_cap)`; payload hello; `poison 1 [badsum][tcpts][autottl=delta,min-max]`; fake ×8; split; forward | `r2o_rx_volume.rs:26-58 r2o_rx_volume_plan_for_client` | **P** | **Совпадает:** проверка `hello_len<=send_cap && send_cap-hello_len>=132`, payload hex, fake `repeats=8 gap_us=0 place=before tlsmod=rnd,dupsid`, split/order. **Отличия:** (1) C принимает **badsum** как порчу, R2O RX-план — только `tcpts`/`autottl`; (2) C `segment=d2k_arm_segment(send_cap)`, R2O фиксирует `R2O_RX_VOLUME_SEGMENT=1400` (`r2o_rx_volume.rs:3,57`); при `send_cap=1280` C даёт 1208, R2O 1400; (3) R2O требует нормализованное имя и проверяет его `domain::normalize`; C полагается на `hello_rename`. C-фикстуры split2/split5 покрывают tcpts; autottl — unit `:112-128`. |
+| `d2k_rx_volume_plan_named` | 84–88 | 5 | обёртка `..._client(..., client_has_ts=1)` | `r2o_rx_volume.rs:21-23 r2o_rx_volume_plan` | **P** | R2O `r2o_rx_volume_plan` = `r2o_rx_volume_plan_for_client(..., true)`, как C. Отличия наследуются: нет параметра `shape` (C требует `MODERN`), фиксированный segment 1400, брендинг `r2o-plan`. C-фикстуры variant 0/4 и длинное имя; варианты 1/2/3 — unit `:94-110`. |
+| `d2k_rx_volume_plan_client` | 90–110 | 21 | variant 0..4 → split `{2,1,3,4,5}`; `shape==MODERN`; белый hello; `client_has_ts` → tcpts (minexec 8) или autottl (`1,2-12`, minexec 13) | `r2o_rx_volume.rs:26-58 r2o_rx_volume_plan_for_client` | **P** | **Подтверждённое расхождение сигнатуры:** C отвергает `shape != D2K_SHAPE_MODERN` (`measured.c:96-98`); Rust `shape` не принимает и всегда строит modern-план. Совпадают: split-таблица, проверка variant, `r2o_rx_fake_client_hello`, `send_cap-hello>=132`, minexec 8/13, `poison tcpts`/`autottl=1,2-12`, fake ×8, split/order. Segment фиксирован 1400 (C `d2k_arm_segment`). |
+| `d2k_rx_volume_plan` | 114–117 | 4 | RX-volume план с именем по умолчанию `hcaptcha.com` | `r2o_rx_volume.rs:62-72 r2o_rx_volume_candidate` (fallback-имена) | **P** | Отдельной функции с именем по умолчанию нет: R2O использует `hcaptcha.com` только для запасных вариантов после списка 266 имён (`candidate(name_count+variant)`). Для variant 0..4 текст совпадает с C-фикстурой после замены брендинга; API/точка вызова иные. |
+| `measured_payload` | 121–138 | 18 | `payload-pad64 ID LEN 15`, пробел+base64(prefix), prefix обрезается до LEN, перевод строки | `classify_measured.rs:381-397 append_measured_payload`, `:399-420 base64` | **P** | Формат и обрезка `prefix.len().min(length)` совпадают; base64-таблица и `=` для 1/2 байт те же. **Отличие:** Rust отвергает `length==0` (`:387-389`), C допускает (но все C-вызовы передают >0: `2n`, `n-mid`, `ov`). C-фикстуры покрывают обычные payload; границы 1/2/3 байта и пустой префикс — без differential. |
+| `d2k_tcp_split_plan` | 140–151 | 12 | проверить `trigger_len<=16384`, `0<split<trigger_len`; segment=`d2k_arm_segment(send_cap)`; `d2k-plan 1 5 … segment … split +split order forward pace gap_us` | `main.rs:6292-6317 r2o_discovery_measured_split_plan` | **E** | `scripts/r2o-measured-split-differential.sh` компилирует `tests/d2o_measured_split_differential.c` с `core/measured.c` и сравнивает с Rust для `send_cap` 0/1492/1280/100/72, split 0/1/1024, verdict prefix/whole. Сегмент `send_cap.saturating_sub(72).min(1400)` совпадает с `d2k_arm_segment`; проверено `main.rs:6307-6312`. |
+| `d2k_arm_plan_measured_cap` | 153–385 | 233 | сборка измеренного плана: split-only, composite template, disorder, oob, fake/between/seqovl, ttl/md5/tcpts/tsup/ipidzero/autottl, minexec и segment | `classify_measured.rs:50-379 measured_plan_text` | **P** | **Подтверждённые пробелы:** (1) `Poison` (`classify.rs:133-152`) **не содержит** `autottl` и `tcpts_up`, поэтому ветви C `a->autottl` (`measured.c:343-345`) и `a->tcpts_up` (`:349`) невыразимы; (2) R2O `fake` (`classify_measured.rs:118-119`) не учитывает `autottl`/`tcpts_up`, C `measured.c:229-230` учитывает; (3) `SEGMENT_SIZE=1400` (`:12,143,170,204,228,234,254,258`) вместо `d2k_arm_segment(send_cap)` — на `send_cap=1280` C даёт 1208; (4) `minexec` R2O `md5?12:parameterized?5:4` (`:245-251`), C `autottl?13:md5?12:param?5:4` (`measured.c:326-333`); (5) composite template R2O требует `tcp_ts && decoy_hello && !badsum` (`:147-174`), C принимает `decoy_hello && (tcpts || badsum)` и `autottl` (`measured.c:180-188`), т.е. badsum-композит и autottl-композит не собираются. **Совпадают:** split-only (кроме segment), disorder_pos, oob, disorder+overlap, payload-slice, seqovl, ttl/md5/tcpts/ipidzero, fake/order/pace/settle. C-фикстуры покрывают обычные fake/split/oob; редкие ветви — unit. |
+| `d2k_arm_plan_measured` | 387–390 | 4 | обёртка `d2k_arm_plan_measured_cap(..., send_cap=0)` | `classify_measured.rs:30-37 plan_text_for_poison(..., send_cap=0)` | **P** | Обёртка совпадает; все пробелы те же, что у `d2k_arm_plan_measured_cap`. |
 
 ### `core/net4.c`
 
+**Прочитано построчно: 4/4 функции, 64 строки C (1–64).** Сверено с `quic_replay.rs:22-53 r2o_quic_address_is_local` и `scripts/test-core-net4-differential.sh` (C-оракул `crates/r2k-core/tests/d2o_net4_differential.c`, донор закреплён на `a378e230…`).
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `d2k_ip4_parse` | 7–30 | 24 | 4 октета по 1–3 цифры, 0..255, ровно точки/конец, старший байт вперёд | `Ipv4Addr::from_str` (`examples/m5_net4_trace.rs:15`) | **P** | **Подтверждённое расхождение:** C принимает ведущие нули (`010.0.0.1` → 10.0.0.1), Rust 1.98 — `Err(AddrParseError)`. Остальное совпадает: 1–3 цифры, ≤255, ровно 4 октета, конец строки. `test-core-net4-differential.sh` (пин a378) покрывает обычные/битые литералы, но не ведущие нули. |
-| `d2k_ip4_text` | 32–38 | 7 | 4 байта → `%u.%u.%u.%u`, 0 при нехватке cap | `Ipv4Addr::Display` | **E** | `test-core-net4-differential.sh` сравнивает текст на валидных адресах; контракт `cap` не нужен Rust `Display`. |
-| `d2k_ip4_private` | 40–51 | 12 | 127/8, 10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10, 0.0.0.0 | `quic_replay.rs:24-33` `ipv4_is_local` | **E** | Диапазоны совпадают посимвольно: `a==10/127`, `172 && b∈16..=31`, `192.168`, `169.254`, `100 && b∈64..=127`, `is_unspecified`. `test-core-net4-differential.sh` + `r2o-quic-local-address-differential.sh`. |
-| `d2k_ip6_private` | 53–64 | 12 | `::`/`::1`, fc00::/7, fe80::/10, ff00::/8, v4-mapped → ip4_private | `quic_replay.rs:37-51` IPv6-ветка | **E** | C: 15 нулевых байт + `ip[15]<=1`; `(ip[0]&0xfe)==0xfc`; `ip[0]==0xfe && (ip[1]&0xc0)==0x80`; `ip[0]==0xff`; `::ffff:` → ip4. Rust: `is_unspecified/is_loopback`, те же маски, mapped_v4. `test-core-net4-differential.sh`. |
+| `d2k_ip4_parse` | 7–30 | 24 | 4 октета по 1–3 цифры, 0..255, ровно точки/конец, старший байт вперёд | `Ipv4Addr::from_str` (`examples/m5_net4_trace.rs:15`) | **P** | **Подтверждённое расхождение:** C принимает ведущие нули (`010.0.0.1` → 10.0.0.1; `001.002.003.004`), Rust 1.98 — `Err(AddrParseError)` (проверено `rustc`). Остальное совпадает: 1–3 цифры, ≤255, ровно 4 октета, конец строки, старший байт вперёд. `test-core-net4-differential.sh` (пин a378) покрывает `0.0.0.0/127.0.0.1/192.168.1.1/255.255.255.255` и битые литералы, но **не ведущие нули**. |
+| `d2k_ip4_text` | 32–38 | 7 | 4 байта → `%u.%u.%u.%u`, 0 при нехватке cap или ошибке | `Ipv4Addr::Display` (`examples/m5_net4_trace.rs`) | **E** | Для валидных адресов текст совпадает; C возвращает 0 при `n<0`/`n>=cap`, Rust `Display` пишет в `String` без предела. `test-core-net4-differential.sh` сравнивает `parse→text` на валидных адресах. |
+| `d2k_ip4_private` | 40–51 | 12 | 127/8, 10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10, 0.0.0.0 | `quic_replay.rs:24-33 ipv4_is_local` | **E** | Диапазоны совпадают: `is_unspecified`, `a==10/127`, `172 && b∈16..=31`, `192.168`, `169.254`, `100 && b∈64..=127`. C собирает `v` из big-endian байт; Rust работает по `octets()`. `test-core-net4-differential.sh` + `r2o-quic-local-address-differential.sh`. |
+| `d2k_ip6_private` | 53–64 | 12 | `::`/`::1`, fc00::/7, fe80::/10, ff00::/8, v4-mapped → ip4_private | `quic_replay.rs:35-52` IPv6-ветка | **E** | C: `NULL→1`; 15 нулевых байт + `ip[15]<=1`; `(ip[0]&0xfe)==0xfc`; `ip[0]==0xfe && (ip[1]&0xc0)==0x80`; `ip[0]==0xff`; `::ffff:` → `ip4_private`. Rust: `is_unspecified/is_loopback`, те же маски, `mapped_v4` = 10 нулей + `ff ff`, затем `ipv4_is_local`. Единственное отличие — C трактует `NULL` как private, Rust принимает значение. `test-core-net4-differential.sh`. |
 
 ### `core/p256.c`
 
+**Прочитано построчно: 22/22 функции, 316 строк C (1–316).** Сверено с `r2o_tls.rs:75-103` (ring provider, `SECP256R1` в TLS12/TLS13) и `core/tls12.c:642-660` (C-путь `d2k_p256_keypair`/`d2k_p256_ecdh`). Собственной арифметики P-256 в R2O нет — её заменяет ring; C-векторы `core/test_p256.c` против Rust не запускались.
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `fe_copy` | 31–31 | 1 | копирование 8-словного элемента поля P-256 | hpke/ring (P-256) | **P*** | static-хелпер; своей арифметики в R2O нет |
-| `ge` | 34–39 | 6 | сравнение элементов поля с модулем P | hpke/ring | **P*** | static-хелпер |
-| `is_zero` | 41–45 | 5 | проверка нуля элемента поля | hpke/ring | **P*** | static-хелпер |
-| `sub_raw` | 48–56 | 9 | вычитание 256-битных чисел с заимствованием | hpke/ring | **P*** | static-хелпер |
-| `add_raw` | 59–67 | 9 | сложение 256-битных чисел с переносом | hpke/ring | **P*** | static-хелпер |
-| `fe_add` | 69–74 | 6 | сложение по модулю P-256 | hpke/ring | **P*** | static-хелпер |
-| `fe_sub` | 76–80 | 5 | вычитание по модулю P-256 | hpke/ring | **P*** | static-хелпер |
-| `fe_mul` | 84–113 | 30 | умножение Монтгомери по модулю P-256 | hpke/ring | **P*** | static-хелпер |
-| `fe_sqr` | 115–115 | 1 | возведение в квадрат по модулю P-256 | hpke/ring | **P*** | static-хелпер |
-| `to_mont` | 124–124 | 1 | перевод в форму Монтгомери | hpke/ring | **P*** | static-хелпер |
-| `from_mont` | 125–128 | 4 | обратный перевод из Монтгомери | hpke/ring | **P*** | static-хелпер |
-| `fe_inv` | 131–141 | 11 | обращение элемента поля P-256 | hpke/ring | **P*** | static-хелпер |
-| `fe_from_be` | 143–148 | 6 | разбор 32-байтного big-endian элемента поля | hpke/ring | **P*** | static-хелпер |
-| `fe_to_be` | 150–156 | 7 | сериализация элемента поля big-endian | hpke/ring | **P*** | static-хелпер |
-| `pt_double` | 161–190 | 30 | удвоение точки якобиевых координат P-256 | hpke/ring | **P*** | static-хелпер |
-| `pt_add` | 192–232 | 41 | сложение точек P-256 в якобиевых координатах | hpke/ring | **P*** | static-хелпер |
-| `pt_mul` | 235–246 | 12 | скалярное умножение точки P-256 | hpke/ring | **P*** | static-хелпер |
-| `pt_affine` | 249–260 | 12 | перевод точки в аффинные координаты | hpke/ring | **P*** | static-хелпер |
-| `scalar_ok` | 262–266 | 5 | проверка скаляра 0<k<N | hpke/ring | **P*** | static-хелпер |
-| `d2k_p256_public` | 268–280 | 13 | `scalar_ok` (`0<k<N`), `pt_mul(G)`, аффинные координаты, `0x04` + X + Y | `rustls::crypto::ring::kx_group::SECP256R1` (`r2o_tls.rs:95,101,288`) | **P** | Production-путь TLS 1.2 подтверждён: C `core/tls12.c:650-655`, Rust rustls/ring `SECP256R1`. Отдельного публичного P-256 API в R2O нет; `d2k_p256_public` используется внутри `d2k_p256_keypair`. C/Rust-векторов публичного ключа нет. |
-| `d2k_p256_keypair` | 282–289 | 8 | `d2k_t13_random` 32 байта, `scalar_ok`, до 16 попыток | `ring::agreement::EphemeralPrivateKey` (через rustls) | **P** | **Production:** `core/tls12.c:650-655` (ECDHE TLS 1.2). C явно повторяет генерацию до 16 раз при `k==0 \|\| k>=N`; ring генерирует ключ внутри и его retry/отбраковка не сравнивались. C-векторов keypair нет. |
-| `d2k_p256_ecdh` | 291–316 | 26 | `scalar_ok`, `peer[0]==0x04`, `x,y<P`, проверка `y²=x³-3x+b`, `pt_mul`, вывод X | `ring::agreement` (P256) через rustls | **P** | **Production:** `core/tls12.c:655`. C сам проверяет точку на кривой; ring тоже отвергает невалидную точку, но C/Rust-векторы ECDH и поведение при точке не на кривой не сравнивались. |
+| `fe_copy` | 31–31 | 1 | `memcpy` 8 слов элемента поля | ring (внутренняя арифметика P-256) | **P*** | static-хелпер; собственной реализации в R2O нет, арифметику выполняет ring через rustls (`r2o_tls.rs:92-103`). |
+| `ge` | 34–39 | 6 | `a>=b` для 256-битных слов, сравнение с 7-го слова; равенство → 1 | ring | **P*** | static-хелпер; используется `fe_add`/`fe_mul`/`scalar_ok`. В R2O заменён внутренним сравнением ring. |
+| `is_zero` | 41–45 | 5 | OR всех 8 слов == 0 | ring | **P*** | static-хелпер; используется `pt_double`/`pt_add`/`scalar_ok`. |
+| `sub_raw` | 48–56 | 9 | 256-битное вычитание с заимствованием `borrow=(d>>63)&1` | ring | **P*** | static-хелпер; C собирает `d=a[i]-b[i]-borrow` в `uint64`. |
+| `add_raw` | 59–67 | 9 | 256-битное сложение с переносом `carry=s>>32` | ring | **P*** | static-хелпер. |
+| `fe_add` | 69–74 | 6 | `a+b mod P`: при переносе или `t>=P` вычесть P | ring | **P*** | static-хелпер; P-256 модуль. |
+| `fe_sub` | 76–80 | 5 | `a-b mod P`: при заёме добавить P | ring | **P*** | static-хелпер. |
+| `fe_mul` | 84–113 | 30 | Montgomery CIOS, `t[10]`, `m=t[0]` (так как `-p^-1 mod 2^32=1`), 8 раундов, финальное вычитание P | ring | **P*** | static-хелпер; C не использует `__int128` и рассчитан на ARM/MIPS32. ring применяет свою реализацию (вероятно, ассемблер/constant-time); побайтовых C/Rust-векторов нет. |
+| `fe_sqr` | 115–115 | 1 | `fe_mul(a,a)` | ring | **P*** | static-хелпер. |
+| `to_mont` | 124–124 | 1 | `a·R² mod P` | ring | **P*** | static-хелпер; `R2` — константа `2^512 mod P`. |
+| `from_mont` | 125–128 | 4 | `a·1` в Montgomery-домене | ring | **P*** | static-хелпер. |
+| `fe_inv` | 131–141 | 11 | `a^(P-2)` по малой теореме Ферма, MSB-first square/multiply, старт `ONE_M` | ring | **P*** | static-хелпер; C-ветвь по битам экспоненты. |
+| `fe_from_be` | 143–148 | 6 | 8 слов из big-endian байт `b+28-4i` | ring | **P*** | static-хелпер; разбор 32-байтного скаляра/координаты. |
+| `fe_to_be` | 150–156 | 7 | обратная сериализация 8 слов в big-endian | ring | **P*** | static-хелпер. |
+| `pt_double` | 161–190 | 30 | якобиево удвоение, `a=-3`; `inf` при `p.inf`/`y==0`; формулы δ,γ,β,α | ring | **P*** | static-хелпер; C считает в Montgomery-домене. |
+| `pt_add` | 192–232 | 41 | якобиево сложение; `p.inf/q.inf`; при `H==0`: `R==0 → double`, иначе `inf`; формулы I,J,V | ring | **P*** | static-хелпер. |
+| `pt_mul` | 235–246 | 12 | MSB-first double-and-add по 32 байтам, **не constant-time** | ring | **P*** | static-хелпер; C прямо документирует «не постоянного времени» (ключ одноразовый). ring, вероятно, constant-time; выходные точки должны совпадать, но C/Rust-векторов нет. |
+| `pt_affine` | 249–260 | 12 | `z^-1`, `x/z²`, `y/z³`, `from_mont`; `-1` при бесконечности | ring | **P*** | static-хелпер. |
+| `scalar_ok` | 262–266 | 5 | `0<k<N` | ring (валидация внутри) | **P*** | static-хелпер; C проверяет `!is_zero && !ge(s,N)`. ring валидирует скаляр внутри генерации/ECDH, отдельной функции нет. |
+| `d2k_p256_public` | 268–280 | 13 | `scalar_ok`, `pt_mul(G)`, аффинные координаты, `0x04`+X+Y | ring (через rustls, без экспорта pub) | **P** | **Production-путь:** C `tls12.c:642-660`; R2O `r2o_tls.rs:92-96` включает `SECP256R1` в TLS12 и TLS13. Отдельного API «публичный ключ из приватного» в R2O нет — ring генерирует эфемерную пару внутри TLS; C/Rust-векторов публичного ключа нет. |
+| `d2k_p256_keypair` | 282–289 | 8 | 32 случайных байта, `scalar_ok`, до 16 попыток | `ring::agreement::EphemeralPrivateKey` через rustls | **P** | **Production:** `tls12.c:642-660` (ECDHE TLS 1.2). C явно повторяет генерацию до 16 раз при `k==0 || k>=N`; ring генерирует ключ внутри, его retry/отбраковка не сравнивались. C-векторов keypair нет. |
+| `d2k_p256_ecdh` | 291–316 | 26 | `scalar_ok`, `peer[0]==0x04`, `x,y<P`, проверка `y²=x³-3x+B`, `pt_mul`, вывод X | `ring::agreement` (P256) через rustls | **P** | **Production:** `tls12.c:655`. C сам проверяет точку на кривой; ring также отвергает невалидную точку, но C/Rust-векторы ECDH и поведение при точке не на кривой не сравнивались. |
 
 ### `core/plantlv.c`
 
+**Прочитано построчно: 20/20 функций, 863 строки C (1–863).** Сверено с `plan_text.rs` (741 строка), `plan.rs` (`scan`/`check_references`: `:692,711-717,798-808`), `scripts/test-controller-plantlv-differential.sh` и фикстурами `scripts/fixtures/plantlv_cases.txt` / `plantlv_stricter_cases.txt`.
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `b64_value` | 126–131 | 6 | декодирование символа base64 | plan_text::base64_decode | **E*** | static-хелпер; differential plantlv |
-| `parse_base64` | 133–161 | 29 | строгий разбор base64 с проверкой паддинга | plan_text::base64_decode | **E*** | static-хелпер; plantlv differential |
-| `say` | 163–169 | 7 | записать текст ошибки | Result<String, String> | **E*** | static-хелпер; текст ошибок не сравнивается |
-| `hex_nib` | 171–176 | 6 | значение hex-цифры | plan_text::hex_nibble | **E*** | static-хелпер |
-| `parse_hex` | 180–204 | 25 | разбор hex-строки в байты | plan_text::decode_hex | **E*** | static-хелпер; plantlv differential |
-| `anchor_by_name` | 206–217 | 12 | имя якоря split/oob в номер | plan_text::anchor | **E*** | static-хелпер |
-| `split_fields` | 221–233 | 13 | разбиение строки плана на поля | plan_text::split_whitespace | **E*** | static-хелпер |
-| `parse_uint` | 237–245 | 9 | десятичное число с верхней границей | plan_text::number | **E*** | static-хелпер |
-| `parse_int` | 248–256 | 9 | знаковое число в диапазоне | plan_text::number_signed | **E*** | static-хелпер |
-| `kv_u32` | 259–263 | 5 | разбор key=value | plan_text::key_value | **E*** | static-хелпер |
-| `str_u32` | 268–270 | 3 | u32 из строки | plan_text::number | **E*** | static-хелпер |
-| `plan_free` | 272–275 | 4 | освобождение разобранного плана | Drop | **E*** | static-хелпер; управление памятью заменено RAII |
-| `parse_text` | 277–685 | 409 | полный разбор текста d2k-plan/r2o-plan во внутреннюю структуру | plan_text::parse | **E** | scripts/test-controller-plantlv-differential.sh: принятие/отказ и точные TLV; строгие случаи сверены с plan_parse.c |
-| `put` | 691–695 | 5 | запись байтов в TLV-буфер | plan_text::push_bytes | **E*** | static-хелпер; TLV сверяется дифференциалом |
-| `put_u8` | 696–696 | 1 | TLV: один байт | plan_text::push_u8 | **E*** | static-хелпер |
-| `put_u16` | 697–697 | 1 | TLV: big-endian u16 | plan_text::push_u16 | **E*** | static-хелпер |
-| `put_u32` | 698–701 | 4 | TLV: big-endian u32 | plan_text::push_u32 | **E*** | static-хелпер |
-| `put_rec` | 702–707 | 6 | TLV-запись тип/длина/значение | plan_text::push_record | **E*** | static-хелпер |
-| `d2k_plan_text_to_tlv` | 709–845 | 137 | компиляция текста плана в TLV D2KP (записи id/proto/payload/poison/...) | plan_text::compile_text | **E** | plantlv differential сравнивает hex после нормализации магии D2KP/R2OP |
-| `d2k_plan_text_to_hex` | 847–863 | 17 | компиляция плана в hex-строку | plan_text::compile_text + hex | **E** | используется link/CLI; покрыто plantlv differential |
+| `b64_value` | 126–131 | 6 | base64-символ → 0..63, иначе -1 | `plan_text.rs:712-721 base64_value` | **E*** | Отображение A-Z/a-z/0-9/+/ совпадает; static-хелпер, покрыт фикстурой `payload-pad64`. |
+| `parse_base64` | 133–161 | 29 | `len%4==0`; `=` только в последнем квартете; нулевые хвостовые биты; пустая строка — 0 байт | `plan_text.rs:677-710 base64` | **E*** | Ветви совпадают, включая `b&15`/`c&3`, пустой вход и отказ на неполном паддинге. Фикстуры `payload-pad64`/`pad-prefix-too-long`. |
+| `say` | 163–169 | 7 | `vsnprintf` в err/cap, молчание при cap==0 | `Result<String, String>` | **E*** | Текст ошибок C/Rust не сравнивается (differential печатает только ok/err и TLV); смысл ошибки сохраняется. |
+| `hex_nib` | 171–176 | 6 | 0-9/a-f/A-F → 0..15, иначе -1 | `plan_text.rs:668-675 hex_nibble` | **E*** | Посимвольно совпадает. |
+| `parse_hex` | 180–204 | 25 | чётная длина; пустая строка — 0 байт; hex → байты | `plan_text.rs:650-666 hex` | **E*** | C выделяет `n/2`, Rust `Vec::with_capacity`; обе отвергают нечётную длину и не-hex. Фикстуры `payload-hex`/`odd-hex`. |
+| `anchor_by_name` | 206–217 | 12 | 6 якорей: payload_start 0, sni_start 1, sni_end 2, hello_middle 3, record_end 4, sni_middle 5 | `plan_text.rs:723-733 anchor` | **E*** | Те же имена/номера; фикстура `split-anchors`/`split-unknown-anchor`. |
+| `split_fields` | 221–233 | 13 | разбиение по пробелам/табам, не более 8 полей; больше — отказ | `plan_text.rs:81-87` | **E*** | C возвращает -1 при `n>=cap`; Rust `fields.len()>8`. Пустые поля отбрасываются в обоих. |
+| `parse_uint` | 237–245 | 9 | первый символ цифра; `strtoul`; без знака/пробела/хвоста; `<=max` | `plan_text.rs:625-631 number` | **E*** | Для канонического текста эквивалентно: Rust требует все ASCII-цифры, `u64`, `<=max`; ведущие нули оба принимают. C дополнительно ловит `ERANGE`. |
+| `parse_int` | 248–256 | 9 | необязательный `+`/`-`; модуль ограничен `lo`/`hi`; `-INT_MIN` без переполнения | `plan_text.rs:308-310`, `:340-342` (`parse::<i32>`/`<i16>`) | **E*** | C разбирает знак и модуль, Rust — стандартный `parse`; диапазоны те же (`i32` для seqshift, `i16` для split). |
+| `kv_u32` | 259–263 | 5 | `key=value`, точное совпадение ключа, значение `parse_uint` | `plan_text.rs:642-648 kv_number` | **E*** | C `strncmp`+`field[kl]=='='`; Rust `split_once('=')`+`actual_key != key`; эквивалентно. |
+| `str_u32` | 268–270 | 3 | голое u32 без ключа | `plan_text.rs:451 number(..., u32::MAX)` | **E*** | Используется для `pace`/`delay`/чисел payload; эквивалентно. |
+| `plan_free` | 272–275 | 4 | освободить payload-буферы и обнулить план | `Drop`/`Vec` | **E*** | RAII заменяет ручное освобождение; ошибки парсера возвращают `Err` без утечек. |
+| `parse_text` | 277–685 | 409 | полный разбор `d2k-plan`: заголовок, id, proto, payload/pad/slice, wire, input, settle/segment, poison+autottl, split, oob, fake, seqovl, order, pace, ipfrag, udplen, quicsplit, quicdeny, delay, guard; лимиты и cross-field проверки | `plan_text.rs:67-610 compile_text` + `plan.rs` | **P** | **Совпадают:** длина строки <8192, trim space/tab/CR, `#`, ≤8 полей, schema/minexec 0..65535, id 16 байт, proto-коды, payload/pad/slice, wire 1/2 + minexec, input/tls-sni, settle/segment, poison-флаги/ttl/seqshift, split-якоря/int16, oob/1 байт, fake/tlsmod, seqovl, order, pace/delay>0, ipfrag 1..4, udplen/quicsplit/quicdeny, guard; cross-field — `plan.rs:313-323,499-614,692,711-717,798-808`. **Расхождения:** (1) C принимает только `d2k-plan`, R2O — `r2o-plan` и `d2k-plan` (брендинг); (2) R2O отвергает NUL во всём тексте (`plan_text.rs:68-70`), C обрабатывает строку до NUL; (3) C `autottl` при повторе — last-wins, R2O отвергает повтор (`plan_text.rs:296-298`); (4) C `plantlv` принимает `autottl` при `minexec<13`, R2O `Plan::parse` отвергает (`plan.rs:510-515,711-712`) — C отклонил бы позже в датапате; (5) C `sscanf("%d,%u-%u")` допускает пробелы/знак, R2O строго `split_once`+`parse` (канонический текст совпадает). Фикстуры покрывают 60+ кейсов; `plantlv_stricter_cases.txt` фиксирует autottl-low-minexec и висячие ссылки. |
+| `put` | 691–695 | 5 | запись n байт; при переполнении `w.bad=1` | `Vec<u8>`/`push_u16` | **E*** | C проверяет `pos+n<=cap`, Rust растёт динамически и проверяет `MAX_PLAN_BYTES=65000` в конце (`plan_text.rs:605-607`); для планов ≤65000 эквивалентно. |
+| `put_u8` | 696–696 | 1 | TLV: один байт | `Vec::push` | **E*** | Тривиальный хелпер. |
+| `put_u16` | 697–697 | 1 | TLV: big-endian u16 | `plan_text.rs:735-737 push_u16` | **E*** | `to_be_bytes` совпадает. |
+| `put_u32` | 698–701 | 4 | TLV: big-endian u32 | `plan_text.rs:739-741 push_u32` | **E*** | `to_be_bytes` совпадает. |
+| `put_rec` | 702–707 | 6 | TLV-запись `type u16, len u16, value`; len>0xFFFF — ошибка | `plan_text.rs:598-604` | **E*** | C `put_rec`; Rust `u16::try_from(value.len())`; порядок type/len/value тот же. |
+| `d2k_plan_text_to_tlv` | 709–845 | 137 | компиляция текста в TLV `D2KP`: magic, schema, minexec, flags=0, count, ID, PROTO, payloads, poisons(+AUTOTTL), splits, fakes, seqovls, ORDER, PACE, INPUT, SETTLE, SEGMENT, INPUT_TLS, DELAY, WIRE, IPFRAG, UDPLEN, QSPLIT, QDENY, OOB, GUARD | `plan_text.rs:67-610 compile_text` | **P** | Порядок записей, magic `D2KP`, `flags=0`, count, длины, `autottl` сразу за порчей, безусловный ORDER, fake 10/11 байт — совпадают; `Plan::parse` повторно проверяет TLV (`plan_text.rs:608`). **Расхождения** наследуются от `parse_text`: NUL, `r2o-plan`, повтор autottl, autottl minexec<13. Differential `test-controller-plantlv-differential.sh` сравнивает ok/err и точные hex-байты на 60+ фикстурах. |
+| `d2k_plan_text_to_hex` | 847–863 | 17 | TLV → lowercase hex в буфер, `cap>=2n+1` | нет отдельной функции; `compile_text` возвращает байты, hex — у вызывающего | **P** | TLV-часть покрыта `compile_text`; отдельного API «план → hex-строка» в R2O нет. C использует hex для `d2k_link_set_name`/sched, R2O передаёт TLV-байты напрямую (`encode_set_name`), поэтому форматирование hex не востребовано; при необходимости вызывающий может hex-кодировать байты. |
 
 ### `core/props.c`
+
+**Прочитано построчно: 5/5 функций, 91 строка C (1–91).** Сверено с `quic_replay.rs` (`r2o_quic_blob_candidate`, `r2o_quic_discovery_candidates`, `r2o_quic_original_fallback_candidates`), `r2o_quic_http3.rs` (`r2o_quic_http3_get_with_wire_len`, measure) и trial-runner `main.rs:20496`; одноимённого hook-API в R2O нет.
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
@@ -2570,6 +2578,8 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 
 ### `core/verdict.c`
 
+**Прочитано построчно: 7/7 функций, 342 строки C (1–342).** Сверено с `classify.rs` (`measure` `:1082-1240`, `run_with_backend_progress` `:1298+`, `finish_cancelled` `:1952`) и `main.rs:1177-1178` (`full_detect_semantics=true, confirm_clear=false`); полного C/Rust differential дерева нет.
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
 | `looks_like_tls` | 33–35 | 3 | `bytes[0] == 0x16` → ServerHello, иначе Any | — | **N** | **Уточнение 2026-11-12:** это static-правило `core/verdict.c`, а не detect-триггер. R2O не портировал core-вердикт (`d2k_classify_cancelable` имеет только тестовый вызов), поэтому отдельной реализации нет. Detect-триггер `Trigger::raw_hex` обязан оставаться `Accept::Any` по `detect/trigger.c:106`; прежняя правка ошибочно применила правило `looks_like_tls` к detect-пути. |
@@ -2581,6 +2591,8 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_classify` | 336–342 | 7 | обёртка `d2k_classify_cancelable(..., stop=NULL)` | `classify::run` (`:1929`) | **P** | C-обёртка без отмены; Rust `run` → `run_with_backend(TcpProbeBackend)`. C-путь production-вызовов не имеет. |
 
 ### `core/x25519.c`
+
+**Прочитано построчно: 12/12 функций, 198 строк C (1–198).** Сверено с `r2o_tls.rs:92-103` (ring `X25519` в TLS12/TLS13), `ech.rs:9,80-137` (`X25519HkdfSha256`), `quic.rs`/`quic_replay.rs` (X25519 key_share); прямых C/Rust-векторов X25519 и теста low-order точки нет.
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
@@ -2608,12 +2620,12 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `d2k_resource_word` | 27–35 | 9 | равная длина, ASCII lower-case `s[i]`, сравнение с `word[i]` | `r2o_resource.rs:407-413` `r2o_resource_word` | **P*** | Совпадает: длина + `eq_ignore_ascii_case` по байтам. Отдельного теста хелпера нет. |
-| `d2k_resource_space` | 36–38 | 3 | `' '`, `\\t`, `\\r`, `\\n`, `\\f` | `r2o_resource.rs:415-417` `r2o_resource_space` | **P*** | Совпадает посимвольно. |
-| `d2k_resource_path_ok` | 39–50 | 12 | непустой, <512, `/`, не `//`, без `/../` и `/./`, `[A-Za-z0-9/._-]`, кончается `.css` | `r2o_resource.rs:309-330` `r2o_resource_path_ok`/`path_bytes_ok` | **P** | Построчно совпадает; Rust `windows(4)`/`windows(3)` вместо `strstr`, `.css` — `eq_ignore_ascii_case`. Целевого C/Rust differential нет. |
-| `d2k_resource_add` | 51–73 | 23 | https/`//`: путь, хост <256, без ведущей/хвостовой точки, LDH+`.`, lower-case, один ресурс на хост, максимум 2 | `r2o_resource.rs:255-305` `r2o_add_url`/`r2o_add_url_bytes` | **P*** | Построчно совпадает: strip_prefix, первый `/`, host/path checks, lower-case, dedupe по host, push. Rust дополнительно останавливает `feed` при 2 ресурсах (C — в `add`). |
-| `d2k_resource_tag` | 74–113 | 40 | завершить тег: raw `/script`/`/style`, script/style/body, `link` с одним `href`/`rel=stylesheet`, href <1024 | `r2o_resource.rs:188-236` `r2o_finish_tag`, `:332-405` `r2o_link_stylesheet_href` | **P*** | Построчно совпадает, включая префикс `/script`/`/style` (case-sensitive), один `href`/`rel`, отказ при незакрытой кавычке и лимит 1024. |
-| `d2k_resource_feed` | 114–159 | 46 | лимит 32768, сбор URL по байту `h`, теги/комментарии/кавычки, `>` завершает тег | `r2o_resource.rs:140-186` `R2oResourceScan::feed` | **P** | Построчно совпадает; **отличие:** Rust прерывает обход при `resources.len() >= 2`, C продолжает до 32768, а лишние ресурсы отбрасывает в `add`. Итоговый набор тот же, объём сканирования разный. Целевого C/Rust differential нет. |
+| `d2k_resource_word` | 27–35 | 9 | равная длина; lower-case `s[i]`; сравнение с `word[i]` без lower | `r2o_resource.rs:407-413 r2o_resource_word` | **P*** | C приводит только haystack; все C-вызовы передают `script/style/body/link/href/rel/stylesheet/.css` в нижнем регистре. Rust `eq_ignore_ascii_case` сворачивает обе стороны; для этих вызовов эквивалентно, при верхнем регистре в `word` C вернул бы 0. Отдельного теста хелпера нет. |
+| `d2k_resource_space` | 36–38 | 3 | `' '`, `\t`, `\r`, `\n`, `\f` | `r2o_resource.rs:415-417 r2o_resource_space` | **P*** | Посимвольно совпадает (`b'\x0c'` = `\f`). |
+| `d2k_resource_path_ok` | 39–50 | 12 | непустой, `<512`, `/`, не `//`, без `/../` и `/./`, `[A-Za-z0-9/._-]`, кончается `.css` без регистра | `r2o_resource.rs:309-330 r2o_resource_path_ok/path_bytes_ok` | **P** | Ветви совпадают: `n==0 || n>=512`, `path[0]=='/'`, `path[1]!='/'`, `strstr("/../")`/`"/./"` ↔ `windows(4)`/`windows(3)`, allowed-байты, `n>=4`, `.css` через `eq_ignore_ascii_case`. Целевого C/Rust differential нет. |
+| `d2k_resource_add` | 51–73 | 23 | `https://`/`//`; первый `/`; `<256`; без ведущей/хвостовой точки; LDH+`.`; lower-case; один ресурс на хост; максимум 2 | `r2o_resource.rs:265-305 r2o_add_url_bytes` | **P*** | Совпадает: strip `https://`/`//`, первый `/`, `r2o_resource_path_bytes_ok`, `host.is_empty()`, `len>=256`, точки, allowed-байты, `to_ascii_lowercase`, dedupe по host, push. C `strcpy` в фиксированные массивы, Rust `String`; C отбрасывает третий ресурс в `add`, Rust останавливает `feed` после двух (`:150-152`). |
+| `d2k_resource_tag` | 74–113 | 40 | завершить тег: raw `/script`/`/style`; script/style/body; `link` с одним `href`/`rel=stylesheet`; href <1024 | `r2o_resource.rs:221-259 r2o_finish_tag`, `:332-405 r2o_link_stylesheet_href` | **P*** | Ветви совпадают: `strcspn(" \t\r\n\f/>")` ↔ position по space/`/`/`>`; raw-префиксы case-sensitive; `body` → `seen=32768`; `script/style/link`; парсер атрибутов с `=`, кавычками, отказом при незакрытой кавычке, одним `href`/`rel`, `href<1024`, `stylesheet`. Rust `split(0)` повторяет C-терминацию тега. |
+| `d2k_resource_feed` | 114–159 | 46 | лимит 32768; сбор URL по байту `h`; теги/комментарии/кавычки; `>` завершает тег; `url_used>8` перед `add` | `r2o_resource.rs:148-219 R2oResourceScan::{feed,r2o_feed_url}` | **P** | Совпадает: лимит `seen<32768`, буфер тега 2048, комментарий `<!-- -->`, quote, `>` → finish, URL-аккумулятор от `h` с делимитерами `"'();,<>` и space, лимит 600. **Отличие:** Rust прерывает обход при `resources.len()>=2` (`:150-152`), C идёт до 32768, а третий ресурс отбрасывает в `add`; итоговый набор тот же, объём сканирования разный. Целевого C/Rust differential нет. |
 
 **Прочитано построчно:** `include/d2k_link.h` 3/3 (521 строка), `include/d2k_resource.h` 6/6 (160 строк).
 
@@ -3666,7 +3678,7 @@ CLI-логирования, health-файла, duration и состава сво
 Таблица потоков: открытая адресация, FNV-1a, удаление сдвигом, порог 3/4.
 R2O заменил структуру на `HashMap`, сохранив ключ, ёмкость и порог отказов.
 
-**Прочитано построчно: 18/18 функций, 337 строк C (1–337).**
+**Прочитано построчно: 18/18 функций, 337 строк C (1–337).** Сверено с `flow_capacity.rs:12-21` (`from_requested`: `max(16).next_power_of_two`, `limit=slots-slots/4`) и `engine.rs:41-88` (`TcpFlowKey`), `:393-440` (`try_with_capacity`, len/capacity/refusals), `:698-732` (`expire_with_silent`), `:911-970` (`track_packet_mode`, лимит/новый SYN), `:1111` (`last_seen`).
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
@@ -3680,10 +3692,10 @@ R2O заменил структуру на `HashMap`, сохранив ключ,
 | `d2k_track_find` | 144–160 | 17 | линейное пробирование, остановка на свободной ячейке | `engine.rs` `self.flows.get` (напр. `:1578`) | **P** | C ищет по FNV-хешу и обрывает цепочку на `SLOT_FREE`; Rust — `HashMap::get`. Результат поиска по ключу тот же, внутренний порядок и пробирование иные. |
 | `remove_at` (static) | 165–191 | 27 | удаление сдвигом назад, без надгробий; пересчёт `home` | `HashMap::remove` | **P** | C поддерживает инвариант линейного пробирования сдвигом кластера; Rust удаляет через `HashMap`, где надгробия/сдвиг — внутренняя деталь. Функционально удаление по ключу эквивалентно; пошагового differential нет. |
 | `d2k_track_get` | 193–229 | 37 | get-or-create, `last_ns=now`, отказ при `used+1 > cap-cap/4`, зануление новой записи | `engine.rs:911 track_packet_mode`, `:941` лимит, `:1111 last_seen` | **P** | C обновляет `last_ns` на каждом пакете и отказывает при `used+1 > limit`; Rust обновляет `last_seen` (`:1111`) и отказывает при `len >= limit` — эквивалентно. C зануляет весь flow; Rust создаёт `TcpSession::new`. **Отличие:** при новом SYN Rust сохраняет только `metrics`, а C — ещё и учёт посылок/execution (см. `d2k_track_new_connection`). Тест `engine.rs:2847` (лимит). |
-| `d2k_track_new_connection` | 231–257 | 27 | сброс полей при новом SYN; сохраняются key/in_use/first/last/init_low/dir_known/счётчики пакетов и байт, **sends_left/sends_failed/execution_id/binding/plan_id/trial_id** | `engine.rs:938` ветка new_connection (новый `TcpSession`, копируются только `metrics`) | **P** | **Подтверждённое расхождение:** C намеренно сохраняет `sends_left/sends_failed/execution_id` через границу нового SYN, чтобы позднее завершение старой посылки не приняли за новую. Rust создаёт новый `TcpSession` с `execution_id=0`, `r2o_execution_pending=false`; `PendingApplied`/tickets живут отдельно, поэтому поздний completion старого поколения будет отброшен (`r2o_send_pending` вернёт false), а не учтён. Нужен тест «новый SYN при незавершённой посылке». |
+| `d2k_track_new_connection` | 231–257 | 27 | сброс полей при новом SYN; сохраняются key/in_use/first/last/init_low/dir_known/счётчики пакетов и байт, **sends_left/sends_failed/execution_id/binding/plan_id/trial_id** | `engine.rs:938-961` ветка `new_connection`: новый `TcpSession`, копируется только `metrics` | **P** | **Подтверждённое расхождение:** C сохраняет `sends_left/sends_failed/execution_id/binding/plan_id/trial_id` через границу нового SYN, чтобы позднее завершение старой посылки не приняли за новую. Rust создаёт `TcpSession::new` с `execution_id=0`, `r2o_execution_pending=false`; `PendingApplied`/tickets живут отдельно, поэтому поздний completion старого поколения отбрасывается (`r2o_send_pending` вернёт false), а не учитывается. Нужен тест «новый SYN при незавершённой посылке». |
 | `d2k_track_remove` | 259–267 | 9 | найти и удалить сдвигом | `engine.rs` `flows.remove` | **P** | C: `find` + `remove_at`; Rust: `HashMap::remove`. Функционально эквивалентно; отдельного теста на удаление середины кластера нет (в C это важно, в Rust — нет). |
 | `d2k_track_walk` | 269–278 | 10 | обход всех занятых слотов в порядке таблицы | `flows.iter()` / `retain` (`engine.rs:698`) | **P** | C обходит слоты по возрастанию индекса; Rust — в неопределённом порядке `HashMap`. Если потребитель зависит от порядка (логи/диагностика), результат может отличаться; функциональные счётчики не зависят. |
-| `d2k_track_expire` | 280–308 | 29 | истечение по idle: `now>=last && now-last>=idle`, callback **до** удаления, повторная проверка слота после сдвига | `engine.rs:698 expire_with_silent` | **P** | C защищается от `now<last` явно; Rust использует `saturating_duration_since`, что для `idle>0` даёт тот же отказ. Callback `on_silent` вызывается до `retain`-удаления. C удаляет по одному и перепроверяет слот; Rust делает одним `retain`. Итоговый набор удалённых и событий совпадает, порядок обхода иной. Тесты `engine.rs:3356`, `:3448`. |
+| `d2k_track_expire` | 280–308 | 29 | истечение по idle: `now>=last && now-last>=idle`, callback **до** удаления, повторная проверка слота после сдвига | `engine.rs:698-732 expire_with_silent` | **P** | C: явное `now>=last` (защита от убывания часов), callback `on_expire` до `remove_at`, повторная проверка слота. Rust: `idle_expired = now.saturating_duration_since(last_seen) >= idle`; **дополнительно** `fin_expired` по `pending_fin_at` (`:708-711`), `on_silent` до `retain`-удаления (`:713-719`), `capture.forget` при удалении (`:723-728`), одним `retain` (`:706-731`). Итоговый набор idle-удалённых и событий совпадает; FIN-истечение в C вынесено в `d2k_track_remove_if`; порядок обхода иной. Тесты `engine.rs:3356`, `:3448`. |
 | `d2k_track_remove_if` | 310–325 | 16 | удаление по предикату (FIN-окно), повторная проверка слота | `engine.rs:700 fin_expired в retain` | **P** | C: `while (used && gone()) remove_at`; Rust: `retain` с `fin_expired`. Набор удаляемых совпадает; C перепроверяет слот после сдвига, Rust — нет необходимости. Отдельного теста на несколько подряд идущих FIN нет. |
 | `d2k_track_count` | 327–329 | 3 | число занятых записей | `engine.rs:429 len` | **E** | Прямой getter `flows.len()`; используется в тестах и статистике. |
 | `d2k_track_capacity` | 331–333 | 3 | физическая ёмкость (степень 2) | `engine.rs:434 r2o_tcp_flow_capacity` | **E** | Прямой getter `flow_capacity.slots()`; тест `flow_capacity.rs:45` проверяет округление. |
@@ -4278,7 +4290,7 @@ observation), `control.rs` (https names), `http_replace.rs` (пакеты),
 
 ## http_trace.c (1 функция)
 
-**Прочитано построчно: 1/1 функция, 50 строк C (1–50).**
+**Прочитано построчно: 1/1 функция, 50 строк C (1–50).** Сверено: в `crates/` нет строки `HTTP execution`, функции `d2k_http_trace` или `http_trace`; R2O использует `HttpPortalEvent`/`HttpResponseEvent` и журнал `flow_journal`, поэтому текстовый формат не портирован.
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
@@ -4289,7 +4301,7 @@ observation), `control.rs` (https names), `http_replace.rs` (пакеты),
 Кольцо журнала наблюдений: kinds, коды suspect/refuse, очистка имени, plan/trial/
 execution/binding, added/dropped. R2O: `flow_journal.rs`.
 
-**Прочитано построчно: 14/14 функций, 204 строки C (1–204).**
+**Прочитано построчно: 14/14 функций, 204 строки C (1–204).** Сверено с `flow_journal.rs:16-56` (константы/тексты), `:184-195` (`set_name`), `:530-581` (`default_journal_note`, `with_capacity`, `push`), `:650-757` (`record_applied/plan_prepared/plan_refused/execution_failure`), `:990-1020` (`count/get/dropped/added`).
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
@@ -5072,19 +5084,21 @@ R2O-аналог — `crates/r2o-datapath/src/control.rs` (`ControlServer`), п�
 | d2k_ctl_accept | 152-177 | 26 | принять одного пира, второго отвергнуть | `control.rs:2084` `accept_peer` | E | `control_server_accepts_reconnect_...` (control.rs:2343) — второй лишний пир закрывается, переподключение принимается. |
 | drop_peer | 179-188 | 10 | закрыть пир, очистить буферы, позвать hook | `control.rs:2210` `disconnect` | E | Тот же тест: после `drop(previous)` `is_connected()` ложно, затем принимается новый пир. |
 | d2k_ctl_flush | 190-215 | 26 | дослать кольцо, EAGAIN — на следующий раз | `control.rs:2176` `flush` | E | `control_server_sends_a_tls_hello_event_to_connected_controller` (control.rs:2460) читает кадр после `send_event`. |
-| d2k_ctl_event | 217-255 | 39 | положить кадр целиком или потерять и посчитать | `control.rs:1913` `send_event`, `:2164` `enqueue` | E | `control_server_counts_each_event_without_connected_peer_as_dropped_like_d2o` (control.rs:2434); `try_send_event_...outbox...` (control.rs:2552) — переполнение. |
-| d2k_ctl_poll | 257-313 | 57 | прочитать, разобрать кадры, рвать на невозможной длине | `control.rs:1883` `poll`, `:2110` `read_peer`, `:2138` `take_complete_frames` | E | Reconnect-тест читает `EVENT_PROTOCOL`; границы `FRAME_MAX` проверяются в `take_complete_frames`. |
+| d2k_ctl_event | 217-255 | 39 | положить кадр целиком или потерять и посчитать | `control.rs:1913` `send_event`, `:2164` `enqueue` | **P** | **Подтверждённое отличие размера:** C `D2K_CTL_OUT_RING=65536` (`ctl.c:21`), R2O `MAX_CONTROL_OUTPUT=128*1024` (`control.rs:28`). Оба кладут кадр целиком, при нехватке — `dropped++`/`dropped_events`; C дополнительно `sent++`, в R2O счётчика `sent` нет. `len>FRAME_MAX-2` → drop. Тесты `control.rs:2434`, `:2552-2583`. |
+| d2k_ctl_poll | 257-313 | 57 | прочитать, разобрать кадры, рвать на невозможной длине | `control.rs:1883` `poll`, `:2110` `read_peer`, `:2138` `take_complete_frames` | **P** | C делает один `read` до EAGAIN и разбирает всё, что пришло; R2O `read_peer` читает блоками 8192 в цикле до EAGAIN, но не более `MAX_COMMANDS_PER_POLL=256` кадров (`control.rs:29,2114,2141`). Проверка длины `2..=FRAME_MAX`, разрыв на неверной длине/переполнении входа (`FRAME_MAX+4`) и удаление обработанного префикса совпадают. Reconnect-тест читает `EVENT_PROTOCOL`; границы `FRAME_MAX` — `take_complete_frames`. |
 | d2k_ctl_dropped | 315-315 | 1 | счётчик потерянных кадров | `control.rs:1983` `dropped_events` | E | `control_server_counts_each_event_without_connected_peer...` (control.rs:2434) сверяет счётчик. |
 | d2k_ctl_sent | 316-316 | 1 | счётчик поставленных в кольцо кадров | — | N | Счётчика `sent` в R2O нет; есть только `dropped_events`. |
 
-Итог по файлу: E 8, P 3, N 3. Пробелы: нет доступа к fd (listen/peer), нет счётчика
-отправленных кадров, hook разрыва реализован в цикле, а не в объекте.
+Итог по файлу: E 6, P 5, N 3. Пробелы: нет доступа к fd (listen/peer), нет счётчика
+отправленных кадров, hook разрыва реализован в цикле, а не в объекте; outbox R2O
+128 КиБ против C 64 КиБ; `poll` разбирает до 256 кадров за вызов.
 
-**Построчная сверка a378:** все 14 функций прочитаны. Кольцо `D2K_CTL_OUT_RING`,
-кадр `HDR=6` (`plen` включает 2 байта типа, `plen>=2`), `D2K_CTL_FRAME_MAX`,
+**Построчная сверка a378:** все 14 функций прочитаны. Кольцо `D2K_CTL_OUT_RING`
+(C 65536), кадр `HDR=6` (`plen` включает 2 байта типа, `plen>=2`), `D2K_CTL_FRAME_MAX`,
 потеря кадра при нехватке места и `dropped++`, EAGAIN-дозапись, один пир,
 `drop_peer` при ошибке чтения — совпадают с `control.rs` (`send_event`/`enqueue`/
-`take_complete_frames`/`disconnect`). Отличия: R2O не отдаёт listen/peer fd,
+`take_complete_frames`/`disconnect`) по семантике; R2O `MAX_CONTROL_OUTPUT=128*1024`
+и `MAX_COMMANDS_PER_POLL=256` расширяют пределы. Отличия: R2O не отдаёт listen/peer fd,
 не считает `sent`, hook разрыва вызывает цикл `main.rs`, а не объект; `open`
 не удаляет чужой не-сокет и ставит 0600/backlog по умолчанию.
 
@@ -5131,12 +5145,12 @@ transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-со�
 
 ## 3. datapath/include/d2k_plans.h — 2 функции
 
-**Прочитано построчно: 2/2 функции, 381 строка C (1–381).**
+**Прочитано построчно: 2/2 функции, 381 строка C (1–381).** Сверено с `r2k-core/control.rs:306-320` (`BindingContext`, `is_known`) и `delete_name_bound`/`binding_for_plan` (проверки `kind/family/shape/temporary/epoch`).
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| d2k_binding_known | 98-102 | 5 | static inline: identity известна (generation, kind, epoch) | `r2k-core/control.rs:315` `BindingContext::is_known` + покомпонентные проверки в `control.rs:1446-1461` | P | `conditional_http_delete_preserves_replacements_and_removes_only_its_binding` (control.rs:3587). Отличие: R2O `is_known` не проверяет `kind`; `kind==1` проверяется отдельно в `delete_name_bound`. |
-| d2k_binding_equal | 103-108 | 6 | static inline: совпадение generation/kind/family/shape/temporary/epoch | `control.rs:1468-1475` (epoch, generation, transport, shape через ключ) | P | Тот же тест. Отдельной функции сравнения нет: `family` берётся из ключа, `kind` проверяется как `==1`, `temporary` — как `false`. |
+| d2k_binding_known | 98-102 | 5 | static inline: `b`, `generation!=0`, `kind!=0`, хотя бы один ненулевой байт `epoch` | `r2k-core/control.rs:317-319 BindingContext::is_known` | **P** | **Подтверждённое отличие:** R2O `is_known` проверяет только `generation != 0 && epoch.iter().any(!=0)`, **без `kind != 0`**. C при `kind=0` считает identity неизвестной. В `delete_name_bound`/`binding_for_plan` `kind` проверяется отдельно (`==1/2/...`), но сам предикат известности шире. Тест `control.rs:3587`. |
+| d2k_binding_equal | 103-108 | 6 | static inline: обе identity known; generation/kind/family/shape/temporary равны; epoch 16 байт равны | `BindingContext` derived `Eq/PartialEq` (`control.rs:306`) + проверки в `delete_name_bound` | **P** | R2O сравнивает `BindingContext` целиком через derived `PartialEq`, включая `kind/family/shape/temporary/epoch`; C дополнительно требует `d2k_binding_known` для обеих сторон. Отдельной функции «equal with known» нет: вызывающий проверяет `is_known` отдельно, а `is_known` не требует `kind`. Для известных контекстов с `kind!=0` результаты совпадают. |
 
 Итог: E 0, P 2, N 0. Обе функции — inline-предикаты identity; поведение распределено по
 `delete_name_bound` и `binding_for_plan`.
@@ -5449,7 +5463,7 @@ UDP→addr переход, R2O — только exact+ECH→MODERN+общий ad
 Сырой сокет: пределы длины, MTU маршрута, отправка без ожидания. R2O:
 `crates/r2o-datapath/src/raw.rs` (`RawSocket`).
 
-**Прочитано построчно: 17/17 функций, 524 строки C (1–524).**
+**Прочитано построчно: 17/17 функций, 524 строки C (1–524).** Сверено с `raw.rs:34-224` (`RawSocket`/open/send), `:270-357` (maxlen/MTU), `:484-550` (`r2o_route_mtu`), `:559-651` (`outgoing_packet`/IPv4-IPv6-фрагменты), `:653-675` (`set_option`); тесты `raw.rs:231,786,820,836,874`.
 
 **Построчная сверка a378:** все 17 функций прочитаны. C держит IPv4+IPv6+fragment
 сокеты в одном объекте; fragment-сокет открывается лениво и **обязательно** с
@@ -5466,7 +5480,7 @@ mark обязателен. Совпадают: `pick_maxlen`/`adopt_egress`/`rou
 | pick_maxlen | 92-116 | 25 | static: предел по named iface или наименьшему MTU поднятых (без loopback) | `raw.rs:270` `r2o_pick_maxlen` | P | `общий_предел_берёт_наименьший...` (raw.rs:836) тестирует выбор через инъекцию; сам обход sysfs и fallback 1500 против `D2K_RAW_MTU_FALLBACK` не сверены. |
 | route_mtu | 140-176 | 37 | static: MTU маршрута к адресу (UDP connect + `IP_MTU`/`IPV6_MTU`) | `raw.rs:484` `r2o_route_mtu` | P | Код тождествен по смыслу, но требует root/kernel; теста нет. |
 | say | 181-191 | 11 | static: текст ошибки с сохранением errno | `io::Error` + `eprintln!` | P | Формат другой; errno сохраняет `io::Error`. |
-| d2k_raw_open | 193-256 | 64 | открыть IPv4 raw, `IP_HDRINCL`, `SO_MARK`, вычислить maxlen | `raw.rs:48` `RawSocket::open` | P | Отличия: R2O требует ненулевой mark (C допускает 0), один объект — одно семейство (C держит IPv4+IPv6 вместе), нет ленивого fragment-сокета. Тестов open на живой системе нет. |
+| d2k_raw_open | 193-256 | 64 | открыть IPv4 raw, `IP_HDRINCL`, `SO_MARK` при mark≠0, вычислить maxlen; `fd6/fragment_fd=-1` | `raw.rs:48-93 RawSocket::open` | **P** | **Подтверждённые отличия:** C создаёт только IPv4 `fd`, а `fd6`/`fragment_fd` открывает лениво; mark=0 допустим (`if (mark != 0)` `:234`), R2O требует **ненулевой** mark (`raw.rs:55-60`). R2O — один объект на одно семейство (`AF_INET`/`AF_INET6` + `IPPROTO_RAW`, `IP_HDRINCL`/`IPV6_HDRINCL`, `SO_MARK`, `raw.rs:62-92`); C держит IPv4+IPv6+IPv4-fragment+IPv6-fragment в одном `d2k_raw`. Тестов open на живой системе нет. |
 | d2k_raw_close | 258-269 | 12 | закрыть fd/фрагментный сокет | `Drop for RawSocket` (`OwnedFd`) | E | Владение типами; утечек нет по построению. |
 | d2k_raw_limits | 271-273 | 3 | маска ограничений способа отправки (`CANT_IPID\|CANT_IPSUM`) | нет API; `engine.rs:2091` отвергает `POISON_IPID_ZERO` | P | `CANT_IPSUM` в R2O не выражен (суммы считает wire); маска как интерфейс отсутствует. |
 | d2k_raw_maxlen | 275-279 | 5 | предел посылки, никогда не 0 | `raw.rs:96` `maxlen` | E | `предел_маршрута_учитывает_объявленный_интерфейс...` (raw.rs:820). |
@@ -5474,7 +5488,7 @@ mark обязателен. Совпадают: `pick_maxlen`/`adopt_egress`/`rou
 | blend | 306-309 | 4 | static: маршрут против общего предела при объявленном iface | `raw.rs:351` `r2o_effective_route_maxlen` | E | `предел_маршрута_учитывает_объявленный_интерфейс_и_запасной_mtu` (raw.rs:820). |
 | d2k_raw_route_maxlen | 311-313 | 3 | MTU маршрута для dst[4] | `raw.rs:119` `packet_route_maxlen` | P | Вход — пакет, а не 4 байта; IPv6-путь и fallback на общий предел не сверены. |
 | d2k_raw_route_maxlen_family | 315-339 | 25 | кэш из 16 маршрутов, порог 1280/576, запись кольцом | `raw.rs:136` `r2o_route_maxlen`, `:367` `R2oRouteMtuCache` | E | `кэш_mtu_сохраняет_только_полезные_маршруты_и_ограничен` (raw.rs:786); порог и вытеснение. |
-| d2k_raw_prepare | 341-404 | 64 | ленивая подготовка IPv6/fragment-сокета, проверка длин и контекста фрагмента | `raw.rs:559` `outgoing_packet` (+`:591`/`:622` фрагменты) | P | R2O не открывает отдельный fragment-сокет с `IP_NODEFRAG` и не создаёт IPv6-сокет лениво (семейство задано при старте); валидация фрагментов есть (`raw_sender_accepts_only_well_formed...`, raw.rs:874). |
+| d2k_raw_prepare | 341-404 | 64 | ленивая подготовка IPv6/fragment-сокета, проверка длин и контекста фрагмента | `raw.rs:559-651 outgoing_packet/ipv4_udp_fragment/ipv6_udp_fragment` | **P** | **Подтверждённые отличия:** C для IPv6 `pkt[6]==44` вызывает `d2k_ip6frag_prepare` (AF_PACKET); иначе лениво открывает `fd6` с `IPV6_HDRINCL`+`SO_MARK` (`:353-372`). Для IPv4-фрагмента требует `pkt[0]==0x45`, `pkt[9]==17`, ненулевой IPID и открывает отдельный `fragment_fd` с `IP_HDRINCL` + **обязательным `IP_NODEFRAG`** (`ENOPROTOOPT`, если опции нет) + `SO_MARK` (`:374-399`). R2O `ipv4_udp_fragment`/`ipv6_udp_fragment` только валидируют фрагмент и шлют через один `RawSocket`; `IP_NODEFRAG` отсутствует, отдельного fragment-сокета и ленивого `fd6` нет. Тест `raw.rs:874 raw_sender_accepts_only_well_formed_ipv4_and_ipv6_udp_fragments`. |
 | d2k_raw_send | 406-512 | 107 | `sendto(MSG_DONTWAIT)`, EINTR-повтор, EMSGSIZE → снизить предел | `raw.rs:147` `send_packet`, `:155` `send_packet_inner` | **P** | **Совпадает:** `sendto(MSG_DONTWAIT)` в цикле, повтор только на EINTR (`raw.rs:186-222`), короткая запись — ошибка, EMSGSIZE при длине выше 1280/576 понижает route-кэш и общий предел, busy считается для EAGAIN/EWOULDBLOCK/ENOBUFS (`record_send_outcome`), счётчики sent/errors/busy. **Отличия:** C выбирает отдельный `fragment_fd` для IPv4-фрагментов и `fragments6` для IPv6; Rust шлёт всё через один `RawSocket` своего семейства без `IP_NODEFRAG`; реальная root-отправка в тестах не выполнялась. |
 | d2k_raw_sent | 514-516 | 3 | счётчик успешных посылок | `raw.rs:100` `send_stats().sent` | E | `raw_send_stats_count_success_and_busy_errors_like_d2o` (raw.rs:231). |
 | d2k_raw_errors | 518-520 | 3 | счётчик ошибок | `raw.rs:100` `send_stats().errors` | E | Тот же тест. |
@@ -5490,7 +5504,7 @@ mark, нет `IP_NODEFRAG`, нет ленивого открытия, нет м�
 Сопоставление fwmark/выходных интерфейсов и политика Keenetic. R2O:
 `crates/r2o-datapath/src/r2o_route.rs` (`R2oRouteGate`, `R2oRoutePolicy`, парсеры).
 
-**Прочитано построчно: 23/23 функции, 343 строки C (1–343).**
+**Прочитано построчно: 23/23 функции, 343 строки C (1–343).** Сверено с `r2o_route.rs:84-243` (`R2oRoutePolicy`, `R2oRouteGate`, `r2o_set_rules/set_default_ifindices/set_policy/mark_is_routed/route_mark`), `:372-395` (`r2o_refresh`), `:679-811` (запросы/парсеры), `:950-954` (`r2o_route_add_ifindex`); аналога текстового `describe` в R2O нет.
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -5529,7 +5543,7 @@ Rust ошибается), отсутствие текстового описан
 Rtnetlink: дампы правил, одиночный поиск маршрута, подписка на изменения. R2O:
 `R2oRouteMonitor` в `crates/r2o-datapath/src/r2o_route.rs`.
 
-**Прочитано построчно: 8/8 функций, 228 строк C (1–228).**
+**Прочитано построчно: 8/8 функций, 228 строк C (1–228).** Сверено с `r2o_route.rs:283-368` (`r2o_open_watch`/`r2o_drain_watch`), `:398-423` (`r2o_dump_rules`), `:425-446` (`r2o_lookup_default`), `:448-536` (`r2o_receive_request`), `:546-554` (`r2o_parse_io_error`).
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -5540,7 +5554,7 @@ Rtnetlink: дампы правил, одиночный поиск маршрут
 | dump_socket | 115-128 | 14 | static: `AF_NETLINK/SOCK_RAW/CLOEXEC`, `SO_RCVTIMEO=200000` | socket+SO_RCVTIMEO в `r2o_receive_request` (`:463-530`) | **E** | Флаги/таймаут совпадают; C переиспользует сокет до ошибки части, Rust создаёт на каждый запрос — наблюдаемое поведение то же. `r2o_монитор_читает_правила...` (`:1240`). |
 | d2k_routemark_load | 130-177 | 48 | 4 независимые части: правила v4/v6, маршруты v4/v6; после ошибки — новый сокет; merge+oifs; `routes4_ok/routes6_ok`, первый текст ошибки, -1 если все части упали | `r2o_refresh` (`:372-397`) | **P** | **Совпадает:** порядок 4 частей, независимость семейств, сохранение прежнего при ошибке, `rc==2` → пустой список oifs (без гейта). **Не перенесены:** `routes4_ok/routes6_ok`, `st->found/truncated`, `changed`, «первая ошибка» как единый текст; Rust возвращает `Vec<String>` всех ошибок. Сокет на каждый запрос, а не после сбоя. |
 | d2k_routemark_watch_open | 179-209 | 31 | `SOCK_NONBLOCK`, bind, 4 группы: 8/7 обязательны, 19/11 опциональны | `r2o_open_watch` (`:283-332`) | **E** | Группы/обязательность совпадают: `(8,true),(7,true),(19,false),(11,false)`; bind/CLOEXEC/NONBLOCK те же. `r2o_монитор_читает_правила...` (`:1240`) вызывает open, но результат намеренно не проверяется — обязательность IPv4 тестом не подтверждена. |
-| d2k_routemark_watch_drain | 211-228 | 18 | до `D2K_ROUTEMARK_WATCH_READS=256`; `>0` → relevant, EINTR, ENOBUFS→1, иное/0 → вернуть накопленное; исчерпание → 1 | `r2o_drain_watch` (`:334-370`) | **E** | 256 чтений, `MSG_DONTWAIT`, EINTR/ENOBUFS/EAGAIN и «предел → true» совпадают. Тест на границу отсутствует, но код построчно эквивалентен. |
+| d2k_routemark_watch_drain | 211-228 | 18 | до `D2K_ROUTEMARK_WATCH_READS=256`; `>0` → relevant, EINTR, ENOBUFS→1, иное/0 → вернуть накопленное; исчерпание → 1 | `r2o_drain_watch` (`:334-370`) | **P** | **Совпадает:** 256 чтений, `MSG_DONTWAIT`, EINTR, ENOBUFS→true, `EAGAIN` → вернуть накопленное, предел→true. **Отличие:** C на любую иную ошибку `recv` возвращает накопленный `any` (`routemark_nl.c:225`), R2O возвращает `Err(error)` (`r2o_route.rs:365`); C не различает «нет данных» и сбой сокета. Тест на границу отсутствует. |
 
 Итог по файлу: E 4, P 4, N 0. Пробелы: обработка `EAFNOSUPPORT` для IPv4-правил,
 переполнение >32 правил (C усекает с `truncated`, Rust ошибается), внешние
@@ -5972,7 +5986,7 @@ P не считается доказанным паритетом: это пок
 фильтра невыразимых находок и гейта socket-only split (`scripts/r2o-measured-split-differential.sh`,
 `scripts/r2o-bridge-clone-decoy-differential.sh`).
 
-**Прочитано построчно: 17/17 функций, 641 строка C (1–641).** Сверены: вход `bridge_input`
+**Прочитано построчно: 17/17 функций, 641 строка C (1–641).** R2O-сверка: `main.rs:15396-15466` (discovery-адаптер), `:6229-6256` (split/owns_search-гейты), `classify.rs:1041,1244,1252,1842`, `raw_probe.rs:602,641,1122`, `response.rs:898`. Сверены: вход `bridge_input`
 (триггер 2..16384 + accept ServerHello, контроль TLSRecord/vouched=0, клон приманки через
 `d2k_hello_rename`, white, repeats/write_gap/timeout/mark/cancel, IPv6-адрес); `sched_tcp`
 (bridge_input → seed → classify_run → stopped→Inconclusive → map_verdict → socket-only split gate →
@@ -5986,11 +6000,11 @@ base.valid/base_blocked) и neutral-ack.
 | `stop_asked` | 50-55 | 156 | две причины броска: флаг задачи и службы | classify.rs:1041 stopped, raw_probe.rs:641 is_cancelled | P | один AtomicBool вместо двух источников; общего флага службы нет |
 | `plannable_hit` | 76-93 | 540 | фильтр находок: невыразимое планом не обрывает перебор | raw_probe.rs:1122 executable_poison_hit, classify.rs:1252 append_reason | E | tests/classify.rs:599 accepted_but_unplannable_poison_keeps_opaque_verdict_and_search_ownership; scripts/r2o-measured-split-differential.sh |
 | `map_verdict` | 95-112 | 953 | перевод D2K_DV_* в D2K_V_* | classify.rs:894 Verdict, :1657 ветка Poisonable | P | единое перечисление; отдельного второго enum и таблицы соответствия нет |
-| `bridge_input` | 116-255 | 8964 | сборка входа измерителя из d2k_hello | main.rs:15396-15466 discovery adapter, raw_probe.rs:602 select_bridge_decoy | P | клон-приманка дифференцирован (raw_probe.rs:2235), адаптер целиком не покрыт |
-| `progress_seen` | 261-273 | 653 | ход вопросов планировщику | main.rs:10573 closure + update_probe_progress | P | подавление seeded-whole не реализовано, счётчики seed печатаются повторно |
-| `trace_questions` | 284-309 | 1043 | qtrace вопросов свойств в d2k_vres | — | N | qtrace-аналога нет; наблюдения остаются в ClassifyResult.trace |
+| `bridge_input` | 116-255 | 8964 | сборка входа измерителя из `d2k_hello`: trigger 2..16384 + ServerHello, TCP-опции, SNI-имя `tls:`, control 2..16384/TLSRecord/`vouched=0`, клон приманки, white, repeats/gap/timeout/mark/cancel, адрес | `main.rs:15396-15466` discovery-адаптер, `raw_probe.rs:602 select_bridge_decoy` | **P** | **Ветви проверены:** `owns_search=1` до любых ошибок; trigger копируется побайтно, accept ServerHello, TCP options только при `tcp_known && len<=buf`; SNI → `tls:<name>` при `0<len<=253`, без NUL; control TLSRecord + `control_vouched=0`; decoy-клон только `snapped && len>5 && b[0]==0x16` и валидном SNI контроля — `d2k_hello_rename` тела, запись `16 03 xx`, иначе fallback len=0; white 2..16384 TLSRecord; `repeats/write_gap_ms=gap_us/1000/timeout=wait/mark/cancel`; IPv6-адрес `[ip]:port`. R2O-адаптер не выделен одним символом, клон-приманка покрыт differential `raw_probe.rs:2235`; полного C/Rust differential адаптера нет. |
+| `progress_seen` | 261-273 | 653 | ход вопросов планировщику; подавление счётчиков seed-«whole» | `main.rs:10573` closure + `update_probe_progress` | **P** | C: если `seeded_whole && probe=="whole"` — `d2k_sched_progress_note(probe,0,0)` и сброс флага; иначе `note(probe,pass,fail)`. R2O closure передаёт прогресс без отдельного подавления seeded-whole, поэтому счётчики прошлого прогона могут печататься повторно. |
+| `trace_questions` | 284-309 | 1043 | qtrace вопросов свойств в `d2k_vres`: только `свойство:*`, обрезка по границе UTF-8, sent/answered ≤255, outcome UNKNOWN/YES/NO | — | **N** | C перебирает `res.trace`, отбирает `probe` с префиксом `свойство:`, режет label до `sizeof(st->label)-1` по границе UTF-8, `sent=pass+fail` (clamp 255), `answered=pass` (clamp), `err[0]→UNKNOWN`, иначе `d2k_prop_majority(pass,repeats)→YES/NO`. В R2O наблюдения остаются в `ClassifyResult.trace`/discovery-событиях, отдельного массива `D2K_QTRACE_MAX` и печати qtrace нет. |
 | `retry_base_timeout` | 314-316 | 139 | распознать наш dial timeout для seed | classify.rs:1244 is_dial_timeout_text | E | tests/classify.rs:796 only_our_connect_deadline_gets_one_doubled_retry_and_stays_flaky |
-| `sched_tcp` | 320-463 | 8837 | полный прогон, вердикт и плечо планировщику | main.rs:15396 discovery pipeline, 6229-6256 гейты | P | notes/qtrace/owns_search перенесены частично, единого символа нет |
+| `sched_tcp` | 320-463 | 8837 | полный прогон: seed, progress, plannable-hit, classify, stopped, split-only gate, unplannable, RST-owns-search, arm | `main.rs:15396` discovery-pipeline, `:6229-6256` гейты | **P** | **Ветви проверены:** seed принимается только при `valid && !retry_base_timeout` (`seed_whole/repeats/pass/fail/err`); `on_obs=progress_seen`; `accept=plannable_hit`; `d2k_classify_run`; `res.stopped → INCONCLUSIVE` с `probes`; `map_verdict`; `split_gap_us=write_gap_ms*1000`; socket-only split (`raw_dial_count==raw_dial_base`) → `FLAKY` и `split_pos=0`; `refused.first && !has_hit → OPAQUE` + текст; `raw_selftest_failed && !has_hit → owns_search=0`; ядерный RST-сбой при живом dial и `!has_hit → owns_search=0` + note в начало; `marked=0`; `arm_from_poison` + проверка размера/наличия decoy, заполнение `arm_input/arm_name/arm_path`, иначе текст «планом не задаётся». R2O-конвейер не выделен одним символом; notes/qtrace/owns_search перенесены частично; полного differential нет. |
 | `d2k_detect_sched_tcp` | 466-474 | 446 | крючок планировщика без white | main.rs:15396 | P | отдельного крючка нет, один путь discovery |
 | `d2k_detect_sched_tcp_white` | 478-485 | 468 | крючок с ECH-приманкой | main.rs:15460 white + 15396 | P | приманка есть, отдельного символа нет |
 | `d2k_detect_sched_tcp_seeded` | 488-497 | 545 | крючок с seed базового вопроса | classify.rs:1842 run_base + main.rs:10634 seed | P | seed перенесён, отдельного крючка нет |
@@ -5998,7 +6012,7 @@ base.valid/base_blocked) и neutral-ack.
 | `base_seen` | 531-535 | 160 | отметка, что базовый вопрос задан | classify.rs:1842 run_base_with_backend_progress | P | run_base спрашивает только базу, колбэка отметки нет |
 | `base_stop` | 537-541 | 136 | останов после базового вопроса | classify.rs:1842 | P | останов структурный, отдельного cancel-колбэка нет |
 | `d2k_detect_sched_tcp_ack` | 548-573 | 889 | перепроверка мёртвого адреса | response.rs:898 probe_neutral_ack, classify.rs:1588 | P | тест tests/classify.rs:679; отдельного hook-символа с probes нет |
-| `d2k_detect_sched_tcp_base` | 575-641 | 3012 | отдельный базовый вопрос с вердиктом | classify.rs:1842 run_base_with_backend_progress | P | BaseProbe{seed,blocked,probes}; вердикт и причина не возвращаются |
+| `d2k_detect_sched_tcp_base` | 575-641 | 3012 | отдельный базовый вопрос: `tr.name=""`, `no_raw=1`, `base_stop`/`base_seen`, вердикт по первому trace `whole` | `classify.rs:1842 run_base_with_backend_progress` | **P** | **Ветви проверены:** `bridge_input`; `tr.name=""`; `opt.no_raw=1`; `base_stop = base_done || task_stop`; `base_seen` отмечает `whole`; `d2k_classify_run`; `b = trace[0]` только если probe=="whole"; `asked=pass+fail`; `base.valid` при `asked>=res.repeats && !retry_base_timeout` (с `base.repeats/pass/fail/err`); вердикты: нет `b`→`map_verdict`, `asked<repeats || repeats<=0`→INCONCLUSIVE, `err && pass==0`→UNREACHABLE, `pass==repeats`→CLEAR, `pass>0`→FLAKY, иначе INCONCLUSIVE + `base_blocked=1`. R2O `run_base` возвращает `BaseProbe{seed,blocked,probes}`, но не verdict/reason; полного C/Rust differential базового вопроса нет. |
 
 ## 2. detect/classify.c — 36 функций
 
@@ -6008,7 +6022,7 @@ base.valid/base_blocked) и neutral-ack.
 правиле RST, текст причины при отказе сырого слоя и счёт probes ответного направления отличаются,
 `note_gap_loss` отсутствует вовсе.
 
-**Прочитано построчно: 36/36 функций, 1494 строки C (1–1494).** Сверены: имена вердиктов/ответа,
+**Прочитано построчно: 36/36 функций, 1494 строки C (1–1494).** Сверено с `classify.rs:28-58` (`split_offsets`), `:60-130` (`Trigger`), `:543-558` (`trigger_accepts`), `:1076-1240` (`measure`/run), `:1298+` (`run_with_backend_progress`), `:1939-1941` (`strategy_for`), `raw_probe.rs:120-186` (`raw_selftest`), `:189-345` (`sweep_poisons`), `:602-760` (`select_bridge_decoy`/`raw_offer_timestamps`/selftest), `:840-1099` (`property_probes`/`compose_from_props`), `response.rs:254-310,776-889,898,953-963` (`connect`/`probe_trigger`/`neutral_ack`/`unacked_bytes`). Сверены: имена вердиктов/ответа,
 часы/сон/отмена, accept-критерии, опции и skip/only, трасса/notes, split_offsets, dial с SO_MARK и
 require_mark, once_probe (raw-split и сокетный путь), TIOCOUTQ/SO_NWRITE, neutral-ack, measure с
 seed и transport-retry, decoy, selftest-кэш `(family, offer_ts)`/TTL/серия ошибок, raw_doubted/
@@ -6110,7 +6124,7 @@ CLI `d2k-detect` и форматы вывода. R2O использует дру
 поэтому соответствие функциональное, а не построчное. В JSON R2O нет массива `notes` и поля `covers_tls12`,
 порядок ключей и форма `response` иные; в человеческом отчёте нет блока свойств коробки и оговорок.
 
-**Прочитано построчно: 8/8 функций, 450 строк C (1–450).**
+**Прочитано построчно: 8/8 функций, 450 строк C (1–450).** Сверено с `classify_json.rs:4-118` (`result_json_value`: `props/trace/response`, без `notes`/`covers_tls12`), `main.rs:811` (`r2o_tri_state`), `:1104-1306` (разбор `--classify`), `:1555-1584` (`classify_control_trigger`, modern `tls13`), `:1586-1604` (`classify_target_trigger`), `:1719+` (help).
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -6163,7 +6177,7 @@ CLI `d2k-detect` и форматы вывода. R2O использует дру
 которые есть в C-структуре; на текущем каталоге это не проявляется, но функция не эквивалентна для
 произвольного `d2k_poison`.
 
-**Прочитано построчно: 12/12 функций, 475 строк C (1–475).** Список `init_poisons` сверен с
+**Прочитано построчно: 12/12 функций, 475 строк C (1–475).** Сверено с `classify.rs:178-201` (`note_props_hit/miss`), `:203-219` (`same_hypothesis`), `:221-380` (`build_poisons`, 85 записей), `:382-397` (`poison_has_fake`/`poison_supports_family`), `:399-540` (`strategy_for_poison`/`overlap_fake`/`disorder_fake`), `:1939-1941` (`strategy_for`), `classify_measured.rs:30-379` (`arm_from_poison` → план). Список `init_poisons` сверен с
 `build_poisons` (`classify.rs:229-380`) по каждой из 85 записей: имена, порядок, ttl/repeats/gap_ms,
 seqovl/seqovl_exact, decoy_hello, badsum/md5/disorder/disorder_pos, syn_data/oob/fake_between,
 tcp_ts/ip_id_zero/seq_shift — совпадают; дедупликация `badsum-xN-gG` повторяет C.
@@ -6227,7 +6241,7 @@ tcp_ts/ip_id_zero/seq_shift — совпадают; дедупликация `ba
 покрыт только составной ECH-вопрос и перепроверка самопроверки. Расхождение: при `control = None`
 C всё равно выдаёт кандидат «всё сразу», R2O его не выдаёт.
 
-**Прочитано построчно: 7/7 функций, 498 строк C (1–498).** Все 12 вопросов `prop_probes`
+**Прочитано построчно: 7/7 функций, 498 строк C (1–498).** Сверено с `raw_probe.rs:840-965` (`property_probes`), `:967-1045` (`property_probe_poison`, `apply_property`), `:189-345` (`sweep_poisons`), `:1047-1099` (`compose_from_props`). Все 12 вопросов `prop_probes`
 (`props.c:49-196`) сверены с `property_probes` (`raw_probe.rs:840-965`): порядок, label, имя,
 ttl/repeats/gap_ms, seqovl/seqovl_exact, decoy_hello, badsum/md5/tcp_ts/seq_shift/split_pos,
 syn_data — совпадают. Все ветви `apply_set` (`props.c:198-257`) совпадают с `apply_property`
@@ -6283,7 +6297,7 @@ syn_data — совпадают. Все ветви `apply_set` (`props.c:198-257
 брошенных правил: R2O не разбирает строки iptables, чистит только собственный тег `r2o-rst`,
 не знает legacy-формы без комментария и не проверяет диапазон портов 30000..54999.
 
-**Прочитано построчно: 62/62 функции, 1377 строк C (1–1377).** Проверены обе ветви
+**Прочитано построчно: 62/62 функции, 1377 строк C (1–1377).** Сверено с `raw_probe.rs:54-58` (счётчики), `:120-186` (selftest), `:602-760` (decoy/offer/selftest), `:1213-1321` (send/plan/probe), `:1350-1463` (build/checksum/local addr), `:1478-1745` (RstRule/RstGuard/sweep/pending), `:1841-2041` (RawConn/recv), `:2156` (read_payload), `classify_measured.rs:12,143` (segment 1400). Проверены обе ветви
 `__linux__`/`!__linux__`: разбор `RST_PREFIX`/legacy/owned-тега и диапазон 30000..54999;
 fork/setpgid/close fd/дедлайн 5000 мс/kill группы; nft `add/delete/get` с timeout 300s и
 iptables `-w -I/-D/-C`; pending-очередь 64/5 попыток/atexit; потоковые счётчики и порт
@@ -6403,7 +6417,7 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
 счёт серии, нейтральное имя и решение покрыты юнит-тестами и общими C-векторами
 (`tests/fixtures/d2o/tls-response-vectors.tsv`, `d2o_response_fixture.c`, EINTR-дифференциал).
 
-**Прочитано построчно: 7/7 функций, 324 строки C (1–324).**
+**Прочитано построчно: 7/7 функций, 324 строки C (1–324).** Сверено с `response.rs:164-171` (`response_timeout`), `:1050-1146` (`handshake`), `:1148-1170` (`count_handshakes`), `:1172-1204` (`neutral_sni`), `:1207-1244` (`probe_response`), `:1248-1290` (`scan12`), `:1304-1340` (`decide`).
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -6454,7 +6468,7 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
 разбор TCP-опций клиента в R2O перенесены не как отдельные функции: контроль собран в CLI,
 признак метки передаётся булевым `client_tcp_has_timestamps`, переопределения нет.
 
-**Прочитано построчно: 9/9 функций, 207 строк C (1–207).**
+**Прочитано построчно: 9/9 функций, 207 строк C (1–207).** Сверено с `classify.rs:60-108` (`Accept`, `Trigger::{raw_hex,tls,tls13}`), `trigger.rs:4` (`parse_raw_hex`), `raw_probe.rs:602-629` (`select_bridge_decoy`), `:673-683` (`raw_offer_timestamps`), `:731-733` (`raw_profile_allows`), `:967-985` (`property_probe_poison`), `main.rs:1555` (`classify_control_trigger`).
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -6508,7 +6522,7 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
 Единственная функция заголовка — правило большинства для вопросов о свойствах.
 
 **Прочитано построчно: 1/1 функция (`d2k_prop_majority`, 490–493); остальные строки заголовка —
-typedef/#define/прототипы, сверены по использованиям в `detect/*.c`.**
+typedef/#define/прототипы, сверены по использованиям в `detect/*.c`.** Сверено с `raw_probe.rs:665-667 majority`.
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
