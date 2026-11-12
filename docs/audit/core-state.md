@@ -1110,6 +1110,13 @@ memory_details).
 
 ## Углублённая сверка: catalog.c (60 функций)
 
+**Прочитано построчно: 60/60 функций, 1477 строк C (1–1477).** Сверены:
+JSON-курсор/числа/строки/RFC3339/пропуск/предел глубины, `parse_object`/
+`parse_array`/`grow`, signal/fingerprint/plan/binding/box/domain/
+network_whitelist/catalog handlers, `prune_unavailable_domain_groups`, free/
+memory_bytes, load с проверкой хвоста, все writer'ы, `d2k_catalog_save` и
+`d2k_catalog_save_atomic`.
+
 - **JSON-парсер:** `jpeek`, `jeat`, `jeat_null_if_present`, `jparse_raw_int`,
   `jparse_i32/u8/u16`, `jparse_bool_i`, `jparse_string_dyn/fixed`,
   `jparse_rfc3339`, `jskip_value`, `parse_object`, `parse_array`, `grow`,
@@ -1135,9 +1142,11 @@ memory_details).
 - **`handle_box_key`/`parse_box`/`elem_box`/`d2k_cat_shape_fits`:**
   boxes/fingerprint/plans/bindings перенесены (`BoxRecord` serde);
   **`d2k_cat_shape_fits` — подтверждённое расхождение:** C принимает
-  только `stored==0 || got==0 || stored==got`, Rust `group_shape_fits`
-  дополнительно принимает `saved==MODERN && observed==ECH_TCP`
-  (`live.rs:284`, `main.rs:3023`).
+  `stored==0 || got==0 || stored==got` (`catalog.c:905-912`); Rust
+  `group_shape_fits` (`live.rs:284-288`, `main.rs:3023`) принимает
+  `saved==0 || saved==observed || (saved==MODERN && observed==ECH_TCP)` —
+  то есть **не принимает `got==0`** при ненулевом `stored` и дополнительно
+  принимает modern→ECH_TCP.
 - **`handle_domain_observation`/`parse_domain_observations`/
   `handle_net_whitelist_key`/`handle_catalog_key`/`parse_catalog_obj`:**
   domain_state/observations до 256, network_whitelist и top-level
