@@ -75,20 +75,17 @@ pub struct Trigger {
 impl Trigger {
     /// Собрать триггер из произвольных байт, заданных hex-строкой.
     ///
-    /// Критерий приёмки — как у C-оракула: если первый байт является записью
-    /// рукопожатия TLS (0x16), доказательством прохода считается только
-    /// ServerHello; иначе принимается любой непустой ответ.
+    /// Это detect-триггер: C `d2k_trigger_raw_hex` (`detect/trigger.c:67-108`)
+    /// всегда ставит `D2K_ACCEPT_ANY`, даже если первый байт похож на запись
+    /// рукопожатия TLS. Правило «0x16 → ServerHello» принадлежит другому
+    /// компоненту — `looks_like_tls` в `core/verdict.c:33-35` — и здесь не
+    /// применяется.
     pub fn raw_hex(hex: &str) -> Result<Self, &'static str> {
         let payload = crate::trigger::parse_raw_hex(hex)?;
-        let accept = if payload.first() == Some(&0x16) {
-            Accept::ServerHello
-        } else {
-            Accept::Any
-        };
         Ok(Self {
             name: format!("raw:{}B", payload.len()),
             payload,
-            accept,
+            accept: Accept::Any,
         })
     }
 

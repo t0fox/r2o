@@ -501,12 +501,14 @@ C всё равно выдаёт кандидат «всё сразу», R2O е�
 разбор TCP-опций клиента в R2O перенесены не как отдельные функции: контроль собран в CLI,
 признак метки передаётся булевым `client_tcp_has_timestamps`, переопределения нет.
 
+**Прочитано построчно: 9/9 функций, 207 строк C (1–207).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `d2k_trigger_tls` | 21-50 | 1378 | ClientHello из снятого профиля (legacy/modern) с SNI; n≥16; name `tls:<sni>`; accept ServerHello; sni_off/len | classify.rs:87 Trigger::tls, :96 Trigger::tls13, hello.rs:549 | **E** | C `d2k_hello_from_profile(legacy?LEGACY:MODERN, sni)`, пустой SNI/ошибка/n<16 → -1, затем `d2k_hello_sni`. Rust `Trigger::tls`/`tls13` через `legacy_client_hello`/`modern_client_hello`, name/accept те же; смещения SNI — `hello::sni_bounds` на месте вызова. Байты совпадают: `tests/hello.rs:42` legacy, `:50` modern, `:62` fake; `tests/classify.rs:946`. |
 | `hexval` | 52-58 | 203 | значение hex-цифры 0-9/a-f/A-F | trigger.rs:11 inline | **E** | C `hexval`; Rust match в `parse_raw_hex`. `tests/trigger.rs:41`. |
-| `d2k_trigger_raw_hex` | 67-108 | 1322 | hex-триггер: разделители `space/tab/nl/cr/:/ -`, нечётный/битый/короткий/длинный отказ; name `raw:NB`; accept Any | classify.rs:77 Trigger::raw_hex, trigger.rs:4 parse_raw_hex | **E** | C пропускает те же разделители, `n<2`/нечётный/битый/`n>=sizeof payload` → ошибка, name `raw:%dB`, accept ANY. Rust `TRIGGER_MAX=16384`, те же проверки, name/accept те же. `tests/trigger.rs:41-58`. |
-| `d2k_trigger_control` | 118-128 | 376 | контроль: `probe-<tag>.invalid-control.example`, legacy TLS, name `control`, accept TLSRecord | main.rs:1555 classify_control_trigger | **P** | C строит legacy-приветствие с тегом из аргумента; Rust `classify_control_trigger` использует `--control-sni`/`--control-raw`, по умолчанию имя `probe-d2k.invalid-control.example` (тег фиксирован) и **`Trigger::tls13` (modern)**; control_raw — raw_hex + name control + `TlsRecord`. Имя/профиль/источник различаются. |
+| `d2k_trigger_raw_hex` | 67-108 | 1322 | hex-триггер: разделители `space/tab/nl/cr/:/ -`, нечётный/битый/короткий/длинный отказ; name `raw:NB`; accept Any | classify.rs:77 Trigger::raw_hex, trigger.rs:4 parse_raw_hex | **E** | C пропускает те же разделители, `n<2`/нечётный/битый/`n>=sizeof payload` → ошибка, name `raw:%dB`, accept **всегда ANY** (`trigger.c:106`). Rust `TRIGGER_MAX=16384`, те же проверки, name и `Accept::Any`. Правило «первый байт 0x16 → ServerHello» принадлежит `core/verdict.c:33-35` (`looks_like_tls`), а не detect-триггеру, и здесь не применяется. `tests/trigger.rs:41-58`; `raw_hex_acceptance_matches_the_detect_trigger`. |
+| `d2k_trigger_control` | 118-128 | 376 | контроль: `probe-<tag>.invalid-control.example`, **modern TLS** (`legacy=0`), name `control`, accept TLSRecord | main.rs:1555 classify_control_trigger | **P** | C строит **modern**-приветствие (`d2k_trigger_tls(name, 0, ...)` → `D2K_SHAPE_MODERN`), Rust по умолчанию тоже `Trigger::tls13` (modern); профиль совпадает. Имя по умолчанию `probe-d2k.invalid-control.example` и name `control` совпадают. Отличие — C принимает произвольный `tag` в `probe-<tag>...`, Rust жёстко фиксирует тег `d2k`; CLI-путь `--control-sni` даёт `control:<sni>` в обеих реализациях, `--control-raw` — raw_hex + name control + `TlsRecord`. P только по API тега. |
 | `d2k_opts_decoy` | 130-136 | 153 | приманка: `o->decoy`, если len≥2, иначе `o->control` | raw_probe.rs:602 select_bridge_decoy | **P** | C просто выбирает готовый `decoy`/`control` без trigger. Rust `select_bridge_decoy(trigger,control,trigger_snapped)` возвращает fallback control≥2 либо **клонирует trigger с SNI из control**; это другая конструкция. Прямого `options.decoy`/селектора нет; fallback на control есть. |
 | `d2k_trigger_host_ts_override` | 156-156 | 66 | глобальный сеттер `host_ts_override` | `ClassifyOptions.client_tcp_has_timestamps` (`classify.rs:833`), `raw_offer_timestamps` (`raw_probe.rs:673`) | **P** | C статический `host_ts_override` (-1/0/1), влияет на `host_offers_ts`. Rust передаёт `Option<bool>` явно; глобального сеттера/CLI-override нет. Поведение выражается, API иное. |
 | `host_offers_ts` | 158-178 | 638 | override → cached чтение `/proc/sys/net/ipv4/tcp_timestamps`, default 1 | raw_probe.rs:673 raw_offer_timestamps | **P** | C `host_ts_override>=0` затем `static cached`; Rust `HOST_TCP_TIMESTAMPS OnceLock`, парсит тот же файл, default 1. Кэш/дефолт совпадают, override отсутствует. |
@@ -523,13 +525,18 @@ C всё равно выдаёт кандидат «всё сразу», R2O е�
   месте вызова. E.
 - **`hexval`/`d2k_trigger_raw_hex` (52–108) ↔ `parse_raw_hex`
   (`trigger.rs:4`):** те же разделители, лимит 16384, отказ
-  нечётному/битому/короткому, name `raw:NB`, accept Any;
-  `tests/trigger.rs:41-58`. E.
+  нечётному/битому/короткому, name `raw:NB`, accept **ANY**;
+  `tests/trigger.rs:41-58`. Важно: C detect всегда ставит
+  `D2K_ACCEPT_ANY` (`trigger.c:106`); правило первого байта 0x16
+  относится к `core/verdict.c:33-35` и detect-путь не затрагивает.
+  E.
 - **`d2k_trigger_control` (118–128) ↔ `classify_control_trigger`
-  (`main.rs:1555`):** C legacy-приветствие с тегом из аргумента;
-  Rust по умолчанию `probe-d2k.invalid-control.example` и
-  **tls13/modern**, control_raw — raw_hex. P — имя/профиль/источник
-  различаются.
+  (`main.rs:1555`):** C вызывает `d2k_trigger_tls(name, 0, ...)`,
+  то есть **modern** TLS (`D2K_SHAPE_MODERN`), и ставит name
+  `control`/accept `TLSRecord`; Rust по умолчанию тоже `tls13`
+  (modern) с тем же именем. Отличие — C принимает произвольный
+  `tag`, Rust фиксирует `d2k`; `--control-sni`/`--control-raw`
+  дают те же имена/accept, что C CLI. P — только API тега.
 - **`d2k_opts_decoy` (130–136) ↔ `select_bridge_decoy` (`:602`):**
   C выбирает готовый `decoy`/`control`; Rust клонирует trigger с SNI
   из control. Это другая конструкция, прямого `options.decoy` нет. P.

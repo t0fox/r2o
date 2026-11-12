@@ -830,9 +830,12 @@ fn cancellation_marks_the_result_and_skips_all_network_probes() {
 }
 
 #[test]
-fn raw_hex_acceptance_follows_the_first_byte() {
+fn raw_hex_acceptance_matches_the_detect_trigger() {
+    // detect/trigger.c: `d2k_trigger_raw_hex` всегда ставит ACCEPT_ANY.
+    // Правило «первый байт 0x16 → ServerHello» относится к core/verdict.c
+    // (`looks_like_tls`) и к detect-триггеру не применяется.
     let handshake = Trigger::raw_hex("1603010000").unwrap();
-    assert_eq!(handshake.accept, Accept::ServerHello);
+    assert_eq!(handshake.accept, Accept::Any);
     let plain = Trigger::raw_hex("5741").unwrap();
     assert_eq!(plain.accept, Accept::Any);
 }

@@ -102,7 +102,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-11)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 616 / P 1324 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 617 / P 1323 /
 N 42 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -131,7 +131,7 @@ P означает неполное доказательство ветвей, N
 | 21 | HTTP-search save | файл `d2k-http-plans 1`, `fflush/fsync/rename` | JSON-каталог, отдельного файла/формата нет | `deep-core-verify.md` |
 | 22 | verify page budget | бюджетный повтор шлёт фактический `req`, дедлайн сбрасывается | повтор строит запрос из `options.path`, общий deadline; redirect только при `complete` | `deep-core-verify.md` |
 | 23 | detect mark | `D2K_BYPASS_MARK=0x40000000` (`detect/include/d2k_detect.h:34`) | `BYPASS_MARK=0x2d` (`raw_probe.rs:23`, `response.rs:71`) | `detect.md` |
-| 24 | raw-hex accept | первый байт `0x16` → `accept_serverhello` (`verdict.c:33-35,126-129`) | **закрыто 2026-11-12:** `Trigger::raw_hex` ставит `Accept::ServerHello` при `0x16`, иначе `Accept::Any` (`classify.rs:77-96`), тест `raw_hex_acceptance_follows_the_first_byte` | `core-state.md` |
+| 24 | raw-hex accept | первый байт `0x16` → `accept_serverhello` (`verdict.c:33-35,126-129`) | **уточнено 2026-11-12:** это правило `core/verdict.c`, а не detect-триггера; R2O core-вердикт не портировал (N). Detect `d2k_trigger_raw_hex` всегда `ACCEPT_ANY` (`detect/trigger.c:106`), `Trigger::raw_hex` возвращён к `Accept::Any`; тест `raw_hex_acceptance_matches_the_detect_trigger` | `core-state.md` |
 | 25 | endpoint role | `server_is_low` по эфемерному диапазону ≥32768 для любого порта (`sched.c:1798-1805`) | `DiscoveryTarget::from_event` только 443, `from_http_portal` только 80 (`discovery.rs:355-460`) | `core-state.md` |
 | 26 | HTTPS probe non-upgrade | `http_probe_done`: SET_HTTPS только для `SERVED`/`TLS_BLOCKED`, иначе `http_search_portal` (`d2kc.c:331-344`) | `main.rs:17033` шлёт `SET_HTTPS(host, ttl_seconds)` для любого результата; у не-upgrade `ttl_seconds=0` (`https_probe.rs:170-178`), HTTP-поиск только через `pending_http_searches` | `core-net.md` |
 | 27 | HTTPS first flight | донорский `modern` ClientHello из `d2k_hello_from_profile` (`httpsprobe.c:171-177`) | rustls-сгенерированный ClientHello (`response.rs:572-605`) | `core-net.md` |
@@ -227,11 +227,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 191 | 344 | 13 | 0 |
-| core-state | 692 | 153 | 536 | 3 | 0 |
+| core-state | 692 | 152 | 536 | 4 | 0 |
 | datapath-core | 400 | 122 | 267 | 11 | 0 |
 | datapath-plan | 183 | 102 | 76 | 5 | 0 |
 | detect | 159 | 49 | 100 | 10 | 0 |
-| **Итого** | **1982** | **617** | **1323** | **42** | **0** |
+| **Итого** | **1982** | **616** | **1323** | **43** | **0** |
 
 
 ---
@@ -2565,7 +2565,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `looks_like_tls` | 33–35 | 3 | `bytes[0] == 0x16` → ServerHello, иначе Any | `Trigger::raw_hex` (`classify.rs:77-96`) | **E** | **Расхождение закрыто 2026-11-12:** `raw_hex` ставит `Accept::ServerHello`, если первый байт `0x16`, иначе `Accept::Any`; `tls/tls13` остаются ServerHello. Тест `raw_hex_acceptance_follows_the_first_byte`; `trigger_acceptance_matches_the_donor_rules` проверяет критерии ответа. |
+| `looks_like_tls` | 33–35 | 3 | `bytes[0] == 0x16` → ServerHello, иначе Any | — | **N** | **Уточнение 2026-11-12:** это static-правило `core/verdict.c`, а не detect-триггер. R2O не портировал core-вердикт (`d2k_classify_cancelable` имеет только тестовый вызов), поэтому отдельной реализации нет. Detect-триггер `Trigger::raw_hex` обязан оставаться `Accept::Any` по `detect/trigger.c:106`; прежняя правка ошибочно применила правило `looks_like_tls` к detect-пути. |
 | `reverse_note` | 53–62 | 10 | MODERN → "", LEGACY → «обратное направление не проверено», UNKNOWN → «вид не разобран…» | `classify.rs` CLEAR/`probe_response` | **P*** | **Подтверждённое расхождение:** C добавляет оговорку к CLEAR по `d2k_hello_shape` (LEGACY/UNKNOWN); Rust по форме приветствия оговорку не строит — при наличии SNI запускает `probe_response` и может вернуть `Response`, иначе при `Accept::ServerHello` добавляет «(ответное направление не проверено: нет SNI)». Текст C «форма TLS 1.2 — обратное направление не проверено» не воспроизводится. |
 | `pause_note` | 74–80 | 7 | `gap_us==0` → «без пауз», иначе «с паузой N мкс»; буфер 96 | classify.rs reason | **P*** | C `snprintf` в 96 байт; Rust `String` без обрезки. Текст и границы не сравнивались. |
 | `stop_requested` | 92–94 | 3 | `stop && *stop` (volatile sig_atomic) | `AtomicBool::load`/cancel (`classify.rs:1041`) | **P*** | C указатель может быть NULL; Rust `Option<&AtomicBool>`/cancel-флаг. Эквивалентно. |
@@ -2639,7 +2639,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_ip4_text` | 32–38 | `Ipv4Addr::Display` | **E** | `scripts/test-core-net4-differential.sh` сравнивает C `d2k_ip4_text` и Rust `Display` на валидных адресах. |
 | `d2k_ip4_private` | 40–51 | `quic_replay.rs:23-46` `ipv4_is_local` | **E** | Differential покрывает 0/8? (C только `v==0`), 10/8, 127/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10 и public 8.8.8.8. Rust-диапазоны совпадают. |
 | `d2k_ip6_private` | 53–64 | `quic_replay.rs:47-58` IPv6-ветка | **E** | Differential покрывает ::, ::1, fc00::, fe80::, ff02::, IPv4-mapped private/public, 2001:db8::1. |
-| `looks_like_tls` (static) | 33–35 | `Trigger::raw_hex` (`classify.rs:77-96`) | **E** | `raw_hex` выбирает accept по первому байту (`0x16` → ServerHello, иначе Any); тест `raw_hex_acceptance_follows_the_first_byte`. C-дерево production-вызовов не имеет, но контракт совпадает. |
+| `looks_like_tls` (static) | 33–35 | — | **N** | **Уточнение 2026-11-12:** правило принадлежит `core/verdict.c`; R2O не портировал core-вердикт. Detect-триггер `Trigger::raw_hex` всегда `Accept::Any` (`detect/trigger.c:106`), поэтому применять это правило к нему нельзя. C-дерево production-вызовов не имеет (только `core/test_verdict.c`). |
 | `reverse_note` (static) | 53–62 | `classify.rs` CLEAR/`probe_response` | **P** | C добавляет оговорку к CLEAR по `d2k_hello_shape` (LEGACY/UNKNOWN); Rust по форме оговорку не строит — при SNI запускает `probe_response` (может вернуть `Response`), иначе при `Accept::ServerHello` пишет «ответное направление не проверено: нет SNI». Текст C не воспроизводится. |
 | `pause_note` (static) | 74–80 | `classify.rs` reason-строки | **P** | Формат «замерено без пауз/с паузой N мкс» перенесён; C-буфер 96 байт, Rust `String` без обрезки. |
 | `stop_requested` (static) | 92–94 | `classify.rs` `stopped(options)` | **P** | Проверка atomic-флага отмены эквивалентна. |
@@ -3353,6 +3353,8 @@ C-хелперы без собственного состояния наслед
 R2O-владелец: `crates/r2o-datapath/src/main.rs` (`run`, `parse_options`,
 `r2o_log_*`), `raw.rs`, `scheduler.rs`, `hold.rs`, `r2o_route.rs`.
 
+**Прочитано построчно: 44/44 функции, 2415 строк C (1–2415).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
 | `on_signal` (static) | 62 | 1 | SIGINT/SIGTERM → `stop_flag` | `main.rs:3762 install_signal_handlers`, `main.rs:55 STOP` | P | обработчик ставит только atomic-флаг; отдельного теста на сигнал нет |
@@ -3490,6 +3492,8 @@ CLI-логирования, health-файла, duration и состава сво
 `engine.rs` (TCP-сессия и решение), `main.rs` (UDP-путь и цикл),
 `r2o_udp_sessions.rs`, `r2o_quic.rs`, `r2o_voice.rs`, `hold.rs`, `r2o_route.rs`.
 
+**Прочитано построчно: 107/107 функций, 3642 строки C (1–3642).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
 | `initial_dcid` (static) | 202–211 | 10 | DCID открытого Initial-заголовка | `r2o_quic.rs:217 r2k_quic_initial_flight_id` | P | разбор QUIC покрыт `r2k-core` тестами quic; отдельного DCID-теста нет |
@@ -3605,6 +3609,8 @@ CLI-логирования, health-файла, duration и состава сво
 Таблица потоков: открытая адресация, FNV-1a, удаление сдвигом, порог 3/4.
 R2O заменил структуру на `HashMap`, сохранив ключ, ёмкость и порог отказов.
 
+**Прочитано построчно: 18/18 функций, 337 строк C (1–337).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
 | `d2k_key_make` | 18–51 | 34 | IPv4-ключ: сравнить 6 байт `addr + port`, выбрать low/high, занулить весь `d2k_key`, записать ip/port/proto | `engine.rs:67 TcpFlowKey::from_endpoints`, `r2o_udp_sessions.rs:35 R2oUdpFlowKey::new` | **P** | C сравнивает `src_ip4 + sport_be` с `dst_ip4 + dport_be` и при равенстве делает источник low (`<=`). Rust сравнивает `(family, 16-байтный Address, port)`; для одной family порядок эквивалентен: хвостовые нули IPv4 не влияют, пока адреса равны, а затем решает порт. Представление ключа разное (типизированный ключ против 16-байтной структуры). Тесты capture/udp_sessions; C/Rust differential нет. |
@@ -3630,6 +3636,8 @@ R2O заменил структуру на `HashMap`, сохранив ключ,
 
 Сборка ClientHello/HTTP-заголовка по seq: TTL, generation, anchor, перекрытия,
 конфликт → poison. R2O: `crates/r2o-datapath/src/capture.rs`.
+
+**Прочитано построчно: 6/6 функций, 124 строки C (1–124).**
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
@@ -3666,6 +3674,8 @@ R2O заменил структуру на `HashMap`, сохранив ключ,
 
 Удержание TCP-сегментов до сборки приветствия/HTTP-заголовка: слоты, дедлайн,
 ревизия плана, порядок оригиналов, ready-batch. R2O: `hold.rs`.
+
+**Прочитано построчно: 12/12 функций, 236 строк C (1–236).**
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
@@ -3729,6 +3739,8 @@ R2O заменил структуру на `HashMap`, сохранив ключ,
 Ограниченное владение NFQUEUE ID для сборки QUIC ClientHello: слоты, дедлайн,
 пачки, переполнение. R2O: `r2o_udp_hold.rs` (`R2oUdpHoldTable`).
 
+**Прочитано построчно: 10/10 функций, 123 строки C (1–123).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
 | `same_key` (static) | 14–16 | 3 | сравнение ключа | `R2oUdpFlowKey` Eq (`r2o_udp_sessions.rs:37`) | **E** | C `d2k_key_equal`; Rust типизированный `Eq` по адресам/портам/proto. Используется поиском слота в `r2o_feed`/`r2o_take`. |
@@ -3777,6 +3789,8 @@ R2O заменил структуру на `HashMap`, сохранив ключ,
 Транзакция UDP-hold вокруг решения сессии и выпуск/повтор пачек.
 R2O: `main.rs` (`r2o_release_udp_batch*`, `r2o_udp_handle_late_tail`),
 `r2o_udp_sessions.rs`.
+
+**Прочитано построчно: 7/7 функций, 97 строк C (1–97).**
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
@@ -3828,6 +3842,8 @@ R2O: `main.rs` (`r2o_release_udp_batch*`, `r2o_udp_handle_late_tail`),
 (5 мс), нейтральность метки, out_batch/out_late. R2O: `r2o_udp_hold.rs`
 (`R2oUdpDeferredVerdicts`, `R2oUdpFollowTable`, `R2oUdpDeferredResends`,
 `r2o_release_batch_with`), `main.rs`.
+
+**Прочитано построчно: 34/34 функции, 509 строк C (1–509).**
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
@@ -3931,6 +3947,8 @@ R2O: `main.rs` (`r2o_release_udp_batch*`, `r2o_udp_handle_late_tail`),
 NFQUEUE: netlink bind/params с ACK, SO_RCVBUF(FORCE), recv ENOBUFS, вердикты.
 R2O: `nfqueue.rs`, `netlink.rs`.
 
+**Прочитано построчно: 12/12 функций, 315 строк C (1–315).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
 | `say` (static) | 33–41 | 9 | `vsnprintf` ошибки в буфер `err/cap` | `io::Error`/`format!` | **P** | C пишет текст в переданный буфер; Rust возвращает `io::Error`/`Display`, вызывающий логирует. Контракт «не падать, отдать причину» тот же, тексты не сверяются. |
@@ -3981,6 +3999,8 @@ R2O: `nfqueue.rs`, `netlink.rs`.
 
 Netlink/NFQUEUE кодек: итератор сообщений, атрибуты пакета, сборка вердиктов и
 конфигурации. R2O: `netlink.rs`.
+
+**Прочитано построчно: 19/19 функций, 309 строк C (1–309).**
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
@@ -4039,6 +4059,8 @@ Netlink/NFQUEUE кодек: итератор сообщений, атрибут�
 Отсечение ICMP time-exceeded на свои фальшивки с пониженным TTL.
 R2O: `r2o_icmp_guard.rs`.
 
+**Прочитано построчно: 7/7 функций, 113 строк C (1–113).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
 | `d2k_icmpguard_init` | 6–8 | 3 | обнулить кольцо 256 | `Default for R2oIcmpGuard` (`:32`) | **E** | C `memset`, Rust `[Slot::default(); 256]` + счётчики 0. |
@@ -4080,6 +4102,8 @@ R2O: `r2o_icmp_guard.rs`.
 разбор запроса/ответа, портал, 307+HTTPS name, RST. R2O: `hold.rs` (HTTP
 observation), `control.rs` (https names), `http_replace.rs` (пакеты),
 `r2k-core/httpup.rs`, `http_response.rs`.
+
+**Прочитано построчно: 30/30 функций, 640 строк C (1–640).**
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
@@ -4197,6 +4221,8 @@ observation), `control.rs` (https names), `http_replace.rs` (пакеты),
 
 ## http_trace.c (1 функция)
 
+**Прочитано построчно: 1/1 функция, 50 строк C (1–50).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
 | `d2k_http_trace` | 9–50 | 42 | строка `d2kd: HTTP execution host=... IPv4/6 [src]:cport -> [dst]:80 seq=... hook/mark/outdev/status/prepared/plan/execution/planned/raw_sent/queued/original/output_failed/reason` | нет: grep `HTTP execution` по R2O пуст | **N** | C: TCP/80, method заглавными + пробел, `d2k_http_request` иначе `host=<unparsed>`, `inet_ntop`, plan hex или `-`, status `OBSERVE/SKIPPED/FAILED/PENDING/COMPLETE`, seq/hook/mark/outdev, execution, planned/sent/queued, original `ACCEPT/DROP`, output_failed, reason; возвращает длину с усечением до `cap-1`. В R2O есть события портала/ответа и журнал, но **нет** этой текстовой строки; N подтверждён. |
@@ -4205,6 +4231,8 @@ observation), `control.rs` (https names), `http_replace.rs` (пакеты),
 
 Кольцо журнала наблюдений: kinds, коды suspect/refuse, очистка имени, plan/trial/
 execution/binding, added/dropped. R2O: `flow_journal.rs`.
+
+**Прочитано построчно: 14/14 функций, 204 строки C (1–204).**
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
@@ -4227,6 +4255,8 @@ execution/binding, added/dropped. R2O: `flow_journal.rs`.
 
 Внешний адрес/порт из `/proc/net/nf_conntrack`: разбор строк, «лучшая запись» по
 TTL, отличие «нет таблицы» от «нет записи». R2O: `proc_nat.rs`.
+
+**Прочитано построчно: 5/5 функций, 195 строк C (1–195).**
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
@@ -4262,6 +4292,8 @@ TTL, отличие «нет таблицы» от «нет записи». R2O:
 
 ctnetlink: сборка GET, разбор счётчиков/состояния TCP, неблокирующий запрос,
 проба подсистемы, открытие сокета. R2O: `conntrack.rs`.
+
+**Прочитано построчно: 20/20 функций, 256 строк C (1–256).**
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
@@ -4329,6 +4361,8 @@ ctnetlink: сборка GET, разбор счётчиков/состояния 
 выбрасывание слишком длинной головы. R2O: `scheduler.rs` (отсортированный Vec +
 flow-брони).
 
+**Прочитано построчно: 16/16 функций, 279 строк C (1–279).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
 | `d2k_sched_new` | 43–71 | 29 | ёмкость/slot_size, `slots*slot_size` overflow, mem/heap/freelist | `scheduler.rs:89 with_limits` | **E** | C `calloc` трёх массивов и freelist, отказ при 0/overflow; Rust `with_limits` проверяет 0, `Vec`/`HashMap` растут лениво, `capacity`/`refusals` тест `:563`. Ёмкость/отказы совпадают; профиль памяти/OOM иной. |
@@ -4388,6 +4422,8 @@ flow-брони).
 Единственное место расчёта контрольных сумм TCP: TTL по измеренному пути,
 опции, MD5, seq_shift, badsum, IPv4/IPv6. R2O: `r2k-core/src/wire.rs`.
 
+**Прочитано построчно: 9/9 функций, 306 строк C (1–306).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
 | `wr16` (static) | 23–26 | 4 | big-endian u16 | `wire.rs:552 write_u16` | E | golden-тесты wire.rs |
@@ -4436,6 +4472,8 @@ flow-брони).
 
 Сборка UDP-датаграммы IPv4/IPv6; отказ неприменимым искажениям, обязательная
 сумма (0→0xffff). R2O: `wire.rs::build_udp_packet`.
+
+**Прочитано построчно: 5/5 функций, 207 строк C (1–207).**
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
@@ -4498,6 +4536,8 @@ flow-брони).
 
 ## addr.c (3 функции)
 
+**Прочитано построчно: 3/3 функции, 36 строк C (1–36).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
 | `d2k_addr_parse` | 5–18 | 14 | IPv4/IPv6 литерал, отказ `%zone`, family 4/6 | `r2k-core/src/addr.rs:11 Address::parse` | **E** | C отвергает NULL и любой `%`, `inet_pton(AF_INET)` затем `AF_INET6`, family 4/6. Rust `IpAddr::parse` отвергает host/zone, те же семейства; `network.rs:6`, `:22` (включая `fe80::1%eth0`). Форматы ввода совпадают. |
@@ -4522,6 +4562,8 @@ flow-брони).
 
 Разбор TLS ClientHello/ServerHello: границы claimed/avail, SNI, TLS1.3,
 ECH, середина приветствия. R2O: `r2k-core/src/tls.rs`.
+
+**Прочитано построчно: 7/7 функций, 361 строка C (1–361).**
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
@@ -4561,6 +4603,8 @@ ECH, середина приветствия. R2O: `r2k-core/src/tls.rs`.
   `tls_parser` `:394`, fuzz-префиксы `:503`. E.
 
 ## include/*.h (14 inline-функций)
+
+**Прочитано построчно: 14/14 inline-функций; тела и структуры в `d2k_packet.h` (72 строки), `d2k_http_request_stream.h` (87), `d2k_http_response.h` (161), `d2k_ctl.h` (86–99), `d2k_track.h` (76–83).**
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
@@ -4954,6 +4998,8 @@ Static-хелперы наследуют статус владельца (вла
 R2O-аналог — `crates/r2o-datapath/src/control.rs` (`ControlServer`), плюс цикл в
 `crates/r2o-datapath/src/main.rs` (вызывает `poll()` напрямую, без epoll-регистрации fd).
 
+**Прочитано построчно: 14/14 функций, 316 строк C (1–316).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | say | 66-74 | 9 | static: форматирование текста ошибки (владелец — `d2k_ctl_open`) | `control.rs:1798` `ControlServer::open` — текст через `io::Error::new`/`format!` | P | Отдельного форматтера нет; тексты ошибок другие, поведение (причина названа) сохранено. |
@@ -4990,6 +5036,8 @@ R2O-аналог — `crates/r2o-datapath/src/control.rs` (`ControlServer`), п�
 `ControlServer` (`crates/r2o-datapath/src/control.rs`), кодеки — `crates/r2k-core/src/control.rs`,
 журнал событий — `flow_journal.rs` и `main.rs`.
 
+**Прочитано построчно: 12/12 функций, 731 строка C (1–731).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | put_key | 23-37 | 15 | static: ключ потока 38 байт полями (владелец — `ack`/`pump`) | `capture.rs:51` `TcpFlowKey::wire_key`, `control.rs:1644` `r2o_udp_flow_wire_key` | E | Побайтово тот же порядок (family, low 16, high 16, порты BE, proto). Сверка раскладки — `d2o_control_frames_match_donor_wire_decoding` (tests/control.rs:47, разбор APPLIED-фикстур D2O). |
@@ -5023,6 +5071,8 @@ transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-со�
 
 ## 3. datapath/include/d2k_plans.h — 2 функции
 
+**Прочитано построчно: 2/2 функции, 381 строка C (1–381).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | d2k_binding_known | 98-102 | 5 | static inline: identity известна (generation, kind, epoch) | `r2k-core/control.rs:315` `BindingContext::is_known` + покомпонентные проверки в `control.rs:1446-1461` | P | `conditional_http_delete_preserves_replacements_and_removes_only_its_binding` (control.rs:3587). Отличие: R2O `is_known` не проверяет `kind`; `kind==1` проверяется отдельно в `delete_name_bound`. |
@@ -5038,6 +5088,8 @@ transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-со�
 Компиляция проверенного плана в список посылок. R2O: `crates/r2k-core/src/plan/apply.rs`
 (`impl Plan`, `Actions`, `Emission`).
 
+**Прочитано построчно: 15/15 функций, 931 строка C (1–931).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | anchor_offset | 26-80 | 55 | static: вычислить якорь разреза или отказать | `plan/apply.rs:862` `anchor_offset` | E | `sni_middle_anchor_is_clamped_inside_short_payload_and_requires_sni` (tests/apply.rs:96). |
@@ -5052,7 +5104,7 @@ transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-со�
 | emit_vec_free | 268-272 | 5 | static: освободить массив посылок и owned_bytes | `plan/apply.rs:61` `Emission` (Vec) + `Drop` | E | Владение выражено типами (`Vec<u8>`, `Vec<Emission>`); утечек нет по построению, отдельный free не нужен. |
 | emit_overhead | 285-295 | 11 | static: заголовки IP+TCP/UDP, MD5/TS-опция | `plan/apply.rs:737` `emit_overhead` | E | `max_emit`-тест (tests/apply.rs:251) и `route_segment_cap...` (tests/apply.rs). |
 | d2k_plan_max_emit | 297-341 | 45 | верхняя оценка одной посылки плана | `plan/apply.rs:418` `Plan::max_emit` | E | `assert_eq!(plan.max_emit(), 171)` (tests/apply.rs:251); используется в `r2o_plan_valid`. |
-| d2k_plan_apply | 343-873 | 531 | превратить план+пакет в посылки, судьбу оригинала и причину отказа | `plan/apply.rs:155` `Plan::apply` | P | 17 тестов tests/apply.rs покрывают split/fake/overlay/order/pace/settle/delay/udplen/qsplit/qdeny/oob/metric. Пробелы: `MAX_EMISSIONS = WIRE_BATCH_MAX = 26` (`plan.rs:10`, `apply.rs:9`) против 65536 в C (`plan_apply.c:830`) — R2O отвергает раньше; однако D2O на выдаче в session тоже ограничивает 26 (`D2K_RESULT_MAX`, session.c:2517), поэтому наблюдаемый отказ совпадает, различаются слой и текст ошибки. В OOB-ветви `suffix.wire_profile` остаётся 0: Rust ставит профиль только `first` и `urgent` (`apply.rs:284-285`), а `suffix` создан без него; C на `finalize` проставляет профиль **всем** посылкам (`plan_apply.c:812`). qsplit-ветвь обходит `delay_us`: Rust возвращает `Actions` в `apply.rs:203-260` до блоков pace/settle/delay (`:640-657`), тогда как C применяет `delay_us` после цикла кусков, включая qsplit (`plan_apply.c:803-809`). Лимит 26 — слой R2O: D2O `plan_apply.c` допускает до 65536, но `session.c:2517` всё равно отказывает при >26, поэтому наблюдаемый отказ совпадает. |
+| d2k_plan_apply | 343-873 | 531 | превратить план+пакет в посылки, судьбу оригинала и причину отказа | `plan/apply.rs:155` `Plan::apply` | **P** | 17 тестов tests/apply.rs покрывают split/fake/overlay/order/pace/settle/delay/udplen/qsplit/qdeny/oob/metric. **Подтверждённые расхождения:** (1) OOB-ветвь: Rust ставит `wire_profile` только `first`/`urgent` (`apply.rs:284-285`); `suffix` и его сегменты остаются с 0, C на `finalize` проставляет профиль **всем** посылкам (`plan_apply.c:812`). (2) qsplit-ветвь возвращает `Actions` в `apply.rs:203-250` до `apply_timing`/`wire_profile` (`:636-657`, `:403-405`), поэтому `delay_us` и `wire_profile` к qsplit-посылке не применяются; C применяет оба после цикла (`plan_apply.c:803-812`). (3) `MAX_EMISSIONS = 26` в Rust (`plan.rs:10`, `apply.rs:9,335,704`); C в `plan_apply.c` не ограничивает число посылок 26 — предел 65536 относится только к числу сегментов (`:830`), а отказ >26 приходит позже из `session.c:2517` (`D2K_RESULT_MAX`). Наблюдаемый отказ сессии совпадает, слой и текст ошибки различаются. `emit_fake` C копирует `ts_up/autottl`-поля, Rust переносит `ts_up` через флаг `POISON_TS_UP`, а autottl вычисляет в `ttl` по `reference_ttl` (`apply.rs:764-781`); для одного и того же `reference_ttl` результат совпадает, при смене TTL между apply и отправкой C пересчитал бы, Rust — нет. |
 | d2k_actions_cancel | 891-921 | 31 | правила отмены недосланного исполнения | `plan/apply.rs:104` `Actions::cancel` | E | `cancellation_drops_only_after_payload_bytes_were_emitted` (tests/apply.rs). |
 | d2k_actions_free | 923-931 | 9 | освободить посылки | `plan/apply.rs:61` `Emission` + `Actions` (RAII) | E | Освобождение автоматическое; отдельных ошибок/утечек нет по типам. |
 
@@ -5062,14 +5114,18 @@ transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-со�
 у OOB-суффикса.
 
 **Построчная сверка a378:** все 15 функций прочитаны. Подтверждены три расхождения
-`d2k_plan_apply` (`plan_apply.c:343-873`) с `apply.rs:155-300/600-670`:
+`d2k_plan_apply` (`plan_apply.c:343-873`) с `apply.rs:155-405/636-735`:
 (1) OOB: C на `finalize` проставляет `wire_profile` всем посылкам (`:812`), Rust — только
-`first` и `urgent`, `suffix` остаётся 0; (2) qsplit: Rust возвращает `Actions` до
-`apply_timing`, поэтому `delay_us` не применяется, C применяет его после всех ветвей
-(`:803-809`); (3) предел `MAX_EMISSIONS=26` в Rust против 65536 в C, но `session.c:2517`
-всё равно отказывает >26, поэтому наблюдаемый отказ совпадает. Остальные helper'ы
-(`anchor_offset`, `split_points`, `tls_ch_layout`, `fake_tls_bytes`, `emit_fake`,
-`max_emit`, `cancel`) совпадают с тестами `tests/apply.rs`.
+`first` и `urgent`; `suffix` и результат его сегментации остаются с профилем 0;
+(2) qsplit: Rust возвращает `Actions` до `apply_timing` и общего присвоения `wire_profile`,
+поэтому `delay_us` и `wire_profile` не применяются; C применяет и паузу, и профиль после
+всех ветвей (`:803-812`); (3) `MAX_EMISSIONS=26` в Rust против отсутствия такого предела
+в `plan_apply.c`: 65536 там ограничивает только число сегментов (`:830`), а отказ >26
+приходит позже из `session.c:2517` (`D2K_RESULT_MAX`) — наблюдаемый отказ сессии совпадает,
+слой и текст ошибки разные. Остальные helper'ы (`anchor_offset`, `split_points`,
+`tls_ch_layout`, `fake_tls_bytes`, `emit_fake`, `max_emit`, `cancel`) совпадают с тестами
+`tests/apply.rs`; autottl в Rust вычисляется в `ttl` по `reference_ttl`, в C хранится
+полями и пересчитывается на отправке.
 
 ---
 
@@ -5132,6 +5188,8 @@ transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-со�
 Разбор канонического плана. R2O: `crates/r2k-core/src/plan.rs` (`Plan::parse`, `scan`,
 `check_references`), поля `Plan`.
 
+**Прочитано построчно: 17/17 функций, 630 строк C (1–630).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | rd16 | 23-25 | 3 | static: u16 BE | `plan.rs:892` `read_u16` | E | `rejects_bad_header_lengths_records_and_unknown_versions` (tests/plan.rs). |
@@ -5141,7 +5199,7 @@ transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-со�
 | check_refs | 224-325 | 102 | второй проход: ссылки, сочетания операций, порядок, одиночное перекрытие | `plan.rs:499` `check_references` | E | `rejects_dangling_references_and_invalid_operation_combinations` (tests/plan.rs). |
 | d2k_find_payload | 327-334 | 8 | найти приманку по id | `plan.rs` — `self.payloads.iter().find(...)` (apply.rs:611, :1287 и др.) | E | `parses_payload_fake_and_cross_references` (tests/plan.rs). |
 | d2k_find_poison | 336-343 | 8 | найти порчу по id | `plan.rs` — `self.poisons.iter().find(...)` (apply.rs:624, :744) | E | Тот же тест. |
-| d2k_plan_load | 345-566 | 222 | полная загрузка: заголовок, scan, записи, check_refs, транспорт | `plan.rs:190` `Plan::parse`, `:167` `parse_wire` | **P** | **Подтверждённое расхождение:** повторный `REC_AUTOTTL` для той же порчи C применяет «последний побеждает» (`plan_parse.c:473-486`), Rust `autottl.replace` отвергает повтор (`plan.rs:307`). Остальное совпадает: 7 тестов tests/plan.rs, legacy `D2KP` через `parse_wire`, magic `R2OP`. C/Rust differential на дубликат autottl нет. |
+| d2k_plan_load | 345-566 | 222 | полная загрузка: заголовок, scan, записи, check_refs, транспорт | `plan.rs:190` `Plan::parse`, `:167` `parse_wire` | **P** | **Подтверждённые расхождения по `REC_AUTOTTL`:** (1) повторная запись для той же порчи в C применяет «последний побеждает» (`plan_parse.c:473-486`), Rust `autottl.replace` отвергает повтор (`plan.rs:301-309`); (2) C разрешает `AUTOTTL` только **после** своей `POISON` (поиск идёт по уже разобранным `p->poisons`, `:477-481`), Rust собирает `autottls` в вектор и разрешает после всего прохода (`plan.rs:224,260-310`), поэтому `AUTOTTL` перед `POISON` C отвергает, Rust принимает. Остальное совпадает: 7 тестов tests/plan.rs, legacy `D2KP` через `parse_wire`, magic `R2OP`, scan/check_refs. C/Rust differential на оба порядка AUTOTTL нет. |
 | d2k_plan_free | 568-581 | 14 | освободить план | `Drop` (`Vec<Payload>`, `vec!`) | E | Владение типами; утечек нет по построению. |
 | d2k_plan_poison_used | 583-592 | 10 | OR всех флагов порчи | `plan.rs:327` `poison_used` | E | `parses_payload_fake_and_cross_references` + `max_emit`-тест. |
 | d2k_plan_flow_needs | 594-599 | 6 | нужен ли потоку TCPTS (шаблон+TCPTS_BACK) | `engine.rs:1860-1869` — прямая проверка `wire_profile==TEMPLATE && POISON_TCPTS_BACK` и наличия TS-опции, иначе `FlowUnfit` | P | Логика перенесена в решатель, отдельной функции нет; тест на `FlowUnfit` по отсутствию TS-опции не найден. |
@@ -5156,11 +5214,13 @@ transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-со�
 функция, прямой тест `stream_input`.
 
 **Построчная сверка a378:** все 17 функций прочитаны. `scan`/`check_refs` совпадают с
-`plan.rs:687-845/499-685` по всем типам записей, длинам, minexec и сочетаниям; отличие —
-повтор `AUTOTTL` (C last-wins, Rust отказ), поэтому `d2k_plan_load` переведён в P.
-`d2k_find_payload`/`d2k_find_poison`/`d2k_plan_poison_used`/`transport`/`proto`/`id`
-эквивалентны; `flow_needs` разнесён в `engine.rs`, `stream_input` покрыт косвенно
-`has_tls_candidate`.
+`plan.rs:687-845/499-685` по всем типам записей, длинам, minexec и сочетаниям. Отличия
+сосредоточены в `REC_AUTOTTL`: C применяет повторную запись к той же порче по принципу
+«последний побеждает» и требует, чтобы `AUTOTTL` шла после своей `POISON`; Rust отвергает
+повтор и разрешает ссылку после всего прохода, поэтому принимает `AUTOTTL` перед `POISON`.
+Из-за этого `d2k_plan_load` — P. `d2k_find_payload`/`d2k_find_poison`/
+`d2k_plan_poison_used`/`transport`/`proto`/`id` эквивалентны; `flow_needs` разнесён в
+`engine.rs`, `stream_input` покрыт косвенно `has_tls_candidate`.
 
 ### Углублённая сверка plan_parse.c (17 функций)
 
@@ -5225,6 +5285,8 @@ legacy-`D2KP` принимается только через `parse_wire`, а п
 Таблица планов по целям: ключи имя/адрес/суффикс, LRU-вытеснение, точные пробы, поиск на
 пакетном пути. R2O-аналог — `NamePlans` в `crates/r2o-datapath/src/control.rs`
 (`HashMap`-ключи вместо уплотнённого массива, `Cell<u64>`-часы вместо `last_used_ns`).
+
+**Прочитано построчно: 75/75 функций, 1273 строки C (1–1273).**
 
 **Построчная сверка a378:** все 75 функций прочитаны. Подтверждены: `area_name_valid`
 принимает односложные/чисто цифровые имена (Rust `canonical_name` — нет);
@@ -5327,6 +5389,8 @@ UDP→addr переход, R2O — только exact+ECH→MODERN+общий ad
 Сырой сокет: пределы длины, MTU маршрута, отправка без ожидания. R2O:
 `crates/r2o-datapath/src/raw.rs` (`RawSocket`).
 
+**Прочитано построчно: 17/17 функций, 524 строки C (1–524).**
+
 **Построчная сверка a378:** все 17 функций прочитаны. C держит IPv4+IPv6+fragment
 сокеты в одном объекте; fragment-сокет открывается лениво и **обязательно** с
 `IP_NODEFRAG` (`raw.c:387-391`), иначе отказ. `RawSocket` R2O — один сокет на
@@ -5351,7 +5415,7 @@ mark обязателен. Совпадают: `pick_maxlen`/`adopt_egress`/`rou
 | d2k_raw_route_maxlen | 311-313 | 3 | MTU маршрута для dst[4] | `raw.rs:119` `packet_route_maxlen` | P | Вход — пакет, а не 4 байта; IPv6-путь и fallback на общий предел не сверены. |
 | d2k_raw_route_maxlen_family | 315-339 | 25 | кэш из 16 маршрутов, порог 1280/576, запись кольцом | `raw.rs:136` `r2o_route_maxlen`, `:367` `R2oRouteMtuCache` | E | `кэш_mtu_сохраняет_только_полезные_маршруты_и_ограничен` (raw.rs:786); порог и вытеснение. |
 | d2k_raw_prepare | 341-404 | 64 | ленивая подготовка IPv6/fragment-сокета, проверка длин и контекста фрагмента | `raw.rs:559` `outgoing_packet` (+`:591`/`:622` фрагменты) | P | R2O не открывает отдельный fragment-сокет с `IP_NODEFRAG` и не создаёт IPv6-сокет лениво (семейство задано при старте); валидация фрагментов есть (`raw_sender_accepts_only_well_formed...`, raw.rs:874). |
-| d2k_raw_send | 406-512 | 107 | `sendto(MSG_DONTWAIT)`, EINTR-повтор, EMSGSIZE → снизить предел | `raw.rs:147` `send_packet`, `:155` `send_packet_inner` | P | Логика EMSGSIZE/кэша и busy есть (raw.rs:208-219, `record_send_outcome`), но реальная отправка в тестах не выполнялась (нужен root). Тесты покрывают статистику и разбор. |
+| d2k_raw_send | 406-512 | 107 | `sendto(MSG_DONTWAIT)`, EINTR-повтор, EMSGSIZE → снизить предел | `raw.rs:147` `send_packet`, `:155` `send_packet_inner` | **P** | **Совпадает:** `sendto(MSG_DONTWAIT)` в цикле, повтор только на EINTR (`raw.rs:186-222`), короткая запись — ошибка, EMSGSIZE при длине выше 1280/576 понижает route-кэш и общий предел, busy считается для EAGAIN/EWOULDBLOCK/ENOBUFS (`record_send_outcome`), счётчики sent/errors/busy. **Отличия:** C выбирает отдельный `fragment_fd` для IPv4-фрагментов и `fragments6` для IPv6; Rust шлёт всё через один `RawSocket` своего семейства без `IP_NODEFRAG`; реальная root-отправка в тестах не выполнялась. |
 | d2k_raw_sent | 514-516 | 3 | счётчик успешных посылок | `raw.rs:100` `send_stats().sent` | E | `raw_send_stats_count_success_and_busy_errors_like_d2o` (raw.rs:231). |
 | d2k_raw_errors | 518-520 | 3 | счётчик ошибок | `raw.rs:100` `send_stats().errors` | E | Тот же тест. |
 | d2k_raw_busy | 522-524 | 3 | счётчик EAGAIN/ENOBUFS | `raw.rs:100` `send_stats().busy` | E | Тот же тест. |
@@ -5366,6 +5430,8 @@ mark, нет `IP_NODEFRAG`, нет ленивого открытия, нет м�
 Сопоставление fwmark/выходных интерфейсов и политика Keenetic. R2O:
 `crates/r2o-datapath/src/r2o_route.rs` (`R2oRouteGate`, `R2oRoutePolicy`, парсеры).
 
+**Прочитано построчно: 23/23 функции, 343 строки C (1–343).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | rd16h | 27-27 | 1 | static: u16 host order через `memcpy` | `u16::from_ne_bytes` (`r2o_route.rs:1098` и др.) | **E** | `r2o_разбор_правил_учитывает_маску_инверсию_и_завершение_дампа` (`r2o_route.rs:1109`). |
@@ -5375,7 +5441,7 @@ mark, нет `IP_NODEFRAG`, нет ленивого открытия, нет м�
 | d2k_routemark_init | 32-34 | 3 | `memset` всего состояния, включая `rules_read*`/`policy_on` | `impl Default for R2oRouteGate` (`:107-116`) | **E** | Все тесты создают `R2oRouteGate::default()`; поля-`Option` дают «неизвестно». |
 | d2k_routemark_request | 36-46 | 11 | `RTM_GETRULE`, `NLM_F_REQUEST/DUMP`, seq, family в `fib_rule_hdr[0]` | `r2o_route_rule_request` (`:679-690`) | **E** | Совпадает: длина 28, тип 34, flags 0x301, seq, family; тест `:1086`. |
 | nl_error | 49-51 | 3 | `body_len>=4` → знаковый errno, иначе 0 | `r2o_kernel_error` (`:863-872`) | **P*** | **Отличие только в коротком теле:** C возвращает 0 и парсер даёт общую ошибку «ответ не разобран»; Rust возвращает `Malformed`. Оба отвергают дамп, но классификация разная; теста на `NLMSG_ERROR` короче 4 байт нет. |
-| d2k_routemark_parse | 53-95 | 43 | обход `NEWRULE`: family[0], flags[8..12] invert, FWMARK/FWMASK (alen≥8), mask по умолчанию `0xffffffff` при ненулевой метке, `mask==0` пропуск, DONE→1 | `r2o_route_parse_rules` (`:711-766`) | **P** | **Совпадает:** FWMARK/FWMASK, `mark &= mask`, invert, `mask=0`, DONE, ошибка на хвосте ≥4. **Подтверждённые отличия:** (1) C принимает **любой** `family` и кладёт его в селектор, Rust — только 2/10, остальные пропускает; (2) C при `*n >= cap` всё равно увеличивает `*n` (переполнение видно вызывающему и обрезается в `merge`), Rust `r2o_dump_rules` при >32 правилах **возвращает ошибку** (`:437-443`); (3) `nl_error` на коротком теле. Тест `:1109`. |
+| d2k_routemark_parse | 53-95 | 43 | обход `NEWRULE`: family[0], flags[8..12] invert, FWMARK/FWMASK (alen≥8), mask по умолчанию `0xffffffff` при ненулевой метке, `mask==0` пропуск, DONE→1 | `r2o_route_parse_rules` (`:711-766`) | **P** | **Совпадает:** FWMARK/FWMASK, `mark &= mask`, invert-правила **пропускаются** в обеих реализациях, `mask=0` пропуск, DONE, ошибка на хвосте ≥4. **Подтверждённые отличия:** (1) C принимает **любой** `family` и кладёт его в селектор, Rust — только 2/10, остальные пропускает; (2) C при `*n >= cap` всё равно увеличивает `*n` (переполнение видно вызывающему и обрезается в `merge`), Rust `r2o_dump_rules` при >32 правилах **возвращает ошибку** (`:437-443`); (3) `nl_error` на коротком теле. Тест `:1109`. |
 | d2k_routemark_lookup_request | 103-120 | 18 | `RTM_GETROUTE` без dump, `rtmsg.dst_len=al*8`, `RTA_DST` = 192.0.2.1/2001:db8::1 | `r2o_route_lookup_request` (`:691-710`) | **E** | Совпадает: family 2/10, длина 36/48, `NLM_F_REQUEST`, probe-адреса; тест `:1086`. |
 | add_oif | 122-128 | 7 | static: пропуск 0, дедуп, запись только при `*n < cap`, иначе только счётчик | `r2o_route_add_ifindex` (`:950-954`) | **E** | Дедуп/ноль совпадают; предел 16 проверяется в `r2o_lookup_default` (`:505-511`), тест `:1137`. |
 | route_oifs | 132-152 | 21 | обход `RTA_OIF` (alen≥8) и `RTA_MULTIPATH` (rtnexthop len≥8), ошибка на битой длине | `r2o_route_attributes` (`:876-911`), `r2o_route_parse_multipath` (`:913-948`) | **E** | Та же раскладка/выравнивание/дедуп; тест `:1137` (OIF+multipath+нулевой hop). |
@@ -5402,6 +5468,8 @@ Rust ошибается), отсутствие текстового описан
 
 Rtnetlink: дампы правил, одиночный поиск маршрута, подписка на изменения. R2O:
 `R2oRouteMonitor` в `crates/r2o-datapath/src/r2o_route.rs`.
+
+**Прочитано построчно: 8/8 функций, 228 строк C (1–228).**
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -6262,12 +6330,14 @@ C всё равно выдаёт кандидат «всё сразу», R2O е�
 разбор TCP-опций клиента в R2O перенесены не как отдельные функции: контроль собран в CLI,
 признак метки передаётся булевым `client_tcp_has_timestamps`, переопределения нет.
 
+**Прочитано построчно: 9/9 функций, 207 строк C (1–207).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `d2k_trigger_tls` | 21-50 | 1378 | ClientHello из снятого профиля (legacy/modern) с SNI; n≥16; name `tls:<sni>`; accept ServerHello; sni_off/len | classify.rs:87 Trigger::tls, :96 Trigger::tls13, hello.rs:549 | **E** | C `d2k_hello_from_profile(legacy?LEGACY:MODERN, sni)`, пустой SNI/ошибка/n<16 → -1, затем `d2k_hello_sni`. Rust `Trigger::tls`/`tls13` через `legacy_client_hello`/`modern_client_hello`, name/accept те же; смещения SNI — `hello::sni_bounds` на месте вызова. Байты совпадают: `tests/hello.rs:42` legacy, `:50` modern, `:62` fake; `tests/classify.rs:946`. |
 | `hexval` | 52-58 | 203 | значение hex-цифры 0-9/a-f/A-F | trigger.rs:11 inline | **E** | C `hexval`; Rust match в `parse_raw_hex`. `tests/trigger.rs:41`. |
-| `d2k_trigger_raw_hex` | 67-108 | 1322 | hex-триггер: разделители `space/tab/nl/cr/:/ -`, нечётный/битый/короткий/длинный отказ; name `raw:NB`; accept Any | classify.rs:77 Trigger::raw_hex, trigger.rs:4 parse_raw_hex | **E** | C пропускает те же разделители, `n<2`/нечётный/битый/`n>=sizeof payload` → ошибка, name `raw:%dB`, accept ANY. Rust `TRIGGER_MAX=16384`, те же проверки, name/accept те же. `tests/trigger.rs:41-58`. |
-| `d2k_trigger_control` | 118-128 | 376 | контроль: `probe-<tag>.invalid-control.example`, legacy TLS, name `control`, accept TLSRecord | main.rs:1555 classify_control_trigger | **P** | C строит legacy-приветствие с тегом из аргумента; Rust `classify_control_trigger` использует `--control-sni`/`--control-raw`, по умолчанию имя `probe-d2k.invalid-control.example` (тег фиксирован) и **`Trigger::tls13` (modern)**; control_raw — raw_hex + name control + `TlsRecord`. Имя/профиль/источник различаются. |
+| `d2k_trigger_raw_hex` | 67-108 | 1322 | hex-триггер: разделители `space/tab/nl/cr/:/ -`, нечётный/битый/короткий/длинный отказ; name `raw:NB`; accept Any | classify.rs:77 Trigger::raw_hex, trigger.rs:4 parse_raw_hex | **E** | C пропускает те же разделители, `n<2`/нечётный/битый/`n>=sizeof payload` → ошибка, name `raw:%dB`, accept **всегда ANY** (`trigger.c:106`). Rust `TRIGGER_MAX=16384`, те же проверки, name и `Accept::Any`. Правило «первый байт 0x16 → ServerHello» принадлежит `core/verdict.c:33-35` (`looks_like_tls`), а не detect-триггеру, и здесь не применяется. `tests/trigger.rs:41-58`; `raw_hex_acceptance_matches_the_detect_trigger`. |
+| `d2k_trigger_control` | 118-128 | 376 | контроль: `probe-<tag>.invalid-control.example`, **modern TLS** (`legacy=0`), name `control`, accept TLSRecord | main.rs:1555 classify_control_trigger | **P** | C строит **modern**-приветствие (`d2k_trigger_tls(name, 0, ...)` → `D2K_SHAPE_MODERN`), Rust по умолчанию тоже `Trigger::tls13` (modern); профиль совпадает. Имя по умолчанию `probe-d2k.invalid-control.example` и name `control` совпадают. Отличие — C принимает произвольный `tag` в `probe-<tag>...`, Rust жёстко фиксирует тег `d2k`; CLI-путь `--control-sni` даёт `control:<sni>` в обеих реализациях, `--control-raw` — raw_hex + name control + `TlsRecord`. P только по API тега. |
 | `d2k_opts_decoy` | 130-136 | 153 | приманка: `o->decoy`, если len≥2, иначе `o->control` | raw_probe.rs:602 select_bridge_decoy | **P** | C просто выбирает готовый `decoy`/`control` без trigger. Rust `select_bridge_decoy(trigger,control,trigger_snapped)` возвращает fallback control≥2 либо **клонирует trigger с SNI из control**; это другая конструкция. Прямого `options.decoy`/селектора нет; fallback на control есть. |
 | `d2k_trigger_host_ts_override` | 156-156 | 66 | глобальный сеттер `host_ts_override` | `ClassifyOptions.client_tcp_has_timestamps` (`classify.rs:833`), `raw_offer_timestamps` (`raw_probe.rs:673`) | **P** | C статический `host_ts_override` (-1/0/1), влияет на `host_offers_ts`. Rust передаёт `Option<bool>` явно; глобального сеттера/CLI-override нет. Поведение выражается, API иное. |
 | `host_offers_ts` | 158-178 | 638 | override → cached чтение `/proc/sys/net/ipv4/tcp_timestamps`, default 1 | raw_probe.rs:673 raw_offer_timestamps | **P** | C `host_ts_override>=0` затем `static cached`; Rust `HOST_TCP_TIMESTAMPS OnceLock`, парсит тот же файл, default 1. Кэш/дефолт совпадают, override отсутствует. |
@@ -6284,13 +6354,18 @@ C всё равно выдаёт кандидат «всё сразу», R2O е�
   месте вызова. E.
 - **`hexval`/`d2k_trigger_raw_hex` (52–108) ↔ `parse_raw_hex`
   (`trigger.rs:4`):** те же разделители, лимит 16384, отказ
-  нечётному/битому/короткому, name `raw:NB`, accept Any;
-  `tests/trigger.rs:41-58`. E.
+  нечётному/битому/короткому, name `raw:NB`, accept **ANY**;
+  `tests/trigger.rs:41-58`. Важно: C detect всегда ставит
+  `D2K_ACCEPT_ANY` (`trigger.c:106`); правило первого байта 0x16
+  относится к `core/verdict.c:33-35` и detect-путь не затрагивает.
+  E.
 - **`d2k_trigger_control` (118–128) ↔ `classify_control_trigger`
-  (`main.rs:1555`):** C legacy-приветствие с тегом из аргумента;
-  Rust по умолчанию `probe-d2k.invalid-control.example` и
-  **tls13/modern**, control_raw — raw_hex. P — имя/профиль/источник
-  различаются.
+  (`main.rs:1555`):** C вызывает `d2k_trigger_tls(name, 0, ...)`,
+  то есть **modern** TLS (`D2K_SHAPE_MODERN`), и ставит name
+  `control`/accept `TLSRecord`; Rust по умолчанию тоже `tls13`
+  (modern) с тем же именем. Отличие — C принимает произвольный
+  `tag`, Rust фиксирует `d2k`; `--control-sni`/`--control-raw`
+  дают те же имена/accept, что C CLI. P — только API тега.
 - **`d2k_opts_decoy` (130–136) ↔ `select_bridge_decoy` (`:602`):**
   C выбирает готовый `decoy`/`control`; Rust клонирует trigger с SNI
   из control. Это другая конструкция, прямого `options.decoy` нет. P.
