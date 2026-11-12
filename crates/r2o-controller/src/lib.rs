@@ -37,6 +37,7 @@ mod raw_probe;
 pub(crate) fn rst_pending_count() -> usize {
     0
 }
+pub mod recv_ttl;
 pub mod response;
 pub mod tls12;
 pub mod trigger;

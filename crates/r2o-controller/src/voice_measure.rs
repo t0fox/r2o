@@ -1452,6 +1452,9 @@ mod tests {
     #[test]
     fn voice_ask_real_points_to_production_probe() {
         let ask = super::voice_ask_real();
-        assert_eq!(ask as usize, super::r2o_voice_ask_real as usize);
+        assert_eq!(
+            ask as *const () as usize,
+            super::r2o_voice_ask_real as *const () as usize
+        );
     }
 }
