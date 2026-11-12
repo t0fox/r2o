@@ -573,13 +573,13 @@
 | `say_quiet` | 1615–1632 | 18 | журнал с подавлением повторов по ключу (8 слотов, 5 мин) | main.rs quiet log | **P*** | static-хелпер |
 | `d2k_sched_set_send_cap` | 1634–1637 | 4 | установить предел отправки датапата | main.rs discovery send_cap | **P*** | static-хелпер |
 | `d2k_sched_set_say` | 1639–1643 | 5 | установить колбэк журнала | main.rs log callback | **P*** | static-хелпер |
-| `verdict_name` | 1647–1662 | 16 | русское имя вердикта | classify::Verdict::as_str/описания | **P*** | static-хелпер; строки близки, но не сверялись |
-| `signal_of` | 1672–1694 | 23 | превратить событие отказа в cat_signal (rst/repeat/silent, ttl/tos/ipid) | main.rs r2o_discovery_suspect_signal | **P** | unit scheduler/classifier; C/Rust differential нет |
-| `is_rx_volume_kind` | 1699–1701 | 3 | kind является rx-volume/rx-volume-wire | catalog Signal kind check | **P*** | static-хелпер |
-| `fp_add` | 1703–1730 | 28 | добавить/слить сигнал в отпечаток с допусками TTL/volume | catalog::Fingerprint merge | **P** | unit catalog fingerprint; C/Rust differential нет |
-| `volume_bucket` | 1746–1751 | 6 | логарифмическая корзина объёма | r2o_discovery_volume_bucket | **P*** | static-хелпер |
-| `is_volume_kind` | 1753–1755 | 3 | kind является volume/rx-volume | catalog Signal kind check | **P*** | static-хелпер |
-| `box_volume_bucket_agrees` | 1760–1772 | 13 | совпадение volume-корзины коробки и отпечатка | main.rs r2o_discovery_volume_known_plans | **P** | реализовано; differential нет |
+| `verdict_name` | 1647–1662 | 16 | русские фразы для лога: «проходит как есть» … «имя разрешается в приватный адрес», default «неизвестный вердикт» | `classify.rs:907-922 Verdict::as_str` | **P** | **Подтверждённое расхождение:** C — русские человекочитаемые строки и набор из 11 вердиктов, включая `NO_QUIC`/`LOCAL_ADDRESS` и без `POISONABLE`; Rust `as_str` — английские машинные имена (`clear/prefix/whole_packet/opaque/inconclusive/address/poisonable/flaky/unreachable/response`) без `NO_QUIC`/`LOCAL_ADDRESS`. Это лог-текст/набор, не классификация. |
+| `signal_of` | 1672–1694 | 23 | code 1/4→rst, 2→repeat, 3→silent, иначе `код-N`; ttl/ttl_delta/tos/ipid только для rst; seen=1 | `main.rs:3391-3420 r2o_discovery_suspect_signal` | **P** | Совпадает посимвольно: те же коды/строки, `is_rst`-гейт для полей, `seen=1`, `ttl_delta=ttl-ref_ttl`. Unit scheduler/classifier; C/Rust differential нет. |
+| `is_rx_volume_kind` | 1699–1701 | 3 | `rx-volume` или `rx-volume-wire` | inline `matches!` в `main.rs:3438+` | **P*** | Rust не выделяет helper, но фильтры `volume`/`rx-volume`/`rx-volume-wire` совпадают. |
+| `fp_add` | 1703–1730 | 28 | слить сигнал: volume-роды по `abs(Δvolume)<=4` + packets, остальные по `abs(Δttl)<=2`+tos+ipid; иначе добавить до 8 | `catalog.rs:112-150 Fingerprint::merge_observed` + `same_signal` (`:1077-1090`) | **P** | Пороги и слияние совпадают: `VOLUME_SLACK=4`, `TTL_SLACK=2`, tos/ipid, packets только для volume-родов, лимит 8. **Отличие:** Rust `merge_observed` при пустом отпечатке копирует `method`, при несовпадении method выходит; C `fp_add` method не трогает (это делает вызывающий). Unit catalog; C/Rust differential нет. |
+| `volume_bucket` | 1746–1751 | 6 | `kb<=0→0`, иначе `floor(log2(kb))+1` | `main.rs:3430-3436 r2o_discovery_volume_bucket` | **P*** | C цикл `kb>>=1; b++` и Rust `32-leading_zeros` дают одно и то же для всех `i32>0`. |
+| `is_volume_kind` | 1753–1755 | 3 | `volume`/`rx-volume`/`rx-volume-wire` | inline `matches!` (`main.rs:3438+`) | **P*** | Набор тот же. |
+| `box_volume_bucket_agrees` | 1760–1772 | 13 | есть ли у коробки объёмная примета того же рода и той же корзины | `main.rs:3438-3510 r2o_discovery_volume_known_plans` (`same_bucket`) | **P** | C проверяет только совпадение kind+корзины; Rust сначала `fingerprint.is_compatible_with(observed)`, затем `same_bucket` по observed_buckets/box signals, затем сортирует планы по `same_bucket` и `successes`. Итоговый отбор планов шире, чем одна функция; C/Rust differential нет. |
 | `server_is_low` | 1798–1805 | 8 | определить, какой конец потока сервер (ephemeral/port) | main.rs discovery endpoint helper | **P*** | static-хелпер |
 | `client_ip_of` | 1807–1811 | 5 | IP клиента из события | main.rs discovery endpoint helper | **P*** | static-хелпер |
 | `server_of` | 1813–1822 | 10 | IP:port сервера из события | main.rs discovery endpoint helper | **P*** | static-хелпер |
@@ -591,11 +591,11 @@
 | `dead_find` | 1899–1910 | 12 | найти мёртвый адрес | main.rs discovery dead-address ring | **P*** | static-хелпер |
 | `dead_step` | 1915–1935 | 21 | увеличить streak мёртвого адреса и выдать backoff | main.rs R2oDiscoveryCooldownRing/queue: dead-address backoff | **E** | r2o-scheduler-dead-address-differential.sh |
 | `dead_clear` | 1937–1940 | 4 | снять мёртвый адрес после успеха | main.rs discovery dead clear | **E** | r2o-scheduler-dead-address-differential.sh |
-| `is_late_volume_suspicion` | 1942–1946 | 5 | код относится к позднему закрытию (RST_AFTER_APP/FIN_RETRY/TCP_STALL) | main.rs r2o_discovery_late_trigger | **P*** | static-хелпер |
+| `is_late_volume_suspicion` | 1942–1946 | 5 | code ∈ {RST_AFTER_APP=5, FIN_RETRY=6, TCP_STALL=8} | `main.rs:7357-7359 r2o_discovery_late_trigger` | **P*** | Коды C (`d2k_journal.h:41,42,56`) и Rust `Some(5|6|8)` совпадают. |
 | `cooldown_blocks` | 1948–1973 | 26 | проверить активный cooldown с учётом challenge/exhausted/late_rst_only/кода | main.rs R2oDiscoveryCooldownRing::blocks | **E** | r2o-scheduler-cooldown-differential.sh |
 | `cooldown_clear_endpoint` | 1975–1980 | 6 | снять endpoint-cooldown | main.rs discovery cooldown clear | **E** | r2o-scheduler-cooldown-differential.sh |
 | `cooldown_clear_nonchallenge` | 1982–1998 | 17 | снять не-challenge cooldown (опционально exhausted/ECH) | main.rs discovery cooldown clear_nonchallenge | **P** | используется в ECH/QUIC путях; отдельного differential нет |
-| `clear_backoff_ms` | 2000–2004 | 5 | backoff после CLEAR: 30/60/120 мин | main.rs r2o_discovery_clear_retry_after | **E** | r2o-scheduler-cooldown-differential.sh |
+| `clear_backoff_ms` | 2000–2004 | 5 | streak≤1 → **10 мин**, 2 → **30 мин**, иначе **60 мин** | `main.rs:14356-14362 r2o_discovery_clear_retry_after` + константы `:7332-7338` | **E** | **Исправлено:** C `SCHED_CLEAR_BACKOFF_1_MS=10 мин`, `_2_MS=30 мин`, `_MAX_MS=60 мин` (`sched.c:162-164`); Rust FIRST=10, SECOND=30, MAX=60 мин. `r2o-scheduler-cooldown-differential.sh`. |
 | `cooldown_victim` | 2012–2027 | 16 | выбрать слот cooldown для вытеснения | main.rs cooldown ring eviction | **P*** | static-хелпер; ring тесты |
 | `cooldown_record` | 2032–2097 | 66 | записать challenge/denied/exhausted/negative cooldown | main.rs R2oDiscoveryCooldownRing::record | **E** | r2o-scheduler-cooldown-differential.sh |
 | `late_close_what` | 2100–2104 | 5 | текст причины позднего закрытия | main.rs discovery reason | **P*** | static-хелпер |
