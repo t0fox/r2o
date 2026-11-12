@@ -434,9 +434,9 @@
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `same_evidence` | 38–73 | 36 | совместимость одной улики: volume±4, ttl±2, tos/ipid точно | catalog::same_signal | **P*** | static-хелпер; unit tests/catalog.rs |
-| `d2k_fp_same` | 75–125 | 51 | совместимость отпечатков: method, все роды сигналов, хотя бы один общий | catalog::Fingerprint::is_compatible_with | **P** | unit tests/catalog.rs (partial evidence, all same-kind signals); C/Rust differential нет |
-| `d2k_catalog_match` | 127–136 | 10 | поиск коробки по отпечатку | catalog::Catalog::match_fingerprint | **P** | unit tests/catalog.rs |
+| `same_evidence` | 38–73 | 36 | одна улика: kind volume/rx-volume/rx-volume-wire → `abs(volume delta)<=4`; иначе `abs(ttl delta)<=2` и tos/ipid точно; ttl_delta/seen не читаются | catalog.rs:1077-1090 `same_signal` | **P*** | Совпадает посимвольно: C `int`-вычитание и `abs`, Rust `i64::from().abs()`, `abs_diff`, `tos/ipid`; `VOLUME_SLACK=4`, `TTL_SLACK=2`. Unit `tests/catalog.rs`; отдельного boundary-теста на 4/5 и 2/3 нет. |
+| `d2k_fp_same` | 75–125 | 51 | method, внешний обход b→a, все приметы того же рода в a, `kind_seen && !agreed → false`, хотя бы один общий род | catalog.rs:59-84 `Fingerprint::is_compatible_with` | **P** | Логика совпадает: направленный обход наблюдаемого, просмотр всех same-kind, break на первом согласии, `any_agreement`, `common>0`. Unit `tests/catalog.rs` (partial evidence, all same-kind signals); C/Rust differential нет. |
+| `d2k_catalog_match` | 127–136 | 10 | первый индекс коробки с совместимым отпечатком, иначе -1 | catalog.rs:537-541 `match_fingerprint` | **E** | C возвращает `i`/`-1`; Rust `position` → `Option<usize>`. Unit `tests/catalog.rs`. |
 
 ### `core/meas.c`
 
