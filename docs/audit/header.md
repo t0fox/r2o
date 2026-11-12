@@ -294,6 +294,10 @@ P означает неполное доказательство ветвей, N
 - `R2O_DONOR_CORE=/mnt/e/d2o-a378w/core sh scripts/r2o-discovery-quic-stop-differential.sh` —
   **PASS** (host lifecycle-тест планировщика C: «все проверки прошли»; Rust-тест
   «остановка QUIC worker обслуживает удаление временной пробы»).
+- `R2O_DONOR_DATAPATH=/mnt/e/d2o-a378w/datapath
+  sh scripts/r2o-quic-stun-watch-differential.sh` —
+  **PASS** (C `test_quic_session`: «все проверки прошли»; C/Rust исключают STUN
+  и Discord Discovery из QUIC conntrack-stall).
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-diagnostics-differential.sh` —
   **не выполнен**: сборка донорского `test_httpsearch` падает на duplicate
   symbols `d2k_plan_apply`, `d2k_plan_max_emit`, `d2k_actions_cancel`,
