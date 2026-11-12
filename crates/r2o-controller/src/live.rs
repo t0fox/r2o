@@ -260,39 +260,11 @@ fn group_exception(
         && domain_member(&observation.name, &group.suffix)
 }
 
+/// Единая реализация C `own_exact_confirmed` (`sched.c:6278-6293`):
+/// точное имя, транспорт/семейство и `tcp_context(shape, tcp_profile)`
+/// для TCP. Дубль в live.rs раньше расходился с main.rs; оставлен один.
 fn has_confirmed_exact_binding(catalog: &Catalog, observation: &DomainObservation) -> bool {
-    catalog.boxes.iter().any(|box_record| {
-        box_record.bindings.iter().any(|binding| {
-            binding.enabled
-                && binding.level >= 3
-                && binding.recheck_since.is_none()
-                && binding.kind == "name"
-                && crate::domain::normalize(&binding.target)
-                    .is_ok_and(|name| name == observation.name)
-                && (binding.transport == observation.key.transport
-                    || binding.transport == 0 && observation.key.transport == 6)
-                && (binding.family == observation.key.family
-                    || binding.family == 0 && observation.key.family == 4)
-                && group_shape_fits(binding.shape, observation.key.shape)
-                && group_path(binding.transport, &binding.probe_path)
-                    == group_path(observation.key.transport, &observation.key.probe_path)
-                && binding.ech_origin == observation.key.ech_origin
-        })
-    })
-}
-
-fn group_shape_fits(saved: u8, observed: u8) -> bool {
-    saved == 0
-        || saved == observed
-        || saved == r2k_core::control::SHAPE_MODERN && observed == r2k_core::control::SHAPE_ECH_TCP
-}
-
-fn group_path(transport: u8, path: &str) -> &str {
-    if transport == 17 || path.is_empty() {
-        "/"
-    } else {
-        path
-    }
+    crate::discovery::has_confirmed_exact_binding(catalog, observation)
 }
 
 fn domain_member(name: &str, suffix: &str) -> bool {

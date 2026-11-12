@@ -822,6 +822,34 @@ pub fn has_covering_binding(catalog: &Catalog, target: &DiscoveryTarget) -> bool
     })
 }
 
+/// C `own_exact_confirmed` (`sched.c:6278-6293`): точное имя, транспорт и
+/// семейство; для TCP — `!shape || tcp_context(shape, tcp_profile)==key.shape`.
+pub fn has_confirmed_exact_binding(catalog: &Catalog, observation: &DomainObservation) -> bool {
+    catalog.boxes.iter().any(|box_record| {
+        box_record.bindings.iter().any(|binding| {
+            let transport = normalized_transport(binding.transport);
+            let family = normalized_family(binding.family);
+            let shape_matches = if transport == 6 {
+                binding.shape == 0
+                    || r2k_core::control::r2k_link_shape_tcp_context(
+                        binding.shape,
+                        binding.tcp_profile,
+                    ) == observation.key.shape
+            } else {
+                binding.shape == observation.key.shape
+            };
+            binding.enabled
+                && binding.level >= 3
+                && binding.recheck_since.is_none()
+                && binding.kind == "name"
+                && binding.target == observation.name
+                && transport == observation.key.transport
+                && family == observation.key.family
+                && shape_matches
+        })
+    })
+}
+
 fn has_usable_binding_with_input(
     catalog: &Catalog,
     target: &DiscoveryTarget,

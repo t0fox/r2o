@@ -2954,6 +2954,7 @@ fn r2o_catalog_mark_flow_unfit(
     catalog: &mut Catalog,
     target: &r2o_controller::discovery::DiscoveryTarget,
     plan_id: &[u8; 16],
+    tcp_profile: u8,
     now: i64,
 ) -> (usize, usize) {
     let present = plan_id.iter().any(|byte| *byte != 0);
@@ -2975,6 +2976,7 @@ fn r2o_catalog_mark_flow_unfit(
                 } else {
                     binding.family
                 }) != target.family
+                || binding.tcp_profile != tcp_profile
             {
                 continue;
             }
@@ -3002,23 +3004,7 @@ fn r2o_catalog_mark_flow_unfit(
 
 #[cfg(unix)]
 fn has_confirmed_exact_binding(catalog: &Catalog, observation: &DomainObservation) -> bool {
-    catalog.boxes.iter().any(|box_record| {
-        box_record.bindings.iter().any(|binding| {
-            binding.enabled
-                && binding.level >= 3
-                && binding.recheck_since.is_none()
-                && binding.kind == "name"
-                && normalize(&binding.target).is_ok_and(|name| name == observation.name)
-                && (binding.transport == observation.key.transport
-                    || binding.transport == 0 && observation.key.transport == 6)
-                && (binding.family == observation.key.family
-                    || binding.family == 0 && observation.key.family == 4)
-                && group_shape_fits(binding.shape, observation.key.shape)
-                && group_path(binding.transport, &binding.probe_path)
-                    == group_path(observation.key.transport, &observation.key.probe_path)
-                && binding.ech_origin == observation.key.ech_origin
-        })
-    })
+    r2o_controller::discovery::has_confirmed_exact_binding(catalog, observation)
 }
 
 #[cfg(unix)]
@@ -3687,6 +3673,7 @@ fn matching_domain_recovery_candidates(
                             || binding.transport == 0 && observation.key.transport == 6)
                         && (binding.family == observation.key.family
                             || binding.family == 0 && observation.key.family == 4)
+                        && binding.tcp_profile == target.tcp_profile()
                         && group_shape_fits(binding.shape, observation.key.shape)
                         && group_path(binding.transport, &binding.probe_path)
                             == group_path(observation.key.transport, &observation.key.probe_path)
@@ -3785,6 +3772,7 @@ fn matching_sibling_recovery_candidates(
             };
             if transport != 6
                 || family != target.family
+                || binding.tcp_profile != target.tcp_profile()
                 || group_path(transport, &binding.probe_path) != "/"
             {
                 continue;
@@ -9308,7 +9296,7 @@ struct DiscoveryWorker {
 
 #[cfg(unix)]
 #[derive(Default)]
-struct R2oFlowUnfitDone(VecDeque<(String, u8, u8, [u8; 16])>);
+struct R2oFlowUnfitDone(VecDeque<(String, u8, u8, u8, [u8; 16])>);
 
 #[cfg(unix)]
 impl R2oFlowUnfitDone {
@@ -9316,28 +9304,33 @@ impl R2oFlowUnfitDone {
         &self,
         target: &r2o_controller::discovery::DiscoveryTarget,
         plan_id: &[u8; 16],
+        tcp_profile: u8,
     ) -> bool {
-        self.0.iter().any(|(host, transport, family, saved_plan)| {
-            host == &target.host
-                && *transport == 6
-                && *family == target.family
-                && saved_plan == plan_id
-        })
+        self.0
+            .iter()
+            .any(|(host, transport, family, profile, saved_plan)| {
+                host == &target.host
+                    && *transport == 6
+                    && *family == target.family
+                    && *profile == tcp_profile
+                    && saved_plan == plan_id
+            })
     }
 
     fn remember(
         &mut self,
         target: &r2o_controller::discovery::DiscoveryTarget,
         plan_id: [u8; 16],
+        tcp_profile: u8,
     ) -> bool {
-        if self.contains(target, &plan_id) {
+        if self.contains(target, &plan_id, tcp_profile) {
             return false;
         }
         if self.0.len() == 8 {
             self.0.pop_front();
         }
         self.0
-            .push_back((target.host.clone(), 6, target.family, plan_id));
+            .push_back((target.host.clone(), 6, target.family, tcp_profile, plan_id));
         true
     }
 }
@@ -19098,10 +19091,17 @@ impl ControlClient {
                     }
                     if refused.code == r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_FLOW_UNFIT {
                         let now = std::time::Instant::now();
+                        let tcp_profile = r2k_core::control::r2k_link_shape_tcp_profile(
+                            refused.client_shape.unwrap_or(0),
+                        );
                         if let Some(target) = tcp_hello_names.target_for_tcp_flow(&refused.key, now)
                         {
                             if let Some((worker, catalog, catalog_path, _)) = &mut discovery {
-                                if worker.flow_unfit_done.contains(&target, &refused.plan_id) {
+                                if worker.flow_unfit_done.contains(
+                                    &target,
+                                    &refused.plan_id,
+                                    tcp_profile,
+                                ) {
                                     println!(
                                         "повторная проверка {} по этому плану уже выполнена; повторный FLOW_UNFIT не запускает второй замер",
                                         target.host
@@ -19116,6 +19116,7 @@ impl ControlClient {
                                         catalog,
                                         &target,
                                         &refused.plan_id,
+                                        tcp_profile,
                                         wall_now,
                                     );
                                     if marked > 0 {
@@ -19132,7 +19133,11 @@ impl ControlClient {
                                             target.host
                                         );
                                     } else {
-                                        worker.flow_unfit_done.remember(&target, refused.plan_id);
+                                        worker.flow_unfit_done.remember(
+                                            &target,
+                                            refused.plan_id,
+                                            tcp_profile,
+                                        );
                                         if r2o_controller::discovery::has_covering_binding(
                                             catalog, &target,
                                         ) {
@@ -23864,7 +23869,7 @@ mod tests {
         };
 
         assert_eq!(
-            r2o_catalog_mark_flow_unfit(&mut catalog, &target, &plan_id, 123),
+            r2o_catalog_mark_flow_unfit(&mut catalog, &target, &plan_id, 0, 123),
             (1, 0)
         );
         let bindings = &catalog.boxes[0].bindings;
@@ -23878,7 +23883,7 @@ mod tests {
         assert_eq!(catalog.boxes[0].updated, 123);
 
         assert_eq!(
-            r2o_catalog_mark_flow_unfit(&mut catalog, &target, &plan_id, 124),
+            r2o_catalog_mark_flow_unfit(&mut catalog, &target, &plan_id, 0, 124),
             (0, 1)
         );
         assert_eq!(catalog.boxes[0].bindings[0].recheck_since, Some(123));
@@ -23894,14 +23899,14 @@ mod tests {
             shape: SHAPE_MODERN,
         };
         let mut done = super::R2oFlowUnfitDone::default();
-        assert!(done.remember(&target, [1; 16]));
-        assert!(!done.remember(&target, [1; 16]));
+        assert!(done.remember(&target, [1; 16], 0));
+        assert!(!done.remember(&target, [1; 16], 0));
         for index in 0..8 {
             let mut other = target.clone();
             other.host = format!("site-{index}.example");
-            assert!(done.remember(&other, [index + 2; 16]));
+            assert!(done.remember(&other, [index + 2; 16], 0));
         }
-        assert!(!done.contains(&target, &[1; 16]));
+        assert!(!done.contains(&target, &[1; 16], 0));
     }
 
     #[cfg(unix)]
@@ -30906,6 +30911,15 @@ mod tests {
                 .iter()
                 .all(|candidate| candidate.probe_path == "/css/site.css")
         );
+
+        // Цель — базовая форма 1: профиль «не измерен» (0). Измеренные 1/2
+        // не должны давать кандидатов, пока профиль цели неизвестен.
+        for box_record in &mut catalog.boxes {
+            for binding in &mut box_record.bindings {
+                binding.tcp_profile = 1;
+            }
+        }
+        assert!(matching_domain_recovery_candidates(&catalog, &target).is_empty());
     }
 
     #[cfg(unix)]
@@ -40305,8 +40319,108 @@ mod tests {
 
 #[cfg(test)]
 mod tcp_profile_tests {
-    use super::r2o_newer_name_binding;
-    use r2o_controller::catalog::{Binding, BoxRecord, Catalog, Plan};
+    use super::{
+        R2oFlowUnfitDone, has_confirmed_exact_binding, r2o_catalog_mark_flow_unfit,
+        r2o_newer_name_binding,
+    };
+    use r2k_core::control::SHAPE_MODERN;
+    use r2o_controller::catalog::{Binding, BoxRecord, Catalog, DomainObservation, GroupKey, Plan};
+    use r2o_controller::discovery::DiscoveryTarget;
+
+    #[test]
+    fn flow_unfit_marks_only_the_target_tcp_profile() {
+        let target = DiscoveryTarget {
+            host: "profile.example".into(),
+            endpoint: String::new(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let plan_id = [0; 16];
+        let mut catalog = Catalog {
+            boxes: vec![BoxRecord {
+                bindings: vec![
+                    Binding {
+                        kind: "name".into(),
+                        target: target.host.clone(),
+                        plan_id: "plan-a".into(),
+                        level: 3,
+                        enabled: true,
+                        transport: 6,
+                        family: 4,
+                        shape: SHAPE_MODERN,
+                        tcp_profile: 1,
+                        ..Binding::default()
+                    },
+                    Binding {
+                        kind: "name".into(),
+                        target: target.host.clone(),
+                        plan_id: "plan-b".into(),
+                        level: 3,
+                        enabled: true,
+                        transport: 6,
+                        family: 4,
+                        shape: SHAPE_MODERN,
+                        tcp_profile: 2,
+                        ..Binding::default()
+                    },
+                ],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        let (marked, waiting) =
+            r2o_catalog_mark_flow_unfit(&mut catalog, &target, &plan_id, 1, 100);
+        assert_eq!((marked, waiting), (1, 0));
+        assert!(catalog.boxes[0].bindings[0].recheck_since.is_some());
+        assert!(catalog.boxes[0].bindings[1].recheck_since.is_none());
+
+        let mut done = R2oFlowUnfitDone::default();
+        assert!(!done.contains(&target, &plan_id, 2));
+        assert!(done.remember(&target, plan_id, 1));
+        assert!(done.contains(&target, &plan_id, 1));
+        assert!(!done.contains(&target, &plan_id, 2));
+    }
+
+    #[test]
+    fn own_exact_confirmed_uses_tcp_context_and_profile() {
+        let observation = DomainObservation {
+            name: "profile.example".into(),
+            plan_id: "plan".into(),
+            key: GroupKey {
+                transport: 6,
+                family: 4,
+                shape: 8,
+                ..GroupKey::default()
+            },
+            evidence: 1,
+            at: 1,
+        };
+        let mut catalog = Catalog {
+            boxes: vec![BoxRecord {
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: observation.name.clone(),
+                    level: 3,
+                    enabled: true,
+                    transport: 6,
+                    family: 4,
+                    shape: 1,
+                    tcp_profile: 1,
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        assert!(has_confirmed_exact_binding(&catalog, &observation));
+        catalog.boxes[0].bindings[0].tcp_profile = 2;
+        assert!(!has_confirmed_exact_binding(&catalog, &observation));
+        catalog.boxes[0].bindings[0].shape = 0;
+        assert!(
+            has_confirmed_exact_binding(&catalog, &observation),
+            "shape=0 — wildcard на проводе"
+        );
+    }
 
     #[test]
     fn newer_name_binding_requires_the_same_tcp_profile() {
