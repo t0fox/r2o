@@ -379,6 +379,8 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 
 Кодирование/разбор HTTP/3: control-поток, QPACK-подобные префиксные целые, HEADERS-запрос, статус из HEADERS (static index + Huffman). Порт: `crates/r2k-core/src/h3.rs` (построчный). Дифференциал: `scripts/test-controller-h3-httpup-differential.sh` (C `h3.c` против `examples/tg_cl14_h3_httpup_trace.rs`), плюс unit-тесты в `h3.rs`.
 
+**Построчная сверка a378:** все 9 функций сверены с `h3.rs`; различий в алгоритмах/границах не найдено. Совпадают: `control` 00 04 00; `prefix_max/prefix_int/prefix_int_read` (включая 8-битный префикс и `shift>56`); `request` (static 17/23/1, authority literal name 0, path literal name 1, лимиты 255/512); `huff_status` (5/6 бит, EOS-хвост); `static_status`/`name_is_status` (24–28, 63–71); `decode_section` (indexed, literal-name, literal-literal, post-base index/literal); `status` (пропуск неизвестных кадров, отказ на обрезанном).
+
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `d2k_h3_control` | 19-26 | 8 | control-поток: stream type 0 + пустой SETTINGS | `h3.rs:12 control`, `:390 frame_type_data` | E | differential h3 + unit `control_stream_is_type_plus_empty_settings` |
@@ -407,18 +409,18 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 | `d2k_qw_varint_write` | 107-109 | 3 | varint с автошириной | `quic.rs:1070 write_varint` | E | RFC-тесты Initial/фреймов |
 | `long_type_v1` | 119-127 | 9 | wire→v1 тип long header (v2 mapping) | `quic.rs` (v2-константы в `parse_initial_header`/build) | E | test `splits_rfc_9369_initial_with_v2_keys_and_labels` |
 | `long_type_wire` | 132-140 | 9 | v1→wire тип (v2 mapping) | `quic.rs` (сборка Initial/Retry) | E | тот же v2-тест |
-| `d2k_qw_long_hdr_token_w` | 142-174 | 33 | long header с token и заданной шириной length | `quic.rs:261 r2k_quic_initial_build` (inline) | P | токен/ширина length как отдельный API не вынесены |
-| `d2k_qw_long_hdr_w` | 176-184 | 9 | long header без token | `quic.rs:261 r2k_quic_initial_build` | E | test `создаёт_аутентифицированный_quic_initial_из_clienthello` |
-| `d2k_qw_long_hdr_token` | 186-194 | 9 | long header с token, автоширина | `quic.rs` (только Initial без token) | P | 0-RTT/Retry-сборка не портирована |
-| `d2k_qw_long_hdr` | 196-202 | 7 | long header без token, автоширина | `quic.rs:261` | E | тот же тест Initial |
-| `d2k_qw_hdr_parse` | 204-273 | 70 | разбор long/short header, token, length, pn offset | `quic.rs:796 parse_initial_header` (+short path в quinn) | E | RFC-тесты Initial v1/v2 |
-| `d2k_qw_pn_len` | 277-293 | 17 | минимальная длина packet number | нет (Rust использует pn_len=4) | P | фиксированная 4-байтовая длина валидна, но байтовый паритет с C отсутствует |
+| `d2k_qw_long_hdr_token_w` | 142-174 | 33 | long header v1/v2, token только Initial, заданная ширина length | `quic.rs:261-336 r2k_quic_initial_build` (inline) | **P** | **Подтверждённые отличия:** Rust строит **только Initial v1** (`0xc0`, `QUIC_V1`), **без token** (пишет token_len=0) и подбирает ширину length перебором `1/2/4/8` под `target_len`; C принимает v1/v2, произвольный Initial-token и `length_width`. Для штатного Initial v1 без token результат совпадает; v2/0-RTT/Retry-сборки в Rust нет. |
+| `d2k_qw_long_hdr_w` | 176-184 | 9 | обёртка long header без token | `quic.rs:261 r2k_quic_initial_build` | **P** | Для Initial v1 без token эквивалентно (RFC-тест `создаёт_аутентифицированный_quic_initial_из_clienthello`); v2 и прочие типы C-обёртка умеет, Rust — нет. |
+| `d2k_qw_long_hdr_token` | 186-194 | 9 | long header с token, автоширина | `quic.rs` (только Initial без token) | **P** | 0-RTT/Retry-сборка и Initial-token в Rust не портированы. |
+| `d2k_qw_long_hdr` | 196-202 | 7 | long header без token, автоширина | `quic.rs:261` | **P** | Только Initial v1; v2-сборка отсутствует. |
+| `d2k_qw_hdr_parse` | 204-273 | 70 | generic long/short/Retry/Initial/0-RTT/Handshake, token, length, pn offset, sample | `quic.rs:796-848 parse_initial_header` (+ short header у quinn) | **P** | **Подтверждённое сужение:** Rust `parse_initial_header` принимает **только Initial** (v1 raw_type 0, v2 raw_type 1), проверяет token/length/pn+20; short header, Retry, 0-RTT и Handshake разбирает quinn/иной код. C generic-парсер умеет все типы. Для клиентского Initial v1/v2 эквивалентно; RFC-тесты Initial v1/v2. |
+| `d2k_qw_pn_len` | 277-293 | 17 | RFC 9000 A.2: unacked, bits+1, 1..4 байта | нет (Rust `seal_initial` принимает pn_len; `initial_build` передаёт 4) | **P** | **Подтверждённое отличие:** C вычисляет минимальную длину PN по `largest_acked`; Rust `r2k_quic_initial_build` всегда передаёт **pn_len=4**, `reseal` сохраняет исходную длину. Функции расчёта нет; для первого Initial 4 байта валидны, байтовый паритет с C на других largest_acked не доказан. |
 | `d2k_qw_pn_decode` | 295-313 | 19 | восстановление PN по largest | `quic.rs:1041 decode_packet_number` | E | используется в RFC-тесте split Initial |
 | `d2k_qw_initial_secret` | 317-325 | 9 | Initial secret (client/server in) | `quic.rs:849 derive_initial_keys` | E | RFC 9001/9369 тесты |
 | `d2k_qw_keys_from_secret` | 327-338 | 12 | key/iv/hp из secret | `quic.rs:853 derive_initial_keys_for_role` | E | RFC-тесты |
 | `nonce_of` | 344-349 | 6 | nonce = iv XOR pn | `quic.rs:1033 packet_nonce` | E | helper; RFC-тесты |
-| `d2k_qw_seal` | 351-394 | 44 | AEAD seal + header protection | `quic.rs:968 seal_initial` | E | RFC-тест split Initial (длина и аутентичность) |
-| `d2k_qw_open` | 396-450 | 55 | header protection + AEAD open, PN decode | `quic.rs:908 open_initial` | E | test `refuses_when_authenticated_initial_is_modified`, split-тесты |
+| `d2k_qw_seal` | 351-394 | 44 | long/short header: AEAD seal (AAD=hdr+pn), tag за ct, HP-маска 0x0f/0x1f, sample pn+4 | `quic.rs:968-1021 seal_initial` | **P** | **Подтверждённые отличия:** Rust `seal_initial` поддерживает только **long header** (маска 0x0f) и Initial; C умеет short header (0x1f). Для Initial v1/v2 байты совпадают (RFC-тест split Initial, длина/аутентичность). Проверка `pn_len+plain+16 >= 20` та же. |
+| `d2k_qw_open` | 396-450 | 55 | long/short, HP, PN decode от `largest_pn`, AEAD open, проверка reserved | `quic.rs:908-967 open_initial` | **P** | **Подтверждённые отличия:** Rust `open_initial` — только Initial (long), `decode_packet_number(0, …)` жёстко с largest_received=0, а C принимает `largest_pn` и поддерживает short header. Для первого полёта/снимка результат совпадает; для последующих пакетов с largest>0 паритет не доказан. Тест `refuses_when_authenticated_initial_is_modified`, split-тесты. |
 | `d2k_qw_retry_verify` | 454-479 | 26 | проверка Retry integrity tag | `quic.rs:569 retry_integrity_valid` | E | test в `quic.rs` (valid/corrupted retry) |
 | `d2k_qw_retry_build` | 481-521 | 41 | собрать Retry (серверная роль) | нет | N | Rust только проверяет Retry; сборка не нужна клиентскому datapath |
 | `d2k_qw_ranges_reset` | 525-527 | 3 | сброс набора диапазонов | нет (quinn reassembly) | P | пересборка делегирована quinn |
