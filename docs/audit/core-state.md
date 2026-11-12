@@ -514,28 +514,30 @@
 
 ### `core/plantlv.c`
 
+**Прочитано построчно: 20/20 функций, 863 строки C (1–863).** Сверено с `plan_text.rs` (741 строка), `plan.rs` (`scan`/`check_references`: `:692,711-717,798-808`), `scripts/test-controller-plantlv-differential.sh` и фикстурами `scripts/fixtures/plantlv_cases.txt` / `plantlv_stricter_cases.txt`.
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `b64_value` | 126–131 | 6 | декодирование символа base64 | plan_text::base64_decode | **E*** | static-хелпер; differential plantlv |
-| `parse_base64` | 133–161 | 29 | строгий разбор base64 с проверкой паддинга | plan_text::base64_decode | **E*** | static-хелпер; plantlv differential |
-| `say` | 163–169 | 7 | записать текст ошибки | Result<String, String> | **E*** | static-хелпер; текст ошибок не сравнивается |
-| `hex_nib` | 171–176 | 6 | значение hex-цифры | plan_text::hex_nibble | **E*** | static-хелпер |
-| `parse_hex` | 180–204 | 25 | разбор hex-строки в байты | plan_text::decode_hex | **E*** | static-хелпер; plantlv differential |
-| `anchor_by_name` | 206–217 | 12 | имя якоря split/oob в номер | plan_text::anchor | **E*** | static-хелпер |
-| `split_fields` | 221–233 | 13 | разбиение строки плана на поля | plan_text::split_whitespace | **E*** | static-хелпер |
-| `parse_uint` | 237–245 | 9 | десятичное число с верхней границей | plan_text::number | **E*** | static-хелпер |
-| `parse_int` | 248–256 | 9 | знаковое число в диапазоне | plan_text::number_signed | **E*** | static-хелпер |
-| `kv_u32` | 259–263 | 5 | разбор key=value | plan_text::key_value | **E*** | static-хелпер |
-| `str_u32` | 268–270 | 3 | u32 из строки | plan_text::number | **E*** | static-хелпер |
-| `plan_free` | 272–275 | 4 | освобождение разобранного плана | Drop | **E*** | static-хелпер; управление памятью заменено RAII |
-| `parse_text` | 277–685 | 409 | полный разбор текста d2k-plan/r2o-plan во внутреннюю структуру | plan_text::parse | **E** | scripts/test-controller-plantlv-differential.sh: принятие/отказ и точные TLV; строгие случаи сверены с plan_parse.c |
-| `put` | 691–695 | 5 | запись байтов в TLV-буфер | plan_text::push_bytes | **E*** | static-хелпер; TLV сверяется дифференциалом |
-| `put_u8` | 696–696 | 1 | TLV: один байт | plan_text::push_u8 | **E*** | static-хелпер |
-| `put_u16` | 697–697 | 1 | TLV: big-endian u16 | plan_text::push_u16 | **E*** | static-хелпер |
-| `put_u32` | 698–701 | 4 | TLV: big-endian u32 | plan_text::push_u32 | **E*** | static-хелпер |
-| `put_rec` | 702–707 | 6 | TLV-запись тип/длина/значение | plan_text::push_record | **E*** | static-хелпер |
-| `d2k_plan_text_to_tlv` | 709–845 | 137 | компиляция текста плана в TLV D2KP (записи id/proto/payload/poison/...) | plan_text::compile_text | **E** | plantlv differential сравнивает hex после нормализации магии D2KP/R2OP |
-| `d2k_plan_text_to_hex` | 847–863 | 17 | компиляция плана в hex-строку | plan_text::compile_text + hex | **E** | используется link/CLI; покрыто plantlv differential |
+| `b64_value` | 126–131 | 6 | base64-символ → 0..63, иначе -1 | `plan_text.rs:712-721 base64_value` | **E*** | Отображение A-Z/a-z/0-9/+/ совпадает; static-хелпер, покрыт фикстурой `payload-pad64`. |
+| `parse_base64` | 133–161 | 29 | `len%4==0`; `=` только в последнем квартете; нулевые хвостовые биты; пустая строка — 0 байт | `plan_text.rs:677-710 base64` | **E*** | Ветви совпадают, включая `b&15`/`c&3`, пустой вход и отказ на неполном паддинге. Фикстуры `payload-pad64`/`pad-prefix-too-long`. |
+| `say` | 163–169 | 7 | `vsnprintf` в err/cap, молчание при cap==0 | `Result<String, String>` | **E*** | Текст ошибок C/Rust не сравнивается (differential печатает только ok/err и TLV); смысл ошибки сохраняется. |
+| `hex_nib` | 171–176 | 6 | 0-9/a-f/A-F → 0..15, иначе -1 | `plan_text.rs:668-675 hex_nibble` | **E*** | Посимвольно совпадает. |
+| `parse_hex` | 180–204 | 25 | чётная длина; пустая строка — 0 байт; hex → байты | `plan_text.rs:650-666 hex` | **E*** | C выделяет `n/2`, Rust `Vec::with_capacity`; обе отвергают нечётную длину и не-hex. Фикстуры `payload-hex`/`odd-hex`. |
+| `anchor_by_name` | 206–217 | 12 | 6 якорей: payload_start 0, sni_start 1, sni_end 2, hello_middle 3, record_end 4, sni_middle 5 | `plan_text.rs:723-733 anchor` | **E*** | Те же имена/номера; фикстура `split-anchors`/`split-unknown-anchor`. |
+| `split_fields` | 221–233 | 13 | разбиение по пробелам/табам, не более 8 полей; больше — отказ | `plan_text.rs:81-87` | **E*** | C возвращает -1 при `n>=cap`; Rust `fields.len()>8`. Пустые поля отбрасываются в обоих. |
+| `parse_uint` | 237–245 | 9 | первый символ цифра; `strtoul`; без знака/пробела/хвоста; `<=max` | `plan_text.rs:625-631 number` | **E*** | Для канонического текста эквивалентно: Rust требует все ASCII-цифры, `u64`, `<=max`; ведущие нули оба принимают. C дополнительно ловит `ERANGE`. |
+| `parse_int` | 248–256 | 9 | необязательный `+`/`-`; модуль ограничен `lo`/`hi`; `-INT_MIN` без переполнения | `plan_text.rs:308-310`, `:340-342` (`parse::<i32>`/`<i16>`) | **E*** | C разбирает знак и модуль, Rust — стандартный `parse`; диапазоны те же (`i32` для seqshift, `i16` для split). |
+| `kv_u32` | 259–263 | 5 | `key=value`, точное совпадение ключа, значение `parse_uint` | `plan_text.rs:642-648 kv_number` | **E*** | C `strncmp`+`field[kl]=='='`; Rust `split_once('=')`+`actual_key != key`; эквивалентно. |
+| `str_u32` | 268–270 | 3 | голое u32 без ключа | `plan_text.rs:451 number(..., u32::MAX)` | **E*** | Используется для `pace`/`delay`/чисел payload; эквивалентно. |
+| `plan_free` | 272–275 | 4 | освободить payload-буферы и обнулить план | `Drop`/`Vec` | **E*** | RAII заменяет ручное освобождение; ошибки парсера возвращают `Err` без утечек. |
+| `parse_text` | 277–685 | 409 | полный разбор `d2k-plan`: заголовок, id, proto, payload/pad/slice, wire, input, settle/segment, poison+autottl, split, oob, fake, seqovl, order, pace, ipfrag, udplen, quicsplit, quicdeny, delay, guard; лимиты и cross-field проверки | `plan_text.rs:67-610 compile_text` + `plan.rs` | **P** | **Совпадают:** длина строки <8192, trim space/tab/CR, `#`, ≤8 полей, schema/minexec 0..65535, id 16 байт, proto-коды, payload/pad/slice, wire 1/2 + minexec, input/tls-sni, settle/segment, poison-флаги/ttl/seqshift, split-якоря/int16, oob/1 байт, fake/tlsmod, seqovl, order, pace/delay>0, ipfrag 1..4, udplen/quicsplit/quicdeny, guard; cross-field — `plan.rs:313-323,499-614,692,711-717,798-808`. **Расхождения:** (1) C принимает только `d2k-plan`, R2O — `r2o-plan` и `d2k-plan` (брендинг); (2) R2O отвергает NUL во всём тексте (`plan_text.rs:68-70`), C обрабатывает строку до NUL; (3) C `autottl` при повторе — last-wins, R2O отвергает повтор (`plan_text.rs:296-298`); (4) C `plantlv` принимает `autottl` при `minexec<13`, R2O `Plan::parse` отвергает (`plan.rs:510-515,711-712`) — C отклонил бы позже в датапате; (5) C `sscanf("%d,%u-%u")` допускает пробелы/знак, R2O строго `split_once`+`parse` (канонический текст совпадает). Фикстуры покрывают 60+ кейсов; `plantlv_stricter_cases.txt` фиксирует autottl-low-minexec и висячие ссылки. |
+| `put` | 691–695 | 5 | запись n байт; при переполнении `w.bad=1` | `Vec<u8>`/`push_u16` | **E*** | C проверяет `pos+n<=cap`, Rust растёт динамически и проверяет `MAX_PLAN_BYTES=65000` в конце (`plan_text.rs:605-607`); для планов ≤65000 эквивалентно. |
+| `put_u8` | 696–696 | 1 | TLV: один байт | `Vec::push` | **E*** | Тривиальный хелпер. |
+| `put_u16` | 697–697 | 1 | TLV: big-endian u16 | `plan_text.rs:735-737 push_u16` | **E*** | `to_be_bytes` совпадает. |
+| `put_u32` | 698–701 | 4 | TLV: big-endian u32 | `plan_text.rs:739-741 push_u32` | **E*** | `to_be_bytes` совпадает. |
+| `put_rec` | 702–707 | 6 | TLV-запись `type u16, len u16, value`; len>0xFFFF — ошибка | `plan_text.rs:598-604` | **E*** | C `put_rec`; Rust `u16::try_from(value.len())`; порядок type/len/value тот же. |
+| `d2k_plan_text_to_tlv` | 709–845 | 137 | компиляция текста в TLV `D2KP`: magic, schema, minexec, flags=0, count, ID, PROTO, payloads, poisons(+AUTOTTL), splits, fakes, seqovls, ORDER, PACE, INPUT, SETTLE, SEGMENT, INPUT_TLS, DELAY, WIRE, IPFRAG, UDPLEN, QSPLIT, QDENY, OOB, GUARD | `plan_text.rs:67-610 compile_text` | **P** | Порядок записей, magic `D2KP`, `flags=0`, count, длины, `autottl` сразу за порчей, безусловный ORDER, fake 10/11 байт — совпадают; `Plan::parse` повторно проверяет TLV (`plan_text.rs:608`). **Расхождения** наследуются от `parse_text`: NUL, `r2o-plan`, повтор autottl, autottl minexec<13. Differential `test-controller-plantlv-differential.sh` сравнивает ok/err и точные hex-байты на 60+ фикстурах. |
+| `d2k_plan_text_to_hex` | 847–863 | 17 | TLV → lowercase hex в буфер, `cap>=2n+1` | нет отдельной функции; `compile_text` возвращает байты, hex — у вызывающего | **P** | TLV-часть покрыта `compile_text`; отдельного API «план → hex-строка» в R2O нет. C использует hex для `d2k_link_set_name`/sched, R2O передаёт TLV-байты напрямую (`encode_set_name`), поэтому форматирование hex не востребовано; при необходимости вызывающий может hex-кодировать байты. |
 
 ### `core/props.c`
 
