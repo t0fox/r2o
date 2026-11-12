@@ -1773,8 +1773,29 @@ impl NamePlans {
             {
                 return None;
             }
+            // C `find_target`: имя названо, и его план не подошёл по форме.
+            // Адресный fallback разрешён только при UDP-наблюдении; для TCP
+            // запись соседа по CDN брать нельзя (`plans.c:1190-1200`).
+            if !r2o_shape_is_udp(shape) && self.name_has_any_binding(name, family) {
+                return None;
+            }
         }
         self.find_addr(address, shape)
+    }
+
+    /// Есть ли у имени любая запись/суффикс в семействе (не только тот же
+    /// транспорт). Нужно для одностороннего правила addr-fallback.
+    fn name_has_any_binding(&self, bytes: &[u8], family: u8) -> bool {
+        let Some(host) = canonical_name(bytes) else {
+            return false;
+        };
+        self.plans
+            .keys()
+            .any(|key| key.host == host && key.family == family && key.shape != SHAPE_HTTP)
+            || self
+                .suffix_plans
+                .keys()
+                .any(|key| key.family == family && domain_suffix_member(&host, &key.suffix))
     }
 
     fn name_has_transport_binding(
@@ -1839,6 +1860,11 @@ impl NamePlans {
 
 /// C `shape_transport` (`plans.c:169-175`): QUIC → 17, TLS/ECH/контекст → 6,
 /// остальные формы → 0.
+/// C `shape_is_udp`: QUIC/VOICE — UDP-формы.
+fn r2o_shape_is_udp(shape: u8) -> bool {
+    matches!(shape, SHAPE_QUIC | SHAPE_VOICE)
+}
+
 fn r2o_shape_transport(shape: u8) -> u8 {
     match shape {
         SHAPE_QUIC => 17,
@@ -5135,6 +5161,62 @@ mod tests {
         }
         let ack = NamePlans::default().handle(&frame(r2k_core::control::SHAPE_MODERN, &quic));
         assert!(!ack.ok, "чужой транспорт плана должен быть отвергнут");
+    }
+
+    #[test]
+    fn tcp_name_does_not_fall_back_to_addr_plan_but_udp_does() {
+        let address = super::Address::new(super::IpAddr::V4(super::Ipv4Addr::new(198, 51, 100, 2)));
+        let host = "fallback.example";
+        let mut plans = NamePlans::default();
+        plans.addr_plans.insert(
+            super::AddrPlanKey {
+                address,
+                shape: r2k_core::control::SHAPE_QUIC,
+            },
+            InstalledPlan {
+                plan: Plan::default(),
+                generation: 1,
+                last_used: std::cell::Cell::new(0),
+            },
+        );
+        plans.plans.insert(
+            NamePlanKey {
+                host: host.into(),
+                family: 4,
+                shape: r2k_core::control::SHAPE_MODERN,
+            },
+            InstalledPlan {
+                plan: Plan::default(),
+                generation: 2,
+                last_used: std::cell::Cell::new(0),
+            },
+        );
+
+        // TCP-наблюдение: имя названо, его план не подошёл — адресный
+        // план соседа по CDN не берём.
+        assert!(
+            plans
+                .find_addr_fallback(
+                    address,
+                    Some(host.as_bytes()),
+                    4,
+                    r2k_core::control::SHAPE_LEGACY,
+                    6,
+                )
+                .is_none()
+        );
+        // UDP-наблюдение: C разрешает `goto check_addr`.
+        assert!(
+            plans
+                .find_addr_fallback(
+                    address,
+                    Some(host.as_bytes()),
+                    4,
+                    r2k_core::control::SHAPE_QUIC,
+                    17,
+                )
+                .is_some()
+        );
     }
 
     #[test]

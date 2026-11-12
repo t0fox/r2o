@@ -87,9 +87,9 @@ recheck 1982 1982 equal True
 | core-net | 548 | 195 | 351 | 4 | 0 |
 | core-state | 692 | 179 | 511 | 2 | 0 |
 | datapath-core | 400 | 153 | 244 | 3 | 0 |
-| datapath-plan | 183 | 139 | 44 | 0 | 0 |
+| datapath-plan | 183 | 140 | 43 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **724** | **1251** | **7** | **0** |
+| **Итого** | **1982** | **725** | **1250** | **7** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 724 / P 1251 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 725 / P 1250 /
 N 7 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -347,9 +347,9 @@ P означает неполное доказательство ветвей, N
 | core-net | 548 | 195 | 351 | 2 | 0 |
 | core-state | 692 | 179 | 511 | 2 | 0 |
 | datapath-core | 400 | 153 | 244 | 3 | 0 |
-| datapath-plan | 183 | 139 | 44 | 0 | 0 |
+| datapath-plan | 183 | 140 | 43 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **724** | **1251** | **7** | **0** |
+| **Итого** | **1982** | **725** | **1250** | **7** | **0** |
 
 
 ---
@@ -5341,8 +5341,8 @@ Static-хелперы наследуют статус владельца (вла
 
 | Статус | Кол-во |
 |---|---:|
-| E | 139 |
-| P | 44 |
+| E | 140 |
+| P | 43 |
 | N | 0 |
 | ? | 0 |
 | **Всего** | **183** |
@@ -5738,7 +5738,7 @@ UDP→addr переход, R2O — только exact+ECH→MODERN+общий ad
 | d2k_plantab_find_voice_probe | 1014-1018 | 5 | поиск голосового опыта (wildcard клиентского порта) | `control.rs:764` `voice_address_binding` | E | `временная_voice_запись_соответствует_только_с_заданным_и_целым_адресом` (control.rs:3239), `stun_...` (3278). Ключ R2O не содержит клиентского порта — wildcard выражен структурно. |
 | d2k_plantab_probe_count | 1020-1022 | 3 | число всех пробных записей (`probe_used`, включая voice) | `control.rs:186-194` `r2o_probe_count` | E | C `t ? t->probe_used : 0`: `probe_used` растёт в `set_addr_probe` и падает в `probe_drop`; истёкшие удаляются лениво (`find_probe`/`set_addr_probe`), поэтому счётчик включает и их. Rust `r2o_probe_count = addr_probes.len()+voice_addr_probes.len()` — обе карты, без фильтра по времени; `clear_probes` обнуляет. Тест `probe_count_counts_addr_and_voice_probes_like_d2o`: 1 addr + 1 voice → 2, после `clear_probes` → 0. |
 | shape_fits | 1044-1052 | 9 | static: grandfather→1; MODERN↔ECH_TCP, MODERN_NO_TS↔ECH_NO_TS, MODERN_TS↔ECH_TS; иначе `entry_shape!=0 && equal` | `control.rs:569-581` — цепочка exact/bridge/fallback/grandfather | **P** | C-предикат расщеплён на цепочку поисков; ECH-перенос и grandfather покрыты тестами (control.rs:2823). В C `entry_shape==0` (ANY) не проходит `shape_fits` — ANY используется отдельной ветвью `h.any`; в R2O отдельного предиката и ANY-ветки нет. |
-| shape_is_udp | 1054-1056 | 3 | static: QUIC/VOICE | `matches!(shape, SHAPE_QUIC \| SHAPE_VOICE)` + `find_addr_fallback` (`control.rs:1522-1540`) | **P** | **Одностороннее правило C:** при UDP-наблюдении и TCP-записи имени разрешается адресный fallback (`goto check_addr`, `plans.c:1190-1200`); при TCP-наблюдении и UDP-записи — нет (`shape_misses++`, NULL). Rust `find_addr_fallback` проверяет только наличие привязки **того же** транспорта, поэтому TCP-поток к имени, у которого есть только QUIC/VOICE-план, может получить адресный план, чего C не делает. |
+| shape_is_udp | 1054-1056 | 3 | static: QUIC/VOICE | `control.rs:1778` `r2o_shape_is_udp`; `find_addr_fallback` (`:1740-1765`) | E | C разрешает адресный fallback при UDP-наблюдении и запрещает при TCP, если имя названо (`plans.c:1190-1200`). Rust `r2o_shape_is_udp` + `name_has_any_binding`: для TCP при любой записи/суффиксе имени возвращается NULL, для UDP fallback разрешён. Тест `tcp_name_does_not_fall_back_to_addr_plan_but_udp_does`. |
 | d2k_plantab_shape_misses | 1058-1060 | 3 | счётчик «нашли, но форма не подошла» | `control.rs:193` `r2o_shape_misses`, `:591-621` `note_tcp_shape_miss` | P | C инкрементирует в трёх ветвях `find_target` (`plans.c:1140,1209,1233`). Rust теперь инкрементирует после неудачи TCP-поиска, если для SNI есть name-запись той же family иной не-HTTP формы либо адресная запись — это покрывает `h.any`/`a.any` TCP-ветвей. UDP-переход `goto check_addr`, probe-by-port и точный порядок C не воспроизведены. Тест `shape_misses_count_known_name_with_wrong_tcp_shape`: план LEGACY + TLS1.3 пакет → select None, счётчик 1. |
 | d2k_plantab_find | 1062-1066 | 5 | поиск плана по имени, затем адресу | `control.rs:410` `select` | P | R2O `select` разбирает пакет и сам извлекает SNI/HTTP/QUIC; порядок «имя → суффикс → адрес» сохранён, но набор ветвей другой (см. `find_target`). |
 | d2k_plantab_find_sport | 1068-1072 | 5 | поиск с местным портом потока | `control.rs:548-571` (`select`, `tcp.source_port`) | P | C `find_family(...,family=4)` с портом; порт учитывается для проб. Rust `select` передаёт `tcp.source_port` в `NameProbeKey`; отдельного входа с sport нет. |
