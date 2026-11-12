@@ -853,6 +853,8 @@ R2O: `r2o_icmp_guard.rs`.
 observation), `control.rs` (https names), `http_replace.rs` (пакеты),
 `r2k-core/httpup.rs`, `http_response.rs`.
 
+**Прочитано построчно: 30/30 функций, 640 строк C (1–640).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
 | `d2k_http80_new` | 67–69 | 3 | создать таблицу 128 потоков/256 имён | `control.rs` NamePlans + `hold.rs` HoldTable | P | объект разнесён на два |
