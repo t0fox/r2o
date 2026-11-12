@@ -287,6 +287,8 @@ P означает неполное доказательство ветвей, N
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/test-quic-app-bytes-differential.sh` —
   **PASS** (`VERDICT|match`; уникальные QUIC stream bytes совпадают, включая
   смещения >32 бит: `4294967306`, `8589934602`).
+- `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/test-quic-budget-init-differential.sh` —
+  **PASS** (budget 0/1/25/2^31-1/2^31/2^32-1; `need` 50/2/50/4294967294/0/4294967294).
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-diagnostics-differential.sh` —
   **не выполнен**: сборка донорского `test_httpsearch` падает на duplicate
   symbols `d2k_plan_apply`, `d2k_plan_max_emit`, `d2k_actions_cancel`,
