@@ -385,7 +385,7 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 
 Кодирование/разбор HTTP/3: control-поток, QPACK-подобные префиксные целые, HEADERS-запрос, статус из HEADERS (static index + Huffman). Порт: `crates/r2k-core/src/h3.rs` (построчный). Дифференциал: `scripts/test-controller-h3-httpup-differential.sh` (C `h3.c` против `examples/tg_cl14_h3_httpup_trace.rs`), плюс unit-тесты в `h3.rs`.
 
-**Построчная сверка a378:** все 9 функций сверены с `h3.rs`; различий в алгоритмах/границах не найдено. Совпадают: `control` 00 04 00; `prefix_max/prefix_int/prefix_int_read` (включая 8-битный префикс и `shift>56`); `request` (static 17/23/1, authority literal name 0, path literal name 1, лимиты 255/512); `huff_status` (5/6 бит, EOS-хвост); `static_status`/`name_is_status` (24–28, 63–71); `decode_section` (indexed, literal-name, literal-literal, post-base index/literal); `status` (пропуск неизвестных кадров, отказ на обрезанном).
+**Прочитано построчно: 9/9 функций, 280 строк C (1–280).** Все 9 функций сверены с `h3.rs`; различий в алгоритмах/границах не найдено. Совпадают: `control` 00 04 00; `prefix_max/prefix_int/prefix_int_read` (включая 8-битный префикс и `shift>56`); `request` (static 17/23/1, authority literal name 0, path literal name 1, лимиты 255/512); `huff_status` (5/6 бит, EOS-хвост); `static_status`/`name_is_status` (24–28, 63–71); `decode_section` (indexed, literal-name, literal-literal, post-base index/literal); `status` (пропуск неизвестных кадров, отказ на обрезанном).
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -747,13 +747,13 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 
 STUN Binding request/response: XOR-MAPPED-ADDRESS для IPv4/IPv6, проверка transaction id. Порт: `crates/r2k-core/src/stun.rs` (`binding_request`, `parse_binding_response`, `parse_xor_mapped`). Тесты: `crates/r2k-core/tests/stun.rs` (RFC 5769 + C-векторы Discovery).
 
-**Построчная сверка a378:** все 5 функций прочитаны; тип 0x0001/0x0101, magic, 12-байтный txid, XOR порта/адреса, IPv6-ключ magic+txid, обход атрибутов с padding 4 и отказ на длине за границей совпадают. Различий не найдено.
+**Прочитано построчно: 5/5 функций, 123 строки C (1–123).** Тип 0x0001/0x0101, magic, 12-байтный txid, XOR порта/адреса, IPv6-ключ magic+txid, обход атрибутов с padding 4 и отказ на длине за границей совпадают. **Отличие API:** C `d2k_stun_request` сам генерирует txid (`d2k_t13_random`, отказ при ошибке); Rust `binding_request(txid)` принимает готовый `[u8;12]` — генерация и обработка ошибки у вызывающего. Для валидного txid байты ответа/запроса совпадают.
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `rd16` | 19-21 | 3 | big-endian u16 | `stun.rs:161 read_u16` | E | хелпер; владелец `d2k_stun_parse_response`, тесты stun |
 | `rd32` | 23-25 | 3 | big-endian u32 | `stun.rs:168 read_u32` | E | хелпер; тесты stun |
-| `d2k_stun_request` | 27-45 | 19 | Binding request: type 0x0001, magic, random txid | `stun.rs:18 binding_request` | E | test `parses_rfc5769...`, `recognizes_only...` |
+| `d2k_stun_request` | 27-45 | 19 | Binding request: type 0x0001, magic, random txid | `stun.rs:18 binding_request` | **P** | **Отличие владения txid:** C генерирует 12 байт внутри через `d2k_t13_random` и возвращает 0 при ошибке; Rust принимает готовый `[u8;12]` от вызывающего. Для валидного txid байты запроса совпадают; тест `parses_rfc5769...`/`recognizes_only...` проверяет разбор, не генерацию. |
 | `parse_xor_mapped` | 52-83 | 32 | XOR-MAPPED IPv4/IPv6 (port ^ magic>>16, IP ^ key) | `stun.rs:133 parse_xor_mapped` | E | test `parses_rfc5769_xor_mapped_v4_and_v6_addresses` |
 | `d2k_stun_parse_response` | 85-123 | 39 | проверка типа/magic/txid, обход атрибутов с padding | `stun.rs:28 parse_binding_response` | E | tests `rejects_foreign_and_malformed...`, `...exact_transaction_id` |
 
