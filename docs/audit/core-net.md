@@ -771,7 +771,7 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 
 STUN Binding request/response: XOR-MAPPED-ADDRESS для IPv4/IPv6, проверка transaction id. Порт: `crates/r2k-core/src/stun.rs` (`binding_request`, `parse_binding_response`, `parse_xor_mapped`). Тесты: `crates/r2k-core/tests/stun.rs` (RFC 5769 + C-векторы Discovery).
 
-**Прочитано построчно: 5/5 функций, 123 строки C (1–123).** Тип 0x0001/0x0101, magic, 12-байтный txid, XOR порта/адреса, IPv6-ключ magic+txid, обход атрибутов с padding 4 и отказ на длине за границей совпадают. **Отличие API:** C `d2k_stun_request` сам генерирует txid (`d2k_t13_random`, отказ при ошибке); Rust `binding_request(txid)` принимает готовый `[u8;12]` — генерация и обработка ошибки у вызывающего. Для валидного txid байты ответа/запроса совпадают.
+**Прочитано построчно: 5/5 функций, 123 строки C (1–123).** Сверено с `stun.rs:1-172`: тип 0x0001/0x0101, `0x2112a442`, 12-байтный txid, XOR порта `^ (magic>>16)`, IPv4 `^ magic`, IPv6 ключ `magic‖txid`, обход атрибутов с padding 4 и отказ на длине за границей — совпадают. **Отличие API:** C `d2k_stun_request` сам генерирует txid (`d2k_t13_random`, отказ при ошибке); Rust `binding_request(txid)` принимает готовый `[u8;12]` — генерация и обработка ошибки у вызывающего. Для валидного txid байты запроса/ответа совпадают. Rust дополнительно имеет `is_binding_request`/`is_binding_response_for`/Discord-сигнатуры, которых в `stun.c` нет.
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
