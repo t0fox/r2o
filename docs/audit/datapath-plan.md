@@ -441,6 +441,8 @@ UDP→addr переход, R2O — только exact+ECH→MODERN+общий ad
 Сырой сокет: пределы длины, MTU маршрута, отправка без ожидания. R2O:
 `crates/r2o-datapath/src/raw.rs` (`RawSocket`).
 
+**Прочитано построчно: 17/17 функций, 524 строки C (1–524).**
+
 **Построчная сверка a378:** все 17 функций прочитаны. C держит IPv4+IPv6+fragment
 сокеты в одном объекте; fragment-сокет открывается лениво и **обязательно** с
 `IP_NODEFRAG` (`raw.c:387-391`), иначе отказ. `RawSocket` R2O — один сокет на
@@ -465,7 +467,7 @@ mark обязателен. Совпадают: `pick_maxlen`/`adopt_egress`/`rou
 | d2k_raw_route_maxlen | 311-313 | 3 | MTU маршрута для dst[4] | `raw.rs:119` `packet_route_maxlen` | P | Вход — пакет, а не 4 байта; IPv6-путь и fallback на общий предел не сверены. |
 | d2k_raw_route_maxlen_family | 315-339 | 25 | кэш из 16 маршрутов, порог 1280/576, запись кольцом | `raw.rs:136` `r2o_route_maxlen`, `:367` `R2oRouteMtuCache` | E | `кэш_mtu_сохраняет_только_полезные_маршруты_и_ограничен` (raw.rs:786); порог и вытеснение. |
 | d2k_raw_prepare | 341-404 | 64 | ленивая подготовка IPv6/fragment-сокета, проверка длин и контекста фрагмента | `raw.rs:559` `outgoing_packet` (+`:591`/`:622` фрагменты) | P | R2O не открывает отдельный fragment-сокет с `IP_NODEFRAG` и не создаёт IPv6-сокет лениво (семейство задано при старте); валидация фрагментов есть (`raw_sender_accepts_only_well_formed...`, raw.rs:874). |
-| d2k_raw_send | 406-512 | 107 | `sendto(MSG_DONTWAIT)`, EINTR-повтор, EMSGSIZE → снизить предел | `raw.rs:147` `send_packet`, `:155` `send_packet_inner` | P | Логика EMSGSIZE/кэша и busy есть (raw.rs:208-219, `record_send_outcome`), но реальная отправка в тестах не выполнялась (нужен root). Тесты покрывают статистику и разбор. |
+| d2k_raw_send | 406-512 | 107 | `sendto(MSG_DONTWAIT)`, EINTR-повтор, EMSGSIZE → снизить предел | `raw.rs:147` `send_packet`, `:155` `send_packet_inner` | **P** | **Совпадает:** `sendto(MSG_DONTWAIT)` в цикле, повтор только на EINTR (`raw.rs:186-222`), короткая запись — ошибка, EMSGSIZE при длине выше 1280/576 понижает route-кэш и общий предел, busy считается для EAGAIN/EWOULDBLOCK/ENOBUFS (`record_send_outcome`), счётчики sent/errors/busy. **Отличия:** C выбирает отдельный `fragment_fd` для IPv4-фрагментов и `fragments6` для IPv6; Rust шлёт всё через один `RawSocket` своего семейства без `IP_NODEFRAG`; реальная root-отправка в тестах не выполнялась. |
 | d2k_raw_sent | 514-516 | 3 | счётчик успешных посылок | `raw.rs:100` `send_stats().sent` | E | `raw_send_stats_count_success_and_busy_errors_like_d2o` (raw.rs:231). |
 | d2k_raw_errors | 518-520 | 3 | счётчик ошибок | `raw.rs:100` `send_stats().errors` | E | Тот же тест. |
 | d2k_raw_busy | 522-524 | 3 | счётчик EAGAIN/ENOBUFS | `raw.rs:100` `send_stats().busy` | E | Тот же тест. |
