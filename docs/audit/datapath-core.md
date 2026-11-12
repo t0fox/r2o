@@ -248,6 +248,8 @@ CLI-логирования, health-файла, duration и состава сво
 `engine.rs` (TCP-сессия и решение), `main.rs` (UDP-путь и цикл),
 `r2o_udp_sessions.rs`, `r2o_quic.rs`, `r2o_voice.rs`, `hold.rs`, `r2o_route.rs`.
 
+**Прочитано построчно: 107/107 функций, 3642 строки C (1–3642).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
 | `initial_dcid` (static) | 202–211 | 10 | DCID открытого Initial-заголовка | `r2o_quic.rs:217 r2k_quic_initial_flight_id` | P | разбор QUIC покрыт `r2k-core` тестами quic; отдельного DCID-теста нет |
