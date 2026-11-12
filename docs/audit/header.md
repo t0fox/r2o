@@ -102,7 +102,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-11)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 617 / P 1323 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 616 / P 1324 /
 N 42 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -136,8 +136,8 @@ P означает неполное доказательство ветвей, N
 | 26 | HTTPS probe non-upgrade | `http_probe_done`: SET_HTTPS только для `SERVED`/`TLS_BLOCKED`, иначе `http_search_portal` (`d2kc.c:331-344`) | `main.rs:17033` шлёт `SET_HTTPS(host, ttl_seconds)` для любого результата; у не-upgrade `ttl_seconds=0` (`https_probe.rs:170-178`), HTTP-поиск только через `pending_http_searches` | `core-net.md` |
 | 27 | HTTPS first flight | донорский `modern` ClientHello из `d2k_hello_from_profile` (`httpsprobe.c:171-177`) | rustls-сгенерированный ClientHello (`response.rs:572-605`) | `core-net.md` |
 | 28 | HTTPS result loss | `done[17]`; при переполнении `lost++`, результат отбрасывается (`httpsprobe.c:337-340`) | `sync_channel(16)` + блокирующий `send`, счётчика `lost` нет (`https_probe.rs:132,181-183`) | `core-net.md` |
-| 29 | HTTP-upgrade 307 | `X-D2K-HTTP-Upgrade: provider-portal` (`httpup_logic.c:145`) | **закрыто 2026-11-12:** `X-D2K-HTTP-Upgrade: provider-portal` (`httpup.rs:513`), тест обновлён, differential PASS | `core-net.md` |
-| 30 | HTTP-search plan identity | `d2k-plan 1 11` + FNV-префикс `d2k-http:` (`httpsearch.c:300,330-333`) | `r2o-plan 1 11` + префикс `r2o-http:` (`http_search.rs:686,784`) | `core-net.md` |
+| 29 | HTTP-upgrade 307 | `X-D2K-HTTP-Upgrade: provider-portal` (`httpup_logic.c:145`) | **брендинг R2O:** `X-R2O-HTTP-Upgrade: provider-portal` (`httpup.rs:513`); имена `d2k`/`d2o` запрещены в рабочем коде, differential нормализует заголовок | `core-net.md` |
+| 30 | HTTP-search plan identity | `d2k-plan 1 11` + FNV-префикс `d2k-http:` (`httpsearch.c:300,330-333`) | **брендинг R2O:** `r2o-plan 1 11` + `b"r2o-http:"` (`http_search.rs:699,784`); имена `d2k`/`d2o` запрещены в рабочем коде | `core-net.md` |
 | 31 | QUIC is_initial | только структура заголовка, без AEAD (`quic.c:182-185`) | `is_authenticated_initial` требует успешного open/AEAD (`quic.rs:107-127`) | `core-net.md` |
 | 32 | QUIC Initial build | v1/v2, DCID 8..20, SCID из снимка, longer=1300, clear-fixed, two-datagram split (`quichello.c:124-455`) | `initial_build` только v1, DCID 8, SCID = аргумент, всегда 1200, без clear-fixed/two-datagram (`quic.rs:261-336`, `quic_replay.rs:98-135`) | `core-net.md` |
 | 33 | QUIC data-stage transport | TP idle 30000/max_udp 1452/max_data 1 МиБ/stream 256 КиБ/16+16, CH из SNI+TP+ALPN h3, сертификат только по имени (`quicconn.c:380-403,836-892,1195-1197`) | quinn defaults без `TransportConfig`, CH rustls, webpki-цепочка рвёт handshake (`r2o_quic_http3.rs:889-916`) | `core-net.md` |

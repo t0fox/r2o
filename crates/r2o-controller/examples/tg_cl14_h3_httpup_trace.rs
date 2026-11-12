@@ -8,7 +8,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn normalized_hex(bytes: &[u8]) -> String {
-    let product = b"X-D2K-HTTP-Upgrade";
+    let product = b"X-R2O-HTTP-Upgrade";
     let normalized = b"X-UPGRADE";
     let mut output = Vec::with_capacity(bytes.len());
     let mut index = 0;

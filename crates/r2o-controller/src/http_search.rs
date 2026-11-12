@@ -682,7 +682,7 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-/// Формирует текст пробного HTTP-плана, совместимый с r2o-plan.
+/// Формирует текст пробного HTTP-плана в формате R2O (`r2o-plan`).
 pub fn candidate_text(key: &str, id: Option<&[u8; 16]>) -> Option<String> {
     let poison = match key {
         "fake-badsum" | "fake-badsum-whole" => Some("badsum".to_owned()),
@@ -780,7 +780,7 @@ pub fn candidate_program(key: &str) -> Option<Vec<u8>> {
 pub fn stable_id(key: &str) -> [u8; 16] {
     const OFFSET: u64 = 1_469_598_103_934_665_603;
     const PRIME: u64 = 1_099_511_628_211;
-    const ID_PREFIX: &[u8] = &[0x72, 0x32, 0x6f, 0x2d, 0x68, 0x74, 0x74, 0x70, 0x3a];
+    const ID_PREFIX: &[u8] = b"r2o-http:";
     let mut hash = OFFSET;
     for byte in ID_PREFIX.iter().chain(key.as_bytes()) {
         hash = (hash ^ u64::from(*byte)).wrapping_mul(PRIME);
