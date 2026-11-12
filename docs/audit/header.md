@@ -284,6 +284,9 @@ P означает неполное доказательство ветвей, N
   sh scripts/r2o-discord-voice-lifecycle-helper.sh` —
   **PASS** (endpoint lifecycle A→B, очередь, lease, proof, persistence;
   address-план и общий `@discord-voice`).
+- `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/test-quic-app-bytes-differential.sh` —
+  **PASS** (`VERDICT|match`; уникальные QUIC stream bytes совпадают, включая
+  смещения >32 бит: `4294967306`, `8589934602`).
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-diagnostics-differential.sh` —
   **не выполнен**: сборка донорского `test_httpsearch` падает на duplicate
   symbols `d2k_plan_apply`, `d2k_plan_max_emit`, `d2k_actions_cancel`,
