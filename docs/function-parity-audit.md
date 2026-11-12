@@ -86,10 +86,10 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 193 | 349 | 6 | 0 |
 | core-state | 692 | 178 | 511 | 3 | 0 |
-| datapath-core | 400 | 152 | 244 | 4 | 0 |
+| datapath-core | 400 | 153 | 244 | 3 | 0 |
 | datapath-plan | 183 | 138 | 45 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **719** | **1250** | **13** | **0** |
+| **Итого** | **1982** | **720** | **1250** | **12** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,8 +103,8 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 719 / P 1250 /
-N 13 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
+Покрытие реестра: **1982/1982** функций. Статусы: **E 720 / P 1250 /
+N 12 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
 | # | Область | D2O | R2O | Подтверждение |
@@ -346,10 +346,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 193 | 349 | 6 | 0 |
 | core-state | 692 | 178 | 511 | 3 | 0 |
-| datapath-core | 400 | 152 | 244 | 4 | 0 |
+| datapath-core | 400 | 153 | 244 | 3 | 0 |
 | datapath-plan | 183 | 138 | 45 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **719** | **1250** | **13** | **0** |
+| **Итого** | **1982** | **720** | **1250** | **12** | **0** |
 
 
 ---
@@ -3612,12 +3612,12 @@ C-хелперы без собственного состояния наслед
 ## Сводка
 
 - Всего функций: **400**.
-- **E: 152 (38,00 %)**; **P: 244 (61,00 %)**; **N: 4 (1,00 %)**; **?: 0**.
+- **E: 153 (38,25 %)**; **P: 244 (61,00 %)**; **N: 3 (0,75 %)**; **?: 0**.
 - Полностью отсутствуют: `count_reason` (гистограмма причин пропуска в сводке),
-  `d2k_session_shape_tcp_options_family` (TCP-опции из снимка),
-  `d2k_session_suspects` (агрегат подозрений) и `d2k_http_trace`
-  (текстовый HTTP-трейс). Агрегатные счётчики applied/done/damaged/sent_lost/
-  exchanges, NAT-статистика и `--offline-self-check` теперь есть.
+  `d2k_session_shape_tcp_options_family` (TCP-опции из снимка) и
+  `d2k_http_trace` (текстовый HTTP-трейс). Агрегатные счётчики applied/done/
+  damaged/sent_lost/exchanges/suspects, NAT-статистика и
+  `--offline-self-check` теперь есть.
 - Неподтверждённые ветви (P) сосредоточены в `session.c` (97), `d2kd.c` (41),
   `http80.c` (22), `udp_release.c` (20): в основном это склейка/loop-код,
   у которого проверены ключевые ветви, но не весь набор краевых условий C.
@@ -3817,7 +3817,7 @@ R2O-владелец: `crates/r2o-datapath/src/main.rs` (`run`, `parse_options`,
   дренирует sched так, как C. Остальные ветви (NFQUEUE, raw, control,
   hold/release, HTTP, ICMP, stats, route/cap) перенесены — P.
 
-**Итог:** 44 функции; N — `count_reason`, `d2k_session_suspects`,
+**Итог:** 44 функции; N — `count_reason`,
 `d2k_session_shape_tcp_options_family`, `d2k_http_trace`
 (диагностика/CLI), остальные P/E с подтверждёнными пробелами
 CLI-логирования, health-файла, duration, состава сводки,
@@ -3934,7 +3934,7 @@ CLI-логирования, health-файла, duration, состава свод
 | `d2k_session_refusals_udp` | 3585-3587 | 3 | отказы UDP-таблицы | UDP flow table (`main.rs`) | **P** | C `return s ? d2k_track_refusals(s->uflows) : 0`. Rust отказы UDP-таблицы хранятся в её счётчике; отдельной функции нет. Проверено: отказы UDP-таблицы хранятся в её счётчике и выводятся в сводке. |
 | `d2k_session_hellos` | 3589-3591 | 3 | число приветствий | `engine.rs:539 r2o_tcp_hello_flows` | **P** | C `s->hellos`; Rust `r2o_tcp_hello_flows` — счётчик потоков с ClientHello. Семантика близка, но C `hellos` может считать все hello; прямого differential нет. |
 | `d2k_session_with_sni` | 3593-3595 | 3 | приветствия с SNI | `engine.rs:543 r2o_tcp_hellos_with_sni` | **P** | C `return s ? s->with_sni : 0`. Rust `r2o_tcp_hellos_with_sni()`; unit «1 с SNI, 0 без». Проверено unit `r2o_tcp_hellos_with_sni`: 1 при SNI, 0 без; то же поле, что C `s->with_sni`. |
-| `d2k_session_suspects` | 3597-3599 | 3 | число подозрений | события/журнал (`EVENT_R2O_*`) | **N** | C `s ? s->suspects : 0`, `suspects++` в `suspect_num`. Rust подозрения уходят событиями/журналом; глобального счётчика `suspects` и getter-а нет. |
+| `d2k_session_suspects` | 3597-3599 | 3 | число подозрений | `session_stats.rs` `r2o_session_suspects`, `engine.rs` `r2o_note_suspect`, `r2o_quic.rs`/`r2o_voice.rs` `mark_suspected` | E | C `s ? s->suspects : 0`, `suspects++` в `suspect_num` один раз на поток. Rust общий `AtomicU64`; TCP `r2o_note_suspect` дедуплицирует по `suspect_counted`, QUIC/voice — по `flow.suspected`. Тесты `session_suspect_counts_once_per_tcp_flow`, `session_suspects_increment_by_one_per_note`. |
 | `d2k_session_rst_dropped` | 3601-3603 | 3 | снятые RST | `engine.rs:552 r2o_tcp_rst_dropped` | **P** | C `return s ? s->rst_dropped : 0`. Rust `r2o_tcp_rst_dropped()` — то же значение; API иное. Проверено: `r2o_tcp_rst_dropped()` читает тот же счётчик снятых RST. |
 | `d2k_session_exchanges` | 3605–3607 | 3 | число обменов | `engine.rs` `session_exchanges`, `r2o_udp_sessions.rs` `session_exchanges` | E | C `s->exchanges++` при первом ответе/прикладных данных. Rust считает TCP-обмены при `exchange_told` (кроме controller probe) и UDP при отправке `R2oUdpExchangeEvent`; тесты `tcp_журнал_повышает...` (`1→2`) и `r2o_stun_сверяет...` (`1→2`). |
 | `d2k_session_reply_hidden` | 3609-3611 | 3 | ACK указал на невидимый ответ | `engine.rs:548 r2o_reply_hidden` | **P** | C `return s ? s->reply_hidden : 0`. Rust `r2o_reply_hidden()`; `r2o-tcp-reply-hidden-differential.sh`. Проверено `r2o-tcp-reply-hidden-differential.sh`: ACK на невидимый ответ даёт тот же счётчик. |

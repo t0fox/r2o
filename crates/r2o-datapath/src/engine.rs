@@ -151,6 +151,8 @@ struct TcpSession {
     fin_retry_reported: bool,
     rst_cut_reported: bool,
     r2o_reply_hidden_reported: bool,
+    /// C `fl->suspected`: подозрение уже учтено в общем счётчике.
+    suspect_counted: bool,
     client_shape: u8,
     hello_capture_done: bool,
     last_seen: Instant,
@@ -213,6 +215,7 @@ impl TcpSession {
             fin_retry_reported: false,
             rst_cut_reported: false,
             r2o_reply_hidden_reported: false,
+            suspect_counted: false,
             client_shape: 0,
             hello_capture_done: false,
             last_seen: now,
@@ -482,6 +485,23 @@ impl TcpSessions {
     /// Учесть завершение, которое уже не относится к живому поколению.
     pub fn r2o_note_sent_lost(&mut self) {
         self.session_sent_lost = self.session_sent_lost.saturating_add(1);
+    }
+
+    /// C `suspect_num` для TCP: учесть подозрение не более одного раза на поток.
+    pub fn r2o_note_suspect(&mut self, key: &[u8; KEY_LEN]) -> bool {
+        let Some((_, session)) = self
+            .flows
+            .iter_mut()
+            .find(|(flow_key, _)| flow_key.wire_key() == *key)
+        else {
+            return false;
+        };
+        if session.suspect_counted {
+            return false;
+        }
+        session.suspect_counted = true;
+        crate::session_stats::r2o_note_session_suspect();
+        true
     }
 
     pub fn r2o_tcp_capture_stats(&self) -> CaptureStats {
@@ -4735,6 +4755,33 @@ mod tests {
             PacketDecision::Accept
         );
         assert!(sessions.is_empty(), "обычный FIN освобождает запись потока");
+    }
+
+    #[test]
+    fn session_suspect_counts_once_per_tcp_flow() {
+        let plan = tcp_fake_plan_with_rst_guard();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+        );
+        let hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello());
+        decide_with_session(&mut sessions, &plan, &hello);
+        let key = crate::capture::TcpFlowKey::from_packet(&hello)
+            .unwrap()
+            .wire_key();
+        let before = crate::session_stats::r2o_session_suspects();
+        assert!(sessions.r2o_note_suspect(&key));
+        assert!(!sessions.r2o_note_suspect(&key));
+        assert_eq!(crate::session_stats::r2o_session_suspects(), before + 1);
     }
 
     #[test]

@@ -1228,12 +1228,14 @@ mod app {
                 let reverse_queue_visible = options.reverse_queue_visible
                     && control.as_ref().is_some_and(ControlServer::is_connected);
                 tcp_sessions.expire_with_silent(now, options.r2o_idle_timeout, |event| {
-                    let _ = send_tcp_silent_event(
+                    if send_tcp_silent_event(
                         &mut control,
                         &mut flow_journal,
                         &journal_origin,
                         &event,
-                    );
+                    ) {
+                        r2o_datapath::session_stats::r2o_note_session_suspect();
+                    }
                 });
                 for event in tcp_sessions.sweep_silent(now, reverse_queue_visible) {
                     if send_tcp_silent_event(
@@ -1243,6 +1245,7 @@ mod app {
                         &event,
                     ) {
                         tcp_sessions.mark_silent(&event.key);
+                        tcp_sessions.r2o_note_suspect(&event.key);
                     }
                 }
                 if conntrack.is_some() && control.as_ref().is_some_and(ControlServer::is_connected)
@@ -1265,6 +1268,7 @@ mod app {
                             &event,
                         ) {
                             tcp_sessions.mark_tcp_stall(&event.key);
+                            tcp_sessions.r2o_note_suspect(&event.key);
                         }
                     }
                 }
@@ -3335,6 +3339,7 @@ mod app {
         for event in sessions.fin_retry_candidates() {
             if send_tcp_fin_retry_event(control, flow_journal, journal_origin, &event) {
                 sessions.mark_fin_retry(&event.key);
+                sessions.r2o_note_suspect(&event.key);
             } else if !control.as_ref().is_some_and(ControlServer::is_connected) {
                 break;
             }
@@ -3514,8 +3519,10 @@ mod app {
             }
         }
         for event in sessions.take_tcp_silence_events() {
-            if !controller_probe {
-                send_tcp_silent_event(control, flow_journal, journal_origin, &event);
+            if !controller_probe
+                && send_tcp_silent_event(control, flow_journal, journal_origin, &event)
+            {
+                sessions.r2o_note_suspect(&event.key);
             }
         }
         send_pending_tcp_fin_retry(sessions, control, flow_journal, journal_origin);

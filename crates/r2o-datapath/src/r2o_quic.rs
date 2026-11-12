@@ -576,8 +576,10 @@ impl R2oQuicSessions {
             .flows
             .iter_mut()
             .find(|(flow_key, _)| flow_key.wire_key() == *key)
+            && !flow.suspected
         {
             flow.suspected = true;
+            crate::session_stats::r2o_note_session_suspect();
         }
     }
 
