@@ -226,12 +226,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 195 | 340 | 13 | 0 |
+| core-net | 548 | 191 | 344 | 13 | 0 |
 | core-state | 692 | 152 | 537 | 3 | 0 |
 | datapath-core | 400 | 122 | 267 | 11 | 0 |
 | datapath-plan | 183 | 102 | 76 | 5 | 0 |
 | detect | 159 | 49 | 100 | 10 | 0 |
-| **Итого** | **1982** | **620** | **1320** | **42** | **0** |
+| **Итого** | **1982** | **616** | **1324** | **42** | **0** |
 
 
 ---
@@ -349,6 +349,8 @@ E→P, `d2k_qc_peer_name` E→N, `remember_live_failure` P→N,
 
 Rust-владелец: `crates/r2o-controller/src/hello.rs` (почти построчный порт парсера и сборки ClientHello). Дифференциал: `scripts/test-controller-clienthello-differential.sh` (C-оракул `tests/d2o_tls_parse_differential.c` + `core/hello.c` против `examples/tg_cl12_tls_trace.rs`).
 
+**Прочитано построчно: 19/19 функций, 609 строк C (1–609).**
+
 | C-функция | строки | размер | назначение | R2O-аналог | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `rd16` | 51-53 | 3 | big-endian u16 из буфера | `hello.rs:186 hello_u16` | E | хелпер; владелец `parse_hello` → `hello.rs:213 parse_hello_layout`, дифф `test-controller-clienthello-differential.sh` |
@@ -374,6 +376,8 @@ Rust-владелец: `crates/r2o-controller/src/hello.rs` (почти пост
 ## core/tls12.c (26 функций)
 
 C-реализация минимального TLS 1.2 клиента (ECDHE+AES128-GCM, X25519/P-256) для зондов/измерений. В R2O построчного порта нет: стек заменён `rustls` с ограничением cipher suites и KX-групп (`r2o-controller/src/r2o_tls.rs:53`, ветка `tls12`). Дифференциал: `scripts/r2o-tls-verify-differential.sh` → `tests/d2o_verify_differential.rs` (в т.ч. `donor_and_r2o_reject_short_tls12_server_finished` с C-фикстурой `tls12`).
+
+**Прочитано построчно: 26/26 функций, 800 строк C (1–800).**
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -408,6 +412,8 @@ C-реализация минимального TLS 1.2 клиента (ECDHE+AE
 
 C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM) с веткой ECH и downgrade на TLS 1.2. R2O заменяет стек на `rustls`; собственная сборка ClientHello для повторов/позднего RX — `r2o_tls.rs:340 r2o_tls13_client_hello`, ECH — `r2o_tls.rs:274/305` + `ech.rs`. Дифференциалы: `scripts/r2o-tls-verify-differential.sh`, `scripts/r2o-ech-rx-ladder-differential.sh`, `tests/r2o_tls.rs`.
 
+**Прочитано построчно: 23/23 функций, 613 строк C (1–613).**
+
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `tls_dispose` | 83-85 | 3 | освободить сессию TLS1.3 и снять diag-учёт | `r2o_tls.rs` (rustls, RAII) | P | владелец `tls_connect_internal`; отдельной функции нет |
@@ -437,6 +443,8 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 ## core/tls13core.c (24 функции)
 
 Ядро TLS 1.3/ECH: DER-разбор SAN, сборка ClientHello, расписание ключей, разбор ServerHello, HPKE для ECH. Часть перенесена почти построчно: `response.rs` (SAN), `r2o_tls.rs:340 r2o_tls13_client_hello`, `ech.rs`. Дифференциалы: `tests/response.rs::d2o_shared_tls_response_vectors_match`, `tests/r2o_tls.rs`, `scripts/r2o-ech-rx-ladder-differential.sh`.
+
+**Прочитано построчно: 24/24 функций, 701 строка C (1–701).**
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -468,6 +476,8 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 ## core/verify.c (74 функции)
 
 Проверочный зонд D2O: TCP/TLS 1.2/1.3 + HTTP/1.x, бюджет keep-alive, Discord Gateway WebSocket, QUIC/HTTP/3. В R2O основной преемник — `r2o-controller/src/fetch.rs` (страницы, бюджеты, Gateway), `r2k-core/src/http_response.rs` (HTTP-framing), `r2o_quic_http3.rs` (QUIC/H3), `ech.rs`. Дифференциалы: `scripts/r2o-tls-verify-differential.sh` (C `verify.o` как оракул), `scripts/test-http-chunk-framing-differential.sh`, `scripts/r2o-http-search-differential.sh`.
+
+**Прочитано построчно: 74/74 функций, 2156 строк C (1–2156).**
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -523,10 +533,10 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `ech_http_denial` | 1451-1460 | 10 | status 429 и level не DENIED/BLOCKPAGE → CHALLENGE, reason «не усиливать отказ» | `main.rs:14518-14535 r2o_ech_witness_transport_proof`, `:27000+` unit | **E** | Rust принимает ECH-witness при `status==429 && !Blocked && !LegalDenial` (или cf-challenge), `complete`, TLS/ECH/name_ok. Unit `ECH witness 429 rate limits must match the donor challenge classification`. |
 | `d2k_verify_probe_ech_on` | 1462-1476 | 15 | требует config+origin; probe13 encoding 0 + ECH; затем `ech_http_denial` | `fetch.rs:738-760 r2o_fetch_ech_connected_stream` | **P** | Rust требует `EchConfig`, делает Identity-запрос, при `ech_status()!=Accepted` возвращает ошибку, `ech_accepted=Some(true)`; 429-классификация — в witness-слое. C вызывает probe13 с encoding 0 и отдельно `ech_http_denial`. Живой ECH-зонд C/Rust differential не покрыт. |
 | `d2k_verify_probe_ech_origin_on` | 1478-1492 | 15 | `d2k_ech_resolve(origin,dns_mark)`, точное `outer_name == config.public_name`, затем probe с mark только при `use_fd<0` | `ech.rs:158-220 resolve_ech_config`, `:150 r2o_ech_tls_config`, `main.rs:14490+` | **P** | Rust резолвит HTTPS RR через `/etc/resolv.conf` + UDP/53 с SO_MARK и строит `R2oEchConfig{public_name,origin_name,config_list}`; **сверка `outer_name == public_name` в `r2o_ech_tls_config` не выполняется** — её делает вызывающий discovery. DNS-путь/точное сравнение C/Rust differential не покрыты. |
-| `d2k_verify_replay_on` | 1499-1562 | 64 | contact с TS-профилем, poll/recv 16 байт, ServerHello `16 03 ?? 02` → HANDSHAKE+replay_proof, alert, иное/тишина | `fetch.rs:331-... r2o_verify_tls_replayed_client_hello`, `r2o_tls_replay_client_hello` | **E** | Rust повторяет сохранённый ClientHello и проверяет ServerHello по донорскому критерию; differential `donor_and_r2o_require_server_hello_when_replaying_captured_ech`, `...absolute_deadline_to_replayed_client_hello`. Отличие: C учитывает TCP TS-профиль, Rust — нет. |
+| `d2k_verify_replay_on` | 1499-1562 | 64 | contact с TS-профилем, poll/recv 16 байт, ServerHello `16 03 ?? 02` → HANDSHAKE+replay_proof, alert, иное/тишина | `fetch.rs:331-... r2o_verify_tls_replayed_client_hello`, `r2o_tls_replay_client_hello` | **P** | Rust повторяет сохранённый ClientHello и проверяет ServerHello по донорскому критерию; differential `donor_and_r2o_require_server_hello_when_replaying_captured_ech`, `...absolute_deadline_to_replayed_client_hello`. **Подтверждённые отличия:** C передаёт `g_verify_tcp_timestamps` в contact (`verify.c:1512-1514`) и оставляет fd открытым; Rust TCP TS-профиль не принимает и закрывает поток при выходе. Байтовый критерий ServerHello совпадает. |
 | `d2k_verify_probe_on` | 1564-1568 | 5 | probe13 encoding=2, path NULL | `fetch.rs:844 r2o_fetch_with_phase_timeout` | **E** | `donor_and_r2o_send_the_same_default_verification_request`. |
 | `d2k_verify_probe_alpn_on` | 1578-1625 | 48 | TLS-проба с ALPN клиента, без прикладного уровня | `fetch.rs:225-330 r2o_verify_tls_connected_stream_with_alpn` | **E** | Rust завершает handshake, возвращает TLS/name_ok/handshake_verified и reason «приложение не измерялось»; differential `donor_and_r2o_preserve_captured_mqtt_and_absent_alpn`. |
-| `verify_probe12_internal` | 1636-1701 | 66 | полный зонд TLS1.2 (contact, handshake, page, бюджет) | `fetch.rs` с `tls12=true` | **E** | `donor_and_r2o_reject_short_tls12_server_finished` + `r2o-tls-verify-differential.sh`; те же отличия fd/TS-профиля, что у probe13. |
+| `verify_probe12_internal` | 1636-1701 | 66 | полный зонд TLS1.2 (contact, handshake, page, бюджет) | `fetch.rs` с `tls12=true` | **P** | `donor_and_r2o_reject_short_tls12_server_finished` + `r2o-tls-verify-differential.sh` покрывают TLS1.2-handshake/отказ. **Подтверждённые отличия:** C передаёт `g_verify_tcp_timestamps` в contact и оставляет fd открытым после `d2k_tls12_free` (`verify.c:1660-1699`); Rust TCP TS-профиль не принимает, `TcpStream` закрывается при выходе из fetch. |
 | `d2k_verify_probe12_on` | 1703-1708 | 6 | обёртка TLS1.2 | `fetch.rs` `tls12=true` | **E** | Тот же differential. |
 | `d2k_verify_probe_identity_on` | 1710-1715 | 6 | `encoding=0` (identity), TLS1.2/1.3 | `fetch.rs:434 r2o_d2o_verification_encoding` | **P** | `r2o_d2o_verification_encoding` выбирает Identity по пути; отдельного differential на identity-зонд нет. |
 | `d2k_verify_probe_gzip_on` | 1717-1722 | 6 | `encoding=1` (gzip), TLS1.2/1.3 | `fetch.rs:434` + `R2oFetchEncoding::Gzip` | **P** | То же; gzip-путь покрыт page/RX-тестами косвенно. |
@@ -550,6 +560,8 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 
 Повтор снятой пачки QUIC Initial с новым DCID и проверка ответа. Порт: `r2o-controller/src/quic_replay.rs` (`QuicReplayProbe::prepare`, reseal снимка, `r2k_quic_snapshot_verify_bound_response`) + `r2k-core/src/quic_snapshot.rs`. Тесты: `r2k-core/tests/quic_snapshot.rs`, `quic.rs` (verify/retry), контроллерные snapshot-тесты.
 
+**Прочитано построчно: 2/2 функции, 127 строк C (1–127).**
+
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `replay_now_ms` | 23-27 | 5 | монотонное время, мс | `std::time::Instant` | **P*** | static-хелпер; C `CLOCK_MONOTONIC` в мс, Rust `Instant` с `Duration` — монотонность та же, единицы пересчитываются. |
@@ -558,6 +570,8 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 ## core/httpsprobe.c (22 функции)
 
 Асинхронный HTTPS-зонд (TCP 443 → first flight → TLS1.3/1.2) и кэш состояний `d2k-https`. В R2O: `r2o-controller/src/https_probe.rs` (воркер, кэш, save/load), `response.rs` (классификация и TLS-проба). Дифференциал: `scripts/test-controller-httpsprobe-differential.sh` (C `httpsprobe.o` против `examples/tg_cl13_httpsprobe_trace.rs`, кэш/состояния/загрузка).
+
+**Прочитано построчно: 22/22 функций, 564 строки C (1–564).**
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -588,6 +602,8 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 
 Логика HTTP-upgrade/порталов: безопасный разбор запроса, распознавание провайдерского портала, ответ 307. Перенесена почти построчно в `crates/r2k-core/src/httpup.rs` и используется контроллером/датапасом. Векторы — `crates/r2k-core/tests/httpup.rs`; косвенно участвует в `scripts/r2o-http-search-differential.sh` (линкуется `httpup_logic.o`).
 
+**Прочитано построчно: 15/15 функций, 277 строк C (1–277).**
+
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `ascii_alnum` | 16-19 | 4 | ASCII-буква/цифра | `r2k-core/src/httpup.rs:390 valid_dns_host` (встроено `is_ascii_alphanumeric`) | **E*** | Хелпер; владелец `dns_host` → `valid_dns_host`, тесты `httpup.rs:78,108`. |
@@ -595,7 +611,7 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `host_equal` | 37-44 | 8 | снять по одной хвостовой точке, сравнить без регистра, непустые | `httpup.rs:468-472 same_host` | **E** | Совпадает; `tests/httpup.rs:78,69`. |
 | `known_portal_host` | 46-51 | 6 | 6 известных порталов | `httpup.rs:492-502 known_portal_host` | **E** | Список и `same_host` совпадают; `tests/httpup.rs:78`. |
 | `find_crlf` | 53-58 | 6 | первый CRLF до `end` | `httpup.rs:382-388 find_crlf` | **E*** | Rust `windows(2)` + `checked_add`; эквивалентно; владелец `parse_request`, тесты `:11,108`. |
-| `parse_request` | 60-130 | 71 | GET/HEAD, HTTP/1.0/1.1, origin-target без控制/`#`, один Host, CL только `0`, запрет TE, порт только `:80`, финальный CRLFCRLF | `httpup.rs:220-229 parse_request`, `:231-344 parse_plan_request` | **P** | **Совпадает:** метод/версия/target, Host/CL/TE, `:80`, хвостовая точка, точный конец заголовков. **Подтверждённое расхождение:** Rust `parse_plan_request` помечает `boundary_known=false` при любом control-байте в строке заголовка и при невалидном HTTP-token имени; затем `parse_request` требует `end_offset==Some(header_len)` и отвергает запрос. C неизвестные/битые заголовки игнорирует (кроме Host/CL/TE) и control-байты не проверяет. Rust также отвергает all-digit last label (см. `dns_host`). `tests/httpup.rs:11,108`. |
+| `parse_request` | 60-130 | 71 | GET/HEAD, HTTP/1.0/1.1, origin-target без control/`#`, один Host, CL только `0`, запрет TE, порт только `:80`, финальный CRLFCRLF | `httpup.rs:220-229 parse_request`, `:231-344 parse_plan_request` | **P** | **Совпадает:** метод/версия/target, Host/CL/TE, `:80`, хвостовая точка, точный конец заголовков. **Подтверждённое расхождение:** Rust `parse_plan_request` помечает `boundary_known=false` при любом control-байте в строке заголовка и при невалидном HTTP-token имени; затем `parse_request` требует `end_offset==Some(header_len)` и отвергает запрос. C неизвестные/битые заголовки игнорирует (кроме Host/CL/TE) и control-байты не проверяет. Rust также отвергает all-digit last label (см. `dns_host`). Отдельно: `parse_plan_request` Rust принимает произвольный uppercase-метод и `Content-Length>0` (для выбора плана), тогда как C `parse_request` — только GET/HEAD и CL=0; для upgrade-пути это сходится через `parse_request`, для plan-API — шире. `tests/httpup.rs:11,108`. |
 | `d2k_httpup_request_safe` | 132-135 | 4 | предикат безопасного запроса | `httpup.rs:164-166 request_safe` | **P** | Тонкая обёртка; наследует более строгий `parse_request` Rust. `tests/httpup.rs:11`. |
 | `build_redirect` | 137-149 | 13 | `HTTP/1.1 307`, `Location: https://host+target`, `Cache-Control: no-store`, `Connection: close`, `Content-Length: 0`, `X-D2K-HTTP-Upgrade: <reason>` | `httpup.rs:504-516 build_redirect` | **P** | **Подтверждённое расхождение:** C пишет `X-D2K-HTTP-Upgrade: provider-portal`, Rust — **`X-R2O-HTTP-Upgrade: provider-portal`**. Остальные строки/порядок/CRLF совпадают. Rust-тест `builds_the_exact_https_redirect...` фиксирует именно `X-R2O`, т.е. расхождение закреплено тестом. |
 | `portal_marker` | 151-170 | 20 | 8 маркеров по меткам хоста | `httpup.rs:474-490 portal_marker` | **E** | Список/разбиение/регистр совпадают; `tests/httpup.rs:78`. |
@@ -609,6 +625,8 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 ## core/httpsearch.c (66 функций)
 
 Поиск HTTP-обхода: база → свои планы → split/checksum/продукт → fallback, с подтверждением APPLIED и живой привязкой. В R2O: `r2o-controller/src/http_search.rs` (judge, кандидаты, id, чтение ответа) и `main.rs` (`HttpSearchRecordCache:4464`, `run_http_search_task:22901`, `begin_http_search:19542`, `http_baseline_failure_action:22853`). Дифференциалы: `scripts/r2o-http-search-differential.sh` (набор C-фикстур `d2o_http_*_differential.c` против Rust-тестов), `tests/http_search.rs`.
+
+**Прочитано построчно: 66/66 функций, 1593 строки C (1–1593).** Строки в таблице — реестровые/CSV; фактические строки C в `a378` на **+2** больше (сдвиг extractor, см. `deep-core-verify.md`). Например, `d2k_httpsearch_save` фактически 1446–1473, `d2k_httpsearch_load` — 1475–1514, `d2k_hs_candidate_text` — 296–326.
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -671,7 +689,7 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `d2k_httpsearch_tick` | 1397-1427 | 31 | таймауты ACK/APPLIED/BASE/RUN | `main.rs` deadline handling | P | таймеры на task/timeout, не tick |
 | `d2k_httpsearch_push_all` | 1429-1442 | 14 | переустановить все сохранённые планы | `main.rs` restore/install loop | P | покрыто durable-тестом частично |
 | `d2k_httpsearch_save` | 1444-1471 | 28 | атомарная запись `d2k-http-plans 1`: `host family key wall`, `fflush/fsync/fclose/rename`, `unlink(tmp)` при ошибке | `main.rs`/`catalog.rs` persist (JSON-каталог) | **P** | C пишет отдельный файл `d2k-http-plans 1` с точным форматом и атомарной заменой; Rust сохраняет каталог JSON, файла и формата `d2k-http-plans` нет. C/Rust durable-дифференциал `d2o_http_durable_differential.c` сравнивает только маркер `persisted_before_flush=yes`, а не содержимое/формат файла; тест `confirmed_http_candidate_is_durable_before_catalog_flush_interval` проверяет каталог. **Фактические строки в a378 — 1446–1473; в реестре/CSV 1444–1471 (сдвиг extractor +2, см. `deep-core-verify.md`).** |
-| `d2k_httpsearch_load` | 1473-1512 | 40 | разбор файла планов, known_key, install | `catalog.rs:391 load` (HTTP-планы) | P | отдельного загрузчика `d2k-http-plans` с теми же правилами не найдено |
+| `d2k_httpsearch_load` | 1473-1512 | 40 | разбор файла планов, known_key, install | `catalog.rs:391 load` (HTTP-планы) | P | отдельного загрузчика `d2k-http-plans` с теми же правилами не найдено. **Фактические строки в a378 — 1475–1514; в реестре/CSV 1473–1512 (сдвиг extractor +2).** |
 | `runner_main` | 1525-1537 | 13 | поток однократного зонда | `std::thread`/async task | P | отдельной структуры нет |
 | `d2k_hs_runner_new` | 1539-1553 | 15 | создать runner с pipe/cond | `std::thread` + канал | P | RAII |
 | `d2k_hs_runner_free` | 1555-1562 | 8 | join/close/destroy | `JoinHandle`/Drop | P | RAII |
@@ -683,7 +701,7 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 
 Кодирование/разбор HTTP/3: control-поток, QPACK-подобные префиксные целые, HEADERS-запрос, статус из HEADERS (static index + Huffman). Порт: `crates/r2k-core/src/h3.rs` (построчный). Дифференциал: `scripts/test-controller-h3-httpup-differential.sh` (C `h3.c` против `examples/tg_cl14_h3_httpup_trace.rs`), плюс unit-тесты в `h3.rs`.
 
-**Построчная сверка a378:** все 9 функций сверены с `h3.rs`; различий в алгоритмах/границах не найдено. Совпадают: `control` 00 04 00; `prefix_max/prefix_int/prefix_int_read` (включая 8-битный префикс и `shift>56`); `request` (static 17/23/1, authority literal name 0, path literal name 1, лимиты 255/512); `huff_status` (5/6 бит, EOS-хвост); `static_status`/`name_is_status` (24–28, 63–71); `decode_section` (indexed, literal-name, literal-literal, post-base index/literal); `status` (пропуск неизвестных кадров, отказ на обрезанном).
+**Прочитано построчно: 9/9 функций, 280 строк C (1–280).** Все 9 функций сверены с `h3.rs`; различий в алгоритмах/границах не найдено. Совпадают: `control` 00 04 00; `prefix_max/prefix_int/prefix_int_read` (включая 8-битный префикс и `shift>56`); `request` (static 17/23/1, authority literal name 0, path literal name 1, лимиты 255/512); `huff_status` (5/6 бит, EOS-хвост); `static_status`/`name_is_status` (24–28, 63–71); `decode_section` (indexed, literal-name, literal-literal, post-base index/literal); `status` (пропуск неизвестных кадров, отказ на обрезанном).
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -700,6 +718,8 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 ## core/quicwire.c (28 функций)
 
 QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/open, Retry integrity, range-набор. В R2O — приватные функции `crates/r2k-core/src/quic.rs` (`derive_initial_keys`, `seal_initial`, `open_initial`, `retry_integrity_valid`, `decode_packet_number`, `read/write_varint`). Доказательства: RFC-векторы 9001/9369 в unit-тестах `quic.rs`, `tests/quic_snapshot.rs`.
+
+**Прочитано построчно: 28/28 функций, 571 строка C (1–571).**
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -736,6 +756,8 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 
 Разбор QUIC Initial, извлечение ClientHello/SNI, инкрементальная сборка и split crypto-фрейма. Порт: `crates/r2k-core/src/quic.rs` (`parse_initial_header`, `open_initial`, `collect_initial_crypto_frames`, `initial_split_crypto`, `r2k_quic_initial_client_hello_from_datagrams`). Доказательства: RFC 9001/9369 unit-тесты, `tests/quic_snapshot.rs`, `scripts/r2o-quic-hello-differential.sh`.
 
+**Прочитано построчно: 21/21 функций, 948 строк C (1–948).**
+
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `rd16` | 97-99 | 3 | big-endian u16 | `u16::from_be_bytes` | E | хелпер; владельцы покрыты RFC-тестами |
@@ -764,6 +786,8 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 
 Сборка QUIC Initial из профиля ClientHello: выбор профиля, переименование/удаление SNI, варианты probing (v2, split, longer, clear fixed bit), recid. R2O: `r2k-core/src/quic.rs:261 r2k_quic_initial_build`, `:1113 r2k_quic_client_hello_rename_sni`, `:338 r2k_quic_initial_reseal_for_dcid`; профиль — `r2o-controller/src/quic_replay.rs:98 r2o_quic_profile_snapshot`. Тесты: `quic.rs` (RFC 9001/9369, rename/reseal), `tests/quic_snapshot.rs`.
 
+**Прочитано построчно: 13/13 функций, 548 строк C (1–548).**
+
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `select_probe_profile` | 34-45 | 12 | копия профиля + MIPS-замена cipher list по `[0,6]` на `[0x1303,0x1301,0x1302]` | `quic_replay.rs:98-135 r2o_quic_profile_snapshot` | **E** | Rust: профиль 275 байт, MIPS-ветка `get(39..41)==[0,6]` → те же три cipher suite, random/SCID/key_share обновляются. Эквивалентно. |
@@ -784,6 +808,8 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 
 Упаковка нескольких QUIC Initial в снимок `QSN` (для повторного использования/пересылки). Порт: `crates/r2k-core/src/quic_snapshot.rs` (`pack`, `parse`, `reseal`, `verify_bound_response`); тесты `r2k-core/tests/quic_snapshot.rs`.
 
+**Прочитано построчно: 6/6 функций, 104 строки C (1–104).**
+
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `d2k_qsnap_is` | 13-15 | 3 | проверка магии `QSN` | `quic_snapshot.rs:50 r2k_quic_snapshot_parse` (проверяет magic) | E | test `tests/quic_snapshot.rs` round-trip; magic проверяется парсером |
@@ -797,6 +823,8 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 
 Перешифровка снимка `QSN` под новый DCID. Порт: `r2k-core/src/quic_snapshot.rs:79 r2k_quic_snapshot_reseal`, `quic.rs:338 r2k_quic_initial_reseal_for_dcid`.
 
+**Прочитано построчно: 2/2 функции, 134 строки C (1–134).**
+
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `reseal_one` | 24-73 | 50 | открыть Initial старым ключом, собрать с новым DCID/ключами, сохранить длину | `quic.rs:338 r2k_quic_initial_reseal_for_dcid` | E | tests `quic.rs:1398-1420` (reseal формы), `quic_snapshot.rs:30` |
@@ -806,7 +834,7 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 
 Низкоуровневый QUIC-зонд: пул адресов, разбор/проверка Initial и Retry, параллельные ask-циклы, arm-стратегии, вопросы свойств, этап данных HTTP/3 и классификатор `classify_run`. В R2O: `r2o-controller/src/quic_replay.rs` (пул, фильтр, кандидаты, ask), `r2k-core/src/quic.rs` (verify/data judge/wait), `r2o_quic_http3.rs` (этап данных), `main.rs:20496 r2o_run_quic_discovery_trial`. Дифференциалы: `test-controller-quic-pool-differential.sh`, `test-quic-budget-init-differential.sh`, `test-quic-app-bytes-differential.sh`, `test-quic-http3-full-stage-differential.sh`, `test-quic-short-control-differential.sh`, `d2o_quic_base_differential.c`.
 
-**Построчная сверка a378 (все 56 функций):** C прочитан целиком. Подтверждённые отличия: `qp_recv_ttl` — N (Rust не читает TTL/hoplimit); `d2k_quic_props_findings` — N (текстовые выводы не портированы); `qp_send_one`/`qp_send_fragmented`/`qp_arm_first_send` — P, потому что plan-send (`d2k_udp_plan_send`: prefix/copies/TTL/split/fragment) заменён прямым `send`/`QuicReplayProbe`; `d2k_quic_budget_ms` — P (Rust бюджет в пакетах, формула мс не портирована); `qp_questions_step` — P (C задаёт 6 вопросов: junk, frames, split-datagrams, clear-fixed, low-port, longer; version2 снят, Rust-набор кандидатов иной); `classify_run` — P (async-переписывание). Совпадают: пул/дедуп, varint/Initial, donor-response/VN/Retry, bound-проверка, `qp_dyn_wait`, `qp_pinned_or_next`, neutral SNI, base-дифференциал.
+**Прочитано построчно: 56/56 функций, 2936 строк C (1–2936).** Подтверждённые отличия: `qp_recv_ttl` — N (Rust не читает TTL/hoplimit); `d2k_quic_props_findings` — N (текстовые выводы не портированы); `qp_send_one`/`qp_send_fragmented`/`qp_arm_first_send` — P, потому что plan-send (`d2k_udp_plan_send`: prefix/copies/TTL/split/fragment) заменён прямым `send`/`QuicReplayProbe`; `d2k_quic_budget_ms` — P (Rust бюджет в пакетах, формула мс не портирована); `qp_questions_step` — P (C задаёт 6 вопросов: junk, frames, split-datagrams, clear-fixed, low-port, longer; version2 снят, Rust-набор кандидатов иной); `classify_run` — P (async-переписывание). Совпадают: пул/дедуп, varint/Initial, donor-response/VN/Retry, bound-проверка, `qp_dyn_wait`, `qp_pinned_or_next`, neutral SNI, base-дифференциал.
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -870,6 +898,8 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 ## core/quicarms.c (8 функций)
 
 Лестница arm-стратегий QUIC: перебор blob/копий/TTL/IP-фрагментации, затем стратегии clearance/split/longer/frag. R2O: `r2o-controller/src/quic_replay.rs` (`r2o_quic_discovery_candidates`, `r2o_quic_original_fallback_candidates`, `r2o_quic_strategy_attempt_decision`). Дифференциал `r2o-diagnostics-differential.sh` (C `quicarms.c` + `d2o_quic_base_differential.c`) покрывает профиль/verify/parallel/VN/base, но не всю лестницу.
+
+**Прочитано построчно: 8/8 функций, 396 строк C (1–396).**
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -983,7 +1013,7 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 
 Собственный QUIC-клиент D2O (Initial/Handshake/1-RTT, transport params, STREAM, ACK, Retry). В R2O построчного порта нет: соединение и кадры обеспечивает `quinn`, TLS — `rustls`; собственная сборка Initial осталась в `r2k-core/src/quic.rs` (`r2k_quic_initial_build`). Дифференциалы QUIC покрывают Initial/снимки/HTTP-3 (`r2o-quic-hello-differential.sh`, `test-quic-http3-full-stage-differential.sh`, `d2o_quic_base_differential.c`).
 
-**Построчная сверка a378 (все 36 функций):** C прочитан целиком. Критические отличия: C `tp_build` объявляет idle 30000, max_udp 1452, max_data 1 МиБ, stream window 256 КиБ, streams 16/16, CID limit 2, `initial_source_connection_id`; в `r2o_quic_http3.rs`/`quic_replay.rs` **нет `TransportConfig`**, поэтому действуют умолчания quinn. C `d2k_qc_connect` **не проверяет цепочку/подпись** сертификата (только имя через `d2k_t13_cert_name_ok`), Rust `with_root_certificates`/webpki рвёт handshake при mismatch. C `first_flight` собирает CH из SNI+TP+ALPN h3 собственным `d2k_t13_ch_build`, Rust data-stage использует CH rustls. Остальные функции — P, заменены quinn/rustls; `crypto_frame` — E, `d2k_qc_peer_name` — N (в результате quinn нет name_ok).
+**Прочитано построчно: 36/36 функций, 1490 строк C (1–1490).** Критические отличия: C `tp_build` объявляет idle 30000, max_udp 1452, max_data 1 МиБ, stream window 256 КиБ, streams 16/16, CID limit 2, `initial_source_connection_id`; в `r2o_quic_http3.rs`/`quic_replay.rs` **нет `TransportConfig`**, поэтому действуют умолчания quinn. C `d2k_qc_connect` **не проверяет цепочку/подпись** сертификата (только имя через `d2k_t13_cert_name_ok`), Rust `with_root_certificates`/webpki рвёт handshake при mismatch. C `first_flight` собирает CH из SNI+TP+ALPN h3 собственным `d2k_t13_ch_build`, Rust data-stage использует CH rustls. Остальные функции — P, заменены quinn/rustls; `crypto_frame` — E, `d2k_qc_peer_name` — N (в результате quinn нет name_ok).
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -1028,7 +1058,7 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 
 Сборка IPv4/IPv6 UDP-фрагментов по 4 формам (прямой/обратный порядок, 3 фрагмента с перекрытием), контрольные суммы. Порт: `crates/r2k-core/src/wire.rs:294 build_udp_fragments_with_capacity`, `:380 udp_fragment_cuts`. Дифференциал: `crates/r2k-core/tests/ipfrag.rs::d2o_ipfrag_builder_matches_r2o_on_ipv4_ipv6_shapes` (C-оракул `tests/d2o_ipfrag_oracle.c`).
 
-**Построчная сверка a378:** все 8 функций прочитаны; различий в shape/cuts/выравнивании/перекрытиях/checksum/UDP6-заголовке не найдено. C-оракул сравнивает offsets/lengths и байты IPv4/IPv6 для shape 1..4.
+**Прочитано построчно: 8/8 функций, 129 строк C (1–129).** Различий в shape/cuts/выравнивании/перекрытиях/checksum/UDP6-заголовке не найдено. C-оракул сравнивает offsets/lengths и байты IPv4/IPv6 для shape 1..4.
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -1045,13 +1075,13 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 
 STUN Binding request/response: XOR-MAPPED-ADDRESS для IPv4/IPv6, проверка transaction id. Порт: `crates/r2k-core/src/stun.rs` (`binding_request`, `parse_binding_response`, `parse_xor_mapped`). Тесты: `crates/r2k-core/tests/stun.rs` (RFC 5769 + C-векторы Discovery).
 
-**Построчная сверка a378:** все 5 функций прочитаны; тип 0x0001/0x0101, magic, 12-байтный txid, XOR порта/адреса, IPv6-ключ magic+txid, обход атрибутов с padding 4 и отказ на длине за границей совпадают. Различий не найдено.
+**Прочитано построчно: 5/5 функций, 123 строки C (1–123).** Тип 0x0001/0x0101, magic, 12-байтный txid, XOR порта/адреса, IPv6-ключ magic+txid, обход атрибутов с padding 4 и отказ на длине за границей совпадают. **Отличие API:** C `d2k_stun_request` сам генерирует txid (`d2k_t13_random`, отказ при ошибке); Rust `binding_request(txid)` принимает готовый `[u8;12]` — генерация и обработка ошибки у вызывающего. Для валидного txid байты ответа/запроса совпадают.
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `rd16` | 19-21 | 3 | big-endian u16 | `stun.rs:161 read_u16` | E | хелпер; владелец `d2k_stun_parse_response`, тесты stun |
 | `rd32` | 23-25 | 3 | big-endian u32 | `stun.rs:168 read_u32` | E | хелпер; тесты stun |
-| `d2k_stun_request` | 27-45 | 19 | Binding request: type 0x0001, magic, random txid | `stun.rs:18 binding_request` | E | test `parses_rfc5769...`, `recognizes_only...` |
+| `d2k_stun_request` | 27-45 | 19 | Binding request: type 0x0001, magic, random txid | `stun.rs:18 binding_request` | **P** | **Отличие владения txid:** C генерирует 12 байт внутри через `d2k_t13_random` и возвращает 0 при ошибке; Rust принимает готовый `[u8;12]` от вызывающего. Для валидного txid байты запроса совпадают; тест `parses_rfc5769...`/`recognizes_only...` проверяет разбор, не генерацию. |
 | `parse_xor_mapped` | 52-83 | 32 | XOR-MAPPED IPv4/IPv6 (port ^ magic>>16, IP ^ key) | `stun.rs:133 parse_xor_mapped` | E | test `parses_rfc5769_xor_mapped_v4_and_v6_addresses` |
 | `d2k_stun_parse_response` | 85-123 | 39 | проверка типа/magic/txid, обход атрибутов с padding | `stun.rs:28 parse_binding_response` | E | tests `rejects_foreign_and_malformed...`, `...exact_transaction_id` |
 
@@ -1059,13 +1089,13 @@ STUN Binding request/response: XOR-MAPPED-ADDRESS для IPv4/IPv6, провер
 
 Голосовой зонд Discord: цели из nf_conntrack, STUN-опрос с приманками, вердикты clear/blocked/no_udp/flaky/unmeasured. В R2O: `r2o-controller/src/voice_targets.rs` (разбор целей) и `voice_measure.rs` (`r2o_measure_voice`, `r2o_ask_voice`, `r2o_evaluate_voice`, `r2o_search_voice_arms`). Тесты: unit `voice_measure.rs` (15+ сценариев), `test-voice-list-differential.sh`, Discord voice differentials.
 
-**Построчная сверка a378:** все 14 функций прочитаны. Константы совпадают: `REPEATS=3`, `MAX_REPEATS=8`, `SILENT_AFTER=4`, контроль `stun.cloudflare.com:3478`, 3 blob'а × копии `1/6`. **Отличия:** `voice_resolve` C `strtoul` без проверки хвоста (Rust strict), `voice_blob_load` C читает файлы/`D2K_FAKE_DIR` (Rust compile-time profiles), `send_one`/`discovery_probe` C plan-send vs Rust raw engine, `voice_ask_real` N. Остальные ветви/вердикты совпадают с unit-тестами.
+**Прочитано построчно: 14/14 функций, 671 строка C (1–671).** Константы совпадают: `REPEATS=3`, `MAX_REPEATS=8`, `SILENT_AFTER=4`, контроль `stun.cloudflare.com:3478`, 3 blob'а × копии `1/6`. **Отличия:** `voice_resolve` C `strtoul` без проверки хвоста (Rust strict), `d2k_voice_targets` C `strtoul/strtol` также без хвоста (Rust `parse::<u16>/<i32>` strict; на валидных строках conntrack совпадает), `voice_blob_load` C читает файлы/`D2K_FAKE_DIR` (Rust compile-time profiles), `send_one`/`discovery_probe` C plan-send vs Rust raw engine, `voice_ask_real` N. Остальные ветви/вердикты совпадают с unit-тестами.
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `is_voice_port` | 42-47 | 6 | входит ли порт в голосовые диапазоны | `voice_targets.rs:161 r2o_is_voice_port` | E | test `voice_targets.rs:231 принимает_только_границы_голосовых_диапазонов` |
 | `field_val` | 65-82 | 18 | выделить `name=value` из строки conntrack | `voice_targets.rs:131 r2o_field` | E | tests `voice_targets.rs:182,199` + `test-voice-list-differential.sh` |
-| `d2k_voice_targets` | 84-167 | 84 | разбор nf_conntrack: udp, публичный dst, voice-порт, агрегация, сортировка | `voice_targets.rs:17 r2o_parse_voice_targets`, `:26 r2o_read_voice_targets` | E | `test-voice-list-differential.sh` + 7 unit-тестов парсера |
+| `d2k_voice_targets` | 84-167 | 84 | разбор nf_conntrack: udp, публичный dst, voice-порт, агрегация, сортировка | `voice_targets.rs:17 r2o_parse_voice_targets`, `:26 r2o_read_voice_targets` | **P** | `test-voice-list-differential.sh` + 7 unit-тестов парсера проверяют валидные строки. **Подтверждённое отличие:** C `dport/sport/packets` разбирает `strtoul/strtol` без проверки хвоста (принимает `50000abc`, `+50000`, ведущие пробелы); Rust `parse::<u16>()`/`parse::<i32>()` строгий. C `packets` приводит к `int` с возможным переполнением, Rust `saturating_add`. Для нормального conntrack результат совпадает. |
 | `send_one` | 173-203 | 31 | UDP-сокет, mark, STUN 20 байт; с приманкой — `d2k_voice_arm_plan` + `d2k_udp_plan_send`, иначе send | `voice_measure.rs:608-780 r2o_ask_voice_with_arm` | **P** | **Подтверждённое отличие:** C отправляет приманку через **plan-send** (`d2k_voice_arm_plan`/`d2k_udp_plan_send`) на обычном UDP-сокете; Rust собирает raw-пакеты через `r2o_datapath::engine::decide` + `RawSocket::send_packet`. Байты/копии могут совпадать, но путь отправки и отметка иные. Тесты `отправляет_копии_приманки...`, `соединённый_udp_оракул...`. |
 | `ms_since` | 205-209 | 5 | мс с момента | `Instant::elapsed` | P | хелпер |
 | `voice_ask` | 214-297 | 84 | параллельные STUN-запросы, poll, RTT, tally | `voice_measure.rs:608 r2o_ask_voice_with_arm`, `:600 r2o_ask_voice` | E | tests `три_ответа...`, `частичный_ответ...`, `местная_ошибка...`, `voice_poll_interruption...` |
@@ -1081,6 +1111,8 @@ STUN Binding request/response: XOR-MAPPED-ADDRESS для IPv4/IPv6, провер
 ## core/voice_discovery.c (7 функций)
 
 Discord IP Discovery обход: разбор/сборка 20-байтового STUN-префикса в тексте плана, 3 обмена Discovery, поиск границы обрыва, подтверждение префиксом. В R2O: `r2o-controller/src/voice_discovery.rs` (`r2o_voice_discovery_prefix_from_plan_text`, `r2o_voice_arm_plan_text`, `r2o_search_discovery_endpoint`, `r2o_evaluate_r2o_discovery`). Дифференциалы: `r2o-discord-discovery-differential.sh`, `test-discord-voice-discovery-arm-differential.sh`.
+
+**Прочитано построчно: 7/7 функций, 159 строк C (1–159).**
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -1151,7 +1183,7 @@ Discord IP Discovery обход: разбор/сборка 20-байтового
 
 Генерация текста плана `d2k-plan` для UDP-проб: QUIC arm (blob/copies/ttl/frag/split/udplen), delay, voice-приманка, вопрос. В R2O план представлен структурой `r2k_core::plan::Plan`, а не текстом; QUIC-кандидаты несут `directives` (`r2o-controller/src/quic_replay.rs:207 R2oQuicDiscoveryCandidate.directives`), voice-текст — `voice_discovery.rs:8 r2o_voice_arm_plan_text`, `voice_measure.rs:269 r2o_measured_voice_arm_plan_text`.
 
-**Построчная сверка a378:** все 12 функций прочитаны. Подтверждённые отличия: C печатает `d2k-plan`, Rust — `r2o-plan`/структурный Plan; `d2k_quic_delay_plan` (`d2k-plan 1 6 … delay 15000`) **не имеет продюсера** в R2O (есть только разбор/применение и тестовая фикстура); `d2k_quic_arm_plan`/`compose_plan`/`question_plan` разложены на `discovery_candidates` + `plan::apply`, побайтового differential текста нет. Voice-план (`payload/fake/order/pace 15000`) совпадает и покрыт `test-controller-udpplan-differential.sh`.
+**Прочитано построчно: 12/12 функций, 266 строк C (1–266).** Подтверждённые отличия: C печатает `d2k-plan`, Rust — `r2o-plan`/структурный Plan; `d2k_quic_delay_plan` (`d2k-plan 1 6 … delay 15000`) **не имеет продюсера** в R2O (есть только разбор/применение и тестовая фикстура); `d2k_quic_arm_plan`/`compose_plan`/`question_plan` разложены на `discovery_candidates` + `plan::apply`, побайтового differential текста нет. Voice-план (`payload/fake/order/pace 15000`) совпадает и покрыт `test-controller-udpplan-differential.sh`.
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -1172,7 +1204,7 @@ Discord IP Discovery обход: разбор/сборка 20-байтового
 
 Сборка UDP-пакета/пачки из текста плана и отправка плана с контроллера: обычным sendto для нефрагментированных, raw IP_HDRINCL/IP_NODEFRAG — для IP-фрагментов. В R2O план применяется в датапате (`r2k-core/src/plan/apply.rs`), а контроллер шлёт QUIC-датаграммы напрямую (`quic_replay.rs`) без UDP-plan runtime.
 
-**Построчная сверка a378:** все 8 функций прочитаны. **Подтверждённые отличия:** C `udp_raw_prepare` на Linux **требует `IP_NODEFRAG`** и без него отказывает; в `r2o-datapath/src/raw.rs` есть только `IP_HDRINCL`/`IPV6_HDRINCL`/`SO_MARK`, `IP_NODEFRAG` отсутствует. C `d2k_udp_plan_send` читает TTL/hoplimit, собирает пачку, шлёт фрагменты raw, восстанавливает TTL и возвращает -2 на ECONNREFUSED; контроллерного API в R2O нет — проводное поведение разнесено по `plan::apply`/`wire::build_udp_fragments`/`raw.rs`, без get/set/restore TTL и без батча.
+**Прочитано построчно: 8/8 функций, 190 строк C (1–190).** **Подтверждённые отличия:** C `udp_raw_prepare` на Linux **требует `IP_NODEFRAG`** и без него отказывает; в `r2o-datapath/src/raw.rs` есть только `IP_HDRINCL`/`IPV6_HDRINCL`/`SO_MARK`, `IP_NODEFRAG` отсутствует. C `d2k_udp_plan_send` читает TTL/hoplimit, собирает пачку, шлёт фрагменты raw, восстанавливает TTL и возвращает -2 на ECONNREFUSED; контроллерного API в R2O нет — проводное поведение разнесено по `plan::apply`/`wire::build_udp_fragments`/`raw.rs`, без get/set/restore TTL и без батча.
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -1189,7 +1221,7 @@ Discord IP Discovery обход: разбор/сборка 20-байтового
 
 Измерение объёма ответа: лестница HEAD с растущим X-Pad, повторные identity-пробы, gzip-контроль, evidence обрыва по объёму/пакетам. R2O: `r2o-controller/src/r2o_volume.rs` (почти построчный порт evidence), `fetch.rs` (`r2o_fetch_measure_rx_volume*`, `r2o_fetch_rx_probe`, `r2o_fetch_measure_tx_volume`). Тесты: `crates/r2o-controller/tests/r2o_volume.rs`, `d2o_verify_differential.rs` (rx-volume), `fetch.rs` unit.
 
-**Построчная сверка a378:** все 19 функций прочитаны. Константы совпадают: `D2K_VOL_STEPS=10`/`R2O_VOLUME_TX_STEPS=10`, `CHUNK=4000`, `MIN_KB=12`, `CHUNK_DELAY=50 мс`, connect/handshake 8000 мс, RTT-таймаут `clamp(3×RTT,1500,12000)`. `fill_pad` — тот же алфавит 62 символа и fallback `i*31+7` (E). `d2k_volume_rx_evidence` — E, построчный порт с тестами. **Отличия:** `d2k_vol_verdict_name` — «цель»/«мишень»; `connect_bounded`/`drain_head_*` — C byte-loop/TCP_NODELAY/restore vs Rust `connect_target`/HTTP-парсер; `resource_retry_path` не вынесен; `measure_response_volume`/`probe_response_volume`/`d2k_volume_probe_path` покрыты e2e, не все ветки (third probe/resource retry/short-preserve) имеют C/Rust differential.
+**Прочитано построчно: 19/19 функций, 732 строки C (1–732).** Константы совпадают: `D2K_VOL_STEPS=10`/`R2O_VOLUME_TX_STEPS=10`, `CHUNK=4000`, `MIN_KB=12`, `CHUNK_DELAY=50 мс`, connect/handshake 8000 мс, RTT-таймаут `clamp(3×RTT,1500,12000)`. `fill_pad` — тот же алфавит 62 символа и fallback `i*31+7` (E). `d2k_volume_rx_evidence` — E, построчный порт с тестами. **Отличия:** `d2k_vol_verdict_name` — «цель»/«мишень»; `connect_bounded`/`drain_head_*` — C byte-loop/TCP_NODELAY/restore vs Rust `connect_target`/HTTP-парсер; `resource_retry_path` не вынесен; `measure_response_volume`/`probe_response_volume`/`d2k_volume_probe_path` покрыты e2e, не все ветки (third probe/resource retry/short-preserve) имеют C/Rust differential.
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -1217,6 +1249,8 @@ Discord IP Discovery обход: разбор/сборка 20-байтового
 
 Inline-классификация HTTP-ответа: 451/2xx/3xx-портал, тело с маркерами РКН/порталов. Порт: `r2o-controller/src/fetch.rs:2836 r2o_fetch_http_outcome`, `:2873 r2o_fetch_portal_location`, `:2916 r2o_fetch_body_has_portal`, `:2906 r2o_fetch_ascii_contains`. Отдельного differential на эту функцию не найдено; используется в page/verify-дифференциалах.
 
+**Прочитано построчно: 6/6 функций, 87 строк C (1–87).**
+
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `d2k_http_lower` | 9-11 | 3 | ASCII lower | `fetch.rs:2910 r2o_fetch_ascii_contains` (`eq_ignore_ascii_case`) | **E*** | static-хелпер; владелец `r2o_fetch_http_outcome` покрыт тестами `fetch.rs:3486-3524` (регистр в фразе/портале). |
@@ -1229,6 +1263,8 @@ Inline-классификация HTTP-ответа: 451/2xx/3xx-портал, �
 ## core/include/d2k_ip6frag_send.h (9 функций)
 
 Отправка IPv6-пакетов с фрагментацией через AF_PACKET: netlink route/neigh, MTU, MAC, SO_MARK, кеш 1 с. В R2O есть `r2o-datapath/src/raw.rs` (`RawSocket`: AF_INET/AF_INET6 IPPROTO_RAW, SO_MARK, route/MTU, IPv4/IPv6 UDP-фрагментация), но он в датапате, а не в контроллере; ручной neighbor-резолв заменён ядром.
+
+**Прочитано построчно: 9/9 функций, 206 строк C (1–206).**
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -1266,6 +1302,8 @@ Inline-классификация HTTP-ответа: 451/2xx/3xx-портал, �
 
 Inline-решения QUIC-зонда: суд этапа данных, stall-детектор с PING, бюджет датаграмм. Порт: `r2k-core/src/quic.rs:31 r2k_quic_data_judge`, `r2o-controller/src/r2o_quic_http3.rs:543 R2oQuicHttp3Budget`, `:600 R2oQuicHttp3Stall`, `quic_replay.rs:417 r2o_quic_trial_data_verdict`. Дифференциалы: `test-quic-short-control-differential.sh`, `test-quic-budget-init-differential.sh`, `d2o_quic_http3_differential.c` в `r2o-diagnostics-differential.sh`.
 
+**Прочитано построчно: 9/9 inline-функций, 930 строк заголовка C (1–930).**
+
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `d2k_quic_arm_data_judge` | 454-461 | 8 | handshake/status/bytes/complete → NO_HANDSHAKE/CUT/PASS | `quic.rs:31-58 r2k_quic_data_judge` (соответствует `judge3`) | **P** | **Расхождение:** простой C-judge: `!handshake→NO_HANDSHAKE`; `status<=0 или 451→CUT`; `complete или bytes>=32768→PASS`; иначе CUT. Rust `r2k_quic_data_judge` — это `judge3`: при `status==0` без `headers_too_long` он возвращает `NotRun`, а не `CUT`. В production `verify.c:2127` проверяется только `== PASS`, поэтому pass/fail там совпадает; C-тест `test_quic_arm_data.c:319` ждёт CUT для `(1,0,3000,1)`, differential с Rust дал бы NotRun. |
@@ -1279,6 +1317,8 @@ Inline-решения QUIC-зонда: суд этапа данных, stall-д�
 | `d2k_quic_arm_data_judge3` | 641-652 | 12 | расширенный суд: complete/budget/stalled/need_complete/headers | `quic_replay.rs:417 r2o_quic_trial_data_verdict`, `r2k_quic_data_judge` | E | `d2o_quic_http3_differential.c` (judge3) + full-stage |
 
 ## core/include/d2k_arm.h (1 функция)
+
+**Прочитано построчно: 1/1 функция, 91 строка C (1–91).**
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
