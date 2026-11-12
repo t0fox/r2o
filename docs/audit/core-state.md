@@ -801,7 +801,7 @@
 | `voice_fail` | 8153–8158 | 6 | снять voice trial при молчании | main.rs voice fail | **P** | voice lifecycle differential частично |
 | `is_voice_class` | 8160–8162 | 3 | UDP и имя @discord-voice | main.rs is_voice_class | **P*** | static-хелпер |
 | `is_telegram_tunnel_domain` | 8167–8178 | 12 | домен telegram.org/поддомен — не мерить | main.rs discovery telegram tunnel | **P*** | static-хелпер |
-| `on_suspect` | 8181–8592 | 412 | главный вход: счёт событий, last_suspect, recall имени, Telegram/decoy/clean-handshake, dead address, cooldown, voice pending, binding_covering, fp_add, T_QUEUED/WATCHING/voice-переходы, trigger shape/flow, launch_or_queue | `main.rs:20090 ControlClient::r2o_queue_tcp_suspect`, `:13534 R2oDiscoveryQueue::queue_after_fresh_suspect`, `:8509 cooldown`, `:8305 dead` | **E** | `r2o-scheduler-differential.sh`, cooldown/dead-address/queue-order/coalesce. **Отличия слоя:** C `recall` по точному flow; Rust очередь ключуется target-ом и хранит recent client shape/ECH отдельно; voice pending/T_WATCHING выражены иначе. |
+| `on_suspect` | 8181–8592 | 412 | главный вход: счёт событий, last_suspect, recall имени, Telegram/decoy/clean-handshake, dead address, cooldown, voice pending, binding_covering, fp_add, T_QUEUED/WATCHING/voice-переходы, trigger shape/flow, launch_or_queue | `main.rs:19941 r2o_handle_legacy_suspect`, `:20090 r2o_queue_tcp_suspect`, `:13534 queue_after_fresh_suspect`, `:8509 cooldown`, `:8305 dead` | **P** | **Подтверждённые пробелы:** (1) C до очереди отсекает `is_telegram_tunnel_domain` (`sched.c:8167-8180,8243-8247`: `telegram.org` и поддомены) и `SCHED_DECOY "disk.rzd.ru"` (`:356,8248-8256`); в Rust `r2o_handle_legacy_suspect` этих проверок нет, grep `telegram.org`/`disk.rzd.ru` по `main.rs`/`discovery.rs` не находит фильтра — такие имена попадут в очередь. (2) C в `on_suspect` сам проверяет dead address (`8281`), cooldown (`8291`), voice pending/T_WATCHING (`8324-8360`), `binding_covering` (`8384`), `T_QUEUED hot_event` (`8415-8424`); Rust разносит это на `R2oDeadAddressCache`, `R2oDiscoveryCooldownRing`, `queue_with_suspect_signal`, голосовой воркер и queue promote — эквивалентность полной цепочки не доказана. **Совпадает:** clean-handshake suppression, разбор кодов 1/2/3/4/5/6/8, `has_solution`/covering, late RST/FIN/TCP-stall отдельными обработчиками (`main.rs:18685/18773/18839`). `r2o-scheduler-differential.sh`/cooldown/dead/queue-order/coalesce покрывают часть, но не отсутствующие фильтры. |
 | `quic_own_initial` | 8607–8621 | 15 | вернуть свой QUIC Initial: задача `snap` или общий `quic_shape` того же имени/family + seq | `main.rs` pending QUIC snapshot/task (`:6880-6975`, `:7024-7090`) | **P*** | Rust хранит снимок в pending-job/задаче (`snapshot`/`pending_snapshots`), общего `quic_shape[name/family]` с seq нет. Эквивалент по источнику, не по API. |
 | `remeasure_snapped` | 8623–8682 | 60 | report superseded; заменить trig байтами, opts, сбросить snap/reasked/researched/family_fast/own_first/seed/plans/tried/RX/ECH/own_seen, launch | `main.rs:8894-8940 r2o_adopt_own_first_client_snapshot`, `:13427 remember_client_snapshot`, pending rechecks (`:9400-9460`) | **P** | **Совпадает:** новый поиск с байтами клиента, сброс кандидатов/счётчиков, один перемер. **Отличия:** C сбрасывает `snap_*`, `seed`, `rx_hashes`, `own_seen`, `ech_grease` в задаче; Rust использует `client_hellos`/`pending_rechecks`/`recent_client_shapes`, набор сбросов иной. |
 | `quic_note_multi` | 8690–8730 | 41 | запомнить multi-datagram имя/family в кольце; split-привязки → recheck_since + DEL_NAME | нет кольца `quic_multi`; `r2o_quic_initial_client_hello_from_datagrams` только собирает CH | **P** | **Подтверждённый пробел:** Rust не помнит «клиент multi» по имени/family и не помечает split-привязки к recheck при обрывке Initial. `r2o_quic_split_unfit`/`quic_client_multi` отсутствуют. |
@@ -1426,10 +1426,13 @@ quicdeny/recheck, каталог/области/исключения, `stall_bud
   own_first_plans`, `main.rs::r2o_discovery_volume_known_plans`,
   `r2o_fallback` и `compose_d2o`; differentials покрывают known/own-first/
   fallback/QUIC, но не все комбинации. P.
-- **`on_suspect` (8181–8592):** E — `r2o-scheduler-differential.sh`,
+- **`on_suspect` (8181–8592):** P — `r2o-scheduler-differential.sh`,
   cooldown/dead-address/queue-order/coalesce, `ControlClient::
   r2o_queue_tcp_suspect` (`main.rs:20090`) + `R2oDiscoveryQueue::
-  queue_after_fresh_suspect` (`13534`).
+  queue_after_fresh_suspect` (`13534`). **Подтверждённый пробел:** C до
+  очереди отсекает `telegram.org` (`is_telegram_tunnel_domain`) и
+  `disk.rzd.ru` (`SCHED_DECOY`); в `r2o_handle_legacy_suspect` этих
+  проверок нет, и такие имена попадут в очередь.
 - **`verify_confirm` (9262–9653):** P — ECH/QUIC/форма/budget,
   `bind_confirmed`, группа, адресный план, сеть, live/report, T_WATCHING
   перенесены в `r2o_confirm_discovery_outcome` (`main.rs:5347`) +
