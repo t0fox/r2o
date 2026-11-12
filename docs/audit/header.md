@@ -136,6 +136,7 @@ P означает неполное доказательство ветвей, N
 | 26 | HTTPS probe non-upgrade | `http_probe_done`: SET_HTTPS только для `SERVED`/`TLS_BLOCKED`, иначе `http_search_portal` (`d2kc.c:331-344`) | `main.rs:17033` шлёт `SET_HTTPS(host, ttl_seconds)` для любого результата; у не-upgrade `ttl_seconds=0` (`https_probe.rs:170-178`), HTTP-поиск только через `pending_http_searches` | `core-net.md` |
 | 27 | HTTPS first flight | донорский `modern` ClientHello из `d2k_hello_from_profile` (`httpsprobe.c:171-177`) | rustls-сгенерированный ClientHello (`response.rs:572-605`) | `core-net.md` |
 | 28 | HTTPS result loss | `done[17]`; при переполнении `lost++`, результат отбрасывается (`httpsprobe.c:337-340`) | `sync_channel(16)` + блокирующий `send`, счётчика `lost` нет (`https_probe.rs:132,181-183`) | `core-net.md` |
+| 29 | HTTP-upgrade 307 | `X-D2K-HTTP-Upgrade: provider-portal` (`httpup_logic.c:145`) | `X-R2O-HTTP-Upgrade: provider-portal` (`httpup.rs:513`), закреплено тестом | `core-net.md` |
 
 ### Остаточные P (не доказано, не значит «сломано»)
 

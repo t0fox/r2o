@@ -286,21 +286,21 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| `ascii_alnum` | 16-19 | 4 | ASCII-буква/цифра | `r2k-core/src/httpup.rs:390 valid_dns_host` (встроено) | E | хелпер; владелец `dns_host` → `valid_dns_host`, тесты `httpup.rs:78,108` |
-| `dns_host` | 21-35 | 15 | валидация DNS-имени (метки ≤63, ≤253) | `httpup.rs:390 valid_dns_host` | E | `tests/httpup.rs:108 rejects_ambiguous_or_malformed...` |
-| `host_equal` | 37-44 | 8 | сравнение хостов без регистра и конечной точки | `httpup.rs:468 same_host` | E | `tests/httpup.rs:78 распознаёт_порталы_операторов...`, `:69` |
-| `known_portal_host` | 46-51 | 6 | входит ли хост в список 6 порталов | `httpup.rs:492 known_portal_host` | E | `tests/httpup.rs:78` |
-| `find_crlf` | 53-58 | 6 | найти CRLF | `httpup.rs:382 find_crlf` | E | хелпер; владелец `parse_request`, тесты `:11,108` |
-| `parse_request` | 60-130 | 71 | GET/HEAD без тела, HTTP/1.0/1.1, Host/Content-Length/TE, порт :80 | `httpup.rs:220 parse_request` | E | `tests/httpup.rs:11 accepts_only_safe_bodyless...`, `:108 rejects_ambiguous...` |
-| `d2k_httpup_request_safe` | 132-135 | 4 | предикат безопасного запроса | `httpup.rs:164 request_safe` | E | `tests/httpup.rs:11` |
-| `build_redirect` | 137-149 | 13 | собрать точный 307 с Location/Cache-Control/X-D2K | `httpup.rs:504 build_redirect` | E | `tests/httpup.rs:126 builds_the_exact_https_redirect...` |
-| `portal_marker` | 151-170 | 20 | маркеры порталов в метках хоста | `httpup.rs:474 portal_marker` | E | `tests/httpup.rs:78` |
-| `redirect_location_host` | 172-190 | 19 | выделить host из Location http/https | `httpup.rs:452 parse_location_host` | E | `tests/httpup.rs:69` |
-| `portal_answer` | 193-225 | 33 | 30x+Location на другой узел, портал/маркер | `httpup.rs:191 portal_response` (внутри) | E | `tests/httpup.rs:49,57` |
-| `d2k_httpup_portal_response` | 227-238 | 12 | запрос+upstream → 307 provider-portal | `httpup.rs:191 portal_response` | E | `tests/httpup.rs:49 upgrades_a_safe_request_only_after...` |
-| `d2k_httpup_request_target` | 240-251 | 12 | host и origin-target запроса | `httpup.rs:169 request_target` | E | `tests/httpup.rs:31 extracts_normalized_host_and_origin_target` |
-| `d2k_httpup_portal_location` | 253-262 | 10 | host портала из upstream-ответа | `httpup.rs:201 portal_location` | E | `tests/httpup.rs:69` |
-| `d2k_httpup_redirect_https` | 264-277 | 14 | готовый 307 https-редирект | `httpup.rs:208 redirect_https` | E | `tests/httpup.rs:126` |
+| `ascii_alnum` | 16-19 | 4 | ASCII-буква/цифра | `r2k-core/src/httpup.rs:390 valid_dns_host` (встроено `is_ascii_alphanumeric`) | **E*** | Хелпер; владелец `dns_host` → `valid_dns_host`, тесты `httpup.rs:78,108`. |
+| `dns_host` | 21-35 | 15 | 1..253, без ведущей/хвостовой точки, метки 1..63, LDH, без ведущего/хвостового `-` | `httpup.rs:390-410 valid_dns_host`, `:350-357 valid_http_name_host` | **P** | Сам `valid_dns_host` совпадает с C. **Подтверждённое расхождение:** `parse_plan_request` вызывает `valid_http_name_host`, который дополнительно отвергает **последнюю метку из одних цифр** (`127`, `1.2.3.4`); C `dns_host` такие имена принимает. `tests/httpup.rs:108 rejects_ambiguous...`. |
+| `host_equal` | 37-44 | 8 | снять по одной хвостовой точке, сравнить без регистра, непустые | `httpup.rs:468-472 same_host` | **E** | Совпадает; `tests/httpup.rs:78,69`. |
+| `known_portal_host` | 46-51 | 6 | 6 известных порталов | `httpup.rs:492-502 known_portal_host` | **E** | Список и `same_host` совпадают; `tests/httpup.rs:78`. |
+| `find_crlf` | 53-58 | 6 | первый CRLF до `end` | `httpup.rs:382-388 find_crlf` | **E*** | Rust `windows(2)` + `checked_add`; эквивалентно; владелец `parse_request`, тесты `:11,108`. |
+| `parse_request` | 60-130 | 71 | GET/HEAD, HTTP/1.0/1.1, origin-target без控制/`#`, один Host, CL только `0`, запрет TE, порт только `:80`, финальный CRLFCRLF | `httpup.rs:220-229 parse_request`, `:231-344 parse_plan_request` | **P** | **Совпадает:** метод/версия/target, Host/CL/TE, `:80`, хвостовая точка, точный конец заголовков. **Подтверждённое расхождение:** Rust `parse_plan_request` помечает `boundary_known=false` при любом control-байте в строке заголовка и при невалидном HTTP-token имени; затем `parse_request` требует `end_offset==Some(header_len)` и отвергает запрос. C неизвестные/битые заголовки игнорирует (кроме Host/CL/TE) и control-байты не проверяет. Rust также отвергает all-digit last label (см. `dns_host`). `tests/httpup.rs:11,108`. |
+| `d2k_httpup_request_safe` | 132-135 | 4 | предикат безопасного запроса | `httpup.rs:164-166 request_safe` | **P** | Тонкая обёртка; наследует более строгий `parse_request` Rust. `tests/httpup.rs:11`. |
+| `build_redirect` | 137-149 | 13 | `HTTP/1.1 307`, `Location: https://host+target`, `Cache-Control: no-store`, `Connection: close`, `Content-Length: 0`, `X-D2K-HTTP-Upgrade: <reason>` | `httpup.rs:504-516 build_redirect` | **P** | **Подтверждённое расхождение:** C пишет `X-D2K-HTTP-Upgrade: provider-portal`, Rust — **`X-R2O-HTTP-Upgrade: provider-portal`**. Остальные строки/порядок/CRLF совпадают. Rust-тест `builds_the_exact_https_redirect...` фиксирует именно `X-R2O`, т.е. расхождение закреплено тестом. |
+| `portal_marker` | 151-170 | 20 | 8 маркеров по меткам хоста | `httpup.rs:474-490 portal_marker` | **E** | Список/разбиение/регистр совпадают; `tests/httpup.rs:78`. |
+| `redirect_location_host` | 172-190 | 19 | http/https, authority до `/ ? # :`, `dns_host` | `httpup.rs:452-466 parse_location_host` | **E** | Совпадает; `tests/httpup.rs:69`. |
+| `portal_answer` | 193-225 | 33 | HTTP/1.x 301/302/303/307/308, ровно один Location, другой host, known/marker | `httpup.rs:411-450 portal_host` | **E** | Статус/дубликат Location/`same_host`/known+marker совпадают; C дополнительно требует `line_end==p` (пустая строка), Rust останавливается на пустой строке. `tests/httpup.rs:49,57`. |
+| `d2k_httpup_portal_response` | 227-238 | 12 | parse_request + portal_answer → 307 provider-portal | `httpup.rs:191-199 portal_response` | **P** | Логика совпадает, но наследует расхождение `build_redirect` (`X-D2K`/`X-R2O`) и более строгий `parse_request`. `tests/httpup.rs:49`. |
+| `d2k_httpup_request_target` | 240-251 | 12 | host и origin-target | `httpup.rs:169-173 request_target` | **P** | Совпадает для валидного запроса; наследует строгий разбор Rust (битые заголовки/all-digit host). `tests/httpup.rs:31`. |
+| `d2k_httpup_portal_location` | 253-262 | 10 | host портала из upstream | `httpup.rs:201-206 portal_location` | **E** | Логика `portal_host`+known/marker совпадает; `tests/httpup.rs:69`. |
+| `d2k_httpup_redirect_https` | 264-277 | 14 | готовый 307 по host/target, только `target[0]=='/'`, пределы 255/2047 | `httpup.rs:208-217 redirect_https` | **P** | **Подтверждённые отличия:** (1) Rust `valid_dns_host(host)` и запрет `<=0x20/0x7f/#` в target; C проверяет только длины и первый `/`; (2) заголовок `X-R2O` вместо `X-D2K`. `tests/httpup.rs:126`. |
 
 ## core/httpsearch.c (66 функций)
 
