@@ -85,11 +85,11 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 193 | 349 | 6 | 0 |
-| core-state | 692 | 178 | 511 | 3 | 0 |
+| core-state | 692 | 179 | 511 | 2 | 0 |
 | datapath-core | 400 | 153 | 244 | 3 | 0 |
 | datapath-plan | 183 | 138 | 45 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **720** | **1250** | **12** | **0** |
+| **Итого** | **1982** | **721** | **1250** | **11** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,8 +103,8 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 720 / P 1250 /
-N 12 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
+Покрытие реестра: **1982/1982** функций. Статусы: **E 721 / P 1250 /
+N 11 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
 | # | Область | D2O | R2O | Подтверждение |
@@ -345,11 +345,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 193 | 349 | 6 | 0 |
-| core-state | 692 | 178 | 511 | 3 | 0 |
+| core-state | 692 | 179 | 511 | 2 | 0 |
 | datapath-core | 400 | 153 | 244 | 3 | 0 |
 | datapath-plan | 183 | 138 | 45 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **720** | **1250** | **12** | **0** |
+| **Итого** | **1982** | **721** | **1250** | **11** | **0** |
 
 
 ---
@@ -2715,7 +2715,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `looks_like_tls` | 33–35 | 3 | `bytes[0] == 0x16` → ServerHello, иначе Any | — | **N** | **Уточнение 2026-11-12:** это static-правило `core/verdict.c`, а не detect-триггер. R2O не портировал core-вердикт (`d2k_classify_cancelable` имеет только тестовый вызов), поэтому отдельной реализации нет. Detect-триггер `Trigger::raw_hex` обязан оставаться `Accept::Any` по `detect/trigger.c:106`; прежняя правка ошибочно применила правило `looks_like_tls` к detect-пути. |
+| `looks_like_tls` | 33–35 | 3 | `bytes[0] == 0x16` → ServerHello, иначе Any | `classify.rs` `looks_like_tls` | E | C `bytes[0] == TLS_REC_HANDSHAKE` (0x16). Rust `looks_like_tls(bytes)` — тот же предикат; тест `looks_like_tls_matches_core_verdict_rule` (0x16/пусто/0x17). Detect-триггер `Trigger::raw_hex` по-прежнему `Accept::Any` (`detect/trigger.c:106`). |
 | `reverse_note` | 53–62 | 10 | MODERN → "", LEGACY → «обратное направление не проверено», UNKNOWN → «вид не разобран…» | `classify.rs` CLEAR/`probe_response` | **P*** | **Подтверждённое расхождение:** C добавляет оговорку к CLEAR по `d2k_hello_shape` (LEGACY/UNKNOWN); Rust по форме приветствия оговорку не строит — при наличии SNI запускает `probe_response` и может вернуть `Response`, иначе при `Accept::ServerHello` добавляет «(ответное направление не проверено: нет SNI)». Текст C «форма TLS 1.2 — обратное направление не проверено» не воспроизводится. |
 | `pause_note` | 74-80 | 7 | текст «без пауз» / «с паузой N мкс» | `String` reason | **P*** | C `gap_us==0` → «замерено без пауз между кусками», иначе «замерено с паузой %u мкс между кусками». Rust `String` без обрезки; текст/границы не сравнивались. |
 | `stop_requested` | 92-94 | 3 | запрошена ли остановка | `Option<&AtomicBool>`/cancel | **P*** | C `return stop && *stop` (NULL допустим). Rust `Option<&AtomicBool>`/cancel-флаг; семантика «остановка запрошена» та же, API иной. |
@@ -2791,7 +2791,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_ip4_text` | 32–38 | `Ipv4Addr::Display` | **E** | `scripts/test-core-net4-differential.sh` сравнивает C `d2k_ip4_text` и Rust `Display` на валидных адресах. |
 | `d2k_ip4_private` | 40–51 | `quic_replay.rs:23-46` `ipv4_is_local` | **E** | Differential покрывает 0/8? (C только `v==0`), 10/8, 127/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10 и public 8.8.8.8. Rust-диапазоны совпадают. |
 | `d2k_ip6_private` | 53–64 | `quic_replay.rs:47-58` IPv6-ветка | **E** | Differential покрывает ::, ::1, fc00::, fe80::, ff02::, IPv4-mapped private/public, 2001:db8::1. |
-| `looks_like_tls` (static) | 33–35 | — | **N** | **Уточнение 2026-11-12:** правило принадлежит `core/verdict.c`; R2O не портировал core-вердикт. Detect-триггер `Trigger::raw_hex` всегда `Accept::Any` (`detect/trigger.c:106`), поэтому применять это правило к нему нельзя. C-дерево production-вызовов не имеет (только `core/test_verdict.c`). |
+| `looks_like_tls` (static) | 33–35 | `classify.rs` `looks_like_tls` | **E** | C `bytes[0] == 0x16`. Rust предикат совпадает; тест `looks_like_tls_matches_core_verdict_rule`. Detect-триггер `Trigger::raw_hex` остаётся `Accept::Any` (`detect/trigger.c:106`). |
 | `reverse_note` (static) | 53–62 | `classify.rs` CLEAR/`probe_response` | **P** | C добавляет оговорку к CLEAR по `d2k_hello_shape` (LEGACY/UNKNOWN); Rust по форме оговорку не строит — при SNI запускает `probe_response` (может вернуть `Response`), иначе при `Accept::ServerHello` пишет «ответное направление не проверено: нет SNI». Текст C не воспроизводится. |
 | `pause_note` (static) | 74–80 | `classify.rs` reason-строки | **P** | Формат «замерено без пауз/с паузой N мкс» перенесён; C-буфер 96 байт, Rust `String` без обрезки. |
 | `stop_requested` (static) | 92–94 | `classify.rs` `stopped(options)` | **P** | Проверка atomic-флага отмены эквивалентна. |

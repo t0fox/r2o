@@ -547,6 +547,14 @@ fn push_repeats(strategy: &mut String, repeats: i32) {
     }
 }
 
+/// C `core/verdict.c:looks_like_tls`: первый байт — TLS handshake.
+///
+/// Это правило core-вердикта, а не detect-триггера: `Trigger::raw_hex`
+/// остаётся `Accept::Any` (`detect/trigger.c:106`).
+pub fn looks_like_tls(bytes: &[u8]) -> bool {
+    bytes.first() == Some(&0x16)
+}
+
 /// Применить правило `r2o_trigger_accepts` эталона к принятому буферу.
 pub fn trigger_accepts(accept: Accept, bytes: &[u8]) -> bool {
     match accept {
@@ -2768,6 +2776,13 @@ mod raw_connect_fallback_tests {
 mod qtrace_tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn looks_like_tls_matches_core_verdict_rule() {
+        assert!(looks_like_tls(&[0x16, 3, 1]));
+        assert!(!looks_like_tls(&[]));
+        assert!(!looks_like_tls(&[0x17, 3, 3]));
+    }
 
     fn observation(probe: &str, pass: usize, fail: usize, error: Option<&str>) -> Observation {
         Observation {
