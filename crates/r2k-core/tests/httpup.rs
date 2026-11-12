@@ -49,7 +49,7 @@ fn returns_the_normalized_host_range_for_tcp_split_anchors() {
 fn upgrades_a_safe_request_only_after_an_explicit_provider_portal_redirect() {
     assert_eq!(
         portal_response(REQUEST, PORTAL),
-        Some(b"HTTP/1.1 307 Temporary Redirect\r\nLocation: https://RuTracker.org/forum/index.php?q=1\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: 0\r\nX-R2O-HTTP-Upgrade: provider-portal\r\n\r\n".to_vec())
+        Some(b"HTTP/1.1 307 Temporary Redirect\r\nLocation: https://RuTracker.org/forum/index.php?q=1\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: 0\r\nX-D2K-HTTP-Upgrade: provider-portal\r\n\r\n".to_vec())
     );
 }
 
@@ -126,7 +126,7 @@ fn rejects_ambiguous_or_malformed_request_and_redirect_headers() {
 fn builds_the_exact_https_redirect_for_a_valid_origin_target() {
     assert_eq!(
         redirect_https(b"rutracker.org", b"/forum/"),
-        Some(b"HTTP/1.1 307 Temporary Redirect\r\nLocation: https://rutracker.org/forum/\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: 0\r\nX-R2O-HTTP-Upgrade: provider-portal\r\n\r\n".to_vec())
+        Some(b"HTTP/1.1 307 Temporary Redirect\r\nLocation: https://rutracker.org/forum/\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: 0\r\nX-D2K-HTTP-Upgrade: provider-portal\r\n\r\n".to_vec())
     );
     assert_eq!(redirect_https(b"rutracker.org", b"not-origin-form"), None);
     assert_eq!(redirect_https(b"bad host", b"/"), None);

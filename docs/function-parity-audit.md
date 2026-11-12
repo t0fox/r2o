@@ -102,7 +102,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-11)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 620 / P 1320 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 616 / P 1324 /
 N 42 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -136,7 +136,7 @@ P означает неполное доказательство ветвей, N
 | 26 | HTTPS probe non-upgrade | `http_probe_done`: SET_HTTPS только для `SERVED`/`TLS_BLOCKED`, иначе `http_search_portal` (`d2kc.c:331-344`) | `main.rs:17033` шлёт `SET_HTTPS(host, ttl_seconds)` для любого результата; у не-upgrade `ttl_seconds=0` (`https_probe.rs:170-178`), HTTP-поиск только через `pending_http_searches` | `core-net.md` |
 | 27 | HTTPS first flight | донорский `modern` ClientHello из `d2k_hello_from_profile` (`httpsprobe.c:171-177`) | rustls-сгенерированный ClientHello (`response.rs:572-605`) | `core-net.md` |
 | 28 | HTTPS result loss | `done[17]`; при переполнении `lost++`, результат отбрасывается (`httpsprobe.c:337-340`) | `sync_channel(16)` + блокирующий `send`, счётчика `lost` нет (`https_probe.rs:132,181-183`) | `core-net.md` |
-| 29 | HTTP-upgrade 307 | `X-D2K-HTTP-Upgrade: provider-portal` (`httpup_logic.c:145`) | `X-R2O-HTTP-Upgrade: provider-portal` (`httpup.rs:513`), закреплено тестом | `core-net.md` |
+| 29 | HTTP-upgrade 307 | `X-D2K-HTTP-Upgrade: provider-portal` (`httpup_logic.c:145`) | **закрыто 2026-11-12:** `X-D2K-HTTP-Upgrade: provider-portal` (`httpup.rs:513`), тест обновлён, differential PASS | `core-net.md` |
 | 30 | HTTP-search plan identity | `d2k-plan 1 11` + FNV-префикс `d2k-http:` (`httpsearch.c:300,330-333`) | `r2o-plan 1 11` + префикс `r2o-http:` (`http_search.rs:686,784`) | `core-net.md` |
 | 31 | QUIC is_initial | только структура заголовка, без AEAD (`quic.c:182-185`) | `is_authenticated_initial` требует успешного open/AEAD (`quic.rs:107-127`) | `core-net.md` |
 | 32 | QUIC Initial build | v1/v2, DCID 8..20, SCID из снимка, longer=1300, clear-fixed, two-datagram split (`quichello.c:124-455`) | `initial_build` только v1, DCID 8, SCID = аргумент, всегда 1200, без clear-fixed/two-datagram (`quic.rs:261-336`, `quic_replay.rs:98-135`) | `core-net.md` |
@@ -226,12 +226,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 191 | 344 | 13 | 0 |
+| core-net | 548 | 192 | 343 | 13 | 0 |
 | core-state | 692 | 152 | 537 | 3 | 0 |
 | datapath-core | 400 | 122 | 267 | 11 | 0 |
 | datapath-plan | 183 | 102 | 76 | 5 | 0 |
 | detect | 159 | 49 | 100 | 10 | 0 |
-| **Итого** | **1982** | **616** | **1324** | **42** | **0** |
+| **Итого** | **1982** | **617** | **1323** | **42** | **0** |
 
 
 ---
@@ -613,11 +613,11 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `find_crlf` | 53-58 | 6 | первый CRLF до `end` | `httpup.rs:382-388 find_crlf` | **E*** | Rust `windows(2)` + `checked_add`; эквивалентно; владелец `parse_request`, тесты `:11,108`. |
 | `parse_request` | 60-130 | 71 | GET/HEAD, HTTP/1.0/1.1, origin-target без control/`#`, один Host, CL только `0`, запрет TE, порт только `:80`, финальный CRLFCRLF | `httpup.rs:220-229 parse_request`, `:231-344 parse_plan_request` | **P** | **Совпадает:** метод/версия/target, Host/CL/TE, `:80`, хвостовая точка, точный конец заголовков. **Подтверждённое расхождение:** Rust `parse_plan_request` помечает `boundary_known=false` при любом control-байте в строке заголовка и при невалидном HTTP-token имени; затем `parse_request` требует `end_offset==Some(header_len)` и отвергает запрос. C неизвестные/битые заголовки игнорирует (кроме Host/CL/TE) и control-байты не проверяет. Rust также отвергает all-digit last label (см. `dns_host`). Отдельно: `parse_plan_request` Rust принимает произвольный uppercase-метод и `Content-Length>0` (для выбора плана), тогда как C `parse_request` — только GET/HEAD и CL=0; для upgrade-пути это сходится через `parse_request`, для plan-API — шире. `tests/httpup.rs:11,108`. |
 | `d2k_httpup_request_safe` | 132-135 | 4 | предикат безопасного запроса | `httpup.rs:164-166 request_safe` | **P** | Тонкая обёртка; наследует более строгий `parse_request` Rust. `tests/httpup.rs:11`. |
-| `build_redirect` | 137-149 | 13 | `HTTP/1.1 307`, `Location: https://host+target`, `Cache-Control: no-store`, `Connection: close`, `Content-Length: 0`, `X-D2K-HTTP-Upgrade: <reason>` | `httpup.rs:504-516 build_redirect` | **P** | **Подтверждённое расхождение:** C пишет `X-D2K-HTTP-Upgrade: provider-portal`, Rust — **`X-R2O-HTTP-Upgrade: provider-portal`**. Остальные строки/порядок/CRLF совпадают. Rust-тест `builds_the_exact_https_redirect...` фиксирует именно `X-R2O`, т.е. расхождение закреплено тестом. |
+| `build_redirect` | 137-149 | 13 | `HTTP/1.1 307`, `Location: https://host+target`, `Cache-Control: no-store`, `Connection: close`, `Content-Length: 0`, `X-D2K-HTTP-Upgrade: <reason>` | `httpup.rs:504-516 build_redirect` | **E** | **Расхождение закрыто 2026-11-12:** Rust теперь пишет `X-D2K-HTTP-Upgrade: provider-portal`; пределы host<256/target<2048/начальный `/`, порядок строк и CRLF совпадают. Тест `builds_the_exact_https_redirect...` обновлён; C/Rust differential `test-controller-h3-httpup-differential.sh` — PASS (49 кейсов). |
 | `portal_marker` | 151-170 | 20 | 8 маркеров по меткам хоста | `httpup.rs:474-490 portal_marker` | **E** | Список/разбиение/регистр совпадают; `tests/httpup.rs:78`. |
 | `redirect_location_host` | 172-190 | 19 | http/https, authority до `/ ? # :`, `dns_host` | `httpup.rs:452-466 parse_location_host` | **E** | Совпадает; `tests/httpup.rs:69`. |
 | `portal_answer` | 193-225 | 33 | HTTP/1.x 301/302/303/307/308, ровно один Location, другой host, known/marker | `httpup.rs:411-450 portal_host` | **E** | Статус/дубликат Location/`same_host`/known+marker совпадают; C дополнительно требует `line_end==p` (пустая строка), Rust останавливается на пустой строке. `tests/httpup.rs:49,57`. |
-| `d2k_httpup_portal_response` | 227-238 | 12 | parse_request + portal_answer → 307 provider-portal | `httpup.rs:191-199 portal_response` | **P** | Логика совпадает, но наследует расхождение `build_redirect` (`X-D2K`/`X-R2O`) и более строгий `parse_request`. `tests/httpup.rs:49`. |
+| `d2k_httpup_portal_response` | 227-238 | 12 | parse_request + portal_answer → 307 provider-portal | `httpup.rs:191-199 portal_response` | **P** | Логика и заголовок `X-D2K` совпадают; остаётся подтверждённое отличие более строгого `parse_request` (control-байты/HTTP-token/all-digit label), из-за которого часть запросов C проходит, а Rust отвергает. `tests/httpup.rs:49`; differential PASS на общих кейсах. |
 | `d2k_httpup_request_target` | 240-251 | 12 | host и origin-target | `httpup.rs:169-173 request_target` | **P** | Совпадает для валидного запроса; наследует строгий разбор Rust (битые заголовки/all-digit host). `tests/httpup.rs:31`. |
 | `d2k_httpup_portal_location` | 253-262 | 10 | host портала из upstream | `httpup.rs:201-206 portal_location` | **E** | Логика `portal_host`+known/marker совпадает; `tests/httpup.rs:69`. |
 | `d2k_httpup_redirect_https` | 264-277 | 14 | готовый 307 по host/target, только `target[0]=='/'`, пределы 255/2047 | `httpup.rs:208-217 redirect_https` | **P** | **Подтверждённые отличия:** (1) Rust `valid_dns_host(host)` и запрет `<=0x20/0x7f/#` в target; C проверяет только длины и первый `/`; (2) заголовок `X-R2O` вместо `X-D2K`. `tests/httpup.rs:126`. |

@@ -510,7 +510,7 @@ fn build_redirect(host: &[u8], target: &[u8]) -> Option<Vec<u8>> {
     response.extend_from_slice(host);
     response.extend_from_slice(target);
     response.extend_from_slice(
-        b"\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: 0\r\nX-R2O-HTTP-Upgrade: provider-portal\r\n\r\n",
+        b"\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: 0\r\nX-D2K-HTTP-Upgrade: provider-portal\r\n\r\n",
     );
     Some(response)
 }
