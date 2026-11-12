@@ -969,6 +969,22 @@ impl NamePlans {
         if !compatible || !self.r2o_plan_valid(&plan) {
             return (false, control::ACK_BAD_PLAN);
         }
+        // C `set_name_family` для grandfather не заводит отдельную форму:
+        // обновляет уже измеренную запись имени (HTTP и grandfather не в счёт).
+        if shape == SHAPE_GRANDFATHER
+            && let Some(existing) = self.find_name_skip(&key.host, key.family, true)
+            && existing.shape != SHAPE_GRANDFATHER
+        {
+            let clock = self.next_plan_clock();
+            let generation = self.next_generation();
+            if let Some(installed) = self.plans.get_mut(&existing) {
+                installed.plan = plan;
+                installed.last_used.set(clock);
+                installed.generation = generation;
+            }
+            self.revision = self.revision.wrapping_add(1);
+            return (true, control::ACK_OK);
+        }
         if !self.plans.contains_key(&key) && !self.make_room_exact() {
             return (false, control::ACK_NO_ROOM);
         }
@@ -1678,6 +1694,17 @@ impl NamePlans {
         }
         self.addr_plans.remove(&AddrPlanKey { address, shape });
         (true, control::ACK_OK)
+    }
+
+    /// C `find_name_skip`: первая постоянная запись имени любой формы;
+    /// `skip_http` исключает HTTP-запись.
+    fn find_name_skip(&self, host: &str, family: u8, skip_http: bool) -> Option<NamePlanKey> {
+        self.plans
+            .keys()
+            .find(|key| {
+                key.host == host && key.family == family && !(skip_http && key.shape == SHAPE_HTTP)
+            })
+            .cloned()
     }
 
     /// C `scan_name` + `shape_fits`: любая именная запись, совместимая с
@@ -5248,6 +5275,60 @@ mod tests {
         }
         let ack = NamePlans::default().handle(&frame(r2k_core::control::SHAPE_MODERN, &quic));
         assert!(!ack.ok, "чужой транспорт плана должен быть отвергнут");
+    }
+
+    #[test]
+    fn grandfather_updates_measured_name_and_find_name_skip_matches_c() {
+        let mut plans = NamePlans::default();
+        assert!(
+            plans
+                .handle(&set_name_shape(
+                    "grand.example",
+                    r2k_core::control::SHAPE_MODERN,
+                    [0x81; 16],
+                ))
+                .ok
+        );
+        assert!(
+            plans
+                .handle(&set_name_shape(
+                    "grand.example",
+                    r2k_core::control::SHAPE_GRANDFATHER,
+                    [0x82; 16],
+                ))
+                .ok
+        );
+        assert_eq!(plans.plans.len(), 1);
+        assert_eq!(
+            plans.plans[&NamePlanKey {
+                host: "grand.example".into(),
+                family: 4,
+                shape: r2k_core::control::SHAPE_MODERN,
+            }]
+                .plan
+                .id,
+            [0x82; 16]
+        );
+        assert!(!plans.plans.contains_key(&NamePlanKey {
+            host: "grand.example".into(),
+            family: 4,
+            shape: r2k_core::control::SHAPE_GRANDFATHER,
+        }));
+
+        plans.plans.insert(
+            NamePlanKey {
+                host: "http.example".into(),
+                family: 4,
+                shape: r2k_core::control::SHAPE_HTTP,
+            },
+            InstalledPlan {
+                plan: Plan::default(),
+                generation: 3,
+                last_used: std::cell::Cell::new(0),
+            },
+        );
+        assert!(plans.find_name_skip("http.example", 4, true).is_none());
+        assert!(plans.find_name_skip("http.example", 4, false).is_some());
     }
 
     #[test]
