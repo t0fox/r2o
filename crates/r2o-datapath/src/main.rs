@@ -44,6 +44,7 @@ mod app {
     use r2o_datapath::r2o_voice::{R2oVoiceSessions, R2oVoiceTrialProofs};
     use r2o_datapath::raw::{RawSocket, r2o_pick_maxlen};
     use r2o_datapath::scheduler::{FlowTicket, ScheduledQueue};
+    use sha2::{Digest, Sha256};
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::error::Error;
@@ -883,6 +884,27 @@ mod app {
         }
     }
 
+    /// C `offline_self_check` (`d2kd.c:1118-1123`): wire-версия и
+    /// SHA-256("abc") должны совпасть с эталоном.
+    fn offline_self_check() -> Result<(), String> {
+        const R2O_RUNTIME_WIRE: u16 = 48;
+        const WANT: [u8; 32] = [
+            0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae,
+            0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61,
+            0xf2, 0x00, 0x15, 0xad,
+        ];
+        if PROTOCOL_VERSION != R2O_RUNTIME_WIRE {
+            return Err(format!(
+                "wire-версия {PROTOCOL_VERSION} не совпала с {R2O_RUNTIME_WIRE}"
+            ));
+        }
+        let got = Sha256::digest(b"abc");
+        if got.as_slice() != WANT {
+            return Err("SHA-256(\"abc\") не совпал с эталоном".into());
+        }
+        Ok(())
+    }
+
     pub fn run() -> Result<(), Box<dyn Error>> {
         let arguments = r2o_thread_arguments();
         if arguments
@@ -898,6 +920,12 @@ mod app {
         {
             println!("r2o-datapath release={RELEASE_ID} wire={PROTOCOL_VERSION}");
             return Ok(());
+        }
+        if arguments
+            .iter()
+            .any(|argument| argument == "--offline-self-check")
+        {
+            return offline_self_check().map_err(|error| error.into());
         }
         if arguments.iter().any(|argument| argument == "--both") {
             return run_both(&arguments);
@@ -4381,6 +4409,11 @@ mod app {
 
     #[cfg(test)]
     mod tests {
+        #[test]
+        fn offline_self_check_matches_c() {
+            assert!(super::offline_self_check().is_ok());
+        }
+
         use super::{
             ControlServer, EmitKind, NF_ACCEPT, NF_DROP, OriginalFate, PacketDecision,
             PendingApplied, Plan, R2oFlowJournal, R2oQuicSessions, R2oTcpExecution, ReceiveError,

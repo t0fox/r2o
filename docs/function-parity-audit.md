@@ -86,10 +86,10 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 191 | 349 | 8 | 0 |
 | core-state | 692 | 178 | 511 | 3 | 0 |
-| datapath-core | 400 | 151 | 244 | 5 | 0 |
+| datapath-core | 400 | 152 | 244 | 4 | 0 |
 | datapath-plan | 183 | 138 | 45 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **716** | **1250** | **16** | **0** |
+| **Итого** | **1982** | **717** | **1250** | **15** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,8 +103,8 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 716 / P 1250 /
-N 16 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
+Покрытие реестра: **1982/1982** функций. Статусы: **E 717 / P 1250 /
+N 15 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
 | # | Область | D2O | R2O | Подтверждение |
@@ -346,10 +346,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 191 | 349 | 8 | 0 |
 | core-state | 692 | 178 | 511 | 3 | 0 |
-| datapath-core | 400 | 151 | 244 | 5 | 0 |
+| datapath-core | 400 | 152 | 244 | 4 | 0 |
 | datapath-plan | 183 | 138 | 45 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **716** | **1250** | **16** | **0** |
+| **Итого** | **1982** | **717** | **1250** | **15** | **0** |
 
 
 ---
@@ -3612,12 +3612,12 @@ C-хелперы без собственного состояния наслед
 ## Сводка
 
 - Всего функций: **400**.
-- **E: 151 (37,75 %)**; **P: 244 (61,00 %)**; **N: 5 (1,25 %)**; **?: 0**.
+- **E: 152 (38,00 %)**; **P: 244 (61,00 %)**; **N: 4 (1,00 %)**; **?: 0**.
 - Полностью отсутствуют: `count_reason` (гистограмма причин пропуска в сводке),
-  `offline_self_check` (`--offline-self-check`), `d2k_session_shape_tcp_options_family`
-  (TCP-опции из снимка), `d2k_session_suspects` (агрегат подозрений) и
-  `d2k_http_trace` (текстовый HTTP-трейс). Агрегатные счётчики applied/done/
-  damaged/sent_lost/exchanges и NAT-статистика теперь есть.
+  `d2k_session_shape_tcp_options_family` (TCP-опции из снимка),
+  `d2k_session_suspects` (агрегат подозрений) и `d2k_http_trace`
+  (текстовый HTTP-трейс). Агрегатные счётчики applied/done/damaged/sent_lost/
+  exchanges, NAT-статистика и `--offline-self-check` теперь есть.
 - Неподтверждённые ветви (P) сосредоточены в `session.c` (97), `d2kd.c` (41),
   `http80.c` (22), `udp_release.c` (20): в основном это склейка/loop-код,
   у которого проверены ключевые ветви, но не весь набор краевых условий C.
@@ -3730,7 +3730,7 @@ R2O-владелец: `crates/r2o-datapath/src/main.rs` (`run`, `parse_options`,
 | `jrn_kind` (static) | 1050–1066 | 17 | коды журнала → тексты: HELLO_SNI «приветствие», HELLO_NONAME «приветствие без имени», PLAN_APPLIED «план применён», PLAN_REFUSED «план не применён», SUSPECT «подозрение», EXCHANGE «обмен пошёл», SHAPE «снята форма приветствия», PLAN_DONE `""`, PLAN_UNSENT «посылка не ушла», PLAN_DAMAGED «поток испорчен», default «запись неизвестного вида» | `flow_journal.rs:85-98 c_name`, `:100-123 russian_name` | **P** | **Совпадают:** `PLAN_APPLIED`, `PLAN_REFUSED`, `SUSPECT`, `EXCHANGE`, `SHAPE`, `PLAN_DONE` (пустая строка), `PLAN_UNSENT`, `PLAN_DAMAGED` — те же русские тексты (`flow_journal.rs:85-98`). **Подтверждённые расхождения:** (1) у C есть отдельный `D2K_JRN_HELLO_NONAME` → «приветствие без имени»; в Rust один `R2oFlowJournalKind::Hello` → «приветствие», имя с `name_len==0` печатается пустым, и вид не отличает отсутствие имени; (2) C default → «запись неизвестного вида», Rust `c_name` для R2O-only видов уходит в `russian_name` (например, «наблюдение», «подозрение голосового UDP-потока»), то есть неизвестного вида не бывает. `journal_note_texts_match_d2o` (`flow_journal.rs:1027`) проверяет тексты suspect/refuse, не `jrn_kind`. |
 | `print_journal` (static) | 1070–1104 | 35 | один раз в конце: пусто → «журнал пуст»; шапка «--- журнал: N записей, затёрто D ---»; строка `%6llu мс  proto low:port - high:port  kind name: note` | `main.rs:1140-1173` (перебор `flow_journal.iter()` в ветке STOP), `:2986-3000 format_journal_key`, `:3006-3075 format_journal_details` | **P** | **Совпадает:** печать один раз при завершении, порядок от старых к новым, имя только при `name_len != 0`, пояснение только при непустом виде. **Подтверждённые отличия формата:** (1) C печатает время в **мс** от старта, Rust — `[{} нс]`; (2) C печатает `proto` (`tcp/udp/?`), Rust `format_journal_key` — сразу `client:port → server:port`, без протокола и в направлении клиент→сервер, а не канонической паре low-high через дефис; (3) C при пустом журнале печатает «журнал пуст», Rust не печатает ничего; (4) C печатает шапку с числом записей и `dropped`, Rust шапки нет; (5) C печатает `note` записи, Rust — `format_journal_details` по виду (план/попытка/исполнение, причина отказа, TTL и т.п.). D22 сверяет записи журнала, не текстовую печать. |
 | `refuse_of_errno` (static) | 1114–1116 | 3 | `EMSGSIZE → D2K_REFUSE_TOO_LONG`, иначе `D2K_REFUSE_SEND` | `main.rs:3904-3950` (`r2o_first_oversized_emit` → `R2O_JOURNAL_REFUSE_TOO_LONG`), `:4024-4041` (raw send error → `R2O_JOURNAL_REFUSE_SEND`), `:3974-3987` (queue full → `REFUSE_QUEUE`) | **P** | **Подтверждённое отличие:** C классифицирует **фактический** `errno` от `send`/`sendto`: `EMSGSIZE` → «посылка длиннее способа отправки», всё остальное → «ядро отвергло посылку». Rust проверяет предел маршрута **до** отправки (`r2o_first_oversized_emit` → `TOO_LONG`), а любую ошибку `raw.send_packet` относит к `REFUSE_SEND` (`main.rs:4040`, `4148`, `4188`). Если `sendto` вернёт `EMSGSIZE` при неизвестном/устаревшем кэше MTU, C запишет `TOO_LONG`, Rust — `SEND`; `raw.rs:208-216` при этом лишь понижает кэш и повторяет, а окончательный код остаётся `SEND`. Отдельного differential на коды нет. |
-| `offline_self_check` (static) | 1118–1123 | 6 | `--offline-self-check`: `D2K_CTL_PROTO_VERSION == D2K_RUNTIME_WIRE` и SHA-256("abc") равна эталону; иначе -1 | нет | **N** | C вызывает проверку через `d2k_runtime_offline(argc, argv, "d2kd", offline_self_check)` до разбора опций (`d2kd.c:1127-1128`); Rust `parse_options` такой опции не знает (`main.rs:2784-2873`), `--offline-self-check` завершится «неизвестный параметр». Ни SHA-256("abc"), ни сверки `PROTOCOL_VERSION` с `D2K_RUNTIME_WIRE` в датапате нет. |
+| `offline_self_check` (static) | 1118–1123 | 6 | `--offline-self-check`: `D2K_CTL_PROTO_VERSION == D2K_RUNTIME_WIRE` и SHA-256("abc") равна эталону; иначе -1 | `main.rs` `app::offline_self_check` | E | C проверяет wire-версию и SHA-256("abc") до разбора опций. Rust `--offline-self-check` обрабатывается в `app::run` до `parse_options`; `offline_self_check()` сверяет `PROTOCOL_VERSION` с 48 и SHA-256("abc") с эталоном. Тест `offline_self_check_matches_c` (`--bin r2o-datapath`). |
 | `main` | 1125–2415 | 1291 | CLI, план, raw, NFQUEUE, control, session, HTTP80, hold/release, route/cap, цикл, sweep, stats, shutdown | `main.rs:884-2707 run`, `:2754-2897 parse_options`, `:3775-3788 load_plan`, `:3081-3091 needs_raw_socket` | **P** | **Перенесено:** `--version` (свой бренд), NFQUEUE, raw (при `needs_raw_socket`), `--only-mark`/route-gate, rtnetlink-watch + опрос, adopt egress MTU, control + snapshot-сокет, name-plans, hold/UDP-hold/deferred verdicts/resends/follow, ICMP-guard, session/HTTP/voice/QUIC, sched, TCP-hold/release, delayed UDP, stats, signals, shutdown. **Подтверждённые отличия:** (1) нет `--health-file` — C пишет heartbeat `d2k_runtime_heartbeat(health_path,…)` **каждый проход цикла** (`d2kd.c:1477`), Rust health-файла не пишет; (2) нет `--log` — C делает `freopen(log_path,"a",stdout/stderr)` + `setvbuf(_IOLBF)` (`1236-1245`), Rust всегда stderr; (3) нет `--duration` — C выходит по `t-start >= duration_s` (`1483-1485`), Rust не имеет; (4) нет `--sched-slots` — C `d2k_sched_new(slots=128, raw_maxlen)` (`1347`), Rust `ScheduledQueue::default()` = 128 слотов, `slot_size=65536` (`scheduler.rs:9,84-85,440-444`), опция отсутствует; (5) `--copy-range`: C 64..`MAX_PKT=1600` (`1211-1214`), Rust 64..65535 (`2876-2878`); (6) C в apply **всегда** требует `--plan` или `--control` (`1215-1221`) и **всегда** `--mark != 0` (`1222-1230`); Rust `load_plan` в apply без `--plan` читает `/etc/r2o/plans/current.r2op` (`3775-3787`), а `needs_raw_socket` требует mark только для TCP/voice/спец-QUIC/control (`3081-3091`) — UDP-план без control может пойти с mark=0; (7) C читает план не более 64 КиБ (`1258-1265`), Rust `std::fs::read` без явного предела (`3783`); (8) C ставит `SO_TIMESTAMP` на NFQUEUE (`1313-1319`), в Rust `SO_TIMESTAMP` не найден; (9) C создаёт `d2k_session_new(flows, journal)` и `http80`, затем `ct_probe(sess,1)` (`1333-1341`); Rust ведёт отдельные таблицы и `R2oConntrackClient::open` + проверку `/proc/net/nf_conntrack` (`1043-1055`); (10) C зовёт `ct_probe(sess,0)` при каждом обновлении маршрутов (`1556`), Rust только переоткрывает conntrack, если его не было (`1376-1383`); (11) C опрашивает control-listen/peer в том же `poll` (`1523-1536,1561-1571`), Rust обрабатывает control после приёма очереди, из-за чего команда может ждать до 200 мс; (12) C раз в секунду шлёт `EVENT_STATS` с `dropped/sent` (`2329-2352`), Rust `EVENT_STATS` не отправляет (grep по датапату — только whitelist/tests); (13) C при завершении дренирует sched с `UINT64_MAX`, owned→`ECANCELED`, named pending→`exec_failed(QUEUE)`, считает `stale_deferred` (`2369-2388`); Rust в ветке STOP снимает pending-карты и hold, но `flush_scheduled` не вызывает (`1083-1174`), поэтому записи sched без записи в pending-картах могут не быть разобраны; (14) C печатает итоговый `print_stats` + `print_journal` (`2389-2391`), Rust — набор `r2o_log_*` и перебор журнала (`1140-1173`); (15) Rust добавил `--family`, `--controller-only`, `--control-wire`, `--control-release-id`, `--rcvbuf`, `--check`, `--both`, `--r2o-flow-capacity`, `--r2o-udp-reverse-visible`, которых у C нет. Проверки `probe-mark != mark` совпадают (`1231-1234` ↔ `2884-2886`). |
 
 ### Углублённая сверка d2kd.c (44 функции)
@@ -3817,7 +3817,8 @@ R2O-владелец: `crates/r2o-datapath/src/main.rs` (`run`, `parse_options`,
   дренирует sched так, как C. Остальные ветви (NFQUEUE, raw, control,
   hold/release, HTTP, ICMP, stats, route/cap) перенесены — P.
 
-**Итог:** 44 функции; N — `count_reason`, `offline_self_check`
+**Итог:** 44 функции; N — `count_reason`, `d2k_session_suspects`,
+`d2k_session_shape_tcp_options_family`, `d2k_http_trace`
 (диагностика/CLI), остальные P/E с подтверждёнными пробелами
 CLI-логирования, health-файла, duration, состава сводки,
 `EVENT_STATS` и shutdown-дренажа sched.
