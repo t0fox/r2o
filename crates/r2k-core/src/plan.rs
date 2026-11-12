@@ -221,8 +221,6 @@ impl Plan {
             seq_overlays: Vec::with_capacity(counts.seq_overlays),
             ..Self::default()
         };
-        let mut autottls = Vec::with_capacity(counts.autottls);
-
         let mut offset = HEADER_LEN;
         while let Some((kind, value)) = next_record(bytes, &mut offset)? {
             match kind {
@@ -257,14 +255,24 @@ impl Plan {
                     seq_shift: read_u32(value, 4)? as i32,
                     autottl: None,
                 }),
-                REC_AUTOTTL => autottls.push((
-                    read_u16(value, 0)?,
-                    AutoTtl {
+                REC_AUTOTTL => {
+                    // C-датапат ищет порчу среди уже разобранных записей
+                    // (`plan_parse.c:473-486`): AUTOTTL обязана идти после
+                    // своей POISON, а повтор для той же порчи перезаписывает
+                    // значения — «последний побеждает».
+                    let id = read_u16(value, 0)?;
+                    let autottl = AutoTtl {
                         delta: value[2] as i8,
                         min: value[3],
                         max: value[4],
-                    },
-                )),
+                    };
+                    let poison = plan
+                        .poisons
+                        .iter_mut()
+                        .find(|poison| poison.id == id)
+                        .ok_or_else(|| PlanError::new("autottl ссылается на неизвестную порчу"))?;
+                    poison.autottl = Some(autottl);
+                }
                 REC_SPLIT => plan.splits.push(Split {
                     anchor: read_u16(value, 0)?,
                     offset: read_u16(value, 2)? as i16,
@@ -295,17 +303,6 @@ impl Plan {
                 REC_SEGMENT => plan.segment_size = read_u32(value, 0)?,
                 REC_GUARD => plan.guards = value[0],
                 _ => return Err(PlanError::new("неизвестный тип записи")),
-            }
-        }
-
-        for (id, autottl) in autottls {
-            let poison = plan
-                .poisons
-                .iter_mut()
-                .find(|poison| poison.id == id)
-                .ok_or_else(|| PlanError::new("autottl ссылается на неизвестную порчу"))?;
-            if poison.autottl.replace(autottl).is_some() {
-                return Err(PlanError::new("повторная запись autottl"));
             }
         }
 
@@ -681,7 +678,6 @@ struct Counts {
     fakes: usize,
     seq_overlays: usize,
     oob: usize,
-    autottls: usize,
 }
 
 fn scan(bytes: &[u8], minexec: u16) -> Result<(Counts, usize), PlanError> {
@@ -714,7 +710,6 @@ fn scan(bytes: &[u8], minexec: u16) -> Result<(Counts, usize), PlanError> {
                 if value[4] != 0 && value[3] > value[4] {
                     return Err(PlanError::new("autottl: min больше max"));
                 }
-                counts.autottls += 1;
             }
             REC_OOB => {
                 if minexec < 8 || value.len() != 3 || read_u16(value, 0)? > ANCHOR_SNI_MIDDLE {

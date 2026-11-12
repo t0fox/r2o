@@ -87,11 +87,11 @@ recheck 1982 1982 equal True
 | core-net | 548 | 186 | 349 | 13 | 0 |
 | core-state | 692 | 174 | 514 | 4 | 0 |
 | datapath-core | 400 | 145 | 244 | 11 | 0 |
-| datapath-plan | 183 | 88 | 90 | 5 | 0 |
+| datapath-plan | 183 | 89 | 89 | 5 | 0 |
 | detect | 159 | 47 | 102 | 10 | 0 |
-| **Итого** | **1982** | **640** | **1299** | **43** | **0** |
+| **Итого** | **1982** | **641** | **1298** | **43** | **0** |
 
-Это не оценка паритета: 1299 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 1298 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
 расхождений (`ARM_SHAPE` UDP, `wire_udp` IPID_ZERO, `udpruntime` raw UDP,
 `tls12/tls13` record-layer). `SET_HTTPS` TTL закрыт 2026-11-12 и в список
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 640 / P 1299 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 641 / P 1298 /
 N 43 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -346,9 +346,9 @@ P означает неполное доказательство ветвей, N
 | core-net | 548 | 186 | 349 | 13 | 0 |
 | core-state | 692 | 174 | 514 | 4 | 0 |
 | datapath-core | 400 | 145 | 244 | 11 | 0 |
-| datapath-plan | 183 | 88 | 90 | 5 | 0 |
+| datapath-plan | 183 | 89 | 89 | 5 | 0 |
 | detect | 159 | 47 | 102 | 10 | 0 |
-| **Итого** | **1982** | **640** | **1299** | **43** | **0** |
+| **Итого** | **1982** | **641** | **1298** | **43** | **0** |
 
 
 ---
@@ -5340,8 +5340,8 @@ Static-хелперы наследуют статус владельца (вла
 
 | Статус | Кол-во |
 |---|---:|
-| E | 88 |
-| P | 90 |
+| E | 89 |
+| P | 89 |
 | N | 5 |
 | ? | 0 |
 | **Всего** | **183** |
@@ -5352,7 +5352,7 @@ Static-хелперы наследуют статус владельца (вла
 |---|---:|---:|---:|---:|---:|
 | datapath/plans.c | 75 | 30 | 44 | 1 | 0 |
 | datapath/routemark.c | 23 | 15 | 7 | 1 | 0 |
-| datapath/plan_parse.c | 17 | 13 | 4 | 0 | 0 |
+| datapath/plan_parse.c | 17 | 14 | 3 | 0 | 0 |
 | datapath/raw.c | 17 | 8 | 9 | 0 | 0 |
 | datapath/plan_apply.c | 15 | 8 | 7 | 0 | 0 |
 | datapath/ctl.c | 14 | 6 | 5 | 3 | 0 |
@@ -5571,7 +5571,7 @@ transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-со�
 | check_refs | 224-325 | 102 | второй проход: ссылки, сочетания операций, порядок, одиночное перекрытие | `plan.rs:499` `check_references` | E | **Ветви C:** MD5 — `minexec>=12 && transport==6 && wire==detect-tcp`; ipfrag — UDP и без splits/seqovl/order/input/input_tls/settle/segment/wire/guards; udplen — то же плюс без oob; qsplit — то же плюс без udplen/oob; qdeny — UDP и без ipfrag/udplen/qsplit/splits/seqovl/fakes/payloads/poisons/order/input/input_tls/settle/segment/wire/guards/oob/pace/delay; oob — minexec>=8, TCP, proto=1, input_tls, wire, без splits/seqovl/fakes/ipfrag/pace/settle/delay; fake/seqovl — payload_id!=0 и существует, poison_id!=0 и существует; PLACE_BETWEEN требует splits; placement только before/between; order только forward/reverse; seqovl<=1. Rust (`plan.rs:499-673`) те же условия и порядок групп; дополнительно перепроверяет autottl (minexec>=13, min<=max), который C уже проверил в `scan`. Тест `rejects_dangling_references_and_invalid_operation_combinations` покрывает висячую fake, BETWEEN без split, qdeny с payload и UDP+input; остальные сочетания — косвенно. |
 | d2k_find_payload | 327-334 | 8 | линейный поиск приманки по id, NULL при отсутствии | `plan.rs` — `self.payloads.iter().find(...)` (`plan.rs:618`, `apply.rs:611,1287`) | E | C цикл `n_payloads`, сравнение `id`, возврат указателя или NULL. Rust `iter().find(\|payload\| payload.id == id)` в `check_references` и `apply_overlay`/`emit_fake`; `parses_payload_fake_and_cross_references` проверяет найденную приманку, `rejects_dangling_references...` — отсутствующую. |
 | d2k_find_poison | 336-343 | 8 | линейный поиск порчи по id, NULL при отсутствии | `plan.rs` — `self.poisons.iter().find(...)` (`plan.rs:628`, `apply.rs:624,499`) | E | C цикл `n_poisons`, сравнение `id`, указатель или NULL. Rust `iter().find` в `check_references` и `emit_fake`/`apply_overlay`; `parses_payload_fake_and_cross_references` и `rejects_dangling...` покрывают найденную и отсутствующую порчу. |
-| d2k_plan_load | 345-566 | 222 | полная загрузка: заголовок, scan, записи, check_refs, транспорт | `plan.rs:190` `Plan::parse`, `:167` `parse_wire` | **P** | **Подтверждённые расхождения по `REC_AUTOTTL`:** (1) повторная запись для той же порчи в C применяет «последний побеждает» (`plan_parse.c:473-486`), Rust `autottl.replace` отвергает повтор (`plan.rs:301-309`); (2) C разрешает `AUTOTTL` только **после** своей `POISON` (поиск идёт по уже разобранным `p->poisons`, `:477-481`), Rust собирает `autottls` в вектор и разрешает после всего прохода (`plan.rs:224,260-310`), поэтому `AUTOTTL` перед `POISON` C отвергает, Rust принимает. Остальное совпадает: 7 тестов tests/plan.rs, legacy `D2KP` через `parse_wire`, magic `R2OP`, scan/check_refs. C/Rust differential на оба порядка AUTOTTL нет. |
+| d2k_plan_load | 345-566 | 222 | полная загрузка: заголовок, scan, записи, check_refs, транспорт | `plan.rs:190` `Plan::parse`, `:167` `parse_wire` | **E** | **Ветви C:** `!buf \|\| len<12` → «короче заголовка»; `D2KP`; schema/minexec/flags/declared; `scan`; `seen==declared`; `calloc` плана и массивов по счётчикам; второй проход записей; `REC_AUTOTTL` ищет порчу **среди уже разобранных** (`plan_parse.c:473-486`) — до `POISON` отказ, повтор перезаписывает; `check_refs`; TCP-операции требуют transport 6; массивы освобождаются при ошибках. Rust (`plan.rs:190-325`) те же проверки/порядок; `REC_AUTOTTL` теперь разрешается сразу в цикле: `iter_mut().find(id)`, иначе ошибка «autottl ссылается на неизвестную порчу», повтор `poison.autottl = Some(...)` — последний побеждает. Тест `autottl_requires_preceding_poison_and_last_repeat_wins` (tests/plan.rs): AUTOTTL перед POISON → `Err`, два повтора → delta/min/max последнего. Остальное: 11 тестов tests/plan.rs, legacy `D2KP` через `parse_wire`, magic `R2OP`; C/Rust differential плана целиком нет. |
 | d2k_plan_free | 568-581 | 14 | освободить байты приманок, массивы и план | `Drop` (`Vec<Payload>`, `Vec<Poison>`, ...) | E* | C `if(!p) return`; цикл `free(payloads[i].bytes)`; `free` пяти массивов и плана. Rust владеет `Vec<u8>`/`Vec<T>`; освобождение при `Drop`, повторное использование после `Drop` невозможно по заимствованию. Отдельного теста нет — свойство типов; утечек нет. |
 | d2k_plan_poison_used | 583-592 | 10 | OR всех флагов порчи; NULL→0 | `plan.rs:327` `poison_used` | E | C `if(!p) return 0`; `used \|= poisons[i].flags`. Rust `fold(0, \|used, poison\| used \| poison.flags)`. Используется в `engine.rs:1861` для `flow_needs`; тест `tls_fake_modifiers...` задаёт флаги и проверяет `emit.poison`, `max_emit` учитывает флаги. |
 | d2k_plan_flow_needs | 594-599 | 6 | нужен ли потоку TCPTS: шаблон+TCPTS_BACK | `engine.rs:1860-1869` — прямая проверка `wire_profile==TEMPLATE && poison_used()&TCPTS_BACK` и наличия TS-опции, иначе `FlowUnfit` | P | **Ветви C:** `!p \|\| wire_profile!=TCP_TEMPLATE → 0`; иначе `poison_used & TCPTS_BACK ? D2K_FLOW_NEED_TCPTS : 0`. Rust не имеет отдельной функции: `decide_tcp` проверяет template+флаг, затем `!input.is_http`, наличие TCP-опций и `tcp_timestamp_option_present`; при отсутствии TS — `FlowUnfit`. Rust добавляет условия (HTTP и фактическая опция), которых в чистом предикате C нет; отдельного теста на `FlowUnfit` по отсутствию TS не найдено. |
@@ -5582,17 +5582,17 @@ transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-со�
 | d2k_plan_stream_input | 617-621 | 5 | потоковый вход: TCP + wire detect/template + (input_tls \|\| input_len) | `plan.rs:337` `stream_input` | P | C: `p && transport==6 && (wire==DETECT_TCP \|\| wire==TEMPLATE) && (input_tls \|\| input_len)`; нулевой план → 0. Rust (`plan.rs:337-341`) те же три условия. Положительный путь проверен `parses_measured_tcp_context_and_wire_contract` (`assert!(parsed.stream_input())`); отрицательные ветви (не TCP, чужой wire, без input) отдельным тестом не покрыты — P. |
 | d2k_plan_id | 623-630 | 8 | id плана или NULL | `Plan::id` (`plan.rs:133`) | E | C `p ? p->id : NULL`; при отсутствии REC_ID `calloc` уже дал 16 нулей. Rust поле `id: [u8;16]`, при отсутствии записи — нули (`Default`); `parses_minimal_canonical_plan` проверяет `id==[0;16]`, `round_trips_an_applied_http_probe_with_its_exact_binding_identity` (tests/control.rs:724) — перенос id через управляющий кадр. |
 
-Итог по файлу: E 13, P 4, N 0. Пробелы: текст ошибок, `flow_needs` как отдельная
+Итог по файлу: E 14, P 3, N 0. Пробелы: текст ошибок, `flow_needs` как отдельная
 функция, отрицательные ветви `stream_input`.
 
 **Построчная сверка a378:** все 17 функций прочитаны. `scan`/`check_refs` совпадают с
-`plan.rs:687-845/499-685` по всем типам записей, длинам, minexec и сочетаниям. Отличия
-сосредоточены в `REC_AUTOTTL`: C применяет повторную запись к той же порче по принципу
-«последний побеждает» и требует, чтобы `AUTOTTL` шла после своей `POISON`; Rust отвергает
-повтор и разрешает ссылку после всего прохода, поэтому принимает `AUTOTTL` перед `POISON`.
-Из-за этого `d2k_plan_load` — P. `d2k_find_payload`/`d2k_find_poison`/
-`d2k_plan_poison_used`/`transport`/`proto`/`id` эквивалентны; `flow_needs` разнесён в
-`engine.rs`, `stream_input` покрыт косвенно `has_tls_candidate`.
+`plan.rs:687-845/499-685` по всем типам записей, длинам, minexec и сочетаниям. Расхождение
+`REC_AUTOTTL` **закрыто 2026-11-12**: Rust теперь, как C, требует `AUTOTTL` после своей
+`POISON` и при повторе применяет «последний побеждает» (тест
+`autottl_requires_preceding_poison_and_last_repeat_wins`). `d2k_plan_load` — E.
+`d2k_find_payload`/`d2k_find_poison`/`d2k_plan_poison_used`/`transport`/`proto`/`id`
+эквивалентны; `flow_needs` разнесён в `engine.rs`, `stream_input` покрыт косвенно
+`has_tls_candidate`.
 
 ### Углублённая сверка plan_parse.c (17 функций)
 
@@ -5637,8 +5637,9 @@ transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-со�
   `R2OP`, а `parse_wire` принимает **оба** (legacy `D2KP`
   переклеивает magic). R2O принимает надмножество. Повторные
   `ipfrag/udplen/qsplit/qdeny` C отвергает в `scan`, Rust —
-  `set_once_*`; повторный `autottl` — см. выше. Массивы calloc
-  заменены `Vec` с capacity.
+  `set_once_*`; `AUTOTTL` теперь как C — после `POISON`, повтор
+  перезаписывает (тест `autottl_requires_preceding_poison_and_last_repeat_wins`).
+  Массивы calloc заменены `Vec` с capacity.
 - **`d2k_plan_free` (568–581):** RAII; E.
 - **`d2k_plan_poison_used`/`quic_deny`/`guards`/`transport`/
   `proto`/`id`:** прямые методы `plan.rs:327/333/134/135/133`,
@@ -5648,9 +5649,8 @@ transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-со�
   `plan.rs:337`, используется `control.rs:614-621`, прямого
   теста предиката нет.
 
-**Итог:** 13 E, 4 P, 0 N. Новые подтверждённые отличия —
-legacy-`D2KP` принимается только через `parse_wire`, а повторный
-`autottl` R2O отвергает, C — нет.
+**Итог:** 14 E, 3 P, 0 N. Подтверждённое отличие — legacy-`D2KP`
+принимается только через `parse_wire`; `AUTOTTL` закрыт.
 
 ## datapath/plans.c (75 функций)
 

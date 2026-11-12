@@ -1,4 +1,4 @@
-use r2k_core::plan::{PLAN_MAGIC, PROTO_HTTP, Plan, WIRE_DETECT_TCP};
+use r2k_core::plan::{AutoTtl, PLAN_MAGIC, PROTO_HTTP, Plan, WIRE_DETECT_TCP};
 
 #[test]
 fn parses_minimal_canonical_plan() {
@@ -187,6 +187,28 @@ fn declared_record_count_is_exact_and_malformed_bytes_never_panic() {
         }
         let _ = Plan::parse(&bytes);
     }
+}
+
+#[test]
+fn autottl_requires_preceding_poison_and_last_repeat_wins() {
+    let autottl = |delta: u8, min: u8, max: u8| tlv(0x0111, &[0, 1, delta, min, max]);
+    let poison = tlv(0x0011, &[0, 1, 3, 0, 0, 0, 0, 0]);
+
+    // C ищет порчу среди уже разобранных записей: AUTOTTL перед POISON — отказ.
+    let before = plan(1, 13, &[autottl(2, 1, 10), poison.clone()]);
+    assert!(Plan::parse(&before).is_err());
+
+    // Повтор для той же порчи не отвергается, а перезаписывает значения.
+    let repeated = plan(1, 13, &[poison, autottl(2, 1, 10), autottl(3, 2, 9)]);
+    let parsed = Plan::parse(&repeated).unwrap();
+    assert_eq!(
+        parsed.poisons[0].autottl,
+        Some(AutoTtl {
+            delta: 3,
+            min: 2,
+            max: 9,
+        })
+    );
 }
 
 #[test]
