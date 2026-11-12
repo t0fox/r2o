@@ -242,6 +242,8 @@ transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-со�
 Разбор канонического плана. R2O: `crates/r2k-core/src/plan.rs` (`Plan::parse`, `scan`,
 `check_references`), поля `Plan`.
 
+**Прочитано построчно: 17/17 функций, 630 строк C (1–630).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | rd16 | 23-25 | 3 | static: u16 BE | `plan.rs:892` `read_u16` | E | `rejects_bad_header_lengths_records_and_unknown_versions` (tests/plan.rs). |
@@ -251,7 +253,7 @@ transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-со�
 | check_refs | 224-325 | 102 | второй проход: ссылки, сочетания операций, порядок, одиночное перекрытие | `plan.rs:499` `check_references` | E | `rejects_dangling_references_and_invalid_operation_combinations` (tests/plan.rs). |
 | d2k_find_payload | 327-334 | 8 | найти приманку по id | `plan.rs` — `self.payloads.iter().find(...)` (apply.rs:611, :1287 и др.) | E | `parses_payload_fake_and_cross_references` (tests/plan.rs). |
 | d2k_find_poison | 336-343 | 8 | найти порчу по id | `plan.rs` — `self.poisons.iter().find(...)` (apply.rs:624, :744) | E | Тот же тест. |
-| d2k_plan_load | 345-566 | 222 | полная загрузка: заголовок, scan, записи, check_refs, транспорт | `plan.rs:190` `Plan::parse`, `:167` `parse_wire` | **P** | **Подтверждённое расхождение:** повторный `REC_AUTOTTL` для той же порчи C применяет «последний побеждает» (`plan_parse.c:473-486`), Rust `autottl.replace` отвергает повтор (`plan.rs:307`). Остальное совпадает: 7 тестов tests/plan.rs, legacy `D2KP` через `parse_wire`, magic `R2OP`. C/Rust differential на дубликат autottl нет. |
+| d2k_plan_load | 345-566 | 222 | полная загрузка: заголовок, scan, записи, check_refs, транспорт | `plan.rs:190` `Plan::parse`, `:167` `parse_wire` | **P** | **Подтверждённые расхождения по `REC_AUTOTTL`:** (1) повторная запись для той же порчи в C применяет «последний побеждает» (`plan_parse.c:473-486`), Rust `autottl.replace` отвергает повтор (`plan.rs:301-309`); (2) C разрешает `AUTOTTL` только **после** своей `POISON` (поиск идёт по уже разобранным `p->poisons`, `:477-481`), Rust собирает `autottls` в вектор и разрешает после всего прохода (`plan.rs:224,260-310`), поэтому `AUTOTTL` перед `POISON` C отвергает, Rust принимает. Остальное совпадает: 7 тестов tests/plan.rs, legacy `D2KP` через `parse_wire`, magic `R2OP`, scan/check_refs. C/Rust differential на оба порядка AUTOTTL нет. |
 | d2k_plan_free | 568-581 | 14 | освободить план | `Drop` (`Vec<Payload>`, `vec!`) | E | Владение типами; утечек нет по построению. |
 | d2k_plan_poison_used | 583-592 | 10 | OR всех флагов порчи | `plan.rs:327` `poison_used` | E | `parses_payload_fake_and_cross_references` + `max_emit`-тест. |
 | d2k_plan_flow_needs | 594-599 | 6 | нужен ли потоку TCPTS (шаблон+TCPTS_BACK) | `engine.rs:1860-1869` — прямая проверка `wire_profile==TEMPLATE && POISON_TCPTS_BACK` и наличия TS-опции, иначе `FlowUnfit` | P | Логика перенесена в решатель, отдельной функции нет; тест на `FlowUnfit` по отсутствию TS-опции не найден. |
@@ -266,11 +268,13 @@ transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-со�
 функция, прямой тест `stream_input`.
 
 **Построчная сверка a378:** все 17 функций прочитаны. `scan`/`check_refs` совпадают с
-`plan.rs:687-845/499-685` по всем типам записей, длинам, minexec и сочетаниям; отличие —
-повтор `AUTOTTL` (C last-wins, Rust отказ), поэтому `d2k_plan_load` переведён в P.
-`d2k_find_payload`/`d2k_find_poison`/`d2k_plan_poison_used`/`transport`/`proto`/`id`
-эквивалентны; `flow_needs` разнесён в `engine.rs`, `stream_input` покрыт косвенно
-`has_tls_candidate`.
+`plan.rs:687-845/499-685` по всем типам записей, длинам, minexec и сочетаниям. Отличия
+сосредоточены в `REC_AUTOTTL`: C применяет повторную запись к той же порче по принципу
+«последний побеждает» и требует, чтобы `AUTOTTL` шла после своей `POISON`; Rust отвергает
+повтор и разрешает ссылку после всего прохода, поэтому принимает `AUTOTTL` перед `POISON`.
+Из-за этого `d2k_plan_load` — P. `d2k_find_payload`/`d2k_find_poison`/
+`d2k_plan_poison_used`/`transport`/`proto`/`id` эквивалентны; `flow_needs` разнесён в
+`engine.rs`, `stream_input` покрыт косвенно `has_tls_candidate`.
 
 ### Углублённая сверка plan_parse.c (17 функций)
 
