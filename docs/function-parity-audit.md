@@ -87,9 +87,9 @@ recheck 1982 1982 equal True
 | core-net | 548 | 195 | 351 | 4 | 0 |
 | core-state | 692 | 179 | 511 | 2 | 0 |
 | datapath-core | 400 | 153 | 244 | 3 | 0 |
-| datapath-plan | 183 | 138 | 45 | 0 | 0 |
+| datapath-plan | 183 | 139 | 44 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **723** | **1252** | **7** | **0** |
+| **Итого** | **1982** | **724** | **1251** | **7** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 723 / P 1252 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 724 / P 1251 /
 N 7 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -347,9 +347,9 @@ P означает неполное доказательство ветвей, N
 | core-net | 548 | 195 | 351 | 2 | 0 |
 | core-state | 692 | 179 | 511 | 2 | 0 |
 | datapath-core | 400 | 153 | 244 | 3 | 0 |
-| datapath-plan | 183 | 138 | 45 | 0 | 0 |
+| datapath-plan | 183 | 139 | 44 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **723** | **1252** | **7** | **0** |
+| **Итого** | **1982** | **724** | **1251** | **7** | **0** |
 
 
 ---
@@ -5341,8 +5341,8 @@ Static-хелперы наследуют статус владельца (вла
 
 | Статус | Кол-во |
 |---|---:|
-| E | 138 |
-| P | 45 |
+| E | 139 |
+| P | 44 |
 | N | 0 |
 | ? | 0 |
 | **Всего** | **183** |
@@ -5425,7 +5425,7 @@ R2O-аналог — `crates/r2o-datapath/src/control.rs` (`ControlServer`), п�
 | read_probe_flow | 169-187 | 19 | static: разобрать flow адресного опыта, отвергнуть неканонический IPv4 | `control.rs:1695` `r2o_udp_addr_probe_flow_key` + `r2k-core/control.rs:1703` `valid_udp_addr_probe_flow` | **P** | **Ветви сверены:** C `b[0]!=4 && b[0]!=6` → -1; family 6 — копия 16+16 байт; family 4 — байты `b[5..17]` и `b[21..33]` обязаны быть нулевыми, копируются `b[1..5]`/`b[17..21]`; `src_port=b[33..35]`, `dst_port=b[35..37]`, `transport=b[37]`; **порты, адреса и transport не проверяются**. Rust `r2o_udp_addr_probe_flow_key` строит ключ из `SocketAddr` с `proto=17`; `valid_udp_addr_probe_flow` требует family 4/6, `flow[37]==17`, **оба порта ≠0**, старшие 12 байт IPv4 нулевые и младшие 4 ≠0 для обоих адресов (IPv6 — любой ненулевой блок). **Расхождения:** C принимает transport≠17 и нулевые порты/адреса; R2O отвергает. Голос C проводит через эту же команду при `src_port=0` (`ctlsrv.c:302-304`); R2O generic `set_addr_probe` теперь принимает этот wildcard с VOICE-планом и хранит в `voice_addr_probes`, DEL снимает; тест `generic_addr_probe_accepts_voice_wildcard_like_d2o`. Отдельная `SET_VOICE_ADDR_PROBE 0x0095` остаётся для R2O-контроллера. |
 | d2k_ctlsrv_command | 189-509 | 321 | диспетчер команд, разбор тел, ACK, установка в таблицу | `control.rs:260` `NamePlans::handle`; `main.rs:68` `handle_control_command` (stall budgets); `control.rs:1988` `arm_client_shape` | **P** | Покрыты SET_NAME/BOUND/PROBE/ADDR/SUFFIX/BYPASS/DEL_*/HTTPS/ARM_SHAPE/STALL_BUDGETS (control.rs:2633-3896). **Подтверждённые расхождения:** (1) ~~`SET_HTTPS` TTL~~ — **закрыто 2026-11-12**: R2O обрезает TTL до **7 суток** (`MAX_HTTPS_TTL_SECONDS`), а кодировщик принимает любой `u32`; (2) ~~`ARM_SHAPE` transport 17~~ — **закрыто 2026-11-12**: R2O принимает 6/17, кэширует QSN-снимок и отдаёт `EVENT_LEGACY_SHAPE` (v22)/`EVENT_HELLO` (v48); пустое имя — wildcard; (3) ~~`SET_ADDR_PROBE` voice wildcard~~ — **закрыто 2026-11-12**: generic-команда с `src_port=0` и VOICE-планом принимается и хранится в `voice_addr_probes`; отдельная 0x0095 остаётся для R2O-контроллера; (4) ~~`DEL_NAME_PROBE` shape~~ — **закрыто 2026-11-12**: C не проверяет shape (`ctlsrv.c:422-437`), R2O теперь тоже (family/port проверяются); (5) адресные опыты не тестированы; (6) `SET_NAME`/`SET_SUFFIX`: C не проверяет `shape` (передаёт `b[1+len]` в plantab), Rust `encode_set_name`/`encode_set_suffix` отвергает неизвестные формы; (7) `DEL_NAME`: C принимает любую пару `transport` (6/17) + `shape != ANY`, Rust `encode_delete_name` — только 6 с 1/2/4/6/7/8..13 или 17 с 3/5. C `DEL_NAME_BOUND`/`DEL_ADDR_PROBE` идемпотентны и всегда ACK OK — R2O так же. ARM_SHAPE: C `ctlsrv.c:335-344` проверяет `len==3+b[0]`, transport 6/17, family 4/6; при готовом слоте шлёт `EV_CLIENT_TCP` (transport 6) с TCP-опциями и `EV_SHAPE` (`:345-375`), затем ACK OK. R2O `arm_client_shape` теперь принимает 6/17: TCP — `EVENT_CLIENT_SHAPE`, QUIC — QSN-снимок (`EVENT_LEGACY_SHAPE` в v22, `EVENT_HELLO` в v48), пустое имя — wildcard; тест `arm_shape_serves_quic_snapshot_and_empty_name_is_wildcard`. SET_ADDR_PROBE: C `ctlsrv.c:285-309` требует `fixed=KEY_LEN+16+4`, transport 17, `dst_port!=0`, lease 1..MAX, trial≠0; `src_port=0` допустим как голосовой wildcard (`:302-303`). Rust generic `set_addr_probe` теперь принимает `src_port=0` с VOICE-планом (family 4) и кладёт запись в `voice_addr_probes`; generic DEL снимает её при совпадении trial. Точный (ненулевой) voice-порт generic-командой пока не принимается; тест `generic_addr_probe_accepts_voice_wildcard_like_d2o`. DEL_NAME_PROBE: C `ctlsrv.c:422-438` проверяет только `len==5+b[0]`, family 4/6 и `probe_port!=0`; shape (`b[1+b[0]]`) передаётся в `d2k_plantab_del_name_probe_family` без проверки. Rust `encode_delete_name_probe` теперь тоже не проверяет shape (family 4/6 и `source_port!=0` остаются) — поведение совпадает с C. SET_NAME/SET_SUFFIX: C `ctlsrv.c:208-261` проверяет только `len>=hdr` и family 4/6; shape (`b[1+len]`) передаётся в plantab без проверки. Rust `encode_set_name` (`control.rs:1360-1391`) допускает только {MODERN,LEGACY,QUIC,GRANDFATHER,VOICE,ECH_TCP,HTTP}+TCP-context, `encode_set_suffix` (`:1480-1504`) — {MODERN,LEGACY,QUIC,ECH_TCP}+TCP-context и совместимый план; неизвестная форма отвергается там, где C принял бы. SET_NAME_PROBE: C `:217-261` `hdr=5+b[0]`, family 4/6, shape без проверки; Rust `encode_set_name_probe` (`:1827-1854`) требует совместимый план, family 4/6 и `source_port!=0`. DEL_NAME: C `:407-421` принимает любую форму кроме ANY для transport 6/17; Rust `encode_delete_name` (`:1856-1879`) — только 6 с {MODERN,LEGACY,GRANDFATHER,ECH_TCP,HTTP}+context или 17 с {VOICE,QUIC}. |
 | d2k_ctlsrv_pump | 511-694 | 184 | выгрузить новые записи журнала в события с раскладкой по типам | `main.rs:2728` `send_journal_updates`, `:2709` `send_journal_snapshot`; `flow_journal.rs:202` `to_event_frame`; `r2k-core/control.rs:1204` `translate_event_to_v22` | **P** | **Ветви C сверены:** `added<=*seen` → выход; `from = fresh>=have ? 0 : have-fresh`; `HELLO_SNI/HELLO_NONAME→EV_HELLO` (name_len+name); `SUSPECT→EV_SUSPECT` (code,d_ttl,d_ref_ttl,d_tos,d_ipid BE2,d_planned,d_client_shape,num clamp u16 BE); `PLAN_APPLIED` — `continue`, не отдаётся; `PLAN_DONE→EV_APPLIED` (plan_id16+trial_id16); `REFUSED/DAMAGED/UNSENT→EV_REFUSED` (code+plan_id+trial_id); `SHAPE` — для `key.proto==6` сначала `EV_CLIENT_TCP` с TCP-опциями из `shape_tcp_options_family`, затем `EV_SHAPE` с hello из `shape_family` по `key.proto`/family; `EXCHANGE→EV_EXCHANGE` (code,d_tos,num 4 BE,d_server_hello,d_planned); default skip; для APPLIED/REFUSED добавляются client_shape (только REFUSED), execution_id 8 BE и binding 28. **Rust:** `send_journal_updates` шлёт каждую запись как `EVENT_R2O_JOURNAL_ENTRY` (`flow_journal.rs:202-262`: version, kind id, at_ns, execution_id, key, code, name_len, name[32], num u32, ttl/ref_ttl/tos, server_hello, planned, client_shape, client_is_low, elapsed_ms, ip_id, mapped_ip/port, plan_id, trial_id, binding+28); dedicated `EVENT_HELLO/APPLIED/REFUSED/CLIENT_SHAPE` идут отдельными путями (`main.rs:3093,3715,3737`). Legacy v22 собирает `translate_event_to_v22`: `CLIENT_SHAPE→LEGACY_CLIENT_TCP` (опции **пустые**)+`LEGACY_SHAPE`; `R2O_TCP_EARLY_RST/RST_CUT` несут ttl/ref_ttl/tos/ip_id, а `REPEAT/SILENT/RST_AFTER_APP/FIN_RETRY/STALL` передают в legacy-suspect нули; `R2O_TCP_EXCHANGE→LEGACY_EXCHANGE` с полями. **Расхождения:** (1) C не отдаёт `PLAN_APPLIED`, R2O шлёт его как journal entry (контроллер только печатает); (2) v22 `LEGACY_CLIENT_TCP` без TCP-опций, C — реальные; (3) часть legacy-suspect теряет d_ttl/d_ref_ttl/d_tos/d_ipid; (4) C-события строятся из журнала при каждом pump, R2O v48 — из того же журнала, но иным форматом. |
-| d2k_ctlsrv_http80_event | 697-731 | 35 | событие HTTP-портала/ответа с измерениями | `control.rs:3136` `send_http_portal_event`, `:3148` `send_http_response_event`; `r2k-core/control.rs:852` `HttpResponseEvent::event_body` | P | `decodes_r2o_http_response_context_and_measurements` (tests/control.rs:977), `control_decoder_accepts_http_portal_response_events` (tests/capture_shape.rs:150). Отличие: R2O кодирует `code 1..4` и всегда несёт хвост status/body/request_no; C для портала без ответа хвост не шлёт. |
+| d2k_ctlsrv_http80_event | 697-731 | 35 | событие HTTP-портала/ответа с измерениями | `main.rs:3190` `send_http_portal_event`, `:3202` `send_http_response_event`; `r2k-core/control.rs` `HttpPortalEvent`/`HttpResponseEvent::event_body` | E | C выбирает `EV_HTTP_PORTAL` без хвоста или `EV_HTTP_RESPONSE` с status/body/request_no. Rust разделяет типы: `HttpPortalEvent` (key+code+host, без хвоста) и `HttpResponseEvent` (контекст+binding+18-байтовый хвост); тест `http_portal_and_response_bodies_match_donor_shapes` проверяет обе длины и хвост 200/4/1. |
 
 Итог по файлу: E 6, P 6, N 0. Пробелы: точный voice-порт generic `SET_ADDR_PROBE`,
 пустые TCP-опции в v22 CLIENT_TCP, адресные опыты без тестов, формат HTTP-события.

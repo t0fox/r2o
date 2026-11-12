@@ -6,10 +6,10 @@ use r2k_core::control::{
     EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_FIN_RETRY,
     EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF,
     EVENT_R2O_VOICE_RTP_PROOF, EVENT_R2O_VOICE_STUN_PROOF, EVENT_R2O_VOICE_SUSPECT, Frame,
-    HttpResponseEvent, KEY_LEN, R2oQuicSuspectEvent, R2oTcpFinRetryEvent, R2oTcpRstAfterAppEvent,
-    R2oTcpSilenceEvent, R2oTcpStallEvent, R2oVoiceProofEvent, R2oVoiceProofKind,
-    R2oVoiceSuspectEvent, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_MODERN, SHAPE_QUIC, decode_ack,
-    decode_applied, decode_hello, decode_http_response, decode_r2o_quic_stall,
+    HttpPortalEvent, HttpResponseEvent, KEY_LEN, R2oQuicSuspectEvent, R2oTcpFinRetryEvent,
+    R2oTcpRstAfterAppEvent, R2oTcpSilenceEvent, R2oTcpStallEvent, R2oVoiceProofEvent,
+    R2oVoiceProofKind, R2oVoiceSuspectEvent, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_MODERN, SHAPE_QUIC,
+    decode_ack, decode_applied, decode_hello, decode_http_response, decode_r2o_quic_stall,
     decode_r2o_quic_suspect, decode_r2o_tcp_fin_retry, decode_r2o_tcp_rst_after_app,
     decode_r2o_tcp_silence, decode_r2o_tcp_stall, decode_r2o_voice_proof, decode_r2o_voice_suspect,
     decode_set_tcp_stall_budgets, encode_ack_for_trial, encode_delete_addr,
@@ -1093,4 +1093,57 @@ fn rejects_http_response_events_with_invalid_outcome_or_truncated_context() {
         })
         .is_err()
     );
+}
+
+#[test]
+fn http_portal_and_response_bodies_match_donor_shapes() {
+    let mut key = [0; KEY_LEN];
+    key[0] = 4;
+    key[1..5].copy_from_slice(&[192, 0, 2, 1]);
+    key[17..21].copy_from_slice(&[198, 51, 100, 2]);
+    key[33..35].copy_from_slice(&40123_u16.to_be_bytes());
+    key[35..37].copy_from_slice(&80_u16.to_be_bytes());
+    key[37] = 6;
+    let host = b"example.test".to_vec();
+
+    let portal = HttpPortalEvent {
+        key,
+        answered: true,
+        host: host.clone(),
+    };
+    let body = portal.event_body().unwrap();
+    assert_eq!(body.len(), KEY_LEN + 2 + host.len());
+    assert_eq!(body[KEY_LEN], 1);
+    assert_eq!(body[KEY_LEN + 1] as usize, host.len());
+
+    let response = HttpResponseEvent {
+        key,
+        code: 1,
+        host: host.clone(),
+        execution_id: 1,
+        plan_id: [1; 16],
+        trial_id: [2; 16],
+        request_ms: 3,
+        path: b"/x".to_vec(),
+        binding: BindingContext {
+            generation: 7,
+            kind: 1,
+            family: 4,
+            shape: SHAPE_HTTP,
+            temporary: false,
+            epoch: [3; 16],
+        },
+        status: 200,
+        body_bytes: 4,
+        request_no: 1,
+    };
+    let body = response.event_body().unwrap();
+    assert_eq!(
+        body.len(),
+        KEY_LEN + 2 + host.len() + 8 + 16 + 16 + 8 + 2 + b"/x".len() + 28 + 18
+    );
+    let tail = &body[body.len() - 18..];
+    assert_eq!(&tail[..2], &200_u16.to_be_bytes());
+    assert_eq!(&tail[2..10], &4_u64.to_be_bytes());
+    assert_eq!(&tail[10..18], &1_u64.to_be_bytes());
 }
