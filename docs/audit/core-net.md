@@ -504,27 +504,27 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 
 Упаковка нескольких QUIC Initial в снимок `QSN` (для повторного использования/пересылки). Порт: `crates/r2k-core/src/quic_snapshot.rs` (`pack`, `parse`, `reseal`, `verify_bound_response`); тесты `r2k-core/tests/quic_snapshot.rs`.
 
-**Прочитано построчно: 6/6 функций, 104 строки C (1–104).**
+**Прочитано построчно: 6/6 функций, 104 строки C (1–104).** Сверено с `quic_snapshot.rs` (124 строки): `r2k_quic_snapshot_pack` (`:23-47`), `r2k_quic_snapshot_parse` (`:50-76`), `R2kQuicSnapshot::datagrams` (`:17-19`), `quic.rs:374-407`.
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| `d2k_qsnap_is` | 13-15 | 3 | проверка магии `QSN` | `quic_snapshot.rs:50 r2k_quic_snapshot_parse` (проверяет magic) | E | test `tests/quic_snapshot.rs` round-trip; magic проверяется парсером |
-| `d2k_qsnap_parse` | 17-47 | 31 | разбор снимка: count, длины, точное потребление | `quic_snapshot.rs:50 r2k_quic_snapshot_parse` | E | `tests/quic_snapshot.rs:30` (pack→parse) |
-| `d2k_qsnap_pack` | 49-73 | 25 | упаковать ≤4 датаграмм с 2-байтовыми длинами | `quic_snapshot.rs:23 r2k_quic_snapshot_pack` | E | test round-trip + лимиты `R2K_QUIC_SNAPSHOT_MAX_DATAGRAMS/BYTES` |
-| `d2k_qsnap_client_hello` | 75-80 | 6 | ClientHello из всех Initial снимка | `quic.rs:374 r2k_quic_initial_client_hello_from_datagrams` | E | test `fragmented_initials`, `r2o-quic-hello-differential.sh` |
-| `d2k_qsnap_sni` | 82-89 | 8 | SNI из снимка | `quic.rs:249 initial_client_hello_sni` + `r2k_quic_snapshot_parse` | E | RFC-тесты SNI + snapshot round-trip |
-| `d2k_qsnap_form` | 91-104 | 14 | форма для shaping (n, dgram_len, ch_len) | `r2k-core/src/quic_snapshot.rs:13 R2kQuicSnapshot::datagrams`, `quic.rs` ClientHello | P | отдельной структуры `form` нет, но `n` и длины датаграмм выводятся из снимка, `ch_len` — из разбора ClientHello; адресного differential на форму нет. |
+| `d2k_qsnap_is` | 13-15 | 3 | проверка магии `QSN` при `n>=4` | `quic_snapshot.rs:50-56 r2k_quic_snapshot_parse` (magic) | E | C: `p && n>=4 && p[0..3]=="QSN"`; Rust: `len>=4 && len<=6144 && input[..3]=="QSN"`. Для валидного снимка эквивалентно; Rust дополнительно ограничивает общий размер. `tests/quic_snapshot.rs` round-trip. |
+| `d2k_qsnap_parse` | 17-47 | 31 | разбор: count 1..4, 2-байтные длины, 1..1500, точное потребление | `quic_snapshot.rs:50-76 r2k_quic_snapshot_parse` | E | Ветви совпадают: magic, `count 1..=4`, каждая длина BE u16, `1..=MAX_PACKET`, `off+len<=n`, финальный `off==n`, датаграммы — срезы. Rust дополнительно `input.len()<=6144`; C-снимок из `pack` (≤4×1502+4) заведомо меньше. `tests/quic_snapshot.rs:30` (pack→parse). |
+| `d2k_qsnap_pack` | 49-73 | 25 | упаковать 1..4 датаграмм: `QSN`, count, 2-байтные длины, данные | `quic_snapshot.rs:23-47 r2k_quic_snapshot_pack` | E | C: `n 1..4`, каждая непустая `len<=1500`, `need=4+Σ(2+len)`, `need<=cap`; Rust: те же проверки + `total<=6144`, иначе None. Формат байтов совпадает (`QSN`, count, BE u16 len, data); тест round-trip + лимиты. |
+| `d2k_qsnap_client_hello` | 75-80 | 6 | ClientHello из всех Initial снимка | `quic.rs:374-407 r2k_quic_initial_client_hello_from_datagrams` | E | C `d2k_quic_dgrams_hello(s->dg,s->len,s->n,...)`; Rust batch-функция с теми же проверками версии/DCID, сборкой CRYPTO и полным CH по claimed. Тест `fragmented_initials`, `r2o-quic-hello-differential.sh`. |
+| `d2k_qsnap_sni` | 82-89 | 8 | SNI из снимка: собрать CH (8192), `d2k_quic_hello_name` | `quic.rs:249-258 initial_client_hello_sni`, `r2k_quic_snapshot_parse` | E | C собирает CH и ищет SNI; Rust `initial_client_hello_sni`/`r2k_quic_initial_sni_result_from_datagrams` делают то же. RFC-тесты SNI + snapshot round-trip. |
+| `d2k_qsnap_form` | 91-104 | 14 | форма shaping: `n`, `dgram_len` первой, `ch_len` из CH; лимит u16 | `quic_snapshot.rs:17-19 R2kQuicSnapshot::datagrams`, `quic.rs` ClientHello | P | Отдельной структуры `form` в R2O нет: `n` и длины датаграмм выводятся из `datagrams()`, `ch_len` — из собранного ClientHello. C дополнительно отказывает при `len[0]>0xffff`/`chl>0xffff`; адресного differential на форму нет. |
 
 ## core/quicsnap_reseal.c (2 функции)
 
 Перешифровка снимка `QSN` под новый DCID. Порт: `r2k-core/src/quic_snapshot.rs:79 r2k_quic_snapshot_reseal`, `quic.rs:338 r2k_quic_initial_reseal_for_dcid`.
 
-**Прочитано построчно: 2/2 функции, 134 строки C (1–134).**
+**Прочитано построчно: 2/2 функции, 134 строки C (1–134).** Сверено с `quic_snapshot.rs:79-113 r2k_quic_snapshot_reseal`, `quic.rs:338-371 r2k_quic_initial_reseal_for_dcid`, `:409-417 r2k_quic_initial_flight_id`.
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| `reseal_one` | 24-73 | 50 | открыть Initial старым ключом, собрать с новым DCID/ключами, сохранить длину | `quic.rs:338 r2k_quic_initial_reseal_for_dcid` | E | tests `quic.rs:1398-1420` (reseal формы), `quic_snapshot.rs:30` |
-| `d2k_qsnap_recid` | 75-134 | 60 | новый DCID для всех Initial снимка и переупаковка | `quic_snapshot.rs:79 r2k_quic_snapshot_reseal` | E | test `tests/quic_snapshot.rs`; контроллер использует в `quic_replay.rs:679` |
+| `reseal_one` | 24-73 | 50 | открыть Initial старым ключом, собрать с новым DCID/ключами, сохранить SCID/token/fixed bit/PN/длину | `quic.rs:338-371 r2k_quic_initial_reseal_for_dcid` | E | Ветви совпадают: parse Initial, `packet_len==n`, open старыми ключами, `pn_len=length_claimed-plain_len-16` (1..4), заголовок с новым DCID и тем же SCID/token/`length_width`, `pkt[0]&~0x40 | in[0]&0x40`, seal новыми ключами, `made==n`. Rust `clear_header[0]=input[0]&0xf0` сохраняет fixed bit и обнуляет младшие 4; seal с тем же PN/`pn_len`; проверка `length_claimed/width`. Tests `quic.rs:1398-1420`, `quic_snapshot.rs:30`. |
+| `d2k_qsnap_recid` | 75-134 | 60 | новый DCID для всех Initial снимка: длина из первого (8..20, иначе 8), один DCID на пачку, все датаграммы той же версии/DCID, reseal+pack | `quic_snapshot.rs:79-113 r2k_quic_snapshot_reseal` | **P** | **Совпадает:** разбор снимка, первый Initial, version V1/V2, старые ключи из первого DCID, новый DCID одной длины на все, проверка version/DCID каждой датаграммы, reseal каждой, упаковка. **Отличия:** (1) C при `first.dcid_len` 0..7 берёт новый DCID длиной **8**, Rust `old_dcid.len()<8 → None`; (2) C не проверяет, что новый DCID отличается от старого, Rust делает до 4 попыток и требует уникальности; (3) Rust `r2k_quic_initial_flight_id` требует **аутентифицированный** Initial (`is_authenticated_initial`), C — структурный, но `reseal_one` всё равно открывает старым ключом и падает на битом теге. Для снимков с DCID 8..20 и валидным тегом эквивалентно; тест `tests/quic_snapshot.rs`, контроллер `quic_replay.rs:679`. |
 
 ## core/quicprobe.c (56 функций)
 
