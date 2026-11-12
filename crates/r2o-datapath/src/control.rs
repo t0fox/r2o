@@ -2337,8 +2337,8 @@ mod tests {
         self, Ack, COMMAND_ARM_SHAPE, COMMAND_CLEAR, COMMAND_DEL_ADDR, COMMAND_DEL_BYPASS,
         COMMAND_DEL_NAME, COMMAND_DEL_NAME_PROBE, COMMAND_DEL_SUFFIX, COMMAND_SET_ADDR,
         COMMAND_SET_BYPASS, COMMAND_SET_NAME, COMMAND_SET_NAME_BOUND, COMMAND_SET_NAME_PROBE,
-        COMMAND_SET_SUFFIX, EVENT_HELLO, Frame, SHAPE_GRANDFATHER, SHAPE_HTTP, SHAPE_LEGACY,
-        SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, encode_delete_addr, encode_set_addr,
+        COMMAND_SET_SUFFIX, EVENT_HELLO, Frame, SHAPE_ECH_TCP, SHAPE_GRANDFATHER, SHAPE_HTTP,
+        SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, encode_delete_addr, encode_set_addr,
         encode_set_voice_addr, encode_set_voice_addr_probe,
     };
     use std::net::{IpAddr, Ipv4Addr};
@@ -2812,6 +2812,30 @@ mod tests {
         plans.r2o_set_send_maxlen(1500);
         let ack = plans.handle(&frame);
         assert!(ack.ok, "reason={} max_emit={}", ack.reason, plan.max_emit());
+    }
+
+    #[test]
+    fn set_addr_accepts_measured_shapes_and_rejects_unmeasured() {
+        let address = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2));
+        let mut plans = NamePlans::default();
+        let command = encode_set_addr(address, SHAPE_ECH_TCP, &tls_plan_records([0x66; 16]))
+            .expect("ECH_TCP — измеренная форма адресной привязки");
+        let frame = control::read_frame(&mut std::io::Cursor::new(command)).unwrap();
+        assert!(plans.handle(&frame).ok);
+
+        for shape in [0_u8, 4, 7] {
+            let mut body = vec![4];
+            body.extend_from_slice(&[198, 51, 100, 2]);
+            body.extend_from_slice(&[0; 12]);
+            body.push(shape);
+            body.push(0); // заведомо негодный план: отказ должен прийти раньше разбора
+            let ack = plans.handle(&Frame {
+                kind: COMMAND_SET_ADDR,
+                body,
+            });
+            assert!(!ack.ok, "shape {shape} не должен приниматься");
+            assert_eq!(ack.reason, control::ACK_BAD_ARGS);
+        }
     }
 
     #[test]
