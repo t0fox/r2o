@@ -1072,7 +1072,7 @@ addr/addr_probe/arm_shape/del_name/del_name_probe; `d2k_link_set_https`,
 
 ## Углублённая сверка: diagnostics.c (41 функция)
 
-**Прочитано построчно: 41/41 функция, 605 строк C (1–605).** Сверены: кольца
+**Прочитано построчно: 41/41 функция, 605 строк C (1–605).** R2O-сверка: `diagnostics.rs:159-236` (memory), `:754-788` (`record`), `:790-1003` (`tick`), `:1155-1231` (`record_write_error`/`write_report`), `:1411-1542` (`process_memory`/`process_detail`/`read_smaps_rollup`). Сверены: кольца
 events/limits/samples/memory_history/anomalies/growth, счётчики памяти по 6 сайтам,
 `copy`/`js`/`number`, `read_proc`/`read_detail`/`read_status`, 60-секундный sample,
 история памяти и аномалия роста RSS, `d2k_diag_write` (schema=1, memory_tracking,
