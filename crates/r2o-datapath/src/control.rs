@@ -21,12 +21,13 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-const MAX_CONTROL_OUTPUT: usize = 128 * 1024;
-const MAX_COMMANDS_PER_POLL: usize = 256;
+/// C `D2K_CTL_OUT_RING` (`datapath/ctl.c:21`) — ровно 65536 байт.
+const MAX_CONTROL_OUTPUT: usize = 64 * 1024;
 pub const MAX_NAME_PLANS: usize = 2048;
 /// C `probes[cap]` создаётся на `d2k_plantab_new(d2k_track_capacity(flows))`,
 /// где `--flows` по умолчанию 2048 (`d2kd.c:1141`, `session.c:334`).
@@ -1948,6 +1949,8 @@ pub struct ControlServer {
     output: VecDeque<PendingWrite>,
     output_bytes: usize,
     dropped_events: u64,
+    /// C `d2k_ctl.sent`: кадры, целиком поставленные в кольцо.
+    sent_events: u64,
     // D2O хранит снимки нескольких целей. Один последний снимок на семейство
     // терялся на занятом роутере: ARM_SHAPE приходил уже после того, как его
     // вытеснило приветствие другого клиента, и Discovery шёл без ClientHello.
@@ -2079,6 +2082,7 @@ impl ControlServer {
             output: VecDeque::new(),
             output_bytes: 0,
             dropped_events: 0,
+            sent_events: 0,
             last_client_shapes: VecDeque::new(),
             armed_client_shapes: [None, None],
             last_quic_shapes: VecDeque::new(),
@@ -2156,12 +2160,9 @@ impl ControlServer {
                     .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?,
             );
         }
-        if self.output_bytes.saturating_add(bytes.len()) > MAX_CONTROL_OUTPUT {
-            self.dropped_events = self.dropped_events.saturating_add(1);
+        if !self.enqueue(bytes) {
             return Ok(false);
         }
-        self.output_bytes += bytes.len();
-        self.output.push_back(PendingWrite { bytes, offset: 0 });
         self.flush()?;
         Ok(self.peer.is_some())
     }
@@ -2188,6 +2189,21 @@ impl ControlServer {
 
     pub fn dropped_events(&self) -> u64 {
         self.dropped_events
+    }
+
+    /// C `d2k_ctl_sent` (`datapath/ctl.c:316`).
+    pub fn sent_events(&self) -> u64 {
+        self.sent_events
+    }
+
+    /// C `d2k_ctl_listen_fd` (`datapath/ctl.c:143`).
+    pub fn listen_fd(&self) -> RawFd {
+        self.listener.as_raw_fd()
+    }
+
+    /// C `d2k_ctl_peer_fd` (`datapath/ctl.c:144`): -1 без подключённого пира.
+    pub fn peer_fd(&self) -> RawFd {
+        self.peer.as_ref().map(AsRawFd::as_raw_fd).unwrap_or(-1)
     }
 
     fn arm_ack(ok: bool, reason: u8) -> Ack {
@@ -2376,9 +2392,6 @@ impl ControlServer {
     fn read_peer(&mut self, frames: &mut Vec<Frame>) -> bool {
         let mut buffer = [0; 8192];
         loop {
-            if frames.len() >= MAX_COMMANDS_PER_POLL {
-                return true;
-            }
             let result = match self.peer.as_mut() {
                 Some(peer) => peer.read(&mut buffer),
                 None => return true,
@@ -2403,9 +2416,6 @@ impl ControlServer {
 
     fn take_complete_frames(&mut self, frames: &mut Vec<Frame>) -> bool {
         loop {
-            if frames.len() >= MAX_COMMANDS_PER_POLL {
-                return true;
-            }
             if self.input.len() < 4 {
                 return true;
             }
@@ -2427,16 +2437,22 @@ impl ControlServer {
         }
     }
 
-    fn enqueue(&mut self, bytes: Vec<u8>) {
+    /// Поставить кадр в кольцо целиком. `false` — кадр потерян.
+    ///
+    /// C `d2k_ctl_event` считает `sent++` только после успешной записи
+    /// заголовка и тела в кольцо (`ctl.c:244-253`).
+    fn enqueue(&mut self, bytes: Vec<u8>) -> bool {
         if self.peer.is_none() {
-            return;
+            return false;
         }
         if self.output_bytes.saturating_add(bytes.len()) > MAX_CONTROL_OUTPUT {
             self.dropped_events = self.dropped_events.saturating_add(1);
-            return;
+            return false;
         }
         self.output_bytes += bytes.len();
         self.output.push_back(PendingWrite { bytes, offset: 0 });
+        self.sent_events = self.sent_events.saturating_add(1);
+        true
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -2533,6 +2549,7 @@ mod tests {
     };
     use r2k_core::control::BindingContext;
     use r2k_core::plan::Plan;
+    use std::io::Write;
 
     fn plan_header(minexec: u16, records: u16) -> Vec<u8> {
         let mut bytes = super::PLAN_MAGIC.to_vec();
@@ -4671,5 +4688,121 @@ mod tests {
             base_only.select(&no_ts).map(|plan| plan.id),
             Some([0xC3; 16])
         );
+    }
+
+    #[test]
+    fn control_server_exposes_listen_and_peer_fds_like_d2o() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("r2o-control-fds-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("control.sock");
+        let mut server = ControlServer::open(&path, u16::MAX as u32).unwrap();
+        assert!(server.listen_fd() >= 0);
+        assert_eq!(server.peer_fd(), -1);
+
+        let mut client = UnixStream::connect(&path).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        assert!(server.poll().unwrap().is_empty());
+        assert!(server.peer_fd() >= 0);
+        assert_eq!(
+            control::read_frame(&mut client).unwrap().kind,
+            control::EVENT_PROTOCOL
+        );
+
+        drop(client);
+        assert!(server.poll().unwrap().is_empty());
+        assert_eq!(server.peer_fd(), -1);
+
+        drop(server);
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn control_sent_counts_only_frames_queued_into_the_ring_like_d2o() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("r2o-control-sent-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("control.sock");
+        let mut server = ControlServer::open(&path, u16::MAX as u32).unwrap();
+        assert_eq!(server.sent_events(), 0);
+        let mut client = UnixStream::connect(&path).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        assert!(server.poll().unwrap().is_empty());
+        // Приветствие — первый кадр, целиком попавший в кольцо.
+        assert_eq!(server.sent_events(), 1);
+        assert_eq!(
+            control::read_frame(&mut client).unwrap().kind,
+            control::EVENT_PROTOCOL
+        );
+
+        server.send_event(EVENT_HELLO, &[1, 2, 3]).unwrap();
+        assert_eq!(server.sent_events(), 2);
+        assert_eq!(control::read_frame(&mut client).unwrap().kind, EVENT_HELLO);
+
+        // C `d2k_ctl_event` при нехватке места теряет кадр целиком и
+        // увеличивает dropped, но не sent.
+        server.output_bytes = super::MAX_CONTROL_OUTPUT;
+        server.send_event(EVENT_HELLO, &[4]).unwrap();
+        assert_eq!(server.sent_events(), 2);
+        assert_eq!(server.dropped_events(), 1);
+        server.output_bytes = 0;
+
+        server.send_event(EVENT_HELLO, &[5]).unwrap();
+        assert_eq!(server.sent_events(), 3);
+
+        drop(client);
+        drop(server);
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn control_poll_processes_all_complete_frames_not_just_256() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("r2o-control-many-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("control.sock");
+        let mut server = ControlServer::open(&path, u16::MAX as u32).unwrap();
+        let mut client = UnixStream::connect(&path).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+
+        let mut wire = Vec::new();
+        for index in 0..300u16 {
+            wire.extend_from_slice(
+                &control::encode_frame(COMMAND_ARM_SHAPE, &index.to_be_bytes()).unwrap(),
+            );
+        }
+        client.write_all(&wire).unwrap();
+
+        let frames = server.poll().unwrap();
+        assert_eq!(frames.len(), 300);
+        assert_eq!(frames[0].body, 0u16.to_be_bytes());
+        assert_eq!(frames[299].body, 299u16.to_be_bytes());
+
+        drop(client);
+        drop(server);
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn control_out_ring_matches_c_65536_bytes() {
+        assert_eq!(super::MAX_CONTROL_OUTPUT, 65536);
     }
 }

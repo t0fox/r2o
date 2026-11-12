@@ -87,9 +87,9 @@ recheck 1982 1982 equal True
 | core-net | 548 | 186 | 349 | 13 | 0 |
 | core-state | 692 | 177 | 511 | 4 | 0 |
 | datapath-core | 400 | 145 | 244 | 11 | 0 |
-| datapath-plan | 183 | 101 | 78 | 4 | 0 |
+| datapath-plan | 183 | 106 | 76 | 1 | 0 |
 | detect | 159 | 47 | 102 | 10 | 0 |
-| **Итого** | **1982** | **656** | **1284** | **42** | **0** |
+| **Итого** | **1982** | **661** | **1282** | **39** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,8 +103,8 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 656 / P 1284 /
-N 42 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
+Покрытие реестра: **1982/1982** функций. Статусы: **E 661 / P 1282 /
+N 39 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
 | # | Область | D2O | R2O | Подтверждение |
@@ -347,9 +347,9 @@ P означает неполное доказательство ветвей, N
 | core-net | 548 | 186 | 349 | 13 | 0 |
 | core-state | 692 | 177 | 511 | 4 | 0 |
 | datapath-core | 400 | 145 | 244 | 11 | 0 |
-| datapath-plan | 183 | 101 | 78 | 4 | 0 |
+| datapath-plan | 183 | 106 | 76 | 1 | 0 |
 | detect | 159 | 47 | 102 | 10 | 0 |
-| **Итого** | **1982** | **656** | **1284** | **42** | **0** |
+| **Итого** | **1982** | **661** | **1282** | **39** | **0** |
 
 
 ---
@@ -5342,9 +5342,9 @@ Static-хелперы наследуют статус владельца (вла
 
 | Статус | Кол-во |
 |---|---:|
-| E | 101 |
-| P | 78 |
-| N | 4 |
+| E | 106 |
+| P | 76 |
+| N | 1 |
 | ? | 0 |
 | **Всего** | **183** |
 
@@ -5357,7 +5357,7 @@ Static-хелперы наследуют статус владельца (вла
 | datapath/plan_parse.c | 17 | 14 | 3 | 0 | 0 |
 | datapath/raw.c | 17 | 8 | 9 | 0 | 0 |
 | datapath/plan_apply.c | 15 | 8 | 7 | 0 | 0 |
-| datapath/ctl.c | 14 | 6 | 5 | 3 | 0 |
+| datapath/ctl.c | 14 | 11 | 3 | 0 | 0 |
 | datapath/ctlsrv.c | 12 | 7 | 5 | 0 | 0 |
 | datapath/routemark_nl.c | 8 | 3 | 5 | 0 | 0 |
 | datapath/include/d2k_plans.h | 2 | 0 | 2 | 0 | 0 |
@@ -5378,20 +5378,21 @@ R2O-аналог — `crates/r2o-datapath/src/control.rs` (`ControlServer`), п�
 | set_nonblock | 76-79 | 4 | static: `O_NONBLOCK` на fd | `control.rs:1852` `listener.set_nonblocking(true)`, `:2088` `peer.set_nonblocking(true)` | E | `control_server_accepts_reconnect_pending_after_previous_peer_closes` (control.rs:2343): без nonblocking цикл `accept_peer` завис бы. |
 | d2k_ctl_open | 81-127 | 47 | создать AF_UNIX listener, снять старый файл, listen(1) | `control.rs:1798` `open`, `:1807` `open_with_profile` | P | `control_socket_is_private_to_its_owner` (control.rs:2325). Отличия: R2O не удаляет чужой не-сокет и занятый живой сокет, ставит права 0600, backlog по умолчанию. |
 | d2k_ctl_close | 129-141 | 13 | закрыть оба fd и снять свой файл сокета | `control.rs:2220` `impl Drop for ControlServer` | E | C `if (!c) return;`; `close(pfd)` при `>=0`; `close(lfd)` при `>=0` и `unlink(c->path)`; `free(c)`. Rust `Drop` закрывает listener/peer и удаляет путь сокета; `control_socket_is_private_to_its_owner` (`control.rs:2325`) проверяет удаление пути и права 0600. |
-| d2k_ctl_listen_fd | 143-143 | 1 | вернуть listen fd для внешнего цикла | `control.rs:1883` `poll` | N | C `return c ? c->lfd : -1`. R2O не отдаёт listen fd: `main.rs:1388` вызывает `control.poll()`, дескриптор инкапсулирован в `ControlServer`; отдельного getter-а нет. |
-| d2k_ctl_peer_fd | 144-144 | 1 | вернуть fd пира | `control.rs:2084` `accept_peer`/`:2210` `disconnect` | N | C `return c ? c->pfd : -1`. В R2O пир хранится внутри `ControlServer`; публичного `peer_fd` нет, цикл использует `poll`/`read_peer`. |
+| d2k_ctl_listen_fd | 143-143 | 1 | вернуть listen fd для внешнего цикла | `control.rs:2203` `listen_fd` | E | C `return c ? c->lfd : -1`. Rust `listen_fd()` возвращает `listener.as_raw_fd()`; тест `control_server_exposes_listen_and_peer_fds_like_d2o` проверяет валидный fd и `-1` для пира до подключения. |
+| d2k_ctl_peer_fd | 144-144 | 1 | вернуть fd пира | `control.rs:2208` `peer_fd` | E | C `return c ? c->pfd : -1`. Rust `peer_fd()` возвращает fd подключённого пира или `-1`; тест `control_server_exposes_listen_and_peer_fds_like_d2o` проверяет оба состояния. |
 | d2k_ctl_set_disconnect_hook | 146-150 | 5 | повесить hook на разрыв | `main.rs:1409-1415` — цикл сам вызывает `name_plans.clear_probes()` при `!is_connected()` | P | Hook в объекте отсутствует; эквивалент распределён по циклу. Тест `clearing_disconnected_http_probes_keeps_the_permanent_plan` (control.rs:3703) проверяет очистку. |
 | d2k_ctl_accept | 152-177 | 26 | принять одного пира, второго отвергнуть | `control.rs:2084` `accept_peer` | E | **Ветви C:** `!c \|\| lfd<0` → return; `accept(lfd)`; `fd<0` → return; если `pfd>=0` — `close(fd)` и return (второй контроллер отвергнут); `set_nonblock(fd)<0` → close/return; иначе `pfd=fd`, `out_head=out_used=0`, `in_len=0`; greet зовёт вызывающий. Rust `accept_peer`: accept, закрывает второго при живом пире, ставит nonblocking, сбрасывает буферы; `control_server_accepts_reconnect_pending_after_previous_peer_closes` (`control.rs:2343`). |
 | drop_peer | 179-188 | 10 | закрыть пир, очистить буферы, позвать hook | `control.rs:2210` `disconnect` | E | C `connected=(pfd>=0)`; закрыть `pfd`, `pfd=-1`; `out_head=out_used=0`; `in_len=0`; если был connected — `disconnect_hook(ctx)`. Rust `disconnect` сбрасывает пир/буферы и состояние; `clear_probes` вызывает цикл `main.rs:1409-1415`. Тест reconnect (`control.rs:2343`) проверяет разрыв и нового пира. |
 | d2k_ctl_flush | 190-215 | 26 | дослать кольцо, EAGAIN — на следующий раз | `control.rs:2176` `flush` | E | **Ветви C:** `!c \|\| pfd<0 \|\| out_used==0` → return; `tail=(out_head+RING-out_used)%RING`; `run=min(RING-tail,out_used)`; `write`; `n>0` — уменьшить и продолжить; `EINTR` — повторить; `EAGAIN/EWOULDBLOCK` — return; иначе `drop_peer` и return. Rust `flush` так же досылает непрерывный кусок, EAGAIN оставляет на следующий вызов, ошибка рвёт соединение; тест `control_server_sends_a_tls_hello_event...` (`control.rs:2460`). |
-| d2k_ctl_event | 217-255 | 39 | положить кадр целиком или потерять и посчитать | `control.rs:1913` `send_event`, `:2164` `enqueue` | **P** | **Подтверждённое отличие размера:** C `D2K_CTL_OUT_RING=65536` (`ctl.c:21`), R2O `MAX_CONTROL_OUTPUT=128*1024` (`control.rs:28`). Оба кладут кадр целиком, при нехватке — `dropped++`/`dropped_events`; C дополнительно `sent++`, в R2O счётчика `sent` нет. `len>FRAME_MAX-2` → drop. Тесты `control.rs:2434`, `:2552-2583`. |
-| d2k_ctl_poll | 257-313 | 57 | прочитать, разобрать кадры, рвать на невозможной длине | `control.rs:1883` `poll`, `:2110` `read_peer`, `:2138` `take_complete_frames` | **P** | C делает один `read` до EAGAIN и разбирает всё, что пришло; R2O `read_peer` читает блоками 8192 в цикле до EAGAIN, но не более `MAX_COMMANDS_PER_POLL=256` кадров (`control.rs:29,2114,2141`). Проверка длины `2..=FRAME_MAX`, разрыв на неверной длине/переполнении входа (`FRAME_MAX+4`) и удаление обработанного префикса совпадают. Reconnect-тест читает `EVENT_PROTOCOL`; границы `FRAME_MAX` — `take_complete_frames`. |
+| d2k_ctl_event | 217-255 | 39 | положить кадр целиком или потерять и посчитать | `control.rs:2137` `send_event`, `:2450` `enqueue` | E | C `D2K_CTL_OUT_RING=65536` (`ctl.c:21`); R2O `MAX_CONTROL_OUTPUT=64*1024` ровно совпадает. Оба кладут кадр целиком, при нехватке — `dropped++`/`dropped_events`; `sent++`/`sent_events` увеличивается только после успешной постановки в кольцо. `len>FRAME_MAX-2` → drop. Тесты `control_out_ring_matches_c_65536_bytes`, `control_sent_counts_only_frames_queued_into_the_ring_like_d2o`, `control_server_counts_each_event_without_connected_peer_as_dropped_like_d2o`. |
+| d2k_ctl_poll | 257-313 | 57 | прочитать, разобрать кадры, рвать на невозможной длине | `control.rs:2097` `poll`, `:2380` `read_peer`, `:2404` `take_complete_frames` | E | C делает один `read` до EAGAIN и разбирает всё, что пришло; R2O `read_peer` читает блоками 8192 в цикле до EAGAIN и разбирает все целые кадры без искусственного предела (прежний `MAX_COMMANDS_PER_POLL=256` удалён). Проверка длины `2..=FRAME_MAX`, разрыв на неверной длине/переполнении входа (`FRAME_MAX+4`) и удаление обработанного префикса совпадают. Тест `control_poll_processes_all_complete_frames_not_just_256` подаёт 300 кадров и получает все; reconnect-тест читает `EVENT_PROTOCOL`. |
 | d2k_ctl_dropped | 315-315 | 1 | счётчик потерянных кадров | `control.rs:1983` `dropped_events` | E | C `return c ? c->dropped : 0`; Rust `dropped_events` считает те же потери при отсутствии пира/нехватке места; `control_server_counts_each_event_without_connected_peer...` (`control.rs:2434`). |
-| d2k_ctl_sent | 316-316 | 1 | счётчик поставленных в кольцо кадров | нет | N | C `return c ? c->sent : 0`; `sent++` только после успешной записи кадра в кольцо (`ctl.c:253`). В R2O отдельного `sent` нет: есть `dropped_events` и состояние peer, поэтому число принятых к отправке кадров не наблюдается. |
+| d2k_ctl_sent | 316-316 | 1 | счётчик поставленных в кольцо кадров | `control.rs:2198` `sent_events` | E | C `return c ? c->sent : 0`; `sent++` только после успешной записи кадра в кольцо (`ctl.c:253`). Rust `sent_events()` увеличивается в `enqueue` после проверки места; тест `control_sent_counts_only_frames_queued_into_the_ring_like_d2o` проверяет приветствие, обычное событие и потерю при полном кольце без увеличения `sent`. |
 
-Итог по файлу: E 6, P 5, N 3. Пробелы: нет доступа к fd (listen/peer), нет счётчика
-отправленных кадров, hook разрыва реализован в цикле, а не в объекте; outbox R2O
-128 КиБ против C 64 КиБ; `poll` разбирает до 256 кадров за вызов.
+Итог по файлу: E 11, P 3, N 0. Закрыты доступ к listen/peer fd, счётчик `sent`,
+размер outbox 65536 и отсутствие предела 256 кадров за `poll`. Остаются: hook разрыва
+реализован в цикле, а не в объекте; `open` не удаляет чужой не-сокет и ставит 0600;
+`say` не воспроизводит C-буфер ошибки.
 
 **Построчная сверка a378:** все 14 функций прочитаны. Кольцо `D2K_CTL_OUT_RING`
 (C 65536), кадр `HDR=6` (`plen` включает 2 байта типа, `plen>=2`), `D2K_CTL_FRAME_MAX`,

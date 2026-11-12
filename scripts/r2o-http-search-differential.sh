@@ -16,6 +16,22 @@ if [ ! -d "$r2o_donor_core" ]; then
     exit 2
 fi
 
+# clang-18 может быть установлен вне PATH (например, в ~/bin у другого
+# пользователя), поэтому ищем его явно; R2O_CC позволяет подставить свой.
+if [ -n "${R2O_CC:-}" ]; then
+    r2o_cc=$R2O_CC
+elif command -v clang-18 >/dev/null 2>&1; then
+    r2o_cc=clang-18
+elif [ -x /home/kirill/bin/clang-18 ]; then
+    r2o_cc=/home/kirill/bin/clang-18
+elif command -v clang >/dev/null 2>&1; then
+    r2o_cc=clang
+else
+    printf 'Не найден C-компилятор (clang-18); задайте R2O_CC\n' >&2
+    exit 2
+fi
+printf 'C-компилятор: %s\n' "$r2o_cc"
+
 r2o_show_log_on_error() {
     r2o_status=$?
     if [ "$r2o_status" -ne 0 ] && [ -f "$r2o_log" ]; then
@@ -69,7 +85,7 @@ mkdir -p "$r2o_log_dir"
         r2o_binary=$1
         (
         cd "$r2o_donor_core" || exit 1
-        clang-18 -std=c99 -O2 -Wall -Wextra -Werror -DD2K_HS_TESTING \
+        "$r2o_cc" -std=c99 -O2 -Wall -Wextra -Werror -DD2K_HS_TESTING \
             -Iinclude -I"$r2o_donor_core/../datapath/include" \
             -o "$r2o_binary" \
             test_httpsearch.c httpsearch.c httpup_logic.c plantlv.c quic.c \
@@ -87,7 +103,7 @@ mkdir -p "$r2o_log_dir"
     r2o_state_binary="$r2o_log_dir/http-response-state-$$"
     r2o_state_c="$r2o_log_dir/http-response-state-c-$$"
     r2o_state_rust="$r2o_log_dir/http-response-state-rust-$$"
-    clang-18 -std=c99 -O2 -Wall -Wextra -Werror \
+    "$r2o_cc" -std=c99 -O2 -Wall -Wextra -Werror \
         -I"$r2o_donor_core/include" -I"$r2o_donor_core/../datapath/include" \
         -o "$r2o_state_binary" \
         "$r2o_script_dir/crates/r2o-controller/tests/d2o_http_response_state_differential.c" \
@@ -118,7 +134,7 @@ mkdir -p "$r2o_log_dir"
     r2o_applied_binary="$r2o_log_dir/http-applied-window-differential-$$"
     r2o_applied_c="$r2o_log_dir/http-applied-window-c-$$"
     r2o_applied_rust="$r2o_log_dir/http-applied-window-rust-$$"
-    clang-18 -std=c99 -O2 -Wall -Wextra -Werror \
+    "$r2o_cc" -std=c99 -O2 -Wall -Wextra -Werror \
         -I"$r2o_donor_core/include" -I"$r2o_donor_core/../datapath/include" \
         -o "$r2o_applied_binary" \
         "$r2o_script_dir/crates/r2o-controller/tests/d2o_http_applied_window_differential.c" \
@@ -147,7 +163,7 @@ mkdir -p "$r2o_log_dir"
     r2o_https_gate_binary="$r2o_log_dir/http-https-gate-differential-$$"
     r2o_https_gate_c="$r2o_log_dir/http-https-gate-c-$$"
     r2o_https_gate_rust="$r2o_log_dir/http-https-gate-rust-$$"
-    clang-18 -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
+    "$r2o_cc" -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
         -I"$r2o_donor_core/include" \
         -o "$r2o_https_gate_binary" \
         "$r2o_script_dir/crates/r2o-controller/tests/d2o_http_https_gate_differential.c" \
@@ -163,7 +179,7 @@ mkdir -p "$r2o_log_dir"
     r2o_durable_binary="$r2o_log_dir/http-durable-differential-$$"
     r2o_durable_c="$r2o_log_dir/http-durable-c-$$"
     r2o_durable_rust="$r2o_log_dir/http-durable-rust-$$"
-    clang-18 -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
+    "$r2o_cc" -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
         -I"$r2o_donor_core" -I"$r2o_donor_core/include" \
         -I"$r2o_donor_core/../datapath/include" \
         -o "$r2o_durable_binary" \
@@ -193,7 +209,7 @@ mkdir -p "$r2o_log_dir"
     r2o_rollback_binary="$r2o_log_dir/http-rollback-differential-$$"
     r2o_rollback_c="$r2o_log_dir/http-rollback-c-$$"
     r2o_rollback_rust="$r2o_log_dir/http-rollback-rust-$$"
-    clang-18 -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
+    "$r2o_cc" -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
         -I"$r2o_donor_core" -I"$r2o_donor_core/include" \
         -I"$r2o_donor_core/../datapath/include" \
         -o "$r2o_rollback_binary" \
@@ -224,7 +240,7 @@ mkdir -p "$r2o_log_dir"
     r2o_baseline_binary="$r2o_log_dir/http-baseline-differential-$$"
     r2o_baseline_c="$r2o_log_dir/http-baseline-c-$$"
     r2o_baseline_rust="$r2o_log_dir/http-baseline-rust-$$"
-    clang-18 -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
+    "$r2o_cc" -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
         -I"$r2o_donor_core/include" -I"$r2o_donor_core/../datapath/include" \
         -o "$r2o_baseline_binary" "$r2o_baseline_harness" \
         "$r2o_donor_core/httpsearch.c" "$r2o_donor_core/httpup_logic.c" \
@@ -252,7 +268,7 @@ mkdir -p "$r2o_log_dir"
     r2o_judge_harness="$r2o_script_dir/crates/r2o-controller/tests/d2o_http_judge_differential.c"
     r2o_judge_binary="$r2o_log_dir/http-judge-differential-$$"
     r2o_rust_answer="$r2o_log_dir/http-judge-rust-answer-$$"
-    clang-18 -std=c99 -O2 -Wall -Wextra -Werror \
+    "$r2o_cc" -std=c99 -O2 -Wall -Wextra -Werror \
         -I"$r2o_donor_core/include" -I"$r2o_donor_core/../datapath/include" \
         -o "$r2o_judge_binary" "$r2o_judge_harness" \
         "$r2o_donor_core/httpsearch.c" "$r2o_donor_core/httpup_logic.c" \
@@ -285,7 +301,7 @@ mkdir -p "$r2o_log_dir"
     r2o_cut_context_binary="$r2o_log_dir/http-cut-context-differential-$$"
     r2o_cut_context_c="$r2o_log_dir/http-cut-context-c-$$"
     r2o_cut_context_rust="$r2o_log_dir/http-cut-context-rust-$$"
-    clang-18 -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
+    "$r2o_cc" -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
         -I"$r2o_donor_core/include" -I"$r2o_donor_core/../datapath/include" \
         -o "$r2o_cut_context_binary" \
         "$r2o_cut_context_harness" "$r2o_donor_core/httpsearch.c" \
@@ -313,7 +329,7 @@ mkdir -p "$r2o_log_dir"
     r2o_queue_harness="$r2o_script_dir/crates/r2o-controller/tests/d2o_http_queue_differential.c"
     r2o_queue_binary="$r2o_log_dir/http-queue-differential-$$"
     r2o_queue_rust="$r2o_log_dir/http-queue-rust-$$"
-    clang-18 -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
+    "$r2o_cc" -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
         -I"$r2o_donor_core/include" -I"$r2o_donor_core/../datapath/include" \
         -o "$r2o_queue_binary" "$r2o_queue_harness" \
         "$r2o_donor_core/httpsearch.c" "$r2o_donor_core/httpup_logic.c" \
@@ -345,7 +361,7 @@ mkdir -p "$r2o_log_dir"
     r2o_no_exec_binary="$r2o_log_dir/http-no-executed-differential-$$"
     r2o_no_exec_c="$r2o_log_dir/http-no-executed-c-$$"
     r2o_no_exec_rust="$r2o_log_dir/http-no-executed-rust-$$"
-    clang-18 -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
+    "$r2o_cc" -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
         -I"$r2o_donor_core" -I"$r2o_donor_core/include" -I"$r2o_donor_core/../datapath/include" \
         -o "$r2o_no_exec_binary" \
         "$r2o_script_dir/crates/r2o-controller/tests/d2o_http_no_executed_differential.c" \
