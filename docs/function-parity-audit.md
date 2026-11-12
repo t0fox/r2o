@@ -87,9 +87,9 @@ recheck 1982 1982 equal True
 | core-net | 548 | 195 | 351 | 4 | 0 |
 | core-state | 692 | 179 | 511 | 2 | 0 |
 | datapath-core | 400 | 153 | 244 | 3 | 0 |
-| datapath-plan | 183 | 160 | 23 | 0 | 0 |
+| datapath-plan | 183 | 164 | 19 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **745** | **1230** | **7** | **0** |
+| **Итого** | **1982** | **749** | **1226** | **7** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 745 / P 1230 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 749 / P 1226 /
 N 7 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -347,9 +347,9 @@ P означает неполное доказательство ветвей, N
 | core-net | 548 | 195 | 351 | 2 | 0 |
 | core-state | 692 | 179 | 511 | 2 | 0 |
 | datapath-core | 400 | 153 | 244 | 3 | 0 |
-| datapath-plan | 183 | 160 | 23 | 0 | 0 |
+| datapath-plan | 183 | 164 | 19 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **745** | **1230** | **7** | **0** |
+| **Итого** | **1982** | **749** | **1226** | **7** | **0** |
 
 
 ---
@@ -5341,8 +5341,8 @@ Static-хелперы наследуют статус владельца (вла
 
 | Статус | Кол-во |
 |---|---:|
-| E | 160 |
-| P | 23 |
+| E | 164 |
+| P | 19 |
 | N | 0 |
 | ? | 0 |
 | **Всего** | **183** |
@@ -5847,13 +5847,13 @@ Rtnetlink: дампы правил, одиночный поиск маршрут
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | parse_rules | 18-21 | 4 | static: адаптер сигнатуры под `d2k_routemark_parse` | замыкание в `r2o_dump_rules` (`r2o_route.rs:402-420`) | E | C `return d2k_routemark_parse(out,cap,n,buf,len,kerr);` — только приведение сигнатуры. Rust `r2o_dump_rules` передаёт замыкание, вызывающее `r2o_route_parse_rules`; владелец проверен тестом `:1109`. |
-| dump | 27-59 | 33 | static: `sendto`, до 4096 `recv`, EINTR, парсер до DONE; `-EAFNOSUPPORT/-EOPNOTSUPP` → пустой успех; иная ошибка ядра/разбор → -1 | `r2o_receive_request` (`:458-557`) + ветка `r2o_dump_rules` (`:406-412`) | **P** | **Совпадает:** sendto, буфер 32768, 4096 раундов, EINTR, DONE, ошибка ядра, SO_RCVTIMEO 200 мс. **Подтверждённое отличие:** C трактует `-EAFNOSUPPORT/-EOPNOTSUPP` как пустой успех для **любого** семейства; Rust делает это только для IPv6-правил (`family == Ipv6 && matches!(code, -97 / -95)`), для IPv4 — ошибка. |
-| dump_rules | 61-67 | 7 | static: запрос правил family + `dump` с пределом `D2K_ROUTEMARK_MAX=32` | `r2o_dump_rules` (`:398-453`) | **P** | **Подтверждённое отличие:** C при >32 правилах не ошибается: парсер считает `*n` сверх cap, `merge` усекает и выставляет `truncated`; Rust при `selectors.len()+batch > 32` возвращает `InvalidData` и **не сохраняет** семейство (остаётся прежний набор). Тест на переполнение отсутствует. |
-| lookup_route | 72-110 | 39 | static: один `RTM_GETROUTE`, до 4 `recv` по 8192; rc 1→0/2, rc 2→3; `ENETUNREACH/EHOSTUNREACH/ENETDOWN/EAFNOSUPPORT` → 3 | `r2o_lookup_default` (`:455-515`) | **P** | **Совпадает:** один lookup, коды 2/3, набор errno `-97/-100/-101/-113`, пустой Unicast → «нет устройства» (2). **Отличия:** C 4 раунда × 8192, Rust 4096 × 32768; C при исчерпании — «нет ответа», Rust — `Pending`/ошибка. Проверено парсером и живым IPv4-тестом, не всеми кодами. |
+| dump | 27-59 | 33 | static: `sendto`, до 4096 `recv`, EINTR, парсер до DONE; `-EAFNOSUPPORT/-EOPNOTSUPP` → пустой успех; иная ошибка ядра/разбор → -1 | `r2o_receive_request`, `r2o_rules_error_is_empty_success` | E | C: sendto, 4096×32768, EINTR, DONE, `-97/-95` — пустой успех для любого семейства, иная ошибка ядра/разбор → -1. Rust `r2o_receive_request` те же лимиты/флаги, `r2o_rules_error_is_empty_success(-97/-95)` для обоих семейств. Тест `r2o_коды_пустого_дампа_и_лимиты_lookup_совпадают_с_c`. |
+| dump_rules | 61-67 | 7 | static: запрос правил family + `dump` с пределом `D2K_ROUTEMARK_MAX=32` | `r2o_dump_rules`, `r2o_extend_rule_selectors` | E | C при >32 правилах усекает и выставляет `truncated`. Rust `r2o_dump_rules` возвращает `(selectors, truncated)`, `r2o_extend_rule_selectors` усекает до 32; `r2o_refresh_with_status` пробрасывает `truncated/found`. Тест `r2o_избыток_правил_усекается_до_32_как_в_c`. |
+| lookup_route | 72-110 | 39 | static: один `RTM_GETROUTE`, до 4 `recv` по 8192; rc 1→0/2, rc 2→3; `ENETUNREACH/EHOSTUNREACH/ENETDOWN/EAFNOSUPPORT` → 3 | `r2o_lookup_default` | E | C: один lookup, 4×8192, коды 2/3, errno `-97/-100/-101/-113`. Rust `r2o_lookup_default` использует `R2O_LOOKUP_ROUNDS=4`/`R2O_LOOKUP_BUFFER=8192`, те же errno и `Unicast(empty)→None`. Тест `r2o_коды_пустого_дампа_и_лимиты_lookup_совпадают_с_c`. |
 | dump_socket | 115-128 | 14 | static: `AF_NETLINK/SOCK_RAW/CLOEXEC`, `SO_RCVTIMEO=200000` | socket+SO_RCVTIMEO в `r2o_receive_request` (`:463-530`) | **E** | Флаги/таймаут совпадают; C переиспользует сокет до ошибки части, Rust создаёт на каждый запрос — наблюдаемое поведение то же. `r2o_монитор_читает_правила...` (`:1240`). |
 | d2k_routemark_load | 130-177 | 48 | 4 независимые части: правила v4/v6, маршруты v4/v6; после ошибки — новый сокет; merge+oifs; `routes4_ok/routes6_ok`, первый текст ошибки, -1 если все части упали | `r2o_refresh` (`:372-397`) | **P** | **Совпадает:** порядок 4 частей, независимость семейств, сохранение прежнего при ошибке, `rc==2` → пустой список oifs (без гейта). **Не перенесены:** `routes4_ok/routes6_ok`, `st->found/truncated`, `changed`, «первая ошибка» как единый текст; Rust возвращает `Vec<String>` всех ошибок. Сокет на каждый запрос, а не после сбоя. |
 | d2k_routemark_watch_open | 179-209 | 31 | `SOCK_NONBLOCK`, bind, 4 группы: 8/7 обязательны, 19/11 опциональны | `r2o_open_watch` (`:283-332`) | **E** | Группы/обязательность совпадают: `(8,true),(7,true),(19,false),(11,false)`; bind/CLOEXEC/NONBLOCK те же. `r2o_монитор_читает_правила...` (`:1240`) вызывает open, но результат намеренно не проверяется — обязательность IPv4 тестом не подтверждена. |
-| d2k_routemark_watch_drain | 211-228 | 18 | до `D2K_ROUTEMARK_WATCH_READS=256`; `>0` → relevant, EINTR, ENOBUFS→1, иное/0 → вернуть накопленное; исчерпание → 1 | `r2o_drain_watch` (`:334-370`) | **P** | **Совпадает:** 256 чтений, `MSG_DONTWAIT`, EINTR, ENOBUFS→true, `EAGAIN` → вернуть накопленное, предел→true. **Отличие:** C на любую иную ошибку `recv` возвращает накопленный `any` (`routemark_nl.c:225`), R2O возвращает `Err(error)` (`r2o_route.rs:365`); C не различает «нет данных» и сбой сокета. Тест на границу отсутствует. |
+| d2k_routemark_watch_drain | 211-228 | 18 | до `D2K_ROUTEMARK_WATCH_READS=256`; `>0` → relevant, EINTR, ENOBUFS→1, иное/0 → вернуть накопленное; исчерпание → 1 | `r2o_drain_watch` | E | C: 256 чтений, `MSG_DONTWAIT`, EINTR, ENOBUFS→true, EAGAIN и любая иная ошибка/0 → вернуть накопленное. Rust те же ветви; `_ => return Ok(changed)` для иной ошибки. Тест `r2o_watch_other_error_returns_accumulated_not_err` (`/dev/null` → ENOTSOCK → `Ok(false)`). |
 
 Итог по файлу: E 4, P 4, N 0. Пробелы: обработка `EAFNOSUPPORT` для IPv4-правил,
 переполнение >32 правил (C усекает с `truncated`, Rust ошибается), внешние

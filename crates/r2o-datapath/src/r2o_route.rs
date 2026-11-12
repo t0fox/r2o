@@ -44,6 +44,20 @@ pub const R2O_ROUTE_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 #[cfg(target_os = "linux")]
 pub const R2O_ROUTE_SETTLE_INTERVAL: Duration = Duration::from_millis(100);
 const R2O_ROUTE_RULE_CAPACITY: usize = 32;
+const R2O_LOOKUP_ROUNDS: usize = 4;
+const R2O_LOOKUP_BUFFER: usize = 8192;
+const R2O_DUMP_ROUNDS: usize = 4096;
+const R2O_DUMP_BUFFER: usize = 32768;
+
+/// C `d2k_routemark_status`: итог merge/refresh по семействам.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct R2oRouteRefreshStatus {
+    pub v4_ok: bool,
+    pub v6_ok: bool,
+    pub found: usize,
+    pub truncated: bool,
+    pub changed: bool,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum R2oRouteFamily {
@@ -136,6 +150,14 @@ impl R2oRouteGate {
         };
         *slot = Some(rules);
         changed
+    }
+
+    /// Число сохранённых правил семейства (для `merge.found`).
+    pub fn r2o_rule_count(&self, family: R2oRouteFamily) -> usize {
+        match family {
+            R2oRouteFamily::Ipv4 => self.r2o_rules_v4.as_ref().map_or(0, Vec::len),
+            R2oRouteFamily::Ipv6 => self.r2o_rules_v6.as_ref().map_or(0, Vec::len),
+        }
     }
 
     /// Задаёт устройства маршрута по умолчанию; `None` означает, что чтение неизвестно.
@@ -445,8 +467,9 @@ impl R2oRouteMonitor {
                     changed = true;
                     continue;
                 }
-                Some(libc::EAGAIN) => return Ok(changed),
-                _ => return Err(error),
+                // C `d2k_routemark_watch_drain`: любая иная ошибка recv
+                // возвращает уже накопленный `any`, а не Err.
+                Some(libc::EAGAIN) | _ => return Ok(changed),
             }
         }
         Ok(true)
@@ -454,13 +477,33 @@ impl R2oRouteMonitor {
 
     /// Обновляет семейства независимо и сохраняет прежние данные при ошибке.
     pub fn r2o_refresh(&mut self, gate: &mut R2oRouteGate) -> Vec<String> {
+        self.r2o_refresh_with_status(gate).0
+    }
+
+    /// C `d2k_routemark_load/merge`: ошибки плюс `found/truncated/changed`
+    /// и независимые `v4_ok/v6_ok`.
+    pub fn r2o_refresh_with_status(
+        &mut self,
+        gate: &mut R2oRouteGate,
+    ) -> (Vec<String>, R2oRouteRefreshStatus) {
         let mut errors = Vec::new();
+        let mut status = R2oRouteRefreshStatus::default();
         for family in [R2oRouteFamily::Ipv4, R2oRouteFamily::Ipv6] {
             match self.r2o_dump_rules(family) {
-                Ok(rules) => {
-                    gate.r2o_set_rules(family, rules);
+                Ok((rules, truncated)) => {
+                    status.found = status.found.saturating_add(rules.len());
+                    status.truncated |= truncated;
+                    status.changed |= gate.r2o_set_rules(family, rules);
+                    match family {
+                        R2oRouteFamily::Ipv4 => status.v4_ok = true,
+                        R2oRouteFamily::Ipv6 => status.v6_ok = true,
+                    }
                 }
-                Err(error) => errors.push(format!("правила {family:?}: {error}")),
+                Err(error) => {
+                    // C merge сохраняет прежние селекторы упавшего семейства.
+                    status.found = status.found.saturating_add(gate.r2o_rule_count(family));
+                    errors.push(format!("правила {family:?}: {error}"));
+                }
             }
             match self.r2o_lookup_default(family) {
                 Ok(R2oRouteLookup::Unicast(ifindices)) if ifindices.is_empty() => {
@@ -478,37 +521,40 @@ impl R2oRouteMonitor {
                 Err(error) => errors.push(format!("маршрут {family:?}: {error}")),
             }
         }
-        errors
+        (errors, status)
     }
 
-    fn r2o_dump_rules(&mut self, family: R2oRouteFamily) -> std::io::Result<Vec<R2oFwSelector>> {
+    fn r2o_dump_rules(
+        &mut self,
+        family: R2oRouteFamily,
+    ) -> std::io::Result<(Vec<R2oFwSelector>, bool)> {
         let mut selectors = Vec::new();
+        let mut truncated = false;
         let sequence = self.r2o_next_sequence();
         let request = r2o_route_rule_request(family, sequence);
-        self.r2o_receive_request(request, |bytes| {
+        self.r2o_receive_request(request, R2O_DUMP_BUFFER, R2O_DUMP_ROUNDS, |bytes| {
             let batch = match r2o_route_parse_rules(bytes) {
                 Ok(batch) => batch,
                 // C `dump` (`routemark_nl.c:48-56`) считает и
                 // `-EAFNOSUPPORT`, и `-EOPNOTSUPP` пустым успехом для любого
                 // семейства, а не только для IPv6.
-                Err(R2oRouteParseError::Kernel(code)) if matches!(code, -97 | -95) => {
+                Err(R2oRouteParseError::Kernel(code)) if r2o_rules_error_is_empty_success(code) => {
                     selectors.clear();
                     return Ok(true);
                 }
                 Err(error) => return Err(r2o_parse_io_error(error)),
             };
-            let mut truncated = false;
             r2o_extend_rule_selectors(&mut selectors, batch.selectors, &mut truncated);
             Ok(batch.done)
         })?;
-        Ok(selectors)
+        Ok((selectors, truncated))
     }
 
     fn r2o_lookup_default(&mut self, family: R2oRouteFamily) -> std::io::Result<R2oRouteLookup> {
         let mut result = R2oRouteLookup::Pending;
         let sequence = self.r2o_next_sequence();
         let request = r2o_route_lookup_request(family, sequence);
-        self.r2o_receive_request(request, |bytes| {
+        self.r2o_receive_request(request, R2O_LOOKUP_BUFFER, R2O_LOOKUP_ROUNDS, |bytes| {
             result = match r2o_route_parse_lookup(bytes) {
                 Ok(result) => result,
                 Err(R2oRouteParseError::Kernel(-97 | -100 | -101 | -113)) => {
@@ -530,6 +576,8 @@ impl R2oRouteMonitor {
     fn r2o_receive_request(
         &mut self,
         request: Vec<u8>,
+        buffer_len: usize,
+        rounds: usize,
         mut parse: impl FnMut(&[u8]) -> std::io::Result<bool>,
     ) -> std::io::Result<()> {
         use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -590,8 +638,8 @@ impl R2oRouteMonitor {
             return Err(std::io::Error::last_os_error());
         }
 
-        let mut bytes = [0_u8; 32768];
-        for _ in 0..4096 {
+        let mut bytes = vec![0_u8; buffer_len];
+        for _ in 0..rounds {
             let received = unsafe {
                 libc::recv(
                     fd.as_raw_fd(),
@@ -791,6 +839,10 @@ pub fn r2o_route_lookup_request(family: R2oRouteFamily, sequence: u32) -> Vec<u8
 
 /// C `d2k_routemark_merge`: найденное сверх `D2K_ROUTEMARK_MAX=32`
 /// усекается, а не превращается в ошибку (`routemark.c:246-261`).
+fn r2o_rules_error_is_empty_success(code: i32) -> bool {
+    matches!(code, -97 | -95)
+}
+
 fn r2o_extend_rule_selectors(
     selectors: &mut Vec<R2oFwSelector>,
     batch: Vec<R2oFwSelector>,
@@ -1484,6 +1536,27 @@ mod tests {
             r2o_route_parse_rules(&message),
             Err(R2oRouteParseError::Kernel(0))
         );
+    }
+
+    #[test]
+    fn r2o_коды_пустого_дампа_и_лимиты_lookup_совпадают_с_c() {
+        assert!(r2o_rules_error_is_empty_success(-97));
+        assert!(r2o_rules_error_is_empty_success(-95));
+        assert!(!r2o_rules_error_is_empty_success(-1));
+        assert_eq!(R2O_LOOKUP_ROUNDS, 4);
+        assert_eq!(R2O_LOOKUP_BUFFER, 8192);
+        assert_eq!(R2O_DUMP_ROUNDS, 4096);
+        assert_eq!(R2O_DUMP_BUFFER, 32768);
+    }
+
+    #[test]
+    fn r2o_watch_other_error_returns_accumulated_not_err() {
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let monitor = R2oRouteMonitor {
+            watch: Some(std::os::fd::OwnedFd::from(file)),
+            sequence: 1,
+        };
+        assert!(!monitor.r2o_drain_watch().unwrap());
     }
 
     #[test]
