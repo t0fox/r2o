@@ -40,6 +40,7 @@ pub(crate) fn rst_pending_count() -> usize {
 }
 pub mod recv_ttl;
 pub mod response;
+pub mod tcp_profile;
 pub mod tls12;
 pub mod trigger;
 pub mod verify;

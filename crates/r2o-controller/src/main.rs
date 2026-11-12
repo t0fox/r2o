@@ -22792,55 +22792,48 @@ impl BoundTcpProbe {
         destination: std::net::SocketAddr,
         timeout: std::time::Duration,
     ) -> std::io::Result<(std::net::TcpStream, std::net::IpAddr, u16, i64)> {
+        self.connect_with_timestamps(destination, timeout, -1)
+    }
+
+    /// C `connect_with_tcp_profile`: временно переключить sysctl
+    /// `tcp_timestamps` вокруг `connect()`, затем восстановить прежнее значение.
+    fn connect_with_timestamps(
+        self,
+        destination: std::net::SocketAddr,
+        timeout: std::time::Duration,
+        tcp_timestamps: i8,
+    ) -> std::io::Result<(std::net::TcpStream, std::net::IpAddr, u16, i64)> {
         use std::os::fd::AsRawFd;
 
         let fd = self.socket.as_raw_fd();
         let start = std::time::Instant::now();
-        let result = match destination {
-            std::net::SocketAddr::V4(address) => {
-                let raw = libc::sockaddr_in {
-                    sin_family: libc::AF_INET as libc::sa_family_t,
-                    sin_port: address.port().to_be(),
-                    sin_addr: libc::in_addr {
-                        s_addr: u32::from_ne_bytes(address.ip().octets()),
-                    },
-                    sin_zero: [0; 8],
-                };
-                unsafe {
-                    libc::connect(
-                        fd,
-                        (&raw as *const libc::sockaddr_in).cast(),
-                        std::mem::size_of_val(&raw) as libc::socklen_t,
-                    )
+        let mut in_progress = false;
+        match r2o_controller::tcp_profile::connect_with_tcp_profile(fd, destination, tcp_timestamps)
+        {
+            Ok(()) => {}
+            Err(r2o_controller::tcp_profile::TcpProfileConnectError::Connect(error)) => {
+                if !matches!(
+                    error.raw_os_error(),
+                    Some(libc::EINPROGRESS | libc::EALREADY | libc::EINTR)
+                ) {
+                    return Err(error);
                 }
+                in_progress = true;
             }
-            std::net::SocketAddr::V6(address) => {
-                let raw = libc::sockaddr_in6 {
-                    sin6_family: libc::AF_INET6 as libc::sa_family_t,
-                    sin6_port: address.port().to_be(),
-                    sin6_flowinfo: address.flowinfo(),
-                    sin6_addr: libc::in6_addr {
-                        s6_addr: address.ip().octets(),
-                    },
-                    sin6_scope_id: address.scope_id(),
-                };
-                unsafe {
-                    libc::connect(
-                        fd,
-                        (&raw as *const libc::sockaddr_in6).cast(),
-                        std::mem::size_of_val(&raw) as libc::socklen_t,
-                    )
-                }
+            Err(r2o_controller::tcp_profile::TcpProfileConnectError::BadProfile) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "профиль tcp_timestamps вне диапазона -1..1",
+                ));
             }
-        };
-        if result != 0 {
-            let error = std::io::Error::last_os_error();
-            if !matches!(
-                error.raw_os_error(),
-                Some(libc::EINPROGRESS | libc::EALREADY | libc::EINTR)
-            ) {
-                return Err(error);
+            Err(r2o_controller::tcp_profile::TcpProfileConnectError::Profile(error)) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("профиль tcp_timestamps: {error}"),
+                ));
             }
+        }
+        if in_progress {
             let millis = timeout.as_millis().saturating_add(1).min(i32::MAX as u128) as i32;
             let mut descriptor = libc::pollfd {
                 fd,
