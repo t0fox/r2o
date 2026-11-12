@@ -309,6 +309,8 @@ P означает неполное доказательство ветвей, N
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/test-discord-udp-observer-reconnect-differential.sh` —
   **PASS**, 24 теста (SSRC reconnect, endpoint change, 10-минутный двусторонний
   сеанс; `suspects=1`, `expire=1` совпали).
+- `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/test-discord-voice-confirm-delete-retry-differential.sh` —
+  **PASS** (`attempts=2 retained=0`: повтор удаления после неудачного подтверждения).
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-diagnostics-differential.sh` —
   **не выполнен**: сборка донорского `test_httpsearch` падает на duplicate
   symbols `d2k_plan_apply`, `d2k_plan_max_emit`, `d2k_actions_cancel`,
