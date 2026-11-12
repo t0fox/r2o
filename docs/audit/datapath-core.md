@@ -766,7 +766,7 @@ Netlink/NFQUEUE кодек: итератор сообщений, атрибут�
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
-| `align4` (static) | 10–12 | 3 | выравнивание | `netlink.rs:291 align4` | E | используется в тестах кодекa |
+| `align4` (static) | 16 | 1 | `(n+3)&~3` | `netlink.rs:291 align4` | **E** | Точное совпадение для длин netlink-сообщений; Rust использует checked-арифметику, переполнение недостижимо. |
 | `h16` (static) | 16 | 1 | host u16 | `from_ne_bytes` (`netlink.rs:95`) | E | тесты конфигурации |
 | `h32` (static) | 17 | 1 | host u32 | `from_ne_bytes` (`:88`) | E | `:355` iterator test |
 | `wh16` (static) | 18 | 1 | запись host u16 | `to_ne_bytes` (`:266`) | E | — |
@@ -1061,26 +1061,26 @@ ctnetlink: сборка GET, разбор счётчиков/состояния 
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
-| `align4` (static) | 16 | 1 | выравнивание | `conntrack.rs:250 align4` | E | — |
-| `wr16h` (static) | 18 | 1 | host u16 | `to_ne_bytes` (`:256`) | E | `:543` encode test |
-| `wr32h` (static) | 19 | 1 | host u32 | `to_ne_bytes` (`:125`) | E | `:543` |
-| `rd16h` (static) | 20 | 1 | host u16 | `from_ne_bytes` (`:233`) | E | `:543` |
-| `rd64be` (static) | 21–25 | 5 | сетевой u64 | `u64::from_be_bytes` (`:214`) | E | `:487` тест счётчиков |
-| `rd32be` (static) | 26–28 | 3 | сетевой u32 | `u32::from_be_bytes` (`:224`) | E | `:529` 32-битные счётчики |
-| `put` (static) | 31–40 | 10 | атрибут с padding | `push_attribute` (`:254`) | E | `:543` |
-| `open_nest` (static) | 43–47 | 5 | вложенный атрибут: пишет `type \| NLA_F_NESTED`, длина позже | `push_attribute(kind с NLA_F_NESTED)` (`:114`) | **P** | C сначала пишет только заголовок, `close_nest` проставляет длину; Rust собирает вложенное значение в `Vec` и `push_attribute` сразу пишет длину+padding. Wire-формат совпадает, порядок сборки разный. |
-| `close_nest` (static) | 48–50 | 3 | проставить длину вложенного атрибута | length prefix в `push_attribute` | **P** | C `end-start` без padding; Rust `push_attribute` добавляет padding. Для кратности 4 результат тот же; отдельного теста нет. |
-| `d2k_ct_get_req` | 52–81 | 30 | GET orig-tuple (family/proto/ports) | `conntrack.rs:74 encode_get` | E | `:543 строит_запрос_по_кортежу_ipv4` |
-| `counter` (static) | 84–96 | 13 | packets из вложенного counters (64/32) | `:211 parse_counter` | E | `:487`, `:529` |
-| `tcp_state` (static) | 99–120 | 22 | состояние TCP (+1 enum) | `:156-160` из PROTOINFO | E | `:487` (state=3) |
-| `d2k_ct_info_parse` | 122–156 | 35 | разбор ответа: -1 нет seq, 0 счётчики+state, 1 NLMSG_ERROR, 2 нет счётчиков; оба counters обязательны | `:137 decode_entry`, `:133 decode_info` | **P** | C различает четыре кода и требует **оба** `CTA_COUNTERS_ORIG/REPLY`; при отсутствии одного возвращает 2. Rust `decode_entry` возвращает `None` для нет seq/не CT_NEW, `Some(Entry{info:None})` при нехватке counters, NLMSG_ERROR не разбирает (это делает `probe`). `tcp_state`: C `+1` в helper и `-1` в info, Rust хранит enum как `Option<u8>`; итог совпадает. P — другой канал ошибок/«нет счётчиков». |
-| `d2k_ct_counters_parse` | 158–167 | 10 | обёртка: только orig/reply packets, код пробрасывается | `decode_info(...).map(...)` | **P** | C сохраняет код `info_parse`; Rust `decode_info` — `Option`, разделения 1/2 нет. |
-| `d2k_ct_query_info_fd` | 169–186 | 18 | send GET `MSG_DONTWAIT`, до 8 recv `MSG_DONTWAIT`, вернуть -1/0/1/2 | `:301 query_entry`, `:384 receive_entry` | **P** | C цикл 8 `recv`, `d2k_ct_info_parse` с seq; Rust `query_entry` send + `receive_entry` 8 циклов, возвращает `Option<Entry>`. Количество попыток/неблокирующий режим совпадают, коды/`Option` — нет. |
-| `d2k_ct_query_fd` | 188–197 | 10 | обёртка `query_info_fd` для счётчиков | `:297 query` | **P** | C возвращает код, Rust `query` — `Option<Info>`; эквивалентно только для успеха. |
-| `reply_errno` (static) | 201–212 | 12 | по seq: положительный errno, 0 — не ошибка, -1 — нет ответа | `kernel_error` + фильтр seq (`:350`) | **P** | C различает «нет ответа на seq» и «ответ не ошибка»; Rust `probe` проверяет только `NLMSG_ERROR == -ENOENT`, общего `reply_errno` нет. |
-| `d2k_ct_probe_fd` | 214–238 | 25 | zero-tuple GET, poll `wait_ms` до 8 раз, ENOENT(2) или запись(0) → подсистема есть | `:309 probe` (100 мс poll) | **P** | C принимает `wait_ms` и делает до 8 poll/recv; Rust `probe` фиксирован на 100 мс и **одном** recv, затем `decode_entry` или `NLMSG_ERROR == -ENOENT`. Параметр ожидания и повторные ответы не портированы. Дифференциал `r2o-conntrack-ctget-differential.sh`. |
+| `align4` (static) | 16 | 1 | `(n+3)&~3` | `netlink.rs:291 align4` | **E** | Точное совпадение для длин netlink-сообщений; Rust использует checked-арифметику, переполнение недостижимо. |
+| `wr16h` (static) | 18 | 1 | host-order u16 | `to_ne_bytes` (`conntrack.rs:256`) | **E** | C `memcpy` host-u16; Rust `to_ne_bytes`. Тест `:543`. |
+| `wr32h` (static) | 19 | 1 | host-order u32 | `to_ne_bytes` (`:125`) | **E** | Точное совпадение; `:543`. |
+| `rd16h` (static) | 20 | 1 | host-order u16 | `from_ne_bytes` (`:233`) | **E** | Точное совпадение; `:543`. |
+| `rd64be` (static) | 21–25 | 5 | big-endian u64 | `u64::from_be_bytes` (`:214`) | **E** | Точное совпадение; тест 64-битных счётчиков `:487`. |
+| `rd32be` (static) | 26–28 | 3 | big-endian u32 | `u32::from_be_bytes` (`:224`) | **E** | Точное совпадение; тест 32-битных счётчиков `:529`. |
+| `put` (static) | 31–40 | 10 | атрибут `alen/type/value` + zero padding, отказ при нехватке cap | `conntrack.rs:254 push_attribute` | **E** | **Совпадает:** `alen = 4+vlen`, `align4`, проверка `pos+step>cap`, length/type host-endian, копия значения, обнуление padding. Тест `:543`. |
+| `open_nest` (static) | 43–47 | 5 | заголовок вложенного атрибута с `NLA_F_NESTED`, длина позже | `conntrack.rs:114` (`push_attribute` с `NLA_F_NESTED`) | **P** | C пишет только `type | NLA_F_NESTED` и возвращает позицию за заголовком; `close_nest` проставляет длину. Rust собирает вложенное значение в `Vec` и `push_attribute` сразу пишет длину+padding. Wire-формат совпадает, порядок сборки/владение иные. |
+| `close_nest` (static) | 48–50 | 3 | проставить длину `end-start` | length в `push_attribute` | **P** | C `end-start` без padding; Rust `push_attribute` добавляет padding. Для кратности 4 результат тот же; отдельного теста нет. |
+| `d2k_ct_get_req` | 52–81 | 30 | nlmsg CT_GET orig tuple: family 2/10, res_id 0, nested TUPLE_ORIG/IP/PROTO, src/dst, proto/ports, seq, pid 0 | `conntrack.rs:74-130 encode_get` | **E*** | **Совпадает:** тип `NFNL_SUBSYS_CTNETLINK<<8 | IPCTNL_MSG_CT_GET`, `NLM_F_REQUEST`, family AF_INET/AF_INET6, res_id 0, nested orig/ip/proto, IPv4/IPv6 src/dst, proto/ports BE. Rust проверяет family 4/6 и собирает те же атрибуты; тест `:543 строит_запрос_по_кортежу_ipv4`. |
+| `counter` (static) | 84–96 | 13 | вложенные counters: `PACKETS` 8 байт или `PACKETS32` 4 байта, иначе -1 | `conntrack.rs:211-226 parse_counter` | **E** | **Совпадает:** ищет `CTA_COUNTERS_PACKETS` (8) или `CTA_COUNTERS32_PACKETS` (4), читает BE, иначе отсутствие. Rust `find_attribute` + `parse_counter`; тесты `:487`, `:529`. |
+| `tcp_state` (static) | 99–120 | 22 | nested PROTOINFO/TCP/TCP_STATE: байт+1, 0 — нет | `conntrack.rs:156-160` (`state.first().copied()`) | **E*** | **Совпадает по значению:** C возвращает `state+1` и в info вычитает 1, получая исходный байт; Rust хранит `Option<u8>` с исходным байтом. `tcp_state_known = st != 0` ↔ `Some`. Тест `:487` (state=3). |
+| `d2k_ct_info_parse` | 122–156 | 35 | seq-фильтр; NLMSG_ERROR → 1, иначе -1; CT_NEW; orig/reply counters оба обязательны; tcp_state; коды -1/0/1/2 | `conntrack.rs:133-171 decode_info/decode_entry` | **P** | **Подтверждённые отличия кодов:** C различает «нет сообщения/не CT_NEW» (-1), «NLMSG_ERROR» (1), «успех с обоими counters» (0), «нет одного counters» (2). Rust `decode_entry` возвращает `None` при нет seq/не CT_NEW/нет reply tuple, `Some(Entry{info:None})` при нехватке counters, NLMSG_ERROR отдельно не разбирает (это делает `probe`). `tcp_state` C +1/-1 ↔ Rust `Option<u8>`. Для успешного ответа с обоими counters поля совпадают. |
+| `d2k_ct_counters_parse` | 158–167 | 10 | обёртка `info_parse`, копирует orig/reply при rc=0 | `conntrack.rs:133-135 decode_info` | **P** | C сохраняет код `info_parse` (включая 1/2); Rust `decode_info` возвращает `Option`, разделения 1/2 нет. Для успешного ответа эквивалентно. |
+| `d2k_ct_query_info_fd` | 169–186 | 18 | send GET `MSG_DONTWAIT`, до 8 recv `MSG_DONTWAIT`, вернуть 0/1/2/-1 | `conntrack.rs:301-307 query_entry`, `:384 receive_entry` | **P** | C отправляет и до 8 раз читает без ожидания, принимая первый ответ с 0/1/2; Rust `query_entry` отправляет, `receive_entry` использует poll/ожидание и возвращает `Option`. Количество попыток/неблокирующий режим и коды различаются. |
+| `d2k_ct_query_fd` | 188–197 | 10 | обёртка `query_info_fd` для счётчиков | `conntrack.rs:297 query` | **P** | C возвращает код; Rust `query` — `Option<Info>` (только успех). Эквивалентно только для успешного ответа. |
+| `reply_errno` (static) | 201–212 | 12 | по seq: NLMSG_ERROR → положительный errno, 0 — не ошибка; нет ответа → -1 | `conntrack.rs:183 kernel_error` + фильтр seq (`:350`) | **P** | C различает «нет ответа на seq» (-1) и «ответ не ошибка» (0), `e<0 ? -e : e`; Rust `kernel_error` читает errno, фильтр seq — в `probe`. Общего `reply_errno` нет. |
+| `d2k_ct_probe_fd` | 214–238 | 25 | zero-tuple GET, poll `wait_ms` до 8 раз; ENOENT(2) или запись(0) → подсистема есть | `conntrack.rs:309-350 probe` (100 мс) | **P** | C принимает `wait_ms` и делает до 8 poll/recv; Rust `probe` фиксирован на 100 мс и одном ожидании/чтении (проверить остаток), затем `decode_entry` или `NLMSG_ERROR == -ENOENT`. Параметр ожидания и повторные ответы не портированы. `r2o-conntrack-ctget-differential.sh`. |
 | `d2k_ct_open` (linux) | 243–253 | 11 | `SOCK_RAW \| SOCK_CLOEXEC`, fcntl O_NONBLOCK, bind; fd возвращается без проверки подсистемы | `:270 open` (`SOCK_NONBLOCK`) | **P** | C открывает сокет и не пробует conntrack; Rust `open` после bind вызывает `probe()` и возвращает `None`, если подсистема недоступна. Вызывающий C может отдельно вызвать `d2k_ct_probe_fd`; поведение API разное. |
-| `d2k_ct_open` (не linux) | 255 | 1 | заглушка -1 | `#[cfg(target_os="linux")]` | E | платформенная ветка |
+| `d2k_ct_open` (не linux) | 255 | 1 | заглушка -1 | `#[cfg(target_os="linux")]` | **E** | Платформенная ветка: вне Linux Rust не компилирует `conntrack.rs`/возвращает отсутствие. |
 
 ### datapath/ctq.c: построчная сверка
 
