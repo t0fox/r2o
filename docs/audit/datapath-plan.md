@@ -550,6 +550,8 @@ Rtnetlink: дампы правил, одиночный поиск маршрут
 
 ## 9a. Углублённая сверка 5 N-функций
 
+**Прочитано построчно: 5/5 N-функций (`ctl.c:143-144,316`; `plans.c:1058-1060` + инкременты `:1140,:1209,:1233`; `routemark.c:327-343`).** В R2O подтверждено отсутствие отдельных геттеров `listen_fd`/`peer_fd`/`sent` и текстового `describe`; `shape_misses` объявлен, но не инкрементируется.
+
 - **`d2k_ctl_listen_fd`/`d2k_ctl_peer_fd` (ctl.c 143–144):** C отдаёт
   наружу listen/peer fd для внешнего poll-цикла. R2O инкапсулирует оба
   дескриптора в `ControlServer` (`control.rs`), а `main.rs:1388` вызывает
@@ -631,6 +633,12 @@ Rtnetlink: дампы правил, одиночный поиск маршрут
   P на сложные ветви/дифференциалы.
 
 ## 9c. Углублённая сверка ctlsrv.c (12 функций)
+
+**Прочитано построчно: 12/12 функций, 731 строка C (1–731).** Сверены тела
+`put_key`, `d2k_plan_fits`, `ack`/`ack_trial`, `d2k_ctlsrv_greet`,
+`d2k_ctlsrv_peer_closed`, `canonical_address`/`addr_shape_valid`,
+`read_probe_flow`, `d2k_ctlsrv_command` (13 команд), `d2k_ctlsrv_pump` и
+`d2k_ctlsrv_http80_event`; подтверждённые отличия перечислены ниже.
 
 - **`put_key` (23–37):** 38-байтовый ключ полями: family, low/high адрес
   (4/16), low/high порт BE, proto. Совпадает с `TcpFlowKey::wire_key`
