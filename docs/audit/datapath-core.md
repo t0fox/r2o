@@ -988,7 +988,7 @@ observation), `control.rs` (https names), `http_replace.rs` (пакеты),
 Кольцо журнала наблюдений: kinds, коды suspect/refuse, очистка имени, plan/trial/
 execution/binding, added/dropped. R2O: `flow_journal.rs`.
 
-**Прочитано построчно: 14/14 функций, 204 строки C (1–204).**
+**Прочитано построчно: 14/14 функций, 204 строки C (1–204).** Сверено с `flow_journal.rs:16-56` (константы/тексты), `:184-195` (`set_name`), `:530-581` (`default_journal_note`, `with_capacity`, `push`), `:650-757` (`record_applied/plan_prepared/plan_refused/execution_failure`), `:990-1020` (`count/get/dropped/added`).
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
