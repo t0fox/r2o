@@ -87,9 +87,9 @@ recheck 1982 1982 equal True
 | core-net | 548 | 195 | 351 | 4 | 0 |
 | core-state | 692 | 179 | 511 | 2 | 0 |
 | datapath-core | 400 | 153 | 244 | 3 | 0 |
-| datapath-plan | 183 | 148 | 35 | 0 | 0 |
+| datapath-plan | 183 | 150 | 33 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **733** | **1242** | **7** | **0** |
+| **Итого** | **1982** | **735** | **1240** | **7** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 733 / P 1242 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 735 / P 1240 /
 N 7 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -347,9 +347,9 @@ P означает неполное доказательство ветвей, N
 | core-net | 548 | 195 | 351 | 2 | 0 |
 | core-state | 692 | 179 | 511 | 2 | 0 |
 | datapath-core | 400 | 153 | 244 | 3 | 0 |
-| datapath-plan | 183 | 148 | 35 | 0 | 0 |
+| datapath-plan | 183 | 150 | 33 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **733** | **1242** | **7** | **0** |
+| **Итого** | **1982** | **735** | **1240** | **7** | **0** |
 
 
 ---
@@ -5341,8 +5341,8 @@ Static-хелперы наследуют статус владельца (вла
 
 | Статус | Кол-во |
 |---|---:|
-| E | 148 |
-| P | 35 |
+| E | 150 |
+| P | 33 |
 | N | 0 |
 | ? | 0 |
 | **Всего** | **183** |
@@ -5704,8 +5704,8 @@ UDP→addr переход, R2O — только exact+ECH→MODERN+общий ad
 | find_addr_shape | 439-450 | 12 | static: адресная запись ровно (адрес, family, форма) | `control.rs:1505` `find_addr` | E | C `!addr`/family не 4/6 → NULL; цикл `used`, `kind==ADDR`, `family`, `any_shape \|\| shape`, `memcmp` 4/16 байт. Rust `AddrPlanKey{address,shape}` в `addr_plans`, точный поиск; `find_addr` дополнительно при `shape==ECH_TCP` берёт `MODERN`. Тесты `discord_voice...` (control.rs:3186), `удаление_адреса...` (control.rs:2793). |
 | find_addr | 452-454 | 3 | static: любая форма адреса (для снятия/учёта промаха) | `control.rs:1687` `find_addr_any`, `:1710` `find_addr` | E | C `find_addr_shape(..., any_shape=1, 0)`: первая запись адреса любой формы. Rust `find_addr_any(address)` возвращает любую форму, `delete_addr_family_all` снимает все; точный `find_addr` дополнительно делает ECH-fallback. Тест `broad_name_and_addr_deletion_removes_all_shapes_like_c` проверяет any-shape и полное снятие; `find_addr_modern_shape_for_ech_covers_no_ts_and_ts` — ECH-ветви. |
 | modern_shape_for_ech | 465-469 | 5 | static: ECH-форма → соответствующая MODERN-форма | `control.rs:534-539` `fallback_shape`; `:1687` `find_addr` | E | C: `ECH_NO_TS(10)→MODERN_NO_TS(8)`, `ECH_TS(13)→MODERN_TS(11)`, `ECH_TCP(6)→MODERN(1)`. Rust `select` строит `fallback_shape` для 6/10/13; `find_addr` теперь делает все три fallback-ветки. Именной ECH_TCP покрыт `tls_план_работает_для_sni_с_ech...`, адресные 10→8/13→11 — `find_addr_modern_shape_for_ech_covers_no_ts_and_ts`. |
-| scan_name | 471-486 | 16 | static: один проход — `any`/`shaped`/`modern(ECH)`/`grandfather` по имени, HTTP-запись пропускается | `control.rs:569-581` — цепочка `find(shape/bridge/fallback/grandfather)` + `find_in_domain` | **P** | C за один проход заполняет `h.any` (любая не-HTTP запись), `h.shaped` (точная `seen_shape`), `h.modern` (`modern_shape_for_ech(seen_shape)`) и `h.grandfather`. Rust делает отдельные поиски и **не имеет** ветки `h.any`/`SHAPE_ANY`: запись с формой 0 не будет найдена. R2O-контроллер такие планы не ставит (valid shapes 1/2/3/5/6), но C-путь шире. |
-| scan_addr | 488-502 | 15 | static: один проход по адресу — `any`/`shaped`/`modern(ECH)`/`grandfather` | `control.rs:1504-1520` `find_addr`, `:1522-1540` `find_addr_fallback` | **P** | C собирает `any`, `shaped` (если `seen_shape!=ANY`), `modern(ECH)`, `grandfather`. Rust `find_addr` ищет **только** точную форму и ECH→MODERN; grandfather/ANY-ветки нет. `find_addr_fallback` дополнительно проверяет `name_has_transport_binding`/`name_is_bypassed`, чего в C `scan_addr` нет (это в `find_target`). Счётчик `shape_misses` теперь ведётся в `note_tcp_shape_miss` после неудачи TCP-поиска, не в `scan_addr`. |
+| scan_name | 471-486 | 16 | static: один проход — `any`/`shaped`/`modern(ECH)`/`grandfather` по имени, HTTP-запись пропускается | `control.rs` `find_any_name`, `find_shape_fits`, `note_tcp_shape_miss` | E | C заполняет `h.any` (любая не-HTTP запись), `h.shaped` (точная форма), `h.modern` (ECH-перенос) и `h.grandfather`. Rust `find_any_name` даёт `h.any` (включая форму 0), `find_shape_fits` — shaped/modern/grandfather, `note_tcp_shape_miss` считает промах по `h.any`. Тест `any_shape_name_counts_shape_miss_like_c`. |
+| scan_addr | 488-502 | 15 | static: один проход по адресу — `any`/`shaped`/`modern(ECH)`/`grandfather` | `control.rs` `find_addr_shape_fits`; `select` fallback | E | C собирает `any`, `shaped`, `modern(ECH)`, `grandfather`. Rust `find_addr_shape_fits` перебирает адресные записи по `r2o_shape_fits` (grandfather/ECH/точное равенство) и вызывается в `select` после точного `find_addr`/fallback. Тест `addr_shape_fits_finds_grandfather_and_ech_contexts`: MODERN не подходит под ECH_NO_TS, grandfather подходит. |
 | oldest | 518-529 | 12 | static: самая старая запись (LRU) | `control.rs:211` `exact_victim` | E | C `used==0→NULL`; `victim=v[0]`; цикл `1..used`, строго `<` по `last_used_ns`; при равенстве побеждает меньший индекс. Rust `exact_victim` перебирает `plans/addr_plans/probes`, выбирает `used < oldest`; при равенстве — первый в порядке итерации HashMap (не детерминирован). Тест `name_plan_table_evicts_lru_and_delete_releases_a_slot` (control.rs:2663). |
 | take_free_or_evict | 541-569 | 29 | static: свободный слот или вытеснение LRU с уплотнением | `control.rs:234` `make_room_exact` | E | C `used<cap` → `v[used]`; иначе `oldest`; `free(victim->plan)`; перенос последней записи на место victim; зануление last; `used--`; вернуть last. Rust `make_room_exact`: если `r2o_plan_count()<capacity` → true; иначе удаляет `exact_victim` из соответствующего HashMap; `None→false`. Тест `exact_name_addr_probe_tables_share_lru_capacity` (control.rs:2633). |
 | d2k_plantab_set_name_shaped | 571-574 | 4 | поставить план имени с формой | `control.rs:832` `set_name` (shape — часть ключа) | E | C `set_name_probe(...,sport=0)` → `set_name_family(...,family=4)`. Rust `set_name` разбирает тело `SET_NAME`, форма в `NamePlanKey`; `set_name_probe` — отдельная команда с портом. Тесты shape/probe (control.rs:2700-3896). |

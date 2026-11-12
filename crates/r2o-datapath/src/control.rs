@@ -572,7 +572,8 @@ impl NamePlans {
             }
             let plan = self
                 .find_addr(view.dst, shape)
-                .or_else(|| self.find_addr(view.dst, bridge_shape));
+                .or_else(|| self.find_addr(view.dst, bridge_shape))
+                .or_else(|| self.find_addr_shape_fits(view.dst, shape));
             if plan.is_none() && self.addr_plans.keys().any(|key| key.address == view.dst) {
                 self.shape_misses
                     .set(self.shape_misses.get().saturating_add(1));
@@ -616,7 +617,8 @@ impl NamePlans {
                     .and_then(|fallback| self.find_in_domain(sni, view.family, fallback, 6))
             })
             .or_else(|| self.find_addr_fallback(view.dst, Some(sni), view.family, shape, 6))
-            .or_else(|| self.find_addr_fallback(view.dst, Some(sni), view.family, bridge_shape, 6));
+            .or_else(|| self.find_addr_fallback(view.dst, Some(sni), view.family, bridge_shape, 6))
+            .or_else(|| self.find_addr_shape_fits(view.dst, shape));
         if plan.is_none() {
             self.note_tcp_shape_miss(sni, view.dst, view.family);
         }
@@ -627,12 +629,7 @@ impl NamePlans {
     /// (`plans.c:1177-1234`). Для TCP проверяются name-записи (кроме HTTP) и
     /// адресные; UDP-переход `goto check_addr` пока не воспроизведён.
     fn note_tcp_shape_miss(&self, host: &[u8], address: Address, family: u8) {
-        if let Some(host) = canonical_name(host)
-            && self
-                .plans
-                .keys()
-                .any(|key| key.host == host && key.family == family && key.shape != SHAPE_HTTP)
-        {
+        if self.find_any_name(host, family).is_some() {
             self.shape_misses
                 .set(self.shape_misses.get().saturating_add(1));
             return;
@@ -1767,6 +1764,27 @@ impl NamePlans {
                 key.host == host && key.family == family && !(skip_http && key.shape == SHAPE_HTTP)
             })
             .cloned()
+    }
+
+    /// C `scan_name.h.any`: первая не-HTTP запись имени любой формы.
+    fn find_any_name(&self, bytes: &[u8], family: u8) -> Option<&Plan> {
+        let host = canonical_name(bytes)?;
+        self.plans
+            .iter()
+            .find(|(key, _)| key.host == host && key.family == family && key.shape != SHAPE_HTTP)
+            .map(|(_, entry)| &entry.plan)
+    }
+
+    /// C `scan_addr` + `shape_fits`: адресная запись, совместимая с
+    /// наблюдённой формой (grandfather/ECH-перенос/точное равенство).
+    fn find_addr_shape_fits(&self, address: Address, seen_shape: u8) -> Option<&Plan> {
+        let entry = self
+            .addr_plans
+            .iter()
+            .find(|(key, _)| key.address == address && r2o_shape_fits(key.shape, seen_shape))
+            .map(|(_, entry)| entry)?;
+        Self::touch(entry, self.next_plan_clock());
+        Some(&entry.plan)
     }
 
     /// C `scan_name` + `shape_fits`: любая именная запись, совместимая с
@@ -5337,6 +5355,73 @@ mod tests {
         }
         let ack = NamePlans::default().handle(&frame(r2k_core::control::SHAPE_MODERN, &quic));
         assert!(!ack.ok, "чужой транспорт плана должен быть отвергнут");
+    }
+
+    #[test]
+    fn any_shape_name_counts_shape_miss_like_c() {
+        let mut plans = NamePlans::default();
+        plans.plans.insert(
+            NamePlanKey {
+                host: "any.example".into(),
+                family: 4,
+                shape: 0,
+            },
+            InstalledPlan {
+                plan: Plan::default(),
+                generation: 1,
+                last_used: std::cell::Cell::new(0),
+            },
+        );
+        assert!(plans.find_any_name(b"any.example", 4).is_some());
+        let address =
+            super::Address::new(super::IpAddr::V4(super::Ipv4Addr::new(198, 51, 100, 22)));
+        let before = plans.shape_misses.get();
+        plans.note_tcp_shape_miss(b"any.example", address, 4);
+        assert_eq!(plans.shape_misses.get(), before + 1);
+    }
+
+    #[test]
+    fn addr_shape_fits_finds_grandfather_and_ech_contexts() {
+        let address =
+            super::Address::new(super::IpAddr::V4(super::Ipv4Addr::new(198, 51, 100, 23)));
+        let mut plans = NamePlans::default();
+        plans.addr_plans.insert(
+            super::AddrPlanKey {
+                address,
+                shape: r2k_core::control::SHAPE_MODERN,
+            },
+            InstalledPlan {
+                plan: Plan::default(),
+                generation: 1,
+                last_used: std::cell::Cell::new(0),
+            },
+        );
+        assert!(
+            plans
+                .find_addr_shape_fits(address, r2k_core::control::SHAPE_MODERN)
+                .is_some()
+        );
+        assert!(
+            plans
+                .find_addr_shape_fits(address, r2k_core::control::SHAPE_ECH_NO_TS)
+                .is_none()
+        );
+        plans.addr_plans.insert(
+            super::AddrPlanKey {
+                address,
+                shape: r2k_core::control::SHAPE_GRANDFATHER,
+            },
+            InstalledPlan {
+                plan: Plan::default(),
+                generation: 2,
+                last_used: std::cell::Cell::new(0),
+            },
+        );
+        assert!(
+            plans
+                .find_addr_shape_fits(address, r2k_core::control::SHAPE_ECH_NO_TS)
+                .is_some()
+        );
     }
 
     #[test]
