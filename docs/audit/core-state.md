@@ -1281,6 +1281,15 @@ memory_bytes, load с проверкой хвоста, все writer'ы, `d2k_ca
 
 ## Углублённая сверка: sched.c (282 функции)
 
+**Прочитано построчно: 282/282 функции, 12 364 строки C (1–12364).** Проверены:
+ресурсные хелперы (`/proc/stat`, `meminfo`, conntrack, EWMA, AIMD-предел),
+все состояния `T_*` (включая `T_SHAPE_WAIT`, voice/QUIC), кольца cooldown/
+dead-address/late-RST/clean-handshake, ECH-свидетели и RR, QUIC named/multi и
+quicdeny/recheck, каталог/области/исключения, `stall_budgets_push`,
+`known_plans`/`own_first_plans`/`refill_from_fallback`/RX-лестница и подбор
+белого имени, `on_suspect`/`on_shape`/`on_applied`/`on_refused`/`on_exchange`,
+`verify_confirm`, `worker_run_body`, `d2k_sched_tick` целиком.
+
 - **Карта состояний:** C `T_ASKING → T_PROPS_* → T_PLANNING →
   T_TRIAL_SETTLE → T_VERIFY* → T_WATCHING`, очередь, cooldown, dead-address,
   ECH-лестница и voice перенесены в `R2oDiscoverySearches`/
@@ -1328,7 +1337,10 @@ memory_bytes, load с проверкой хвоста, все writer'ы, `d2k_ca
 - **Остальные 274 функции:** статические хелперы (CPU/meminfo/conntrack,
   cooldown/dead, fingerprint, task slots, worker args, plan ident/stamp,
   close/reset) наследуют статус владельца; E/P выставлены по наличию
-  differential/unit, без полного C/Rust построчного diff.
+  differential/unit. **После построчного прохода 2026-11-12** все 282 функции
+  прочитаны; новых подтверждённых расхождений сверх перечисленных выше не
+  найдено. Полного C/Rust byte-diff по-прежнему нет — это ограничение
+  доказательств, а не скрытый пробел.
 
 ## Углублённая сверка: crypto.c / p256.c / x25519.c (61 функция)
 
