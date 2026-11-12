@@ -86,10 +86,10 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 186 | 349 | 13 | 0 |
 | core-state | 692 | 177 | 511 | 4 | 0 |
-| datapath-core | 400 | 145 | 244 | 11 | 0 |
+| datapath-core | 400 | 151 | 244 | 5 | 0 |
 | datapath-plan | 183 | 138 | 45 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **704** | **1250** | **28** | **0** |
+| **Итого** | **1982** | **710** | **1250** | **22** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,8 +103,8 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 704 / P 1250 /
-N 28 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
+Покрытие реестра: **1982/1982** функций. Статусы: **E 710 / P 1250 /
+N 22 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
 | # | Область | D2O | R2O | Подтверждение |
@@ -346,10 +346,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 186 | 349 | 13 | 0 |
 | core-state | 692 | 177 | 511 | 4 | 0 |
-| datapath-core | 400 | 145 | 244 | 11 | 0 |
+| datapath-core | 400 | 151 | 244 | 5 | 0 |
 | datapath-plan | 183 | 138 | 45 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **704** | **1250** | **28** | **0** |
+| **Итого** | **1982** | **710** | **1250** | **22** | **0** |
 
 
 ---
@@ -3612,14 +3612,12 @@ C-хелперы без собственного состояния наслед
 ## Сводка
 
 - Всего функций: **400**.
-- **E: 120 (30,00 %)**; **P: 270 (67,50 %)**; **N: 10 (2,50 %)**; **?: 0**.
+- **E: 151 (37,75 %)**; **P: 244 (61,00 %)**; **N: 5 (1,25 %)**; **?: 0**.
 - Полностью отсутствуют: `count_reason` (гистограмма причин пропуска в сводке),
-  `d2k_session_nat_stats` (счётчики NAT), `offline_self_check`
-  (`--offline-self-check`), `d2k_http_trace` (текстовый HTTP-трейс), а также
-  агрегатные счётчики `d2k_session_applied`, `d2k_session_done`,
-  `d2k_session_damaged_count`, `d2k_session_sent_lost`, `d2k_session_suspects`,
-  `d2k_session_exchanges` — события этих видов есть, но сводных чисел R2O не
-  ведёт.
+  `offline_self_check` (`--offline-self-check`), `d2k_session_shape_tcp_options_family`
+  (TCP-опции из снимка), `d2k_session_suspects` (агрегат подозрений) и
+  `d2k_http_trace` (текстовый HTTP-трейс). Агрегатные счётчики applied/done/
+  damaged/sent_lost/exchanges и NAT-статистика теперь есть.
 - Неподтверждённые ветви (P) сосредоточены в `session.c` (97), `d2kd.c` (41),
   `http80.c` (22), `udp_release.c` (20): в основном это склейка/loop-код,
   у которого проверены ключевые ветви, но не весь набор краевых условий C.
@@ -3862,7 +3860,7 @@ CLI-логирования, health-файла, duration, состава свод
 | `is_stun_binding` (static) | 569-578 | 10 | RFC 5389 Binding: `n>=20`, top bits 0, length%4==0, `20+len<=n`, magic `2112a442`, type | `r2k-core/src/stun.rs is_binding` | **E** | **Точное совпадение:** C проверяет `!d \|\| n<20 \|\| (d[0]&0xc0)!=0 \|\| len%4!=0 \|\| 20+len>n \|\| d[4..8]!=21 12 a4 42 \|\| type`; Rust `is_binding` те же поля/границы. |
 | `is_stun_request` (static) | 580-582 | 3 | STUN Binding Request (`type 0x0001`) | `stun.rs is_binding_request` | **E*** | C `return is_stun_binding(d,n,0x0001)`: те же проверки `n>=20`, top bits 0, `len%4==0`, `20+len<=n`, magic `2112a442`, type. Rust `is_binding_request` → `is_binding(...,BINDING_REQUEST)`; эквивалентно. |
 | `is_stun_response_for` (static) | 584–588 | 5 | Binding Success 0x0101 + txid | `stun.rs:76-78` | **E** | C `is_stun_binding(...,0x0101) && memcmp(d+8,txid,12)==0`; Rust `is_binding(packet, BINDING_RESPONSE) && packet[8..20]==txid` (`stun.rs:76-78`). |
-| `d2k_session_nat_stats` | 650–656 | 7 | глобальные NAT ok/miss/none/retry | нет аналога | **N** | C ведёт `g_nat_ok/miss/none/retried` в `flow_tracked` и отдаёт их в `print_stats`. Rust `R2oConntrackGate` кеширует подтверждение, но счётчиков NAT не ведёт; строки `поток ведётся conntrack` в сводке нет. |
+| `d2k_session_nat_stats` | 650–656 | 7 | глобальные NAT ok/miss/none/retry | `r2o_conntrack_gate.rs` `nat_stats` | E | C ведёт `g_nat_ok/miss/none/retried` в `flow_tracked`. Rust `R2oConntrackGate` считает те же четыре состояния: `TcpSynAck`/`Found` → ok, три `Missing` → miss, `TableMissing` → none, `Found` после повтора → retried. Тест `nat_stats_match_d2o_counters`. |
 | `plan_fits_transport` (static) | 672–676 | 5 | `!p → 1`; transport 0 или совпал с proto | выбор плана в `engine.rs`/`main.rs` (`plan.transport`) | **P** | C явно пропускает план с `transport==0` и отвергает чужой (`session.c:672-676`). Rust `name_plans`/`decide_with_session` проверяет транспорт при выборе/применении; отдельной функции нет. Для планов R2O с явным transport эквивалентно; «дедушкино» 0 обрабатывается иначе (по контексту плана). |
 | `flow_tracked` (static) | 678–777 | 100 | conntrack: первый пакет — не читать; SYN-ACK — доказано; до 3 попыток procfs; nat_state 0/1/3, g_nat_* | `r2o_conntrack_gate.rs:55-93 confirm`, `:115-175 guard_decision`, `proc_nat.rs:20 lookup` | **P** | **Совпадает:** первый пакет не читает таблицу; TCP SYN-ACK считается доказательством; три попытки `lookup`; «таблицы нет» — отдельное состояние; первый пакет при промахе пропускается. **Подтверждённые отличия:** (1) C ведёт глобальные `g_nat_ok/miss/none/retried` и `nat_state` на потоке; Rust кеширует `Tracked/NoConntrackTable` в `R2oConntrackGate`, счётчиков NAT нет (N `d2k_session_nat_stats`); (2) C вызывает `flow_tracked` **до** применения плана и при `-1` отказывает целиком; Rust `guard_decision` вызывается после решения и для UDP-фрагментов дополнительно переписывает адреса; (3) C `first_packet` для TCP всегда 0, Rust передаёт `first_udp_packet` только в UDP-ветке, TCP — `false`; (4) C при `rc>0` ставит `nat_state=3` навсегда, Rust кеширует `NoConntrackTable` с idle 120 с. |
 | `handle_udp` (static) | 779–1569 | 791 | весь UDP-путь: направление по hook/flow/443, серверные счётчики/voice/STUN, окно 8, hold, QUIC-сборка/снимок/ECH, addr/voice/name/fallback планы, `plan_fits_transport`, запрет разреза, conntrack/NAT фрагментов, сборка до 16 посылок, APPLIED | `main.rs:1543-2604` (UDP-путь), `r2o_udp_sessions.rs`, `r2o_quic.rs`, `r2o_voice.rs`, `r2o_conntrack_gate.rs` | **P** | **Совпадает по крупным ветвям:** направление из OUT/POST vs IN/PRE с fallback на известное направление и порт 443; серверная сторона учитывается, voice/STUN-доказательства и UDP EXCHANGE; окно 8; `saw_hello`/`saw_initial`; запрет повторного плана; `quic_deny`; выбор addr/voice/name/fallback; `plan_fits_transport`; запрет нескольких payload-посылок; conntrack/NAT; лимит 16; APPLIED. **Подтверждённые отличия:** (1) C хранит `saw_initial` и `rev_after_hello` в `d2k_flow`; Rust `r2o_udp_sessions` имеет `hello_seen`, но отдельного состояния «Initial без имени» не найдено — молчание по такому потоку может не наблюдаться; (2) C добавляет датаграмму в `init_ring` всегда до `qsnap_done`; Rust — только до первого отправленного приветствия (`hello_reported`), после чего кольцо чистится; (3) C снимок `last_hello/last_name` глобальный на слот, Rust `QuicHello { key, host, snapshot }`; (4) C `find_addr_probe`/`find_voice_probe`/`find_target`/`s->plan` и `refuse` при отсутствии; Rust `select_with_quic_host_at_hook` + fallback `plan`, `qdeny`; (5) C `payload_emits > 1` отвергает план для UDP, Rust проверка в `engine`/`wire` иная; (6) C при `acts.fate==HOLD` отказывает, Rust `Transmit`/fate; (7) C `out->quic_name/quic_shape_miss` для лога, Rust — события. Полного C/Rust differential на все ветви нет; `r2o-udp-exchange-differential.sh`, voice/quic differentials частичные. |
@@ -3921,10 +3919,10 @@ CLI-логирования, health-файла, duration, состава свод
 | `d2k_session_client_shape` | 3509–3513 | 5 | форма клиента потока | `engine.rs` `session.client_shape` | **P** | C getter; Rust `TcpSession.client_shape` заполняется из ClientHello. Полный набор TCP-опций не хранится (N `shape_tcp_options_family`). |
 | `d2k_session_damaged` | 3515–3523 | 9 | пометить damaged при совпадении execution | `engine.rs:672-690 r2o_mark_damaged_for_execution` | **P** | C ставит только `damaged=1`; Rust дополнительно `r2o_execution_pending=false`, `guards=0`. Для флага эквивалентно; guards сбрасываются раньше, чем C в `exec_failed`. |
 | `d2k_session_unsent` | 3525–3539 | 15 | PLAN_UNSENT + `sends_left=0`/`sends_failed=1` | `main.rs:468 r2o_fail_pending_applied`, `r2o_datapath::flow_journal::record_execution_failure` | **P** | C пишет PLAN_UNSENT и обнуляет счётчики; Rust `sends_left/sends_failed` не имеет, UNSENT — часть `record_execution_failure` (PlanUnsent). Повторный UNSENT невозможен, потому что `r2o_fail_pending_applied` удаляет `PendingApplied`; это функциональный эквивалент `sends_failed=1`. D22. |
-| `d2k_session_applied` | 3541–3543 | 3 | счётчик applied | агрегата нет | **N** | C `s->applied++` в `plan_handed_off`; Rust APPLIED — событие/журнал, агрегата в `TcpSessions`/`R2oUdpSessions` нет. Сводка R2O это число не печатает. |
-| `d2k_session_done` | 3545-3547 | 3 | счётчик завершённых исполнений | `engine.rs:627 r2o_mark_plan_done_for_execution` | **N** | C `s->done++` при завершении всех посылок. Rust `r2o_mark_plan_done_for_execution` ставит `session.plan_done=true` на потоке, но **глобального счётчика `done`** нет; в сводке R2O поле отсутствует (см. `print_stats`, пробел «applied/done/...»). |
-| `d2k_session_damaged_count` | 3549-3551 | 3 | число испорченных потоков | `engine.rs:672 r2o_mark_damaged_for_execution` | **N** | C `damaged_flows++` один раз на поток в `exec_failed`. Rust выставляет `session.damaged=true` на потоке, но **глобального `damaged_flows`** нет; сводка R2O это поле не печатает. |
-| `d2k_session_sent_lost` | 3553–3555 | 3 | «некому приписать отправку» | нет | **N** | C `sent_lost++` при отсутствии потока/чужом поколении/нулевом `sends_left`; Rust такие завершения просто игнорирует, счётчика нет. |
+| `d2k_session_applied` | 3541–3543 | 3 | счётчик applied | `engine.rs` `TcpSessions::session_applied`, `r2o_udp_sessions.rs` `session_applied` | E | C `s->applied++` в `plan_handed_off`. Rust считает применения плана в TCP (`decide_with_session`) и UDP (`r2o_mark_plan_applied`); тесты `tcp_отказ_повреждает...` (`session_applied>=1`) и `r2o_udp_зонд...` (`==1`). |
+| `d2k_session_done` | 3545-3547 | 3 | счётчик завершённых исполнений | `engine.rs` `session_done`, `r2o_mark_plan_done_for_execution` | E | C `s->done++` при завершении всех посылок. Rust `r2o_mark_plan_done_for_execution` при успехе увеличивает `session_done`; тест `tcp_повторный_clienthello...` проверяет `==1`. |
+| `d2k_session_damaged_count` | 3549-3551 | 3 | число испорченных потоков | `engine.rs` `session_damaged`, `r2o_mark_damaged_for_execution` | E | C `damaged_flows++` один раз на поток. Rust увеличивает `session_damaged` только при переходе `damaged=false→true`; тест `tcp_отказ_повреждает...` проверяет `==1`. |
+| `d2k_session_sent_lost` | 3553–3555 | 3 | «некому приписать отправку» | `engine.rs` `session_sent_lost`/`r2o_note_sent_lost`, `main.rs` `r2o_finish_tcp_execution` | E | C `sent_lost++` при отсутствии потока/чужом поколении/нулевом `sends_left`. Rust `r2o_finish_tcp_execution` вызывает `r2o_note_sent_lost()`, если `r2o_mark_plan_done_for_execution` не нашёл живое поколение; тест `session_sent_lost_counts_completions_without_live_flow`. |
 | `d2k_session_refusals` | 3557-3559 | 3 | сумма отказов TCP+UDP | `engine.rs:438 r2o_tcp_flow_refusals` + UDP-таблица | **P** | C `d2k_track_refusals(s->flows)+d2k_track_refusals(s->uflows)`. Rust есть `r2o_tcp_flow_refusals` и отказы UDP-таблицы, но **общего getter-а суммы** нет; в сводке выводятся отдельно. |
 | `d2k_session_capacity` | 3561-3563 | 3 | суммарная ёмкость TCP+UDP | `engine.rs:434 r2o_tcp_flow_capacity` + UDP-таблица | **P** | C `track_capacity(tcp)+track_capacity(udp)`. Rust есть `r2o_tcp_flow_capacity` и ёмкость UDP, но **общей функции суммы** нет; в сводке значения выводятся раздельно. |
 | `d2k_session_flows_tcp` | 3565-3567 | 3 | число TCP-потоков | `TcpSessions::len` (`engine.rs:393`) | **P** | C `s ? d2k_track_count(s->flows) : 0`. Rust `TcpSessions` — `HashMap`, `len()` даёт то же число; отдельного getter-а `flows_tcp` нет. |
@@ -3937,7 +3935,7 @@ CLI-логирования, health-файла, duration, состава свод
 | `d2k_session_with_sni` | 3593-3595 | 3 | приветствия с SNI | `engine.rs:543 r2o_tcp_hellos_with_sni` | **P** | C `return s ? s->with_sni : 0`. Rust `r2o_tcp_hellos_with_sni()`; unit «1 с SNI, 0 без». Проверено unit `r2o_tcp_hellos_with_sni`: 1 при SNI, 0 без; то же поле, что C `s->with_sni`. |
 | `d2k_session_suspects` | 3597-3599 | 3 | число подозрений | события/журнал (`EVENT_R2O_*`) | **N** | C `s ? s->suspects : 0`, `suspects++` в `suspect_num`. Rust подозрения уходят событиями/журналом; глобального счётчика `suspects` и getter-а нет. |
 | `d2k_session_rst_dropped` | 3601-3603 | 3 | снятые RST | `engine.rs:552 r2o_tcp_rst_dropped` | **P** | C `return s ? s->rst_dropped : 0`. Rust `r2o_tcp_rst_dropped()` — то же значение; API иное. Проверено: `r2o_tcp_rst_dropped()` читает тот же счётчик снятых RST. |
-| `d2k_session_exchanges` | 3605–3607 | 3 | число обменов | агрегата нет; EXCHANGE — событие журнала | **N** | C `s->exchanges++` при первом ответе/прикладных данных; Rust `R2oTcpExchangeEvent`/UDP exchange events, агрегата нет. `r2o-udp-exchange-differential.sh` сверяет события. |
+| `d2k_session_exchanges` | 3605–3607 | 3 | число обменов | `engine.rs` `session_exchanges`, `r2o_udp_sessions.rs` `session_exchanges` | E | C `s->exchanges++` при первом ответе/прикладных данных. Rust считает TCP-обмены при `exchange_told` (кроме controller probe) и UDP при отправке `R2oUdpExchangeEvent`; тесты `tcp_журнал_повышает...` (`1→2`) и `r2o_stun_сверяет...` (`1→2`). |
 | `d2k_session_reply_hidden` | 3609-3611 | 3 | ACK указал на невидимый ответ | `engine.rs:548 r2o_reply_hidden` | **P** | C `return s ? s->reply_hidden : 0`. Rust `r2o_reply_hidden()`; `r2o-tcp-reply-hidden-differential.sh`. Проверено `r2o-tcp-reply-hidden-differential.sh`: ACK на невидимый ответ даёт тот же счётчик. |
 | `d2k_session_tcp_hello_flows` | 3613-3615 | 3 | TCP-потоки с ClientHello | `engine.rs:539 r2o_tcp_hello_flows` | **P** | C `return s ? s->tcp_hello_flows : 0`. Rust `r2o_tcp_hello_flows()` — то же значение; отдельного differential нет. Проверено: `r2o_tcp_hello_flows()` читает тот же счётчик потоков с ClientHello. |
 | `d2k_session_payload_stats` | 3617–3638 | 22 | снимок: reverse/after_hello/late/not_hello/first_byte/sni_next_seg/capture + http_later/unaligned/open_end | `engine.rs R2oTcpPayloadStats` | **P** | **Совпадает по полям:** reverse/after_hello/late/not_hello/first_byte/sni_next_seg/capture_* и HTTP keep-alive счётчики; Rust `r2o_tcp_payload_stats` (`main.rs:719-733`). **Отличия:** C `capture.rejected/expired/full` берутся из `d2k_capture`, Rust `capture_stats`; C `last_nonhello_first` — первый байт последнего не-ClientHello, Rust `last_first_byte`; `test-datapath-stats-timer-differential.sh` и payload-тесты частичные. |

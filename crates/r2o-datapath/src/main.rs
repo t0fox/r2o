@@ -420,7 +420,9 @@ mod app {
             return false;
         };
         if successful {
-            sessions.r2o_mark_plan_done_for_execution(&execution.key, execution.id);
+            if !sessions.r2o_mark_plan_done_for_execution(&execution.key, execution.id) {
+                sessions.r2o_note_sent_lost();
+            }
             false
         } else if payload_on_wire || (original_spent && original_taken) {
             sessions.r2o_mark_damaged_for_execution(&execution.key, execution.id)

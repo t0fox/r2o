@@ -366,6 +366,16 @@ pub struct TcpSessions {
     flows: HashMap<TcpFlowKey, TcpSession>,
     flow_capacity: R2oFlowCapacity,
     tcp_flow_refusals: u64,
+    /// C `d2k_session.applied`: пакеты, к которым применён план.
+    session_applied: u64,
+    /// C `d2k_session.done`: исполнения, у которых кончились посылки.
+    session_done: u64,
+    /// C `d2k_session.damaged_flows`: потоки, испорченные после нагрузки.
+    session_damaged: u64,
+    /// C `d2k_session.sent_lost`: завершения без живого потока/поколения.
+    session_sent_lost: u64,
+    /// C `d2k_session.exchanges`: первые ответы/прикладные данные.
+    session_exchanges: u64,
     http_keepalive_stats: R2oHttpKeepAliveStats,
     tcp_payload_stats: R2oTcpPayloadStats,
     tcp_stall_budgets: Vec<u16>,
@@ -409,6 +419,11 @@ impl TcpSessions {
             flows,
             flow_capacity,
             tcp_flow_refusals: 0,
+            session_applied: 0,
+            session_done: 0,
+            session_damaged: 0,
+            session_sent_lost: 0,
+            session_exchanges: 0,
             http_keepalive_stats: R2oHttpKeepAliveStats::default(),
             tcp_payload_stats: R2oTcpPayloadStats::default(),
             tcp_stall_budgets: vec![TCP_STALL_PACKET_BUDGET as u16],
@@ -437,6 +452,36 @@ impl TcpSessions {
 
     pub fn r2o_tcp_flow_refusals(&self) -> u64 {
         self.tcp_flow_refusals
+    }
+
+    /// C `d2k_session_applied`: число применений плана к TCP-пакетам.
+    pub fn session_applied(&self) -> u64 {
+        self.session_applied
+    }
+
+    /// C `d2k_session_done`: число завершённых исполнений.
+    pub fn session_done(&self) -> u64 {
+        self.session_done
+    }
+
+    /// C `d2k_session_damaged_count`: число испорченных потоков.
+    pub fn session_damaged(&self) -> u64 {
+        self.session_damaged
+    }
+
+    /// C `d2k_session_sent_lost`: завершения, которым не нашлось потока.
+    pub fn session_sent_lost(&self) -> u64 {
+        self.session_sent_lost
+    }
+
+    /// C `d2k_session_exchanges`: число первых обменов TCP.
+    pub fn session_exchanges(&self) -> u64 {
+        self.session_exchanges
+    }
+
+    /// Учесть завершение, которое уже не относится к живому поколению.
+    pub fn r2o_note_sent_lost(&mut self) {
+        self.session_sent_lost = self.session_sent_lost.saturating_add(1);
     }
 
     pub fn r2o_tcp_capture_stats(&self) -> CaptureStats {
@@ -645,6 +690,7 @@ impl TcpSessions {
         }
         session.plan_done = true;
         session.r2o_execution_pending = false;
+        self.session_done = self.session_done.saturating_add(1);
         true
     }
 
@@ -687,6 +733,7 @@ impl TcpSessions {
         session.damaged = true;
         session.r2o_execution_pending = false;
         session.guards = 0;
+        self.session_damaged = self.session_damaged.saturating_add(1);
         true
     }
 
@@ -1166,11 +1213,13 @@ impl TcpSessions {
                             R2oTcpExchangeEvent::PLANNED_NO
                         },
                     };
-                    if !controller_probe
-                        && self.tcp_exchange_events.len()
+                    if !controller_probe {
+                        self.session_exchanges = self.session_exchanges.saturating_add(1);
+                        if self.tcp_exchange_events.len()
                             < self.flow_capacity.slots().saturating_mul(2)
-                    {
-                        self.tcp_exchange_events.push_back(event);
+                        {
+                            self.tcp_exchange_events.push_back(event);
+                        }
                     }
                 }
             }
@@ -1598,6 +1647,9 @@ fn decide_with_session_mode(
             session.plan_done = true;
             session.r2o_execution_pending = false;
         }
+    }
+    if applied {
+        sessions.session_applied = sessions.session_applied.saturating_add(1);
     }
     decision
 }
@@ -2909,6 +2961,7 @@ mod tests {
         );
         let first = sessions.take_tcp_exchange_events();
         assert_eq!(first.len(), 1);
+        assert_eq!(sessions.session_exchanges(), 1);
         assert_eq!(first[0].code, 0x16);
         assert_eq!(first[0].num, 47);
         assert_eq!(first[0].tos, 0x04);
@@ -2928,6 +2981,7 @@ mod tests {
         );
         let second = sessions.take_tcp_exchange_events();
         assert_eq!(second.len(), 1);
+        assert_eq!(sessions.session_exchanges(), 2);
         assert_eq!(second[0].code, 0x16);
         assert_eq!(second[0].num, 100);
         assert_eq!(second[0].tos, 0x0c);
@@ -4596,12 +4650,14 @@ mod tests {
             decide_with_session(&mut sessions, &plan, &hello),
             PacketDecision::Transmit { .. }
         ));
+        assert!(sessions.session_applied() >= 1);
         let key = sessions.r2o_begin_execution(&hello, 41).unwrap();
         assert!(sessions.r2o_send_pending(&key, 41));
         assert!(!sessions.r2o_is_damaged_packet(&hello));
         assert!(!sessions.r2o_mark_damaged_for_execution(&key, 40));
         assert!(!sessions.r2o_mark_plan_done_for_execution(&key, 40));
         assert!(sessions.r2o_mark_damaged_for_execution(&key, 41));
+        assert_eq!(sessions.session_damaged(), 1);
         assert!(!sessions.r2o_send_pending(&key, 41));
         assert!(sessions.r2o_is_damaged_packet(&hello));
         let flow_key = TcpFlowKey::from_packet(&hello).unwrap();
@@ -4682,6 +4738,14 @@ mod tests {
     }
 
     #[test]
+    fn session_sent_lost_counts_completions_without_live_flow() {
+        let mut sessions = TcpSessions::default();
+        assert_eq!(sessions.session_sent_lost(), 0);
+        sessions.r2o_note_sent_lost();
+        assert_eq!(sessions.session_sent_lost(), 1);
+    }
+
+    #[test]
     fn tcp_clienthello_в_терминальном_пакете_не_разбирается() {
         let plan = tcp_fake_plan_with_rst_guard();
         let client = ([192, 0, 2, 10], 41000);
@@ -4734,6 +4798,7 @@ mod tests {
         let key = sessions.r2o_begin_execution(&hello, 51).unwrap();
         assert!(sessions.r2o_send_pending(&key, 51));
         assert!(sessions.r2o_mark_plan_done_for_execution(&key, 51));
+        assert_eq!(sessions.session_done(), 1);
         assert!(!sessions.r2o_send_pending(&key, 51));
         assert_eq!(
             decide_with_session(&mut sessions, &plan, &hello),

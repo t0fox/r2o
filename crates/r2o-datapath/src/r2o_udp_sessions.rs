@@ -112,6 +112,10 @@ pub struct R2oUdpSessions {
     udp_exchange_events: VecDeque<R2oUdpExchangeEvent>,
     flow_capacity: R2oFlowCapacity,
     refusals: u64,
+    /// C `d2k_session.applied`: применения плана к UDP-потоку.
+    applied: u64,
+    /// C `d2k_session.exchanges`: первые обратные датаграммы.
+    exchanges: u64,
     r2o_quic_hello_flows: u64,
     r2o_quic_hellos_with_sni: u64,
     r2o_idle_timeout: Duration,
@@ -133,6 +137,8 @@ impl R2oUdpSessions {
             udp_exchange_events,
             flow_capacity,
             refusals: 0,
+            applied: 0,
+            exchanges: 0,
             r2o_quic_hello_flows: 0,
             r2o_quic_hellos_with_sni: 0,
             r2o_idle_timeout: UDP_IDLE,
@@ -301,6 +307,7 @@ impl R2oUdpSessions {
         if proof_matches && !stun.proof_told {
             stun.proof_told = true;
             stun.exchange_told = true;
+            self.exchanges = self.exchanges.saturating_add(1);
             if self.udp_exchange_events.len() < self.flow_capacity.limit() {
                 self.udp_exchange_events.push_back(R2oUdpExchangeEvent {
                     key: key.wire_key(),
@@ -310,6 +317,7 @@ impl R2oUdpSessions {
             }
         } else if !stun.exchange_told {
             stun.exchange_told = true;
+            self.exchanges = self.exchanges.saturating_add(1);
             if self.udp_exchange_events.len() < self.flow_capacity.limit() {
                 self.udp_exchange_events.push_back(R2oUdpExchangeEvent {
                     key: key.wire_key(),
@@ -323,6 +331,16 @@ impl R2oUdpSessions {
     /// Забрать накопленные события UDP-обмена и STUN-подтверждения.
     pub fn r2o_take_udp_exchange_events(&mut self) -> Vec<R2oUdpExchangeEvent> {
         self.udp_exchange_events.drain(..).collect()
+    }
+
+    /// C `d2k_session_applied`: применения плана к UDP-потоку.
+    pub fn session_applied(&self) -> u64 {
+        self.applied
+    }
+
+    /// C `d2k_session_exchanges`: первые обратные датаграммы UDP.
+    pub fn session_exchanges(&self) -> u64 {
+        self.exchanges
     }
 
     /// Проверить, применялся ли уже план к этому UDP-потоку.
@@ -376,7 +394,11 @@ impl R2oUdpSessions {
         else {
             return false;
         };
-        !std::mem::replace(&mut flow.plan_applied, true)
+        let was_applied = std::mem::replace(&mut flow.plan_applied, true);
+        if !was_applied {
+            self.applied = self.applied.saturating_add(1);
+        }
+        !was_applied
     }
 
     /// Разрешить повтор плана после потери UDP-датаграммы при его исполнении.
@@ -623,6 +645,7 @@ mod tests {
         assert!(sessions.r2o_is_first_client_packet(&probe));
 
         assert!(sessions.r2o_mark_plan_applied(&probe));
+        assert_eq!(sessions.session_applied(), 1);
         assert!(sessions.r2o_plan_applied(&probe));
         assert!(sessions.r2o_observe_probe_packet_at_hook(&client, now, None));
         assert_eq!(sessions.stats().flows, 0);
@@ -715,6 +738,7 @@ mod tests {
         );
         let generic = sessions.r2o_take_udp_exchange_events();
         assert_eq!(generic.len(), 1);
+        assert_eq!(sessions.session_exchanges(), 1);
         assert_eq!(generic[0].code, 0);
         assert_eq!(generic[0].num, 20);
 
@@ -726,6 +750,7 @@ mod tests {
             Some(R2O_NF_INET_FORWARD),
         );
         let proof = sessions.r2o_take_udp_exchange_events();
+        assert_eq!(sessions.session_exchanges(), 2);
         assert_eq!(proof.len(), 1);
         assert_eq!(proof[0].code, 2);
         assert_eq!(proof[0].num, 20);

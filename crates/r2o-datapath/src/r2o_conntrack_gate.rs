@@ -28,6 +28,11 @@ pub struct R2oConntrackGate {
     entries: HashMap<R2oConntrackTuple, CachedEntry>,
     capacity: usize,
     idle_timeout: Duration,
+    /// C `g_nat_ok/miss/none/retried` (`session.c:648-656`).
+    nat_ok: u64,
+    nat_miss: u64,
+    nat_none: u64,
+    nat_retried: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -49,7 +54,16 @@ impl R2oConntrackGate {
             entries: HashMap::with_capacity(capacity),
             capacity,
             idle_timeout,
+            nat_ok: 0,
+            nat_miss: 0,
+            nat_none: 0,
+            nat_retried: 0,
         }
+    }
+
+    /// C `d2k_session_nat_stats`: (ok, miss, none, retried).
+    pub fn nat_stats(&self) -> (u64, u64, u64, u64) {
+        (self.nat_ok, self.nat_miss, self.nat_none, self.nat_retried)
     }
 
     fn confirm(
@@ -74,21 +88,28 @@ impl R2oConntrackGate {
         }
         if tuple.protocol == 6 && tcp_syn_ack_seen {
             self.insert(tuple, CachedStatus::Tracked, now);
+            self.nat_ok = self.nat_ok.saturating_add(1);
             return Confirmation::TcpSynAck;
         }
 
-        for _ in 0..R2O_CONNTRACK_LOOKUP_ATTEMPTS {
+        for attempt in 0..R2O_CONNTRACK_LOOKUP_ATTEMPTS {
             match query(&tuple) {
                 R2oProcNatLookup::TableMissing => {
                     self.insert(tuple, CachedStatus::NoConntrackTable, now);
+                    self.nat_none = self.nat_none.saturating_add(1);
                     return Confirmation::NoConntrackTable;
                 }
                 R2oProcNatLookup::Missing => continue,
                 R2oProcNatLookup::Found(_) => {}
             }
+            if attempt > 0 {
+                self.nat_retried = self.nat_retried.saturating_add(1);
+            }
             self.insert(tuple, CachedStatus::Tracked, now);
+            self.nat_ok = self.nat_ok.saturating_add(1);
             return Confirmation::Tracked;
         }
+        self.nat_miss = self.nat_miss.saturating_add(1);
         Confirmation::Missing
     }
 
@@ -730,5 +751,87 @@ mod tests {
         }
         pseudo.extend_from_slice(&datagram);
         assert_eq!(internet_checksum(&pseudo), 0);
+    }
+}
+
+#[cfg(test)]
+mod nat_stats_tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn tuple(protocol: u8) -> R2oConntrackTuple {
+        let mut source = [0; 16];
+        source[..4].copy_from_slice(&[192, 0, 2, 1]);
+        let mut destination = [0; 16];
+        destination[..4].copy_from_slice(&[198, 51, 100, 2]);
+        R2oConntrackTuple {
+            family: 4,
+            protocol,
+            source,
+            destination,
+            source_port: 40000,
+            destination_port: 443,
+        }
+    }
+
+    fn found() -> R2oProcNatLookup {
+        R2oProcNatLookup::Found(R2oConntrackNatSource {
+            family: 4,
+            address: [203, 0, 113, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            port: 50000,
+        })
+    }
+
+    #[test]
+    fn nat_stats_match_d2o_counters() {
+        let now = Instant::now();
+
+        let mut gate = R2oConntrackGate::with_capacity(8);
+        assert_eq!(
+            gate.confirm(tuple(17), true, false, now, &mut |_| panic!()),
+            Confirmation::FirstPacket
+        );
+        assert_eq!(gate.nat_stats(), (0, 0, 0, 0));
+
+        let mut gate = R2oConntrackGate::with_capacity(8);
+        assert_eq!(
+            gate.confirm(tuple(6), false, true, now, &mut |_| panic!()),
+            Confirmation::TcpSynAck
+        );
+        assert_eq!(gate.nat_stats(), (1, 0, 0, 0));
+
+        let mut gate = R2oConntrackGate::with_capacity(8);
+        assert_eq!(
+            gate.confirm(tuple(17), false, false, now, &mut |_| {
+                R2oProcNatLookup::TableMissing
+            }),
+            Confirmation::NoConntrackTable
+        );
+        assert_eq!(gate.nat_stats(), (0, 0, 1, 0));
+
+        let mut gate = R2oConntrackGate::with_capacity(8);
+        assert_eq!(
+            gate.confirm(tuple(17), false, false, now, &mut |_| {
+                R2oProcNatLookup::Missing
+            }),
+            Confirmation::Missing
+        );
+        assert_eq!(gate.nat_stats(), (0, 1, 0, 0));
+
+        let mut gate = R2oConntrackGate::with_capacity(8);
+        let mut calls = 0;
+        assert_eq!(
+            gate.confirm(tuple(17), false, false, now, &mut |_| {
+                calls += 1;
+                if calls == 1 {
+                    R2oProcNatLookup::Missing
+                } else {
+                    found()
+                }
+            }),
+            Confirmation::Tracked
+        );
+        assert_eq!(calls, 2);
+        assert_eq!(gate.nat_stats(), (1, 0, 0, 1));
     }
 }
