@@ -225,7 +225,7 @@ fn r2o_quic_http3_set_socket_mark(_socket: &UdpSocket, _mark: u32) -> std::io::R
     ))
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct R2oQuicHttp3Result {
     pub local_refusal: bool,
     pub handshake_confirmed: bool,
@@ -242,7 +242,109 @@ pub struct R2oQuicHttp3Result {
     pub r2o_quic_one_way: bool,
     pub r2o_ping_probes: u32,
     pub r2o_ping_acks: u32,
+    /// C `d2k_qc.peer_name`: -1 — не проверялось, 0 — имя не совпало, 1 — совпало.
+    pub peer_name: i8,
     pub error: Option<String>,
+}
+
+impl Default for R2oQuicHttp3Result {
+    fn default() -> Self {
+        Self {
+            local_refusal: false,
+            handshake_confirmed: false,
+            status: 0,
+            body_bytes: 0,
+            app_bytes: 0,
+            complete: false,
+            requests: 0,
+            datagrams: 0,
+            budget_required: false,
+            budget_passed: false,
+            r2o_quic_stalled: false,
+            r2o_quic_one_way: false,
+            r2o_ping_probes: 0,
+            r2o_ping_acks: 0,
+            // C `d2k_qc_connect` инициализирует peer_name = -1.
+            peer_name: -1,
+            error: None,
+        }
+    }
+}
+
+impl R2oQuicHttp3Result {
+    /// C `d2k_qc_peer_name`: результат сверки имени сертификата.
+    pub fn d2k_qc_peer_name(&self) -> i8 {
+        self.peer_name
+    }
+}
+
+/// C `d2k_t13_cert_name_ok`: сверка имени листового сертификата.
+/// `None` (C -1) — сертификат не разобран или SAN не найден.
+pub fn r2o_quic_peer_name(der: &[u8], host: &str) -> i8 {
+    match crate::response::https_certificate_name_matches(der, host) {
+        Some(true) => 1,
+        Some(false) => 0,
+        None => -1,
+    }
+}
+
+/// C `d2k_qc_connect` продолжает рукопожатие даже при чужом имени:
+/// `peer_name` — наблюдение, а не условие допуска. Поэтому verifier
+/// записывает результат и принимает сертификат.
+#[derive(Debug)]
+struct R2oQuicNameRecordingVerifier {
+    host: String,
+    result: Arc<Mutex<R2oQuicHttp3Result>>,
+    provider: Arc<rustls::crypto::CryptoProvider>,
+}
+
+impl rustls::client::danger::ServerCertVerifier for R2oQuicNameRecordingVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        let value = r2o_quic_peer_name(end_entity.as_ref(), &self.host);
+        self.result.lock().unwrap().peer_name = value;
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
 }
 
 struct R2oQuicHttp3CountedConnection {
@@ -898,9 +1000,28 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
         return state.clone();
     }
 
-    let mut tls = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let verifier = Arc::new(R2oQuicNameRecordingVerifier {
+        host: server_name.to_owned(),
+        result: Arc::clone(&result),
+        provider: Arc::clone(&provider),
+    });
+    let builder = match rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+    {
+        Ok(builder) => builder,
+        Err(error) => {
+            result.lock().unwrap().error = Some(format!("не настроены версии QUIC TLS: {error}"));
+            return result.lock().unwrap().clone();
+        }
+    };
+    let mut tls = builder
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
+    // C `d2k_qc_connect` не рвёт рукопожатие при чужом имени сертификата:
+    // webpki-цепочка здесь не проверяется, `peer_name` — наблюдение зонда.
+    let _ = roots;
     tls.alpn_protocols = vec![b"h3".to_vec()];
     tls.r2o_client_hello_wire_len = wire_len;
     let crypto = match quinn::crypto::rustls::QuicClientConfig::try_from(tls) {
@@ -1605,5 +1726,19 @@ mod tests {
         assert!(super::r2o_quic_port_was_recently_claimed(port));
         super::r2o_quic_port_forget_all();
         assert!(!super::r2o_quic_port_was_recently_claimed(port));
+    }
+
+    #[test]
+    fn quic_peer_name_matches_donor_semantics() {
+        let certificate =
+            rcgen::generate_simple_self_signed(vec!["example.test".to_owned()]).unwrap();
+        let der = certificate.serialize_der().unwrap();
+        assert_eq!(super::r2o_quic_peer_name(&der, "example.test"), 1);
+        assert_eq!(super::r2o_quic_peer_name(&der, "other.test"), 0);
+        assert_eq!(super::r2o_quic_peer_name(b"garbage", "example.test"), -1);
+        assert_eq!(super::R2oQuicHttp3Result::default().d2k_qc_peer_name(), -1);
+        let mut result = super::R2oQuicHttp3Result::default();
+        result.peer_name = 0;
+        assert_eq!(result.d2k_qc_peer_name(), 0);
     }
 }

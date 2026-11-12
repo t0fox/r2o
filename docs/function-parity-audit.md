@@ -84,12 +84,12 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 196 | 351 | 1 | 0 |
+| core-net | 548 | 197 | 351 | 0 | 0 |
 | core-state | 692 | 182 | 509 | 0 | 0 |
 | datapath-core | 400 | 156 | 244 | 0 | 0 |
 | datapath-plan | 183 | 164 | 19 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **756** | **1225** | **1** | **0** |
+| **Итого** | **1982** | **757** | **1225** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,8 +103,8 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 756 / P 1225 /
-N 1 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
+Покрытие реестра: **1982/1982** функций. Статусы: **E 757 / P 1225 /
+N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
 | # | Область | D2O | R2O | Подтверждение |
@@ -344,12 +344,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 196 | 351 | 1 | 0 |
+| core-net | 548 | 197 | 351 | 0 | 0 |
 | core-state | 692 | 182 | 510 | 0 | 0 |
 | datapath-core | 400 | 156 | 244 | 0 | 0 |
 | datapath-plan | 183 | 164 | 19 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **756** | **1225** | **1** | **0** |
+| **Итого** | **1982** | **757** | **1225** | **0** | **0** |
 
 
 ---
@@ -1155,7 +1155,7 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 | `d2k_qc_first_initial` | 928-954 | 27 | calloc `d2k_qc`, `first_flight` (CH+TP), seal Initial ровно 1200, отдать байты | `quic.rs:261-335 r2k_quic_initial_build` | **P** | **Подтверждённое расхождение:** C собирает CH из SNI+TP (`d2k_t13_ch_build`) и запечатывает ровно 1200; Rust `initial_build` принимает готовый CH (обычно профиль) и запечатывает 1200 v1. Сборки CH+TP и API `d2k_qc_first_initial` в R2O нет. |
 | `d2k_qc_connect` | 966-1286 | 321 | сокет/марка/свежий порт, first_flight, multi-datagram form, first_send, Initial/Retry, ServerHello/EE/Cert/Finished, ACK, app keys, Finished; cert только по имени; PTO 333×2; классификация отказа | `quinn::Endpoint::connect`, `r2o_quic_http3.rs:889-916` | **P** | **C-ветви проверены:** `first_flight`; family по `:`; `use_fd` или свежий порт (`d2k_udp_port_claim`, удержание до 3); mark/connect; `getsockname`; multi-datagram form (CH режется на `form->n` CRYPTO-кадров, pn 0..n-1, общий DCID) или один Initial 1200; `first_send` перед первым Initial; deadline 5000; PTO 333 мс с удвоением до 3; Retry; ServerHello→handshake keys; EE→`tp_server_parse`; Certificate→`d2k_t13_cert_name_ok` (только имя); ACK на каждый уровень; Finished→app keys+свой Finished; отказ по `Initial.rx_pkts`/`Handshake.rx_pkts` (`:1269-1282`). **R2O-отличия:** rustls `with_root_certificates(roots)` → `QuicClientConfig` → `quinn::ClientConfig`; проверяется цепочка/имя webpki, handshake **рвётся** при mismatch; `TransportConfig` нет (quinn defaults); multi-datagram form/`first_send`-путь не портированы; отказ — текст quinn; `peer_name` нет. HTTP/3 stage-дифференциал сверяет исход, не handshake-байты. |
 | `qc_no_sigpipe` | 956-964 | 9 | `SO_NOSIGPIPE` на macOS, иначе 0 | `MSG_NOSIGNAL`/std/quinn | **P** | C ставит `SO_NOSIGPIPE`, если есть, иначе no-op; Rust на Linux полагается на `MSG_NOSIGNAL`/std, quinn не выставляет SIGPIPE. Платформенный хелпер, отдельной функции нет. |
-| `d2k_qc_peer_name` | 1430-1430 | 1 | результат проверки имени сертификата (`-1/0/1`) | нет (quinn/webpki) | **N** | C заполняет `peer_name` из `d2k_t13_cert_name_ok` и **продолжает** handshake при чужом имени; R2O `with_root_certificates(roots)`/webpki проверяет цепочку и имя и **рвёт** handshake при mismatch; в `R2oQuicHttp3Result` (`r2o_quic_http3.rs:217-234`) полей `name_ok`/`peer_name` нет. TCP-дифференциал `tls13` этот QUIC-путь не покрывает. |
+| `d2k_qc_peer_name` | 1430-1430 | 1 | результат проверки имени сертификата (`-1/0/1`) | `r2o_quic_http3.rs` `r2o_quic_peer_name`, `R2oQuicHttp3Result::d2k_qc_peer_name`, `R2oQuicNameRecordingVerifier` | **E** | C заполняет `peer_name` из `d2k_t13_cert_name_ok` и **продолжает** handshake при чужом имени. Rust `r2o_quic_peer_name` использует существующую проверку SAN/CN `https_certificate_name_matches`, `R2oQuicNameRecordingVerifier` записывает `-1/0/1` в результат и принимает сертификат (webpki-цепочка не рвёт пробу, как в C). Тест `quic_peer_name_matches_donor_semantics` (совпадение/чужое имя/мусор/default -1). |
 | `d2k_qc_stream_send` | 1288-1375 | 88 | проверка peer streams/sdata/max_data; want_stream и сброс rx; STREAM len+fin; last_app для PTO 300 мс | quinn `SendStream` | **P** | **Совпадает:** запись STREAM len+fin, учёт stream_id, проверка лимитов. **C-ветви проверены:** для клиентских потоков `count=(sid>>2)+1`, `peer_streams[uni]`, `peer_sdata[uni]`; `peer_max_data`; двунаправленный `(sid&3)==0` → `want_stream`, сброс `rx_*`/`app_rx`; кадр `FR_STREAM_LO\|0x02\|fin`, sid/len/байты; `last_app` + `app_pto_ms=now+300`, `app_tries=0`. **Отличия:** quinn делает retransmit/flow control сам, отдельных полей результата нет. |
 | `d2k_qc_stream_recv` | 1377-1423 | 47 | буфер rx_data, recv 50 мс, повтор last_app по PTO, ACK + MAX_DATA/MAX_STREAM_DATA при половине окна | quinn `RecvStream` | **P** | **Совпадает:** чтение потока, ACK, расширение кредита. **C-ветви проверены:** отдаёт из `rx_data` до `cap`; `until`; `recv_dgram` кусками ≤50 мс; при пустом `rx_len` повтор `last_app` (`app_tries<3`, `300<<tries`); ACK + `FR_MAX_DATA`/`FR_MAX_STREAM_DATA` при `credit_due`; сброс флагов после отправки. **Отличия:** quinn управляет окнами/retransmit сам; точные пороги half-window и `last_app` не сопоставлены. |
 | `d2k_qc_app_progress` | 1425-1428 | 4 | `d2k_qw_ranges_bytes`/`ranges_complete` по диапазонам ответа | `r2o_quic_http3.rs:278 app_bytes_load` | **P** | C считает уникальные байты и FIN-покрытие по `d2k_qw_ranges`; Rust — счётчик app-байт counted-stream, `complete` из `recv_data`/trailers. Семантика «разные байты/целиком» различается. |
