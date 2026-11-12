@@ -38,6 +38,7 @@ pub(crate) fn rst_pending_count() -> usize {
     0
 }
 pub mod response;
+pub mod tls12;
 pub mod trigger;
 pub mod verify;
 pub mod voice_discovery;

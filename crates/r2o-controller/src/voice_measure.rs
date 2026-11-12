@@ -596,6 +596,22 @@ fn r2o_resolve_voice_control(r2o_control: &str) -> Option<SocketAddrV4> {
         })
 }
 
+pub(crate) type R2oVoiceAskFn = fn(SocketAddrV4, Duration, Option<u32>) -> R2oVoiceTally;
+
+fn r2o_voice_ask_real(
+    r2o_server: SocketAddrV4,
+    r2o_wait: Duration,
+    r2o_mark: Option<u32>,
+) -> R2oVoiceTally {
+    r2o_ask_voice_with_arm(r2o_server, r2o_wait, r2o_mark, None)
+}
+
+/// C `voice_ask_real`: указатель на production-функцию голосового зонда.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn voice_ask_real() -> R2oVoiceAskFn {
+    r2o_voice_ask_real
+}
+
 #[cfg(test)]
 fn r2o_ask_voice(
     r2o_server: SocketAddrV4,
@@ -1431,5 +1447,11 @@ mod tests {
         assert_eq!(r2o_result.passed, R2O_VOICE_REPEATS);
         assert_eq!(r2o_result.errors, 0);
         assert!(!r2o_result.marked);
+    }
+
+    #[test]
+    fn voice_ask_real_points_to_production_probe() {
+        let ask = super::voice_ask_real();
+        assert_eq!(ask as usize, super::r2o_voice_ask_real as usize);
     }
 }

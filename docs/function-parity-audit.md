@@ -84,12 +84,12 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 188 | 349 | 11 | 0 |
+| core-net | 548 | 190 | 349 | 9 | 0 |
 | core-state | 692 | 178 | 511 | 3 | 0 |
 | datapath-core | 400 | 151 | 244 | 5 | 0 |
 | datapath-plan | 183 | 138 | 45 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **713** | **1250** | **19** | **0** |
+| **Итого** | **1982** | **715** | **1250** | **17** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,8 +103,8 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 713 / P 1250 /
-N 19 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
+Покрытие реестра: **1982/1982** функций. Статусы: **E 715 / P 1250 /
+N 17 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
 | # | Область | D2O | R2O | Подтверждение |
@@ -344,12 +344,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 188 | 349 | 11 | 0 |
+| core-net | 548 | 190 | 349 | 9 | 0 |
 | core-state | 692 | 178 | 511 | 3 | 0 |
 | datapath-core | 400 | 151 | 244 | 5 | 0 |
 | datapath-plan | 183 | 138 | 45 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **713** | **1250** | **19** | **0** |
+| **Итого** | **1982** | **715** | **1250** | **17** | **0** |
 
 
 ---
@@ -507,7 +507,7 @@ C-реализация минимального TLS 1.2 клиента (ECDHE+AE
 | `read_exact` | 119-153 | 35 | дочитать `n` байт до `deadline`: poll ≤1000 мс, EINTR/EAGAIN, `rx_wire_bytes`, `rx_record_missing` для body | `fetch.rs:2464-2473 R2oTlsTcpStream::read`, `:2386-2437 R2oTlsRecordTracker` | **P** | **C-ветви проверены:** `got<n`; `left<=0` → ошибка; `poll(left>1000?1000:left)`; EINTR continue; `pr==0` continue; `recv`; `r==0` → «закрыто на N-м байте»; `r<0` EINTR/EAGAIN continue, иначе ошибка; `got+=r`, `rx_wire_bytes+=r`, `body` → `rx_record_missing=n-got`. **R2O:** `set_read_timeout(remaining)` + rustls `complete_io` до `deadline` (`fetch.rs:251-265`), байты — `R2oTlsTcpStream::read` (`:2464-2473`), оборванная запись — `R2oTlsRecordTracker`; `rx_record_missing` — `bool`. |
 | `write_all` | 155-171 | 17 | дослать буфер через `send(MSG_NOSIGNAL)`, EINTR/EAGAIN | `R2oTlsTcpStream::write` (`fetch.rs:2475-2482`) + rustls `Stream` | **P** | C `send(...,MSG_NOSIGNAL)`, `w<=0` EINTR/EAGAIN continue, иначе ошибка; `sent+=w`. Rust `TcpStream::write`/`complete_io`; явной EINTR-ветки/`MSG_NOSIGNAL` в слое нет, функционально досыл эквивалентен. |
 | `prf` | 183-212 | 30 | TLS 1.2 PRF P_SHA256: `A(1)=HMAC(secret,label‖seed)`, блоки `HMAC(secret,A(i)‖label‖seed)`, `A(i+1)=HMAC(secret,A(i))`, обрезка выхода | rustls (внутренний TLS1.2 PRF) | **P** | **C-ветви проверены:** `ls_len=len(label)+seed_len`; `>128` → нули; `A1=HMAC(secret,ls)`; цикл до `out_len`: `block=HMAC(secret,A‖ls)`, копия `min(32,остаток)`, `A=HMAC(secret,A)`. Rust TLS1.2 PRF — внутри rustls; собственной функции/KAT (`test_tls12.c`) в Rust нет. |
-| `d2k_tls12_prf_for_test` | 214-218 | 5 | экспорт PRF для C-тестов | нет | **N** | C-обёртка `prf(secret,slen,label,seed,seed_len,out,out_len)`, используется только `test_tls12.c:44,58`. Rust PRF выполняет rustls; отдельного тестового экспорта и C/Rust-векторов PRF нет. |
+| `d2k_tls12_prf_for_test` | 214-218 | 5 | экспорт PRF для C-тестов | `tls12.rs` `d2k_tls12_prf_for_test` | E | C-обёртка `prf(secret,slen,label,seed,seed_len,out,out_len)`. Rust `tls12.rs` реализует P_SHA256 через HMAC-SHA256; тест `tls12_prf_matches_rfc_5246_vector` сверяет первые 32 байта с донорским `test_tls12.c` (100-байтовый вектор). |
 | `tr_add` | 220-225 | 6 | накопить транскрипт: append, если помещается; переполнение молча игнорируется | rustls (транскрипт внутри) | **P** | C `if (tr_len+n<=sizeof transcript) memcpy; tr_len+=n`, иначе тихо ничего не делает. Rust транскрипт ведёт rustls; C-поведение «тихо не добавить» не воспроизведено (и не нужно при корректном размере). |
 | `nonce_of` | 228-233 | 6 | TLS1.2 nonce: `salt[4]` + явный `seq[8]` (big-endian) | rustls (TLS1.2 record nonce) | **P** | C `memcpy(salt,4)`, `out[11-i]=seq>>(8*i)`; это **не** XOR, а salt‖seq. Rust TLS1.2 record nonce считает rustls; `quic.rs packet_nonce` — другая формула (IV XOR PN), поэтому прямого аналога нет. |
 | `aad_of` | 235-242 | 8 | TLS1.2 AAD: seq BE64, type, 03 03, plaintext length BE16 | rustls/ring AEAD AAD | **P** | C `out[7-i]=seq>>(8*i)`, `out[8]=type`, `out[9]=3,out[10]=3`, `put16(out+11,plen)`. Rust AAD формирует rustls/ring; побайтового сравнения нет. |
@@ -1220,7 +1220,7 @@ STUN Binding request/response: XOR-MAPPED-ADDRESS для IPv4/IPv6, провер
 | `voice_resolve` | 299-321 | 23 | последнее `:`, host<256, `strtoul` порта (без проверки хвоста), 1..65535, getaddrinfo AF_INET, первый адрес | `voice_measure.rs:581-599 r2o_resolve_voice_control` | **P** | **Подтверждённое отличие:** C `strrchr(':')`, `strtoul(colon+1,NULL,10)` принимает `123abc`, `+123`, ведущие пробелы, молча берёт префикс; Rust `rsplit_once(':')` + strict `parse::<u16>` + первый IPv4, отвергает хвост/0/пустой host. Для валидного `host:port` совпадает. |
 | `voice_blob_load` | 323-340 | 18 | dir → `D2K_FAKE_DIR` → `/opt/d2k/files/fake`; fopen; fread cap; лишний байт/ошибка/`got<16` → отказ | `voice_measure.rs:485 r2o_search_voice_arms` (compile-time profiles) | **P** | **C-ветви проверены:** dir fallback; path; fopen; `fread(cap)`, `fgetc` extra, `ferror/fclose`, `extra!=EOF \|\| got<16` → -1; len. **Rust:** `R2O_VOICE_ARM_PROFILES` — встроенные `Option<&[u8]>` (3 профиля); файлового пути/`D2K_FAKE_DIR`/проверки лишнего байта нет; набор профилей/копий (1,6) совпадает. |
 | `voice_alive` | 349-360 | 12 | прочитать targets; найти ip/port (и src/sport, если задан); replied→ANSWERS; packets>=4→SILENT, иначе YOUNG; нет→UNSEEN | `voice_measure.rs:553 r2o_voice_observation` | **E** | **Совпадает:** C `d2k_voice_targets`, сравнение ip/port, `src_ip!=0` → src/sport, `replied→ANSWERS`, `packets>=D2K_VOICE_SILENT_AFTER(4)→SILENT`, иначе YOUNG, нет записи→UNSEEN. Rust те же ветви/порог. Tests `ответный_флаг...`, `молодой_поток...`, `ответы_на_живом_потоке...`. |
-| `voice_ask_real` | 365-365 | 1 | вернуть C-указатель `voice_ask` | нет (прямой вызов) | **N** | C `return voice_ask` — function pointer для подмены в тестах. Rust не держит C-API function pointer: голосовой путь вызывает `r2o_ask_voice_with_arm`/измеритель напрямую (`voice_measure.rs`). Поведение вопроса перенесено, сам getter-указателя — нет. |
+| `voice_ask_real` | 365-365 | 1 | вернуть C-указатель `voice_ask` | `voice_measure.rs` `voice_ask_real` | E | C `return voice_ask` — function pointer для подмены в тестах. Rust `voice_ask_real()` возвращает `R2oVoiceAskFn` на production-обёртку `r2o_voice_ask_real` (без arm); тест `voice_ask_real_points_to_production_probe` сверяет адрес функции. |
 | `voice_ask_arms` | 371-399 | 29 | 3 blob'а (`active_discord_udp.bin`, `stun.bin`, `quic_initial_dbankcloud_ru.bin`) × copies 1/6; load; ask; probes; pass 3/3 → arm_bytes/len/copies/fake_arm `name:repeats=N` | `voice_measure.rs:485 r2o_search_voice_arms` | **E** | **C-ветви проверены:** blobs/copies в порядке; `d2k_voice_blob_hook` (load) или ошибка/len 0/>cap → skip; `d2k_voice_ask_hook(...D2K_VOICE_REPEATS)`, `probes += repeats-err`, `marked`; `pass!=3` → continue; иначе копия bytes/len, copies, `fake_arm "%s:repeats=%d"`, return. Rust те же 3 профиля × 1/6 и критерий; test `непринятая_приманка_не_меняет_вердикт...`. |
 | `say_reason` | 403-408 | 6 | перезаписать `r->reason` через `vsnprintf` | `format!` (`voice_measure.rs:217+`) | **P** | C `va_start/vsnprintf(r->reason,sizeof reason,fmt,ap)/va_end`. Rust `r2o_result.reason = format!(...)` в ветвях измерения; поле фиксированной длины 256 и обрезка `vsnprintf` не воспроизведены, тексты иные. |
 | `add_reason` | 410-417 | 8 | дописать причину в хвост `r->reason` | `String::push_str` (`voice_measure.rs:437`) | **P** | C `used=strlen(reason)`; `used+1>=sizeof` → выход; `vsnprintf(reason+used,sizeof-used,...)`. Rust `r2o_result.reason.push_str(&format!(...))` без 255-байтного потолка; тексты/разделители не сверялись. |
