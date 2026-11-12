@@ -1360,6 +1360,8 @@ ECH, середина приветствия. R2O: `r2k-core/src/tls.rs`.
 
 ## include/*.h (14 inline-функций)
 
+**Прочитано построчно: 14/14 inline-функций; тела и структуры в `d2k_packet.h` (72 строки), `d2k_http_request_stream.h` (87), `d2k_http_response.h` (161), `d2k_ctl.h` (86–99), `d2k_track.h` (76–83).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
 | `d2k_ctl_binding_write` (inline) | 86–90 | 5 | запись binding: BE u64 generation, kind/family/shape/temporary, 16-байтная epoch | `r2k-core/src/control.rs:330-347 AppliedEvent::event_body`, `:305 BindingContext`, `:2016/2051 encode_ack_with_binding` | **P** | Раскладка построчно совпадает (BE u64 + 4 байта + epoch). Roundtrip-тесты APPLIED/REFUSED/ACK (`:2528-2607`, `:2770+`, `:2168-2337`) проверяют кодирование/декодирование, но **C/Rust byte-differential отсутствует**; отдельного теста на все три места записи нет. |
