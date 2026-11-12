@@ -173,9 +173,12 @@ pub struct Binding {
     pub successes: i32,
     pub enabled: bool,
     pub transport: u8,
-    #[serde(serialize_with = "serialize_family")]
+    #[serde(default = "default_family", serialize_with = "serialize_family")]
     pub family: u8,
     pub shape: u8,
+    /// Измеренный TCP-профиль (0 — неизвестен, 1 — без TS, 2 — с TS).
+    /// C читает и всегда пишет поле (`catalog.c:862-868,1307`).
+    pub tcp_profile: u8,
     pub verified_by: u8,
     pub input: u8,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -566,6 +569,16 @@ impl Catalog {
                 validate_string(&binding.probe_path, 511, "binding.probe_path")?;
                 validate_string(&binding.ech_origin, 255, "binding.ech_origin")?;
                 format_timestamp(binding.confirmed)?;
+                if !matches!(binding.family, 4 | 6) {
+                    return Err(CatalogError::new(format!(
+                        "box {box_index}: binding.family must be 4 or 6"
+                    )));
+                }
+                if binding.tcp_profile > 2 {
+                    return Err(CatalogError::new(format!(
+                        "box {box_index}: binding.tcp_profile must be 0, 1 or 2"
+                    )));
+                }
                 if let Some(recheck_since) = binding.recheck_since {
                     format_timestamp(recheck_since)?;
                 }
@@ -910,6 +923,11 @@ fn merge_binding(base: Option<&Binding>, local: &Binding, latest: &Binding) -> B
         transport: local.transport,
         family: local.family,
         shape: local.shape,
+        tcp_profile: merge_field(
+            base.map(|base| &base.tcp_profile),
+            &local.tcp_profile,
+            &latest.tcp_profile,
+        ),
         verified_by: merge_field(
             base.map(|base| &base.verified_by),
             &local.verified_by,
@@ -1106,6 +1124,10 @@ fn validate_string(value: &str, max_bytes: usize, field: &str) -> Result<(), Cat
 
 fn is_zero<T: Default + PartialEq>(value: &T) -> bool {
     *value == T::default()
+}
+
+fn default_family() -> u8 {
+    4
 }
 
 fn serialize_family<S>(family: &u8, serializer: S) -> Result<S::Ok, S::Error>

@@ -11,7 +11,9 @@ fn accepts_old_catalogs_and_null_arrays_without_inventing_measurements() {
     assert_eq!(catalog.boxes.len(), 1);
     assert!(catalog.boxes[0].plans.is_empty());
     assert_eq!(catalog.boxes[0].bindings[0].transport, 0);
+    assert_eq!(catalog.boxes[0].bindings[0].family, 4);
     assert_eq!(catalog.boxes[0].bindings[0].shape, 0);
+    assert_eq!(catalog.boxes[0].bindings[0].tcp_profile, 0);
     assert_eq!(catalog.boxes[0].bindings[0].verified_by, 0);
     assert_eq!(catalog.boxes[0].bindings[0].confirmed, 1_788_667_769);
 }
@@ -49,7 +51,7 @@ fn skips_unknown_fields_and_round_trips_known_measurement_context() {
         "id":"box-1","created":"2026-09-06T04:08:02Z","updated":"2026-09-07T07:13:56Z",
         "fingerprint":{"method":2,"signals":[{"kind":"rx-volume","ttl":126,"ttl_delta":-3,"tos":136,"ipid":54321,"volume":16,"seen":2,"packets":45,"future":1}]},
         "plans":[{"id":"plan-1","proto":"tls","text":"payload \u2603","added":"2026-09-06T04:09:29Z","successes":4,"enabled":true}],
-        "bindings":[{"kind":"name","target":"example.org","plan_id":"plan-1","level":3,"confirmed":"2026-09-06T04:09:29Z","successes":2,"enabled":true,"transport":6,"family":4,"shape":1,"verified_by":1,"input":2,"probe_path":"/main.css","ech_origin":"edge.example","recheck_since":"2026-09-07T07:13:56Z","budget":3}]
+        "bindings":[{"kind":"name","target":"example.org","plan_id":"plan-1","level":3,"confirmed":"2026-09-06T04:09:29Z","successes":2,"enabled":true,"transport":6,"family":4,"shape":8,"tcp_profile":2,"verified_by":1,"input":2,"probe_path":"/main.css","ech_origin":"edge.example","recheck_since":"2026-09-07T07:13:56Z","budget":3}]
       }]
     }"#;
     let catalog = Catalog::parse(input).unwrap();
@@ -62,9 +64,25 @@ fn skips_unknown_fields_and_round_trips_known_measurement_context() {
         -3
     );
     assert_eq!(value["boxes"][0]["bindings"][0]["transport"], 6);
+    assert_eq!(value["boxes"][0]["bindings"][0]["tcp_profile"], 2);
     assert_eq!(value["boxes"][0]["bindings"][0]["input"], 2);
     assert_eq!(value["boxes"][0]["bindings"][0]["probe_path"], "/main.css");
     assert_eq!(value["boxes"][0]["bindings"][0]["budget"], 3);
+}
+
+#[test]
+fn binding_tcp_profile_round_trips_and_rejects_unknown_values() {
+    let input = br#"{"boxes":[{"id":"box-1","fingerprint":{"signals":[]},"bindings":[{"kind":"name","target":"example.org","plan_id":"plan-1","family":6,"shape":11,"tcp_profile":2,"confirmed":"2026-09-06T04:09:29Z"}]}]}"#;
+    let catalog = Catalog::parse(input).unwrap();
+    assert_eq!(catalog.boxes[0].bindings[0].tcp_profile, 2);
+    let written = catalog.to_json_at(1_788_765_236).unwrap();
+    assert!(written.contains("\"tcp_profile\": 2"));
+
+    let bad_profile = br#"{"boxes":[{"id":"box-1","fingerprint":{"signals":[]},"bindings":[{"kind":"name","target":"example.org","plan_id":"plan-1","family":4,"shape":1,"tcp_profile":3,"confirmed":"2026-09-06T04:09:29Z"}]}]}"#;
+    assert!(Catalog::parse(bad_profile).is_err());
+
+    let bad_family = br#"{"boxes":[{"id":"box-1","fingerprint":{"signals":[]},"bindings":[{"kind":"name","target":"example.org","plan_id":"plan-1","family":5,"shape":1,"tcp_profile":1,"confirmed":"2026-09-06T04:09:29Z"}]}]}"#;
+    assert!(Catalog::parse(bad_family).is_err());
 }
 
 #[test]

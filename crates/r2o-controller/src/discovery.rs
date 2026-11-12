@@ -1187,6 +1187,7 @@ pub fn add_measured_binding_with_fingerprint_in_box(
         transport: 6,
         family: target.family,
         shape: target.shape,
+        tcp_profile: r2k_core::control::r2k_link_shape_tcp_profile(target.shape),
         verified_by: 1,
         input,
         ..Binding::default()
