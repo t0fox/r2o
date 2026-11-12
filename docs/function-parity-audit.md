@@ -2021,10 +2021,10 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `d2k_domain_normalize` | 6–29 | 24 | строгая нормализация DNS-имени: lower-case, метки, длина, запрет IP | domain::normalize | **P** | unit tests/domain.rs; R2O дополнительно отвергает односоставные имена (labels<2), C — нет; C/Rust differential не найден |
-| `rule_exists` | 31–40 | 10 | бинарный поиск правила в сгенерированном PSL | psl crate (suffix lookup) | **P*** | static-хелпер; таблица PSL заменена crate psl |
-| `d2k_domain_base` | 42–64 | 23 | регистрируемый домен по PSL: longest rule, exception, wildcard | domain::registrable_domain | **P** | unit tests/domain.rs (private wildcard/exception); прямого сравнения с C PSL-таблицей нет |
-| `d2k_domain_member` | 66–72 | 7 | проверка вхождения имени в суффикс по границе метки | domain::is_member | **P** | unit tests/domain.rs; R2O требует известный registrable suffix, C — только normalize+base |
+| `d2k_domain_normalize` | 6–29 | 24 | одна хвостовая точка, длина 1..253, lower-case, LDH, метка ≤63, без ведущего/хвостового `-`, хотя бы одна нецифра | domain::normalize (`domain.rs:8`) | **P** | **Подтверждённое расхождение:** C **не требует ≥2 меток** — `localhost`, `a-b` проходят (если есть нецифра); Rust `labels < 2` отвергает. Остальное совпадает: одна точка, длина, lower-case, LDH, ≤63, дефисы, запрет чисто числового имени. Unit `tests/domain.rs`; C/Rust differential нет. |
+| `rule_exists` | 31–40 | 10 | бинарный поиск правила в сгенерированном `d2k_psl_blob` | `psl` crate (`psl::suffix`) | **P*** | Таблица заменена crate `psl`; версия/состав PSL и бинарный поиск C напрямую не сравнивались. |
+| `d2k_domain_base` | 42–64 | 23 | регистрируемый домен: longest rule, exception (`!`), wildcard (`*.`), неизвестный TLD → отказ | domain::registrable_domain (`:62`) | **P** | C явно перебирает суффиксы, считает `exception/longest/wildcard` и требует `count>suffix_count`; Rust `psl::suffix` + `is_known()` + `psl::domain`. Алгоритм PSL тот же, но таблица/версия и точные исключения C/Rust не сравнивались; unit private wildcard/exception. |
+| `d2k_domain_member` | 66–72 | 7 | normalize(name)+normalize(suffix)+base(suffix), затем совпадение по границе метки | domain::is_member (`:74`) | **P** | C требует успешный `d2k_domain_base(suffix)`; Rust — `registrable_domain(suffix).is_some()`. Сравнение `name==suffix || prefix.ends_with('.')` эквивалентно. Отличие наследует `normalize` (односложные имена). Unit `tests/domain.rs`. |
 
 ### `core/groups.c`
 
