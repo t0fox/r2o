@@ -327,7 +327,7 @@ tcp_ts/ip_id_zero/seq_shift — совпадают; дедупликация `ba
 покрыт только составной ECH-вопрос и перепроверка самопроверки. Расхождение: при `control = None`
 C всё равно выдаёт кандидат «всё сразу», R2O его не выдаёт.
 
-**Прочитано построчно: 7/7 функций, 498 строк C (1–498).** Все 12 вопросов `prop_probes`
+**Прочитано построчно: 7/7 функций, 498 строк C (1–498).** Сверено с `raw_probe.rs:840-965` (`property_probes`), `:967-1045` (`property_probe_poison`, `apply_property`), `:189-345` (`sweep_poisons`), `:1047-1099` (`compose_from_props`). Все 12 вопросов `prop_probes`
 (`props.c:49-196`) сверены с `property_probes` (`raw_probe.rs:840-965`): порядок, label, имя,
 ttl/repeats/gap_ms, seqovl/seqovl_exact, decoy_hello, badsum/md5/tcp_ts/seq_shift/split_pos,
 syn_data — совпадают. Все ветви `apply_set` (`props.c:198-257`) совпадают с `apply_property`
