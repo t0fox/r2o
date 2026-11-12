@@ -92,6 +92,8 @@ pub struct NamePlans {
     https_names: HashMap<String, Instant>,
     exact_capacity: usize,
     plan_clock: Cell<u64>,
+    /// C `next_binding`: монотонный номер привязки, не зависящий от revision.
+    binding_generation: Cell<u64>,
     shape_misses: Cell<u64>,
     send_maxlen: usize,
     revision: u64,
@@ -166,6 +168,7 @@ impl NamePlans {
             https_names: HashMap::new(),
             exact_capacity: exact_capacity.max(1),
             plan_clock: Cell::new(0),
+            binding_generation: Cell::new(0),
             shape_misses: Cell::new(0),
             send_maxlen: 0,
             revision: 0,
@@ -1689,14 +1692,18 @@ impl NamePlans {
             .addr_plans
             .get(&AddrPlanKey { address, shape })
             .or_else(|| {
-                if shape == SHAPE_ECH_TCP {
-                    self.addr_plans.get(&AddrPlanKey {
-                        address,
-                        shape: SHAPE_MODERN,
-                    })
-                } else {
-                    None
-                }
+                // C `modern_shape_for_ech`: ECH_TCP→MODERN,
+                // ECH_NO_TS→MODERN_NO_TS, ECH_TS→MODERN_TS.
+                let fallback = match shape {
+                    SHAPE_ECH_TCP => SHAPE_MODERN,
+                    SHAPE_ECH_NO_TS => SHAPE_MODERN_NO_TS,
+                    SHAPE_ECH_TS => SHAPE_MODERN_TS,
+                    _ => return None,
+                };
+                self.addr_plans.get(&AddrPlanKey {
+                    address,
+                    shape: fallback,
+                })
             })?;
         Self::touch(entry, self.next_plan_clock());
         Some(&entry.plan)
@@ -1773,7 +1780,12 @@ impl NamePlans {
     }
 
     fn next_generation(&self) -> u64 {
-        self.revision.wrapping_add(1).max(1)
+        // C `bind_context`: `generation = ++next_binding`, с пропуском нуля
+        // при переполнении (`plans.c:94-102`).
+        let next = self.binding_generation.get().wrapping_add(1);
+        let next = if next == 0 { 1 } else { next };
+        self.binding_generation.set(next);
+        next
     }
 }
 
@@ -4933,6 +4945,83 @@ mod tests {
         assert!(plans.handle(&set_name("Example.Test")).ok);
         assert!(plans.select(&tcp_tls_packet("example.test")).is_some());
         assert!(plans.select(&tcp_tls_packet("EXAMPLE.TEST")).is_some());
+    }
+
+    #[test]
+    fn binding_generation_is_monotonic_independent_of_revision() {
+        let mut plans = NamePlans::default();
+        assert!(plans.handle(&set_name("a.example")).ok);
+        assert!(plans.handle(&set_name("b.example")).ok);
+        let generations: Vec<u64> = plans.plans.values().map(|plan| plan.generation).collect();
+        assert_eq!(generations.len(), 2);
+        assert!(generations.iter().all(|generation| *generation >= 1));
+        assert_ne!(generations[0], generations[1]);
+    }
+
+    #[test]
+    fn find_addr_modern_shape_for_ech_covers_no_ts_and_ts() {
+        let address = super::Address::new(super::IpAddr::V4(super::Ipv4Addr::new(198, 51, 100, 2)));
+        let mut plans = NamePlans::default();
+        for shape in [
+            r2k_core::control::SHAPE_MODERN_NO_TS,
+            r2k_core::control::SHAPE_MODERN_TS,
+        ] {
+            plans.addr_plans.insert(
+                super::AddrPlanKey { address, shape },
+                InstalledPlan {
+                    plan: Plan::default(),
+                    generation: 1,
+                    last_used: std::cell::Cell::new(0),
+                },
+            );
+        }
+        assert!(
+            plans
+                .find_addr(address, r2k_core::control::SHAPE_ECH_NO_TS)
+                .is_some()
+        );
+        assert!(
+            plans
+                .find_addr(address, r2k_core::control::SHAPE_ECH_TS)
+                .is_some()
+        );
+        assert!(
+            plans
+                .find_addr(address, r2k_core::control::SHAPE_ECH_TCP)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn set_suffix_accepts_exactly_c_shape_transports() {
+        let name = "area.example";
+        let tcp = tls_plan_records([0x41; 16]);
+        let quic = quic_plan_records([0x42; 16]);
+        let frame = |shape: u8, records: &[u8]| {
+            let mut body = vec![name.len() as u8];
+            body.extend_from_slice(name.as_bytes());
+            body.extend_from_slice(&[shape, 4]);
+            body.extend_from_slice(records);
+            body.extend_from_slice(&[0; 16]);
+            Frame {
+                kind: COMMAND_SET_SUFFIX,
+                body,
+            }
+        };
+
+        for shape in [1_u8, 2, 6, 8, 9, 10, 11, 12, 13] {
+            let ack = NamePlans::default().handle(&frame(shape, &tcp));
+            assert!(ack.ok, "shape {shape}: reason={}", ack.reason);
+        }
+        let ack = NamePlans::default().handle(&frame(r2k_core::control::SHAPE_QUIC, &quic));
+        assert!(ack.ok, "QUIC: reason={}", ack.reason);
+
+        for shape in [0_u8, 4, 5, 7, 14] {
+            let ack = NamePlans::default().handle(&frame(shape, &tcp));
+            assert!(!ack.ok, "shape {shape} должен быть отвергнут");
+        }
+        let ack = NamePlans::default().handle(&frame(r2k_core::control::SHAPE_MODERN, &quic));
+        assert!(!ack.ok, "чужой транспорт плана должен быть отвергнут");
     }
 
     #[test]

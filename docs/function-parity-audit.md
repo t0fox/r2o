@@ -87,9 +87,9 @@ recheck 1982 1982 equal True
 | core-net | 548 | 186 | 349 | 13 | 0 |
 | core-state | 692 | 177 | 511 | 4 | 0 |
 | datapath-core | 400 | 145 | 244 | 11 | 0 |
-| datapath-plan | 183 | 127 | 56 | 0 | 0 |
+| datapath-plan | 183 | 132 | 51 | 0 | 0 |
 | detect | 159 | 47 | 102 | 10 | 0 |
-| **Итого** | **1982** | **682** | **1262** | **38** | **0** |
+| **Итого** | **1982** | **687** | **1257** | **38** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 682 / P 1262 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 687 / P 1257 /
 N 38 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -347,9 +347,9 @@ P означает неполное доказательство ветвей, N
 | core-net | 548 | 186 | 349 | 13 | 0 |
 | core-state | 692 | 177 | 511 | 4 | 0 |
 | datapath-core | 400 | 145 | 244 | 11 | 0 |
-| datapath-plan | 183 | 127 | 56 | 0 | 0 |
+| datapath-plan | 183 | 132 | 51 | 0 | 0 |
 | detect | 159 | 47 | 102 | 10 | 0 |
-| **Итого** | **1982** | **682** | **1262** | **38** | **0** |
+| **Итого** | **1982** | **687** | **1257** | **38** | **0** |
 
 
 ---
@@ -5342,8 +5342,8 @@ Static-хелперы наследуют статус владельца (вла
 
 | Статус | Кол-во |
 |---|---:|
-| E | 127 |
-| P | 56 |
+| E | 132 |
+| P | 51 |
 | N | 0 |
 | ? | 0 |
 | **Всего** | **183** |
@@ -5352,7 +5352,7 @@ Static-хелперы наследуют статус владельца (вла
 
 | Файл | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| datapath/plans.c | 75 | 44 | 31 | 0 | 0 |
+| datapath/plans.c | 75 | 49 | 26 | 0 | 0 |
 | datapath/routemark.c | 23 | 21 | 2 | 0 | 0 |
 | datapath/plan_parse.c | 17 | 14 | 3 | 0 | 0 |
 | datapath/raw.c | 17 | 12 | 5 | 0 | 0 |
@@ -5675,7 +5675,7 @@ UDP→addr переход, R2O — только exact+ECH→MODERN+общий ad
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| bind_context | 94-102 | 9 | static: owner, `generation=++next_binding` (пропуск 0 на UINT64_MAX), kind/family/shape/temporary, `trial_id=0` | `control.rs:1592 next_generation`, `:878-887`/`:915-924` вставка, `:690 binding_for_plan` | **P** | C generation — монотонный `next_binding`; Rust — `revision+1` на каждую вставку. Identity выдаётся при вставке, отдельной функции нет; проверяется через `binding_for_plan` в APPLIED-тестах. |
+| bind_context | 94-102 | 9 | static: owner, `generation=++next_binding` (пропуск 0 на UINT64_MAX), kind/family/shape/temporary, `trial_id=0` | `control.rs:1775 next_generation`, `:878-887`/`:915-924` вставка, `:690 binding_for_plan` | E | C generation — монотонный `next_binding`, не зависящий от revision. Rust поле `binding_generation: Cell<u64>` и `next_generation()` увеличивают его с пропуском нуля; identity собирается при вставке. Тест `binding_generation_is_monotonic_independent_of_revision`: две вставки без revision-инкремента получают разные ненулевые generation. |
 | d2k_plantab_new | 104-130 | 27 | создать таблицу на cap записей и 16-байтовый epoch | `control.rs:146` `NamePlans::with_capacity` | E | C `cap==0→NULL`; `calloc` таблицы, `v` и `probes` по cap; при нехватке — `free` и NULL; `cap=cap`; epoch из `/dev/urandom`, при коротком чтении/отсутствии — нули. Rust `with_capacity` читает 16 байт тем же способом, `exact_capacity.max(1)`, HashMap-поля пусты. Тест `exact_name_addr_probe_tables_share_lru_capacity` (control.rs:2633) проверяет общую ёмкость. |
 | d2k_plantab_free | 132-149 | 18 | освободить планы и массивы | `Drop` (`HashMap`-поля `NamePlans`) | E* | C `!t→return`; цикл по **cap**, а не used, освобождает `v[i].plan` и `probes[i].plan` (свободный хвост занулён, `d2k_plan_free(NULL)` — no-op); отдельно `suffix_used`; `free` probes/v/t. Rust освобождает HashMap-поля при `Drop`; владение типами, утечек нет. |
 | name_eq | 154-167 | 14 | static: ASCII case-insensitive, равная длина | `control.rs:2620` `canonical_name` (lowercase) + `String`-равенство | E | C понижает A-Z по месту; Rust канонизирует имя при вставке. Тест `exact_names_match_case_insensitively_like_name_eq`: план `Example.Test` находится по `example.test` и `EXAMPLE.TEST`. |
@@ -5683,14 +5683,14 @@ UDP→addr переход, R2O — только exact+ECH→MODERN+общий ad
 | area_name_valid | 177-191 | 15 | static: DNS-суффикс: 1..253, метки 1..63, LDH, без ведущего/хвостового дефиса; **односложное и чисто цифровое допустимы** | `control.rs:2544` `canonical_area_name` | E | C-правила перенесены в `canonical_area_name`: 1..253, метки 1..63, LDH, без ведущего/хвостового дефиса, без пустых меток; односложные и числовые имена допустимы. `SET_SUFFIX`/`SET_BYPASS`/DEL используют его, точные имена остаются на `canonical_name`. Тест `area_names_allow_single_label_and_numeric_like_d2o`: `localhost`, `12345`, `a` приняты; `-bad`, `bad-`, `a..b`, `a_b`, `a.` отвергнуты. |
 | suffix_member | 193-197 | 5 | static: имя входит в суффикс по границе метки | `control.rs:1605` `domain_suffix_member` | E | `исключение_снимает_suffix_только_для_точного_имени...` (control.rs:3075): `other.googlevideo.com` получает план, `failed...` — нет. |
 | area_exact | 199-207 | 9 | static: найти запись площади по (имя, транспорт, форма, family) | ключи `SuffixPlanKey`/`DomainBypassKey` (control.rs:65-78) | E | C линейный проход `used`, сравнение `transport/shape/family` и `name_eq`; первый совпавший. Rust те же четыре поля в ключе HashMap; порядок не важен, дубликат ключа заменяется. Тест control.rs:3075 (установка/поиск/удаление суффикса и обхода). |
-| area_set | 209-226 | 18 | static: поставить план суффикса с проверкой формы/транспорта/family | `control.rs:928` `set_suffix` (и `:988` `set_domain_bypass`) | P | Тест control.rs:3075. Отличие: C принимает любой транспорт, равный `shape_transport(shape)`; R2O ограничивает набор форм TCP 1/2/6/8-13 и QUIC 3. |
-| d2k_plantab_set_suffix_family | 228-237 | 10 | поставить план изученного суффикса | `control.rs:928` `set_suffix` | P | C: `!t/!p` или транспорт плана не равен `shape_transport(shape)`, либо `shape==HTTP`, либо `proto==HTTP` → `free(p)`/`-2`; иначе `area_set` проверяет имя 1..253, `transport==shape_transport(shape)`, family 4/6. Rust `set_suffix` дополнительно ограничивает shape набором 1/2/3/6/8-13, требует `plan.transport==6 && proto==1` (TCP) или `valid_quic_plan` (QUIC), `r2o_plan_valid`; C такие планы принял бы. Тест control.rs:3075 покрывает штатный суффикс. |
+| area_set | 209-226 | 18 | static: поставить план суффикса с проверкой формы/транспорта/family | `control.rs:928` `set_suffix` (и `:988` `set_domain_bypass`) | E | C допускает ровно формы с `shape_transport != 0` (1/2/3/6/8–13), family 4/6 и транспорт плана, равный `shape_transport(shape)`. Rust использует тот же набор; тест `set_suffix_accepts_exactly_c_shape_transports` принимает 1/2/6/8–13 и QUIC 3, отвергает 0/4/5/7/14 и чужой транспорт плана. |
+| d2k_plantab_set_suffix_family | 228-237 | 10 | поставить план изученного суффикса | `control.rs:928` `set_suffix` | E | C: транспорт плана, если объявлен, обязан совпадать с `shape_transport(shape)`; HTTP-форма/протокол отвергаются; имя 1..253, family 4/6. Rust проверяет тот же набор форм и совместимость плана (TCP proto 1 или QUIC), плюс `r2o_plan_valid`. Тест `set_suffix_accepts_exactly_c_shape_transports` покрывает допустимые формы и отказ чужому транспорту; штатный суффикс — `план_суффикса_наследуется...`. |
 | d2k_plantab_set_bypass_family | 239-244 | 6 | поставить исключение семейства (bypass) | `control.rs:988` `set_domain_bypass` | E | C `!t→-2`; `area_set` с явным transport, плана нет; проверяются имя, `transport==shape_transport(shape)`, family 4/6. Rust `set_domain_bypass` требует `valid_domain_area_context` (TCP 1/2/6/8-13 или QUIC 3, family 4/6) и точную длину тела; ключ `DomainBypassKey`. Тест control.rs:3075: bypass подавляет суффикс, затем снимается. |
 | area_del | 246-253 | 8 | static: снять запись площади с уплотнением | `HashMap::remove` в `delete_domain_area` (control.rs:1021-1053) | E | C `!t/!name/!len→0`; `area_exact`; нет → 0; `free(e->plan)`; `*e=v[--used]`; зануление хвоста; `revision++`; 1. Rust удаляет точный `SuffixPlanKey` или `DomainBypassKey`; `revision` не меняется (счётчик ревизии в R2O инкрементируется только в `clear_probes`/`delete_name_bound`). Тест control.rs:3075. |
 | d2k_plantab_del_suffix_family | 255-258 | 4 | снять суффикс | `control.rs:1021` `delete_domain_area(body, true)` | E | C `t ? area_del(t,t->suffixes,...) : 0`; ключ — имя/transport/shape/family. Rust `delete_domain_area` разбирает тело, проверяет `valid_domain_area_context`, удаляет `SuffixPlanKey`. Тест control.rs:3075 (DEL_SUFFIX). |
 | d2k_plantab_del_bypass_family | 260-263 | 4 | снять исключение | `control.rs:1021` `delete_domain_area(body, false)` | E | C `t ? area_del(t,t->bypasses,...) : 0`. Rust удаляет `DomainBypassKey` после той же проверки контекста. Тест control.rs:3075 (DEL_BYPASS). |
 | area_bypassed | 265-273 | 9 | static: имя исключено для (family, shape) | `control.rs:1558` `name_is_bypassed` | E | C цикл `bypass_used`, сравнение `family/shape`, непустого name и `name_eq`; transport не сравнивается. Rust `DomainBypassKey{name,transport,family,shape}` — transport входит в ключ, но для допустимых shape он однозначно следует из shape (`shape_transport`), поэтому наблюдаемый результат тот же. Тест control.rs:3075. |
-| area_match | 275-284 | 10 | static: самый длинный подходящий суффикс при точном `(shape, family)` и `suffix_member` | `control.rs:1569-1590` `find_in_domain` (`max_by_key(len)`) | **P** | Логика совпадает: точные `transport/family/shape`, `domain_suffix_member`, максимум по длине суффикса. Тест покрывает один суффикс; выбор самого длинного из нескольких не проверен. |
+| area_match | 275-284 | 10 | static: самый длинный подходящий суффикс при точном `(shape, family)` и `suffix_member` | `control.rs:1569-1590` `find_in_domain` (`max_by_key(len)`) | E | Логика совпадает: точные `transport/family/shape`, `domain_suffix_member`, максимум по длине. Тест `план_суффикса_наследуется_поддоменом_и_не_совпадает_с_похожим_именем` устанавливает `googlevideo.com` и `video.googlevideo.com` и подтверждает, что `rr-new.video.googlevideo.com` получает план более длинного суффикса, а `rr-new.googlevideo.com` — внешнего. |
 | d2k_plantab_revision | 286-286 | 1 | ревизия таблицы | `control.rs:586` `revision` | E | C `return t ? t->revision : 0`; `revision++` в `area_set`/`area_del`/`set_name_family`/`set_addr_shaped`/`drop`/`probe_drop`/`set_addr_probe`. Rust поле `revision`, `revision()`; инкремент в `clear_probes`/`delete_name_bound`/`set_name`? Проверяется `conditional_http_delete...` (control.rs:3587) до/после. |
 | d2k_plantab_has_ech_target | 288-314 | 27 | есть ли ECH-привязка имени/адреса для трёх ECH-форм, с учётом `only_sport` и BYPASS; затем суффиксы | — | **P** | Прямого предиката нет, но это **не N**: R2O удерживает любой неполный TLS-заголовок (`hold.rs:574-590`, `incomplete_tls_head`) и выставляет ECH-форму по факту `ech_offer` (`engine.rs:1053-1059`). То есть обычный случай «ECH-target → удержание обрывка» покрыт **шире** C. Не воспроизведены C-исключения: `only_sport`, BYPASS для не-точных записей, отдельные `ECH_NO_TS`/`ECH_TS`, суффиксный поиск; адресного differential нет. |
 | d2k_plantab_stream_candidate | 316-319 | 4 | префильтр: есть ли потоковый план по имени/адресу | `control.rs:612` `has_tls_candidate(family)` | P | C вызывает `stream_candidate_family(..., family=4)`: имя/адрес/sport/`only_sport`/bypass/`stream_input`. Rust `has_tls_candidate(family)` смотрит только family и `plan.stream_input()` по `plans/suffix_plans/addr_plans`, без имени, адреса и порта. Префильтр R2O шире: может вернуть true для цели без плана. Используется в `main.rs:1699`. |
@@ -5704,7 +5704,7 @@ UDP→addr переход, R2O — только exact+ECH→MODERN+общий ad
 | d2k_plantab_find_http | 424-431 | 8 | план для HTTP-запроса: проба своего порта, иначе постоянная | `control.rs:495-509` (`select` + `NameProbeKey` для порта 80) | E | C `!t/!name/!len→NULL`; `find_name_shape_port(HTTP,sport,family)`; если нет или `proto!=HTTP` → NULL; иначе `last_used_ns=now`, план. Rust при `request_host_range` и `destination_port==80` сначала ищет `probes` по `(host,family,HTTP,source_port)`, иначе `find(host,family,HTTP)`. Тест `http_probe_plan_matches_only_its_source_port_and_acknowledges_trial_id` (control.rs:3489). |
 | find_addr_shape | 439-450 | 12 | static: адресная запись ровно (адрес, family, форма) | `control.rs:1505` `find_addr` | E | C `!addr`/family не 4/6 → NULL; цикл `used`, `kind==ADDR`, `family`, `any_shape \|\| shape`, `memcmp` 4/16 байт. Rust `AddrPlanKey{address,shape}` в `addr_plans`, точный поиск; `find_addr` дополнительно при `shape==ECH_TCP` берёт `MODERN`. Тесты `discord_voice...` (control.rs:3186), `удаление_адреса...` (control.rs:2793). |
 | find_addr | 452-454 | 3 | static: любая форма адреса (для снятия/учёта промаха) | `control.rs:1505` `find_addr` (с ECH-fallback) | P | C `find_addr_shape(..., any_shape=1, 0)`: первая запись адреса любой формы. Rust `find_addr(address,shape)` требует точную форму и лишь `ECH_TCP→MODERN`; «любой формы» нет — широкое удаление адреса в R2O заменено точным `delete_addr`. Тесты control.rs:2793/3186 покрывают точные формы. |
-| modern_shape_for_ech | 465-469 | 5 | static: ECH-форма → соответствующая MODERN-форма | `control.rs:534-539` `fallback_shape`; `:1509-1517` `find_addr` | P | C: `ECH_NO_TS(10)→MODERN_NO_TS(8)`, `ECH_TS(13)→MODERN_TS(11)`, иначе `MODERN(1)`. Rust `select` строит `fallback_shape` для 6/10/13 и перебирает его для имени/суффикса; `find_addr` делает fallback только для `ECH_TCP(6)→MODERN(1)`, без 10→8/13→11. Тест `tls_план_работает_для_sni_с_ech...` (control.rs:2823) покрывает ECH_TCP. |
+| modern_shape_for_ech | 465-469 | 5 | static: ECH-форма → соответствующая MODERN-форма | `control.rs:534-539` `fallback_shape`; `:1687` `find_addr` | E | C: `ECH_NO_TS(10)→MODERN_NO_TS(8)`, `ECH_TS(13)→MODERN_TS(11)`, `ECH_TCP(6)→MODERN(1)`. Rust `select` строит `fallback_shape` для 6/10/13; `find_addr` теперь делает все три fallback-ветки. Именной ECH_TCP покрыт `tls_план_работает_для_sni_с_ech...`, адресные 10→8/13→11 — `find_addr_modern_shape_for_ech_covers_no_ts_and_ts`. |
 | scan_name | 471-486 | 16 | static: один проход — `any`/`shaped`/`modern(ECH)`/`grandfather` по имени, HTTP-запись пропускается | `control.rs:569-581` — цепочка `find(shape/bridge/fallback/grandfather)` + `find_in_domain` | **P** | C за один проход заполняет `h.any` (любая не-HTTP запись), `h.shaped` (точная `seen_shape`), `h.modern` (`modern_shape_for_ech(seen_shape)`) и `h.grandfather`. Rust делает отдельные поиски и **не имеет** ветки `h.any`/`SHAPE_ANY`: запись с формой 0 не будет найдена. R2O-контроллер такие планы не ставит (valid shapes 1/2/3/5/6), но C-путь шире. |
 | scan_addr | 488-502 | 15 | static: один проход по адресу — `any`/`shaped`/`modern(ECH)`/`grandfather` | `control.rs:1504-1520` `find_addr`, `:1522-1540` `find_addr_fallback` | **P** | C собирает `any`, `shaped` (если `seen_shape!=ANY`), `modern(ECH)`, `grandfather`. Rust `find_addr` ищет **только** точную форму и ECH→MODERN; grandfather/ANY-ветки нет. `find_addr_fallback` дополнительно проверяет `name_has_transport_binding`/`name_is_bypassed`, чего в C `scan_addr` нет (это в `find_target`). Счётчик `shape_misses` теперь ведётся в `note_tcp_shape_miss` после неудачи TCP-поиска, не в `scan_addr`. |
 | oldest | 518-529 | 12 | static: самая старая запись (LRU) | `control.rs:211` `exact_victim` | E | C `used==0→NULL`; `victim=v[0]`; цикл `1..used`, строго `<` по `last_used_ns`; при равенстве побеждает меньший индекс. Rust `exact_victim` перебирает `plans/addr_plans/probes`, выбирает `used < oldest`; при равенстве — первый в порядке итерации HashMap (не детерминирован). Тест `name_plan_table_evicts_lru_and_delete_releases_a_slot` (control.rs:2663). |
