@@ -492,7 +492,7 @@ mark, нет `IP_NODEFRAG`, нет ленивого открытия, нет м�
 Сопоставление fwmark/выходных интерфейсов и политика Keenetic. R2O:
 `crates/r2o-datapath/src/r2o_route.rs` (`R2oRouteGate`, `R2oRoutePolicy`, парсеры).
 
-**Прочитано построчно: 23/23 функции, 343 строки C (1–343).**
+**Прочитано построчно: 23/23 функции, 343 строки C (1–343).** Сверено с `r2o_route.rs:84-243` (`R2oRoutePolicy`, `R2oRouteGate`, `r2o_set_rules/set_default_ifindices/set_policy/mark_is_routed/route_mark`), `:372-395` (`r2o_refresh`), `:679-811` (запросы/парсеры), `:950-954` (`r2o_route_add_ifindex`); аналога текстового `describe` в R2O нет.
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
