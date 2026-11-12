@@ -116,23 +116,38 @@ pub struct R2oRouteGate {
 
 impl R2oRouteGate {
     /// Сохраняет успешно прочитанный набор правил конкретного семейства.
-    pub fn r2o_set_rules(&mut self, family: R2oRouteFamily, mut rules: Vec<R2oFwSelector>) {
+    ///
+    /// Возвращает C `d2k_routemark_set.changed`: изменились ли длина или
+    /// тройки mark/mask/family. Отсутствие чтения (`None`) не считается
+    /// изменением само по себе — как и в C, где `changed` сравнивает только
+    /// `n` и содержимое.
+    pub fn r2o_set_rules(&mut self, family: R2oRouteFamily, mut rules: Vec<R2oFwSelector>) -> bool {
         rules.retain(|rule| rule.family == family);
         for rule in &mut rules {
             rule.mark &= rule.mask;
         }
-        match family {
-            R2oRouteFamily::Ipv4 => self.r2o_rules_v4 = Some(rules),
-            R2oRouteFamily::Ipv6 => self.r2o_rules_v6 = Some(rules),
-        }
+        let slot = match family {
+            R2oRouteFamily::Ipv4 => &mut self.r2o_rules_v4,
+            R2oRouteFamily::Ipv6 => &mut self.r2o_rules_v6,
+        };
+        let changed = match slot.as_deref() {
+            Some(previous) => previous != rules.as_slice(),
+            None => !rules.is_empty(),
+        };
+        *slot = Some(rules);
+        changed
     }
 
     /// Задаёт устройства маршрута по умолчанию; `None` означает, что чтение неизвестно.
+    ///
+    /// Возвращает C `d2k_routemark_set_oifs/clear_oifs.changed`: для `None`
+    /// это факт наличия прежнего чтения, для `Some` — отличие после
+    /// дедупликации от прежнего списка.
     pub fn r2o_set_default_ifindices(
         &mut self,
         family: R2oRouteFamily,
         ifindices: Option<Vec<u32>>,
-    ) {
+    ) -> bool {
         let ifindices = ifindices.map(|values| {
             let mut unique = Vec::with_capacity(values.len());
             for value in values {
@@ -142,10 +157,53 @@ impl R2oRouteGate {
             }
             unique
         });
-        match family {
-            R2oRouteFamily::Ipv4 => self.r2o_default_ifindices_v4 = ifindices,
-            R2oRouteFamily::Ipv6 => self.r2o_default_ifindices_v6 = ifindices,
+        let slot = match family {
+            R2oRouteFamily::Ipv4 => &mut self.r2o_default_ifindices_v4,
+            R2oRouteFamily::Ipv6 => &mut self.r2o_default_ifindices_v6,
+        };
+        let changed = match (slot.as_deref(), ifindices.as_deref()) {
+            (None, None) => false,
+            (None, Some(_)) | (Some(_), None) => true,
+            (Some(previous), Some(current)) => previous != current,
+        };
+        *slot = ifindices;
+        changed
+    }
+
+    /// C `d2k_routemark_describe`: `0xmark/0xmask v4, ...` или `нет`.
+    ///
+    /// `cap` — размер буфера C; возвращается не больше `cap - 1` байт.
+    /// Нулевой `cap` даёт пустую строку, как и C-функция.
+    pub fn r2o_describe_rules(&self, cap: usize) -> String {
+        if cap == 0 {
+            return String::new();
         }
+        let mut described = String::new();
+        for rules in [self.r2o_rules_v4.as_deref(), self.r2o_rules_v6.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            for rule in rules {
+                if !described.is_empty() {
+                    described.push_str(", ");
+                }
+                described.push_str(&format!(
+                    "0x{:x}/0x{:x} {}",
+                    rule.mark,
+                    rule.mask,
+                    if rule.family == R2oRouteFamily::Ipv6 {
+                        "v6"
+                    } else {
+                        "v4"
+                    }
+                ));
+            }
+        }
+        if described.is_empty() {
+            described.push_str("нет");
+        }
+        described.truncate(cap - 1);
+        described
     }
 
     /// Возвращает объединённые выходные интерфейсы известных IPv4/IPv6 маршрутов.
@@ -197,6 +255,31 @@ impl R2oRouteGate {
             .any(|rule| ((mark ^ rule.mark) & rule.mask) == 0)
     }
 
+    /// C `d2k_routemark_client`: чужая метка, если она направлена правилом.
+    ///
+    /// Нет метки/ноль/свои probe и datapath — 0. Иначе routed ? mark : 0.
+    /// Гейт политики вызывается отдельно, поэтому функция не смотрит на
+    /// outbound и output ifindex.
+    pub fn r2o_client_mark(
+        &self,
+        family: R2oRouteFamily,
+        mark: Option<u32>,
+        probe_mark: u32,
+        datapath_mark: u32,
+    ) -> u32 {
+        let Some(mark) = mark else {
+            return 0;
+        };
+        if mark == 0 || mark == probe_mark || mark == datapath_mark {
+            return 0;
+        }
+        if self.r2o_mark_is_routed(family, mark) {
+            mark
+        } else {
+            0
+        }
+    }
+
     /// Возвращает метку потока, которую runtime должен передать обработчикам.
     pub fn r2o_route_mark(&self, packet: R2oRoutePacket) -> u32 {
         let mark = packet.mark.unwrap_or(0);
@@ -211,13 +294,14 @@ impl R2oRouteGate {
             }
         }
 
-        if packet.mark.is_some()
-            && mark != 0
-            && mark != packet.probe_mark
-            && mark != packet.datapath_mark
-            && self.r2o_mark_is_routed(packet.family, mark)
-        {
-            return mark;
+        let client = self.r2o_client_mark(
+            packet.family,
+            packet.mark,
+            packet.probe_mark,
+            packet.datapath_mark,
+        );
+        if client != 0 {
+            return client;
         }
 
         if !packet.outbound {
@@ -373,7 +457,9 @@ impl R2oRouteMonitor {
         let mut errors = Vec::new();
         for family in [R2oRouteFamily::Ipv4, R2oRouteFamily::Ipv6] {
             match self.r2o_dump_rules(family) {
-                Ok(rules) => gate.r2o_set_rules(family, rules),
+                Ok(rules) => {
+                    gate.r2o_set_rules(family, rules);
+                }
                 Err(error) => errors.push(format!("правила {family:?}: {error}")),
             }
             match self.r2o_lookup_default(family) {
@@ -402,21 +488,17 @@ impl R2oRouteMonitor {
         self.r2o_receive_request(request, |bytes| {
             let batch = match r2o_route_parse_rules(bytes) {
                 Ok(batch) => batch,
-                Err(R2oRouteParseError::Kernel(code))
-                    if family == R2oRouteFamily::Ipv6 && matches!(code, -97 | -95) =>
-                {
+                // C `dump` (`routemark_nl.c:48-56`) считает и
+                // `-EAFNOSUPPORT`, и `-EOPNOTSUPP` пустым успехом для любого
+                // семейства, а не только для IPv6.
+                Err(R2oRouteParseError::Kernel(code)) if matches!(code, -97 | -95) => {
                     selectors.clear();
                     return Ok(true);
                 }
                 Err(error) => return Err(r2o_parse_io_error(error)),
             };
-            if selectors.len() + batch.selectors.len() > R2O_ROUTE_RULE_CAPACITY {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "число правил fwmark превысило безопасный предел",
-                ));
-            }
-            selectors.extend(batch.selectors);
+            let mut truncated = false;
+            r2o_extend_rule_selectors(&mut selectors, batch.selectors, &mut truncated);
             Ok(batch.done)
         })?;
         Ok(selectors)
@@ -707,6 +789,20 @@ pub fn r2o_route_lookup_request(family: R2oRouteFamily, sequence: u32) -> Vec<u8
     message
 }
 
+/// C `d2k_routemark_merge`: найденное сверх `D2K_ROUTEMARK_MAX=32`
+/// усекается, а не превращается в ошибку (`routemark.c:246-261`).
+fn r2o_extend_rule_selectors(
+    selectors: &mut Vec<R2oFwSelector>,
+    batch: Vec<R2oFwSelector>,
+    truncated: &mut bool,
+) {
+    let room = R2O_ROUTE_RULE_CAPACITY.saturating_sub(selectors.len());
+    if batch.len() > room {
+        *truncated = true;
+    }
+    selectors.extend(batch.into_iter().take(room));
+}
+
 /// Разбирает часть дампа правил; несколько частей можно объединить до `done`.
 pub fn r2o_route_parse_rules(bytes: &[u8]) -> Result<R2oRouteRuleBatch, R2oRouteParseError> {
     let messages = r2o_route_messages(bytes)?;
@@ -861,16 +957,15 @@ fn r2o_route_messages(bytes: &[u8]) -> Result<Vec<R2oNetlinkMessage<'_>>, R2oRou
 }
 
 fn r2o_kernel_error(body: &[u8]) -> Result<i32, R2oRouteParseError> {
-    let code = body
-        .get(..4)
-        .ok_or(R2oRouteParseError::Malformed)
-        .and_then(|bytes| {
-            bytes
-                .try_into()
-                .map(i32::from_ne_bytes)
-                .map_err(|_| R2oRouteParseError::Malformed)
-        })?;
-    Ok(code)
+    // C `nl_error` (`routemark.c:49-51`): тело короче четырёх байт даёт 0,
+    // после чего вызывающий всё равно отвергает ответ как неразобранный.
+    let Some(bytes) = body.get(..4) else {
+        return Ok(0);
+    };
+    bytes
+        .try_into()
+        .map(i32::from_ne_bytes)
+        .map_err(|_| R2oRouteParseError::Malformed)
 }
 
 fn r2o_route_attributes(
@@ -1303,5 +1398,115 @@ mod tests {
         packet[32] = 0x50;
         packet[33] = flags;
         packet
+    }
+
+    fn r2o_selector(mark: u32, mask: u32, family: R2oRouteFamily) -> R2oFwSelector {
+        R2oFwSelector { mark, mask, family }
+    }
+
+    #[test]
+    fn r2o_описание_правил_совпадает_с_c_описанием_и_обрезается_по_cap() {
+        let mut gate = R2oRouteGate::default();
+        assert_eq!(gate.r2o_describe_rules(32), "нет");
+        assert_eq!(gate.r2o_describe_rules(0), "");
+
+        gate.r2o_set_rules(
+            R2oRouteFamily::Ipv4,
+            vec![r2o_selector(0x1, 0xff, R2oRouteFamily::Ipv4)],
+        );
+        gate.r2o_set_rules(
+            R2oRouteFamily::Ipv6,
+            vec![r2o_selector(0x2, 0xff, R2oRouteFamily::Ipv6)],
+        );
+        assert_eq!(gate.r2o_describe_rules(64), "0x1/0xff v4, 0x2/0xff v6");
+        // C `snprintf(buf, cap, ...)` оставляет не больше cap-1 байт.
+        assert_eq!(gate.r2o_describe_rules(8), "0x1/0xf");
+    }
+
+    #[test]
+    fn r2o_признак_изменения_правил_и_устройств_совпадает_с_c() {
+        let mut gate = R2oRouteGate::default();
+        assert!(!gate.r2o_set_rules(R2oRouteFamily::Ipv4, Vec::new()));
+        assert!(gate.r2o_set_rules(
+            R2oRouteFamily::Ipv4,
+            vec![r2o_selector(1, 0xff, R2oRouteFamily::Ipv4)]
+        ));
+        assert!(!gate.r2o_set_rules(
+            R2oRouteFamily::Ipv4,
+            vec![r2o_selector(1, 0xff, R2oRouteFamily::Ipv4)]
+        ));
+        assert!(gate.r2o_set_rules(
+            R2oRouteFamily::Ipv4,
+            vec![r2o_selector(2, 0xff, R2oRouteFamily::Ipv4)]
+        ));
+
+        assert!(!gate.r2o_set_default_ifindices(R2oRouteFamily::Ipv4, None));
+        assert!(gate.r2o_set_default_ifindices(R2oRouteFamily::Ipv4, Some(vec![5])));
+        assert!(!gate.r2o_set_default_ifindices(R2oRouteFamily::Ipv4, Some(vec![5, 5, 0])));
+        assert!(gate.r2o_set_default_ifindices(R2oRouteFamily::Ipv4, Some(vec![6])));
+        assert!(gate.r2o_set_default_ifindices(R2oRouteFamily::Ipv4, None));
+        assert!(!gate.r2o_set_default_ifindices(R2oRouteFamily::Ipv4, None));
+    }
+
+    #[test]
+    fn r2o_клиентская_метка_отделена_от_выходного_гейта_как_в_c() {
+        let mut gate = R2oRouteGate::default();
+        gate.r2o_set_rules(
+            R2oRouteFamily::Ipv4,
+            vec![r2o_selector(0x10, 0xff, R2oRouteFamily::Ipv4)],
+        );
+        assert_eq!(gate.r2o_client_mark(R2oRouteFamily::Ipv4, None, 1, 2), 0);
+        assert_eq!(gate.r2o_client_mark(R2oRouteFamily::Ipv4, Some(0), 1, 2), 0);
+        assert_eq!(gate.r2o_client_mark(R2oRouteFamily::Ipv4, Some(1), 1, 2), 0);
+        assert_eq!(gate.r2o_client_mark(R2oRouteFamily::Ipv4, Some(2), 1, 2), 0);
+        assert_eq!(
+            gate.r2o_client_mark(R2oRouteFamily::Ipv4, Some(0x10), 1, 2),
+            0x10
+        );
+        assert_eq!(
+            gate.r2o_client_mark(R2oRouteFamily::Ipv4, Some(0x11), 1, 2),
+            0
+        );
+
+        // Клиентская метка возвращается до проверки outbound/outdev.
+        assert_eq!(
+            gate.r2o_route_mark(r2o_packet(false, Some(0x10), Some(9))),
+            0x10
+        );
+    }
+
+    #[test]
+    fn r2o_короткий_nlmsg_error_даёт_код_ноль_как_c() {
+        let mut message = vec![0; 18];
+        message[..4].copy_from_slice(&18_u32.to_ne_bytes());
+        message[4..6].copy_from_slice(&R2O_NLMSG_ERROR.to_ne_bytes());
+        assert_eq!(
+            r2o_route_parse_rules(&message),
+            Err(R2oRouteParseError::Kernel(0))
+        );
+    }
+
+    #[test]
+    fn r2o_избыток_правил_усекается_до_32_как_в_c() {
+        let mut selectors = Vec::new();
+        let mut truncated = false;
+        let batch: Vec<_> = (0..33)
+            .map(|index| r2o_selector(index, 0xff, R2oRouteFamily::Ipv4))
+            .collect();
+        r2o_extend_rule_selectors(&mut selectors, batch, &mut truncated);
+        assert_eq!(selectors.len(), R2O_ROUTE_RULE_CAPACITY);
+        assert!(truncated);
+
+        let mut exact = Vec::new();
+        let mut exact_truncated = false;
+        r2o_extend_rule_selectors(
+            &mut exact,
+            (0..32)
+                .map(|index| r2o_selector(index, 0xff, R2oRouteFamily::Ipv4))
+                .collect(),
+            &mut exact_truncated,
+        );
+        assert_eq!(exact.len(), R2O_ROUTE_RULE_CAPACITY);
+        assert!(!exact_truncated);
     }
 }

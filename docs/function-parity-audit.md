@@ -87,9 +87,9 @@ recheck 1982 1982 equal True
 | core-net | 548 | 186 | 349 | 13 | 0 |
 | core-state | 692 | 177 | 511 | 4 | 0 |
 | datapath-core | 400 | 145 | 244 | 11 | 0 |
-| datapath-plan | 183 | 107 | 75 | 1 | 0 |
+| datapath-plan | 183 | 113 | 70 | 0 | 0 |
 | detect | 159 | 47 | 102 | 10 | 0 |
-| **Итого** | **1982** | **662** | **1281** | **39** | **0** |
+| **Итого** | **1982** | **668** | **1276** | **38** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,8 +103,8 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 662 / P 1281 /
-N 39 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
+Покрытие реестра: **1982/1982** функций. Статусы: **E 668 / P 1276 /
+N 38 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
 | # | Область | D2O | R2O | Подтверждение |
@@ -347,9 +347,9 @@ P означает неполное доказательство ветвей, N
 | core-net | 548 | 186 | 349 | 13 | 0 |
 | core-state | 692 | 177 | 511 | 4 | 0 |
 | datapath-core | 400 | 145 | 244 | 11 | 0 |
-| datapath-plan | 183 | 107 | 75 | 1 | 0 |
+| datapath-plan | 183 | 113 | 70 | 0 | 0 |
 | detect | 159 | 47 | 102 | 10 | 0 |
-| **Итого** | **1982** | **662** | **1281** | **39** | **0** |
+| **Итого** | **1982** | **668** | **1276** | **38** | **0** |
 
 
 ---
@@ -5342,9 +5342,9 @@ Static-хелперы наследуют статус владельца (вла
 
 | Статус | Кол-во |
 |---|---:|
-| E | 107 |
-| P | 75 |
-| N | 1 |
+| E | 113 |
+| P | 70 |
+| N | 0 |
 | ? | 0 |
 | **Всего** | **183** |
 
@@ -5353,7 +5353,7 @@ Static-хелперы наследуют статус владельца (вла
 | Файл | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | datapath/plans.c | 75 | 40 | 35 | 0 | 0 |
-| datapath/routemark.c | 23 | 15 | 7 | 1 | 0 |
+| datapath/routemark.c | 23 | 21 | 2 | 0 | 0 |
 | datapath/plan_parse.c | 17 | 14 | 3 | 0 | 0 |
 | datapath/raw.c | 17 | 8 | 9 | 0 | 0 |
 | datapath/plan_apply.c | 15 | 8 | 7 | 0 | 0 |
@@ -5813,27 +5813,27 @@ mark, нет `IP_NODEFRAG`, нет ленивого открытия, нет м�
 | wr32h | 30-30 | 1 | static: записать u32 host order | `to_ne_bytes` (`r2o_route.rs:682`, `:685`, `:696`, `:699`) | E | C `memcpy(p,&v,4)` — netlink-поля в порядке хоста. Rust `to_ne_bytes` для длины сообщения и sequence; тест `r2o_запросы_содержат_семейство_последовательность_и_адрес_поиска` (`:1086`) проверяет длину/seq/адрес. |
 | d2k_routemark_init | 32-34 | 3 | `memset` всего состояния, включая `rules_read*`/`policy_on` | `impl Default for R2oRouteGate` (`r2o_route.rs:108-115`) | E | C `if(r) memset(r,0,sizeof *r)` — `n=0`, `rules_read4/6=0`, `oifs_read4/6=0`, `policy_on=0`, `policy_none=0`, mark/mask=0. Rust `Default` даёт `Option::None` для правил/устройств/политики — те же «неизвестно/выключено». Все тесты создают `R2oRouteGate::default()`. |
 | d2k_routemark_request | 36-46 | 11 | `RTM_GETRULE`, `NLM_F_REQUEST/DUMP`, seq, family в `fib_rule_hdr[0]` | `r2o_route_rule_request` (`:679-688`) | E | C `len=NLMSG_HDRLEN(16)+FIB_HDR(12)=28`; `!o \|\| cap<len→0`; `memset`; `wr32(len)`, `wr16(type=34)`, `wr16(flags=REQUEST\|DUMP=0x301)`, `wr32(seq)`, `body[0]=family`. Rust те же 28 байт, тип 34, flags 0x301, seq, family; тест `:1086` проверяет длину/тип/flags/seq/family. |
-| nl_error | 49-51 | 3 | `body_len>=4` → знаковый errno, иначе 0 | `r2o_kernel_error` (`:863-872`) | **P*** | **Отличие только в коротком теле:** C возвращает 0 и парсер даёт общую ошибку «ответ не разобран»; Rust возвращает `Malformed`. Оба отвергают дамп, но классификация разная; теста на `NLMSG_ERROR` короче 4 байт нет. |
+| nl_error | 49-51 | 3 | `body_len>=4` → знаковый errno, иначе 0 | `r2o_kernel_error` (`:863-872`) | E | C `m->body_len >= 4 ? rd32h(body) : 0`. Rust `r2o_kernel_error` теперь возвращает `Kernel(0)` для тела короче четырёх байт; тест `r2o_короткий_nlmsg_error_даёт_код_ноль_как_c` подтверждает классификацию. |
 | d2k_routemark_parse | 53-95 | 43 | обход `NEWRULE`: family[0], flags[8..12] invert, FWMARK/FWMASK (alen≥8), mask по умолчанию `0xffffffff` при ненулевой метке, `mask==0` пропуск, DONE→1 | `r2o_route_parse_rules` (`:711-766`) | **P** | **Совпадает:** FWMARK/FWMASK, `mark &= mask`, invert-правила **пропускаются** в обеих реализациях, `mask=0` пропуск, DONE, ошибка на хвосте ≥4. **Подтверждённые отличия:** (1) C принимает **любой** `family` и кладёт его в селектор, Rust — только 2/10, остальные пропускает; (2) C при `*n >= cap` всё равно увеличивает `*n` (переполнение видно вызывающему и обрезается в `merge`), Rust `r2o_dump_rules` при >32 правилах **возвращает ошибку** (`:437-443`); (3) `nl_error` на коротком теле. Тест `:1109`. |
 | d2k_routemark_lookup_request | 103-120 | 18 | `RTM_GETROUTE` без dump, `rtmsg.dst_len=al*8`, `RTA_DST` = 192.0.2.1/2001:db8::1 | `r2o_route_lookup_request` (`:691-708`) | E | C `al=family==10?16:4`; `len=16+12+4+al` (36/48); `!o \|\| cap<len \|\| family not 2/10→0`; `memset`; header type 26, flags REQUEST, seq; `rtmsg[0]=family`, `[1]=al*8`; `RTA_DST` len `4+al`, type 1, probe4/probe6. Rust те же длины/поля/адреса; family — enum v4/v6. Тест `:1086` проверяет 36 байт, тип, family, dst_len 32, адрес. |
 | add_oif | 122-128 | 7 | static: пропуск 0, дедуп, запись только при `*n < cap`, иначе только счётчик | `r2o_route_add_ifindex` (`:950-954`) | E | C `!oif→return`; `have=min(*n,cap)`; дедуп по первым `have`; `if(*n<cap) oifs[*n]=oif`; `(*n)++` — при переполнении счётчик растёт, запись нет. Rust `if ifindex!=0 && !contains → push`; предел 16 проверяется в `r2o_lookup_default` (`:437-442`) и даёт ошибку. Для штатных ≤16 результат совпадает. Тест `r2o_разбор_маршрута...` (:1137) — дедуп/ноль. |
 | route_oifs | 132-152 | 21 | обход `RTA_OIF` (alen≥8) и `RTA_MULTIPATH` (rtnexthop len≥8), ошибка на битой длине | `r2o_route_attributes` (`:876-911`), `r2o_route_parse_multipath` (`:913-948`) | E | C `off=RTMSG(12)`; цикл NLA-заголовка 4; `alen`/`atype&mask`; `alen<4 \|\| alen>remaining→-1`; `RTA_OIF && alen>=8` → `add_oif(rd32(+4))`; `RTA_MULTIPATH` → payload `off+4`, длина `alen-4`, цикл rtnexthop: `nl<8 \|\| nl>remaining→-1`, `add_oif(rd32(+4))`, `h+=align4(nl)`; `off+=align4(alen)`. Rust те же проверки/выравнивание/дедуп; тест `:1137` (OIF+multipath+нулевой hop). |
 | d2k_routemark_lookup_parse | 154-173 | 20 | `NEWROUTE`, `rtm_type != RTN_UNICAST` → 2, иначе OIF; хвост ≥4 → -1 | `r2o_route_parse_lookup` (`:774-803`) | E | C `!oifs/!n/!buf→-1`; итератор; `NLMSG_ERROR` → `kerr`, -1; `NEWROUTE` и `body_len>=RTMSG`; `body[7]!=RTN_UNICAST→2`; `route_oifs==0?1:-1`; конец: хвост <4 → 0, иначе -1. Rust `Kernel`/`Malformed`, `NoRoute` для не-Unicast, `Unicast(ifindices)`, `Pending` при отсутствии NEWROUTE; тест `:1137` и ошибки `:1161`. |
 | d2k_routemark_watch_relevant | 175-190 | 16 | NEW/DEL RULE → 1; NEW/DEL ROUTE с `rtm_dst_len==0` (или коротким телом) → 1; битый хвост → 1 | `r2o_route_watch_relevant` (`:806-817`) | E | C `!buf→0`; итератор; `NEWRULE/DELRULE→1`; `NEWROUTE/DELROUTE` и (`body_len<RTMSG \|\| body[1]==0`)→1; конец: хвост <4?0:1. Rust `r2o_route_messages` ошибка→true; `any`: rule→true; route и (`body<12 \|\| body[1]==0`)→true; иначе false. Тест `:1189`. |
-| d2k_routemark_clear_oifs | 192-199 | 8 | family 2/10: `changed = oifs_read`, `oifs_read=0`, `n=0` | `r2o_set_default_ifindices(family, None)` (`:131-157`) | **P** | Состояние эквивалентно (`None` = «неизвестно», как `read=0/n=0`), но C **возвращает признак изменения**, а Rust-сеттер — нет; вызывающий не может отличить сброс от отсутствия изменений. Теста на маршрут без OIF нет. |
-| d2k_routemark_set_oifs | 201-213 | 13 | `ok==0` → без изменений; cap 16; `changed = !read или n!=old или memcmp`; `read=1` | `r2o_set_default_ifindices` (`:131-157`) | **P** | Rust дополнительно дедуплицирует и выбрасывает 0 (после `add_oif` это no-op), состояние `Some(vec)` соответствует `read=1`; **признак `changed` не возвращается**. `r2o_устройства_по_умолчанию...` (`:1053`). |
-| d2k_routemark_set | 215-227 | 13 | `rules_read4=read6=1`, cap 32, `changed` по длине и тройкам mark/mask/family, копия | `r2o_set_rules` (`:118-130`) | **P** | Хранение `Option<Vec>` эквивалентно `read+n`, `mark &= mask`; **нет возврата `changed`** и отдельных `rules_read4/6`; Rust фильтрует селекторы чужого семейства. Влияние на удержание/refresh не проверено. |
+| d2k_routemark_clear_oifs | 192-199 | 8 | family 2/10: `changed = oifs_read`, `oifs_read=0`, `n=0` | `r2o_set_default_ifindices(family, None)` (`:131-176`) | E | C возвращает `changed = oifs_read` и сбрасывает чтение. Rust `None` = «неизвестно»; сеттер возвращает `true` только если прежнее чтение было (`Some`), затем очищает. Тест `r2o_признак_изменения_правил_и_устройств_совпадает_с_c` проверяет `Some→None=true`, `None→None=false`. |
+| d2k_routemark_set_oifs | 201-213 | 13 | `ok==0` → без изменений; cap 16; `changed = !read или n!=old или memcmp`; `read=1` | `r2o_set_default_ifindices` (`:131-176`) | E | Rust дедуплицирует и выбрасывает 0 (после `add_oif` это no-op), `Some(vec)` = `read=1`; `changed` возвращается: `None→Some=true`, совпадающий дедуплицированный список — `false`, отличие — `true`. Тест `r2o_признак_изменения_правил_и_устройств_совпадает_с_c`. |
+| d2k_routemark_set | 215-227 | 13 | `rules_read4=read6=1`, cap 32, `changed` по длине и тройкам mark/mask/family, копия | `r2o_set_rules` (`:118-147`) | E | Хранение `Option<Vec>` эквивалентно `read+n`, `mark &= mask`; `changed` сравнивает прежний и новый списки, а при `None` — только непустоту (как C сравнивает `n`). Тест `r2o_признак_изменения_правил_и_устройств_совпадает_с_c`: пусто→пусто `false`, пусто→правило `true`, повтор `false`, отличие `true`. |
 | d2k_routemark_merge | 229-267 | 39 | успешное семейство заменяет, упавшее — прежние селекторы; `found`, `truncated`, `rules_read` обновляется через `ok` | `r2o_refresh` (`:372-397`) | **P** | Сохранение прежнего набора при ошибке есть (сеттер вызывается только при `Ok`). **Не перенесены:** `st->found`, `st->truncated`, `routes4_ok/routes6_ok`, `changed`; Rust не сообщает, сколько правил найдено и было ли усечение. |
 | d2k_routemark_set_policy | 269-275 | 7 | `policy_on=1`, `policy_none`, `policy_mark = mark & mask`, mask | `r2o_set_policy(Some(R2oRoutePolicy))` (`:170-172`), `R2oRoutePolicy::new` (`:88-95`) | **E** | `Some(new(false,0,0))` = `policy_on=1, none=1`; `Some(new(true,..))` = активная политика; `None` = исходное `policy_on=0`. Тест `r2o_политика_отделяет_чужие_потоки...` (`:1008`). |
 | policy_match | 277-280 | 4 | `policy_on && !none && have_mark && (mark^policy_mark)&mask==0` | `R2oRoutePolicy::r2o_matches` (`:93-95`) | E | C возвращает `int`. Rust `found && ((mark ^ self.mark) & self.mask)==0`; `policy_on` выражен `Option::Some`, `policy_none` — `found=false`, `have_mark` — `Option<u32>`. Тест `r2o_политика_отделяет_чужие_потоки...` (`:1008`). |
 | d2k_routemark_routed | 282-296 | 15 | 0 → 0; OTHER/OUTSIDE → 1; своя политика → 0; неизвестное семейство → 1 (fail closed); совпадение правила → 1 | `r2o_mark_is_routed` (`:175-198`) | E | C `!r \|\| !mark→0`; `mark==OTHER/OUTSIDE→1`; `policy_match(r,1,mark)→0`; family 10/2; `!rules_read→1`; цикл `sel.family==family && xor&mask==0→1`; иначе 0. Rust те же ветви; `rules=None→true`, `any` по правилам. Тест `:979`. |
-| d2k_routemark_client | 298-302 | 5 | нет метки/0/probe/own → 0, иначе routed ? mark : 0 | первые ветви `r2o_route_mark` (`:202-220`) | **P** | Логика «клиентской» метки совпадает, но отдельной функции нет: Rust в той же функции дальше применяет outdev-гейт и может вернуть `OTHER_DEV` вместо 0. Тест покрывает политику/свои метки (`:1008`), не границу client/gate. |
+| d2k_routemark_client | 298-302 | 5 | нет метки/0/probe/own → 0, иначе routed ? mark : 0 | `R2oRouteGate::r2o_client_mark` (`:202-228`) | E | Отдельная функция возвращает 0 для `None/0/probe/own`, иначе `routed ? mark : 0`; `r2o_route_mark` вызывает её до outdev-гейта, как C `gate` возвращает `m` при `m != 0`. Тест `r2o_клиентская_метка_отделена_от_выходного_гейта_как_в_c` проверяет все ветви и возврат метки при `outbound=false`. |
 | d2k_routemark_gate | 304-325 | 22 | policy_on+outbound: не own и не policy_match → OUTSIDE; client; не outbound/нет outdev → m; неизвестные oifs → 0; outdev не в списке → OTHER_DEV | `r2o_route_mark` (`:201-241`) | E | C `policy_on && outbound`: `own=have_mark && mark && (probe\|own)`; `!own && !policy_match→OUTSIDE`; `m=client`; `m \|\| !r \|\| !outbound \|\| !have_outdev→m`; family; `!oifs_read→0`; цикл oifs, совпал→0; иначе `OTHER_DEV`. Rust `policy.is_some() && outbound`: own/selected; `!own&&!selected→OUTSIDE`; затем клиентская метка; `!outbound→0`; `output_ifindex`/`default_ifindices` None→0; contains→0 иначе OTHER_DEV. Тесты `:1008`, `:1053`. |
-| d2k_routemark_describe | 327-343 | 17 | текст `0xmark/0xmask v4, ...` или `нет`, обрезка по cap | — | N | C `!buf \|\| !cap→0`; `buf[0]=0`; `!r \|\| !n` → `snprintf("нет")`; цикл `%s0x%x/0x%x %s` с `", "` и `v6/v4`; возврат `min(w,cap-1)`. В R2O функции/строки описания набора правил нет — только отладочные сообщения `main.rs`; формат и обрезка не перенесены. |
+| d2k_routemark_describe | 327-343 | 17 | текст `0xmark/0xmask v4, ...` или `нет`, обрезка по cap | `R2oRouteGate::r2o_describe_rules` (`:178-220`) | E | C `!cap→0`; пустой набор → `нет`; цикл `%s0x%x/0x%x %s` с `", "` и `v6/v4`; возврат не больше `cap-1`. Rust `r2o_describe_rules(cap)` выдаёт тот же текст, `cap=0` — пустую строку, `cap-1` — обрезку. Тест `r2o_описание_правил_совпадает_с_c_описанием_и_обрезается_по_cap`. |
 
-Итог по файлу: E 15, P 7, N 1. Пробелы: статус merge (`found/truncated/routes_ok`),
-признак изменения набора правил и списка устройств, переполнение >32 правил (C усекает,
-Rust ошибается), отсутствие текстового описания.
+Итог по файлу: E 21, P 2, N 0. Закрыты `describe`, `changed` для правил и OIF,
+клиентская метка, короткий `NLMSG_ERROR`. Остаются: статус merge
+(`found/truncated/routes_ok`) и приём любого `family` в `d2k_routemark_parse`.
 
 ---
 
