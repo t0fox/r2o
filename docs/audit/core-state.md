@@ -106,7 +106,7 @@
 | `handle_binding_key` | 834–885 | 52 | поля binding: kind/target/plan_id/level/confirmed/successes/enabled/transport/family/shape/tcp_profile/verified_by/input/probe_path/ech_origin/recheck_since/budget | catalog::Binding serde + validate | **P** | C `family` принимает только 4/6 (`catalog.c:852-859`), `tcp_profile` — только 0/1/2 (`:862-869`), затем пишет все поля. Rust `Binding` (`catalog.rs:166-198`) **не имеет `tcp_profile`**: serde молча игнорирует ключ, при save поле теряется. `family` в `Binding` есть, но без C-валидации 4/6 в `validate`. Для старых каталогов shape 1/2 + tcp_profile 1/2 теряется измеренный TS-профиль; R2O выводит его из shape только для 8–13. |
 | `parse_binding` | 886–890 | 5 | `memset`, `out->family=4`, затем `parse_object` | `catalog.rs:166-198` `Binding` | **P** | C явно ставит `family=4` до разбора (`catalog.c:887-888`) и валидирует 4/6 при наличии. Rust `#[derive(Default)]` + `#[serde(default)]` даёт family=0; `serialize_family` пишет 0 как 4 **только при сохранении**, `validate` не нормализует. Старый каталог без `family` в памяти получает 0; поведение потребителей family=0 отличается от C. |
 | `elem_binding` | 891–893 | 3 | элемент массива bindings | Vec<Binding> | **P*** | static-хелпер |
-| `d2k_cat_shape_fits` | 905–912 | 8 | совместимость форм: 0 подходит любой, иначе равенство | catalog shape-fits helper | **P*** | static-хелпер; используется group/own-first тестами |
+| `d2k_cat_shape_fits` | 905–912 | 8 | совместимость форм: 0 подходит любой, иначе **только равенство** | `group_shape_fits` (`live.rs:284`, `main.rs:3023`) | **P** | **Подтверждённое расхождение:** C `stored==0 || got==0 ? 1 : stored==got`; Rust дополнительно принимает `saved==SHAPE_MODERN && observed==SHAPE_ECH_TCP` (`1` vs `6`). C-вызовы `sched.c:3522/5088/7858` такую пару отвергают, Rust — нет. Используется для сопоставления binding/наблюдения. |
 | `handle_box_key` | 918–939 | 22 | поля box: id/created/updated/fingerprint/plans/bindings | catalog::BoxRecord serde | **P** | unit round_trips |
 | `parse_box` | 940–943 | 4 | разобрать box | catalog::BoxRecord | **P*** | static-хелпер |
 | `elem_box` | 944–946 | 3 | элемент массива boxes | Vec<BoxRecord> | **P*** | static-хелпер |
@@ -115,10 +115,10 @@
 | `handle_net_whitelist_key` | 991–999 | 9 | поля network_whitelist: name/searched/tx_only/confirmed_utc | catalog::NetworkWhitelist | **P** | unit catalog |
 | `handle_catalog_key` | 1001–1027 | 27 | корневые ключи: `boxes`, `domain_observations`, `domain_groups_frozen`, `domain_groups_disabled`, `domain_groups_disabled_at`, `network_whitelist`; `schema`/`updated`/`domain_groups` пропускаются | `CatalogInput` (`catalog.rs:1226-1239`) → `Catalog.domain_state` (`:364-381`), `CatalogOutput` (`:1240+`) | **E** | C разбирает те же top-level поля; `domain_observations` ≤256, frozen/disabled/disabled_at, network_whitelist. Rust `CatalogInput` читает их, `schema != 1` отвергает, неизвестные ключи игнорирует, конвертирует в `DomainState`; `CatalogOutput` пишет обратно. Есть `skips_unknown_fields`, persist differential и `validate` лимитов. |
 | `parse_catalog_obj` | 1028–1034 | 7 | `memset`, `parse_object` с глубиной 1 | `Catalog::parse` (`catalog.rs:344-389`) | **P** | C стартует глубину с 1; Rust `check_json_depth` (64) + serde_json. Разбор верхнего объекта эквивалентен; отдельного кода функции нет. |
-| `prune_unavailable_domain_groups` | 1036–1053 | 18 | удалить группы, чей план отключён/отсутствует | catalog::validate/derive groups | **P** | unit derived_domain_groups_are_ignored |
+| `prune_unavailable_domain_groups` | 1036–1053 | 18 | после restore удалить группу, если нет **enabled** плана с тем же `plan_id` и proto (`transport 17` → `quic`, иначе `tls`) | `DomainState::restore` (`groups.rs:15`) → `rebuild` | **P** | **Подтверждённое расхождение:** C после `d2k_group_restore` проходит по группам и удаляет те, чей план отключён/отсутствует в каталоге (`catalog.c:1036-1053`). Rust `restore`/`rebuild` работают только с `DomainState` и не видят `boxes`, поэтому группа, выведенная из наблюдения, остаётся даже при отключённом/удалённом плане. Unit `derived_domain_groups_are_ignored` покрывает недоверие сохранённым `domain_groups`, но не prune по плану. |
 | `free_box` | 1062–1070 | 9 | освободить планы/привязки коробки | Drop | **P*** | static-хелпер |
 | `d2k_catalog_free` | 1072–1082 | 11 | освободить каталог | Drop | **P*** | static-хелпер |
-| `d2k_catalog_memory_bytes` | 1084–1097 | 14 | оценка памяти каталога | diagnostics catalog_bytes (main.rs:16768); отдельной функции нет | **P** | реализовано косвенно; C/Rust differential на объём нет |
+| `d2k_catalog_memory_bytes` | 1084–1097 | 14 | память каталога: `n_boxes*sizeof`, планы/привязки, `strlen(text)+1`, `sizeof(groups)` | `catalog_bytes` = длина `to_json_at()` (`main.rs:16768`) | **P** | **Расхождение метрики:** C считает **in-memory** размер структур и текстов; Rust — длину **сериализованного JSON**. Числа систематически разные (JSON включает ключи/форматирование, но не capacity Vec). Для диагностического поля `catalog_bytes` смысл меняется; C/Rust differential на объём нет. |
 | `read_whole_file` | 1103–1143 | 41 | прочитать файл целиком | std::fs::read | **P*** | static-хелпер |
 | `d2k_catalog_load` | 1145–1191 | 47 | загрузка каталога: JSON, domain observations, prune, запрет мусора после объекта | catalog::Catalog::load | **E** | r2o-catalog-persist-differential.sh + tests/catalog.rs (старые каталоги, null, trailing garbage) |
 | `write_json_string` | 1198–1218 | 21 | JSON-строка с escape | serde_json | **P*** | static-хелпер |
@@ -1102,13 +1102,19 @@
   даёт 0, `serialize_family` пишет 0 как 4 только при сохранении, `validate`
   family не нормализует. Старый каталог без `family` загрузится с 0.
 - **`handle_box_key`/`parse_box`/`elem_box`/`d2k_cat_shape_fits`:**
-  boxes/fingerprint/plans/bindings и правило shape 0→любая, иначе равенство
-  перенесены (`discovery.rs`/`live.rs` `group_shape_fits`).
+  boxes/fingerprint/plans/bindings перенесены (`BoxRecord` serde);
+  **`d2k_cat_shape_fits` — подтверждённое расхождение:** C принимает
+  только `stored==0 || got==0 || stored==got`, Rust `group_shape_fits`
+  дополнительно принимает `saved==MODERN && observed==ECH_TCP`
+  (`live.rs:284`, `main.rs:3023`).
 - **`handle_domain_observation`/`parse_domain_observations`/
-  `handle_net_whitelist_key`/`handle_catalog_key`/`parse_catalog_obj`/
-  `prune_unavailable_domain_groups`:** domain_state/observations до 256,
-  network_whitelist и отбрасывание групп без включённого плана перенесены
-  в `catalog.rs`/`groups.rs`; unit `derived_domain_groups_are_ignored`.
+  `handle_net_whitelist_key`/`handle_catalog_key`/`parse_catalog_obj`:**
+  domain_state/observations до 256, network_whitelist и top-level
+  frozen/disabled/disabled_at перенесены (`catalog.rs`/`groups.rs`);
+  unit `derived_domain_groups_are_ignored`.
+  **`prune_unavailable_domain_groups` — подтверждённое расхождение:**
+  C после restore удаляет группы без enabled-плана в каталоге; Rust
+  `restore`/`rebuild` не видят `boxes` и такого prune не делают.
 - **`read_whole_file`/`d2k_catalog_load`:** загрузка, schema=1, запрет
   мусора после объекта — E (`r2o-catalog-persist-differential.sh`,
   `tests/catalog.rs`).
@@ -1120,8 +1126,11 @@
   сравнивался, persist differential проверяет save_atomic — P.
 - **`d2k_catalog_save_atomic`:** `.new` + rename + fsync каталога — E
   (persist differential, включая конкурентное обновление).
-- **`d2k_catalog_memory_bytes`/`free_box`/`d2k_catalog_free`:** оценка
-  памяти косвенная (`diagnostics catalog_bytes`), освобождение — RAII; P*.
+- **`d2k_catalog_memory_bytes`/`free_box`/`d2k_catalog_free`:**
+  освобождение — RAII; **`catalog_bytes` — расхождение метрики:** C
+  считает in-memory размер структур + `strlen(text)+1`, Rust — длину
+  `to_json_at()` (сериализованный JSON, `main.rs:16768`). Числа
+  систематически разные; C/Rust differential на объём нет. P.
 
 ## Углублённая сверка: compose.c (53 функции)
 
