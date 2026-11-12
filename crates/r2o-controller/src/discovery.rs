@@ -64,6 +64,7 @@ pub fn own_first_bound_plan_id(
                 || normalized_transport(binding.transport) != 6
                 || normalized_family(binding.family) != target.family
                 || binding.shape != shape
+                || binding.tcp_profile != target.tcp_profile()
                 || newer_name_binding(catalog, binding)
                 || !box_record
                     .plans
@@ -116,6 +117,8 @@ fn newer_name_binding(catalog: &Catalog, binding: &Binding) -> bool {
                 && normalized_transport(other.transport) == normalized_transport(binding.transport)
                 && normalized_family(other.family) == normalized_family(binding.family)
                 && other.shape == binding.shape
+                && (normalized_transport(other.transport) != 6
+                    || other.tcp_profile == binding.tcp_profile)
                 && box_record.plans.iter().any(|plan| plan.id == other.plan_id)
         })
     })
@@ -214,6 +217,7 @@ pub fn own_first_plans(
                     || binding.kind != "name"
                     || transport != 6
                     || family != target.family
+                    || binding.tcp_profile != target.tcp_profile()
                     || !shape_matches
                 {
                     continue;
@@ -351,6 +355,12 @@ fn own_rank_before(left: &RankedOwnPlan, right: &RankedOwnPlan) -> bool {
 }
 
 impl DiscoveryTarget {
+    /// TCP-профиль цели: контекстные формы 8–13 несут NO_TS/TS, базовые
+    /// 1/2/6 — «не измерено» (0), как C `task_wire_shape`/`trigger_tcp_profile`.
+    pub const fn tcp_profile(&self) -> u8 {
+        r2k_core::control::r2k_link_shape_tcp_profile(self.shape)
+    }
+
     /// Выбирать только именованные потоки TLS на стандартном порту HTTPS.
     pub fn from_event(event: &HelloEvent) -> Option<Self> {
         if event.key[37] != 6 {
@@ -804,6 +814,7 @@ pub fn has_covering_binding(catalog: &Catalog, target: &DiscoveryTarget) -> bool
                 && binding.target == target.host
                 && family == target.family
                 && transport == 6
+                && binding.tcp_profile == target.tcp_profile()
                 && (binding.shape == 0
                     || binding.shape == target.shape
                     || binding.shape == SHAPE_MODERN && target.shape == SHAPE_ECH_TCP)
@@ -1393,6 +1404,7 @@ fn exact_key(binding: &Binding, target: &DiscoveryTarget) -> bool {
         && (binding.family == target.family || binding.family == 0 && target.family == 4)
         && (binding.transport == 6 || binding.transport == 0)
         && (binding.shape == target.shape || binding.shape == 0)
+        && binding.tcp_profile == target.tcp_profile()
 }
 
 fn usable_runtime_plan(plan: &RuntimePlan, shape: u8) -> bool {
@@ -1473,9 +1485,9 @@ fn stable_plan_id(family: u8, shape: u8, text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        DiscoveryTarget, OwnFirstResultAction, known_plans, own_first_bound_plan_id,
-        own_first_plans, own_first_result_action, r2o_ech_witness_candidates,
-        r2o_ech_witness_challenge_order,
+        DiscoveryTarget, OwnFirstResultAction, exact_key, has_covering_binding, known_plans,
+        newer_name_binding, own_first_bound_plan_id, own_first_plans, own_first_result_action,
+        r2o_ech_witness_candidates, r2o_ech_witness_challenge_order,
     };
     use r2k_core::control::{
         BindingContext, HttpResponseEvent, KEY_LEN, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_MODERN,
@@ -2737,5 +2749,153 @@ mod tests {
         assert_eq!(result.removed, 1);
         assert_eq!(result.marked, 0);
         assert!(catalog.boxes[0].bindings.is_empty());
+    }
+
+    #[test]
+    fn exact_key_and_covering_binding_respect_tcp_profile() {
+        use crate::catalog::{Binding, BoxRecord, Catalog};
+
+        let target = DiscoveryTarget {
+            host: "profile.example".into(),
+            endpoint: String::new(),
+            family: 4,
+            shape: 8,
+        };
+        let binding = Binding {
+            kind: "name".into(),
+            target: target.host.clone(),
+            family: 4,
+            transport: 6,
+            shape: 8,
+            tcp_profile: 1,
+            ..Binding::default()
+        };
+        assert_eq!(target.tcp_profile(), 1);
+        assert!(exact_key(&binding, &target));
+        let mut mismatched = binding.clone();
+        mismatched.tcp_profile = 2;
+        assert!(!exact_key(&mismatched, &target));
+
+        let catalog = Catalog {
+            boxes: vec![BoxRecord {
+                id: "box".into(),
+                bindings: vec![Binding {
+                    enabled: true,
+                    level: 3,
+                    ..binding
+                }],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        assert!(has_covering_binding(&catalog, &target));
+        let mut mismatched_catalog = catalog.clone();
+        mismatched_catalog.boxes[0].bindings[0].tcp_profile = 2;
+        assert!(!has_covering_binding(&mismatched_catalog, &target));
+    }
+
+    #[test]
+    fn newer_name_binding_requires_the_same_tcp_profile() {
+        use crate::catalog::{Binding, BoxRecord, Catalog, Plan};
+
+        let binding = Binding {
+            kind: "name".into(),
+            target: "profile.example".into(),
+            plan_id: "old".into(),
+            level: 3,
+            enabled: true,
+            transport: 6,
+            family: 4,
+            shape: 8,
+            tcp_profile: 1,
+            confirmed: 10,
+            ..Binding::default()
+        };
+        let newer = Binding {
+            plan_id: "new".into(),
+            tcp_profile: 2,
+            confirmed: 20,
+            ..binding.clone()
+        };
+        let catalog = Catalog {
+            boxes: vec![BoxRecord {
+                id: "box".into(),
+                plans: vec![Plan {
+                    id: "new".into(),
+                    proto: "tls".into(),
+                    text: "plan".into(),
+                    enabled: true,
+                    ..Plan::default()
+                }],
+                bindings: vec![binding.clone(), newer],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        assert!(!newer_name_binding(&catalog, &catalog.boxes[0].bindings[0]));
+        let mut same_profile = catalog.clone();
+        same_profile.boxes[0].bindings[1].tcp_profile = 1;
+        assert!(newer_name_binding(
+            &same_profile,
+            &same_profile.boxes[0].bindings[0]
+        ));
+    }
+
+    #[test]
+    fn own_first_binding_and_plans_require_the_target_tcp_profile() {
+        use crate::catalog::{Binding, BoxRecord, Catalog, Plan};
+
+        let target = DiscoveryTarget {
+            host: "profile.example".into(),
+            endpoint: String::new(),
+            family: 4,
+            shape: 8,
+        };
+        let mut catalog = Catalog {
+            boxes: vec![BoxRecord {
+                id: "box".into(),
+                plans: vec![Plan {
+                    id: "plan".into(),
+                    proto: "tls".into(),
+                    text: "r2o-plan 1 1".into(),
+                    enabled: true,
+                    ..Plan::default()
+                }],
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: target.host.clone(),
+                    plan_id: "plan".into(),
+                    level: 3,
+                    enabled: true,
+                    transport: 6,
+                    family: 4,
+                    shape: 8,
+                    tcp_profile: 1,
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        assert_eq!(
+            own_first_bound_plan_id(&catalog, &target, 8).as_deref(),
+            Some("plan")
+        );
+        catalog.boxes[0].bindings[0].tcp_profile = 2;
+        assert!(own_first_bound_plan_id(&catalog, &target, 8).is_none());
+
+        // Базовой форме 1 соответствует «профиль не измерен» (0).
+        let base_target = DiscoveryTarget {
+            shape: SHAPE_MODERN,
+            ..target
+        };
+        catalog.boxes[0].bindings[0].shape = SHAPE_MODERN;
+        catalog.boxes[0].bindings[0].tcp_profile = 1;
+        assert!(own_first_plans(&catalog, &base_target, false, None, &[], &[]).is_empty());
+        catalog.boxes[0].bindings[0].tcp_profile = 0;
+        assert_eq!(
+            own_first_plans(&catalog, &base_target, false, None, &[], &[]).len(),
+            1
+        );
     }
 }
