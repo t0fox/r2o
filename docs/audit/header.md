@@ -291,6 +291,9 @@ P означает неполное доказательство ветвей, N
   **PASS** (budget 0/1/25/2^31-1/2^31/2^32-1; `need` 50/2/50/4294967294/0/4294967294).
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/test-quic-short-control-differential.sh` —
   **PASS** (`VERDICT|match`; partial→NOT_RUN, complete→PASS, stalled/refused→CUT).
+- `R2O_DONOR_CORE=/mnt/e/d2o-a378w/core sh scripts/r2o-discovery-quic-stop-differential.sh` —
+  **PASS** (host lifecycle-тест планировщика C: «все проверки прошли»; Rust-тест
+  «остановка QUIC worker обслуживает удаление временной пробы»).
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-diagnostics-differential.sh` —
   **не выполнен**: сборка донорского `test_httpsearch` падает на duplicate
   symbols `d2k_plan_apply`, `d2k_plan_max_emit`, `d2k_actions_cancel`,
