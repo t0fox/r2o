@@ -855,7 +855,7 @@ Discord IP Discovery обход: разбор/сборка 20-байтового
 
 Генерация текста плана `d2k-plan` для UDP-проб: QUIC arm (blob/copies/ttl/frag/split/udplen), delay, voice-приманка, вопрос. В R2O план представлен структурой `r2k_core::plan::Plan`, а не текстом; QUIC-кандидаты несут `directives` (`r2o-controller/src/quic_replay.rs:207 R2oQuicDiscoveryCandidate.directives`), voice-текст — `voice_discovery.rs:8 r2o_voice_arm_plan_text`, `voice_measure.rs:269 r2o_measured_voice_arm_plan_text`.
 
-**Построчная сверка a378:** все 12 функций прочитаны. Подтверждённые отличия: C печатает `d2k-plan`, Rust — `r2o-plan`/структурный Plan; `d2k_quic_delay_plan` (`d2k-plan 1 6 … delay 15000`) **не имеет продюсера** в R2O (есть только разбор/применение и тестовая фикстура); `d2k_quic_arm_plan`/`compose_plan`/`question_plan` разложены на `discovery_candidates` + `plan::apply`, побайтового differential текста нет. Voice-план (`payload/fake/order/pace 15000`) совпадает и покрыт `test-controller-udpplan-differential.sh`.
+**Прочитано построчно: 12/12 функций, 266 строк C (1–266).** Подтверждённые отличия: C печатает `d2k-plan`, Rust — `r2o-plan`/структурный Plan; `d2k_quic_delay_plan` (`d2k-plan 1 6 … delay 15000`) **не имеет продюсера** в R2O (есть только разбор/применение и тестовая фикстура); `d2k_quic_arm_plan`/`compose_plan`/`question_plan` разложены на `discovery_candidates` + `plan::apply`, побайтового differential текста нет. Voice-план (`payload/fake/order/pace 15000`) совпадает и покрыт `test-controller-udpplan-differential.sh`.
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -876,7 +876,7 @@ Discord IP Discovery обход: разбор/сборка 20-байтового
 
 Сборка UDP-пакета/пачки из текста плана и отправка плана с контроллера: обычным sendto для нефрагментированных, raw IP_HDRINCL/IP_NODEFRAG — для IP-фрагментов. В R2O план применяется в датапате (`r2k-core/src/plan/apply.rs`), а контроллер шлёт QUIC-датаграммы напрямую (`quic_replay.rs`) без UDP-plan runtime.
 
-**Построчная сверка a378:** все 8 функций прочитаны. **Подтверждённые отличия:** C `udp_raw_prepare` на Linux **требует `IP_NODEFRAG`** и без него отказывает; в `r2o-datapath/src/raw.rs` есть только `IP_HDRINCL`/`IPV6_HDRINCL`/`SO_MARK`, `IP_NODEFRAG` отсутствует. C `d2k_udp_plan_send` читает TTL/hoplimit, собирает пачку, шлёт фрагменты raw, восстанавливает TTL и возвращает -2 на ECONNREFUSED; контроллерного API в R2O нет — проводное поведение разнесено по `plan::apply`/`wire::build_udp_fragments`/`raw.rs`, без get/set/restore TTL и без батча.
+**Прочитано построчно: 8/8 функций, 190 строк C (1–190).** **Подтверждённые отличия:** C `udp_raw_prepare` на Linux **требует `IP_NODEFRAG`** и без него отказывает; в `r2o-datapath/src/raw.rs` есть только `IP_HDRINCL`/`IPV6_HDRINCL`/`SO_MARK`, `IP_NODEFRAG` отсутствует. C `d2k_udp_plan_send` читает TTL/hoplimit, собирает пачку, шлёт фрагменты raw, восстанавливает TTL и возвращает -2 на ECONNREFUSED; контроллерного API в R2O нет — проводное поведение разнесено по `plan::apply`/`wire::build_udp_fragments`/`raw.rs`, без get/set/restore TTL и без батча.
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
