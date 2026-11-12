@@ -217,11 +217,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 221 | 313 | 13 | 1 |
-| core-state | 692 | 130 | 559 | 3 | 0 |
+| core-state | 692 | 134 | 555 | 3 | 0 |
 | datapath-core | 400 | 122 | 267 | 11 | 0 |
 | datapath-plan | 183 | 105 | 72 | 5 | 1 |
 | detect | 159 | 49 | 100 | 10 | 0 |
-| **Итого** | **1982** | **627** | **1311** | **42** | **2** |
+| **Итого** | **1982** | **631** | **1307** | **42** | **2** |
 
 
 ---
@@ -2030,20 +2030,20 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `d2k_group_key_make` | 9–17 | 9 | собрать ключ области (transport/family/shape/path/ech_origin) с проверкой длин | catalog::GroupKey (From/validate_key) | **P** | ключ и ограничения перенесены; C/Rust differential групп нет |
-| `d2k_group_key_same` | 19–23 | 5 | сравнить ключи области | GroupKey PartialEq | **P** | unit tests/groups.rs |
-| `valid` | 24–36 | 13 | валидация наблюдения: NUL, семейство, транспорт/форма, evidence | groups::learn/restore + validate_key | **P** | unit tests/groups.rs (rejects invalid/ambiguous) |
-| `member` | 38–41 | 4 | вхождение имени в суффикс по границе метки | groups::member | **P*** | static-хелпер; unit tests/groups.rs |
-| `votes` | 45–60 | 16 | подсчёт живых/устаревших голосов за суффикс (>=2, >stale, >=3) | groups::votes | **P** | unit tests/groups.rs; семантика совпадает, C-oracle нет |
-| `failures` | 61–71 | 11 | число PLAN_FAILED для суффикса/ключа/плана | groups::failures | **P*** | static-хелпер; unit tests/groups.rs |
-| `add_group` | 72–102 | 31 | добавить/заменить группу с выбором по failures, count, at, plan_id | groups::add_group | **P** | unit tests/groups.rs |
-| `rebuild` | 103–120 | 18 | перестроить группы из BLOCKED-наблюдений и голосов | groups::rebuild | **P** | unit tests/groups.rs |
-| `cover` | 122–132 | 11 | самый длинный покрывающий суффикс для ключа | groups::covering_group | **P*** | static-хелпер |
-| `d2k_group_learn` | 133–245 | 113 | приём наблюдения: дедуп, замена, admitted exception, переполнение/frozen/disabled, rebuild | groups::learn | **P** | unit tests/groups.rs покрывают дедуп, исключения, capacity reenable; побитовое совпадение с C не сравнивалось |
-| `d2k_group_restore` | 246–273 | 28 | валидация и канонизация сохранённых наблюдений, rebuild | groups::restore + canonical_evidence | **P** | unit tests/groups.rs; R2O ввёл OPERATOR_REJECT, которого нет в C |
-| `d2k_group_match` | 274–293 | 20 | выбор группы для имени с учётом исключений и PLAN_FAILED | groups::match_domain | **P** | unit tests/groups.rs; C/Rust differential нет |
-| `d2k_group_forget` | 294–310 | 17 | удалить PLAN_FAILED-наблюдения имени/транспорта/семейства и rebuild | groups::forget_failures | **P** | unit tests/groups.rs |
-| `d2k_group_expire` | 311–324 | 14 | удалить PLAN_FAILED старше max_age и rebuild | groups::expire_failures | **P** | unit tests/groups.rs |
+| `d2k_group_key_make` | 9–17 | 9 | ключ области: transport/family/shape/path/ech_origin; path/origin короче полей, иначе -1 | `catalog::GroupKey` + `validate_key` (`groups.rs:424`) | **P** | C копирует в фиксированные буферы с проверкой `strlen >= sizeof`; Rust `String` + `validate_key`: transport 6/shape 1/2/6/8–13 или 17/3, family 4/6, path/origin ≤255 без NUL. Эквивалентно; C/Rust differential групп нет. |
+| `d2k_group_key_same` | 19–23 | 5 | равенство transport/family/shape/path/ech_origin | `GroupKey: PartialEq` | **E** | C пять сравнений; Rust derived `PartialEq` по всем полям. `tests/groups.rs`. |
+| `valid` | 24–36 | 13 | NUL-терминация, family 4/6, transport 6/shape 1/2/6/8–13 или 17/3, evidence ровно 1/2/4/8, BLOCKED/PLAN_FAILED требуют plan_id | `validate_key` + `canonical_evidence` (`:389`) | **P** | Транспорт/форма/семейство и требование plan_id совпадают. **R2O-расширение:** `OPERATOR_REJECT=32` и маски `BLOCKED|...`; C принимает только точные `1/2/4/8`. C-проверка NUL через `memchr`; Rust `contains(&0)`. |
+| `member` | 38–41 | 4 | суффикс по границе метки: `name==suffix` или `name[-len-1]=='.'` | `groups::member` (`:443`) | **E** | Формула совпадает посимвольно; `tests/groups.rs`. |
+| `votes` | 45–60 | 16 | живые/устаревшие голоса: DIRECT_CLEAR без исключения → 0; BLOCKED&same plan&name!=suffix; итог `live>=2 && live>stale && live+stale>=3` | `groups::votes` (`:484`) + `latest_vote` (`:514`) | **P** | Формула и условия совпадают; C обновляет `*latest` внутри `votes`, Rust считает `latest_vote` отдельным проходом. C-oracle нет, unit `tests/groups.rs`. |
+| `failures` | 61–71 | 11 | число PLAN_FAILED для суффикса/ключа/плана | `groups::failures` (`:531`) | **P*** | Три условия (`PLAN_FAILED`, key, plan_id, member) совпадают; unit `tests/groups.rs`. |
+| `add_group` | 72–102 | 31 | замена/выбор по failures, count, at, plan_id; запрет покрытой группы; frozen при 64 | `groups::add_group` (`:544`) | **P** | Выбор совпадает: меньше failures, затем больше count, затем свежее at, затем лексикографически меньший plan_id; удаление покрытых групп и `frozen` при 64 — те же. Unit `tests/groups.rs`; C/Rust differential нет. |
+| `rebuild` | 103–120 | 18 | из BLOCKED-наблюдений: base, перебор суффиксов от длинного к короткому, последний с голосами | `groups::rebuild` (`:326`) | **P** | C требует `d2k_domain_base`, идёт от первого суффикса к короткому и перезаписывает `best` при `count!=0` (побеждает самый короткий с голосами); Rust `registrable_domain` + `labels[start..]`, та же перезапись. Наследует разницу PSL/`normalize`; unit `tests/groups.rs`. |
+| `cover` | 122–132 | 11 | самый длинный покрывающий суффикс для ключа; disabled/overflow → NULL | `groups::covering_group` (`:450`) | **P*** | C `disabled || n_groups>MAX` → NULL; Rust то же, `max_by_key(len)`. Unit `tests/groups.rs`. |
+| `d2k_group_learn` | 133–245 | 113 | приём: normalize/base, admitted_clear, слот по plan_id/any/replace, frozen/capacity, disabled-reenable, reclaim oldest, замена, OR PLAN_FAILED, очистка дублей, rebuild | `groups::learn` (`:65`) | **P** | Основная логика совпадает построчно: slot/any/replace, changed/frozen, reclaim exact INCONCLUSIVE→BLOCKED→first, disabled_at=max, PLAN_FAILED OR, admitted exception, очистка без PLAN_FAILED, rebuild. **Отличия:** (1) Rust `OPERATOR_REJECT` — ранний `Ok(false)` и отдельная маска, C такого бита не знает; (2) при disabled C удаляет только `evidence==BLOCKED`, Rust — любой `evidence & BLOCKED` (шире); (3) C не делает rebuild при вставке INCONCLUSIVE, Rust делает (набор групп не меняется). Unit `tests/groups.rs`. |
+| `d2k_group_restore` | 246–273 | 28 | канонизация масок, normalize/base, at≥0, дубликаты (same plan или нет PLAN_FAILED), rebuild | `groups::restore` (`:15`) + `canonical_evidence` (`:389`) | **P** | Канонизация совпадает: снять INCONCLUSIVE, ADMITTED_EXCEPTION требует DIRECT_CLEAR, BLOCKED снимает DIRECT_CLEAR|PLAN_FAILED, DIRECT_CLEAR+PLAN_FAILED→PLAN_FAILED; дубликаты — то же условие. **R2O-расширение:** OPERATOR_REJECT (база BLOCKED|PLAN_FAILED|5). |
+| `d2k_group_match` | 274–293 | 20 | нормализация, disabled/overflow, longest suffix, исключение DIRECT_CLEAR или PLAN_FAILED того же плана | `groups::match_domain` (`:358`) | **P** | Формула и выбор longest совпадают; **Rust дополнительно исключает `OPERATOR_REJECT`**. C/Rust differential нет, unit `tests/groups.rs`. |
+| `d2k_group_forget` | 294–310 | 17 | удалить PLAN_FAILED имени/транспорта/семейства, rebuild при удалении | `groups::forget_failures` (`:271`) | **E** | C и Rust: normalize, фильтр name/transport/family/PLAN_FAILED, swap_remove, rebuild при dropped>0, возврат числа. Unit `tests/groups.rs`. |
+| `d2k_group_expire` | 311–324 | 14 | удалить PLAN_FAILED с `at < now-max_age`, rebuild | `groups::expire_failures` (`:304`) | **E** | Условия `max_age<=0 || now<max_age` и `at < cutoff` совпадают; swap_remove/rebuild. Unit `tests/groups.rs`. |
 
 ### `core/link.c`
 
@@ -2548,20 +2548,20 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `rule_exists` (static) | 31–40 | `domain.rs:63-69` `psl::suffix/domain` | **P*** | C ищет правило в зашитом `psl_index.h`; Rust использует crate `psl`. Совпадение снимка PSL не доказано. |
 | `d2k_domain_base` | 42–64 | `domain.rs:61-71` `registrable_domain` | **P** | Логика «longest rule, exception, wildcard, unknown TLD → отказ» соответствует `psl::domain` + `is_known()`. C/Rust differential на PSL-набор не найден. |
 | `d2k_domain_member` | 66–72 | `domain.rs:74-86` `is_member` | **P** | C требует, чтобы `suffix` имел известный base; Rust делает то же через `registrable_domain(suffix).is_none()`. Зависит от совпадения PSL. |
-| `d2k_group_key_make` | 9–17 | `catalog::GroupKey` (struct, `catalog.rs`) | **P** | Поля transport/family/shape/probe_path/ech_origin и лимиты строк перенесены; отдельной функции-конструктора нет. |
-| `d2k_group_key_same` | 19–23 | `PartialEq for GroupKey` | **P** | Сравнение всех пяти полей эквивалентно; тест — unit групп/catalog. |
-| `valid` (static) | 24–36 | `groups.rs:60-100` `learn` + `validate_key` | **P** | Проверки family 4/6, transport 6/17, shape, evidence 1/2/4/8 и непустого plan_id для BLOCKED/FAILED перенесены. |
-| `member` (static) | 38–41 | `domain::is_member` | **P** | Сравнение суффикса по границе точки совпадает; зависит от PSL. |
-| `votes` (static) | 45–60 | `groups.rs:484` `votes` | **P** | Правило `live>=2 && live>stale && live+stale>=3`, stale при PLAN_FAILED/DIRECT_CLEAR, latest по `at` перенесено. |
-| `failures` (static) | 61–71 | `groups.rs` `failures`/`add_group` | **P** | Считает PLAN_FAILED по name/key/plan_id; используется при выборе группы. |
-| `add_group` (static) | 72–102 | `groups.rs:544` `add_group` | **P** | Детерминированные выборы по failures/count/at/plan_id, вытеснение вложенной группы и `frozen` при MAX_GROUPS перенесены. |
-| `rebuild` (static) | 103–120 | `groups.rs:326` `rebuild` | **P** | Пересборка по BLOCKED-наблюдениям, `base`, перебор суффиксов и `votes` совпадает. |
-| `cover` (static) | 122–132 | `groups.rs:450` `covering_group` | **P** | Самый длинныйcovering-суффикс по key; отключённое состояние и лимит групп учтены. |
-| `d2k_group_learn` | 133–245 | `groups.rs:60-269` `learn` | **P** | Слот same-plan/any/replace, frozen/reclaim, disabled/disabled_at, admitted clear, PLAN_FAILED как exception и дедупликация — перенесены. R2O добавляет OPERATOR_REJECT, которого нет в C (расширение, не пробел). C/Rust differential нет. |
-| `d2k_group_restore` | 246–273 | `groups.rs:14-58` `restore` | **P** | Канонизация evidence, проверка дублей и `rebuild` совпадают; отдельного C/Rust теста нет. |
-| `d2k_group_match` | 274–293 | `catalog.rs:287` `match_domain` | **P** | Исключения DIRECT_CLEAR/PLAN_FAILED и выбор самого длинного суффикса перенесены. |
-| `d2k_group_forget` | 294–310 | `groups.rs:271` `forget_failures` | **P** | Удаление только PLAN_FAILED по name/transport/family и `rebuild` совпадают. |
-| `d2k_group_expire` | 311–324 | `groups.rs:304` `expire_failures` | **P** | Удаление PLAN_FAILED старше `now-max_age` и `rebuild` совпадают. |
+| `d2k_group_key_make` | 9–17 | `catalog::GroupKey` + `validate_key` (`groups.rs:424`) | **P** | C копирует в фиксированные буферы с `strlen >= sizeof`; Rust `String` + `validate_key` (transport 6/shape 1/2/6/8–13 или 17/3, family 4/6, path/origin ≤255 без NUL). Эквивалентно; отдельного конструктора нет. |
+| `d2k_group_key_same` | 19–23 | `PartialEq for GroupKey` | **E** | Пять полей, derived `PartialEq`; unit `tests/groups.rs`. |
+| `valid` (static) | 24–36 | `validate_key` + `canonical_evidence` (`:389`) | **P** | Транспорт/форма/семейство и требование plan_id совпадают. **R2O-расширение:** `OPERATOR_REJECT=32` и маски `BLOCKED|...`; C принимает только точные evidence 1/2/4/8. |
+| `member` (static) | 38–41 | `groups::member` (`:443`) | **E** | Формула `name==suffix` или `prefix.ends_with('.')` совпадает; unit. |
+| `votes` (static) | 45–60 | `groups::votes` (`:484`) + `latest_vote` (`:514`) | **P** | Правило `live>=2 && live>stale && live+stale>=3`, stale при PLAN_FAILED/DIRECT_CLEAR, latest по `at` — совпадают; Rust считает latest отдельным проходом. C-oracle нет. |
+| `failures` (static) | 61–71 | `groups::failures` (`:531`) | **P*** | План/ключ/суффикс/PLAN_FAILED совпадают; unit `tests/groups.rs`. |
+| `add_group` (static) | 72–102 | `groups::add_group` (`:544`) | **P** | Выбор по failures→count→at→plan_id, удаление покрытых и `frozen` при 64 совпадают; unit. |
+| `rebuild` (static) | 103–120 | `groups::rebuild` (`:326`) | **P** | C `d2k_domain_base` + суффиксы от длинного к короткому, последний `count!=0` побеждает; Rust `registrable_domain` + `labels[start..]`, та же перезапись. Наследует разницу PSL/`normalize`. |
+| `cover` (static) | 122–132 | `groups::covering_group` (`:450`) | **P*** | disabled/overflow → None, иначе longest suffix по key; unit. |
+| `d2k_group_learn` | 133–245 | `groups::learn` (`:65`) | **P** | Слот same-plan/any/replace, changed/frozen, reclaim exact INCONCLUSIVE→BLOCKED→first, disabled_at=max, PLAN_FAILED OR, admitted exception, очистка дублей, rebuild — совпадают. **Отличия:** (1) Rust `OPERATOR_REJECT` — ранний `Ok(false)`; C бита не знает; (2) при disabled C удаляет только `evidence==BLOCKED`, Rust — любой `evidence & BLOCKED` (шире); (3) C не делает rebuild при вставке INCONCLUSIVE, Rust делает (набор групп не меняется). |
+| `d2k_group_restore` | 246–273 | `groups::restore` (`:15`) + `canonical_evidence` (`:389`) | **P** | Канонизация масок и проверка дублей совпадают. **R2O-расширение:** OPERATOR_REJECT (база BLOCKED/PLAN_FAILED/5). Отдельного C/Rust теста нет. |
+| `d2k_group_match` | 274–293 | `groups::match_domain` (`:358`) | **P** | Исключения DIRECT_CLEAR/PLAN_FAILED того же плана и longest suffix совпадают; **Rust дополнительно исключает OPERATOR_REJECT**. |
+| `d2k_group_forget` | 294–310 | `groups::forget_failures` (`:271`) | **E** | normalize, фильтр name/transport/family/PLAN_FAILED, swap_remove, rebuild, возврат числа — совпадают; unit. |
+| `d2k_group_expire` | 311–324 | `groups::expire_failures` (`:304`) | **E** | `max_age<=0` или `now<max_age`, `at < now-max_age`, swap_remove/rebuild — совпадают; unit. |
 | `same_evidence` (static) | 38–73 | `catalog.rs:1077-1090` `same_signal` | **P** | volume/rx-volume: `\|d\|<=4`; ttl: `\|d\|<=2`; tos/ipid точно — совпадает с C. Тестов/дифференциала именно на эту функцию нет. |
 | `d2k_fp_same` | 75–125 | `catalog.rs:59-84` `Fingerprint::is_compatible_with` | **P** | Направленный обход b→a, все приметы одного рода, `kind_seen && !agreed → false`, `common>0` — совпадает. |
 | `d2k_catalog_match` | 127–136 | `catalog.rs:537-541` `match_fingerprint` | **P** | Первый совместимый индекс; эквивалентно. |
