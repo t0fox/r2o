@@ -361,6 +361,8 @@ CLI-логирования, health-файла, duration и состава сво
 Таблица потоков: открытая адресация, FNV-1a, удаление сдвигом, порог 3/4.
 R2O заменил структуру на `HashMap`, сохранив ключ, ёмкость и порог отказов.
 
+**Прочитано построчно: 18/18 функций, 337 строк C (1–337).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
 | `d2k_key_make` | 18–51 | 34 | IPv4-ключ: сравнить 6 байт `addr + port`, выбрать low/high, занулить весь `d2k_key`, записать ip/port/proto | `engine.rs:67 TcpFlowKey::from_endpoints`, `r2o_udp_sessions.rs:35 R2oUdpFlowKey::new` | **P** | C сравнивает `src_ip4 + sport_be` с `dst_ip4 + dport_be` и при равенстве делает источник low (`<=`). Rust сравнивает `(family, 16-байтный Address, port)`; для одной family порядок эквивалентен: хвостовые нули IPv4 не влияют, пока адреса равны, а затем решает порт. Представление ключа разное (типизированный ключ против 16-байтной структуры). Тесты capture/udp_sessions; C/Rust differential нет. |
@@ -967,6 +969,8 @@ observation), `control.rs` (https names), `http_replace.rs` (пакеты),
 
 ## http_trace.c (1 функция)
 
+**Прочитано построчно: 1/1 функция, 50 строк C (1–50).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
 | `d2k_http_trace` | 9–50 | 42 | строка `d2kd: HTTP execution host=... IPv4/6 [src]:cport -> [dst]:80 seq=... hook/mark/outdev/status/prepared/plan/execution/planned/raw_sent/queued/original/output_failed/reason` | нет: grep `HTTP execution` по R2O пуст | **N** | C: TCP/80, method заглавными + пробел, `d2k_http_request` иначе `host=<unparsed>`, `inet_ntop`, plan hex или `-`, status `OBSERVE/SKIPPED/FAILED/PENDING/COMPLETE`, seq/hook/mark/outdev, execution, planned/sent/queued, original `ACCEPT/DROP`, output_failed, reason; возвращает длину с усечением до `cap-1`. В R2O есть события портала/ответа и журнал, но **нет** этой текстовой строки; N подтверждён. |
@@ -975,6 +979,8 @@ observation), `control.rs` (https names), `http_replace.rs` (пакеты),
 
 Кольцо журнала наблюдений: kinds, коды suspect/refuse, очистка имени, plan/trial/
 execution/binding, added/dropped. R2O: `flow_journal.rs`.
+
+**Прочитано построчно: 14/14 функций, 204 строки C (1–204).**
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
