@@ -28,10 +28,12 @@ use std::time::{Duration, Instant};
 const MAX_CONTROL_OUTPUT: usize = 128 * 1024;
 const MAX_COMMANDS_PER_POLL: usize = 256;
 pub const MAX_NAME_PLANS: usize = 2048;
-const MAX_ADDR_PROBES: usize = 64;
+/// C `probes[cap]` создаётся на `d2k_plantab_new(d2k_track_capacity(flows))`,
+/// где `--flows` по умолчанию 2048 (`d2kd.c:1141`, `session.c:334`).
+const MAX_FLOW_PROBES: usize = 2048;
 const MAX_HTTPS_NAMES: usize = 256;
 const MAX_VOICE_ADDR_PLANS: usize = 128;
-const MAX_VOICE_ADDR_PROBES: usize = 64;
+
 const MAX_SUFFIX_PLANS: usize = 64;
 const MAX_DOMAIN_BYPASSES: usize = 256;
 
@@ -194,6 +196,10 @@ impl NamePlans {
     /// включает QUIC- и VOICE-записи, а истёкшие удаляются лениво, поэтому
     /// счётчик не фильтрует по времени (`plans.c:1020-1022`).
     pub fn r2o_probe_count(&self, _now: Instant) -> usize {
+        self.flow_probe_count()
+    }
+
+    fn flow_probe_count(&self) -> usize {
         self.addr_probes.len() + self.voice_addr_probes.len()
     }
 
@@ -797,7 +803,7 @@ impl NamePlans {
                 return Some(PlanBinding {
                     trial_id: probe.trial_id,
                     generation: probe.generation,
-                    shape: SHAPE_VOICE,
+                    shape: flow_probe_shape(&probe.plan),
                     temporary: true,
                 });
             }
@@ -817,7 +823,7 @@ impl NamePlans {
                 return Some(PlanBinding {
                     trial_id: probe.trial_id,
                     generation: probe.generation,
-                    shape: SHAPE_QUIC,
+                    shape: flow_probe_shape(&probe.plan),
                     temporary: true,
                 });
             }
@@ -850,6 +856,19 @@ impl NamePlans {
             server_port: r2o_destination_port,
         };
         let r2o_now = Instant::now();
+        // Точный voice-опыт из generic SET_ADDR_PROBE лежит в addr_probes:
+        // C `find_voice_probe` находит и его, и wildcard.
+        if let Some(key) = r2o_udp_addr_probe_flow_key(packet)
+            && let Some(r2o_probe) = self.addr_probes.get(&key)
+            && r2o_probe.expires > r2o_now
+        {
+            return Some((
+                &r2o_probe.plan,
+                r2o_probe.trial_id,
+                r2o_probe.generation,
+                true,
+            ));
+        }
         if let Some(r2o_probe) = self.voice_addr_probes.get(&r2o_key)
             && r2o_probe.expires > r2o_now
             && r2o_source_port != 0
@@ -1302,7 +1321,7 @@ impl NamePlans {
             return (false, control::ACK_BAD_PLAN);
         }
         if !self.voice_addr_probes.contains_key(&r2o_key)
-            && self.voice_addr_probes.len() >= MAX_VOICE_ADDR_PROBES
+            && self.flow_probe_count() >= MAX_FLOW_PROBES
         {
             return (false, control::ACK_NO_ROOM);
         }
@@ -1368,9 +1387,8 @@ impl NamePlans {
             Err(_) => return (false, control::ACK_BAD_PLAN),
         };
         if voice_wildcard {
-            if plan.transport != 17 || plan.proto != PROTO_VOICE {
-                return (false, control::ACK_BAD_PLAN);
-            }
+            // C принимает любой разобранный план: shape выводится из proto
+            // (2→QUIC, 3→VOICE, иначе ANY), отказа по proto здесь нет.
             let voice_key = VoiceProbeKey {
                 client: Ipv4Addr::new(key[1], key[2], key[3], key[4]),
                 server: Ipv4Addr::new(key[17], key[18], key[19], key[20]),
@@ -1387,7 +1405,7 @@ impl NamePlans {
                 return (false, control::ACK_BAD_ARGS);
             }
             if !self.voice_addr_probes.contains_key(&voice_key)
-                && self.voice_addr_probes.len() >= MAX_VOICE_ADDR_PROBES
+                && self.flow_probe_count() >= MAX_FLOW_PROBES
             {
                 return (false, control::ACK_NO_ROOM);
             }
@@ -1406,9 +1424,7 @@ impl NamePlans {
             );
             return (true, control::ACK_OK);
         }
-        if !valid_quic_plan(&plan) {
-            return (false, control::ACK_BAD_PLAN);
-        }
+        // C не требует QUIC-плана: shape ANY допустим, прочие proto тоже.
         let now = Instant::now();
         self.addr_probes.retain(|_, probe| probe.expires > now);
         if self
@@ -1418,7 +1434,7 @@ impl NamePlans {
         {
             return (false, control::ACK_BAD_ARGS);
         }
-        if !self.addr_probes.contains_key(&key) && self.addr_probes.len() >= MAX_ADDR_PROBES {
+        if !self.addr_probes.contains_key(&key) && self.flow_probe_count() >= MAX_FLOW_PROBES {
             return (false, control::ACK_NO_ROOM);
         }
         if self.addr_probes.try_reserve(1).is_err() {
@@ -1891,6 +1907,15 @@ fn valid_tcp_probe_shape(shape: u8) -> bool {
 
 fn valid_quic_plan(plan: &Plan) -> bool {
     plan.r2k_is_quic_address_plan() && validate_runtime_plan(plan).is_ok()
+}
+
+/// C `d2k_plantab_set_addr_probe`: shape из proto (2→QUIC, 3→VOICE, иначе ANY).
+fn flow_probe_shape(plan: &Plan) -> u8 {
+    match plan.proto {
+        2 => SHAPE_QUIC,
+        3 => SHAPE_VOICE,
+        _ => 0,
+    }
 }
 
 struct PendingWrite {
@@ -3617,6 +3642,74 @@ mod tests {
         });
         assert!(ack.ok);
         assert!(plans.voice_addr_probes.is_empty());
+    }
+
+    #[test]
+    fn generic_addr_probe_accepts_any_plan_and_exact_voice() {
+        fn key(source_port: u16) -> [u8; control::KEY_LEN] {
+            let mut key = [0u8; control::KEY_LEN];
+            key[0] = 4;
+            key[1..5].copy_from_slice(&[192, 0, 2, 1]);
+            key[17..21].copy_from_slice(&[198, 51, 100, 2]);
+            key[33..35].copy_from_slice(&source_port.to_be_bytes());
+            key[35..37].copy_from_slice(&3478_u16.to_be_bytes());
+            key[37] = 17;
+            key
+        }
+        fn plan(id: [u8; 16], proto: u8) -> Vec<u8> {
+            let mut plan = plan_header(1, 2);
+            plan.extend_from_slice(&[0x00, 0x01, 0x00, 0x10]);
+            plan.extend_from_slice(&id);
+            plan.extend_from_slice(&[0x00, 0x02, 0x00, 0x02, 17, proto]);
+            plan
+        }
+        let mut plans = NamePlans::default();
+        let request = r2k_core::stun::binding_request([7; 12]);
+
+        // Точный voice-порт generic-командой: C хранит его в probes[] и
+        // находит как find_addr_probe, так и find_voice_probe.
+        let voice_key = key(50_000);
+        let voice_trial = [0x24; 16];
+        let mut body = voice_key.to_vec();
+        body.extend_from_slice(&voice_trial);
+        body.extend_from_slice(&1000_u32.to_be_bytes());
+        body.extend_from_slice(&plan([0x32; 16], r2k_core::plan::PROTO_VOICE));
+        let ack = plans.handle(&Frame {
+            kind: control::COMMAND_SET_ADDR_PROBE,
+            body,
+        });
+        assert!(ack.ok, "exact voice rejected: {}", ack.reason);
+        assert_eq!(plans.addr_probes.len(), 1);
+
+        let mut packet = udp_packet(&request, 3478);
+        packet[20..22].copy_from_slice(&50_000_u16.to_be_bytes());
+        let selected = plans.select(&packet).expect("exact voice probe");
+        assert_eq!(selected.id, [0x32; 16]);
+        assert_eq!(plans.binding_for_plan(selected).unwrap().shape, SHAPE_VOICE);
+
+        let mut other_port = packet.clone();
+        other_port[20..22].copy_from_slice(&50_001_u16.to_be_bytes());
+        assert!(plans.select(&other_port).is_none());
+
+        // ANY-план (proto не 2/3) C принимает и отдаёт с shape=0.
+        let any_key = key(50_002);
+        let mut body = any_key.to_vec();
+        body.extend_from_slice(&[0x25; 16]);
+        body.extend_from_slice(&1000_u32.to_be_bytes());
+        body.extend_from_slice(&plan([0x33; 16], 1));
+        let ack = plans.handle(&Frame {
+            kind: control::COMMAND_SET_ADDR_PROBE,
+            body,
+        });
+        assert!(ack.ok, "ANY plan rejected: {}", ack.reason);
+        assert_eq!(plans.addr_probes.len(), 2);
+
+        let mut any_packet = udp_packet(&request, 3478);
+        any_packet[20..22].copy_from_slice(&50_002_u16.to_be_bytes());
+        let selected = plans.select(&any_packet).expect("ANY exact probe");
+        assert_eq!(selected.id, [0x33; 16]);
+        assert_eq!(plans.binding_for_plan(selected).unwrap().shape, 0);
+        assert_eq!(super::MAX_FLOW_PROBES, 2048);
     }
 
     #[test]
