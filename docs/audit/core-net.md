@@ -478,6 +478,8 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 
 Сборка QUIC Initial из профиля ClientHello: выбор профиля, переименование/удаление SNI, варианты probing (v2, split, longer, clear fixed bit), recid. R2O: `r2k-core/src/quic.rs:261 r2k_quic_initial_build`, `:1113 r2k_quic_client_hello_rename_sni`, `:338 r2k_quic_initial_reseal_for_dcid`; профиль — `r2o-controller/src/quic_replay.rs:98 r2o_quic_profile_snapshot`. Тесты: `quic.rs` (RFC 9001/9369, rename/reseal), `tests/quic_snapshot.rs`.
 
+**Прочитано построчно: 13/13 функций, 548 строк C (1–548).**
+
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `select_probe_profile` | 34-45 | 12 | копия профиля + MIPS-замена cipher list по `[0,6]` на `[0x1303,0x1301,0x1302]` | `quic_replay.rs:98-135 r2o_quic_profile_snapshot` | **E** | Rust: профиль 275 байт, MIPS-ветка `get(39..41)==[0,6]` → те же три cipher suite, random/SCID/key_share обновляются. Эквивалентно. |
