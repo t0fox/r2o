@@ -227,11 +227,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 195 | 340 | 13 | 0 |
-| core-state | 692 | 148 | 541 | 3 | 0 |
+| core-state | 692 | 151 | 538 | 3 | 0 |
 | datapath-core | 400 | 122 | 267 | 11 | 0 |
 | datapath-plan | 183 | 102 | 76 | 5 | 0 |
 | detect | 159 | 49 | 100 | 10 | 0 |
-| **Итого** | **1982** | **616** | **1324** | **42** | **0** |
+| **Итого** | **1982** | **619** | **1321** | **42** | **0** |
 
 
 ---
@@ -2433,28 +2433,28 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `plan_text_max_emit` | 6648–6658 | 11 | TLV → Plan::load → `max_emit`; 0 при ошибке/нет посылок | `plan_text::compile` + `plan::max_emit` (`main.rs` send_cap) | **P** | Rust считает `max_emit` из скомпилированного плана; C-путь через `d2k_plan_load` эквивалентен, отдельного differential нет. |
 | `d2k_sched_sync_step` | 6660–6907 | 248 | порция 8: skip disabled/recheck/newer/QUIC-deny/UDP CLIENT/level<3/TCP shape 0/missing plan; guard RST; send_cap; SET_NAME/ADDR; затем areas; stall budgets; сводка/refused | `main.rs:3887-4256 CatalogSyncCursor::send_step`, `catalog_area_*` | **E** | `r2o-catalog-sync-differential.sh` + catalog persist. **Совпадает:** chunk 8, все skip-условия, guard, send_cap, addr/name, areas, сводка. **Отличия:** C-`plan_text_to_hex`/`d2k_link_*` заменены `compile_text`/control-командами; `tcp_profile`/`verified_by`-поля в Rust `Binding` отсутствуют (см. header #16). |
 | `has_other_family_target_plan` | 6915–6935 | 21 | есть подтверждённый план той же цели другого семейства | main.rs discovery other family plan | **P** | family queue differential частично |
-| `remember_resources` | 6939–6959 | 21 | запомнить публичные resource paths (8 слотов, 1 ч) | r2o_resource::R2oResourceCache::remember_hints | **P** | unit r2o_resource |
-| `remember_measured_path` | 6969–6983 | 15 | запомнить доказанный measured_path | r2o_resource::remember_proven_path | **P** | unit r2o_resource |
-| `public_resource_peer` | 6985–6993 | 9 | публичный адрес цели (не private/loopback/CGNAT) | r2o_resource/public peer check | **P*** | static-хелпер; net4 differential |
-| `select_resource_path` | 6995–7048 | 54 | выбрать measure_path/alt: binding → proven → mention | main.rs discovery select_resource_path | **P** | unit r2o_resource; C/Rust diff нет |
-| `ech_rr_known` | 7052–7059 | 8 | кэш HTTPS RR: known yes/no и public_name (10/60 мин) | main.rs discovery ech_rr | **P*** | static-хелпер ECH |
-| `ech_rr_store` | 7061–7072 | 12 | сохранить результат HTTPS RR | main.rs discovery ech_rr | **P*** | static-хелпер |
-| `ech_chal_has` | 7074–7079 | 6 | имя в 30-мин карантине ECH-witness | main.rs discovery ech_chal | **P*** | static-хелпер |
-| `ech_chal_add` | 7081–7086 | 6 | добавить имя в карантин ECH-witness | main.rs discovery ech_chal | **P*** | static-хелпер |
-| `ech_pick_witness` | 7088–7116 | 29 | выбрать ECH-witness с public_name == имя, с учётом real/allow_chal | main.rs discovery ech_pick_witness | **P** | ECH differentials частично |
-| `ech_witness_untried` | 7118–7128 | 11 | есть неотвергнутый witness | main.rs discovery ech witness | **P*** | static-хелпер |
-| `ech_witness_reject` | 7130–7136 | 7 | отвергнуть witness и поставить карантин | main.rs discovery ech witness | **P*** | static-хелпер |
-| `ech_witness_add` | 7140–7150 | 11 | добавить кандидата-witness, если RR известен | main.rs discovery ech witness | **P*** | static-хелпер |
-| `start_search` | 7152–7328 | 177 | старт поиска: fill_hellos, resource path, ECH witnesses, family recovery, base/own-first, JOB_CLASSIFY | main.rs discovery start_search | **P** | discovery/ECH/own-first differentials покрывают часть |
-| `box_id_for` | 7332–7413 | 82 | id коробки по fp/тексту с солью при коллизии | main.rs discovery box_id_for | **P** | catalog tests частично |
-| `voice_trial_send` | 7424–7444 | 21 | поставить измеренный voice arm как SET_ADDR_PROBE с lease | voice_discovery.rs::r2o_voice_arm_plan (20) + main.rs voice trial send | **E** | test-discord-voice-discovery-arm/lifecycle differentials |
-| `voice_ip_fmt` | 7446–7449 | 4 | IPv4 в текст с fallback «?» | std::net::Ipv4Addr Display | **P*** | static-хелпер |
-| `voice_ip_text` | 7450–7453 | 4 | статический буфер IPv4 | std::net::Ipv4Addr Display | **P*** | static-хелпер |
-| `voice_ip_text2` | 7454–7457 | 4 | второй статический буфер IPv4 | std::net::Ipv4Addr Display | **P*** | static-хелпер |
-| `voice_trial_owned` | 7461–7464 | 4 | voice trial принадлежит нам (name, identity, sport=0, dport!=0) | voice_discovery.rs::r2o_voice_binding_address_scoped (72) | **P*** | static-хелпер |
-| `voice_trial_same_context` | 7469–7479 | 11 | событие относится к тому же voice endpoint/клиенту | voice_discovery.rs::r2o_voice_target_from_event (267) | **P** | voice differentials частично |
-| `voice_start` | 7481–7510 | 30 | найти known discovery prefix и запустить JOB_VOICE | voice_discovery.rs::r2o_voice_discovery_prefix_from_plan_text (26) + main.rs R2oVoiceDiscoveryWorker (9801) | **E** | r2o-discord-discovery-differential.sh |
-| `voice_finish_measure` | 7512–7609 | 98 | разобрать voice-замер: CLEAR/blocked, flow match, arm → план, SET_ADDR_PROBE, T_VOICE_TRIAL | voice_discovery.rs::evaluate_r2o_discovery (728) + main.rs R2oVoiceDiscoveryWorker (9801) | **P** | discord lifecycle differential частично |
+| `remember_resources` | 6939–6959 | 21 | 8 слотов по host, TTL 1 ч; HTML-hint не вытесняет действующий proven-путь | `r2o_resource.rs:38-65 remember_hints`, `main.rs:5982,14695` | **P** | **Совпадает:** host-слоты, TTL, proven не вытесняется упоминанием. **Отличия:** C хранит `ref/proven/expires_ms` в `sched.resources[8]`; Rust `R2oResourceMemory`/`remember_hints` с иной структурой. Unit `r2o_resource`. |
+| `remember_measured_path` | 6969–6983 | 15 | запомнить только доказанный `rx_cut` measured_path (proven, 1 ч) | `r2o_resource.rs:67-100 remember_proven_path`, `main.rs:14704` | **P** | **Совпадает:** только rx_cut, только path_ok, proven/TTL. Rust-структура и вызовы иные; unit `r2o_resource`. |
+| `public_resource_peer` | 6985–6993 | 9 | IPv4 public (не 0/10/127/multicast/link-local/private/CGNAT); IPv6 global unicast `20::/3` | `main.rs:3037-3060 r2o_public_resource_ip` | **E*** | Посимвольно совпадает: те же диапазоны IPv4 и `first & 0xe0 == 0x20` для IPv6. |
+| `select_resource_path` | 6995–7048 | 54 | 443, не by_addr, public peer; binding (level 3, name/transport/family/shape/path_ok, newest) → proven → mention; alt из proven/mention | `main.rs:3062-3105 r2o_target_confirmed_probe_path`, `:3107-3140 r2o_discovery_resource_probe_paths` | **P** | **Совпадает:** binding → proven → hint, newest confirmed, alt path, path_ok. **Отличия:** C `t->measure_path/measure_alt` пишутся в задаче; Rust возвращает `(primary, alternate)` из `R2oResourceMemory`. C/Rust differential нет. |
+| `ech_rr_known` | 7052–7059 | 8 | HTTPS RR cache: used/not expired/name → has && public_name match; иначе -1 | нет прямого RR-кэша; `R2oEchChallengeCache` — только 30-мин карантин | **P** | **Подтверждённый пробел:** поиск по `crates/` не нашёл кэша «имя → has/public_name» с TTL 6 ч/30 мин. Rust резолвит HTTPS RR через `resolve_ech_config` и хранит только challenge-карантин; повторный резолв может отличаться по числу DNS-запросов. |
+| `ech_rr_store` | 7061–7072 | 12 | записать RR: has/public_name, TTL 6 ч при yes, 30 мин при no; кольцо 256 | нет прямого аналога | **P** | **Подтверждённый пробел:** отдельного RR-кэша с TTL yes/no нет; `R2oEchChallengeCache` хранит только имена-карантины. |
+| `ech_chal_has` | 7074–7079 | 6 | имя в 30-мин карантине ECH-witness | `R2oEchChallengeCache::contains` (`main.rs:10392+`, тесты `:26789-26802`) | **E*** | Совпадает: name + expiry 30 мин; тест кольца/истечения. |
+| `ech_chal_add` | 7081–7086 | 6 | добавить имя в кольцо карантина (30 мин), без дубля | `R2oEchChallengeCache::record` (`main.rs:26789-26802`) | **E*** | Совпадает: запись/обновление, 30 мин; тест кольца/eviction. |
+| `ech_pick_witness` | 7088–7116 | 29 | два прохода (allow_chal): RR known/chal, bad, real/первые 4, resolve+store public_name, вернуть origin | `main.rs` ECH witness resolve (`resolve_ech_config`/`r2o_discovery_ech_witness`), `R2oEchChallengeCache` | **P** | **Совпадает:** public_name == target, challenge-карантин, real/allow_chal, отказ bad. **Отличия:** Rust не хранит RR-кэш и resolved public_name; проверка/выбор свидетеля разнесены по discovery. ECH differentials частичные. |
+| `ech_witness_untried` | 7118–7128 | 11 | есть не-bad witness с known!=0 и не в карантине | `main.rs` ECH witness list/challenge | **P*** | Rust проверяет кандидатов через resolve/challenge; отдельной функции нет. |
+| `ech_witness_reject` | 7130–7136 | 7 | пометить bad и добавить origin в карантин | `R2oEchChallengeCache::record`, `main.rs:29135+` | **P*** | Карантин есть; C-флаг `ech_bad[]` в задаче, Rust-состояние иное. |
+| `ech_witness_add` | 7140–7150 | 11 | пропуск self/дублей/лимита; если RR known==0 — не добавлять | `main.rs` ECH witness candidates | **P*** | Логика кандидатов разнесена; RR-кэша нет. |
+| `start_search` | 7152–7328 | 177 | fill_hellos; resource path; ECH offer; witness-лестница (RR/bindings/seen); family recovery; rx_volume_only; own_first; JOB_CLASSIFY | `main.rs` discovery start/enqueue (`:10388+`, `:12879-13120`), `r2o_discovery_trigger`, `own_first_plans` | **P** | **Совпадает:** fill/hello, resource path, ECH candidates, family recovery, own_first, CLASSIFY. **Отличия:** C-порядок witness-лестницы (RR→bindings→same addr→bindings sorted→any addr) и `rx_volume_only`/`shape_armed`/`addr_recheck` в Rust разнесены; T_SHAPE_WAIT/очередь иные. discovery/ECH/own-first differentials частичные. |
+| `box_id_for` | 7332–7413 | 82 | box_id из задачи/единственного fp-match/«box-без-приметы»/FNV(fp+text) с солью при clash | `catalog.rs` box id/`discovery.rs:1020` (C-оракул), `add_measured_binding_with_fingerprint` | **P** | **Совпадает:** один совместимый fp → существующая box; иначе FNV-имя; соль при конфликте; без примет — отдельная запись. Rust-функция вынесена в catalog/measured binding, полного C/Rust differential нет. |
+| `voice_trial_send` | 7424–7444 | 21 | stamp plan id, hex, SET_ADDR_PROBE (transport 17, family 4, client sport 0, dst, lease), lease_ms | `main.rs:16301-16320 encode_r2o_voice_trial`, `voice_discovery.rs:20 r2o_voice_arm_plan` | **E** | `test-discord-voice-discovery-arm/lifecycle`; trial/lease/dst/client-address совпадают. |
+| `voice_ip_fmt` | 7446–7449 | 4 | IPv4 → текст, fallback «?» | `std::net::Ipv4Addr Display` | **P*** | Fallback «?» в Rust не выражен; для валидного IPv4 эквивалентно. |
+| `voice_ip_text` | 7450–7453 | 4 | статический буфер IPv4 | `Ipv4Addr Display`/`String` | **P*** | Буфер заменён owned-строкой. |
+| `voice_ip_text2` | 7454–7457 | 4 | второй статический буфер | `Ipv4Addr Display`/`String` | **P*** | То же. |
+| `voice_trial_owned` | 7461–7464 | 4 | !by_addr, identity valid, client sport 0, dst port != 0 | `voice_discovery.rs` binding address-scoped | **P*** | Rust проверяет address-scoped привязку/trial; отдельной функции нет. |
+| `voice_trial_same_context` | 7469–7479 | 11 | family 4; (dst IP/port + client IP) в любом направлении, client port не сравнивается | `voice_discovery.rs:292 r2o_voice_observed_flow_from_event` | **P** | **Совпадает:** endpoint + client IP, любой client port. Rust flow-событие/сопоставление иное по структуре; voice differentials частичные. |
+| `voice_start` | 7481–7510 | 30 | найти known voice discovery prefix (transport 17/family 4/shape VOICE/verified_by DISCOVERY/addr/prefix), сбросить планы, T_VOICE_MEASURE, JOB_VOICE | `voice_discovery.rs:26 r2o_voice_discovery_prefix_from_plan_text`, `main.rs:9801 R2oVoiceDiscoveryWorker` | **E** | `r2o-discord-discovery-differential.sh`; условия привязки/prefix и запуск worker совпадают. |
+| `voice_finish_measure` | 7512–7609 | 98 | join; verdict != BLOCKED → report/fail; flow match/marked/arm/copies; arm→plan; trial id; SET_ADDR_PROBE на следующий поток; probes; T_VOICE_TRIAL | `main.rs:16383 confirm_r2o_voice_trial`, `voice_discovery.rs:728 evaluate_r2o_discovery`, `:39 save_confirmed_voice_binding` | **P** | **Совпадает:** BLOCKED-only, flow match, marked/arm/copies, plan→addr probe, client sport 0, lease, probes. **Отличия:** C `voice_res`/task-поля и Rust `R2oVoiceTrialContext`/evaluate разнесены; voice lifecycle differential частичный. |
 | `quic_addr_start` | 7616–7624 | 9 | QUIC-поиск по адресу без SNI | main.rs discovery quic_addr_start | **P** | quic differentials частично |
 | `measurements_in_flight` | 7628–7633 | 6 | число идущих замеров без parked QUIC | main.rs discovery in-flight | **P*** | static-хелпер; queue tests |
 | `queued_measurements` | 7635–7641 | 7 | число задач в очереди + parked QUIC | main.rs discovery queued | **P*** | static-хелпер |
