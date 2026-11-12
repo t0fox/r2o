@@ -1246,6 +1246,64 @@ memory_bytes, load с проверкой хвоста, все writer'ы, `d2k_ca
   покрывают 50 arm и 5 `send_cap`, но произвольные сочетания
   disorder/oob/seqovl/fake/ttl/tcpts/ipidzero не сравнивались.
 
+### Построчная таблица `compose.c` (53 функции)
+
+| C-функция | строки | R2O-аналог | статус | доказательство / пробел |
+|---|---:|---|---|---|
+| `d2k_net_whitelist_count` | 107–109 | `r2o_rx_volume.rs:6` | **E** | 266 имён и порядок проверены unit `r2o_rx_volume.rs:84`. |
+| `d2k_net_whitelist_name` | 110–112 | `r2o_rx_volume.rs:11` | **E** | Тот же список, `Option` вместо NULL; unit `:84`. |
+| `wr16be` | 150–150 | `push_u16`/`to_be_bytes` (`plan_text.rs`) | **P*** | Big-endian u16; static-хелпер, отдельного differential нет. |
+| `rd16be` | 151–151 | `u16::from_be_bytes` | **P*** | Big-endian u16; используется в `plan_tlv_stamp_ident`. |
+| `wr32be` | 152–155 | `push_u32`/`to_be_bytes` | **P*** | Big-endian u32; static-хелпер. |
+| `tlv_rec` | 162–174 | `plan_text.rs:598-604` | **P*** | type/len/value, `len<=0xFFFF`, проверка cap; Rust проверяет `u16::try_from`. |
+| `tlv_header` | 186–198 | `plan_text.rs:67-610` | **P** | D2KP/schema 1/minexec 1/flags 0/count + ID(нули)+PROTO(6,1); Rust `r2o-plan` и `minexec` вычисляется, не всегда 1. |
+| `plan_tlv_stamp_ident` | 218–240 | `main.rs` random plan/trial id | **P** | C FNV-1a по TLV с нулевым ID → `plan-%08x`; Rust подставляет случайный 16-байтный id. Разная идентичность/атрибуция APPLIED. |
+| `overlap_plan_tlv` | 258–270 | `ask.rs:438-443` + `plan_text` | **P** | 5 записей, payload 1 `0f`, seqovl 1/0, order forward; Rust собирает текст, не TLV. |
+| `reorder_plan_tlv` | 277–290 | `ask.rs:444-448` | **P** | split payload_start+1, split sni_middle+0, order reverse, pace 12000; Rust текст, тот же смысл. |
+| `badsum_fake_plan_tlv` | 296–316 | `ask.rs:449-466` | **P** | 7 записей, payload 1 + poison badsum + fake; Rust текст, plan id иной. |
+| `checksum_plan_tlv` | 322–326 | `ask.rs:449-453` | **P** | 64×`0f`, badsum repeats=1; Rust `compose_badsum_fake_plan` с payload `[0x0f;64]`. |
+| `to_hex` | 331–338 | `hex()` (`classify_measured.rs:422`) | **E*** | Нижний регистр, 2 символа/байт; используется C-тестами и differential-планами. |
+| `ev_matches_flow` | 351–366 | `main.rs:628` expected_key, `R2oAskProof` | **P** | Сравнение неупорядоченной пары адрес:порт + family/transport; Rust сравнивает канонический ключ потока. C/Rust differential нет. |
+| `wait_for_event3` | 397–421 | `main.rs:646 wait_for_ask_proof` | **P** | C ждёт до трёх типов, code-фильтр и flow; Rust ждёт APPLIED/EXCHANGE/REFUSED по trial/plan/ключу. |
+| `wait_for_event` | 423–429 | `main.rs:646` | **P** | Обёртка `wait_for_event3`; Rust отдельного аналога нет. |
+| `props_bind_any` | 494–524 | `BoundTcpProbe::open` (`main.rs`) | **P** | **Отличия:** C ставит `IPV6_V6ONLY` для family 6, Rust не ставит; C при `out_fd==NULL` закрывает fd и возвращает -1, Rust владеет сокетом. |
+| `d2k_props_bind` | 526–528 | `BoundTcpProbe::open` | **P*** | Обёртка family=4/SOCK_STREAM. |
+| `d2k_props_bind_family` | 530–532 | `BoundTcpProbe::open` | **P** | family 4/6; Rust `BoundTcpProbe::open(family, Some(0))`. |
+| `d2k_props_bind_udp` | 534–536 | UDP bind в `voice_measure` | **P*** | Обёртка family=4/SOCK_DGRAM; отдельного C/Rust differential нет. |
+| `d2k_props_bind_udp_family` | 538–540 | UDP bind в `voice_measure` | **P** | family 4/6; Rust использует `UdpSocket`/raw bind. |
+| `d2k_props_contact` | 542–545 | `BoundTcpProbe::connect` | **P*** | Обёртка use_fd=-1/family=4. |
+| `d2k_props_contact_on` | 547–551 | `BoundTcpProbe::connect` | **P*** | Обёртка family=4. |
+| `d2k_props_contact_on_family` | 553–558 | `BoundTcpProbe::connect` | **P** | C без TCP-timestamps (`-1`); Rust connect тем же путём, профиль timestamps не задаёт. |
+| `tcp_timestamps_read` | 567–578 | `raw_probe.rs:676` host_offers_ts | **P** | C читает `/proc/sys/net/ipv4/tcp_timestamps`; Rust читает sysctl только для признака клиента, не для connect-профиля. |
+| `tcp_timestamps_write` | 580–588 | нет | **N** | Подтверждено grep: Rust не пишет `/proc/sys/net/ipv4/tcp_timestamps`. |
+| `connect_with_tcp_profile` | 591–636 | нет | **N** | C меняет sysctl вокруг `connect()` под mutex; Rust такого пути не имеет. |
+| `d2k_props_contact_on_family_tcp_profile` | 638–753 | `BoundTcpProbe::connect` + `probe_socket` | **P** | Перенесены literal IPv4/IPv6, TCP_NODELAY, SO_NOSIGPIPE, timeouts, nonblock connect, poll/SO_ERROR, getsockname, send; **нет** параметра tcp_timestamps, кода -3 и восстановления sysctl. |
+| `build_fake_body` | 786–796 | `ask.rs:470-471`, `compose_badsum_fake_plan` | **E** | `truth_len*2`, заполнение `0f`, decoy в голову; unit `ask.rs:520-559`. |
+| `d2k_props_question_plan` | 798–841 | `ask.rs:432-490 question_plan` | **P** | Порядок и эффекты 5 вопросов совпадают; C TLV + FNV id, Rust текст + random plan_id. |
+| `d2k_props_question_passed` | 845–864 | `ask.rs:492-505 record_question_passed` | **E** | Те же поля и спецслучай parse→checksum=false; unit `ask.rs:562-574`. |
+| `question_retire` | 874–879 | `delete_name_probe` (`main.rs:528`) | **P** | Тот же кадр DEL_NAME_PROBE; C игнорирует ошибку, Rust может прервать опрос. |
+| `d2k_props_ask` | 881–884 | `main.rs:836` `r2o_measure_voice`-подобный вызов | **P*** | Обёртка `d2k_props_ask_traced(..., NULL)`. |
+| `step_rc` | 889–898 | `main.rs:15799 r2o_print_ask_trace` | **P*** | Трасса шага: C rc+err, Rust строки/поля. |
+| `d2k_props_ask_traced` | 900–1191 | `main.rs:455-734` | **P** | **Отличия:** C требует `applied && server_hello`, Rust `applied && exchange_seen && server_hello`; C не сверяет trial_id ACK, Rust отвергает чужой; C игнорирует ошибку снятия, Rust может прервать; C flowkey неупорядоченный, Rust канонический. |
+| `append_fmt` | 1203–1213 | `String`/`checked_text` (`ask.rs`) | **P*** | C проверяет cap на каждом добавлении; Rust пишет в String и проверяет предел в конце. |
+| `emit_header_proto` | 1221–1227 | `ask.rs:252-260` | **P** | C `d2k-plan 1 1`, id нули, proto; Rust `r2o-plan 1 minexec`, minexec 5/12. |
+| `emit_header` | 1229–1231 | `ask.rs` header | **P** | Обёртка proto `tcp tls`. |
+| `append_hex` | 1233–1239 | `hex()` | **E*** | Нижний hex; differential планов. |
+| `overlap_plan_text` | 1245–1256 | `ask.rs:438-443` | **E** | `d2o_compose_differential.c`; payload 1 0f, seqovl, order forward. |
+| `reorder_plan_text` | 1271–1279 | `ask.rs:444-448` | **E** | Тот же differential; два split, reverse, pace 12000. |
+| `badsum_fake_plan_text` | 1288–1305 | `ask.rs` compose_badsum_fake_plan | **E** | Payload, poison badsum, fake repeats/gap, order, pace; differential. |
+| `checksum_plan_text` | 1312–1316 | `ask.rs` checksum | **E** | 64×0f + badsum; differential. |
+| `build_decoy_hello` | 1346–1351 | `ask.rs:315-324` | **E** | Modern для MODERN, иначе LEGACY; differential/фикстуры. |
+| `parse_protocol_plan_text` | 1356–1361 | `ask.rs:340-344` | **E** | Decoy hello + badsum; differential. |
+| `duplicates_plan_text` | 1367–1372 | `ask.rs:332-336` | **E** | Decoy hello, repeats=2, gap=20000; differential. |
+| `body_room` | 1384–1388 | `ask.rs:347-352` / fallback | **P*** | C `send_cap-120`, иначе 0; Rust те же 120 в fallback/decoy; отдельного differential нет. |
+| `everything_plan_text` | 1397–1426 | `ask.rs:346-358` | **E** | Fallback «всё сразу»; `d2o_compose_differential.c` и unit. |
+| `d2k_fallback_arms` | 1499–1501 | `r2o_fallback.rs` total | **E** | `r2o-fallback-differential.sh`, `fallback_plans_match_donor`. |
+| `fb_arm_at` | 1504–1540 | `r2o_fallback.rs:114 arm` | **E** | Те же 50 плеч и порядок; differential. |
+| `d2k_fallback_plan` | 1543–1550 | `r2o_fallback.rs:168 plan` | **E** | Обёртка arm→plan; differential. |
+| `d2k_arm_plan` | 1552–1751 | `r2o_fallback.rs`, `classify_measured.rs` | **P** | 50 arm × 5 send_cap покрыты, но произвольные сочетания disorder/oob/seqovl/fake/ttl/tcpts/ipidzero не сравнивались. |
+| `d2k_compose` | 1763–1799 | `ask.rs:305-368 compose_plan_texts` | **E** | Порядок веток, checksum-исключение, fallback; `d2o_compose_differential.c` + unit `ask.rs:689-756`. |
+
 ## Углублённая сверка: d2kc.c (28 функций)
 
 **Прочитано построчно: 28/28 функций, 931 строка C (1–931).**
