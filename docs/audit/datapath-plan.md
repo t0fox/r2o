@@ -142,6 +142,8 @@ transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-со�
 Компиляция проверенного плана в список посылок. R2O: `crates/r2k-core/src/plan/apply.rs`
 (`impl Plan`, `Actions`, `Emission`).
 
+**Прочитано построчно: 15/15 функций, 931 строка C (1–931).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | anchor_offset | 26-80 | 55 | static: вычислить якорь разреза или отказать | `plan/apply.rs:862` `anchor_offset` | E | `sni_middle_anchor_is_clamped_inside_short_payload_and_requires_sni` (tests/apply.rs:96). |
@@ -156,7 +158,7 @@ transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-со�
 | emit_vec_free | 268-272 | 5 | static: освободить массив посылок и owned_bytes | `plan/apply.rs:61` `Emission` (Vec) + `Drop` | E | Владение выражено типами (`Vec<u8>`, `Vec<Emission>`); утечек нет по построению, отдельный free не нужен. |
 | emit_overhead | 285-295 | 11 | static: заголовки IP+TCP/UDP, MD5/TS-опция | `plan/apply.rs:737` `emit_overhead` | E | `max_emit`-тест (tests/apply.rs:251) и `route_segment_cap...` (tests/apply.rs). |
 | d2k_plan_max_emit | 297-341 | 45 | верхняя оценка одной посылки плана | `plan/apply.rs:418` `Plan::max_emit` | E | `assert_eq!(plan.max_emit(), 171)` (tests/apply.rs:251); используется в `r2o_plan_valid`. |
-| d2k_plan_apply | 343-873 | 531 | превратить план+пакет в посылки, судьбу оригинала и причину отказа | `plan/apply.rs:155` `Plan::apply` | P | 17 тестов tests/apply.rs покрывают split/fake/overlay/order/pace/settle/delay/udplen/qsplit/qdeny/oob/metric. Пробелы: `MAX_EMISSIONS = WIRE_BATCH_MAX = 26` (`plan.rs:10`, `apply.rs:9`) против 65536 в C (`plan_apply.c:830`) — R2O отвергает раньше; однако D2O на выдаче в session тоже ограничивает 26 (`D2K_RESULT_MAX`, session.c:2517), поэтому наблюдаемый отказ совпадает, различаются слой и текст ошибки. В OOB-ветви `suffix.wire_profile` остаётся 0: Rust ставит профиль только `first` и `urgent` (`apply.rs:284-285`), а `suffix` создан без него; C на `finalize` проставляет профиль **всем** посылкам (`plan_apply.c:812`). qsplit-ветвь обходит `delay_us`: Rust возвращает `Actions` в `apply.rs:203-260` до блоков pace/settle/delay (`:640-657`), тогда как C применяет `delay_us` после цикла кусков, включая qsplit (`plan_apply.c:803-809`). Лимит 26 — слой R2O: D2O `plan_apply.c` допускает до 65536, но `session.c:2517` всё равно отказывает при >26, поэтому наблюдаемый отказ совпадает. |
+| d2k_plan_apply | 343-873 | 531 | превратить план+пакет в посылки, судьбу оригинала и причину отказа | `plan/apply.rs:155` `Plan::apply` | **P** | 17 тестов tests/apply.rs покрывают split/fake/overlay/order/pace/settle/delay/udplen/qsplit/qdeny/oob/metric. **Подтверждённые расхождения:** (1) OOB-ветвь: Rust ставит `wire_profile` только `first`/`urgent` (`apply.rs:284-285`); `suffix` и его сегменты остаются с 0, C на `finalize` проставляет профиль **всем** посылкам (`plan_apply.c:812`). (2) qsplit-ветвь возвращает `Actions` в `apply.rs:203-250` до `apply_timing`/`wire_profile` (`:636-657`, `:403-405`), поэтому `delay_us` и `wire_profile` к qsplit-посылке не применяются; C применяет оба после цикла (`plan_apply.c:803-812`). (3) `MAX_EMISSIONS = 26` в Rust (`plan.rs:10`, `apply.rs:9,335,704`); C в `plan_apply.c` не ограничивает число посылок 26 — предел 65536 относится только к числу сегментов (`:830`), а отказ >26 приходит позже из `session.c:2517` (`D2K_RESULT_MAX`). Наблюдаемый отказ сессии совпадает, слой и текст ошибки различаются. `emit_fake` C копирует `ts_up/autottl`-поля, Rust переносит `ts_up` через флаг `POISON_TS_UP`, а autottl вычисляет в `ttl` по `reference_ttl` (`apply.rs:764-781`); для одного и того же `reference_ttl` результат совпадает, при смене TTL между apply и отправкой C пересчитал бы, Rust — нет. |
 | d2k_actions_cancel | 891-921 | 31 | правила отмены недосланного исполнения | `plan/apply.rs:104` `Actions::cancel` | E | `cancellation_drops_only_after_payload_bytes_were_emitted` (tests/apply.rs). |
 | d2k_actions_free | 923-931 | 9 | освободить посылки | `plan/apply.rs:61` `Emission` + `Actions` (RAII) | E | Освобождение автоматическое; отдельных ошибок/утечек нет по типам. |
 
@@ -166,14 +168,18 @@ transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-со�
 у OOB-суффикса.
 
 **Построчная сверка a378:** все 15 функций прочитаны. Подтверждены три расхождения
-`d2k_plan_apply` (`plan_apply.c:343-873`) с `apply.rs:155-300/600-670`:
+`d2k_plan_apply` (`plan_apply.c:343-873`) с `apply.rs:155-405/636-735`:
 (1) OOB: C на `finalize` проставляет `wire_profile` всем посылкам (`:812`), Rust — только
-`first` и `urgent`, `suffix` остаётся 0; (2) qsplit: Rust возвращает `Actions` до
-`apply_timing`, поэтому `delay_us` не применяется, C применяет его после всех ветвей
-(`:803-809`); (3) предел `MAX_EMISSIONS=26` в Rust против 65536 в C, но `session.c:2517`
-всё равно отказывает >26, поэтому наблюдаемый отказ совпадает. Остальные helper'ы
-(`anchor_offset`, `split_points`, `tls_ch_layout`, `fake_tls_bytes`, `emit_fake`,
-`max_emit`, `cancel`) совпадают с тестами `tests/apply.rs`.
+`first` и `urgent`; `suffix` и результат его сегментации остаются с профилем 0;
+(2) qsplit: Rust возвращает `Actions` до `apply_timing` и общего присвоения `wire_profile`,
+поэтому `delay_us` и `wire_profile` не применяются; C применяет и паузу, и профиль после
+всех ветвей (`:803-812`); (3) `MAX_EMISSIONS=26` в Rust против отсутствия такого предела
+в `plan_apply.c`: 65536 там ограничивает только число сегментов (`:830`), а отказ >26
+приходит позже из `session.c:2517` (`D2K_RESULT_MAX`) — наблюдаемый отказ сессии совпадает,
+слой и текст ошибки разные. Остальные helper'ы (`anchor_offset`, `split_points`,
+`tls_ch_layout`, `fake_tls_bytes`, `emit_fake`, `max_emit`, `cancel`) совпадают с тестами
+`tests/apply.rs`; autottl в Rust вычисляется в `ttl` по `reference_ttl`, в C хранится
+полями и пересчитывается на отправке.
 
 ---
 
