@@ -2420,6 +2420,8 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 
 ### `core/sched.c`
 
+**Прочитано построчно: 282/282 функции, 6574 строки C (1–6574).** Сверено с `main.rs` (`R2oDiscoverySearches`/`R2oDiscoveryQueue`/`R2oDiscoveryWorker`), `discovery.rs`, `r2o_resource_limit.rs`, `r2o_fallback.rs`, `voice_*`, `groups.rs`, `catalog.rs`; полного C/Rust differential планировщика нет — покрытие по профильным differentials (queue/cooldown/dead/family/own-first/volume/ECH/voice/QUIC).
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
 | `refuse_is_permanent` | 301–312 | 12 | отказ, который не лечится повтором: `TOO_LONG`(3), `NOT_APPLIED`(5), `FLOW_UNFIT`(6) | `main.rs:19088-19099` + `flow_journal.rs:20-23` | **P** | **Подтверждённое расщепление:** C-хелпер вызывается в трёх местах — `local_refusal_verdict` (`sched.c:4487`), `on_refused_foreign` (`:9901`), провал группы (`:10113`). Rust обрабатывает 3/5 как `worker.record_client_unfit()` (`main.rs:19091-19095`), а 6 — отдельно: `r2o_catalog_mark_flow_unfit` + повторная постановка (`:19097-19170`). Единой функции/таблицы нет; группа-провал по коду отказа не сопоставлена. |
