@@ -103,7 +103,7 @@ C-хелперы без собственного состояния наслед
   журнал/`http_replace.rs`, но не повторяет строку `d2kd: HTTP execution ...`.
   Влияние — только диагностика.
 
-## d2kd.c (44 функции)
+## datapath/d2kd.c (44 функции)
 
 Процесс-служба: CLI, NFQUEUE-цикл, raw/sched, hold, HTTP80, ICMP-guard, метрики.
 R2O-владелец: `crates/r2o-datapath/src/main.rs` (`run`, `parse_options`,
@@ -147,16 +147,16 @@ R2O-владелец: `crates/r2o-datapath/src/main.rs` (`run`, `parse_options`,
 | `http80_io_rst` (static) | 757–768 | 12 | raw RST серверу после 307 | `raw.rs:147 send_packet` | P | D17 проверяет сборку RST, не отправку |
 | `http80_cut` (static) | 776–784 | 9 | событие обрыва ответа контроллеру | `hold.rs:255 sweep_http_responses`, `main.rs:3148` | P | `hold.rs:2082 incomplete_fixed_length...` |
 | `http80_step` (static) | 786–829 | 44 | диспетчер HTTP80: DROP/REPLACE/swap/лог | `main.rs:2006 build_http_redirect_packets`, `:2093 send_replacement`, `hold.rs` | P | D17 paired differential; ветви «raw нет» и «swap rejected» покрыты кодом |
-| `usage` (static) | 834–861 | 28 | текст помощи CLI | `main.rs:2952 print_help` | **P** | **C:** `--health-file/--queue/--plan/--log/--control/--mark/--probe-mark/--only-mark/--udp-reverse-hook/--iface/--flows/--queue-len/--copy-range/--sched-slots/--journal/--idle/--stats/--duration/--no-fail-open/--mode`. **R2O:** те же основные, но **нет** `--log`, `--health-file`, `--duration`, `--sched-slots`; добавлены `--family`, `--check`, `--controller-only`, `--control-wire`, `--control-release-id`, `--rcvbuf`, `--both/--queue4/6/--control4/6`, `--r2o-flow-capacity`, `--r2o-udp-reverse-visible`. Текст и состав отличаются. |
-| `arg_u32` (static) | 863–871 | 9 | строгий разбор u32 | `main.rs:2911 parse_value` | P | общий `FromStr`; граничные тесты не выделены |
-| `port_of` (static) | 873–876 | 4 | big-endian u16 | `packet.rs`/`read_u16` (приватный) | P | тривиально; отдельного теста нет |
-| `print_stats` (static) | 878–1030 | 153 | периодическая сводка (процесс, HTTP80, hold, пакеты, ICMP, план, потоки, приветствия, sched, payload, NFQ, NAT, routed, UDP marked, raw, follow, shape misses, plan count, причины) | `main.rs:629-773` десять `r2o_log_*` | **P** | R2O печатает: процесс, очередь, TCP/UDP-таблицы, sched, session (reply_hidden/hello/sni/rst/HTTP keep-alive), payload (без capture), capture, hold, raw, udp_follow. **Не печатает:** HTTP80-статистику, владение приветствием (`hold_owned/resent/resend_fail`), план `applied/done/emitted/deferred/damaged/stale_deferred/sent_lost` (эти счётчики в R2O — N), NAT `ok/miss/none/retry`, routed flows, `udp_marked_kept`, `shape_misses` (всегда 0), `plan_count/capacity`, гистограмму причин (`count_reason` — N). ICMP печатается отдельно `icmp_guard.r2o_stats_line()` (`main.rs:1158`). `test-datapath-stats-timer-differential.sh` есть. |
-| `proto_name` (static) | 1039–1045 | 7 | имя протокола 6/17 | inline в `main.rs` | P | — |
-| `jrn_kind` (static) | 1050–1066 | 17 | код журнала → текст | `flow_journal.rs:85 c_name`, `:100 russian_name` | P | `flow_journal.rs:1027 journal_note_texts_match_d2o` |
-| `print_journal` (static) | 1070–1104 | 35 | печать журнала по записям | `main.rs:3006 format_journal_details` | P | формат отличается; D22 сверяет записи, не печать |
-| `refuse_of_errno` (static) | 1114–1116 | 3 | errno → код REFUSE | `flow_journal.rs:16-23` константы + `main.rs` | P | маппинг SEND/TOO_LONG разнесён по вызывающим |
-| `offline_self_check` (static) | 1118–1123 | 6 | `--offline-self-check` SHA-проверка | нет | N | опция отсутствует в `parse_options` |
-| `main` | 1125–2415 | 1291 | CLI, сокеты, NFQUEUE-цикл, sweep, hold/release, stats | `main.rs:884 run` (и `parse_options` `:2754`) | **P** | Цикл и большинство ветвей есть: NFQUEUE, raw, sched, hold, HTTP80, ICMP, stats, signals, route/cap refresh. **Нет** `--log` (R2O пишет в stderr без freopen), `--health-file` (health-файл не пишется), `--duration` (нет остановки по времени), `--sched-slots` (ёмкость очереди отправки задаётся в коде `scheduler.rs`). C-проверки «apply требует plan или control», «apply требует mark≠0», «probe-mark≠mark» в R2O разнесены по `parse_options`/`run`; `--check` — R2O-расширение. |
+| `usage` (static) | 834–861 | 28 | текст помощи CLI | `main.rs:2952-2984 print_help` | **P** | **Точный состав C (`d2kd.c:834-861`):** `--queue` (обязательно), `--plan`, `--mode observe\|apply`, `--mark M`, `--probe-mark M`, `--only-mark M[/K]\|none`, `--udp-reverse-hook`, `--iface NAME`, `--flows N` (2048, отдельно TCP и UDP), `--queue-len N` (1024), `--copy-range N` (1600), `--sched-slots N` (128), `--journal N` (256), `--control PATH`, `--idle SEC` (120), `--log FILE`, `--stats SEC` (10), `--duration SEC`, `--no-fail-open`. В справке нет `--health-file` и `--version`, хотя парсер их знает. **R2O (`print_help`):** есть `--plan`, `--controller-only`, `--r2o-udp-reverse-visible\|--udp-reverse-hook`, `--queue`, `--idle`, `--r2o-flow-capacity\|--flows`, `--stats`, `--family`, `--mode`, `--mark`, `--iface`, `--probe-mark`, `--only-mark`, `--copy-range` (64..65535), `--queue-len`, `--journal`, `--rcvbuf`, `--control`, `--control-wire v22\|v48`, `--control-release-id`, `--no-fail-open`, `--check`, `--version`, `--help`. **Подтверждённые пробелы:** нет `--log`, `--health-file`, `--duration`, `--sched-slots`; добавлены `--family`, `--controller-only`, `--control-wire`, `--control-release-id`, `--rcvbuf`, `--check`, `--both` (не в help), `--r2o-flow-capacity`, `--r2o-udp-reverse-visible`. Текст и умолчания (`copy-range` 65535 против 1600) отличаются. |
+| `arg_u32` (static) | 863–871 | 9 | строгий разбор u32 через `strtoul(v,&end,0)`: база 0 (десятичное/0x hex/ведущий 0 — восьмеричное), `*end==0`, `n<=0xffffffff` | `main.rs:2911-2923 parse_value`; `:2929-2937 parse_mark`; `:2939-2950 parse_only_mark` | **P** | **Подтверждённые расхождения синтаксиса:** C `strtoul(...,0)` принимает `0x10`, `010` (восьмеричное 8), ведущие пробелы и знак `+`/`-`; пустая строка даёт `end==v`, `*end=='\\0'`, `n=0` — **принимается как 0**. Rust `parse_value::<u32>` — строгий `FromStr`: только десятичное, без пробелов/знака/пустой строки; `parse_mark` дополнительно принимает только `0x`/`0X` hex, но не восьмеричное и не пробелы. Для `--mark/--probe-mark/--only-mark` C и Rust понимают hex, но расходятся на пустой строке, `010`, `+1`, ` 1`. Граничные тесты в Rust не выделены. |
+| `port_of` (static) | 873–876 | 4 | big-endian u16: `b[0]<<8 \| b[1]` | `r2k-core/src/packet.rs:138-139` (`read_u16` TCP), `main.rs:2989-2990` (`u16::from_be_bytes` в журнале) | **E*** | **Точное совпадение:** C читает сетевой порядок как `(b[0]<<8)\|b[1]` (`d2kd.c:873-876`); Rust `read_u16`/`from_be_bytes` дают то же значение. Используется в `print_journal` (`1092-1093`) и разборе UDP-заголовка (`1776-1777,1804-1805`), в Rust — в `format_journal_key` и `PacketView::tcp_segment`/UDP-разборе. |
+| `print_stats` (static) | 878–1030 | 153 | периодическая сводка: процесс, HTTP80, hold, владение приветствием, пакеты, ICMP, план applied/done/emitted/deferred/damaged/stale/sent_lost, TCP/UDP-потоки, приветствия/обмены/подозрения, reply hidden, sched, обрезано/без нагрузки/без заголовка, payload, keep-alive, снимки, lost/verdict/send/recv, NAT, routed, udp_marked, raw, follow, shape misses, plan count, причины | `main.rs:629-773` (`r2o_log_process_stats`, `r2o_log_queue_stats`, `r2o_log_flow_table_stats`, `r2o_log_scheduler_stats`, `r2o_log_session_stats`, `r2o_log_payload_stats`, `r2o_log_capture_stats`, `r2o_log_hold_stats`, `r2o_log_raw_stats`, `r2o_log_udp_follow_stats`), `r2o_icmp_guard.rs:153-161` | **P** | **Совпадает дословно/по полям:** процессор/RSS (`r2o_process_stats_line` — та же формула `cpu_ms/10/сек` и остаток), hold (`started/ready/released/timed_out/timed_out_packets/plan_changed/dropped_all/joined/mismatched/sided/full/pending`), пакеты/байты/принято/снято, ICMP, TCP/UDP-потоки и отказы, reply hidden, sched count/refusals, truncated/no_payload/no_header, payload (reverse/after_hello/late/not_hello/first_byte/sni_next_seg/HTTP keep-alive), снимки, lost, raw sent/errors/busy, UDP follow refused/busy/queue_full/route notifications. **Подтверждённые пробелы:** (1) нет HTTP80-строки (`requests/injections/evicted/untracked/unparsed/later`); (2) нет `hold_owned/hold_resent/hold_resend_fail`; (3) нет `applied/done/emitted/deferred/immediate/late/damaged/stale_deferred/sent_lost` — в R2O этих агрегатов нет; (4) нет `verdict_fail/recv_err` отдельными числами; (5) нет NAT `ok/miss/none/retry`; (6) нет `routed_flows` и `udp_marked_kept`; (7) `shape_misses` и `plan_count/capacity` в `NamePlans` есть (`control.rs:178-195`), но в сводку не выводятся; (8) нет гистограммы причин (`count_reason` — N). ICMP выводится отдельно только при `seen/noted != 0`. `test-datapath-stats-timer-differential.sh` покрывает таймер, не состав. |
+| `proto_name` (static) | 1039–1045 | 7 | `6→tcp`, `17→udp`, иначе `?` | нет прямого аналога; `format_journal_key` (`main.rs:2986-3000`) печатает адреса/порты без имени протокола | **P** | C использует `proto_name` только в `print_journal` (`d2kd.c:1091`); Rust `format_journal_key` не выводит `tcp/udp/?`, а сразу пару адресов. Функция тривиальна, но текстовое представление журнала различается (см. `print_journal`). |
+| `jrn_kind` (static) | 1050–1066 | 17 | коды журнала → тексты: HELLO_SNI «приветствие», HELLO_NONAME «приветствие без имени», PLAN_APPLIED «план применён», PLAN_REFUSED «план не применён», SUSPECT «подозрение», EXCHANGE «обмен пошёл», SHAPE «снята форма приветствия», PLAN_DONE `""`, PLAN_UNSENT «посылка не ушла», PLAN_DAMAGED «поток испорчен», default «запись неизвестного вида» | `flow_journal.rs:85-98 c_name`, `:100-123 russian_name` | **P** | **Совпадают:** `PLAN_APPLIED`, `PLAN_REFUSED`, `SUSPECT`, `EXCHANGE`, `SHAPE`, `PLAN_DONE` (пустая строка), `PLAN_UNSENT`, `PLAN_DAMAGED` — те же русские тексты (`flow_journal.rs:85-98`). **Подтверждённые расхождения:** (1) у C есть отдельный `D2K_JRN_HELLO_NONAME` → «приветствие без имени»; в Rust один `R2oFlowJournalKind::Hello` → «приветствие», имя с `name_len==0` печатается пустым, и вид не отличает отсутствие имени; (2) C default → «запись неизвестного вида», Rust `c_name` для R2O-only видов уходит в `russian_name` (например, «наблюдение», «подозрение голосового UDP-потока»), то есть неизвестного вида не бывает. `journal_note_texts_match_d2o` (`flow_journal.rs:1027`) проверяет тексты suspect/refuse, не `jrn_kind`. |
+| `print_journal` (static) | 1070–1104 | 35 | один раз в конце: пусто → «журнал пуст»; шапка «--- журнал: N записей, затёрто D ---»; строка `%6llu мс  proto low:port - high:port  kind name: note` | `main.rs:1140-1173` (перебор `flow_journal.iter()` в ветке STOP), `:2986-3000 format_journal_key`, `:3006-3075 format_journal_details` | **P** | **Совпадает:** печать один раз при завершении, порядок от старых к новым, имя только при `name_len != 0`, пояснение только при непустом виде. **Подтверждённые отличия формата:** (1) C печатает время в **мс** от старта, Rust — `[{} нс]`; (2) C печатает `proto` (`tcp/udp/?`), Rust `format_journal_key` — сразу `client:port → server:port`, без протокола и в направлении клиент→сервер, а не канонической паре low-high через дефис; (3) C при пустом журнале печатает «журнал пуст», Rust не печатает ничего; (4) C печатает шапку с числом записей и `dropped`, Rust шапки нет; (5) C печатает `note` записи, Rust — `format_journal_details` по виду (план/попытка/исполнение, причина отказа, TTL и т.п.). D22 сверяет записи журнала, не текстовую печать. |
+| `refuse_of_errno` (static) | 1114–1116 | 3 | `EMSGSIZE → D2K_REFUSE_TOO_LONG`, иначе `D2K_REFUSE_SEND` | `main.rs:3904-3950` (`r2o_first_oversized_emit` → `R2O_JOURNAL_REFUSE_TOO_LONG`), `:4024-4041` (raw send error → `R2O_JOURNAL_REFUSE_SEND`), `:3974-3987` (queue full → `REFUSE_QUEUE`) | **P** | **Подтверждённое отличие:** C классифицирует **фактический** `errno` от `send`/`sendto`: `EMSGSIZE` → «посылка длиннее способа отправки», всё остальное → «ядро отвергло посылку». Rust проверяет предел маршрута **до** отправки (`r2o_first_oversized_emit` → `TOO_LONG`), а любую ошибку `raw.send_packet` относит к `REFUSE_SEND` (`main.rs:4040`, `4148`, `4188`). Если `sendto` вернёт `EMSGSIZE` при неизвестном/устаревшем кэше MTU, C запишет `TOO_LONG`, Rust — `SEND`; `raw.rs:208-216` при этом лишь понижает кэш и повторяет, а окончательный код остаётся `SEND`. Отдельного differential на коды нет. |
+| `offline_self_check` (static) | 1118–1123 | 6 | `--offline-self-check`: `D2K_CTL_PROTO_VERSION == D2K_RUNTIME_WIRE` и SHA-256("abc") равна эталону; иначе -1 | нет | **N** | C вызывает проверку через `d2k_runtime_offline(argc, argv, "d2kd", offline_self_check)` до разбора опций (`d2kd.c:1127-1128`); Rust `parse_options` такой опции не знает (`main.rs:2784-2873`), `--offline-self-check` завершится «неизвестный параметр». Ни SHA-256("abc"), ни сверки `PROTOCOL_VERSION` с `D2K_RUNTIME_WIRE` в датапате нет. |
+| `main` | 1125–2415 | 1291 | CLI, план, raw, NFQUEUE, control, session, HTTP80, hold/release, route/cap, цикл, sweep, stats, shutdown | `main.rs:884-2707 run`, `:2754-2897 parse_options`, `:3775-3788 load_plan`, `:3081-3091 needs_raw_socket` | **P** | **Перенесено:** `--version` (свой бренд), NFQUEUE, raw (при `needs_raw_socket`), `--only-mark`/route-gate, rtnetlink-watch + опрос, adopt egress MTU, control + snapshot-сокет, name-plans, hold/UDP-hold/deferred verdicts/resends/follow, ICMP-guard, session/HTTP/voice/QUIC, sched, TCP-hold/release, delayed UDP, stats, signals, shutdown. **Подтверждённые отличия:** (1) нет `--health-file` — C пишет heartbeat `d2k_runtime_heartbeat(health_path,…)` **каждый проход цикла** (`d2kd.c:1477`), Rust health-файла не пишет; (2) нет `--log` — C делает `freopen(log_path,"a",stdout/stderr)` + `setvbuf(_IOLBF)` (`1236-1245`), Rust всегда stderr; (3) нет `--duration` — C выходит по `t-start >= duration_s` (`1483-1485`), Rust не имеет; (4) нет `--sched-slots` — C `d2k_sched_new(slots=128, raw_maxlen)` (`1347`), Rust `ScheduledQueue::default()` = 128 слотов, `slot_size=65536` (`scheduler.rs:9,84-85,440-444`), опция отсутствует; (5) `--copy-range`: C 64..`MAX_PKT=1600` (`1211-1214`), Rust 64..65535 (`2876-2878`); (6) C в apply **всегда** требует `--plan` или `--control` (`1215-1221`) и **всегда** `--mark != 0` (`1222-1230`); Rust `load_plan` в apply без `--plan` читает `/etc/r2o/plans/current.r2op` (`3775-3787`), а `needs_raw_socket` требует mark только для TCP/voice/спец-QUIC/control (`3081-3091`) — UDP-план без control может пойти с mark=0; (7) C читает план не более 64 КиБ (`1258-1265`), Rust `std::fs::read` без явного предела (`3783`); (8) C ставит `SO_TIMESTAMP` на NFQUEUE (`1313-1319`), в Rust `SO_TIMESTAMP` не найден; (9) C создаёт `d2k_session_new(flows, journal)` и `http80`, затем `ct_probe(sess,1)` (`1333-1341`); Rust ведёт отдельные таблицы и `R2oConntrackClient::open` + проверку `/proc/net/nf_conntrack` (`1043-1055`); (10) C зовёт `ct_probe(sess,0)` при каждом обновлении маршрутов (`1556`), Rust только переоткрывает conntrack, если его не было (`1376-1383`); (11) C опрашивает control-listen/peer в том же `poll` (`1523-1536,1561-1571`), Rust обрабатывает control после приёма очереди, из-за чего команда может ждать до 200 мс; (12) C раз в секунду шлёт `EVENT_STATS` с `dropped/sent` (`2329-2352`), Rust `EVENT_STATS` не отправляет (grep по датапату — только whitelist/tests); (13) C при завершении дренирует sched с `UINT64_MAX`, owned→`ECANCELED`, named pending→`exec_failed(QUEUE)`, считает `stale_deferred` (`2369-2388`); Rust в ветке STOP снимает pending-карты и hold, но `flush_scheduled` не вызывает (`1083-1174`), поэтому записи sched без записи в pending-картах могут не быть разобраны; (14) C печатает итоговый `print_stats` + `print_journal` (`2389-2391`), Rust — набор `r2o_log_*` и перебор журнала (`1140-1173`); (15) Rust добавил `--family`, `--controller-only`, `--control-wire`, `--control-release-id`, `--rcvbuf`, `--check`, `--both`, `--r2o-flow-capacity`, `--r2o-udp-reverse-visible`, которых у C нет. Проверки `probe-mark != mark` совпадают (`1231-1234` ↔ `2884-2886`). |
 
 ### Углублённая сверка d2kd.c (44 функции)
 
@@ -208,7 +208,8 @@ R2O-владелец: `crates/r2o-datapath/src/main.rs` (`run`, `parse_options`,
   `raw.rs:147`, P. `out_send_at`/`out_send_at_owned` (686–709) —
   отложенная отправка без/с владением ID; Rust
   `scheduler.rs:209/214`, P + D21. `refuse_of_errno` (1114–1116) —
-  EMSGSIZE→TOO_LONG, иначе SEND; Rust константы + вызывающие, P.
+  EMSGSIZE→TOO_LONG, иначе SEND; Rust проверяет предел до отправки,
+  а ошибку `sendto` относит к SEND (`main.rs:3904-3950,4040`), P.
 - **HTTP80:** `http80_log` (717–728) — текст «вставка провайдера»;
   Rust событие `send_http_portal_event`, P. `http80_io_payload`/
   `http80_io_accept`/`http80_io_rst` (733–768) — ACCEPT с заменой,
@@ -216,32 +217,37 @@ R2O-владелец: `crates/r2o-datapath/src/main.rs` (`run`, `parse_options`,
   `http80_cut` (776–784) — событие обрыва; Rust
   `hold.rs:255`/`main.rs:3148`, P. `http80_step` (786–829) —
   DROP/REPLACE/swap; Rust `main.rs:2006/2093` + `hold.rs`, P + D17.
-- **CLI/вывод:** `usage` (834–861) — см. строку: R2O не имеет
+- **CLI/вывод:** `usage` (834–861) — R2O не имеет
   `--log/--health-file/--duration/--sched-slots`, добавляет
   `--family/--check/--controller-only/--control-wire/--rcvbuf/
-  --both`. `arg_u32` (863–871) — `strtoul(...,0)`; Rust
-  `parse_value`, P. `port_of` (873–876) — BE u16; Rust `read_u16`,
-  P. `print_stats` (878–1030) — см. строку: R2O не печатает HTTP80,
-  hold ownership, план applied/done/damaged/stale/sent_lost, NAT,
-  routed, udp_marked, shape_misses, plan count, гистограмму причин.
-  `proto_name` (1039–1045) — tcp/udp/?; Rust inline, P.
-  `jrn_kind` (1050–1066) — имена видов; Rust `c_name`/
-  `russian_name`, P. `print_journal` (1070–1104) — печать журнала;
-  Rust `format_journal_details`, P.
+  --both` и др. `arg_u32` (863–871) — `strtoul(...,0)` принимает
+  hex/восьмеричное/пробелы/пустую строку; Rust `parse_value`
+  десятичный, `parse_mark` — десятичный/0x, P.
+  `port_of` (873–876) — BE u16, Rust `read_u16`/`from_be_bytes`, E*.
+  `print_stats` (878–1030) — R2O не печатает HTTP80, hold ownership,
+  план applied/done/damaged/stale/sent_lost, NAT, routed, udp_marked,
+  shape_misses, plan count, гистограмму причин; остальные группы
+  совпадают. `proto_name` (1039–1045) — tcp/udp/?; Rust не печатает
+  протокол. `jrn_kind` (1050–1066) — нет отдельного
+  «приветствие без имени» и default «запись неизвестного вида».
+  `print_journal` (1070–1104) — Rust печатает нс, `client→server`,
+  без протокола/шапки/`note`.
 - **Самопроверка:** `offline_self_check` (1118–1123) — SHA-256("abc")
   и версия провода; Rust-опции `--offline-self-check` нет. **N.**
 - **`main` (1125–2415):** CLI, план, raw, NFQUEUE, control, session,
   http80, sched, signals, цикл. Нет `--log`/`--health-file`/
   `--duration`/`--sched-slots`; health-файл не пишется, остановки по
-  времени нет, лог не переоткрывается. Остальные ветви (apply
-  требует plan/control, mark≠0, probe-mark≠mark, SO_TIMESTAMP,
-  stats/idle/sched/hold/http80/routes/cap) перенесены — P.
+  времени нет, лог не переоткрывается; `SO_TIMESTAMP` на NFQUEUE не
+  ставится. `EVENT_STATS` раз в секунду не отправляется; shutdown не
+  дренирует sched так, как C. Остальные ветви (NFQUEUE, raw, control,
+  hold/release, HTTP, ICMP, stats, route/cap) перенесены — P.
 
 **Итог:** 44 функции; N — `count_reason`, `offline_self_check`
 (диагностика/CLI), остальные P/E с подтверждёнными пробелами
-CLI-логирования, health-файла, duration и состава сводки.
+CLI-логирования, health-файла, duration, состава сводки,
+`EVENT_STATS` и shutdown-дренажа sched.
 
-## session.c (107 функций)
+## datapath/session.c (107 функций)
 
 Склейка датапата: таблицы TCP/UDP, разбор TLS/QUIC/STUN/voice, выбор плана,
 сборка посылок, hold, детекторы молчания, учёт исполнения. R2O-владельцы:
@@ -360,7 +366,7 @@ CLI-логирования, health-файла, duration и состава сво
 | `d2k_session_payload_stats` | 3617–3638 | 22 | разбор нагрузки: причины, HTTP, capture | `engine.rs` `R2oTcpPayloadStats` | P | `r2o-tcp-payload-stats-differential.sh` |
 | `d2k_session_journal` | 3640–3642 | 3 | доступ к журналу | `flow_journal.rs:543 R2oFlowJournal` | P | D22 |
 
-## track.c (18 функций)
+## datapath/track.c (18 функций)
 
 Таблица потоков: открытая адресация, FNV-1a, удаление сдвигом, порог 3/4.
 R2O заменил структуру на `HashMap`, сохранив ключ, ёмкость и порог отказов.
@@ -388,7 +394,7 @@ R2O заменил структуру на `HashMap`, сохранив ключ,
 | `d2k_track_capacity` | 331–333 | 3 | физическая ёмкость (степень 2) | `engine.rs:434 r2o_tcp_flow_capacity` | **E** | Прямой getter `flow_capacity.slots()`; тест `flow_capacity.rs:45` проверяет округление. |
 | `d2k_track_refusals` | 335–337 | 3 | счётчик отказов вставки | `engine.rs:438 r2o_tcp_flow_refusals` | **P** | Прямой getter; инкремент в `track_packet_mode` при `len >= limit`. Есть `test-datapath-tcp-capacity-differential.sh`, но в этом проходе он не перезапускался; статус P. |
 
-## capture.c (6 функций)
+## datapath/capture.c (6 функций)
 
 Сборка ClientHello/HTTP-заголовка по seq: TTL, generation, anchor, перекрытия,
 конфликт → poison. R2O: `crates/r2o-datapath/src/capture.rs`.
@@ -404,7 +410,7 @@ R2O заменил структуру на `HashMap`, сохранив ключ,
 | `tls_ready` (static) | 109–118 | 10 | критерий целой TLS-записи (1 запись, длины) | `capture.rs:673 tls_ready` | **E** | Точное совпадение: `n>=2 && b[1]!=3`, `n>=6 && b[5]!=1`, `total=5+u16`, `9..=4096`, `high>total`, `hs+9==total`, `n==total`; тест `capture.rs:1209`. |
 | `d2k_capture_feed` | 119–124 | 6 | feed с TLS-критерием `tls_ready` | `capture.rs:446 feed` | **E** | Тонкая TLS-обёртка: C `feed_ready(..., tls_ready)`, Rust `feed(..., CaptureMode::Tls, visible=true)`. Для пользовательского TLS-трафика `feed_ready` эквивалентен; общий HTTP-путь — P (см. выше). |
 
-### capture.c: построчная сверка
+### datapath/capture.c: построчная сверка
 
 - **`same` (4–6) ↔ `TcpFlowKey: Eq`:** C `d2k_key_equal`, Rust
   `capture.rs:14`. E; используется всеми capture-тестами.
@@ -426,7 +432,7 @@ R2O заменил структуру на `HashMap`, сохранив ключ,
 - **`d2k_capture_feed` (119–124) ↔ `capture.rs:446`:** TLS-обёртка;
   E для TLS, HTTP-путь наследует P `feed_ready`.
 
-## hold.c (12 функций)
+## datapath/hold.c (12 функций)
 
 Удержание TCP-сегментов до сборки приветствия/HTTP-заголовка: слоты, дедлайн,
 ревизия плана, порядок оригиналов, ready-batch. R2O: `hold.rs`.
@@ -448,7 +454,7 @@ R2O заменил структуру на `HashMap`, сохранив ключ,
 | `http_ready` (static) | 93–100 | 8 | готовность HTTP-заголовка; полный заголовок без Host → -1 | `hold.rs:695 http_ready`, `:1343 incomplete_http_head` | **P** | C `d2k_http_request` vs Rust `request_host_range`: Rust требует полностью закрытые заголовки (`find_crlf`), C может вернуть 1 при завершённой строке Host без пустой строки; Rust отвергает `#` и target ≥2048, C — нет; см. также `capture.c`. Тест `hold.rs:2374`. |
 | `d2k_hold_feed` | 101–236 | 136 | приём сегмента: flush, слот/сторона, лимиты 8×1600, capture, выбор головы, порядок оригиналов, синтетическая голова | `hold.rs:356 feed_observing_mode`, `:1348 synthetic_packet` | **P** | **Совпадает:** константы `HOLD_SLOTS=16`, `HOLD_PACKETS=8`, `HOLD_PACKET_BYTES=1600`, `HOLD_WAIT=100 мс`; флаги `~0x18`/ACK, `ack`, лимит пакетов, capture TLS/HTTP, поиск головы по sequence, stable-сортировка оригиналов по `seq-hello_seq`, synthetic head и пересчёт IP total. **Отличия:** C получает готовый `allow_start` и `anchor/have_anchor` от сессии; Rust сам ведёт `syns`/`http_requests`, проверяет `attempted/saw_hello`, различает `observe_tls/observe_http/own_packets` и поддерживает `OwnedReady`/HTTP-response. Ветви старта/якоря/наблюдения/owned не покрыты одним C/Rust differential; тесты `hold.rs:1458/2126/2167` подтверждают split/out-of-order/order. P. |
 
-### hold.c: построчная сверка
+### datapath/hold.c: построчная сверка
 
 - **`r32` (17) ↔ `packet.rs:236`:** BE u32; Rust bounds-checked.
   P — отдельного теста helper'а нет, но `parse_tcp` получает поля из
@@ -490,7 +496,7 @@ R2O заменил структуру на `HashMap`, сохранив ключ,
   покрыты одним C/Rust differential; split/out-of-order/order
   подтверждены `hold.rs:1458/2126/2167`. P.
 
-## udp_hold.c (10 функций)
+## datapath/udp_hold.c (10 функций)
 
 Ограниченное владение NFQUEUE ID для сборки QUIC ClientHello: слоты, дедлайн,
 пачки, переполнение. R2O: `r2o_udp_hold.rs` (`R2oUdpHoldTable`).
@@ -510,7 +516,7 @@ R2O заменил структуру на `HashMap`, сохранив ключ,
 | `d2k_udp_hold_take` | 98–113 | 16 | забрать пачку по ключу, очистить слот; `now_ns` не используется | `:198 r2o_take` | **P** | C копирует `d2k_udp_hold_batch` и чистит слот; Rust возвращает `Option<R2oUdpHoldBatch>`, слот забирает через `Option::take`. Истёкшие слоты оба не трогают — C требует предварительного flush, Rust вызывает `r2o_flush` отдельно. |
 | `d2k_udp_hold_next_ns` | 115–123 | 9 | абсолютный минимальный deadline (ns), 0 если пусто | `:240 timeout_ms` | **P** | C отдаёт абсолютные ns; Rust — относительные ms с `max_ms` и `0` при `deadline<=now`/`max_ms<=0`. Для poll эквивалентно, отдельного absolute-getter нет. |
 
-### udp_hold.c: построчная сверка
+### datapath/udp_hold.c: построчная сверка
 
 - **Константы:** C `SLOTS=16`, `PACKETS=8`, `PACKET=1600`,
   `WAIT=100 мс`; Rust `R2O_UDP_HOLD_SLOTS=16`,
@@ -540,7 +546,7 @@ R2O заменил структуру на `HashMap`, сохранив ключ,
   Поведение hold-таблицы проверяется косвенно через `main.rs`
   (`r2o-udp-session-table-check.sh` и UDP differentials).
 
-## udp_path.c (7 функций)
+## datapath/udp_path.c (7 функций)
 
 Транзакция UDP-hold вокруг решения сессии и выпуск/повтор пачек.
 R2O: `main.rs` (`r2o_release_udp_batch*`, `r2o_udp_handle_late_tail`),
@@ -558,7 +564,7 @@ R2O: `main.rs` (`r2o_release_udp_batch*`, `r2o_udp_handle_late_tail`),
 | `d2k_udp_path_passed` | 76–88 | 13 | пассивный проход: IPv4, len≥20, `udp_opening`, neutral, follow_mark(0,seq) | `main.rs:108 r2o_udp_mark_plain_pass` | **P** | Rust дополнительно требует `view.protocol==17` и `fragment & 0x3fff == 0` через `PacketView`, C проверяет только `len>=20` и версию IPv4; C `d2k_udp_out_neutral` и Rust `r2o_udp_packet_is_neutral` учитывают route/probe mark. `follow_mark(...,0,seq)` ↔ `follow.r2o_mark(packet, now, None, receive_seq)`. P. |
 | `d2k_udp_path_planned` | 90–97 | 8 | плановая посылка: те же проверки + follow_mark(at_ns,seq) | `main.rs:131 r2o_udp_mark_planned` | **P** | То же отличие proto/fragment; `at_ns` ↔ `Option<Instant> at`, `seq` ↔ `receive_seq`. Отдельного differential на planned-путь с `at` нет. |
 
-### udp_path.c: построчная сверка
+### datapath/udp_path.c: построчная сверка
 
 - **`d2k_udp_path_release` (6–13) ↔ `r2o_release_udp_batch`
   (`main.rs:153`):** C закрывает session-hold (`udp_hold_active=0`) и
@@ -592,7 +598,7 @@ R2O: `main.rs` (`r2o_release_udp_batch*`, `r2o_udp_handle_late_tail`),
   отличия proto/fragment; `at_ns` ↔ `Option<Instant>`, `seq` ↔
   `receive_seq`. P.
 
-## udp_release.c (34 функции)
+## datapath/udp_release.c (34 функции)
 
 Очередь отложенных вердиктов, судьбы повторной отправки пачки, окно follow
 (5 мс), нейтральность метки, out_batch/out_late. R2O: `r2o_udp_hold.rs`
@@ -638,7 +644,7 @@ R2O: `main.rs` (`r2o_release_udp_batch*`, `r2o_udp_handle_late_tail`),
 | `d2k_udp_out_batch` | 442–473 | 32 | выпуск пачки: may, marked, follow, failed | `main.rs:153 r2o_release_udp_batch` | P | — |
 | `d2k_udp_out_late` | 475–509 | 35 | поздний хвост: follow, defer, resend | `main.rs:226 r2o_udp_handle_late_tail` | P | — |
 
-### udp_release.c: построчная сверка
+### datapath/udp_release.c: построчная сверка
 
 - **Очередь `d2k_udp_release_new/enqueue/next_due/flush/next_ns`
   (29–133) ↔ `R2oUdpDeferredVerdicts` (`r2o_udp_hold.rs:283`):** C
@@ -698,7 +704,7 @@ R2O: `main.rs` (`r2o_release_udp_batch*`, `r2o_udp_handle_late_tail`),
   нет `noted`, `marked`-callback и `defer` в `release_batch_with`.
   P — нужен differential на late-tail/ENOSPC/owned.
 
-## nfq.c (12 функций)
+## datapath/nfq.c (12 функций)
 
 NFQUEUE: netlink bind/params с ACK, SO_RCVBUF(FORCE), recv ENOBUFS, вердикты.
 R2O: `nfqueue.rs`, `netlink.rs`.
@@ -720,7 +726,7 @@ R2O: `nfqueue.rs`, `netlink.rs`.
 | `d2k_nfq_verdict_payload` | 294–311 | 18 | вердикт с заменой до 2048 байт | `nfqueue.rs:317 send_replacement` | **E** | C `d2k_nl_verdict_payload` + `nl_write`; Rust `verdict_payload(NF_ACCEPT)` + `send_to_kernel`; лимит буфера 64+2048. Тесты `netlink.rs:321`. |
 | `d2k_nfq_lost` | 313–315 | 3 | счётчик потерянных пакетов | `nfqueue.rs:271 lost_packets` | **E** | C `q->lost`, Rust `Cell<u64>` с saturating_add; тест `:492`. |
 
-### nfq.c: построчная сверка
+### datapath/nfq.c: построчная сверка
 
 - **`say` (33–41) ↔ `io::Error`:** C `vsnprintf` в `err/cap`;
   Rust возвращает ошибку, вызывающий логирует. P — текст не сверяется.
@@ -751,7 +757,7 @@ R2O: `nfqueue.rs`, `netlink.rs`.
   `record_verdict`, `Cell<u64>`. E, тесты `netlink.rs:304/321`,
   `nfqueue.rs:492`.
 
-## nl.c (19 функций)
+## datapath/nl.c (19 функций)
 
 Netlink/NFQUEUE кодек: итератор сообщений, атрибуты пакета, сборка вердиктов и
 конфигурации. R2O: `netlink.rs`.
@@ -780,7 +786,7 @@ Netlink/NFQUEUE кодек: итератор сообщений, атрибут�
 | `d2k_nl_cfg_cmd` | 254–273 | 20 | CONFIG BIND/UNBIND, ACK | `netlink.rs:219 config_command` | E | `:332` |
 | `d2k_nl_cfg_params` | 275–309 | 35 | PARAMS/MAXLEN/FLAGS/MASK | `netlink.rs:234 config_params` | E | `:332` |
 
-### nl.c: построчная сверка
+### datapath/nl.c: построчная сверка
 
 - **`align4/h16/h32/wh16/wh32/n16/n32/wn16/wn32` (10–35) ↔
   `netlink.rs`:** C `align4` без проверки переполнения, Rust
@@ -810,7 +816,7 @@ Netlink/NFQUEUE кодек: итератор сообщений, атрибут�
   BIND/UNBIND с ACK, params copy_range+copy_mode, MAXLEN, FLAGS, MASK
   (FAIL_OPEN|GSO). E, тесты `:304/321/332`.
 
-## icmpguard.c (7 функций)
+## datapath/icmpguard.c (7 функций)
 
 Отсечение ICMP time-exceeded на свои фальшивки с пониженным TTL.
 R2O: `r2o_icmp_guard.rs`.
@@ -827,7 +833,7 @@ R2O: `r2o_icmp_guard.rs`.
 | `d2k_icmpguard_dropped` | 112 | 1 | счётчик снятых | `:149 r2o_dropped` | **E** | Прямой getter; `u64` saturating/wrapping-add. |
 | `d2k_icmpguard_noted` | 113 | 1 | счётчик запомненных | `:145 r2o_noted` | **E** | Прямой getter; `u64` saturating/wrapping-add. |
 
-### icmpguard.c: построчная сверка
+### datapath/icmpguard.c: построчная сверка
 
 - **`d2k_icmpguard_init`/`u16`/`dropped`/`noted` (6–10, 112–113):**
   C `memset`, BE-u16, getters; Rust `Default`, `from_be_bytes`,
@@ -852,7 +858,7 @@ R2O: `r2o_icmp_guard.rs`.
   `r2o_seen`, `r2o_stats_line` не имеют отдельных C-функций в
   `icmpguard.c`; в C их роль выполняет вызывающий код.
 
-## http80.c (30 функций)
+## datapath/http80.c (30 функций)
 
 Провайдерская вставка в HTTP/80: таблица потоков, RTT по SYN/SYN-ACK, потоковый
 разбор запроса/ответа, портал, 307+HTTPS name, RST. R2O: `hold.rs` (HTTP
@@ -894,7 +900,7 @@ observation), `control.rs` (https names), `http_replace.rs` (пакеты),
 | `d2k_http_request` | 551–632 | 82 | строгий разбор запроса: метод, origin-form, Host:80, LDH, не IPv4 | `httpup.rs:180 r2o_http_plan_request`, `:220 parse_request` | P | тесты httpup; полный набор отказов C не сверен |
 | `d2k_http_hello` | 634–640 | 7 | host_off/host_len из запроса | `httpup.rs:175 request_host_range` | P | — |
 
-### http80.c: построчная сверка
+### datapath/http80.c: построчная сверка
 
 - **`d2k_http80_new/free/get_stats` (67–79) ↔ `HoldTable` +
   `NamePlans`:** C один `calloc` на 128 flow + 256 имён; Rust
@@ -975,7 +981,7 @@ observation), `control.rs` (https names), `http_replace.rs` (пакеты),
   `#`/target<2048, требует полные заголовки, иначе обрабатывает
   Host/CL/TE. P — полный набор отказов C не сверен.
 
-## http_trace.c (1 функция)
+## datapath/http_trace.c (1 функция)
 
 **Прочитано построчно: 1/1 функция, 50 строк C (1–50).** Сверено: в `crates/` нет строки `HTTP execution`, функции `d2k_http_trace` или `http_trace`; R2O использует `HttpPortalEvent`/`HttpResponseEvent` и журнал `flow_journal`, поэтому текстовый формат не портирован.
 
@@ -983,7 +989,7 @@ observation), `control.rs` (https names), `http_replace.rs` (пакеты),
 |---|---|---|---|---|---|---|
 | `d2k_http_trace` | 9–50 | 42 | строка `d2kd: HTTP execution host=... IPv4/6 [src]:cport -> [dst]:80 seq=... hook/mark/outdev/status/prepared/plan/execution/planned/raw_sent/queued/original/output_failed/reason` | нет: grep `HTTP execution` по R2O пуст | **N** | C: TCP/80, method заглавными + пробел, `d2k_http_request` иначе `host=<unparsed>`, `inet_ntop`, plan hex или `-`, status `OBSERVE/SKIPPED/FAILED/PENDING/COMPLETE`, seq/hook/mark/outdev, execution, planned/sent/queued, original `ACCEPT/DROP`, output_failed, reason; возвращает длину с усечением до `cap-1`. В R2O есть события портала/ответа и журнал, но **нет** этой текстовой строки; N подтверждён. |
 
-## journal.c (14 функций)
+## datapath/journal.c (14 функций)
 
 Кольцо журнала наблюдений: kinds, коды suspect/refuse, очистка имени, plan/trial/
 execution/binding, added/dropped. R2O: `flow_journal.rs`.
@@ -1007,7 +1013,7 @@ execution/binding, added/dropped. R2O: `flow_journal.rs`.
 | `d2k_journal_dropped` | 198–200 | 3 | вытеснено | `:1006 dropped` | E | — |
 | `d2k_journal_added` | 202–204 | 3 | добавлено всего | `:1010 added` | E | — |
 
-## nat.c (5 функций)
+## datapath/nat.c (5 функций)
 
 Внешний адрес/порт из `/proc/net/nf_conntrack`: разбор строк, «лучшая запись» по
 TTL, отличие «нет таблицы» от «нет записи». R2O: `proc_nat.rs`.
@@ -1022,7 +1028,7 @@ TTL, отличие «нет таблицы» от «нет записи». R2O:
 | `parse_address` (static) | 75–82 | 8 | IPv4 через `parse_ip4`, IPv6 через `inet_pton`, out[16] занулён | `:134 parse_address` | **P** | C `memset(out,0,16)`, v6 `inet_pton(AF_INET6)`, v4 `parse_ip4` + 4 байта. Rust `Ipv6Addr::from_str` / `parse_ipv4`, 16-байтный массив. Оба не принимают `%zone`; unit-теста нет. |
 | `d2k_nat_outside_family` | 84–194 | 111 | fopen; 1 — нет таблицы, -1 — нет записи, 0 — найдено; строки >1022 пропуск; direct/reverse tuple; best TTL (3-е число) | `:20 lookup` → `R2oProcNatLookup` | **E** | C `fopen` fail → 1, Rust `TableMissing`; пустая/без записи → -1/Missing; найдено → 0/Found. Совпадают: `fgets(1024)` + drain длинной строки ↔ `read_until` + `content_len>1022`; `strstr(tcp/udp)`; direct `src/dst/sport/dport`; reverse `dst/dport`; `third_number`; `ttl<=best` skip; memcmp адресов/портов. Тест `:220 отличает_отсутствие_таблицы...` + `r2o-nat-proc-differential.sh`; в этом проходе не перезапускались. |
 
-### nat.c: построчная сверка
+### datapath/nat.c: построчная сверка
 
 - **`parse_ip4` (20–41) ↔ `proc_nat.rs:145`:** C 4 октета 0..255,
   ровно точки/NUL, ведущие нули допустимы; Rust `split('.')` +
@@ -1044,7 +1050,7 @@ TTL, отличие «нет таблицы» от «нет записи». R2O:
   memcmp адресов/портов. E; тест `:220` + `r2o-nat-proc-differential.sh`
   (не перезапускались).
 
-## ctq.c (20 функций)
+## datapath/ctq.c (20 функций)
 
 ctnetlink: сборка GET, разбор счётчиков/состояния TCP, неблокирующий запрос,
 проба подсистемы, открытие сокета. R2O: `conntrack.rs`.
@@ -1074,7 +1080,7 @@ ctnetlink: сборка GET, разбор счётчиков/состояния 
 | `d2k_ct_open` (linux) | 243–253 | 11 | `SOCK_RAW \| SOCK_CLOEXEC`, fcntl O_NONBLOCK, bind; fd возвращается без проверки подсистемы | `:270 open` (`SOCK_NONBLOCK`) | **P** | C открывает сокет и не пробует conntrack; Rust `open` после bind вызывает `probe()` и возвращает `None`, если подсистема недоступна. Вызывающий C может отдельно вызвать `d2k_ct_probe_fd`; поведение API разное. |
 | `d2k_ct_open` (не linux) | 255 | 1 | заглушка -1 | `#[cfg(target_os="linux")]` | E | платформенная ветка |
 
-### ctq.c: построчная сверка
+### datapath/ctq.c: построчная сверка
 
 - **`align4/wr16h/wr32h/rd16h/rd64be/rd32be/put` (16–40):** C
   host-endian `memcpy`, BE-чтение, атрибут с padding; Rust
@@ -1111,7 +1117,7 @@ ctnetlink: сборка GET, разбор счётчиков/состояния 
   без проверки подсистемы; Rust `SOCK_NONBLOCK` + bind + обязательный
   `probe()`, иначе `None`. P; не-Linux C-заглушка — E.
 
-## sched.c (16 функций)
+## datapath/sched.c (16 функций)
 
 Двоичная куча отложенной отправки по (due, seq), владение NFQUEUE ID,
 выбрасывание слишком длинной головы. R2O: `scheduler.rs` (отсортированный Vec +
@@ -1138,7 +1144,7 @@ flow-брони).
 | `d2k_sched_count` | 273–275 | 3 | n | `:373 len` | **E** | Прямой getter. |
 | `d2k_sched_refusals` | 277–279 | 3 | refusals | `:377 refusals` | **E** | Тест `:563`. |
 
-### sched.c: построчная сверка
+### datapath/sched.c: построчная сверка
 
 - **`d2k_sched_new/grow_slot_size/free` (43–98) ↔
   `with_limits/grow_slot_size/Drop`:** C выделяет `mem/heap/freelist`
@@ -1173,7 +1179,7 @@ flow-брони).
   `expire`/`has_pending`/`timeout_ms` не имеют отдельных C-функций в
   `sched.c`; в C брони и очистка потоков живут в вызывающем коде.
 
-## wire.c (9 функций)
+## datapath/wire.c (9 функций)
 
 Единственное место расчёта контрольных сумм TCP: TTL по измеренному пути,
 опции, MD5, seq_shift, badsum, IPv4/IPv6. R2O: `r2k-core/src/wire.rs`.
@@ -1192,7 +1198,7 @@ flow-брони).
 | `d2k_wire_build` | 109–277 | 169 | сборка TCP: профили 0/DETECT/TEMPLATE, MD5, TS/TS-up, seq_shift, poison, суммы | `wire.rs:18 build_tcp_packet` | **P** | **Совпадает:** family 4/6, urgent, ipfrag/profile, MD5 только measured, native options ≤40/кратность 4, TS 8/10 уникальна, TS-back `-1000`, TS-up перенос 10 байт, IPv4 ID 0/random/native+1, measured DF=0/window=65535, IPv6 IPID_ZERO reject, MD5-байты 19/18/1/1, TS NOP/NOP/8/10, badsum measured `^0xbeef`/0x1234 vs legacy `~`/0xffff. **Отличия:** C берёт src/dst/ports/ack/window/ttl/ip_id/traffic_class/flow_label/options из `d2k_conn`, Rust — из входного `PacketView`/`TcpSegmentView`; C `measured` IP-ID — `random()%65535`, Rust — `getrandom()%u16::MAX` (разный источник); C допускает `family=0` как IPv4, Rust требует 4/6. 12 golden/дифференциалов покрывают шаблон/TS-up/badsum/measured/MD5/v6/capacity, но не равенство RNG и не conn-vs-input. |
 | `d2k_wire_tcp_checksum_ok` | 279–306 | 28 | IPv4: версия/proto/ihl/total; IPv6: len≥60/proto 6/base-only; сверка суммы | `wire.rs:436 tcp_checksum_ok` | **P** | Для базовых IPv4/IPv6-пакетов формула та же (`pseudo_sum`+`sum16`+`fold==0`). C IPv6 смотрит только основной заголовок (`pkt[6]==6`, len≥60), Rust `PacketView` допускает цепочку padding-extension headers; C `total<ihl`/ihl<20 — аналогично. Различается набор принимаемых ext-header пакетов; тесты wire/http_replace покрывают базовые. |
 
-### wire.c: построчная сверка
+### datapath/wire.c: построчная сверка
 
 - **`wr16/wr32/rd16` (23–37):** C BE-запись/чтение; Rust
   `write_u16/write_u32`/`from_be_bytes`. E/P.
@@ -1224,7 +1230,7 @@ flow-брони).
   `test-wire-ts-up-plan-differential.sh`); они не покрывают RNG
   и conn-vs-input.
 
-## wire_udp.c (5 функций)
+## datapath/wire_udp.c (5 функций)
 
 Сборка UDP-датаграммы IPv4/IPv6; отказ неприменимым искажениям, обязательная
 сумма (0→0xffff). R2O: `wire.rs::build_udp_packet`.
@@ -1290,7 +1296,7 @@ flow-брони).
   TOS/адреса/порты/ip_id из input; C берёт их из `d2k_conn` и
   допускает `family=0`.
 
-## addr.c (3 функции)
+## datapath/addr.c (3 функции)
 
 **Прочитано построчно: 3/3 функции, 36 строк C (1–36).**
 
@@ -1300,7 +1306,7 @@ flow-брони).
 | `d2k_addr_text` | 20–30 | 11 | `inet_ntop`, отказ при неизвестной family; `n>=cap`→0, иначе копия+`\0`, вернуть n | `addr.rs:49 Display` | **P** | C пишет в буфер `out/cap`, проверяет `n>=cap` и возвращает длину; Rust `Display`/`format!` не имеет буфера и не усекает, вызывающий сам выделяет строку. Текст IPv4/IPv6 совпадает, контракт «не влезло → 0» не портирован. |
 | `d2k_addr_equal` | 32–36 | 5 | family совпадает, `memcmp` 4/16; неизвестная family → 0 | `addr.rs:5 PartialEq` | **E** | C сравнивает family+bytes, family 0/иная → 0; Rust derived `Eq` на `IpAddr` (V4/V6 — разные варианты). `network.rs:16`. |
 
-### addr.c: построчная сверка
+### datapath/addr.c: построчная сверка
 
 - **`d2k_addr_parse` (5–18) ↔ `Address::parse` (`addr.rs:11`):** C
   отвергает NULL и любой `%`, затем `inet_pton(AF_INET)` /
@@ -1314,7 +1320,7 @@ flow-брони).
   неизвестная family→0; Rust derived `Eq` на `IpAddr` (V4/V6 разные
   варианты). E; `network.rs:16`.
 
-## tls.c (7 функций)
+## datapath/tls.c (7 функций)
 
 Разбор TLS ClientHello/ServerHello: границы claimed/avail, SNI, TLS1.3,
 ECH, середина приветствия. R2O: `r2k-core/src/tls.rs`.
@@ -1331,7 +1337,7 @@ ECH, середина приветствия. R2O: `r2k-core/src/tls.rs`.
 | `find_sni` (static) | 131–177 | 47 | server_name→host_name; пустое/битое имя — отказ | `:274 find_sni` | **E** | C возвращает -1 при выходе extension/list/name за границы и при nlen==0; Rust `Option`/None с теми же проверками. `:445`, `:455`. |
 | `d2k_tls_parse` | 179–361 | 183 | запись TLS, claimed/avail, ServerHello≥38, ClientHello, hello_middle, extensions, ECH/TLS1.3/SNI | `tls.rs:32 parse` | **E** | Построчно совпадает: `len<3`/`b[1]!=3`, `record_type`, `record_end` при полной записи, `record_type!=0x16`, `end=min(claimed,avail)`, ServerHello `sh_len>=38 && off+4+sh_len<=claimed`, ClientHello `hs_end<=claimed`, `hello_middle=off+hs_len/2` только при полном hello, 34 байта version/random, skip session/ciphers/compression, exts_len/claimed, `exts_truncated` при exts_end>hs_end, затем has_tls13/ECH/find_sni. Тесты `:367`-`:525`, `tls_parser` `:394`, fuzz-префиксы `:503`. |
 
-### tls.c: построчная сверка
+### datapath/tls.c: построчная сверка
 
 - **`rd16` (30–32) ↔ `tls.rs:129`:** BE u16; Rust с bounds-check.
   E.
@@ -1358,28 +1364,46 @@ ECH, середина приветствия. R2O: `r2k-core/src/tls.rs`.
   затем has_tls13/ECH/find_sni. Тесты `:367`-`:525`, независимый
   `tls_parser` `:394`, fuzz-префиксы `:503`. E.
 
-## include/*.h (14 inline-функций)
-
-**Прочитано построчно: 14/14 inline-функций; тела и структуры в `d2k_packet.h` (72 строки), `d2k_http_request_stream.h` (87), `d2k_http_response.h` (161), `d2k_ctl.h` (86–99), `d2k_track.h` (76–83).**
+## datapath/include/d2k_ctl.h (2 inline-функции)
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
 | `d2k_ctl_binding_write` (inline) | 86–90 | 5 | запись binding: BE u64 generation, kind/family/shape/temporary, 16-байтная epoch | `r2k-core/src/control.rs:330-347 AppliedEvent::event_body`, `:305 BindingContext`, `:2016/2051 encode_ack_with_binding` | **P** | Раскладка построчно совпадает (BE u64 + 4 байта + epoch). Roundtrip-тесты APPLIED/REFUSED/ACK (`:2528-2607`, `:2770+`, `:2168-2337`) проверяют кодирование/декодирование, но **C/Rust byte-differential отсутствует**; отдельного теста на все три места записи нет. |
 | `d2k_ctl_binding_read` (inline) | 91–99 | 9 | чтение/валидация binding: n=28, kind≤4, family 0/4/6, shape≤MAX, temporary≤1 | `control.rs:2373 decode_applied`, `:2445 decode_refused`, `:3104 valid_binding` | **P** | Валидации совпадают: `kind<=4`, `family in {0,4,6}`, `shape<=SHAPE_ECH_TS`, temporary только 0/1. Тесты: REFUSED roundtrip/truncated (`:2528-2607`), APPLIED; ветки `kind=5`, `family=1`, `shape>MAX` отдельным тестом не покрыты. |
+
+## datapath/include/d2k_http_request_stream.h (3 inline-функции)
+
+| C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
+|---|---|---|---|---|---|---|
 | `d2k_http_request_stream_init` (inline) | 19–21 | 3 | обнулить состояние, `start=next=seq`, `first=1` | `httpup.rs:64 R2oHttpRequestSequence::new` | **P** | Rust хранит только `first/next/checked/disabled`, без `start/head_len/end/length`; это другой уровень (трекер границ, не байтовый парсер). |
 | `d2k_http_request_stream_line` (inline) | 22–30 | 9 | завершение строки: ровно один Host, конец ≤0x7fffffff, CL с цифрами | `httpup.rs:231 parse_plan_request`, `:219 parse_request`, `:382 find_crlf` | **P** | C завершает строку инкрементально и валидирует `hosts==1`, `length`, 10 цифр CL; Rust разбирает весь буфер и проверяет Host через `Option`, а `header_len/end_offset` вычисляет в конце. Промежуточного состояния строки нет. |
 | `d2k_http_request_stream_feed` (inline) | 31–86 | 56 | потоковый разбор заголовка: CRLF, token, Host, CL, TE/Upgrade, end/past_end/invalid | `httpup.rs:116 observe_detailed`, `:73 candidate`, `:263-316 boundary_known` | **P** | **Расхождения:** C отвергает TE/Upgrade (`invalid`), Rust только `end_offset=None`; C отвергает управляющие байты и неверные имена полей, Rust помечает лишь `boundary_known=false` и продолжает; C ограничивает CL 10 цифрами, Rust — `usize`; C не валидирует DNS-значение Host, Rust требует `valid_dns_host`, снимает `:80` и точку. C игнорирует полностью старые байты, Rust — `candidate_state`; обе стороны считают `end<=0x7fffffff`. Отдельного C/Rust differential для потока нет. |
+
+## datapath/include/d2k_http_response.h (6 inline-функций)
+
+| C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
+|---|---|---|---|---|---|---|
 | `d2k_hr_decimal` (inline) | 21–29 | 9 | десятичное число с проверкой переполнения | `http_response.rs:360 parse_decimal` | **E** | Совпадает: пусто/нецифра → ошибка, `checked_mul/checked_add`; тест `rejects_malformed...` с `18446744073709551616` (`tests/http_response.rs:229`). |
 | `d2k_hr_token` (inline) | 31–34 | 4 | допустимый token-байт RFC 7230 | `httpup.rs:346 is_http_token` | **E** | Набор символов совпадает; используется в `parse_plan_request` для имени заголовка запроса. В ответном парсере Rust этот предикат не применяется (см. `d2k_hr_field`). |
 | `d2k_hr_field` (inline) | 35–42 | 8 | валидация поля: непустое имя, token, допустимые байты значения | `http_response.rs:281 parse_headers` | **P** | **Неполно:** Rust ищет `:` и разбирает известные поля, но не отвергает строку без `:`, не проверяет token-символы имени и управляющие байты значения; C делает всё это через `d2k_hr_field`. |
 | `d2k_hr_extensions` (inline) | 43–70 | 28 | разбор chunk-extensions: `;token[=token/quoted]`, OWS, контрольные байты | `http_response.rs:372 parse_chunk_size` | **P** | **Неполно:** Rust отбрасывает всё после первого `;` и не валидирует extensions; C проверяет token, кавычки, escape и управляющие байты. Поэтому `1;\x01`, незакрытая кавычка и `1 ;x` дают разный исход. |
 | `d2k_hr_headers` (inline) | 72–105 | 34 | разбор status-line и заголовков, CL/TE, interim, 101/204/304 | `http_response.rs:281 parse_headers`, `:321 parse_status_line` | **P** | **Расхождения:** C `head[8192]`, Rust 64 КиБ; C принимает status-line ровно 12 байт, Rust требует 13-й символ; C валидирует каждое поле и отвергает дубли Content-Length, Rust пропускает строки без `:` и разрешает одинаковые CL; C отвергает управляющие байты в заголовках, Rust после status-line их не проверяет. Логика interim/101/204/304/CL+TE совпадает. |
 | `d2k_http_response_feed` (inline) | 107–160 | 54 | потоковый разбор ответа: header/fixed/chunk/trailer/close/fin | `http_response.rs:55 feed` | **P** | **Расхождения:** C при байтах после `complete` ставит `invalid`, Rust молча `break`; C `line[512]`, Rust 128; C валидирует trailer как поле и отвергает NUL, Rust принимает ведущий NUL как пустой trailer; C проверяет chunk-extensions, Rust игнорирует; C `head[8192]`, Rust 64 КиБ. Общая state-machine и `fin`-логика совпадают. |
+
+## datapath/include/d2k_packet.h (2 inline-функции)
+
+| C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
+|---|---|---|---|---|---|---|
 | `d2k_packet_u16` (inline) | 20–22 | 3 | big-endian u16 | `packet.rs:231 read_u16` | E | Построчно совпадает; используется в `parse_ipv4/parse_ipv6` с bounds-check. |
 | `d2k_packet_parse` (inline) | 24–70 | 47 | разбор IPv4/IPv6, fragment, extension headers, только Pad1/PadN, L4 minimum | `packet.rs:69 PacketView::parse`, `:152 parse_ipv4`, `:172 parse_ipv6`, `:203 has_only_padding_options` | E | IPv4: IHL/ total / fragment offset / ID / proto / TTL / TOS / адреса совпадают. IPv6: payload≠0, total=40+payload, TC/flow label, до 8 extension headers, Pad1/PadN; иные опции отвергаются. Тесты `r2k-core/tests/network.rs:36+`. |
+
+## datapath/include/d2k_track.h (1 inline-функция)
+
+| C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
+|---|---|---|---|---|---|---|
 | `d2k_key_equal` (inline) | 76–83 | 8 | равенство ключа: proto/ports/family/адреса; family 0 и 4 эквивалентны | `#[derive(Eq, PartialEq)]` (`capture.rs:13 TcpFlowKey`, `engine.rs:41`, `r2o_udp_hold.rs`, `session`) | **E** | Для ключей, созданных R2O, поля сравниваются все; family 4/6 представлена `Address`, legacy family 0 не используется. C-ветка `family==0` и `family==4` с `low_ip` эквивалентна Rust-ключу IPv4. Отдельного differential нет. |
 
-### include/*.h (14 inline-функций)
+### datapath/include/*.h (14 inline-функций)
 
 - **`d2k_ctl_binding_write` (86–90) ↔ `control.rs:330-347`:** C пишет
   BE u64 generation, `kind/family/shape/temporary`, 16-байтную epoch.
