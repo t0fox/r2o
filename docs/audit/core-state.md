@@ -264,7 +264,7 @@
 | `save_atomic` | 122–125 | 4 | атомарное сохранение каталога | catalog::Catalog::save_atomic | **E** | r2o-catalog-persist-differential.sh |
 | `self_mem` | 136–148 | 13 | RSS/HWM/VmData/Threads из /proc/self/status | diagnostics::process_memory | **P** | реализовано; формат/точки чтения отличаются, отдельного C/Rust differential нет |
 | `sched_say` | 150–157 | 8 | журнал планировщика с локальным временем | main.rs log callback | **P*** | static-хелпер |
-| `http_search_portal` | 168–174 | 7 | класс 3 (портал) → `d2k_httpsearch_portal`: пропуск при `!g_hs`, family 0, UNKNOWN/PROBING, `d2k_https_upgrade(st)` | `r2o_http_search_https_action` (`main.rs:4729-4750`) | **P** | C передаёт портал только для известного не-upgrade состояния; Rust решает `Queue/Suppress/Wait` по `response_code==3`, `live_bound_failure`, `HttpsProbeState::should_redirect()` и `probe_pending`. Наборы условий различаются: Rust откладывает/подавляет при pending, C при PROBING просто выходит. |
+| `http_search_portal` | 168–174 | 7 | класс 3 (портал) → `d2k_httpsearch_portal`: пропуск при `!g_hs`, family 0, UNKNOWN/PROBING, `d2k_https_upgrade(st)` | `r2o_http_search_https_action` (`main.rs:4729-4750`) | **P** | **Совпадает:** портал обрабатывается только при `response_code==3` и отсутствии live-bound failure. **Отличия:** Rust при известном состоянии (`Some(state)`) даёт `Suppress` для `should_redirect()` (Served/TlsBlocked) и `Queue` иначе; при неизвестном — `Wait` при `probe_pending`, иначе `Suppress`. C при UNKNOWN/PROBING просто выходит, а upgrade-состояния в httpsearch не передаёт. Набор состояний тот же, но pending/unknown различаются. |
 | `hs_open_port` | 176–208 | 33 | socket family, опциональный `SO_MARK=g_probe_mark`, bind, getsockname | `BoundTcpProbe::open` (`main.rs:22507-22611`) | **P** | C: socket, mark только если `g_probe_mark!=0`, bind/getsockname, без nonblock/CLOEXEC. Rust: mark `unwrap_or(0x2d)` (0 отключает), nonblock+CLOEXEC, отказ при нулевом порту. При `Some(0)` марка не ставится, как и в C при `g_probe_mark==0`; Rust шире по проверкам. |
 | `hs_close_port` | 210–210 | 1 | `close(fd)` | `OwnedFd`/Drop (`BoundTcpProbe`) | **P*** | C закрывает явно; Rust владеет fd и закрывает при drop. |
 | `hs_hex` | 212–219 | 8 | `d2k_plan_text_to_hex` в буфер 8192, ошибка в stderr | `compile_text` + `r2o_plan_records_for_wire` | **P** | C печатает ошибку и возвращает -1; Rust возвращает `String`-ошибку, текст и стадия иные. Компиляция плана покрыта plan_text/дифференциалами. |
@@ -1189,6 +1189,8 @@
   disorder/oob/seqovl/fake/ttl/tcpts/ipidzero не сравнивались.
 
 ## Углублённая сверка: d2kc.c (28 функций)
+
+**Прочитано построчно: 28/28 функций, 931 строка C (1–931).**
 
 - **Сигналы/время/сохранение:** `on_signal`, `now_ms` — P* (atomic/Instant);
   `save_atomic` — E (`r2o-catalog-persist-differential.sh`).
