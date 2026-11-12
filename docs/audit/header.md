@@ -124,7 +124,7 @@ P означает неполное доказательство ветвей, N
 | 13 | TLS 1.2 | CH без ALPN, P-384 объявлен/отвергнут, открытый HTTP — отдельная ошибка | ALPN `http/1.1`, P-384 разрешён, открытый HTTP — общий rustls error; `rx_record_missing` только bool | `deep-core-net.md` |
 | 14 | ctl output ring | 64 КиБ (`ctl.c:21`) | 128 КиБ (`control.rs:28`) | `datapath-plan.md` |
 | 15 | raw mark | допускает `mark=0` (`raw.c:193`) | требует ненулевой mark (`raw.rs:55-59`) | `datapath-plan.md` |
-| 16 | Binding | `tcp_profile` хранится, `family` default 4 (`catalog.c:834-890`) | **закрыто 2026-11-12 (данные):** `Binding.tcp_profile` и `default_family()=4` добавлены, читаются/пишутся/проверяются (`catalog.rs:166-201`, тест `binding_tcp_profile_round_trips_and_rejects_unknown_values`); **частично закрыто:** `exact_key`, `own_first_bound_plan_id`, `own_first_plans`, `newer_name_binding` (discovery), `has_covering_binding` сравнивают профиль, выведенный из shape; остаются `main.rs::r2o_newer_name_binding`, `clear_binding_matches`, `own_exact_confirmed`, `family_recovery`, `unfit` и отсутствие отдельного `trigger_tcp_profile` | `core-state.md` |
+| 16 | Binding | `tcp_profile` хранится, `family` default 4 (`catalog.c:834-890`) | **закрыто 2026-11-12 (данные):** `Binding.tcp_profile` и `default_family()=4` добавлены, читаются/пишутся/проверяются (`catalog.rs:166-201`, тест `binding_tcp_profile_round_trips_and_rejects_unknown_values`); **частично закрыто:** `exact_key`, `own_first_bound_plan_id`, `own_first_plans`, `newer_name_binding` (discovery), `has_covering_binding` сравнивают профиль, выведенный из shape; остаются `own_exact_confirmed`, `family_recovery`, `unfit` и отсутствие отдельного `trigger_tcp_profile` | `core-state.md` |
 | 17 | plan identity | FNV-1a `plan-%08x` в TLV (`compose.c:218-240`) | trial-id 16 байт (`discovery.rs:1450`) | `core-state.md` |
 | 18 | P-256 | production TLS1.2 ECDHE (`tls12.c:650-655`) | `ring`; прямых C/Rust-векторов нет | `core-state.md` |
 | 19 | HTTP-search `probe_run` | 403 с телом РКН → `INJECTED`; 101/битый CL/TE → CUT; `head` включает тело | Rust не классифицирует тело, 101 → `Empty`, битый CL/TE → `InvalidData`; judge видит только заголовки | `deep-core-verify.md` |
@@ -168,7 +168,7 @@ P означает неполное доказательство ветвей, N
 2. **Данные/каталог:** `Binding.tcp_profile` и default `family=4` закрыты
    для load/save; `exact_key`/`own_first`/`newer_name_binding`/`covering`
    сравнивают профиль из shape, но отдельного `trigger_tcp_profile`,
-   `clear_binding_matches`, `family_recovery` и `unfit` пока нет;
+   `own_exact_confirmed`, `family_recovery` и `unfit` пока нет;
    FNV `plan-%08x`; HTTP live failures/счётчики; QUIC `name_ok`; TLS 1.2
    ALPN/P-384/открытый HTTP/`rx_record_missing`.
 3. **Диагностика/CLI:** `--log/--health-file/--duration/--sched-slots`;

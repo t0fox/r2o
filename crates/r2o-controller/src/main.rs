@@ -2521,6 +2521,8 @@ fn r2o_newer_name_binding(catalog: &Catalog, binding: &Binding) -> bool {
                 && r2o_catalog_binding_transport(other) == r2o_catalog_binding_transport(binding)
                 && r2o_catalog_binding_family(other) == r2o_catalog_binding_family(binding)
                 && other.shape == binding.shape
+                && (r2o_catalog_binding_transport(other) != 6
+                    || other.tcp_profile == binding.tcp_profile)
                 && !(other.transport == 17 && other.verified_by == R2O_D2K_VERBY_CLIENT)
                 && box_record
                     .plans
@@ -40298,5 +40300,59 @@ mod tests {
         bytes.extend_from_slice(&[0, 2, 0, 2]);
         bytes.extend_from_slice(proto);
         Plan::parse(&bytes).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tcp_profile_tests {
+    use super::r2o_newer_name_binding;
+    use r2o_controller::catalog::{Binding, BoxRecord, Catalog, Plan};
+
+    #[test]
+    fn newer_name_binding_requires_the_same_tcp_profile() {
+        let old = Binding {
+            kind: "name".into(),
+            target: "profile.example".into(),
+            plan_id: "old".into(),
+            level: 3,
+            enabled: true,
+            transport: 6,
+            family: 4,
+            shape: 8,
+            tcp_profile: 1,
+            confirmed: 10,
+            ..Binding::default()
+        };
+        let newer = Binding {
+            plan_id: "new".into(),
+            tcp_profile: 2,
+            confirmed: 20,
+            ..old.clone()
+        };
+        let catalog = Catalog {
+            boxes: vec![BoxRecord {
+                id: "box".into(),
+                plans: vec![Plan {
+                    id: "new".into(),
+                    proto: "tls".into(),
+                    text: "plan".into(),
+                    enabled: true,
+                    ..Plan::default()
+                }],
+                bindings: vec![old, newer],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        assert!(!r2o_newer_name_binding(
+            &catalog,
+            &catalog.boxes[0].bindings[0]
+        ));
+        let mut same_profile = catalog.clone();
+        same_profile.boxes[0].bindings[1].tcp_profile = 1;
+        assert!(r2o_newer_name_binding(
+            &same_profile,
+            &same_profile.boxes[0].bindings[0]
+        ));
     }
 }

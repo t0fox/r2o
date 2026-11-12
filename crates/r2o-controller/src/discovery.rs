@@ -897,6 +897,7 @@ pub fn update_direct_clear_bindings(
                 && binding.target == target.host
                 && transport == 6
                 && family == target.family
+                && binding.tcp_profile == target.tcp_profile()
                 && (binding.shape == 0 || binding.shape == target.shape || modern_covers_ech);
             if !matches_target {
                 index += 1;
@@ -1487,7 +1488,7 @@ mod tests {
     use super::{
         DiscoveryTarget, OwnFirstResultAction, exact_key, has_covering_binding, known_plans,
         newer_name_binding, own_first_bound_plan_id, own_first_plans, own_first_result_action,
-        r2o_ech_witness_candidates, r2o_ech_witness_challenge_order,
+        r2o_ech_witness_candidates, r2o_ech_witness_challenge_order, update_direct_clear_bindings,
     };
     use r2k_core::control::{
         BindingContext, HttpResponseEvent, KEY_LEN, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_MODERN,
@@ -2749,6 +2750,42 @@ mod tests {
         assert_eq!(result.removed, 1);
         assert_eq!(result.marked, 0);
         assert!(catalog.boxes[0].bindings.is_empty());
+    }
+
+    #[test]
+    fn direct_clear_requires_the_target_tcp_profile() {
+        use crate::catalog::{Binding, BoxRecord, Catalog};
+
+        let target = DiscoveryTarget {
+            host: "profile.example".into(),
+            endpoint: String::new(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let mut catalog = Catalog {
+            boxes: vec![BoxRecord {
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: target.host.clone(),
+                    level: 3,
+                    enabled: true,
+                    transport: 6,
+                    family: 4,
+                    shape: SHAPE_MODERN,
+                    tcp_profile: 1,
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        let update =
+            update_direct_clear_bindings(&mut catalog, &target, 100, std::time::Instant::now());
+        assert_eq!(update.marked, 0, "измеренный профиль не совпадает с base=0");
+        catalog.boxes[0].bindings[0].tcp_profile = 0;
+        let update =
+            update_direct_clear_bindings(&mut catalog, &target, 100, std::time::Instant::now());
+        assert_eq!(update.marked, 1);
     }
 
     #[test]
