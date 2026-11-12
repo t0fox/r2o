@@ -381,6 +381,226 @@ fn route_segment_cap_splits_owned_tcp_payload_without_changing_bytes() {
     assert_eq!(actions.emits[3].delay_us, 0);
 }
 
+#[test]
+fn anchor_two_three_four_and_unknown_cover_all_anchor_branches() {
+    let split =
+        |anchor: u16| Plan::parse(&plan(1, 1, &[tlv(0x0100, &[0, anchor as u8, 0, 0])])).unwrap();
+    let mut input = PacketInput::new(b"abcdefgh", 10);
+    input.have_sni = true;
+    input.sni_off = 2;
+    input.sni_len = 4;
+
+    let actions = split(2).apply(&input).unwrap();
+    assert_eq!(actions.emits.len(), 2);
+    assert_eq!(actions.emits[0].bytes, b"abcdef");
+    assert_eq!(actions.emits[1].bytes, b"gh");
+
+    let actions = split(3).apply(&input).unwrap();
+    assert_eq!(actions.emits.len(), 2);
+    assert_eq!(actions.emits[0].bytes, b"abcd");
+    assert_eq!(actions.emits[1].bytes, b"efgh");
+
+    assert_eq!(
+        split(4).apply(&input).unwrap_err().kind(),
+        "unsupported-anchor"
+    );
+    assert_eq!(split(9).apply(&input).unwrap_err().kind(), "unknown-anchor");
+
+    let mut no_sni = PacketInput::new(b"abcdefgh", 10);
+    no_sni.have_sni = false;
+    assert_eq!(split(2).apply(&no_sni).unwrap_err().kind(), "missing-sni");
+}
+
+#[test]
+fn split_points_dedup_and_drop_out_of_range_points() {
+    let duplicate = Plan::parse(&plan(
+        1,
+        2,
+        &[tlv(0x0100, &[0, 0, 0, 3]), tlv(0x0100, &[0, 0, 0, 3])],
+    ))
+    .unwrap();
+    let actions = duplicate.apply(&PacketInput::new(b"abcdefgh", 10)).unwrap();
+    assert_eq!(actions.emits.len(), 2);
+    assert_eq!(actions.emits[0].bytes, b"abc");
+    assert_eq!(actions.emits[1].bytes, b"defgh");
+
+    let edges = Plan::parse(&plan(
+        1,
+        2,
+        &[tlv(0x0100, &[0, 0, 0, 0]), tlv(0x0100, &[0, 0, 0, 8])],
+    ))
+    .unwrap();
+    let actions = edges.apply(&PacketInput::new(b"abcdefgh", 10)).unwrap();
+    assert_eq!(actions.fate, OriginalFate::Pass);
+    assert!(actions.emits.is_empty());
+}
+
+#[test]
+fn tls_shape_errors_and_template_prefix_are_checked_like_c() {
+    let hello = tls_client_hello();
+    let payload_record = [vec![0, 1], hello.clone()].concat();
+    let fake_plan = |modifier: u8| {
+        Plan::parse(&plan(
+            8,
+            4,
+            &[
+                tlv(0x0002, &[6, 1]),
+                tlv(0x0010, &payload_record),
+                tlv(0x0101, &[0, 1, 0, 0, 1, 0, 0, 0, 0, 0, modifier]),
+                tlv(0x0109, &[1]),
+            ],
+        ))
+        .unwrap()
+    };
+
+    let mut short = PacketInput::new(b"short", 1);
+    short.is_tls13 = true;
+    assert_eq!(fake_plan(1).apply(&short).unwrap_err().kind(), "tls-shape");
+
+    let mut wrong_type = hello.clone();
+    wrong_type[0] = 0x17;
+    let mut input = PacketInput::new(&wrong_type, 1);
+    input.is_tls13 = true;
+    assert_eq!(fake_plan(1).apply(&input).unwrap_err().kind(), "tls-shape");
+
+    let mut wrong_lengths = hello.clone();
+    wrong_lengths[3..5].copy_from_slice(&81_u16.to_be_bytes());
+    let mut input = PacketInput::new(&wrong_lengths, 1);
+    input.is_tls13 = true;
+    assert_eq!(fake_plan(1).apply(&input).unwrap_err().kind(), "tls-shape");
+
+    // Обычный профиль требует приветствие целиком: 76 байт — только начало.
+    let prefix = &hello[..76];
+    let mut input = PacketInput::new(prefix, 1);
+    input.is_tls13 = true;
+    assert_eq!(fake_plan(1).apply(&input).unwrap_err().kind(), "tls-shape");
+
+    // WIRE_TCP_TEMPLATE разрешает начало приветствия: 76 байт включают SID.
+    let template_plan = Plan::parse(&plan(
+        8,
+        5,
+        &[
+            tlv(0x0002, &[6, 1]),
+            tlv(0x0010, &payload_record),
+            tlv(0x0101, &[0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1]),
+            tlv(0x0109, &[2]),
+            tlv(0x010a, &[]),
+        ],
+    ))
+    .unwrap();
+    let mut input = PacketInput::new(prefix, 1);
+    input.is_tls13 = true;
+    input.have_sni = true;
+    input.sni_off = 20;
+    input.sni_len = 8;
+    let actions = template_plan.apply(&input).unwrap();
+    assert_eq!(actions.emits.len(), 1);
+    assert_eq!(actions.emits[0].bytes.len(), hello.len());
+}
+
+#[test]
+fn tls_fake_template_keeps_unequal_sid_and_non_template_rebuilds_length() {
+    let real = tls_client_hello();
+    let mut fake = tls_client_hello();
+    fake[43] = 16;
+
+    let payload_record = [vec![0, 1], fake.clone()].concat();
+    let non_template = Plan::parse(&plan(
+        8,
+        5,
+        &[
+            tlv(0x0002, &[6, 1]),
+            tlv(0x0010, &payload_record),
+            tlv(0x0101, &[0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 2]),
+            tlv(0x0109, &[1]),
+            tlv(0x010a, &[]),
+        ],
+    ))
+    .unwrap();
+    let mut input = PacketInput::new(&real, 1);
+    input.is_tls13 = true;
+    input.have_sni = true;
+    input.sni_off = 20;
+    input.sni_len = 8;
+    let actions = non_template.apply(&input).unwrap();
+    assert_eq!(actions.emits[0].bytes.len(), real.len() - 16 + 32);
+    assert_eq!(actions.emits[0].bytes[44..76], real[44..76]);
+
+    let template = Plan::parse(&plan(
+        8,
+        5,
+        &[
+            tlv(0x0002, &[6, 1]),
+            tlv(0x0010, &payload_record),
+            tlv(0x0101, &[0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 2]),
+            tlv(0x0109, &[2]),
+            tlv(0x010a, &[]),
+        ],
+    ))
+    .unwrap();
+    let actions = template.apply(&input).unwrap();
+    assert_eq!(actions.emits[0].bytes.len(), fake.len());
+    assert_eq!(actions.emits[0].bytes[44..60], fake[44..60]);
+}
+
+#[test]
+fn max_emit_counts_udp_tcp_options_seq_overlay_and_udplen() {
+    let udp = Plan::parse(&plan(
+        1,
+        4,
+        &[
+            tlv(0x0002, &[17, 2]),
+            tlv(0x0010, &[0, 1, 1, 2, 3, 4]),
+            tlv(0x0101, &[0, 1, 0, 0, 1, 0, 0, 0, 0, 0]),
+            tlv(0x0103, &[0]),
+        ],
+    ))
+    .unwrap();
+    assert_eq!(udp.max_emit(), 20 + 8 + 4);
+
+    let tcp_ts = Plan::parse(&plan(
+        1,
+        5,
+        &[
+            tlv(0x0002, &[6, 1]),
+            tlv(0x0010, &[0, 1, 1, 2, 3, 4]),
+            tlv(0x0011, &[0, 1, 64, 2, 0, 0, 0, 0]),
+            tlv(0x0101, &[0, 1, 0, 1, 1, 0, 0, 0, 0, 0]),
+            tlv(0x0103, &[0]),
+        ],
+    ))
+    .unwrap();
+    assert_eq!(tcp_ts.max_emit(), 20 + 20 + 12 + 4);
+
+    let overlay = Plan::parse(&plan(
+        1,
+        4,
+        &[
+            tlv(0x0002, &[6, 1]),
+            tlv(0x0010, &[0, 1, 1, 2, 3, 4]),
+            tlv(0x0102, &[0, 1, 0, 0]),
+            tlv(0x0103, &[0]),
+        ],
+    ))
+    .unwrap();
+    assert_eq!(overlay.max_emit(), 20 + 20 + 4);
+
+    let quic_udplen = Plan::parse(&plan(
+        9,
+        2,
+        &[tlv(0x0002, &[17, 2]), tlv(0x010e, &[0, 100])],
+    ))
+    .unwrap();
+    assert_eq!(quic_udplen.max_emit(), 20 + 8 + 1200 + 100);
+    let plain_udplen = Plan::parse(&plan(
+        9,
+        2,
+        &[tlv(0x0002, &[17, 1]), tlv(0x010e, &[0, 100])],
+    ))
+    .unwrap();
+    assert_eq!(plain_udplen.max_emit(), 20 + 8 + 1 + 100);
+}
+
 fn tlv(kind: u16, value: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(4 + value.len());
     bytes.extend_from_slice(&kind.to_be_bytes());
