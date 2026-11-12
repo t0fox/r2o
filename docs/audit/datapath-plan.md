@@ -30,8 +30,8 @@ Static-хелперы наследуют статус владельца (вла
 
 | Статус | Кол-во |
 |---|---:|
-| E | 106 |
-| P | 76 |
+| E | 107 |
+| P | 75 |
 | N | 1 |
 | ? | 0 |
 | **Всего** | **183** |
@@ -104,7 +104,7 @@ R2O-аналог — `crates/r2o-datapath/src/control.rs` (`ControlServer`), п�
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | put_key | 23-37 | 15 | static: ключ потока 38 байт полями (владелец — `ack`/`pump`) | `capture.rs:51` `TcpFlowKey::wire_key`, `control.rs:1644` `r2o_udp_flow_wire_key` | E | Побайтово тот же порядок (family, low 16, high 16, порты BE, proto). Сверка раскладки — `d2o_control_frames_match_donor_wire_decoding` (tests/control.rs:47, разбор APPLIED-фикстур D2O). |
-| d2k_plan_fits | 39-72 | 34 | отказ до установки: IPID=0 и длина посылки > предела | `control.rs:255` `r2o_plan_valid` (+`engine.rs:2091` запрет POISON_IPID_ZERO), `main.rs:986` проверка `max_emit` | P | Ветвь длины покрыта `name_plan_отклоняется_если_..._mtu` (control.rs:2766): `send_maxlen=1` — отказ, 1500 — успех. Ветвь `POISON_IPID_ZERO` реализована в `validate_runtime_plan`, но теста на неё нет. |
+| d2k_plan_fits | 39-72 | 34 | отказ до установки: IPID=0 и длина посылки > предела | `control.rs:255` `r2o_plan_valid` (+`engine.rs:2091` запрет POISON_IPID_ZERO), `main.rs:986` проверка `max_emit` | E | Ветвь длины покрыта `name_plan_отклоняется_если_..._mtu` (control.rs:2766): `send_maxlen=1` — отказ, 1500 — успех. Ветвь `POISON_IPID_ZERO` покрыта `name_plan_rejects_ipid_zero_poison_like_plan_fits`: план с флагом `1<<2` получает `ACK_BAD_PLAN`, в таблицу не попадает. |
 | ack | 84-110 | 27 | static: подтверждение команды с trial/area/binding | `control.rs:1899` `send_ack`; `r2k-core/control.rs:1986` `encode_ack_with_identifiers_profile` | E | **Ветви C:** body = key(38)+4+16+28; `memset`; `body[0]=4`; на offset 38 — `type` BE2, `ok` (1/0), `reason` (OK или код); `ok_cmds++`/`bad_cmds++`; если контроллер подключён: `len=42`, для `SET_SUFFIX..DEL_BYPASS`, `SET_NAME_PROBE`, `SET_NAME_BOUND` дописываются 16 байт `area_id`; для `SET_NAME_BOUND` — ещё 28 байт binding; событие ACK. Rust `send_ack` кодирует `encode_ack_with_identifiers_profile` с `trial_id`/`area_id`/`binding_context`; функция проверяет допустимость trial/area/binding по команде (bound требует оба). Тесты `v22_control_server_greets_...` (control.rs:2494), ACK-фикстуры tests/control.rs:47. |
 | ack_trial | 112-123 | 12 | static: ACK с trial ID (в т.ч. на отказ) | `control.rs:1898` (поле `Ack::trial_id`), `r2k-core/control.rs:1945` `encode_ack_for_trial` | E | `http_probe_plan_matches_only_its_source_port_and_acknowledges_trial_id` (control.rs:3489) и `encodes_http_probe_command_and_round_trips_its_correlated_ack` (tests/control.rs:493). |
 | d2k_ctlsrv_greet | 125-145 | 21 | первое событие: версия провода, maxlen, release | `control.rs:2093` `encode_greeting_profile` при accept | E | `v22_control_server_greets_...` (control.rs:2494) и `control_server_accepts_reconnect_...` (control.rs:2343) читают `EVENT_PROTOCOL`. |

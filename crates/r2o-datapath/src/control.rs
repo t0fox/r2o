@@ -3160,6 +3160,30 @@ mod tests {
     }
 
     #[test]
+    fn name_plan_rejects_ipid_zero_poison_like_plan_fits() {
+        let host = "ipid-zero.test";
+        let mut body = vec![host.len() as u8];
+        body.extend_from_slice(host.as_bytes());
+        body.extend_from_slice(&[SHAPE_MODERN, 4]);
+        body.extend_from_slice(&plan_header(0, 3));
+        body.extend_from_slice(&[0x00, 0x01, 0x00, 0x10]);
+        body.extend_from_slice(&[0; 16]);
+        body.extend_from_slice(&[0x00, 0x02, 0x00, 0x02, 0x06, 0x01]);
+        // POISON: id=1, ttl=64, flags=POISON_IPID_ZERO, seq_shift=0.
+        body.extend_from_slice(&[0x00, 0x11, 0x00, 0x08, 0x00, 0x01, 0x40, 0x04]);
+        body.extend_from_slice(&[0, 0, 0, 0]);
+
+        let mut plans = NamePlans::default();
+        let ack = plans.handle(&Frame {
+            kind: COMMAND_SET_NAME,
+            body,
+        });
+        assert_eq!(ack.reason, control::ACK_BAD_PLAN);
+        assert!(!ack.ok);
+        assert_eq!(plans.plans.len(), 0);
+    }
+
+    #[test]
     fn set_addr_accepts_measured_shapes_and_rejects_unmeasured() {
         let address = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2));
         let mut plans = NamePlans::default();
