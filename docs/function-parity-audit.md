@@ -84,12 +84,12 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 191 | 349 | 8 | 0 |
+| core-net | 548 | 193 | 349 | 6 | 0 |
 | core-state | 692 | 178 | 511 | 3 | 0 |
 | datapath-core | 400 | 152 | 244 | 4 | 0 |
 | datapath-plan | 183 | 138 | 45 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **717** | **1250** | **15** | **0** |
+| **Итого** | **1982** | **719** | **1250** | **13** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,8 +103,8 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 717 / P 1250 /
-N 15 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
+Покрытие реестра: **1982/1982** функций. Статусы: **E 719 / P 1250 /
+N 13 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
 | # | Область | D2O | R2O | Подтверждение |
@@ -344,12 +344,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 191 | 349 | 8 | 0 |
+| core-net | 548 | 193 | 349 | 6 | 0 |
 | core-state | 692 | 178 | 511 | 3 | 0 |
 | datapath-core | 400 | 152 | 244 | 4 | 0 |
 | datapath-plan | 183 | 138 | 45 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **717** | **1250** | **15** | **0** |
+| **Итого** | **1982** | **719** | **1250** | **13** | **0** |
 
 
 ---
@@ -1004,7 +1004,7 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 | `d2k_quic_budget_ms` | 2096-2104 | 9 | бюджет Run: фиксированный `budget_s` или `wait + QP_RUN_DYN_POLLS*(3RTT+gap)` | `R2oQuicHttp3Budget`/таймауты (`r2o_quic_http3.rs`) | **P** | C `budget_s != DERIVED` → `budget_s*1000` с насыщением; иначе `qp_dyn_wait(rtt)+GAP_US/1000`, `wait + QP_RUN_DYN_POLLS*per_poll`. Rust бюджеты HTTP/3 выражены в пакетах/дедлайнах (`budget_required/budget_passed`, `R2O_QUIC_*`), формула `d2k_quic_budget_ms` не портирована. |
 | `qp_outcome` | 2111-2116 | 6 | tally → UNKNOWN/YES/NO: `err>0` или частичный pass → UNKNOWN; 3/3 → YES; иначе NO | `quic_replay.rs:276 r2o_quic_direct_action`, `:332 filter_round_decision` | **P** | C единогласие 3/3; Rust решения разделены: `r2o_quic_filter_round_decision` (Pass/No/Retry/Unknown) и `r2o_quic_direct_action`; маппинг иной, но исходы совпадают для 0/3/частичных. |
 | `qp_questions_step` | 2118-2268 | 152 | 6 вопросов: мусор/кадры/датаграммы/бит/низкийпорт/длина; version2 снят; пропуск уже отвеченных; бюджет/адреса/не собралось; qtrace | `quic_replay.rs:449-503 r2o_quic_discovery_candidates` | **P** | **C-ветви проверены:** `qp_list` — junk (16 нулей), frames (SPLIT_CRYPTO), datagrams (SPLIT), bit (CLEAR_FIXED_BIT), lowport (SRCPORT `port-1`), length (LONGER); version2 не задаётся; пропуск `junk_asked`/`frames_asked`/`longer_asked` и уже известных; сначала сборка, потом адрес; `n_budget/n_addr/n_unbuilt/n_strategy`; `qp_outcome`; qtrace. **R2O-отличия:** набор `Clearance/SplitCrypto/UdpLength/TtlStrategy` иной по составу/порядку, lowport/longer в том же виде нет, бюджет в пакетах. |
-| `d2k_quic_props_findings` | 2275-2323 | 50 | текстовые выводы по split_crypto/split_datagrams/version2/clear_fixed_bit/low_source_port | нет | **N** | В R2O текстовых `finding`-строк нет; свойства живут в `R2oQuicDiscoveryCandidate`/результатах, но аналогичного массива сообщений и `d2k_quic_props.cap`-контракта нет. |
+| `d2k_quic_props_findings` | 2275-2323 | 50 | текстовые выводы по split_crypto/split_datagrams/version2/clear_fixed_bit/low_source_port | `quic_props.rs` `R2oQuicProps::findings` | E | C для каждого YES-свойства добавляет донорский текст через `\n`, считает found и обрезает по `cap`. Rust `R2oQuicProps::findings(cap)` выдаёт те же шесть текстов, `found`, обрезку по UTF-8; тест `findings_include_only_yes_properties_and_truncate_to_cap`. |
 | `arm_budget_left` | 2326-2326 | 1 | адаптер `can_ask` → `budget_left` | замыкание/дедлайн arm-стадии | **P** | C `return budget_left(budget)` через function pointer `can_ask`. Rust arm-стадия проверяет дедлайн/замыкание; отдельного адаптера и типа `qp_budget` нет. |
 | `arm_budget_spent` | 2329-2332 | 4 | увеличить предел бюджета на время arm-стадии | нет (фиксированные дедлайны) | **P** | C `b->limit_ms = UINT32_MAX - b->limit_ms < ms ? UINT32_MAX : b->limit_ms + ms`. Rust динамического предела arm-стадии не ведёт; дедлайны фиксированы, насыщающего сложения нет. |
 | `classify_run` | 2337-2917 | 582 | шаг 0 контроль → 1 прямой Initial → 2 остаточный контроль → 3 VN/address → 4 arms/questions; base_only/seed; local-address; CLEAR/OPAQUE/NO_QUIC/ADDRESS/FLAKY | `main.rs:20496 r2o_run_quic_discovery_trial`, `quic_replay.rs:289 r2o_quic_base_result` | **P** | **C-ветви проверены:** вход ip/sni/trigger → FLAKY; private/local IP → LOCAL_ADDRESS; пул, `next_addr=1`; шаг 0 control/seed: refused → NO_QUIC, err==3 → FLAKY, pass==0 → VN, VN pass>0 → NO_QUIC, VN 0 → ADDRESS; pass>0 → dyn_wait/бюджет, шаг 1 direct/seed; base_only → CLEAR/INCONCLUSIVE; err>0 → FLAKY; 3/3 → data-cut arm (2 запроса+короткий контроль) или CLEAR/INCONCLUSIVE по метке; 0<pass<3 → FLAKY; шаг 2 nap 60 мс + residual control, `residual=pass==0`, OPAQUE, arms/questions, early exit `have_arm`; финальный marked. **R2O-отличия:** async trial/`r2o_quic_base_result`, бюджет в пакетах/дедлайнах, arms/questions через `discovery_candidates`; `d2o_quic_base_differential.c` и HTTP/3 stage покрывают не все ветви (`budget exhausted`, `data_cut 2`, короткий контроль). |
@@ -1027,7 +1027,7 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 | `ask` | 125-140 | 16 | собрать вопрос по blob/copies/ttl/frag/control + label | `quic_replay.rs:586-626 r2o_quic_blob_candidate` | **P** | C заполняет `q.copies/ttl/frag/control`, берёт blob по индексу (или `-1`), собирает label: control «фрагменты доходят вообще», frag «фрагментация: …», ttl «фальшивка … с TTL N», copies «фальшивка … ×N», иначе «фальшивка …»; вызывает `ask_q`. Rust `blob_candidate` формирует директивы `payload 1`, `fake … repeats`, `poison ttl`, `quicsplit`, `udplen`; C-метки/тексты и control-вопрос как отдельный `Probe` не портированы. |
 | `d2k_quic_original_arms` | 142-219 | 78 | 5 singles → пары quic5/fake_default ×6/11 → adaptive fake_default×11+split → TTL 3/5/8/12 → frag | `quic_replay.rs:506-584 r2o_quic_original_fallback_candidates/_adaptive_split_candidate/_eligible` | **P** | **C-ветви проверены:** singles `b=0..4`, `b==4` пропускается при `benign_answered`; первый passing → selected; пары `candidates={0,3} × repeats={6,11}`; adaptive split только при `split_failed && !no_split && candidate==3 && copies==11 && last.answered>0 && ((answered<3 && !not_measured) \|\| data==CUT \|\| data==NO_HANDSHAKE)`; TTL `{3,5,8,12}` с blob 0/copies 2, TTL3 пропускается при `ttl_pair_answered`; frag при `!frag_answered`; selected → kind TTL/COPIES, frag→FRAG, `!marked`→FLAKY; reason с copies/ttl/frag. **Rust:** те же singles/pairs/TTL/фрагменты в `original_fallback_candidates`; adaptive split вынесен отдельным кандидатом `r2o_quic_adaptive_split_candidate` + `r2o_quic_adaptive_split_eligible` (эквивалентное условие); порядок плоского списка иной, adaptive не встроен между парами и TTL. |
 | `strategy_ask` | 227-242 | 16 | до 2 попыток, `asked` по not_measured 1/2, YES/NO/UNKNOWN | `quic_replay.rs:332-357 filter_round_decision`, `:368-405 strategy_attempt_decision` | **P** | C: 2 попытки; `asked=1`, если последний trace `not_measured != 1/2`; `ok` → YES; `measured && !retry` → NO; `!retry` → break; иначе UNKNOWN. Rust `filter_round_decision` (measured/repeats, 0/частичные/retry) и `strategy_attempt_decision` (No/Unknown/Retry/Pass с data verdict) дают те же исходы для 0/3, 1–2/3 и NotRun; C отдельно ведёт `asked`, Rust — вызывающий. |
-| `prop_word` | 244-246 | 3 | слово причины свойства (текст) | нет (строки формируются иначе) | **N** | C `prop_word` возвращает только текстовую подпись для reason (например, «свойство…»); логика свойств отдельно. Rust не имеет этой функции: причины/подписи собираются `format!` в discovery/classify по месту. Отдельного текстового контракта нет. |
+| `prop_word` | 244-246 | 3 | слово причины свойства (текст) | `quic_props.rs` `prop_word` | E | C `prop_word`: YES→«прошло», NO→«не прошло», иначе «ответа нет». Rust `prop_word(value)` возвращает те же строки; тест `prop_word_matches_donor_tri_state` (2/1/0/-1). |
 | `d2k_quic_strategy_arms` | 248-396 | 149 | TTL-lifetime (quic5×2 TTL3) → clearance benign → split CRYPTO → longer 100 → frag → original fallback; слияние trace | `quic_replay.rs:449-487 r2o_quic_discovery_candidates`, `:490-554` fragment/fallback/adaptive, `:368-405` decision | **P** | **C-ветви проверены:** TTL-вопрос только при `need_complete && budget_pk` (blob0/copies2/ttl3); YES → `TTL_LIFETIME`; иначе benign (16 нулей/copies1) → YES `CLEARANCE`; иначе split (если `!no_split`) → YES `SPLIT`; иначе `udplen=100` → YES `LENGTH`; если `clearance==NO && (split==NO \|\| no_split)` → `ask_frag`, форма → `FRAG`; иначе `d2k_quic_original_arms` с `benign_answered/frag_answered/ttl_pair_answered/split_failed`, слияние trace и `strategy=LADDER/FAKE_SPLIT`; `!marked`→FLAKY. **R2O:** `r2o_quic_discovery_candidates` даёт плоский список TTL→Clearance→Split→UdpLength, `fragment_candidates` и `original_fallback_candidates` отдельно, решение — `strategy_attempt_decision`; полная лестница (frag после двух «нет», слияние trace, adaptive split) differential не покрыта. |
 
 ## Углублённая сверка: verify/volume/voice (114)

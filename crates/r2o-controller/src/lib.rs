@@ -18,6 +18,7 @@ pub mod http_search;
 pub mod https_probe;
 pub mod live;
 pub mod plan_text;
+pub mod quic_props;
 pub mod quic_replay;
 pub mod r2o_fallback;
 pub mod r2o_late_rx;
