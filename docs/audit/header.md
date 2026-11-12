@@ -303,6 +303,9 @@ P означает неполное доказательство ветвей, N
   sh scripts/r2o-discord-discovery-differential.sh` —
   **PASS**, 23 теста (RTP/RTCP, SSRC, capacity, control reconnect, повторный
   discovery, смена endpoint, истечение voice proof).
+- `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/test-discord-scheduled-udp-differential.sh` —
+  **PASS** (UDP emission `delay_us=15000` и packet bytes совпали;
+  `METRICS queue=1 refusals=1`).
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-diagnostics-differential.sh` —
   **не выполнен**: сборка донорского `test_httpsearch` падает на duplicate
   symbols `d2k_plan_apply`, `d2k_plan_max_emit`, `d2k_actions_cancel`,
