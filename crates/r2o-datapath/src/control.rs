@@ -1196,7 +1196,10 @@ impl NamePlans {
         let Some(fields_end) = 5_usize.checked_add(name_len) else {
             return (false, control::ACK_BAD_ARGS);
         };
-        if name_len == 0 || body.len() < fields_end || trial_id.is_none() {
+        if name_len == 0
+            || body.len() < fields_end
+            || trial_id.is_none_or(|id| id.iter().all(|byte| *byte == 0))
+        {
             return (false, control::ACK_BAD_ARGS);
         }
         let shape = body[1 + name_len];
@@ -1685,6 +1688,51 @@ impl NamePlans {
         })?;
         Self::touch(entry, self.next_plan_clock());
         Some(&entry.plan)
+    }
+
+    /// C `d2k_plantab_del_name_family`: снять все постоянные записи имени
+    /// в семействе, не трогая пробы (`only_sport != 0`).
+    pub fn delete_name_family_all(&mut self, host: &str, family: u8) -> bool {
+        let Some(host) = canonical_name(host.as_bytes()) else {
+            return false;
+        };
+        let before = self.plans.len();
+        self.plans
+            .retain(|key, _| !(key.host == host && key.family == family));
+        let removed = before - self.plans.len();
+        if removed != 0 {
+            self.revision = self.revision.wrapping_add(removed as u64);
+        }
+        removed != 0
+    }
+
+    /// C `d2k_plantab_del_name` — вариант `delete_name_family_all` для IPv4.
+    pub fn delete_name_all(&mut self, host: &str) -> bool {
+        self.delete_name_family_all(host, 4)
+    }
+
+    /// C `d2k_plantab_del_addr_family`: снять адрес целиком, все формы.
+    pub fn delete_addr_family_all(&mut self, address: Address) -> bool {
+        let before = self.addr_plans.len();
+        self.addr_plans.retain(|key, _| key.address != address);
+        let removed = before - self.addr_plans.len();
+        if removed != 0 {
+            self.revision = self.revision.wrapping_add(removed as u64);
+        }
+        removed != 0
+    }
+
+    /// C `d2k_plantab_del_addr` — снятие всех форм адреса.
+    pub fn delete_addr_all(&mut self, address: Address) -> bool {
+        self.delete_addr_family_all(address)
+    }
+
+    /// C `find_addr(..., any_shape=1, 0)`: любая форма адреса.
+    pub fn find_addr_any(&self, address: Address) -> Option<&Plan> {
+        self.addr_plans
+            .iter()
+            .find(|(key, _)| key.address == address)
+            .map(|(_, entry)| &entry.plan)
     }
 
     fn find_addr(&self, address: Address, shape: u8) -> Option<&Plan> {
@@ -4945,6 +4993,71 @@ mod tests {
         assert!(plans.handle(&set_name("Example.Test")).ok);
         assert!(plans.select(&tcp_tls_packet("example.test")).is_some());
         assert!(plans.select(&tcp_tls_packet("EXAMPLE.TEST")).is_some());
+    }
+
+    #[test]
+    fn name_probe_rejects_all_zero_trial_id_like_c() {
+        let records = tls_plan_records([0x51; 16]);
+        let frame = |trial_id: [u8; 16]| {
+            let bytes = r2k_core::control::encode_set_name_probe(
+                "probe.example",
+                r2k_core::control::SHAPE_MODERN,
+                4,
+                40000,
+                &records,
+                trial_id,
+            )
+            .unwrap();
+            r2k_core::control::read_frame(&mut std::io::Cursor::new(bytes)).unwrap()
+        };
+        assert!(!NamePlans::default().handle(&frame([0; 16])).ok);
+        assert!(NamePlans::default().handle(&frame([0x51; 16])).ok);
+    }
+
+    #[test]
+    fn broad_name_and_addr_deletion_removes_all_shapes_like_c() {
+        let mut plans = NamePlans::default();
+        assert!(
+            plans
+                .handle(&set_name_shape(
+                    "wide.example",
+                    r2k_core::control::SHAPE_MODERN,
+                    [0x61; 16],
+                ))
+                .ok
+        );
+        assert!(
+            plans
+                .handle(&set_name_shape(
+                    "wide.example",
+                    r2k_core::control::SHAPE_LEGACY,
+                    [0x62; 16],
+                ))
+                .ok
+        );
+        assert_eq!(plans.plans.len(), 2);
+        assert!(plans.delete_name_family_all("wide.example", 4));
+        assert!(plans.plans.is_empty());
+        assert!(!plans.delete_name_family_all("wide.example", 4));
+
+        let address = super::Address::new(super::IpAddr::V4(super::Ipv4Addr::new(198, 51, 100, 9)));
+        for shape in [
+            r2k_core::control::SHAPE_MODERN,
+            r2k_core::control::SHAPE_LEGACY,
+        ] {
+            plans.addr_plans.insert(
+                super::AddrPlanKey { address, shape },
+                InstalledPlan {
+                    plan: Plan::default(),
+                    generation: 1,
+                    last_used: std::cell::Cell::new(0),
+                },
+            );
+        }
+        assert!(plans.find_addr_any(address).is_some());
+        assert!(plans.delete_addr_all(address));
+        assert!(plans.addr_plans.is_empty());
+        assert!(plans.find_addr_any(address).is_none());
     }
 
     #[test]
