@@ -102,7 +102,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-11)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 627 / P 1311 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 618 / P 1320 /
 N 42 / ? 2**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -137,6 +137,7 @@ P означает неполное доказательство ветвей, N
 | 27 | HTTPS first flight | донорский `modern` ClientHello из `d2k_hello_from_profile` (`httpsprobe.c:171-177`) | rustls-сгенерированный ClientHello (`response.rs:572-605`) | `core-net.md` |
 | 28 | HTTPS result loss | `done[17]`; при переполнении `lost++`, результат отбрасывается (`httpsprobe.c:337-340`) | `sync_channel(16)` + блокирующий `send`, счётчика `lost` нет (`https_probe.rs:132,181-183`) | `core-net.md` |
 | 29 | HTTP-upgrade 307 | `X-D2K-HTTP-Upgrade: provider-portal` (`httpup_logic.c:145`) | `X-R2O-HTTP-Upgrade: provider-portal` (`httpup.rs:513`), закреплено тестом | `core-net.md` |
+| 30 | HTTP-search plan identity | `d2k-plan 1 11` + FNV-префикс `d2k-http:` (`httpsearch.c:300,330-333`) | `r2o-plan 1 11` + префикс `r2o-http:` (`http_search.rs:686,784`) | `core-net.md` |
 
 ### Остаточные P (не доказано, не значит «сломано»)
 

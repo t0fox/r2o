@@ -137,6 +137,7 @@ P означает неполное доказательство ветвей, N
 | 27 | HTTPS first flight | донорский `modern` ClientHello из `d2k_hello_from_profile` (`httpsprobe.c:171-177`) | rustls-сгенерированный ClientHello (`response.rs:572-605`) | `core-net.md` |
 | 28 | HTTPS result loss | `done[17]`; при переполнении `lost++`, результат отбрасывается (`httpsprobe.c:337-340`) | `sync_channel(16)` + блокирующий `send`, счётчика `lost` нет (`https_probe.rs:132,181-183`) | `core-net.md` |
 | 29 | HTTP-upgrade 307 | `X-D2K-HTTP-Upgrade: provider-portal` (`httpup_logic.c:145`) | `X-R2O-HTTP-Upgrade: provider-portal` (`httpup.rs:513`), закреплено тестом | `core-net.md` |
+| 30 | HTTP-search plan identity | `d2k-plan 1 11` + FNV-префикс `d2k-http:` (`httpsearch.c:300,330-333`) | `r2o-plan 1 11` + префикс `r2o-http:` (`http_search.rs:686,784`) | `core-net.md` |
 
 ### Остаточные P (не доказано, не значит «сломано»)
 
@@ -222,12 +223,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 209 | 325 | 13 | 1 |
+| core-net | 548 | 207 | 327 | 13 | 1 |
 | core-state | 692 | 135 | 554 | 3 | 0 |
 | datapath-core | 400 | 122 | 267 | 11 | 0 |
 | datapath-plan | 183 | 105 | 72 | 5 | 1 |
 | detect | 159 | 49 | 100 | 10 | 0 |
-| **Итого** | **1982** | **620** | **1318** | **42** | **2** |
+| **Итого** | **1982** | **618** | **1320** | **42** | **2** |
 
 
 ---
@@ -618,8 +619,8 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `d2k_hs_candidate_key` | 254-254 | 1 | ключ кандидата по индексу | `http_search.rs:627 candidate_keys` | **P** | Тот же рассинхрон: индексы 0..3 не совпадают с C (`split, disorder, fake-badsum, fake-seqshift`), на индексе 1 Rust отдаёт `fake-badsum-whole`; C-дифференциала публичного списка нет. |
 | `poison_key_spec` | 258-287 | 30 | разбор `fake:` спецификации (ttl/badsum/seqshift, порядок) | `http_search.rs:796 poison_key_spec` | E | test `tests/http_search.rs:268 accepts_only_measured_poison_keys...` |
 | `known_key` | 289-294 | 6 | известный ключ плана/кандидата | `http_search.rs:631 candidate_key_from_plan_text` | E | test `:210 recovers_only_exact_supported_keys_from_saved_plan_text` |
-| `d2k_hs_candidate_text` | 296-324 | 29 | текст плана по ключу (fake/split/order) | `http_search.rs:686 candidate_text` | E | tests `:227,235,243,260` (точные тексты split/disorder/fake) |
-| `stable_id` | 327-332 | 6 | FNV-1a id плана `d2k-http:` | `http_search.rs:780 stable_id` | E | test `:279 derives_the_r2o_stable_id_for_a_candidate` |
+| `d2k_hs_candidate_text` | 296-324 | 29 | `d2k-plan 1 11`, id, `proto tcp http`, fake payload/poison/repeats, split, disorder+pace | `http_search.rs:686-717 candidate_text` | **P** | **Подтверждённое расхождение формата:** C пишет `d2k-plan 1 11`, Rust — `r2o-plan 1 11`. Эффекты/директивы (`payload 1`, `poison 1`, `fake … repeats=1`, `split sni_middle +0`, `order reverse`, `pace 12000`) совпадают; Rust-тесты `:227,235,243,260` фиксируют R2O-заголовок, C-байтового differential нет. |
+| `stable_id` | 327-332 | 6 | FNV-1a по префиксу `d2k-http:` и ключу, 16 байт | `http_search.rs:780-795 stable_id` | **P** | **Подтверждённое расхождение:** C хеширует `"d2k-http:"`, Rust — `"r2o-http:"` (`http_search.rs:784`), поэтому для одного ключа получаются **разные 16-байтные id**. Тест `derives_the_r2o_stable_id_for_a_candidate` закрепляет R2O-id, C-вектора нет. |
 | `fresh_id` | 334-352 | 19 | случайный id с fallback на PRNG | `rand`/`getrandom` в `main.rs` | P | отдельной функции и fallback-ветки нет |
 | `say` | 442-450 | 9 | лог через ops.say | `main.rs` logging/diagnostics | P | формат логов не сверяется |
 | `host_ok` | 452-466 | 15 | валидация host, запрет числового TLD | `main.rs`/`http_search.rs` валидация имени | P | отдельного предиката с тем же правилом нет |
