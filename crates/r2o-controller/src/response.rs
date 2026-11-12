@@ -31,6 +31,18 @@ pub enum ResponseVerdict {
     Flaky,
 }
 
+impl ResponseVerdict {
+    /// C `d2k_resp_name`: точные строки ответного вердикта.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Clear => "clear",
+            Self::Blocked => "blocked",
+            Self::Flaky => "flaky",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResponseResult {
     pub verdict: ResponseVerdict,
@@ -1652,5 +1664,14 @@ mod tcp_split_transport_tests {
             std::fs::write(path, format!("{row}\n")).unwrap();
         }
         println!("{row}");
+    }
+
+    #[test]
+    fn response_verdict_names_match_donor() {
+        use super::ResponseVerdict;
+        assert_eq!(ResponseVerdict::Clear.as_str(), "clear");
+        assert_eq!(ResponseVerdict::Blocked.as_str(), "blocked");
+        assert_eq!(ResponseVerdict::Flaky.as_str(), "flaky");
+        assert_eq!(ResponseVerdict::NotApplicable.as_str(), "not_applicable");
     }
 }

@@ -101,12 +101,7 @@ pub fn result_json_value(result: &ClassifyResult, trigger_len: usize) -> serde_j
         value["path"] = serde_json::json!(path);
     }
     if let Some(response) = &result.response {
-        let verdict = match response.verdict {
-            crate::response::ResponseVerdict::NotApplicable => "not_applicable",
-            crate::response::ResponseVerdict::Clear => "clear",
-            crate::response::ResponseVerdict::Blocked => "blocked",
-            crate::response::ResponseVerdict::Flaky => "flaky",
-        };
+        let verdict = response.verdict.as_str();
         value["response"] = serde_json::json!({
             "verdict": verdict,
             "reason": &response.reason,

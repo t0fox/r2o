@@ -940,6 +940,25 @@ pub enum Verdict {
     Response,
 }
 
+/// C `map_verdict` (`detect/classify.c:95-112`): коды `D2K_DV_*` →
+/// `D2K_V_*`. POISONABLE намеренно сводится к OPAQUE: отдельный класс
+/// `Verdict::Poisonable` остаётся для внутренней классификации R2O.
+pub fn r2o_map_verdict(value: u8) -> Verdict {
+    match value {
+        1 => Verdict::Clear,
+        2 => Verdict::Prefix,
+        3 => Verdict::WholePacket,
+        4 => Verdict::Opaque,
+        5 => Verdict::Inconclusive,
+        6 => Verdict::Address,
+        7 => Verdict::Opaque,
+        8 => Verdict::Flaky,
+        9 => Verdict::Unreachable,
+        10 => Verdict::Response,
+        _ => Verdict::Inconclusive,
+    }
+}
+
 impl Verdict {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -2846,5 +2865,28 @@ mod qtrace_tests {
         cross_check_tls12(&mut result, &options, "");
         assert_eq!(result.covers_tls12, TriState::Unset);
         assert!(result.notes.last().unwrap().contains("НЕ ПРОВЕРЕНО"));
+    }
+
+    #[test]
+    fn map_verdict_matches_donor_table() {
+        use super::{Verdict, r2o_map_verdict};
+        let expected = [
+            (0, Verdict::Inconclusive),
+            (1, Verdict::Clear),
+            (2, Verdict::Prefix),
+            (3, Verdict::WholePacket),
+            (4, Verdict::Opaque),
+            (5, Verdict::Inconclusive),
+            (6, Verdict::Address),
+            // C: POISONABLE намеренно сводится к OPAQUE.
+            (7, Verdict::Opaque),
+            (8, Verdict::Flaky),
+            (9, Verdict::Unreachable),
+            (10, Verdict::Response),
+            (11, Verdict::Inconclusive),
+        ];
+        for (code, verdict) in expected {
+            assert_eq!(r2o_map_verdict(code), verdict, "код {code}");
+        }
     }
 }
