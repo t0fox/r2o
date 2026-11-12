@@ -608,6 +608,7 @@ impl NamePlans {
             .or_else(|| self.find(sni, view.family, bridge_shape))
             .or_else(|| fallback_shape.and_then(|fallback| self.find(sni, view.family, fallback)))
             .or_else(|| self.find(sni, view.family, SHAPE_GRANDFATHER))
+            .or_else(|| self.find_shape_fits(sni, view.family, shape))
             .or_else(|| self.find_in_domain(sni, view.family, shape, 6))
             .or_else(|| self.find_in_domain(sni, view.family, bridge_shape, 6))
             .or_else(|| {
@@ -1679,6 +1680,24 @@ impl NamePlans {
         (true, control::ACK_OK)
     }
 
+    /// C `scan_name` + `shape_fits`: любая именная запись, совместимая с
+    /// наблюдённой формой (grandfather/ECH-перенос/точное равенство).
+    fn find_shape_fits(&self, bytes: &[u8], family: u8, seen_shape: u8) -> Option<&Plan> {
+        let host = canonical_name(bytes)?;
+        let entry = self
+            .plans
+            .iter()
+            .find(|(key, _)| {
+                key.host == host
+                    && key.family == family
+                    && key.shape != SHAPE_HTTP
+                    && r2o_shape_fits(key.shape, seen_shape)
+            })
+            .map(|(_, entry)| entry)?;
+        Self::touch(entry, self.next_plan_clock());
+        Some(&entry.plan)
+    }
+
     fn find(&self, bytes: &[u8], family: u8, shape: u8) -> Option<&Plan> {
         let host = canonical_plan_name(bytes, shape)?;
         let entry = self.plans.get(&NamePlanKey {
@@ -1733,6 +1752,55 @@ impl NamePlans {
             .iter()
             .find(|(key, _)| key.address == address)
             .map(|(_, entry)| &entry.plan)
+    }
+
+    /// C `d2k_plantab_set_addr`: IPv4-адрес как grandfather-запись.
+    pub fn set_addr_legacy(&mut self, address: Address, plan: Plan) -> bool {
+        self.set_addr_family_legacy(address, 4, plan)
+    }
+
+    /// C `d2k_plantab_set_addr_family`: адрес без формы → grandfather.
+    pub fn set_addr_family_legacy(&mut self, address: Address, family: u8, plan: Plan) -> bool {
+        self.set_addr_shaped_legacy(address, family, SHAPE_GRANDFATHER, plan)
+    }
+
+    /// C `d2k_plantab_set_addr_shaped`: адрес ровно (address, family, shape);
+    /// C отвергает только ANY/HTTP и HTTP-протокол плана.
+    pub fn set_addr_shaped_legacy(
+        &mut self,
+        address: Address,
+        family: u8,
+        shape: u8,
+        plan: Plan,
+    ) -> bool {
+        if !matches!(family, 4 | 6)
+            || address.family() != family
+            || shape == 0
+            || shape == SHAPE_HTTP
+            || plan.proto == PROTO_HTTP
+            || !self.r2o_plan_valid(&plan)
+        {
+            return false;
+        }
+        let key = AddrPlanKey { address, shape };
+        if !self.addr_plans.contains_key(&key) && !self.make_room_exact() {
+            return false;
+        }
+        if self.addr_plans.try_reserve(1).is_err() {
+            return false;
+        }
+        let generation = self.next_generation();
+        let last_used = Cell::new(self.next_plan_clock());
+        self.addr_plans.insert(
+            key,
+            InstalledPlan {
+                plan,
+                generation,
+                last_used,
+            },
+        );
+        self.revision = self.revision.wrapping_add(1);
+        true
     }
 
     fn find_addr(&self, address: Address, shape: u8) -> Option<&Plan> {
@@ -1863,6 +1931,25 @@ impl NamePlans {
 /// C `shape_is_udp`: QUIC/VOICE — UDP-формы.
 fn r2o_shape_is_udp(shape: u8) -> bool {
     matches!(shape, SHAPE_QUIC | SHAPE_VOICE)
+}
+
+/// C `shape_fits` (`plans.c:1044-1052`): grandfather подходит любой форме;
+/// MODERN/NO_TS/TS совместимы с соответствующей ECH-формой; иначе точное
+/// равенство ненулевых форм.
+fn r2o_shape_fits(entry_shape: u8, seen_shape: u8) -> bool {
+    if entry_shape == SHAPE_GRANDFATHER {
+        return true;
+    }
+    if entry_shape == SHAPE_MODERN && seen_shape == SHAPE_ECH_TCP {
+        return true;
+    }
+    if entry_shape == SHAPE_MODERN_NO_TS && seen_shape == SHAPE_ECH_NO_TS {
+        return true;
+    }
+    if entry_shape == SHAPE_MODERN_TS && seen_shape == SHAPE_ECH_TS {
+        return true;
+    }
+    entry_shape != 0 && entry_shape == seen_shape
 }
 
 fn r2o_shape_transport(shape: u8) -> u8 {
@@ -5161,6 +5248,46 @@ mod tests {
         }
         let ack = NamePlans::default().handle(&frame(r2k_core::control::SHAPE_MODERN, &quic));
         assert!(!ack.ok, "чужой транспорт плана должен быть отвергнут");
+    }
+
+    #[test]
+    fn legacy_addr_setters_and_shape_fits_match_c() {
+        let address = super::Address::new(super::IpAddr::V4(super::Ipv4Addr::new(198, 51, 100, 7)));
+        let tcp = Plan::parse_wire(&tls_plan_records([0x71; 16])).unwrap();
+        let mut plans = NamePlans::default();
+        assert!(plans.set_addr_legacy(address, tcp.clone()));
+        assert!(plans.addr_plans.contains_key(&super::AddrPlanKey {
+            address,
+            shape: r2k_core::control::SHAPE_GRANDFATHER,
+        }));
+        assert!(plans.set_addr_family_legacy(address, 4, tcp.clone()));
+        assert!(plans.set_addr_shaped_legacy(
+            address,
+            4,
+            r2k_core::control::SHAPE_MODERN,
+            tcp.clone(),
+        ));
+        assert!(plans.addr_plans.contains_key(&super::AddrPlanKey {
+            address,
+            shape: r2k_core::control::SHAPE_MODERN,
+        }));
+        let http = Plan {
+            proto: r2k_core::plan::PROTO_HTTP,
+            ..Plan::default()
+        };
+        assert!(!plans.set_addr_shaped_legacy(address, 4, r2k_core::control::SHAPE_MODERN, http,));
+
+        use r2k_core::control::{
+            SHAPE_ECH_NO_TS, SHAPE_ECH_TCP, SHAPE_ECH_TS, SHAPE_GRANDFATHER, SHAPE_LEGACY,
+            SHAPE_MODERN, SHAPE_MODERN_NO_TS, SHAPE_MODERN_TS, SHAPE_VOICE,
+        };
+        assert!(super::r2o_shape_fits(SHAPE_GRANDFATHER, SHAPE_VOICE));
+        assert!(super::r2o_shape_fits(SHAPE_MODERN, SHAPE_ECH_TCP));
+        assert!(super::r2o_shape_fits(SHAPE_MODERN_NO_TS, SHAPE_ECH_NO_TS));
+        assert!(super::r2o_shape_fits(SHAPE_MODERN_TS, SHAPE_ECH_TS));
+        assert!(super::r2o_shape_fits(SHAPE_LEGACY, SHAPE_LEGACY));
+        assert!(!super::r2o_shape_fits(0, SHAPE_MODERN));
+        assert!(!super::r2o_shape_fits(SHAPE_MODERN, SHAPE_ECH_NO_TS));
     }
 
     #[test]
