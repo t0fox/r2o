@@ -541,6 +541,8 @@
 
 ### `core/props.c`
 
+**Прочитано построчно: 5/5 функций, 91 строка C (1–91).** Сверено с `quic_replay.rs` (`r2o_quic_blob_candidate`, `r2o_quic_discovery_candidates`, `r2o_quic_original_fallback_candidates`), `r2o_quic_http3.rs` (`r2o_quic_http3_get_with_wire_len`, measure) и trial-runner `main.rs:20496`; одноимённого hook-API в R2O нет.
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
 | `original_probe` | 35–44 | 10 | hook исходного QUIC-замера: `sni = q->control ? NULL : target_sni`, затем `d2k_quic_ask_arm_hook(q,sni,port,wait,mark,sent)` | `r2o_quic_blob_candidate`/`r2o_quic_raw_ask` (`quic_replay.rs`), `r2o_quic_http3_get...` | **P** | **Прямого hook-аналога нет:** Rust строит кандидатов (`r2o_quic_discovery_candidates`, `r2o_quic_original_fallback_candidates`) и вызывает `r2o_quic_http3_*` с `server_name`, но отдельной пары probe/data-hook с `control ? NULL : target_sni` нет. QUIC differentials сравнивают результаты, не эту развилку. |
@@ -838,6 +840,8 @@
 
 ### `core/verdict.c`
 
+**Прочитано построчно: 7/7 функций, 342 строки C (1–342).** Сверено с `classify.rs` (`measure` `:1082-1240`, `run_with_backend_progress` `:1298+`, `finish_cancelled` `:1952`) и `main.rs:1177-1178` (`full_detect_semantics=true, confirm_clear=false`); полного C/Rust differential дерева нет.
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
 | `looks_like_tls` | 33–35 | 3 | `bytes[0] == 0x16` → ServerHello, иначе Any | — | **N** | **Уточнение 2026-11-12:** это static-правило `core/verdict.c`, а не detect-триггер. R2O не портировал core-вердикт (`d2k_classify_cancelable` имеет только тестовый вызов), поэтому отдельной реализации нет. Detect-триггер `Trigger::raw_hex` обязан оставаться `Accept::Any` по `detect/trigger.c:106`; прежняя правка ошибочно применила правило `looks_like_tls` к detect-пути. |
@@ -849,6 +853,8 @@
 | `d2k_classify` | 336–342 | 7 | обёртка `d2k_classify_cancelable(..., stop=NULL)` | `classify::run` (`:1929`) | **P** | C-обёртка без отмены; Rust `run` → `run_with_backend(TcpProbeBackend)`. C-путь production-вызовов не имеет. |
 
 ### `core/x25519.c`
+
+**Прочитано построчно: 12/12 функций, 198 строк C (1–198).** Сверено с `r2o_tls.rs:92-103` (ring `X25519` в TLS12/TLS13), `ech.rs:9,80-137` (`X25519HkdfSha256`), `quic.rs`/`quic_replay.rs` (X25519 key_share); прямых C/Rust-векторов X25519 и теста low-order точки нет.
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
@@ -876,12 +882,12 @@
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `d2k_resource_word` | 27–35 | 9 | равная длина, ASCII lower-case `s[i]`, сравнение с `word[i]` | `r2o_resource.rs:407-413` `r2o_resource_word` | **P*** | Совпадает: длина + `eq_ignore_ascii_case` по байтам. Отдельного теста хелпера нет. |
-| `d2k_resource_space` | 36–38 | 3 | `' '`, `\\t`, `\\r`, `\\n`, `\\f` | `r2o_resource.rs:415-417` `r2o_resource_space` | **P*** | Совпадает посимвольно. |
-| `d2k_resource_path_ok` | 39–50 | 12 | непустой, <512, `/`, не `//`, без `/../` и `/./`, `[A-Za-z0-9/._-]`, кончается `.css` | `r2o_resource.rs:309-330` `r2o_resource_path_ok`/`path_bytes_ok` | **P** | Построчно совпадает; Rust `windows(4)`/`windows(3)` вместо `strstr`, `.css` — `eq_ignore_ascii_case`. Целевого C/Rust differential нет. |
-| `d2k_resource_add` | 51–73 | 23 | https/`//`: путь, хост <256, без ведущей/хвостовой точки, LDH+`.`, lower-case, один ресурс на хост, максимум 2 | `r2o_resource.rs:255-305` `r2o_add_url`/`r2o_add_url_bytes` | **P*** | Построчно совпадает: strip_prefix, первый `/`, host/path checks, lower-case, dedupe по host, push. Rust дополнительно останавливает `feed` при 2 ресурсах (C — в `add`). |
-| `d2k_resource_tag` | 74–113 | 40 | завершить тег: raw `/script`/`/style`, script/style/body, `link` с одним `href`/`rel=stylesheet`, href <1024 | `r2o_resource.rs:188-236` `r2o_finish_tag`, `:332-405` `r2o_link_stylesheet_href` | **P*** | Построчно совпадает, включая префикс `/script`/`/style` (case-sensitive), один `href`/`rel`, отказ при незакрытой кавычке и лимит 1024. |
-| `d2k_resource_feed` | 114–159 | 46 | лимит 32768, сбор URL по байту `h`, теги/комментарии/кавычки, `>` завершает тег | `r2o_resource.rs:140-186` `R2oResourceScan::feed` | **P** | Построчно совпадает; **отличие:** Rust прерывает обход при `resources.len() >= 2`, C продолжает до 32768, а лишние ресурсы отбрасывает в `add`. Итоговый набор тот же, объём сканирования разный. Целевого C/Rust differential нет. |
+| `d2k_resource_word` | 27–35 | 9 | равная длина; lower-case `s[i]`; сравнение с `word[i]` без lower | `r2o_resource.rs:407-413 r2o_resource_word` | **P*** | C приводит только haystack; все C-вызовы передают `script/style/body/link/href/rel/stylesheet/.css` в нижнем регистре. Rust `eq_ignore_ascii_case` сворачивает обе стороны; для этих вызовов эквивалентно, при верхнем регистре в `word` C вернул бы 0. Отдельного теста хелпера нет. |
+| `d2k_resource_space` | 36–38 | 3 | `' '`, `\t`, `\r`, `\n`, `\f` | `r2o_resource.rs:415-417 r2o_resource_space` | **P*** | Посимвольно совпадает (`b'\x0c'` = `\f`). |
+| `d2k_resource_path_ok` | 39–50 | 12 | непустой, `<512`, `/`, не `//`, без `/../` и `/./`, `[A-Za-z0-9/._-]`, кончается `.css` без регистра | `r2o_resource.rs:309-330 r2o_resource_path_ok/path_bytes_ok` | **P** | Ветви совпадают: `n==0 || n>=512`, `path[0]=='/'`, `path[1]!='/'`, `strstr("/../")`/`"/./"` ↔ `windows(4)`/`windows(3)`, allowed-байты, `n>=4`, `.css` через `eq_ignore_ascii_case`. Целевого C/Rust differential нет. |
+| `d2k_resource_add` | 51–73 | 23 | `https://`/`//`; первый `/`; `<256`; без ведущей/хвостовой точки; LDH+`.`; lower-case; один ресурс на хост; максимум 2 | `r2o_resource.rs:265-305 r2o_add_url_bytes` | **P*** | Совпадает: strip `https://`/`//`, первый `/`, `r2o_resource_path_bytes_ok`, `host.is_empty()`, `len>=256`, точки, allowed-байты, `to_ascii_lowercase`, dedupe по host, push. C `strcpy` в фиксированные массивы, Rust `String`; C отбрасывает третий ресурс в `add`, Rust останавливает `feed` после двух (`:150-152`). |
+| `d2k_resource_tag` | 74–113 | 40 | завершить тег: raw `/script`/`/style`; script/style/body; `link` с одним `href`/`rel=stylesheet`; href <1024 | `r2o_resource.rs:221-259 r2o_finish_tag`, `:332-405 r2o_link_stylesheet_href` | **P*** | Ветви совпадают: `strcspn(" \t\r\n\f/>")` ↔ position по space/`/`/`>`; raw-префиксы case-sensitive; `body` → `seen=32768`; `script/style/link`; парсер атрибутов с `=`, кавычками, отказом при незакрытой кавычке, одним `href`/`rel`, `href<1024`, `stylesheet`. Rust `split(0)` повторяет C-терминацию тега. |
+| `d2k_resource_feed` | 114–159 | 46 | лимит 32768; сбор URL по байту `h`; теги/комментарии/кавычки; `>` завершает тег; `url_used>8` перед `add` | `r2o_resource.rs:148-219 R2oResourceScan::{feed,r2o_feed_url}` | **P** | Совпадает: лимит `seen<32768`, буфер тега 2048, комментарий `<!-- -->`, quote, `>` → finish, URL-аккумулятор от `h` с делимитерами `"'();,<>` и space, лимит 600. **Отличие:** Rust прерывает обход при `resources.len()>=2` (`:150-152`), C идёт до 32768, а третий ресурс отбрасывает в `add`; итоговый набор тот же, объём сканирования разный. Целевого C/Rust differential нет. |
 
 **Прочитано построчно:** `include/d2k_link.h` 3/3 (521 строка), `include/d2k_resource.h` 6/6 (160 строк).
 
