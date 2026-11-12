@@ -230,6 +230,7 @@ impl ProbeBackend for MeasuredPoisonHit {
             strategy: "--lua-desync=multisplit:badsum".into(),
             plan_text,
             plan,
+            gap_ms: 0,
         }))
     }
 }

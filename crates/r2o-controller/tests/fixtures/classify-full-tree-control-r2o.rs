@@ -51,6 +51,7 @@ impl ProbeBackend for ComposeBackend {
             strategy: "fixture".into(),
             plan_text: String::new(),
             plan: Vec::new(),
+            gap_ms: 0,
         }))
     }
 }

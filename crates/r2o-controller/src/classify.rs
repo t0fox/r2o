@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 use crate::response::{ResponseOptions, ResponseResult, ResponseVerdict, probe_response};
 
 const TRACE_MAX: usize = 512;
+/// C `D2K_QTRACE_MAX` (`core/include/d2k_verdict.h:147`).
+const QTRACE_MAX: usize = 16;
 const CLEAR_CONFIRM_REPEATS: usize = 2;
 
 /// Один непрерывный диапазон данных триггера, отправляемый пробой с разрезанием.
@@ -806,6 +808,23 @@ pub struct PoisonHit {
     pub plan_text: String,
     /// Проверенная программа R2OP, полученная из успешной измеренной гипотезы.
     pub plan: Vec<u8>,
+    /// C `d2k_poison.gap_ms`: пауза между копиями, которую движок не умеет.
+    pub gap_ms: i32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QuestionOutcome {
+    Unknown,
+    No,
+    Yes,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QuestionTrace {
+    pub label: String,
+    pub sent: u8,
+    pub answered: u8,
+    pub outcome: QuestionOutcome,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -841,6 +860,8 @@ pub struct ClassifyOptions {
     pub mark: Option<u32>,
     pub cancel: Option<Arc<AtomicBool>>,
     pub seed_whole: Option<SeedWhole>,
+    /// C `d2k_opts.cross_check_tls12`: режим both, ещё не перенесённый.
+    pub cross_check_tls12: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -884,6 +905,7 @@ impl Default for ClassifyOptions {
             mark: None,
             cancel: None,
             seed_whole: None,
+            cross_check_tls12: false,
         }
     }
 }
@@ -960,6 +982,12 @@ pub struct ClassifyResult {
     pub rst_rule_failures: usize,
     pub raw_dials: u64,
     pub trace: Vec<Observation>,
+    /// C `d2k_vres.qtrace`: ответы вопросов «свойство:*» для планировщика.
+    pub qtrace: Vec<QuestionTrace>,
+    /// C `d2k_result.notes`: честные оговорки о неперенесённых режимах.
+    pub notes: Vec<String>,
+    /// C `d2k_result.covers_tls12`: `Unset` означает «не проверено».
+    pub covers_tls12: TriState,
     rst_rule_failure_base: u64,
     raw_dial_base: u64,
 }
@@ -988,6 +1016,9 @@ impl ClassifyResult {
             rst_rule_failures: 0,
             raw_dials: 0,
             trace: Vec::new(),
+            qtrace: Vec::new(),
+            notes: Vec::new(),
+            covers_tls12: TriState::Unset,
             rst_rule_failure_base: crate::raw_probe::rst_rule_failure_count(),
             raw_dial_base: current_raw_dial_count(),
         }
@@ -1667,7 +1698,9 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
                         "поток пересобирается, но буфер травится: коробка глотает «{}», сервер выбрасывает",
                         hit.name
                     );
+                    let gap_ms = hit.gap_ms;
                     result.hit = Some(hit);
+                    note_gap_loss(&mut result, gap_ms);
                     append_unplannable_reason(&mut result);
                     finish(&mut result, &options, start);
                     return result;
@@ -1940,7 +1973,82 @@ fn strategy_for(pos: usize) -> String {
     format!("--lua-desync=multisplit:payload=unknown:dir=out:pos={pos}")
 }
 
+fn prop_majority(pass: usize, repeats: usize) -> bool {
+    repeats > 0 && pass.saturating_mul(2) > repeats
+}
+
+fn truncate_utf8_label(label: &str, max: usize) -> &str {
+    if label.len() <= max {
+        return label;
+    }
+    let mut end = max;
+    while end > 0 && !label.is_char_boundary(end) {
+        end -= 1;
+    }
+    &label[..end]
+}
+
+/// C `trace_questions` (`detect/bridge.c:284-309`): только наблюдения
+/// «свойство:*», ярлык до 63 байт по границе UTF-8, sent/answered ≤255,
+/// исход UNKNOWN при локальной ошибке, иначе большинство повторов.
+fn trace_questions(result: &ClassifyResult) -> Vec<QuestionTrace> {
+    let mut out = Vec::new();
+    for observation in &result.trace {
+        if out.len() >= QTRACE_MAX {
+            break;
+        }
+        let Some(label) = observation.probe.strip_prefix("свойство:") else {
+            continue;
+        };
+        let sent = observation.pass.saturating_add(observation.fail).min(255) as u8;
+        let answered = observation.pass.min(255) as u8;
+        let outcome = if observation
+            .error
+            .as_deref()
+            .is_some_and(|error| !error.is_empty())
+        {
+            QuestionOutcome::Unknown
+        } else if prop_majority(observation.pass, result.repeats) {
+            QuestionOutcome::Yes
+        } else {
+            QuestionOutcome::No
+        };
+        out.push(QuestionTrace {
+            label: truncate_utf8_label(label, 63).to_owned(),
+            sent,
+            answered,
+            outcome,
+        });
+    }
+    out
+}
+
+/// C `note_gap_loss` (`detect/classify.c:238-247`): честно сказать, что
+/// движок не умеет паузу между копиями фальшивки.
+fn note_gap_loss(result: &mut ClassifyResult, gap_ms: i32) {
+    if gap_ms <= 0 {
+        return;
+    }
+    result.notes.push(format!(
+        "приём сработал с паузой {gap_ms} мс между копиями фальшивки, а движок паузу выразить не умеет: в строке копии идут вплотную. Если обход не встанет — дело может быть именно в этом"
+    ));
+}
+
+/// C `cross_check_tls12` (`detect/classify.c:1084-1092`): режим ещё не
+/// перенесён, поэтому результат обязан остаться «не проверено».
+fn cross_check_tls12(result: &mut ClassifyResult, options: &ClassifyOptions, _poison_name: &str) {
+    if !options.cross_check_tls12 {
+        return;
+    }
+    result.covers_tls12 = TriState::Unset;
+    result
+        .notes
+        .push("покрытие старого приветствия TLS 1.2 НЕ ПРОВЕРЕНО: режим ещё не перенесён".into());
+}
+
 fn finish(result: &mut ClassifyResult, options: &ClassifyOptions, start: Instant) {
+    result.qtrace = trace_questions(result);
+    cross_check_tls12(result, options, "");
     result.stopped = stopped(options);
     result.props.reassembles = match result.reassembles {
         Some(true) => TriState::True,
@@ -2653,5 +2761,75 @@ mod raw_connect_fallback_tests {
         assert_eq!(result.probes, 2);
         assert_eq!(backend.targets.len(), 1);
         assert_eq!(backend.controls.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod qtrace_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn observation(probe: &str, pass: usize, fail: usize, error: Option<&str>) -> Observation {
+        Observation {
+            probe: probe.into(),
+            cuts: Vec::new(),
+            delay: Duration::ZERO,
+            pass,
+            fail,
+            error: error.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn trace_questions_matches_c_for_property_observations() {
+        let mut result = ClassifyResult::new("example.com:443", 3);
+        result
+            .trace
+            .push(observation("свойство:timestamps", 2, 1, None));
+        result.trace.push(observation("base", 3, 0, None));
+        result
+            .trace
+            .push(observation("свойство:checksum", 0, 3, None));
+        result
+            .trace
+            .push(observation("свойство:md5", 1, 0, Some("local")));
+        let trace = trace_questions(&result);
+        assert_eq!(trace.len(), 3);
+        assert_eq!(trace[0].label, "timestamps");
+        assert_eq!((trace[0].sent, trace[0].answered), (3, 2));
+        assert_eq!(trace[0].outcome, QuestionOutcome::Yes);
+        assert_eq!(trace[1].outcome, QuestionOutcome::No);
+        assert_eq!(trace[2].outcome, QuestionOutcome::Unknown);
+
+        let long = format!("свойство:{}", "я".repeat(40));
+        result.trace.push(observation(&long, 1, 0, None));
+        let trace = trace_questions(&result);
+        let label = &trace.last().unwrap().label;
+        assert!(label.len() <= 63);
+        assert!(std::str::from_utf8(label.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn trace_questions_is_bounded_and_notes_match_c() {
+        let mut result = ClassifyResult::new("example.com:443", 3);
+        for _ in 0..20 {
+            result
+                .trace
+                .push(observation("свойство:timestamps", 1, 1, None));
+        }
+        assert_eq!(trace_questions(&result).len(), QTRACE_MAX);
+
+        note_gap_loss(&mut result, 0);
+        assert!(result.notes.is_empty());
+        note_gap_loss(&mut result, 20);
+        assert!(result.notes[0].contains("20 мс"));
+
+        let mut options = ClassifyOptions::default();
+        cross_check_tls12(&mut result, &options, "");
+        assert_eq!(result.notes.len(), 1);
+        options.cross_check_tls12 = true;
+        cross_check_tls12(&mut result, &options, "");
+        assert_eq!(result.covers_tls12, TriState::Unset);
+        assert!(result.notes.last().unwrap().contains("НЕ ПРОВЕРЕНО"));
     }
 }

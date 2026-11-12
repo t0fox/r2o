@@ -1124,6 +1124,7 @@ fn make_poison_hit(
         strategy,
         plan_text,
         plan,
+        gap_ms: poison.gap_ms,
     }))
 }
 
