@@ -1176,6 +1176,13 @@ memory_bytes, load с проверкой хвоста, все writer'ы, `d2k_ca
 
 ## Углублённая сверка: compose.c (53 функции)
 
+**Прочитано построчно: 53/53 функции, 1799 строк C (1–1799).** Сверены:
+белый список 266 имён, TLV-билдеры (`tlv_rec`/`tlv_header`/`plan_tlv_stamp_ident`),
+пять планов вопросов (overlap/reorder/badsum/checksum/protocol), `ev_matches_flow`,
+`wait_for_event3`/`wait_for_event`, bind/contact и TCP-profile connect,
+`d2k_props_ask_traced` (applied+server_hello+unsent, ключ потока, снятие пробы),
+текстовые планы и fallback-перебор, `d2k_arm_plan`, `d2k_compose`.
+
 - **Белый список и TLV-билдеры:** `d2k_net_whitelist_count/name`,
   `wr16be`, `rd16be`, `wr32be`, `tlv_rec`, `tlv_header`, `to_hex` сверены с
   `r2o_rx_volume`/`plan_text`; список 266 имён и порядок покрыты unit
