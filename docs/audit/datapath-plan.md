@@ -78,6 +78,14 @@ R2O-аналог — `crates/r2o-datapath/src/control.rs` (`ControlServer`), п�
 Итог по файлу: E 8, P 3, N 3. Пробелы: нет доступа к fd (listen/peer), нет счётчика
 отправленных кадров, hook разрыва реализован в цикле, а не в объекте.
 
+**Построчная сверка a378:** все 14 функций прочитаны. Кольцо `D2K_CTL_OUT_RING`,
+кадр `HDR=6` (`plen` включает 2 байта типа, `plen>=2`), `D2K_CTL_FRAME_MAX`,
+потеря кадра при нехватке места и `dropped++`, EAGAIN-дозапись, один пир,
+`drop_peer` при ошибке чтения — совпадают с `control.rs` (`send_event`/`enqueue`/
+`take_complete_frames`/`disconnect`). Отличия: R2O не отдаёт listen/peer fd,
+не считает `sent`, hook разрыва вызывает цикл `main.rs`, а не объект; `open`
+не удаляет чужой не-сокет и ставит 0600/backlog по умолчанию.
+
 ---
 
 ## 2. datapath/ctlsrv.c — 12 функций
@@ -97,12 +105,23 @@ R2O-аналог — `crates/r2o-datapath/src/control.rs` (`ControlServer`), п�
 | canonical_address | 152-157 | 6 | static: family 4 требует нулевой хвост 16-байтного адреса | `control.rs:1612` `addr_plan_key` | E | `удаление_адреса_разделяет_формы_и_удаляет_одну` (control.rs:2793): `body[5]=1` даёт `ACK_BAD_ARGS`. |
 | addr_shape_valid | 163-167 | 5 | допустимые формы адресной привязки (1,2,3,5,6) | `control.rs:1628` `valid_addr_shape`, `:1635` `addr_plan_matches_shape` | P | Валидные формы покрыты тестами адресов; отказа для недопустимой формы (0/4/7) в тестах не найдено. |
 | read_probe_flow | 169-187 | 19 | static: разобрать flow адресного опыта, отвергнуть неканонический IPv4 | `control.rs:1695` `r2o_udp_addr_probe_flow_key` + `r2k-core/control.rs:1701` `valid_udp_addr_probe_flow` | **P** | **Расхождение:** C допускает `src_port=0` — голосовой опыт «любой клиентский порт» (`ctlsrv.c:302-304`), и не требует ненулевых адресов; Rust `valid_udp_addr_probe_flow` требует оба порта ≠0 и ненулевые адреса. R2O вынес голос в отдельную `SET_VOICE_ADDR_PROBE` (0x0095), которой в C нет: C-команды заканчиваются на 0x0093. Тестов SET/DEL/FIND адресного опыта в дереве нет. |
-| d2k_ctlsrv_command | 189-509 | 321 | диспетчер команд, разбор тел, ACK, установка в таблицу | `control.rs:260` `NamePlans::handle`; `main.rs:68` `handle_control_command` (stall budgets); `control.rs:1988` `arm_client_shape` | **P** | Покрыты SET_NAME/BOUND/PROBE/ADDR/SUFFIX/BYPASS/DEL_*/HTTPS/ARM_SHAPE/STALL_BUDGETS (control.rs:2633-3896). **Подтверждённые расхождения:** (1) `SET_HTTPS`: C обрезает TTL до **7 суток** (`d2k_ctl.h:231`, `ctlsrv.c:446`), R2O отвергает `> 6 часов` (`control.rs:64,1070,1781`); (2) `ARM_SHAPE`: C принимает transport 6/17 (`ctlsrv.c:341`), R2O — только 6 (`control.rs:2002`); (3) `SET_ADDR_PROBE`: C допускает `src_port=0` для голоса (`ctlsrv.c:302-304`), R2O generic-проба требует оба порта ≠0, а голос вынесен в `SET_VOICE_ADDR_PROBE` 0x0095, отсутствующую в C; (4) `DEL_NAME_PROBE`: C не проверяет shape (`ctlsrv.c:422-437`), R2O проверяет; (5) адресные опыты не тестированы. C `DEL_NAME_BOUND`/`DEL_ADDR_PROBE` идемпотентны и всегда ACK OK — R2O так же. |
+| d2k_ctlsrv_command | 189-509 | 321 | диспетчер команд, разбор тел, ACK, установка в таблицу | `control.rs:260` `NamePlans::handle`; `main.rs:68` `handle_control_command` (stall budgets); `control.rs:1988` `arm_client_shape` | **P** | Покрыты SET_NAME/BOUND/PROBE/ADDR/SUFFIX/BYPASS/DEL_*/HTTPS/ARM_SHAPE/STALL_BUDGETS (control.rs:2633-3896). **Подтверждённые расхождения:** (1) `SET_HTTPS`: C обрезает TTL до **7 суток** (`d2k_ctl.h:231`, `ctlsrv.c:446`), R2O отвергает `> 6 часов` (`control.rs:64,1070,1781`); (2) `ARM_SHAPE`: C принимает transport 6/17 (`ctlsrv.c:341`), R2O — только 6 (`control.rs:2002`); (3) `SET_ADDR_PROBE`: C допускает `src_port=0` для голоса (`ctlsrv.c:302-304`), R2O generic-проба требует оба порта ≠0, а голос вынесен в `SET_VOICE_ADDR_PROBE` 0x0095, отсутствующую в C; (4) `DEL_NAME_PROBE`: C не проверяет shape (`ctlsrv.c:422-437`), R2O проверяет; (5) адресные опыты не тестированы; (6) `SET_NAME`/`SET_SUFFIX`: C не проверяет `shape` (передаёт `b[1+len]` в plantab), Rust `encode_set_name`/`encode_set_suffix` отвергает неизвестные формы; (7) `DEL_NAME`: C принимает любую пару `transport` (6/17) + `shape != ANY`, Rust `encode_delete_name` — только 6 с 1/2/4/6/7/8..13 или 17 с 3/5. C `DEL_NAME_BOUND`/`DEL_ADDR_PROBE` идемпотентны и всегда ACK OK — R2O так же. |
 | d2k_ctlsrv_pump | 511-694 | 184 | выгрузить новые записи журнала в события с раскладкой по типам | `main.rs:2728` `send_journal_updates`, `:2709` `send_journal_snapshot`; `flow_journal.rs:202` `to_event_frame` | **P** | C: `PLAN_APPLIED` не отдаётся вовсе (`ctlsrv.c:566-568`), `PLAN_DONE→APPLIED`, `REFUSED/UNSENT/DAMAGED→REFUSED`, `SHAPE→CLIENT_TCP+SHAPE`, `HELLO/SUSPECT/EXCHANGE` — своими типами. R2O `send_journal_updates` шлёт каждую запись как `EVENT_R2O_JOURNAL_ENTRY`, а dedicated-события (`EVENT_APPLIED/REFUSED/CLIENT_SHAPE/HELLO`) идут отдельными путями; контроллер декодирует journal entry только для печати (`main.rs:7148,17948`), доказательства — через dedicated. `PlanApplied` не становится `EVENT_APPLIED` ни там, ни там. Пробел v22: `EVENT_LEGACY_CLIENT_TCP` шлёт пустые TCP-опции (`r2k-core/control.rs:1212-1215`), C — реальные. |
 | d2k_ctlsrv_http80_event | 697-731 | 35 | событие HTTP-портала/ответа с измерениями | `control.rs:3136` `send_http_portal_event`, `:3148` `send_http_response_event`; `r2k-core/control.rs:852` `HttpResponseEvent::event_body` | P | `decodes_r2o_http_response_context_and_measurements` (tests/control.rs:977), `control_decoder_accepts_http_portal_response_events` (tests/capture_shape.rs:150). Отличие: R2O кодирует `code 1..4` и всегда несёт хвост status/body/request_no; C для портала без ответа хвост не шлёт. |
 
 Итог по файлу: E 6, P 6, N 0. Пробелы: TTL HTTPS (обрезка vs отказ), ARM_SHAPE для
 UDP, пустые TCP-опции в v22 CLIENT_TCP, адресные опыты без тестов, формат HTTP-события.
+
+**Построчная сверка a378:** все 12 функций прочитаны. Совпадают: `put_key` 38 байт
+полями; `ack`/`ack_trial` (trial/area/binding, reason только при ok=0); greet
+`PROTO` с версией/maxlen/release; `peer_closed` → clear_probes; canonical_address;
+read_probe_flow family/хвост; диспетчер SET_NAME/BOUND/SUFFIX/PROBE/ADDR,
+ADDR_PROBE, ARM_SHAPE, DEL_SUFFIX/BYPASS/DEL_NAME/BOUND/PROBE, SET_HTTPS,
+STALL_BUDGETS, DEL_ADDR/PROBE, неизвестная → BAD_ARGS; pump-раскладка журнала;
+http80_event code 1..4. **Расхождения:** перечисленные TTL/ARM/ADDR_PROBE/DEL_NAME_PROBE,
+плюс `SET_NAME`/`SET_SUFFIX` без проверки shape, `DEL_NAME` с любой парой
+transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-событие C без хвоста
+для портала.
 
 ---
 
@@ -145,6 +164,16 @@ UDP, пустые TCP-опции в v22 CLIENT_TCP, адресные опыты 
 обход `delay_us` в qsplit и место отказа при >26 посылках (D2O тоже отказывает в session,
 но позже).
 у OOB-суффикса.
+
+**Построчная сверка a378:** все 15 функций прочитаны. Подтверждены три расхождения
+`d2k_plan_apply` (`plan_apply.c:343-873`) с `apply.rs:155-300/600-670`:
+(1) OOB: C на `finalize` проставляет `wire_profile` всем посылкам (`:812`), Rust — только
+`first` и `urgent`, `suffix` остаётся 0; (2) qsplit: Rust возвращает `Actions` до
+`apply_timing`, поэтому `delay_us` не применяется, C применяет его после всех ветвей
+(`:803-809`); (3) предел `MAX_EMISSIONS=26` в Rust против 65536 в C, но `session.c:2517`
+всё равно отказывает >26, поэтому наблюдаемый отказ совпадает. Остальные helper'ы
+(`anchor_offset`, `split_points`, `tls_ch_layout`, `fake_tls_bytes`, `emit_fake`,
+`max_emit`, `cancel`) совпадают с тестами `tests/apply.rs`.
 
 ---
 
@@ -216,7 +245,7 @@ UDP, пустые TCP-опции в v22 CLIENT_TCP, адресные опыты 
 | check_refs | 224-325 | 102 | второй проход: ссылки, сочетания операций, порядок, одиночное перекрытие | `plan.rs:499` `check_references` | E | `rejects_dangling_references_and_invalid_operation_combinations` (tests/plan.rs). |
 | d2k_find_payload | 327-334 | 8 | найти приманку по id | `plan.rs` — `self.payloads.iter().find(...)` (apply.rs:611, :1287 и др.) | E | `parses_payload_fake_and_cross_references` (tests/plan.rs). |
 | d2k_find_poison | 336-343 | 8 | найти порчу по id | `plan.rs` — `self.poisons.iter().find(...)` (apply.rs:624, :744) | E | Тот же тест. |
-| d2k_plan_load | 345-566 | 222 | полная загрузка: заголовок, scan, записи, check_refs, транспорт | `plan.rs:190` `Plan::parse`, `:167` `parse_wire` | E | 7 тестов tests/plan.rs, включая legacy `D2KP` (`parses_legacy_d2kp_container_with_identical_body`). Отличия: magic `R2OP` (legacy `D2KP` только через `parse_wire`), повторный `autottl` в R2O — ошибка (`plan.rs:307`), в C — «последний побеждает» (plan_parse.c:482). |
+| d2k_plan_load | 345-566 | 222 | полная загрузка: заголовок, scan, записи, check_refs, транспорт | `plan.rs:190` `Plan::parse`, `:167` `parse_wire` | **P** | **Подтверждённое расхождение:** повторный `REC_AUTOTTL` для той же порчи C применяет «последний побеждает» (`plan_parse.c:473-486`), Rust `autottl.replace` отвергает повтор (`plan.rs:307`). Остальное совпадает: 7 тестов tests/plan.rs, legacy `D2KP` через `parse_wire`, magic `R2OP`. C/Rust differential на дубликат autottl нет. |
 | d2k_plan_free | 568-581 | 14 | освободить план | `Drop` (`Vec<Payload>`, `vec!`) | E | Владение типами; утечек нет по построению. |
 | d2k_plan_poison_used | 583-592 | 10 | OR всех флагов порчи | `plan.rs:327` `poison_used` | E | `parses_payload_fake_and_cross_references` + `max_emit`-тест. |
 | d2k_plan_flow_needs | 594-599 | 6 | нужен ли потоку TCPTS (шаблон+TCPTS_BACK) | `engine.rs:1860-1869` — прямая проверка `wire_profile==TEMPLATE && POISON_TCPTS_BACK` и наличия TS-опции, иначе `FlowUnfit` | P | Логика перенесена в решатель, отдельной функции нет; тест на `FlowUnfit` по отсутствию TS-опции не найден. |
@@ -229,6 +258,13 @@ UDP, пустые TCP-опции в v22 CLIENT_TCP, адресные опыты 
 
 Итог по файлу: E 14, P 3, N 0. Пробелы: текст ошибок, `flow_needs` как отдельная
 функция, прямой тест `stream_input`.
+
+**Построчная сверка a378:** все 17 функций прочитаны. `scan`/`check_refs` совпадают с
+`plan.rs:687-845/499-685` по всем типам записей, длинам, minexec и сочетаниям; отличие —
+повтор `AUTOTTL` (C last-wins, Rust отказ), поэтому `d2k_plan_load` переведён в P.
+`d2k_find_payload`/`d2k_find_poison`/`d2k_plan_poison_used`/`transport`/`proto`/`id`
+эквивалентны; `flow_needs` разнесён в `engine.rs`, `stream_input` покрыт косвенно
+`has_tls_candidate`.
 
 ### Углублённая сверка plan_parse.c (17 функций)
 
