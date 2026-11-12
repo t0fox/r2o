@@ -316,6 +316,9 @@ P означает неполное доказательство ветвей, N
   проверена, звук проверяется в приложении).
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/test-discord-voice-shutdown-cleanup-differential.sh` —
   **PASS** (`attempts=2 retained=0`: очистка при shutdown с повтором удаления).
+- `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/test-discord-voice-trial-clock-differential.sh` —
+  **PASS** (`trial_at_nine_minutes_after_launch|active`,
+  `queued_after_ten_minutes|expired`).
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-diagnostics-differential.sh` —
   **не выполнен**: сборка донорского `test_httpsearch` падает на duplicate
   symbols `d2k_plan_apply`, `d2k_plan_max_emit`, `d2k_actions_cancel`,
