@@ -999,6 +999,17 @@
 
 ## Углублённая сверка: link.c (43 функции)
 
+**Прочитано построчно: 43/43 функции, 1094 строки C (1–1094).** Сверены:
+`d2k_link_open/close/peer_closed`, `wait_readable`, `read_exact`, `write_all`,
+`hex_nibble`, `hex_decode`; полный декодер `d2k_link_next` (HELLO,
+HTTP_RESPONSE/HTTP_PORTAL, SUSPECT, STATS, EXCHANGE, CLIENT_TCP, SHAPE, ACK,
+APPLIED, PROTO, REFUSED, default); `send_name_plan` (имя 1..255, transport
+6/17, hex, shape/family, optional sport, plan, optional trial/area_id);
+`send_area_key`, `area_context_valid`, все `set/del_*` name/suffix/bypass/
+addr/addr_probe/arm_shape/del_name/del_name_probe; `d2k_link_set_https`,
+`d2k_link_set_stall_budgets`; `d2k_ev_outer_appdata`. Подтверждённые отличия
+перечислены ниже.
+
 - **Открытие/чтение кадра:** `d2k_link_open`, `d2k_link_close`,
   `d2k_link_peer_closed`, `wait_readable`, `read_exact`, `write_all`,
   `hex_nibble`, `hex_decode` сверены с `ControlClient`/`read_frame`/
