@@ -1058,6 +1058,13 @@ addr/addr_probe/arm_shape/del_name/del_name_probe; `d2k_link_set_https`,
 
 ## Углублённая сверка: diagnostics.c (41 функция)
 
+**Прочитано построчно: 41/41 функция, 605 строк C (1–605).** Сверены: кольца
+events/limits/samples/memory_history/anomalies/growth, счётчики памяти по 6 сайтам,
+`copy`/`js`/`number`, `read_proc`/`read_detail`/`read_status`, 60-секундный sample,
+история памяти и аномалия роста RSS, `d2k_diag_write` (schema=1, memory_tracking,
+madvise, anomalies, events, limit_transitions, memory_history, samples,
+memory_details).
+
 - **Ёмкости колец совпадают:** C `EVENTS=64`, `LIMIT_EVENTS=32`, `SAMPLES=120`,
   `MEMORY_HISTORY=1440`, `ANOMALIES=8`, `GROWTH_POINTS=10`, `PROCESS_COUNT=3`;
   Rust `EVENT_CAPACITY=64`, `LIMIT_CAPACITY=32`, `SAMPLE_CAPACITY=120`,
@@ -1078,13 +1085,15 @@ addr/addr_probe/arm_shape/del_name/del_name_probe; `d2k_link_set_https`,
   `first_process_detail_survives_process_exit`,
   `d2o_periodic_rss_sample_matches_c`.
   **Подтверждённые расхождения истории памяти:** C пишет фактические
-  `rollup_status/errno/rollup[5]`, Rust — `0/null/null`; C даёт `null`
-  для недоступных RSS/VmData/VmSwap/RssAnon, Rust — `0` (`unwrap_or(0)`).
-  P.
+  `rollup_status/errno/rollup[5]` (`diagnostics.c:426-433`), Rust в
+  memory_history кладёт `0/null/null` (`diagnostics.rs:949-968`); C даёт
+  `null` для недоступных RSS/VmData/VmSwap/RssAnon, Rust — `0`
+  (`unwrap_or(0)`, `diagnostics.rs:938-941`). P.
 - **`d2k_diag_write`:** C вручную пишет `report.json` schema=1 с лимитом
   448 КиБ; Rust сериализует `Recorder::write_report` через serde_json с тем
   же `REPORT_MAX`. **Отличия:** C пишет `http_storage_limits` только при
-  `ns>0`, Rust — всегда; C выводит `reason_source` из `protocol=="http"`,
+  `ns>0` (`diagnostics.c:476-481`), Rust — всегда (`diagnostics.rs:1130-1135`);
+  C выводит `reason_source` из `protocol=="http"` (`diagnostics.c:493`),
   Rust берёт его из события. `r2o-diagnostics-differential.sh` сравнивает
   `ring_bytes/event/snapshots/http_records`; остальные поля — unit, не
   C-oracle. P.
@@ -1092,7 +1101,7 @@ addr/addr_probe/arm_shape/del_name/del_name_probe; `d2k_link_set_https`,
   кольца и счётчики `event_total/limit_total/anomaly_total/write_failures`
   перенесены; `record_anomaly` пишет kind/code/rss_delta/accounted_delta/
   stage в кольцо 8. **Подтверждённые расхождения:** (1) предел `reason` —
-  255 байт в C (`reason[256]`) и **1024** в Rust (`diagnostics.rs:768`);
+  255 байт в C (`reason[256]`) и **1024** в Rust (`diagnostics.rs:766-772`);
   (2) `d2k_diag_record_write_error` в C сохраняет код ошибки в
   `anomaly.code` и печатает `error_code`, Rust `record_write_error(stage)`
   всегда пишет `null` (`diagnostics.rs:1165-1176`) — errno/код теряются.
