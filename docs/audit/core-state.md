@@ -1388,20 +1388,20 @@ volume-recovery (`:14628`) и каталог.
 | C-гейт | строки | Rust | статус/пробел |
 |---|---:|---|---|
 | volume ladder budget | 9268–9285 | `r2o_discovery_volume_recovery` (`:14628`), `r2o_discovery_volume_ladder_decision` (`:3282`) | P: разные слои, полного differential нет |
-| bound plan без PASSED-бюджета | 9286–9298 | прямого аналога не найдено | **пробел:** C не переподтверждает план, под которым шёл поток подозрения, без PASSED |
+| bound plan без PASSED-бюджета | 9286–9298 | прямого аналога не найдено | **подтверждённый пробел:** grep `bound_plan_id` по `crates/` пуст; C-гейт `own_first==2 && bound_plan_id==plan_id && budget!=PASSED → T_PLANNING` в Rust не найден. |
 | QUIC ECH replay | 9299–9304 | `r2o_discovery_ech_replay_required` (`:15322`), `r2o_quic_data_proof_confirmed` | P: replay/APPLIED есть, уровня HANDSHAKE как отдельного условия нет |
 | ECH accepted/name_ok/application | 9305–9318 | `r2o_family_recovery_decision` (`:5321-5341`) | P: `ech_accepted`/`peer_name_ok`/`complete`/`application_verified`; C-ветка `ech_replay` выражена иначе |
 | name_ok=0 — только диагностика | 9330–9334 | не блокирует для не-ECH (`ech_accepted=None`) | эквивалентно |
 | QUIC split unfit | 9335–9345 | `split_applicable`/`valid_quic_plan` при генерации кандидатов | P |
-| `unfit_here` по plan_id | 9346–9365 | нет pre-confirm проверки; только `r2o_catalog_mark_flow_unfit` после FLOW_UNFIT (`:19097-19169`) | **пробел:** кандидат может подтвердиться, хотя тот же план уже не подошёл клиенту |
+| `unfit_here` по plan_id | 9346–9365 | `r2o_catalog_mark_flow_unfit` (`main.rs:2951`, вызов `:19113`) | **подтверждённый пробел:** функция маркировки есть и вызывается после FLOW_UNFIT, но pre-confirm проверки `t->unfit_plan_id`/`ver_plan_id` в `r2o_confirm_discovery_outcome`/`apply_discovery_outcome` нет. Кандидат может подтвердиться, хотя тот же план уже не подошёл клиенту. |
 | bind_confirmed: shape/input/verified_by/probe_path/tcp_profile | 9366–9427 | `add_measured_binding_with_fingerprint_in_box`, `add_confirmed_quic_address_binding` | P: `tcp_profile` в `Binding` отсутствует; `probe_path` для QUIC есть |
 | group_record BLOCKED_CONFIRMED | 9431–9432 | `groups.rs`/каталог | P: прямого вызова из `apply_discovery_outcome` не найдено |
-| budget mark PASSED/UNCHECKED/CUT | 9449–9474 | константы `R2O_D2K_CAT_BUDGET_*` есть, путь установки из подтверждения не найден | **пробел** |
+| budget mark PASSED/UNCHECKED/CUT | 9449–9474 | `Binding.budget` (`catalog.rs:195`), merge (`:931`), константы `R2O_D2K_CAT_BUDGET_*` (`main.rs:2440-2442`) | **подтверждённый пробел:** поле и merge есть, но production-присваивания `binding.budget` из подтверждения не найдено (grep `.budget =` — только тесты `main.rs:25821/25826`). C выставляет PASSED/UNCHECKED/CUT в `verify_confirm`. |
 | measure_path | 9475–9488 | `probe_path` для QUIC; для name-binding не найден | P |
 | by_addr permanent plan | 9489–9506 | `r2o_install_quic_candidate`/`add_confirmed_quic_address_binding` для QUIC/ECH | P: общий адресный путь не найден |
 | net whitelist tx_only/searched | 9514–9536 | `r2o_discovery_record_network_whitelist` (`:2269`) | P |
 | T_WATCHING | 9621 | live-группы/`live.rs`; фазы «смотрим живой трафик» нет | P |
-| yield других T_ASKING | 9622–9636 | `yield_to_own_plan` в Rust не найден | **пробел** |
+| yield других T_ASKING | 9622–9636 | `yield_to_own_plan` в Rust не найден | **подтверждённый пробел:** grep `yield_to_own_plan`/`yield.*own` по `crates/` пуст; C прерывает чужие `T_ASKING` при появлении подтверждённого плана (`ot->stop=1`). |
 | sync_pending | 9643 | очередь синхронизации каталога | P |
 | remeasure snapshot после trial | 9648–9652 | `r2o_discovery_client_shape_trial`/`r2o_capture_client_shape` | P |
 
