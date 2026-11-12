@@ -298,6 +298,11 @@ P означает неполное доказательство ветвей, N
   sh scripts/r2o-quic-stun-watch-differential.sh` —
   **PASS** (C `test_quic_session`: «все проверки прошли»; C/Rust исключают STUN
   и Discord Discovery из QUIC conntrack-stall).
+- `R2O_DONOR_CORE=/mnt/e/d2o-a378w/core
+  R2O_EXPECTED_DONOR_SHA=a378e230947ebfd011439e1cac0f1e994d883aae
+  sh scripts/r2o-discord-discovery-differential.sh` —
+  **PASS**, 23 теста (RTP/RTCP, SSRC, capacity, control reconnect, повторный
+  discovery, смена endpoint, истечение voice proof).
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-diagnostics-differential.sh` —
   **не выполнен**: сборка донорского `test_httpsearch` падает на duplicate
   symbols `d2k_plan_apply`, `d2k_plan_max_emit`, `d2k_actions_cancel`,
