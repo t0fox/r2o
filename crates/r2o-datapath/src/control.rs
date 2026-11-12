@@ -1431,7 +1431,7 @@ impl NamePlans {
         if body.len() < fixed {
             return (false, control::ACK_BAD_ARGS);
         }
-        let Ok(key) = <[u8; control::KEY_LEN]>::try_from(&body[..control::KEY_LEN]) else {
+        let Some(key) = r2o_read_probe_flow(&body[..control::KEY_LEN]) else {
             return (false, control::ACK_BAD_ARGS);
         };
         let trial_id: [u8; 16] = body[control::KEY_LEN..control::KEY_LEN + 16]
@@ -1542,7 +1542,7 @@ impl NamePlans {
         if body.len() != control::KEY_LEN + 16 || trial_id.is_none() {
             return (false, control::ACK_BAD_ARGS);
         }
-        let Ok(key) = <[u8; control::KEY_LEN]>::try_from(&body[..control::KEY_LEN]) else {
+        let Some(key) = r2o_read_probe_flow(&body[..control::KEY_LEN]) else {
             return (false, control::ACK_BAD_ARGS);
         };
         let body_trial_id: [u8; 16] = body[control::KEY_LEN..]
@@ -2094,6 +2094,28 @@ impl NamePlans {
 
 /// C `shape_transport` (`plans.c:169-175`): QUIC → 17, TLS/ECH/контекст → 6,
 /// остальные формы → 0.
+/// C `read_probe_flow` (`ctlsrv.c:169-187`): family 4/6, канонический IPv4
+/// (хвост нулевой), порты и transport как есть. Валидация транспорта/портов —
+/// уже на уровне команды.
+fn r2o_read_probe_flow(bytes: &[u8]) -> Option<[u8; control::KEY_LEN]> {
+    if bytes.len() < control::KEY_LEN {
+        return None;
+    }
+    let family = bytes[0];
+    if !matches!(family, 4 | 6) {
+        return None;
+    }
+    if family == 4
+        && (bytes[5..17].iter().any(|byte| *byte != 0)
+            || bytes[21..33].iter().any(|byte| *byte != 0))
+    {
+        return None;
+    }
+    let mut key = [0; control::KEY_LEN];
+    key.copy_from_slice(&bytes[..control::KEY_LEN]);
+    Some(key)
+}
+
 /// C `probe_flow_valid` (`plans.c:860-874`): UDP-транспорт, ненулевой
 /// dst_port, family 0/4/6, ненулевые адреса; src_port=0 — голосовой wildcard.
 fn r2o_probe_flow_valid(flow: &[u8; control::KEY_LEN]) -> bool {
@@ -2331,6 +2353,8 @@ pub struct ControlServer {
     dropped_events: u64,
     /// C `d2k_ctl.sent`: кадры, целиком поставленные в кольцо.
     sent_events: u64,
+    /// C `disconnect_hook`: вызывается при разрыве живого пира.
+    disconnect_hook: Option<Box<dyn FnMut() + Send>>,
     // D2O хранит снимки нескольких целей. Один последний снимок на семейство
     // терялся на занятом роутере: ARM_SHAPE приходил уже после того, как его
     // вытеснило приветствие другого клиента, и Discovery шёл без ClientHello.
@@ -2463,6 +2487,7 @@ impl ControlServer {
             output_bytes: 0,
             dropped_events: 0,
             sent_events: 0,
+            disconnect_hook: None,
             last_client_shapes: VecDeque::new(),
             armed_client_shapes: [None, None],
             last_quic_shapes: VecDeque::new(),
@@ -2565,6 +2590,11 @@ impl ControlServer {
 
     pub fn is_connected(&self) -> bool {
         self.peer.is_some()
+    }
+
+    /// C `d2k_ctl_set_disconnect_hook`: повесить обработчик разрыва.
+    pub fn set_disconnect_hook(&mut self, hook: impl FnMut() + Send + 'static) {
+        self.disconnect_hook = Some(Box::new(hook));
     }
 
     pub fn dropped_events(&self) -> u64 {
@@ -2870,17 +2900,24 @@ impl ControlServer {
     }
 
     fn disconnect(&mut self) {
-        if let Some(peer) = self.peer.take() {
+        let peer = self.peer.take();
+        let was_connected = peer.is_some();
+        if let Some(peer) = peer {
             let _ = peer.shutdown(Shutdown::Both);
         }
         self.input.clear();
         self.output.clear();
         self.output_bytes = 0;
+        if was_connected && let Some(hook) = self.disconnect_hook.as_mut() {
+            hook();
+        }
     }
 }
 
 impl Drop for ControlServer {
     fn drop(&mut self) {
+        // C `d2k_ctl_close` закрывает pfd напрямую, без disconnect_hook.
+        self.disconnect_hook = None;
         self.disconnect();
         if let Ok(metadata) = std::fs::symlink_metadata(&self.path)
             && metadata.file_type().is_socket()
@@ -5236,6 +5273,70 @@ mod tests {
         drop(client);
         drop(server);
         std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn disconnect_hook_fires_once_on_live_peer_disconnect() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("r2o-control-hook-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("control.sock");
+        let mut server = ControlServer::open(&path, u16::MAX as u32).unwrap();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook_calls = std::sync::Arc::clone(&calls);
+        server.set_disconnect_hook(move || {
+            hook_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        });
+        let mut client = UnixStream::connect(&path).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        assert!(server.poll().unwrap().is_empty());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(
+            control::read_frame(&mut client).unwrap().kind,
+            control::EVENT_PROTOCOL
+        );
+        drop(client);
+        assert!(server.poll().unwrap().is_empty());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(server.poll().unwrap().is_empty());
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        drop(server);
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn read_probe_flow_matches_canonical_layout() {
+        let mut body = [0_u8; control::KEY_LEN];
+        body[0] = 4;
+        body[1..5].copy_from_slice(&[192, 0, 2, 1]);
+        body[17..21].copy_from_slice(&[198, 51, 100, 2]);
+        body[35..37].copy_from_slice(&443_u16.to_be_bytes());
+        body[37] = 17;
+        let key = super::r2o_read_probe_flow(&body).unwrap();
+        assert_eq!(key[0], 4);
+        assert_eq!(key[37], 17);
+
+        let mut noncanonical = body;
+        noncanonical[5] = 1;
+        assert!(super::r2o_read_probe_flow(&noncanonical).is_none());
+
+        let mut v6 = [0_u8; control::KEY_LEN];
+        v6[0] = 6;
+        v6[1..17].fill(0x20);
+        v6[17..33].fill(0x30);
+        v6[35..37].copy_from_slice(&443_u16.to_be_bytes());
+        v6[37] = 17;
+        assert!(super::r2o_read_probe_flow(&v6).is_some());
+
+        let mut bad_family = body;
+        bad_family[0] = 5;
+        assert!(super::r2o_read_probe_flow(&bad_family).is_none());
     }
 
     #[test]
