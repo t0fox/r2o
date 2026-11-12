@@ -62,7 +62,7 @@ P не считается доказанным паритетом: это пок
 
 ---
 
-## 1. detect/bridge.c — 17 функций
+## detect/bridge.c (17 функций)
 
 Мост между планировщиком d2k и перенесённым измерителем: вход из `d2k_hello`, запуск дерева,
 перевод вердикта и находки в `d2k_vres`, прогресс и вопросы свойств. В R2O этот слой не выделен:
@@ -100,7 +100,7 @@ base.valid/base_blocked) и neutral-ack.
 | `d2k_detect_sched_tcp_ack` | 548-573 | 889 | перепроверка мёртвого адреса | response.rs:898 probe_neutral_ack, classify.rs:1588 | P | тест tests/classify.rs:679; отдельного hook-символа с probes нет |
 | `d2k_detect_sched_tcp_base` | 575-641 | 3012 | отдельный базовый вопрос: `tr.name=""`, `no_raw=1`, `base_stop`/`base_seen`, вердикт по первому trace `whole` | `classify.rs:1842 run_base_with_backend_progress` | **P** | **Ветви проверены:** `bridge_input`; `tr.name=""`; `opt.no_raw=1`; `base_stop = base_done || task_stop`; `base_seen` отмечает `whole`; `d2k_classify_run`; `b = trace[0]` только если probe=="whole"; `asked=pass+fail`; `base.valid` при `asked>=res.repeats && !retry_base_timeout` (с `base.repeats/pass/fail/err`); вердикты: нет `b`→`map_verdict`, `asked<repeats || repeats<=0`→INCONCLUSIVE, `err && pass==0`→UNREACHABLE, `pass==repeats`→CLEAR, `pass>0`→FLAKY, иначе INCONCLUSIVE + `base_blocked=1`. R2O `run_base` возвращает `BaseProbe{seed,blocked,probes}`, но не verdict/reason; полного C/Rust differential базового вопроса нет. |
 
-## 2. detect/classify.c — 36 функций
+## detect/classify.c (36 функций)
 
 Ядро дерева: триггер, опции, трасса, measure, самопроверка сырого слоя, перебор и итоговый вердикт.
 Сильные места R2O: `measure`, `split_offsets`, `trigger_accepts`, нейтральный ACK и кэш самопроверки
@@ -155,7 +155,7 @@ raw_recheck, sweep_poisons (свойства → compose → перебор), cr
 | `d2k_classify_run` | 1095-1476 | 22179 | дерево зондов и вердикт | `classify.rs:1298` `run_with_backend_progress` | P | Нет notes/`covers_tls12`, иной счёт probes ответного направления. **Ключевое:** production-discovery использует `full_detect_semantics=false`, `confirm_clear=true` (`classify.rs:869-870`, `main.rs:15380-15391`), то есть не donor-семантику C: нет удвоенного dial-retry, иначе обрабатываются частичные transport-ошибки, control без `until_pass`, добавлен whole-confirm. Существующие дифференциалы идут с `full_detect_semantics=true` и этот путь не покрывают. |
 | `d2k_send_nosig` | 1481-1494 | 309 | `send` с `MSG_NOSIGNAL` (если есть) и `SO_NOSIGPIPE` (если есть) | libc::send `MSG_NOSIGNAL` (response.rs:815/1100) | **P** | C условно ставит оба флага; Rust использует только `MSG_NOSIGNAL`, macOS-ветка `SO_NOSIGPIPE` отсутствует. На Linux эквивалентно, на macOS — нет. |
 
-### classify.c: построчная сверка
+### detect/classify.c: построчная сверка
 
 - **Имена/время/триггер (57–139):** `d2k_verdict_name` — точный
   switch `clear/prefix/whole_packet/opaque/inconclusive/address/
@@ -204,7 +204,7 @@ raw_recheck, sweep_poisons (свойства → compose → перебор), cr
   идут с `true` и этот путь не покрывают; `d2k_send_nosig` —
   `MSG_NOSIGNAL` + `SO_NOSIGPIPE` в C, Rust только `MSG_NOSIGNAL`.
 
-## 3. detect/main.c — 8 функций
+## detect/main.c (8 функций)
 
 CLI `d2k-detect` и форматы вывода. R2O использует другой интерфейс (`r2o-controller --classify HOST PORT`),
 поэтому соответствие функциональное, а не построчное. В JSON R2O нет массива `notes` и поля `covers_tls12`,
@@ -223,7 +223,7 @@ CLI `d2k-detect` и форматы вывода. R2O использует дру
 | `print_human` | 207-275 | 3700 | человеческий отчёт: target/trigger/verdict/reason/probes/duration/repeats/boundary/reassembly/strategy+пояснение/response/notes/opaque warning/properties/trace | main.rs:1254-1305 | **P** | C печатает `Цель/Триггер (имя+длина)/Вердикт/Зондов (повторы)/Граница/Пересборка/Стратегия+пояснение по path/Ответ/Оговорки/ВНИМАНИЕ raw_usable/Свойства коробки (6 полей+hop_ttl)/Трасса`. Rust печатает `цель/вердикт/причина/зонды/время`, при наличии — `отказов RST`, `граница`, `пересборка`, `стратегия`, `ответное направление` (русские имена), trace, `замер прерван`, предупреждение о сырых зондах. **Отличия:** нет имени/длины триггера, числа повторов, `notes[]`, блока свойств и пояснения стратегии; R2O добавляет rst_failures/stopped. Тексты иные. |
 | `main` | 277-450 | 8186 | CLI: `classify host:port`, разбор флагов, trigger/control/white, dump/json/progress, `d2k_classify_run` | main.rs:1104-1306, 1356-1553, 1555/1586 | **P** | C: `classify <host:port>`, флаги `--sni/--raw/--repeats/--timeout/--write-gap/--long-gap/--only/--skip/--control-sni/--white/--control-raw/--hello/--no-raw/--mark/--allow-loopback/--json/--dump-trigger/--progress`; `memset(opt,0)` затем `d2k_classify_run` вызывает `d2k_opts_defaults` (repeats 3, timeout 6000, write 60, long 700, mark `0x40000000`), `--mark` через `strtoul`, `--repeats/--timeout` через `atoi`, `--hello modern|legacy` (без both), control по умолчанию `d2k_trigger_control("d2k")` — **modern** TLS, `signal(SIGPIPE,SIG_IGN)`. Rust: `--classify HOST PORT [SNI]`, те же основные флаги плюс `--modern/--legacy/--save-plan/--arm`, REPEATS можно позиционно; `parse_classify_options` валидирует числа/метку, значения ≤0 отбрасывает, mark `None` → `0x2d` (#23), `full_detect_semantics=true`, `confirm_clear=false`, control через `classify_control_trigger` (tls13/modern), `--dump-trigger` до контроля, SIGPIPE не игнорируется глобально (MSG_NOSIGNAL на отправке). P — CLI/умолчания/API различаются. |
 
-### main.c: построчная сверка
+### detect/main.c: построчная сверка
 
 - **`usage` (19–49) ↔ `print_help` (`main.rs:1721`):** C —
   подкоманда `classify` и полный список флагов; Rust — `--classify`
@@ -256,7 +256,7 @@ CLI `d2k-detect` и форматы вывода. R2O использует дру
   `classify_control_trigger` (tls13/modern), SIGPIPE не игнорируется
   глобально. P — CLI/умолчания/API различаются.
 
-## 4. detect/poison.c — 12 функций
+## detect/poison.c (12 функций)
 
 Каталог гипотез и перевод находки в строку стратегии/язык плана. Порядок и состав 85 гипотез совпадают
 и закреплены тестом. `poison_has_fake` и `arm_from_poison` не знают осей `autottl`/`tcp_ts_up`,
@@ -283,7 +283,7 @@ tcp_ts/ip_id_zero/seq_shift — совпадают; дедупликация `ba
 | `d2k_strategy_for` | 401-404 | 144 | `--lua-desync=multisplit:payload=unknown:dir=out:pos=%d` | classify.rs:1933 strategy_for | **P** | C и Rust формируют ту же строку; отдельного теста строки нет. P. |
 | `d2k_arm_from_poison` | 413-475 | 4050 | гипотеза → `d2k_arm`: oob, badsum/md5, repeats, gap, disorder/pos, between, ttl, autottl/delta/min/max, seq_out, decoy, tcpts/tcpts_up, ipidzero, split_pos, seqovl_hello/seqovl | classify_measured.rs:30 plan_text_for_poison, :50 measured_plan_text, r2k-core plan.rs | **P** | **Совпадает:** `syn_data` → отказ (`classify_measured.rs:62-64`); `seq_shift != 0 && != -66000` → отказ с тем же смыслом (`:65-70`); `repeats=0` + fake → 1 (`:93-99`); `gap_ms*1000`; `seqovl_exact` → длина приманки; `between` отключает fake/disorder; badsum/md5/ttl/seq_out/decoy/tcpts/ipidzero/disorder_pos/split_pos/seqovl переносятся. **Отличия:** (1) C переносит **autottl** и **tcp_ts_up** отдельными осями (`poison.c:442-445,460`), Rust `Poison` этих полей не имеет — план не выражается; (2) C `oob` ставит флаг, Rust отдельная ветка oob есть в `measured_plan_text`; (3) C `a->name=NULL`, имя хранится в `d2k_vres.arm_name`, Rust `PoisonHit.name`. Дифференциалы split/badsum есть, полного набора полей/отказов нет. |
 
-### poison.c: построчная сверка
+### detect/poison.c: построчная сверка
 
 - **`d2k_poison_supports_family` (17–22) ↔
   `poison_supports_family` (`:389`):** C `family==4` или
@@ -320,7 +320,7 @@ tcp_ts/ip_id_zero/seq_shift — совпадают; дедупликация `ba
   не имеет autottl/tcp_ts_up, эти оси не выражаются. Дифференциалы
   split/badsum есть, полного набора нет. P.
 
-## 5. detect/props.c — 7 функций
+## detect/props.c (7 функций)
 
 Вопросы о свойствах и сборка кандидатов из вектора. В R2O цикл вопросов и `compose_from_props`
 встроены в `raw_probe::sweep_poisons`; отдельного дифференциала на весь список вопросов нет,
@@ -344,7 +344,7 @@ syn_data — совпадают. Все ветви `apply_set` (`props.c:198-257
 | `tri_yes` | 419-419 | 59 | `t == D2K_TRI_TRUE` | inline `== TriState::True` | **P** | Хелпер заменён сравнением; отдельного теста нет. |
 | `d2k_compose_from_props` | 426-498 | 3144 | сборка: base badsum/decoy, duplicates×2, left-overlap, reorder, fallback «всё сразу», decoy/seqovl из control | `raw_probe.rs:1047` `compose_from_props` | **P** | **Подтверждено:** C при `n==0 && cap>0` всегда создаёт «СОБРАНО: всё сразу», даже при `ctl=NULL` (`props.c:477-486`); Rust создаёт его только `if control.is_some()` (`raw_probe.rs:1094-1096`). Остальные правила (badsum при `validates_checksum!=TRUE`, decoy при `parses_l7`, серия×2, overlap, reorder) совпадают. C `cap` и привязка `decoy/seqovl` в конце; Rust `Vec` и control.len. P. |
 
-### props.c: построчная сверка
+### detect/props.c: построчная сверка
 
 - **`prop_probes` (49–196) ↔ `property_probes` (`:840`):** 12
   вопросов в одном порядке и с теми же label/name/полями: seqovl-1,
@@ -375,7 +375,7 @@ syn_data — совпадают. Все ветви `apply_set` (`props.c:198-257
   `if control.is_some()`. C `cap` и привязка decoy/seqovl в конце,
   Rust `Vec`/control.len. P; header, п. 6.
 
-## 6. detect/raw.c — 62 функции
+## detect/raw.c (62 функции)
 
 Сырой слой: свой TCP, правило подавления RST, сборка пакетов и исполнение измеренного плана.
 Сильная часть — пакетные строители, SYN-профиль и исполнение плана: есть C/Rust-дифференциалы
@@ -458,7 +458,7 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
 | `d2k_raw_probe_handshake_family` | 1364-1370 | 371 | рукопожатие с профилем метки | raw_probe.rs:1174/1841 | P | offer_ts всегда передаёт вызывающий |
 | `d2k_raw_probe_poison` | 1372-1377 | 305 | обёртка IPv4 | raw_probe.rs:1174 | P | отдельного символа нет |
 
-### raw.c: построчная сверка
+### detect/raw.c: построчная сверка
 
 - **RST-правила (63–553):** `parse_long_exact` — точный разбор числа
   (первый символ цифра, `strtol`, `errno`, конец строки), Rust inline
@@ -497,7 +497,7 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
   `d2k_raw_set_segment_max` N, counters P/E, `d2k_raw_pending_count`
   N, `d2k_raw_probe_*` stubs P, обёртки IPv4 P.
 
-## 7. detect/response.c — 7 функций
+## detect/response.c (7 функций)
 
 Ответное направление TLS 1.2. Самый закрытый файл среза: разбор потока записей, рукопожатие,
 счёт серии, нейтральное имя и решение покрыты юнит-тестами и общими C-векторами
@@ -515,7 +515,7 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
 | `d2k_resp_decide` | 274-304 | 1957 | unmeasured>0 / control==0 / target==repeats / target==0 / flaky с точными reason | response.rs:1304 decide | **E** | C и Rust совпадают все 5 ветвей и тексты; `tests/response.rs:421/479`. |
 | `d2k_probe_response` | 310-324 | 806 | neutral SNI, target count, control count, decide | response.rs:1207 probe_response | **P** | Для валидных входов target/control на одном адресе, neutral SNI, `decide` совпадают. **Отличия:** (1) Rust валидирует `repeats>0` и legacy hello до зондов и возвращает NotApplicable с другим текстом; C при `repeats<=0` делает 0 попыток и приходит к NotApplicable через `control==0`; (2) наследует метку #23. `tests/response.rs:649/780`. |
 
-### response.c: построчная сверка
+### detect/response.c: построчная сверка
 
 - **`resp_timeout` (64–70) ↔ `response_timeout` (`:164`):** оба
   `timeout>0 && timeout<3000 ? timeout : 3000`. E.
@@ -547,7 +547,7 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
   `repeats<=0` делает 0 попыток и приходит к NotApplicable через
   `control==0`; наследует метку #23.
 
-## 8. detect/trigger.c — 9 функций
+## detect/trigger.c (9 функций)
 
 Чем меряем: ClientHello из снятого профиля, произвольный hex, контроль, приманка и вопрос о метке
 времени клиента. Байты приветствий совпадают с C побайтно (тесты `tests/hello.rs`). Контроль и
@@ -568,7 +568,7 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
 | `d2k_trigger_offers_ts` | 180-199 | 615 | нет профиля → host_offers_ts; иначе разбор TCP-опций, kind 8/10 → 1 | raw_probe.rs:673/731 | **P** | C парсит `client_tcp_options` байт за байтом (kind 0 break, 1 skip, неверная длина →0, 8/10 →1). Rust `raw_offer_timestamps(Option<bool>)` использует готовый bool из профиля, байты не разбирает; расхождение представления, не результата для уже снятого профиля. |
 | `d2k_trigger_allows_poison` | 201-207 | 165 | `!p->tcp_ts` или `offers_ts(t)` | raw_probe.rs:731 raw_profile_allows, :967 fallback | **P** | Формула `!tcp_ts` или `offer_ts` совпадает. Но Rust `property_probe_poison` при `WhiteTimestamp`, если TS не предложен и checksum не validated, **заменяет** poison: `tcp_ts=false`, `badsum=true`; C просто возвращает 0. Это дополнительная fallback-ветвь, не входящая в `d2k_trigger_allows_poison`. |
 
-### trigger.c: построчная сверка
+### detect/trigger.c: построчная сверка
 
 - **`d2k_trigger_tls` (21–50) ↔ `Trigger::tls/tls13`
   (`classify.rs:87/96`):** C legacy/modern через
@@ -603,7 +603,7 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
   `property_probe_poison` добавляет fallback WhiteTimestamp →
   `tcp_ts=false,badsum=true`, которого в C-функции нет. P.
 
-## 9. detect/include/d2k_detect.h — 1 функция
+## detect/include/d2k_detect.h (1 функция)
 
 Единственная функция заголовка — правило большинства для вопросов о свойствах.
 
