@@ -494,6 +494,8 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 
 Упаковка нескольких QUIC Initial в снимок `QSN` (для повторного использования/пересылки). Порт: `crates/r2k-core/src/quic_snapshot.rs` (`pack`, `parse`, `reseal`, `verify_bound_response`); тесты `r2k-core/tests/quic_snapshot.rs`.
 
+**Прочитано построчно: 6/6 функций, 104 строки C (1–104).**
+
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `d2k_qsnap_is` | 13-15 | 3 | проверка магии `QSN` | `quic_snapshot.rs:50 r2k_quic_snapshot_parse` (проверяет magic) | E | test `tests/quic_snapshot.rs` round-trip; magic проверяется парсером |
@@ -506,6 +508,8 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 ## core/quicsnap_reseal.c (2 функции)
 
 Перешифровка снимка `QSN` под новый DCID. Порт: `r2k-core/src/quic_snapshot.rs:79 r2k_quic_snapshot_reseal`, `quic.rs:338 r2k_quic_initial_reseal_for_dcid`.
+
+**Прочитано построчно: 2/2 функции, 134 строки C (1–134).**
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
@@ -738,7 +742,7 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 
 Сборка IPv4/IPv6 UDP-фрагментов по 4 формам (прямой/обратный порядок, 3 фрагмента с перекрытием), контрольные суммы. Порт: `crates/r2k-core/src/wire.rs:294 build_udp_fragments_with_capacity`, `:380 udp_fragment_cuts`. Дифференциал: `crates/r2k-core/tests/ipfrag.rs::d2o_ipfrag_builder_matches_r2o_on_ipv4_ipv6_shapes` (C-оракул `tests/d2o_ipfrag_oracle.c`).
 
-**Построчная сверка a378:** все 8 функций прочитаны; различий в shape/cuts/выравнивании/перекрытиях/checksum/UDP6-заголовке не найдено. C-оракул сравнивает offsets/lengths и байты IPv4/IPv6 для shape 1..4.
+**Прочитано построчно: 8/8 функций, 129 строк C (1–129).** Различий в shape/cuts/выравнивании/перекрытиях/checksum/UDP6-заголовке не найдено. C-оракул сравнивает offsets/lengths и байты IPv4/IPv6 для shape 1..4.
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
