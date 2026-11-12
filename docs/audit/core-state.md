@@ -537,11 +537,11 @@
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `original_probe` | 35–44 | 10 | hook исходного QUIC-замера: probe с SNI цели/без SNI для control | r2o_quic_http3 / quic_replay hooks | **P*** | static-хелпер; QUIC differentials |
-| `original_data` | 47–50 | 4 | hook данных исходного QUIC-замера (path/port/wait/mark) | r2o_quic_http3 | **P*** | static-хелпер |
-| `wire_measure` | 52–78 | 27 | обёртка arm-контекста: подмена probe/data, извлечение SNI, перенос next/marked/path | quic_replay::R2oQuicArmContext | **P** | QUIC-обвязка перенесена; отдельного C/Rust differential для этой обёртки нет |
-| `d2k_quic_original_measure` | 80–83 | 4 | QUIC-замер исходным набором arm | quic_replay + r2o_quic_http3 | **P** | покрыто QUIC differentials на уровне результатов |
-| `d2k_quic_strategy_measure` | 88–91 | 4 | QUIC-замер стратегий (split/frag/ttl/length/fake) | quic_replay strategy arms | **P** | покрыто r2o-quic-* differentials частично |
+| `original_probe` | 35–44 | 10 | hook исходного QUIC-замера: `sni = q->control ? NULL : target_sni`, затем `d2k_quic_ask_arm_hook(q,sni,port,wait,mark,sent)` | `r2o_quic_blob_candidate`/`r2o_quic_raw_ask` (`quic_replay.rs`), `r2o_quic_http3_get...` | **P** | **Прямого hook-аналога нет:** Rust строит кандидатов (`r2o_quic_discovery_candidates`, `r2o_quic_original_fallback_candidates`) и вызывает `r2o_quic_http3_*` с `server_name`, но отдельной пары probe/data-hook с `control ? NULL : target_sni` нет. QUIC differentials сравнивают результаты, не эту развилку. |
+| `original_data` | 47–50 | 4 | hook данных: `d2k_quic_arm_data_hook(q,target_sni,path,port,wait,mark)` | `r2o_quic_http3_measure...` (`path`/`server_name`/timeouts) | **P** | C передаёт target SNI/path/port/wait/mark одной структурой; Rust принимает path/server_name параметрами в `r2o_quic_http3_get_with_wire_len`. Эквивалентность полей не доказана. |
+| `wire_measure` | 52–78 | 27 | собрать `original_wire`, вытащить SNI из trigger, при неудаче и IPv4-литерале `pool[0]` → target_sni, подменить probe/data, скопировать `path`, `next`, `marked`, `probe_path` | `r2o_run_quic_discovery_trial`/`quic_replay` (arm-контекста нет) | **P** | **Подтверждённый пробел:** в Rust grep `target_sni`/`pool[0]` в QUIC-модулях пуст — fallback «literal IP без SNI → pool[0]» не найден; `probe_path` копируется в других местах (`r2o_quic_discovery_probe_path`), `next/marked` живут в `R2oQuicRawAskResult`/trial. Одноимённой обёртки нет. |
+| `d2k_quic_original_measure` | 80–83 | 4 | запуск `d2k_quic_original_arms` через `wire_measure` | `r2o_quic_original_fallback_candidates` + trial runner | **P** | C-обёртка одной строкой; Rust список исходных кандидатов и исполнение разнесены. Результаты покрыты QUIC differentials, сама обёртка/`probe_path` — нет. |
+| `d2k_quic_strategy_measure` | 88–91 | 4 | запуск `d2k_quic_strategy_arms` через `wire_measure` | `r2o_quic_discovery_candidates` + trial runner | **P** | C-обёртка; Rust список стратегий (`Clearance/SplitCrypto/UdpLength/TtlStrategy`) и исполнение разнесены. Покрыто `r2o-quic-*` differentials частично. |
 
 ### `core/sched.c`
 
