@@ -87,9 +87,9 @@ recheck 1982 1982 equal True
 | core-net | 548 | 195 | 351 | 4 | 0 |
 | core-state | 692 | 179 | 511 | 2 | 0 |
 | datapath-core | 400 | 153 | 244 | 3 | 0 |
-| datapath-plan | 183 | 150 | 33 | 0 | 0 |
+| datapath-plan | 183 | 151 | 32 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **735** | **1240** | **7** | **0** |
+| **Итого** | **1982** | **736** | **1239** | **7** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 735 / P 1240 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 736 / P 1239 /
 N 7 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -347,9 +347,9 @@ P означает неполное доказательство ветвей, N
 | core-net | 548 | 195 | 351 | 2 | 0 |
 | core-state | 692 | 179 | 511 | 2 | 0 |
 | datapath-core | 400 | 153 | 244 | 3 | 0 |
-| datapath-plan | 183 | 150 | 33 | 0 | 0 |
+| datapath-plan | 183 | 151 | 32 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **735** | **1240** | **7** | **0** |
+| **Итого** | **1982** | **736** | **1239** | **7** | **0** |
 
 
 ---
@@ -5341,8 +5341,8 @@ Static-хелперы наследуют статус владельца (вла
 
 | Статус | Кол-во |
 |---|---:|
-| E | 150 |
-| P | 33 |
+| E | 151 |
+| P | 32 |
 | N | 0 |
 | ? | 0 |
 | **Всего** | **183** |
@@ -5727,7 +5727,7 @@ UDP→addr переход, R2O — только exact+ECH→MODERN+общий ad
 | d2k_plantab_del_addr_family | 837-842 | 6 | снять все формы адреса | `control.rs:1704` `delete_addr_family_all` | E | C `!t→0`; `while(drop(find_addr(addr,family))) n++`; возврат `n>0`. Rust `delete_addr_family_all(address)` делает `retain` по адресу (все формы) и возвращает, было ли что снимать. Тест `broad_name_and_addr_deletion_removes_all_shapes_like_c`. |
 | d2k_plantab_del_addr_shaped | 844-848 | 5 | снять ровно форму адреса | `control.rs:1480` `delete_addr` | E | C `!t/ANY→0`; `drop(find_addr_shape(...,0,shape))`. Rust `delete_addr` проверяет family/shape (`valid_addr_shape`), удаляет `AddrPlanKey`. Тест `удаление_адреса_разделяет_формы...` (control.rs:2793). |
 | trial_id_valid | 850-855 | 6 | static: trial id не весь нулевой | inline `is_none_or(iter().all(==0))` (`control.rs:1199`, `:1300`, `:1397`, `:1484`) | E | C `!id→0`; OR всех 16 байт, `any!=0`. Rust отвергает нулевой trial id в `set_name_probe`, `set_voice_addr_probe`, `set_addr_probe`, `delete_addr_probe`. Тест `name_probe_rejects_all_zero_trial_id_like_c`: нулевой id — отказ, ненулевой — установка. |
-| probe_flow_valid | 860-874 | 15 | static: UDP, dst port≠0, family 0/4/6, ненулевые src/dst; `src_port=0` — голосовой wildcard | `r2k-core/control.rs:1701-1717` `valid_udp_addr_probe_flow`; `control.rs:1341-1438` `set_addr_probe` | **P** | **Расхождение:** C допускает `family=0` (внутренние вызовы) и `src_port=0` (голос); Rust `valid_udp_addr_probe_flow` требует family 4/6 и оба порта ≠0. Generic `set_addr_probe` отдельно принимает `src_port=0` + VOICE-план (family 4) и хранит в `voice_addr_probes`; DEL снимает. C-ветви family 0 и отсутствие проверки адресов/transport всё ещё не воспроизведены. Тест `generic_addr_probe_accepts_voice_wildcard_like_d2o`. |
+| probe_flow_valid | 860-874 | 15 | static: UDP, dst port≠0, family 0/4/6, ненулевые src/dst; `src_port=0` — голосовой wildcard | `control.rs` `r2o_probe_flow_valid` | E | C требует transport 17, `dst_port!=0`, family 0/4/6, ненулевые src/dst; `src_port=0` допустим. Rust `r2o_probe_flow_valid` повторяет эти ветви (family 0 читает 4 байта, 6 — 16), тест `probe_flow_valid_and_equal_match_c`. Control-путь дополнительно требует family 4/6 и канонический адрес — как C `read_probe_flow`. |
 | probe_flow_equal | 876-887 | 12 | static: равенство flow | ключ `[u8; KEY_LEN]` в `HashMap` (control.rs:88) | E | C сравнивает `(family==6)`-класс, transport, `src_port_be`, `dst_port_be`, 4/16 байт src и dst. Rust ключ `[u8; KEY_LEN]` включает те же поля; равенство — `HashMap::get`. Тесты `r2o_временная_quic_привязка_проверяет_полный_поток_и_поколение` (точный QUIC-ключ) и `generic_addr_probe_accepts_voice_wildcard_like_d2o` (голосовой wildcard, SET/DEL с чужим trial). |
 | probe_drop | 889-895 | 7 | static: снять запись опыта | `HashMap::remove`/`retain` (control.rs:607,1224,1292) | E | C `!t/!e/!used→return`; `free(plan)`; `memset`; `probe_used--`; `revision++`. Rust удаляет запись или `retain` по сроку; счётчик `probe_used` заменён вычислением. Тест `clearing_disconnected_http_probes_keeps_the_permanent_plan` (control.rs:3703). |
 | d2k_plantab_clear_probes | 897-910 | 14 | снять пробные записи и QUIC-запреты (`qdeny`) | `control.rs:600-621` `clear_probes` | E | C цикл `used`: `kind==NAME && (only_sport \|\| d2k_plan_quic_deny(plan))` → `drop`; затем `probe_drop` всех `probes[]`. Rust `retain` удаляет из `plans` записи с `plan.quic_deny()`, очищает `probes`/`voice_addr_probes`/`addr_probes`, `revision++` при любом удалении. Постоянные name/addr-планы без qdeny сохраняются. Тесты `clearing_disconnected_http_probes...` (control.rs:3703) и `clearing_probes_removes_quic_deny_name_plans_like_d2o` (qdeny удалён, MODERN остался). |

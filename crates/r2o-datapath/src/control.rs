@@ -2035,6 +2035,26 @@ impl NamePlans {
 
 /// C `shape_transport` (`plans.c:169-175`): QUIC → 17, TLS/ECH/контекст → 6,
 /// остальные формы → 0.
+/// C `probe_flow_valid` (`plans.c:860-874`): UDP-транспорт, ненулевой
+/// dst_port, family 0/4/6, ненулевые адреса; src_port=0 — голосовой wildcard.
+fn r2o_probe_flow_valid(flow: &[u8; control::KEY_LEN]) -> bool {
+    if flow[37] != 17 || u16::from_be_bytes([flow[35], flow[36]]) == 0 {
+        return false;
+    }
+    let family = flow[0];
+    if !matches!(family, 0 | 4 | 6) {
+        return false;
+    }
+    let width = if family == 6 { 16 } else { 4 };
+    flow[1..1 + width].iter().any(|byte| *byte != 0)
+        && flow[17..17 + width].iter().any(|byte| *byte != 0)
+}
+
+/// C `probe_flow_equal`: равенство family/transport/портов/адресов.
+fn r2o_probe_flow_equal(a: &[u8; control::KEY_LEN], b: &[u8; control::KEY_LEN]) -> bool {
+    a == b
+}
+
 /// C `shape_is_udp`: QUIC/VOICE — UDP-формы.
 fn r2o_shape_is_udp(shape: u8) -> bool {
     matches!(shape, SHAPE_QUIC | SHAPE_VOICE)
@@ -5355,6 +5375,34 @@ mod tests {
         }
         let ack = NamePlans::default().handle(&frame(r2k_core::control::SHAPE_MODERN, &quic));
         assert!(!ack.ok, "чужой транспорт плана должен быть отвергнут");
+    }
+
+    #[test]
+    fn probe_flow_valid_and_equal_match_c() {
+        let mut key = [0; control::KEY_LEN];
+        key[0] = 4;
+        key[1..5].copy_from_slice(&[192, 0, 2, 1]);
+        key[17..21].copy_from_slice(&[198, 51, 100, 2]);
+        key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+        key[37] = 17;
+        assert!(super::r2o_probe_flow_valid(&key));
+        assert!(super::r2o_probe_flow_equal(&key, &key));
+
+        let mut foreign = key;
+        key[35..37].copy_from_slice(&444_u16.to_be_bytes());
+        assert!(!super::r2o_probe_flow_equal(&key, &foreign));
+        foreign = key;
+        foreign[37] = 6;
+        assert!(!super::r2o_probe_flow_valid(&foreign));
+        foreign = key;
+        foreign[0] = 5;
+        assert!(!super::r2o_probe_flow_valid(&foreign));
+        foreign = key;
+        foreign[35..37].fill(0);
+        assert!(!super::r2o_probe_flow_valid(&foreign));
+        foreign = key;
+        foreign[1..5].fill(0);
+        assert!(!super::r2o_probe_flow_valid(&foreign));
     }
 
     #[test]
