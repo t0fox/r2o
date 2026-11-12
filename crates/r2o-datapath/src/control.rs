@@ -1696,6 +1696,68 @@ impl NamePlans {
         (true, control::ACK_OK)
     }
 
+    fn is_ech_shape(shape: u8) -> bool {
+        matches!(shape, SHAPE_ECH_TCP | SHAPE_ECH_NO_TS | SHAPE_ECH_TS)
+    }
+
+    /// C `d2k_plantab_has_ech_target`: есть ли ECH-привязка имени/адреса,
+    /// пробы или суффикса с учётом BYPASS.
+    pub fn has_ech_target(
+        &self,
+        name: Option<&[u8]>,
+        addr: Option<Address>,
+        family: u8,
+        sport_be: u16,
+    ) -> bool {
+        if !matches!(family, 4 | 6) {
+            return false;
+        }
+        let host = name.and_then(canonical_name);
+        for key in self.plans.keys() {
+            if key.family == family
+                && Self::is_ech_shape(key.shape)
+                && host.as_ref().is_some_and(|host| key.host == *host)
+            {
+                return true;
+            }
+        }
+        for key in self.addr_plans.keys() {
+            if key.address.family() != family || !Self::is_ech_shape(key.shape) {
+                continue;
+            }
+            if addr.is_some_and(|addr| key.address == addr)
+                && host.as_ref().is_none_or(|host| {
+                    !self.name_is_bypassed(host.as_bytes(), family, key.shape, 6)
+                })
+            {
+                return true;
+            }
+        }
+        if sport_be != 0 {
+            for key in self.probes.keys() {
+                if key.name.family == family
+                    && key.source_port == sport_be
+                    && Self::is_ech_shape(key.name.shape)
+                    && host.as_ref().is_some_and(|host| key.name.host == *host)
+                {
+                    return true;
+                }
+            }
+        }
+        if let Some(host) = host {
+            for shape in [SHAPE_ECH_TCP, SHAPE_ECH_NO_TS, SHAPE_ECH_TS] {
+                if !self.name_is_bypassed(host.as_bytes(), family, shape, 6)
+                    && self
+                        .find_in_domain(host.as_bytes(), family, shape, 6)
+                        .is_some()
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// C `find_name_skip`: первая постоянная запись имени любой формы;
     /// `skip_http` исключает HTTP-запись.
     fn find_name_skip(&self, host: &str, family: u8, skip_http: bool) -> Option<NamePlanKey> {
@@ -5275,6 +5337,50 @@ mod tests {
         }
         let ack = NamePlans::default().handle(&frame(r2k_core::control::SHAPE_MODERN, &quic));
         assert!(!ack.ok, "чужой транспорт плана должен быть отвергнут");
+    }
+
+    #[test]
+    fn has_ech_target_matches_c_entries_addr_and_bypass() {
+        let mut plans = NamePlans::default();
+        assert!(
+            plans
+                .handle(&set_name_shape(
+                    "ech.example",
+                    r2k_core::control::SHAPE_ECH_TCP,
+                    [0x91; 16],
+                ))
+                .ok
+        );
+        assert!(plans.has_ech_target(Some(b"ech.example"), None, 4, 0));
+        assert!(!plans.has_ech_target(None, None, 4, 0));
+
+        let address =
+            super::Address::new(super::IpAddr::V4(super::Ipv4Addr::new(198, 51, 100, 21)));
+        let tcp = Plan::parse_wire(&tls_plan_records([0x92; 16])).unwrap();
+        assert!(plans.set_addr_shaped_legacy(address, 4, r2k_core::control::SHAPE_ECH_NO_TS, tcp,));
+        assert!(plans.has_ech_target(None, Some(address), 4, 0));
+
+        plans.suffix_plans.insert(
+            super::SuffixPlanKey {
+                suffix: "bypass.example".into(),
+                transport: 6,
+                family: 4,
+                shape: r2k_core::control::SHAPE_ECH_TS,
+            },
+            InstalledPlan {
+                plan: Plan::default(),
+                generation: 4,
+                last_used: std::cell::Cell::new(0),
+            },
+        );
+        assert!(plans.has_ech_target(Some(b"bypass.example"), None, 4, 0));
+        plans.domain_bypasses.insert(super::DomainBypassKey {
+            name: "bypass.example".into(),
+            transport: 6,
+            family: 4,
+            shape: r2k_core::control::SHAPE_ECH_TS,
+        });
+        assert!(!plans.has_ech_target(Some(b"bypass.example"), None, 4, 0));
     }
 
     #[test]
