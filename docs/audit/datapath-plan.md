@@ -72,19 +72,21 @@ R2O-аналог — `crates/r2o-datapath/src/control.rs` (`ControlServer`), п�
 | d2k_ctl_accept | 152-177 | 26 | принять одного пира, второго отвергнуть | `control.rs:2084` `accept_peer` | E | `control_server_accepts_reconnect_...` (control.rs:2343) — второй лишний пир закрывается, переподключение принимается. |
 | drop_peer | 179-188 | 10 | закрыть пир, очистить буферы, позвать hook | `control.rs:2210` `disconnect` | E | Тот же тест: после `drop(previous)` `is_connected()` ложно, затем принимается новый пир. |
 | d2k_ctl_flush | 190-215 | 26 | дослать кольцо, EAGAIN — на следующий раз | `control.rs:2176` `flush` | E | `control_server_sends_a_tls_hello_event_to_connected_controller` (control.rs:2460) читает кадр после `send_event`. |
-| d2k_ctl_event | 217-255 | 39 | положить кадр целиком или потерять и посчитать | `control.rs:1913` `send_event`, `:2164` `enqueue` | E | `control_server_counts_each_event_without_connected_peer_as_dropped_like_d2o` (control.rs:2434); `try_send_event_...outbox...` (control.rs:2552) — переполнение. |
-| d2k_ctl_poll | 257-313 | 57 | прочитать, разобрать кадры, рвать на невозможной длине | `control.rs:1883` `poll`, `:2110` `read_peer`, `:2138` `take_complete_frames` | E | Reconnect-тест читает `EVENT_PROTOCOL`; границы `FRAME_MAX` проверяются в `take_complete_frames`. |
+| d2k_ctl_event | 217-255 | 39 | положить кадр целиком или потерять и посчитать | `control.rs:1913` `send_event`, `:2164` `enqueue` | **P** | **Подтверждённое отличие размера:** C `D2K_CTL_OUT_RING=65536` (`ctl.c:21`), R2O `MAX_CONTROL_OUTPUT=128*1024` (`control.rs:28`). Оба кладут кадр целиком, при нехватке — `dropped++`/`dropped_events`; C дополнительно `sent++`, в R2O счётчика `sent` нет. `len>FRAME_MAX-2` → drop. Тесты `control.rs:2434`, `:2552-2583`. |
+| d2k_ctl_poll | 257-313 | 57 | прочитать, разобрать кадры, рвать на невозможной длине | `control.rs:1883` `poll`, `:2110` `read_peer`, `:2138` `take_complete_frames` | **P** | C делает один `read` до EAGAIN и разбирает всё, что пришло; R2O `read_peer` читает блоками 8192 в цикле до EAGAIN, но не более `MAX_COMMANDS_PER_POLL=256` кадров (`control.rs:29,2114,2141`). Проверка длины `2..=FRAME_MAX`, разрыв на неверной длине/переполнении входа (`FRAME_MAX+4`) и удаление обработанного префикса совпадают. Reconnect-тест читает `EVENT_PROTOCOL`; границы `FRAME_MAX` — `take_complete_frames`. |
 | d2k_ctl_dropped | 315-315 | 1 | счётчик потерянных кадров | `control.rs:1983` `dropped_events` | E | `control_server_counts_each_event_without_connected_peer...` (control.rs:2434) сверяет счётчик. |
 | d2k_ctl_sent | 316-316 | 1 | счётчик поставленных в кольцо кадров | — | N | Счётчика `sent` в R2O нет; есть только `dropped_events`. |
 
-Итог по файлу: E 8, P 3, N 3. Пробелы: нет доступа к fd (listen/peer), нет счётчика
-отправленных кадров, hook разрыва реализован в цикле, а не в объекте.
+Итог по файлу: E 6, P 5, N 3. Пробелы: нет доступа к fd (listen/peer), нет счётчика
+отправленных кадров, hook разрыва реализован в цикле, а не в объекте; outbox R2O
+128 КиБ против C 64 КиБ; `poll` разбирает до 256 кадров за вызов.
 
-**Построчная сверка a378:** все 14 функций прочитаны. Кольцо `D2K_CTL_OUT_RING`,
-кадр `HDR=6` (`plen` включает 2 байта типа, `plen>=2`), `D2K_CTL_FRAME_MAX`,
+**Построчная сверка a378:** все 14 функций прочитаны. Кольцо `D2K_CTL_OUT_RING`
+(C 65536), кадр `HDR=6` (`plen` включает 2 байта типа, `plen>=2`), `D2K_CTL_FRAME_MAX`,
 потеря кадра при нехватке места и `dropped++`, EAGAIN-дозапись, один пир,
 `drop_peer` при ошибке чтения — совпадают с `control.rs` (`send_event`/`enqueue`/
-`take_complete_frames`/`disconnect`). Отличия: R2O не отдаёт listen/peer fd,
+`take_complete_frames`/`disconnect`) по семантике; R2O `MAX_CONTROL_OUTPUT=128*1024`
+и `MAX_COMMANDS_PER_POLL=256` расширяют пределы. Отличия: R2O не отдаёт listen/peer fd,
 не считает `sent`, hook разрыва вызывает цикл `main.rs`, а не объект; `open`
 не удаляет чужой не-сокет и ставит 0600/backlog по умолчанию.
 
