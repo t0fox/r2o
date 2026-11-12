@@ -239,6 +239,10 @@ P означает неполное доказательство ветвей, N
   **PASS** (HTTP no-executed-trial, baseline local failure/cut retry rules).
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-ack-applied-persist-differential.sh` —
   **PASS** (own-first candidate budget reset, proven RX survives snapshot reask).
+- `R2O_EXPECTED_DONOR_SHA=a378e230947ebfd011439e1cac0f1e994d883aae
+  R2O_DONOR_DATAPATH=/mnt/e/d2o-a378w/datapath sh scripts/r2o-quic-hello-differential.sh` —
+  **PASS** (ClientHello из проверенного Initial, повтор полного CH, истечение кэша,
+  сборка CH из нескольких датаграмм).
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-diagnostics-differential.sh` —
   **не выполнен**: сборка донорского `test_httpsearch` падает на duplicate
   symbols `d2k_plan_apply`, `d2k_plan_max_emit`, `d2k_actions_cancel`,
