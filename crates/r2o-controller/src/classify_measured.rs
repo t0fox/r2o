@@ -1,6 +1,7 @@
 //! Преобразование измеренной гипотезы искажения в программу R2OP для r2o-datapath.
 
 use std::fmt::Write as _;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use r2k_core::plan::Plan;
 
@@ -9,7 +10,32 @@ use crate::classify::{Poison, Trigger, poison_has_fake};
 const MAX_TRIGGER: usize = 16_384;
 const MAX_DECOY: usize = 2_048;
 const MAX_TEXT: usize = 8_192;
-const SEGMENT_SIZE: usize = 1_400;
+pub const DEFAULT_SEGMENT_MAX: usize = 1_400;
+/// C `seg_max` (`detect/raw.c:814`): потолок сегмента, общий для замера и
+/// исполнения. Ноль означает значение по умолчанию.
+static SEGMENT_MAX: AtomicUsize = AtomicUsize::new(DEFAULT_SEGMENT_MAX);
+
+/// C `d2k_raw_set_segment_max`: `seg ? seg : D2K_ARM_SEGMENT_MAX`.
+pub fn set_segment_max(segment: usize) {
+    #[cfg(target_os = "linux")]
+    {
+        let segment = if segment == 0 {
+            DEFAULT_SEGMENT_MAX
+        } else {
+            segment
+        };
+        SEGMENT_MAX.store(segment, Ordering::Relaxed);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // C не-Linux `d2k_raw_set_segment_max` — no-op (`detect/raw.c:1329`).
+        let _ = segment;
+    }
+}
+
+pub fn segment_max() -> usize {
+    SEGMENT_MAX.load(Ordering::Relaxed)
+}
 
 /// Собрать и проверить точные байты плана R2OP для измеренного искажения.
 ///
@@ -53,6 +79,7 @@ fn measured_plan_text(
     decoy: Option<&[u8]>,
     send_cap: usize,
 ) -> Result<String, String> {
+    let segment_size = segment_max();
     let n = trigger.payload.len();
     if !(2..=MAX_TRIGGER).contains(&n) {
         return Err("measured trigger length is outside 2..=16384".into());
@@ -140,7 +167,7 @@ fn measured_plan_text(
             return Err("measured split is outside the trigger".into());
         }
         return checked_text(format!(
-            "r2o-plan 1 5\nid 00000000000000000000000000000000\nproto tcp tls\nwire detect-tcp-v1\nsegment {SEGMENT_SIZE}\nsplit payload_start +{split_pos}\norder forward\npace {gap_us}\n"
+            "r2o-plan 1 5\nid 00000000000000000000000000000000\nproto tcp tls\nwire detect-tcp-v1\nsegment {segment_size}\nsplit payload_start +{split_pos}\norder forward\npace {gap_us}\n"
         ));
     }
 
@@ -167,7 +194,7 @@ fn measured_plan_text(
             return Err("composite measured hello exceeds the send cap".into());
         }
         let mut text = format!(
-            "r2o-plan 1 8\nid 00000000000000000000000000000000\nproto tcp tls\nwire tcp-template-v1\ninput tls-sni\nsegment {SEGMENT_SIZE}\npayload 1 {}\npoison 1 tcpts\nfake payload=1 poison=1 repeats=8 gap_us=0 place=before tlsmod=rnd,dupsid\nsplit payload_start +2\norder forward\n",
+            "r2o-plan 1 8\nid 00000000000000000000000000000000\nproto tcp tls\nwire tcp-template-v1\ninput tls-sni\nsegment {segment_size}\npayload 1 {}\npoison 1 tcpts\nfake payload=1 poison=1 repeats=8 gap_us=0 place=before tlsmod=rnd,dupsid\nsplit payload_start +2\norder forward\n",
             hex(decoy)
         );
         return checked_text(std::mem::take(&mut text));
@@ -201,7 +228,7 @@ fn measured_plan_text(
             format!("input {n} {sni_off} {sni_len}")
         };
         return checked_text(format!(
-            "r2o-plan 1 5\nid 00000000000000000000000000000000\nproto tcp tls\nwire detect-tcp-v1\n{input}\nsegment {SEGMENT_SIZE}\nsplit payload_start +{disorder_pos}\norder reverse\n"
+            "r2o-plan 1 5\nid 00000000000000000000000000000000\nproto tcp tls\nwire detect-tcp-v1\n{input}\nsegment {segment_size}\nsplit payload_start +{disorder_pos}\norder reverse\n"
         ));
     }
 
@@ -225,13 +252,13 @@ fn measured_plan_text(
             return Err("measured urgent-byte plan requires a named TLS input only".into());
         }
         return checked_text(format!(
-            "r2o-plan 1 8\nid 00000000000000000000000000000000\nproto tcp tls\nwire detect-tcp-v1\ninput tls-sni\nsegment {SEGMENT_SIZE}\noob sni_middle 0f\norder forward\n"
+            "r2o-plan 1 8\nid 00000000000000000000000000000000\nproto tcp tls\nwire detect-tcp-v1\ninput tls-sni\nsegment {segment_size}\noob sni_middle 0f\norder forward\n"
         ));
     }
 
     if disorder && !fake && named {
         let mut text = format!(
-            "r2o-plan 1 5\nid 00000000000000000000000000000000\nproto tcp tls\nwire detect-tcp-v1\ninput tls-sni\nsegment {SEGMENT_SIZE}\n"
+            "r2o-plan 1 5\nid 00000000000000000000000000000000\nproto tcp tls\nwire detect-tcp-v1\ninput tls-sni\nsegment {segment_size}\n"
         );
         if overlap != 0 {
             append_measured_payload(&mut text, 2, overlap, decoy)?;
@@ -251,11 +278,11 @@ fn measured_plan_text(
     };
     let mut text = if parameterized {
         format!(
-            "r2o-plan 1 {minexec}\nid 00000000000000000000000000000000\nproto tcp tls\nwire detect-tcp-v1\ninput tls-sni\nsegment {SEGMENT_SIZE}\n"
+            "r2o-plan 1 {minexec}\nid 00000000000000000000000000000000\nproto tcp tls\nwire detect-tcp-v1\ninput tls-sni\nsegment {segment_size}\n"
         )
     } else {
         format!(
-            "r2o-plan 1 {minexec}\nid 00000000000000000000000000000000\nproto tcp tls\nwire detect-tcp-v1\ninput {n} {sni_off} {sni_len}\nsegment {SEGMENT_SIZE}\n"
+            "r2o-plan 1 {minexec}\nid 00000000000000000000000000000000\nproto tcp tls\nwire detect-tcp-v1\ninput {n} {sni_off} {sni_len}\nsegment {segment_size}\n"
         )
     };
     let mid = if between { 1 } else { n / 2 };
@@ -362,7 +389,7 @@ fn measured_plan_text(
         } else {
             0
         };
-        body = body.max(overlap).min(SEGMENT_SIZE);
+        body = body.max(overlap).min(segment_size);
         let header = 40
             + if fake && poison.md5 {
                 20
@@ -425,6 +452,21 @@ fn hex(bytes: &[u8]) -> String {
         write!(out, "{byte:02x}").expect("writing to String");
     }
     out
+}
+
+#[cfg(test)]
+mod segment_tests {
+    use super::{DEFAULT_SEGMENT_MAX, segment_max, set_segment_max};
+
+    #[test]
+    fn segment_max_zero_uses_default_and_restores() {
+        let before = segment_max();
+        set_segment_max(0);
+        assert_eq!(segment_max(), DEFAULT_SEGMENT_MAX);
+        set_segment_max(1200);
+        assert_eq!(segment_max(), 1200);
+        set_segment_max(before);
+    }
 }
 
 fn checked_text(text: String) -> Result<String, String> {

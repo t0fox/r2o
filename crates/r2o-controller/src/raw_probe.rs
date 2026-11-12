@@ -1732,6 +1732,17 @@ fn retry_pending_rst_releases(final_attempt: bool) {
     retry_pending_rst_releases_locked(final_attempt);
 }
 
+/// C `d2k_raw_pending_count` (`detect/raw.c:488-495`): число отложенных
+/// снятий RST-правил под mutex.
+pub(crate) fn rst_pending_count() -> usize {
+    RST_PENDING.get().map_or(0, |pending| {
+        pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    })
+}
+
 extern "C" fn rst_cleanup_at_exit() {
     retry_pending_rst_releases(true);
 }
@@ -2890,6 +2901,11 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2)),
             &packet[20..]
         ));
+    }
+
+    #[test]
+    fn rst_pending_count_starts_empty_and_is_bounded() {
+        assert!(rst_pending_count() <= RST_PENDING_MAX);
     }
 
     #[test]
