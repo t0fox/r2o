@@ -84,12 +84,12 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 186 | 349 | 13 | 0 |
-| core-state | 692 | 177 | 511 | 4 | 0 |
+| core-net | 548 | 188 | 349 | 11 | 0 |
+| core-state | 692 | 178 | 511 | 3 | 0 |
 | datapath-core | 400 | 151 | 244 | 5 | 0 |
 | datapath-plan | 183 | 138 | 45 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **710** | **1250** | **22** | **0** |
+| **Итого** | **1982** | **713** | **1250** | **19** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,8 +103,8 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 710 / P 1250 /
-N 22 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
+Покрытие реестра: **1982/1982** функций. Статусы: **E 713 / P 1250 /
+N 19 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
 | # | Область | D2O | R2O | Подтверждение |
@@ -344,12 +344,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 186 | 349 | 13 | 0 |
-| core-state | 692 | 177 | 511 | 4 | 0 |
+| core-net | 548 | 188 | 349 | 11 | 0 |
+| core-state | 692 | 178 | 511 | 3 | 0 |
 | datapath-core | 400 | 151 | 244 | 5 | 0 |
 | datapath-plan | 183 | 138 | 45 | 0 | 0 |
 | detect | 159 | 58 | 101 | 0 | 0 |
-| **Итого** | **1982** | **710** | **1250** | **22** | **0** |
+| **Итого** | **1982** | **713** | **1250** | **19** | **0** |
 
 
 ---
@@ -628,7 +628,7 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `d2k_verify_budget_set` | 822-822 | 1 | установить бюджет зондов потока | `R2oMeasurementGate`/параметры fetch | **P** | C `__thread unsigned g_verify_budget; g_verify_budget=budget_packets`. Rust бюджет/гейт передаётся через `R2oMeasurementGate`/параметры `r2o_fetch_*`; отдельного thread-local сеттера нет. |
 | `d2k_verify_budget_get` | 823-823 | 1 | прочитать бюджет зондов текущего потока | `R2oMeasurementGate`/параметры fetch | **P** | C `return g_verify_budget` (thread-local, ставится `d2k_verify_budget_set`). Rust бюджет передаётся через `R2oMeasurementGate`/параметр запроса и проверяется в fetch; отдельного геттера thread-local нет. |
 | `d2k_verify_tcp_timestamps_set` | 826-828 | 3 | поточная настройка TCP Timestamp (-1/0/1), иное → -1 | `ClassifyOptions.client_tcp_has_timestamps`, `raw_offer_timestamps` | **P** | C `enabled in -1..1 ? enabled : -1`; Rust передаёт `Option<bool>` в discovery/raw probe, глобального сеттера нет. Значения выражаются, API иной. |
-| `d2k_verify_tcp_timestamps_get` | 829-829 | 1 | прочитать thread-local `tcp_timestamps` | нет | **N** | C `return g_verify_tcp_timestamps` (значение -1/0/1, ставится `d2k_verify_tcp_timestamps_set`). Rust такого thread-local/геттера не имеет: `tcp_timestamps` передаётся параметром/опцией fetch (и sysctl-переключение не портировано). |
+| `d2k_verify_tcp_timestamps_get` | 829-829 | 1 | прочитать thread-local `tcp_timestamps` | `verify.rs` `d2k_verify_tcp_timestamps_get` | E | C `return g_verify_tcp_timestamps` (-1/0/1). Rust thread-local `VERIFY_TCP_TIMESTAMPS: Cell<i8>` с getter/setter; тест `tcp_timestamps_getter_reflects_thread_local_setter` проверяет 1/0/-1. |
 | `d2k_verify_quic_form_set` | 837-840 | 4 | поточная форма клиента для QUIC-зонда: `n>0` → копия/флаг, иначе сброс | `quic_replay.rs:98-136 r2o_quic_profile_snapshot`, `R2oQuicHttp3Result` | **P** | C хранит `d2k_quic_form` в thread-local; Rust форму задаёт профиль/snapshot при построении зонда, отдельного thread-local сеттера нет. |
 | `d2k_verify_tcp_data_packets` | 850-865 | 16 | TCP_INFO data_segs_in/out по смещениям 152/156, ответ ≥160, иначе -1 | `fetch.rs`/`r2o_volume` TCP_INFO? | **P*** | C `getsockopt(IPPROTO_TCP,11/TCP_INFO)`, `len>=160`, `in@152`, `out@156`, сумма. Rust использует TCP_INFO для объёмного бюджета (см. `fetch.rs`), но точная функция/смещения не вынесены; `test-http-chunk-framing-differential` не про это. |
 | `budget_say` | 877-883 | 7 | записать исход бюджета и текст в результат | `budget`/`reason` (`fetch.rs`) | **P** | C `r->budget=outcome`; `va_start/vsnprintf(r->budget_note,sizeof,...)`. Rust исход бюджета и текст живут в полях `R2oVolumeObservation`/`reason`; отдельной функции с `budget_note` нет, тексты иные. |
@@ -712,7 +712,7 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `d2k_httpsprobe_portal` | 397-428 | 32 | проверка host/family/addr; cached upgrade + !answered → resend_ttl rc=2; иначе при месте в очереди job, PROBING на 10 с, rc=1; иначе 0 | `https_probe.rs:189-235 submit`, `main.rs:18992-19045` | **P** | **C-ветви проверены:** `resend_ttl=0`; host/family/addr; lock; cached non-expired: upgrade+!answered+resend_ttl → left=expires-now /1000, rc=2 при left>0; иначе если очередь <64: job host/family/addr, count++, `cache_put(PROBING, now+PROBE_MS*4)`, signal, rc=1; иначе 0. **R2O:** `submit`/`cached_state`/`pending`, очередь 16; C ставит PROBING в кэш, Rust отдельно. differential очереди нет. |
 | `d2k_httpsprobe_done` | 430-449 | 20 | забрать до cap результатов, `cache_put` с полным ttl, memmove, повторный wake | `https_probe.rs:236-250 try_result`, `main.rs:17032-17035`, `d2kc.c:324-355` | **P** | **C-ветви проверены:** drain pipe; lock; `n=min(d_count,cap)`; для каждого `out[i]=done[i]` + `cache_put(host,state,now+ttl*1000)`; memmove остатка; `d_count-=n`; wake при остатке. **R2O-расхождение:** C `http_probe_done` для каждого результата вызывает `d2k_https_upgrade`; только SERVED/TLS_BLOCKED → `SET_HTTPS(host,ttl_s)` (`d2kc.c:343`), иначе `http_search_portal`. Rust `try_result` кладёт полный TTL в кэш, но в `HttpsProbeResult.ttl_seconds` для не-upgrade пишет 0, а `main.rs:17033` безусловно шлёт `SET_HTTPS(host,ttl_seconds)` — для closed/other-name/unconfirmed TTL=0 (удаление). Rust отдаёт по одному, `lost` нет. |
 | `d2k_httpsprobe_state` | 451-458 | 8 | cached state, если не истёк, иначе UNKNOWN | `https_probe.rs:226-231 cached_state` | **E** | C lock/cache_find/`now<expires ? state : UNKNOWN`; Rust `Option`; differential httpsprobe + unit `cached_state_and_pending_lookup_follow_host_and_expiry`. |
-| `d2k_httpsprobe_lost` | 460-466 | 7 | счётчик потерянных запросов под mutex | нет | **N** | C `if (!p) return 0`; lock; `n=p->lost`; unlock; return. В `https_probe.rs` счётчика `lost` нет: при полном канале воркер блокируется, а не копит потери; отдельного геттера нет. |
+| `d2k_httpsprobe_lost` | 460-466 | 7 | счётчик потерянных запросов под mutex | `https_probe.rs` `HttpsProbeWorker::lost` | E | C `n=p->lost` под mutex. Rust `lost: u64` увеличивается при `TrySendError::Full` в `submit`; геттер `lost()`. Тест `lost_counts_requests_that_do_not_fit_the_queue`: полная очередь → `lost=1`, запрос не принят. |
 | `d2k_httpsprobe_save` | 476-505 | 30 | `d2k-https 2 <wall_s>`, все не-PROBING и не истёкшие, tmp+fflush+fsync+rename, unlink при ошибке | `https_probe.rs:399-460 save_cache` | **E** | **Совпадает:** заголовок `d2k-https 2 %lld`; записи `state wall_s+(expires-now)/1000 host`; пропуск PROBING/истёкших; tmp; `fflush`+`fsync`+`fclose`+`rename`; `unlink(tmp)` при ошибке. Rust уникальный `.new.{pid}.{nonce}` + `sync_all` + `rename` + fsync каталога. differential httpsprobe + round-trip. |
 | `d2k_httpsprobe_load` | 507-564 | 58 | v1/v2, откат при `written>wall_s`, strict `%lld`, TTL-кламп, upgrade→push | `https_probe.rs:320-386 load_cache`, `:388-397 load_verified` | **E** | **Ветви сверены:** заголовок `d2k-https 1` или `d2k-https 2 %lld %n`; `written>wall_s` → пусто; строки `%31s %lld %299s %n`, `line[used]=='\0'`, `host_ok`; state из `stored[]`, `exp<=wall` skip; `left=exp-wall`, clamp до `d2k_https_ttl`; `cache_put(now+left*1000)`; `n_loaded++`; upgrade+push → host/state/ttl/why «из кэша на диске». Rust `load_verified` фильтрует `should_redirect()`. differential httpsprobe (16+ кейсов). |
 
@@ -2320,7 +2320,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_meas` | 269–293 | 25 | серия: `repeats<=0→3`; ERR→err+fail; PASS→pass; UNPROVEN→unproven+fail; SILENT→fail; `marked` — AND | `classify.rs:997-1005 Tally`, `:1082-1240 measure`, `:634-642 with_mark_status` | **P** | Логика совпадает: `unmarked` sticky по серии, ERR→`errors+1`/`fail+1`, UNPROVEN→`unproven+1`/`fail+1`, PASS→`pass+1`. Тесты `classify.rs:2135-2178`, `2309-2361` проверяют unmarked/unproven. Отдельного C/Rust differential на серию нет. |
 | `udp_now_ms` | 307-311 | 5 | `CLOCK_MONOTONIC` в мс для реестра UDP-портов | `std::time::Instant` | **P*** | C `clock_gettime(CLOCK_MONOTONIC)`, `tv_sec*1000+tv_nsec/1e6`; Rust `Instant`/`Duration`. Монотонность та же, абсолютное значение/точка отсчёта иные. |
 | `d2k_udp_port_claim` | 313–339 | 27 | `getsockname(fd)` → порт; `port==0→-1`; кольцо 4096, возраст 480 с; недавний → 1 без записи, иначе запись/0 | `r2o_quic_http3.rs:16-22,127-148 r2o_quic_port_was_recently_claimed` | **P** | **Ветви сверены:** C `getsockname`, `port==0` → -1; lock; поиск `port` с `at_ms!=0 && now-at<480000`; если недавний → 1; иначе запись в `udp_recent[next]` и next=(next+1)%4096, return 0. Rust `r2o_quic_http3.rs:127-148`: lock; `VecDeque<(u16,Instant)>`; поиск `elapsed()<480s`; если найден → true; иначе `push_back`/замена по `next` и false. Порт 0 отсекается вызывающим (`:102-107`). API иной (fd vs port), Rust-цикл `udp_socket_fresh` держит до 16 старых сокетов (`:82-124`). C/Rust differential нет. |
-| `d2k_udp_port_forget_all` | 341–346 | 6 | сброс реестра недавних UDP-портов | нет прямого аналога | **N** | Подтверждено: единственный вызов в D2O — `core/test_quic_arm_data.c:440`; production-вызовов нет. В R2O реестр живёт в `static OnceLock<Mutex<...>>` (`r2o_quic_http3.rs:21-22`) и не сбрасывается. Это тестовый сброс, не packet-path контракт. |
+| `d2k_udp_port_forget_all` | 341–346 | 6 | сброс реестра недавних UDP-портов | `r2o_quic_http3.rs` `r2o_quic_port_forget_all` | E | C сбрасывает реестр недавних UDP-портов (вызов только из теста). Rust `r2o_quic_port_forget_all()` очищает `VecDeque` и индекс кольца; тест `forget_all_clears_recent_udp_ports`: порт сначала «свежий», после сброса снова свободен. |
 
 ### `core/measured.c`
 

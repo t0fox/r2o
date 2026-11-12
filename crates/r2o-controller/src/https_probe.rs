@@ -122,6 +122,8 @@ pub struct HttpsProbeWorker {
     mark: Option<u32>,
     thread: Option<JoinHandle<()>>,
     pending: HashSet<String>,
+    /// C `d2k_httpsprobe.lost`: запросы, не влезшие в очередь.
+    lost: u64,
     /// Слоты кэша в порядке C-массива: загрузка и сохранение обязаны давать
     /// тот же файл, что `d2k_httpsprobe_load/save`.
     cache: Vec<CachedResult>,
@@ -137,6 +139,7 @@ impl HttpsProbeWorker {
             mark,
             thread: None,
             pending: HashSet::new(),
+            lost: 0,
             cache: Vec::new(),
         };
         worker.r2o_ensure_worker();
@@ -207,7 +210,10 @@ impl HttpsProbeWorker {
                 self.pending.insert(host);
                 true
             }
-            Err(TrySendError::Full(_)) => false,
+            Err(TrySendError::Full(_)) => {
+                self.lost = self.lost.saturating_add(1);
+                false
+            }
             Err(TrySendError::Disconnected(job)) => {
                 self.r2o_ensure_worker();
                 let Some(jobs) = self.jobs.clone() else {
@@ -221,6 +227,11 @@ impl HttpsProbeWorker {
                 }
             }
         }
+    }
+
+    /// C `d2k_httpsprobe_lost`: число запросов, потерянных при полной очереди.
+    pub fn lost(&self) -> u64 {
+        self.lost
     }
 
     pub fn cached_state(&self, host: &str, now: Instant) -> Option<HttpsProbeState> {
@@ -747,5 +758,35 @@ mod tests {
                 .is_some_and(|thread| !thread.is_finished()),
             "submit обязан поднять новый HTTPS probe worker"
         );
+    }
+
+    #[test]
+    fn lost_counts_requests_that_do_not_fit_the_queue() {
+        let address: SocketAddr = "127.0.0.1:443".parse().unwrap();
+        let (jobs, _receiver) = std::sync::mpsc::sync_channel(1);
+        jobs.try_send(super::Job {
+            host: "queued.example".into(),
+            address,
+        })
+        .unwrap();
+        let (result_sender, results) = std::sync::mpsc::sync_channel(1);
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            let _ = wait.recv();
+        });
+        let mut worker = HttpsProbeWorker {
+            jobs: Some(jobs),
+            result_sender,
+            results,
+            mark: None,
+            thread: Some(thread),
+            pending: std::collections::HashSet::new(),
+            lost: 0,
+            cache: Vec::new(),
+        };
+        assert!(!worker.submit("lost.example", address, Instant::now()));
+        assert_eq!(worker.lost(), 1);
+        release.send(()).unwrap();
+        drop(worker);
     }
 }

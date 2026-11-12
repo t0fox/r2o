@@ -39,6 +39,7 @@ pub(crate) fn rst_pending_count() -> usize {
 }
 pub mod response;
 pub mod trigger;
+pub mod verify;
 pub mod voice_discovery;
 pub mod voice_measure;
 pub mod voice_targets;

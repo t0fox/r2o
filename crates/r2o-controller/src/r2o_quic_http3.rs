@@ -124,6 +124,18 @@ pub fn r2o_quic_http3_udp_socket_fresh(
     )))
 }
 
+/// C `d2k_udp_port_forget_all`: сбросить реестр недавних UDP-портов.
+pub fn r2o_quic_port_forget_all() {
+    let Some(state) = R2O_QUIC_RECENT_PORTS_STATE.get() else {
+        return;
+    };
+    let mut state = state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    state.0.clear();
+    state.1 = 0;
+}
+
 fn r2o_quic_port_was_recently_claimed(port: u16) -> bool {
     let state = R2O_QUIC_RECENT_PORTS_STATE
         .get_or_init(|| Mutex::new((VecDeque::with_capacity(R2O_QUIC_RECENT_PORTS), 0)));
@@ -1583,5 +1595,15 @@ mod tests {
         if let Ok(path) = std::env::var("R2O_QUIC_HTTP3_NEXT_STREAM_DIFF_OUTPUT") {
             std::fs::write(path, "budget-next-stream=Pass\n").unwrap();
         }
+    }
+
+    #[test]
+    fn forget_all_clears_recent_udp_ports() {
+        let port = 65530;
+        super::r2o_quic_port_forget_all();
+        assert!(!super::r2o_quic_port_was_recently_claimed(port));
+        assert!(super::r2o_quic_port_was_recently_claimed(port));
+        super::r2o_quic_port_forget_all();
+        assert!(!super::r2o_quic_port_was_recently_claimed(port));
     }
 }
