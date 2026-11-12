@@ -221,6 +221,25 @@ fn quic_split_reseals_initial_and_replaces_original_datagram() {
 }
 
 #[test]
+fn quic_split_applies_delay_us_like_d2o() {
+    let source = include_bytes!("fixtures/quic_v1_initial.bin");
+    let split_plan = Plan::parse(&plan(
+        10,
+        3,
+        &[
+            tlv(0x0002, &[17, 2]),
+            tlv(0x010f, &[1]),
+            tlv(0x010b, &25_u32.to_be_bytes()),
+        ],
+    ))
+    .unwrap();
+    let actions = split_plan.apply(&PacketInput::new(source, 0)).unwrap();
+    assert_eq!(actions.fate, OriginalFate::Drop);
+    assert_eq!(actions.emits.len(), 1);
+    assert_eq!(actions.emits[0].delay_us, 25);
+}
+
+#[test]
 fn udp_lengthening_copies_payload_and_appends_zero_bytes() {
     let plan = Plan::parse(&plan(9, 2, &[tlv(0x0002, &[17, 2]), tlv(0x010e, &[0, 3])])).unwrap();
     let actions = plan.apply(&PacketInput::new(b"udp", 7)).unwrap();
@@ -298,6 +317,14 @@ fn urgent_oob_plan_sends_prefix_urgent_byte_and_suffix() {
     assert_eq!(actions.emits[1].seq, 724);
     assert_eq!(actions.emits[2].bytes, &hello[24..]);
     assert_eq!(actions.emits[2].seq, 725);
+    // C `finalize` проставляет wire_profile всем трём посылкам, включая
+    // суффикс после срочного байта.
+    assert!(
+        actions
+            .emits
+            .iter()
+            .all(|emission| emission.wire_profile == 1)
+    );
 }
 
 #[test]

@@ -244,6 +244,14 @@ impl Plan {
                 self.append_fake_repeats(&mut emits, fake, input, input.seq)?;
             }
             emits.push(Emission::payload(input.seq, &bytes)?);
+            // C qsplit не возвращается из середины: он идёт в общий
+            // `finalize`, где применяются timing, wire_profile и нарезка
+            // (`plan_apply.c:645-666,785-812`).
+            self.apply_timing(&mut emits);
+            for emission in &mut emits {
+                emission.wire_profile = self.wire_profile;
+            }
+            self.segment(&mut emits, input)?;
             return Ok(Actions {
                 fate: OriginalFate::Drop,
                 emits,
@@ -270,7 +278,7 @@ impl Plan {
                     "место срочного байта вне нагрузки этого пакета",
                 ));
             }
-            let mut first = Emission::payload(input.seq, &input.payload[..middle])?;
+            let first = Emission::payload(input.seq, &input.payload[..middle])?;
             let mut urgent = Emission::payload(
                 input.seq.wrapping_add(middle as u32),
                 std::slice::from_ref(&self.oob_byte),
@@ -281,12 +289,17 @@ impl Plan {
                 input.seq.wrapping_add(middle as u32).wrapping_add(1),
                 &input.payload[middle..],
             )?;
-            first.wire_profile = self.wire_profile;
-            urgent.wire_profile = self.wire_profile;
             let mut actions = Actions {
                 fate: OriginalFate::Drop,
                 emits: vec![first, urgent, suffix],
             };
+            // C OOB идёт в `finalize`: профиль ставится ВСЕМ посылкам,
+            // включая суффикс, затем применяются timing и нарезка
+            // (`plan_apply.c:475-507,785-812`).
+            for emission in &mut actions.emits {
+                emission.wire_profile = self.wire_profile;
+            }
+            self.apply_timing(&mut actions.emits);
             self.segment(&mut actions.emits, input)?;
             return Ok(actions);
         }

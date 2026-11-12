@@ -164,7 +164,6 @@ P означает неполное доказательство ветвей, N
 
 1. **Packet-path/безопасность:** `wire_udp` IPID_ZERO/TOS; raw UDP/TTL
    (`IP_NODEFRAG`, `qp_recv_ttl`); `ARM_SHAPE` transport 17;
-   `plan_apply` OOB `wire_profile` и qsplit `delay_us`;
    `raw_set_segment_max`; полный `shape_opts`; HTTP80 capacity 128/1024;
    ENOBUFS-дренаж только истёкших.
 2. **Данные/каталог:** `Binding.tcp_profile` и default `family=4` закрыты
