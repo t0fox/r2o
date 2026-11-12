@@ -203,6 +203,18 @@ impl NamePlans {
         self.addr_probes.len() + self.voice_addr_probes.len()
     }
 
+    /// Ленивое удаление истёкших flow-проб, как C `probe_drop` внутри
+    /// `find_probe`/`set_addr_probe` (`plans.c:985-987,931-934`).
+    pub fn prune_expired_probes(&mut self, now: Instant) {
+        let before = self.flow_probe_count();
+        self.addr_probes.retain(|_, probe| probe.expires > now);
+        self.voice_addr_probes
+            .retain(|_, probe| probe.expires > now);
+        if self.flow_probe_count() != before {
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+
     pub fn r2o_shape_misses(&self) -> u64 {
         self.shape_misses.get()
     }
@@ -2585,7 +2597,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixStream;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     #[test]
     fn control_socket_is_private_to_its_owner() {
@@ -4347,6 +4359,48 @@ mod tests {
         );
         assert_eq!(plans.r2o_plan_count(), 0);
         assert_eq!(plans.exact_usage(), 1);
+    }
+
+    #[test]
+    fn prune_expired_probes_matches_lazy_probe_drop() {
+        let now = Instant::now();
+        let mut plans = NamePlans::default();
+        plans.addr_probes.insert(
+            [0x11; control::KEY_LEN],
+            AddrProbePlan {
+                plan: Plan::default(),
+                trial_id: [0x21; 16],
+                generation: 1,
+                expires: now - Duration::from_millis(1),
+            },
+        );
+        plans.addr_probes.insert(
+            [0x12; control::KEY_LEN],
+            AddrProbePlan {
+                plan: Plan::default(),
+                trial_id: [0x22; 16],
+                generation: 2,
+                expires: now + Duration::from_secs(1),
+            },
+        );
+        plans.voice_addr_probes.insert(
+            VoiceProbeKey {
+                client: Ipv4Addr::new(192, 0, 2, 1),
+                server: Ipv4Addr::new(198, 51, 100, 2),
+                server_port: 443,
+            },
+            VoiceProbePlan {
+                plan: Plan::default(),
+                trial_id: [0x23; 16],
+                generation: 3,
+                expires: now - Duration::from_millis(1),
+            },
+        );
+        let revision = plans.revision();
+        plans.prune_expired_probes(now);
+        assert_eq!(plans.addr_probes.len(), 1);
+        assert_eq!(plans.voice_addr_probes.len(), 0);
+        assert_eq!(plans.revision(), revision.wrapping_add(1));
     }
 
     #[test]

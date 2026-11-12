@@ -3525,19 +3525,17 @@ fn matching_domain_group<'a>(
     catalog: &'a Catalog,
     target: &r2o_controller::discovery::DiscoveryTarget,
 ) -> Option<&'a r2o_controller::catalog::DomainGroup> {
-    if target.shape == SHAPE_QUIC {
-        return None;
-    }
+    let transport = if target.shape == SHAPE_QUIC { 17 } else { 6 };
     let selected_path = r2o_target_confirmed_probe_path(catalog, target).unwrap_or_default();
     let key = GroupKey {
-        transport: 6,
+        transport,
         family: target.family,
         shape: if target.shape == SHAPE_ECH_TCP {
             SHAPE_MODERN
         } else {
             target.shape
         },
-        probe_path: if selected_path == "/" {
+        probe_path: if transport == 17 || selected_path == "/" {
             String::new()
         } else {
             selected_path
@@ -3659,7 +3657,12 @@ fn matching_domain_recovery_candidates(
                 else {
                     continue;
                 };
-                if saved_plan.proto != "tls" || saved_plan.text.len() >= 4096 {
+                let expected_proto = if target.shape == SHAPE_QUIC {
+                    "quic"
+                } else {
+                    "tls"
+                };
+                if saved_plan.proto != expected_proto || saved_plan.text.len() >= 4096 {
                     continue;
                 }
                 let confirmed = box_record.bindings.iter().any(|binding| {
@@ -30920,6 +30923,77 @@ mod tests {
             }
         }
         assert!(matching_domain_recovery_candidates(&catalog, &target).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn семейное_восстановление_поддерживает_quic() {
+        use r2o_controller::catalog::{
+            Binding, BoxRecord, Catalog, DomainGroup, DomainObservation, DomainState, GroupKey,
+            Plan as SavedPlan,
+        };
+
+        let plan_id = "ab".repeat(16);
+        let plan = SavedPlan {
+            id: plan_id.clone(),
+            proto: "quic".into(),
+            text: format!("r2o-plan 1 10\nid {plan_id}\nproto udp quic\nquicsplit 1\n"),
+            enabled: true,
+            ..SavedPlan::default()
+        };
+        let key = GroupKey {
+            transport: 17,
+            family: 4,
+            shape: SHAPE_QUIC,
+            ..GroupKey::default()
+        };
+        let catalog = Catalog {
+            boxes: vec![BoxRecord {
+                id: "box".into(),
+                plans: vec![plan],
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: "q.example.net".into(),
+                    plan_id: plan_id.clone(),
+                    level: 3,
+                    enabled: true,
+                    transport: 17,
+                    family: 4,
+                    shape: SHAPE_QUIC,
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            domain_state: Some(DomainState {
+                groups: vec![DomainGroup {
+                    suffix: "example.net".into(),
+                    plan_id: plan_id.clone(),
+                    key: key.clone(),
+                    evidence_count: 1,
+                    at: 0,
+                }],
+                observations: vec![DomainObservation {
+                    name: "q.example.net".into(),
+                    plan_id: plan_id.clone(),
+                    key,
+                    evidence: 1,
+                    at: 10,
+                }],
+                ..DomainState::default()
+            }),
+            ..Catalog::default()
+        };
+        let target = DiscoveryTarget {
+            host: "q.example.net".into(),
+            endpoint: "198.51.100.10:443".into(),
+            family: 4,
+            shape: SHAPE_QUIC,
+        };
+
+        let candidates = matching_domain_recovery_candidates(&catalog, &target);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].plan_id, [0xAB; 16]);
+        assert!(candidates[0].group_plan);
     }
 
     #[cfg(unix)]

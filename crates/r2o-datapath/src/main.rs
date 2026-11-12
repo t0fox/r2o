@@ -1690,6 +1690,9 @@ mod app {
                                 }
                             }
                         }
+                        // C удаляет истёкшие flow-опыты лениво при поиске;
+                        // делаем это на входе пакета до выбора плана.
+                        name_plans.prune_expired_probes(now);
                         let packet_view = r2k_core::packet::PacketView::parse(bytes);
                         let family = packet_view.as_ref().map(|view| view.family);
                         let allow_tls = options.mode == RuntimeMode::Apply
