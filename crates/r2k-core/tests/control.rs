@@ -15,7 +15,7 @@ use r2k_core::control::{
     decode_set_tcp_stall_budgets, encode_ack_for_trial, encode_delete_addr,
     encode_delete_addr_probe, encode_delete_name, encode_delete_name_probe, encode_set_addr,
     encode_set_addr_probe, encode_set_https, encode_set_name_probe, encode_set_tcp_stall_budgets,
-    encode_set_voice_addr, encode_set_voice_addr_probe, read_frame,
+    encode_set_voice_addr, encode_set_voice_addr_probe, r2o_binding_equal, read_frame,
 };
 use std::io::Cursor;
 
@@ -1093,6 +1093,27 @@ fn rejects_http_response_events_with_invalid_outcome_or_truncated_context() {
         })
         .is_err()
     );
+}
+
+#[test]
+fn binding_known_requires_kind_and_equal_requires_both_sides() {
+    let known = BindingContext {
+        generation: 1,
+        kind: 1,
+        family: 4,
+        shape: SHAPE_HTTP,
+        temporary: false,
+        epoch: [1; 16],
+    };
+    assert!(known.is_known());
+    let mut unknown = known;
+    unknown.kind = 0;
+    assert!(!unknown.is_known());
+    assert!(r2o_binding_equal(&known, &known));
+    assert!(!r2o_binding_equal(&known, &unknown));
+    let mut different = known;
+    different.shape = SHAPE_MODERN;
+    assert!(!r2o_binding_equal(&known, &different));
 }
 
 #[test]

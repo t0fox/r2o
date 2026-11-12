@@ -315,8 +315,13 @@ pub struct BindingContext {
 
 impl BindingContext {
     pub fn is_known(&self) -> bool {
-        self.generation != 0 && self.epoch.iter().any(|byte| *byte != 0)
+        self.generation != 0 && self.kind != 0 && self.epoch.iter().any(|byte| *byte != 0)
     }
+}
+
+/// C `d2k_binding_equal`: обе identity известны и поля совпадают.
+pub fn r2o_binding_equal(left: &BindingContext, right: &BindingContext) -> bool {
+    left.is_known() && right.is_known() && left == right
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

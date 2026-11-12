@@ -1670,7 +1670,16 @@ impl NamePlans {
         };
         if self.epoch == binding.epoch
             && self.plans.get(&key).is_some_and(|installed| {
-                installed.generation == binding.generation && installed.plan.transport == transport
+                let current = BindingContext {
+                    generation: installed.generation,
+                    kind: 1,
+                    family: binding.family,
+                    shape: binding.shape,
+                    temporary: false,
+                    epoch: self.epoch,
+                };
+                control::r2o_binding_equal(&current, &binding)
+                    && installed.plan.transport == transport
             })
         {
             self.plans.remove(&key);

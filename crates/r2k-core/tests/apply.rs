@@ -544,6 +544,34 @@ fn tls_fake_template_keeps_unequal_sid_and_non_template_rebuilds_length() {
 }
 
 #[test]
+fn flow_needs_and_stream_input_match_donor() {
+    let proto = tlv(0x0002, &[6, 1]);
+    let poison = tlv(0x0011, &[0, 1, 64, 2, 0, 0, 0, 0]);
+    let template = tlv(0x0109, &[2]);
+    let input = tlv(0x0106, &[0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
+
+    let without_input = Plan::parse(&plan(
+        8,
+        3,
+        &[proto.clone(), template.clone(), poison.clone()],
+    ))
+    .unwrap();
+    assert_eq!(without_input.flow_needs(), r2k_core::plan::FLOW_NEED_TCPTS);
+    assert!(!without_input.stream_input());
+
+    let with_input = Plan::parse(&plan(
+        8,
+        4,
+        &[proto.clone(), template.clone(), poison.clone(), input],
+    ))
+    .unwrap();
+    assert!(with_input.stream_input());
+
+    let detect = Plan::parse(&plan(5, 3, &[proto, tlv(0x0109, &[1]), poison])).unwrap();
+    assert_eq!(detect.flow_needs(), 0);
+}
+
+#[test]
 fn max_emit_counts_udp_tcp_options_seq_overlay_and_udplen() {
     let udp = Plan::parse(&plan(
         1,

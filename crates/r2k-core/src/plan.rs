@@ -18,6 +18,8 @@ pub const PROTO_VOICE: u8 = 3;
 pub const R2K_QUIC_TTL_PROBE_PAYLOAD: &[u8] = include_bytes!("quic/quic_ttl_probe.bin");
 pub const WIRE_DETECT_TCP: u8 = 1;
 pub const WIRE_TCP_TEMPLATE: u8 = 2;
+/// C `D2K_FLOW_NEED_TCPTS` (`datapath/include/d2k_plan.h:264`).
+pub const FLOW_NEED_TCPTS: u8 = 1;
 pub const POISON_BADSUM: u8 = 1 << 0;
 pub const POISON_TCPTS_BACK: u8 = 1 << 1;
 pub const POISON_IPID_ZERO: u8 = 1 << 2;
@@ -329,6 +331,18 @@ impl Plan {
 
     pub const fn quic_deny(&self) -> bool {
         self.qdeny != 0
+    }
+
+    /// C `d2k_plan_flow_needs`: TCP template с `TCPTS_BACK` требует flow-TS.
+    pub fn flow_needs(&self) -> u8 {
+        if self.wire_profile != WIRE_TCP_TEMPLATE {
+            return 0;
+        }
+        if self.poison_used() & POISON_TCPTS_BACK != 0 {
+            FLOW_NEED_TCPTS
+        } else {
+            0
+        }
     }
 
     pub const fn stream_input(&self) -> bool {
