@@ -1067,9 +1067,10 @@ impl NamePlans {
                 .try_into()
                 .expect("HTTPS TTL has a fixed width"),
         );
-        if ttl > MAX_HTTPS_TTL_SECONDS {
-            return (false, control::ACK_BAD_ARGS);
-        }
+        // C-датапат не отвергает большой срок, а обрезает его до семи
+        // суток (`ctlsrv.c:446`): иначе команда, которую C принял бы,
+        // возвращала бы ACK_BAD_ARGS.
+        let ttl = ttl.min(MAX_HTTPS_TTL_SECONDS);
         if ttl == 0 {
             self.https_names.remove(&host);
             return (true, control::ACK_OK);
@@ -3180,6 +3181,26 @@ mod tests {
                 .ok
         );
         assert!(!plans.has_verified_https(b"example.test", now));
+
+        // TTL больше семи суток C-датапат обрезает, а не отвергает.
+        let mut long = vec![b"long.example.test".len() as u8];
+        long.extend_from_slice(b"long.example.test");
+        long.extend_from_slice(&u32::MAX.to_be_bytes());
+        let ack = plans.handle(&Frame {
+            kind: control::COMMAND_SET_HTTPS,
+            body: long,
+        });
+        assert!(ack.ok, "long HTTPS TTL was rejected: {}", ack.reason);
+        let now = std::time::Instant::now();
+        let bounded = u64::from(control::MAX_HTTPS_TTL_SECONDS);
+        assert!(plans.has_verified_https(
+            b"long.example.test",
+            now + Duration::from_secs(bounded - 60)
+        ));
+        assert!(!plans.has_verified_https(
+            b"long.example.test",
+            now + Duration::from_secs(bounded + 60)
+        ));
     }
 
     #[test]

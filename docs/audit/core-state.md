@@ -406,7 +406,7 @@
 | `d2k_link_set_name_probe_trial` | 659–668 | 10 | SET_NAME_PROBE с trial_id: требует `sport_be != 0` | control::encode_set_name_probe | **P** | C проверяет только ненулевой порт; Rust дополнительно требует `valid_name_probe_plan_records(shape, plan)` и family 4/6, trial не проверяет. Для валидного плана кадр совпадает; набор отказов шире. |
 | `area_context_valid` | 670–675 | 6 | допустимая комбинация transport/shape/family для области | control::valid_domain_area_context | **P*** | static-хелпер; формула сверена ниже (P). |
 | `d2k_link_set_suffix_family` | 677–684 | 8 | SET_SUFFIX с планом | control::encode_set_suffix | **P** | **Подтверждённое расхождение:** C `send_name_plan(..., SET_SUFFIX)` проверяет только имя/family/transport/hex; Rust `encode_set_suffix` дополнительно проверяет shape (1/2/3/6 или 8–13), family и **`valid_domain_plan_records`** (transport/proto плана). C кодирует несовместимый план, Rust отвергает. |
-| `d2k_link_set_https` | 686–705 | 20 | fd>=0, name 1..253; ttl любой u32 BE; frame len/name/ttl | `control.rs:1777-1790 encode_set_https` | **P** | **Подтверждённое расхождение:** C-link не ограничивает `ttl_s`; обрезку до `D2K_HTTPS_TTL_MAX_S=7 суток` делает датапат (`ctlsrv.c:446`). Rust `encode_set_https` отвергает `ttl > MAX_HTTPS_TTL_SECONDS=6 часов` уже на кодировании. Для ttl≤6ч кадр совпадает; unit `encodes_the_exact_https_name_and_ttl`. |
+| `d2k_link_set_https` | 686–705 | 20 | fd>=0, name 1..253; ttl любой u32 BE; frame len/name/ttl | `control.rs:1777-1792 encode_set_https` | **E** | **Расхождение закрыто 2026-11-12:** `encode_set_https` принимает любой `u32` и кодирует его как есть, как C-link; обрезку до `MAX_HTTPS_TTL_SECONDS = 7 суток` (`D2K_HTTPS_TTL_MAX_S`) выполняет датапат. Тесты: `encodes_the_exact_https_name_and_ttl_for_the_datapath` (включая `21_601` и `u32::MAX`) и `set_https_command_accepts_an_exact_name_with_a_bounded_ttl`. |
 | `d2k_link_set_stall_budgets` | 707–729 | 23 | SET_STALL_BUDGETS список бюджетов | control::encode_set_tcp_stall_budgets | **P** | unit бюджеты tcp/reset; C/Rust diff нет |
 | `send_area_key` | 731–752 | 22 | общий кодировщик domain-area команд (name/key/area_id) | control::encode_domain_area_key | **P*** | static-хелпер |
 | `d2k_link_del_suffix_family` | 754–757 | 4 | DEL_SUFFIX | control::encode_delete_suffix | **P** | кодировщик есть; C/Rust differential нет |
@@ -1027,9 +1027,11 @@ addr/addr_probe/arm_shape/del_name/del_name_probe; `d2k_link_set_https`,
   на датапат (`ctlsrv.c`), поэтому для валидных команд кадры совпадают, а
   для невалидных различается стадия и код ошибки.
 - **Подтверждённые расхождения:**
-  1. `SET_HTTPS`: C-link кодирует любой `u32 ttl` и оставляет обрезку
-     датапату до **7 суток** (`d2k_ctl.h:231`); Rust `encode_set_https`
-     отвергает `ttl > 6 часов`.
+  1. `SET_HTTPS` — **закрыто 2026-11-12.** C-link кодирует любой
+     `u32 ttl`, обрезку до **7 суток** делает датапат
+     (`d2k_ctl.h:231`, `ctlsrv.c:446`); R2O-кодировщик теперь тоже
+     принимает любой `u32`, датапат обрезает до
+     `MAX_HTTPS_TTL_SECONDS = 7 суток`. Тесты кодировщика и датапата.
   2. `send_name_plan`: C не проверяет `shape` (`link.c:591` кодирует
      любой байт); Rust `encode_set_name` отвергает форму вне
      `{1,2,3,4,5,6,7} ∪ {8..13}`. C также не проверяет совместимость

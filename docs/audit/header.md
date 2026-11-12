@@ -102,13 +102,13 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-11)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 614 / P 1325 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 615 / P 1324 /
 N 43 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
 | # | Область | D2O | R2O | Подтверждение |
 |---|---|---|---|---|
-| 1 | `SET_HTTPS` TTL | обрезает до **7 суток** (`d2k_ctl.h:231`, `ctlsrv.c:446`) | отвергает `> 6 часов` (`control.rs:64,1070,1781`) | `deep-detect-plan.md`, `deep-datapath-core.md` |
+| 1 | `SET_HTTPS` TTL | обрезает до **7 суток** (`d2k_ctl.h:231`, `ctlsrv.c:446`) | **закрыто 2026-11-12:** датапат обрезает до 7 суток, кодировщик принимает любой `u32`; тесты `encodes_the_exact_https_name_and_ttl_for_the_datapath`, `set_https_command_accepts_an_exact_name_with_a_bounded_ttl` | `core-state.md`, `datapath-plan.md` |
 | 2 | `ARM_SHAPE` | принимает transport 6 и 17 (`ctlsrv.c:329`) | только 6 (`control.rs:2002`) | `deep-datapath-core.md` |
 | 3 | `wire_udp` IPv4 | `POISON_IPID_ZERO` разрешён, ID=0 (`wire_udp.c:75,136`); TOS из пакета | любой poison отвергнут (`wire.rs:213`), TOS иной | C/Rust harness 4 poison-кейса |
 | 4 | raw UDP/TTL | `IP_HDRINCL`+`IP_NODEFRAG`+TTL get/set/restore, `qp_recv_ttl` | `IP_NODEFRAG` отсутствует, TTL не принимается; датапат raw без controller API | `deep-core-net.md` |

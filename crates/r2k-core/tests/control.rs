@@ -716,7 +716,20 @@ fn encodes_the_exact_https_name_and_ttl_for_the_datapath() {
     assert_eq!(frame.body[0], 12);
     assert_eq!(&frame.body[1..13], b"Example.test");
     assert_eq!(&frame.body[13..], &3600_u32.to_be_bytes());
-    assert!(encode_set_https("example.test", 21_601).is_err());
+    // C-кодировщик `d2k_link_set_https` не ограничивает TTL: обрезку
+    // до семи суток делает датапат. Проверяем, что срок доезжает как есть.
+    let frame = read_frame(&mut Cursor::new(
+        encode_set_https("example.test", 21_601).unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(frame.kind, COMMAND_SET_HTTPS);
+    assert_eq!(&frame.body[13..], &21_601_u32.to_be_bytes());
+    let frame = read_frame(&mut Cursor::new(
+        encode_set_https("example.test", u32::MAX).unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(frame.kind, COMMAND_SET_HTTPS);
+    assert_eq!(&frame.body[13..], &u32::MAX.to_be_bytes());
     assert!(encode_set_https("bad host.test", 1).is_err());
 }
 

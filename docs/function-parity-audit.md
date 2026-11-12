@@ -108,7 +108,7 @@ P означает неполное доказательство ветвей, N
 
 | # | Область | D2O | R2O | Подтверждение |
 |---|---|---|---|---|
-| 1 | `SET_HTTPS` TTL | обрезает до **7 суток** (`d2k_ctl.h:231`, `ctlsrv.c:446`) | отвергает `> 6 часов` (`control.rs:64,1070,1781`) | `deep-detect-plan.md`, `deep-datapath-core.md` |
+| 1 | `SET_HTTPS` TTL | обрезает до **7 суток** (`d2k_ctl.h:231`, `ctlsrv.c:446`) | **закрыто 2026-11-12:** датапат обрезает до 7 суток, кодировщик принимает любой `u32`; тесты `encodes_the_exact_https_name_and_ttl_for_the_datapath`, `set_https_command_accepts_an_exact_name_with_a_bounded_ttl` | `core-state.md`, `datapath-plan.md` |
 | 2 | `ARM_SHAPE` | принимает transport 6 и 17 (`ctlsrv.c:329`) | только 6 (`control.rs:2002`) | `deep-datapath-core.md` |
 | 3 | `wire_udp` IPv4 | `POISON_IPID_ZERO` разрешён, ID=0 (`wire_udp.c:75,136`); TOS из пакета | любой poison отвергнут (`wire.rs:213`), TOS иной | C/Rust harness 4 poison-кейса |
 | 4 | raw UDP/TTL | `IP_HDRINCL`+`IP_NODEFRAG`+TTL get/set/restore, `qp_recv_ttl` | `IP_NODEFRAG` отсутствует, TTL не принимается; датапат raw без controller API | `deep-core-net.md` |
@@ -227,11 +227,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 191 | 344 | 13 | 0 |
-| core-state | 692 | 152 | 536 | 4 | 0 |
+| core-state | 692 | 153 | 535 | 4 | 0 |
 | datapath-core | 400 | 122 | 267 | 11 | 0 |
 | datapath-plan | 183 | 102 | 76 | 5 | 0 |
 | detect | 159 | 47 | 102 | 10 | 0 |
-| **Итого** | **1982** | **614** | **1325** | **43** | **0** |
+| **Итого** | **1982** | **615** | **1324** | **43** | **0** |
 
 
 ---
@@ -2144,7 +2144,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_link_set_name_probe_trial` | 659–668 | 10 | SET_NAME_PROBE с trial_id: требует `sport_be != 0` | control::encode_set_name_probe | **P** | C проверяет только ненулевой порт; Rust дополнительно требует `valid_name_probe_plan_records(shape, plan)` и family 4/6, trial не проверяет. Для валидного плана кадр совпадает; набор отказов шире. |
 | `area_context_valid` | 670–675 | 6 | допустимая комбинация transport/shape/family для области | control::valid_domain_area_context | **P*** | static-хелпер; формула сверена ниже (P). |
 | `d2k_link_set_suffix_family` | 677–684 | 8 | SET_SUFFIX с планом | control::encode_set_suffix | **P** | **Подтверждённое расхождение:** C `send_name_plan(..., SET_SUFFIX)` проверяет только имя/family/transport/hex; Rust `encode_set_suffix` дополнительно проверяет shape (1/2/3/6 или 8–13), family и **`valid_domain_plan_records`** (transport/proto плана). C кодирует несовместимый план, Rust отвергает. |
-| `d2k_link_set_https` | 686–705 | 20 | fd>=0, name 1..253; ttl любой u32 BE; frame len/name/ttl | `control.rs:1777-1790 encode_set_https` | **P** | **Подтверждённое расхождение:** C-link не ограничивает `ttl_s`; обрезку до `D2K_HTTPS_TTL_MAX_S=7 суток` делает датапат (`ctlsrv.c:446`). Rust `encode_set_https` отвергает `ttl > MAX_HTTPS_TTL_SECONDS=6 часов` уже на кодировании. Для ttl≤6ч кадр совпадает; unit `encodes_the_exact_https_name_and_ttl`. |
+| `d2k_link_set_https` | 686–705 | 20 | fd>=0, name 1..253; ttl любой u32 BE; frame len/name/ttl | `control.rs:1777-1792 encode_set_https` | **E** | **Расхождение закрыто 2026-11-12:** `encode_set_https` принимает любой `u32` и кодирует его как есть, как C-link; обрезку до `MAX_HTTPS_TTL_SECONDS = 7 суток` (`D2K_HTTPS_TTL_MAX_S`) выполняет датапат. Тесты: `encodes_the_exact_https_name_and_ttl_for_the_datapath` (включая `21_601` и `u32::MAX`) и `set_https_command_accepts_an_exact_name_with_a_bounded_ttl`. |
 | `d2k_link_set_stall_budgets` | 707–729 | 23 | SET_STALL_BUDGETS список бюджетов | control::encode_set_tcp_stall_budgets | **P** | unit бюджеты tcp/reset; C/Rust diff нет |
 | `send_area_key` | 731–752 | 22 | общий кодировщик domain-area команд (name/key/area_id) | control::encode_domain_area_key | **P*** | static-хелпер |
 | `d2k_link_del_suffix_family` | 754–757 | 4 | DEL_SUFFIX | control::encode_delete_suffix | **P** | кодировщик есть; C/Rust differential нет |
@@ -2765,9 +2765,11 @@ addr/addr_probe/arm_shape/del_name/del_name_probe; `d2k_link_set_https`,
   на датапат (`ctlsrv.c`), поэтому для валидных команд кадры совпадают, а
   для невалидных различается стадия и код ошибки.
 - **Подтверждённые расхождения:**
-  1. `SET_HTTPS`: C-link кодирует любой `u32 ttl` и оставляет обрезку
-     датапату до **7 суток** (`d2k_ctl.h:231`); Rust `encode_set_https`
-     отвергает `ttl > 6 часов`.
+  1. `SET_HTTPS` — **закрыто 2026-11-12.** C-link кодирует любой
+     `u32 ttl`, обрезку до **7 суток** делает датапат
+     (`d2k_ctl.h:231`, `ctlsrv.c:446`); R2O-кодировщик теперь тоже
+     принимает любой `u32`, датапат обрезает до
+     `MAX_HTTPS_TTL_SECONDS = 7 суток`. Тесты кодировщика и датапата.
   2. `send_name_plan`: C не проверяет `shape` (`link.c:591` кодирует
      любой байт); Rust `encode_set_name` отвергает форму вне
      `{1,2,3,4,5,6,7} ∪ {8..13}`. C также не проверяет совместимость
@@ -5107,7 +5109,7 @@ R2O-аналог — `crates/r2o-datapath/src/control.rs` (`ControlServer`), п�
 | canonical_address | 152-157 | 6 | static: family 4 требует нулевой хвост 16-байтного адреса | `control.rs:1612` `addr_plan_key` | E | `удаление_адреса_разделяет_формы_и_удаляет_одну` (control.rs:2793): `body[5]=1` даёт `ACK_BAD_ARGS`. |
 | addr_shape_valid | 163-167 | 5 | допустимые формы адресной привязки (1,2,3,5,6) | `control.rs:1628` `valid_addr_shape`, `:1635` `addr_plan_matches_shape` | P | Валидные формы покрыты тестами адресов; отказа для недопустимой формы (0/4/7) в тестах не найдено. |
 | read_probe_flow | 169-187 | 19 | static: разобрать flow адресного опыта, отвергнуть неканонический IPv4 | `control.rs:1695` `r2o_udp_addr_probe_flow_key` + `r2k-core/control.rs:1701` `valid_udp_addr_probe_flow` | **P** | **Расхождение:** C допускает `src_port=0` — голосовой опыт «любой клиентский порт» (`ctlsrv.c:302-304`), и не требует ненулевых адресов; Rust `valid_udp_addr_probe_flow` требует оба порта ≠0 и ненулевые адреса. R2O вынес голос в отдельную `SET_VOICE_ADDR_PROBE` (0x0095), которой в C нет: C-команды заканчиваются на 0x0093. Тестов SET/DEL/FIND адресного опыта в дереве нет. |
-| d2k_ctlsrv_command | 189-509 | 321 | диспетчер команд, разбор тел, ACK, установка в таблицу | `control.rs:260` `NamePlans::handle`; `main.rs:68` `handle_control_command` (stall budgets); `control.rs:1988` `arm_client_shape` | **P** | Покрыты SET_NAME/BOUND/PROBE/ADDR/SUFFIX/BYPASS/DEL_*/HTTPS/ARM_SHAPE/STALL_BUDGETS (control.rs:2633-3896). **Подтверждённые расхождения:** (1) `SET_HTTPS`: C обрезает TTL до **7 суток** (`d2k_ctl.h:231`, `ctlsrv.c:446`), R2O отвергает `> 6 часов` (`control.rs:64,1070,1781`); (2) `ARM_SHAPE`: C принимает transport 6/17 (`ctlsrv.c:341`), R2O — только 6 (`control.rs:2002`); (3) `SET_ADDR_PROBE`: C допускает `src_port=0` для голоса (`ctlsrv.c:302-304`), R2O generic-проба требует оба порта ≠0, а голос вынесен в `SET_VOICE_ADDR_PROBE` 0x0095, отсутствующую в C; (4) `DEL_NAME_PROBE`: C не проверяет shape (`ctlsrv.c:422-437`), R2O проверяет; (5) адресные опыты не тестированы; (6) `SET_NAME`/`SET_SUFFIX`: C не проверяет `shape` (передаёт `b[1+len]` в plantab), Rust `encode_set_name`/`encode_set_suffix` отвергает неизвестные формы; (7) `DEL_NAME`: C принимает любую пару `transport` (6/17) + `shape != ANY`, Rust `encode_delete_name` — только 6 с 1/2/4/6/7/8..13 или 17 с 3/5. C `DEL_NAME_BOUND`/`DEL_ADDR_PROBE` идемпотентны и всегда ACK OK — R2O так же. |
+| d2k_ctlsrv_command | 189-509 | 321 | диспетчер команд, разбор тел, ACK, установка в таблицу | `control.rs:260` `NamePlans::handle`; `main.rs:68` `handle_control_command` (stall budgets); `control.rs:1988` `arm_client_shape` | **P** | Покрыты SET_NAME/BOUND/PROBE/ADDR/SUFFIX/BYPASS/DEL_*/HTTPS/ARM_SHAPE/STALL_BUDGETS (control.rs:2633-3896). **Подтверждённые расхождения:** (1) ~~`SET_HTTPS` TTL~~ — **закрыто 2026-11-12**: R2O обрезает TTL до **7 суток** (`MAX_HTTPS_TTL_SECONDS`), а кодировщик принимает любой `u32`; (2) `ARM_SHAPE`: C принимает transport 6/17 (`ctlsrv.c:341`), R2O — только 6 (`control.rs:2002`); (3) `SET_ADDR_PROBE`: C допускает `src_port=0` для голоса (`ctlsrv.c:302-304`), R2O generic-проба требует оба порта ≠0, а голос вынесен в `SET_VOICE_ADDR_PROBE` 0x0095, отсутствующую в C; (4) `DEL_NAME_PROBE`: C не проверяет shape (`ctlsrv.c:422-437`), R2O проверяет; (5) адресные опыты не тестированы; (6) `SET_NAME`/`SET_SUFFIX`: C не проверяет `shape` (передаёт `b[1+len]` в plantab), Rust `encode_set_name`/`encode_set_suffix` отвергает неизвестные формы; (7) `DEL_NAME`: C принимает любую пару `transport` (6/17) + `shape != ANY`, Rust `encode_delete_name` — только 6 с 1/2/4/6/7/8..13 или 17 с 3/5. C `DEL_NAME_BOUND`/`DEL_ADDR_PROBE` идемпотентны и всегда ACK OK — R2O так же. |
 | d2k_ctlsrv_pump | 511-694 | 184 | выгрузить новые записи журнала в события с раскладкой по типам | `main.rs:2728` `send_journal_updates`, `:2709` `send_journal_snapshot`; `flow_journal.rs:202` `to_event_frame` | **P** | C: `PLAN_APPLIED` не отдаётся вовсе (`ctlsrv.c:566-568`), `PLAN_DONE→APPLIED`, `REFUSED/UNSENT/DAMAGED→REFUSED`, `SHAPE→CLIENT_TCP+SHAPE`, `HELLO/SUSPECT/EXCHANGE` — своими типами. R2O `send_journal_updates` шлёт каждую запись как `EVENT_R2O_JOURNAL_ENTRY`, а dedicated-события (`EVENT_APPLIED/REFUSED/CLIENT_SHAPE/HELLO`) идут отдельными путями; контроллер декодирует journal entry только для печати (`main.rs:7148,17948`), доказательства — через dedicated. `PlanApplied` не становится `EVENT_APPLIED` ни там, ни там. Пробел v22: `EVENT_LEGACY_CLIENT_TCP` шлёт пустые TCP-опции (`r2k-core/control.rs:1212-1215`), C — реальные. |
 | d2k_ctlsrv_http80_event | 697-731 | 35 | событие HTTP-портала/ответа с измерениями | `control.rs:3136` `send_http_portal_event`, `:3148` `send_http_response_event`; `r2k-core/control.rs:852` `HttpResponseEvent::event_body` | P | `decodes_r2o_http_response_context_and_measurements` (tests/control.rs:977), `control_decoder_accepts_http_portal_response_events` (tests/capture_shape.rs:150). Отличие: R2O кодирует `code 1..4` и всегда несёт хвост status/body/request_no; C для портала без ответа хвост не шлёт. |
 
@@ -5666,11 +5668,13 @@ Rtnetlink: дампы правил, одиночный поиск маршрут
   `valid_udp_addr_probe_flow` требует оба порта ≠0 и ненулевые адреса.
   Это подтверждённое расхождение (см. строку).
 - **`d2k_ctlsrv_command` (189–509):** 13 команд. Сверены тела, точные
-  длины, ACK-коды, идемпотентные DEL. Расхождения: SET_HTTPS 7 суток
-  vs 6 часов; ARM_SHAPE 6/17 vs 6; SET_ADDR_PROBE `src_port=0` vs
-  требование ≠0 + отдельная 0x0095; DEL_NAME_PROBE shape не
-  проверяется в C. Остальные ветви (SET_NAME/BOUND/PROBE/ADDR,
-  SUFFIX/BYPASS, DEL_*, STALL_BUDGETS) совпадают по полям и ACK.
+  длины, ACK-коды, идемпотентные DEL. Расхождения: ~~SET_HTTPS 7 суток
+  vs 6 часов~~ — **закрыто 2026-11-12** (датапат обрезает до 7 суток,
+  кодировщик принимает любой `u32`); ARM_SHAPE 6/17 vs 6;
+  SET_ADDR_PROBE `src_port=0` vs требование ≠0 + отдельная 0x0095;
+  DEL_NAME_PROBE shape не проверяется в C. Остальные ветви
+  (SET_NAME/BOUND/PROBE/ADDR, SUFFIX/BYPASS, DEL_*, STALL_BUDGETS)
+  совпадают по полям и ACK.
 - **`d2k_ctlsrv_pump` (511–694):** C раскладывает journal kind в
   события; `PLAN_APPLIED` не отдаёт, `PLAN_DONE→APPLIED`,
   `REFUSED/UNSENT/DAMAGED→REFUSED`, `SHAPE→CLIENT_TCP+SHAPE`,
@@ -5871,8 +5875,9 @@ Rtnetlink: дампы правил, одиночный поиск маршрут
 7. **Legacy-удаления «все формы» отсутствуют**: `del_name`/`del_addr`/`del_*_family`
    удаляют один shape-ключ; по сокету C тоже шлёт форму, но внутренние вызовы C шире.
 8. **Управляющий слой:** нет `listen_fd`/`peer_fd` и счётчика `sent`; disconnect-hook
-   реализован в цикле; `SET_HTTPS` отвергает TTL > 6 часов вместо обрезки до 7 суток;
-   ARM_SHAPE не обслуживает UDP; v22 CLIENT_TCP идёт с пустыми TCP-опциями.
+   реализован в цикле; ~~`SET_HTTPS` отвергает TTL > 6 часов~~ (**закрыто 2026-11-12:**
+   обрезка до 7 суток, кодировщик принимает любой `u32`); ARM_SHAPE не обслуживает UDP;
+   v22 CLIENT_TCP идёт с пустыми TCP-опциями.
 9. **raw:** один сокет на семейство, обязательный mark, нет `IP_NODEFRAG` и ленивого
    fragment/IPv6-сокета; реальная отправка в тестах не выполнялась (нужен root).
 10. **routemark:** нет `describe`, нет `found/truncated` статуса merge и признака изменения

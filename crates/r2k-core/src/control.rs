@@ -61,7 +61,9 @@ pub const MAX_TCP_STALL_BUDGETS: usize = 8;
 pub const VOICE_ADDR_PROBE_LEASE_MAX_MS: u32 = 120_000;
 pub const VOICE_RTP_PROOF_MIN_PACKETS: u8 = 3;
 pub const ADDR_PROBE_LEASE_MAX_MS: u32 = 120_000;
-pub const MAX_HTTPS_TTL_SECONDS: u32 = 6 * 60 * 60;
+/// Потолок срока HTTPS-имени — как `D2K_HTTPS_TTL_MAX_S` (`d2k_ctl.h:231`):
+/// C-датапат не отвергает больший TTL, а обрезает его до семи суток.
+pub const MAX_HTTPS_TTL_SECONDS: u32 = 7 * 24 * 60 * 60;
 pub const ACK_OK: u8 = 0;
 pub const ACK_BAD_PLAN: u8 = 1;
 pub const ACK_NO_ROOM: u8 = 2;
@@ -1778,9 +1780,10 @@ pub fn encode_set_https(name: &str, ttl_seconds: u32) -> Result<Vec<u8>, &'stati
     if !valid_control_dns_name(name) {
         return Err("имя HTTPS должно быть корректным DNS-именем длиной до 253 байт");
     }
-    if ttl_seconds > MAX_HTTPS_TTL_SECONDS {
-        return Err("срок проверки HTTPS превышает шесть часов");
-    }
+    // C-кодировщик `d2k_link_set_https` передаёт любой `u32` как есть:
+    // обрезку до семи суток выполняет датапат (`ctlsrv.c:446`). Поэтому
+    // кодировщик не отвергает больший срок — иначе команда, которую C
+    // принял бы, до датапата не доходит.
     let mut body = Vec::with_capacity(5 + name.len());
     body.push(name.len() as u8);
     body.extend_from_slice(name.as_bytes());
