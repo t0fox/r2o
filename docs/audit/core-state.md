@@ -1351,6 +1351,39 @@ memory_bytes, load с проверкой хвоста, все writer'ы, `d2k_ca
   graceful stop и exit 1 перенесены в `serve_catalog`; полного
   CLI-паритета нет, `--serve` имеет другую форму.
 
+### Построчная таблица `d2kc.c` (28 функций)
+
+| C-функция | строки | R2O-аналог | статус | доказательство / пробел |
+|---|---:|---|---|---|
+| `on_signal` | 111–111 | обработка SIGINT/SIGTERM в `main.rs` | **P*** | C ставит `stop_asked`; Rust использует atomic-флаг/канал. Отдельного differential нет. |
+| `now_ms` | 113–117 | `Instant`/`SystemTime` | **P*** | C `CLOCK_MONOTONIC` в мс; Rust `Instant` для интервалов и wall-clock для логов. |
+| `save_atomic` | 122–125 | `save_atomic` (`catalog.rs`) | **E** | `r2o-catalog-persist-differential.sh`: tmp+fsync+rename, включая конкурентное обновление. |
+| `self_mem` | 136–148 | `diagnostics::process_memory` | **P** | C читает VmRSS/VmHWM/VmData/Threads из `/proc/self/status`; Rust читает те же поля, но набор точек/формат иные. C/Rust differential нет. |
+| `sched_say` | 150–157 | лог-колбэк `main.rs`/`Recorder` | **P*** | C печатает локальное время и `flush`; Rust пишет через журнал/`eprintln`. |
+| `http_search_portal` | 168–174 | `r2o_http_search_https_action` | **P** | C отбирает класс 3 (не UNKNOWN/PROBING/upgrade) и зовёт `d2k_httpsearch_portal`; Rust действие Queue/Suppress/Wait. |
+| `hs_open_port` | 176–208 | `BoundTcpProbe::open` | **P** | C ставит `SO_MARK` только при `g_probe_mark!=0`, bind/getsockname в блокирующем сокете; Rust `unwrap_or(0x2d)`, nonblock+CLOEXEC. |
+| `hs_close_port` | 210–210 | `Drop`/`close` | **P*** | C `close(fd)`; Rust владеет `OwnedFd`. |
+| `hs_hex` | 212–219 | `compile_text`/hex | **P** | C переводит текст плана в hex через `d2k_plan_text_to_hex`; Rust передаёт TLV-байты. Для валидных планов тот же план, стадия/формат различаются. |
+| `hs_set_probe` | 221–233 | `encode_set_name_probe` | **P** | Поля/порядок совпадают, C жёстко `SHAPE_HTTP`; Rust передаёт `wire_shape`. |
+| `hs_del_probe` | 235–244 | `encode_delete_name_probe` | **P** | Тот же кадр DEL_NAME_PROBE; C игнорирует/логирует ошибку, Rust возвращает `Result`. |
+| `hs_set_plan` | 246–257 | `encode_set_name_bound` | **P** | C кодирует bound-план с token; Rust требует shape `SHAPE_HTTP` и ненулевой trial_id (`control.rs:1399-1406`). |
+| `hs_del_plan` | 259–269 | `encode_delete_name_bound` | **P** | **Подтверждённое расхождение:** C проверяет `binding->family == family` и `d2k_binding_known`; Rust `encode_delete_name_bound(host,6,binding)` не сверяет family. |
+| `hs_start` | 271–274 | `http_search` runner | **P** | Тонкая обёртка `d2k_hs_runner_start`; Rust запускает задачу через свой runner/поток. |
+| `hs_say` | 357–357 | лог HTTP-поиска | **P*** | C перенаправляет в `sched_say`; Rust использует общий лог. |
+| `hs_changed` | 277–284 | сохранение HTTP-планов | **P** | C пишет отдельный `http-plans.txt` формата `d2k-http-plans 1`; в Rust grep `http-plans` пуст, кандидаты живут в JSON-каталоге. |
+| `http_portal` | 288–308 | `r2o_http_search_https_action` + `encode_set_https` | **P** | C различает rc 0/1/2 (лог/SET_HTTPS), Rust — Queue/Suppress/Wait; TTL SET_HTTPS после фикса кодируется любым `u32`, датапат обрезает до 7 суток. |
+| `http_push` | 310–315 | `encode_set_https` | **P** | Тот же кадр SET_HTTPS; C логирует ошибку, Rust возвращает `Result`. |
+| `http_save` | 317–322 | `save_cache` | **P** | C `d2k_httpsprobe_save` с wall-clock; Rust сохраняет кэш через свой `save_cache`/JSON. |
+| `http_probe_done` | 324–355 | drain + save | **P** | Обработка результатов до 8, push/save, предупреждение о потерях; **счётчик `d2k_httpsprobe_lost` в Rust отсутствует**, поэтому лог потерь не перенесён. |
+| `poison_cmp` | 365–367 | stable sort/`Reverse` | **P*** | C `qsort` по убыванию successes; Rust сортирует стабильно/через `Reverse`, порядок равных может отличаться. |
+| `hs_measured_poisons` | 368–392 | `measured_http_candidate_keys` | **P** | C берёт до 8 спеков на план и 64 всего, сортирует по successes и передаёт сырой spec; Rust извлекает poison-id, маппит `fake-badsum`/`fake-seqshift`/`fake:{spec}`, дедуплицирует, cap 8. |
+| `usage` | 394–404 | `main.rs` help/serve args | **P** | C поддерживает `--health-file`, `--log`, `--https-cache`, `--measure-mark`; Rust `--serve` позиционный и не имеет части флагов. |
+| `offline_self_check` | 406–411 | `--self-check` | **P** | C проверяет `D2K_CTL_PROTO_VERSION == D2K_RUNTIME_WIRE` и SHA-256("abc"); в `r2o-controller` отдельного `--self-check` нет, SHA-256 покрыт crypto-дифференциалом. |
+| `diagnostic_event` | 415–417 | `Recorder::record` | **P** | Тот же колбэк события; Rust хранит поля в `Recorder`. |
+| `diagnostic_limit` | 418–420 | `Recorder::record_limit` | **P** | Тот же колбэк лимита; формат/счётчики различаются. |
+| `diagnostic_tick` | 421–468 | `Recorder::tick`/`write_report` | **P** | C 1 с/60 с, `report.new`+rename, лимит `D2K_DIAG_REPORT_MAX`; Rust `tick`/`write_report` с tmp+rename. Unit `diagnostic_tick_lifecycle_matches_d2o`; C/Rust differential сравнивает только часть JSON. |
+| `main` | 470–931 | `main.rs` serve loop | **P** | **Совпадает:** загрузка каталога, приветствие PROTO с version/release, `TICK_MS=3000`, `SAVE_EVERY_MS=60000`, `REPORT_EVERY_MS=15 мин`, `LIVE_EVERY_MS=2 с`, 256 событий за круг, обработка HELLO/SUSPECT/EXCHANGE/APPLIED/REFUSED/HTTP, сохранение каталога, health-file, остановка измерителя. **Отличия:** Rust не имеет `--health-file/--log/--https-cache/--measure-mark`, `http-plans.txt` и `d2k_httpsprobe_lost`; структура цикла и набор колбэков иные. Полного C/Rust differential `d2kc` нет. |
+
 ## Углублённая сверка: sched.c (282 функции)
 
 **Прочитано построчно: 282/282 функции, 12 364 строки C (1–12364).** Проверены:
