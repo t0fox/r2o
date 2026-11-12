@@ -1338,8 +1338,26 @@ impl NamePlans {
                 .try_into()
                 .expect("длина срока адресного опыта проверена выше"),
         );
-        if !control::valid_udp_addr_probe_flow(&key)
-            || trial_id.iter().all(|byte| *byte == 0)
+        let source_port = u16::from_be_bytes([key[33], key[34]]);
+        let voice_wildcard = source_port == 0;
+        if voice_wildcard {
+            // C `probe_flow_valid` допускает src_port=0 как голосовой
+            // wildcard (`plans.c:857-874`); R2O хранит такие опыты в
+            // `voice_addr_probes` без клиентского порта.
+            if key[0] != 4
+                || key[37] != 17
+                || !key[5..17].iter().all(|byte| *byte == 0)
+                || !key[21..33].iter().all(|byte| *byte == 0)
+                || key[1..5].iter().all(|byte| *byte == 0)
+                || key[17..21].iter().all(|byte| *byte == 0)
+                || u16::from_be_bytes([key[35], key[36]]) == 0
+            {
+                return (false, control::ACK_BAD_ARGS);
+            }
+        } else if !control::valid_udp_addr_probe_flow(&key) {
+            return (false, control::ACK_BAD_ARGS);
+        }
+        if trial_id.iter().all(|byte| *byte == 0)
             || lease_ms == 0
             || lease_ms > control::ADDR_PROBE_LEASE_MAX_MS
         {
@@ -1349,6 +1367,45 @@ impl NamePlans {
             Ok(plan) => plan,
             Err(_) => return (false, control::ACK_BAD_PLAN),
         };
+        if voice_wildcard {
+            if plan.transport != 17 || plan.proto != PROTO_VOICE {
+                return (false, control::ACK_BAD_PLAN);
+            }
+            let voice_key = VoiceProbeKey {
+                client: Ipv4Addr::new(key[1], key[2], key[3], key[4]),
+                server: Ipv4Addr::new(key[17], key[18], key[19], key[20]),
+                server_port: u16::from_be_bytes([key[35], key[36]]),
+            };
+            let now = Instant::now();
+            self.voice_addr_probes
+                .retain(|_, probe| probe.expires > now);
+            if self
+                .voice_addr_probes
+                .get(&voice_key)
+                .is_some_and(|existing| existing.trial_id != trial_id)
+            {
+                return (false, control::ACK_BAD_ARGS);
+            }
+            if !self.voice_addr_probes.contains_key(&voice_key)
+                && self.voice_addr_probes.len() >= MAX_VOICE_ADDR_PROBES
+            {
+                return (false, control::ACK_NO_ROOM);
+            }
+            if self.voice_addr_probes.try_reserve(1).is_err() {
+                return (false, control::ACK_NO_ROOM);
+            }
+            let generation = self.next_generation();
+            self.voice_addr_probes.insert(
+                voice_key,
+                VoiceProbePlan {
+                    plan,
+                    trial_id,
+                    generation,
+                    expires: now + Duration::from_millis(u64::from(lease_ms)),
+                },
+            );
+            return (true, control::ACK_OK);
+        }
         if !valid_quic_plan(&plan) {
             return (false, control::ACK_BAD_PLAN);
         }
@@ -1390,10 +1447,38 @@ impl NamePlans {
         let body_trial_id: [u8; 16] = body[control::KEY_LEN..]
             .try_into()
             .expect("длина идентификатора адресного опыта проверена выше");
-        if !control::valid_udp_addr_probe_flow(&key)
-            || body_trial_id.iter().all(|byte| *byte == 0)
-            || trial_id != Some(body_trial_id)
-        {
+        if body_trial_id.iter().all(|byte| *byte == 0) || trial_id != Some(body_trial_id) {
+            return (false, control::ACK_BAD_ARGS);
+        }
+        let source_port = u16::from_be_bytes([key[33], key[34]]);
+        if source_port == 0 {
+            // C generic DEL_ADDR_PROBE снимает и голосовой wildcard; при
+            // несовпадении trial запись просто остаётся, ACK — OK.
+            if key[0] != 4
+                || key[37] != 17
+                || !key[5..17].iter().all(|byte| *byte == 0)
+                || !key[21..33].iter().all(|byte| *byte == 0)
+                || key[1..5].iter().all(|byte| *byte == 0)
+                || key[17..21].iter().all(|byte| *byte == 0)
+                || u16::from_be_bytes([key[35], key[36]]) == 0
+            {
+                return (false, control::ACK_BAD_ARGS);
+            }
+            let voice_key = VoiceProbeKey {
+                client: Ipv4Addr::new(key[1], key[2], key[3], key[4]),
+                server: Ipv4Addr::new(key[17], key[18], key[19], key[20]),
+                server_port: u16::from_be_bytes([key[35], key[36]]),
+            };
+            if self
+                .voice_addr_probes
+                .get(&voice_key)
+                .is_some_and(|probe| probe.trial_id == body_trial_id)
+            {
+                self.voice_addr_probes.remove(&voice_key);
+            }
+            return (true, control::ACK_OK);
+        }
+        if !control::valid_udp_addr_probe_flow(&key) {
             return (false, control::ACK_BAD_ARGS);
         }
         if self
@@ -3479,6 +3564,49 @@ mod tests {
         assert!(plans.select(&discord_stun).is_some());
         discord_stun[22..24].copy_from_slice(&3478_u16.to_be_bytes());
         assert!(plans.select(&discord_stun).is_none());
+    }
+
+    #[test]
+    fn generic_addr_probe_accepts_voice_wildcard_like_d2o() {
+        let mut plans = NamePlans::default();
+        let mut key = [0u8; control::KEY_LEN];
+        key[0] = 4;
+        key[1..5].copy_from_slice(&[192, 0, 2, 1]);
+        key[17..21].copy_from_slice(&[198, 51, 100, 2]);
+        key[35..37].copy_from_slice(&3478_u16.to_be_bytes());
+        key[37] = 17;
+        let trial_id = [0x21; 16];
+        let mut plan = plan_header(1, 2);
+        plan.extend_from_slice(&[0x00, 0x01, 0x00, 0x10]);
+        plan.extend_from_slice(&[0x31; 16]);
+        plan.extend_from_slice(&[0x00, 0x02, 0x00, 0x02, 17, r2k_core::plan::PROTO_VOICE]);
+
+        let mut body = key.to_vec();
+        body.extend_from_slice(&trial_id);
+        body.extend_from_slice(&1000_u32.to_be_bytes());
+        body.extend_from_slice(&plan);
+        let ack = plans.handle(&Frame {
+            kind: control::COMMAND_SET_ADDR_PROBE,
+            body,
+        });
+        assert!(ack.ok, "voice wildcard rejected: {}", ack.reason);
+        assert_eq!(plans.voice_addr_probes.len(), 1);
+
+        let request = r2k_core::stun::binding_request([7; 12]);
+        let packet = udp_packet(&request, 3478);
+        assert_eq!(
+            plans.select(&packet).map(|selected| selected.id),
+            Some([0x31; 16])
+        );
+
+        let mut delete = key.to_vec();
+        delete.extend_from_slice(&trial_id);
+        let ack = plans.handle(&Frame {
+            kind: control::COMMAND_DEL_ADDR_PROBE,
+            body: delete,
+        });
+        assert!(ack.ok);
+        assert!(plans.voice_addr_probes.is_empty());
     }
 
     #[test]
