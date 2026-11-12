@@ -274,6 +274,8 @@ P означает неполное доказательство ветвей, N
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-raw-connect-fallback-differential.sh` —
   **PASS**, 18 тестов (raw-connect timeout recovery, control/retry на том же peer,
   отмена на каждой стадии, CLEAR-подтверждение, seeded baseline, transport-ошибки).
+- `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-raw-split-support-differential.sh` —
+  **PASS** (Linux-гейт raw-split без CAP_NET_RAW; `raw_split=1`).
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-diagnostics-differential.sh` —
   **не выполнен**: сборка донорского `test_httpsearch` падает на duplicate
   symbols `d2k_plan_apply`, `d2k_plan_max_emit`, `d2k_actions_cancel`,
