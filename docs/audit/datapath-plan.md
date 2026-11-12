@@ -131,6 +131,8 @@ transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-со�
 
 ## 3. datapath/include/d2k_plans.h — 2 функции
 
+**Прочитано построчно: 2/2 функции, 381 строка C (1–381).**
+
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | d2k_binding_known | 98-102 | 5 | static inline: identity известна (generation, kind, epoch) | `r2k-core/control.rs:315` `BindingContext::is_known` + покомпонентные проверки в `control.rs:1446-1461` | P | `conditional_http_delete_preserves_replacements_and_removes_only_its_binding` (control.rs:3587). Отличие: R2O `is_known` не проверяет `kind`; `kind==1` проверяется отдельно в `delete_name_bound`. |
@@ -526,6 +528,8 @@ Rust ошибается), отсутствие текстового описан
 
 Rtnetlink: дампы правил, одиночный поиск маршрута, подписка на изменения. R2O:
 `R2oRouteMonitor` в `crates/r2o-datapath/src/r2o_route.rs`.
+
+**Прочитано построчно: 8/8 функций, 228 строк C (1–228).**
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
