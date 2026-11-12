@@ -45,6 +45,8 @@ E→P, `d2k_qc_peer_name` E→N, `remember_live_failure` P→N,
 
 Rust-владелец: `crates/r2o-controller/src/hello.rs` (почти построчный порт парсера и сборки ClientHello). Дифференциал: `scripts/test-controller-clienthello-differential.sh` (C-оракул `tests/d2o_tls_parse_differential.c` + `core/hello.c` против `examples/tg_cl12_tls_trace.rs`).
 
+**Прочитано построчно: 19/19 функций, 609 строк C (1–609).**
+
 | C-функция | строки | размер | назначение | R2O-аналог | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `rd16` | 51-53 | 3 | big-endian u16 из буфера | `hello.rs:186 hello_u16` | E | хелпер; владелец `parse_hello` → `hello.rs:213 parse_hello_layout`, дифф `test-controller-clienthello-differential.sh` |
