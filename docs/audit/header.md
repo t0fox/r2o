@@ -232,6 +232,8 @@ P означает неполное доказательство ветвей, N
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-measured-split-differential.sh` —
   **PASS** (measured split, bridge raw-split gate, unplannable-hit fallback,
   scheduler adapter contracts).
+- `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-resource-limit-differential.sh` —
+  **PASS** (CPU-разбор донора, AIMD-пороги/backoff/потеря ресурса/потолок слотов).
 - `R2O_DONOR_ROOT=/mnt/e/d2o-a378w sh scripts/r2o-diagnostics-differential.sh` —
   **не выполнен**: сборка донорского `test_httpsearch` падает на duplicate
   symbols `d2k_plan_apply`, `d2k_plan_max_emit`, `d2k_actions_cancel`,
