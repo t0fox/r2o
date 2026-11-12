@@ -292,21 +292,21 @@
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `json_string` | 41–62 | 22 | JSON-экранирование строки с проверкой UTF-8 | serde_json::to_string | **P*** | static-хелпер; serde_json может иначе экранировать невалидный UTF-8 |
-| `vol_verdict_code` | 64–72 | 9 | код вердикта объёмной лестницы | bin/r2o-fetch.rs:227 match R2oFetchVolumeTxVerdict | **P** | строки unreachable/cut/passed/short совпадают; CLI-differential не проверяет |
-| `usage` | 74–102 | 29 | справка d2kfetch | r2o-fetch print_help | **P** | набор флагов расширен (--quic-budget/--control); текст отличается |
-| `resolve_first` | 104–114 | 11 | первый адрес getaddrinfo AF_UNSPEC/SOCK_STREAM | std::net::ToSocketAddrs | **P** | порядок/семейство может отличаться от getaddrinfo; проверяется только localhost в r2o-fetch-cli-differential.sh |
-| `snapshot_wire` | 117–155 | 39 | ловушка ARM_SHAPE и ожидание D2K_EV_SHAPE с дедлайном | fetch::r2o_fetch_snapshot_wire_len + r2o_fetch_cli/snapshot tests | **P** | Rust-тесты снимка есть; C/Rust differential снимка не найден |
-| `main` | 157–356 | 200 | CLI d2kfetch: name/ip/port/path/wire/snapshot/ladder/quic/tls12/deadline/mark/json/version | r2o-fetch bin + fetch.rs | **P** | известные расхождения: level не выдаёт 5/6, name_ok выводится из TLS, location всегда строка; r2o-fetch-cli-differential.sh сравнивает только DNS-fail и QUIC-refusal |
+| `json_string` | 41–62 | 22 | JSON-строка: `"`/`\\`, control → `\\u%04x`, валидный UTF-8 как есть, иначе `\\u%04x` | serde_json::to_string | **P*** | C сам валидирует UTF-8 (overlong/surrogate/>0x10ffff) и печатает `\u00xx`; Rust строки всегда валидны, serde_json экранирует control иначе (`\u001f` и т.п.). Для ASCII эквивалентно. |
+| `vol_verdict_code` | 64–72 | 9 | `unreachable/cut/passed/short/unknown` | `bin/r2o-fetch.rs:227` match `R2oFetchVolumeTxVerdict` | **P** | Строки совпадают; CLI-differential не проверяет. |
+| `usage` | 74–102 | 29 | флаги `--name/--ip/--port/--path/--wire/--snapshot[=ms]/--ladder/--mark/--quic/--tls12/--deadline/--json/--version` | `r2o-fetch` print_help | **P** | Набор флагов расширен (`--quic-budget`, `--control`); текст/форма справки отличаются. |
+| `resolve_first` | 104–114 | 11 | `getaddrinfo(AF_UNSPEC,SOCK_STREAM)`, первый адрес, `getnameinfo(NI_NUMERICHOST)` | `std::net::ToSocketAddrs` | **P** | C берёт первый результат getaddrinfo (порядок ОС), Rust — первый из `ToSocketAddrs`; семейство/порядок могут отличаться. `r2o-fetch-cli-differential.sh` проверяет только localhost. |
+| `snapshot_wire` | 117–155 | 39 | link open (NULL sock), ARM_SHAPE transport 6, ожидание `D2K_EV_SHAPE` transport 6 до `wait_ms`, `shape_len` | `fetch::r2o_fetch_snapshot_wire_len`, CLI snapshot tests | **P** | C ARM_SHAPE передаёт transport 6; Rust-снимок использует ARM_SHAPE/ожидание SHAPE, но C/Rust differential снимка не заявлен; известное расхождение ARM_SHAPE transport 17 (header, п. 2) сюда не входит (C тоже 6). |
+| `main` | 157–356 | 200 | CLI: name/ip/port/path/wire/snapshot/ladder/quic/tls12/deadline/mark/json/version; atoi/atol без проверки; port 443, deadline 15000, snapshot 60000 | `r2o-fetch` bin + `fetch.rs` | **P** | **Подтверждённые отличия:** C `atoi/atol` молча даёт 0/мусор, Rust парсит строго; C level не выдаёт 5/6, Rust выводит `name_ok` из TLS, `location` всегда строка; `r2o-fetch-cli-differential.sh` сравнивает только DNS-fail и QUIC-refusal. |
 
 ### `core/d2kvoice.c`
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `usage` | 22–37 | 16 | текст справки d2kvoice | main.rs r2o_voice_check_command help text (819) | **P** | флаги те же, текст/формат командной строки отличается; CLI-дифференциала нет |
-| `split_hostport` | 39–48 | 10 | разбор IP:ПОРТ по последнему двоеточию | main.rs r2o_voice_check_command parse (819) | **P*** | static-хелпер; IPv6-литерал в C всё равно отвергается d2k_ip4_parse |
-| `verdict_word` | 50–61 | 12 | русский текст вердикта голосового замера | voice_measure::r2o_format_voice_measurement | **P** | строки совпадают; формат всего вывода не сравнивался |
-| `main` | 63–135 | 73 | CLI d2kvoice: --addr/--control/--conntrack/--wait/--mark/--list/--discovery, печать вердикта, exit 0/1/2 | main.rs r2o_voice_check_command/r2o_voice_list_command (819/843) + voice_measure/voice_targets | **P** | есть unit/voice и Discord differential; известны расхождения: C --wait 0 => default 3000, Rust 0; --voice-list принимает только --conntrack; блок «Приём» может отличаться |
+| `usage` | 22–37 | 16 | флаги `--addr/--control/--conntrack/--wait/--mark/--list/--discovery` | `main.rs` `r2o_voice_check_command` help | **P** | Флаги те же, текст/форма командной строки отличается; CLI-дифференциала нет. |
+| `split_hostport` | 39–48 | 10 | последнее `:`, host<64, port 1..65535 | `main.rs` `r2o_voice_check_command` parse | **P*** | C `strtoul` не проверяет хвост (`1:2x` → порт 2); Rust строгий parse. IPv6-литерал C всё равно отвергает `d2k_ip4_parse`. |
+| `verdict_word` | 50–61 | 12 | русские тексты CLEAR/BLOCKED/NO_UDP/NO_CALL/FLAKY/NO_ORACLE/UNMEASURED | `voice_measure::r2o_format_voice_measurement` | **P** | Строки совпадают; формат всего вывода не сравнивался. |
+| `main` | 63–135 | 73 | CLI: list-only (targets по conntrack), voice_run, печать разговора/вердикта/зондов/предупреждения/приёма, exit 0 для CLEAR иначе 1 | `main.rs` `r2o_voice_check_command`/`r2o_voice_list_command` + `voice_measure`/`voice_targets` | **P** | **Подтверждённые отличия:** C `--wait 0` передаёт 0, `d2k_voice_run` подставляет default 3000; Rust `0` остаётся 0. C `--list` принимает любые флаги, Rust `--voice-list` — только `--conntrack`. C `atoi/strtoul` без проверки; Rust строгий parse. Блок «Приём» зависит от `discovery_verified`/BLOCKED. |
 
 ### `core/diagnostics.c`
 
