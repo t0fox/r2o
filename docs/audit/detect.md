@@ -108,7 +108,7 @@ base.valid/base_blocked) и neutral-ack.
 правиле RST, текст причины при отказе сырого слоя и счёт probes ответного направления отличаются,
 `note_gap_loss` отсутствует вовсе.
 
-**Прочитано построчно: 36/36 функций, 1494 строки C (1–1494).** Сверены: имена вердиктов/ответа,
+**Прочитано построчно: 36/36 функций, 1494 строки C (1–1494).** Сверено с `classify.rs:28-58` (`split_offsets`), `:60-130` (`Trigger`), `:543-558` (`trigger_accepts`), `:1076-1240` (`measure`/run), `:1298+` (`run_with_backend_progress`), `:1939-1941` (`strategy_for`), `raw_probe.rs:120-186` (`raw_selftest`), `:189-345` (`sweep_poisons`), `:602-760` (`select_bridge_decoy`/`raw_offer_timestamps`/selftest), `:840-1099` (`property_probes`/`compose_from_props`), `response.rs:254-310,776-889,898,953-963` (`connect`/`probe_trigger`/`neutral_ack`/`unacked_bytes`). Сверены: имена вердиктов/ответа,
 часы/сон/отмена, accept-критерии, опции и skip/only, трасса/notes, split_offsets, dial с SO_MARK и
 require_mark, once_probe (raw-split и сокетный путь), TIOCOUTQ/SO_NWRITE, neutral-ack, measure с
 seed и transport-retry, decoy, selftest-кэш `(family, offer_ts)`/TTL/серия ошибок, raw_doubted/
