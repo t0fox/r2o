@@ -12,6 +12,8 @@
 
 ## 2. `core/verify.c` (74 функции): N и ключевые P
 
+**Прочитано построчно: N-функция `d2k_verify_tcp_timestamps_get` и ключевые P из таблицы (фактические строки); полный построчный реестр 74 функций — в `core-net.md`, секция `verify.c`, где отмечены все строки.**
+
 | C-функция | C-строки | текущий | проверенный | Rust (file:line/символ) | доказательство или конкретный пробел |
 |---|---|---|---|---|---|
 | `d2k_ech_resolve` | 90–184 | P | P | `r2o-controller/src/ech.rs:158 resolve_ech_config`, `:182 r2o_ech_query_resolver`, `:269 r2o_ech_parse_https_reply`, `:364 r2o_ech_select_config`, `:482 r2o_ech_dns_name` | UDP-запрос HTTPS RR (type 65), txid, QDCOUNT=1, RCODE, 64 ответа, SvcPriority/port/ECHConfig, сверка owner/цели и `public_name` портированы; unit `ech.rs:613/620/632/652/658` (тест есть, не перезапускался). **Пробелы:** C при отсутствии/нечитаемом `/etc/resolv.conf` откатывается на `127.0.0.1` (`verify.c:116–125`), Rust возвращает ошибку (`ech.rs:164–180`); C не снимает точку в конце имени, Rust снимает (`:239`); C ограничивает имя 253 байтами в декодере (`verify.c:78`), Rust — только 127 меток (`ech.rs:526`), т.е. принимает имена длиннее; C допускает compression-указатели вперёд с бюджетом 16 прыжков, Rust требует строго назад (`ech.rs:502`). Живого C/Rust-дифференциала резолвера нет. |
@@ -64,6 +66,8 @@
 
 ## 3. `core/httpsearch.c` (66 функций): N, ключевые P и лимиты
 
+**Прочитано построчно: N-функции `remember_live_failure`, `failed_live`, `d2k_httpsearch_test_add_failures`, `d2k_httpsearch_test_add_records` и ключевые P/лимиты из таблицы (фактические строки); полный построчный реестр 66 функций — в `core-net.md`, секция `httpsearch.c`.**
+
 | C-функция | C-строки | текущий | проверенный | Rust (file:line/символ) | доказательство или конкретный пробел |
 |---|---|---|---|---|---|
 | `d2k_hs_judge` | 61–95 | E | E | `http_search.rs:850 judge` | Garbage/portal/Decoy(400/421/`disk.rzd.ru`)/Early/Real совпадают; C-фикстура `d2o_http_judge_differential.c` + `fixtures/d2o_http_challenge_response.bin` и Rust unit-тесты есть, не перезапускались. Ограничение: дифференциал — один fixture с `host=NULL`, ветви Decoy/Early сверяются только Rust unit-тестами, не C-оракулом. |
@@ -87,6 +91,8 @@
 | лимиты записей/живых отказов | 482–544, 687–708 | P/N | P/N | `main.rs:4437–4453`, `:4480`, `:4506`; `httpsearch.h` | Записи: `D2K_HS_RECORD_MAX_BYTES=256 КиБ`, `QUEUE=32 КиБ`, item 1480/273 — совпадают. Живые отказы: `FAILURE_MAX=64 КиБ`, `FAILURE_RECORD=8 КиБ` объявлены, но массивов/счётчиков нет — лимиты не исполняются (см. N выше). |
 
 ## 4. `core/quicprobe.c` (56 функций): N и ключевые P
+
+**Прочитано построчно: N-функции `qp_recv_ttl`, `d2k_quic_props_findings` и ключевые P из таблицы (фактические строки); полный построчный реестр 56 функций — в `core-net.md`, секция `quicprobe.c`.**
 
 | C-функция | C-строки | текущий | проверенный | Rust (file:line/символ) | доказательство или конкретный пробел |
 |---|---|---|---|---|---|
