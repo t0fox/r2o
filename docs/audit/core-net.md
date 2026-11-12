@@ -1022,6 +1022,8 @@ Inline-решения QUIC-зонда: суд этапа данных, stall-д�
 
 ## Углублённая сверка: udpplan.c и udpruntime.c (20 функций)
 
+**Прочитано построчно: 20/20 функций, 456 строк C (`udpplan.c` 1–266, `udpruntime.c` 1–190).** Сверены: сборщики quicsplit/ipfrag/udplen/fake/ttl/copies/voice/«нет воздействия», проверки arm/props, `d2k_udp_plan_build` (TLV → apply → >1 payload/IPID_ZERO/фрагменты/ORIG_PASS), raw-sink `AF_INET/SOCK_RAW/IPPROTO_RAW` + `IP_HDRINCL`/`IP_NODEFRAG`/`SO_MARK`, IPv6-frag sender, TTL/hoplimit get/set/restore, `ECONNREFUSED → -2`.
+
 - **Текстовые сборщики `udpplan.c`:** `append_fmt`, `emit_header_proto`,
   `append_hex`, `quic_arm_found`, `quic_split_plan_text`, `quic_plan_text`,
   `d2k_quic_arm_plan`, `d2k_quic_compose_plan`, `d2k_quic_delay_plan`,
