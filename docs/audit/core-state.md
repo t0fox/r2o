@@ -489,28 +489,28 @@
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `fe_copy` | 31–31 | 1 | `memcpy` 8 слов элемента поля | ring (внутренняя арифметика P-256) | **P*** | static-хелпер; собственной реализации в R2O нет, арифметику выполняет ring через rustls (`r2o_tls.rs:92-103`). |
-| `ge` | 34–39 | 6 | `a>=b` для 256-битных слов, сравнение с 7-го слова; равенство → 1 | ring | **P*** | static-хелпер; используется `fe_add`/`fe_mul`/`scalar_ok`. В R2O заменён внутренним сравнением ring. |
-| `is_zero` | 41–45 | 5 | OR всех 8 слов == 0 | ring | **P*** | static-хелпер; используется `pt_double`/`pt_add`/`scalar_ok`. |
-| `sub_raw` | 48–56 | 9 | 256-битное вычитание с заимствованием `borrow=(d>>63)&1` | ring | **P*** | static-хелпер; C собирает `d=a[i]-b[i]-borrow` в `uint64`. |
-| `add_raw` | 59–67 | 9 | 256-битное сложение с переносом `carry=s>>32` | ring | **P*** | static-хелпер. |
-| `fe_add` | 69–74 | 6 | `a+b mod P`: при переносе или `t>=P` вычесть P | ring | **P*** | static-хелпер; P-256 модуль. |
-| `fe_sub` | 76–80 | 5 | `a-b mod P`: при заёме добавить P | ring | **P*** | static-хелпер. |
-| `fe_mul` | 84–113 | 30 | Montgomery CIOS, `t[10]`, `m=t[0]` (так как `-p^-1 mod 2^32=1`), 8 раундов, финальное вычитание P | ring | **P*** | static-хелпер; C не использует `__int128` и рассчитан на ARM/MIPS32. ring применяет свою реализацию (вероятно, ассемблер/constant-time); побайтовых C/Rust-векторов нет. |
-| `fe_sqr` | 115–115 | 1 | `fe_mul(a,a)` | ring | **P*** | static-хелпер. |
-| `to_mont` | 124–124 | 1 | `a·R² mod P` | ring | **P*** | static-хелпер; `R2` — константа `2^512 mod P`. |
-| `from_mont` | 125–128 | 4 | `a·1` в Montgomery-домене | ring | **P*** | static-хелпер. |
-| `fe_inv` | 131–141 | 11 | `a^(P-2)` по малой теореме Ферма, MSB-first square/multiply, старт `ONE_M` | ring | **P*** | static-хелпер; C-ветвь по битам экспоненты. |
-| `fe_from_be` | 143–148 | 6 | 8 слов из big-endian байт `b+28-4i` | ring | **P*** | static-хелпер; разбор 32-байтного скаляра/координаты. |
-| `fe_to_be` | 150–156 | 7 | обратная сериализация 8 слов в big-endian | ring | **P*** | static-хелпер. |
-| `pt_double` | 161–190 | 30 | якобиево удвоение, `a=-3`; `inf` при `p.inf`/`y==0`; формулы δ,γ,β,α | ring | **P*** | static-хелпер; C считает в Montgomery-домене. |
-| `pt_add` | 192–232 | 41 | якобиево сложение; `p.inf/q.inf`; при `H==0`: `R==0 → double`, иначе `inf`; формулы I,J,V | ring | **P*** | static-хелпер. |
-| `pt_mul` | 235–246 | 12 | MSB-first double-and-add по 32 байтам, **не constant-time** | ring | **P*** | static-хелпер; C прямо документирует «не постоянного времени» (ключ одноразовый). ring, вероятно, constant-time; выходные точки должны совпадать, но C/Rust-векторов нет. |
-| `pt_affine` | 249–260 | 12 | `z^-1`, `x/z²`, `y/z³`, `from_mont`; `-1` при бесконечности | ring | **P*** | static-хелпер. |
-| `scalar_ok` | 262–266 | 5 | `0<k<N` | ring (валидация внутри) | **P*** | static-хелпер; C проверяет `!is_zero && !ge(s,N)`. ring валидирует скаляр внутри генерации/ECDH, отдельной функции нет. |
-| `d2k_p256_public` | 268–280 | 13 | `scalar_ok`, `pt_mul(G)`, аффинные координаты, `0x04`+X+Y | ring (через rustls, без экспорта pub) | **P** | **Production-путь:** C `tls12.c:642-660`; R2O `r2o_tls.rs:92-96` включает `SECP256R1` в TLS12 и TLS13. Отдельного API «публичный ключ из приватного» в R2O нет — ring генерирует эфемерную пару внутри TLS; C/Rust-векторов публичного ключа нет. |
-| `d2k_p256_keypair` | 282–289 | 8 | 32 случайных байта, `scalar_ok`, до 16 попыток | `ring::agreement::EphemeralPrivateKey` через rustls | **P** | **Production:** `tls12.c:642-660` (ECDHE TLS 1.2). C явно повторяет генерацию до 16 раз при `k==0 || k>=N`; ring генерирует ключ внутри, его retry/отбраковка не сравнивались. C-векторов keypair нет. |
-| `d2k_p256_ecdh` | 291–316 | 26 | `scalar_ok`, `peer[0]==0x04`, `x,y<P`, проверка `y²=x³-3x+B`, `pt_mul`, вывод X | `ring::agreement` (P256) через rustls | **P** | **Production:** `tls12.c:655`. C сам проверяет точку на кривой; ring также отвергает невалидную точку, но C/Rust-векторы ECDH и поведение при точке не на кривой не сравнивались. |
+| `fe_copy` | 31-31 | 1 | `memcpy` 8 слов элемента поля | ring (внутренняя арифметика P-256) | **P*** | C `memcpy(r,a,sizeof(fe))`; Rust собственной функции не имеет — арифметику P-256 выполняет ring через rustls (`r2o_tls.rs:92-103`). |
+| `ge` | 34-39 | 6 | `a>=b` для 256-битных слов, сравнение с 7-го слова; равенство → 1 | ring | **P*** | C идёт `i=7..0`, при первом отличии возвращает `a[i]>b[i]`, при полном равенстве — 1. Используется `fe_add`/`fe_mul`/`scalar_ok`. В R2O заменён сравнением ring; C-векторов нет. |
+| `is_zero` | 41-45 | 5 | OR всех 8 слов == 0 | ring | **P*** | C `acc|=a[i]`, `acc==0`. Используется `pt_double`/`pt_add`/`scalar_ok`/`pt_affine`. В R2O — внутренняя проверка ring. |
+| `sub_raw` | 48-56 | 9 | 256-битное вычитание с заимствованием | ring | **P*** | C `d=a[i]-b[i]-borrow` в `uint64`, `r[i]=(uint32)d`, `borrow=(d>>63)&1`, возврат borrow. В R2O — арифметика ring; отдельной функции/векторов нет. |
+| `add_raw` | 59-67 | 9 | 256-битное сложение с переносом | ring | **P*** | C `s=a[i]+b[i]+carry`, `r[i]=(uint32)s`, `carry=s>>32`, возврат carry. R2O — ring; C-вейкторов нет. |
+| `fe_add` | 69-74 | 6 | `a+b mod P`: при переносе или `t>=P` вычесть P | ring | **P*** | C `add_raw`, затем `c || ge(t,P)` → `sub_raw(t,t,P)`; копия. R2O — ring; модуль P-256 тот же. |
+| `fe_sub` | 76-80 | 5 | `a-b mod P`: при заёме добавить P | ring | **P*** | C `sub_raw`, при borrow `add_raw(t,t,P)`; копия. R2O — ring. |
+| `fe_mul` | 84-113 | 30 | Montgomery CIOS: `t[10]`, `m=t[0]` (так как `-p^-1 mod 2^32=1`), 8 раундов, финальное вычитание P | ring | **P*** | **Ветви сверены:** внешний `i=0..7`; внутренний `j=0..7` `s=t[j]+a[j]*b[i]+c`, `t[j]=(u32)s`, `c=s>>32`; перенос в `t[8]/t[9]`; `m=t[0]`; второй проход `u=t[j]+m*P[j]+c`, сдвиг `t[j-1]`, `c=u>>32`; финальный перенос и `if(t[8]||ge(res,P)) sub_raw`. C без `__int128`, рассчитан на ARM/MIPS32. R2O — ring (своя реализация, вероятно constant-time); побайтовых C/Rust-векторов нет. |
+| `fe_sqr` | 115-115 | 1 | `fe_mul(a,a)` | ring | **P*** | C-обёртка; R2O — ring. |
+| `to_mont` | 124-124 | 1 | `a·R² mod P` | ring | **P*** | C `fe_mul(r,a,R2)`, `R2=2^512 mod P` — константа (`:119-120`), а не ленивый расчёт. R2O — ring. |
+| `from_mont` | 125-128 | 4 | `a·1` в Montgomery-домене | ring | **P*** | C `one={1,0..}`, `fe_mul(r,a,one)`. R2O — ring. |
+| `fe_inv` | 131-141 | 11 | `a^(P-2)` по малой теореме Ферма, MSB-first square/multiply, старт `ONE_M` | ring | **P*** | C `e=P-2` (`sub_raw(e,P,2)`), `acc=ONE_M`, цикл `i=255..0`: `fe_sqr`, при бите `fe_mul(acc,acc,a)`. R2O — ring. |
+| `fe_from_be` | 143-148 | 6 | 8 слов из big-endian байт `b+28-4i` | ring | **P*** | C собирает `q[0]<<24|q[1]<<16|q[2]<<8|q[3]` для i=0..7 (младшее слово — последние 4 байта). R2O — ring/rustls разбирает скаляр/координаты. |
+| `fe_to_be` | 150-156 | 7 | обратная сериализация 8 слов в big-endian | ring | **P*** | C пишет `a[i]` BE в `b+28-4i`. R2O — ring/rustls сериализует точку. |
+| `pt_double` | 161-190 | 30 | якобиево удвоение, `a=-3`; `inf` при `p.inf`/`y==0`; δ,γ,β,α | ring | **P*** | **Ветви сверены:** `p->inf || is_zero(y)` → `r->inf=1`; `δ=z²`, `γ=y²`, `β=xγ`, `t1=x-δ`, `t2=x+δ`, `α=t1*t2`, `α=3α`; `x3=α²-8β`; `z3=(y+z)²-γ-δ`; `y3=α(4β-x3)-8γ²`; `inf=0`. R2O — ring; выходные точки должны совпадать, C/Rust-векторов нет. |
+| `pt_add` | 192-232 | 41 | якобиево сложение; `p.inf/q.inf`; при `H==0`: `R==0 → double`, иначе `inf`; I,J,V | ring | **P*** | **Ветви сверены:** `p.inf → *r=*q`, `q.inf → *r=*p`; `z1z1/z2z2/u1/u2/s1/s2`; `h=u2-u1`, `rr=s2-s1`; `h==0 && rr==0 → pt_double`, `h==0 → inf`; `I=(2h)²`, `J=hI`, `rr=2rr`, `V=u1I`; `x3=rr²-J-2V`; `y3=rr(V-x3)-2s1J`; `z3=(z1+z2)²-z1z1-z2z2)h`. R2O — ring. |
+| `pt_mul` | 235-246 | 12 | MSB-first double-and-add по 32 байтам, **не constant-time** | ring | **P** | C `base=(ax,ay,ONE_M)`, `acc.inf=1`; для каждого байта `bit=7..0`: `pt_double(acc)`, при бите `pt_add(acc,base)`. Комментарий C прямо документирует отсутствие constant-time (ключ одноразовый). ring в R2O, вероятно, constant-time; результат должен совпадать, но C/Rust-векторов нет. |
+| `pt_affine` | 249-260 | 12 | `z^-1`, `x/z²`, `y/z³`, `from_mont`; `-1` при бесконечности | ring | **P** | C при `inf || z==0` → -1; `zi=inv(z)`, `zi2/zi3`, `x=x*zi2`, `y=y*zi3`, `from_mont`. R2O — ring. |
+| `scalar_ok` | 262-266 | 5 | `0<k<N` | ring (валидация внутри) | **P** | C `fe_from_be`, `!is_zero(s) && !ge(s,N)`. ring валидирует скаляр внутри генерации/ECDH; отдельной функции нет. |
+| `d2k_p256_public` | 268-280 | 13 | `scalar_ok`, `pt_mul(G)`, аффинные координаты, `0x04`+X+Y | ring (через rustls, без экспорта pub) | **P** | C проверяет `priv/pub`/`scalar_ok`; `GX/GY` в Montgomery; `pt_mul`; `pt_affine`; `pub[0]=4`, X/Y BE. **Production:** `tls12.c:642-660`; R2O `r2o_tls.rs:92-96` включает `SECP256R1` в TLS12/TLS13, ring генерирует эфемерную пару внутри TLS. Отдельного API «публичный ключ из приватного» нет; C/Rust-векторов публичного ключа нет. |
+| `d2k_p256_keypair` | 282-289 | 8 | 32 случайных байта, `scalar_ok`, до 16 попыток | `ring::agreement::EphemeralPrivateKey` через rustls | **P** | C `d2k_t13_random(priv,32)`; `scalar_ok` → `d2k_p256_public`; иначе до 16 попыток. **Production:** `tls12.c:642-660` (ECDHE TLS1.2). ring генерирует ключ внутри TLS; retry/отбраковка не сравнивались, C-векторов keypair нет. |
+| `d2k_p256_ecdh` | 291-316 | 26 | `scalar_ok`, `peer[0]==0x04`, `x,y<P`, проверка `y²=x³-3x+B`, `pt_mul`, вывод X | `ring::agreement` (P256) через rustls | **P** | **Ветви сверены:** `priv/peer/out_x`; `scalar_ok`; `peer[0]==4`; `x,y` BE; `ge(x,P)||ge(y,P)` → -1; `xm/ym/bm` в Montgomery; `lhs=ym²`; `rhs=xm³-3xm+B`; `memcmp(lhs,rhs)` → -1; `pt_mul(priv,xm,ym)`; `pt_affine`; `out_x=sx`. **Production:** `tls12.c:655`. ring также отвергает точку не на кривой; C/Rust-векторы ECDH и поведение при невалидной точке не сравнивались. |
 
 ### `core/plantlv.c`
 
