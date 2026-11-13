@@ -9335,22 +9335,55 @@ fn r2o_record_voice_terminal_diagnostic(
 }
 
 #[cfg(unix)]
+fn r2o_floor_div(a: i64, b: i64) -> i64 {
+    let q = a / b;
+    let r = a % b;
+    if r != 0 && ((r < 0) != (b < 0)) {
+        q - 1
+    } else {
+        q
+    }
+}
+
+#[cfg(unix)]
+fn r2o_days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = year - i64::from(month <= 2);
+    let era = (if year >= 0 { year } else { year - 399 }) / 400;
+    let yoe = year - era * 400;
+    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+#[cfg(unix)]
+fn r2o_civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    (year, month, day)
+}
+
+#[cfg(unix)]
 fn r2o_json_time(unix_s: i64) -> String {
     // C `json_time`: неположительное время → нулевое время Go.
     if unix_s <= 0 {
         return "0001-01-01T00:00:00Z".into();
     }
-    let Ok(date) = time::OffsetDateTime::from_unix_timestamp(unix_s) else {
-        return "0001-01-01T00:00:00Z".into();
-    };
+    let days = r2o_floor_div(unix_s, 86_400);
+    let second_of_day = unix_s - days * 86_400;
+    let (year, month, day) = r2o_civil_from_days(days);
     format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        date.year(),
-        u8::from(date.month()),
-        date.day(),
-        date.hour(),
-        date.minute(),
-        date.second()
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        second_of_day / 3_600,
+        second_of_day % 3_600 / 60,
+        second_of_day % 60
     )
 }
 
@@ -24814,6 +24847,29 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn json_time_and_string_escaping_match_c() {
+        assert_eq!(super::r2o_floor_div(7, 3), 2);
+        assert_eq!(super::r2o_floor_div(-7, 3), -3);
+        assert_eq!(super::r2o_floor_div(7, -3), -3);
+        assert_eq!(super::r2o_floor_div(-7, -3), 2);
+        for (year, month, day, days) in [
+            (1970, 1, 1, 0),
+            (2000, 2, 29, 11_016),
+            (1969, 12, 31, -1),
+            (2026, 9, 7, 20_703),
+            (1900, 3, 1, -25_508),
+            (2100, 3, 1, 47_541),
+        ] {
+            assert_eq!(
+                super::r2o_days_from_civil(year, month, day),
+                days,
+                "{year}-{month:02}-{day:02}"
+            );
+            assert_eq!(
+                super::r2o_civil_from_days(days),
+                (year, month, day),
+                "{days}"
+            );
+        }
         assert_eq!(super::r2o_json_time(0), "0001-01-01T00:00:00Z");
         assert_eq!(super::r2o_json_time(-1), "0001-01-01T00:00:00Z");
         assert_eq!(super::r2o_json_time(1), "1970-01-01T00:00:01Z");

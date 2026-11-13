@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 317 | 231 | 0 | 0 |
-| core-state | 692 | 346 | 346 | 0 | 0 |
+| core-state | 692 | 349 | 343 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1151** | **831** | **0** | **0** |
+| **Итого** | **1982** | **1154** | **828** | **0** | **0** |
 
-Это не оценка паритета: 831 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 828 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1151 / P 831 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1154 / P 828 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 317 | 231 | 0 | 0 |
-| core-state | 692 | 346 | 346 | 0 | 0 |
+| core-state | 692 | 349 | 343 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1151** | **831** | **0** | **0** |
+| **Итого** | **1982** | **1154** | **828** | **0** | **0** |
 
 
 ---
@@ -1934,9 +1934,9 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `jpeek` | 79-87 | 9 | следующий значимый байт без сдвига | serde_json cursor | **E*** | C пропускает пробелы и отдаёт `s[i]`/0. Rust позицию ведёт serde_json; синтаксис/пробелы обрабатываются там же; malformed-тесты `json_core_limits_match_c`. |
 | `jeat` | 92-104 | 13 | ожидать символ с пропуском пробелов | serde_json grammar | **E*** | C пропускает whitespace, сверяет байт, ошибка «ожидался». Rust serde_json отвергает те же нарушения (`[,}`, обрезка); тест `json_core_limits_match_c`. |
 | `jeat_null_if_present` | 110-117 | 8 | `null` → успех без сдвига значения | `null_to_default`/`Option` (serde) | **E*** | C распознаёт `null` для необязательных массивов/строк. Rust `#[serde(default, deserialize_with="null_to_default")]` для plans/bindings/signals, `Option` для optional; тест `json_core_limits_match_c` и `catalog_json_input_handlers...` (plans/bindings/signals null). |
-| `floor_div` | 148-153 | 6 | деление с округлением вниз (для отрицательной эпохи) | `div_euclid`/`time` | **P*** | C `q=a/b; r=a%b; if(r!=0 && ((r<0)!=(b<0))) q--`. Rust `time`/`div_euclid` даёт то же математическое частное; отдельной функции нет. |
-| `days_from_civil` | 156-163 | 8 | дни от 1970-01-01 по Хиннанту | `time` crate | **P*** | C `y-=m<=2`; `era=(y>=0?y:y-399)/400`; `yoe`, `doy=153*(m+(m>2?-3:9))+2)/5+d-1`, `doe`, `era*146097+doe-719468`. Rust `time` использует тот же гражданский календарь; отдельной функции/векторов C↔Rust нет. |
-| `civil_from_days` | 166-178 | 13 | дата из дней по Хиннанту | `time` crate | **P*** | C `z+=719468`; `era=(z>=0?z:z-146096)/146097`; `doe=z-era*146097`; `yoe=(doe-doe/1460+doe/36524-doe/146096)/365`; `y=yoe+era*400`; `doy=doe-(365*yoe+yoe/4-yoe/100)`; `mp=(5*doy+2)/153`; `dd=doy-(153*mp+2)/5+1`; `mm=mp+(mp<10?3:-9)`; `y+=mm<=2`. Rust `time` — тот же гражданский календарь; отдельных C/Rust-векторов нет. |
+| `floor_div` | 148-153 | 6 | деление с округлением вниз (для отрицательной эпохи) | `main.rs` `r2o_floor_div` | E | C: `q=a/b; r=a%b; if(r!=0 && ((r<0)!=(b<0))) q--`. Rust `r2o_floor_div` — та же формула; используется `r2o_json_time`; тест `json_time_and_string_escaping_match_c` (±7/±3). |
+| `days_from_civil` | 156-163 | 8 | дни от 1970-01-01 по Хиннанту | `main.rs` `r2o_days_from_civil` | E | C: `y-=m<=2`, `era=(y>=0?y:y-399)/400`, `yoe`, `doy`, `doe`, `era*146097+doe-719468`. Rust `r2o_days_from_civil` повторяет формулу; векторы 1970-01-01=0, 2000-02-29=11016, 1969-12-31=-1, 2026-09-07=20703, 1900-03-01=-25508, 2100-03-01=47541; roundtrip с `r2o_civil_from_days` в тесте `json_time_and_string_escaping_match_c`. |
+| `civil_from_days` | 166-178 | 13 | дата из дней по Хиннанту | `main.rs` `r2o_civil_from_days` | E | C: `z+=719468`, `era`, `doe`, `yoe`, `y`, `doy`, `mp`, `dd/mm/y`. Rust `r2o_civil_from_days` повторяет формулу; те же шесть векторов и roundtrip с `r2o_days_from_civil` в `json_time_and_string_escaping_match_c`. |
 | `format_rfc3339` | 185-195 | 11 | epoch → `YYYY-MM-DDTHH:MM:SSZ` без дробной доли | `time::format_description` | **E*** | C `floor_div(epoch,86400)`, `sod`, `civil_from_days`, `snprintf("%04lld-%02u-%02uT%02u:%02u:%02uZ")`. Rust `time` форматирует RFC3339; `r2o-catalog-persist-differential.sh` сравнивает added/confirmed. |
 | `jparse_raw_int` | 207-239 | 33 | знак/цифры/границы int64, отказ на мусор | serde_json integer lexer | **E*** | C: `-`, цифры, INT64_MIN/MAX, ошибка на пустом/мусоре. Rust целые разбирает serde_json с теми же границами; тест `json_core_limits_match_c` (i32-границы), `successes`/`ttl` отказы. |
 | `jparse_i32` | 241-250 | 10 | int64 → i32 с проверкой диапазона | serde `i32` | **E*** | C проверяет `v<INT32_MIN||v>INT32_MAX`. Rust тип поля `i32` — serde отвергает вне диапазона; тест `json_core_limits_match_c` (`2147483647` ok, `2147483648`/`-2147483649` err). |
@@ -2576,7 +2576,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_sched_new` | 5566–5610 | 45 | calloc; cat/link/mark/measure_mark; `stall_sent[0]=25`; meas_limit=default; wake pipe nonblock; mutex/cond; QUIC hooks | `main.rs:10388-10400` (R2oDiscoveryQueue/Searches constructors), `R2oDiscoveryWorker` | **P** | **Совпадает:** дефолты лимита/бюджета, wake-канал/очередь, mutex/cond, QUIC progress/yield hooks. **Отличия:** Rust не использует pipe, а канал/condvar; `wall_base`/mono-база выражены `Instant`/`SystemTime`; C/Rust diff нет. |
 | `d2k_sched_set_measure_mark` | 5612-5614 | 3 | установить метку измерений | `main.rs` measure mark field | **P*** | C `void d2k_sched_set_measure_mark(d2k_sched *s,uint32_t mark){if(s)s->measure_mark=mark;}`. Rust поле метки есть, отдельного сеттера/теста нет. |
 | `json_str` | 5624-5632 | 9 | JSON-строка: `"`/`\\` escape, control → `\u%04x`, UTF-8 как есть | `serde_json` | **E*** | C: кавычка/обратная косая, `<0x20` → `\u%04x`, UTF-8-байты как есть. Rust `serde_json::to_string` даёт те же escape (`\"`, `\\`, `\n`, `\r`, `\t`, `\b`, `\f`, `\u0001`); тест `json_time_and_string_escaping_match_c` сверяет побайтно. **Ограничение:** отдельной функции нет — сериализатор serde_json. |
-| `json_time` | 5634-5645 | 12 | unix-время → RFC3339, `<=0` → `0001-01-01T00:00:00Z` | `main.rs` `r2o_json_time` | E | C: `unix_s<=0` → нулевое время Go; иначе `gmtime_r` + `%Y-%m-%dT%H:%M:%SZ`. Rust `r2o_json_time` делает то же (`OffsetDateTime::from_unix_timestamp` + ручной формат с `Z`), используется `r2o_live_timestamp`; тест `json_time_and_string_escaping_match_c` (0/-1, epoch+1, 1700000000 → `2023-11-14T22:13:20Z`). |
+| `json_time` | 5634-5645 | 12 | unix-время → RFC3339, `<=0` → `0001-01-01T00:00:00Z` | `main.rs` `r2o_json_time` | E | C: `unix_s<=0` → нулевое время Go; иначе `floor_div`/`civil_from_days` + `%Y-%m-%dT%H:%M:%SZ`. Rust `r2o_json_time` использует `r2o_floor_div`/`r2o_civil_from_days`; используется `r2o_live_timestamp`; тест `json_time_and_string_escaping_match_c` (0/-1, epoch+1, 1700000000). |
 | `level_name` | 5650-5659 | 10 | уровень доказательства 1..5 словами, default «не измерено» | `main.rs` level text | **P*** | C пять строк: транспорт/сервер ответил/обмен/прикладной объём/подтверждён; default. Rust тексты уровней есть, дословное совпадение не сверялось. |
 | `signal_human` | 5663-5680 | 18 | примета словами: rst/volume/rx-volume/rx-volume-wire/silent/repeat, иначе kind | `main.rs` signal text | **P*** | C шесть шаблонов с числами (TTL/delta/ToS/ipid, КБ), иначе `kind`. Rust набор родов и формат текста иные; отдельного differential нет. |
 | `task_phase` | 5685-5705 | 21 | фаза задачи словами по T_* | `main.rs` phase text | **P*** | C `T_QUEUED/T_SHAPE_WAIT/T_ASKING/T_PROPS_*/T_PLANNING/T_TRIAL_SETTLE/T_VERIFY*/T_WATCHING/T_RESTING/T_VOICE_*` → строки; T_WATCHING «подтверждено, смотрим живой трафик». Rust-строки фаз не сопоставлены дословно, T_WATCHING-фазы нет. |
