@@ -89,7 +89,7 @@ recheck 1982 1982 equal True
 | datapath-core | 400 | 214 | 186 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **913** | **1069** | **0** | **0** |
+| **Итого** | **1982** | **914** | **1068** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 913 / P 1069 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 914 / P 1068 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -345,11 +345,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 225 | 323 | 0 | 0 |
-| core-state | 692 | 205 | 487 | 0 | 0 |
+| core-state | 692 | 206 | 486 | 0 | 0 |
 | datapath-core | 400 | 214 | 186 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **913** | **1069** | **0** | **0** |
+| **Итого** | **1982** | **914** | **1068** | **0** | **0** |
 
 
 ---
@@ -2602,7 +2602,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `newer_name_binding` | 6171–6193 | 23 | есть ли более сильная enabled name-binding того же ключа (budget/confirmed, TCP profile, QUIC verified_by) | `discovery.rs:103-122 newer_name_binding`, `main.rs:2506-2532 r2o_newer_name_binding` | **P** | **Совпадает:** other enabled, recheck none/0, level 0 или ≥3, `binding_beats` (budget→confirmed), kind name, target, normalized transport/family, shape, plan по `other.plan_id`. **Подтверждённые отличия:** (1) C проверяет `other->tcp_profile == bd->tcp_profile` (`sched.c:6185-6186`); `discovery.rs::newer_name_binding` и `main.rs::r2o_newer_name_binding` теперь сравнивают профиль для TCP (тесты `newer_name_binding_requires_the_same_tcp_profile` в обоих модулях); (2) `discovery.rs:103-122` **не** проверяет QUIC `verified_by != CLIENT` и наличие `plan.enabled`; `main.rs:2506-2532` проверяет `verified_by` и `plan.enabled`, но не `plan.text`; C `plan_by_id` требует `plan && plan->text` (`6188-6189`); (3) два Rust-варианта расходятся между собой, то есть выбор зависит от вызывающего пути. known/own-first differentials частичные. |
 | `area_key_same` | 6195–6198 | 4 | kind/transport/shape/family/name | `CatalogAreaKey` (`main.rs:3851-3858`), `PartialEq` | **E*** | **Точное совпадение:** C сравнивает `kind`, `transport`, `shape`, `family`, `name` (`sched.c:6195-6198`); Rust `CatalogAreaKey` содержит те же пять полей и выводит `Hash/PartialEq/Eq` (`3851-3858`). `plan_id` в ключ не входит в обоих. |
 | `area_find` | 6200–6204 | 5 | линейный поиск установленной области | `main.rs:4008` (`areas.iter().position` по `CatalogAreaKey`) | **E*** | C линейно ищет по `s->areas[]` через `area_key_same` (`sched.c:6200-6204`); Rust ищет `installed.key == area.key` в `Vec` (`main.rs:4008`), ключ тот же (kind/name/transport/shape/family). Индекс/`position` эквивалентны. |
-| `area_store` | 6206–6212 | 7 | вставить/заменить область, лимит `D2K_GROUP_MAX+D2K_GROUP_OBSERVATION_MAX=320` | `main.rs:4004-4014 catalog_area_store` | **P*** | **Совпадает:** замена по ключу через `catalog_area_store` (replace) либо добавление (push); C делает то же через `area_find` + запись/`n_areas++` (`sched.c:6206-6212`). **Отличие:** C при переполнении 320 возвращает `-1`; Rust `Vec` явного предела 320 в `catalog_area_store` не имеет — граница задаётся размером скомпилированного каталога/`desired_areas`. Порядок хранения (Vec vs массив) различается. |
+| `area_store` | 6206–6212 | 7 | вставить/заменить область, лимит `D2K_GROUP_MAX+D2K_GROUP_OBSERVATION_MAX=320` | `main.rs` `catalog_area_store` | E | C заменяет по ключу, иначе добавляет; при `i == 320` возвращает -1. Rust `catalog_area_store` возвращает `Ok(Some(previous))` при замене, `Ok(None)` при добавлении и `Err(())` на пределе 320; подтверждённый ACK при переполнении помечает `areas_failed`, истёкший — пропускает. Тест `catalog_area_store_enforces_c_capacity` (320 вставок, 321-я ошибка, замена на пределе). |
 | `area_retry_delay` | 6214-6221 | 8 | база, удвоение до потолка | `r2o-catalog-sync-differential.sh` | **E** | C `delay=AREA_RETRY_BASE_MS`; пока `attempts>1 && delay<MAX` — `delay*=2`, `attempts--`; clamp `delay>MAX?MAX:delay`. Rust те же база/удвоение/потолок; differential PASS. |
 | `area_failure` | 6223-6237 | 15 | retry_count++, confirmed=0 (кроме remove_pending), maybe_active для timeout/send, permanent для bad plan/args/unknown, reason/code, retry_at | `r2o-catalog-sync-differential.sh` | **E** | **Ветви сверены:** C копирует запись; `retry_count<255` ++; `!remove_pending → confirmed=0`; `ACK_TIMEOUT\|SEND_ERROR → maybe_active=1`; `BAD_PLAN\|BAD_ARGS\|UNKNOWN_ACK → permanent`; reason/code/detail; `retry_at=permanent?0:now+delay`; store. Rust те же причины/permanent/retry; differential PASS. |
 | `area_ack_reason` | 6239–6246 | 8 | ACK NO_ROOM/BAD_PLAN/BAD_ARGS/UNKNOWN → `AREA_REASON_*` | `main.rs:4256-4303 observe_area_ack` | **P** | **Подтверждённый пробел:** C различает причины отказа `NO_ROOM/BAD_PLAN/BAD_ARGS/UNKNOWN_ACK` и сохраняет их в `installed_area.reason` (`sched.c:6239-6246`); Rust `observe_area_ack` при `ack.ok == false` только печатает `ack.reason`, увеличивает `skipped` и ставит `areas_failed` (`main.rs:4294-4301`), не заводя причину области. Каталог sync-тестов проверяет ACK/очередь, не этот маппинг. |

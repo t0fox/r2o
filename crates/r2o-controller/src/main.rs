@@ -3994,15 +3994,21 @@ fn catalog_area_remove_group(
 }
 
 #[cfg(unix)]
+/// C `D2K_GROUP_MAX + D2K_GROUP_OBSERVATION_MAX`.
+const R2O_INSTALLED_AREA_LIMIT: usize = 320;
+
 fn catalog_area_store(
     areas: &mut Vec<InstalledCatalogArea>,
     area: InstalledCatalogArea,
-) -> Option<InstalledCatalogArea> {
+) -> Result<Option<InstalledCatalogArea>, ()> {
     if let Some(index) = areas.iter().position(|installed| installed.key == area.key) {
-        Some(std::mem::replace(&mut areas[index], area))
+        Ok(Some(std::mem::replace(&mut areas[index], area)))
+    } else if areas.len() >= R2O_INSTALLED_AREA_LIMIT {
+        // C `area_store` при переполнении возвращает -1.
+        Err(())
     } else {
         areas.push(area);
-        None
+        Ok(None)
     }
 }
 
@@ -4267,8 +4273,14 @@ impl CatalogSyncCursor {
             match pending.action {
                 CatalogAreaAction::Set(mut area) => {
                     area.confirmed = true;
-                    if let Some(previous) = catalog_area_store(installed_areas, area.clone()) {
-                        catalog_area_remove_group(&previous, active_groups);
+                    match catalog_area_store(installed_areas, area.clone()) {
+                        Ok(Some(previous)) => catalog_area_remove_group(&previous, active_groups),
+                        Ok(None) => {}
+                        Err(()) => {
+                            // C `area_store` при переполнении возвращает -1.
+                            self.skipped += 1;
+                            self.areas_failed = true;
+                        }
                     }
                     if let Some(group) = area.group {
                         active_groups.insert(group);
@@ -4313,7 +4325,7 @@ impl CatalogSyncCursor {
             match pending.action {
                 CatalogAreaAction::Set(mut area) => {
                     area.confirmed = false;
-                    if let Some(previous) = catalog_area_store(installed_areas, area) {
+                    if let Ok(Some(previous)) = catalog_area_store(installed_areas, area) {
                         catalog_area_remove_group(&previous, active_groups);
                     }
                 }
@@ -23859,6 +23871,41 @@ mod tests {
         let mut last = [0; 16];
         last[15] = 1;
         assert!(super::r2o_trial_present(&last));
+    }
+
+    #[test]
+    fn catalog_area_store_enforces_c_capacity() {
+        fn area(index: usize) -> super::InstalledCatalogArea {
+            super::InstalledCatalogArea {
+                key: super::CatalogAreaKey {
+                    kind: super::CatalogAreaKind::Suffix,
+                    name: format!("area-{index}.example"),
+                    transport: 6,
+                    shape: super::SHAPE_MODERN,
+                    family: 4,
+                },
+                plan_id: None,
+                group: None,
+                confirmed: true,
+            }
+        }
+
+        let mut areas = Vec::new();
+        for index in 0..320 {
+            assert!(matches!(
+                super::catalog_area_store(&mut areas, area(index)),
+                Ok(None)
+            ));
+        }
+        assert_eq!(areas.len(), 320);
+        assert!(super::catalog_area_store(&mut areas, area(320)).is_err());
+        assert_eq!(areas.len(), 320);
+        // Замена существующего ключа на пределе разрешена.
+        assert!(matches!(
+            super::catalog_area_store(&mut areas, area(0)),
+            Ok(Some(_))
+        ));
+        assert_eq!(areas.len(), 320);
     }
 
     #[test]
