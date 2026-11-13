@@ -984,13 +984,13 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
             }
         }
     }
-    if ech.is_some() && connection.ech_status() != rustls::client::EchStatus::Accepted {
+    if ech.is_some() && !r2o_ech_accepted(connection.ech_status()) {
         return Err(format!(
             "сервер не подтвердил ECH: {:?}",
             connection.ech_status()
         ));
     }
-    let ech_accepted = ech.map(|_| true);
+    let ech_accepted = ech.map(|_| r2o_ech_accepted(connection.ech_status()));
     r2o_socket.r2o_reset_after_handshake();
     let tls = match connection.protocol_version() {
         Some(ProtocolVersion::TLSv1_3) => Some("1.3"),
@@ -1429,6 +1429,11 @@ impl Drop for R2oHttpResponseBufferTracking {
             );
         }
     }
+}
+
+/// rustls `EchStatus::Accepted` означает проверенный accept_confirmation.
+fn r2o_ech_accepted(status: rustls::client::EchStatus) -> bool {
+    status == rustls::client::EchStatus::Accepted
 }
 
 /// C `read_http_body`: для chunked/close-delimited `body_expected=body_bytes`.
@@ -4620,6 +4625,20 @@ mod tests {
         assert!(guard.tracked);
         drop(guard);
         memory_enable(was_active);
+    }
+
+    #[test]
+    fn ech_acceptance_requires_rustls_accepted_status() {
+        use rustls::client::EchStatus;
+        assert!(r2o_ech_accepted(EchStatus::Accepted));
+        for status in [
+            EchStatus::NotOffered,
+            EchStatus::Grease,
+            EchStatus::Offered,
+            EchStatus::Rejected,
+        ] {
+            assert!(!r2o_ech_accepted(status), "{status:?}");
+        }
     }
 
     #[test]

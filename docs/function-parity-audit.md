@@ -84,14 +84,14 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 246 | 302 | 0 | 0 |
+| core-net | 548 | 248 | 300 | 0 | 0 |
 | core-state | 692 | 274 | 418 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1008** | **974** | **0** | **0** |
+| **Итого** | **1982** | **1010** | **972** | **0** | **0** |
 
-Это не оценка паритета: 974 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 972 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1008 / P 974 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1010 / P 972 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -342,12 +342,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 246 | 302 | 0 | 0 |
+| core-net | 548 | 248 | 300 | 0 | 0 |
 | core-state | 692 | 274 | 418 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1008** | **974** | **0** | **0** |
+| **Итого** | **1982** | **1010** | **972** | **0** | **0** |
 
 
 ---
@@ -586,8 +586,8 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `hpke_extract` | 570-581 | 12 | HPKE-v1 labeled Extract: `HPKE-v1`+suite+label+ikm → HKDF-Extract | `hpke` crate (`ech.rs:63-144`) | **P** | C вручную собирает `HPKE-v1‖suite‖label‖ikm` (проверка 768) и вызывает `d2k_hkdf_extract`; Rust HPKE — внутри crate (`setup_sender/receiver`); C-векторов нет. |
 | `hpke_expand` | 583-596 | 14 | HPKE-v1 labeled Expand: 2-байтная длина+`HPKE-v1`+suite+label+info, один HMAC-блок, out≤32 | `hpke` crate | **P** | C требует `out_len 1..32`, `n+1<=768`, `b[n]=1`, HMAC-SHA256, копия out_len; Rust — внутри crate; собственной функции/векторов нет. |
 | `ech_hpke` | 598-619 | 22 | X25519 base/shared, context=enc‖pk, info=`tls ech\0`‖config, HPKE extract/expand key/base_nonce, suite HPKE(0x20,0x0001,0x0001) | `ech.rs:63-144` через `hpke` | **P** | C `d2k_x25519_base`/`d2k_x25519`, `eae_prk`/`shared_secret`/`psk_id_hash`/`info_hash`/`secret`/`key`/`base_nonce`, zeroize. Rust `hpke::setup_sender::<AesGcm128,HkdfSha256,X25519HkdfSha256>`; suite `DHKEM_X25519_HKDF_SHA256`/`HKDF_SHA256`/`AES_128_GCM` (`ech.rs:135-143`); байтового differential нет. |
-| `d2k_t13_ech_build` | 621-682 | 62 | inner CH с ECH-расширением, outer CH с public_name, HPKE enc/config_id, AES-GCM inner, padding | `r2o_tls.rs:274-306 r2o_tls_ech_client_hello` (rustls) | **P** | C проверяет sni/ech_host_ok/extra_len==0/session_id<=32/pad_to<=cap/public_name; `ech_hpke`; inner CH с `fe0d 0001 01`; копия session_id из outer; encoded = inner[4..39]+0+inner[39+sid..]; plain_len с max_name, округление 32; extension `fe0d`, len 42+plain+16, config_id, enc, payload len, нули; outer CH с public_name/outer_random/extension; поиск 0xfe0d, проверка len, AES-GCM AAD outer[4..], ciphertext+tag; `inner_len=n`. Rust строит ECH через rustls `EchMode::Enable`, не повторяет байтовую раскладку; C-оракул не подключён. |
-| `d2k_t13_ech_accepted` | 684-701 | 18 | accept_confirmation: SHA-256(inner + ServerHello с обнулёнными 8 байтами), HKDF `ech accept confirmation`, сравнение 8 байт | `fetch.rs:987-993 connection.ech_status()==Accepted` | **P** | C требует inner/sh 38..4096, `inner[0]==1`, `sh[0]==2`; `sh_parse`; `tr=inner‖sh`, обнуляет `tr+n+30..+38`; SHA256; `HKDF-Extract(0,inner+6)`; `expand_label_ctx("ech accept confirmation",hash,8)`; сравнивает `sh[30..38]`. Rust проверяет `EchStatus::Accepted`; C-оракул не подключён; ECH-RX differential проверяет исход. |
+| `d2k_t13_ech_build` | 621-682 | 62 | inner CH с ECH-расширением, outer CH с public_name, HPKE enc/config_id, AES-GCM inner, padding | `r2o_tls.rs` `r2o_tls_ech_client_hello` (rustls) | **E*** | Rust собирает ECH ClientHello через rustls; тесты `rustls_принимает_донорскую_конфигурацию_ech`, `r2o_собирает_ech_clienthello_для_автоклассификатора` (public_name, SNI, classifier принимает форму). **Ограничение:** побайтовый C-оракул HPKE/AAD/extension-layout не подключён. |
+| `d2k_t13_ech_accepted` | 684-701 | 18 | accept_confirmation: SHA-256(inner + ServerHello с обнулёнными 8 байтами), HKDF `ech accept confirmation`, сравнение 8 байт | `fetch.rs` `r2o_ech_accepted` + rustls `EchStatus` | **E*** | Rust fetch требует `rustls::client::EchStatus::Accepted`, иначе ошибка «сервер не подтвердил ECH»; helper `r2o_ech_accepted` и тест `ech_acceptance_requires_rustls_accepted_status` (Accepted true; NotOffered/Grease/Offered/Rejected false). **Ограничение:** C-оракул ручного accept_confirmation не подключён; проверку выполняет rustls. |
 
 ## core/verify.c (74 функции)
 
