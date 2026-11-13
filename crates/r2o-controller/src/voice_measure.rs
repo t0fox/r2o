@@ -821,18 +821,56 @@ fn r2o_voice_option_value<'a>(
         .ok_or_else(|| format!("{r2o_option} требует значение в UTF-8"))
 }
 
+/// C `split_hostport` (`core/d2kvoice.c:39-48`): последний `:`, непустой
+/// хост, порт через `strtoul(...,10)` (хвост после цифр игнорируется),
+/// затем 1..65535.
+fn r2o_split_voice_hostport(r2o_value: &str) -> Option<(&str, u16)> {
+    let (r2o_host, r2o_port_text) = r2o_value.rsplit_once(':')?;
+    if r2o_host.is_empty() {
+        return None;
+    }
+    let bytes = r2o_port_text.as_bytes();
+    let mut position = 0;
+    while position < bytes.len() && bytes[position].is_ascii_whitespace() {
+        position += 1;
+    }
+    let mut negative = false;
+    if position < bytes.len() && (bytes[position] == b'+' || bytes[position] == b'-') {
+        negative = bytes[position] == b'-';
+        position += 1;
+    }
+    let digits_start = position;
+    let mut value: u128 = 0;
+    while position < bytes.len() && bytes[position].is_ascii_digit() {
+        value = value
+            .saturating_mul(10)
+            .saturating_add(u128::from(bytes[position] - b'0'));
+        if value > u128::from(u64::MAX) {
+            value = u128::from(u64::MAX);
+        }
+        position += 1;
+    }
+    if position == digits_start {
+        return None;
+    }
+    let parsed = if negative {
+        // `strtoul` возвращает беззнаковое дополнение: отрицательное
+        // значение заведомо выходит за 1..65535.
+        u64::MAX
+    } else {
+        value as u64
+    };
+    let port = u16::try_from(parsed).ok()?;
+    (port != 0).then_some((r2o_host, port))
+}
+
 fn r2o_parse_voice_address(r2o_value: &str) -> Result<SocketAddrV4, String> {
-    let (r2o_ip, r2o_port) = r2o_value
-        .rsplit_once(':')
-        .ok_or("--addr должен быть в формате IPv4:ПОРТ")?;
-    let r2o_ip = r2o_ip
-        .parse::<Ipv4Addr>()
-        .map_err(|_| "--addr должен содержать IPv4-адрес")?;
-    let r2o_port = r2o_port
-        .parse::<u16>()
-        .ok()
-        .filter(|r2o_port| *r2o_port != 0)
-        .ok_or("--addr содержит неверный порт")?;
+    let (r2o_host, r2o_port) =
+        r2o_split_voice_hostport(r2o_value).ok_or("--addr должен быть в формате IPv4:ПОРТ")?;
+    // C после `split_hostport` зовёт `d2k_ip4_parse`, который принимает
+    // ведущие нули октетов.
+    let r2o_ip =
+        r2k_core::addr::parse_ipv4_legacy(r2o_host).ok_or("--addr должен содержать IPv4-адрес")?;
     Ok(SocketAddrV4::new(r2o_ip, r2o_port))
 }
 
@@ -858,6 +896,40 @@ mod tests {
         r2o_record_voice_discovery_arm, r2o_select_voice_target, r2o_voice_observation,
         r2o_voice_verdict_word,
     };
+
+    #[test]
+    fn voice_split_hostport_matches_c_d2kvoice() {
+        // C `split_hostport`: strtoul игнорирует хвост после цифр.
+        assert_eq!(
+            super::r2o_split_voice_hostport("1.2.3.4:443"),
+            Some(("1.2.3.4", 443))
+        );
+        assert_eq!(
+            super::r2o_split_voice_hostport("1.2.3.4:443junk"),
+            Some(("1.2.3.4", 443))
+        );
+        assert_eq!(
+            super::r2o_split_voice_hostport("1.2.3.4:+443"),
+            Some(("1.2.3.4", 443))
+        );
+        assert_eq!(
+            super::r2o_split_voice_hostport("1.2.3.4: 443"),
+            Some(("1.2.3.4", 443))
+        );
+        assert_eq!(super::r2o_split_voice_hostport(":443"), None);
+        assert_eq!(super::r2o_split_voice_hostport("1.2.3.4:"), None);
+        assert_eq!(super::r2o_split_voice_hostport("1.2.3.4:0"), None);
+        assert_eq!(super::r2o_split_voice_hostport("1.2.3.4:65536"), None);
+        assert_eq!(super::r2o_split_voice_hostport("1.2.3.4:-1"), None);
+
+        // C после split зовёт d2k_ip4_parse: ведущие нули допустимы.
+        let address = super::r2o_parse_voice_address("010.0.0.1:443").unwrap();
+        assert_eq!(
+            address,
+            std::net::SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 443)
+        );
+        assert!(super::r2o_parse_voice_address("voice.example:443").is_err());
+    }
 
     #[test]
     fn voice_verdict_words_match_c_d2kvoice() {
