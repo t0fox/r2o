@@ -603,6 +603,18 @@ pub fn looks_like_tls(bytes: &[u8]) -> bool {
     bytes.first() == Some(&0x16)
 }
 
+/// C `reverse_note` (`core/verdict.c:53-62`): оговорка к CLEAR — обратное
+/// направление не проверено, кроме TLS 1.3 (MODERN), где резать нечего.
+pub fn r2o_reverse_note(trigger: &Trigger) -> &'static str {
+    match crate::hello::hello_shape(&trigger.payload) {
+        crate::hello::HelloShape::Modern => "",
+        crate::hello::HelloShape::Legacy => "; форма TLS 1.2 — обратное направление не проверено",
+        crate::hello::HelloShape::Unknown => {
+            "; вид приветствия не разобран — обратное направление не проверено"
+        }
+    }
+}
+
 /// Применить правило `r2o_trigger_accepts` эталона к принятому буферу.
 pub fn trigger_accepts(accept: Accept, bytes: &[u8]) -> bool {
     match accept {
@@ -1585,7 +1597,10 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
         }
 
         result.verdict = Verdict::Clear;
-        result.reason = "триггер проходит как есть — обходить нечего".into();
+        result.reason = format!(
+            "триггер проходит как есть — обходить нечего{}",
+            r2o_reverse_note(trigger)
+        );
         let sni = trigger.name.strip_prefix("tls:").unwrap_or("");
         if !sni.is_empty() {
             let response = probe_response(
@@ -2884,6 +2899,26 @@ mod raw_connect_fallback_tests {
 mod qtrace_tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn reverse_note_matches_c_verdict() {
+        let modern = Trigger::tls13("modern.example").unwrap();
+        assert_eq!(super::r2o_reverse_note(&modern), "");
+        let legacy = Trigger::tls("legacy.example").unwrap();
+        assert_eq!(
+            super::r2o_reverse_note(&legacy),
+            "; форма TLS 1.2 — обратное направление не проверено"
+        );
+        let unknown = Trigger {
+            name: "raw".into(),
+            payload: vec![0x16, 0x03, 0x01],
+            accept: Accept::Any,
+        };
+        assert_eq!(
+            super::r2o_reverse_note(&unknown),
+            "; вид приветствия не разобран — обратное направление не проверено"
+        );
+    }
 
     #[test]
     fn looks_like_tls_matches_core_verdict_rule() {
