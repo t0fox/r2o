@@ -1007,12 +1007,29 @@ fn expand_label(
     label: &[u8],
     output: &mut [u8],
 ) -> Result<(), QuicSplitError> {
-    let mut info = Vec::with_capacity(4 + label.len());
+    expand_label_ctx(hkdf, label, &[], output)
+}
+
+/// C `d2k_hkdf_expand_label_ctx` (`core/crypto.c:355-427`): HkdfLabel
+/// `out_len(2) || len(full_label)(1) || "tls13 "+label || len(ctx)(1) || ctx`.
+/// C отвергает label > 58 и ctx > 32 до первого memcpy.
+fn expand_label_ctx(
+    hkdf: &Hkdf<Sha256>,
+    label: &[u8],
+    context: &[u8],
+    output: &mut [u8],
+) -> Result<(), QuicSplitError> {
+    const LABEL_MAX: usize = 58;
+    if label.len() > LABEL_MAX || context.len() > 32 {
+        return Err(QuicSplitError::Invalid);
+    }
+    let mut info = Vec::with_capacity(5 + 6 + label.len() + context.len());
     info.extend_from_slice(&(output.len() as u16).to_be_bytes());
     info.push(u8::try_from(6 + label.len()).map_err(|_| QuicSplitError::Invalid)?);
     info.extend_from_slice(b"tls13 ");
     info.extend_from_slice(label);
-    info.push(0);
+    info.push(u8::try_from(context.len()).map_err(|_| QuicSplitError::Invalid)?);
+    info.extend_from_slice(context);
     hkdf.expand(&info, output)
         .map_err(|_| QuicSplitError::Invalid)
 }
@@ -1489,14 +1506,49 @@ fn skip_u16_vector(bytes: &[u8], end: usize, offset: &mut usize) -> bool {
 mod tests {
     use super::QuicSplitError;
     use super::{
-        append_crypto_frame, derive_initial_keys, find_client_hello_sni,
-        find_client_hello_sni_result, initial_split_crypto, open_initial, parse_initial_header,
-        read_varint, seal_initial,
+        Hkdf, append_crypto_frame, derive_initial_keys, expand_label, expand_label_ctx,
+        find_client_hello_sni, find_client_hello_sni_result, initial_split_crypto, open_initial,
+        parse_initial_header, read_varint, seal_initial,
     };
     use sha2::{Digest, Sha256};
 
     const RFC_9001_INITIAL: &[u8] = include_bytes!("../tests/fixtures/quic_v1_initial.bin");
     const RFC_9369_INITIAL: &[u8] = include_bytes!("../tests/fixtures/quic_v2_initial.bin");
+
+    #[test]
+    fn hkdf_expand_label_ctx_matches_c_vector_and_limits() {
+        let secret: [u8; 32] = std::array::from_fn(|index| index as u8);
+        let hkdf = Hkdf::<Sha256>::from_prk(&secret).unwrap();
+        let mut output = [0_u8; 32];
+        expand_label_ctx(&hkdf, b"test", b"abc", &mut output).unwrap();
+        let hex: String = output.iter().map(|byte| format!("{byte:02x}")).collect();
+        // C-вектор `d2k_hkdf_expand_label_ctx(secret, "test", "abc", 32)`.
+        assert_eq!(
+            hex,
+            "3a98f0e3a8c36f2cfbaf82419723fee93c845279822030e77d977e5d73f0dbf1"
+        );
+
+        // Пустой ctx совпадает с обёрткой без ctx.
+        let mut plain = [0_u8; 32];
+        expand_label(&hkdf, b"test", &mut plain).unwrap();
+        let mut empty_ctx = [0_u8; 32];
+        expand_label_ctx(&hkdf, b"test", &[], &mut empty_ctx).unwrap();
+        assert_eq!(plain, empty_ctx);
+
+        // C: label <= 58, ctx <= 32; иначе отказ до записи.
+        let label58 = vec![b'b'; 58];
+        assert!(expand_label(&hkdf, &label58, &mut output).is_ok());
+        assert_eq!(
+            expand_label(&hkdf, &vec![b'a'; 59], &mut output),
+            Err(QuicSplitError::Invalid)
+        );
+        let ctx32 = [0_u8; 32];
+        assert!(expand_label_ctx(&hkdf, b"test", &ctx32, &mut output).is_ok());
+        assert_eq!(
+            expand_label_ctx(&hkdf, b"test", &[0_u8; 33], &mut output),
+            Err(QuicSplitError::Invalid)
+        );
+    }
 
     #[test]
     fn собирает_clienthello_из_двух_initial_и_проверяет_принадлежность_полёту() {
