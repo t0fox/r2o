@@ -17,7 +17,8 @@ pub const HOLD_WAIT: Duration = Duration::from_millis(100);
 const HOLD_EARLY_WINDOW: u32 = 16_384;
 const SYN_TRACK_CAPACITY: usize = 1024;
 const SYN_TRACK_TTL: Duration = Duration::from_secs(120);
-const HTTP_FLOW_CAPACITY: usize = 1024;
+/// C `D2K_HTTP80_FLOWS=128` (`datapath/include/d2k_http80.h:40`).
+pub const HTTP_FLOW_CAPACITY: usize = 128;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HoldOutcome {
@@ -1077,9 +1078,18 @@ impl HoldTable {
             *flow = replacement;
             return;
         }
+        // C `make` (`datapath/http80.c:217-236`): при заполнении таблицы
+        // вытесняется самый старый поток (`touched`), а не отвергается новый.
         if self.http_requests.len() >= HTTP_FLOW_CAPACITY
-            || self.http_requests.try_reserve(1).is_err()
+            && let Some((oldest, _)) = self
+                .http_requests
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, flow)| flow.seen)
         {
+            self.http_requests.remove(oldest);
+        }
+        if self.http_requests.try_reserve(1).is_err() {
             return;
         }
         self.http_requests.push(replacement);
@@ -1371,7 +1381,12 @@ fn synthetic_packet(head: &[u8], hello: &[u8]) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{HOLD_WAIT, HoldOptions, HoldOutcome, HoldTable};
+    use super::{
+        Endpoint, HOLD_WAIT, HTTP_FLOW_CAPACITY, HoldOptions, HoldOutcome, HoldTable,
+        HttpRequestObservation,
+    };
+    use crate::capture::TcpFlowKey;
+    use r2k_core::addr::Address;
     use std::time::{Duration, Instant};
 
     fn tcp_packet(sequence: u32, flags: u8, payload: &[u8]) -> Vec<u8> {
@@ -1395,6 +1410,63 @@ mod tests {
 
     fn hello() -> Vec<u8> {
         vec![22, 3, 3, 0, 4, 1, 0, 0, 0]
+    }
+
+    #[test]
+    fn http_flow_table_evicts_oldest_at_128_like_c() {
+        const REQUEST: &[u8] = b"GET /x HTTP/1.1\r\nHost: h\r\n\r\n";
+        let mut table = HoldTable::default();
+        let base = Instant::now();
+        let client = Address::parse("192.0.2.10").unwrap();
+        let mut keys = Vec::new();
+        for index in 0..HTTP_FLOW_CAPACITY as u16 {
+            let mut packet = tcp_packet(1000, 0x18, REQUEST);
+            packet[22..24].copy_from_slice(&(50_000_u16 + index).to_be_bytes());
+            let key = TcpFlowKey::from_packet(&packet).unwrap();
+            keys.push(key);
+            table.remember_http_request(
+                key,
+                Endpoint {
+                    address: client,
+                    port: 50_000 + index,
+                },
+                1,
+                HttpRequestObservation {
+                    sequence: 1000,
+                    request: REQUEST,
+                    host: b"h".to_vec(),
+                    target: b"/x".to_vec(),
+                    response_anchor: None,
+                    rtt: Duration::ZERO,
+                    now: base + Duration::from_millis(u64::from(index)),
+                },
+            );
+        }
+        assert_eq!(table.http_requests.len(), HTTP_FLOW_CAPACITY);
+
+        let mut packet = tcp_packet(1000, 0x18, REQUEST);
+        packet[22..24].copy_from_slice(&60_000_u16.to_be_bytes());
+        let fresh = TcpFlowKey::from_packet(&packet).unwrap();
+        table.remember_http_request(
+            fresh,
+            Endpoint {
+                address: client,
+                port: 60_000,
+            },
+            1,
+            HttpRequestObservation {
+                sequence: 1000,
+                request: REQUEST,
+                host: b"h".to_vec(),
+                target: b"/x".to_vec(),
+                response_anchor: None,
+                rtt: Duration::ZERO,
+                now: base + Duration::from_secs(1),
+            },
+        );
+        assert_eq!(table.http_requests.len(), HTTP_FLOW_CAPACITY);
+        assert!(!table.http_requests.iter().any(|flow| flow.key == keys[0]));
+        assert!(table.http_requests.iter().any(|flow| flow.key == fresh));
     }
 
     fn client_hello(host: &[u8]) -> Vec<u8> {
