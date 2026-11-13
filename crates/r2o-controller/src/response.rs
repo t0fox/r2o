@@ -1244,6 +1244,22 @@ fn read_random_bytes(reader: &mut impl std::io::Read, out: &mut [u8]) -> bool {
     true
 }
 
+fn neutral_sni_fallback(sec: u64, nsec: u32, pid: u32, counter: u64) -> [u8; 10] {
+    let mut state = (u64::from(nsec) << 20)
+        ^ sec
+        ^ (u64::from(pid) << 40)
+        ^ counter.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    state |= 1;
+    let mut random = [0_u8; 10];
+    for byte in &mut random {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        *byte = (state >> 24) as u8;
+    }
+    random
+}
+
 fn neutral_sni() -> String {
     let mut random = [0_u8; 10];
     let random_ok = File::open("/dev/urandom")
@@ -1258,18 +1274,15 @@ fn neutral_sni() -> String {
                 *counter
             })
             .unwrap_or(1);
-        let mut state = SystemTime::now()
+        let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64
-            ^ (std::process::id() as u64).rotate_left(17)
-            ^ counter.wrapping_mul(0x9e37_79b9_7f4a_7c15);
-        for byte in &mut random {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            *byte = (state >> 24) as u8;
-        }
+            .unwrap_or_default();
+        random = neutral_sni_fallback(
+            now.as_secs(),
+            now.subsec_nanos(),
+            std::process::id(),
+            counter,
+        );
     }
     let suffix: String = random
         .iter()
@@ -1736,6 +1749,14 @@ mod tcp_split_transport_tests {
         assert_eq!(ResponseVerdict::Blocked.as_str(), "blocked");
         assert_eq!(ResponseVerdict::Flaky.as_str(), "flaky");
         assert_eq!(ResponseVerdict::NotApplicable.as_str(), "not_applicable");
+    }
+
+    #[test]
+    fn neutral_sni_fallback_matches_c_vector() {
+        let random = super::neutral_sni_fallback(1_700_000_000, 123_456_789, 4321, 1);
+        let hex: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+        // Вектор снят с C `d2k_neutral_sni` fallback при тех же sec/nsec/pid/counter.
+        assert_eq!(hex, "d5cb5d70a46d1b95f18f");
     }
 
     #[test]

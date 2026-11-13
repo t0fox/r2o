@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 320 | 228 | 0 | 0 |
-| core-state | 692 | 383 | 309 | 0 | 0 |
+| core-state | 692 | 384 | 308 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1208** | **774** | **0** | **0** |
+| **Итого** | **1982** | **1209** | **773** | **0** | **0** |
 
-Это не оценка паритета: 774 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 773 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1208 / P 774 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1209 / P 773 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 320 | 228 | 0 | 0 |
-| core-state | 692 | 383 | 309 | 0 | 0 |
+| core-state | 692 | 384 | 308 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1208** | **774** | **0** | **0** |
+| **Итого** | **1982** | **1209** | **773** | **0** | **0** |
 
 
 ---
@@ -2273,7 +2273,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_link_set_bypass_family` | 758–761 | 4 | SET_BYPASS: name ≤253, area_context_valid, тело name+transport+shape+family+area_id | `control.rs:1515-1522 encode_set_bypass`, `:1533-1551` | **E*** | **Точное совпадение тела:** C `send_area_key(D2K_CMD_SET_BYPASS)` с теми же проверками и полями (`link.c:758-761`); Rust `encode_set_bypass` → `encode_domain_area_key`, name 1..253 + `valid_domain_area_context`, то же тело; area_id добавляется отдельно. |
 | `d2k_link_del_bypass_family` | 762–765 | 4 | DEL_BYPASS: name ≤253, area_context_valid, тело name+transport+shape+family+area_id | `control.rs:1524-1531 encode_delete_bypass`, `:1533-1551` | **E*** | **Точное совпадение тела:** C `send_area_key(D2K_CMD_DEL_BYPASS)` с теми же проверками и полями (`link.c:762-765`); Rust `encode_delete_bypass` → `encode_domain_area_key`, name 1..253 + `valid_domain_area_context`, то же тело; area_id добавляется отдельно. |
 | `d2k_link_area_identified` | 767–777 | 11 | area-команда с identity: id non-null + area_context_valid; SET_SUFFIX → send_name_plan с id, иначе send_area_key с id | `control.rs` `encode_set_suffix`/`encode_delete_suffix`/`encode_set_bypass`/`encode_delete_bypass`, `main.rs` `control_frame_with_area_id` | E | C: id non-null + area_context_valid; SET_SUFFIX → send_name_plan с 16-байтным id после плана, иначе send_area_key с id. Rust перечисленные энкодеры + `control_frame_with_area_id` добавляют id в конец и обновляют длину; тест `area_commands_append_identity_like_c` (SET_SUFFIX и три area-команды, плюс нулевой id). |
-| `addr_shape_ok` | 783–787 | 5 | 1/2/3(QUIC)/5(VOICE)/6(ECH_TCP)/**8..13** | `control::valid_addr_shape` (`control.rs:1462`) | **P*** | **Подтверждённое расхождение:** C принимает контекстные TCP-формы 8–13 (`d2k_link.h:311-328`, `link.c:786`); Rust `valid_addr_shape` — только `{1,2,3,5,6}`. `SET_ADDR`/`DEL_ADDR` с формой 8–13 C кодирует, Rust отвергает. |
+| `addr_shape_ok` | 783–787 | 5 | 1/2/3(QUIC)/5(VOICE)/6(ECH_TCP)/**8..13** | `control::valid_addr_shape` (`control.rs:1479`) | E | C принимает контекстные TCP-формы 8–13. Rust `valid_addr_shape` принимает 1/2/3/5/6 и `is_tcp_context_shape` 8..13; `encode_set_addr`/`encode_delete_addr` используют его; тест `addr_commands_accept_tcp_context_shapes_like_c` проверяет все 8..13 для set/del. |
 | `d2k_link_set_addr` | 789–792 | 4 | SET_ADDR IPv4: обёртка family=4 → `set_addr_family` | `control.rs` `encode_set_addr` | E | C-обёртка зовёт `set_addr_family(..., family=4)`; тело family+16 байт адреса (v4 + 12 нулей)+shape+план. Rust `encode_set_addr(IpAddr::V4, ...)` выдаёт ту же раскладку; тест `link_wrappers_emit_c_family4_frames` сверяет тело. |
 | `d2k_link_set_addr_family` | 794–848 | 55 | SET_ADDR family 4/6: shape, hex, 16-байтный адрес, план без проверки совместимости | `control::encode_set_addr` | E | C проверяет `addr_shape_ok` (1/2/3/5/6/8..13), кодирует family+16 байт+shape+hex, план не сверяет. Rust `valid_addr_shape` теперь включает 8..13, `encode_set_addr` не вызывает `valid_addr_plan_records`; кадр совпадает. Тесты `addr_commands_accept_tcp_context_shapes_like_c`, `кодирует_адресные_планы_ipv4_ipv6_и_удаляет_только_заданную_форму`. |
 | `addr_probe_flow_bytes` | 852–866 | 15 | 38 байт: family, src/dst 16-байт, src_port_be, dst_port_be, transport 17; **src_port_be=0 разрешён**, dst≠0 | `control::udp_addr_probe_flow` (`control.rs:1670`) | **P*** | **Подтверждённое расхождение:** C явно допускает `src_port_be=0` — голосовой опыт «на любой клиентский порт» (`link.c:855`); Rust `udp_addr_probe_flow` требует `source.port()!=0` (`control.rs:1677`). `SET_ADDR_PROBE`/`DEL_ADDR_PROBE` voice с нулевым исходным портом C кодирует, Rust отвергает. |
@@ -6732,7 +6732,7 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
 | `d2k_resp_scan12` | 83-118 | 996 | поток TLS-записей: неполная запись — ждать; `0x15` — останов с `done=0`; `0x16` — склейка handshake; type 14/len 0 — ServerHelloDone | response.rs:1248 `scan12` | **E** | **Построчно совпадает:** C и Rust идут по полным записям (`have-pos>=5`, `rlen=BE16(p+3)`, `have-pos<5+rlen` → продолжить чтение), тип `0x15` завершает разбор (C `*done=0`, Rust `FatalAlert`), тип `0x16` разбирает payload как непрерывный поток 4-байтных handshake-заголовков (`body` 24 бита, `hdr[0]==14 && body==0` → ServerHelloDone), прочие типы пропускаются. В `handshake` C `rc=0` и Rust `Trial::Failed` дают один исход «не дошло». Тесты `tests/response.rs:122` (склейка через записи), `:138` (0x0e внутри сертификата), `:338` (заголовок через записи, alert), `:479` (общие C-векторы). |
 | `d2k_resp_handshake12` | 123-207 | 2623 | legacy ClientHello, getaddrinfo по `:` в хосте, socket, `SO_MARK`/`TCP_NODELAY`/`SNDTIMEO`/`RCVTIMEO`, connect/send, 64 КиБ, poll/recv, `scan12`; 1/0/-1 | `response.rs` `handshake` | **E*** | C: legacy hello, TCP_NODELAY/timeouts, `RESPONSE_CAP=65536`, poll/recv, `scan12`, переполнение/alert/обрыв → Unmeasured. Rust `response::handshake` повторяет legacy hello, таймауты, 64 КиБ, poll/recv и `scan12`; тесты `tests/response.rs` (`scans_handshake_messages...`, `incomplete_tls_record_is_not_mistaken...`, `probe_response`). **Ограничение:** `SO_MARK`/`MSG_NOSIGNAL` и точные тексты причин отличаются; C/Rust differential полного handshake12 не подключён. |
 | `count_handshakes` | 215-228 | 403 | последовательные `repeats`: `r>0` → done++, `r<0` → unmeasured++, вернуть done | response.rs:1148 `count_handshakes` | **E** | **Совпадает:** C и Rust считают рукопожатия строго последовательно; `Done` увеличивает счётчик, `Failed` пропускается, `Unmeasured` увеличивает `unmeasured`; результат — число завершённых. Rust дополнительно считает `probes` (каждая попытка) и резолвит адрес на каждую попытку — C делает то же внутри `d2k_resp_handshake12`. `Err` из Rust достижим только при недопустимом SNI, который `probe_response` отсекает заранее. Тест `tests/response.rs:649`. |
-| `d2k_neutral_sni` | 233-269 | 1252 | 10 случайных байт из `/dev/urandom`, fallback xorshift, hex из младших тетрад, `z<hex>.example.com` | `response.rs` `neutral_sni`, `read_random_bytes` | **E*** | C: 10 байт, low-nibble hex, `z%s.example.com`, fallback xorshift 13/7/17; частичное чтение urandom допускается. Rust `neutral_sni` использует `read_random_bytes`, который накапливает частичные чтения до 10 байт и уходит в fallback только при EOF/ошибке; тест `neutral_sni_reads_partial_urandom_like_c` (чанки 3+7 и короткий поток). **Ограничение:** seed fallback и точная его формула отличаются; прямого C/Rust-теста fallback нет. |
+| `d2k_neutral_sni` | 233-269 | 1252 | 10 случайных байт из `/dev/urandom`, fallback xorshift, hex из младших тетрад, `z<hex>.example.com` | `response.rs` `neutral_sni`, `read_random_bytes`, `neutral_sni_fallback` | E | C: 10 байт, low-nibble hex, `z%s.example.com`; частичное чтение urandom допускается; fallback `(nsec<<20)^sec^(pid<<40)^(++counter*0x9e3779b97f4a7c15)`, `x|=1`, xorshift 13/7/17. Rust повторяет и частичное чтение (`read_random_bytes`), и точную формулу fallback; тесты `neutral_sni_reads_partial_urandom_like_c`, `neutral_sni_fallback_matches_c_vector` (C-вектор `d5cb5d70a46d1b95f18f`). |
 | `d2k_resp_decide` | 274-304 | 1957 | `unmeasured>0` → NOT_APPLICABLE; `control==0` → NOT_APPLICABLE; `target==repeats` → CLEAR; `target==0` → BLOCKED; иначе FLAKY; точные reason | response.rs:1304 `decide` | **E** | **Точное совпадение всех пяти ветвей и текстов:** C (`response.c:274-304`) и Rust (`response.rs:1304-1340`) проверяют в одном порядке `unmeasured`, `control==0`, `target==repeats`, `target==0`, иначе FLAKY; reason побайтово совпадают, включая «64 КБ», «сертификат в TLS 1.2 идёт открытым текстом» и `target/repeats`. `res->target/control` выставляются до решения. Тесты `tests/response.rs:421` (unmeasured/control/flaky), `:479` (общие векторы), `:649`. |
 | `d2k_probe_response` | 310-324 | 806 | `memset(res)`, target-count по SNI, нейтральное имя, control-count, `decide` | `response.rs` `probe_response` | **E*** | C считает target/control на одном `host:port`, control — другое случайное имя, решение `decide(target,control,unmeasured,repeats)`. Rust `probe_response` делает то же; тесты `tests/response.rs` (target/control, decide-таблица, alert/обрыв, неполная запись). **Ограничение:** Rust до зондов проверяет `repeats>0`/i32 и валидность legacy-приветствия, тексты причин иные. |
 
