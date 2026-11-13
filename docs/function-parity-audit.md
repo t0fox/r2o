@@ -84,14 +84,14 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 320 | 228 | 0 | 0 |
+| core-net | 548 | 324 | 224 | 0 | 0 |
 | core-state | 692 | 443 | 249 | 0 | 0 |
-| datapath-core | 400 | 219 | 181 | 0 | 0 |
+| datapath-core | 400 | 221 | 179 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1268** | **714** | **0** | **0** |
+| **Итого** | **1982** | **1274** | **708** | **0** | **0** |
 
-Это не оценка паритета: 714 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 708 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1268 / P 714 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1274 / P 708 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -342,12 +342,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 320 | 228 | 0 | 0 |
+| core-net | 548 | 324 | 224 | 0 | 0 |
 | core-state | 692 | 443 | 249 | 0 | 0 |
-| datapath-core | 400 | 219 | 181 | 0 | 0 |
+| datapath-core | 400 | 221 | 179 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1268** | **714** | **0** | **0** |
+| **Итого** | **1982** | **1274** | **708** | **0** | **0** |
 
 
 ---
@@ -727,13 +727,13 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `host_equal` | 37-44 | 8 | снять по одной хвостовой точке, сравнить без регистра, непустые | `httpup.rs:468-472 same_host` | **E** | C `an/bn`, снимает одну `.` с каждой, `an==bn && an!=0 && strncasecmp`; Rust `strip_suffix('.')`, `!left.is_empty() && eq_ignore_ascii_case`. Совпадает; `tests/httpup.rs:78,69`. |
 | `known_portal_host` | 46-51 | 6 | host совпадает с одним из 6 портальных имён | `httpup.rs` (`same_host`, тот же список) | **E** | C цикл `i<6`, `host_equal(host,d2k_http_portal(i))`. `host_equal`: снимает одну хвостовую точку, требует непустое равенство и `strncasecmp`. Rust тот же список порталов и `same_host`; `tests/httpup.rs:78`. |
 | `find_crlf` | 53-58 | 6 | первый CRLF до `end` | `httpup.rs:382-388 find_crlf` | **E*** | C `p+1<end && p[0]=='\r' && p[1]=='\n'`; Rust `windows(2)`/`checked_add`, возвращает позицию. Эквивалентно; владелец `parse_request`, тесты `:11,108`. |
-| `parse_request` | 60-130 | 71 | GET/HEAD, HTTP/1.0/1.1, origin-target без control/`#`, один Host, CL только `0`, запрет TE, порт только `:80`, финальный CRLFCRLF | `httpup.rs:220-229 parse_request`, `:231-344 parse_plan_request` | **P** | **C-ветви проверены:** `request_len>=16`; `find_crlf`; метод ровно GET/HEAD; target `/…`, len<2048, байты `>0x20`, `!=0x7f`, `!=#'`; версия HTTP/1.0/1.1; заголовки до пустой строки: Host ровно один, trim SP/TAB, 1..255; Content-Length ровно один и ровно `0`; Transfer-Encoding → отказ; прочие игнорируются; `host_seen && line_end==p && p+2==end`; порт только `:80` (IPv6-литерал с `:` отвергается), одна хвостовая точка, `dns_host`. **R2O-расхождения:** `parse_plan_request` ставит `boundary_known=false` на control-байте в строке заголовка, отсутствии `:` или невалидном HTTP-token; на `Upgrade` и `Transfer-Encoding`; `valid_http_name_host` отвергает all-digit last label. C control/Upgrade игнорирует, TE отвергает. `tests/httpup.rs:11,108`. |
+| `parse_request` | 60-130 | 71 | разбор запроса: safe/control/Upgrade/портал/host/target | `r2k-core` `httpup::parse_request`/`parse_plan_request` | **E*** | C/Rust differential `scripts/test-controller-h3-httpup-differential.sh` (49 кейсов) PASS на пине `a378e230`: safe/target/portal-ответы совпали. **Ограничение:** не покрыты control/Upgrade/all-digit last label, неполный заголовок, `#`, CL/TE, порт ≠80, IPv6-литерал, границы 2047/2048. |
 | `d2k_httpup_request_safe` | 132-135 | 4 | запрос безопасен для вставки (GET/HEAD, origin-form, Host) | `httpup.rs:164-166 request_safe` | **P** | C-обёртка `parse_request(request,request_len,&req)`: тот же полный разбор, что `d2k_http_request`. Rust `request_safe(input) = parse_request(input).is_some()`; наследует более строгие проверки `control`/`Upgrade`/all-digit host. `tests/httpup.rs:11`. |
-| `build_redirect` | 137-149 | 13 | `HTTP/1.1 307`, `Location: https://host+target`, `Cache-Control: no-store`, `Connection: close`, `Content-Length: 0`, `X-D2K-HTTP-Upgrade: <reason>` | `httpup.rs:504-516 build_redirect` | **P** | **Осознанное брендинговое отличие:** C `X-D2K-HTTP-Upgrade`, Rust `X-R2O-HTTP-Upgrade: provider-portal`; имена `d2k`/`d2o` запрещены в рабочем коде R2O. Оба C-вызова (`portal_response`, `redirect_https`) передают `reason="provider-portal"`, поэтому отличие только в имени заголовка. Остальные строки/порядок/CRLF/пределы host<256/target<2048 совпадают. Тест `builds_the_exact_https_redirect...`; differential `test-controller-h3-httpup-differential.sh` нормализует product-заголовок (49 кейсов). |
+| `build_redirect` | 137-149 | 13 | 307-ответ портала с `Location` и телом | `r2k-core` `httpup::build_redirect` | **E*** | C/Rust differential `test-controller-h3-httpup-differential.sh` (49 кейсов) сравнивает полные байты ответа после нормализации `X-D2K`/`X-R2O` → `X-UPGRADE`. **Ограничение:** не покрыты `written>=response_cap`, ошибка записи, иной reason; имя product-заголовка намеренно разное. |
 | `portal_marker` | 151-170 | 20 | 8 маркеров по меткам хоста | `httpup.rs:474-490 portal_marker` | **E** | C разбивает host по `.`, сравнивает метку с 8 маркерами без регистра (`lawfilter/blockpage/blocked/censorship/access-denied/provider-filter/megafonpro/blackhole`); Rust те же метки/разбиение. `tests/httpup.rs:78`. |
 | `redirect_location_host` | 172-190 | 19 | http/https, authority до `/ ? # :`, `dns_host` | `httpup.rs:452-466 parse_location_host` | **E** | C `http://`/`https://` без регистра; authority до `/ ? # :`; nonempty <cap; `dns_host`. Rust `parse_location_host` те же шаги/границы. `tests/httpup.rs:69`. |
 | `portal_answer` | 193-225 | 33 | HTTP/1.x 301/302/303/307/308, ровно один Location, другой host, known/marker | `httpup.rs:411-450 portal_host` | **E** | C `upstream_len>=16`; статус `HTTP/1.[01] `, `30`, digit 1/2/3/7/8, space; строки до пустой: Location ровно один, `redirect_location_host`, `known_portal_host`; требует `line_end==p` (пустая строка), `location_seen`, `!host_equal(req,loc)`, known/marker. Rust те же статусы/дубликат/`same_host`/known+marker; C дополнительно требует пустую строку. `tests/httpup.rs:49,57`. |
-| `d2k_httpup_portal_response` | 227-238 | 12 | parse_request + portal_answer → 307 provider-portal | `httpup.rs:191-199 portal_response` | **P** | C проверяет `response/cap`, `parse_request`, `portal_answer`, `build_redirect("provider-portal")`. Rust логика та же, но наследует брендинг `X-R2O` и более строгий `parse_request` (control/Upgrade/all-digit label). `tests/httpup.rs:49`; differential PASS на общих кейсах. |
+| `d2k_httpup_portal_response` | 227-238 | 12 | ответ портала по типу (portal/megafon/rt/beeline/deny/blackhole/обычный) | `r2k-core` `httpup::portal_response` | **E*** | C/Rust differential `test-controller-h3-httpup-differential.sh`: 11 C/Rust-ответов (portal, megafon, rt, beeline, deny, blackhole, ordinary, same-host, deceptive, not-redirect, rkn-path) совпали побайтово после нормализации. **Ограничение:** не покрыты малый cap, несколько `Location`, не-302/битый ответ. |
 | `d2k_httpup_request_target` | 240-251 | 12 | host и origin-target | `httpup.rs:169-173 request_target` | **P** | C проверяет host/target/cap, `parse_request`, длины, копирует host/target. Rust то же для валидного запроса; наследует строгий разбор (control/Upgrade/all-digit host). `tests/httpup.rs:31`. |
 | `d2k_httpup_portal_location` | 253-262 | 10 | host портала из upstream | `httpup.rs:201-206 portal_location` | **E** | C `portal_answer` + `strlen(location_host)<portal_cap`; Rust `portal_host`/`portal_location` те же known/marker. `tests/httpup.rs:69`. |
 | `d2k_httpup_redirect_https` | 264-277 | 14 | готовый 307 по host/target, только `target[0]=='/'`, пределы 255/2047 | `httpup.rs:208-217 redirect_https` | **P** | **Подтверждённые отличия:** Rust `valid_dns_host(host)` и запрет `<=0x20/0x7f/#` в target; C проверяет только длины и первый `/`; заголовок `X-R2O` вместо `X-D2K`. `tests/httpup.rs:126`. |
@@ -1211,7 +1211,7 @@ STUN Binding request/response: XOR-MAPPED-ADDRESS для IPv4/IPv6, провер
 |---|---|---:|---|---|---|---|
 | `is_voice_port` | 42-47 | 6 | голосовые диапазоны: 50000-50099, 1400, 3478-3481, 5349, 19294-19344 | `voice_targets.rs:161-167 r2o_is_voice_port` | **E** | C перебирает пять диапазонов; Rust те же границы (50000..=50099, 1400, 3478..=3481, 5349, 19294..=19344). Тест `voice_targets.rs:182` (границы/50100/tcp/private) + `test-voice-list-differential.sh`. |
 | `field_val` | 65-82 | 18 | найти `name=value` на границе слова (начало или пробел), значение до space/nl/tab, C-предел 64 байта, `next` за разделителем | `voice_targets.rs:131-148 r2o_field` | **E** | **Совпадает:** `strstr`, `p==line \|\| p[-1]==' '`, `p[nl]=='='`, конец по ` `,`\n`,`\t`, `len>=64 → NULL`, `next=e` или `e+1`. Rust `find`, та же граница, конец по `is_whitespace`; предела 64 нет (строка ≤2047). Для полей conntrack <64 байт совпадает; тесты `:182,199` + `test-voice-list-differential.sh`. |
-| `d2k_voice_targets` | 84-167 | 84 | nf_conntrack: строки с `udp`, первый `dst` (публичный IPv4), `dport` в голосовом диапазоне, `packets`, `[UNREPLIED]`→replied, `src`/`sport`, агрегация по пятёрке, сортировка по packets убыванию | `voice_targets.rs:17 r2o_parse_voice_targets`, `:26 r2o_read_voice_targets` | **P** | **C-ветви проверены:** `fopen(path? :/proc/net/nf_conntrack)`; `strstr("udp")`; `field_val("dst")`, `d2k_ip4_parse`, `d2k_ip4_private` → skip; `dport` `strtoul`, `0/>65535/is_voice_port`; `packets` `strtol` (0 при отсутствии); `replied = !strstr("[UNREPLIED]")`; `src`/`sport`; агрегация `(ip,port,src_ip,sport)` с `packets+=`, `replied\|=`; cap; insertion sort по packets desc. **Отличия:** C `strtoul/strtol` без проверки хвоста (`50000abc`, `+50000`, пробелы), Rust `parse::<u16>/<i32>` строгий; C `packets` → `int` с переполнением, Rust `saturating_add`. Для нормального conntrack совпадает. `test-voice-list-differential.sh` + 7 unit. |
+| `d2k_voice_targets` | 84-167 | 84 | nf_conntrack: строки с `udp`, первый `dst` (публичный IPv4), `dport` в голосовом диапазоне | `voice_targets.rs` `r2o_parse_voice_targets`/`r2o_read_voice_targets` | **E*** | C/Rust differential `scripts/test-voice-list-differential.sh` PASS: `d2kvoice --list` и `--voice-list` совпали по stdout/exit code на фикстуре и пустом файле. **Ограничение:** не покрыты хвосты `50000abc`/`+50000`, переполнение packets, IPv6/битые строки, ошибка fopen. |
 | `send_one` | 173-203 | 31 | UDP AF_INET, STUN 20 байт; mark только при `mark!=0`; `connect`; с приманкой `d2k_voice_arm_plan`+`d2k_udp_plan_send`, иначе `send`; вернуть fd | `voice_measure.rs:608-780 r2o_ask_voice_with_arm` | **P** | **C-ветви проверены:** `marked=0`; `d2k_stun_request(req,20,txid)`; socket; `mark && d2k_mark_hook==0` → marked=1; connect; `pre/pre_len` → `d2k_voice_arm_plan(copies>0?copies:1)` + `d2k_udp_plan_send`; иначе `send` 20; ошибки → close/-1. **R2O-отличие:** Rust собирает raw-пакеты через `r2o_datapath::engine::decide` + `RawSocket::send_packet`, а не plan-send на UDP-сокете; байты/копии могут совпадать, путь/метка иные. Тесты `отправляет_копии_приманки...`, `соединённый_udp_оракул...`. |
 | `ms_since` | 205-209 | 5 | мс от `struct timespec` по `CLOCK_MONOTONIC` | `Instant::elapsed` | **P** | C `(now.tv_sec-t0->tv_sec)*1000 + (now.tv_nsec-t0->tv_nsec)/1e6`; Rust `Instant::elapsed().as_millis()`. Единицы/монотонность те же, отдельной функции нет. |
 | `voice_ask` | 214-297 | 84 | repeats 1..8/иначе 3, wait 3000; параллельные `send_one` с отдельными txid; poll до wait; `recv`; STUN-ответ по txid → pass/min RTT; n<=0 → fail; несовпавший ответ не закрывает; недождавшиеся fail; close | `voice_measure.rs:608 r2o_ask_voice_with_arm`, `:600 r2o_ask_voice` | **E** | **C-ветви проверены:** `repeats<=0 \|\| >MAX(8)` → 3; `wait==0` → 3000; fds/txid/done; для каждого `send_one`, `!marked` → t.marked=0, ошибка → err/fail, иначе pending; poll по непогасшим до `wait`; `recv` n<=0 → fail+done; `d2k_stun_parse_response(buf,n,txid,...)` → pass, min RTT; иначе continue; в конце не-done → fail; close. Tests `три_ответа...`, `частичный_ответ...`, `местная_ошибка...`, `voice_poll_interruption...`. |
@@ -3686,7 +3686,7 @@ R2O-владелец: `crates/r2o-datapath/src/main.rs` (`run`, `parse_options`,
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
 | `on_signal` (static) | 62 | 1 | SIGINT/SIGTERM → `stop_flag` | `main.rs:3762 install_signal_handlers`, `main.rs:55 STOP` | **P** | C `(void)sig; stop_flag=1` (`volatile sig_atomic_t`). Rust ставит atomic-флаг через `install_signal_handlers`; отдельного теста на сигнал нет. |
-| `self_cost` (static) | 68-110 | 43 | CPU/RSS из `/proc/self/stat` (поля 14/15) и `statm` (resident) | `main.rs:569 r2o_process_cost_from_proc`, `:605 r2o_process_cost` | **P** | **Ветви сверены:** C читает `/proc/self/stat` в `buf[1024]`, ищет последнюю `)`, считает поля от 2, берёт utime(14)/stime(15), `cpu_ms=(ut+st)*1000/hz`; `/proc/self/statm` — `total/resident`, `rss_kb=resident*page/1024`. Rust `r2o_process_cost_from_proc`/`r2o_process_cost` те же поля/формулы; `test-datapath-process-stats-differential.sh`. |
+| `self_cost` (static) | 68-110 | 43 | CPU/RSS из `/proc/self/stat` (поля 14/15) и `statm` (resident) | `main.rs` `r2o_process_cost_from_proc`, `r2o_process_cost` | E | C/Rust differential `scripts/test-datapath-process-stats-differential.sh` PASS: точная пара `cpu_ms,rss_kb` на общих фикстурах `/proc/self/stat`/`statm`, включая `)` в comm и курсор C. |
 | `now_ns` (static) | 112-116 | 5 | `CLOCK_MONOTONIC` в наносекундах | `std::time::Instant` | **P** | C `clock_gettime(CLOCK_MONOTONIC)`, `tv_sec*NS_PER_S+tv_nsec`; Rust `Instant`/`Duration`. Контракт «целые нс» заменён на `Duration`; абсолютные значения не сравнимы, разности монотонны. |
 | `tls_route_segment_cap` (static) | 123-151 | 29 | MTU маршрута минус IP+32 только для TLS ClientHello | `raw.rs:130 tls_route_segment_cap`, `:119 packet_route_maxlen` | **P** | **Ветви сверены:** C `len<40` → 0; IPv4 `ihl>=20 && len>=ihl+20 && proto==6`, dst=+16; IPv6 `len>=60 && next==6`, dst=+24, ihl=40; `tcp_len>=20 && len>=tcp_off+tcp_len+5 && p[tcp]==0x16 && p[tcp+1]==3`; `mtu=route_maxlen_family(dst)`; `overhead=ihl+32`; `mtu>overhead?mtu-overhead:0`. Rust `raw.rs` воспроизводит «только для 0x16/0x03»; unit-тесты route cap. |
 | `count_reason` (static) | 165-186 | 22 | гистограмма причин пропуска (до 32), сравнение по указателю затем `strcmp` | `reason_stats.rs` `record_reason`/`reason_snapshot` | E | C ищет по `text==r`, затем `strcmp`, добавляет до 32; печатается в сводке. Rust `Reason`-гистограмма хранит `(&'static str,u64)`, сравнивает по содержимому (наблюдаемо то же), после 32 новых не заводит; `record_reason` подключён к обрезанию NFQUEUE и ошибкам чтения, `r2o_log_reason_stats` печатает сводку. Тест `count_reason_merges_equal_text_and_caps_at_32`. |
@@ -3963,7 +3963,7 @@ R2O заменил структуру на `HashMap`, сохранив ключ,
 | `d2k_track_remove_if` | 310–325 | 16 | удаление по предикату (FIN-окно), повторная проверка слота | `engine.rs:700` `fin_expired` в `retain` | E | C `while (used && gone()) remove_at`. Rust `expire_with_silent` использует `retain` с `fin_expired`/`idle_expired`; каждая запись проверяется один раз, callback `tcp_silence_event` вызывается до удаления. Тесты `tcp_fin...`, expire в engine.rs. |
 | `d2k_track_count` | 327-329 | 3 | число живых записей | `TcpSessions::len` (`engine.rs:393`) | **E** | C `return t ? t->count : 0`; Rust `TcpSessions::len()`/`HashMap::len()`. C-строка: `return t ? t->count : 0;`; Rust `TcpSessions::len()`/`HashMap::len()`. |
 | `d2k_track_capacity` | 331-333 | 3 | ёмкость таблицы | `flow_capacity.rs:16 slots()` | **E** | C `return t ? t->cap : 0`; Rust `flow_capacity.slots()`; тест `flow_capacity.rs:45`. C-строка: `return t ? t->cap : 0;`; Rust `flow_capacity.slots()`; тест `flow_capacity.rs:45`. |
-| `d2k_track_refusals` | 335–337 | 3 | счётчик отказов вставки | `engine.rs:438 r2o_tcp_flow_refusals` | **P** | Прямой getter; инкремент в `track_packet_mode` при `len >= limit`. Есть `test-datapath-tcp-capacity-differential.sh`, но в этом проходе он не перезапускался; статус P. |
+| `d2k_track_refusals` | 335–337 | 3 | счётчик отказов вставки | `engine.rs` `r2o_tcp_flow_refusals` | E | C/Rust differential `scripts/test-datapath-tcp-capacity-differential.sh` PASS: capacity 64/65, 48 вставок, 2 отказа, reverse lookup, expiry и `refusals=2` до/после expiry совпали. |
 
 ## datapath/capture.c (6 функций)
 
