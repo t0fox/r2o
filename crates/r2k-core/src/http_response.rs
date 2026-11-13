@@ -278,6 +278,16 @@ fn invalid_line_byte(byte: u8) -> bool {
     byte == 0 || byte < 32 && !matches!(byte, b'\r' | b'\n' | b'\t') || byte == 127
 }
 
+/// C `span_eq_ascii_ci`: длина и посимвольное сравнение без регистра;
+/// `lower` — константа в нижнем регистре, как в C.
+fn span_eq_ascii_ci(span: &[u8], lower: &[u8]) -> bool {
+    span.len() == lower.len()
+        && span
+            .iter()
+            .zip(lower)
+            .all(|(value, expected)| value.to_ascii_lowercase() == *expected)
+}
+
 fn parse_headers(bytes: &[u8]) -> Option<(u16, Option<u64>, bool)> {
     let (status_end, status) = parse_status_line(bytes)?;
 
@@ -298,14 +308,14 @@ fn parse_headers(bytes: &[u8]) -> Option<(u16, Option<u64>, bool)> {
         };
         let name = &line[..colon];
         let value = trim_ascii_whitespace(&line[colon + 1..]);
-        if name.eq_ignore_ascii_case(b"Content-Length") {
+        if span_eq_ascii_ci(name, b"content-length") {
             let parsed = parse_decimal(value)?;
             if content_length.is_some_and(|previous| previous != parsed) {
                 return None;
             }
             content_length = Some(parsed);
-        } else if name.eq_ignore_ascii_case(b"Transfer-Encoding") {
-            if transfer_encoding || !value.eq_ignore_ascii_case(b"chunked") {
+        } else if span_eq_ascii_ci(name, b"transfer-encoding") {
+            if transfer_encoding || !span_eq_ascii_ci(value, b"chunked") {
                 return None;
             }
             transfer_encoding = true;
@@ -386,4 +396,18 @@ fn parse_chunk_size(line: &[u8]) -> Option<u64> {
         };
         value.checked_mul(16)?.checked_add(digit)
     })
+}
+
+#[cfg(test)]
+mod span_tests {
+    use super::span_eq_ascii_ci;
+
+    #[test]
+    fn span_eq_ascii_ci_matches_c() {
+        assert!(span_eq_ascii_ci(b"Content-Length", b"content-length"));
+        assert!(span_eq_ascii_ci(b"CHUNKED", b"chunked"));
+        assert!(!span_eq_ascii_ci(b"Content-Lengths", b"content-length"));
+        assert!(!span_eq_ascii_ci(b"", b"content-length"));
+        assert!(!span_eq_ascii_ci(b"transfer", b"chunked"));
+    }
 }

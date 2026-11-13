@@ -118,6 +118,11 @@ pub fn r2o_tls_client_connection_with_alpn(
 /// Вернуть список клиента, если он отсутствует или не содержит HTTP поверх TLS.
 /// `Some([])` означает ClientHello без ALPN; ошибочная форма и HTTP-протоколы
 /// оставляют прежнюю HTTP-проверку.
+/// C `d2k_alpn_is_http`: три HTTP-протокола в списке ALPN.
+fn alpn_is_http(name: &[u8]) -> bool {
+    matches!(name, b"http/1.1" | b"http/1.0" | b"h2")
+}
+
 pub fn r2o_tls_client_hello_non_http_alpn(client_hello: &[u8]) -> Option<Vec<Vec<u8>>> {
     if client_hello.len() < 9
         || client_hello[0] != 22
@@ -177,10 +182,7 @@ pub fn r2o_tls_client_hello_non_http_alpn(client_hello: &[u8]) -> Option<Vec<Vec
                     return None;
                 }
                 let name = &client_hello[protocol..protocol_end];
-                if [b"http/1.1".as_slice(), b"http/1.0", b"h2"]
-                    .iter()
-                    .any(|http| name == *http)
-                {
+                if alpn_is_http(name) {
                     return None;
                 }
                 protocols.push(name.to_vec());
@@ -485,4 +487,19 @@ fn push_extension(output: &mut Vec<u8>, kind: u16, value: &[u8]) -> Result<(), &
 
 fn push_u16(output: &mut Vec<u8>, value: u16) {
     output.extend_from_slice(&value.to_be_bytes());
+}
+
+#[cfg(test)]
+mod alpn_tests {
+    use super::alpn_is_http;
+
+    #[test]
+    fn alpn_is_http_matches_c() {
+        assert!(alpn_is_http(b"http/1.1"));
+        assert!(alpn_is_http(b"http/1.0"));
+        assert!(alpn_is_http(b"h2"));
+        assert!(!alpn_is_http(b"h3"));
+        assert!(!alpn_is_http(b"HTTP/1.1"));
+        assert!(!alpn_is_http(b""));
+    }
 }

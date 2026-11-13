@@ -498,6 +498,16 @@ fn locate_sni_for_record(bytes: &[u8]) -> Option<SniLayout> {
     locate_sni(&handshake)
 }
 
+/// C `hex_nibble`: `0-9a-fA-F` → 0..15, иначе `None` (C -1).
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn decode_profile(profile: &str) -> Option<Vec<u8>> {
     let mut hex = Vec::new();
     for line in profile.lines() {
@@ -509,9 +519,9 @@ fn decode_profile(profile: &str) -> Option<Vec<u8>> {
     }
     let mut bytes = Vec::with_capacity(hex.len() / 2);
     for pair in hex.chunks(2) {
-        let high = (pair[0] as char).to_digit(16)?;
-        let low = (pair[1] as char).to_digit(16)?;
-        bytes.push(((high << 4) | low) as u8);
+        let high = hex_nibble(pair[0])?;
+        let low = hex_nibble(pair[1])?;
+        bytes.push((high << 4) | low);
     }
     Some(bytes)
 }
@@ -775,5 +785,17 @@ mod tests {
             .concat(),
         );
         assert_eq!(hello_ech_offer(&duplicate), HelloEchOffer::Incomplete);
+    }
+
+    #[test]
+    fn hex_nibble_matches_c() {
+        use super::hex_nibble;
+        assert_eq!(hex_nibble(b'0'), Some(0));
+        assert_eq!(hex_nibble(b'9'), Some(9));
+        assert_eq!(hex_nibble(b'a'), Some(10));
+        assert_eq!(hex_nibble(b'F'), Some(15));
+        assert_eq!(hex_nibble(b'g'), None);
+        assert_eq!(hex_nibble(0), None);
+        assert_eq!(hex_nibble(b' '), None);
     }
 }
