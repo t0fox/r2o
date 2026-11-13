@@ -2654,7 +2654,7 @@ impl ControlServer {
         if !control::valid_release_id(release_id) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "недопустимый release ID control-wire",
+                crate::error_text::error_text(96, "недопустимый release ID control-wire"),
             ));
         }
         let path = path.as_ref().to_owned();

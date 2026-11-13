@@ -57,7 +57,7 @@ impl RawSocket {
         if !matches!(family, libc::AF_INET | libc::AF_INET6) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "raw-отправка поддерживает только IPv4 или IPv6",
+                crate::error_text::error_text(96, "raw-отправка поддерживает только IPv4 или IPv6"),
             ));
         }
         let fd = unsafe {
