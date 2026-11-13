@@ -23331,6 +23331,131 @@ struct BoundTcpProbe {
 }
 
 #[cfg(unix)]
+fn r2o_props_bind_any(
+    socket_type: libc::c_int,
+    family: u8,
+) -> std::io::Result<(std::os::fd::OwnedFd, u16)> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    if !matches!(family, 4 | 6) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "семейство адресов bind не поддерживается",
+        ));
+    }
+    let domain = if family == 4 {
+        libc::AF_INET
+    } else {
+        libc::AF_INET6
+    };
+    let raw = unsafe { libc::socket(domain, socket_type | libc::SOCK_CLOEXEC, 0) };
+    if raw < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let socket = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
+    let fd = socket.as_raw_fd();
+    if family == 6 {
+        // C `props_bind_any`: IPv6 wildcard не должен принимать IPv4.
+        let one: libc::c_int = 1;
+        let result = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_IPV6,
+                libc::IPV6_V6ONLY,
+                (&one as *const libc::c_int).cast(),
+                std::mem::size_of_val(&one) as libc::socklen_t,
+            )
+        };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    let bound = if family == 4 {
+        let address = libc::sockaddr_in {
+            sin_family: libc::AF_INET as libc::sa_family_t,
+            sin_port: 0,
+            sin_addr: libc::in_addr { s_addr: 0 },
+            sin_zero: [0; 8],
+        };
+        unsafe {
+            libc::bind(
+                fd,
+                (&address as *const libc::sockaddr_in).cast(),
+                std::mem::size_of_val(&address) as libc::socklen_t,
+            )
+        }
+    } else {
+        let address = libc::sockaddr_in6 {
+            sin6_family: libc::AF_INET6 as libc::sa_family_t,
+            sin6_port: 0,
+            sin6_flowinfo: 0,
+            sin6_addr: libc::in6_addr { s6_addr: [0; 16] },
+            sin6_scope_id: 0,
+        };
+        unsafe {
+            libc::bind(
+                fd,
+                (&address as *const libc::sockaddr_in6).cast(),
+                std::mem::size_of_val(&address) as libc::socklen_t,
+            )
+        }
+    };
+    if bound != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut local: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut length = std::mem::size_of_val(&local) as libc::socklen_t;
+    if unsafe {
+        libc::getsockname(
+            fd,
+            (&mut local as *mut libc::sockaddr_storage).cast(),
+            &mut length,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    let local_port = unsafe {
+        if family == 4 {
+            u16::from_be((*(&local as *const _ as *const libc::sockaddr_in)).sin_port)
+        } else {
+            u16::from_be((*(&local as *const _ as *const libc::sockaddr_in6)).sin6_port)
+        }
+    };
+    if local_port == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            "ядро не назначило локальный порт",
+        ));
+    }
+    Ok((socket, local_port))
+}
+
+/// C `d2k_props_bind_family`: IPv4/IPv6 TCP wildcard.
+#[cfg(unix)]
+fn r2o_props_bind_family(family: u8) -> std::io::Result<(std::os::fd::OwnedFd, u16)> {
+    r2o_props_bind_any(libc::SOCK_STREAM, family)
+}
+
+/// C `d2k_props_bind`: IPv4 TCP.
+#[cfg(unix)]
+fn r2o_props_bind() -> std::io::Result<(std::os::fd::OwnedFd, u16)> {
+    r2o_props_bind_family(4)
+}
+
+/// C `d2k_props_bind_udp_family`: IPv4/IPv6 UDP wildcard.
+#[cfg(unix)]
+fn r2o_props_bind_udp_family(family: u8) -> std::io::Result<(std::os::fd::OwnedFd, u16)> {
+    r2o_props_bind_any(libc::SOCK_DGRAM, family)
+}
+
+/// C `d2k_props_bind_udp`: IPv4 UDP.
+#[cfg(unix)]
+fn r2o_props_bind_udp() -> std::io::Result<(std::os::fd::OwnedFd, u16)> {
+    r2o_props_bind_udp_family(4)
+}
+
+#[cfg(unix)]
 impl BoundTcpProbe {
     fn open(family: u8, mark: Option<u32>) -> std::io::Result<Self> {
         use std::os::fd::{AsRawFd, FromRawFd};
@@ -24880,6 +25005,56 @@ mod tests {
         );
         let pretty = serde_json::to_string_pretty(&serde_json::json!({"a": {"b": 1}})).unwrap();
         assert_eq!(pretty, "{\n  \"a\": {\n    \"b\": 1\n  }\n}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn props_bind_wrappers_match_c_families_and_socket_types() {
+        use std::os::fd::AsRawFd;
+
+        let socket_type = |fd: std::os::fd::RawFd| {
+            let mut value: libc::c_int = 0;
+            let mut length = std::mem::size_of_val(&value) as libc::socklen_t;
+            let result = unsafe {
+                libc::getsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_TYPE,
+                    (&mut value as *mut libc::c_int).cast(),
+                    &mut length,
+                )
+            };
+            assert_eq!(result, 0);
+            value
+        };
+        for family in [4, 6] {
+            let (tcp, port) = super::r2o_props_bind_family(family).unwrap();
+            assert!(port > 0);
+            assert_eq!(socket_type(tcp.as_raw_fd()), libc::SOCK_STREAM);
+            if family == 6 {
+                let mut v6only: libc::c_int = 0;
+                let mut length = std::mem::size_of_val(&v6only) as libc::socklen_t;
+                let result = unsafe {
+                    libc::getsockopt(
+                        tcp.as_raw_fd(),
+                        libc::IPPROTO_IPV6,
+                        libc::IPV6_V6ONLY,
+                        (&mut v6only as *mut libc::c_int).cast(),
+                        &mut length,
+                    )
+                };
+                assert_eq!(result, 0);
+                assert_eq!(v6only, 1, "IPv6 bind должен быть V6ONLY");
+            }
+
+            let (udp, udp_port) = super::r2o_props_bind_udp_family(family).unwrap();
+            assert!(udp_port > 0);
+            assert_eq!(socket_type(udp.as_raw_fd()), libc::SOCK_DGRAM);
+        }
+        assert!(super::r2o_props_bind().unwrap().1 > 0);
+        assert!(super::r2o_props_bind_udp().unwrap().1 > 0);
+        assert!(super::r2o_props_bind_family(5).is_err());
+        assert!(super::r2o_props_bind_udp_family(0).is_err());
     }
 
     #[cfg(unix)]

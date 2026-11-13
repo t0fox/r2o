@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 317 | 231 | 0 | 0 |
-| core-state | 692 | 349 | 343 | 0 | 0 |
+| core-state | 692 | 353 | 339 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1154** | **828** | **0** | **0** |
+| **Итого** | **1982** | **1158** | **824** | **0** | **0** |
 
-Это не оценка паритета: 828 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 824 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1154 / P 828 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1158 / P 824 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 317 | 231 | 0 | 0 |
-| core-state | 692 | 349 | 343 | 0 | 0 |
+| core-state | 692 | 353 | 339 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1154** | **828** | **0** | **0** |
+| **Итого** | **1982** | **1158** | **824** | **0** | **0** |
 
 
 ---
@@ -2012,10 +2012,10 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `wait_for_event3` | 397-421 | 25 | ожидание одного из трёх типов событий с code/filter/flow и общим дедлайном | `main.rs:646 wait_for_ask_proof` / event loop | **P** | **Ветви сверены:** C `clock_gettime`; цикл: `elapsed>=deadline` → -1; `d2k_link_next(fd,out,remaining)`; `rc!=0` → -1 (тайм-аут/ошибка); фильтр `kind==want_a/b/c` (нулевые want пропускаются); `code_filter>=0 && kind==want_a && code!=filter` → continue; `flow && !ev_matches_flow` → continue; 0. Rust `wait_for_ask_proof` ждёт APPLIED/EXCHANGE/REFUSED с trial/plan/flow; API/условия иные, C/Rust differential нет. |
 | `wait_for_event` | 423-429 | 7 | ожидание одного типа события | `main.rs:646 wait_for_ask_proof` | **P** | C-обёртка `wait_for_event3(fd,want,0,0,...)`; Rust отдельного однотипного ожидания нет, `wait_for_ask_proof` обрабатывает набор APPLIED/EXCHANGE/REFUSED. |
 | `props_bind_any` | 494-524 | 31 | socket/bind/getsockname локального TCP/UDP-порта, IPv6 `IPV6_V6ONLY=1`, ошибка при `out_fd==NULL` | `main.rs:22508-22612 BoundTcpProbe::open` | **P** | **Ветви C:** `out_fd=-1`; family 4/6; `socket(af,type,0)`; IPv6 — `IPV6_V6ONLY=1`; `bind` wildcard; `getsockname`; `sport_be`; при `out_fd` — отдать fd, иначе close/-1. **Отличия Rust:** `BoundTcpProbe::open` ставит `O_NONBLOCK`+`FD_CLOEXEC`, `SO_MARK=mark.unwrap_or(0x2d)` (C bind не метит), не ставит `IPV6_V6ONLY`, требует `local_port!=0`, всегда владеет `OwnedFd`; ветви `out_fd==NULL` нет. |
-| `d2k_props_bind` | 526-528 | 3 | bind IPv4 TCP | `BoundTcpProbe::open(4,..)` | **P*** | C `return d2k_props_bind_family(4,...)`. Rust `BoundTcpProbe::open(family,..)`; наследует отличия `props_bind_any` (`IPV6_V6ONLY`, mark). |
-| `d2k_props_bind_family` | 530-532 | 3 | bind TCP family 4/6 | `BoundTcpProbe::open` | **P*** | C `return props_bind_any(SOCK_STREAM,family,...)`: socket/bind wildcard/getsockname, IPv6 `IPV6_V6ONLY=1`, ошибка при `out_fd==NULL`. Rust `BoundTcpProbe::open(family,..)`; family 4/6. |
-| `d2k_props_bind_udp` | 534-536 | 3 | bind IPv4 UDP | нет прямого аналога в ask-пути | **P*** | C `return d2k_props_bind_udp_family(4,...)` → `props_bind_any(SOCK_DGRAM,...)`. Ask-вопросы TCP; UDP-bind в R2O отдельным хелпером не вынесен. |
-| `d2k_props_bind_udp_family` | 538-540 | 3 | bind UDP family 4/6 | нет прямого аналога | **P*** | C `return props_bind_any(SOCK_DGRAM,family,...)`: socket/bind wildcard/getsockname, IPv6 `IPV6_V6ONLY=1`. Rust отдельного UDP-bind хелпера для ask нет. |
+| `d2k_props_bind` | 526-528 | 3 | bind IPv4 TCP | `main.rs` `r2o_props_bind` | **E*** | C `return d2k_props_bind_family(4,...)`. Rust `r2o_props_bind` → `r2o_props_bind_family(4)` → `r2o_props_bind_any(SOCK_STREAM, 4)`; тест `props_bind_wrappers_match_c_families_and_socket_types` (порт >0, SO_TYPE=STREAM). **Ограничение:** helper добавляет SOCK_CLOEXEC и отвергает порт 0; ask-путь использует `BoundTcpProbe` с mark/nonblock. |
+| `d2k_props_bind_family` | 530-532 | 3 | bind TCP family 4/6 | `main.rs` `r2o_props_bind_family` | **E*** | C `props_bind_any(SOCK_STREAM,family,...)`: wildcard bind, getsockname, IPv6 `IPV6_V6ONLY=1`. Rust helper делает то же; тест проверяет family 4/6, SO_TYPE=STREAM и `IPV6_V6ONLY=1`; family 5 → ошибка. **Ограничение:** SOCK_CLOEXEC/port>0 — осознанно строже. |
+| `d2k_props_bind_udp` | 534-536 | 3 | bind IPv4 UDP | `main.rs` `r2o_props_bind_udp` | **E*** | C `return d2k_props_bind_udp_family(4,...)` → `props_bind_any(SOCK_DGRAM,...)`. Rust helper → family 4 DGRAM; тест проверяет порт >0 и SO_TYPE=DGRAM. **Ограничение:** см. `props_bind_any`. |
+| `d2k_props_bind_udp_family` | 538-540 | 3 | bind UDP family 4/6 | `main.rs` `r2o_props_bind_udp_family` | **E*** | C `props_bind_any(SOCK_DGRAM,family,...)`: wildcard/getsockname, IPv6 `IPV6_V6ONLY=1`. Rust helper — то же; тест проверяет family 4/6, SO_TYPE=DGRAM, IPv6 V6ONLY; family 0 → ошибка. **Ограничение:** SOCK_CLOEXEC/port>0. |
 | `d2k_props_contact` | 542-545 | 4 | TCP-обращение к цели IPv4 с отправкой приветствия | CLI `run_r2o_ask` (`main.rs:493+`, `BoundTcpProbe`) | **P** | C `d2k_props_contact_on(-1,...)`. Rust `BoundTcpProbe::open/connect` + `stream.write_all(trigger)` в `run_r2o_ask`; production-discovery этим путём вопросы не задаёт. C/Rust differential контакта нет. |
 | `d2k_props_contact_on` | 547-551 | 5 | TCP-обращение к цели IPv4 с отправкой приветствия | `run_r2o_ask` (`main.rs:493+`) | **P*** | C `return d2k_props_contact_on_family(use_fd,...,4)`. Rust владеет сокетом с момента open, отдельного «готового fd» нет; contact/send выполняет `run_r2o_ask`. |
 | `d2k_props_contact_on_family` | 553-558 | 6 | TCP-обращение family 4/6 с `tcp_timestamps=-1` | `BoundTcpProbe::connect` | **P*** | C `return d2k_props_contact_on_family_tcp_profile(use_fd,...,family,-1,...)`. Rust `BoundTcpProbe::connect`; family 4/6, без tcp-профиля. |
