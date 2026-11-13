@@ -655,6 +655,9 @@ pub struct Counts {
     pub measurement_limit: u64,
     pub measurement_slots: u64,
     pub limiter_mask: u32,
+    pub grow_pending: bool,
+    pub resource_sequence: u64,
+    pub limit_sequence: u64,
     pub resources_valid: bool,
     pub cpu_valid: bool,
     pub cpu_free_pct: Option<u64>,
@@ -695,7 +698,6 @@ pub struct Recorder {
     samples: VecDeque<Value>,
     limit_total: u64,
     limits: VecDeque<Value>,
-    limit_sequence: u64,
     last_counts: Option<Counts>,
     last_limit_change: Option<Instant>,
     memory_total: u64,
@@ -729,7 +731,6 @@ impl Recorder {
             samples: VecDeque::with_capacity(SAMPLE_CAPACITY),
             limit_total: 0,
             limits: VecDeque::with_capacity(LIMIT_CAPACITY),
-            limit_sequence: 0,
             last_counts: None,
             last_limit_change: None,
             memory_total: 0,
@@ -816,7 +817,6 @@ impl Recorder {
                 self.event_total = 0;
                 self.sample_total = 0;
                 self.limit_total = 0;
-                self.limit_sequence = 0;
                 self.memory_total = 0;
                 self.anomaly_total = 0;
                 self.write_failures = 0;
@@ -865,21 +865,8 @@ impl Recorder {
                 || previous.conntrack_valid != counts.conntrack_valid
         });
         if limit_changed {
-            self.limit_sequence = self.limit_sequence.saturating_add(1);
             self.limit_total = self.limit_total.saturating_add(1);
-            let limit_age_ms = self.last_limit_change.map(|started| {
-                now.saturating_duration_since(started)
-                    .as_millis()
-                    .min(u64::MAX as u128) as u64
-            });
-            let event = limit_event_json(
-                at,
-                mono_ms,
-                &counts,
-                self.limit_sequence,
-                self.sample_total,
-                limit_age_ms,
-            );
+            let event = limit_event_json(at, mono_ms, &counts);
             if self.limits.len() == LIMIT_CAPACITY {
                 self.limits.pop_front();
             }
@@ -946,6 +933,50 @@ impl Recorder {
                         .or_else(|| value.as_u64().and_then(|v| i64::try_from(v).ok()))
                 })
         };
+        let primary_name = primary
+            .and_then(|process| process["name"].as_str())
+            .unwrap_or_default();
+        let primary_detail = details
+            .iter()
+            .find(|detail| detail["name"].as_str() == Some(primary_name))
+            .map(|detail| &detail["latest"]);
+        let detail_i64 = |key: &str| {
+            primary_detail
+                .and_then(|detail| detail.get(key))
+                .and_then(|value| {
+                    value
+                        .as_i64()
+                        .or_else(|| value.as_u64().and_then(|v| i64::try_from(v).ok()))
+                })
+        };
+        let rollup_status = rollup_status_code(
+            primary_detail
+                .and_then(|detail| detail["smaps_rollup_status"].as_str())
+                .unwrap_or("not-read"),
+        );
+        let rollup_errno = detail_i64("smaps_rollup_errno").filter(|error| *error != 0);
+        let rollup_value = |key: &str| {
+            primary_detail
+                .and_then(|detail| detail.get("smaps_rollup"))
+                .and_then(|rollup| rollup.get(key))
+                .and_then(|value| {
+                    value
+                        .as_i64()
+                        .or_else(|| value.as_u64().and_then(|v| i64::try_from(v).ok()))
+                })
+                .unwrap_or(-1)
+        };
+        let rollup = if rollup_status != ROLLUP_OK && rollup_value("rss_kib") < 0 {
+            Value::Null
+        } else {
+            json!([
+                compact_kib(rollup_value("rss_kib")),
+                compact_kib(rollup_value("pss_kib")),
+                compact_kib(rollup_value("anonymous_kib")),
+                compact_kib(rollup_value("private_dirty_kib")),
+                compact_kib(rollup_value("swap_kib")),
+            ])
+        };
         let rss_kib = compact_kib(field_i64(primary, "rss_kib").unwrap_or(-1));
         let vm_data_kib = compact_kib(field_i64(primary, "vm_data_kib").unwrap_or(-1));
         let vm_swap_kib = compact_kib(field_i64(primary, "vm_swap_kib").unwrap_or(-1));
@@ -961,9 +992,9 @@ impl Recorder {
             json!(rss_kib),
             json!(vm_data_kib),
             json!(vm_swap_kib),
-            json!(0),
-            Value::Null,
-            Value::Null,
+            json!(rollup_status),
+            json!(rollup_errno),
+            json!(rollup),
             json!(rss_anon_kib),
             json!(compact_bytes(counts.catalog_bytes)),
             json!(compact_bytes(counts.http_bytes)),
@@ -1094,9 +1125,9 @@ impl Recorder {
             "conntrack_count": counts.conntrack_valid.then_some(counts.conntrack_count),
             "conntrack_max": counts.conntrack_valid.then_some(counts.conntrack_max),
             "limiter_mask": counts.limiter_mask,
-            "grow_pending": false,
-            "resource_sequence": self.sample_total,
-            "limit_sequence": self.limit_sequence,
+            "grow_pending": counts.grow_pending,
+            "resource_sequence": counts.resource_sequence,
+            "limit_sequence": counts.limit_sequence,
             "limit_age_ms": limit_age_ms,
             "task_states": task_states_json(&counts),
             "limit_reason": limit_reason_values(&counts),
@@ -1286,6 +1317,8 @@ fn compact_count(count: u64) -> u8 {
 /// C `value(line,key)`: число после ключа в /proc; отрицательное — None.
 fn proc_field(line: &str, key: &str) -> Option<i64> {
     let rest = line.strip_prefix(key)?;
+    // C `value` принимает ключ с двоеточием; допускаем и форму без него.
+    let rest = rest.strip_prefix(':').unwrap_or(rest);
     let value = rest.split_whitespace().next()?.parse::<i64>().ok()?;
     (value >= 0).then_some(value)
 }
@@ -1313,23 +1346,16 @@ fn limit_reason_values(counts: &Counts) -> Vec<&'static str> {
     reasons
 }
 
-fn limit_event_json(
-    at: u64,
-    mono_ms: u64,
-    counts: &Counts,
-    limit_sequence: u64,
-    resource_sequence: u64,
-    limit_age_ms: Option<u64>,
-) -> Value {
+fn limit_event_json(at: u64, mono_ms: u64, counts: &Counts) -> Value {
     json!({
         "at": at,
         "mono_ms": mono_ms,
         "measurement_limit": counts.measurement_limit,
         "measurement_slots": counts.measurement_slots,
         "limiter_mask": counts.limiter_mask,
-        "grow_pending": false,
-        "resource_sequence": resource_sequence,
-        "limit_sequence": limit_sequence,
+        "grow_pending": counts.grow_pending,
+        "resource_sequence": counts.resource_sequence,
+        "limit_sequence": counts.limit_sequence,
         "resources_valid": counts.resources_valid,
         "cpu_valid": counts.cpu_valid,
         "cpu_free_pct": counts.cpu_free_pct,
@@ -1340,7 +1366,6 @@ fn limit_event_json(
         "conntrack_valid": counts.conntrack_valid,
         "conntrack_count": counts.conntrack_valid.then_some(counts.conntrack_count),
         "conntrack_max": counts.conntrack_valid.then_some(counts.conntrack_max),
-        "limit_age_ms": limit_age_ms,
         "limit_reason": limit_reason_values(counts),
     })
 }
@@ -1584,6 +1609,17 @@ fn rollup_status_text(code: u8) -> &'static str {
     }
 }
 
+/// Обратное отображение строки статуса в код C `read_status`.
+fn rollup_status_code(text: &str) -> u8 {
+    match text {
+        "unavailable" => ROLLUP_UNAVAILABLE,
+        "ok" => ROLLUP_OK,
+        "parse-error" => ROLLUP_PARSE_ERROR,
+        "unsupported" => ROLLUP_UNSUPPORTED,
+        _ => 0,
+    }
+}
+
 fn read_smaps_rollup(base: &Path) -> (&'static str, &'static str, Option<i32>, Option<Value>) {
     let path = base.join("smaps_rollup");
     let text = match fs::read_to_string(&path) {
@@ -1647,10 +1683,10 @@ mod tests {
     use super::{
         Counts, EVENT_CAPACITY, MADVISE_ERRNO_SLOTS, MEMORY_SITE_COUNT, MadviseErrno, MadviseStats,
         Recorder, compact_bytes, compact_bytes_kib, compact_count, compact_kib, d2o_ring_bytes,
-        limit_reason_values, madvise_json, memory_acquire, memory_active, memory_alloc_failure,
-        memory_enable, memory_release, memory_snapshot, memory_tracking_json, optional_proc_status,
-        proc_field, proc_pid_dir_present, read_smaps_rollup, rollup_status_text,
-        tracked_memory_bytes,
+        limit_event_json, limit_reason_values, madvise_json, memory_acquire, memory_active,
+        memory_alloc_failure, memory_enable, memory_release, memory_snapshot, memory_tracking_json,
+        optional_proc_status, proc_field, proc_pid_dir_present, read_smaps_rollup,
+        rollup_status_text, tracked_memory_bytes,
     };
     use serde_json::json;
     use std::fs::{self, OpenOptions};
@@ -1982,6 +2018,7 @@ mod tests {
 
         // C `value(line,key)`: число после ключа, отрицательное — отказ.
         assert_eq!(proc_field("VmRSS:\t 2048 kB\n", "VmRSS:"), Some(2048));
+        assert_eq!(proc_field("VmRSS:\t 2048 kB\n", "VmRSS"), Some(2048));
         assert_eq!(proc_field("VmRSS: -1 kB\n", "VmRSS:"), None);
         assert_eq!(proc_field("VmHWM: 4096 kB\n", "VmRSS:"), None);
         assert_eq!(proc_field("VmRSS:\n", "VmRSS:"), None);
@@ -2082,6 +2119,83 @@ mod tests {
             counts.limiter_mask = mask;
             assert_eq!(limit_reason_values(&counts), expected, "mask {mask}");
         }
+    }
+
+    #[test]
+    fn limit_event_json_matches_c_fields() {
+        let mut counts = Counts::default();
+        counts.measurement_limit = 7;
+        counts.measurement_slots = 12;
+        counts.limiter_mask = 3;
+        counts.grow_pending = true;
+        counts.resource_sequence = 14;
+        counts.limit_sequence = 12;
+        counts.resources_valid = true;
+        counts.cpu_valid = true;
+        let event = limit_event_json(100, 200, &counts);
+        // C `d2k_diag_record_limit`/`write_limit_reason`: grow_pending и
+        // resource/limit sequence берутся из снимка ресурсов.
+        assert_eq!(event["grow_pending"], true);
+        assert_eq!(event["resource_sequence"], json!(14));
+        assert_eq!(event["limit_sequence"], json!(12));
+        assert_eq!(event["limiter_mask"], json!(3));
+        assert_eq!(event["limit_reason"], json!(["cpu", "memory"]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn memory_history_rollup_fields_match_c() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let root = std::env::temp_dir().join(format!("r2o-diag-history-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let proc_dir = root.join("proc");
+        let run_dir = root.join("run");
+        let diag_dir = root.join("diag");
+        fs::create_dir_all(proc_dir.join("124/fd")).unwrap();
+        fs::create_dir_all(&run_dir).unwrap();
+        fs::create_dir_all(&diag_dir).unwrap();
+        fs::set_permissions(&diag_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(proc_dir.join("124/comm"), "r2o-controller\n").unwrap();
+        fs::write(
+            proc_dir.join("124/status"),
+            "VmRSS: 1024 kB\nVmHWM: 2048 kB\nRssAnon: 512 kB\nThreads: 3\nVmData: 4096 kB\nVmSwap: 8 kB\nVmSize: 8192 kB\nVmStk: 132 kB\n",
+        )
+        .unwrap();
+        fs::write(
+            proc_dir.join("124/stat"),
+            "124 (r2o-controller) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 987654 20 21\n",
+        )
+        .unwrap();
+        fs::write(proc_dir.join("124/fd/0"), "").unwrap();
+        fs::write(proc_dir.join("124/fd/1"), "").unwrap();
+        fs::write(
+            proc_dir.join("124/smaps_rollup"),
+            "Rss: 1024 kB\nPss: 2048 kB\nAnonymous: 512 kB\nPrivate_Dirty: 256 kB\nSwap: 8 kB\n",
+        )
+        .unwrap();
+        fs::write(run_dir.join("r2o-controller4.pid"), "124\n").unwrap();
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(diag_dir.join("enabled"))
+            .unwrap();
+
+        let mut recorder = Recorder::new(diag_dir, run_dir);
+        recorder.proc_dir = proc_dir;
+        recorder.tick(|| Counts::default());
+        assert_eq!(recorder.memory_history.len(), 1);
+        let row = &recorder.memory_history.front().unwrap().2;
+        assert_eq!(row[0], json!(1024));
+        assert_eq!(row[1], json!(4096));
+        assert_eq!(row[2], json!(8));
+        // C memory_history: rollup_status_code/errno/rollup[5].
+        assert_eq!(row[3], json!(2));
+        assert_eq!(row[4], json!(null));
+        assert_eq!(row[5], json!([1024, 2048, 512, 256, 8]));
+        assert_eq!(row[6], json!(512));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]

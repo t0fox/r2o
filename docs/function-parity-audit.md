@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 240 | 308 | 0 | 0 |
-| core-state | 692 | 262 | 430 | 0 | 0 |
+| core-state | 692 | 264 | 428 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **990** | **992** | **0** | **0** |
+| **Итого** | **1982** | **992** | **990** | **0** | **0** |
 
-Это не оценка паритета: 992 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 990 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 990 / P 992 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 992 / P 990 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 240 | 308 | 0 | 0 |
-| core-state | 692 | 262 | 430 | 0 | 0 |
+| core-state | 692 | 264 | 428 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **990** | **992** | **0** | **0** |
+| **Итого** | **1982** | **992** | **990** | **0** | **0** |
 
 
 ---
@@ -2190,7 +2190,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `record_anomaly` | 181-187 | 7 | записать аномалию в кольцо (8 слотов) | `Recorder::record_anomaly` | E | C: слот `anomaly_total++%8`, `memset`, at/kind/code/rss/accounted/stage, `na` до 8. Rust `record_anomaly` с `ANOMALY_CAPACITY=8`; тест `record_write_error_stores_code_and_keeps_last_eight_anomalies` после 11 записей даёт `anomaly_total=11`, len=8, последний code=10. |
 | `d2k_diag_record_write_error` | 188-191 | 4 | `write_failures++` и аномалия kind=2 с кодом ошибки `error` | `Recorder::record_write_error` | E | C сохраняет `error` в `anomaly.code`, `write_anomalies` печатает `error_code`. Rust `record_write_error(stage, error_code)` теперь сохраняет код; call-site'ы передают errno для path/open-temp/flush-close/rename/remove-old-temp и `EFBIG` для size-limit. Тест `record_write_error_stores_code_and_keeps_last_eight_anomalies` проверяет `EACCES`, поля аномалии и кольцо. |
 | `d2k_diag_record` | 192-201 | 10 | событие в кольцо 64 | `Recorder::record` | E | C `!d||!v` → выход; при выключенной диагностике d2kc ставит `diagnostics=NULL` (`d2kc.c:428,922`), поэтому Rust-гейт `!enabled` эквивалентен. C: слот `event_total++%64`, at/id/elapsed/queued/units/family/trigger/shape, `copy` ip(48)/path(16)/kind(8)/target(256)/protocol(16)/outcome(32)/reason(256), `ne` до 64. Rust `record` пишет те же поля с теми же пределами (reason теперь 255), добавляет id при отсутствии и `at`; тест `record_event_ring_and_text_limits_match_c` проверяет 70 событий, id, at, лимиты строк и выключенный сбор. |
-| `d2k_diag_record_limit` | 202-212 | 11 | переход лимита в кольцо 32 | `diagnostics.rs:860-881`, `limit_event_json` (`:1257-1287`) | **P** | **Ветви C:** `!d \|\| !c` → выход; слот `limit_total++%32`; `at=time`, `mono=ms`, `limit/slots/resource_seq/limit_seq/mem_avail/total/reserve/ct_count/max/cpu_free/mask`; `flags = resources_valid\|1, cpu_valid\|2, mem_valid\|4, conntrack_valid\|8, grow_pending\|16`; `nl++` до 32. Rust `limit_event_json` пишет те же поля, но **`grow_pending` жёстко `false`** (`:1271`), а `resource_sequence` передаётся как `self.sample_total` (`:873`) — в C это `c->resource_sequence`, отдельный счётчик ресурсов; `limit_age_ms` есть только в Rust. `limit_changed` сравнивает mask/limit/slots/valid-флаги; C вызывает функцию из sched-хука при смене лимита. |
+| `d2k_diag_record_limit` | 202-212 | 11 | переход лимита в кольцо 32 | `diagnostics::limit_event_json` + `R2oAdaptiveLimit` | E | C: слот `limit_total++%32`; at/mono/limit/slots/resource_seq/limit_seq/mem_avail/total/reserve/ct_count/max/cpu_free/mask; `flags` из valid/grow_pending. Rust `limit_event_json` берёт `grow_pending`/`resource_sequence`/`limit_sequence` из `Counts`; `R2oAdaptiveLimit` инкрементирует `res_seq` на каждом снимке ресурсов, `limit_seq=res_seq` при смене лимита, `grow_pending` — при запуске на пределе. Тесты `limit_event_json_matches_c_fields`, `adaptive_limit_tracks_res_seq_and_grow_pending`; кольцо 32 в `tick`. Лишний `limit_age_ms` из limit-event JSON удалён (C пишет его только в sample). |
 | `value` | 213-217 | 5 | число после ключа в `/proc` | `diagnostics::proc_field` | E | C `value(line,key)`: префикс ключа, `sscanf("%lld")`, отрицательное → -1. Rust `proc_field` возвращает `Some` только для неотрицательного числа после ключа; используется в `process_memory`/`process_detail`. Тест `compact_helpers_and_proc_field_match_c` (2048, отрицательное, чужой ключ, пустое значение). |
 | `compact_kib` | 218-220 | 3 | сжать KiB в i32 или -1 | `diagnostics::compact_kib` | E | C `v<0 || v>INT32_MAX ? -1 : (int32_t)v`. Rust `compact_kib` возвращает `Option<i32>` (в JSON null), применяется в истории памяти и growth. Тест `compact_helpers_and_proc_field_match_c` (границы -1, 0, `INT32_MAX`, `INT32_MAX+1`). |
 | `compact_bytes_kib` | 221-221 | 1 | байты в KiB с округлением вверх, i32 или -1 | `diagnostics::compact_bytes_kib` | E | C `kib=bytes/1024+(bytes%1024!=0)`, `kib>INT32_MAX ? -1`. Rust `compact_bytes_kib` делает тот же ceil и `None` при переполнении; используется в growth. Тест `compact_helpers_and_proc_field_match_c` (0, 1, 1024, 1025, граница `INT32_MAX`). |
@@ -2207,7 +2207,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `write_memory_tracking` | 357-369 | 13 | JSON memory_tracking: enabled, coverage, 6 сайтов (id/name/location/live/peak/objects/created/destroyed/failures) | `diagnostics::memory_tracking_json` | E | C: `memory_snapshot`, `enabled`, фиксированный текст coverage, 6 сайтов с id/name/location и счётчиками. Rust `memory_tracking_json` те же поля/строки; тест `memory_tracking_and_madvise_json_match_d2o_shape` расширен: coverage и все 9 ключей каждого сайта, live/peak/objects/created; memory-differential `scripts/test-diagnostics-memory-differential.sh` (exit 0). |
 | `write_madvise` | 370-381 | 12 | JSON madvise: successes/failures/requested/failed/last_errno/other/errno-гистограмма | `diagnostics::madvise_json` | E | C: `successes/failures/requested_bytes/failed_requested_bytes`; `last_errno` или null; `other_errno_count`; `errno[]` только ненулевые `{code,count}`. Rust `madvise_json` те же поля/фильтр; тест расширен: requested/failed/other, null и ненулевой `last_errno`, две записи errno с code/count; memory-differential (exit 0). |
 | `write_anomalies` | 382-394 | 13 | JSON аномалий и счётчиков перезаписи | `Recorder::write_report` | E | C: `anomalies_overwritten`, `diagnostic_write_failures`, массив `anomalies` (kind/at/error_code/stage/rss/accounted/window_samples). Rust `write_report` те же ключи; тест `report_anomalies_match_c_shape` записывает две аномалии и проверяет counters, len=2, kind/stage/error_code (EACCES/ENOENT). |
-| `d2k_diag_sample` | 395-468 | 74 | раз в 60 с: meminfo, conntrack, процессы, first/latest detail, память-история 1440, детектор RSS-роста | `Recorder::tick` (`:790`) + `process_memory`/`process_detail` | **P** | **Ветви C:** throttle 60 с; sample slot 120; at/mono/counts; `total/available=-1`; meminfo `MemTotal/MemAvailable`; conntrack; для 3 процессов `read_proc` + `read_detail` latest + first при смене pid/start_ticks; `ns++`; history slot 1440: at_s/mono_s, `compact_kib` rss/vm_data/vm_swap (недоступное → -1/null), `rollup_status/errno`, epoch при смене pid/start_ticks, **фактические `rollup[5]`**, rss_anon/catalog/http/snapshot/tracked/tasks/workers; `nm++`; growth: смена pid → сброс; accounted=tcp+quic+tls+catalog+http+snapshot, `compact_bytes_kib` (округление вверх); кольцо 10; при 10 точках span≥9 мин, rising≥7, rss_delta≥1024, accounted_delta<rss/4, cooldown 30 мин → anomaly kind=1/code=10. **Rust-отличия:** `field_u64(...).unwrap_or(0)` для rss/vm_data/vm_swap/anon (`:938-941`) — C даёт -1/null; history жёстко `0, null, null` для rollup (`:953-955`); growth `accounted_bytes / 1024` — округление вниз, C `compact_bytes_kib` вверх; остальные пороги/поля совпадают. Unit `d2o_periodic_rss_sample_matches_c`, `first_process_detail_survives_process_exit`. |
+| `d2k_diag_sample` | 395-468 | 74 | раз в 60 с: meminfo, conntrack, процессы, first/latest detail, память-история 1440, детектор RSS-роста | `Recorder::tick` + `process_memory`/`process_detail` | E | C: throttle 60 с, слот 120, процессы/detail, memory_history 1440 с `compact_*`, реальными `rollup_status/errno/rollup[5]`, epoch и growth-детектором. Rust `tick` повторяет ветви; memory_history теперь берёт rollup-поля из `process_detail`, `proc_field` исправлен (ключи с `:` и без). C/Rust RSS-differential `scripts/test-diagnostics-rss-differential.sh` (exit 0) сверяет samples/detail; тест `memory_history_rollup_fields_match_c` — status=2, errno=null, rollup=[1024,2048,512,256,8], rss_anon=512. |
 | `d2k_diag_write` | 469-605 | 137 | report.json schema=1: controller_pid/release/ring_bytes/capacities/overwritten, http_storage_limits, memory_tracking, madvise, anomalies, events, limit_transitions, memory_history, samples, memory_details | `Recorder::write_report` (`:1179`) + serde_json | **P** | **Ветви C:** `!d \|\| !f` → -1; schema/enabled/controller_pid/release; ring_bytes/capacities 64/32/120/60с/1440/60с/overwritten; `http_storage_limits` **только при `ns>0`**; memory_tracking/madvise/anomalies; events 64 с `reason_source` (http→terminal-code, иначе last-classifier-context); limits 32 с flags/mem/conntrack/limit_reason; memory_history: capacity/interval/time_base, 20 полей, rollup null при `status!=2 && rollup[0]<0`; samples 120: `resource_sequence` и `grow_pending` и `http_failures` из counts, mem/conntrack/http/boxes/.../task_states/limit_reason/processes; memory_details: 3 процесса first/latest. **Rust-отличия:** `http_storage_limits` пишется **всегда**; в samples `resource_sequence=self.sample_total` (`:1083`), `grow_pending=false` (`:1082`), `http_failures=0` (`:1057`) — не из counts; `reason_source` берётся из события, не вычисляется; в memory_history `rollup_status=0`, `errno=null`, `rollup=null` жёстко (`:953-955`), RSS/VmData/VmSwap/RssAnon — `unwrap_or(0)` вместо C `-1`/null; `ring_bytes = d2o_ring_bytes()`, не `sizeof` C-структуры. `r2o-diagnostics-differential.sh` сравнивает ring_bytes/event/snapshots/http_records; остальное — unit, не C/Rust diff. |
 
 ### `core/domain.c`

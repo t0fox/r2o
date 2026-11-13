@@ -145,6 +145,8 @@ struct R2oAdaptiveLimit {
     max_slots: usize,
     limit: usize,
     grow_pending: bool,
+    res_seq: u64,
+    limit_seq: u64,
     cpu_previous: Option<R2oCpuCounters>,
     cpu_free_u: Option<u64>,
     cpu_try_ms: Option<u64>,
@@ -165,6 +167,8 @@ impl R2oAdaptiveLimit {
             max_slots,
             limit: default_limit,
             grow_pending: false,
+            res_seq: 0,
+            limit_seq: 0,
             cpu_previous: None,
             cpu_free_u: None,
             cpu_try_ms: None,
@@ -191,6 +195,7 @@ impl R2oAdaptiveLimit {
     ) -> Option<String> {
         let previous_limit = self.limit;
         let previous_limiter = self.limiter;
+        self.res_seq = self.res_seq.saturating_add(1);
         let elapsed_ms = self
             .cpu_try_ms
             .map_or(0, |previous| now_ms.saturating_sub(previous).max(1));
@@ -285,6 +290,7 @@ impl R2oAdaptiveLimit {
         }
         if self.limit != previous_limit || limiter != previous_limiter {
             self.limit_since_ms = now_ms;
+            self.limit_seq = self.res_seq;
         }
         self.limiter = limiter;
 
@@ -457,6 +463,9 @@ pub struct R2oMeasurementSnapshot {
     pub mem_total_mb: Option<u64>,
     pub conntrack_pct: Option<u64>,
     pub limited_by: Option<String>,
+    pub grow_pending: bool,
+    pub resource_sequence: u64,
+    pub limit_sequence: u64,
 }
 
 pub struct R2oMeasurementPermit {
@@ -519,6 +528,9 @@ impl R2oMeasurementGate {
             mem_total_mb: memory.map(|memory| memory.total_kb / 1024),
             conntrack_pct: state.adaptive.conntrack.map(r2o_conntrack_percent),
             limited_by: (!limited_by.is_empty()).then_some(limited_by),
+            grow_pending: state.adaptive.grow_pending,
+            resource_sequence: state.adaptive.res_seq,
+            limit_sequence: state.adaptive.limit_seq,
         }
     }
 
@@ -961,6 +973,32 @@ mod tests {
         mpsc,
     };
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn adaptive_limit_tracks_res_seq_and_grow_pending() {
+        let mut limit = R2oAdaptiveLimit::new(8);
+        assert_eq!(
+            (limit.res_seq, limit.limit_seq, limit.grow_pending),
+            (0, 0, false)
+        );
+        let reading = R2oResourceReading {
+            cpu: None,
+            memory: None,
+            conntrack: None,
+        };
+        let _ = limit.r2o_sample(1000, reading, 0, 0);
+        assert_eq!(limit.res_seq, 1);
+        limit.r2o_mark_started(limit.limit());
+        assert!(limit.grow_pending);
+        let reading = R2oResourceReading {
+            cpu: None,
+            memory: None,
+            conntrack: None,
+        };
+        let _ = limit.r2o_sample(2000, reading, 0, 0);
+        assert_eq!(limit.res_seq, 2);
+        assert!(!limit.grow_pending);
+    }
 
     #[test]
     fn worker_slots_match_the_d2o_scheduler_capacity() {
