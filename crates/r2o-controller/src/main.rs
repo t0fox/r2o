@@ -3017,7 +3017,8 @@ fn has_confirmed_exact_binding(catalog: &Catalog, observation: &DomainObservatio
 
 #[cfg(unix)]
 fn group_shape_fits(saved: u8, observed: u8) -> bool {
-    saved == 0 || saved == observed || saved == SHAPE_MODERN && observed == SHAPE_ECH_TCP
+    // C `d2k_cat_shape_fits`: ноль — «не измерено»; иначе только равенство.
+    saved == 0 || observed == 0 || saved == observed
 }
 
 #[cfg(unix)]
@@ -24158,6 +24159,30 @@ mod tests {
         ));
         assert!(!super::r2o_cached_shape_fits(
             6,
+            super::SHAPE_LEGACY,
+            super::SHAPE_MODERN
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn group_shape_fits_matches_c() {
+        assert!(super::group_shape_fits(0, super::SHAPE_MODERN));
+        assert!(super::group_shape_fits(super::SHAPE_MODERN, 0));
+        assert!(super::group_shape_fits(
+            super::SHAPE_MODERN,
+            super::SHAPE_MODERN
+        ));
+        assert!(super::group_shape_fits(
+            super::SHAPE_LEGACY,
+            super::SHAPE_LEGACY
+        ));
+        // C `d2k_cat_shape_fits` не делает исключения MODERN→ECH_TCP.
+        assert!(!super::group_shape_fits(
+            super::SHAPE_MODERN,
+            super::SHAPE_ECH_TCP
+        ));
+        assert!(!super::group_shape_fits(
             super::SHAPE_LEGACY,
             super::SHAPE_MODERN
         ));

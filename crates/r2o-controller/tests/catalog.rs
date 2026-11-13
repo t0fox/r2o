@@ -182,6 +182,42 @@ fn catalog_json_output_matches_c_fields() {
     assert!(observation["at"].as_str().unwrap().ends_with('Z'));
 }
 
+fn catalog_with_observation_group(plan_enabled: bool, plan_proto: &str, plan_id: &str) -> Catalog {
+    let observations: Vec<String> = ["a", "b", "c"]
+        .iter()
+        .map(|label| {
+            format!(
+                "{{\"name\":\"{label}.example.org\",\"plan_id\":\"p1\",\"transport\":6,\"family\":4,\"shape\":1,\"probe_path\":\"\",\"ech_origin\":\"\",\"evidence\":1,\"at\":\"2026-09-06T04:08:06Z\"}}"
+            )
+        })
+        .collect();
+    let text = format!(
+        "{{\"boxes\":[{{\"plans\":[{{\"id\":\"{plan_id}\",\"proto\":\"{plan_proto}\",\"text\":\"r2o-plan 1 1\\nproto tcp tls\\n\",\"enabled\":{plan_enabled}}}]}}],\"domain_observations\":[{}]}}",
+        observations.join(",")
+    );
+    Catalog::parse(text.as_bytes()).unwrap()
+}
+
+#[test]
+fn prune_unavailable_domain_groups_matches_c() {
+    // Enabled tls-план с тем же id: группа остаётся.
+    let kept = catalog_with_observation_group(true, "tls", "p1");
+    assert_eq!(kept.domain_state.unwrap().groups.len(), 1);
+
+    // Disabled/чужой proto/чужой id: C `prune_unavailable_domain_groups` удаляет.
+    for (enabled, proto, id) in [
+        (false, "tls", "p1"),
+        (true, "quic", "p1"),
+        (true, "tls", "p2"),
+    ] {
+        let pruned = catalog_with_observation_group(enabled, proto, id);
+        assert!(
+            pruned.domain_state.unwrap().groups.is_empty(),
+            "group survived for enabled={enabled} proto={proto} id={id}"
+        );
+    }
+}
+
 #[test]
 fn json_core_limits_match_c() {
     // C `D2K_JSON_MAX_DEPTH=64`: ровно 64 уровня ok, 65 — отказ.

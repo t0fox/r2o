@@ -388,6 +388,7 @@ impl Catalog {
         if let Some(state) = &mut catalog.domain_state {
             state.restore()?;
         }
+        catalog.prune_unavailable_domain_groups();
         Ok(catalog)
     }
 
@@ -561,6 +562,34 @@ impl Catalog {
         self.boxes
             .iter()
             .position(|box_record| box_record.fingerprint.is_compatible_with(observed))
+    }
+
+    /// C `prune_unavailable_domain_groups`: удалить группы без enabled-плана.
+    fn prune_unavailable_domain_groups(&mut self) {
+        let Self {
+            domain_state,
+            boxes,
+            ..
+        } = self;
+        let Some(state) = domain_state else {
+            return;
+        };
+        state.groups.retain(|group| {
+            // C `transport==17 ? "quic" : "tls"`, `strcmp` по id/proto.
+            let proto = if group.key.transport == 17 {
+                "quic"
+            } else {
+                "tls"
+            };
+            boxes.iter().any(|box_record| {
+                box_record.plans.iter().any(|plan| {
+                    plan.enabled
+                        && !plan.text.is_empty()
+                        && plan.id == group.plan_id
+                        && plan.proto == proto
+                })
+            })
+        });
     }
 
     fn validate(&self) -> Result<(), CatalogError> {

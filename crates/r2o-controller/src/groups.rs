@@ -631,6 +631,65 @@ mod tests {
     }
 
     #[test]
+    fn group_key_and_evidence_validation_match_c() {
+        let mut k = key(1);
+        assert!(validate_key(&k).is_ok());
+
+        k.probe_path = "a".repeat(255);
+        assert!(validate_key(&k).is_ok());
+        k.probe_path = "a".repeat(256);
+        assert!(validate_key(&k).is_err());
+        k.probe_path.clear();
+
+        k.ech_origin = "a".repeat(256);
+        assert!(validate_key(&k).is_err());
+        k.ech_origin.clear();
+
+        k.probe_path = "a\0b".into();
+        assert!(validate_key(&k).is_err());
+        k.probe_path.clear();
+        k.family = 5;
+        assert!(validate_key(&k).is_err());
+        k.family = 4;
+        k.transport = 17;
+        k.shape = 3;
+        assert!(validate_key(&k).is_ok());
+        k.shape = 1;
+        assert!(validate_key(&k).is_err());
+        k.transport = 6;
+        k.shape = 1;
+        assert!(validate_key(&k).is_ok());
+        k.shape = 99;
+        assert!(validate_key(&k).is_err());
+        k.shape = 1;
+        k.transport = 7;
+        assert!(validate_key(&k).is_err());
+
+        // C `valid`: после канонизации допустимы ровно 1/2/4/8.
+        assert_eq!(canonical_evidence(BLOCKED).unwrap(), BLOCKED);
+        assert_eq!(canonical_evidence(INCONCLUSIVE).unwrap(), INCONCLUSIVE);
+        assert_eq!(canonical_evidence(INCONCLUSIVE | BLOCKED).unwrap(), BLOCKED);
+        assert_eq!(canonical_evidence(BLOCKED | DIRECT_CLEAR).unwrap(), BLOCKED);
+        assert_eq!(
+            canonical_evidence(DIRECT_CLEAR | PLAN_FAILED).unwrap(),
+            PLAN_FAILED
+        );
+        assert_eq!(
+            canonical_evidence(DIRECT_CLEAR | ADMITTED_EXCEPTION).unwrap(),
+            DIRECT_CLEAR
+        );
+        for invalid in [0, ADMITTED_EXCEPTION, INCONCLUSIVE | ADMITTED_EXCEPTION] {
+            assert!(canonical_evidence(invalid).is_err(), "accepted {invalid}");
+        }
+        // R2O-расширение OPERATOR_REJECT (нет в C `valid`).
+        assert_eq!(
+            canonical_evidence(OPERATOR_REJECT | BLOCKED).unwrap(),
+            OPERATOR_REJECT | BLOCKED
+        );
+        assert!(canonical_evidence(OPERATOR_REJECT).is_err());
+    }
+
+    #[test]
     fn votes_and_latest_vote_match_c_rule() {
         let k = key(1);
         let seed = observation("seed.example.org", "p1", BLOCKED, 10, &k);
