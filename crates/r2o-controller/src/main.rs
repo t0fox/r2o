@@ -23424,6 +23424,24 @@ mod r2o_ask_proof_tests {
     }
 
     #[test]
+    fn ask_flow_key_is_unordered_like_c_ev_matches_flow() {
+        let client = std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 10));
+        let server: std::net::SocketAddr = "198.51.100.20:443".parse().unwrap();
+        let direct = super::r2o_ask_flow_key(client, 40_000, server);
+        // C `ev_matches_flow` сравнивает неупорядоченную пару адрес:порт.
+        let reversed = super::r2o_ask_flow_key(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 20)),
+            443,
+            "192.0.2.10:40000".parse().unwrap(),
+        );
+        assert_eq!(direct, reversed);
+        let other_port = super::r2o_ask_flow_key(client, 40_001, server);
+        assert_ne!(direct, other_port);
+        assert_eq!(direct[37], 6);
+        assert_eq!(direct[0], 4);
+    }
+
+    #[test]
     fn pass_waits_for_matching_applied_and_server_hello_events() {
         let key = flow_key();
         let plan_id = [7; 16];
