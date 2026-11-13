@@ -86,10 +86,10 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 222 | 326 | 0 | 0 |
 | core-state | 692 | 182 | 509 | 0 | 0 |
-| datapath-core | 400 | 197 | 203 | 0 | 0 |
+| datapath-core | 400 | 199 | 201 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **876** | **1106** | **0** | **0** |
+| **Итого** | **1982** | **878** | **1104** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 876 / P 1106 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 878 / P 1104 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -346,10 +346,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 222 | 326 | 0 | 0 |
 | core-state | 692 | 188 | 504 | 0 | 0 |
-| datapath-core | 400 | 197 | 203 | 0 | 0 |
+| datapath-core | 400 | 199 | 201 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **876** | **1106** | **0** | **0** |
+| **Итого** | **1982** | **878** | **1104** | **0** | **0** |
 
 
 ---
@@ -3898,7 +3898,7 @@ CLI-логирования, health-файла, duration, состава свод
 | `fin_window_over` (static) | 3069-3073 | 5 | `pending_fin && now>=pending_fin_ns && elapsed>=3*max(3*rtt,1s)` | `engine.rs:708` (`pending_fin_at` + `fin_retry_window`) | **E** | C `f->pending_fin && now>=pending_fin_ns && now-pending_fin_ns >= fin_retry_window(f)`, где окно `3*max(3*rtt,1s)`. Rust `pending_fin_at.is_some_and(\|started\| elapsed >= fin_retry_window(session.rtt))`. |
 | `sweep_one` (static) | 3084–3087 | 4 | обход TCP-потоков, `told += tcp_silence_observe` | `engine.rs:693 expire_with_silent`, `:1330-1372` sweep | **P** | C проходит `d2k_track_walk(flows, sweep_one)` и считает подозрения. Rust `tcp_sessions.sweep_silent`/`tcp_silence_events`; счётчик `told` не возвращается, события забираются отдельно. Эквивалент по наблюдению, API иной. |
 | `sweep_udp_one` (static) | 3112–3142 | 31 | UDP SILENT: saw_hello/saw_initial, не silence_told/suspected/quic_deny; ответ после последнего повтора; rev_seen или udp_reverse_hook; fwd_after_hello>0; deadline | `r2o_quic.rs:478 sweep`, `main.rs` quic sweep | **P** | **Совпадает:** критерий «клиент повторял после приветствия, ответа после последнего повтора не было, обратное направление видно (или hook), прошёл deadline». **Отличия:** C использует `rev_seen[slot]` и `udp_reverse_hook`; Rust `reverse_queue_visible`/`ControlServer::is_connected` и `R2oQuicSessions::sweep`; поля `saw_initial`/`last_rev_after_hello` в Rust распределены между `hello_seen`/`last_reverse`, отдельного `saw_initial` нет. `r2o-quic-stun-watch-differential.sh`. |
-| `quic_watch` (static) | 3164–3169 | 6 | кандидат QUIC-stall: proto 17, hello/initial, был ответ, не suspected/probe/quic_deny/voice/STUN | `r2o_quic.rs:503 r2o_quic_stall_candidates` | **P** | **Совпадает:** proto 17, было приветствие и ответ, не подозревался, не зонд, не quic_deny, не voice/STUN. **Отличие:** C отдельно проверяет `voice_ssrc_valid`/`stun_txid_valid`; Rust `quic_stall_excluded`/`last_reverse`/`suspected`. Voice/STUN-потоки Rust исключает в `r2o_voice`, не в этом предикате. |
+| `quic_watch` (static) | 3164–3169 | 6 | кандидат QUIC-stall: proto 17, hello/initial, был ответ, не suspected/probe/quic_deny/voice/STUN | `r2o_quic.rs:503 r2o_quic_stall_candidates` | E | C: proto 17, было приветствие и ответ, не подозревался, не зонд, не quic_deny, не voice/STUN. Rust `r2o_quic_stall_candidates` фильтрует `suspected`, `quic_stall_excluded`, `last_reverse`, `first_response_rtt`; voice/STUN-потоки помечаются в `r2o_voice`/`suppress_packet`. Тесты `quic_зависание_не_срабатывает_без_скрытых_ответов_или_после_quicdeny`, `quic_зависание_исключает_stun_и_discord_discovery_из_одного_потока` (позитив/пусто/quicdeny/STUN/Discord). |
 | `flow_tuple` (static) | 3174–3187 | 14 | прямой кортеж клиент→сервер по `init_low` | `conntrack.rs:413-430 tuple_from_packet/from_socket_addrs` | **P** | C строит кортеж из канонического ключа и `init_low`; Rust `tuple_from_packet` берёт адреса/порты из пакета, `from_socket_addrs` — из сокета. Для потока с известным `init_low` эквивалентно; C не требует пакета. |
 | `ct_flow` (static) | 3197–3221 | 25 | QUIC stall по conntrack: reply изменился → запомнить; reply<=rev_pkts, orig delta<3 → нет; PTO=max(3*quic_rtt,1с); suspect QUIC_STALL | `r2o_quic.rs:527-571 update_r2o_quic_stall` | **E*** | **Точное совпадение условий:** `reply_packets` изменился → mark; `reply <= reverse_packets` или `orig - mark.orig < 3` → нет; `pto = 3*first_response_rtt`, минимум 1 с; время от mark ≥ pto → событие. C `quic_rtt_ns` измеряется hello→first reverse, Rust `first_response_rtt`; для штатного потока эквивалентно. `r2o-quic-stun-watch-differential.sh`. |
 | `tcp_watch` (static) | 3257–3261 | 5 | TCP-stall: proto 6, saw_hello, had_sni, rev_payload_after_hello>0, не suspected/probe/pending_fin/tcp_watch_off/routed | `engine.rs:788-815 tcp_stall_candidates` | **P** | **Подтверждённое расхождение набора:** C требует `pending_fin==0` и `routed==0`; Rust `tcp_stall_candidates` их не проверяет, но добавляет `reverse_rst==0`, `guards==0`, `!stall_reported` и `direction_known`. C `tcp_watch_off` выставляется при выходе за полосу; Rust `stall_watch_off`/`stall_reported`. Таблица только TCP. |
@@ -3908,7 +3908,7 @@ CLI-логирования, health-файла, duration, состава свод
 | `d2k_session_set_stall_budgets` | 3330–3343 | 14 | до 8 ненулевых бюджетов, пусто → полевой 25 | `engine.rs:451-460 set_tcp_stall_budgets` | **E** | Точное совпадение: `>8` или любой `0` → отказ; пустой список → `[25]`; иначе копия. Тесты `engine.rs:2431-2434` (нулевой/9/пусто/25). |
 | `d2k_session_stall_budgets` | 3345–3351 | 7 | чтение бюджетов до cap, вернуть полное число | `engine.rs:371/850` поле `tcp_stall_budgets` | **P** | C getter копирует до `cap` и возвращает `n_stall_budget`; Rust поле используется напрямую в `tcp_in_band`/`tcp_band_top`, отдельного getter с cap нет. Эквивалент для чтения. |
 | `d2k_session_sweep` | 3353–3370 | 18 | TCP sweep + UDP sweep; при `ct_query` — обход uflows/flows через `ct_flow`/`ct_tcp_flow`, вернуть число подозрений | `main.rs:1197-1263` periodic sweep, `engine.rs`, `r2o_quic.rs`, `conntrack.rs` | **P** | **Совпадает:** раз в секунду TCP/UDP sweep, затем conntrack-запросы для наблюдаемых потоков, сумма `told`. **Отличия:** C `d2k_track_walk` по двум таблицам и единый `told`; Rust отдельные `tcp_sessions.sweep_silent`, `quic_sessions`/`voice_sessions/udp_sessions` и `conntrack.query`; порядок uflows→flows не гарантирован. Полного differential нет. |
-| `d2k_session_expire` | 3372–3395 | 24 | удалить FIN-окно, expire TCP с callback, expire UDP без callback | `engine.rs:698-760 expire_with_silent`, `r2o_udp_sessions.rs:456 expire` | **P** | **Совпадает:** TCP expiry вызывает `tcp_silence_observe`/capture-forget до удаления; UDP удаляется без callback; FIN-записи снимаются по своему окну. **Отличия:** C `d2k_track_remove_if(fin_window_over)` и `d2k_track_expire`; Rust `expire_with_silent` + `R2oUdpSessions::expire`; порядок/тайминги и счётчик `freed` не сверены. |
+| `d2k_session_expire` | 3372–3395 | 24 | удалить FIN-окно, expire TCP с callback, expire UDP без callback | `engine.rs:928 expire_with_silent`, `r2o_udp_sessions.rs:493 expire` | E | C: снять FIN-окно, затем TCP-expire с callback, UDP-expire без callback. Rust `expire_with_silent` проверяет `idle_expired`/`fin_expired`, вызывает `tcp_silence_event` и `capture.forget` до удаления; `R2oUdpSessions::expire` удаляет UDP по idle без callback. Тесты `r2o_tcp_silence_requires_a_recognized_clienthello`, `tcp_истечение_не_сообщает_если_после_clienthello_была_полезная_нагрузка`, `R2oUdpSessions::expire` (4с/5с). |
 | `d2k_session_flows` | 3397–3399 | 3 | сумма TCP+UDP потоков | `engine.rs` `r2o_session_flows` | E | C `track_count(flows)+track_count(uflows)`. Rust `r2o_session_flows(tcp,udp)` суммирует `TcpSessions::len` и `R2oUdpSessions::len`; тест `session_flows_guards_shape_damaged_getters_match_c`. |
 | `d2k_session_send_pending` | 3401–3405 | 5 | `fl && execution_id==execution && sends_left && !sends_failed` | `engine.rs` `r2o_send_pending` | E | C проверяет поток, совпадение поколения, `sends_left != 0`, `!sends_failed`. Rust `r2o_send_pending` хранит те же числовые `sends_left/sends_failed`, выставляемые `r2o_begin_execution` (`n_out + 1`), `r2o_mark_execution_failed_for_execution` (unsent) и `r2o_mark_damaged_for_execution`; тест `session_execution_counters_match_c_sent_unsent_damaged` проверяет истину, чужое поколение и ложь после unsent/damaged. |
 | `d2k_session_sent` | 3407–3428 | 22 | `sends_left--`, `sends_done++` (до 0xFF); при нуле и без failed → `done++` + PLAN_DONE; иначе `sent_lost++` | `engine.rs` `r2o_session_sent`, `r2o_mark_plan_done_for_execution` | E | C `sent` на каждую посылку: чужое поколение/`sends_left==0` → `sent_lost++`; иначе декремент, насыщение `sends_done` 0xFF, при нуле и `!sends_failed` — `done++` и PLAN_DONE (журнал пишет вызывающий). Rust `r2o_session_sent` реализует ровно это пошагово; `r2o_mark_plan_done_for_execution` зачитывает оставшиеся посылки тем же счётчиком и возвращает false → вызывающий делает `r2o_note_sent_lost`. Тесты `session_execution_counters_match_c_sent_unsent_damaged`, `session_sends_done_saturates_at_0xff_like_c` (255 посылок, `sends_done=0xFF`). |
