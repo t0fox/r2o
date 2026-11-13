@@ -751,6 +751,14 @@ impl Recorder {
         self.madvise = stats;
     }
 
+    pub fn madvise_stats(&self) -> MadviseStats {
+        self.madvise
+    }
+
+    pub fn reset_madvise(&mut self) {
+        self.madvise = MadviseStats::default();
+    }
+
     pub fn record(&mut self, mut event: Value) {
         if !self.enabled {
             return;
@@ -1568,6 +1576,26 @@ mod tests {
     static MEMORY_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[cfg(unix)]
+    #[test]
+    fn madvise_get_and_reset_match_c() {
+        let mut recorder = Recorder::new(std::env::temp_dir(), std::env::temp_dir());
+        let mut stats = MadviseStats::default();
+        stats.successes = 3;
+        stats.failures = 2;
+        stats.requested_bytes = 4096;
+        stats.failed_requested_bytes = 512;
+        stats.last_errno = libc::EINVAL;
+        stats.other_errno_count = 1;
+        stats.errno_hist[0] = MadviseErrno {
+            error: libc::EINVAL,
+            count: 1,
+        };
+        recorder.set_madvise(stats);
+        assert_eq!(recorder.madvise_stats(), stats);
+        recorder.reset_madvise();
+        assert_eq!(recorder.madvise_stats(), MadviseStats::default());
+    }
+
     #[test]
     fn memory_tracking_and_madvise_json_match_d2o_shape() {
         let _guard = MEMORY_TEST_LOCK.lock().unwrap();
