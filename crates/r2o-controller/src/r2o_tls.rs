@@ -406,7 +406,7 @@ fn r2o_t13_flight_next<'a>(buffer: &'a [u8], offset: &mut usize) -> Option<(u8, 
     Some((header[0], body))
 }
 
-fn r2o_hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+pub(crate) fn r2o_hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
 
     let mut block_key = [0_u8; 64];

@@ -143,6 +143,41 @@ impl Hpke for R2oEchHpke {
     }
 }
 
+/// C `hpke_extract`: HPKE-v1 labeled HKDF-Extract (совместимость с C-векторами;
+/// production-путь использует crate `hpke`).
+#[allow(dead_code)]
+fn r2o_hpke_extract(salt: &[u8], suite: &[u8], label: &str, ikm: &[u8]) -> [u8; 32] {
+    let mut input = Vec::with_capacity(7 + suite.len() + label.len() + ikm.len());
+    input.extend_from_slice(b"HPKE-v1");
+    input.extend_from_slice(suite);
+    input.extend_from_slice(label.as_bytes());
+    input.extend_from_slice(ikm);
+    crate::r2o_tls::r2o_hmac_sha256(salt, &input)
+}
+
+/// C `hpke_expand`: HPKE-v1 labeled HKDF-Expand, out_len 1..32.
+#[allow(dead_code)]
+fn r2o_hpke_expand(
+    prk: &[u8; 32],
+    suite: &[u8],
+    label: &str,
+    info: &[u8],
+    out_len: usize,
+) -> Option<Vec<u8>> {
+    if out_len == 0 || out_len > 32 {
+        return None;
+    }
+    let mut input = Vec::with_capacity(2 + 7 + suite.len() + label.len() + info.len() + 1);
+    input.extend_from_slice(&(out_len as u16).to_be_bytes());
+    input.extend_from_slice(b"HPKE-v1");
+    input.extend_from_slice(suite);
+    input.extend_from_slice(label.as_bytes());
+    input.extend_from_slice(info);
+    input.push(1);
+    let block = crate::r2o_tls::r2o_hmac_sha256(prk, &input);
+    Some(block[..out_len].to_vec())
+}
+
 fn r2o_ech_hpke_error(error: impl std::fmt::Display) -> rustls::Error {
     rustls::Error::General(format!("ошибка ECH HPKE: {error}"))
 }
@@ -542,7 +577,7 @@ mod tests {
     use super::{
         Hpke, R2O_ECH_HPKE, R2oEchConfig, r2o_ech_dns_name, r2o_ech_https_query,
         r2o_ech_parse_https_reply, r2o_ech_public_name, r2o_ech_query_resolver,
-        r2o_ech_select_config, r2o_ech_u16,
+        r2o_ech_select_config, r2o_ech_u16, r2o_hpke_expand, r2o_hpke_extract,
     };
     use std::net::UdpSocket;
     use std::thread;
@@ -608,6 +643,35 @@ mod tests {
         reply.extend_from_slice(&(config.len() as u16).to_be_bytes());
         reply.extend_from_slice(config);
         reply
+    }
+
+    #[test]
+    fn hpke_extract_expand_match_c_vectors() {
+        const SUITE: [u8; 10] = [b'H', b'P', b'K', b'E', 0, 0x20, 0, 1, 0, 1];
+        let salt: Vec<u8> = (0..32u8).collect();
+        let ikm: Vec<u8> = (0..32u8).map(|value| 0x40 + value).collect();
+        let info: Vec<u8> = (0..32u8).map(|value| 0x60 + value).collect();
+        let hex = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let prk = r2o_hpke_extract(&salt, &SUITE, "test label", &ikm);
+        assert_eq!(
+            hex(&prk),
+            "4f0d402c6bc11f7969b48b3fc87e9babf40d13a2da816d3863ea7adfd64500c8"
+        );
+        let expanded = r2o_hpke_expand(&prk, &SUITE, "test label", &info, 32).unwrap();
+        assert_eq!(
+            hex(&expanded),
+            "843a4dd9ef4c651f977b9b3b301888c6dd9ea0294d71a62aa8316c5e842ffd63"
+        );
+        let empty = r2o_hpke_extract(&[], &SUITE, "eae_prk", &[]);
+        assert_eq!(
+            hex(&empty),
+            "dd53614a4e5dff8b7ab8b7a4a22657aa8b408e2fa2846aaff005cfddbc7a8c03"
+        );
     }
 
     #[test]
