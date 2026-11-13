@@ -1863,14 +1863,9 @@ pub fn encode_delete_name(
     if name.is_empty() || name.len() > u8::MAX as usize {
         return Err("имя должно занимать от 1 до 255 байт");
     }
-    if !matches!(family, 4 | 6)
-        || !(transport == 6
-            && (matches!(
-                shape,
-                SHAPE_MODERN | SHAPE_LEGACY | SHAPE_GRANDFATHER | SHAPE_ECH_TCP | SHAPE_HTTP
-            ) || is_tcp_context_shape(shape))
-            || transport == 17 && matches!(shape, SHAPE_VOICE | SHAPE_QUIC))
-    {
+    // C `d2k_link_del_name_family`: имя 1..255, family 4/6, transport 6/17,
+    // shape != 0; пару transport+shape не сверяет — это делает датапат.
+    if !matches!(family, 4 | 6) || !matches!(transport, 6 | 17) || shape == 0 {
         return Err("привязка требует поддерживаемые транспорт, форму и семейство");
     }
     let mut body = Vec::with_capacity(4 + name.len());

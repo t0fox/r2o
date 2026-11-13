@@ -89,7 +89,7 @@ recheck 1982 1982 equal True
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **929** | **1053** | **0** | **0** |
+| **Итого** | **1982** | **931** | **1051** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 929 / P 1053 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 931 / P 1051 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -345,11 +345,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 226 | 322 | 0 | 0 |
-| core-state | 692 | 215 | 477 | 0 | 0 |
+| core-state | 692 | 217 | 475 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **929** | **1053** | **0** | **0** |
+| **Итого** | **1982** | **931** | **1051** | **0** | **0** |
 
 
 ---
@@ -2285,9 +2285,9 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_link_del_addr_probe_family` | 919–937 | 19 | DEL_ADDR_PROBE: flow + trial≠0 | control::encode_delete_addr_probe | **P** | C требует transport 17, dst_port≠0, trial≠0; Rust дополнительно `source.port()!=0`, ненулевые адреса, одинаковое семейство. Кадр при валидных входах совпадает. |
 | `d2k_link_arm_shape` | 939–942 | 4 | ARM_SHAPE IPv4: обёртка family=4 → `arm_shape_family` | `control.rs` `encode_arm_shape` | E | C-обёртка зовёт `arm_shape_family(..., family=4)`, тело name_len+name+transport+family. Rust `encode_arm_shape(name, transport, 4)` выдаёт тот же кадр; тест `link_wrappers_emit_c_family4_frames` сверяет тело. |
 | `d2k_link_arm_shape_family` | 944–979 | 36 | ARM_SHAPE: имя, transport 6/17, family 4/6; кадр name_len+name+transport+family | `control.rs:904-917 encode_arm_shape` | **P** | **Совпадает:** оба принимают transport 6/17, family 4/6 и кодируют `name_len + name + transport + family`; C проверяет `fd>=0`. **Подтверждённые отличия:** (1) C при `name==NULL` подставляет пустое имя и допускает `nl==0`; Rust требует непустое имя (`control.rs:905-906`); (2) C допускает длину до 255, Rust — до `MAX_DNS_NAME_LEN` (253); (3) C `ctlsrv.c:341` принимает transport 6/17, а датапат R2O `arm_client_shape` (`control.rs:2002`) отвергает 17; при готовом слоте C шлёт `EV_CLIENT_TCP` (для 6) с TCP-опциями и `EV_SHAPE` (`ctlsrv.c:345-375`), Rust отдаёт только `EVENT_CLIENT_SHAPE` с `tcp_has_timestamp`. |
-| `d2k_link_del_name_family` | 981–1012 | 32 | DEL_NAME: fd, имя 1..255, family 4/6, transport 6/17, **shape != 0** (без сверки пары) | control::encode_delete_name | **P** | **Подтверждённое расхождение:** C принимает любую пару `transport`+`shape!=0` (например, 17 + shape 1); Rust `encode_delete_name` требует `transport==6 && shape ∈ {1,2,4,6,7,8..13}` или `transport==17 && shape ∈ {3,5}`. C шире, отказ переносится на датапат. Кадр для допустимой пары совпадает. |
+| `d2k_link_del_name_family` | 981–1012 | 32 | DEL_NAME: fd, имя 1..255, family 4/6, transport 6/17, **shape != 0** (без сверки пары) | `control.rs` `encode_delete_name` | E | C принимает любую пару transport 6/17 + shape != 0. Rust `encode_delete_name` теперь проверяет только name 1..255, family 4/6, transport 6/17 и shape != 0 (без сверки пары); кадр name_len+name+transport+shape+family совпадает. Тест `delete_name_matches_c_transport_shape_rules`. |
 | `d2k_link_del_name_probe` | 1014–1018 | 5 | DEL_NAME_PROBE IPv4: обёртка family=4 → `del_name_probe_family` | `control.rs` `encode_delete_name_probe` | E | C-обёртка передаёт family=4; тело name_len+name+shape+family+sport BE. Rust `encode_delete_name_probe(name, shape, 4, source_port≠0)` даёт тот же кадр; тест `link_wrappers_emit_c_family4_frames` сверяет поля. |
-| `d2k_link_del_name_probe_family` | 1020–1049 | 30 | DEL_NAME_PROBE: имя, shape, family 4/6, source port | `control.rs:1906-1926` `encode_delete_name_probe` | **P** | **Расхождение:** C-link не проверяет `shape` вовсе (только имя/порт/family), Rust требует `valid_tcp_probe_shape(shape)` и отвергает неизвестную форму. C-датапат всё равно отверг бы такую команду, но отказ происходит позже. Точный кадр C/Rust не сравнивался. |
+| `d2k_link_del_name_probe_family` | 1020–1049 | 30 | DEL_NAME_PROBE: имя, shape, family 4/6, source port | `control.rs` `encode_delete_name_probe` | E | C не проверяет shape вовсе (только имя/порт/family). Rust `encode_delete_name_probe` также не проверяет shape; кадр name_len+name+shape+family+sport BE. Тест `delete_name_probe_ignores_shape_like_c`. |
 | `d2k_link_del_addr` | 1051–1054 | 4 | DEL_ADDR IPv4: обёртка family=4 → `del_addr_family` | `control.rs` `encode_delete_addr` | E | C-обёртка передаёт family=4; тело family+16 байт адреса (v4 + 12 нулей)+shape. Rust `encode_delete_addr(IpAddr::V4, shape)` даёт тот же кадр; тест `link_wrappers_emit_c_family4_frames` сверяет длину 18 и поля. |
 | `d2k_link_del_addr_family` | 1056–1076 | 21 | family 4/6, ip nonnull, shape ok; frame len=20: family+16 addr+shape | `control::encode_delete_addr` | **P** | C собирает фиксированный 18-байтный кадр (len 20) и проверяет `addr_shape_ok`; Rust кодировщик проверяет family/shape и план не нужен. Для формы 1/2/3/5/6 кадр совпадает; C/Rust differential нет. |
 | `d2k_ev_outer_appdata` | 1079–1094 | 16 | `seen_types & (1 << (23-20))` — внешний тип 23, а не первый код; `ev==NULL` → 0 | `engine.rs:1150-1153` (`reverse_record_types & (1 << 3)`), `main.rs:20077` (clean-handshake `seen_types & 0x0f`) | **P*** | **Ветви C:** `if (!ev) return 0; return (ev->seen_types & 0x08) != 0 ? 1 : 0;` — только бит типа 23 (APPLICATION_DATA), не `code`. **Rust:** в datapath `engine.rs:1151-1153` маска `reverse_record_types` строится как `1 << (payload[0]-20)` для 20..23, `has_application_data = reverse_record_types & (1 << 3) != 0` — тот же бит 23; отдельной функции нет. Контроллер в legacy clean-handshake использует более широкую маску `seen_types & 0x0f` (`main.rs:20077`) — это другой потребитель («любой ответ»), не замена `d2k_ev_outer_appdata`. C/Rust differential на маску 0x08 отсутствует. |

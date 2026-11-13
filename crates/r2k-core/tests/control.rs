@@ -491,6 +491,27 @@ fn r2o_событие_молчания_tcp_проверяет_ключ_напр�
 }
 
 #[test]
+fn delete_name_matches_c_transport_shape_rules() {
+    // C `d2k_link_del_name_family`: любая пара transport 6/17 + shape != 0.
+    assert!(encode_delete_name("example.test", 17, SHAPE_MODERN, 4).is_ok());
+    assert!(encode_delete_name("example.test", 6, SHAPE_QUIC, 4).is_ok());
+    assert!(encode_delete_name("example.test", 6, 0, 4).is_err());
+    assert!(encode_delete_name("example.test", 5, SHAPE_MODERN, 4).is_err());
+    assert!(encode_delete_name("example.test", 6, SHAPE_MODERN, 5).is_err());
+    assert!(encode_delete_name("", 6, SHAPE_MODERN, 4).is_err());
+    assert!(encode_delete_name(&"a".repeat(256), 6, SHAPE_MODERN, 4).is_err());
+}
+
+#[test]
+fn delete_name_probe_ignores_shape_like_c() {
+    // C `d2k_link_del_name_probe_family` не проверяет shape.
+    assert!(encode_delete_name_probe("example.test", 0, 4, 40123).is_ok());
+    assert!(encode_delete_name_probe("example.test", 99, 6, 40123).is_ok());
+    assert!(encode_delete_name_probe("example.test", SHAPE_MODERN, 5, 40123).is_err());
+    assert!(encode_delete_name_probe("example.test", SHAPE_MODERN, 4, 0).is_err());
+}
+
+#[test]
 fn link_wrappers_emit_c_family4_frames() {
     use r2k_core::control::{
         COMMAND_ARM_SHAPE, COMMAND_SET_NAME, encode_arm_shape, encode_set_name,
