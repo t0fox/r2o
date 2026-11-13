@@ -11,6 +11,19 @@ const CANDIDATES: [&str; 5] = [
     "disorder",
     "fake-seqshift",
 ];
+
+/// C `CANDS` (`httpsearch.c:250`): публичный список без R2O-расширения.
+pub const D2K_HS_CANDIDATES: [&str; 4] = ["split", "disorder", "fake-badsum", "fake-seqshift"];
+
+/// C `d2k_hs_candidate_count`.
+pub fn d2k_hs_candidate_count() -> usize {
+    D2K_HS_CANDIDATES.len()
+}
+
+/// C `d2k_hs_candidate_key`: NULL за пределом списка.
+pub fn d2k_hs_candidate_key(index: usize) -> Option<&'static str> {
+    D2K_HS_CANDIDATES.get(index).copied()
+}
 const FAKE_REQUEST: &[u8] = b"GET / HTTP/1.1\r\nHost: disk.rzd.ru\r\n\r\n";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -21,6 +34,40 @@ pub enum Answer {
     Decoy,
     Real,
     Cut,
+}
+
+/// C `d2k_hs_answer`: все 10 исходов и default.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum R2oHsAnswer {
+    None,
+    Real,
+    Injected,
+    Early,
+    Garbage,
+    Silent,
+    Reset,
+    Closed,
+    ConnectFail,
+    Decoy,
+    Cut,
+    Unknown,
+}
+
+/// C `d2k_hs_answer_name`: русские имена исходов и default «нет».
+pub fn d2k_hs_answer_name(answer: R2oHsAnswer) -> &'static str {
+    match answer {
+        R2oHsAnswer::Real => "ответ сервера",
+        R2oHsAnswer::Injected => "вставка провайдера",
+        R2oHsAnswer::Early => "ответ раньше RTT/2 (не сервер)",
+        R2oHsAnswer::Garbage => "не ответ HTTP",
+        R2oHsAnswer::Silent => "тишина",
+        R2oHsAnswer::Reset => "сброс",
+        R2oHsAnswer::Closed => "закрытие без ответа",
+        R2oHsAnswer::ConnectFail => "соединение не установилось",
+        R2oHsAnswer::Decoy => "ответ на приманку, не на запрос цели",
+        R2oHsAnswer::Cut => "обрыв тела ответа",
+        R2oHsAnswer::None | R2oHsAnswer::Unknown => "нет",
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -789,11 +836,19 @@ pub fn candidate_program(key: &str) -> Option<Vec<u8>> {
 }
 
 pub fn stable_id(key: &str) -> [u8; 16] {
+    stable_id_with_prefix(b"r2o-http:", key)
+}
+
+/// C `stable_id`: FNV-1a по префиксу `d2k-http:` и ключу.
+pub fn d2k_stable_id(key: &str) -> [u8; 16] {
+    stable_id_with_prefix(b"d2k-http:", key)
+}
+
+fn stable_id_with_prefix(prefix: &[u8], key: &str) -> [u8; 16] {
     const OFFSET: u64 = 1_469_598_103_934_665_603;
     const PRIME: u64 = 1_099_511_628_211;
-    const ID_PREFIX: &[u8] = b"r2o-http:";
     let mut hash = OFFSET;
-    for byte in ID_PREFIX.iter().chain(key.as_bytes()) {
+    for byte in prefix.iter().chain(key.as_bytes()) {
         hash = (hash ^ u64::from(*byte)).wrapping_mul(PRIME);
     }
     let mut id = [0; 16];

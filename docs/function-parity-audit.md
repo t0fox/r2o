@@ -84,14 +84,14 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 282 | 266 | 0 | 0 |
+| core-net | 548 | 286 | 262 | 0 | 0 |
 | core-state | 692 | 274 | 418 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1044** | **938** | **0** | **0** |
+| **Итого** | **1982** | **1048** | **934** | **0** | **0** |
 
-Это не оценка паритета: 938 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 934 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1044 / P 938 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1048 / P 934 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -342,12 +342,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 282 | 266 | 0 | 0 |
+| core-net | 548 | 286 | 262 | 0 | 0 |
 | core-state | 692 | 274 | 418 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1044** | **938** | **0** | **0** |
+| **Итого** | **1982** | **1048** | **934** | **0** | **0** |
 
 
 ---
@@ -747,17 +747,17 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `mono_ms` | 37-41 | 5 | монотонное время, мс, `CLOCK_MONOTONIC` | `std::time::Instant`/`Duration` (`http_search.rs:314`, `main.rs:22901+`) | **P** | C возвращает целые мс от `CLOCK_MONOTONIC` (`httpsearch.c:37-41`); Rust использует `Instant` и `Duration`/`as_micros`/`as_millis`. Монотонность и единицы пересчитываются, отдельной функции-обёртки нет. |
-| `d2k_hs_answer_name` | 43-57 | 15 | русские имена 10 исходов + default «нет» | `http_search.rs:17-24 enum Answer` (6 вариантов); тексты — в `main.rs` | **P** | **Подтверждённое отличие состава:** C различает `REAL/INJECTED/EARLY/GARBAGE/SILENT/RESET/CLOSED/CONNECT_FAIL/DECOY/CUT` и default (`httpsearch.c:43-57`); Rust `Answer` содержит только `Injected/Early/Garbage/Decoy/Real/Cut` (`http_search.rs:17-24`), а `Silent/Reset/Closed/ConnectFail` выражены ошибками ввода-вывода. Тексты C в Rust дословно не перенесены: логи используют собственные строки (`main.rs:22974,23127`). Диагностика. |
+| `d2k_hs_answer_name` | 43-57 | 15 | русские имена 10 исходов + default «нет» | `http_search.rs` `d2k_hs_answer_name`/`R2oHsAnswer` | **E*** | C: 10 имён (`REAL…CUT`) и default «нет». Rust `R2oHsAnswer` повторяет все 10 + `None`/`Unknown` → «нет»; C/Rust differential `scripts/test-http-search-candidates-differential.sh` (22 кейса, значения 0..11) PASS. **Ограничение:** production `Answer` содержит 6 вариантов, остальные — IO-ошибки; `R2oHsAnswer` — C-совместимый API. |
 | `d2k_hs_judge` | 61-95 | 35 | классификация HTTP-ответа: garbage/injected/decoy/early/real | `http_search.rs:850-882 judge` | **E** | **Совпадает построчно:** `<12`/`HTTP/1.0\|1.1`/код `1..5`+2 цифры/наличие CRLFCRLF → Garbage; `portal_location` → Injected; 400/421 или `disk.rzd.ru` без регистра → Decoy; `rtt_us>0 && reply_us>=0 && 2*reply_us<rtt_us` → Early; иначе Real. Rust те же условия и порядок (`http_search.rs:850-882`), `i128` для переполнения. Differential `scripts/r2o-http-search-differential.sh` + `d2o_http_judge_differential`. |
 | `hs_path_ok` | 99-107 | 7 | допустимый путь для повтора: `/`, не `//`, длина ≤1023, байты 33..126 без `? # \` | `http_search.rs:300-308 repeatable_path` | **E** | C: `path[0]=='/'`, `path[1]!='/'`, `n<1023`, `c>32 && c<127`, запрет `? # \`, `n>0` (`httpsearch.c:99-107`). Rust: `1..=1023`, первый `/`, второй не `/`, `(33..127)` без `? # \`. Тесты `tests/http_search.rs:243-259`, `main.rs:28365`. |
 | `hs_read` | 110-130 | 21 | чтение сокета: poll до `wait_ms`, EINTR, время первого байта, префикс 4 КиБ | `http_search.rs:310-365 read_probe_response`, `:367-398 read_response_head` | **P** | C `poll`-цикл, `recv`, `first_us` от первого байта, `head[4096]` (с телом), `used` — длина префикса (`httpsearch.c:110-130`). Rust читает заголовок побайтно до CRLFCRLF с пределом 64 КиБ, затем тело по CL/chunked/until-close; `first_byte: Instant`, `reply_us` от него. **Отличия:** C хранит только 4 КиБ ответа, Rust — 64 КиБ заголовков; C `used` не равен полному числу байт; таймаут C в `hs_read`, Rust — через `Read`/`Instant`. Побайтового differential таймингов нет. |
 | `d2k_hs_probe_run` | 132-246 | 115 | один зонд: connect, RTT, local identity, 2 GET, judge, keep-alive | `main.rs:23385-23440 run_http_baseline(_on_stream)`, `http_search.rs:310-365` | **P** | Rust `run_http_baseline_on_stream` делает ровно 2 запроса, на каждом `read_probe_response`, прерывается на не-Real, CUT при `!complete`, останавливается при `connection_close`; connect 6 с. **Подтверждённые различия:** (1) C переопределяет ответ в INJECTED при `D2K_HTTP_BLOCKED` (`httpsearch.c:232`), Rust тело не классифицирует; (2) C 101 проходит judge как Real и затем `!complete` → CUT, Rust `BodyMode::Empty` + `complete=true` (`http_search.rs:338-341,590-600`); (3) C неверный CL/TE → CUT (parse error + head), Rust `Err(InvalidData)` (`:335-337`); (4) C judge видит первые 4 КиБ тела, Rust — только заголовки; (5) C не имеет общего дедлайна `3*probe_ms`, Rust ограничен connect 6 с и таймаутами. C-фикстура baseline покрывает keep-alive. |
-| `d2k_hs_candidate_count` | 253-253 | 1 | число встроенных кандидатов | `http_search.rs:627 candidate_keys` | **P** | **Расхождение:** C `CANDS[]` — 4 элемента `split, disorder, fake-badsum, fake-seqshift` (`httpsearch.c:250-254`); Rust — 5 в порядке `split, fake-badsum-whole, fake-badsum, disorder, fake-seqshift` (`http_search.rs:7-13`). `fake-badsum-whole` в C — отдельный вопрос `HQ_PRODUCT`, не элемент `CANDS`. Тест `tests/http_search.rs:196` закрепляет расширенный список Rust. |
-| `d2k_hs_candidate_key` | 254-254 | 1 | ключ кандидата по индексу | `http_search.rs:627 candidate_keys` | **P** | Индексы 0..3 не совпадают с C: на индексе 1 Rust отдаёт `fake-badsum-whole`, у C — `disorder`. C-дифференциала публичного списка нет. |
+| `d2k_hs_candidate_count` | 253-253 | 1 | число встроенных кандидатов | `http_search.rs` `d2k_hs_candidate_count` | **E*** | C `N_CANDS=4`. Rust `D2K_HS_CANDIDATES` — точный C-список `split, disorder, fake-badsum, fake-seqshift`; C/Rust differential 22 кейса PASS. **Ограничение:** production `candidate_keys()` — R2O-надмножество из 5 (`fake-badsum-whole`), расширение сохранено. |
+| `d2k_hs_candidate_key` | 254-254 | 1 | ключ кандидата по индексу | `http_search.rs` `d2k_hs_candidate_key` | **E*** | C: `i<N_CANDS ? CANDS[i] : NULL`. Rust `d2k_hs_candidate_key` — те же индексы 0..3 и `None` за пределом; C/Rust differential PASS. **Ограничение:** production enumeration — R2O-надмножество. |
 | `poison_key_spec` | 258-287 | 30 | разбор `fake:`: ttl=1/badsum=2/seqshift=3, строго возрастающий порядок; ttl 1..255, seqshift ±2147483647 ≠0; ttl без badsum/seqshift запрещён | `http_search.rs:796-834 poison_key_spec` | **E** | **Совпадает:** `len>39` → отказ; `strtok("+")`/`split('+').filter(nonempty)`; ранги 1/2/3; повтор/порядок → отказ; ttl 1..255, seqshift ±2147483647 и ≠0; ttl без badsum/seqshift → отказ; пустой список → отказ. C `strtol` base 10 принимает ведущие пробелы и знак; Rust `parse_decimal` срезает ведущие ASCII-пробелы и парсит `i64` (`:836-839`), знак принимает; хвостовой мусор оба отвергают. Тест `tests/http_search.rs:268`. |
 | `known_key` | 289-294 | 6 | предикат: `fake-badsum-whole`, CANDS или валидный `fake:`-spec | `http_search.rs` `known_key` | E | C: `fake-badsum-whole`, 4 CANDS или `poison_key_spec==0`. Rust `known_key` возвращает то же множество и используется `candidate_text` как guard; тест `known_key_matches_c_predicate` (8 принятых, 12 отклонённых: ttl без badsum/seqshift, повторы, порядок, границы 0/256, seqshift 0/INT_MIN, длина >39, неизвестные). |
 | `d2k_hs_candidate_text` | 296-324 | 29 | `d2k-plan 1 11`, id, `proto tcp http`, fake payload/poison/repeats, split, disorder+pace | `http_search.rs:686-717 candidate_text` | **P** | **Осознанное брендинговое отличие:** C `d2k-plan 1 11`, Rust `r2o-plan 1 11`; директивы (`payload 1`, `poison 1`, `fake … repeats=1`, `split sni_middle +0`, `order reverse`, `pace 12000`) совпадают. Rust-тесты `tests/http_search.rs:227,235,243,260` фиксируют R2O-заголовок; C-байтового differential нет. |
-| `stable_id` | 327-332 | 6 | FNV-1a по префиксу `d2k-http:` и ключу, 16 байт | `http_search.rs:780-795 stable_id` | **P** | **Осознанное брендинговое отличие:** C хеширует `"d2k-http:"`, Rust — `"r2o-http:"`, id для ключа разные. FNV-1a/prime/порядок совпадают. Тест `derives_the_r2o_stable_id_for_a_candidate` (`tests/http_search.rs:279`) закрепляет R2O-id. |
+| `stable_id` | 327-332 | 6 | FNV-1a по префиксу `d2k-http:` и ключу, 16 байт | `http_search.rs` `d2k_stable_id`/`stable_id` | **E*** | C: FNV-1a offset/prime, `d2k-http:` + key, 16 байт из `h>>56`. Rust `d2k_stable_id` — точные байты (split/disorder/fake-badsum/fake-spec); C/Rust differential PASS. **Ограничение:** production `stable_id` использует брендинг `r2o-http:` (осознанное отличие R2O), id для одного ключа разные. |
 | `fresh_id` | 334-352 | 19 | 16 случайных байт из `/dev/urandom`; fallback mono/counter LCG; `id[0]\|=1` | `main.rs` `random_id`/`r2o_fresh_id_fallback` | E | C читает `/dev/urandom` до 16 байт, при недоборе берёт `mono_ms ^ (++ctr * 0x9e3779b97f4a7c15)` и LCG, затем `id[0] \|= 1`. Rust `random_id` при ошибке urandom вызывает `r2o_fresh_id_fallback` (та же константа/LCG/счётчик) и ставит `id[0] \|= 1`; тест `fresh_id_matches_c_nonzero_and_random`. |
 | `say` | 215-224 | 10 | `vsnprintf` ошибки в `err/cap` | `format!`/`io::Error` в `r2o_quic_http3.rs`/`quic_replay.rs` | **P** | C пишет текст в переданный буфер, молча выходит при `!err\|\|cap==0`; Rust возвращает `io::Error`/`String`, вызывающий логирует. Контракт «назвать причину» тот же, тексты/владение иные. |
 | `host_ok` | 452-466 | 15 | host 1..253, только LDH и `.`, последняя метка не полностью цифровая | `r2k-core/httpup.rs` `valid_http_name_host` | E | C: длина 1..253, только `[A-Za-z0-9.-]`, последняя метка содержит нецифровой символ. Rust `valid_http_name_host` = `valid_dns_host` + последняя метка не полностью цифровая; тест `http_name_host_rejects_numeric_last_label_like_c` (валидные, `example.123`, `123`, `a..1`). |
