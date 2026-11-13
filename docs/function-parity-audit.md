@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 320 | 228 | 0 | 0 |
-| core-state | 692 | 395 | 297 | 0 | 0 |
+| core-state | 692 | 396 | 296 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1220** | **762** | **0** | **0** |
+| **Итого** | **1982** | **1221** | **761** | **0** | **0** |
 
-Это не оценка паритета: 762 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 761 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1220 / P 762 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1221 / P 761 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 320 | 228 | 0 | 0 |
-| core-state | 692 | 395 | 297 | 0 | 0 |
+| core-state | 692 | 396 | 296 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1220** | **762** | **0** | **0** |
+| **Итого** | **1982** | **1221** | **761** | **0** | **0** |
 
 
 ---
@@ -2161,7 +2161,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 |---|---:|---:|---|---|---|---|
 | `usage` | 22-37 | 16 | флаги `--addr/--control/--conntrack/--wait/--mark/--list/--discovery` | `main.rs` `r2o_voice_check_command` help | **P** | C текст перечисляет эти флаги и умолчания (3000 мс, `/proc/net/nf_conntrack`, `D2K_VOICE_CONTROL_DEFAULT`). Rust-набор тот же, текст/форма командной строки отличается; CLI-дифференциала нет. |
 | `split_hostport` | 39-48 | 10 | последнее `:`, host<cap, `strtoul` порта (без проверки хвоста), 1..65535 | `main.rs` `r2o_voice_check_command` parse | **P*** | C `strrchr(':')`, `colon==s` → -1, `hl>=hcap` → -1, копия host, `strtoul(colon+1,NULL,10)`, `0<port<=65535`. Rust использует строгий `parse::<u16>`/`rsplit_once`; `1:2x` C примет как 2, Rust отвергнет. IPv6-литерал C всё равно отвергает `d2k_ip4_parse`. |
-| `verdict_word` | 50-61 | 12 | русские тексты CLEAR/BLOCKED/NO_UDP/NO_CALL/FLAKY/NO_ORACLE/UNMEASURED | `voice_measure::r2o_format_voice_measurement` | **P** | C `switch`: «резать нечего», «режут этот поток», «UDP не ходит вовсе», «мерить нечего», «не воспроизводится», «мерить этим зондом нечем», «измерение не закончено», default «неизвестный вердикт». Rust те же строки; формат всего вывода не сравнивался. |
+| `verdict_word` | 50-61 | 12 | русские тексты CLEAR/BLOCKED/NO_UDP/NO_CALL/FLAKY/NO_ORACLE/UNMEASURED | `voice_measure.rs` `r2o_voice_verdict_word`, `r2o_format_voice_measurement` | E | Все семь текстов C `verdict_word` совпадают дословно: «резать нечего», «режут этот поток», «UDP не ходит вовсе», «мерить нечего», «не воспроизводится», «мерить этим зондом нечем», «измерение не закончено». Функция используется production-форматтером; тест `voice_verdict_words_match_c_d2kvoice`. |
 | `main` | 63–135 | 73 | CLI: list-only (targets по conntrack), voice_run, печать разговора/вердикта/зондов/предупреждения/приёма, exit 0 для CLEAR иначе 1 | `main.rs` `r2o_voice_check_command`/`r2o_voice_list_command` + `voice_measure`/`voice_targets` | **P** | **Подтверждённые отличия:** C `--wait 0` передаёт 0, `d2k_voice_run` подставляет default 3000; Rust `0` остаётся 0. C `--list` принимает любые флаги, Rust `--voice-list` — только `--conntrack`. C `atoi/strtoul` без проверки; Rust строгий parse. Блок «Приём» зависит от `discovery_verified`/BLOCKED. |
 
 ### `core/diagnostics.c`
@@ -2818,7 +2818,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `main` | 157–356 | `crates/r2o-controller/src/bin/r2o-fetch.rs:11-507` | **P** | **Совпадает:** режимы GET/TLS12/QUIC/ladder/snapshot/json, `--wire 0` → длина профиля, `--ip ""` → `dns_failed`/exit 2, итоговые коды TCP 0 (полный ответ), 1 (обрыв/ошибка), 2 (локальный отказ/ DNS), поля JSON `schema/client/name/shape/ip/port/path/protocol/body_*/headers_inspected/wire_requested/mark/elapsed_ms/local_port/negotiated_tls/http_status/response_complete/level/local_refusal/measured/name_ok/reason`. **Подтверждённые отличия:** (1) C разбирает `atoi/atol/strtoul` без проверки (`--port 65537` → 1, отрицательный deadline допустим), Rust строго парсит `u16/u64` и отвергает; (2) C `ladder` полностью вытесняет `quic` и меряет TCP, Rust при `--ladder --quic` выполняет обе проверки и combines exit; (3) C ladder всегда зовёт `d2k_volume_probe_path` (RX внутри), Rust вызывает TX и RX отдельно и пропускает RX при port 80 или reason «нет TCP к »; (4) C QUIC-режим использует `d2k_verify_probe_quic_path_mark_on` и успех только по `body_complete`, Rust — `r2o_fetch_quic_with_budget`, JSON `body_bytes:null` + `quic_stream_bytes`, exit 0 при `complete` или `budget_passed`; (5) C печатает `--version` из `D2K_RELEASE_ID`, Rust — `CARGO_PKG_VERSION`; (6) человеческий вывод различается компоновкой (C печатает gzip/chunked в строке тела, Rust — отдельными строками); (7) Rust добавляет `--quic-budget` (требует `--quic`) и `--control`. Полного побайтового JSON/exit differential нет. |
 | `usage` (static) | 22–37 | `main.rs:819-833` usage `--voice-check`, `:843-861` `--voice-list` | **P** | C — отдельный бинарь `d2kvoice` с `--addr/--control/--conntrack/--wait/--mark/--list/--discovery`; Rust — подкоманды `r2o-controller --voice-check …` и `--voice-list [--conntrack ФАЙЛ]`. Набор возможностей совпадает, но `--list` разнесён в отдельную подкоманду, текст помощи другой. |
 | `split_hostport` (static) | 39–48 | `voice_measure.rs:803-816 r2o_parse_voice_address` | **P** | **Совпадает:** последний `:`, непустой host, порт 1..65535. **Отличия:** C делает `strtoul` без проверки хвоста (`1.2.3.4:12abc` → 12) и принимает ведущие нули IPv4 через `d2k_ip4_parse`; Rust `parse::<u16>()` отвергает хвост, а `Ipv4Addr::from_str` — ведущие нули. C host-буфер 64 байта, Rust `String`. |
-| `verdict_word` (static) | 50–61 | `voice_measure.rs:296-305 r2o_format_voice_measurement` | **P** | Все семь текстов совпадают дословно: «резать нечего», «режут этот поток», «UDP не ходит вовсе», «мерить нечего», «не воспроизводится», «мерить этим зондом нечем», «измерение не закончено». C default → «неизвестный вердикт»; Rust match исчерпывающий, default недостижим. Отдельного C/Rust differential нет. |
+| `verdict_word` (static) | 50–61 | `voice_measure.rs` `r2o_voice_verdict_word` | E | Все семь текстов C `verdict_word` совпадают дословно: «резать нечего», «режут этот поток», «UDP не ходит вовсе», «мерить нечего», «не воспроизводится», «мерить этим зондом нечем», «измерение не закончено»; функция используется production-форматтером `r2o_format_voice_measurement`. Тест `voice_verdict_words_match_c_d2kvoice`. |
 | `main` | 63–135 | `voice_measure.rs:93-139` parse, `main.rs:819-867` commands, `voice_measure.rs:141-350` measure/print | **P** | **Совпадает:** `--addr/--control/--conntrack/--wait/--mark/--discovery`, `--list` с кодом 1 при пустом списке и 0 иначе, итоговый код `CLEAR ? 0 : 1`, печать «Разговор/Вердикт/Зондов/ВНИМАНИЕ». **Отличия:** (1) C `--wait/--mark` — `strtoul` без проверки (в т.ч. `--wait -1`, мусорный хвост), Rust строго `u64`/`0x`+decimal; C `--mark` понимает восьмеричную форму (`base 0`), Rust — только hex/десятичную; (2) C `--list` — флаг в том же бинаре, Rust — отдельная подкоманда с строгим набором аргументов; (3) C при `discovery_verified` печатает `fake_arm ×arm_copies`, Rust отдельно печатает `discovery_prefix` как `stun-before-discovery ×1` либо общую строку, а найденную приманку — как `Приманка: кандидат …`; (4) C `--addr` принимает ведущие нули IPv4, Rust отвергает. Печать и коды не сверялись побайтовым differential. |
 | `need_value` (static) | 120–128 | `ask.rs:61-70` inline value fetch | **E*** | Тот же контракт `i+1>=argc` → «требует значения»; тест `cli_flag_parsers_match_c_bounds_bases_and_missing_values` покрывает все флаги. **Ограничение:** inline, без отдельной функции. |
 | `parse_flag_u16` (static) | 134–149 | `ask.rs:168-177 parse_positive_port` | **E*** | 1..65535, base 10, отказ на 0/переполнение/хвост; тест `cli_flag_parsers_match_c_bounds_bases_and_missing_values`. **Ограничение:** Rust строже C (пробелы/`+`). |

@@ -293,8 +293,9 @@ pub fn r2o_measured_voice_arm_plan_text(r2o_arm: R2oVoiceArm) -> Result<String, 
     ))
 }
 
-pub fn r2o_format_voice_measurement(r2o_result: &R2oVoiceMeasurement) -> String {
-    let r2o_verdict = match r2o_result.verdict {
+/// C `verdict_word` (`core/d2kvoice.c:50-61`): русские подписи вердикта.
+pub const fn r2o_voice_verdict_word(r2o_verdict: R2oVoiceVerdict) -> &'static str {
+    match r2o_verdict {
         R2oVoiceVerdict::Clear => "резать нечего",
         R2oVoiceVerdict::Blocked => "режут этот поток",
         R2oVoiceVerdict::NoUdp => "UDP не ходит вовсе",
@@ -302,7 +303,11 @@ pub fn r2o_format_voice_measurement(r2o_result: &R2oVoiceMeasurement) -> String 
         R2oVoiceVerdict::Flaky => "не воспроизводится",
         R2oVoiceVerdict::NoOracle => "мерить этим зондом нечем",
         R2oVoiceVerdict::Unmeasured => "измерение не закончено",
-    };
+    }
+}
+
+pub fn r2o_format_voice_measurement(r2o_result: &R2oVoiceMeasurement) -> String {
+    let r2o_verdict = r2o_voice_verdict_word(r2o_result.verdict);
     let mut r2o_output = String::new();
     if let Some(r2o_address) = r2o_result.address {
         r2o_output.push_str(&format!("Разговор:  {r2o_address}\n"));
@@ -851,7 +856,41 @@ mod tests {
         R2oVoiceTally, R2oVoiceVerdict, r2o_ask_voice, r2o_ask_voice_with_arm, r2o_evaluate_voice,
         r2o_format_voice_measurement, r2o_measured_voice_arm_plan_text, r2o_parse_voice_options,
         r2o_record_voice_discovery_arm, r2o_select_voice_target, r2o_voice_observation,
+        r2o_voice_verdict_word,
     };
+
+    #[test]
+    fn voice_verdict_words_match_c_d2kvoice() {
+        // Все семь текстов C `verdict_word` (`core/d2kvoice.c:50-61`).
+        assert_eq!(
+            r2o_voice_verdict_word(R2oVoiceVerdict::Clear),
+            "резать нечего"
+        );
+        assert_eq!(
+            r2o_voice_verdict_word(R2oVoiceVerdict::Blocked),
+            "режут этот поток"
+        );
+        assert_eq!(
+            r2o_voice_verdict_word(R2oVoiceVerdict::NoUdp),
+            "UDP не ходит вовсе"
+        );
+        assert_eq!(
+            r2o_voice_verdict_word(R2oVoiceVerdict::NoCall),
+            "мерить нечего"
+        );
+        assert_eq!(
+            r2o_voice_verdict_word(R2oVoiceVerdict::Flaky),
+            "не воспроизводится"
+        );
+        assert_eq!(
+            r2o_voice_verdict_word(R2oVoiceVerdict::NoOracle),
+            "мерить этим зондом нечем"
+        );
+        assert_eq!(
+            r2o_voice_verdict_word(R2oVoiceVerdict::Unmeasured),
+            "измерение не закончено"
+        );
+    }
     use crate::voice_targets::R2oVoiceTarget;
     use std::ffi::OsString;
     use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
