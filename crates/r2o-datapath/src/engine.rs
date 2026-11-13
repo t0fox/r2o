@@ -3432,6 +3432,29 @@ mod tests {
     }
 
     #[test]
+    fn note_tcp_hello_skips_probe_and_records_ack_like_c() {
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let start = Instant::now();
+        let syn = ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]);
+        let hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello_with_sni());
+
+        // C `note_tcp_hello`: probe не увеличивает счётчик, но ACK пишется.
+        let mut sessions = TcpSessions::default();
+        sessions.track_packet_mode(&syn, start, false);
+        sessions.track_packet_mode(&hello, start + Duration::from_millis(1), true);
+        assert_eq!(sessions.r2o_tcp_hello_flows(), 0);
+        let key = TcpFlowKey::from_packet(&hello).unwrap();
+        assert!(sessions.flows[&key].hello_ack.is_some());
+
+        // Обычный hello считается один раз.
+        let mut sessions = TcpSessions::default();
+        sessions.track_packet_mode(&syn, start, false);
+        sessions.track_packet_mode(&hello, start + Duration::from_millis(1), false);
+        assert_eq!(sessions.r2o_tcp_hello_flows(), 1);
+    }
+
+    #[test]
     fn track_expire_matches_c_idle_boundary_and_clock_regression() {
         let mut sessions = TcpSessions::default();
         let start = Instant::now();
