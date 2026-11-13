@@ -470,6 +470,21 @@ impl R2oUdpSessions {
         self.r2o_quic_hello_flows
     }
 
+    /// C `d2k_session_flows_udp`: число текущих UDP-потоков.
+    pub fn len(&self) -> usize {
+        self.flows.len()
+    }
+
+    /// C `d2k_session_capacity_udp`: ёмкость UDP-таблицы.
+    pub fn r2o_flow_capacity(&self) -> usize {
+        self.flow_capacity.slots()
+    }
+
+    /// C `d2k_session_refusals_udp`: отказы UDP-таблицы.
+    pub fn r2o_flow_refusals(&self) -> u64 {
+        self.refusals
+    }
+
     pub fn r2o_quic_hellos_with_sni(&self) -> u64 {
         self.r2o_quic_hellos_with_sni
     }

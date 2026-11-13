@@ -86,10 +86,10 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 197 | 351 | 0 | 0 |
 | core-state | 692 | 182 | 509 | 0 | 0 |
-| datapath-core | 400 | 156 | 244 | 0 | 0 |
+| datapath-core | 400 | 164 | 236 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 74 | 85 | 0 | 0 |
-| **Итого** | **1982** | **785** | **1197** | **0** | **0** |
+| **Итого** | **1982** | **793** | **1189** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 785 / P 1197 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 793 / P 1189 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -346,10 +346,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 197 | 351 | 0 | 0 |
 | core-state | 692 | 182 | 510 | 0 | 0 |
-| datapath-core | 400 | 156 | 244 | 0 | 0 |
+| datapath-core | 400 | 164 | 236 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 74 | 85 | 0 | 0 |
-| **Итого** | **1982** | **785** | **1197** | **0** | **0** |
+| **Итого** | **1982** | **793** | **1189** | **0** | **0** |
 
 
 ---
@@ -3921,14 +3921,14 @@ CLI-логирования, health-файла, duration, состава свод
 | `d2k_session_done` | 3545-3547 | 3 | счётчик завершённых исполнений | `engine.rs` `session_done`, `r2o_mark_plan_done_for_execution` | E | C `s->done++` при завершении всех посылок. Rust `r2o_mark_plan_done_for_execution` при успехе увеличивает `session_done`; тест `tcp_повторный_clienthello...` проверяет `==1`. |
 | `d2k_session_damaged_count` | 3549-3551 | 3 | число испорченных потоков | `engine.rs` `session_damaged`, `r2o_mark_damaged_for_execution` | E | C `damaged_flows++` один раз на поток. Rust увеличивает `session_damaged` только при переходе `damaged=false→true`; тест `tcp_отказ_повреждает...` проверяет `==1`. |
 | `d2k_session_sent_lost` | 3553–3555 | 3 | «некому приписать отправку» | `engine.rs` `session_sent_lost`/`r2o_note_sent_lost`, `main.rs` `r2o_finish_tcp_execution` | E | C `sent_lost++` при отсутствии потока/чужом поколении/нулевом `sends_left`. Rust `r2o_finish_tcp_execution` вызывает `r2o_note_sent_lost()`, если `r2o_mark_plan_done_for_execution` не нашёл живое поколение; тест `session_sent_lost_counts_completions_without_live_flow`. |
-| `d2k_session_refusals` | 3557-3559 | 3 | сумма отказов TCP+UDP | `engine.rs:438 r2o_tcp_flow_refusals` + UDP-таблица | **P** | C `d2k_track_refusals(s->flows)+d2k_track_refusals(s->uflows)`. Rust есть `r2o_tcp_flow_refusals` и отказы UDP-таблицы, но **общего getter-а суммы** нет; в сводке выводятся отдельно. |
-| `d2k_session_capacity` | 3561-3563 | 3 | суммарная ёмкость TCP+UDP | `engine.rs:434 r2o_tcp_flow_capacity` + UDP-таблица | **P** | C `track_capacity(tcp)+track_capacity(udp)`. Rust есть `r2o_tcp_flow_capacity` и ёмкость UDP, но **общей функции суммы** нет; в сводке значения выводятся раздельно. |
-| `d2k_session_flows_tcp` | 3565-3567 | 3 | число TCP-потоков | `TcpSessions::len` (`engine.rs:393`) | **P** | C `s ? d2k_track_count(s->flows) : 0`. Rust `TcpSessions` — `HashMap`, `len()` даёт то же число; отдельного getter-а `flows_tcp` нет. |
-| `d2k_session_flows_udp` | 3569-3571 | 3 | число UDP-потоков | UDP flow table (`main.rs`) | **P** | C `return s ? d2k_track_count(s->uflows) : 0`. Rust ведёт UDP-таблицу отдельно (сессии/`main.rs`), отдельного getter-а `flows_udp` нет; значение выводится в сводке из таблицы. |
-| `d2k_session_capacity_tcp` | 3573-3575 | 3 | ёмкость TCP-таблицы | `engine.rs:434 r2o_tcp_flow_capacity` | **P** | C `return s ? d2k_track_capacity(s->flows) : 0`. Rust `r2o_tcp_flow_capacity()` возвращает то же значение; имя/API иные. Проверено: `r2o_tcp_flow_capacity()` возвращает `flow_capacity.slots()`, тот же предел; см. `flow_capacity.rs:45`. |
-| `d2k_session_capacity_udp` | 3577-3579 | 3 | ёмкость UDP-таблицы | UDP flow table (`main.rs`) | **P** | C `return s ? d2k_track_capacity(s->uflows) : 0`. Rust ёмкость UDP-таблицы хранится в её структуре; отдельной функции нет. Проверено: ёмкость UDP-таблицы хранится в её структуре и выводится в сводке; отдельного differential нет. |
-| `d2k_session_refusals_tcp` | 3581-3583 | 3 | отказы TCP-таблицы | `engine.rs:438 r2o_tcp_flow_refusals` | **P** | C `return s ? d2k_track_refusals(s->flows) : 0`. Rust `r2o_tcp_flow_refusals()` — то же значение; API иное. Проверено: `r2o_tcp_flow_refusals()` читает тот же счётчик отказов TCP-таблицы. |
-| `d2k_session_refusals_udp` | 3585-3587 | 3 | отказы UDP-таблицы | UDP flow table (`main.rs`) | **P** | C `return s ? d2k_track_refusals(s->uflows) : 0`. Rust отказы UDP-таблицы хранятся в её счётчике; отдельной функции нет. Проверено: отказы UDP-таблицы хранятся в её счётчике и выводятся в сводке. |
+| `d2k_session_refusals` | 3557-3559 | 3 | сумма отказов TCP+UDP | `engine.rs` `r2o_session_refusals` | E | C `d2k_track_refusals(tcp)+d2k_track_refusals(udp)`. Rust `r2o_session_refusals(tcp,udp)` суммирует `r2o_tcp_flow_refusals` и `r2o_flow_refusals`; тест `session_capacity_flows_and_refusals_match_c`. |
+| `d2k_session_capacity` | 3561-3563 | 3 | суммарная ёмкость TCP+UDP | `engine.rs` `r2o_session_capacity` | E | C `track_capacity(tcp)+track_capacity(udp)`. Rust `r2o_session_capacity(tcp,udp)` суммирует `slots()` обеих таблиц; тест `session_capacity_flows_and_refusals_match_c`. |
+| `d2k_session_flows_tcp` | 3565-3567 | 3 | число TCP-потоков | `TcpSessions::len` | E | C `s ? d2k_track_count(s->flows) : 0`. Rust `TcpSessions::len()` возвращает `flows.len()`; тест `session_capacity_flows_and_refusals_match_c`. |
+| `d2k_session_flows_udp` | 3569-3571 | 3 | число UDP-потоков | `R2oUdpSessions::len` | E | C `s ? d2k_track_count(s->uflows) : 0`. Rust `R2oUdpSessions::len()` возвращает `flows.len()`; тест `session_capacity_flows_and_refusals_match_c`. |
+| `d2k_session_capacity_tcp` | 3573-3575 | 3 | ёмкость TCP-таблицы | `TcpSessions::r2o_tcp_flow_capacity` | E | C `s ? d2k_track_capacity(s->flows) : 0`. Rust `r2o_tcp_flow_capacity()` = `flow_capacity.slots()`; тест проверяет равенство умолчанию. |
+| `d2k_session_capacity_udp` | 3577-3579 | 3 | ёмкость UDP-таблицы | `R2oUdpSessions::r2o_flow_capacity` | E | C `s ? d2k_track_capacity(s->uflows) : 0`. Rust `r2o_flow_capacity()` = `flow_capacity.slots()`; тест `session_capacity_flows_and_refusals_match_c`. |
+| `d2k_session_refusals_tcp` | 3581-3583 | 3 | отказы TCP-таблицы | `TcpSessions::r2o_tcp_flow_refusals` | E | C `s ? d2k_track_refusals(s->flows) : 0`. Rust `r2o_tcp_flow_refusals()` читает `tcp_flow_refusals`; тест проверяет 0 на пустой таблице. |
+| `d2k_session_refusals_udp` | 3585-3587 | 3 | отказы UDP-таблицы | `R2oUdpSessions::r2o_flow_refusals` | E | C `s ? d2k_track_refusals(s->uflows) : 0`. Rust `r2o_flow_refusals()` читает `refusals`; тест `session_capacity_flows_and_refusals_match_c`. |
 | `d2k_session_hellos` | 3589-3591 | 3 | число приветствий | `engine.rs:539 r2o_tcp_hello_flows` | **P** | C `s->hellos`; Rust `r2o_tcp_hello_flows` — счётчик потоков с ClientHello. Семантика близка, но C `hellos` может считать все hello; прямого differential нет. |
 | `d2k_session_with_sni` | 3593-3595 | 3 | приветствия с SNI | `engine.rs:543 r2o_tcp_hellos_with_sni` | **P** | C `return s ? s->with_sni : 0`. Rust `r2o_tcp_hellos_with_sni()`; unit «1 с SNI, 0 без». Проверено unit `r2o_tcp_hellos_with_sni`: 1 при SNI, 0 без; то же поле, что C `s->with_sni`. |
 | `d2k_session_suspects` | 3597-3599 | 3 | число подозрений | `session_stats.rs` `r2o_session_suspects`, `engine.rs` `r2o_note_suspect`, `r2o_quic.rs`/`r2o_voice.rs` `mark_suspected` | E | C `s ? s->suspects : 0`, `suspects++` в `suspect_num` один раз на поток. Rust общий `AtomicU64`; TCP `r2o_note_suspect` дедуплицирует по `suspect_counted`, QUIC/voice — по `flow.suspected`. Тесты `session_suspect_counts_once_per_tcp_flow`, `session_suspects_increment_by_one_per_note`. |

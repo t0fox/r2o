@@ -2168,6 +2168,24 @@ pub fn validate_runtime_plan(plan: &Plan) -> Result<(), &'static str> {
     Err("runtime исполняет UDP QUIC/udplen и пакетные TCP TLS/HTTP планы")
 }
 
+/// C `d2k_session_refusals`: сумма отказов TCP- и UDP-таблиц.
+pub fn r2o_session_refusals(
+    tcp: &TcpSessions,
+    udp: &crate::r2o_udp_sessions::R2oUdpSessions,
+) -> u64 {
+    tcp.r2o_tcp_flow_refusals()
+        .saturating_add(udp.r2o_flow_refusals())
+}
+
+/// C `d2k_session_capacity`: суммарная ёмкость TCP- и UDP-таблиц.
+pub fn r2o_session_capacity(
+    tcp: &TcpSessions,
+    udp: &crate::r2o_udp_sessions::R2oUdpSessions,
+) -> usize {
+    tcp.r2o_tcp_flow_capacity()
+        .saturating_add(udp.r2o_flow_capacity())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2187,6 +2205,22 @@ mod tests {
 
     const V1_INITIAL: &[u8] = include_bytes!("../../r2k-core/tests/fixtures/quic_v1_initial.bin");
     const V2_INITIAL: &[u8] = include_bytes!("../../r2k-core/tests/fixtures/quic_v2_initial.bin");
+
+    #[test]
+    fn session_capacity_flows_and_refusals_match_c() {
+        let tcp = TcpSessions::default();
+        let udp = crate::r2o_udp_sessions::R2oUdpSessions::new().unwrap();
+        let slots = R2oFlowCapacity::default().slots();
+        assert_eq!(tcp.len(), 0);
+        assert_eq!(udp.len(), 0);
+        assert!(udp.is_empty());
+        assert_eq!(tcp.r2o_tcp_flow_capacity(), slots);
+        assert_eq!(udp.r2o_flow_capacity(), slots);
+        assert_eq!(tcp.r2o_tcp_flow_refusals(), 0);
+        assert_eq!(udp.r2o_flow_refusals(), 0);
+        assert_eq!(super::r2o_session_capacity(&tcp, &udp), slots * 2);
+        assert_eq!(super::r2o_session_refusals(&tcp, &udp), 0);
+    }
 
     #[test]
     fn autottl_uses_the_observed_reverse_tcp_ttl_without_client_timestamps() {
