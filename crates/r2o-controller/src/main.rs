@@ -4375,12 +4375,18 @@ impl ControlClient {
 
 #[cfg(unix)]
 fn ack_reason_text(reason: u8) -> &'static str {
+    // C `ack_reason_text` (`core/sched.c:4412-4419`): точные тексты.
     match reason {
-        control::ACK_BAD_PLAN => "план не подходит runtime",
-        control::ACK_NO_ROOM => "таблица планов заполнена",
-        control::ACK_BAD_ARGS => "датапат отверг аргументы",
-        _ => "неизвестная причина",
+        control::ACK_BAD_PLAN => "план не разобран или не годится способу отправки",
+        control::ACK_NO_ROOM => "в таблице планов нет места",
+        control::ACK_BAD_ARGS => "аргументы команды негодны",
+        _ => "причина не известна",
     }
+}
+
+/// C `applied_trial_is_ours`: нулевой trial не доказывает применение.
+fn r2o_trial_present(trial_id: &[u8; 16]) -> bool {
+    trial_id.iter().any(|byte| *byte != 0)
 }
 
 #[cfg(unix)]
@@ -10487,7 +10493,8 @@ fn applied_quic_trial_matches(
     server: std::net::SocketAddr,
 ) -> bool {
     let key = &event.key;
-    if event.trial_id != trial_id
+    if !r2o_trial_present(&event.trial_id)
+        || event.trial_id != trial_id
         || event.plan_id != plan_id
         || key[37] != 17
         || key[0] != if server.is_ipv4() { 4 } else { 6 }
@@ -15950,12 +15957,8 @@ impl R2oAskProof {
 
 #[cfg(unix)]
 fn r2o_ask_ack_reason(code: u8) -> &'static str {
-    match code {
-        r2k_core::control::ACK_BAD_PLAN => "план не разобрался",
-        r2k_core::control::ACK_BAD_ARGS => "аргументы команды не разобрались",
-        r2k_core::control::ACK_NO_ROOM => "нет места в таблице планов",
-        _ => "неизвестная причина",
-    }
+    // Тот же C-источник, что и у `ack_reason_text`.
+    ack_reason_text(code)
 }
 
 #[cfg(unix)]
@@ -16550,12 +16553,7 @@ impl ControlClient {
         if !ack.ok {
             return Err(format!(
                 "DEL_VOICE_ADDR_PROBE не выполнена: {}",
-                match ack.reason {
-                    control::ACK_BAD_PLAN => "план не подходит runtime",
-                    control::ACK_NO_ROOM => "таблица временных планов заполнена",
-                    control::ACK_BAD_ARGS => "датапат отверг аргументы",
-                    _ => "неизвестная причина",
-                }
+                ack_reason_text(ack.reason)
             )
             .into());
         }
@@ -22510,7 +22508,10 @@ fn r2o_ask_applied_matches(
     plan_id: [u8; 16],
     trial_id: [u8; 16],
 ) -> bool {
-    event.key == *key && event.plan_id == plan_id && event.trial_id == trial_id
+    r2o_trial_present(&event.trial_id)
+        && event.key == *key
+        && event.plan_id == plan_id
+        && event.trial_id == trial_id
 }
 
 #[cfg(unix)]
@@ -23815,6 +23816,33 @@ mod tests {
             super::SHAPE_LEGACY,
             super::SHAPE_MODERN
         ));
+    }
+
+    #[test]
+    fn ack_reason_text_matches_c() {
+        use r2k_core::control::{ACK_BAD_ARGS, ACK_BAD_PLAN, ACK_NO_ROOM};
+        assert_eq!(
+            super::ack_reason_text(ACK_BAD_PLAN),
+            "план не разобран или не годится способу отправки"
+        );
+        assert_eq!(
+            super::ack_reason_text(ACK_NO_ROOM),
+            "в таблице планов нет места"
+        );
+        assert_eq!(
+            super::ack_reason_text(ACK_BAD_ARGS),
+            "аргументы команды негодны"
+        );
+        assert_eq!(super::ack_reason_text(255), "причина не известна");
+    }
+
+    #[test]
+    fn trial_present_matches_c() {
+        assert!(!super::r2o_trial_present(&[0; 16]));
+        assert!(super::r2o_trial_present(&[1; 16]));
+        let mut last = [0; 16];
+        last[15] = 1;
+        assert!(super::r2o_trial_present(&last));
     }
 
     #[test]
