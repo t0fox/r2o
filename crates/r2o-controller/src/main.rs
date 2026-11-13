@@ -8396,6 +8396,59 @@ fn r2o_legacy_exchange_is_clean(event: &r2k_core::control::LegacyExchangeEvent) 
 }
 
 #[cfg(unix)]
+const R2O_QUIET_SLOTS: usize = 64;
+#[cfg(unix)]
+const R2O_QUIET_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// C `say_quiet` (`sched.c:1615-1632`): повтор того же ключа в пределах
+/// 10 минут молчит; кольцо 64 слота вытесняет старое.
+#[cfg(unix)]
+#[derive(Default)]
+struct R2oQuietLog {
+    slots: Vec<Option<(String, std::time::Instant)>>,
+    next: usize,
+}
+
+#[cfg(unix)]
+impl R2oQuietLog {
+    fn allow(&mut self, key: &str, now: std::time::Instant) -> bool {
+        if self
+            .slots
+            .iter()
+            .flatten()
+            .any(|(saved, until)| *until > now && saved == key)
+        {
+            return false;
+        }
+        let slot = self.next;
+        self.next = (self.next + 1) % R2O_QUIET_SLOTS;
+        let entry = Some((key.to_owned(), now + R2O_QUIET_TTL));
+        if self.slots.len() < R2O_QUIET_SLOTS {
+            self.slots.push(entry);
+        } else {
+            self.slots[slot] = entry;
+        }
+        true
+    }
+}
+
+#[cfg(unix)]
+static R2O_QUIET_LOG: std::sync::OnceLock<std::sync::Mutex<R2oQuietLog>> =
+    std::sync::OnceLock::new();
+
+#[cfg(unix)]
+fn r2o_say_quiet(key: &str, line: String) {
+    let allowed = R2O_QUIET_LOG
+        .get_or_init(|| std::sync::Mutex::new(R2oQuietLog::default()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .allow(key, std::time::Instant::now());
+    if allowed {
+        println!("{line}");
+    }
+}
+
+#[cfg(unix)]
 #[derive(Default)]
 struct R2oCleanHandshakeCache {
     entries: VecDeque<(String, u8, std::time::Instant)>,
@@ -21150,15 +21203,20 @@ impl ControlClient {
         };
         let queued =
             self.r2o_queue_tcp_suspect(worker, target.clone(), signal, mode, trigger_planned);
-        println!(
-            "v22 SUSPECT {}: {} — {}",
-            target.host,
-            description,
-            if queued {
-                "поставлено в очередь Discovery"
-            } else {
-                "задача уже выполняется или очередь занята"
-            }
+        // C `say_quiet`: повтор того же объяснения по той же цели не
+        // печатается 10 минут, иначе журнал забивается одним и тем же.
+        r2o_say_quiet(
+            &format!("v22-suspect:{}:{description}", target.host),
+            format!(
+                "v22 SUSPECT {}: {} — {}",
+                target.host,
+                description,
+                if queued {
+                    "поставлено в очередь Discovery"
+                } else {
+                    "задача уже выполняется или очередь занята"
+                }
+            ),
         );
         let _ = std::io::Write::flush(&mut std::io::stdout());
     }
@@ -30770,6 +30828,66 @@ mod tests {
         ring.note(&overflow, now);
         assert_eq!(ring.recall(&first_fill.key), None);
         assert_eq!(ring.recall(&overflow.key), Some("overflow.example"));
+    }
+
+    #[test]
+    fn say_quiet_differential_matches_c() {
+        fn emit(
+            log: &mut super::R2oQuietLog,
+            key: &str,
+            now: std::time::Instant,
+            line: &str,
+            out: &mut String,
+        ) {
+            if log.allow(key, now) {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+
+        let base = std::time::Instant::now();
+        let mut out = String::new();
+        let mut log = super::R2oQuietLog::default();
+        emit(&mut log, "a", base, "a1", &mut out);
+        emit(&mut log, "a", base, "a-suppressed", &mut out);
+        emit(
+            &mut log,
+            "a",
+            base + std::time::Duration::from_millis(599_999),
+            "a-still-suppressed",
+            &mut out,
+        );
+        emit(
+            &mut log,
+            "a",
+            base + std::time::Duration::from_millis(600_000),
+            "a2",
+            &mut out,
+        );
+        emit(&mut log, "b", base, "b1", &mut out);
+
+        let mut ring = super::R2oQuietLog::default();
+        let ring_base = base + std::time::Duration::from_secs(5);
+        for index in 0..64 {
+            let key = format!("k{index}");
+            emit(
+                &mut ring,
+                &key,
+                ring_base,
+                &format!("fill{index}"),
+                &mut out,
+            );
+        }
+        emit(&mut ring, "k64", ring_base, "overflow", &mut out);
+        emit(&mut ring, "k0", ring_base, "k0-again", &mut out);
+        emit(&mut ring, "k1", ring_base, "k1-suppressed", &mut out);
+
+        if let Ok(path) = std::env::var("R2O_SAY_QUIET_DIFF_OUTPUT") {
+            std::fs::write(path, &out).unwrap();
+        }
+        assert!(out.contains("a1\na2\nb1\n"));
+        assert!(!out.contains("a-suppressed"));
+        assert!(out.contains("k0-again\nk1-suppressed\n"));
     }
 
     #[test]

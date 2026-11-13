@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 324 | 224 | 0 | 0 |
-| core-state | 692 | 461 | 231 | 0 | 0 |
+| core-state | 692 | 462 | 230 | 0 | 0 |
 | datapath-core | 400 | 221 | 179 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1292** | **690** | **0** | **0** |
+| **Итого** | **1982** | **1293** | **689** | **0** | **0** |
 
-Это не оценка паритета: 690 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 689 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1292 / P 690 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1293 / P 689 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 324 | 224 | 0 | 0 |
-| core-state | 692 | 461 | 231 | 0 | 0 |
+| core-state | 692 | 462 | 230 | 0 | 0 |
 | datapath-core | 400 | 221 | 179 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1292** | **690** | **0** | **0** |
+| **Итого** | **1982** | **1293** | **689** | **0** | **0** |
 
 
 ---
@@ -2446,7 +2446,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `candidate_retire` | 1572–1590 | 19 | addr-probe либо `DEL_NAME_PROBE` по trial shape/port; закрыть probe fd, сбросить `trial_installed` | `main.rs:19652-19710` (`delete_name_probe` при ошибке установки/чужом trial + `DeleteProbe`), `:16355 retire_r2o_voice_trial` | **P** | Rust снимает name-probe при ошибке установки и по `DeleteProbe`; voice — отдельной командой. C снимает и в `task_fail`/`task_done`; полной матрицы переходов Rust нет. |
 | `trial_retire` | 1592–1595 | 4 | `question_retire` + `candidate_retire` | `main.rs:19799 delete_name_probe`, `:16355 retire_r2o_voice_trial`, RAII `BoundTcpProbe`/`OwnedFd` | **P*** | **Составной хелпер.** C `question_retire` снимает `DEL_NAME_PROBE` по name/transport/question_shape/sport/family, закрывает `prop_bound_fd`, очищает `prop_installed/sport` (`sched.c:1557-1570`); `candidate_retire` снимает addr-probe либо `DEL_NAME_PROBE` по trial_shape/sport, закрывает `probe_fd`, очищает `probe_sport_be/trial_installed` (`1572-1590`). Ошибка снятия только логируется. Rust не имеет единой функции: `ControlClient::delete_name_probe` кодирует точный DEL_NAME_PROBE и возвращает `Result`, `retire_r2o_voice_trial` отдельно снимает voice-пробу с проверкой trial ID/ACK, сокеты закрываются Drop. C-флаги `prop_installed/trial_installed/probe_sport_be` заменены владением/состоянием caller'а; ошибки снятия в части путей пробрасываются, а не только логируются. |
 | `say` | 1603-1611 | 9 | лог через `say_fn`, `vsnprintf` 512 | `main.rs` log callback | **P*** | C `!say_fn` → выход; `vsnprintf(line,512)`; `say_fn(ctx,line)`. Rust колбэк-инъекции нет, формат/адресация строк не сверялись; отдельной функции нет. |
-| `say_quiet` | 1615–1632 | 18 | подавление повтора по ключу: **`SCHED_QUIET_SLOTS=64`**, **`SCHED_QUIET_MS=10 мин`**, кольцо `key[300] + until_ms` | нет | **P*** | **Подтверждённый пробел:** C `say_quiet` ищет тот же `key` в 64 слотах с `until_ms > now`, при повторе молчит, иначе пишет и ставит `until = now + 10 мин` (`sched.c:178-182,1615-1632`). В R2O нет подавления повторов журнала по ключу; `quiet` в `main.rs:4832` относится к `HttpSearchDisposition`, не к логу. Все C-вызовы `say_quiet` (позднее закрытие, ожидание слота и т.п.) в Rust либо печатаются, либо не имеют отдельного сообщения. |
+| `say_quiet` | 1615–1632 | 18 | подавление повтора по ключу: **`SCHED_QUIET_SLOTS=64`**, **`SCHED_QUIET_MS=10 мин`**, кольцо `key[300] + until_ms` | `main.rs` `R2oQuietLog`, `r2o_say_quiet` | **E*** | C/Rust differential `scripts/test-say-quiet-differential.sh` PASS: 70 строк — повтор подавляется, ровно через 10 мин снова печатается, кольцо 64/вытеснение, k1 вытесняется k0-again — совпало с C. Production: v22 SUSPECT-результаты подавляются по ключу `host:description`. **Ограничение:** C вызывает `say_quiet` в других точках (decoy/cooldown/late-close); в Rust этих сообщений нет, поэтому общий логгер не является полной заменой `s->say_fn`. |
 | `d2k_sched_set_send_cap` | 1634–1637 | 4 | установить предел отправки датапата (`s->send_cap`) | `main.rs` `r2o_sched_set_send_cap`, общий `Arc<AtomicUsize>`, `r2o_update_send_cap` | **E*** | C-сеттер пишет `s->send_cap`. Rust `r2o_sched_set_send_cap` пишет общий `AtomicUsize`, который читают планировщик/кандидаты; production-путь обновляет его из приветствия датапата (`r2o_update_send_cap` → `r2o_sched_set_send_cap`). Тест `controller_applies_a_dynamic_datapath_send_limit_before_queueing_the_event` (1200 → 1500 до постановки события). **Ограничение:** API — атомарный счётчик, а не поле структуры; начальное значение и источник обновления иные (PROTO/STATS). |
 | `d2k_sched_set_say` | 1639–1643 | 5 | установить колбэк журнала и контекст | нет (прямой вывод `eprintln`/`Recorder`) | **P*** | C инъектирует `say_fn/say_ctx` (`sched.c:1639-1643`), поэтому тест/`d2kc` перехватывает все строки. Rust пишет напрямую через `println!`/`eprintln!` и `diagnostics::Recorder`; единой точки инъекции лога нет. API-совместимость не нужна, но и эквивалента перехвата нет. |
 | `verdict_name` | 1647–1662 | 16 | 11 русских фраз: «проходит как есть» … «имя разрешается в приватный адрес», default «неизвестный вердикт» | `classify.rs:908-921 Verdict::as_str` | **P** | **Подтверждённое расхождение:** C — русские человекочитаемые строки, включая `NO_QUIC`/`LOCAL_ADDRESS`, без `POISONABLE`; Rust — 10 английских машинных имён (`clear/prefix/whole_packet/opaque/inconclusive/address/poisonable/flaky/unreachable/response`) без `NO_QUIC`/`LOCAL_ADDRESS`. Это лог-текст/набор, не классификация. |
