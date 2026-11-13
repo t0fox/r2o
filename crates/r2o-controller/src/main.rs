@@ -25776,6 +25776,25 @@ mod tests {
         assert!(super::r2o_trial_present(&last));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn area_ack_reason_and_name_match_c() {
+        assert_eq!(super::area_ack_reason(r2k_core::control::ACK_NO_ROOM), 3);
+        assert_eq!(super::area_ack_reason(r2k_core::control::ACK_BAD_PLAN), 4);
+        assert_eq!(super::area_ack_reason(r2k_core::control::ACK_BAD_ARGS), 5);
+        assert_eq!(super::area_ack_reason(0), 6);
+        assert_eq!(super::area_ack_reason(r2k_core::control::ACK_OK), 6);
+
+        assert_eq!(super::area_reason_name(1), "ack_timeout");
+        assert_eq!(super::area_reason_name(2), "send_error");
+        assert_eq!(super::area_reason_name(3), "no_room");
+        assert_eq!(super::area_reason_name(4), "bad_plan");
+        assert_eq!(super::area_reason_name(5), "bad_args");
+        assert_eq!(super::area_reason_name(6), "unknown_ack");
+        assert_eq!(super::area_reason_name(0), "");
+        assert_eq!(super::area_reason_name(255), "");
+    }
+
     #[test]
     fn catalog_area_store_enforces_c_capacity() {
         fn area(index: usize) -> super::InstalledCatalogArea {

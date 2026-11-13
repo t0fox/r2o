@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 320 | 228 | 0 | 0 |
-| core-state | 692 | 440 | 252 | 0 | 0 |
+| core-state | 692 | 442 | 250 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1265** | **717** | **0** | **0** |
+| **Итого** | **1982** | **1267** | **715** | **0** | **0** |
 
-Это не оценка паритета: 717 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 715 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1265 / P 717 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1267 / P 715 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 320 | 228 | 0 | 0 |
-| core-state | 692 | 440 | 252 | 0 | 0 |
+| core-state | 692 | 442 | 250 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1265** | **717** | **0** | **0** |
+| **Итого** | **1982** | **1267** | **715** | **0** | **0** |
 
 
 ---
@@ -2603,8 +2603,8 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `area_store` | 6206–6212 | 7 | вставить/заменить область, лимит `D2K_GROUP_MAX+D2K_GROUP_OBSERVATION_MAX=320` | `main.rs` `catalog_area_store` | E | C заменяет по ключу, иначе добавляет; при `i == 320` возвращает -1. Rust `catalog_area_store` возвращает `Ok(Some(previous))` при замене, `Ok(None)` при добавлении и `Err(())` на пределе 320; подтверждённый ACK при переполнении помечает `areas_failed`, истёкший — пропускает. Тест `catalog_area_store_enforces_c_capacity` (320 вставок, 321-я ошибка, замена на пределе). |
 | `area_retry_delay` | 6214-6221 | 8 | база, удвоение до потолка | `r2o-catalog-sync-differential.sh` | **E** | C `delay=AREA_RETRY_BASE_MS`; пока `attempts>1 && delay<MAX` — `delay*=2`, `attempts--`; clamp `delay>MAX?MAX:delay`. Rust те же база/удвоение/потолок; differential PASS. |
 | `area_failure` | 6223-6237 | 15 | retry_count++, confirmed=0 (кроме remove_pending), maybe_active для timeout/send, permanent для bad plan/args/unknown, reason/code, retry_at | `r2o-catalog-sync-differential.sh` | **E** | **Ветви сверены:** C копирует запись; `retry_count<255` ++; `!remove_pending → confirmed=0`; `ACK_TIMEOUT\|SEND_ERROR → maybe_active=1`; `BAD_PLAN\|BAD_ARGS\|UNKNOWN_ACK → permanent`; reason/code/detail; `retry_at=permanent?0:now+delay`; store. Rust те же причины/permanent/retry; differential PASS. |
-| `area_ack_reason` | 6239–6246 | 8 | ACK NO_ROOM/BAD_PLAN/BAD_ARGS/UNKNOWN → `AREA_REASON_*` | `main.rs:4256-4303 observe_area_ack` | **P** | **Подтверждённый пробел:** C различает причины отказа `NO_ROOM/BAD_PLAN/BAD_ARGS/UNKNOWN_ACK` и сохраняет их в `installed_area.reason` (`sched.c:6239-6246`); Rust `observe_area_ack` при `ack.ok == false` только печатает `ack.reason`, увеличивает `skipped` и ставит `areas_failed` (`main.rs:4294-4301`), не заводя причину области. Каталог sync-тестов проверяет ACK/очередь, не этот маппинг. |
-| `area_reason_name` | 6248–6258 | 11 | reason → `ack_timeout/send_error/no_room/bad_plan/bad_args/unknown_ack` | `main.rs:3861-3866 InstalledCatalogArea` (только key/plan_id/group/confirmed), live area status | **P** | **Подтверждённый пробел:** C хранит и печатает причину области (`AREA_REASON_*` → строка, `sched.c:6248-6258`); Rust `InstalledCatalogArea` содержит только `key/plan_id/group/confirmed` (`main.rs:3861-3866`), без `retry_count/reason/reason_code/detail`. Соответствующих строк в live-снимке нет. |
+| `area_ack_reason` | 6239–6246 | 8 | ACK NO_ROOM/BAD_PLAN/BAD_ARGS/UNKNOWN → `AREA_REASON_*` | `main.rs` `area_ack_reason` | E | C отображает коды ACK в причины area; Rust `area_ack_reason` даёт те же 3/4/5, любой иной код → 6 (unknown_ack). Тест `area_ack_reason_and_name_match_c` (NO_ROOM/BAD_PLAN/BAD_ARGS/0/ACK_OK). |
+| `area_reason_name` | 6248–6258 | 11 | reason → `ack_timeout/send_error/no_room/bad_plan/bad_args/unknown_ack` | `main.rs` `area_reason_name` | E | C возвращает имена причин, неизвестная/0 → пусто. Rust `area_reason_name` совпадает для 1..6 и возвращает "" для 0/255; используется при записи `install_reason` в live.json. Тест `area_ack_reason_and_name_match_c`. |
 | `area_retry_due` | 6260-6265 | 6 | есть ли area, готовая к повтору | `r2o-catalog-sync-differential.sh` | **E** | C проходит `n_areas`, проверяет `!permanent && retry_at && retry_at<=now`; при первом совпадении 1, иначе 0. Rust те же условия/переходы; differential PASS. |
 | `area_plan` | 6267–6273 | 7 | найти план области по id и proto tls/quic | `main.rs:3905-3978 catalog_area_action`, `CompiledCatalog` | **P** | C ищет `plan_by_id` во всех коробках и требует `p->text` и `proto == (transport==17 ? "quic" : "tls")` (`sched.c:6267-6273`). Rust `catalog_area_action` разбирает план из уже собранной команды через `Plan::parse` и берёт `group.transport`/транспорт плана (`main.rs:3935-3953`); выбор/проверка плана происходит в компиляторе каталога. Слой и проверки различаются, результат для валидных планов тот же. |
 | `own_exact_confirmed` | 6278–6293 | 16 | enabled, level>=3, !recheck, name/target, transport/family, TCP shape context или точная shape | `discovery.rs:827` `has_confirmed_exact_binding` (единая; `main.rs`/`live.rs` делегируют) | **E** | **Ветви C:** `enabled && level>=3 && !recheck_since`, `kind=="name"`, `target` **точным** `strcmp`, transport/family (0→6/4), для TCP `!shape \|\| tcp_context(bd->shape, bd->tcp_profile)==key->shape`, для не-TCP `bd->shape==key->shape`; path/origin не проверяются (`sched.c:6278-6293`). Rust `discovery.rs::has_confirmed_exact_binding` повторяет это построчно: точное имя, нормализованные транспорт/семейство, `shape==0 \|\| tcp_context(shape,tcp_profile)==observation.key.shape`, без path/origin; `main.rs` и `live.rs` делегируют в lib. Тест `own_exact_confirmed_uses_tcp_context_and_profile`: shape 1 + profile 1 → context 8, profile 2 → нет, shape 0 → wildcard. C/Rust differential нет. |
