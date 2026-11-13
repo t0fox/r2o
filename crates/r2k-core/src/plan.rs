@@ -73,6 +73,11 @@ impl PlanError {
     pub fn message(&self) -> &str {
         &self.0
     }
+
+    /// C `fail`: записать текст в буфер вызывающего с усечением.
+    pub fn write_into(&self, buffer: &mut [u8]) -> usize {
+        crate::error_text::write_error_text(buffer, &self.0)
+    }
 }
 
 impl fmt::Display for PlanError {
@@ -916,4 +921,25 @@ fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, PlanError> {
         .get(offset..end)
         .ok_or_else(|| PlanError::new("обрезанное поле"))?;
     Ok(u32::from_be_bytes([value[0], value[1], value[2], value[3]]))
+}
+
+#[cfg(test)]
+mod write_into_tests {
+    use super::PlanError;
+
+    #[test]
+    fn plan_error_write_into_matches_fail() {
+        let error = PlanError::new("план слишком длинный");
+        let mut empty: [u8; 0] = [];
+        assert_eq!(error.write_into(&mut empty), 0);
+
+        let mut short = [0xAA_u8; 5];
+        assert_eq!(error.write_into(&mut short), 4);
+        assert_eq!(short[4], 0);
+
+        let mut roomy = [0u8; 128];
+        let written = error.write_into(&mut roomy);
+        assert_eq!(&roomy[..written], "план слишком длинный".as_bytes());
+        assert_eq!(roomy[written], 0);
+    }
 }
