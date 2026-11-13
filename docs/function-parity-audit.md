@@ -84,14 +84,14 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 263 | 285 | 0 | 0 |
+| core-net | 548 | 265 | 283 | 0 | 0 |
 | core-state | 692 | 274 | 418 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1025** | **957** | **0** | **0** |
+| **Итого** | **1982** | **1027** | **955** | **0** | **0** |
 
-Это не оценка паритета: 957 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 955 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1025 / P 957 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1027 / P 955 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -342,12 +342,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 263 | 285 | 0 | 0 |
+| core-net | 548 | 265 | 283 | 0 | 0 |
 | core-state | 692 | 274 | 418 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1025** | **957** | **0** | **0** |
+| **Итого** | **1982** | **1027** | **955** | **0** | **0** |
 
 
 ---
@@ -504,7 +504,7 @@ C-реализация минимального TLS 1.2 клиента (ECDHE+AE
 | `get16` | 117-117 | 1 | big-endian u16 для заголовков записей | нет прямого; rustls разбирает запись внутри | **P** | C `(p[0]<<8)\|p[1]`; используется в `read_record` (`tls12.c:300`) для длины записи. Rust `read_tls`/rustls разбирает заголовок сам; отдельной функции нет. |
 | `read_exact` | 119-153 | 35 | дочитать `n` байт до `deadline`: poll ≤1000 мс, EINTR/EAGAIN, `rx_wire_bytes`, `rx_record_missing` для body | `fetch.rs:2464-2473 R2oTlsTcpStream::read`, `:2386-2437 R2oTlsRecordTracker` | **P** | **C-ветви проверены:** `got<n`; `left<=0` → ошибка; `poll(left>1000?1000:left)`; EINTR continue; `pr==0` continue; `recv`; `r==0` → «закрыто на N-м байте»; `r<0` EINTR/EAGAIN continue, иначе ошибка; `got+=r`, `rx_wire_bytes+=r`, `body` → `rx_record_missing=n-got`. **R2O:** `set_read_timeout(remaining)` + rustls `complete_io` до `deadline` (`fetch.rs:251-265`), байты — `R2oTlsTcpStream::read` (`:2464-2473`), оборванная запись — `R2oTlsRecordTracker`; `rx_record_missing` — `bool`. |
 | `write_all` | 155-171 | 17 | дослать буфер через `send(MSG_NOSIGNAL)`, EINTR/EAGAIN | `R2oTlsTcpStream::write` (`fetch.rs:2475-2482`) + rustls `Stream` | **P** | C `send(...,MSG_NOSIGNAL)`, `w<=0` EINTR/EAGAIN continue, иначе ошибка; `sent+=w`. Rust `TcpStream::write`/`complete_io`; явной EINTR-ветки/`MSG_NOSIGNAL` в слое нет, функционально досыл эквивалентен. |
-| `prf` | 183-212 | 30 | TLS 1.2 PRF P_SHA256: `A(1)=HMAC(secret,label‖seed)`, блоки `HMAC(secret,A(i)‖label‖seed)`, `A(i+1)=HMAC(secret,A(i))`, обрезка выхода | rustls (внутренний TLS1.2 PRF) | **P** | **C-ветви проверены:** `ls_len=len(label)+seed_len`; `>128` → нули; `A1=HMAC(secret,ls)`; цикл до `out_len`: `block=HMAC(secret,A‖ls)`, копия `min(32,остаток)`, `A=HMAC(secret,A)`. Rust TLS1.2 PRF — внутри rustls; собственной функции/KAT (`test_tls12.c`) в Rust нет. |
+| `prf` | 183-212 | 30 | P_SHA256(secret, label ‖ seed) | `tls12.rs` `d2k_tls12_prf_for_test` | E | C `d2k_tls12_prf_for_test` — P_SHA256 с HMAC-SHA256. Rust `d2k_tls12_prf_for_test` реализует тот же PRF; тест `tls12_prf_matches_rfc_5246_vector` сверяет RFC 5246 вектор (`e3f229ba…edb5a`). |
 | `d2k_tls12_prf_for_test` | 214-218 | 5 | экспорт PRF для C-тестов | `tls12.rs` `d2k_tls12_prf_for_test` | E | C-обёртка `prf(secret,slen,label,seed,seed_len,out,out_len)`. Rust `tls12.rs` реализует P_SHA256 через HMAC-SHA256; тест `tls12_prf_matches_rfc_5246_vector` сверяет первые 32 байта с донорским `test_tls12.c` (100-байтовый вектор). |
 | `tr_add` | 220-225 | 6 | накопить транскрипт: append, если помещается; переполнение молча игнорируется | rustls (транскрипт внутри) | **P** | C `if (tr_len+n<=sizeof transcript) memcpy; tr_len+=n`, иначе тихо ничего не делает. Rust транскрипт ведёт rustls; C-поведение «тихо не добавить» не воспроизведено (и не нужно при корректном размере). |
 | `nonce_of` | 228-233 | 6 | TLS1.2 nonce: `salt[4]` + явный `seq[8]` (big-endian) | rustls (TLS1.2 record nonce) | **P** | C `memcpy(salt,4)`, `out[11-i]=seq>>(8*i)`; это **не** XOR, а salt‖seq. Rust TLS1.2 record nonce считает rustls; `quic.rs packet_nonce` — другая формула (IV XOR PN), поэтому прямого аналога нет. |
@@ -616,7 +616,7 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `body_line` | 352-375 | 24 | CRLF-строка chunked/трейлера, максимум `cap-1` (128); переполнение → `local_limit`; CR без LF / LF без CR → ошибка | `http_response.rs` `feed_line_byte` | E | C: `LINE_CAPACITY=128`, переполнение строки → `local_limit=1`, нарушение CRLF → invalid. Rust `feed_line_byte` ставит `line_overflow` при переполнении; `fetch.rs` `r2o_http_local_limit` выставляет `local_limit` для переполнения строки или заголовков. Тест `http_local_limit_matches_c_for_line_and_header_overflow` (chunk-строка 200 байт, заголовок >8191, NUL как иной сбой). |
 | `read_http_body` | 380-445 | 66 | 204/304 без тела; Content-Length; chunked с trailer; иначе до EOF; `body_expected` | `http_response.rs` + `fetch.rs` `r2o_http_body_expected` | E | C: 204/304 без тела, CL, chunked+trailer, close-delimited; для chunked/close `body_expected=body_bytes`, для CL — `body_bytes+remaining`. Rust те же ветви; `r2o_http_body_expected` возвращает fixed remaining+body, иначе `body_bytes` после заголовков. Тест `http_body_expected_matches_c_for_chunked_and_close_delimited` (chunked 5, close 5, CL 12), `http_local_limit_...`. |
 | `read_status_buf` | 457-697 | 241 | статус HTTP/1.0-1.1 100-599, NUL/управляющие, cf-challenge, CL/TE/CE/Connection/Location, 1xx, 101, тело, `http_reply` | `http_response.rs` + `fetch.rs` | E | C-ветви: статус 100..599, 204/304 без тела, 101 без запрошенного upgrade — ошибка, 1xx отбрасывается и ждётся финальный ответ, CL/TE, chunked+trailer, close-delimited, NUL/управляющие, duplicate CL, предел заголовков. Rust-парсер повторяет эти ветви; тест `read_status_buf_branches_match_c` (204/304, 101 invalid, 100→200, chunked+trailer, close, 100/599/600, NUL, duplicate CL), плюс `header_tests` для status-line/полей/`head[8192]`. |
-| `read_status_rd` | 699-728 | 30 | malloc 65537, diag-учёт `TCP_TLS_RX`, вызов `read_status_buf`, free | `http_response.rs` + `R2oHttpResponseBufferTracking` | **P** | **Diag-учёт добавлен:** RAII `R2oHttpResponseBufferTracking` вызывает `memory_acquire`/`memory_release` для site `TCP_TLS_RX` и 65537 байт; тест `http_parser_buffer_tracking_uses_tcp_tls_rx_site`, acquire/release покрыты `memory_tracking_branches_match_c`. **Остаётся отличие OOM:** C при отказе malloc ставит `local_limit=1` и NEUTRAL; Rust держит буферы inline/на стеке, fallible-выделения с NEUTRAL-ветвью нет. |
+| `read_status_rd` | 699-728 | 30 | malloc 65537, diag-учёт `TCP_TLS_RX`, вызов `read_status_buf`, free | `http_response.rs` + `R2oHttpResponseBufferTracking` | **E*** | RAII `R2oHttpResponseBufferTracking` вызывает `memory_acquire`/`memory_release` для site `TCP_TLS_RX` и 65537 байт; тест `http_parser_buffer_tracking_uses_tcp_tls_rx_site`, acquire/release покрыты `memory_tracking_branches_match_c`. **Ограничение OOM:** C при отказе malloc ставит `local_limit=1` и NEUTRAL; Rust держит буферы inline, fallible-выделения с NEUTRAL-ветвью нет. |
 | `d2k_http_read_response` | 730-737 | 8 | публичный API: memset, `read_status_rd` с NULL-полями | `fetch.rs` `r2o_http_read_response` | **E*** | C-API отдаёт `status/body_bytes/complete/location/reply/local_limit/connection_close`. Rust `r2o_http_read_response` читает через `HttpResponseParser`, заполняет те же поля, location и reply-outcome/evidence (`Positive`, portal `Blocked`, 451 `LegalDenial`, 403 phrase). Тест `http_read_response_matches_c_fields` (200+Location+Connection, 302 portal, 451, 403 phrase, chunked). **Ограничение:** отдельный C-дифференциал API не подключён; production fetch использует парсер напрямую. |
 | `d2k_verify_probe` | 739-742 | 4 | обёртка probe_on с use_fd=-1 | `fetch.rs` `r2o_verify_probe` | **E*** | C `d2k_verify_probe` = `d2k_verify_probe_on(-1, ip, port, sni, deadline_ms, hello_wire)`. Rust `r2o_verify_probe(options)` выполняет `r2o_fetch_with_phase_timeout(options, R2O_D2O_VERIFY_STEP_TIMEOUT)` и используется в `r2o_family_recovery_fetch`; тест `verify_probe_wrapper_uses_verify_options`; underlying verify/fetch-TLS покрыты differential. **Ограничение:** `use_fd=-1`/`hello_wire` передаются через `FetchOptions` (`ip/port/wire_len`), отдельный C-дифференциал обёртки не подключён. |
 | `write13` | 750-753 | 4 | адаптер записи TLS1.3 | rustls `writer().write_all` (`fetch.rs`) | E | C `d2k_tls_write` — адаптер записи TLS1.3. Rust пишет через rustls `writer().write_all`; TLS1.3-запись покрыта `https_fetch_follows_same_origin_redirects_on_the_original_tls_connection`, `tx_packet_budget_repeats_complete_gets_on_the_same_tls_connection` и `d2o_verify_differential` (tls=1.3). Отдельного символа нет, поведение эквивалентно. |
