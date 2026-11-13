@@ -934,6 +934,19 @@ fn r2o_verify_probe_with_encoding(
     .map_err(|error| error.message)
 }
 
+/// C `d2k_verify_close`: закрыть fd и обнулить его (−1), идемпотентно.
+pub fn r2o_verify_close(fd: &mut i32) {
+    if *fd >= 0 {
+        // SAFETY: вызывающий передал владение этим fd и просит его закрыть,
+        // как C `d2k_verify_close`; после close значение становится -1,
+        // поэтому повторный вызов не закрывает чужой дескриптор.
+        unsafe {
+            libc::close(*fd);
+        }
+        *fd = -1;
+    }
+}
+
 /// C `d2k_verify_probe_identity_on`: encoding 0, TLS-версия из options.
 pub fn r2o_verify_probe_identity(options: &FetchOptions) -> Result<FetchResult, String> {
     r2o_verify_probe_with_encoding(options, R2oFetchEncoding::Identity)
@@ -5227,6 +5240,23 @@ mod tests {
         assert!(r2o_verify_probe_gzip(&options).is_err());
         assert!(r2o_verify_probe_baseline(&options, R2oFetchEncoding::Identity).is_err());
         assert!(r2o_verify_probe_path(&options, R2oFetchEncoding::GzipDeflate).is_err());
+    }
+
+    #[test]
+    fn verify_close_closes_once_and_zeroes_fd_like_c() {
+        use std::io::Read;
+        use std::os::fd::IntoRawFd;
+
+        let (mut peer, writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut fd = writer.into_raw_fd();
+        r2o_verify_close(&mut fd);
+        assert_eq!(fd, -1);
+        // Идемпотентно: повторный вызов не трогает чужие дескрипторы.
+        r2o_verify_close(&mut fd);
+        assert_eq!(fd, -1);
+        // Закрытие реально произошло: пир видит EOF.
+        let mut buffer = [0_u8; 1];
+        assert_eq!(peer.read(&mut buffer).unwrap(), 0);
     }
 
     #[test]
