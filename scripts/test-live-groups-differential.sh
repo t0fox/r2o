@@ -45,4 +45,4 @@ if c != r:
 print("PASS: live groups C/Rust match")
 PY
 
-printf 'cases=%s\n' 1
+printf 'cases=%s\n' "$(grep -o '"scenario"' "$TEMP/c.json" | wc -l)"

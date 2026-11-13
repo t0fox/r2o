@@ -815,27 +815,26 @@ mod tests {
             probe_path: String::new(),
             ech_origin: String::new(),
         };
-        let group = DomainGroup {
-            suffix: "example.com".into(),
-            plan_id: "plan-1".into(),
-            key: key.clone(),
-            evidence_count: 1,
-            at: 1,
-        };
-        let catalog = Catalog {
+        let catalog = |plan_enabled: bool| Catalog {
             boxes: vec![BoxRecord {
                 plans: vec![Plan {
                     id: "plan-1".into(),
                     proto: "tls".into(),
                     text: "plan".into(),
-                    enabled: true,
+                    enabled: plan_enabled,
                     successes: 1,
                     ..Plan::default()
                 }],
                 ..BoxRecord::default()
             }],
             domain_state: Some(DomainState {
-                groups: vec![group.clone()],
+                groups: vec![DomainGroup {
+                    suffix: "example.com".into(),
+                    plan_id: "plan-1".into(),
+                    key: key.clone(),
+                    evidence_count: 1,
+                    at: 1,
+                }],
                 observations: vec![
                     DomainObservation {
                         name: "a.example.com".into(),
@@ -870,53 +869,197 @@ mod tests {
             }),
             ..Catalog::default()
         };
-        let areas = [
-            LiveAreaState {
-                kind: 1,
-                name: "example.com".into(),
-                transport: 6,
-                shape: 1,
-                family: 4,
-                plan_id: Some("plan-1".into()),
-                confirmed: true,
-                ..LiveAreaState::default()
-            },
-            LiveAreaState {
-                kind: 2,
-                name: "b.example.com".into(),
-                transport: 6,
-                shape: 1,
-                family: 4,
-                confirmed: true,
-                ..LiveAreaState::default()
-            },
-        ];
-        let live = snapshot_with_areas(
-            &catalog,
+        let area = |kind: u8,
+                    name: &str,
+                    plan_id: Option<&str>,
+                    confirmed: bool,
+                    maybe_active: bool,
+                    remove_pending: bool,
+                    permanent: bool,
+                    retry_count: u32,
+                    reason: &str,
+                    reason_code: u32,
+                    detail: &str| LiveAreaState {
+            kind,
+            name: name.into(),
+            transport: 6,
+            shape: 1,
+            family: 4,
+            plan_id: plan_id.map(str::to_owned),
+            confirmed,
+            maybe_active,
+            remove_pending,
+            permanent,
+            retry_count,
+            reason: reason.into(),
+            reason_code,
+            detail: detail.into(),
+        };
+        let groups = |plan_enabled: bool, areas: &[LiveAreaState]| {
+            let catalog = catalog(plan_enabled);
+            let live = snapshot_with_areas(
+                &catalog,
+                Path::new("/state/catalog.json"),
+                &HashSet::new(),
+                Vec::new(),
+                json!({}),
+                DiscoveryStatus::default(),
+                areas,
+            )
+            .unwrap();
+            live["groups"][0].clone()
+        };
+        let active_group = area(
+            1,
+            "example.com",
+            Some("plan-1"),
+            true,
+            false,
+            false,
+            false,
+            0,
+            "",
+            0,
+            "",
+        );
+        let active_exc = area(
+            2,
+            "b.example.com",
+            None,
+            true,
+            false,
+            false,
+            false,
+            0,
+            "",
+            0,
+            "",
+        );
+        let retry_group = area(
+            1,
+            "example.com",
+            Some("plan-1"),
+            false,
+            true,
+            false,
+            false,
+            2,
+            "ack_timeout",
+            0,
+            "ACK не пришёл",
+        );
+        let rejected_group = area(
+            1,
+            "example.com",
+            Some("plan-1"),
+            false,
+            true,
+            false,
+            true,
+            1,
+            "bad_plan",
+            17,
+            "план не разобрался",
+        );
+        let removing_group = area(
+            1,
+            "example.com",
+            Some("plan-1"),
+            true,
+            false,
+            true,
+            false,
+            0,
+            "",
+            0,
+            "",
+        );
+        let removing_retry_group = area(
+            1,
+            "example.com",
+            Some("plan-1"),
+            true,
+            false,
+            true,
+            false,
+            1,
+            "ack_timeout",
+            0,
+            "",
+        );
+        let retry_exc = area(
+            2,
+            "b.example.com",
+            None,
+            false,
+            true,
+            false,
+            false,
+            1,
+            "ack_timeout",
+            0,
+            "ACK не пришёл",
+        );
+        let rejected_exc = area(
+            2,
+            "b.example.com",
+            None,
+            false,
+            true,
+            false,
+            true,
+            1,
+            "bad_args",
+            9,
+            "аргументы команды не разобрались",
+        );
+
+        let mut scenarios = Vec::new();
+        scenarios.push(
+            json!({"scenario": "active", "groups": [groups(true, &[active_group.clone(), active_exc.clone()])]}),
+        );
+        scenarios.push(
+            json!({"scenario": "retrying", "groups": [groups(true, &[retry_group, active_exc.clone()])]}),
+        );
+        scenarios.push(json!({"scenario": "rejected", "groups": [groups(true, &[rejected_group, active_exc.clone()])]}));
+        scenarios.push(json!({"scenario": "remove_pending", "groups": [groups(true, &[removing_group, active_exc.clone()])]}));
+        scenarios.push(json!({"scenario": "remove_pending_retry", "groups": [groups(true, &[removing_retry_group, active_exc.clone()])]}));
+        scenarios.push(json!({"scenario": "exception_retrying", "groups": [groups(true, &[active_group.clone(), retry_exc])]}));
+        scenarios.push(json!({"scenario": "exception_rejected", "groups": [groups(true, &[active_group.clone(), rejected_exc])]}));
+        scenarios.push(json!({"scenario": "no_area", "groups": [groups(true, &[])]}));
+        scenarios.push(json!({"scenario": "plan_unavailable", "groups": [groups(false, &[active_group.clone(), active_exc.clone()])]}));
+        let mut no_exc_catalog = catalog(true);
+        if let Some(state) = &mut no_exc_catalog.domain_state {
+            state.observations.truncate(1);
+        }
+        let no_exc = snapshot_with_areas(
+            &no_exc_catalog,
             Path::new("/state/catalog.json"),
             &HashSet::new(),
             Vec::new(),
             json!({}),
             DiscoveryStatus::default(),
-            &areas,
+            &[active_group, active_exc],
         )
         .unwrap();
-        assert_eq!(live["groups"][0]["install_state"], "active");
-        assert_eq!(live["groups"][0]["exception_install_state"], "active");
-        assert_eq!(live["groups"][0]["evidence"], json!(["a.example.com"]));
+        scenarios
+            .push(json!({"scenario": "no_exceptions", "groups": [no_exc["groups"][0].clone()]}));
+
         assert_eq!(
-            live["groups"][0]["exceptions"],
-            json!([
-                {"name": "b.example.com", "reason": "Напрямую работает"},
-                {"name": "d.example.com", "reason": "Общий план не подошёл"}
-            ])
+            scenarios[0]["groups"][0]["evidence"],
+            json!(["a.example.com"])
+        );
+        assert_eq!(scenarios[0]["groups"][0]["install_state"], "active");
+        assert_eq!(scenarios[1]["groups"][0]["install_state"], "retrying");
+        assert_eq!(scenarios[2]["groups"][0]["install_reason"], "bad_plan");
+        assert_eq!(scenarios[4]["groups"][0]["install_state"], "retrying");
+        assert_eq!(scenarios[7]["groups"][0]["install_state"], "pending");
+        assert_eq!(
+            scenarios[8]["groups"][0]["install_reason"],
+            "plan_unavailable"
         );
         if let Ok(path) = std::env::var("R2O_LIVE_GROUPS_DIFF_OUTPUT") {
-            std::fs::write(
-                path,
-                serde_json::to_string(&json!({"groups": live["groups"].clone()})).unwrap(),
-            )
-            .unwrap();
+            std::fs::write(path, serde_json::to_string(&scenarios).unwrap()).unwrap();
         }
     }
 
