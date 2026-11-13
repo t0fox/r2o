@@ -86,10 +86,10 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 225 | 323 | 0 | 0 |
 | core-state | 692 | 182 | 509 | 0 | 0 |
-| datapath-core | 400 | 213 | 187 | 0 | 0 |
+| datapath-core | 400 | 214 | 186 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **912** | **1070** | **0** | **0** |
+| **Итого** | **1982** | **913** | **1069** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 912 / P 1070 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 913 / P 1069 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -346,10 +346,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 225 | 323 | 0 | 0 |
 | core-state | 692 | 205 | 487 | 0 | 0 |
-| datapath-core | 400 | 213 | 187 | 0 | 0 |
+| datapath-core | 400 | 214 | 186 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **912** | **1070** | **0** | **0** |
+| **Итого** | **1982** | **913** | **1069** | **0** | **0** |
 
 
 ---
@@ -4968,7 +4968,7 @@ ECH, середина приветствия. R2O: `r2k-core/src/tls.rs`.
 | `d2k_hr_token` (inline) | 31–34 | 4 | допустимый token-байт RFC 7230 | `httpup.rs:346 is_http_token` | **E** | Набор символов совпадает; используется в `parse_plan_request` для имени заголовка запроса. В ответном парсере Rust этот предикат не применяется (см. `d2k_hr_field`). |
 | `d2k_hr_field` (inline) | 35–42 | 8 | валидация поля: непустое имя, token, допустимые байты значения | `http_response.rs:281 parse_headers` | **P** | **Неполно:** Rust ищет `:` и разбирает известные поля, но не отвергает строку без `:`, не проверяет token-символы имени и управляющие байты значения; C делает всё это через `d2k_hr_field`. |
 | `d2k_hr_extensions` (inline) | 43–70 | 28 | разбор chunk-extensions: `;token[=token/quoted]`, OWS, контрольные байты | `http_response.rs:372 parse_chunk_size` | **P** | **Неполно:** Rust отбрасывает всё после первого `;` и не валидирует extensions; C проверяет token, кавычки, escape и управляющие байты. Поэтому `1;\x01`, незакрытая кавычка и `1 ;x` дают разный исход. |
-| `d2k_hr_headers` (inline) | 72–105 | 34 | разбор status-line и заголовков, CL/TE, interim, 101/204/304 | `http_response.rs:281 parse_headers`, `:321 parse_status_line` | **P** | **Расхождения:** C `head[8192]`, Rust 64 КиБ; C принимает status-line ровно 12 байт, Rust требует 13-й символ; C валидирует каждое поле и отвергает дубли Content-Length, Rust пропускает строки без `:` и разрешает одинаковые CL; C отвергает управляющие байты в заголовках, Rust после status-line их не проверяет. Логика interim/101/204/304/CL+TE совпадает. |
+| `d2k_hr_headers` (inline) | 72–105 | 34 | разбор status-line и заголовков, CL/TE, interim, 101/204/304 | `http_response.rs` `parse_headers`/`parse_status_line` | E | C: status-line ≥12 байт (ровно 12 без reason phrase; при >12 13-й байт — пробел), каждое поле проходит `d2k_hr_field` (двоеточие, token-имя, значение без control/DEL кроме TAB), любой второй Content-Length отвергается, TE только chunked, CL+TE запрещены. Rust `parse_status_line`/`parse_headers` повторяют эти ветви; ёмкость заголовка 8191 (C `head[8192]`). Тесты `status_line_without_reason_phrase_is_accepted_like_c`, `header_fields_are_validated_like_c`, `duplicate_content_length_is_rejected_even_when_equal`, `header_capacity_matches_c_head_buffer`. |
 | `d2k_http_response_feed` (inline) | 107–160 | 54 | потоковый разбор ответа: header/fixed/chunk/trailer/close/fin | `http_response.rs:55 feed` | **P** | **Расхождения:** C при байтах после `complete` ставит `invalid`, Rust молча `break`; C `line[512]`, Rust 128; C валидирует trailer как поле и отвергает NUL, Rust принимает ведущий NUL как пустой trailer; C проверяет chunk-extensions, Rust игнорирует; C `head[8192]`, Rust 64 КиБ. Общая state-machine и `fin`-логика совпадают. |
 
 ## datapath/include/d2k_packet.h (2 inline-функции)

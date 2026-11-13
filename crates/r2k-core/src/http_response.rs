@@ -1,4 +1,5 @@
-pub const MAX_HTTP_RESPONSE_HEADER_BYTES: usize = 65_536;
+/// C `head[8192]`: максимум сохранённого заголовка — 8191 байт (плюс NUL).
+pub const MAX_HTTP_RESPONSE_HEADER_BYTES: usize = 8191;
 const HEADER_CAPACITY: usize = MAX_HTTP_RESPONSE_HEADER_BYTES + 1;
 const LINE_CAPACITY: usize = 128; // Matches the C buffer, including its NUL slot.
 
@@ -288,6 +289,25 @@ fn span_eq_ascii_ci(span: &[u8], lower: &[u8]) -> bool {
             .all(|(value, expected)| value.to_ascii_lowercase() == *expected)
 }
 
+/// C `d2k_hr_token`: допустимый байт имени поля.
+fn is_hr_token(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
+}
+
+/// C `d2k_hr_field`: двоеточие, непустое token-имя и допустимые байты
+/// значения (управляющие отвергаются, TAB разрешён, DEL отвергается).
+fn valid_hr_field(line: &[u8]) -> bool {
+    let Some(colon) = line.iter().position(|byte| *byte == b':') else {
+        return false;
+    };
+    if colon == 0 || !line[..colon].iter().all(|byte| is_hr_token(*byte)) {
+        return false;
+    }
+    line[colon + 1..]
+        .iter()
+        .all(|byte| (*byte >= 32 || *byte == b'\t') && *byte != 127)
+}
+
 fn parse_headers(bytes: &[u8]) -> Option<(u16, Option<u64>, bool)> {
     let (status_end, status) = parse_status_line(bytes)?;
 
@@ -299,21 +319,19 @@ fn parse_headers(bytes: &[u8]) -> Option<(u16, Option<u64>, bool)> {
         let relative_end = find_crlf(&bytes[cursor..header_end])?;
         let line_end = cursor + relative_end;
         let line = &bytes[cursor..line_end];
-        if line.is_empty() {
+        if !valid_hr_field(line) {
             return None;
         }
-        let Some(colon) = line.iter().position(|byte| *byte == b':') else {
-            cursor = line_end + 2;
-            continue;
-        };
+        let colon = line.iter().position(|byte| *byte == b':')?;
         let name = &line[..colon];
         let value = trim_ascii_whitespace(&line[colon + 1..]);
         if span_eq_ascii_ci(name, b"content-length") {
-            let parsed = parse_decimal(value)?;
-            if content_length.is_some_and(|previous| previous != parsed) {
+            // C `d2k_hr_headers`: второй Content-Length отвергается даже при
+            // совпадающем значении (`if (cl++)`).
+            if content_length.is_some() {
                 return None;
             }
-            content_length = Some(parsed);
+            content_length = Some(parse_decimal(value)?);
         } else if span_eq_ascii_ci(name, b"transfer-encoding") {
             if transfer_encoding || !span_eq_ascii_ci(value, b"chunked") {
                 return None;
@@ -331,13 +349,13 @@ fn parse_headers(bytes: &[u8]) -> Option<(u16, Option<u64>, bool)> {
 fn parse_status_line(bytes: &[u8]) -> Option<(usize, u16)> {
     let status_end = find_crlf(bytes)?;
     let status_line = bytes.get(..status_end)?;
-    if status_line.len() < 13
+    if status_line.len() < 12
         || !(status_line.starts_with(b"HTTP/1.0 ") || status_line.starts_with(b"HTTP/1.1 "))
         || !(b'1'..=b'5').contains(&status_line[9])
         || status_line[10..12]
             .iter()
             .any(|byte| !byte.is_ascii_digit())
-        || status_line[12] != b' '
+        || status_line.len() > 12 && status_line[12] != b' '
     {
         return None;
     }
@@ -409,5 +427,71 @@ mod span_tests {
         assert!(!span_eq_ascii_ci(b"Content-Lengths", b"content-length"));
         assert!(!span_eq_ascii_ci(b"", b"content-length"));
         assert!(!span_eq_ascii_ci(b"transfer", b"chunked"));
+    }
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::{MAX_HTTP_RESPONSE_HEADER_BYTES, parse_headers};
+
+    #[test]
+    fn status_line_without_reason_phrase_is_accepted_like_c() {
+        // C `d2k_hr_headers`: ровно 12 байт status-line допустимы.
+        assert_eq!(
+            parse_headers(b"HTTP/1.1 200\r\n\r\n"),
+            Some((200, None, false))
+        );
+        assert_eq!(
+            parse_headers(b"HTTP/1.1 200 OK\r\n\r\n"),
+            Some((200, None, false))
+        );
+        assert_eq!(parse_headers(b"HTTP/1.1 200X\r\n\r\n"), None);
+        assert_eq!(parse_headers(b"HTTP/1.1 600 OK\r\n\r\n"), None);
+    }
+
+    #[test]
+    fn header_fields_are_validated_like_c() {
+        // Без двоеточия — отказ (C `d2k_hr_field`).
+        assert_eq!(parse_headers(b"HTTP/1.1 200 OK\r\nBadHeader\r\n\r\n"), None);
+        // Пробел в имени — не token.
+        assert_eq!(
+            parse_headers(b"HTTP/1.1 200 OK\r\nBad Header: x\r\n\r\n"),
+            None
+        );
+        // Управляющий байт в значении (кроме TAB) — отказ.
+        assert_eq!(parse_headers(b"HTTP/1.1 200 OK\r\nX: a\x01b\r\n\r\n"), None);
+        // TAB в значении разрешён.
+        assert_eq!(
+            parse_headers(b"HTTP/1.1 200 OK\r\nX: a\tb\r\n\r\n"),
+            Some((200, None, false))
+        );
+    }
+
+    #[test]
+    fn duplicate_content_length_is_rejected_even_when_equal() {
+        assert_eq!(
+            parse_headers(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\n"),
+            None
+        );
+        assert_eq!(
+            parse_headers(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n"),
+            Some((200, Some(5), false))
+        );
+        assert_eq!(
+            parse_headers(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"),
+            Some((200, None, true))
+        );
+    }
+
+    #[test]
+    fn header_capacity_matches_c_head_buffer() {
+        // C `head[8192]`: максимум сохранённых байт — 8191.
+        assert_eq!(MAX_HTTP_RESPONSE_HEADER_BYTES, 8191);
+        let mut parser = super::HttpResponseParser::new(false);
+        let mut response = Vec::new();
+        response.extend_from_slice(b"HTTP/1.1 200 OK\r\nX: ");
+        response.extend(std::iter::repeat_n(b'a', MAX_HTTP_RESPONSE_HEADER_BYTES));
+        parser.feed(&response, false);
+        assert!(parser.is_invalid());
     }
 }
