@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 317 | 231 | 0 | 0 |
-| core-state | 692 | 353 | 339 | 0 | 0 |
+| core-state | 692 | 357 | 335 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1158** | **824** | **0** | **0** |
+| **Итого** | **1982** | **1162** | **820** | **0** | **0** |
 
-Это не оценка паритета: 824 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 820 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1158 / P 824 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1162 / P 820 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 317 | 231 | 0 | 0 |
-| core-state | 692 | 353 | 339 | 0 | 0 |
+| core-state | 692 | 357 | 335 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1158** | **824** | **0** | **0** |
+| **Итого** | **1982** | **1162** | **820** | **0** | **0** |
 
 
 ---
@@ -2011,14 +2011,14 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `ev_matches_flow` | 351-366 | 16 | сравнение события с потоком в обе стороны, family по умолчанию 4 | `main.rs` flow match helpers | **P** | **Ветви сверены:** C `transport` равен; `family=ev.family?:4`, `kf` аналогично; `ef!=kf \|\| (kf!=4&&kf!=6)` → 0; `n=16/4`; сравнение `low_ip/low_port/high_ip/high_port` с a/b и с b/a. Rust `r2o_ask_flow_key`/сравнение события с ключом в `run_r2o_ask`; канонизация/семейство иные, direct unit нет. |
 | `wait_for_event3` | 397-421 | 25 | ожидание одного из трёх типов событий с code/filter/flow и общим дедлайном | `main.rs:646 wait_for_ask_proof` / event loop | **P** | **Ветви сверены:** C `clock_gettime`; цикл: `elapsed>=deadline` → -1; `d2k_link_next(fd,out,remaining)`; `rc!=0` → -1 (тайм-аут/ошибка); фильтр `kind==want_a/b/c` (нулевые want пропускаются); `code_filter>=0 && kind==want_a && code!=filter` → continue; `flow && !ev_matches_flow` → continue; 0. Rust `wait_for_ask_proof` ждёт APPLIED/EXCHANGE/REFUSED с trial/plan/flow; API/условия иные, C/Rust differential нет. |
 | `wait_for_event` | 423-429 | 7 | ожидание одного типа события | `main.rs:646 wait_for_ask_proof` | **P** | C-обёртка `wait_for_event3(fd,want,0,0,...)`; Rust отдельного однотипного ожидания нет, `wait_for_ask_proof` обрабатывает набор APPLIED/EXCHANGE/REFUSED. |
-| `props_bind_any` | 494-524 | 31 | socket/bind/getsockname локального TCP/UDP-порта, IPv6 `IPV6_V6ONLY=1`, ошибка при `out_fd==NULL` | `main.rs:22508-22612 BoundTcpProbe::open` | **P** | **Ветви C:** `out_fd=-1`; family 4/6; `socket(af,type,0)`; IPv6 — `IPV6_V6ONLY=1`; `bind` wildcard; `getsockname`; `sport_be`; при `out_fd` — отдать fd, иначе close/-1. **Отличия Rust:** `BoundTcpProbe::open` ставит `O_NONBLOCK`+`FD_CLOEXEC`, `SO_MARK=mark.unwrap_or(0x2d)` (C bind не метит), не ставит `IPV6_V6ONLY`, требует `local_port!=0`, всегда владеет `OwnedFd`; ветви `out_fd==NULL` нет. |
+| `props_bind_any` | 494-524 | 31 | socket/bind/getsockname локального TCP/UDP-порта, IPv6 `IPV6_V6ONLY=1`, ошибка при `out_fd==NULL` | `main.rs` `r2o_props_bind_socket`, production `BoundTcpProbe::open` | **E*** | C: family 4/6, `socket(af,type,0)`, IPv6 `IPV6_V6ONLY=1`, wildcard bind, getsockname. Rust `r2o_props_bind_socket` делает то же и теперь используется production `BoundTcpProbe::open` (STREAM, mark/nonblock) и обёртками TCP/UDP. Тест `props_bind_wrappers_match_c_families_and_socket_types` проверяет TCP/UDP 4/6, SO_TYPE, IPv6 V6ONLY, production `BoundTcpProbe::open(6)` V6ONLY. **Ограничение:** R2O добавляет `SO_MARK`/`O_NONBLOCK` для production-зонда; C helper блокирующий и без метки. |
 | `d2k_props_bind` | 526-528 | 3 | bind IPv4 TCP | `main.rs` `r2o_props_bind` | **E*** | C `return d2k_props_bind_family(4,...)`. Rust `r2o_props_bind` → `r2o_props_bind_family(4)` → `r2o_props_bind_any(SOCK_STREAM, 4)`; тест `props_bind_wrappers_match_c_families_and_socket_types` (порт >0, SO_TYPE=STREAM). **Ограничение:** helper добавляет SOCK_CLOEXEC и отвергает порт 0; ask-путь использует `BoundTcpProbe` с mark/nonblock. |
 | `d2k_props_bind_family` | 530-532 | 3 | bind TCP family 4/6 | `main.rs` `r2o_props_bind_family` | **E*** | C `props_bind_any(SOCK_STREAM,family,...)`: wildcard bind, getsockname, IPv6 `IPV6_V6ONLY=1`. Rust helper делает то же; тест проверяет family 4/6, SO_TYPE=STREAM и `IPV6_V6ONLY=1`; family 5 → ошибка. **Ограничение:** SOCK_CLOEXEC/port>0 — осознанно строже. |
 | `d2k_props_bind_udp` | 534-536 | 3 | bind IPv4 UDP | `main.rs` `r2o_props_bind_udp` | **E*** | C `return d2k_props_bind_udp_family(4,...)` → `props_bind_any(SOCK_DGRAM,...)`. Rust helper → family 4 DGRAM; тест проверяет порт >0 и SO_TYPE=DGRAM. **Ограничение:** см. `props_bind_any`. |
 | `d2k_props_bind_udp_family` | 538-540 | 3 | bind UDP family 4/6 | `main.rs` `r2o_props_bind_udp_family` | **E*** | C `props_bind_any(SOCK_DGRAM,family,...)`: wildcard/getsockname, IPv6 `IPV6_V6ONLY=1`. Rust helper — то же; тест проверяет family 4/6, SO_TYPE=DGRAM, IPv6 V6ONLY; family 0 → ошибка. **Ограничение:** SOCK_CLOEXEC/port>0. |
-| `d2k_props_contact` | 542-545 | 4 | TCP-обращение к цели IPv4 с отправкой приветствия | CLI `run_r2o_ask` (`main.rs:493+`, `BoundTcpProbe`) | **P** | C `d2k_props_contact_on(-1,...)`. Rust `BoundTcpProbe::open/connect` + `stream.write_all(trigger)` в `run_r2o_ask`; production-discovery этим путём вопросы не задаёт. C/Rust differential контакта нет. |
-| `d2k_props_contact_on` | 547-551 | 5 | TCP-обращение к цели IPv4 с отправкой приветствия | `run_r2o_ask` (`main.rs:493+`) | **P*** | C `return d2k_props_contact_on_family(use_fd,...,4)`. Rust владеет сокетом с момента open, отдельного «готового fd» нет; contact/send выполняет `run_r2o_ask`. |
-| `d2k_props_contact_on_family` | 553-558 | 6 | TCP-обращение family 4/6 с `tcp_timestamps=-1` | `BoundTcpProbe::connect` | **P*** | C `return d2k_props_contact_on_family_tcp_profile(use_fd,...,family,-1,...)`. Rust `BoundTcpProbe::connect`; family 4/6, без tcp-профиля. |
+| `d2k_props_contact` | 542-545 | 4 | TCP-обращение к цели IPv4 с отправкой приветствия | `main.rs` `r2o_props_contact`, production `run_r2o_ask` | **E*** | C `d2k_props_contact_on(-1,...)`. Rust `r2o_props_contact` → `contact_on` → `contact_on_family(4)` → общий `r2o_props_contact_on_family_tcp_profile` (open/connect/write_all); production `run_r2o_ask` использует `r2o_props_contact_connect` + `r2o_props_contact_write`. Тест `props_contact_wrappers_send_hello_and_report_local_port` (hello доставлен, локальный порт >0, ответ прочитан). **Ограничение:** нет `use_fd`, профиль -1. |
+| `d2k_props_contact_on` | 547-551 | 5 | TCP-обращение к цели IPv4 с отправкой приветствия | `main.rs` `r2o_props_contact_on` | **E*** | C `contact_on_family(...,4)`. Rust `r2o_props_contact_on` — та же обёртка; production-путь и тест `props_contact_wrappers_send_hello_and_report_local_port` проверяют connect+hello. **Ограничение:** нет `use_fd`/профиля. |
+| `d2k_props_contact_on_family` | 553-558 | 6 | TCP-обращение family 4/6 с `tcp_timestamps=-1` | `main.rs` `r2o_props_contact_on_family` | **E*** | C `contact_on_family_tcp_profile(...,-1)`. Rust обёртка вызывает общий helper с `tcp_timestamps=-1`, open/connect/write; тест `props_contact_wrappers_send_hello_and_report_local_port` (family 4, hello/ответ). **Ограничение:** family 6 в тесте покрыт bind-тестом, не contact-тестом; `use_fd` нет. |
 | `tcp_timestamps_read` | 567-578 | 12 | прочитать `/proc/sys/net/ipv4/tcp_timestamps`, допустить '0'..'2' | `tcp_profile.rs` `tcp_timestamps_read_from` | **E** | C `open(O_RDONLY)`, `read(buf,8)`, `n<1` → ошибка, `buf[0]` вне '0'..'2' → EINVAL. Rust `tcp_timestamps_read_from` те же проверки; используется `connect_with_tcp_profile`; тест `sysctl_read_and_write_match_c_strictness`. |
 | `tcp_timestamps_write` | 580-588 | 9 | записать tcp_timestamps | `tcp_profile.rs` `tcp_timestamps_write_to` | **E** | C `open(O_WRONLY)`, `write(&value,1)`, `n!=1` → ошибка, close. Rust `tcp_timestamps_write_to` пишет ровно один байт с truncate и отвергает короткую запись; тест `sysctl_read_and_write_match_c_strictness`. |
 | `connect_with_tcp_profile` | 591-636 | 46 | под мьютексом прочитать/переключить tcp_timestamps, connect, восстановить; -2 при сбое профиля | `tcp_profile.rs` `connect_with_tcp_profile(_at)`, `BoundTcpProbe::connect_with_timestamps` | **E** | C `timestamps<-1\|\|>1` → EINVAL/-1; Linux mutex; `>=0` read previous, при отличии write wanted (ошибка → restore и -2); connect; сохранить errno; при `changed` restore previous дважды (ошибка → -2); non-Linux `>=0` → EOPNOTSUPP/-2. Rust `TcpProfileConnectError` различает BadProfile/Profile/Connect, mutex `OnceLock`, двойное восстановление, non-Linux EOPNOTSUPP; `BoundTcpProbe::connect_with_timestamps` использует его в production. Тесты `profile_changes_and_restores_sysctl_around_connect`, `connect_failure_still_restores_previous_value`, `invalid_profile_and_write_failure_match_c_codes`. |

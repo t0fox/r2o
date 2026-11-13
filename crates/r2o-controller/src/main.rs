@@ -623,7 +623,7 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
             continue;
         }
 
-        let connection = bound.connect(destination, ASK_WAIT);
+        let connection = r2o_props_contact_connect(bound, destination, ASK_WAIT);
         let (mut stream, local_ip, local_port, _) = match connection {
             Ok(connection) => connection,
             Err(error) => {
@@ -668,7 +668,7 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
             continue;
         }
         let expected_key = r2o_ask_flow_key(local_ip, local_port, destination);
-        if let Err(error) = stream.write_all(&trigger_bytes) {
+        if let Err(error) = r2o_props_contact_write(&mut stream, &trigger_bytes) {
             drop(stream);
             client.delete_name_probe(&options.sni, shape, family, source_port)?;
             r2o_print_ask_trace(
@@ -23331,9 +23331,11 @@ struct BoundTcpProbe {
 }
 
 #[cfg(unix)]
-fn r2o_props_bind_any(
+fn r2o_props_bind_socket(
     socket_type: libc::c_int,
     family: u8,
+    mark: Option<u32>,
+    nonblock: bool,
 ) -> std::io::Result<(std::os::fd::OwnedFd, u16)> {
     use std::os::fd::{AsRawFd, FromRawFd};
 
@@ -23354,6 +23356,31 @@ fn r2o_props_bind_any(
     }
     let socket = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
     let fd = socket.as_raw_fd();
+    if nonblock {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(mark) = mark
+        && mark != 0
+    {
+        let result = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_MARK,
+                (&mark as *const u32).cast(),
+                std::mem::size_of_val(&mark) as libc::socklen_t,
+            )
+        };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = mark;
     if family == 6 {
         // C `props_bind_any`: IPv6 wildcard не должен принимать IPv4.
         let one: libc::c_int = 1;
@@ -23431,6 +23458,15 @@ fn r2o_props_bind_any(
     Ok((socket, local_port))
 }
 
+/// C `props_bind_any`: блокирующий wildcard-bind без метки.
+#[cfg(unix)]
+fn r2o_props_bind_any(
+    socket_type: libc::c_int,
+    family: u8,
+) -> std::io::Result<(std::os::fd::OwnedFd, u16)> {
+    r2o_props_bind_socket(socket_type, family, None, false)
+}
+
 /// C `d2k_props_bind_family`: IPv4/IPv6 TCP wildcard.
 #[cfg(unix)]
 fn r2o_props_bind_family(family: u8) -> std::io::Result<(std::os::fd::OwnedFd, u16)> {
@@ -23455,112 +23491,76 @@ fn r2o_props_bind_udp() -> std::io::Result<(std::os::fd::OwnedFd, u16)> {
     r2o_props_bind_udp_family(4)
 }
 
+/// C `d2k_props_contact_on_family_tcp_profile`: connect + отправка приветствия.
+#[cfg(unix)]
+fn r2o_props_contact_on_family_tcp_profile(
+    family: u8,
+    destination: std::net::SocketAddr,
+    hello: &[u8],
+    timeout: std::time::Duration,
+    tcp_timestamps: i8,
+) -> std::io::Result<(std::net::TcpStream, std::net::IpAddr, u16, i64)> {
+    let probe = BoundTcpProbe::open(family, Some(0))?;
+    let (mut stream, local_ip, local_port, elapsed) =
+        probe.connect_with_timestamps(destination, timeout, tcp_timestamps)?;
+    r2o_props_contact_write(&mut stream, hello)?;
+    Ok((stream, local_ip, local_port, elapsed))
+}
+
+/// C `d2k_props_contact_on_family`: TCP family 4/6, профиль -1.
+#[cfg(unix)]
+fn r2o_props_contact_on_family(
+    family: u8,
+    destination: std::net::SocketAddr,
+    hello: &[u8],
+    timeout: std::time::Duration,
+) -> std::io::Result<(std::net::TcpStream, std::net::IpAddr, u16, i64)> {
+    r2o_props_contact_on_family_tcp_profile(family, destination, hello, timeout, -1)
+}
+
+/// C `d2k_props_contact_on`: IPv4.
+#[cfg(unix)]
+fn r2o_props_contact_on(
+    destination: std::net::SocketAddr,
+    hello: &[u8],
+    timeout: std::time::Duration,
+) -> std::io::Result<(std::net::TcpStream, std::net::IpAddr, u16, i64)> {
+    r2o_props_contact_on_family(4, destination, hello, timeout)
+}
+
+/// C `d2k_props_contact`: IPv4.
+#[cfg(unix)]
+fn r2o_props_contact(
+    destination: std::net::SocketAddr,
+    hello: &[u8],
+    timeout: std::time::Duration,
+) -> std::io::Result<(std::net::TcpStream, std::net::IpAddr, u16, i64)> {
+    r2o_props_contact_on(destination, hello, timeout)
+}
+
+/// Общий шаг `contact`: connect уже открытого зонда.
+#[cfg(unix)]
+fn r2o_props_contact_connect(
+    probe: BoundTcpProbe,
+    destination: std::net::SocketAddr,
+    timeout: std::time::Duration,
+) -> std::io::Result<(std::net::TcpStream, std::net::IpAddr, u16, i64)> {
+    probe.connect(destination, timeout)
+}
+
+/// Общий шаг `contact`: отправить снимок приветствия.
+#[cfg(unix)]
+fn r2o_props_contact_write(stream: &mut std::net::TcpStream, hello: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    stream.write_all(hello)
+}
+
 #[cfg(unix)]
 impl BoundTcpProbe {
     fn open(family: u8, mark: Option<u32>) -> std::io::Result<Self> {
-        use std::os::fd::{AsRawFd, FromRawFd};
-
-        if !matches!(family, 4 | 6) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "семейство адресов HTTP-зонда не поддерживается",
-            ));
-        }
-        let domain = if family == 4 {
-            libc::AF_INET
-        } else {
-            libc::AF_INET6
-        };
-        let raw = unsafe { libc::socket(domain, libc::SOCK_STREAM, 0) };
-        if raw < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let socket = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
-        let fd = socket.as_raw_fd();
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-        if flags < 0
-            || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
-            || unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0
-        {
-            return Err(std::io::Error::last_os_error());
-        }
-        let mark = mark.unwrap_or(0x2d);
-        #[cfg(target_os = "linux")]
-        if mark != 0 {
-            let result = unsafe {
-                libc::setsockopt(
-                    fd,
-                    libc::SOL_SOCKET,
-                    libc::SO_MARK,
-                    (&mark as *const u32).cast(),
-                    std::mem::size_of_val(&mark) as libc::socklen_t,
-                )
-            };
-            if result != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-        }
-        #[cfg(not(target_os = "linux"))]
-        let _ = mark;
-
-        let bound = if family == 4 {
-            let address = libc::sockaddr_in {
-                sin_family: libc::AF_INET as libc::sa_family_t,
-                sin_port: 0,
-                sin_addr: libc::in_addr { s_addr: 0 },
-                sin_zero: [0; 8],
-            };
-            unsafe {
-                libc::bind(
-                    fd,
-                    (&address as *const libc::sockaddr_in).cast(),
-                    std::mem::size_of_val(&address) as libc::socklen_t,
-                )
-            }
-        } else {
-            let address = libc::sockaddr_in6 {
-                sin6_family: libc::AF_INET6 as libc::sa_family_t,
-                sin6_port: 0,
-                sin6_flowinfo: 0,
-                sin6_addr: libc::in6_addr { s6_addr: [0; 16] },
-                sin6_scope_id: 0,
-            };
-            unsafe {
-                libc::bind(
-                    fd,
-                    (&address as *const libc::sockaddr_in6).cast(),
-                    std::mem::size_of_val(&address) as libc::socklen_t,
-                )
-            }
-        };
-        if bound != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let mut local: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-        let mut length = std::mem::size_of_val(&local) as libc::socklen_t;
-        if unsafe {
-            libc::getsockname(
-                fd,
-                (&mut local as *mut libc::sockaddr_storage).cast(),
-                &mut length,
-            )
-        } != 0
-        {
-            return Err(std::io::Error::last_os_error());
-        }
-        let local_port = unsafe {
-            if family == 4 {
-                u16::from_be((*(&local as *const _ as *const libc::sockaddr_in)).sin_port)
-            } else {
-                u16::from_be((*(&local as *const _ as *const libc::sockaddr_in6)).sin6_port)
-            }
-        };
-        if local_port == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AddrNotAvailable,
-                "ядро не назначило порт HTTP-зонду",
-            ));
-        }
+        // C `props_bind_any` + R2O: общий bind, метка и nonblock.
+        let (socket, local_port) =
+            r2o_props_bind_socket(libc::SOCK_STREAM, family, Some(mark.unwrap_or(0x2d)), true)?;
         Ok(Self { socket, local_port })
     }
 
@@ -25055,6 +25055,56 @@ mod tests {
         assert!(super::r2o_props_bind_udp().unwrap().1 > 0);
         assert!(super::r2o_props_bind_family(5).is_err());
         assert!(super::r2o_props_bind_udp_family(0).is_err());
+
+        // Production path `BoundTcpProbe::open` использует тот же bind.
+        let probe = super::BoundTcpProbe::open(6, Some(0)).unwrap();
+        assert!(probe.local_port > 0);
+        let mut v6only: libc::c_int = 0;
+        let mut length = std::mem::size_of_val(&v6only) as libc::socklen_t;
+        assert_eq!(
+            unsafe {
+                libc::getsockopt(
+                    probe.socket.as_raw_fd(),
+                    libc::IPPROTO_IPV6,
+                    libc::IPV6_V6ONLY,
+                    (&mut v6only as *mut libc::c_int).cast(),
+                    &mut length,
+                )
+            },
+            0
+        );
+        assert_eq!(v6only, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn props_contact_wrappers_send_hello_and_report_local_port() {
+        use std::io::{Read, Write};
+        use std::time::Duration;
+
+        let hello = r2o_controller::hello::modern_client_hello("contact.example").unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let expected = hello.clone();
+        let server = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            let mut received = vec![0_u8; expected.len()];
+            peer.read_exact(&mut received).unwrap();
+            assert_eq!(received, expected);
+            peer.write_all(b"hello").unwrap();
+        });
+
+        let (mut stream, local_ip, local_port, _) =
+            super::r2o_props_contact_on_family(4, address, &hello, Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            local_ip,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        );
+        assert!(local_port > 0);
+        let mut response = [0_u8; 5];
+        stream.read_exact(&mut response).unwrap();
+        assert_eq!(&response, b"hello");
+        server.join().unwrap();
     }
 
     #[cfg(unix)]
