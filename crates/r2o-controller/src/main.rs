@@ -596,7 +596,7 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
             }
         };
         if ack.trial_id != Some(trial_id) {
-            client.delete_name_probe(&options.sni, shape, family, source_port)?;
+            client.retire_question(&options.sni, shape, family, source_port);
             r2o_print_ask_trace(
                 plan_len,
                 "получено чужое подтверждение",
@@ -656,7 +656,7 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
             }
         };
         if local_port != source_port {
-            client.delete_name_probe(&options.sni, shape, family, source_port)?;
+            client.retire_question(&options.sni, shape, family, source_port);
             drop(stream);
             r2o_print_ask_trace(
                 plan_len,
@@ -675,7 +675,7 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
         let expected_key = r2o_ask_flow_key(local_ip, local_port, destination);
         if let Err(error) = r2o_props_contact_write(&mut stream, &trigger_bytes) {
             drop(stream);
-            client.delete_name_probe(&options.sni, shape, family, source_port)?;
+            client.retire_question(&options.sni, shape, family, source_port);
             r2o_print_ask_trace(
                 plan_len,
                 "датапат принял",
@@ -740,7 +740,7 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
         }
 
         if let Some(code) = proof.unsent_code {
-            client.delete_name_probe(&options.sni, shape, family, source_port)?;
+            client.retire_question(&options.sni, shape, family, source_port);
             drop(stream);
             r2o_print_ask_trace(
                 plan_len,
@@ -757,7 +757,7 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
             continue;
         }
 
-        client.delete_name_probe(&options.sni, shape, family, source_port)?;
+        client.retire_question(&options.sni, shape, family, source_port);
         drop(stream);
         r2o_print_ask_trace(
             plan_len,
@@ -20836,6 +20836,13 @@ impl ControlClient {
         self.send_command(&command, control::COMMAND_DEL_NAME_PROBE)
             .map_err(|error| error.to_string())?;
         Ok(())
+    }
+
+    /// C `question_retire` (`core/compose.c:874-879`): снять пробу вопроса
+    /// ровно её ключом; отказ отправки ничего не меняет в наблюдении и не
+    /// прерывает опрос.
+    fn retire_question(&mut self, host: &str, shape: u8, family: u8, port: u16) {
+        let _ = self.delete_name_probe(host, shape, family, port);
     }
 
     fn collect_applied_events(
