@@ -6481,9 +6481,11 @@ fn r2o_run_discovery_candidate_trial_with_progress(
             .saturating_sub(proof_probe_reserve + 1)
             .min(u8::MAX as usize) as u8,
     );
-    let plan_id = match random_id() {
-        Ok(id) => id,
-        Err(error) => return (Err(error.to_string()), false, 0, Default::default()),
+    // C `plan_ident`: id временного/каталожного кандидата — `plan-%08x` от
+    // FNV-1a текста, на провод уходят ASCII-байты, добитые нулями.
+    let (_plan_name, plan_id) = match r2o_controller::discovery::plan_ident(source_text) {
+        Ok(value) => value,
+        Err(error) => return (Err(error), false, 0, Default::default()),
     };
     let plan_text = match r2o_controller::discovery::plan_text_for_trial(source_text, plan_id) {
         Ok(text) => text,

@@ -1542,6 +1542,23 @@ fn text_with_id(canonical: &str, id: &str) -> Result<String, String> {
     Ok(format!("{before}{replacement}{after}"))
 }
 
+/// C `plan_ident` (`core/sched.c:3598-3605`): `plan-%08x` от младших 32 бит
+/// FNV-1a текста плана; на провод уходят ASCII-байты строки, добитые нулями
+/// до 16. Текст хешируется в каноническом виде (id из нулей).
+pub fn plan_ident(text: &str) -> Result<(String, [u8; 16]), String> {
+    let canonical = canonical_plan_text(text)?;
+    let mut hash = 1_469_598_103_934_665_603_u64;
+    for byte in canonical.bytes() {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(1_099_511_628_211);
+    }
+    let name = format!("plan-{:08x}", (hash & 0xffff_ffff) as u32);
+    let mut wire = [0_u8; 16];
+    let bytes = name.as_bytes();
+    let length = bytes.len().min(wire.len());
+    wire[..length].copy_from_slice(&bytes[..length]);
+    Ok((name, wire))
+}
+
 /// Подставить отдельный идентификатор для временной проверки измеренного плана.
 pub fn plan_text_for_trial(text: &str, id: [u8; 16]) -> Result<String, String> {
     let canonical = canonical_plan_text(text)?;
@@ -2535,6 +2552,23 @@ mod tests {
         assert_eq!(catalog.boxes[1].bindings[0].plan_id, plan_b_id);
         assert_eq!(catalog.boxes[0].fingerprint.signals[0].seen, 1);
         assert_eq!(catalog.boxes[1].fingerprint.signals[0].seen, 2);
+    }
+
+    #[test]
+    fn plan_ident_matches_c_fnv_and_ascii_wire_id() {
+        let text = "r2o-plan 1 11\nid 00000000000000000000000000000000\nproto tcp tls\nsplit sni_middle +0\n";
+        let (name, wire) = super::plan_ident(text).unwrap();
+        // C-вектор: FNV-1a(text) & 0xffffffff = 0x6dcd9d91.
+        assert_eq!(name, "plan-6dcd9d91");
+        assert_eq!(
+            wire,
+            [
+                0x70, 0x6c, 0x61, 0x6e, 0x2d, 0x36, 0x64, 0x63, 0x64, 0x39, 0x64, 0x39, 0x31, 0, 0,
+                0
+            ]
+        );
+        let stamped = super::plan_text_for_trial(text, wire).unwrap();
+        assert!(stamped.contains("id 706c616e2d3664636439643931000000"));
     }
 
     #[test]
