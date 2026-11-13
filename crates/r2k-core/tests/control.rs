@@ -491,6 +491,125 @@ fn r2o_событие_молчания_tcp_проверяет_ключ_напр�
 }
 
 #[test]
+fn link_wrappers_emit_c_family4_frames() {
+    use r2k_core::control::{
+        COMMAND_ARM_SHAPE, COMMAND_SET_NAME, encode_arm_shape, encode_set_name,
+    };
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let plan = r2o_tls_plan_records();
+    let trial = [0x5a; 16];
+
+    // C `d2k_link_set_name`: SET_NAME, family=4, без местного порта.
+    let frame = read_frame(&mut Cursor::new(
+        encode_set_name("example.test", SHAPE_MODERN, 4, &plan).unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(frame.kind, COMMAND_SET_NAME);
+    assert_eq!(frame.body[0], 12);
+    assert_eq!(&frame.body[1..13], b"example.test");
+    assert_eq!(&frame.body[13..15], &[SHAPE_MODERN, 4]);
+    assert_eq!(&frame.body[15..], &plan[..]);
+
+    // C `d2k_link_set_name_probe`/`_probe_trial`: sport BE и 16-байтный trial.
+    let frame = read_frame(&mut Cursor::new(
+        encode_set_name_probe("example.test", SHAPE_MODERN, 4, 40123, &plan, trial).unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(frame.kind, COMMAND_SET_NAME_PROBE);
+    assert_eq!(&frame.body[13..15], &[SHAPE_MODERN, 4]);
+    assert_eq!(&frame.body[15..17], &40123_u16.to_be_bytes());
+    assert_eq!(&frame.body[17..17 + plan.len()], &plan[..]);
+    assert_eq!(&frame.body[17 + plan.len()..], &trial[..]);
+
+    // Постоянная проба (`area_id=NULL`) шлёт 16 нулевых байт, как C.
+    let frame = read_frame(&mut Cursor::new(
+        encode_set_name_probe("example.test", SHAPE_MODERN, 4, 40123, &plan, [0; 16]).unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(&frame.body[17 + plan.len()..], &[0; 16]);
+    // C `d2k_link_set_name_probe_trial`: нулевой порт — отказ.
+    assert!(encode_set_name_probe("example.test", SHAPE_MODERN, 4, 0, &plan, trial).is_err());
+
+    // `d2k_link_set_addr`: family=4, 16-байтное поле с нулями после IPv4.
+    let frame = read_frame(&mut Cursor::new(
+        encode_set_addr(
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+            SHAPE_QUIC,
+            &r2o_quic_plan_records(),
+        )
+        .unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(frame.kind, COMMAND_SET_ADDR);
+    assert_eq!(frame.body[0], 4);
+    assert_eq!(&frame.body[1..5], &[192, 0, 2, 10]);
+    assert_eq!(&frame.body[5..17], &[0; 12]);
+    assert_eq!(frame.body[17], SHAPE_QUIC);
+
+    // `d2k_link_del_addr`: family+16 байт+shape.
+    let frame = read_frame(&mut Cursor::new(
+        encode_delete_addr(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)), SHAPE_QUIC).unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(frame.kind, COMMAND_DEL_ADDR);
+    assert_eq!(frame.body.len(), 18);
+    assert_eq!(frame.body[0], 4);
+    assert_eq!(&frame.body[1..5], &[192, 0, 2, 10]);
+    assert_eq!(&frame.body[5..17], &[0; 12]);
+    assert_eq!(frame.body[17], SHAPE_QUIC);
+
+    // `d2k_link_arm_shape`: имя+transport+family.
+    let frame = read_frame(&mut Cursor::new(
+        encode_arm_shape("example.test", 6, 4).unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(frame.kind, COMMAND_ARM_SHAPE);
+    assert_eq!(frame.body[0], 12);
+    assert_eq!(&frame.body[1..13], b"example.test");
+    assert_eq!(&frame.body[13..15], &[6, 4]);
+
+    // `d2k_link_del_name_probe`: имя+shape+family+sport BE.
+    let frame = read_frame(&mut Cursor::new(
+        encode_delete_name_probe("example.test", SHAPE_MODERN, 4, 40123).unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(frame.kind, COMMAND_DEL_NAME_PROBE);
+    assert_eq!(&frame.body[13..15], &[SHAPE_MODERN, 4]);
+    assert_eq!(&frame.body[15..17], &40123_u16.to_be_bytes());
+
+    // `d2k_link_set_addr_probe`: flow 38 байт + trial + lease + план.
+    let source: SocketAddr = "192.0.2.10:41000".parse().unwrap();
+    let destination: SocketAddr = "198.51.100.20:443".parse().unwrap();
+    let quic = r2o_quic_plan_records();
+    let frame = read_frame(&mut Cursor::new(
+        encode_set_addr_probe(source, destination, 5000, &quic, trial).unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(frame.kind, COMMAND_SET_ADDR_PROBE);
+    assert_eq!(frame.body[0], 4);
+    assert_eq!(&frame.body[1..5], &[192, 0, 2, 10]);
+    assert_eq!(&frame.body[5..17], &[0; 12]);
+    assert_eq!(&frame.body[17..21], &[198, 51, 100, 20]);
+    assert_eq!(&frame.body[21..33], &[0; 12]);
+    assert_eq!(&frame.body[33..35], &41000_u16.to_be_bytes());
+    assert_eq!(&frame.body[35..37], &443_u16.to_be_bytes());
+    assert_eq!(frame.body[37], 17);
+    assert_eq!(&frame.body[38..54], &trial[..]);
+    assert_eq!(&frame.body[54..58], &5000_u32.to_be_bytes());
+    assert_eq!(&frame.body[58..], &quic[..]);
+
+    // `d2k_link_del_addr_probe`: flow + trial.
+    let frame = read_frame(&mut Cursor::new(
+        encode_delete_addr_probe(source, destination, trial).unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(frame.kind, COMMAND_DEL_ADDR_PROBE);
+    assert_eq!(&frame.body[38..54], &trial[..]);
+    assert_eq!(frame.body.len(), 54);
+}
+
+#[test]
 fn encodes_http_probe_command_and_round_trips_its_correlated_ack() {
     let mut plan = r2o_tls_plan_records();
     plan[6..8].copy_from_slice(&11_u16.to_be_bytes());
