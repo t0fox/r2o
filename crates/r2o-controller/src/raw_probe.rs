@@ -1517,14 +1517,17 @@ struct RstGuard {
     rule: Option<RstRule>,
 }
 
-fn r2o_rst_uses_nft(firewall: Option<&str>) -> bool {
-    firewall == Some("nft")
+/// C `rst_nft`: `D2K_FW == "nft"`; R2O дополнительно принимает `R2O_FW`.
+fn r2o_rst_uses_nft(d2k_fw: Option<&str>, r2o_fw: Option<&str>) -> bool {
+    d2k_fw.or(r2o_fw) == Some("nft")
 }
 
 impl RstRule {
     fn install(source_port: u16, destination: SocketAddr) -> Result<Self, ProbeError> {
-        let firewall = std::env::var("R2O_FW").ok();
-        let nft = r2o_rst_uses_nft(firewall.as_deref());
+        // C `rst_nft` читает `D2K_FW`; R2O дополнительно принимает `R2O_FW`.
+        let d2k_fw = std::env::var("D2K_FW").ok();
+        let r2o_fw = std::env::var("R2O_FW").ok();
+        let nft = r2o_rst_uses_nft(d2k_fw.as_deref(), r2o_fw.as_deref());
         let mut guard = Self {
             source_port,
             destination: destination.ip(),
@@ -2864,9 +2867,12 @@ mod tests {
             .filter(|line| !line.is_empty() && !line.starts_with('#'))
             .map(|line| line.split_once('=').expect("fixture key=value"))
             .collect::<std::collections::HashMap<_, _>>();
-        let nft = r2o_rst_uses_nft(Some(fixture["firewall"]));
+        let nft = r2o_rst_uses_nft(Some(fixture["firewall"]), None);
         assert!(nft);
-        assert!(!r2o_rst_uses_nft(None));
+        assert!(!r2o_rst_uses_nft(None, None));
+        // C-паритет `D2K_FW` важнее R2O-имени; неизвестное значение не nft.
+        assert!(r2o_rst_uses_nft(None, Some("nft")));
+        assert!(!r2o_rst_uses_nft(Some("iptables"), Some("nft")));
         let rule = RstRule {
             source_port: fixture["source_port"].parse().unwrap(),
             destination: fixture["destination"].parse().unwrap(),
@@ -3185,6 +3191,51 @@ mod tests {
             ..Poison::default()
         };
         assert!(make_poison_hit(&badsum, &trigger, None).unwrap().is_some());
+    }
+
+    #[test]
+    fn prop_majority_matches_c() {
+        // C `d2k_prop_majority`: repeats>0 && pass > repeats/2.
+        assert!(!majority(0, 0));
+        assert!(!majority(0, 1));
+        assert!(majority(1, 1));
+        assert!(!majority(1, 2));
+        assert!(majority(2, 3));
+        assert!(!majority(2, 4));
+        assert!(majority(3, 4));
+    }
+
+    #[test]
+    fn rst_key_fields_are_used_in_both_command_forms() {
+        // C `rst_key_of`: sport/dport/family/dst попадают в ключ правила.
+        let rule = RstRule {
+            source_port: 40_123,
+            destination: "2001:db8::2".parse().unwrap(),
+            destination_port: 443,
+            nft: false,
+            comment: true,
+        };
+        let nft = rule.nft_args("add").join(" ");
+        assert!(nft.contains("rst6"));
+        assert!(nft.contains("2001:db8::2"));
+        assert!(nft.contains("40123"));
+        assert!(nft.contains("443"));
+        let iptables = rule.iptables_args(true, "-I").join(" ");
+        assert!(iptables.contains("--sport 40123"));
+        assert!(iptables.contains("--comment r2o-rst:"));
+
+        let v4 = RstRule {
+            source_port: 40_124,
+            destination: "198.51.100.2".parse().unwrap(),
+            destination_port: 80,
+            nft: true,
+            comment: false,
+        };
+        let nft4 = v4.nft_args("delete").join(" ");
+        assert!(nft4.contains("rst4"));
+        assert!(nft4.contains("198.51.100.2"));
+        assert!(nft4.contains("40124"));
+        assert!(nft4.contains("80"));
     }
 
     #[test]
