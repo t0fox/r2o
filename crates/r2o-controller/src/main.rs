@@ -40898,6 +40898,10 @@ mod tests {
                 kind: "name".into(),
                 target: "example.com".into(),
                 plan_id: "plan".into(),
+                // C-каталог всегда пишет семейство 4/6; Derived Default даёт 0,
+                // который валидатор законно отвергает.
+                family: 4,
+                transport: 6,
                 recheck_since: Some(1),
                 ..r2o_controller::catalog::Binding::default()
             }],
