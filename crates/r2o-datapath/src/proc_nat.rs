@@ -111,7 +111,9 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 fn fields(line: &[u8]) -> Vec<(&[u8], &[u8])> {
-    line.split(|byte| byte.is_ascii_whitespace())
+    // C `field_after` завершает значение только на пробеле или переводе
+    // строки; прочие whitespace остаются частью значения и ломают разбор.
+    line.split(|byte| matches!(byte, b' ' | b'\n'))
         .filter_map(|field| {
             let equal = field.iter().position(|byte| *byte == b'=')?;
             Some((&field[..equal], &field[equal + 1..]))
@@ -235,5 +237,69 @@ mod tests {
         std::fs::write(&path, "").unwrap();
         assert_eq!(lookup(&path, &tuple), R2oProcNatLookup::Missing);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn parse_ip4_and_address_match_c_nat_parser() {
+        use super::{parse_address, parse_ipv4};
+        // C `parse_ip4` не ограничивает число цифр, пока значение <= 255.
+        assert_eq!(parse_ipv4("010.0.0.1"), Some([10, 0, 0, 1]));
+        assert_eq!(parse_ipv4("001.002.003.004"), Some([1, 2, 3, 4]));
+        assert_eq!(parse_ipv4("0001.2.3.4"), Some([1, 2, 3, 4]));
+        assert_eq!(parse_ipv4("255.255.255.255"), Some([255, 255, 255, 255]));
+        for invalid in [
+            "",
+            "1.2.3",
+            "1.2.3.4.5",
+            "256.1.1.1",
+            "1..2.3",
+            "a.b.c.d",
+            "1.2.3.4 ",
+            "1.2.3.4\n",
+        ] {
+            assert_eq!(parse_ipv4(invalid), None, "{invalid:?}");
+        }
+
+        let mut expected = [0; 16];
+        expected[..4].copy_from_slice(&[192, 168, 1, 117]);
+        assert_eq!(parse_address(b"192.168.1.117", 4), Some(expected));
+        assert_eq!(
+            parse_address(b"2001:db8::1", 6),
+            Some(
+                "2001:db8::1"
+                    .parse::<std::net::Ipv6Addr>()
+                    .unwrap()
+                    .octets()
+            )
+        );
+        // C `inet_pton` не принимает зону; семейство вне 4/6 отвергается.
+        assert_eq!(parse_address(b"fe80::1%eth0", 6), None);
+        assert_eq!(parse_address(b"192.168.1.1", 5), None);
+    }
+
+    #[test]
+    fn field_after_matches_c_word_boundary_and_continuation() {
+        use super::{field_after, fields};
+        let line = b"ipv4 2 tcp 6 431999 ESTABLISHED src=192.168.1.117 dst=157.240.205.21 sport=50759 dport=443 src=157.240.205.21 dst=192.168.1.117 sport=443 dport=50759 [ASSURED] mark=0 use=1\n";
+        let parsed = fields(line);
+        let (src_at, src) = field_after(&parsed, 0, b"src").unwrap();
+        assert_eq!(src, b"192.168.1.117");
+        let (dst_at, dst) = field_after(&parsed, src_at + 1, b"dst").unwrap();
+        assert_eq!(dst, b"157.240.205.21");
+        let (sport_at, sport) = field_after(&parsed, dst_at + 1, b"sport").unwrap();
+        assert_eq!(sport, b"50759");
+        let (dport_at, dport) = field_after(&parsed, sport_at + 1, b"dport").unwrap();
+        assert_eq!(dport, b"443");
+        // C требует имя на границе слова: `port` не находится внутри `sport`.
+        assert!(field_after(&parsed, 0, b"port").is_none());
+        let (reply_src_at, reply_src) = field_after(&parsed, dport_at + 1, b"src").unwrap();
+        assert_eq!(reply_src, b"157.240.205.21");
+        let (_, reply_dport) = field_after(&parsed, reply_src_at + 1, b"dport").unwrap();
+        assert_eq!(reply_dport, b"50759");
+
+        // C завершает значение только на пробеле/переводе строки: табуляция
+        // остаётся частью значения и ломает последующий разбор адреса.
+        let with_tab = fields(b"src=1\t2\n");
+        assert_eq!(with_tab[0], (&b"src"[..], &b"1\t2"[..]));
     }
 }

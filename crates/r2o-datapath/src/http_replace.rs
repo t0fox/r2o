@@ -249,4 +249,54 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn pseudo_sum_matches_c_pseudo_header() {
+        use super::pseudo_sum;
+        use r2k_core::addr::Address;
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+        fn c_style_sum(bytes: &[u8], mut sum: u64) -> u64 {
+            for word in bytes.chunks(2) {
+                sum += if word.len() == 2 {
+                    u64::from(u16::from_be_bytes([word[0], word[1]]))
+                } else {
+                    u64::from(word[0]) << 8
+                };
+            }
+            sum
+        }
+
+        fn pseudo_header(
+            family: u8,
+            source: Address,
+            destination: Address,
+            tcp_len: usize,
+        ) -> Vec<u8> {
+            let width = if family == 4 { 4 } else { 16 };
+            let mut header = Vec::new();
+            header.extend_from_slice(&source.bytes()[..width]);
+            header.extend_from_slice(&destination.bytes()[..width]);
+            header.push(0);
+            header.push(6);
+            header.extend_from_slice(&(tcp_len as u16).to_be_bytes());
+            header
+        }
+
+        let source4 = Address::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)));
+        let destination4 = Address::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)));
+        let header4 = pseudo_header(4, source4, destination4, 1234);
+        assert_eq!(
+            pseudo_sum(4, source4, destination4, 1234),
+            c_style_sum(&header4, 0)
+        );
+
+        let source6 = Address::new(IpAddr::V6(Ipv6Addr::LOCALHOST));
+        let destination6 = Address::new(IpAddr::V6("2001:db8::1".parse().unwrap()));
+        let header6 = pseudo_header(6, source6, destination6, 4321);
+        assert_eq!(
+            pseudo_sum(6, source6, destination6, 4321),
+            c_style_sum(&header6, 0)
+        );
+    }
 }

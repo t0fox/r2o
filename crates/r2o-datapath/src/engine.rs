@@ -26,6 +26,12 @@ const D2O_OUT_BUF_BYTES: usize = 26 * 1600;
 // Matches D2O core/quic.c::D2K_QUIC_MAX_DGRAM.
 const D2O_QUIC_MAX_DGRAM: usize = 1500;
 
+/// C `tcp_band_top` (`datapath/session.c:3271-3277`): верхняя граница полосы —
+/// максимум бюджетов плюс допуск; пустой список даёт только допуск.
+fn tcp_band_top(budgets: &[u16]) -> u64 {
+    u64::from(budgets.iter().copied().max().unwrap_or(0)) + TCP_STALL_PACKET_SLACK
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct TcpEndpoint {
     address: r2k_core::addr::Address,
@@ -1076,13 +1082,7 @@ impl TcpSessions {
         let estimate = u64::from(session.forward_data_packets)
             .saturating_add(u64::from(session.reverse_data_packets))
             .saturating_add(unseen);
-        let band_top = u64::from(
-            self.tcp_stall_budgets
-                .iter()
-                .copied()
-                .max()
-                .unwrap_or(TCP_STALL_PACKET_BUDGET as u16),
-        ) + TCP_STALL_PACKET_SLACK;
+        let band_top = tcp_band_top(&self.tcp_stall_budgets);
         if estimate > band_top {
             session.stall_watch_off = true;
             return None;
@@ -2976,6 +2976,15 @@ mod tests {
         assert!(sessions.set_tcp_stall_budgets(&[1; 9]).is_err());
         sessions.set_tcp_stall_budgets(&[]).unwrap();
         assert!(sessions.set_tcp_stall_budgets(&[25]).is_ok());
+    }
+
+    #[test]
+    fn tcp_band_top_matches_c() {
+        // C `tcp_band_top`: max(budgets)+D2K_TCP_STALL_SLACK; пусто — только slack.
+        assert_eq!(super::tcp_band_top(&[]), super::TCP_STALL_PACKET_SLACK);
+        assert_eq!(super::tcp_band_top(&[25]), 28);
+        assert_eq!(super::tcp_band_top(&[15, 35]), 38);
+        assert_eq!(super::tcp_band_top(&[1, 2]), 5);
     }
 
     #[cfg(target_os = "linux")]

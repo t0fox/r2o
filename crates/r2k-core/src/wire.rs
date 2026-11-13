@@ -298,20 +298,7 @@ pub fn build_udp_packet(input: &[u8], emission: &Emission, out: &mut [u8]) -> Op
     write_u16(&mut out[udp_offset + 4..udp_offset + 6], udp_len as u16);
     out[udp_offset + UDP_HEADER_LEN..total_len].copy_from_slice(&emission.bytes);
 
-    let mut pseudo = 0;
-    match view.family {
-        4 => {
-            pseudo = sum16(&out[12..20], pseudo);
-            pseudo += 17 + udp_len as u64;
-        }
-        6 => {
-            pseudo = sum16(&out[8..40], pseudo);
-            pseudo += ((udp_len as u32) >> 16) as u64;
-            pseudo += (udp_len as u32 & 0xffff) as u64;
-            pseudo += 17;
-        }
-        _ => return None,
-    }
+    let pseudo = udp_pseudo_sum(&out[..], view.family, udp_len)?;
     let checksum = checksum_value(sum16(&out[udp_offset..total_len], pseudo));
     write_u16(
         &mut out[udp_offset + 6..udp_offset + 8],
@@ -563,6 +550,25 @@ fn pseudo_sum(src: [u8; 16], dst: [u8; 16], family: u8, tcp_len: usize) -> Optio
     Some(acc)
 }
 
+/// C `pseudo_sum` (`datapath/wire_udp.c:57-65`): псевдозаголовок UDP —
+/// адреса, ноль, proto 17, длина датаграммы; для IPv6 — 32 байта адресов.
+fn udp_pseudo_sum(packet: &[u8], family: u8, udp_len: usize) -> Option<u64> {
+    match family {
+        4 => Some(
+            sum16(packet.get(12..20)?, 0)
+                .saturating_add(17)
+                .saturating_add(udp_len as u64),
+        ),
+        6 => Some(
+            sum16(packet.get(8..40)?, 0)
+                .saturating_add(((udp_len as u32) >> 16) as u64)
+                .saturating_add((udp_len as u32 & 0xffff) as u64)
+                .saturating_add(17),
+        ),
+        _ => None,
+    }
+}
+
 fn sum16(bytes: &[u8], mut acc: u64) -> u64 {
     for word in bytes.chunks(2) {
         acc += if word.len() == 2 {
@@ -587,6 +593,39 @@ fn write_u16(out: &mut [u8], value: u16) {
 
 fn write_u32(out: &mut [u8], value: u32) {
     out.copy_from_slice(&value.to_be_bytes());
+}
+
+#[cfg(test)]
+mod udp_pseudo_sum_tests {
+    use super::{sum16, udp_pseudo_sum};
+
+    fn c_style_pseudo_header(source: &[u8], destination: &[u8], udp_len: usize) -> Vec<u8> {
+        let mut header = Vec::new();
+        header.extend_from_slice(source);
+        header.extend_from_slice(destination);
+        header.push(0);
+        header.push(17);
+        header.extend_from_slice(&(udp_len as u16).to_be_bytes());
+        header
+    }
+
+    #[test]
+    fn udp_pseudo_sum_matches_c_pseudo_header() {
+        let mut v4 = vec![0u8; 20];
+        v4[12..16].copy_from_slice(&[192, 0, 2, 10]);
+        v4[16..20].copy_from_slice(&[198, 51, 100, 20]);
+        let header4 = c_style_pseudo_header(&v4[12..16], &v4[16..20], 1234);
+        assert_eq!(udp_pseudo_sum(&v4, 4, 1234), Some(sum16(&header4, 0)));
+
+        let source: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let destination: std::net::Ipv6Addr = "2001:db8::2".parse().unwrap();
+        let mut v6 = vec![0u8; 40];
+        v6[8..24].copy_from_slice(&source.octets());
+        v6[24..40].copy_from_slice(&destination.octets());
+        let header6 = c_style_pseudo_header(&v6[8..24], &v6[24..40], 4321);
+        assert_eq!(udp_pseudo_sum(&v6, 6, 4321), Some(sum16(&header6, 0)));
+        assert_eq!(udp_pseudo_sum(&v4, 5, 10), None);
+    }
 }
 
 #[cfg(test)]

@@ -86,10 +86,10 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 222 | 326 | 0 | 0 |
 | core-state | 692 | 182 | 509 | 0 | 0 |
-| datapath-core | 400 | 200 | 200 | 0 | 0 |
+| datapath-core | 400 | 205 | 195 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **879** | **1103** | **0** | **0** |
+| **Итого** | **1982** | **884** | **1098** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 879 / P 1103 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 884 / P 1098 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -346,10 +346,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 222 | 326 | 0 | 0 |
 | core-state | 692 | 188 | 504 | 0 | 0 |
-| datapath-core | 400 | 200 | 200 | 0 | 0 |
+| datapath-core | 400 | 205 | 195 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **879** | **1103** | **0** | **0** |
+| **Итого** | **1982** | **884** | **1098** | **0** | **0** |
 
 
 ---
@@ -3903,7 +3903,7 @@ CLI-логирования, health-файла, duration, состава свод
 | `ct_flow` (static) | 3197–3221 | 25 | QUIC stall по conntrack: reply изменился → запомнить; reply<=rev_pkts, orig delta<3 → нет; PTO=max(3*quic_rtt,1с); suspect QUIC_STALL | `r2o_quic.rs:527-571 update_r2o_quic_stall` | **E*** | **Точное совпадение условий:** `reply_packets` изменился → mark; `reply <= reverse_packets` или `orig - mark.orig < 3` → нет; `pto = 3*first_response_rtt`, минимум 1 с; время от mark ≥ pto → событие. C `quic_rtt_ns` измеряется hello→first reverse, Rust `first_response_rtt`; для штатного потока эквивалентно. `r2o-quic-stun-watch-differential.sh`. |
 | `tcp_watch` (static) | 3257–3261 | 5 | TCP-stall: proto 6, saw_hello, had_sni, rev_payload_after_hello>0, не suspected/probe/pending_fin/tcp_watch_off/routed | `engine.rs:788-815 tcp_stall_candidates` | **P** | **Подтверждённое расхождение набора:** C требует `pending_fin==0` и `routed==0`; Rust `tcp_stall_candidates` их не проверяет, но добавляет `reverse_rst==0`, `guards==0`, `!stall_reported` и `direction_known`. C `tcp_watch_off` выставляется при выходе за полосу; Rust `stall_watch_off`/`stall_reported`. Таблица только TCP. |
 | `tcp_in_band` (static) | 3263–3269 | 7 | `est+3 >= b && est <= b+3` для любого бюджета | `engine.rs:880-883` | **E** | **Точное совпадение:** C `est + D2K_TCP_STALL_SLACK >= b && est <= b + SLACK` (`session.c:3263-3269`); Rust `saturating_add(3) >= budget && estimate <= budget+3` (`engine.rs:880-883`), `TCP_STALL_PACKET_SLACK=3`. Тесты `engine.rs:2341/2381/2405`. |
-| `tcp_band_top` (static) | 3271–3277 | 7 | максимум бюджетов + 3; пустой список → 3 | `engine.rs:850-855` | **P** | **Подтверждённое отличие пустого списка:** C при `n_stall_budget==0` даёт `0+3=3` (`session.c:3271-3277`); Rust `max().unwrap_or(25)+3=28`. На практике `set_stall_budgets` заменяет пустой список на `[25]`, но граничный случай различается и отдельного теста нет. Для непустого списка — совпадение. |
+| `tcp_band_top` (static) | 3271–3277 | 7 | максимум бюджетов + 3; пустой список → 3 | `engine.rs` `tcp_band_top` | E | C: `top = max(budgets)`, `return top + D2K_TCP_STALL_SLACK`; пустой список даёт 0+3. Rust `tcp_band_top(&[u16])` использует `max().unwrap_or(0) + SLACK` и вызывается из `update_tcp_stall`; тест `tcp_band_top_matches_c` (пусто, [25], [15,35], [1,2]). |
 | `ct_tcp_flow` (static) | 3279–3328 | 50 | TCP stall: ESTABLISHED, unseen = reply-rev_pkts_conn, est = fwd+rev+unseen, band top, reply change → mark, orig delta>=3, RTO=max(3*rtt,2с), band, suspect с est | `engine.rs` conntrack stall detection | **P** | **Совпадает:** ESTABLISHED-only, `unseen`, `est`, верхняя полоса, обновление mark при смене reply, `orig` delta ≥3, RTO `3*rtt` минимум 2 с, `tcp_in_band`, событие с `num=est`. **Отличия:** C `tcp_watch_off=1` при не-ESTABLISHED/выше полосы; Rust `stall_watch_off`/`stall_reported`; C `suspect_num` с деталями server_hello, Rust `R2oTcpStallEvent` с полями. Полного differential нет. |
 | `d2k_session_set_stall_budgets` | 3330–3343 | 14 | до 8 ненулевых бюджетов, пусто → полевой 25 | `engine.rs:451-460 set_tcp_stall_budgets` | **E** | Точное совпадение: `>8` или любой `0` → отказ; пустой список → `[25]`; иначе копия. Тесты `engine.rs:2431-2434` (нулевой/9/пусто/25). |
 | `d2k_session_stall_budgets` | 3345–3351 | 7 | чтение бюджетов до cap, вернуть полное число | `engine.rs:371/850` поле `tcp_stall_budgets` | **P** | C getter копирует до `cap` и возвращает `n_stall_budget`; Rust поле используется напрямую в `tcp_in_band`/`tcp_band_top`, отдельного getter с cap нет. Эквивалент для чтения. |
@@ -4597,10 +4597,10 @@ TTL, отличие «нет таблицы» от «нет записи». R2O:
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
-| `parse_ip4` (static) | 20–41 | 22 | строгий IPv4: 4 десятичных октета 0..255, ровно точки и NUL | `proc_nat.rs:145 parse_ipv4` | **P** | **Совпадает:** 4 октета, ASCII-цифры, `b>255`/пустой октет/лишние символы → отказ, ведущие нули допустимы, результат в сетевом порядке. **Отличие:** C накапливает `uint32_t` без `checked_*`; Rust `checked_mul/checked_add` (для >u32 даёт отказ). Unit-теста на отказы нет; `r2o-nat-proc-differential.sh`. |
-| `field_after` (static) | 46–63 | 18 | найти `name=` на границе слова, вернуть значение до пробела/`\n`, сдвинуть `next`; строка режется на месте | `proc_nat.rs:122 field_after`, `:113 fields` | **P** | **Совпадает:** имя на границе слова (`p==s` или предыдущий пробел), затем `=`, значение до пробела/`\n`, `next` за разделителем. **Отличие:** C `strstr` по мутируемой копии строки, Rust сначала токенизирует `key=value` по ASCII-пробелам и ищет точное имя; для строки conntrack эквивалентно, но Rust не примет `src=` внутри значения другого поля. |
+| `parse_ip4` (static) | 20–41 | 22 | строгий IPv4: 4 десятичных октета 0..255, ровно точки и NUL | `proc_nat.rs` `parse_ipv4` | E | C: ровно 4 октета, только ASCII-цифры, значение ≤255, после четвёртого — NUL; число цифр не ограничено (`0001.2.3.4` → 1.2.3.4), переполнение отвергается. Rust `parse_ipv4` повторяет все ветви (checked mul/add, ≤255), включая ведущие нули; тест `parse_ip4_and_address_match_c_nat_parser` (валидные, 256, пустой октет, лишние символы, пробел/перевод строки). |
+| `field_after` (static) | 46–63 | 18 | найти `name=` на границе слова, вернуть значение до пробела/`\n`, сдвинуть `next`; строка режется на месте | `proc_nat.rs` `field_after`/`fields` | E | C ищет имя на границе слова (начало или после пробела), требует `=`, значение до пробела/перевода строки, `*next` — продолжение поиска. Rust `fields()` делит строку только по пробелу/`\n` (табуляция остаётся в значении, как в C), `field_after(fields, from, name)` ищет точное имя и возвращает индекс+значение; тест `field_after_matches_c_word_boundary_and_continuation` (src/dst/sport/dport, отсутствие `port`, повторный src, табуляция). |
 | `d2k_nat_outside` | 67–73 | 7 | IPv4-обёртка: family=4, src/dst как 4 байта, `d2k_nat_outside_family` | `proc_nat.rs:20 lookup` с tuple family=4 | **P** | C передаёт указатели на `uint32_t` и family 4; Rust `R2oConntrackTuple.family=4`, адреса 16-байтные с нулевым хвостом. Для IPv4 эквивалентно; отдельной функции-обёртки в Rust нет. |
-| `parse_address` (static) | 75–82 | 8 | IPv4 через `parse_ip4`, IPv6 через `inet_pton`, `out[16]` занулён | `proc_nat.rs:134 parse_address` | **P** | **Совпадает:** v6 `inet_pton(AF_INET6)`, v4 `parse_ipv4`, 16-байтный выход. **Отличие:** C `inet_pton` не принимает `%zone`; Rust `Ipv6Addr::from_str` тоже. Unit-теста нет. |
+| `parse_address` (static) | 75–82 | 8 | IPv4 через `parse_ip4`, IPv6 через `inet_pton`, `out[16]` занулён | `proc_nat.rs` `parse_address` | E | C зануляет 16 байт, для family 6 использует `inet_pton(AF_INET6)`, для 4 — `parse_ip4`; иное семейство → -1. Rust `parse_address` делает то же (`Ipv6Addr::from_str` отвергает `%zone`); тест `parse_ip4_and_address_match_c_nat_parser` (v4/v6, `%eth0`, family 5). |
 | `d2k_nat_outside_family` | 84–194 | 111 | `fopen`; 1 — нет таблицы, -1 — нет записи, 0 — найдено; строки >1022 пропуск; direct/reverse tuple; best TTL (3-е число) | `proc_nat.rs:20 lookup` → `R2oProcNatLookup` | **E** | **Точное совпадение:** `fopen` fail → 1 / `TableMissing`; нет записи → -1 / `Missing`; найдено → 0 / `Found`; `fgets(1024)` + drain длинной строки ↔ `read_until` + `content_len>1022`; `strstr(tcp/udp)` ↔ `contains`; direct `src/dst/sport/dport`; reverse `dst/dport`; TTL — третье число (`third_number`); `ttl<=best_ttl` → skip; `memcmp` 4/16 и `htons` портов. Тест `proc_nat.rs:220` + `r2o-nat-proc-differential.sh`; в этом проходе не перезапускались. |
 
 ### datapath/nat.c: построчная сверка
@@ -4817,7 +4817,7 @@ flow-брони).
 | `wr16` (static) | 22-25 | 4 | big-endian u16 | `wire.rs:552-554 write_u16` | **E** | C `p[0]=(uint8_t)(v>>8); p[1]=(uint8_t)v`. Rust `to_be_bytes` в срез ровно 2 байта; golden-тесты wire. C-строка: `p[0]=(uint8_t)(v>>8); p[1]=(uint8_t)v;`; Rust `write_u16` — `to_be_bytes`. |
 | `sum16` (static) | 31-40 | 10 | RFC 1071: слова + нечётный хвост `<<8` | `wire.rs:534-543 sum16` | **E** | C обходит `i+1<n`, хвост `b[i]<<8`. Rust `chunks(2)` даёт те же значения; `u64`-аккумулятор для пакета ≤65535 не переполняется. C-строка: обход `i+1<n`, хвост `b[i]<<8`; Rust `sum16` — `chunks(2)`. |
 | `fold` (static) | 42-47 | 6 | свёртка переносов + инверсия | `wire.rs:545-550 checksum_value` | **E** | C `while(acc>>16) …`, `~(uint16_t)acc`; Rust тот же цикл и `!(acc as u16)`. Golden wire. C-строка: `while(acc>>16) …; return ~acc;`; Rust `checksum_value` — `!(acc as u16)`. |
-| `pseudo_sum` (static) | 57-65 | 9 | IPv4 UDP псевдозаголовок: src/dst, 0, proto 17, udp_len; 12 байт | `wire.rs:271-284` (inline в `build_udp_packet`), `wire.rs:516-532 pseudo_sum` | **P** | **Совпадает по значению:** C строит 12 байт (адреса сырыми, `0`, `17`, BE16 `udp_len`) и складывает. Rust для IPv4: `sum16(out[12..20]) + 17 + udp_len`; для IPv6: `sum16(out[8..40]) + (udp_len>>16) + (udp_len&0xffff) + 17`. Для IPv4 результат побитово тот же; отдельного вызова C-хелпера нет, `pseudo_sum` в `wire.rs` используется TCP-путём. |
+| `pseudo_sum` (static) | 57-65 | 9 | IPv4 UDP псевдозаголовок: src/dst, 0, proto 17, udp_len; 12 байт | `r2k-core/wire.rs` `udp_pseudo_sum` | E | C строит 12 байт (адреса сырыми, `0`, `17`, BE16 `udp_len`) и складывает; для IPv6 `d2k_wire_build_udp` суммирует 32 байта адресов + `udp_len + 17`. Rust `udp_pseudo_sum(packet, family, udp_len)` повторяет обе ветви и используется в `build_udp_packet`; тест `udp_pseudo_sum_matches_c_pseudo_header` (IPv4/IPv6 против C-заголовка, неизвестное семейство). |
 | `d2k_wire_build_udp` | 67-207 | 141 | сборка UDP: family 0/4/6, IPv6 IPID_ZERO reject, wire_profile/ipfrag reject, pre/seq_shift/TCPTS_BACK/BADSUM reject, IP-ID, TTL, длина, сумма всегда 0→0xffff | `r2k-core/src/wire.rs:213-291 build_udp_packet` | **P** | **Совпадает:** IPv4/IPv6-заголовки, UDP-порты/длина, payload, сумма всегда и `0→0xffff`, IPv6 IPID_ZERO reject, отказ `wire_profile/ipfrag/pre/seq_shift/TCPTS_BACK/BADSUM`, лимиты `len<=65535-8`, `total<=cap/65535`, IPv4 DF=0x4000, TTL `e->ttl ?: c->ttl ?: 64` ↔ `emission_ttl(emission, view.hop_limit)`, field-level IPv4 ID `c->ip_id+1` ↔ `view.ip_id+1`. **IPID_ZERO закрыт 2026-11-12:** C для IPv4 принимает `POISON_IPID_ZERO` и пишет ID=0, для IPv6 отвергает; Rust теперь так же (`wire.rs:218,246-252`), тесты `udp_ipv4_ipid_zero_sets_zero_id`, `udp_ipv6_ipid_zero_is_rejected`, `udp_badsum_and_tcpts_back_are_rejected`, `udp_ignores_md5_and_ts_up_like_d2o`. **Остаются расхождения:** (1) C ставит IPv4 TOS=0 (`:130`), Rust копирует `view.traffic_class` (`:244`); (2) C не проверяет `urgent/urgent_ptr` (игнорирует), Rust требует `urgent==false`, `urgent_ptr==0`; `prefix` C отвергает как `pre_len`, Rust — `prefix.is_empty()`; (3) C допускает `family=0` как IPv4 и берёт адреса/порты/ip_id/TOS/flow из `d2k_conn`, Rust требует `PacketView` family 4/6, `protocol==17`, `total_len==input.len()`, `udp_payload_range` и берёт поля из input. `tests/raw.rs:181` собирает пакет; эти divergence не покрывает. |
 
 ## Углублённая сверка: journal/nl/icmpguard/wire_udp
