@@ -1,8 +1,186 @@
-use r2o_controller::catalog::Catalog;
+use r2o_controller::catalog::{
+    Binding, BoxRecord, Catalog, DomainGroup, DomainObservation, DomainState, Fingerprint,
+    GroupKey, NetworkWhitelist, Plan, Signal,
+};
 use serde_json::Value;
 use std::fs;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[test]
+fn catalog_json_output_matches_c_fields() {
+    let key = GroupKey {
+        transport: 6,
+        family: 4,
+        shape: 1,
+        probe_path: "probe".into(),
+        ech_origin: "ech".into(),
+    };
+    let catalog = Catalog {
+        boxes: vec![BoxRecord {
+            id: "box-1".into(),
+            created: 1_788_000_000,
+            updated: 1_788_700_000,
+            fingerprint: Fingerprint {
+                method: 2,
+                signals: vec![
+                    Signal {
+                        kind: "rx-volume".into(),
+                        ttl: 126,
+                        ttl_delta: -3,
+                        tos: 136,
+                        ipid: 54321,
+                        volume: 16,
+                        seen: 2,
+                        packets: 45,
+                    },
+                    Signal {
+                        kind: "rx-volume-wire".into(),
+                        ttl: 64,
+                        ttl_delta: 1,
+                        tos: 0,
+                        ipid: 7,
+                        volume: 8,
+                        seen: 1,
+                        packets: 0,
+                    },
+                ],
+            },
+            plans: vec![Plan {
+                id: "plan-1".into(),
+                proto: "tls".into(),
+                text: "r2o-plan 1 1\nproto tcp tls\n".into(),
+                added: 1_788_000_001,
+                successes: 7,
+                enabled: true,
+            }],
+            bindings: vec![Binding {
+                kind: "name".into(),
+                target: "example.org".into(),
+                plan_id: "plan-1".into(),
+                level: 1,
+                confirmed: 1_788_000_002,
+                successes: 2,
+                enabled: true,
+                transport: 6,
+                family: 6,
+                shape: 11,
+                tcp_profile: 2,
+                verified_by: 1,
+                input: 1,
+                probe_path: "probe".into(),
+                ech_origin: "ech".into(),
+                recheck_since: Some(1_788_000_003),
+                budget: 5,
+                ..Binding::default()
+            }],
+            ..BoxRecord::default()
+        }],
+        domain_state: Some(DomainState {
+            groups: Vec::new(),
+            observations: vec![DomainObservation {
+                name: "www.example.org".into(),
+                plan_id: "plan-1".into(),
+                key: key.clone(),
+                evidence: 1,
+                at: 1_788_000_004,
+            }],
+            frozen: true,
+            disabled: true,
+            disabled_at: Some(1_788_000_005),
+        }),
+        network_whitelist: Some(NetworkWhitelist {
+            name: "white.example".into(),
+            searched: true,
+            tx_only: true,
+            confirmed_at: Some(1_788_000_006),
+        }),
+    };
+    let text = catalog.to_json_at(1_788_765_236).unwrap();
+    let value: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(value["schema"], 1);
+    assert!(value["updated"].as_str().unwrap().ends_with('Z'));
+    let r#box = &value["boxes"][0];
+    assert_eq!(r#box["id"], "box-1");
+    assert!(r#box["created"].as_str().unwrap().ends_with('Z'));
+    assert!(r#box["updated"].as_str().unwrap().ends_with('Z'));
+    assert_eq!(r#box["fingerprint"]["method"], 2);
+    let signals = r#box["fingerprint"]["signals"].as_array().unwrap();
+    assert_eq!(signals[0]["kind"], "rx-volume");
+    assert_eq!(signals[0]["ttl"], 126);
+    assert_eq!(signals[0]["ttl_delta"], -3);
+    assert_eq!(signals[0]["tos"], 136);
+    assert_eq!(signals[0]["ipid"], 54321);
+    assert_eq!(signals[0]["volume"], 16);
+    assert_eq!(signals[0]["seen"], 2);
+    assert_eq!(signals[0]["packets"], 45);
+    assert!(signals[1].get("packets").is_none());
+    assert_eq!(r#box["plans"][0]["id"], "plan-1");
+    assert_eq!(r#box["plans"][0]["proto"], "tls");
+    assert_eq!(r#box["plans"][0]["successes"], 7);
+    assert_eq!(r#box["plans"][0]["enabled"], true);
+    assert!(r#box["plans"][0]["added"].as_str().unwrap().ends_with('Z'));
+    assert_eq!(r#box["bindings"][0]["transport"], 6);
+    assert_eq!(r#box["bindings"][0]["family"], 6);
+    assert_eq!(r#box["bindings"][0]["shape"], 11);
+    assert_eq!(r#box["bindings"][0]["tcp_profile"], 2);
+    assert_eq!(value["network_whitelist"]["name"], "white.example");
+    assert_eq!(value["network_whitelist"]["searched"], true);
+    assert_eq!(value["network_whitelist"]["tx_only"], true);
+    assert!(
+        value["network_whitelist"]["confirmed_utc"]
+            .as_str()
+            .unwrap()
+            .ends_with('Z')
+    );
+    assert!(value["domain_groups"].is_array());
+    assert_eq!(value["domain_observations"][0]["name"], "www.example.org");
+    assert_eq!(value["domain_observations"][0]["transport"], 6);
+    assert_eq!(value["domain_groups_frozen"], true);
+    assert_eq!(value["domain_groups_disabled"], true);
+    assert!(
+        value["domain_groups_disabled_at"]
+            .as_str()
+            .unwrap()
+            .ends_with('Z')
+    );
+
+    let group = serde_json::to_value(DomainGroup {
+        suffix: "example.org".into(),
+        plan_id: "plan-1".into(),
+        key: key.clone(),
+        evidence_count: 3,
+        at: 123,
+    })
+    .unwrap();
+    assert_eq!(group["suffix"], "example.org");
+    assert_eq!(group["plan_id"], "plan-1");
+    assert_eq!(group["transport"], 6);
+    assert_eq!(group["family"], 4);
+    assert_eq!(group["shape"], 1);
+    assert_eq!(group["probe_path"], "probe");
+    assert_eq!(group["ech_origin"], "ech");
+    assert_eq!(group["evidence_count"], 3);
+    assert!(group.get("at").is_none());
+
+    let observation = serde_json::to_value(DomainObservation {
+        name: "www.example.org".into(),
+        plan_id: "plan-1".into(),
+        key,
+        evidence: 1,
+        at: 1_788_000_004,
+    })
+    .unwrap();
+    assert_eq!(observation["name"], "www.example.org");
+    assert_eq!(observation["plan_id"], "plan-1");
+    assert_eq!(observation["transport"], 6);
+    assert_eq!(observation["family"], 4);
+    assert_eq!(observation["shape"], 1);
+    assert_eq!(observation["probe_path"], "probe");
+    assert_eq!(observation["ech_origin"], "ech");
+    assert_eq!(observation["evidence"], 1);
+    assert!(observation["at"].as_str().unwrap().ends_with('Z'));
+}
 
 #[test]
 fn accepts_old_catalogs_and_null_arrays_without_inventing_measurements() {
