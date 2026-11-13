@@ -296,6 +296,26 @@ fn кодирует_адресные_планы_ipv4_ipv6_и_удаляет_то
 }
 
 #[test]
+fn addr_probe_commands_allow_zero_source_port_like_c() {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    let source = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+    let destination = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 20)), 443);
+    let trial = [0x42; 16];
+    let set = encode_set_addr_probe(source, destination, 1000, &[], trial).unwrap();
+    assert_eq!(
+        read_frame(&mut Cursor::new(set)).unwrap().kind,
+        COMMAND_SET_ADDR_PROBE
+    );
+    let delete = encode_delete_addr_probe(source, destination, trial).unwrap();
+    assert_eq!(
+        read_frame(&mut Cursor::new(delete)).unwrap().kind,
+        COMMAND_DEL_ADDR_PROBE
+    );
+    assert!(encode_set_addr_probe(source, destination, 0, &[], trial).is_err());
+}
+
+#[test]
 fn addr_commands_accept_tcp_context_shapes_like_c() {
     use std::net::{IpAddr, Ipv4Addr};
 
