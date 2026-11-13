@@ -535,4 +535,15 @@ mod dns_host_tests {
         assert!(!valid_dns_host(&[b'a'; 64]));
         assert!(!valid_dns_host(&[b'a'; 254]));
     }
+
+    #[test]
+    fn http_name_host_rejects_numeric_last_label_like_c() {
+        use super::valid_http_name_host;
+        assert!(valid_http_name_host(b"example.com"));
+        assert!(valid_http_name_host(b"a.1b"));
+        assert!(!valid_http_name_host(b"example.123"));
+        assert!(!valid_http_name_host(b"123"));
+        assert!(!valid_http_name_host(b"a..1"));
+        assert!(!valid_http_name_host(b""));
+    }
 }

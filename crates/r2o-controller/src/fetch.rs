@@ -4653,4 +4653,36 @@ mod tests {
             "мишень не ответила"
         );
     }
+
+    #[test]
+    fn external_https_redirect_matches_c() {
+        use super::r2o_fetch_external_https_redirect;
+        for status in [301, 302, 303, 307, 308] {
+            assert!(
+                r2o_fetch_external_https_redirect(status, b"https://example.com/path"),
+                "{status}"
+            );
+        }
+        assert!(!r2o_fetch_external_https_redirect(
+            200,
+            b"https://example.com/"
+        ));
+        assert!(!r2o_fetch_external_https_redirect(
+            301,
+            b"http://example.com/"
+        ));
+        assert!(!r2o_fetch_external_https_redirect(301, b"https:///"));
+        assert!(!r2o_fetch_external_https_redirect(
+            301,
+            b"https://exa_mple.com/"
+        ));
+        assert!(!r2o_fetch_external_https_redirect(
+            301,
+            b"https://example.com/\x01"
+        ));
+        assert!(r2o_fetch_external_https_redirect(
+            301,
+            b"https://example.com:8443/[::1]"
+        ));
+    }
 }

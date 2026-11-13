@@ -1170,19 +1170,40 @@ fn read_varint(input: &[u8], cursor: &mut usize) -> Option<u64> {
     Some(value)
 }
 
-fn write_varint(value: u64, output: &mut Vec<u8>) -> Result<(), QuicSplitError> {
-    if value <= 63 {
-        output.push(value as u8);
-    } else if value <= 16_383 {
-        output.extend_from_slice(&((value as u16) | 0x4000).to_be_bytes());
-    } else if value <= 1_073_741_823 {
-        output.extend_from_slice(&((value as u32) | 0x8000_0000).to_be_bytes());
-    } else if value <= 4_611_686_018_427_387_903 {
-        output.extend_from_slice(&(value | 0xc000_0000_0000_0000).to_be_bytes());
+/// C `d2k_qw_varint_write_w` (`core/quicwire.c:77-105`): ширина 0 — авто,
+/// 1/2/4/8 — принудительно; значение обязано помещаться в ширину.
+fn write_varint_w(value: u64, width: usize, output: &mut Vec<u8>) -> Result<(), QuicSplitError> {
+    let width = if width == 0 {
+        if value <= 63 {
+            1
+        } else if value <= 16_383 {
+            2
+        } else if value <= 1_073_741_823 {
+            4
+        } else if value <= 4_611_686_018_427_387_903 {
+            8
+        } else {
+            return Err(QuicSplitError::Invalid);
+        }
     } else {
-        return Err(QuicSplitError::Invalid);
+        width
+    };
+    match width {
+        1 if value <= 63 => output.push(value as u8),
+        2 if value <= 16_383 => output.extend_from_slice(&((value as u16) | 0x4000).to_be_bytes()),
+        4 if value <= 1_073_741_823 => {
+            output.extend_from_slice(&((value as u32) | 0x8000_0000).to_be_bytes())
+        }
+        8 if value <= 4_611_686_018_427_387_903 => {
+            output.extend_from_slice(&(value | 0xc000_0000_0000_0000).to_be_bytes())
+        }
+        _ => return Err(QuicSplitError::Invalid),
     }
     Ok(())
+}
+
+fn write_varint(value: u64, output: &mut Vec<u8>) -> Result<(), QuicSplitError> {
+    write_varint_w(value, 0, output)
 }
 
 fn append_crypto_frame(
@@ -1868,6 +1889,46 @@ mod tests {
             r2k_quic_arm_data_judge_limited(true, 200, 1, true, true),
             R2kQuicDataVerdict::Pass
         );
+    }
+
+    #[test]
+    fn varint_write_w_matches_c_widths() {
+        use super::{QuicSplitError, write_varint_w};
+        let mut out = Vec::new();
+        write_varint_w(63, 0, &mut out).unwrap();
+        assert_eq!(out, vec![63]);
+        out.clear();
+        write_varint_w(64, 0, &mut out).unwrap();
+        assert_eq!(out, vec![0x40, 0x40]);
+        out.clear();
+        write_varint_w(16_383, 2, &mut out).unwrap();
+        assert_eq!(out, vec![0x7f, 0xff]);
+        out.clear();
+        write_varint_w(16_384, 4, &mut out).unwrap();
+        assert_eq!(out, vec![0x80, 0x00, 0x40, 0x00]);
+        out.clear();
+        write_varint_w(1_073_741_823, 4, &mut out).unwrap();
+        assert_eq!(out, vec![0xbf, 0xff, 0xff, 0xff]);
+        out.clear();
+        write_varint_w(1_073_741_824, 8, &mut out).unwrap();
+        assert_eq!(out, vec![0xc0, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00]);
+        // Принудительная ширина: 63 в 2 байта — 0x403f.
+        out.clear();
+        write_varint_w(63, 2, &mut out).unwrap();
+        assert_eq!(out, vec![0x40, 0x3f]);
+        // Не влезает в ширину / недопустимая ширина / слишком большое.
+        assert!(matches!(
+            write_varint_w(64, 1, &mut Vec::new()),
+            Err(QuicSplitError::Invalid)
+        ));
+        assert!(matches!(
+            write_varint_w(0, 3, &mut Vec::new()),
+            Err(QuicSplitError::Invalid)
+        ));
+        assert!(matches!(
+            write_varint_w(u64::MAX, 0, &mut Vec::new()),
+            Err(QuicSplitError::Invalid)
+        ));
     }
 
     #[test]

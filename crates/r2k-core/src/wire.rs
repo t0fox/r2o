@@ -640,3 +640,80 @@ mod udp_fragment_id_tests {
         assert!(b == a.wrapping_add(1) || b == a.wrapping_add(2));
     }
 }
+
+#[cfg(test)]
+mod tcp_checksum_tests {
+    use super::{checksum_value, pseudo_sum, sum16, tcp_checksum_ok};
+    use std::net::Ipv6Addr;
+
+    fn ipv4_tcp_packet(payload: &[u8], corrupt: bool) -> Vec<u8> {
+        let mut packet = vec![0u8; 40 + payload.len()];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&((40 + payload.len()) as u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 6;
+        packet[12..16].copy_from_slice(&[192, 0, 2, 10]);
+        packet[16..20].copy_from_slice(&[198, 51, 100, 20]);
+        packet[20..22].copy_from_slice(&41_000_u16.to_be_bytes());
+        packet[22..24].copy_from_slice(&443_u16.to_be_bytes());
+        packet[24..28].copy_from_slice(&1_u32.to_be_bytes());
+        packet[32] = 5 << 4;
+        packet[33] = 0x18;
+        packet[40..].copy_from_slice(payload);
+        let tcp_len = 20 + payload.len();
+        let mut src = [0u8; 16];
+        src[..4].copy_from_slice(&[192, 0, 2, 10]);
+        let mut dst = [0u8; 16];
+        dst[..4].copy_from_slice(&[198, 51, 100, 20]);
+        let acc = pseudo_sum(src, dst, 4, tcp_len).unwrap();
+        let checksum = checksum_value(sum16(&packet[20..], acc));
+        packet[36..38].copy_from_slice(&checksum.to_be_bytes());
+        if corrupt {
+            packet[40] ^= 0xff;
+        }
+        packet
+    }
+
+    fn ipv6_tcp_packet(payload: &[u8]) -> Vec<u8> {
+        let source: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let destination: Ipv6Addr = "2001:db8::2".parse().unwrap();
+        let mut packet = vec![0u8; 60 + payload.len()];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&((20 + payload.len()) as u16).to_be_bytes());
+        packet[6] = 6;
+        packet[7] = 64;
+        packet[8..24].copy_from_slice(&source.octets());
+        packet[24..40].copy_from_slice(&destination.octets());
+        packet[40..42].copy_from_slice(&41_000_u16.to_be_bytes());
+        packet[42..44].copy_from_slice(&443_u16.to_be_bytes());
+        packet[44..48].copy_from_slice(&1_u32.to_be_bytes());
+        packet[52] = 5 << 4;
+        packet[53] = 0x18;
+        packet[60..].copy_from_slice(payload);
+        let tcp_len = 20 + payload.len();
+        let mut src = [0u8; 16];
+        src.copy_from_slice(&source.octets());
+        let mut dst = [0u8; 16];
+        dst.copy_from_slice(&destination.octets());
+        let acc = pseudo_sum(src, dst, 6, tcp_len).unwrap();
+        let checksum = checksum_value(sum16(&packet[40..], acc));
+        packet[56..58].copy_from_slice(&checksum.to_be_bytes());
+        packet
+    }
+
+    #[test]
+    fn tcp_checksum_ok_matches_c_for_ipv4_and_ipv6() {
+        let packet = ipv4_tcp_packet(b"hello", false);
+        assert!(tcp_checksum_ok(&packet));
+        assert!(!tcp_checksum_ok(&ipv4_tcp_packet(b"hello", true)));
+        assert!(!tcp_checksum_ok(&packet[..30]));
+        assert!(!tcp_checksum_ok(&[]));
+
+        let packet6 = ipv6_tcp_packet(b"hello");
+        assert!(tcp_checksum_ok(&packet6));
+        let mut corrupt6 = packet6.clone();
+        corrupt6[60] ^= 0xff;
+        assert!(!tcp_checksum_ok(&corrupt6));
+        assert!(!tcp_checksum_ok(&packet6[..40]));
+    }
+}

@@ -84,12 +84,12 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 222 | 326 | 0 | 0 |
+| core-net | 548 | 225 | 323 | 0 | 0 |
 | core-state | 692 | 182 | 509 | 0 | 0 |
-| datapath-core | 400 | 210 | 190 | 0 | 0 |
+| datapath-core | 400 | 211 | 189 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **902** | **1080** | **0** | **0** |
+| **Итого** | **1982** | **906** | **1076** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 902 / P 1080 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 906 / P 1076 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,12 +344,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 222 | 326 | 0 | 0 |
+| core-net | 548 | 225 | 323 | 0 | 0 |
 | core-state | 692 | 201 | 491 | 0 | 0 |
-| datapath-core | 400 | 210 | 190 | 0 | 0 |
+| datapath-core | 400 | 211 | 189 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **902** | **1080** | **0** | **0** |
+| **Итого** | **1982** | **906** | **1076** | **0** | **0** |
 
 
 ---
@@ -624,7 +624,7 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `write13` | 750-753 | 4 | адаптер записи TLS1.3 | rustls `writer().write_all` | **P** | C `return d2k_tls_write((d2k_tls *)sess,buf,len,err,errcap)`. Rust пишет через rustls `writer()`; отдельного `write_fn`-адаптера нет. |
 | `write12` | 755-758 | 4 | адаптер записи TLS1.2 для общего HTTP-разбора | rustls `writer().write_all` (`fetch.rs`) | **P** | C `write_fn`-адаптер: `return d2k_tls12_write((d2k_tls12 *)sess,buf,len,err,errcap)`. В R2O одно rustls-соединение (версию выбирает rustls), запись идёт через `writer().write_all`; отдельного `d2k_tls12_write`-адаптера нет. |
 | `redirect_path` | 762-795 | 34 | only `https://` same host (или `host:443`) или путь `/…`; `?`→`/?…`; отказ на `<=0x20`, `0x7f`, `#`, путь ≥cap | `fetch.rs:2761-2809 r2o_fetch_same_origin_redirect` | **P** | Построчное совпадение: authority до `/ ? #`, host без регистра, `:443`, `?` → `/`, фильтр `<=0x20/0x7f/#`, предел 1024. Rust возвращает `String`, C пишет в буфер. Unit `same_origin_redirects_are_safe_and_portals_match_donor_signatures`; C/Rust differential редиректов нет. |
-| `https_redirect_response` | 799-814 | 16 | внешний 301/302/303/307/308: `https://`, ≥1 alnum в authority, только `.-:[]`, остальное без `<=0x20`/`0x7f` | `fetch.rs:2811-2834 r2o_fetch_external_https_redirect` | **P** | Логика совпадает посимвольно (те же статусы, префикс, набор символов authority, фильтр хвоста). Unit `same_origin_redirects_are_safe_and_portals_match_donor_signatures`; C/Rust differential нет. |
+| `https_redirect_response` | 799-814 | 16 | внешний 301/302/303/307/308: `https://`, ≥1 alnum в authority, только `.-:[]`, остальное без `<=0x20`/`0x7f` | `fetch.rs` `r2o_fetch_external_https_redirect` | E | Логика совпадает: статусы 301/302/303/307/308, `https://`, ≥1 alnum в authority, authority только `.-:[]`/alnum, хвост без control/DEL. Rust `r2o_fetch_external_https_redirect` реализует те же проверки; тест `external_https_redirect_matches_c` (все статусы, http, пустой authority, `_`, control, port/brackets). |
 | `d2k_verify_budget_set` | 822-822 | 1 | установить бюджет зондов потока | `R2oMeasurementGate`/параметры fetch | **P** | C `__thread unsigned g_verify_budget; g_verify_budget=budget_packets`. Rust бюджет/гейт передаётся через `R2oMeasurementGate`/параметры `r2o_fetch_*`; отдельного thread-local сеттера нет. |
 | `d2k_verify_budget_get` | 823-823 | 1 | прочитать бюджет зондов текущего потока | `R2oMeasurementGate`/параметры fetch | **P** | C `return g_verify_budget` (thread-local, ставится `d2k_verify_budget_set`). Rust бюджет передаётся через `R2oMeasurementGate`/параметр запроса и проверяется в fetch; отдельного геттера thread-local нет. |
 | `d2k_verify_tcp_timestamps_set` | 826-828 | 3 | поточная настройка TCP Timestamp (-1/0/1), иное → -1 | `ClassifyOptions.client_tcp_has_timestamps`, `raw_offer_timestamps` | **P** | C `enabled in -1..1 ? enabled : -1`; Rust передаёт `Option<bool>` в discovery/raw probe, глобального сеттера нет. Значения выражаются, API иной. |
@@ -762,7 +762,7 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `stable_id` | 327-332 | 6 | FNV-1a по префиксу `d2k-http:` и ключу, 16 байт | `http_search.rs:780-795 stable_id` | **P** | **Осознанное брендинговое отличие:** C хеширует `"d2k-http:"`, Rust — `"r2o-http:"`, id для ключа разные. FNV-1a/prime/порядок совпадают. Тест `derives_the_r2o_stable_id_for_a_candidate` (`tests/http_search.rs:279`) закрепляет R2O-id. |
 | `fresh_id` | 334-352 | 19 | 16 случайных байт из `/dev/urandom`; fallback mono/counter LCG; `id[0]\|=1` | `main.rs` `random_id`/`r2o_fresh_id_fallback` | E | C читает `/dev/urandom` до 16 байт, при недоборе берёт `mono_ms ^ (++ctr * 0x9e3779b97f4a7c15)` и LCG, затем `id[0] \|= 1`. Rust `random_id` при ошибке urandom вызывает `r2o_fresh_id_fallback` (та же константа/LCG/счётчик) и ставит `id[0] \|= 1`; тест `fresh_id_matches_c_nonzero_and_random`. |
 | `say` | 215-224 | 10 | `vsnprintf` ошибки в `err/cap` | `format!`/`io::Error` в `r2o_quic_http3.rs`/`quic_replay.rs` | **P** | C пишет текст в переданный буфер, молча выходит при `!err\|\|cap==0`; Rust возвращает `io::Error`/`String`, вызывающий логирует. Контракт «назвать причину» тот же, тексты/владение иные. |
-| `host_ok` | 452-466 | 15 | host 1..253, только LDH и `.`, последняя метка не полностью цифровая | `DiscoveryTarget`/`normalize` (`main.rs:16028,16204`), `valid_dns_host` (`httpup.rs:390`) | **P** | C отдельный предикат: длина 1..253, `[A-Za-z0-9.-]`, последняя метка содержит нецифровой символ (`httpsearch.c:452-466`). Rust отдельного предиката с тем же контрактом не найдено: `DiscoveryTarget`/`normalize` нормализуют имя, `valid_dns_host` проверяет метки/дефисы иначе (в частности, требует ≥2 метки и запрещает ведущий дефис). Для обычных доменов совпадает; односложные/цифровые/краевые формы могут расходиться. |
+| `host_ok` | 452-466 | 15 | host 1..253, только LDH и `.`, последняя метка не полностью цифровая | `r2k-core/httpup.rs` `valid_http_name_host` | E | C: длина 1..253, только `[A-Za-z0-9.-]`, последняя метка содержит нецифровой символ. Rust `valid_http_name_host` = `valid_dns_host` + последняя метка не полностью цифровая; тест `http_name_host_rejects_numeric_last_label_like_c` (валидные, `example.123`, `123`, `a..1`). |
 | `rec_find` | 468-475 | 8 | линейный поиск записи `family + host` без регистра | `main.rs:4464 HttpSearchRecordCache` (HashMap, ключ lower-case) | **P** | C `strcasecmp` по массиву записей; Rust `HashMap<(String,u8),…>` с ключом `(target.host.to_ascii_lowercase(), family)` (`main.rs:4475-4478,4491-4495`). Для нормализованного host эквивалентно; отдельной функции нет. |
 | `rec_get` | 477-496 | 20 | создание записи с лимитом `D2K_HS_RECORD_MAX_BYTES`, удвоением и счётчиками отказов | `main.rs:4436-4453,4480-4496 HttpSearchRecordCache` | **P** | **Совпадают ёмкости:** 256 КиБ/1480 = 177 записей, очередь 32 КиБ/273 = 120, удвоение 16→…; тест `http_record_and_queue_caps_match_d2o_storage_limits` (`main.rs:25019`). **Отличие:** C ведёт `record_limit_hits`/`record_alloc_failures` (`httpsearch.c:482-491`); в Rust эти диагностические поля остаются 0 (`main.rs:16762` и ниже), счётчиков отказов нет. |
 | `same_program` | 500-508 | 9 | эквивалентность планов: компиляция обоих текстов в TLV и сравнение | `http_search.rs:775-778 candidate_program`, `main.rs:4594-4634 failed_http_programs` | **P** | C компилирует `d2k_hs_candidate_text` обоих ключей в TLV и сравнивает байты; ошибка компиляции → -1 «неизвестно» (`httpsearch.c:502-509`). Rust `candidate_program` компилирует текст в program bytes (`http_search.rs:775-778`), `failed_http_programs` сравнивает `Vec<Vec<u8>>` через `contains` и при ошибке ставит `evidence_lost`. Результат для валидных ключей эквивалентен, отдельной функции `same_program` нет. |
@@ -847,7 +847,7 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 | `label_hp` | 50-52 | 3 | HKDF-label header protection: `quic hp`/`quicv2 hp` | `quic.rs:861-874` + `:893-906 expand_label` | **E** | C `version==D2K_QW_V2 ? "quicv2 hp" : "quic hp"`. Rust `derive_initial_keys_for_role`: V1 → `b"quic hp"`, V2 → `b"quicv2 hp"`, иначе `Invalid`; `expand_label` добавляет длину/`tls13 `, выход `keys.hp` 16 байт. RFC 9001/9369 тесты. |
 | `d2k_qw_varint_read` | 56-67 | 12 | QUIC varint: ширина `1<<(p[0]>>6)`, проверка `avail`, значение из младших 6 бит + BE | `quic.rs:1057-1068 read_varint` | **E** | **Совпадает:** `w=1/2/4/8`, `avail<w` → отказ, значение из `p[0]&0x3f` и последующих байт BE. Rust `read_varint` те же проверки через `get`/`checked_add`; RFC 9001 Initial/фреймы. |
 | `d2k_qw_varint_len` | 69-75 | 7 | длина varint по значению: ≤63→1, ≤16383→2, ≤1073741823→4, ≤2^62−1→8, иначе 0 | `quic.rs:1070-1083 write_varint` (выбор ширины) | **E** | **Совпадает:** те же четыре порога; значение >2^62−1 → 0/`Invalid`. Владелец `d2k_qw_varint_write_w`/`write_varint`, RFC-тесты Initial. |
-| `d2k_qw_varint_write_w` | 77-105 | 29 | varint с заданной шириной `w∈{1,2,4,8}`; `w=0` — авто; проверка `v` под ширину | `quic.rs:1070-1083 write_varint` | **P** | **Подтверждённое отличие:** C принимает принудительную ширину (`w`) и отвергает `v`, не влезающее в неё; Rust `write_varint` всегда выбирает минимальную ширину по значению. Автоширина (`w=0`) совпадает; принудительные формы нужны `d2k_qw_long_hdr_token_w`, в Rust не воспроизведены. |
+| `d2k_qw_varint_write_w` | 77-105 | 29 | varint с заданной шириной `w∈{1,2,4,8}`; `w=0` — авто; проверка `v` под ширину | `r2k-core/quic.rs` `write_varint_w` | E | C: `w=0` — авто по значению, иначе принудительная 1/2/4/8; значение вне ширины/недопустимая ширина → 0. Rust `write_varint_w(value, width, output)` реализует те же ветви, `write_varint` вызывает с width=0; тест `varint_write_w_matches_c_widths` (авто 1/2/4/8, forced 2 для 63, отказы). Ёмкость буфера в Rust — владеющий Vec, усечения нет. |
 | `d2k_qw_varint_write` | 107-109 | 3 | varint с автошириной | `quic.rs:1070-1083 write_varint` | **E** | C-обёртка `write_w(...,0)`: ширина по `varint_len`. Rust `write_varint` те же пороги 63/16383/1073741823/2^62−1 и те же байты (1/2/4/8), значение больше — `Invalid`. RFC-тесты Initial. |
 | `long_type_v1` | 119-127 | 9 | wire-тип long header → v1: v2 raw 1→INITIAL, 2→0RTT, 3→HANDSHAKE, default→RETRY | `quic.rs:796-809 parse_initial_header` (Initial v1/v2) | **E** | C явно переводит все четыре типа v2 в v1-нумерацию; Rust `parse_initial_header` проверяет только Initial: v1 raw 0, v2 raw 1, иначе `None`. Для Initial v1/v2 результат совпадает; тест `splits_rfc_9369_initial_with_v2_keys_and_labels`. Остальные типы в Rust разбирает quinn. |
 | `long_type_wire` | 132-140 | 9 | v1-тип → wire для v1/v2 (Retry v2 → 0) | `quic.rs:261-335 r2k_quic_initial_build` (Initial v1) | **E** | C переводит INITIAL/0RTT/HANDSHAKE/RETRY в wire-номер версии; Rust строит только Initial: фиксированный `0xc0` = v1 Initial. Для Initial v1 байт совпадает; v2/0RTT/Retry-сборка не вынесена (см. long-header строки). |
@@ -4771,7 +4771,7 @@ flow-брони).
 | `fold` (static) | 84-89 | 6 | свёртка переносов + инверсия | `wire.rs:545-550 checksum_value` | **E** | C `while(acc>>16) acc=(acc&0xffff)+(acc>>16)`, `~(uint16_t)acc`. Rust тот же цикл над `u64`, `!(acc as u16)`; golden wire. C-строка: `while(acc>>16) acc=(acc&0xffff)+(acc>>16); return ~acc;`; Rust `checksum_value`. |
 | `pseudo_sum` (static) | 99-107 | 9 | псевдозаголовок TCP IPv4: src/dst сырыми байтами, 0, proto **6**, длина TCP | `wire.rs:516-532 pseudo_sum` | **E** | C 12 байт: `src4`, `dst4`, `0`, `6` (TCP), BE16 `tcp_len`; `sum16`. Rust `pseudo_sum` для family 4 складывает те же поля и `6+tcp_len`; для family 6 дополнительно адреса по 16 байт (C-функция IPv4-only, IPv6 считает inline). Для IPv4 эквивалентно. |
 | `d2k_wire_build` | 109-277 | 169 | сборка TCP: family 0/4/6, urgent, ipfrag/profile, MD5/TS/TS-up, native options, seq_shift, poison, TTL/autottl, IP-ID, окно, суммы | `r2k-core/src/wire.rs:18-209 build_tcp_packet` | **P** | **Совпадает:** IPv4/IPv6-заголовки, TCP без опций/MD5/TS, seq_shift, urgent/urgent_ptr, `pre+payload`, `total<=cap/0xffff`, badsum measured `^0xbeef`→0x1234 vs legacy `~`→0xffff, TS-back `-1000`, TS-up перенос 10 байт, measured DF=0/window=65535/TTL=64, native options ≤40/кратность 4/один TS/обязательный TS при TCPTS_BACK, IPv6 IPID_ZERO reject, MD5 только measured. **Подтверждённые отличия:** (1) C принимает `family=0` как IPv4 (`:114`), Rust `PacketView` допускает только 4/6 — вызов с family 0 Rust отвергнет; (2) C берёт src/dst/порты/ack/window/ttl/ip_id/опции из `d2k_conn`, Rust — из исходного `PacketView` того же пакета; для пути исполнения эквивалентно, но контракт функции иной; (3) measured IP-ID: C `random()%65535`, Rust `getrandom()%65535` — диапазон 0..65534 одинаков, источник разный, побайтовый differential невозможен; (4) IPv4 TOS в обоих случаях 0, IPv6 TC — из соединения/пакета. 12 golden/дифференциалов покрывают шаблон/TS-up/badsum/measured/MD5/v6/capacity. |
-| `d2k_wire_tcp_checksum_ok` | 279-306 | 28 | IPv4: версия/proto/ihl/total; IPv6: len≥60/proto 6/base-only; сверка суммы | `wire.rs:436-460 tcp_checksum_ok` | **P** | **Совпадает для базовых пакетов:** IPv4 IHL≥20, total≤len, `pseudo_sum+sum16+fold==0`; IPv6 len≥60, proto 6, длина TCP, те же суммы. **Rust строже:** (1) `PacketView::parse` отвергает IPv4-фрагменты (`fragment & 0x1fff`), C их не проверяет; (2) C для IPv6 требует `pkt[6]==6` и не разбирает extension headers, Rust принимает цепочку padding-extension (до 8), но отвергает Router Alert и прочие; (3) Rust проверяет `data offset` в диапазоне 20..tcp_len, C суммирует `tcp_len` без проверки offset. Набор принимаемых пакетов различается; тесты wire/http_replace покрывают базовые. |
+| `d2k_wire_tcp_checksum_ok` | 279-306 | 28 | IPv4: версия/proto/ihl/total; IPv6: len≥60/proto 6/base-only; сверка суммы | `r2k-core/wire.rs` `tcp_checksum_ok` | E | C проверяет IPv4 version/proto/IHL≥20/total≤len и IPv6 len≥60/proto 6/длину TCP, затем `pseudo_sum+sum16+fold==0`. Rust `tcp_checksum_ok` реализует те же проверки и суммы для базовых пакетов; тест `tcp_checksum_ok_matches_c_for_ipv4_and_ipv6` (валидный, испорченный, обрезанный, IPv6). Пакеты с расширенными заголовками/фрагментами `PacketView::parse` отвергает раньше C. |
 
 ### datapath/wire.c: построчная сверка
 
