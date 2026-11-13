@@ -84,14 +84,14 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 324 | 224 | 0 | 0 |
+| core-net | 548 | 325 | 223 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
 | datapath-core | 400 | 222 | 178 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1297** | **685** | **0** | **0** |
+| **Итого** | **1982** | **1298** | **684** | **0** | **0** |
 
-Это не оценка паритета: 685 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 684 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1297 / P 685 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1298 / P 684 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -342,12 +342,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 324 | 224 | 0 | 0 |
+| core-net | 548 | 325 | 223 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
 | datapath-core | 400 | 222 | 178 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1297** | **685** | **0** | **0** |
+| **Итого** | **1982** | **1298** | **684** | **0** | **0** |
 
 
 ---
@@ -984,7 +984,7 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 | `qp_arm_first_send` | 1500-1508 | 8 | первый send Initial через план, вернуть local_port | `quic_replay.rs:647` | **P** | C использует `d2k_udp_plan_send` для первого пакета и `getsockname`; Rust `QuicReplayProbe` шлёт снимок напрямую, local_endpoint известен из сокета. Plan-send отсутствует. |
 | `qp_now_ms` | 1510-1514 | 5 | монотонное время в мс | `std::time::Instant` (`quic_replay.rs:9,768`) | **P** | C `clock_gettime(CLOCK_MONOTONIC)`, `tv_sec*1000+tv_nsec/1e6`. Rust `Instant::now()` + `Duration`/`deadline`, миллисекунды для бюджета считаются через `Duration`; отдельной функции нет. |
 | `quic_arm_data` | 1516-1584 | 69 | этап данных по arm: connect, h3, SETTINGS/GET, judge | `quic_replay.rs:417 r2o_quic_trial_data_verdict`, `r2o_quic_http3.rs:822 measure_with_wire_len` | **P** | C создаёт `d2k_qc`, вызывает `d2k_quic_data_stage`, возвращает `d2k_quic_arm_data` с verdict/reason/app_bytes/packets/requests/oneway. Rust `r2o_quic_http3_measure_with_wire_len` + `r2o_quic_trial_data_verdict`; композиция иная, stage differential покрывает основные исходы. |
-| `d2k_quic_data_stage` | 1591-1829 | 239 | SETTINGS/control, GET stream 0, HEADERS 64 КиБ, 451, app-байты, PING-stall (RTO 3×RTT≥1с), бюджет 2× датаграмм, judge3, reason | `r2o_quic_http3.rs:822-1200 measure_with_wire_len` | **P** | **C-ветви проверены:** control `d2k_h3_control`; ошибка запроса → NOT_RUN; `malloc(D2K_VERIFY_HEADER_LIMIT)`+diag; `d2k_qstall_init(rtt, app_progress, rx_wire)`; `limit=max(4*step,4*RTO)`; повтор запроса только при `complete && status` на `sid+4`, сброс bytes/status/head_len; PING при `D2K_QSTALL_PROBE` с запоминанием PN; `451` → break; `judge3(1,status,bytes,complete,stalled,need_complete,head_full,budget)`. **R2O-отличия:** quinn/h3-клиент сам держит control stream, явной паузы 400 мс нет; бюджет/повторы через `R2oQuicHttp3Budget`/`Stall`; reason-тексты и judge3 не сверены побайтно. Stage-дифференциал `test-quic-http3-full-stage-differential.sh`. |
+| `d2k_quic_data_stage` | 1591-1829 | 239 | SETTINGS/control, GET stream 0, HEADERS 64 КиБ, 451, app-байты, PING-stall (RTO 3×RTT≥1с), бюджет 2× датаграмм, judge3, reason | `r2o_quic_http3.rs:822-1200 measure_with_wire_len` | **E*** | C/Rust differential `scripts/test-quic-http3-full-stage-differential.sh` PASS: 18/18 loopback-сценариев против C `d2k_quic_data_stage` — полный stage, without-peer-settings, partial/closed body, GOAWAY, one-way reply, silent peer, transport close, UDP unreachable/drop, zero uni credit, 16 MiB, content-length, packet budget, deadline. **Ограничение:** quinn/h3-клиент сам держит control stream, явной паузы 400 мс нет; reason/judge3 не сверены побайтно, budget-ветки иные. |
 | `quic_ask` | 1832-1839 | 8 | базовый вопрос: prefix + Initial, AEAD | `r2o_quic_raw_ask_initial` (`quic_replay.rs:894+`) | **P** | C `quic_ask_ex(addr,port,prefix,prefix_len,0,1,0,NULL,msg,wait,mark,repeats,...,qp_verify_aead,NULL,NULL,0)`. Rust `r2o_quic_raw_ask_initial`/`QuicReplayProbe` отправляет Initial и собирает pass/err/refused/sent/rtt/marked; prefix и прямой `quic_ask_core`-контракт не воспроизведены. |
 | `qp_ask_vn` | 1855-1862 | 8 | ask VN: пустой msg, repeats 3, verify VN | `quic_replay.rs:967-1009 r2o_quic_ask_donor_version_negotiation` | **P** | C вызывает `quic_ask_ex` с `qp_verify_vn`, VN-триггер строится на каждую попытку, `D2K_QUIC_REPEATS`; Rust отдельная функция: 3 свежих VN-триггера, donor-сбор ответов, `sent/pass/refused/err/marked`. Тест `r2o_quic_version_negotiation_uses_donor_parallel_answers` (`quic_replay.rs:1280`). Побайтового C/Rust differential нет. |
 | `quic_ask_ttl` | 1869-1875 | 6 | ask с prefix TTL | `quic_replay.rs:901` | **P** | C передаёт `prefix_ttl` в `quic_ask_ex` → `qp_send_one` ставит IP_TTL перед приманкой и восстанавливает; Rust `QuicReplayProbe` TTL не трогает, plan-send отсутствует. |
@@ -1101,7 +1101,7 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
   `qp_send_one`/`qp_send_fragmented` (отправка Initial/фрагментов
   контроллером заменена прямым `UdpSocket`/датапатом, raw-плана нет);
   `quic_ask_core` (асинхронный `r2o_quic_ask_donor_parallel`; refused/TTL/
-  счётчики не сверены); `d2k_quic_data_stage` (HTTP/3 stage 18/18, но
+  счётчики не сверены); `d2k_quic_data_stage` (E*, HTTP/3 stage 18/18,
   budget/reason-ветки иные); `quic_ask_*` обёртки
   (`ttl/copies/srcport/split/longer/frames/control`) — TTL-prefix,
   source-port, 2 CRYPTO-фрейма и target_len 100 не вынесены в Rust-API;
