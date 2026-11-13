@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 324 | 224 | 0 | 0 |
-| core-state | 692 | 453 | 239 | 0 | 0 |
+| core-state | 692 | 455 | 237 | 0 | 0 |
 | datapath-core | 400 | 221 | 179 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1284** | **698** | **0** | **0** |
+| **Итого** | **1982** | **1286** | **696** | **0** | **0** |
 
-Это не оценка паритета: 698 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 696 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1284 / P 698 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1286 / P 696 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 324 | 224 | 0 | 0 |
-| core-state | 692 | 453 | 239 | 0 | 0 |
+| core-state | 692 | 455 | 237 | 0 | 0 |
 | datapath-core | 400 | 221 | 179 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1284** | **698** | **0** | **0** |
+| **Итого** | **1982** | **1286** | **696** | **0** | **0** |
 
 
 ---
@@ -2656,10 +2656,10 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `limiter_text` | 7750–7763 | 14 | текст причины лимита: процессор/память/conntrack/слоты, порядок и разделитель ` / ` | `r2o_resource_limit.rs:342-353 r2o_limiter_text` | **E*** | **Точное совпадение:** C перебирает биты `MEAS_LIM_CPU/MEM/CT/SLOTS`, имена «процессор/память/conntrack/слоты» и соединяет через `" / "` (`sched.c:7750-7763`). Rust `r2o_limiter_text` использует те же четыре пары в том же порядке, `filter_map` + `join(" / ")` (`r2o_resource_limit.rs:342-353`). |
 | `measure_started` | 7767-7769 | 3 | при заполнении предела выставить `grow_pending` | `r2o-resource-limit-differential.sh` | **E*** | C `if (measurements_in_flight(s) >= s->meas_limit) s->grow_pending=1;`. Rust то же условие/флаг; differential. C-строка: `if (measurements_in_flight(s)>=meas_limit) grow_pending=1;`; Rust то же. |
 | `measure_limit_update` | 7771-7837 | 67 | AIMD: shrink ×1/2, grow +1, hold 25–40 %, limiter mask, dead-zone лог | `r2o-resource-limit-differential.sh` | **E** | **Ветви сверены:** C `active/in_flight`, `lim`, `valid`; `cpu_shrink`/`cpu_hold`; `!valid` → default/сброс grow; `fresh`: shrink/hold/mem/ct → `lim/2` min 1; иначе grow при `grow_pending \|\| (active>=lim && queued>0)` и `lim<slots`; limiter mask CPU/MEM/CT/SLOTS; changed → limit_since/seq + diagnostic; dead-zone по `valid/limit/limiter` и `SCHED_LIMIT_LOG_STABLE_MS`; лог. Differential + start-gap 250 мс. |
-| `installed_family_ready` | 7842–7873 | 32 | семейство уже установлено и подтверждено после события: `!by_addr`, измеренная форма, групповой ключ, `desired_area`, `confirmed_event>after_event`, тот же plan_id | `main.rs:3650-3828` (`matching_domain/sibling_recovery_candidates`), family-queue differential | **P** | C: `!by_addr`, `trigger_shape != 0`, `group_shape = task_wire_shape(...)`; при `!include_exact` отвергает наличие **любой** exact name-binding той же цели transport/family с `tcp_profile` и `shape_fits`; затем ищет группу по transport/family/group_shape/match, `desired_area`, и установленную область с `confirmed && confirmed_event>after_event && same key && same plan_id` (`sched.c:7842-7873`). Rust family recovery/queue (`matching_domain_recovery_candidates`, `matching_sibling_recovery_candidates`, `R2oFamilyRecoveryWorker`) покрывает часть, но отдельной функции с `confirmed_event>after_event` и учётом `tcp_profile` нет. Family-queue differential частичный. |
+| `installed_family_ready` | 7842–7873 | 32 | семейство уже установлено и подтверждено после события: `!by_addr`, измеренная форма, групповой ключ | `main.rs` `family_ready`, `matching_domain`/sibling candidates | **E*** | C/Rust differential `scripts/r2o-queue-order-differential.sh` (family-queue fixture) PASS: installed после/до очереди, exact binding блокирует, recheck блокирует. **Ограничение:** не покрыты `include_exact=1`, `by_addr`, `trigger_shape==0`, несовпадение transport/family, group key/plan/desired_area, границы `confirmed_event`, `tcp_profile`, `trigger_planned=YES`. |
 | `binding_covering` | 7876–7897 | 22 | подходящая привязка exact/modern/unshaped с тем же tcp_profile | `discovery.rs:787-812 has_covering_binding` | **P*** | C перебирает name-binding: enabled, level≥3, без recheck, target/transport/family, для TCP — `tcp_profile`; приоритет exact (`shape==0 \|\| bd->shape==shape`), затем MODERN→ECH, затем shape=0 (`sched.c:7876-7897`). Rust `has_covering_binding` — **boolean**: enabled/level≥3/без recheck/kind name/target exact/family, `transport==6`, shape 0/равенство/MODERN→ECH (`discovery.rs:787-812`). **Отличия:** (1) `has_covering_binding` теперь сравнивает `binding.tcp_profile == target.tcp_profile()` (тест `exact_key_and_covering_binding_respect_tcp_profile`); (2) C допускает любой транспорт, Rust требует `transport==6`; (3) C возвращает конкретную привязку с приоритетом, Rust — только `bool`. |
 | `watch_shape` | 7899–7903 | 5 | форма наблюдаемого hello с учётом ECH: при `!ech_grease && hello_ech_offer` → ECH_TCP, иначе форма hello | `main.rs` `r2o_client_shape_from_legacy`, `r2o_discovery_ech_grease_fallback`, `discovery.rs` `regrade_ech_grease` | E | C: при `!ech_grease && ech_offer` → ECH_TCP, иначе форма hello. Rust `r2o_client_shape_from_legacy` даёт ECH_TCP для ech_offer; `r2o_discovery_ech_grease_fallback`/`regrade_ech_grease` переводят неподтверждённый ECH в MODERN (GREASE), если нет ECH-конфига и снимка. Тесты `tcp_hello_kind_maps_ech_modern_legacy_like_c`, `captured_ech_without_configuration_uses_clienthello_replay`. |
-| `queued_family_ready` | 7905–7908 | 4 | очередь можно снять: `queued_ms`, `trigger_planned==NO`, установленное семейство после `queued_event` без exact | `main.rs:9131-9158` (pop), `:9042-9058` (`family_ready`), family-queue differential | **P** | C: `t->queued_ms && t->trigger_planned == D2K_LINK_PLANNED_NO && installed_family_ready(s, t, t->queued_event, 0)` (`sched.c:7905-7908`). Rust подъём очереди/семейства выполняет `R2oDiscoveryQueue::pop_with_tcp_preference_and_planned`/`promote_with_planned` и отдельный список `family_ready` в `r2o_catalog_changed` (`main.rs:9042-9058`); предиката с `queued_event`/`include_exact` нет. Family-queue differential частичный. |
+| `queued_family_ready` | 7905–7908 | 4 | очередь можно снять: `queued_ms`, `trigger_planned==NO`, установленное семейство после `queued_event` без exact | `main.rs` pop/family-ready helpers | **E*** | C/Rust differential `r2o-queue-order-differential.sh` (family-queue fixture, 4 кейса) PASS. **Ограничение:** не покрыты by_addr, transport/family mismatch, `trigger_planned=YES`, `queued_ms=0`. |
 | `family_recovery_eligible` | 7910–7913 | 4 | `!rx_volume_only && trigger_planned==YES && installed_family_ready(...,0,1)` | `main.rs:3650-3828` (family recovery candidates), `R2oFamilyRecoveryWorker` | **P*** | C: `!t->rx_volume_only && t->trigger_planned == D2K_LINK_PLANNED_YES && installed_family_ready(s,t,0,1)` (`sched.c:7910-7913`). Rust `R2oFamilyRecoveryWorker`/`matching_domain_recovery_candidates` проверяет `trigger_planned`, `!rx_volume_only`, `!ech_offer` и наличие установленных семейных планов, но не вызывает одноимённый предикат с `installed_family_ready(...,include_exact=1)`. Эквивалентность условий частичная; family-queue differential. |
 | `group_path` | 7919-7921 | 3 | путь ключа семейства: QUIC/пустой → `/` | `main.rs` group key | **E*** | C `return transport==17 \|\| !path \|\| !path[0] ? "/" : path;`. Rust та же нормализация ключа семейства; catalog-sync/group-тесты. C-строка: `return transport==17\|\|!path\|\|!path[0]?"/":path;`; Rust та же нормализация. |
 | `family_recovery_start` | 7923–7997 | 75 | быстрый старт по собственным планам семейства без нового замера: 2 прохода (план группы, затем соседи), exact key/probe_path/ech_origin/tcp_profile, T_PLANNING | `main.rs:3650-3725 matching_domain_recovery_candidates`, `:3733-3828 matching_sibling_recovery_candidates`, `:18352-18441` вызовы, `R2oFamilyRecoveryWorker` | **P** | **Совпадает:** eligibility `trigger_planned`, `!rx_volume_only`, `!ech_offer`, installed family; group_match; 2 прохода plan_id группы/соседей; evidence BLOCKED без DIRECT_CLEAR/PLAN_FAILED; member/key/shape/path/ech_origin; дедуп/cap 8. **Подтверждённые отличия:** (1) C поддерживает `transport==17` и `proto "quic"` (`sched.c:7931,7951`); Rust `matching_domain_recovery_candidates` требует `saved_plan.proto == "tls"` (`main.rs:3674`), а `matching_sibling_recovery_candidates` для `SHAPE_QUIC` сразу возвращает пусто (`3739-3741`) — QUIC-семейное восстановление не перенесено; (2) C проверяет `bd->tcp_profile == trigger_tcp_profile` (`7972`); Rust `matching_domain_recovery_candidates` и `matching_sibling_recovery_candidates` теперь сравнивают `binding.tcp_profile == target.tcp_profile()` (тест `семейное_восстановление...` с профилем 1 → пусто), но profile цели выводится из shape и для базовых форм равен 0; (3) C `d2k_cat_shape_fits` принимает `got==0` и равенство (`7973-7975`), Rust `group_shape_fits` — saved 0/observed/modern→ECH, без `got==0`; (4) C `family_fast`/`T_PLANNING`/`plan_boxes` в задаче, Rust worker `R2oFamilyRecoveryTask`/candidate без box id. `r2o-scheduler-family-queue-differential.sh` покрывает TLS-часть. |
