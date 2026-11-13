@@ -50,13 +50,17 @@ const R2O_DUMP_ROUNDS: usize = 4096;
 const R2O_DUMP_BUFFER: usize = 32768;
 
 /// C `d2k_routemark_status`: итог merge/refresh по семействам.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct R2oRouteRefreshStatus {
     pub v4_ok: bool,
     pub v6_ok: bool,
     pub found: usize,
     pub truncated: bool,
     pub changed: bool,
+    /// Первый текст ошибки, как C `d2k_routemark_load`.
+    pub first_error: Option<String>,
+    /// Все четыре части (правила/маршруты v4/v6) упали.
+    pub all_failed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -482,37 +486,54 @@ impl R2oRouteMonitor {
 
     /// C `d2k_routemark_load/merge`: ошибки плюс `found/truncated/changed`
     /// и независимые `v4_ok/v6_ok`.
+    ///
+    /// `found` считает правила ДО усечения (как C `found += n4/n6`), а
+    /// `truncated` — `found > 32`.
     pub fn r2o_refresh_with_status(
         &mut self,
         gate: &mut R2oRouteGate,
     ) -> (Vec<String>, R2oRouteRefreshStatus) {
+        let previous4 = gate.r2o_rule_count(R2oRouteFamily::Ipv4);
+        let previous6 = gate.r2o_rule_count(R2oRouteFamily::Ipv6);
         let mut errors = Vec::new();
-        let mut status = R2oRouteRefreshStatus::default();
-        for family in [R2oRouteFamily::Ipv4, R2oRouteFamily::Ipv6] {
-            match self.r2o_dump_rules(family) {
-                Ok((rules, truncated)) => {
-                    status.found = status.found.saturating_add(rules.len());
-                    status.truncated |= truncated;
-                    status.changed |= gate.r2o_set_rules(family, rules);
-                    match family {
-                        R2oRouteFamily::Ipv4 => status.v4_ok = true,
-                        R2oRouteFamily::Ipv6 => status.v6_ok = true,
-                    }
-                }
-                Err(error) => {
-                    // C merge сохраняет прежние селекторы упавшего семейства.
-                    status.found = status.found.saturating_add(gate.r2o_rule_count(family));
-                    errors.push(format!("правила {family:?}: {error}"));
-                }
+        let mut changed = false;
+        let mut v4_ok = false;
+        let mut found4 = 0;
+        match self.r2o_dump_rules(R2oRouteFamily::Ipv4) {
+            Ok((rules, found)) => {
+                v4_ok = true;
+                found4 = found;
+                changed |= gate.r2o_set_rules(R2oRouteFamily::Ipv4, rules);
             }
+            Err(error) => errors.push(format!("правила Ipv4: {error}")),
+        }
+        let mut v6_ok = false;
+        let mut found6 = 0;
+        match self.r2o_dump_rules(R2oRouteFamily::Ipv6) {
+            Ok((rules, found)) => {
+                v6_ok = true;
+                found6 = found;
+                changed |= gate.r2o_set_rules(R2oRouteFamily::Ipv6, rules);
+            }
+            Err(error) => errors.push(format!("правила Ipv6: {error}")),
+        }
+        let status =
+            r2o_route_merge_status(previous4, previous6, v4_ok, found4, v6_ok, found6, changed);
+        let mut lookup4_ok = false;
+        let mut lookup6_ok = false;
+        for family in [R2oRouteFamily::Ipv4, R2oRouteFamily::Ipv6] {
+            let mut lookup_ok = false;
             match self.r2o_lookup_default(family) {
                 Ok(R2oRouteLookup::Unicast(ifindices)) if ifindices.is_empty() => {
+                    lookup_ok = true;
                     gate.r2o_set_default_ifindices(family, None);
                 }
                 Ok(R2oRouteLookup::Unicast(ifindices)) => {
+                    lookup_ok = true;
                     gate.r2o_set_default_ifindices(family, Some(ifindices));
                 }
                 Ok(R2oRouteLookup::NoRoute) => {
+                    lookup_ok = true;
                     gate.r2o_set_default_ifindices(family, Some(Vec::new()));
                 }
                 Ok(R2oRouteLookup::Pending) => errors.push(format!(
@@ -520,16 +541,23 @@ impl R2oRouteMonitor {
                 )),
                 Err(error) => errors.push(format!("маршрут {family:?}: {error}")),
             }
+            match family {
+                R2oRouteFamily::Ipv4 => lookup4_ok = lookup_ok,
+                R2oRouteFamily::Ipv6 => lookup6_ok = lookup_ok,
+            }
         }
+        let mut status = status;
+        status.first_error = errors.first().cloned();
+        status.all_failed = r2o_route_all_failed(v4_ok, v6_ok, lookup4_ok, lookup6_ok);
         (errors, status)
     }
 
     fn r2o_dump_rules(
         &mut self,
         family: R2oRouteFamily,
-    ) -> std::io::Result<(Vec<R2oFwSelector>, bool)> {
+    ) -> std::io::Result<(Vec<R2oFwSelector>, usize)> {
         let mut selectors = Vec::new();
-        let mut truncated = false;
+        let mut found = 0_usize;
         let sequence = self.r2o_next_sequence();
         let request = r2o_route_rule_request(family, sequence);
         self.r2o_receive_request(request, R2O_DUMP_BUFFER, R2O_DUMP_ROUNDS, |bytes| {
@@ -540,14 +568,19 @@ impl R2oRouteMonitor {
                 // семейства, а не только для IPv6.
                 Err(R2oRouteParseError::Kernel(code)) if r2o_rules_error_is_empty_success(code) => {
                     selectors.clear();
+                    found = 0;
                     return Ok(true);
                 }
                 Err(error) => return Err(r2o_parse_io_error(error)),
             };
+            // C `merge.found` считает правила до усечения.
+            found = found.saturating_add(batch.selectors.len());
+            let mut truncated = false;
             r2o_extend_rule_selectors(&mut selectors, batch.selectors, &mut truncated);
+            let _ = truncated;
             Ok(batch.done)
         })?;
-        Ok((selectors, truncated))
+        Ok((selectors, found))
     }
 
     fn r2o_lookup_default(&mut self, family: R2oRouteFamily) -> std::io::Result<R2oRouteLookup> {
@@ -843,6 +876,39 @@ fn r2o_rules_error_is_empty_success(code: i32) -> bool {
     matches!(code, -97 | -95)
 }
 
+/// C `d2k_routemark_merge`: `found` считает новые правила для успешных
+/// семейств и прежние — для упавших; `truncated` — превышение 32.
+fn r2o_route_merge_status(
+    previous4: usize,
+    previous6: usize,
+    v4_ok: bool,
+    found4: usize,
+    v6_ok: bool,
+    found6: usize,
+    changed: bool,
+) -> R2oRouteRefreshStatus {
+    let found = if v4_ok { found4 } else { previous4 } + if v6_ok { found6 } else { previous6 };
+    R2oRouteRefreshStatus {
+        v4_ok,
+        v6_ok,
+        found,
+        truncated: found > R2O_ROUTE_RULE_CAPACITY,
+        changed,
+        first_error: None,
+        all_failed: false,
+    }
+}
+
+/// C `d2k_routemark_load`: -1, если упали все четыре части.
+fn r2o_route_all_failed(
+    rules4_ok: bool,
+    rules6_ok: bool,
+    lookup4_ok: bool,
+    lookup6_ok: bool,
+) -> bool {
+    !(rules4_ok || rules6_ok || lookup4_ok || lookup6_ok)
+}
+
 fn r2o_extend_rule_selectors(
     selectors: &mut Vec<R2oFwSelector>,
     batch: Vec<R2oFwSelector>,
@@ -875,7 +941,9 @@ pub fn r2o_route_parse_rules(bytes: &[u8]) -> Result<R2oRouteRuleBatch, R2oRoute
         let family = match message.body[0] {
             2 => R2oRouteFamily::Ipv4,
             10 => R2oRouteFamily::Ipv6,
-            _ => continue,
+            // C `routemark_parse` принимает любой family и кладёт его в
+            // селектор; merge относит всё, кроме 10, к IPv4-набору.
+            _ => R2oRouteFamily::Ipv4,
         };
         let flags = u32::from_ne_bytes(
             message.body[8..12]
@@ -1279,6 +1347,45 @@ mod tests {
         assert_eq!(batch.selectors[0].mark, 0x1200);
         assert_eq!(batch.selectors[0].mask, 0xff00);
         assert_eq!(batch.selectors[1].mask, u32::MAX);
+    }
+
+    #[test]
+    fn r2o_статус_merge_считает_found_до_усечения_как_c() {
+        let status = r2o_route_merge_status(2, 1, true, 33, true, 0, true);
+        assert_eq!(status.found, 33);
+        assert!(status.truncated);
+        assert!(status.v4_ok && status.v6_ok && status.changed);
+
+        let status = r2o_route_merge_status(2, 1, false, 0, true, 2, true);
+        assert_eq!(status.found, 4);
+        assert!(!status.v4_ok && status.v6_ok);
+        assert!(!status.truncated);
+
+        let status = r2o_route_merge_status(1, 1, false, 0, false, 0, false);
+        assert_eq!(status.found, 2);
+        assert!(!status.truncated && !status.changed);
+    }
+
+    #[test]
+    fn r2o_route_all_failed_matches_c() {
+        assert!(r2o_route_all_failed(false, false, false, false));
+        assert!(!r2o_route_all_failed(true, false, false, false));
+        assert!(!r2o_route_all_failed(false, true, false, false));
+        assert!(!r2o_route_all_failed(false, false, true, false));
+        assert!(!r2o_route_all_failed(false, false, false, true));
+    }
+
+    #[test]
+    fn r2o_разбор_правил_принимает_неизвестный_family_как_c() {
+        let mut body = vec![0; R2O_FIB_RULE_HEADER_LEN];
+        body[0] = 0;
+        r2o_test_attr(&mut body, R2O_FRA_FWMARK, &0x33_u32.to_ne_bytes());
+        let mut messages = r2o_test_message(R2O_RTM_NEWRULE, &body);
+        messages.extend(r2o_test_message(R2O_NLMSG_DONE, &[]));
+        let batch = r2o_route_parse_rules(&messages).unwrap();
+        assert_eq!(batch.selectors.len(), 1);
+        assert_eq!(batch.selectors[0].family, R2oRouteFamily::Ipv4);
+        assert_eq!(batch.selectors[0].mark, 0x33);
     }
 
     #[test]
