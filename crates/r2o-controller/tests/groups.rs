@@ -15,7 +15,7 @@ fn catalog_restore_derives_groups_and_never_trusts_saved_group_cache() {
     ]
     .join(",");
     let input = format!(
-        r#"{{"boxes":[],"domain_groups":[{{"suffix":"evil.example","plan_id":"forged"}}],"domain_observations":[{rows}]}}"#
+        r#"{{"boxes":[{{"plans":[{{"id":"plan-a","proto":"tls","text":"r2o-plan 1 1\nproto tcp tls\n","enabled":true}}]}}],"domain_groups":[{{"suffix":"evil.example","plan_id":"forged"}}],"domain_observations":[{rows}]}}"#
     );
     let catalog = Catalog::parse(input.as_bytes()).unwrap();
     let state = catalog.domain_state.unwrap();
@@ -59,7 +59,9 @@ fn restores_exclusions_failures_and_learned_evidence_masks() {
         observation_json("clean.googlevideo.com", 18, "", "2025-01-01T00:00:04Z"),
     ]
     .join(",");
-    let input = format!(r#"{{"boxes":[],"domain_observations":[{rows}]}}"#);
+    let input = format!(
+        r#"{{"boxes":[{{"plans":[{{"id":"plan-a","proto":"tls","text":"r2o-plan 1 1\nproto tcp tls\n","enabled":true}}]}}],"domain_observations":[{rows}]}}"#
+    );
     let state = Catalog::parse(input.as_bytes())
         .unwrap()
         .domain_state

@@ -144,6 +144,9 @@ pub(crate) fn learn(
     if slot.is_none() {
         slot = any.or(replace);
     }
+    // C применяет проверки `at<old->at`/INCONCLUSIVE только к найденному
+    // существующему слоту, но не к новой вставке/реклайму.
+    let replacing_existing = slot.is_some();
 
     if slot.is_none() {
         if state.frozen || state.observations.len() == MAX_OBSERVATIONS {
@@ -158,7 +161,9 @@ pub(crate) fn learn(
                 let mut index = 0;
                 while index < state.observations.len() {
                     let old = &state.observations[index];
-                    if old.evidence & BLOCKED != 0 && old.at <= disabled_at {
+                    // C `d2k_group_learn`: при disabled удаляются только
+                    // точные BLOCKED (не маски с DIRECT_CLEAR/PLAN_FAILED).
+                    if old.evidence == BLOCKED && old.at <= disabled_at {
                         state.observations.swap_remove(index);
                     } else {
                         index += 1;
@@ -221,7 +226,7 @@ pub(crate) fn learn(
     }
     if let Some(index) = slot {
         let old = &mut state.observations[index];
-        if observation.at < old.at || observation.evidence == INCONCLUSIVE {
+        if replacing_existing && (observation.at < old.at || observation.evidence == INCONCLUSIVE) {
             return Ok(false);
         }
         if observation.evidence == DIRECT_CLEAR && old.evidence & ADMITTED_EXCEPTION != 0 {
@@ -264,7 +269,9 @@ pub(crate) fn learn(
             }
         }
     }
-    rebuild(state);
+    if observation.evidence != INCONCLUSIVE {
+        rebuild(state);
+    }
     Ok(true)
 }
 
@@ -628,6 +635,251 @@ mod tests {
             observations,
             ..DomainState::default()
         }
+    }
+
+    fn trace_key() -> GroupKey {
+        GroupKey {
+            transport: 6,
+            family: 4,
+            shape: 1,
+            probe_path: String::new(),
+            ech_origin: String::new(),
+        }
+    }
+
+    fn trace_obs(name: &str, plan: &str, evidence: u8, at: i64) -> DomainObservation {
+        DomainObservation {
+            name: name.into(),
+            plan_id: plan.into(),
+            key: trace_key(),
+            evidence,
+            at,
+        }
+    }
+
+    fn trace_state(tag: &str, rc: i32, state: &DomainState) -> String {
+        let mut out = format!(
+            "scenario {tag} rc={rc} n_obs={} n_groups={} frozen={} disabled={} disabled_at={}\n",
+            state.observations.len(),
+            state.groups.len(),
+            u8::from(state.frozen),
+            u8::from(state.disabled),
+            state.disabled_at.unwrap_or_default()
+        );
+        for (index, observation) in state.observations.iter().enumerate() {
+            out.push_str(&format!(
+                "obs {index} name={} plan={} t={} f={} s={} path={} origin={} ev={} at={}\n",
+                observation.name,
+                observation.plan_id,
+                observation.key.transport,
+                observation.key.family,
+                observation.key.shape,
+                observation.key.probe_path,
+                observation.key.ech_origin,
+                observation.evidence,
+                observation.at
+            ));
+        }
+        for (index, group) in state.groups.iter().enumerate() {
+            out.push_str(&format!(
+                "group {index} suffix={} plan={} t={} f={} s={} path={} origin={} count={} at={}\n",
+                group.suffix,
+                group.plan_id,
+                group.key.transport,
+                group.key.family,
+                group.key.shape,
+                group.key.probe_path,
+                group.key.ech_origin,
+                group.evidence_count,
+                group.at
+            ));
+        }
+        out
+    }
+
+    fn trace_learn(state: &mut DomainState, observation: DomainObservation) -> i32 {
+        match learn(state, observation) {
+            Ok(true) => 1,
+            Ok(false) => 0,
+            Err(_) => -1,
+        }
+    }
+
+    /// C/Rust differential-трасса `d2k_group_learn`/`d2k_group_restore`.
+    /// Скрипт `scripts/test-groups-differential.sh` сравнивает файл с C-оракулом.
+    #[test]
+    fn groups_learn_restore_trace_matches_c() {
+        let mut out = String::new();
+
+        // A: общие ветви learn (evidence 1/2/4/8, без расширений R2O).
+        let mut state = DomainState::default();
+        out.push_str(&trace_state("A0", 0, &state));
+        let steps: [(&str, &str, &str, u8, i64); 14] = [
+            ("A1", "a.example.org", "p1", BLOCKED, 10),
+            ("A2", "b.example.org", "p1", BLOCKED, 20),
+            ("A3", "c.example.org", "p1", BLOCKED, 30),
+            ("A4", "c.example.org", "p1", BLOCKED, 25),
+            ("A5", "c.example.org", "p1", BLOCKED, 40),
+            ("A6", "d.example.org", "p2", BLOCKED, 50),
+            ("A7", "b.example.org", "p1", PLAN_FAILED, 60),
+            ("A8", "e.example.org", "p1", BLOCKED, 70),
+            ("A9", "f.example.org", "p1", BLOCKED, 80),
+            ("A10", "c.example.org", "p1", DIRECT_CLEAR, 90),
+            ("A11", "e.example.org", "p1", DIRECT_CLEAR, 100),
+            ("A12", "f.example.org", "p1", INCONCLUSIVE, 110),
+            ("A13", "g.example.org", "p1", INCONCLUSIVE, 120),
+            ("A14", "g.example.org", "p1", INCONCLUSIVE, 130),
+        ];
+        for (tag, name, plan, evidence, at) in steps {
+            let rc = trace_learn(&mut state, trace_obs(name, plan, evidence, at));
+            out.push_str(&trace_state(tag, rc, &state));
+        }
+        let mut invalid = trace_obs("h.example.org", "p1", BLOCKED, 140);
+        invalid.key.family = 5;
+        let rc = trace_learn(&mut state, invalid);
+        out.push_str(&trace_state("A15", rc, &state));
+        let rc = trace_learn(
+            &mut state,
+            trace_obs("d.example.org", "p3", DIRECT_CLEAR, 150),
+        );
+        out.push_str(&trace_state("A16", rc, &state));
+
+        // B: предел наблюдений и frozen.
+        let mut state = DomainState::default();
+        out.push_str(&trace_state("B0", 0, &state));
+        for index in 0..MAX_OBSERVATIONS {
+            let name = format!("h{index}.example.org");
+            if trace_learn(
+                &mut state,
+                trace_obs(&name, "p1", BLOCKED, 1000 + index as i64),
+            ) != 1
+            {
+                out.push_str(&format!("B-fill-fail {index}\n"));
+                break;
+            }
+        }
+        out.push_str(&trace_state("B1", 0, &state));
+        let rc = trace_learn(
+            &mut state,
+            trace_obs("overflow.example.org", "p1", BLOCKED, 2000),
+        );
+        out.push_str(&trace_state("B2", rc, &state));
+        let rc = trace_learn(
+            &mut state,
+            trace_obs("overflow2.example.org", "p1", BLOCKED, 2001),
+        );
+        out.push_str(&trace_state("B3", rc, &state));
+
+        // C: предел групп (64) включает frozen.
+        let mut state = DomainState::default();
+        for domain in 0..MAX_GROUPS {
+            for member in 0..3 {
+                let name = format!("m{member}.example{domain}.org");
+                let _ = trace_learn(
+                    &mut state,
+                    trace_obs(&name, "p1", BLOCKED, 1000 + domain as i64 * 10 + member),
+                );
+            }
+        }
+        out.push_str(&trace_state("C1", 0, &state));
+        let rc = trace_learn(
+            &mut state,
+            trace_obs("m0.example64.org", "p1", BLOCKED, 2000),
+        );
+        out.push_str(&trace_state("C2", rc, &state));
+        let rc = trace_learn(
+            &mut state,
+            trace_obs("m1.example64.org", "p1", BLOCKED, 2001),
+        );
+        out.push_str(&trace_state("C3", rc, &state));
+
+        // D: disabled + frozen, повторное включение после удаления BLOCKED.
+        let mut state = DomainState::default();
+        for index in 0..MAX_OBSERVATIONS - 1 {
+            state.observations.push(trace_obs(
+                &format!("b{index}.example.org"),
+                "p1",
+                BLOCKED,
+                10,
+            ));
+        }
+        state
+            .observations
+            .push(trace_obs("p.example.org", "p1", PLAN_FAILED, 20));
+        state.frozen = true;
+        state.disabled = true;
+        state.disabled_at = Some(20);
+        out.push_str(&trace_state("D0", 0, &state));
+        let rc = trace_learn(
+            &mut state,
+            trace_obs("q.example.org", "p1", PLAN_FAILED, 30),
+        );
+        out.push_str(&trace_state("D1", rc, &state));
+
+        // E: restore и его отказы.
+        let mut state = DomainState::default();
+        for observation in [
+            trace_obs("a.example.org", "p1", INCONCLUSIVE | PLAN_FAILED, 10),
+            trace_obs("b.example.org", "p1", BLOCKED | PLAN_FAILED, 20),
+            trace_obs("c.example.org", "p1", BLOCKED | DIRECT_CLEAR, 30),
+            trace_obs("d.example.org", "p1", DIRECT_CLEAR | PLAN_FAILED, 40),
+            trace_obs("e.example.org", "p1", BLOCKED, 50),
+            trace_obs("f.example.org", "p1", DIRECT_CLEAR, 60),
+            trace_obs("g.example.org", "p1", INCONCLUSIVE, 70),
+        ] {
+            state.observations.push(observation);
+        }
+        let rc = i32::from(restore(&mut state).is_err()).wrapping_neg();
+        out.push_str(&trace_state("E1", rc, &state));
+
+        let mut state = DomainState::default();
+        state
+            .observations
+            .push(trace_obs("a.example.org", "p1", ADMITTED_EXCEPTION, 10));
+        let rc = i32::from(restore(&mut state).is_err()).wrapping_neg();
+        out.push_str(&trace_state("E2", rc, &state));
+
+        let mut state = DomainState::default();
+        state
+            .observations
+            .push(trace_obs("a.example.org", "p1", BLOCKED, 10));
+        state
+            .observations
+            .push(trace_obs("a.example.org", "p1", DIRECT_CLEAR, 20));
+        let rc = i32::from(restore(&mut state).is_err()).wrapping_neg();
+        out.push_str(&trace_state("E3", rc, &state));
+
+        let mut state = DomainState::default();
+        state
+            .observations
+            .push(trace_obs("a.example.org", "p1", BLOCKED, 10));
+        state.disabled_at = Some(-1);
+        let rc = i32::from(restore(&mut state).is_err()).wrapping_neg();
+        out.push_str(&trace_state("E4", rc, &state));
+
+        let mut state = DomainState::default();
+        state
+            .observations
+            .push(trace_obs("a.example.org", "p1", BLOCKED, -1));
+        let rc = i32::from(restore(&mut state).is_err()).wrapping_neg();
+        out.push_str(&trace_state("E5", rc, &state));
+
+        let mut state = DomainState::default();
+        state
+            .observations
+            .push(trace_obs("a.example.not-a-real-tld", "p1", BLOCKED, 10));
+        let rc = i32::from(restore(&mut state).is_err()).wrapping_neg();
+        out.push_str(&trace_state("E6", rc, &state));
+
+        if let Ok(path) = std::env::var("R2O_GROUPS_DIFF_OUTPUT") {
+            std::fs::write(path, &out).unwrap();
+        }
+        assert!(
+            out.contains("scenario A3 rc=1 n_obs=3 n_groups=1"),
+            "A3: {out}"
+        );
+        assert!(out.contains("scenario E2 rc=-1"), "E2: {out}");
+        assert_eq!(state.observations.len(), 1);
     }
 
     #[test]
