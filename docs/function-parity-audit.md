@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 320 | 228 | 0 | 0 |
-| core-state | 692 | 436 | 256 | 0 | 0 |
+| core-state | 692 | 437 | 255 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1261** | **721** | **0** | **0** |
+| **Итого** | **1982** | **1262** | **720** | **0** | **0** |
 
-Это не оценка паритета: 721 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 720 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1261 / P 721 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1262 / P 720 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 320 | 228 | 0 | 0 |
-| core-state | 692 | 436 | 256 | 0 | 0 |
+| core-state | 692 | 437 | 255 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1261** | **721** | **0** | **0** |
+| **Итого** | **1982** | **1262** | **720** | **0** | **0** |
 
 
 ---
@@ -2718,7 +2718,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `pause_note` | 74-80 | 7 | текст «без пауз» / «с паузой N мкс» | `String` reason | **P*** | C `gap_us==0` → «замерено без пауз между кусками», иначе «замерено с паузой %u мкс между кусками». Rust `String` без обрезки; текст/границы не сравнивались. |
 | `stop_requested` | 92-94 | 3 | запрошена ли остановка | `classify.rs` `stopped(options)` | E | C `stop && *stop`. Rust `stopped` проверяет atomic-флаг отмены (`options.cancel`); флаг взводится тем же путём, что C `task_stop` для sched-прогона; CLI передаёт `None`/ложный, как C `stop=NULL`. Используется в 5 точках дерева classify. |
 | `classify_cancelled` | 96–102 | 7 | INCONCLUSIVE, reason про снимок клиента, `marked=(mark!=0)&&all_marked` | `classify.rs` `R2O_CLASSIFY_CANCELLED_REASON`, `finish_cancelled` | **E*** | C ставит `INCONCLUSIVE`, причину «профильный замер отменён: пришёл снимок приветствия клиента» и `marked`. Rust `finish_cancelled` ставит тот же вердикт и дословную причину (`R2O_CLASSIFY_CANCELLED_REASON`), тест `classify_cancelled_reason_matches_c`. **Ограничение:** поле `marked` в `ClassifyResult` не заведено — у него нет потребителя в R2O (C `d2k_vres.marked` не читается sched/`print_json`). |
-| `d2k_classify_cancelable` | 104–334 | 231 | дерево: guard len<2 → FLAKY; база; `err==repeats` → UNREACHABLE; частичный pass → FLAKY; полный → confirm 2 → CLEAR/INCONCLUSIVE; иначе разрез 1 → PREFIX/FLAKY/контроль → OPAQUE/INCONCLUSIVE; метка по AND | `run_with_backend_progress` (`classify.rs:1298`) + `measure`/`finish` | **P** | **Совпадает:** guard len<2 → Flaky (текст иной), база, `errors==repeats` → Unreachable, частичный pass → Flaky, confirm 2 → Clear/Inconclusive, разрез 1 → Flaky, AND-метка. **Подтверждённые отличия/расширения R2O:** (1) CLI `--classify` ставит `full_detect_semantics=true, confirm_clear=false` (`main.rs:1177-1178`) — удвоенное подтверждение CLEAR пропускается, добавлен dial-timeout-retry и разделение timeout→Flaky/иное→Unreachable; (2) при CLEAR с SNI Rust делает `probe_response` и может вернуть `Response`, C только текстовую оговорку; (3) после успешного разреза 1 C сразу даёт `PREFIX` split=1, Rust измеряет long-gap, последний байт и бинарный поиск → `WholePacket`/`Prefix` с boundary; (4) при прошедшем контроле C даёт `OPAQUE`/`INCONCLUSIVE`, Rust сначала делает raw-sweep (`Poisonable`) и `neutral_ack` (`Address`); (5) `one.error` оставляет default `Flaky` с другим текстом, C даёт FLAKY с «N из M не состоялись». Полного C/Rust differential дерева нет. |
+| `d2k_classify_cancelable` | 104–334 | 231 | дерево base→confirm→split1→control, CLEAR_CONFIRM_REPEATS=2, UNREACHABLE/FLAKY/CLEAR/PREFIX/OPAQUE/INCONCLUSIVE и AND-метка | `classify.rs` `run_with_backend_progress` | **E*** | C/Rust differential `scripts/test-classifier-clear-confirm-differential.sh` на пине `a378e230` PASS: clear/base/control repeats, mark, unproven-ответы и отмена совпадают по вердикту/причине. Плюс unit-тесты classify. **Ограничение:** differential не покрывает split1/long-gap/binary-search (`PREFIX`/`WHOLE`), raw-sweep (`Poisonable`) и `neutral_ack` (`Address`); CLI `--classify` включает `full_detect_semantics` без удвоенного CLEAR и с `probe_response`. |
 | `d2k_classify` | 336-342 | 7 | обёртка `d2k_classify_cancelable(...,NULL)` | `classify.rs:1298 run`/`run_with_backend` | **P** | C-обёртка без отмены. Rust `run` → `run_with_backend(TcpProbeBackend)`; C-путь production заменён discovery-путём, отдельного differential этой обёртки нет. |
 
 ### `core/x25519.c`
