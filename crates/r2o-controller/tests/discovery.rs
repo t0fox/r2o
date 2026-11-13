@@ -248,7 +248,9 @@ fn measured_plan_accepts_and_persists_context_shape() {
 fn invalid_discovery_endpoint_does_not_mutate_the_catalog() {
     let mut target =
         DiscoveryTarget::from_event(&hello(Some("example.com"), 4, Some(SHAPE_MODERN))).unwrap();
-    target.endpoint = "198.51.100.2:8443".into();
+    // C `bind_confirmed` принимает нестандартный порт, но не нулевой и не
+    // чужое семейство; порт 8443 проверяется отдельным тестом.
+    target.endpoint = "198.51.100.2:0".into();
     let mut catalog = Catalog::default();
 
     assert!(add_measured_binding(&mut catalog, &target, PLAN_TEXT, 1_800_000_000).is_err());
