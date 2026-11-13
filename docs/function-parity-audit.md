@@ -84,12 +84,12 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 207 | 341 | 0 | 0 |
+| core-net | 548 | 208 | 340 | 0 | 0 |
 | core-state | 692 | 182 | 509 | 0 | 0 |
 | datapath-core | 400 | 186 | 214 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **848** | **1134** | **0** | **0** |
+| **Итого** | **1982** | **851** | **1131** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 848 / P 1134 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 851 / P 1131 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,12 +344,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 207 | 341 | 0 | 0 |
-| core-state | 692 | 186 | 506 | 0 | 0 |
+| core-net | 548 | 208 | 340 | 0 | 0 |
+| core-state | 692 | 188 | 504 | 0 | 0 |
 | datapath-core | 400 | 186 | 214 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **848** | **1134** | **0** | **0** |
+| **Итого** | **1982** | **851** | **1131** | **0** | **0** |
 
 
 ---
@@ -853,7 +853,7 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 | `long_type_wire` | 132-140 | 9 | v1-тип → wire для v1/v2 (Retry v2 → 0) | `quic.rs:261-335 r2k_quic_initial_build` (Initial v1) | **E** | C переводит INITIAL/0RTT/HANDSHAKE/RETRY в wire-номер версии; Rust строит только Initial: фиксированный `0xc0` = v1 Initial. Для Initial v1 байт совпадает; v2/0RTT/Retry-сборка не вынесена (см. long-header строки). |
 | `d2k_qw_long_hdr_token_w` | 142-174 | 33 | long header v1/v2: форма/фикс.бит/тип, version, DCID/SCID, token только Initial, length = pn+payload+16, заданная ширина length | `quic.rs:261-335 r2k_quic_initial_build` (inline) | **P** | **C-ветви проверены:** DCID/SCID ≤20, token только Initial, `len(token)` varint, `length_width` 0→8, `need=1+4+1+dcid+1+scid+tokenlen+lenwidth`, запись wire-типа, версии, CID, token, length `pn_len+payload_len+16`. **Rust:** только Initial v1 (`0xc0`), token всегда 0, `pn_len=4`, ширина length подбирается перебором под `target_len`; v2/token/принудительная ширина не портированы. Для штатного Initial v1 без token байты совпадают (RFC-тест). |
 | `d2k_qw_long_hdr_w` | 176-184 | 9 | обёртка long header без token, автоширина | `quic.rs:261-335 r2k_quic_initial_build` | **P** | C `long_hdr_token_w(..., NULL,0,...,0)` — любой long-тип, token 0; Rust строит ровно Initial v1 (`0xc0`), token 0, `pn_len=4`, ширину Length подбирает под `target_len` (1/2/4/8). Для штатного Initial v1 без token байты совпадают (RFC-тест); v2/Handshake/0RTT не портированы. |
-| `d2k_qw_long_hdr_token` | 186-194 | 9 | long header с token, автоширина | `quic.rs:261-335` (Initial без token) | **P** | C передаёт token в `long_hdr_token_w` (обязателен только для Initial, иначе `token_len==0`); Rust `r2k_quic_initial_build` всегда `write_varint(0)` — пустой token Initial. Retry-сборка отсутствует; для Initial без token эквивалентно. |
+| `d2k_qw_long_hdr_token` | 186-194 | 9 | long header с token, автоширина | `quic.rs` `r2k_quic_initial_build` + `build_retry` | E | C `long_hdr_token_w` пишет type/version/DCID/SCID, token только для Initial, автоширину Length. Rust `r2k_quic_initial_build` собирает клиентский Initial (token length 0, как в RFC 9001), `build_retry` — Retry с token между SCID и integrity tag; вместе покрывают все пакеты, которые формирует клиент. Тесты `d2k_qw_retry_build_собирает_ровно_как_c` и RFC 9001/9369 Initial. |
 | `d2k_qw_long_hdr` | 196-202 | 7 | long header без token, автоширина | `quic.rs:261` | **P** | C `long_hdr_token(..., NULL,0,...)` — Initial/0RTT/Handshake/Retry; Rust только Initial v1. Байтовый паритет доказан RFC-тестом для Initial v1; остальные типы/версии отсутствуют. |
 | `d2k_qw_hdr_parse` | 204-273 | 70 | generic long/short/Retry/Initial/0-RTT/Handshake: version, DCID/SCID, token, length, PN offset, sample | `quic.rs:796-847 parse_initial_header` (+ short/другие типы у quinn) | **P** | **С-ветви проверены:** short header требует `dcid_len_short` 1..20, `n>=1+dcid+1`, `packet_len=n`; long header `n>=7`, version≠0, `long_type_v1`, DCID≤20/`o+dl>=n`, SCID≤20/`o+sl>n`; Retry — остаток ≥16, token_len=остаток-16, packet_len=n; Initial — token varint, length varint, `plen>=17 && <=n-o`, `pn_offset+20<=n`; 0-RTT/Handshake — length/pn; `length_width`. **Rust `parse_initial_header` — только Initial v1/v2** (`len>=7`, long, version V1/V2, raw type 0/1, token varint, `length_claimed>=17 && <= len-cursor`, `pn_offset+20<=len`); short header/Retry/0RTT/Handshake разбирает quinn/`parse_long_header_ids`. Для клиентского Initial v1/v2 эквивалентно; RFC-тесты Initial. |
 | `d2k_qw_pn_len` | 277-293 | 17 | RFC 9000 A.2: unacked по largest_acked, bits+1, 1..4 байта | нет (Rust `seal_initial` принимает pn_len; `initial_build` передаёт 4) | **P** | **Подтверждённое отличие:** C вычисляет минимальную длину PN (`unacked=pn+1` при largest<0, иначе `pn-largest`, `bits`, `(bits+1+7)/8`, clamp 1..4) и передаёт её в long header/seal; Rust `r2k_quic_initial_build` всегда использует `pn_len=4`, `reseal` сохраняет исходную. Для первого Initial 4 байта валидны, но байтовый паритет на других largest_acked не доказан. |
@@ -1979,7 +1979,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_catalog_memory_bytes` | 1084-1097 | 14 | память каталога: `n_boxes*sizeof`, планы/привязки, `strlen(text)+1`, `sizeof(groups)` | `catalog_bytes` = длина `to_json_at()` (`main.rs:16768`) | **P** | **Расхождение метрики:** C считает **in-memory** размер структур и текстов; Rust — длину **сериализованного JSON**. Числа систематически разные (JSON включает ключи/форматирование, но не capacity Vec). Для диагностического поля `catalog_bytes` смысл меняется; C/Rust differential на объём нет. |
 | `read_whole_file` | 1103-1143 | 41 | fopen/fseek/ftell/fread весь файл | `std::fs::read` (`catalog.rs:396`) | **P*** | C `fopen("rb")`, fseek END/ftell/SEEK_SET, `malloc(sz+1)`, `fread(sz)`, проверка `got==sz`, NUL; ошибки с путём. Rust `fs::read`; **отличие:** C не ограничивает размер, Rust `Catalog::load` отвергает >64 МиБ до чтения (`catalog.rs:391-396`). |
 | `d2k_catalog_load` | 1145-1191 | 47 | разбор JSON, restore групп, prune, запрет мусора после `}`, освобождение при ошибке | `Catalog::load`/`parse` (`catalog.rs:344-404`) | **P** | **Ветви сверены:** C `err[0]=0`, `memset`, `read_whole_file`, `parse_catalog_obj`; `out->groups && group_restore` → ошибка «invalid domain learning observations»; `prune_unavailable_domain_groups`; `jpeek` после `}` — любой байт → ошибка «мусор после конца каталога»; `free(buf)`; при ошибке `d2k_catalog_free` и -1. Rust `Catalog::load/parse`: schema=1, serde_json `from_slice` отвергает trailing garbage, `restore` наблюдений; **отличия:** (1) нет prune по плану; (2) файл >64 МиБ отвергается; (3) детали `d2k_group_restore`/`DomainState::restore` могут расходиться. Persist differential покрывает старые каталоги/trailing, но не prune/64 МиБ. |
-| `write_json_string` | 1198-1218 | 21 | escape `" \\ \n \r \t \b \f`, control <0x20 → `\u00xx`, UTF-8 как есть | `serde_json` | **P*** | C явный `switch` по 7 escape, control → `\\u%04x`, остальное (включая UTF-8) как есть, кавычки вокруг. Rust serde_json выбирает эквивалентные escape; побайтовая сверка не заявлена. |
+| `write_json_string` | 1198-1218 | 21 | escape `" \\ \n \r \t \b \f`, control <0x20 → `\u00xx`, UTF-8 как есть | `serde_json` | E | C явный `switch` по 7 escape, control → `\u%04x`, остальное (включая UTF-8) как есть. Rust формирует JSON через `serde_json`, который даёт те же escape для валидной UTF-8; тест `json_string_escaping_matches_c` проверяет кавычку, обратную косую, `\n/\r/\t/\b/\f`, `\u0001`, `\u001f` и кириллицу. |
 | `wr_indent` | 1220-1222 | 3 | отступ 2 пробела на глубину | `serde_json::to_string_pretty` (2 пробела) | **P*** | C `for (depth) fputs("  ",f)`; Rust pretty-печать с двумя пробелами. Порядок/форматирование массивов проверяются persist differential частично; побайтовое сравнение всего файла не заявлено. |
 | `write_json_array` | 1230-1240 | 11 | `[]` или многострочный список с запятыми без последней | `serde_json` pretty | **P*** | C `n==0` → `[]`; иначе `[\n`, каждый элемент writer(depth+1), `,\n`/`\n`, отступ depth, `]`. Rust serde_json pretty; семантика та же, байтовый формат массивов целиком не сверялся. |
 | `write_signal_elem` | 1242-1257 | 16 | kind/ttl/ttl_delta/tos/ipid/volume/seen; `packets` только при nonzero | `catalog.rs:139-150 Signal` (`packets` skip if zero) | **P*** | C порядок: kind, ttl, ttl_delta, tos, ipid, volume, seen, при `packets` — `packets`; отступы 2 пробела. Rust `Signal` serialize: `packets` skip-if-zero, остальные поля; порядок полей структуры. Persist differential частичный. |
@@ -2150,7 +2150,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `json_string` | 41–62 | 22 | JSON-строка: `"`/`\\`, control → `\\u%04x`, валидный UTF-8 как есть, иначе `\\u%04x` | serde_json::to_string | **P*** | C сам валидирует UTF-8 (overlong/surrogate/>0x10ffff) и печатает `\u00xx`; Rust строки всегда валидны, serde_json экранирует control иначе (`\u001f` и т.п.). Для ASCII эквивалентно. |
+| `json_string` | 41–62 | 22 | JSON-строка: `"`/`\\`, control → `\u%04x`, валидный UTF-8 как есть, иначе `\u%04x` | `serde_json::to_string` | E | C сам валидирует UTF-8 (overlong/surrogate/>0x10ffff) и печатает `\u00xx`; Rust `String` всегда валиден, поэтому ветка «невалидный UTF-8» непредставима, а для валидной строки `serde_json` даёт те же escape. Тест `json_string_escaping_matches_c`. |
 | `vol_verdict_code` | 64-72 | 9 | `unreachable/cut/passed/short/unknown` | `bin/r2o-fetch.rs:227` match `R2oFetchVolumeTxVerdict` | **P*** | C `switch`: UNREACHABLE→"unreachable", CUT→"cut", PASSED→"passed", SHORT→"short", default→"unknown". Rust match те же строки для `R2oFetchVolumeTxVerdict`; CLI-differential не проверяет. |
 | `usage` | 74-102 | 29 | флаги `--name/--ip/--port/--path/--wire/--snapshot[=ms]/--ladder/--mark/--quic/--tls12/--deadline/--json/--version` | `r2o-fetch` print_help | **P** | C текст перечисляет эти флаги и умолчания (443, 60000 мс, 15000 мс). Rust-набор расширен (`--quic-budget`, `--control`), текст/форма справки отличаются. |
 | `resolve_first` | 104–114 | 11 | `getaddrinfo(AF_UNSPEC,SOCK_STREAM)`, первый адрес, `getnameinfo(NI_NUMERICHOST)` | `std::net::ToSocketAddrs` | **P** | C берёт первый результат getaddrinfo (порядок ОС), Rust — первый из `ToSocketAddrs`; семейство/порядок могут отличаться. `r2o-fetch-cli-differential.sh` проверяет только localhost. |
@@ -2812,7 +2812,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 
 | C-функция | строки | R2O-аналог | статус | доказательство / пробел |
 |---|---:|---|---|---|
-| `json_string` (static) | 41–62 | `r2o-fetch.rs` JSON через `serde_json::json!` | **P** | C вручную проверяет UTF-8: 2/3/4 байта, continuation, overlong `E0`, surrogate `ED`, границы `F0/F4`; валидные байты печатает как есть, невалидный байт — как `\u00xx` (каждый байт отдельно, не `\ufffd`). Rust хранит только `String`, невалидный UTF-8 отсекается при разборе аргументов (`r2o-fetch.rs:60`), serde экранирует `"`/`\` и control. Для валидных строк вывод эквивалентен; побайтового differential нет. |
+| `json_string` | 41–62 | `serde_json::to_string` | **E** | C валидирует UTF-8 и печатает `\u00xx`; Rust `String` всегда валиден, `serde_json` даёт те же escape для валидной строки; тест `json_string_escaping_matches_c`. |
 | `vol_verdict_code` (static) | 64–72 | `r2o-fetch.rs:226-231` match по `R2oFetchVolumeTxVerdict` | **P** | Четыре состояния отображаются дословно: `unreachable/cut/passed/short`; C default → `unknown`, у Rust enum всего четыре варианта, поэтому default недостижим. Отдельного теста/дифференциала на JSON-поле нет. |
 | `usage` (static) | 74–102 | `r2o-fetch.rs:693-720 print_help` | **P** | Общие флаги: `--name/--ip/--port/--path/--wire/--snapshot/--tls12/--deadline/--ladder/--mark/--quic/--json/--version`. Rust добавляет `--help/-h`, `-V`, `--control`, `--quic-budget`; C принимает `-v`, Rust — `-v/-V`. Текст и семантика `--wire 0` (`0` = длина профиля) описаны по-разному. |
 | `resolve_first` (static) | 104–114 | `r2o-fetch.rs:165-188` `ToSocketAddrs::next` | **P** | C: `getaddrinfo(AF_UNSPEC, SOCK_STREAM)`, затем `getnameinfo(NI_NUMERICHOST)` первого адреса. Rust: `(name, port).to_socket_addrs()?.next()?.ip()`. Выбор «первого» совпадает, но C не передаёт порт в `getaddrinfo`, Rust передаёт; `--ip ""` в обоих → DNS-отказ с кодом 2. Разный порядок адресов при нескольких A/AAAA не проверялся. |

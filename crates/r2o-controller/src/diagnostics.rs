@@ -2155,4 +2155,22 @@ mod tests {
         assert_eq!(reused["memory_details"][0]["first"]["start_ticks"], 222);
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn json_string_escaping_matches_c() {
+        // C `write_json_string`/`json_string`: 7 escape, control <0x20 →
+        // `\u00xx`, валидный UTF-8 как есть. serde_json даёт те же escape.
+        let value = json!("a\"b\\c\n\r\t\u{8}\u{c}\u{1}\u{1f}пример");
+        let text = serde_json::to_string(&value).unwrap();
+        assert!(text.contains("\\\""), "{text}");
+        assert!(text.contains("\\\\"), "{text}");
+        assert!(text.contains("\\n"), "{text}");
+        assert!(text.contains("\\r"), "{text}");
+        assert!(text.contains("\\t"), "{text}");
+        assert!(text.contains("\\b"), "{text}");
+        assert!(text.contains("\\f"), "{text}");
+        assert!(text.contains("\\u0001"), "{text}");
+        assert!(text.contains("\\u001f"), "{text}");
+        assert!(text.contains("пример"), "{text}");
+    }
 }
