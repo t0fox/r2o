@@ -512,6 +512,7 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
         let source_port = bound.local_port;
         let command = encode_set_name_family(
             &options.sni,
+            6,
             shape,
             family,
             source_port,

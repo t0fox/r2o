@@ -89,7 +89,7 @@ recheck 1982 1982 equal True
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **937** | **1045** | **0** | **0** |
+| **Итого** | **1982** | **938** | **1044** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -345,11 +345,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 226 | 322 | 0 | 0 |
-| core-state | 692 | 223 | 469 | 0 | 0 |
+| core-state | 692 | 224 | 468 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **937** | **1045** | **0** | **0** |
+| **Итого** | **1982** | **938** | **1044** | **0** | **0** |
 
 
 ---
@@ -2261,7 +2261,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_link_next` | 223-522 | 300 | декодирование событий: PROTO/HELLO/SUSPECT/EXCHANGE/APPLIED/REFUSED/ACK/SHAPE/HTTP_*; границы/длины/`execution` | `r2k-core/src/control.rs` decode, `tests/control.rs` | **E** | **Ветви C сверены:** `out==NULL`/`fd<0` → -1; `wait_readable` (0 — таймаут → 1); заголовок 6 байт; `plen` 2..`D2K_CTL_FRAME_MAX`; тело `plen-2`, короче `KEY_LEN` → -1; family 4/6; IPv4 старшие 12 байт адресов нулевые; HELLO (name_len+name), SUSPECT (code + опционально ttl/ref_ttl/tos/ipid/planned/client_shape/num), STATS (dropped/sent опционально), EXCHANGE (code/seen_types/num + server_hello/planned), CLIENT_TCP (опции ≤40), SHAPE (≤буфера), ACK (code/ok-reason + trial + binding для SET_NAME_BOUND), APPLIED (plan/trial + execution 0/36), PROTO (release_id 1..64 + версия/send_maxlen), REFUSED (code + plan/trial + client_shape + execution). Rust декодирует те же события в `control.rs`; `d2o_control_differential.c` + `tests/control.rs` сверяют границы/типы/`execution`. |
 | `d2k_link_set_name` | 524–527 | 4 | SET_NAME без пробного порта: `set_name_probe(..., sport=0)` → `send_name_plan` (cmd SET_NAME) | `control.rs` `encode_set_name` | E | C-обёртка передаёт `sport=0`, `family=4` в `set_name_family`; кадр — SET_NAME с телом name_len+name+shape+family+план. Rust `encode_set_name(name, shape, 4, plan_records)` формирует тот же кадр; тест `link_wrappers_emit_c_family4_frames` сверяет cmd/body/план байт-в-байт. |
 | `d2k_link_set_name_probe` | 531–536 | 6 | SET_NAME_PROBE с local port (family=4): `set_name_family(..., sport_be)` | `control.rs` `encode_set_name_probe` | E | C передаёт `sport_be` и family=4, команда выбирается по ненулевому порту; тело name_len+name+shape+family+sport BE+план+16-байтный trial. Rust `encode_set_name_probe(..., family=4, source_port≠0, ..., trial_id)` даёт тот же кадр; тест `link_wrappers_emit_c_family4_frames` проверяет sport/план/trial и нулевой trial для постоянной пробы. |
-| `send_name_plan` | 538–630 | 93 | family 4/6, fd, name 1..255, transport 6/17, hex even, plan cap; frame: len/name/shape/family/[sport]/plan/[trial или area_id] | `control::encode_set_name*` | **P** | **Подтверждённое расхождение:** C **не проверяет `shape` вовсе** и кодирует любой байт (`link.c:591`); Rust `encode_set_name` отвергает форму вне `{1,2,3,4,5,6,7} ∪ {8..13}`. C также не проверяет совместимость плана с формой/транспортом; Rust `valid_name_probe_plan_records`/`valid_domain_plan_records` проверяют transport/proto. Для валидных команд кадры совпадают (tests/control.rs); C/Rust differential кодирования нет. |
+| `send_name_plan` | 538–630 | 93 | family 4/6, fd, name 1..255, transport 6/17, hex even, plan cap; frame: len/name/shape/family/[sport]/plan/[trial или area_id] | `control::encode_set_name*` | E | C `send_name_plan`: family 4/6, name non-null 1..255, transport 6/17, чётный hex, план ≤ остатка кадра, shape пишется любым байтом, совместимость плана не проверяется; fd — у вызывающего. Rust `encode_set_name`/`encode_set_name_probe` проверяют name 1..255, family 4/6, source_port≠0 (probe) и больше не ограничивают shape/план; `encode_set_name_family` проверяет transport 6/17. Hex-декодирование делает контроллер при компиляции плана, предел кадра — `encode_frame` (FRAME_MAX). Тесты `send_name_plan_writes_any_shape_and_unchecked_plan_like_c`, `tcp_probe_encoder_accepts_any_shape_and_foreign_plan_like_c`, `set_name_family_selects_command_by_source_port_like_c`. |
 | `d2k_link_set_name_family` | 632–637 | 6 | выбрать SET_NAME_PROBE при `sport_be != 0`, иначе SET_NAME; family 4/6 | `control.rs` `encode_set_name_family` | E | C выбирает команду по `sport_be`; shape/план не проверяет (это `send_name_plan`). Rust `encode_set_name_family(name, shape, family, source_port, plan, trial)` выбирает `encode_set_name` при sport=0 и `encode_set_name_probe` иначе; используется в ask-пути. Тест `set_name_family_selects_command_by_source_port_like_c` (SET_NAME без trial, SET_NAME_PROBE с портом и trial). Различия проверок shape/плана относятся к `send_name_plan` (P). |
 | `d2k_link_set_name_bound` | 639–643 | 5 | SET_NAME_BOUND с identity: только `token != NULL`, затем `send_name_plan` | `r2k-core/control.rs` `encode_set_name_bound` | E | C проверяет только наличие token (в Rust массив всегда присутствует), затем шлёт SET_NAME_BOUND с sport=0 и 16-байтным token; shape/family/plan не ограничивает сверх `send_name_plan`. Rust `encode_set_name_bound` собирает то же тело name_len+name+shape+family+план+16 байт без проверок shape/trial; тесты `bound_set_name_accepts_any_shape_and_zero_trial_like_c`, `bound_set_name_round_trips_command_and_ack_identity`. |
 | `d2k_link_del_name_bound` | 645–657 | 13 | условное удаление name binding: имя/transport/known/kind NAME/!temporary | `control.rs:1882-1907 encode_delete_name_bound` | **E*** | **Ветви C:** `fd<0 \|\| !name \|\| !*name \|\| strlen>255 \|\| (transport!=6 && transport!=17) \|\| !d2k_binding_known(binding) \|\| binding->kind!=D2K_BIND_NAME \|\| binding->temporary` → -1; тело `name_len+name+transport+binding(28)` (`link.c:645-657`). **Rust:** name 1..255, transport 6/17, `binding.is_known()`, `kind==1`, `!temporary`, тело `name_len+name+transport+28` (`control.rs:1882-1907`). Построчно совпадает; unit `encodes_a_bounded_exact_name_binding_delete`, C/Rust differential нет. |

@@ -16,7 +16,7 @@ use r2k_core::control::{
     decode_r2o_voice_proof, decode_r2o_voice_suspect, decode_set_tcp_stall_budgets,
     encode_ack_for_trial, encode_delete_addr, encode_delete_addr_probe, encode_delete_name,
     encode_delete_name_probe, encode_set_addr, encode_set_addr_probe, encode_set_https,
-    encode_set_name_family, encode_set_name_probe, encode_set_tcp_stall_budgets,
+    encode_set_name, encode_set_name_family, encode_set_name_probe, encode_set_tcp_stall_budgets,
     encode_set_voice_addr, encode_set_voice_addr_probe, r2o_binding_equal, read_frame,
 };
 use std::io::Cursor;
@@ -712,19 +712,48 @@ fn set_name_family_selects_command_by_source_port_like_c() {
     let plan = r2o_tls_plan_records();
     let trial = [0x5a; 16];
     let permanent = read_frame(&mut Cursor::new(
-        encode_set_name_family("example.test", SHAPE_MODERN, 4, 0, &plan, trial).unwrap(),
+        encode_set_name_family("example.test", 6, SHAPE_MODERN, 4, 0, &plan, trial).unwrap(),
     ))
     .unwrap();
     assert_eq!(permanent.kind, COMMAND_SET_NAME);
     assert!(!permanent.body.ends_with(&trial));
 
     let probe = read_frame(&mut Cursor::new(
-        encode_set_name_family("example.test", SHAPE_MODERN, 4, 40123, &plan, trial).unwrap(),
+        encode_set_name_family("example.test", 6, SHAPE_MODERN, 4, 40123, &plan, trial).unwrap(),
     ))
     .unwrap();
     assert_eq!(probe.kind, COMMAND_SET_NAME_PROBE);
     assert_eq!(&probe.body[probe.body.len() - 16..], &trial);
     assert_eq!(&probe.body[15..17], &40123_u16.to_be_bytes());
+
+    // C `send_name_plan` принимает только transport 6/17.
+    assert!(encode_set_name_family("example.test", 17, SHAPE_QUIC, 4, 0, &plan, trial).is_ok());
+    assert!(encode_set_name_family("example.test", 5, SHAPE_MODERN, 4, 0, &plan, trial).is_err());
+}
+
+#[test]
+fn send_name_plan_writes_any_shape_and_unchecked_plan_like_c() {
+    // C `send_name_plan` (`link.c:584-607`) пишет shape как есть и не
+    // разбирает план: принимает любой байт формы и произвольные байты плана.
+    let frame = read_frame(&mut Cursor::new(
+        encode_set_name("example.test", 0xee, 4, &[0xff, 0x00, 0x7f]).unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(frame.kind, COMMAND_SET_NAME);
+    assert_eq!(frame.body[13], 0xee);
+    assert_eq!(&frame.body[15..], &[0xff, 0x00, 0x7f]);
+
+    // Пустое имя, имя длиннее 255 и family вне 4/6 — отказ, как в C.
+    assert!(encode_set_name("", SHAPE_MODERN, 4, &[]).is_err());
+    assert!(encode_set_name(&"a".repeat(256), SHAPE_MODERN, 4, &[]).is_err());
+    assert!(encode_set_name("example.test", SHAPE_MODERN, 5, &[]).is_err());
+
+    // Пустой план соответствует `plan_text == NULL` в C.
+    let empty = read_frame(&mut Cursor::new(
+        encode_set_name("example.test", SHAPE_MODERN, 6, &[]).unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(empty.body.len(), 15);
 }
 
 #[test]
@@ -750,18 +779,16 @@ fn encodes_http_probe_command_and_round_trips_its_correlated_ack() {
 }
 
 #[test]
-fn tcp_probe_encoder_accepts_tls_shapes_and_rejects_incompatible_plans() {
+fn tcp_probe_encoder_accepts_any_shape_and_foreign_plan_like_c() {
     let plan = r2o_tls_plan_records();
-    for shape in [SHAPE_MODERN, SHAPE_ECH_TCP] {
+    for shape in [SHAPE_MODERN, SHAPE_ECH_TCP, SHAPE_QUIC, SHAPE_HTTP, 0, 99] {
         assert!(encode_set_name_probe("example.test", shape, 4, 40123, &plan, [0x31; 16]).is_ok());
     }
-    assert!(
-        encode_set_name_probe("example.test", SHAPE_QUIC, 4, 40123, &plan, [0x31; 16]).is_err()
-    );
 
     let mut http_plan = plan;
     http_plan[6..8].copy_from_slice(&11_u16.to_be_bytes());
     *http_plan.last_mut().unwrap() = r2k_core::plan::PROTO_HTTP;
+    // C `send_name_plan` не сверяет план с формой/транспортом.
     assert!(
         encode_set_name_probe(
             "example.test",
@@ -771,7 +798,7 @@ fn tcp_probe_encoder_accepts_tls_shapes_and_rejects_incompatible_plans() {
             &http_plan,
             [0x31; 16]
         )
-        .is_err()
+        .is_ok()
     );
 }
 

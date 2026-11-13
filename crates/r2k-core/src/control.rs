@@ -1,4 +1,4 @@
-use crate::plan::{PROTO_HTTP, PROTO_VOICE, Plan};
+use crate::plan::{PROTO_VOICE, Plan};
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr};
@@ -1372,19 +1372,8 @@ pub fn encode_set_name(
     if !matches!(family, 4 | 6) {
         return Err("семейство должно быть 4 или 6");
     }
-    if !matches!(
-        shape,
-        SHAPE_MODERN
-            | SHAPE_LEGACY
-            | SHAPE_QUIC
-            | SHAPE_GRANDFATHER
-            | SHAPE_VOICE
-            | SHAPE_ECH_TCP
-            | SHAPE_HTTP
-    ) && !is_tcp_context_shape(shape)
-    {
-        return Err("форма приветствия не поддерживается");
-    }
+    // C `send_name_plan` не проверяет shape вовсе и пишет любой байт
+    // (`link.c:591`); совместимость формы и плана решает датапат.
     let mut body = Vec::with_capacity(3 + name.len() + plan_records.len());
     body.push(name.len() as u8);
     body.extend_from_slice(name.as_bytes());
@@ -1393,15 +1382,21 @@ pub fn encode_set_name(
     encode_frame(COMMAND_SET_NAME, &body)
 }
 
-/// C `d2k_link_set_name_family`: спорт 0 — SET_NAME, иначе SET_NAME_PROBE.
+/// C `d2k_link_set_name_family`: transport 6/17, спорт 0 — SET_NAME,
+/// иначе SET_NAME_PROBE.
 pub fn encode_set_name_family(
     name: &str,
+    transport: u8,
     shape: u8,
     family: u8,
     source_port: u16,
     plan_records: &[u8],
     trial_id: [u8; 16],
 ) -> Result<Vec<u8>, &'static str> {
+    // C `send_name_plan` проверяет транспорт, хотя на проводе его нет.
+    if !matches!(transport, 6 | 17) {
+        return Err("транспорт должен быть 6 (TCP) или 17 (UDP)");
+    }
     if source_port == 0 {
         encode_set_name(name, shape, family, plan_records)
     } else {
@@ -1857,13 +1852,8 @@ pub fn encode_set_name_probe(
     if name.is_empty() || name.len() > u8::MAX as usize {
         return Err("имя должно занимать от 1 до 255 байт");
     }
-    if !valid_name_probe_plan_records(shape, plan_records)
-        || !matches!(family, 4 | 6)
-        || source_port == 0
-    {
-        return Err(
-            "временная TCP-проба требует совместимые форму и план, IP family и ненулевой source port",
-        );
+    if !matches!(family, 4 | 6) || source_port == 0 {
+        return Err("временная TCP-проба требует IP family и ненулевой source port");
     }
     let mut body = Vec::with_capacity(5 + name.len() + plan_records.len() + trial_id.len());
     body.push(name.len() as u8);
@@ -1941,15 +1931,6 @@ pub fn encode_delete_name_probe(
     body.extend_from_slice(&[shape, family]);
     body.extend_from_slice(&source_port.to_be_bytes());
     encode_frame(COMMAND_DEL_NAME_PROBE, &body)
-}
-
-fn valid_name_probe_plan_records(shape: u8, records: &[u8]) -> bool {
-    Plan::parse_wire(records).is_ok_and(|plan| match shape {
-        SHAPE_HTTP => plan.transport == 6 && plan.proto == PROTO_HTTP,
-        SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP => plan.transport == 6 && plan.proto == 1,
-        _ if is_tcp_context_shape(shape) => plan.transport == 6 && plan.proto == 1,
-        _ => false,
-    })
 }
 
 pub fn encode_ack(command: u16, ok: bool, reason: u8) -> Result<Vec<u8>, &'static str> {
