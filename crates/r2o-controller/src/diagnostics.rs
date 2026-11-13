@@ -1553,20 +1553,44 @@ fn process_detail(process: &Value, at: u64, mono_ms: u64, proc_dir: &Path) -> Va
 /// Повторяет семантику D2O `read_detail`: отсутствие smaps_rollup при
 /// существующем каталоге процесса — ожидаемое ограничение ядра
 /// (unsupported без errno), а не ошибка чтения.
+const ROLLUP_UNAVAILABLE: u8 = 1;
+const ROLLUP_OK: u8 = 2;
+const ROLLUP_PARSE_ERROR: u8 = 3;
+const ROLLUP_UNSUPPORTED: u8 = 4;
+
+/// C `proc_pid_dir_present`: каталог `/proc/<pid>` существует.
+fn proc_pid_dir_present(base: &Path) -> bool {
+    base.is_dir()
+}
+
+/// C `optional_proc_status`: ENOENT при живом pid — unsupported без errno,
+/// иначе unavailable с errno.
+fn optional_proc_status(error: &std::io::Error, pid_dir_present: bool) -> (u8, Option<i32>) {
+    if error.kind() == std::io::ErrorKind::NotFound && pid_dir_present {
+        (ROLLUP_UNSUPPORTED, None)
+    } else {
+        (ROLLUP_UNAVAILABLE, error.raw_os_error())
+    }
+}
+
+/// C `read_status`: код статуса smaps_rollup в строку.
+fn rollup_status_text(code: u8) -> &'static str {
+    match code {
+        ROLLUP_UNAVAILABLE => "unavailable",
+        ROLLUP_OK => "ok",
+        ROLLUP_PARSE_ERROR => "parse-error",
+        ROLLUP_UNSUPPORTED => "unsupported",
+        _ => "not-read",
+    }
+}
+
 fn read_smaps_rollup(base: &Path) -> (&'static str, &'static str, Option<i32>, Option<Value>) {
     let path = base.join("smaps_rollup");
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) => {
-            let status = if error.kind() == std::io::ErrorKind::NotFound && base.is_dir() {
-                "unsupported"
-            } else {
-                "unavailable"
-            };
-            let errno = (status == "unavailable")
-                .then(|| error.raw_os_error())
-                .flatten();
-            return (status, "unavailable", errno, None);
+            let (code, errno) = optional_proc_status(&error, proc_pid_dir_present(base));
+            return (rollup_status_text(code), "unavailable", errno, None);
         }
     };
     let mut values = [None; 5];
@@ -1584,7 +1608,12 @@ fn read_smaps_rollup(base: &Path) -> (&'static str, &'static str, Option<i32>, O
             .and_then(|value| value.parse::<u64>().ok());
     }
     if values.iter().any(Option::is_none) {
-        return ("parse-error", "unavailable", None, None);
+        return (
+            rollup_status_text(ROLLUP_PARSE_ERROR),
+            "unavailable",
+            None,
+            None,
+        );
     }
     let value = json!({
         "rss_kib": values[0],
@@ -1593,7 +1622,12 @@ fn read_smaps_rollup(base: &Path) -> (&'static str, &'static str, Option<i32>, O
         "private_dirty_kib": values[3],
         "swap_kib": values[4],
     });
-    ("ok", "smaps_rollup", None, Some(value))
+    (
+        rollup_status_text(ROLLUP_OK),
+        "smaps_rollup",
+        None,
+        Some(value),
+    )
 }
 
 fn read_fd_count(path: &Path) -> Option<u64> {
@@ -1613,8 +1647,10 @@ mod tests {
     use super::{
         Counts, EVENT_CAPACITY, MADVISE_ERRNO_SLOTS, MEMORY_SITE_COUNT, MadviseErrno, MadviseStats,
         Recorder, compact_bytes, compact_bytes_kib, compact_count, compact_kib, d2o_ring_bytes,
-        madvise_json, memory_acquire, memory_active, memory_alloc_failure, memory_enable,
-        memory_release, memory_snapshot, memory_tracking_json, proc_field, tracked_memory_bytes,
+        limit_reason_values, madvise_json, memory_acquire, memory_active, memory_alloc_failure,
+        memory_enable, memory_release, memory_snapshot, memory_tracking_json, optional_proc_status,
+        proc_field, proc_pid_dir_present, read_smaps_rollup, rollup_status_text,
+        tracked_memory_bytes,
     };
     use serde_json::json;
     use std::fs::{self, OpenOptions};
@@ -1869,6 +1905,103 @@ mod tests {
         assert_eq!(proc_field("VmRSS: -1 kB\n", "VmRSS:"), None);
         assert_eq!(proc_field("VmHWM: 4096 kB\n", "VmRSS:"), None);
         assert_eq!(proc_field("VmRSS:\n", "VmRSS:"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn smaps_rollup_statuses_match_c() {
+        // C `read_status`: 1 unavailable, 2 ok, 3 parse-error, 4 unsupported,
+        // иначе not-read.
+        assert_eq!(rollup_status_text(1), "unavailable");
+        assert_eq!(rollup_status_text(2), "ok");
+        assert_eq!(rollup_status_text(3), "parse-error");
+        assert_eq!(rollup_status_text(4), "unsupported");
+        assert_eq!(rollup_status_text(0), "not-read");
+        assert_eq!(rollup_status_text(5), "not-read");
+
+        // C `optional_proc_status`: ENOENT при живом pid — unsupported без
+        // errno, иначе unavailable с errno.
+        assert_eq!(
+            optional_proc_status(&std::io::Error::from_raw_os_error(libc::ENOENT), true),
+            (4, None)
+        );
+        assert_eq!(
+            optional_proc_status(&std::io::Error::from_raw_os_error(libc::ENOENT), false),
+            (1, Some(libc::ENOENT))
+        );
+        assert_eq!(
+            optional_proc_status(&std::io::Error::from_raw_os_error(libc::EACCES), true),
+            (1, Some(libc::EACCES))
+        );
+
+        let root = std::env::temp_dir().join(format!("r2o-rollup-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        assert!(proc_pid_dir_present(&root));
+        assert!(!proc_pid_dir_present(&root.join("999")));
+
+        // Каталог pid есть, файла нет — unsupported без errno.
+        let (status, source, errno, values) = read_smaps_rollup(&root);
+        assert_eq!(status, "unsupported");
+        assert_eq!(source, "unavailable");
+        assert_eq!(errno, None);
+        assert!(values.is_none());
+
+        // Каталога pid нет — unavailable с ENOENT.
+        let (status, _, errno, _) = read_smaps_rollup(&root.join("999"));
+        assert_eq!(status, "unavailable");
+        assert_eq!(errno, Some(libc::ENOENT));
+
+        // Неполный набор ключей — parse-error.
+        fs::write(root.join("smaps_rollup"), "Rss: 1 kB\n").unwrap();
+        let (status, _, _, values) = read_smaps_rollup(&root);
+        assert_eq!(status, "parse-error");
+        assert!(values.is_none());
+
+        // Полный набор — ok и пять полей.
+        fs::write(
+            root.join("smaps_rollup"),
+            "Rss: 1 kB\nPss: 2 kB\nAnonymous: 3 kB\nPrivate_Dirty: 4 kB\nSwap: 5 kB\n",
+        )
+        .unwrap();
+        let (status, source, errno, values) = read_smaps_rollup(&root);
+        assert_eq!(status, "ok");
+        assert_eq!(source, "smaps_rollup");
+        assert_eq!(errno, None);
+        let values = values.unwrap();
+        assert_eq!(values["rss_kib"], json!(1));
+        assert_eq!(values["pss_kib"], json!(2));
+        assert_eq!(values["anonymous_kib"], json!(3));
+        assert_eq!(values["private_dirty_kib"], json!(4));
+        assert_eq!(values["swap_kib"], json!(5));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn limit_reason_branches_match_c() {
+        let mut counts = Counts::default();
+        counts.resources_valid = false;
+        assert_eq!(
+            limit_reason_values(&counts),
+            vec!["resource-data-unavailable"]
+        );
+        counts.resources_valid = true;
+        counts.limiter_mask = 0;
+        assert_eq!(
+            limit_reason_values(&counts),
+            vec!["no-current-resource-limit"]
+        );
+        for (mask, expected) in [
+            (1, vec!["cpu"]),
+            (2, vec!["memory"]),
+            (4, vec!["conntrack"]),
+            (8, vec!["slots"]),
+            (5, vec!["cpu", "conntrack"]),
+            (15, vec!["cpu", "memory", "conntrack", "slots"]),
+        ] {
+            counts.limiter_mask = mask;
+            assert_eq!(limit_reason_values(&counts), expected, "mask {mask}");
+        }
     }
 
     #[cfg(unix)]

@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 226 | 322 | 0 | 0 |
-| core-state | 692 | 248 | 444 | 0 | 0 |
+| core-state | 692 | 253 | 439 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **962** | **1020** | **0** | **0** |
+| **Итого** | **1982** | **967** | **1015** | **0** | **0** |
 
-Это не оценка паритета: 1020 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 1015 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 962 / P 1020 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 967 / P 1015 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 226 | 322 | 0 | 0 |
-| core-state | 692 | 248 | 444 | 0 | 0 |
+| core-state | 692 | 253 | 439 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **962** | **1020** | **0** | **0** |
+| **Итого** | **1982** | **967** | **1015** | **0** | **0** |
 
 
 ---
@@ -2196,14 +2196,14 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `compact_bytes_kib` | 221-221 | 1 | байты в KiB с округлением вверх, i32 или -1 | `diagnostics::compact_bytes_kib` | E | C `kib=bytes/1024+(bytes%1024!=0)`, `kib>INT32_MAX ? -1`. Rust `compact_bytes_kib` делает тот же ceil и `None` при переполнении; используется в growth. Тест `compact_helpers_and_proc_field_match_c` (0, 1, 1024, 1025, граница `INT32_MAX`). |
 | `compact_bytes` | 222-222 | 1 | байты в i32 или -1 | `diagnostics::compact_bytes` | E | C `bytes>INT32_MAX ? -1`. Rust `compact_bytes` возвращает `Option<i32>`; поля истории памяти пишут null при переполнении. Тест `compact_helpers_and_proc_field_match_c` (граница `INT32_MAX`/`+1`). |
 | `compact_count` | 223-223 | 1 | счётчик в u8 с насыщением | `diagnostics::compact_count` | E | C `n>UINT8_MAX ? UINT8_MAX : (uint8_t)n`. Rust `compact_count` насыщает до 255; tasks/workers поля истории памяти. Тест `compact_helpers_and_proc_field_match_c` (0, 255, 256, `u64::MAX`). |
-| `proc_pid_dir_present` | 225-229 | 5 | существует ли `/proc/<pid>` как каталог | `read_smaps_rollup` (`diagnostics.rs:1501-1515`) | **P*** | C `snprintf("%s/%ld")`, `stat`, `S_ISDIR`. Rust при `NotFound` проверяет `base.is_dir()` (`:1506`): каталог есть → `unsupported`, иначе `unavailable`. Отдельной функции нет, путь строится `proc_dir.join(pid)`. |
-| `optional_proc_status` | 230-237 | 8 | различить unsupported/unavailable для smaps_rollup: ENOENT при живом pid → unsupported(4), иначе unavailable(1)+errno | `diagnostics::read_smaps_rollup` | **P*** | C `error==ENOENT && pid-dir present` → `*reported_error=0`, 4; иначе `*reported_error=error`, 1. Rust `read_smaps_rollup` различает те же статусы; API иной. |
+| `proc_pid_dir_present` | 225-229 | 5 | существует ли `/proc/<pid>` как каталог | `diagnostics::proc_pid_dir_present` | E | C `snprintf("%s/%ld")`, `stat`, `S_ISDIR`. Rust `proc_pid_dir_present(base)` использует `Path::is_dir` (stat); вызывается из `read_smaps_rollup`. Тест `smaps_rollup_statuses_match_c` проверяет существующий каталог, отсутствующий и ветку unsupported. |
+| `optional_proc_status` | 230-237 | 8 | различить unsupported/unavailable для smaps_rollup: ENOENT при живом pid → unsupported(4), иначе unavailable(1)+errno | `diagnostics::optional_proc_status` | E | C: `error==ENOENT && pid-dir present` → `*reported_error=0`, 4; иначе `*reported_error=error`, 1. Rust `optional_proc_status` возвращает `(4, None)` или `(1, Some(errno))`; используется в `read_smaps_rollup`. Тест `smaps_rollup_statuses_match_c` (ENOENT при живом/мёртвом pid, EACCES). |
 | `read_proc` | 238-259 | 22 | pid из pid-файла, comm, VmRSS/HWM/RssAnon/Threads/VmData/VmSwap | `diagnostics::process_memory` (`:1411`) | **P** | **Ветви сверены:** C инициализирует pid=0/rss..=-1; `run/pidfile`; `fscanf("%ld")` + `pid>0&&pid<=INT_MAX`; `/proc/pid/comm` → `fgets`, обрезка `\r\n`, **точное** `strcmp(comm,names[i])`; `/proc/pid/status` — `value()` по шести ключам. Rust принимает `name == spec.comm \|\| name.starts_with(spec.comm)` (усечение comm до 15 байт) и пробует `fallback_pidfile`; поля status те же. Unit `process_memory_follows_pidfiles_and_restarts`; C-oracle нет. |
 | `read_detail` | 260-304 | 45 | stat starttime, VmSize/Data/Stk/Swap, fd_count, smaps_rollup | `diagnostics::process_detail` | **P** | **Ветви сверены:** C `memset`; pid/rss/at/mono; start_ticks/fds=-1, vm[4]/rollup[5]=-1; `/proc/pid/stat`: `strrchr(')')`, `strtok_r`, 19 полей до 22-го, `strtoll`, `n>=0`; `/proc/pid/status` 4 ключа; `/proc/pid/fd` readdir без `.`; `smaps_rollup`: open/errno → `optional_proc_status`, иначе 5 ключей, `seen==31 && !ferror` → status=2/source=1, иначе 3, errno при ferror. Rust `process_detail` те же поля/статусы; unit `first_process_detail_survives_process_exit`. |
-| `read_status` | 305-309 | 5 | код статуса smaps_rollup в строку | `read_smaps_rollup` (`diagnostics.rs:1501-1533`) | **P*** | C `1→unavailable`, `2→ok`, `3→parse-error`, `4→unsupported`, default `not-read`. Rust возвращает строки напрямую: `unsupported` при отсутствии файла у живого pid, `unavailable` при иной ошибке, `parse-error` при неполном наборе ключей, `ok` при успехе; `not-read` — для legacy-поля `smaps_status` (`:1492`). |
+| `read_status` | 305-309 | 5 | код статуса smaps_rollup в строку | `diagnostics::rollup_status_text` | E | C `1→unavailable`, `2→ok`, `3→parse-error`, `4→unsupported`, default `not-read`. Rust `rollup_status_text` те же значения; используется в `read_smaps_rollup`. Тест `smaps_rollup_statuses_match_c` проверяет коды 0..5. |
 | `write_detail` | 310-328 | 19 | JSON memory_detail процесса | `diagnostics` memory_details | **P** | C `!pid` → `null`; pid/at/mono/rss/start_ticks; vm_size/data/stack/swap через `number`; fd_count; `smaps_rollup_status`; source `smaps_rollup`/`smaps-fallback`/`unavailable`; errno или null; rollup null при `status!=2 && source!=2`, иначе объект 5 полей; `smaps_status:not-read`, `smaps_errno:null`, `smaps:null`. Rust те же поля; unit/differential частично. |
-| `write_limit_reason` | 329-343 | 15 | JSON `limit_reason` по counts | `diagnostics::limit_reason_values` | **P** | C `flags=resources_valid`; `!flags&1` → `resource-data-unavailable`; `!mask` → `no-current-resource-limit`; иначе `cpu`/`memory`/`conntrack`/`slots` по битам в порядке. Rust те же значения/порядок; unit `diagnostics_id_and_counts_match_d2o`. |
-| `write_limit_reason_state` | 344-356 | 13 | JSON `limit_reason` по flags/mask | `diagnostics::limit_reason_values` | **P** | C повторяет `write_limit_reason`, но берёт flags/mask из limit-события; та же развилка/порядок. Rust использует ту же функцию; unit. |
+| `write_limit_reason` | 329-343 | 15 | JSON `limit_reason` по counts | `diagnostics::limit_reason_values` | E | C: `!resources_valid` → `resource-data-unavailable`; `!mask` → `no-current-resource-limit`; иначе биты в порядке cpu/memory/conntrack/slots. Rust `limit_reason_values` те же значения/порядок; тест `limit_reason_branches_match_c` (invalid, mask=0, 1/2/4/8/5/15). |
+| `write_limit_reason_state` | 344-356 | 13 | JSON `limit_reason` по flags/mask | `diagnostics::limit_reason_values` | E | C повторяет `write_limit_reason` для flags/mask limit-события; та же развилка/порядок. Rust использует ту же `limit_reason_values` в `limit_event_json`; тест `limit_reason_branches_match_c`. |
 | `write_memory_tracking` | 357-369 | 13 | JSON memory_tracking: enabled, coverage, 6 сайтов (id/name/location/live/peak/objects/created/destroyed/failures) | `diagnostics::memory_tracking_json` | **P** | C `memory_snapshot`; `enabled`; фиксированный текст coverage; 6 сайтов с id/name/location и счётчиками. Rust `memory_tracking_json` те же поля/строки; unit `memory_tracking_and_madvise_json_match_d2o_shape`. |
 | `write_madvise` | 370-381 | 12 | JSON madvise: successes/failures/requested/failed/last_errno/other/errno-гистограмма | `diagnostics::madvise_json` | **P** | C `successes/failures/requested_bytes/failed_requested_bytes`; `last_errno` или null; `other_errno_count`; `errno[]` только ненулевые `{code,count}`. Rust `madvise_json` те же поля/фильтр; unit. |
 | `write_anomalies` | 382-394 | 13 | JSON аномалий и счётчиков перезаписи | `Recorder::write_report` | **P** | C `anomalies_overwritten`, `diagnostic_write_failures`, массив `anomalies`: kind→`unattributed-rss-growth`/`diagnostic-json-write-error`; at; error_code или null; stage; rss/accounted delta только kind=1; window_samples 10/0. Rust `write_report`; unit `records_only_while_enabled`. |
