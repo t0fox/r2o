@@ -7,6 +7,8 @@ thread_local! {
     static VERIFY_TCP_TIMESTAMPS: Cell<i8> = const { Cell::new(-1) };
     /// C `d2k_quic_form`: поточная форма клиента для QUIC-зонда.
     static VERIFY_QUIC_FORM: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    /// C `g_verify_budget`: бюджет зондов текущего потока.
+    static VERIFY_BUDGET: Cell<u32> = const { Cell::new(0) };
 }
 
 /// C `d2k_verify_tcp_timestamps_get`: текущее значение потока.
@@ -37,12 +39,32 @@ pub fn d2k_verify_quic_form_get() -> Vec<u8> {
     VERIFY_QUIC_FORM.with(|cell| cell.borrow().clone())
 }
 
+/// C `d2k_verify_budget_set`: установить бюджет зондов потока.
+pub fn d2k_verify_budget_set(budget_packets: u32) {
+    VERIFY_BUDGET.with(|cell| cell.set(budget_packets));
+}
+
+/// C `d2k_verify_budget_get`: бюджет зондов текущего потока.
+pub fn d2k_verify_budget_get() -> u32 {
+    VERIFY_BUDGET.with(Cell::get)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        d2k_verify_quic_form_get, d2k_verify_quic_form_set, d2k_verify_tcp_timestamps_get,
-        d2k_verify_tcp_timestamps_set,
+        d2k_verify_budget_get, d2k_verify_budget_set, d2k_verify_quic_form_get,
+        d2k_verify_quic_form_set, d2k_verify_tcp_timestamps_get, d2k_verify_tcp_timestamps_set,
     };
+
+    #[test]
+    fn verify_budget_setter_reflects_thread_local_value() {
+        d2k_verify_budget_set(0);
+        assert_eq!(d2k_verify_budget_get(), 0);
+        d2k_verify_budget_set(1280);
+        assert_eq!(d2k_verify_budget_get(), 1280);
+        d2k_verify_budget_set(u32::MAX);
+        assert_eq!(d2k_verify_budget_get(), u32::MAX);
+    }
 
     #[test]
     fn quic_form_setter_copies_or_resets_like_c() {
