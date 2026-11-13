@@ -217,6 +217,8 @@ pub struct FetchResult {
     pub elapsed: Duration,
     pub reason: Option<String>,
     pub r2o_volume_observation: crate::r2o_volume::R2oVolumeObservation,
+    /// C `budget_say`: заметка об исходе проверки бюджета пакетов.
+    pub budget_note: Option<String>,
     pub r2o_resources: Vec<crate::r2o_resource::R2oResourceHint>,
 }
 
@@ -335,6 +337,7 @@ pub fn r2o_verify_tls_connected_stream_with_alpn(
         elapsed: started.elapsed(),
         reason: Some("TLS-рукопожатие с ALPN клиента завершено; приложение не измерялось".into()),
         r2o_volume_observation: crate::r2o_volume::R2oVolumeObservation::default(),
+        budget_note: None,
         r2o_resources: Vec::new(),
     })
 }
@@ -384,6 +387,7 @@ pub fn r2o_verify_tls_replayed_client_hello(
             "повтор ClientHello не получил ServerHello".into()
         }),
         r2o_volume_observation: crate::r2o_volume::R2oVolumeObservation::default(),
+        budget_note: None,
         r2o_resources: Vec::new(),
     })
 }
@@ -1153,6 +1157,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
                 packet_budget: crate::r2o_volume::R2oVolumePacketBudget::NotApplicable,
                 ..Default::default()
             },
+            budget_note: None,
             r2o_resources: Vec::new(),
         });
     }
@@ -1372,9 +1377,9 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
         } else {
             Vec::new()
         };
-        let r2o_packet_budget = if let Some(need) = packet_budget {
+        let (r2o_packet_budget, r2o_budget_note) = if let Some(need) = packet_budget {
             if complete && parser.status() >= 100 && parser.headers_complete() {
-                r2o_measure_http_packet_budget(
+                let outcome = r2o_measure_http_packet_budget(
                     &mut stream,
                     options,
                     r2o_encoding,
@@ -1382,12 +1387,16 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
                     need,
                     r2o_http_connection_closes(parser.headers()),
                     &mut packet_counter,
-                )
+                );
+                (outcome.budget, Some(outcome.note))
             } else {
-                crate::r2o_volume::R2oVolumePacketBudget::NotApplicable
+                (
+                    crate::r2o_volume::R2oVolumePacketBudget::NotApplicable,
+                    None,
+                )
             }
         } else {
-            crate::r2o_volume::R2oVolumePacketBudget::NotMeasured
+            (crate::r2o_volume::R2oVolumePacketBudget::NotMeasured, None)
         };
         let r2o_tcp_after = r2o_tcp_counters(&stream.sock.socket);
         let r2o_tls_wire_bytes = stream.sock.r2o_wire_bytes;
@@ -1443,6 +1452,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
             elapsed: started.elapsed(),
             reason,
             r2o_volume_observation,
+            budget_note: r2o_budget_note,
             r2o_resources,
         });
     }
@@ -2818,6 +2828,64 @@ fn r2o_http_connection_closes(headers: &[u8]) -> bool {
         })
 }
 
+fn r2o_budget_passed_note(packets: u32, need: u32, requests: u32) -> String {
+    format!(
+        "поток перенёс {packets} пакетов с данными из нужных {need} за {requests} запросов, сервер ответил на каждый"
+    )
+}
+
+fn r2o_budget_conn_close_note(requests: u32, packets: u32, need: u32) -> String {
+    format!(
+        "сервер закрывает keep-alive после {requests}-го ответа, на {packets} пакетах из {need} — бюджет не проверен"
+    )
+}
+
+fn r2o_budget_not_growing_note(packets: u32) -> String {
+    format!("счётчик пакетов не растёт ({packets}) — бюджет не проверен")
+}
+
+fn r2o_budget_closed_note(requests: u32, packets: u32, need: u32, error: &str) -> String {
+    format!(
+        "сервер закрыл поток на {requests}-м запросе, {packets} пакетов из {need} — бюджет не проверен: {}",
+        r2o_budget_error(error)
+    )
+}
+
+fn r2o_budget_replay_note(requests: u32, local_limit: bool, error: &str) -> String {
+    format!(
+        "повтор {requests} не измерен ({}): {} — бюджет не проверен",
+        if local_limit {
+            "наш предел"
+        } else {
+            "ответ битый или отказ TLS, не молчание"
+        },
+        r2o_budget_error(error)
+    )
+}
+
+fn r2o_budget_cut_note(requests: u32, packets: u32, need: u32, error: &str) -> String {
+    format!(
+        "сервер замолчал посреди повторов: {requests}-й запрос, поток перенёс {packets} пакетов с данными из нужных {need}: {}",
+        r2o_budget_error(error)
+    )
+}
+
+/// C `budget_say` `%.60s`: заметка обрезается по 60 байтам.
+fn r2o_budget_error(error: &str) -> String {
+    let bytes = error.as_bytes();
+    String::from_utf8_lossy(&bytes[..bytes.len().min(60)]).into_owned()
+}
+
+fn r2o_budget_say(
+    budget: crate::r2o_volume::R2oVolumePacketBudget,
+    note: impl Into<String>,
+) -> crate::r2o_volume::R2oPacketBudgetOutcome {
+    crate::r2o_volume::R2oPacketBudgetOutcome {
+        budget,
+        note: note.into(),
+    }
+}
+
 fn r2o_measure_http_packet_budget(
     stream: &mut StreamOwned<rustls::ClientConnection, R2oTlsTcpStream>,
     options: &FetchOptions,
@@ -2826,25 +2894,41 @@ fn r2o_measure_http_packet_budget(
     need: u32,
     mut connection_close: bool,
     packet_counter: &mut impl FnMut(&TcpStream) -> Option<u32>,
-) -> crate::r2o_volume::R2oVolumePacketBudget {
+) -> crate::r2o_volume::R2oPacketBudgetOutcome {
     use crate::r2o_volume::R2oVolumePacketBudget as Budget;
 
     let Some(mut packets) = packet_counter(&stream.sock.socket) else {
-        return Budget::NotApplicable;
+        return r2o_budget_say(
+            Budget::NotApplicable,
+            "пакеты потока не считаются (нет TCP_INFO data_segs) — бюджет не проверен",
+        );
     };
     let mut previous = None;
+    let mut requests = 1_u32;
     loop {
         if packets >= need {
-            return Budget::Passed;
+            return r2o_budget_say(
+                Budget::Passed,
+                r2o_budget_passed_note(packets, need, requests),
+            );
         }
-        if connection_close || previous.is_some_and(|last| packets <= last) {
-            return Budget::NotApplicable;
+        if connection_close {
+            return r2o_budget_say(
+                Budget::NotApplicable,
+                r2o_budget_conn_close_note(requests, packets, need),
+            );
+        }
+        if previous.is_some_and(|last| packets <= last) {
+            return r2o_budget_say(Budget::NotApplicable, r2o_budget_not_growing_note(packets));
         }
         previous = Some(packets);
 
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Budget::Cut;
+            return r2o_budget_say(
+                Budget::Cut,
+                r2o_budget_cut_note(requests, packets, need, "истёк срок ожидания повтора"),
+            );
         }
         if stream
             .sock
@@ -2852,15 +2936,22 @@ fn r2o_measure_http_packet_budget(
             .set_write_timeout(Some(remaining))
             .is_err()
         {
-            return Budget::NotApplicable;
+            return r2o_budget_say(
+                Budget::NotApplicable,
+                r2o_budget_replay_note(requests, false, "не удалось задать срок записи"),
+            );
         }
         let request = build_request(&options.name, &options.path, encoding);
+        requests += 1;
         if stream
             .write_all(&request)
             .and_then(|()| stream.flush())
             .is_err()
         {
-            return Budget::NotApplicable;
+            return r2o_budget_say(
+                Budget::NotApplicable,
+                r2o_budget_closed_note(requests, packets, need, "запись запроса не прошла"),
+            );
         }
         let mut parser = HttpResponseParser::new(false);
         let _r2o_http_buffer = R2oHttpResponseBufferTracking::new();
@@ -2869,7 +2960,10 @@ fn r2o_measure_http_packet_budget(
         while !parser.is_complete() && !parser.is_invalid() {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Budget::Cut;
+                return r2o_budget_say(
+                    Budget::Cut,
+                    r2o_budget_cut_note(requests, packets, need, "тайм-аут чтения повтора"),
+                );
             }
             if stream
                 .sock
@@ -2877,7 +2971,10 @@ fn r2o_measure_http_packet_budget(
                 .set_read_timeout(Some(remaining))
                 .is_err()
             {
-                return Budget::NotApplicable;
+                return r2o_budget_say(
+                    Budget::NotApplicable,
+                    r2o_budget_replay_note(requests, false, "не удалось задать срок чтения"),
+                );
             }
             match stream.read(&mut buffer) {
                 Ok(0) => {
@@ -2892,17 +2989,41 @@ fn r2o_measure_http_packet_budget(
                         io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
                     ) =>
                 {
-                    return Budget::Cut;
+                    return r2o_budget_say(
+                        Budget::Cut,
+                        r2o_budget_cut_note(requests, packets, need, "тайм-аут чтения повтора"),
+                    );
                 }
-                Err(_) => return Budget::NotApplicable,
+                Err(error) => {
+                    return r2o_budget_say(
+                        Budget::NotApplicable,
+                        r2o_budget_replay_note(requests, false, &error.to_string()),
+                    );
+                }
             }
         }
-        if parser.is_invalid() || !parser.is_complete() {
-            return Budget::NotApplicable;
+        if parser.is_invalid() {
+            return r2o_budget_say(
+                Budget::NotApplicable,
+                r2o_budget_replay_note(
+                    requests,
+                    r2o_http_local_limit(&parser),
+                    r2o_http_error_reason(&parser),
+                ),
+            );
+        }
+        if !parser.is_complete() {
+            return r2o_budget_say(
+                Budget::NotApplicable,
+                r2o_budget_closed_note(requests, packets, need, "ответ не дочитан"),
+            );
         }
         connection_close = eof || r2o_http_connection_closes(parser.headers());
         let Some(current) = packet_counter(&stream.sock.socket) else {
-            return Budget::NotApplicable;
+            return r2o_budget_say(
+                Budget::NotApplicable,
+                r2o_budget_replay_note(requests, false, "счётчик пакетов пропал"),
+            );
         };
         packets = current;
     }
@@ -3414,6 +3535,7 @@ mod tests {
             elapsed: Duration::ZERO,
             reason: None,
             r2o_volume_observation: crate::r2o_volume::R2oVolumeObservation::default(),
+            budget_note: None,
             r2o_resources: Vec::new(),
         }
     }
@@ -4766,6 +4888,51 @@ mod tests {
         .unwrap();
         assert!(chunked.complete);
         assert_eq!(chunked.body_bytes, 3);
+    }
+
+    #[test]
+    fn budget_say_notes_match_c() {
+        assert_eq!(
+            r2o_budget_passed_note(40, 20, 3),
+            "поток перенёс 40 пакетов с данными из нужных 20 за 3 запросов, сервер ответил на каждый"
+        );
+        assert_eq!(
+            r2o_budget_conn_close_note(2, 10, 20),
+            "сервер закрывает keep-alive после 2-го ответа, на 10 пакетах из 20 — бюджет не проверен"
+        );
+        assert_eq!(
+            r2o_budget_not_growing_note(7),
+            "счётчик пакетов не растёт (7) — бюджет не проверен"
+        );
+        // C `%.60s`: длинная причина обрезается по 60 байтам.
+        assert_eq!(
+            r2o_budget_closed_note(2, 10, 20, &"x".repeat(100)),
+            format!(
+                "сервер закрыл поток на 2-м запросе, 10 пакетов из 20 — бюджет не проверен: {}",
+                "x".repeat(60)
+            )
+        );
+        assert_eq!(
+            r2o_budget_replay_note(3, false, "битый ответ"),
+            "повтор 3 не измерен (ответ битый или отказ TLS, не молчание): битый ответ — бюджет не проверен"
+        );
+        assert_eq!(
+            r2o_budget_replay_note(3, true, "строка длиннее предела"),
+            "повтор 3 не измерен (наш предел): строка длиннее предела — бюджет не проверен"
+        );
+        assert_eq!(
+            r2o_budget_cut_note(4, 11, 20, "тайм-аут чтения повтора"),
+            "сервер замолчал посреди повторов: 4-й запрос, поток перенёс 11 пакетов с данными из нужных 20: тайм-аут чтения повтора"
+        );
+        let outcome = r2o_budget_say(
+            crate::r2o_volume::R2oVolumePacketBudget::Passed,
+            r2o_budget_passed_note(40, 20, 3),
+        );
+        assert_eq!(
+            outcome.budget,
+            crate::r2o_volume::R2oVolumePacketBudget::Passed
+        );
+        assert!(outcome.note.starts_with("поток перенёс 40"));
     }
 
     #[test]

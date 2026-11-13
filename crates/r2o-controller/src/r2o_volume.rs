@@ -27,6 +27,13 @@ pub enum R2oVolumePacketBudget {
     Passed,
 }
 
+/// C `budget_say`: исход бюджета и заметка с числами/причиной.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct R2oPacketBudgetOutcome {
+    pub budget: R2oVolumePacketBudget,
+    pub note: String,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct R2oVolumeObservation {
     pub stage: R2oVolumeProbeStage,

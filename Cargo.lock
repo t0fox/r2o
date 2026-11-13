@@ -1500,6 +1500,7 @@ dependencies = [
 name = "r2o-controller"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm 0.10.3",
  "bytes",
  "h3",
  "h3-quinn",
