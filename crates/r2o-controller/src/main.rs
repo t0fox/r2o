@@ -8556,6 +8556,16 @@ impl R2oRecentTcpNameCache {
         }
     }
 
+    /// C `recall` (`sched.c:1864-1869`): точное имя по ключу потока из кольца
+    /// 512; срок не проверяется — запись живёт до вытеснения.
+    fn recall(&self, key: &[u8; r2k_core::control::KEY_LEN]) -> Option<&str> {
+        self.entries
+            .iter()
+            .flatten()
+            .find(|(entry_key, _, _)| entry_key == key)
+            .map(|(_, name, _)| name.as_str())
+    }
+
     fn ech_witness_names(
         &self,
         target: &r2o_controller::discovery::DiscoveryTarget,
@@ -20260,7 +20270,14 @@ impl ControlClient {
                     let event = decode_r2o_tcp_clean_handshake(&frame)
                         .map_err(|error| format!("чистое TCP-рукопожатие: {error}"))?;
                     let now = std::time::Instant::now();
-                    if let Some(name) = tcp_hello_names.clean_handshake_name(&event.key, now) {
+                    // C `on_exchange`: имя берётся через `recall` из кольца
+                    // последних потоков, а не из TTL-кэша ClientHello.
+                    let recalled = tcp_witness_names
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .recall(&event.key)
+                        .map(str::to_owned);
+                    if let Some(name) = recalled {
                         clean_handshakes.note(&name, event.key[0], now);
                     }
                     continue;
@@ -20312,11 +20329,10 @@ impl ControlClient {
                 if frame.kind == control::EVENT_LEGACY_EXCHANGE {
                     let event = decode_legacy_exchange(&frame)
                         .map_err(|error| format!("EXCHANGE v22: {error}"))?;
-                    self.r2o_handle_legacy_exchange(
-                        &event,
-                        &tcp_hello_names,
-                        &mut clean_handshakes,
-                    );
+                    let recent_names = tcp_witness_names
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    self.r2o_handle_legacy_exchange(&event, &recent_names, &mut clean_handshakes);
                     continue;
                 }
                 if frame.kind == EVENT_CLIENT_SHAPE {
@@ -21156,12 +21172,13 @@ impl ControlClient {
     fn r2o_handle_legacy_exchange(
         &self,
         event: &r2k_core::control::LegacyExchangeEvent,
-        tcp_hello_names: &R2oTcpHelloCache,
+        recent_tcp_names: &R2oRecentTcpNameCache,
         clean_handshakes: &mut R2oCleanHandshakeCache,
     ) {
         let now = std::time::Instant::now();
         if r2o_legacy_exchange_is_clean(event) {
-            if let Some(name) = tcp_hello_names.clean_handshake_name(&event.key, now) {
+            if let Some(name) = recent_tcp_names.recall(&event.key) {
+                let name = name.to_owned();
                 clean_handshakes.note(&name, event.key[0], now);
                 println!(
                     "v22 EXCHANGE {}: ответ сервера без плана отмечен как чистое рукопожатие",
@@ -30703,6 +30720,128 @@ mod tests {
             cache.ech_witness_names(&target, now + std::time::Duration::from_secs(601)),
             []
         );
+    }
+
+    #[test]
+    fn recent_tcp_name_ring_remember_and_recall_match_c() {
+        fn hello(port: u16, name: &[u8]) -> HelloEvent {
+            let mut key = [0; r2k_core::control::KEY_LEN];
+            key[0] = 4;
+            key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+            key[17..21].copy_from_slice(&[198, 51, 100, 20]);
+            key[33..35].copy_from_slice(&port.to_be_bytes());
+            key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+            key[37] = 6;
+            HelloEvent {
+                key,
+                host: Some(name.to_vec()),
+                shape: Some(SHAPE_MODERN),
+                r2o_wire_len: None,
+                quic_snapshot: None,
+                tcp_has_timestamp: None,
+            }
+        }
+
+        let now = std::time::Instant::now();
+        let mut cache = super::R2oRecentTcpNameCache::default();
+        let first = hello(40_000, b"one.example");
+        cache.note(&first, now);
+        assert_eq!(cache.recall(&first.key), Some("one.example"));
+
+        // Повтор того же потока обновляет имя, не двигая кольцо.
+        let updated = hello(40_000, b"two.example");
+        cache.note(&updated, now);
+        assert_eq!(cache.recall(&first.key), Some("two.example"));
+
+        // Другой поток и промах.
+        let second = hello(40_001, b"second.example");
+        cache.note(&second, now);
+        assert_eq!(cache.recall(&second.key), Some("second.example"));
+        assert_eq!(cache.recall(&hello(40_002, b"absent.example").key), None);
+
+        // Кольцо 512: после 512 записей первая ещё жива, после 513-й вытеснена.
+        let mut ring = super::R2oRecentTcpNameCache::default();
+        let first_fill = hello(30_000, b"fill.example");
+        for index in 0..512_u16 {
+            ring.note(&hello(30_000 + index, b"fill.example"), now);
+        }
+        assert_eq!(ring.recall(&first_fill.key), Some("fill.example"));
+        let overflow = hello(31_000, b"overflow.example");
+        ring.note(&overflow, now);
+        assert_eq!(ring.recall(&first_fill.key), None);
+        assert_eq!(ring.recall(&overflow.key), Some("overflow.example"));
+    }
+
+    #[test]
+    fn remember_recall_differential_matches_c() {
+        use std::fmt::Write as _;
+
+        fn hello(port: u16, name: &[u8]) -> HelloEvent {
+            let mut key = [0; r2k_core::control::KEY_LEN];
+            key[0] = 4;
+            key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+            key[17..21].copy_from_slice(&[198, 51, 100, 20]);
+            key[33..35].copy_from_slice(&port.to_be_bytes());
+            key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+            key[37] = 6;
+            HelloEvent {
+                key,
+                host: Some(name.to_vec()),
+                shape: Some(SHAPE_MODERN),
+                r2o_wire_len: None,
+                quic_snapshot: None,
+                tcp_has_timestamp: None,
+            }
+        }
+        let now = std::time::Instant::now();
+        let mut out = String::new();
+
+        let mut cache = super::R2oRecentTcpNameCache::default();
+        let one = hello(40_000, b"one.example");
+        cache.note(&one, now);
+        writeln!(out, "first={}", cache.recall(&one.key).unwrap_or("-")).unwrap();
+        let updated = hello(40_000, b"two.example");
+        cache.note(&updated, now);
+        writeln!(out, "updated={}", cache.recall(&one.key).unwrap_or("-")).unwrap();
+        let second = hello(40_001, b"second.example");
+        cache.note(&second, now);
+        writeln!(out, "second={}", cache.recall(&second.key).unwrap_or("-")).unwrap();
+        let absent = hello(40_002, b"probe");
+        writeln!(out, "absent={}", cache.recall(&absent.key).unwrap_or("-")).unwrap();
+
+        let mut ring = super::R2oRecentTcpNameCache::default();
+        let first_fill = hello(30_000, b"fill.example");
+        for index in 0..512_u16 {
+            ring.note(&hello(30_000 + index, b"fill.example"), now);
+        }
+        writeln!(
+            out,
+            "ring_first={}",
+            ring.recall(&first_fill.key).unwrap_or("-")
+        )
+        .unwrap();
+        let overflow = hello(31_000, b"overflow.example");
+        ring.note(&overflow, now);
+        writeln!(
+            out,
+            "ring_after_overflow={}",
+            ring.recall(&first_fill.key).unwrap_or("-")
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "ring_overflow={}",
+            ring.recall(&overflow.key).unwrap_or("-")
+        )
+        .unwrap();
+
+        if let Ok(path) = std::env::var("R2O_REMEMBER_RECALL_DIFF_OUTPUT") {
+            std::fs::write(path, &out).unwrap();
+        }
+        assert!(out.contains("first=one.example"));
+        assert!(out.contains("updated=two.example"));
+        assert!(out.contains("absent=-"));
+        assert!(out.contains("ring_after_overflow=-"));
     }
 
     #[cfg(unix)]

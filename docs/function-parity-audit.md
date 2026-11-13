@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 324 | 224 | 0 | 0 |
-| core-state | 692 | 456 | 236 | 0 | 0 |
+| core-state | 692 | 458 | 234 | 0 | 0 |
 | datapath-core | 400 | 221 | 179 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1287** | **695** | **0** | **0** |
+| **Итого** | **1982** | **1289** | **693** | **0** | **0** |
 
-Это не оценка паритета: 695 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 693 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1287 / P 695 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1289 / P 693 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 324 | 224 | 0 | 0 |
-| core-state | 692 | 456 | 236 | 0 | 0 |
+| core-state | 692 | 458 | 234 | 0 | 0 |
 | datapath-core | 400 | 221 | 179 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1287** | **695** | **0** | **0** |
+| **Итого** | **1982** | **1289** | **693** | **0** | **0** |
 
 
 ---
@@ -2460,8 +2460,8 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `client_ip_of` | 1807–1811 | 5 | IP клиента: противоположный серверу конец по `server_is_low` | `discovery.rs` `client_ip_of`; `flow_socket_addresses` (`client_is_low` из datapath) | E | C выбирает клиента через `server_is_low` и обнуляет хвост для IPv4. Rust `client_ip_of` делает то же; production `flow_socket_addresses` использует `client_is_low`, вычисленный datapath по фактическому инициатору TCP-сессии (`session.initiator == key.low`), что эквивалентно/точнее. Тест `server_selection_matches_c_sched_helpers`. |
 | `server_of` | 1813–1822 | 10 | IP:port сервера в текст и порт по `server_is_low` | `discovery.rs` `server_of`, `DiscoveryTarget::from_event` | E | C выбирает конец через `server_is_low`, печатает `inet_ntop` и порт. Rust `server_of` возвращает `IpAddr`/порт, `from_event` строит `endpoint` тем же выбором; тест `server_selection_matches_c_sched_helpers` покрывает порт 8443, обратный порядок и оба 443. **Ограничение:** `from_http_portal`/`from_http_response` намеренно остаются портом 80. |
 | `same_flow` | 1824–1830 | 7 | transport, family (по умолчанию 4), low/high ports, low/high IP | полный 38-байтный ключ в `R2oTcpHelloCache` (`main.rs`) и `R2oRecentTcpNameCache` | E | C сравнивает `used`, transport, family (0→4), оба порта и `memcmp` адресов 4/16. Rust оба кэша ключуются полным 38-байтным `HelloEvent.key`, который содержит family[0], оба IP[1..33], оба порта[33..37] и transport[37]; equality покрывает ровно те же поля (family в ключе всегда 4/6 — проверено декодером). |
-| `remember` | 1841–1862 | 22 | имя потока в кольцо **`SCHED_SEEN=512`** (`sched.c:338`), ключ same_flow, `observed_ms`, имя без нормализации | `R2oTcpHelloCache::note` (`main.rs:7740-7754`), `R2oRecentTcpNameCache::note` (`:7816-7847`) | **P** | **Подтверждённые отличия:** C хранит **512** записей любого транспорта, сырое `ev->name` и `observed_ms`, без проверки срока в `recall` (`sched.c:1841-1862`). Rust разделил роли: `R2oTcpHelloCache` — **128** записей (`R2O_TCP_HELLO_CAPACITY`), TTL **60 с**, полный 38-байтный ключ, хранит `HelloEvent` для точного `target_for_tcp_flow`/clean-handshake; `R2oRecentTcpNameCache` — **512** записей, TTL **10 мин**, только TCP, нормализует host через `domain::normalize`, используется для `ech_witness_names`. Общего кэша «имя по любому транспорту без TTL» нет. C/Rust differential нет. |
-| `recall` | 1864–1869 | 6 | точное имя по `same_flow` из кольца 512 | `R2oTcpHelloCache::target_for_tcp_flow` (`main.rs:7773-7783`), `clean_handshake_name` (`:7756-7771`), `R2oRecentTcpNameCache::ech_witness_names` (`:7850-7880`) | **P** | **Уточнение:** точный поиск по flow в Rust **есть** — `R2oTcpHelloCache::target_for_tcp_flow(key, now)` ищет по полному 38-байтному ключу и возвращает `DiscoveryTarget`; `clean_handshake_name` — имя по тому же ключу. **Подтверждённые отличия:** (1) C возвращает сырое `t->seen[i].name` для любого транспорта и без TTL; Rust — только TCP, нормализованное имя/цель, TTL 60 с и порт 443 (`DiscoveryTarget::from_event`); (2) C-кольцо 512, Rust `R2oTcpHelloCache` — 128; (3) `R2oRecentTcpNameCache` (512/10 мин) отдаёт **список** имён по family/адресу для ECH-witness, а не точное имя по flow. Для TCP/443/свежего HELLO эквивалентно; для не-443/старого потока/не-TCP — нет. |
+| `remember` | 1841–1862 | 22 | имя потока в кольцо **`SCHED_SEEN=512`** (`sched.c:338`), ключ same_flow, `observed_ms`, имя без нормализации | `main.rs` `R2oRecentTcpNameCache::note` | **E*** | C/Rust differential `scripts/test-remember-recall-differential.sh` PASS: обновление того же потока, кольцо 512, вытеснение 513-й записью, промах — 7 кейсов. **Ограничение:** Rust нормализует host (`domain::normalize`), C пишет имя как есть; для событий с уже нормализованным именем совпадает. |
+| `recall` | 1864–1869 | 6 | точное имя по `same_flow` из кольца 512 | `R2oRecentTcpNameCache::recall`, production clean-handshake/EXCHANGE | E | C/Rust differential `test-remember-recall-differential.sh` PASS (7 кейсов, включая вытеснение). Rust `recall` используется в production-ветках `EVENT_R2O_TCP_CLEAN_HANDSHAKE` и `EVENT_LEGACY_EXCHANGE` вместо TTL-кэша ClientHello, как C `on_exchange`. |
 | `cooldown_find_endpoint` | 1871–1884 | 14 | `used && !challenge && transport/family/name/ip/port` | `R2oDiscoveryCooldownRing` | **E*** | C линейный поиск; Rust `Vec<Option<Entry>>` с типизированным ключом (name/transport/family/ip/port). C/Rust differential `scripts/r2o-scheduler-cooldown-differential.sh` PASS на пине `a378e230`. **Ограничение:** API — типизированный ключ, не параллельные массивы. |
 | `cooldown_find_challenge` | 1886-1897 | 12 | линейный поиск challenge-слоя: used/challenge/transport/family(default 4)/name | `R2oDiscoveryCooldownRing` challenge-слой | **E*** | C идёт по `SCHED_COOLDOWN_SLOTS`, проверяя `used && challenge && transport && family(default 4) && name`; Rust ключ помечает challenge и ищет те же поля. C/Rust differential `scripts/r2o-scheduler-cooldown-differential.sh` PASS. **Ограничение:** отдельного differential только на challenge-слой нет. |
 | `dead_find` | 1899-1910 | 12 | поиск мёртвого адреса: used/transport/family(default 4)/name/addr | `R2oDeadAddressCache` | **E*** | C линейный поиск `dead_addrs[128]` по key; Rust ключ `(host, transport, family, ip)`, слоты 128. C/Rust differential `scripts/r2o-scheduler-dead-address-differential.sh` PASS на пине `a378e230`. **Ограничение:** API иной, ёмкость/семантика те же. |
