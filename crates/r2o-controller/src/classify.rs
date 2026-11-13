@@ -25,6 +25,16 @@ pub struct Span {
 
 /// Преобразовать смещения разрезов в упорядоченные непустые диапазоны данных.
 ///
+/// C `client_offers_ts` (`core/sched.c:2286-2301`): при снятых опциях клиента
+/// решает побайтный разбор (Rust получает готовый `Option<bool>` из
+/// датапата), при неизвестных — профиль триггера (`!= NO_TS`).
+pub fn client_offers_ts(client_profile: Option<bool>, trigger_tcp_profile: u8) -> bool {
+    match client_profile {
+        Some(offers) => offers,
+        None => trigger_tcp_profile != r2k_core::control::TCP_PROFILE_NO_TS,
+    }
+}
+
 /// C `cuts_valid` (`meas.c:109`): разрезы обязаны строго возрастать и лежать
 /// внутри приветствия; любой плохой разрез — отказ всего опыта.
 pub fn split_offsets_checked(cuts: &[usize], len: usize) -> Option<Vec<Span>> {
@@ -3139,6 +3149,19 @@ mod qtrace_tests {
         assert_eq!(kept.write_gap, Duration::from_millis(5));
         assert_eq!(kept.long_gap, Duration::from_millis(9));
         assert_eq!(explicit.repeats, 7);
+    }
+
+    #[test]
+    fn client_offers_ts_matches_c_unknown_and_known() {
+        use r2k_core::control::{TCP_PROFILE_NO_TS, TCP_PROFILE_TS, TCP_PROFILE_UNKNOWN};
+
+        // Снятые опции клиента важнее профиля триггера.
+        assert!(super::client_offers_ts(Some(true), TCP_PROFILE_NO_TS));
+        assert!(!super::client_offers_ts(Some(false), TCP_PROFILE_TS));
+        // Неизвестные опции: C берёт профиль триггера (`!= NO_TS`).
+        assert!(super::client_offers_ts(None, TCP_PROFILE_UNKNOWN));
+        assert!(super::client_offers_ts(None, TCP_PROFILE_TS));
+        assert!(!super::client_offers_ts(None, TCP_PROFILE_NO_TS));
     }
 
     #[test]

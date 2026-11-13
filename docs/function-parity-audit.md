@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 320 | 228 | 0 | 0 |
-| core-state | 692 | 387 | 305 | 0 | 0 |
+| core-state | 692 | 388 | 304 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1212** | **770** | **0** | **0** |
+| **Итого** | **1982** | **1213** | **769** | **0** | **0** |
 
-Это не оценка паритета: 770 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 769 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1212 / P 770 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1213 / P 769 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 320 | 228 | 0 | 0 |
-| core-state | 692 | 387 | 305 | 0 | 0 |
+| core-state | 692 | 388 | 304 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1212** | **770** | **0** | **0** |
+| **Итого** | **1982** | **1213** | **769** | **0** | **0** |
 
 
 ---
@@ -2487,7 +2487,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `hello_fits_client` | 2245–2252 | 8 | transport≠6 → 1; `trigger_shape` не MODERN/LEGACY/ECH_TCP → 1; иначе `tcp_hello_kind` == UNKNOWN или == want | `main.rs` `r2o_cached_shape_fits` | E | C: transport≠6 → 1; для want вне MODERN/LEGACY/ECH_TCP → 1; иначе UNKNOWN (0) или точное совпадение. Rust `r2o_cached_shape_fits(transport, shape, want)` реализует все три ветви и используется в фильтре `cached_client_hello` (TLS-кеш, transport=6). Тест `discovery_plan_shape_and_cached_shape_match_c` проверяет transport 17, want=QUIC, UNKNOWN, точное совпадение и чужую форму. |
 | `quic_pack_ech` | 2256–2266 | 11 | QSN → ClientHello → TLS-запись 0x16 0x03 0x01 → `d2k_hello_ech_offer` | `main.rs:4925-4943 r2o_quic_snapshot_has_ech` | **E** | Построчно совпадает: `r2k_quic_snapshot_parse` → `r2k_quic_initial_client_hello_from_datagrams` → запись 5 байт → `r2k_core::tls::parse.ech_offer`. Тест `main.rs:26418`. |
 | `quic_named_find` | 2268–2274 | 7 | кольцо `quic_named`: len/family/name и `observed_ms+600000 >= now` | `main.rs:12753-12770` (`queued_quic_snapshots` — HashSet задач), `:6973` (снимок в pending job) | **P** | **Подтверждённый пробел:** Rust хранит QUIC-снимок в pending-job/очереди задачи и `queued_quic_snapshots`, но **не имеет кольца снимков по имени с 10-минутным сроком**. Повторное использование «последняя пачка этого имени» из C не найдено; Rust берёт снимок из текущего события/задачи. |
-| `client_offers_ts` | 2286–2301 | 16 | если опции неизвестны → `trigger_tcp_profile != NO_TS`; иначе 0→break, 1→skip, битая длина→0, 8/10→1 | `raw_probe.rs:673-682 raw_offer_timestamps` + `ClientShapeEvent.tcp_has_timestamp` | **P** | **Подтверждённое расхождение default:** C при неизвестных опциях берёт **профиль триггера** (`!= NO_TS`); Rust `raw_offer_timestamps(None)` читает `/proc/sys/net/ipv4/tcp_timestamps` (обычно 1). Если триггер измерен как NO_TS, а опции клиента не сняты, C даёт false, Rust — true. Разбор известных опций эквивалентен `PacketView::tcp_options_timestamp_profile`. |
+| `client_offers_ts` | 2286–2301 | 16 | если опции неизвестны → `trigger_tcp_profile != NO_TS`; иначе 0→break, 1→skip, битая длина→0, 8/10→1 | `classify::client_offers_ts`, `raw_probe.rs:676-700`, discovery options | E | C: неизвестные опции → профиль триггера; иначе побайтный разбор опций. Rust `client_offers_ts(Option<bool>, trigger_profile)` повторяет обе ветви; датапат R2O отдаёт TS-профиль уже разобранным (`tcp_timestamp_option_present`), discovery передаёт `target.tcp_profile()` и материализует результат в `ClassifyOptions.client_tcp_has_timestamps`, а `host_offers_ts` (sysctl) остаётся только для синтезированного триггера CLI-сканера, как C `detect/trigger.c:183`. Тесты `client_offers_ts_matches_c_unknown_and_known`, `discovery_classify_options_resolve_unknown_client_ts_like_c`. |
 | `client_tcp_profile` | 2303–2318 | 16 | !known/overflow→UNKNOWN; 0→NO_TS; 1→skip; битая→UNKNOWN; 8/10→TS; конец→NO_TS | `packet.rs:39-65 PacketView::tcp_options_timestamp_profile` | **P** | Алгоритм совпадает посимвольно; тесты `packet.rs:253-284`. **Отличие представления:** `r2o_client_shape_from_legacy` (`main.rs:9381-9384`) сводит результат к `Option<bool>` (`== TS`), поэтому UNKNOWN превращается в `Some(false)`, а `ClientShapeEvent` не хранит профиль/сырые опции (header, п. 10). |
 | `flowkey_same` | 2320–2325 | 6 | transport, family, a_port/b_port, a_ip/b_ip (4 или 16 байт) | полный 38-байтный `HelloEvent.key`, `R2oTcpHelloCache` (`main.rs:7734-7805`) | **P*** | C сравнивает `transport`, `family`, `a_port`, `b_port` и `memcmp` адресов длиной 4/16 (`sched.c:2320-2325`). Rust оба TCP-кэша используют полный 38-байтный ключ (family/адреса/порты/proto), поэтому для TCP сравнение строже и эквивалентно; C не включает proto-байт и допускает любой транспорт. Отдельного helper нет. |
 | `take_shape_opts` | 2328–2341 | 14 | при совпадении имени и flowkey скопировать `tcp_shape_opts[4][40]` и вычислить профиль | `main.rs:13257 queue_client_snapshot`, `:9400 remember_client_snapshot`, `ClientShapeEvent` | **P** | **Подтверждённый пробел (header, п. 10):** C хранит **сырые TCP-опции** (4×40) в задаче и пересчитывает профиль; Rust уже на приёме события сводит опции к `Option<bool>` (`tcp_has_timestamp`) и сырые байты не хранит. `take_shape_opts` как отдельный шаг отсутствует; для последующей проверки/повторов доступен только bool. |

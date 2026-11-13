@@ -11375,6 +11375,7 @@ impl DiscoveryWorker {
                 let base_options = r2o_discovery_classify_options(
                     mark,
                     client_has_tcp_timestamps,
+                    target.tcp_profile(),
                     Arc::clone(&cancel),
                     None,
                 );
@@ -16141,9 +16142,18 @@ fn r2o_discovery_trigger(
 fn r2o_discovery_classify_options(
     mark: Option<u32>,
     client_tcp_has_timestamps: Option<bool>,
+    trigger_tcp_profile: u8,
     cancel: Arc<AtomicBool>,
     seed_whole: Option<r2o_controller::classify::SeedWhole>,
 ) -> ClassifyOptions {
+    // C `client_offers_ts`: если опции клиента не сняты, решает профиль
+    // триггера, а не sysctl локального стека (`host_offers_ts` — только для
+    // синтезированного триггера CLI-сканера). Разрешённые discovery-цели
+    // несут базовые формы 1/2/6, поэтому профиль триггера — UNKNOWN.
+    let client_tcp_has_timestamps = Some(r2o_controller::classify::client_offers_ts(
+        client_tcp_has_timestamps,
+        trigger_tcp_profile,
+    ));
     ClassifyOptions {
         mark,
         client_tcp_has_timestamps,
@@ -16224,6 +16234,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
             let mut options = r2o_discovery_classify_options(
                 mark,
                 client_tcp_has_timestamps,
+                target.tcp_profile(),
                 task_cancel,
                 seed_whole,
             );
@@ -25654,6 +25665,41 @@ mod tests {
             "аргументы команды негодны"
         );
         assert_eq!(super::ack_reason_text(255), "причина не известна");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_classify_options_resolve_unknown_client_ts_like_c() {
+        use std::sync::atomic::AtomicBool;
+
+        let cancel = || Arc::new(AtomicBool::new(false));
+        let unknown = super::r2o_discovery_classify_options(
+            None,
+            None,
+            r2k_core::control::TCP_PROFILE_UNKNOWN,
+            cancel(),
+            None,
+        );
+        // C `client_offers_ts`: неизвестные опции → профиль триггера != NO_TS.
+        assert_eq!(unknown.client_tcp_has_timestamps, Some(true));
+
+        let no_ts = super::r2o_discovery_classify_options(
+            None,
+            None,
+            r2k_core::control::TCP_PROFILE_NO_TS,
+            cancel(),
+            None,
+        );
+        assert_eq!(no_ts.client_tcp_has_timestamps, Some(false));
+
+        let observed = super::r2o_discovery_classify_options(
+            None,
+            Some(true),
+            r2k_core::control::TCP_PROFILE_NO_TS,
+            cancel(),
+            None,
+        );
+        assert_eq!(observed.client_tcp_has_timestamps, Some(true));
     }
 
     #[test]

@@ -673,16 +673,21 @@ fn should_recheck(cached: bool, successes: usize, errors: usize) -> bool {
     cached && successes == 0 && errors >= 2
 }
 
-fn raw_offer_timestamps(client_profile: Option<bool>) -> bool {
-    client_profile.unwrap_or_else(|| {
-        *HOST_TCP_TIMESTAMPS.get_or_init(|| {
-            std::fs::read_to_string("/proc/sys/net/ipv4/tcp_timestamps")
-                .ok()
-                .and_then(|value| value.trim().parse::<i32>().ok())
-                .unwrap_or(1)
-                != 0
-        })
+/// C `host_offers_ts` (`detect/trigger.c:158-178`): кэшированное чтение
+/// `/proc/sys/net/ipv4/tcp_timestamps`, по умолчанию 1. Это профиль
+/// синтезированного триггера CLI-сканера, а не наблюдение за клиентом.
+fn host_offers_ts() -> bool {
+    *HOST_TCP_TIMESTAMPS.get_or_init(|| {
+        std::fs::read_to_string("/proc/sys/net/ipv4/tcp_timestamps")
+            .ok()
+            .and_then(|value| value.trim().parse::<i32>().ok())
+            .unwrap_or(1)
+            != 0
     })
+}
+
+fn raw_offer_timestamps(client_profile: Option<bool>) -> bool {
+    client_profile.unwrap_or_else(host_offers_ts)
 }
 
 const R2O_SELFTEST_TTL: Duration = Duration::from_secs(600);
