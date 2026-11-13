@@ -183,6 +183,33 @@ fn catalog_json_output_matches_c_fields() {
 }
 
 #[test]
+fn catalog_load_rejects_missing_and_oversized_files_like_c() {
+    let dir = std::env::temp_dir().join(format!("r2o-catalog-load-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+
+    let missing = dir.join("missing.json");
+    assert!(Catalog::load(&missing).is_err());
+
+    let valid = dir.join("valid.json");
+    fs::write(&valid, br#"{"schema":1,"boxes":[]}"#).unwrap();
+    assert!(Catalog::load(&valid).unwrap().boxes.is_empty());
+
+    let trailing = dir.join("trailing.json");
+    fs::write(&trailing, br#"{"schema":1,"boxes":[]} trailing"#).unwrap();
+    assert!(Catalog::load(&trailing).is_err());
+
+    // 64 МиБ + 1: разреженный файл, метаданных достаточно для отказа.
+    let huge = dir.join("huge.json");
+    let file = fs::File::create(&huge).unwrap();
+    file.set_len(64 * 1024 * 1024 + 1).unwrap();
+    let error = Catalog::load(&huge).unwrap_err().to_string();
+    assert!(error.contains("64 MiB"), "{error}");
+
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn catalog_memory_bytes_matches_c_formula() {
     let mut catalog = Catalog::default();
     assert_eq!(catalog.memory_bytes(), 0);
