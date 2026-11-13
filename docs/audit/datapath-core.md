@@ -1241,7 +1241,7 @@ flow-брони).
 | `sum16` (static) | 31-40 | 10 | RFC 1071: слова + нечётный хвост `<<8` | `wire.rs:534-543 sum16` | **E** | C обходит `i+1<n`, хвост `b[i]<<8`. Rust `chunks(2)` даёт те же значения; `u64`-аккумулятор для пакета ≤65535 не переполняется. C-строка: обход `i+1<n`, хвост `b[i]<<8`; Rust `sum16` — `chunks(2)`. |
 | `fold` (static) | 42-47 | 6 | свёртка переносов + инверсия | `wire.rs:545-550 checksum_value` | **E** | C `while(acc>>16) …`, `~(uint16_t)acc`; Rust тот же цикл и `!(acc as u16)`. Golden wire. C-строка: `while(acc>>16) …; return ~acc;`; Rust `checksum_value` — `!(acc as u16)`. |
 | `pseudo_sum` (static) | 57-65 | 9 | IPv4 UDP псевдозаголовок: src/dst, 0, proto 17, udp_len; 12 байт | `r2k-core/wire.rs` `udp_pseudo_sum` | E | C строит 12 байт (адреса сырыми, `0`, `17`, BE16 `udp_len`) и складывает; для IPv6 `d2k_wire_build_udp` суммирует 32 байта адресов + `udp_len + 17`. Rust `udp_pseudo_sum(packet, family, udp_len)` повторяет обе ветви и используется в `build_udp_packet`; тест `udp_pseudo_sum_matches_c_pseudo_header` (IPv4/IPv6 против C-заголовка, неизвестное семейство). |
-| `d2k_wire_build_udp` | 67-207 | 141 | сборка UDP: family 0/4/6, IPv6 IPID_ZERO reject, wire_profile/ipfrag reject, pre/seq_shift/TCPTS_BACK/BADSUM reject, IP-ID, TTL, длина, сумма всегда 0→0xffff | `r2k-core/src/wire.rs:213-291 build_udp_packet` | **P** | **Совпадает:** IPv4/IPv6-заголовки, UDP-порты/длина, payload, сумма всегда и `0→0xffff`, IPv6 IPID_ZERO reject, отказ `wire_profile/ipfrag/pre/seq_shift/TCPTS_BACK/BADSUM`, лимиты `len<=65535-8`, `total<=cap/65535`, IPv4 DF=0x4000, TTL `e->ttl ?: c->ttl ?: 64` ↔ `emission_ttl(emission, view.hop_limit)`, field-level IPv4 ID `c->ip_id+1` ↔ `view.ip_id+1`. **IPID_ZERO закрыт 2026-11-12:** C для IPv4 принимает `POISON_IPID_ZERO` и пишет ID=0, для IPv6 отвергает; Rust теперь так же (`wire.rs:218,246-252`), тесты `udp_ipv4_ipid_zero_sets_zero_id`, `udp_ipv6_ipid_zero_is_rejected`, `udp_badsum_and_tcpts_back_are_rejected`, `udp_ignores_md5_and_ts_up_like_d2o`. **Остаются расхождения:** (1) C ставит IPv4 TOS=0 (`:130`), Rust копирует `view.traffic_class` (`:244`); (2) C не проверяет `urgent/urgent_ptr` (игнорирует), Rust требует `urgent==false`, `urgent_ptr==0`; `prefix` C отвергает как `pre_len`, Rust — `prefix.is_empty()`; (3) C допускает `family=0` как IPv4 и берёт адреса/порты/ip_id/TOS/flow из `d2k_conn`, Rust требует `PacketView` family 4/6, `protocol==17`, `total_len==input.len()`, `udp_payload_range` и берёт поля из input. `tests/raw.rs:181` собирает пакет; эти divergence не покрывает. |
+| `d2k_wire_build_udp` | 67-207 | 141 | сборка UDP: family 0/4/6, IPv6 IPID_ZERO reject, wire_profile/ipfrag reject, pre/seq_shift/TCPTS_BACK/BADSUM reject, IP-ID, TTL, длина, сумма всегда 0→0xffff | `r2k-core/wire.rs` `build_udp_packet` | **E*** | C/Rust differential `scripts/test-datapath-udp-build-differential.sh` PASS: 20 кейсов — IPv4/IPv6, TOS, ipidzero, ttl 0/48/64/5, пустая нагрузка, badsum/tcpts/seq_shift/pre/wire_profile/ipfrag reject, cap на байт меньше, MD5 игнорируется. Исправлено расхождение: IPv4 DSCP/ECN теперь 0, как C `wire_udp.c:130` (раньше Rust копировал TOS). **Ограничение:** не покрыты `len > 65535-8`, `total > 0xffff`, NULL-указатели (в Rust невозможны), family 0 в Rust представлен IPv4-входом. |
 
 ## Углублённая сверка: journal/nl/icmpguard/wire_udp
 
@@ -1670,11 +1670,10 @@ packet-path-пробел (`shape_tcp_options_family`). Счётчики собы
   `CAPTURE_WINDOW`, `try_*`), тесты capture lifecycle; P.
 - **`wire.c`:** `d2k_wire_build` (TCP: профили, MD5, TS, ts_up,
   seq_shift, poison, суммы) — E: `wire.rs:18 build_tcp_packet`, 12 тестов
-  + `test-wire-ts-up-plan-differential.sh`. `d2k_wire_build_udp` — P:
-  R2O `wire.rs:213 build_udp_packet` отвергает **любой** poison, включая
-  `POISON_IPID_ZERO`, который C для IPv4 допускает (`wire_udp.c:75,136`),
-  и берёт TOS из пакета; `raw.rs:181` собирает пакет, но этот divergence
-  не покрыт.
+  + `test-wire-ts-up-plan-differential.sh`. `d2k_wire_build_udp` — E*:
+  `wire.rs` `build_udp_packet`, 20-кейсовый C/Rust differential; IPv4 TOS
+  приведён к C (всегда 0), IPv4 `POISON_IPID_ZERO` допускается, IPv6 —
+  отвергается. Не покрыты только сверхдлинные длины и NULL-указатели.
 - **Вывод:** session/hold/capture/track — P с конкретными пробелами
   (TCP options, полная таблица, редкие таймауты); wire TCP — E, wire UDP —
   P из-за IPID_ZERO/TOS.

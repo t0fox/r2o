@@ -266,7 +266,9 @@ pub fn build_udp_packet(input: &[u8], emission: &Emission, out: &mut [u8]) -> Op
     out[..total_len].fill(0);
     if view.family == 4 {
         out[0] = 0x45;
-        out[1] = view.traffic_class;
+        // C `d2k_wire_build_udp` (`datapath/wire_udp.c:130`): DSCP/ECN
+        // исходного пакета не переносится — байт всегда нулевой.
+        out[1] = 0;
         write_u16(&mut out[2..4], total_len as u16);
         let ip_id = if emission.poison & POISON_IPID_ZERO != 0 {
             0

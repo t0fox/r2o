@@ -165,6 +165,143 @@ fn udp_ignores_md5_and_ts_up_like_d2o() {
     }
 }
 
+fn udp_input_v4(tos: u8, ttl: u8, ip_id: u16, payload: &[u8]) -> Vec<u8> {
+    let mut packet = vec![0; 20 + 8 + payload.len()];
+    packet[0] = 0x45;
+    packet[1] = tos;
+    let total_len = packet.len() as u16;
+    packet[2..4].copy_from_slice(&total_len.to_be_bytes());
+    packet[4..6].copy_from_slice(&ip_id.to_be_bytes());
+    packet[8] = ttl;
+    packet[9] = 17;
+    packet[12..16].copy_from_slice(&[192, 0, 2, 1]);
+    packet[16..20].copy_from_slice(&[198, 51, 100, 20]);
+    packet[20..22].copy_from_slice(&40000u16.to_be_bytes());
+    packet[22..24].copy_from_slice(&443u16.to_be_bytes());
+    packet[24..26].copy_from_slice(&(8 + payload.len() as u16).to_be_bytes());
+    packet[28..].copy_from_slice(payload);
+    packet
+}
+
+fn udp_input_v6(tos: u8, flow: u32, hop: u8, payload: &[u8]) -> Vec<u8> {
+    let mut packet = vec![0; 40 + 8 + payload.len()];
+    let first = 0x6000_0000 | u32::from(tos) << 20 | (flow & 0x000f_ffff);
+    packet[..4].copy_from_slice(&first.to_be_bytes());
+    packet[4..6].copy_from_slice(&(8 + payload.len() as u16).to_be_bytes());
+    packet[6] = 17;
+    packet[7] = hop;
+    let mut src = [0_u8; 16];
+    src[0] = 0x20;
+    src[1] = 0x01;
+    src[15] = 1;
+    let mut dst = [0_u8; 16];
+    dst[0] = 0x20;
+    dst[1] = 0x01;
+    dst[15] = 2;
+    packet[8..24].copy_from_slice(&src);
+    packet[24..40].copy_from_slice(&dst);
+    packet[40..42].copy_from_slice(&40000u16.to_be_bytes());
+    packet[42..44].copy_from_slice(&443u16.to_be_bytes());
+    packet[44..46].copy_from_slice(&(8 + payload.len() as u16).to_be_bytes());
+    packet[48..].copy_from_slice(payload);
+    packet
+}
+
+#[test]
+fn udp_build_differential_matches_d2o() {
+    use std::fmt::Write as _;
+
+    fn record(out: &mut String, index: usize, input: &[u8], emission: &Emission, cap: usize) {
+        let mut buffer = [0_u8; 512];
+        let length = wire::build_udp_packet(input, emission, &mut buffer[..cap]).unwrap_or(0);
+        writeln!(out, "case {index} len {length}").unwrap();
+        if length > 0 {
+            for byte in &buffer[..length] {
+                write!(out, "{byte:02x}").unwrap();
+            }
+            out.push('\n');
+        }
+    }
+
+    const PAYLOAD: &[u8] = &[0xde, 0xad, 0xbe, 0xef, 0x52, 0x32];
+    let mut out = String::new();
+
+    let v4 = udp_input_v4(0x2e, 64, 0x1234, PAYLOAD);
+    let mut e = emission(PAYLOAD);
+    record(&mut out, 0, &v4, &e, 512);
+
+    e.poison = POISON_IPID_ZERO;
+    record(&mut out, 1, &v4, &e, 512);
+    e.poison = 0;
+
+    e.ttl = 5;
+    record(&mut out, 2, &v4, &e, 512);
+    e.ttl = 0;
+
+    let v4_ttl0 = udp_input_v4(0x2e, 0, 0x1234, PAYLOAD);
+    record(&mut out, 3, &v4_ttl0, &e, 512);
+
+    let v4_ttl48 = udp_input_v4(0x2e, 48, 0x1234, PAYLOAD);
+    record(&mut out, 4, &v4_ttl48, &e, 512);
+
+    let v6 = udp_input_v6(0x2e, 0xabcde, 64, PAYLOAD);
+    record(&mut out, 5, &v6, &e, 512);
+
+    e.poison = POISON_IPID_ZERO;
+    record(&mut out, 6, &v6, &e, 512);
+    e.poison = 0;
+
+    e.poison = POISON_BADSUM;
+    record(&mut out, 7, &v4, &e, 512);
+    e.poison = POISON_TCPTS_BACK;
+    record(&mut out, 8, &v4, &e, 512);
+    e.poison = 0;
+
+    e.seq_shift = 1;
+    record(&mut out, 9, &v4, &e, 512);
+    e.seq_shift = 0;
+
+    e.prefix = vec![0xde];
+    record(&mut out, 10, &v4, &e, 512);
+    e.prefix.clear();
+
+    e.wire_profile = 1;
+    record(&mut out, 11, &v4, &e, 512);
+    e.wire_profile = 0;
+
+    e.ipfrag = 1;
+    record(&mut out, 12, &v4, &e, 512);
+    e.ipfrag = 0;
+
+    let empty = emission(&[]);
+    record(&mut out, 13, &v4, &empty, 512);
+
+    record(&mut out, 14, &v4, &e, 33);
+
+    e.poison = POISON_BADSUM;
+    record(&mut out, 15, &v6, &e, 512);
+    e.poison = 0;
+
+    // C family 0 — legacy IPv4; вход Rust уже IPv4.
+    record(&mut out, 16, &v4, &e, 512);
+
+    e.poison = POISON_MD5;
+    record(&mut out, 17, &v4, &e, 512);
+    e.poison = 0;
+
+    e.ttl = 1;
+    record(&mut out, 18, &v4, &e, 512);
+    e.ttl = 0;
+
+    e.ttl = 5;
+    record(&mut out, 19, &v6, &e, 512);
+
+    if let Ok(path) = std::env::var("R2O_UDP_BUILD_DIFF_OUTPUT") {
+        std::fs::write(path, &out).unwrap();
+    }
+    assert!(out.contains("case 0 len 34\n45000022123540004011"));
+}
+
 #[test]
 fn clean_ipv4_matches_the_r2o_golden_packet() {
     let packet = original_v4(&[]);
