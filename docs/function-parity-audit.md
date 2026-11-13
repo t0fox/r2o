@@ -84,14 +84,14 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 325 | 223 | 0 | 0 |
+| core-net | 548 | 326 | 222 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
 | datapath-core | 400 | 222 | 178 | 0 | 0 |
 | datapath-plan | 183 | 177 | 6 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1299** | **683** | **0** | **0** |
+| **Итого** | **1982** | **1300** | **682** | **0** | **0** |
 
-Это не оценка паритета: 683 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 682 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1299 / P 683 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1300 / P 682 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -342,12 +342,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 325 | 223 | 0 | 0 |
+| core-net | 548 | 326 | 222 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
 | datapath-core | 400 | 222 | 178 | 0 | 0 |
 | datapath-plan | 183 | 177 | 6 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1299** | **683** | **0** | **0** |
+| **Итого** | **1982** | **1300** | **682** | **0** | **0** |
 
 
 ---
@@ -756,7 +756,7 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `d2k_hs_candidate_key` | 254-254 | 1 | ключ кандидата по индексу | `http_search.rs` `d2k_hs_candidate_key` | **E*** | C: `i<N_CANDS ? CANDS[i] : NULL`. Rust `d2k_hs_candidate_key` — те же индексы 0..3 и `None` за пределом; C/Rust differential PASS. **Ограничение:** production enumeration — R2O-надмножество. |
 | `poison_key_spec` | 258-287 | 30 | разбор `fake:`: ttl=1/badsum=2/seqshift=3, строго возрастающий порядок; ttl 1..255, seqshift ±2147483647 ≠0; ttl без badsum/seqshift запрещён | `http_search.rs:796-834 poison_key_spec` | **E** | **Совпадает:** `len>39` → отказ; `strtok("+")`/`split('+').filter(nonempty)`; ранги 1/2/3; повтор/порядок → отказ; ttl 1..255, seqshift ±2147483647 и ≠0; ttl без badsum/seqshift → отказ; пустой список → отказ. C `strtol` base 10 принимает ведущие пробелы и знак; Rust `parse_decimal` срезает ведущие ASCII-пробелы и парсит `i64` (`:836-839`), знак принимает; хвостовой мусор оба отвергают. Тест `tests/http_search.rs:268`. |
 | `known_key` | 289-294 | 6 | предикат: `fake-badsum-whole`, CANDS или валидный `fake:`-spec | `http_search.rs` `known_key` | E | C: `fake-badsum-whole`, 4 CANDS или `poison_key_spec==0`. Rust `known_key` возвращает то же множество и используется `candidate_text` как guard; тест `known_key_matches_c_predicate` (8 принятых, 12 отклонённых: ttl без badsum/seqshift, повторы, порядок, границы 0/256, seqshift 0/INT_MIN, длина >39, неизвестные). |
-| `d2k_hs_candidate_text` | 296-324 | 29 | `d2k-plan 1 11`, id, `proto tcp http`, fake payload/poison/repeats, split, disorder+pace | `http_search.rs:686-717 candidate_text` | **P** | **Осознанное брендинговое отличие:** C `d2k-plan 1 11`, Rust `r2o-plan 1 11`; директивы (`payload 1`, `poison 1`, `fake … repeats=1`, `split sni_middle +0`, `order reverse`, `pace 12000`) совпадают. Rust-тесты `tests/http_search.rs:227,235,243,260` фиксируют R2O-заголовок; C-байтового differential нет. |
+| `d2k_hs_candidate_text` | 296-324 | 29 | `d2k-plan 1 11`, id, `proto tcp http`, fake payload/poison/repeats, split, disorder+pace | `http_search.rs` `candidate_text` | **E*** | C/Rust differential `scripts/test-http-search-candidates-differential.sh` PASS: 7 ключей (split, disorder, fake-badsum, fake-badsum-whole, fake-seqshift, fake:ttl=5+badsum, nope→rc=-1) с фиксированным id — полный текст плана совпал после нормализации заголовка. **Ограничение:** брендинг `r2o-plan` вместо `d2k-plan` — осознанное отличие; Rust-тесты дополнительно фиксируют заголовок. |
 | `stable_id` | 327-332 | 6 | FNV-1a по префиксу `d2k-http:` и ключу, 16 байт | `http_search.rs` `d2k_stable_id`/`stable_id` | **E*** | C: FNV-1a offset/prime, `d2k-http:` + key, 16 байт из `h>>56`. Rust `d2k_stable_id` — точные байты (split/disorder/fake-badsum/fake-spec); C/Rust differential PASS. **Ограничение:** production `stable_id` использует брендинг `r2o-http:` (осознанное отличие R2O), id для одного ключа разные. |
 | `fresh_id` | 334-352 | 19 | 16 случайных байт из `/dev/urandom`; fallback mono/counter LCG; `id[0]\|=1` | `main.rs` `random_id`/`r2o_fresh_id_fallback` | E | C читает `/dev/urandom` до 16 байт, при недоборе берёт `mono_ms ^ (++ctr * 0x9e3779b97f4a7c15)` и LCG, затем `id[0] \|= 1`. Rust `random_id` при ошибке urandom вызывает `r2o_fresh_id_fallback` (та же константа/LCG/счётчик) и ставит `id[0] \|= 1`; тест `fresh_id_matches_c_nonzero_and_random`. |
 | `say` | 215-224 | 10 | `vsnprintf` ошибки в `err/cap` | `format!`/`io::Error` в `r2o_quic_http3.rs`/`quic_replay.rs` | **P** | C пишет текст в переданный буфер, молча выходит при `!err\|\|cap==0`; Rust возвращает `io::Error`/`String`, вызывающий логирует. Контракт «назвать причину» тот же, тексты/владение иные. |

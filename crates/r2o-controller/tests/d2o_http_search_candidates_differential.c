@@ -29,6 +29,19 @@ int main(void) {
     stable_id("fake:ttl=5+badsum", id);
     print_hex("stable fake-spec", id);
 
+    uint8_t plan_id[16];
+    for (size_t i = 0; i < sizeof plan_id; i++) plan_id[i] = (uint8_t)i;
+    const char *keys[] = {
+        "split", "disorder", "fake-badsum", "fake-badsum-whole",
+        "fake-seqshift", "fake:ttl=5+badsum", "nope",
+    };
+    char plan[2048];
+    for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++) {
+        int rc = d2k_hs_candidate_text(keys[i], plan_id, plan, sizeof plan);
+        printf("plan %s rc=%d\n", keys[i], rc);
+        if (rc == 0) fputs(plan, stdout);
+    }
+
     for (int answer = 0; answer <= 11; answer++)
         printf("answer %d=%s\n", answer,
                d2k_hs_answer_name((d2k_hs_answer)answer));
