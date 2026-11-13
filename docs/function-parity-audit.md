@@ -84,14 +84,14 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 328 | 220 | 0 | 0 |
+| core-net | 548 | 329 | 219 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
 | datapath-core | 400 | 229 | 171 | 0 | 0 |
 | datapath-plan | 183 | 177 | 6 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1309** | **673** | **0** | **0** |
+| **Итого** | **1982** | **1310** | **672** | **0** | **0** |
 
-Это не оценка паритета: 673 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 672 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1309 / P 673 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1310 / P 672 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -342,12 +342,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 328 | 220 | 0 | 0 |
+| core-net | 548 | 329 | 219 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
 | datapath-core | 400 | 229 | 171 | 0 | 0 |
 | datapath-plan | 183 | 177 | 6 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1309** | **673** | **0** | **0** |
+| **Итого** | **1982** | **1310** | **672** | **0** | **0** |
 
 
 ---
@@ -734,7 +734,7 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `redirect_location_host` | 172-190 | 19 | http/https, authority до `/ ? # :`, `dns_host` | `httpup.rs:452-466 parse_location_host` | **E** | C `http://`/`https://` без регистра; authority до `/ ? # :`; nonempty <cap; `dns_host`. Rust `parse_location_host` те же шаги/границы. `tests/httpup.rs:69`. |
 | `portal_answer` | 193-225 | 33 | HTTP/1.x 301/302/303/307/308, ровно один Location, другой host, known/marker | `httpup.rs:411-450 portal_host` | **E** | C `upstream_len>=16`; статус `HTTP/1.[01] `, `30`, digit 1/2/3/7/8, space; строки до пустой: Location ровно один, `redirect_location_host`, `known_portal_host`; требует `line_end==p` (пустая строка), `location_seen`, `!host_equal(req,loc)`, known/marker. Rust те же статусы/дубликат/`same_host`/known+marker; C дополнительно требует пустую строку. `tests/httpup.rs:49,57`. |
 | `d2k_httpup_portal_response` | 227-238 | 12 | ответ портала по типу (portal/megafon/rt/beeline/deny/blackhole/обычный) | `r2k-core` `httpup::portal_response` | **E*** | C/Rust differential `test-controller-h3-httpup-differential.sh`: 11 C/Rust-ответов (portal, megafon, rt, beeline, deny, blackhole, ordinary, same-host, deceptive, not-redirect, rkn-path) совпали побайтово после нормализации. **Ограничение:** не покрыты малый cap, несколько `Location`, не-302/битый ответ. |
-| `d2k_httpup_request_target` | 240-251 | 12 | host и origin-target | `httpup.rs:169-173 request_target` | **P** | C проверяет host/target/cap, `parse_request`, длины, копирует host/target. Rust то же для валидного запроса; наследует строгий разбор (control/Upgrade/all-digit host). `tests/httpup.rs:31`. |
+| `d2k_httpup_request_target` | 240-251 | 12 | host и origin-target | `httpup.rs` `request_target` | **E*** | C/Rust differential `scripts/test-controller-h3-httpup-differential.sh` PASS (49 кейсов): для `GET /forum/index.php?q=1` с `Host: RuTracker.org:80` host и target совпали побайтово. **Ограничение:** проверен один валидный запрос; строгие ветви Rust (control/Upgrade/all-digit host) в C-кейсах отсутствуют. |
 | `d2k_httpup_portal_location` | 253-262 | 10 | host портала из upstream | `httpup.rs:201-206 portal_location` | **E** | C `portal_answer` + `strlen(location_host)<portal_cap`; Rust `portal_host`/`portal_location` те же known/marker. `tests/httpup.rs:69`. |
 | `d2k_httpup_redirect_https` | 264-277 | 14 | готовый 307 по host/target, только `target[0]=='/'`, пределы 255/2047 | `httpup.rs` `redirect_https` | **E*** | C/Rust differential `scripts/test-controller-h3-httpup-differential.sh` PASS (49 кейсов): полные байты 307-ответа после нормализации `X-D2K`/`X-R2O` → `X-UPGRADE`. **Ограничение:** лимиты 255/2047 и невалидный target не покрыты; бренд product-заголовка намеренно разный. |
 
