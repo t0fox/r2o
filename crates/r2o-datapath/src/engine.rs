@@ -349,6 +349,23 @@ pub struct R2oTcpPayloadStats {
     pub sni_next_seg: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct R2oSessionPayloadStats {
+    pub reverse: u64,
+    pub after_hello: u64,
+    pub late: u64,
+    pub not_hello: u64,
+    pub last_first_byte: u8,
+    pub sni_next_seg: u64,
+    pub capture_complete: u64,
+    pub capture_rejected: u64,
+    pub capture_expired: u64,
+    pub capture_full: u64,
+    pub http_later: u64,
+    pub http_unaligned: u64,
+    pub http_open_end: u64,
+}
+
 #[derive(Clone, Copy)]
 struct TrackedTcpPacket {
     key: TcpFlowKey,
@@ -598,6 +615,28 @@ impl TcpSessions {
 
     pub fn r2o_tcp_payload_stats(&self) -> R2oTcpPayloadStats {
         self.tcp_payload_stats
+    }
+
+    /// C `d2k_session_payload_stats`: единый снимок payload/capture/HTTP.
+    pub fn session_payload_stats(&self) -> R2oSessionPayloadStats {
+        let payload = self.tcp_payload_stats;
+        let capture = self.tcp_hello_capture.stats();
+        let http = self.http_keepalive_stats;
+        R2oSessionPayloadStats {
+            reverse: payload.reverse,
+            after_hello: payload.after_hello,
+            late: payload.late,
+            not_hello: payload.not_hello,
+            last_first_byte: payload.last_first_byte,
+            sni_next_seg: payload.sni_next_seg,
+            capture_complete: capture.completed,
+            capture_rejected: capture.rejected,
+            capture_expired: capture.expired,
+            capture_full: capture.full,
+            http_later: http.later,
+            http_unaligned: http.unaligned,
+            http_open_end: http.open_end,
+        }
     }
 
     /// Число распознанных пользовательских TCP-потоков с ClientHello.
@@ -2235,6 +2274,25 @@ mod tests {
         assert_eq!(udp.r2o_flow_refusals(), 0);
         assert_eq!(super::r2o_session_capacity(&tcp, &udp), slots * 2);
         assert_eq!(super::r2o_session_refusals(&tcp, &udp), 0);
+    }
+
+    #[test]
+    fn session_payload_stats_combines_capture_and_http_like_c() {
+        let mut sessions = TcpSessions::default();
+        let empty = sessions.session_payload_stats();
+        assert_eq!(empty, super::R2oSessionPayloadStats::default());
+
+        sessions.tcp_payload_stats.reverse = 5;
+        sessions.tcp_payload_stats.last_first_byte = 0x16;
+        sessions.http_keepalive_stats.later = 2;
+        sessions.http_keepalive_stats.unaligned = 1;
+        sessions.http_keepalive_stats.open_end = 4;
+        let stats = sessions.session_payload_stats();
+        assert_eq!(stats.reverse, 5);
+        assert_eq!(stats.last_first_byte, 0x16);
+        assert_eq!(stats.http_later, 2);
+        assert_eq!(stats.http_unaligned, 1);
+        assert_eq!(stats.http_open_end, 4);
     }
 
     #[test]

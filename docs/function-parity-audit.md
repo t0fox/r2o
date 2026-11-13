@@ -86,10 +86,10 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 197 | 351 | 0 | 0 |
 | core-state | 692 | 182 | 509 | 0 | 0 |
-| datapath-core | 400 | 169 | 231 | 0 | 0 |
+| datapath-core | 400 | 170 | 230 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 74 | 85 | 0 | 0 |
-| **Итого** | **1982** | **798** | **1184** | **0** | **0** |
+| **Итого** | **1982** | **799** | **1183** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 798 / P 1184 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 799 / P 1183 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -346,10 +346,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 197 | 351 | 0 | 0 |
 | core-state | 692 | 182 | 510 | 0 | 0 |
-| datapath-core | 400 | 169 | 231 | 0 | 0 |
+| datapath-core | 400 | 170 | 230 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 74 | 85 | 0 | 0 |
-| **Итого** | **1982** | **798** | **1184** | **0** | **0** |
+| **Итого** | **1982** | **799** | **1183** | **0** | **0** |
 
 
 ---
@@ -3936,7 +3936,7 @@ CLI-логирования, health-файла, duration, состава свод
 | `d2k_session_exchanges` | 3605–3607 | 3 | число обменов | `engine.rs` `session_exchanges`, `r2o_udp_sessions.rs` `session_exchanges` | E | C `s->exchanges++` при первом ответе/прикладных данных. Rust считает TCP-обмены при `exchange_told` (кроме controller probe) и UDP при отправке `R2oUdpExchangeEvent`; тесты `tcp_журнал_повышает...` (`1→2`) и `r2o_stun_сверяет...` (`1→2`). |
 | `d2k_session_reply_hidden` | 3609-3611 | 3 | ACK указал на невидимый ответ | `TcpSessions::r2o_reply_hidden` | E | C `s->reply_hidden`. Rust `r2o_reply_hidden()`; дифференциал `r2o-tcp-reply-hidden-differential.sh` и unit-проверки 0/1. |
 | `d2k_session_tcp_hello_flows` | 3613-3615 | 3 | TCP-потоки с ClientHello | `TcpSessions::r2o_tcp_hello_flows` | E | C `s->tcp_hello_flows` (`session.c:1577`). Rust `r2o_tcp_hello_flows()`; unit-тесты проверяют 1 после ClientHello и неизменность на повторе. |
-| `d2k_session_payload_stats` | 3617–3638 | 22 | снимок: reverse/after_hello/late/not_hello/first_byte/sni_next_seg/capture + http_later/unaligned/open_end | `engine.rs R2oTcpPayloadStats` | **P** | **Совпадает по полям:** reverse/after_hello/late/not_hello/first_byte/sni_next_seg/capture_* и HTTP keep-alive счётчики; Rust `r2o_tcp_payload_stats` (`main.rs:719-733`). **Отличия:** C `capture.rejected/expired/full` берутся из `d2k_capture`, Rust `capture_stats`; C `last_nonhello_first` — первый байт последнего не-ClientHello, Rust `last_first_byte`; `test-datapath-stats-timer-differential.sh` и payload-тесты частичные. |
+| `d2k_session_payload_stats` | 3617–3638 | 22 | снимок: reverse/after_hello/late/not_hello/first_byte/sni_next_seg/capture + http_later/unaligned/open_end | `engine.rs` `R2oSessionPayloadStats`/`session_payload_stats` | E | C заполняет `d2k_payload_stats` из `s->pay_*`, `capture` и HTTP-счётчиков. Rust `R2oSessionPayloadStats` объединяет `R2oTcpPayloadStats`, `CaptureStats` и `R2oHttpKeepAliveStats`; тест `session_payload_stats_combines_capture_and_http_like_c` проверяет поля и значения. |
 | `d2k_session_journal` | 3640-3642 | 3 | вернуть журнал сессии | `R2oFlowJournal` (`flow_journal.rs:543`) | **P** | C `return s ? s->jrn : NULL`. Rust журнал `R2oFlowJournal` живёт в движке/`run`; отдельного getter-а нет. D22 сверяет записи журнала. |
 
 ## datapath/track.c (18 функций)
