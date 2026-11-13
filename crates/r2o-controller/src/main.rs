@@ -6486,11 +6486,28 @@ fn r2o_discovery_owned_fallback_needed(
 
 #[cfg(unix)]
 fn r2o_discovery_plan_shape(shape: u8) -> u8 {
+    // C `question_shape`: ECH-приветствие даёт MODERN, неизвестная форма —
+    // GRANDFATHER, иначе форма как есть (QUIC остаётся QUIC).
     if shape == SHAPE_ECH_TCP {
         SHAPE_MODERN
+    } else if shape == 0 {
+        SHAPE_GRANDFATHER
     } else {
         shape
     }
+}
+
+/// C `hello_fits_client`: не-TCP и не-приветственные формы принимают любой
+/// снимок; для MODERN/LEGACY/ECH_TCP подходит UNKNOWN (shape 0) или точная
+/// форма.
+fn r2o_cached_shape_fits(transport: u8, shape: u8, want: u8) -> bool {
+    if transport != 6 {
+        return true;
+    }
+    if !matches!(want, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP) {
+        return true;
+    }
+    shape == 0 || shape == want
 }
 
 #[cfg(unix)]
@@ -13181,9 +13198,11 @@ impl DiscoveryWorker {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get_for_host(&target)
             .map(|(shape, snapshot, timestamp)| (shape, snapshot.to_vec(), timestamp));
+        // Кеш снимков относится к TLS-целям (TCP); C-гейт транспорта
+        // `hello_fits_client` здесь всегда проходит.
         let cached_client_hello = cached_shape
             .as_ref()
-            .filter(|(shape, _, _)| *shape == target.shape)
+            .filter(|(shape, _, _)| r2o_cached_shape_fits(6, *shape, target.shape))
             .map(|(_, snapshot, _)| snapshot.clone());
         if let Some(client_hello) = cached_client_hello.as_ref() {
             self.client_hellos
@@ -23756,6 +23775,46 @@ mod tests {
         let fallback_a = super::r2o_fresh_id_fallback();
         let fallback_b = super::r2o_fresh_id_fallback();
         assert_ne!(fallback_a, fallback_b);
+    }
+
+    #[test]
+    fn discovery_plan_shape_and_cached_shape_match_c() {
+        assert_eq!(
+            super::r2o_discovery_plan_shape(super::SHAPE_QUIC),
+            super::SHAPE_QUIC
+        );
+        assert_eq!(
+            super::r2o_discovery_plan_shape(super::SHAPE_ECH_TCP),
+            super::SHAPE_MODERN
+        );
+        assert_eq!(super::r2o_discovery_plan_shape(0), super::SHAPE_GRANDFATHER);
+        assert_eq!(
+            super::r2o_discovery_plan_shape(super::SHAPE_LEGACY),
+            super::SHAPE_LEGACY
+        );
+        // C `hello_fits_client`: не-TCP и не-приветственные формы принимают
+        // любой снимок; для MODERN/LEGACY/ECH_TCP — UNKNOWN или точная форма.
+        assert!(super::r2o_cached_shape_fits(
+            17,
+            super::SHAPE_LEGACY,
+            super::SHAPE_MODERN
+        ));
+        assert!(super::r2o_cached_shape_fits(
+            6,
+            super::SHAPE_LEGACY,
+            super::SHAPE_QUIC
+        ));
+        assert!(super::r2o_cached_shape_fits(6, 0, super::SHAPE_MODERN));
+        assert!(super::r2o_cached_shape_fits(
+            6,
+            super::SHAPE_MODERN,
+            super::SHAPE_MODERN
+        ));
+        assert!(!super::r2o_cached_shape_fits(
+            6,
+            super::SHAPE_LEGACY,
+            super::SHAPE_MODERN
+        ));
     }
 
     #[test]
