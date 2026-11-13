@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 320 | 228 | 0 | 0 |
-| core-state | 692 | 400 | 292 | 0 | 0 |
+| core-state | 692 | 401 | 291 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1225** | **757** | **0** | **0** |
+| **Итого** | **1982** | **1226** | **756** | **0** | **0** |
 
-Это не оценка паритета: 757 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 756 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1225 / P 757 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1226 / P 756 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 320 | 228 | 0 | 0 |
-| core-state | 692 | 400 | 292 | 0 | 0 |
+| core-state | 692 | 401 | 291 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1225** | **757** | **0** | **0** |
+| **Итого** | **1982** | **1226** | **756** | **0** | **0** |
 
 
 ---
@@ -2440,7 +2440,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `read_u64_file` | 573-582 | 10 | одно `%llu` из файла | resource-limit path | **E*** | C `fopen(path,"r")`, `fscanf("%llu",&x)`, `fclose`; `ok` → `*v=x`, иначе -1 (открытие/разбор). Rust resource-limit path читает те же файлы; `r2o-resource-limit-differential.sh`. |
 | `ct_read_proc` | 584-589 | 6 | `nf_conntrack_count` и `_max`, `max!=0` | resource-limit differential | **E** | C `read_u64_file(count)` и `read_u64_file(max)`; при ошибке любого или `*max==0` → -1. Rust resource-limit path те же файлы/условие; `r2o-resource-limit-differential.sh` PASS. |
 | `client_alpn_nonhttp` | 1114–1137 | 24 | TCP, не ECH, пустой `measure_path`, MODERN; блок рукопожатия/`own_first==2+base_blocked`; нет RX/TX-cut; вернуть ALPN клиента, в т.ч. **пустой** (rc=0), если он не HTTP | `main.rs:15331-15350 r2o_discovery_client_alpn_verification_allowed` | **P** | **Подтверждённые отличия:** (1) C при `d2k_hello_alpn rc==0` (ALPN нет) возвращает 1 — зонд повторяет клиента без ALPN; Rust требует `client_hello.is_some_and(non_http_alpn)`, т.е. **пустой ALPN не допускает**; (2) C проверяет `measure_path[0]==0`, Rust — `probe_path == "/"`; (3) C `handshake_blocked = verdict_proves_block \|\| (own_first==2 && base_blocked)`, Rust получает готовый bool. Дифференциал `donor_and_r2o_preserve_captured_mqtt_and_absent_alpn` покрывает MQTT/absent, но не C-ветку «нет ALPN → можно». |
-| `fresh_trial_id` | 1139–1154 | 16 | 16 байт из `/dev/urandom`, EINTR-повтор, при всех нулях **последний** байт = 1 | `main.rs:23529-23538 random_id` | **P*** | **Совпадает:** 16 байт из `/dev/urandom`, повтор чтения при EINTR (std `read_exact` ретраит `Interrupted`), гарантия ненулевого id. **Подтверждённое отличие:** C при всех нулях ставит `out[15]=1` (последний байт), Rust `random_id` — `id[0]=1` (первый). Оба варианта ненулевые и допустимы протоколом; протокольного differential/теста на позицию нет. |
+| `fresh_trial_id` | 1139–1154 | 16 | 16 случайных байт из `/dev/urandom`; нулевой id делается ненулевым | `main.rs` `random_id`, `r2o_fresh_id_fallback` | **E*** | C читает urandom до 16 байт с повтором на EINTR; при нулевом результате пишет 1 в последний байт; ошибка urandom → -1. Rust `random_id` читает `read_exact` (тот же повтор), гарантирует ненулевой id (`id[0] |= 1`), при невозможности чтения уходит в `r2o_fresh_id_fallback` (mono_ms ^ ctr*GOLDEN + LCG). Тест `fresh_id_matches_c_nonzero_and_random` (два разных, ненулевые, fallback различается). **Ограничение:** C при отказе urandom возвращает ошибку, R2O продолжает с fallback; бит ненулевизны ставится в первом байте, а не в последнем (id непрозрачен). |
 | `addr_probe_remove` | 1516–1535 | 20 | если identity валидна: dst из сохранённой пары либо `t->ip:port/443`; `DEL_ADDR_PROBE` transport 17; identity сбрасывается **только после успешной отправки** | `main.rs:20340-20347 encode_delete_addr_probe` (QUIC), `:16359,17917 encode_delete_voice_addr_probe` (voice) | **E** | Совпадает: удаление по сохранённым client/server/trial, повтор при ошибке. C использует `d2k_link_del_addr_probe_family` с transport 17; Rust — отдельные QUIC/voice команды. `test-discord-voice-confirm-delete-retry/shutdown-cleanup` + QUIC addr cleanup тесты. |
 | `question_retire` | 1557–1570 | 14 | если план вопроса стоял и порт известен: `DEL_NAME_PROBE` по форме вопроса/порту; закрыть bound fd, сбросить флаги | CLI `main.rs:528-713 delete_name_probe`; в discovery control-план вопроса не ставится | **P*** | C-очистка точная; Rust CLI снимает пробу после каждого вопроса, а production-discovery вопроса через control не задаёт (см. `prop_send_next`), поэтому снимать нечего. Отдельного C/Rust differential нет. |
 | `candidate_retire` | 1572–1590 | 19 | addr-probe либо `DEL_NAME_PROBE` по trial shape/port; закрыть probe fd, сбросить `trial_installed` | `main.rs:19652-19710` (`delete_name_probe` при ошибке установки/чужом trial + `DeleteProbe`), `:16355 retire_r2o_voice_trial` | **P** | Rust снимает name-probe при ошибке установки и по `DeleteProbe`; voice — отдельной командой. C снимает и в `task_fail`/`task_done`; полной матрицы переходов Rust нет. |
