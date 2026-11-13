@@ -1,5 +1,5 @@
 use r2o_controller::http_search::{
-    Answer, candidate_key_from_plan_text, candidate_keys, candidate_text, judge,
+    Answer, candidate_key_from_plan_text, candidate_keys, candidate_text, judge, known_key,
     read_probe_response, stable_id,
 };
 use std::io::{self, Cursor, Read};
@@ -204,6 +204,40 @@ fn exposes_the_same_ordered_http_search_questions() {
             "fake-seqshift"
         ]
     );
+}
+
+#[test]
+fn known_key_matches_c_predicate() {
+    for accepted in [
+        "split",
+        "disorder",
+        "fake-badsum",
+        "fake-seqshift",
+        "fake-badsum-whole",
+        "fake:ttl=5+badsum",
+        "fake:badsum+seqshift=-66000",
+        "fake:ttl=255+badsum+seqshift=2147483647",
+    ] {
+        assert!(known_key(accepted), "rejected {accepted:?}");
+    }
+    for rejected in [
+        "",
+        "fake:",
+        "fake:ttl=1",
+        "fake:badsum+badsum",
+        "fake:seqshift=0",
+        "fake:badsum+ttl=1",
+        "fake:ttl=0+badsum",
+        "fake:ttl=256+badsum",
+        "fake:seqshift=abc",
+        "fake:ttl=1+badsum+seqshift=-2147483648",
+        "unknown",
+        "fake-badsum-whole2",
+    ] {
+        assert!(!known_key(rejected), "accepted {rejected:?}");
+    }
+    let too_long = format!("fake:ttl=1+badsum+{}", "x".repeat(30));
+    assert!(!known_key(&too_long), "accepted {too_long:?}");
 }
 
 #[test]

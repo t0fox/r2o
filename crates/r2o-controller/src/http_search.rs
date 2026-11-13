@@ -682,8 +682,19 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
+/// C `known_key`: встроенный ключ, `fake-badsum-whole` или валидный `fake:`-spec.
+pub fn known_key(key: &str) -> bool {
+    matches!(
+        key,
+        "split" | "disorder" | "fake-badsum" | "fake-seqshift" | "fake-badsum-whole"
+    ) || poison_key_spec(key).is_some()
+}
+
 /// Формирует текст пробного HTTP-плана в формате R2O (`r2o-plan`).
 pub fn candidate_text(key: &str, id: Option<&[u8; 16]>) -> Option<String> {
+    if !known_key(key) {
+        return None;
+    }
     let poison = match key {
         "fake-badsum" | "fake-badsum-whole" => Some("badsum".to_owned()),
         "fake-seqshift" => Some("seqshift=-66000".to_owned()),

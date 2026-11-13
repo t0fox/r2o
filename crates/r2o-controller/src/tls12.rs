@@ -6,7 +6,7 @@
 use aes_gcm::aead::{AeadInPlace, KeyInit};
 use aes_gcm::{Aes128Gcm, Nonce};
 use sha2::{Digest, Sha256};
-use std::io::Read;
+use std::io::{Read, Write};
 
 /// C `REC_MAX` (`tls12.c`/`tls13.c`): предел тела одной записи.
 pub const TLS_RECORD_MAX: usize = 18_432;
@@ -367,11 +367,78 @@ impl Tls13RecordWriter {
     }
 }
 
+/// C `d2k_tls12_read`: app-data с остатком и пропуском не-app записей.
+pub struct Tls12AppReader {
+    records: Tls12RecordReader,
+    plain: Vec<u8>,
+    offset: usize,
+}
+
+impl Tls12AppReader {
+    pub fn new(records: Tls12RecordReader) -> Self {
+        Self {
+            records,
+            plain: Vec::new(),
+            offset: 0,
+        }
+    }
+
+    pub fn records(&self) -> &Tls12RecordReader {
+        &self.records
+    }
+
+    pub fn read(&mut self, reader: &mut impl Read, buffer: &mut [u8]) -> Result<usize, String> {
+        if self.offset < self.plain.len() {
+            let length = (self.plain.len() - self.offset).min(buffer.len());
+            buffer[..length].copy_from_slice(&self.plain[self.offset..self.offset + length]);
+            self.offset += length;
+            return Ok(length);
+        }
+        loop {
+            let mut payload = Vec::new();
+            let (content_type, length) =
+                self.records
+                    .read_record(reader, &mut payload, TLS_RECORD_MAX)?;
+            if content_type == 21 {
+                // C `REC_ALERT`: close_notify — конец потока, иная тревога — отказ.
+                if length >= 2 && payload[1] == 0 {
+                    return Ok(0);
+                }
+                let level = payload.first().copied().unwrap_or(0);
+                let description = payload.get(1).copied().unwrap_or(0);
+                return Err(format!("тревога {description} уровня {level}"));
+            }
+            if content_type != TLS_RECORD_APPDATA {
+                continue;
+            }
+            self.plain = payload;
+            self.offset = 0;
+            let taken = self.plain.len().min(buffer.len());
+            buffer[..taken].copy_from_slice(&self.plain[..taken]);
+            self.offset = taken;
+            return Ok(taken);
+        }
+    }
+}
+
+/// C `d2k_tls12_write`: запечатать app data и записать в поток.
+pub fn tls12_write(
+    stream: &mut impl Write,
+    writer: &mut Tls12RecordWriter,
+    data: &[u8],
+) -> Result<(), String> {
+    let wire = writer.seal(TLS_RECORD_APPDATA, data)?;
+    stream
+        .write_all(&wire)
+        .map_err(|error| format!("запись не ушла: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        TLS_RECORD_APPDATA, TLS_RECORD_MAX, Tls12RecordReader, Tls12RecordWriter, Tls12Transcript,
-        Tls13RecordReader, Tls13RecordWriter, d2k_tls12_prf_for_test, tls12_aad, tls12_nonce,
+        TLS_RECORD_APPDATA, TLS_RECORD_MAX, Tls12AppReader, Tls12RecordReader, Tls12RecordWriter,
+        Tls12Transcript, Tls13RecordReader, Tls13RecordWriter, d2k_tls12_prf_for_test, tls12_aad,
+        tls12_nonce, tls12_write,
     };
     use std::io::Cursor;
 
@@ -400,6 +467,41 @@ mod tests {
             out,
             hex("e3f229ba727be17b8d122620557cd453c2aab21d07c3d495329b52d4e61edb5a")
         );
+    }
+
+    #[test]
+    fn tls12_app_read_write_matches_c() {
+        let salt = [1, 2, 3, 4];
+        let mut writer = Tls12RecordWriter::new(salt, key(), 0);
+        let mut wire = Vec::new();
+        // Не-app запись пропускается, app-data возвращается с остатком.
+        wire.extend_from_slice(&writer.seal(22, b"h").unwrap());
+        tls12_write(&mut wire, &mut writer, b"hello").unwrap();
+        wire.extend_from_slice(&writer.seal(TLS_RECORD_APPDATA, b"world").unwrap());
+        assert_eq!(writer.sequence(), 3);
+
+        let mut app = Tls12AppReader::new(Tls12RecordReader::new(salt, key(), 0, true));
+        let mut input = Cursor::new(wire);
+        let mut buffer = [0_u8; 8];
+        assert_eq!(app.read(&mut input, &mut buffer[..3]).unwrap(), 3);
+        assert_eq!(&buffer[..3], b"hel");
+        assert_eq!(app.read(&mut input, &mut buffer).unwrap(), 2);
+        assert_eq!(&buffer[..2], b"lo");
+        assert_eq!(app.read(&mut input, &mut buffer).unwrap(), 5);
+        assert_eq!(&buffer[..5], b"world");
+
+        // close_notify — конец потока.
+        let mut alert_writer = Tls12RecordWriter::new(salt, key(), 0);
+        let close = alert_writer.seal(21, &[1, 0]).unwrap();
+        let mut app = Tls12AppReader::new(Tls12RecordReader::new(salt, key(), 0, true));
+        assert_eq!(app.read(&mut Cursor::new(close), &mut buffer).unwrap(), 0);
+
+        // Иная тревога — отказ с C-текстом «тревога <описание> уровня <уровень>».
+        let mut alert_writer = Tls12RecordWriter::new(salt, key(), 0);
+        let fatal = alert_writer.seal(21, &[2, 40]).unwrap();
+        let mut app = Tls12AppReader::new(Tls12RecordReader::new(salt, key(), 0, true));
+        let error = app.read(&mut Cursor::new(fatal), &mut buffer).unwrap_err();
+        assert_eq!(error, "тревога 40 уровня 2");
     }
 
     #[test]
