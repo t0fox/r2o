@@ -86,10 +86,10 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 222 | 326 | 0 | 0 |
 | core-state | 692 | 182 | 509 | 0 | 0 |
-| datapath-core | 400 | 196 | 204 | 0 | 0 |
+| datapath-core | 400 | 197 | 203 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **875** | **1107** | **0** | **0** |
+| **Итого** | **1982** | **876** | **1106** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 875 / P 1107 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 876 / P 1106 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -346,10 +346,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 222 | 326 | 0 | 0 |
 | core-state | 692 | 188 | 504 | 0 | 0 |
-| datapath-core | 400 | 196 | 204 | 0 | 0 |
+| datapath-core | 400 | 197 | 203 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **875** | **1107** | **0** | **0** |
+| **Итого** | **1982** | **876** | **1106** | **0** | **0** |
 
 
 ---
@@ -3893,7 +3893,7 @@ CLI-логирования, health-файла, duration, состава свод
 | `d2k_session_plan_count` | 2996-2998 | 3 | число активных планов | `control.rs:178 NamePlans::r2o_plan_count` | **E*** | C `return s ? d2k_plantab_count(s->plans) : 0`. Rust `NamePlans::r2o_plan_count()` считает активные записи таблицы; unit `r2o_plan_count`. |
 | `d2k_session_plan_capacity` | 3000–3002 | 3 | ёмкость планов | `control.rs:182 r2o_plan_capacity` | **E*** | C `d2k_plantab_capacity`; Rust `NamePlans::r2o_plan_capacity()`. Ёмкость выводится из `--r2o-flow-capacity`; тест `control.rs:2670-2671`. |
 | `silence_deadline` (static) | 3018–3028 | 11 | RTT неизвестен → 2 с; иначе `8*RTT`, clamp 1..5 с | `engine.rs:239-242` | **E** | **Точное совпадение:** C `2*NS_PER_S` при `!rtt_ns`; иначе `8*rtt`, минимум 1 с, максимум 5 с (`session.c:3018-3028`). Rust `rtt.map_or(2s, \|rtt\| rtt*8 clamp 1..5)` (`engine.rs:239-242`). |
-| `tcp_silence_observe` (static) | 3034–3049 | 16 | SILENT: не probe, есть hello, не told/suspected, `rev_pkts>0`, нет payload после hello, нет reverse RST; ждать deadline или повтор hello | `engine.rs:223-252 tcp_silence_event` | **P** | **Совпадает:** те же условия (probe/silence_reported/reverse_seen/response_payload/saw_reverse_rst), deadline или `hello_repeats>0`; событие `R2oTcpSilenceEvent` с planned/elapsed. **Отличие:** C `F->hello_repeats > 0` и отдельный `suspected`; Rust `session.repeat_reported`/`silence_reported` — флаги отправки события, не обязательно факта повтора; семантика близка, но не тождественна. `test-tcp-silence-current-differential.sh`. |
+| `tcp_silence_observe` (static) | 3034–3049 | 16 | SILENT: не probe, есть hello, не told/suspected, `rev_pkts>0`, нет payload после hello, нет reverse RST; ждать deadline или повтор hello | `engine.rs` `tcp_silence_event` | E | C проверяет `!controller_probe`, наличие hello, `!silence_reported`, `reverse_seen`, `!response_payload`, `!saw_reverse_rst`, затем deadline или `hello_repeats>0`. Rust `tcp_silence_event` повторяет те же условия (флаги отправки события `silence_reported`/`repeat_reported`), deadline `clamp(8×RTT,1..5с)` или 2с; тест `tcp_silence_event_matches_c_conditions` (событие, payload, RST, probe). |
 | `fin_retry_window` (static) | 3063–3067 | 5 | окно повтора FIN: `3×max(3×RTT, 1с)` = `max(9×RTT, 3с)` | `engine.rs:1389 fin_retry_window` | **E** | Формула совпадает: Rust `rtt*9`, минимум 3 с; `None` (RTT неизвестен) → 3 с, что соответствует C `rtt_ns=0`. Тест `engine.rs:3823` (истечение ограниченного окна FIN) и `:3568` (повтор FIN). |
 | `fin_window_over` (static) | 3069-3073 | 5 | `pending_fin && now>=pending_fin_ns && elapsed>=3*max(3*rtt,1s)` | `engine.rs:708` (`pending_fin_at` + `fin_retry_window`) | **E** | C `f->pending_fin && now>=pending_fin_ns && now-pending_fin_ns >= fin_retry_window(f)`, где окно `3*max(3*rtt,1s)`. Rust `pending_fin_at.is_some_and(\|started\| elapsed >= fin_retry_window(session.rtt))`. |
 | `sweep_one` (static) | 3084–3087 | 4 | обход TCP-потоков, `told += tcp_silence_observe` | `engine.rs:693 expire_with_silent`, `:1330-1372` sweep | **P** | C проходит `d2k_track_walk(flows, sweep_one)` и считает подозрения. Rust `tcp_sessions.sweep_silent`/`tcp_silence_events`; счётчик `told` не возвращается, события забираются отдельно. Эквивалент по наблюдению, API иной. |

@@ -2439,6 +2439,39 @@ mod tests {
     }
 
     #[test]
+    fn tcp_silence_event_matches_c_conditions() {
+        let plan = tcp_fake_plan_with_rst_guard();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+        );
+        let hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello_with_sni());
+        decide_with_session(&mut sessions, &plan, &hello);
+        let key = TcpFlowKey::from_packet(&hello).unwrap();
+        let session = sessions.flows.get_mut(&key).unwrap();
+        session.reverse_seen = true;
+        let deadline = session.hello_at.unwrap() + Duration::from_secs(6);
+        assert!(super::tcp_silence_event(&key, session, deadline).is_some());
+        session.response_payload = true;
+        assert!(super::tcp_silence_event(&key, session, deadline).is_none());
+        session.response_payload = false;
+        session.saw_reverse_rst = true;
+        assert!(super::tcp_silence_event(&key, session, deadline).is_none());
+        session.saw_reverse_rst = false;
+        session.controller_probe = true;
+        assert!(super::tcp_silence_event(&key, session, deadline).is_none());
+    }
+
+    #[test]
     fn session_capacity_flows_and_refusals_match_c() {
         let tcp = TcpSessions::default();
         let udp = crate::r2o_udp_sessions::R2oUdpSessions::new().unwrap();
