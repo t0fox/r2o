@@ -8395,6 +8395,15 @@ fn r2o_legacy_exchange_is_clean(event: &r2k_core::control::LegacyExchangeEvent) 
         && event.planned == r2k_core::control::LEGACY_PLANNED_NO
 }
 
+/// C `d2k_ev_outer_appdata` (`core/link.c:1079-1094`): внешний тип записи 23
+/// — бит 3 маски `seen_types` (типы записей 20..23 → биты 0..3). Это
+/// наблюдение уровня 2, а не доказательство работы приложения: в TLS 1.3
+/// внешним типом 23 едет и второй полёт рукопожатия (RFC 8446 §5.2).
+#[cfg(unix)]
+fn r2o_ev_outer_appdata(event: Option<&r2k_core::control::LegacyExchangeEvent>) -> bool {
+    event.is_some_and(|event| event.seen_types & 0x08 != 0)
+}
+
 #[cfg(unix)]
 const R2O_QUIET_SLOTS: usize = 64;
 #[cfg(unix)]
@@ -13680,6 +13689,17 @@ impl DiscoveryWorker {
                     .cloned()
                     .map(|watching| (index, Some(watching)))
             })
+    }
+
+    /// C `on_exchange` (`sched.c:10311-10322`): последующий TLS-ответ по
+    /// подтверждённому имени — только наблюдение. Задача наблюдения
+    /// освобождается, подтверждённый план остаётся стоять.
+    fn r2o_note_followup_tls_observation(&mut self, task_key: &R2oDiscoveryTaskKey) -> bool {
+        if !self.completed.remove(task_key) {
+            return false;
+        }
+        self.completed_started_at.remove(task_key);
+        true
     }
 
     fn r2o_forget_watching_task(&mut self, task_key: &R2oDiscoveryTaskKey) {
@@ -20385,7 +20405,12 @@ impl ControlClient {
                     let recent_names = tcp_witness_names
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    self.r2o_handle_legacy_exchange(&event, &recent_names, &mut clean_handshakes);
+                    self.r2o_handle_legacy_exchange(
+                        &event,
+                        &recent_names,
+                        &mut discovery,
+                        &mut clean_handshakes,
+                    );
                     continue;
                 }
                 if frame.kind == EVENT_CLIENT_SHAPE {
@@ -21231,6 +21256,7 @@ impl ControlClient {
         &self,
         event: &r2k_core::control::LegacyExchangeEvent,
         recent_tcp_names: &R2oRecentTcpNameCache,
+        discovery: &mut Option<(DiscoveryWorker, Catalog, PathBuf, Option<u32>)>,
         clean_handshakes: &mut R2oCleanHandshakeCache,
     ) {
         let now = std::time::Instant::now();
@@ -21241,6 +21267,29 @@ impl ControlClient {
                 println!(
                     "v22 EXCHANGE {}: ответ сервера без плана отмечен как чистое рукопожатие",
                     name
+                );
+            }
+        }
+        // C `on_exchange`: внешний тип 23 по подтверждённому имени — лишь
+        // наблюдение «последующего TLS-ответа». Поток собственного зонда под
+        // планом не считается последующим соединением.
+        if r2o_ev_outer_appdata(Some(event))
+            && event.planned != r2k_core::control::LEGACY_PLANNED_YES
+            && let Some(name) = recent_tcp_names.recall(&event.key)
+        {
+            let task_key = (name.to_owned(), event.key[0], event.key[37]);
+            let freed = discovery.as_mut().is_some_and(|(worker, _, _, _)| {
+                worker.r2o_note_followup_tls_observation(&task_key)
+            });
+            if freed {
+                r2o_say_quiet(
+                    &format!("followup-tls:{name}"),
+                    format!(
+                        "v22 EXCHANGE {name}: замечен последующий TLS-ответ ({} байт); \
+                         это не доказательство работы приложения клиента — уровень и \
+                         источник подтверждения не меняются",
+                        event.num
+                    ),
                 );
             }
         }
@@ -30664,6 +30713,57 @@ mod tests {
             r2k_core::control::LEGACY_PLANNED_NO,
             17
         )));
+    }
+
+    #[test]
+    fn ev_outer_appdata_matches_c_mask_vectors() {
+        let mut key = [0; r2k_core::control::KEY_LEN];
+        key[0] = 4;
+        key[37] = 6;
+        let event = |seen_types| r2k_core::control::LegacyExchangeEvent {
+            key,
+            first_record_type: 21,
+            seen_types,
+            num: 512,
+            server_hello: false,
+            planned: r2k_core::control::LEGACY_PLANNED_NO,
+        };
+        // Векторы core/test_link.c:489-510.
+        const APP_DATA: u8 = 1 << (23 - 20);
+        const HANDSHAKE: u8 = 1 << (22 - 20);
+        const ALERT: u8 = 1 << (21 - 20);
+        const CCS: u8 = 1 << (20 - 20);
+        assert!(super::r2o_ev_outer_appdata(Some(&event(APP_DATA))));
+        assert!(!super::r2o_ev_outer_appdata(Some(&event(ALERT))));
+        assert!(!super::r2o_ev_outer_appdata(Some(&event(HANDSHAKE))));
+        assert!(!super::r2o_ev_outer_appdata(Some(&event(CCS))));
+        assert!(!super::r2o_ev_outer_appdata(Some(&event(0))));
+        assert!(super::r2o_ev_outer_appdata(Some(&event(
+            HANDSHAKE | APP_DATA
+        ))));
+        assert!(!super::r2o_ev_outer_appdata(Some(&event(
+            CCS | ALERT | HANDSHAKE
+        ))));
+        assert!(super::r2o_ev_outer_appdata(Some(&event(0xFF))));
+        assert!(!super::r2o_ev_outer_appdata(None));
+    }
+
+    #[test]
+    fn followup_tls_observation_frees_watching_task_like_c() {
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        let watched = ("watched.example".to_string(), 4, 6);
+        worker.completed.insert(watched.clone());
+        worker
+            .completed_started_at
+            .insert(watched.clone(), std::time::Instant::now());
+        assert!(worker.r2o_note_followup_tls_observation(&watched));
+        assert!(!worker.completed.contains(&watched));
+        assert!(!worker.completed_started_at.contains_key(&watched));
+        // Повтор по уже снятой задаче наблюдением не считается.
+        assert!(!worker.r2o_note_followup_tls_observation(&watched));
+        // Имя без подтверждённой задачи не освобождается.
+        let unknown = ("unknown.example".to_string(), 4, 6);
+        assert!(!worker.r2o_note_followup_tls_observation(&unknown));
     }
 
     #[test]

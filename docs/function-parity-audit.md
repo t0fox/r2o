@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 324 | 224 | 0 | 0 |
-| core-state | 692 | 462 | 230 | 0 | 0 |
+| core-state | 692 | 463 | 229 | 0 | 0 |
 | datapath-core | 400 | 221 | 179 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1293** | **689** | **0** | **0** |
+| **Итого** | **1982** | **1294** | **688** | **0** | **0** |
 
-Это не оценка паритета: 689 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 688 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1293 / P 689 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1294 / P 688 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 324 | 224 | 0 | 0 |
-| core-state | 692 | 462 | 230 | 0 | 0 |
+| core-state | 692 | 463 | 229 | 0 | 0 |
 | datapath-core | 400 | 221 | 179 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1293** | **689** | **0** | **0** |
+| **Итого** | **1982** | **1294** | **688** | **0** | **0** |
 
 
 ---
@@ -2288,7 +2288,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_link_del_name_probe_family` | 1020–1049 | 30 | DEL_NAME_PROBE: имя, shape, family 4/6, source port | `control.rs` `encode_delete_name_probe` | E | C не проверяет shape вовсе (только имя/порт/family). Rust `encode_delete_name_probe` также не проверяет shape; кадр name_len+name+shape+family+sport BE. Тест `delete_name_probe_ignores_shape_like_c`. |
 | `d2k_link_del_addr` | 1051–1054 | 4 | DEL_ADDR IPv4: обёртка family=4 → `del_addr_family` | `control.rs` `encode_delete_addr` | E | C-обёртка передаёт family=4; тело family+16 байт адреса (v4 + 12 нулей)+shape. Rust `encode_delete_addr(IpAddr::V4, shape)` даёт тот же кадр; тест `link_wrappers_emit_c_family4_frames` сверяет длину 18 и поля. |
 | `d2k_link_del_addr_family` | 1056–1076 | 21 | family 4/6, ip nonnull, shape ok; frame len=20: family+16 addr+shape | `control::encode_delete_addr` | E | C проверяет family/ip/`addr_shape_ok` (1/2/3/5/6/8..13) и кодирует фиксированные 18 байт. Rust `encode_delete_addr` проверяет `valid_addr_shape` (теперь с 8..13) и family; кадр совпадает. Тест `addr_commands_accept_tcp_context_shapes_like_c`. |
-| `d2k_ev_outer_appdata` | 1079–1094 | 16 | `seen_types & (1 << (23-20))` — внешний тип 23, а не первый код; `ev==NULL` → 0 | `engine.rs:1150-1153` (`reverse_record_types & (1 << 3)`), `main.rs:20077` (clean-handshake `seen_types & 0x0f`) | **P*** | **Ветви C:** `if (!ev) return 0; return (ev->seen_types & 0x08) != 0 ? 1 : 0;` — только бит типа 23 (APPLICATION_DATA), не `code`. **Rust:** в datapath `engine.rs:1151-1153` маска `reverse_record_types` строится как `1 << (payload[0]-20)` для 20..23, `has_application_data = reverse_record_types & (1 << 3) != 0` — тот же бит 23; отдельной функции нет. Контроллер в legacy clean-handshake использует более широкую маску `seen_types & 0x0f` (`main.rs:20077`) — это другой потребитель («любой ответ»), не замена `d2k_ev_outer_appdata`. C/Rust differential на маску 0x08 отсутствует. |
+| `d2k_ev_outer_appdata` | 1079–1094 | 16 | `seen_types & (1 << (23-20))` — внешний тип 23, а не первый код; `ev==NULL` → 0 | `main.rs` `r2o_ev_outer_appdata`, production `r2o_handle_legacy_exchange` | **E*** | Точные векторы `core/test_link.c:489-510` в тесте `ev_outer_appdata_matches_c_mask_vectors`: только appdata, среди прочих, все три прочих без 23, пустая маска, 0xFF, NULL. Production: последующий TLS-ответ по подтверждённому имени (`completed`) освобождает задачу наблюдения и пишет `say_quiet`-наблюдение, как C `on_exchange`; тест `followup_tls_observation_frees_watching_task_like_c`. **Ограничение:** Rust не хранит `ver_flow` подтверждённой задачи — вместо точной сверки потока собственный зонд исключается по `planned=YES`; планируемый внешний поток C наблюдал бы, Rust пропускает. |
 
 ### `core/match.c`
 
