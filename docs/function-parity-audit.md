@@ -89,7 +89,7 @@ recheck 1982 1982 equal True
 | datapath-core | 400 | 217 | 183 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **917** | **1065** | **0** | **0** |
+| **Итого** | **1982** | **918** | **1064** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 917 / P 1065 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 918 / P 1064 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -345,11 +345,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 225 | 323 | 0 | 0 |
-| core-state | 692 | 206 | 486 | 0 | 0 |
+| core-state | 692 | 207 | 485 | 0 | 0 |
 | datapath-core | 400 | 217 | 183 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **917** | **1065** | **0** | **0** |
+| **Итого** | **1982** | **918** | **1064** | **0** | **0** |
 
 
 ---
@@ -2263,7 +2263,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_link_set_name_probe` | 531–536 | 6 | SET_NAME_PROBE с local port (family=4): `set_name_family(..., sport_be)` | `control.rs` `encode_set_name_probe` | E | C передаёт `sport_be` и family=4, команда выбирается по ненулевому порту; тело name_len+name+shape+family+sport BE+план+16-байтный trial. Rust `encode_set_name_probe(..., family=4, source_port≠0, ..., trial_id)` даёт тот же кадр; тест `link_wrappers_emit_c_family4_frames` проверяет sport/план/trial и нулевой trial для постоянной пробы. |
 | `send_name_plan` | 538–630 | 93 | family 4/6, fd, name 1..255, transport 6/17, hex even, plan cap; frame: len/name/shape/family/[sport]/plan/[trial или area_id] | `control::encode_set_name*` | **P** | **Подтверждённое расхождение:** C **не проверяет `shape` вовсе** и кодирует любой байт (`link.c:591`); Rust `encode_set_name` отвергает форму вне `{1,2,3,4,5,6,7} ∪ {8..13}`. C также не проверяет совместимость плана с формой/транспортом; Rust `valid_name_probe_plan_records`/`valid_domain_plan_records` проверяют transport/proto. Для валидных команд кадры совпадают (tests/control.rs); C/Rust differential кодирования нет. |
 | `d2k_link_set_name_family` | 632–637 | 6 | выбрать SET_NAME_PROBE при `sport_be != 0`, иначе SET_NAME; family 4/6 | `control.rs:1360-1391 encode_set_name`, `:1827-1854 encode_set_name_probe` | **P** | C выбирает команду по `sport_be` и зовёт общий `send_name_plan`; shape/план не проверяются, family передаётся как есть (`link.c:632-637`). Rust использует отдельные `encode_set_name`/`encode_set_name_probe` с проверкой name/family/shape (и плана для probe). Для валидной пары команда и кадр совпадают; C принимает неизвестную shape. |
-| `d2k_link_set_name_bound` | 639–643 | 5 | SET_NAME_BOUND с identity: только `token != NULL`, затем `send_name_plan` | `control.rs:1393-1417 encode_set_name_bound` | **P** | **Ветви C:** `if(!token) return -1;`; `send_name_plan(...,shape,0,family,SET_NAME_BOUND,token)`. В `send_name_plan` `seq_len=16`, при `token!=NULL` копируются 16 байт **как есть**, включая нулевой token; shape/план не проверяются (`link.c:576-577,603-607,639-643`). **Rust:** требует `shape==SHAPE_HTTP` и **ненулевой** `trial_id`, затем `encode_set_name` + 16 байт trial (`control.rs:1393-1417`). Кадр для валидного HTTP-плана и ненулевого trial совпадает; C принимает любую shape и нулевой token, R2O отвергает раньше. |
+| `d2k_link_set_name_bound` | 639–643 | 5 | SET_NAME_BOUND с identity: только `token != NULL`, затем `send_name_plan` | `r2k-core/control.rs` `encode_set_name_bound` | E | C проверяет только наличие token (в Rust массив всегда присутствует), затем шлёт SET_NAME_BOUND с sport=0 и 16-байтным token; shape/family/plan не ограничивает сверх `send_name_plan`. Rust `encode_set_name_bound` собирает то же тело name_len+name+shape+family+план+16 байт без проверок shape/trial; тесты `bound_set_name_accepts_any_shape_and_zero_trial_like_c`, `bound_set_name_round_trips_command_and_ack_identity`. |
 | `d2k_link_del_name_bound` | 645–657 | 13 | условное удаление name binding: имя/transport/known/kind NAME/!temporary | `control.rs:1882-1907 encode_delete_name_bound` | **E*** | **Ветви C:** `fd<0 \|\| !name \|\| !*name \|\| strlen>255 \|\| (transport!=6 && transport!=17) \|\| !d2k_binding_known(binding) \|\| binding->kind!=D2K_BIND_NAME \|\| binding->temporary` → -1; тело `name_len+name+transport+binding(28)` (`link.c:645-657`). **Rust:** name 1..255, transport 6/17, `binding.is_known()`, `kind==1`, `!temporary`, тело `name_len+name+transport+28` (`control.rs:1882-1907`). Построчно совпадает; unit `encodes_a_bounded_exact_name_binding_delete`, C/Rust differential нет. |
 | `d2k_link_set_name_probe_trial` | 659–668 | 10 | SET_NAME_PROBE с trial_id: требует `sport_be != 0` | `control.rs` `encode_set_name_probe` | E | C: `!sport_be` → ошибка, иначе SET_NAME_PROBE с trial_id (16 байт после плана). Rust `encode_set_name_probe` отвергает `source_port == 0` и всегда пишет 16-байтный trial; тест `link_wrappers_emit_c_family4_frames` проверяет ненулевой/нулевой trial и отказ при нулевом порте. |
 | `area_context_valid` | 670-675 | 6 | family 4/6; transport 6 + shape 1/2/6/8..13; transport 17 + shape 3 | `control.rs r2k_link_shape_tcp_context/valid` | **E*** | **Точное совпадение:** C `(family==4\|\|family==6) && ((transport==6 && (shape==1\|\|shape==2\|\|shape==6\|\|(shape>=8&&shape<=13))) \|\| (transport==17&&shape==3))`. Rust те же family/transport/shape; unit таблицы. |

@@ -1399,23 +1399,22 @@ pub fn encode_set_name_bound(
     plan_records: &[u8],
     trial_id: [u8; 16],
 ) -> Result<Vec<u8>, &'static str> {
-    if shape != SHAPE_HTTP {
-        return Err("SET_NAME_BOUND предназначена для постоянного HTTP-плана");
+    // C `d2k_link_set_name_bound` проверяет только наличие token (в Rust он
+    // всегда присутствует) и не ограничивает shape/trial; кадр —
+    // name_len+name+shape+family+план+16-байтный token.
+    if name.is_empty() || name.len() > u8::MAX as usize {
+        return Err("имя должно занимать от 1 до 255 байт");
     }
-    if trial_id.iter().all(|byte| *byte == 0) {
-        return Err("идентификатор подтверждения SET_NAME не может быть нулевым");
+    if !matches!(family, 4 | 6) {
+        return Err("семейство должно быть 4 или 6");
     }
-    let mut command = encode_set_name(name, shape, family, plan_records)?;
-    let new_length = command
-        .len()
-        .checked_add(trial_id.len())
-        .and_then(|length| length.checked_sub(4))
-        .filter(|length| *length <= FRAME_MAX)
-        .ok_or("SET_NAME_BOUND слишком длинная")?;
-    command[0..4].copy_from_slice(&(new_length as u32).to_be_bytes());
-    command[4..6].copy_from_slice(&COMMAND_SET_NAME_BOUND.to_be_bytes());
-    command.extend_from_slice(&trial_id);
-    Ok(command)
+    let mut body = Vec::with_capacity(3 + name.len() + plan_records.len() + trial_id.len());
+    body.push(name.len() as u8);
+    body.extend_from_slice(name.as_bytes());
+    body.extend_from_slice(&[shape, family]);
+    body.extend_from_slice(plan_records);
+    body.extend_from_slice(&trial_id);
+    encode_frame(COMMAND_SET_NAME_BOUND, &body)
 }
 
 pub fn encode_set_addr(
@@ -2254,6 +2253,18 @@ mod ack_binding_context_tests {
         assert!(!failed.ok);
         assert_eq!(failed.trial_id, Some(trial_id));
         assert_eq!(failed.binding_context, Some(BindingContext::default()));
+    }
+
+    #[test]
+    fn bound_set_name_accepts_any_shape_and_zero_trial_like_c() {
+        // C `d2k_link_set_name_bound` проверяет только token; shape/trial
+        // не ограничивает.
+        let command =
+            encode_set_name_bound("x.test", super::SHAPE_MODERN, 4, &[1, 2], [0; 16]).unwrap();
+        let frame = read_frame(&mut Cursor::new(command)).unwrap();
+        assert_eq!(frame.kind, COMMAND_SET_NAME_BOUND);
+        assert_eq!(frame.body[0], 6);
+        assert_eq!(&frame.body[frame.body.len() - 16..], &[0; 16]);
     }
 
     #[test]
