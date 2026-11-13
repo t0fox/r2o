@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 318 | 230 | 0 | 0 |
-| core-state | 692 | 381 | 311 | 0 | 0 |
+| core-state | 692 | 382 | 310 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 107 | 52 | 0 | 0 |
-| **Итого** | **1982** | **1201** | **781** | **0** | **0** |
+| **Итого** | **1982** | **1202** | **780** | **0** | **0** |
 
-Это не оценка паритета: 781 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 780 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1201 / P 781 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1202 / P 780 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 318 | 230 | 0 | 0 |
-| core-state | 692 | 381 | 311 | 0 | 0 |
+| core-state | 692 | 382 | 310 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 107 | 52 | 0 | 0 |
-| **Итого** | **1982** | **1201** | **781** | **0** | **0** |
+| **Итого** | **1982** | **1202** | **780** | **0** | **0** |
 
 
 ---
@@ -2024,7 +2024,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `connect_with_tcp_profile` | 591-636 | 46 | под мьютексом прочитать/переключить tcp_timestamps, connect, восстановить; -2 при сбое профиля | `tcp_profile.rs` `connect_with_tcp_profile(_at)`, `BoundTcpProbe::connect_with_timestamps` | **E** | C `timestamps<-1\|\|>1` → EINVAL/-1; Linux mutex; `>=0` read previous, при отличии write wanted (ошибка → restore и -2); connect; сохранить errno; при `changed` restore previous дважды (ошибка → -2); non-Linux `>=0` → EOPNOTSUPP/-2. Rust `TcpProfileConnectError` различает BadProfile/Profile/Connect, mutex `OnceLock`, двойное восстановление, non-Linux EOPNOTSUPP; `BoundTcpProbe::connect_with_timestamps` использует его в production. Тесты `profile_changes_and_restores_sysctl_around_connect`, `connect_failure_still_restores_previous_value`, `invalid_profile_and_write_failure_match_c_codes`. |
 | `d2k_props_contact_on_family_tcp_profile` | 638-753 | 116 | полный TCP-contact: опции, nonblock connect, локальные адрес/порт, отправка hello, tcp-профиль | `main.rs` `BoundTcpProbe::open/connect_with_timestamps`, `r2o_props_contact_on_family_tcp_profile`, production `run_r2o_ask` | **E*** | C: family 4/6, TCP_NODELAY, timeouts 5000, nonblock connect, poll/SO_ERROR, `connect_with_tcp_profile`, getsockname, send hello. Rust `BoundTcpProbe::open` (shared bind, V6ONLY, nonblock) + `connect_with_timestamps` (sysctl-профиль, poll, SO_ERROR, nodelay/timeouts, local addr/port) + `r2o_props_contact_on_family_tcp_profile` (connect+write); `run_r2o_ask` использует общие `r2o_props_contact_connect/write`. Тесты `props_contact_wrappers_send_hello...`, `tcp_profile` differential/tests. **Ограничение:** нет `use_fd`/кода -3; C отправляет hello внутри функции, Rust — общим write; полного C/Rust differential contact нет. |
 | `build_fake_body` | 786-796 | 11 | тело fake: decoy-префикс + заполнитель 0f, длина `2*truth` | `classify_measured.rs` | **E** | C `want=truth_len*2`; `truth_len==0 \|\| want>cap` → 0; `memset(0f,want)`; decoy копируется в голову до `min(decoy.len,want)`. Rust `fake_len=n.saturating_mul(2)`, `append_measured_payload` даёт те же байты; `tests/measured_plan.rs`. |
-| `d2k_props_question_plan` | 798-841 | 44 | TLV-план вопроса 0..4: overlap, reorder, checksum, protocol, duplicates | `ask.rs:432-491 question_plan` | **P** | **Ветви C:** `!buf \|\| !out_len` → -1; q0 `overlap_plan_tlv`; q1 `reorder_plan_tlv`; q2 `build_fake_body(no decoy)` + `badsum(1,0)`; q3 требует `control.bytes && len>0`, `build_fake_body(control)` + `badsum(1,0)`; q4 `build_fake_body(no decoy)` + `badsum(2,20000)`; default -1. **Rust `question_plan`:** Poison seqovl=1 / disorder / badsum / badsum+decoy / badsum+repeats=2+gap_ms=20; q3 control режется до `min(control.len, trigger.payload.len()*2)`; текст `r2o-plan` через `plan_text_for_poison`, id заменяется переданным 16-байтным `plan_id`; проверка `Plan::parse`/`validate_runtime_plan`. **Отличия:** TLV↔текст; у overlap C payload id=1, Rust даёт payload 2; C ставит FNV `plan-%08x`, Rust — переданный id; C `pace 15000`, Rust `settle 15000`. Unit `ask.rs:568`; C/Rust differential планов вопросов нет. |
+| `d2k_props_question_plan` | 798-841 | 44 | TLV-план вопроса 0..4: overlap, reorder, checksum, protocol, duplicates | `ask.rs` `question_plan` | **E*** | C: q0 payload id1 0f + seqovl payload1; q1 два split + order reverse + pace 12000; q2 badsum fake без decoy; q3 badsum fake(control); q4 badsum repeats2 gap20000. Rust `question_plan` даёт тот же Plan: q0 один payload/seqovl (R2O id2), q1 без payload/fake, 2 split, reverse, pace 12000; q2 poison badsum id1/payload id1/fake1 gap0; q3 control-префикс; q4 repeats2 gap20000. Тест `question_order_and_plan_parameters_match_the_five_donor_probes` расширен полями Plan. **Ограничение:** C TLV ↔ R2O plan text; q0 payload id1 vs 2; id плана передаётся, а не FNV; полного C/Rust differential планов вопросов нет. |
 | `d2k_props_question_passed` | 845-864 | 20 | ответ вопроса → d2k_props: overlap/reorder/checksum=NO, protocol→parses=YES+checksum=NO, duplicates=YES | `ask.rs:492-506 record_question_passed` | **E** | **Совпадает:** C q0 `tolerates_left_overlap=NO`, q1 `tolerates_reorder=NO`, q2 `validates_checksum=NO`, q3 `parses_l7=YES; validates_checksum=NO`, q4 `counts_duplicates=YES`; `!pr` → выход. Rust `record_question_passed` те же ветви; unit `ask.rs:568`. |
 | `question_retire` | 874-879 | 6 | снять пробный план: DEL_NAME_PROBE с transport 6, имя/shape/sport/family | `main.rs:528+ client.delete_name_probe` | **P*** | C `d2k_link_del_name_probe_family(link_fd,name,6,shape,sport_be,family,derr)`; результат игнорируется. Rust `delete_name_probe` возвращает ошибку; в части ветвей опрос прерывается. Кадр DEL_NAME_PROBE тот же. |
 | `d2k_props_ask` | 881-884 | 4 | обёртка `d2k_props_ask_traced(..., steps=NULL)` | `main.rs` `run_r2o_ask` | **E*** | C вызывает traced-вариант с `steps=NULL`. Rust production `run_r2o_ask` выполняет те же пять вопросов без массива шагов: plan/SET_NAME/connect/send/wait/passed, обновляет `DpiProps` и печатает итог; тесты `ask_options_keep_capture_inputs_and_c_defaults`, `question_order_and_plan_parameters_match_the_five_donor_probes`, `https_probe...`/ask CLI. **Ограничение:** отдельной non-traced обёртки нет; per-question вывод стримится, а не собирается как C-отчёт. |

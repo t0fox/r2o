@@ -530,16 +530,29 @@ mod tests {
         assert!(overlap_text.contains("seqovl payload=2 poison=0"));
         assert_eq!(overlap.seq_overlays.len(), 1);
         assert_eq!(overlap.payloads[0].bytes, [0x0f]);
+        assert_eq!(overlap.payloads[0].id, 2);
+        assert_eq!(overlap.seq_overlays[0].payload_id, 2);
+        assert!(overlap.fakes.is_empty());
+        assert!(overlap.poisons.is_empty());
+        assert_eq!(overlap.order, 0);
 
         let (_, reorder) = question_plan(AskQuestion::Reorder, &trigger, None, [2; 16]).unwrap();
         assert_eq!(reorder.order, 1);
         assert_eq!(reorder.pace_us, 12_000);
         assert_eq!(reorder.splits.len(), 2);
+        assert!(reorder.payloads.is_empty());
+        assert!(reorder.fakes.is_empty());
 
         let (_, checksum) = question_plan(AskQuestion::Checksum, &trigger, None, [3; 16]).unwrap();
         assert_eq!(checksum.poisons[0].flags, POISON_BADSUM);
+        assert_eq!(checksum.poisons[0].id, 1);
+        assert_eq!(checksum.payloads[0].id, 1);
         assert_eq!(checksum.payloads[0].bytes.len(), trigger.payload.len() * 2);
         assert!(checksum.payloads[0].bytes.iter().all(|byte| *byte == 0x0f));
+        assert_eq!(checksum.fakes[0].repeats, 1);
+        assert_eq!(checksum.fakes[0].gap_us, 0);
+        assert_eq!(checksum.fakes[0].payload_id, 1);
+        assert_eq!(checksum.fakes[0].poison_id, 1);
 
         let (_, parse) = question_plan(
             AskQuestion::ProtocolParse,
@@ -555,11 +568,14 @@ mod tests {
                 .iter()
                 .all(|byte| *byte == 0x0f)
         );
+        assert_eq!(parse.poisons[0].flags, POISON_BADSUM);
+        assert_eq!(parse.fakes[0].repeats, 1);
 
         let (_, duplicates) =
             question_plan(AskQuestion::Duplicates, &trigger, None, [5; 16]).unwrap();
         assert_eq!(duplicates.fakes[0].repeats, 2);
         assert_eq!(duplicates.fakes[0].gap_us, 20_000);
+        assert_eq!(duplicates.poisons[0].flags, POISON_BADSUM);
     }
 
     #[test]
