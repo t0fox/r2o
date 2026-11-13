@@ -14,6 +14,8 @@ pub fn d2k_verify_tcp_timestamps_get() -> i8 {
 
 /// C `d2k_verify_tcp_timestamps_set`: записать значение потока.
 pub fn d2k_verify_tcp_timestamps_set(value: i8) {
+    // C `enabled in -1..1 ? enabled : -1`.
+    let value = if (-1..=1).contains(&value) { value } else { -1 };
     VERIFY_TCP_TIMESTAMPS.with(|cell| cell.set(value));
 }
 
@@ -29,5 +31,9 @@ mod tests {
         assert_eq!(d2k_verify_tcp_timestamps_get(), 0);
         d2k_verify_tcp_timestamps_set(-1);
         assert_eq!(d2k_verify_tcp_timestamps_get(), -1);
+        for invalid in [2, -2, 127, -128] {
+            d2k_verify_tcp_timestamps_set(invalid);
+            assert_eq!(d2k_verify_tcp_timestamps_get(), -1, "value {invalid}");
+        }
     }
 }
