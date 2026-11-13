@@ -19,6 +19,23 @@ pub const R2O_QUIC_MAX_ADDRS: usize = 8;
 pub const R2O_QUIC_RESIDUAL_GAP: Duration = Duration::from_millis(60);
 pub const R2O_QUIC_FRAGMENT_CONTROL_NAME: &str = "контроль прохождения IP-фрагментов, форма 1";
 
+/// C `qp_addr_parse` (`core/quicprobe.c:173-179`): голый IPv4/IPv6-литерал,
+/// `%` запрещён, выход 16 байт; семейство 4/6.
+pub fn r2o_qp_addr_parse(text: &str) -> Option<(u8, [u8; 16])> {
+    if text.contains('%') {
+        return None;
+    }
+    match text.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(address)) => {
+            let mut bytes = [0u8; 16];
+            bytes[..4].copy_from_slice(&address.octets());
+            Some((4, bytes))
+        }
+        Ok(std::net::IpAddr::V6(address)) => Some((6, address.octets())),
+        Err(_) => None,
+    }
+}
+
 /// Match d2o `d2k_ip4_private` / `d2k_ip6_private` for QUIC targets.
 pub fn r2o_quic_address_is_local(address: SocketAddr) -> bool {
     fn ipv4_is_local(address: std::net::Ipv4Addr) -> bool {
@@ -1870,5 +1887,26 @@ mod tests {
         assert_eq!(received[0].1, local);
         assert_eq!(received[1].1, local);
         assert_eq!(probe.local_endpoint(), local);
+    }
+
+    #[test]
+    fn qp_addr_parse_matches_c() {
+        let (family, bytes) = super::r2o_qp_addr_parse("192.0.2.1").unwrap();
+        assert_eq!(family, 4);
+        assert_eq!(&bytes[..4], &[192, 0, 2, 1]);
+        assert_eq!(bytes[4..], [0; 12]);
+        let (family, bytes) = super::r2o_qp_addr_parse("2001:db8::1").unwrap();
+        assert_eq!(family, 6);
+        assert_eq!(
+            bytes,
+            "2001:db8::1"
+                .parse::<std::net::Ipv6Addr>()
+                .unwrap()
+                .octets()
+        );
+        // C запрещает `%`, не-IP и пустую строку.
+        assert_eq!(super::r2o_qp_addr_parse("fe80::1%eth0"), None);
+        assert_eq!(super::r2o_qp_addr_parse("not-an-ip"), None);
+        assert_eq!(super::r2o_qp_addr_parse(""), None);
     }
 }

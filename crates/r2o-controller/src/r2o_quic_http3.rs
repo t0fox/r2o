@@ -1404,10 +1404,12 @@ fn r2o_quic_http3_authority(server: SocketAddr, server_name: &str) -> String {
 
 fn r2o_quic_http3_datagrams(connection: &quinn::Connection) -> u64 {
     let stats = connection.stats();
-    stats
-        .udp_tx
-        .datagrams
-        .saturating_add(stats.udp_rx.datagrams)
+    r2o_quic_datagrams_sum(stats.udp_tx.datagrams, stats.udp_rx.datagrams)
+}
+
+/// C `d2k_qc_datagrams` (`core/quicconn.c:1432-1435`): сумма tx+rx.
+fn r2o_quic_datagrams_sum(tx: u64, rx: u64) -> u64 {
+    tx.saturating_add(rx)
 }
 
 fn r2o_quic_http3_wire_bytes(connection: &quinn::Connection) -> u64 {
@@ -1740,5 +1742,13 @@ mod tests {
         let mut result = super::R2oQuicHttp3Result::default();
         result.peer_name = 0;
         assert_eq!(result.d2k_qc_peer_name(), 0);
+    }
+
+    #[test]
+    fn quic_datagrams_sum_matches_c() {
+        // C `d2k_qc_datagrams`: tx+rx, NULL-объект даёт 0.
+        assert_eq!(super::r2o_quic_datagrams_sum(0, 0), 0);
+        assert_eq!(super::r2o_quic_datagrams_sum(3, 4), 7);
+        assert_eq!(super::r2o_quic_datagrams_sum(u64::MAX, 1), u64::MAX);
     }
 }

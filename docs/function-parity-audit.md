@@ -84,12 +84,12 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 204 | 344 | 0 | 0 |
+| core-net | 548 | 206 | 342 | 0 | 0 |
 | core-state | 692 | 182 | 509 | 0 | 0 |
 | datapath-core | 400 | 182 | 218 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **841** | **1141** | **0** | **0** |
+| **Итого** | **1982** | **843** | **1139** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 841 / P 1141 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 843 / P 1139 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,12 +344,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 204 | 344 | 0 | 0 |
+| core-net | 548 | 206 | 342 | 0 | 0 |
 | core-state | 692 | 186 | 506 | 0 | 0 |
 | datapath-core | 400 | 182 | 218 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **841** | **1141** | **0** | **0** |
+| **Итого** | **1982** | **843** | **1139** | **0** | **0** |
 
 
 ---
@@ -956,7 +956,7 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| `qp_addr_parse` | 173-179 | 7 | IPv4/IPv6 из текста, запрет `%`, 16-байтный выход | `std::net::IpAddr`/`SocketAddr` в `quic_replay.rs:23-53,56-75` | **P** | C `memcpy`-буфер: `inet_pton(AF_INET)` затем `AF_INET6`, отказ при `%` и пустом/битом тексте, family 4/6. Rust разбирает `SocketAddr`/`IpAddr` через `std`; зона `%` не тестировалась, отдельной функции с тем же буферным контрактом нет. Для обычных литералов эквивалентно. |
+| `qp_addr_parse` | 173-179 | 7 | IPv4/IPv6 из текста, запрет `%`, 16-байтный выход | `quic_replay.rs` `r2o_qp_addr_parse` | E | C запрещает `%`, пробует `inet_pton(AF_INET)`, затем `AF_INET6`, пишет 16 байт. Rust `r2o_qp_addr_parse` делает те же проверки и возвращает family 4/6 + 16 байт; используется в QUIC snapshot/address-binding проверках. Тест `qp_addr_parse_matches_c` (IPv4, IPv6, `%`, мусор, пусто). |
 | `resolve_family` | 181-208 | 28 | getaddrinfo в пул адресов семьи, до `cap`, `inet_ntop` | `quic_replay.rs:56-75 r2o_quic_address_pool` (резолв снаружи) | **E** | C `getaddrinfo(sni,NULL,{family,SOCK_DGRAM})`, обход `ai_next`, `inet_ntop`; Rust получает уже разрешённые `SocketAddr`, фильтрует ту же семью и дедуплицирует (`:61-73`). Pool differential (v4/v6/дубли) `r2o_quic_residual_control_and_address_pool_match_d2o` (`quic_replay.rs:1147`). |
 | `resolve_real` | 209-211 | 3 | IPv4-резолв имени через `resolve_family` | `quic_replay.rs:56-75 r2o_quic_address_pool` + резолв discovery | **E** | C `return resolve_family(sni, AF_INET, out, cap)`: `getaddrinfo`, только AF_INET, `inet_ntop`, до cap адресов. Rust адреса резолвит discovery/`ToSocketAddrs`, `r2o_quic_address_pool` фильтрует `is_ipv4()==primary.is_ipv4()`, дедуп по IP и `.take(MAX_ADDRS)`; `r2o-quic-pool-differential.sh` проверяет IPv4-путь/дедуп. |
 | `d2k_quic_build_pool` | 254-295 | 42 | цель + DNS-адреса семьи, дедуп по 16 байтам, первый адрес гарантирован | `quic_replay.rs:56-75 r2o_quic_address_pool` | **E** | **Совпадает:** первый адрес — `ip` как есть, затем same-family адреса резолвера, дедуп по IP, порт берётся из primary (Rust `SocketAddr::new(address.ip(), primary.port())`), предел `D2K_QUIC_MAX_ADDRS`/`R2O_QUIC_MAX_ADDRS=8`. C дополнительно проверяет `strlen(ip)<ADDR_LEN`, `memchr` и зажимает `n_extra`; Rust работает с типизированными адресами. Тест `r2o_quic_residual_control_and_address_pool_match_d2o` (`quic_replay.rs:1147`) + pool differential. |
@@ -1160,7 +1160,7 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 | `d2k_qc_stream_recv` | 1377-1423 | 47 | буфер rx_data, recv 50 мс, повтор last_app по PTO, ACK + MAX_DATA/MAX_STREAM_DATA при половине окна | quinn `RecvStream` | **P** | **Совпадает:** чтение потока, ACK, расширение кредита. **C-ветви проверены:** отдаёт из `rx_data` до `cap`; `until`; `recv_dgram` кусками ≤50 мс; при пустом `rx_len` повтор `last_app` (`app_tries<3`, `300<<tries`); ACK + `FR_MAX_DATA`/`FR_MAX_STREAM_DATA` при `credit_due`; сброс флагов после отправки. **Отличия:** quinn управляет окнами/retransmit сам; точные пороги half-window и `last_app` не сопоставлены. |
 | `d2k_qc_app_progress` | 1425-1428 | 4 | `d2k_qw_ranges_bytes`/`ranges_complete` по диапазонам ответа | `r2o_quic_http3.rs:278 app_bytes_load` | **P** | C считает уникальные байты и FIN-покрытие по `d2k_qw_ranges`; Rust — счётчик app-байт counted-stream, `complete` из `recv_data`/trailers. Семантика «разные байты/целиком» различается. |
 | `d2k_qc_rx_wire_bytes` | 1431-1431 | 1 | байты, принятые с провода | `r2o_quic_http3.rs`/quinn stats | **P** | C `return c ? c->rx_wire_bytes : 0`, счётчик растёт в `recv`. Rust `wire_bytes` берётся из quinn connection stats; точка/момент учёта иные. |
-| `d2k_qc_datagrams` | 1432-1435 | 4 | счётчики датаграмм tx/rx | quinn stats | **P** | C `tx ? c->tx_dgrams : 0`, `rx ? c->rx_dgrams : 0`; NULL-объект → 0. Rust quinn `stats().udp_tx`/`udp_rx` (или эквивалент HTTP/3-пула); счётчики те же по смыслу, API/точки инкремента иные. |
+| `d2k_qc_datagrams` | 1432-1435 | 4 | счётчики датаграмм tx/rx | `r2o_quic_http3.rs` `r2o_quic_datagrams_sum` | E | C возвращает `tx`/`rx` (NULL → 0). Rust `r2o_quic_datagrams_sum(tx, rx)` суммирует `quinn::Connection::stats().udp_tx.datagrams` и `udp_rx.datagrams` через saturating-add; используется в HTTP/3-измерении. Тест `quic_datagrams_sum_matches_c` (0/3+4/переполнение). |
 | `d2k_qc_handshake_done` | 1436-1436 | 1 | получен ли HANDSHAKE_DONE | `R2oQuicHttp3Result.handshake_confirmed` | **P** | C `return c ? c->handshake_done : 0`, флаг ставится на кадре `HANDSHAKE_DONE`. Rust `handshake_confirmed` формируется из состояния quinn/handshake; отдельного флага кадра нет. |
 | `d2k_qc_rtt_ms` | 1437-1437 | 1 | RTT первой датаграммы после Initial, мс | quinn RTT estimator | **P** | C `return c ? c->rtt_ms : 0`, измеряется по первой датаграмме после первого Initial. Rust RTT считает quinn по своей модели (latest/smoothed RTT); значение и момент иные. |
 | `d2k_qc_dgrams` | 1438-1441 | 4 | дубль геттера датаграмм tx/rx | quinn stats | **P** | C повторяет `d2k_qc_datagrams` теми же полями (`tx_dgrams`/`rx_dgrams`), без NULL-проверки объекта в строках. Rust отдельного дубля нет — те же quinn stats. |

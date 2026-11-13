@@ -20708,7 +20708,7 @@ impl ControlClient {
             let Some(server_name) = r2o_quic_snapshot_server_name(snapshot, server) else {
                 return Ok(None);
             };
-            if server_name.parse::<std::net::IpAddr>().is_ok() {
+            if r2o_controller::quic_replay::r2o_qp_addr_parse(&server_name).is_some() {
                 return Ok(None);
             }
             let mut probe = match QuicReplayProbe::prepare(server, snapshot, r2o_mark) {
@@ -21690,8 +21690,8 @@ impl ControlClient {
         catalog_path: &std::path::Path,
         mut persistence: Option<&mut R2oCatalogPersistence>,
     ) -> Result<(), Box<dyn Error>> {
-        let address_binding =
-            host.parse::<std::net::IpAddr>().is_ok() || r2o_quic_snapshot_has_ech(snapshot);
+        let address_binding = r2o_controller::quic_replay::r2o_qp_addr_parse(&host).is_some()
+            || r2o_quic_snapshot_has_ech(snapshot);
         let (_lock, previous) =
             locked_catalog_for_persistence(catalog_path, catalog, persistence.as_deref())?;
         if address_binding
