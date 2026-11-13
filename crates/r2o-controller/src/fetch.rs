@@ -5316,8 +5316,8 @@ mod tests {
     fn http_local_limit_matches_c_for_line_and_header_overflow() {
         // C `body_line`: переполнение chunk-строки — local_limit.
         let mut line = HttpResponseParser::new(false);
-        let mut response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
-        response.extend(std::iter::repeat_n(b'a', 200));
+        let mut response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;".to_vec();
+        response.extend(std::iter::repeat_n(b'a', 510));
         response.extend_from_slice(b"\r\n");
         line.feed(&response, false);
         assert!(line.is_invalid());
@@ -5378,12 +5378,12 @@ mod tests {
         assert_eq!(cr.body_error(), Some("chunked: после CR нет LF"));
 
         let mut long = HttpResponseParser::new(false);
-        let mut response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
-        response.extend(std::iter::repeat_n(b'a', 200));
+        let mut response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;".to_vec();
+        response.extend(std::iter::repeat_n(b'a', 510));
         long.feed(&response, false);
         assert_eq!(
             long.body_error(),
-            Some("chunked: строка длиннее 127 байт (наш предел)")
+            Some("chunked: строка длиннее 510 байт (предел C)")
         );
         assert!(long.line_overflow());
 

@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 231 | 169 | 0 | 0 |
+| datapath-core | 400 | 233 | 167 | 0 | 0 |
 | datapath-plan | 183 | 177 | 6 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1313** | **669** | **0** | **0** |
+| **Итого** | **1982** | **1315** | **667** | **0** | **0** |
 
-Это не оценка паритета: 669 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 667 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1313 / P 669 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1315 / P 667 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 231 | 169 | 0 | 0 |
+| datapath-core | 400 | 233 | 167 | 0 | 0 |
 | datapath-plan | 183 | 177 | 6 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1313** | **669** | **0** | **0** |
+| **Итого** | **1982** | **1315** | **667** | **0** | **0** |
 
 
 ---
@@ -4965,9 +4965,9 @@ ECH, середина приветствия. R2O: `r2k-core/src/tls.rs`.
 | `d2k_hr_decimal` (inline) | 21–29 | 9 | десятичное число с проверкой переполнения | `http_response.rs:360 parse_decimal` | **E** | Совпадает: пусто/нецифра → ошибка, `checked_mul/checked_add`; тест `rejects_malformed...` с `18446744073709551616` (`tests/http_response.rs:229`). |
 | `d2k_hr_token` (inline) | 31–34 | 4 | допустимый token-байт RFC 7230 | `httpup.rs:346 is_http_token` | **E** | Набор символов совпадает; используется в `parse_plan_request` для имени заголовка запроса. В ответном парсере Rust этот предикат не применяется (см. `d2k_hr_field`). |
 | `d2k_hr_field` (inline) | 35–42 | 8 | валидация поля: непустое имя, token, допустимые байты значения | `http_response.rs` `valid_hr_field`, production `parse_headers` | E | C/Rust differential `scripts/test-http-field-differential.sh` PASS: 12 кейсов — пустое имя, строка без `:`, `Host :`, TAB в значении, `\x01`/`\x7f`, `@` в имени, `X-Empty:`; коды 0/1 совпали. |
-| `d2k_hr_extensions` (inline) | 43–70 | 28 | разбор chunk-extensions: `;token[=token/quoted]`, OWS, контрольные байты | `http_response.rs:372 parse_chunk_size` | **P** | **Неполно:** Rust отбрасывает всё после первого `;` и не валидирует extensions; C проверяет token, кавычки, escape и управляющие байты. Поэтому `1;\x01`, незакрытая кавычка и `1 ;x` дают разный исход. |
+| `d2k_hr_extensions` (inline) | 43–70 | 28 | разбор chunk-extensions: `;token[=token/quoted]`, OWS, контрольные байты | `http_response.rs` `valid_hr_extensions`, production `parse_chunk_size` | E | C/Rust differential `scripts/test-http-response-feed-differential.sh` PASS: 19 framing-кейсов, включая `1;foo="bar"`, `1 ;foo`, пустой `;`, незакрытую кавычку и control-байт; текст/rc совпали. |
 | `d2k_hr_headers` (inline) | 72–105 | 34 | разбор status-line и заголовков, CL/TE, interim, 101/204/304 | `http_response.rs` `parse_headers`/`parse_status_line` | E | C: status-line ≥12 байт (ровно 12 без reason phrase; при >12 13-й байт — пробел), каждое поле проходит `d2k_hr_field` (двоеточие, token-имя, значение без control/DEL кроме TAB), любой второй Content-Length отвергается, TE только chunked, CL+TE запрещены. Rust `parse_status_line`/`parse_headers` повторяют эти ветви; ёмкость заголовка 8191 (C `head[8192]`). Тесты `status_line_without_reason_phrase_is_accepted_like_c`, `header_fields_are_validated_like_c`, `duplicate_content_length_is_rejected_even_when_equal`, `header_capacity_matches_c_head_buffer`. |
-| `d2k_http_response_feed` (inline) | 107–160 | 54 | потоковый разбор ответа: header/fixed/chunk/trailer/close/fin | `http_response.rs:55 feed` | **P** | **Расхождения:** C при байтах после `complete` ставит `invalid`, Rust молча `break`; C `line[512]`, Rust 128; C валидирует trailer как поле и отвергает NUL, Rust принимает ведущий NUL как пустой trailer; C проверяет chunk-extensions, Rust игнорирует; C `head[8192]`, Rust 64 КиБ. Общая state-machine и `fin`-логика совпадают. |
+| `d2k_http_response_feed` (inline) | 107–160 | 54 | потоковый разбор ответа: header/fixed/chunk/trailer/close/fin | `http_response.rs` `HttpResponseParser::feed` | **E*** | C/Rust differential `scripts/test-http-response-feed-differential.sh` PASS: 19 кейсов — bytes-after-complete → invalid, trailer без `:`, duplicate CL, control-байты в заголовке/расширении, NUL-trailer, 204/304 с телом, 12-байтная status-line, валидные chunk-extensions. Строка — C `line[512]`; статус при неполном заголовке остаётся 0. **Ограничение:** не все состояния 1xx/101 и close-delimited FIN входят в C-оракул (они покрыты unit-тестами). |
 
 ## datapath/include/d2k_packet.h (2 inline-функции)
 

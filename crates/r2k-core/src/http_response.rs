@@ -1,7 +1,7 @@
 /// C `head[8192]`: максимум сохранённого заголовка — 8191 байт (плюс NUL).
 pub const MAX_HTTP_RESPONSE_HEADER_BYTES: usize = 8191;
 const HEADER_CAPACITY: usize = MAX_HTTP_RESPONSE_HEADER_BYTES + 1;
-const LINE_CAPACITY: usize = 128; // Matches the C buffer, including its NUL slot.
+const LINE_CAPACITY: usize = 512; // C `char line[512]`.
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum State {
@@ -18,7 +18,7 @@ enum State {
 #[derive(Clone, Debug)]
 pub struct HttpResponseParser {
     header: Vec<u8>,
-    line: [u8; LINE_CAPACITY + 1],
+    line: [u8; LINE_CAPACITY],
     header_len: usize,
     line_len: usize,
     remaining: u64,
@@ -46,7 +46,7 @@ impl HttpResponseParser {
     pub fn with_header_capacity(head_only: bool, header_capacity: usize) -> Self {
         Self {
             header: vec![0; header_capacity.saturating_add(1)],
-            line: [0; LINE_CAPACITY + 1],
+            line: [0; LINE_CAPACITY],
             header_len: 0,
             line_len: 0,
             remaining: 0,
@@ -68,8 +68,17 @@ impl HttpResponseParser {
         if self.invalid {
             return;
         }
+        // C `d2k_http_response_feed`: байты после `complete` — не pipeline,
+        // а неопределённый framing; ответ становится invalid.
+        if self.complete && !bytes.is_empty() {
+            self.invalid = true;
+            self.complete = false;
+            return;
+        }
         for &byte in bytes {
             if self.complete {
+                self.invalid = true;
+                self.complete = false;
                 break;
             }
             match self.state {
@@ -180,17 +189,13 @@ impl HttpResponseParser {
     }
 
     fn feed_header_byte(&mut self, byte: u8) {
-        // D2O find_eol recognizes only CRLF, so lone CR/LF in fields remain data.
-        if byte == 0
-            || !self.status_line_complete && invalid_header_byte(byte)
+        // C `d2k_http_response_feed`: NUL/control, одиночные CR/LF и
+        // переполнение отвергаются в любом месте заголовка, не только в
+        // строке статуса.
+        if invalid_header_byte(byte)
             || self.header_len + 1 >= self.header.len()
-            || !self.status_line_complete
-                && byte == b'\n'
-                && (self.header_len == 0 || self.header[self.header_len - 1] != b'\r')
-            || !self.status_line_complete
-                && self.header_len != 0
-                && self.header[self.header_len - 1] == b'\r'
-                && byte != b'\n'
+            || byte == b'\n' && (self.header_len == 0 || self.header[self.header_len - 1] != b'\r')
+            || self.header_len != 0 && self.header[self.header_len - 1] == b'\r' && byte != b'\n'
         {
             self.invalid = true;
             return;
@@ -246,22 +251,15 @@ impl HttpResponseParser {
     }
 
     fn feed_line_byte(&mut self, byte: u8) {
-        let content_len = self.line_len.saturating_sub(usize::from(
-            self.line_len != 0 && self.line[self.line_len - 1] == b'\r',
-        ));
-        let ignored_chunk_extension =
-            self.state == State::ChunkSize && self.line[..self.line_len].contains(&b';');
-        let opaque_trailer_byte = self.state == State::Trailers;
-        let overflow = self.line_len >= self.line.len()
-            || !matches!(byte, b'\r' | b'\n') && content_len >= LINE_CAPACITY - 1;
-        if invalid_line_byte(byte) && !ignored_chunk_extension && !opaque_trailer_byte {
+        if invalid_line_byte(byte) {
             self.invalid = true;
             return;
         }
-        if overflow {
+        // C `d2k_http_response_feed`: `line_len+1 >= sizeof line` (512).
+        if self.line_len + 1 >= self.line.len() {
             self.invalid = true;
             self.line_overflow = true;
-            self.body_error = Some("chunked: строка длиннее 127 байт (наш предел)");
+            self.body_error = Some("chunked: строка длиннее 510 байт (предел C)");
             return;
         }
         if byte == b'\n' && (self.line_len == 0 || self.line[self.line_len - 1] != b'\r') {
@@ -285,9 +283,12 @@ impl HttpResponseParser {
         let line_len = self.line_len - 2;
         let line = &self.line[..line_len];
         if self.state == State::Trailers {
-            // D2O's C-string loop also treats a leading NUL as an empty line.
-            if line.is_empty() || line[0] == 0 {
+            // C `d2k_http_response_feed`: пустая строка завершает ответ,
+            // непустая обязана быть валидным полем.
+            if line.is_empty() {
                 self.complete = true;
+            } else if !valid_hr_field(line) {
+                return false;
             }
         } else {
             let Some(size) = parse_chunk_size(line) else {
@@ -431,12 +432,80 @@ fn parse_decimal(bytes: &[u8]) -> Option<u64> {
     })
 }
 
+/// C `d2k_hr_extensions` (`datapath/include/d2k_http_response.h:43-70`):
+/// `*(OWS ";" OWS token [OWS "=" OWS (token | quoted-string)])`.
+fn valid_hr_extensions(bytes: &[u8]) -> bool {
+    let mut index = 0;
+    while index < bytes.len() {
+        while index < bytes.len() && matches!(bytes[index], b' ' | b'\t') {
+            index += 1;
+        }
+        if index == bytes.len() || bytes[index] != b';' {
+            return false;
+        }
+        index += 1;
+        while index < bytes.len() && matches!(bytes[index], b' ' | b'\t') {
+            index += 1;
+        }
+        let start = index;
+        while index < bytes.len() && is_hr_token(bytes[index]) {
+            index += 1;
+        }
+        if index == start {
+            return false;
+        }
+        while index < bytes.len() && matches!(bytes[index], b' ' | b'\t') {
+            index += 1;
+        }
+        if index < bytes.len() && bytes[index] == b'=' {
+            index += 1;
+            while index < bytes.len() && matches!(bytes[index], b' ' | b'\t') {
+                index += 1;
+            }
+            if index < bytes.len() && bytes[index] == b'"' {
+                index += 1;
+                let mut closed = false;
+                while index < bytes.len() {
+                    let mut byte = bytes[index];
+                    index += 1;
+                    if byte == b'"' {
+                        closed = true;
+                        break;
+                    }
+                    if byte == b'\\' {
+                        if index == bytes.len() {
+                            return false;
+                        }
+                        byte = bytes[index];
+                        index += 1;
+                    }
+                    if (byte < 32 && byte != b'\t') || byte == 127 {
+                        return false;
+                    }
+                }
+                if !closed {
+                    return false;
+                }
+            } else {
+                let start = index;
+                while index < bytes.len() && is_hr_token(bytes[index]) {
+                    index += 1;
+                }
+                if index == start {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
 fn parse_chunk_size(line: &[u8]) -> Option<u64> {
     let digits = line
         .iter()
-        .position(|byte| *byte == b';')
+        .position(|byte| matches!(byte, b';' | b' ' | b'\t'))
         .unwrap_or(line.len());
-    if digits == 0 {
+    if digits == 0 || !valid_hr_extensions(&line[digits..]) {
         return None;
     }
     line[..digits].iter().try_fold(0_u64, |value, byte| {
@@ -575,6 +644,60 @@ mod header_tests {
             parser.feed(response, false);
             assert!(parser.is_invalid());
         }
+    }
+
+    #[test]
+    fn hr_extensions_differential_matches_c() {
+        let cases: &[&[u8]] = &[
+            b"",
+            b";ext",
+            b" ;ext",
+            b"\t;ext=value",
+            b";ext = \"quoted value\"",
+            b";ext=\"a\\\"b\"",
+            b";ext=",
+            b";ext=\"unterminated",
+            b";ext=\"a\x01\"",
+            b";",
+            b"; ext ; second=1",
+            b"1;ext",
+            b" ",
+            b";ext=val trailing",
+        ];
+        let mut out = String::new();
+        for (index, line) in cases.iter().enumerate() {
+            out.push_str(&format!(
+                "ext {index}={}\n",
+                u8::from(super::valid_hr_extensions(line))
+            ));
+        }
+        if let Ok(path) = std::env::var("R2O_HTTP_EXT_DIFF_OUTPUT") {
+            std::fs::write(path, &out).unwrap();
+        }
+        assert!(super::valid_hr_extensions(b";ext"));
+        assert!(!super::valid_hr_extensions(b";ext="));
+        assert!(!super::valid_hr_extensions(b";ext=\"unterminated"));
+    }
+
+    #[test]
+    fn chunk_size_validates_extensions_like_c() {
+        assert_eq!(
+            super::parse_chunk_size(b"1;ext=val"),
+            Some(1),
+            "chunk extension accepted"
+        );
+        assert_eq!(
+            super::parse_chunk_size(b"1 ;ext"),
+            Some(1),
+            "OWS before extension accepted"
+        );
+        assert_eq!(super::parse_chunk_size(b"1 "), None, "bare trailing OWS");
+        assert_eq!(super::parse_chunk_size(b"1;"), None, "empty extension");
+        assert_eq!(
+            super::parse_chunk_size(b"1;ext=\"unterminated"),
+            None,
+            "unclosed quoted extension"
+        );
     }
 
     #[test]

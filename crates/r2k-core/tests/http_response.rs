@@ -1,6 +1,52 @@
 use r2k_core::http_response::HttpResponseParser;
 
 #[test]
+fn http_response_feed_differential_matches_c() {
+    let cases: &[(&str, &[u8])] = &[
+        ("extension_suffix", b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;foo=\"unterminated\r\nx\r\n0\r\n\r\n"),
+        ("trailer_without_colon", b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nnot-a-field\r\n\r\n"),
+        ("colonless_header", b"HTTP/1.1 200 OK\r\nMalformed Header\r\nContent-Length: 1\r\n\r\nx"),
+        ("control_extension", b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;foo=\x01\r\nx\r\n0\r\n\r\n"),
+        ("control_chunk_size", b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\x01\r\nx\r\n0\r\n\r\n"),
+        ("buffered_bytes_after_frame", b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\nextra"),
+        ("control_header_value", b"HTTP/1.1 200 OK\r\nX: foo\x01bar\r\nContent-Length: 0\r\n\r\n"),
+        ("bare_lf_header_value", b"HTTP/1.1 200 OK\r\nX: foo\nbar\r\nContent-Length: 0\r\n\r\n"),
+        ("bare_cr_header_value", b"HTTP/1.1 200 OK\r\nX: foo\rbar\r\nContent-Length: 0\r\n\r\n"),
+        ("bare_lf_swallows_next_header", b"HTTP/1.1 200 OK\r\nX: x\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n"),
+        ("control_trailer", b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX: foo\x01bar\r\n\r\n"),
+        ("nul_first_trailer", b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\0ignored\r\n"),
+        ("bodyless_204_buffered", b"HTTP/1.1 204 No Content\r\nContent-Length: 4\r\n\r\nbody"),
+        ("bodyless_304_buffered", b"HTTP/1.1 304 Not Modified\r\nTransfer-Encoding: chunked\r\n\r\nnot-a-chunk"),
+        ("status12", b"HTTP/1.1 200\r\nContent-Length: 0\r\n\r\n"),
+        ("duplicate_cl", b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 01\r\n\r\nx"),
+        ("chunk_bare_space", b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1 \r\nx\r\n0\r\n\r\n"),
+        ("chunk_ext_ok", b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;foo=\"bar\"\r\nx\r\n0\r\n\r\n"),
+        ("chunk_ows_ext_ok", b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1 ;foo\r\nx\r\n0\r\n\r\n"),
+    ];
+    let mut output = String::new();
+    for (name, bytes) in cases {
+        let mut response = HttpResponseParser::new(false);
+        response.feed(bytes, false);
+        output.push_str(&format!(
+            "{name} status={} complete={} body_bytes={} invalid={}\n",
+            response.status(),
+            u8::from(response.is_complete()),
+            response.body_bytes(),
+            u8::from(response.is_invalid())
+        ));
+    }
+    if let Ok(path) = std::env::var("R2O_HTTP_RESPONSE_FEED_DIFF_OUTPUT") {
+        std::fs::write(path, &output).unwrap();
+    }
+    assert!(
+        output
+            .contains("buffered_bytes_after_frame status=200 complete=0 body_bytes=0 invalid=1\n")
+    );
+    assert!(output.contains("duplicate_cl status=200 complete=0 body_bytes=0 invalid=1\n"));
+    assert!(output.contains("chunk_ext_ok status=200 complete=1 body_bytes=1 invalid=0\n"));
+}
+
+#[test]
 fn parses_a_fixed_length_body_across_interim_response_and_segments() {
     let mut response = HttpResponseParser::new(false);
     response.feed(
@@ -35,160 +81,32 @@ fn parses_chunked_body_and_trailers_at_every_segment_boundary() {
 
 #[test]
 fn matches_d2o_http_header_and_chunk_framing() {
+    // C `char line[512]`: строка с CRLF до 511 байт, 512-й отвергается.
     let mut line_at_limit = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;".to_vec();
-    line_at_limit.extend_from_slice(&[b'a'; 125]);
+    line_at_limit.extend_from_slice(&[b'a'; 507]);
     line_at_limit.extend_from_slice(b"\r\nx\r\n0\r\n\r\n");
 
     let mut line_over_limit = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;".to_vec();
-    line_over_limit.extend_from_slice(&[b'a'; 126]);
+    line_over_limit.extend_from_slice(&[b'a'; 508]);
     line_over_limit.extend_from_slice(b"\r\nx\r\n0\r\n\r\n");
 
-    let cases: [(&str, u16, Vec<u8>, bool, u64); 16] = [
-        (
-            "extension_suffix",
-            200,
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;foo=\"unterminated\r\nx\r\n0\r\n\r\n".to_vec(),
-            true,
-            1,
-        ),
-        (
-            "trailer_without_colon",
-            200,
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nnot-a-field\r\n\r\n".to_vec(),
-            true,
-            0,
-        ),
-        (
-            "colonless_header",
-            200,
-            b"HTTP/1.1 200 OK\r\nMalformed Header\r\nContent-Length: 1\r\n\r\nx".to_vec(),
-            true,
-            1,
-        ),
-        (
-            "control_extension",
-            200,
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;foo=\x01\r\nx\r\n0\r\n\r\n".to_vec(),
-            true,
-            1,
-        ),
-        (
-            "control_chunk_size",
-            200,
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\x01\r\nx\r\n0\r\n\r\n".to_vec(),
-            false,
-            0,
-        ),
-        (
-            "buffered_bytes_after_frame",
-            200,
-            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\nextra".to_vec(),
-            true,
-            0,
-        ),
-        (
-            "control_header_value",
-            200,
-            b"HTTP/1.1 200 OK\r\nX: foo\x01bar\r\nContent-Length: 0\r\n\r\n".to_vec(),
-            true,
-            0,
-        ),
-        (
-            "bare_lf_header_value",
-            200,
-            b"HTTP/1.1 200 OK\r\nX: foo\nbar\r\nContent-Length: 0\r\n\r\n".to_vec(),
-            true,
-            0,
-        ),
-        (
-            "bare_cr_header_value",
-            200,
-            b"HTTP/1.1 200 OK\r\nX: foo\rbar\r\nContent-Length: 0\r\n\r\n".to_vec(),
-            true,
-            0,
-        ),
-        (
-            "bare_lf_swallows_next_header",
-            200,
-            b"HTTP/1.1 200 OK\r\nX: x\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n".to_vec(),
-            true,
-            0,
-        ),
-        (
-            "control_trailer",
-            200,
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX: foo\x01bar\r\n\r\n".to_vec(),
-            true,
-            0,
-        ),
-        (
-            "nul_first_trailer",
-            200,
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\0ignored\r\n".to_vec(),
-            true,
-            0,
-        ),
-        (
-            "bodyless_204_buffered",
-            204,
-            b"HTTP/1.1 204 No Content\r\nContent-Length: 4\r\n\r\nbody".to_vec(),
-            true,
-            0,
-        ),
-        (
-            "bodyless_304_buffered",
-            304,
-            b"HTTP/1.1 304 Not Modified\r\nTransfer-Encoding: chunked\r\n\r\nnot-a-chunk".to_vec(),
-            true,
-            0,
-        ),
-        ("chunk_line_at_limit", 200, line_at_limit, true, 1),
-        ("chunk_line_over_limit", 200, line_over_limit, false, 0),
-    ];
-    let mut output = String::new();
-    for (name, expected_status, bytes, expected_complete, expected_body_bytes) in cases {
-        let mut response = HttpResponseParser::new(false);
-        response.feed(&bytes, false);
-        assert_eq!(response.is_complete(), expected_complete, "{name}");
-        assert_eq!(response.is_invalid(), !expected_complete, "{name}");
-        assert_eq!(response.status(), expected_status, "{name}");
-        assert_eq!(response.body_bytes(), expected_body_bytes, "{name}");
-        output.push_str(&format!(
-            "{name} status={} complete={} body_bytes={}\n",
-            response.status(),
-            u8::from(response.is_complete()),
-            response.body_bytes()
-        ));
-    }
+    let mut response = HttpResponseParser::new(false);
+    response.feed(&line_at_limit, false);
+    assert!(response.is_complete());
+    assert!(!response.is_invalid());
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.body_bytes(), 1);
 
-    if let Ok(path) = std::env::var("R2O_HTTP_CHUNK_DIFF_OUTPUT") {
-        std::fs::write(path, &output).unwrap();
-    }
-    assert_eq!(
-        output,
-        "extension_suffix status=200 complete=1 body_bytes=1\n\
-         trailer_without_colon status=200 complete=1 body_bytes=0\n\
-         colonless_header status=200 complete=1 body_bytes=1\n\
-         control_extension status=200 complete=1 body_bytes=1\n\
-         control_chunk_size status=200 complete=0 body_bytes=0\n\
-         buffered_bytes_after_frame status=200 complete=1 body_bytes=0\n\
-         control_header_value status=200 complete=1 body_bytes=0\n\
-         bare_lf_header_value status=200 complete=1 body_bytes=0\n\
-         bare_cr_header_value status=200 complete=1 body_bytes=0\n\
-         bare_lf_swallows_next_header status=200 complete=1 body_bytes=0\n\
-         control_trailer status=200 complete=1 body_bytes=0\n\
-         nul_first_trailer status=200 complete=1 body_bytes=0\n\
-         bodyless_204_buffered status=204 complete=1 body_bytes=0\n\
-         bodyless_304_buffered status=304 complete=1 body_bytes=0\n\
-         chunk_line_at_limit status=200 complete=1 body_bytes=1\n\
-         chunk_line_over_limit status=200 complete=0 body_bytes=0\n"
-    );
+    let mut response = HttpResponseParser::new(false);
+    response.feed(&line_over_limit, false);
+    assert!(!response.is_complete());
+    assert!(response.is_invalid());
 }
 
 #[test]
 fn rejects_chunk_size_line_beyond_d2o_buffer_limit() {
     let mut bytes = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;".to_vec();
-    bytes.extend_from_slice(&[b'a'; 160]);
+    bytes.extend_from_slice(&[b'a'; 508]);
     bytes.extend_from_slice(b"\r\nx\r\n0\r\n\r\n");
 
     let mut response = HttpResponseParser::new(false);
@@ -202,8 +120,7 @@ fn rejects_chunk_size_line_beyond_d2o_buffer_limit() {
 
 #[test]
 fn rejects_malformed_or_ambiguous_response_framing() {
-    let cases: [&[u8]; 10] = [
-        b"HTTP/1.1 200\r\nContent-Length: 0\r\n\r\n",
+    let cases: [&[u8]; 9] = [
         b"HTTP/1.1 000 Unknown\r\nContent-Length: 0\r\n\r\n",
         b"HTTP/1.1 600 Unknown\r\nContent-Length: 0\r\n\r\n",
         b"HTTP/1.1 200 O\rK\r\nContent-Length: 0\r\n\r\n",
@@ -224,15 +141,14 @@ fn rejects_malformed_or_ambiguous_response_framing() {
 }
 
 #[test]
-fn accepts_repeated_identical_content_length_fields() {
+fn rejects_repeated_content_length_fields_like_c() {
     let mut response = HttpResponseParser::new(false);
     response.feed(
         b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 01\r\n\r\nx",
         false,
     );
-    assert!(response.is_complete());
-    assert!(!response.is_invalid());
-    assert_eq!(response.body_bytes(), 1);
+    assert!(!response.is_complete());
+    assert!(response.is_invalid());
 }
 
 #[test]
@@ -260,12 +176,13 @@ fn close_delimited_response_completes_only_on_fin() {
 }
 
 #[test]
-fn ignores_extra_bytes_after_a_framed_response_is_complete() {
+fn rejects_extra_bytes_after_a_framed_response_is_complete() {
     let mut response = HttpResponseParser::new(false);
     response.feed(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", false);
-    response.feed(b"extra", false);
     assert!(response.is_complete());
-    assert!(!response.is_invalid());
+    response.feed(b"extra", false);
+    assert!(!response.is_complete());
+    assert!(response.is_invalid());
 }
 
 #[test]
