@@ -81,6 +81,8 @@ impl AtomicU64 {
 }
 
 pub const MEMORY_SITE_COUNT: usize = 6;
+/// C `D2K_DIAG_MEM_TCP_TLS_RX`: сайт HTTP/TLS receive buffer.
+pub const MEMORY_SITE_TCP_TLS_RX: usize = 3;
 pub const MADVISE_ERRNO_SLOTS: usize = 4;
 const MEMORY_SITE_SPECS: [(&str, &str, &str); MEMORY_SITE_COUNT] = [
     (

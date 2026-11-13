@@ -1082,6 +1082,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
             .map_err(|error| format!("не удалось отправить HTTP-запрос: {error}"))?;
 
         let mut parser = HttpResponseParser::new(false);
+        let _r2o_http_buffer = R2oHttpResponseBufferTracking::new();
         let mut buffer = [0_u8; 16 * 1024];
         let mut reason = None;
         let mut r2o_framing_valid = true;
@@ -1397,6 +1398,37 @@ fn r2o_http_error_reason(parser: &HttpResponseParser) -> &'static str {
     parser
         .body_error()
         .unwrap_or("HTTP-ответ содержит неверное обрамление")
+}
+
+/// C `read_status_rd`: размер heap-буфера HTTP-ответа.
+const R2O_HTTP_RESPONSE_BUFFER_BYTES: usize = 65_537;
+
+/// C `read_status_rd`: malloc 65537 и diag-учёт `TCP_TLS_RX`.
+struct R2oHttpResponseBufferTracking {
+    tracked: bool,
+}
+
+impl R2oHttpResponseBufferTracking {
+    fn new() -> Self {
+        Self {
+            tracked: crate::diagnostics::memory_acquire(
+                crate::diagnostics::MEMORY_SITE_TCP_TLS_RX,
+                R2O_HTTP_RESPONSE_BUFFER_BYTES,
+            ),
+        }
+    }
+}
+
+impl Drop for R2oHttpResponseBufferTracking {
+    fn drop(&mut self) {
+        if self.tracked {
+            crate::diagnostics::memory_release(
+                crate::diagnostics::MEMORY_SITE_TCP_TLS_RX,
+                R2O_HTTP_RESPONSE_BUFFER_BYTES,
+                true,
+            );
+        }
+    }
 }
 
 /// C `read_http_body`: для chunked/close-delimited `body_expected=body_bytes`.
@@ -2603,6 +2635,7 @@ fn r2o_drain_head_response(stream: &mut R2oFetchVolumeStream, timeout: Duration)
         .checked_add(timeout)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "слишком долгий срок ответа"))?;
     let mut parser = HttpResponseParser::new(true);
+    let _r2o_http_buffer = R2oHttpResponseBufferTracking::new();
     let mut buffer = [0_u8; 4096];
     loop {
         if parser.is_complete() {
@@ -2731,6 +2764,7 @@ fn r2o_measure_http_packet_budget(
             return Budget::NotApplicable;
         }
         let mut parser = HttpResponseParser::new(false);
+        let _r2o_http_buffer = R2oHttpResponseBufferTracking::new();
         let mut buffer = [0_u8; 16 * 1024];
         let mut eof = false;
         while !parser.is_complete() && !parser.is_invalid() {
@@ -4575,6 +4609,17 @@ mod tests {
 
         let counters = r2o_tcp_counters(&stream);
         assert!(counters.data_packets.is_none_or(|packets| packets >= 2));
+    }
+
+    #[test]
+    fn http_parser_buffer_tracking_uses_tcp_tls_rx_site() {
+        use crate::diagnostics::{memory_active, memory_enable};
+        let was_active = memory_active();
+        memory_enable(true);
+        let guard = R2oHttpResponseBufferTracking::new();
+        assert!(guard.tracked);
+        drop(guard);
+        memory_enable(was_active);
     }
 
     #[test]

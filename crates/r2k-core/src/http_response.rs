@@ -459,7 +459,7 @@ mod span_tests {
 
 #[cfg(test)]
 mod header_tests {
-    use super::{MAX_HTTP_RESPONSE_HEADER_BYTES, parse_headers};
+    use super::{HttpResponseParser, MAX_HTTP_RESPONSE_HEADER_BYTES, parse_headers};
 
     #[test]
     fn status_line_without_reason_phrase_is_accepted_like_c() {
@@ -508,6 +508,66 @@ mod header_tests {
             parse_headers(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"),
             Some((200, None, true))
         );
+    }
+
+    #[test]
+    fn read_status_buf_branches_match_c() {
+        // 204/304 без тела; 101 без запрошенного upgrade — ошибка, как C.
+        for (response, status) in [
+            (b"HTTP/1.1 204 No Content\r\n\r\n".as_slice(), 204),
+            (b"HTTP/1.1 304 Not Modified\r\n\r\n".as_slice(), 304),
+        ] {
+            let mut parser = HttpResponseParser::new(false);
+            parser.feed(response, false);
+            assert!(parser.is_complete(), "status {status}");
+            assert_eq!(parser.status(), status);
+            assert_eq!(parser.body_bytes(), 0);
+        }
+        let mut parser = HttpResponseParser::new(false);
+        parser.feed(b"HTTP/1.1 101 Switching Protocols\r\n\r\n", false);
+        assert!(parser.is_invalid());
+
+        // 1xx промежуточный, затем настоящий ответ с Content-Length.
+        let mut parser = HttpResponseParser::new(false);
+        parser.feed(
+            b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc",
+            false,
+        );
+        assert!(parser.is_complete());
+        assert_eq!(parser.status(), 200);
+        assert_eq!(parser.body_bytes(), 3);
+
+        // chunked с trailer.
+        let mut parser = HttpResponseParser::new(false);
+        parser.feed(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\nX: y\r\n\r\n",
+            false,
+        );
+        assert!(parser.is_complete());
+        assert_eq!(parser.body_bytes(), 3);
+
+        // close-delimited тело до EOF.
+        let mut parser = HttpResponseParser::new(false);
+        parser.feed(b"HTTP/1.1 200 OK\r\n\r\nhello", true);
+        assert_eq!(parser.body_bytes(), 5);
+
+        // Границы статуса: 100 и 599 допустимы, 600 — нет.
+        for (status, valid) in [(100, true), (599, true), (600, false)] {
+            let response = format!("HTTP/1.1 {status} X\r\n\r\n");
+            let mut parser = HttpResponseParser::new(false);
+            parser.feed(response.as_bytes(), false);
+            assert_eq!(!parser.is_invalid(), valid, "status {status}");
+        }
+
+        // NUL в заголовке и повторный Content-Length — ошибки.
+        for response in [
+            b"HTTP/1.1 200 OK\r\nX: \x00\r\n\r\n".as_slice(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\n".as_slice(),
+        ] {
+            let mut parser = HttpResponseParser::new(false);
+            parser.feed(response, false);
+            assert!(parser.is_invalid());
+        }
     }
 
     #[test]
