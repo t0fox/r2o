@@ -2127,11 +2127,40 @@ mod tests {
                 field(sample, "vm_swap_kib")
             )
         };
+        let detail = &report["memory_details"][0]["latest"];
+        let detail_i64 = |value: &serde_json::Value, key: &str| {
+            value
+                .get(key)
+                .and_then(|value| {
+                    value
+                        .as_i64()
+                        .or_else(|| value.as_u64().and_then(|v| i64::try_from(v).ok()))
+                })
+                .unwrap_or(-1)
+        };
         let rust_trace = format!(
-            "samples={}\n{}\n{}\n",
+            "samples={}\n{}\n{}\ndetail pid={} rss={} start={} vm={},{},{},{} fds={} status={} source={} errno={} rollup={},{},{},{},{}\n",
             samples.len(),
             line(&samples[0]),
-            line(&samples[1])
+            line(&samples[1]),
+            detail_i64(&detail, "pid"),
+            detail_i64(&detail, "rss_kib"),
+            detail_i64(&detail, "start_ticks"),
+            detail_i64(&detail, "vm_size_kib"),
+            detail_i64(&detail, "vm_data_kib"),
+            detail_i64(&detail, "vm_stack_kib"),
+            detail_i64(&detail, "vm_swap_kib"),
+            detail_i64(&detail, "fd_count"),
+            detail["smaps_rollup_status"].as_str().unwrap_or("not-read"),
+            detail["smaps_rollup_source"]
+                .as_str()
+                .unwrap_or("unavailable"),
+            detail["smaps_rollup_errno"].as_i64().unwrap_or(0),
+            detail_i64(&detail["smaps_rollup"], "rss_kib"),
+            detail_i64(&detail["smaps_rollup"], "pss_kib"),
+            detail_i64(&detail["smaps_rollup"], "anonymous_kib"),
+            detail_i64(&detail["smaps_rollup"], "private_dirty_kib"),
+            detail_i64(&detail["smaps_rollup"], "swap_kib"),
         );
         assert_eq!(rust_trace, c_trace);
         std::fs::remove_dir_all(root).unwrap();

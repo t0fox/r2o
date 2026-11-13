@@ -21,9 +21,16 @@ CASE=$(mktemp -d /tmp/r2o-diagnostics-rss-case.XXXXXX)
 trap 'rm -rf -- "$TEMP" "$CASE"' EXIT HUP INT TERM
 
 mkdir -p "$CASE/proc/123" "$CASE/proc/124" "$CASE/run"
-printf 'VmRSS: 1024 kB\nVmHWM: 2048 kB\nRssAnon: 512 kB\nThreads: 3\nVmData: 4096 kB\nVmSwap: 8 kB\n' \
+printf 'VmRSS: 1024 kB\nVmHWM: 2048 kB\nRssAnon: 512 kB\nThreads: 3\nVmData: 4096 kB\nVmSwap: 8 kB\nVmSize: 8192 kB\nVmStk: 132 kB\n' \
     > "$CASE/proc/123/status"
 printf 'd2kc\n' > "$CASE/proc/123/comm"
+printf '123 (d2kc) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 987654 20 21\n' \
+    > "$CASE/proc/123/stat"
+mkdir -p "$CASE/proc/123/fd"
+: > "$CASE/proc/123/fd/0"
+: > "$CASE/proc/123/fd/1"
+printf 'Rss: 1024 kB\nPss: 2048 kB\nAnonymous: 512 kB\nPrivate_Dirty: 256 kB\nSwap: 8 kB\n' \
+    > "$CASE/proc/123/smaps_rollup"
 printf '123\n' > "$CASE/run/d2k.pid"
 printf 'VmRSS: 1024 kB\nVmHWM: 2048 kB\nRssAnon: 512 kB\nThreads: 3\nVmData: 4096 kB\nVmSwap: 8 kB\n' \
     > "$CASE/proc/124/status"

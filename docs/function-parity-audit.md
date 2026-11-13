@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 232 | 316 | 0 | 0 |
-| core-state | 692 | 257 | 435 | 0 | 0 |
+| core-state | 692 | 259 | 433 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **977** | **1005** | **0** | **0** |
+| **Итого** | **1982** | **979** | **1003** | **0** | **0** |
 
-Это не оценка паритета: 1005 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 1003 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 977 / P 1005 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 979 / P 1003 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 232 | 316 | 0 | 0 |
-| core-state | 692 | 257 | 435 | 0 | 0 |
+| core-state | 692 | 259 | 433 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **977** | **1005** | **0** | **0** |
+| **Итого** | **1982** | **979** | **1003** | **0** | **0** |
 
 
 ---
@@ -2199,9 +2199,9 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `proc_pid_dir_present` | 225-229 | 5 | существует ли `/proc/<pid>` как каталог | `diagnostics::proc_pid_dir_present` | E | C `snprintf("%s/%ld")`, `stat`, `S_ISDIR`. Rust `proc_pid_dir_present(base)` использует `Path::is_dir` (stat); вызывается из `read_smaps_rollup`. Тест `smaps_rollup_statuses_match_c` проверяет существующий каталог, отсутствующий и ветку unsupported. |
 | `optional_proc_status` | 230-237 | 8 | различить unsupported/unavailable для smaps_rollup: ENOENT при живом pid → unsupported(4), иначе unavailable(1)+errno | `diagnostics::optional_proc_status` | E | C: `error==ENOENT && pid-dir present` → `*reported_error=0`, 4; иначе `*reported_error=error`, 1. Rust `optional_proc_status` возвращает `(4, None)` или `(1, Some(errno))`; используется в `read_smaps_rollup`. Тест `smaps_rollup_statuses_match_c` (ENOENT при живом/мёртвом pid, EACCES). |
 | `read_proc` | 238-259 | 22 | pid из pid-файла, comm, VmRSS/HWM/RssAnon/Threads/VmData/VmSwap | `diagnostics::process_memory` | E | C: pid-файл `fscanf("%ld")` + `0<pid<=INT_MAX`; comm `fgets` + trim `\r\n` + точное `strcmp`; status 6 ключей через `value()`. Rust `process_memory` читает те же поля и шесть ключей; C/Rust differential `scripts/test-diagnostics-rss-differential.sh` (exit 0) сверяет `samples=2` и `rss/hwm/anon/threads/vm_data/vm_swap`. Rust дополнительно принимает усечённый comm и `fallback_pidfile` (R2O-совместимость); unit `process_memory_follows_pidfiles_and_restarts`; для C-эквивалентных входов результат совпадает. |
-| `read_detail` | 260-304 | 45 | stat starttime, VmSize/Data/Stk/Swap, fd_count, smaps_rollup | `diagnostics::process_detail` | **P** | **Ветви сверены:** C `memset`; pid/rss/at/mono; start_ticks/fds=-1, vm[4]/rollup[5]=-1; `/proc/pid/stat`: `strrchr(')')`, `strtok_r`, 19 полей до 22-го, `strtoll`, `n>=0`; `/proc/pid/status` 4 ключа; `/proc/pid/fd` readdir без `.`; `smaps_rollup`: open/errno → `optional_proc_status`, иначе 5 ключей, `seen==31 && !ferror` → status=2/source=1, иначе 3, errno при ferror. Rust `process_detail` те же поля/статусы; unit `first_process_detail_survives_process_exit`. |
+| `read_detail` | 260-304 | 45 | stat starttime, VmSize/Data/Stk/Swap, fd_count, smaps_rollup | `diagnostics::process_detail` | E | C: `)`, 19 полей до 22-го, `strtoll`, `n>=0`; status 4 ключа; `/proc/pid/fd` без `.`; `smaps_rollup` через `optional_proc_status`, 5 ключей, `seen==31` → ok. Rust `process_detail` те же поля/статусы. C/Rust differential `scripts/test-diagnostics-rss-differential.sh` расширен и сверяет `detail pid/rss/start/vm[4]/fds/status/source/errno/rollup[5]` (exit 0); unit `first_process_detail_survives_process_exit`. |
 | `read_status` | 305-309 | 5 | код статуса smaps_rollup в строку | `diagnostics::rollup_status_text` | E | C `1→unavailable`, `2→ok`, `3→parse-error`, `4→unsupported`, default `not-read`. Rust `rollup_status_text` те же значения; используется в `read_smaps_rollup`. Тест `smaps_rollup_statuses_match_c` проверяет коды 0..5. |
-| `write_detail` | 310-328 | 19 | JSON memory_detail процесса | `diagnostics` memory_details | **P** | C `!pid` → `null`; pid/at/mono/rss/start_ticks; vm_size/data/stack/swap через `number`; fd_count; `smaps_rollup_status`; source `smaps_rollup`/`smaps-fallback`/`unavailable`; errno или null; rollup null при `status!=2 && source!=2`, иначе объект 5 полей; `smaps_status:not-read`, `smaps_errno:null`, `smaps:null`. Rust те же поля; unit/differential частично. |
+| `write_detail` | 310-328 | 19 | JSON memory_detail процесса | `diagnostics` memory_details | E | C `!pid` → `null`; pid/at/mono/rss/start_ticks; vm_size/data/stack/swap через `number`; fd_count; `smaps_rollup_status`; source `smaps_rollup`/`smaps-fallback`/`unavailable`; errno или null; rollup null при `status!=2 && source!=2`, иначе объект 5 полей. Rust `memory_details` пишет те же ключи/значения; RSS-differential сверяет `status/source/errno/rollup[5]` и числовые поля (exit 0); unit `first_process_detail_survives_process_exit`. |
 | `write_limit_reason` | 329-343 | 15 | JSON `limit_reason` по counts | `diagnostics::limit_reason_values` | E | C: `!resources_valid` → `resource-data-unavailable`; `!mask` → `no-current-resource-limit`; иначе биты в порядке cpu/memory/conntrack/slots. Rust `limit_reason_values` те же значения/порядок; тест `limit_reason_branches_match_c` (invalid, mask=0, 1/2/4/8/5/15). |
 | `write_limit_reason_state` | 344-356 | 13 | JSON `limit_reason` по flags/mask | `diagnostics::limit_reason_values` | E | C повторяет `write_limit_reason` для flags/mask limit-события; та же развилка/порядок. Rust использует ту же `limit_reason_values` в `limit_event_json`; тест `limit_reason_branches_match_c`. |
 | `write_memory_tracking` | 357-369 | 13 | JSON memory_tracking: enabled, coverage, 6 сайтов (id/name/location/live/peak/objects/created/destroyed/failures) | `diagnostics::memory_tracking_json` | **P** | C `memory_snapshot`; `enabled`; фиксированный текст coverage; 6 сайтов с id/name/location и счётчиками. Rust `memory_tracking_json` те же поля/строки; unit `memory_tracking_and_madvise_json_match_d2o_shape`. |
