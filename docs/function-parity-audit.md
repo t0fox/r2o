@@ -84,14 +84,14 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 308 | 240 | 0 | 0 |
+| core-net | 548 | 309 | 239 | 0 | 0 |
 | core-state | 692 | 274 | 418 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1070** | **912** | **0** | **0** |
+| **Итого** | **1982** | **1071** | **911** | **0** | **0** |
 
-Это не оценка паритета: 912 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 911 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1070 / P 912 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1071 / P 911 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -342,12 +342,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 308 | 240 | 0 | 0 |
+| core-net | 548 | 309 | 239 | 0 | 0 |
 | core-state | 692 | 274 | 418 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1070** | **912** | **0** | **0** |
+| **Итого** | **1982** | **1071** | **911** | **0** | **0** |
 
 
 ---
@@ -706,7 +706,7 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `worker` | 314-349 | 36 | поток зонда: ждать job, probe, положить результат | `https_probe.rs` `r2o_ensure_worker` | **E*** | C: pthread-цикл с pipe/cond, `d2k_https_probe_real`, результат в очередь. Rust: поток `r2o-проверка-https`, `recv_timeout`, `probe_https_state`, `result_sender`; перезапуск при завершении. Тест `idle_https_probe_worker_exits_and_restarts`. **Ограничение:** каналы вместо pipe/cond; live-проверка роутера недоступна. |
 | `d2k_httpsprobe_new` | 351-375 | 25 | calloc, mark, probe default, mutex/cond, pipe nonblock, pthread; ошибка pipe/потока → free/NULL | `https_probe.rs` `new`/`r2o_ensure_worker` | **E*** | C создаёт mutex/cond/pipe(nonblock)/поток; pipe<0/поток не создался → free/NULL. Rust `new` всегда возвращает объект, поток/каналы создаются лениво и перезапускаются `r2o_ensure_worker`; при сбое spawn `jobs=None`, `submit` → false (fail-closed), паники нет. Тест `idle_https_probe_worker_exits_and_restarts` (перезапуск после простоя). **Ограничение:** C-контракт NULL и nonblock-pipe заменён каналами; сбой spawn не воспроизведён тестом. |
 | `d2k_httpsprobe_free` | 377-391 | 15 | stop+broadcast+join, close pipe, destroy, free | `https_probe.rs` `Drop` | **E*** | C `stop=1`, broadcast, join, close pipes, destroy mutex/cond, free. Rust Drop закрывает jobs-канал, **разрывает receiver результатов до join** (иначе воркер, заблокированный на send при полном канале, не даст завершиться), затем join; тест `httpsprobe_drop_unblocks_full_results_channel_like_c_free` (полный канал + заблокированный send → Drop < 2 с). **Ограничение:** pipe/fd-пробуждения и mutex/cond в Rust нет — каналы. |
-| `d2k_httpsprobe_wake_fd` | 393-395 | 3 | fd пробуждения воркера (read-end pipe) | канал/`try_result` (`https_probe.rs`) | **P*** | C `return p ? p->wake[0] : -1`. Rust воркер получает работу через канал и забирает результат `try_result`; отдельного fd/pipe-контракта нет. |
+| `d2k_httpsprobe_wake_fd` | 393-395 | 3 | fd пробуждения воркера (read-end pipe) | `https_probe.rs` `wake_fd`/`drain_wake` | **E*** | C `return p ? p->wake[0] : -1`; pipe nonblock, воркер пишет байт после результата, `done` осушает pipe. Rust `wake_fd` отдаёт read-end nonblocking `UnixStream::pair`, воркер пишет `x` после `result_sender.send`, `try_result` осушает `drain_wake`; тест `httpsprobe_wake_fd_signals_a_ready_result_like_c` (poll readable → try_result → poll 0). **Ограничение:** socketpair вместо pipe; при ошибке пары `wake_fd=-1`; главный цикл по-прежнему опрашивает `try_result`. |
 | `d2k_httpsprobe_portal` | 397-428 | 32 | проверка host/family/addr; cached upgrade + !answered → resend_ttl rc=2; иначе при месте в очереди job, PROBING на 10 с, rc=1; иначе 0 | `https_probe.rs` `HttpsProbeWorker::portal`, `main.rs` HTTP_PORTAL/HTTP_RESPONSE | **E*** | C: host_ok/family/addr; cached non-expired: upgrade+!answered+resend_ttl → left=(expires-now)/1000, rc=2 при left>0; иначе очередь <64 → job/PROBING/rc=1; иначе rc=0. Rust `portal` возвращает `Resend{ttl_seconds}`/`Queued`/`Busy`; используется в обоих production-путях (HTTP_PORTAL и HTTP_RESPONSE code 3); `Resend` отправляет `SET_HTTPS`, `Queued` ставит зонд. Тесты `httpsprobe_portal_cached_upgrade_resends_like_c` (Served→resend 6ч, answered→Busy, Closed→Busy, bad host), `httpsprobe_portal_queues_uncached_and_rejects_pending_like_c` (Queued/pending/повтор→Busy). **Ограничения:** Rust хранит PROBING отдельно (`pending`), очередь 16 вместо C 64; `family` выводится из `SocketAddr`. |
 | `d2k_httpsprobe_done` | 430-449 | 20 | забрать до cap результатов, `cache_put` с полным ttl, memmove, повторный wake | `https_probe.rs` `try_result`, `main.rs` `r2o_https_set_ttl` | **E*** | C: drain pipe; `n=min(d_count,cap)`; для каждого `cache_put(host,state,now+ttl*1000)`; memmove; `d_count`; wake. `http_probe_done`: только SERVED/TLS_BLOCKED → SET_HTTPS(host,ttl), иначе `http_search_portal`. Rust `try_result` кладёт полный TTL в кэш и отдаёт по одному; main теперь шлёт `SET_HTTPS` только для upgrade через `r2o_https_set_ttl`, иначе — путь портала. Тест `https_probe_pushes_set_https_only_for_upgrades_like_c`. **Ограничение:** Rust отдаёт по одному (C — до 8), счётчик `lost` не выводится; живой portal-поиск не проверялся. |
 | `d2k_httpsprobe_state` | 451-458 | 8 | cached state, если не истёк, иначе UNKNOWN | `https_probe.rs:226-231 cached_state` | **E** | C lock/cache_find/`now<expires ? state : UNKNOWN`; Rust `Option`; differential httpsprobe + unit `cached_state_and_pending_lookup_follow_host_and_expiry`. |

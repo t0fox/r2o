@@ -4,8 +4,10 @@ use crate::response::{HttpsProbeState, probe_https_state};
 use r2k_core::control::{HttpPortalEvent, HttpResponseEvent, KEY_LEN};
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::thread::{self, JoinHandle};
@@ -128,6 +130,10 @@ pub struct HttpsProbeWorker {
     jobs: Option<SyncSender<Job>>,
     result_sender: SyncSender<HttpsProbeResult>,
     results: Receiver<HttpsProbeResult>,
+    /// C `wake[0]`: pollable read-end, воркер пишет байт после результата.
+    wake_read: Option<UnixStream>,
+    /// C `wake[1]`: write-end (nonblock), клон уходит в поток.
+    wake_write: Option<UnixStream>,
     mark: Option<u32>,
     thread: Option<JoinHandle<()>>,
     pending: HashSet<String>,
@@ -149,10 +155,22 @@ pub enum HttpsPortalOutcome {
 impl HttpsProbeWorker {
     pub fn new(mark: Option<u32>) -> Self {
         let (result_sender, results) = mpsc::sync_channel::<HttpsProbeResult>(QUEUE_CAPACITY);
+        // C `wake`: неблокирующая пара; ошибка pipe → wake=-1, new→NULL.
+        // В Rust нет NULL-контракта: при ошибке wake_fd() отдаёт -1.
+        let (wake_read, wake_write) = match UnixStream::pair() {
+            Ok((read, write)) => {
+                let _ = read.set_nonblocking(true);
+                let _ = write.set_nonblocking(true);
+                (Some(read), Some(write))
+            }
+            Err(_) => (None, None),
+        };
         let mut worker = Self {
             jobs: None,
             result_sender,
             results,
+            wake_read,
+            wake_write,
             mark,
             thread: None,
             pending: HashSet::new(),
@@ -161,6 +179,27 @@ impl HttpsProbeWorker {
         };
         worker.r2o_ensure_worker();
         worker
+    }
+
+    /// C `d2k_httpsprobe_wake_fd`: pollable read-end или -1.
+    pub fn wake_fd(&self) -> i32 {
+        self.wake_read
+            .as_ref()
+            .map_or(-1, |stream| stream.as_raw_fd())
+    }
+
+    fn drain_wake(&self) {
+        let Some(stream) = self.wake_read.as_ref() else {
+            return;
+        };
+        let mut buffer = [0_u8; 64];
+        loop {
+            let read =
+                unsafe { libc::read(stream.as_raw_fd(), buffer.as_mut_ptr().cast(), buffer.len()) };
+            if read <= 0 {
+                break;
+            }
+        }
     }
 
     fn r2o_ensure_worker(&mut self) {
@@ -176,6 +215,10 @@ impl HttpsProbeWorker {
         }
         let (jobs, job_queue) = mpsc::sync_channel::<Job>(QUEUE_CAPACITY);
         let result_sender = self.result_sender.clone();
+        let mut wake_write = self
+            .wake_write
+            .as_ref()
+            .and_then(|stream| stream.try_clone().ok());
         let mark = self.mark;
         let thread = thread::Builder::new()
             .name("r2o-проверка-https".into())
@@ -198,6 +241,10 @@ impl HttpsProbeWorker {
                     };
                     if result_sender.send(result).is_err() {
                         break;
+                    }
+                    // C `worker`: result положен → будим pollable wake-fd.
+                    if let Some(wake) = wake_write.as_mut() {
+                        let _ = wake.write(b"x");
                     }
                 }
             })
@@ -293,6 +340,8 @@ impl HttpsProbeWorker {
     }
 
     pub fn try_result(&mut self) -> Option<HttpsProbeResult> {
+        // C `d2k_httpsprobe_done`: сначала осушить pipe пробуждения.
+        self.drain_wake();
         match self.results.try_recv() {
             Ok(result) => {
                 self.pending.remove(&result.host);
@@ -935,6 +984,8 @@ mod tests {
             jobs: Some(jobs),
             result_sender,
             results,
+            wake_read: None,
+            wake_write: None,
             mark: None,
             thread: Some(thread),
             pending: std::collections::HashSet::new(),
@@ -957,6 +1008,40 @@ mod tests {
     }
 
     #[test]
+    fn httpsprobe_wake_fd_signals_a_ready_result_like_c() {
+        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1);
+        let mut worker = HttpsProbeWorker::new(None);
+        let fd = worker.wake_fd();
+        assert!(fd >= 0);
+        assert!(worker.submit("wake.example", address, Instant::now()));
+
+        let started = Instant::now();
+        loop {
+            let mut descriptor = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ready = unsafe { libc::poll(&mut descriptor, 1, 50) };
+            if ready > 0 && descriptor.revents & libc::POLLIN != 0 {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "wake-fd не стал читаемым после результата"
+            );
+        }
+        assert!(worker.try_result().is_some());
+        // C `d2k_httpsprobe_done` осушает pipe — после try_result fd не читаем.
+        let mut descriptor = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(unsafe { libc::poll(&mut descriptor, 1, 0) }, 0);
+    }
+
+    #[test]
     fn lost_counts_requests_that_do_not_fit_the_queue() {
         let address: SocketAddr = "127.0.0.1:443".parse().unwrap();
         let (jobs, _receiver) = std::sync::mpsc::sync_channel(1);
@@ -974,6 +1059,8 @@ mod tests {
             jobs: Some(jobs),
             result_sender,
             results,
+            wake_read: None,
+            wake_write: None,
             mark: None,
             thread: Some(thread),
             pending: std::collections::HashSet::new(),
