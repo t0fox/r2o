@@ -179,10 +179,63 @@ fn кодирует_временную_quic_привязку_к_полному_u
 
     assert!(encode_set_addr_probe(source, destination, 120_001, &plan, trial_id).is_err());
     assert!(encode_set_addr_probe(source, destination, 1, &plan, [0; 16]).is_err());
+    // C не сверяет план с формой: чужой план энкодер принимает.
     assert!(
-        encode_set_addr_probe(source, destination, 1, &r2o_tls_plan_records(), trial_id).is_err()
+        encode_set_addr_probe(source, destination, 1, &r2o_tls_plan_records(), trial_id).is_ok()
     );
     assert!(encode_delete_addr_probe(source, destination, [0; 16]).is_err());
+}
+
+#[test]
+fn addr_probe_flow_allows_zero_source_port_and_foreign_plan_like_c() {
+    use std::net::SocketAddr;
+
+    let trial = [7; 16];
+    let source_zero_port: SocketAddr = "192.0.2.10:0".parse().unwrap();
+    let destination: SocketAddr = "198.51.100.20:443".parse().unwrap();
+    let set = read_frame(&mut Cursor::new(
+        encode_set_addr_probe(source_zero_port, destination, 1, &[], trial).unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(set.kind, COMMAND_SET_ADDR_PROBE);
+    assert_eq!(&set.body[33..35], &[0, 0]);
+    assert_eq!(&set.body[35..37], &443_u16.to_be_bytes());
+
+    // C не сверяет план с формой; пустой/чужой план принимается.
+    assert!(encode_set_addr_probe(destination, destination, 1, &[0xff], trial).is_ok());
+    // dst_port == 0 отвергается.
+    let zero_destination: SocketAddr = "198.51.100.20:0".parse().unwrap();
+    assert!(encode_set_addr_probe(source_zero_port, zero_destination, 1, &[], trial).is_err());
+    assert!(encode_delete_addr_probe(source_zero_port, zero_destination, trial).is_err());
+
+    // Смешанные семейства C допускает: ширина по family источника.
+    let source_v4: SocketAddr = "192.0.2.10:41000".parse().unwrap();
+    let destination_v6: SocketAddr = "[2001:db8::1]:443".parse().unwrap();
+    assert!(encode_set_addr_probe(source_v4, destination_v6, 1, &[], trial).is_ok());
+    assert!(encode_delete_addr_probe(source_v4, destination_v6, trial).is_ok());
+
+    assert!(encode_set_addr_probe(source_v4, destination, 0, &[], trial).is_err());
+    assert!(encode_set_addr_probe(source_v4, destination, 1, &[], [0; 16]).is_err());
+}
+
+#[test]
+fn arm_shape_accepts_empty_and_255_byte_name_like_c() {
+    use r2k_core::control::{decode_arm_shape, encode_arm_shape};
+
+    let frame = read_frame(&mut Cursor::new(encode_arm_shape("", 6, 4).unwrap())).unwrap();
+    assert_eq!(frame.body, vec![0, 6, 4]);
+
+    let name = "a".repeat(255);
+    let frame = read_frame(&mut Cursor::new(encode_arm_shape(&name, 17, 6).unwrap())).unwrap();
+    assert_eq!(frame.body[0], 255);
+    assert_eq!(&frame.body[1..256], name.as_bytes());
+    assert_eq!(&frame.body[256..258], &[17, 6]);
+    assert_eq!(
+        decode_arm_shape(&frame).unwrap().name.as_slice(),
+        name.as_bytes()
+    );
+
+    assert!(encode_arm_shape(&"a".repeat(256), 6, 4).is_err());
 }
 
 #[test]

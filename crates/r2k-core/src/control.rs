@@ -909,7 +909,8 @@ impl HttpResponseEvent {
 pub fn encode_arm_shape(name: &str, transport: u8, family: u8) -> Result<Vec<u8>, &'static str> {
     // Пустое имя — wildcard C `d2k_session_want_shape_family` (len==0
     // подходит любому сохранённому приветствию, `session.c:2938-2958`).
-    if name.len() > MAX_DNS_NAME_LEN || !matches!(transport, 6 | 17) || !matches!(family, 4 | 6) {
+    // C `d2k_link_arm_shape_family` допускает имя до 255 байт.
+    if name.len() > u8::MAX as usize || !matches!(transport, 6 | 17) || !matches!(family, 4 | 6) {
         return Err("запрос снимка требует транспорт и IP family из протокола");
     }
     let mut body = Vec::with_capacity(name.len() + 3);
@@ -924,8 +925,8 @@ pub fn decode_arm_shape(frame: &Frame) -> Result<ArmShapeCommand, &'static str> 
         return Err("неверная команда ARM_SHAPE");
     }
     let name_len = usize::from(frame.body[0]);
-    if name_len > MAX_DNS_NAME_LEN
-        || frame.body.len() != name_len + 3
+    // C `d2k_link_arm_shape_family` допускает имя до 255 байт.
+    if frame.body.len() != name_len + 3
         || !matches!(frame.body[name_len + 1], 6 | 17)
         || !matches!(frame.body[name_len + 2], 4 | 6)
     {
@@ -1643,10 +1644,8 @@ pub fn encode_set_addr_probe(
     trial_id: [u8; 16],
 ) -> Result<Vec<u8>, &'static str> {
     let flow = udp_addr_probe_flow(source, destination)?;
-    if lease_ms == 0
-        || lease_ms > ADDR_PROBE_LEASE_MAX_MS
-        || trial_id.iter().all(|byte| *byte == 0)
-        || !valid_addr_plan_records(SHAPE_QUIC, plan_records)
+    // C `d2k_link_set_addr_probe_family` не сверяет план с формой.
+    if lease_ms == 0 || lease_ms > ADDR_PROBE_LEASE_MAX_MS || trial_id.iter().all(|byte| *byte == 0)
     {
         return Err("временная QUIC-привязка имеет недопустимые параметры");
     }
@@ -1673,31 +1672,34 @@ pub fn encode_delete_addr_probe(
     encode_frame(COMMAND_DEL_ADDR_PROBE, &body)
 }
 
+fn address_bytes_16(address: IpAddr) -> [u8; 16] {
+    match address {
+        IpAddr::V4(address) => {
+            let mut bytes = [0; 16];
+            bytes[..4].copy_from_slice(&address.octets());
+            bytes
+        }
+        IpAddr::V6(address) => address.octets(),
+    }
+}
+
 fn udp_addr_probe_flow(
     source: SocketAddr,
     destination: SocketAddr,
 ) -> Result<[u8; KEY_LEN], &'static str> {
-    if source.is_ipv4() != destination.is_ipv4()
-        || source.ip().is_unspecified()
-        || destination.ip().is_unspecified()
-        || source.port() == 0
-        || destination.port() == 0
-    {
-        return Err("UDP-поток временной привязки имеет недопустимые адреса или порты");
+    // C `addr_probe_flow_bytes`: только dst_port != 0; src_port 0, нулевые
+    // адреса и разные семейства допускаются, ширина — по family источника.
+    if destination.port() == 0 {
+        return Err("UDP-поток временной привязки имеет недопустимый dst port");
     }
+    let family = if source.is_ipv4() { 4 } else { 6 };
+    let width = if family == 4 { 4 } else { 16 };
     let mut flow = [0; KEY_LEN];
-    flow[0] = if source.is_ipv4() { 4 } else { 6 };
-    match (source.ip(), destination.ip()) {
-        (IpAddr::V4(source), IpAddr::V4(destination)) => {
-            flow[1..5].copy_from_slice(&source.octets());
-            flow[17..21].copy_from_slice(&destination.octets());
-        }
-        (IpAddr::V6(source), IpAddr::V6(destination)) => {
-            flow[1..17].copy_from_slice(&source.octets());
-            flow[17..33].copy_from_slice(&destination.octets());
-        }
-        _ => return Err("семейства адресов UDP-потока не совпадают"),
-    }
+    flow[0] = family;
+    let src = address_bytes_16(source.ip());
+    let dst = address_bytes_16(destination.ip());
+    flow[1..1 + width].copy_from_slice(&src[..width]);
+    flow[17..17 + width].copy_from_slice(&dst[..width]);
     flow[33..35].copy_from_slice(&source.port().to_be_bytes());
     flow[35..37].copy_from_slice(&destination.port().to_be_bytes());
     flow[37] = 17;
