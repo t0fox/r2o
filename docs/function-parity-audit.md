@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 320 | 228 | 0 | 0 |
-| core-state | 692 | 416 | 276 | 0 | 0 |
+| core-state | 692 | 417 | 275 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1241** | **741** | **0** | **0** |
+| **Итого** | **1982** | **1242** | **740** | **0** | **0** |
 
-Это не оценка паритета: 741 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 740 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1241 / P 741 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1242 / P 740 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 320 | 228 | 0 | 0 |
-| core-state | 692 | 416 | 276 | 0 | 0 |
+| core-state | 692 | 417 | 275 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1241** | **741** | **0** | **0** |
+| **Итого** | **1982** | **1242** | **740** | **0** | **0** |
 
 
 ---
@@ -2254,7 +2254,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `hex_nibble` | 133–138 | 6 | `0-9` → 0..9, `a-f`/`A-F` → 10..15, иначе -1 | `plan_text::hex_nibble`/`u8::is_ascii_hexdigit` | **E*** | **Точное совпадение:** C возвращает `c-'0'`, `c-'a'+10`, `c-'A'+10`, иначе -1 (`link.c:133-138`); Rust `hex_nibble`/`is_ascii_hexdigit` принимает тот же набор ASCII-цифр. Используется в разборе планов; покрыто plan_text/дифференциалами. |
 | `hex_decode` | 144–159 | 16 | hex-пары в байты, ошибка на недопустимом символе/переполнении `outcap`; нечётную длину проверяет вызывающий | `plan_text::decode_hex`/`compile_text` | **P*** | C идёт парами, проверяет обе цифры и `n < outcap`, возвращает число байт или -1; нечётный хвост молча игнорируется (`hex[1]` == 0) (`link.c:144-159`). Rust `decode_hex`/`compile_text` отвергает не-Hex и нечётную длину; для вызовов, где чётность уже проверена (`send_name_plan`, `set_addr`), результат совпадает. Отдельного differential нет. |
 | `d2k_link_open` | 161–189 | 29 | AF_UNIX SOCK_STREAM: пустой путь/путь ≥ `sun_path` → ошибка, блокирующий `connect` | `ControlClient::connect`/`UnixStream::connect` (`main.rs`) | **P** | C проверяет непустой путь и `strlen < sizeof(sun_path)`, создаёт `AF_UNIX/SOCK_STREAM` и блокирующе зовёт `connect` (`link.c:161-189`). Rust использует `UnixStream::connect(path)`; пустой/слишком длинный путь отвергает ОС/`io::Error`, отдельной проверки `sun_path` нет. Для штатного сокета эквивалентно; C/Rust differential на ошибки connect/длину пути нет. |
-| `d2k_link_close` | 191–195 | 5 | закрыть link, если `fd>=0` | `Drop for UnixStream`/`OwnedFd` | **P*** | C закрывает `fd` только при `fd>=0` (`link.c:191-195`); Rust `UnixStream`/`OwnedFd` закрывается `Drop`, отрицательного fd в типе нет. Эквивалентно по владению. |
+| `d2k_link_close` | 191–195 | 5 | закрыть link, если `fd>=0` | `Drop for ControlClient`/`UnixStream` (`OwnedFd`) | **E*** | C закрывает fd только при `fd>=0`; Rust `UnixStream`/`OwnedFd` закрывается `Drop`, отрицательного fd в типе нет. Тест `link_close_drops_fd_like_c`: после drop `fcntl(F_GETFD) == -1`. **Ограничение:** отдельной функции нет — семантика выражена владением. |
 | `d2k_link_peer_closed` | 197–221 | 25 | poll(0); `POLLNVAL`→EBADF/-1; `HUP/ERR`→1; иначе 0; EINTR повтор | `read_optional_frame`/`ControlClient` EOF (`main.rs:19907-19908`) | **P** | C опрашивает `poll(0)`, различает `POLLNVAL` (EBADF/-1) и `POLLHUP/POLLERR` (1), EINTR повторяет (`link.c:197-221`). Rust не имеет отдельной функции: `read_optional_frame` возвращает `None` на EOF, `wait_for_control_frame` — ошибку; `POLLNVAL`/`EBADF` отдельно не классифицируются. Семантика «закрыт/не закрыт» сохраняется, коды различаются. |
 | `d2k_link_next` | 223-522 | 300 | декодирование событий: PROTO/HELLO/SUSPECT/EXCHANGE/APPLIED/REFUSED/ACK/SHAPE/HTTP_*; границы/длины/`execution` | `r2k-core/src/control.rs` decode, `tests/control.rs` | **E** | **Ветви C сверены:** `out==NULL`/`fd<0` → -1; `wait_readable` (0 — таймаут → 1); заголовок 6 байт; `plen` 2..`D2K_CTL_FRAME_MAX`; тело `plen-2`, короче `KEY_LEN` → -1; family 4/6; IPv4 старшие 12 байт адресов нулевые; HELLO (name_len+name), SUSPECT (code + опционально ttl/ref_ttl/tos/ipid/planned/client_shape/num), STATS (dropped/sent опционально), EXCHANGE (code/seen_types/num + server_hello/planned), CLIENT_TCP (опции ≤40), SHAPE (≤буфера), ACK (code/ok-reason + trial + binding для SET_NAME_BOUND), APPLIED (plan/trial + execution 0/36), PROTO (release_id 1..64 + версия/send_maxlen), REFUSED (code + plan/trial + client_shape + execution). Rust декодирует те же события в `control.rs`; `d2o_control_differential.c` + `tests/control.rs` сверяют границы/типы/`execution`. |
 | `d2k_link_set_name` | 524–527 | 4 | SET_NAME без пробного порта: `set_name_probe(..., sport=0)` → `send_name_plan` (cmd SET_NAME) | `control.rs` `encode_set_name` | E | C-обёртка передаёт `sport=0`, `family=4` в `set_name_family`; кадр — SET_NAME с телом name_len+name+shape+family+план. Rust `encode_set_name(name, shape, 4, plan_records)` формирует тот же кадр; тест `link_wrappers_emit_c_family4_frames` сверяет cmd/body/план байт-в-байт. |

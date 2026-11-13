@@ -25458,6 +25458,20 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn link_close_drops_fd_like_c() {
+        use std::os::fd::AsRawFd;
+
+        // C `d2k_link_close`: закрыть fd, если он >= 0. Rust ControlClient
+        // владеет UnixStream, и Drop закрывает дескриптор; отрицательного fd
+        // в типе быть не может.
+        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let fd = stream.as_raw_fd();
+        drop(stream);
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn hs_close_port_drops_fd_like_c() {
         use std::os::fd::AsRawFd;
 
