@@ -2084,15 +2084,38 @@ fn trace_questions(result: &ClassifyResult) -> Vec<QuestionTrace> {
     out
 }
 
+const NOTES_MAX: usize = 8;
+const NOTE_LEN: usize = 256;
+
+/// C `d2k_note`: не больше `D2K_NOTES_MAX` заметок, каждая усечена до 255
+/// байт (в C — `vsnprintf` в `char[256]`).
+fn push_note(result: &mut ClassifyResult, text: String) {
+    if result.notes.len() >= NOTES_MAX {
+        return;
+    }
+    if text.len() < NOTE_LEN {
+        result.notes.push(text);
+        return;
+    }
+    let mut end = NOTE_LEN - 1;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    result.notes.push(text[..end].to_owned());
+}
+
 /// C `note_gap_loss` (`detect/classify.c:238-247`): честно сказать, что
 /// движок не умеет паузу между копиями фальшивки.
 fn note_gap_loss(result: &mut ClassifyResult, gap_ms: i32) {
     if gap_ms <= 0 {
         return;
     }
-    result.notes.push(format!(
-        "приём сработал с паузой {gap_ms} мс между копиями фальшивки, а движок паузу выразить не умеет: в строке копии идут вплотную. Если обход не встанет — дело может быть именно в этом"
-    ));
+    push_note(
+        result,
+        format!(
+            "приём сработал с паузой {gap_ms} мс между копиями фальшивки, а движок паузу выразить не умеет: в строке копии идут вплотную. Если обход не встанет — дело может быть именно в этом"
+        ),
+    );
 }
 
 /// C `cross_check_tls12` (`detect/classify.c:1084-1092`): режим ещё не
@@ -2102,9 +2125,10 @@ fn cross_check_tls12(result: &mut ClassifyResult, options: &ClassifyOptions, _po
         return;
     }
     result.covers_tls12 = TriState::Unset;
-    result
-        .notes
-        .push("покрытие старого приветствия TLS 1.2 НЕ ПРОВЕРЕНО: режим ещё не перенесён".into());
+    push_note(
+        result,
+        "покрытие старого приветствия TLS 1.2 НЕ ПРОВЕРЕНО: режим ещё не перенесён".into(),
+    );
 }
 
 fn finish(result: &mut ClassifyResult, options: &ClassifyOptions, start: Instant) {
@@ -2981,6 +3005,20 @@ mod qtrace_tests {
         let mut renamed = a.clone();
         renamed.name = "other".into();
         assert!(poison_same(&a, &renamed));
+    }
+
+    #[test]
+    fn note_caps_and_truncates_like_c() {
+        let mut result = ClassifyResult::new("example.com:443", 3);
+        for index in 0..12 {
+            super::push_note(&mut result, format!("note-{index}"));
+        }
+        assert_eq!(result.notes.len(), super::NOTES_MAX);
+
+        let mut long = ClassifyResult::new("example.com:443", 3);
+        super::push_note(&mut long, "я".repeat(400));
+        assert!(long.notes[0].len() <= super::NOTE_LEN - 1);
+        assert!(std::str::from_utf8(long.notes[0].as_bytes()).is_ok());
     }
 
     #[test]

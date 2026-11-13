@@ -51,6 +51,11 @@ pub struct RawSocket {
     route_mtu_cache: RefCell<R2oRouteMtuCache>,
 }
 
+/// C `d2k_send_nosig`: Linux глушит SIGPIPE флагом MSG_NOSIGNAL.
+fn r2o_raw_send_flags() -> libc::c_int {
+    libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL
+}
+
 impl RawSocket {
     /// Открыть отправитель, чьи пакеты не попадут обратно в очередь без метки.
     pub fn open(family: i32, mark: u32, interface: Option<&str>) -> io::Result<Self> {
@@ -197,7 +202,7 @@ impl RawSocket {
                     self.fd.as_raw_fd(),
                     packet.as_ptr().cast(),
                     packet.len(),
-                    libc::MSG_DONTWAIT,
+                    r2o_raw_send_flags(),
                     &destination as *const libc::sockaddr_storage as *const libc::sockaddr,
                     destination_len,
                 )
@@ -953,6 +958,12 @@ mod tests {
             assert!(mtu > 0);
             assert_eq!(r2o_pick_maxlen(Some("lo")), mtu);
         }
+    }
+
+    #[test]
+    fn raw_send_flags_include_nosignal() {
+        assert_ne!(super::r2o_raw_send_flags() & libc::MSG_NOSIGNAL, 0);
+        assert_ne!(super::r2o_raw_send_flags() & libc::MSG_DONTWAIT, 0);
     }
 
     proptest! {

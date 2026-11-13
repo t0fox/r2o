@@ -88,8 +88,8 @@ recheck 1982 1982 equal True
 | core-state | 692 | 182 | 509 | 0 | 0 |
 | datapath-core | 400 | 156 | 244 | 0 | 0 |
 | datapath-plan | 183 | 174 | 9 | 0 | 0 |
-| detect | 159 | 68 | 91 | 0 | 0 |
-| **Итого** | **1982** | **777** | **1205** | **0** | **0** |
+| detect | 159 | 70 | 89 | 0 | 0 |
+| **Итого** | **1982** | **779** | **1203** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 777 / P 1205 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 779 / P 1203 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -348,8 +348,8 @@ P означает неполное доказательство ветвей, N
 | core-state | 692 | 182 | 510 | 0 | 0 |
 | datapath-core | 400 | 156 | 244 | 0 | 0 |
 | datapath-plan | 183 | 174 | 9 | 0 | 0 |
-| detect | 159 | 68 | 91 | 0 | 0 |
-| **Итого** | **1982** | **777** | **1205** | **0** | **0** |
+| detect | 159 | 70 | 89 | 0 | 0 |
+| **Итого** | **1982** | **779** | **1203** | **0** | **0** |
 
 
 ---
@@ -6353,7 +6353,7 @@ raw_recheck, sweep_poisons (свойства → compose → перебор), cr
 | `d2k_opts_skipped` | 172-181 | 10 | пропуск гипотезы по имени: линейный `strcmp` по `skip[]` | `classify.rs` `opts_skipped`/`poison_selected` | E | C проходит `o->nskip`, `strcmp` → 1. Rust `opts_skipped` делает линейный точный `==` по `skip_poisons`, `poison_selected` дополнительно учитывает `only_poison`. Тест `trigger_sni_and_opts_skipped_match_c` (точное имя, регистр, отсутствие, only). |
 | `d2k_trace_add` | 183-204 | 1018 | добавить наблюдение в трассу, при переполнении — последний слот | `classify.rs:1048 add_observation` | **E** | C `ntrace>=D2K_TRACE_MAX` → `&trace[MAX-1]`; иначе слот `ntrace++`, `memset`, копия probe с обрезкой до поля/NUL. Rust `add_observation`; `tests/classify.rs:384`. |
 | `obs_done` | 210-215 | 5 | объявить наблюдение наружу через `on_obs` | `classify.rs:1235` progress callback | **E** | C `if (opt->on_obs) opt->on_obs(opt->on_obs_ctx, o)`; Rust progress callback вызывается после записи наблюдения; `tests/classify.rs:384`. |
-| `d2k_note` | 217-227 | 264 | до `D2K_NOTES_MAX` заметок в `res->notes[]` через `vsnprintf` | `classify.rs:1248 append_reason` | **P** | C `nnotes>=MAX` → return; `vsnprintf(notes[nnotes], sizeof(notes[0]), fmt, ap)`; `nnotes++`. Rust `append_reason` дописывает в одно поле `reason`, массива/лимита notes нет; для `note_gap_loss` отдельного аналога нет (N). |
+| `d2k_note` | 217-227 | 264 | до `D2K_NOTES_MAX` заметок в `res->notes[]` через `vsnprintf` | `classify.rs` `push_note` | **E** | C `nnotes>=MAX` → return; `vsnprintf(notes[nnotes], sizeof(notes[0]), fmt, ap)`; `nnotes++`. Rust `push_note` ограничивает 8 заметками и 255 байтами (по границе UTF-8), используется `note_gap_loss`/`cross_check_tls12`. Тесты `note_caps_and_truncates_like_c`, `trace_questions_is_bounded_and_notes_match_c`. |
 | `note_gap_loss` | 238-247 | 9 | при `gap_ms>0` — note, что движок не умеет паузу между копиями | `classify.rs` `note_gap_loss`, `ClassifyResult.notes` | E | C `gap_ms<=0` → выход; иначе note с текстом про паузу N мс. Rust `note_gap_loss` добавляет тот же текст в `notes`; вызывается при принятии `PoisonHit` с `gap_ms`. Тест `trace_questions_is_bounded_and_notes_match_c` (0 — без note, 20 — с «20 мс»). |
 | `d2k_split_offsets` | 253-287 | 915 | точки разреза → диапазоны; вне `(0,n)` отброшены; сортировка/дедуп; последний до `n` | `classify.rs:28 split_offsets` | **E** | C `cuts[i]>0 && cuts[i]<n`, до 8; вставки; пропуск `cl[i]==prev`; `out[used]={prev,cl[i]}`; финальный `{prev,n}`; возврат used. Rust `split_offsets` те же фильтр/сорт/дедуп/диапазоны; `tests/classify.rs:337,349,361`. |
 | `dial_marked_mode` | 292-364 | 2591 | TCP-connect с меткой: `require_mark`, различение отказа `SO_MARK` и connect | `response.rs:723 dial_probe_target`, `:289 probe_socket` | **P** | **Ветви сверены:** C `getaddrinfo` family по `:`; для каждого ai: socket, `SO_MARK(mark)`, при `require_mark && mark && marked!=0` → ошибка «transport control: SO_MARK»; `TCP_NODELAY`; nonblock; `connect==0` → restore flags/fd; `EINPROGRESS` → poll(timeout), затем `SO_ERROR`; restore flags; ошибки. Rust `dial_probe_target`/`probe_socket` не имеют `require_mark` и различают только общий connect/SO_MARK error; нужен тест «SO_MARK запрещён». |
@@ -6376,7 +6376,7 @@ raw_recheck, sweep_poisons (свойства → compose → перебор), cr
 | `sweep_poisons` | 887-1076 | 8251 | перебор: resolve, selftest, RST-правило, свойства, compose, список гипотез, контроль | `raw_probe.rs:78 sweep_poisons` | **P** | **Ветви сверены:** C `getaddrinfo`/family/ip/port; `selftest_cached_age` → trace «кэш», иначе `raw_selftest` (провал → raw_usable=0/return 0); `rst_fail_count != base` → trace; `props0`, `d2k_run_properties_family`/acceptable → path «свойство»; `raw_doubted` → `raw_recheck`; `compose_from_props` кандидаты; для каждого: family/skip, trace, повторы с единогласием/`raw_note_rc`/`raw_recheck`, pass==repeats && acceptable → hit/path «собрано»; затем `d2k_poisons` список: only/family/disorder/len/skip/trigger_allows, `bind_decoy`, `answered_by_props`, trace, повторы, `raw_doubted`, pass==repeats → `note_props_hit`, acceptable, path «перебор», hit; miss. **Отличия:** C ведёт trace о непринятом RST-правиле, отдельный текст selftest, compose при `control=None` иной; Rust часть диагностики не выносит. |
 | `cross_check_tls12` | 1084-1092 | 367 | проверка покрытия TLS 1.2 | `classify.rs` `cross_check_tls12`, `ClassifyResult.covers_tls12` | E | C при `cross_check_tls12` ставит `covers_tls12=UNSET` и note «НЕ ПРОВЕРЕНО: режим не перенесён». Rust поле `covers_tls12: TriState` (Unset) и `notes`; `cross_check_tls12` вызывается из `finish`, текст совпадает. Тест `trace_questions_is_bounded_and_notes_match_c`. |
 | `d2k_classify_run` | 1095-1476 | 22179 | дерево зондов и вердикт | `classify.rs:1298 run_with_backend_progress` | **P** | **Ветви сверены:** C `opts_defaults`, `raw_flush_pending`, rst/dial base, target/repeats/trigger_len/tri; разбор `host:port`, `[]`, `%`, loopback, trigger<2 → FLAKY; база `measure("whole")`; при dial-timeout — один повтор с `timeout*2`; base err → FLAKY (наш срок) или UNREACHABLE; base pass==repeats → CLEAR + response (SNI) / ответное направление не проверено; base 0<p<repeats → FLAKY; split pos=1; err → FLAKY; pass==0 → контроль (until_pass), neutral-ack (0/repeats → ADDRESS; -2/ошибка → observed=0), `sweep_poisons` → POISONABLE, иначе control_vouched → ADDRESS / INCONCLUSIVE, OPAQUE; pass==repeats → split-long → reassembles, двоичный поиск границы (×(len-1), mid; err→FLAKY, pass==repeats→lo, pass==0→hi, иначе FLAKY) → PREFIX; done: stopped/duration. **Ключевое:** production-discovery использует `full_detect_semantics=false`, `confirm_clear=true` (`classify.rs:869-870`, `main.rs:15380-15391`), то есть не donor-семантику C: нет удвоенного dial-retry, иначе обрабатываются частичные transport-ошибки, control без `until_pass`, добавлен whole-confirm. Существующие дифференциалы идут с `full_detect_semantics=true`. |
-| `d2k_send_nosig` | 1481-1494 | 309 | `send` с `MSG_NOSIGNAL` (если есть) и `SO_NOSIGPIPE` (если есть) | libc::send `MSG_NOSIGNAL` (`response.rs:815/1100`) | **P** | C под `#ifdef MSG_NOSIGNAL` ставит флаг; под `#ifdef SO_NOSIGPIPE` — опцию сокета; затем `send`. Rust использует только `MSG_NOSIGNAL`, macOS-ветка `SO_NOSIGPIPE` отсутствует. На Linux эквивалентно, на macOS — нет. |
+| `d2k_send_nosig` | 1481-1494 | 309 | `send` с `MSG_NOSIGNAL` (если есть) и `SO_NOSIGPIPE` (если есть) | `raw.rs` `r2o_raw_send_flags` | **E** | C под `#ifdef MSG_NOSIGNAL` ставит флаг, под `#ifdef SO_NOSIGPIPE` — опцию сокета. Rust raw-модуль собирается только на Linux, где действует `MSG_NOSIGNAL`; флаг включён в каждый `sendto`. Тест `raw_send_flags_include_nosignal`. macOS-ветка неприменима: датапат Linux-only. |
 
 ### detect/classify.c: построчная сверка
 
