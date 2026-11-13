@@ -2178,12 +2178,13 @@ fn finish(result: &mut ClassifyResult, options: &ClassifyOptions, start: Instant
     .unwrap_or(usize::MAX);
 }
 
+/// C `classify_cancelled` (`core/verdict.c:96-102`): причина отмены.
+const R2O_CLASSIFY_CANCELLED_REASON: &str =
+    "профильный замер отменён: пришёл снимок приветствия клиента";
+
 fn finish_cancelled(result: &mut ClassifyResult, options: &ClassifyOptions, start: Instant) {
     result.verdict = Verdict::Inconclusive;
-    result.reason = format!(
-        "замер брошен по требованию остановки на {}-м зонде — о цели не сказано ничего",
-        result.probes
-    );
+    result.reason = R2O_CLASSIFY_CANCELLED_REASON.to_owned();
     finish(result, options, start);
 }
 
@@ -3149,6 +3150,23 @@ mod qtrace_tests {
         assert_eq!(kept.write_gap, Duration::from_millis(5));
         assert_eq!(kept.long_gap, Duration::from_millis(9));
         assert_eq!(explicit.repeats, 7);
+    }
+
+    #[test]
+    fn classify_cancelled_reason_matches_c() {
+        assert_eq!(
+            super::R2O_CLASSIFY_CANCELLED_REASON,
+            "профильный замер отменён: пришёл снимок приветствия клиента"
+        );
+        let mut result = super::ClassifyResult::new("192.0.2.1:443", 3);
+        result.probes = 2;
+        super::finish_cancelled(
+            &mut result,
+            &super::ClassifyOptions::default(),
+            std::time::Instant::now(),
+        );
+        assert_eq!(result.verdict, super::Verdict::Inconclusive);
+        assert_eq!(result.reason, super::R2O_CLASSIFY_CANCELLED_REASON);
     }
 
     #[test]
