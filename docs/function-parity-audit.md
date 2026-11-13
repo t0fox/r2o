@@ -88,8 +88,8 @@ recheck 1982 1982 equal True
 | core-state | 692 | 182 | 509 | 0 | 0 |
 | datapath-core | 400 | 156 | 244 | 0 | 0 |
 | datapath-plan | 183 | 169 | 14 | 0 | 0 |
-| detect | 159 | 64 | 95 | 0 | 0 |
-| **Итого** | **1982** | **768** | **1214** | **0** | **0** |
+| detect | 159 | 67 | 92 | 0 | 0 |
+| **Итого** | **1982** | **771** | **1211** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 768 / P 1214 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 771 / P 1211 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -348,8 +348,8 @@ P означает неполное доказательство ветвей, N
 | core-state | 692 | 182 | 510 | 0 | 0 |
 | datapath-core | 400 | 156 | 244 | 0 | 0 |
 | datapath-plan | 183 | 169 | 14 | 0 | 0 |
-| detect | 159 | 64 | 95 | 0 | 0 |
-| **Итого** | **1982** | **768** | **1214** | **0** | **0** |
+| detect | 159 | 67 | 92 | 0 | 0 |
+| **Итого** | **1982** | **771** | **1211** | **0** | **0** |
 
 
 ---
@@ -6364,7 +6364,7 @@ raw_recheck, sweep_poisons (свойства → compose → перебор), cr
 | `d2k_probe_data_ack` | 520-586 | 2519 | подтверждение нейтрального байта `x` по очереди отправки | `response.rs:898 probe_neutral_ack` | **E** | **Ветви сверены:** C платформа без TIOCOUTQ/SO_NWRITE → -2; `dial_marked`; первичная `unacked_bytes<0` → -1; `send_nosig("x")`; цикл: `q==0` → 1, `q<0` → -1, deadline ≤0 → 0, отмена → -1, `poll(POLLIN,≤20 мс)>0` → 1. Rust `probe_neutral_ack`; `tests/classify.rs:990`. |
 | `measure` | 608-710 | 4054 | повторы одного зонда, seed-ветка, raw-connect-retry, запись наблюдения | `classify.rs:1076 measure` | **E** | **Ветви сверены:** C `trace_add`, cuts≤4/gap; `seed_whole && ncuts==0 && name=="whole" && seed_repeats==repeats && !dial_deadline_err` → seed pass/fail/err; иначе `repeats`: отмена, `once_probe`, `probes++`; `RAW_CONNECT_TIMEOUT` → trace transport + control `dial_marked_mode(require_mark=1)` + retry; `rc<0` → fail/err (первый), `rc>0` → pass (until_pass break), `rc==0` → fail; obs pass/fail; `obs_done`. Rust `measure`; `tests/classify.rs:535,694,732`; seeded/progress. |
 | `bind_decoy` | 717-728 | 279 | привязать приманку и длину перекрытия | `raw_probe.rs:203-231`, `:1047`, `classify_measured.rs:106` | **P** | C при `decoy_hello`: `d2k_opts_decoy(opt)` → `decoy/decoy_len`; при `seqovl_exact` `seqovl=d->len`. Rust привязка разнесена по `select_bridge_decoy`/`raw_probe`/`classify_measured`; профильного теста нет. |
-| `answered_by_props` | 732-739 | 7 | не повторять гипотезу, уже отвеченную свойствами | `raw_probe.rs:474` (`answered` + `same_hypothesis`) | **P** | C линейно по `res->nanswered`, `d2k_poison_same(&answered[k],p)` → 1. Rust `answered`/`same_hypothesis` (`classify.rs:206`) сравнивает подмножество полей `Poison` (без autottl/tcp_ts_up); логика есть, профильного теста нет. |
+| `answered_by_props` | 732-739 | 7 | не повторять гипотезу, уже отвеченную свойствами | `raw_probe.rs:484` (`answered` + `same_hypothesis`) | **E** | C линейно по `res->nanswered`, `d2k_poison_same` → 1. Rust `answered` использует `Poison::same_hypothesis`, который делегирует полному `poison_same` (имя игнорируется, repeats≤1→1); тест `poison_has_fake_and_same_match_c` проверяет autottl-различие и переименование. |
 | `fam_ix` | 766-766 | 1 | индекс семейства: 6 → 1, иначе 0 | `raw_probe.rs` `fam_ix` | E | C `return family==6 ? 1 : 0`. Rust `fam_ix` используется `raw_selftest_index`; тест `fam_ix_matches_c_family_slots` проверяет 4/6/0 и слоты 0..3. |
 | `self_ix` | 769-771 | 3 | индекс кэша `(family, offer_ts)`: 0/1 с меткой, 2/3 без | `raw_probe.rs:719-721 raw_selftest_index` | **E** | C `fam_ix(family)+(offer_ts?0:2)`. Rust `(if family==6 {1} else {0}) + if offer_ts {0} else {2}` — точное совпадение; `raw_probe.rs:2348` (`RAW_SELFTEST_KEY`). |
 | `selftest_cached_age` | 774-789 | 445 | возраст кэша самопроверки или -1 | `raw_probe.rs:685 raw_selftest_age` | **P** | C под mutex: `ok[k]` → `d=now-at[k]`; `0<=d<TTL(600000)` → age, иначе `ok=0`; иначе -1. Rust `raw_selftest_age`; TTL 600 с совпадает, теста возраста нет. |
@@ -6494,9 +6494,9 @@ tcp_ts/ip_id_zero/seq_shift — совпадают; дедупликация `ba
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `d2k_poison_supports_family` | 17-22 | 290 | допустимость гипотезы для семейства: IPv6 запрещает `ip_id_zero` | `classify.rs:389-397 poison_supports_family` | **E** | C `p && (family==4 \|\| (family==6 && !p->ip_id_zero))`; Rust те же три условия: NULL/семейство/ipid. Тест `tests/classify.rs:861` (ipid на IPv6). |
-| `d2k_poison_has_fake` | 24-40 | 1239 | фальшивка, если не syn_data/oob/fake_between и есть badsum/md5/ttl/autottl/seq_shift/tcp_ts | `classify.rs:382-388 poison_has_fake` | **P** | **Ветви сверены:** C `p->syn_data \|\| p->oob \|\| p->fake_between` → 0; иначе `badsum \|\| md5 \|\| ttl>0 \|\| autottl \|\| seq_shift!=0 \|\| tcp_ts`. Rust `Poison` не имеет `autottl`/`tcp_ts_up`, поэтому autottl-only или tcp_ts-only гипотеза в C даёт fake, в Rust — нет. Для текущих 85 гипотез таких записей нет; для произвольной структуры поведение различается. |
+| `d2k_poison_has_fake` | 24-40 | 1239 | фальшивка, если не syn_data/oob/fake_between и есть badsum/md5/ttl/autottl/seq_shift/tcp_ts | `classify.rs` `poison_has_fake` | E | C `syn_data/oob/fake_between` → 0; иначе `badsum \|\| md5 \|\| ttl>0 \|\| autottl \|\| seq_shift!=0 \|\| tcp_ts`. Rust `Poison` получил `autottl`, `poison_has_fake` учитывает его; тест `poison_has_fake_and_same_match_c` покрывает все шесть положительных и три исключающих поля. |
 | `add` | 47-60 | 335 | добавить гипотезу в список: cap 128, `memset`, `vsnprintf(name)` | classify.rs:215 `add_poison` | **E** | C при `g_npoisons>=128` возвращает последний слот; иначе `g_npoisons++`, `memset`, `vsnprintf(p->name, ..., fmt, ap)`. Rust `add_poison` в `build_poisons`; `tests/classify.rs:861` (порядок и 85 записей). |
-| `d2k_poison_same` | 62-70 | 300 | сравнение без имени: name занулён, repeats≤1→1, `memcmp` всего struct | classify.rs:200 `same_hypothesis` | **P** | C копирует обе структуры, зануляет `name`, нормализует `repeats<=1→1`, сравнивает **все** поля `d2k_poison`, включая `autottl/autottl_delta/min/max/tcp_ts_up/split_pos`. Rust `same_hypothesis` сравнивает подмножество полей `Poison`; autottl/tcp_ts_up отсутствуют. На текущем каталоге расхождений нет; для произвольной гипотезы — есть. |
+| `d2k_poison_same` | 62-70 | 300 | сравнение без имени: name занулён, repeats≤1→1, `memcmp` всего struct | `classify.rs` `poison_same`, `Poison::same_hypothesis` | E | C копирует обе структуры, зануляет `name`, нормализует `repeats<=1→1`, сравнивает все поля, включая autottl. Rust `poison_same` делает то же через clone/clear/normalize/`==`, `same_hypothesis` делегирует ему; тест проверяет имя, repeats 0/1, иное число и autottl. |
 | `already_listed` | 73-82 | 248 | отсев уже перечисленной гипотезы (кроме себя) | classify.rs:327-330 (dedup в `build_poisons`) | **E** | C линейно сравнивает `d2k_poison_same` со всеми предыдущими, пропуская `q==p`. Rust `build_poisons` дедуплицирует `badsum-xN-gG`; `tests/classify.rs:861` все 85 уникальны. |
 | `init_poisons` | 84-180 | 5674 | полный список 85 гипотез в порядке стоимости | classify.rs:223 `build_poisons` | **E** | **Состав сверен:** C 9 головных (`seqovl-1`, `badsum-x2-g20/g80`, `badsum-x7`, `disorder`, `disorder-pos2`, `badsum`, `md5`, `seq-out-of-window`), `syndata`, `oob`, `fakedsplit`/`fakedsplit-x7`, 3×3 `fake-xR+seqovl-hello/681/ttl62`, 3 `seqovl-hello*`, 3×3 `seqovl-N+disorder*`, 7×2 `seqovl-N[+hello]`, 16 `badsum-xN-gG` с дедупом, 8×2 `ttl-N`/`badsum+ttl-N`, `disorder+badsum[+hello]`, 3 `disorder+badsum+ttl-N`, `badsum+ts/ipid/hello`. Rust `build_poisons` те же имена/порядок/поля/дедуп; `tests/classify.rs:861`. |
 | `d2k_poisons` | 182-189 | 284 | неизменяемый список гипотез после `pthread_once` | classify.rs:377 `poisons` | **E** | C `pthread_once(init_poisons)`, `*n=g_npoisons`, вернуть `g_poisons`. Rust `OnceLock<Vec<Poison>>`/`poisons()`; `tests/classify.rs:861`. |

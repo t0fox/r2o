@@ -148,6 +148,8 @@ pub struct Poison {
     pub disorder_pos: i32,
     pub tcp_ts: bool,
     pub ip_id_zero: bool,
+    /// C `d2k_poison.autottl`: TTL по измеренному пути — тоже подделка.
+    pub autottl: bool,
     pub gap_ms: i32,
     pub syn_data: bool,
     pub oob: bool,
@@ -208,20 +210,10 @@ pub fn note_props_miss(properties: &mut DpiProps, poison: &Poison) {
 }
 
 impl Poison {
-    /// Сравнить гипотезы вроде `r2o_poison_same`: имя игнорируется, а ноль и один
-    /// повтор считаются одинаковым числом передач.
+    /// Сравнить гипотезы как C `d2k_poison_same`: имя игнорируется, а ноль и
+    /// один повтор считаются одинаковым числом передач.
     pub fn same_hypothesis(&self, other: &Self) -> bool {
-        let mut left = self.clone();
-        let mut right = other.clone();
-        left.name.clear();
-        right.name.clear();
-        if left.repeats <= 1 {
-            left.repeats = 1;
-        }
-        if right.repeats <= 1 {
-            right.repeats = 1;
-        }
-        left == right
+        poison_same(self, other)
     }
 }
 
@@ -396,7 +388,28 @@ pub fn poison_has_fake(poison: &Poison) -> bool {
     !poison.syn_data
         && !poison.oob
         && !poison.fake_between
-        && (poison.badsum || poison.md5 || poison.ttl > 0 || poison.seq_shift != 0 || poison.tcp_ts)
+        && (poison.badsum
+            || poison.md5
+            || poison.ttl > 0
+            || poison.autottl
+            || poison.seq_shift != 0
+            || poison.tcp_ts)
+}
+
+/// C `d2k_poison_same`: сравнение всех полей, кроме имени; `repeats<=1`
+/// нормализуется к 1.
+pub fn poison_same(left: &Poison, right: &Poison) -> bool {
+    let mut a = left.clone();
+    let mut b = right.clone();
+    a.name.clear();
+    b.name.clear();
+    if a.repeats <= 1 {
+        a.repeats = 1;
+    }
+    if b.repeats <= 1 {
+        b.repeats = 1;
+    }
+    a == b
 }
 
 pub fn poison_supports_family(poison: &Poison, family: u8) -> bool {
@@ -2897,6 +2910,65 @@ mod qtrace_tests {
         for (code, verdict) in expected {
             assert_eq!(r2o_map_verdict(code), verdict, "код {code}");
         }
+    }
+
+    #[test]
+    fn poison_has_fake_and_same_match_c() {
+        use super::{Poison, poison_has_fake, poison_same};
+
+        let base = Poison::default();
+        assert!(!poison_has_fake(&base));
+        for mutate in [
+            |poison: &mut Poison| poison.badsum = true,
+            |poison: &mut Poison| poison.md5 = true,
+            |poison: &mut Poison| poison.ttl = 1,
+            |poison: &mut Poison| poison.autottl = true,
+            |poison: &mut Poison| poison.seq_shift = -1,
+            |poison: &mut Poison| poison.tcp_ts = true,
+        ] {
+            let mut poison = base.clone();
+            mutate(&mut poison);
+            assert!(poison_has_fake(&poison));
+        }
+        for mutate in [
+            |poison: &mut Poison| poison.syn_data = true,
+            |poison: &mut Poison| poison.oob = true,
+            |poison: &mut Poison| poison.fake_between = true,
+        ] {
+            let mut poison = base.clone();
+            poison.badsum = true;
+            mutate(&mut poison);
+            assert!(!poison_has_fake(&poison));
+        }
+
+        let a = Poison {
+            name: "a".into(),
+            badsum: true,
+            repeats: 0,
+            ..Poison::default()
+        };
+        let mut b = Poison {
+            name: "b".into(),
+            badsum: true,
+            repeats: 1,
+            ..Poison::default()
+        };
+        assert!(poison_same(&a, &b));
+        assert!(a.same_hypothesis(&b));
+        b.repeats = 2;
+        assert!(!poison_same(&a, &b));
+        b.repeats = 1;
+        b.ttl = 1;
+        assert!(!poison_same(&a, &b));
+
+        // Полное сравнение: autottl входит, как в C `memcmp` всего struct.
+        let mut with_autottl = a.clone();
+        with_autottl.autottl = true;
+        assert!(!poison_same(&a, &with_autottl));
+        assert!(!a.same_hypothesis(&with_autottl));
+        let mut renamed = a.clone();
+        renamed.name = "other".into();
+        assert!(poison_same(&a, &renamed));
     }
 
     #[test]
