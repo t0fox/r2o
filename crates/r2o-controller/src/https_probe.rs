@@ -513,6 +513,11 @@ impl HttpsProbeWorker {
 impl Drop for HttpsProbeWorker {
     fn drop(&mut self) {
         self.jobs.take();
+        // Разорвать канал результатов до join: иначе воркер, заблокированный
+        // на send при полном канале, не даст Drop завершиться.
+        let (_, closed) = mpsc::sync_channel(0);
+        let results = std::mem::replace(&mut self.results, closed);
+        drop(results);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -530,6 +535,7 @@ mod tests {
     };
     use r2k_core::control::{BindingContext, HttpPortalEvent, HttpResponseEvent, KEY_LEN};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -880,6 +886,56 @@ mod tests {
                 .is_some_and(|thread| !thread.is_finished()),
             "submit обязан поднять новый HTTPS probe worker"
         );
+    }
+
+    #[test]
+    fn httpsprobe_drop_unblocks_full_results_channel_like_c_free() {
+        let (result_sender, results) = mpsc::sync_channel::<super::HttpsProbeResult>(1);
+        result_sender
+            .send(super::HttpsProbeResult {
+                host: "prefill.example".into(),
+                ttl_seconds: 0,
+                state: HttpsProbeState::Closed,
+            })
+            .unwrap();
+        let thread_sender = result_sender.clone();
+        let (jobs, _job_receiver) = mpsc::sync_channel::<super::Job>(1);
+        let (release, wait) = mpsc::channel::<()>();
+        let (worker_done, worker_finished) = mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            let _ = wait.recv();
+            // Канал результатов полон: send блокируется, пока Drop не
+            // разорвёт receiver (C free сначала останавливает поток).
+            let _ = thread_sender.send(super::HttpsProbeResult {
+                host: "blocked.example".into(),
+                ttl_seconds: 0,
+                state: HttpsProbeState::Closed,
+            });
+            let _ = worker_done.send(());
+        });
+        let worker = HttpsProbeWorker {
+            jobs: Some(jobs),
+            result_sender,
+            results,
+            mark: None,
+            thread: Some(thread),
+            pending: std::collections::HashSet::new(),
+            lost: 0,
+            cache: Vec::new(),
+        };
+        release.send(()).unwrap();
+        let (dropped, drop_done) = mpsc::channel::<()>();
+        let dropper = std::thread::spawn(move || {
+            drop(worker);
+            let _ = dropped.send(());
+        });
+        drop_done
+            .recv_timeout(Duration::from_secs(2))
+            .expect("Drop завис на полном канале результатов");
+        dropper.join().unwrap();
+        worker_finished
+            .recv_timeout(Duration::from_secs(2))
+            .expect("воркер не разблокировался после Drop");
     }
 
     #[test]
