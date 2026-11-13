@@ -89,7 +89,7 @@ recheck 1982 1982 equal True
 | datapath-core | 400 | 213 | 187 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **910** | **1072** | **0** | **0** |
+| **Итого** | **1982** | **911** | **1071** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 910 / P 1072 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 911 / P 1071 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -345,11 +345,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 225 | 323 | 0 | 0 |
-| core-state | 692 | 203 | 489 | 0 | 0 |
+| core-state | 692 | 204 | 488 | 0 | 0 |
 | datapath-core | 400 | 213 | 187 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **910** | **1072** | **0** | **0** |
+| **Итого** | **1982** | **911** | **1071** | **0** | **0** |
 
 
 ---
@@ -2544,7 +2544,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `quic_deny_recheck` | 4129–4153 | 25 | если поиск уже идёт — 1; иначе task_done/свободный слот, заполнить name/transport/family/ip/port/trig, `deny_recheck=1`, запустить | `r2o_quic_deny.rs:84-99 start_recheck`, `main.rs:17754-17840 r2o_run_quic_discovery_trial` | **P** | **Совпадает:** перепроверка после срока своим запросом, флаг rechecking, повтор при cut. **Отличия:** C создаёт задачу с `trigger_code=QUIC_STALL` и `deny_recheck=1`; Rust запускает QUIC-trial через `r2o_run_quic_discovery_trial`, поля/триггер иные. Отдельного differential нет. |
 | `quic_deny_tick` | 4155–4181 | 27 | по истечении: recheck, если он идёт — ждать; иначе active=0, DEL_NAME QUIC, sync, лог | `r2o_quic_deny.rs:84-153 due_rechecks/start_recheck/recheck_clear/pending_removals/finish_removal`, `main.rs:17731-17760` | **P** | Rust-модуль покрывает due/recheck/removal и тесты снятия только после подтверждения DEL; C-тик дополнительно проверяет `task_of`/`deny_recheck` и снимает запрет при незавершённой перепроверке. Полного differential тика нет. |
 | `task_done` | 4183–4191 | 9 | join, report cancelled, contact/prop/ver close, task_reset, T_FREE | `main.rs:12855-12916 r2o_forget_watching_task`, `:12774-12824 r2o_reconcile_task_slots`, `:12092-12133` worker cancel | **P** | **Подтверждено в Rust:** задача снимается из `active`, `seen`, `suspect_fingerprints`, `client_hellos`, `client_tcp_timestamps`, `failed_at`/`failed_retry_after`, `clear_streaks`, `clear_signal_codes`, `clear_bypass_pending`, `late_rst_only_bypass_pending` (`r2o_forget_watching_task`); слот освобождается/вытесняется `r2o_reconcile_task_slots`; воркер останавливается `task_cancel`/`worker_cancel`. **Подтверждённые отличия:** (1) C требует успешного `pthread_join` и при ошибке **не** освобождает задачу; Rust не join-ит detached-воркер, отмена кооперативная; (2) C зовёт `search_report(\"cancelled\")`; в Rust строка `\"cancelled\"` встречается только в voice-диагностике (`16985,17020`), общего отчёта об отмене задачи нет; (3) C `task_reset` возвращает страницы `MADV_DONTNEED` и обнуляет ~114 КиБ; Rust очищает записи `HashMap`/`Vec`, слоты переиспользуются; (4) C `contact_close/prop_close/ver_close` закрывают fd, Rust — RAII. Queue/lifetime differentials частичные. |
-| `rx_decoy_name` | 4195–4197 | 3 | имя приманки RX: `network_whitelist.name` или `hcaptcha.com` | `main.rs:10570` (`unwrap_or("hcaptcha.com")`), `:14388` (список кандидатов) | **P*** | C: `s->cat && s->cat->net.name[0] ? s->cat->net.name : "hcaptcha.com"` (`sched.c:4195-4197`). Rust в ECH/объёмной лестнице берёт `white_name` с `unwrap_or("hcaptcha.com")` (`main.rs:10570`) и тот же дефолт в списке кандидатов (`14388`). Отдельной функции нет; для пустого/отсутствующего имени совпадает. |
+| `rx_decoy_name` | 4195–4197 | 3 | имя приманки RX: `network_whitelist.name` или `hcaptcha.com` | `main.rs` `r2o_rx_decoy_name` | E | C: `s->cat && s->cat->net.name[0] ? net.name : "hcaptcha.com"` — пустое имя даёт default. Rust `r2o_rx_decoy_name(Option<&str>)` возвращает имя только при непустой строке, иначе `hcaptcha.com`; используется в ECH/объёмной лестнице и в тестовом классификаторе. Тест `rx_decoy_name_matches_c` (None/пусто/имя). |
 | `net_whitelist_undecided` | 4201-4203 | 3 | cat есть, `!searched`, `!name[0]` | `main.rs` whitelist state | **E*** | C `s->cat && !s->cat->net.searched && !s->cat->net.name[0]`; Rust те же `searched`/`name.is_empty()`; C дополнительно требует `cat`. |
 | `net_whitelist_needs_probe` | 4211-4214 | 4 | нерешённое имя ИЛИ `rx_cut && cat && name[0] && tx_only` | `r2o-net-whitelist-probe-differential.sh` | **E** | **Построчно совпадает:** C `net_whitelist_undecided(s) \|\| (t->vol.rx_cut && s->cat && s->cat->net.name[0] && s->cat->net.tx_only)`. Rust те же условия; differential. |
 | `sched_probe_cap` | 4220–4222 | 3 | `SCHED_MAX_PROBES + (net_probing ? net_whitelist_count : 0)` | `main.rs:7362-7364` (`R2O_DISCOVERY_PROBE_CAP=67`), `:10661,11160,14728` | **E** | **Арифметика проверена:** C `SCHED_MAX_PROBES = D2K_PROPS_QUESTIONS(5) + SCHED_MAX_PLANS(8) + D2K_RX_VOLUME_PLAN_VARIANTS(5) + d2k_fallback_arms()`; `d2k_fallback_arms()` = `FB_N_HEAD(13) + FB_N_FAKE(3) + FB_N_FAKE(3) + FB_N_OVL(7)*2 + FB_N_DUP(4*4=16)` = **49** (`compose.c:1469-1500`), итого **67**. Rust `R2O_DISCOVERY_PROBE_CAP = 67` с тем же разбором; добавка `network_probe`/`net_probing` учитывается в `main.rs:10661,10963,11160,11486,14728`. |

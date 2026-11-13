@@ -10749,12 +10749,12 @@ impl DiscoveryWorker {
                 .get(&target)
                 .map(|progress| progress.tried.clone())
                 .unwrap_or_default();
-            let white_name = candidate_catalog
-                .as_ref()
-                .and_then(|catalog| catalog.network_whitelist.as_ref())
-                .map(|network| network.name.as_str())
-                .filter(|name| !name.is_empty())
-                .unwrap_or("hcaptcha.com");
+            let white_name = r2o_rx_decoy_name(
+                candidate_catalog
+                    .as_ref()
+                    .and_then(|catalog| catalog.network_whitelist.as_ref())
+                    .map(|network| network.name.as_str()),
+            );
             let progress_searches = Arc::clone(&runner_searches);
             let progress_target = target.clone();
             let mut progress = move |probe: &str, probes: usize, passed: usize, failed: usize| {
@@ -14574,9 +14574,15 @@ fn classify_discovery_target_with_client_hello(
         cancel,
         mark,
         None,
-        "hcaptcha.com",
+        r2o_rx_decoy_name(None),
     )
     .0
+}
+
+/// C `rx_decoy_name`: имя приманки из white-списка или `hcaptcha.com`.
+fn r2o_rx_decoy_name(name: Option<&str>) -> &str {
+    name.filter(|value| !value.is_empty())
+        .unwrap_or("hcaptcha.com")
 }
 
 #[cfg(unix)]
@@ -23816,6 +23822,16 @@ mod tests {
             super::SHAPE_LEGACY,
             super::SHAPE_MODERN
         ));
+    }
+
+    #[test]
+    fn rx_decoy_name_matches_c() {
+        assert_eq!(super::r2o_rx_decoy_name(None), "hcaptcha.com");
+        assert_eq!(super::r2o_rx_decoy_name(Some("")), "hcaptcha.com");
+        assert_eq!(
+            super::r2o_rx_decoy_name(Some("white.example")),
+            "white.example"
+        );
     }
 
     #[test]
