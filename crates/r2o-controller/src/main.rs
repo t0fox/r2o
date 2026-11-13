@@ -2363,10 +2363,16 @@ const R2O_TCP_STALL_BUDGETS_MAX: usize = 8;
 #[cfg(unix)]
 const R2O_TCP_STALL_BUDGET_SLACK: u32 = 3;
 
+/// C `is_rx_volume_kind`: только RX-роды, без обычного `volume`.
+#[cfg(unix)]
+fn r2o_is_rx_volume_kind(kind: &str) -> bool {
+    matches!(kind, "rx-volume" | "rx-volume-wire")
+}
+
 #[cfg(unix)]
 fn r2o_box_tcp_stall_budget(box_record: &r2o_controller::catalog::BoxRecord) -> Option<u16> {
     box_record.fingerprint.signals.iter().find_map(|signal| {
-        if !matches!(signal.kind.as_str(), "rx-volume" | "rx-volume-wire")
+        if !r2o_is_rx_volume_kind(&signal.kind)
             || !(1..=i32::from(u16::MAX)).contains(&signal.packets)
         {
             return None;
@@ -24100,6 +24106,15 @@ mod tests {
 
         // Снимок обязан проходить ту же проверку, что и R2O CLIENT_SHAPE.
         assert!(with_ts.event_body().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_rx_volume_kind_matches_c() {
+        assert!(super::r2o_is_rx_volume_kind("rx-volume"));
+        assert!(super::r2o_is_rx_volume_kind("rx-volume-wire"));
+        assert!(!super::r2o_is_rx_volume_kind("volume"));
+        assert!(!super::r2o_is_rx_volume_kind("rst"));
     }
 
     #[cfg(unix)]

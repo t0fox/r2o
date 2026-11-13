@@ -89,7 +89,7 @@ recheck 1982 1982 equal True
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **925** | **1057** | **0** | **0** |
+| **Итого** | **1982** | **926** | **1056** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 925 / P 1057 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 926 / P 1056 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -345,11 +345,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 226 | 322 | 0 | 0 |
-| core-state | 692 | 211 | 481 | 0 | 0 |
+| core-state | 692 | 212 | 480 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **925** | **1057** | **0** | **0** |
+| **Итого** | **1982** | **926** | **1056** | **0** | **0** |
 
 
 ---
@@ -2453,7 +2453,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_sched_set_say` | 1639–1643 | 5 | установить колбэк журнала и контекст | нет (прямой вывод `eprintln`/`Recorder`) | **P*** | C инъектирует `say_fn/say_ctx` (`sched.c:1639-1643`), поэтому тест/`d2kc` перехватывает все строки. Rust пишет напрямую через `println!`/`eprintln!` и `diagnostics::Recorder`; единой точки инъекции лога нет. API-совместимость не нужна, но и эквивалента перехвата нет. |
 | `verdict_name` | 1647–1662 | 16 | 11 русских фраз: «проходит как есть» … «имя разрешается в приватный адрес», default «неизвестный вердикт» | `classify.rs:908-921 Verdict::as_str` | **P** | **Подтверждённое расхождение:** C — русские человекочитаемые строки, включая `NO_QUIC`/`LOCAL_ADDRESS`, без `POISONABLE`; Rust — 10 английских машинных имён (`clear/prefix/whole_packet/opaque/inconclusive/address/poisonable/flaky/unreachable/response`) без `NO_QUIC`/`LOCAL_ADDRESS`. Это лог-текст/набор, не классификация. |
 | `signal_of` | 1672–1694 | 23 | code 1/4→`rst`, 2→`repeat`, 3→`silent`, иначе `код-N`; ttl/ttl_delta/tos/ipid только для `rst`; `seen=1` | `main.rs:3389-3427 r2o_discovery_suspect_signal` | **P** | Посимвольно совпадает: те же коды/строки, `is_rst`-гейт для полей, `seen=1`, `ttl_delta=ttl-ref_ttl`. Тесты `main.rs:29861` (rst-поля) и `:29885` (trigger 3/silent); `repeat` и прочие коды отдельно не проверены, C/Rust differential нет. |
-| `is_rx_volume_kind` | 1699–1701 | 3 | `rx-volume` или `rx-volume-wire` (без `volume`) | inline `matches!` в `main.rs:3450-3458`, `catalog.rs:1077-1088 same_signal` | **P*** | C-хелпер возвращает 1 только для `rx-volume`/`rx-volume-wire`; `volume` — отдельный род. Rust в `r2o_discovery_volume_known_plans` фильтрует объединение `volume\|rx-volume\|rx-volume-wire` (`main.rs:3454-3457`), а `same_signal` отдельно обрабатывает volume-роды. Отдельной функции «только RX-роды» нет; для набора `same_bucket` объединение совпадает с C `is_volume_kind`. |
+| `is_rx_volume_kind` | 1699–1701 | 3 | `rx-volume` или `rx-volume-wire` (без `volume`) | `main.rs` `r2o_is_rx_volume_kind` | E | C возвращает true только для двух RX-родов. Rust `r2o_is_rx_volume_kind` делает то же и используется в `r2o_box_tcp_stall_budget` (RX-only ветвь с `packets>0`); объединение `volume|rx-volume|rx-volume-wire` остаётся для C `is_volume_kind` в `merge_observed`/`same_signal`. Тест `is_rx_volume_kind_matches_c`. |
 | `fp_add` | 1703–1730 | 28 | слить сигнал: volume-роды по `abs(Δvolume)<=4` + packets, остальные по `abs(Δttl)<=2`+tos+ipid; иначе добавить до 8 | `catalog.rs:111-135 Fingerprint::merge_observed`, `:1077-1088 same_signal`, константы `:15,18,19` | **P** | Пороги и слияние совпадают: `MAX_SIGNALS=8`, `VOLUME_SLACK=4`, `TTL_SLACK=2`, tos/ipid, packets только для volume-родов. **Отличие:** Rust `merge_observed` при пустом отпечатке копирует `method`, при несовпадении method выходит; C `fp_add` method не трогает (это делает вызывающий). Unit catalog; C/Rust differential нет. |
 | `volume_bucket` | 1746–1751 | 6 | `kb<=0→0`, иначе `floor(log2(kb))+1` | `main.rs:3430-3435 r2o_discovery_volume_bucket` | **E*** | **Точное совпадение:** C `while (kb > 1) { kb >>= 1; b++; } return b+1` и Rust `i32::BITS - volume_kb.leading_zeros()` дают `floor(log2(kb))+1` для всех `i32 > 0`; `kb<=0 → 0` в обоих. Используется в `same_bucket` (`main.rs:3462,3475`); отдельного differential нет, но формула тождественна. |
 | `is_volume_kind` | 1753-1755 | 3 | `volume` или rx-volume-род | `catalog.rs`/`r2o_volume` kind set | **E*** | **Точное совпадение набора:** C `strcmp(kind,"volume")==0 \|\| is_rx_volume_kind(kind)`; Rust те же `volume`/`rx-volume`/`rx-volume-wire`. |
