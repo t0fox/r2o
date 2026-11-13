@@ -778,3 +778,122 @@ fn fingerprint_slack_boundaries_match_c() {
     changed.ipid = 8;
     assert!(!print(signal("rst", 90, 0)).is_compatible_with(&print(changed)));
 }
+
+#[test]
+fn fp_add_differential_matches_c_sched() {
+    fn signal(
+        kind: &str,
+        ttl: u8,
+        tos: u8,
+        ipid: u16,
+        volume: i32,
+        seen: i32,
+        packets: i32,
+    ) -> Signal {
+        Signal {
+            kind: kind.into(),
+            ttl,
+            ttl_delta: 0,
+            tos,
+            ipid,
+            volume,
+            seen,
+            packets,
+        }
+    }
+
+    fn scenario(name: &str, steps: &[Signal]) -> Value {
+        let mut fingerprint = Fingerprint {
+            method: 2,
+            signals: Vec::new(),
+        };
+        for step in steps {
+            fingerprint.merge_observed(&Fingerprint {
+                method: 2,
+                signals: vec![step.clone()],
+            });
+        }
+        serde_json::json!({
+            "scenario": name,
+            "signals": serde_json::to_value(&fingerprint.signals).unwrap(),
+        })
+    }
+
+    let scenarios = vec![
+        scenario(
+            "volume_in_slack",
+            &[
+                signal("volume", 0, 0, 0, 20, 1, 0),
+                signal("volume", 0, 0, 0, 19, 1, 5),
+            ],
+        ),
+        scenario(
+            "volume_out_of_slack",
+            &[
+                signal("volume", 0, 0, 0, 20, 1, 0),
+                signal("volume", 0, 0, 0, 24, 1, 0),
+            ],
+        ),
+        scenario(
+            "volume_other_kind",
+            &[
+                signal("volume", 0, 0, 0, 20, 1, 0),
+                signal("rx-volume", 0, 0, 0, 20, 1, 0),
+            ],
+        ),
+        scenario(
+            "rst_ttl_in_slack",
+            &[
+                signal("rst", 127, 0x88, 54321, 0, 1, 0),
+                signal("rst", 129, 0x88, 54321, 0, 1, 0),
+            ],
+        ),
+        scenario(
+            "rst_ttl_out_of_slack",
+            &[
+                signal("rst", 127, 0x88, 54321, 0, 1, 0),
+                signal("rst", 130, 0x88, 54321, 0, 1, 0),
+            ],
+        ),
+        scenario(
+            "rst_tos_differs",
+            &[
+                signal("rst", 127, 0x88, 54321, 0, 1, 0),
+                signal("rst", 127, 0x89, 54321, 0, 1, 0),
+            ],
+        ),
+        scenario(
+            "rst_seen_and_packets",
+            &[
+                signal("rst", 127, 0x88, 54321, 0, 1, 7),
+                signal("rst", 127, 0x88, 54321, 0, 2, 9),
+            ],
+        ),
+        scenario(
+            "eight_signal_cap",
+            &(0..9)
+                .map(|index| signal(&format!("k{index}"), 0, 0, 0, 0, 1, 0))
+                .collect::<Vec<_>>(),
+        ),
+        scenario(
+            "silent_ttl_in_slack",
+            &[
+                signal("silent", 0, 0, 0, 0, 1, 0),
+                signal("silent", 2, 0, 0, 0, 1, 0),
+            ],
+        ),
+    ];
+    if let Ok(path) = std::env::var("R2O_FP_ADD_DIFF_OUTPUT") {
+        let lines = scenarios
+            .iter()
+            .map(|scenario| serde_json::to_string(scenario).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(path, format!("{lines}\n")).unwrap();
+    }
+    assert_eq!(scenarios[0]["signals"][0]["seen"], 2);
+    assert_eq!(scenarios[0]["signals"][0]["packets"], 5);
+    assert_eq!(scenarios[1]["signals"].as_array().unwrap().len(), 1);
+    assert_eq!(scenarios[6]["signals"][0]["packets"], 7);
+    assert_eq!(scenarios[7]["signals"].as_array().unwrap().len(), 8);
+}

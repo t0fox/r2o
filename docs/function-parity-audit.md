@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 320 | 228 | 0 | 0 |
-| core-state | 692 | 403 | 289 | 0 | 0 |
+| core-state | 692 | 404 | 288 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1228** | **754** | **0** | **0** |
+| **Итого** | **1982** | **1229** | **753** | **0** | **0** |
 
-Это не оценка паритета: 754 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 753 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1228 / P 754 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1229 / P 753 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 320 | 228 | 0 | 0 |
-| core-state | 692 | 403 | 289 | 0 | 0 |
+| core-state | 692 | 404 | 288 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1228** | **754** | **0** | **0** |
+| **Итого** | **1982** | **1229** | **753** | **0** | **0** |
 
 
 ---
@@ -2452,7 +2452,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `verdict_name` | 1647–1662 | 16 | 11 русских фраз: «проходит как есть» … «имя разрешается в приватный адрес», default «неизвестный вердикт» | `classify.rs:908-921 Verdict::as_str` | **P** | **Подтверждённое расхождение:** C — русские человекочитаемые строки, включая `NO_QUIC`/`LOCAL_ADDRESS`, без `POISONABLE`; Rust — 10 английских машинных имён (`clear/prefix/whole_packet/opaque/inconclusive/address/poisonable/flaky/unreachable/response`) без `NO_QUIC`/`LOCAL_ADDRESS`. Это лог-текст/набор, не классификация. |
 | `signal_of` | 1672–1694 | 23 | code 1/4→`rst`, 2→`repeat`, 3→`silent`, иначе `код-N`; ttl/ttl_delta/tos/ipid только для `rst`; `seen=1` | `main.rs:3570-3600 r2o_discovery_suspect_signal` | E | Посимвольно совпадает: те же коды/строки, `is_rst`-гейт для полей, `seen=1`, `ttl_delta=ttl-ref_ttl`. Production-вызовы: сохранение исходной приметы подозрения, диагностическое событие, восстановление QUIC. Тест `suspect_signal_matches_c_signal_of_for_all_codes` покрывает 1/4→rst, 2→repeat, 3→silent, 0/5/255→код-N и обнуление ttl/tos/ipid вне rst. |
 | `is_rx_volume_kind` | 1699–1701 | 3 | `rx-volume` или `rx-volume-wire` (без `volume`) | `main.rs` `r2o_is_rx_volume_kind` | E | C возвращает true только для двух RX-родов. Rust `r2o_is_rx_volume_kind` делает то же и используется в `r2o_box_tcp_stall_budget` (RX-only ветвь с `packets>0`); объединение `volume|rx-volume|rx-volume-wire` остаётся для C `is_volume_kind` в `merge_observed`/`same_signal`. Тест `is_rx_volume_kind_matches_c`. |
-| `fp_add` | 1703–1730 | 28 | слить сигнал: volume-роды по `abs(Δvolume)<=4` + packets, остальные по `abs(Δttl)<=2`+tos+ipid; иначе добавить до 8 | `catalog.rs:111-135 Fingerprint::merge_observed`, `:1077-1088 same_signal`, константы `:15,18,19` | **P** | Пороги и слияние совпадают: `MAX_SIGNALS=8`, `VOLUME_SLACK=4`, `TTL_SLACK=2`, tos/ipid, packets только для volume-родов. **Отличие:** Rust `merge_observed` при пустом отпечатке копирует `method`, при несовпадении method выходит; C `fp_add` method не трогает (это делает вызывающий). Unit catalog; C/Rust differential нет. |
+| `fp_add` | 1703–1730 | 28 | слить сигнал: volume-роды по `abs(Δvolume)<=4` + packets, остальные по `abs(Δttl)<=2`+tos+ipid; иначе добавить до 8 | `catalog.rs` `Fingerprint::merge_observed`, `same_signal` | E | C/Rust differential `scripts/test-fp-add-differential.sh` (9 сценариев: volume в допуске/вне, другой род, rst ttl 2/3, tos, seen/packets только для volume, предел 8, silent ttl 2) PASS. Пороги `VOLUME_SLACK=4`, `TTL_SLACK=2`, `MAX_SIGNALS=8`, packets обновляется только у volume-родов — совпадают. **Ограничение:** C сравнивает volume в `int` (переполнение на крайних значениях), Rust — в `i64`; `method` Rust выставляет при пустом отпечатке, C оставляет вызывающему (на слияние не влияет). |
 | `volume_bucket` | 1746–1751 | 6 | `kb<=0→0`, иначе `floor(log2(kb))+1` | `main.rs:3430-3435 r2o_discovery_volume_bucket` | **E*** | **Точное совпадение:** C `while (kb > 1) { kb >>= 1; b++; } return b+1` и Rust `i32::BITS - volume_kb.leading_zeros()` дают `floor(log2(kb))+1` для всех `i32 > 0`; `kb<=0 → 0` в обоих. Используется в `same_bucket` (`main.rs:3462,3475`); отдельного differential нет, но формула тождественна. |
 | `is_volume_kind` | 1753-1755 | 3 | `volume` или rx-volume-род | `catalog.rs`/`r2o_volume` kind set | **E*** | **Точное совпадение набора:** C `strcmp(kind,"volume")==0 \|\| is_rx_volume_kind(kind)`; Rust те же `volume`/`rx-volume`/`rx-volume-wire`. |
 | `box_volume_bucket_agrees` | 1760–1772 | 13 | коробка той же корзины порога по любой объёмной примете того же рода; `want==0` пропускается | `discovery.rs:297-311 same_volume_bucket` в `known_plans`, `main.rs:3638-3657 r2o_discovery_volume_known_plans` | E | C перебирает объёмные приметы цели (`is_volume_kind`: volume/rx-volume/rx-volume-wire), считает `volume_bucket`, пропускает 0 и ищет тот же род+корзину в коробке. Rust делает то же в production-отборе известных планов; C/Rust differential `scripts/r2o-known-plans-differential.sh` (fixture `d2o_known_plans.tsv`, кейс `bucket`: same/near/outside/duplicate) PASS на пине `a378e230`. |
