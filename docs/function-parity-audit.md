@@ -88,8 +88,8 @@ recheck 1982 1982 equal True
 | core-state | 692 | 182 | 509 | 0 | 0 |
 | datapath-core | 400 | 156 | 244 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
-| detect | 159 | 71 | 88 | 0 | 0 |
-| **Итого** | **1982** | **782** | **1200** | **0** | **0** |
+| detect | 159 | 72 | 87 | 0 | 0 |
+| **Итого** | **1982** | **783** | **1199** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 782 / P 1200 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 783 / P 1199 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -348,8 +348,8 @@ P означает неполное доказательство ветвей, N
 | core-state | 692 | 182 | 510 | 0 | 0 |
 | datapath-core | 400 | 156 | 244 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
-| detect | 159 | 71 | 88 | 0 | 0 |
-| **Итого** | **1982** | **782** | **1200** | **0** | **0** |
+| detect | 159 | 72 | 87 | 0 | 0 |
+| **Итого** | **1982** | **783** | **1199** | **0** | **0** |
 
 
 ---
@@ -6363,7 +6363,7 @@ raw_recheck, sweep_poisons (свойства → compose → перебор), cr
 | `unacked_bytes` | 499-518 | 388 | байты в очереди отправки, -1 — не наблюдается | `response.rs:953/963 unacked_bytes` | **E** | C Linux `ioctl(TIOCOUTQ)`, macOS `getsockopt(SO_NWRITE)`, иначе -1. Rust `unacked_bytes` те же вызовы; TIOCOUTQ/SO_NWRITE; `tests/classify.rs:990`. |
 | `d2k_probe_data_ack` | 520-586 | 2519 | подтверждение нейтрального байта `x` по очереди отправки | `response.rs:898 probe_neutral_ack` | **E** | **Ветви сверены:** C платформа без TIOCOUTQ/SO_NWRITE → -2; `dial_marked`; первичная `unacked_bytes<0` → -1; `send_nosig("x")`; цикл: `q==0` → 1, `q<0` → -1, deadline ≤0 → 0, отмена → -1, `poll(POLLIN,≤20 мс)>0` → 1. Rust `probe_neutral_ack`; `tests/classify.rs:990`. |
 | `measure` | 608-710 | 4054 | повторы одного зонда, seed-ветка, raw-connect-retry, запись наблюдения | `classify.rs:1076 measure` | **E** | **Ветви сверены:** C `trace_add`, cuts≤4/gap; `seed_whole && ncuts==0 && name=="whole" && seed_repeats==repeats && !dial_deadline_err` → seed pass/fail/err; иначе `repeats`: отмена, `once_probe`, `probes++`; `RAW_CONNECT_TIMEOUT` → trace transport + control `dial_marked_mode(require_mark=1)` + retry; `rc<0` → fail/err (первый), `rc>0` → pass (until_pass break), `rc==0` → fail; obs pass/fail; `obs_done`. Rust `measure`; `tests/classify.rs:535,694,732`; seeded/progress. |
-| `bind_decoy` | 717-728 | 279 | привязать приманку и длину перекрытия | `raw_probe.rs:203-231`, `:1047`, `classify_measured.rs:106` | **P** | C при `decoy_hello`: `d2k_opts_decoy(opt)` → `decoy/decoy_len`; при `seqovl_exact` `seqovl=d->len`. Rust привязка разнесена по `select_bridge_decoy`/`raw_probe`/`classify_measured`; профильного теста нет. |
+| `bind_decoy` | 717-728 | 279 | привязать приманку и длину перекрытия | `raw_probe.rs` `select_bridge_decoy`, `classify_measured.rs` | **E** | C при `decoy_hello`: контрольное приветствие → `decoy/decoy_len`; при `seqovl_exact` `seqovl=d->len`. Rust `select_bridge_decoy` клонирует приманку с SNI контроля (fixture `d2o_bridge_clone_decoy.tsv`), `classify_measured` при `seqovl_exact` берёт `overlap = decoy.len()` и кладёт приманку payload 2. Тест `seqovl_exact_overlap_equals_decoy_length_like_c`. |
 | `answered_by_props` | 732-739 | 7 | не повторять гипотезу, уже отвеченную свойствами | `raw_probe.rs:484` (`answered` + `same_hypothesis`) | **E** | C линейно по `res->nanswered`, `d2k_poison_same` → 1. Rust `answered` использует `Poison::same_hypothesis`, который делегирует полному `poison_same` (имя игнорируется, repeats≤1→1); тест `poison_has_fake_and_same_match_c` проверяет autottl-различие и переименование. |
 | `fam_ix` | 766-766 | 1 | индекс семейства: 6 → 1, иначе 0 | `raw_probe.rs` `fam_ix` | E | C `return family==6 ? 1 : 0`. Rust `fam_ix` используется `raw_selftest_index`; тест `fam_ix_matches_c_family_slots` проверяет 4/6/0 и слоты 0..3. |
 | `self_ix` | 769-771 | 3 | индекс кэша `(family, offer_ts)`: 0/1 с меткой, 2/3 без | `raw_probe.rs:719-721 raw_selftest_index` | **E** | C `fam_ix(family)+(offer_ts?0:2)`. Rust `(if family==6 {1} else {0}) + if offer_ts {0} else {2}` — точное совпадение; `raw_probe.rs:2348` (`RAW_SELFTEST_KEY`). |

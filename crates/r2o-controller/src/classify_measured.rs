@@ -475,3 +475,29 @@ fn checked_text(text: String) -> Result<String, String> {
     }
     Ok(text)
 }
+
+#[cfg(test)]
+mod decoy_binding_tests {
+    use super::{plan_for_poison, plan_text_for_poison};
+    use crate::classify::{Poison, Trigger};
+
+    #[test]
+    fn seqovl_exact_overlap_equals_decoy_length_like_c() {
+        let trigger = Trigger::tls("example.com").unwrap();
+        let decoy = crate::hello::legacy_client_hello("disk.rzd.ru").unwrap();
+        let poison = Poison {
+            decoy_hello: true,
+            seqovl_exact: true,
+            ..Poison::default()
+        };
+        let text = plan_text_for_poison(&poison, &trigger, Some(&decoy), 0).unwrap();
+        assert!(text.contains("seqovl payload=2 poison=0"));
+        let plan = plan_for_poison(&poison, &trigger, Some(&decoy), 0).unwrap();
+        let payload = plan
+            .payloads
+            .iter()
+            .find(|payload| payload.id == 2)
+            .expect("decoy payload 2");
+        assert_eq!(payload.bytes.len(), decoy.len());
+    }
+}
