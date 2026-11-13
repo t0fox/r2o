@@ -84,14 +84,14 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 272 | 276 | 0 | 0 |
+| core-net | 548 | 276 | 272 | 0 | 0 |
 | core-state | 692 | 274 | 418 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1034** | **948** | **0** | **0** |
+| **Итого** | **1982** | **1038** | **944** | **0** | **0** |
 
-Это не оценка паритета: 948 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 944 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1034 / P 948 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1038 / P 944 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -342,12 +342,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 272 | 276 | 0 | 0 |
+| core-net | 548 | 276 | 272 | 0 | 0 |
 | core-state | 692 | 274 | 418 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1034** | **948** | **0** | **0** |
+| **Итого** | **1982** | **1038** | **944** | **0** | **0** |
 
 
 ---
@@ -636,10 +636,10 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `gateway_json_hello` | 917-974 | 58 | JSON: top-level `op`, число 0..100000 без переполнения, `op==10`, строки/вложенность/экранирование | `fetch.rs:2050-2100 r2o_gateway_json_hello` | **E** | C: скип whitespace, `{`, обход с depth, строки с `\\`, top-level `op:`, число, проверка `,`/`}`, overflow, `op==10`; Rust те же поля/правила (top-level, overflow, `op==10`) в gateway-тесте. |
 | `gateway_fill` | 976-998 | 23 | дочитать до `need`: предел буфера, дедлайн, `rd`, ошибки | `fetch.rs:2105-2125` gateway fill | **E** | C `used<need`; `used==cap` → «больше предела»; left/`until`; `rd`; `got<=0` → ошибка; `used+=`; Rust те же условия/пределы. Gateway differential. |
 | `request_gateway_websocket` | 1000-1123 | 124 | GET Gateway с Upgrade, проверка 101/Upgrade/Connection/Accept, WebSocket frame, JSON Hello op=10 | `fetch.rs:2129-2188 r2o_gateway_websocket_probe` | **E** | **Совпадает:** фиксированный запрос `GET /?v=10&encoding=json`, Host/UA/Origin/Upgrade/Version/Key; `Sec-WebSocket-Accept` `s3pP...`; буфер 4 КиБ; ожидание заголовков/статуса 101; ровно один Upgrade, Connection: Upgrade, ровно один Accept; frame FIN/opcode 1/mask 0, длины 126/127, JSON top-level op=10; `http_evidence`/reason. Gateway differential `donor_and_r2o_validate_the_discord_gateway_websocket_like_d2o`. |
-| `read_eof` | 1132-1139 | 8 | обёртка чтения: запомнить `eof` (n==0), `failed` (n<0), `bytes` | `fetch.rs` eof reader | **P** | C `read_eof`; Rust бюджетный цикл сам отслеживает `eof`/ошибку/байты через `read_status_rd`/EOF-обёртку. Точный аналог не выделен. |
-| `budget_tcp` | 1146-1213 | 68 | бюджет TCP: `need=budget*2`; пакеты/данные; PASSED при pk≥need; NOT_APPLICABLE при счётчике<0, conn_close, pk не растёт; иначе повтор запроса, `read_status_rd`, CUT при молчании после deadline, иначе NOT_APPLICABLE | `fetch.rs` HTTP keep-alive budget differential | **P** | **C-ветви проверены:** `packets<0` → uncountable/NOT_APPLICABLE; `pk>=need` → PASSED; `conn_close` → NOT_APPLICABLE; `last>=0 && pk<=last` → NOT_APPLICABLE; `wr`, `budget_requests++`; `read_status_rd(read_eof,...)`; при ошибке: `now`/`packets`, `silent=er.failed && elapsed>=deadline-20`, `wrote\|\|eof\|\|peer_spoke` → NOT_APPLICABLE, `ll\|\|!silent` → NOT_APPLICABLE, иначе CUT; иначе `conn_close=cc`. Rust HTTP budget differential `d2o_http_baseline`/keep-alive; точные коды/границы не все сверены. |
-| `fd_peer_spoke` | 1217-1222 | 6 | сервер закрыл/сбросил поток после неудачи чтения | бюджетный код fetch | **P** | C `poll(fd,POLLIN,0)>0 && (revents&(POLLIN\|POLLHUP\|POLLERR))`. Rust бюджетный код проверяет закрытие/наличие данных через сокет/ошибки чтения; отдельной функции `poll`-проверки нет. |
-| `fd_packets` | 1223-1223 | 1 | пакеты с данными обеих сторон через hook | `TCP_INFO`/`R2oVolume` (`fetch.rs`) | **P*** | C `return d2k_verify_packets_hook(fd)`, `-1` — не считается. Rust `data_packets` получает из TCP_INFO/`R2oVolume` и кладёт в `R2oVolumeObservation`; отдельного hook `packets(ctx)` нет. |
+| `read_eof` | 1132-1139 | 8 | обёртка чтения: запомнить `eof` (n==0), `failed` (n<0), `bytes` | `fetch.rs` `R2oEofReader` | **E*** | C: `n==0 → eof=1` (липкий), `failed = n<0`, `bytes += n` при n>0. Rust `R2oEofReader` реализует `Read` с теми же правилами; тест `eof_reader_matches_c` (пустой, hello, ошибка ECONNRESET). **Ограничение:** production-бюджетный цикл отслеживает EOF локальным bool; адаптер добавлен для C-паритета. |
+| `budget_tcp` | 1146-1213 | 68 | бюджет TCP: `need=budget*2`; PASSED при pk≥need; NOT_APPLICABLE при счётчике<0, conn_close, pk не растёт; повтор GET; CUT при молчании; иначе NOT_APPLICABLE | `fetch.rs` `r2o_measure_http_packet_budget` | **E*** | C: need=budget*2 (25→50), pk<0/conn_close/не растёт → NotApplicable, pk≥need → Passed, повтор запроса с `read_status_rd`; ошибка чтения: eof/peer_spoke → поток закрыт, local_limit/не-молчание → не измерен, молчание по сроку → Cut; тексты `budget_say`. Rust те же ветви/порядок, `need` = `R2O_VOLUME_TX_LADDER_PACKET_BUDGET=50` = 2×25; заметки `r2o_budget_*_note`; тесты `budget_say_notes_match_c`, `tx_packet_budget_repeats_complete_gets_on_the_same_tls_connection`. **Ограничение:** C poll/peer_spoke и допуск ±20 мс не воспроизведены — Rust отличает EOF/тайм-аут по read. |
+| `fd_peer_spoke` | 1217-1222 | 6 | сервер закрыл/сбросил поток после неудачи чтения | `fetch.rs` `r2o_fd_peer_spoke` | **E*** | C: `poll(fd,POLLIN,0)>0 && revents&(POLLIN|POLLHUP|POLLERR)`. Rust `r2o_fd_peer_spoke` тот же poll; тесты `fd_peer_spoke_and_packets_match_c` (пустой/с данными UnixStream) и `счётчики_tcp_info_содержат_принятые_байты_и_пакеты` (после FIN true). **Ограничение:** production-цикл различает EOF/тайм-аут без poll. |
+| `fd_packets` | 1223-1223 | 1 | пакеты с данными обеих сторон через hook | `fetch.rs` `r2o_fd_packets` | E | C `d2k_verify_packets_hook(fd)`, -1 если TCP_INFO недоступен. Rust `r2o_fd_packets(fd)` читает `libc::tcp_info` через общий `r2o_tcp_info_data_packets` (in+out) и отдаёт -1 при ошибке; тесты `fd_peer_spoke_and_packets_match_c` (не-TCP → -1), `счётчики_tcp_info_содержат_принятые_байты_и_пакеты` (TCP ≥2). |
 | `request_complete_page` | 1238-1245 | 8 | прочитать страницу без проверки бюджета | `fetch.rs` (страница с бюджетом/без) | **P** | C-обёртка `request_page_budget(...,NULL,0,...)`: тот же разбор, но без `budget_io`/`budget`. Rust fetch читает страницу с бюджетом и без через параметры запроса; отдельной обёртки нет. |
 | `request_page_budget` | 1247-1343 | 97 | Gateway shortcut; GET с Host/UA/Accept/Encoding/keep-alive; до 3 same-origin redirect; challenge/blocked/denied; 3xx same-origin/external complete; 2xx complete body; budget_tcp | `fetch.rs` page request/budget | **P** | **C-ветви проверены:** `initial_path`+host gateway → websocket; path `/`; encoding gzip/gzip,deflate/identity; 4 попытки; запрос с Host/UA/Accept/Encoding/keep-alive; `read_status_rd`; challenge → CHALLENGE; BLOCKED/LEGAL_DENIAL → BLOCKPAGE/DENIED; 3xx: same-origin framing_valid/redirects<3 → next; external complete `https_redirect_response` → APPLICATION + budget; иначе HANDSHAKE; 2xx complete → APPLICATION + budget; code but incomplete → reason bytes/expected; no code → error; после 4 → HANDSHAKE. Rust `r2o_fetch_*`/volume budget; композиция иная, полного differential нет. |
 | `verify_contact` | 1349-1363 | 15 | при mark: bind (если fd<0), SO_MARK, иначе -2; затем `d2k_props_contact_on_family_tcp_profile` с пустым hello, family, TCPTS, local addr/port | `d2k_props_contact_on_family_tcp_profile` | **P** | C: `mark` → bind family/`mark_hook`; `d2k_props_contact...`; ошибки -2/-1. Rust `r2o_props_contact`/fetch connection с mark; отдельной функции с теми же кодами нет. |

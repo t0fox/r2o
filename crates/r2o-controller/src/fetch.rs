@@ -2777,12 +2777,12 @@ fn r2o_drain_head_response(stream: &mut R2oFetchVolumeStream, timeout: Duration)
 }
 
 #[cfg(target_os = "linux")]
-fn r2o_tcp_counters(stream: &TcpStream) -> R2oTcpCounters {
+fn r2o_tcp_info_data_packets(fd: std::os::fd::RawFd) -> Option<u32> {
     let mut r2o_info = std::mem::MaybeUninit::<libc::tcp_info>::zeroed();
     let mut r2o_length = std::mem::size_of::<libc::tcp_info>() as libc::socklen_t;
     let r2o_result = unsafe {
         libc::getsockopt(
-            stream.as_raw_fd(),
+            fd,
             libc::IPPROTO_TCP,
             libc::TCP_INFO,
             r2o_info.as_mut_ptr().cast(),
@@ -2790,24 +2790,97 @@ fn r2o_tcp_counters(stream: &TcpStream) -> R2oTcpCounters {
         )
     };
     if r2o_result != 0 {
-        return R2oTcpCounters::default();
+        return None;
     }
     let r2o_info = unsafe { r2o_info.assume_init() };
     let r2o_length = r2o_length as usize;
     let r2o_packets_end = std::mem::offset_of!(libc::tcp_info, tcpi_data_segs_out)
         + std::mem::size_of_val(&r2o_info.tcpi_data_segs_out);
+    (r2o_length >= r2o_packets_end).then_some(
+        r2o_info
+            .tcpi_data_segs_in
+            .saturating_add(r2o_info.tcpi_data_segs_out),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn r2o_tcp_counters(stream: &TcpStream) -> R2oTcpCounters {
     R2oTcpCounters {
-        data_packets: (r2o_length >= r2o_packets_end).then_some(
-            r2o_info
-                .tcpi_data_segs_in
-                .saturating_add(r2o_info.tcpi_data_segs_out),
-        ),
+        data_packets: r2o_tcp_info_data_packets(stream.as_raw_fd()),
     }
 }
 
 #[cfg(target_os = "linux")]
 pub fn r2o_verify_tcp_data_packets(stream: &TcpStream) -> i64 {
     r2o_tcp_counters(stream).data_packets.map_or(-1, i64::from)
+}
+
+/// C `fd_packets`/`d2k_verify_packets_hook`: пакеты с данными или -1.
+#[cfg(target_os = "linux")]
+pub fn r2o_fd_packets(fd: std::os::fd::RawFd) -> i64 {
+    r2o_tcp_info_data_packets(fd).map_or(-1, i64::from)
+}
+
+/// C `fd_peer_spoke`: poll(POLLIN, 0) и POLLIN/POLLHUP/POLLERR.
+#[cfg(target_os = "linux")]
+pub fn r2o_fd_peer_spoke(fd: std::os::fd::RawFd) -> bool {
+    let mut descriptor = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ready = unsafe { libc::poll(&mut descriptor, 1, 0) };
+    ready > 0 && descriptor.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0
+}
+
+/// C `read_eof`: обёртка чтения, запоминающая eof/failed/bytes.
+pub struct R2oEofReader<R> {
+    reader: R,
+    eof: bool,
+    failed: bool,
+    bytes: u64,
+}
+
+impl<R> R2oEofReader<R> {
+    pub fn new(reader: R) -> Self {
+        Self {
+            reader,
+            eof: false,
+            failed: false,
+            bytes: 0,
+        }
+    }
+
+    pub fn eof(&self) -> bool {
+        self.eof
+    }
+
+    pub fn failed(&self) -> bool {
+        self.failed
+    }
+
+    pub fn captured_bytes(&self) -> u64 {
+        self.bytes
+    }
+}
+
+impl<R: Read> Read for R2oEofReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let result = self.reader.read(buffer);
+        match &result {
+            // C `read_eof`: n==0 — eof; failed=n<0; bytes+=n при n>0.
+            Ok(0) => {
+                self.eof = true;
+                self.failed = false;
+            }
+            Ok(length) => {
+                self.failed = false;
+                self.bytes = self.bytes.saturating_add(*length as u64);
+            }
+            Err(_) => self.failed = true,
+        }
+        result
+    }
 }
 
 fn r2o_http_connection_closes(headers: &[u8]) -> bool {
@@ -4831,6 +4904,55 @@ mod tests {
         let counters = r2o_tcp_counters(&stream);
         assert!(counters.data_packets.is_none_or(|packets| packets >= 2));
         assert!(r2o_verify_tcp_data_packets(&stream) >= 2);
+        assert!(r2o_fd_packets(stream.as_raw_fd()) >= 2);
+        // Сервер уже закрыл свою сторону после ответа — poll видит POLLIN/HUP,
+        // как C `fd_peer_spoke` в бюджетном цикле.
+        assert!(r2o_fd_peer_spoke(stream.as_raw_fd()));
+    }
+
+    #[test]
+    fn eof_reader_matches_c() {
+        use std::io::Cursor;
+
+        let mut empty = R2oEofReader::new(Cursor::new(Vec::<u8>::new()));
+        let mut buffer = [0_u8; 4];
+        assert_eq!(empty.read(&mut buffer).unwrap(), 0);
+        assert!(empty.eof());
+        assert!(!empty.failed());
+        assert_eq!(empty.captured_bytes(), 0);
+
+        let mut reader = R2oEofReader::new(Cursor::new(b"hello".to_vec()));
+        assert_eq!(reader.read(&mut buffer).unwrap(), 4);
+        assert_eq!(reader.captured_bytes(), 4);
+        assert!(!reader.eof());
+        assert_eq!(reader.read(&mut buffer).unwrap(), 1);
+        assert_eq!(reader.captured_bytes(), 5);
+        assert_eq!(reader.read(&mut buffer).unwrap(), 0);
+        assert!(reader.eof());
+
+        struct Failing;
+        impl Read for Failing {
+            fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::from_raw_os_error(libc::ECONNRESET))
+            }
+        }
+        let mut failing = R2oEofReader::new(Failing);
+        assert!(failing.read(&mut buffer).is_err());
+        assert!(failing.failed());
+        assert!(!failing.eof());
+        assert_eq!(failing.captured_bytes(), 0);
+    }
+
+    #[test]
+    fn fd_peer_spoke_and_packets_match_c() {
+        use std::os::unix::net::UnixStream;
+
+        let (reader, mut writer) = UnixStream::pair().expect("пара Unix-сокетов");
+        assert!(!r2o_fd_peer_spoke(reader.as_raw_fd()));
+        writer.write_all(b"x").expect("записать байт");
+        assert!(r2o_fd_peer_spoke(reader.as_raw_fd()));
+        // Не-TCP сокет: TCP_INFO недоступен — как C hook, отдаём -1.
+        assert_eq!(r2o_fd_packets(reader.as_raw_fd()), -1);
     }
 
     #[test]
