@@ -2186,6 +2186,21 @@ pub fn r2o_session_capacity(
         .saturating_add(udp.r2o_flow_capacity())
 }
 
+/// C `d2k_session_hellos`: приветствия TCP+QUIC.
+pub fn r2o_session_hellos(tcp: &TcpSessions, udp: &crate::r2o_udp_sessions::R2oUdpSessions) -> u64 {
+    tcp.r2o_tcp_hello_flows()
+        .saturating_add(udp.r2o_quic_hello_flows())
+}
+
+/// C `d2k_session_with_sni`: приветствия с именем TCP+QUIC.
+pub fn r2o_session_with_sni(
+    tcp: &TcpSessions,
+    udp: &crate::r2o_udp_sessions::R2oUdpSessions,
+) -> u64 {
+    tcp.r2o_tcp_hellos_with_sni()
+        .saturating_add(udp.r2o_quic_hellos_with_sni())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2220,6 +2235,14 @@ mod tests {
         assert_eq!(udp.r2o_flow_refusals(), 0);
         assert_eq!(super::r2o_session_capacity(&tcp, &udp), slots * 2);
         assert_eq!(super::r2o_session_refusals(&tcp, &udp), 0);
+    }
+
+    #[test]
+    fn session_hellos_and_with_sni_sum_tcp_and_udp() {
+        let tcp = TcpSessions::default();
+        let udp = crate::r2o_udp_sessions::R2oUdpSessions::new().unwrap();
+        assert_eq!(super::r2o_session_hellos(&tcp, &udp), 0);
+        assert_eq!(super::r2o_session_with_sni(&tcp, &udp), 0);
     }
 
     #[test]
