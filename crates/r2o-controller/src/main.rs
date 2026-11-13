@@ -4959,6 +4959,12 @@ enum HttpSearchHttpsAction {
     Suppress,
 }
 
+/// C `http_probe_done`: SET_HTTPS только для upgrade-состояний.
+#[cfg(unix)]
+fn r2o_https_set_ttl(state: HttpsProbeState) -> Option<u32> {
+    state.should_redirect().then(|| state.ttl_seconds())
+}
+
 #[cfg(unix)]
 fn r2o_http_search_https_action(
     response_code: u8,
@@ -17314,9 +17320,13 @@ impl ControlClient {
                 }
                 let mut https_cache_changed = false;
                 while let Some(result) = https_probe.try_result() {
-                    let command = encode_set_https(&result.host, result.ttl_seconds)
-                        .map_err(|error| format!("команда проверки HTTPS: {error}"))?;
-                    self.send_command(&command, COMMAND_SET_HTTPS)?;
+                    // C `http_probe_done`: SET_HTTPS шлётся только для upgrade
+                    // (SERVED/TLS_BLOCKED); иначе — путь портала, без ttl=0.
+                    if let Some(ttl_seconds) = r2o_https_set_ttl(result.state) {
+                        let command = encode_set_https(&result.host, ttl_seconds)
+                            .map_err(|error| format!("команда проверки HTTPS: {error}"))?;
+                        self.send_command(&command, COMMAND_SET_HTTPS)?;
+                    }
                     println!(
                         "проверка HTTPS {}: {}",
                         result.host,
@@ -32049,6 +32059,25 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn https_probe_pushes_set_https_only_for_upgrades_like_c() {
+        use r2o_controller::response::HttpsProbeState;
+
+        assert_eq!(
+            super::r2o_https_set_ttl(HttpsProbeState::Served),
+            Some(6 * 60 * 60)
+        );
+        assert_eq!(
+            super::r2o_https_set_ttl(HttpsProbeState::TlsBlocked),
+            Some(60 * 60)
+        );
+        // C `http_probe_done`: closed/other-name/unconfirmed идут в
+        // http_search_portal, а не в SET_HTTPS с нулевым TTL.
+        assert_eq!(super::r2o_https_set_ttl(HttpsProbeState::Closed), None);
+        assert_eq!(super::r2o_https_set_ttl(HttpsProbeState::OtherName), None);
+        assert_eq!(super::r2o_https_set_ttl(HttpsProbeState::Unconfirmed), None);
+    }
+
     #[test]
     fn http_search_https_caller_gate_matches_d2o_states() {
         use r2o_controller::response::HttpsProbeState;
