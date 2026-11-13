@@ -675,4 +675,15 @@ mod tests {
             (None, Some("/8.css".into()))
         );
     }
+
+    #[test]
+    fn resource_space_matches_c() {
+        // C `d2k_resource_space`: space, TAB, CR, LF, FF; VT не входит.
+        for byte in [b' ', b'\t', b'\r', b'\n', b'\x0c'] {
+            assert!(super::r2o_resource_space(byte), "{byte:#x}");
+        }
+        for byte in [b'\x0b', b'\0', b'a', b'/', b'\x1f'] {
+            assert!(!super::r2o_resource_space(byte), "{byte:#x}");
+        }
+    }
 }
