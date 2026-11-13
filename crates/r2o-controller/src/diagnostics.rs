@@ -635,6 +635,7 @@ pub struct Counts {
     pub snapshots: usize,
     pub http_records: usize,
     pub http_queued: usize,
+    pub http_failures: u64,
     pub catalog_bytes: u64,
     pub snapshot_bytes: u64,
     pub http_bytes: u64,
@@ -1100,7 +1101,7 @@ impl Recorder {
             "workers_joined": counts.workers_joined,
             "worker_start_failures": counts.worker_start_failures,
             "worker_join_failures": counts.worker_join_failures,
-            "http_failures": 0,
+            "http_failures": counts.http_failures,
             "http_bytes": counts.http_bytes,
             "http_records_bytes": counts.http_records_bytes,
             "http_queue_bytes": counts.http_queue_bytes,
@@ -2539,6 +2540,12 @@ mod tests {
             snapshots: 4,
             http_records: 5,
             http_queued: 6,
+            http_failures: 2,
+            grow_pending: true,
+            resource_sequence: 14,
+            limit_sequence: 12,
+            limiter_mask: 3,
+            resources_valid: true,
             ..Counts::default()
         };
         let mut recorder = Recorder::new(dir.clone(), dir.join("run"));
@@ -2575,6 +2582,14 @@ mod tests {
         assert_eq!(sample["snapshots"], 4);
         assert_eq!(sample["http_records"], 5);
         assert_eq!(sample["http_queued"], 6);
+        assert_eq!(sample["http_failures"], 2);
+        assert_eq!(sample["grow_pending"], true);
+        assert_eq!(sample["resource_sequence"], 14);
+        assert_eq!(sample["limit_sequence"], 12);
+        assert_eq!(sample["limiter_mask"], 3);
+        assert_eq!(sample["limit_reason"], json!(["cpu", "memory"]));
+        assert_eq!(event["reason_source"], "terminal-code");
+        assert!(report["http_storage_limits"]["records_bytes"].is_u64());
         if let Ok(path) = std::env::var("R2O_DIAGNOSTICS_DIFF_OUTPUT") {
             fs::write(
                 path,

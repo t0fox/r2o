@@ -4687,6 +4687,11 @@ impl HttpSearchRecordCache {
         self.0.len() * R2O_HTTP_RECORD_BYTES
     }
 
+    /// C `d2k_httpsearch_diagnostic_counts`: live_failure_count.
+    fn failure_count(&self) -> u64 {
+        self.1.live_failure_count
+    }
+
     fn record_cut(&mut self, target: &r2o_controller::discovery::DiscoveryTarget, path: &[u8]) {
         let key = Self::key(target);
         if !self.has_room_for(&key) {
@@ -6989,6 +6994,13 @@ impl HttpSearchWorker {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .bytes()
+    }
+
+    fn failure_count(&self) -> u64 {
+        self.records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .failure_count()
     }
 
     fn seed_records(&self, catalog: &Catalog) {
@@ -16957,6 +16969,9 @@ impl ControlClient {
                             http_queued: http_search
                                 .as_ref()
                                 .map_or(0, HttpSearchWorker::queued_jobs),
+                            http_failures: http_search
+                                .as_ref()
+                                .map_or(0, HttpSearchWorker::failure_count),
                             http_records_bytes: http_search
                                 .as_ref()
                                 .map_or(0, HttpSearchWorker::record_bytes)
