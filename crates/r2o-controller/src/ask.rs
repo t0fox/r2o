@@ -178,13 +178,15 @@ fn parse_positive_port(value: &OsString) -> Result<u16, String> {
 
 fn parse_positive_ms(value: &OsString, flag: &str) -> Result<Duration, String> {
     let text = argument_text(value, flag)?;
+    // C `parse_flag_ms`: strtol → long. На LP64 это i64, поэтому значения
+    // выше i64::MAX должны отвергаться, как ERANGE у C.
     let milliseconds = text
-        .parse::<u64>()
+        .parse::<i64>()
         .map_err(|_| format!("{flag} не положительное целое (мс): {text}"))?;
-    if milliseconds == 0 {
+    if milliseconds <= 0 {
         return Err(format!("{flag} не положительное целое (мс): {text}"));
     }
-    Ok(Duration::from_millis(milliseconds))
+    Ok(Duration::from_millis(milliseconds as u64))
 }
 
 fn parse_mark(value: &OsString) -> Result<u32, String> {
@@ -654,6 +656,92 @@ mod tests {
         assert!(
             super::parse_ask_options(&with(&["--hello-hex", "trigger.hex", "--mark", "-1"]))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn cli_flag_parsers_match_c_bounds_bases_and_missing_values() {
+        let os = OsString::from;
+
+        // C `parse_flag_u16`: base 10, 1..65535, минус/пусто/хвост — отказ.
+        assert_eq!(super::parse_positive_port(&os("1")).unwrap(), 1);
+        assert_eq!(super::parse_positive_port(&os("443")).unwrap(), 443);
+        assert_eq!(super::parse_positive_port(&os("65535")).unwrap(), 65535);
+        for bad in ["0", "65536", "-1", "", "0x10", "10x", " 1"] {
+            assert!(
+                super::parse_positive_port(&os(bad)).is_err(),
+                "accepted --port {bad:?}"
+            );
+        }
+
+        // C `parse_flag_u32`: base 0 (hex/octal/decimal), минус запрещён.
+        assert_eq!(super::parse_mark(&os("0")).unwrap(), 0);
+        assert_eq!(super::parse_mark(&os("45")).unwrap(), 45);
+        assert_eq!(super::parse_mark(&os("0x2d")).unwrap(), 45);
+        assert_eq!(super::parse_mark(&os("0X2D")).unwrap(), 45);
+        assert_eq!(super::parse_mark(&os("055")).unwrap(), 45);
+        assert_eq!(super::parse_mark(&os("4294967295")).unwrap(), u32::MAX);
+        for bad in ["-1", "", "0x", "08", "4294967296", " 5"] {
+            assert!(
+                super::parse_mark(&os(bad)).is_err(),
+                "accepted --mark {bad:?}"
+            );
+        }
+
+        // C `parse_flag_ms`: положительный long, не больше i64::MAX.
+        assert_eq!(
+            super::parse_positive_ms(&os("1"), "--arm-wait-ms").unwrap(),
+            Duration::from_millis(1)
+        );
+        assert_eq!(
+            super::parse_positive_ms(&os("9223372036854775807"), "--arm-wait-ms").unwrap(),
+            Duration::from_millis(i64::MAX as u64)
+        );
+        for bad in ["0", "-1", "9223372036854775808", "1x", ""] {
+            assert!(
+                super::parse_positive_ms(&os(bad), "--arm-wait-ms").is_err(),
+                "accepted --arm-wait-ms {bad:?}"
+            );
+        }
+
+        // C `need_value`: каждый флаг без следующего токена — «требует значения».
+        let base = [
+            "--control",
+            "/run/r2o.sock",
+            "--ip",
+            "192.0.2.1",
+            "--sni",
+            "target.example",
+        ];
+        for flag in [
+            "--control",
+            "--ip",
+            "--port",
+            "--sni",
+            "--control-sni",
+            "--control-hex",
+            "--hello-hex",
+            "--arm-wait-ms",
+            "--mark",
+            "--save-trigger",
+            "--save-control",
+        ] {
+            let args = base
+                .iter()
+                .copied()
+                .chain([flag])
+                .map(OsString::from)
+                .collect::<Vec<_>>();
+            let error = super::parse_ask_options(&args).unwrap_err();
+            assert!(error.contains("требует значения"), "{flag}: {error}");
+        }
+
+        // `hex_nibble` через decode_hex: 0-9, a-f, A-F.
+        assert_eq!(
+            super::decode_hex(b"0123456789abcdefABCDEF").unwrap(),
+            vec![
+                0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xab, 0xcd, 0xef
+            ]
         );
     }
 
