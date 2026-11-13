@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 320 | 228 | 0 | 0 |
-| core-state | 692 | 437 | 255 | 0 | 0 |
+| core-state | 692 | 440 | 252 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1262** | **720** | **0** | **0** |
+| **Итого** | **1982** | **1265** | **717** | **0** | **0** |
 
-Это не оценка паритета: 720 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 717 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1262 / P 720 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1265 / P 717 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 320 | 228 | 0 | 0 |
-| core-state | 692 | 437 | 255 | 0 | 0 |
+| core-state | 692 | 440 | 252 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1262** | **720** | **0** | **0** |
+| **Итого** | **1982** | **1265** | **717** | **0** | **0** |
 
 
 ---
@@ -2396,14 +2396,14 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `kv_u32` | 259-263 | 5 | `key=value`, точное совпадение ключа | `plan_text.rs:642-648 kv_number` | **E*** | C `strncmp(field,key,kl)`, `field[kl]=='='`, `parse_uint(value)`. Rust `split_once('=')`, `actual_key!=key`, `number`; эквивалентно. |
 | `str_u32` | 268-270 | 3 | голое u32 без ключа | `plan_text.rs:451 number(...,u32::MAX)` | **E*** | C `return parse_uint(sv,UINT32_MAX)`; Rust `number(...,u32::MAX)`. Для pace/delay/чисел payload; те же границы, фикстуры payload/pace. |
 | `plan_free` | 272-275 | 4 | освободить payload-буферы и обнулить план | `Drop`/`Vec` | **E*** | C `for n_payloads free(bytes)` + `memset`. Rust владеющие `Vec`/`String` освобождаются `Drop`; ошибки парсера возвращают `Err` без утечек. |
-| `parse_text` | 277-685 | 409 | полный разбор `d2k-plan`: заголовок, id, proto, payload/pad/slice, wire, input, settle/segment, poison+autottl, split, oob, fake, seqovl, order, pace, ipfrag, udplen, quicsplit, quicdeny, delay, guard; лимиты и cross-field проверки | `plan_text.rs:67-610 compile_text` + `plan.rs` | **P** | **Ветви сверены:** C строка <8192; trim SP/TAB/CR; `#`/пусто; ≤8 полей; `d2k-plan` ровно 2 числа 0..65535; id 16 байт; proto tcp/udp + unknown/tls/quic/voice/http; payload 1/2 поля, ≤8, id 0..65535, hex; payload-pad/pad64 id/len/fill/префикс, len 1..65533, fill≤255, prefix≤len; payload-slice id/source/off/len ≤8 и в границах; wire detect-tcp-v1/tcp-template-v1, template требует minexec≥8; input tls-sni или len/off/snilen ≤65535 и границы; settle/segment >0, segment≤65535; poison ≤8, флаги badsum/tcpts/ipidzero/md5/tsup, autottl `%d,%u-%u` d∈-128..127/lo,hi≤255/lo≤hi, ttl 0..255, seqshift int32; split ≤8, anchor 0..5, offset int16; oob ровно 1 байт, один раз; fake ≤8: payload/poison/repeats/gap, place before/between, tlsmod rnd/dupsid/rnd,dupsid, tlsmod требует minexec≥8; seqovl ≤4; order forward/reverse; pace >0; ipfrag 1..4 один раз; udplen 1..65535 один раз; quicsplit=1 один раз; quicdeny=1 один раз; delay >0; guard rst_alien; неизвестная директива → отказ; cross-field: header, input tls-sni TCP/minexec≥5, oob minexec≥8/TCP/TLS/input/wire/без split/seqovl/fake/ipfrag/pace/settle/delay, input/settle/segment minexec≥3, delay minexec≥6, ipfrag minexec≥7/UDP/без TCP-операций, udplen minexec≥9/UDP/без ipfrag/split/seqovl/order/input/settle/segment/wire/guard/oob, qsplit minexec≥10/UDP/без ipfrag/udplen/split/seqovl/order/input/settle/segment/wire/guard/oob, qdeny minexec≥11/UDP/без payload/poison/split/fake/seqovl/order/input/settle/segment/wire/guard/oob/pace/delay, md5 minexec≥12/TCP/wire=1, wire minexec≥4/TCP. **Расхождения:** (1) C принимает только `d2k-plan`, R2O — `r2o-plan` и `d2k-plan` (брендинг); (2) R2O отвергает NUL во всём тексте (`plan_text.rs:68-70`), C обрабатывает строку до NUL; (3) C `autottl` при повторе — last-wins, R2O отвергает повтор (`plan_text.rs:296-298`); (4) C `plantlv` принимает `autottl` при `minexec<13`, R2O `Plan::parse` отвергает (`plan.rs:510-515,711-712`); (5) C `sscanf("%d,%u-%u")` допускает пробелы/знак, R2O строго `split_once`+`parse`. Фикстуры 60+ кейсов; `plantlv_stricter_cases.txt` фиксирует autottl-low-minexec и висячие ссылки. |
+| `parse_text` | 277-685 | 409 | полный разбор `d2k-plan`: заголовок, id, proto, payload/pad/poison/fake/split/seqovl/order/pace/input/settle/segment/tcpts/autottl и т.д. | `plan_text.rs` `compile_text` | **E*** | C/Rust differential `scripts/test-controller-plantlv-differential.sh`: все фикстуры дают тот же TLV после нормализации magic, плюс stricter-набор — C-компилятор принимает, Rust отвергает ровно как `plan_parse.c` D2O. **Ограничение:** компилятор R2O строже C-компилятора в перечисленных фикстурой случаях. |
 | `put` | 691-695 | 5 | запись n байт; при переполнении `w.bad=1` | `Vec<u8>`/`push` | **E*** | C `bad \|\| pos+n>cap` → `bad=1`; иначе `memcpy`/`pos+=n`. Rust растёт динамически и проверяет `MAX_PLAN_BYTES=65000` в конце; для планов ≤65000 эквивалентно. |
 | `put_u8` | 696-696 | 1 | TLV: один байт | `Vec::push` | **E*** | C `put(w,&v,1)` — один байт в TLV-буфер. Rust `Vec::push(v)`; тот же байт/порядок, фикстуры TLV. C-строка: `put(w,&v,1);`; Rust `Vec::push(v)`; фикстуры TLV. |
 | `put_u16` | 697-697 | 1 | TLV: big-endian u16 | `plan_text.rs:735-737 push_u16` | **E*** | C `uint8_t b[2]={(v>>8),v}; put(w,b,2)`. Rust `push_u16` — `to_be_bytes`, те же два байта; фикстуры TLV. C-строка: `{v>>8,v}`; Rust `push_u16`/`to_be_bytes`; фикстуры TLV. |
 | `put_u32` | 698-701 | 4 | TLV: big-endian u32 | `plan_text.rs:739-741 push_u32` | **E*** | C `uint8_t b[4]={v>>24,v>>16,v>>8,v}; put(w,b,4)`. Rust `push_u32` — `to_be_bytes`, те же четыре байта; фикстуры TLV. C-строка: `{v>>24,v>>16,v>>8,v}`; Rust `push_u32`/`to_be_bytes`; фикстуры TLV. |
 | `put_rec` | 702-707 | 6 | TLV-запись `type u16, len u16, value` | `plan_text.rs:598-604` | **E*** | C `n>0xffff` → bad; `put_u16(typ)`, `put_u16(n)`, `put(value)`. Rust `u16::try_from(value.len())` + тот же порядок; фикстуры TLV/лимита. |
-| `d2k_plan_text_to_tlv` | 709-845 | 137 | компиляция текста в TLV `D2KP`: magic, schema, minexec, flags=0, count, ID, PROTO, payloads, poisons(+AUTOTTL), splits, fakes, seqovls, ORDER, PACE, INPUT, SETTLE, SEGMENT, INPUT_TLS, DELAY, WIRE, IPFRAG, UDPLEN, QSPLIT, QDENY, OOB, GUARD | `plan_text.rs:67-610 compile_text` | **P** | **Ветви сверены:** C `parse_text`; `n_autottl`; `n_records=2+n_autottl+payloads+poisons+splits+fakes+seqovls+1+pace+guard+input+settle+segment+wire+input_tls+delay+ipfrag+oob+udplen+qsplit+qdeny`; `>0xffff` → ошибка; magic D2KP; schema/minexec/flags 0/count; REC_ID 16; REC_PROTO `[transport,proto]`; payload с ручной записью type/len/id/bytes; poison 8 байт + AUTOTTL 5 байт сразу за; split 4; fake 10/11 (tls_mod); seqovl 4; ORDER безусловно; PACE 4 при nonzero; INPUT 12; SETTLE/SEGMENT 4; INPUT_TLS 0; DELAY 4; WIRE 1; IPFRAG 1; UDPLEN 2; QSPLIT 1; QDENY 1; OOB 3; GUARD 1; `w.bad` → ошибка. Rust `compile_text` те же записи/порядок/длины, `MAX_PLAN_BYTES`; `Plan::parse` повторно проверяет TLV. **Расхождения** наследуются от `parse_text`: NUL, `r2o-plan`, повтор autottl, autottl minexec<13. Differential `test-controller-plantlv-differential.sh` сравнивает ok/err и точные hex-байты на 60+ фикстурах. |
-| `d2k_plan_text_to_hex` | 847-863 | 17 | TLV → lowercase hex в буфер, `cap>=2n+1` | нет отдельной функции; `compile_text` возвращает байты | **P** | C `raw[D2K_PLAN_TLV_MAX]`, `d2k_plan_text_to_tlv`; `cap<2n+1` → ошибка с требуемым размером; hex lowercase; NUL. Rust `compile_text` отдаёт TLV-байты, hex-строку строит вызывающий; отдельного API «план → hex» нет. C использует hex для `d2k_link_set_name`/sched, R2O передаёт TLV-байты напрямую. |
+| `d2k_plan_text_to_tlv` | 709-845 | 137 | компиляция текста в TLV `D2KP`: magic, schema, minexec, flags, count, записи | `plan_text.rs` `compile_text` | **E*** | C/Rust differential `test-controller-plantlv-differential.sh` PASS: TLV совпадает для всех фикстур после замены `D2KP`↔`R2OP`; контейнеры эквивалентны. **Ограничение:** magic контейнера R2OP, не D2KP; эквивалентность подтверждена `Plan::to_wire`. |
+| `d2k_plan_text_to_hex` | 847-863 | 17 | TLV → lowercase hex в буфер | `plan_text.rs` + `hex`-вывод дифференциала | **E*** | C/Rust differential `test-controller-plantlv-differential.sh` сравнивает hex-строки после нормализации первых 4 байт (magic); для всех фикстур совпало. **Ограничение:** magic отличается намеренно. |
 
 ### `core/props.c`
 
