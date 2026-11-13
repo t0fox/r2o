@@ -525,6 +525,30 @@ impl TcpSessions {
         self.tcp_hello_capture.stats()
     }
 
+    /// C `d2k_session_guards`: guards потока по ключу.
+    pub fn session_guards(&self, key: &[u8; KEY_LEN]) -> u8 {
+        self.flows
+            .iter()
+            .find(|(flow_key, _)| flow_key.wire_key() == *key)
+            .map_or(0, |(_, session)| session.guards)
+    }
+
+    /// C `d2k_session_client_shape`: форма клиента потока.
+    pub fn session_client_shape(&self, key: &[u8; KEY_LEN]) -> u8 {
+        self.flows
+            .iter()
+            .find(|(flow_key, _)| flow_key.wire_key() == *key)
+            .map_or(0, |(_, session)| session.client_shape)
+    }
+
+    /// C `d2k_session_damaged`: флаг повреждения потока.
+    pub fn session_flow_damaged(&self, key: &[u8; KEY_LEN]) -> bool {
+        self.flows
+            .iter()
+            .find(|(flow_key, _)| flow_key.wire_key() == *key)
+            .is_some_and(|(_, session)| session.damaged)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.flows.is_empty()
     }
@@ -2225,6 +2249,14 @@ pub fn r2o_session_capacity(
         .saturating_add(udp.r2o_flow_capacity())
 }
 
+/// C `d2k_session_flows`: сумма TCP- и UDP-потоков.
+pub fn r2o_session_flows(
+    tcp: &TcpSessions,
+    udp: &crate::r2o_udp_sessions::R2oUdpSessions,
+) -> usize {
+    tcp.len().saturating_add(udp.len())
+}
+
 /// C `d2k_session_hellos`: приветствия TCP+QUIC.
 pub fn r2o_session_hellos(tcp: &TcpSessions, udp: &crate::r2o_udp_sessions::R2oUdpSessions) -> u64 {
     tcp.r2o_tcp_hello_flows()
@@ -2293,6 +2325,44 @@ mod tests {
         assert_eq!(stats.http_later, 2);
         assert_eq!(stats.http_unaligned, 1);
         assert_eq!(stats.http_open_end, 4);
+    }
+
+    #[test]
+    fn session_flows_guards_shape_damaged_getters_match_c() {
+        let unknown = [0xAA_u8; KEY_LEN];
+        let empty = TcpSessions::default();
+        assert_eq!(empty.session_guards(&unknown), 0);
+        assert_eq!(empty.session_client_shape(&unknown), 0);
+        assert!(!empty.session_flow_damaged(&unknown));
+        let udp = crate::r2o_udp_sessions::R2oUdpSessions::new().unwrap();
+        assert_eq!(super::r2o_session_flows(&empty, &udp), 0);
+
+        let plan = tcp_fake_plan_with_rst_guard();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+        );
+        let hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello_with_sni());
+        decide_with_session(&mut sessions, &plan, &hello);
+        let key = TcpFlowKey::from_packet(&hello).unwrap().wire_key();
+        assert_eq!(sessions.session_guards(&key), plan.guards);
+        assert_ne!(sessions.session_client_shape(&key), 0);
+        assert!(!sessions.session_flow_damaged(&key));
+        assert_eq!(super::r2o_session_flows(&sessions, &udp), 1);
+
+        assert!(sessions.r2o_begin_execution(&hello, 42).is_some());
+        assert!(sessions.r2o_mark_damaged_for_execution(&key, 42));
+        assert!(sessions.session_flow_damaged(&key));
+        assert_eq!(sessions.session_guards(&key), 0);
     }
 
     #[test]
