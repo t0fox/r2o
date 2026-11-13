@@ -10,17 +10,33 @@ fn is_local(address: IpAddr) -> bool {
 fn print_parse(text: &str) {
     let name = if text.is_empty() { "empty" } else { text };
     println!("case parse-{name}");
-    match text.parse::<Ipv4Addr>() {
-        Ok(address) => println!("result ok text={address}"),
-        Err(_) => println!("result err"),
+    match r2k_core::addr::parse_ipv4_legacy(text) {
+        Some(address) => println!("result ok text={address}"),
+        None => println!("result err"),
     }
 }
 
 fn main() {
-    for text in ["0.0.0.0", "127.0.0.1", "192.168.1.1", "255.255.255.255"] {
+    for text in [
+        "0.0.0.0",
+        "127.0.0.1",
+        "192.168.1.1",
+        "255.255.255.255",
+        "010.0.0.1",
+        "001.002.003.004",
+    ] {
         print_parse(text);
     }
-    for text in ["", "1.2.3", "1.2.3.4.5", "256.1.1.1", "1..2.3", "a.b.c.d"] {
+    for text in [
+        "",
+        "1.2.3",
+        "1.2.3.4.5",
+        "256.1.1.1",
+        "1..2.3",
+        "a.b.c.d",
+        "0001.2.3.4",
+        "1.2.3.4.",
+    ] {
         print_parse(text);
     }
 

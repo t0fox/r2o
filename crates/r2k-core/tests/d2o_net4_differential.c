@@ -32,9 +32,11 @@ static void print_private6(const char *text, const uint8_t address[16]) {
 int main(void) {
     static const char *valid[] = {
         "0.0.0.0", "127.0.0.1", "192.168.1.1", "255.255.255.255",
+        "010.0.0.1", "001.002.003.004",
     };
     static const char *invalid[] = {
         "", "1.2.3", "1.2.3.4.5", "256.1.1.1", "1..2.3", "a.b.c.d",
+        "0001.2.3.4", "1.2.3.4.",
     };
     for (size_t i = 0; i < sizeof valid / sizeof valid[0]; i++) {
         print_parse(valid[i]);

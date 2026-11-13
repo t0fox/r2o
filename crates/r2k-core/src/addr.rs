@@ -63,3 +63,67 @@ impl From<Address> for IpAddr {
         value.0
     }
 }
+
+/// C `d2k_ip4_parse` (`core/net4.c:7-30`): 4 октета по 1–3 цифры, 0..255,
+/// ведущие нули допустимы; ровно точки и конец строки.
+pub fn parse_ipv4_legacy(text: &str) -> Option<Ipv4Addr> {
+    let bytes = text.as_bytes();
+    let mut octets = [0u8; 4];
+    let mut position = 0usize;
+    for (index, octet) in octets.iter_mut().enumerate() {
+        let start = position;
+        let mut value: u16 = 0;
+        while position < bytes.len() && bytes[position].is_ascii_digit() {
+            if position - start >= 3 {
+                return None;
+            }
+            value = value * 10 + u16::from(bytes[position] - b'0');
+            if value > 255 {
+                return None;
+            }
+            position += 1;
+        }
+        if position == start {
+            return None;
+        }
+        *octet = value as u8;
+        if index < 3 {
+            if bytes.get(position) != Some(&b'.') {
+                return None;
+            }
+            position += 1;
+        }
+    }
+    (position == bytes.len()).then(|| Ipv4Addr::from(octets))
+}
+
+#[cfg(test)]
+mod ipv4_legacy_tests {
+    use super::parse_ipv4_legacy;
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn ip4_parse_accepts_leading_zeros_like_c() {
+        assert_eq!(
+            parse_ipv4_legacy("010.0.0.1"),
+            Some(Ipv4Addr::new(10, 0, 0, 1))
+        );
+        assert_eq!(
+            parse_ipv4_legacy("001.002.003.004"),
+            Some(Ipv4Addr::new(1, 2, 3, 4))
+        );
+        assert_eq!(parse_ipv4_legacy("0.0.0.0"), Some(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(
+            parse_ipv4_legacy("255.255.255.255"),
+            Some(Ipv4Addr::BROADCAST)
+        );
+        assert_eq!(parse_ipv4_legacy("256.1.1.1"), None);
+        assert_eq!(parse_ipv4_legacy("1.2.3"), None);
+        assert_eq!(parse_ipv4_legacy("1.2.3.4.5"), None);
+        assert_eq!(parse_ipv4_legacy("0001.2.3.4"), None);
+        assert_eq!(parse_ipv4_legacy("1..2.3"), None);
+        assert_eq!(parse_ipv4_legacy("a.b.c.d"), None);
+        assert_eq!(parse_ipv4_legacy(""), None);
+        assert_eq!(parse_ipv4_legacy("1.2.3.4."), None);
+    }
+}

@@ -89,7 +89,7 @@ recheck 1982 1982 equal True
 | datapath-core | 400 | 182 | 218 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **840** | **1142** | **0** | **0** |
+| **Итого** | **1982** | **841** | **1141** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 840 / P 1142 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 841 / P 1141 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -345,11 +345,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 204 | 344 | 0 | 0 |
-| core-state | 692 | 185 | 507 | 0 | 0 |
+| core-state | 692 | 186 | 506 | 0 | 0 |
 | datapath-core | 400 | 182 | 218 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **840** | **1142** | **0** | **0** |
+| **Итого** | **1982** | **841** | **1141** | **0** | **0** |
 
 
 ---
@@ -2346,7 +2346,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `d2k_ip4_parse` | 7–30 | 24 | 4 октета по 1–3 цифры, 0..255, ровно точки/конец, старший байт вперёд | `Ipv4Addr::from_str` (`examples/m5_net4_trace.rs:15`) | **P** | **Подтверждённое расхождение:** C принимает ведущие нули (`010.0.0.1` → 10.0.0.1; `001.002.003.004`), Rust 1.98: `010.0.0.1`/`001.002.003.004` → `Err(AddrParseError(Ipv4))`, `10.0.0.1` → `Ok(10.0.0.1)` (проверено `rustc`). Остальное совпадает: 1–3 цифры, ≤255, ровно 4 октета, конец строки, старший байт вперёд. `test-core-net4-differential.sh` (пин a378) покрывает `0.0.0.0/127.0.0.1/192.168.1.1/255.255.255.255` и битые литералы, но **не ведущие нули**. |
+| `d2k_ip4_parse` | 7–30 | 24 | 4 октета по 1–3 цифры, 0..255, ровно точки/конец, старший байт вперёд | `r2k-core/addr.rs` `parse_ipv4_legacy` | E | C принимает ведущие нули (`010.0.0.1` → 10.0.0.1; `001.002.003.004`), 1–3 цифры, ≤255, ровно 4 октета и конец строки. Rust `parse_ipv4_legacy` реализует те же ветви; используется в проверке voice-привязки (`voice_discovery.rs`) и примере net4. Тест `ip4_parse_accepts_leading_zeros_like_c`; C/Rust дифференциал `scripts/test-core-net4-differential.sh` расширен ведущими нулями/отказами, 34 случая PASS (D2O a378e230). |
 | `d2k_ip4_text` | 32–38 | 7 | 4 байта → `%u.%u.%u.%u`, 0 при нехватке cap или ошибке | `Ipv4Addr::Display` (`examples/m5_net4_trace.rs`) | **E** | Для валидных адресов текст совпадает; C возвращает 0 при `n<0`/`n>=cap`, Rust `Display` пишет в `String` без предела. `test-core-net4-differential.sh` сравнивает `parse→text` на валидных адресах. |
 | `d2k_ip4_private` | 40–51 | 12 | 127/8, 10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10, 0.0.0.0 | `quic_replay.rs:24-33 ipv4_is_local` | **E** | Диапазоны совпадают: `is_unspecified`, `a==10/127`, `172 && b∈16..=31`, `192.168`, `169.254`, `100 && b∈64..=127`. C собирает `v` из big-endian байт; Rust работает по `octets()`. `test-core-net4-differential.sh` + `r2o-quic-local-address-differential.sh`. |
 | `d2k_ip6_private` | 53–64 | 12 | `::`/`::1`, fc00::/7, fe80::/10, ff00::/8, v4-mapped → ip4_private | `quic_replay.rs:35-52` IPv6-ветка | **E** | C: `NULL→1`; 15 нулевых байт + `ip[15]<=1`; `(ip[0]&0xfe)==0xfc`; `ip[0]==0xfe && (ip[1]&0xc0)==0x80`; `ip[0]==0xff`; `::ffff:` → `ip4_private`. Rust: `is_unspecified/is_loopback`, те же маски, `mapped_v4` = 10 нулей + `ff ff`, затем `ipv4_is_local`. Единственное отличие — C трактует `NULL` как private, Rust принимает значение. `test-core-net4-differential.sh`. |
@@ -2787,7 +2787,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `same_evidence` (static) | 38–73 | `catalog.rs:1077-1088` `same_signal` | **P** | volume/rx-volume/rx-volume-wire: `abs(saved-observed)<=4`; ttl: `abs_diff<=2`; tos/ipid точно. C `int`-разность и модуль, Rust `i64`/`u8::abs_diff`. Тесты `tests/catalog.rs:94-153` покрывают ttl±1, конфликт ttl, tos/ipid; ветка volume без прямого теста, C/Rust differential нет. |
 | `d2k_fp_same` | 75–125 | `catalog.rs:59-83` `Fingerprint::is_compatible_with` | **P** | Направленный обход observed→saved, все приметы одного рода, `kind_seen && !agreed → false`, отсутствие рода не противоречие, `any_agreement` в конце. C `common++` только при согласии рода; Rust `any_agreement` через `signal_agrees`. Тесты `tests/catalog.rs:94-153`: несколько `rst` одного рода, частичное покрытие, конфликт, нет общих родов, method mismatch. |
 | `d2k_catalog_match` | 127–136 | `catalog.rs:537-541` `match_fingerprint` | **P** | Первый совместимый индекс, `-1`/`None` при отсутствии. Тесты `tests/catalog.rs:95-153` (совпадение box 0, отсутствие, конфликт). Проверки индекса >0 нет; C/Rust differential нет. |
-| `d2k_ip4_parse` | 7–30 | `std::net::Ipv4Addr::from_str` (`examples/m5_net4_trace.rs:15`) | **P** | **Подтверждённое расхождение:** C принимает ведущие нули (`010.0.0.1` → 10.0.0.1), Rust 1.98 даёт `Err(AddrParseError(Ipv4))` (проверено `rustc`). `test-core-net4-differential.sh` покрывает только обычные/битые литералы, не ведущие нули. |
+| `d2k_ip4_parse` | 7–30 | `r2k-core/addr.rs` `parse_ipv4_legacy` | **E** | C принимает ведущие нули (`010.0.0.1` → 10.0.0.1), 1–3 цифры, ≤255, ровно 4 октета; Rust `parse_ipv4_legacy` реализует те же ветви, используется в voice-привязке и примере net4; тест `ip4_parse_accepts_leading_zeros_like_c`, дифференциал `test-core-net4-differential.sh` — 34 случая PASS. |
 | `d2k_ip4_text` | 32–38 | `Ipv4Addr::Display` | **E** | `scripts/test-core-net4-differential.sh` сравнивает C `d2k_ip4_text` и Rust `Display` на валидных адресах. |
 | `d2k_ip4_private` | 40–51 | `quic_replay.rs:23-46` `ipv4_is_local` | **E** | Differential покрывает 0/8? (C только `v==0`), 10/8, 127/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10 и public 8.8.8.8. Rust-диапазоны совпадают. |
 | `d2k_ip6_private` | 53–64 | `quic_replay.rs:47-58` IPv6-ветка | **E** | Differential покрывает ::, ::1, fc00::, fe80::, ff02::, IPv4-mapped private/public, 2001:db8::1. |

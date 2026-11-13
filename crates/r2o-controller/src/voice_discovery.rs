@@ -97,7 +97,7 @@ fn r2o_save_confirmed_voice_binding_for_target(
                 .into(),
         );
     }
-    if !((r2o_kind == "addr" && r2o_target.parse::<std::net::Ipv4Addr>().is_ok())
+    if !((r2o_kind == "addr" && r2k_core::addr::parse_ipv4_legacy(r2o_target).is_some())
         || (r2o_kind == "name" && r2o_target == "@discord-voice" && r2o_verified_by == 4))
     {
         return Err("недопустимая область постоянной голосовой привязки".into());
