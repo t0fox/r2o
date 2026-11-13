@@ -298,7 +298,15 @@ fn connect_until(fd: libc::c_int, address: SocketAddr, timeout: Duration) -> io:
     Ok(true)
 }
 
-fn probe_socket(address: SocketAddr, mark: u32) -> io::Result<OwnedFd> {
+fn require_mark_failed(require_mark: bool, mark: u32, marked: bool) -> bool {
+    require_mark && mark != 0 && !marked
+}
+
+fn probe_socket_with_mark(
+    address: SocketAddr,
+    mark: u32,
+    require_mark: bool,
+) -> io::Result<OwnedFd> {
     let domain = if address.is_ipv4() {
         libc::AF_INET
     } else {
@@ -316,9 +324,19 @@ fn probe_socket(address: SocketAddr, mark: u32) -> io::Result<OwnedFd> {
     }
     let owned_fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
     let fd = owned_fd.as_raw_fd();
-    let _ = set_socket_option(fd, libc::SOL_SOCKET, SO_MARK, mark as libc::c_int);
+    let marked = set_socket_option(fd, libc::SOL_SOCKET, SO_MARK, mark as libc::c_int).is_ok();
+    if require_mark_failed(require_mark, mark, marked) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "transport control: SO_MARK",
+        ));
+    }
     let _ = set_socket_option(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY, 1);
     Ok(owned_fd)
+}
+
+fn probe_socket(address: SocketAddr, mark: u32) -> io::Result<OwnedFd> {
+    probe_socket_with_mark(address, mark, false)
 }
 
 pub fn probe_https_name(host: &str, address: SocketAddr, mark: Option<u32>) -> bool {
@@ -732,10 +750,41 @@ fn io_error_text(error: &std::io::Error) -> String {
         .to_string()
 }
 
+#[allow(dead_code)]
+fn dial_marked_mode(
+    target: &ProbeTarget,
+    timeout: Duration,
+    mark: Option<u32>,
+    require_mark: bool,
+) -> Result<(OwnedFd, SocketAddr), ProbeError> {
+    dial_probe_target_mode(target, timeout, mark, require_mark)
+}
+
+/// C `dial_marked`: режим без обязательной метки.
+#[allow(dead_code)]
+fn dial_marked(
+    target: &ProbeTarget,
+    timeout: Duration,
+    mark: Option<u32>,
+) -> Result<(OwnedFd, SocketAddr), ProbeError> {
+    dial_probe_target_mode(target, timeout, mark, false)
+}
+
 fn dial_probe_target(
     target: &ProbeTarget,
     timeout: Duration,
     mark: Option<u32>,
+) -> Result<(OwnedFd, SocketAddr), ProbeError> {
+    dial_probe_target_mode(target, timeout, mark, false)
+}
+
+/// C `dial_marked_mode`: `require_mark` различает отказ `SO_MARK` от отказа
+/// соединения.
+fn dial_probe_target_mode(
+    target: &ProbeTarget,
+    timeout: Duration,
+    mark: Option<u32>,
+    require_mark: bool,
 ) -> Result<(OwnedFd, SocketAddr), ProbeError> {
     let ipv6 = target.host.contains(':');
     let addresses = (&target.host[..], target.port)
@@ -743,13 +792,14 @@ fn dial_probe_target(
         .map_err(|error| ProbeError::Transport(format!("dial tcp: {error}")))?;
     let mut last_failure = None;
     for address in addresses.filter(|address| address.is_ipv6() == ipv6) {
-        let socket = match probe_socket(address, mark.unwrap_or(BYPASS_MARK)) {
-            Ok(socket) => socket,
-            Err(error) => {
-                last_failure = Some(Err(error));
-                continue;
-            }
-        };
+        let socket =
+            match probe_socket_with_mark(address, mark.unwrap_or(BYPASS_MARK), require_mark) {
+                Ok(socket) => socket,
+                Err(error) => {
+                    last_failure = Some(Err(error));
+                    continue;
+                }
+            };
         match connect_until(socket.as_raw_fd(), address, timeout) {
             Ok(true) => return Ok((socket, address)),
             Ok(false) => last_failure = Some(Ok(())),
@@ -1673,5 +1723,14 @@ mod tcp_split_transport_tests {
         assert_eq!(ResponseVerdict::Blocked.as_str(), "blocked");
         assert_eq!(ResponseVerdict::Flaky.as_str(), "flaky");
         assert_eq!(ResponseVerdict::NotApplicable.as_str(), "not_applicable");
+    }
+
+    #[test]
+    fn require_mark_failure_matches_c() {
+        use super::require_mark_failed;
+        assert!(require_mark_failed(true, 0x2d, false));
+        assert!(!require_mark_failed(true, 0, false));
+        assert!(!require_mark_failed(true, 0x2d, true));
+        assert!(!require_mark_failed(false, 0x2d, false));
     }
 }

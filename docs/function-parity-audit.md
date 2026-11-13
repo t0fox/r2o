@@ -88,8 +88,8 @@ recheck 1982 1982 equal True
 | core-state | 692 | 182 | 509 | 0 | 0 |
 | datapath-core | 400 | 156 | 244 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
-| detect | 159 | 72 | 87 | 0 | 0 |
-| **Итого** | **1982** | **783** | **1199** | **0** | **0** |
+| detect | 159 | 74 | 85 | 0 | 0 |
+| **Итого** | **1982** | **785** | **1197** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 783 / P 1199 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 785 / P 1197 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -348,8 +348,8 @@ P означает неполное доказательство ветвей, N
 | core-state | 692 | 182 | 510 | 0 | 0 |
 | datapath-core | 400 | 156 | 244 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
-| detect | 159 | 72 | 87 | 0 | 0 |
-| **Итого** | **1982** | **783** | **1199** | **0** | **0** |
+| detect | 159 | 74 | 85 | 0 | 0 |
+| **Итого** | **1982** | **785** | **1197** | **0** | **0** |
 
 
 ---
@@ -6356,9 +6356,9 @@ raw_recheck, sweep_poisons (свойства → compose → перебор), cr
 | `d2k_note` | 217-227 | 264 | до `D2K_NOTES_MAX` заметок в `res->notes[]` через `vsnprintf` | `classify.rs` `push_note` | **E** | C `nnotes>=MAX` → return; `vsnprintf(notes[nnotes], sizeof(notes[0]), fmt, ap)`; `nnotes++`. Rust `push_note` ограничивает 8 заметками и 255 байтами (по границе UTF-8), используется `note_gap_loss`/`cross_check_tls12`. Тесты `note_caps_and_truncates_like_c`, `trace_questions_is_bounded_and_notes_match_c`. |
 | `note_gap_loss` | 238-247 | 9 | при `gap_ms>0` — note, что движок не умеет паузу между копиями | `classify.rs` `note_gap_loss`, `ClassifyResult.notes` | E | C `gap_ms<=0` → выход; иначе note с текстом про паузу N мс. Rust `note_gap_loss` добавляет тот же текст в `notes`; вызывается при принятии `PoisonHit` с `gap_ms`. Тест `trace_questions_is_bounded_and_notes_match_c` (0 — без note, 20 — с «20 мс»). |
 | `d2k_split_offsets` | 253-287 | 915 | точки разреза → диапазоны; вне `(0,n)` отброшены; сортировка/дедуп; последний до `n` | `classify.rs:28 split_offsets` | **E** | C `cuts[i]>0 && cuts[i]<n`, до 8; вставки; пропуск `cl[i]==prev`; `out[used]={prev,cl[i]}`; финальный `{prev,n}`; возврат used. Rust `split_offsets` те же фильтр/сорт/дедуп/диапазоны; `tests/classify.rs:337,349,361`. |
-| `dial_marked_mode` | 292-364 | 2591 | TCP-connect с меткой: `require_mark`, различение отказа `SO_MARK` и connect | `response.rs:723 dial_probe_target`, `:289 probe_socket` | **P** | **Ветви сверены:** C `getaddrinfo` family по `:`; для каждого ai: socket, `SO_MARK(mark)`, при `require_mark && mark && marked!=0` → ошибка «transport control: SO_MARK»; `TCP_NODELAY`; nonblock; `connect==0` → restore flags/fd; `EINPROGRESS` → poll(timeout), затем `SO_ERROR`; restore flags; ошибки. Rust `dial_probe_target`/`probe_socket` не имеют `require_mark` и различают только общий connect/SO_MARK error; нужен тест «SO_MARK запрещён». |
+| `dial_marked_mode` | 292-364 | 2591 | TCP-connect с меткой: `require_mark`, различение отказа `SO_MARK` и connect | `response.rs` `dial_probe_target_mode`/`probe_socket_with_mark`/`require_mark_failed` | **E** | C: `getaddrinfo` по family, socket, `SO_MARK`, `require_mark && mark && !marked` → «transport control: SO_MARK», `TCP_NODELAY`, nonblock, connect/poll/SO_ERROR. Rust `probe_socket_with_mark` ставит SO_MARK и при `require_mark` возвращает ту же ошибку; `dial_probe_target_mode` повторяет connect/poll/SO_ERROR. Тест `require_mark_failure_matches_c`; live-ветка SO_MARK требует привилегий (ограничение среды). |
 | `d2k_dial_deadline_err` | 368-374 | 183 | признак нашего срока соединения | `classify.rs:1244 is_dial_timeout_text`, `:575 ProbeError` | **E** | C `err` начинается с `"dial tcp "` и содержит `": i/o timeout"`. Rust `is_dial_timeout_text`/`ProbeError`; `tests/classify.rs:796`. |
-| `dial_marked` | 376-380 | 4 | соединение без `require_mark` | `response.rs:723 dial_probe_target` | **P** | C `dial_marked_mode(...,0)`. Rust отдельной обёртки нет, `dial_probe_target` делает обычное соединение; ветка `require_mark` в Rust отсутствует. |
+| `dial_marked` | 376-380 | 4 | соединение без `require_mark` | `response.rs` `dial_marked` | **E** | C `dial_marked_mode(...,0)`. Rust `dial_marked` делегирует `dial_probe_target_mode(...,false)`; обязательной метки нет. |
 | `once_probe` | 385-492 | 4437 | один зонд: raw-split или сокетная запись кусков, ожидание ответа | `response.rs:776 probe_trigger`, `:891 raw_split_enabled`, `raw_probe.rs:1140 probe_tcp_split` | **E** | **Ветви сверены:** C raw-ветка при `ncuts>0 && !no_raw && raw_supported`: ровно один разрез в `(0,len)`, resolve, `raw_probe_poison_family`; сокетная: `dial_marked`, `split_offsets`, запись кусков `send_nosig`, пауза `gap` с проверкой дедлайна/отмены, `poll(POLLIN,left)`, `recv`, `trigger_accepts`. Rust `probe_trigger`/`raw_split_enabled`/`probe_tcp_split`; `tests/classify.rs:957`, `response.rs:1476/1512`, meas EINTR differentials. |
 | `unacked_bytes` | 499-518 | 388 | байты в очереди отправки, -1 — не наблюдается | `response.rs:953/963 unacked_bytes` | **E** | C Linux `ioctl(TIOCOUTQ)`, macOS `getsockopt(SO_NWRITE)`, иначе -1. Rust `unacked_bytes` те же вызовы; TIOCOUTQ/SO_NWRITE; `tests/classify.rs:990`. |
 | `d2k_probe_data_ack` | 520-586 | 2519 | подтверждение нейтрального байта `x` по очереди отправки | `response.rs:898 probe_neutral_ack` | **E** | **Ветви сверены:** C платформа без TIOCOUTQ/SO_NWRITE → -2; `dial_marked`; первичная `unacked_bytes<0` → -1; `send_nosig("x")`; цикл: `q==0` → 1, `q<0` → -1, deadline ≤0 → 0, отмена → -1, `poll(POLLIN,≤20 мс)>0` → 1. Rust `probe_neutral_ack`; `tests/classify.rs:990`. |
