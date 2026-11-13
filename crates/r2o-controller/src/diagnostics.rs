@@ -937,15 +937,19 @@ impl Recorder {
             self.memory_pid = Some(primary_pid);
             self.memory_start_ticks = primary_start_ticks;
         }
-        let field_u64 = |process: Option<&Value>, key: &str| {
+        let field_i64 = |process: Option<&Value>, key: &str| {
             process
                 .and_then(|process| process.get(key))
-                .and_then(Value::as_u64)
+                .and_then(|value| {
+                    value
+                        .as_i64()
+                        .or_else(|| value.as_u64().and_then(|v| i64::try_from(v).ok()))
+                })
         };
-        let rss_kib = field_u64(primary, "rss_kib").unwrap_or(0);
-        let vm_data_kib = field_u64(primary, "vm_data_kib").unwrap_or(0);
-        let vm_swap_kib = field_u64(primary, "vm_swap_kib").unwrap_or(0);
-        let rss_anon_kib = field_u64(primary, "anon_kib").unwrap_or(0);
+        let rss_kib = compact_kib(field_i64(primary, "rss_kib").unwrap_or(-1));
+        let vm_data_kib = compact_kib(field_i64(primary, "vm_data_kib").unwrap_or(-1));
+        let vm_swap_kib = compact_kib(field_i64(primary, "vm_swap_kib").unwrap_or(-1));
+        let rss_anon_kib = compact_kib(field_i64(primary, "anon_kib").unwrap_or(-1));
         let accounted_bytes = counts
             .tracked_tcp_bytes
             .saturating_add(counts.tracked_quic_bytes)
@@ -961,16 +965,16 @@ impl Recorder {
             Value::Null,
             Value::Null,
             json!(rss_anon_kib),
-            json!(counts.catalog_bytes),
-            json!(counts.http_bytes),
-            json!(counts.snapshot_bytes),
-            json!(counts.tracked_tcp_bytes),
-            json!(counts.tracked_quic_bytes),
-            json!(counts.tracked_tls_bytes),
-            json!(counts.tasks),
-            json!(counts.workers_live),
-            json!(counts.workers_result_pending),
-            json!(counts.workers_join_pending),
+            json!(compact_bytes(counts.catalog_bytes)),
+            json!(compact_bytes(counts.http_bytes)),
+            json!(compact_bytes(counts.snapshot_bytes)),
+            json!(compact_bytes(counts.tracked_tcp_bytes)),
+            json!(compact_bytes(counts.tracked_quic_bytes)),
+            json!(compact_bytes(counts.tracked_tls_bytes)),
+            json!(compact_count(counts.tasks as u64)),
+            json!(compact_count(counts.workers_live)),
+            json!(compact_count(counts.workers_result_pending)),
+            json!(compact_count(counts.workers_join_pending)),
             json!(self.memory_epoch),
         ];
         self.memory_total = self.memory_total.saturating_add(1);
@@ -980,9 +984,13 @@ impl Recorder {
         self.memory_history.push_back((at, mono_ms, memory_tail));
 
         // Критерий D2O: устойчивый рост RSS без сопоставимого роста учтённых объектов.
-        if primary_pid != 0 && rss_kib > 0 {
+        if primary_pid != 0
+            && let Some(rss_kib) = compact_kib(field_i64(primary, "rss_kib").unwrap_or(-1))
+            && rss_kib > 0
+            && let Some(accounted_kib) = compact_bytes_kib(accounted_bytes)
+        {
             self.growth
-                .push_back((mono_ms, rss_kib as i64, (accounted_bytes / 1024) as i64));
+                .push_back((mono_ms, i64::from(rss_kib), i64::from(accounted_kib)));
             while self.growth.len() > GROWTH_CAPACITY {
                 self.growth.pop_front();
             }
@@ -1252,6 +1260,36 @@ impl Recorder {
     }
 }
 
+/// C `compact_kib`: отрицательное или слишком большое значение — null.
+fn compact_kib(value: i64) -> Option<i32> {
+    (0..=i64::from(i32::MAX))
+        .contains(&value)
+        .then_some(value as i32)
+}
+
+/// C `compact_bytes_kib`: байты в KiB с округлением вверх.
+fn compact_bytes_kib(bytes: u64) -> Option<i32> {
+    let kib = bytes / 1024 + u64::from(bytes % 1024 != 0);
+    (kib <= i32::MAX as u64).then_some(kib as i32)
+}
+
+/// C `compact_bytes`: байты в i32 или null при переполнении.
+fn compact_bytes(bytes: u64) -> Option<i32> {
+    (bytes <= i32::MAX as u64).then_some(bytes as i32)
+}
+
+/// C `compact_count`: счётчик в u8 с насыщением.
+fn compact_count(count: u64) -> u8 {
+    count.min(u64::from(u8::MAX)) as u8
+}
+
+/// C `value(line,key)`: число после ключа в /proc; отрицательное — None.
+fn proc_field(line: &str, key: &str) -> Option<i64> {
+    let rest = line.strip_prefix(key)?;
+    let value = rest.split_whitespace().next()?.parse::<i64>().ok()?;
+    (value >= 0).then_some(value)
+}
+
 fn limit_reason_values(counts: &Counts) -> Vec<&'static str> {
     if !counts.resources_valid {
         return vec!["resource-data-unavailable"];
@@ -1457,12 +1495,10 @@ fn process_memory(proc_dir: &Path, run_dir: &Path) -> Vec<Value> {
             }
             let status = fs::read_to_string(base.join("status")).unwrap_or_default();
             let field = |key: &str| {
-                status.lines().find_map(|line| {
-                    let (name, rest) = line.split_once(':')?;
-                    (name == key)
-                        .then(|| rest.split_whitespace().next()?.parse::<u64>().ok())
-                        .flatten()
-                })
+                status
+                    .lines()
+                    .find_map(|line| proc_field(line, key))
+                    .map(|value| value as u64)
             };
             json!({
                 "name":spec.name,"pid":pid,"rss_kib":field("VmRSS"),"hwm_kib":field("VmHWM"),
@@ -1483,12 +1519,10 @@ fn process_detail(process: &Value, at: u64, mono_ms: u64, proc_dir: &Path) -> Va
     let base = proc_dir.join(pid.to_string());
     let status = fs::read_to_string(base.join("status")).unwrap_or_default();
     let field = |key: &str| {
-        status.lines().find_map(|line| {
-            let (name, rest) = line.split_once(':')?;
-            (name == key)
-                .then(|| rest.split_whitespace().next()?.parse::<u64>().ok())
-                .flatten()
-        })
+        status
+            .lines()
+            .find_map(|line| proc_field(line, key))
+            .map(|value| value as u64)
     };
     let start_ticks = fs::read_to_string(base.join("stat")).ok().and_then(|stat| {
         let close = stat.rfind(')')?;
@@ -1578,9 +1612,9 @@ fn read_fd_count(path: &Path) -> Option<u64> {
 mod tests {
     use super::{
         Counts, EVENT_CAPACITY, MADVISE_ERRNO_SLOTS, MEMORY_SITE_COUNT, MadviseErrno, MadviseStats,
-        Recorder, d2o_ring_bytes, madvise_json, memory_acquire, memory_active,
-        memory_alloc_failure, memory_enable, memory_release, memory_snapshot, memory_tracking_json,
-        tracked_memory_bytes,
+        Recorder, compact_bytes, compact_bytes_kib, compact_count, compact_kib, d2o_ring_bytes,
+        madvise_json, memory_acquire, memory_active, memory_alloc_failure, memory_enable,
+        memory_release, memory_snapshot, memory_tracking_json, proc_field, tracked_memory_bytes,
     };
     use serde_json::json;
     use std::fs::{self, OpenOptions};
@@ -1802,6 +1836,39 @@ mod tests {
         recorder.enabled = false;
         recorder.record(json!({"id": 99}));
         assert_eq!(recorder.event_total, total);
+    }
+
+    #[test]
+    fn compact_helpers_and_proc_field_match_c() {
+        // C `compact_kib`: v<0 || v>INT32_MAX → -1 (в JSON null).
+        assert_eq!(compact_kib(-1), None);
+        assert_eq!(compact_kib(0), Some(0));
+        assert_eq!(compact_kib(i64::from(i32::MAX)), Some(i32::MAX));
+        assert_eq!(compact_kib(i64::from(i32::MAX) + 1), None);
+
+        // C `compact_bytes_kib`: ceil(bytes/1024), переполнение → -1.
+        assert_eq!(compact_bytes_kib(0), Some(0));
+        assert_eq!(compact_bytes_kib(1), Some(1));
+        assert_eq!(compact_bytes_kib(1024), Some(1));
+        assert_eq!(compact_bytes_kib(1025), Some(2));
+        assert_eq!(compact_bytes_kib(i32::MAX as u64 * 1024), Some(i32::MAX));
+        assert_eq!(compact_bytes_kib(i32::MAX as u64 * 1024 + 1), None);
+
+        // C `compact_bytes`: bytes>INT32_MAX → -1.
+        assert_eq!(compact_bytes(i32::MAX as u64), Some(i32::MAX));
+        assert_eq!(compact_bytes(i32::MAX as u64 + 1), None);
+
+        // C `compact_count`: насыщение до UINT8_MAX.
+        assert_eq!(compact_count(0), 0);
+        assert_eq!(compact_count(255), 255);
+        assert_eq!(compact_count(256), 255);
+        assert_eq!(compact_count(u64::MAX), 255);
+
+        // C `value(line,key)`: число после ключа, отрицательное — отказ.
+        assert_eq!(proc_field("VmRSS:\t 2048 kB\n", "VmRSS:"), Some(2048));
+        assert_eq!(proc_field("VmRSS: -1 kB\n", "VmRSS:"), None);
+        assert_eq!(proc_field("VmHWM: 4096 kB\n", "VmRSS:"), None);
+        assert_eq!(proc_field("VmRSS:\n", "VmRSS:"), None);
     }
 
     #[cfg(unix)]

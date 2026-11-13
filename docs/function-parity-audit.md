@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 226 | 322 | 0 | 0 |
-| core-state | 692 | 243 | 449 | 0 | 0 |
+| core-state | 692 | 248 | 444 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **957** | **1025** | **0** | **0** |
+| **Итого** | **1982** | **962** | **1020** | **0** | **0** |
 
-Это не оценка паритета: 1025 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 1020 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 957 / P 1025 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 962 / P 1020 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 226 | 322 | 0 | 0 |
-| core-state | 692 | 243 | 449 | 0 | 0 |
+| core-state | 692 | 248 | 444 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **957** | **1025** | **0** | **0** |
+| **Итого** | **1982** | **962** | **1020** | **0** | **0** |
 
 
 ---
@@ -2191,11 +2191,11 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_diag_record_write_error` | 188-191 | 4 | `write_failures++` и аномалия kind=2 с кодом ошибки `error` | `Recorder::record_write_error` | E | C сохраняет `error` в `anomaly.code`, `write_anomalies` печатает `error_code`. Rust `record_write_error(stage, error_code)` теперь сохраняет код; call-site'ы передают errno для path/open-temp/flush-close/rename/remove-old-temp и `EFBIG` для size-limit. Тест `record_write_error_stores_code_and_keeps_last_eight_anomalies` проверяет `EACCES`, поля аномалии и кольцо. |
 | `d2k_diag_record` | 192-201 | 10 | событие в кольцо 64 | `Recorder::record` | E | C `!d||!v` → выход; при выключенной диагностике d2kc ставит `diagnostics=NULL` (`d2kc.c:428,922`), поэтому Rust-гейт `!enabled` эквивалентен. C: слот `event_total++%64`, at/id/elapsed/queued/units/family/trigger/shape, `copy` ip(48)/path(16)/kind(8)/target(256)/protocol(16)/outcome(32)/reason(256), `ne` до 64. Rust `record` пишет те же поля с теми же пределами (reason теперь 255), добавляет id при отсутствии и `at`; тест `record_event_ring_and_text_limits_match_c` проверяет 70 событий, id, at, лимиты строк и выключенный сбор. |
 | `d2k_diag_record_limit` | 202-212 | 11 | переход лимита в кольцо 32 | `diagnostics.rs:860-881`, `limit_event_json` (`:1257-1287`) | **P** | **Ветви C:** `!d \|\| !c` → выход; слот `limit_total++%32`; `at=time`, `mono=ms`, `limit/slots/resource_seq/limit_seq/mem_avail/total/reserve/ct_count/max/cpu_free/mask`; `flags = resources_valid\|1, cpu_valid\|2, mem_valid\|4, conntrack_valid\|8, grow_pending\|16`; `nl++` до 32. Rust `limit_event_json` пишет те же поля, но **`grow_pending` жёстко `false`** (`:1271`), а `resource_sequence` передаётся как `self.sample_total` (`:873`) — в C это `c->resource_sequence`, отдельный счётчик ресурсов; `limit_age_ms` есть только в Rust. `limit_changed` сравнивает mask/limit/slots/valid-флаги; C вызывает функцию из sched-хука при смене лимита. |
-| `value` | 213-217 | 5 | число после ключа в `/proc` | `diagnostics::read_number` | **P*** | C `strncmp(line,key,n)`, `sscanf(line+n,"%lld",&x)!=1 \|\| x<0` → -1; иначе x. Rust `read_number` парсит те же строки; отдельной функции нет. |
-| `compact_kib` | 218-220 | 3 | сжать KiB в i32 или -1 | diagnostics compact | **P*** | C `v<0 \|\| v>INT32_MAX ? -1 : (int32_t)v`; Rust compact-поля `Option`/i32; недоступное C даёт -1 → JSON null, часть истории Rust — 0. |
-| `compact_bytes_kib` | 221-221 | 1 | байты в KiB с округлением вверх, i32 или -1 | история памяти/рост (`diagnostics.rs:942-978`) | **P*** | C `kib=bytes/1024+(bytes%1024!=0)`, `kib>INT32_MAX ? -1`. Rust в истории пишет байты как `u64` без сжатия, а для роста считает `accounted_bytes / 1024` (округление вниз, без -1). Формула/тип различаются. |
-| `compact_bytes` | 222-222 | 1 | байты в i32 или -1 | JSON-поля истории (`diagnostics.rs:949-968`) | **P*** | C `bytes>INT32_MAX ? -1 : (int32_t)bytes`. Rust пишет `u64` напрямую (`json!(counts.catalog_bytes)` и т.п.), без насыщения i32 и без -1; на реальных объёмах <2 ГиБ значения совпадают. |
-| `compact_count` | 223-223 | 1 | счётчик в u8 с насыщением | `task_states_json`/история (`diagnostics.rs:963-966,1289+`) | **P*** | C `n>UINT8_MAX ? UINT8_MAX : (uint8_t)n`. Rust хранит счётчики как `u64` в JSON, насыщения до 255 нет; для значений ≤255 совпадает. |
+| `value` | 213-217 | 5 | число после ключа в `/proc` | `diagnostics::proc_field` | E | C `value(line,key)`: префикс ключа, `sscanf("%lld")`, отрицательное → -1. Rust `proc_field` возвращает `Some` только для неотрицательного числа после ключа; используется в `process_memory`/`process_detail`. Тест `compact_helpers_and_proc_field_match_c` (2048, отрицательное, чужой ключ, пустое значение). |
+| `compact_kib` | 218-220 | 3 | сжать KiB в i32 или -1 | `diagnostics::compact_kib` | E | C `v<0 || v>INT32_MAX ? -1 : (int32_t)v`. Rust `compact_kib` возвращает `Option<i32>` (в JSON null), применяется в истории памяти и growth. Тест `compact_helpers_and_proc_field_match_c` (границы -1, 0, `INT32_MAX`, `INT32_MAX+1`). |
+| `compact_bytes_kib` | 221-221 | 1 | байты в KiB с округлением вверх, i32 или -1 | `diagnostics::compact_bytes_kib` | E | C `kib=bytes/1024+(bytes%1024!=0)`, `kib>INT32_MAX ? -1`. Rust `compact_bytes_kib` делает тот же ceil и `None` при переполнении; используется в growth. Тест `compact_helpers_and_proc_field_match_c` (0, 1, 1024, 1025, граница `INT32_MAX`). |
+| `compact_bytes` | 222-222 | 1 | байты в i32 или -1 | `diagnostics::compact_bytes` | E | C `bytes>INT32_MAX ? -1`. Rust `compact_bytes` возвращает `Option<i32>`; поля истории памяти пишут null при переполнении. Тест `compact_helpers_and_proc_field_match_c` (граница `INT32_MAX`/`+1`). |
+| `compact_count` | 223-223 | 1 | счётчик в u8 с насыщением | `diagnostics::compact_count` | E | C `n>UINT8_MAX ? UINT8_MAX : (uint8_t)n`. Rust `compact_count` насыщает до 255; tasks/workers поля истории памяти. Тест `compact_helpers_and_proc_field_match_c` (0, 255, 256, `u64::MAX`). |
 | `proc_pid_dir_present` | 225-229 | 5 | существует ли `/proc/<pid>` как каталог | `read_smaps_rollup` (`diagnostics.rs:1501-1515`) | **P*** | C `snprintf("%s/%ld")`, `stat`, `S_ISDIR`. Rust при `NotFound` проверяет `base.is_dir()` (`:1506`): каталог есть → `unsupported`, иначе `unavailable`. Отдельной функции нет, путь строится `proc_dir.join(pid)`. |
 | `optional_proc_status` | 230-237 | 8 | различить unsupported/unavailable для smaps_rollup: ENOENT при живом pid → unsupported(4), иначе unavailable(1)+errno | `diagnostics::read_smaps_rollup` | **P*** | C `error==ENOENT && pid-dir present` → `*reported_error=0`, 4; иначе `*reported_error=error`, 1. Rust `read_smaps_rollup` различает те же статусы; API иной. |
 | `read_proc` | 238-259 | 22 | pid из pid-файла, comm, VmRSS/HWM/RssAnon/Threads/VmData/VmSwap | `diagnostics::process_memory` (`:1411`) | **P** | **Ветви сверены:** C инициализирует pid=0/rss..=-1; `run/pidfile`; `fscanf("%ld")` + `pid>0&&pid<=INT_MAX`; `/proc/pid/comm` → `fgets`, обрезка `\r\n`, **точное** `strcmp(comm,names[i])`; `/proc/pid/status` — `value()` по шести ключам. Rust принимает `name == spec.comm \|\| name.starts_with(spec.comm)` (усечение comm до 15 байт) и пробует `fallback_pidfile`; поля status те же. Unit `process_memory_follows_pidfiles_and_restarts`; C-oracle нет. |
