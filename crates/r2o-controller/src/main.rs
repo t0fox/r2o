@@ -47,7 +47,7 @@ use r2o_controller::http_search::{
     measured_poison_keys, stable_id,
 };
 use r2o_controller::https_probe::{
-    HttpsProbeWorker, target_from_http_response, target_from_portal,
+    HttpsPortalOutcome, HttpsProbeWorker, target_from_http_response, target_from_portal,
 };
 use r2o_controller::plan_text::compile_text;
 #[cfg(unix)]
@@ -18381,7 +18381,18 @@ impl ControlClient {
                     );
                     std::io::stdout().flush()?;
                     if let Some((host, address)) = target_from_portal(&portal) {
-                        https_probe.submit(&host, address, std::time::Instant::now());
+                        let now = std::time::Instant::now();
+                        match https_probe.portal(&host, address, portal.answered, now) {
+                            // C rc=1: зонд поставлен.
+                            HttpsPortalOutcome::Queued => {}
+                            // C rc=2: подтверждённое, но забытое — повторить TTL.
+                            HttpsPortalOutcome::Resend { ttl_seconds } => {
+                                let command = encode_set_https(&host, ttl_seconds)
+                                    .map_err(|error| format!("повтор HTTPS: {error}"))?;
+                                self.send_command(&command, COMMAND_SET_HTTPS)?;
+                            }
+                            HttpsPortalOutcome::Busy => {}
+                        }
                     }
                     continue;
                 }
@@ -19387,9 +19398,17 @@ impl ControlClient {
                     if let Some((host, address)) = &https_target {
                         let now = std::time::Instant::now();
                         https_state = https_probe.cached_state(host, now);
-                        if https_state.is_none() {
-                            let _ = https_probe.submit(host, *address, now);
-                            https_pending = https_probe.is_pending(host);
+                        // C `http_portal`: answered = ev->code == 1.
+                        match https_probe.portal(host, *address, response.code == 1, now) {
+                            HttpsPortalOutcome::Queued => {
+                                https_pending = https_probe.is_pending(host)
+                            }
+                            HttpsPortalOutcome::Resend { ttl_seconds } => {
+                                let command = encode_set_https(host, ttl_seconds)
+                                    .map_err(|error| format!("повтор HTTPS: {error}"))?;
+                                self.send_command(&command, COMMAND_SET_HTTPS)?;
+                            }
+                            HttpsPortalOutcome::Busy => {}
                         }
                     }
                     if let Some((_, catalog, path, mark)) = &mut discovery {

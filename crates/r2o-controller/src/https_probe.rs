@@ -129,6 +129,14 @@ pub struct HttpsProbeWorker {
     cache: Vec<CachedResult>,
 }
 
+/// C `d2k_httpsprobe_portal`: rc=2 (resend), 1 (queued) или 0 (busy).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HttpsPortalOutcome {
+    Resend { ttl_seconds: u32 },
+    Queued,
+    Busy,
+}
+
 impl HttpsProbeWorker {
     pub fn new(mark: Option<u32>) -> Self {
         let (result_sender, results) = mpsc::sync_channel::<HttpsProbeResult>(QUEUE_CAPACITY);
@@ -226,6 +234,37 @@ impl HttpsProbeWorker {
                     false
                 }
             }
+        }
+    }
+
+    /// C `d2k_httpsprobe_portal`: результат постановки/повтора.
+    pub fn portal(
+        &mut self,
+        host: &str,
+        address: SocketAddr,
+        answered: bool,
+        now: Instant,
+    ) -> HttpsPortalOutcome {
+        let host = host.to_ascii_lowercase();
+        if !cache_host_ok(&host) {
+            return HttpsPortalOutcome::Busy;
+        }
+        if let Some(index) = cache_find(&self.cache, &host) {
+            let entry = &self.cache[index];
+            if entry.expires > now {
+                if entry.state.should_redirect() && !answered {
+                    let left = (entry.expires - now).as_secs().min(u64::from(u32::MAX)) as u32;
+                    if left > 0 {
+                        return HttpsPortalOutcome::Resend { ttl_seconds: left };
+                    }
+                }
+                return HttpsPortalOutcome::Busy;
+            }
+        }
+        if self.submit(&host, address, now) {
+            HttpsPortalOutcome::Queued
+        } else {
+            HttpsPortalOutcome::Busy
         }
     }
 
@@ -482,7 +521,10 @@ impl Drop for HttpsProbeWorker {
 
 #[cfg(test)]
 mod tests {
-    use super::{HttpsProbeWorker, cache_host_ok, target_from_http_response, target_from_portal};
+    use super::{
+        HttpsPortalOutcome, HttpsProbeWorker, cache_host_ok, target_from_http_response,
+        target_from_portal,
+    };
     use crate::response::{
         HTTPS_CONNECTED, HTTPS_NO_ANSWER, HTTPS_REFUSED, HttpsProbeState, classify_https_probe,
     };
@@ -619,6 +661,63 @@ mod tests {
                 "example.test".to_owned(),
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2)), 443),
             ))
+        );
+    }
+
+    #[test]
+    fn httpsprobe_portal_cached_upgrade_resends_like_c() {
+        let now = Instant::now();
+        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443);
+        let mut worker = HttpsProbeWorker::new(None);
+        worker.insert_cache(
+            "served.example".into(),
+            HttpsProbeState::Served,
+            6 * 60 * 60,
+            now,
+        );
+        // C rc=2: upgrade-кэш и ответа клиенту не было — остаток TTL.
+        assert_eq!(
+            worker.portal("SERVED.example", address, false, now),
+            HttpsPortalOutcome::Resend {
+                ttl_seconds: 6 * 60 * 60
+            }
+        );
+        // answered=true — не resend; кэш непустой, постановка не нужна.
+        assert_eq!(
+            worker.portal("served.example", address, true, now),
+            HttpsPortalOutcome::Busy
+        );
+
+        worker.insert_cache(
+            "closed.example".into(),
+            HttpsProbeState::Closed,
+            30 * 60,
+            now,
+        );
+        assert_eq!(
+            worker.portal("closed.example", address, false, now),
+            HttpsPortalOutcome::Busy
+        );
+        assert_eq!(
+            worker.portal("bad_host", address, false, now),
+            HttpsPortalOutcome::Busy
+        );
+    }
+
+    #[test]
+    fn httpsprobe_portal_queues_uncached_and_rejects_pending_like_c() {
+        // Порт 1 на loopback заведомо закрыт: проба завершится быстро.
+        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1);
+        let now = Instant::now();
+        let mut worker = HttpsProbeWorker::new(None);
+        assert_eq!(
+            worker.portal("queue.example", address, false, now),
+            HttpsPortalOutcome::Queued
+        );
+        assert!(worker.is_pending("queue.example"));
+        assert_eq!(
+            worker.portal("queue.example", address, false, now),
+            HttpsPortalOutcome::Busy
         );
     }
 
