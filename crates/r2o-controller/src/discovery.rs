@@ -5,7 +5,7 @@ use r2k_core::control::{
     SHAPE_MODERN, SHAPE_QUIC,
 };
 use r2k_core::plan::Plan as RuntimePlan;
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::catalog::{Binding, BoxRecord, Catalog, DomainObservation, DomainState, GroupKey, Plan};
 
@@ -354,6 +354,66 @@ fn own_rank_before(left: &RankedOwnPlan, right: &RankedOwnPlan) -> bool {
                         || left.successes == right.successes && left.confirmed > right.confirmed))
 }
 
+/// C `EPHEMERAL_FROM` (`core/sched.c:1778`): с этого порта начинается
+/// клиентский (эфемерный) диапазон.
+pub const EPHEMERAL_FROM: u16 = 32_768;
+
+/// C `server_is_low` (`core/sched.c:1798-1805`): сервер — тот конец, чей
+/// порт не эфемерный; если оба одинаковы по «эфемерности» — меньший порт.
+pub const fn server_is_low(low_port: u16, high_port: u16) -> bool {
+    let low_ephemeral = low_port >= EPHEMERAL_FROM;
+    let high_ephemeral = high_port >= EPHEMERAL_FROM;
+    if low_ephemeral != high_ephemeral {
+        return high_ephemeral;
+    }
+    low_port <= high_port
+}
+
+/// C `client_ip_of` (`core/sched.c:1807-1811`): IP клиента — противоположный
+/// серверу конец, младшие 4 байта для IPv4, все 16 для IPv6.
+pub fn client_ip_of(
+    family: u8,
+    low_ip: [u8; 16],
+    high_ip: [u8; 16],
+    low_port: u16,
+    high_port: u16,
+) -> [u8; 16] {
+    let mut client = if server_is_low(low_port, high_port) {
+        high_ip
+    } else {
+        low_ip
+    };
+    if family != 6 {
+        client[4..].fill(0);
+    }
+    client
+}
+
+/// C `server_of` (`core/sched.c:1813-1822`): адрес и порт серверного конца.
+pub fn server_of(
+    family: u8,
+    low_ip: [u8; 16],
+    low_port: u16,
+    high_ip: [u8; 16],
+    high_port: u16,
+) -> Option<(IpAddr, u16)> {
+    let (address, port) = if server_is_low(low_port, high_port) {
+        (low_ip, low_port)
+    } else {
+        (high_ip, high_port)
+    };
+    match family {
+        4 => Some((
+            IpAddr::V4(Ipv4Addr::new(
+                address[0], address[1], address[2], address[3],
+            )),
+            port,
+        )),
+        6 => Some((IpAddr::V6(Ipv6Addr::from(address)), port)),
+        _ => None,
+    }
+}
+
 impl DiscoveryTarget {
     /// TCP-профиль цели: контекстные формы 8–13 несут NO_TS/TS, базовые
     /// 1/2/6 — «не измерено» (0), как C `task_wire_shape`/`trigger_tcp_profile`.
@@ -377,22 +437,14 @@ impl DiscoveryTarget {
         let family = event.key[0];
         let low_port = u16::from_be_bytes([event.key[33], event.key[34]]);
         let high_port = u16::from_be_bytes([event.key[35], event.key[36]]);
-        let (address, port) = match (low_port, high_port) {
-            (443, 443) => return None,
-            (_, 443) => (&event.key[17..33], 443),
-            (443, _) => (&event.key[1..17], 443),
-            _ => return None,
-        };
-        let endpoint = match family {
-            4 => format!(
-                "{}:{port}",
-                Ipv4Addr::new(address[0], address[1], address[2], address[3])
-            ),
-            6 => {
-                let address: [u8; 16] = address.try_into().ok()?;
-                format!("[{}]:{port}", Ipv6Addr::from(address))
-            }
-            _ => return None,
+        let low_ip: [u8; 16] = event.key[1..17].try_into().ok()?;
+        let high_ip: [u8; 16] = event.key[17..33].try_into().ok()?;
+        // C `server_of`: серверный конец по эфемерности/величине портов, а не
+        // по зашитому 443 — d2k охватывает весь IP-трафик на всех портах.
+        let (address, port) = server_of(family, low_ip, low_port, high_ip, high_port)?;
+        let endpoint = match address {
+            IpAddr::V4(address) => format!("{address}:{port}"),
+            IpAddr::V6(address) => format!("[{address}]:{port}"),
         };
         Some(Self {
             host,
@@ -1522,6 +1574,88 @@ mod tests {
         BindingContext, HttpResponseEvent, KEY_LEN, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_MODERN,
     };
     use std::net::{IpAddr, Ipv4Addr};
+
+    fn hello_key(
+        family: u8,
+        low_ip: &[u8],
+        high_ip: &[u8],
+        low_port: u16,
+        high_port: u16,
+    ) -> [u8; KEY_LEN] {
+        let mut key = [0_u8; KEY_LEN];
+        key[0] = family;
+        key[1..1 + low_ip.len()].copy_from_slice(low_ip);
+        key[17..17 + high_ip.len()].copy_from_slice(high_ip);
+        key[33..35].copy_from_slice(&low_port.to_be_bytes());
+        key[35..37].copy_from_slice(&high_port.to_be_bytes());
+        key[37] = 6;
+        key
+    }
+
+    #[test]
+    fn server_selection_matches_c_sched_helpers() {
+        // C `server_is_low`: эфемерный конец — клиент.
+        assert!(!super::server_is_low(51_000, 443));
+        assert!(super::server_is_low(443, 51_000));
+        // Оба не эфемерные — сервер меньший порт; оба эфемерные — тоже меньший.
+        assert!(super::server_is_low(80, 8443));
+        assert!(!super::server_is_low(8443, 80));
+        assert!(super::server_is_low(50_000, 60_000));
+
+        let client = [192, 0, 2, 10];
+        let server = [198, 51, 100, 20];
+        let mut low = [0_u8; 16];
+        low[..4].copy_from_slice(&client);
+        let mut high = [0_u8; 16];
+        high[..4].copy_from_slice(&server);
+        assert_eq!(
+            &super::client_ip_of(4, low, high, 51_000, 443)[..4],
+            &client
+        );
+        assert_eq!(
+            super::server_of(4, low, 51_000, high, 443),
+            Some((IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20)), 443))
+        );
+        assert_eq!(
+            super::server_of(4, low, 443, high, 51_000),
+            Some((IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)), 443))
+        );
+
+        // Нестандартный серверный порт 8443 теперь тоже даёт цель.
+        let event = r2k_core::control::HelloEvent {
+            key: hello_key(4, &client, &server, 40_000, 8443),
+            host: Some(b"example.com".to_vec()),
+            shape: Some(super::SHAPE_MODERN),
+            r2o_wire_len: None,
+            quic_snapshot: None,
+            tcp_has_timestamp: None,
+        };
+        let target = DiscoveryTarget::from_event(&event).unwrap();
+        assert_eq!(target.endpoint, "198.51.100.20:8443");
+        assert_eq!(target.host, "example.com");
+
+        let event = r2k_core::control::HelloEvent {
+            key: hello_key(4, &client, &server, 8443, 40_000),
+            host: Some(b"example.com".to_vec()),
+            shape: Some(super::SHAPE_MODERN),
+            r2o_wire_len: None,
+            quic_snapshot: None,
+            tcp_has_timestamp: None,
+        };
+        let target = DiscoveryTarget::from_event(&event).unwrap();
+        assert_eq!(target.endpoint, "192.0.2.10:8443");
+
+        let event = r2k_core::control::HelloEvent {
+            key: hello_key(4, &client, &server, 443, 443),
+            host: Some(b"example.com".to_vec()),
+            shape: Some(super::SHAPE_MODERN),
+            r2o_wire_len: None,
+            quic_snapshot: None,
+            tcp_has_timestamp: None,
+        };
+        let target = DiscoveryTarget::from_event(&event).unwrap();
+        assert_eq!(target.endpoint, "192.0.2.10:443");
+    }
 
     #[test]
     fn own_first_plan_batches_match_donor_scheduler() {
