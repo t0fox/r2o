@@ -1407,6 +1407,22 @@ fn r2o_quic_http3_datagrams(connection: &quinn::Connection) -> u64 {
     r2o_quic_datagrams_sum(stats.udp_tx.datagrams, stats.udp_rx.datagrams)
 }
 
+/// C `d2k_qbudget_grew` (`core/include/d2k_quicprobe.h:637-639`): при
+/// `pkts>=need` отметить прогресс, затем `status>0 && progress>mark`;
+/// свежесть при `now=last=0, rto=1` всегда истинна.
+fn r2o_quic_budget_grew(
+    packets: u32,
+    need: u32,
+    status: u16,
+    progress: u64,
+    progress_mark: &mut Option<u64>,
+) -> bool {
+    if packets >= need && progress_mark.is_none() {
+        *progress_mark = Some(progress);
+    }
+    status > 0 && progress_mark.is_some_and(|mark| progress > mark)
+}
+
 /// C `d2k_qc_datagrams` (`core/quicconn.c:1432-1435`): сумма tx+rx.
 fn r2o_quic_datagrams_sum(tx: u64, rx: u64) -> u64 {
     tx.saturating_add(rx)
@@ -1750,5 +1766,18 @@ mod tests {
         assert_eq!(super::r2o_quic_datagrams_sum(0, 0), 0);
         assert_eq!(super::r2o_quic_datagrams_sum(3, 4), 7);
         assert_eq!(super::r2o_quic_datagrams_sum(u64::MAX, 1), u64::MAX);
+    }
+
+    #[test]
+    fn quic_budget_grew_matches_c() {
+        // C `d2k_qbudget_grew`: pkts>=need отмечает progress, затем
+        // status>0 && progress>mark без проверки свежести.
+        let mut mark = None;
+        assert!(!super::r2o_quic_budget_grew(1, 2, 200, 10, &mut mark));
+        assert_eq!(mark, None);
+        assert!(!super::r2o_quic_budget_grew(2, 2, 0, 10, &mut mark));
+        assert_eq!(mark, Some(10));
+        assert!(!super::r2o_quic_budget_grew(3, 2, 200, 10, &mut mark));
+        assert!(super::r2o_quic_budget_grew(3, 2, 200, 11, &mut mark));
     }
 }
