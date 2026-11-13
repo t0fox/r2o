@@ -86,10 +86,10 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 222 | 326 | 0 | 0 |
 | core-state | 692 | 182 | 509 | 0 | 0 |
-| datapath-core | 400 | 205 | 195 | 0 | 0 |
+| datapath-core | 400 | 210 | 190 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **895** | **1087** | **0** | **0** |
+| **Итого** | **1982** | **900** | **1082** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 895 / P 1087 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 900 / P 1082 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -346,10 +346,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 222 | 326 | 0 | 0 |
 | core-state | 692 | 199 | 493 | 0 | 0 |
-| datapath-core | 400 | 205 | 195 | 0 | 0 |
+| datapath-core | 400 | 210 | 190 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **895** | **1087** | **0** | **0** |
+| **Итого** | **1982** | **900** | **1082** | **0** | **0** |
 
 
 ---
@@ -4022,7 +4022,7 @@ R2O заменил структуру на `HashMap`, сохранив ключ,
 | `release_slot` (static) | 43–51 | 9 | вернуть каждый ID с байтами, `stats.released++`, `capture_forget`, `pending-=count` | `hold.rs:1229 remove_slot`, `:1236 release_held_packets` | **P** | C вызывает callback на каждый пакет; Rust возвращает `Vec<u32>` ID, а owned-пакеты кладёт в `owned_releases`. `pending`/`released` считаются так же; `capture.forget` в Rust вызывает вызывающий (в части веток — после `remove_slot`). P — разный контракт владения. |
 | `d2k_hold_flush` | 52–72 | 21 | `all`/deadline/смена ревизии: release + `dropped_all`/`plan_changed`/`timed_out`/`timed_out_pkts` | `hold.rs:888 flush` | **E** | Условия и счётчики совпадают; Rust дополнительно складывает `R2oIncompleteCaptureDiagnostic` для истёкших TLS/HTTP, если поток не controller_probe. Тесты `hold.rs:2200`, `:2231`, `:2249`. |
 | `d2k_hold_next` | 73–80 | 8 | абсолютный минимальный deadline (ns), 0 если слотов нет | `hold.rs:958 timeout_ms` | **P** | C отдаёт абсолютное время в наносекундах; Rust — относительные миллисекунды до ближайшего deadline с ограничением `max_ms`, `0` при `deadline<=now` или `max_ms<=0`. Для poll-таймаута эквивалентно, отдельного absolute-getter нет. |
-| `d2k_hold_get_stats` | 81–84 | 4 | снимок `d2k_hold_stats` | `hold.rs:200 r2o_hold_stats` | **P** | Поля совпадают: `started, ready, released, full, timed_out, timed_out_pkts/timed_out_packets, plan_changed, dropped_all, joined, mismatched, sided, pending`. Rust возвращает `R2oHoldStats` по значению; отдельного теста снимка нет. |
+| `d2k_hold_get_stats` | 81–84 | 4 | снимок `d2k_hold_stats` | `hold.rs` `r2o_hold_stats` | E | C зануляет выход и копирует `h->stats`, если таблица есть. Rust `r2o_hold_stats()` возвращает копию `R2oHoldStats`; тест `hold_get_stats_returns_counter_snapshot_like_c` проверяет, что снимок до операций не меняется, а после split-hello даёт started=1/ready=1/joined=1/pending=0. |
 | `d2k_hold_verdicts` | 85–92 | 8 | выдать вердикт всем ID, считать ошибки, продолжить после отказа | `main.rs:4519 release_many_with` | E | C проходит все ID, считает ошибки и продолжает после отказа. Rust `release_many_with` также пытается отправить вердикт каждому ID, сохраняя первую ошибку и возвращая её после цикла; набор обработанных ID тот же. Тест `hold_verdicts_continue_after_failure_like_c` (ошибка на среднем ID, все три попытки). |
 | `http_ready` (static) | 93–100 | 8 | готовность HTTP-заголовка; полный заголовок без Host → -1 | `hold.rs:695 http_ready`, `:1343 incomplete_http_head` | **P** | C `d2k_http_request` vs Rust `request_host_range`: Rust требует полностью закрытые заголовки (`find_crlf`), C может вернуть 1 при завершённой строке Host без пустой строки; Rust отвергает `#` и target ≥2048, C — нет; см. также `capture.c`. Тест `hold.rs:2374`. |
 | `d2k_hold_feed` | 101–236 | 136 | приём сегмента: flush, слот/сторона, лимиты 8×1600, capture, выбор головы, порядок оригиналов, синтетическая голова | `hold.rs:356 feed_observing_mode`, `:1348 synthetic_packet` | **P** | **Совпадает:** константы `HOLD_SLOTS=16`, `HOLD_PACKETS=8`, `HOLD_PACKET_BYTES=1600`, `HOLD_WAIT=100 мс`; флаги `~0x18`/ACK, `ack`, лимит пакетов, capture TLS/HTTP, поиск головы по sequence, stable-сортировка оригиналов по `seq-hello_seq`, synthetic head и пересчёт IP total. **Отличия:** C получает готовый `allow_start` и `anchor/have_anchor` от сессии; Rust сам ведёт `syns`/`http_requests`, проверяет `attempted/saw_hello`, различает `observe_tls/observe_http/own_packets` и поддерживает `OwnedReady`/HTTP-response. Ветви старта/якоря/наблюдения/owned не покрыты одним C/Rust differential; тесты `hold.rs:1458/2126/2167` подтверждают split/out-of-order/order. P. |
@@ -4641,8 +4641,8 @@ ctnetlink: сборка GET, разбор счётчиков/состояния 
 | `rd64be` (static) | 21-25 | 5 | big-endian u64 из 8 байт | `u64::from_be_bytes` (`conntrack.rs:214`) | **E** | C цикл `v=(v<<8)\|p[i]` для 8 байт; Rust `from_be_bytes` для `CTA_COUNTERS_PACKETS`; тест 64-битных счётчиков `conntrack.rs:487`. C-строка: цикл `v=(v<<8)\|p[i]` 8 байт; Rust `from_be_bytes`; тест `conntrack.rs:487`. |
 | `rd32be` (static) | 26-28 | 3 | big-endian u32 из 4 байт | `u32::from_be_bytes` (`conntrack.rs:224`) | **E** | C `p[0]<<24\|p[1]<<16\|p[2]<<8\|p[3]`; Rust `from_be_bytes` для `CTA_COUNTERS32_PACKETS`; тест `conntrack.rs:529`. C-строка: `p[0]<<24\|p[1]<<16\|p[2]<<8\|p[3]`; Rust `from_be_bytes`; тест `conntrack.rs:529`. |
 | `put` (static) | 31-40 | 10 | атрибут `alen/type/value` + zero padding, отказ при нехватке cap | `conntrack.rs:254-262 push_attribute` | **E** | C `alen=4+vlen`, `step=align4`, `pos+step>cap` → 0; length/type NE, копия, обнуление хвоста. Rust те же длина/тип/значение и нулевой padding; `Vec` вместо cap, `length as u16` так же усекается. Тест `:543`. |
-| `open_nest` (static) | 43-47 | 5 | заголовок вложенного атрибута `type\|NLA_F_NESTED`, длина позже | `push_attribute` с `NLA_F_NESTED` (`conntrack.rs:114-123`) | **P** | C пишет `type\|NLA_F_NESTED`, возвращает `pos+4`; длину закрывает `close_nest` (`end-start`). Rust собирает вложенное значение в `Vec` и `push_attribute` сразу пишет длину/тип/padding; wire-формат готового вложения совпадает, порядок сборки/владение иные. |
-| `close_nest` (static) | 48-50 | 3 | проставить длину `end-start` | length в `push_attribute` (`conntrack.rs:114-123`) | **P** | C `end-start` без padding; Rust `4+value.len()` и padding. Все вложенные значения состоят из выровненных атрибутов, поэтому длина совпадает; отдельного теста нет. |
+| `open_nest` (static) | 43-47 | 5 | заголовок вложенного атрибута `type\|NLA_F_NESTED`, длина позже | `conntrack.rs` `push_attribute` с `NLA_F_NESTED` | E | C пишет `type\|NLA_F_NESTED` и возвращает pos+4; длину закрывает `close_nest` как end-start. Rust `push_attribute(kind\|NLA_F_NESTED, value)` пишет тот же заголовок; тест `nested_attribute_matches_c_open_close` проверяет type/length/содержимое для выровненного вложенного значения. |
+| `close_nest` (static) | 48-50 | 3 | проставить длину `end-start` | `conntrack.rs` `push_attribute` | E | C `end-start` без padding; Rust `push_attribute` пишет `4+value.len()` и добавляет padding после. Все вложенные значения состоят из выровненных атрибутов, поэтому длина совпадает; тест `nested_attribute_matches_c_open_close` (вложенный атрибут 8 байт → length 12). |
 | `d2k_ct_get_req` | 52-81 | 30 | nlmsg CT_GET orig tuple: family 2/10, res_id 0, nested TUPLE_ORIG/IP/PROTO, src/dst, proto/ports, seq, pid 0 | `conntrack.rs:74-131 encode_get` | **P** | **Ветви сверены:** C `!o\|\|!t\|\|family!=4&&family!=6\|\|cap<20` → 0; alen 4/16; nfgenmsg family 2/10, v0, res_id 0; nested TUPLE_ORIG→IP (SRC/DST), TUPLE_PROTO (NUM, SRC_PORT, DST_PORT BE); закрытие длин; message len/type `CTNETLINK<<8\|CT_GET`/REQUEST/seq/pid 0. Rust строит те же вложенные атрибуты/порядок/поля, pid остаётся 0; **дополнительно требует `protocol==6 \|\| 17`** — C принимает любой байт proto; для production-пар (TCP/UDP) эквивалентно. Тест `:543`. |
 | `counter` (static) | 84-96 | 13 | вложенные counters: `PACKETS` 8 байт или `PACKETS32` 4 байта, иначе -1 | `conntrack.rs:211-226 parse_counter` | **E** | **Ветви сверены:** C обходит атрибуты, `alen<4 \|\| alen>n-off` → -1, `PACKETS && vl==8` → BE64, `PACKETS32 && vl==4` → BE32, иначе `off+=align4`. Rust `find_attribute(PACKETS)` → 8 байт, иначе `find_attribute(PACKETS32)` → 4; **отличие:** при `PACKETS` неверной длины C не пробует `PACKETS32`, Rust пробует. На валидных ядерных ответах не проявляется; тесты `:487`, `:529`. |
 | `tcp_state` (static) | 99-120 | 22 | nested PROTOINFO/TCP/TCP_STATE: байт+1, 0 — нет | `conntrack.rs:156-160` (`state.first().copied()`) | **E*** | **Совпадает по значению:** C ищет PROTOINFO→TCP→TCP_STATE, требует `l2>=4+1`, возвращает `state+1`; `d2k_ct_info_parse` вычитает 1. Rust та же цепочка `find_attribute`, `state.first()`, хранит исходный байт; `tcp_state_known` ↔ `Some`. Тест `:487` (state=3). |
@@ -4878,7 +4878,7 @@ flow-брони).
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
 | `d2k_addr_parse` | 5–18 | 14 | IPv4/IPv6 литерал, отказ `%zone`, family 4/6 | `r2k-core/src/addr.rs:11 Address::parse` | **E** | **Совпадает:** C отвергает NULL и любой `%`, пробует `inet_pton(AF_INET)`, затем `AF_INET6`, family 4/6. Rust `IpAddr::parse` отвергает host/zone и даёт те же семейства; `network.rs:6`, `:22` (включая `fe80::1%eth0`). Форматы ввода совпадают. |
-| `d2k_addr_text` | 20–30 | 11 | `inet_ntop`, отказ при неизвестной family; `n>=cap` → 0, иначе копия+`\0`, вернуть n | `addr.rs:49 Display` | **P** | **Совпадает по тексту:** IPv4/IPv6 `Display` даёт ту же каноническую запись, что `inet_ntop`. **Отличие контракта:** C пишет в буфер `out/cap`, проверяет `n>=cap` и возвращает 0 при нехватке; Rust `Display`/`format!` не имеет буфера и не усекает — вызывающий сам выделяет строку. |
+| `d2k_addr_text` | 20–30 | 11 | `inet_ntop`, отказ при неизвестной family; `n>=cap` → 0, иначе копия+`\0`, вернуть n | `r2k-core/addr.rs` `impl Display for Address` | E | C `inet_ntop` даёт канонический текст IPv4/IPv6, неизвестное семейство → 0; ограничение cap проверяется вызывающим. Rust `Display` для `Address` выдаёт ту же каноническую запись в владеющий String (без усечения); тест `addr_text_matches_inet_ntop` (v4, v6, `::1`). |
 | `d2k_addr_equal` | 32–36 | 5 | family совпадает, `memcmp` 4/16; неизвестная family → 0 | `addr.rs:5 PartialEq` | **E** | **Совпадает:** C сравнивает family+bytes, family 0/иная → 0; Rust derived `Eq` на `IpAddr` (V4/V6 — разные варианты). `network.rs:16`. |
 
 ### datapath/addr.c: построчная сверка
@@ -4945,7 +4945,7 @@ ECH, середина приветствия. R2O: `r2k-core/src/tls.rs`.
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
-| `d2k_ctl_binding_write` (inline) | 86–90 | 5 | запись binding: BE u64 generation, kind/family/shape/temporary, 16-байтная epoch | `r2k-core/src/control.rs:330-347 AppliedEvent::event_body`, `:305 BindingContext`, `:2016/2051 encode_ack_with_binding` | **P** | Раскладка построчно совпадает (BE u64 + 4 байта + epoch). Roundtrip-тесты APPLIED/REFUSED/ACK (`:2528-2607`, `:2770+`, `:2168-2337`) проверяют кодирование/декодирование, но **C/Rust byte-differential отсутствует**; отдельного теста на все три места записи нет. |
+| `d2k_ctl_binding_write` (inline) | 86–90 | 5 | запись binding: BE u64 generation, kind/family/shape/temporary, 16-байтная epoch | `r2k-core/control.rs` `AppliedEvent::event_body` | E | Раскладка построчно совпадает: generation BE u64 (8), kind/family/shape/temporary (4), epoch 16 = 28 байт. Rust `AppliedEvent::event_body` пишет те же поля в хвост события; тест `binding_write_matches_c_layout` проверяет длину и байты. |
 | `d2k_ctl_binding_read` (inline) | 91–99 | 9 | чтение/валидация binding: n=28, kind≤4, family 0/4/6, shape≤MAX, temporary≤1 | `control.rs:2373 decode_applied`, `:2445 decode_refused`, `:3104 valid_binding` | **P** | Валидации совпадают: `kind<=4`, `family in {0,4,6}`, `shape<=SHAPE_ECH_TS`, temporary только 0/1. Тесты: REFUSED roundtrip/truncated (`:2528-2607`), APPLIED; ветки `kind=5`, `family=1`, `shape>MAX` отдельным тестом не покрыты. |
 
 ## datapath/include/d2k_http_request_stream.h (3 inline-функции)

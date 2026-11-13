@@ -1511,6 +1511,44 @@ mod tests {
     }
 
     #[test]
+    fn hold_get_stats_returns_counter_snapshot_like_c() {
+        // C `d2k_hold_get_stats` копирует структуру: снимок не меняется
+        // последующими операциями таблицы.
+        let now = Instant::now();
+        let mut hold = HoldTable::default();
+        let before = hold.r2o_hold_stats();
+        assert_eq!(before.started, 0);
+        assert_eq!(before.pending, 0);
+
+        let syn = tcp_packet(1000, 0x02, &[]);
+        assert_eq!(
+            hold.feed(1, &syn, now, 0, true, false).outcome,
+            HoldOutcome::Pass
+        );
+        let hello = hello();
+        let first = tcp_packet(1001, 0x18, &hello[..5]);
+        assert_eq!(
+            hold.feed(2, &first, now, 0, true, false).outcome,
+            HoldOutcome::Waiting
+        );
+        let second = tcp_packet(1006, 0x18, &hello[5..]);
+        assert!(matches!(
+            hold.feed(3, &second, now, 0, true, false).outcome,
+            HoldOutcome::Ready { .. }
+        ));
+
+        let after = hold.r2o_hold_stats();
+        assert_eq!(after.started, 1);
+        assert_eq!(after.ready, 1);
+        assert_eq!(after.joined, 1);
+        assert_eq!(after.pending, 0);
+        // Снимок до операций не изменился.
+        assert_eq!(before.started, 0);
+        assert_eq!(before.ready, 0);
+        assert_eq!(before.pending, 0);
+    }
+
+    #[test]
     fn повреждённый_tcp_поток_отпускает_накопленные_пакеты() {
         let now = Instant::now();
         let mut hold = HoldTable::default();

@@ -126,4 +126,16 @@ mod ipv4_legacy_tests {
         assert_eq!(parse_ipv4_legacy(""), None);
         assert_eq!(parse_ipv4_legacy("1.2.3.4."), None);
     }
+
+    #[test]
+    fn addr_text_matches_inet_ntop() {
+        use super::Address;
+        use std::net::IpAddr;
+        let v4: IpAddr = "192.0.2.10".parse().unwrap();
+        assert_eq!(Address::new(v4).to_string(), "192.0.2.10");
+        let v6: IpAddr = "2001:db8::1".parse().unwrap();
+        assert_eq!(Address::new(v6).to_string(), "2001:db8::1");
+        let loopback: IpAddr = "::1".parse().unwrap();
+        assert_eq!(Address::new(loopback).to_string(), "::1");
+    }
 }

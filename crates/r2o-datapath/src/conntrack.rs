@@ -620,6 +620,23 @@ mod tests {
     }
 
     #[test]
+    fn nested_attribute_matches_c_open_close() {
+        use super::{CTA_TUPLE_IP, NLA_F_NESTED, push_attribute};
+        let mut inner = Vec::new();
+        push_attribute(&mut inner, CTA_TUPLE_IP, &[192, 0, 2, 1]);
+        assert_eq!(inner.len(), 8);
+        let mut nested = Vec::new();
+        push_attribute(&mut nested, CTA_TUPLE_IP | NLA_F_NESTED, &inner);
+        let length = u16::from_ne_bytes([nested[0], nested[1]]);
+        let kind = u16::from_ne_bytes([nested[2], nested[3]]);
+        // Вложенное значение собрано из выровненных атрибутов, поэтому
+        // C `close_nest` (end-start) и Rust length совпадают.
+        assert_eq!(usize::from(length), 4 + inner.len());
+        assert_eq!(kind, CTA_TUPLE_IP | NLA_F_NESTED);
+        assert_eq!(&nested[4..], &inner[..]);
+    }
+
+    #[test]
     fn собирает_сетевые_кортежи_одного_семейства() {
         let client: SocketAddr = "192.0.2.10:50000".parse().unwrap();
         let server: SocketAddr = "198.51.100.20:443".parse().unwrap();

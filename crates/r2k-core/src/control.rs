@@ -3827,3 +3827,41 @@ mod legacy_v22_wire_tests {
         assert!(ack.is_ok());
     }
 }
+
+#[cfg(test)]
+mod binding_layout_tests {
+    use super::{AppliedEvent, BindingContext, KEY_LEN};
+
+    #[test]
+    fn binding_write_matches_c_layout() {
+        // C `d2k_ctl_binding_write`: generation BE u64, kind/family/shape/
+        // temporary, 16-байтная epoch. Событие кладёт те же 28 байт в хвост.
+        let mut key = [0u8; KEY_LEN];
+        key[0] = 4;
+        key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+        key[17..21].copy_from_slice(&[198, 51, 100, 20]);
+        key[33..35].copy_from_slice(&41_000_u16.to_be_bytes());
+        key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+        key[37] = 6;
+        let event = AppliedEvent {
+            key,
+            plan_id: [0x11; 16],
+            trial_id: [0x22; 16],
+            execution_id: 0x0102_0304_0506_0708,
+            binding: BindingContext {
+                generation: 0x1112_1314_1516_1718,
+                kind: 2,
+                family: 4,
+                shape: 3,
+                temporary: true,
+                epoch: [0x33; 16],
+            },
+        };
+        let body = event.event_body().expect("валидное событие");
+        assert_eq!(body.len(), KEY_LEN + 16 + 16 + 36);
+        let tail = &body[body.len() - 28..];
+        assert_eq!(&tail[..8], &0x1112_1314_1516_1718_u64.to_be_bytes());
+        assert_eq!(&tail[8..12], &[2, 4, 3, 1]);
+        assert_eq!(&tail[12..], &[0x33; 16]);
+    }
+}
