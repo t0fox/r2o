@@ -178,6 +178,38 @@ fn r2o_hpke_expand(
     Some(block[..out_len].to_vec())
 }
 
+/// C `ech_hpke`: X25519/HPKE schedule для ECH-конфигурации.
+#[allow(dead_code)]
+fn r2o_ech_hpke(
+    wire: &[u8],
+    config_public_key: &[u8; 32],
+    private_key: &[u8; 32],
+) -> Option<([u8; 32], [u8; 16], [u8; 12])> {
+    let suite: [u8; 10] = [b'H', b'P', b'K', b'E', 0, 0x20, 0, 1, 0, 1];
+    let private = <X25519HkdfSha256 as HpkeKem>::PrivateKey::from_bytes(private_key).ok()?;
+    let peer = <X25519HkdfSha256 as HpkeKem>::EncappedKey::from_bytes(config_public_key).ok()?;
+    let enc = <X25519HkdfSha256 as HpkeKem>::sk_to_pk(&private).to_bytes();
+    let shared = <X25519HkdfSha256 as HpkeKem>::decap(&private, None, &peer).ok()?;
+    let shared = shared.0.as_slice();
+    let mut info = Vec::with_capacity(8 + wire.len());
+    info.extend_from_slice(b"tls ech\0");
+    info.extend_from_slice(wire);
+    let psk_hash = r2o_hpke_extract(&[], &suite, "psk_id_hash", &[]);
+    let info_hash = r2o_hpke_extract(&[], &suite, "info_hash", &info);
+    let secret = r2o_hpke_extract(shared, &suite, "secret", &[]);
+    let mut schedule = Vec::with_capacity(65);
+    schedule.push(0);
+    schedule.extend_from_slice(&psk_hash);
+    schedule.extend_from_slice(&info_hash);
+    let key = r2o_hpke_expand(&secret, &suite, "key", &schedule, 16)?;
+    let nonce = r2o_hpke_expand(&secret, &suite, "base_nonce", &schedule, 12)?;
+    Some((
+        enc.as_slice().try_into().ok()?,
+        key.try_into().ok()?,
+        nonce.try_into().ok()?,
+    ))
+}
+
 fn r2o_ech_hpke_error(error: impl std::fmt::Display) -> rustls::Error {
     rustls::Error::General(format!("ошибка ECH HPKE: {error}"))
 }
@@ -575,7 +607,7 @@ fn r2o_ech_u16(bytes: &[u8], offset: usize) -> Result<u16, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Hpke, R2O_ECH_HPKE, R2oEchConfig, r2o_ech_dns_name, r2o_ech_https_query,
+        Hpke, R2O_ECH_HPKE, R2oEchConfig, r2o_ech_dns_name, r2o_ech_hpke, r2o_ech_https_query,
         r2o_ech_parse_https_reply, r2o_ech_public_name, r2o_ech_query_resolver,
         r2o_ech_select_config, r2o_ech_u16, r2o_hpke_expand, r2o_hpke_extract,
     };
@@ -672,6 +704,32 @@ mod tests {
             hex(&empty),
             "dd53614a4e5dff8b7ab8b7a4a22657aa8b408e2fa2846aaff005cfddbc7a8c03"
         );
+    }
+
+    #[test]
+    fn ech_hpke_matches_c_vector() {
+        let mut private_key = [0_u8; 32];
+        for (index, byte) in private_key.iter_mut().enumerate() {
+            *byte = (index + 1) as u8;
+        }
+        let public_key: [u8; 32] = [
+            0x07, 0xa3, 0x7c, 0xbc, 0x14, 0x20, 0x93, 0xc8, 0xb7, 0x55, 0xdc, 0x1b, 0x10, 0xe8,
+            0x6c, 0xb4, 0x26, 0x37, 0x4a, 0xd1, 0x6a, 0xa8, 0x53, 0xed, 0x0b, 0xdf, 0xc0, 0xb2,
+            0xb8, 0x6d, 0x1c, 0x7c,
+        ];
+        let (enc, key, nonce) = r2o_ech_hpke(&[1, 2, 3, 4], &public_key, &private_key).unwrap();
+        let hex = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        assert_eq!(
+            hex(&enc),
+            "07a37cbc142093c8b755dc1b10e86cb426374ad16aa853ed0bdfc0b2b86d1c7c"
+        );
+        assert_eq!(hex(&key), "a8dbf80171850a5f38481165890895a2");
+        assert_eq!(hex(&nonce), "f46cd1836045cfa732e86e78");
     }
 
     #[test]
