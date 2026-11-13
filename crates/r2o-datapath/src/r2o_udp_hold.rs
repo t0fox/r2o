@@ -828,6 +828,41 @@ mod tests {
     }
 
     #[test]
+    fn udp_hold_flush_releases_expired_batches_like_c() {
+        use super::{R2O_UDP_HOLD_WAIT, R2oUdpHoldFeed, R2oUdpHoldTable};
+        let packet = udp_packet();
+        let now = Instant::now();
+        let mut table = R2oUdpHoldTable::new();
+        assert_eq!(table.r2o_feed(1, 0, &packet, now), R2oUdpHoldFeed::Held);
+        assert!(table.r2o_flush(now).is_empty());
+        let expired = table.r2o_flush(now + R2O_UDP_HOLD_WAIT);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].packets.len(), 1);
+        assert_eq!(expired[0].packets[0].id, 1);
+        assert!(table.r2o_flush(now + R2O_UDP_HOLD_WAIT).is_empty());
+    }
+
+    #[test]
+    fn udp_follow_age_matches_c_receive_seq_rules() {
+        use super::{R2O_UDP_FOLLOW_WAIT, R2oUdpFollowTable};
+        let packet = udp_packet();
+        let now = Instant::now();
+        let mut follow = R2oUdpFollowTable::new();
+        assert!(follow.r2o_mark(&packet, now, None, 0));
+        assert_eq!(follow.r2o_stats().live, 1);
+        follow.r2o_age(now + R2O_UDP_FOLLOW_WAIT + Duration::from_millis(1), 0);
+        assert_eq!(follow.r2o_stats().live, 0);
+
+        // Тот же seq сохраняет запись; больший seq удаляет.
+        let now = Instant::now();
+        assert!(follow.r2o_mark(&packet, now, None, 10));
+        follow.r2o_age(now + R2O_UDP_FOLLOW_WAIT + Duration::from_millis(1), 10);
+        assert_eq!(follow.r2o_stats().live, 1);
+        follow.r2o_age(now + R2O_UDP_FOLLOW_WAIT + Duration::from_millis(1), 11);
+        assert_eq!(follow.r2o_stats().live, 0);
+    }
+
+    #[test]
     fn follow_stats_count_busy_and_only_the_first_permanent_refusal() {
         let packet = udp_packet();
         let mut follow = R2oUdpFollowTable::new();

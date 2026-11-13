@@ -86,10 +86,10 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 222 | 326 | 0 | 0 |
 | core-state | 692 | 182 | 509 | 0 | 0 |
-| datapath-core | 400 | 190 | 210 | 0 | 0 |
+| datapath-core | 400 | 193 | 207 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **869** | **1113** | **0** | **0** |
+| **Итого** | **1982** | **872** | **1110** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 869 / P 1113 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 872 / P 1110 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -346,10 +346,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 222 | 326 | 0 | 0 |
 | core-state | 692 | 188 | 504 | 0 | 0 |
-| datapath-core | 400 | 190 | 210 | 0 | 0 |
+| datapath-core | 400 | 193 | 207 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **869** | **1113** | **0** | **0** |
+| **Итого** | **1982** | **872** | **1110** | **0** | **0** |
 
 
 ---
@@ -4083,7 +4083,7 @@ R2O заменил структуру на `HashMap`, сохранив ключ,
 | `release_slot` (static) | 22–29 | 8 | `release(ctx,&batch)`, clear, вернуть count | `r2o_udp_hold.rs:212 r2o_flush`, `:228 r2o_drain`, `:198 r2o_take` | **P** | C вызывает release-callback и сам чистит слот; Rust возвращает `R2oUdpHoldBatch` вызывающему, который обязан отпустить ID. Семантика «release → clear» та же, владение и форма результата разные. |
 | `d2k_udp_hold_new` | 31-31 | 1 | создать таблицу UDP-удержания | `R2oUdpHoldTable::new` (`r2o_udp_hold.rs:147`) | **E** | C `calloc(1,sizeof(d2k_udp_hold))`, при OOM NULL. Rust `[None; 16]`/`Default`; обычный путь эквивалентен, OOM-ветвь иная. C-строка: `return calloc(1,sizeof(d2k_udp_hold));`; Rust `R2oUdpHoldTable::new`/`[None;16]`, OOM-ветвь иная. |
 | `d2k_udp_hold_free` | 33–39 | 7 | слить все занятые слоты, затем `free` | `r2o_drain` (`:228`) | **P** | C при free вызывает release-callback для каждого used-слота; Rust `r2o_drain` возвращает пачки, а `Drop` не отпускает NFQUEUE ID сам — это обязанность вызывающего. |
-| `d2k_udp_hold_flush` | 41–52 | 12 | `used && now>=deadline` → release, сумма count | `r2o_flush` (`:212`) | **P** | Условие deadline совпадает; C отпускает ID внутри и возвращает число, Rust возвращает `Vec<R2oUdpHoldBatch>` без вердиктов. Вызывающий `main.rs:1459/1570` отпускает пачки отдельно. |
+| `d2k_udp_hold_flush` | 41–52 | 12 | `used && now>=deadline` → release, сумма count | `r2o_udp_hold.rs` `r2o_flush` | E | C обходит слоты и для `used && now>=deadline` отпускает ID, возвращая число. Rust `r2o_flush(now)` забирает все пачки с `now>=deadline` и возвращает `Vec<R2oUdpHoldBatch>`; вызывающий отпускает ID/байты. Условие и набор освобождённых слотов те же. Тест `udp_hold_flush_releases_expired_batches_like_c` (до срока — пусто, на сроке — одна пачка, повтор — пусто). |
 | `d2k_udp_hold_feed` | 54-58 | 5 | обёртка `feed_marked(...,mark=0,...)` | `udp_hold` feed | **P** | C `d2k_udp_hold_feed_marked(h,key,id,packet,len,0,now,release,ctx)`. Rust передаёт mark явно; тонкая обёртка с тем же поведением при mark=0. |
 | `d2k_udp_hold_feed_marked` | 60–96 | 37 | валидация len 1..1600, flush истёкших, слот по ключу/свободный, переполнение 8, запись id/len/mark/packet | `:154 r2o_feed` (`R2O_UDP_HOLD_PACKETS=8`, max 1600) | **P** | **Отличия:** C сначала вызывает `d2k_udp_hold_flush`, Rust `r2o_feed` сам не flush-ит — это делает `main.rs:1570` перед feed; C при переполнении освобождает слот через callback и возвращает 0, Rust снимает слот и возвращает `Overflow(batch)`, который вызывающий обязан отпустить. Валидация len>1600 и ключа эквивалентна; пустой пакет Rust отвергает через `flow_key_from_packet`. Тестов `R2oUdpHoldTable` в файле нет (тесты `:830+` относятся к follow/deferred). |
 | `d2k_udp_hold_take` | 98–113 | 16 | забрать пачку по ключу, очистить слот; `now_ns` не используется | `:198 r2o_take` | **P** | C копирует `d2k_udp_hold_batch` и чистит слот; Rust возвращает `Option<R2oUdpHoldBatch>`, слот забирает через `Option::take`. Истёкшие слоты оба не трогают — C требует предварительного flush, Rust вызывает `r2o_flush` отдельно. |
@@ -4133,7 +4133,7 @@ R2O: `main.rs` (`r2o_release_udp_batch*`, `r2o_udp_handle_late_tail`),
 | `d2k_udp_path_pre` | 15–33 | 19 | flush истёкших, `session_udp_hold_begin`, `hold_feed_marked`; при отказе feed — `hold_end` | `main.rs:1560-1635` flush/release + begin_hold + feed | **P** | C: flush с release-callback → `hold_begin` → `feed_marked`; при отказе feed вызывает `hold_end`. Rust: `r2o_flush(now)` + `r2o_release_udp_batches`, затем `r2o_begin_hold` и `r2o_feed`; `Held` без собранного ClientHello делает `continue` без отката, `Overflow` отпускает пачку, `Refused` ничего; `hold_end` отсутствует. Логика близка, но ветви rollback/held-без-hello различаются. |
 | `d2k_udp_path_post` | 35–60 | 26 | `udp_hold_wait` → HELD/NORMAL; `udp_hold_ready` → take/replay → REPLAY, иначе LOST; `fed` → take/release → RECLAIMED | `main.rs:1600-2210` (late tail/replay/release) | **P** | C возвращает один из четырёх кодов и явно вызывает `hold_replay`/`hold_end`. Rust разносит это по веткам `PacketDecision`, `r2o_udp_handle_late_tail`, `r2o_mark_hold_replay_first` и `r2o_release_udp_batch`; отдельной функции с теми же четырьмя исходами нет. P — нужен differential на HELD/REPLAY/LOST/RECLAIMED. |
 | `d2k_udp_path_read` | 62–67 | 6 | `rseq++`, `seq=rseq`, `now_ns` | `main.rs:1340` `udp_receive_seq` | **P** | C инкрементирует `rseq` без защиты от нуля; Rust `wrapping_add(1).max(1)` — при переполнении C даёт `seq=0`, Rust `1`. На практике 64-битный счётчик не переполняется; отличие зафиксировано. |
-| `d2k_udp_path_expire` | 69–74 | 6 | `seq = read_follows ? rseq+1 : NONE`, flush по таймеру | `main.rs:1330-1345` flush + release + `follow.age` | **P** | C `D2K_UDP_SEQ_NONE` для отсутствия чтения; Rust `follow_receive_seq = received ? udp_receive_seq : 0`, затем `r2o_flush`/`r2o_release_udp_batches`/`r2o_age`. Семантика 0/NONE совпадает, но `max(1)` и порядок flush/release/age разнесены. |
+| `d2k_udp_path_expire` | 69–74 | 6 | `seq = read_follows ? rseq+1 : NONE`, flush по таймеру | `main.rs` `follow_receive_seq`, `r2o_udp_hold.rs` `r2o_age` | E | C `D2K_UDP_SEQ_NONE=0`: при отсутствии чтения передаёт 0, иначе `rseq+1`. Rust в `main.rs` ставит `follow_receive_seq = received ? udp_receive_seq : 0` и вызывает `r2o_age` с тем же сентинелом; `r2o_age` удаляет по сроку и seq-правилам. C-тест `test_udp_path.c:393`, Rust-тест `udp_follow_age_matches_c_receive_seq_rules`. |
 | `d2k_udp_path_passed` | 76–88 | 13 | пассивный проход: IPv4, len≥20, `udp_opening`, neutral, follow_mark(0,seq) | `main.rs:108 r2o_udp_mark_plain_pass` | **P** | Rust дополнительно требует `view.protocol==17` и `fragment & 0x3fff == 0` через `PacketView`, C проверяет только `len>=20` и версию IPv4; C `d2k_udp_out_neutral` и Rust `r2o_udp_packet_is_neutral` учитывают route/probe mark. `follow_mark(...,0,seq)` ↔ `follow.r2o_mark(packet, now, None, receive_seq)`. P. |
 | `d2k_udp_path_planned` | 90–97 | 8 | плановая посылка: те же проверки + follow_mark(at_ns,seq) | `main.rs:131 r2o_udp_mark_planned` | **P** | То же отличие proto/fragment; `at_ns` ↔ `Option<Instant> at`, `seq` ↔ `receive_seq`. Отдельного differential на planned-путь с `at` нет. |
 
@@ -4195,7 +4195,7 @@ R2O: `main.rs` (`r2o_release_udp_batch*`, `r2o_udp_handle_late_tail`),
 | `release_batch` (static) | 194-247 | 54 | общая выдача пачки: fates, fallback после отказа головы, marked → ACCEPT/defer, resend/owned, verdict, счётчики | `main.rs` `r2o_udp_out_batch` | **P** | **Ветви сверены:** C валидирует `b/verdict/count`; `!resend → can_resend=0, owned=0`; `replay_fates`; для каждого: при `again && vfail && !owned` → ACCEPT/fallback; `again && may && !may` → ACCEPT, при defer вызвать и continue; `again` → `resend(...)`; rr==1 → resent/continue (вердикт даст очередь), rr==0 → resent, иначе ACCEPT/fallback; `verdict` ошибка → vfail; возврат resent, vfail/fell_back. Rust `r2o_udp_out_batch`/`release_batch` те же правила; отдельной функции нет. |
 | `follow_stale` (static) | 272-275 | 4 | запись устарела: истёк срок, другая/более новая пачка | `r2o_match`/`r2o_age` (`r2o_udp_hold.rs:550-615`) | **E*** | C `if (now_ns < until_ns \|\| (e->seq && e->seq==seq)) return 0; return e->seq==0 \|\| (seq!=0 && e->seq<seq);` — запись без seq истекает только по сроку. Rust `r2o_match`/`r2o_age` используют ровно эти три условия; тест `follow_stats_and_age_match_d2o`. |
 | `follow_drop` (static) | 277-280 | 4 | погасить follow-запись и уменьшить `live` | `r2o_age` (`r2o_udp_hold.rs:602-615`) | **E** | C `e->used=0; if (f->live) f->live--;`. Rust `*slot=None`, `live.saturating_sub(1)`; эквивалентно. C-строка: `e->used=0; if (f->live) f->live--;`; Rust `*slot=None`, `live.saturating_sub(1)`. |
-| `d2k_udp_follow_age` | 282-287 | 6 | удалить устаревшие записи; обход останавливается при `live==0` | `r2o_udp_hold.rs:602-615 r2o_age` | **P** | C `for i<S>LOTS && f->live`, `used && follow_stale` → drop. Rust `r2o_age` проходит все слоты, удаляет stale, `live.saturating_sub`; ранней остановки по `live==0` нет. Набор удаляемых совпадает. |
+| `d2k_udp_follow_age` | 282-287 | 6 | удалить устаревшие записи; обход останавливается при `live==0` | `r2o_udp_hold.rs` `r2o_age` | E | C идёт по слотам, пока `live`, и удаляет `used && follow_stale`. Rust `r2o_age` обходит все слоты (пустые пропускаются), применяет то же условие `now>=until && !(seq match) && (entry.seq==0 || seq>entry.seq)` и уменьшает `live`. Набор удалённых записей тот же. Тест `udp_follow_age_matches_c_receive_seq_rules` (0/совпавший/больший seq). |
 | `d2k_udp_follow_live` | 289-289 | 1 | число живых follow-записей | `R2oUdpFollowStats.live` (`:490-497`) | **E** | C `return f ? f->live : 0`. Rust `r2o_stats().live`; прямой getter, тест `follow_stats_*`. C-строка: `return f ? f->live : 0;`; Rust `r2o_stats().live`; тест `follow_stats_*`. |
 | `d2k_udp_follow_busy` | 290-290 | 1 | счётчик busy повторной отправки | `R2oUdpFollowStats.busy` | **E** | C `return f ? f->busy : 0`; Rust `r2o_stats().busy`; тест `follow_stats_*`. C-строка: `return f ? f->busy : 0;`; Rust `r2o_stats().busy`; тест `follow_stats_*`. |
 | `d2k_udp_follow_queue_full` | 291-291 | 1 | счётчик отказов полной очереди | `R2oUdpFollowStats.queue_full` | **E** | C `return f ? f->queue_full : 0`; Rust `r2o_stats().queue_full`; тест `follow_stats_*`. C-строка: `return f ? f->queue_full : 0;`; Rust `r2o_stats().queue_full`; тест `follow_stats_*`. |
