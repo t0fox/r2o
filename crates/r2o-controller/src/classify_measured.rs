@@ -467,6 +467,14 @@ mod segment_tests {
         assert_eq!(segment_max(), 1200);
         set_segment_max(before);
     }
+
+    #[test]
+    fn checked_text_cap_and_hex_match_c_append_limits() {
+        // C `append_fmt`: `n >= cap-pos` отвергается; итоговый предел 8191.
+        assert!(super::checked_text("a".repeat(super::MAX_TEXT - 1)).is_ok());
+        assert!(super::checked_text("a".repeat(super::MAX_TEXT)).is_err());
+        assert_eq!(super::hex(&[0x00, 0x0f, 0xab, 0xff]), "000fabff");
+    }
 }
 
 fn checked_text(text: String) -> Result<String, String> {
