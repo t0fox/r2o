@@ -84,12 +84,12 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 225 | 323 | 0 | 0 |
+| core-net | 548 | 226 | 322 | 0 | 0 |
 | core-state | 692 | 182 | 509 | 0 | 0 |
 | datapath-core | 400 | 217 | 183 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **918** | **1064** | **0** | **0** |
+| **Итого** | **1982** | **919** | **1063** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 918 / P 1064 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 919 / P 1063 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,12 +344,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 225 | 323 | 0 | 0 |
+| core-net | 548 | 226 | 322 | 0 | 0 |
 | core-state | 692 | 207 | 485 | 0 | 0 |
 | datapath-core | 400 | 217 | 183 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **918** | **1064** | **0** | **0** |
+| **Итого** | **1982** | **919** | **1063** | **0** | **0** |
 
 
 ---
@@ -488,7 +488,7 @@ Rust-владелец: `crates/r2o-controller/src/hello.rs` (почти пост
 | `hex_nibble` | 462-473 | 12 | hex-цифра → значение, иначе -1 | `hello.rs` `hex_nibble` | E | C helper для чистого hex (`0-9a-fA-F`, иначе -1). Rust `hex_nibble(u8) -> Option<u8>` даёт те же значения и используется в `decode_profile`; тест `hex_nibble_matches_c` (0,9,a,F,g,NUL,пробел). |
 | `hex_decode` | 480-498 | 19 | чётная длина, `n<=cap`, hex → байты; -1 при ошибке | `hello.rs:501-517 decode_profile` | **P** | C: нечётная длина/`n>cap`/невалидный nibble → -1, комментарии и пробелы не допускает. Rust: режет каждую строку по `#`, удаляет ASCII-пробелы, проверяет чётность и `<=4096`, затем `to_digit(16)` → `None` при ошибке. Для сгенерированных C-профилей и `include_str!`-профилей R2O байты совпадают; API `Vec`/`Option` вместо кода. |
 | `d2k_hello_rename` | 500-535 | 36 | обернуть CH в TLS-запись, `splice_sni`, вернуть тело; `n>0xffff` или `n+5>4096` → -1 | `hello.rs:439 rename_sni`, `:482 locate_sni_for_record` | **P** | C принимает **тело** ClientHello, оборачивает в запись `16 03 01`, вызывает `splice_sni` и возвращает тело; проверяет `n<=0xffff`, `n+5<=4096`, непустое имя, `slen>=5`, `slen-5<=cap`. Rust `rename_sni` принимает запись, проверяет имя (непустое, без NUL), `bytes.len()<=4096`, обновляет те же 6 длин и валидирует результат; `locate_sni_for_record` для записи длиннее рукопожатия разбирает префикс и сохраняет хвост. Для полного CH с записью результат эквивалентен; unit/differential на `rename` нет. |
-| `d2k_hello_without_sni` | 537-576 | 40 | требует complete/!truncated/have_exts/have_sni; удаляет server_name, обновляет ext/hs/rec | `r2k-core/src/quic.rs:1113 r2k_quic_client_hello_rename_sni(..., None)` | **P** | C принимает **тело** CH, оборачивает в запись, требует `parsed && complete && !exts_truncated && have_exts && have_sni`, проверяет `sni_ext_off+ext_len` против записи/расширений/handshake, удаляет расширение, обновляя `exts_len`/`hs_len`/`rec_len`, возвращает тело. Rust `r2k_quic_client_hello_rename_sni(..., None)` принимает тело CH (`bytes[0]==1`, длина handshake точная), удаляет `extension_start..extension_end`, обновляет `extensions_len`/`handshake_len`; без SNI возвращает копию. Для тела результат совпадает, но **TLS-обёртки записи и вызова из TLS-пути нет** (функция в модуле QUIC, используется только bridge-clone fixture). P. |
+| `d2k_hello_without_sni` | 537-576 | 40 | требует complete/!truncated/have_exts/have_sni; удаляет server_name, обновляет ext/hs/rec | `r2k-core/quic.rs` `r2k_quic_client_hello_rename_sni(..., None)` | E | C принимает тело ClientHello, оборачивает в TLS-запись, требует complete/!truncated/have_exts/have_sni, проверяет границы SNI-расширения и после удаления обновляет длины расширений/handshake/record; без SNI — отказ. Rust `r2k_quic_client_hello_rename_sni(bytes, None)` удаляет server_name из handshake (4-байтный заголовок вместо record-обёртки), пересчитывает extensions/handshake длины, идемпотентен при повторном удалении и отвергает добавление SNI в hello без SNI. Тест `переименовывает_или_удаляет_sni_с_пересчётом_длин_clienthello`. |
 | `d2k_hello_from_profile` | 578-609 | 32 | modern/legacy профиль → `splice_sni`; UNKNOWN → -1 | `hello.rs:549-598 client_hello_from_profile` + `legacy/modern_client_hello` | **E** | C: `sni/out/out_len` не NULL, имя непустое; modern/legacy decode, `tmpl_len!=0`, `splice_sni`. Rust: имя непустое/без NUL/`<=u16::MAX`; `decode_profile`; `locate_sni`; `new_len<=4096`; шесть длин; валидация результата. C-профили modern/legacy и R2O `include_str!` дают те же байты (unit `shape_distinguishes_modern_and_legacy_profiles`, тесты профилей); Rust дополнительно имеет профиль `r2o_rx_fake`, которого в C нет. E. |
 
 ## core/tls12.c (26 функций)
