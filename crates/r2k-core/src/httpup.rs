@@ -514,3 +514,25 @@ fn build_redirect(host: &[u8], target: &[u8]) -> Option<Vec<u8>> {
     );
     Some(response)
 }
+
+#[cfg(test)]
+mod dns_host_tests {
+    use super::valid_dns_host;
+
+    #[test]
+    fn dns_host_matches_c() {
+        assert!(valid_dns_host(b"example.com"));
+        assert!(valid_dns_host(b"a"));
+        assert!(valid_dns_host(b"a-b.c-d"));
+        assert!(valid_dns_host(&[b'a'; 63]));
+        assert!(!valid_dns_host(b""));
+        assert!(!valid_dns_host(b".example.com"));
+        assert!(!valid_dns_host(b"example.com."));
+        assert!(!valid_dns_host(b"exa..mple"));
+        assert!(!valid_dns_host(b"-a.example"));
+        assert!(!valid_dns_host(b"a-.example"));
+        assert!(!valid_dns_host(b"a_b.example"));
+        assert!(!valid_dns_host(&[b'a'; 64]));
+        assert!(!valid_dns_host(&[b'a'; 254]));
+    }
+}

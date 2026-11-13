@@ -23698,11 +23698,34 @@ fn random_id() -> std::io::Result<[u8; 16]> {
     use std::io::Read;
 
     let mut id = [0; 16];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut id)?;
-    if id.iter().all(|byte| *byte == 0) {
-        id[0] = 1;
+    let read = std::fs::File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut id))
+        .is_ok();
+    if !read {
+        id = r2o_fresh_id_fallback();
     }
+    // C `fresh_id`: нулевой идентификатор означает «нет идентичности».
+    id[0] |= 1;
     Ok(id)
+}
+
+/// C `fresh_id` fallback: `mono_ms ^ (++ctr * 0x9e3779b97f4a7c15)`, затем LCG.
+#[cfg(unix)]
+fn r2o_fresh_id_fallback() -> [u8; 16] {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static CTR: AtomicU64 = AtomicU64::new(0);
+    let ctr = CTR.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+    let mono = r2o_controller::now_ms::d2k_now_ms() as u64;
+    let mut h = mono ^ ctr.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    let mut id = [0_u8; 16];
+    for byte in &mut id {
+        h = h
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *byte = (h >> 56) as u8;
+    }
+    id
 }
 
 fn r2o_quic_binding_blocks_retry(binding_exists: bool, planned: bool) -> bool {
@@ -23720,6 +23743,19 @@ mod tests {
         assert_eq!(cache.test_add_failures("live.example", 4, 1), 0);
         let added = cache.test_add_records(500);
         assert!(added > 0 && added < 500);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fresh_id_matches_c_nonzero_and_random() {
+        let first = super::random_id().unwrap();
+        let second = super::random_id().unwrap();
+        assert_ne!(first, second);
+        assert_ne!(first[0] & 1, 0);
+        assert_ne!(second[0] & 1, 0);
+        let fallback_a = super::r2o_fresh_id_fallback();
+        let fallback_b = super::r2o_fresh_id_fallback();
+        assert_ne!(fallback_a, fallback_b);
     }
 
     #[cfg(unix)]
