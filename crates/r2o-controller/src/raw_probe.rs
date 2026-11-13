@@ -2393,6 +2393,20 @@ fn timestamp_options(server_timestamp: u32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn trigger_timestamp_helpers_match_c() {
+        let plain = super::Poison::default();
+        let tcp_ts = super::Poison {
+            tcp_ts: true,
+            ..super::Poison::default()
+        };
+        assert!(super::raw_profile_allows(&plain, false));
+        assert!(!super::raw_profile_allows(&tcp_ts, false));
+        assert!(super::raw_profile_allows(&tcp_ts, true));
+        assert!(super::raw_offer_timestamps(Some(true)));
+        assert!(!super::raw_offer_timestamps(Some(false)));
+    }
+
+    #[test]
     fn parse_rst_rule_accepts_d2o_and_r2o_owner_tags() {
         let legacy = "-A OUTPUT -p tcp -m tcp --sport 40123 --tcp-flags RST RST -j DROP";
         assert_eq!(super::parse_stale_rst_rule(legacy), Some(40_123));
