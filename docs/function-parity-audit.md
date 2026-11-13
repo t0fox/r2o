@@ -89,7 +89,7 @@ recheck 1982 1982 equal True
 | datapath-core | 400 | 182 | 218 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **837** | **1145** | **0** | **0** |
+| **Итого** | **1982** | **840** | **1142** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 837 / P 1145 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 840 / P 1142 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -345,11 +345,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 204 | 344 | 0 | 0 |
-| core-state | 692 | 182 | 510 | 0 | 0 |
+| core-state | 692 | 185 | 507 | 0 | 0 |
 | datapath-core | 400 | 182 | 218 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **837** | **1145** | **0** | **0** |
+| **Итого** | **1982** | **840** | **1142** | **0** | **0** |
 
 
 ---
@@ -2175,7 +2175,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `number` | 131-131 | 1 | `<0` → `null`, иначе число | serde_json `Value`/`Option` | **P*** | C `v<0 ? "null" : "%lld"`. Rust для счётчиков `u64` и `Option` сериализует `null`/число; отрицательных счётчиков нет, семантика та же. |
 | `d2k_diag_new` | 132-132 | 1 | создать диагностическийリング (calloc) | `diagnostics::Recorder::new` | **P*** | C `calloc(1,sizeof(d2k_diag))` (структура ≤256 КиБ, проверено `bounded_ring`). Rust `Recorder::default/new`; отдельной функции нет. |
 | `d2k_diag_free` | 133-133 | 1 | освободить диагностику | `Drop` (`Recorder`, `diagnostics.rs:684-714`) | **P*** | C `free(d)`. Rust `Recorder` владеет `VecDeque` колец/истории и `HashMap` деталей; освобождение при `Drop`, отдельной функции нет. |
-| `d2k_diag_bytes` | 134-134 | 1 | размер структуры диагностики | `size_of::<Recorder>()` | **P*** | C `d ? sizeof *d : 0`; Rust `size_of` структуры `Recorder`; значение попадает в `ring_bytes` отчёта. Состав полей Rust иной (VecDeque/HashMap вместо массивов), поэтому число не совпадает побайтово. |
+| `d2k_diag_bytes` | 134-134 | 1 | размер структуры диагностики | `diagnostics.rs` `d2o_ring_bytes` | E | C `d ? sizeof *d : 0`. Rust `d2o_ring_bytes()` возвращает `size_of::<Recorder>()`, значение попадает в `ring_bytes` отчёта; тест `assert_eq!(report["ring_bytes"], d2o_ring_bytes())`. Точное число зависит от раскладки своей структуры, как и в C. |
 | `d2k_diag_event_count` | 135-135 | 1 | число событий в кольце | `Recorder.events.len()` (`diagnostics.rs:299,728`) | **P*** | C `d ? d->ne : 0`, `ne` растёт до `EVENTS=64`. Rust `events: VecDeque` с `EVENT_CAPACITY=64`, `len()`; при вытеснении `pop_front` длина остаётся 64. |
 | `d2k_diag_sample_count` | 136-136 | 1 | число сэмплов | `Recorder.samples.len()` (`diagnostics.rs:301,729`) | **P*** | C `return d ? d->ns : 0`, `ns` растёт до `SAMPLES=120`. Rust `samples: VecDeque` с `SAMPLE_CAPACITY=120`, `len()`; вытеснение `pop_front`. |
 | `d2k_diag_memory_history_count` | 137-137 | 1 | число записей истории памяти | `Recorder.memory_history.len()` | **P*** | C `return d ? d->nm : 0`, до `MEMORY_HISTORY=1440`. Rust `memory_history: VecDeque` с `MEMORY_HISTORY_CAPACITY=1440`, `pop_front` при переполнении. |
@@ -2251,8 +2251,8 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `execution_context` | 45–51 | 7 | пустой хвост → 0 (id/binding не измерены); иначе ровно **36 байт**: execution_id BE p[0..8], binding p[8..36] (`D2K_CTL_EXECUTION_LEN=36`, `D2K_CTL_BINDING_LEN=28`); ошибка при неверной длине/чтении binding | `control::decode_applied/decode_refused` + `BindingContext` (`EXECUTION_CONTEXT_LEN=36`) | **E*** | **Точное совпадение:** C `n==0` → 0; `n != 36` или `d2k_ctl_binding_read(...,p+8,28)` → -1; execution_id — 8 байт BE (`link.c:45-51`, `d2k_ctl.h:83,85`). Rust `EXECUTION_CONTEXT_LEN=36`, декодеры APPLIED/REFUSED читают те же 8+28 байт (`control.rs:183`, `execution_context`); `d2o_control_differential`. |
 | `say` | 56-64 | 9 | записать причину в `err[cap]` через `vsnprintf` | `format!`/`String` | **P*** | C `if (!err \|\| cap == 0) return; va_start; vsnprintf(err,cap,fmt,ap); va_end`. Rust возвращает `String`/`Result`; отдельной функции с буфером нет, тексты не сверялись. |
 | `wait_readable` | 70–86 | 17 | `poll(POLLIN)` с повтором на EINTR; `ms<0` — бесконечно, `0` — без ожидания; 0/таймаут, >0/данные, -1/ошибка | `wait_for_control_frame`/`poll` (`main.rs:19901-19907`), `wait_for_command_ack` | **P*** | C вызывает `poll` с точным `ms` и повторяет при EINTR, различая таймаут/данные/ошибку (`link.c:70-86`). Rust-ожидание кадра (`wait_for_control_frame`) использует poll/таймаут частями (≤100 мс) и `read_optional_frame`; семантика «данные/таймаут» сохраняется, но бюджет дробится и EINTR обрабатывается стандартной библиотекой. Отдельного differential нет. |
-| `read_exact` | 92–106 | 15 | дочитать ровно N байт: `recv` в цикле, EINTR повтор, 0/ошибка → -1 | `Read::read_exact` | **P*** | C `recv`-цикл добирает ровно `n`, повторяет при EINTR, при 0 или ошибке возвращает -1 (`link.c:92-106`). Rust `Read::read_exact` также ретраит `Interrupted`, но на EOF даёт `UnexpectedEof`; семантика «строго N или ошибка» совпадает. Отдельного differential нет. |
-| `write_all` | 108–131 | 24 | дописать всё: `send` в цикле, `MSG_NOSIGNAL`/`SO_NOSIGPIPE`, EINTR повтор | `Write::write_all` (std `UnixStream`) | **P*** | C выставляет `MSG_NOSIGNAL` (или `SO_NOSIGPIPE`) и дописывает `send`-циклом с повтором EINTR, чтобы обрыв датапата не убил процесс SIGPIPE (`link.c:108-131`). Rust `UnixStream::write_all` на Linux использует `MSG_NOSIGNAL` внутри std и ретраит `Interrupted`; отдельной настройки `SO_NOSIGPIPE` нет (не требуется). Семантика «всё или ошибка» совпадает. |
+| `read_exact` | 92–106 | 15 | дочитать ровно N байт: `recv` в цикле, EINTR повтор, 0/ошибка → -1 | `Read::read_exact` (`main.rs:15757,15766`) | E | C `recv`-цикл добирает ровно `n`, повторяет EINTR, при 0/ошибке -1. Rust `Read::read_exact` ретраит `Interrupted` и на коротком потоке даёт `UnexpectedEof`; используется в чтении control-фреймов. Тест `read_exact_and_write_all_match_c_link_io` (Interrupted + две части, короткий поток). |
+| `write_all` | 108–131 | 24 | дописать всё: `send` в цикле, `MSG_NOSIGNAL`/`SO_NOSIGPIPE`, EINTR повтор | `Write::write_all` (`main.rs:4341`) | E | C ставит `MSG_NOSIGNAL` и дописывает `send`-циклом с повтором EINTR. Rust `UnixStream::write_all` на Linux использует `MSG_NOSIGNAL` внутри std, ретраит `Interrupted` и дописывает короткие записи; тест `read_exact_and_write_all_match_c_link_io`. |
 | `hex_nibble` | 133–138 | 6 | `0-9` → 0..9, `a-f`/`A-F` → 10..15, иначе -1 | `plan_text::hex_nibble`/`u8::is_ascii_hexdigit` | **E*** | **Точное совпадение:** C возвращает `c-'0'`, `c-'a'+10`, `c-'A'+10`, иначе -1 (`link.c:133-138`); Rust `hex_nibble`/`is_ascii_hexdigit` принимает тот же набор ASCII-цифр. Используется в разборе планов; покрыто plan_text/дифференциалами. |
 | `hex_decode` | 144–159 | 16 | hex-пары в байты, ошибка на недопустимом символе/переполнении `outcap`; нечётную длину проверяет вызывающий | `plan_text::decode_hex`/`compile_text` | **P*** | C идёт парами, проверяет обе цифры и `n < outcap`, возвращает число байт или -1; нечётный хвост молча игнорируется (`hex[1]` == 0) (`link.c:144-159`). Rust `decode_hex`/`compile_text` отвергает не-Hex и нечётную длину; для вызовов, где чётность уже проверена (`send_name_plan`, `set_addr`), результат совпадает. Отдельного differential нет. |
 | `d2k_link_open` | 161–189 | 29 | AF_UNIX SOCK_STREAM: пустой путь/путь ≥ `sun_path` → ошибка, блокирующий `connect` | `ControlClient::connect`/`UnixStream::connect` (`main.rs`) | **P** | C проверяет непустой путь и `strlen < sizeof(sun_path)`, создаёт `AF_UNIX/SOCK_STREAM` и блокирующе зовёт `connect` (`link.c:161-189`). Rust использует `UnixStream::connect(path)`; пустой/слишком длинный путь отвергает ОС/`io::Error`, отдельной проверки `sun_path` нет. Для штатного сокета эквивалентно; C/Rust differential на ошибки connect/длину пути нет. |

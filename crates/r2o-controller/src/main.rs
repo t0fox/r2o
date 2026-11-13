@@ -23758,6 +23758,73 @@ mod tests {
         assert_ne!(fallback_a, fallback_b);
     }
 
+    #[test]
+    fn read_exact_and_write_all_match_c_link_io() {
+        use std::io::{Cursor, ErrorKind, Read, Write};
+
+        struct ChunkedReader {
+            chunks: Vec<Result<&'static [u8], ErrorKind>>,
+        }
+        impl Read for ChunkedReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.chunks.is_empty() {
+                    return Ok(0);
+                }
+                match self.chunks.remove(0) {
+                    Ok(chunk) => {
+                        let n = chunk.len().min(buf.len());
+                        buf[..n].copy_from_slice(&chunk[..n]);
+                        Ok(n)
+                    }
+                    Err(kind) => Err(std::io::Error::new(kind, "test")),
+                }
+            }
+        }
+
+        // C `read_exact`: EINTR повторяется, короткий поток — ошибка.
+        let mut reader = ChunkedReader {
+            chunks: vec![Err(ErrorKind::Interrupted), Ok(&[1, 2]), Ok(&[3, 4])],
+        };
+        let mut buf = [0u8; 4];
+        reader.read_exact(&mut buf).unwrap();
+        assert_eq!(buf, [1, 2, 3, 4]);
+
+        let mut short = Cursor::new(vec![1u8, 2]);
+        let mut small = [0u8; 3];
+        assert_eq!(
+            short.read_exact(&mut small).unwrap_err().kind(),
+            ErrorKind::UnexpectedEof
+        );
+
+        struct ChunkedWriter {
+            chunks: Vec<Result<usize, ErrorKind>>,
+            written: Vec<u8>,
+        }
+        impl Write for ChunkedWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                match self.chunks.remove(0) {
+                    Err(kind) => Err(std::io::Error::new(kind, "test")),
+                    Ok(limit) => {
+                        let n = limit.min(buf.len());
+                        self.written.extend_from_slice(&buf[..n]);
+                        Ok(n)
+                    }
+                }
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        // C `write_all`: EINTR повторяется, короткие записи дописываются.
+        let mut writer = ChunkedWriter {
+            chunks: vec![Err(ErrorKind::Interrupted), Ok(1), Ok(2), Ok(3)],
+            written: Vec::new(),
+        };
+        writer.write_all(b"abcdef").unwrap();
+        assert_eq!(writer.written, b"abcdef");
+    }
+
     #[cfg(unix)]
     use super::locked_catalog;
     #[cfg(unix)]
