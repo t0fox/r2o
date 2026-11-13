@@ -2795,6 +2795,11 @@ fn r2o_tcp_counters(stream: &TcpStream) -> R2oTcpCounters {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub fn r2o_verify_tcp_data_packets(stream: &TcpStream) -> i64 {
+    r2o_tcp_counters(stream).data_packets.map_or(-1, i64::from)
+}
+
 fn r2o_http_connection_closes(headers: &[u8]) -> bool {
     headers
         .split(|byte| *byte == b'\n')
@@ -4703,6 +4708,7 @@ mod tests {
 
         let counters = r2o_tcp_counters(&stream);
         assert!(counters.data_packets.is_none_or(|packets| packets >= 2));
+        assert!(r2o_verify_tcp_data_packets(&stream) >= 2);
     }
 
     #[test]
