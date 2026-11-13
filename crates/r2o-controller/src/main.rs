@@ -20,11 +20,12 @@ use r2k_core::control::{
     decode_r2o_tcp_fin_retry, decode_r2o_tcp_repeat, decode_r2o_tcp_rst_after_app,
     decode_r2o_tcp_rst_cut_signal, decode_r2o_tcp_silence, decode_r2o_tcp_stall,
     decode_r2o_voice_proof, decode_r2o_voice_suspect, decode_refused, encode_arm_shape,
-    encode_delete_addr, encode_delete_addr_probe, encode_delete_name, encode_delete_name_bound,
-    encode_delete_name_probe, encode_delete_voice_addr_probe, encode_set_addr,
-    encode_set_addr_probe, encode_set_bypass, encode_set_https, encode_set_name,
-    encode_set_name_bound, encode_set_name_probe, encode_set_suffix, encode_set_tcp_stall_budgets,
-    encode_set_voice_addr, encode_set_voice_addr_probe, read_frame,
+    encode_delete_addr, encode_delete_addr_probe, encode_delete_bypass, encode_delete_name,
+    encode_delete_name_bound, encode_delete_name_probe, encode_delete_suffix,
+    encode_delete_voice_addr_probe, encode_set_addr, encode_set_addr_probe, encode_set_bypass,
+    encode_set_https, encode_set_name, encode_set_name_bound, encode_set_name_probe,
+    encode_set_suffix, encode_set_tcp_stall_budgets, encode_set_voice_addr,
+    encode_set_voice_addr_probe, read_frame,
 };
 use r2k_core::plan::{PROTO_HTTP, PROTO_VOICE, Plan};
 use r2o_controller::ask::{
@@ -24174,6 +24175,54 @@ mod tests {
         assert_eq!(shape("example.com", true, false), super::SHAPE_MODERN);
         assert_eq!(shape("example.com", false, false), super::SHAPE_LEGACY);
         assert_eq!(shape("example.com", true, true), super::SHAPE_ECH_TCP);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn area_commands_append_identity_like_c() {
+        use super::control_frame_with_area_id;
+        use r2k_core::control::{COMMAND_SET_SUFFIX, WireProfile, read_frame};
+
+        let r2op = compile_text(
+            "r2o-plan 1 8\nproto tcp tls\npayload 1 00\npoison 1 tsup\nfake payload=1 poison=1 repeats=1 gap_us=0 place=before\n",
+        )
+        .unwrap();
+        let d2kp = super::r2o_plan_records_for_profile(WireProfile::V22, &r2op).unwrap();
+
+        let base = super::encode_set_suffix("example.test", super::SHAPE_MODERN, 4, &d2kp).unwrap();
+        let frame = read_frame(&mut std::io::Cursor::new(&base)).unwrap();
+        assert_eq!(frame.kind, COMMAND_SET_SUFFIX);
+        assert_eq!(frame.body[0], 12);
+        assert_eq!(&frame.body[1..13], b"example.test");
+        assert_eq!(&frame.body[13..15], &[super::SHAPE_MODERN, 4]);
+        assert!(frame.body.ends_with(&d2kp));
+
+        let id = [0x5a; 16];
+        let identified = control_frame_with_area_id(&base, id).unwrap();
+        assert_eq!(
+            u32::from_be_bytes(identified[..4].try_into().unwrap()) as usize,
+            identified.len() - 4
+        );
+        assert_eq!(&identified[4..identified.len() - 16], &base[4..]);
+        assert_eq!(&identified[identified.len() - 16..], &id);
+
+        // C `d2k_link_set_suffix_family` без identity шлёт 16 нулевых байт.
+        let zeros = control_frame_with_area_id(&base, [0; 16]).unwrap();
+        assert_eq!(&zeros[zeros.len() - 16..], &[0; 16]);
+
+        for command in [
+            super::encode_delete_suffix("example.test", 6, super::SHAPE_MODERN, 4).unwrap(),
+            super::encode_set_bypass("example.test", 6, super::SHAPE_MODERN, 4).unwrap(),
+            super::encode_delete_bypass("example.test", 6, super::SHAPE_MODERN, 4).unwrap(),
+        ] {
+            let identified = control_frame_with_area_id(&command, id).unwrap();
+            assert_eq!(
+                u32::from_be_bytes(identified[..4].try_into().unwrap()) as usize,
+                identified.len() - 4
+            );
+            assert_eq!(&identified[4..identified.len() - 16], &command[4..]);
+            assert_eq!(&identified[identified.len() - 16..], &id);
+        }
     }
 
     #[cfg(unix)]
