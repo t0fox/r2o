@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 226 | 322 | 0 | 0 |
-| core-state | 692 | 253 | 439 | 0 | 0 |
+| core-state | 692 | 256 | 436 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **967** | **1015** | **0** | **0** |
+| **Итого** | **1982** | **970** | **1012** | **0** | **0** |
 
-Это не оценка паритета: 1015 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 1012 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 967 / P 1015 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 970 / P 1012 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 226 | 322 | 0 | 0 |
-| core-state | 692 | 253 | 439 | 0 | 0 |
+| core-state | 692 | 256 | 436 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **967** | **1015** | **0** | **0** |
+| **Итого** | **1982** | **970** | **1012** | **0** | **0** |
 
 
 ---
@@ -2171,12 +2171,12 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `copy` | 98-104 | 7 | копия в `cap`, обрезка до `cap-1`, откат с continuation-байта UTF-8 | `diagnostics::truncate_utf8` (`:1313`) | **P*** | C `s? s:""`; `n=strlen`, `n>=cap → cap-1`; `while(n && (s[n]&0xc0)==0x80) n--` (не режет многобайтовый символ); `memcpy`/NUL. Rust `truncate_utf8` использует `is_char_boundary` — тот же результат для валидного UTF-8. Пределы полей задаёт вызывающий. |
 | `js` | 105-130 | 26 | JSON-строка: `"`/`\\`, `\\n`, control→`?`, валидный UTF-8 как есть, иначе `\\ufffd` | serde_json + `d2o_event_text` (`:1324`) | **P*** | **Ветви сверены:** C `"` и `\` экранируются; `\n` → `\\n`; `<32` → `?`; `<0x80` как есть; иначе проверка 2/3/4-байтного UTF-8 (`0xc2..0xf4`, continuation, overlong/surrogate/>0x10ffff), валидный — как есть, иначе `\ufffd`. Rust строки всегда валидны, `d2o_event_text` режет по NUL и control→`?`; для валидных строк эквивалентно, raw-байты вне UTF-8 Rust не получает. |
 | `number` | 131-131 | 1 | `<0` → `null`, иначе число | serde_json `Value`/`Option` | **P*** | C `v<0 ? "null" : "%lld"`. Rust для счётчиков `u64` и `Option` сериализует `null`/число; отрицательных счётчиков нет, семантика та же. |
-| `d2k_diag_new` | 132-132 | 1 | создать диагностическийリング (calloc) | `diagnostics::Recorder::new` | **P*** | C `calloc(1,sizeof(d2k_diag))` (структура ≤256 КиБ, проверено `bounded_ring`). Rust `Recorder::default/new`; отдельной функции нет. |
+| `d2k_diag_new` | 132-132 | 1 | создать диагностическийリング (calloc) | `diagnostics::Recorder::new` | E | C `calloc(1,sizeof(d2k_diag))` — все кольца и счётчики нулевые. Rust `Recorder::new` создаёт пустые `VecDeque` (events/samples/limits/memory_history/anomalies) и нулевые счётчики; тест `recorder_toggles_memory_tracking_with_enabled_file` проверяет исходное состояние. |
 | `d2k_diag_free` | 133-133 | 1 | освободить диагностику | `Drop` (`Recorder`, `diagnostics.rs:684-714`) | **P*** | C `free(d)`. Rust `Recorder` владеет `VecDeque` колец/истории и `HashMap` деталей; освобождение при `Drop`, отдельной функции нет. |
 | `d2k_diag_bytes` | 134-134 | 1 | размер структуры диагностики | `diagnostics.rs` `d2o_ring_bytes` | E | C `d ? sizeof *d : 0`. Rust `d2o_ring_bytes()` возвращает `size_of::<Recorder>()`, значение попадает в `ring_bytes` отчёта; тест `assert_eq!(report["ring_bytes"], d2o_ring_bytes())`. Точное число зависит от раскладки своей структуры, как и в C. |
 | `d2k_diag_event_count` | 135-135 | 1 | число событий в кольце | `Recorder.events.len()` | E | C `d ? d->ne : 0`, `ne` растёт до `EVENTS=64`. Rust `events: VecDeque` с `EVENT_CAPACITY=64`; тест `record_event_ring_and_text_limits_match_c` записывает 70 событий: len=64, первые вытеснены, `event_total=70`. |
-| `d2k_diag_sample_count` | 136-136 | 1 | число сэмплов | `Recorder.samples.len()` (`diagnostics.rs:301,729`) | **P*** | C `return d ? d->ns : 0`, `ns` растёт до `SAMPLES=120`. Rust `samples: VecDeque` с `SAMPLE_CAPACITY=120`, `len()`; вытеснение `pop_front`. |
-| `d2k_diag_memory_history_count` | 137-137 | 1 | число записей истории памяти | `Recorder.memory_history.len()` | **P*** | C `return d ? d->nm : 0`, до `MEMORY_HISTORY=1440`. Rust `memory_history: VecDeque` с `MEMORY_HISTORY_CAPACITY=1440`, `pop_front` при переполнении. |
+| `d2k_diag_sample_count` | 136-136 | 1 | число сэмплов | `Recorder.samples.len()` | E | C `d ? d->ns : 0`, `ns` растёт до `SAMPLES=120`. Rust `samples: VecDeque` с `SAMPLE_CAPACITY=120`; тест `recorder_toggles_memory_tracking_with_enabled_file` после двух tick даёт len=2, после выключения кольцо очищается. |
+| `d2k_diag_memory_history_count` | 137-137 | 1 | число записей истории памяти | `Recorder.memory_history.len()` | E | C `d ? d->nm : 0`, до `MEMORY_HISTORY=1440`. Rust `memory_history: VecDeque` с `MEMORY_HISTORY_CAPACITY=1440`; тест `recorder_toggles_memory_tracking_with_enabled_file` после двух tick даёт len=2, после выключения кольцо очищается. |
 | `d2k_diag_memory_enable` | 138-138 | 1 | включить учёт аллокаций | `diagnostics::memory_enable` | E | C `__atomic_store_n(&memory_collection, enabled!=0, RELEASE)`; Rust `MEMORY_ENABLED.store(enabled, Release)`. Тест `memory_tracking_branches_match_c` переключает флаг и проверяет блокировку acquire/alloc_failure. |
 | `d2k_diag_memory_active` | 139-139 | 1 | включён ли учёт аллокаций | `memory_active()` | E | C `__atomic_load_n(&memory_collection, RELAXED) != 0`; Rust `MEMORY_ENABLED.load(Relaxed)`. Тест `memory_tracking_branches_match_c` проверяет оба состояния. |
 | `atomic_read` | 140-140 | 1 | атомарное чтение счётчика | `AtomicU64::load` в `memory_snapshot` | E | C `__sync_fetch_and_add(...,0)` — атомарное чтение без изменения; Rust `AtomicU64::load(Acquire)` в `memory_snapshot`. Тест `memory_tracking_branches_match_c` сверяет снимок с ожидаемыми live/objects/created/destroyed/alloc_failures. |

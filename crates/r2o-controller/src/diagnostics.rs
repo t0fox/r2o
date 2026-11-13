@@ -2027,11 +2027,32 @@ mod tests {
             .unwrap();
 
         let mut recorder = Recorder::new(diag.clone(), run);
+        // C `d2k_diag_new` = calloc: пустые кольца и нулевые счётчики.
+        assert!(recorder.events.is_empty());
+        assert!(recorder.samples.is_empty());
+        assert!(recorder.memory_history.is_empty());
+        assert!(recorder.limits.is_empty());
+        assert!(recorder.anomalies.is_empty());
+        assert_eq!(recorder.event_total, 0);
+        assert_eq!(recorder.sample_total, 0);
+        assert_eq!(recorder.memory_total, 0);
+
         recorder.tick(|| Counts::default());
         assert!(
             memory_active(),
             "включённая диагностика включает memory tracking"
         );
+        // C `d2k_diag_sample_count`/`memory_history_count`: tick добавил
+        // по одной записи в каждое кольцо.
+        assert_eq!(recorder.samples.len(), 1);
+        assert_eq!(recorder.memory_history.len(), 1);
+
+        // Второй tick после интервала добавляет ещё по записи.
+        recorder.checked = Some(Instant::now() - Duration::from_secs(2));
+        recorder.sampled = Some(Instant::now() - Duration::from_secs(60));
+        recorder.tick(|| Counts::default());
+        assert_eq!(recorder.samples.len(), 2);
+        assert_eq!(recorder.memory_history.len(), 2);
 
         fs::remove_file(&enabled).unwrap();
         recorder.checked = Some(Instant::now() - Duration::from_secs(2));
@@ -2040,6 +2061,9 @@ mod tests {
             !memory_active(),
             "выключенная диагностика выключает memory tracking"
         );
+        // C-очистка при выключении: кольца пусты.
+        assert!(recorder.samples.is_empty());
+        assert!(recorder.memory_history.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
