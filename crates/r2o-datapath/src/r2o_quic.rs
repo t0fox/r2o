@@ -214,7 +214,7 @@ impl R2oQuicSessions {
             return None;
         }
         let payload = packet.get(view.udp_payload_range(packet)?)?;
-        let (version, dcid) = r2k_core::quic::r2k_quic_initial_flight_id(payload)?;
+        let (version, dcid) = r2k_core::quic::r2k_quic_initial_flight_id_structural(payload)?;
         let key = FlowKey::new(source, destination).0;
 
         let idle_timeout = self.r2o_idle_timeout;

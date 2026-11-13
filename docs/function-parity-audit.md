@@ -86,10 +86,10 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 226 | 322 | 0 | 0 |
 | core-state | 692 | 182 | 509 | 0 | 0 |
-| datapath-core | 400 | 217 | 183 | 0 | 0 |
+| datapath-core | 400 | 218 | 182 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **919** | **1063** | **0** | **0** |
+| **Итого** | **1982** | **920** | **1062** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 919 / P 1063 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 920 / P 1062 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -346,10 +346,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 226 | 322 | 0 | 0 |
 | core-state | 692 | 207 | 485 | 0 | 0 |
-| datapath-core | 400 | 217 | 183 | 0 | 0 |
+| datapath-core | 400 | 218 | 182 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **919** | **1063** | **0** | **0** |
+| **Итого** | **1982** | **920** | **1062** | **0** | **0** |
 
 
 ---
@@ -3831,7 +3831,7 @@ CLI-логирования, health-файла, duration, состава свод
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
-| `initial_dcid` (static) | 202–211 | 10 | DCID открытого Initial: `d2k_qw_hdr_parse`, long header, тип Initial, `dcid_len <= D2K_QW_CID_MAX` | `r2k-core/src/quic.rs:410-417 r2k_quic_initial_flight_id` | **P** | **Совпадает:** Rust `r2k_quic_initial_flight_id` разбирает Initial и возвращает `(version, dcid)`. **Подтверждённое отличие:** C извлекает DCID из структурно корректного Initial без проверки аутентификации (`d2k_qw_hdr_parse` + тип), Rust требует `is_authenticated_initial(input)` (`quic.rs:411`). Для настоящего Initial результат тот же; для подделки/мусора C может записать DCID, Rust — нет. Отдельного differential нет. |
+| `initial_dcid` (static) | 202–211 | 10 | DCID открытого Initial: `d2k_qw_hdr_parse`, long header, тип Initial, `dcid_len <= D2K_QW_CID_MAX` | `r2k-core/quic.rs` `r2k_quic_initial_flight_id_structural` | E | C извлекает DCID из структурно корректного Initial без проверки тега. Rust `r2k_quic_initial_flight_id_structural` делает то же (long header/version/type/DCID, границы) и используется в датапате для кольца полёта/UDP-hold; аутентифицирующий `r2k_quic_initial_flight_id` остаётся для проверок контроллера. Тест `initial_dcid_structural_matches_c_without_tag_check` (испорченный тег: structural Some, auth None; обрезанный None). |
 | `init_ring_add` (static) | 215–236 | 22 | кольцо 32: дедуп по key+len+байтам, запись key/DCID/len/dg | `r2o_quic.rs:229-243` (`MAX_INITIAL_RING=32`) | **P** | **Совпадает:** дедуп по `key + bytes`, кольцо 32, вытеснение старого, запись DCID/version/байт. **Отличия:** (1) C хранит `dcid` без версии, Rust — `version + dcid`; (2) Rust при уже отправленном приветствии (`hello_reported`) удаляет записи потока и не добавляет датаграмму (`r2o_quic.rs:223-227`), C добавляет до `qsnap_done`; (3) C проверяет `len <= D2K_QW_MAX_DGRAM`, Rust — разбор Initial. Unit-тесты `:1041-1056`. |
 | `init_ring_drop` (static) | 239–247 | 9 | забыть датаграммы потока (обнулить записи) | `r2o_quic.rs:225,263` (`retain`) | **E*** | C обнуляет `len/dcid_len/key` у совпавших записей, Rust удаляет их `retain`; для последующего `pack` оба варианта эквивалентны (нулевые записи пропускаются). |
 | `init_ring_pack` (static) | 253–283 | 31 | собрать полёт по key+DCID от самой старой записи, до `D2K_QSNAP_MAX_DGRAMS`, `d2k_qsnap_pack` | `r2o_quic.rs:245-260` | **P** | **Подтверждённое отличие порядка отбора:** C идёт по кольцу от `init_ring_next - init_ring_n` (старые→новые) и берёт **первые** `MAX_DGRAMS`; Rust фильтрует `key+version+dcid`, затем `matching.len().saturating_sub(MAX_INITIAL_DATAGRAMS)` берёт **последние** N (`r2o_quic.rs:249-255`). При числе датаграмм больше предела наборы различаются. C дополнительно требует совпадения DCID, Rust — DCID и version. |

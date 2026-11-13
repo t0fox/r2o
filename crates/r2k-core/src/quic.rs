@@ -949,6 +949,15 @@ fn parse_initial_header(input: &[u8]) -> Option<InitialHeader> {
     })
 }
 
+/// C `initial_dcid` (`datapath/session.c:202-211`): DCID структурно
+/// корректного Initial без проверки тега — датапату он нужен для кольца
+/// полёта, а не для доверия содержимому.
+pub fn r2k_quic_initial_flight_id_structural(input: &[u8]) -> Option<(u32, Vec<u8>)> {
+    let header = parse_initial_header(input)?;
+    let end = header.dcid_offset.checked_add(header.dcid_len)?;
+    Some((header.version, input.get(header.dcid_offset..end)?.to_vec()))
+}
+
 fn derive_initial_keys(version: u32, dcid: &[u8]) -> Result<InitialKeys, QuicSplitError> {
     derive_initial_keys_for_role(version, dcid, b"client in")
 }
@@ -1543,6 +1552,23 @@ mod tests {
         assert!(
             super::r2k_quic_client_hello_rename_sni(&without_sni, Some("example.com")).is_none()
         );
+    }
+
+    #[test]
+    fn initial_dcid_structural_matches_c_without_tag_check() {
+        let original = RFC_9001_INITIAL;
+        let (version, dcid) = super::r2k_quic_initial_flight_id(original).unwrap();
+        let mut corrupted = original.to_vec();
+        let last = corrupted.len() - 1;
+        corrupted[last] ^= 0xff;
+        assert!(!super::is_authenticated_initial(&corrupted));
+        assert!(super::r2k_quic_initial_flight_id(&corrupted).is_none());
+        // C `initial_dcid` извлекает DCID из структуры, не проверяя тег.
+        assert_eq!(
+            super::r2k_quic_initial_flight_id_structural(&corrupted),
+            Some((version, dcid))
+        );
+        assert!(super::r2k_quic_initial_flight_id_structural(&original[..10]).is_none());
     }
 
     #[test]

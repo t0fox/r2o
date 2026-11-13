@@ -41,9 +41,9 @@ pub fn r2o_udp_hold_candidate(packet: &[u8], hook: Option<u8>) -> bool {
     let Some(payload_range) = view.udp_payload_range(packet) else {
         return false;
     };
-    packet
-        .get(payload_range)
-        .is_some_and(|payload| r2k_core::quic::r2k_quic_initial_flight_id(payload).is_some())
+    packet.get(payload_range).is_some_and(|payload| {
+        r2k_core::quic::r2k_quic_initial_flight_id_structural(payload).is_some()
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
