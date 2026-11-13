@@ -204,7 +204,7 @@ pub fn r2o_tls_replay_client_hello(
     client_hello: &[u8],
     timeout: std::time::Duration,
 ) -> std::io::Result<bool> {
-    use std::io::{Read, Write};
+    use std::io::Write;
 
     if client_hello.len() < 6 {
         return Ok(false);
@@ -221,34 +221,189 @@ pub fn r2o_tls_replay_client_hello(
     let deadline = std::time::Instant::now()
         .checked_add(timeout)
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "timeout overflow"))?;
-    let mut response = [0_u8; 7];
+    let mut record_header = [0_u8; 5];
+    if !r2o_tls_read_until(stream, &mut record_header, deadline)? {
+        return Ok(false);
+    }
+    if record_header[0] != 22 {
+        return Ok(false);
+    }
+    let record_len = usize::from(u16::from_be_bytes([record_header[3], record_header[4]]));
+    if record_len == 0 || record_len > 65_535 {
+        return Ok(false);
+    }
+    let mut record = vec![0_u8; record_len];
+    if !r2o_tls_read_until(stream, &mut record, deadline)? {
+        return Ok(false);
+    }
+
+    // C `tls_connect_internal` ищет ServerHello по заголовкам сообщений;
+    // для TLS1.3 дополнительно требуется cipher 0x1301 и X25519 key_share.
+    let mut offset = 0;
+    while offset < record.len() {
+        let start = offset;
+        let Some((kind, _)) = r2o_t13_flight_next(&record, &mut offset) else {
+            break;
+        };
+        if kind == 2 {
+            let server_hello = &record[start..offset];
+            let version = r2o_t13_sh_version(server_hello);
+            if version == 0x0304 && r2o_t13_sh_parse(server_hello).is_err() {
+                return Ok(false);
+            }
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn r2o_tls_read_until(
+    stream: &mut std::net::TcpStream,
+    buffer: &mut [u8],
+    deadline: std::time::Instant,
+) -> std::io::Result<bool> {
+    use std::io::Read;
+
     let mut have = 0;
-    while have < 7 && !(have >= 6 && response[0] == 22) {
+    while have < buffer.len() {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
-            break;
+            return Ok(false);
         }
         stream.set_read_timeout(Some(remaining))?;
-        match stream.read(&mut response[have..]) {
-            Ok(0) => break,
+        match stream.read(&mut buffer[have..]) {
+            Ok(0) => return Ok(false),
             Ok(length) => have += length,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error)
                 if matches!(
                     error.kind(),
-                    std::io::ErrorKind::Interrupted
-                        | std::io::ErrorKind::TimedOut
-                        | std::io::ErrorKind::WouldBlock
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
                 ) =>
             {
-                if error.kind() == std::io::ErrorKind::Interrupted {
-                    continue;
-                }
-                break;
+                return Ok(false);
             }
-            Err(_) => break,
+            Err(error) => return Err(error),
         }
     }
-    Ok(have >= 6 && response[0] == 22 && response[1] == 3 && response[5] == 2)
+    Ok(true)
+}
+
+fn r2o_tls_be16(bytes: &[u8], offset: usize) -> Option<u16> {
+    Some(u16::from_be_bytes([
+        *bytes.get(offset)?,
+        *bytes.get(offset.checked_add(1)?)?,
+    ]))
+}
+
+/// C `d2k_t13_sh_version`: версия ServerHello из supported_versions.
+fn r2o_t13_sh_version(server_hello: &[u8]) -> u16 {
+    let mut cursor = 4 + 2 + 32;
+    let Some(&session_len) = server_hello.get(cursor) else {
+        return 0;
+    };
+    let legacy = r2o_tls_be16(server_hello, 4).unwrap_or(0);
+    cursor += 1 + usize::from(session_len);
+    if cursor + 3 > server_hello.len() {
+        return 0;
+    }
+    cursor += 3;
+    if cursor + 2 > server_hello.len() {
+        return legacy;
+    }
+    let Some(extensions_len) = r2o_tls_be16(server_hello, cursor) else {
+        return legacy;
+    };
+    let extensions_end = cursor
+        .checked_add(2 + usize::from(extensions_len))
+        .unwrap_or(server_hello.len())
+        .min(server_hello.len());
+    cursor += 2;
+    while cursor + 4 <= extensions_end {
+        let Some(kind) = r2o_tls_be16(server_hello, cursor) else {
+            break;
+        };
+        let Some(length) = r2o_tls_be16(server_hello, cursor + 2) else {
+            break;
+        };
+        cursor += 4;
+        if cursor + usize::from(length) > extensions_end {
+            break;
+        }
+        if kind == 0x002b && length == 2 {
+            return r2o_tls_be16(server_hello, cursor).unwrap_or(legacy);
+        }
+        cursor += usize::from(length);
+    }
+    legacy
+}
+
+/// C `d2k_t13_sh_parse`: cipher 0x1301 и X25519 key_share.
+fn r2o_t13_sh_parse(server_hello: &[u8]) -> Result<[u8; 32], String> {
+    if server_hello.len() < 4 {
+        return Err("ServerHello обрезан".into());
+    }
+    let mut cursor = 4 + 2 + 32;
+    let Some(&session_len) = server_hello.get(cursor) else {
+        return Err("ServerHello обрезан".into());
+    };
+    cursor += 1 + usize::from(session_len);
+    if cursor + 3 > server_hello.len() {
+        return Err("ServerHello обрезан".into());
+    }
+    let suite = r2o_tls_be16(server_hello, cursor).unwrap_or(0);
+    cursor += 3;
+    if suite != 0x1301 {
+        return Err(format!(
+            "сервер выбрал шифр 0x{suite:04x}, а поддержан только 0x1301"
+        ));
+    }
+    if cursor + 2 > server_hello.len() {
+        return Err("ServerHello без расширений".into());
+    }
+    let extensions_len = r2o_tls_be16(server_hello, cursor).unwrap_or(0);
+    cursor += 2;
+    let extensions_end = cursor
+        .checked_add(usize::from(extensions_len))
+        .unwrap_or(server_hello.len())
+        .min(server_hello.len());
+    while cursor + 4 <= extensions_end {
+        let Some(kind) = r2o_tls_be16(server_hello, cursor) else {
+            break;
+        };
+        let Some(length) = r2o_tls_be16(server_hello, cursor + 2) else {
+            break;
+        };
+        cursor += 4;
+        if cursor + usize::from(length) > extensions_end {
+            break;
+        }
+        if kind == 0x0033
+            && length >= 36
+            && r2o_tls_be16(server_hello, cursor) == Some(0x001d)
+            && r2o_tls_be16(server_hello, cursor + 2) == Some(32)
+        {
+            let key = server_hello
+                .get(cursor + 4..cursor + 36)
+                .ok_or_else(|| "ServerHello обрезан".to_owned())?;
+            return key.try_into().map_err(|_| "ServerHello обрезан".to_owned());
+        }
+        cursor += usize::from(length);
+    }
+    Err("сервер не прислал ключ X25519 — TLS 1.3 не согласован".into())
+}
+
+/// C `d2k_t13_flight_next`: следующее handshake-сообщение флайта.
+fn r2o_t13_flight_next<'a>(buffer: &'a [u8], offset: &mut usize) -> Option<(u8, &'a [u8])> {
+    let start = *offset;
+    let header = buffer.get(start..start.checked_add(4)?)?;
+    let length =
+        (usize::from(header[1]) << 16) | (usize::from(header[2]) << 8) | usize::from(header[3]);
+    let body_start = start.checked_add(4)?;
+    let end = body_start.checked_add(length)?;
+    let body = buffer.get(body_start..end)?;
+    *offset = end;
+    Some((header[0], body))
 }
 
 fn r2o_tls_u16(bytes: &[u8], offset: usize, end: usize) -> Option<(usize, usize)> {
@@ -501,5 +656,121 @@ mod alpn_tests {
         assert!(!alpn_is_http(b"h3"));
         assert!(!alpn_is_http(b"HTTP/1.1"));
         assert!(!alpn_is_http(b""));
+    }
+}
+
+#[cfg(test)]
+mod server_hello_tests {
+    use super::{
+        r2o_t13_flight_next, r2o_t13_sh_parse, r2o_t13_sh_version, r2o_tls_replay_client_hello,
+    };
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread;
+    use std::time::Duration;
+
+    fn server_hello(
+        cipher: [u8; 2],
+        key_share: Option<[u8; 32]>,
+        supported_version: Option<[u8; 2]>,
+    ) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x03, 0x03]);
+        body.extend_from_slice(&[0x42; 32]);
+        body.push(0);
+        body.extend_from_slice(&cipher);
+        body.push(0);
+        let mut extensions = Vec::new();
+        if let Some(version) = supported_version {
+            extensions.extend_from_slice(&[0x00, 0x2b, 0x00, 0x02]);
+            extensions.extend_from_slice(&version);
+        }
+        if let Some(key) = key_share {
+            extensions.extend_from_slice(&[0x00, 0x33, 0x00, 0x24, 0x00, 0x1d, 0x00, 0x20]);
+            extensions.extend_from_slice(&key);
+        }
+        if !extensions.is_empty() {
+            body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+            body.extend_from_slice(&extensions);
+        }
+        let mut message = Vec::with_capacity(4 + body.len());
+        message.push(2);
+        let len = body.len();
+        message.extend_from_slice(&[(len >> 16) as u8, (len >> 8) as u8, len as u8]);
+        message.extend_from_slice(&body);
+        message
+    }
+
+    fn replay_response(server_hello: Vec<u8>) -> bool {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut hello = [0_u8; 6];
+            stream.read_exact(&mut hello).unwrap();
+            let len = server_hello.len();
+            let mut record = vec![22, 3, 3, (len >> 8) as u8, len as u8];
+            record.extend_from_slice(&server_hello);
+            stream.write_all(&record).unwrap();
+        });
+        let mut client = TcpStream::connect(address).unwrap();
+        let result =
+            r2o_tls_replay_client_hello(&mut client, &[22, 3, 1, 0, 1, 0], Duration::from_secs(1))
+                .unwrap();
+        server.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn tls13_server_hello_version_and_parse_match_c() {
+        let valid = server_hello([0x13, 0x01], Some([0x11; 32]), Some([0x03, 0x04]));
+        assert_eq!(r2o_t13_sh_version(&valid), 0x0304);
+        assert_eq!(r2o_t13_sh_parse(&valid).unwrap(), [0x11; 32]);
+
+        let tls12 = server_hello([0x13, 0x01], None, None);
+        assert_eq!(r2o_t13_sh_version(&tls12), 0x0303);
+        assert!(r2o_t13_sh_parse(&tls12).is_err());
+
+        let missing_key = server_hello([0x13, 0x01], None, Some([0x03, 0x04]));
+        assert_eq!(r2o_t13_sh_version(&missing_key), 0x0304);
+        assert!(r2o_t13_sh_parse(&missing_key).is_err());
+        assert_eq!(r2o_t13_sh_version(&valid[..10]), 0);
+    }
+
+    #[test]
+    fn tls13_flight_next_matches_c() {
+        let flight = [2, 0, 0, 1, 0xaa, 8, 0, 0, 2, 0xbb, 0xcc];
+        let mut offset = 0;
+        assert_eq!(
+            r2o_t13_flight_next(&flight, &mut offset),
+            Some((2, &[0xaa][..]))
+        );
+        assert_eq!(
+            r2o_t13_flight_next(&flight, &mut offset),
+            Some((8, &[0xbb, 0xcc][..]))
+        );
+        assert_eq!(r2o_t13_flight_next(&flight, &mut offset), None);
+        let mut offset = 0;
+        assert_eq!(r2o_t13_flight_next(&flight[..4], &mut offset), None);
+    }
+
+    #[test]
+    fn tls13_replay_requires_cipher_and_key_share_like_c() {
+        assert!(replay_response(server_hello(
+            [0x13, 0x01],
+            Some([0x11; 32]),
+            Some([0x03, 0x04])
+        )));
+        assert!(replay_response(server_hello([0x13, 0x01], None, None)));
+        assert!(!replay_response(server_hello(
+            [0x13, 0x02],
+            Some([0x11; 32]),
+            Some([0x03, 0x04])
+        )));
+        assert!(!replay_response(server_hello(
+            [0x13, 0x01],
+            None,
+            Some([0x03, 0x04])
+        )));
     }
 }
