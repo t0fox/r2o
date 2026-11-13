@@ -8,14 +8,16 @@ use r2k_core::control::{
     EVENT_R2O_VOICE_RTP_PROOF, EVENT_R2O_VOICE_STUN_PROOF, EVENT_R2O_VOICE_SUSPECT, Frame,
     HttpPortalEvent, HttpResponseEvent, KEY_LEN, R2oQuicSuspectEvent, R2oTcpFinRetryEvent,
     R2oTcpRstAfterAppEvent, R2oTcpSilenceEvent, R2oTcpStallEvent, R2oVoiceProofEvent,
-    R2oVoiceProofKind, R2oVoiceSuspectEvent, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_MODERN, SHAPE_QUIC,
-    decode_ack, decode_applied, decode_hello, decode_http_response, decode_r2o_quic_stall,
-    decode_r2o_quic_suspect, decode_r2o_tcp_fin_retry, decode_r2o_tcp_rst_after_app,
-    decode_r2o_tcp_silence, decode_r2o_tcp_stall, decode_r2o_voice_proof, decode_r2o_voice_suspect,
-    decode_set_tcp_stall_budgets, encode_ack_for_trial, encode_delete_addr,
-    encode_delete_addr_probe, encode_delete_name, encode_delete_name_probe, encode_set_addr,
-    encode_set_addr_probe, encode_set_https, encode_set_name_probe, encode_set_tcp_stall_budgets,
-    encode_set_voice_addr, encode_set_voice_addr_probe, r2o_binding_equal, read_frame,
+    R2oVoiceProofKind, R2oVoiceSuspectEvent, SHAPE_ECH_NO_TS, SHAPE_ECH_TCP, SHAPE_ECH_TS,
+    SHAPE_HTTP, SHAPE_LEGACY_NO_TS, SHAPE_LEGACY_TS, SHAPE_MODERN, SHAPE_MODERN_NO_TS,
+    SHAPE_MODERN_TS, SHAPE_QUIC, decode_ack, decode_applied, decode_hello, decode_http_response,
+    decode_r2o_quic_stall, decode_r2o_quic_suspect, decode_r2o_tcp_fin_retry,
+    decode_r2o_tcp_rst_after_app, decode_r2o_tcp_silence, decode_r2o_tcp_stall,
+    decode_r2o_voice_proof, decode_r2o_voice_suspect, decode_set_tcp_stall_budgets,
+    encode_ack_for_trial, encode_delete_addr, encode_delete_addr_probe, encode_delete_name,
+    encode_delete_name_probe, encode_set_addr, encode_set_addr_probe, encode_set_https,
+    encode_set_name_probe, encode_set_tcp_stall_budgets, encode_set_voice_addr,
+    encode_set_voice_addr_probe, r2o_binding_equal, read_frame,
 };
 use std::io::Cursor;
 
@@ -235,8 +237,30 @@ fn кодирует_адресные_планы_ipv4_ipv6_и_удаляет_то
     assert_eq!(delete_v6.body[17], SHAPE_ECH_TCP);
 
     assert!(encode_set_addr(IpAddr::V4(Ipv4Addr::LOCALHOST), SHAPE_HTTP, &tls_plan).is_err());
-    assert!(encode_set_addr(IpAddr::V4(Ipv4Addr::LOCALHOST), SHAPE_QUIC, &tls_plan).is_err());
+    // C `d2k_link_set_addr_family` не сверяет план с формой.
+    assert!(encode_set_addr(IpAddr::V4(Ipv4Addr::LOCALHOST), SHAPE_QUIC, &tls_plan).is_ok());
     assert!(encode_delete_addr(IpAddr::V4(Ipv4Addr::LOCALHOST), SHAPE_HTTP).is_err());
+}
+
+#[test]
+fn addr_commands_accept_tcp_context_shapes_like_c() {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    let v4 = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+    for shape in [
+        SHAPE_MODERN_NO_TS,
+        SHAPE_LEGACY_NO_TS,
+        SHAPE_ECH_NO_TS,
+        SHAPE_MODERN_TS,
+        SHAPE_LEGACY_TS,
+        SHAPE_ECH_TS,
+    ] {
+        assert!(encode_set_addr(v4, shape, &[]).is_ok(), "set {shape}");
+        assert!(encode_delete_addr(v4, shape).is_ok(), "del {shape}");
+    }
+    // C не сверяет план с формой; чужой/пустой план принимается.
+    assert!(encode_set_addr(v4, SHAPE_MODERN, &[0xff, 0x00]).is_ok());
+    assert!(encode_delete_addr(v4, 0).is_err());
 }
 
 #[test]

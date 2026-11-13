@@ -1422,8 +1422,10 @@ pub fn encode_set_addr(
     shape: u8,
     plan_records: &[u8],
 ) -> Result<Vec<u8>, &'static str> {
-    if !valid_addr_shape(shape) || !valid_addr_plan_records(shape, plan_records) {
-        return Err("адресная привязка требует поддерживаемые форму и совместимый план");
+    // C `d2k_link_set_addr_family` проверяет только форму; совместимость
+    // плана с формой решает датапат.
+    if !valid_addr_shape(shape) {
+        return Err("адресная привязка требует поддерживаемую форму");
     }
     let mut body = Vec::with_capacity(18 + plan_records.len());
     match address {
@@ -1463,10 +1465,11 @@ pub fn encode_delete_addr(address: IpAddr, shape: u8) -> Result<Vec<u8>, &'stati
 }
 
 fn valid_addr_shape(shape: u8) -> bool {
+    // C `addr_shape_ok`: 1/2/3/5/6 и TCP-контекст 8..13.
     matches!(
         shape,
         SHAPE_MODERN | SHAPE_LEGACY | SHAPE_QUIC | SHAPE_VOICE | SHAPE_ECH_TCP
-    )
+    ) || is_tcp_context_shape(shape)
 }
 
 fn valid_addr_plan_records(shape: u8, records: &[u8]) -> bool {
