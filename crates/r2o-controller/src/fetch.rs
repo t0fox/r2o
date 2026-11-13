@@ -1945,7 +1945,8 @@ fn r2o_fetch_measure_tx_volume_with_roots(
         }
         if r2o_step == 0 {
             let r2o_rtt_ms = r2o_request_started.elapsed().as_millis();
-            let r2o_read_ms = r2o_rtt_ms.saturating_mul(3).clamp(
+            let r2o_read_ms = crate::now_ms::clamp_ms(
+                r2o_rtt_ms.saturating_mul(3),
                 R2O_VOLUME_TX_READ_MIN.as_millis(),
                 R2O_VOLUME_TX_READ_MAX.as_millis(),
             );

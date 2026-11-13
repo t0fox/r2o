@@ -27,9 +27,22 @@ pub fn d2k_now_ms() -> i64 {
             .saturating_mul(1000)
             .saturating_add((ts.tv_nsec / 1_000_000) as i64)
     } else {
-        0
+        // C fallback: gettimeofday, если monotonic недоступен.
+        let mut tv: libc::timeval = unsafe { std::mem::zeroed() };
+        if unsafe { libc::gettimeofday(&mut tv, std::ptr::null_mut()) } == 0 {
+            (tv.tv_sec as i64)
+                .saturating_mul(1000)
+                .saturating_add((tv.tv_usec / 1000) as i64)
+        } else {
+            0
+        }
     };
     millis.saturating_add(clock_offset_ms())
+}
+
+/// C `clamp_ms`: ограничить миллисекунды в `[lo, hi]`.
+pub fn clamp_ms(value: u128, lo: u128, hi: u128) -> u128 {
+    value.clamp(lo, hi)
 }
 
 /// C `d2k_sleep_ms`: `ms <= 0` — немедленный возврат, иначе пауза.
@@ -71,5 +84,13 @@ mod tests {
         assert!(start.elapsed() < std::time::Duration::from_secs(1));
         d2k_sleep_ms(2);
         assert!(start.elapsed() >= std::time::Duration::from_millis(1));
+    }
+
+    #[test]
+    fn clamp_ms_matches_c() {
+        use super::clamp_ms;
+        assert_eq!(clamp_ms(10, 20, 30), 20);
+        assert_eq!(clamp_ms(25, 20, 30), 25);
+        assert_eq!(clamp_ms(40, 20, 30), 30);
     }
 }
