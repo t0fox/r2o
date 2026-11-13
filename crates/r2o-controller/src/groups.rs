@@ -592,3 +592,223 @@ fn add_group(
         at,
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(shape: u8) -> GroupKey {
+        GroupKey {
+            transport: 6,
+            family: 4,
+            shape,
+            probe_path: String::new(),
+            ech_origin: String::new(),
+        }
+    }
+
+    fn observation(
+        name: &str,
+        plan: &str,
+        evidence: u8,
+        at: i64,
+        key: &GroupKey,
+    ) -> DomainObservation {
+        DomainObservation {
+            name: name.into(),
+            plan_id: plan.into(),
+            key: key.clone(),
+            evidence,
+            at,
+        }
+    }
+
+    fn state(observations: Vec<DomainObservation>) -> DomainState {
+        DomainState {
+            observations,
+            ..DomainState::default()
+        }
+    }
+
+    #[test]
+    fn votes_and_latest_vote_match_c_rule() {
+        let k = key(1);
+        let seed = observation("seed.example.org", "p1", BLOCKED, 10, &k);
+        let live = state(vec![
+            seed.clone(),
+            observation("a.example.org", "p1", BLOCKED, 20, &k),
+            observation("b.example.org", "p1", BLOCKED, 30, &k),
+        ]);
+        assert_eq!(votes(&live, "example.org", &seed), 3);
+        assert_eq!(latest_vote(&live, "example.org", &seed), 30);
+
+        // live=2, stale=2: live > stale ложно → 0.
+        let stale_equal = state(vec![
+            seed.clone(),
+            observation("a.example.org", "p1", BLOCKED, 20, &k),
+            observation("b.example.org", "p1", BLOCKED | PLAN_FAILED, 30, &k),
+            observation("c.example.org", "p1", BLOCKED | DIRECT_CLEAR, 40, &k),
+        ]);
+        assert_eq!(votes(&stale_equal, "example.org", &seed), 0);
+
+        // live=3, stale=1: live > stale и сумма ≥3 → 3; latest только live.
+        let stale_one = state(vec![
+            seed.clone(),
+            observation("a.example.org", "p1", BLOCKED, 20, &k),
+            observation("b.example.org", "p1", BLOCKED, 30, &k),
+            observation("c.example.org", "p1", BLOCKED | PLAN_FAILED, 99, &k),
+        ]);
+        assert_eq!(votes(&stale_one, "example.org", &seed), 3);
+        assert_eq!(latest_vote(&stale_one, "example.org", &seed), 30);
+
+        // DIRECT_CLEAR без ADMITTED_EXCEPTION обрывает голосование.
+        let mut clear = live.clone();
+        clear
+            .observations
+            .push(observation("c.example.org", "p1", DIRECT_CLEAR, 40, &k));
+        assert_eq!(votes(&clear, "example.org", &seed), 0);
+        clear.observations.last_mut().unwrap().evidence = DIRECT_CLEAR | ADMITTED_EXCEPTION;
+        assert_eq!(votes(&clear, "example.org", &seed), 3);
+    }
+
+    #[test]
+    fn failures_are_scoped_by_plan_key_and_suffix_like_c() {
+        let k = key(1);
+        let s = state(vec![
+            observation("a.example.org", "p1", PLAN_FAILED, 1, &k),
+            observation("b.sub.example.org", "p1", PLAN_FAILED, 2, &k),
+            observation("c.example.org", "p2", PLAN_FAILED, 3, &k),
+            observation("d.example.org", "p1", BLOCKED, 4, &k),
+        ]);
+        assert_eq!(failures(&s, "example.org", &k, "p1"), 2);
+        assert_eq!(failures(&s, "example.org", &k, "p2"), 1);
+        assert_eq!(failures(&s, "sub.example.org", &k, "p1"), 1);
+        assert_eq!(failures(&s, "example.org", &key(2), "p1"), 0);
+    }
+
+    #[test]
+    fn covering_group_returns_longest_suffix_and_respects_disabled() {
+        let k = key(1);
+        let mut s = state(vec![]);
+        for suffix in ["example.org", "sub.example.org"] {
+            s.groups.push(DomainGroup {
+                suffix: suffix.into(),
+                plan_id: "p1".into(),
+                key: k.clone(),
+                evidence_count: 3,
+                at: 1,
+            });
+        }
+        assert_eq!(
+            covering_group(&s, "a.sub.example.org", &k).map(|group| group.suffix.as_str()),
+            Some("sub.example.org")
+        );
+        assert!(covering_group(&s, "a.other.org", &k).is_none());
+        s.disabled = true;
+        assert!(covering_group(&s, "a.sub.example.org", &k).is_none());
+    }
+
+    #[test]
+    fn rebuild_chooses_last_nonzero_suffix_and_clears_when_disabled() {
+        let k = key(1);
+        let mut s = state(vec![
+            observation("a.example.org", "p1", BLOCKED, 1, &k),
+            observation("b.example.org", "p1", BLOCKED, 2, &k),
+            observation("c.example.org", "p1", BLOCKED, 3, &k),
+            observation("d.sub.example.org", "p1", BLOCKED, 4, &k),
+            observation("e.sub.example.org", "p1", BLOCKED, 5, &k),
+            observation("f.sub.example.org", "p1", BLOCKED, 6, &k),
+        ]);
+        rebuild(&mut s);
+        assert_eq!(s.groups.len(), 1);
+        assert_eq!(s.groups[0].suffix, "example.org");
+        assert_eq!(s.groups[0].evidence_count, 6);
+
+        s.disabled = true;
+        rebuild(&mut s);
+        assert!(s.groups.is_empty());
+    }
+
+    #[test]
+    fn add_group_prefers_failures_count_at_plan_and_covers_narrow_groups() {
+        let k = key(1);
+        let mut s = state(vec![]);
+        let p1 = observation("a.example.org", "p1", BLOCKED, 10, &k);
+        add_group(&mut s, "sub.example.org", &p1, 2, 100);
+        assert_eq!(s.groups.len(), 1);
+
+        // Широкая группа того же плана удаляет покрытую узкую.
+        add_group(&mut s, "example.org", &p1, 3, 200);
+        assert_eq!(s.groups.len(), 1);
+        assert_eq!(s.groups[0].suffix, "example.org");
+        assert_eq!(s.groups[0].evidence_count, 3);
+
+        // Узкая группа под широкой того же плана отвергается.
+        add_group(&mut s, "sub.example.org", &p1, 4, 300);
+        assert_eq!(s.groups.len(), 1);
+
+        // Меньше PLAN_FAILED важнее count/at: p2 вытесняет p1.
+        s.observations
+            .push(observation("b.example.org", "p1", PLAN_FAILED, 5, &k));
+        let p2 = observation("a.example.org", "p2", BLOCKED, 20, &k);
+        add_group(&mut s, "example.org", &p2, 2, 400);
+        assert_eq!(s.groups[0].plan_id, "p2");
+
+        // Предел 64: новая группа не добавляется, state.frozen.
+        let mut full = state(vec![]);
+        for index in 0..MAX_GROUPS {
+            full.groups.push(DomainGroup {
+                suffix: format!("g{index}.example"),
+                plan_id: "p1".into(),
+                key: k.clone(),
+                evidence_count: 1,
+                at: 1,
+            });
+        }
+        add_group(&mut full, "new.example", &p1, 1, 1);
+        assert_eq!(full.groups.len(), MAX_GROUPS);
+        assert!(full.frozen);
+    }
+
+    #[test]
+    fn match_domain_applies_plan_exceptions_and_direct_clear_like_c() {
+        let k = key(1);
+        let mut s = state(vec![]);
+        for (suffix, plan) in [("example.org", "p1"), ("sub.example.org", "p1")] {
+            s.groups.push(DomainGroup {
+                suffix: suffix.into(),
+                plan_id: plan.into(),
+                key: k.clone(),
+                evidence_count: 3,
+                at: 1,
+            });
+        }
+        assert_eq!(
+            match_domain(&s, "a.sub.example.org", &k).map(|group| group.suffix.as_str()),
+            Some("sub.example.org")
+        );
+
+        // PLAN_FAILED p1 исключает только группы p1; p2 остаётся.
+        s.groups.push(DomainGroup {
+            suffix: "sub.example.org".into(),
+            plan_id: "p2".into(),
+            key: k.clone(),
+            evidence_count: 3,
+            at: 2,
+        });
+        s.observations
+            .push(observation("a.sub.example.org", "p1", PLAN_FAILED, 1, &k));
+        assert_eq!(
+            match_domain(&s, "a.sub.example.org", &k).map(|group| group.plan_id.as_str()),
+            Some("p2")
+        );
+
+        // DIRECT_CLEAR исключает все группы этого ключа.
+        s.observations
+            .push(observation("a.sub.example.org", "p2", DIRECT_CLEAR, 2, &k));
+        assert!(match_domain(&s, "a.sub.example.org", &k).is_none());
+
+        s.disabled = true;
+        assert!(match_domain(&s, "a.sub.example.org", &k).is_none());
+    }
+}
