@@ -85,8 +85,13 @@ static R2O_DISCOVERY_WORKERS_STARTED: AtomicUsize = AtomicUsize::new(0);
 static R2O_DISCOVERY_WORKERS_JOINED: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(unix)]
+fn r2o_controller_signal_stop(stop: &AtomicBool) {
+    stop.store(true, Ordering::Relaxed);
+}
+
+#[cfg(unix)]
 extern "C" fn r2o_controller_request_stop(_signal: libc::c_int) {
-    R2O_CONTROLLER_STOP.store(true, Ordering::Relaxed);
+    r2o_controller_signal_stop(&R2O_CONTROLLER_STOP);
 }
 
 #[cfg(unix)]
@@ -25655,6 +25660,17 @@ mod tests {
     fn offline_self_check_matches_c() {
         assert!(super::r2o_offline_self_check());
         assert_eq!(r2k_core::control::PROTOCOL_VERSION, 48);
+    }
+
+    #[test]
+    fn on_signal_sets_stop_flag_like_c() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        static STOP: AtomicBool = AtomicBool::new(false);
+        super::r2o_controller_signal_stop(&STOP);
+        assert!(STOP.load(Ordering::Relaxed));
+        STOP.store(false, Ordering::Relaxed);
+        assert!(!STOP.load(Ordering::Relaxed));
     }
 
     #[test]

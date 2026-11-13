@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 317 | 231 | 0 | 0 |
-| core-state | 692 | 371 | 321 | 0 | 0 |
+| core-state | 692 | 374 | 318 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1176** | **806** | **0** | **0** |
+| **Итого** | **1982** | **1179** | **803** | **0** | **0** |
 
-Это не оценка паритета: 806 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 803 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1176 / P 806 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1179 / P 803 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 317 | 231 | 0 | 0 |
-| core-state | 692 | 371 | 321 | 0 | 0 |
+| core-state | 692 | 374 | 318 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1176** | **806** | **0** | **0** |
+| **Итого** | **1982** | **1179** | **803** | **0** | **0** |
 
 
 ---
@@ -2115,10 +2115,10 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `on_signal` | 111-111 | 1 | SIGINT/SIGTERM выставляют `stop_asked` | `main.rs` signal handler / `CancellationToken` | **P*** | C `(void)sig; stop_asked=1`; Rust использует atomic/cancel-токен в цикле serve. `stop_asked` — `volatile sig_atomic_t`, проверяется в `while(!stop_asked)`. |
-| `now_ms` | 113-117 | 5 | монотонное время в мс | `std::time::Instant` | **P*** | C `clock_gettime(CLOCK_MONOTONIC)`, `tv_sec*1000+tv_nsec/1e6`; Rust `Instant`/`Duration`. Монотонность та же, абсолютное значение иное. |
+| `on_signal` | 111-111 | 1 | обработка SIGINT/SIGTERM: `stop_asked=1` | `main.rs` `r2o_controller_signal_stop`, `install_r2o_controller_signal_handlers` | E | C ставит `stop_asked` из обработчика. Rust `r2o_controller_signal_stop` ставит `R2O_CONTROLLER_STOP`, обработчик устанавливается на SIGINT/SIGTERM в production `run`; тест `on_signal_sets_stop_flag_like_c`. |
+| `now_ms` | 113-117 | 5 | монотонное время в мс | `now_ms.rs` `d2k_now_ms` | **E*** | C `clock_gettime(CLOCK_MONOTONIC)` + сдвиг. Rust `d2k_now_ms` — тот же CLOCK_MONOTONIC, fallback `gettimeofday`, `clock_offset_ms`; тесты `now_ms.rs`. **Ограничение:** d2kc-цикл в Rust ведёт сроки через `Instant`, а не через абсолютные мс; для интервалов эквивалентно. |
 | `save_atomic` | 122-125 | 4 | атомарное сохранение каталога | `catalog::Catalog::save_atomic` | **E** | C-обёртка `d2k_catalog_save_atomic`; Rust `Catalog::save_atomic` пишет temp+fsync+rename. `scripts/r2o-catalog-persist-differential.sh` + unit. |
-| `self_mem` | 136-148 | 13 | RSS/HWM/VmData/Threads из `/proc/self/status` | `diagnostics.rs` process memory | **P** | C инициализирует `-1`, `fopen("/proc/self/status")`; построчно `VmRSS:`/`VmHWM:`/`VmData:`/`Threads:` → `strtol`. Rust читает те же поля (`diagnostics.rs`), формат/точка вызова иные; отдельного C/Rust differential нет. |
+| `self_mem` | 136-148 | 13 | VmRSS/VmHWM/VmData/Threads из `/proc/self/status` | `diagnostics.rs` `process_memory`/`proc_field` | **E*** | C читает поля `/proc/self/status`. Rust `process_memory`/`proc_field` разбирает те же VmRSS/VmHWM/VmData/Threads для процессов; тесты `proc_field`, `process_memory` (RSS/HWM/Threads/границы). **Ограничение:** Rust собирает список процессов диагностики, а не только self; поля и парсер те же. |
 | `sched_say` | 150-157 | 8 | журнал планировщика с локальным временем | `main.rs` log callback | **P*** | C `localtime_r` + `printf("%02d:%02d:%02d %s\n")` + `fflush`. Rust пишет через свой logger с иным форматом; отдельной функции нет. |
 | `http_search_portal` | 168-174 | 7 | класс 3 (портал) → `d2k_httpsearch_portal` | `main.rs:4729-4750 r2o_http_search_https_action` | **P** | **Ветви сверены:** C `!g_hs \|\| !family \|\| state UNKNOWN/PROBING \|\| d2k_https_upgrade(st)` → return; иначе `d2k_httpsearch_portal(host,family,addr,now)`. Rust классифицирует `Served/TlsBlocked` → Suppress, иное известное → Queue, неизвестное с pending → Wait, иначе Suppress; live-bound failure отдельно. Набор состояний тот же, pending/unknown различаются. |
 | `hs_open_port` | 176-208 | 33 | socket family, `SO_MARK` только при `g_probe_mark`, bind wildcard, getsockname, big-endian порт | `main.rs` `r2o_props_bind_socket`, `BoundTcpProbe::open` | **E*** | C: socket family 4/6, SO_MARK только при ненулевой метке, wildcard bind, getsockname. Rust production `BoundTcpProbe::open` использует общий `r2o_props_bind_socket` (IPv6 V6ONLY) и ставит метку `mark.unwrap_or(0x2d)`; тесты `props_bind_wrappers_match_c_families_and_socket_types`, C/Rust differential `scripts/test-props-bind-differential.sh` (5 кейсов). **Ограничение:** Rust добавляет `SOCK_CLOEXEC`/`O_NONBLOCK`. |
