@@ -690,6 +690,15 @@ fn raw_offer_timestamps(client_profile: Option<bool>) -> bool {
     })
 }
 
+const R2O_SELFTEST_TTL: Duration = Duration::from_secs(600);
+
+/// C `selftest_cached_age`: `0 <= age < TTL` → возраст, иначе кэш негоден.
+fn selftest_age_from(at: Option<Instant>, now: Instant) -> Option<Duration> {
+    let at = at?;
+    let age = now.saturating_duration_since(at);
+    (age < R2O_SELFTEST_TTL).then_some(age)
+}
+
 fn raw_selftest_age(family: u8, offer_ts: bool) -> Option<Duration> {
     let mut cache = RAW_SELFTESTS
         .get_or_init(|| Mutex::new(RawSelftestState::default()))
@@ -697,13 +706,11 @@ fn raw_selftest_age(family: u8, offer_ts: bool) -> Option<Duration> {
         .ok()?;
     let index = raw_selftest_index(family, offer_ts);
     let at = cache.checked_at[index]?;
-    let age = at.elapsed();
-    if age < Duration::from_secs(600) {
-        Some(age)
-    } else {
+    let age = selftest_age_from(Some(at), Instant::now());
+    if age.is_none() {
         cache.checked_at[index] = None;
-        None
     }
+    age
 }
 
 fn note_raw_probe(family: u8, local_error: bool) {
@@ -3082,6 +3089,24 @@ mod tests {
         assert_eq!(packet.len(), 60);
         assert_eq!(packet[0] >> 4, 6);
         assert!(tcp_checksum_valid(source, destination, &packet[40..]));
+    }
+
+    #[test]
+    fn selftest_cached_age_ttl_matches_c() {
+        let now = std::time::Instant::now();
+        assert!(selftest_age_from(None, now).is_none());
+        assert_eq!(
+            selftest_age_from(Some(now), now),
+            Some(std::time::Duration::ZERO)
+        );
+        let fresh = now
+            .checked_sub(std::time::Duration::from_secs(599))
+            .unwrap();
+        assert!(selftest_age_from(Some(fresh), now).is_some());
+        let stale = now
+            .checked_sub(std::time::Duration::from_secs(600))
+            .unwrap();
+        assert!(selftest_age_from(Some(stale), now).is_none());
     }
 
     #[test]

@@ -88,8 +88,8 @@ recheck 1982 1982 equal True
 | core-state | 692 | 182 | 509 | 0 | 0 |
 | datapath-core | 400 | 156 | 244 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
-| detect | 159 | 70 | 89 | 0 | 0 |
-| **Итого** | **1982** | **781** | **1201** | **0** | **0** |
+| detect | 159 | 71 | 88 | 0 | 0 |
+| **Итого** | **1982** | **782** | **1200** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 781 / P 1201 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 782 / P 1200 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -348,8 +348,8 @@ P означает неполное доказательство ветвей, N
 | core-state | 692 | 182 | 510 | 0 | 0 |
 | datapath-core | 400 | 156 | 244 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
-| detect | 159 | 70 | 89 | 0 | 0 |
-| **Итого** | **1982** | **781** | **1201** | **0** | **0** |
+| detect | 159 | 71 | 88 | 0 | 0 |
+| **Итого** | **1982** | **782** | **1200** | **0** | **0** |
 
 
 ---
@@ -6367,7 +6367,7 @@ raw_recheck, sweep_poisons (свойства → compose → перебор), cr
 | `answered_by_props` | 732-739 | 7 | не повторять гипотезу, уже отвеченную свойствами | `raw_probe.rs:484` (`answered` + `same_hypothesis`) | **E** | C линейно по `res->nanswered`, `d2k_poison_same` → 1. Rust `answered` использует `Poison::same_hypothesis`, который делегирует полному `poison_same` (имя игнорируется, repeats≤1→1); тест `poison_has_fake_and_same_match_c` проверяет autottl-различие и переименование. |
 | `fam_ix` | 766-766 | 1 | индекс семейства: 6 → 1, иначе 0 | `raw_probe.rs` `fam_ix` | E | C `return family==6 ? 1 : 0`. Rust `fam_ix` используется `raw_selftest_index`; тест `fam_ix_matches_c_family_slots` проверяет 4/6/0 и слоты 0..3. |
 | `self_ix` | 769-771 | 3 | индекс кэша `(family, offer_ts)`: 0/1 с меткой, 2/3 без | `raw_probe.rs:719-721 raw_selftest_index` | **E** | C `fam_ix(family)+(offer_ts?0:2)`. Rust `(if family==6 {1} else {0}) + if offer_ts {0} else {2}` — точное совпадение; `raw_probe.rs:2348` (`RAW_SELFTEST_KEY`). |
-| `selftest_cached_age` | 774-789 | 445 | возраст кэша самопроверки или -1 | `raw_probe.rs:685 raw_selftest_age` | **P** | C под mutex: `ok[k]` → `d=now-at[k]`; `0<=d<TTL(600000)` → age, иначе `ok=0`; иначе -1. Rust `raw_selftest_age`; TTL 600 с совпадает, теста возраста нет. |
+| `selftest_cached_age` | 774-789 | 445 | возраст кэша самопроверки или -1 | `raw_probe.rs` `raw_selftest_age`/`selftest_age_from` | **E** | C под mutex: `ok[k]` → `d=now-at[k]`; `0<=d<TTL(600000)` → age, иначе `ok=0`; иначе -1. Rust `selftest_age_from` проверяет `age < 600 с`, `raw_selftest_age` очищает просроченный слот. Тест `selftest_cached_age_ttl_matches_c` (None/0/599/600 с). |
 | `selftest_store` | 791-799 | 282 | записать исход самопроверки: ok/at/сброс серии | `raw_probe.rs:735 store_raw_selftest` | **E** | C `k=self_ix`; под mutex `ok[k]=ok`, `at[k]=now`, `streak[k]=0`. Rust `store_raw_selftest`; `raw_probe.rs:2348` (`RAW_SELFTEST_INVALIDATION`). |
 | `d2k_raw_note_rc` | 801-823 | 1035 | счётчики raw_ok/raw_err и серия ошибок на семейство | `raw_probe.rs:701 note_raw_probe` | **E** | **Ветви сверены:** C `rc<0` → `raw_probes_err++`, иначе `raw_probes_ok++`; под mutex: `rc<0` → `++streak[k]>=3` гасит оба набора семейства; иначе `streak=0`. Rust `note_raw_probe` + локальные `raw_ok/raw_errors`; `raw_probe.rs:2348`; `tests/classify.rs:990`. |
 | `raw_selftest` | 827-854 | 943 | самопроверка сырого слоя: до `repeats`, первый успех завершает | `raw_probe.rs:120-186` | **P** | C `trace_add("raw-selftest")`; цикл: отмена, `raw_probe_handshake_as`, `probes++`; `rc<0` fail+err, `rc>0` pass+break, `rc==0` fail; `obs_done`; `selftest_store(ok=pass>0)`. Rust `raw_selftest`; цикл встроен в `sweep_poisons`, отдельного теста цикла нет. |
