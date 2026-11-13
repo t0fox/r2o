@@ -775,9 +775,8 @@ impl Recorder {
             ("target", 255),
             ("protocol", 15),
             ("outcome", 31),
-            // Полная причина важнее дословного 255-байтового предела D2O:
-            // иначе диагностика обрывает текст на полуслове.
-            ("reason", 1024),
+            // C `event.reason[256]`: предел 255 байт, как у остальных строк.
+            ("reason", 255),
             ("ip", 47),
             ("path", 15),
             ("kind", 7),
@@ -1170,12 +1169,16 @@ impl Recorder {
         self.anomalies.push_back(anomaly);
     }
 
-    fn record_write_error(&mut self, stage: &'static str) {
+    fn last_errno() -> i32 {
+        std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+    }
+
+    fn record_write_error(&mut self, stage: &'static str, error_code: i32) {
         self.write_failures = self.write_failures.saturating_add(1);
         let anomaly = json!({
             "kind": "diagnostic-json-write-error",
             "at": unix_seconds(),
-            "error_code": null,
+            "error_code": error_code,
             "stage": stage,
             "rss_delta_kib": null,
             "accounted_delta_kib": null,
@@ -1186,13 +1189,14 @@ impl Recorder {
 
     fn write_report(&mut self, report: &Value) {
         if !ensure_diagnostics_dir(&self.dir, true) {
-            self.record_write_error("path");
+            let error = Self::last_errno();
+            self.record_write_error("path", error);
             return;
         }
         let bytes = match serde_json::to_vec(report) {
             Ok(bytes) => bytes,
             Err(_) => {
-                self.record_write_error("serialize");
+                self.record_write_error("serialize", 0);
                 return;
             }
         };
@@ -1200,12 +1204,16 @@ impl Recorder {
             return;
         }
         if bytes.len() > REPORT_MAX {
-            self.record_write_error("size-limit");
+            self.record_write_error("size-limit", libc::EFBIG);
             return;
         }
         let tmp = self.dir.join("report.new");
         let path = self.dir.join("report.json");
-        let _ = fs::remove_file(&tmp);
+        if let Err(error) = fs::remove_file(&tmp)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            self.record_write_error("remove-old-temp", error.raw_os_error().unwrap_or(0));
+        }
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -1214,27 +1222,32 @@ impl Recorder {
             options.mode(0o600);
         }
         let Ok(mut file) = options.open(&tmp) else {
-            self.record_write_error("open-temp");
+            let error = Self::last_errno();
+            self.record_write_error("open-temp", error);
             return;
         };
-        let write_failed = file
-            .write_all(&bytes)
-            .and_then(|()| file.sync_all())
-            .is_err();
+        let write_result = file.write_all(&bytes).and_then(|()| file.sync_all());
+        let write_error = write_result
+            .as_ref()
+            .err()
+            .and_then(std::io::Error::raw_os_error)
+            .unwrap_or(0);
+        let write_failed = write_result.is_err();
         if write_failed
             || fs::metadata(&tmp).map_or(true, |metadata| metadata.len() as usize > REPORT_MAX)
             || !diagnostics_enabled(&self.dir)
         {
             let _ = fs::remove_file(&tmp);
             if write_failed {
-                self.record_write_error("flush-close");
+                self.record_write_error("flush-close", write_error);
             }
             return;
         }
         drop(file);
-        if fs::rename(&tmp, &path).is_err() {
+        if let Err(error) = fs::rename(&tmp, &path) {
+            let code = error.raw_os_error().unwrap_or(0);
             let _ = fs::remove_file(&tmp);
-            self.record_write_error("rename");
+            self.record_write_error("rename", code);
         }
     }
 }
@@ -1564,9 +1577,10 @@ fn read_fd_count(path: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Counts, MADVISE_ERRNO_SLOTS, MEMORY_SITE_COUNT, MadviseErrno, MadviseStats, Recorder,
-        d2o_ring_bytes, madvise_json, memory_acquire, memory_active, memory_alloc_failure,
-        memory_enable, memory_release, memory_snapshot, memory_tracking_json, tracked_memory_bytes,
+        Counts, EVENT_CAPACITY, MADVISE_ERRNO_SLOTS, MEMORY_SITE_COUNT, MadviseErrno, MadviseStats,
+        Recorder, d2o_ring_bytes, madvise_json, memory_acquire, memory_active,
+        memory_alloc_failure, memory_enable, memory_release, memory_snapshot, memory_tracking_json,
+        tracked_memory_bytes,
     };
     use serde_json::json;
     use std::fs::{self, OpenOptions};
@@ -1720,6 +1734,74 @@ mod tests {
         assert!(!memory_acquire(0, 1));
         memory_alloc_failure(0);
         assert_eq!(memory_snapshot(), frozen);
+    }
+
+    #[test]
+    fn record_write_error_stores_code_and_keeps_last_eight_anomalies() {
+        let mut recorder = Recorder::new(std::env::temp_dir(), std::env::temp_dir());
+        recorder.record_write_error("open-temp", libc::EACCES);
+        assert_eq!(recorder.write_failures, 1);
+        assert_eq!(recorder.anomalies.len(), 1);
+        let anomaly = recorder.anomalies.back().unwrap();
+        assert_eq!(anomaly["kind"], "diagnostic-json-write-error");
+        assert_eq!(anomaly["stage"], "open-temp");
+        // C `d2k_diag_record_write_error` сохраняет error в anomaly.code.
+        assert_eq!(anomaly["error_code"], json!(libc::EACCES));
+        assert!(anomaly["rss_delta_kib"].is_null());
+        assert!(anomaly["accounted_delta_kib"].is_null());
+        assert_eq!(anomaly["window_samples"], json!(0));
+
+        for code in 1..=10 {
+            recorder.record_write_error("rename", code);
+        }
+        assert_eq!(recorder.write_failures, 11);
+        assert_eq!(recorder.anomaly_total, 11);
+        assert_eq!(recorder.anomalies.len(), 8);
+        assert_eq!(recorder.anomalies.back().unwrap()["error_code"], json!(10));
+    }
+
+    #[test]
+    fn record_event_ring_and_text_limits_match_c() {
+        let mut recorder = Recorder::new(std::env::temp_dir(), std::env::temp_dir());
+        recorder.enabled = true;
+        for id in 1..=70 {
+            recorder.record(json!({
+                "id": id,
+                "target": "a".repeat(300),
+                "protocol": "b".repeat(20),
+                "outcome": "c".repeat(40),
+                "reason": "d".repeat(300),
+                "ip": "e".repeat(60),
+                "path": "f".repeat(20),
+                "kind": "g".repeat(10),
+            }));
+        }
+        assert_eq!(recorder.event_total, 70);
+        assert_eq!(recorder.events.len(), EVENT_CAPACITY);
+        assert_eq!(recorder.events.front().unwrap()["id"], json!(7));
+        assert_eq!(recorder.events.back().unwrap()["id"], json!(70));
+
+        // C `copy` режет строки по размерам полей event (cap-1 байт).
+        let last = recorder.events.back().unwrap();
+        assert_eq!(last["target"].as_str().unwrap().len(), 255);
+        assert_eq!(last["protocol"].as_str().unwrap().len(), 15);
+        assert_eq!(last["outcome"].as_str().unwrap().len(), 31);
+        assert_eq!(last["reason"].as_str().unwrap().len(), 255);
+        assert_eq!(last["ip"].as_str().unwrap().len(), 47);
+        assert_eq!(last["path"].as_str().unwrap().len(), 15);
+        assert_eq!(last["kind"].as_str().unwrap().len(), 7);
+        assert!(last["at"].is_u64());
+
+        // Событие без id получает event_total; не-объект и выключенный
+        // сбор игнорируются.
+        recorder.record(json!({"target": "x"}));
+        assert_eq!(recorder.events.back().unwrap()["id"], json!(71));
+        let total = recorder.event_total;
+        recorder.record(json!(1));
+        assert_eq!(recorder.event_total, total);
+        recorder.enabled = false;
+        recorder.record(json!({"id": 99}));
+        assert_eq!(recorder.event_total, total);
     }
 
     #[cfg(unix)]
