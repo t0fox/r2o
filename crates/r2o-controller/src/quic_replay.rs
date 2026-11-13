@@ -37,6 +37,18 @@ pub fn r2o_qp_addr_parse(text: &str) -> Option<(u8, [u8; 16])> {
 }
 
 /// Match d2o `d2k_ip4_private` / `d2k_ip6_private` for QUIC targets.
+/// C `replay_now_ms`: монотонные миллисекунды процесса для QUIC-replay.
+pub fn replay_now_ms() -> i64 {
+    use std::sync::OnceLock;
+
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}
+
 pub fn r2o_quic_address_is_local(address: SocketAddr) -> bool {
     fn ipv4_is_local(address: std::net::Ipv4Addr) -> bool {
         let [a, b, _, _] = address.octets();
@@ -1027,6 +1039,14 @@ pub async fn r2o_quic_ask_donor_version_negotiation(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn replay_now_ms_is_monotonic_like_c() {
+        let first = super::replay_now_ms();
+        assert!(first >= 0);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = super::replay_now_ms();
+        assert!(second > first);
+    }
     use super::{
         QuicReplayProbe, R2oQuicCandidateKind, R2oQuicFilterDecision,
         r2o_quic_adaptive_split_eligible, r2o_quic_ask_donor_parallel,
