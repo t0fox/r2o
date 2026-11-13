@@ -67,6 +67,10 @@ pub(crate) fn raw_dial_count() -> u64 {
     RAW_DIALS.with(Cell::get)
 }
 
+fn note_raw_dial() {
+    RAW_DIALS.with(|count| count.set(count.get().saturating_add(1)));
+}
+
 /// C `d2k_raw_supported` (`detect/raw.c:164`): на Linux сырой слой
 /// доступен всегда; отказ ядра проявится при открытии сокета отправки.
 pub fn raw_supported() -> bool {
@@ -2064,7 +2068,7 @@ impl RawConn {
             }
         }
         let source_port = next_source_port();
-        RAW_DIALS.with(|count| count.set(count.get().saturating_add(1)));
+        note_raw_dial();
         let rst_guard = RstGuard::install(source_port, remote);
         let mut connection = Self {
             sender,
@@ -3236,6 +3240,21 @@ mod tests {
         assert!(nft4.contains("198.51.100.2"));
         assert!(nft4.contains("40124"));
         assert!(nft4.contains("80"));
+    }
+
+    #[test]
+    fn raw_dial_counter_matches_c() {
+        let before = raw_dial_count();
+        note_raw_dial();
+        assert_eq!(raw_dial_count(), before + 1);
+    }
+
+    #[test]
+    fn register_rst_cleanup_is_once() {
+        // C `register_atexit` вызывается под `pthread_once`.
+        register_rst_cleanup();
+        register_rst_cleanup();
+        assert!(RST_CLEANUP_REGISTERED.is_completed());
     }
 
     #[test]

@@ -111,3 +111,36 @@ pub fn result_json_value(result: &ClassifyResult, trigger_len: usize) -> serde_j
     }
     value
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{TriState, insert_tri_state};
+
+    #[test]
+    fn json_string_escaping_matches_c_print_json_str() {
+        // C `print_json_str` экранирует `"`/`\`, control <0x20 как \u%04x,
+        // UTF-8 отдаёт как есть; serde_json делает то же для валидной строки.
+        let value = serde_json::json!({
+            "quote": "a\"b\\c",
+            "control": "\u{1}\u{1f}",
+            "utf8": "пример",
+        });
+        let text = serde_json::to_string(&value).unwrap();
+        assert!(text.contains("a\\\"b\\\\c"), "{text}");
+        assert!(text.contains("\\u0001"), "{text}");
+        assert!(text.contains("\\u001f"), "{text}");
+        assert!(text.contains("пример"), "{text}");
+    }
+
+    #[test]
+    fn tri_state_fields_match_c_print_tri() {
+        // C `print_tri`: UNSET пропускается, TRUE/FALSE дают JSON true/false.
+        let mut props = serde_json::Map::new();
+        insert_tri_state(&mut props, "unset", TriState::Unset);
+        insert_tri_state(&mut props, "yes", TriState::True);
+        insert_tri_state(&mut props, "no", TriState::False);
+        assert!(!props.contains_key("unset"));
+        assert_eq!(props["yes"], serde_json::json!(true));
+        assert_eq!(props["no"], serde_json::json!(false));
+    }
+}
