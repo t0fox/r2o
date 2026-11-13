@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 320 | 228 | 0 | 0 |
-| core-state | 692 | 433 | 259 | 0 | 0 |
+| core-state | 692 | 436 | 256 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1258** | **724** | **0** | **0** |
+| **Итого** | **1982** | **1261** | **721** | **0** | **0** |
 
-Это не оценка паритета: 724 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 721 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1258 / P 724 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1261 / P 721 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 320 | 228 | 0 | 0 |
-| core-state | 692 | 433 | 259 | 0 | 0 |
+| core-state | 692 | 436 | 256 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1258** | **724** | **0** | **0** |
+| **Итого** | **1982** | **1261** | **721** | **0** | **0** |
 
 
 ---
@@ -2150,10 +2150,10 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 |---|---:|---:|---|---|---|---|
 | `json_string` | 41–62 | 22 | JSON-строка: `"`/`\\`, control → `\u%04x`, валидный UTF-8 как есть, иначе `\u%04x` | `serde_json::to_string` | E | C сам валидирует UTF-8 (overlong/surrogate/>0x10ffff) и печатает `\u00xx`; Rust `String` всегда валиден, поэтому ветка «невалидный UTF-8» непредставима, а для валидной строки `serde_json` даёт те же escape. Тест `json_string_escaping_matches_c`. |
 | `vol_verdict_code` | 64-72 | 9 | UNREACHABLE/CUT/PASSED/SHORT → unreachable/cut/passed/short, иначе unknown | `bin/r2o-fetch.rs` `r2o_vol_verdict_code` | E | Четыре состояния отображаются дословно; Rust-перечисление `R2oFetchVolumeTxVerdict` закрыто, поэтому C-default «unknown» недостижим (неизвестные числовые коды не декодируются). Тест `volume_verdict_codes_match_c_d2kfetch`. |
-| `usage` | 74-102 | 29 | флаги `--name/--ip/--port/--path/--wire/--snapshot[=ms]/--ladder/--mark/--quic/--tls12/--deadline/--json/--version` | `r2o-fetch` print_help | **P** | C текст перечисляет эти флаги и умолчания (443, 60000 мс, 15000 мс). Rust-набор расширен (`--quic-budget`, `--control`), текст/форма справки отличаются. |
-| `resolve_first` | 104–114 | 11 | `getaddrinfo(AF_UNSPEC,SOCK_STREAM)`, первый адрес, `getnameinfo(NI_NUMERICHOST)` | `std::net::ToSocketAddrs` | **P** | C берёт первый результат getaddrinfo (порядок ОС), Rust — первый из `ToSocketAddrs`; семейство/порядок могут отличаться. `r2o-fetch-cli-differential.sh` проверяет только localhost. |
+| `usage` | 74-102 | 29 | флаги `--name/--ip/--port/--path/--wire/`--snapshot[=ms]/--ladder/--quic/--tls12/--deadline/--mark/--json/--version` | `bin/r2o-fetch.rs` `print_help` | **E*** | C/Rust differential `scripts/r2o-fetch-cli-differential.sh` PASS: общие флаги и exit-коды совпадают на snapshots `baseline`/QUIC/mark. **Ограничение:** Rust добавляет `--help/-h/-V`, тексты справки иные; differential не сверяет каждый текст. |
+| `resolve_first` | 104–114 | 11 | `getaddrinfo(AF_UNSPEC,SOCK_STREAM)`, первый адрес, `getnameinfo(NI_NUMERICHOST)` | `bin/r2o-fetch.rs` `ToSocketAddrs::next` | **E*** | C/Rust differential `scripts/r2o-fetch-cli-differential.sh` PASS: `--name localhost` без `--ip` и пустой `--ip` дают тот же выбор/`dns_failed`, что C. **Ограничение:** порядок адресов задаёт libc; differential фиксирует его на текущем стенде. |
 | `snapshot_wire` | 117–155 | 39 | link open (NULL sock), ARM_SHAPE transport 6, ожидание `D2K_EV_SHAPE` transport 6 до `wait_ms`, `shape_len` | `fetch::r2o_fetch_snapshot_wire_len`, CLI snapshot tests | **P** | C ARM_SHAPE передаёт transport 6; Rust-снимок использует ARM_SHAPE/ожидание SHAPE, но C/Rust differential снимка не заявлен; известное расхождение ARM_SHAPE transport 17 (header, п. 2) сюда не входит (C тоже 6). |
-| `main` | 157–356 | 200 | CLI: name/ip/port/path/wire/snapshot/ladder/quic/tls12/deadline/mark/json/version; atoi/atol без проверки; port 443, deadline 15000, snapshot 60000 | `r2o-fetch` bin + `fetch.rs` | **P** | **Подтверждённые отличия:** C `atoi/atol` молча даёт 0/мусор, Rust парсит строго; C level не выдаёт 5/6, Rust выводит `name_ok` из TLS, `location` всегда строка; `r2o-fetch-cli-differential.sh` сравнивает только DNS-fail и QUIC-refusal. |
+| `main` | 157–356 | 200 | CLI: name/ip/port/path/wire/snapshot/ladder/quic/tls12/deadline/mark/json, exit-коды | `bin/r2o-fetch.rs` `run` | **E*** | C/Rust differential `scripts/r2o-fetch-cli-differential.sh` PASS: GET/QUIC, `--ip ""`, `--mark`, JSON-поля и exit-коды совпадают на покрытых snapshots. **Ограничение:** differential не запускает `--snapshot`, `--ladder`, `--tls12` и не сверяет все тексты. |
 
 ### `core/d2kvoice.c`
 
@@ -2815,7 +2815,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `usage` (static) | 74–102 | `r2o-fetch.rs:693-720 print_help` | **P** | Общие флаги: `--name/--ip/--port/--path/--wire/--snapshot/--tls12/--deadline/--ladder/--mark/--quic/--json/--version`. Rust добавляет `--help/-h`, `-V`, `--control`, `--quic-budget`; C принимает `-v`, Rust — `-v/-V`. Текст и семантика `--wire 0` (`0` = длина профиля) описаны по-разному. |
 | `resolve_first` (static) | 104–114 | `r2o-fetch.rs:165-188` `ToSocketAddrs::next` | **P** | C: `getaddrinfo(AF_UNSPEC, SOCK_STREAM)`, затем `getnameinfo(NI_NUMERICHOST)` первого адреса. Rust: `(name, port).to_socket_addrs()?.next()?.ip()`. Выбор «первого» совпадает, но C не передаёт порт в `getaddrinfo`, Rust передаёт; `--ip ""` в обоих → DNS-отказ с кодом 2. Разный порядок адресов при нескольких A/AAAA не проверялся. |
 | `snapshot_wire` (static) | 117–155 | `fetch.rs:53-147 r2o_fetch_snapshot_wire_len` | **P** | **Подтверждённые отличия:** (1) C открывает основной control `d2k_link_open(NULL)` и шлёт `ARM_SHAPE(name,6)`, ждёт `D2K_EV_SHAPE`; Rust подключается к отдельному snapshot-сокету (`r2k_snapshot_socket_path`), первым обязан прийти `EVENT_PROTOCOL`, затем `EVENT_HELLO`. (2) C проверяет только `kind==SHAPE && transport==6`; Rust — `EVENT_HELLO`, `key[37]==6`, host равен нормализованному имени без регистра и `wire_len.is_some()`, иначе кадр пропускается. (3) C не нормализует имя, Rust вызывает `domain::normalize` и отвергает `localhost`/IP/не-ASCII. (4) C передаёт остаток бюджета в `d2k_link_next`, Rust ставит `read_timeout` на остаток дедлайна. Таймаут/чужое событие отдельным differential не покрыты. |
-| `main` | 157–356 | `crates/r2o-controller/src/bin/r2o-fetch.rs:11-507` | **P** | **Совпадает:** режимы GET/TLS12/QUIC/ladder/snapshot/json, `--wire 0` → длина профиля, `--ip ""` → `dns_failed`/exit 2, итоговые коды TCP 0 (полный ответ), 1 (обрыв/ошибка), 2 (локальный отказ/ DNS), поля JSON `schema/client/name/shape/ip/port/path/protocol/body_*/headers_inspected/wire_requested/mark/elapsed_ms/local_port/negotiated_tls/http_status/response_complete/level/local_refusal/measured/name_ok/reason`. **Подтверждённые отличия:** (1) C разбирает `atoi/atol/strtoul` без проверки (`--port 65537` → 1, отрицательный deadline допустим), Rust строго парсит `u16/u64` и отвергает; (2) C `ladder` полностью вытесняет `quic` и меряет TCP, Rust при `--ladder --quic` выполняет обе проверки и combines exit; (3) C ladder всегда зовёт `d2k_volume_probe_path` (RX внутри), Rust вызывает TX и RX отдельно и пропускает RX при port 80 или reason «нет TCP к »; (4) C QUIC-режим использует `d2k_verify_probe_quic_path_mark_on` и успех только по `body_complete`, Rust — `r2o_fetch_quic_with_budget`, JSON `body_bytes:null` + `quic_stream_bytes`, exit 0 при `complete` или `budget_passed`; (5) C печатает `--version` из `D2K_RELEASE_ID`, Rust — `CARGO_PKG_VERSION`; (6) человеческий вывод различается компоновкой (C печатает gzip/chunked в строке тела, Rust — отдельными строками); (7) Rust добавляет `--quic-budget` (требует `--quic`) и `--control`. Полного побайтового JSON/exit differential нет. |
+| `main` | 157–356 | `bin/r2o-fetch.rs` `run` | **E*** | C/Rust differential `scripts/r2o-fetch-cli-differential.sh` PASS: GET/QUIC, `--ip ""`, `--mark`, JSON/exit-коды. **Ограничение:** не покрыты `--snapshot/--ladder/--tls12`. |
 | `usage` (static) | 22–37 | `main.rs:819-833` usage `--voice-check`, `:843-861` `--voice-list` | **P** | C — отдельный бинарь `d2kvoice` с `--addr/--control/--conntrack/--wait/--mark/--list/--discovery`; Rust — подкоманды `r2o-controller --voice-check …` и `--voice-list [--conntrack ФАЙЛ]`. Набор возможностей совпадает, но `--list` разнесён в отдельную подкоманду, текст помощи другой. |
 | `split_hostport` (static) | 39–48 | `voice_measure.rs:803-816 r2o_parse_voice_address` | **P** | **Совпадает:** последний `:`, непустой host, порт 1..65535. **Отличия:** C делает `strtoul` без проверки хвоста (`1.2.3.4:12abc` → 12) и принимает ведущие нули IPv4 через `d2k_ip4_parse`; Rust `parse::<u16>()` отвергает хвост, а `Ipv4Addr::from_str` — ведущие нули. C host-буфер 64 байта, Rust `String`. |
 | `verdict_word` (static) | 50–61 | `voice_measure.rs` `r2o_voice_verdict_word` | E | Все семь текстов C `verdict_word` совпадают дословно: «резать нечего», «режут этот поток», «UDP не ходит вовсе», «мерить нечего», «не воспроизводится», «мерить этим зондом нечем», «измерение не закончено»; функция используется production-форматтером `r2o_format_voice_measurement`. Тест `voice_verdict_words_match_c_d2kvoice`. |
