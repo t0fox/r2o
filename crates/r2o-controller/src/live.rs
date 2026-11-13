@@ -46,6 +46,25 @@ pub struct LiveGroupKey {
     pub ech_origin: String,
 }
 
+/// Снимок `installed_area` для live.json.
+#[derive(Clone, Debug, Default)]
+pub struct LiveAreaState {
+    pub kind: u8,
+    pub name: String,
+    pub transport: u8,
+    pub shape: u8,
+    pub family: u8,
+    pub plan_id: Option<String>,
+    pub confirmed: bool,
+    pub maybe_active: bool,
+    pub remove_pending: bool,
+    pub permanent: bool,
+    pub retry_count: u32,
+    pub reason: String,
+    pub reason_code: u32,
+    pub detail: String,
+}
+
 impl From<&DomainGroup> for LiveGroupKey {
     fn from(group: &DomainGroup) -> Self {
         Self {
@@ -60,6 +79,76 @@ impl From<&DomainGroup> for LiveGroupKey {
     }
 }
 
+fn group_plan_available(catalog: &Catalog, group: &DomainGroup) -> bool {
+    let proto = if group.key.transport == 17 {
+        "quic"
+    } else {
+        "tls"
+    };
+    catalog.boxes.iter().any(|box_record| {
+        box_record.plans.iter().any(|plan| {
+            plan.enabled && !plan.text.is_empty() && plan.id == group.plan_id && plan.proto == proto
+        })
+    })
+}
+
+fn group_exception_status(
+    catalog: &Catalog,
+    group: &DomainGroup,
+    observations: &[DomainObservation],
+    areas: &[LiveAreaState],
+) -> (String, String, u32, String) {
+    let mut found = false;
+    let mut best = 0_u8;
+    let mut state = "none".to_owned();
+    let mut reason = String::new();
+    let mut reason_code = 0;
+    let mut detail = String::new();
+    for observation in observations
+        .iter()
+        .filter(|observation| group_exception(catalog, group, observation))
+    {
+        found = true;
+        let installed = areas.iter().find(|area| {
+            area.kind == 2
+                && area.name == observation.name
+                && area.transport == group.key.transport
+                && area.shape == group.key.shape
+                && area.family == group.key.family
+        });
+        if let Some(area) = installed
+            && area.confirmed
+            && !area.remove_pending
+        {
+            continue;
+        }
+        let (candidate, rank) = if installed.is_some_and(|area| area.permanent) {
+            ("rejected", 3)
+        } else if installed.is_some_and(|area| area.retry_count > 0) {
+            ("retrying", 2)
+        } else {
+            ("pending", 1)
+        };
+        if rank > best {
+            best = rank;
+            state = candidate.to_owned();
+            if let Some(area) = installed {
+                reason.clone_from(&area.reason);
+                reason_code = area.reason_code;
+                detail.clone_from(&area.detail);
+            } else {
+                reason.clear();
+                reason_code = 0;
+                detail.clear();
+            }
+        }
+    }
+    if found && best == 0 {
+        state = "active".to_owned();
+    }
+    (state, reason, reason_code, detail)
+}
+
 pub fn snapshot(
     catalog: &Catalog,
     catalog_path: &Path,
@@ -67,6 +156,26 @@ pub fn snapshot(
     searches: Vec<Value>,
     measurements: Value,
     discovery_status: DiscoveryStatus,
+) -> Result<Value, CatalogError> {
+    snapshot_with_areas(
+        catalog,
+        catalog_path,
+        active_groups,
+        searches,
+        measurements,
+        discovery_status,
+        &[],
+    )
+}
+
+pub fn snapshot_with_areas(
+    catalog: &Catalog,
+    catalog_path: &Path,
+    active_groups: &HashSet<LiveGroupKey>,
+    searches: Vec<Value>,
+    measurements: Value,
+    discovery_status: DiscoveryStatus,
+    areas: &[LiveAreaState],
 ) -> Result<Value, CatalogError> {
     let mut boxes = Vec::with_capacity(catalog.boxes.len());
     let mut targets = 0_u64;
@@ -164,6 +273,49 @@ pub fn snapshot(
                     "name": observation.name,
                     "reason": if observation.evidence & DOMAIN_DIRECT_CLEAR != 0 { "Напрямую работает" } else { "Общий план не подошёл" }
                 })).collect::<Vec<_>>();
+            let (exception_state, exception_reason, exception_reason_code, exception_detail) =
+                group_exception_status(catalog, group, &state.observations, areas);
+            let exceptions_ready = matches!(exception_state.as_str(), "none" | "active");
+            let mut install_state = "pending";
+            let mut install_reason = String::new();
+            let mut install_reason_code = 0;
+            let mut install_detail = String::new();
+            let mut active = false;
+            let mut possibly_active = false;
+            let mut remove_pending = false;
+            if !group_plan_available(catalog, group) {
+                install_state = "rejected";
+                install_reason = "plan_unavailable".into();
+            } else if let Some(area) = areas.iter().find(|area| {
+                area.kind == 1
+                    && area.name == group.suffix
+                    && area.transport == group.key.transport
+                    && area.shape == group.key.shape
+                    && area.family == group.key.family
+                    && area.plan_id.as_deref().is_none_or(|plan| plan == group.plan_id)
+            }) {
+                remove_pending = area.remove_pending;
+                install_reason.clone_from(&area.reason);
+                install_reason_code = area.reason_code;
+                install_detail.clone_from(&area.detail);
+                if area.permanent {
+                    install_state = "rejected";
+                } else if area.remove_pending {
+                    install_state = if area.retry_count > 0 { "retrying" } else { "removing" };
+                } else if area.retry_count > 0 {
+                    install_state = "retrying";
+                } else if area.confirmed && exceptions_ready {
+                    install_state = "active";
+                    active = true;
+                } else if (area.confirmed || area.maybe_active) && !exceptions_ready {
+                    install_state = "removing";
+                    install_detail = "Общее правило требуется снять перед установкой исключения".into();
+                }
+                possibly_active = (area.confirmed || area.maybe_active) && !active;
+            }
+            if areas.is_empty() {
+                active = active_groups.contains(&LiveGroupKey::from(group));
+            }
             json!({
                 "suffix": group.suffix,
                 "transport": group.key.transport,
@@ -173,7 +325,17 @@ pub fn snapshot(
                 "plan_id": group.plan_id,
                 "probe_path": group.key.probe_path,
                 "ech_origin": group.key.ech_origin,
-                "active": active_groups.contains(&LiveGroupKey::from(group)),
+                "install_state": install_state,
+                "install_reason": install_reason,
+                "install_reason_code": install_reason_code,
+                "install_detail": install_detail,
+                "exception_install_state": exception_state,
+                "exception_install_reason": exception_reason,
+                "exception_install_reason_code": exception_reason_code,
+                "exception_install_detail": exception_detail,
+                "remove_pending": remove_pending,
+                "active": active,
+                "possibly_active": possibly_active,
                 "evidence": evidence,
                 "exceptions": exceptions,
             })
@@ -469,6 +631,150 @@ mod tests {
         assert_eq!(live["client_unfit"], 0);
         assert_eq!(live["autopick"]["reason"], "нет событий от datapath");
         assert_eq!(live["autopick"]["datapath_events"], 0);
+    }
+
+    #[test]
+    fn live_group_install_and_exception_states_match_c() {
+        let key = crate::catalog::GroupKey {
+            transport: 6,
+            family: 4,
+            shape: 1,
+            probe_path: "/".into(),
+            ech_origin: String::new(),
+        };
+        let group = DomainGroup {
+            suffix: "example.com".into(),
+            plan_id: "plan-1".into(),
+            key: key.clone(),
+            evidence_count: 1,
+            at: 1,
+        };
+        let mut catalog = Catalog {
+            boxes: vec![BoxRecord {
+                plans: vec![Plan {
+                    id: "plan-1".into(),
+                    proto: "tls".into(),
+                    text: "plan".into(),
+                    enabled: true,
+                    ..Plan::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            domain_state: Some(DomainState {
+                groups: vec![group.clone()],
+                observations: vec![
+                    DomainObservation {
+                        name: "a.example.com".into(),
+                        plan_id: "plan-1".into(),
+                        key: key.clone(),
+                        evidence: DOMAIN_BLOCKED,
+                        at: 1,
+                    },
+                    DomainObservation {
+                        name: "b.example.com".into(),
+                        plan_id: "plan-1".into(),
+                        key: key.clone(),
+                        evidence: DOMAIN_DIRECT_CLEAR,
+                        at: 2,
+                    },
+                ],
+                ..DomainState::default()
+            }),
+            ..Catalog::default()
+        };
+        let group_area =
+            |confirmed: bool, retry: u32, reason: &str, permanent: bool| LiveAreaState {
+                kind: 1,
+                name: "example.com".into(),
+                transport: 6,
+                shape: 1,
+                family: 4,
+                plan_id: Some("plan-1".into()),
+                confirmed,
+                reason: reason.into(),
+                retry_count: retry,
+                permanent,
+                ..LiveAreaState::default()
+            };
+        let exception_area =
+            |confirmed: bool, retry: u32, reason: &str, permanent: bool| LiveAreaState {
+                kind: 2,
+                name: "b.example.com".into(),
+                transport: 6,
+                shape: 1,
+                family: 4,
+                confirmed,
+                reason: reason.into(),
+                retry_count: retry,
+                permanent,
+                ..LiveAreaState::default()
+            };
+        let snapshot = |areas: &[LiveAreaState], catalog: &Catalog| {
+            snapshot_with_areas(
+                catalog,
+                Path::new("/state/catalog.json"),
+                &HashSet::new(),
+                Vec::new(),
+                json!({}),
+                DiscoveryStatus::default(),
+                areas,
+            )
+            .unwrap()
+        };
+
+        let active = snapshot(
+            &[
+                group_area(true, 0, "", false),
+                exception_area(true, 0, "", false),
+            ],
+            &catalog,
+        );
+        assert_eq!(active["groups"][0]["install_state"], "active");
+        assert_eq!(active["groups"][0]["exception_install_state"], "active");
+        assert_eq!(active["groups"][0]["active"], true);
+        assert_eq!(active["groups"][0]["possibly_active"], false);
+
+        let pending_exception = snapshot(
+            &[
+                group_area(true, 0, "", false),
+                exception_area(false, 1, "bad_plan", true),
+            ],
+            &catalog,
+        );
+        assert_eq!(
+            pending_exception["groups"][0]["exception_install_state"],
+            "rejected"
+        );
+        assert_eq!(pending_exception["groups"][0]["install_state"], "removing");
+        assert_eq!(pending_exception["groups"][0]["possibly_active"], true);
+
+        let no_area = snapshot(&[], &catalog);
+        assert_eq!(no_area["groups"][0]["install_state"], "pending");
+
+        let removing = snapshot(
+            &[
+                LiveAreaState {
+                    remove_pending: true,
+                    ..group_area(true, 0, "", false)
+                },
+                exception_area(true, 0, "", false),
+            ],
+            &catalog,
+        );
+        assert_eq!(removing["groups"][0]["install_state"], "removing");
+        assert_eq!(removing["groups"][0]["remove_pending"], true);
+
+        let retrying = snapshot(&[group_area(false, 2, "ack_timeout", false)], &catalog);
+        assert_eq!(retrying["groups"][0]["install_state"], "retrying");
+        assert_eq!(retrying["groups"][0]["install_reason"], "ack_timeout");
+
+        catalog.boxes[0].plans[0].enabled = false;
+        let unavailable = snapshot(&[group_area(true, 0, "", false)], &catalog);
+        assert_eq!(unavailable["groups"][0]["install_state"], "rejected");
+        assert_eq!(
+            unavailable["groups"][0]["install_reason"],
+            "plan_unavailable"
+        );
     }
 
     #[test]

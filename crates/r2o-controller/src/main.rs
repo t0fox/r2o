@@ -2064,7 +2064,7 @@ fn apply_catalog(socket_path: PathBuf, catalog_path: PathBuf) -> Result<(), Box<
     let mut area_sequence = 0;
     let mut installed_areas = Vec::new();
     let mut cursor =
-        CatalogSyncCursor::from_compiled(compiled, &mut area_sequence, &installed_areas)?;
+        CatalogSyncCursor::from_compiled(compiled, &mut area_sequence, &mut installed_areas)?;
     let mut active_groups = HashSet::new();
     loop {
         if !cursor.send_step(&mut client, &mut active_groups, &mut installed_areas)? {
@@ -4025,6 +4025,91 @@ struct InstalledCatalogArea {
     plan_id: Option<String>,
     group: Option<r2o_controller::live::LiveGroupKey>,
     confirmed: bool,
+    permanent: bool,
+    retry_count: u32,
+    reason: u8,
+    reason_code: u32,
+    detail: String,
+    remove_pending: bool,
+    maybe_active: bool,
+}
+
+#[cfg(unix)]
+const AREA_REASON_NONE: u8 = 0;
+#[cfg(unix)]
+const AREA_REASON_ACK_TIMEOUT: u8 = 1;
+#[cfg(unix)]
+const AREA_REASON_SEND_ERROR: u8 = 2;
+#[cfg(unix)]
+const AREA_REASON_NO_ROOM: u8 = 3;
+#[cfg(unix)]
+const AREA_REASON_BAD_PLAN: u8 = 4;
+#[cfg(unix)]
+const AREA_REASON_BAD_ARGS: u8 = 5;
+#[cfg(unix)]
+const AREA_REASON_UNKNOWN_ACK: u8 = 6;
+
+#[cfg(unix)]
+fn area_reason_name(reason: u8) -> &'static str {
+    match reason {
+        AREA_REASON_ACK_TIMEOUT => "ack_timeout",
+        AREA_REASON_SEND_ERROR => "send_error",
+        AREA_REASON_NO_ROOM => "no_room",
+        AREA_REASON_BAD_PLAN => "bad_plan",
+        AREA_REASON_BAD_ARGS => "bad_args",
+        AREA_REASON_UNKNOWN_ACK => "unknown_ack",
+        _ => "",
+    }
+}
+
+#[cfg(unix)]
+fn area_ack_reason(code: u8) -> u8 {
+    match code {
+        control::ACK_NO_ROOM => AREA_REASON_NO_ROOM,
+        control::ACK_BAD_PLAN => AREA_REASON_BAD_PLAN,
+        control::ACK_BAD_ARGS => AREA_REASON_BAD_ARGS,
+        _ => AREA_REASON_UNKNOWN_ACK,
+    }
+}
+
+#[cfg(unix)]
+impl InstalledCatalogArea {
+    fn new(
+        key: CatalogAreaKey,
+        plan_id: Option<String>,
+        group: Option<r2o_controller::live::LiveGroupKey>,
+    ) -> Self {
+        Self {
+            key,
+            plan_id,
+            group,
+            confirmed: false,
+            permanent: false,
+            retry_count: 0,
+            reason: AREA_REASON_NONE,
+            reason_code: 0,
+            detail: String::new(),
+            remove_pending: false,
+            maybe_active: false,
+        }
+    }
+
+    fn fail(&mut self, reason: u8, reason_code: u32, detail: impl Into<String>) {
+        self.retry_count = self.retry_count.saturating_add(1);
+        if !self.remove_pending {
+            self.confirmed = false;
+        }
+        if matches!(reason, AREA_REASON_ACK_TIMEOUT | AREA_REASON_SEND_ERROR) {
+            self.maybe_active = true;
+        }
+        self.permanent = matches!(
+            reason,
+            AREA_REASON_BAD_PLAN | AREA_REASON_BAD_ARGS | AREA_REASON_UNKNOWN_ACK
+        );
+        self.reason = reason;
+        self.reason_code = reason_code;
+        self.detail = detail.into();
+    }
 }
 
 #[cfg(unix)]
@@ -4131,12 +4216,9 @@ fn catalog_area_action(
         }
         _ => return Ok(None),
     };
-    Ok(Some(CatalogAreaAction::Set(InstalledCatalogArea {
-        key,
-        plan_id,
-        group,
-        confirmed: true,
-    })))
+    Ok(Some(CatalogAreaAction::Set(InstalledCatalogArea::new(
+        key, plan_id, group,
+    ))))
 }
 
 #[cfg(unix)]
@@ -4181,9 +4263,31 @@ fn catalog_area_store(
 }
 
 #[cfg(unix)]
+fn catalog_area_fail(
+    installed_areas: &mut Vec<InstalledCatalogArea>,
+    action: CatalogAreaAction,
+    reason: u8,
+    reason_code: u32,
+    detail: impl Into<String>,
+) {
+    let detail = detail.into();
+    match action {
+        CatalogAreaAction::Set(mut area) => {
+            area.fail(reason, reason_code, detail);
+            let _ = catalog_area_store(installed_areas, area);
+        }
+        CatalogAreaAction::Delete(key) => {
+            if let Some(area) = installed_areas.iter_mut().find(|area| area.key == key) {
+                area.fail(reason, reason_code, detail);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
 fn catalog_area_queue_stale_deletes(
     pending: &mut VecDeque<PendingCatalogSyncCommand>,
-    installed_areas: &[InstalledCatalogArea],
+    installed_areas: &mut [InstalledCatalogArea],
     desired_areas: &HashSet<CatalogAreaKey>,
     area_sequence: &mut u64,
 ) -> Result<(), Box<dyn Error>> {
@@ -4198,6 +4302,9 @@ fn catalog_area_queue_stale_deletes(
             continue;
         }
         let key = remaining.swap_remove(index);
+        if let Some(area) = installed_areas.iter_mut().find(|area| area.key == key) {
+            area.remove_pending = true;
+        }
         *area_sequence = area_sequence.wrapping_add(1);
         let mut area_id = [0; 16];
         area_id[..8].copy_from_slice(&area_sequence.to_ne_bytes());
@@ -4244,7 +4351,7 @@ impl CatalogSyncCursor {
     fn from_compiled(
         compiled: CompiledCatalog,
         area_sequence: &mut u64,
-        installed_areas: &[InstalledCatalogArea],
+        installed_areas: &mut [InstalledCatalogArea],
     ) -> Result<Self, Box<dyn Error>> {
         let groups = compiled
             .group_commands
@@ -4363,7 +4470,7 @@ impl CatalogSyncCursor {
         &mut self,
         client: &mut ControlClient,
         active_groups: &mut HashSet<r2o_controller::live::LiveGroupKey>,
-        _installed_areas: &mut Vec<InstalledCatalogArea>,
+        installed_areas: &mut Vec<InstalledCatalogArea>,
     ) -> Result<bool, Box<dyn Error>> {
         if self.pending_area_ack.is_some() {
             return Ok(true);
@@ -4386,6 +4493,15 @@ impl CatalogSyncCursor {
                         "каталог: команда для {} не подтверждена: {error}",
                         operation.host
                     );
+                    if let Some(action) = operation.area_action {
+                        catalog_area_fail(
+                            installed_areas,
+                            action,
+                            AREA_REASON_SEND_ERROR,
+                            0,
+                            format!("запись команды: {error}"),
+                        );
+                    }
                     self.skipped += 1;
                     self.areas_failed = true;
                     continue;
@@ -4441,6 +4557,13 @@ impl CatalogSyncCursor {
             match pending.action {
                 CatalogAreaAction::Set(mut area) => {
                     area.confirmed = true;
+                    area.remove_pending = false;
+                    area.maybe_active = false;
+                    area.retry_count = 0;
+                    area.permanent = false;
+                    area.reason = AREA_REASON_NONE;
+                    area.reason_code = 0;
+                    area.detail.clear();
                     match catalog_area_store(installed_areas, area.clone()) {
                         Ok(Some(previous)) => catalog_area_remove_group(&previous, active_groups),
                         Ok(None) => {}
@@ -4469,6 +4592,14 @@ impl CatalogSyncCursor {
                 "каталог: команда для {} отвергнута датапатом (код {})",
                 pending.host, ack.reason
             );
+            let reason = area_ack_reason(ack.reason);
+            catalog_area_fail(
+                installed_areas,
+                pending.action,
+                reason,
+                u32::from(ack.reason),
+                format!("датапат отверг: код {}", ack.reason),
+            );
             self.skipped += 1;
             self.areas_failed = true;
         }
@@ -4490,20 +4621,27 @@ impl CatalogSyncCursor {
                 .pending_area_ack
                 .take()
                 .expect("checked pending area ACK");
-            match pending.action {
-                CatalogAreaAction::Set(mut area) => {
-                    area.confirmed = false;
-                    if let Ok(Some(previous)) = catalog_area_store(installed_areas, area) {
-                        catalog_area_remove_group(&previous, active_groups);
+            match &pending.action {
+                CatalogAreaAction::Set(area) => {
+                    if let Some(group) = &area.group {
+                        active_groups.remove(group);
                     }
                 }
                 CatalogAreaAction::Delete(key) => {
-                    if let Some(area) = installed_areas.iter_mut().find(|area| area.key == key) {
-                        area.confirmed = false;
-                        catalog_area_remove_group(area, active_groups);
+                    if let Some(area) = installed_areas.iter().find(|area| area.key == *key) {
+                        if let Some(group) = &area.group {
+                            active_groups.remove(group);
+                        }
                     }
                 }
             }
+            catalog_area_fail(
+                installed_areas,
+                pending.action,
+                AREA_REASON_ACK_TIMEOUT,
+                0,
+                "ACK не пришёл за 5 секунд",
+            );
             eprintln!(
                 "каталог: команда для {} не подтверждена: истёк срок ожидания ACK",
                 pending.host
@@ -17386,7 +17524,7 @@ impl ControlClient {
                 CatalogSyncCursor::from_compiled(
                     compiled,
                     &mut catalog_area_sequence,
-                    &installed_areas,
+                    &mut installed_areas,
                 )
             })
             .transpose()?;
@@ -17632,7 +17770,7 @@ impl ControlClient {
                             CatalogSyncCursor::from_compiled(
                                 compiled,
                                 &mut catalog_area_sequence,
-                                &installed_areas,
+                                &mut installed_areas,
                             )
                         })
                         .transpose()?;
@@ -17724,13 +17862,36 @@ impl ControlClient {
                             })
                             .unwrap_or_default();
                         if let Some((_, catalog_path)) = &live_catalog {
-                            match r2o_controller::live::snapshot(
+                            let live_areas = installed_areas
+                                .iter()
+                                .map(|area| r2o_controller::live::LiveAreaState {
+                                    kind: match area.key.kind {
+                                        CatalogAreaKind::Suffix => 1,
+                                        CatalogAreaKind::Bypass => 2,
+                                    },
+                                    name: area.key.name.clone(),
+                                    transport: area.key.transport,
+                                    shape: area.key.shape,
+                                    family: area.key.family,
+                                    plan_id: area.plan_id.clone(),
+                                    confirmed: area.confirmed,
+                                    maybe_active: area.maybe_active,
+                                    remove_pending: area.remove_pending,
+                                    permanent: area.permanent,
+                                    retry_count: area.retry_count,
+                                    reason: area_reason_name(area.reason).to_owned(),
+                                    reason_code: area.reason_code,
+                                    detail: area.detail.clone(),
+                                })
+                                .collect::<Vec<_>>();
+                            match r2o_controller::live::snapshot_with_areas(
                                 catalog,
                                 catalog_path,
                                 &active_groups,
                                 searches,
                                 measurements,
                                 discovery_status,
+                                &live_areas,
                             )
                             .and_then(|value| r2o_controller::live::write_snapshot(path, &value))
                             {
@@ -25009,6 +25170,71 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn props_bind_trace_matches_c() {
+        use std::os::fd::AsRawFd;
+
+        fn line(
+            name: &str,
+            result: std::io::Result<(std::os::fd::OwnedFd, u16)>,
+            family: i32,
+        ) -> String {
+            let Ok((fd, port)) = result else {
+                return format!("{name} rc=-1 port_nonzero=0 type=0 v6only=0\n");
+            };
+            let mut socket_type: libc::c_int = 0;
+            let mut length = std::mem::size_of_val(&socket_type) as libc::socklen_t;
+            assert_eq!(
+                unsafe {
+                    libc::getsockopt(
+                        fd.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_TYPE,
+                        (&mut socket_type as *mut libc::c_int).cast(),
+                        &mut length,
+                    )
+                },
+                0
+            );
+            let mut v6only: libc::c_int = 0;
+            if family == 6 {
+                let mut v6len = std::mem::size_of_val(&v6only) as libc::socklen_t;
+                assert_eq!(
+                    unsafe {
+                        libc::getsockopt(
+                            fd.as_raw_fd(),
+                            libc::IPPROTO_IPV6,
+                            libc::IPV6_V6ONLY,
+                            (&mut v6only as *mut libc::c_int).cast(),
+                            &mut v6len,
+                        )
+                    },
+                    0
+                );
+            }
+            format!(
+                "{name} rc=0 port_nonzero={} type={} v6only={}\n",
+                u8::from(port != 0),
+                socket_type,
+                v6only
+            )
+        }
+
+        let mut out = String::new();
+        out.push_str(&line("tcp4", super::r2o_props_bind(), 4));
+        out.push_str(&line("tcp6", super::r2o_props_bind_family(6), 6));
+        out.push_str(&line("udp4", super::r2o_props_bind_udp(), 4));
+        out.push_str(&line("udp6", super::r2o_props_bind_udp_family(6), 6));
+        out.push_str(&line("invalid", super::r2o_props_bind_family(5), 5));
+        if let Ok(path) = std::env::var("R2O_PROPS_BIND_DIFF_OUTPUT") {
+            std::fs::write(path, &out).unwrap();
+        }
+        assert!(out.contains("tcp6 rc=0 port_nonzero=1 type=1 v6only=1\n"));
+        assert!(out.contains("udp6 rc=0 port_nonzero=1 type=2 v6only=1\n"));
+        assert!(out.contains("invalid rc=-1"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn props_bind_wrappers_match_c_families_and_socket_types() {
         use std::os::fd::AsRawFd;
 
@@ -25353,18 +25579,19 @@ mod tests {
     #[test]
     fn catalog_area_store_enforces_c_capacity() {
         fn area(index: usize) -> super::InstalledCatalogArea {
-            super::InstalledCatalogArea {
-                key: super::CatalogAreaKey {
+            let mut area = super::InstalledCatalogArea::new(
+                super::CatalogAreaKey {
                     kind: super::CatalogAreaKind::Suffix,
                     name: format!("area-{index}.example"),
                     transport: 6,
                     shape: super::SHAPE_MODERN,
                     family: 4,
                 },
-                plan_id: None,
-                group: None,
-                confirmed: true,
-            }
+                None,
+                None,
+            );
+            area.confirmed = true;
+            area
         }
 
         let mut areas = Vec::new();
@@ -27289,9 +27516,12 @@ mod tests {
         let mut client = ControlClient::connect(socket_path.clone()).unwrap();
         let mut area_sequence = 0;
         let mut installed_areas = Vec::new();
-        let mut cursor =
-            super::CatalogSyncCursor::from_compiled(compiled, &mut area_sequence, &installed_areas)
-                .unwrap();
+        let mut cursor = super::CatalogSyncCursor::from_compiled(
+            compiled,
+            &mut area_sequence,
+            &mut installed_areas,
+        )
+        .unwrap();
         let mut active_groups = std::collections::HashSet::new();
         let pending = cursor
             .send_step(&mut client, &mut active_groups, &mut installed_areas)
@@ -27357,9 +27587,12 @@ mod tests {
         let mut client = ControlClient::connect(socket_path.clone()).unwrap();
         let mut area_sequence = 0;
         let mut installed_areas = Vec::new();
-        let mut cursor =
-            super::CatalogSyncCursor::from_compiled(compiled, &mut area_sequence, &installed_areas)
-                .unwrap();
+        let mut cursor = super::CatalogSyncCursor::from_compiled(
+            compiled,
+            &mut area_sequence,
+            &mut installed_areas,
+        )
+        .unwrap();
         let mut active_groups = std::collections::HashSet::new();
         assert!(
             cursor
@@ -27444,9 +27677,12 @@ mod tests {
         let mut area_sequence = 0;
         let mut installed_areas = Vec::new();
         let mut active_groups = std::collections::HashSet::new();
-        let mut cursor =
-            super::CatalogSyncCursor::from_compiled(compiled, &mut area_sequence, &installed_areas)
-                .unwrap();
+        let mut cursor = super::CatalogSyncCursor::from_compiled(
+            compiled,
+            &mut area_sequence,
+            &mut installed_areas,
+        )
+        .unwrap();
         let install_pending = cursor
             .send_step(&mut client, &mut active_groups, &mut installed_areas)
             .unwrap();
@@ -27459,9 +27695,12 @@ mod tests {
         state.disabled = true;
         state.restore().unwrap();
         let compiled = super::catalog_commands_with_send_cap(&mut catalog, 1280, 2).unwrap();
-        let mut cursor =
-            super::CatalogSyncCursor::from_compiled(compiled, &mut area_sequence, &installed_areas)
-                .unwrap();
+        let mut cursor = super::CatalogSyncCursor::from_compiled(
+            compiled,
+            &mut area_sequence,
+            &mut installed_areas,
+        )
+        .unwrap();
         let delete_pending = cursor
             .send_step(&mut client, &mut active_groups, &mut installed_areas)
             .unwrap();
@@ -27552,9 +27791,12 @@ mod tests {
         let mut area_sequence = 0;
         let mut installed_areas = Vec::new();
         let mut active_groups = std::collections::HashSet::new();
-        let mut cursor =
-            super::CatalogSyncCursor::from_compiled(compiled, &mut area_sequence, &installed_areas)
-                .unwrap();
+        let mut cursor = super::CatalogSyncCursor::from_compiled(
+            compiled,
+            &mut area_sequence,
+            &mut installed_areas,
+        )
+        .unwrap();
         loop {
             if !cursor
                 .send_step(&mut client, &mut active_groups, &mut installed_areas)
@@ -27578,9 +27820,12 @@ mod tests {
         state.disabled = true;
         state.restore().unwrap();
         let compiled = super::catalog_commands_with_send_cap(&mut catalog, 1280, 2).unwrap();
-        let mut cursor =
-            super::CatalogSyncCursor::from_compiled(compiled, &mut area_sequence, &installed_areas)
-                .unwrap();
+        let mut cursor = super::CatalogSyncCursor::from_compiled(
+            compiled,
+            &mut area_sequence,
+            &mut installed_areas,
+        )
+        .unwrap();
         loop {
             if !cursor
                 .send_step(&mut client, &mut active_groups, &mut installed_areas)
@@ -27706,9 +27951,12 @@ mod tests {
         let mut client = ControlClient::connect(socket_path).unwrap();
         let mut area_sequence = 0;
         let mut installed_areas = Vec::new();
-        let mut cursor =
-            super::CatalogSyncCursor::from_compiled(compiled, &mut area_sequence, &installed_areas)
-                .unwrap();
+        let mut cursor = super::CatalogSyncCursor::from_compiled(
+            compiled,
+            &mut area_sequence,
+            &mut installed_areas,
+        )
+        .unwrap();
         let mut active_groups = std::collections::HashSet::new();
         assert!(
             !cursor
@@ -27781,9 +28029,12 @@ mod tests {
         let mut client = ControlClient::connect(socket_path.clone()).unwrap();
         let mut area_sequence = 0;
         let mut installed_areas = Vec::new();
-        let mut cursor =
-            super::CatalogSyncCursor::from_compiled(compiled, &mut area_sequence, &installed_areas)
-                .unwrap();
+        let mut cursor = super::CatalogSyncCursor::from_compiled(
+            compiled,
+            &mut area_sequence,
+            &mut installed_areas,
+        )
+        .unwrap();
         let mut active_groups = std::collections::HashSet::new();
         assert!(
             cursor
@@ -28267,9 +28518,12 @@ mod tests {
         let mut client = ControlClient::connect(socket_path.clone()).unwrap();
         let mut area_sequence = 0;
         let mut installed_areas = Vec::new();
-        let mut cursor =
-            super::CatalogSyncCursor::from_compiled(compiled, &mut area_sequence, &installed_areas)
-                .unwrap();
+        let mut cursor = super::CatalogSyncCursor::from_compiled(
+            compiled,
+            &mut area_sequence,
+            &mut installed_areas,
+        )
+        .unwrap();
         let mut active_groups = std::collections::HashSet::new();
         assert!(
             cursor
