@@ -84,14 +84,14 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 309 | 239 | 0 | 0 |
+| core-net | 548 | 313 | 235 | 0 | 0 |
 | core-state | 692 | 274 | 418 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1071** | **911** | **0** | **0** |
+| **Итого** | **1982** | **1075** | **907** | **0** | **0** |
 
-Это не оценка паритета: 911 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 907 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1071 / P 911 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1075 / P 907 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -342,12 +342,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 309 | 239 | 0 | 0 |
+| core-net | 548 | 313 | 235 | 0 | 0 |
 | core-state | 692 | 274 | 418 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1071** | **911** | **0** | **0** |
+| **Итого** | **1982** | **1075** | **907** | **0** | **0** |
 
 
 ---
@@ -774,8 +774,8 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `drop_socket` | 652-657 | 6 | закрыть сокет через `ops.close_port` | RAII `TcpStream`/`OwnedFd` | **P** | C вызывает хук закрытия; Rust сокет закрывается `Drop` при выходе из `run_http_baseline`. Отдельной функции/хука нет, поведение эквивалентно. |
 | `drop_probe` | 659-664 | 6 | снять пробный план датапата по host/family/sport | `main.rs` delete/revoke | **P** | C вызывает `ops.del_probe`; Rust удаляет временную привязку командами `DEL_NAME_PROBE`/`revoke_http_search_binding`. API и момент снятия иные. |
 | `d2k_httpsearch_free` | 666-674 | 9 | снять активную пробу, закрыть сокет, освободить записи/очередь | RAII `Drop` | **P** | C вручную освобождает `failures`, `recs`, `q`; Rust владеющие `Vec`/`HashMap` освобождаются `Drop`. Для непустого состояния эквивалентно. |
-| `d2k_httpsearch_busy` | 676-678 | 3 | есть ли активная задача (`phase != PH_IDLE`) | `main.rs:4689+ HttpSearchTask`, `HttpSearchWindow::active` | **P** | C одно поле `phase`; Rust активность выражена окном `http_search_started` (`main.rs:19557-19566`) и задачей в worker-канале. Семантика «занято» сохраняется, API иное. |
-| `d2k_httpsearch_plan_of` | 680-683 | 4 | ключ подтверждённого плана host+family, не revoked | `HttpSearchRecordCache`/каталог | **P** | C возвращает `r->key`, если он есть и не revoked (`httpsearch.c:682-685`). Rust подтверждённый план ищется в каталоге (`catalog_has_http_search_owner`, `acknowledged_http_search_owner`), отдельной функции нет. |
+| `d2k_httpsearch_busy` | 676-678 | 3 | есть ли активная задача (`phase != PH_IDLE`) | `main.rs` `HttpSearchWindow::active`/`HttpSearchWorker::queued_jobs` | **E*** | C одно поле `phase`; Rust активность выражена окном на цель (`begin_http_search` → `HttpSearchWindow::active`) и очередью воркера (`queued_jobs`). Для одной цели семантика эквивалентна; окно/кулдаун проверены `http_search_window_shares_active_and_cooldown_state_across_endpoints`. **Ограничение:** глобального `phase` нет — активность per-target. |
+| `d2k_httpsearch_plan_of` | 680-683 | 4 | ключ подтверждённого плана host+family, не revoked | `http_search.rs` `http_plan_of` | E | C: `rec_find` + `r->key[0] && !r->revoked`. Rust `http_plan_of(catalog, host, family)` ищет включённую name-binding (HTTP, TCP, family) и восстанавливает ключ из `plan.text`; используется в `http_search_candidates` (ключ своей записи первым, как C `build_cands`). Тест `http_plan_of_matches_c` (split, неверная family/host, disabled→None). |
 | `d2k_httpsearch_diagnostic_counts` | 687-706 | 20 | счётчики записей/очереди/отказов/лимитов/байт | `main.rs` `HttpSearchWorker` accessors + `Counts` fill | **E*** | C заполняет records/queued/failures, records/queue/failure bytes, 4 лимита, `failure(_record/_alloc)_hits/failures`, `record(_alloc)_hits/failures`, `queue(_alloc)_hits/failures`, `http_bytes=sizeof(hs)+records+queue+failures`. Rust `Counts` теперь получает все эти поля из `HttpSearchWorker`/`HttpSearchRecordCache`; `http_failure_bytes` и `http_bytes` больше не нули. Тесты `httpsearch_diagnostic_counters_match_c` (failure bytes/count/дедуп, record bytes), `rec_get_record_limit_is_counted_like_c` (record_limit_hits). **Ограничения:** `record_alloc_failures`/`failure_alloc_failures` всегда 0 (HashMap не возвращает NULL); `record_bytes` — фиксированный размер элемента, не `cap*sizeof`; queue limit-hit копится в воркере, отдельного unit-теста нет. |
 | `d2k_httpsearch_diagnostics` | 709-711 | 3 | подключить observer диагностики HTTP-поиска | общий диагностический канал/события | **P** | C `if(hs){hs->diagnostic=fn;hs->diagnostic_ctx=ctx;}`. Rust HTTP-поиск отдаёт диагностику через общий канал/события контроллера; отдельного сеттера `fn/ctx` нет. |
 | `diagnostic_end` | 710-721 | 12 | событие завершения: id/target/outcome/reason/elapsed/ip/path/kind | `main.rs:4864 r2o_http_search_diagnostic_event` | **P** | C заполняет `d2k_diag_event` полями `id,target,protocol=http,family,outcome,reason,elapsed_ms,queue_ms=-1,probe_units=-1,ip,path=httpsearch,kind=name` и сбрасывает id (`httpsearch.c:712-723`). Rust `r2o_http_search_diagnostic_event` формирует те же ключевые поля, тест `http_search_diagnostic_event_matches_d2o_http_defaults` (`main.rs:31376`). Полного C/Rust differential события/таймингов нет; P. |
@@ -789,11 +789,11 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `trial_executed` | 894-900 | 7 | APPLIED покрывает все отправленные запросы, порт/адрес совпали | `main.rs` `http_applied_collection...`, `http_search.rs:36-97 confirmed_applied` | **E** | C: `requests_sent>0 && <=2`, `complete_responses<=requests_sent`, `applied>=requests_sent`, `local_port==proof_sport`, `local_ip==proof_client`. Rust `confirmed_applied` требует те же поля (family/key/plan/trial/execution/binding/shape/temporary), тест `http_applied_collection_requires_each_unique_execution_within_donor_window` (`main.rs:33161`). |
 | `judge_trial` | 902-953 | 52 | суд кандидата по REAL/CUT/INJECTED | `http_search.rs:850 judge` + `main.rs` worker | **P** | C: `trial_executed` → `!executed` пропуск; `REAL+2`/`INJECTED`/`CUT` → judged; REAL+2 → ok++, при `HS_CONFIRM` confirmed; CUT после Real — один диагностический повтор; иначе переход. Rust `advance_http_candidate` повторяет правила (тесты `main.rs:31287,31311,31327`), но решение/логика распределены по worker; полного differential на все переходы нет. |
 | `next_candidate` | 955-1003 | 49 | переход к следующему кандидату/вопросу, запуск зонда | `main.rs:22901 run_http_search_task` | **P** | C обходит вопросы OWN→SPLIT→CHECKSUM→PRODUCT→FALLBACK, сбрасывает состояние кандидата, создаёт plan/trial ID, ставит пробный план и ждёт ACK. Rust worker перебирает `candidates` и ставит пробу через команды; порядок вопросов покрыт unit, переходы/дедлайны — нет. |
-| `add_cand` | 1005-1010 | 6 | добавить кандидата без дублей, предел массива | `main.rs:4638 http_search_candidates` + Vec | **P** | C фиксированный `cands[24]` (`N_CANDS*4+8`) с дедупом; Rust `Vec<String>` с `contains`/push без фиксированного предела, набор формируется `http_search_candidates`/`saved_http_candidate_keys`. |
+| `add_cand` | 1005-1010 | 6 | добавить кандидата без дублей, предел массива | `http_search.rs` `add_candidate`/`D2K_HS_CANDS_MAX` | E | C `cands[24]` (`N_CANDS*4+8`), дедуп, молчаливый отказ при пределе. Rust `add_candidate` — те же правила, `D2K_HS_CANDS_MAX=24`; используется в `http_search_candidates` для own/saved/canonical/measured. Тест `add_candidate_dedups_and_caps_like_c` (дубль, 30 уникальных → 24, порядок). |
 | `build_cands` | 1012-1039 | 28 | свои подтверждённые планы: свой ключ, затем другие по убыванию seq | `main.rs:4394-4433 saved_http_candidate_keys` | **P** | C сначала добавляет ключ своей записи, затем лучшие (`seq` максимален) подтверждённые ключи других записей (`httpsearch.c:1024-1038`). Rust `saved_http_candidate_keys` сортирует по `same_context`, затем `confirmed` (`main.rs:4423-4426`), а не по seq; набор/приоритет могут отличаться. |
 | `build_fallback` | 1041-1052 | 12 | fallback: split, disorder + измеренные или fake-badsum/fake-seqshift | `main.rs:4638-4657 http_search_candidates` | **P** | C fallback: `split`, `disorder`, затем measured-ключи, иначе `fake-badsum`, `fake-seqshift` (`httpsearch.c:1043-1053`). Rust всегда замешивает 5 канонических ключей (включая `fake-badsum-whole`) и measured, при непустых measured пропускает `fake-seqshift` (`main.rs:4642-4656`). Состав/порядок отличаются. |
 | `start` | 1054-1091 | 38 | старт поиска: контекст repeat_path/cut, job, база PH_BASE, дедлайн 3×probe | `main.rs:19542 begin_http_search`, `22901 run_http_search_task` | **P** | C копирует контекст, проверяет `repro_gap`, открывает job, запускает worker, ставит PH_BASE и `deadline=3*probe_ms`. Rust `begin_http_search` держит окно/cooldown, `run_http_search_task` сразу выполняет baseline с повторами; стадии/дедлайны иные. |
-| `start_next` | 1093-1101 | 9 | взять следующую заявку из очереди `pend[]` | `main.rs` worker loop / канал | **P** | C очередь — массив `pend` с `memmove`; Rust очередь — канал задач `HttpSearchWorker` (`main.rs:6629+`), порядок и момент старта иные. |
+| `start_next` | 1093-1101 | 9 | взять следующую заявку из очереди `pend[]` | `main.rs` worker loop / очередь `HttpSearchTask` | **E*** | C `while phase==IDLE && n_q`: pop `q[0]`, memmove, `rec_find`, `start`. Rust воркер читает `HttpSearchTask` из FIFO-канала (`job_receiver.recv_timeout`), очередь ограничена `R2O_HTTP_QUEUE_MAX_ITEMS`/`pending_jobs`; отдельного массива `pend[]` нет. **Ограничение:** последовательность задач одна (один воркер), приоритет/seq как в C не реализованы; тест `http_record_and_queue_caps_match_d2o_storage_limits`. |
 | `live_owner` | 1103-1111 | 9 | найти запись-владельца живого запроса по plan/binding/execution/request_ms | `main.rs:16023 acknowledged_http_search_owner`, `acknowledged_http_binding_for` | **P** | C проверяет `key[0]`, не revoked, `binding_equal`, `install_id==0`, `installed_plan_id==plan_id`, execution>0, request_ms>0, host_ok/family (`httpsearch.c:1105-1113`). Rust ведёт `http_acknowledged_bindings` и проверяет последнюю подтверждённую генерацию; тест `http_live_owner_requires_the_latest_acknowledged_runtime_generation` (`main.rs:24635`). Полного совпадения полей (request_ms/addr) нет; P. |
 | `d2k_httpsearch_bound_failure` | 1113-1131 | 19 | живой отказ под планом: remember, revoked, repro_gap, отзыв, перезапуск | `main.rs` failure handling | **P** | C записывает live failure, ставит revoked, сохраняет repeat_path при валидном path, снимает привязку, завершает текущий поиск и ставит портал. Rust обрабатывает live-отказ через каталог/`revoke_http_search_owner`, покрыто косвенно rollback-тестом; массива live failures нет (см. N `remember_live_failure`). |
 | `d2k_httpsearch_control` | 1133-1163 | 31 | диспетчер APPLIED/ACK/HTTP_RESPONSE/PORTAL | `main.rs:19622 service_http_search_command` | **P** | C маршрутизирует APPLIED, ACK SET_NAME_BOUND, live HTTP_RESPONSE (code 1/2), CUT (code 4) и PORTAL/code 3 с проверкой transport/port/trial. Rust обрабатывает команды в `service_http_search_command` и события в цикле контроллера; разбиение и проверки иные. |

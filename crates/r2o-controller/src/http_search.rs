@@ -729,6 +729,45 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
+/// C `d2k_httpsearch_cur.cands`: `N_CANDS*4+8`.
+pub const D2K_HS_CANDS_MAX: usize = 24;
+
+/// C `add_cand`: добавить без дублей, не больше предела массива.
+pub fn add_candidate(candidates: &mut Vec<String>, key: &str) {
+    if candidates.len() >= D2K_HS_CANDS_MAX || candidates.iter().any(|saved| saved == key) {
+        return;
+    }
+    candidates.push(key.to_owned());
+}
+
+/// C `d2k_httpsearch_plan_of`: подтверждённый HTTP-план host+family.
+pub fn http_plan_of(catalog: &crate::catalog::Catalog, host: &str, family: u8) -> Option<String> {
+    for box_record in &catalog.boxes {
+        for binding in &box_record.bindings {
+            if binding.kind != "name"
+                || !binding.target.eq_ignore_ascii_case(host)
+                || !binding.enabled
+                || binding.transport != 6
+                || binding.family != family
+                || binding.shape != SHAPE_HTTP
+            {
+                continue;
+            }
+            let Some(plan) = box_record
+                .plans
+                .iter()
+                .find(|plan| plan.id.eq_ignore_ascii_case(&binding.plan_id))
+            else {
+                continue;
+            };
+            if let Some(key) = candidate_key_from_plan_text(&plan.text) {
+                return Some(key);
+            }
+        }
+    }
+    None
+}
+
 /// C `known_key`: встроенный ключ, `fake-badsum-whole` или валидный `fake:`-spec.
 pub fn known_key(key: &str) -> bool {
     matches!(

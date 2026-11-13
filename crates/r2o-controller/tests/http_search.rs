@@ -1,6 +1,6 @@
 use r2o_controller::http_search::{
-    Answer, candidate_key_from_plan_text, candidate_keys, candidate_text, judge, known_key,
-    read_probe_response, stable_id,
+    Answer, D2K_HS_CANDS_MAX, add_candidate, candidate_key_from_plan_text, candidate_keys,
+    candidate_text, judge, known_key, read_probe_response, stable_id,
 };
 use std::io::{self, Cursor, Read};
 use std::time::Instant;
@@ -203,6 +203,24 @@ fn exposes_the_same_ordered_http_search_questions() {
             "disorder",
             "fake-seqshift"
         ]
+    );
+}
+
+#[test]
+fn add_candidate_dedups_and_caps_like_c() {
+    let mut candidates = Vec::new();
+    add_candidate(&mut candidates, "split");
+    add_candidate(&mut candidates, "split");
+    assert_eq!(candidates, ["split"]);
+
+    for index in 0..D2K_HS_CANDS_MAX + 6 {
+        add_candidate(&mut candidates, &format!("key-{index}"));
+    }
+    assert_eq!(candidates.len(), D2K_HS_CANDS_MAX);
+    assert_eq!(candidates[1], "key-0");
+    assert_eq!(
+        candidates[D2K_HS_CANDS_MAX - 1],
+        format!("key-{}", D2K_HS_CANDS_MAX - 2)
     );
 }
 

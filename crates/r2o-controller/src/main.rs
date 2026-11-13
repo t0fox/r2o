@@ -43,8 +43,8 @@ use r2o_controller::classify::{
 use r2o_controller::classify_json::result_json_value as classify_result_json_value;
 use r2o_controller::domain::normalize;
 use r2o_controller::http_search::{
-    candidate_key_from_plan_text, candidate_keys, candidate_program, candidate_text,
-    measured_poison_keys, stable_id,
+    add_candidate, candidate_key_from_plan_text, candidate_keys, candidate_program, candidate_text,
+    http_plan_of, measured_poison_keys, stable_id,
 };
 use r2o_controller::https_probe::{
     HttpsPortalOutcome, HttpsProbeWorker, target_from_http_response, target_from_portal,
@@ -4893,19 +4893,22 @@ fn http_search_candidates(
     target: &r2o_controller::discovery::DiscoveryTarget,
 ) -> Vec<String> {
     let measured = measured_http_candidate_keys(catalog);
-    let mut candidates = saved_http_candidate_keys(catalog, target);
+    let mut candidates = Vec::new();
+    // C `build_cands`: сначала ключ своей подтверждённой записи.
+    if let Some(key) = http_plan_of(catalog, &target.host, target.family) {
+        add_candidate(&mut candidates, &key);
+    }
+    for key in saved_http_candidate_keys(catalog, target) {
+        add_candidate(&mut candidates, &key);
+    }
     for key in candidate_keys() {
         if !measured.is_empty() && *key == "fake-seqshift" {
             continue;
         }
-        if !candidates.iter().any(|saved| saved == key) {
-            candidates.push((*key).to_owned());
-        }
+        add_candidate(&mut candidates, key);
     }
     for key in measured {
-        if !candidates.contains(&key) {
-            candidates.push(key);
-        }
+        add_candidate(&mut candidates, &key);
     }
     candidates
 }
@@ -29272,6 +29275,42 @@ mod tests {
         unknown.plan_id = id;
         catalog.boxes[0].plans[0].text = "r2o-plan 1 1\nproto tcp tls\n".into();
         assert!(super::http_live_failure_key(&catalog, &unknown).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn http_plan_of_matches_c() {
+        let id = [0x33_u8; 16];
+        let text = r2o_controller::http_search::candidate_text("split", Some(&id)).unwrap();
+        let plan_id: String = id.iter().map(|byte| format!("{byte:02x}")).collect();
+        let binding = r2o_controller::catalog::Binding {
+            kind: "name".into(),
+            target: "Example.COM".into(),
+            plan_id: plan_id.clone(),
+            enabled: true,
+            transport: 6,
+            family: 4,
+            shape: r2k_core::control::SHAPE_HTTP,
+            ..Default::default()
+        };
+        let mut catalog = r2o_controller::catalog::Catalog::default();
+        catalog.boxes.push(r2o_controller::catalog::BoxRecord {
+            plans: vec![r2o_controller::catalog::Plan {
+                id: plan_id,
+                text,
+                ..Default::default()
+            }],
+            bindings: vec![binding],
+            ..Default::default()
+        });
+        assert_eq!(
+            super::http_plan_of(&catalog, "example.com", 4).as_deref(),
+            Some("split")
+        );
+        assert!(super::http_plan_of(&catalog, "example.com", 6).is_none());
+        assert!(super::http_plan_of(&catalog, "other.example", 4).is_none());
+        catalog.boxes[0].bindings[0].enabled = false;
+        assert!(super::http_plan_of(&catalog, "example.com", 4).is_none());
     }
 
     #[cfg(unix)]
