@@ -840,6 +840,11 @@ fn r2o_fetch_with_roots_and_encoding_detailed(
     )
 }
 
+/// C `d2k_verify_probe`: один verify-прогон с донорским фазовым сроком.
+pub fn r2o_verify_probe(options: &FetchOptions) -> Result<FetchResult, String> {
+    r2o_fetch_with_phase_timeout(options, R2O_D2O_VERIFY_STEP_TIMEOUT)
+}
+
 /// Выполнить HTTPS GET с отдельным донорским сроком на TCP, TLS и HTTP шаги.
 pub fn r2o_fetch_with_phase_timeout(
     options: &FetchOptions,
@@ -4625,6 +4630,22 @@ mod tests {
         assert!(guard.tracked);
         drop(guard);
         memory_enable(was_active);
+    }
+
+    #[test]
+    fn verify_probe_wrapper_uses_verify_options() {
+        let options = FetchOptions {
+            name: String::new(),
+            ip: Some("127.0.0.1".parse().unwrap()),
+            port: 443,
+            path: "/".into(),
+            deadline: Duration::from_secs(1),
+            tls12: false,
+            wire_len: None,
+            mark: None,
+        };
+        let error = r2o_verify_probe(&options).unwrap_err();
+        assert!(error.contains("имя"), "{error}");
     }
 
     #[test]

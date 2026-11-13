@@ -5570,20 +5570,18 @@ fn r2o_family_recovery_fetch(
         .endpoint
         .parse::<std::net::SocketAddr>()
         .map_err(|error| format!("адрес семейной пробы недопустим: {error}"))?;
-    r2o_controller::fetch::r2o_fetch_with_phase_timeout(
-        &r2o_controller::fetch::FetchOptions {
-            name: target.host.clone(),
-            ip: Some(endpoint.ip()),
-            port: endpoint.port(),
-            path: probe_path.into(),
-            deadline: std::time::Duration::from_secs(8),
-            tls12: target.shape == SHAPE_LEGACY,
-            wire_len: None,
-            mark: r2o_candidate_confirmation_mark(mark),
-        },
-        r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT,
-    )
-    .map_err(|error| format!("проверка известного семейного плана не завершилась: {error}"))
+    let options = r2o_controller::fetch::FetchOptions {
+        name: target.host.clone(),
+        ip: Some(endpoint.ip()),
+        port: endpoint.port(),
+        path: probe_path.into(),
+        deadline: std::time::Duration::from_secs(8),
+        tls12: target.shape == SHAPE_LEGACY,
+        wire_len: None,
+        mark: r2o_candidate_confirmation_mark(mark),
+    };
+    r2o_controller::fetch::r2o_verify_probe(&options)
+        .map_err(|error| format!("проверка известного семейного плана не завершилась: {error}"))
 }
 
 #[cfg(unix)]

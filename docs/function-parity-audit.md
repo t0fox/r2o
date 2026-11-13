@@ -84,14 +84,14 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 254 | 294 | 0 | 0 |
+| core-net | 548 | 255 | 293 | 0 | 0 |
 | core-state | 692 | 274 | 418 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1016** | **966** | **0** | **0** |
+| **Итого** | **1982** | **1017** | **965** | **0** | **0** |
 
-Это не оценка паритета: 966 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 965 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1016 / P 966 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1017 / P 965 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -342,12 +342,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 254 | 294 | 0 | 0 |
+| core-net | 548 | 255 | 293 | 0 | 0 |
 | core-state | 692 | 274 | 418 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1016** | **966** | **0** | **0** |
+| **Итого** | **1982** | **1017** | **965** | **0** | **0** |
 
 
 ---
@@ -618,7 +618,7 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `read_status_buf` | 457-697 | 241 | статус HTTP/1.0-1.1 100-599, NUL/управляющие, cf-challenge, CL/TE/CE/Connection/Location, 1xx, 101, тело, `http_reply` | `http_response.rs` + `fetch.rs` | E | C-ветви: статус 100..599, 204/304 без тела, 101 без запрошенного upgrade — ошибка, 1xx отбрасывается и ждётся финальный ответ, CL/TE, chunked+trailer, close-delimited, NUL/управляющие, duplicate CL, предел заголовков. Rust-парсер повторяет эти ветви; тест `read_status_buf_branches_match_c` (204/304, 101 invalid, 100→200, chunked+trailer, close, 100/599/600, NUL, duplicate CL), плюс `header_tests` для status-line/полей/`head[8192]`. |
 | `read_status_rd` | 699-728 | 30 | malloc 65537, diag-учёт `TCP_TLS_RX`, вызов `read_status_buf`, free | `http_response.rs` + `R2oHttpResponseBufferTracking` | **P** | **Diag-учёт добавлен:** RAII `R2oHttpResponseBufferTracking` вызывает `memory_acquire`/`memory_release` для site `TCP_TLS_RX` и 65537 байт; тест `http_parser_buffer_tracking_uses_tcp_tls_rx_site`, acquire/release покрыты `memory_tracking_branches_match_c`. **Остаётся отличие OOM:** C при отказе malloc ставит `local_limit=1` и NEUTRAL; Rust держит буферы inline/на стеке, fallible-выделения с NEUTRAL-ветвью нет. |
 | `d2k_http_read_response` | 730-737 | 8 | публичный API: memset, `read_status_rd` с NULL-полями | `http_response.rs:18 HttpResponseParser`, `http_search.rs:310 read_probe_response` | **P** | C-API отдаёт `status/body_bytes/complete/location/reply/local_limit/connection_close`; Rust использует парсер напрямую в fetch/`read_probe_response`, единого API с теми же полями нет. |
-| `d2k_verify_probe` | 739-742 | 4 | обёртка probe_on с use_fd=-1 | `fetch.rs` (`r2o_fetch...`) | **P** | C `return d2k_verify_probe_on(-1,ip,port,sni,deadline_ms,hello_wire)`. Rust end-to-end fetch/TLS-дифференциал выполняет тот же пробный запрос; отдельного символа с фиксированным `use_fd=-1` нет. |
+| `d2k_verify_probe` | 739-742 | 4 | обёртка probe_on с use_fd=-1 | `fetch.rs` `r2o_verify_probe` | **E*** | C `d2k_verify_probe` = `d2k_verify_probe_on(-1, ip, port, sni, deadline_ms, hello_wire)`. Rust `r2o_verify_probe(options)` выполняет `r2o_fetch_with_phase_timeout(options, R2O_D2O_VERIFY_STEP_TIMEOUT)` и используется в `r2o_family_recovery_fetch`; тест `verify_probe_wrapper_uses_verify_options`; underlying verify/fetch-TLS покрыты differential. **Ограничение:** `use_fd=-1`/`hello_wire` передаются через `FetchOptions` (`ip/port/wire_len`), отдельный C-дифференциал обёртки не подключён. |
 | `write13` | 750-753 | 4 | адаптер записи TLS1.3 | rustls `writer().write_all` (`fetch.rs`) | E | C `d2k_tls_write` — адаптер записи TLS1.3. Rust пишет через rustls `writer().write_all`; TLS1.3-запись покрыта `https_fetch_follows_same_origin_redirects_on_the_original_tls_connection`, `tx_packet_budget_repeats_complete_gets_on_the_same_tls_connection` и `d2o_verify_differential` (tls=1.3). Отдельного символа нет, поведение эквивалентно. |
 | `write12` | 755-758 | 4 | адаптер записи TLS1.2 для общего HTTP-разбора | rustls `writer().write_all` (`fetch.rs`) | E | C `d2k_tls12_write` — адаптер записи TLS1.2. Rust использует тот же rustls `writer().write_all`; TLS1.2-запись покрыта `https_замер_подтверждает_неполное_тело_tls_записи` (`tls12=true`) и donor-тестами TLS1.2. Отдельного символа нет, поведение эквивалентно. |
 | `redirect_path` | 762-795 | 34 | only `https://` same host (или `host:443`) или путь `/…`; `?`→`/?…`; отказ на `<=0x20`, `0x7f`, `#`, путь ≥cap | `fetch.rs` `r2o_fetch_same_origin_redirect` | E | C: только `https://` с тем же host или `:443`, либо путь `/…`; `?` → `/?…`; отказ на `<=0x20`, `0x7f`, `#`, путь ≥cap. Rust `r2o_fetch_same_origin_redirect` повторяет все ветви. Unit `same_origin_redirects_are_safe_and_portals_match_donor_signatures` дополнен: `https://host` → `/`, `:443?x` → `/?x`, путь 1024 → отказ, `0x7f` → отказ. |
