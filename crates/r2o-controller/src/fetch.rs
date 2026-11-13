@@ -1109,7 +1109,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
                         .map(|remaining| parser.body_bytes().saturating_add(remaining));
                     parser.feed(&[], true);
                     if !parser.is_complete() {
-                        reason = Some("сервер закрыл TLS-поток до завершения HTTP-ответа".into());
+                        reason = Some(r2o_body_read_reason(true).into());
                     }
                     break;
                 }
@@ -1188,7 +1188,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
                         .fixed_body_remaining()
                         .map(|remaining| parser.body_bytes().saturating_add(remaining));
                     parser.feed(&[], true);
-                    reason = Some("TLS-поток оборвался до завершения HTTP-ответа".into());
+                    reason = Some(r2o_body_read_reason(false).into());
                     break;
                 }
                 Err(error) => {
@@ -1381,6 +1381,15 @@ fn r2o_fetch_is_cloudflare_challenge(headers: &[u8]) -> bool {
             })
             .is_some_and(|value| value.eq_ignore_ascii_case(b"challenge"))
     })
+}
+
+/// C `body_read_reason`: текст причины обрыва тела.
+fn r2o_body_read_reason(empty: bool) -> &'static str {
+    if empty {
+        "сервер закрыл соединение посреди тела"
+    } else {
+        "ошибка чтения TLS в теле"
+    }
 }
 
 /// C `read_http_body`: для chunked/close-delimited `body_expected=body_bytes`.
@@ -4601,6 +4610,15 @@ mod tests {
         assert!(ordinary.is_invalid());
         assert!(!ordinary.line_overflow());
         assert!(!r2o_http_local_limit(&ordinary));
+    }
+
+    #[test]
+    fn body_read_reason_matches_c() {
+        assert_eq!(
+            r2o_body_read_reason(true),
+            "сервер закрыл соединение посреди тела"
+        );
+        assert_eq!(r2o_body_read_reason(false), "ошибка чтения TLS в теле");
     }
 
     #[test]
