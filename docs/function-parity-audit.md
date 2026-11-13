@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 317 | 231 | 0 | 0 |
-| core-state | 692 | 335 | 357 | 0 | 0 |
+| core-state | 692 | 339 | 353 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1140** | **842** | **0** | **0** |
+| **Итого** | **1982** | **1144** | **838** | **0** | **0** |
 
-Это не оценка паритета: 842 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 838 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1140 / P 842 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1144 / P 838 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 317 | 231 | 0 | 0 |
-| core-state | 692 | 335 | 357 | 0 | 0 |
+| core-state | 692 | 339 | 353 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1140** | **842** | **0** | **0** |
+| **Итого** | **1982** | **1144** | **838** | **0** | **0** |
 
 
 ---
@@ -2094,16 +2094,16 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `hex_nibble` | 315-320 | 6 | значение hex-цифры | `ask.rs:230-240` (match в `decode_hex`) + `plan_text::hex_nibble` | **E*** | C три диапазона `0-9/a-f/A-F`, иначе -1. Rust тот же match внутри `decode_hex` (и общий `plan_text::hex_nibble`); тест `cli_flag_parsers_match_c_bounds_bases_and_missing_values` декодирует `0123456789abcdefABCDEF` во все 11 байт. **Ограничение:** отдельной функции в `ask.rs` нет — match inline. |
 | `save_hex` | 329-349 | 21 | заголовок `# снимок {what}, имя {sni}, N байт — снят d2kask…`, 32 байта/строку | `main.rs` `save_ask_snapshot` | **E*** | C: `fopen("wb")`, заголовок «снят d2kask с живого датапата», 32 байта/строку, завершающий `\n`, `fclose` с диагностикой. Rust теперь пишет тот же заголовок (включая `(без имени)`), hex 32/строку и завершающий `\n`; тест `save_ask_snapshot_matches_c_hex_layout` (33 байта → 64+2 hex). **Ограничение:** `fs::write` не даёт отдельной диагностики частичной записи (ошибка только целиком). |
 | `read_hex_file` | 361-414 | 54 | комментарии `#` после пробелов, hex/пробелы, нечёт/пусто/`>cap` → отказ | `ask.rs` `read_hex_file/decode_hex` | **E*** | C: `fopen("rb")`, строки до 8200, ведущие SP/TAB, `#` → skip, hex/пробелы, не-hex/нечёт/пусто/`>2048` → отказ. Rust читает файл целиком, те же правила комментариев/пробелов/ошибок/cap 2048. Тесты `read_hex_file_matches_c_limits_and_comments` (валидный CRLF, пустой, нечёт 5, `z`, 2049 байт, отсутствующий файл) и `saved_hex_reader_accepts_comments...`. **Ограничение:** C обрабатывает строками по 8200 байт, Rust — целиком; для hex-файлов эквивалентно. |
-| `wait_shape` | 424-455 | 32 | ожидание D2K_EV_SHAPE до дедлайна | `main.rs:365-380` (`arm_client_shape`/`wait_for_client_shape`) | **P** | C `clock_gettime(CLOCK_MONOTONIC)`; цикл: elapsed>=wait_ms → 1 (тайм-аут); `d2k_link_next` с остатком; `rc<0` → -1; `rc==1` → continue; `D2K_EV_SHAPE`: `shape_len>cap` → ошибка, иначе копия/0; прочие события пропускаются. Rust `ControlClient::wait_for_client_shape(name,family,wait)` возвращает событие/None; семейство и имя проверяются в control-слое. API/точки проверки иные, отдельного differential нет. |
+| `wait_shape` | 424-455 | 32 | ожидание D2K_EV_SHAPE до дедлайна | `main.rs` `ControlClient::wait_for_client_shape` | **E*** | C: `CLOCK_MONOTONIC`, цикл `elapsed>=wait_ms` → 1, `d2k_link_next` с остатком, `rc<0` → -1, `rc==1` → continue, `EV_SHAPE` → копия/0, прочие события пропускаются. Rust: `Instant`-дедлайн, опрос до 100 мс, `read_optional_frame`, фильтр `EVENT_CLIENT_SHAPE` по family/host, тайм-аут → `None`. Тест `wait_for_client_shape_skips_other_names_and_times_out_like_c` (чужое имя пропущено, форма цели получена, затем 50 мс → None). **Ограничение:** фильтрация host/family живёт в ControlClient, а не в самой функции; опрос 100 мс вместо остатка C. |
 | `pval_str` | 462-468 | 7 | текст pval: да/нет/не измерено | `main.rs:811-817 r2o_tri_state` | **E*** | **Тексты совпадают:** `D2K_P_YES→"да"`, `D2K_P_NO→"нет"`, default→"не измерено"; Rust `TriState::True→"да"`, `False→"нет"`, `Unset→"не измерено"`. Отдельной функции нет. |
 | `print_header` | 470-476 | 7 | заголовок отчёта d2kask | `main.rs` `r2o_ask_header` | E | C печатает `d2kask: спрашиваем настоящую коробку DPI`, пустую строку, цель/имя/сокет/метку `0x%x`. Rust `r2o_ask_header` возвращает ровно те же строки, используется в `run_r2o_ask`; тест `ask_print_helpers_match_c_exactly`. |
 | `print_snapshot` | 482-502 | 21 | печать снимка, SNI и вида приветствия | `main.rs` `r2o_ask_snapshot` | E | C: `снимок {label}: {how} ({detail}), N байт`, `SNI в снимке: …`/`НЕ НАЙДЕНО`, `вид приветствия: MODERN/LEGACY/UNKNOWN`; тайм-аут и отсутствие — отдельные строки. Rust `r2o_ask_snapshot` повторяет все ветки и используется для триггера/control; тест `ask_print_helpers_match_c_exactly` (timeout, modern hello с SNI). |
-| `pos_decided` | 519-528 | 10 | решён ли вопрос свойств; checksum не решён при `parses_l7==YES` | `ask.rs:392-428 AskQuestion` + `main.rs:458-744` | **P*** | **Ветви C:** enum `POS_OVERLAP=0, POS_REORDER=1, POS_CHECKSUM=2, POS_PARSE=3, POS_DUP=4`; switch: overlap/dup/reorder — поле `!= D2K_P_UNKNOWN`; checksum — `validates_checksum!=UNKNOWN && parses_l7!=YES`; parse — `parses_l7!=UNKNOWN`; default 0. `print_question` для позиции `pos` перебирает `q=0..pos-1` и считает вопрос незаданным, если любой ранний уже решён. **Rust:** `AskQuestion::ALL` в том же порядке (overlap, reorder, checksum, protocol, duplicates); после успеха ставит `passed_question` и пропускает следующие; отдельной функции «решён ли» нет. Итоговые «задан/не задан» совпадают. |
+| `pos_decided` | 519-528 | 10 | решён ли вопрос свойств; checksum не решён при `parses_l7==YES` | `main.rs` `r2o_ask_pos_decided` | **E*** | C `switch`: overlap/dup/reorder — поле != UNKNOWN; checksum — checksum != UNKNOWN && parses_l7 != YES; parse — parses_l7 != UNKNOWN; default 0. Rust helper повторяет все ветви; тест `ask_trace_helpers_match_c_exactly` (все позиции, checksum до/после parses_l7, позиция 99). **Ограничение:** production останавливает опрос по первому прошедшему вопросу; per-question печать C не перестроена. |
 | `pos_value` | 530-539 | 10 | значение вопроса свойств | `main.rs` `r2o_ask_pos_value` | E | C `switch` по POS_* возвращает поле `d2k_props`; Rust `r2o_ask_pos_value` — тот же порядок 0..4, неизвестная позиция → Unset; используется `r2o_ask_vector`; тест `ask_print_helpers_match_c_exactly` (все позиции и 99). |
-| `step_rc_str` | 547-561 | 15 | текст кода шага опроса (10 кодов) | `main.rs:15799-15825 r2o_print_ask_trace` (`stop_reason`) | **P** | C `switch` по `D2K_STEP_*`: «вопрос не собран», «SET_NAME не ушёл в сокет», «подтверждение SET_NAME не пришло в срок», «датапат отверг план», «обращение к цели не состоялось», «своего обмена не было в срок», «план к потоку вопроса не применён», «обмен был, но сервер не ответил ServerHello», «посылка плана не ушла на провод — опыта не было», «прошёл». Rust передаёт `stop_reason` строкой в `r2o_print_ask_trace`; маппинга 1:1 нет, тексты иные. |
+| `step_rc_str` | 547-561 | 15 | текст кода шага опроса (10 кодов) | `main.rs` `r2o_ask_step_rc_str` | **E*** | C `switch` 0..9: «вопрос не собран», «SET_NAME…», «подтверждение…», «датапат отверг план», «обращение…», «своего обмена…», «план к потоку…», «обмен был, но сервер…», «посылка плана…», «прошёл», default «неизвестно». Rust helper содержит ровно эти тексты; тест `ask_trace_helpers_match_c_exactly` (0..9 и 99). **Ограничение:** production `r2o_print_ask_trace` пока печатает свой `stop_reason`, а не этот код. |
 | `ack_code_str` | 565-573 | 9 | текст кода ACK | `main.rs:15770-15777 r2o_ask_ack_reason` | **E*** | C: `D2K_ACK_OK→"принято"`, `BAD_PLAN→"план не разобрался"`, `BAD_ARGS→"аргументы команды не разобрались"`, `NO_ROOM→"нет места в таблице планов"`, default «неизвестная причина». Rust те же три текста + default; `ACK_OK` не входит (вызывается только при `!ack.ok`). `print_step` C вызывает только при `ack_ok==0`, поэтому набор совпадает. |
 | `print_seen_types` | 579-594 | 16 | печать встреченных TLS-типов | `main.rs:15780-15796 r2o_ask_print_seen_types` | **E*** | **Совпадает:** C биты `mask & 1<<(type-20)` для 20/21/22/23 с текстами «20 смена шифра», «21 тревога», «22 рукопожатие», «23 прикладные данные», через `, `; пусто → «ни одной». Rust те же пары/биты/join/пустое значение. |
-| `print_step` | 597-624 | 28 | печать шага: план, обмен, причина | `main.rs:15799-15825 r2o_print_ask_trace` | **P** | C: `plan_len==0` → «не собрался»; `ack_ok==1` → «N байт, датапат принял»; `REFUSED` → «N байт, датапат ОТВЕРГ — <ack>»; иначе «N байт, подтверждения нет». Обмен: `local_port==0`; `NO_EXCHANGE`; иначе local_port/bytes/first_type/seen. `err` добавляется к причине. Rust `r2o_print_ask_trace` печатает `план: N байт, <plan_status>`, обмен по `local_port`/`proof.exchange`, `отказ отправки плана: код N` и `причина остановки: <stop_reason>`; ветки/тексты иные. |
+| `print_step` | 597-624 | 28 | печать шага: план, обмен, причина | `main.rs` `r2o_ask_print_step` | **E*** | C: `plan_len==0` → «не собрался»; `ack_ok` → «датапат принял»; REFUSED → «датапат ОТВЕРГ — <ack_code_str>»; иначе «подтверждения нет». Обмен: нет порта / NO_EXCHANGE / порт+bytes+first_type+`print_seen_types`; причина — `step_rc_str` + err. Rust `R2oAskStep`/`r2o_ask_print_step` повторяют все ветки, включая отдельный `ack_code_str`; тест `ask_trace_helpers_match_c_exactly` (не собран, принят, ОТВЕРГ, NO_EXCHANGE, err). **Ограничение:** production trace пока использует прежний R2O-текст. |
 | `print_question` | 632-674 | 43 | печать вопроса и его ответа | `main.rs:458-744` (per-question branches) | **P** | C: `[i/5] поле (фраза):`; если более ранний вопрос решён — «спрошен: нет» с причиной; `POS_PARSE && !control` — отдельная причина; «спрошен: да»; `print_step`; «метка: не ставится»; если не решён — «ответ: не измерено…»; иначе значение; примечания checksum/parse. Rust печатает `[i/5] label — <статус>` в ветках выполнения/ошибок, после успеха — `пройден: ...`; блока «спрошен: да/нет», `print_step` и примечаний checksum/parse нет. |
 | `all_unknown` | 676-682 | 7 | все пять свойств не измерены | `main.rs` `r2o_ask_all_unknown` | **E*** | C проверяет пять полей `== D2K_P_UNKNOWN`. Rust `(0..5).all(pos_value==Unset)`, используется для C-предупреждения о снятом плане; тест `ask_print_helpers_match_c_exactly`. **Ограничение:** C печатает предупреждение до секции вопросов, Rust стримит вопросы по ходу и печатает его в конце — место в потоке вывода иное. |
 | `print_not_asked_at_all` | 684-696 | 13 | печать отказа от всех вопросов | `main.rs` `r2o_ask_not_asked_at_all` | E | C: `ни один из 5 вопросов не задан: <reason>` и пять блоков в порядке overlap, duplicates, reorder, checksum, parse. Rust helper повторяет текст/порядок/причины и используется при отсутствии триггера и SNI; тест `ask_print_helpers_match_c_exactly` (5 блоков). |

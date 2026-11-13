@@ -16333,6 +16333,113 @@ fn r2o_ask_print_seen_types(mask: u8) -> String {
 }
 
 #[cfg(unix)]
+fn r2o_ask_step_rc_str(rc: u8) -> &'static str {
+    match rc {
+        0 => "вопрос не собран",
+        1 => "SET_NAME не ушёл в сокет",
+        2 => "подтверждение SET_NAME не пришло в срок",
+        3 => "датапат отверг план",
+        4 => "обращение к цели не состоялось",
+        5 => "своего обмена не было в срок",
+        6 => "план к потоку вопроса не применён",
+        7 => "обмен был, но сервер не ответил ServerHello",
+        8 => "посылка плана не ушла на провод — опыта не было",
+        9 => "прошёл",
+        _ => "неизвестно",
+    }
+}
+
+/// C `ack_code_str` (не путать с `ack_reason_text` из sched.c).
+#[cfg(unix)]
+fn r2o_ask_ack_code_str(code: u8) -> &'static str {
+    match code {
+        control::ACK_OK => "принято",
+        control::ACK_BAD_PLAN => "план не разобрался",
+        control::ACK_BAD_ARGS => "аргументы команды не разобрались",
+        control::ACK_NO_ROOM => "нет места в таблице планов",
+        _ => "неизвестная причина",
+    }
+}
+
+/// C `pos_decided`.
+#[cfg(unix)]
+fn r2o_ask_pos_decided(properties: &r2o_controller::classify::DpiProps, pos: usize) -> bool {
+    use r2o_controller::classify::TriState;
+    match pos {
+        0 => properties.tolerates_left_overlap != TriState::Unset,
+        4 => properties.counts_duplicates != TriState::Unset,
+        1 => properties.tolerates_reorder != TriState::Unset,
+        2 => {
+            properties.validates_checksum != TriState::Unset
+                && properties.parses_l7 != TriState::True
+        }
+        3 => properties.parses_l7 != TriState::Unset,
+        _ => false,
+    }
+}
+
+/// Поля C `d2k_props_step`, нужные `print_step`.
+#[cfg(unix)]
+struct R2oAskStep<'a> {
+    plan_len: usize,
+    ack_ok: bool,
+    rc: u8,
+    ack_code: u8,
+    local_port: Option<u16>,
+    bytes: u32,
+    first_type: u8,
+    seen_types: u8,
+    err: &'a str,
+}
+
+/// C `print_step`.
+#[cfg(unix)]
+fn r2o_ask_print_step(step: &R2oAskStep<'_>) -> String {
+    let mut out = String::new();
+    if step.plan_len == 0 {
+        out.push_str("  план: не собрался\n");
+    } else if step.ack_ok {
+        out.push_str(&format!("  план: {} байт, датапат принял\n", step.plan_len));
+    } else if step.rc == 3 {
+        out.push_str(&format!(
+            "  план: {} байт, датапат ОТВЕРГ — {}\n",
+            step.plan_len,
+            r2o_ask_ack_code_str(step.ack_code)
+        ));
+    } else {
+        out.push_str(&format!(
+            "  план: {} байт, подтверждения нет\n",
+            step.plan_len
+        ));
+    }
+    match step.local_port {
+        None => out.push_str("  обмен: до обращения к цели дело не дошло\n"),
+        Some(port) if step.rc == 5 => out.push_str(&format!(
+            "  обмен: обращение с местного порта {port}, события обмена не пришло\n"
+        )),
+        Some(port) => out.push_str(&format!(
+            "  обмен: с местного порта {port}, {} байт, первая запись типа {}, встречены типы: {}\n",
+            step.bytes,
+            step.first_type,
+            r2o_ask_print_seen_types(step.seen_types)
+        )),
+    }
+    if step.err.is_empty() {
+        out.push_str(&format!(
+            "  причина остановки: {}\n",
+            r2o_ask_step_rc_str(step.rc)
+        ));
+    } else {
+        out.push_str(&format!(
+            "  причина остановки: {} ({})\n",
+            r2o_ask_step_rc_str(step.rc),
+            step.err
+        ));
+    }
+    out
+}
+
+#[cfg(unix)]
 fn r2o_print_ask_trace(
     plan_len: usize,
     plan_status: &str,
@@ -24274,6 +24381,229 @@ mod tests {
         )));
         assert!(captured.contains("  SNI в снимке: target.example\n"));
         assert!(captured.contains("  вид приветствия: MODERN\n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ask_trace_helpers_match_c_exactly() {
+        use r2o_controller::classify::{DpiProps, TriState};
+
+        assert_eq!(super::r2o_ask_step_rc_str(0), "вопрос не собран");
+        assert_eq!(super::r2o_ask_step_rc_str(1), "SET_NAME не ушёл в сокет");
+        assert_eq!(
+            super::r2o_ask_step_rc_str(2),
+            "подтверждение SET_NAME не пришло в срок"
+        );
+        assert_eq!(super::r2o_ask_step_rc_str(3), "датапат отверг план");
+        assert_eq!(
+            super::r2o_ask_step_rc_str(4),
+            "обращение к цели не состоялось"
+        );
+        assert_eq!(
+            super::r2o_ask_step_rc_str(5),
+            "своего обмена не было в срок"
+        );
+        assert_eq!(
+            super::r2o_ask_step_rc_str(6),
+            "план к потоку вопроса не применён"
+        );
+        assert_eq!(
+            super::r2o_ask_step_rc_str(7),
+            "обмен был, но сервер не ответил ServerHello"
+        );
+        assert_eq!(
+            super::r2o_ask_step_rc_str(8),
+            "посылка плана не ушла на провод — опыта не было"
+        );
+        assert_eq!(super::r2o_ask_step_rc_str(9), "прошёл");
+        assert_eq!(super::r2o_ask_step_rc_str(99), "неизвестно");
+
+        assert_eq!(
+            super::r2o_ask_ack_code_str(r2k_core::control::ACK_OK),
+            "принято"
+        );
+        assert_eq!(
+            super::r2o_ask_ack_code_str(r2k_core::control::ACK_BAD_PLAN),
+            "план не разобрался"
+        );
+        assert_eq!(
+            super::r2o_ask_ack_code_str(r2k_core::control::ACK_BAD_ARGS),
+            "аргументы команды не разобрались"
+        );
+        assert_eq!(
+            super::r2o_ask_ack_code_str(r2k_core::control::ACK_NO_ROOM),
+            "нет места в таблице планов"
+        );
+        assert_eq!(super::r2o_ask_ack_code_str(0xff), "неизвестная причина");
+
+        let mut properties = DpiProps::default();
+        for pos in 0..5 {
+            assert!(!super::r2o_ask_pos_decided(&properties, pos));
+        }
+        assert!(!super::r2o_ask_pos_decided(&properties, 99));
+        properties.tolerates_left_overlap = TriState::True;
+        assert!(super::r2o_ask_pos_decided(&properties, 0));
+        properties.tolerates_reorder = TriState::False;
+        assert!(super::r2o_ask_pos_decided(&properties, 1));
+        properties.validates_checksum = TriState::True;
+        assert!(super::r2o_ask_pos_decided(&properties, 2));
+        properties.parses_l7 = TriState::True;
+        assert!(!super::r2o_ask_pos_decided(&properties, 2));
+        assert!(super::r2o_ask_pos_decided(&properties, 3));
+        properties.counts_duplicates = TriState::True;
+        assert!(super::r2o_ask_pos_decided(&properties, 4));
+
+        let not_collected = super::R2oAskStep {
+            plan_len: 0,
+            ack_ok: false,
+            rc: 0,
+            ack_code: 0,
+            local_port: None,
+            bytes: 0,
+            first_type: 0,
+            seen_types: 0,
+            err: "",
+        };
+        assert_eq!(
+            super::r2o_ask_print_step(&not_collected),
+            "  план: не собрался\n\
+             \x20 обмен: до обращения к цели дело не дошло\n\
+             \x20 причина остановки: вопрос не собран\n"
+        );
+
+        let passed = super::R2oAskStep {
+            plan_len: 10,
+            ack_ok: true,
+            rc: 9,
+            ack_code: 0,
+            local_port: Some(40_000),
+            bytes: 120,
+            first_type: 22,
+            seen_types: 0b1100,
+            err: "ok",
+        };
+        assert_eq!(
+            super::r2o_ask_print_step(&passed),
+            "  план: 10 байт, датапат принял\n\
+             \x20 обмен: с местного порта 40000, 120 байт, первая запись типа 22, встречены типы: \
+             22 рукопожатие, 23 прикладные данные\n\
+             \x20 причина остановки: прошёл (ok)\n"
+        );
+
+        let refused = super::R2oAskStep {
+            plan_len: 10,
+            ack_ok: false,
+            rc: 3,
+            ack_code: r2k_core::control::ACK_BAD_PLAN,
+            local_port: None,
+            bytes: 0,
+            first_type: 0,
+            seen_types: 0,
+            err: "bad",
+        };
+        assert_eq!(
+            super::r2o_ask_print_step(&refused),
+            "  план: 10 байт, датапат ОТВЕРГ — план не разобрался\n\
+             \x20 обмен: до обращения к цели дело не дошло\n\
+             \x20 причина остановки: датапат отверг план (bad)\n"
+        );
+
+        let no_exchange = super::R2oAskStep {
+            plan_len: 10,
+            ack_ok: true,
+            rc: 5,
+            ack_code: 0,
+            local_port: Some(40_001),
+            bytes: 0,
+            first_type: 0,
+            seen_types: 0,
+            err: "",
+        };
+        assert_eq!(
+            super::r2o_ask_print_step(&no_exchange),
+            "  план: 10 байт, датапат принял\n\
+             \x20 обмен: обращение с местного порта 40001, события обмена не пришло\n\
+             \x20 причина остановки: своего обмена не было в срок\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_for_client_shape_skips_other_names_and_times_out_like_c() {
+        use r2k_core::control::{ClientShapeEvent, EVENT_CLIENT_SHAPE, KEY_LEN, SHAPE_MODERN};
+        use std::io::Write;
+        use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let socket_path = std::env::temp_dir().join(format!(
+            "r2o-wait-shape-{}-{nonce}.sock",
+            std::process::id()
+        ));
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        let hello = r2o_controller::hello::modern_client_hello("target.example").unwrap();
+        let other_hello = r2o_controller::hello::modern_client_hello("other.example").unwrap();
+        let server_hello = hello.clone();
+        let server_other_hello = other_hello;
+        let server = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            peer.write_all(&r2k_core::control::encode_greeting(u16::MAX as u32).unwrap())
+                .unwrap();
+            let mut key = [0_u8; KEY_LEN];
+            key[0] = 4;
+            key[1..5].copy_from_slice(&[192, 0, 2, 1]);
+            key[17..21].copy_from_slice(&[198, 51, 100, 2]);
+            key[33..35].copy_from_slice(&443_u16.to_be_bytes());
+            key[35..37].copy_from_slice(&40_000_u16.to_be_bytes());
+            key[37] = 6;
+            let wrong = ClientShapeEvent {
+                key,
+                host: b"other.example".to_vec(),
+                shape: SHAPE_MODERN,
+                client_hello: server_other_hello,
+                tcp_has_timestamp: None,
+            };
+            peer.write_all(
+                &super::encode_frame(EVENT_CLIENT_SHAPE, &wrong.event_body().unwrap()).unwrap(),
+            )
+            .unwrap();
+            let right = ClientShapeEvent {
+                key,
+                host: b"target.example".to_vec(),
+                shape: SHAPE_MODERN,
+                client_hello: server_hello,
+                tcp_has_timestamp: None,
+            };
+            peer.write_all(
+                &super::encode_frame(EVENT_CLIENT_SHAPE, &right.event_body().unwrap()).unwrap(),
+            )
+            .unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+        });
+
+        let mut client = super::ControlClient::connect(socket_path.clone()).unwrap();
+        let event = client
+            .wait_for_client_shape("target.example", 4, Duration::from_secs(1))
+            .unwrap()
+            .expect("форма цели должна быть получена");
+        assert_eq!(event.host, b"target.example");
+        assert_eq!(event.shape, SHAPE_MODERN);
+        assert_eq!(event.client_hello, hello);
+
+        // Чужое имя пропущено, а после него форма цели уже получена.
+        let started = Instant::now();
+        assert!(
+            client
+                .wait_for_client_shape("target.example", 4, Duration::from_millis(50))
+                .unwrap()
+                .is_none()
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        server.join().unwrap();
+        drop(client);
+        let _ = std::fs::remove_file(socket_path);
     }
 
     #[cfg(unix)]
