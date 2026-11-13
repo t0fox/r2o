@@ -4537,6 +4537,32 @@ mod tests {
     }
 
     #[test]
+    fn tls_stream_counts_wire_bytes_and_resets_like_c() {
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("открыть TCP-приёмник");
+        let address = listener.local_addr().expect("адрес TCP-приёмника");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("принять соединение");
+            stream
+                .write_all(&[1, 2, 3, 4, 5])
+                .expect("отправить пять байт");
+        });
+        let socket = TcpStream::connect(address).expect("подключиться к TCP-приёмнику");
+        let mut stream = R2oTlsTcpStream::new(socket);
+        let mut buffer = [0_u8; 5];
+        stream.read_exact(&mut buffer).expect("прочитать пять байт");
+        // C `d2k_tls12_rx_wire_bytes`/`d2k_tls_rx_wire_bytes`: счётчик
+        // увеличивается на каждый принятый байт.
+        assert_eq!(stream.r2o_wire_bytes, 5);
+        stream.r2o_reset_after_handshake();
+        assert_eq!(stream.r2o_wire_bytes, 0);
+        server.join().expect("дождаться TCP-приёмника");
+    }
+
+    #[test]
     fn tls_счётчик_отличает_неполное_тело_записи_от_полной_записи() {
         let mut tracker = R2oTlsRecordTracker::default();
         tracker.observe(&[23, 3, 3, 0, 10, 1, 2, 3]);
