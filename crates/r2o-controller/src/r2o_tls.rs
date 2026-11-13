@@ -406,6 +406,114 @@ fn r2o_t13_flight_next<'a>(buffer: &'a [u8], offset: &mut usize) -> Option<(u8, 
     Some((header[0], body))
 }
 
+fn r2o_hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+
+    let mut block_key = [0_u8; 64];
+    if key.len() > block_key.len() {
+        block_key[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        block_key[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0_u8; 64];
+    let mut opad = [0_u8; 64];
+    for index in 0..64 {
+        ipad[index] = block_key[index] ^ 0x36;
+        opad[index] = block_key[index] ^ 0x5c;
+    }
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(message);
+    let inner = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner);
+    outer.finalize().into()
+}
+
+fn r2o_hkdf_expand_label(
+    secret: &[u8; 32],
+    label: &str,
+    context: &[u8],
+    out_len: usize,
+) -> Option<Vec<u8>> {
+    if out_len == 0 || out_len > 255 * 32 || context.len() > 32 {
+        return None;
+    }
+    let full_label = format!("tls13 {label}");
+    if full_label.len() > 255 {
+        return None;
+    }
+    let mut info = Vec::with_capacity(4 + full_label.len() + context.len());
+    info.extend_from_slice(&(out_len as u16).to_be_bytes());
+    info.push(full_label.len() as u8);
+    info.extend_from_slice(full_label.as_bytes());
+    info.push(context.len() as u8);
+    info.extend_from_slice(context);
+
+    let mut output = Vec::with_capacity(out_len);
+    let mut previous = Vec::new();
+    let mut counter = 1_u8;
+    while output.len() < out_len {
+        let mut message = info.clone();
+        message.extend_from_slice(&previous);
+        message.push(counter);
+        let block = r2o_hmac_sha256(secret, &message);
+        output.extend_from_slice(&block);
+        previous = block.to_vec();
+        counter = counter.wrapping_add(1);
+    }
+    output.truncate(out_len);
+    Some(output)
+}
+
+/// C `d2k_t13_derive_secret`: Derive-Secret с Transcript-Hash.
+pub fn r2o_t13_derive_secret(secret: &[u8; 32], label: &str, messages: &[u8]) -> Option<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+
+    let transcript_hash = Sha256::digest(messages);
+    r2o_hkdf_expand_label(secret, label, &transcript_hash, 32)?
+        .try_into()
+        .ok()
+}
+
+/// C `d2k_t13_schedule_hs`: early→handshake secret, c/s hs traffic.
+pub fn r2o_t13_schedule_hs(
+    shared: &[u8; 32],
+    transcript: &[u8],
+) -> Option<([u8; 32], [u8; 32], [u8; 32])> {
+    let zero = [0_u8; 32];
+    let early = r2o_hmac_sha256(&zero, &zero);
+    let derived = r2o_t13_derive_secret(&early, "derived", &[])?;
+    let handshake = r2o_hmac_sha256(&derived, shared);
+    let client = r2o_t13_derive_secret(&handshake, "c hs traffic", transcript)?;
+    let server = r2o_t13_derive_secret(&handshake, "s hs traffic", transcript)?;
+    Some((client, server, handshake))
+}
+
+/// C `d2k_t13_schedule_ap`: master secret, c/s ap traffic.
+pub fn r2o_t13_schedule_ap(
+    handshake: &[u8; 32],
+    transcript: &[u8],
+) -> Option<([u8; 32], [u8; 32])> {
+    let zero = [0_u8; 32];
+    let derived = r2o_t13_derive_secret(handshake, "derived", &[])?;
+    let master = r2o_hmac_sha256(&derived, &zero);
+    let client = r2o_t13_derive_secret(&master, "c ap traffic", transcript)?;
+    let server = r2o_t13_derive_secret(&master, "s ap traffic", transcript)?;
+    Some((client, server))
+}
+
+/// C `d2k_t13_finished_mac`: Finished MAC над Transcript-Hash.
+pub fn r2o_t13_finished_mac(secret: &[u8; 32], transcript: &[u8]) -> Option<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+
+    let finished_key = r2o_hkdf_expand_label(secret, "finished", &[], 32)?;
+    let finished_key: [u8; 32] = finished_key.try_into().ok()?;
+    let transcript_hash = Sha256::digest(transcript);
+    Some(r2o_hmac_sha256(&finished_key, &transcript_hash))
+}
+
 fn r2o_tls_u16(bytes: &[u8], offset: usize, end: usize) -> Option<(usize, usize)> {
     let field_end = offset.checked_add(2)?;
     if field_end > end {
@@ -656,6 +764,67 @@ mod alpn_tests {
         assert!(!alpn_is_http(b"h3"));
         assert!(!alpn_is_http(b"HTTP/1.1"));
         assert!(!alpn_is_http(b""));
+    }
+}
+
+#[cfg(test)]
+mod tls13_schedule_tests {
+    use super::{
+        r2o_t13_derive_secret, r2o_t13_finished_mac, r2o_t13_schedule_ap, r2o_t13_schedule_hs,
+    };
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn inputs() -> ([u8; 32], [u8; 32], [u8; 64]) {
+        let mut secret = [0_u8; 32];
+        let mut shared = [0_u8; 32];
+        let mut transcript = [0_u8; 64];
+        for index in 0..32 {
+            secret[index] = index as u8;
+            shared[index] = 0x20 + index as u8;
+        }
+        for index in 0..64 {
+            transcript[index] = 0x40 + index as u8;
+        }
+        (secret, shared, transcript)
+    }
+
+    #[test]
+    fn tls13_schedule_matches_c_vectors() {
+        let (secret, shared, transcript) = inputs();
+        // Векторы сняты с C `d2k_t13_*` (D2O a378e230, tls13core.c/crypto.c).
+        assert_eq!(
+            hex(&r2o_t13_derive_secret(&secret, "test label", &transcript).unwrap()),
+            "2865f62df6d615f6423154285aa323e4263d7a6f3855789ba9d00a2a04d24ef0"
+        );
+        let (c_hs, s_hs, handshake) = r2o_t13_schedule_hs(&shared, &transcript).unwrap();
+        assert_eq!(
+            hex(&c_hs),
+            "5b7ac7e4c5faa7b2ca933859fe444b1ef9d4f07004cab4498cbae80fbc60c786"
+        );
+        assert_eq!(
+            hex(&s_hs),
+            "b618551ff9ae877176c8368202b9463d2eeb6b33202f969c53ee7939b70ba2d9"
+        );
+        assert_eq!(
+            hex(&handshake),
+            "a07aa32e1f50d12a76d9fe57d188e01e88f1076aa240f59107dd9a6054aac7aa"
+        );
+        let (c_ap, s_ap) = r2o_t13_schedule_ap(&handshake, &transcript).unwrap();
+        assert_eq!(
+            hex(&c_ap),
+            "f6b10070fbd8d0de2a7c3646ac42169c1ee314fb6e5e73e7dd71e9f3deb776c0"
+        );
+        assert_eq!(
+            hex(&s_ap),
+            "25c9ce29ef4faace0f8cb22cd9e4cd6eedd03620228161259142b1b88f8c45e9"
+        );
+        assert_eq!(
+            hex(&r2o_t13_finished_mac(&secret, &transcript).unwrap()),
+            "56184596c40690edb1403adb73b148b88ce3f7922fdde490ff8bcfc830769eda"
+        );
     }
 }
 

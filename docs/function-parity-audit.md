@@ -84,14 +84,14 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 248 | 300 | 0 | 0 |
+| core-net | 548 | 252 | 296 | 0 | 0 |
 | core-state | 692 | 274 | 418 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1010** | **972** | **0** | **0** |
+| **Итого** | **1982** | **1014** | **968** | **0** | **0** |
 
-Это не оценка паритета: 972 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 968 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1010 / P 972 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1014 / P 968 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -342,12 +342,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 248 | 300 | 0 | 0 |
+| core-net | 548 | 252 | 296 | 0 | 0 |
 | core-state | 692 | 274 | 418 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1010** | **972** | **0** | **0** |
+| **Итого** | **1982** | **1014** | **968** | **0** | **0** |
 
 
 ---
@@ -574,10 +574,10 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `d2k_t13_cert_name_ok12` | 166-175 | 10 | SAN из Certificate TLS1.2: 3-байтовая длина списка, 3-байтовая длина первого серта | `response.rs:389 https_certificate_name_matches` | **E** | C: `len>=6`, `list` 24 бита, `o=3`, `list>=3 && o+list<=len`, `clen` 24 бита, `clen>0 && o+clen<=len`, `cert_name_ok(body+o,clen,host)`. Rust получает листовой DER от rustls и передаёт в тот же SAN-парсер; TLS1.2-путь сверяется `donor_and_r2o_tls_results_match_...`. |
 | `d2k_t13_cert_name_ok` | 177-189 | 13 | SAN из Certificate TLS1.3: context length + 3-байтовая длина списка + первый серт | `response.rs:389 https_certificate_name_matches` | **E** | C: `len>=1`, `ctx=body[0]`, `o=1+ctx`, `o+3<=len`, `list` 24 бита, `o+=3`, `list>=3 && o+list<=len`, `clen` 24 бита, `clen>0 && o+clen<=len`, `cert_name_ok`. Rust получает DER от rustls; framing делает rustls. Тот же SAN-парсер; TLS1.3 differential. |
 | `d2k_t13_ch_build` | 197-357 | 161 | CH: session_id≤32 (байты random), cipher_suites 0x1301[+0xc02b+0xc02f], SNI, ec_formats, groups X25519[+P-256], 9 sigalg, supported_versions [1.3(+1.2)], ALPN wire/str, psk_dhe_ke, extra, key_share X25519, padding 0x0015 | `r2o_tls.rs:340-475 r2o_tls13_client_hello` | **E** | **Побайтовый порт:** `[1,0,0,0]`+0x0303+random+session_id (≤32, байты random); `offer_tls12` → `0x1301,0xc02b,0xc02f`, иначе `0x1301`; compression `[1,0]`; SNI при `sni_len>0 && <256` (len+5/len+3/type 0/len); `0x000b [1,0]`; `0x000a` `[1d,17]` или `[1d]`; `0x000d` 9 sigalg (0403/0503/0603/0804/0805/0806/0401/0501/0601); `0x002b` 1.3+1.2 или 1.3; ALPN wire (≤256) или str (≤255); `0x002d [1,1]`; extra (проверка `p+42<=cap`); `0x0033` X25519 32; padding 0x0015 при `want_wire>have+4`, `pad<=0xffff`, в cap; длины тела/расширений. Rust те же поля/лимиты, дополнительно 4096/SNI NUL; unit `tests/r2o_tls.rs:183` (padding), `:212` (session_id), `:101/115` (ALPN). |
-| `d2k_t13_derive_secret` | 361-366 | 6 | Derive-Secret(Transcript-Hash): SHA256(msgs) + HKDF-Expand-Label(ctx) | rustls key schedule | **P** | C `d2k_sha256(msgs,n,th)` и `d2k_hkdf_expand_label_ctx(secret,label,th,32,out,32)`. Rust ключи считает rustls; собственной функции/KAT в Rust нет. |
-| `d2k_t13_schedule_hs` | 368-381 | 14 | early→handshake secret, c/s hs traffic, `hs_out` | rustls key schedule | **P** | C `HKDF-Extract(0,0)` → `Derive-Secret(early,"derived","")` → `HKDF-Extract(derived,shared)` → `c hs traffic`/`s hs traffic` по транскрипту; `hs_out` отдельно. Rust — внутри rustls, отдельного `hs`-выхода нет. |
-| `d2k_t13_schedule_ap` | 383-394 | 12 | master secret, c/s ap traffic | rustls key schedule | **P** | C `Derive-Secret(hs,"derived","")` → `HKDF-Extract(derived,0)` → `c ap traffic`/`s ap traffic` по транскрипту. Rust — внутри rustls. |
-| `d2k_t13_finished_mac` | 396-403 | 8 | Finished MAC: Expand-Label `finished`(32), SHA256(transcript), HMAC-SHA256 | rustls key schedule | **P** | C `d2k_hkdf_expand_label(secret,"finished",fin_key,32)`; `d2k_sha256(tr,tr_len,th)`; `d2k_hmac_sha256(fin_key,32,th,32,out)`. Rust Finished вычисляет rustls по тому же RFC 8446; отдельной функции и C/Rust-векторов MAC в R2O нет. |
+| `d2k_t13_derive_secret` | 361-366 | 6 | Derive-Secret(Transcript-Hash): SHA256(msgs) + HKDF-Expand-Label(ctx) | `r2o_tls.rs` `r2o_t13_derive_secret` | E | C: SHA256(msgs) → HKDF-Expand-Label(secret,label,hash,32). Rust `r2o_t13_derive_secret` реализует тот же HMAC/HKDF; тест `tls13_schedule_matches_c_vectors` сверяет с C-вектором D2O `a378e230` (`tls13core.c`/`crypto.c`). |
+| `d2k_t13_schedule_hs` | 368-381 | 14 | early→handshake secret, c/s hs traffic, `hs_out` | `r2o_tls.rs` `r2o_t13_schedule_hs` | E | C: Extract(0,0)→Derive-Secret(early,"derived")→Extract(derived,shared)→c/s hs traffic по транскрипту. Rust `r2o_t13_schedule_hs` тот же порядок; тест `tls13_schedule_matches_c_vectors` сверяет c_hs/s_hs/hs с C-вектором. |
+| `d2k_t13_schedule_ap` | 383-394 | 12 | master secret, c/s ap traffic | `r2o_tls.rs` `r2o_t13_schedule_ap` | E | C: Derive-Secret(hs,"derived")→Extract(derived,0)→c/s ap traffic. Rust `r2o_t13_schedule_ap` тот же порядок; тест `tls13_schedule_matches_c_vectors` сверяет c_ap/s_ap с C-вектором. |
+| `d2k_t13_finished_mac` | 396-403 | 8 | Finished MAC: Expand-Label `finished`(32), SHA256(transcript), HMAC-SHA256 | `r2o_tls.rs` `r2o_t13_finished_mac` | E | C: Expand-Label(secret,"finished",32), SHA256(tr), HMAC-SHA256. Rust `r2o_t13_finished_mac` те же шаги; тест `tls13_schedule_matches_c_vectors` сверяет MAC с C-вектором. |
 | `d2k_t13_sh_version` | 407-426 | 20 | версия из ServerHello.supported_versions: legacy 0x0303, ext 0x002b len=2, иначе legacy; обрезки | `r2o_tls.rs` `r2o_t13_sh_version` | E | C: `q=4+2+32`, session_id, cipher/compression, supported_versions `0x002b` len 2, иначе legacy `0x0303`; обрезки → 0. Rust `r2o_t13_sh_version` те же ветви; тест `tls13_server_hello_version_and_parse_match_c` (0x0304, TLS1.2 `0x0303`, обрезанный → 0). Используется в `r2o_tls_replay_client_hello`. |
 | `d2k_t13_sh_parse` | 428-475 | 48 | ServerHello: session_id, cipher==0x1301, extensions, key_share 0x001d len=32; ошибки «обрезан/шифр/без расширений/нет X25519» | `r2o_tls.rs` `r2o_t13_sh_parse` | E | C: session_id, cipher `0x1301`, extensions, key_share `0x0033`/group `0x001d`/len 32; ошибки обрезки/шифра/без расширений/без X25519. Rust `r2o_t13_sh_parse` те же проверки; тест `tls13_server_hello_version_and_parse_match_c` (валидный key_share, TLS1.2 без расширений, missing key). Replay использует парсер для TLS1.3. |
 | `d2k_t13_flight_next` | 479-490 | 12 | следующее handshake-сообщение флайта: 4-байтный заголовок + тело | `r2o_tls.rs` `r2o_t13_flight_next` | E | C: `!buf||!off||*off+4>len` → 0; 3-байтная длина, `o+4+n>len` → 0; возвращает type/body/offset. Rust `r2o_t13_flight_next` те же границы; тест `tls13_flight_next_matches_c` (два сообщения, исчерпание, обрезанный заголовок). Используется в replay для поиска ServerHello. |
