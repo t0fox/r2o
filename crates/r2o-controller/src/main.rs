@@ -34725,6 +34725,20 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn http_search_state_starts_empty_like_c() {
+        // C `d2k_httpsearch_new`: calloc, cur.fd=-1, пустые записи/отказы.
+        let cache = super::HttpSearchRecordCache::default();
+        assert_eq!(cache.count(), 0);
+        assert_eq!(cache.bytes(), 0);
+        assert_eq!(cache.failure_count(), 0);
+        assert_eq!(cache.failure_bytes(), 0);
+        assert_eq!(cache.record_limit_hits(), 0);
+        assert_eq!(cache.failure_limit_hits(), 0);
+        assert_eq!(cache.failure_record_limit_hits(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn http_search_worker_runs_queued_jobs_outside_the_control_loop() {
         let worker = HttpSearchWorker::new(
             r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(4),

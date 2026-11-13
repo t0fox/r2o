@@ -84,14 +84,14 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 313 | 235 | 0 | 0 |
+| core-net | 548 | 317 | 231 | 0 | 0 |
 | core-state | 692 | 274 | 418 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1075** | **907** | **0** | **0** |
+| **Итого** | **1982** | **1079** | **903** | **0** | **0** |
 
-Это не оценка паритета: 907 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 903 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1075 / P 907 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1079 / P 903 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -342,12 +342,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 313 | 235 | 0 | 0 |
+| core-net | 548 | 317 | 231 | 0 | 0 |
 | core-state | 692 | 274 | 418 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1075** | **907** | **0** | **0** |
+| **Итого** | **1982** | **1079** | **903** | **0** | **0** |
 
 
 ---
@@ -770,10 +770,10 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `d2k_httpsearch_test_add_records` | 569-578 | 10 | тестовое заполнение кэша записей | `main.rs` `HttpSearchRecordCache::test_add_records` | E | C под `D2K_HS_TESTING`: `record-%zu.example`, family 4, счётчик added до заполнения. Rust `#[cfg(test)] test_add_records` делает то же через `record_name`/`has_room_for`; тест `http_live_failure_hooks_match_donor` проверяет частичное заполнение (added > 0 и < 500). |
 | `d2k_httpsearch_measured_poison` | 579-606 | 28 | регистрация измеренной poison-спеки: канонический ключ, алиасы, дедуп, максимум 8 | `http_search.rs:719-772 measured_poison_keys`, `main.rs:4565-4591 measured_http_candidate_keys` | **P** | C: spec → ключ `fake:...`, алиасы `fake:badsum`→`fake-badsum`, `fake:seqshift=-66000`→`fake-seqshift`, `known_key`, дедуп, `measured[8]` (`httpsearch.c:581-608`). Rust `measured_poison_keys` возвращает канонические ключи из текста TLS-плана, `measured_http_candidate_keys` сортирует по `successes` и ограничивает 8; отдельного состояния `measured` нет. Тест `candidate_tests::measured_poison_requires_tls_and_an_actual_fake_reference`. |
 | `d2k_hs_plan_poisons` | 608-642 | 35 | poison-спеки, на которые ссылается fake в TLS-плане | `http_search.rs:719-772 measured_poison_keys` | **P** | C возвращает **спеки** (`ttl=64 badsum`), затем вызывающий регистрирует их; Rust сразу возвращает канонические **ключи** (`fake:ttl=64+badsum`). Условия совпадают: только `proto tcp tls`, `poison N`, ссылка `poison=N` в строке `fake `. Тот же тест; представление/API различаются. |
-| `d2k_httpsearch_new` | 644-650 | 7 | создать состояние поиска, `cur.fd=-1` | `main.rs:4464 HttpSearchRecordCache` + `HttpSearchWorker` | **P** | C единый объект `d2k_httpsearch` с записями, очередью и текущим состоянием; Rust состояние разнесено на `HttpSearchRecordCache`, канал задач `HttpSearchWorker` и локальные переменные задачи. |
-| `drop_socket` | 652-657 | 6 | закрыть сокет через `ops.close_port` | RAII `TcpStream`/`OwnedFd` | **P** | C вызывает хук закрытия; Rust сокет закрывается `Drop` при выходе из `run_http_baseline`. Отдельной функции/хука нет, поведение эквивалентно. |
-| `drop_probe` | 659-664 | 6 | снять пробный план датапата по host/family/sport | `main.rs` delete/revoke | **P** | C вызывает `ops.del_probe`; Rust удаляет временную привязку командами `DEL_NAME_PROBE`/`revoke_http_search_binding`. API и момент снятия иные. |
-| `d2k_httpsearch_free` | 666-674 | 9 | снять активную пробу, закрыть сокет, освободить записи/очередь | RAII `Drop` | **P** | C вручную освобождает `failures`, `recs`, `q`; Rust владеющие `Vec`/`HashMap` освобождаются `Drop`. Для непустого состояния эквивалентно. |
+| `d2k_httpsearch_new` | 644-650 | 7 | создать состояние поиска, `cur.fd=-1` | `main.rs` `HttpSearchRecordCache::default` + `HttpSearchWorker::new` | **E*** | C calloc, `cur.fd=-1`. Rust состояние разнесено: `HttpSearchRecordCache::default()` (пустые записи/отказы, нулевые счётчики) + `HttpSearchWorker::new` (поток/каналы). Тесты `http_search_state_starts_empty_like_c`, `http_search_worker_runs_queued_jobs_outside_the_control_loop`. **Ограничение:** единого объекта `d2k_httpsearch` нет — состояние распределено. |
+| `drop_socket` | 652-657 | 6 | закрыть сокет через `ops.close_port` | RAII `TcpStream`/`OwnedFd` (`run_http_baseline`) | **E*** | C вызывает хук `ops.close_port`; Rust сокет базового зонда — `TcpStream` в `run_http_baseline`, закрывается `Drop` при любом выходе; отдельного хука нет. Интеграционный `http_search_worker_runs_queued_jobs_outside_the_control_loop`. **Ограничение:** C-хука close_port для подмены в тестах нет. |
+| `drop_probe` | 659-664 | 6 | снять пробный план датапата по host/family/sport | `main.rs` `delete_name_probe` | **E*** | C `ops.del_probe`; Rust `delete_name_probe` отправляет `COMMAND_DEL_NAME_PROBE` с `encode_delete_name_probe(host,shape,family,port)`; используется во всех verify-сценариях (main.rs:530,554,590,614,633). Тесты кодера `encode_delete_name_probe` в `r2k-core/tests/control.rs`. **Ограничение:** момент/условия снятия отличаются от C-хука. |
+| `d2k_httpsearch_free` | 666-674 | 9 | снять активную пробу, закрыть сокет, освободить записи/очередь | `Drop` (`HttpSearchWorker`, `HttpSearchRecordCache`) | **E*** | C вручную free failures/recs/q + drop_probe. Rust `Drop for HttpSearchWorker` ставит cancel, закрывает jobs/commands/outcomes-каналы (receiver drop разблокирует send), join-ит поток; `Vec`/`HashMap`/`HttpLiveFailure` освобождаются Drop. `http_search_worker_runs_queued_jobs...` завершает воркер. **Ограничение:** отдельного drop_probe в Drop нет — временные привязки снимаются явными DEL_NAME_PROBE в сценариях. |
 | `d2k_httpsearch_busy` | 676-678 | 3 | есть ли активная задача (`phase != PH_IDLE`) | `main.rs` `HttpSearchWindow::active`/`HttpSearchWorker::queued_jobs` | **E*** | C одно поле `phase`; Rust активность выражена окном на цель (`begin_http_search` → `HttpSearchWindow::active`) и очередью воркера (`queued_jobs`). Для одной цели семантика эквивалентна; окно/кулдаун проверены `http_search_window_shares_active_and_cooldown_state_across_endpoints`. **Ограничение:** глобального `phase` нет — активность per-target. |
 | `d2k_httpsearch_plan_of` | 680-683 | 4 | ключ подтверждённого плана host+family, не revoked | `http_search.rs` `http_plan_of` | E | C: `rec_find` + `r->key[0] && !r->revoked`. Rust `http_plan_of(catalog, host, family)` ищет включённую name-binding (HTTP, TCP, family) и восстанавливает ключ из `plan.text`; используется в `http_search_candidates` (ключ своей записи первым, как C `build_cands`). Тест `http_plan_of_matches_c` (split, неверная family/host, disabled→None). |
 | `d2k_httpsearch_diagnostic_counts` | 687-706 | 20 | счётчики записей/очереди/отказов/лимитов/байт | `main.rs` `HttpSearchWorker` accessors + `Counts` fill | **E*** | C заполняет records/queued/failures, records/queue/failure bytes, 4 лимита, `failure(_record/_alloc)_hits/failures`, `record(_alloc)_hits/failures`, `queue(_alloc)_hits/failures`, `http_bytes=sizeof(hs)+records+queue+failures`. Rust `Counts` теперь получает все эти поля из `HttpSearchWorker`/`HttpSearchRecordCache`; `http_failure_bytes` и `http_bytes` больше не нули. Тесты `httpsearch_diagnostic_counters_match_c` (failure bytes/count/дедуп, record bytes), `rec_get_record_limit_is_counted_like_c` (record_limit_hits). **Ограничения:** `record_alloc_failures`/`failure_alloc_failures` всегда 0 (HashMap не возвращает NULL); `record_bytes` — фиксированный размер элемента, не `cap*sizeof`; queue limit-hit копится в воркере, отдельного unit-теста нет. |
