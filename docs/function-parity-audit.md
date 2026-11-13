@@ -89,7 +89,7 @@ recheck 1982 1982 equal True
 | datapath-core | 400 | 205 | 195 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **893** | **1089** | **0** | **0** |
+| **Итого** | **1982** | **895** | **1087** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 893 / P 1089 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 895 / P 1087 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -345,11 +345,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 222 | 326 | 0 | 0 |
-| core-state | 692 | 197 | 495 | 0 | 0 |
+| core-state | 692 | 199 | 493 | 0 | 0 |
 | datapath-core | 400 | 205 | 195 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **893** | **1089** | **0** | **0** |
+| **Итого** | **1982** | **895** | **1087** | **0** | **0** |
 
 
 ---
@@ -2298,8 +2298,8 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `same_evidence` | 38–73 | 36 | одна улика: kind volume/rx-volume/rx-volume-wire → `abs(volume delta)<=4`; иначе `abs(ttl delta)<=2` и tos/ipid точно; ttl_delta/seen не читаются | catalog.rs:1077-1090 `same_signal` | **P*** | Совпадает посимвольно: C `int`-вычитание и `abs`, Rust `i64::from().abs()`, `abs_diff`, `tos/ipid`; `VOLUME_SLACK=4`, `TTL_SLACK=2`. Unit `tests/catalog.rs`; отдельного boundary-теста на 4/5 и 2/3 нет. |
-| `d2k_fp_same` | 75–125 | 51 | method, внешний обход b→a, все приметы того же рода в a, `kind_seen && !agreed → false`, хотя бы один общий род | catalog.rs:59-84 `Fingerprint::is_compatible_with` | **P** | Логика совпадает: направленный обход наблюдаемого, просмотр всех same-kind, break на первом согласии, `any_agreement`, `common>0`. Unit `tests/catalog.rs` (partial evidence, all same-kind signals); C/Rust differential нет. |
+| `same_evidence` | 38–73 | 36 | одна улика: kind volume/rx-volume/rx-volume-wire → `abs(volume delta)<=4`; иначе `abs(ttl delta)<=2` и tos/ipid точно; ttl_delta/seen не читаются | `catalog.rs` `same_signal` | E | C `int`-вычитание и `abs`; Rust `i64`/`abs_diff`, пороги `VOLUME_SLACK=4`, `TTL_SLACK=2`, `tos/ipid` точно. Тест `fingerprint_slack_boundaries_match_c` проверяет границы 4/5 и 2/3, tos/ipid; существующие тесты — частичное покрытие и конфликт. |
+| `d2k_fp_same` | 75–125 | 51 | method, внешний обход b→a, все приметы того же рода в a, `kind_seen && !agreed → false`, хотя бы один общий род | `catalog.rs` `Fingerprint::is_compatible_with` | E | C обходит наблюдаемые приметы, смотрит все same-kind сохранённые, `kind_seen && !agreed → false`, требует хотя бы одного согласия. Rust `is_compatible_with` повторяет направленный обход и `any_agreement`; тесты `fingerprint_matching_uses_partial_evidence_and_all_same_kind_signals`, `fingerprint_match_requires_one_agreement_and_rejects_known_conflicts`, `fingerprint_slack_boundaries_match_c`. |
 | `d2k_catalog_match` | 127-136 | 10 | первый индекс коробки с совместимым отпечатком, иначе -1 | `catalog.rs:537-541 match_fingerprint` | **E** | C `for i in boxes`: `d2k_fp_same(&boxes[i].fp,fp)` → `(int)i`, иначе -1. Rust `position` → `Option<usize>`; unit `tests/catalog.rs`. |
 
 ### `core/meas.c`
@@ -2784,8 +2784,8 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_group_match` | 274–293 | `groups.rs:358-387` `match_domain` | **P** | Исключения DIRECT_CLEAR/PLAN_FAILED того же плана и longest suffix совпадают; **Rust дополнительно исключает OPERATOR_REJECT**. Тесты `tests/groups.rs:10-78`, `:116-163`. |
 | `d2k_group_forget` | 294–310 | `groups.rs:271-302` `forget_failures` | **E** | normalize, фильтр name/transport/family/PLAN_FAILED, swap_remove, rebuild, возврат числа — совпадают. Тест `tests/groups.rs:166-234` (два плана, забывание после повторного изучения). |
 | `d2k_group_expire` | 311–324 | `groups.rs:304-324` `expire_failures` | **E** | `max_age<=0` или `now<max_age`, `at < now-max_age`, swap_remove/rebuild, возврат числа — совпадают. Тест `tests/groups.rs:210` (7 суток и +1 секунда). |
-| `same_evidence` (static) | 38–73 | `catalog.rs:1077-1088` `same_signal` | **P** | volume/rx-volume/rx-volume-wire: `abs(saved-observed)<=4`; ttl: `abs_diff<=2`; tos/ipid точно. C `int`-разность и модуль, Rust `i64`/`u8::abs_diff`. Тесты `tests/catalog.rs:94-153` покрывают ttl±1, конфликт ttl, tos/ipid; ветка volume без прямого теста, C/Rust differential нет. |
-| `d2k_fp_same` | 75–125 | `catalog.rs:59-83` `Fingerprint::is_compatible_with` | **P** | Направленный обход observed→saved, все приметы одного рода, `kind_seen && !agreed → false`, отсутствие рода не противоречие, `any_agreement` в конце. C `common++` только при согласии рода; Rust `any_agreement` через `signal_agrees`. Тесты `tests/catalog.rs:94-153`: несколько `rst` одного рода, частичное покрытие, конфликт, нет общих родов, method mismatch. |
+| `same_evidence` (static) | 38–73 | `catalog.rs` `same_signal` | **E** | volume/rx-volume/rx-volume-wire: `abs(saved-observed)<=4`; ttl: `abs_diff<=2`; tos/ipid точно. Тест `fingerprint_slack_boundaries_match_c` (границы 4/5, 2/3, tos/ipid), плюс существующие тесты частичного покрытия/конфликта. |
+| `d2k_fp_same` | 75–125 | `catalog.rs` `Fingerprint::is_compatible_with` | **E** | Направленный обход observed→saved, все приметы одного рода, `kind_seen && !agreed → false`, отсутствие рода не противоречие, `any_agreement` в конце. Тесты `fingerprint_matching_uses_partial_evidence...`, `fingerprint_match_requires_one_agreement...`, `fingerprint_slack_boundaries_match_c`. |
 | `d2k_catalog_match` | 127–136 | `catalog.rs:537-541` `match_fingerprint` | **P** | Первый совместимый индекс, `-1`/`None` при отсутствии. Тесты `tests/catalog.rs:95-153` (совпадение box 0, отсутствие, конфликт). Проверки индекса >0 нет; C/Rust differential нет. |
 | `d2k_ip4_parse` | 7–30 | `r2k-core/addr.rs` `parse_ipv4_legacy` | **E** | C принимает ведущие нули (`010.0.0.1` → 10.0.0.1), 1–3 цифры, ≤255, ровно 4 октета; Rust `parse_ipv4_legacy` реализует те же ветви, используется в voice-привязке и примере net4; тест `ip4_parse_accepts_leading_zeros_like_c`, дифференциал `test-core-net4-differential.sh` — 34 случая PASS. |
 | `d2k_ip4_text` | 32–38 | `Ipv4Addr::Display` | **E** | `scripts/test-core-net4-differential.sh` сравнивает C `d2k_ip4_text` и Rust `Display` на валидных адресах. |

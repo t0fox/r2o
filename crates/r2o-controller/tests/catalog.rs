@@ -306,3 +306,39 @@ fn temp_dir() -> std::path::PathBuf {
     fs::create_dir(&path).unwrap();
     path
 }
+
+#[test]
+fn fingerprint_slack_boundaries_match_c() {
+    use r2o_controller::catalog::{Fingerprint, Signal};
+
+    fn signal(kind: &str, ttl: u8, volume: i32) -> Signal {
+        Signal {
+            kind: kind.into(),
+            ttl,
+            tos: 1,
+            ipid: 7,
+            volume,
+            ..Default::default()
+        }
+    }
+    fn print(signal: Signal) -> Fingerprint {
+        Fingerprint {
+            method: 2,
+            signals: vec![signal],
+        }
+    }
+
+    // C same_evidence: допуск объёма не больше 4.
+    assert!(print(signal("volume", 64, 20)).is_compatible_with(&print(signal("volume", 64, 24))));
+    assert!(!print(signal("volume", 64, 20)).is_compatible_with(&print(signal("volume", 64, 25))));
+    // ttl delta <= 2.
+    assert!(print(signal("rst", 90, 0)).is_compatible_with(&print(signal("rst", 92, 0))));
+    assert!(!print(signal("rst", 90, 0)).is_compatible_with(&print(signal("rst", 93, 0))));
+    // tos/ipid сравниваются точно.
+    let mut changed = signal("rst", 90, 0);
+    changed.tos = 2;
+    assert!(!print(signal("rst", 90, 0)).is_compatible_with(&print(changed)));
+    let mut changed = signal("rst", 90, 0);
+    changed.ipid = 8;
+    assert!(!print(signal("rst", 90, 0)).is_compatible_with(&print(changed)));
+}
