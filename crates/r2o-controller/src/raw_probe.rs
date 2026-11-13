@@ -43,6 +43,7 @@ const RST_PREFIX: &str = "-A OUTPUT -p tcp -m tcp --sport ";
 const RST_LEGACY_SUFFIX: &str = " --tcp-flags RST RST -j DROP";
 const RST_OWNED_MID: &str = " --tcp-flags RST RST -m comment --comment ";
 const RST_OWNED_TAG: &str = "d2k-rst:";
+const RST_OWNED_TAG_R2O: &str = "r2o-rst:";
 const RST_OWNED_SUFFIX: &str = " -j DROP";
 
 struct RawSelftestState {
@@ -1844,10 +1845,13 @@ fn parse_rst_rule(line: &str) -> Option<(u16, Option<i64>)> {
             }
             owner = &owner[1..owner.len() - 1];
         }
-        if !owner.starts_with(RST_OWNED_TAG) {
+        if !owner.starts_with(RST_OWNED_TAG) && !owner.starts_with(RST_OWNED_TAG_R2O) {
             return None;
         }
-        let pid = parse_long_exact(owner[RST_OWNED_TAG.len()..].as_bytes())?;
+        let pid_text = owner
+            .strip_prefix(RST_OWNED_TAG)
+            .or_else(|| owner.strip_prefix(RST_OWNED_TAG_R2O))?;
+        let pid = parse_long_exact(pid_text.as_bytes())?;
         if pid <= 0 {
             return None;
         }
@@ -2388,6 +2392,24 @@ fn timestamp_options(server_timestamp: u32) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parse_rst_rule_accepts_d2o_and_r2o_owner_tags() {
+        let legacy = "-A OUTPUT -p tcp -m tcp --sport 40123 --tcp-flags RST RST -j DROP";
+        assert_eq!(super::parse_stale_rst_rule(legacy), Some(40_123));
+
+        let d2o = "-A OUTPUT -p tcp -m tcp --sport 40124 --tcp-flags RST RST -m comment \
+                   --comment \"d2k-rst:123\" -j DROP";
+        assert_eq!(super::parse_stale_rst_rule(d2o), Some(40_124));
+
+        let r2o = "-A OUTPUT -p tcp -m tcp --sport 40125 --tcp-flags RST RST -m comment \
+                   --comment \"r2o-rst:456\" -j DROP";
+        assert_eq!(super::parse_stale_rst_rule(r2o), Some(40_125));
+
+        let foreign = "-A OUTPUT -p tcp -m tcp --sport 40126 --tcp-flags RST RST -m comment \
+                       --comment \"other-rst:456\" -j DROP";
+        assert_eq!(super::parse_stale_rst_rule(foreign), None);
+    }
+
     #[test]
     fn rst_abandon_message_includes_family_and_port_like_c() {
         let rule = super::RstRule {
