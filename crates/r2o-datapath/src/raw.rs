@@ -495,18 +495,11 @@ fn r2o_tls_route_probe(packet: &[u8]) -> Option<R2oTlsRouteProbe> {
 }
 
 fn r2o_route_mtu(mark: u32, family: u8, destination: [u8; 16]) -> usize {
-    let socket_family = match family {
-        4 => libc::AF_INET,
-        6 => libc::AF_INET6,
-        _ => return 0,
-    };
-    let raw_fd = unsafe {
-        libc::socket(
-            socket_family,
-            libc::SOCK_DGRAM | libc::SOCK_CLOEXEC,
-            libc::IPPROTO_UDP,
-        )
-    };
+    // C `route_mtu` (`datapath/raw.c:140-176`): IPv6 только при family==6,
+    // любой другой family — IPv4; socket SOCK_DGRAM с protocol 0.
+    let ipv6 = family == 6;
+    let socket_family = if ipv6 { libc::AF_INET6 } else { libc::AF_INET };
+    let raw_fd = unsafe { libc::socket(socket_family, libc::SOCK_DGRAM, 0) };
     if raw_fd < 0 {
         return 0;
     }
@@ -515,7 +508,7 @@ fn r2o_route_mtu(mark: u32, family: u8, destination: [u8; 16]) -> usize {
         let _ = set_option(fd.as_raw_fd(), libc::SOL_SOCKET, libc::SO_MARK, &mark);
     }
     let mut address: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-    let (address_len, level, option) = if family == 4 {
+    let (address_len, level, option) = if !ipv6 {
         let address = unsafe { &mut *(&mut address as *mut _ as *mut libc::sockaddr_in) };
         address.sin_family = libc::AF_INET as libc::sa_family_t;
         address.sin_port = 443_u16.to_be();
@@ -688,7 +681,7 @@ mod tests {
         R2O_RAW_CANT_IPID, R2O_RAW_CANT_IPSUM, R2O_RAW_LIMITS, R2O_ROUTE_MTU_CACHE_CAPACITY,
         R2oRouteMtuCache, outgoing_packet, r2o_effective_route_maxlen, r2o_interface_mtu,
         r2o_packet_route_key, r2o_parse_interface_flags, r2o_pick_maxlen, r2o_raw_mark_option,
-        r2o_select_egress_mtu, r2o_tls_route_segment_cap_with,
+        r2o_route_mtu, r2o_select_egress_mtu, r2o_tls_route_segment_cap_with,
     };
     use proptest::prelude::*;
     use r2k_core::plan::{Emission, EmitKind};
@@ -746,6 +739,27 @@ mod tests {
         packet[52] = 5 << 4;
         packet[60..65].copy_from_slice(&[0x16, 3, 3, 0, 0]);
         packet
+    }
+
+    #[test]
+    fn route_mtu_differential_matches_c() {
+        let mut v4 = [0_u8; 16];
+        v4[..4].copy_from_slice(&[127, 0, 0, 1]);
+        let mut v6 = [0_u8; 16];
+        v6[15] = 1;
+        let out = format!(
+            "v4 {}\nv6 {}\nbad {}\n",
+            r2o_route_mtu(0, 4, v4),
+            r2o_route_mtu(0, 6, v6),
+            // C: любая family, кроме 6, идёт по IPv4-ветке.
+            r2o_route_mtu(0, 5, v4)
+        );
+        if let Ok(path) = std::env::var("R2O_ROUTE_MTU_DIFF_OUTPUT") {
+            std::fs::write(path, &out).unwrap();
+        }
+        assert!(r2o_route_mtu(0, 4, v4) > 0);
+        assert!(r2o_route_mtu(0, 6, v6) > 0);
+        assert_eq!(r2o_route_mtu(0, 5, v4), r2o_route_mtu(0, 4, v4));
     }
 
     #[test]

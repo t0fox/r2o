@@ -87,11 +87,11 @@ recheck 1982 1982 equal True
 | core-net | 548 | 325 | 223 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
 | datapath-core | 400 | 222 | 178 | 0 | 0 |
-| datapath-plan | 183 | 176 | 7 | 0 | 0 |
+| datapath-plan | 183 | 177 | 6 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1298** | **684** | **0** | **0** |
+| **Итого** | **1982** | **1299** | **683** | **0** | **0** |
 
-Это не оценка паритета: 684 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 683 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1298 / P 684 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1299 / P 683 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -345,9 +345,9 @@ P означает неполное доказательство ветвей, N
 | core-net | 548 | 325 | 223 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
 | datapath-core | 400 | 222 | 178 | 0 | 0 |
-| datapath-plan | 183 | 176 | 7 | 0 | 0 |
+| datapath-plan | 183 | 177 | 6 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1298** | **684** | **0** | **0** |
+| **Итого** | **1982** | **1299** | **683** | **0** | **0** |
 
 
 ---
@@ -5770,7 +5770,7 @@ mark обязателен. Совпадают: `pick_maxlen`/`adopt_egress`/`rou
 |---|---|---:|---|---|---|---|
 | if_mtu | 64-81 | 18 | static: MTU интерфейса через `SIOCGIFMTU` | `raw.rs:301` `r2o_interface_mtu` (sysfs `/sys/class/net/<if>/mtu`) | E | C `!name \|\| !*name→0`; `ioctl(SIOCGIFMTU)`; успех и `mtu>0`. Rust читает `mtu` из sysfs, отвергает имена с `/`, `\\`, `.`, `..`, фильтрует 0. Значение `lo` и отказ для `../lo`/`.` проверены `interface_mtu_reads_sysfs_and_named_limit_uses_it`. |
 | pick_maxlen | 92-116 | 25 | static: предел по named iface или наименьшему MTU поднятых (без loopback) | `raw.rs:270` `r2o_pick_maxlen` | E | C named iface → `if_mtu`, иначе наименьший MTU поднятых без loopback, fallback `D2K_RAW_MTU_FALLBACK=1500`. Rust тот же выбор по sysfs; named-путь проверен `interface_mtu_reads_sysfs_and_named_limit_uses_it` (MTU `lo` совпадает), обход/порог — `общий_предел_берёт_наименьший...`. |
-| route_mtu | 140-176 | 37 | static: MTU маршрута к адресу (UDP connect + `IP_MTU`/`IPV6_MTU`) | `raw.rs:484` `r2o_route_mtu` | P | C под `#ifdef IP_MTU`: `socket(family==6?AF_INET6:AF_INET,SOCK_DGRAM,0)`; `SO_MARK` только при `mark!=0`; sockaddr с портом 443 и адресом; `connect`; `getsockopt(IPPROTO_IPV6/IPPROTO_IP, IPV6_MTU/IP_MTU)`; `mtu>0`; `close`; без `IP_MTU` — 0. Rust `r2o_route_mtu` те же шаги, но `SOCK_DGRAM\|SOCK_CLOEXEC`, `IPPROTO_UDP`, `SO_MARK` ставится всегда (в т.ч. 0), `libc::IP_MTU`/`IPV6_MTU`;结果 0 при ошибке connect/getsockopt. Требует root/kernel, теста нет. |
+| route_mtu | 140-176 | 37 | static: MTU маршрута к адресу (UDP connect + `IP_MTU`/`IPV6_MTU`) | `raw.rs` `r2o_route_mtu` | **E*** | C/Rust differential `scripts/test-route-mtu-differential.sh` PASS: IPv4 127.0.0.1 → 65535, IPv6 ::1 → 65536, family 5 идёт по IPv4-ветке → 65535. Rust приведён к C: `SOCK_DGRAM`/protocol 0, IPv6 только при family==6, `SO_MARK` только при mark≠0. **Ограничение:** не покрыты отказ socket/connect и сборка без `IP_MTU` (Linux-константы всегда есть). |
 | say | 181-191 | 11 | static: текст ошибки с сохранением errno | `error_text.rs` `write_error_text`/`error_text`; `raw.rs` | E | C `!err \|\| cap==0→return`; сохраняет `errno`, `vsnprintf`, восстанавливает `errno`. Rust helper реализует буферный контракт (cap=0/усечение/NUL) и используется в `RawSocket::open`; errno сохраняется в `io::Error`. Тест `error_text_matches_snprintf_semantics`. |
 | d2k_raw_open | 193-256 | 64 | открыть IPv4 raw, `IP_HDRINCL`, `SO_MARK` при mark≠0, вычислить maxlen; `fd6/fragment_fd=-1` | `raw.rs:48-93 RawSocket::open` | **P** | **Подтверждённые отличия:** C создаёт только IPv4 `fd`, а `fd6`/`fragment_fd` открывает лениво; mark=0 допустим (`if (mark != 0)` `:234`), R2O требует **ненулевой** mark (`raw.rs:55-60`). R2O — один объект на одно семейство (`AF_INET`/`AF_INET6` + `IPPROTO_RAW`, `IP_HDRINCL`/`IPV6_HDRINCL`, `SO_MARK`, `raw.rs:62-92`); C держит IPv4+IPv6+IPv4-fragment+IPv6-fragment в одном `d2k_raw`. Тестов open на живой системе нет. |
 | d2k_raw_close | 258-269 | 12 | закрыть fd/фрагментный сокет | `Drop for RawSocket` (`OwnedFd`) | E* | C `!r→return`; `close(fd)` при `>=0`; `close(fragment_fd)` при `>=0`; `d2k_ip6frag_sender_close(&fragments6)`; `close(fd6)` при `>=0`; `free(r)`. Rust `OwnedFd` закрывает дескриптор при `Drop`; отдельный fragment/fd6 в R2O отсутствует, но все владеемые fd освобождаются типами. Утечек нет. |
