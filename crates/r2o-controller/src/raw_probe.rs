@@ -1703,6 +1703,20 @@ fn rst_delete_once(rule: &RstRule) -> bool {
     rst_delete_once_locked(rule)
 }
 
+fn r2o_rst_abandon_message(rule: &RstRule) -> String {
+    format!(
+        "r2o: правило подавления RST ({}, порт {}) не снято за 5 попыток — больше не повторяю \
+         до выхода процесса; при выходе попробую ещё раз, оставшееся снимет уборка следующего \
+         запуска r2o",
+        if rule.destination.is_ipv6() {
+            "ip6tables"
+        } else {
+            "iptables"
+        },
+        rule.source_port
+    )
+}
+
 fn rst_release(rule: &RstRule) {
     for _ in 0..2 {
         if rst_delete_once(rule) {
@@ -1719,8 +1733,9 @@ fn rst_release(rule: &RstRule) {
             attempts: 2,
         });
     } else {
+        let message = r2o_rst_abandon_message(rule);
         RST_ABANDON_REPORTED.call_once(|| {
-            eprintln!("r2o: достигнут предел отложенного снятия RST-правил (64)");
+            eprintln!("{message}");
         });
     }
 }
@@ -1744,8 +1759,9 @@ fn retry_pending_rst_releases_locked(final_attempt: bool) {
         }
         pending[index].attempts = pending[index].attempts.saturating_add(1);
         if pending[index].attempts >= RST_RELEASE_ATTEMPTS && !final_attempt {
+            let message = r2o_rst_abandon_message(&pending[index].rule);
             RST_ABANDON_REPORTED.call_once(|| {
-                eprintln!("r2o: правило подавления RST не снято за 5 попыток; повторю при выходе");
+                eprintln!("{message}");
             });
         }
         index += 1;
@@ -2372,6 +2388,27 @@ fn timestamp_options(server_timestamp: u32) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rst_abandon_message_includes_family_and_port_like_c() {
+        let rule = super::RstRule {
+            source_port: 40_123,
+            destination: "2001:db8::1".parse().unwrap(),
+            destination_port: 443,
+            nft: false,
+            comment: true,
+        };
+        assert_eq!(
+            super::r2o_rst_abandon_message(&rule),
+            "r2o: правило подавления RST (ip6tables, порт 40123) не снято за 5 попыток — \
+             больше не повторяю до выхода процесса; при выходе попробую ещё раз, оставшееся \
+             снимет уборка следующего запуска r2o"
+        );
+        let v4 = super::RstRule {
+            destination: "192.0.2.1".parse().unwrap(),
+            ..rule
+        };
+        assert!(super::r2o_rst_abandon_message(&v4).contains("(iptables, порт 40123)"));
+    }
     use super::*;
     use r2k_core::plan::Plan;
     use std::net::{Ipv4Addr, Ipv6Addr};

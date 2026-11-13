@@ -88,10 +88,10 @@ recheck 1982 1982 equal True
 | core-state | 692 | 379 | 313 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
-| detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1184** | **798** | **0** | **0** |
+| detect | 159 | 94 | 65 | 0 | 0 |
+| **Итого** | **1982** | **1185** | **797** | **0** | **0** |
 
-Это не оценка паритета: 798 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 797 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1184 / P 798 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1185 / P 797 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -346,8 +346,8 @@ P означает неполное доказательство ветвей, N
 | core-state | 692 | 379 | 313 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
-| detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1184** | **798** | **0** | **0** |
+| detect | 159 | 94 | 65 | 0 | 0 |
+| **Итого** | **1982** | **1185** | **797** | **0** | **0** |
 
 
 ---
@@ -6634,7 +6634,7 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
 | `rst_rule_cmd` | 402-405 | 4 | команда правила с текущим `g_rst_comment` | `raw_probe.rs:1586-1609 iptables_args`/`nft_args` | **P** | C `return rst_rule_cmd_form(op,k,g_rst_comment)`. Rust передаёт `comment` явно в `iptables_args`/`nft_args`; отдельной обёртки с глобальным комментарием нет. |
 | `rc_exit1` | 407-410 | 4 | успех команды: `WIFEXITED && WEXITSTATUS==1` | `raw_probe.rs` `rc_exit1` | E | C проверяет wait-статус `WIFEXITED`/`WEXITSTATUS==1`. Rust `ExitStatus::code()==Some(1)` вынесен в `rc_exit1` и используется в `rst_delete_once_locked` для nft/iptables; тест `rc_exit1_matches_c_wait_status` (exit 0/1/2). |
 | `rst_delete_once` | 416-422 | 7 | одна попытка снять: `-D`; exit 1 → `-C`, exit 1 = правила нет | `raw_probe.rs:1638-1665 rst_delete_once(_locked)` | **P** | C `-D`; rc==0 → 1; не exit1 → 0; иначе `-C` exit1. Rust nft: delete success → 1, code 1 + get code 1 → 1; iptables: -D, затем -C; `rst_delete_once` берёт `IPTABLES_LOCK`. Эквивалентно. |
-| `rst_abandon` | 424-434 | 11 | одноразовый лог «правило не снято за 5 попыток» с family/port | `raw_probe.rs:1691-1693,1716-1718` | **P** | C печатает family/порт/`RST_RELEASE_ATTEMPTS` один раз (`g_rst_abandon_said`). Rust `RST_ABANDON_REPORTED.call_once` печатает текст без family/port; точка вызова та же. |
+| `rst_abandon` | 424–434 | 11 | одноразовый лог «правило не снято за 5 попыток» с family/port | `raw_probe.rs` `r2o_rst_abandon_message`, `RST_ABANDON_REPORTED` | E | C печатает family (iptables/ip6tables), sport и `RST_RELEASE_ATTEMPTS` один раз. Rust `r2o_rst_abandon_message` включает те же family/sport/5 попыток и вызывается из обоих мест abandon под `Once`; тест `rst_abandon_message_includes_family_and_port_like_c` (IPv6 и IPv4). |
 | `register_atexit` | 437-437 | 1 | однократная регистрация `atexit(raw_atexit)` | `raw_probe.rs` `register_rst_cleanup` | E | C `(void)atexit(raw_atexit)` под `pthread_once`. Rust `register_rst_cleanup` использует `Once::call_once` и `libc::atexit`; тест `register_rst_cleanup_is_once` вызывает дважды и проверяет `is_completed`. |
 | `rst_remember` | 440-450 | 11 | запомнить неснятое правило (до 64), иначе abandon | `raw_probe.rs:1675-1694 rst_release` | **P** | C `register_atexit`; при `pending_n<64` запись с attempts, иначе `rst_abandon`. Rust `RST_PENDING` `Vec`, `RST_PENDING_MAX=64`, attempts=2, иначе `RST_ABANDON_REPORTED`; API/структура иные. |
 | `retry_pending_releases` | 454-468 | 15 | повтор снятия: skip attempts>=5 (не final), удалить при успехе, иначе ++ и abandon | `raw_probe.rs:1697-1733 retry_pending_rst_releases(_locked)` | **P** | C проходит массив, `!final && attempts>=5` → skip; успех → swap-remove; иначе `++attempts`, при >=5 и !final — abandon. Rust `Vec::remove(index)` и `saturating_add`, те же пороги/условия; final повторяет все. |
