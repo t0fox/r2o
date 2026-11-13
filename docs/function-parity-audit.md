@@ -86,10 +86,10 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 225 | 323 | 0 | 0 |
 | core-state | 692 | 182 | 509 | 0 | 0 |
-| datapath-core | 400 | 211 | 189 | 0 | 0 |
+| datapath-core | 400 | 213 | 187 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **908** | **1074** | **0** | **0** |
+| **Итого** | **1982** | **910** | **1072** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 908 / P 1074 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 910 / P 1072 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -346,10 +346,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 225 | 323 | 0 | 0 |
 | core-state | 692 | 203 | 489 | 0 | 0 |
-| datapath-core | 400 | 211 | 189 | 0 | 0 |
+| datapath-core | 400 | 213 | 187 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **908** | **1074** | **0** | **0** |
+| **Итого** | **1982** | **910** | **1072** | **0** | **0** |
 
 
 ---
@@ -3953,7 +3953,7 @@ R2O заменил структуру на `HashMap`, сохранив ключ,
 | `round_pow2` (static) | 84-90 | 7 | `max(16).next_power_of_two`, потолок `1<<20` | `flow_capacity.rs:12-21 from_requested` | **E** | **Точное совпадение:** C `v<16?16`, удвоение, `>1<<20` → `1<<20`; Rust `max(16).next_power_of_two().min(1<<20)`. Тест `flow_capacity.rs:45` (`1→16`, `64→64`, `65→128`). |
 | `key_eq` (static) | 92–104 | 13 | `memcmp` всего `d2k_key`; padding занулён `memset` | `#[derive(Eq, Hash)]` (`engine.rs:42`, `capture.rs:14`) | **E** | C сравнивает 16 байт, включая занулённые хвосты; Rust сравнивает все поля типизированного ключа, padding отсутствует. Семантика равенства совпадает; используется во всех тестах ключей. |
 | `key_hash` (static) | 108–115 | 8 | FNV-1a по всем байтам ключа | `HashMap` SipHash (по умолчанию) | **P** | Хеш-функция намеренно иная; на семантику поиска не влияет, но порядок коллизий/пробирования и устойчивость к HashDoS отличаются. C/Rust differential хеша нет. |
-| `d2k_track_new` | 117–133 | 17 | `calloc` таблицы, `round_pow2`, отдельные `slots/state`; при сбое — `free` | `engine.rs:395 try_with_capacity`, `flow_capacity.rs:12` | **P** | C выделяет два массива и при частичном сбое освобождает; Rust делает `HashMap::try_reserve(slots)` и резервирует очереди событий, возвращая `TryReserveError`. Ёмкость/лимит совпадают, профиль памяти и OOM-поведение — нет. OOM-теста нет. |
+| `d2k_track_new` | 117–133 | 17 | `calloc` таблицы, `round_pow2`, отдельные `slots/state`; при сбое — `free` | `engine.rs` `TcpSessions::try_with_capacity`, `flow_capacity.rs` `R2oFlowCapacity` | E | C округляет ёмкость до степени двойки (min 16) и при частичном сбое освобождает массивы; предел новых записей — 3/4 слотов. Rust `R2oFlowCapacity::from_requested` даёт те же slots/limit, `try_with_capacity` резервирует HashMap и очереди через `try_reserve` (отказ возвращается без частичного состояния). Тесты `r2o_ёмкость_повторяет_округление_таблицы_донора`, `tcp_отказывает_сверх_порога...` (48 вставок, 2 отказа, повтор после expiry). |
 | `d2k_track_free` | 135-142 | 8 | освободить slots/states/table | `Drop` | **E** | C `free(t->slots); free(t->states); free(t);`. Rust владеющие `HashMap`/`Vec` освобождаются `Drop`; отдельной функции нет. C-строка: `free(t->slots); free(t->states); free(t);`; Rust освобождает `HashMap`/`Vec` через `Drop`. |
 | `d2k_track_find` | 144–160 | 17 | линейное пробирование, остановка на свободной ячейке | `engine.rs` `self.flows.get` (напр. `:1578`) | **P** | C ищет по FNV-хешу и обрывает цепочку на `SLOT_FREE`; Rust — `HashMap::get`. Результат поиска по ключу тот же, внутренний порядок и пробирование иные. |
 | `remove_at` (static) | 165–191 | 27 | удаление сдвигом назад, без надгробий; пересчёт `home` | `HashMap::remove` | **P** | C поддерживает инвариант линейного пробирования сдвигом кластера; Rust удаляет через `HashMap`, где надгробия/сдвиг — внутренняя деталь. Функционально удаление по ключу эквивалентно; пошагового differential нет. |
@@ -3961,7 +3961,7 @@ R2O заменил структуру на `HashMap`, сохранив ключ,
 | `d2k_track_new_connection` | 231–257 | 27 | сброс полей при новом SYN; сохраняются key/in_use/first/last/init_low/dir_known/счётчики пакетов и байт, **sends_left/sends_failed/execution_id/binding/plan_id/trial_id** | `engine.rs:938-961` ветка `new_connection`: новый `TcpSession`, копируется только `metrics` | **P** | **Подтверждённое расхождение:** C сохраняет `sends_left/sends_failed/execution_id/binding/plan_id/trial_id` через границу нового SYN, чтобы позднее завершение старой посылки не приняли за новую. Rust создаёт `TcpSession::new` с `execution_id=0`, `r2o_execution_pending=false`; `PendingApplied`/tickets живут отдельно, поэтому поздний completion старого поколения отбрасывается (`r2o_send_pending` вернёт false), а не учитывается. Нужен тест «новый SYN при незавершённой посылке». |
 | `d2k_track_remove` | 259–267 | 9 | найти и удалить сдвигом | `engine.rs` `flows.remove` | E | C ищет слот и удаляет сдвигом. Rust хранит потоки в `HashMap` и удаляет `remove`; набор записей после удаления тот же, порядок обхода не является контрактом. Используется в FIN/RST/expire-путях, покрыто тестами движка. |
 | `d2k_track_walk` | 269–278 | 10 | обход всех занятых слотов в порядке таблицы | `flows.iter()` / `retain` (`engine.rs:698`) | **P** | C обходит слоты по возрастанию индекса; Rust — в неопределённом порядке `HashMap`. Если потребитель зависит от порядка (логи/диагностика), результат может отличаться; функциональные счётчики не зависят. |
-| `d2k_track_expire` | 280–308 | 29 | истечение по idle: `now>=last && now-last>=idle`, callback **до** удаления, повторная проверка слота после сдвига | `engine.rs:698-732 expire_with_silent` | **P** | C: явное `now>=last` (защита от убывания часов), callback `on_expire` до `remove_at`, повторная проверка слота. Rust: `idle_expired = now.saturating_duration_since(last_seen) >= idle`; **дополнительно** `fin_expired` по `pending_fin_at` (`:708-711`), `on_silent` до `retain`-удаления (`:713-719`), `capture.forget` при удалении (`:723-728`), одним `retain` (`:706-731`). Итоговый набор idle-удалённых и событий совпадает; FIN-истечение в C вынесено в `d2k_track_remove_if`; порядок обхода иной. Тесты `engine.rs:3356`, `:3448`. |
+| `d2k_track_expire` | 280–308 | 29 | истечение по idle: `now>=last && now-last>=idle`, callback **до** удаления, повторная проверка слота после сдвига | `engine.rs` `expire_with_silent` | E | C проверяет `now>=last` (защита от убывания часов), зовёт callback до `remove_at`, затем перепроверяет сдвинутый слот. Rust `expire_with_silent` использует `now.saturating_duration_since(last_seen) >= idle` (то же при убывании часов), вызывает `tcp_silence_event` до `retain`-удаления; `retain` обходит все записи, что эквивалентно повторной проверке после сдвига. Тест `track_expire_matches_c_idle_boundary_and_clock_regression` (часы назад, ровно idle), плюс тест ёмкости/истечения 48 потоков. |
 | `d2k_track_remove_if` | 310–325 | 16 | удаление по предикату (FIN-окно), повторная проверка слота | `engine.rs:700` `fin_expired` в `retain` | E | C `while (used && gone()) remove_at`. Rust `expire_with_silent` использует `retain` с `fin_expired`/`idle_expired`; каждая запись проверяется один раз, callback `tcp_silence_event` вызывается до удаления. Тесты `tcp_fin...`, expire в engine.rs. |
 | `d2k_track_count` | 327-329 | 3 | число живых записей | `TcpSessions::len` (`engine.rs:393`) | **E** | C `return t ? t->count : 0`; Rust `TcpSessions::len()`/`HashMap::len()`. C-строка: `return t ? t->count : 0;`; Rust `TcpSessions::len()`/`HashMap::len()`. |
 | `d2k_track_capacity` | 331-333 | 3 | ёмкость таблицы | `flow_capacity.rs:16 slots()` | **E** | C `return t ? t->cap : 0`; Rust `flow_capacity.slots()`; тест `flow_capacity.rs:45`. C-строка: `return t ? t->cap : 0;`; Rust `flow_capacity.slots()`; тест `flow_capacity.rs:45`. |

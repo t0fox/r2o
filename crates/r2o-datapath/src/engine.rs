@@ -3432,6 +3432,31 @@ mod tests {
     }
 
     #[test]
+    fn track_expire_matches_c_idle_boundary_and_clock_regression() {
+        let mut sessions = TcpSessions::default();
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        assert!(
+            sessions
+                .track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]), start)
+                .is_some()
+        );
+        // C `now >= last`: часы назад не дают истечь.
+        assert_eq!(
+            sessions.expire(start - Duration::from_secs(1), Duration::from_secs(5)),
+            0
+        );
+        assert_eq!(sessions.len(), 1);
+        // Ровно на границе idle поток истекает.
+        assert_eq!(
+            sessions.expire(start + Duration::from_secs(5), Duration::from_secs(5)),
+            1
+        );
+        assert_eq!(sessions.len(), 0);
+    }
+
+    #[test]
     fn tcp_журнал_повышает_уровень_обмена_при_tls_application_data() {
         let mut sessions = TcpSessions::default();
         let start = Instant::now();
