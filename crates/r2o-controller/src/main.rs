@@ -9335,6 +9335,26 @@ fn r2o_record_voice_terminal_diagnostic(
 }
 
 #[cfg(unix)]
+fn r2o_json_time(unix_s: i64) -> String {
+    // C `json_time`: неположительное время → нулевое время Go.
+    if unix_s <= 0 {
+        return "0001-01-01T00:00:00Z".into();
+    }
+    let Ok(date) = time::OffsetDateTime::from_unix_timestamp(unix_s) else {
+        return "0001-01-01T00:00:00Z".into();
+    };
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        date.year(),
+        u8::from(date.month()),
+        date.day(),
+        date.hour(),
+        date.minute(),
+        date.second()
+    )
+}
+
+#[cfg(unix)]
 fn r2o_live_timestamp(seen: std::time::Instant, now: std::time::Instant) -> Option<String> {
     let elapsed = now.saturating_duration_since(seen).as_secs();
     let unix = SystemTime::now()
@@ -9342,10 +9362,7 @@ fn r2o_live_timestamp(seen: std::time::Instant, now: std::time::Instant) -> Opti
         .ok()?
         .as_secs()
         .saturating_sub(elapsed);
-    time::OffsetDateTime::from_unix_timestamp(i64::try_from(unix).ok()?)
-        .ok()?
-        .format(&time::format_description::well_known::Rfc3339)
-        .ok()
+    Some(r2o_json_time(i64::try_from(unix).ok()?))
 }
 
 #[cfg(unix)]
@@ -16434,6 +16451,68 @@ fn r2o_ask_print_step(step: &R2oAskStep<'_>) -> String {
             "  причина остановки: {} ({})\n",
             r2o_ask_step_rc_str(step.rc),
             step.err
+        ));
+    }
+    out
+}
+
+/// C `print_question`: заголовок вопроса и одна из веток ответа.
+#[cfg(unix)]
+fn r2o_ask_print_question(
+    idx1: usize,
+    pos: usize,
+    field: &str,
+    doc_phrase: &str,
+    properties: &r2o_controller::classify::DpiProps,
+    have_control: bool,
+    step: &R2oAskStep<'_>,
+) -> String {
+    use r2o_controller::classify::TriState;
+
+    let mut out = format!("\n[{idx1}/5] {field} ({doc_phrase}):\n");
+    for earlier in 0..pos {
+        if r2o_ask_pos_decided(properties, earlier) {
+            out.push_str(&format!(
+                "  спрошен: нет\n  причина: опрос остановился раньше (вопрос {} уже дал ответ — \
+                 первый прошедший вопрос обрывает опрос)\n",
+                earlier + 1
+            ));
+            return out;
+        }
+    }
+    if pos == 3 && !have_control {
+        out.push_str(
+            "  спрошен: нет\n  причина: нет control-приветствия (второе реальное имя на ту же \
+             цель не снято)\n",
+        );
+        return out;
+    }
+
+    out.push_str("  спрошен: да\n");
+    out.push_str(&r2o_ask_print_step(step));
+    out.push_str("  метка: не ставится (см. предупреждение выше)\n");
+    if !r2o_ask_pos_decided(properties, pos) {
+        out.push_str(
+            "  ответ: не измерено — зонд не прошёл (строки выше говорят, каким именно местом; \
+             «обмен без прикладных данных» и «обмена не было» — это про коробку, остальное — \
+             про нас)\n",
+        );
+        return out;
+    }
+
+    let value = r2o_ask_pos_value(properties, pos);
+    out.push_str(&format!("  ответ: {}\n", r2o_tri_state(value)));
+    if pos == 2 && properties.parses_l7 == TriState::True {
+        out.push_str(
+            "  примечание: значение приписано ЭТОМУ вопросу, хотя разбор протокола тоже решён — \
+             проверьте pos_decided\n",
+        );
+    }
+    if pos == 3 && value == TriState::True {
+        out.push_str(&format!(
+            "  примечание: тем же фактом снят вопрос [3/5] (контрольная сумма = {}) — \
+             \"разбор протокола пишет ОБА поля из одного факта\" (compose.c)\n",
+            r2o_tri_state(properties.validates_checksum)
         ));
     }
     out
@@ -24604,6 +24683,147 @@ mod tests {
         server.join().unwrap();
         drop(client);
         let _ = std::fs::remove_file(socket_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ask_print_question_matches_c_branches() {
+        use r2o_controller::classify::{DpiProps, TriState};
+
+        let empty_step = super::R2oAskStep {
+            plan_len: 0,
+            ack_ok: false,
+            rc: 0,
+            ack_code: 0,
+            local_port: None,
+            bytes: 0,
+            first_type: 0,
+            seen_types: 0,
+            err: "",
+        };
+        let passed_step = super::R2oAskStep {
+            plan_len: 10,
+            ack_ok: true,
+            rc: 9,
+            ack_code: 0,
+            local_port: Some(40_000),
+            bytes: 120,
+            first_type: 22,
+            seen_types: 0b1000,
+            err: "",
+        };
+
+        let mut properties = DpiProps::default();
+        properties.tolerates_left_overlap = TriState::True;
+        let early = super::r2o_ask_print_question(
+            2,
+            1,
+            "порядок сегментов",
+            "держит ли сегменты не по порядку прихода",
+            &properties,
+            true,
+            &empty_step,
+        );
+        assert!(early.starts_with(
+            "\n[2/5] порядок сегментов (держит ли сегменты не по порядку прихода):\n"
+        ));
+        assert!(early.contains(
+            "  спрошен: нет\n  причина: опрос остановился раньше (вопрос 1 уже дал ответ — \
+             первый прошедший вопрос обрывает опрос)\n"
+        ));
+        assert!(!early.contains("спрошен: да"));
+
+        let no_control = super::r2o_ask_print_question(
+            4,
+            3,
+            "разбор протокола",
+            "разбирает ли TLS, а не просто смотрит байты",
+            &DpiProps::default(),
+            false,
+            &empty_step,
+        );
+        assert!(no_control.contains(
+            "  спрошен: нет\n  причина: нет control-приветствия (второе реальное имя на ту же \
+             цель не снято)\n"
+        ));
+
+        let not_measured = super::r2o_ask_print_question(
+            1,
+            0,
+            "перекрытие слева",
+            "держит ли сегмент, начинающийся левее данных",
+            &DpiProps::default(),
+            true,
+            &empty_step,
+        );
+        assert!(not_measured.contains("  спрошен: да\n  план: не собрался\n"));
+        assert!(not_measured.contains("  метка: не ставится (см. предупреждение выше)\n"));
+        assert!(not_measured.contains(
+            "  ответ: не измерено — зонд не прошёл (строки выше говорят, каким именно местом; \
+             «обмен без прикладных данных» и «обмена не было» — это про коробку, остальное — \
+             про нас)\n"
+        ));
+
+        let mut decided = DpiProps::default();
+        decided.tolerates_left_overlap = TriState::True;
+        let answered = super::r2o_ask_print_question(
+            1,
+            0,
+            "перекрытие слева",
+            "держит ли сегмент, начинающийся левее данных",
+            &decided,
+            true,
+            &passed_step,
+        );
+        assert!(answered.contains("  ответ: да\n"));
+        assert!(!answered.contains("примечание:"));
+
+        let mut parse = DpiProps::default();
+        parse.parses_l7 = TriState::True;
+        parse.validates_checksum = TriState::True;
+        let parse_answer = super::r2o_ask_print_question(
+            4,
+            3,
+            "разбор протокола",
+            "разбирает ли TLS, а не просто смотрит байты",
+            &parse,
+            true,
+            &passed_step,
+        );
+        assert!(parse_answer.contains("  ответ: да\n"));
+        assert!(parse_answer.contains(
+            "  примечание: тем же фактом снят вопрос [3/5] (контрольная сумма = да) — \
+             \"разбор протокола пишет ОБА поля из одного факта\" (compose.c)\n"
+        ));
+
+        let mut checksum = DpiProps::default();
+        checksum.validates_checksum = TriState::True;
+        let checksum_answer = super::r2o_ask_print_question(
+            3,
+            2,
+            "контрольная сумма",
+            "сверяет ли контрольную сумму TCP",
+            &checksum,
+            true,
+            &passed_step,
+        );
+        assert!(checksum_answer.contains("  ответ: да\n"));
+        assert!(!checksum_answer.contains("примечание:"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn json_time_and_string_escaping_match_c() {
+        assert_eq!(super::r2o_json_time(0), "0001-01-01T00:00:00Z");
+        assert_eq!(super::r2o_json_time(-1), "0001-01-01T00:00:00Z");
+        assert_eq!(super::r2o_json_time(1), "1970-01-01T00:00:01Z");
+        assert_eq!(super::r2o_json_time(1_700_000_000), "2023-11-14T22:13:20Z");
+        assert_eq!(
+            serde_json::to_string("\"\\\n\r\t\u{8}\u{c}\u{1}").unwrap(),
+            "\"\\\"\\\\\\n\\r\\t\\b\\f\\u0001\""
+        );
+        let pretty = serde_json::to_string_pretty(&serde_json::json!({"a": {"b": 1}})).unwrap();
+        assert_eq!(pretty, "{\n  \"a\": {\n    \"b\": 1\n  }\n}");
     }
 
     #[cfg(unix)]

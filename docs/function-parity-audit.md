@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 317 | 231 | 0 | 0 |
-| core-state | 692 | 339 | 353 | 0 | 0 |
+| core-state | 692 | 343 | 349 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1144** | **838** | **0** | **0** |
+| **Итого** | **1982** | **1148** | **834** | **0** | **0** |
 
-Это не оценка паритета: 838 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 834 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1144 / P 838 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1148 / P 834 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 317 | 231 | 0 | 0 |
-| core-state | 692 | 339 | 353 | 0 | 0 |
+| core-state | 692 | 343 | 349 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1144** | **838** | **0** | **0** |
+| **Итого** | **1982** | **1148** | **834** | **0** | **0** |
 
 
 ---
@@ -1978,7 +1978,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `read_whole_file` | 1103-1143 | 41 | fopen/fseek/ftell/fread весь файл | `std::fs::read` (`Catalog::load`) | **E*** | C `fopen("rb")`, fseek END/ftell/SEEK_SET, malloc(sz+1), fread, got==sz, NUL. Rust `fs::read` после `metadata`; **C не ограничивает размер, Rust отвергает >64 МиБ до чтения**. Тест `catalog_load_rejects_missing_and_oversized_files_like_c` (missing, пустой boxes, trailing, 64 МиБ+1 → «64 MiB»). **Ограничение:** предел 64 МиБ — осознанная защита R2O. |
 | `d2k_catalog_load` | 1145-1191 | 47 | разбор JSON, restore групп, prune, запрет мусора после `}`, освобождение при ошибке | `Catalog::load`/`parse` | **E*** | C: err=0, memset, read_whole_file, parse_catalog_obj; group_restore → ошибка «invalid domain learning observations»; prune; jpeek после `}` — мусор → ошибка; free при ошибке. Rust `Catalog::load` → `parse`: 64 МиБ, depth≤64, serde_json, schema=1, observations≤256, `DomainState::restore`, prune, trailing garbage отклоняется. Тесты `catalog_load_rejects_missing_and_oversized_files_like_c`, `rejects_trailing_garbage_and_excessive_nesting`, `accepts_old_catalogs...`, domain-restore тесты. **Ограничение:** предел 64 МиБ и serde_json вместо ручного парсера. |
 | `write_json_string` | 1198-1218 | 21 | escape `" \\ \n \r \t \b \f`, control <0x20 → `\u00xx`, UTF-8 как есть | `serde_json` | E | C явный `switch` по 7 escape, control → `\u%04x`, остальное (включая UTF-8) как есть. Rust формирует JSON через `serde_json`, который даёт те же escape для валидной UTF-8; тест `json_string_escaping_matches_c` проверяет кавычку, обратную косую, `\n/\r/\t/\b/\f`, `\u0001`, `\u001f` и кириллицу. |
-| `wr_indent` | 1220-1222 | 3 | отступ 2 пробела на глубину | `serde_json::to_string_pretty` (2 пробела) | **P*** | C `for (depth) fputs("  ",f)`; Rust pretty-печать с двумя пробелами. Порядок/форматирование массивов проверяются persist differential частично; побайтовое сравнение всего файла не заявлено. |
+| `wr_indent` | 1220-1222 | 3 | отступ 2 пробела на глубину | `serde_json::to_string_pretty` (2 пробела) | **E*** | C: `for i<depth fputs("  ")`. Rust live/catalog JSON пишет `serde_json::to_string_pretty`, который даёт те же 2 пробела на уровень; тест `json_time_and_string_escaping_match_c` фиксирует `{\n  "a": {\n    "b": 1\n  }\n}`. **Ограничение:** отдельной функции нет — форматтер serde. |
 | `write_json_array` | 1230-1240 | 11 | `[]` или многострочный список с запятыми без последней | `serde_json` pretty | E | C: пустой массив `[]`, иначе элементы через запятую без хвостовой. Rust `serde_json::to_string_pretty` даёт валидный массив без хвостовой запятой; `catalog_json_output_matches_c_fields` проверяет `boxes` и domain-массивы через разбор JSON. |
 | `write_signal_elem` | 1242-1257 | 16 | kind/ttl/ttl_delta/tos/ipid/volume/seen; `packets` только при nonzero | `catalog.rs` `Signal` | E | C-порядок kind/ttl/ttl_delta/tos/ipid/volume/seen, `packets` только при nonzero. Rust `Signal` serialize с теми же полями и `skip_serializing_if=is_zero`; тест `catalog_json_output_matches_c_fields` проверяет все значения, `packets=45` и отсутствие `packets` у второго сигнала. |
 | `write_fp` | 1259-1266 | 8 | записать fingerprint: method + signals | `catalog.rs` `Fingerprint` | E | C `{"method":N,"signals":[...]}`. Rust `Fingerprint` serialize те же поля, порядок сигналов сохраняется; тест `catalog_json_output_matches_c_fields` проверяет method=2 и два сигнала. |
@@ -2104,7 +2104,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `ack_code_str` | 565-573 | 9 | текст кода ACK | `main.rs:15770-15777 r2o_ask_ack_reason` | **E*** | C: `D2K_ACK_OK→"принято"`, `BAD_PLAN→"план не разобрался"`, `BAD_ARGS→"аргументы команды не разобрались"`, `NO_ROOM→"нет места в таблице планов"`, default «неизвестная причина». Rust те же три текста + default; `ACK_OK` не входит (вызывается только при `!ack.ok`). `print_step` C вызывает только при `ack_ok==0`, поэтому набор совпадает. |
 | `print_seen_types` | 579-594 | 16 | печать встреченных TLS-типов | `main.rs:15780-15796 r2o_ask_print_seen_types` | **E*** | **Совпадает:** C биты `mask & 1<<(type-20)` для 20/21/22/23 с текстами «20 смена шифра», «21 тревога», «22 рукопожатие», «23 прикладные данные», через `, `; пусто → «ни одной». Rust те же пары/биты/join/пустое значение. |
 | `print_step` | 597-624 | 28 | печать шага: план, обмен, причина | `main.rs` `r2o_ask_print_step` | **E*** | C: `plan_len==0` → «не собрался»; `ack_ok` → «датапат принял»; REFUSED → «датапат ОТВЕРГ — <ack_code_str>»; иначе «подтверждения нет». Обмен: нет порта / NO_EXCHANGE / порт+bytes+first_type+`print_seen_types`; причина — `step_rc_str` + err. Rust `R2oAskStep`/`r2o_ask_print_step` повторяют все ветки, включая отдельный `ack_code_str`; тест `ask_trace_helpers_match_c_exactly` (не собран, принят, ОТВЕРГ, NO_EXCHANGE, err). **Ограничение:** production trace пока использует прежний R2O-текст. |
-| `print_question` | 632-674 | 43 | печать вопроса и его ответа | `main.rs:458-744` (per-question branches) | **P** | C: `[i/5] поле (фраза):`; если более ранний вопрос решён — «спрошен: нет» с причиной; `POS_PARSE && !control` — отдельная причина; «спрошен: да»; `print_step`; «метка: не ставится»; если не решён — «ответ: не измерено…»; иначе значение; примечания checksum/parse. Rust печатает `[i/5] label — <статус>` в ветках выполнения/ошибок, после успеха — `пройден: ...`; блока «спрошен: да/нет», `print_step` и примечаний checksum/parse нет. |
+| `print_question` | 632-674 | 43 | печать вопроса и его ответа | `main.rs` `r2o_ask_print_question` | **E*** | C-ветви: заголовок `[i/5] поле (фраза):`; ранний решённый вопрос → «спрошен: нет» с номером; POS_PARSE без control → отдельная причина; «спрошен: да» + `print_step` + «метка: не ставится»; не решён → «ответ: не измерено…»; иначе значение и примечания checksum/parse. Rust helper повторяет все ветки; тест `ask_print_question_matches_c_branches` (ранний вопрос, нет control, не измерено, «да», примечание parse). **Ограничение:** production всё ещё стримит per-question вывод по ходу выполнения, а не перестраивает C-отчёт. |
 | `all_unknown` | 676-682 | 7 | все пять свойств не измерены | `main.rs` `r2o_ask_all_unknown` | **E*** | C проверяет пять полей `== D2K_P_UNKNOWN`. Rust `(0..5).all(pos_value==Unset)`, используется для C-предупреждения о снятом плане; тест `ask_print_helpers_match_c_exactly`. **Ограничение:** C печатает предупреждение до секции вопросов, Rust стримит вопросы по ходу и печатает его в конце — место в потоке вывода иное. |
 | `print_not_asked_at_all` | 684-696 | 13 | печать отказа от всех вопросов | `main.rs` `r2o_ask_not_asked_at_all` | E | C: `ни один из 5 вопросов не задан: <reason>` и пять блоков в порядке overlap, duplicates, reorder, checksum, parse. Rust helper повторяет текст/порядок/причины и используется при отсутствии триггера и SNI; тест `ask_print_helpers_match_c_exactly` (5 блоков). |
 | `print_vector` | 698-705 | 8 | печать итогового вектора свойств | `main.rs` `r2o_ask_vector` | E | C: заголовок `итоговый вектор (не измерено / да / нет):` и пять строк overlap/duplicates/reorder/checksum/parse с отступом 2. Rust helper повторяет заголовок/порядок/отступы и используется в `run_r2o_ask`; тест `ask_print_helpers_match_c_exactly` (пустой и заполненный вектор). |
@@ -2575,8 +2575,8 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `verdict_to_plans` | 5209–5551 | 343 | по вердикту собрать кандидатов: early-return, ECH trial, QUIC arm, volume fingerprint + known plans, measured arm, RX-лестница, PREFIX/WHOLE split, owned fallback, compose | `main.rs:14573 r2o_ech_rx_ladder_candidate`, `:3438 r2o_discovery_volume_known_plans`, `:6292 r2o_discovery_measured_split_plan`, `r2o_fallback`/`own_first_plans`, `compose_d2o`/`compose_from_props`, `quic_replay.rs:427 r2o_quic_discovery_candidates` | **P** | C-порядок: (1) CLEAR/UNREACHABLE/ADDRESS/RESPONSE/NO_QUIC/LOCAL_ADDRESS → пусто (`:5224-5234`); (2) ECH trial — known plans witness (`:5242-5262`); (3) QUIC — один план из arm+qprops, `arm_hash/arm_path`, `stall_cut`, `quic_split_unfit` (`:5264-5386`); (4) volume signal + `known_plans` (`:5390-5422`); (5) measured arm первым (`:5429-5459`); (6) RX-лестница: room по `rx_cut`, `net_probing`, `plan_boxes`, `rx_volume_candidate_pending` (`:5465-5517`); (7) PREFIX/WHOLE split (`:5519-5528`); (8) `owned_fallback`/`refill_from_fallback` (`:5539-5544`); (9) `d2k_compose` (`:5547-5550`). **Подтверждено в Rust:** `stall_cut` (`main.rs:4898,6898,20606,21068`), `owned_fallback` (`r2o_fallback.rs:10,23,334`; `main.rs:11125-11899`), measured split (`main.rs:6292`), volume-known plans (`:3438`), compose/fallback. **Остаются P-пробелы:** `arm_hash/arm_path`-атрибуция, `plan_boxes`/`net_probe_name`-раскладка и `rx_volume_candidate_pending` как отдельная очередь не найдены; вместо них `primary_source`/`owned_fallback_queue`/`fallback_reason` (`main.rs:11125-11298`). Полного differential порядка источников кандидатов нет. |
 | `d2k_sched_new` | 5566–5610 | 45 | calloc; cat/link/mark/measure_mark; `stall_sent[0]=25`; meas_limit=default; wake pipe nonblock; mutex/cond; QUIC hooks | `main.rs:10388-10400` (R2oDiscoveryQueue/Searches constructors), `R2oDiscoveryWorker` | **P** | **Совпадает:** дефолты лимита/бюджета, wake-канал/очередь, mutex/cond, QUIC progress/yield hooks. **Отличия:** Rust не использует pipe, а канал/condvar; `wall_base`/mono-база выражены `Instant`/`SystemTime`; C/Rust diff нет. |
 | `d2k_sched_set_measure_mark` | 5612-5614 | 3 | установить метку измерений | `main.rs` measure mark field | **P*** | C `void d2k_sched_set_measure_mark(d2k_sched *s,uint32_t mark){if(s)s->measure_mark=mark;}`. Rust поле метки есть, отдельного сеттера/теста нет. |
-| `json_str` | 5624-5632 | 9 | JSON-строка: `"`/`\` escape, control → `\u%04x`, UTF-8 как есть | `serde_json` | **P*** | C `"`/`\` → `\%c`; `<0x20` → `\u%04x`; остальное как есть. Rust сериализует через serde_json; экранирование эквивалентно, формат вывода может отличаться. |
-| `json_time` | 5634-5645 | 12 | unix-время → RFC3339, `<=0` → `0001-01-01T00:00:00Z` | `main.rs` JSON time | **P*** | C `<=0` → нулевое Go-время; иначе `gmtime_r`+`strftime("%Y-%m-%dT%H:%M:%SZ")`. Rust формирует из `Instant`/wall-clock иначе; нулевое время/RFC3339 совпадают. |
+| `json_str` | 5624-5632 | 9 | JSON-строка: `"`/`\\` escape, control → `\u%04x`, UTF-8 как есть | `serde_json` | **E*** | C: кавычка/обратная косая, `<0x20` → `\u%04x`, UTF-8-байты как есть. Rust `serde_json::to_string` даёт те же escape (`\"`, `\\`, `\n`, `\r`, `\t`, `\b`, `\f`, `\u0001`); тест `json_time_and_string_escaping_match_c` сверяет побайтно. **Ограничение:** отдельной функции нет — сериализатор serde_json. |
+| `json_time` | 5634-5645 | 12 | unix-время → RFC3339, `<=0` → `0001-01-01T00:00:00Z` | `main.rs` `r2o_json_time` | E | C: `unix_s<=0` → нулевое время Go; иначе `gmtime_r` + `%Y-%m-%dT%H:%M:%SZ`. Rust `r2o_json_time` делает то же (`OffsetDateTime::from_unix_timestamp` + ручной формат с `Z`), используется `r2o_live_timestamp`; тест `json_time_and_string_escaping_match_c` (0/-1, epoch+1, 1700000000 → `2023-11-14T22:13:20Z`). |
 | `level_name` | 5650-5659 | 10 | уровень доказательства 1..5 словами, default «не измерено» | `main.rs` level text | **P*** | C пять строк: транспорт/сервер ответил/обмен/прикладной объём/подтверждён; default. Rust тексты уровней есть, дословное совпадение не сверялось. |
 | `signal_human` | 5663-5680 | 18 | примета словами: rst/volume/rx-volume/rx-volume-wire/silent/repeat, иначе kind | `main.rs` signal text | **P*** | C шесть шаблонов с числами (TTL/delta/ToS/ipid, КБ), иначе `kind`. Rust набор родов и формат текста иные; отдельного differential нет. |
 | `task_phase` | 5685-5705 | 21 | фаза задачи словами по T_* | `main.rs` phase text | **P*** | C `T_QUEUED/T_SHAPE_WAIT/T_ASKING/T_PROPS_*/T_PLANNING/T_TRIAL_SETTLE/T_VERIFY*/T_WATCHING/T_RESTING/T_VOICE_*` → строки; T_WATCHING «подтверждено, смотрим живой трафик». Rust-строки фаз не сопоставлены дословно, T_WATCHING-фазы нет. |
