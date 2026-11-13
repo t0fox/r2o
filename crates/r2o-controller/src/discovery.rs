@@ -163,8 +163,8 @@ pub fn own_first_plans(
     target: &DiscoveryTarget,
     ech_replay: bool,
     bound_plan_id: Option<&str>,
-    tried: &[u32],
-    seen: &[u32],
+    tried: &[u64],
+    seen: &[u64],
 ) -> Vec<OwnPlanCandidate> {
     const BATCH: usize = 8;
     const SEEN_CAP: usize = 256;
@@ -279,7 +279,7 @@ pub fn known_plans(
     catalog: &Catalog,
     target: &DiscoveryTarget,
     observed: &crate::catalog::Fingerprint,
-    tried: &[u32],
+    tried: &[u64],
 ) -> Vec<KnownPlanCandidate> {
     if observed.signals.is_empty() {
         return Vec::new();
@@ -1680,7 +1680,7 @@ mod tests {
             catalog: Catalog,
             observed: Fingerprint,
             transport: u8,
-            tried: Vec<u32>,
+            tried: Vec<u64>,
         }
         let mut cases: Vec<Case> = Vec::new();
         for row in include_str!("../tests/fixtures/d2o_known_plans.tsv").lines() {

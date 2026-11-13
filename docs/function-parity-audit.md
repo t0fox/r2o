@@ -89,7 +89,7 @@ recheck 1982 1982 equal True
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **926** | **1056** | **0** | **0** |
+| **Итого** | **1982** | **927** | **1055** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 926 / P 1056 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 927 / P 1055 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -345,11 +345,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 226 | 322 | 0 | 0 |
-| core-state | 692 | 212 | 480 | 0 | 0 |
+| core-state | 692 | 213 | 479 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **926** | **1056** | **0** | **0** |
+| **Итого** | **1982** | **927** | **1055** | **0** | **0** |
 
 
 ---
@@ -2519,7 +2519,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `wall_s` | 3459–3461 | 3 | `wall_base_s + (now_ms-mono_base_ms)/1000` | `main.rs` (`SystemTime::now`), `catalog.rs` RFC3339 | **P*** | C переводит монотонные мс в стенную эпоху через зафиксированную на первом тике базу (`sched.c:3459-3461`), поэтому скачок системных часов не меняет привязку к монотонному времени. Rust берёт `SystemTime::now()`/`OffsetDateTime::now_utc()` в точках записи; монотонные `Instant` и wall-clock не связаны базой, поэтому при переводе часов отметки могут сместиться. Отдельного differential нет. |
 | `bind_confirmed` | 3463–3568 | 106 | записать box/fp/plan/binding: successes++, confirmed, recheck_since=0, budget сброс при смене плана, shape/tcp_profile/verified_by/input только сильнее | `discovery.rs:969-1215 add_measured_binding_with_fingerprint_in_box`, `:1219 add_confirmed_quic_address_binding`, `main.rs:21856 apply_discovery_outcome` | **P** | **Подтверждённые расхождения:** (1) C ищет binding по `transport/target/kind/family/tcp_profile` и `d2k_cat_shape_fits(shape)` (`sched.c:3517-3522`); Rust `exact_key` (`discovery.rs:1390-1397`) теперь сравнивает `binding.tcp_profile == target.tcp_profile()` (профиль выводится из shape: базовые 1/2/6 → 0, контекст 8–13 → 1/2) и допускает shape 0/exact. `target` не хранит отдельный `trigger_tcp_profile`, как C, поэтому для базовых форм профиль всегда «не измерен»; это ограничение зафиксировано тестом `exact_key_and_covering_binding_respect_tcp_profile`. (2) Rust перед добавлением удаляет все `exact_key`-привязки **во всех коробках** (`:1128-1138`), C обновляет только binding выбранной коробки и другие не трогает. (3) Rust всегда создаёт новую `Binding` с `verified_by=1` и переданным `input` (`:1179-1193`); C сохраняет/усиливает `verified_by` и `input` (только `CLIENT` или пустой) и пишет shape только при `shape!=0` (`:3533-3540`). (4) C сбрасывает `budget` только при смене plan_id (`:3531`), Rust новая binding получает budget=0, поэтому budget теряется и при том же плане. (5) C у заведённой коробки обновляет только `packets` rx-volume (`:3481-3493`); Rust при совместимом fp делает `merge_observed` (`:1144-1145`), добавляя identity-признаки. (6) Rust для не-HTTP вызывает `domain_state.learn(evidence=1)` (`:1195-1212`), C `bind_confirmed` группу не учит — это делает условный `group_record` в `verify_confirm`. (7) C выбирает box по `box_id`; Rust может создать `auto-*` или выбрать compatible/preferred box. |
 
-| `fnv1a` | 3574–3581 | 8 | FNV-1a 64 по сырому тексту (offset `1469598103934665603`, prime `1099511628211`) | `r2o_fallback.rs:52-58 tried_key` | **P*** | C считает FNV-1a 64 по байтам исходного текста и возвращает `u64` (`sched.c:3574-3581`). Rust `tried_key` сначала заменяет **первое** вхождение `r2o-plan` на `d2k-plan`, затем считает тот же FNV-1a 64 и берёт младшие 32 бита (`r2o_fallback.rs:52-58`). Для C-планов (`d2k-plan`) совпадает; для R2O-текста с брендом хеш отличается от «сырого». C использует `u64` для `arm_hash`/`rx_hashes`, Rust — `u32` tried-ключ; старшие 32 бита нигде не сравниваются. |
+| `fnv1a` | 3574–3581 | 8 | FNV-1a 64 по сырому тексту (offset `1469598103934665603`, prime `1099511628211`) | `r2o_fallback.rs` `tried_key` | E | C считает FNV-1a 64 по байтам текста и хранит u64. Rust `tried_key` теперь возвращает полный u64 (offset/prime те же), `FallbackQueue.tried`/`tried_hashes` — u64; тест `fnv1a_key_matches_c_full_u64`. Для R2O-брендированного текста ключ нормализует `r2o-plan`→`d2k-plan` (C такой текст не производит). |
 | `tried_add` | 3593–3596 | 4 | добавить hash в `tried[SCHED_TRIED_MAX=256]`, при переполнении `tried_full=1` | `r2o_fallback.rs:14-19,67-110` (`FallbackQueue.tried: Vec<u32>`), `main.rs:15036` | **P*** | C после 256 записей больше не добавляет и один раз ставит `tried_full`, о чём `tried_note` сообщает в журнале (`sched.c:200,824-827,3593-3596,12067`). Rust `FallbackQueue.tried` — неограниченный `Vec<u32>`; флага `tried_full` и журнального сообщения нет. Для штатного поиска (лимит зондов 67 + свои планы) переполнение 256 практически недостижимо, но контракт различается. |
 | `plan_ident` | 3598–3605 | 8 | `plan-%08x` (FNV low32) + wire id 16 байт ASCII | `discovery.rs:1450-1460 plan_text_for_trial`, `:1462+ stable_plan_id` | **P** | **Подтверждённое расхождение (header #17):** C — `plan-%08x` и те же байты на проводе; Rust для trial подставляет **16-байтный random id** (`plan_text_for_trial`), а каталожный `stable_plan_id` — 32 hex из двойного FNV. Формат/значение идентификатора различаются. |
 | `is_hex_digit` | 3607–3609 | 3 | `0-9a-fA-F` | `plan_text.rs`/`discovery.rs` (`is_ascii_hexdigit` в `canonical_plan_text`) | **P*** | C-хелпер и Rust `u8::is_ascii_hexdigit` принимают ровно `0-9a-fA-F`; отдельной функции нет. Покрыто разбором планов и `plan_text` тестами. |

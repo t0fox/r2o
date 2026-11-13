@@ -3433,7 +3433,7 @@ fn r2o_discovery_volume_known_plans(
     catalog: Option<&Catalog>,
     target: &r2o_controller::discovery::DiscoveryTarget,
     observed: &r2o_controller::catalog::Fingerprint,
-    tried: &[u32],
+    tried: &[u64],
 ) -> Vec<(String, String)> {
     let Some(catalog) = catalog else {
         return Vec::new();
@@ -7577,7 +7577,7 @@ struct R2oDiscoveryVolumeSearchKey {
 #[derive(Clone, Default)]
 struct R2oEchRxProgress {
     next_candidate: usize,
-    tried: Vec<u32>,
+    tried: Vec<u64>,
 }
 
 #[cfg(unix)]
@@ -14848,7 +14848,7 @@ fn r2o_discovery_volume_recovery(
     network_whitelist_updates: &std::sync::Mutex<VecDeque<R2oNetworkWhitelistUpdate>>,
     candidate_catalog: Option<&Catalog>,
     suspect_fingerprint: &r2o_controller::catalog::Fingerprint,
-    tried_hashes: &[u32],
+    tried_hashes: &[u64],
     prior_candidate_probes: usize,
     white_name: &str,
     send_cap: &AtomicUsize,

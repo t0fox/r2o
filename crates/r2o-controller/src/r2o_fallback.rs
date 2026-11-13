@@ -48,18 +48,18 @@ impl ProbeCounts {
     }
 }
 
-/// The scheduler stores the low 32 bits of its original FNV-1a text hash.
-pub fn tried_key(text: &str) -> u32 {
+/// C `fnv1a` (`core/sched.c:3574-3581`): полный FNV-1a 64 по тексту плана.
+pub fn tried_key(text: &str) -> u64 {
     let text = text.replacen("r2o-plan", "d2k-plan", 1);
     text.bytes()
         .fold(1_469_598_103_934_665_603_u64, |hash, byte| {
             (hash ^ u64::from(byte)).wrapping_mul(1_099_511_628_211)
-        }) as u32
+        })
 }
 
 pub struct FallbackQueue {
     next: usize,
-    tried: Vec<u32>,
+    tried: Vec<u64>,
     pending: VecDeque<String>,
 }
 
@@ -68,7 +68,7 @@ impl FallbackQueue {
         Self::new_with_tried(measured, &[])
     }
 
-    pub fn new_with_tried(measured: &str, tried: &[u32]) -> Self {
+    pub fn new_with_tried(measured: &str, tried: &[u64]) -> Self {
         let mut tried = tried.to_vec();
         tried.push(tried_key(measured));
         Self {
@@ -82,7 +82,7 @@ impl FallbackQueue {
         Self::new_owned_search_with_tried(&[])
     }
 
-    pub fn new_owned_search_with_tried(tried: &[u32]) -> Self {
+    pub fn new_owned_search_with_tried(tried: &[u64]) -> Self {
         Self {
             next: 0,
             tried: tried.to_vec(),
@@ -276,6 +276,23 @@ pub fn plan(index: usize, shape: u8, send_cap: usize) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fnv1a_key_matches_c_full_u64() {
+        fn c_fnv1a(text: &str) -> u64 {
+            text.bytes()
+                .fold(1_469_598_103_934_665_603_u64, |hash, byte| {
+                    (hash ^ u64::from(byte)).wrapping_mul(1_099_511_628_211)
+                })
+        }
+        for text in [
+            "d2k-plan 1 11\nid 00112233445566778899aabbccddeeff\n",
+            "",
+            "d2k-plan 1 6\nsplit sni_middle +0\n",
+        ] {
+            assert_eq!(super::tried_key(text), c_fnv1a(text), "{text:?}");
+        }
+    }
+
     #[test]
     fn fallback_queue_batches_and_tried_hashes_match_donor() {
         let mut output = String::new();
