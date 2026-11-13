@@ -67,19 +67,9 @@ pub(crate) fn raw_dial_count() -> u64 {
     RAW_DIALS.with(Cell::get)
 }
 
-/// Проверить, может ли текущий процесс открыть raw-сокет отправки IPv4.
+/// C `d2k_raw_supported` (`detect/raw.c:164`): на Linux сырой слой
+/// доступен всегда; отказ ядра проявится при открытии сокета отправки.
 pub fn raw_supported() -> bool {
-    let fd = unsafe {
-        libc::socket(
-            libc::AF_INET,
-            libc::SOCK_RAW | libc::SOCK_CLOEXEC,
-            libc::IPPROTO_RAW,
-        )
-    };
-    if fd < 0 {
-        return false;
-    }
-    unsafe { libc::close(fd) };
     true
 }
 
@@ -983,6 +973,16 @@ fn property_probes() -> Vec<PropertyProbe> {
     probes
 }
 
+/// C `tri_yes` (`detect/props.c:419`): свойство подтверждено.
+fn tri_yes(value: TriState) -> bool {
+    value == TriState::True
+}
+
+/// C `tri_no` (`detect/props.c:418`): свойство опровергнуто.
+fn tri_no(value: TriState) -> bool {
+    value == TriState::False
+}
+
 fn property_probe_poison(
     property: &PropertyProbe,
     offer_ts: bool,
@@ -991,9 +991,7 @@ fn property_probe_poison(
     if raw_profile_allows(&property.poison, offer_ts) {
         return Some(property.poison.clone());
     }
-    if !matches!(property.set, Property::WhiteTimestamp)
-        || props.validates_checksum == TriState::True
-    {
+    if !matches!(property.set, Property::WhiteTimestamp) || tri_yes(props.validates_checksum) {
         return None;
     }
 
@@ -1065,12 +1063,12 @@ fn apply_property(props: &mut DpiProps, property: Property, passed: bool, poison
 
 fn compose_from_props(props: &DpiProps, control: Option<&[u8]>) -> Vec<Poison> {
     let mut base = Poison {
-        badsum: props.validates_checksum != TriState::True,
-        decoy_hello: props.parses_l7 == TriState::True,
+        badsum: !tri_yes(props.validates_checksum),
+        decoy_hello: tri_yes(props.parses_l7),
         ..Poison::default()
     };
     let mut out = Vec::with_capacity(4);
-    if props.counts_duplicates == TriState::True {
+    if tri_yes(props.counts_duplicates) {
         let mut spaced = base.clone();
         spaced.name = "СОБРАНО: серия с паузой".into();
         spaced.repeats = 2;
@@ -1655,17 +1653,19 @@ impl Drop for RstGuard {
     }
 }
 
+/// C `rc_exit1` (`detect/raw.c:407-410`): `WIFEXITED && WEXITSTATUS==1`.
+fn rc_exit1(status: &std::process::ExitStatus) -> bool {
+    status.code() == Some(1)
+}
+
 fn rst_delete_once_locked(rule: &RstRule) -> bool {
     if rule.nft {
         let deleted = run_command("nft", &rule.nft_args("delete"));
         if deleted.as_ref().is_ok_and(|status| status.success()) {
             return true;
         }
-        return deleted
-            .as_ref()
-            .is_ok_and(|status| status.code() == Some(1))
-            && run_command("nft", &rule.nft_args("get"))
-                .is_ok_and(|status| status.code() == Some(1));
+        return deleted.as_ref().is_ok_and(|status| rc_exit1(status))
+            && run_command("nft", &rule.nft_args("get")).is_ok_and(|status| rc_exit1(&status));
     }
 
     let program = if rule.destination.is_ipv6() {
@@ -1677,11 +1677,9 @@ fn rst_delete_once_locked(rule: &RstRule) -> bool {
     if deleted.as_ref().is_ok_and(|status| status.success()) {
         return true;
     }
-    deleted
-        .as_ref()
-        .is_ok_and(|status| status.code() == Some(1))
+    deleted.as_ref().is_ok_and(|status| rc_exit1(status))
         && run_command(program, &rule.iptables_args(rule.comment, "-C"))
-            .is_ok_and(|status| status.code() == Some(1))
+            .is_ok_and(|status| rc_exit1(&status))
 }
 
 fn rst_delete_once(rule: &RstRule) -> bool {
@@ -1777,7 +1775,7 @@ pub(crate) fn flush_pending_rst_releases() {
     retry_pending_rst_releases(false);
 }
 
-fn parse_long_exact(bytes: &[u8]) -> Option<i64> {
+fn parse_long_exact(bytes: &[u8]) -> Option<std::os::raw::c_long> {
     if bytes.is_empty() || bytes.len() >= 32 || !bytes.iter().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
@@ -1824,7 +1822,7 @@ fn parse_rst_rule(line: &str) -> Option<(u16, Option<i64>)> {
         if pid <= 0 {
             return None;
         }
-        return Some((port as u16, Some(pid)));
+        return Some((port as u16, Some(i64::from(pid))));
     }
     None
 }
@@ -3107,6 +3105,47 @@ mod tests {
             .checked_sub(std::time::Duration::from_secs(600))
             .unwrap();
         assert!(selftest_age_from(Some(stale), now).is_none());
+    }
+
+    #[test]
+    fn raw_supported_matches_c_linux_contract() {
+        // C `detect/raw.c:164`: на Linux всегда 1, отказ ядра виден при отправке.
+        assert!(raw_supported());
+    }
+
+    #[test]
+    fn rc_exit1_matches_c_wait_status() {
+        use std::process::Command;
+        let one = Command::new("sh").arg("-c").arg("exit 1").status().unwrap();
+        assert!(rc_exit1(&one));
+        let zero = Command::new("sh").arg("-c").arg("exit 0").status().unwrap();
+        assert!(!rc_exit1(&zero));
+        let two = Command::new("sh").arg("-c").arg("exit 2").status().unwrap();
+        assert!(!rc_exit1(&two));
+    }
+
+    #[test]
+    fn parse_long_exact_matches_c_bounds() {
+        assert_eq!(parse_long_exact(b"0"), Some(0));
+        assert_eq!(parse_long_exact(b"30000"), Some(30000));
+        assert_eq!(parse_long_exact(b""), None);
+        assert_eq!(parse_long_exact(b"+1"), None);
+        assert_eq!(parse_long_exact(b"-1"), None);
+        assert_eq!(parse_long_exact(b"12a"), None);
+        assert_eq!(parse_long_exact(&[b'0'; 31]), Some(0));
+        assert!(parse_long_exact(&[b'0'; 32]).is_none());
+        let overflow = (i128::from(std::os::raw::c_long::MAX) + 1).to_string();
+        assert!(parse_long_exact(overflow.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn tri_yes_no_match_donor() {
+        assert!(tri_yes(TriState::True));
+        assert!(!tri_yes(TriState::False));
+        assert!(!tri_yes(TriState::Unset));
+        assert!(tri_no(TriState::False));
+        assert!(!tri_no(TriState::True));
+        assert!(!tri_no(TriState::Unset));
     }
 
     #[test]
