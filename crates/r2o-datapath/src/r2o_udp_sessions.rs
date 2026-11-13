@@ -376,7 +376,10 @@ impl R2oUdpSessions {
     }
 
     /// Проверить первый клиентский пакет UDP-потока для окна поздних копий.
-    pub fn r2o_udp_opening(&self, packet: &[u8]) -> bool {
+    ///
+    /// C `d2k_session_udp_opening`: hook имеет приоритет (OUT/POST→клиент,
+    /// IN/PRE→сервер), иначе сохранённое направление, иначе резерв по 443.
+    pub fn r2o_udp_opening_at_hook(&self, packet: &[u8], hook: Option<u8>) -> bool {
         let Some(key) = flow_key_from_packet(packet) else {
             return false;
         };
@@ -384,8 +387,12 @@ impl R2oUdpSessions {
             return false;
         };
         flow.r2o_client_packets_seen == 1
-            && r2o_udp_packet_direction(packet, key, None, flow.r2o_client_is_low)
+            && r2o_udp_packet_direction(packet, key, hook, flow.r2o_client_is_low)
                 .is_some_and(|(is_client, _)| is_client)
+    }
+
+    pub fn r2o_udp_opening(&self, packet: &[u8]) -> bool {
+        self.r2o_udp_opening_at_hook(packet, None)
     }
 
     /// Отметить первое применение плана к UDP-потоку.

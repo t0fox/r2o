@@ -113,6 +113,7 @@ mod app {
         probe_mark: u32,
         mark: u32,
         packet: &[u8],
+        hook: Option<u8>,
         now: Instant,
         receive_seq: u64,
         can_resend: bool,
@@ -121,7 +122,7 @@ mod app {
             || !r2k_core::packet::PacketView::parse(packet).is_some_and(|view| {
                 view.family == 4 && view.protocol == 17 && view.fragment & 0x3fff == 0
             })
-            || !sessions.r2o_udp_opening(packet)
+            || !sessions.r2o_udp_opening_at_hook(packet, hook)
             || !r2o_udp_packet_is_neutral(route_gate, probe_mark, mark, packet)
         {
             return false;
@@ -2340,6 +2341,7 @@ mod app {
                                             options.probe_mark,
                                             packet.mark.unwrap_or(0),
                                             bytes,
+                                            queue_hook,
                                             now,
                                             udp_receive_seq,
                                             raw.is_some(),
@@ -2397,6 +2399,7 @@ mod app {
                                             options.probe_mark,
                                             packet.mark.unwrap_or(0),
                                             bytes,
+                                            queue_hook,
                                             now,
                                             udp_receive_seq,
                                             raw.is_some(),
@@ -5136,6 +5139,7 @@ mod app {
                 0,
                 0,
                 &packet,
+                None,
                 now,
                 1,
                 true,
@@ -5156,6 +5160,7 @@ mod app {
                 0,
                 0,
                 &packet,
+                None,
                 now + std::time::Duration::from_millis(1),
                 2,
                 true,
@@ -5181,6 +5186,7 @@ mod app {
                 0,
                 0,
                 &reply,
+                None,
                 now + std::time::Duration::from_millis(7),
                 3,
                 true,

@@ -86,10 +86,10 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 222 | 326 | 0 | 0 |
 | core-state | 692 | 182 | 509 | 0 | 0 |
-| datapath-core | 400 | 195 | 205 | 0 | 0 |
+| datapath-core | 400 | 196 | 204 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **874** | **1108** | **0** | **0** |
+| **Итого** | **1982** | **875** | **1107** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 874 / P 1108 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 875 / P 1107 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -346,10 +346,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 222 | 326 | 0 | 0 |
 | core-state | 692 | 188 | 504 | 0 | 0 |
-| datapath-core | 400 | 195 | 205 | 0 | 0 |
+| datapath-core | 400 | 196 | 204 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **874** | **1108** | **0** | **0** |
+| **Итого** | **1982** | **875** | **1107** | **0** | **0** |
 
 
 ---
@@ -3879,7 +3879,7 @@ CLI-логирования, health-файла, duration, состава свод
 | `d2k_session_set_udp_reverse_hook` | 2663–2665 | 3 | «обратное UDP видно» | `main.rs` `reverse_queue_visible` | **P** | C хранит флаг в сессии и использует в `sweep_udp_one`; Rust `options.reverse_queue_visible` + `ControlServer::is_connected`, передаётся в `sweep`. Смысл тот же, поле/условие иное. |
 | `d2k_session_set_ct_query` | 2667–2669 | 3 | включить ctnetlink-запросы | `conntrack.rs:264 R2oConntrackClient` (`Option`) | **P** | C инъектирует `ct_query`/`ctx`; Rust `conntrack: Option<R2oConntrackClient>` создаётся в `run`, `None` при недоступности. Эквивалентно по включению/выключению, API иной. |
 | `d2k_session_udp_hold_begin` | 2671–2711 | 41 | route_mark=0, UDP не фрагмент, hook client/server, 443 fallback, QUIC Initial, поток не plan_done/damaged/saw_hello/routed, fwd_pkts<8 | `r2o_udp_hold.rs:19-47 r2o_udp_hold_candidate`, `r2o_udp_sessions.rs:410-424 r2o_begin_hold` | **P** | **Совпадает:** только клиентский Initial (OUT/POST или порт 443 fallback), не фрагмент, окно 8, запрет после плана/приветствия. **Подтверждённые отличия:** C проверяет `route_mark==0`, `fl->damaged`, `fl->routed` в этой функции; Rust `r2o_udp_hold_candidate` их не проверяет (route gate выполняется раньше, `damaged` — в `r2o_begin_hold` отсутствует), а `r2o_begin_hold` добавляет `hold_attempts`/`client_packets` и `r2o_mark_hello_seen`. C `saw_initial` не входит в запрет, Rust `hello_seen` входит. |
-| `d2k_session_udp_opening` | 2713–2736 | 24 | первый клиентский пакет: `fwd_pkts==1`, hook OUT/POST→клиент, IN/PRE→сервер, иначе flow, иначе 443 | `r2o_udp_sessions.rs:361-371 r2o_udp_opening` | **P** | **Совпадает:** проверка «ровно один клиентский пакет» и направление. **Отличие:** Rust `r2o_udp_opening` вызывает `r2o_udp_packet_direction(packet, key, None, known)` — **без текущего hook**, поэтому для первого пакета неизвестного потока остаётся только сохранённое направление/порт 443; C использует hook. При известном направлении результат совпадает. |
+| `d2k_session_udp_opening` | 2713–2736 | 24 | первый клиентский пакет: `fwd_pkts==1`, hook OUT/POST→клиент, IN/PRE→сервер, иначе flow, иначе 443 | `r2o_udp_sessions.rs` `r2o_udp_opening_at_hook` | E | C проверяет `fwd_pkts==1` и определяет клиента по hook: OUT/POST → клиент, IN/PRE → сервер, иначе сохранённое направление, иначе резерв по 443. Rust `r2o_udp_opening_at_hook(packet, hook)` передаёт hook в `r2o_udp_packet_direction` с тем же приоритетом; `r2o_udp_mark_plain_pass` пробрасывает `queue_hook`. Тест `обычный_принятый_первый_udp_пакет_открывает_окно_только_для_клиента` (OUT). |
 | `d2k_session_udp_hold_end` | 2738–2742 | 5 | закрыть транзакцию hold (`udp_hold_active=0`) | `r2o_udp_sessions.rs` hold state + `main.rs` release | **P** | C снимает флаг на потоке после сборки/отказа. Rust `r2o_begin_hold`/`hold_attempts` и `r2o_mark_hello_seen`; отдельного `hold_end` нет — состояние снимается release/hello. Эквивалент по смыслу, не по API. |
 | `d2k_session_udp_hold_replay` | 2744–2751 | 8 | `udp_hold_active=0`, `udp_hold_replay_first=1` | `r2o_udp_sessions.rs:337-343 r2o_mark_hold_replay_first` | **P** | C после сборки снимает active и помечает первую датаграмму к повтору. Rust `r2o_mark_hold_replay_first` ставит `hold_replay_first=true`; `hold_active` как отдельное поле отсутствует, повтор выбирается `r2o_udp_opening`/`replay_first`. Unit `:640`. |
 | `d2k_session_note_unassembled` | 2753–2784 | 32 | «составное приветствие не собралось» один раз на поток + HTTP-ветка (порт 80, нет hello, начало запроса), лог declared/payload | `hold.rs:235 r2o_take_incomplete_diagnostics`, `main.rs:544` | **P** | **Совпадает:** диагностика один раз на поток, HTTP-ветка снимает `http_checked/http_conn` и пишет отказ. **Отличия:** C печатает `d2kd: составное приветствие отпущено без сборки: объявлено N байт…`; Rust `r2o_take_incomplete_diagnostics` формирует события/строки иначе, точный текст/числа не сверены. `hold.rs:2249` покрывает TLS-таймаут. |
