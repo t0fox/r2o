@@ -791,6 +791,56 @@ mod tests {
     }
 
     #[test]
+    fn read_hex_file_matches_c_limits_and_comments() {
+        let dir = std::env::temp_dir().join(format!("r2o-read-hex-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let valid = dir.join("valid.hex");
+        std::fs::write(&valid, b"# comment\n 16 03\r\n03\n").unwrap();
+        assert_eq!(
+            super::read_hex_file(&valid).unwrap(),
+            vec![0x16, 0x03, 0x03]
+        );
+
+        let empty = dir.join("empty.hex");
+        std::fs::write(&empty, b"# only comment\n").unwrap();
+        assert_eq!(
+            super::read_hex_file(&empty).unwrap_err(),
+            "файл пуст (0 байт)"
+        );
+
+        let odd = dir.join("odd.hex");
+        std::fs::write(&odd, b"16 030").unwrap();
+        assert!(super::read_hex_file(&odd).unwrap_err().contains("нечётное"));
+        assert!(super::read_hex_file(&odd).unwrap_err().contains("(5)"));
+
+        let invalid = dir.join("invalid.hex");
+        std::fs::write(&invalid, b"16 zz").unwrap();
+        assert!(
+            super::read_hex_file(&invalid)
+                .unwrap_err()
+                .contains("недопустимый символ 'z'")
+        );
+
+        let huge = dir.join("huge.hex");
+        std::fs::write(&huge, "00".repeat(2049)).unwrap();
+        assert!(
+            super::read_hex_file(&huge)
+                .unwrap_err()
+                .contains("потолка формы приветствия (2048 байт)")
+        );
+
+        assert!(
+            super::read_hex_file(&dir.join("missing.hex"))
+                .unwrap_err()
+                .starts_with("открыть не удалось")
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn saved_hex_reader_accepts_comments_and_rejects_non_hex_data() {
         assert_eq!(
             super::decode_hex(b"  # comment\n  16 03\t03\r\n0x16"),

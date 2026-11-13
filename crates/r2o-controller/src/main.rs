@@ -399,50 +399,90 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
         }
     }
 
-    println!("цель: {}:{}", options.target_ip, options.port);
-    println!("имя (--sni): {}", options.sni);
-    println!("управляющий сокет: {}", options.control_path.display());
-    println!(
-        "метка (--mark): 0x{:x}; зонд отправляется без метки",
-        options.mark
+    let trigger_how_detail = match &options.trigger {
+        AskSnapshotInput::File(path) => ("--hello-hex", format!("файл {}", path.display())),
+        AskSnapshotInput::Capture => (
+            "--arm-wait-ms",
+            format!(
+                "имя={}, потолок={} мс",
+                options.sni,
+                options.arm_wait.unwrap_or(ASK_WAIT).as_millis()
+            ),
+        ),
+    };
+    print!(
+        "{}",
+        r2o_ask_header(
+            options.target_ip,
+            options.port,
+            &options.sni,
+            &options.control_path.display().to_string(),
+            options.mark,
+        )
     );
-    match &trigger_bytes {
-        Some(bytes) => println!(
-            "снимок триггера: {} байт, SNI {}",
-            bytes.len(),
-            hello_sni(bytes).unwrap_or_else(|_| "не найден".into())
-        ),
-        None if trigger_timed_out => println!(
-            "снимок триггера: не получен за {} мс",
-            options.arm_wait.unwrap_or(ASK_WAIT).as_millis()
-        ),
-        None => println!("снимок триггера: не получен"),
-    }
+    println!();
+    print!(
+        "{}",
+        r2o_ask_snapshot(
+            "триггера",
+            trigger_bytes.is_some(),
+            trigger_timed_out,
+            trigger_how_detail.0,
+            &trigger_how_detail.1,
+            trigger_bytes.as_deref(),
+        )
+    );
     match (&options.control, &control_bytes) {
-        (None, _) => println!("снимок control: не запрошен"),
-        (_, Some(bytes)) => println!(
-            "снимок control: {} байт, SNI {}",
-            bytes.len(),
-            hello_sni(bytes).unwrap_or_else(|_| "не найден".into())
+        (None, _) => println!(
+            "снимок control: не запрошен (--control-sni/--control-hex не заданы) — вопросы \
+             \"счёт дубликатов\" и \"разбор протокола\" не будут заданы (см. секцию \
+             \"вопросы\" ниже)"
         ),
-        (_, None) if control_timed_out => println!(
-            "снимок control: не получен за {} мс",
-            options.arm_wait.unwrap_or(ASK_WAIT).as_millis()
-        ),
-        (_, None) => println!("снимок control: не получен"),
+        (Some(control), bytes) => {
+            let (how, detail) = match control {
+                AskControlInput::File(path) => {
+                    ("--control-hex", format!("файл {}", path.display()))
+                }
+                AskControlInput::Capture(name) => (
+                    "--arm-wait-ms",
+                    format!(
+                        "имя={name}, потолок={} мс",
+                        options.arm_wait.unwrap_or(ASK_WAIT).as_millis()
+                    ),
+                ),
+            };
+            print!(
+                "{}",
+                r2o_ask_snapshot(
+                    "control",
+                    bytes.is_some(),
+                    control_timed_out,
+                    how,
+                    &detail,
+                    bytes.as_deref(),
+                )
+            );
+        }
     }
 
     let Some(trigger_bytes) = trigger_bytes else {
-        println!("опрос не выполнен: нет полного ClientHello цели");
-        for (index, question) in AskQuestion::ALL.iter().enumerate() {
-            println!(
-                "[{}/5] {} — не задан: снимок триггера не получен",
-                index + 1,
-                question.label()
-            );
-        }
+        print!(
+            "{}",
+            r2o_ask_not_asked_at_all("снимок приветствия триггера не получен")
+        );
         return Ok(0);
     };
+    if hello_sni(&trigger_bytes).is_err() {
+        // C `trig_sni_ok==0`: отчёт без вопросов, код 0.
+        print!(
+            "{}",
+            r2o_ask_not_asked_at_all(&format!(
+                "в снимке триггера ({} байт) не нашлось SNI (d2k_hello_sni)",
+                trigger_bytes.len()
+            ))
+        );
+        return Ok(0);
+    }
     let trigger = validate_hello(&trigger_bytes, &options.sni)
         .map_err(|error| format!("ClientHello цели: {error}"))?;
     let control_trigger = control_bytes
@@ -745,46 +785,40 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
         }
     }
 
-    println!("итоговые свойства инспектора:");
-    println!(
-        "  tolerates_left_overlap = {}",
-        r2o_tri_state(properties.tolerates_left_overlap)
-    );
-    println!(
-        "  tolerates_reorder      = {}",
-        r2o_tri_state(properties.tolerates_reorder)
-    );
-    println!(
-        "  validates_checksum     = {}",
-        r2o_tri_state(properties.validates_checksum)
-    );
-    println!(
-        "  parses_l7              = {}",
-        r2o_tri_state(properties.parses_l7)
-    );
-    println!(
-        "  counts_duplicates      = {}",
-        r2o_tri_state(properties.counts_duplicates)
-    );
+    if r2o_ask_all_unknown(&properties) {
+        println!(
+            "  - ни один зонд не прошёл: план последнего заданного вопроса СНЯТ с датапата \
+             (DEL_NAME по имени \"{}\") — иначе на боевом датапате остался бы стоять план, \
+             про который это же измерение сказало \"не работает\"",
+            options.sni
+        );
+    }
+    print!("{}", r2o_ask_vector(&properties));
     let decoy_sni = control_bytes
         .as_deref()
         .and_then(|bytes| hello_sni(bytes).ok());
     let composed = compose_plan_texts(&properties, &trigger, shape, decoy_sni.as_deref(), 0)?;
-    if composed.is_empty() {
-        println!("выведенные планы: нет (не хватает имени control-приманки)");
+    let no_decoy_reason = if options.control.is_none() {
+        "control-приветствие не задано"
     } else {
-        println!("выведенные планы:");
-        for (index, plan) in composed.iter().enumerate() {
-            println!("\nплан {}/{}:\n{}", index + 1, composed.len(), plan);
-        }
-    }
+        "в control-приветствии не нашлось имени (d2k_hello_sni)"
+    };
+    print!(
+        "{}",
+        r2o_ask_plans(&composed, decoy_sni.as_deref(), no_decoy_reason)
+    );
     Ok(0)
 }
 
 #[cfg(unix)]
 fn save_ask_snapshot(path: &std::path::Path, kind: &str, sni: &str, bytes: &[u8]) {
+    let name = if sni.is_empty() {
+        "(без имени)"
+    } else {
+        sni
+    };
     let mut contents = format!(
-        "# снимок {kind}, имя {sni}, {} байт — снят r2o-controller с живого датапата\n",
+        "# снимок {kind}, имя {name}, {} байт — снят d2kask с живого датапата\n",
         bytes.len()
     );
     for (index, byte) in bytes.iter().enumerate() {
@@ -816,6 +850,131 @@ fn r2o_tri_state(value: r2o_controller::classify::TriState) -> &'static str {
         r2o_controller::classify::TriState::False => "нет",
         r2o_controller::classify::TriState::True => "да",
     }
+}
+
+/// C `pos_value`: поле свойств по фиксированной позиции опроса.
+#[cfg(unix)]
+fn r2o_ask_pos_value(
+    properties: &r2o_controller::classify::DpiProps,
+    pos: usize,
+) -> r2o_controller::classify::TriState {
+    match pos {
+        0 => properties.tolerates_left_overlap,
+        1 => properties.tolerates_reorder,
+        2 => properties.validates_checksum,
+        3 => properties.parses_l7,
+        4 => properties.counts_duplicates,
+        _ => r2o_controller::classify::TriState::Unset,
+    }
+}
+
+/// C `all_unknown`: все пять полей вектора не измерены.
+#[cfg(unix)]
+fn r2o_ask_all_unknown(properties: &r2o_controller::classify::DpiProps) -> bool {
+    (0..5)
+        .all(|pos| r2o_ask_pos_value(properties, pos) == r2o_controller::classify::TriState::Unset)
+}
+
+/// C `print_header`.
+#[cfg(unix)]
+fn r2o_ask_header(ip: std::net::IpAddr, port: u16, sni: &str, control: &str, mark: u32) -> String {
+    format!(
+        "d2kask: спрашиваем настоящую коробку DPI\n\n\
+         цель: {ip}:{port}\n\
+         имя (--sni): {sni}\n\
+         управляющий сокет: {control}\n\
+         метка (--mark): 0x{mark:x}\n"
+    )
+}
+
+/// C `print_snapshot`.
+#[cfg(unix)]
+fn r2o_ask_snapshot(
+    label: &str,
+    have_bytes: bool,
+    timed_out: bool,
+    how: &str,
+    detail: &str,
+    bytes: Option<&[u8]>,
+) -> String {
+    if have_bytes {
+        let bytes = bytes.unwrap_or_default();
+        let mut out = format!("снимок {label}: {how} ({detail}), {} байт\n", bytes.len());
+        match r2o_controller::ask::hello_sni(bytes) {
+            Ok(sni) if !sni.is_empty() && sni.len() < 256 => {
+                out.push_str(&format!("  SNI в снимке: {sni}\n"));
+            }
+            _ => out.push_str("  SNI в снимке: НЕ НАЙДЕНО\n"),
+        }
+        let shape = match r2o_controller::ask::hello_shape(bytes) {
+            Ok(r2k_core::control::SHAPE_MODERN) => "MODERN",
+            Ok(r2k_core::control::SHAPE_LEGACY) => "LEGACY",
+            _ => "UNKNOWN",
+        };
+        out.push_str(&format!("  вид приветствия: {shape}\n"));
+        return out;
+    }
+    if timed_out {
+        format!(
+            "снимок {label}: {how} ({detail}) — НЕ ПОЛУЧЕН (D2K_EV_SHAPE не пришло за отведённое время)\n"
+        )
+    } else {
+        format!("снимок {label}: {how} ({detail}) — НЕ ПОЛУЧЕН\n")
+    }
+}
+
+/// C `print_not_asked_at_all`.
+#[cfg(unix)]
+fn r2o_ask_not_asked_at_all(reason: &str) -> String {
+    const FIELDS: [&str; 5] = [
+        "перекрытие слева (tolerates_left_overlap)",
+        "счёт дубликатов (counts_duplicates)",
+        "порядок сегментов (tolerates_reorder)",
+        "контрольная сумма (validates_checksum)",
+        "разбор протокола (parses_l7)",
+    ];
+    let mut out = format!("\nни один из 5 вопросов не задан: {reason}\n");
+    for (index, field) in FIELDS.iter().enumerate() {
+        out.push_str(&format!(
+            "\n[{}/5] {field}:\n  спрошен: нет\n  причина: {reason}\n",
+            index + 1
+        ));
+    }
+    out
+}
+
+/// C `print_vector`.
+#[cfg(unix)]
+fn r2o_ask_vector(properties: &r2o_controller::classify::DpiProps) -> String {
+    format!(
+        "\nитоговый вектор (не измерено / да / нет):\n  tolerates_left_overlap = {}\n  counts_duplicates      = {}\n  tolerates_reorder      = {}\n  validates_checksum     = {}\n  parses_l7              = {}\n",
+        r2o_tri_state(r2o_ask_pos_value(properties, 0)),
+        r2o_tri_state(r2o_ask_pos_value(properties, 4)),
+        r2o_tri_state(r2o_ask_pos_value(properties, 1)),
+        r2o_tri_state(r2o_ask_pos_value(properties, 2)),
+        r2o_tri_state(r2o_ask_pos_value(properties, 3)),
+    )
+}
+
+/// C `print_plans`.
+#[cfg(unix)]
+fn r2o_ask_plans(plans: &[String], decoy: Option<&str>, no_decoy_reason: &str) -> String {
+    if plans.is_empty() {
+        return format!(
+            "\nвыведенные планы: НЕТ (d2k_compose не собрал ни одного плана — приманка (decoy) недоступна: {no_decoy_reason})\n"
+        );
+    }
+    let mut out = format!(
+        "\nвыведенные планы (d2k_compose, приманка={}):\n",
+        decoy.unwrap_or("нет")
+    );
+    for (index, plan) in plans.iter().enumerate() {
+        out.push_str(&format!("\n  план {}/{}:\n", index + 1, plans.len()));
+        for line in plan.lines() {
+            out.push_str(&format!("    {line}\n"));
+        }
+    }
+    out
 }
 
 fn r2o_voice_check_command(r2o_arguments: &[std::ffi::OsString]) -> Option<i32> {
@@ -24008,6 +24167,141 @@ fn r2o_quic_binding_blocks_retry(binding_exists: bool, planned: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn ask_print_helpers_match_c_exactly() {
+        use r2o_controller::classify::{DpiProps, TriState};
+
+        let header = super::r2o_ask_header(
+            "192.0.2.1".parse().unwrap(),
+            443,
+            "target.example",
+            "/run/r2o.sock",
+            0x2d,
+        );
+        assert_eq!(
+            header,
+            "d2kask: спрашиваем настоящую коробку DPI\n\n\
+             цель: 192.0.2.1:443\n\
+             имя (--sni): target.example\n\
+             управляющий сокет: /run/r2o.sock\n\
+             метка (--mark): 0x2d\n"
+        );
+
+        let mut properties = DpiProps::default();
+        assert!(super::r2o_ask_all_unknown(&properties));
+        assert_eq!(
+            super::r2o_ask_vector(&properties),
+            "\nитоговый вектор (не измерено / да / нет):\n\
+             \x20 tolerates_left_overlap = не измерено\n\
+             \x20 counts_duplicates      = не измерено\n\
+             \x20 tolerates_reorder      = не измерено\n\
+             \x20 validates_checksum     = не измерено\n\
+             \x20 parses_l7              = не измерено\n"
+        );
+        properties.tolerates_left_overlap = TriState::True;
+        properties.tolerates_reorder = TriState::False;
+        properties.validates_checksum = TriState::True;
+        properties.parses_l7 = TriState::False;
+        properties.counts_duplicates = TriState::True;
+        assert!(!super::r2o_ask_all_unknown(&properties));
+        assert_eq!(super::r2o_ask_pos_value(&properties, 0), TriState::True);
+        assert_eq!(super::r2o_ask_pos_value(&properties, 1), TriState::False);
+        assert_eq!(super::r2o_ask_pos_value(&properties, 2), TriState::True);
+        assert_eq!(super::r2o_ask_pos_value(&properties, 3), TriState::False);
+        assert_eq!(super::r2o_ask_pos_value(&properties, 4), TriState::True);
+        assert_eq!(super::r2o_ask_pos_value(&properties, 99), TriState::Unset);
+        let vector = super::r2o_ask_vector(&properties);
+        assert!(vector.contains("tolerates_left_overlap = да"));
+        assert!(vector.contains("counts_duplicates      = да"));
+        assert!(vector.contains("tolerates_reorder      = нет"));
+        assert!(vector.contains("validates_checksum     = да"));
+        assert!(vector.contains("parses_l7              = нет"));
+
+        let empty_plans = super::r2o_ask_plans(&[], None, "control-приветствие не задано");
+        assert_eq!(
+            empty_plans,
+            "\nвыведенные планы: НЕТ (d2k_compose не собрал ни одного плана — приманка \
+             (decoy) недоступна: control-приветствие не задано)\n"
+        );
+        let plans = vec!["a\nb".to_owned(), "c".to_owned()];
+        assert_eq!(
+            super::r2o_ask_plans(&plans, Some("decoy.example"), ""),
+            "\nвыведенные планы (d2k_compose, приманка=decoy.example):\n\
+             \n  план 1/2:\n    a\n    b\n\
+             \n  план 2/2:\n    c\n"
+        );
+
+        let not_asked = super::r2o_ask_not_asked_at_all("снимок приветствия триггера не получен");
+        assert!(not_asked.starts_with(
+            "\nни один из 5 вопросов не задан: снимок приветствия триггера не получен\n"
+        ));
+        assert!(not_asked.contains(
+            "\n[2/5] счёт дубликатов (counts_duplicates):\n  спрошен: нет\n  причина: \
+             снимок приветствия триггера не получен\n"
+        ));
+        assert!(not_asked.ends_with(
+            "\n[5/5] разбор протокола (parses_l7):\n  спрошен: нет\n  причина: \
+             снимок приветствия триггера не получен\n"
+        ));
+        assert_eq!(not_asked.matches("спрошен: нет").count(), 5);
+
+        let missing = super::r2o_ask_snapshot(
+            "control",
+            false,
+            true,
+            "--arm-wait-ms",
+            "имя=control.example, потолок=5000 мс",
+            None,
+        );
+        assert_eq!(
+            missing,
+            "снимок control: --arm-wait-ms (имя=control.example, потолок=5000 мс) — \
+             НЕ ПОЛУЧЕН (D2K_EV_SHAPE не пришло за отведённое время)\n"
+        );
+        let hello = r2o_controller::hello::modern_client_hello("target.example").unwrap();
+        let captured = super::r2o_ask_snapshot(
+            "триггера",
+            true,
+            false,
+            "--hello-hex",
+            "файл trigger.hex",
+            Some(&hello),
+        );
+        assert!(captured.starts_with(&format!(
+            "снимок триггера: --hello-hex (файл trigger.hex), {} байт\n",
+            hello.len()
+        )));
+        assert!(captured.contains("  SNI в снимке: target.example\n"));
+        assert!(captured.contains("  вид приветствия: MODERN\n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_ask_snapshot_matches_c_hex_layout() {
+        let path =
+            std::env::temp_dir().join(format!("r2o-ask-snapshot-{}.hex", std::process::id()));
+        let bytes: Vec<u8> = (0..33).collect();
+        super::save_ask_snapshot(&path, "триггера", "", &bytes);
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let expected_header =
+            "# снимок триггера, имя (без имени), 33 байт — снят d2kask с живого датапата\n";
+        assert!(contents.starts_with(expected_header), "{contents}");
+        let line1: String = bytes[..32]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let line2: String = bytes[32..]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(
+            &contents[expected_header.len()..],
+            format!("{line1}\n{line2}\n")
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn rec_find_is_case_insensitive_and_family_scoped() {
