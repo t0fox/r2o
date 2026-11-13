@@ -1169,7 +1169,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
                     if parser.is_invalid() {
                         r2o_framing_valid = false;
                         r2o_local_limit = r2o_http_local_limit(&parser);
-                        reason = Some("HTTP-ответ содержит неверное обрамление".into());
+                        reason = Some(r2o_http_error_reason(&parser).into());
                         break;
                     }
                 }
@@ -1390,6 +1390,13 @@ fn r2o_body_read_reason(empty: bool) -> &'static str {
     } else {
         "ошибка чтения TLS в теле"
     }
+}
+
+/// C `body_say`: текст ошибки тела, если парсер его знает.
+fn r2o_http_error_reason(parser: &HttpResponseParser) -> &'static str {
+    parser
+        .body_error()
+        .unwrap_or("HTTP-ответ содержит неверное обрамление")
 }
 
 /// C `read_http_body`: для chunked/close-delimited `body_expected=body_bytes`.
@@ -4619,6 +4626,49 @@ mod tests {
             "сервер закрыл соединение посреди тела"
         );
         assert_eq!(r2o_body_read_reason(false), "ошибка чтения TLS в теле");
+    }
+
+    #[test]
+    fn http_body_error_texts_match_c() {
+        // C `body_say`: точные тексты ошибок chunked-строк.
+        let mut lf = HttpResponseParser::new(false);
+        lf.feed(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\n",
+            false,
+        );
+        assert_eq!(
+            lf.body_error(),
+            Some("chunked: строка оканчивается LF без CR")
+        );
+        assert_eq!(
+            r2o_http_error_reason(&lf),
+            "chunked: строка оканчивается LF без CR"
+        );
+
+        let mut cr = HttpResponseParser::new(false);
+        cr.feed(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\rX",
+            false,
+        );
+        assert_eq!(cr.body_error(), Some("chunked: после CR нет LF"));
+
+        let mut long = HttpResponseParser::new(false);
+        let mut response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+        response.extend(std::iter::repeat_n(b'a', 200));
+        long.feed(&response, false);
+        assert_eq!(
+            long.body_error(),
+            Some("chunked: строка длиннее 127 байт (наш предел)")
+        );
+        assert!(long.line_overflow());
+
+        let mut ordinary = HttpResponseParser::new(false);
+        ordinary.feed(b"HTTP/1.1 200 OK\r\nX: \x00\r\n\r\n", false);
+        assert_eq!(ordinary.body_error(), None);
+        assert_eq!(
+            r2o_http_error_reason(&ordinary),
+            "HTTP-ответ содержит неверное обрамление"
+        );
     }
 
     #[test]

@@ -31,6 +31,7 @@ pub struct HttpResponseParser {
     complete: bool,
     invalid: bool,
     line_overflow: bool,
+    body_error: Option<&'static str>,
     interim: bool,
 }
 
@@ -51,6 +52,7 @@ impl HttpResponseParser {
             complete: false,
             invalid: false,
             line_overflow: false,
+            body_error: None,
             interim: false,
         }
     }
@@ -139,6 +141,11 @@ impl HttpResponseParser {
     /// C `body_line`: переполнение строки, а не иной сбой обрамления.
     pub const fn line_overflow(&self) -> bool {
         self.line_overflow
+    }
+
+    /// C `body_say`: текст ошибки chunked-строки.
+    pub const fn body_error(&self) -> Option<&'static str> {
+        self.body_error
     }
 
     pub const fn status(&self) -> u16 {
@@ -240,13 +247,24 @@ impl HttpResponseParser {
         let opaque_trailer_byte = self.state == State::Trailers;
         let overflow = self.line_len >= self.line.len()
             || !matches!(byte, b'\r' | b'\n') && content_len >= LINE_CAPACITY - 1;
-        if invalid_line_byte(byte) && !ignored_chunk_extension && !opaque_trailer_byte
-            || overflow
-            || byte == b'\n' && (self.line_len == 0 || self.line[self.line_len - 1] != b'\r')
-            || self.line_len != 0 && self.line[self.line_len - 1] == b'\r' && byte != b'\n'
-        {
+        if invalid_line_byte(byte) && !ignored_chunk_extension && !opaque_trailer_byte {
             self.invalid = true;
-            self.line_overflow |= overflow;
+            return;
+        }
+        if overflow {
+            self.invalid = true;
+            self.line_overflow = true;
+            self.body_error = Some("chunked: строка длиннее 127 байт (наш предел)");
+            return;
+        }
+        if byte == b'\n' && (self.line_len == 0 || self.line[self.line_len - 1] != b'\r') {
+            self.invalid = true;
+            self.body_error = Some("chunked: строка оканчивается LF без CR");
+            return;
+        }
+        if self.line_len != 0 && self.line[self.line_len - 1] == b'\r' && byte != b'\n' {
+            self.invalid = true;
+            self.body_error = Some("chunked: после CR нет LF");
             return;
         }
         self.line[self.line_len] = byte;
