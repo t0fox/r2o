@@ -16392,6 +16392,37 @@ fn read_optional_frame(stream: &mut impl std::io::Read) -> std::io::Result<Optio
     }))
 }
 
+/// C `d2k_link_peer_closed` (`core/link.c:197-221`): poll(0);
+/// `POLLNVAL` → EBADF/-1, `POLLHUP|POLLERR` → 1, иначе 0; EINTR повторяется.
+#[cfg(unix)]
+fn r2o_link_peer_closed(fd: libc::c_int) -> std::io::Result<bool> {
+    if fd < 0 {
+        return Err(std::io::Error::from_raw_os_error(libc::EBADF));
+    }
+    let mut descriptor = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    loop {
+        let result = unsafe { libc::poll(&mut descriptor, 1, 0) };
+        if result < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if result == 0 {
+            return Ok(false);
+        }
+        if descriptor.revents & libc::POLLNVAL != 0 {
+            return Err(std::io::Error::from_raw_os_error(libc::EBADF));
+        }
+        return Ok(descriptor.revents & (libc::POLLHUP | libc::POLLERR) != 0);
+    }
+}
+
 #[cfg(unix)]
 fn wait_for_control_frame(
     socket: &std::os::unix::net::UnixStream,
@@ -16399,6 +16430,10 @@ fn wait_for_control_frame(
 ) -> std::io::Result<bool> {
     use std::os::fd::AsRawFd;
 
+    // Закрытый/испорченный дескриптор виден до блокирующего poll.
+    if r2o_link_peer_closed(socket.as_raw_fd())? {
+        return Ok(true);
+    }
     let millis = timeout.as_millis().min(i32::MAX as u128) as i32;
     let mut descriptor = libc::pollfd {
         fd: socket.as_raw_fd(),
@@ -16408,6 +16443,9 @@ fn wait_for_control_frame(
     loop {
         let result = unsafe { libc::poll(&mut descriptor, 1, millis) };
         if result > 0 {
+            if descriptor.revents & libc::POLLNVAL != 0 {
+                return Err(std::io::Error::from_raw_os_error(libc::EBADF));
+            }
             return Ok(descriptor.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0);
         }
         if result == 0 {
@@ -25464,6 +25502,27 @@ mod tests {
             4,
             &binding(4, 1, false, false)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn link_peer_closed_matches_c() {
+        use std::os::fd::AsRawFd;
+
+        assert!(super::r2o_link_peer_closed(-1).is_err());
+
+        let (stream, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let fd = stream.as_raw_fd();
+        assert_eq!(super::r2o_link_peer_closed(fd).unwrap(), false);
+        drop(peer);
+        assert_eq!(super::r2o_link_peer_closed(fd).unwrap(), true);
+
+        // Закрытый дескриптор: poll(0) даёт POLLNVAL → EBADF.
+        let extra = std::os::unix::net::UnixStream::pair().unwrap().0;
+        let extra_fd = extra.as_raw_fd();
+        std::mem::forget(extra);
+        assert_eq!(unsafe { libc::close(extra_fd) }, 0);
+        assert!(super::r2o_link_peer_closed(extra_fd).is_err());
     }
 
     #[cfg(unix)]
