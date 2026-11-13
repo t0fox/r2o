@@ -23,8 +23,8 @@ use r2k_core::control::{
     encode_delete_addr, encode_delete_addr_probe, encode_delete_bypass, encode_delete_name,
     encode_delete_name_bound, encode_delete_name_probe, encode_delete_suffix,
     encode_delete_voice_addr_probe, encode_set_addr, encode_set_addr_probe, encode_set_bypass,
-    encode_set_https, encode_set_name, encode_set_name_bound, encode_set_name_probe,
-    encode_set_suffix, encode_set_tcp_stall_budgets, encode_set_voice_addr,
+    encode_set_https, encode_set_name, encode_set_name_bound, encode_set_name_family,
+    encode_set_name_probe, encode_set_suffix, encode_set_tcp_stall_budgets, encode_set_voice_addr,
     encode_set_voice_addr_probe, read_frame,
 };
 use r2k_core::plan::{PROTO_HTTP, PROTO_VOICE, Plan};
@@ -510,7 +510,7 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
             }
         };
         let source_port = bound.local_port;
-        let command = encode_set_name_probe(
+        let command = encode_set_name_family(
             &options.sni,
             shape,
             family,

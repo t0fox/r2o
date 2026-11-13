@@ -1393,6 +1393,22 @@ pub fn encode_set_name(
     encode_frame(COMMAND_SET_NAME, &body)
 }
 
+/// C `d2k_link_set_name_family`: спорт 0 — SET_NAME, иначе SET_NAME_PROBE.
+pub fn encode_set_name_family(
+    name: &str,
+    shape: u8,
+    family: u8,
+    source_port: u16,
+    plan_records: &[u8],
+    trial_id: [u8; 16],
+) -> Result<Vec<u8>, &'static str> {
+    if source_port == 0 {
+        encode_set_name(name, shape, family, plan_records)
+    } else {
+        encode_set_name_probe(name, shape, family, source_port, plan_records, trial_id)
+    }
+}
+
 pub fn encode_set_name_bound(
     name: &str,
     shape: u8,

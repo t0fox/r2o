@@ -1,9 +1,9 @@
 use r2k_core::control::{
     AppliedEvent, BindingContext, COMMAND_DEL_ADDR, COMMAND_DEL_ADDR_PROBE, COMMAND_DEL_NAME,
     COMMAND_DEL_NAME_PROBE, COMMAND_SET_ADDR, COMMAND_SET_ADDR_PROBE, COMMAND_SET_HTTPS,
-    COMMAND_SET_NAME_PROBE, COMMAND_SET_TCP_STALL_BUDGETS, COMMAND_SET_VOICE_ADDR,
-    COMMAND_SET_VOICE_ADDR_PROBE, EVENT_APPLIED, EVENT_HELLO, EVENT_HTTP_RESPONSE,
-    EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_FIN_RETRY,
+    COMMAND_SET_NAME, COMMAND_SET_NAME_PROBE, COMMAND_SET_TCP_STALL_BUDGETS,
+    COMMAND_SET_VOICE_ADDR, COMMAND_SET_VOICE_ADDR_PROBE, EVENT_APPLIED, EVENT_HELLO,
+    EVENT_HTTP_RESPONSE, EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_FIN_RETRY,
     EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF,
     EVENT_R2O_VOICE_RTP_PROOF, EVENT_R2O_VOICE_STUN_PROOF, EVENT_R2O_VOICE_SUSPECT, Frame,
     HttpPortalEvent, HttpResponseEvent, KEY_LEN, R2oQuicSuspectEvent, R2oTcpFinRetryEvent,
@@ -16,8 +16,8 @@ use r2k_core::control::{
     decode_r2o_voice_proof, decode_r2o_voice_suspect, decode_set_tcp_stall_budgets,
     encode_ack_for_trial, encode_delete_addr, encode_delete_addr_probe, encode_delete_name,
     encode_delete_name_probe, encode_set_addr, encode_set_addr_probe, encode_set_https,
-    encode_set_name_probe, encode_set_tcp_stall_budgets, encode_set_voice_addr,
-    encode_set_voice_addr_probe, r2o_binding_equal, read_frame,
+    encode_set_name_family, encode_set_name_probe, encode_set_tcp_stall_budgets,
+    encode_set_voice_addr, encode_set_voice_addr_probe, r2o_binding_equal, read_frame,
 };
 use std::io::Cursor;
 
@@ -705,6 +705,26 @@ fn link_wrappers_emit_c_family4_frames() {
     assert_eq!(frame.kind, COMMAND_DEL_ADDR_PROBE);
     assert_eq!(&frame.body[38..54], &trial[..]);
     assert_eq!(frame.body.len(), 54);
+}
+
+#[test]
+fn set_name_family_selects_command_by_source_port_like_c() {
+    let plan = r2o_tls_plan_records();
+    let trial = [0x5a; 16];
+    let permanent = read_frame(&mut Cursor::new(
+        encode_set_name_family("example.test", SHAPE_MODERN, 4, 0, &plan, trial).unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(permanent.kind, COMMAND_SET_NAME);
+    assert!(!permanent.body.ends_with(&trial));
+
+    let probe = read_frame(&mut Cursor::new(
+        encode_set_name_family("example.test", SHAPE_MODERN, 4, 40123, &plan, trial).unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(probe.kind, COMMAND_SET_NAME_PROBE);
+    assert_eq!(&probe.body[probe.body.len() - 16..], &trial);
+    assert_eq!(&probe.body[15..17], &40123_u16.to_be_bytes());
 }
 
 #[test]
