@@ -23335,8 +23335,7 @@ impl ControlClient {
             .into());
         }
         self.send_maxlen = greeting.send_maxlen;
-        self.send_cap
-            .store(greeting.send_maxlen as usize, Ordering::Relaxed);
+        r2o_sched_set_send_cap(&self.send_cap, greeting.send_maxlen as usize);
         Ok(())
     }
 
@@ -23346,6 +23345,14 @@ impl ControlClient {
             .store(dropped as usize, Ordering::Relaxed);
         Ok(())
     }
+}
+
+/// C `d2k_sched_set_send_cap` (`sched.c:1634-1637`): записать предел
+/// отправки датапата. В R2O предел живёт в общем `AtomicUsize` и читается
+/// планировщиком/кандидатами; обновляется из приветствия датапата.
+#[cfg(unix)]
+fn r2o_sched_set_send_cap(send_cap: &AtomicUsize, send_maxlen: usize) {
+    send_cap.store(send_maxlen, Ordering::Relaxed);
 }
 
 #[cfg(unix)]
