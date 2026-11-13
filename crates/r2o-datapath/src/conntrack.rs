@@ -578,6 +578,48 @@ mod tests {
     }
 
     #[test]
+    fn tuple_from_packet_matches_c_flow_tuple() {
+        use super::tuple_from_packet;
+
+        // IPv4/TCP: 20 байт IP + 20 байт TCP, порты в первых 4 байтах L4.
+        let mut packet = vec![0u8; 40];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&40_u16.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 6;
+        packet[12..16].copy_from_slice(&[192, 0, 2, 10]);
+        packet[16..20].copy_from_slice(&[198, 51, 100, 20]);
+        packet[20..22].copy_from_slice(&41_000_u16.to_be_bytes());
+        packet[22..24].copy_from_slice(&443_u16.to_be_bytes());
+        packet[32] = 5 << 4;
+
+        let tuple = tuple_from_packet(&packet).unwrap();
+        assert_eq!(tuple.family, 4);
+        assert_eq!(tuple.protocol, 6);
+        assert_eq!(&tuple.source[..4], &[192, 0, 2, 10]);
+        assert_eq!(&tuple.destination[..4], &[198, 51, 100, 20]);
+        assert_eq!(tuple.source_port, 41_000);
+        assert_eq!(tuple.destination_port, 443);
+
+        // Rust отвергает фрагмент с ненулевым offset (`fragment & 0x1fff`),
+        // как разбор ключа C; MF без offset — не отдельный датапат-пакет.
+        let mut first_fragment = packet.clone();
+        first_fragment[6] = 0x20;
+        assert!(tuple_from_packet(&first_fragment).is_some());
+        let mut offset_fragment = packet.clone();
+        offset_fragment[7] = 1;
+        assert!(tuple_from_packet(&offset_fragment).is_none());
+
+        // Не TCP/UDP — не кортеж conntrack.
+        let mut icmp = packet.clone();
+        icmp[9] = 1;
+        assert!(tuple_from_packet(&icmp).is_none());
+
+        // Обрезанный пакет не даёт портов.
+        assert!(tuple_from_packet(&packet[..22]).is_none());
+    }
+
+    #[test]
     fn собирает_сетевые_кортежи_одного_семейства() {
         let client: SocketAddr = "192.0.2.10:50000".parse().unwrap();
         let server: SocketAddr = "198.51.100.20:443".parse().unwrap();
