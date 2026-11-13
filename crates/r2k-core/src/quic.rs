@@ -83,6 +83,19 @@ pub fn r2k_quic_arm_data_judge(
     R2kQuicDataVerdict::Cut
 }
 
+pub fn r2k_quic_arm_data_judge_limited(
+    handshake: bool,
+    status: i32,
+    app_bytes: u64,
+    complete: bool,
+    headers_too_long: bool,
+) -> R2kQuicDataVerdict {
+    if handshake && status <= 0 && headers_too_long {
+        return R2kQuicDataVerdict::NotRun;
+    }
+    r2k_quic_arm_data_judge(handshake, status, app_bytes, complete)
+}
+
 /// Вычислить время ожидания одного вопроса QUIC по правилу донора `3 × RTT`.
 pub fn r2k_quic_dynamic_wait_ms(rtt_ms: u32) -> u32 {
     let wait_ms = if rtt_ms >= R2K_QUIC_RTT_WAIT_CEIL_MS / 3 {
@@ -1833,6 +1846,27 @@ mod tests {
         assert_eq!(
             r2k_quic_arm_data_judge(true, 200, 32_767, false),
             R2kQuicDataVerdict::Cut
+        );
+    }
+
+    #[test]
+    fn quic_arm_data_judge_limited_matches_c() {
+        use super::{R2kQuicDataVerdict, r2k_quic_arm_data_judge_limited};
+        assert_eq!(
+            r2k_quic_arm_data_judge_limited(true, 0, 0, false, true),
+            R2kQuicDataVerdict::NotRun
+        );
+        assert_eq!(
+            r2k_quic_arm_data_judge_limited(true, 0, 0, false, false),
+            R2kQuicDataVerdict::Cut
+        );
+        assert_eq!(
+            r2k_quic_arm_data_judge_limited(false, 0, 0, false, true),
+            R2kQuicDataVerdict::NoHandshake
+        );
+        assert_eq!(
+            r2k_quic_arm_data_judge_limited(true, 200, 1, true, true),
+            R2kQuicDataVerdict::Pass
         );
     }
 

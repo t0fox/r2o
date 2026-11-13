@@ -485,7 +485,7 @@ pub enum R2oFetchVolumeTxVerdict {
 impl R2oFetchVolumeTxVerdict {
     pub const fn r2o_label(self) -> &'static str {
         match self {
-            Self::Unreachable => "цель не ответила",
+            Self::Unreachable => "мишень не ответила",
             Self::Short => "объём не набран — вердикта нет",
             Self::Cut => "обрыв по объёму",
             Self::Passed => "объём прошёл",
@@ -4637,5 +4637,20 @@ mod tests {
         assert!(!super::r2o_fallback_path_allowed("/", None, ""));
         assert!(!super::r2o_fallback_path_allowed("/", None, "css/site.css"));
         assert!(!super::r2o_fallback_path_allowed("/", None, "/../site.css"));
+    }
+
+    #[test]
+    fn volume_verdict_names_match_c() {
+        use super::R2oFetchVolumeTxVerdict;
+        assert_eq!(R2oFetchVolumeTxVerdict::Cut.r2o_label(), "обрыв по объёму");
+        assert_eq!(R2oFetchVolumeTxVerdict::Passed.r2o_label(), "объём прошёл");
+        assert_eq!(
+            R2oFetchVolumeTxVerdict::Short.r2o_label(),
+            "объём не набран — вердикта нет"
+        );
+        assert_eq!(
+            R2oFetchVolumeTxVerdict::Unreachable.r2o_label(),
+            "мишень не ответила"
+        );
     }
 }
