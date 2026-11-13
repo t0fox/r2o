@@ -84,14 +84,14 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 292 | 256 | 0 | 0 |
+| core-net | 548 | 293 | 255 | 0 | 0 |
 | core-state | 692 | 274 | 418 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1054** | **928** | **0** | **0** |
+| **Итого** | **1982** | **1055** | **927** | **0** | **0** |
 
-Это не оценка паритета: 928 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 927 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1054 / P 928 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1055 / P 927 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -342,12 +342,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 292 | 256 | 0 | 0 |
+| core-net | 548 | 293 | 255 | 0 | 0 |
 | core-state | 692 | 274 | 418 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1054** | **928** | **0** | **0** |
+| **Итого** | **1982** | **1055** | **927** | **0** | **0** |
 
 
 ---
@@ -776,7 +776,7 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `d2k_httpsearch_free` | 666-674 | 9 | снять активную пробу, закрыть сокет, освободить записи/очередь | RAII `Drop` | **P** | C вручную освобождает `failures`, `recs`, `q`; Rust владеющие `Vec`/`HashMap` освобождаются `Drop`. Для непустого состояния эквивалентно. |
 | `d2k_httpsearch_busy` | 676-678 | 3 | есть ли активная задача (`phase != PH_IDLE`) | `main.rs:4689+ HttpSearchTask`, `HttpSearchWindow::active` | **P** | C одно поле `phase`; Rust активность выражена окном `http_search_started` (`main.rs:19557-19566`) и задачей в worker-канале. Семантика «занято» сохраняется, API иное. |
 | `d2k_httpsearch_plan_of` | 680-683 | 4 | ключ подтверждённого плана host+family, не revoked | `HttpSearchRecordCache`/каталог | **P** | C возвращает `r->key`, если он есть и не revoked (`httpsearch.c:682-685`). Rust подтверждённый план ищется в каталоге (`catalog_has_http_search_owner`, `acknowledged_http_search_owner`), отдельной функции нет. |
-| `d2k_httpsearch_diagnostic_counts` | 687-706 | 20 | счётчики записей/очереди/отказов/лимитов/байт | `main.rs:16748-16767`, `diagnostics.rs:449-481` | **P** | C заполняет `http_records/queued/failures/records_bytes/queue_bytes/failure_bytes`, четыре лимита, `failure_limit_hits/…/queue_alloc_failures/http_bytes` (`httpsearch.c:689-708`). Rust заполняет записи/очередь/их байты и лимиты; `http_failure_bytes` жёстко 0 (`main.rs:16762`), счётчики `http_failure_limit_hits` и др. остаются 0, `http_bytes` не включает failures. |
+| `d2k_httpsearch_diagnostic_counts` | 687-706 | 20 | счётчики записей/очереди/отказов/лимитов/байт | `main.rs` `HttpSearchWorker` accessors + `Counts` fill | **E*** | C заполняет records/queued/failures, records/queue/failure bytes, 4 лимита, `failure(_record/_alloc)_hits/failures`, `record(_alloc)_hits/failures`, `queue(_alloc)_hits/failures`, `http_bytes=sizeof(hs)+records+queue+failures`. Rust `Counts` теперь получает все эти поля из `HttpSearchWorker`/`HttpSearchRecordCache`; `http_failure_bytes` и `http_bytes` больше не нули. Тесты `httpsearch_diagnostic_counters_match_c` (failure bytes/count/дедуп, record bytes), `rec_get_record_limit_is_counted_like_c` (record_limit_hits). **Ограничения:** `record_alloc_failures`/`failure_alloc_failures` всегда 0 (HashMap не возвращает NULL); `record_bytes` — фиксированный размер элемента, не `cap*sizeof`; queue limit-hit копится в воркере, отдельного unit-теста нет. |
 | `d2k_httpsearch_diagnostics` | 709-711 | 3 | подключить observer диагностики HTTP-поиска | общий диагностический канал/события | **P** | C `if(hs){hs->diagnostic=fn;hs->diagnostic_ctx=ctx;}`. Rust HTTP-поиск отдаёт диагностику через общий канал/события контроллера; отдельного сеттера `fn/ctx` нет. |
 | `diagnostic_end` | 710-721 | 12 | событие завершения: id/target/outcome/reason/elapsed/ip/path/kind | `main.rs:4864 r2o_http_search_diagnostic_event` | **P** | C заполняет `d2k_diag_event` полями `id,target,protocol=http,family,outcome,reason,elapsed_ms,queue_ms=-1,probe_units=-1,ip,path=httpsearch,kind=name` и сбрасывает id (`httpsearch.c:712-723`). Rust `r2o_http_search_diagnostic_event` формирует те же ключевые поля, тест `http_search_diagnostic_event_matches_d2o_http_defaults` (`main.rs:31376`). Полного C/Rust differential события/таймингов нет; P. |
 | `finish` | 722-728 | 7 | завершить: diagnostic_end, drop_socket, PH_IDLE, start_next | `main.rs:19570 complete_http_search` + worker loop | **P** | C завершает диагностику, закрывает сокет, сбрасывает фазу и запускает следующую очередь. Rust завершает задачу, освобождает окно `complete_http_search` и берёт следующую задачу из канала. Жизненный цикл переписан на задачи. |

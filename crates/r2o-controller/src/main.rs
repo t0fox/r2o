@@ -73,7 +73,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 #[cfg(unix)]
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 #[cfg(unix)]
 static R2O_CONTROLLER_STOP: AtomicBool = AtomicBool::new(false);
@@ -4485,6 +4485,8 @@ struct HttpSearchFailureStats {
     live_failure_count: u64,
     failure_record_limit_hits: u64,
     failure_limit_hits: u64,
+    /// C `failure_alloc_failures`; в Rust HashMap не возвращает NULL — 0.
+    failure_alloc_failures: u64,
     /// C `record_limit_hits`/`record_alloc_failures`.
     record_limit_hits: u64,
     record_alloc_failures: u64,
@@ -4717,6 +4719,23 @@ impl HttpSearchRecordCache {
     /// C `d2k_httpsearch_diagnostic_counts`: live_failure_count.
     fn failure_count(&self) -> u64 {
         self.1.live_failure_count
+    }
+
+    /// C `live_failure_bytes`: байты живых отказов.
+    fn failure_bytes(&self) -> usize {
+        self.1.live_failure_bytes
+    }
+
+    fn failure_limit_hits(&self) -> u64 {
+        self.1.failure_limit_hits
+    }
+
+    fn failure_record_limit_hits(&self) -> u64 {
+        self.1.failure_record_limit_hits
+    }
+
+    fn failure_alloc_failures(&self) -> u64 {
+        self.1.failure_alloc_failures
     }
 
     fn record_cut(&mut self, target: &r2o_controller::discovery::DiscoveryTarget, path: &[u8]) {
@@ -6887,6 +6906,9 @@ struct HttpSearchWorker {
     commands: Option<Receiver<HttpSearchCommand>>,
     outcomes: Option<Receiver<HttpSearchOutcome>>,
     pending_jobs: Arc<AtomicUsize>,
+    /// C `queue_limit_hits`/`queue_alloc_failures`.
+    queue_limit_hits: AtomicU64,
+    queue_alloc_failures: AtomicU64,
     records: Arc<std::sync::Mutex<HttpSearchRecordCache>>,
     cancel: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -6975,6 +6997,8 @@ impl HttpSearchWorker {
             commands: Some(commands),
             outcomes: Some(outcomes),
             pending_jobs,
+            queue_limit_hits: AtomicU64::new(0),
+            queue_alloc_failures: AtomicU64::new(0),
             records,
             cancel,
             thread: Some(thread),
@@ -6983,16 +7007,19 @@ impl HttpSearchWorker {
 
     fn queue(&self, task: HttpSearchTask) -> bool {
         let Some(jobs) = self.jobs.as_ref() else {
+            self.queue_alloc_failures.fetch_add(1, Ordering::Relaxed);
             return false;
         };
         if self.pending_jobs.fetch_add(1, Ordering::Relaxed) >= R2O_HTTP_QUEUE_MAX_ITEMS {
             self.pending_jobs.fetch_sub(1, Ordering::Relaxed);
+            self.queue_limit_hits.fetch_add(1, Ordering::Relaxed);
             return false;
         }
         if jobs.send(task).is_ok() {
             true
         } else {
             self.pending_jobs.fetch_sub(1, Ordering::Relaxed);
+            self.queue_alloc_failures.fetch_add(1, Ordering::Relaxed);
             false
         }
     }
@@ -7003,6 +7030,64 @@ impl HttpSearchWorker {
 
     fn queued_bytes(&self) -> usize {
         self.queued_jobs() * R2O_HTTP_QUEUE_ITEM_BYTES
+    }
+
+    fn failure_bytes(&self) -> usize {
+        self.records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .failure_bytes()
+    }
+
+    fn failure_limit_hits(&self) -> u64 {
+        self.records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .failure_limit_hits()
+    }
+
+    fn failure_record_limit_hits(&self) -> u64 {
+        self.records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .failure_record_limit_hits()
+    }
+
+    fn failure_alloc_failures(&self) -> u64 {
+        self.records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .failure_alloc_failures()
+    }
+
+    fn record_limit_hits(&self) -> u64 {
+        self.records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record_limit_hits()
+    }
+
+    fn record_alloc_failures(&self) -> u64 {
+        self.records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record_alloc_failures()
+    }
+
+    fn queue_limit_hits(&self) -> u64 {
+        self.queue_limit_hits.load(Ordering::Relaxed)
+    }
+
+    fn queue_alloc_failures(&self) -> u64 {
+        self.queue_alloc_failures.load(Ordering::Relaxed)
+    }
+
+    /// C `http_bytes`: заголовок кэша + записи + очередь + живые отказы.
+    fn memory_bytes(&self) -> usize {
+        std::mem::size_of::<HttpSearchRecordCache>()
+            + self.record_bytes()
+            + self.queued_bytes()
+            + self.failure_bytes()
     }
 
     fn record_cut(&self, target: &r2o_controller::discovery::DiscoveryTarget, path: &[u8]) {
@@ -17046,12 +17131,40 @@ impl ControlClient {
                                 .as_ref()
                                 .map_or(0, HttpSearchWorker::queued_bytes)
                                 as u64,
-                            http_failure_bytes: 0,
+                            http_failure_bytes: http_search
+                                .as_ref()
+                                .map_or(0, HttpSearchWorker::failure_bytes)
+                                as u64,
+                            http_bytes: http_search
+                                .as_ref()
+                                .map_or(0, HttpSearchWorker::memory_bytes)
+                                as u64,
                             http_records_limit_bytes: R2O_HTTP_RECORD_LIMIT_BYTES as u64,
                             http_queue_limit_bytes: R2O_HTTP_QUEUE_LIMIT_BYTES as u64,
                             http_failure_limit_bytes: R2O_HTTP_FAILURE_LIMIT_BYTES as u64,
                             http_failure_record_limit_bytes: R2O_HTTP_FAILURE_RECORD_LIMIT_BYTES
                                 as u64,
+                            http_failure_limit_hits: http_search
+                                .as_ref()
+                                .map_or(0, HttpSearchWorker::failure_limit_hits),
+                            http_failure_record_limit_hits: http_search
+                                .as_ref()
+                                .map_or(0, HttpSearchWorker::failure_record_limit_hits),
+                            http_failure_alloc_failures: http_search
+                                .as_ref()
+                                .map_or(0, HttpSearchWorker::failure_alloc_failures),
+                            http_record_limit_hits: http_search
+                                .as_ref()
+                                .map_or(0, HttpSearchWorker::record_limit_hits),
+                            http_record_alloc_failures: http_search
+                                .as_ref()
+                                .map_or(0, HttpSearchWorker::record_alloc_failures),
+                            http_queue_limit_hits: http_search
+                                .as_ref()
+                                .map_or(0, HttpSearchWorker::queue_limit_hits),
+                            http_queue_alloc_failures: http_search
+                                .as_ref()
+                                .map_or(0, HttpSearchWorker::queue_alloc_failures),
                             catalog_bytes: catalog
                                 .and_then(|catalog| {
                                     catalog
@@ -23942,6 +24055,37 @@ mod tests {
         // Существующий ключ не считается отказом предела.
         cache.record_name("record-0.example", 4);
         assert_eq!(cache.record_limit_hits(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn httpsearch_diagnostic_counters_match_c() {
+        let mut cache = super::HttpSearchRecordCache::default();
+        assert_eq!(cache.failure_bytes(), 0);
+        assert_eq!(cache.failure_limit_hits(), 0);
+        assert_eq!(cache.failure_record_limit_hits(), 0);
+        assert_eq!(cache.failure_alloc_failures(), 0);
+        assert_eq!(cache.record_limit_hits(), 0);
+        assert_eq!(cache.record_alloc_failures(), 0);
+
+        assert_eq!(cache.test_add_records(2), 2);
+        assert_eq!(cache.bytes(), 2 * super::R2O_HTTP_RECORD_BYTES);
+        assert_eq!(cache.test_add_failures("counters.example", 4, 3), 3);
+        assert_eq!(cache.failure_count(), 3);
+        assert_eq!(
+            cache.failure_bytes(),
+            3 * std::mem::size_of::<super::HttpLiveFailure>()
+        );
+
+        // Тот же ключ/адрес дедупится — байты и счётчик не растут.
+        assert_eq!(cache.test_add_failures("counters.example", 4, 1), 0);
+        assert_eq!(cache.failure_count(), 3);
+        assert_eq!(
+            cache.failure_bytes(),
+            3 * std::mem::size_of::<super::HttpLiveFailure>()
+        );
+        // `counters.example` добавил третью запись.
+        assert_eq!(cache.bytes(), 3 * super::R2O_HTTP_RECORD_BYTES);
     }
 
     #[cfg(unix)]
