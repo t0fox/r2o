@@ -84,12 +84,12 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 218 | 330 | 0 | 0 |
+| core-net | 548 | 222 | 326 | 0 | 0 |
 | core-state | 692 | 182 | 509 | 0 | 0 |
 | datapath-core | 400 | 186 | 214 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **861** | **1121** | **0** | **0** |
+| **Итого** | **1982** | **865** | **1117** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 861 / P 1121 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 865 / P 1117 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,12 +344,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 218 | 330 | 0 | 0 |
+| core-net | 548 | 222 | 326 | 0 | 0 |
 | core-state | 692 | 188 | 504 | 0 | 0 |
 | datapath-core | 400 | 186 | 214 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **861** | **1121** | **0** | **0** |
+| **Итого** | **1982** | **865** | **1117** | **0** | **0** |
 
 
 ---
@@ -1326,11 +1326,11 @@ Discord IP Discovery обход: разбор/сборка 20-байтового
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| `udp_next_fragment_id` | 22-30 | 9 | потокобезопасный IP id: статический seed из `d2k_t13_random`, затем `++id`, пропуск нулевого `uint16` | `wire.rs` (случайный id на сборку) | **P** | **C-ветви проверены:** mutex; при `!seeded` random 4 байта, ошибка → 0; `!(uint16_t)++id` → `++id`; вернуть id. **Rust:** глобального счётчика нет, id выбирается `getrandom` на каждую сборку (`wire.rs:334-337`), нулевой исключается `max(1)`. Оба дают ненулевой id, но последовательность/момент отказа различаются. |
-| `d2k_udp_batch_free` | 32-32 | 1 | освободить байты пачки и обнулить структуру | `Drop`/владение `Vec` | **P** | C `if (b) { free(b->bytes); memset(b,0,sizeof *b); }`. Rust пачка — владеющая структура с `Vec<u8>`/буферами, освобождается `Drop`; отдельной функции и явного `memset` нет. |
+| `udp_next_fragment_id` | 22-30 | 9 | потокобезопасный IP id: seed из random, `++id`, пропуск нулевого `uint16` | `r2k-core/wire.rs` `next_udp_fragment_id` | E | C под mutex: seed один раз из `d2k_t13_random`, при ошибке 0; затем `++id`, при нулевом младшем 16 битах ещё `++id`. Rust `Mutex<Option<u32>>` делает те же шаги, при отказе random возвращает 0 (план отвергается), используется в `build_udp_fragments` для id4/id6. Тест `udp_fragment_id_matches_c_counter` (ненулевой, монотонный, пропуск нуля). |
+| `d2k_udp_batch_free` | 32-32 | 1 | освободить байты пачки и обнулить структуру | `Drop`/владение `Vec` | E | C `free(b->bytes); memset(b,0,...)`. Rust пачка — владеющая структура с `Vec<u8>/Vec<Vec<u8>>`, освобождается `Drop`; повторного использования после освобождения нет. |
 | `d2k_udp_plan_build` | 33-93 | 61 | текст → TLV → план → emissions → IPv4/IPv6 пакеты/фрагменты; один payload, запрет IPID_ZERO, ipfrag только payload без pre/seq_shift/poison/wire_profile; ORIG_PASS один раз | `r2k-core/src/plan/apply.rs` (apply emissions) | **P** | **C-ветви проверены:** `out`/text/c/payload/len; malloc TLV `D2K_PLAN_TLV_MAX` + batch `D2K_UDP_BATCH_BYTES`; `plan_text_to_tlv`/`plan_load`; transport==17; `pkt{payload,len,own_after_fakes=1}`; `plan_apply`; fate HOLD → -1; на emission: второй PAYLOAD → -1, `poison&IPID_ZERO` → -1; ipfrag требует PAYLOAD, `pre_len/seq_shift/poison/wire_profile==0`, `ipfrag_shape`; v6 `udpfrag6_build_ex`, v4 `udpfrag_build_ex`; иначе `wire_build_udp`; `out->n+n<=MAX`; delay только у первого фрагмента; `ORIG_PASS` — одна копия `payload`; `!out->n` → -1; cleanup. **R2O:** применение плана есть (`plan/apply.rs`), но контроллерной сборки байтовой пачки/фрагментов из текста плана нет. |
-| `udp_raw_init` | 101-106 | 6 | инициализация raw-sink: `fd=-1`, IPv6 frag sender | `r2o-datapath/src/raw.rs:48 RawSocket::open`, `:35-44 OwnedFd` | **P** | C `memset`, `fd=-1`, `d2k_ip6frag_sender_init`; Rust `RawSocket` создаёт IPv4/IPv6 сокеты, `OwnedFd`/RAII; отдельной `udp_raw_sink` и `ip6frag_sender` нет. |
-| `udp_raw_close` | 107-112 | 6 | закрыть raw-сокет и IPv6-фрагментер | `OwnedFd`/`Drop` | **P** | C `if (s->fd>=0) close(s->fd)`; на Linux `d2k_ip6frag_sender_close(&s->six)`. Rust raw-сокет и фрагментер владеют дескрипторами и закрываются `Drop`; отдельной функции нет. |
+| `udp_raw_init` | 101-106 | 6 | инициализация raw-sink: `fd=-1`, IPv6 frag sender | `raw.rs` `RawSocket::open` | E | C `memset`, `fd=-1`, `d2k_ip6frag_sender_init`. Rust `RawSocket::open` конструирует сокет/поля (`family`, `mark`, `maxlen`, кеш MTU), дескриптор во владении `OwnedFd`; отдельный AF_PACKET-фрагментер остаётся P в строках `d2k_ip6frag_*`. |
+| `udp_raw_close` | 107-112 | 6 | закрыть raw-сокет и IPv6-фрагментер | `OwnedFd`/`Drop` | E | C `close(s->fd)` и `d2k_ip6frag_sender_close`. Rust raw-сокет и кеш владеют дескрипторами и закрываются `Drop`; отдельной функции нет, двойного закрытия/утечки нет. |
 | `udp_raw_prepare` | 113-130 | 18 | non-Linux → -1; IPv6 → `ip6frag_prepare`; IPv4 lazily `SOCK_RAW/IPPROTO_RAW`, `IP_HDRINCL`, **обязательный `IP_NODEFRAG`**, mark | `raw.rs:48-93`, `:155-167` | **P** | **C-ветви проверены:** `!linux` → -1; `p[0]>>4==6` → `d2k_ip6frag_prepare`; IPv4 при `fd<0`: `socket(AF_INET,SOCK_RAW,IPPROTO_RAW)`, `IP_HDRINCL`; `#ifdef IP_NODEFRAG` `setsockopt(IP_NODEFRAG)` иначе -1; mark hook. **R2O:** `IP_HDRINCL`/`IPV6_HDRINCL`/`SO_MARK` есть, **`IP_NODEFRAG` во всём R2O отсутствует**, mark обязателен, IPv6-путь иной. |
 | `udp_raw_send` | 131-139 | 9 | non-Linux → -1; IPv6 → `ip6frag_send`; IPv4 `sendto` по адресу из `p+16` | `raw.rs:147-223` | **P** | C v6 `d2k_ip6frag_send(...)==n`; v4 `sockaddr_in`, dst из `p+16`, `sendto` ровно n. Rust `RawSocket::send_packet` шлёт полный IP-пакет/фрагмент, `MSG_DONTWAIT`, EMSGSIZE-понижение MTU; C — блокирующий `sendto`, IPv6 через frag-sender. |
 | `d2k_udp_plan_send` | 147-190 | 44 | отправить план с сокета: TTL/hoplimit, пачка, задержки, фрагменты raw, обычные send с TTL из пакета, восстановление TTL, `ECONNREFUSED→-2` | датапат: `engine.rs:1753`, `main.rs:3604`, `wire.rs:109/132`, `raw.rs:147` | **P** | **C-ветви проверены:** `getsockname/getpeername`; family/level/hop; `getsockopt` TTL 1..255; `c` src/dst/ports; `udp_fragment_id_io` (0 → -1); `d2k_udp_plan_build`; предварительный `udp_prepare_io` для всех фрагментов; цикл: `delay_us` nanosleep с EINTR; фрагмент → `udp_send_io`; иначе `off=28/48`, TTL из `p[8]/p[7]`, `setsockopt`, `send(p+off,n-off)`, `ECONNREFUSED→-2`; восстановление TTL даже после ошибки; close/free. **R2O:** контроллерного API нет; проводное поведение разнесено по `plan::apply`/`wire::build_udp_fragments`/`raw.rs`, без socket TTL get/set/restore и без батча. |

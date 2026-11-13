@@ -11,6 +11,30 @@ const TCP_HEADER_LEN: usize = 20;
 const UDP_HEADER_LEN: usize = 8;
 const TCP_TIMESTAMP_OPTION_LEN: usize = 12;
 
+/// C `udp_next_fragment_id` (`core/udpruntime.c:22-30`): seed из random один
+/// раз, затем `++id` с пропуском нулевого младшего 16-битного значения;
+/// при отказе random — 0 (вызывающий отвергает план).
+static UDP_FRAGMENT_ID: std::sync::Mutex<Option<u32>> = std::sync::Mutex::new(None);
+
+fn next_udp_fragment_id() -> u32 {
+    let mut state = UDP_FRAGMENT_ID
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if state.is_none() {
+        let mut random = [0_u8; 4];
+        if getrandom::getrandom(&mut random).is_err() {
+            return 0;
+        }
+        *state = Some(u32::from_ne_bytes(random));
+    }
+    let mut id = state.unwrap_or(0).wrapping_add(1);
+    if id as u16 == 0 {
+        id = id.wrapping_add(1);
+    }
+    *state = Some(id);
+    id
+}
+
 /// Собрать пакет TCP из исходного пакета соединения и действия плана.
 ///
 /// Буфером `out` владеет вызывающий код и он же его переиспользует; при неверном
@@ -337,10 +361,12 @@ pub fn build_udp_fragments_with_capacity(
         return None;
     }
 
-    let mut random = [0; 4];
-    getrandom::getrandom(&mut random).ok()?;
-    let id4 = u16::from_ne_bytes(random[..2].try_into().ok()?).max(1);
-    let id6 = u32::from_ne_bytes(random).max(1);
+    let id = next_udp_fragment_id();
+    if id == 0 {
+        return None;
+    }
+    let id4 = (id as u16).max(1);
+    let id6 = id.max(1);
     let mut fragments = Vec::new();
     fragments.try_reserve_exact(cuts.len()).ok()?;
     for output_index in 0..cuts.len() {
@@ -561,4 +587,17 @@ fn write_u16(out: &mut [u8], value: u16) {
 
 fn write_u32(out: &mut [u8], value: u32) {
     out.copy_from_slice(&value.to_be_bytes());
+}
+
+#[cfg(test)]
+mod udp_fragment_id_tests {
+    #[test]
+    fn udp_fragment_id_matches_c_counter() {
+        let a = super::next_udp_fragment_id();
+        assert_ne!(a, 0);
+        assert_ne!(a as u16, 0);
+        let b = super::next_udp_fragment_id();
+        assert_ne!(b as u16, 0);
+        assert!(b == a.wrapping_add(1) || b == a.wrapping_add(2));
+    }
 }
