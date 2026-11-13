@@ -84,14 +84,14 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 240 | 308 | 0 | 0 |
+| core-net | 548 | 242 | 306 | 0 | 0 |
 | core-state | 692 | 274 | 418 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1002** | **980** | **0** | **0** |
+| **Итого** | **1982** | **1004** | **978** | **0** | **0** |
 
-Это не оценка паритета: 980 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 978 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1002 / P 980 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1004 / P 978 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -342,12 +342,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 240 | 308 | 0 | 0 |
+| core-net | 548 | 242 | 306 | 0 | 0 |
 | core-state | 692 | 274 | 418 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1002** | **980** | **0** | **0** |
+| **Итого** | **1982** | **1004** | **978** | **0** | **0** |
 
 
 ---
@@ -581,8 +581,8 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `d2k_t13_sh_version` | 407-426 | 20 | версия из ServerHello.supported_versions: legacy 0x0303, ext 0x002b len=2, иначе legacy; обрезки | rustls (version negotiation) | **P** | C `q=4+2+32`; session_id; cipher/compression `q+=3`; без расширений → legacy; `end=q+2+get16`, clamp; цикл ext; `0x002b && el==2` → `get16`; иначе legacy. Rust выбирает версию внутри rustls; отдельной downgrade-функции нет. |
 | `d2k_t13_sh_parse` | 428-475 | 48 | ServerHello: session_id, cipher==0x1301, extensions, key_share 0x001d len=32; ошибки «обрезан/шифр/без расширений/нет X25519» | `r2o_tls.rs:200-250 r2o_tls_replay_client_hello`, rustls | **P** | C `q=4+2+32`; `q+1>len` → «ServerHello обрезан»; session_id; `q+3>len` → trunc; suite=get16, `q+=2`, compression `q+=1`; suite!=0x1301 → ошибка; `q+2>len` → «без расширений»; `ext_end=q+2+get16`, clamp; цикл ext; `0x0033 && el>=36 && get16==0x001d && get16(q+2)==32` → `peer_key=q+4`; нет ключа → ошибка. Rust `r2o_tls_replay_client_hello` проверяет только критерий ServerHello (22/3/2), полный разбор — rustls; C-оракула нет. |
 | `d2k_t13_flight_next` | 479-490 | 12 | следующее handshake-сообщение флайта: 4-байтный заголовок + тело | rustls handshake messages | **P** | C `!buf\|\|!off\|\|*off+4>len` → 0; `n=buf[o+1]<<16\|buf[o+2]<<8\|buf[o+3]`; `o+4+n>len` → 0 (обрезанный хвост); иначе type/body/blen и `*off=o+4+n`, 1. Rust сообщения флайта отдаёт rustls; отдельной публичной функции с тем же контрактом нет. |
-| `ech_host_ok` | 492-508 | 17 | публичное имя ECH: 1..253, метки 1..63, не начинается/заканчивается `.`/`-`, только alnum/`-` | `ech.rs:464-480 r2o_ech_public_name` | **P** | C проверяет `n` 1..253, `p[0]!='.'`, `p[n-1]!='.'`, каждую метку 1..63, первый/последний символ не `-`, только alnum/`-`. Rust `name.len()<=253`, `split('.')`, непустая метка ≤63, не начинается/заканчивается `-`, `is_ascii_alphanumeric() \|\| '-'`; пустые первая/последняя метки ловятся. C-тестов/дифференциала на границы нет. |
-| `d2k_ech_config_parse` | 510-567 | 58 | ECHConfigList: outer length, version 0xfe0d, config_id, KEM 0x20, key_len 32, suites (1,1), max_name, public_name, extensions, mandatory unknown; первый валидный | `ech.rs:364-462 r2o_ech_select_config`, `:158 resolve_ech_config` | **P** | **Ветви сверены:** `len>=2 && get16(list)==len-2`; цикл `at<len`; `len-at<4`/`end>len` → -1; version!=0xfe0d skip; `end-p<5` → -1; id; kem; key_len; key; `end-p<2`; suites>0, %4==0, <=end-p; любая `(1,1)`; max_name; name_len<=end-p и `ech_host_ok`; `end-p<2`; extensions==end-p; mandatory unknown `kind&0x8000`; первый с kem 0x20/key 32/suite/!mandatory/wire<=512; иначе -1. **Отличие представления:** C `wire` — ECHConfig без внешней 2-байтной длины; Rust `config_list` — с ней (требование rustls); HPKE-info использует сам ECHConfig. C/Rust differential на границы не заявлен. |
+| `ech_host_ok` | 492-508 | 17 | публичное имя ECH: 1..253, метки 1..63, не начинается/заканчивается `.`/`-`, только alnum/`-` | `ech.rs` `r2o_ech_public_name` | E | C: длина 1..253, метки 1..63, без ведущего/хвостового `.`/`-`, только alnum/`-`. Rust `r2o_ech_public_name` те же ветви; тест `ech_host_ok_matches_c` (пустое, дефисы, пустая метка, `_`, хвостовая точка, non-ASCII, 254 байта, метка 64, uppercase). |
+| `d2k_ech_config_parse` | 510-567 | 58 | ECHConfigList: outer length, version 0xfe0d, config_id, KEM 0x20, key_len 32, suites (1,1), max_name, public_name, extensions, mandatory unknown; первый валидный | `ech.rs` `r2o_ech_select_config` | E | C: outer length, version `0xfe0d`, config_id, KEM `0x20`, key_len 32, suite `(1,1)`, max_name, public_name, extensions без mandatory unknown, выбирается первый валидный. Rust `r2o_ech_select_config` те же проверки; тесты `r2o_выбирает_совместимую_конфигурацию_из_записи_донора`, `r2o_отклоняет_обрезанные_и_неподдерживаемые_конфигурации`, `r2o_выбирает_первую_валидную_конфигурацию_ech` (неподдерживаемая + валидная). |
 | `hpke_extract` | 570-581 | 12 | HPKE-v1 labeled Extract: `HPKE-v1`+suite+label+ikm → HKDF-Extract | `hpke` crate (`ech.rs:63-144`) | **P** | C вручную собирает `HPKE-v1‖suite‖label‖ikm` (проверка 768) и вызывает `d2k_hkdf_extract`; Rust HPKE — внутри crate (`setup_sender/receiver`); C-векторов нет. |
 | `hpke_expand` | 583-596 | 14 | HPKE-v1 labeled Expand: 2-байтная длина+`HPKE-v1`+suite+label+info, один HMAC-блок, out≤32 | `hpke` crate | **P** | C требует `out_len 1..32`, `n+1<=768`, `b[n]=1`, HMAC-SHA256, копия out_len; Rust — внутри crate; собственной функции/векторов нет. |
 | `ech_hpke` | 598-619 | 22 | X25519 base/shared, context=enc‖pk, info=`tls ech\0`‖config, HPKE extract/expand key/base_nonce, suite HPKE(0x20,0x0001,0x0001) | `ech.rs:63-144` через `hpke` | **P** | C `d2k_x25519_base`/`d2k_x25519`, `eae_prk`/`shared_secret`/`psk_id_hash`/`info_hash`/`secret`/`key`/`base_nonce`, zeroize. Rust `hpke::setup_sender::<AesGcm128,HkdfSha256,X25519HkdfSha256>`; suite `DHKEM_X25519_HKDF_SHA256`/`HKDF_SHA256`/`AES_128_GCM` (`ech.rs:135-143`); байтового differential нет. |

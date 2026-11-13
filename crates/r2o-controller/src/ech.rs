@@ -541,7 +541,8 @@ fn r2o_ech_u16(bytes: &[u8], offset: usize) -> Result<u16, String> {
 mod tests {
     use super::{
         Hpke, R2O_ECH_HPKE, R2oEchConfig, r2o_ech_dns_name, r2o_ech_https_query,
-        r2o_ech_parse_https_reply, r2o_ech_query_resolver, r2o_ech_select_config, r2o_ech_u16,
+        r2o_ech_parse_https_reply, r2o_ech_public_name, r2o_ech_query_resolver,
+        r2o_ech_select_config, r2o_ech_u16,
     };
     use std::net::UdpSocket;
     use std::thread;
@@ -607,6 +608,49 @@ mod tests {
         reply.extend_from_slice(&(config.len() as u16).to_be_bytes());
         reply.extend_from_slice(config);
         reply
+    }
+
+    #[test]
+    fn ech_host_ok_matches_c() {
+        assert_eq!(
+            r2o_ech_public_name("example.com"),
+            Some("example.com".to_owned())
+        );
+        assert_eq!(
+            r2o_ech_public_name("EXAMPLE.com"),
+            Some("EXAMPLE.com".to_owned())
+        );
+        for invalid in [
+            "",
+            "-a.com",
+            "a-.com",
+            "a..com",
+            "a_b.com",
+            "example.com.",
+            "é.example",
+        ] {
+            assert!(
+                r2o_ech_public_name(invalid).is_none(),
+                "accepted {invalid:?}"
+            );
+        }
+        assert!(r2o_ech_public_name(&"a".repeat(254)).is_none());
+        assert!(r2o_ech_public_name(&format!("{}.com", "a".repeat(64))).is_none());
+    }
+
+    #[test]
+    fn r2o_выбирает_первую_валидную_конфигурацию_ech() {
+        let config = r2o_hex(CONFIG_HEX);
+        let body = &config[2..];
+        let mut unsupported = body.to_vec();
+        unsupported[..2].copy_from_slice(&0xfe0eu16.to_be_bytes());
+        let mut list = Vec::with_capacity(2 + 2 * body.len());
+        list.extend_from_slice(&((2 * body.len()) as u16).to_be_bytes());
+        list.extend_from_slice(&unsupported);
+        list.extend_from_slice(body);
+        let selected = r2o_ech_select_config(&list).unwrap();
+        assert_eq!(selected.public_name, "cloudflare-ech.com");
+        assert_eq!(selected.config_list, config);
     }
 
     #[test]
