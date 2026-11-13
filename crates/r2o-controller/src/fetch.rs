@@ -918,6 +918,48 @@ pub fn r2o_verify_probe(options: &FetchOptions) -> Result<FetchResult, String> {
     r2o_fetch_with_phase_timeout(options, R2O_D2O_VERIFY_STEP_TIMEOUT)
 }
 
+fn r2o_verify_probe_with_encoding(
+    options: &FetchOptions,
+    encoding: R2oFetchEncoding,
+) -> Result<FetchResult, String> {
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    r2o_fetch_with_roots_and_encoding_detailed_with_timeouts(
+        options,
+        encoding,
+        roots,
+        Some(R2O_D2O_VERIFY_STEP_TIMEOUT),
+        Some(R2O_D2O_VERIFY_STEP_TIMEOUT),
+    )
+    .map_err(|error| error.message)
+}
+
+/// C `d2k_verify_probe_identity_on`: encoding 0, TLS-версия из options.
+pub fn r2o_verify_probe_identity(options: &FetchOptions) -> Result<FetchResult, String> {
+    r2o_verify_probe_with_encoding(options, R2oFetchEncoding::Identity)
+}
+
+/// C `d2k_verify_probe_gzip_on`: encoding 1, TLS-версия из options.
+pub fn r2o_verify_probe_gzip(options: &FetchOptions) -> Result<FetchResult, String> {
+    r2o_verify_probe_with_encoding(options, R2oFetchEncoding::Gzip)
+}
+
+/// C `d2k_verify_probe_baseline`: encoding 0/1 (enum исключает иное).
+pub fn r2o_verify_probe_baseline(
+    options: &FetchOptions,
+    encoding: R2oFetchEncoding,
+) -> Result<FetchResult, String> {
+    r2o_verify_probe_with_encoding(options, encoding)
+}
+
+/// C `d2k_verify_probe_path_on`: path/mark в options, encoding 0..2.
+pub fn r2o_verify_probe_path(
+    options: &FetchOptions,
+    encoding: R2oFetchEncoding,
+) -> Result<FetchResult, String> {
+    r2o_verify_probe_with_encoding(options, encoding)
+}
+
 /// Выполнить HTTPS GET с отдельным донорским сроком на TCP, TLS и HTTP шаги.
 pub fn r2o_fetch_with_phase_timeout(
     options: &FetchOptions,
@@ -5167,6 +5209,24 @@ mod tests {
             crate::r2o_volume::R2oVolumePacketBudget::Passed
         );
         assert!(outcome.note.starts_with("поток перенёс 40"));
+    }
+
+    #[test]
+    fn verify_probe_encoding_wrappers_validate_options_like_c() {
+        let options = FetchOptions {
+            name: String::new(),
+            ip: Some("127.0.0.1".parse().unwrap()),
+            port: 443,
+            path: "/".into(),
+            deadline: Duration::from_secs(1),
+            tls12: false,
+            wire_len: None,
+            mark: None,
+        };
+        assert!(r2o_verify_probe_identity(&options).is_err());
+        assert!(r2o_verify_probe_gzip(&options).is_err());
+        assert!(r2o_verify_probe_baseline(&options, R2oFetchEncoding::Identity).is_err());
+        assert!(r2o_verify_probe_path(&options, R2oFetchEncoding::GzipDeflate).is_err());
     }
 
     #[test]

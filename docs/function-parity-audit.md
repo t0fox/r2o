@@ -84,14 +84,14 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 296 | 252 | 0 | 0 |
+| core-net | 548 | 300 | 248 | 0 | 0 |
 | core-state | 692 | 274 | 418 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1058** | **924** | **0** | **0** |
+| **Итого** | **1982** | **1062** | **920** | **0** | **0** |
 
-Это не оценка паритета: 924 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 920 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1058 / P 924 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1062 / P 920 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -342,12 +342,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 296 | 252 | 0 | 0 |
+| core-net | 548 | 300 | 248 | 0 | 0 |
 | core-state | 692 | 274 | 418 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1058** | **924** | **0** | **0** |
+| **Итого** | **1982** | **1062** | **920** | **0** | **0** |
 
 
 ---
@@ -654,10 +654,10 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `d2k_verify_probe_alpn_on` | 1578-1625 | 48 | ALPN клиента: проверка alpn_len≤256, contact, TLS1.3 с ALPN, HANDSHAKE, peer_name, reason (ALPN/без), TLS free | `fetch.rs` ALPN probe | **E** | C проверяет `alpn_len<=256`/указатель; `verify_contact`; `d2k_tls_connect_alpn`; HANDSHAKE/handshake_proof/name_ok; reason для ALPN/без. Rust `r2o_tls_client_connection_with_alpn` + fetch; ALPN unit `tests/r2o_tls.rs:101/115`; end-to-end. |
 | `verify_probe12_internal` | 1636-1701 | 66 | path/host checks; contact; TLS1.2; HANDSHAKE/peer_name; budget_io; request_page_budget(read12/write12,tls12=1); rx bytes/missing/data_packets; TLS12 free | `fetch.rs` TLS12 path | **P** | **C-ветви проверены:** path/`d2k_resource_path_ok`; host control; family; `verify_contact` (-2/-3); `d2k_tls12_connect`; HANDSHAKE/name; budget_io; `request_page_budget(read12,write12,...,1,...)`; `rx_tls_wire_bytes/missing`; `data_packets`; free. Rust rustls TLS12 branch (`r2o_tls_client_connection(tls12=true)`); C-сессия/PRF/записи не сравниваются побайтно. |
 | `d2k_verify_probe12_on` | 1703-1708 | 6 | проба TLS1.2 с gzip по умолчанию | `fetch.rs` (TLS1.2 + gzip) | **E** | C `return verify_probe12_internal(use_fd,ip,port,sni,deadline_ms,hello_wire,2,0,NULL)` — gzip, mark 0, path NULL. Rust fetch с TLS1.2 и default gzip; end-to-end TLS12-дифференциал. |
-| `d2k_verify_probe_identity_on` | 1710-1715 | 6 | проба identity (encoding 0), выбор TLS1.2/1.3 | `fetch.rs` (identity/version) | **P** | C `tls12 ? verify_probe12_internal(...,0,0,NULL) : verify_probe13_on(...,0,0,NULL)`. Rust identity-режим и версия TLS задаются параметрами fetch; отдельной функции с этим выбором нет. |
-| `d2k_verify_probe_gzip_on` | 1717-1722 | 6 | проба gzip (encoding 1), выбор TLS1.2/1.3 | `fetch.rs` (gzip/version) | **P** | C `tls12 ? verify_probe12_internal(...,1,0,NULL) : verify_probe13_on(...,1,0,NULL)`. Rust gzip-режим и версия задаются параметрами fetch; отдельной функции нет. |
-| `d2k_verify_probe_baseline` | 1724-1742 | 19 | baseline: encoding 0/1, иначе ошибка; tls12 → probe12(-1), иначе probe13(-1) | `fetch.rs` baseline probe | **P** | C проверяет encoding∈{0,1}; `verify_probe12_internal(-1,...)`/`verify_probe13_on(-1,...)`; Rust baseline fetch; точные коды/версия не сопоставлены. |
-| `d2k_verify_probe_path_on` | 1744-1757 | 14 | проба с путём, encoding 0..2, mark, TLS1.2/1.3 | `fetch.rs` (path/encoding/mark) | **P** | C `encoding<0\|\|>2` → fd=-1/name_ok=-1, закрыть use_fd, reason «неподдерживаемое сжатие»; иначе TLS12/13 internal с path/mark. Rust path/encoding/mark — параметры fetch; отдельной функции и такого кода ошибки нет. |
+| `d2k_verify_probe_identity_on` | 1710-1715 | 6 | проба identity (encoding 0), выбор TLS1.2/1.3 | `fetch.rs` `r2o_verify_probe_identity` | **E*** | C `tls12 ? verify_probe12_internal(...,0,0,NULL) : verify_probe13_on(...,0,0,NULL)`. Rust `r2o_verify_probe_identity` → `r2o_verify_probe_with_encoding(Identity)`; версия из `FetchOptions.tls12`. Тест `verify_probe_encoding_wrappers_validate_options_like_c`; identity-запрос проверен существующим TLS-тестом (`Accept-Encoding: identity`). **Ограничение:** rustls вместо C-сессии; C-дифференциала обёртки нет. |
+| `d2k_verify_probe_gzip_on` | 1717-1722 | 6 | проба gzip (encoding 1), выбор TLS1.2/1.3 | `fetch.rs` `r2o_verify_probe_gzip` | **E*** | C `tls12 ? verify_probe12_internal(...,1,0,NULL) : verify_probe13_on(...,1,0,NULL)`. Rust `r2o_verify_probe_gzip` → `r2o_verify_probe_with_encoding(Gzip)`; тест `verify_probe_encoding_wrappers_validate_options_like_c`, `Accept-Encoding: gzip` проверен существующим TLS-тестом. **Ограничение:** rustls вместо C-сессии. |
+| `d2k_verify_probe_baseline` | 1724-1742 | 19 | baseline: encoding 0/1, иначе ошибка; tls12 → probe12(-1), иначе probe13(-1) | `fetch.rs` `r2o_verify_probe_baseline` | **E*** | C проверяет encoding∈{0,1}; `verify_probe12_internal(-1,...)`/`verify_probe13_on(-1,...)`. Rust `r2o_verify_probe_baseline(options, encoding)` с закрытым enum (Identity/Gzip/GzipDeflate); TLS-версия из options. Тест `verify_probe_encoding_wrappers_validate_options_like_c`. **Ограничение:** недопустимый int невозможен типом; `use_fd=-1` заменён собственным сокетом (RAII). |
+| `d2k_verify_probe_path_on` | 1744-1757 | 14 | проба с путём, encoding 0..2, mark, TLS1.2/1.3 | `fetch.rs` `r2o_verify_probe_path` | **E*** | C: encoding<0||>2 → fd=-1/name_ok=-1, закрыть use_fd, reason «неподдерживаемое сжатие»; иначе probe12/13 internal с path/mark. Rust `r2o_verify_probe_path(options, encoding)` — path/mark в `FetchOptions`, encoding закрыт enum 0..2; тест `verify_probe_encoding_wrappers_validate_options_like_c`; `gzip, deflate` Accept-Encoding проверен существующим TLS-тестом. **Ограничение:** недопустимый encoding невозможен типом; fd не отдаётся. |
 | `d2k_verify_close` | 1759-1764 | 6 | закрыть fd результата и обнулить его | `Drop`/явное закрытие в fetch | **P** | C `if (r && r->fd >= 0) { close(r->fd); r->fd = -1; }`. Rust сокет закрывается `Drop`/явно в fetch; отдельной функции «close + fd=-1» нет. |
 | `d2k_verify_probe_quic` | 1768-1771 | 4 | QUIC-проба, use_fd=-1 | `r2o_quic_http3`/discovery | **P*** | C `return d2k_verify_probe_quic_on(-1,...)`. Rust QUIC-пробу выполняет `r2o_quic_http3`/discovery; отдельной обёртки с фиксированным `use_fd=-1` нет. |
 | `quic_app_silent` | 1780-1791 | 12 | причина «рукопожатие прошло, приложение молчит» | `R2oQuicHttp3Result`/discovery reason | **P** | C две ветки `snprintf`: с `closed` (обрезает причину до 40 символов) и без (got + wire байт). Rust причину формирует `R2oQuicHttp3Result`/discovery иначе; тексты/поля не сверялись. |
