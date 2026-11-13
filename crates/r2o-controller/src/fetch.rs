@@ -220,6 +220,19 @@ pub struct FetchResult {
     pub r2o_resources: Vec<crate::r2o_resource::R2oResourceHint>,
 }
 
+/// C `d2k_http_read_response`: поля одного разобранного HTTP-ответа.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct R2oHttpReadResponse {
+    pub status: u16,
+    pub body_bytes: u64,
+    pub complete: bool,
+    pub location: String,
+    pub reply: R2oFetchHttpOutcome,
+    pub reply_evidence: String,
+    pub local_limit: bool,
+    pub connection_close: bool,
+}
+
 /// Подтвердить только TLS-рукопожатие с ALPN, предложенным исходным клиентом.
 /// Этот путь намеренно не отправляет HTTP-запрос для MQTT и прочих протоколов.
 pub fn r2o_verify_tls_connected_stream_with_alpn(
@@ -838,6 +851,77 @@ fn r2o_fetch_with_roots_and_encoding_detailed(
         None,
         None,
     )
+}
+
+/// C `d2k_http_read_response`: разобрать один HTTP-ответ.
+pub fn r2o_http_read_response(reader: &mut impl Read) -> std::io::Result<R2oHttpReadResponse> {
+    let mut parser = HttpResponseParser::new(false);
+    let mut buffer = [0_u8; 16 * 1024];
+    let mut raw = Vec::new();
+    loop {
+        if parser.is_complete() || parser.is_invalid() {
+            break;
+        }
+        match reader.read(&mut buffer) {
+            Ok(0) => {
+                parser.feed(&[], true);
+                break;
+            }
+            Ok(length) => {
+                raw.extend_from_slice(&buffer[..length]);
+                parser.feed(&buffer[..length], false);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+
+    let headers = parser.headers();
+    let body_start = if headers.is_empty() {
+        raw.len()
+    } else {
+        raw.windows(headers.len())
+            .rposition(|window| window == headers)
+            .map_or(raw.len(), |start| start + headers.len())
+    };
+    let body_prefix = &raw[body_start.min(raw.len())..raw.len().min(body_start + 4096)];
+    let location = header_value(headers, b"location")
+        .map(|value| String::from_utf8_lossy(trim_ascii(value)).into_owned())
+        .unwrap_or_default();
+    let identity =
+        r2o_fetch_body_encoding(headers) == crate::r2o_volume::R2oVolumeRxEncoding::Identity;
+    let reply = r2o_fetch_http_outcome(
+        parser.status(),
+        location.as_bytes(),
+        identity,
+        body_prefix,
+        parser.body_bytes(),
+    );
+    let reply_evidence = match reply {
+        R2oFetchHttpOutcome::LegalDenial => "HTTP 451".to_owned(),
+        R2oFetchHttpOutcome::Blocked => r2o_fetch_portal_location(location.as_bytes())
+            .map(str::to_owned)
+            .or_else(|| {
+                r2o_fetch_ascii_contains(body_prefix, b"access blocked by rkn")
+                    .then(|| "access blocked by rkn".to_owned())
+            })
+            .or_else(|| {
+                r2o_fetch_body_has_portal(body_prefix, parser.body_bytes())
+                    .then(|| "portal".to_owned())
+            })
+            .unwrap_or_default(),
+        R2oFetchHttpOutcome::Positive | R2oFetchHttpOutcome::Neutral => String::new(),
+    };
+    Ok(R2oHttpReadResponse {
+        status: parser.status(),
+        body_bytes: parser.body_bytes(),
+        complete: parser.is_complete(),
+        location,
+        reply,
+        reply_evidence,
+        local_limit: r2o_http_local_limit(&parser),
+        connection_close: r2o_http_connection_closes(headers),
+    })
 }
 
 /// C `d2k_verify_probe`: один verify-прогон с донорским фазовым сроком.
@@ -4630,6 +4714,52 @@ mod tests {
         assert!(guard.tracked);
         drop(guard);
         memory_enable(was_active);
+    }
+
+    #[test]
+    fn http_read_response_matches_c_fields() {
+        use std::io::Cursor;
+
+        let response = r2o_http_read_response(&mut Cursor::new(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nLocation: /next\r\nConnection: close\r\n\r\nhello",
+        ))
+        .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body_bytes, 5);
+        assert!(response.complete);
+        assert_eq!(response.location, "/next");
+        assert_eq!(response.reply, R2oFetchHttpOutcome::Positive);
+        assert!(response.reply_evidence.is_empty());
+        assert!(!response.local_limit);
+        assert!(response.connection_close);
+
+        let portal = r2o_http_read_response(&mut Cursor::new(
+            b"HTTP/1.1 302 Found\r\nLocation: https://eais.rkn.gov.ru/blocked\r\n\r\n",
+        ))
+        .unwrap();
+        assert_eq!(portal.reply, R2oFetchHttpOutcome::Blocked);
+        assert_eq!(portal.reply_evidence, "eais.rkn.gov.ru");
+
+        let legal = r2o_http_read_response(&mut Cursor::new(
+            b"HTTP/1.1 451 Unavailable For Legal Reasons\r\n\r\n",
+        ))
+        .unwrap();
+        assert_eq!(legal.reply, R2oFetchHttpOutcome::LegalDenial);
+        assert_eq!(legal.reply_evidence, "HTTP 451");
+
+        let blocked = r2o_http_read_response(&mut Cursor::new(
+            b"HTTP/1.1 403 Forbidden\r\nContent-Length: 21\r\n\r\naccess blocked by rkn",
+        ))
+        .unwrap();
+        assert_eq!(blocked.reply, R2oFetchHttpOutcome::Blocked);
+        assert_eq!(blocked.reply_evidence, "access blocked by rkn");
+
+        let chunked = r2o_http_read_response(&mut Cursor::new(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n",
+        ))
+        .unwrap();
+        assert!(chunked.complete);
+        assert_eq!(chunked.body_bytes, 3);
     }
 
     #[test]
