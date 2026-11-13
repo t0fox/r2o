@@ -221,58 +221,22 @@ pub fn r2o_tls_replay_client_hello(
     let deadline = std::time::Instant::now()
         .checked_add(timeout)
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "timeout overflow"))?;
-    let mut record_header = [0_u8; 5];
-    if !r2o_tls_read_until(stream, &mut record_header, deadline)? {
-        return Ok(false);
-    }
-    if record_header[0] != 22 {
-        return Ok(false);
-    }
-    let record_len = usize::from(u16::from_be_bytes([record_header[3], record_header[4]]));
-    if record_len == 0 || record_len > 65_535 {
-        return Ok(false);
-    }
-    let mut record = vec![0_u8; record_len];
-    if !r2o_tls_read_until(stream, &mut record, deadline)? {
-        return Ok(false);
-    }
-
-    // C `tls_connect_internal` ищет ServerHello по заголовкам сообщений;
-    // для TLS1.3 дополнительно требуется cipher 0x1301 и X25519 key_share.
-    let mut offset = 0;
-    while offset < record.len() {
-        let start = offset;
-        let Some((kind, _)) = r2o_t13_flight_next(&record, &mut offset) else {
-            break;
-        };
-        if kind == 2 {
-            let server_hello = &record[start..offset];
-            let version = r2o_t13_sh_version(server_hello);
-            if version == 0x0304 && r2o_t13_sh_parse(server_hello).is_err() {
-                return Ok(false);
-            }
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn r2o_tls_read_until(
-    stream: &mut std::net::TcpStream,
-    buffer: &mut [u8],
-    deadline: std::time::Instant,
-) -> std::io::Result<bool> {
+    // C `d2k_verify_replay_on` (`core/verify.c:1530-1549`): ServerHello
+    // узнаётся по шести байтам записи (`22 03 03 00 01 02`), а не разбором
+    // TLS1.3-расширений. Закрытого ключа клиента нет, поэтому глубже
+    // доказательство и не идёт.
     use std::io::Read;
 
+    let mut buf = [0_u8; 16];
     let mut have = 0;
-    while have < buffer.len() {
+    while have < 7 && !(have >= 6 && buf[0] == 22) {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
-            return Ok(false);
+            break;
         }
         stream.set_read_timeout(Some(remaining))?;
-        match stream.read(&mut buffer[have..]) {
-            Ok(0) => return Ok(false),
+        match stream.read(&mut buf[have..]) {
+            Ok(0) => break,
             Ok(length) => have += length,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error)
@@ -281,12 +245,12 @@ fn r2o_tls_read_until(
                     std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
                 ) =>
             {
-                return Ok(false);
+                break;
             }
             Err(error) => return Err(error),
         }
     }
-    Ok(true)
+    Ok(have >= 6 && buf[0] == 22 && buf[1] == 3 && buf[5] == 2)
 }
 
 fn r2o_tls_be16(bytes: &[u8], offset: usize) -> Option<u16> {
@@ -924,19 +888,22 @@ mod server_hello_tests {
     }
 
     #[test]
-    fn tls13_replay_requires_cipher_and_key_share_like_c() {
+    fn replay_accepts_any_server_hello_record_like_c() {
+        // C `d2k_verify_replay_on` смотрит только на шесть байт записи
+        // (`22 03 03 00 01 02`), cipher/key_share не разбирает — ключей
+        // клиента для продолжения рукопожатия всё равно нет.
         assert!(replay_response(server_hello(
             [0x13, 0x01],
             Some([0x11; 32]),
             Some([0x03, 0x04])
         )));
         assert!(replay_response(server_hello([0x13, 0x01], None, None)));
-        assert!(!replay_response(server_hello(
+        assert!(replay_response(server_hello(
             [0x13, 0x02],
             Some([0x11; 32]),
             Some([0x03, 0x04])
         )));
-        assert!(!replay_response(server_hello(
+        assert!(replay_response(server_hello(
             [0x13, 0x01],
             None,
             Some([0x03, 0x04])

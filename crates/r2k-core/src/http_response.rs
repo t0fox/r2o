@@ -17,7 +17,7 @@ enum State {
 
 #[derive(Clone, Debug)]
 pub struct HttpResponseParser {
-    header: [u8; HEADER_CAPACITY],
+    header: Vec<u8>,
     line: [u8; LINE_CAPACITY + 1],
     header_len: usize,
     line_len: usize,
@@ -37,8 +37,15 @@ pub struct HttpResponseParser {
 
 impl HttpResponseParser {
     pub fn new(head_only: bool) -> Self {
+        Self::with_header_capacity(head_only, MAX_HTTP_RESPONSE_HEADER_BYTES)
+    }
+
+    /// Парсер с увеличенным пределом заголовка. C `read_status_rd`
+    /// (`core/verify.c:699-728`) выделяет `D2K_VERIFY_HEADER_LIMIT + 1`
+    /// (65537) на кучу: заголовки Meta/YouTube не влезают в 8 КиБ.
+    pub fn with_header_capacity(head_only: bool, header_capacity: usize) -> Self {
         Self {
-            header: [0; HEADER_CAPACITY],
+            header: vec![0; header_capacity.saturating_add(1)],
             line: [0; LINE_CAPACITY + 1],
             header_len: 0,
             line_len: 0,
@@ -568,6 +575,20 @@ mod header_tests {
             parser.feed(response, false);
             assert!(parser.is_invalid());
         }
+    }
+
+    #[test]
+    fn verify_header_capacity_accepts_large_headers_like_d2o() {
+        // C `read_status_rd`: `D2K_VERIFY_HEADER_LIMIT + 1` = 65537.
+        let mut parser = super::HttpResponseParser::with_header_capacity(false, 65_536);
+        let mut response = Vec::new();
+        response.extend_from_slice(b"HTTP/1.1 200 OK\r\nX-YouTube-Response: ");
+        response.extend(std::iter::repeat_n(b'a', 12_000));
+        response.extend_from_slice(b"\r\nConnection: close\r\n\r\nok");
+        parser.feed(&response, true);
+        assert!(!parser.is_invalid());
+        assert_eq!(parser.status(), 200);
+        assert!(parser.headers_complete());
     }
 
     #[test]

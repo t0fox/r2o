@@ -859,7 +859,7 @@ fn r2o_fetch_with_roots_and_encoding_detailed(
 
 /// C `d2k_http_read_response`: разобрать один HTTP-ответ.
 pub fn r2o_http_read_response(reader: &mut impl Read) -> std::io::Result<R2oHttpReadResponse> {
-    let mut parser = HttpResponseParser::new(false);
+    let mut parser = HttpResponseParser::with_header_capacity(false, 65_536);
     let mut buffer = [0_u8; 16 * 1024];
     let mut raw = Vec::new();
     loop {
@@ -1215,7 +1215,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
             .and_then(|()| stream.flush())
             .map_err(|error| format!("не удалось отправить HTTP-запрос: {error}"))?;
 
-        let mut parser = HttpResponseParser::new(false);
+        let mut parser = HttpResponseParser::with_header_capacity(false, 65_536);
         let _r2o_http_buffer = R2oHttpResponseBufferTracking::new();
         let mut buffer = [0_u8; 16 * 1024];
         let mut reason = None;
@@ -2778,7 +2778,7 @@ fn r2o_drain_head_response(stream: &mut R2oFetchVolumeStream, timeout: Duration)
     let deadline = Instant::now()
         .checked_add(timeout)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "слишком долгий срок ответа"))?;
-    let mut parser = HttpResponseParser::new(true);
+    let mut parser = HttpResponseParser::with_header_capacity(true, 65_536);
     let _r2o_http_buffer = R2oHttpResponseBufferTracking::new();
     let mut buffer = [0_u8; 4096];
     loop {
@@ -3066,7 +3066,7 @@ fn r2o_measure_http_packet_budget(
                 r2o_budget_closed_note(requests, packets, need, "запись запроса не прошла"),
             );
         }
-        let mut parser = HttpResponseParser::new(false);
+        let mut parser = HttpResponseParser::with_header_capacity(false, 65_536);
         let _r2o_http_buffer = R2oHttpResponseBufferTracking::new();
         let mut buffer = [0_u8; 16 * 1024];
         let mut eof = false;
