@@ -183,6 +183,32 @@ fn catalog_json_output_matches_c_fields() {
 }
 
 #[test]
+fn catalog_memory_bytes_matches_c_formula() {
+    let mut catalog = Catalog::default();
+    assert_eq!(catalog.memory_bytes(), 0);
+
+    catalog.boxes.push(BoxRecord {
+        plans: vec![Plan {
+            text: "abc".into(),
+            ..Default::default()
+        }],
+        bindings: vec![Binding::default()],
+        ..Default::default()
+    });
+    let expected = std::mem::size_of::<BoxRecord>() as u64
+        + std::mem::size_of::<Plan>() as u64
+        + std::mem::size_of::<Binding>() as u64
+        + 4;
+    assert_eq!(catalog.memory_bytes(), expected);
+
+    catalog.domain_state = Some(DomainState::default());
+    assert_eq!(
+        catalog.memory_bytes(),
+        expected + std::mem::size_of::<DomainState>() as u64
+    );
+}
+
+#[test]
 fn accepts_old_catalogs_and_null_arrays_without_inventing_measurements() {
     let input = br#"{"boxes":[{"id":"box-1","created":"2026-09-06T04:08:02Z","updated":"2026-09-07T07:13:56Z","fingerprint":{"method":1,"signals":[]},"plans":null,"bindings":[{"kind":"name","target":"example.org","plan_id":"plan-1","confirmed":"2026-09-06T04:09:29.08957744Z"}]}]}"#;
     let catalog = Catalog::parse(input).unwrap();

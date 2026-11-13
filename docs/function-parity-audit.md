@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 317 | 231 | 0 | 0 |
-| core-state | 692 | 274 | 418 | 0 | 0 |
+| core-state | 692 | 275 | 417 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1079** | **903** | **0** | **0** |
+| **Итого** | **1982** | **1080** | **902** | **0** | **0** |
 
-Это не оценка паритета: 903 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 902 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1079 / P 903 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1080 / P 902 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 317 | 231 | 0 | 0 |
-| core-state | 692 | 274 | 418 | 0 | 0 |
+| core-state | 692 | 275 | 417 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1079** | **903** | **0** | **0** |
+| **Итого** | **1982** | **1080** | **902** | **0** | **0** |
 
 
 ---
@@ -1974,7 +1974,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `prune_unavailable_domain_groups` | 1036-1053 | 18 | после restore удалить группу, если нет **enabled** плана с тем же `plan_id` и proto (`transport 17` → `quic`, иначе `tls`) | `DomainState::restore` (`groups.rs:15`) → `rebuild` | **P** | **Подтверждённое расхождение:** C после `d2k_group_restore` проходит по группам и удаляет те, чей план отключён/отсутствует в каталоге; proto выбирается `transport==17 ? "quic" : "tls"`, ищется `enabled && text && id==plan_id && proto==proto`, иначе `swap_remove`. Rust `restore`/`rebuild` работают только с `DomainState` и не видят `boxes`, поэтому группа остаётся при отключённом/удалённом плане. Unit `derived_domain_groups_are_ignored` покрывает недоверие сохранённым `domain_groups`, но не prune по плану. |
 | `free_box` | 1062-1070 | 9 | освободить тексты планов, массивы plans/binds, обнулить | `Drop`/`Vec` | **P*** | C `for n_plans free(text)`, `free(plans)`, `free(binds)`, обнуление. Rust владеющие `Vec`/`String` освобождаются `Drop`; отдельной функции нет. |
 | `d2k_catalog_free` | 1072-1082 | 11 | освободить все коробки, boxes, groups | `Drop` | **P*** | C `free_box` для каждой коробки, `free(boxes)`, `free(groups)`, обнуление. Rust владеющие `Vec`/`Option` освобождаются `Drop`; утечек нет. |
-| `d2k_catalog_memory_bytes` | 1084-1097 | 14 | память каталога: `n_boxes*sizeof`, планы/привязки, `strlen(text)+1`, `sizeof(groups)` | `catalog_bytes` = длина `to_json_at()` (`main.rs:16768`) | **P** | **Расхождение метрики:** C считает **in-memory** размер структур и текстов; Rust — длину **сериализованного JSON**. Числа систематически разные (JSON включает ключи/форматирование, но не capacity Vec). Для диагностического поля `catalog_bytes` смысл меняется; C/Rust differential на объём нет. |
+| `d2k_catalog_memory_bytes` | 1084-1097 | 14 | память каталога: `n_boxes*sizeof`, планы/привязки, `strlen(text)+1`, `sizeof(groups)` | `catalog.rs` `Catalog::memory_bytes` | **E*** | C: `n_boxes*sizeof(box)`, arrays plans/binds, `strlen(text)+1`, `sizeof(groups)` при наличии. Rust `Catalog::memory_bytes` — та же формула через `size_of::<BoxRecord/Plan/Binding/DomainState>()` и `plan.text.len()+1`; используется в diagnostics `catalog_bytes` вместо прежней длины JSON. Тест `catalog_memory_bytes_matches_c_formula` (пусто=0, box+plan+binding+text, +DomainState). **Ограничение:** размеры Rust-структур отличаются от C, абсолютные числа не совпадают; метрика in-memory, не JSON. |
 | `read_whole_file` | 1103-1143 | 41 | fopen/fseek/ftell/fread весь файл | `std::fs::read` (`catalog.rs:396`) | **P*** | C `fopen("rb")`, fseek END/ftell/SEEK_SET, `malloc(sz+1)`, `fread(sz)`, проверка `got==sz`, NUL; ошибки с путём. Rust `fs::read`; **отличие:** C не ограничивает размер, Rust `Catalog::load` отвергает >64 МиБ до чтения (`catalog.rs:391-396`). |
 | `d2k_catalog_load` | 1145-1191 | 47 | разбор JSON, restore групп, prune, запрет мусора после `}`, освобождение при ошибке | `Catalog::load`/`parse` (`catalog.rs:344-404`) | **P** | **Ветви сверены:** C `err[0]=0`, `memset`, `read_whole_file`, `parse_catalog_obj`; `out->groups && group_restore` → ошибка «invalid domain learning observations»; `prune_unavailable_domain_groups`; `jpeek` после `}` — любой байт → ошибка «мусор после конца каталога»; `free(buf)`; при ошибке `d2k_catalog_free` и -1. Rust `Catalog::load/parse`: schema=1, serde_json `from_slice` отвергает trailing garbage, `restore` наблюдений; **отличия:** (1) нет prune по плану; (2) файл >64 МиБ отвергается; (3) детали `d2k_group_restore`/`DomainState::restore` могут расходиться. Persist differential покрывает старые каталоги/trailing, но не prune/64 МиБ. |
 | `write_json_string` | 1198-1218 | 21 | escape `" \\ \n \r \t \b \f`, control <0x20 → `\u00xx`, UTF-8 как есть | `serde_json` | E | C явный `switch` по 7 escape, control → `\u%04x`, остальное (включая UTF-8) как есть. Rust формирует JSON через `serde_json`, который даёт те же escape для валидной UTF-8; тест `json_string_escaping_matches_c` проверяет кавычку, обратную косую, `\n/\r/\t/\b/\f`, `\u0001`, `\u001f` и кириллицу. |

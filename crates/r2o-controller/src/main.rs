@@ -17168,18 +17168,7 @@ impl ControlClient {
                             http_queue_alloc_failures: http_search
                                 .as_ref()
                                 .map_or(0, HttpSearchWorker::queue_alloc_failures),
-                            catalog_bytes: catalog
-                                .and_then(|catalog| {
-                                    catalog
-                                        .to_json_at(
-                                            std::time::SystemTime::now()
-                                                .duration_since(std::time::UNIX_EPOCH)
-                                                .map(|duration| duration.as_secs() as i64)
-                                                .unwrap_or(0),
-                                        )
-                                        .ok()
-                                })
-                                .map_or(0, |text| text.len() as u64),
+                            catalog_bytes: catalog.map_or(0, Catalog::memory_bytes),
                             snapshot_bytes: 0,
                             measurement_limit: measurements.limit as u64,
                             measurement_slots: measurement_gate.r2o_max_slots() as u64,

@@ -447,6 +447,26 @@ impl Catalog {
         write_new_catalog(destination, content.as_bytes())
     }
 
+    /// C `d2k_catalog_memory_bytes`: in-memory размер записей/планов/привязок.
+    ///
+    /// Считаются массивы записей/планов/привязок и текст планов (`strlen+1`),
+    /// плюс `DomainState`, если группы загружены. Содержимое `Vec` внутри
+    /// групп C тоже не учитывает (`groups` — одна структура).
+    pub fn memory_bytes(&self) -> u64 {
+        let mut bytes = (self.boxes.len() * std::mem::size_of::<BoxRecord>()) as u64;
+        for box_record in &self.boxes {
+            bytes += (box_record.plans.len() * std::mem::size_of::<Plan>()) as u64;
+            bytes += (box_record.bindings.len() * std::mem::size_of::<Binding>()) as u64;
+            for plan in &box_record.plans {
+                bytes += plan.text.len() as u64 + 1;
+            }
+        }
+        if self.domain_state.is_some() {
+            bytes += std::mem::size_of::<DomainState>() as u64;
+        }
+        bytes
+    }
+
     pub fn to_json_at(&self, updated: i64) -> Result<String, CatalogError> {
         self.validate()?;
         format_timestamp(updated)?;
