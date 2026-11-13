@@ -1685,11 +1685,11 @@ fn read_fd_count(path: &Path) -> Option<u64> {
 mod tests {
     use super::{
         Counts, EVENT_CAPACITY, MADVISE_ERRNO_SLOTS, MEMORY_SITE_COUNT, MadviseErrno, MadviseStats,
-        Recorder, compact_bytes, compact_bytes_kib, compact_count, compact_kib, d2o_ring_bytes,
-        limit_event_json, limit_reason_values, madvise_json, memory_acquire, memory_active,
-        memory_alloc_failure, memory_enable, memory_release, memory_snapshot, memory_tracking_json,
-        optional_proc_status, proc_field, proc_pid_dir_present, read_smaps_rollup,
-        rollup_status_text, tracked_memory_bytes,
+        Recorder, compact_bytes, compact_bytes_kib, compact_count, compact_kib, d2o_event_text,
+        d2o_ring_bytes, limit_event_json, limit_reason_values, madvise_json, memory_acquire,
+        memory_active, memory_alloc_failure, memory_enable, memory_release, memory_snapshot,
+        memory_tracking_json, optional_proc_status, proc_field, proc_pid_dir_present,
+        read_smaps_rollup, rollup_status_text, tracked_memory_bytes, truncate_utf8,
     };
     use serde_json::json;
     use std::fs::{self, OpenOptions};
@@ -1991,6 +1991,24 @@ mod tests {
         recorder.enabled = false;
         recorder.record(json!({"id": 99}));
         assert_eq!(recorder.event_total, total);
+    }
+
+    #[test]
+    fn diagnostic_copy_and_js_match_c() {
+        // C `copy`: cap-1 байт, не разрезать многобайтовый UTF-8.
+        assert_eq!(truncate_utf8("abcdef".into(), 4), "abcd");
+        // «привет» — 12 байт; предел 8 попадает внутрь «и», обрезка до «при».
+        assert_eq!(truncate_utf8("привет".into(), 7), "при");
+        assert_eq!(truncate_utf8("привет".into(), 100), "привет");
+        assert_eq!(truncate_utf8(String::new(), 4), "");
+
+        // C `js`: control → '?', \n сохраняется, NUL обрывает строку.
+        assert_eq!(d2o_event_text("a\nb".into(), 255), "a\nb");
+        assert_eq!(d2o_event_text("a\u{1}b".into(), 255), "a?b");
+        assert_eq!(d2o_event_text("a\0b".into(), 255), "a");
+        assert_eq!(d2o_event_text("\"\\".into(), 255), "\"\\");
+        // Валидный UTF-8 проходит без изменений, предел режет по границе.
+        assert_eq!(d2o_event_text("привет".into(), 7), "при");
     }
 
     #[test]
