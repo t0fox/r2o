@@ -1969,8 +1969,12 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
     result.boundary = Some(hi);
     result.split_pos = Some(1);
     result.strategy = Some(strategy_for(1));
-    result.reason =
-        format!("префиксный матчер: сигнатура кончается на байте {hi}, разрез левее её ломает");
+    // C `pause_note` (`core/verdict.c:74-80`): вывод о разрезе обязан
+    // называть паузу, на которой он снят.
+    result.reason = format!(
+        "префиксный матчер: сигнатура кончается на байте {hi}, разрез левее её ломает; {}",
+        pause_note(options.write_gap.as_micros().min(u128::from(u32::MAX)) as u32)
+    );
     if reassembles {
         result.reason.push_str(&format!(
             "; при паузе {}ms блок возвращается — у коробки есть буфер пересборки",
@@ -2073,6 +2077,17 @@ fn measure_baseline<B: ProbeBackend>(
 /// Запустить классификатор через помеченные TCP-сокеты узла.
 pub fn run(address: &str, trigger: &Trigger, options: ClassifyOptions) -> ClassifyResult {
     run_with_backend(address, trigger, options, &mut TcpProbeBackend)
+}
+
+/// C `pause_note` (`core/verdict.c:74-80`): оговорка к выводу о разрезе —
+/// на какой паузе между кусками он снят. C-буфер 96 байт вмещает самый
+/// длинный текст с `u32::MAX` (76 байт), поэтому обрезка не нужна.
+pub fn pause_note(gap_us: u32) -> String {
+    if gap_us == 0 {
+        "замерено без пауз между кусками".into()
+    } else {
+        format!("замерено с паузой {gap_us} мкс между кусками")
+    }
 }
 
 fn strategy_for(pos: usize) -> String {
@@ -2989,6 +3004,26 @@ mod qtrace_tests {
         cross_check_tls12(&mut result, &options, "");
         assert_eq!(result.covers_tls12, TriState::Unset);
         assert!(result.notes.last().unwrap().contains("НЕ ПРОВЕРЕНО"));
+    }
+
+    #[test]
+    fn pause_note_matches_c_text() {
+        let mut out = String::new();
+        for gap in [0_u32, 1, 60_000, u32::MAX] {
+            out.push_str(&format!("gap {gap} {}\n", super::pause_note(gap)));
+        }
+        if let Ok(path) = std::env::var("R2O_PAUSE_NOTE_DIFF_OUTPUT") {
+            std::fs::write(path, &out).unwrap();
+        }
+        assert_eq!(super::pause_note(0), "замерено без пауз между кусками");
+        assert_eq!(
+            super::pause_note(60_000),
+            "замерено с паузой 60000 мкс между кусками"
+        );
+        assert_eq!(
+            super::pause_note(u32::MAX),
+            "замерено с паузой 4294967295 мкс между кусками"
+        );
     }
 
     #[test]
