@@ -41,6 +41,8 @@ pub const R2O_NF_INET_POST_ROUTING: u8 = 4;
 const NLMSG_HEADER_LEN: usize = 16;
 const NFGENMSG_LEN: usize = 4;
 const NLA_HEADER_LEN: usize = 4;
+/// C `uint8_t msg[64 + 2048]` в `d2k_nfq_verdict_payload`.
+const R2O_NFQ_VERDICT_PAYLOAD_MESSAGE_MAX: usize = 64 + 2048;
 const NLA_TYPE_MASK: u16 = 0x3fff;
 const NFQNL_V0: u8 = 0;
 
@@ -213,7 +215,8 @@ pub fn verdict_payload(
     let mut message = verdict(queue, sequence, packet_id, action);
     push_attr(&mut message, NFQA_PAYLOAD, replacement);
     finish(&mut message);
-    Some(message)
+    // C `uint8_t msg[64 + 2048]`: замена обязана поместиться в 2112 байт.
+    (message.len() <= R2O_NFQ_VERDICT_PAYLOAD_MESSAGE_MAX).then_some(message)
 }
 
 pub fn config_command(queue: u16, sequence: u32, command: u8, protocol_family: u16) -> Vec<u8> {
@@ -326,6 +329,15 @@ mod tests {
         assert_eq!(&bytes[36..41], &[0x45, 1, 2, 3, 4]);
         assert_eq!(&bytes[41..44], &[0; 3]);
         assert!(verdict_payload(1, 7, 1, NF_ACCEPT, &[]).is_none());
+    }
+
+    #[test]
+    fn replacement_verdict_respects_c_message_capacity() {
+        // C `uint8_t msg[64+2048]`: 32 байта заголовков + attr(4+len, padded).
+        let max_payload = vec![0x5a; 2076];
+        let bytes = verdict_payload(1, 7, 1, NF_ACCEPT, &max_payload).unwrap();
+        assert_eq!(bytes.len(), 64 + 2048);
+        assert!(verdict_payload(1, 7, 1, NF_ACCEPT, &vec![0x5a; 2077]).is_none());
     }
 
     #[test]
