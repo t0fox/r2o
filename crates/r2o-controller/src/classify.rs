@@ -3140,4 +3140,41 @@ mod qtrace_tests {
         assert_eq!(kept.long_gap, Duration::from_millis(9));
         assert_eq!(explicit.repeats, 7);
     }
+
+    #[test]
+    fn seed_input_matches_c_vectors() {
+        let trigger = super::Trigger {
+            name: "t".into(),
+            payload: vec![0x16, 0x03, 0x01, 0x00, 0x2f, 0x01, 0x00, 0x00, 0x2b],
+            accept: super::Accept::Any,
+        };
+        let target = |host: &str, port: u16| super::ProbeTarget {
+            host: host.into(),
+            port,
+        };
+        // Векторы сняты с C `seed_input_of` (sched.c:2667-2673):
+        // FNV-1a по байтам приветствия, IP-строке, порту, затем XOR длины.
+        assert_eq!(
+            super::seed_input(&trigger, &target("203.0.113.9", 443)),
+            0x03fb_4701_6337_9dbd
+        );
+        assert_eq!(
+            super::seed_input(&trigger, &target("2001:db8::1", 8443)),
+            0x5caa_4ac4_e313_35ca
+        );
+        assert_eq!(
+            super::seed_input(&trigger, &target("example.com", 443)),
+            0x0c1b_bd50_d3cb_3f7d
+        );
+
+        let empty = super::Trigger {
+            name: "e".into(),
+            payload: Vec::new(),
+            accept: super::Accept::Any,
+        };
+        assert_eq!(
+            super::seed_input(&empty, &target("", 0)),
+            0x44bd_2bd4_73cc_f799
+        );
+    }
 }
