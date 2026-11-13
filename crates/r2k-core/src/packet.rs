@@ -285,4 +285,14 @@ mod tcp_option_profile_tests {
             TCP_PROFILE_NO_TS
         );
     }
+
+    #[test]
+    fn read_u32_matches_c_and_checks_bounds() {
+        let bytes = [0x12, 0x34, 0x56, 0x78, 0x9a];
+        assert_eq!(super::read_u32(&bytes, 0), Some(0x1234_5678));
+        assert_eq!(super::read_u32(&bytes, 1), Some(0x3456_789a));
+        assert_eq!(super::read_u32(&bytes, 2), None);
+        assert_eq!(super::read_u32(&[], 0), None);
+        assert_eq!(super::read_u32(&bytes, usize::MAX), None);
+    }
 }
