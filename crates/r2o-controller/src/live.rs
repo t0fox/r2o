@@ -92,9 +92,31 @@ fn group_plan_available(catalog: &Catalog, group: &DomainGroup) -> bool {
     })
 }
 
+fn desired_exception(
+    catalog: &Catalog,
+    group: &DomainGroup,
+    groups: &[DomainGroup],
+    observation: &DomainObservation,
+) -> bool {
+    if !group_exception(catalog, group, observation) {
+        return false;
+    }
+    if observation.evidence & DOMAIN_DIRECT_CLEAR != 0 {
+        return true;
+    }
+    observation.evidence & DOMAIN_PLAN_FAILED != 0
+        && !has_confirmed_exact_binding(catalog, observation)
+        && groups.iter().any(|candidate| {
+            candidate.key == observation.key
+                && candidate.plan_id == observation.plan_id
+                && domain_member(&observation.name, &candidate.suffix)
+        })
+}
+
 fn group_exception_status(
     catalog: &Catalog,
     group: &DomainGroup,
+    groups: &[DomainGroup],
     observations: &[DomainObservation],
     areas: &[LiveAreaState],
 ) -> (String, String, u32, String) {
@@ -106,7 +128,7 @@ fn group_exception_status(
     let mut detail = String::new();
     for observation in observations
         .iter()
-        .filter(|observation| group_exception(catalog, group, observation))
+        .filter(|observation| desired_exception(catalog, group, groups, observation))
     {
         found = true;
         let installed = areas.iter().find(|area| {
@@ -274,7 +296,13 @@ pub fn snapshot_with_areas(
                     "reason": if observation.evidence & DOMAIN_DIRECT_CLEAR != 0 { "Напрямую работает" } else { "Общий план не подошёл" }
                 })).collect::<Vec<_>>();
             let (exception_state, exception_reason, exception_reason_code, exception_detail) =
-                group_exception_status(catalog, group, &state.observations, areas);
+                group_exception_status(
+                    catalog,
+                    group,
+                    &state.groups,
+                    &state.observations,
+                    areas,
+                );
             let exceptions_ready = matches!(exception_state.as_str(), "none" | "active");
             let mut install_state = "pending";
             let mut install_reason = String::new();
@@ -403,6 +431,8 @@ pub fn write_snapshot(path: &Path, value: &Value) -> Result<(), CatalogError> {
 
 fn group_evidence(group: &DomainGroup, observation: &DomainObservation) -> bool {
     observation.evidence & DOMAIN_BLOCKED != 0
+        && observation.evidence & (DOMAIN_DIRECT_CLEAR | DOMAIN_PLAN_FAILED) == 0
+        && observation.name != group.suffix
         && observation.key == group.key
         && observation.plan_id == group.plan_id
         && domain_member(&observation.name, &group.suffix)
@@ -415,7 +445,6 @@ fn group_exception(
 ) -> bool {
     let direct_clear = observation.evidence & DOMAIN_DIRECT_CLEAR != 0;
     let failed_group_plan = observation.evidence & DOMAIN_PLAN_FAILED != 0
-        && observation.plan_id == group.plan_id
         && !has_confirmed_exact_binding(catalog, observation);
     (direct_clear || failed_group_plan)
         && observation.key == group.key
@@ -775,6 +804,120 @@ mod tests {
             unavailable["groups"][0]["install_reason"],
             "plan_unavailable"
         );
+    }
+
+    #[test]
+    fn live_groups_differential_matches_c() {
+        let key = crate::catalog::GroupKey {
+            transport: 6,
+            family: 4,
+            shape: 1,
+            probe_path: String::new(),
+            ech_origin: String::new(),
+        };
+        let group = DomainGroup {
+            suffix: "example.com".into(),
+            plan_id: "plan-1".into(),
+            key: key.clone(),
+            evidence_count: 1,
+            at: 1,
+        };
+        let catalog = Catalog {
+            boxes: vec![BoxRecord {
+                plans: vec![Plan {
+                    id: "plan-1".into(),
+                    proto: "tls".into(),
+                    text: "plan".into(),
+                    enabled: true,
+                    successes: 1,
+                    ..Plan::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            domain_state: Some(DomainState {
+                groups: vec![group.clone()],
+                observations: vec![
+                    DomainObservation {
+                        name: "a.example.com".into(),
+                        plan_id: "plan-1".into(),
+                        key: key.clone(),
+                        evidence: DOMAIN_BLOCKED,
+                        at: 1,
+                    },
+                    DomainObservation {
+                        name: "b.example.com".into(),
+                        plan_id: "plan-1".into(),
+                        key: key.clone(),
+                        evidence: DOMAIN_DIRECT_CLEAR,
+                        at: 2,
+                    },
+                    DomainObservation {
+                        name: "example.com".into(),
+                        plan_id: "plan-1".into(),
+                        key: key.clone(),
+                        evidence: DOMAIN_BLOCKED,
+                        at: 3,
+                    },
+                    DomainObservation {
+                        name: "d.example.com".into(),
+                        plan_id: "plan-2".into(),
+                        key: key.clone(),
+                        evidence: DOMAIN_BLOCKED | DOMAIN_PLAN_FAILED,
+                        at: 4,
+                    },
+                ],
+                ..DomainState::default()
+            }),
+            ..Catalog::default()
+        };
+        let areas = [
+            LiveAreaState {
+                kind: 1,
+                name: "example.com".into(),
+                transport: 6,
+                shape: 1,
+                family: 4,
+                plan_id: Some("plan-1".into()),
+                confirmed: true,
+                ..LiveAreaState::default()
+            },
+            LiveAreaState {
+                kind: 2,
+                name: "b.example.com".into(),
+                transport: 6,
+                shape: 1,
+                family: 4,
+                confirmed: true,
+                ..LiveAreaState::default()
+            },
+        ];
+        let live = snapshot_with_areas(
+            &catalog,
+            Path::new("/state/catalog.json"),
+            &HashSet::new(),
+            Vec::new(),
+            json!({}),
+            DiscoveryStatus::default(),
+            &areas,
+        )
+        .unwrap();
+        assert_eq!(live["groups"][0]["install_state"], "active");
+        assert_eq!(live["groups"][0]["exception_install_state"], "active");
+        assert_eq!(live["groups"][0]["evidence"], json!(["a.example.com"]));
+        assert_eq!(
+            live["groups"][0]["exceptions"],
+            json!([
+                {"name": "b.example.com", "reason": "Напрямую работает"},
+                {"name": "d.example.com", "reason": "Общий план не подошёл"}
+            ])
+        );
+        if let Ok(path) = std::env::var("R2O_LIVE_GROUPS_DIFF_OUTPUT") {
+            std::fs::write(
+                path,
+                serde_json::to_string(&json!({"groups": live["groups"].clone()})).unwrap(),
+            )
+            .unwrap();
+        }
     }
 
     #[test]
