@@ -2926,6 +2926,19 @@ mod qtrace_tests {
     }
 
     #[test]
+    fn strategy_for_matches_c_format() {
+        // C `d2k_strategy_for` (`detect/poison.c:401-404`).
+        assert_eq!(
+            super::strategy_for(1),
+            "--lua-desync=multisplit:payload=unknown:dir=out:pos=1"
+        );
+        assert_eq!(
+            super::strategy_for(7),
+            "--lua-desync=multisplit:payload=unknown:dir=out:pos=7"
+        );
+    }
+
+    #[test]
     fn map_verdict_matches_donor_table() {
         use super::{Verdict, r2o_map_verdict};
         let expected = [

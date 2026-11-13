@@ -1458,7 +1458,13 @@ static NEXT_SOURCE_PORT: OnceLock<AtomicU32> = OnceLock::new();
 
 fn next_source_port() -> u16 {
     let next = NEXT_SOURCE_PORT.get_or_init(|| AtomicU32::new(random_u32() % 25_000));
-    30_000 + (next.fetch_add(1, Ordering::Relaxed) % 25_000) as u16
+    // C `next_source_port`: сначала `g_sport_counter++`, затем `% 25000`.
+    source_port_from_counter(next.fetch_add(1, Ordering::Relaxed).wrapping_add(1))
+}
+
+/// C `next_source_port`: `30000 + counter % 25000`, счётчик уже увеличен.
+fn source_port_from_counter(counter: u32) -> u16 {
+    (30_000 + counter % 25_000) as u16
 }
 
 fn set_option<T>(fd: i32, level: i32, option: i32, value: &T) -> io::Result<()> {
@@ -3146,6 +3152,39 @@ mod tests {
         assert!(tri_no(TriState::False));
         assert!(!tri_no(TriState::True));
         assert!(!tri_no(TriState::Unset));
+    }
+
+    #[test]
+    fn source_port_counter_matches_c_increment_and_range() {
+        assert_eq!(source_port_from_counter(0), 30_000);
+        assert_eq!(source_port_from_counter(24_999), 54_999);
+        assert_eq!(source_port_from_counter(25_000), 30_000);
+        assert_eq!(
+            source_port_from_counter(u32::MAX),
+            (30_000 + (u32::MAX % 25_000)) as u16
+        );
+        // seed_once + next_source_port: два вызова идут по счётчику C.
+        let first = next_source_port();
+        let second = next_source_port();
+        assert!((30_000..=54_999).contains(&first));
+        assert_eq!(second, if first == 54_999 { 30_000 } else { first + 1 });
+    }
+
+    #[test]
+    fn opts_acceptable_matches_plannable_filter() {
+        let trigger = Trigger::tls("probe.example").unwrap();
+        let plain = Poison {
+            name: "plain".into(),
+            ..Poison::default()
+        };
+        // C `plannable_hit` отвергает невыразимую гипотезу.
+        assert!(make_poison_hit(&plain, &trigger, None).unwrap().is_none());
+        let badsum = Poison {
+            name: "badsum".into(),
+            badsum: true,
+            ..Poison::default()
+        };
+        assert!(make_poison_hit(&badsum, &trigger, None).unwrap().is_some());
     }
 
     #[test]
