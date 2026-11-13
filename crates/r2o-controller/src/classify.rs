@@ -25,6 +25,26 @@ pub struct Span {
 
 /// Преобразовать смещения разрезов в упорядоченные непустые диапазоны данных.
 ///
+/// C `cuts_valid` (`meas.c:109`): разрезы обязаны строго возрастать и лежать
+/// внутри приветствия; любой плохой разрез — отказ всего опыта.
+pub fn split_offsets_checked(cuts: &[usize], len: usize) -> Option<Vec<Span>> {
+    let mut previous = 0;
+    for cut in cuts {
+        if *cut <= previous || *cut >= len {
+            return None;
+        }
+        previous = *cut;
+    }
+    let mut spans = Vec::with_capacity(cuts.len() + 1);
+    let mut from = 0;
+    for cut in cuts {
+        spans.push(Span { from, to: *cut });
+        from = *cut;
+    }
+    spans.push(Span { from, to: len });
+    Some(spans)
+}
+
 /// Поведение совпадает с `r2o_split_offsets`: используются первые восемь
 /// корректных разрезов, дубликаты игнорируются, а границы данных не считаются разрезами.
 pub fn split_offsets(cuts: &[usize], len: usize, capacity: usize) -> Vec<Span> {

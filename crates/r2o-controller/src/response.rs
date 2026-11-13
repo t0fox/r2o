@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::classify::{
-    ProbeError, ProbeOutcome, ProbeTarget, Trigger, split_offsets, trigger_accepts,
+    ProbeError, ProbeOutcome, ProbeTarget, Trigger, split_offsets_checked, trigger_accepts,
 };
 use crate::hello::legacy_client_hello;
 use serde::{Deserialize, Serialize};
@@ -866,7 +866,10 @@ pub(crate) fn probe_trigger(
     let marked =
         expected_mark == 0 || get_socket_mark(fd).ok() == Some(expected_mark as libc::c_int);
     let deadline = Instant::now() + timeout;
-    for span in split_offsets(cuts, trigger.payload.len(), 8) {
+    let Some(spans) = split_offsets_checked(cuts, trigger.payload.len()) else {
+        return Err(ProbeError::Local("invalid cut".into()));
+    };
+    for span in spans {
         let mut offset = span.from;
         while offset < span.to {
             let sent = unsafe {

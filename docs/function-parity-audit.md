@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 320 | 228 | 0 | 0 |
-| core-state | 692 | 385 | 307 | 0 | 0 |
+| core-state | 692 | 386 | 306 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1210** | **772** | **0** | **0** |
+| **Итого** | **1982** | **1211** | **771** | **0** | **0** |
 
-Это не оценка паритета: 772 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 771 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1210 / P 772 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1211 / P 771 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 320 | 228 | 0 | 0 |
-| core-state | 692 | 385 | 307 | 0 | 0 |
+| core-state | 692 | 386 | 306 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1210** | **772** | **0** | **0** |
+| **Итого** | **1982** | **1211** | **771** | **0** | **0** |
 
 
 ---
@@ -2311,7 +2311,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_accept_serverhello` | 87–94 | 8 | `len>=6 && b[0]==0x16 && b[1]==0x03 && b[5]==0x02` | `classify.rs:549-553 trigger_accepts(ServerHello)` | **E*** | **Точное совпадение:** C проверяет ровно `len>=6 && buf[0]==0x16 && buf[1]==0x03 && buf[5]==0x02` (`meas.c:87-94`); Rust `trigger_accepts(Accept::ServerHello)` — те же байты/длина (`classify.rs:551-553`). Сокетные тесты `response.rs:1442-1463`; C/Rust differential не нужен для побайтового предиката. |
 | `d2k_accept_tls_record` | 96–99 | 4 | `len>=3`, `b[0]` ∈ {0x16,0x15}, `b[1]==0x03` | `classify.rs:554-556 trigger_accepts(TlsRecord)` | **E*** | **Точное совпадение:** C проверяет `len>=3`, `buf[0]` ∈ {0x16,0x15}, `buf[1]==0x03` (`meas.c:96-99`); Rust `trigger_accepts(Accept::TlsRecord)` — те же значения (`classify.rs:554-556`). Используется для белого ClientHello (`main.rs:34054`); предикат побайтовый. |
 | `d2k_accept_any` | 101–104 | 4 | `len>0` | `classify.rs:557 trigger_accepts(Any)` | **E*** | **Точное совпадение:** C `(void)buf; return len > 0` (`meas.c:101-104`); Rust `Accept::Any => !bytes.is_empty()` (`classify.rs:557`). Покрыто сокетными тестами `response.rs:1480-1528`; предикат тривиален. |
-| `cuts_valid` | 109–116 | 8 | строго возрастающие `0<cut<len`; любой плохой разрез — отказ всего опыта | `classify.rs:28-56 split_offsets`; `raw_probe.rs:1150-1152` | **P** | **Подтверждённое расхождение:** C отвергает **весь** опыт при `cut<=prev` или `cut>=len`; Rust `split_offsets` молча фильтрует такие разрезы, берёт первые 8, сортирует и дедуплицирует, затем строит диапазоны. Raw-путь R2O (`probe_tcp_split`) требует **ровно один** разрез (`cuts.len()!=1 → Local("invalid cut")`), C штатно шлёт несколько. Дифференциала на multi-cut/невалидные разрезы нет. |
+| `cuts_valid` | 109–116 | 8 | строго возрастающие `0<cut<len`; любой плохой разрез — отказ всего опыта | `classify::split_offsets_checked`, production `response.rs` | E | C `cuts_valid` отвергает весь опыт при `cut<=prev` или `cut>=len`. Rust `split_offsets_checked` возвращает `None` на те же условия и используется production-путём `response.rs` до отправки (ошибка `invalid cut`); тест `split_offsets_checked_matches_c_cuts_valid` (возрастающие, пустой, 0/len/len+1, дубль, убывание). |
 | `send_all` | 124–136 | 13 | доотправка куска до `len`; `send()<=0` → -1 (сбой опыта, не «молчание») | `response.rs:807-847` send-loop в `probe_trigger` | **P*** | partial write обрабатывается циклом в обоих. `MSG_NOSIGNAL` есть. C блокирующий с `SO_SNDTIMEO=8 с`; Rust неблокирующий: `EAGAIN` → `poll(POLLOUT, PROBE_SEND_TIMEOUT)`, `EINTR` → `Transport("write: ...")`, `send==0` → `Local`. `r2o-meas-differential.sh` покрывает send-timeout/EINTR. |
 | `connect_bounded` | 142–173 | 32 | fcntl nonblock; connect; immediate success → restore flags; EINPROGRESS → poll(POLLOUT,timeout) → SO_ERROR; restore flags | `response.rs:254-287 connect_until`, `:289-310 probe_socket` | **P** | Ветви совпадают: `EINPROGRESS/EALREADY/EINTR`, poll по `POLLOUT` до дедлайна, затем `SO_ERROR`. C восстанавливает исходные `fcntl` flags и работает блокирующе; R2O `SOCK_NONBLOCK` оставляет сокет неблокирующим, а send/recv обходят `EAGAIN` через poll. Поведение эквивалентно; differential на все errno-ветви не заявлен. |
 | `d2k_meas_once` | 175–267 | 93 | literal IPv4/IPv6 (zone-id отвергнут), mark, TCP_NODELAY, SO_SNDTIMEO 8 с, SO_RCVTIMEO wait (0/>5000→5000), connect 8 с, разрезы+gap, recv 512, accept | `response.rs:776-889 probe_trigger`; `raw_probe.rs:1140-1172 probe_tcp_split` | **P** | **Расхождения:** (1) C всегда обычный TCP-сокет; R2O на Linux при непустых `cuts` и `!no_raw` уходит в raw-путь, который принимает только один разрез; (2) C отвергает IPv6 zone-id (`%`), R2O резолвит host через `ToSocketAddrs` и фильтрует семейство; (3) C `marked_out=(mark==0)`, при `mark!=0` ставит метку; R2O `expected_mark=mark.unwrap_or(BYPASS_MARK=0x2d)` и проверяет `get_socket_mark`, `Some(0)` отключает маркировку. Перенесены: TCP_NODELAY, send/recv 512, accept-фильтр, gap, `SO_SNDTIMEO`/`SO_RCVTIMEO` через poll/дедлайн. `r2o-meas-differential.sh` покрывает send/recv EINTR и таймауты, не multi-cut/zone. |

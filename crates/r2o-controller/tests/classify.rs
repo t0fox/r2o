@@ -3,7 +3,7 @@ use r2o_controller::classify::{
     ProbeRequest, ProbeTarget, Span, TriState, Trigger, UnplannablePoison, Verdict, note_props_hit,
     note_props_miss, plan_bytes_for_poison, poison_has_fake, poison_supports_family, poisons, run,
     run_base_with_backend_progress, run_with_backend, run_with_backend_progress, split_offsets,
-    strategy_for_poison, trigger_accepts,
+    split_offsets_checked, strategy_for_poison, trigger_accepts,
 };
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -331,6 +331,32 @@ fn test_trigger() -> Trigger {
         name: "test".into(),
         payload: b"WA\x06\x03SIGNATURE-AND-THEN-SOME-PAYLOAD-BYTES".to_vec(),
         accept: Default::default(),
+    }
+}
+
+#[test]
+fn split_offsets_checked_matches_c_cuts_valid() {
+    assert_eq!(
+        split_offsets_checked(&[2, 5], 10).unwrap(),
+        [
+            Span { from: 0, to: 2 },
+            Span { from: 2, to: 5 },
+            Span { from: 5, to: 10 }
+        ]
+    );
+    assert_eq!(
+        split_offsets_checked(&[], 10).unwrap(),
+        [Span { from: 0, to: 10 }]
+    );
+    for invalid in [
+        vec![0],
+        vec![10],
+        vec![11],
+        vec![4, 4],
+        vec![5, 2],
+        vec![2, 10],
+    ] {
+        assert!(split_offsets_checked(&invalid, 10).is_none(), "{invalid:?}");
     }
 }
 
