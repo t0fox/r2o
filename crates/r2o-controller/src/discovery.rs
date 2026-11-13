@@ -1085,8 +1085,10 @@ pub fn add_measured_binding_with_fingerprint_in_box(
         .endpoint
         .parse()
         .map_err(|_| "discovery endpoint must be an IP socket address")?;
-    let expected_port = if target.shape == SHAPE_HTTP { 80 } else { 443 };
-    if endpoint.port() != expected_port || endpoint.is_ipv4() != (target.family == 4) {
+    // C `bind_confirmed` принимает любой серверный порт: d2k охватывает весь
+    // IP-трафик, а не только 443/80. Порт 80 для HTTP задаёт
+    // `from_http_portal`, здесь проверяется лишь семейство и ненулевой порт.
+    if endpoint.port() == 0 || endpoint.is_ipv4() != (target.family == 4) {
         return Err("discovery endpoint disagrees with its target family or port".into());
     }
     if now < 0 {

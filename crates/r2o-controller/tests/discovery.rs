@@ -153,6 +153,27 @@ fn measured_http_plan_is_stored_and_selected_as_an_http_binding() {
 }
 
 #[test]
+fn measured_plan_saves_on_a_nonstandard_server_port_like_c() {
+    let mut event = hello(Some("example.com"), 4, Some(SHAPE_MODERN));
+    // Клиент 40000 → сервер 8443: C выбирает серверный конец и сохраняет
+    // привязку на любом порту, а не только 443.
+    event.key[33..35].copy_from_slice(&40_000_u16.to_be_bytes());
+    event.key[35..37].copy_from_slice(&8443_u16.to_be_bytes());
+    let target = DiscoveryTarget::from_event(&event).unwrap();
+    assert_eq!(target.endpoint, "198.51.100.2:8443");
+    let mut catalog = Catalog::default();
+    add_measured_binding(&mut catalog, &target, PLAN_TEXT, 1_800_000_000).unwrap();
+    assert!(has_usable_binding(&catalog, &target));
+
+    let mut zero_port = target.clone();
+    zero_port.endpoint = "198.51.100.2:0".into();
+    assert!(add_measured_binding(&mut catalog, &zero_port, PLAN_TEXT, 1_800_000_001).is_err());
+    let mut wrong_family = target.clone();
+    wrong_family.endpoint = "[2001:db8::2]:8443".into();
+    assert!(add_measured_binding(&mut catalog, &wrong_family, PLAN_TEXT, 1_800_000_002).is_err());
+}
+
+#[test]
 fn measured_plan_is_stored_with_a_shape_specific_binding_and_group_evidence() {
     let target =
         DiscoveryTarget::from_event(&hello(Some("example.com"), 4, Some(SHAPE_MODERN))).unwrap();
