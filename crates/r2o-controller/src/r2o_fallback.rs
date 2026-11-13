@@ -166,7 +166,12 @@ fn arm(index: usize) -> Option<Poison> {
 
 /// Дословные порядок и сборка d2k_fallback_plan/fb_arm_at/d2k_arm_plan.
 pub fn plan(index: usize, shape: u8, send_cap: usize) -> Option<String> {
-    let a = arm(index)?;
+    plan_from_arm(&arm(index)?, shape, send_cap)
+}
+
+/// Дословный порт `d2k_arm_plan` (`core/compose.c:1552-1751`) для любого
+/// набора полей `Poison`, а не только для фиксированного списка плеч.
+pub fn plan_from_arm(a: &Poison, shape: u8, send_cap: usize) -> Option<String> {
     let segment = if send_cap == 0 {
         1400
     } else {
@@ -175,16 +180,55 @@ pub fn plan(index: usize, shape: u8, send_cap: usize) -> Option<String> {
     if segment == 0 {
         return None;
     }
+    // C отвергает md5 (его выражает только измеренный/сырой сборщик) и
+    // unsigned-поля, которые в Rust представлены i32.
+    if a.md5 || a.repeats < 0 || a.gap_ms < 0 || a.seqovl < 0 || a.ttl < 0 {
+        return None;
+    }
     let header = |version| {
         format!("r2o-plan 1 {version}\nid 00000000000000000000000000000000\nproto tcp tls\n")
     };
     if a.disorder_pos != 0 {
+        if a.disorder_pos < 0
+            || a.disorder_pos as usize > 2048
+            || !a.disorder
+            || a.seqovl != 0
+            || a.seqovl_exact
+            || a.badsum
+            || a.repeats != 0
+            || a.gap_ms != 0
+            || a.fake_between
+            || a.ttl != 0
+            || a.seq_shift != 0
+            || a.decoy_hello
+            || a.tcp_ts
+            || a.ip_id_zero
+            || a.oob
+        {
+            return None;
+        }
         return Some(format!(
-            "{}wire detect-tcp-v1\ninput tls-sni\nsegment {segment}\nsplit payload_start +2\norder reverse\n",
-            header(5)
+            "{}wire detect-tcp-v1\ninput tls-sni\nsegment {segment}\nsplit payload_start +{}\norder reverse\n",
+            header(5),
+            a.disorder_pos
         ));
     }
     if a.oob {
+        if a.seqovl != 0
+            || a.seqovl_exact
+            || a.badsum
+            || a.repeats != 0
+            || a.gap_ms != 0
+            || a.disorder
+            || a.fake_between
+            || a.ttl != 0
+            || a.seq_shift != 0
+            || a.decoy_hello
+            || a.tcp_ts
+            || a.ip_id_zero
+        {
+            return None;
+        }
         return Some(format!(
             "{}wire detect-tcp-v1\ninput tls-sni\nsegment {segment}\noob sni_middle 0f\norder forward\n",
             header(8)
@@ -232,6 +276,14 @@ pub fn plan(index: usize, shape: u8, send_cap: usize) -> Option<String> {
         text.push_str("poison 1");
         if a.badsum {
             text.push_str(" badsum");
+        }
+        // C `d2k_arm_plan`: tcpts/ipidzero — такие же измеренные признаки
+        // боевых плеч, как битая сумма; без них план отличается от замера.
+        if a.tcp_ts {
+            text.push_str(" tcpts");
+        }
+        if a.ip_id_zero {
+            text.push_str(" ipidzero");
         }
         if a.ttl != 0 {
             write!(text, " ttl={}", a.ttl).unwrap();
@@ -320,6 +372,161 @@ mod tests {
         if let Ok(path) = std::env::var("R2O_FALLBACK_QUEUE_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
         }
+    }
+
+    #[test]
+    fn arm_plan_arbitrary_combinations_match_donor() {
+        use crate::classify::Poison;
+        use std::fmt::Write as _;
+
+        fn record(out: &mut String, index: usize, shape: u8, cap: usize, arm: &Poison) {
+            let text = super::plan_from_arm(arm, shape, cap);
+            writeln!(
+                out,
+                "case {index} rc={}",
+                if text.is_some() { 0 } else { -1 }
+            )
+            .unwrap();
+            if let Some(text) = text {
+                out.push_str(&text.replacen("r2o-plan", "d2k-plan", 1));
+            }
+        }
+
+        let mut out = String::new();
+
+        let mut a = Poison::default();
+        a.badsum = true;
+        a.repeats = 1;
+        a.tcp_ts = true;
+        record(&mut out, 0, 1, 1492, &a);
+
+        let mut a = Poison::default();
+        a.badsum = true;
+        a.repeats = 2;
+        a.gap_ms = 20;
+        a.ip_id_zero = true;
+        record(&mut out, 1, 1, 1492, &a);
+
+        let mut a = Poison::default();
+        a.badsum = true;
+        a.ttl = 10;
+        a.tcp_ts = true;
+        a.ip_id_zero = true;
+        record(&mut out, 2, 2, 1492, &a);
+
+        let mut a = Poison::default();
+        a.seq_shift = 1;
+        a.tcp_ts = true;
+        record(&mut out, 3, 1, 1492, &a);
+
+        let mut a = Poison::default();
+        a.disorder = true;
+        a.disorder_pos = 2;
+        record(&mut out, 4, 1, 1492, &a);
+
+        let mut a = Poison::default();
+        a.disorder = true;
+        a.disorder_pos = 100;
+        record(&mut out, 5, 2, 1492, &a);
+
+        let mut a = Poison::default();
+        a.disorder = true;
+        a.disorder_pos = 2;
+        a.seqovl = 4;
+        record(&mut out, 6, 1, 1492, &a);
+
+        let mut a = Poison::default();
+        a.disorder_pos = 2;
+        record(&mut out, 7, 1, 1492, &a);
+
+        let mut a = Poison::default();
+        a.oob = true;
+        record(&mut out, 8, 1, 1492, &a);
+
+        let mut a = Poison::default();
+        a.oob = true;
+        a.ttl = 10;
+        record(&mut out, 9, 1, 1492, &a);
+
+        let mut a = Poison::default();
+        a.md5 = true;
+        a.badsum = true;
+        record(&mut out, 10, 1, 1492, &a);
+
+        let mut a = Poison::default();
+        a.seqovl_exact = true;
+        a.badsum = true;
+        a.repeats = 1;
+        record(&mut out, 11, 1, 1492, &a);
+
+        let mut a = Poison::default();
+        a.badsum = true;
+        a.split_pos = 5;
+        a.autottl = true;
+        record(&mut out, 12, 1, 1492, &a);
+
+        let mut a = Poison::default();
+        a.repeats = 2;
+        record(&mut out, 13, 2, 1492, &a);
+
+        let mut a = Poison::default();
+        a.fake_between = true;
+        a.badsum = true;
+        a.repeats = 7;
+        a.gap_ms = 300;
+        a.tcp_ts = true;
+        record(&mut out, 14, 1, 1492, &a);
+
+        let mut a = Poison::default();
+        a.seq_shift = 1;
+        record(&mut out, 15, 1, 100, &a);
+
+        let mut a = Poison::default();
+        a.badsum = true;
+        a.repeats = 1;
+        record(&mut out, 16, 1, 60, &a);
+
+        let mut a = Poison::default();
+        a.badsum = true;
+        a.repeats = 1;
+        a.decoy_hello = true;
+        a.tcp_ts = true;
+        record(&mut out, 17, 2, 1492, &a);
+
+        let mut a = Poison::default();
+        a.disorder = true;
+        record(&mut out, 18, 1, 1492, &a);
+
+        let mut a = Poison::default();
+        a.disorder = true;
+        a.disorder_pos = 2048;
+        record(&mut out, 19, 1, 1492, &a);
+
+        let mut a = Poison::default();
+        a.disorder = true;
+        a.disorder_pos = 2049;
+        record(&mut out, 20, 1, 1492, &a);
+
+        let mut a = Poison::default();
+        a.seqovl = 4;
+        a.tcp_ts = true;
+        record(&mut out, 21, 1, 1492, &a);
+
+        let mut a = Poison::default();
+        a.badsum = true;
+        a.repeats = 1;
+        a.ttl = 62;
+        a.ip_id_zero = true;
+        record(&mut out, 22, 1, 1200, &a);
+
+        if let Ok(path) = std::env::var("R2O_ARM_PLAN_DIFF_OUTPUT") {
+            std::fs::write(path, &out).unwrap();
+        }
+        assert!(out.contains("poison 1 badsum tcpts\n"));
+        assert!(out.contains("poison 1 badsum ipidzero\n"));
+        assert!(out.contains("split payload_start +2048\n"));
+        assert!(out.contains("case 10 rc=-1\n"));
+        assert!(out.contains("case 20 rc=-1\n"));
     }
 
     #[test]
