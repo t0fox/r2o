@@ -4653,6 +4653,15 @@ impl CatalogSyncCursor {
 }
 
 #[cfg(unix)]
+fn r2o_http_delete_binding_allowed(
+    family: u8,
+    binding: &r2k_core::control::BindingContext,
+) -> bool {
+    // C `hs_del_plan`: binding есть, family совпадает, d2k_binding_known.
+    binding.family == family && binding.is_known() && !binding.temporary && binding.kind == 1
+}
+
+#[cfg(unix)]
 impl ControlClient {
     fn write_command(&mut self, command: &[u8]) -> Result<(), Box<dyn Error>> {
         use std::io::Write;
@@ -17030,7 +17039,7 @@ impl ControlClient {
             (true, Some(binding)) => {
                 if revoke_on_ack {
                     self.http_acknowledged_bindings.remove(&key);
-                    self.send_http_owned_delete(&key.0, binding);
+                    self.send_http_owned_delete(&key.0, key.1, binding);
                 } else {
                     self.http_acknowledged_bindings
                         .insert(key, HttpAcknowledgedBinding::Confirmed { plan_id, binding });
@@ -17040,7 +17049,7 @@ impl ControlClient {
                 if revoke_on_ack {
                     self.http_acknowledged_bindings.remove(&key);
                     if let Some((_, binding)) = previous {
-                        self.send_http_owned_delete(&key.0, binding);
+                        self.send_http_owned_delete(&key.0, key.1, binding);
                     }
                 } else {
                     match previous {
@@ -22589,7 +22598,18 @@ impl ControlClient {
         Ok(())
     }
 
-    fn send_http_owned_delete(&mut self, host: &str, binding: r2k_core::control::BindingContext) {
+    fn send_http_owned_delete(
+        &mut self,
+        host: &str,
+        family: u8,
+        binding: r2k_core::control::BindingContext,
+    ) {
+        if !r2o_http_delete_binding_allowed(family, &binding) {
+            eprintln!(
+                "HTTP {host}: условный отзыв привязки пропущен: семейство/вид привязки не совпадают"
+            );
+            return;
+        }
         match encode_delete_name_bound(host, 6, binding) {
             Ok(command) => {
                 if let Err(error) = self.write_command(&command) {
@@ -22699,7 +22719,7 @@ impl ControlClient {
             self.http_acknowledged_bindings.remove(&key);
         }
         if let Some(binding) = delete_binding {
-            self.send_http_owned_delete(&target.host, binding);
+            self.send_http_owned_delete(&target.host, target.family, binding);
         }
         println!(
             "HTTP {}: исполненная перепроверка исчерпала кандидатов; сохранённая привязка отозвана",
@@ -25331,6 +25351,41 @@ mod tests {
         stream.read_exact(&mut response).unwrap();
         assert_eq!(&response, b"hello");
         server.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn http_delete_binding_requires_matching_family_and_known_binding_like_c() {
+        use r2k_core::control::BindingContext;
+
+        let binding = |family: u8, kind: u8, temporary: bool, known: bool| BindingContext {
+            generation: u64::from(known),
+            kind,
+            family,
+            shape: 7,
+            temporary,
+            epoch: if known { [1; 16] } else { [0; 16] },
+        };
+        assert!(super::r2o_http_delete_binding_allowed(
+            4,
+            &binding(4, 1, false, true)
+        ));
+        assert!(!super::r2o_http_delete_binding_allowed(
+            6,
+            &binding(4, 1, false, true)
+        ));
+        assert!(!super::r2o_http_delete_binding_allowed(
+            4,
+            &binding(4, 2, false, true)
+        ));
+        assert!(!super::r2o_http_delete_binding_allowed(
+            4,
+            &binding(4, 1, true, true)
+        ));
+        assert!(!super::r2o_http_delete_binding_allowed(
+            4,
+            &binding(4, 1, false, false)
+        ));
     }
 
     #[cfg(unix)]
