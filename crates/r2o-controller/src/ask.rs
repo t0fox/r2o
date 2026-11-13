@@ -69,31 +69,32 @@ pub fn parse_ask_options(arguments: &[OsString]) -> Result<AskCliOptions, String
             }
             unknown => return Err(format!("неизвестный аргумент: {unknown}")),
         };
-        let one = |slot: &mut Option<OsString>| -> Result<(), String> {
-            if slot.replace(value.clone()).is_some() {
-                Err(format!("{flag} указан больше одного раза"))
-            } else {
-                Ok(())
-            }
+        // C `parse_args`: повтор флага просто перезаписывает значение
+        // (last-wins), отдельной ошибки на дубль нет.
+        let assign = |slot: &mut Option<OsString>| {
+            *slot = Some(value.clone());
         };
         match flag {
-            "--control" => one(&mut control_path)?,
-            "--ip" => one(&mut ip)?,
-            "--port" => one(&mut port)?,
-            "--sni" => one(&mut sni)?,
-            "--control-sni" => one(&mut control_sni)?,
-            "--control-hex" => one(&mut control_hex)?,
-            "--hello-hex" => one(&mut hello_hex)?,
-            "--arm-wait-ms" => one(&mut arm_wait_raw)?,
-            "--mark" => one(&mut mark_raw)?,
-            "--save-trigger" => one(&mut save_trigger)?,
-            "--save-control" => one(&mut save_control)?,
+            "--control" => assign(&mut control_path),
+            "--ip" => assign(&mut ip),
+            "--port" => assign(&mut port),
+            "--sni" => assign(&mut sni),
+            "--control-sni" => assign(&mut control_sni),
+            "--control-hex" => assign(&mut control_hex),
+            "--hello-hex" => assign(&mut hello_hex),
+            "--arm-wait-ms" => assign(&mut arm_wait_raw),
+            "--mark" => assign(&mut mark_raw),
+            "--save-trigger" => assign(&mut save_trigger),
+            "--save-control" => assign(&mut save_control),
             _ => unreachable!(),
         }
         index += 1;
     }
 
-    let control_path = control_path.ok_or("обязателен --control <путь к сокету>")?;
+    // C `parse_args` отвергает пустой --control, а не только отсутствующий.
+    let control_path = control_path
+        .filter(|path| !path.is_empty())
+        .ok_or("обязателен --control <путь к сокету>")?;
     let target_ip = ip
         .ok_or("обязателен --ip <IPv4 или IPv6>")?
         .to_str()
@@ -743,6 +744,50 @@ mod tests {
                 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xab, 0xcd, 0xef
             ]
         );
+    }
+
+    #[test]
+    fn parse_args_last_wins_and_rejects_empty_control_like_c() {
+        let args = [
+            "--control",
+            "/run/r2o.sock",
+            "--ip",
+            "192.0.2.1",
+            "--sni",
+            "target.example",
+            "--arm-wait-ms",
+            "20",
+            "--port",
+            "443",
+            "--port",
+            "8443",
+            "--mark",
+            "1",
+            "--mark",
+            "0x2d",
+            "--sni",
+            "other.example",
+        ]
+        .map(OsString::from);
+        let options = super::parse_ask_options(&args).unwrap();
+        // C `parse_args`: последнее значение флага побеждает.
+        assert_eq!(options.port, 8443);
+        assert_eq!(options.mark, 0x2d);
+        assert_eq!(options.sni, "other.example");
+
+        // C отвергает пустой --control наравне с отсутствующим.
+        let args = [
+            "--control",
+            "",
+            "--ip",
+            "192.0.2.1",
+            "--sni",
+            "target.example",
+            "--arm-wait-ms",
+            "20",
+        ]
+        .map(OsString::from);
+        assert!(super::parse_ask_options(&args).is_err());
     }
 
     #[test]

@@ -579,6 +579,34 @@ fn fingerprint_match_requires_one_agreement_and_rejects_known_conflicts() {
 }
 
 #[test]
+fn catalog_match_returns_the_first_compatible_box_index_like_c() {
+    let catalog = Catalog::parse(
+        br#"{"boxes":[
+          {"id":"box-1","fingerprint":{"method":2,"signals":[
+            {"kind":"rst","ttl":126,"tos":136,"ipid":54321}
+          ]}},
+          {"id":"box-2","fingerprint":{"method":2,"signals":[
+            {"kind":"rst","ttl":127,"tos":136,"ipid":54321}
+          ]}}
+        ]}"#,
+    )
+    .unwrap();
+    let observed = Fingerprint {
+        method: 2,
+        signals: vec![Signal {
+            kind: "rst".into(),
+            ttl: 126,
+            tos: 136,
+            ipid: 54321,
+            ..Default::default()
+        }],
+    };
+    // C `d2k_catalog_match`: первый совместимый box, порядок каталога.
+    assert_eq!(catalog.match_fingerprint(&observed), Some(0));
+    assert_eq!(Catalog::default().match_fingerprint(&observed), None);
+}
+
+#[test]
 fn derived_domain_groups_are_ignored_and_learning_observations_are_saved() {
     let forged = Catalog::parse(
         br#"{"boxes":[],"domain_groups":[{"suffix":"example.org","plan_id":"forged"}]}"#,
