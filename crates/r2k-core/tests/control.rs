@@ -1,23 +1,24 @@
 use r2k_core::control::{
     AppliedEvent, BindingContext, COMMAND_DEL_ADDR, COMMAND_DEL_ADDR_PROBE, COMMAND_DEL_NAME,
     COMMAND_DEL_NAME_PROBE, COMMAND_SET_ADDR, COMMAND_SET_ADDR_PROBE, COMMAND_SET_HTTPS,
-    COMMAND_SET_NAME, COMMAND_SET_NAME_PROBE, COMMAND_SET_TCP_STALL_BUDGETS,
-    COMMAND_SET_VOICE_ADDR, COMMAND_SET_VOICE_ADDR_PROBE, EVENT_APPLIED, EVENT_HELLO,
-    EVENT_HTTP_RESPONSE, EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_FIN_RETRY,
-    EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF,
-    EVENT_R2O_VOICE_RTP_PROOF, EVENT_R2O_VOICE_STUN_PROOF, EVENT_R2O_VOICE_SUSPECT, Frame,
-    HttpPortalEvent, HttpResponseEvent, KEY_LEN, R2oQuicSuspectEvent, R2oTcpFinRetryEvent,
-    R2oTcpRstAfterAppEvent, R2oTcpSilenceEvent, R2oTcpStallEvent, R2oVoiceProofEvent,
-    R2oVoiceProofKind, R2oVoiceSuspectEvent, SHAPE_ECH_NO_TS, SHAPE_ECH_TCP, SHAPE_ECH_TS,
-    SHAPE_HTTP, SHAPE_LEGACY_NO_TS, SHAPE_LEGACY_TS, SHAPE_MODERN, SHAPE_MODERN_NO_TS,
-    SHAPE_MODERN_TS, SHAPE_QUIC, decode_ack, decode_applied, decode_hello, decode_http_response,
-    decode_r2o_quic_stall, decode_r2o_quic_suspect, decode_r2o_tcp_fin_retry,
+    COMMAND_SET_NAME, COMMAND_SET_NAME_BOUND, COMMAND_SET_NAME_PROBE,
+    COMMAND_SET_TCP_STALL_BUDGETS, COMMAND_SET_VOICE_ADDR, COMMAND_SET_VOICE_ADDR_PROBE,
+    EVENT_APPLIED, EVENT_HELLO, EVENT_HTTP_RESPONSE, EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT,
+    EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_SILENT,
+    EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_RTP_PROOF,
+    EVENT_R2O_VOICE_STUN_PROOF, EVENT_R2O_VOICE_SUSPECT, Frame, HttpPortalEvent, HttpResponseEvent,
+    KEY_LEN, R2oQuicSuspectEvent, R2oTcpFinRetryEvent, R2oTcpRstAfterAppEvent, R2oTcpSilenceEvent,
+    R2oTcpStallEvent, R2oVoiceProofEvent, R2oVoiceProofKind, R2oVoiceSuspectEvent, SHAPE_ECH_NO_TS,
+    SHAPE_ECH_TCP, SHAPE_ECH_TS, SHAPE_HTTP, SHAPE_LEGACY_NO_TS, SHAPE_LEGACY_TS, SHAPE_MODERN,
+    SHAPE_MODERN_NO_TS, SHAPE_MODERN_TS, SHAPE_QUIC, decode_ack, decode_applied, decode_hello,
+    decode_http_response, decode_r2o_quic_stall, decode_r2o_quic_suspect, decode_r2o_tcp_fin_retry,
     decode_r2o_tcp_rst_after_app, decode_r2o_tcp_silence, decode_r2o_tcp_stall,
     decode_r2o_voice_proof, decode_r2o_voice_suspect, decode_set_tcp_stall_budgets,
     encode_ack_for_trial, encode_delete_addr, encode_delete_addr_probe, encode_delete_name,
     encode_delete_name_probe, encode_set_addr, encode_set_addr_probe, encode_set_https,
-    encode_set_name, encode_set_name_family, encode_set_name_probe, encode_set_tcp_stall_budgets,
-    encode_set_voice_addr, encode_set_voice_addr_probe, r2o_binding_equal, read_frame,
+    encode_set_name, encode_set_name_bound, encode_set_name_family, encode_set_name_probe,
+    encode_set_tcp_stall_budgets, encode_set_voice_addr, encode_set_voice_addr_probe,
+    r2o_binding_equal, read_frame,
 };
 use std::io::Cursor;
 
@@ -293,6 +294,26 @@ fn кодирует_адресные_планы_ipv4_ipv6_и_удаляет_то
     // C `d2k_link_set_addr_family` не сверяет план с формой.
     assert!(encode_set_addr(IpAddr::V4(Ipv4Addr::LOCALHOST), SHAPE_QUIC, &tls_plan).is_ok());
     assert!(encode_delete_addr(IpAddr::V4(Ipv4Addr::LOCALHOST), SHAPE_HTTP).is_err());
+}
+
+#[test]
+fn bounded_name_plan_accepts_any_shape_and_zero_token_like_c() {
+    // C `d2k_link_set_name_bound` проверяет только непустой token (указатель) и
+    // не ограничивает shape/содержимое token; транспорт на проводе не едет.
+    let records = [0xaa_u8; 8];
+    let command =
+        encode_set_name_bound("example.test", SHAPE_MODERN, 4, &records, [0; 16]).unwrap();
+    let frame = read_frame(&mut Cursor::new(command)).unwrap();
+    assert_eq!(frame.kind, COMMAND_SET_NAME_BOUND);
+    assert_eq!(frame.body[0], 12);
+    assert_eq!(&frame.body[1..13], b"example.test");
+    assert_eq!(frame.body[13], SHAPE_MODERN);
+    assert_eq!(frame.body[14], 4);
+    assert_eq!(&frame.body[15..23], &records);
+    assert_eq!(&frame.body[23..39], &[0_u8; 16]);
+
+    assert!(encode_set_name_bound("", SHAPE_HTTP, 4, &records, [1; 16]).is_err());
+    assert!(encode_set_name_bound("example.test", SHAPE_HTTP, 7, &records, [1; 16]).is_err());
 }
 
 #[test]

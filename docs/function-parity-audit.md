@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 320 | 228 | 0 | 0 |
-| core-state | 692 | 394 | 298 | 0 | 0 |
+| core-state | 692 | 395 | 297 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1219** | **763** | **0** | **0** |
+| **Итого** | **1982** | **1220** | **762** | **0** | **0** |
 
-Это не оценка паритета: 763 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 762 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1219 / P 763 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1220 / P 762 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 320 | 228 | 0 | 0 |
-| core-state | 692 | 394 | 298 | 0 | 0 |
+| core-state | 692 | 395 | 297 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1219** | **763** | **0** | **0** |
+| **Итого** | **1982** | **1220** | **762** | **0** | **0** |
 
 
 ---
@@ -2126,7 +2126,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `hs_hex` | 212-219 | 8 | `d2k_plan_text_to_hex` в буфер 8192, ошибка в stderr | `compile_text` + `r2o_plan_records_for_wire` | **E*** | C переводит текст плана в hex (8192) и печатает ошибку. Rust production HTTP-search компилирует `candidate.plan_text` через `compile_text`, проверяет runtime и передаёт бинарные `r2o_plan_records_for_wire` в SET_NAME_PROBE; plan_text покрыт differential/тестами. **Ограничение:** Rust не формирует hex-строку и не печатает `d2kc:`-префикс; ошибки возвращаются наверх. |
 | `hs_set_probe` | 221-233 | 13 | SET_NAME_PROBE trial: `SHAPE_HTTP`, sport, family | `r2k-core` `encode_set_name_probe`, production candidate install | **E*** | C: hs_hex плана, затем `d2k_link_set_name_probe_trial(..., SHAPE_HTTP, sport, family, trial)`. Rust production HTTP-search ставит `encode_set_name_probe` с `target.shape` (для HTTP — `SHAPE_HTTP`), wire-записями и trial; тесты `crates/r2k-core/tests/control.rs` (проbe с SHAPE_HTTP/family/port/trial, отказ нулевого порта), HTTP-search differential. **Ограничение:** Rust передаёт бинарные wire-записи, C — hex-текст; тексты ошибок иные. |
 | `hs_del_probe` | 235-244 | 10 | DEL_NAME_PROBE с `SHAPE_HTTP` | `r2k-core` `encode_delete_name_probe`, production `delete_name_probe` | **E*** | C `d2k_link_del_name_probe_family(fd,host,6,SHAPE_HTTP,sport,family)`. Rust production `delete_name_probe` отправляет `encode_delete_name_probe` с формой задачи (для HTTP — `SHAPE_HTTP`); тесты control.rs (форма/семейство/порт, неизвестная форма, port 0). **Ограничение:** фиксированный `SHAPE_HTTP` не зашит в функцию; для HTTP-пути он приходит из target. |
-| `hs_set_plan` | 246-257 | 12 | SET_NAME_BOUND с `SHAPE_HTTP`, token | `encode_set_name_bound` (`main.rs:21813`) | **P** | C `hs_hex` + `d2k_link_set_name_bound(fd,host,6,hex,SHAPE_HTTP,family,token)`; ошибка в stderr. Rust `encode_set_name_bound` требует `SHAPE_HTTP` и ненулевой trial — совпадает с C-вызовом; C не проверяет plan records, Rust проверяет (см. link.c). |
+| `hs_set_plan` | 246-257 | 12 | SET_NAME_BOUND с `SHAPE_HTTP`, token | `r2k-core` `encode_set_name_bound` (`main.rs:21813`) | E | C `hs_hex` + `d2k_link_set_name_bound(fd,host,6,hex,SHAPE_HTTP,family,token)`: `send_name_plan` проверяет name 1..255, family 4/6, transport 6/17 и hex-план; shape/token не ограничены. Rust `encode_set_name_bound` кодирует name_len+name+shape+family+records+16-байтный token, проверяет name/family; тест `bounded_name_plan_accepts_any_shape_and_zero_token_like_c` принимает MODERN и нулевой token. Production HTTP-кандидат передаёт SHAPE_HTTP и случайный trial. **Ограничение:** транспорт на проводе не едет ни в C, ни в Rust; hex-план C заменён бинарными records. |
 | `hs_del_plan` | 259-269 | 11 | проверить `binding->family==family` и `d2k_binding_known`, затем DEL_NAME_BOUND | `main.rs` `r2o_http_delete_binding_allowed`, `send_http_owned_delete` | **E*** | C отвергает `!binding || binding->family!=family || !d2k_binding_known(binding)` до `d2k_link_del_name_bound`. Rust predicate проверяет family, known, kind=1 и !temporary и вызывается production `send_http_owned_delete` перед `encode_delete_name_bound`; тест `http_delete_binding_requires_matching_family_and_known_binding_like_c` (family 6 vs 4, kind 2, temporary, неизвестная). **Ограничение:** C возвращает -1/печатает stderr, Rust пропускает удаление с логом; отдельного C/Rust differential кадра нет. |
 | `hs_start` | 271-274 | 4 | запустить runner HTTP-поиска | `HttpSearchWorker` (`main.rs`) | **E*** | C `d2k_hs_runner_start(runner,job)` — отдельный pthread. Rust HTTP-поиск идёт задачей/worker в общем планировщике; production очередь запускается `HttpSearchWorker`; тест `http_search_worker_runs_queued_jobs_outside_the_control_loop`. **Ограничение:** нет отдельного pthread/hook runner, жизненный цикл общий. |
 | `hs_changed` | 277-284 | 8 | сохранить `http-plans.txt` через `d2k_httpsearch_save` | каталог JSON (`R2oCatalogPersistence`) | **E*** | C пишет отдельный `d2k-http-plans 1`; Rust подтверждённые HTTP-кандидаты хранит в каталоге JSON и сохраняет через `R2oCatalogPersistence` (атомарная запись), differential `r2o-catalog-persist-differential.sh`. **Ограничение:** имя/формат отдельного файла не совпадают; момент сохранения — по изменению каталога. |
@@ -3236,7 +3236,7 @@ memory_bytes, load с проверкой хвоста, все writer'ы, `d2k_ca
 | `hs_hex` | 212–219 | `compile_text`/hex | **P** | C переводит текст плана в hex через `d2k_plan_text_to_hex`; Rust передаёт TLV-байты. Для валидных планов тот же план, стадия/формат различаются. |
 | `hs_set_probe` | 221–233 | `encode_set_name_probe` | **P** | Поля/порядок совпадают, C жёстко `SHAPE_HTTP`; Rust передаёт `wire_shape`. |
 | `hs_del_probe` | 235–244 | `encode_delete_name_probe` | **P** | Тот же кадр DEL_NAME_PROBE; C игнорирует/логирует ошибку, Rust возвращает `Result`. |
-| `hs_set_plan` | 246–257 | `encode_set_name_bound` | **P** | C кодирует bound-план с token; Rust требует shape `SHAPE_HTTP` и ненулевой trial_id (`control.rs:1399-1406`). |
+| `hs_set_plan` | 246–257 | `encode_set_name_bound` | E | Кадр и проверки name/family совпадают; shape/token не ограничены, как C. Тест `bounded_name_plan_accepts_any_shape_and_zero_token_like_c`; hex-план заменён records. |
 | `hs_del_plan` | 259–269 | `encode_delete_name_bound` | **P** | **Подтверждённое расхождение:** C проверяет `binding->family == family` и `d2k_binding_known`; Rust `encode_delete_name_bound(host,6,binding)` не сверяет family. |
 | `hs_start` | 271–274 | `http_search` runner | **P** | Тонкая обёртка `d2k_hs_runner_start`; Rust запускает задачу через свой runner/поток. |
 | `hs_say` | 357–357 | лог HTTP-поиска | **P*** | C перенаправляет в `sched_say`; Rust использует общий лог. |
