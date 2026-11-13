@@ -302,6 +302,13 @@ fn require_mark_failed(require_mark: bool, mark: u32, marked: bool) -> bool {
     require_mark && mark != 0 && !marked
 }
 
+/// C `d2k_mark_real` (`core/meas.c:61-70`): `setsockopt(SO_MARK, int mark)`.
+/// Вне Linux/без SO_MARK C возвращает -1; Rust на неподдерживаемой платформе
+/// получит ошибку `setsockopt`/константы.
+fn r2o_mark_real(fd: libc::c_int, mark: u32) -> io::Result<()> {
+    set_socket_option(fd, libc::SOL_SOCKET, SO_MARK, mark as libc::c_int)
+}
+
 fn probe_socket_with_mark(
     address: SocketAddr,
     mark: u32,
@@ -324,7 +331,7 @@ fn probe_socket_with_mark(
     }
     let owned_fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
     let fd = owned_fd.as_raw_fd();
-    let marked = set_socket_option(fd, libc::SOL_SOCKET, SO_MARK, mark as libc::c_int).is_ok();
+    let marked = r2o_mark_real(fd, mark).is_ok();
     if require_mark_failed(require_mark, mark, marked) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -1804,5 +1811,29 @@ mod tcp_split_transport_tests {
         assert!(!require_mark_failed(true, 0, false));
         assert!(!require_mark_failed(true, 0x2d, true));
         assert!(!require_mark_failed(false, 0x2d, false));
+    }
+
+    #[test]
+    fn mark_real_sets_so_mark_like_c() {
+        use std::os::fd::AsRawFd;
+
+        let socket: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let fd = super::probe_socket(socket, 0).unwrap();
+        match super::r2o_mark_real(fd.as_raw_fd(), 0x2d) {
+            Ok(()) => {
+                assert_eq!(
+                    super::get_socket_mark(fd.as_raw_fd()).unwrap(),
+                    libc::c_int::from(0x2d)
+                );
+                // C приводит u32→int; значение 0 — валидная метка.
+                super::r2o_mark_real(fd.as_raw_fd(), 0).unwrap();
+                assert_eq!(super::get_socket_mark(fd.as_raw_fd()).unwrap(), 0);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                // Без CAP_NET_ADMIN ядро отказывает — как C `setsockopt` → -1.
+                assert_eq!(super::get_socket_mark(fd.as_raw_fd()).unwrap(), 0);
+            }
+            Err(error) => panic!("неожиданная ошибка SO_MARK: {error}"),
+        }
     }
 }
