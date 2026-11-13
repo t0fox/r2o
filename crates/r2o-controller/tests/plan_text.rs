@@ -165,3 +165,33 @@ fn compiles_supported_directives_to_r2o_tlv_bytes() {
         assert_eq!(actual_hex, expected_hex, "plan text: {text}");
     }
 }
+
+#[test]
+fn d2kp_header_matches_c_tlv_header_for_question_plan() {
+    // C `tlv_header` (`compose.c:186-198`): 12-байтная шапка, REC_ID с 16
+    // нулями, REC_PROTO [6,1]. Проверяем ту же раскладку после перекодировки
+    // R2OP → D2KP; остальные записи плана шапкой не ограничены.
+    let r2op = compile_text("r2o-plan 1 1\nproto tcp tls\n").unwrap();
+    let d2kp = Plan::to_wire(&r2op, true).unwrap();
+    assert_eq!(&d2kp[..4], b"D2KP");
+    assert_eq!(&d2kp[4..6], &1_u16.to_be_bytes()); // schema
+    assert_eq!(&d2kp[6..8], &1_u16.to_be_bytes()); // minexec
+    assert_eq!(&d2kp[8..10], &[0, 0]); // flags
+    assert_eq!(&d2kp[12..16], &[0x00, 0x01, 0x00, 0x10]); // REC_ID, len 16
+    assert_eq!(&d2kp[16..32], &[0; 16]);
+    assert_eq!(&d2kp[32..38], &[0x00, 0x02, 0x00, 0x02, 6, 1]); // REC_PROTO
+
+    // Остаток — TLV-записи; границы каждой записи должны сходиться.
+    let declared = usize::from(u16::from_be_bytes([d2kp[10], d2kp[11]]));
+    let mut offset = 12;
+    let mut records = 0;
+    while offset < d2kp.len() {
+        assert!(offset + 4 <= d2kp.len());
+        let len = usize::from(u16::from_be_bytes([d2kp[offset + 2], d2kp[offset + 3]]));
+        assert!(offset + 4 + len <= d2kp.len());
+        offset += 4 + len;
+        records += 1;
+    }
+    assert_eq!(offset, d2kp.len());
+    assert_eq!(records, declared);
+}

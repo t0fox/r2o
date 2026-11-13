@@ -85,16 +85,14 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 226 | 322 | 0 | 0 |
-| core-state | 692 | 182 | 509 | 0 | 0 |
+| core-state | 692 | 229 | 463 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **942** | **1040** | **0** | **0** |
+| **Итого** | **1982** | **943** | **1039** | **0** | **0** |
 
-Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
-неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
-расхождений (`wire_udp` IPID_ZERO, `udpruntime` raw UDP,
-`tls12/tls13` record-layer). `SET_HTTPS` TTL закрыт 2026-11-12 и в список
+Это не оценка паритета: 1039 P означают «код есть, доказательство ветвей
+неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
 Статусы пересчитаны строго по колонке «статус»: описание вида «N цифр подряд»
@@ -103,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 937 / P 1045 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 943 / P 1039 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -345,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 226 | 322 | 0 | 0 |
-| core-state | 692 | 224 | 468 | 0 | 0 |
+| core-state | 692 | 229 | 463 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **938** | **1044** | **0** | **0** |
+| **Итого** | **1982** | **943** | **1039** | **0** | **0** |
 
 
 ---
@@ -1999,11 +1997,11 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 |---|---:|---:|---|---|---|---|
 | `d2k_net_whitelist_count` | 107-109 | 3 | число имён встроенного белого списка TCP 16-20 (266) | `r2o_rx_volume.rs:1-8 r2o_rx_volume_name_count` | **E*** | C `sizeof d2k_tcp1620_whitelist / sizeof [0]`; Rust `R2O_RX_VOLUME_NAMES` = 266 строк. Тест `r2o_rx_volume.rs:85` (`== 266`, first `9gag.com`, last `zoho.com`). |
 | `d2k_net_whitelist_name` | 110-112 | 3 | имя белого списка по индексу, NULL за концом | `r2o_rx_volume.rs:10-14 r2o_rx_volume_name` | **E*** | C `i < d2k_net_whitelist_count() ? d2k_tcp1620_whitelist[i] : NULL`; Rust `R2O_RX_VOLUME_NAMES.lines().nth(index)` → `None` за концом. Тот же список/порядок (266 имён), тест `:85-87`. |
-| `wr16be` | 150-150 | 1 | запись big-endian u16 | `plan_text::push_u16` | **P*** | C `p[0]=v>>8; p[1]=v`; Rust `push_u16` — `to_be_bytes` ровно в два байта. Отдельной функции в compose-слое нет; используется TLV-билдерами. |
-| `rd16be` | 151-151 | 1 | чтение big-endian u16 | `plan_text::read_u16`/`from_be_bytes` | **P*** | C `(p[0]<<8)\|p[1]`; Rust `from_be_bytes` с bounds-check через `get`. Отдельной функции нет; используется TLV-разбором/`plan_tlv_stamp_ident`. |
-| `wr32be` | 152-155 | 4 | запись big-endian u32 | `plan_text.rs:739-741 push_u32` | **P*** | C `p[0]=v>>24; p[1]=v>>16; p[2]=v>>8; p[3]=v`. Rust `push_u32` пишет `to_be_bytes` ровно в 4 байта; отдельной функции в compose-слое нет. |
-| `tlv_rec` | 162-174 | 13 | TLV-запись из двух частей (a+b): `vlen<=0xffff`, `pos+4<=cap`, `cap-(pos+4)>=vlen`, type/len BE, копии | `plan_text::push_record` | **P** | **Ветви сверены:** C `vlen=alen+blen`; отказ при `vlen>0xffff \|\| pos+4>cap \|\| cap-(pos+4)<vlen`; `buf[pos]=typ>>8/typ`, `vlen>>8/vlen`; `memcpy a`, `memcpy b`; `pos+=4+vlen`. Rust `push_record` проверяет `u16::try_from(value.len())` и `MAX_PLAN_BYTES`; двухчастной формы нет (собирает `Vec`), для валидных записей байты те же. |
-| `tlv_header` | 186-198 | 13 | шапка TLV: `D2KP`, schema 1, minexec 1, flags 0, n_records, REC_ID (16 нулей), REC_PROTO (6,1) | `compose_d2o::header` (текст) | **P** | **Ветви C:** `*pos+12>cap` → -1; `'D','2','K','P'`; `wr16be(schema=1)`, `wr16be(minexec=1)`, `wr16be(flags=0)`, `wr16be(n_records)`; `pos+=12`; REC_ID `0x0001` + len 16 + 16 нулей; REC_PROTO `0x0002` + len 2 + `[6,1]`. Rust `compose_d2o::header` выдаёт **текстовую** шапку `d2k-plan 1 1\nid 000…0\nproto tcp tls\n` — побайтно для differential, но не TLV; runtime-сборщики используют `r2o-plan` (осознанный брендинг). TLV-форму R2O не собирает; прямого TLV-differential нет. |
+| `wr16be` | 150-150 | 1 | запись big-endian u16 | `plan_text::push_u16` | E | C `wr16be`: `p[0]=v>>8; p[1]=v`. Rust `push_u16` пишет `to_be_bytes`; тест `push_u16_and_push_u32_match_c_wr16be_wr32be` сверяет 0, 1, 0x1234, 0xffff. |
+| `rd16be` | 151-151 | 1 | чтение big-endian u16 | `plan::read_u16` | E | C `rd16be`: `(p[0]<<8)|p[1]`. Rust `read_u16` — `from_be_bytes` с bounds-check через `get`; тест `read_u16_and_read_u32_match_c_rd16be_with_bounds` проверяет значения, обрезку и переполнение offset. |
+| `wr32be` | 152-155 | 4 | запись big-endian u32 | `plan_text::push_u32` | E | C `wr32be`: `p[0]=v>>24 … p[3]=v`. Rust `push_u32` пишет `to_be_bytes`; тест `push_u16_and_push_u32_match_c_wr16be_wr32be` сверяет 0, 1, 0x12345678, 0xffffffff. |
+| `tlv_rec` | 162-174 | 13 | TLV-запись из двух частей (a+b): `vlen<=0xffff`, `pos+4<=cap`, `cap-(pos+4)>=vlen`, type/len BE, копии | `plan_text::compile_text` | E | C `tlv_rec`: `vlen=alen+blen`, type/len BE, затем `a` и `b`; отказ при `vlen>0xffff` или нехватке места. Rust `compile_text` пишет те же записи `kind/len/value` BE и проверяет `u16::try_from`/`MAX_PLAN_BYTES`; тест `d2kp_header_matches_c_tlv_header_for_question_plan` проверяет границы всех записей и declared count, точные hex-тесты фиксируют байты. Двухчастная форма C — API-деталь, на проводе байты те же. |
+| `tlv_header` | 186-198 | 13 | шапка TLV: `D2KP`, schema 1, minexec 1, flags 0, n_records, REC_ID (16 нулей), REC_PROTO (6,1) | `plan_text::compile_text` + `Plan::to_wire(..., true)` | E | C `tlv_header`: 12 байт `D2KP`+schema+minexec+flags+n_records BE, затем REC_ID `0x0001` len 16 с нулями и REC_PROTO `0x0002` len 2 `[6,1]`. Rust `compile_text` собирает ту же шапку в R2OP, `Plan::to_wire(..., true)` меняет magic на D2KP; тест `d2kp_header_matches_c_tlv_header_for_question_plan` сверяет байты шапки, REC_ID/REC_PROTO и границы всех записей. |
 | `plan_tlv_stamp_ident` | 218-240 | 23 | проверяет REC_ID на offset 12 (len 16), FNV-1a по TLV с нулевым id, пишет `plan-%08x` | `discovery.rs:1450 plan_text_for_trial`, `:1459 stable_plan_id`, `:1434 text_with_id` | **P** | **Ветви C:** `rec=12`, `val=16`; `!tlv \|\| len<32` → -1; `rd16(tlv+rec)==REC_ID && rd16(tlv+rec+2)==16`, иначе -1; `h=2166136261`; для каждого байта `h^=tlv[i]; h*=16777619`; `snprintf("plan-%08x")`; `memset(out_id,0,16)`, копия `min(strlen,16)`; запись в `tlv+val`. **Расхождение:** Rust `plan_text_for_trial` подставляет переданный 16-байтный id через `text_with_id`, FNV над TLV не считает; `stable_plan_id` — другой хэш (два FNV-1a 64-бит по family/shape/тексту), не `plan-%08x`. C/Rust differential штампа нет. |
 | `overlap_plan_tlv` | 258-270 | 13 | TLV-план перекрытия: 5 записей, payload 1 (`0f`), seqovl 1/0, order forward | `compose_d2o::overlap_plan_text` + `plan_text::compile_text` | **P** | C `tlv_header(...,5)`; payload id `[0,1]` + байт `D2K_OVERLAP_FILLER` = **0x0f**; seqovl `[payload=1,poison=0]`; order forward. Rust `overlap_plan_text` пишет текст `payload 1 0f`, `seqovl payload=1 poison=0`, `order forward`; после компиляции воздействие то же, но форма TLV/текст различается. TLV-вариант используется только C-тестом, прямого TLV-differential нет. |
 | `reorder_plan_tlv` | 277-290 | 14 | TLV-план обратного порядка: 6 записей, два split, order reverse, pace | `compose_d2o::reorder_plan_text` + `compile_text` | **P** | C `tlv_header(...,6)`; split `[payload_start,1]`; split `[sni_middle,0]`; order reverse; pace `D2K_PACE_PIECE_US`. Rust текст/компилятор; TLV-вариант только C-тест. |

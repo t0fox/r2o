@@ -924,6 +924,25 @@ fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, PlanError> {
 }
 
 #[cfg(test)]
+mod read_be_tests {
+    use super::{read_u16, read_u32};
+
+    #[test]
+    fn read_u16_and_read_u32_match_c_rd16be_with_bounds() {
+        // C `rd16be`: (p[0]<<8)|p[1].
+        assert_eq!(read_u16(&[0x12, 0x34], 0).unwrap(), 0x1234);
+        assert_eq!(read_u16(&[0xff, 0xff], 0).unwrap(), u16::MAX);
+        assert!(read_u16(&[0x12], 0).is_err());
+        assert!(read_u16(&[0x12, 0x34], usize::MAX).is_err());
+
+        assert_eq!(read_u32(&[0x12, 0x34, 0x56, 0x78], 0).unwrap(), 0x1234_5678);
+        assert_eq!(read_u32(&[0xff, 0xff, 0xff, 0xff], 0).unwrap(), u32::MAX);
+        assert!(read_u32(&[0, 0, 0], 0).is_err());
+        assert!(read_u32(&[0x12, 0x34, 0x56, 0x78], usize::MAX).is_err());
+    }
+}
+
+#[cfg(test)]
 mod write_into_tests {
     use super::PlanError;
 

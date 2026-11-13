@@ -739,3 +739,31 @@ fn push_u16(output: &mut Vec<u8>, value: u16) {
 fn push_u32(output: &mut Vec<u8>, value: u32) {
     output.extend_from_slice(&value.to_be_bytes());
 }
+
+#[cfg(test)]
+mod big_endian_tests {
+    use super::{push_u16, push_u32};
+
+    #[test]
+    fn push_u16_and_push_u32_match_c_wr16be_wr32be() {
+        // C `wr16be`: p[0]=v>>8, p[1]=v.
+        let mut bytes = Vec::new();
+        for value in [0u16, 1, 0x1234, u16::MAX] {
+            push_u16(&mut bytes, value);
+        }
+        assert_eq!(bytes, [0x00, 0x00, 0x00, 0x01, 0x12, 0x34, 0xff, 0xff]);
+
+        // C `wr32be`: p[0]=v>>24 … p[3]=v.
+        let mut bytes = Vec::new();
+        for value in [0u32, 1, 0x1234_5678, u32::MAX] {
+            push_u32(&mut bytes, value);
+        }
+        assert_eq!(
+            bytes,
+            [
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x12, 0x34, 0x56, 0x78, 0xff, 0xff,
+                0xff, 0xff
+            ]
+        );
+    }
+}
