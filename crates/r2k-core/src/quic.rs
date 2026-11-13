@@ -62,6 +62,27 @@ pub fn r2k_quic_data_judge(
     R2kQuicDataVerdict::NotRun
 }
 
+/// C `d2k_quic_arm_data_judge` (`core/include/d2k_quicprobe.h:454-461`):
+/// без рукопожатия — NO_HANDSHAKE; нет кода или 451 — CUT; полный ответ или
+/// порог байт — PASS; иначе CUT.
+pub fn r2k_quic_arm_data_judge(
+    handshake: bool,
+    status: i32,
+    app_bytes: u64,
+    complete: bool,
+) -> R2kQuicDataVerdict {
+    if !handshake {
+        return R2kQuicDataVerdict::NoHandshake;
+    }
+    if status <= 0 || status == 451 {
+        return R2kQuicDataVerdict::Cut;
+    }
+    if complete || app_bytes >= R2K_QUIC_DATA_BYTES {
+        return R2kQuicDataVerdict::Pass;
+    }
+    R2kQuicDataVerdict::Cut
+}
+
 /// Вычислить время ожидания одного вопроса QUIC по правилу донора `3 × RTT`.
 pub fn r2k_quic_dynamic_wait_ms(rtt_ms: u32) -> u32 {
     let wait_ms = if rtt_ms >= R2K_QUIC_RTT_WAIT_CEIL_MS / 3 {
@@ -1784,6 +1805,35 @@ mod tests {
         assert_eq!(&v2[1..5], &super::QUIC_V2.to_be_bytes());
         assert!(super::retry_integrity_valid(super::QUIC_V2, &odcid, &v2));
         assert!(!super::retry_integrity_valid(super::QUIC_V1, &odcid, &v2));
+    }
+
+    #[test]
+    fn quic_arm_data_judge_matches_c() {
+        use super::{R2kQuicDataVerdict, r2k_quic_arm_data_judge};
+        assert_eq!(
+            r2k_quic_arm_data_judge(false, 200, 0, false),
+            R2kQuicDataVerdict::NoHandshake
+        );
+        assert_eq!(
+            r2k_quic_arm_data_judge(true, 0, 100, true),
+            R2kQuicDataVerdict::Cut
+        );
+        assert_eq!(
+            r2k_quic_arm_data_judge(true, 451, 100, true),
+            R2kQuicDataVerdict::Cut
+        );
+        assert_eq!(
+            r2k_quic_arm_data_judge(true, 204, 1, true),
+            R2kQuicDataVerdict::Pass
+        );
+        assert_eq!(
+            r2k_quic_arm_data_judge(true, 200, 32_768, false),
+            R2kQuicDataVerdict::Pass
+        );
+        assert_eq!(
+            r2k_quic_arm_data_judge(true, 200, 32_767, false),
+            R2kQuicDataVerdict::Cut
+        );
     }
 
     #[test]

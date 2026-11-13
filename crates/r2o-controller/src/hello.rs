@@ -541,17 +541,25 @@ fn read_len(bytes: &[u8], offset: usize, width: usize) -> Option<usize> {
     }
 }
 
+/// C `wr24` (`core/hello.c:61-65`): младшие 24 бита big-endian.
+fn wr24(bytes: &mut [u8], offset: usize, value: usize) {
+    let value = value & 0x00ff_ffff;
+    bytes[offset] = (value >> 16) as u8;
+    bytes[offset + 1] = (value >> 8) as u8;
+    bytes[offset + 2] = value as u8;
+}
+
 fn write_len(bytes: &mut [u8], offset: usize, width: usize, value: usize) -> Option<()> {
-    let max = if width == 2 {
-        u16::MAX as usize
-    } else {
-        0x00ff_ffff
-    };
-    if value > max {
-        return None;
-    }
-    for index in 0..width {
-        bytes[offset + width - index - 1] = (value >> (index * 8)) as u8;
+    match width {
+        2 => {
+            if value > u16::MAX as usize {
+                return None;
+            }
+            bytes[offset] = (value >> 8) as u8;
+            bytes[offset + 1] = value as u8;
+        }
+        3 => wr24(bytes, offset, value),
+        _ => return None,
     }
     Some(())
 }
@@ -797,5 +805,16 @@ mod tests {
         assert_eq!(hex_nibble(b'g'), None);
         assert_eq!(hex_nibble(0), None);
         assert_eq!(hex_nibble(b' '), None);
+    }
+
+    #[test]
+    fn wr24_writes_lower_24_bits_like_c() {
+        use super::wr24;
+        let mut bytes = [0u8; 3];
+        wr24(&mut bytes, 0, 0x12_34_56);
+        assert_eq!(bytes, [0x12, 0x34, 0x56]);
+        // C пишет младшие 24 бита без отказа.
+        wr24(&mut bytes, 0, 0x112_34_56);
+        assert_eq!(bytes, [0x12, 0x34, 0x56]);
     }
 }

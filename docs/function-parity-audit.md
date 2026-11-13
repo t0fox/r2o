@@ -84,12 +84,12 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 202 | 346 | 0 | 0 |
+| core-net | 548 | 204 | 344 | 0 | 0 |
 | core-state | 692 | 182 | 509 | 0 | 0 |
 | datapath-core | 400 | 182 | 218 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **835** | **1147** | **0** | **0** |
+| **Итого** | **1982** | **837** | **1145** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 835 / P 1147 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 837 / P 1145 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,12 +344,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 202 | 346 | 0 | 0 |
+| core-net | 548 | 204 | 344 | 0 | 0 |
 | core-state | 692 | 182 | 510 | 0 | 0 |
 | datapath-core | 400 | 182 | 218 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **835** | **1147** | **0** | **0** |
+| **Итого** | **1982** | **837** | **1145** | **0** | **0** |
 
 
 ---
@@ -474,7 +474,7 @@ Rust-владелец: `crates/r2o-controller/src/hello.rs` (почти пост
 | `rd16` | 51-53 | 3 | big-endian u16 | `hello.rs:186-190 hello_u16` | **E** | C `(p[0]<<8)\|p[1]`; Rust `hello_u16` — `u16::from_be_bytes` с `get`/`checked_add`. Владельцы `parse_hello`/`splice_sni` покрыты `test-controller-clienthello-differential.sh`. |
 | `rd24` | 54-56 | 3 | big-endian u24 | `hello.rs:192-196 hello_u24` | **E** | C `(p[0]<<16)\|(p[1]<<8)\|p[2]`. Rust `hello_u24`: `offset.checked_add(3)`, `bytes.get(offset..end)`, затем те же три байта со сдвигами 16/8/0; `Option`. Владелец `parse_hello_layout`; дифференциал ClientHello. |
 | `wr16` | 46-46 | 1 | big-endian u16 | `wire.rs:552-554 write_u16` | **E** | C `p[0]=(uint8_t)(v>>8); p[1]=(uint8_t)v`. Rust `write_u16` пишет `to_be_bytes` в срез ровно 2 байта. Владелец `d2k_udpfrag_build_ex`; differential ipfrag. |
-| `wr24` | 61-65 | 5 | запись big-endian u24 | `hello.rs:534-547 write_len(width=3)` | **P** | Rust проверяет `value>0xffffff`; C пишет младшие 24 бита. Для валидного шаблона/`delta` эквивалентно; при переполнении C испортил бы длину, Rust вернул бы `None`. |
+| `wr24` | 61-65 | 5 | запись big-endian u24 | `hello.rs` `wr24`/`write_len(width=3)` | E | C пишет младшие 24 бита без отказа. Rust `wr24` маскирует `0x00ff_ffff` и пишет три байта; `write_len(width=3)` вызывает его. Тест `wr24_writes_lower_24_bits_like_c` (0x123456 и 0x1123456 → 12 34 56). |
 | `skip_u8_vec` | 69-79 | 11 | пропуск TLS-вектора u8: `off+1<=end`, `off+1+n<=end` | `hello.rs:198-202 hello_skip_u8_vec` | **E** | C `*off+1>end` → -1, `n=b[*off]`, `*off+1+n>end` → -1, иначе `*off+=1+n`. Rust `bytes.get(offset)`, `checked_add(1+len)`, `next<=end`. Владелец `parse_hello_layout`; дифф ClientHello. |
 | `skip_u16_vec` | 80-90 | 11 | пропуск TLS-вектора u16: `off+2<=end`, `off+2+n<=end` | `hello.rs:204-208 hello_skip_u16_vec` | **E** | C `*off+2>end` → -1; `n=rd16(b+*off)`; `*off+2+n>end` → -1; `*off+=2+n`. Rust `hello_u16(bytes,offset)` с bounds-check, `offset.checked_add(2)?.checked_add(length)?`, `(next<=end).then_some(next)`. Эквивалентно; владелец `parse_hello_layout`. |
 | `parse_hello` | 128-272 | 145 | разбор записи ClientHello: длины, SNI-координаты, supported_versions, усечение расширений | `hello.rs:213-342 parse_hello_layout` | **E** | **Ветви сверены построчно:** `n<3`/`b[1]!=0x03`/`n<5`/`b[0]!=0x16` → пусто; `rec_len=rd16(3)`, `claimed=5+rec_len`, `end=min(claimed,avail)`; `off+4>end`/`b[4]!=1` → пусто; `hs_len=rd24(5)`, `off=8`, `off+hs_len>claimed` → пусто; `complete=hs_end<=avail`, иначе `hs_end=avail`; `+34`; session_id u8-вектор, cipher_suites u16-вектор, compression u8-вектор; `parsed=1`; `exts_len`, `off+exts_len>claimed` → пусто; `exts_end>hs_end` → `exts_truncated=1`; цикл `p+4<=exts_end`, `edata+elen>exts_end` → break; SNI (первый `etype==0`, `!have_sni`, list/имя и `nt==0 && nlen>0`), supported_versions (`0x002b`, `elen>=1`, `1+list_len<=elen`, любая `0x0304`); `p=edata+elen`. Rust `parse_hello_layout` те же поля/порядок; не хранит `rec_len_off`/`hs_len_off` (фиксированы 3 и 6), для `shape/sni/ech` не влияет. Дифф `test-controller-clienthello-differential.sh` (24+ кейса). |
@@ -1424,7 +1424,7 @@ Inline-решения QUIC-зонда: суд этапа данных, stall-д�
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| `d2k_quic_arm_data_judge` | 454-461 | 8 | handshake/status/bytes/complete → NO_HANDSHAKE/CUT/PASS | `quic.rs:31-63 r2k_quic_data_judge` (это `judge3`) | **P** | **Подтверждённое расхождение:** C: `!handshake→NO_HANDSHAKE`; `status<=0 или 451→CUT`; `complete или bytes>=32768→PASS`; иначе CUT. Rust — 8-аргументный `judge3`; при простых значениях (`stalled=false, need_complete=false, headers_too_long=false, budget_ok=false`) он даёт `status==0` → `NotRun`, `status>0` без complete и bytes<32768 → `NotRun`. C-тесты `test_quic_arm_data.c:319` (`1,0,3000,1→CUT`) и `:321` (`1,0,32768,0→CUT`) с Rust дали бы `NotRun`. Production `quicprobe.c:1577` вызывает `judge(0,0,0,0)` (NoHandshake) и `verify.c:2127` проверяет только `==PASS`, поэтому pass/fail там совпадает; контракт функции — нет. |
+| `d2k_quic_arm_data_judge` | 454-461 | 8 | handshake/status/bytes/complete → NO_HANDSHAKE/CUT/PASS | `r2k-core/quic.rs` `r2k_quic_arm_data_judge` | E | C: `!handshake→NO_HANDSHAKE`; `status<=0 или 451→CUT`; `complete или bytes>=32768→PASS`; иначе CUT. Rust `r2k_quic_arm_data_judge` повторяет все ветви и порог `R2K_QUIC_DATA_BYTES=32768`; тест `quic_arm_data_judge_matches_c` (все ветви, граница 32767/32768). `r2k_quic_data_judge` остаётся `judge3` для расширенного этапа. |
 | `d2k_quic_arm_data_judge_limited` | 466-470 | 5 | `handshake && status<=0 && headers_too_long→NOT_RUN`, иначе простой judge | `quic.rs:31-63 r2k_quic_data_judge` | **P** | Rust `judge3` содержит `status==0 && headers_too_long→NotRun` (`:56-58`), но: (1) при `status==0` **без** `headers_too_long` C даёт `CUT`, Rust — `NotRun`; (2) при `status>0`, неполном ответе и bytes<32768 C даёт `CUT`, Rust — `NotRun`. C-тест `test_quic_arm_data.c:328` (`1,0,3000,0,0→CUT`) расходится. Функция используется только C-тестами (`:326-332`), production идёт через простой judge/judge3. |
 | `d2k_qstall_init` | 523-535 | 13 | stall: RTO=max(3×RTT,1000), отметки прогресса | `r2o_quic_http3.rs:600-615 R2oQuicHttp3Stall::r2o_initialize` | **E** | Совпадает: `rto=max(3*rtt,1s)`, `last_progress_at=now`, `probe_at=None`, `wire_at_probe=wire`, `probe_packet_number=None`, `unanswered=0`; C `prog_seen/wire_seen` = Rust `progress_seen/wire_seen`. Rust добавляет только счётчики `probes_sent/probes_acked`. Тесты `r2o_quic_http3.rs:1435-1518` (PN-ACK, одновременный рост, STALLED/ONEWAY). |
 | `d2k_qstall_sent` | 540-543 | 4 | запомнить PN отправленного PING | `r2o_quic_http3.rs:617-620 R2oQuicHttp3Stall::r2o_sent` | **E** | C `probe_pn=pn; probe_pn_set=1`; Rust `probe_packet_number=Some(pn); probes_sent+=1`. Номер и признак «PING ушёл» эквивалентны; тесты `:1437-1455`. |
