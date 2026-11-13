@@ -8384,6 +8384,17 @@ fn r2o_merge_ech_witness_candidates(
     candidates
 }
 
+/// C `on_exchange` (`sched.c:10222-10226`): чистое рукопожатие отмечается
+/// только по разобранному `server_hello` на TCP-потоке без плана. Любой
+/// `seen_type`, включая внешний тип 23, — отдельное наблюдение (§4.2), а не
+/// доказательство рукопожатия.
+#[cfg(unix)]
+fn r2o_legacy_exchange_is_clean(event: &r2k_core::control::LegacyExchangeEvent) -> bool {
+    event.key[37] == 6
+        && event.server_hello
+        && event.planned == r2k_core::control::LEGACY_PLANNED_NO
+}
+
 #[cfg(unix)]
 #[derive(Default)]
 struct R2oCleanHandshakeCache {
@@ -21111,8 +21122,7 @@ impl ControlClient {
         clean_handshakes: &mut R2oCleanHandshakeCache,
     ) {
         let now = std::time::Instant::now();
-        let has_response = event.server_hello || event.seen_types & 0x0f != 0;
-        if event.planned == r2k_core::control::LEGACY_PLANNED_NO && has_response {
+        if r2o_legacy_exchange_is_clean(event) {
             if let Some(name) = tcp_hello_names.clean_handshake_name(&event.key, now) {
                 clean_handshakes.note(&name, event.key[0], now);
                 println!(
@@ -30476,6 +30486,50 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .requires_recheck(&target, std::time::Instant::now())
         );
+    }
+
+    #[test]
+    fn legacy_exchange_clean_handshake_requires_parsed_server_hello() {
+        let mut key = [0; r2k_core::control::KEY_LEN];
+        key[0] = 4;
+        key[37] = 6;
+        let event = |server_hello, seen_types, planned, transport| {
+            let mut key = key;
+            key[37] = transport;
+            r2k_core::control::LegacyExchangeEvent {
+                key,
+                first_record_type: 23,
+                seen_types,
+                num: 100,
+                server_hello,
+                planned,
+            }
+        };
+        // C `on_exchange`: только server_hello + TCP + без плана.
+        assert!(super::r2o_legacy_exchange_is_clean(&event(
+            true,
+            0,
+            r2k_core::control::LEGACY_PLANNED_NO,
+            6
+        )));
+        assert!(!super::r2o_legacy_exchange_is_clean(&event(
+            false,
+            0b1000,
+            r2k_core::control::LEGACY_PLANNED_NO,
+            6
+        )));
+        assert!(!super::r2o_legacy_exchange_is_clean(&event(
+            true,
+            0,
+            r2k_core::control::LEGACY_PLANNED_YES,
+            6
+        )));
+        assert!(!super::r2o_legacy_exchange_is_clean(&event(
+            true,
+            0,
+            r2k_core::control::LEGACY_PLANNED_NO,
+            17
+        )));
     }
 
     #[test]
