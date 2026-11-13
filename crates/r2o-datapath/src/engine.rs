@@ -1852,6 +1852,12 @@ fn guard_plan_applies_without_emissions(
         .is_ok_and(|actions| actions.emits.is_empty() && actions.fate != OriginalFate::Hold)
 }
 
+/// C `plan_fits_transport` (`datapath/session.c:672-676`): план без
+/// объявленного транспорта подходит любому; иначе протокол должен совпасть.
+pub fn plan_fits_transport(plan: Option<&Plan>, proto: u8) -> bool {
+    plan.is_none_or(|plan| plan.transport == 0 || plan.transport == proto)
+}
+
 fn tcp_plan_input<'a>(
     plan: &Plan,
     packet: &'a [u8],
@@ -1859,7 +1865,7 @@ fn tcp_plan_input<'a>(
     tcp_segment_cap: usize,
     reference_ttl: u8,
 ) -> Option<PacketInput<'a>> {
-    if plan.transport != 6 || !matches!(plan.proto, 1 | PROTO_HTTP) {
+    if !plan_fits_transport(Some(plan), 6) || !matches!(plan.proto, 1 | PROTO_HTTP) {
         return None;
     }
     let tcp = view.tcp_segment(packet)?;
@@ -2391,6 +2397,46 @@ mod tests {
 
     const V1_INITIAL: &[u8] = include_bytes!("../../r2k-core/tests/fixtures/quic_v1_initial.bin");
     const V2_INITIAL: &[u8] = include_bytes!("../../r2k-core/tests/fixtures/quic_v2_initial.bin");
+
+    #[test]
+    fn plan_fits_transport_matches_c() {
+        let mut plan = Plan::default();
+        assert!(super::plan_fits_transport(None, 6));
+        assert!(super::plan_fits_transport(None, 17));
+        // transport 0 — «не объявлен», подходит любому протоколу.
+        assert!(super::plan_fits_transport(Some(&plan), 6));
+        assert!(super::plan_fits_transport(Some(&plan), 17));
+        plan.transport = 6;
+        assert!(super::plan_fits_transport(Some(&plan), 6));
+        assert!(!super::plan_fits_transport(Some(&plan), 17));
+        plan.transport = 17;
+        assert!(!super::plan_fits_transport(Some(&plan), 6));
+        assert!(super::plan_fits_transport(Some(&plan), 17));
+    }
+
+    #[test]
+    fn transport_zero_plan_applies_to_tcp_like_c() {
+        let mut plan = tcp_fake_plan_with_rst_guard();
+        plan.transport = 0;
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+        );
+        let hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello_with_sni());
+        assert!(matches!(
+            decide_with_session(&mut sessions, &plan, &hello),
+            PacketDecision::Transmit { .. }
+        ));
+    }
 
     #[test]
     fn session_capacity_flows_and_refusals_match_c() {

@@ -86,10 +86,10 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 197 | 351 | 0 | 0 |
 | core-state | 692 | 182 | 509 | 0 | 0 |
-| datapath-core | 400 | 181 | 219 | 0 | 0 |
+| datapath-core | 400 | 182 | 218 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **829** | **1153** | **0** | **0** |
+| **Итого** | **1982** | **830** | **1152** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 829 / P 1153 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 830 / P 1152 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -346,10 +346,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 197 | 351 | 0 | 0 |
 | core-state | 692 | 182 | 510 | 0 | 0 |
-| datapath-core | 400 | 181 | 219 | 0 | 0 |
+| datapath-core | 400 | 182 | 218 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **829** | **1153** | **0** | **0** |
+| **Итого** | **1982** | **830** | **1152** | **0** | **0** |
 
 
 ---
@@ -3859,7 +3859,7 @@ CLI-логирования, health-файла, duration, состава свод
 | `is_stun_request` (static) | 580-582 | 3 | STUN Binding Request (`type 0x0001`) | `stun.rs is_binding_request` | **E*** | C `return is_stun_binding(d,n,0x0001)`: те же проверки `n>=20`, top bits 0, `len%4==0`, `20+len<=n`, magic `2112a442`, type. Rust `is_binding_request` → `is_binding(...,BINDING_REQUEST)`; эквивалентно. |
 | `is_stun_response_for` (static) | 584–588 | 5 | Binding Success 0x0101 + txid | `stun.rs:76-78` | **E** | C `is_stun_binding(...,0x0101) && memcmp(d+8,txid,12)==0`; Rust `is_binding(packet, BINDING_RESPONSE) && packet[8..20]==txid` (`stun.rs:76-78`). |
 | `d2k_session_nat_stats` | 650–656 | 7 | глобальные NAT ok/miss/none/retry | `r2o_conntrack_gate.rs` `nat_stats` | E | C ведёт `g_nat_ok/miss/none/retried` в `flow_tracked`. Rust `R2oConntrackGate` считает те же четыре состояния: `TcpSynAck`/`Found` → ok, три `Missing` → miss, `TableMissing` → none, `Found` после повтора → retried. Тест `nat_stats_match_d2o_counters`. |
-| `plan_fits_transport` (static) | 672–676 | 5 | `!p → 1`; transport 0 или совпал с proto | выбор плана в `engine.rs`/`main.rs` (`plan.transport`) | **P** | C явно пропускает план с `transport==0` и отвергает чужой (`session.c:672-676`). Rust `name_plans`/`decide_with_session` проверяет транспорт при выборе/применении; отдельной функции нет. Для планов R2O с явным transport эквивалентно; «дедушкино» 0 обрабатывается иначе (по контексту плана). |
+| `plan_fits_transport` (static) | 672–676 | 5 | `!p → 1`; transport 0 или совпал с proto | `engine.rs` `plan_fits_transport` | E | C `!p` → 1; `tr == 0 \|\| tr == proto`. Rust `plan_fits_transport(Option<&Plan>, proto)` повторяет обе ветви; используется в `tcp_plan_input` вместо жёсткого `transport != 6`, поэтому план без объявленного транспорта снова подходит TCP, как в C. Тесты `plan_fits_transport_matches_c` (0/6/17) и `transport_zero_plan_applies_to_tcp_like_c`. |
 | `flow_tracked` (static) | 678–777 | 100 | conntrack: первый пакет — не читать; SYN-ACK — доказано; до 3 попыток procfs; nat_state 0/1/3, g_nat_* | `r2o_conntrack_gate.rs:55-93 confirm`, `:115-175 guard_decision`, `proc_nat.rs:20 lookup` | **P** | **Совпадает:** первый пакет не читает таблицу; TCP SYN-ACK считается доказательством; три попытки `lookup`; «таблицы нет» — отдельное состояние; первый пакет при промахе пропускается. **Подтверждённые отличия:** (1) C ведёт глобальные `g_nat_ok/miss/none/retried` и `nat_state` на потоке; Rust кеширует `Tracked/NoConntrackTable` в `R2oConntrackGate`, счётчиков NAT нет (N `d2k_session_nat_stats`); (2) C вызывает `flow_tracked` **до** применения плана и при `-1` отказывает целиком; Rust `guard_decision` вызывается после решения и для UDP-фрагментов дополнительно переписывает адреса; (3) C `first_packet` для TCP всегда 0, Rust передаёт `first_udp_packet` только в UDP-ветке, TCP — `false`; (4) C при `rc>0` ставит `nat_state=3` навсегда, Rust кеширует `NoConntrackTable` с idle 120 с. |
 | `handle_udp` (static) | 779–1569 | 791 | весь UDP-путь: направление по hook/flow/443, серверные счётчики/voice/STUN, окно 8, hold, QUIC-сборка/снимок/ECH, addr/voice/name/fallback планы, `plan_fits_transport`, запрет разреза, conntrack/NAT фрагментов, сборка до 16 посылок, APPLIED | `main.rs:1543-2604` (UDP-путь), `r2o_udp_sessions.rs`, `r2o_quic.rs`, `r2o_voice.rs`, `r2o_conntrack_gate.rs` | **P** | **Совпадает по крупным ветвям:** направление из OUT/POST vs IN/PRE с fallback на известное направление и порт 443; серверная сторона учитывается, voice/STUN-доказательства и UDP EXCHANGE; окно 8; `saw_hello`/`saw_initial`; запрет повторного плана; `quic_deny`; выбор addr/voice/name/fallback; `plan_fits_transport`; запрет нескольких payload-посылок; conntrack/NAT; лимит 16; APPLIED. **Подтверждённые отличия:** (1) C хранит `saw_initial` и `rev_after_hello` в `d2k_flow`; Rust `r2o_udp_sessions` имеет `hello_seen`, но отдельного состояния «Initial без имени» не найдено — молчание по такому потоку может не наблюдаться; (2) C добавляет датаграмму в `init_ring` всегда до `qsnap_done`; Rust — только до первого отправленного приветствия (`hello_reported`), после чего кольцо чистится; (3) C снимок `last_hello/last_name` глобальный на слот, Rust `QuicHello { key, host, snapshot }`; (4) C `find_addr_probe`/`find_voice_probe`/`find_target`/`s->plan` и `refuse` при отсутствии; Rust `select_with_quic_host_at_hook` + fallback `plan`, `qdeny`; (5) C `payload_emits > 1` отвергает план для UDP, Rust проверка в `engine`/`wire` иная; (6) C при `acts.fate==HOLD` отказывает, Rust `Transmit`/fate; (7) C `out->quic_name/quic_shape_miss` для лога, Rust — события. Полного C/Rust differential на все ветви нет; `r2o-udp-exchange-differential.sh`, voice/quic differentials частичные. |
 | `note_tcp_hello` (static) | 1573–1580 | 8 | `!controller_probe` → `tcp_hello_flows++`; `hello_ack=rd32(tcp+8)`, `hello_ack_valid=ack` | `engine.rs:1044-1049`, `r2o_tcp_hello_flows` | **P** | **Совпадает:** инкремент только для не-зонда; Rust `hello_ack: Option<u32>` заменяет пару `hello_ack/hello_ack_valid`; счётчик `r2o_tcp_hello_flows`. Тесты `engine.rs:2548/2565/2608`; C/Rust differential нет. |
