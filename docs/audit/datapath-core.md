@@ -1684,15 +1684,12 @@ packet-path-пробел (`shape_tcp_options_family`). Счётчики собы
   `d2k_nfq_open/close/fd`, `d2k_nfq_recv`, `d2k_nfq_verdict(_payload)`,
   `d2k_nfq_lost` сверены с `nfqueue.rs`/`netlink.rs`. Bind/params/ACK,
   `SO_RCVBUF(FORCE)`, очередь и счётчик `lost` покрыты netlink/NFQUEUE
-  тестами. **Расхождение ENOBUFS:** C `d2k_nfq_recv` при `ENOBUFS`
-  возвращает `-2`, `d2kd.c:1590` делает `d2k_hold_flush(..., all=1)` для
-  TCP и только `d2k_udp_path_expire(..., read_follows=0)` для UDP; R2O
-  `ReceiveError::LostPackets` (`main.rs:1312-1335`) вызывает
-  `holding.flush(..., all=true)` **и** `udp_holds.r2o_drain()` +
-  `udp_deferred_verdicts/resends.r2o_drain_accept()`, то есть сбрасывает
-  все UDP-удержания, а не только истёкшие. P, конкретный behavioural gap.
-  EINTR: C возвращает 0, R2O `ReceiveError::Wait`; `receive_error_requires_flush`
-  для `Wait` = false, поэтому наблюдаемое поведение цикла совпадает.
+  тестами. **ENOBUFS-дренаж приведён к C:** на `ReceiveError::LostPackets`
+  TCP-удержания сбрасываются все, а UDP — только истёкшие
+  (`udp_holds.r2o_flush(now)`, `r2o_take_due_accept(now)`), как
+  `d2k_udp_path_expire(..., 0)`. Тест
+  `nfqueue_error_releases_only_due_udp_deferred_entries_like_c`. Остаётся P
+  по `d2k_nfq_recv`: poll/EAGAIN-после-poll трактуются как `Io`, а не `Wait`.
 - **`udp_hold.c`:** `same_key`, `clear_slot`, `release_slot`, `new/free/
   flush/feed/feed_marked/take/next_ns` сверены с `r2o_udp_hold.rs`:
   `SLOTS=16`, `PACKETS=8`, `PACKET_MAX=1600`, `WAIT=100ms` совпадают;

@@ -1416,7 +1416,11 @@ mod app {
                         }
                         ReceiveError::Wait(_) => unreachable!("poll errors do not flush packets"),
                     }
-                    let released = holding.flush(Instant::now(), name_plans.revision(), true);
+                    // C `d2kd.c:1585-1593`: на ошибке NFQUEUE TCP-удержания
+                    // сбрасываются все, а UDP — только истёкшие
+                    // (`d2k_udp_path_expire(..., 0)`).
+                    let failure_now = Instant::now();
+                    let released = holding.flush(failure_now, name_plans.revision(), true);
                     r2o_report_incomplete_captures(&mut holding);
                     r2o_flush_owned_hold_releases(&mut holding, raw.as_ref());
                     release_accepting(&mut socket, &released);
@@ -1425,13 +1429,19 @@ mod app {
                         raw.as_ref(),
                         &route_gate,
                         options.probe_mark,
-                        Instant::now(),
+                        failure_now,
                         &mut udp_follow,
                         0,
-                        udp_holds.r2o_drain(),
+                        udp_holds.r2o_flush(failure_now),
                     );
-                    release_accepting(&mut socket, &udp_deferred_verdicts.r2o_drain_accept());
-                    release_accepting(&mut socket, &udp_deferred_resends.r2o_drain_accept());
+                    release_accepting(
+                        &mut socket,
+                        &udp_deferred_verdicts.r2o_take_due_accept(failure_now),
+                    );
+                    release_accepting(
+                        &mut socket,
+                        &udp_deferred_resends.r2o_take_due_accept(failure_now),
+                    );
                     (false, false)
                 }
             };

@@ -377,6 +377,19 @@ impl R2oUdpDeferredVerdicts {
         first_error.map_or(Ok(released), Err)
     }
 
+    /// Забрать только созревшие ID — C `d2k_udp_path_expire(..., 0)`.
+    pub fn r2o_take_due_accept(&mut self, now: Instant) -> Vec<u32> {
+        let mut ids = Vec::new();
+        for slot in &mut self.slots {
+            if slot.as_ref().is_some_and(|entry| entry.due <= now)
+                && let Some(entry) = slot.take()
+            {
+                ids.extend_from_slice(&entry.ids[..entry.count]);
+            }
+        }
+        ids
+    }
+
     /// Принять все ещё удержанные ID, например при штатном завершении.
     pub fn r2o_drain_accept(&mut self) -> Vec<u32> {
         let mut ids = Vec::new();
@@ -758,6 +771,21 @@ impl R2oUdpDeferredResends {
         stats
     }
 
+    /// Забрать только созревшие ID — C `d2k_udp_path_expire(..., 0)`.
+    pub fn r2o_take_due_accept(&mut self, now: Instant) -> Vec<u32> {
+        self.slots
+            .iter_mut()
+            .filter_map(|slot| {
+                let due = slot.as_ref().is_some_and(|entry| entry.due <= now);
+                if due {
+                    slot.take().map(|entry| entry.id)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     /// Принять ID всех ещё ожидающих поздних хвостов.
     pub fn r2o_drain_accept(&mut self) -> Vec<u32> {
         self.slots
@@ -807,7 +835,8 @@ pub fn r2o_udp_send_busy(error: &std::io::Error) -> bool {
 mod tests {
     use super::{
         R2O_UDP_RELEASE_SLOTS, R2oUdpDeferredEnqueueError, R2oUdpDeferredResends,
-        R2oUdpFollowTable, R2oUdpHeldPacket, R2oUdpHoldBatch, r2o_release_batch_with,
+        R2oUdpDeferredVerdicts, R2oUdpFollowTable, R2oUdpHeldPacket, R2oUdpHoldBatch,
+        r2o_release_batch_with,
     };
     use crate::r2o_udp_sessions::flow_key_from_packet;
     use std::io;
@@ -937,6 +966,39 @@ mod tests {
         assert_eq!(stats.flushed, R2O_UDP_RELEASE_SLOTS);
         assert_eq!(stats.resend_failed, R2O_UDP_RELEASE_SLOTS);
         assert_eq!(stats.resend_busy, R2O_UDP_RELEASE_SLOTS);
+    }
+
+    #[test]
+    fn nfqueue_error_releases_only_due_udp_deferred_entries_like_c() {
+        let now = Instant::now();
+        let packet = udp_packet();
+        let mut resends = R2oUdpDeferredResends::new();
+        assert!(resends.r2o_enqueue(now + Duration::from_millis(10), 1, &packet));
+        assert!(resends.r2o_enqueue(now + Duration::from_millis(20), 2, &packet));
+        assert_eq!(
+            resends.r2o_take_due_accept(now + Duration::from_millis(15)),
+            [1]
+        );
+        assert!(!resends.is_empty());
+        assert_eq!(
+            resends.r2o_take_due_accept(now + Duration::from_millis(25)),
+            [2]
+        );
+        assert!(resends.is_empty());
+
+        let mut verdicts = R2oUdpDeferredVerdicts::new();
+        assert!(verdicts.r2o_enqueue(now + Duration::from_millis(10), &[3], &[0], None));
+        assert!(verdicts.r2o_enqueue(now + Duration::from_millis(20), &[4], &[0], None));
+        assert_eq!(
+            verdicts.r2o_take_due_accept(now + Duration::from_millis(15)),
+            [3]
+        );
+        assert!(!verdicts.is_empty());
+        assert_eq!(
+            verdicts.r2o_take_due_accept(now + Duration::from_millis(25)),
+            [4]
+        );
+        assert!(verdicts.is_empty());
     }
 
     #[test]
