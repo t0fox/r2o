@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 317 | 231 | 0 | 0 |
-| core-state | 692 | 359 | 333 | 0 | 0 |
+| core-state | 692 | 364 | 328 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1164** | **818** | **0** | **0** |
+| **Итого** | **1982** | **1169** | **813** | **0** | **0** |
 
-Это не оценка паритета: 818 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 813 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1164 / P 818 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1169 / P 813 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 317 | 231 | 0 | 0 |
-| core-state | 692 | 359 | 333 | 0 | 0 |
+| core-state | 692 | 364 | 328 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1164** | **818** | **0** | **0** |
+| **Итого** | **1982** | **1169** | **813** | **0** | **0** |
 
 
 ---
@@ -2121,8 +2121,8 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `self_mem` | 136-148 | 13 | RSS/HWM/VmData/Threads из `/proc/self/status` | `diagnostics.rs` process memory | **P** | C инициализирует `-1`, `fopen("/proc/self/status")`; построчно `VmRSS:`/`VmHWM:`/`VmData:`/`Threads:` → `strtol`. Rust читает те же поля (`diagnostics.rs`), формат/точка вызова иные; отдельного C/Rust differential нет. |
 | `sched_say` | 150-157 | 8 | журнал планировщика с локальным временем | `main.rs` log callback | **P*** | C `localtime_r` + `printf("%02d:%02d:%02d %s\n")` + `fflush`. Rust пишет через свой logger с иным форматом; отдельной функции нет. |
 | `http_search_portal` | 168-174 | 7 | класс 3 (портал) → `d2k_httpsearch_portal` | `main.rs:4729-4750 r2o_http_search_https_action` | **P** | **Ветви сверены:** C `!g_hs \|\| !family \|\| state UNKNOWN/PROBING \|\| d2k_https_upgrade(st)` → return; иначе `d2k_httpsearch_portal(host,family,addr,now)`. Rust классифицирует `Served/TlsBlocked` → Suppress, иное известное → Queue, неизвестное с pending → Wait, иначе Suppress; live-bound failure отдельно. Набор состояний тот же, pending/unknown различаются. |
-| `hs_open_port` | 176-208 | 33 | socket family, `SO_MARK` только при `g_probe_mark`, bind wildcard, getsockname, big-endian порт | `BoundTcpProbe::open` (`main.rs:22507-22611`) | **P** | **Ветви сверены:** C `socket(family==6?AF_INET6:AF_INET,SOCK_STREAM,0)`; `SO_MARK` под `#ifdef`, только при `g_probe_mark!=0`, ошибка → close/-1; `sockaddr_storage` zero, family, `bind`, `getsockname`, `sport_be=sin_port`; fd. Rust `BoundTcpProbe::open`: mark `unwrap_or(0x2d)` (0 отключает), nonblock+CLOEXEC, отказ при нулевом порту; при `Some(0)` марка не ставится, как C при 0. Rust строже по проверкам. |
-| `hs_close_port` | 210-210 | 1 | закрыть порт поиска | `OwnedFd`/Drop (`BoundTcpProbe`) | **P*** | C `static void hs_close_port(int fd){ if (fd>=0) close(fd); }`. Rust `BoundTcpProbe` владеет `OwnedFd` и закрывает при drop; отдельной функции нет. |
+| `hs_open_port` | 176-208 | 33 | socket family, `SO_MARK` только при `g_probe_mark`, bind wildcard, getsockname, big-endian порт | `main.rs` `r2o_props_bind_socket`, `BoundTcpProbe::open` | **E*** | C: socket family 4/6, SO_MARK только при ненулевой метке, wildcard bind, getsockname. Rust production `BoundTcpProbe::open` использует общий `r2o_props_bind_socket` (IPv6 V6ONLY) и ставит метку `mark.unwrap_or(0x2d)`; тесты `props_bind_wrappers_match_c_families_and_socket_types`, C/Rust differential `scripts/test-props-bind-differential.sh` (5 кейсов). **Ограничение:** Rust добавляет `SOCK_CLOEXEC`/`O_NONBLOCK`. |
+| `hs_close_port` | 210-210 | 1 | закрыть порт поиска | `OwnedFd`/`Drop` (`BoundTcpProbe`) | E | C `if (fd>=0) close(fd)`. Rust `BoundTcpProbe` владеет `OwnedFd`, закрытие в `Drop`; тест `hs_close_port_drops_fd_like_c` проверяет `fcntl(F_GETFD) == -1` после drop. |
 | `hs_hex` | 212-219 | 8 | `d2k_plan_text_to_hex` в буфер 8192, ошибка в stderr | `compile_text` + `r2o_plan_records_for_wire` | **P** | C при ошибке печатает `d2kc: план HTTP не собрался: <err>` и -1. Rust возвращает `String`-ошибку из `compile_text`/`r2o_plan_records_for_wire`; текст/стадия иные. Компиляция покрыта plan_text-дифференциалами. |
 | `hs_set_probe` | 221-233 | 13 | SET_NAME_PROBE trial: `SHAPE_HTTP`, sport, family | `encode_set_name_probe` (`main.rs:5545`) | **P** | C `hs_hex`, затем `d2k_link_set_name_probe_trial(fd,host,6,hex,SHAPE_HTTP,sport_be,family,trial)`; ошибка в stderr. Rust `encode_set_name_probe(&host, wire_shape, family, port, ..)`; `wire_shape` вычисляется из `target.shape`/timestamp, для HTTP ожидается 7; жёсткой `SHAPE_HTTP` нет. Кодирование покрыто control tests. |
 | `hs_del_probe` | 235-244 | 10 | DEL_NAME_PROBE с `SHAPE_HTTP` | `delete_name_probe(&host, shape, family, port)` (`main.rs:19799`) | **P** | C `d2k_link_del_name_probe_family(fd,host,6,SHAPE_HTTP,sport_be,family)`; ошибка в stderr. Rust `delete_name_probe` принимает shape из задачи; для HTTP-привязки тот же кадр, но нет фиксированного `SHAPE_HTTP` на уровне функции. |
@@ -2131,9 +2131,9 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `hs_start` | 271-274 | 4 | запустить runner HTTP-поиска | `HttpSearchWorker` (`main.rs`) | **P** | C `d2k_hs_runner_start(runner,job)` — отдельный pthread. Rust HTTP-поиск идёт задачей/worker в общем планировщике; жизненный цикл частично покрыт http-search differential. |
 | `hs_changed` | 277-284 | 8 | сохранить `http-plans.txt` через `d2k_httpsearch_save` | каталог JSON (`R2oCatalogPersistence`) | **P** | **Расхождение:** C `d2k_httpsearch_save(g_hs,g_http_plans,time,NULL)` пишет отдельный файл `d2k-http-plans 1`; в Rust grep `http-plans` пуст — подтверждённые HTTP-кандидаты живут в каталоге JSON. Момент сохранения (по изменению) и формат не совпадают. |
 | `http_portal` | 288-308 | 21 | `d2k_httpsprobe_portal` → rc 0: http_search_portal, rc 1: лог, rc 2: SET_HTTPS с ttl | `r2o_http_search_https_action` (`main.rs:4729`), `encode_set_https` (`:16610`, `:17033`) | **P** | **Ветви сверены:** C `d2k_httpsprobe_portal(hp,name,family,high_ip,code==1,now,&ttl)`; `rc==0` → `http_search_portal` с текущим состоянием; `rc==1` → лог «ответ перенаправляет…»/«провайдер подменяет…»; `rc==2` → `d2k_link_set_https(fd,name,ttl)`; ошибка в stderr. Rust разносит решение по `HttpSearchHttpsAction` (`Queue/Suppress/Wait`) и отдельно `encode_set_https`; условия `probe_pending`/live-bound/`should_redirect` выражены иначе. |
-| `http_push` | 310-315 | 6 | `d2k_link_set_https(host,ttl)` + stderr | `encode_set_https` (`main.rs:16610`, `:17033`) | **P** | C кодирует SET_HTTPS и печатает ошибку. Rust `encode_set_https` принимает любой `u32` и кодирует как есть; обрезку до **7 суток** (`MAX_HTTPS_TTL_SECONDS`) выполняет датапат, как C `D2K_HTTPS_TTL_MAX_S`. Расхождение TTL **закрыто 2026-11-12** и в открытых пробелах не числится; кодирование покрыто control tests. |
-| `http_save` | 317-322 | 6 | сохранить кэш HTTPS-проб | `main.rs:17080 https_probe.save_cache` | **P** | C `d2k_httpsprobe_save(path,now,wall)`, ошибка в stderr. Rust `save_cache` вызывается из main; формат/атомарность кэша C и Rust не сравнивались. |
-| `http_probe_done` | 324-355 | 32 | drain до 8 результатов, лог, `http_push`/`http_search_portal`, save при total, лог роста `lost` | `https_probe` drain (`main.rs:17033+`), `save_cache` | **P** | **Ветви сверены:** C `while((n=done(...,8))>0)`: для каждого `up=upgrade(state)`, строка с текстом состояния/why/действия, `up ? set_https(ttl) : http_search_portal`; после цикла `total` → save; `lost` сравнивается с прошлым и печатается. Rust: up → SET_HTTPS, иначе HTTP-поиск; **счётчика `lost` в Rust нет** (core-net, N), поэтому лог потерь/перепроверка отсутствуют. |
+| `http_push` | 310-315 | 6 | `d2k_link_set_https(host,ttl)` + stderr | `main.rs` `encode_set_https`, `r2o_https_set_ttl` | **E*** | C кодирует SET_HTTPS и печатает ошибку. Rust `encode_set_https` кодирует те же поля; production `httpsprobe`-цикл отправляет SET_HTTPS только для upgrade через `r2o_https_set_ttl`. Тесты `crates/r2k-core/tests/control.rs` (ttl 3600, 21601, u32::MAX, bad host), `https_probe_pushes_set_https_only_for_upgrades_like_c`. **Ограничение:** предел 7 суток применяет датапат, не кодировщик (как C `D2K_HTTPS_TTL_MAX_S`). |
+| `http_save` | 317-322 | 6 | сохранить кэш HTTPS-проб | `https_probe.rs` `save_cache` | **E*** | C `d2k_httpsprobe_save(path,now,wall)`; Rust `HttpsProbeWorker::save_cache` с тем же v1/v2-форматом, TTL-клампом и wall-clock; вызывается production-циклом. Тесты `https_cache_round_trip_keeps_only_the_remaining_positive_ttl`, `https_cache_persists_negative_states_with_their_shorter_ttl`. **Ограничение:** побайтового C/Rust differential файла кэша нет. |
+| `http_probe_done` | 324-355 | 32 | drain до 8 результатов, лог, `http_push`/`http_search_portal`, save при total, лог роста `lost` | `https_probe.rs` `try_result`, `main.rs` drain | **E*** | C: drain до 8, для каждого upgrade → SET_HTTPS(ttl), иначе http_search_portal, после total — save. Rust `try_result` отдаёт результаты, production-цикл шлёт SET_HTTPS только для upgrade (`r2o_https_set_ttl`), иначе идёт portal-ветка, затем `save_cache`. Тесты `httpsprobe_wake_fd_signals_a_ready_result_like_c`, `https_probe_pushes_set_https_only_for_upgrades_like_c`. **Ограничение:** Rust отдаёт по одному (C — до 8), `lost` не выводится; побайтового C/Rust differential drain нет. |
 | `hs_say` | 357-357 | 1 | журнал HTTP-поиска | общий logger `main.rs` | **P*** | C `static void hs_say(const char *line){ sched_say(NULL,line); }`. Rust использует общий logger с иным форматом; отдельной функции нет. |
 | `poison_cmp` | 365-367 | 3 | сортировка `poison_seen` по `succ` убыванию | `sort_by_key(Reverse(successes))` (`main.rs:4587`) | **P*** | C `qsort` по `b->succ - a->succ` (убывание); при равных порядок не стабилен. Rust stable sort по `Reverse`; для равных сохраняется порядок каталога. |
 | `hs_measured_poisons` | 368-392 | 25 | каталог → до 8 poison-спеков на план, всего 64, сортировка по successes | `main.rs:4565-4597 measured_http_candidate_keys`, `http_search.rs:719 measured_poison_keys` | **P** | **Ветви сверены:** C `v[64]`; для каждого box/plan при `n<64`: пропуск `!text \|\| successes<=0 \|\| !enabled \|\| !strstr("\nproto tcp tls\n")`; `d2k_hs_plan_poisons(text,specs,8)`; копия spec (≤63) + successes; `qsort` по убыванию; `d2k_httpsearch_measured_poison` для каждого, `taken++` при 0; печать. Rust фильтр `proto=="tls"`/текст, `measured_poison_keys`, маппинг в канонические ключи, дедуп, максимум 8; сортировка по successes. C ограничивает 8 на план и 64 всего, Rust — 8 итог. |

@@ -25390,6 +25390,17 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn hs_close_port_drops_fd_like_c() {
+        use std::os::fd::AsRawFd;
+
+        let probe = super::BoundTcpProbe::open(4, Some(0)).unwrap();
+        let fd = probe.socket.as_raw_fd();
+        drop(probe);
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn save_ask_snapshot_matches_c_hex_layout() {
         let path =
             std::env::temp_dir().join(format!("r2o-ask-snapshot-{}.hex", std::process::id()));

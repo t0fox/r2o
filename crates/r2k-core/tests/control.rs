@@ -967,7 +967,9 @@ fn encodes_a_bounded_exact_name_binding_delete() {
     expected.extend_from_slice(&[6, SHAPE_HTTP, 4]);
     assert_eq!(frame.body, expected);
     assert!(encode_delete_name("", 6, SHAPE_HTTP, 4).is_err());
-    assert!(encode_delete_name("example.com", 17, SHAPE_HTTP, 4).is_err());
+    // C `d2k_link_del_name_family` проверяет только transport 6/17 и shape!=0;
+    // пару transport+shape валидирует датапат, поэтому 17+HTTP допустима.
+    assert!(encode_delete_name("example.com", 17, SHAPE_HTTP, 4).is_ok());
     assert!(encode_delete_name("example.com", 6, SHAPE_HTTP, 7).is_err());
 }
 
