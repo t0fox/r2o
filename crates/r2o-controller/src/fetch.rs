@@ -1537,9 +1537,7 @@ fn r2o_fetch_measure_rx_volume_with_fallback_path_and_roots_and_timeouts(
         return primary;
     };
     let Some(path) = fallback_path.filter(|path| {
-        *path != options.path
-            && primary.retry_path.as_deref() != Some(*path)
-            && crate::r2o_resource::r2o_resource_path_ok(path)
+        r2o_fallback_path_allowed(&options.path, primary.retry_path.as_deref(), path)
     }) else {
         return primary;
     };
@@ -1554,6 +1552,14 @@ fn r2o_fetch_measure_rx_volume_with_fallback_path_and_roots_and_timeouts(
         phase_timeout,
     );
     r2o_fetch_rx_fallback_result(primary, fallback, path, short_bytes)
+}
+
+/// C `resource_retry_path`: путь не равен текущему, не повторяет уже
+/// выбранный retry и проходит `d2k_resource_path_ok`.
+fn r2o_fallback_path_allowed(current: &str, primary_retry: Option<&str>, candidate: &str) -> bool {
+    candidate != current
+        && primary_retry != Some(candidate)
+        && crate::r2o_resource::r2o_resource_path_ok(candidate)
 }
 
 fn r2o_fetch_rx_fallback_result(
@@ -4612,5 +4618,23 @@ mod tests {
         assert_eq!(r2o_gateway_status_code(b"HTTP/1.1 600"), None);
         assert_eq!(r2o_gateway_status_code(b"HTTP/1.0 200"), None);
         assert_eq!(r2o_gateway_status_code(b"HTTP/1.1"), None);
+    }
+
+    #[test]
+    fn fallback_path_filter_matches_c() {
+        assert!(super::r2o_fallback_path_allowed("/", None, "/css/site.css"));
+        assert!(!super::r2o_fallback_path_allowed(
+            "/css/site.css",
+            None,
+            "/css/site.css"
+        ));
+        assert!(!super::r2o_fallback_path_allowed(
+            "/",
+            Some("/css/site.css"),
+            "/css/site.css"
+        ));
+        assert!(!super::r2o_fallback_path_allowed("/", None, ""));
+        assert!(!super::r2o_fallback_path_allowed("/", None, "css/site.css"));
+        assert!(!super::r2o_fallback_path_allowed("/", None, "/../site.css"));
     }
 }
