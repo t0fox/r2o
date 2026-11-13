@@ -1564,9 +1564,9 @@ fn read_fd_count(path: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Counts, MADVISE_ERRNO_SLOTS, MadviseErrno, MadviseStats, Recorder, d2o_ring_bytes,
-        madvise_json, memory_acquire, memory_active, memory_enable, memory_release,
-        memory_tracking_json,
+        Counts, MADVISE_ERRNO_SLOTS, MEMORY_SITE_COUNT, MadviseErrno, MadviseStats, Recorder,
+        d2o_ring_bytes, madvise_json, memory_acquire, memory_active, memory_alloc_failure,
+        memory_enable, memory_release, memory_snapshot, memory_tracking_json, tracked_memory_bytes,
     };
     use serde_json::json;
     use std::fs::{self, OpenOptions};
@@ -1626,6 +1626,100 @@ mod tests {
         assert_eq!(madvise["failures"], 2);
         assert!(madvise["last_errno"].is_null());
         assert_eq!(madvise["errno"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn memory_tracking_branches_match_c() {
+        let _guard = MEMORY_TEST_LOCK.lock().unwrap();
+
+        // C `d2k_diag_memory_enable`/`_active`: выключенный сбор блокирует
+        // acquire и alloc_failure, счётчики не меняются.
+        memory_enable(false);
+        assert!(!memory_active());
+        assert!(!memory_acquire(0, 1));
+        let frozen = memory_snapshot();
+        memory_alloc_failure(0);
+        assert_eq!(memory_snapshot(), frozen);
+
+        memory_enable(true);
+        assert!(memory_active());
+        let before = memory_snapshot();
+
+        // acquire: live/objects/created/peak; peak только растёт.
+        assert!(memory_acquire(0, 100));
+        assert!(memory_acquire(0, 50));
+        let after = memory_snapshot();
+        assert_eq!(after[0].live_bytes, before[0].live_bytes + 150);
+        assert_eq!(after[0].live_objects, before[0].live_objects + 2);
+        assert_eq!(after[0].created, before[0].created + 2);
+        assert_eq!(after[0].peak_bytes, after[0].live_bytes);
+        let peak = after[0].peak_bytes;
+
+        // site >= 6 и bytes > UINT32_MAX отвергаются без изменения пика.
+        assert!(!memory_acquire(MEMORY_SITE_COUNT, 1));
+        if let Ok(oversized) = usize::try_from(u32::MAX as u64 + 1) {
+            assert!(!memory_acquire(0, oversized));
+        }
+        assert_eq!(memory_snapshot()[0].peak_bytes, peak);
+
+        // release: tracked=false / site>=6 / bytes>UINT32_MAX ничего не меняют.
+        let before_release = memory_snapshot();
+        memory_release(0, 100, false);
+        memory_release(MEMORY_SITE_COUNT, 1, true);
+        if let Ok(oversized) = usize::try_from(u32::MAX as u64 + 1) {
+            memory_release(0, oversized, true);
+        }
+        assert_eq!(memory_snapshot(), before_release);
+
+        // Корректный release: live−=bytes, objects−=1, destroyed+=1, peak не падает.
+        memory_release(0, 100, true);
+        let after_release = memory_snapshot();
+        assert_eq!(
+            after_release[0].live_bytes,
+            before_release[0].live_bytes - 100
+        );
+        assert_eq!(
+            after_release[0].live_objects,
+            before_release[0].live_objects - 1
+        );
+        assert_eq!(after_release[0].destroyed, before_release[0].destroyed + 1);
+        assert_eq!(after_release[0].peak_bytes, peak);
+
+        // alloc_failure: активный валидный сайт +1; site>=6 — нет.
+        let before_failure = memory_snapshot();
+        memory_alloc_failure(0);
+        memory_alloc_failure(MEMORY_SITE_COUNT);
+        let after_failure = memory_snapshot();
+        assert_eq!(
+            after_failure[0].alloc_failures,
+            before_failure[0].alloc_failures + 1
+        );
+        for site in 1..MEMORY_SITE_COUNT {
+            assert_eq!(
+                after_failure[site].alloc_failures,
+                before_failure[site].alloc_failures
+            );
+        }
+
+        // counts: tcp = site0+site3, tls = site1+site2, quic = site4+site5.
+        let counts_before = tracked_memory_bytes();
+        for (site, bytes) in [(0, 11), (1, 22), (2, 33), (3, 44), (4, 55), (5, 66)] {
+            assert!(memory_acquire(site, bytes));
+        }
+        let counts_after = tracked_memory_bytes();
+        assert_eq!(counts_after.0 - counts_before.0, 11 + 44);
+        assert_eq!(counts_after.1 - counts_before.1, 22 + 33);
+        assert_eq!(counts_after.2 - counts_before.2, 55 + 66);
+        for (site, bytes) in [(0, 11), (1, 22), (2, 33), (3, 44), (4, 55), (5, 66)] {
+            memory_release(site, bytes, true);
+        }
+
+        // Отключение не сбрасывает накопленное, но блокирует новые записи.
+        memory_enable(false);
+        let frozen = memory_snapshot();
+        assert!(!memory_acquire(0, 1));
+        memory_alloc_failure(0);
+        assert_eq!(memory_snapshot(), frozen);
     }
 
     #[cfg(unix)]
