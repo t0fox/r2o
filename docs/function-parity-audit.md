@@ -88,8 +88,8 @@ recheck 1982 1982 equal True
 | core-state | 692 | 182 | 509 | 0 | 0 |
 | datapath-core | 400 | 156 | 244 | 0 | 0 |
 | datapath-plan | 183 | 169 | 14 | 0 | 0 |
-| detect | 159 | 61 | 98 | 0 | 0 |
-| **Итого** | **1982** | **765** | **1217** | **0** | **0** |
+| detect | 159 | 64 | 95 | 0 | 0 |
+| **Итого** | **1982** | **768** | **1214** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 765 / P 1217 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 768 / P 1214 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -348,8 +348,8 @@ P означает неполное доказательство ветвей, N
 | core-state | 692 | 182 | 510 | 0 | 0 |
 | datapath-core | 400 | 156 | 244 | 0 | 0 |
 | datapath-plan | 183 | 169 | 14 | 0 | 0 |
-| detect | 159 | 61 | 98 | 0 | 0 |
-| **Итого** | **1982** | **765** | **1217** | **0** | **0** |
+| detect | 159 | 64 | 95 | 0 | 0 |
+| **Итого** | **1982** | **768** | **1214** | **0** | **0** |
 
 
 ---
@@ -6346,11 +6346,11 @@ raw_recheck, sweep_poisons (свойства → compose → перебор), cr
 | `d2k_now_ms` | 86-91 | 188 | монотонное время в мс + `d2k_clock_offset_ms` | `now_ms.rs` `d2k_now_ms`/`set_clock_offset_ms` | E | C `clock_gettime(CLOCK_MONOTONIC)`, `tv_sec*1000+tv_nsec/1e6+offset`, ширина 64 бита. Rust `now_ms.rs` использует тот же syscall, `AtomicI64`-сдвиг и saturating-арифметику; тест `now_ms_survives_64bit_offset_like_c` (50 суток и граница i32). |
 | `d2k_sleep_ms` | 96-105 | 194 | пауза между сегментами | `thread::sleep` (`raw_probe.rs:1238`, `response.rs:856`) | **P** | C `ms<=0` → return; `nanosleep(ms/1000, (ms%1000)*1e6)`. Rust `thread::sleep(Duration::from_millis)`, отдельного символа нет; семантика та же. |
 | `d2k_trigger_accepts` | 109-124 | 903 | критерий прохода по типу accept | `classify.rs:543 trigger_accepts` | **E** | C: SERVERHELLO `n>=6 && b[0]==0x16 && b[1]==0x03 && b[5]==0x02`; TLSRECORD `n>=3 && b[0]∈{0x16,0x15} && b[1]==0x03`; default `n>0`. Rust те же байты/длины; `tests/classify.rs:833 trigger_acceptance_matches_the_donor_rules`. |
-| `d2k_trigger_sni` | 126-134 | 236 | извлечь SNI из имени `tls:<sni>` | `classify.rs:1461 strip_prefix("tls:")` | **P** | C `strlen(name)>4 && strncmp(name,"tls:",4)==0` → `name+4`, иначе `""`. Rust `strip_prefix("tls:")` inline; прямого теста нет, ответная ветка CLI-теста может не дойти. |
+| `d2k_trigger_sni` | 126-134 | 236 | извлечь SNI из имени `tls:<sni>` | `classify.rs` `Trigger::sni` | E | C `strlen(name)>4 && strncmp(name,"tls:",4)==0` → `name+4`, иначе `""`. Rust `Trigger::sni` использует `strip_prefix("tls:")`; тест `trigger_sni_and_opts_skipped_match_c` (tls:/raw:/пусто). |
 | `d2k_detect_stopped` | 136-139 | 92 | проверка отмены через callback | `classify.rs:1041 stopped`, `raw_probe.rs:641 is_cancelled` | **E** | C `c && c->fn && c->fn(c->ctx)`. Rust `stopped`/`is_cancelled`; `tests/classify.rs:818`, `cancellation_after_*` (`classify.rs:2596+`). |
 | `d2k_opts_defaults` | 141-162 | 815 | умолчания: repeats 3, timeout 6000, write_gap 60, long_gap 700, mark `D2K_BYPASS_MARK` | `classify.rs:860 Default`, `:1888 configured_options` | **P** | **Ветви сверены:** C заполняет только `<=0`/`==0`: repeats 3, timeout 6000, write_gap 60, long_gap 700, mark `D2K_BYPASS_MARK`. **Подтверждено:** C `D2K_BYPASS_MARK=0x40000000` (`detect/include/d2k_detect.h:34`, `classify.c:160`); Rust `BYPASS_MARK=0x2d` (`raw_probe.rs:23`, `response.rs:71`). Числа повторов/сроков совпадают; метка по умолчанию разная — влияет на policy-routing/SO_MARK. |
 | `d2k_opts_acceptable` | 164-170 | 153 | фильтр приемлемости находки | `raw_probe.rs:1122 executable_poison_hit` | **P** | C `!accept` → 1, иначе `accept(p,ctx)`. Rust `executable_poison_hit`; общего колбэка accept нет, в CLI R2O фильтр плана включён всегда, в C CLI accept не задан. |
-| `d2k_opts_skipped` | 172-181 | 10 | пропуск гипотезы по имени: линейный `strcmp` по `skip[]` | `classify.rs:891-897 poison_selected` | **P** | C проходит `o->nskip`, `strcmp(o->skip[i], name)==0` → 1. Rust `poison_selected`: `only_poison.is_none_or(\|only\| only==name)` **и** ни один `skip_poisons` не равен имени. C `only` обрабатывается отдельно в `sweep_poisons` (`opt->only`), Rust сводит оба фильтра в одну функцию; для пустого `only` эквивалентно. |
+| `d2k_opts_skipped` | 172-181 | 10 | пропуск гипотезы по имени: линейный `strcmp` по `skip[]` | `classify.rs` `opts_skipped`/`poison_selected` | E | C проходит `o->nskip`, `strcmp` → 1. Rust `opts_skipped` делает линейный точный `==` по `skip_poisons`, `poison_selected` дополнительно учитывает `only_poison`. Тест `trigger_sni_and_opts_skipped_match_c` (точное имя, регистр, отсутствие, only). |
 | `d2k_trace_add` | 183-204 | 1018 | добавить наблюдение в трассу, при переполнении — последний слот | `classify.rs:1048 add_observation` | **E** | C `ntrace>=D2K_TRACE_MAX` → `&trace[MAX-1]`; иначе слот `ntrace++`, `memset`, копия probe с обрезкой до поля/NUL. Rust `add_observation`; `tests/classify.rs:384`. |
 | `obs_done` | 210-215 | 5 | объявить наблюдение наружу через `on_obs` | `classify.rs:1235` progress callback | **E** | C `if (opt->on_obs) opt->on_obs(opt->on_obs_ctx, o)`; Rust progress callback вызывается после записи наблюдения; `tests/classify.rs:384`. |
 | `d2k_note` | 217-227 | 264 | до `D2K_NOTES_MAX` заметок в `res->notes[]` через `vsnprintf` | `classify.rs:1248 append_reason` | **P** | C `nnotes>=MAX` → return; `vsnprintf(notes[nnotes], sizeof(notes[0]), fmt, ap)`; `nnotes++`. Rust `append_reason` дописывает в одно поле `reason`, массива/лимита notes нет; для `note_gap_loss` отдельного аналога нет (N). |
@@ -6365,7 +6365,7 @@ raw_recheck, sweep_poisons (свойства → compose → перебор), cr
 | `measure` | 608-710 | 4054 | повторы одного зонда, seed-ветка, raw-connect-retry, запись наблюдения | `classify.rs:1076 measure` | **E** | **Ветви сверены:** C `trace_add`, cuts≤4/gap; `seed_whole && ncuts==0 && name=="whole" && seed_repeats==repeats && !dial_deadline_err` → seed pass/fail/err; иначе `repeats`: отмена, `once_probe`, `probes++`; `RAW_CONNECT_TIMEOUT` → trace transport + control `dial_marked_mode(require_mark=1)` + retry; `rc<0` → fail/err (первый), `rc>0` → pass (until_pass break), `rc==0` → fail; obs pass/fail; `obs_done`. Rust `measure`; `tests/classify.rs:535,694,732`; seeded/progress. |
 | `bind_decoy` | 717-728 | 279 | привязать приманку и длину перекрытия | `raw_probe.rs:203-231`, `:1047`, `classify_measured.rs:106` | **P** | C при `decoy_hello`: `d2k_opts_decoy(opt)` → `decoy/decoy_len`; при `seqovl_exact` `seqovl=d->len`. Rust привязка разнесена по `select_bridge_decoy`/`raw_probe`/`classify_measured`; профильного теста нет. |
 | `answered_by_props` | 732-739 | 7 | не повторять гипотезу, уже отвеченную свойствами | `raw_probe.rs:474` (`answered` + `same_hypothesis`) | **P** | C линейно по `res->nanswered`, `d2k_poison_same(&answered[k],p)` → 1. Rust `answered`/`same_hypothesis` (`classify.rs:206`) сравнивает подмножество полей `Poison` (без autottl/tcp_ts_up); логика есть, профильного теста нет. |
-| `fam_ix` | 766-766 | 1 | индекс семейства: 6 → 1, иначе 0 | `raw_probe.rs:702` (inline), `:719-721` | **P** | C `return family==6 ? 1 : 0`. Rust то же выражение inline в `note_raw_probe` и `raw_selftest_index`; отдельного хелпера нет, значение для 4/6 совпадает. |
+| `fam_ix` | 766-766 | 1 | индекс семейства: 6 → 1, иначе 0 | `raw_probe.rs` `fam_ix` | E | C `return family==6 ? 1 : 0`. Rust `fam_ix` используется `raw_selftest_index`; тест `fam_ix_matches_c_family_slots` проверяет 4/6/0 и слоты 0..3. |
 | `self_ix` | 769-771 | 3 | индекс кэша `(family, offer_ts)`: 0/1 с меткой, 2/3 без | `raw_probe.rs:719-721 raw_selftest_index` | **E** | C `fam_ix(family)+(offer_ts?0:2)`. Rust `(if family==6 {1} else {0}) + if offer_ts {0} else {2}` — точное совпадение; `raw_probe.rs:2348` (`RAW_SELFTEST_KEY`). |
 | `selftest_cached_age` | 774-789 | 445 | возраст кэша самопроверки или -1 | `raw_probe.rs:685 raw_selftest_age` | **P** | C под mutex: `ok[k]` → `d=now-at[k]`; `0<=d<TTL(600000)` → age, иначе `ok=0`; иначе -1. Rust `raw_selftest_age`; TTL 600 с совпадает, теста возраста нет. |
 | `selftest_store` | 791-799 | 282 | записать исход самопроверки: ok/at/сброс серии | `raw_probe.rs:735 store_raw_selftest` | **E** | C `k=self_ix`; под mutex `ok[k]=ok`, `at[k]=now`, `streak[k]=0`. Rust `store_raw_selftest`; `raw_probe.rs:2348` (`RAW_SELFTEST_INVALIDATION`). |

@@ -724,8 +724,12 @@ fn note_raw_probe(family: u8, local_error: bool) {
     }
 }
 
+fn fam_ix(family: u8) -> usize {
+    if family == 6 { 1 } else { 0 }
+}
+
 fn raw_selftest_index(family: u8, offer_ts: bool) -> usize {
-    (if family == 6 { 1 } else { 0 }) + if offer_ts { 0 } else { 2 }
+    fam_ix(family) + if offer_ts { 0 } else { 2 }
 }
 
 fn raw_syn_options(offer_ts: bool) -> &'static [u8] {
@@ -3078,5 +3082,16 @@ mod tests {
         assert_eq!(packet.len(), 60);
         assert_eq!(packet[0] >> 4, 6);
         assert!(tcp_checksum_valid(source, destination, &packet[40..]));
+    }
+
+    #[test]
+    fn fam_ix_matches_c_family_slots() {
+        assert_eq!(fam_ix(4), 0);
+        assert_eq!(fam_ix(6), 1);
+        assert_eq!(fam_ix(0), 0);
+        assert_eq!(raw_selftest_index(4, true), 0);
+        assert_eq!(raw_selftest_index(6, true), 1);
+        assert_eq!(raw_selftest_index(4, false), 2);
+        assert_eq!(raw_selftest_index(6, false), 3);
     }
 }

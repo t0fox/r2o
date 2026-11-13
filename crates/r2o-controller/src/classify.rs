@@ -91,6 +91,11 @@ impl Trigger {
         })
     }
 
+    /// C `d2k_trigger_sni`: имя вида `tls:<sni>` даёт SNI, иначе пусто.
+    pub fn sni(&self) -> &str {
+        self.name.strip_prefix("tls:").unwrap_or("")
+    }
+
     /// Собрать снятый триггер устаревшего TLS, используемый эталонным классификатором.
     pub fn tls(sni: &str) -> Result<Self, &'static str> {
         Ok(Self {
@@ -918,12 +923,16 @@ impl Default for ClassifyOptions {
     }
 }
 
+pub fn opts_skipped(options: &ClassifyOptions, name: &str) -> bool {
+    options.skip_poisons.iter().any(|skip| skip == name)
+}
+
 pub fn poison_selected(options: &ClassifyOptions, name: &str) -> bool {
     options
         .only_poison
         .as_deref()
         .is_none_or(|only| only == name)
-        && !options.skip_poisons.iter().any(|skip| skip == name)
+        && !opts_skipped(options, name)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2888,5 +2897,68 @@ mod qtrace_tests {
         for (code, verdict) in expected {
             assert_eq!(r2o_map_verdict(code), verdict, "код {code}");
         }
+    }
+
+    #[test]
+    fn trigger_sni_and_opts_skipped_match_c() {
+        let tls = Trigger {
+            name: "tls:example.test".into(),
+            payload: Vec::new(),
+            accept: Accept::Any,
+        };
+        assert_eq!(tls.sni(), "example.test");
+        let raw = Trigger {
+            name: "raw:12B".into(),
+            payload: Vec::new(),
+            accept: Accept::Any,
+        };
+        assert_eq!(raw.sni(), "");
+        let bare = Trigger {
+            name: "tls:".into(),
+            payload: Vec::new(),
+            accept: Accept::Any,
+        };
+        assert_eq!(bare.sni(), "");
+
+        let mut options = ClassifyOptions::default();
+        options.skip_poisons = vec!["badsum".into(), "disorder".into()];
+        assert!(super::opts_skipped(&options, "badsum"));
+        assert!(!super::opts_skipped(&options, "Badsum"));
+        assert!(!super::opts_skipped(&options, "split"));
+        assert!(!super::poison_selected(&options, "badsum"));
+        assert!(super::poison_selected(&options, "split"));
+        options.only_poison = Some("badsum".into());
+        assert!(!super::poison_selected(&options, "badsum"));
+        assert!(!super::poison_selected(&options, "split"));
+    }
+
+    #[test]
+    fn opts_defaults_match_c_and_keep_explicit_values() {
+        let defaults = ClassifyOptions {
+            repeats: 0,
+            timeout: Duration::ZERO,
+            write_gap: Duration::ZERO,
+            long_gap: Duration::ZERO,
+            ..ClassifyOptions::default()
+        };
+        let filled = super::configured_options(defaults);
+        assert_eq!(filled.repeats, 3);
+        assert_eq!(filled.timeout, Duration::from_secs(6));
+        assert_eq!(filled.write_gap, Duration::from_millis(60));
+        assert_eq!(filled.long_gap, Duration::from_millis(700));
+
+        let explicit = ClassifyOptions {
+            repeats: 7,
+            timeout: Duration::from_secs(2),
+            write_gap: Duration::from_millis(5),
+            long_gap: Duration::from_millis(9),
+            ..ClassifyOptions::default()
+        };
+        let kept = super::configured_options(explicit.clone());
+        assert_eq!(kept.repeats, 7);
+        assert_eq!(kept.timeout, Duration::from_secs(2));
+        assert_eq!(kept.write_gap, Duration::from_millis(5));
+        assert_eq!(kept.long_gap, Duration::from_millis(9));
+        assert_eq!(explicit.repeats, 7);
     }
 }
