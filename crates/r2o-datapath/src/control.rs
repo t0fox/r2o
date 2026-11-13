@@ -2658,34 +2658,15 @@ impl ControlServer {
             ));
         }
         let path = path.as_ref().to_owned();
-        if let Ok(metadata) = std::fs::symlink_metadata(&path) {
-            if !metadata.file_type().is_socket() {
-                return Err(io::Error::new(
-                    io::ErrorKind::AddrInUse,
-                    "control path уже занят не Unix-сокетом",
-                ));
-            }
-            match UnixStream::connect(&path) {
-                Ok(_) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::AddrInUse,
-                        "control socket уже обслуживается",
-                    ));
-                }
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
-                    ) =>
-                {
-                    std::fs::remove_file(&path)?;
-                }
-                Err(error) => return Err(error),
-            }
-        }
+        // C `d2k_ctl_open` (`ctl.c:109-112`): (void)unlink(path) перед bind —
+        // снимается только свой путь из настройки, чтобы файл после SIGKILL
+        // не мешал следующему запуску.
+        let _ = std::fs::remove_file(&path);
         let listener = UnixListener::bind(&path)?;
-        if let Err(error) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-        {
+        // C `listen(c->lfd, 1)`; std уже вызвал listen с большим backlog,
+        // повторный вызов сужает очередь до эталонной.
+        if unsafe { libc::listen(listener.as_raw_fd(), 1) } != 0 {
+            let error = io::Error::last_os_error();
             drop(listener);
             let _ = std::fs::remove_file(&path);
             return Err(error);
@@ -3276,6 +3257,7 @@ mod tests {
     use r2k_core::control::BindingContext;
     use r2k_core::plan::Plan;
     use std::io::Write;
+    use std::os::unix::fs::FileTypeExt;
 
     fn plan_header(minexec: u16, records: u16) -> Vec<u8> {
         let mut bytes = super::PLAN_MAGIC.to_vec();
@@ -3353,10 +3335,31 @@ mod tests {
         std::fs::create_dir(&directory).unwrap();
         let path = directory.join("control.sock");
         let server = ControlServer::open(&path, u16::MAX as u32).unwrap();
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let metadata = std::fs::metadata(&path).unwrap();
+        let mode = metadata.permissions().mode() & 0o777;
         drop(server);
-        assert_eq!(mode, 0o600, "control socket grants group/other access");
+        // C `d2k_ctl_open` не вызывает chmod: доступ задаёт umask. Проверяем
+        // только, что владелец может пользоваться сокетом и это сокет.
+        assert!(metadata.file_type().is_socket());
+        assert_ne!(mode & 0o600, 0, "owner must be able to use the socket");
         assert!(!path.exists(), "server should remove its socket on drop");
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn control_open_unlinks_existing_regular_file_like_c() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("r2o-control-unlink-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("control.sock");
+        std::fs::write(&path, b"stale").unwrap();
+        let server = ControlServer::open(&path, u16::MAX as u32).unwrap();
+        assert!(std::fs::metadata(&path).unwrap().file_type().is_socket());
+        drop(server);
         std::fs::remove_dir(&directory).unwrap();
     }
 

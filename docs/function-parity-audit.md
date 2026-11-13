@@ -87,9 +87,9 @@ recheck 1982 1982 equal True
 | core-net | 548 | 197 | 351 | 0 | 0 |
 | core-state | 692 | 182 | 509 | 0 | 0 |
 | datapath-core | 400 | 156 | 244 | 0 | 0 |
-| datapath-plan | 183 | 174 | 9 | 0 | 0 |
+| datapath-plan | 183 | 175 | 8 | 0 | 0 |
 | detect | 159 | 70 | 89 | 0 | 0 |
-| **Итого** | **1982** | **779** | **1203** | **0** | **0** |
+| **Итого** | **1982** | **780** | **1202** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 779 / P 1203 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 780 / P 1202 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -347,9 +347,9 @@ P означает неполное доказательство ветвей, N
 | core-net | 548 | 197 | 351 | 0 | 0 |
 | core-state | 692 | 182 | 510 | 0 | 0 |
 | datapath-core | 400 | 156 | 244 | 0 | 0 |
-| datapath-plan | 183 | 174 | 9 | 0 | 0 |
+| datapath-plan | 183 | 175 | 8 | 0 | 0 |
 | detect | 159 | 70 | 89 | 0 | 0 |
-| **Итого** | **1982** | **779** | **1203** | **0** | **0** |
+| **Итого** | **1982** | **780** | **1202** | **0** | **0** |
 
 
 ---
@@ -5372,7 +5372,7 @@ R2O-аналог — `crates/r2o-datapath/src/control.rs` (`ControlServer`), п�
 |---|---|---:|---|---|---|---|
 | say | 66-74 | 9 | static: форматирование текста ошибки (владелец — `d2k_ctl_open`) | `error_text.rs` `write_error_text`/`error_text`; `control.rs` | E | C `if (!err \|\| cap == 0) return;`; `vsnprintf(err,cap,fmt,ap)`. Rust helper повторяет контракт: `cap==0` — молчание, не более `cap-1` байт, завершающий NUL, побайтная обрезка; используется в `ControlServer::open`. Тест `error_text_matches_snprintf_semantics`. |
 | set_nonblock | 76-79 | 4 | static: `O_NONBLOCK` на fd | `control.rs:1852` `listener.set_nonblocking(true)`, `:2088` `peer.set_nonblocking(true)` | E | `control_server_accepts_reconnect_pending_after_previous_peer_closes` (control.rs:2343): без nonblocking цикл `accept_peer` завис бы. |
-| d2k_ctl_open | 81-127 | 47 | создать AF_UNIX listener, снять старый файл, listen(1) | `control.rs:1798` `open`, `:1807` `open_with_profile` | P | `control_socket_is_private_to_its_owner` (control.rs:2325). Отличия: R2O не удаляет чужой не-сокет и занятый живой сокет, ставит права 0600, backlog по умолчанию. |
+| d2k_ctl_open | 81-127 | 47 | создать AF_UNIX listener, снять старый файл, listen(1) | `control.rs` `open_with_profile` | E | C: пустой/длинный путь → ошибка; `socket(AF_UNIX)`; `(void)unlink(path)`; `bind`; `listen(1)`; `set_nonblock`. Rust: `remove_file` пути, `UnixListener::bind`, `libc::listen(fd,1)`, `set_nonblocking`; права задаёт umask, как C (без chmod). Тесты `control_socket_is_private_to_its_owner`, `control_open_unlinks_existing_regular_file_like_c`. |
 | d2k_ctl_close | 129-141 | 13 | закрыть оба fd и снять свой файл сокета | `control.rs:2220` `impl Drop for ControlServer` | E | C `if (!c) return;`; `close(pfd)` при `>=0`; `close(lfd)` при `>=0` и `unlink(c->path)`; `free(c)`. Rust `Drop` закрывает listener/peer и удаляет путь сокета; `control_socket_is_private_to_its_owner` (`control.rs:2325`) проверяет удаление пути и права 0600. |
 | d2k_ctl_listen_fd | 143-143 | 1 | вернуть listen fd для внешнего цикла | `control.rs:2203` `listen_fd` | E | C `return c ? c->lfd : -1`. Rust `listen_fd()` возвращает `listener.as_raw_fd()`; тест `control_server_exposes_listen_and_peer_fds_like_d2o` проверяет валидный fd и `-1` для пира до подключения. |
 | d2k_ctl_peer_fd | 144-144 | 1 | вернуть fd пира | `control.rs:2208` `peer_fd` | E | C `return c ? c->pfd : -1`. Rust `peer_fd()` возвращает fd подключённого пира или `-1`; тест `control_server_exposes_listen_and_peer_fds_like_d2o` проверяет оба состояния. |
