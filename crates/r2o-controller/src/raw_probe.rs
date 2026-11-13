@@ -1871,7 +1871,7 @@ fn sweep_stale_iptables() {
                 let _ = child.kill();
                 break;
             }
-            thread::sleep(Duration::from_millis(10));
+            crate::now_ms::d2k_sleep_ms(10);
         }
         if timed_out {
             let _ = child.wait();

@@ -88,8 +88,8 @@ recheck 1982 1982 equal True
 | core-state | 692 | 182 | 509 | 0 | 0 |
 | datapath-core | 400 | 156 | 244 | 0 | 0 |
 | datapath-plan | 183 | 174 | 9 | 0 | 0 |
-| detect | 159 | 67 | 92 | 0 | 0 |
-| **Итого** | **1982** | **776** | **1206** | **0** | **0** |
+| detect | 159 | 68 | 91 | 0 | 0 |
+| **Итого** | **1982** | **777** | **1205** | **0** | **0** |
 
 Это не оценка паритета: 1284 P означают «код есть, доказательство ветвей
 неполное», 43 N — в основном диагностические/CLI-функции и несколько реальных
@@ -103,7 +103,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 776 / P 1206 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 777 / P 1205 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -348,8 +348,8 @@ P означает неполное доказательство ветвей, N
 | core-state | 692 | 182 | 510 | 0 | 0 |
 | datapath-core | 400 | 156 | 244 | 0 | 0 |
 | datapath-plan | 183 | 174 | 9 | 0 | 0 |
-| detect | 159 | 67 | 92 | 0 | 0 |
-| **Итого** | **1982** | **776** | **1206** | **0** | **0** |
+| detect | 159 | 68 | 91 | 0 | 0 |
+| **Итого** | **1982** | **777** | **1205** | **0** | **0** |
 
 
 ---
@@ -6344,7 +6344,7 @@ raw_recheck, sweep_poisons (свойства → compose → перебор), cr
 | `d2k_verdict_name` | 57-72 | 604 | имя вердикта дерева | classify.rs:907 `Verdict::as_str` | **E** | C `switch`: `clear/prefix/whole_packet/opaque/inconclusive/address/poisonable/flaky/unreachable/response`, default `""`. Rust `Verdict::as_str` те же строки; `tests/classify.rs:1025` проверяет clear/inconclusive. |
 | `d2k_resp_name` | 74-82 | 255 | имена `clear/blocked/flaky`, default `not_applicable` | `response.rs` `ResponseVerdict::as_str`; `classify_json.rs` | E | C один `switch` с точными строками. Rust `ResponseVerdict::as_str` возвращает те же четыре строки, `classify_json` использует её; тест `response_verdict_names_match_donor`. |
 | `d2k_now_ms` | 86-91 | 188 | монотонное время в мс + `d2k_clock_offset_ms` | `now_ms.rs` `d2k_now_ms`/`set_clock_offset_ms` | E | C `clock_gettime(CLOCK_MONOTONIC)`, `tv_sec*1000+tv_nsec/1e6+offset`, ширина 64 бита. Rust `now_ms.rs` использует тот же syscall, `AtomicI64`-сдвиг и saturating-арифметику; тест `now_ms_survives_64bit_offset_like_c` (50 суток и граница i32). |
-| `d2k_sleep_ms` | 96-105 | 194 | пауза между сегментами | `thread::sleep` (`raw_probe.rs:1238`, `response.rs:856`) | **P** | C `ms<=0` → return; `nanosleep(ms/1000, (ms%1000)*1e6)`. Rust `thread::sleep(Duration::from_millis)`, отдельного символа нет; семантика та же. |
+| `d2k_sleep_ms` | 96-105 | 194 | пауза между сегментами | `now_ms.rs` `d2k_sleep_ms`; `raw_probe.rs` | **E** | C `ms<=0` → return; `nanosleep(ms/1000, (ms%1000)*1e6)`. Rust `d2k_sleep_ms` немедленно возвращается при `<=0`, иначе `thread::sleep`; используется в ожидании дочернего процесса. Тест `sleep_ms_is_noop_for_nonpositive_like_c`. |
 | `d2k_trigger_accepts` | 109-124 | 903 | критерий прохода по типу accept | `classify.rs:543 trigger_accepts` | **E** | C: SERVERHELLO `n>=6 && b[0]==0x16 && b[1]==0x03 && b[5]==0x02`; TLSRECORD `n>=3 && b[0]∈{0x16,0x15} && b[1]==0x03`; default `n>0`. Rust те же байты/длины; `tests/classify.rs:833 trigger_acceptance_matches_the_donor_rules`. |
 | `d2k_trigger_sni` | 126-134 | 236 | извлечь SNI из имени `tls:<sni>` | `classify.rs` `Trigger::sni` | E | C `strlen(name)>4 && strncmp(name,"tls:",4)==0` → `name+4`, иначе `""`. Rust `Trigger::sni` использует `strip_prefix("tls:")`; тест `trigger_sni_and_opts_skipped_match_c` (tls:/raw:/пусто). |
 | `d2k_detect_stopped` | 136-139 | 92 | проверка отмены через callback | `classify.rs:1041 stopped`, `raw_probe.rs:641 is_cancelled` | **E** | C `c && c->fn && c->fn(c->ctx)`. Rust `stopped`/`is_cancelled`; `tests/classify.rs:818`, `cancellation_after_*` (`classify.rs:2596+`). |

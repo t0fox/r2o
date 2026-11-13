@@ -32,9 +32,17 @@ pub fn d2k_now_ms() -> i64 {
     millis.saturating_add(clock_offset_ms())
 }
 
+/// C `d2k_sleep_ms`: `ms <= 0` — немедленный возврат, иначе пауза.
+pub fn d2k_sleep_ms(ms: i64) {
+    if ms <= 0 {
+        return;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(ms as u64));
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{clock_offset_ms, d2k_now_ms, set_clock_offset_ms};
+    use super::{clock_offset_ms, d2k_now_ms, d2k_sleep_ms, set_clock_offset_ms};
 
     #[test]
     fn now_ms_survives_64bit_offset_like_c() {
@@ -53,5 +61,15 @@ mod tests {
         set_clock_offset_ms(i64::from(i32::MAX) - 50);
         assert!(d2k_now_ms() > i64::from(i32::MAX));
         set_clock_offset_ms(saved);
+    }
+
+    #[test]
+    fn sleep_ms_is_noop_for_nonpositive_like_c() {
+        let start = std::time::Instant::now();
+        d2k_sleep_ms(0);
+        d2k_sleep_ms(-50);
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        d2k_sleep_ms(2);
+        assert!(start.elapsed() >= std::time::Duration::from_millis(1));
     }
 }

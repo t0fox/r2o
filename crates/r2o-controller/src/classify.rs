@@ -1137,17 +1137,24 @@ fn add_observation(
     cuts: &[usize],
     delay: Duration,
 ) -> usize {
+    let observation = Observation {
+        probe: probe.to_owned(),
+        cuts: cuts.iter().copied().take(4).collect(),
+        delay,
+        pass: 0,
+        fail: 0,
+        error: None,
+    };
     if result.trace.len() < TRACE_MAX {
-        result.trace.push(Observation {
-            probe: probe.to_owned(),
-            cuts: cuts.iter().copied().take(4).collect(),
-            delay,
-            pass: 0,
-            fail: 0,
-            error: None,
-        });
+        result.trace.push(observation);
+        result.trace.len() - 1
+    } else {
+        // C `d2k_trace_add`: при переполнении возвращает последний слот,
+        // и вызывающий перезаписывает его новым наблюдением.
+        let last = TRACE_MAX - 1;
+        result.trace[last] = observation;
+        last
     }
-    result.trace.len().saturating_sub(1)
 }
 
 fn seed_input(trigger: &Trigger, target: &ProbeTarget) -> u64 {
@@ -1327,8 +1334,13 @@ fn measure<B: ProbeBackend>(
     tally
 }
 
+/// C `d2k_dial_deadline_err`: наш срок истёк, а не линия ответила.
+pub fn dial_deadline_err(error: &str) -> bool {
+    !error.is_empty() && error.starts_with("dial tcp ") && error.contains(": i/o timeout")
+}
+
 fn is_dial_timeout_text(error: &str) -> bool {
-    error.starts_with("dial tcp ") && error.contains(": i/o timeout")
+    dial_deadline_err(error)
 }
 
 fn append_reason(reason: &mut String, tail: &str) {
@@ -2969,6 +2981,30 @@ mod qtrace_tests {
         let mut renamed = a.clone();
         renamed.name = "other".into();
         assert!(poison_same(&a, &renamed));
+    }
+
+    #[test]
+    fn dial_deadline_err_matches_c() {
+        use super::dial_deadline_err;
+        assert!(dial_deadline_err("dial tcp 192.0.2.1:443: i/o timeout"));
+        assert!(!dial_deadline_err(""));
+        assert!(!dial_deadline_err("read tcp 192.0.2.1:443: i/o timeout"));
+        assert!(!dial_deadline_err(
+            "dial tcp 192.0.2.1:443: connection refused"
+        ));
+    }
+
+    #[test]
+    fn trace_add_overwrites_last_slot_when_full_like_c() {
+        let mut result = ClassifyResult::new("example.com:443", 3);
+        for index in 0..TRACE_MAX {
+            super::add_observation(&mut result, &format!("probe-{index}"), &[], Duration::ZERO);
+        }
+        assert_eq!(result.trace.len(), TRACE_MAX);
+        let index = super::add_observation(&mut result, "overflow", &[], Duration::ZERO);
+        assert_eq!(index, TRACE_MAX - 1);
+        assert_eq!(result.trace.len(), TRACE_MAX);
+        assert_eq!(result.trace[TRACE_MAX - 1].probe, "overflow");
     }
 
     #[test]
