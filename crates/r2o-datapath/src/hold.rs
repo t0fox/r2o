@@ -1455,6 +1455,26 @@ mod tests {
     }
 
     #[test]
+    fn hold_parse_tcp_matches_c_fields() {
+        use super::parse_tcp;
+        let packet = tcp_packet(1234, 0x18, b"hello");
+        let (view, tcp, _key, source, destination) = parse_tcp(&packet).unwrap();
+        assert_eq!(view.protocol, 6);
+        assert_eq!(view.total_len, packet.len());
+        assert_eq!(tcp.payload.start, 40);
+        assert_eq!(tcp.payload.len(), 5);
+        assert_eq!(tcp.sequence, 1234);
+        assert_eq!(tcp.acknowledgment, 3000);
+        assert_eq!(tcp.flags, 0x18);
+        assert_eq!(source.port, 50000);
+        assert_eq!(destination.port, 443);
+        // C отвергает IPv4-фрагменты (`fragment & 0x3fff`).
+        let mut fragment = packet.clone();
+        fragment[6] = 0x20;
+        assert!(parse_tcp(&fragment).is_none());
+    }
+
+    #[test]
     fn split_hello_returns_synthetic_head_and_all_original_ids() {
         let now = Instant::now();
         let mut hold = HoldTable::default();

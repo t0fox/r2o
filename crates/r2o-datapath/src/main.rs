@@ -4564,6 +4564,22 @@ mod app {
             assert!(super::offline_self_check().is_ok());
         }
 
+        #[test]
+        fn hold_verdicts_continue_after_failure_like_c() {
+            let mut ids = Vec::new();
+            let result =
+                super::release_many_with(&[10, 20, 30], OriginalFate::Pass, false, |id, _| {
+                    ids.push(id);
+                    if id == 20 {
+                        Err(std::io::Error::from_raw_os_error(libc::EIO))
+                    } else {
+                        Ok(())
+                    }
+                });
+            assert!(result.is_err());
+            assert_eq!(ids, vec![10, 20, 30]);
+        }
+
         use super::{
             ControlServer, EmitKind, NF_ACCEPT, NF_DROP, OriginalFate, PacketDecision,
             PendingApplied, Plan, R2oFlowJournal, R2oQuicSessions, R2oTcpExecution, ReceiveError,
