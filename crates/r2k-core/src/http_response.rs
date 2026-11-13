@@ -578,6 +578,37 @@ mod header_tests {
     }
 
     #[test]
+    fn hr_field_differential_matches_c() {
+        let cases: &[&[u8]] = &[
+            b"",
+            b"Host",
+            b": value",
+            b"Host: value",
+            b"Host : value",
+            b"Host:\tvalue",
+            b"Host: a\x01",
+            b"Host: a\x7f",
+            b"Host: a\tb",
+            b"Bad@Name: x",
+            b"Content-Length: 10",
+            b"X-Empty:",
+        ];
+        let mut out = String::new();
+        for (index, line) in cases.iter().enumerate() {
+            out.push_str(&format!(
+                "field {index}={}\n",
+                u8::from(super::valid_hr_field(line))
+            ));
+        }
+        if let Ok(path) = std::env::var("R2O_HTTP_FIELD_DIFF_OUTPUT") {
+            std::fs::write(path, &out).unwrap();
+        }
+        assert!(super::valid_hr_field(b"Host: value"));
+        assert!(!super::valid_hr_field(b"Host : value"));
+        assert!(!super::valid_hr_field(b"Host: a\x01"));
+    }
+
+    #[test]
     fn verify_header_capacity_accepts_large_headers_like_d2o() {
         // C `read_status_rd`: `D2K_VERIFY_HEADER_LIMIT + 1` = 65537.
         let mut parser = super::HttpResponseParser::with_header_capacity(false, 65_536);
