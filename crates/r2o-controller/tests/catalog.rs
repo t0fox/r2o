@@ -183,6 +183,86 @@ fn catalog_json_output_matches_c_fields() {
 }
 
 #[test]
+fn catalog_json_input_handlers_match_c_fields_null_and_errors() {
+    let full = br#"{
+      "schema":1,
+      "boxes":[{
+        "id":"box-1",
+        "created":"2026-09-06T04:08:02Z",
+        "updated":"2026-09-07T07:13:56Z",
+        "fingerprint":{"method":2,"signals":[{"kind":"rx-volume","ttl":126,"ttl_delta":-3,"tos":136,"ipid":54321,"volume":16,"seen":2,"packets":45}]},
+        "plans":[{"id":"plan-1","proto":"tls","text":"r2o-plan 1 1\nproto tcp tls\n","added":"2026-09-06T04:08:03Z","successes":7,"enabled":true}],
+        "bindings":[{"kind":"name","target":"example.org","plan_id":"plan-1","level":1,"confirmed":"2026-09-06T04:08:04Z","successes":2,"enabled":true,"transport":6,"family":6,"shape":11,"tcp_profile":2,"verified_by":1,"input":1,"probe_path":"probe","ech_origin":"ech","recheck_since":"2026-09-06T04:08:05Z","budget":5}]
+      }],
+      "domain_observations":[{"name":"www.example.org","plan_id":"plan-1","transport":6,"family":4,"shape":1,"probe_path":"probe","ech_origin":"ech","evidence":1,"at":"2026-09-06T04:08:06Z"}],
+      "network_whitelist":{"name":"white.example","searched":true,"tx_only":true,"confirmed_utc":"2026-09-06T04:08:07Z"}
+    }"#;
+    let catalog = Catalog::parse(full).unwrap();
+    let signal = &catalog.boxes[0].fingerprint.signals[0];
+    assert_eq!(signal.kind, "rx-volume");
+    assert_eq!(
+        (
+            signal.ttl,
+            signal.ttl_delta,
+            signal.tos,
+            signal.ipid,
+            signal.volume,
+            signal.seen,
+            signal.packets
+        ),
+        (126, -3, 136, 54321, 16, 2, 45)
+    );
+    assert_eq!(catalog.boxes[0].fingerprint.method, 2);
+    assert_eq!(catalog.boxes[0].plans[0].successes, 7);
+    assert!(catalog.boxes[0].plans[0].enabled);
+    assert!(catalog.boxes[0].plans[0].added > 0);
+    let binding = &catalog.boxes[0].bindings[0];
+    assert_eq!(binding.transport, 6);
+    assert_eq!(binding.family, 6);
+    assert_eq!(binding.shape, 11);
+    assert_eq!(binding.tcp_profile, 2);
+    assert_eq!(binding.budget, 5);
+    assert!(binding.recheck_since.is_some_and(|value| value > 0));
+    let observation = &catalog.domain_state.as_ref().unwrap().observations[0];
+    assert_eq!(observation.key.transport, 6);
+    assert_eq!(observation.key.family, 4);
+    assert_eq!(observation.evidence, 1);
+    let whitelist = catalog.network_whitelist.as_ref().unwrap();
+    assert_eq!(whitelist.name, "white.example");
+    assert!(whitelist.searched && whitelist.tx_only);
+    assert!(whitelist.confirmed_at.is_some_and(|value| value > 0));
+
+    // C `jeat_null_if_present`/null-массивы: null → пусто.
+    let nulls = Catalog::parse(
+        br#"{"boxes":[{"plans":null,"bindings":null,"fingerprint":{"signals":null}}]}"#,
+    )
+    .unwrap();
+    assert!(nulls.boxes[0].plans.is_empty());
+    assert!(nulls.boxes[0].bindings.is_empty());
+    assert!(nulls.boxes[0].fingerprint.signals.is_empty());
+
+    // Неизвестные ключи (в т.ч. вложенные) пропускаются, как jskip_value.
+    assert!(Catalog::parse(br#"{"boxes":[{"x":{"y":[1,2,{"z":"q"}]}}],"unknown":1}"#).is_ok());
+
+    // Типы и границы полей: C jparse_u8/i32/u16/bool/rfc3339.
+    for invalid in [
+        br#"{"boxes":[{"fingerprint":{"signals":[{"ttl":256}]}}]}"#.as_slice(),
+        br#"{"boxes":[{"fingerprint":{"signals":[{"ttl":-1}]}}]}"#,
+        br#"{"boxes":[{"fingerprint":{"signals":[{"ipid":65536}]}}]}"#,
+        br#"{"boxes":[{"fingerprint":{"method":2.5}}]}"#,
+        br#"{"boxes":[{"plans":[{"added":"not-a-date"}]}]}"#,
+        br#"{"boxes":[{"plans":[{"enabled":"true"}]}]}"#,
+        br#"{"boxes":[{"fingerprint":{"signals":[{},{},{},{},{},{},{},{},{}]}}]}"#,
+    ] {
+        assert!(
+            Catalog::parse(invalid).is_err(),
+            "accepted {}",
+            String::from_utf8_lossy(invalid)
+        );
+    }
+}
+
+#[test]
 fn catalog_load_rejects_missing_and_oversized_files_like_c() {
     let dir = std::env::temp_dir().join(format!("r2o-catalog-load-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
