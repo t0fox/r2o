@@ -97,6 +97,14 @@ impl R2oFlowJournalKind {
         }
     }
 
+    /// C `jrn_kind`: HELLO_NONAME отличается от HELLO_SNI по наличию имени.
+    pub fn c_name_with_name(self, has_name: bool) -> &'static str {
+        if self == Self::Hello && !has_name {
+            return "приветствие без имени";
+        }
+        self.c_name()
+    }
+
     pub fn russian_name(self) -> &'static str {
         match self {
             Self::Observation => "наблюдение",

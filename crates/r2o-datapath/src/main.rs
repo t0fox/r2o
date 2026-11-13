@@ -1254,9 +1254,10 @@ mod app {
                     let name = String::from_utf8_lossy(&entry.name[..usize::from(entry.name_len)]);
                     let details = format_journal_details(entry);
                     eprintln!(
-                        "r2o-datapath: [{} нс] {} {} {}{}",
+                        "r2o-datapath: [{} нс] {} {} {} {}{}",
                         entry.at_ns,
-                        entry.kind.c_name(),
+                        proto_name(entry.key[37]),
+                        entry.kind.c_name_with_name(entry.name_len != 0),
                         format_journal_key(&entry.key),
                         name,
                         details
@@ -3149,6 +3150,25 @@ mod app {
         );
     }
 
+    /// C `proto_name` (`datapath/d2kd.c:1039-1045`): имя транспорта ключа.
+    fn proto_name(proto: u8) -> &'static str {
+        match proto {
+            6 => "tcp",
+            17 => "udp",
+            _ => "?",
+        }
+    }
+
+    /// C `refuse_of_errno` (`datapath/d2kd.c:1114-1116`): EMSGSIZE — «длиннее
+    /// того, что унесёт способ отправки», иначе общий отказ посылки.
+    fn refuse_of_errno(error: &std::io::Error) -> u8 {
+        if error.raw_os_error() == Some(libc::EMSGSIZE) {
+            r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_TOO_LONG
+        } else {
+            r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_SEND
+        }
+    }
+
     fn format_journal_key(key: &[u8; r2k_core::control::KEY_LEN]) -> String {
         use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -4217,7 +4237,7 @@ mod app {
                         payload_committed,
                     )?;
                     return Ok(TransmissionOutcome::Failed {
-                        code: r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_SEND,
+                        code: refuse_of_errno(&error),
                         r2o_sends_done,
                         payload_on_wire,
                         original_spent: !packet_ids.is_empty(),
@@ -4365,7 +4385,7 @@ mod app {
                         flow_journal,
                         journal_timestamp(journal_origin),
                         &pending,
-                        r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_SEND,
+                        refuse_of_errno(&error),
                     );
                     if damaged {
                         r2o_release_damaged_tcp_hold(
@@ -6858,6 +6878,43 @@ mod app {
                     .collect();
                 assert!(r2o_both_family_arguments(&arguments).is_err());
             }
+        }
+
+        #[test]
+        fn proto_name_matches_c() {
+            assert_eq!(super::proto_name(6), "tcp");
+            assert_eq!(super::proto_name(17), "udp");
+            assert_eq!(super::proto_name(0), "?");
+            assert_eq!(super::proto_name(1), "?");
+        }
+
+        #[test]
+        fn refuse_of_errno_matches_c() {
+            let too_long = std::io::Error::from_raw_os_error(libc::EMSGSIZE);
+            assert_eq!(
+                super::refuse_of_errno(&too_long),
+                r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_TOO_LONG
+            );
+            let send = std::io::Error::from_raw_os_error(libc::EIO);
+            assert_eq!(
+                super::refuse_of_errno(&send),
+                r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_SEND
+            );
+        }
+
+        #[test]
+        fn jrn_kind_c_names_match_donor() {
+            use r2o_datapath::flow_journal::R2oFlowJournalKind as K;
+            assert_eq!(K::Hello.c_name_with_name(true), "приветствие");
+            assert_eq!(K::Hello.c_name_with_name(false), "приветствие без имени");
+            assert_eq!(K::PlanApplied.c_name(), "план применён");
+            assert_eq!(K::PlanRefused.c_name(), "план не применён");
+            assert_eq!(K::Suspect.c_name(), "подозрение");
+            assert_eq!(K::Exchange.c_name(), "обмен пошёл");
+            assert_eq!(K::Shape.c_name(), "снята форма приветствия");
+            assert_eq!(K::PlanDone.c_name(), "");
+            assert_eq!(K::PlanUnsent.c_name(), "посылка не ушла");
+            assert_eq!(K::PlanDamaged.c_name(), "поток испорчен");
         }
     }
 }
