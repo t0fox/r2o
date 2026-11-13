@@ -3509,6 +3509,19 @@ mod tests {
             r2o_fetch_same_origin_redirect("https://example.com?next=1", "example.com").as_deref(),
             Some("/?next=1")
         );
+        assert_eq!(
+            r2o_fetch_same_origin_redirect("https://example.com", "example.com").as_deref(),
+            Some("/")
+        );
+        assert_eq!(
+            r2o_fetch_same_origin_redirect("https://example.com:443?x=1", "example.com").as_deref(),
+            Some("/?x=1")
+        );
+        assert!(
+            r2o_fetch_same_origin_redirect(&format!("/{}", "a".repeat(1023)), "example.com")
+                .is_none()
+        );
+        assert!(r2o_fetch_same_origin_redirect("/next\x7f", "example.com").is_none());
         assert!(r2o_fetch_same_origin_redirect("https://other.example/", "example.com").is_none());
         assert!(r2o_fetch_same_origin_redirect("/next#fragment", "example.com").is_none());
         assert!(r2o_fetch_same_origin_redirect("/bad path", "example.com").is_none());

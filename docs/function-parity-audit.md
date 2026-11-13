@@ -84,14 +84,14 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 238 | 310 | 0 | 0 |
+| core-net | 548 | 240 | 308 | 0 | 0 |
 | core-state | 692 | 259 | 433 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **985** | **997** | **0** | **0** |
+| **Итого** | **1982** | **987** | **995** | **0** | **0** |
 
-Это не оценка паритета: 997 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 995 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 985 / P 997 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 987 / P 995 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -342,12 +342,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 238 | 310 | 0 | 0 |
+| core-net | 548 | 240 | 308 | 0 | 0 |
 | core-state | 692 | 259 | 433 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **985** | **997** | **0** | **0** |
+| **Итого** | **1982** | **987** | **995** | **0** | **0** |
 
 
 ---
@@ -598,7 +598,7 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `verify_now_ms` | 52-56 | 5 | монотонное время в мс для HTTP-разбора | `Instant`/`Duration` (`fetch.rs`) | **P** | C `clock_gettime(CLOCK_MONOTONIC)`, `tv_sec*1000+tv_nsec/1e6`. Rust HTTP-чтение ведёт сроки через `Instant`/`Duration`; отдельной функции нет, абсолютные значения иные. |
-| `dns16` | 58-58 | 1 | big-endian u16 DNS | `ech.rs:482 r2o_ech_dns_name` (`read_u16`/`from_be_bytes`) | **P** | C `(p[0]<<8)\|p[1]` без проверки (вызывающий проверил границы). Rust `r2o_ech_dns_name` читает те же поля через `from_be_bytes`/`get`; значение для проверенных вызовов то же. Отдельного differential DNS-хелпера нет. |
+| `dns16` | 58-58 | 1 | big-endian u16 DNS | `ech.rs` `r2o_ech_u16` | E | C `(p[0]<<8)|p[1]` без проверки (вызывающий проверил границы). Rust `r2o_ech_u16` читает те же два байта через `get(offset..offset+2)` и `from_be_bytes`, используется в разборе DNS-ответа. Тест `dns16_matches_c_big_endian` (0x1234, 0xffff, обрезка, offset за границей). |
 | `ech_dns_name` | 62-88 | 27 | DNS-имя с компрессией: явный бюджет 16 прыжков, курсор по исходной записи, lower-case, LDH, метка ≤63, имя ≤253 | `ech.rs:482 r2o_ech_dns_name` | **E** | Построчный порт: `p< n`, `c==0` → конец/`after`, `(c&0xc0)==0xc0` → прыжок с `++jumps>16`, `after` при первом прыжке, `c>63\|\|c>n-p\|\|used+c+(used!=0)>253` → -1, lower-case, только `a-z0-9-`; DNS-кейсы ECH-резолва в тестах. |
 | `d2k_ech_resolve` | 90-184 | 95 | DNS HTTPS RR (type 65): `/etc/resolv.conf` (иначе 127.0.0.1), UDP/53, SO_MARK, 1500 мс; id/QR/rcode/qdcount, вопрос name/65/1, ответы ≤64, owner/type/class, SvcPriority>0, target, строго возрастающие ключи, port 443, key 5 → ECHConfig | `ech.rs:158-233 resolve_ech_config` → `:164 r2o_ech_system_resolver`, `:182 r2o_ech_query_resolver`, `:269 r2o_ech_parse_https_reply`, `:364 r2o_ech_select_config` | **P** | **C-ветви проверены:** origin непустой/≤253; random 2 байта; query[2]=1/query[5]=1; имя lower-case, метки 1..63, LDH; `\0 0 65 0 1`; резолвер из первого `nameserver`, иначе 127.0.0.1; IPv4/IPv6/53; SO_MARK; connect/send/recv; `received>=12`; id/QR/`rcode`/qdcount=1; owner=expected; type 65/class 1; answers≤64; owner/type/class; `SvcPriority>0`; target пустой или expected; ключи строго возрастают; key 3 len 2 port 443; key 5 → `d2k_ech_config_parse`; compatible. **R2O:** тот же resolv.conf/первый nameserver, UDP/53, mark, 1500 мс, те же проверки заголовка/вопроса/ответов/ключей/port 443/key 5; **отличия:** C при отсутствии resolv.conf берёт 127.0.0.1, Rust возвращает ошибку; C хранит ECHConfig без внешней длины, Rust `config_list` с ней (требование rustls). C/Rust DNS-differential не заявлен. |
 | `find_hdr_end` | 193-200 | 8 | найти CRLFCRLF в памяти (нулевые байты допустимы) | `fetch.rs:2002 r2o_gateway_header_end`, `httpup.rs:382 find_crlf` | **E** | C цикл `i+3<n`, ищет `13,10,13,10`, возвращает указатель или NULL. Rust `r2o_gateway_header_end` возвращает `Option<usize>` того же вхождения; `find_crlf` ищет CRLF. Framing/gateway differential. |
@@ -621,7 +621,7 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `d2k_verify_probe` | 739-742 | 4 | обёртка probe_on с use_fd=-1 | `fetch.rs` (`r2o_fetch...`) | **P** | C `return d2k_verify_probe_on(-1,ip,port,sni,deadline_ms,hello_wire)`. Rust end-to-end fetch/TLS-дифференциал выполняет тот же пробный запрос; отдельного символа с фиксированным `use_fd=-1` нет. |
 | `write13` | 750-753 | 4 | адаптер записи TLS1.3 | rustls `writer().write_all` (`fetch.rs`) | E | C `d2k_tls_write` — адаптер записи TLS1.3. Rust пишет через rustls `writer().write_all`; TLS1.3-запись покрыта `https_fetch_follows_same_origin_redirects_on_the_original_tls_connection`, `tx_packet_budget_repeats_complete_gets_on_the_same_tls_connection` и `d2o_verify_differential` (tls=1.3). Отдельного символа нет, поведение эквивалентно. |
 | `write12` | 755-758 | 4 | адаптер записи TLS1.2 для общего HTTP-разбора | rustls `writer().write_all` (`fetch.rs`) | E | C `d2k_tls12_write` — адаптер записи TLS1.2. Rust использует тот же rustls `writer().write_all`; TLS1.2-запись покрыта `https_замер_подтверждает_неполное_тело_tls_записи` (`tls12=true`) и donor-тестами TLS1.2. Отдельного символа нет, поведение эквивалентно. |
-| `redirect_path` | 762-795 | 34 | only `https://` same host (или `host:443`) или путь `/…`; `?`→`/?…`; отказ на `<=0x20`, `0x7f`, `#`, путь ≥cap | `fetch.rs:2761-2809 r2o_fetch_same_origin_redirect` | **P** | Построчное совпадение: authority до `/ ? #`, host без регистра, `:443`, `?` → `/`, фильтр `<=0x20/0x7f/#`, предел 1024. Rust возвращает `String`, C пишет в буфер. Unit `same_origin_redirects_are_safe_and_portals_match_donor_signatures`; C/Rust differential редиректов нет. |
+| `redirect_path` | 762-795 | 34 | only `https://` same host (или `host:443`) или путь `/…`; `?`→`/?…`; отказ на `<=0x20`, `0x7f`, `#`, путь ≥cap | `fetch.rs` `r2o_fetch_same_origin_redirect` | E | C: только `https://` с тем же host или `:443`, либо путь `/…`; `?` → `/?…`; отказ на `<=0x20`, `0x7f`, `#`, путь ≥cap. Rust `r2o_fetch_same_origin_redirect` повторяет все ветви. Unit `same_origin_redirects_are_safe_and_portals_match_donor_signatures` дополнен: `https://host` → `/`, `:443?x` → `/?x`, путь 1024 → отказ, `0x7f` → отказ. |
 | `https_redirect_response` | 799-814 | 16 | внешний 301/302/303/307/308: `https://`, ≥1 alnum в authority, только `.-:[]`, остальное без `<=0x20`/`0x7f` | `fetch.rs` `r2o_fetch_external_https_redirect` | E | Логика совпадает: статусы 301/302/303/307/308, `https://`, ≥1 alnum в authority, authority только `.-:[]`/alnum, хвост без control/DEL. Rust `r2o_fetch_external_https_redirect` реализует те же проверки; тест `external_https_redirect_matches_c` (все статусы, http, пустой authority, `_`, control, port/brackets). |
 | `d2k_verify_budget_set` | 822-822 | 1 | установить бюджет зондов потока | `R2oMeasurementGate`/параметры fetch | **P** | C `__thread unsigned g_verify_budget; g_verify_budget=budget_packets`. Rust бюджет/гейт передаётся через `R2oMeasurementGate`/параметры `r2o_fetch_*`; отдельного thread-local сеттера нет. |
 | `d2k_verify_budget_get` | 823-823 | 1 | прочитать бюджет зондов текущего потока | `R2oMeasurementGate`/параметры fetch | **P** | C `return g_verify_budget` (thread-local, ставится `d2k_verify_budget_set`). Rust бюджет передаётся через `R2oMeasurementGate`/параметр запроса и проверяется в fetch; отдельного геттера thread-local нет. |

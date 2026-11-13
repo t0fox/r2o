@@ -541,7 +541,7 @@ fn r2o_ech_u16(bytes: &[u8], offset: usize) -> Result<u16, String> {
 mod tests {
     use super::{
         Hpke, R2O_ECH_HPKE, R2oEchConfig, r2o_ech_dns_name, r2o_ech_https_query,
-        r2o_ech_parse_https_reply, r2o_ech_query_resolver, r2o_ech_select_config,
+        r2o_ech_parse_https_reply, r2o_ech_query_resolver, r2o_ech_select_config, r2o_ech_u16,
     };
     use std::net::UdpSocket;
     use std::thread;
@@ -652,6 +652,15 @@ mod tests {
     fn r2o_ограничивает_dns_указатели_сжатия() {
         assert!(r2o_ech_dns_name(&[0xc0, 0], 0).is_err());
         assert!(r2o_ech_dns_name(&[0xc0, 2, 0], 0).is_err());
+    }
+
+    #[test]
+    fn dns16_matches_c_big_endian() {
+        // C `dns16`: (p[0]<<8)|p[1] без проверки границ.
+        assert_eq!(r2o_ech_u16(&[0x12, 0x34], 0).unwrap(), 0x1234);
+        assert_eq!(r2o_ech_u16(&[0xff, 0xff], 0).unwrap(), u16::MAX);
+        assert!(r2o_ech_u16(&[0x12], 0).is_err());
+        assert!(r2o_ech_u16(&[0x12, 0x34], 1).is_err());
     }
 
     #[test]
