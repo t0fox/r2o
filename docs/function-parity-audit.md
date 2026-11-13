@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 240 | 308 | 0 | 0 |
-| core-state | 692 | 259 | 433 | 0 | 0 |
+| core-state | 692 | 262 | 430 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **987** | **995** | **0** | **0** |
+| **Итого** | **1982** | **990** | **992** | **0** | **0** |
 
-Это не оценка паритета: 995 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 992 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 987 / P 995 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 990 / P 992 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 240 | 308 | 0 | 0 |
-| core-state | 692 | 259 | 433 | 0 | 0 |
+| core-state | 692 | 262 | 430 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **987** | **995** | **0** | **0** |
+| **Итого** | **1982** | **990** | **992** | **0** | **0** |
 
 
 ---
@@ -2204,9 +2204,9 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `write_detail` | 310-328 | 19 | JSON memory_detail процесса | `diagnostics` memory_details | E | C `!pid` → `null`; pid/at/mono/rss/start_ticks; vm_size/data/stack/swap через `number`; fd_count; `smaps_rollup_status`; source `smaps_rollup`/`smaps-fallback`/`unavailable`; errno или null; rollup null при `status!=2 && source!=2`, иначе объект 5 полей. Rust `memory_details` пишет те же ключи/значения; RSS-differential сверяет `status/source/errno/rollup[5]` и числовые поля (exit 0); unit `first_process_detail_survives_process_exit`. |
 | `write_limit_reason` | 329-343 | 15 | JSON `limit_reason` по counts | `diagnostics::limit_reason_values` | E | C: `!resources_valid` → `resource-data-unavailable`; `!mask` → `no-current-resource-limit`; иначе биты в порядке cpu/memory/conntrack/slots. Rust `limit_reason_values` те же значения/порядок; тест `limit_reason_branches_match_c` (invalid, mask=0, 1/2/4/8/5/15). |
 | `write_limit_reason_state` | 344-356 | 13 | JSON `limit_reason` по flags/mask | `diagnostics::limit_reason_values` | E | C повторяет `write_limit_reason` для flags/mask limit-события; та же развилка/порядок. Rust использует ту же `limit_reason_values` в `limit_event_json`; тест `limit_reason_branches_match_c`. |
-| `write_memory_tracking` | 357-369 | 13 | JSON memory_tracking: enabled, coverage, 6 сайтов (id/name/location/live/peak/objects/created/destroyed/failures) | `diagnostics::memory_tracking_json` | **P** | C `memory_snapshot`; `enabled`; фиксированный текст coverage; 6 сайтов с id/name/location и счётчиками. Rust `memory_tracking_json` те же поля/строки; unit `memory_tracking_and_madvise_json_match_d2o_shape`. |
-| `write_madvise` | 370-381 | 12 | JSON madvise: successes/failures/requested/failed/last_errno/other/errno-гистограмма | `diagnostics::madvise_json` | **P** | C `successes/failures/requested_bytes/failed_requested_bytes`; `last_errno` или null; `other_errno_count`; `errno[]` только ненулевые `{code,count}`. Rust `madvise_json` те же поля/фильтр; unit. |
-| `write_anomalies` | 382-394 | 13 | JSON аномалий и счётчиков перезаписи | `Recorder::write_report` | **P** | C `anomalies_overwritten`, `diagnostic_write_failures`, массив `anomalies`: kind→`unattributed-rss-growth`/`diagnostic-json-write-error`; at; error_code или null; stage; rss/accounted delta только kind=1; window_samples 10/0. Rust `write_report`; unit `records_only_while_enabled`. |
+| `write_memory_tracking` | 357-369 | 13 | JSON memory_tracking: enabled, coverage, 6 сайтов (id/name/location/live/peak/objects/created/destroyed/failures) | `diagnostics::memory_tracking_json` | E | C: `memory_snapshot`, `enabled`, фиксированный текст coverage, 6 сайтов с id/name/location и счётчиками. Rust `memory_tracking_json` те же поля/строки; тест `memory_tracking_and_madvise_json_match_d2o_shape` расширен: coverage и все 9 ключей каждого сайта, live/peak/objects/created; memory-differential `scripts/test-diagnostics-memory-differential.sh` (exit 0). |
+| `write_madvise` | 370-381 | 12 | JSON madvise: successes/failures/requested/failed/last_errno/other/errno-гистограмма | `diagnostics::madvise_json` | E | C: `successes/failures/requested_bytes/failed_requested_bytes`; `last_errno` или null; `other_errno_count`; `errno[]` только ненулевые `{code,count}`. Rust `madvise_json` те же поля/фильтр; тест расширен: requested/failed/other, null и ненулевой `last_errno`, две записи errno с code/count; memory-differential (exit 0). |
+| `write_anomalies` | 382-394 | 13 | JSON аномалий и счётчиков перезаписи | `Recorder::write_report` | E | C: `anomalies_overwritten`, `diagnostic_write_failures`, массив `anomalies` (kind/at/error_code/stage/rss/accounted/window_samples). Rust `write_report` те же ключи; тест `report_anomalies_match_c_shape` записывает две аномалии и проверяет counters, len=2, kind/stage/error_code (EACCES/ENOENT). |
 | `d2k_diag_sample` | 395-468 | 74 | раз в 60 с: meminfo, conntrack, процессы, first/latest detail, память-история 1440, детектор RSS-роста | `Recorder::tick` (`:790`) + `process_memory`/`process_detail` | **P** | **Ветви C:** throttle 60 с; sample slot 120; at/mono/counts; `total/available=-1`; meminfo `MemTotal/MemAvailable`; conntrack; для 3 процессов `read_proc` + `read_detail` latest + first при смене pid/start_ticks; `ns++`; history slot 1440: at_s/mono_s, `compact_kib` rss/vm_data/vm_swap (недоступное → -1/null), `rollup_status/errno`, epoch при смене pid/start_ticks, **фактические `rollup[5]`**, rss_anon/catalog/http/snapshot/tracked/tasks/workers; `nm++`; growth: смена pid → сброс; accounted=tcp+quic+tls+catalog+http+snapshot, `compact_bytes_kib` (округление вверх); кольцо 10; при 10 точках span≥9 мин, rising≥7, rss_delta≥1024, accounted_delta<rss/4, cooldown 30 мин → anomaly kind=1/code=10. **Rust-отличия:** `field_u64(...).unwrap_or(0)` для rss/vm_data/vm_swap/anon (`:938-941`) — C даёт -1/null; history жёстко `0, null, null` для rollup (`:953-955`); growth `accounted_bytes / 1024` — округление вниз, C `compact_bytes_kib` вверх; остальные пороги/поля совпадают. Unit `d2o_periodic_rss_sample_matches_c`, `first_process_detail_survives_process_exit`. |
 | `d2k_diag_write` | 469-605 | 137 | report.json schema=1: controller_pid/release/ring_bytes/capacities/overwritten, http_storage_limits, memory_tracking, madvise, anomalies, events, limit_transitions, memory_history, samples, memory_details | `Recorder::write_report` (`:1179`) + serde_json | **P** | **Ветви C:** `!d \|\| !f` → -1; schema/enabled/controller_pid/release; ring_bytes/capacities 64/32/120/60с/1440/60с/overwritten; `http_storage_limits` **только при `ns>0`**; memory_tracking/madvise/anomalies; events 64 с `reason_source` (http→terminal-code, иначе last-classifier-context); limits 32 с flags/mem/conntrack/limit_reason; memory_history: capacity/interval/time_base, 20 полей, rollup null при `status!=2 && rollup[0]<0`; samples 120: `resource_sequence` и `grow_pending` и `http_failures` из counts, mem/conntrack/http/boxes/.../task_states/limit_reason/processes; memory_details: 3 процесса first/latest. **Rust-отличия:** `http_storage_limits` пишется **всегда**; в samples `resource_sequence=self.sample_total` (`:1083`), `grow_pending=false` (`:1082`), `http_failures=0` (`:1057`) — не из counts; `reason_source` берётся из события, не вычисляется; в memory_history `rollup_status=0`, `errno=null`, `rollup=null` жёстко (`:953-955`), RSS/VmData/VmSwap/RssAnon — `unwrap_or(0)` вместо C `-1`/null; `ring_bytes = d2o_ring_bytes()`, не `sizeof` C-структуры. `r2o-diagnostics-differential.sh` сравнивает ring_bytes/event/snapshots/http_records; остальное — unit, не C/Rust diff. |
 

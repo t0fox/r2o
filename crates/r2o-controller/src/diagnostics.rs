@@ -1693,10 +1693,31 @@ mod tests {
         assert_eq!(sites[2]["location"], "core/tls13.c:tls_connect_internal");
         assert!(sites[2]["live_bytes"].as_u64().unwrap() >= 77);
         assert!(sites[2]["peak_bytes"].as_u64().unwrap() >= 77);
+        assert_eq!(
+            tracking["coverage"],
+            "учитываются объекты, выделенные при включённом сборе; уже существующие объекты задним числом не учитываются"
+        );
+        for site in sites {
+            for key in [
+                "id",
+                "name",
+                "location",
+                "live_bytes",
+                "peak_bytes",
+                "live_objects",
+                "created",
+                "destroyed",
+                "alloc_failures",
+            ] {
+                assert!(site.get(key).is_some(), "memory site missing {key}");
+            }
+        }
+        assert!(sites[2]["live_objects"].as_u64().unwrap() >= 1);
+        assert!(sites[2]["created"].as_u64().unwrap() >= 1);
         memory_release(2, 77, tracked);
         memory_enable(false);
 
-        let stats = MadviseStats {
+        let mut stats = MadviseStats {
             successes: 3,
             failures: 2,
             requested_bytes: 1000,
@@ -1708,8 +1729,67 @@ mod tests {
         let madvise = madvise_json(&stats);
         assert_eq!(madvise["successes"], 3);
         assert_eq!(madvise["failures"], 2);
+        assert_eq!(madvise["requested_bytes"], 1000);
+        assert_eq!(madvise["failed_requested_bytes"], 500);
+        assert_eq!(madvise["other_errno_count"], 1);
         assert!(madvise["last_errno"].is_null());
         assert_eq!(madvise["errno"].as_array().unwrap().len(), 0);
+
+        stats.last_errno = libc::EINVAL;
+        stats.errno_hist[0] = MadviseErrno {
+            error: libc::EINVAL,
+            count: 1,
+        };
+        stats.errno_hist[1] = MadviseErrno {
+            error: libc::EACCES,
+            count: 2,
+        };
+        let madvise = madvise_json(&stats);
+        assert_eq!(madvise["last_errno"], json!(libc::EINVAL));
+        let errno = madvise["errno"].as_array().unwrap();
+        assert_eq!(errno.len(), 2);
+        assert_eq!(errno[0]["code"], json!(libc::EINVAL));
+        assert_eq!(errno[0]["count"], json!(1));
+        assert_eq!(errno[1]["code"], json!(libc::EACCES));
+        assert_eq!(errno[1]["count"], json!(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn report_anomalies_match_c_shape() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let dir = std::env::temp_dir().join(format!("r2o-diag-anomalies-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(dir.join("enabled"))
+            .unwrap();
+        let mut recorder = Recorder::new(dir.clone(), dir.join("run"));
+        recorder.record_write_error("open-temp", libc::EACCES);
+        recorder.record_write_error("rename", libc::ENOENT);
+        let report = json!({
+            "diagnostic_write_failures": recorder.write_failures,
+            "anomalies_overwritten": recorder.anomaly_total.saturating_sub(recorder.anomalies.len() as u64),
+            "anomalies": recorder.anomalies.clone(),
+        });
+        recorder.write_report(&report);
+        let report: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("report.json")).unwrap()).unwrap();
+        assert_eq!(report["diagnostic_write_failures"], json!(2));
+        assert_eq!(report["anomalies_overwritten"], json!(0));
+        let anomalies = report["anomalies"].as_array().unwrap();
+        assert_eq!(anomalies.len(), 2);
+        assert_eq!(anomalies[0]["kind"], "diagnostic-json-write-error");
+        assert_eq!(anomalies[0]["stage"], "open-temp");
+        assert_eq!(anomalies[0]["error_code"], json!(libc::EACCES));
+        assert_eq!(anomalies[1]["stage"], "rename");
+        assert_eq!(anomalies[1]["error_code"], json!(libc::ENOENT));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
