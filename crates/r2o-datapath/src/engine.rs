@@ -112,6 +112,16 @@ struct TcpSession {
     guards: u8,
     execution_id: u64,
     r2o_execution_pending: bool,
+    /// C `fl->sends_left`: сколько посылок попытки ещё не зачтено.
+    sends_left: u8,
+    /// C `fl->sends_done`: сколько посылок зачтено (насыщается 0xFF).
+    sends_done: u8,
+    /// C `fl->sends_failed`: отказ попытки уже записан (PLAN_UNSENT).
+    sends_failed: bool,
+    /// C `fl->orig_taken`: оригинал снят вердиктом DROP на передаче плана.
+    orig_taken: bool,
+    /// C `fl->damaged_told`: PLAN_DAMAGED уже сообщён.
+    damaged_told: bool,
     damaged: bool,
     first_syn: Option<Instant>,
     capture_anchor: Option<u32>,
@@ -176,6 +186,11 @@ impl TcpSession {
             guards: 0,
             execution_id: 0,
             r2o_execution_pending: false,
+            sends_left: 0,
+            sends_done: 0,
+            sends_failed: false,
+            orig_taken: false,
+            damaged_told: false,
             damaged: false,
             first_syn,
             capture_anchor: None,
@@ -713,10 +728,16 @@ impl TcpSessions {
     }
 
     /// Привязать попытку отправки к текущему поколению TCP-потока.
+    ///
+    /// C `plan_handed_off`: `sends_left = n_out + 1` (каждая raw-посылка и
+    /// вердикт оригинала), `sends_done = 0`, `sends_failed = 0`,
+    /// `orig_taken = (verdict == DROP)`.
     pub fn r2o_begin_execution(
         &mut self,
         packet: &[u8],
         execution_id: u64,
+        n_out: usize,
+        original_taken: bool,
     ) -> Option<[u8; KEY_LEN]> {
         if execution_id == 0 {
             return None;
@@ -728,7 +749,19 @@ impl TcpSessions {
         }
         session.execution_id = execution_id;
         session.r2o_execution_pending = true;
+        session.sends_left = n_out.saturating_add(1) as u8;
+        session.sends_done = 0;
+        session.sends_failed = false;
+        session.orig_taken = original_taken;
         Some(key.wire_key())
+    }
+
+    /// C `fl->orig_taken` текущего поколения.
+    pub fn r2o_orig_taken(&self, key: &[u8; KEY_LEN]) -> Option<bool> {
+        self.flows
+            .iter()
+            .find(|(flow_key, _)| flow_key.wire_key() == *key)
+            .map(|(_, session)| session.orig_taken)
     }
 
     /// Проверить, испорчено ли текущее поколение TCP-потока.
@@ -739,6 +772,9 @@ impl TcpSessions {
     }
 
     /// Проверить, что отложенная посылка относится к активному исполнению.
+    ///
+    /// C `d2k_session_send_pending`: поток есть, поколение совпало,
+    /// `sends_left != 0` и попытка ещё не помечена неудачной.
     pub fn r2o_send_pending(&self, key: &[u8; KEY_LEN], execution_id: u64) -> bool {
         self.flows
             .iter()
@@ -746,17 +782,18 @@ impl TcpSessions {
             .is_some_and(|(_, session)| {
                 execution_id != 0
                     && session.execution_id == execution_id
-                    && session.r2o_execution_pending
-                    && !session.damaged
+                    && session.sends_left != 0
+                    && !session.sends_failed
             })
     }
 
-    /// Зачесть завершение только той попытке, которая ещё принадлежит потоку.
-    pub fn r2o_mark_plan_done_for_execution(
-        &mut self,
-        key: &[u8; KEY_LEN],
-        execution_id: u64,
-    ) -> bool {
+    /// Зачесть одну ушедшую посылку поколения.
+    ///
+    /// C `d2k_session_sent`: при совпадении потока/поколения уменьшает
+    /// `sends_left`, насыщает `sends_done` до 0xFF и при
+    /// `sends_left == 0 && !sends_failed` завершает план. `true` — именно
+    /// этот вызов опустошил счётчик и зачёл завершение.
+    pub fn r2o_session_sent(&mut self, key: &[u8; KEY_LEN], execution_id: u64) -> bool {
         let Some((_, session)) = self
             .flows
             .iter_mut()
@@ -764,20 +801,67 @@ impl TcpSessions {
         else {
             return false;
         };
-        if execution_id == 0
-            || session.execution_id != execution_id
-            || !session.r2o_execution_pending
-            || session.damaged
-        {
+        if execution_id == 0 || session.execution_id != execution_id || session.sends_left == 0 {
             return false;
         }
-        session.plan_done = true;
-        session.r2o_execution_pending = false;
-        self.session_done = self.session_done.saturating_add(1);
-        true
+        session.sends_left -= 1;
+        session.sends_done = session.sends_done.saturating_add(1).min(0xFF);
+        if session.sends_left == 0 && !session.sends_failed {
+            session.plan_done = true;
+            session.r2o_execution_pending = false;
+            self.session_done = self.session_done.saturating_add(1);
+            return true;
+        }
+        false
+    }
+
+    /// Зачесть завершение только той попытке, которая ещё принадлежит потоку.
+    ///
+    /// C `d2k_session_sent` вызывается на каждую ушедшую посылку; Rust узнаёт
+    /// о завершении один раз, когда очередь исполнения опустела, поэтому
+    /// зачитывает все оставшиеся посылки тем же пошаговым счётчиком
+    /// (`sends_done` насыщается 0xFF) и завершает план ровно при
+    /// `sends_left == 0 && !sends_failed`.
+    pub fn r2o_mark_plan_done_for_execution(
+        &mut self,
+        key: &[u8; KEY_LEN],
+        execution_id: u64,
+    ) -> bool {
+        let remaining = {
+            let Some((_, session)) = self
+                .flows
+                .iter()
+                .find(|(flow_key, _)| flow_key.wire_key() == *key)
+            else {
+                return false;
+            };
+            // C: нет потока, чужое поколение или `sends_left == 0` → sent_lost.
+            if execution_id == 0 || session.execution_id != execution_id || session.sends_left == 0
+            {
+                return false;
+            }
+            session.sends_left
+        };
+        let mut completed = false;
+        for _ in 0..remaining {
+            if self.r2o_session_sent(key, execution_id) {
+                completed = true;
+            }
+        }
+        if let Some((_, session)) = self
+            .flows
+            .iter_mut()
+            .find(|(flow_key, _)| flow_key.wire_key() == *key)
+        {
+            session.r2o_execution_pending = false;
+        }
+        completed
     }
 
     /// Снять ожидание попытки, которая завершилась без порчи потока.
+    ///
+    /// C `d2k_session_unsent`: `sends_left = 0`, `sends_failed = 1`;
+    /// журнал PLAN_UNSENT пишет вызывающий.
     pub fn r2o_mark_execution_failed_for_execution(
         &mut self,
         key: &[u8; KEY_LEN],
@@ -790,14 +874,22 @@ impl TcpSessions {
         else {
             return false;
         };
-        if execution_id == 0 || session.execution_id != execution_id || session.damaged {
+        if execution_id == 0 || session.execution_id != execution_id {
             return false;
+        }
+        if !session.sends_failed {
+            session.sends_left = 0;
+            session.sends_failed = true;
         }
         session.r2o_execution_pending = false;
         true
     }
 
     /// Пометить поток испорченным после частичной отправки полезной нагрузки.
+    ///
+    /// C `d2k_session_exec_failed`: перед порчей вызывается `unsent`
+    /// (один PLAN_UNSENT на попытку), затем `damaged = 1`, `guards = 0`,
+    /// `damaged_told = 1`; `damaged_flows++` только при первом переходе.
     pub fn r2o_mark_damaged_for_execution(
         &mut self,
         key: &[u8; KEY_LEN],
@@ -810,10 +902,18 @@ impl TcpSessions {
         else {
             return false;
         };
-        if execution_id == 0 || session.execution_id != execution_id || session.damaged {
+        if execution_id == 0 || session.execution_id != execution_id {
             return false;
         }
+        if session.damaged {
+            return false;
+        }
+        if !session.sends_failed {
+            session.sends_left = 0;
+            session.sends_failed = true;
+        }
         session.damaged = true;
+        session.damaged_told = true;
         session.r2o_execution_pending = false;
         session.guards = 0;
         self.session_damaged = self.session_damaged.saturating_add(1);
@@ -2328,6 +2428,114 @@ mod tests {
     }
 
     #[test]
+    fn session_execution_counters_match_c_sent_unsent_damaged() {
+        let plan = tcp_fake_plan_with_rst_guard();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+        );
+        let hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello_with_sni());
+        decide_with_session(&mut sessions, &plan, &hello);
+        let flow_key = TcpFlowKey::from_packet(&hello).unwrap();
+        let key = flow_key.wire_key();
+
+        // C `plan_handed_off`: sends_left = n_out + 1, orig_taken из вердикта.
+        let key = sessions.r2o_begin_execution(&hello, 100, 2, false).unwrap();
+        assert_eq!(key, flow_key.wire_key());
+        let session = &sessions.flows[&flow_key];
+        assert_eq!(session.sends_left, 3);
+        assert_eq!(session.sends_done, 0);
+        assert!(!session.sends_failed);
+        assert!(!session.orig_taken);
+        assert!(sessions.r2o_send_pending(&key, 100));
+        assert!(!sessions.r2o_send_pending(&key, 99));
+
+        // C `d2k_session_sent`: по одной посылке, насыщение sends_done.
+        assert!(!sessions.r2o_session_sent(&key, 100));
+        assert!(!sessions.r2o_session_sent(&key, 100));
+        assert!(sessions.r2o_session_sent(&key, 100));
+        let session = &sessions.flows[&flow_key];
+        assert_eq!(session.sends_left, 0);
+        assert_eq!(session.sends_done, 3);
+        assert!(session.plan_done);
+        assert_eq!(sessions.session_done(), 1);
+        assert!(!sessions.r2o_send_pending(&key, 100));
+        // Повторное завершение уже пустого счётчика — sent_lost у вызывающего.
+        assert!(!sessions.r2o_mark_plan_done_for_execution(&key, 100));
+
+        // C `d2k_session_unsent`: sends_left=0, sends_failed=1.
+        assert!(sessions.r2o_begin_execution(&hello, 101, 0, true).is_some());
+        assert!(sessions.flows[&flow_key].orig_taken);
+        assert!(sessions.r2o_send_pending(&key, 101));
+        assert!(sessions.r2o_mark_execution_failed_for_execution(&key, 101));
+        let session = &sessions.flows[&flow_key];
+        assert_eq!(session.sends_left, 0);
+        assert!(session.sends_failed);
+        assert!(!session.damaged);
+        assert!(!sessions.r2o_send_pending(&key, 101));
+        assert_eq!(sessions.session_done(), 1);
+
+        // C `d2k_session_exec_failed`: перед порчей — unsent, guards=0,
+        // damaged_told один раз, счётчик damaged_flows только при переходе.
+        assert!(
+            sessions
+                .r2o_begin_execution(&hello, 102, 0, false)
+                .is_some()
+        );
+        assert!(sessions.r2o_mark_damaged_for_execution(&key, 102));
+        let session = &sessions.flows[&flow_key];
+        assert_eq!(session.sends_left, 0);
+        assert!(session.sends_failed);
+        assert!(session.damaged_told);
+        assert!(session.damaged);
+        assert_eq!(session.guards, 0);
+        assert_eq!(sessions.session_damaged(), 1);
+        assert!(!sessions.r2o_mark_damaged_for_execution(&key, 102));
+        assert!(!sessions.r2o_session_sent(&key, 102));
+        assert!(!sessions.r2o_mark_plan_done_for_execution(&key, 102));
+        assert!(!sessions.r2o_send_pending(&key, 102));
+    }
+
+    #[test]
+    fn session_sends_done_saturates_at_0xff_like_c() {
+        let plan = tcp_fake_plan_with_rst_guard();
+        let client = ([192, 0, 2, 11], 41001);
+        let server = ([198, 51, 100, 21], 443);
+        let hello = ipv4_tcp_packet(client, server, 0x18, 64, 801, &client_hello_with_sni());
+        let mut sessions = TcpSessions::default();
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x02, 64, 800, &[]),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x12, 124, 1000, &[]),
+        );
+        decide_with_session(&mut sessions, &plan, &hello);
+        let flow_key = TcpFlowKey::from_packet(&hello).unwrap();
+        // n_out+1 = 255: C `uint8_t` даёт полный диапазон, `sends_done`
+        // насыщается на 0xFF.
+        let key = sessions
+            .r2o_begin_execution(&hello, 201, 254, false)
+            .unwrap();
+        assert_eq!(sessions.flows[&flow_key].sends_left, 255);
+        assert!(sessions.r2o_mark_plan_done_for_execution(&key, 201));
+        assert_eq!(sessions.flows[&flow_key].sends_done, 0xFF);
+        assert_eq!(sessions.flows[&flow_key].sends_left, 0);
+    }
+
+    #[test]
     fn session_flows_guards_shape_damaged_getters_match_c() {
         let unknown = [0xAA_u8; KEY_LEN];
         let empty = TcpSessions::default();
@@ -2359,7 +2567,7 @@ mod tests {
         assert!(!sessions.session_flow_damaged(&key));
         assert_eq!(super::r2o_session_flows(&sessions, &udp), 1);
 
-        assert!(sessions.r2o_begin_execution(&hello, 42).is_some());
+        assert!(sessions.r2o_begin_execution(&hello, 42, 1, false).is_some());
         assert!(sessions.r2o_mark_damaged_for_execution(&key, 42));
         assert!(sessions.session_flow_damaged(&key));
         assert_eq!(sessions.session_guards(&key), 0);
@@ -4856,7 +5064,7 @@ mod tests {
             PacketDecision::Transmit { .. }
         ));
         assert!(sessions.session_applied() >= 1);
-        let key = sessions.r2o_begin_execution(&hello, 41).unwrap();
+        let key = sessions.r2o_begin_execution(&hello, 41, 1, false).unwrap();
         assert!(sessions.r2o_send_pending(&key, 41));
         assert!(!sessions.r2o_is_damaged_packet(&hello));
         assert!(!sessions.r2o_mark_damaged_for_execution(&key, 40));
@@ -4895,7 +5103,9 @@ mod tests {
             decide_with_session(&mut sessions, &plan, &new_hello),
             PacketDecision::Transmit { .. }
         ));
-        let new_key = sessions.r2o_begin_execution(&new_hello, 43).unwrap();
+        let new_key = sessions
+            .r2o_begin_execution(&new_hello, 43, 1, false)
+            .unwrap();
         assert_eq!(new_key, key);
         assert!(sessions.r2o_send_pending(&new_key, 43));
         assert!(!sessions.r2o_send_pending(&new_key, 41));
@@ -5027,7 +5237,7 @@ mod tests {
             decide_with_session(&mut sessions, &plan, &hello),
             PacketDecision::Transmit { .. }
         ));
-        let key = sessions.r2o_begin_execution(&hello, 51).unwrap();
+        let key = sessions.r2o_begin_execution(&hello, 51, 0, false).unwrap();
         assert!(sessions.r2o_send_pending(&key, 51));
         assert!(sessions.r2o_mark_plan_done_for_execution(&key, 51));
         assert_eq!(sessions.session_done(), 1);
@@ -5061,7 +5271,9 @@ mod tests {
             decide_with_session(&mut sessions, &plan, &first_packet),
             PacketDecision::Transmit { .. }
         ));
-        let key = sessions.r2o_begin_execution(&first_packet, 61).unwrap();
+        let key = sessions
+            .r2o_begin_execution(&first_packet, 61, 0, false)
+            .unwrap();
 
         let second = b"GET /second HTTP/1.1\r\nHost: example.test\r\n\r\n";
         let second_sequence = first_sequence.wrapping_add(first.len() as u32);

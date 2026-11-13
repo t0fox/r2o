@@ -425,11 +425,18 @@ mod app {
                 sessions.r2o_note_sent_lost();
             }
             false
-        } else if payload_on_wire || (original_spent && original_taken) {
-            sessions.r2o_mark_damaged_for_execution(&execution.key, execution.id)
         } else {
-            sessions.r2o_mark_execution_failed_for_execution(&execution.key, execution.id);
-            false
+            // C `d2k_session_exec_failed` решает по сохранённому на потоке
+            // `fl->orig_taken`, а не по аргументу вызывающего.
+            let original_taken = sessions
+                .r2o_orig_taken(&execution.key)
+                .unwrap_or(original_taken);
+            if payload_on_wire || (original_spent && original_taken) {
+                sessions.r2o_mark_damaged_for_execution(&execution.key, execution.id)
+            } else {
+                sessions.r2o_mark_execution_failed_for_execution(&execution.key, execution.id);
+                false
+            }
         }
     }
 
@@ -2213,12 +2220,19 @@ mod app {
                     } else {
                         None
                     };
+                    let (r2o_n_out, r2o_original_taken) = match &decision {
+                        PacketDecision::Replace(_) => (1_usize, true),
+                        PacketDecision::Transmit { packets, fate } => {
+                            (packets.len(), *fate == OriginalFate::Drop)
+                        }
+                        _ => (0, false),
+                    };
                     let tcp_execution =
                         tx_original
                             .zip(decision_execution_id)
                             .and_then(|(packet, id)| {
                                 tcp_sessions
-                                    .r2o_begin_execution(packet, id)
+                                    .r2o_begin_execution(packet, id, r2o_n_out, r2o_original_taken)
                                     .map(|key| R2oTcpExecution { key, id })
                             });
                     let mut applied_candidate = decision_execution_id.and_then(|execution_id| {
@@ -4639,7 +4653,7 @@ mod app {
                 decide_with_session(&mut damaged, &Plan::default(), &packet),
                 PacketDecision::Accept,
             );
-            let key = damaged.r2o_begin_execution(&packet, 71).unwrap();
+            let key = damaged.r2o_begin_execution(&packet, 71, 0, true).unwrap();
             r2o_finish_tcp_execution(
                 &mut damaged,
                 Some(R2oTcpExecution { key, id: 71 }),
@@ -4652,7 +4666,7 @@ mod app {
 
             let mut intact = TcpSessions::default();
             decide_with_session(&mut intact, &Plan::default(), &packet);
-            let key = intact.r2o_begin_execution(&packet, 72).unwrap();
+            let key = intact.r2o_begin_execution(&packet, 72, 0, false).unwrap();
             assert!(intact.r2o_send_pending(&key, 72));
             assert!(!r2o_finish_tcp_execution(
                 &mut intact,
@@ -4684,7 +4698,7 @@ mod app {
 
             let mut sessions = TcpSessions::default();
             decide_with_session(&mut sessions, &Plan::default(), &packet);
-            let key = sessions.r2o_begin_execution(&packet, 77).unwrap();
+            let key = sessions.r2o_begin_execution(&packet, 77, 0, false).unwrap();
             let event = r2k_core::control::AppliedEvent {
                 key,
                 plan_id: [0xa5; 16],
@@ -6083,7 +6097,10 @@ mod app {
                     epoch: [0x3c; 16],
                 },
             };
-            assert_eq!(sessions.r2o_begin_execution(&hello_packet, 77), Some(ключ));
+            assert_eq!(
+                sessions.r2o_begin_execution(&hello_packet, 77, 0, false),
+                Some(ключ)
+            );
             send_applied_event(&mut sessions, &mut control, &mut journal, 1, &applied);
             отправить_tcp_пакет(
                 &mut sessions,
