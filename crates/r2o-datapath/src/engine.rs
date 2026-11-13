@@ -534,7 +534,8 @@ impl TcpSessions {
         else {
             return false;
         };
-        if session.suspect_counted {
+        // C `suspect_num`: зонд и уже подозревавшийся поток не учитываются.
+        if session.controller_probe || session.suspect_counted {
             return false;
         }
         session.suspect_counted = true;
@@ -5286,6 +5287,22 @@ mod tests {
             PacketDecision::Accept
         );
         assert!(sessions.is_empty(), "обычный FIN освобождает запись потока");
+    }
+
+    #[test]
+    fn suspect_num_skips_controller_probe_like_c() {
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let syn = ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]);
+        let hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello_with_sni());
+        let mut sessions = TcpSessions::default();
+        sessions.track_packet(&syn, start);
+        sessions.track_packet_mode(&hello, start + Duration::from_millis(1), true);
+        let key = crate::capture::TcpFlowKey::from_packet(&hello)
+            .unwrap()
+            .wire_key();
+        assert!(!sessions.r2o_note_suspect(&key));
     }
 
     #[test]
