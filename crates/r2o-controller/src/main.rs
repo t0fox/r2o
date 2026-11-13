@@ -24104,6 +24104,65 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn tcp_hello_kind_maps_ech_modern_legacy_like_c() {
+        use super::r2o_client_shape_from_legacy;
+        use r2k_core::control::{KEY_LEN, LegacyShapeEvent};
+
+        fn hello(host: &str, supported_versions: bool, ech: bool) -> Vec<u8> {
+            let host = host.as_bytes();
+            let mut server_name = Vec::new();
+            server_name.extend_from_slice(&((host.len() + 3) as u16).to_be_bytes());
+            server_name.push(0);
+            server_name.extend_from_slice(&(host.len() as u16).to_be_bytes());
+            server_name.extend_from_slice(host);
+            let mut extensions = vec![0x00, 0x00];
+            extensions.extend_from_slice(&(server_name.len() as u16).to_be_bytes());
+            extensions.extend_from_slice(&server_name);
+            if supported_versions {
+                extensions.extend_from_slice(&[0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04]);
+            }
+            if ech {
+                // C `d2k_hello_ech_offer`: структурно согласованный offer.
+                extensions.extend_from_slice(&[
+                    0xfe, 0x0d, 0x00, 0x0c, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0xaa, 0xbb,
+                ]);
+            }
+            let mut body = vec![0x03, 0x03];
+            body.extend_from_slice(&[0x42; 32]);
+            body.extend_from_slice(&[0x00, 0x00, 0x02, 0x13, 0x01, 0x01, 0x00]);
+            body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+            body.extend_from_slice(&extensions);
+            let mut handshake = vec![0x01];
+            handshake.extend_from_slice(&[
+                ((body.len() >> 16) & 0xff) as u8,
+                ((body.len() >> 8) & 0xff) as u8,
+                (body.len() & 0xff) as u8,
+            ]);
+            handshake.extend_from_slice(&body);
+            let mut record = vec![0x16, 0x03, 0x01];
+            record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+            record.extend_from_slice(&handshake);
+            record
+        }
+
+        fn shape(host: &str, supported_versions: bool, ech: bool) -> u8 {
+            let mut key = [0; KEY_LEN];
+            key[0] = 4;
+            key[37] = 6;
+            let event = LegacyShapeEvent {
+                key,
+                client_hello: hello(host, supported_versions, ech),
+            };
+            r2o_client_shape_from_legacy(&event, None).unwrap().shape
+        }
+
+        assert_eq!(shape("example.com", true, false), super::SHAPE_MODERN);
+        assert_eq!(shape("example.com", false, false), super::SHAPE_LEGACY);
+        assert_eq!(shape("example.com", true, true), super::SHAPE_ECH_TCP);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn v22_plan_records_are_d2kp_and_accepted_by_command_codec() {
         use super::r2o_plan_records_for_profile;
         use r2k_core::control::WireProfile;
