@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 320 | 228 | 0 | 0 |
-| core-state | 692 | 402 | 290 | 0 | 0 |
+| core-state | 692 | 403 | 289 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1227** | **755** | **0** | **0** |
+| **Итого** | **1982** | **1228** | **754** | **0** | **0** |
 
-Это не оценка паритета: 755 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 754 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1227 / P 755 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1228 / P 754 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 320 | 228 | 0 | 0 |
-| core-state | 692 | 402 | 290 | 0 | 0 |
+| core-state | 692 | 403 | 289 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1227** | **755** | **0** | **0** |
+| **Итого** | **1982** | **1228** | **754** | **0** | **0** |
 
 
 ---
@@ -2149,7 +2149,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
 | `json_string` | 41–62 | 22 | JSON-строка: `"`/`\\`, control → `\u%04x`, валидный UTF-8 как есть, иначе `\u%04x` | `serde_json::to_string` | E | C сам валидирует UTF-8 (overlong/surrogate/>0x10ffff) и печатает `\u00xx`; Rust `String` всегда валиден, поэтому ветка «невалидный UTF-8» непредставима, а для валидной строки `serde_json` даёт те же escape. Тест `json_string_escaping_matches_c`. |
-| `vol_verdict_code` | 64-72 | 9 | `unreachable/cut/passed/short/unknown` | `bin/r2o-fetch.rs:227` match `R2oFetchVolumeTxVerdict` | **P*** | C `switch`: UNREACHABLE→"unreachable", CUT→"cut", PASSED→"passed", SHORT→"short", default→"unknown". Rust match те же строки для `R2oFetchVolumeTxVerdict`; CLI-differential не проверяет. |
+| `vol_verdict_code` | 64-72 | 9 | UNREACHABLE/CUT/PASSED/SHORT → unreachable/cut/passed/short, иначе unknown | `bin/r2o-fetch.rs` `r2o_vol_verdict_code` | E | Четыре состояния отображаются дословно; Rust-перечисление `R2oFetchVolumeTxVerdict` закрыто, поэтому C-default «unknown» недостижим (неизвестные числовые коды не декодируются). Тест `volume_verdict_codes_match_c_d2kfetch`. |
 | `usage` | 74-102 | 29 | флаги `--name/--ip/--port/--path/--wire/--snapshot[=ms]/--ladder/--mark/--quic/--tls12/--deadline/--json/--version` | `r2o-fetch` print_help | **P** | C текст перечисляет эти флаги и умолчания (443, 60000 мс, 15000 мс). Rust-набор расширен (`--quic-budget`, `--control`), текст/форма справки отличаются. |
 | `resolve_first` | 104–114 | 11 | `getaddrinfo(AF_UNSPEC,SOCK_STREAM)`, первый адрес, `getnameinfo(NI_NUMERICHOST)` | `std::net::ToSocketAddrs` | **P** | C берёт первый результат getaddrinfo (порядок ОС), Rust — первый из `ToSocketAddrs`; семейство/порядок могут отличаться. `r2o-fetch-cli-differential.sh` проверяет только localhost. |
 | `snapshot_wire` | 117–155 | 39 | link open (NULL sock), ARM_SHAPE transport 6, ожидание `D2K_EV_SHAPE` transport 6 до `wait_ms`, `shape_len` | `fetch::r2o_fetch_snapshot_wire_len`, CLI snapshot tests | **P** | C ARM_SHAPE передаёт transport 6; Rust-снимок использует ARM_SHAPE/ожидание SHAPE, но C/Rust differential снимка не заявлен; известное расхождение ARM_SHAPE transport 17 (header, п. 2) сюда не входит (C тоже 6). |

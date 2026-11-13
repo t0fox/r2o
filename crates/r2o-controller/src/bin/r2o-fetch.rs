@@ -8,6 +8,18 @@ use r2o_controller::fetch::{
 };
 use r2o_controller::r2o_quic_http3::R2O_QUIC_HTTP3_DEFAULT_BUDGET_PACKETS;
 
+/// C `vol_verdict_code` (`core/d2kfetch.c:64-72`): машинный код объёмного
+/// вердикта для JSON. Перечисление Rust закрытое, поэтому default «unknown»
+/// недостижим (C-значения 0/неизвестные сюда не попадают).
+fn r2o_vol_verdict_code(r2o_verdict: R2oFetchVolumeTxVerdict) -> &'static str {
+    match r2o_verdict {
+        R2oFetchVolumeTxVerdict::Unreachable => "unreachable",
+        R2oFetchVolumeTxVerdict::Short => "short",
+        R2oFetchVolumeTxVerdict::Cut => "cut",
+        R2oFetchVolumeTxVerdict::Passed => "passed",
+    }
+}
+
 fn main() {
     let code = match run() {
         Ok(code) => code,
@@ -223,12 +235,7 @@ fn run() -> Result<i32, String> {
             None
         };
         if r2o_json {
-            let r2o_verdict = match r2o_tx.verdict {
-                R2oFetchVolumeTxVerdict::Unreachable => "unreachable",
-                R2oFetchVolumeTxVerdict::Short => "short",
-                R2oFetchVolumeTxVerdict::Cut => "cut",
-                R2oFetchVolumeTxVerdict::Passed => "passed",
-            };
+            let r2o_verdict = r2o_vol_verdict_code(r2o_tx.verdict);
             let r2o_verdict_human = match r2o_tx.verdict {
                 R2oFetchVolumeTxVerdict::Unreachable => "мишень не ответила",
                 R2oFetchVolumeTxVerdict::Short => "объём не набран — вердикта нет",
@@ -721,7 +728,25 @@ fn print_help() {
 
 #[cfg(test)]
 mod tests {
-    use super::{ladder_mark_label, parse_mark};
+    use super::{ladder_mark_label, parse_mark, r2o_vol_verdict_code};
+    use r2o_controller::fetch::R2oFetchVolumeTxVerdict;
+
+    #[test]
+    fn volume_verdict_codes_match_c_d2kfetch() {
+        assert_eq!(
+            r2o_vol_verdict_code(R2oFetchVolumeTxVerdict::Unreachable),
+            "unreachable"
+        );
+        assert_eq!(
+            r2o_vol_verdict_code(R2oFetchVolumeTxVerdict::Short),
+            "short"
+        );
+        assert_eq!(r2o_vol_verdict_code(R2oFetchVolumeTxVerdict::Cut), "cut");
+        assert_eq!(
+            r2o_vol_verdict_code(R2oFetchVolumeTxVerdict::Passed),
+            "passed"
+        );
+    }
 
     #[test]
     fn mark_parser_matches_c_decimal_hex_and_octal_forms() {
