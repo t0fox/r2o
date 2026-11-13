@@ -11,6 +11,15 @@ thread_local! {
     static VERIFY_BUDGET: Cell<u32> = const { Cell::new(0) };
 }
 
+/// C `verify_now_ms`: монотонное время процесса в миллисекундах.
+pub fn verify_now_ms() -> i64 {
+    use std::sync::OnceLock;
+
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    let start = START.get_or_init(std::time::Instant::now);
+    start.elapsed().as_millis().min(i64::MAX as u128) as i64
+}
+
 /// C `d2k_verify_tcp_timestamps_get`: текущее значение потока.
 pub fn d2k_verify_tcp_timestamps_get() -> i8 {
     VERIFY_TCP_TIMESTAMPS.with(Cell::get)
@@ -54,7 +63,18 @@ mod tests {
     use super::{
         d2k_verify_budget_get, d2k_verify_budget_set, d2k_verify_quic_form_get,
         d2k_verify_quic_form_set, d2k_verify_tcp_timestamps_get, d2k_verify_tcp_timestamps_set,
+        verify_now_ms,
     };
+
+    #[test]
+    fn verify_now_ms_is_monotonic_and_non_negative() {
+        let first = verify_now_ms();
+        assert!(first >= 0);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let second = verify_now_ms();
+        assert!(second >= first);
+        assert!(second > first, "монотонные часы должны идти вперёд");
+    }
 
     #[test]
     fn verify_budget_setter_reflects_thread_local_value() {

@@ -894,35 +894,20 @@ pub fn r2o_http_read_response(reader: &mut impl Read) -> std::io::Result<R2oHttp
         .unwrap_or_default();
     let identity =
         r2o_fetch_body_encoding(headers) == crate::r2o_volume::R2oVolumeRxEncoding::Identity;
-    let reply = r2o_fetch_http_outcome(
+    let reply = r2o_http_reply_classify(
         parser.status(),
         location.as_bytes(),
         identity,
         body_prefix,
         parser.body_bytes(),
     );
-    let reply_evidence = match reply {
-        R2oFetchHttpOutcome::LegalDenial => "HTTP 451".to_owned(),
-        R2oFetchHttpOutcome::Blocked => r2o_fetch_portal_location(location.as_bytes())
-            .map(str::to_owned)
-            .or_else(|| {
-                r2o_fetch_ascii_contains(body_prefix, b"access blocked by rkn")
-                    .then(|| "access blocked by rkn".to_owned())
-            })
-            .or_else(|| {
-                r2o_fetch_body_has_portal(body_prefix, parser.body_bytes())
-                    .then(|| "portal".to_owned())
-            })
-            .unwrap_or_default(),
-        R2oFetchHttpOutcome::Positive | R2oFetchHttpOutcome::Neutral => String::new(),
-    };
     Ok(R2oHttpReadResponse {
         status: parser.status(),
         body_bytes: parser.body_bytes(),
         complete: parser.is_complete(),
         location,
-        reply,
-        reply_evidence,
+        reply: reply.outcome,
+        reply_evidence: reply.evidence.to_owned(),
         local_limit: r2o_http_local_limit(&parser),
         connection_close: r2o_http_connection_closes(headers),
     })
@@ -3199,6 +3184,74 @@ fn r2o_fetch_external_https_redirect(status: u16, location: &[u8]) -> bool {
             .all(|&byte| byte > 0x20 && byte != 0x7f)
 }
 
+/// C `d2k_http_reply_result`: исход и доказательство.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct R2oHttpReplyResult {
+    pub outcome: R2oFetchHttpOutcome,
+    pub evidence: &'static str,
+}
+
+const R2O_HTTP_REPLY_NEUTRAL: R2oHttpReplyResult = R2oHttpReplyResult {
+    outcome: R2oFetchHttpOutcome::Neutral,
+    evidence: "",
+};
+
+/// C `d2k_http_reply_classify`: исход и строка-доказательство.
+fn r2o_http_reply_classify(
+    code: u16,
+    location: &[u8],
+    identity_encoding: bool,
+    body: &[u8],
+    total: u64,
+) -> R2oHttpReplyResult {
+    if code == 451 {
+        return R2oHttpReplyResult {
+            outcome: R2oFetchHttpOutcome::LegalDenial,
+            evidence: "HTTP 451",
+        };
+    }
+    if (200..300).contains(&code) || code == 304 {
+        return R2oHttpReplyResult {
+            outcome: R2oFetchHttpOutcome::Positive,
+            evidence: "",
+        };
+    }
+    if matches!(code, 301 | 302 | 303 | 307 | 308) {
+        if let Some(host) = r2o_fetch_portal_location(location) {
+            return R2oHttpReplyResult {
+                outcome: R2oFetchHttpOutcome::Blocked,
+                evidence: host,
+            };
+        }
+        return if location.first() == Some(&b'/')
+            && location.get(1).is_some_and(|byte| *byte != b'/')
+        {
+            R2oHttpReplyResult {
+                outcome: R2oFetchHttpOutcome::Positive,
+                evidence: "",
+            }
+        } else {
+            R2O_HTTP_REPLY_NEUTRAL
+        };
+    }
+    if !(400..=599).contains(&code) || !identity_encoding {
+        return R2O_HTTP_REPLY_NEUTRAL;
+    }
+    if r2o_fetch_ascii_contains(body, b"access blocked by rkn") {
+        return R2oHttpReplyResult {
+            outcome: R2oFetchHttpOutcome::Blocked,
+            evidence: "access blocked by rkn",
+        };
+    }
+    if let Some(host) = r2o_fetch_body_portal(body, total) {
+        return R2oHttpReplyResult {
+            outcome: R2oFetchHttpOutcome::Blocked,
+            evidence: host,
+        };
+    }
+    R2O_HTTP_REPLY_NEUTRAL
+}
+
 fn r2o_fetch_http_outcome(
     status: u16,
     location: &[u8],
@@ -3206,34 +3259,7 @@ fn r2o_fetch_http_outcome(
     body_prefix: &[u8],
     body_total: u64,
 ) -> R2oFetchHttpOutcome {
-    if status == 451 {
-        return R2oFetchHttpOutcome::LegalDenial;
-    }
-    if (200..300).contains(&status) || status == 304 {
-        return R2oFetchHttpOutcome::Positive;
-    }
-    if matches!(status, 301 | 302 | 303 | 307 | 308) {
-        if r2o_fetch_portal_location(location).is_some() {
-            return R2oFetchHttpOutcome::Blocked;
-        }
-        return if location.first() == Some(&b'/')
-            && location.get(1).is_some_and(|byte| *byte != b'/')
-        {
-            R2oFetchHttpOutcome::Positive
-        } else {
-            R2oFetchHttpOutcome::Neutral
-        };
-    }
-    if !(400..=599).contains(&status) || !identity_encoding {
-        return R2oFetchHttpOutcome::Neutral;
-    }
-    if r2o_fetch_ascii_contains(body_prefix, b"access blocked by rkn")
-        || r2o_fetch_body_has_portal(body_prefix, body_total)
-    {
-        R2oFetchHttpOutcome::Blocked
-    } else {
-        R2oFetchHttpOutcome::Neutral
-    }
+    r2o_http_reply_classify(status, location, identity_encoding, body_prefix, body_total).outcome
 }
 
 fn r2o_fetch_portal_location(location: &[u8]) -> Option<&'static str> {
@@ -3279,16 +3305,16 @@ fn r2o_fetch_ascii_contains(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
-fn r2o_fetch_body_has_portal(body: &[u8], total: u64) -> bool {
-    const PORTALS: [&[u8]; 6] = [
-        b"eais.rkn.gov.ru",
-        b"lawfilter.ertelecom.ru",
-        b"blackhole.svyaztelecom.ru",
-        b"warning.rt.ru",
-        b"warn.beeline.ru",
-        b"deny.megafon.ru",
+fn r2o_fetch_body_portal(body: &[u8], total: u64) -> Option<&'static str> {
+    const PORTALS: [(&[u8], &str); 6] = [
+        (b"eais.rkn.gov.ru", "eais.rkn.gov.ru"),
+        (b"lawfilter.ertelecom.ru", "lawfilter.ertelecom.ru"),
+        (b"blackhole.svyaztelecom.ru", "blackhole.svyaztelecom.ru"),
+        (b"warning.rt.ru", "warning.rt.ru"),
+        (b"warn.beeline.ru", "warn.beeline.ru"),
+        (b"deny.megafon.ru", "deny.megafon.ru"),
     ];
-    PORTALS.iter().any(|portal| {
+    PORTALS.iter().find_map(|(portal, name)| {
         body.windows(portal.len())
             .enumerate()
             .any(|(start, window)| {
@@ -3301,7 +3327,12 @@ fn r2o_fetch_body_has_portal(body: &[u8], total: u64) -> bool {
                 start + portal.len() == body.len()
                     || !r2o_fetch_http_host_char(body[start + portal.len()])
             })
+            .then_some(*name)
     })
+}
+
+fn r2o_fetch_body_has_portal(body: &[u8], total: u64) -> bool {
+    r2o_fetch_body_portal(body, total).is_some()
 }
 
 fn r2o_fetch_http_host_char(byte: u8) -> bool {
@@ -3909,6 +3940,87 @@ mod tests {
         body.feed(b"5\r\neais.");
         body.feed(b"\r\nA\r\nrkn.gov.ru\r\n0\r\n\r\n");
         assert_eq!(body.prefix(), b"eais.rkn.gov.ru");
+    }
+
+    #[test]
+    fn http_reply_classify_preserves_c_evidence() {
+        assert_eq!(
+            r2o_http_reply_classify(451, b"", true, &[], 0),
+            R2oHttpReplyResult {
+                outcome: R2oFetchHttpOutcome::LegalDenial,
+                evidence: "HTTP 451",
+            }
+        );
+        assert_eq!(
+            r2o_http_reply_classify(200, b"", true, &[], 0),
+            R2oHttpReplyResult {
+                outcome: R2oFetchHttpOutcome::Positive,
+                evidence: "",
+            }
+        );
+        assert_eq!(
+            r2o_http_reply_classify(304, b"", true, &[], 0).outcome,
+            R2oFetchHttpOutcome::Positive
+        );
+        assert_eq!(
+            r2o_http_reply_classify(
+                302,
+                b"https://user@WARNING.RT.RU.:443/blocked",
+                true,
+                &[],
+                0
+            ),
+            R2oHttpReplyResult {
+                outcome: R2oFetchHttpOutcome::Blocked,
+                evidence: "warning.rt.ru",
+            }
+        );
+        assert_eq!(
+            r2o_http_reply_classify(302, b"//eais.rkn.gov.ru/x", true, &[], 0).evidence,
+            "eais.rkn.gov.ru"
+        );
+        assert_eq!(
+            r2o_http_reply_classify(303, b"/login", true, &[], 0),
+            R2oHttpReplyResult {
+                outcome: R2oFetchHttpOutcome::Positive,
+                evidence: "",
+            }
+        );
+        assert_eq!(
+            r2o_http_reply_classify(307, b"//other.example/", true, &[], 0),
+            R2oHttpReplyResult {
+                outcome: R2oFetchHttpOutcome::Neutral,
+                evidence: "",
+            }
+        );
+        assert_eq!(
+            r2o_http_reply_classify(403, b"", true, b"Access Blocked By RKN", 21),
+            R2oHttpReplyResult {
+                outcome: R2oFetchHttpOutcome::Blocked,
+                evidence: "access blocked by rkn",
+            }
+        );
+        assert_eq!(
+            r2o_http_reply_classify(403, b"", true, b"x eais.rkn.gov.ru y", 19),
+            R2oHttpReplyResult {
+                outcome: R2oFetchHttpOutcome::Blocked,
+                evidence: "eais.rkn.gov.ru",
+            }
+        );
+        // Портал у самого конца префикса при total>len — доказательство неполно.
+        assert_eq!(
+            r2o_http_reply_classify(403, b"", true, b"eais.rkn.gov.ru", 16).outcome,
+            R2oFetchHttpOutcome::Neutral
+        );
+        // Сжатое тело не сканируется.
+        assert_eq!(
+            r2o_http_reply_classify(403, b"", false, b"access blocked by rkn", 21).outcome,
+            R2oFetchHttpOutcome::Neutral
+        );
+        assert_eq!(
+            r2o_http_reply_classify(301, b"", true, &[], 0).outcome,
+            R2oFetchHttpOutcome::Neutral
+        );
     }
 
     #[test]

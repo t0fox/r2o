@@ -482,13 +482,36 @@ impl Drop for HttpsProbeWorker {
 
 #[cfg(test)]
 mod tests {
-    use super::{HttpsProbeWorker, target_from_http_response, target_from_portal};
+    use super::{HttpsProbeWorker, cache_host_ok, target_from_http_response, target_from_portal};
     use crate::response::{
         HTTPS_CONNECTED, HTTPS_NO_ANSWER, HTTPS_REFUSED, HttpsProbeState, classify_https_probe,
     };
     use r2k_core::control::{BindingContext, HttpPortalEvent, HttpResponseEvent, KEY_LEN};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn cache_host_ok_matches_c() {
+        // C `host_ok`: 1..253 и только `[A-Za-z0-9.-]`; структура меток,
+        // дефисы и цифровая последняя метка не проверяются.
+        for accepted in [
+            "example.com",
+            "EXAMPLE.COM",
+            "-",
+            ".",
+            "..",
+            "--..--",
+            "127.0.0.1",
+            "a-b.c",
+        ] {
+            assert!(cache_host_ok(accepted), "rejected {accepted:?}");
+        }
+        for rejected in ["", "a_b.com", "a b.com", "a/b.com", "é.example", "a\tb"] {
+            assert!(!cache_host_ok(rejected), "accepted {rejected:?}");
+        }
+        assert!(cache_host_ok(&"a".repeat(253)));
+        assert!(!cache_host_ok(&"a".repeat(254)));
+    }
 
     #[test]
     fn cached_state_and_pending_lookup_follow_host_and_expiry() {
