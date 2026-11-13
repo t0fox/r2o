@@ -84,14 +84,14 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 289 | 259 | 0 | 0 |
+| core-net | 548 | 291 | 257 | 0 | 0 |
 | core-state | 692 | 274 | 418 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1051** | **931** | **0** | **0** |
+| **Итого** | **1982** | **1053** | **929** | **0** | **0** |
 
-Это не оценка паритета: 931 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 929 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1051 / P 931 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1053 / P 929 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -342,12 +342,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 289 | 259 | 0 | 0 |
+| core-net | 548 | 291 | 257 | 0 | 0 |
 | core-state | 692 | 274 | 418 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **1051** | **931** | **0** | **0** |
+| **Итого** | **1982** | **1053** | **929** | **0** | **0** |
 
 
 ---
@@ -764,8 +764,8 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `rec_find` | 468-475 | 8 | линейный поиск записи `family + host` без регистра | `main.rs` `HttpSearchRecordCache::rec_find` | E | C `strcasecmp` по массиву записей. Rust `rec_find` — `HashMap<(lowercase host, family)>`; используется `failed_live`/`remember_live_failure`. Тест `rec_find_is_case_insensitive_and_family_scoped` (upper-case hit, family 6 miss, отсутствующая). |
 | `rec_get` | 477-496 | 20 | создание записи с лимитом `D2K_HS_RECORD_MAX_BYTES`, удвоением и счётчиками отказов | `main.rs` `HttpSearchRecordCache::{has_room_for,record,record_name}` | **E*** | C: `max_records=177`, `record_limit_hits++` при пределе, `realloc` с удвоением 16→…, `record_alloc_failures++` при NULL. Rust `R2O_HTTP_RECORD_MAX_ITEMS=177`, `has_room_for` считает `record_limit_hits`; тест `rec_get_record_limit_is_counted_like_c` (177 записей, 178-я не создаётся, счётчик 1, существующий ключ без отказа). **Ограничение:** `record_alloc_failures` всегда 0 — Rust HashMap не возвращает NULL (OOM аварийный). |
 | `same_program` | 500-508 | 9 | эквивалентность планов: компиляция обоих текстов в TLV и сравнение | `main.rs` `HttpSearchRecordCache::same_program` | E | C компилирует `d2k_hs_candidate_text` обоих ключей в TLV; ошибка → -1. Rust `same_program` компилирует `candidate_text` через `compile_text`, `None` на невалидном ключе, `Some(a==b)`; используется `failed_live`. Тест `same_program_matches_c_compiled_plan_semantics` (равные, split/disorder, badsum/whole, fake-spec, unknown/unknown → None, invalid order → None). |
-| `failed_live` | 510-519 | 10 | поиск живого отказа по ключу/адресу, `same_program<0` → evidence_lost | `main.rs` `HttpSearchRecordCache::failed_live` | P | C `same_program` компилирует канонический текст в TLV и сравнивает; при ошибке ставит `evidence_lost/repro_gap`. Rust `failed_live` перебирает `HttpLiveFailure`, сравнивает addr и TLV через `candidate_text`+`compile_text`, ставит `evidence_lost`; тест `http_live_failure_hooks_match_donor`. **Пробел:** production HTTP-search ещё не вызывает его при выборе кандидата. |
-| `remember_live_failure` | 520-550 | 31 | учёт живого отказа: addr/binding/execution/request_ms, лимиты байт | `main.rs` `HttpSearchRecordCache::remember_live_failure` | P | C хранит `live_failure[]` с addr/binding/execution/request_ms, дедупом через `failed_live` и лимитами 8 КиБ/64 КиБ, счётчиками limit/alloc. Rust `HttpLiveFailure` и `remember_live_failure` реализуют поля, дедуп, `evidence_lost`, лимиты и счётчики; тест `http_live_failure_hooks_match_donor`. **Пробел:** production-путь отказа HTTP ещё не пишет сюда. |
+| `failed_live` | 510-519 | 10 | поиск живого отказа по ключу/адресу, `same_program<0` → evidence_lost | `main.rs` `HttpSearchRecordCache::failed_live` | **E*** | C: addr-фильтр, `same_program<0` → evidence_lost/repro_gap, иначе bool. Rust `failed_live` перебирает `HttpLiveFailure`, сравнивает addr и TLV через `same_program`, ставит evidence_lost/repro_gap; тест `http_live_failure_hooks_match_donor`. Production-эквивалент — `failed_http_programs(catalog,target)` (binding `enabled=false/recheck_since/verified_by=1/input=2`) → `live_failures.programs` используется в `run_http_search_task` для пропуска кандидатов. **Ограничение:** in-memory cache-метод остаётся тестовым хуком; живой роутер не проверялся. |
+| `remember_live_failure` | 520-550 | 31 | учёт живого отказа: addr/binding/execution/request_ms, лимиты байт | `main.rs` `HttpSearchRecordCache::remember_live_failure` + `http_live_failure_key` | **E*** | C: dedup через `failed_live`, лимиты 8/64 КиБ, счётчики, поля addr/binding/execution/request_ms. Rust-метод реализует поля/дедуп/лимиты; production-путь `response.code==3 && live` → `http_live_failure_key` (key из plan text по plan_id) → `HttpSearchWorker::remember_live_failure` перед отзывом привязки. Тесты `http_live_failure_key_recovers_plan_key_like_c`, `http_live_failure_hooks_match_donor`. **Ограничение:** живой отказ также персистится в catalog (`revoke_http_binding`), а пропуск кандидатов идёт через `failed_http_programs`; in-memory счётчики не выводятся в отчёт. |
 | `d2k_httpsearch_test_add_failures` | 553-567 | 15 | тестовое заполнение `live_failure[]` | `main.rs` `HttpSearchRecordCache::test_add_failures` | E | C под `D2K_HS_TESTING`: key `fake-badsum`, addr из номера, binding, execution/request_ms, возврат прироста. Rust `#[cfg(test)] test_add_failures` делает то же через `remember_live_failure`; тест `http_live_failure_hooks_match_donor` (3 записи, дубль не добавляется). |
 | `d2k_httpsearch_test_add_records` | 569-578 | 10 | тестовое заполнение кэша записей | `main.rs` `HttpSearchRecordCache::test_add_records` | E | C под `D2K_HS_TESTING`: `record-%zu.example`, family 4, счётчик added до заполнения. Rust `#[cfg(test)] test_add_records` делает то же через `record_name`/`has_room_for`; тест `http_live_failure_hooks_match_donor` проверяет частичное заполнение (added > 0 и < 500). |
 | `d2k_httpsearch_measured_poison` | 579-606 | 28 | регистрация измеренной poison-спеки: канонический ключ, алиасы, дедуп, максимум 8 | `http_search.rs:719-772 measured_poison_keys`, `main.rs:4565-4591 measured_http_candidate_keys` | **P** | C: spec → ключ `fake:...`, алиасы `fake:badsum`→`fake-badsum`, `fake:seqshift=-66000`→`fake-seqshift`, `known_key`, дедуп, `measured[8]` (`httpsearch.c:581-608`). Rust `measured_poison_keys` возвращает канонические ключи из текста TLS-плана, `measured_http_candidate_keys` сортирует по `successes` и ограничивает 8; отдельного состояния `measured` нет. Тест `candidate_tests::measured_poison_requires_tls_and_an_actual_fake_reference`. |

@@ -4851,6 +4851,24 @@ fn failed_http_programs(
 }
 
 #[cfg(unix)]
+fn http_live_failure_key(
+    catalog: &Catalog,
+    response: &r2k_core::control::HttpResponseEvent,
+) -> Option<String> {
+    let plan_id: String = response
+        .plan_id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    catalog
+        .boxes
+        .iter()
+        .flat_map(|box_record| box_record.plans.iter())
+        .find(|plan| plan.id.eq_ignore_ascii_case(&plan_id))
+        .and_then(|plan| candidate_key_from_plan_text(&plan.text))
+}
+
+#[cfg(unix)]
 fn http_search_candidates(
     catalog: &Catalog,
     target: &r2o_controller::discovery::DiscoveryTarget,
@@ -6993,6 +7011,23 @@ impl HttpSearchWorker {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .record_repeat_path(target, path);
+    }
+
+    /// C `remember_live_failure`: зафиксировать живой отказ под планом.
+    fn remember_live_failure(
+        &self,
+        host: &str,
+        family: u8,
+        key: &str,
+        addr: &[u8],
+        binding: r2k_core::control::BindingContext,
+        execution: u64,
+        request_ms: i64,
+    ) -> bool {
+        self.records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remember_live_failure(host, family, key, addr, binding, execution, request_ms)
     }
 
     fn search_context(
@@ -19247,6 +19282,7 @@ impl ControlClient {
                             r2o_http_search_from_response(&response)
                         {
                             let should_search = if response.code == 3 && live {
+                                let live_failure_key = http_live_failure_key(catalog, &response);
                                 let revoked = self.revoke_http_binding(
                                     &response,
                                     &target,
@@ -19257,6 +19293,20 @@ impl ControlClient {
                                 if revoked {
                                     if let Some(worker) = http_search.as_ref() {
                                         worker.record_repeat_path(&target, &response.path);
+                                        // C `d2k_httpsearch_bound_failure`:
+                                        // живой отказ запоминается до отзыва.
+                                        if let Some(key) = live_failure_key {
+                                            let _ = worker.remember_live_failure(
+                                                &target.host,
+                                                target.family,
+                                                &key,
+                                                &response.key[1..],
+                                                response.binding,
+                                                response.execution_id,
+                                                i64::try_from(response.request_ms)
+                                                    .unwrap_or(i64::MAX),
+                                            );
+                                        }
                                     }
                                 }
                                 revoked
@@ -29018,6 +29068,37 @@ mod tests {
             body_bytes: 1024,
             request_no: 1,
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn http_live_failure_key_recovers_plan_key_like_c() {
+        let id = [0x11_u8; 16];
+        let text = r2o_controller::http_search::candidate_text("split", Some(&id)).unwrap();
+        let plan_id: String = id.iter().map(|byte| format!("{byte:02x}")).collect();
+        let mut catalog = r2o_controller::catalog::Catalog::default();
+        catalog.boxes.push(r2o_controller::catalog::BoxRecord {
+            plans: vec![r2o_controller::catalog::Plan {
+                id: plan_id,
+                text,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let mut response = r2o_http_response(3, b"/");
+        response.plan_id = id;
+        assert_eq!(
+            super::http_live_failure_key(&catalog, &response).as_deref(),
+            Some("split")
+        );
+
+        // Чужой plan_id и не-HTTP текст — не наш живой отказ.
+        response.plan_id = [0x22; 16];
+        assert!(super::http_live_failure_key(&catalog, &response).is_none());
+        let mut unknown = r2o_http_response(3, b"/");
+        unknown.plan_id = id;
+        catalog.boxes[0].plans[0].text = "r2o-plan 1 1\nproto tcp tls\n".into();
+        assert!(super::http_live_failure_key(&catalog, &unknown).is_none());
     }
 
     #[cfg(unix)]
