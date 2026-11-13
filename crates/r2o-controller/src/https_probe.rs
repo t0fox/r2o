@@ -115,6 +115,15 @@ fn parse_signed_decimal(text: &str) -> Option<i64> {
     i64::try_from(value).ok()
 }
 
+/// C `mono_ms`: монотонные миллисекунды пробы HTTPS.
+pub fn mono_ms() -> i64 {
+    use std::sync::OnceLock;
+
+    static START: OnceLock<Instant> = OnceLock::new();
+    let start = START.get_or_init(Instant::now);
+    start.elapsed().as_millis().min(i64::MAX as u128) as i64
+}
+
 pub struct HttpsProbeWorker {
     jobs: Option<SyncSender<Job>>,
     result_sender: SyncSender<HttpsProbeResult>,
@@ -537,6 +546,15 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn mono_ms_is_monotonic_like_c() {
+        let first = super::mono_ms();
+        assert!(first >= 0);
+        std::thread::sleep(Duration::from_millis(2));
+        let second = super::mono_ms();
+        assert!(second > first);
+    }
 
     #[test]
     fn cache_host_ok_matches_c() {
