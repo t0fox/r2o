@@ -4485,6 +4485,9 @@ struct HttpSearchFailureStats {
     live_failure_count: u64,
     failure_record_limit_hits: u64,
     failure_limit_hits: u64,
+    /// C `record_limit_hits`/`record_alloc_failures`.
+    record_limit_hits: u64,
+    record_alloc_failures: u64,
 }
 
 #[cfg(unix)]
@@ -4522,9 +4525,7 @@ impl HttpSearchRecordCache {
 
     /// C `same_program`: сравнить канонический текст кандидата по TLV.
     fn same_program(left: &str, right: &str) -> Option<bool> {
-        if left == right {
-            return Some(true);
-        }
+        // C `same_program`: оба ключа обязаны компилироваться, иначе -1.
         let left = r2o_controller::http_search::candidate_text(left, None)?;
         let left = r2o_controller::plan_text::compile_text(&left).ok()?;
         let right = r2o_controller::http_search::candidate_text(right, None)?;
@@ -4534,6 +4535,9 @@ impl HttpSearchRecordCache {
 
     /// C `failed_live`: найти живой отказ по ключу/адресу.
     fn failed_live(&mut self, host: &str, family: u8, key: &str, addr: Option<&[u8]>) -> bool {
+        if !self.rec_find(host, family) {
+            return false;
+        }
         let Some(record) = self.0.get_mut(&(host.to_ascii_lowercase(), family)) else {
             return false;
         };
@@ -4575,7 +4579,7 @@ impl HttpSearchRecordCache {
         request_ms: i64,
     ) -> bool {
         let record_key = (host.to_ascii_lowercase(), family);
-        if !self.0.contains_key(&record_key) {
+        if !self.rec_find(host, family) {
             return false;
         }
         if self.failed_live(host, family, key, Some(addr)) {
@@ -4661,8 +4665,31 @@ impl HttpSearchRecordCache {
         added
     }
 
-    fn has_room_for(&self, key: &(String, u8)) -> bool {
-        self.0.contains_key(key) || self.0.len() < R2O_HTTP_RECORD_MAX_ITEMS
+    /// C `rec_find`: запись по family+host без регистра.
+    fn rec_find(&self, host: &str, family: u8) -> bool {
+        self.0.contains_key(&(host.to_ascii_lowercase(), family))
+    }
+
+    fn has_room_for(&mut self, key: &(String, u8)) -> bool {
+        if self.0.contains_key(key) {
+            return true;
+        }
+        if self.0.len() < R2O_HTTP_RECORD_MAX_ITEMS {
+            return true;
+        }
+        // C `rec_get`: предел числа записей — отдельный счётчик, не alloc.
+        self.1.record_limit_hits = self.1.record_limit_hits.saturating_add(1);
+        false
+    }
+
+    /// C `record_limit_hits`: отказы из-за предела числа записей.
+    fn record_limit_hits(&self) -> u64 {
+        self.1.record_limit_hits
+    }
+
+    /// C `record_alloc_failures`: в Rust HashMap не возвращает NULL, поэтому 0.
+    fn record_alloc_failures(&self) -> u64 {
+        self.1.record_alloc_failures
     }
 
     fn record(&mut self, target: &r2o_controller::discovery::DiscoveryTarget) {
@@ -23798,6 +23825,67 @@ fn r2o_quic_binding_blocks_retry(binding_exists: bool, planned: bool) -> bool {
 mod tests {
     #[cfg(unix)]
     #[test]
+    fn rec_find_is_case_insensitive_and_family_scoped() {
+        let mut cache = super::HttpSearchRecordCache::default();
+        assert_eq!(cache.test_add_records(3), 3);
+        assert!(cache.rec_find("RECORD-0.EXAMPLE", 4));
+        assert!(cache.rec_find("record-1.example", 4));
+        assert!(!cache.rec_find("record-0.example", 6));
+        assert!(!cache.rec_find("missing.example", 4));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn same_program_matches_c_compiled_plan_semantics() {
+        assert_eq!(
+            super::HttpSearchRecordCache::same_program("split", "split"),
+            Some(true)
+        );
+        assert_eq!(
+            super::HttpSearchRecordCache::same_program("split", "disorder"),
+            Some(false)
+        );
+        assert_eq!(
+            super::HttpSearchRecordCache::same_program("fake-badsum", "fake-badsum-whole"),
+            Some(false)
+        );
+        assert_eq!(
+            super::HttpSearchRecordCache::same_program("fake:ttl=5+badsum", "fake:ttl=5+badsum"),
+            Some(true)
+        );
+        // C: невалидный ключ не компилируется → -1 (None), даже если строки равны.
+        assert_eq!(
+            super::HttpSearchRecordCache::same_program("unknown", "unknown"),
+            None
+        );
+        assert_eq!(
+            super::HttpSearchRecordCache::same_program("fake:badsum+ttl=1", "split"),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rec_get_record_limit_is_counted_like_c() {
+        let mut cache = super::HttpSearchRecordCache::default();
+        assert_eq!(cache.record_limit_hits(), 0);
+        assert_eq!(cache.record_alloc_failures(), 0);
+        let limit = super::R2O_HTTP_RECORD_MAX_ITEMS;
+        assert!(cache.test_add_records(limit) > 0);
+        assert_eq!(cache.count(), limit);
+
+        cache.record_name("overflow.example", 4);
+        assert_eq!(cache.count(), limit);
+        assert_eq!(cache.record_limit_hits(), 1);
+        assert_eq!(cache.record_alloc_failures(), 0);
+
+        // Существующий ключ не считается отказом предела.
+        cache.record_name("record-0.example", 4);
+        assert_eq!(cache.record_limit_hits(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn http_live_failure_hooks_match_donor() {
         let mut cache = super::HttpSearchRecordCache::default();
         assert_eq!(cache.test_add_failures("live.example", 4, 3), 3);
@@ -29144,6 +29232,7 @@ mod tests {
             elapsed: std::time::Duration::from_millis(30),
             reason: None,
             r2o_volume_observation: Default::default(),
+            budget_note: None,
             r2o_resources: Vec::new(),
         };
         assert_eq!(
@@ -29761,6 +29850,7 @@ mod tests {
             elapsed: std::time::Duration::from_millis(30),
             reason: None,
             r2o_volume_observation: Default::default(),
+            budget_note: None,
             r2o_resources: Vec::new(),
         }
     }
