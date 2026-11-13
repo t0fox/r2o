@@ -84,14 +84,14 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 230 | 318 | 0 | 0 |
+| core-net | 548 | 232 | 316 | 0 | 0 |
 | core-state | 692 | 257 | 435 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **975** | **1007** | **0** | **0** |
+| **Итого** | **1982** | **977** | **1005** | **0** | **0** |
 
-Это не оценка паритета: 1007 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 1005 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 975 / P 1007 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 977 / P 1005 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -342,12 +342,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 230 | 318 | 0 | 0 |
+| core-net | 548 | 232 | 316 | 0 | 0 |
 | core-state | 692 | 257 | 435 | 0 | 0 |
 | datapath-core | 400 | 219 | 181 | 0 | 0 |
 | datapath-plan | 183 | 176 | 7 | 0 | 0 |
 | detect | 159 | 93 | 66 | 0 | 0 |
-| **Итого** | **1982** | **975** | **1007** | **0** | **0** |
+| **Итого** | **1982** | **977** | **1005** | **0** | **0** |
 
 
 ---
@@ -613,8 +613,8 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `body_feed` | 308-314 | 7 | первые 4096 байт тела в `prefix` + полное тело в `d2k_resource_feed` | `r2o_resource.rs:429-553 R2oResourceBodyTap`, `fetch.rs:1140-1175` | **E** | Rust `prefix` тоже 4096 (`r2o_resource.rs:551-556`), resource-scan — `R2oResourceScan`; префикс идёт в `r2o_fetch_http_outcome`. Покрыто `donor_and_r2o_accept_youtube_sized_response_headers`. |
 | `body_byte` | 317-329 | 13 | следующий байт: из буфера или TLS по 8192, дедлайн `until`, `body_read_reason` | `http_response.rs:55-122 feed` + `fetch.rs` цикл чтения | **E** | C `pos==used` → left/`until`, `rd(...,8192,left)`, `n<=0` reason, `used/pos`, байт; Rust скармливает блоки конечному автомату, границы/дедлайн те же. `test-http-chunk-framing-differential.sh` (привязан к D2O `a63d9641`, для a378 не перезапускался). |
 | `body_exact` | 331-350 | 20 | дочитать ровно `n`: буфер/TLS 8192, `body_feed`, `bytes`, дедлайн | `http_response.rs:55-90 FixedBody` | **E** | C `while(n)`: при пустом буфере `rd(8192)`, `got<=0` reason/-1, `take=min(used-pos,n)`, `feed`, `bytes+=take`; Rust уменьшает `remaining` и завершает при 0, extra-байты после complete игнорируются. Тот же дифференциал. |
-| `body_line` | 352-375 | 24 | CRLF-строка chunked/трейлера, максимум `cap-1` (128); переполнение → `local_limit`; CR без LF / LF без CR → ошибка | `http_response.rs:226-271 feed_line_byte` (`LINE_CAPACITY=128`) | **P** | **Подтверждённые отличия:** C при `n+1>=cap` ставит `local_limit=1` и текст «строка длиннее…»; Rust помечает парсер `invalid`, а `fetch.rs:1171-1173` выставляет `local_limit` только для переполнения **заголовков** (`!headers_complete && headers.len()>=65536`), поэтому переполнение chunk-строки даёт `local_limit=false`. Rust `feed_line_byte` разрешает произвольные байты в chunk-extension (после `;`) и trailers (`:230-233`), C проверяет только CR/LF/длину; в строке размера Rust дополнительно отвергает NUL/control (`invalid_line_byte`). CRLF/LF/пустой размер совпадают. Дифференциал привязан к `a63d9641`, для a378 не перезапускался. |
-| `read_http_body` | 380-445 | 66 | 204/304 без тела; Content-Length; chunked с trailer; иначе до EOF; `body_expected` | `http_response.rs:55-271`, `fetch.rs:1206-1209` | **P** | Обрамление совпадает (204/304, CL, chunked, close, overflow, trailer; Rust `finish_headers` `head_only \|\| 204\|304 → complete`). **Расхождение `body_expected`:** C для chunked и close-delimited выставляет `body_expected=body_bytes`; Rust `fixed_body_remaining()` даёт `Some` только для Content-Length, `r2o_body_expected_at_eof` (`fetch.rs:1107-1109,1189-1191`) — только остаток fixed body; для chunked/close `body_expected=None` → 0. |
+| `body_line` | 352-375 | 24 | CRLF-строка chunked/трейлера, максимум `cap-1` (128); переполнение → `local_limit`; CR без LF / LF без CR → ошибка | `http_response.rs` `feed_line_byte` | E | C: `LINE_CAPACITY=128`, переполнение строки → `local_limit=1`, нарушение CRLF → invalid. Rust `feed_line_byte` ставит `line_overflow` при переполнении; `fetch.rs` `r2o_http_local_limit` выставляет `local_limit` для переполнения строки или заголовков. Тест `http_local_limit_matches_c_for_line_and_header_overflow` (chunk-строка 200 байт, заголовок >8191, NUL как иной сбой). |
+| `read_http_body` | 380-445 | 66 | 204/304 без тела; Content-Length; chunked с trailer; иначе до EOF; `body_expected` | `http_response.rs` + `fetch.rs` `r2o_http_body_expected` | E | C: 204/304 без тела, CL, chunked+trailer, close-delimited; для chunked/close `body_expected=body_bytes`, для CL — `body_bytes+remaining`. Rust те же ветви; `r2o_http_body_expected` возвращает fixed remaining+body, иначе `body_bytes` после заголовков. Тест `http_body_expected_matches_c_for_chunked_and_close_delimited` (chunked 5, close 5, CL 12), `http_local_limit_...`. |
 | `read_status_buf` | 457-697 | 241 | статус HTTP/1.0-1.1 100-599, NUL/управляющие, cf-challenge, CL/TE/CE/Connection/Location, 1xx, 101, тело, `http_reply` | `http_response.rs:160-321` + `fetch.rs:1084-1235` | **P** | **Совпадает:** заголовки 64 КиБ, NUL/управляющие, статус-строка, 1xx (сброс и ожидание следующего), CL/TE, CE, cf-challenge, 451, resource-scan. **C-ветви проверены:** `find_hdr_end`; NUL внутри заголовков → ошибка; `eol`; `line_len>=13`, `HTTP/1.x`, код 100-599, управляющие; code≥200: cf-challenge, CL (переполнение/неоднозначность), TE (только один `chunked`, иначе framing_valid=0), CE (gzip/identity/стек=2), Connection (close/keep-alive токены), Location (дубликат → framing_valid=0, обрезка SP/TAB, `<=0x20/0x7f` → пусто); CL+TE → ошибка; body_stream `pos=hdr_len+4`; `read_http_body`; `conn_close` (close, HTTP/1.0 без keep-alive, нет CL/chunked); `http_reply`; 101 → ошибка; 1xx → memmove/ожидание. **R2O-отличия:** rustls/HTTP parser: C не читает тело при `framing_valid=false` (CL+TE, не-chunked TE, **дубликат Location**), Rust `parse_headers` (`http_response.rs:281-319`) отвергает TE/CL+TE, но **Location не разбирает**, поэтому дубликат Location не делает ответ invalid; C 101 → 0, Rust сохраняет `status=101` при `invalid`; C Location ограничен `location_cap`, Rust `String::from_utf8_lossy` без предела; C `conn_close` учитывает HTTP/1.0/close-delimited, Rust `r2o_http_connection_closes` — только явный `Connection: close`. |
 | `read_status_rd` | 699-728 | 30 | malloc 65537, diag-учёт `TCP_TLS_RX`, вызов `read_status_buf`, free | `http_response.rs:18-36` (массив в структуре) | **P** | Лимит 65536+1 совпадает. **Отличие:** C выделяет буфер на куче и ведёт `d2k_diag_memory_acquire/release`; Rust держит `[u8;65537]` внутри `HttpResponseParser`, diag-учёта нет. При OOM C ставит `local_limit=1` и NEUTRAL; Rust массив в структуре. |
 | `d2k_http_read_response` | 730-737 | 8 | публичный API: memset, `read_status_rd` с NULL-полями | `http_response.rs:18 HttpResponseParser`, `http_search.rs:310 read_probe_response` | **P** | C-API отдаёт `status/body_bytes/complete/location/reply/local_limit/connection_close`; Rust использует парсер напрямую в fetch/`read_probe_response`, единого API с теми же полями нет. |

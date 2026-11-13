@@ -1168,9 +1168,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
                     }
                     if parser.is_invalid() {
                         r2o_framing_valid = false;
-                        r2o_local_limit = !parser.headers_complete()
-                            && parser.headers().len()
-                                >= r2k_core::http_response::MAX_HTTP_RESPONSE_HEADER_BYTES;
+                        r2o_local_limit = r2o_http_local_limit(&parser);
                         reason = Some("HTTP-ответ содержит неверное обрамление".into());
                         break;
                     }
@@ -1203,10 +1201,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
         if parser.is_invalid() && reason.is_none() {
             reason = Some("HTTP-ответ содержит неверное обрамление".into());
         }
-        let body_expected = parser
-            .fixed_body_remaining()
-            .map(|remaining| parser.body_bytes().saturating_add(remaining))
-            .or(r2o_body_expected_at_eof);
+        let body_expected = r2o_http_body_expected(&parser, r2o_body_expected_at_eof);
         let headers = parser.headers();
         let cloudflare_challenge = r2o_fetch_is_cloudflare_challenge(headers);
         let r2o_body_encoding = r2o_fetch_body_encoding(headers);
@@ -1386,6 +1381,23 @@ fn r2o_fetch_is_cloudflare_challenge(headers: &[u8]) -> bool {
             })
             .is_some_and(|value| value.eq_ignore_ascii_case(b"challenge"))
     })
+}
+
+/// C `read_http_body`: для chunked/close-delimited `body_expected=body_bytes`.
+fn r2o_http_body_expected(parser: &HttpResponseParser, at_eof: Option<u64>) -> Option<u64> {
+    parser
+        .fixed_body_remaining()
+        .map(|remaining| parser.body_bytes().saturating_add(remaining))
+        .or(at_eof)
+        .or_else(|| parser.headers_complete().then_some(parser.body_bytes()))
+}
+
+/// C `body_line`: переполнение chunk-строки или заголовков выставляет
+/// `local_limit`, а не общий `invalid`.
+fn r2o_http_local_limit(parser: &HttpResponseParser) -> bool {
+    parser.line_overflow()
+        || (!parser.headers_complete()
+            && parser.headers().len() >= r2k_core::http_response::MAX_HTTP_RESPONSE_HEADER_BYTES)
 }
 
 fn r2o_fetch_chunked(headers: &[u8]) -> bool {
@@ -4534,6 +4546,61 @@ mod tests {
 
         let counters = r2o_tcp_counters(&stream);
         assert!(counters.data_packets.is_none_or(|packets| packets >= 2));
+    }
+
+    #[test]
+    fn http_body_expected_matches_c_for_chunked_and_close_delimited() {
+        let mut chunked = HttpResponseParser::new(false);
+        chunked.feed(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+            false,
+        );
+        assert!(chunked.is_complete());
+        assert_eq!(chunked.body_bytes(), 5);
+        // C `read_http_body`: для chunked body_expected=body_bytes.
+        assert_eq!(r2o_http_body_expected(&chunked, None), Some(5));
+
+        let mut close = HttpResponseParser::new(false);
+        close.feed(b"HTTP/1.1 200 OK\r\n\r\nhello", true);
+        assert_eq!(close.body_bytes(), 5);
+        assert_eq!(r2o_http_body_expected(&close, None), Some(5));
+
+        let mut fixed = HttpResponseParser::new(false);
+        fixed.feed(b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nabc", false);
+        assert_eq!(fixed.body_bytes(), 3);
+        assert_eq!(r2o_http_body_expected(&fixed, None), Some(12));
+    }
+
+    #[test]
+    fn http_local_limit_matches_c_for_line_and_header_overflow() {
+        // C `body_line`: переполнение chunk-строки — local_limit.
+        let mut line = HttpResponseParser::new(false);
+        let mut response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+        response.extend(std::iter::repeat_n(b'a', 200));
+        response.extend_from_slice(b"\r\n");
+        line.feed(&response, false);
+        assert!(line.is_invalid());
+        assert!(line.line_overflow());
+        assert!(r2o_http_local_limit(&line));
+
+        // Переполнение заголовков — тоже local_limit.
+        let mut header = HttpResponseParser::new(false);
+        let mut response = b"HTTP/1.1 200 OK\r\nX: ".to_vec();
+        response.extend(std::iter::repeat_n(
+            b'a',
+            r2k_core::http_response::MAX_HTTP_RESPONSE_HEADER_BYTES + 1,
+        ));
+        header.feed(&response, false);
+        assert!(header.is_invalid());
+        assert!(!header.line_overflow());
+        assert!(r2o_http_local_limit(&header));
+
+        // Иной сбой обрамления — не local_limit.
+        let mut ordinary = HttpResponseParser::new(false);
+        ordinary.feed(b"HTTP/1.1 200 OK\r\nX: \x00\r\n\r\n", false);
+        assert!(ordinary.is_invalid());
+        assert!(!ordinary.line_overflow());
+        assert!(!r2o_http_local_limit(&ordinary));
     }
 
     #[test]

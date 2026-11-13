@@ -30,6 +30,7 @@ pub struct HttpResponseParser {
     headers_complete: bool,
     complete: bool,
     invalid: bool,
+    line_overflow: bool,
     interim: bool,
 }
 
@@ -49,6 +50,7 @@ impl HttpResponseParser {
             headers_complete: false,
             complete: false,
             invalid: false,
+            line_overflow: false,
             interim: false,
         }
     }
@@ -132,6 +134,11 @@ impl HttpResponseParser {
 
     pub const fn is_invalid(&self) -> bool {
         self.invalid
+    }
+
+    /// C `body_line`: переполнение строки, а не иной сбой обрамления.
+    pub const fn line_overflow(&self) -> bool {
+        self.line_overflow
     }
 
     pub const fn status(&self) -> u16 {
@@ -231,13 +238,15 @@ impl HttpResponseParser {
         let ignored_chunk_extension =
             self.state == State::ChunkSize && self.line[..self.line_len].contains(&b';');
         let opaque_trailer_byte = self.state == State::Trailers;
+        let overflow = self.line_len >= self.line.len()
+            || !matches!(byte, b'\r' | b'\n') && content_len >= LINE_CAPACITY - 1;
         if invalid_line_byte(byte) && !ignored_chunk_extension && !opaque_trailer_byte
-            || self.line_len >= self.line.len()
-            || !matches!(byte, b'\r' | b'\n') && content_len >= LINE_CAPACITY - 1
+            || overflow
             || byte == b'\n' && (self.line_len == 0 || self.line[self.line_len - 1] != b'\r')
             || self.line_len != 0 && self.line[self.line_len - 1] == b'\r' && byte != b'\n'
         {
             self.invalid = true;
+            self.line_overflow |= overflow;
             return;
         }
         self.line[self.line_len] = byte;
