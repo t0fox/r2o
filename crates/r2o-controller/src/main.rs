@@ -25458,6 +25458,35 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn link_open_path_validation_matches_c() {
+        use std::os::unix::net::{UnixListener, UnixStream};
+
+        // C `d2k_link_open`: пустой путь и путь >= sun_path отвергаются.
+        assert!(UnixStream::connect("").is_err());
+        let long = "/tmp/".to_owned() + &"x".repeat(200);
+        assert!(UnixStream::connect(&long).is_err());
+
+        // Валидный AF_UNIX SOCK_STREAM: блокирующий connect.
+        let dir = std::env::temp_dir().join(format!(
+            "r2o-link-open-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("control.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let stream = UnixStream::connect(&path).unwrap();
+        let _accepted = listener.accept().unwrap();
+        drop(stream);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn link_close_drops_fd_like_c() {
         use std::os::fd::AsRawFd;
 
