@@ -32374,6 +32374,32 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn suspect_signal_matches_c_signal_of_for_all_codes() {
+        // Ветки C `signal_of` (`sched.c:1672-1694`): 1/4 → rst, 2 → repeat,
+        // 3 → silent, иначе код-N; ttl/tos/ipid — только у rst.
+        for (code, kind) in [
+            (1_u8, "rst"),
+            (4, "rst"),
+            (2, "repeat"),
+            (3, "silent"),
+            (0, "код-0"),
+            (5, "код-5"),
+            (255, "код-255"),
+        ] {
+            let signal = super::r2o_discovery_suspect_signal(code, 127, 61, 0x88, 54321);
+            assert_eq!(signal.fingerprint.kind, kind, "code {code}");
+            assert_eq!(signal.fingerprint.seen, 1);
+            assert_eq!(signal.trigger_code, code);
+            let is_rst = kind == "rst";
+            assert_eq!(signal.fingerprint.ttl, if is_rst { 127 } else { 0 });
+            assert_eq!(signal.fingerprint.ttl_delta, if is_rst { 66 } else { 0 });
+            assert_eq!(signal.fingerprint.tos, if is_rst { 0x88 } else { 0 });
+            assert_eq!(signal.fingerprint.ipid, if is_rst { 54321 } else { 0 });
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn discovery_diagnostic_report_id_and_trigger_match_d2o() {
         let target = DiscoveryTarget {
             host: "diagnostic.example".into(),
