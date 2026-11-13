@@ -1231,12 +1231,25 @@ fn count_handshakes(
     Ok(done)
 }
 
+fn read_random_bytes(reader: &mut impl std::io::Read, out: &mut [u8]) -> bool {
+    let mut filled = 0;
+    while filled < out.len() {
+        match reader.read(&mut out[filled..]) {
+            Ok(0) => return false,
+            Ok(length) => filled += length,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
 fn neutral_sni() -> String {
     let mut random = [0_u8; 10];
-    if File::open("/dev/urandom")
-        .and_then(|mut file| file.read_exact(&mut random))
-        .is_err()
-    {
+    let random_ok = File::open("/dev/urandom")
+        .map(|mut file| read_random_bytes(&mut file, &mut random))
+        .unwrap_or(false);
+    if !random_ok {
         static COUNTER: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
         let counter = COUNTER
             .lock()
@@ -1723,6 +1736,41 @@ mod tcp_split_transport_tests {
         assert_eq!(ResponseVerdict::Blocked.as_str(), "blocked");
         assert_eq!(ResponseVerdict::Flaky.as_str(), "flaky");
         assert_eq!(ResponseVerdict::NotApplicable.as_str(), "not_applicable");
+    }
+
+    #[test]
+    fn neutral_sni_reads_partial_urandom_like_c() {
+        struct Chunks {
+            data: Vec<u8>,
+            position: usize,
+            chunk: usize,
+        }
+        impl Read for Chunks {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                let remaining = self.data.len().saturating_sub(self.position);
+                let length = remaining.min(self.chunk).min(buffer.len());
+                buffer[..length].copy_from_slice(&self.data[self.position..self.position + length]);
+                self.position += length;
+                Ok(length)
+            }
+        }
+
+        let mut out = [0_u8; 10];
+        let mut chunks = Chunks {
+            data: b"0123456789".to_vec(),
+            position: 0,
+            chunk: 3,
+        };
+        assert!(super::read_random_bytes(&mut chunks, &mut out));
+        assert_eq!(&out, b"0123456789");
+
+        let mut short = Chunks {
+            data: b"0123".to_vec(),
+            position: 0,
+            chunk: 3,
+        };
+        let mut out = [0_u8; 10];
+        assert!(!super::read_random_bytes(&mut short, &mut out));
     }
 
     #[test]
