@@ -43,7 +43,7 @@ pub struct R2oVolumeObservation {
     pub body_expected: u64,
     pub body_bytes: u64,
     pub rx_tls_wire_bytes: u64,
-    pub rx_tls_record_missing: bool,
+    pub rx_tls_record_missing: u32,
     pub data_packets: u32,
     pub packet_budget: R2oVolumePacketBudget,
 }
@@ -140,7 +140,7 @@ fn r2o_volume_rx_wire_partial(observation: &R2oVolumeObservation) -> bool {
         && !observation.replay_proof
         && !observation.local_limit
         && matches!(observation.negotiated_tls, Some(0x0303 | 0x0304))
-        && observation.rx_tls_record_missing
+        && observation.rx_tls_record_missing != 0
         && observation.rx_tls_wire_bytes >= R2O_VOLUME_MIN_BYTES
 }
 
@@ -163,7 +163,7 @@ fn r2o_volume_rx_wire_evidence(
         || gzip.body_encoding != R2oVolumeRxEncoding::Gzip
         || gzip.body_bytes == 0
         || gzip.rx_tls_wire_bytes == 0
-        || gzip.rx_tls_record_missing
+        || gzip.rx_tls_record_missing != 0
         || gzip.rx_tls_wire_bytes >= first.rx_tls_wire_bytes
         || gzip.rx_tls_wire_bytes >= second.rx_tls_wire_bytes
     {

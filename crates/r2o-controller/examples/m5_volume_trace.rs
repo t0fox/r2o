@@ -26,7 +26,7 @@ fn wire() -> R2oVolumeObservation {
         name_valid: true,
         negotiated_tls: Some(0x0304),
         rx_tls_wire_bytes: 20000,
-        rx_tls_record_missing: true,
+        rx_tls_record_missing: 1,
         data_packets: 10,
         ..R2oVolumeObservation::default()
     }

@@ -113,7 +113,7 @@ fn r2o_rx_сверяет_tls_wire_отдельно_от_http_тела() {
         name_valid: true,
         negotiated_tls: Some(0x0304),
         rx_tls_wire_bytes: 14 * 1024,
-        rx_tls_record_missing: true,
+        rx_tls_record_missing: 1,
         ..Default::default()
     };
     let second = R2oVolumeObservation {

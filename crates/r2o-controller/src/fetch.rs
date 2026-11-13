@@ -2431,8 +2431,12 @@ impl R2oTlsRecordTracker {
         }
     }
 
-    fn body_is_missing(&self) -> bool {
-        self.valid && self.body_remaining != 0
+    fn body_missing_bytes(&self) -> u32 {
+        if self.valid {
+            self.body_remaining.min(u32::MAX as usize) as u32
+        } else {
+            0
+        }
     }
 }
 
@@ -2456,8 +2460,8 @@ impl R2oTlsTcpStream {
         self.r2o_records = R2oTlsRecordTracker::default();
     }
 
-    fn r2o_record_missing(&self) -> bool {
-        self.r2o_records.body_is_missing()
+    fn r2o_record_missing(&self) -> u32 {
+        self.r2o_records.body_missing_bytes()
     }
 }
 
@@ -3774,7 +3778,7 @@ mod tests {
             R2oVolumeRxEncoding::Gzip
         );
         assert!(result.r2o_volume_observation.body_framing_valid);
-        assert!(!result.r2o_volume_observation.rx_tls_record_missing);
+        assert_eq!(result.r2o_volume_observation.rx_tls_record_missing, 0);
         assert!(result.r2o_volume_observation.rx_tls_wire_bytes > 0);
     }
 
@@ -3857,7 +3861,7 @@ mod tests {
             alpn_receiver.recv().unwrap().as_deref(),
             Some(&b"http/1.1"[..])
         );
-        assert!(result.r2o_volume_observation.rx_tls_record_missing);
+        assert_ne!(result.r2o_volume_observation.rx_tls_record_missing, 0);
         assert!(result.r2o_volume_observation.rx_tls_wire_bytes >= 12 * 1024);
         assert!(crate::r2o_volume::r2o_volume_rx_partial(
             &result.r2o_volume_observation
@@ -4529,9 +4533,12 @@ mod tests {
     fn tls_счётчик_отличает_неполное_тело_записи_от_полной_записи() {
         let mut tracker = R2oTlsRecordTracker::default();
         tracker.observe(&[23, 3, 3, 0, 10, 1, 2, 3]);
-        assert!(tracker.body_is_missing());
+        assert_eq!(tracker.body_missing_bytes(), 7);
         tracker.observe(&[4, 5, 6, 7, 8, 9, 10]);
-        assert!(!tracker.body_is_missing());
+        assert_eq!(tracker.body_missing_bytes(), 0);
+        let mut invalid = R2oTlsRecordTracker::default();
+        invalid.observe(&[99, 3, 3, 0, 10]);
+        assert_eq!(invalid.body_missing_bytes(), 0);
     }
 
     #[test]

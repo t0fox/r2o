@@ -3290,7 +3290,7 @@ fn r2o_discovery_partial_rx_inconclusive_reason(
     if !r2o_controller::r2o_volume::r2o_volume_rx_partial(observation) {
         return None;
     }
-    let wire_partial = observation.status == 0 && observation.rx_tls_record_missing;
+    let wire_partial = observation.status == 0 && observation.rx_tls_record_missing != 0;
     let (domain, bytes) = if wire_partial {
         ("TLS wire", observation.rx_tls_wire_bytes)
     } else {
@@ -30759,7 +30759,7 @@ mod tests {
             name_valid: true,
             negotiated_tls: Some(0x0303),
             rx_tls_wire_bytes: 14_005,
-            rx_tls_record_missing: true,
+            rx_tls_record_missing: 1,
             ..Default::default()
         };
         let mut tls_outcome = DiscoveryOutcome {
