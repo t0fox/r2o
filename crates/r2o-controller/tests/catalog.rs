@@ -183,6 +183,67 @@ fn catalog_json_output_matches_c_fields() {
 }
 
 #[test]
+fn json_core_limits_match_c() {
+    // C `D2K_JSON_MAX_DEPTH=64`: ровно 64 уровня ok, 65 — отказ.
+    let at_limit = format!(
+        "{{\"boxes\":[],\"unknown\":{}}}",
+        "[".repeat(63) + "0" + &"]".repeat(63)
+    );
+    assert!(
+        Catalog::parse(at_limit.as_bytes()).is_ok(),
+        "depth 64 must be accepted"
+    );
+    let over = format!(
+        "{{\"boxes\":[],\"unknown\":{}}}",
+        "[".repeat(64) + "0" + &"]".repeat(64)
+    );
+    assert!(Catalog::parse(over.as_bytes()).is_err());
+
+    // Обрезка, мусорный escape, неверная UTF-8 — ошибки парсера.
+    for bad in [
+        br#"{"boxes":["#.as_slice(),
+        br#"{"boxes":[}"#,
+        b"{\"boxes\":[\"\xff\"]}",
+        br#"{"boxes":[],"x":"\q"}"#,
+    ] {
+        assert!(
+            Catalog::parse(bad).is_err(),
+            "accepted {}",
+            String::from_utf8_lossy(bad)
+        );
+    }
+
+    // C `jparse_string_fixed`: строки длиннее cap-1 отвергаются.
+    assert!(
+        Catalog::parse(br#"{"boxes":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}"#).is_ok()
+    );
+    assert!(
+        Catalog::parse(br#"{"boxes":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}"#)
+            .is_err()
+    );
+    let mut signal_kind = String::from("{\"boxes\":[{\"fingerprint\":{\"signals\":[{\"kind\":\"");
+    signal_kind.push_str(&"a".repeat(24));
+    signal_kind.push_str("\"}]}}]}");
+    assert!(Catalog::parse(signal_kind.as_bytes()).is_err());
+    let mut binding_target =
+        String::from("{\"boxes\":[{\"bindings\":[{\"kind\":\"name\",\"target\":\"");
+    binding_target.push_str(&"a".repeat(256));
+    binding_target.push_str("\"}]}]}");
+    assert!(Catalog::parse(binding_target.as_bytes()).is_err());
+
+    // C `jparse_i32`: границы ровно i32.
+    assert!(Catalog::parse(br#"{"boxes":[{"plans":[{"successes":2147483647}]}]}"#).is_ok());
+    assert!(Catalog::parse(br#"{"boxes":[{"plans":[{"successes":2147483648}]}]}"#).is_err());
+    assert!(Catalog::parse(br#"{"boxes":[{"plans":[{"successes":-2147483649}]}]}"#).is_err());
+
+    // C `jparse_rfc3339`: невалидный календарь отвергается.
+    assert!(Catalog::parse(br#"{"boxes":[{"plans":[{"added":"2026-09-06T04:08:03Z"}]}]}"#).is_ok());
+    assert!(
+        Catalog::parse(br#"{"boxes":[{"plans":[{"added":"2026-13-40T00:00:00Z"}]}]}"#).is_err()
+    );
+}
+
+#[test]
 fn catalog_json_input_handlers_match_c_fields_null_and_errors() {
     let full = br#"{
       "schema":1,
