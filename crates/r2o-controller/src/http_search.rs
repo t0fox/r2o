@@ -342,6 +342,18 @@ mod tests {
     }
 
     #[test]
+    fn response_reader_sees_decoy_name_inside_the_first_body_bytes_like_c() {
+        // C `hs_read`/`d2k_hs_judge`: в `reader.head` попадает до 4 КиБ
+        // тела, поэтому имя приманки в теле тоже даёт DECOY.
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\nsee disk.rzd.ru";
+        let mut reader = Cursor::new(response.as_slice());
+        let response =
+            read_probe_response(&mut reader, Some(b"rutracker.org"), 0, Instant::now()).unwrap();
+        assert_eq!(response.answer, Answer::Decoy);
+        assert!(response.complete);
+    }
+
+    #[test]
     fn response_reader_matches_donor_for_101_and_invalid_framing() {
         // C `read_status_buf` возвращает 101 без подтверждения полноты, а
         // `d2k_hs_probe_run` превращает REAL в CUT.
@@ -512,7 +524,15 @@ pub fn read_probe_response(
         &body_prefix,
         body_bytes.saturating_add(u64::from(!complete)),
     );
-    let judged = judge(host, &head, rtt_us, reply_us);
+    // C `hs_read` складывает в `reader.head` первые 4096 байт ответа вместе
+    // с телом, и `d2k_hs_judge` видит их все (в том числе подпись приманки).
+    let mut judge_view = Vec::with_capacity(head.len().min(HTTP_REPLY_BODY_PREFIX));
+    judge_view.extend(
+        head.iter()
+            .chain(body_prefix.iter())
+            .take(HTTP_REPLY_BODY_PREFIX),
+    );
+    let judged = judge(host, &judge_view, rtt_us, reply_us);
     // C `d2k_hs_probe_run`: BLOKED-тело важнее неполноты, а CUT получается
     // только из REAL; EARLY/DECOY/INJECTED/GARBAGE сохраняют свой исход.
     let answer = if reply.outcome == crate::fetch::R2oFetchHttpOutcome::Blocked {

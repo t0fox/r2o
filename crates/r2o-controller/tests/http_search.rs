@@ -62,6 +62,7 @@ fn d2o_response_state_differential_preserves_portal_and_partial_head_outcomes() 
     const UPGRADE: &[u8] = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: h2c\r\n\r\n";
     const INVALID_FRAMING: &[u8] =
         b"HTTP/1.1 200 OK\r\nContent-Length: 1 2\r\nConnection: close\r\n\r\n";
+    const BODY_DECOY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\nsee disk.rzd.ru";
 
     let mut portal_reader = TimeoutReader::new(PORTAL_TRUNCATED);
     let portal = read_probe_response(
@@ -122,8 +123,16 @@ fn d2o_response_state_differential_preserves_portal_and_partial_head_outcomes() 
         donor_request_sent(),
     )
     .unwrap();
+    let mut decoy_reader = TimeoutReader::new(BODY_DECOY);
+    let body_decoy = read_probe_response(
+        &mut decoy_reader,
+        Some(b"rutracker.org"),
+        98_000,
+        donor_request_sent(),
+    )
+    .unwrap();
     let output = format!(
-        "portal_truncated={}\npartial_header_timeout={}\nblocked_body={}/{}\nportal_body={}/{}\ngzip_body={}/{}\nupgrade={}/{}\ninvalid_framing={}/{}\n",
+        "portal_truncated={}\npartial_header_timeout={}\nblocked_body={}/{}\nportal_body={}/{}\ngzip_body={}/{}\nupgrade={}/{}\ninvalid_framing={}/{}\nbody_decoy={}/{}\n",
         answer_name(portal.answer),
         partial,
         answer_name(blocked.answer),
@@ -136,6 +145,8 @@ fn d2o_response_state_differential_preserves_portal_and_partial_head_outcomes() 
         u8::from(upgrade.complete),
         answer_name(invalid.answer),
         u8::from(invalid.complete),
+        answer_name(body_decoy.answer),
+        u8::from(body_decoy.complete),
     );
     if let Ok(path) = std::env::var("R2O_HTTP_RESPONSE_DIFF_OUTPUT") {
         std::fs::write(path, &output).unwrap();
@@ -143,7 +154,7 @@ fn d2o_response_state_differential_preserves_portal_and_partial_head_outcomes() 
 
     assert_eq!(
         output,
-        "portal_truncated=injected\npartial_header_timeout=garbage\nblocked_body=injected/1\nportal_body=injected/1\ngzip_body=real/1\nupgrade=cut/0\ninvalid_framing=cut/0\n"
+        "portal_truncated=injected\npartial_header_timeout=garbage\nblocked_body=injected/1\nportal_body=injected/1\ngzip_body=real/1\nupgrade=cut/0\ninvalid_framing=cut/0\nbody_decoy=decoy/1\n"
     );
     assert!(!portal.complete);
 }

@@ -94,9 +94,11 @@ int main(void)
         "HTTP/1.1 101 Switching Protocols\r\nUpgrade: h2c\r\n\r\n";
     static const uint8_t invalid_framing[] =
         "HTTP/1.1 200 OK\r\nContent-Length: 1 2\r\nConnection: close\r\n\r\n";
+    static const uint8_t body_decoy[] =
+        "HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\nsee disk.rzd.ru";
     int portal_complete = 1, partial_complete = 1;
     int blocked_complete = 0, portal_body_complete = 0, gzip_complete = 0;
-    int upgrade_complete = 1, invalid_complete = 1;
+    int upgrade_complete = 1, invalid_complete = 1, body_decoy_complete = 0;
     d2k_hs_answer portal_answer = classify_response(
         "rutracker.org", portal, sizeof(portal) - 1, &portal_complete);
     d2k_hs_answer partial_answer = classify_response(
@@ -111,21 +113,25 @@ int main(void)
         "rutracker.org", upgrade, sizeof(upgrade) - 1, &upgrade_complete);
     d2k_hs_answer invalid_answer = classify_response(
         "rutracker.org", invalid_framing, sizeof(invalid_framing) - 1, &invalid_complete);
+    d2k_hs_answer body_decoy_answer = classify_response(
+        "rutracker.org", body_decoy, sizeof(body_decoy) - 1, &body_decoy_complete);
 
     printf("portal_truncated=%s\npartial_header_timeout=%s\n"
            "blocked_body=%s/%d\nportal_body=%s/%d\ngzip_body=%s/%d\n"
-           "upgrade=%s/%d\ninvalid_framing=%s/%d\n",
+           "upgrade=%s/%d\ninvalid_framing=%s/%d\nbody_decoy=%s/%d\n",
            answer_name(portal_answer), answer_name(partial_answer),
            answer_name(blocked_answer), blocked_complete,
            answer_name(portal_body_answer), portal_body_complete,
            answer_name(gzip_answer), gzip_complete,
            answer_name(upgrade_answer), upgrade_complete,
-           answer_name(invalid_answer), invalid_complete);
+           answer_name(invalid_answer), invalid_complete,
+           answer_name(body_decoy_answer), body_decoy_complete);
     return portal_answer == D2K_HS_INJECTED && !portal_complete &&
                    partial_answer == D2K_HS_GARBAGE && !partial_complete &&
                    blocked_answer == D2K_HS_INJECTED && blocked_complete &&
                    portal_body_answer == D2K_HS_INJECTED && portal_body_complete &&
                    gzip_answer == D2K_HS_REAL && gzip_complete &&
                    upgrade_answer == D2K_HS_CUT && !upgrade_complete &&
-                   invalid_answer == D2K_HS_CUT && !invalid_complete ? 0 : 1;
+                   invalid_answer == D2K_HS_CUT && !invalid_complete &&
+                   body_decoy_answer == D2K_HS_DECOY && body_decoy_complete ? 0 : 1;
 }
