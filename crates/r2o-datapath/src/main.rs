@@ -2426,7 +2426,7 @@ mod app {
                             let id = ids[0];
                             if let Err(error) = socket.send_replacement(id, &replacement) {
                                 eprintln!("r2o-datapath: не отправлен HTTPS verdict: {error}");
-                                holding.note_http_swap_failed();
+                                holding.r2o_apply_http_swap_result(None, None, false);
                                 socket.send_verdict(id, NF_ACCEPT)?;
                                 if let Some(event) = applied_candidate.as_ref() {
                                     flow_journal.record_execution_failure(
@@ -2444,13 +2444,11 @@ mod app {
                                         "r2o-datapath: не отправлен сброс исходного HTTP-потока: {error}"
                                     );
                                 }
-                                if let Some(event) = response_candidate.as_ref() {
-                                    holding
-                                        .mark_http_response_answered(&event.key, event.request_no);
-                                }
-                                if let Some(portal) = portal_candidate.as_mut() {
-                                    portal.answered = true;
-                                }
+                                holding.r2o_apply_http_swap_result(
+                                    response_candidate.as_deref(),
+                                    portal_candidate.as_mut(),
+                                    true,
+                                );
                             }
                             response_delivered = true;
                         } else {

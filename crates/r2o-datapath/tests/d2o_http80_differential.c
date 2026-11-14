@@ -293,6 +293,30 @@ int main(void) {
         printf("D17 post-client action=%s\n", action_name(r.action));
         print_http_stats("post-client", h);
     }
+
+    {
+        d2k_http80 *fail = d2k_http80_new();
+        flow fail_flow = flow4(56000);
+        d2k_http80_set_https(fail, "rutracker.org.", 14, T + 3600 * 1000 * MS);
+        open_flow(fail, &fail_flow, T);
+        feed_inject(fail, &fail_flow, T + 99 * MS + 700000ull);
+        d2k_http80_res keep = r;
+        fake_io io = { 1, 0, 0, 0, 0 };
+        d2k_http80_io callbacks = { io_payload, io_accept, io_rst, &io };
+        int ok = d2k_http80_swap(fail, &keep, out, rst, &callbacks);
+        d2k_http80_stats st = d2k_http80_get_stats(fail);
+        printf("D17 https-fail result=%d answered=%d swap_failed=%llu\n", ok,
+               keep.answered, (unsigned long long)st.swap_failed);
+        size_t n = packet(&fail_flow, 0, F_ACK | F_PSH,
+                          SISN + 1 + (uint32_t)strlen(INJECT),
+                          CISN + 1 + (uint32_t)strlen(GET), "late", b);
+        d2k_http80_packet(fail, b, n, T + 99 * MS + 121 * MS, 0, out, sizeof out,
+                          rst, sizeof rst, &r);
+        printf("D17 https-fail-late action=%s\n", action_name(r.action));
+        print_http_stats("https-fail", fail);
+        d2k_http80_free(fail);
+    }
+
     d2k_http80_free(h);
     return 0;
 }

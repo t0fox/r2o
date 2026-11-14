@@ -286,6 +286,28 @@ impl HoldTable {
         true
     }
 
+    /// C `d2k_http80_swap` (`http80.c:527-545`): успешная замена помечает
+    /// ответ и portal answered; отказ — `swap_failed`, поток остаётся
+    /// INJECTED и получает обычный ACCEPT.
+    pub fn r2o_apply_http_swap_result(
+        &mut self,
+        event: Option<&HttpResponseEvent>,
+        portal: Option<&mut HttpPortalEvent>,
+        swapped: bool,
+    ) -> bool {
+        if !swapped {
+            self.note_http_swap_failed();
+            return false;
+        }
+        if let Some(event) = event {
+            self.mark_http_response_answered(&event.key, event.request_no);
+        }
+        if let Some(portal) = portal {
+            portal.answered = true;
+        }
+        true
+    }
+
     /// C `d2k_http80_swap`: вердикт с заменой не принят — вставка ушла как есть.
     pub fn note_http_swap_failed(&mut self) {
         self.http80.swap_failed = self.http80.swap_failed.saturating_add(1);
@@ -1560,6 +1582,64 @@ mod tests {
 
         table.note_http_swap_failed();
         assert_eq!(table.r2o_http80_stats().swap_failed, 1);
+    }
+
+    #[test]
+    fn http80_swap_result_marks_answered_or_failed_like_c() {
+        let start = Instant::now();
+        let options = HoldOptions {
+            observe_http: true,
+            ..HoldOptions::default()
+        };
+        let request = b"GET /path?q=1 HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        let request_end = 2001 + request.len() as u32;
+        let response = b"HTTP/1.1 302 Found\r\nLocation: http://lawfilter.example/blocked\r\nContent-Length: 0\r\n\r\n";
+
+        let mut hold = d17_start(start, options, request);
+        let result = hold.feed_observing(
+            4,
+            &http_response_packet(9001, request_end, 0x18, response),
+            start + Duration::from_millis(12),
+            options,
+        );
+        let (event, mut portal) = match result.outcome {
+            HoldOutcome::HttpResponse { event, portal, .. } => (event, portal),
+            _ => panic!("HTTPS injection must be recognized"),
+        };
+        assert!(hold.r2o_apply_http_swap_result(Some(&event), portal.as_mut(), true));
+        let stats = hold.r2o_http80_stats();
+        assert_eq!(stats.answered, 1);
+        assert_eq!(stats.swap_failed, 0);
+        let late = hold.feed_observing(
+            5,
+            &http_response_packet(9001 + response.len() as u32, request_end, 0x18, b"late"),
+            start + Duration::from_millis(13),
+            options,
+        );
+        assert!(matches!(late.outcome, HoldOutcome::Drop));
+
+        let mut fail = d17_start(start, options, request);
+        let result = fail.feed_observing(
+            4,
+            &http_response_packet(9001, request_end, 0x18, response),
+            start + Duration::from_millis(12),
+            options,
+        );
+        let (event, mut portal) = match result.outcome {
+            HoldOutcome::HttpResponse { event, portal, .. } => (event, portal),
+            _ => panic!("HTTPS injection must be recognized"),
+        };
+        assert!(!fail.r2o_apply_http_swap_result(Some(&event), portal.as_mut(), false));
+        let stats = fail.r2o_http80_stats();
+        assert_eq!(stats.answered, 0);
+        assert_eq!(stats.swap_failed, 1);
+        let late = fail.feed_observing(
+            5,
+            &http_response_packet(9001 + response.len() as u32, request_end, 0x18, b"late"),
+            start + Duration::from_millis(13),
+            options,
+        );
+        assert!(!matches!(late.outcome, HoldOutcome::Drop));
     }
 
     fn client_hello(host: &[u8]) -> Vec<u8> {
@@ -3117,6 +3197,37 @@ mod tests {
             let (action, _) = d17_action(&client, true);
             println!("D17 post-client action={action}");
             d17_stats("post-client", &https);
+        }
+
+        {
+            let mut fail = d17_start(start, options, request);
+            let result = fail.feed_observing(
+                4,
+                &http_response_packet(9001, request_end, 0x18, response),
+                start + Duration::from_millis(12),
+                options,
+            );
+            let (event, mut portal) = match result.outcome {
+                HoldOutcome::HttpResponse { event, portal, .. } => (event, portal),
+                _ => panic!("HTTPS injection must be recognized"),
+            };
+            let swapped = fail.r2o_apply_http_swap_result(Some(&event), portal.as_mut(), false);
+            let stats = fail.r2o_http80_stats();
+            println!(
+                "D17 https-fail result={} answered={} swap_failed={}",
+                u8::from(swapped),
+                stats.answered,
+                stats.swap_failed
+            );
+            let late = fail.feed_observing(
+                5,
+                &http_response_packet(9001 + response.len() as u32, request_end, 0x18, b"late"),
+                start + Duration::from_millis(13),
+                options,
+            );
+            let (action, _) = d17_action(&late, true);
+            println!("D17 https-fail-late action={action}");
+            d17_stats("https-fail", &fail);
         }
     }
 }

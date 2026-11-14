@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 264 | 136 | 0 | 0 |
+| datapath-core | 400 | 265 | 135 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1352** | **630** | **0** | **0** |
+| **Итого** | **1982** | **1353** | **629** | **0** | **0** |
 
-Это не оценка паритета: 630 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 629 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1352 / P 630 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1353 / P 629 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 264 | 136 | 0 | 0 |
+| datapath-core | 400 | 265 | 135 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1352** | **630** | **0** | **0** |
+| **Итого** | **1982** | **1353** | **629** | **0** | **0** |
 
 
 ---
@@ -4466,7 +4466,7 @@ observation), `control.rs` (https names), `http_replace.rs` (пакеты),
 | `request_prefix` (static) | 327-341 | 15 | GET/HEAD, target без пробелов/`#`, Host из `d2k_http_request` | `r2k-core/src/httpup.rs:220-229 parse_request`, `:180-187` | **P** | **Ветви сверены:** C `d2k_http_request(p,n,&req)` (может принять неполный заголовок), `host_len<256`; метод ровно `GET `/`HEAD `; target до SP, отвергает `<=0x20`, `0x7f`, `#`; `end==n` или длина ≥ target → 0; копия target/host. Rust `parse_request` требует **полный** запрос (`header_len==input.len()`), GET/HEAD, Host:80, target без `#`/control; возвращает host/target. C может начать поток по префиксу без конца заголовка, Rust — нет. |
 | `request_feed` (static) | 342-347 | 6 | `d2k_http_request_stream_feed`, `client_next`, `next_known` | `httpup.rs` `R2oHttpRequestStream::feed_and_next_known`, `hold.rs` `HttpRequestFlow` | **E*** | C/Rust differential `scripts/test-request-feed-differential.sh` PASS: 7 состояний — split1/split2, тело за end, TE-invalid, complete, старый повтор, дыра; `client_next/next_known/next/end/header_done/invalid/past_end` совпали. Production: `HttpRequestFlow` хранит поток и обновляет поля на клиентских сегментах. **Ограничение:** `next_known` пока не используется для решения о следующем запросе, только поддерживается как состояние. |
 | `d2k_http80_packet` | 349-525 | 177 | стейт-машина HTTP/80: SYN/OPEN/IDLE/REQUEST/INJECTED/SWAP/ANSWERED/DONE, RTT, запрос/ответ, портал, 307+RST, CUT | `hold.rs` `observe_http_response`, `feed_observing_mode`, `observe_http_client_close`, `main.rs` | **E*** | D17 `scripts/test-datapath-http80-differential.sh` PASS (21 строка): SYN/OPEN/REQUEST, portal-вставка (no-https/https/slow/duplicate), 307+REPLACE, late server DROP после ANSWERED, post-client, FIN-CUT (`cut_result`: response=4, status=200, body=10), IPv6-поток, полный ответ (response=1) и битый заголовок (response=2); stats-строки совпали. Побайтовые 307/RST — отдельный swap-bytes differential. **Ограничение:** не сверены отдельно ретрансмиссия/дыра/перекрытие запроса, ACK/progress-поля, `request_feed` после ответа и тихий `d2k_http80_sweep` (3×RTT); Rust дополнительно собирает кросс-сегментный запрос, чего C не делает. |
-| `d2k_http80_swap` | 527-545 | 19 | вердикт с заменой + RST; ошибка → INJECTED, ACCEPT, swap_failed | `main.rs:2093 send_replacement`, `:2114 mark_http_response_answered`, `http_replace.rs` | **P** | **Ветви сверены:** C `!h\|\|!r\|\|!io\|\|action!=REPLACE\|\|flow>=128` → 0; `state!=SWAP` или ошибка `verdict_payload` → при SWAP вернуть INJECTED, `swap_failed++`, answered=0, `verdict_accept`, 0; успех → ANSWERED, `answered++`, answered=1, `send_rst`, 1. Rust `send_replacement`/`mark_http_response_answered`/`release_with`; те же исходы, счётчики/события иные. D17 проверяет исход, не сокет. |
+| `d2k_http80_swap` | 527-545 | 19 | вердикт с заменой + RST; ошибка → INJECTED, ACCEPT, swap_failed | `hold.rs` `r2o_apply_http_swap_result`, `main.rs` `send_replacement` | **E*** | C/Rust differential D17 (`scripts/test-datapath-http80-differential.sh`, 24 строки) PASS: успех — `answered=1`, `swap_failed=0`, поздний серверный пакет → DROP; отказ — `result=0`, `answered=0`, `swap_failed=1`, поздний пакет проходит (INJECTED). Побайтовые 307/RST — `scripts/test-http80-swap-bytes-differential.sh` (IPv4+IPv6). **Ограничение:** C `verdict_payload`/`verdict_accept`/`send_rst` — колбэки, Rust шлёт replacement/verdict напрямую; сравнивались исходы и счётчики, не порядок syscall-ов. |
 | `lc` (static) | 549-549 | 1 | ASCII-нижний регистр | `u8::to_ascii_lowercase` | **E** | C `('A'..='Z') ? c+32 : c`; Rust `to_ascii_lowercase()` понижает ровно `A..Z`, остальные байты не меняет. C-строка: `return (c>='A'&&c<='Z')?c+32:c;`; Rust `to_ascii_lowercase()`. |
 | `d2k_http_request` | 551-632 | 82 | строгий разбор: метод 1..20 заглавных, origin-form `/`, HTTP/1.x, ровно один Host:80, LDH/метки, не IPv4, framing | `r2k-core/src/httpup.rs` `parse_plan_request`/`r2o_http_plan_request` | **E*** | C/Rust differential `scripts/test-http-request-differential.sh` PASS: 15 кейсов — полный/частичный заголовок, `:80`/`:8080`, нет/два Host, хвостовая точка, IPv4-метка, нижний метод, absolute-form, плохая метка, TE, duplicate CL, Content-Length, отсутствие CRLF. Исправлено: неполная строка заголовка больше не отменяет уже найденный Host; `head_len=0`, `end_known=0`, как C. **Ограничение:** частичное перекрытие заголовка и точные 10-значные границы CL проверяются stream-дифференциалом. |
 
