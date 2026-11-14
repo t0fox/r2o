@@ -384,6 +384,88 @@ mod tests {
         assert!(!response.complete);
     }
 
+    struct TimeoutAfter {
+        data: Vec<u8>,
+        position: usize,
+        fail_at: usize,
+    }
+
+    impl std::io::Read for TimeoutAfter {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if self.position >= self.fail_at {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "HTTP read timeout",
+                ));
+            }
+            let available = self.data.len().saturating_sub(self.position);
+            let take = buffer
+                .len()
+                .min(available)
+                .min(self.fail_at - self.position);
+            buffer[..take].copy_from_slice(&self.data[self.position..self.position + take]);
+            self.position += take;
+            Ok(take)
+        }
+    }
+
+    #[test]
+    fn response_reader_sees_decoy_only_inside_the_c_4kib_prefix() {
+        // C `hs_read` кладёт в `reader.head` первые 4096 байт ответа
+        // (заголовки и тело вместе), и `d2k_hs_judge` видит только их.
+        let head = b"HTTP/1.1 200 OK\r\nContent-Length: 5000\r\n\r\n";
+        let mut inside = vec![b'a'; 5000];
+        let decoy_at = 4096 - head.len() - 11;
+        inside[decoy_at..decoy_at + 11].copy_from_slice(b"disk.rzd.ru");
+        let mut response = head.to_vec();
+        response.extend_from_slice(&inside);
+        let mut reader = Cursor::new(response.as_slice());
+        let parsed =
+            read_probe_response(&mut reader, Some(b"rutracker.org"), 0, Instant::now()).unwrap();
+        assert_eq!(parsed.answer, Answer::Decoy);
+        assert!(parsed.complete);
+
+        let mut outside = vec![b'a'; 5000];
+        let edge_at = decoy_at + 1;
+        outside[edge_at..edge_at + 11].copy_from_slice(b"disk.rzd.ru");
+        let mut response = head.to_vec();
+        response.extend_from_slice(&outside);
+        let mut reader = Cursor::new(response.as_slice());
+        let parsed =
+            read_probe_response(&mut reader, Some(b"rutracker.org"), 0, Instant::now()).unwrap();
+        assert_eq!(parsed.answer, Answer::Real);
+        assert!(parsed.complete);
+    }
+
+    #[test]
+    fn response_reader_treats_close_delimited_body_as_complete_like_c() {
+        let bytes = b"HTTP/1.0 200 OK\r\n\r\nhello";
+        let mut reader = Cursor::new(bytes.as_slice());
+        let response =
+            read_probe_response(&mut reader, Some(b"example.com"), 0, Instant::now()).unwrap();
+        assert_eq!(response.status, 200);
+        assert!(response.complete);
+        assert!(response.connection_close);
+        assert_eq!(response.body_bytes, 5);
+        assert_eq!(response.answer, Answer::Real);
+    }
+
+    #[test]
+    fn response_reader_turns_mid_body_timeout_into_cut() {
+        let head = b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nabc";
+        let mut reader = TimeoutAfter {
+            data: head.to_vec(),
+            position: 0,
+            fail_at: head.len(),
+        };
+        let response =
+            read_probe_response(&mut reader, Some(b"example.com"), 0, Instant::now()).unwrap();
+        assert_eq!(response.status, 200);
+        assert!(!response.complete);
+        assert_eq!(response.body_bytes, 3);
+        assert_eq!(response.answer, Answer::Cut);
+    }
+
     #[test]
     fn response_reader_consumes_chunk_trailers_before_the_next_response() {
         let bytes = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\none\r\n0\r\nX-End: yes\r\n\r\nHTTP/1.1 204 No Content\r\n\r\n";
