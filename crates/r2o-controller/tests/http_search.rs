@@ -3,7 +3,7 @@ use r2o_controller::http_search::{
     candidate_text, judge, known_key, read_probe_response, stable_id,
 };
 use std::io::{self, Cursor, Read};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const INJECTED: &[u8] = b"HTTP/1.1 302 Moved Temporarily\r\nLocation: http://lawfilter.ertelecom.ru\r\nConnection: close\r\nContent-Length: 13\r\n\r\nlawfilter.ru\n";
 const REAL: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
@@ -32,6 +32,12 @@ impl Read for TimeoutReader {
     }
 }
 
+/// C-фикстура сравнивает `rtt_us=98000`, `reply_us=99000`: отправка была
+/// примерно на 99 мс раньше, иначе настоящий `Instant` даёт EARLY.
+fn donor_request_sent() -> Instant {
+    Instant::now() - Duration::from_millis(99)
+}
+
 fn answer_name(answer: Answer) -> &'static str {
     match answer {
         Answer::Injected => "injected",
@@ -48,13 +54,21 @@ fn d2o_response_state_differential_preserves_portal_and_partial_head_outcomes() 
     const PORTAL_TRUNCATED: &[u8] = b"HTTP/1.1 302 Moved Temporarily\r\nLocation: http://lawfilter.ertelecom.ru/\r\nContent-Length: 100\r\n\r\nshort";
     const PARTIAL_HEAD: &[u8] =
         b"HTTP/1.1 302 Moved Temporarily\r\nLocation: http://lawfilter.ertelecom.ru";
+    const BLOCKED_BODY: &[u8] =
+        b"HTTP/1.1 403 Forbidden\r\nContent-Length: 21\r\n\r\naccess blocked by rkn";
+    const PORTAL_BODY: &[u8] =
+        b"HTTP/1.1 403 Forbidden\r\nContent-Length: 15\r\n\r\neais.rkn.gov.ru";
+    const GZIP_BODY: &[u8] = b"HTTP/1.1 403 Forbidden\r\nContent-Encoding: gzip\r\nContent-Length: 21\r\n\r\naccess blocked by rkn";
+    const UPGRADE: &[u8] = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: h2c\r\n\r\n";
+    const INVALID_FRAMING: &[u8] =
+        b"HTTP/1.1 200 OK\r\nContent-Length: 1 2\r\nConnection: close\r\n\r\n";
 
     let mut portal_reader = TimeoutReader::new(PORTAL_TRUNCATED);
     let portal = read_probe_response(
         &mut portal_reader,
         Some(b"rutracker.org"),
         98_000,
-        Instant::now(),
+        donor_request_sent(),
     )
     .unwrap();
     let mut partial_reader = TimeoutReader::new(PARTIAL_HEAD);
@@ -62,16 +76,66 @@ fn d2o_response_state_differential_preserves_portal_and_partial_head_outcomes() 
         &mut partial_reader,
         Some(b"rutracker.org"),
         98_000,
-        Instant::now(),
+        donor_request_sent(),
     ) {
         Ok(response) => answer_name(response.answer),
         Err(error) if error.kind() == io::ErrorKind::TimedOut => "timeout",
         Err(_) => "error",
     };
+    let mut blocked_reader = TimeoutReader::new(BLOCKED_BODY);
+    let blocked = read_probe_response(
+        &mut blocked_reader,
+        Some(b"rutracker.org"),
+        98_000,
+        donor_request_sent(),
+    )
+    .unwrap();
+    let mut portal_body_reader = TimeoutReader::new(PORTAL_BODY);
+    let portal_body = read_probe_response(
+        &mut portal_body_reader,
+        Some(b"rutracker.org"),
+        98_000,
+        donor_request_sent(),
+    )
+    .unwrap();
+    let mut gzip_reader = TimeoutReader::new(GZIP_BODY);
+    let gzip = read_probe_response(
+        &mut gzip_reader,
+        Some(b"rutracker.org"),
+        98_000,
+        donor_request_sent(),
+    )
+    .unwrap();
+    let mut upgrade_reader = TimeoutReader::new(UPGRADE);
+    let upgrade = read_probe_response(
+        &mut upgrade_reader,
+        Some(b"rutracker.org"),
+        98_000,
+        donor_request_sent(),
+    )
+    .unwrap();
+    let mut invalid_reader = TimeoutReader::new(INVALID_FRAMING);
+    let invalid = read_probe_response(
+        &mut invalid_reader,
+        Some(b"rutracker.org"),
+        98_000,
+        donor_request_sent(),
+    )
+    .unwrap();
     let output = format!(
-        "portal_truncated={}\npartial_header_timeout={}\n",
+        "portal_truncated={}\npartial_header_timeout={}\nblocked_body={}/{}\nportal_body={}/{}\ngzip_body={}/{}\nupgrade={}/{}\ninvalid_framing={}/{}\n",
         answer_name(portal.answer),
-        partial
+        partial,
+        answer_name(blocked.answer),
+        u8::from(blocked.complete),
+        answer_name(portal_body.answer),
+        u8::from(portal_body.complete),
+        answer_name(gzip.answer),
+        u8::from(gzip.complete),
+        answer_name(upgrade.answer),
+        u8::from(upgrade.complete),
+        answer_name(invalid.answer),
+        u8::from(invalid.complete),
     );
     if let Ok(path) = std::env::var("R2O_HTTP_RESPONSE_DIFF_OUTPUT") {
         std::fs::write(path, &output).unwrap();
@@ -79,7 +143,7 @@ fn d2o_response_state_differential_preserves_portal_and_partial_head_outcomes() 
 
     assert_eq!(
         output,
-        "portal_truncated=injected\npartial_header_timeout=garbage\n"
+        "portal_truncated=injected\npartial_header_timeout=garbage\nblocked_body=injected/1\nportal_body=injected/1\ngzip_body=real/1\nupgrade=cut/0\ninvalid_framing=cut/0\n"
     );
     assert!(!portal.complete);
 }
@@ -134,8 +198,13 @@ fn reads_the_body_of_a_cloudflare_challenge_response_and_reports_cut() {
         b"HTTP/1.1 403 Forbidden\r\ncf-mitigated: challenge\r\nContent-Length: 100\r\n\r\n";
     let response = [response_head.as_slice(), b"captcha"].concat();
     let mut reader = Cursor::new(response.as_slice());
-    let result =
-        read_probe_response(&mut reader, Some(b"rutracker.org"), 98_000, Instant::now()).unwrap();
+    let result = read_probe_response(
+        &mut reader,
+        Some(b"rutracker.org"),
+        98_000,
+        donor_request_sent(),
+    )
+    .unwrap();
 
     assert_eq!(result.answer, Answer::Cut);
     assert!(!result.complete);

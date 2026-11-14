@@ -306,6 +306,73 @@ mod tests {
     }
 
     #[test]
+    fn response_reader_reports_provider_block_body_and_keeps_early_outcome() {
+        let blocked = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 21\r\n\r\naccess blocked by rkn";
+        let mut reader = Cursor::new(blocked.as_slice());
+        let response =
+            read_probe_response(&mut reader, Some(b"rutracker.org"), 0, Instant::now()).unwrap();
+        assert_eq!(response.answer, Answer::Injected);
+        assert_eq!(response.reply, crate::fetch::R2oFetchHttpOutcome::Blocked);
+        assert_eq!(response.reply_evidence, "access blocked by rkn");
+        assert!(response.complete);
+
+        let portal = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 15\r\n\r\neais.rkn.gov.ru";
+        let mut reader = Cursor::new(portal.as_slice());
+        let response =
+            read_probe_response(&mut reader, Some(b"rutracker.org"), 0, Instant::now()).unwrap();
+        assert_eq!(response.answer, Answer::Injected);
+        assert_eq!(response.reply_evidence, "eais.rkn.gov.ru");
+
+        // C `d2k_http_reply_classify` не сканирует сжатое тело.
+        let compressed = b"HTTP/1.1 403 Forbidden\r\nContent-Encoding: gzip\r\nContent-Length: 21\r\n\r\naccess blocked by rkn";
+        let mut reader = Cursor::new(compressed.as_slice());
+        let response =
+            read_probe_response(&mut reader, Some(b"rutracker.org"), 0, Instant::now()).unwrap();
+        assert_eq!(response.answer, Answer::Real);
+        assert_eq!(response.reply, crate::fetch::R2oFetchHttpOutcome::Neutral);
+
+        // C `read_status_buf`: EARLY важнее неполного тела, CUT — только REAL.
+        let early = b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc";
+        let mut reader = Cursor::new(early.as_slice());
+        let response =
+            read_probe_response(&mut reader, Some(b"rutracker.org"), 98_000, Instant::now())
+                .unwrap();
+        assert_eq!(response.answer, Answer::Early);
+        assert!(!response.complete);
+    }
+
+    #[test]
+    fn response_reader_matches_donor_for_101_and_invalid_framing() {
+        // C `read_status_buf` возвращает 101 без подтверждения полноты, а
+        // `d2k_hs_probe_run` превращает REAL в CUT.
+        let upgrade = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: h2c\r\n\r\n";
+        let mut reader = Cursor::new(upgrade.as_slice());
+        let response =
+            read_probe_response(&mut reader, Some(b"rutracker.org"), 0, Instant::now()).unwrap();
+        assert_eq!(response.answer, Answer::Cut);
+        assert_eq!(response.status, 101);
+        assert!(!response.complete);
+
+        // C `read_status_buf`: неоднозначный Content-Length — ответ есть,
+        // тело не считается полным; это CUT, а не ошибка разбора.
+        let malformed = b"HTTP/1.1 200 OK\r\nContent-Length: 1 2\r\nConnection: close\r\n\r\n";
+        let mut reader = Cursor::new(malformed.as_slice());
+        let response =
+            read_probe_response(&mut reader, Some(b"rutracker.org"), 0, Instant::now()).unwrap();
+        assert_eq!(response.answer, Answer::Cut);
+        assert_eq!(response.status, 200);
+        assert!(!response.complete);
+
+        let duplicate = b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nx";
+        let mut reader = Cursor::new(duplicate.as_slice());
+        let response =
+            read_probe_response(&mut reader, Some(b"rutracker.org"), 0, Instant::now()).unwrap();
+        assert_eq!(response.answer, Answer::Cut);
+        assert_eq!(response.status, 200);
+        assert!(!response.complete);
+    }
+
+    #[test]
     fn response_reader_consumes_chunk_trailers_before_the_next_response() {
         let bytes = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\none\r\n0\r\nX-End: yes\r\n\r\nHTTP/1.1 204 No Content\r\n\r\n";
         let mut reader = Cursor::new(bytes.as_slice());
@@ -331,6 +398,9 @@ struct ParsedResponseHead {
     status: u16,
     body: BodyMode,
     connection_close: bool,
+    /// C `d2k_http_reply_classify`: сжатое тело не сканируется на подпись
+    /// блокировки, поэтому `gzip`/несколько `Content-Encoding` дают `false`.
+    identity_encoding: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -341,6 +411,9 @@ pub struct HttpProbeResponse {
     pub body_bytes: u64,
     pub connection_close: bool,
     pub reply_us: i64,
+    /// C `d2k_http_read_result.reply`: исход проверки тела/редиректа.
+    pub reply: crate::fetch::R2oFetchHttpOutcome,
+    pub reply_evidence: &'static str,
 }
 
 /// Проверить, можно ли безопасно повторить наблюдённый путь HTTP.
@@ -361,7 +434,7 @@ pub fn read_probe_response(
     request_sent: Instant,
 ) -> io::Result<HttpProbeResponse> {
     let mut first_byte = None;
-    let (head, response, body_bytes, complete) = loop {
+    let (head, response, body_prefix, body_bytes, complete) = loop {
         let mut head = Vec::with_capacity(1024);
         if let Err(error) = read_response_head(reader, &mut first_byte, &mut head) {
             if head.is_empty() {
@@ -370,45 +443,127 @@ pub fn read_probe_response(
             let reply_us = first_byte
                 .map(|received| received.saturating_duration_since(request_sent).as_micros() as i64)
                 .unwrap_or(-1);
+            // C `d2k_hs_probe_run`: частичный заголовок — судимый ответ
+            // (обычно GARBAGE), а не ошибка чтения.
+            let judged = judge(host, &head, rtt_us, reply_us);
             return Ok(HttpProbeResponse {
-                answer: Answer::Garbage,
+                answer: judged,
                 status: 0,
                 complete: false,
                 body_bytes: 0,
                 connection_close: false,
                 reply_us,
+                reply: crate::fetch::R2oFetchHttpOutcome::Neutral,
+                reply_evidence: "",
             });
         }
-        let response = parse_response_head(&head).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "неверный заголовок HTTP-ответа")
-        })?;
-        if response.body == BodyMode::Empty {
-            if !(100..200).contains(&response.status) || response.status == 101 {
-                break (head, response, 0, true);
+        let Some(parsed) = parse_response_head(&head) else {
+            // C `read_status_buf`: неоднозначный Content-Length/Transfer-
+            // Encoding не отменяет ответ, но тело считается неполным.
+            let Some(status) = parse_status_line(&head) else {
+                let reply_us = first_byte
+                    .map(|received| {
+                        received.saturating_duration_since(request_sent).as_micros() as i64
+                    })
+                    .unwrap_or(-1);
+                return Ok(HttpProbeResponse {
+                    answer: Answer::Garbage,
+                    status: 0,
+                    complete: false,
+                    body_bytes: 0,
+                    connection_close: false,
+                    reply_us,
+                    reply: crate::fetch::R2oFetchHttpOutcome::Neutral,
+                    reply_evidence: "",
+                });
+            };
+            let response = ParsedResponseHead {
+                status,
+                body: BodyMode::Empty,
+                connection_close: true,
+                identity_encoding: true,
+            };
+            break (head, response, Vec::new(), 0, false);
+        };
+        if parsed.status == 101 {
+            // C `read_status_buf`: 101 без запроса на upgrade — ответ без
+            // тела и без подтверждения полноты; probe_run превратит его в CUT
+            // (если judge не вернул более специфичный исход).
+            break (head, parsed, Vec::new(), 0, false);
+        }
+        if parsed.body == BodyMode::Empty {
+            if !(100..200).contains(&parsed.status) {
+                break (head, parsed, Vec::new(), 0, true);
             }
         } else {
-            let (body_bytes, complete) = read_response_body(reader, response.body)?;
-            break (head, response, body_bytes, complete);
+            let mut prefix = Vec::new();
+            let (body_bytes, complete) = read_response_body(reader, parsed.body, &mut prefix)?;
+            break (head, parsed, prefix, body_bytes, complete);
         }
     };
     let reply_us = first_byte
         .map(|received| received.saturating_duration_since(request_sent).as_micros() as i64)
         .unwrap_or(-1);
+    let location = response_header(&head, b"location").unwrap_or_default();
+    let reply = crate::fetch::r2o_http_reply_classify(
+        response.status,
+        location,
+        response.identity_encoding,
+        &body_prefix,
+        body_bytes.saturating_add(u64::from(!complete)),
+    );
     let judged = judge(host, &head, rtt_us, reply_us);
+    // C `d2k_hs_probe_run`: BLOKED-тело важнее неполноты, а CUT получается
+    // только из REAL; EARLY/DECOY/INJECTED/GARBAGE сохраняют свой исход.
+    let answer = if reply.outcome == crate::fetch::R2oFetchHttpOutcome::Blocked {
+        Answer::Injected
+    } else if judged == Answer::Real && !complete {
+        Answer::Cut
+    } else {
+        judged
+    };
     Ok(HttpProbeResponse {
-        answer: if judged == Answer::Injected {
-            Answer::Injected
-        } else if !complete {
-            Answer::Cut
-        } else {
-            judged
-        },
+        answer,
         status: response.status,
         complete,
         body_bytes,
         connection_close: response.connection_close,
         reply_us,
+        reply: reply.outcome,
+        reply_evidence: reply.evidence,
     })
+}
+
+/// C `d2k_hs_judge`/`read_status_rd`: код статуса из первой строки.
+fn parse_status_line(head: &[u8]) -> Option<u16> {
+    let status_line = head.split(|byte| *byte == b'\n').next()?;
+    let status_line = status_line.strip_suffix(b"\r").unwrap_or(status_line);
+    if status_line.len() < 12
+        || &status_line[..7] != b"HTTP/1."
+        || !matches!(status_line[7], b'0' | b'1')
+        || status_line[8] != b' '
+    {
+        return None;
+    }
+    std::str::from_utf8(&status_line[9..12]).ok()?.parse().ok()
+}
+
+/// Значение первого поля заголовка без завершающих пробелов, как C scanner.
+fn response_header<'a>(head: &'a [u8], name: &[u8]) -> Option<&'a [u8]> {
+    let end = head.windows(4).position(|window| window == b"\r\n\r\n")? + 2;
+    for raw_line in head[..end].split(|byte| *byte == b'\n').skip(1) {
+        let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+        if line.is_empty() {
+            break;
+        }
+        let Some(separator) = line.iter().position(|byte| *byte == b':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case(&line[..separator]) {
+            return Some(trim_http_whitespace(&line[separator + 1..]));
+        }
+    }
+    None
 }
 
 fn read_response_head(
@@ -444,7 +599,22 @@ fn read_response_head(
     }
 }
 
-fn read_response_body(reader: &mut impl Read, body: BodyMode) -> io::Result<(u64, bool)> {
+/// C `body_stream.prefix[4096]`: начало тела для `d2k_http_reply_classify`.
+const HTTP_REPLY_BODY_PREFIX: usize = 4096;
+
+fn capture_body_prefix(prefix: &mut Vec<u8>, bytes: &[u8]) {
+    if prefix.len() >= HTTP_REPLY_BODY_PREFIX {
+        return;
+    }
+    let take = bytes.len().min(HTTP_REPLY_BODY_PREFIX - prefix.len());
+    prefix.extend_from_slice(&bytes[..take]);
+}
+
+fn read_response_body(
+    reader: &mut impl Read,
+    body: BodyMode,
+    prefix: &mut Vec<u8>,
+) -> io::Result<(u64, bool)> {
     match body {
         BodyMode::Empty => Ok((0, true)),
         BodyMode::Length(mut remaining) => {
@@ -455,6 +625,7 @@ fn read_response_body(reader: &mut impl Read, body: BodyMode) -> io::Result<(u64
                 match reader.read(&mut buffer[..size]) {
                     Ok(0) => return Ok((read_total, false)),
                     Ok(read) => {
+                        capture_body_prefix(prefix, &buffer[..read]);
                         remaining -= read;
                         read_total += read as u64;
                     }
@@ -465,14 +636,17 @@ fn read_response_body(reader: &mut impl Read, body: BodyMode) -> io::Result<(u64
             }
             Ok((read_total, true))
         }
-        BodyMode::Chunked => read_chunked_body(reader),
+        BodyMode::Chunked => read_chunked_body(reader, prefix),
         BodyMode::UntilClose => {
             let mut buffer = [0; 8192];
             let mut read_total = 0_u64;
             loop {
                 match reader.read(&mut buffer) {
                     Ok(0) => return Ok((read_total, true)),
-                    Ok(read) => read_total = read_total.saturating_add(read as u64),
+                    Ok(read) => {
+                        capture_body_prefix(prefix, &buffer[..read]);
+                        read_total = read_total.saturating_add(read as u64);
+                    }
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                     Err(error) => return Err(error),
                 }
@@ -493,7 +667,7 @@ fn body_cut_error(error: &io::Error) -> bool {
     )
 }
 
-fn read_chunked_body(reader: &mut impl Read) -> io::Result<(u64, bool)> {
+fn read_chunked_body(reader: &mut impl Read, prefix: &mut Vec<u8>) -> io::Result<(u64, bool)> {
     let mut declared_total = 0_usize;
     let mut body_bytes = 0_u64;
     loop {
@@ -531,7 +705,7 @@ fn read_chunked_body(reader: &mut impl Read) -> io::Result<(u64, bool)> {
                 }
             }
         }
-        let (read, complete) = read_response_body(reader, BodyMode::Length(size))?;
+        let (read, complete) = read_response_body(reader, BodyMode::Length(size), prefix)?;
         body_bytes = body_bytes.saturating_add(read);
         if !complete {
             return Ok((body_bytes, false));
@@ -590,6 +764,7 @@ fn parse_response_head(head: &[u8]) -> Option<ParsedResponseHead> {
     let mut chunked = false;
     let mut close = status_line[7] == b'0';
     let mut keep_alive = false;
+    let mut identity_encoding = true;
     for raw_line in lines {
         if raw_line.is_empty() {
             break;
@@ -631,6 +806,12 @@ fn parse_response_head(head: &[u8]) -> Option<ParsedResponseHead> {
                 close |= header_has_token(&value, b"close");
                 keep_alive |= header_has_token(&value, b"keep-alive");
             }
+            b"content-encoding" => {
+                // C `read_status_buf`: только ровно `identity` разрешает
+                // сканировать тело на подпись блокировки; `gzip` и цепочки
+                // кодировок дают «не identity».
+                identity_encoding &= value == b"identity";
+            }
             _ => {}
         }
     }
@@ -652,6 +833,7 @@ fn parse_response_head(head: &[u8]) -> Option<ParsedResponseHead> {
         status,
         body,
         connection_close: close,
+        identity_encoding,
     })
 }
 
@@ -1004,7 +1186,11 @@ mod d2o_http_judge_differential {
         let sent = std::time::Instant::now();
         let mut reader = &response[..];
         let probe = super::read_probe_response(&mut reader, None, 0, sent).unwrap();
-        assert_eq!(probe.answer, Answer::Real);
+        // Фикстура — 403 с телом «access blocked by rkn». C `d2k_hs_judge`
+        // сам тело не смотрит и даёт REAL, но `d2k_hs_probe_run` применяет
+        // `d2k_http_reply_classify` и превращает ответ в INJECTED.
+        assert_eq!(probe.answer, Answer::Injected);
+        assert_eq!(probe.reply, crate::fetch::R2oFetchHttpOutcome::Blocked);
         assert!(probe.complete);
     }
 }

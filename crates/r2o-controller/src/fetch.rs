@@ -3252,7 +3252,10 @@ const R2O_HTTP_REPLY_NEUTRAL: R2oHttpReplyResult = R2oHttpReplyResult {
 };
 
 /// C `d2k_http_reply_classify`: исход и строка-доказательство.
-fn r2o_http_reply_classify(
+///
+/// HTTP-search использует ту же классификацию тела/редиректа, что и проверка
+/// страницы: без неё `403` с подписью РКН считался бы ответом сервера.
+pub(crate) fn r2o_http_reply_classify(
     code: u16,
     location: &[u8],
     identity_encoding: bool,
