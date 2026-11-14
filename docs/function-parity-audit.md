@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 238 | 162 | 0 | 0 |
+| datapath-core | 400 | 239 | 161 | 0 | 0 |
 | datapath-plan | 183 | 177 | 6 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1320** | **662** | **0** | **0** |
+| **Итого** | **1982** | **1321** | **661** | **0** | **0** |
 
-Это не оценка паритета: 662 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 661 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1320 / P 662 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1321 / P 661 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 238 | 162 | 0 | 0 |
+| datapath-core | 400 | 239 | 161 | 0 | 0 |
 | datapath-plan | 183 | 177 | 6 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1320** | **662** | **0** | **0** |
+| **Итого** | **1982** | **1321** | **661** | **0** | **0** |
 
 
 ---
@@ -4649,7 +4649,7 @@ ctnetlink: сборка GET, разбор счётчиков/состояния 
 | `d2k_ct_query_info_fd` | 169-186 | 18 | send GET `MSG_DONTWAIT`, до 8 recv `MSG_DONTWAIT`, вернуть 0/1/2/-1 | `conntrack.rs` `query_info`, `receive_info_parse` | **E*** | C-ветви сверены: encode/`send` ровно n, до 8 `recv` с фильтром seq, `info_parse` 0/1/2 возвращается, иначе -1. Rust `query_info` возвращает `Info/Reply/NoCounters/Error`, `query` оставляет только `Info`. **Ограничение:** живой netlink C/Rust-оракул не построен; возвращаемые коды проверены на чистых фикстурах `ct_info_parse`. |
 | `d2k_ct_query_fd` | 188-197 | 10 | обёртка `query_info_fd` для счётчиков | `conntrack.rs` `query`/`query_info` | **E*** | `query_info` сохраняет код `info_parse`; `query` отдаёт `Info` только при rc=0, как C-обёртка копирует счётчики только при успехе. **Ограничение:** различие кодов 1/2 на уровне `query` схлопывается в `None`; полный код доступен через `query_info`. |
 | `reply_errno` (static) | 201-212 | 12 | по seq: NLMSG_ERROR → положительный errno, 0 — не ошибка; нет ответа → -1 | `conntrack.rs:350-356` (inline в `probe`) | **P** | C различает «нет ответа на seq» (-1) и «ответ не ошибка» (0), `e<0 ? -e : e`. Rust в `probe` проверяет только `NLMSG_ERROR` с нужным seq и `errno == -ENOENT`; общего `reply_errno`/различения 0 и -1 нет. |
-| `d2k_ct_probe_fd` | 214-238 | 25 | zero-tuple GET, poll `wait_ms` до 8 раз; ENOENT(2) или запись(0) → подсистема есть | `conntrack.rs:309-357 probe` | **P** | **Ветви сверены:** C `fd<0` → 0; zero tuple family 4/proto 17; GET; send `MSG_DONTWAIT`; до 8 раз `poll(wait_ms)`, recv, `reply_errno`; `e<0` (чужой) → continue; `return e==2 \|\| e==0`. Rust тот же zero tuple/GET/send; **один** `poll(100)` и один recv; `decode_entry` с нужным seq → true; иначе только NLMSG_ERROR с `-ENOENT`. Параметр `wait_ms`, 8 попыток и успех по «не ошибка» не портированы. `r2o-conntrack-ctget-differential.sh`. |
+| `d2k_ct_probe_fd` | 214-238 | 25 | zero-tuple GET, poll `wait_ms` до 8 раз; ENOENT(2) или запись(0) → подсистема есть | `conntrack.rs` `probe`, `r2o_ct_reply_errno` | **E*** | C-ветви сверены: zero tuple family 4/proto 17, send ровно n, до 8 poll/recv, чужой seq пропускается, errno 0/2 → true, иное → false. Rust приведён к тому же циклу; тест `ct_reply_errno_matches_c` (запись, чужой seq, ENOENT, ACK). **Ограничение:** живой C/Rust netlink-оракул не построен. |
 | `d2k_ct_open` (linux) | 243-253 | 11 | `SOCK_RAW`+`SOCK_CLOEXEC`, fcntl O_NONBLOCK, bind; fd без проверки подсистемы | `conntrack.rs:270-295 open` | **P** | C: socket `RAW\|CLOEXEC`, fcntl `O_NONBLOCK`, bind, вернуть fd (probe отдельно). Rust: socket `RAW\|CLOEXEC\|NONBLOCK`, bind, затем **обязательный `probe()`**; при недоступности — None. API/момент проверки различаются. |
 | `d2k_ct_open` (не linux) | 255-255 | 1 | вне Linux — заглушка -1 | `#[cfg(target_os="linux")]` (модуль `conntrack`) | **E** | C вне Linux возвращает -1. Rust модуль conntrack подключается только для Linux; вне платформы функциональность отсутствует (эквивалент отказа). |
 

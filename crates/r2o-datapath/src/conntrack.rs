@@ -206,6 +206,26 @@ pub fn r2o_ct_info_parse(bytes: &[u8], sequence: u32) -> R2oConntrackInfoParse {
     R2oConntrackInfoParse::Error
 }
 
+/// C `reply_errno` (`datapath/ctq.c:201-212`): errno из NLMSG_ERROR
+/// (положительный), 0 для ответа-записи, `None` если своего seq нет.
+fn r2o_ct_reply_errno(bytes: &[u8], sequence: u32) -> Option<i32> {
+    for message in MessageIter::new(bytes) {
+        if message.sequence != sequence {
+            continue;
+        }
+        if message.kind == NLMSG_ERROR && message.body.len() >= 4 {
+            let errno = i32::from_ne_bytes(
+                message.body[..4]
+                    .try_into()
+                    .expect("длина NLMSG_ERROR проверена"),
+            );
+            return Some(if errno < 0 { -errno } else { errno });
+        }
+        return Some(0);
+    }
+    None
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct R2oConntrackCounters {
     pub parsed: R2oConntrackInfoParse,
@@ -440,37 +460,36 @@ impl R2oConntrackClient {
         if self.send(&request).is_err() {
             return false;
         }
+        // C `d2k_ct_probe_fd` (`datapath/ctq.c:214-238`): до 8 poll/recv;
+        // чужой seq пропускается, ENOENT(2) или запись(0) — подсистема есть.
         let mut poll = libc::pollfd {
             fd: self.fd,
             events: libc::POLLIN,
             revents: 0,
         };
-        if unsafe { libc::poll(&mut poll, 1, 100) } <= 0 {
-            return false;
-        }
         let mut response = [0_u8; 4096];
-        let read = unsafe {
-            libc::recv(
-                self.fd,
-                response.as_mut_ptr() as *mut libc::c_void,
-                response.len(),
-                libc::MSG_DONTWAIT,
-            )
-        };
-        if read <= 0 {
-            return false;
+        for _ in 0..8 {
+            if unsafe { libc::poll(&mut poll, 1, 100) } <= 0 {
+                return false;
+            }
+            let read = unsafe {
+                libc::recv(
+                    self.fd,
+                    response.as_mut_ptr() as *mut libc::c_void,
+                    response.len(),
+                    libc::MSG_DONTWAIT,
+                )
+            };
+            if read <= 0 {
+                return false;
+            }
+            let response = &response[..read as usize];
+            match r2o_ct_reply_errno(response, sequence) {
+                None => continue,
+                Some(errno) => return errno == 0 || errno == libc::ENOENT,
+            }
         }
-        let response = &response[..read as usize];
-        if decode_entry(response, sequence).is_some() {
-            return true;
-        }
-        MessageIter::new(response).any(|message| {
-            message.sequence == sequence
-                && message.kind == NLMSG_ERROR
-                && message.body.len() >= 4
-                && i32::from_ne_bytes(message.body[..4].try_into().expect("длина проверена"))
-                    == -libc::ENOENT
-        })
+        false
     }
 
     fn send(&self, request: &[u8]) -> io::Result<()> {
@@ -624,7 +643,7 @@ mod tests {
         CTA_IP_V4_DST, CTA_IP_V4_SRC, CTA_PROTO_DST_PORT, CTA_PROTO_NUM, CTA_PROTO_SRC_PORT,
         CTA_TUPLE_IP, CTA_TUPLE_ORIG, CTA_TUPLE_PROTO, CTA_TUPLE_REPLY, R2oConntrackInfo,
         R2oConntrackInfoParse, R2oConntrackNatSource, R2oConntrackTuple, decode_entry, decode_info,
-        encode_get, find_attribute, r2o_ct_info_parse, tuple_from_socket_addrs,
+        encode_get, find_attribute, r2o_ct_info_parse, r2o_ct_reply_errno, tuple_from_socket_addrs,
     };
     use crate::netlink::MessageIter;
     use std::net::SocketAddr;
@@ -736,6 +755,18 @@ mod tests {
         assert!(output.contains("no_counters rc=2\n"));
         assert!(output.contains("reply rc=1\n"));
         assert!(output.contains("ack rc=-1\n"));
+    }
+
+    #[test]
+    fn ct_reply_errno_matches_c() {
+        let message = ответ_conntrack_без_кортежа(7, 22, 25);
+        assert_eq!(r2o_ct_reply_errno(&message, 7), Some(0));
+        assert_eq!(r2o_ct_reply_errno(&message, 8), None);
+        assert_eq!(
+            r2o_ct_reply_errno(&ошибка_conntrack(7, -libc::ENOENT), 7),
+            Some(libc::ENOENT)
+        );
+        assert_eq!(r2o_ct_reply_errno(&ошибка_conntrack(7, 0), 7), Some(0));
     }
 
     #[test]
