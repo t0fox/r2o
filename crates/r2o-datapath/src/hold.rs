@@ -2874,6 +2874,85 @@ mod tests {
         );
     }
 
+    fn http_response_packet6(
+        sequence: u32,
+        acknowledgment: u32,
+        flags: u8,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut packet = vec![0; 40 + 20 + payload.len()];
+        packet[0] = 0x60;
+        let payload_len = (20 + payload.len()) as u16;
+        packet[4..6].copy_from_slice(&payload_len.to_be_bytes());
+        packet[6] = 6;
+        packet[7] = 64;
+        let mut server = [0_u8; 16];
+        server[0] = 0x20;
+        server[1] = 0x01;
+        server[15] = 0xd6;
+        let mut client = [0_u8; 16];
+        client[0] = 0x20;
+        client[1] = 0x01;
+        client[15] = 0x17;
+        packet[8..24].copy_from_slice(&server);
+        packet[24..40].copy_from_slice(&client);
+        let tcp = 40;
+        packet[tcp..tcp + 2].copy_from_slice(&80_u16.to_be_bytes());
+        packet[tcp + 2..tcp + 4].copy_from_slice(&50000_u16.to_be_bytes());
+        packet[tcp + 4..tcp + 8].copy_from_slice(&sequence.to_be_bytes());
+        packet[tcp + 8..tcp + 12].copy_from_slice(&acknowledgment.to_be_bytes());
+        packet[tcp + 12] = 0x50;
+        packet[tcp + 13] = flags;
+        packet[tcp + 20..].copy_from_slice(payload);
+        packet
+    }
+
+    fn http_packet6(sequence: u32, flags: u8, payload: &[u8]) -> Vec<u8> {
+        let mut packet = vec![0; 40 + 20 + payload.len()];
+        packet[0] = 0x60;
+        let payload_len = (20 + payload.len()) as u16;
+        packet[4..6].copy_from_slice(&payload_len.to_be_bytes());
+        packet[6] = 6;
+        packet[7] = 64;
+        let mut server = [0_u8; 16];
+        server[0] = 0x20;
+        server[1] = 0x01;
+        server[15] = 0xd6;
+        let mut client = [0_u8; 16];
+        client[0] = 0x20;
+        client[1] = 0x01;
+        client[15] = 0x17;
+        packet[8..24].copy_from_slice(&client);
+        packet[24..40].copy_from_slice(&server);
+        let tcp = 40;
+        packet[tcp..tcp + 2].copy_from_slice(&50000_u16.to_be_bytes());
+        packet[tcp + 2..tcp + 4].copy_from_slice(&80_u16.to_be_bytes());
+        packet[tcp + 4..tcp + 8].copy_from_slice(&sequence.to_be_bytes());
+        packet[tcp + 8..tcp + 12].copy_from_slice(&3000_u32.to_be_bytes());
+        packet[tcp + 12] = 0x50;
+        packet[tcp + 13] = flags;
+        packet[tcp + 20..].copy_from_slice(payload);
+        packet
+    }
+
+    fn d17_start6(start: Instant, options: HoldOptions, request: &[u8]) -> HoldTable {
+        let mut hold = HoldTable::default();
+        let _ = hold.feed_observing(1, &http_packet6(2000, 0x02, &[]), start, options);
+        let _ = hold.feed_observing(
+            2,
+            &http_response_packet6(9000, 2001, 0x12, &[]),
+            start + Duration::from_millis(10),
+            options,
+        );
+        let _ = hold.feed_observing(
+            3,
+            &http_packet6(2001, 0x18, request),
+            start + Duration::from_millis(11),
+            options,
+        );
+        hold
+    }
+
     #[test]
     #[ignore]
     fn d17_http80_trace() {
@@ -2939,6 +3018,85 @@ mod tests {
         let (action, portal) = d17_action(&result, false);
         println!("D17 duplicate action={action} portal={}", u8::from(portal));
         d17_stats("duplicate", &duplicate);
+
+        {
+            let mut cut = d17_start(start, options, request);
+            let partial: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n0123456789";
+            let _ = cut.feed_observing(
+                4,
+                &http_response_packet(9001, request_end, 0x18, partial),
+                start + Duration::from_millis(12),
+                options,
+            );
+            let mut fin = http_packet(request_end, 0x11, &[]);
+            fin[28..32].copy_from_slice(&(9001 + partial.len() as u32).to_be_bytes());
+            let result = cut.feed_observing(5, &fin, start + Duration::from_millis(13), options);
+            let (action, _) = d17_action(&result, true);
+            if let HoldOutcome::HttpResponse { event, .. } = &result.outcome {
+                println!(
+                    "D17 cut action={action} response={} status={} body={}",
+                    event.code, event.status, event.body_bytes
+                );
+            } else {
+                println!("D17 cut action={action} response=- status=0 body=0");
+            }
+            d17_stats("cut", &cut);
+        }
+
+        {
+            let mut v6 = d17_start6(start, options, request);
+            let result = v6.feed_observing(
+                4,
+                &http_response_packet6(9001, request_end, 0x18, response),
+                start + Duration::from_millis(12),
+                options,
+            );
+            let (action, portal) = d17_action(&result, false);
+            println!("D17 ipv6 action={action} portal={}", u8::from(portal));
+            d17_stats("ipv6", &v6);
+        }
+
+        {
+            let mut complete = d17_start(start, options, request);
+            let full: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+            let result = complete.feed_observing(
+                4,
+                &http_response_packet(9001, request_end, 0x18, full),
+                start + Duration::from_millis(12),
+                options,
+            );
+            let (action, _) = d17_action(&result, false);
+            if let HoldOutcome::HttpResponse { event, .. } = &result.outcome {
+                println!(
+                    "D17 complete action={action} response={} status={} body={}",
+                    event.code, event.status, event.body_bytes
+                );
+            } else {
+                println!("D17 complete action={action} response=- status=0 body=0");
+            }
+            d17_stats("complete", &complete);
+        }
+
+        {
+            let mut invalid = d17_start(start, options, request);
+            let bad: &[u8] = b"HTTP/1.1 200 OK\r\nMalformed Header\r\n\r\n";
+            let result = invalid.feed_observing(
+                4,
+                &http_response_packet(9001, request_end, 0x18, bad),
+                start + Duration::from_millis(12),
+                options,
+            );
+            let (action, _) = d17_action(&result, false);
+            if let HoldOutcome::HttpResponse { event, .. } = &result.outcome {
+                println!(
+                    "D17 invalid action={action} response={} status={} body={}",
+                    event.code, event.status, event.body_bytes
+                );
+            } else {
+                println!("D17 invalid action={action} response=- status=0 body=0");
+            }
+            d17_stats("invalid", &invalid);
+        }
 
         if let Some((key, request_no)) = answered {
             assert!(https.mark_http_response_answered(&key, request_no));

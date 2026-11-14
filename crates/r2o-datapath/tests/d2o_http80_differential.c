@@ -83,6 +83,17 @@ static flow flow4(uint16_t client_port) {
     return f;
 }
 
+static flow flow6(uint16_t client_port) {
+    flow f;
+    memset(&f, 0, sizeof f);
+    f.v6 = 1;
+    f.client[0] = 0x20; f.client[1] = 0x01; f.client[15] = 0x17;
+    f.server[0] = 0x20; f.server[1] = 0x01; f.server[15] = 0xd6;
+    f.cport = client_port;
+    f.sport = 80;
+    return f;
+}
+
 static const char GET[] =
     "GET /forum/index.php HTTP/1.1\r\nHost: RuTracker.org:80\r\n"
     "User-Agent: test\r\nAccept: */*\r\n\r\n";
@@ -196,6 +207,70 @@ int main(void) {
         print_result("duplicate");
         print_http_stats("duplicate", duplicate);
         d2k_http80_free(duplicate);
+    }
+
+    {
+        d2k_http80 *cut = d2k_http80_new();
+        flow cut_flow = flow4(53000);
+        open_flow(cut, &cut_flow, T);
+        const char *partial =
+            "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n0123456789";
+        size_t n = packet(&cut_flow, 0, F_ACK | F_PSH, SISN + 1,
+                          CISN + 1 + (uint32_t)strlen(GET), partial, b);
+        d2k_http80_packet(cut, b, n, T + 99 * MS + 700000ull, 0, out, sizeof out,
+                          rst, sizeof rst, &r);
+        n = packet(&cut_flow, 1, F_ACK | F_FIN,
+                   CISN + 1 + (uint32_t)strlen(GET),
+                   SISN + 1 + (uint32_t)strlen(partial), NULL, b);
+        d2k_http80_packet(cut, b, n, T + 99 * MS + 120 * MS, 0, out, sizeof out,
+                          rst, sizeof rst, &r);
+        printf("D17 cut action=%s response=%d status=%d body=%llu\n",
+               action_name(r.action), r.response, r.status,
+               (unsigned long long)r.body_bytes);
+        print_http_stats("cut", cut);
+        d2k_http80_free(cut);
+    }
+
+    {
+        d2k_http80 *v6 = d2k_http80_new();
+        flow v6_flow = flow6(54000);
+        open_flow(v6, &v6_flow, T);
+        feed_inject(v6, &v6_flow, T + 99 * MS + 700000ull);
+        print_result("ipv6");
+        print_http_stats("ipv6", v6);
+        d2k_http80_free(v6);
+    }
+
+    {
+        d2k_http80 *complete = d2k_http80_new();
+        flow complete_flow = flow4(55000);
+        open_flow(complete, &complete_flow, T);
+        const char *full = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        size_t n = packet(&complete_flow, 0, F_ACK | F_PSH, SISN + 1,
+                          CISN + 1 + (uint32_t)strlen(GET), full, b);
+        d2k_http80_packet(complete, b, n, T + 99 * MS + 700000ull, 0, out,
+                          sizeof out, rst, sizeof rst, &r);
+        printf("D17 complete action=%s response=%d status=%d body=%llu\n",
+               action_name(r.action), r.response, r.status,
+               (unsigned long long)r.body_bytes);
+        print_http_stats("complete", complete);
+        d2k_http80_free(complete);
+    }
+
+    {
+        d2k_http80 *invalid = d2k_http80_new();
+        flow invalid_flow = flow4(55500);
+        open_flow(invalid, &invalid_flow, T);
+        const char *bad = "HTTP/1.1 200 OK\r\nMalformed Header\r\n\r\n";
+        size_t n = packet(&invalid_flow, 0, F_ACK | F_PSH, SISN + 1,
+                          CISN + 1 + (uint32_t)strlen(GET), bad, b);
+        d2k_http80_packet(invalid, b, n, T + 99 * MS + 700000ull, 0, out,
+                          sizeof out, rst, sizeof rst, &r);
+        printf("D17 invalid action=%s response=%d status=%d body=%llu\n",
+               action_name(r.action), r.response, r.status,
+               (unsigned long long)r.body_bytes);
+        print_http_stats("invalid", invalid);
+        d2k_http80_free(invalid);
     }
 
     {
