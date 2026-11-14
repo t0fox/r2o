@@ -48,6 +48,61 @@ static size_t counters_message(uint8_t *out, uint32_t seq, uint64_t orig,
     return length;
 }
 
+static size_t mixed_message(uint8_t *out, uint32_t seq,
+                            const uint8_t *orig_attrs, size_t orig_len,
+                            const uint8_t *reply_attrs, size_t reply_len) {
+    uint8_t body[256];
+    size_t used = 4;
+    memset(body, 0, sizeof body);
+    body[0] = 2;
+    push_attr(body, &used, 9 | 0x8000, orig_attrs, orig_len);
+    push_attr(body, &used, 10 | 0x8000, reply_attrs, reply_len);
+    memset(out, 0, 16 + used);
+    uint32_t length = (uint32_t)(16 + used);
+    memcpy(out, &length, 4);
+    uint16_t type = 0x0100;
+    memcpy(out + 4, &type, 2);
+    memcpy(out + 8, &seq, 4);
+    memcpy(out + 16, body, used);
+    return length;
+}
+
+static size_t repeat_packets_message(uint8_t *out, uint32_t seq,
+                                     uint64_t orig, uint64_t reply) {
+    uint8_t attrs[32];
+    size_t used = 0;
+    uint8_t bad[4] = {0, 0, 0, 1};
+    uint8_t wide[8];
+    push_attr(attrs, &used, 1, bad, sizeof bad);
+    be64(wide, orig);
+    push_attr(attrs, &used, 1, wide, sizeof wide);
+    uint8_t reply_attrs[16];
+    size_t reply_used = 0;
+    uint8_t narrow[4] = {
+        (uint8_t)(reply >> 24), (uint8_t)(reply >> 16),
+        (uint8_t)(reply >> 8), (uint8_t)reply};
+    push_attr(reply_attrs, &reply_used, 3, narrow, sizeof narrow);
+    return mixed_message(out, seq, attrs, used, reply_attrs, reply_used);
+}
+
+static size_t packets32_first_message(uint8_t *out, uint32_t seq,
+                                      uint64_t orig, uint64_t reply) {
+    uint8_t attrs[32];
+    size_t used = 0;
+    uint8_t narrow[4] = {
+        (uint8_t)(orig >> 24), (uint8_t)(orig >> 16),
+        (uint8_t)(orig >> 8), (uint8_t)orig};
+    uint8_t wide[8];
+    push_attr(attrs, &used, 3, narrow, sizeof narrow);
+    be64(wide, 999);
+    push_attr(attrs, &used, 1, wide, sizeof wide);
+    uint8_t reply_attrs[16];
+    size_t reply_used = 0;
+    be64(wide, reply);
+    push_attr(reply_attrs, &reply_used, 1, wide, sizeof wide);
+    return mixed_message(out, seq, attrs, used, reply_attrs, reply_used);
+}
+
 static size_t error_message(uint8_t *out, uint32_t seq, int32_t errno_value) {
     uint32_t length = 20;
     memset(out, 0, length);
@@ -93,5 +148,9 @@ int main(void) {
     run("reply", buffer, length, 7);
     length = error_message(buffer, 7, 0);
     run("ack", buffer, length, 7);
+    length = repeat_packets_message(buffer, 7, 22, 25);
+    run("repeat_packets", buffer, length, 7);
+    length = packets32_first_message(buffer, 7, 22, 25);
+    run("packets32_first", buffer, length, 7);
     return 0;
 }

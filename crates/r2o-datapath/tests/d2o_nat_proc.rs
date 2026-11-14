@@ -11,6 +11,7 @@ fn proc_nat_matches_d2o_c_on_shared_conntrack_vectors() {
     let oracle = std::env::var_os("D2O_NAT_ORACLE").expect("D2O_NAT_ORACLE is set by script");
     let main_table = manifest.join("tests/fixtures/d2o_nat_conntrack.txt");
     let duplicate_table = manifest.join("tests/fixtures/d2o_nat_conntrack_duplicate.txt");
+    let quirk_table = manifest.join("tests/fixtures/d2o_nat_conntrack_quirk.txt");
     let absent_table = std::env::temp_dir().join(format!(
         "r2o-nat-absent-{}-{}",
         std::process::id(),
@@ -29,6 +30,7 @@ fn proc_nat_matches_d2o_c_on_shared_conntrack_vectors() {
         let table = match fields[0] {
             "main" => &main_table,
             "duplicate" => &duplicate_table,
+            "quirk" => &quirk_table,
             "absent" => &absent_table,
             other => panic!("unknown fixture {other}"),
         };
@@ -72,7 +74,7 @@ fn proc_nat_matches_d2o_c_on_shared_conntrack_vectors() {
     }
 
     println!("C/Rust proc NAT matched for {compared} shared vectors");
-    assert_eq!(compared, 10);
+    assert_eq!(compared, 16);
 }
 
 fn format_lookup(result: R2oProcNatLookup) -> String {

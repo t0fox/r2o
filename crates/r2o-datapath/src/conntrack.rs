@@ -250,6 +250,16 @@ pub fn r2o_ct_counters_parse(bytes: &[u8], sequence: u32) -> R2oConntrackCounter
     }
 }
 
+/// C `ct_query` (`d2kd.c:561-571`): предупреждение о выключенном
+/// `nf_conntrack_acct` — один раз за процесс.
+fn r2o_note_missing_accounting(parsed: R2oConntrackInfoParse, told: &mut bool) -> bool {
+    if parsed == R2oConntrackInfoParse::NoCounters && !*told {
+        *told = true;
+        return true;
+    }
+    false
+}
+
 pub fn decode_info(bytes: &[u8], sequence: u32) -> Option<R2oConntrackInfo> {
     decode_entry(bytes, sequence).and_then(|entry| entry.info)
 }
@@ -329,20 +339,37 @@ fn parse_reply_nat_source(attributes: &[u8]) -> Result<Option<R2oConntrackNatSou
 }
 
 fn parse_counter(attributes: &[u8]) -> Option<u64> {
-    if let Some(value) = find_attribute(attributes, CTA_COUNTERS_PACKETS).ok()? {
-        if value.len() == 8 {
-            return Some(u64::from_be_bytes(value.try_into().ok()?));
+    // C `counter` (`datapath/ctq.c:84-96`): один последовательный проход.
+    // Атрибут PACKETS неверной ширины не ошибка — поиск продолжается, и
+    // первый же подходящий PACKETS/PACKETS32 решает исход. Поэтому повторный
+    // PACKETS правильной ширины находится, а PACKETS32, стоящий раньше
+    // PACKETS, выигрывает (в C порядок атрибутов значим).
+    let mut offset = 0_usize;
+    while offset + NLA_HEADER_LEN <= attributes.len() {
+        let header = attributes.get(offset..offset + NLA_HEADER_LEN)?;
+        let length = usize::from(u16::from_ne_bytes([header[0], header[1]]));
+        let kind = u16::from_ne_bytes([header[2], header[3]]) & NLA_TYPE_MASK;
+        if length < NLA_HEADER_LEN || length > attributes.len() - offset {
+            return None;
         }
-    }
-    find_attribute(attributes, CTA_COUNTERS32_PACKETS)
-        .ok()?
-        .and_then(|value| {
-            if value.len() != 4 {
-                return None;
+        let value = &attributes[offset + NLA_HEADER_LEN..offset + length];
+        match kind {
+            CTA_COUNTERS_PACKETS if value.len() == 8 => {
+                return Some(u64::from_be_bytes(value.try_into().ok()?));
             }
-            let bytes: [u8; 4] = value.try_into().ok()?;
-            Some(u64::from(u32::from_be_bytes(bytes)))
-        })
+            CTA_COUNTERS32_PACKETS if value.len() == 4 => {
+                let bytes: [u8; 4] = value.try_into().ok()?;
+                return Some(u64::from(u32::from_be_bytes(bytes)));
+            }
+            _ => {}
+        }
+        let step = align4(length)?;
+        if step > attributes.len() - offset {
+            return None;
+        }
+        offset += step;
+    }
+    None
 }
 
 fn find_attribute(attributes: &[u8], wanted: u16) -> Result<Option<&[u8]>, ()> {
@@ -384,6 +411,9 @@ fn push_attribute(message: &mut Vec<u8>, kind: u16, value: &[u8]) {
 pub struct R2oConntrackClient {
     fd: RawFd,
     sequence: u32,
+    /// C `ct_link.told_acct`: предупреждение о выключенном nf_conntrack_acct
+    /// печатается один раз на процесс.
+    told_accounting: bool,
 }
 
 impl R2oConntrackClient {
@@ -400,7 +430,11 @@ impl R2oConntrackClient {
         if fd < 0 {
             return None;
         }
-        let client = Self { fd, sequence: 1 };
+        let client = Self {
+            fd,
+            sequence: 1,
+            told_accounting: false,
+        };
         let mut address: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
         address.nl_family = libc::AF_NETLINK as u16;
         let bound = unsafe {
@@ -438,7 +472,14 @@ impl R2oConntrackClient {
         if self.send(&request).is_err() {
             return R2oConntrackInfoParse::Error;
         }
-        self.receive_info_parse(sequence)
+        let parsed = self.receive_info_parse(sequence);
+        if r2o_note_missing_accounting(parsed, &mut self.told_accounting) {
+            eprintln!(
+                "r2o-datapath: в записях conntrack нет счётчиков (nf_conntrack_acct выключен) — \
+                 детекторы тишины QUIC и TCP ничего не видят"
+            );
+        }
+        parsed
     }
 
     pub fn query_entry(&mut self, tuple: &R2oConntrackTuple) -> Option<R2oConntrackEntry> {
@@ -712,12 +753,18 @@ mod tests {
     #[test]
     fn ct_info_parse_differential_matches_c() {
         let mut output = String::new();
-        let cases: [(&str, Vec<u8>, u32); 5] = [
+        let cases: [(&str, Vec<u8>, u32); 7] = [
             ("counters", ответ_conntrack_без_кортежа(7, 22, 25), 7),
             ("wrong_seq", ответ_conntrack_без_кортежа(7, 22, 25), 8),
             ("no_counters", ответ_conntrack_без_счётчиков(7), 7),
             ("reply", ошибка_conntrack(7, -2), 7),
             ("ack", ошибка_conntrack(7, 0), 7),
+            ("repeat_packets", ответ_с_повторным_packets(7, 22, 25), 7),
+            (
+                "packets32_first",
+                ответ_где_packets32_раньше_packets(7, 22, 25),
+                7,
+            ),
         ];
         for (name, buffer, sequence) in cases {
             let parsed = r2o_ct_info_parse(&buffer, sequence);
@@ -764,6 +811,25 @@ mod tests {
     }
 
     #[test]
+    fn предупреждение_о_счётчиках_печатается_один_раз_как_в_ct_query() {
+        let mut told = false;
+        assert!(super::r2o_note_missing_accounting(
+            R2oConntrackInfoParse::NoCounters,
+            &mut told
+        ));
+        assert!(!super::r2o_note_missing_accounting(
+            R2oConntrackInfoParse::NoCounters,
+            &mut told
+        ));
+        let mut fresh = false;
+        assert!(!super::r2o_note_missing_accounting(
+            R2oConntrackInfoParse::Error,
+            &mut fresh
+        ));
+        assert!(!fresh);
+    }
+
+    #[test]
     fn ct_reply_errno_matches_c() {
         let message = ответ_conntrack_без_кортежа(7, 22, 25);
         assert_eq!(r2o_ct_reply_errno(&message, 7), Some(0));
@@ -778,12 +844,18 @@ mod tests {
     #[test]
     fn ct_counters_parse_differential_matches_c() {
         let mut output = String::new();
-        let cases: [(&str, Vec<u8>, u32); 5] = [
+        let cases: [(&str, Vec<u8>, u32); 7] = [
             ("counters", ответ_conntrack_без_кортежа(7, 22, 25), 7),
             ("wrong_seq", ответ_conntrack_без_кортежа(7, 22, 25), 8),
             ("no_counters", ответ_conntrack_без_счётчиков(7), 7),
             ("reply", ошибка_conntrack(7, -2), 7),
             ("ack", ошибка_conntrack(7, 0), 7),
+            ("repeat_packets", ответ_с_повторным_packets(7, 22, 25), 7),
+            (
+                "packets32_first",
+                ответ_где_packets32_раньше_packets(7, 22, 25),
+                7,
+            ),
         ];
         for (name, buffer, sequence) in cases {
             let parsed = super::r2o_ct_counters_parse(&buffer, sequence);
@@ -1000,6 +1072,81 @@ mod tests {
             атрибут(&mut protocol, 1 | 0x8000, &tcp);
             атрибут(&mut body, 4 | 0x8000, &protocol);
         }
+        let mut message = vec![0; 16];
+        message.extend_from_slice(&body);
+        let message_len = message.len() as u32;
+        message[..4].copy_from_slice(&message_len.to_ne_bytes());
+        message[4..6].copy_from_slice(&0x0100_u16.to_ne_bytes());
+        message[8..12].copy_from_slice(&sequence.to_ne_bytes());
+        message
+    }
+
+    fn ответ_с_повторным_packets(
+        sequence: u32,
+        original: u64,
+        reply: u64,
+    ) -> Vec<u8> {
+        // C `counter`: PACKETS шириной 4 пропускается, находится следующий
+        // PACKETS шириной 8.
+        let mut original_counter = Vec::new();
+        атрибут(&mut original_counter, CTA_COUNTERS_PACKETS, &[0, 0, 0, 1]);
+        атрибут(
+            &mut original_counter,
+            CTA_COUNTERS_PACKETS,
+            &original.to_be_bytes(),
+        );
+        let mut reply_counter = Vec::new();
+        атрибут(
+            &mut reply_counter,
+            CTA_COUNTERS32_PACKETS,
+            &(reply as u32).to_be_bytes(),
+        );
+        ответ_с_готовыми_счётчиками(
+            sequence,
+            &original_counter,
+            &reply_counter,
+        )
+    }
+
+    fn ответ_где_packets32_раньше_packets(
+        sequence: u32,
+        original: u64,
+        reply: u64,
+    ) -> Vec<u8> {
+        // C `counter` возвращает первый подходящий счётчик, поэтому PACKETS32
+        // выигрывает у стоящего позже PACKETS.
+        let mut original_counter = Vec::new();
+        атрибут(
+            &mut original_counter,
+            CTA_COUNTERS32_PACKETS,
+            &(original as u32).to_be_bytes(),
+        );
+        атрибут(
+            &mut original_counter,
+            CTA_COUNTERS_PACKETS,
+            &999_u64.to_be_bytes(),
+        );
+        let mut reply_counter = Vec::new();
+        атрибут(
+            &mut reply_counter,
+            CTA_COUNTERS_PACKETS,
+            &reply.to_be_bytes(),
+        );
+        ответ_с_готовыми_счётчиками(
+            sequence,
+            &original_counter,
+            &reply_counter,
+        )
+    }
+
+    fn ответ_с_готовыми_счётчиками(
+        sequence: u32,
+        original_counter: &[u8],
+        reply_counter: &[u8],
+    ) -> Vec<u8> {
+        let mut body = vec![2, 0, 0, 0];
+        атрибут(&mut body, CTA_COUNTERS_ORIG | 0x8000, original_counter);
+        атрибут(&mut body, CTA_COUNTERS_REPLY | 0x8000, reply_counter);
         let mut message = vec![0; 16];
         message.extend_from_slice(&body);
         let message_len = message.len() as u32;
