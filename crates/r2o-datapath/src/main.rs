@@ -34,7 +34,8 @@ mod app {
     use r2o_datapath::r2o_quic::R2oQuicSessions;
     use r2o_datapath::r2o_route::{
         R2O_ROUTE_REFRESH_INTERVAL, R2O_ROUTE_SETTLE_INTERVAL, R2oRouteFamily, R2oRouteGate,
-        R2oRouteMonitor, R2oRoutePacket, R2oRoutePolicy, R2oRoutedFlows,
+        R2oRouteMonitor, R2oRoutePacket, R2oRoutePolicy, R2oRouteRefreshStatus, R2oRoutedFlows,
+        R2oRoutesChange, R2oRoutesRefreshLog, r2o_routes_change_line, r2o_routes_quiet_line,
     };
     use r2o_datapath::r2o_udp_hold::{
         R2oUdpDeferredEnqueueError, R2oUdpDeferredResends, R2oUdpDeferredVerdicts,
@@ -1134,6 +1135,30 @@ mod app {
         );
     }
 
+    /// C `routes_refresh` (`d2kd.c:300-368`): печать переходов и quiet-строки
+    /// смен не чаще раза в 600 с.
+    fn r2o_log_routes_refresh(
+        log: &mut R2oRoutesRefreshLog,
+        gate: &R2oRouteGate,
+        status: &R2oRouteRefreshStatus,
+        now: Instant,
+    ) {
+        for change in log.r2o_observe(status, now) {
+            if let R2oRoutesChange::Changed { changes } = change {
+                let rules = gate.r2o_describe_rules(512);
+                let oifs4 = gate.r2o_describe_default_ifindices(R2oRouteFamily::Ipv4, 128);
+                let oifs6 = gate.r2o_describe_default_ifindices(R2oRouteFamily::Ipv6, 128);
+                eprintln!(
+                    "r2o-datapath: {}",
+                    r2o_routes_quiet_line(&rules, &oifs4, &oifs6, changes)
+                );
+            } else if let Some(line) = r2o_routes_change_line(change, status.first_error.as_deref())
+            {
+                eprintln!("r2o-datapath: {line}");
+            }
+        }
+    }
+
     fn r2o_log_routed_stats(routed_flows: u64) {
         eprintln!(
             "r2o-datapath: потоков клиентов с меткой маршрутизации (ядром, без плана): {routed_flows}"
@@ -1458,14 +1483,14 @@ mod app {
         }
         let mut route_monitor = R2oRouteMonitor::default();
         let mut route_watch_notifications = 0_u64;
+        let mut routes_log = R2oRoutesRefreshLog::default();
         if let Err(error) = route_monitor.r2o_open_watch() {
             eprintln!(
                 "r2o-datapath: уведомления rtnetlink недоступны ({error}); оставляю опрос раз в 30 секунд"
             );
         }
-        for error in route_monitor.r2o_refresh(&mut route_gate) {
-            eprintln!("r2o-datapath: не удалось обновить маршрутное состояние: {error}");
-        }
+        let (_, route_status) = route_monitor.r2o_refresh_with_status(&mut route_gate);
+        r2o_log_routes_refresh(&mut routes_log, &route_gate, &route_status, Instant::now());
         if let (Some(raw), Some(ifindices)) = (raw.as_ref(), route_gate.r2o_egress_ifindices())
             && let Some(maxlen) = raw.r2o_adopt_egress(&ifindices)
         {
@@ -1923,9 +1948,8 @@ mod app {
             }
             let route_now = Instant::now();
             if route_now >= next_route_refresh {
-                for error in route_monitor.r2o_refresh(&mut route_gate) {
-                    eprintln!("r2o-datapath: не удалось обновить маршрутное состояние: {error}");
-                }
+                let (_, route_status) = route_monitor.r2o_refresh_with_status(&mut route_gate);
+                r2o_log_routes_refresh(&mut routes_log, &route_gate, &route_status, Instant::now());
                 if let (Some(raw), Some(ifindices)) =
                     (raw.as_ref(), route_gate.r2o_egress_ifindices())
                     && let Some(maxlen) = raw.r2o_adopt_egress(&ifindices)
@@ -2441,37 +2465,52 @@ mod app {
                                 } else {
                                     let first_udp_packet =
                                         udp_sessions.r2o_is_first_client_packet(bytes);
-                                    r2o_udp_decide_once_mode(
-                                        &mut udp_sessions,
-                                        &mut quic_sessions,
-                                        selected_plan,
-                                        bytes,
-                                        controller_probe,
-                                        || {
-                                            let decision = decide_with_tcp_session_mode(
-                                                &mut tcp_sessions,
-                                                selected_plan,
-                                                bytes,
-                                                &mut control,
-                                                &mut flow_journal,
-                                                &journal_origin,
-                                                controller_probe,
-                                                raw.as_ref().map_or(0, |raw| {
-                                                    raw.tls_route_segment_cap(bytes)
-                                                }),
-                                            );
-                                            let tcp_syn_ack_seen =
-                                                tcp_sessions.r2o_syn_ack_seen_for_packet(bytes);
-                                            guard_decision(
-                                                &mut conntrack_gate,
-                                                bytes,
-                                                decision,
-                                                selected_plan.id,
-                                                first_udp_packet,
-                                                tcp_syn_ack_seen,
-                                            )
-                                        },
-                                    )
+                                    if !conntrack_gate.r2o_preflight(bytes, first_udp_packet, false)
+                                    {
+                                        r2o_note_conntrack_refusal(
+                                            &mut tcp_sessions,
+                                            &name_plans,
+                                            &mut control,
+                                            &mut flow_journal,
+                                            &journal_origin,
+                                            bytes,
+                                            first_udp_packet,
+                                            controller_probe,
+                                        );
+                                        PacketDecision::Accept
+                                    } else {
+                                        r2o_udp_decide_once_mode(
+                                            &mut udp_sessions,
+                                            &mut quic_sessions,
+                                            selected_plan,
+                                            bytes,
+                                            controller_probe,
+                                            || {
+                                                let decision = decide_with_tcp_session_mode(
+                                                    &mut tcp_sessions,
+                                                    selected_plan,
+                                                    bytes,
+                                                    &mut control,
+                                                    &mut flow_journal,
+                                                    &journal_origin,
+                                                    controller_probe,
+                                                    raw.as_ref().map_or(0, |raw| {
+                                                        raw.tls_route_segment_cap(bytes)
+                                                    }),
+                                                );
+                                                let tcp_syn_ack_seen =
+                                                    tcp_sessions.r2o_syn_ack_seen_for_packet(bytes);
+                                                guard_decision(
+                                                    &mut conntrack_gate,
+                                                    bytes,
+                                                    decision,
+                                                    selected_plan.id,
+                                                    first_udp_packet,
+                                                    tcp_syn_ack_seen,
+                                                )
+                                            },
+                                        )
+                                    }
                                 }
                             }
                             HoldOutcome::Waiting => continue,
@@ -2511,23 +2550,6 @@ mod app {
                                 let decision = if options.mode == RuntimeMode::Observe {
                                     PacketDecision::Accept
                                 } else {
-                                    let decision = decide_with_tcp_session_mode(
-                                        &mut tcp_sessions,
-                                        name_plans
-                                            .select_with_quic_host_probe(
-                                                &packet,
-                                                None,
-                                                controller_probe,
-                                            )
-                                            .unwrap_or(&plan),
-                                        &packet,
-                                        &mut control,
-                                        &mut flow_journal,
-                                        &journal_origin,
-                                        controller_probe,
-                                        raw.as_ref()
-                                            .map_or(0, |raw| raw.tls_route_segment_cap(&packet)),
-                                    );
                                     let selected = name_plans
                                         .select_with_quic_host_probe(
                                             &packet,
@@ -2537,14 +2559,44 @@ mod app {
                                         .unwrap_or(&plan);
                                     let tcp_syn_ack_seen =
                                         tcp_sessions.r2o_syn_ack_seen_for_packet(&packet);
-                                    guard_decision(
-                                        &mut conntrack_gate,
+                                    if !conntrack_gate.r2o_preflight(
                                         &packet,
-                                        decision,
-                                        selected.id,
                                         false,
                                         tcp_syn_ack_seen,
-                                    )
+                                    ) {
+                                        r2o_note_conntrack_refusal(
+                                            &mut tcp_sessions,
+                                            &name_plans,
+                                            &mut control,
+                                            &mut flow_journal,
+                                            &journal_origin,
+                                            &packet,
+                                            false,
+                                            controller_probe,
+                                        );
+                                        PacketDecision::Accept
+                                    } else {
+                                        let decision = decide_with_tcp_session_mode(
+                                            &mut tcp_sessions,
+                                            selected,
+                                            &packet,
+                                            &mut control,
+                                            &mut flow_journal,
+                                            &journal_origin,
+                                            controller_probe,
+                                            raw.as_ref().map_or(0, |raw| {
+                                                raw.tls_route_segment_cap(&packet)
+                                            }),
+                                        );
+                                        guard_decision(
+                                            &mut conntrack_gate,
+                                            &packet,
+                                            decision,
+                                            selected.id,
+                                            false,
+                                            tcp_syn_ack_seen,
+                                        )
+                                    }
                                 };
                                 r2o_log_http_trace(
                                     &name_plans,
@@ -2596,23 +2648,6 @@ mod app {
                                 let decision = if options.mode == RuntimeMode::Observe {
                                     PacketDecision::Accept
                                 } else {
-                                    let decision = decide_with_tcp_session_mode(
-                                        &mut tcp_sessions,
-                                        name_plans
-                                            .select_with_quic_host_probe(
-                                                &packet,
-                                                None,
-                                                controller_probe,
-                                            )
-                                            .unwrap_or(&plan),
-                                        &packet,
-                                        &mut control,
-                                        &mut flow_journal,
-                                        &journal_origin,
-                                        controller_probe,
-                                        raw.as_ref()
-                                            .map_or(0, |raw| raw.tls_route_segment_cap(&packet)),
-                                    );
                                     let selected = name_plans
                                         .select_with_quic_host_probe(
                                             &packet,
@@ -2622,14 +2657,44 @@ mod app {
                                         .unwrap_or(&plan);
                                     let tcp_syn_ack_seen =
                                         tcp_sessions.r2o_syn_ack_seen_for_packet(&packet);
-                                    guard_decision(
-                                        &mut conntrack_gate,
+                                    if !conntrack_gate.r2o_preflight(
                                         &packet,
-                                        decision,
-                                        selected.id,
                                         false,
                                         tcp_syn_ack_seen,
-                                    )
+                                    ) {
+                                        r2o_note_conntrack_refusal(
+                                            &mut tcp_sessions,
+                                            &name_plans,
+                                            &mut control,
+                                            &mut flow_journal,
+                                            &journal_origin,
+                                            &packet,
+                                            false,
+                                            controller_probe,
+                                        );
+                                        PacketDecision::Accept
+                                    } else {
+                                        let decision = decide_with_tcp_session_mode(
+                                            &mut tcp_sessions,
+                                            selected,
+                                            &packet,
+                                            &mut control,
+                                            &mut flow_journal,
+                                            &journal_origin,
+                                            controller_probe,
+                                            raw.as_ref().map_or(0, |raw| {
+                                                raw.tls_route_segment_cap(&packet)
+                                            }),
+                                        );
+                                        guard_decision(
+                                            &mut conntrack_gate,
+                                            &packet,
+                                            decision,
+                                            selected.id,
+                                            false,
+                                            tcp_syn_ack_seen,
+                                        )
+                                    }
                                 };
                                 r2o_log_http_trace(
                                     &name_plans,
@@ -2664,27 +2729,42 @@ mod app {
                                 if options.mode == RuntimeMode::Observe {
                                     PacketDecision::Accept
                                 } else {
-                                    let decision = decide_with_tcp_session_mode(
-                                        &mut tcp_sessions,
-                                        selected_plan,
-                                        bytes,
-                                        &mut control,
-                                        &mut flow_journal,
-                                        &journal_origin,
-                                        controller_probe,
-                                        raw.as_ref()
-                                            .map_or(0, |raw| raw.tls_route_segment_cap(bytes)),
-                                    );
                                     let tcp_syn_ack_seen =
                                         tcp_sessions.r2o_syn_ack_seen_for_packet(bytes);
-                                    guard_decision(
-                                        &mut conntrack_gate,
-                                        bytes,
-                                        decision,
-                                        selected_plan.id,
-                                        false,
-                                        tcp_syn_ack_seen,
-                                    )
+                                    if !conntrack_gate.r2o_preflight(bytes, false, tcp_syn_ack_seen)
+                                    {
+                                        r2o_note_conntrack_refusal(
+                                            &mut tcp_sessions,
+                                            &name_plans,
+                                            &mut control,
+                                            &mut flow_journal,
+                                            &journal_origin,
+                                            bytes,
+                                            false,
+                                            controller_probe,
+                                        );
+                                        PacketDecision::Accept
+                                    } else {
+                                        let decision = decide_with_tcp_session_mode(
+                                            &mut tcp_sessions,
+                                            selected_plan,
+                                            bytes,
+                                            &mut control,
+                                            &mut flow_journal,
+                                            &journal_origin,
+                                            controller_probe,
+                                            raw.as_ref()
+                                                .map_or(0, |raw| raw.tls_route_segment_cap(bytes)),
+                                        );
+                                        guard_decision(
+                                            &mut conntrack_gate,
+                                            bytes,
+                                            decision,
+                                            selected_plan.id,
+                                            false,
+                                            tcp_syn_ack_seen,
+                                        )
+                                    }
                                 }
                             }
                             HoldOutcome::HttpResponse {
@@ -5079,6 +5159,54 @@ mod app {
         if let Err(error) = control.send_event(EVENT_APPLIED, &body) {
             eprintln!("r2o-datapath: событие APPLIED не отправлено: {error}");
         }
+    }
+
+    /// C `session.c:1402-1406`/`2501-2506`: `flow_tracked` не подтвердил
+    /// поток — план не применяется, оригинал идёт как есть, причина уходит
+    /// в журнал как REFUSED NONE.
+    fn r2o_note_conntrack_refusal(
+        sessions: &mut TcpSessions,
+        plans: &NamePlans,
+        control: &mut Option<ControlServer>,
+        flow_journal: &mut R2oFlowJournal,
+        journal_origin: &Instant,
+        packet: &[u8],
+        first_udp_packet: bool,
+        controller_probe: bool,
+    ) {
+        if controller_probe {
+            return;
+        }
+        let Some(key) = r2o_datapath::control::flow_journal_key_for_packet(packet) else {
+            return;
+        };
+        let shape = if let Some(shape) = plans.r2o_observed_tcp_shape(packet, false) {
+            if !sessions.r2o_mark_no_plan_refusal(packet) {
+                return;
+            }
+            shape
+        } else if first_udp_packet {
+            r2o_udp_client_shape(packet)
+        } else {
+            return;
+        };
+        let refused = RefusedEvent {
+            key,
+            code: r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_NONE,
+            plan_id: [0; 16],
+            trial_id: [0; 16],
+            client_shape: Some(shape),
+            execution_id: None,
+            binding: None,
+        };
+        r2o_refuse_coded(
+            control,
+            flow_journal,
+            journal_timestamp(journal_origin),
+            &refused,
+            Some("поток не ведётся conntrack — посылки уйдут мимо NAT"),
+            controller_probe,
+        );
     }
 
     fn r2o_note_tcp_no_plan_refusal(
