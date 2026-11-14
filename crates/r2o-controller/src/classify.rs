@@ -1529,8 +1529,9 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
     }
     if !options.full_detect_semantics && base.pass == 0 && base.errors == options.repeats {
         result.reason = format!(
-            "нет TCP до цели: ни один из {} опытов не состоялся",
-            options.repeats
+            "нет TCP до цели: ни один из {} {} не состоялся",
+            options.repeats,
+            probes_word(options.repeats)
         );
         result.verdict = Verdict::Unreachable;
         finish(&mut result, &options, start);
@@ -1562,8 +1563,10 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
             if confirm.errors > 0 {
                 result.verdict = Verdict::Flaky;
                 result.reason = format!(
-                    "подтверждение базы: {} из {} опытов не состоялись — ошибка транспорта, а не решение коробки",
-                    confirm.errors, CLEAR_CONFIRM_REPEATS
+                    "подтверждение базы: {} из {} {} не состоялись — ошибка транспорта, а не решение коробки",
+                    confirm.errors,
+                    CLEAR_CONFIRM_REPEATS,
+                    probes_word(CLEAR_CONFIRM_REPEATS)
                 );
                 finish(&mut result, &options, start);
                 return result;
@@ -1686,8 +1689,10 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
                 if measured.errors > 0 {
                     result.verdict = Verdict::Flaky;
                     result.reason = format!(
-                        "контроль другим именем: {} из {} опытов не состоялись — ошибка транспорта, а не решение коробки",
-                        measured.errors, options.repeats
+                        "контроль другим именем: {} из {} {} не состоялись — ошибка транспорта, а не решение коробки",
+                        measured.errors,
+                        options.repeats,
+                        probes_word(options.repeats)
                     );
                     finish(&mut result, &options, start);
                     return result;
@@ -1710,8 +1715,9 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
             if !options.full_detect_semantics && control_ok && base.unproven + one.unproven > 0 {
                 result.verdict = Verdict::Inconclusive;
                 result.reason = format!(
-                    "на триггер ответили не доказательством прохода ({} опытов из {}): алерт инжектируют и коробки, и серверы — вердикта нет",
+                    "на триггер ответили не доказательством прохода ({} {} из {}): алерт инжектируют и коробки, и серверы — вердикта нет",
                     base.unproven + one.unproven,
+                    probes_word(base.unproven + one.unproven),
                     options.repeats * 2
                 );
                 finish(&mut result, &options, start);
@@ -2189,6 +2195,19 @@ fn cross_check_tls12(result: &mut ClassifyResult, options: &ClassifyOptions, _po
         result,
         "покрытие старого приветствия TLS 1.2 НЕ ПРОВЕРЕНО: режим ещё не перенесён".into(),
     );
+}
+
+/// C `probes_word` (`core/sched.c:5191-5201`): русское склонение после числа.
+pub fn probes_word(n: usize) -> &'static str {
+    let t = n % 100;
+    if (11..=14).contains(&t) {
+        return "опытов";
+    }
+    match n % 10 {
+        1 => "опыт",
+        2..=4 => "опыта",
+        _ => "опытов",
+    }
 }
 
 fn finish(result: &mut ClassifyResult, options: &ClassifyOptions, start: Instant) {
@@ -3287,5 +3306,37 @@ mod qtrace_tests {
             super::seed_input(&empty, &target("", 0)),
             0x44bd_2bd4_73cc_f799
         );
+    }
+}
+
+#[cfg(test)]
+mod probes_word_tests {
+    use super::probes_word;
+
+    #[test]
+    fn probes_word_matches_c_declension() {
+        for (n, expected) in [
+            (0, "опытов"),
+            (1, "опыт"),
+            (2, "опыта"),
+            (3, "опыта"),
+            (4, "опыта"),
+            (5, "опытов"),
+            (10, "опытов"),
+            (11, "опытов"),
+            (12, "опытов"),
+            (13, "опытов"),
+            (14, "опытов"),
+            (15, "опытов"),
+            (21, "опыт"),
+            (22, "опыта"),
+            (25, "опытов"),
+            (101, "опыт"),
+            (111, "опытов"),
+            (112, "опытов"),
+            (121, "опыт"),
+        ] {
+            assert_eq!(probes_word(n), expected, "probes_word({n})");
+        }
     }
 }
