@@ -633,6 +633,158 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
+    fn d2o_handle_udp_trace() {
+        use crate::netlink::{R2O_NF_INET_LOCAL_IN, R2O_NF_INET_POST_ROUTING};
+        use crate::r2o_quic::R2oQuicSessions;
+
+        fn print_quic(
+            name: &str,
+            udp: &R2oUdpSessions,
+            exchanges: u64,
+            hellos: u64,
+            with_sni: u64,
+        ) {
+            println!(
+                "{name} flows={} refusals={} hellos={hellos} with_sni={with_sni} exchanges={exchanges}",
+                udp.stats().flows,
+                udp.stats().refusals
+            );
+        }
+
+        let client = ([192, 0, 2, 10], 50001);
+        let server = ([198, 51, 100, 20], 443);
+        let initial = include_bytes!("../../r2k-core/tests/fixtures/quic_v1_initial.bin");
+        let mut udp =
+            R2oUdpSessions::with_capacity(R2oFlowCapacity::from_requested(64).unwrap()).unwrap();
+        let mut quic = R2oQuicSessions::default();
+        let now = Instant::now();
+        let mut exchanges = 0;
+        fn feed(
+            udp: &mut R2oUdpSessions,
+            quic: &mut R2oQuicSessions,
+            exchanges: &mut u64,
+            now: Instant,
+            packet: &[u8],
+            hook: u8,
+        ) {
+            udp.r2o_observe_packet_at_hook(packet, now, Some(hook));
+            if let Some(hello) = quic.capture_hello_at_hook(packet, Some(hook)) {
+                udp.r2o_mark_hello_seen(packet, !hello.host.is_empty());
+            }
+            quic.observe_packet_at_hook(packet, now, Some(hook));
+            *exchanges += quic.take_udp_exchange_events().len() as u64;
+        }
+
+        let packet = r2o_stun_packet(client, server, initial);
+        feed(
+            &mut udp,
+            &mut quic,
+            &mut exchanges,
+            now,
+            &packet,
+            R2O_NF_INET_POST_ROUTING,
+        );
+        print_quic(
+            "Q1",
+            &udp,
+            exchanges,
+            udp.r2o_quic_hello_flows(),
+            udp.r2o_quic_hellos_with_sni(),
+        );
+        let response = r2o_stun_packet(server, client, b"resp");
+        feed(
+            &mut udp,
+            &mut quic,
+            &mut exchanges,
+            now,
+            &response,
+            R2O_NF_INET_LOCAL_IN,
+        );
+        print_quic(
+            "Q2",
+            &udp,
+            exchanges,
+            udp.r2o_quic_hello_flows(),
+            udp.r2o_quic_hellos_with_sni(),
+        );
+        feed(
+            &mut udp,
+            &mut quic,
+            &mut exchanges,
+            now,
+            &response,
+            R2O_NF_INET_LOCAL_IN,
+        );
+        print_quic(
+            "Q3",
+            &udp,
+            exchanges,
+            udp.r2o_quic_hello_flows(),
+            udp.r2o_quic_hellos_with_sni(),
+        );
+        let reversed =
+            r2o_stun_packet(([198, 51, 100, 20], 443), ([192, 0, 2, 10], 50002), initial);
+        feed(
+            &mut udp,
+            &mut quic,
+            &mut exchanges,
+            now,
+            &reversed,
+            R2O_NF_INET_LOCAL_IN,
+        );
+        print_quic(
+            "Q4",
+            &udp,
+            exchanges,
+            udp.r2o_quic_hello_flows(),
+            udp.r2o_quic_hellos_with_sni(),
+        );
+
+        let client = ([192, 0, 2, 10], 50000);
+        let server = ([198, 51, 100, 20], 50010);
+        let txid = [0x40; 12];
+        let request = r2o_stun_packet(client, server, &binding_request(txid));
+        let mut voice = R2oUdpSessions::new().unwrap();
+        voice.r2o_observe_packet_at_hook(&request, now, Some(R2O_NF_INET_POST_ROUTING));
+        voice.r2o_observe_stun_packet_at_hook(&request, now, Some(R2O_NF_INET_POST_ROUTING));
+        let response = r2o_stun_packet(server, client, &r2o_stun_response(txid));
+        voice.r2o_observe_packet_at_hook(&response, now, Some(R2O_NF_INET_LOCAL_IN));
+        voice.r2o_observe_stun_packet_at_hook(&response, now, Some(R2O_NF_INET_LOCAL_IN));
+        println!(
+            "V1 flows={} refusals={} exchanges={}",
+            voice.stats().flows,
+            voice.stats().refusals,
+            voice.session_exchanges()
+        );
+        voice.r2o_observe_packet_at_hook(&response, now, Some(R2O_NF_INET_LOCAL_IN));
+        voice.r2o_observe_stun_packet_at_hook(&response, now, Some(R2O_NF_INET_LOCAL_IN));
+        println!(
+            "V2 flows={} refusals={} exchanges={}",
+            voice.stats().flows,
+            voice.stats().refusals,
+            voice.session_exchanges()
+        );
+
+        let mut refusal =
+            R2oUdpSessions::with_capacity(R2oFlowCapacity::from_requested(64).unwrap()).unwrap();
+        for index in 0..60_u16 {
+            let packet = r2o_stun_packet(
+                ([192, 0, 2, 10], 20_000 + index),
+                ([198, 51, 100, 20], 50_010),
+                b"x",
+            );
+            refusal.r2o_observe_packet_at_hook(&packet, now, Some(R2O_NF_INET_POST_ROUTING));
+        }
+        println!(
+            "R1 flows={} refusals={} exchanges={}",
+            refusal.stats().flows,
+            refusal.stats().refusals,
+            refusal.session_exchanges()
+        );
+    }
+
+    #[test]
     fn r2o_udp_настраивает_ёмкость_и_отказывает_после_трёх_четвертей() {
         let capacity = R2oFlowCapacity::from_requested(64).unwrap();
         let mut sessions = R2oUdpSessions::with_capacity(capacity).unwrap();

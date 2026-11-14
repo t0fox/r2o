@@ -94,16 +94,19 @@ pub fn is_discord_ip_discovery_response(packet: &[u8], ssrc: &[u8; 4]) -> bool {
     {
         return false;
     }
-    let Some(address_end) = packet[8..72].iter().position(|byte| *byte == 0) else {
-        return false;
-    };
-    if address_end == 0 {
-        return false;
+    // C `is_discord_ip_discovery_response`: любая непустая комбинация
+    // цифр/`.`/`:` в 8..71, NUL пропускается; IPv4-разбор не требуется.
+    let mut nonzero = false;
+    for &byte in &packet[8..72] {
+        if byte == 0 {
+            continue;
+        }
+        nonzero = true;
+        if !(byte.is_ascii_digit() || byte == b'.' || byte == b':') {
+            return false;
+        }
     }
-    std::str::from_utf8(&packet[8..8 + address_end])
-        .ok()
-        .and_then(|text| text.parse::<std::net::Ipv4Addr>().ok())
-        .is_some()
+    nonzero
 }
 
 /// Распознать голосовой класс Discord, исключая обычный STUN вне проверенного

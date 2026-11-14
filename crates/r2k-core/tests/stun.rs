@@ -140,8 +140,46 @@ fn r2o_discovery_отвергает_чужой_ssrc_и_неверный_отве
 
     let mut r2o_no_terminator = r2o_valid;
     r2o_no_terminator[8..72].fill(b'1');
+    assert!(
+        is_discord_ip_discovery_response(&r2o_no_terminator, &[0x12, 0x34, 0x56, 0x78]),
+        "C принимает любую непустую последовательность цифр/./: без NUL"
+    );
+}
+
+#[test]
+fn r2o_discovery_повторяет_c_для_двоеточий_точек_и_мусора() {
+    let valid = r2o_discovery_response();
+    for (index, text) in [
+        (0, b"::".as_slice()),
+        (1, b"...".as_slice()),
+        (2, b"1.2.3.4:443".as_slice()),
+        (3, b"1.2.3.4\0::".as_slice()),
+    ] {
+        let mut packet = valid.clone();
+        packet[8..72].fill(0);
+        packet[8..8 + text.len()].copy_from_slice(text);
+        assert!(
+            is_discord_ip_discovery_response(&packet, &[0x12, 0x34, 0x56, 0x78]),
+            "case {index}: C принимает {text:?}"
+        );
+    }
+    for (index, text) in [
+        (0, b"1.2.3.4\x01".as_slice()),
+        (1, b"abc".as_slice()),
+        (2, b"1.2.3.4 tail".as_slice()),
+    ] {
+        let mut packet = valid.clone();
+        packet[8..72].fill(0);
+        packet[8..8 + text.len()].copy_from_slice(text);
+        assert!(
+            !is_discord_ip_discovery_response(&packet, &[0x12, 0x34, 0x56, 0x78]),
+            "case {index}: C отвергает {text:?}"
+        );
+    }
+    let mut empty = valid;
+    empty[8..72].fill(0);
     assert!(!is_discord_ip_discovery_response(
-        &r2o_no_terminator,
-        &[0x12, 0x34, 0x56, 0x78],
+        &empty,
+        &[0x12, 0x34, 0x56, 0x78]
     ));
 }
