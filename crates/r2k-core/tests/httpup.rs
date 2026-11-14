@@ -1,11 +1,115 @@
 use r2k_core::httpup::{
-    portal_location, portal_response, redirect_https, request_host_range, request_safe,
-    request_target,
+    R2oHttpRequestStream, portal_location, portal_response, redirect_https, request_host_range,
+    request_safe, request_target,
 };
 
 const REQUEST: &[u8] =
     b"GET /forum/index.php?q=1 HTTP/1.1\r\nHost: RuTracker.org:80\r\nConnection: close\r\n\r\n";
 const PORTAL: &[u8] = b"HTTP/1.1 302 Found\r\nLocation: http://lawfilter.ertelecom.ru/deny?id=7\r\nContent-Length: 0\r\n\r\n";
+
+#[test]
+fn http_request_stream_differential_matches_c() {
+    fn dump(output: &mut String, label: &str, stream: &R2oHttpRequestStream) {
+        output.push_str(&format!(
+            "{label} start={} next={} head={} end={} length={} invalid={} hd={} past={}\n",
+            stream.start,
+            stream.next,
+            stream.head_len,
+            stream.end,
+            stream.length,
+            u8::from(stream.invalid),
+            u8::from(stream.header_done),
+            u8::from(stream.past_end)
+        ));
+    }
+
+    let mut output = String::new();
+    {
+        let mut stream = R2oHttpRequestStream::new(1000);
+        stream.feed(
+            1000,
+            b"GET / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 3\r\n\r\n",
+        );
+        dump(&mut output, "simple", &stream);
+        stream.feed(stream.next, b"abcd");
+        dump(&mut output, "past_end", &stream);
+    }
+    {
+        let mut stream = R2oHttpRequestStream::new(2000);
+        stream.feed(2000, b"GET / HTTP/1.1\r\nHost: ex");
+        dump(&mut output, "split1", &stream);
+        stream.feed(stream.next, b"ample.com\r\nContent-Length: 0\r\n\r\n");
+        dump(&mut output, "split2", &stream);
+    }
+    for (label, sequence, request) in [
+        (
+            "no_host",
+            3000,
+            &b"GET / HTTP/1.1\r\nContent-Length: 0\r\n\r\n"[..],
+        ),
+        (
+            "two_hosts",
+            4000,
+            &b"GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n"[..],
+        ),
+        (
+            "te",
+            5000,
+            &b"GET / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n"[..],
+        ),
+        (
+            "upgrade",
+            6000,
+            &b"GET / HTTP/1.1\r\nHost: a\r\nUpgrade: h2c\r\n\r\n"[..],
+        ),
+        (
+            "duplicate_cl",
+            7000,
+            &b"GET / HTTP/1.1\r\nHost: a\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\n"[..],
+        ),
+        (
+            "bad_cl",
+            8000,
+            &b"GET / HTTP/1.1\r\nHost: a\r\nContent-Length: 1x\r\n\r\n"[..],
+        ),
+        (
+            "control",
+            9000,
+            &b"GET / HTTP/1.1\r\nHost: a\r\nX: \x01\r\n\r\n"[..],
+        ),
+    ] {
+        let mut stream = R2oHttpRequestStream::new(sequence);
+        stream.feed(sequence, request);
+        dump(&mut output, label, &stream);
+    }
+    {
+        let mut stream = R2oHttpRequestStream::new(10_000);
+        stream.feed(10_000, b"GET / HTTP/1.1\r\nHost: a\r\n\r\n");
+        let old = stream.start;
+        stream.feed(old, b"0123456789");
+        dump(&mut output, "old_repeat", &stream);
+        stream.feed(stream.next.wrapping_add(5), b"x");
+        dump(&mut output, "gap", &stream);
+    }
+
+    if let Ok(path) = std::env::var("R2O_HTTP_REQUEST_STREAM_DIFF_OUTPUT") {
+        std::fs::write(path, &output).unwrap();
+    }
+    assert!(
+        output.contains(
+            "simple start=1000 next=1056 head=56 end=1059 length=3 invalid=0 hd=1 past=0\n"
+        )
+    );
+    assert!(
+        output.contains(
+            "split2 start=2000 next=2056 head=56 end=2056 length=0 invalid=0 hd=1 past=0\n"
+        )
+    );
+    assert!(
+        output
+            .contains("no_host start=3000 next=3037 head=0 end=0 length=0 invalid=1 hd=0 past=0\n")
+    );
+}
 
 #[test]
 fn accepts_only_safe_bodyless_origin_form_get_and_head() {

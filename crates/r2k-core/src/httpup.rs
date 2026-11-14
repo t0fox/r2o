@@ -23,6 +23,196 @@ pub struct R2oHttpPlanRequest {
     pub end_offset: Option<usize>,
 }
 
+/// C `d2k_http_request_stream` (`datapath/include/d2k_http_request_stream.h`):
+/// инкрементальный разбор заголовка запроса без хранения значений.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct R2oHttpRequestStream {
+    pub start: u32,
+    pub next: u32,
+    pub head_len: u32,
+    pub end: u32,
+    pub length: u64,
+    first: bool,
+    cr: bool,
+    line: bool,
+    value: bool,
+    field: bool,
+    name_len: u8,
+    cl_seen: u8,
+    digits: u8,
+    trailing: u8,
+    hosts: u8,
+    pub invalid: bool,
+    pub header_done: bool,
+    pub past_end: bool,
+    name: [u8; 18],
+}
+
+impl R2oHttpRequestStream {
+    pub const fn new(sequence: u32) -> Self {
+        Self {
+            start: sequence,
+            next: sequence,
+            head_len: 0,
+            end: 0,
+            length: 0,
+            first: true,
+            cr: false,
+            line: false,
+            value: false,
+            field: false,
+            name_len: 0,
+            cl_seen: 0,
+            digits: 0,
+            trailing: 0,
+            hosts: 0,
+            invalid: false,
+            header_done: false,
+            past_end: false,
+            name: [0; 18],
+        }
+    }
+
+    fn finish_line(&mut self) {
+        if self.first {
+            self.first = false;
+        } else if !self.line {
+            let end = u64::from(self.next.wrapping_sub(self.start)) + self.length;
+            if self.hosts != 1 || end > 0x7fff_ffff {
+                self.invalid = true;
+                return;
+            }
+            self.header_done = true;
+            self.head_len = self.next.wrapping_sub(self.start);
+            self.end = self.start.wrapping_add(end as u32);
+        } else if !self.value || self.field && self.digits == 0 {
+            self.invalid = true;
+        }
+        self.line = false;
+        self.value = false;
+        self.field = false;
+        self.name_len = 0;
+        self.digits = 0;
+        self.trailing = 0;
+    }
+
+    /// C `d2k_http_request_stream_feed`: только непрерывные байты; полностью
+    /// старый повтор игнорируется, дыра/частичное перекрытие — invalid.
+    pub fn feed(&mut self, sequence: u32, bytes: &[u8]) {
+        if self.invalid || bytes.is_empty() {
+            return;
+        }
+        if bytes.len() > 0x7fff_ffff {
+            self.invalid = true;
+            return;
+        }
+        if sequence != self.next {
+            let old_distance = sequence.wrapping_sub(self.next) as i32;
+            let end_distance = sequence
+                .wrapping_add(bytes.len() as u32)
+                .wrapping_sub(self.next) as i32;
+            if old_distance < 0 && end_distance <= 0 {
+                return;
+            }
+            self.invalid = true;
+            return;
+        }
+        for &byte in bytes {
+            self.next = self.next.wrapping_add(1);
+            if self.next.wrapping_sub(self.start) > 0x7fff_ffff {
+                self.invalid = true;
+                return;
+            }
+            if self.header_done {
+                if self.next.wrapping_sub(self.end) as i32 > 0 {
+                    self.past_end = true;
+                }
+                continue;
+            }
+            if self.cr {
+                self.cr = false;
+                if byte != b'\n' {
+                    self.invalid = true;
+                    return;
+                }
+                self.finish_line();
+                if self.invalid {
+                    return;
+                }
+                continue;
+            }
+            if byte == b'\r' {
+                self.cr = true;
+                continue;
+            }
+            if byte == b'\n' || byte == 0x7f || byte < 0x20 && byte != b'\t' {
+                self.invalid = true;
+                return;
+            }
+            self.line = true;
+            if self.first {
+                continue;
+            }
+            if !self.value {
+                if byte == b':' {
+                    self.value = true;
+                    if self.name_len == 14 && &self.name[..14] == b"content-length" {
+                        self.cl_seen = self.cl_seen.saturating_add(1);
+                        if self.cl_seen > 1 {
+                            self.invalid = true;
+                            return;
+                        }
+                        self.field = true;
+                    } else if (self.name_len == 17 && &self.name[..17] == b"transfer-encoding")
+                        || (self.name_len == 7 && &self.name[..7] == b"upgrade")
+                    {
+                        self.invalid = true;
+                        return;
+                    } else if self.name_len == 4 && &self.name[..4] == b"host" {
+                        self.hosts = self.hosts.saturating_add(1);
+                        if self.hosts > 1 {
+                            self.invalid = true;
+                            return;
+                        }
+                    } else if self.name_len == 0 {
+                        self.invalid = true;
+                        return;
+                    }
+                } else {
+                    let token = byte.is_ascii_lowercase()
+                        || byte.is_ascii_uppercase()
+                        || byte.is_ascii_digit()
+                        || b"!#$%&'*+-.^_`|~".contains(&byte);
+                    if !token {
+                        self.invalid = true;
+                        return;
+                    }
+                    if usize::from(self.name_len) < self.name.len() {
+                        self.name[usize::from(self.name_len)] = if byte.is_ascii_uppercase() {
+                            byte + 32
+                        } else {
+                            byte
+                        };
+                        self.name_len += 1;
+                    }
+                }
+            } else if self.field {
+                if byte == b' ' || byte == b'\t' {
+                    if self.digits != 0 {
+                        self.trailing = 1;
+                    }
+                } else if byte.is_ascii_digit() && self.trailing == 0 && self.digits < 10 {
+                    self.digits += 1;
+                    self.length = self.length * 10 + u64::from(byte - b'0');
+                } else {
+                    self.invalid = true;
+                    return;
+                }
+            }
+        }
+    }
+}
+
 /// Последовательные HTTP-запросы одного TCP-потока с fail-open при потере границы.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct R2oHttpRequestSequence {
@@ -30,6 +220,8 @@ pub struct R2oHttpRequestSequence {
     next: Option<u32>,
     checked: bool,
     disabled: bool,
+    stream: Option<R2oHttpRequestStream>,
+    stream_later: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,6 +258,8 @@ impl R2oHttpRequestSequence {
             next: None,
             checked: false,
             disabled: false,
+            stream: None,
+            stream_later: false,
         }
     }
 
@@ -80,6 +274,13 @@ impl R2oHttpRequestSequence {
     fn candidate_state(&mut self, sequence: u32, payload_len: usize) -> R2oHttpRequestCandidate {
         if self.disabled {
             return R2oHttpRequestCandidate::Ignored;
+        }
+        if self.stream.is_some() {
+            return if self.stream_later {
+                R2oHttpRequestCandidate::Later
+            } else {
+                R2oHttpRequestCandidate::First
+            };
         }
         if !self.checked {
             return if self.first == Some(sequence) {
@@ -124,15 +325,67 @@ impl R2oHttpRequestSequence {
         ) {
             return R2oHttpRequestObservation::Ignored;
         }
-        let Some(request) = r2o_http_plan_request(payload) else {
+        if let Some(mut stream) = self.stream.take() {
+            stream.feed(sequence, payload);
+            if stream.invalid {
+                self.first = None;
+                self.next = None;
+                self.checked = true;
+                self.disabled = true;
+                return if candidate == R2oHttpRequestCandidate::Later {
+                    R2oHttpRequestObservation::Unaligned
+                } else {
+                    R2oHttpRequestObservation::Ignored
+                };
+            }
+            if !stream.header_done {
+                self.stream = Some(stream);
+                return R2oHttpRequestObservation::Ignored;
+            }
+            let aligned = !stream.past_end;
             self.first = None;
-            self.next = None;
             self.checked = true;
-            self.disabled = true;
-            return if candidate == R2oHttpRequestCandidate::Later {
-                R2oHttpRequestObservation::Unaligned
-            } else {
-                R2oHttpRequestObservation::Ignored
+            self.next = aligned.then_some(stream.end);
+            if !aligned {
+                self.disabled = true;
+            }
+            return R2oHttpRequestObservation::Request {
+                later: self.stream_later,
+                end_known: true,
+                aligned,
+            };
+        }
+        let Some(request) = r2o_http_plan_request(payload) else {
+            let mut stream = R2oHttpRequestStream::new(sequence);
+            stream.feed(sequence, payload);
+            if stream.invalid {
+                self.first = None;
+                self.next = None;
+                self.checked = true;
+                self.disabled = true;
+                return if candidate == R2oHttpRequestCandidate::Later {
+                    R2oHttpRequestObservation::Unaligned
+                } else {
+                    R2oHttpRequestObservation::Ignored
+                };
+            }
+            if !stream.header_done {
+                self.first = None;
+                self.stream = Some(stream);
+                self.stream_later = candidate == R2oHttpRequestCandidate::Later;
+                return R2oHttpRequestObservation::Ignored;
+            }
+            let aligned = !stream.past_end;
+            self.first = None;
+            self.checked = true;
+            self.next = aligned.then_some(stream.end);
+            if !aligned {
+                self.disabled = true;
+            }
+            return R2oHttpRequestObservation::Request {
+                later: candidate == R2oHttpRequestCandidate::Later,
+                end_known: true,
+                aligned,
             };
         };
         self.first = None;

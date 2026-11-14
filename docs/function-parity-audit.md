@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 239 | 161 | 0 | 0 |
+| datapath-core | 400 | 242 | 158 | 0 | 0 |
 | datapath-plan | 183 | 177 | 6 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1321** | **661** | **0** | **0** |
+| **Итого** | **1982** | **1324** | **658** | **0** | **0** |
 
-Это не оценка паритета: 661 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 658 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1321 / P 661 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1324 / P 658 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 239 | 161 | 0 | 0 |
+| datapath-core | 400 | 242 | 158 | 0 | 0 |
 | datapath-plan | 183 | 177 | 6 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1321** | **661** | **0** | **0** |
+| **Итого** | **1982** | **1324** | **658** | **0** | **0** |
 
 
 ---
@@ -4952,9 +4952,9 @@ ECH, середина приветствия. R2O: `r2k-core/src/tls.rs`.
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
-| `d2k_http_request_stream_init` (inline) | 19–21 | 3 | обнулить состояние, `start=next=seq`, `first=1` | `httpup.rs:64 R2oHttpRequestSequence::new` | **P** | Rust хранит только `first/next/checked/disabled`, без `start/head_len/end/length`; это другой уровень (трекер границ, не байтовый парсер). |
-| `d2k_http_request_stream_line` (inline) | 22–30 | 9 | завершение строки: ровно один Host, конец ≤0x7fffffff, CL с цифрами | `httpup.rs:231 parse_plan_request`, `:219 parse_request`, `:382 find_crlf` | **P** | C завершает строку инкрементально и валидирует `hosts==1`, `length`, 10 цифр CL; Rust разбирает весь буфер и проверяет Host через `Option`, а `header_len/end_offset` вычисляет в конце. Промежуточного состояния строки нет. |
-| `d2k_http_request_stream_feed` (inline) | 31–86 | 56 | потоковый разбор заголовка: CRLF, token, Host, CL, TE/Upgrade, end/past_end/invalid | `httpup.rs:116 observe_detailed`, `:73 candidate`, `:263-316 boundary_known` | **P** | **Расхождения:** C отвергает TE/Upgrade (`invalid`), Rust только `end_offset=None`; C отвергает управляющие байты и неверные имена полей, Rust помечает лишь `boundary_known=false` и продолжает; C ограничивает CL 10 цифрами, Rust — `usize`; C не валидирует DNS-значение Host, Rust требует `valid_dns_host`, снимает `:80` и точку. C игнорирует полностью старые байты, Rust — `candidate_state`; обе стороны считают `end<=0x7fffffff`. Отдельного C/Rust differential для потока нет. |
+| `d2k_http_request_stream_init` (inline) | 19–21 | 3 | обнулить состояние, `start=next=seq`, `first=1` | `httpup.rs` `R2oHttpRequestStream::new` | E | Точный порт: `start=next=seq`, все флаги/поля обнулены, `first=true`. Используется в production `R2oHttpRequestSequence` при кросс-сегментном заголовке. |
+| `d2k_http_request_stream_line` (inline) | 22–30 | 9 | завершение строки: ровно один Host, конец ≤0x7fffffff, CL с цифрами | `httpup.rs` `R2oHttpRequestStream::finish_line` | E | Точный порт `hosts==1`, `end<=0x7fffffff`, `head_len/end`, сброс line/value/field/name_len/digits/trailing и `invalid` для пустого CL. |
+| `d2k_http_request_stream_feed` (inline) | 31–86 | 56 | потоковый разбор заголовка: CRLF, token, Host, CL, TE/Upgrade, end/past_end/invalid | `httpup.rs` `R2oHttpRequestStream::feed` | **E*** | C/Rust differential `scripts/test-http-request-stream-differential.sh` PASS: 13 состояний — простой запрос, тело за end (`past_end`), заголовок из двух сегментов, нет/два Host, TE, Upgrade, duplicate CL, битый CL, control-байт, старый повтор, дыра. **Ограничение:** не покрыты все 10-значные границы CL и частичное перекрытие; проверено на фиксированных сценариях. |
 
 ## datapath/include/d2k_http_response.h (6 inline-функций)
 
