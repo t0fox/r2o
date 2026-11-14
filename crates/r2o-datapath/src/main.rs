@@ -234,6 +234,55 @@ mod app {
         follow.r2o_mark(packet, now, at, receive_seq)
     }
 
+    static R2O_UDP_REFUSED_LOGGED: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
+    /// C `out_resend_failed` (`datapath/d2kd.c:651-671`): одна строка на
+    /// поток при постоянном отказе raw-переиздания, первые 16 потоков.
+    fn r2o_udp_resend_refused_line(
+        packet: &[u8],
+        error: &io::Error,
+        logged: u64,
+    ) -> Option<String> {
+        if logged > 16 {
+            return None;
+        }
+        let suffix = if logged == 16 {
+            " (дальше только счётчик)"
+        } else {
+            ""
+        };
+        let (source, destination, source_port, destination_port, family) =
+            match r2k_core::packet::PacketView::parse(packet) {
+                Some(view)
+                    if view.protocol == 17 && packet.len() >= view.l4_offset.saturating_add(4) =>
+                {
+                    let ports = &packet[view.l4_offset..view.l4_offset + 4];
+                    (
+                        view.src.as_ip_addr().to_string(),
+                        view.dst.as_ip_addr().to_string(),
+                        u16::from_be_bytes([ports[0], ports[1]]),
+                        u16::from_be_bytes([ports[2], ports[3]]),
+                        view.family,
+                    )
+                }
+                _ => ("?".to_string(), "?".to_string(), 0, 0, 0),
+            };
+        Some(format!(
+            "r2o-datapath: поток UDP {source}:{source_port} -> {destination}:{destination_port} \
+             (IPv{family}, {} байт): хвост не переиздан, отдаю ядру, поток дальше без \
+             переиздания: {error}{suffix}",
+            packet.len()
+        ))
+    }
+
+    fn r2o_log_udp_resend_refused(packet: &[u8], error: &io::Error) {
+        let logged = R2O_UDP_REFUSED_LOGGED.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Some(line) = r2o_udp_resend_refused_line(packet, error, logged) {
+            eprintln!("{line}");
+        }
+    }
+
     fn r2o_release_udp_batch(
         queue: &mut QueueSocket,
         raw: Option<&RawSocket>,
@@ -258,8 +307,10 @@ mod app {
             raw.is_some(),
             |packet| r2o_udp_packet_is_neutral(route_gate, probe_mark, packet.mark, &packet.packet),
             |packet| raw.expect("raw-сокет проверен").send_packet(&packet.packet),
-            |packet| {
-                follow.r2o_mark_failed(&packet.packet);
+            |packet, error| {
+                if follow.r2o_mark_failed(&packet.packet) {
+                    r2o_log_udp_resend_refused(&packet.packet, error);
+                }
             },
             |id, verdict| queue.send_verdict(id, verdict),
         );
@@ -4925,6 +4976,27 @@ mod app {
                 r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_QUEUE,
             ));
             assert_eq!(journal.count(), 2);
+        }
+
+        #[test]
+        fn udp_resend_refused_line_matches_c_limit_and_address() {
+            let packet = udp_packet([192, 0, 2, 1], [198, 51, 100, 2], 50_000, 443);
+            let error = io::Error::from_raw_os_error(libc::EACCES);
+            let line = super::r2o_udp_resend_refused_line(&packet, &error, 1).unwrap();
+            assert!(line.contains("192.0.2.1:50000 -> 198.51.100.2:443 (IPv4, 28 байт)"));
+            assert!(line.contains("Permission denied"));
+            assert!(!line.contains("дальше только счётчик"));
+            assert!(
+                super::r2o_udp_resend_refused_line(&packet, &error, 16)
+                    .unwrap()
+                    .contains("дальше только счётчик")
+            );
+            assert!(super::r2o_udp_resend_refused_line(&packet, &error, 17).is_none());
+            assert!(
+                super::r2o_udp_resend_refused_line(&[0; 5], &error, 1)
+                    .unwrap()
+                    .contains("?:0")
+            );
         }
 
         #[test]

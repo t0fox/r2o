@@ -76,7 +76,7 @@ pub fn r2o_release_batch_with(
     can_resend: bool,
     mut is_neutral: impl FnMut(&R2oUdpHeldPacket) -> bool,
     mut resend: impl FnMut(&R2oUdpHeldPacket) -> std::io::Result<()>,
-    mut on_permanent_failure: impl FnMut(&R2oUdpHeldPacket),
+    mut on_permanent_failure: impl FnMut(&R2oUdpHeldPacket, &std::io::Error),
     mut send_verdict: impl FnMut(u32, u32) -> std::io::Result<()>,
 ) -> R2oUdpReleaseStats {
     let mut stats = R2oUdpReleaseStats::default();
@@ -107,7 +107,7 @@ pub fn r2o_release_batch_with(
                     if r2o_udp_send_busy(&error) {
                         stats.resend_busy += 1;
                     } else {
-                        on_permanent_failure(tail);
+                        on_permanent_failure(tail, &error);
                     }
                     1
                 }
@@ -937,7 +937,7 @@ mod tests {
             true,
             |_| true,
             |_| Err(io::Error::from_raw_os_error(libc::ENOBUFS)),
-            |_| panic!("busy raw-send errors are retryable"),
+            |_, _| panic!("busy raw-send errors are retryable"),
             |_, _| Ok(()),
         );
 

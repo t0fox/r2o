@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 261 | 139 | 0 | 0 |
+| datapath-core | 400 | 262 | 138 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1349** | **633** | **0** | **0** |
+| **Итого** | **1982** | **1350** | **632** | **0** | **0** |
 
-Это не оценка паритета: 633 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 632 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1349 / P 633 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1350 / P 632 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 261 | 139 | 0 | 0 |
+| datapath-core | 400 | 262 | 138 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1349** | **633** | **0** | **0** |
+| **Итого** | **1982** | **1350** | **632** | **0** | **0** |
 
 
 ---
@@ -3709,7 +3709,7 @@ R2O-владелец: `crates/r2o-datapath/src/main.rs` (`run`, `parse_options`,
 | `out_fail` (static) | 603-607 | 5 | учесть отказ переиздания, сохранить errno | `main.rs:272` eprintln + `r2o_note_busy` | **P** | C `st.send_fail++`, `errno=err`, -1. Rust `main.rs:272`/`r2o_note_busy`; классификация busy есть (`r2o_udp_send_busy`), отдельного `send_fail`/сохранения errno для этой ветки нет. |
 | `out_marked` (static) | 615-635 | 21 | лог «метка клиента → хвосты ядром», первые 16 | `main.rs` `r2o_udp_marked_line`/`r2o_log_udp_marked`, `r2o_udp_mark_plain_pass` | **E*** | Перенесены счётчик `R2O_UDP_MARKED_KEPT`, порты/метка в строке, отдельный текст для `R2O_ROUTE_OTHER_DEV`, лимит 16 и предупреждение на 16-й. Тест `udp_marked_line_matches_c_text_and_limit`. Вызывается из plain-pass до отказа, как C `d2k_udp_path_passed`. **Ограничение:** префикс `r2o-datapath:` вместо `d2kd:`; C также зовёт `marked` из batch/late путей — там Rust пока только помечает follow без строки. |
 | `out_defer` (static) | 640-647 | 8 | вердикт позже, за отложенной головой | `r2o_udp_hold.rs` `R2oUdpDeferredVerdicts::r2o_enqueue`, `main.rs` `r2o_udp_handle_late_tail` | **E*** | C: `enqueue(at,id,verdict,1,none)` успешно → 0 (немедленного вердикта нет), иначе сразу `send_original_verdict`. Rust: `r2o_enqueue` true → `late_tail_handled`, false → вызывающий шлёт ACCEPT сразу. Тест `deferred_verdicts_enqueue_flush_and_full_match_c`: срок, порядок, полная очередь (16) отказывает, `cancel_flow`. **Ограничение:** у C кольцо `d2k_udp_release`, у Rust свой 16-слотовый ring с ключом потока; живой NFQUEUE-оракул не строился. |
-| `out_resend_failed` (static) | 651-671 | 21 | одна строка на поток при отказе хвоста, адрес/семейство/длина | `main.rs:287` лог позднего хвоста | **P** | C парсит пакет, `inet_ntop`, порты, `fam`, печатает `src:sport -> dst:dport (IPv%d, N байт)` + `strerror(err)`; хвост «дальше только счётчик» при `D2K_UDP_REFUSED_LOG`. Rust лог без лимита/адресной строки; лимит `D2K_UDP_REFUSED_LOG` не воспроизведён. |
+| `out_resend_failed` (static) | 651-671 | 21 | одна строка на поток при отказе хвоста, адрес/семейство/длина | `main.rs` `r2o_udp_resend_refused_line`/`r2o_log_udp_resend_refused`, `r2o_release_udp_batch` | **E*** | Перенесены адрес/порты/семейство/длина и ошибка, лимит 16 (`R2O_UDP_REFUSED_LOGGED`) с предупреждением на 16-й; строка печатается один раз на поток — `r2o_mark_failed` возвращает истину только для первой постоянной ошибки. Тест `udp_resend_refused_line_matches_c_limit_and_address`. **Ограничение:** префикс/`strerror` отличаются (`r2o-datapath:` и Display вместо `d2kd:`/`strerror`); C лимит считает `follow_refused`, Rust — свой счётчик; busy-ошибки по-прежнему только в счётчике, как C. |
 | `out_send_now` (static) | 673-684 | 12 | raw send немедленно | `raw.rs:147 send_packet` | **P** | C `!raw` → `out_fail(ENOTSOCK)`; `raw_prepare`/`raw_send`, ошибка → `out_fail(errno?:EIO)`; `emitted++/emitted_now++`. Rust `raw.rs:147 send_packet`; unit-тесты исходящего пакета. |
 | `out_send_at` (static) | 686-696 | 11 | отложить посылку без владения ID | `scheduler.rs:209-211 push_raw` | **P** | **Ветви сверены:** C `!c->raw \|\| !c->sched` → `out_fail(ENOTSOCK)`; `d2k_raw_prepare`, ошибка → `out_fail(errno?:EIO)`; `d2k_sched_push_serial(...,NULL,0)` — при отказе `out_fail(ENOSPC)`; `deferred++`, 0. Rust `push_raw` возвращает `Err(WirePacket)`; классификация ENOSPC/ENOTSOCK и счётчик `deferred` — в вызывающем. Тест `test-datapath-scheduler-differential.sh`. |
 | `out_send_at_owned` (static) | 699-709 | 11 | отложить с владением NFQUEUE ID | `scheduler.rs:214 push_owned`, `:275 pop_due_ex` | **P** | C как `out_send_at`, но `push_owned(at,p,n,id)`; ENOSPC → out_fail; `deferred++`. Rust `push_owned`/`pop_due_ex`; unit `scheduler.rs:564` + D21. |

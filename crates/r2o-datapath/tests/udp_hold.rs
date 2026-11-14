@@ -228,7 +228,7 @@ fn r2o_udp_освобождает_голову_перед_raw_хвостом_и_
                 .push(format!("raw:{}", packet.packet[28] as char));
             Ok::<_, std::io::Error>(())
         },
-        |_| {},
+        |_, _| {},
         |id, verdict| {
             events.borrow_mut().push(format!("вердикт:{id}:{verdict}"));
             Ok::<_, std::io::Error>(())
@@ -262,7 +262,7 @@ fn r2o_udp_при_ошибке_вердикта_головы_не_обгоняе
             resent += 1;
             Ok::<_, std::io::Error>(())
         },
-        |_| {},
+        |_, _| {},
         |id, verdict| {
             verdicts.push((id, verdict));
             if id == 21 {
@@ -297,7 +297,7 @@ fn r2o_udp_постоянный_отказ_немедленного_raw_закр
         true,
         |_| true,
         |_| Err(std::io::Error::other("permanent raw send failure")),
-        |packet| {
+        |packet, _| {
             follow.r2o_mark_failed(&packet.packet);
         },
         |_, _| Ok(()),
@@ -326,7 +326,7 @@ fn r2o_udp_busy_raw_отказ_не_закрывает_follow() {
         true,
         |_| true,
         |_| Err(std::io::Error::from_raw_os_error(libc::ENOBUFS)),
-        |packet| {
+        |packet, _| {
             follow.r2o_mark_failed(&packet.packet);
         },
         |_, _| Ok(()),
