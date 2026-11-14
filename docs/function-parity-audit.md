@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 338 | 210 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 374 | 26 | 0 | 0 |
+| datapath-core | 400 | 375 | 25 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1474** | **508** | **0** | **0** |
+| **Итого** | **1982** | **1475** | **507** | **0** | **0** |
 
-Это не оценка паритета: 508 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 507 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1474 / P 508 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1475 / P 507 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 338 | 210 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 374 | 26 | 0 | 0 |
+| datapath-core | 400 | 375 | 25 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1474** | **508** | **0** | **0** |
+| **Итого** | **1982** | **1475** | **507** | **0** | **0** |
 
 
 ---
@@ -3691,7 +3691,7 @@ R2O-владелец: `crates/r2o-datapath/src/main.rs` (`run`, `parse_options`,
 | `now_ns` (static) | 112-116 | 5 | `CLOCK_MONOTONIC` в наносекундах | `main.rs` `r2o_now_ns`, `std::time::Instant` для интервалов | **E*** | `r2o_now_ns` — точный вызов `clock_gettime(CLOCK_MONOTONIC)` с насыщением; записи журнала теперь помечаются абсолютным временем C, а не `elapsed()` от старта процесса. Тест `now_ns_uses_clock_monotonic_like_c` сверяет с независимым `clock_gettime` и монотонность. **Ограничение:** интервалы планировщика по-прежнему на `Instant` (для разностей эквивалентно); побайтовый differential абсолютных значений невозможен. |
 | `tls_route_segment_cap` (static) | 123-151 | 29 | MTU маршрута минус IP+32 только для TLS ClientHello | `raw.rs:143 tls_route_segment_cap`, `:435 r2o_tls_route_segment_cap_with` | **E*** | C/Rust differential `scripts/test-tls-route-cap-differential.sh` PASS (**14 строк**): IPv4 при ihl=20/24, UDP, не-TLS первый байт, неверная версия TLS, малый data offset, `len<40`, точная минимальная длина, MTU меньше overhead, IPv6 TLS, `len<60`, не-TCP next, неверная версия IP. Совпали cap и отбор пакетов; маршрутный MTU подменён заглушкой с обеих сторон. **Ограничение:** сам `route_mtu`/кэш MTU проверяются `test-route-mtu-differential.sh` и unit-тестами raw.rs, не этим дифференциалом. |
 | `count_reason` (static) | 165-186 | 22 | гистограмма причин пропуска (до 32), сравнение по указателю затем `strcmp` | `reason_stats.rs` `record_reason`/`reason_snapshot` | E | C ищет по `text==r`, затем `strcmp`, добавляет до 32; печатается в сводке. Rust `Reason`-гистограмма хранит `(&'static str,u64)`, сравнивает по содержимому (наблюдаемо то же), после 32 новых не заводит; `record_reason` подключён к обрезанию NFQUEUE и ошибкам чтения, `r2o_log_reason_stats` печатает сводку. Тест `count_reason_merges_equal_text_and_caps_at_32`. |
-| `icmp_step` (static) | 220-248 | 29 | ICMP time-exceeded: DROP только на свою фальшивку, иначе ACCEPT | `r2o_icmp_guard.rs:127 r2o_handle_at_hook`, вызов в `main.rs` | **P** | **Ветви сверены:** C требует payload/len, IPv4 proto 1 (len>=20) или IPv6 next 58 (len>=40); `st.icmp_seen++`; inbound FORWARD/INPUT; `icmpguard_check` → DROP/ACCEPT; лог при первом drop с адресом; `nfq_verdict`; счётчики. Rust `r2o_handle_at_hook`; `scripts/test-icmp-guard-current-differential.sh`; unit-тестов в модуле нет. |
+| `icmp_step` (static) | 220-248 | 29 | ICMP time-exceeded: DROP только на свою фальшивку, иначе ACCEPT | `r2o_icmp_guard.rs:127 r2o_handle_at_hook`, вызов в `main.rs` | **E*** | C/Rust differential `scripts/test-icmp-step-differential.sh` PASS (**10 строк**): нет payload, один байт, IPv4/IPv6 не-ICMP → `handled=0`; ICMP без запомненной фальшивки → ACCEPT; совпавшая фальшивка на FORWARD/INPUT → DROP; POSTROUTING/PRE_ROUTING → ACCEPT; изменённая цитата → ACCEPT. Совпали handled/drop/seen/noted/dropped. **Ограничение:** сам вызов `d2k_nfq_verdict`, `st.accepted/dropped/verdict_fail` и текст лога в дифференциал не входят — они покрыты тестом `send_original_verdict` и `send_verdicts`; C-оракул подменяет `d2k_nfq_verdict` заглушкой. |
 | `log_send_fail` (static) | 253-261 | 9 | лог отказа raw; busy(EAGAIN/ENOBUFS) — максимум 16 строк | `main.rs` `r2o_send_fail_line`/`r2o_log_send_fail` | **E*** | C-семантика перенесена: busy-ошибка считается, после 16-й строки молчит, на 16-й пишет «дальше только счётчик»; не-busy ошибка логируется всегда. Тест `log_send_fail_limits_busy_lines_like_c` (ENOBUFS 1..16, 17-я тишина, EAGAIN busy, EACCES без счётчика). Хелпер подключён к трём raw-send сайтам. **Ограничение:** текст/префикс строки отличаются (`r2o-datapath:` против `d2kd:`), C-сайт «RST к серверу после 307» использует другую ветку Rust; счётчик общий на процесс, как C `st`. |
 | `routes_routed` (static) | 278-280 | 3 | предикат «метка выбирает политику» | `r2o_route.rs:259 r2o_mark_is_routed` | E | C `d2k_routemark_routed`: `!mark→0`; OTHER_DEV/OUTSIDE→1; policy_match→0; непрочитанные правила семейства→1 (fail closed); совпадение селектора→1. Rust `r2o_mark_is_routed` повторяет эти ветви, `None`-правила дают true; тесты `r2o_route.rs:1216-1265` (policy, OTHER_DEV/OUTSIDE, IPv4/IPv6, fail closed). |
 | `describe_oifs` (static) | 282-294 | 13 | имена выходных интерфейсов для лога | `r2o_route.rs:152 r2o_egress_ifindices`, строки `r2o_refresh` | **P** | C `!read` → «неизвестен…», `!n` → «нет», иначе `if_indextoname`/`#%u` через `, `. Rust `r2o_egress_ifindices`/`r2o_refresh`; формат лога иной, список oif читается. |

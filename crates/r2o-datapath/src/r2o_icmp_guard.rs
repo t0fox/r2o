@@ -345,6 +345,45 @@ mod tests {
         }
     }
 
+    const FAKE4_PACKET: [u8; 28] = [
+        0x45, 0x70, 0x04, 0xcc, 0x00, 0x01, 0x40, 0x00, 0x03, 0x11, 0x16, 0x59, 0xc0, 0xa8, 0x01,
+        0x43, 0x68, 0x15, 0x34, 0x57, 0xd8, 0x8b, 0x01, 0xbb, 0x04, 0xb8, 0x34, 0x8e,
+    ];
+
+    const FIELD_ICMP: [u8; 56] = [
+        0x45, 0x70, 0x00, 0x38, 0x00, 0x00, 0x00, 0x00, 0xfb, 0x01, 0x2d, 0x19, 0x3e, 0x73, 0x91,
+        0xdd, 0xc0, 0xa8, 0x01, 0x43, 0x0b, 0x00, 0xe1, 0x72, 0x00, 0x00, 0x00, 0x00, 0x45, 0x70,
+        0x04, 0xcc, 0x00, 0x01, 0x40, 0x00, 0x01, 0x11, 0x16, 0x59, 0xc0, 0xa8, 0x01, 0x43, 0x68,
+        0x15, 0x34, 0x57, 0xd8, 0x8b, 0x01, 0xbb, 0x04, 0xb8, 0x34, 0x8e,
+    ];
+
+    fn fake4() -> Vec<u8> {
+        let mut packet = vec![0; 1228];
+        packet[..FAKE4_PACKET.len()].copy_from_slice(&FAKE4_PACKET);
+        packet[2..4].copy_from_slice(&1228_u16.to_be_bytes());
+        packet[24..26].copy_from_slice(&1208_u16.to_be_bytes());
+        packet
+    }
+
+    fn run_icmp_step(name: &str, payload: Option<&[u8]>, hook: Option<u8>, with_fake: bool) {
+        use super::R2oIcmpGuard;
+
+        let mut guard = R2oIcmpGuard::default();
+        if with_fake {
+            assert!(guard.r2o_note(&fake4(), 64, 1_000_000_000));
+        }
+        let handled =
+            payload.and_then(|payload| guard.r2o_handle_at_hook(payload, hook, 1_000_000_000));
+        println!(
+            "{name} handled={} drop={} seen={} noted={} dropped={}",
+            u8::from(handled.is_some()),
+            u8::from(handled == Some(true)),
+            guard.r2o_seen(),
+            guard.r2o_noted(),
+            guard.r2o_dropped()
+        );
+    }
+
     #[test]
     #[ignore]
     fn d2o_parse_ip_trace() {
@@ -363,5 +402,68 @@ mod tests {
         run("M v6-udp-ttl1", &v6(48, 17, 1, 8));
         run("N one-byte", &v4(1, 5, 0, 6, 64, 40, 1));
         run("O empty", &[]);
+    }
+
+    #[test]
+    #[ignore]
+    fn d2o_icmp_step_trace() {
+        use crate::netlink::{R2O_NF_INET_FORWARD, R2O_NF_INET_LOCAL_IN, R2O_NF_INET_POST_ROUTING};
+
+        let short_packet = [0x45_u8];
+        let v4_tcp = [0x45, 0, 0, 20, 0, 0, 0, 0, 64, 6];
+        let v6_tcp = [0x60, 0, 0, 0, 0, 0, 6, 64];
+        let mut mutated = FIELD_ICMP;
+        mutated[48] ^= 1;
+
+        run_icmp_step("A no-payload", None, Some(R2O_NF_INET_FORWARD), true);
+        run_icmp_step(
+            "B one-byte",
+            Some(&short_packet),
+            Some(R2O_NF_INET_FORWARD),
+            true,
+        );
+        run_icmp_step(
+            "C v4-non-icmp",
+            Some(&v4_tcp),
+            Some(R2O_NF_INET_FORWARD),
+            true,
+        );
+        run_icmp_step(
+            "D v6-non-icmp",
+            Some(&v6_tcp),
+            Some(R2O_NF_INET_FORWARD),
+            true,
+        );
+        run_icmp_step(
+            "E v4-no-fake",
+            Some(&FIELD_ICMP),
+            Some(R2O_NF_INET_FORWARD),
+            false,
+        );
+        run_icmp_step(
+            "F v4-forward",
+            Some(&FIELD_ICMP),
+            Some(R2O_NF_INET_FORWARD),
+            true,
+        );
+        run_icmp_step(
+            "G v4-input",
+            Some(&FIELD_ICMP),
+            Some(R2O_NF_INET_LOCAL_IN),
+            true,
+        );
+        run_icmp_step(
+            "H v4-postrouting",
+            Some(&FIELD_ICMP),
+            Some(R2O_NF_INET_POST_ROUTING),
+            true,
+        );
+        run_icmp_step("I v4-prerouting", Some(&FIELD_ICMP), Some(0), true);
+        run_icmp_step(
+            "J v4-mutated",
+            Some(&mutated),
+            Some(R2O_NF_INET_FORWARD),
+            true,
+        );
     }
 }
