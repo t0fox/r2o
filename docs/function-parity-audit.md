@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 335 | 213 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 286 | 114 | 0 | 0 |
+| datapath-core | 400 | 288 | 112 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1379** | **603** | **0** | **0** |
+| **Итого** | **1982** | **1381** | **601** | **0** | **0** |
 
-Это не оценка паритета: 603 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 601 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1379 / P 603 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1381 / P 601 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 335 | 213 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 286 | 114 | 0 | 0 |
+| datapath-core | 400 | 288 | 112 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1379** | **603** | **0** | **0** |
+| **Итого** | **1982** | **1381** | **601** | **0** | **0** |
 
 
 ---
@@ -4081,9 +4081,9 @@ R2O заменил структуру на `HashMap`, сохранив ключ,
 |---|---|---|---|---|---|---|
 | `same_key` (static) | 14-16 | 3 | равенство ключа UDP-потока | типизированное `Eq` (`r2o_udp_hold.rs`) | **E** | C `return d2k_key_equal(a,b)` — proto/ports/family/адреса. Rust `Eq` по адресам/портам/proto; используется всеми udp_hold-тестами. |
 | `clear_slot` (static) | 18–20 | 3 | обнулить слот без release | `Option::take`/`None` | **E** | C `memset(s,0)`, Rust `slots[i].take()`; освобождение ID в обоих случаях делает вызывающий (C — `release_slot`, Rust — `r2o_take`/`r2o_drain`). |
-| `release_slot` (static) | 22–29 | 8 | `release(ctx,&batch)`, clear, вернуть count | `r2o_udp_hold.rs:212 r2o_flush`, `:228 r2o_drain`, `:198 r2o_take` | **P** | C вызывает release-callback и сам чистит слот; Rust возвращает `R2oUdpHoldBatch` вызывающему, который обязан отпустить ID. Семантика «release → clear» та же, владение и форма результата разные. |
+| `release_slot` (static) | 22–29 | 8 | `release(ctx,&batch)`, clear, вернуть count | `r2o_udp_hold.rs:212 r2o_flush`, `:228 r2o_drain`, :198 r2o_take` | **E*** | Rust возвращает пачки, а release ID делает вызывающий; владение выражено типом, набор и очистка те же. Тесты `udp_hold_flush_releases_expired_batches_like_c`, `r2o_udp_hold_drain_возвращает_все_слоты_для_release_как_free`, `...fifo_с_метками`, `...при_переполнении...`. **Ограничение:** callback-release внутри C заменён возвратом `R2oUdpHoldBatch`; production drains/releases на shutdown и в `r2o_release_udp_batch`. |
 | `d2k_udp_hold_new` | 31-31 | 1 | создать таблицу UDP-удержания | `R2oUdpHoldTable::new` (`r2o_udp_hold.rs:147`) | **E** | C `calloc(1,sizeof(d2k_udp_hold))`, при OOM NULL. Rust `[None; 16]`/`Default`; обычный путь эквивалентен, OOM-ветвь иная. C-строка: `return calloc(1,sizeof(d2k_udp_hold));`; Rust `R2oUdpHoldTable::new`/`[None;16]`, OOM-ветвь иная. |
-| `d2k_udp_hold_free` | 33–39 | 7 | слить все занятые слоты, затем `free` | `r2o_drain` (`:228`) | **P** | C при free вызывает release-callback для каждого used-слота; Rust `r2o_drain` возвращает пачки, а `Drop` не отпускает NFQUEUE ID сам — это обязанность вызывающего. |
+| `d2k_udp_hold_free` | 33–39 | 7 | слить все занятые слоты, затем `free` | `r2o_drain` (`:228`) | **E*** | C при free вызывает release-callback для каждого used-слота. Rust `r2o_drain` возвращает все пачки; production `main.rs:1382` передаёт их в release, затем таблица пуста. Тест `r2o_udp_hold_drain_возвращает_все_слоты_для_release_как_free`: два потока → две пачки id 1/2, повторный drain пуст, take пуст. **Ограничение:** `Drop` сам NFQUEUE ID не отпускает — это обязанность вызывающего, в отличие от C. |
 | `d2k_udp_hold_flush` | 41–52 | 12 | `used && now>=deadline` → release, сумма count | `r2o_udp_hold.rs` `r2o_flush` | E | C обходит слоты и для `used && now>=deadline` отпускает ID, возвращая число. Rust `r2o_flush(now)` забирает все пачки с `now>=deadline` и возвращает `Vec<R2oUdpHoldBatch>`; вызывающий отпускает ID/байты. Условие и набор освобождённых слотов те же. Тест `udp_hold_flush_releases_expired_batches_like_c` (до срока — пусто, на сроке — одна пачка, повтор — пусто). |
 | `d2k_udp_hold_feed` | 54-58 | 5 | обёртка `feed_marked(...,mark=0,...)` | `r2o_udp_hold.rs` `r2o_feed` | **E*** | Rust `r2o_feed(id, 0, …)` — та же запись с нулевой меткой; тесты `r2o_udp_hold_сохраняет_датаграммы_потока_fifo_с_метками`, `...истекает_на_границе_ста_миллисекунд`, `...при_переполнении_возвращает_всю_старую_пачку`, `...отказывает_после_шестнадцати_потоков_без_вытеснения`, `...отказывает_для_датаграмм_больше_тысячи_шестисот_байт`; C/Rust differential `test-udp-prepost-differential.sh` использует mark=0. **Ограничение:** истёкшие слоты C flush-ит внутри feed, Rust — отдельным `r2o_flush` перед feed (production `main.rs`). |
 | `d2k_udp_hold_feed_marked` | 60–96 | 37 | валидация len 1..1600, flush истёкших, слот по ключу/свободный, переполнение 8, запись id/len/mark/packet | `:154 r2o_feed` (`R2O_UDP_HOLD_PACKETS=8`, max 1600) | **E*** | Тесты `tests/udp_hold.rs`: FIFO и метки (`...fifo_с_метками`, mark 7), истечение на границе 100 мс, переполнение 8 → `Overflow(batch)` со всей старой пачкой, отказ после 16 потоков без вытеснения, отказ для датаграмм >1600, отказ для фрагментов/не-Initial (`r2o_udp_hold_отказывает_для_фрагментов_и_не_initial`). **Ограничение:** C освобождает слот через callback и возвращает 0; Rust возвращает `Overflow(batch)`, который вызывающий обязан отпустить; flush истёкших — отдельный вызов, как в production. |
@@ -4099,10 +4099,10 @@ R2O заменил структуру на `HashMap`, сохранив ключ,
 - **`same_key`/`clear_slot`/`d2k_udp_hold_new`:** E. C
   `d2k_key_equal`/`memset`/`calloc`; Rust `Eq`/`Option::take`/
   `[None; 16]`. Отличие только OOM-ветвь `calloc`.
-- **`release_slot`/`d2k_udp_hold_free`/`d2k_udp_hold_flush`:** P.
+- **`release_slot`/`d2k_udp_hold_free`/`d2k_udp_hold_flush`:** E*.
   C отпускает NFQUEUE ID через callback внутри слота; Rust возвращает
-  `R2oUdpHoldBatch`/`Vec<...>` и оставляет release вызывающему. Условие
-  `now>=deadline` и счётчики совпадают.
+  `R2oUdpHoldBatch`/`Vec<...>` и оставляет release вызывающему; условие
+  `now>=deadline`, набор слотов и счётчики совпадают, drain покрыт тестом.
 - **`d2k_udp_hold_feed_marked`:** E*. Тесты `tests/udp_hold.rs`
   покрывают FIFO/метки, истечение, переполнение 8, 16 потоков, >1600,
   фрагменты/не-Initial. C flush-ит истёкшие внутри, Rust — отдельным

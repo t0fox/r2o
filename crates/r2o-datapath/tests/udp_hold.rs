@@ -549,3 +549,26 @@ fn r2o_udp_hold_отказывает_для_датаграмм_больше_ты
     );
     assert!(table.is_empty());
 }
+
+#[test]
+fn r2o_udp_hold_drain_возвращает_все_слоты_для_release_как_free() {
+    let now = Instant::now();
+    let mut table = R2oUdpHoldTable::new();
+    let first = r2o_udp_packet([192, 0, 2, 1], [198, 51, 100, 2], 50_001, 443, b"one");
+    let second = r2o_udp_packet([192, 0, 2, 2], [198, 51, 100, 2], 50_002, 443, b"two");
+    assert_eq!(table.r2o_feed(1, 0, &first, now), R2oUdpHoldFeed::Held);
+    assert_eq!(table.r2o_feed(2, 0, &second, now), R2oUdpHoldFeed::Held);
+
+    let batches = table.r2o_drain();
+    assert_eq!(batches.len(), 2);
+    assert_eq!(
+        batches
+            .iter()
+            .map(|batch| batch.packets[0].id)
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert!(table.is_empty());
+    assert!(table.r2o_drain().is_empty());
+    assert!(table.r2o_take(&first).is_none());
+}
