@@ -172,7 +172,12 @@ if setup_flows; then
     export R2O_CT_LIVE_FLOW1="$FLOW1"
     export R2O_CT_LIVE_FLOW2="$FLOW2"
 else
-    echo "live flow phase skipped: veth/nsenter/nft unavailable" >&2
+    if [ "${R2O_CT_LIVE_ALLOW_NO_FLOW:-0}" = 1 ]; then
+        echo "live flow phase skipped (R2O_CT_LIVE_ALLOW_NO_FLOW=1)" >&2
+    else
+        echo "live flow phase недоступен: нужны veth/nsenter/nft" >&2
+        exit 1
+    fi
 fi
 
 # 3. C и Rust запускаются сразу друг за другом, без компиляции между ними.
