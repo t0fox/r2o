@@ -1082,8 +1082,14 @@ impl HoldTable {
         released
     }
 
+    /// C `d2k_hold_next`: абсолютный ближайший deadline; `None` — слотов нет
+    /// (C отдаёт 0).
+    pub fn r2o_next_deadline(&self) -> Option<Instant> {
+        self.slots.iter().map(|slot| slot.deadline).min()
+    }
+
     pub fn timeout_ms(&self, now: Instant, max_ms: i32) -> i32 {
-        let Some(deadline) = self.slots.iter().map(|slot| slot.deadline).min() else {
+        let Some(deadline) = self.r2o_next_deadline() else {
             return max_ms.max(0);
         };
         if deadline <= now || max_ms <= 0 {
@@ -1852,6 +1858,49 @@ mod tests {
         assert_eq!(stats.ready, 1);
         assert_eq!(stats.joined, 1);
         assert_eq!(stats.pending, 0);
+    }
+
+    #[test]
+    fn hold_next_deadline_даёт_абсолютный_минимум_как_c() {
+        let now = Instant::now();
+        let mut hold = HoldTable::default();
+        assert_eq!(hold.r2o_next_deadline(), None);
+        assert_eq!(hold.timeout_ms(now, 500), 500);
+
+        let syn = tcp_packet(1000, 0x02, &[]);
+        assert_eq!(
+            hold.feed(1, &syn, now, 0, true, false).outcome,
+            HoldOutcome::Pass
+        );
+        let hello = hello();
+        let first = tcp_packet(1001, 0x18, &hello[..5]);
+        assert_eq!(
+            hold.feed(2, &first, now, 0, true, false).outcome,
+            HoldOutcome::Waiting
+        );
+        assert_eq!(hold.r2o_next_deadline(), Some(now + HOLD_WAIT));
+        assert_eq!(hold.timeout_ms(now, 500), 100);
+
+        let mut syn2 = syn.clone();
+        syn2[20..22].copy_from_slice(&50001_u16.to_be_bytes());
+        let later = now + Duration::from_millis(20);
+        assert_eq!(
+            hold.feed(3, &syn2, later, 0, true, false).outcome,
+            HoldOutcome::Pass
+        );
+        let mut first2 = tcp_packet(2001, 0x18, &hello[..5]);
+        first2[20..22].copy_from_slice(&50001_u16.to_be_bytes());
+        assert_eq!(
+            hold.feed(4, &first2, later, 0, true, false).outcome,
+            HoldOutcome::Waiting
+        );
+        assert_eq!(hold.r2o_next_deadline(), Some(now + HOLD_WAIT));
+        assert!(!hold.flush(now + HOLD_WAIT, 0, false).is_empty());
+        assert_eq!(
+            hold.r2o_next_deadline(),
+            Some(later + HOLD_WAIT),
+            "после снятия первого слота остаётся второй"
+        );
     }
 
     #[test]
