@@ -996,7 +996,7 @@ mod app {
         );
     }
 
-    fn r2o_log_routed_stats(routed_flows: usize) {
+    fn r2o_log_routed_stats(routed_flows: u64) {
         eprintln!(
             "r2o-datapath: потоков клиентов с меткой маршрутизации (ядром, без плана): {routed_flows}"
         );
@@ -1505,7 +1505,7 @@ mod app {
                 r2o_log_plan_stats(&tcp_sessions, raw.as_ref());
                 r2o_log_hold_ownership();
                 r2o_log_nat_stats(&conntrack_gate);
-                r2o_log_routed_stats(routed_flows.len());
+                r2o_log_routed_stats(routed_flows.routed_flows());
                 r2o_log_plan_table_stats(&name_plans);
                 r2o_log_raw_stats(raw.as_ref());
                 if raw.is_some() {
@@ -1545,7 +1545,7 @@ mod app {
                 r2o_log_plan_stats(&tcp_sessions, raw.as_ref());
                 r2o_log_hold_ownership();
                 r2o_log_nat_stats(&conntrack_gate);
-                r2o_log_routed_stats(routed_flows.len());
+                r2o_log_routed_stats(routed_flows.routed_flows());
                 r2o_log_plan_table_stats(&name_plans);
                 r2o_log_raw_stats(raw.as_ref());
                 if raw.is_some() {

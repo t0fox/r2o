@@ -743,6 +743,8 @@ impl R2oRouteFlowKey {
 pub struct R2oRoutedFlows {
     flows: HashMap<R2oRouteFlowKey, Instant>,
     next_expire: Instant,
+    /// C `s->routed_flows`: кумулятивное число впервые помеченных потоков.
+    routed_flows: u64,
 }
 
 impl Default for R2oRoutedFlows {
@@ -750,12 +752,19 @@ impl Default for R2oRoutedFlows {
         Self {
             flows: HashMap::with_capacity(R2O_ROUTE_FLOW_CAPACITY),
             next_expire: Instant::now(),
+            routed_flows: 0,
         }
     }
 }
 
 impl R2oRoutedFlows {
-    /// C `d2k_session_routed_flows`: число потоков с меткой маршрутизации.
+    /// C `d2k_session_routed_flows`: кумулятивное число впервые помеченных
+    /// потоков. Не уменьшается при истечении или новом SYN.
+    pub fn routed_flows(&self) -> u64 {
+        self.routed_flows
+    }
+
+    /// Текущее число записей в таблице (обе стороны потока).
     pub fn len(&self) -> usize {
         self.flows.len()
     }
@@ -768,6 +777,9 @@ impl R2oRoutedFlows {
         };
         let reverse = key.r2o_reverse();
         if route_mark != 0 {
+            if !self.flows.contains_key(&key) {
+                self.routed_flows = self.routed_flows.wrapping_add(1);
+            }
             self.r2o_insert(key, reverse, now);
             return true;
         }
@@ -1463,6 +1475,27 @@ mod tests {
             &[]
         )));
         assert!(r2o_route_watch_relevant(&[0; 4]));
+    }
+
+    #[test]
+    fn r2o_счётчик_маршрутных_потоков_кумулятивный_как_c() {
+        let mut flows = R2oRoutedFlows::default();
+        let now = Instant::now();
+        let client_syn = r2o_test_tcp([192, 0, 2, 1], [198, 51, 100, 2], 40_000, 443, 0x02);
+        let second_syn = r2o_test_tcp([192, 0, 2, 1], [198, 51, 100, 2], 40_001, 443, 0x02);
+        assert_eq!(flows.routed_flows(), 0);
+        assert!(flows.r2o_skip_packet(&client_syn, R2O_ROUTE_OTHER_DEV, now));
+        assert_eq!(flows.routed_flows(), 1);
+        assert!(flows.r2o_skip_packet(&client_syn, R2O_ROUTE_OTHER_DEV, now));
+        assert_eq!(flows.routed_flows(), 1, "повторная метка не считается");
+        flows.r2o_expire(now + R2O_ROUTE_FLOW_IDLE + Duration::from_secs(1));
+        assert_eq!(flows.routed_flows(), 1, "истечение не уменьшает счётчик");
+        assert!(flows.r2o_skip_packet(
+            &second_syn,
+            R2O_ROUTE_OTHER_DEV,
+            now + R2O_ROUTE_FLOW_IDLE + Duration::from_secs(1)
+        ));
+        assert_eq!(flows.routed_flows(), 2);
     }
 
     #[test]
