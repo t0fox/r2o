@@ -1529,9 +1529,8 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
     }
     if !options.full_detect_semantics && base.pass == 0 && base.errors == options.repeats {
         result.reason = format!(
-            "нет TCP до цели: ни один из {} {} не состоялся",
-            options.repeats,
-            probes_word(options.repeats)
+            "нет TCP до цели: ни один из {} опытов не состоялся",
+            options.repeats
         );
         result.verdict = Verdict::Unreachable;
         finish(&mut result, &options, start);
@@ -1563,10 +1562,8 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
             if confirm.errors > 0 {
                 result.verdict = Verdict::Flaky;
                 result.reason = format!(
-                    "подтверждение базы: {} из {} {} не состоялись — ошибка транспорта, а не решение коробки",
-                    confirm.errors,
-                    CLEAR_CONFIRM_REPEATS,
-                    probes_word(CLEAR_CONFIRM_REPEATS)
+                    "подтверждение базы: {} из {} опытов не состоялись — ошибка транспорта, а не решение коробки",
+                    confirm.errors, CLEAR_CONFIRM_REPEATS
                 );
                 finish(&mut result, &options, start);
                 return result;
@@ -1689,10 +1686,8 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
                 if measured.errors > 0 {
                     result.verdict = Verdict::Flaky;
                     result.reason = format!(
-                        "контроль другим именем: {} из {} {} не состоялись — ошибка транспорта, а не решение коробки",
-                        measured.errors,
-                        options.repeats,
-                        probes_word(options.repeats)
+                        "контроль другим именем: {} из {} опытов не состоялись — ошибка транспорта, а не решение коробки",
+                        measured.errors, options.repeats
                     );
                     finish(&mut result, &options, start);
                     return result;
@@ -1715,9 +1710,8 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
             if !options.full_detect_semantics && control_ok && base.unproven + one.unproven > 0 {
                 result.verdict = Verdict::Inconclusive;
                 result.reason = format!(
-                    "на триггер ответили не доказательством прохода ({} {} из {}): алерт инжектируют и коробки, и серверы — вердикта нет",
+                    "на триггер ответили не доказательством прохода ({} опытов из {}): алерт инжектируют и коробки, и серверы — вердикта нет",
                     base.unproven + one.unproven,
-                    probes_word(base.unproven + one.unproven),
                     options.repeats * 2
                 );
                 finish(&mut result, &options, start);
