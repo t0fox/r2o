@@ -2440,6 +2440,15 @@ fn r2o_shape_is_udp(shape: u8) -> bool {
 /// C `shape_fits` (`plans.c:1044-1052`): grandfather подходит любой форме;
 /// MODERN/NO_TS/TS совместимы с соответствующей ECH-формой; иначе точное
 /// равенство ненулевых форм.
+/// C `name_same` (`session.c:369-382`): равная длина и ASCII A-Z→a-z,
+/// без нормализации точки и без прочих преобразований.
+pub fn r2o_name_same(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(left, right)| left.to_ascii_lowercase() == right.to_ascii_lowercase())
+}
+
 fn r2o_shape_fits(entry_shape: u8, seen_shape: u8) -> bool {
     if entry_shape == SHAPE_GRANDFATHER {
         return true;
@@ -2975,8 +2984,7 @@ impl ControlServer {
             6 => {
                 if let Some(position) = self.last_client_shapes.iter().position(|cached| {
                     cached.family == command.family
-                        && (command.name.is_empty()
-                            || cached.host.eq_ignore_ascii_case(&command.name))
+                        && (command.name.is_empty() || r2o_name_same(&cached.host, &command.name))
                 }) {
                     let cached = self
                         .last_client_shapes
@@ -2996,8 +3004,7 @@ impl ControlServer {
             17 => {
                 if let Some(position) = self.last_quic_shapes.iter().position(|cached| {
                     cached.family == command.family
-                        && (command.name.is_empty()
-                            || cached.host.eq_ignore_ascii_case(&command.name))
+                        && (command.name.is_empty() || r2o_name_same(&cached.host, &command.name))
                 }) {
                     let cached = self
                         .last_quic_shapes
@@ -3036,9 +3043,11 @@ impl ControlServer {
         })?;
         let family = event.key[0];
         let slot = shape_family_slot(family);
-        if let Some(position) = self.last_client_shapes.iter().position(|cached| {
-            cached.family == family && cached.host.eq_ignore_ascii_case(&event.host)
-        }) {
+        if let Some(position) = self
+            .last_client_shapes
+            .iter()
+            .position(|cached| cached.family == family && r2o_name_same(&cached.host, &event.host))
+        {
             self.last_client_shapes.remove(position);
         }
         self.last_client_shapes.push_back(CachedClientShape {
@@ -3051,7 +3060,7 @@ impl ControlServer {
         }
         if self.armed_client_shapes[slot]
             .as_ref()
-            .is_some_and(|host| host.is_empty() || host.eq_ignore_ascii_case(&event.host))
+            .is_some_and(|host| host.is_empty() || r2o_name_same(host, &event.host))
         {
             self.armed_client_shapes[slot] = None;
             Ok(Some(body.to_vec()))
@@ -3076,9 +3085,11 @@ impl ControlServer {
         let snapshot = hello.snapshot.as_ref()?;
         let event_body = hello.event_body()?;
         let family = hello.key[0];
-        if let Some(position) = self.last_quic_shapes.iter().position(|cached| {
-            cached.family == family && cached.host.eq_ignore_ascii_case(&hello.host)
-        }) {
+        if let Some(position) = self
+            .last_quic_shapes
+            .iter()
+            .position(|cached| cached.family == family && r2o_name_same(&cached.host, &hello.host))
+        {
             self.last_quic_shapes.remove(position);
         }
         self.last_quic_shapes.push_back(CachedQuicShape {
@@ -3093,7 +3104,7 @@ impl ControlServer {
         let slot = shape_family_slot(family);
         if self.armed_quic_shapes[slot]
             .as_ref()
-            .is_some_and(|host| host.is_empty() || host.eq_ignore_ascii_case(&hello.host))
+            .is_some_and(|host| host.is_empty() || r2o_name_same(host, &hello.host))
         {
             self.armed_quic_shapes[slot] = None;
             if self.wire_profile == control::WireProfile::V22 {

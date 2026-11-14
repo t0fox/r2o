@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 348 | 52 | 0 | 0 |
+| datapath-core | 400 | 349 | 51 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1446** | **536** | **0** | **0** |
+| **Итого** | **1982** | **1447** | **535** | **0** | **0** |
 
-Это не оценка паритета: 536 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 535 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1446 / P 536 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1447 / P 535 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 348 | 52 | 0 | 0 |
+| datapath-core | 400 | 349 | 51 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1446** | **536** | **0** | **0** |
+| **Итого** | **1982** | **1447** | **535** | **0** | **0** |
 
 
 ---
@@ -3842,7 +3842,7 @@ CLI-логирования, health-файла, duration, состава свод
 | `d2k_session_new` | 306–344 | 39 | `calloc`, hook=UNKNOWN, бюджет 25, `flows`/`uflows` по capacity, `plans` по capacity таблицы, journal | `main.rs:884 run` (`TcpSessions`, `R2oUdpSessions`, `NamePlans`, `R2oFlowJournal`) | **P** | **Совпадает:** отдельные таблицы TCP/UDP с одинаковой ёмкостью, журнал, бюджет по умолчанию 25 (`engine.rs:451-460`). **Отличия:** C хранит `hook`, `route_mark`, `fragment_id`, `rev_seen`, `shape_*` в сессии; Rust передаёт hook/route_mark на пакет, а снимки/visible-флаги живут в `QuicSessions`/`TcpSessions`/`R2oUdpSessions`. C `plans` ёмкость выводит из `d2k_track_capacity(flows)`, Rust `NamePlans` — из `--r2o-flow-capacity`. OOM-ветка C (`plans==NULL`) в Rust — `Result` при создании таблиц. |
 | `d2k_session_free` | 346–356 | 11 | освободить plans/journal/uflows/flows/plan/session | `Drop` (Rust RAII) | **E** | C вручную освобождает пять владений; Rust `TcpSessions`/`R2oUdpSessions`/`NamePlans`/`R2oFlowJournal`/`Plan` освобождаются `Drop`. Для непустой сессии эквивалентно; OOM-ветка C (`plans==NULL`) в Rust — `Result` при создании. |
 | `d2k_session_set_plan` | 358–365 | 8 | освободить прежний запасной план, сохранить новый, `plan_revision++` | `main.rs` `plan`, `NamePlans` | **E*** | C `d2k_plan_free(s->plan)`, `s->plan=p`, `plan_revision++`. Rust хранит `Plan` значением/в составе `NamePlans` и увеличивает `NamePlans.revision` на каждое изменение; тесты revision `control.rs:5439/5448/5701`. C/Rust session-packet differential загружает одинаковый D2KP-план и применяет его к SYN/ClientHello. **Ограничение:** отдельного `d2k_plan_free` нет — освобождает `Drop`; ревизия одна на таблицу, не сумма fallback+table. |
-| `name_same` (static) | 369–382 | 14 | равная длина, ASCII A-Z→a-z, без нормализации точки | `r2k-core/src/httpup.rs:468-472 same_host` | **P** | **Подтверждённое расхождение:** C сравнивает ровно `alen==blen` и байты без учёта регистра, **не снимая** хвостовую точку и не требуя непустого имени (`session.c:369-382`). Rust `same_host` снимает по одной хвостовой `.` с обеих сторон и требует `!left.is_empty()` (`httpup.rs:469-471`). Для `example.com.` и `example.com` C вернёт 0, Rust 1; для пустого имени C может вернуть 1 при обоих пустых, Rust — 0. Используется в `last_hello`/`shape`; для SNI с точкой поведение различается. |
+| `name_same` (static) | 369–382 | 14 | равная длина, ASCII A-Z→a-z, без нормализации точки | `control.rs` `r2o_name_same` | **E*** | C/Rust differential `scripts/test-name-same-differential.sh` PASS (10 кейсов): equal, регистр, разная длина, хвостовая точка, цифры/дефис, пустые, high-byte 0x80/0x81, `A-B`/`a-b` — совпадение/различие без нормализации. Helper подключён к production-сравнениям кэша форм ClientHello/QUIC (6 мест вместо `eq_ignore_ascii_case`). **Ограничение:** C принимает произвольные байты; Rust-команды/снимки — `Vec<u8>`, high-byte differential покрыт, но не-UTF8 строки из control-сообщений не моделировались. |
 | `rd16` (static) | 30-32 | 3 | big-endian u16 | `r2k-core/src/packet.rs read_u16` | **E** | C `(p[0]<<8)\|p[1]`; Rust `read_u16`/`from_be_bytes` с проверкой границ. Используется в разборе TCP/UDP/STUN; побайтовые тесты пакетов. |
 | `refuse_coded` (static) | 402–413 | 12 | отказ плана в журнал; зонд молчит только при `code==NONE`; trial/plan id | `flow_journal.rs:684-720 record_plan_refused`, `main.rs:3737-3760 send_refused_event` | **P** | **Подтверждённое отличие:** C находит поток по ключу и при `controller_probe && code==D2K_REFUSE_NONE` **не пишет** запись (`session.c:404-406`); Rust `record_plan_refused` не знает о probe и принимает только `NOT_APPLIED/FLOW_UNFIT`, а `send_refused_event` всегда пишет журнал и отправляет событие. Для `code==NONE` C пишет запись (кроме probe), Rust `record_plan_refused` её отвергает; отказ NONE идёт только событием. D22 покрывает основные коды, не это условие. |
 | `refuse` (static) | 415–418 | 4 | `refuse_coded(..., NONE, NULL)` | `main.rs:3737 send_refused_event` (событие), `flow_journal.rs:684 record_plan_refused` | **P*** | C-обёртка передаёт `code=NONE`, без плана/trial. Rust отправляет `EVENT_REFUSED` и пишет журнал только для `NOT_APPLIED/FLOW_UNFIT`; отказ `NONE` в журнал не попадает (см. `refuse_coded`). |
