@@ -515,12 +515,21 @@ fn parse_plan_request(input: &[u8]) -> Option<Request<'_>> {
     let mut content_length = None;
     let mut boundary_known = true;
     let mut cursor = first_end + 2;
+    let mut header_len = 0;
+    let mut header_complete = false;
     loop {
+        // C `d2k_http_request`: неполная строка заголовка в этом сегменте
+        // завершает разбор, но уже найденный Host остаётся действительным.
+        let Some(relative_end) = find_crlf(&input[cursor..], 0) else {
+            break;
+        };
         let line_start = cursor;
-        let line_end = find_crlf(input, cursor)?;
+        let line_end = cursor + relative_end;
         let line = &input[cursor..line_end];
         cursor = line_end + 2;
         if line.is_empty() {
+            header_len = cursor;
+            header_complete = true;
             break;
         }
         if line
@@ -565,8 +574,7 @@ fn parse_plan_request(input: &[u8]) -> Option<Request<'_>> {
             boundary_known = false;
         }
     }
-    let header_len = cursor;
-    let end_offset = if boundary_known {
+    let end_offset = if header_complete && boundary_known {
         header_len
             .checked_add(content_length.unwrap_or_default())
             .filter(|&end| end <= 0x7fff_ffff)

@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 242 | 158 | 0 | 0 |
+| datapath-core | 400 | 243 | 157 | 0 | 0 |
 | datapath-plan | 183 | 177 | 6 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1324** | **658** | **0** | **0** |
+| **Итого** | **1982** | **1325** | **657** | **0** | **0** |
 
-Это не оценка паритета: 658 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 657 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1324 / P 658 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1325 / P 657 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 242 | 158 | 0 | 0 |
+| datapath-core | 400 | 243 | 157 | 0 | 0 |
 | datapath-plan | 183 | 177 | 6 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1324** | **658** | **0** | **0** |
+| **Итого** | **1982** | **1325** | **657** | **0** | **0** |
 
 
 ---
@@ -4468,7 +4468,7 @@ observation), `control.rs` (https names), `http_replace.rs` (пакеты),
 | `d2k_http80_packet` | 349-525 | 177 | стейт-машина HTTP/80: SYN/OPEN/IDLE/REQUEST/INJECTED/SWAP/ANSWERED/DONE, RTT, запрос/ответ, портал, 307+RST | `hold.rs:1088 observe_http_response`, `:356 feed_observing_mode`, `main.rs:2006/2093/2605` | **P** | **Ветви сверены:** C разбирает пакет/proto 6/thl; sport/dport 80 (ровно одна сторона); SYN без ACK → новый/сброс host, `ST_SYN`, t_syn/k_syn; нет потока → `untracked++`; ACK обновляет acked/progress; FIN\|RST при CUT → `cut_result`; данные в SYN/OPEN → `later++`; `ST_REQUEST` → request_feed; `OPEN/IDLE` + данные: `seq==client_next`, `request_prefix`, init/frames, IDLE server_next=ack, reset reply, request_no/seq/get, execution reset, `ST_REQUEST`, acked/reply_next, body flags, t_req/k_req, client_next, requests++; иначе DONE/unparsed. Обратно: SYN/ACK при SYN → rtt/krtt, server_next=seq+1, client_next=ack, OPEN; ANSWERED → DROP; не REQUEST (кроме FIN) → выход; seq-выравнивание (старый повтор/FIN/ gap→invalid); next_known/ack mismatch → invalid; reply_started; response_feed; reply_next; progress; fixed body_end/body_start; rtt/dt по t_req или krtt/k_req; портал `httpup_portal_location`; portal only if !interim && rtt && dt<rtt/2; known но не portal → response=3/INJECTED; complete/invalid → response 1/2, IDLE/DONE; portal → INJECTED/injections, response 1, rtt/reply_ns; только 1 сегмент; нужен `next_known && !request.length && https(host)`; build 307 и RST, окно/ttl/TC/flow/id из пакета; SWAP/REPLACE. Rust-аналоги разнесены по `hold.rs`/`http_replace.rs`/`main.rs`; состояния/поля иные, часть счётчиков отсутствует. D17 покрывает портал/307/поздний/дубль, не все ветви. |
 | `d2k_http80_swap` | 527-545 | 19 | вердикт с заменой + RST; ошибка → INJECTED, ACCEPT, swap_failed | `main.rs:2093 send_replacement`, `:2114 mark_http_response_answered`, `http_replace.rs` | **P** | **Ветви сверены:** C `!h\|\|!r\|\|!io\|\|action!=REPLACE\|\|flow>=128` → 0; `state!=SWAP` или ошибка `verdict_payload` → при SWAP вернуть INJECTED, `swap_failed++`, answered=0, `verdict_accept`, 0; успех → ANSWERED, `answered++`, answered=1, `send_rst`, 1. Rust `send_replacement`/`mark_http_response_answered`/`release_with`; те же исходы, счётчики/события иные. D17 проверяет исход, не сокет. |
 | `lc` (static) | 549-549 | 1 | ASCII-нижний регистр | `u8::to_ascii_lowercase` | **E** | C `('A'..='Z') ? c+32 : c`; Rust `to_ascii_lowercase()` понижает ровно `A..Z`, остальные байты не меняет. C-строка: `return (c>='A'&&c<='Z')?c+32:c;`; Rust `to_ascii_lowercase()`. |
-| `d2k_http_request` | 551-632 | 82 | строгий разбор: метод 1..20 заглавных, origin-form `/`, HTTP/1.x, ровно один Host:80, LDH/метки, не IPv4, framing | `r2k-core/src/httpup.rs:220-344 parse_request/parse_plan_request`, `:390-409 valid_dns_host` | **P** | **Совпадает:** метод 1..20 заглавных, origin-form, HTTP/1.0\|1.1, ровно один Host, порт только `:80`, снятие одной хвостовой точки, host ≤253, метки 1..63 без ведущего/хвостового `-`, последняя метка не из одних цифр, framing `head_len/end/end_known`. **Отличия:** (1) C возвращает 1, если Host найден, даже когда пустая строка/конец заголовка ещё не пришли (`head_len` остаётся 0); Rust `parse_plan_request` требует CRLF каждой строки и завершающую пустую строку (`find_crlf`), иначе None; (2) C принимает `#`/`\\`/`?` в target (проверяет только `>0x20` и `!=0x7f`), Rust отвергает `#`, control и `<=0x20`; (3) Rust учитывает Content-Length/Transfer-Encoding/Upgrade и вычисляет `end_offset`, C дополнительно прогоняет `d2k_http_request_stream`; (4) Rust требует input ≥16 байт, C — только до Host. |
+| `d2k_http_request` | 551-632 | 82 | строгий разбор: метод 1..20 заглавных, origin-form `/`, HTTP/1.x, ровно один Host:80, LDH/метки, не IPv4, framing | `r2k-core/src/httpup.rs` `parse_plan_request`/`r2o_http_plan_request` | **E*** | C/Rust differential `scripts/test-http-request-differential.sh` PASS: 15 кейсов — полный/частичный заголовок, `:80`/`:8080`, нет/два Host, хвостовая точка, IPv4-метка, нижний метод, absolute-form, плохая метка, TE, duplicate CL, Content-Length, отсутствие CRLF. Исправлено: неполная строка заголовка больше не отменяет уже найденный Host; `head_len=0`, `end_known=0`, как C. **Ограничение:** частичное перекрытие заголовка и точные 10-значные границы CL проверяются stream-дифференциалом. |
 
 `), Rust требует полный заголовок/`find_crlf`; C отвергает `#`/control в target, Rust — иные проверки `valid_dns_host`; C ограничивает method 20 символами, Rust — `parse_request`; C `d2k_http_request` возвращает 1 при завершённой строке Host без конца заголовка, Rust `parse_request` — только полный запрос. |
 | `d2k_http_hello` | 634-640 | 7 | `host_off/host_len` из `d2k_http_request` | `r2k-core/src/httpup.rs:175-177 request_host_range` | **P** | C-обёртка возвращает смещение/длину Host или 0; Rust `request_host_range` — `Range` из `r2o_http_plan_request` после полного разбора. Для полного валидного запроса эквивалентно; на префиксе C сработает, Rust — нет. |

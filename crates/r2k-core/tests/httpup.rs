@@ -8,6 +8,91 @@ const REQUEST: &[u8] =
 const PORTAL: &[u8] = b"HTTP/1.1 302 Found\r\nLocation: http://lawfilter.ertelecom.ru/deny?id=7\r\nContent-Length: 0\r\n\r\n";
 
 #[test]
+fn partial_header_keeps_known_host_like_c() {
+    // C `d2k_http_request`: неполная строка после Host не отменяет Host.
+    let partial = b"GET / HTTP/1.1\r\nHost: example.com\r\nX";
+    let request = r2k_core::httpup::r2o_http_plan_request(partial).unwrap();
+    assert_eq!(request.header_len, 0);
+    assert_eq!(request.end_offset, None);
+    assert_eq!(&partial[request.host_range.clone()], b"example.com");
+    assert!(!request_safe(partial));
+
+    let complete = b"GET / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\n";
+    let request = r2k_core::httpup::r2o_http_plan_request(complete).unwrap();
+    assert_eq!(request.header_len, complete.len());
+    assert_eq!(
+        request.end_offset,
+        Some(complete.len() + 5),
+        "framing includes Content-Length"
+    );
+}
+
+#[test]
+fn http_request_differential_matches_c() {
+    let cases: &[(&str, &[u8])] = &[
+        ("simple", b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"),
+        ("partial", b"GET / HTTP/1.1\r\nHost: example.com\r\nX"),
+        ("host80", b"GET / HTTP/1.1\r\nHost: example.com:80\r\n\r\n"),
+        (
+            "host8080",
+            b"GET / HTTP/1.1\r\nHost: example.com:8080\r\n\r\n",
+        ),
+        ("no_host", b"GET / HTTP/1.1\r\nContent-Length: 0\r\n\r\n"),
+        ("two_hosts", b"GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n"),
+        (
+            "trailing_dot",
+            b"GET / HTTP/1.1\r\nHost: example.com.\r\n\r\n",
+        ),
+        ("ipv4", b"GET / HTTP/1.1\r\nHost: 1.2.3.4\r\n\r\n"),
+        ("lower_method", b"get / HTTP/1.1\r\nHost: a\r\n\r\n"),
+        ("absolute", b"GET http://a/ HTTP/1.1\r\nHost: a\r\n\r\n"),
+        ("bad_label", b"GET / HTTP/1.1\r\nHost: -bad\r\n\r\n"),
+        (
+            "te",
+            b"GET / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n",
+        ),
+        (
+            "duplicate_cl",
+            b"GET / HTTP/1.1\r\nHost: a\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\n",
+        ),
+        (
+            "cl",
+            b"GET / HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\n\r\n",
+        ),
+        ("no_crlf", b"GET / HTTP/1.1\r\nHost: a\r\n"),
+    ];
+    let mut output = String::new();
+    for (name, bytes) in cases {
+        let request = r2k_core::httpup::r2o_http_plan_request(bytes);
+        let rc = u8::from(request.is_some());
+        output.push_str(&format!("{name} rc={rc} host="));
+        if let Some(request) = &request {
+            for byte in &bytes[request.host_range.clone()] {
+                output.push_str(&format!("{byte:02x}"));
+            }
+        }
+        if let Some(request) = request {
+            output.push_str(&format!(
+                " head={} end_known={} end={}\n",
+                request.header_len,
+                u8::from(request.end_offset.is_some()),
+                request.end_offset.unwrap_or(0)
+            ));
+        } else {
+            output.push_str(" head=0 end_known=0 end=0\n");
+        }
+    }
+    if let Ok(path) = std::env::var("R2O_HTTP_REQUEST_DIFF_OUTPUT") {
+        std::fs::write(path, &output).unwrap();
+    }
+    assert!(
+        output.contains("simple rc=1 host=6578616d706c652e636f6d head=37 end_known=1 end=37\n")
+    );
+    assert!(output.contains("partial rc=1 host=6578616d706c652e636f6d head=0 end_known=0 end=0\n"));
+    assert!(output.contains("host8080 rc=0 host= head=0 end_known=0 end=0\n"));
+}
+
+#[test]
 fn http_request_stream_differential_matches_c() {
     fn dump(output: &mut String, label: &str, stream: &R2oHttpRequestStream) {
         output.push_str(&format!(
@@ -145,7 +230,8 @@ fn returns_the_normalized_host_range_for_tcp_split_anchors() {
     assert_eq!(request_host_range(request), Some(27..39));
     assert_eq!(
         request_host_range(b"GET / HTTP/1.1\r\nHost: example.test\r\n"),
-        None
+        Some(22..34),
+        "C d2k_http_request keeps a known Host on an incomplete header"
     );
 }
 
