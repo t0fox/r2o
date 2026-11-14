@@ -291,6 +291,48 @@ int main(void) {
     }
 
     {
+        d2k_http80 *post = d2k_http80_new();
+        flow post_flow = flow4(56500);
+        const char *post_request =
+            "POST /login HTTP/1.1\r\nHost: RuTracker.org\r\nContent-Length: 0\r\n\r\n";
+        size_t n = packet(&post_flow, 1, F_SYN, CISN, 0, NULL, b);
+        d2k_http80_packet(post, b, n, T, 0, out, sizeof out, rst, sizeof rst, &r);
+        n = packet(&post_flow, 0, F_SYN | F_ACK, SISN, CISN + 1, NULL, b);
+        d2k_http80_packet(post, b, n, T + 98 * MS, 0, out, sizeof out, rst,
+                          sizeof rst, &r);
+        n = packet(&post_flow, 1, F_ACK | F_PSH, CISN + 1, SISN + 1,
+                   post_request, b);
+        d2k_http80_packet(post, b, n, T + 99 * MS, 0, out, sizeof out, rst,
+                          sizeof rst, &r);
+        n = packet(&post_flow, 0, F_ACK | F_PSH | F_FIN, SISN + 1,
+                   CISN + 1 + (uint32_t)strlen(post_request), INJECT, b);
+        d2k_http80_packet(post, b, n, T + 99 * MS + 700000ull, 0, out,
+                          sizeof out, rst, sizeof rst, &r);
+        printf("D17 post action=%s response=%d portal=%d\n",
+               action_name(r.action), r.response, r.injection);
+        print_http_stats("post", post);
+        d2k_http80_free(post);
+    }
+
+    {
+        d2k_http80 *bad = d2k_http80_new();
+        flow bad_flow = flow4(56700);
+        const char *bad_request =
+            "GET /a#b HTTP/1.1\r\nHost: RuTracker.org\r\n\r\n";
+        size_t n = packet(&bad_flow, 1, F_SYN, CISN, 0, NULL, b);
+        d2k_http80_packet(bad, b, n, T, 0, out, sizeof out, rst, sizeof rst, &r);
+        n = packet(&bad_flow, 0, F_SYN | F_ACK, SISN, CISN + 1, NULL, b);
+        d2k_http80_packet(bad, b, n, T + 98 * MS, 0, out, sizeof out, rst,
+                          sizeof rst, &r);
+        n = packet(&bad_flow, 1, F_ACK | F_PSH, CISN + 1, SISN + 1,
+                   bad_request, b);
+        d2k_http80_packet(bad, b, n, T + 99 * MS, 0, out, sizeof out, rst,
+                          sizeof rst, &r);
+        print_http_stats("bad-target", bad);
+        d2k_http80_free(bad);
+    }
+
+    {
         d2k_http80 *v6 = d2k_http80_new();
         flow v6_flow = flow6(54000);
         open_flow(v6, &v6_flow, T);

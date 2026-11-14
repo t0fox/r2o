@@ -657,6 +657,11 @@ impl HoldTable {
                 // C `d2k_http80_packet`: request_prefix не разобрал запрос.
                 self.http80.unparsed = self.http80.unparsed.saturating_add(1);
             }
+            if !complete && payload.windows(4).any(|window| window == b"\r\n\r\n") {
+                // Заголовок уже целиком пришёл, но request-line негоден:
+                // C сразу ставит DONE и считает unparsed.
+                self.http80.unparsed = self.http80.unparsed.saturating_add(1);
+            }
         }
         let r2o_next_http_request =
             (r2o_http_request_candidate || r2o_http_capture_active) && r2o_http_followup;
@@ -752,6 +757,10 @@ impl HoldTable {
                                 now,
                             },
                         );
+                    } else {
+                        // C `request_prefix`: не GET/HEAD или негодная
+                        // request-line — `unparsed++`, поток не ведётся.
+                        self.http80.unparsed = self.http80.unparsed.saturating_add(1);
                     }
                     self.syns[anchor_index].saw_hello = true;
                     self.capture.forget(&key);
@@ -1117,6 +1126,12 @@ impl HoldTable {
             rtt,
             now,
         } = observation;
+        // C `request_prefix` принимает только `GET `/`HEAD `: остальные
+        // методы в HTTP/80 не ведутся и попадают в `unparsed`.
+        if !(request.starts_with(b"GET ") || request.starts_with(b"HEAD ")) {
+            self.http80.unparsed = self.http80.unparsed.saturating_add(1);
+            return;
+        }
         self.http80.requests = self.http80.requests.saturating_add(1);
         self.http_requests
             .retain(|flow| now.saturating_duration_since(flow.seen) <= HTTP_FLOW_IDLE);
@@ -3221,6 +3236,35 @@ mod tests {
                 _ => 0,
             };
             println!("D17 find-miss action={action} response={response}");
+        }
+
+        {
+            let post_request: &[u8] =
+                b"POST /login HTTP/1.1\r\nHost: RuTracker.org\r\nContent-Length: 0\r\n\r\n";
+            let mut post = d17_start(start, options, post_request);
+            let post_end = 2001 + post_request.len() as u32;
+            let result = post.feed_observing(
+                4,
+                &http_response_packet(9001, post_end, 0x18, response),
+                start + Duration::from_millis(12),
+                options,
+            );
+            let (action, portal) = d17_action(&result, false);
+            let response_code = match &result.outcome {
+                HoldOutcome::HttpResponse { event, .. } => event.code,
+                _ => 0,
+            };
+            println!(
+                "D17 post action={action} response={response_code} portal={}",
+                u8::from(portal)
+            );
+            d17_stats("post", &post);
+        }
+
+        {
+            let bad_request: &[u8] = b"GET /a#b HTTP/1.1\r\nHost: RuTracker.org\r\n\r\n";
+            let bad = d17_start(start, options, bad_request);
+            d17_stats("bad-target", &bad);
         }
 
         {
