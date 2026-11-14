@@ -156,5 +156,21 @@ int main(void) {
         done(s, h, f);
     }
 
+    {
+        d2k_udp_hold *h; d2k_udp_follow *f;
+        d2k_session *s = fresh(&h, &f);
+        size_t pn = unnamed_initial(pay, 1);
+        size_t n = build(pkt, 5, 50104, pay, pn);
+        int pre = d2k_udp_path_pre(&path, 5, pkt, n, 0, 1000, &key);
+        memset(&result, 0, sizeof result);
+        (void)d2k_session_packet(s, pkt, n, 1000, buf, sizeof buf, &result);
+        memset(&batch, 0, sizeof batch);
+        result.udp_hold_wait = 0;
+        result.udp_hold_ready = 1;
+        int post = d2k_udp_path_post(&path, 1, &key, &result, &batch);
+        printf("E pre=%d post=%d count=%zu\n", pre, post, batch.count);
+        done(s, h, f);
+    }
+
     return 0;
 }
