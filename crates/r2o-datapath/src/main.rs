@@ -477,7 +477,9 @@ mod app {
         mut is_neutral: impl FnMut(&R2oUdpHeldPacket) -> bool,
         mut resend: impl FnMut(&R2oUdpHeldPacket) -> io::Result<()>,
         mut send_verdict: impl FnMut(u32, u32) -> io::Result<()>,
-    ) {
+    ) -> (bool, usize) {
+        let mut complete = true;
+        let mut sent = 0_usize;
         let head_fate = if completed {
             fate
         } else if fate == OriginalFate::Drop && payload_on_wire {
@@ -487,8 +489,12 @@ mod app {
         };
         let payload_sent = completed || payload_on_wire;
         if !head_already_released && let Some(head) = packets.first() {
-            if let Err(error) = release_with(head.id, head_fate, payload_sent, &mut send_verdict) {
-                eprintln!("r2o-datapath: не выдан вердикт отложенной UDP-головы: {error}");
+            match release_with(head.id, head_fate, payload_sent, &mut send_verdict) {
+                Ok(()) => sent += 1,
+                Err(error) => {
+                    complete = false;
+                    eprintln!("r2o-datapath: не выдан вердикт отложенной UDP-головы: {error}");
+                }
             }
         }
         for tail in packets.iter().skip(1) {
@@ -502,14 +508,18 @@ mod app {
                     NF_ACCEPT
                 };
             if let Err(error) = send_verdict(tail.id, verdict) {
+                complete = false;
                 eprintln!("r2o-datapath: не выдан вердикт отложенного UDP-хвоста: {error}");
                 if verdict == NF_DROP
                     && let Err(fallback) = send_verdict(tail.id, NF_ACCEPT)
                 {
                     eprintln!("r2o-datapath: не выдан ACCEPT отложенного UDP-хвоста: {fallback}");
                 }
+            } else {
+                sent += 1;
             }
         }
+        (complete, sent)
     }
 
     fn r2o_complete_delayed_udp_batch(
@@ -517,9 +527,14 @@ mod app {
         raw: Option<&RawSocket>,
         route_gate: &R2oRouteGate,
         probe_mark: u32,
+        tcp_sessions: &mut TcpSessions,
+        udp_sessions: &mut R2oUdpSessions,
         batch: PendingUdpRelease,
     ) {
-        r2o_release_delayed_udp_batch_with(
+        let packet = batch.packets.first().map(|head| head.packet.clone());
+        let execution = batch.r2o_execution;
+        let fate = batch.fate;
+        let (complete, sent) = r2o_release_delayed_udp_batch_with(
             &batch.packets,
             batch.fate,
             batch.payload_on_wire,
@@ -534,6 +549,60 @@ mod app {
             |packet| raw.expect("raw-сокет проверен").send_packet(&packet.packet),
             |id, verdict| queue.send_verdict(id, verdict),
         );
+        r2o_delayed_verdict_done(
+            tcp_sessions,
+            udp_sessions,
+            execution,
+            packet.as_deref(),
+            complete,
+            sent,
+            fate,
+        );
+    }
+
+    /// C `delayed_verdict_done` (`d2kd.c:433-446`): token 0 — не исполнение
+    /// плана; complete → `session_sent`; иначе `exec_failed(REFUSE_SEND)`.
+    fn r2o_delayed_verdict_done(
+        tcp_sessions: &mut TcpSessions,
+        udp_sessions: &mut R2oUdpSessions,
+        execution: Option<R2oTcpExecution>,
+        packet: Option<&[u8]>,
+        complete: bool,
+        sent: usize,
+        fate: OriginalFate,
+    ) {
+        let Some(execution) = execution else {
+            return;
+        };
+        if execution.id == 0 {
+            return;
+        }
+        if execution.key[37] == 6 {
+            if complete {
+                if !tcp_sessions.r2o_mark_plan_done_for_execution(&execution.key, execution.id) {
+                    tcp_sessions.r2o_note_sent_lost();
+                }
+            } else {
+                let original_taken = tcp_sessions.r2o_orig_taken(&execution.key).unwrap_or(false);
+                if sent != 0 && original_taken {
+                    tcp_sessions.r2o_mark_damaged_for_execution(&execution.key, execution.id);
+                } else {
+                    tcp_sessions
+                        .r2o_mark_execution_failed_for_execution(&execution.key, execution.id);
+                }
+            }
+        } else if !complete && let Some(packet) = packet {
+            // C UDP-ветка `d2k_session_exec_failed`: payload_on_wire=0,
+            // orig_spent = sent != 0; Rust plan_applied сбрасывается →
+            // повторный Initial снова получает план.
+            udp_sessions.r2o_note_execution_failure(
+                packet,
+                sent != 0,
+                false,
+                sent != 0,
+                fate == OriginalFate::Drop,
+            );
+        }
     }
 
     fn r2o_cancel_delayed_udp_batch(
@@ -668,6 +737,8 @@ mod app {
         fate: OriginalFate,
         payload_on_wire: bool,
         head_already_released: bool,
+        /// C `d2k_udp_release` token: key/execution отложенной пачки.
+        r2o_execution: Option<R2oTcpExecution>,
     }
 
     struct Options {
@@ -3072,6 +3143,16 @@ mod app {
                                                         fate,
                                                         payload_on_wire,
                                                         head_already_released,
+                                                        r2o_execution: tcp_execution.or_else(
+                                                            || {
+                                                                applied_candidate.as_ref().map(
+                                                                    |event| R2oTcpExecution {
+                                                                        key: event.key,
+                                                                        id: event.execution_id,
+                                                                    },
+                                                                )
+                                                            },
+                                                        ),
                                                     },
                                                 );
                                             }
@@ -3168,6 +3249,14 @@ mod app {
                                                 fate,
                                                 payload_on_wire,
                                                 head_already_released: false,
+                                                r2o_execution: tcp_execution.or_else(|| {
+                                                    applied_candidate.as_ref().map(|event| {
+                                                        R2oTcpExecution {
+                                                            key: event.key,
+                                                            id: event.execution_id,
+                                                        }
+                                                    })
+                                                }),
                                             };
                                             udp_head_verdict =
                                                 if fate == OriginalFate::Drop && payload_on_wire {
@@ -5147,6 +5236,8 @@ mod app {
                         Some(raw),
                         route_gate,
                         probe_mark,
+                        tcp_sessions,
+                        udp_sessions,
                         pending,
                     );
                 }
@@ -8613,6 +8704,130 @@ mod app {
             // Без raw-сокета C-путь недостижим; Rust честно считает все
             // оригиналы неотправленными.
             assert_eq!(super::r2o_resend_owned_originals(None, &originals), 3);
+        }
+
+        #[test]
+        fn delayed_verdict_done_повторяет_ветви_c() {
+            use super::{
+                OriginalFate, Plan, R2oTcpExecution, R2oUdpSessions, TcpSessions,
+                r2o_delayed_verdict_done,
+            };
+            use r2o_datapath::engine::decide_with_session;
+
+            let mut packet = vec![0; 28];
+            packet[0] = 0x45;
+            packet[2..4].copy_from_slice(&28_u16.to_be_bytes());
+            packet[8] = 64;
+            packet[9] = 17;
+            packet[12..16].copy_from_slice(&[192, 0, 2, 10]);
+            packet[16..20].copy_from_slice(&[198, 51, 100, 20]);
+            packet[20..22].copy_from_slice(&50000_u16.to_be_bytes());
+            packet[22..24].copy_from_slice(&443_u16.to_be_bytes());
+            packet[24..26].copy_from_slice(&8_u16.to_be_bytes());
+            let key = r2o_datapath::control::flow_journal_key_for_packet(&packet).unwrap();
+            let execution = R2oTcpExecution { key, id: 42 };
+
+            // token 0 (нет исполнения) — ничего не меняет, как C.
+            let mut udp = R2oUdpSessions::new().unwrap();
+            assert!(udp.observe_packet(&packet, Instant::now()));
+            assert!(udp.r2o_mark_plan_applied(&packet));
+            r2o_delayed_verdict_done(
+                &mut TcpSessions::default(),
+                &mut udp,
+                None,
+                Some(&packet),
+                false,
+                0,
+                OriginalFate::Drop,
+            );
+            assert!(udp.r2o_plan_applied(&packet), "token=0 не трогает план");
+
+            // complete=true: для UDP план уже отмечен применённым.
+            r2o_delayed_verdict_done(
+                &mut TcpSessions::default(),
+                &mut udp,
+                Some(execution),
+                Some(&packet),
+                true,
+                2,
+                OriginalFate::Drop,
+            );
+            assert!(udp.r2o_plan_applied(&packet));
+
+            // incomplete + sent!=0: C exec_failed → udp_replan/повтор Initial.
+            r2o_delayed_verdict_done(
+                &mut TcpSessions::default(),
+                &mut udp,
+                Some(execution),
+                Some(&packet),
+                false,
+                1,
+                OriginalFate::Drop,
+            );
+            assert!(!udp.r2o_plan_applied(&packet), "потеря даёт повтор плана");
+
+            // incomplete + sent==0: оригинал цел, план не сбрасывается.
+            let mut intact = R2oUdpSessions::new().unwrap();
+            assert!(intact.observe_packet(&packet, Instant::now()));
+            assert!(intact.r2o_mark_plan_applied(&packet));
+            r2o_delayed_verdict_done(
+                &mut TcpSessions::default(),
+                &mut intact,
+                Some(execution),
+                Some(&packet),
+                false,
+                0,
+                OriginalFate::Drop,
+            );
+            assert!(intact.r2o_plan_applied(&packet));
+
+            // TCP complete: session_sent завершает исполнение.
+            let mut syn = vec![0; 40];
+            syn[0] = 0x45;
+            syn[2..4].copy_from_slice(&40_u16.to_be_bytes());
+            syn[8] = 64;
+            syn[9] = 6;
+            syn[12..16].copy_from_slice(&[192, 0, 2, 10]);
+            syn[16..20].copy_from_slice(&[198, 51, 100, 20]);
+            syn[20..22].copy_from_slice(&41000_u16.to_be_bytes());
+            syn[22..24].copy_from_slice(&443_u16.to_be_bytes());
+            syn[24..28].copy_from_slice(&700_u32.to_be_bytes());
+            syn[32] = 0x50;
+            syn[33] = 0x02;
+            let mut tcp = TcpSessions::default();
+            decide_with_session(&mut tcp, &Plan::default(), &syn);
+            let tcp_key = tcp.r2o_begin_execution(&syn, 43, 0, false).unwrap();
+            r2o_delayed_verdict_done(
+                &mut tcp,
+                &mut udp,
+                Some(R2oTcpExecution {
+                    key: tcp_key,
+                    id: 43,
+                }),
+                None,
+                true,
+                0,
+                OriginalFate::Drop,
+            );
+            assert_eq!(tcp.session_done(), 1);
+
+            // TCP incomplete + sent!=0 + orig_taken: порча потока.
+            let mut tcp2 = TcpSessions::default();
+            decide_with_session(&mut tcp2, &Plan::default(), &syn);
+            let tcp_key2 = tcp2.r2o_begin_execution(&syn, 44, 0, true).unwrap();
+            r2o_delayed_verdict_done(
+                &mut tcp2,
+                &mut udp,
+                Some(R2oTcpExecution {
+                    key: tcp_key2,
+                    id: 44,
+                }),
+                None,
+                false,
+                1,
+                OriginalFate::Drop,
+            );
+            assert!(tcp2.session_flow_damaged(&tcp_key2));
         }
 
         #[test]

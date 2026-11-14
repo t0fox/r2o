@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 338 | 210 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 380 | 20 | 0 | 0 |
+| datapath-core | 400 | 381 | 19 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1480** | **502** | **0** | **0** |
+| **Итого** | **1982** | **1481** | **501** | **0** | **0** |
 
-Это не оценка паритета: 502 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 501 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1480 / P 502 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1481 / P 501 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 338 | 210 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 380 | 20 | 0 | 0 |
+| datapath-core | 400 | 381 | 19 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1480** | **502** | **0** | **0** |
+| **Итого** | **1982** | **1481** | **501** | **0** | **0** |
 
 
 ---
@@ -3699,7 +3699,7 @@ R2O-владелец: `crates/r2o-datapath/src/main.rs` (`run`, `parse_options`,
 | `cap_refresh` (static) | 372-415 | 44 | adopt egress MTU → grow sched → greet control | `raw.rs:106 r2o_adopt_egress`, `scheduler.rs:260 grow_slot_size`, `main.rs` greet | **P** | **Ветви сверены:** C собирает oif4/oif6, `!n` → return; `d2k_raw_adopt_egress`, adopted<0 → return; лог при adopted>0; `d2k_sched_grow_slot_size(after)`, ошибка → лог один раз и return; если `send_maxlen==after` → return; иначе обновляет и `d2k_ctlsrv_greet`. Rust `r2o_adopt_egress`/`grow_slot_size`/greet; ветви реализованы, прямого differential нет. |
 | `send_original_verdict` (static) | 417-427 | 11 | вердикт NFQUEUE + счётчики accepted/dropped | `nfqueue.rs:347 send_verdict`, `:336 record_verdict`, `:325 record_verdict_failure` | **E*** | C `d2k_nfq_verdict`; ошибка → `verdict_fail++` и лог; иначе `DROP→dropped`, любой другой вердикт → `accepted`. Rust `send_verdict` на ошибке зовёт `record_verdict_failure` и возвращает `Err` (вызывающий пишет лог), на успехе — `record_verdict(action)` с тем же тернарным правилом. Тест `record_verdict_counts_accept_drop_and_failure_like_c` (ACCEPT/DROP/DROP/failure → 2/2/1). Побайтовые тесты netlink-вердикта уже есть. **Ограничение:** C возвращает `rc` наружу, Rust — `io::Result`. |
 | `send_delayed_verdict` (static) | 429-431 | 3 | обёртка вердикта отложенной выдачи | `main.rs` `r2o_release_delayed_udp_batch_with` → `QueueSocket::send_verdict` | **E*** | C дословно `return send_original_verdict(ctx,id,verdict)`. Rust выпускает отложенные вердикты тем же `send_verdict` (счётчики/ошибка как выше); отдельной обёртки нет. Тест `deferred_verdicts_enqueue_flush_and_full_match_c` покрывает порядок/срок/полную очередь. **Ограничение:** API-обёртки нет — поведение выражено вызовом. |
-| `delayed_verdict_done` (static) | 433-446 | 14 | complete → `session_sent`, иначе `exec_failed(REFUSE_SEND)` | `main.rs:411 r2o_finish_tcp_execution`, `:319` | **P** | C `execution==0` → return; `complete` → `session_sent(at,key,execution)`; иначе `session_exec_failed(..., D2K_REFUSE_SEND, execution, 0, sent!=0)`. Rust `r2o_finish_tcp_execution`/release; ветви token=0/complete/sent!=0 реализованы, прямого теста нет. |
+| `delayed_verdict_done` (static) | 433-446 | 14 | complete → `session_sent`, иначе `exec_failed(REFUSE_SEND)` | `main.rs` `r2o_delayed_verdict_done`, `r2o_complete_delayed_udp_batch` | **E*** | C: `execution==0` → выход; `complete` → `session_sent`; иначе `session_exec_failed(..., REFUSE_SEND, execution, payload_on_wire=0, orig_spent=sent!=0)`. Rust `PendingUdpRelease` теперь хранит key/id исполнения; `r2o_release_delayed_udp_batch_with` возвращает `(complete,sent)` по вердиктам, `r2o_delayed_verdict_done` повторяет ветви: token 0 — no-op; TCP complete — `r2o_mark_plan_done_for_execution` (иначе `sent_lost`); TCP incomplete — damaged/unsent по sent/orig_taken; UDP incomplete — `r2o_note_execution_failure` сбрасывает `plan_applied`. Тест `delayed_verdict_done_повторяет_ветви_c`: token 0, complete UDP, incomplete sent=1 → повтор плана, sent=0 → план цел, TCP complete → `session_done=1`, TCP incomplete+orig_taken → damaged. **Ограничение:** C вызывает `session_sent` один раз на пачку; Rust завершает оставшиеся посылки сразу (модель `r2o_finish_tcp_execution`). Для UDP complete отдельного счётчика посылок нет — `plan_applied` уже стоит. |
 | `hold_owns` (static) | 484-489 | 6 | TLS-hold владеет ID, если это не порт 80 | `hold.rs` `current_owned = own_packets && destination.port != 80`, `main.rs` `own_packets: raw.is_some()` | **E*** | C/Rust differential D6 `scripts/test-datapath-hold-differential.sh` PASS: 15 кейсов ownership/release, `OwnedWaiting`/`OwnedReady`, повторная посылка оригиналов. Предикат C `c->raw && parse && dst_port != 80` разложен на `own_packets = raw.is_some()` и `destination.port != 80`; отказ `d2k_hold_parse` соответствует отсутствию владения в `feed`. **Ограничение:** сам порт-80-исключающий предикат в D6-оракуле не входит — он проверен по коду; полный HTTP/80 путь покрыт D17. |
 | `resend_original` (static) | 493-508 | 16 | вернуть снятый оригинал raw-посылкой; до 16 строк лога | `main.rs:3794 r2o_resend_owned_originals` | **P** | C `raw_prepare`+`raw_send`; ошибка → `hold_resend_fail++/send_fail++`, лог первых 16, -1; иначе `hold_resent++/emitted++/emitted_now++`. Rust `r2o_resend_owned_originals`; тест `hold.rs:2167` покрывает владение, не сокет. |
 | `resend_originals` (static) | 510-516 | 7 | цикл по `orig[]`, вернуть число ошибок | `main.rs` `r2o_resend_originals_with`, `r2o_resend_owned_originals` | **E*** | C зовёт `resend_original` на каждый оригинал и считает ошибки; Rust `r2o_resend_originals_with` проходит все элементы и возвращает число отказов, production-обёртка шлёт через `RawSocket` с теми же счётчиками/логом. **Исправлено:** в ветке `TransmissionOutcome::Complete` результат теперь используется как C `original_failed`: `!= 0` → `r2o_finish_tcp_execution(false, payload_on_wire=0, orig_spent=1, orig_taken=1)` + журнал REFUSE_SEND/DAMAGED, а не «план доисполнен». Тест `resend_originals_считает_ошибки_и_пробует_все_как_c` (3 элемента, средний падает → failed=1, попытки все; пусто → 0; нет raw → все неотправлены). **Ограничение:** остальные call-site’ы игнорируют счётчик — там C тоже зовёт `resend_original` без использования результата (release_original). |
