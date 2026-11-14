@@ -2,7 +2,7 @@
 
 use crate::response::{HttpsProbeState, probe_https_state};
 use r2k_core::control::{HttpPortalEvent, HttpResponseEvent, KEY_LEN};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -19,6 +19,9 @@ pub const VERIFIED_TTL_SECONDS: u32 = 6 * 60 * 60;
 const QUEUE_CAPACITY: usize = 16;
 const CACHE_CAPACITY: usize = 128;
 const HTTPS_PROBE_IDLE: Duration = Duration::from_secs(10);
+/// C `cache_put(PROBING, now + PROBE_MS * 4)`: имя можно перепроверить после
+/// 10 секунд, даже если результат потерялся в полном `done[]`.
+const HTTPS_PROBING_TTL: Duration = Duration::from_secs(10);
 
 struct Job {
     host: String,
@@ -161,7 +164,8 @@ pub struct HttpsProbeWorker {
     wake_write: Option<UnixStream>,
     mark: Option<u32>,
     thread: Option<JoinHandle<()>>,
-    pending: HashSet<String>,
+    /// C `PROBING`-запись: имя и момент постановки; по TTL снимается.
+    pending: HashMap<String, Instant>,
     /// C `d2k_httpsprobe.lost`: результаты, не влезшие в `done[17]`.
     /// Заполненная очередь заданий, наоборот, просто не принимает новое имя.
     lost: Arc<AtomicU64>,
@@ -201,7 +205,7 @@ impl HttpsProbeWorker {
             wake_write,
             mark,
             thread: None,
-            pending: HashSet::new(),
+            pending: HashMap::new(),
             lost: Arc::new(AtomicU64::new(0)),
             cache: Vec::new(),
         };
@@ -278,10 +282,16 @@ impl HttpsProbeWorker {
         self.thread = thread;
     }
 
+    fn expire_pending(&mut self, now: Instant) {
+        self.pending
+            .retain(|_, started| now.saturating_duration_since(*started) < HTTPS_PROBING_TTL);
+    }
+
     pub fn submit(&mut self, host: &str, address: SocketAddr, now: Instant) -> bool {
         let host = host.to_ascii_lowercase();
+        self.expire_pending(now);
         if !cache_host_ok(&host)
-            || self.pending.contains(&host)
+            || self.pending.contains_key(&host)
             || cache_find(&self.cache, &host).is_some_and(|index| self.cache[index].expires > now)
         {
             return false;
@@ -296,7 +306,7 @@ impl HttpsProbeWorker {
         };
         match jobs.try_send(job) {
             Ok(()) => {
-                self.pending.insert(host);
+                self.pending.insert(host, now);
                 true
             }
             Err(TrySendError::Full(_)) => {
@@ -310,7 +320,7 @@ impl HttpsProbeWorker {
                     return false;
                 };
                 if jobs.try_send(job).is_ok() {
-                    self.pending.insert(host);
+                    self.pending.insert(host, now);
                     true
                 } else {
                     false
@@ -362,7 +372,9 @@ impl HttpsProbeWorker {
     }
 
     pub fn is_pending(&self, host: &str) -> bool {
-        self.pending.contains(&host.to_ascii_lowercase())
+        self.pending
+            .get(&host.to_ascii_lowercase())
+            .is_some_and(|started| started.elapsed() < HTTPS_PROBING_TTL)
     }
 
     pub fn try_result(&mut self) -> Option<HttpsProbeResult> {
@@ -664,7 +676,7 @@ mod tests {
             stamp: now,
             state: HttpsProbeState::Served,
         });
-        worker.pending.insert("pending.example".into());
+        worker.pending.insert("pending.example".into(), now);
 
         assert_eq!(
             worker.cached_state("EXAMPLE.COM", now),
@@ -676,6 +688,10 @@ mod tests {
         );
         assert!(worker.is_pending("PENDING.EXAMPLE"));
         assert!(!worker.is_pending("missing.example"));
+        worker
+            .pending
+            .insert("stale.example".into(), now - super::HTTPS_PROBING_TTL);
+        assert!(!worker.is_pending("stale.example"));
     }
 
     #[test]
@@ -1014,7 +1030,7 @@ mod tests {
             wake_write: None,
             mark: None,
             thread: Some(thread),
-            pending: std::collections::HashSet::new(),
+            pending: std::collections::HashMap::new(),
             lost: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cache: Vec::new(),
         };
@@ -1089,7 +1105,7 @@ mod tests {
             wake_write: None,
             mark: None,
             thread: Some(thread),
-            pending: std::collections::HashSet::new(),
+            pending: std::collections::HashMap::new(),
             lost: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cache: Vec::new(),
         };
