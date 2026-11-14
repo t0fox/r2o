@@ -1590,8 +1590,8 @@ fn synthetic_packet(head: &[u8], hello: &[u8]) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Endpoint, HOLD_WAIT, HTTP_FLOW_CAPACITY, HoldOptions, HoldOutcome, HoldTable,
-        HttpRequestObservation,
+        Endpoint, HOLD_WAIT, HTTP_FLOW_CAPACITY, HeldFlow, HeldPacket, HoldKind, HoldOptions,
+        HoldOutcome, HoldTable, HttpRequestObservation,
     };
     use crate::capture::TcpFlowKey;
     use r2k_core::addr::Address;
@@ -3687,5 +3687,64 @@ mod tests {
             println!("D17 https-fail-late action={action}");
             d17_stats("https-fail", &fail);
         }
+    }
+
+    #[test]
+    fn release_slot_возвращает_все_id_и_owned_как_c() {
+        // C `release_slot` (hold.c:43-51): callback на каждый пакет,
+        // stats.released++, pending-=count; capture.forget делает вызывающий.
+        let now = Instant::now();
+        let mut hold = HoldTable::default();
+        let key = TcpFlowKey {
+            low_address: Address::parse("192.0.2.10").unwrap(),
+            high_address: Address::parse("198.51.100.20").unwrap(),
+            low_port: 41000,
+            high_port: 443,
+        };
+        hold.stats.pending = 3;
+        hold.slots.push(HeldFlow {
+            key,
+            client: Endpoint {
+                address: Address::parse("192.0.2.10").unwrap(),
+                port: 41000,
+            },
+            acknowledgment: 0,
+            generation: 1,
+            revision: 0,
+            deadline: now,
+            anchor: 0,
+            kind: HoldKind::Tls,
+            packets: vec![
+                HeldPacket {
+                    id: 10,
+                    sequence: 1,
+                    bytes: vec![1, 2],
+                    owned: false,
+                },
+                HeldPacket {
+                    id: 11,
+                    sequence: 2,
+                    bytes: vec![3, 4],
+                    owned: true,
+                },
+                HeldPacket {
+                    id: 12,
+                    sequence: 3,
+                    bytes: vec![5, 6],
+                    owned: false,
+                },
+            ],
+        });
+
+        let released = hold.remove_slot(0);
+        assert_eq!(released, vec![10, 12]);
+        assert_eq!(hold.stats.released, 3);
+        assert_eq!(hold.stats.pending, 0);
+        assert!(hold.slots.is_empty());
+        assert_eq!(
+            hold.r2o_take_observe_releases(),
+            vec![vec![1, 2], vec![3, 4], vec![5, 6]]
+        );
+        assert_eq!(hold.r2o_take_owned_releases(), vec![vec![3, 4]]);
     }
 }
