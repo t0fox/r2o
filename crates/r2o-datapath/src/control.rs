@@ -89,7 +89,7 @@ pub struct NamePlans {
     voice_addr_plans: HashMap<Ipv4Addr, InstalledPlan>,
     voice_addr_probes: HashMap<VoiceProbeKey, VoiceProbePlan>,
     addr_probes: HashMap<[u8; control::KEY_LEN], AddrProbePlan>,
-    https_names: HashMap<String, Instant>,
+    https_names: Vec<HttpsNameSlot>,
     exact_capacity: usize,
     plan_clock: Cell<u64>,
     /// C `next_binding`: монотонный номер привязки, не зависящий от revision.
@@ -125,6 +125,53 @@ struct AddrProbePlan {
     trial_id: [u8; 16],
     generation: u64,
     expires: Instant,
+}
+
+/// C `char name[254]` + `uint64_t expires` (`datapath/http80.c:23-27`):
+/// фиксированные 256 слотов, вытеснение по минимальному `expires` с выбором
+/// первого слота при равенстве — порядок слотов наблюдаем.
+const HTTPS_NAME_BYTES: usize = 254;
+
+#[derive(Clone, Copy)]
+struct HttpsNameSlot {
+    name: [u8; HTTPS_NAME_BYTES],
+    len: u16,
+    expires: Option<Instant>,
+}
+
+impl Default for HttpsNameSlot {
+    fn default() -> Self {
+        Self {
+            name: [0; HTTPS_NAME_BYTES],
+            len: 0,
+            expires: None,
+        }
+    }
+}
+
+impl HttpsNameSlot {
+    fn matches(&self, host: &[u8]) -> bool {
+        let len = usize::from(self.len);
+        len != 0 && &self.name[..len] == host
+    }
+
+    fn is_free(&self) -> bool {
+        self.len == 0
+    }
+
+    fn assign(&mut self, host: &[u8], expires: Instant) {
+        self.name = [0; HTTPS_NAME_BYTES];
+        let len = host.len().min(HTTPS_NAME_BYTES - 1);
+        self.name[..len].copy_from_slice(&host[..len]);
+        self.len = len as u16;
+        self.expires = Some(expires);
+    }
+
+    fn clear(&mut self) {
+        self.name = [0; HTTPS_NAME_BYTES];
+        self.len = 0;
+        self.expires = None;
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -165,7 +212,7 @@ impl NamePlans {
             voice_addr_plans: HashMap::new(),
             voice_addr_probes: HashMap::new(),
             addr_probes: HashMap::new(),
-            https_names: HashMap::new(),
+            https_names: vec![HttpsNameSlot::default(); MAX_HTTPS_NAMES],
             exact_capacity: exact_capacity.max(1),
             plan_clock: Cell::new(0),
             binding_generation: Cell::new(0),
@@ -366,7 +413,9 @@ impl NamePlans {
                     self.voice_addr_plans.clear();
                     self.voice_addr_probes.clear();
                     self.addr_probes.clear();
-                    self.https_names.clear();
+                    for slot in &mut self.https_names {
+                        slot.clear();
+                    }
                     (true, control::ACK_OK)
                 }
                 COMMAND_CLEAR => (false, control::ACK_BAD_ARGS),
@@ -693,12 +742,12 @@ impl NamePlans {
     }
 
     pub fn has_verified_https(&self, host: &[u8], now: Instant) -> bool {
-        let Some(host) = canonical_name(host) else {
+        let Some(host) = canonical_https_name(host) else {
             return false;
         };
-        self.https_names
-            .get(&host)
-            .is_some_and(|expires| *expires > now)
+        self.https_names.iter().any(|slot| {
+            slot.matches(host.as_bytes()) && slot.expires.is_some_and(|expires| expires > now)
+        })
     }
 
     /// Удаляет временные испытания после отключения контроллера.
@@ -1264,13 +1313,17 @@ impl NamePlans {
     }
 
     fn set_https(&mut self, body: &[u8]) -> (bool, u8) {
+        self.set_https_at(body, Instant::now())
+    }
+
+    fn set_https_at(&mut self, body: &[u8], now: Instant) -> (bool, u8) {
         let Some(name_len) = body.first().copied().map(usize::from) else {
             return (false, control::ACK_BAD_ARGS);
         };
         if name_len == 0 || body.len() != name_len + 5 {
             return (false, control::ACK_BAD_ARGS);
         }
-        let Some(host) = canonical_name(&body[1..1 + name_len]) else {
+        let Some(host) = canonical_https_name(&body[1..1 + name_len]) else {
             return (false, control::ACK_BAD_ARGS);
         };
         let ttl = u32::from_be_bytes(
@@ -1282,22 +1335,37 @@ impl NamePlans {
         // суток (`ctlsrv.c:446`): иначе команда, которую C принял бы,
         // возвращала бы ACK_BAD_ARGS.
         let ttl = ttl.min(MAX_HTTPS_TTL_SECONDS);
+        let existing = self
+            .https_names
+            .iter()
+            .position(|slot| slot.matches(host.as_bytes()));
         if ttl == 0 {
-            self.https_names.remove(&host);
+            if let Some(index) = existing {
+                self.https_names[index].clear();
+            }
             return (true, control::ACK_OK);
         }
-        if !self.https_names.contains_key(&host)
-            && self.https_names.len() >= MAX_HTTPS_NAMES
-            && let Some(oldest) = self
-                .https_names
-                .iter()
-                .min_by_key(|(_, expires)| **expires)
-                .map(|(host, _)| host.clone())
-        {
-            self.https_names.remove(&oldest);
+        let expires = now + Duration::from_secs(u64::from(ttl));
+        if let Some(index) = existing {
+            self.https_names[index].expires = Some(expires);
+            return (true, control::ACK_OK);
         }
-        self.https_names
-            .insert(host, Instant::now() + Duration::from_secs(u64::from(ttl)));
+        // C `d2k_http80_set_https`: первый свободный слот, иначе слот с
+        // минимальным `expires`; при равенстве — первый по порядку слотов.
+        let pick = self
+            .https_names
+            .iter()
+            .position(HttpsNameSlot::is_free)
+            .or_else(|| {
+                self.https_names
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, slot)| slot.expires)
+                    .map(|(index, _)| index)
+            });
+        if let Some(index) = pick {
+            self.https_names[index].assign(host.as_bytes(), expires);
+        }
         (true, control::ACK_OK)
     }
 
@@ -3195,6 +3263,24 @@ impl Drop for ControlServer {
     }
 }
 
+/// C `name_norm` (`datapath/http80.c:83-95`): имя HTTPS-подтверждения —
+/// только `A-Za-z0-9-.`, один хвостовой точка снимается, длина до 253.
+/// Это НЕ строгий валидатор планов: C допускает односложные, чисто цифровые
+/// имена и пустые метки (`localhost`, `1.2.3.4`, `a..b`).
+fn canonical_https_name(bytes: &[u8]) -> Option<String> {
+    let bytes = bytes.strip_suffix(b".").unwrap_or(bytes);
+    if bytes.is_empty() || bytes.len() >= HTTPS_NAME_BYTES || !bytes.is_ascii() {
+        return None;
+    }
+    if !bytes
+        .iter()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.'))
+    {
+        return None;
+    }
+    String::from_utf8(bytes.to_ascii_lowercase()).ok()
+}
+
 fn canonical_name(bytes: &[u8]) -> Option<String> {
     if bytes.is_empty() || bytes.len() > 253 || !bytes.is_ascii() {
         return None;
@@ -4466,6 +4552,280 @@ mod tests {
         assert!(output.contains("set_name ok=1\n"));
         assert!(output.contains("set_name_bad_plan ok=0\n"));
         assert!(output.contains("set_name_bad_family ok=0\n"));
+    }
+
+    #[test]
+    fn http80_https_differential_matches_c() {
+        use std::fmt::Write as _;
+
+        let now = Instant::now();
+        let mut output = String::new();
+        let mut plans = NamePlans::with_capacity(16);
+
+        fn set_https(
+            plans: &mut NamePlans,
+            label: &str,
+            name: &[u8],
+            ttl: u32,
+            now: Instant,
+            output: &mut String,
+        ) {
+            let mut body = Vec::with_capacity(name.len() + 5);
+            body.push(name.len() as u8);
+            body.extend_from_slice(name);
+            body.extend_from_slice(&ttl.to_be_bytes());
+            let (ok, _) = plans.set_https_at(&body, now);
+            if label != "filler" && label != "tie_filler" {
+                writeln!(output, "set {label} rc={}", if ok { 0 } else { -1 }).unwrap();
+            }
+        }
+
+        fn has(plans: &NamePlans, label: &str, name: &[u8], at: Instant, output: &mut String) {
+            writeln!(
+                output,
+                "{label}={}",
+                u8::from(plans.has_verified_https(name, at))
+            )
+            .unwrap();
+        }
+
+        set_https(
+            &mut plans,
+            "example",
+            b"Example.COM.",
+            7200,
+            now,
+            &mut output,
+        );
+        has(
+            &plans,
+            "example_now",
+            b"example.com",
+            now + Duration::from_nanos(1),
+            &mut output,
+        );
+        has(
+            &plans,
+            "example_case",
+            b"EXAMPLE.com.",
+            now + Duration::from_nanos(1),
+            &mut output,
+        );
+        has(
+            &plans,
+            "example_last",
+            b"example.com",
+            now + Duration::from_secs(7199),
+            &mut output,
+        );
+        has(
+            &plans,
+            "example_expired",
+            b"example.com",
+            now + Duration::from_secs(7200),
+            &mut output,
+        );
+
+        set_https(
+            &mut plans,
+            "single_label",
+            b"localhost",
+            100,
+            now,
+            &mut output,
+        );
+        has(
+            &plans,
+            "single_label",
+            b"localhost",
+            now + Duration::from_nanos(1),
+            &mut output,
+        );
+        set_https(&mut plans, "numeric", b"1.2.3.4", 100, now, &mut output);
+        has(
+            &plans,
+            "numeric",
+            b"1.2.3.4",
+            now + Duration::from_nanos(1),
+            &mut output,
+        );
+        set_https(&mut plans, "dash", b"-bad", 100, now, &mut output);
+        has(
+            &plans,
+            "dash",
+            b"-bad",
+            now + Duration::from_nanos(1),
+            &mut output,
+        );
+        set_https(&mut plans, "empty_label", b"a..b", 100, now, &mut output);
+        has(
+            &plans,
+            "empty_label",
+            b"a..b",
+            now + Duration::from_nanos(1),
+            &mut output,
+        );
+        set_https(
+            &mut plans,
+            "invalid_char",
+            b"bad_name",
+            100,
+            now,
+            &mut output,
+        );
+        set_https(&mut plans, "empty", b"", 100, now, &mut output);
+
+        set_https(&mut plans, "gone_first", b"gone", 100, now, &mut output);
+        set_https(&mut plans, "gone_remove", b"gone", 0, now, &mut output);
+        has(
+            &plans,
+            "removed",
+            b"gone",
+            now + Duration::from_nanos(1),
+            &mut output,
+        );
+        set_https(&mut plans, "up_first", b"up", 100, now, &mut output);
+        set_https(&mut plans, "up_second", b"up", 1000, now, &mut output);
+        has(
+            &plans,
+            "updated",
+            b"up",
+            now + Duration::from_secs(500),
+            &mut output,
+        );
+
+        set_https(
+            &mut plans,
+            "clamped",
+            b"clamped",
+            1_000_000_000,
+            now,
+            &mut output,
+        );
+        has(
+            &plans,
+            "clamped_last",
+            b"clamped",
+            now + Duration::from_secs(604_799),
+            &mut output,
+        );
+        has(
+            &plans,
+            "clamped_expired",
+            b"clamped",
+            now + Duration::from_secs(604_800),
+            &mut output,
+        );
+
+        let mut plans = NamePlans::with_capacity(16);
+        for index in 0..256_u32 {
+            let name = format!("n{index}");
+            set_https(
+                &mut plans,
+                "filler",
+                name.as_bytes(),
+                100 + index,
+                now,
+                &mut output,
+            );
+        }
+        set_https(&mut plans, "overflow", b"overflow", 500, now, &mut output);
+        has(
+            &plans,
+            "n0",
+            b"n0",
+            now + Duration::from_nanos(1),
+            &mut output,
+        );
+        has(
+            &plans,
+            "n1",
+            b"n1",
+            now + Duration::from_nanos(1),
+            &mut output,
+        );
+        has(
+            &plans,
+            "overflow",
+            b"overflow",
+            now + Duration::from_nanos(1),
+            &mut output,
+        );
+
+        set_https(&mut plans, "n5_remove", b"n5", 0, now, &mut output);
+        set_https(&mut plans, "late", b"late", 50, now, &mut output);
+        set_https(&mut plans, "overflow2", b"overflow2", 600, now, &mut output);
+        has(
+            &plans,
+            "late",
+            b"late",
+            now + Duration::from_nanos(1),
+            &mut output,
+        );
+        has(
+            &plans,
+            "overflow2",
+            b"overflow2",
+            now + Duration::from_nanos(1),
+            &mut output,
+        );
+        has(
+            &plans,
+            "n1_after",
+            b"n1",
+            now + Duration::from_nanos(1),
+            &mut output,
+        );
+
+        let mut plans = NamePlans::with_capacity(16);
+        for index in 0..256_u32 {
+            let name = format!("e{index}");
+            set_https(
+                &mut plans,
+                "tie_filler",
+                name.as_bytes(),
+                100,
+                now,
+                &mut output,
+            );
+        }
+        set_https(
+            &mut plans,
+            "tie_overflow",
+            b"tie-overflow",
+            100,
+            now,
+            &mut output,
+        );
+        has(
+            &plans,
+            "tie_e0",
+            b"e0",
+            now + Duration::from_nanos(1),
+            &mut output,
+        );
+        has(
+            &plans,
+            "tie_e1",
+            b"e1",
+            now + Duration::from_nanos(1),
+            &mut output,
+        );
+        has(
+            &plans,
+            "tie_overflow",
+            b"tie-overflow",
+            now + Duration::from_nanos(1),
+            &mut output,
+        );
+
+        if let Ok(path) = std::env::var("R2O_HTTP80_HTTPS_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert!(output.contains("single_label=1\n"));
+        assert!(output.contains("n0=0\n"));
+        assert!(output.contains("late=0\n"));
+        assert!(output.contains("tie_e0=0\n"));
     }
 
     #[test]
