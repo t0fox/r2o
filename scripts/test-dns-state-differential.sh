@@ -1,6 +1,6 @@
 #!/bin/sh
-# C/Rust differential: dns_service_observe / dns_service_note_applied и
-# live-состояния dns_services current main 7a5fab9.
+# C/Rust differential: dns_service_observe / dns_service_note_applied,
+# task-ячейки DNS и live-состояния dns_services current main 7a5fab9.
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)

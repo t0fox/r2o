@@ -176,7 +176,19 @@ impl FetchOptions {
         if self.port == 0 {
             return Err("порт должен быть в диапазоне 1–65535".into());
         }
-        if !repeatable_path(self.path.as_bytes()) {
+        let path_ok = if r2o_fetch_doh_query().is_some() {
+            // C `d2k_verify_doh_on` разрешает query в request target; запрещены
+            // только управляющие символы, кавычка и обратный слэш.
+            let bytes = self.path.as_bytes();
+            !bytes.is_empty()
+                && bytes[0] == b'/'
+                && bytes.iter().all(|byte| {
+                    *byte > 32 && *byte != 127 && !matches!(*byte, b'\\' | b'"' | b'\r' | b'\n')
+                })
+        } else {
+            repeatable_path(self.path.as_bytes())
+        };
+        if !path_ok {
             return Err(
                 "путь должен быть безопасным абсолютным путём без запроса и фрагмента".into(),
             );
@@ -214,6 +226,10 @@ pub struct FetchResult {
     pub complete: bool,
     pub application_verified: bool,
     pub handshake_verified: bool,
+    /// Проба шла как DoH POST `application/dns-message`.
+    pub doh_probe: bool,
+    /// Тело DoH-ответа прошло `d2k_verify_doh_response_parse`/`dns_probe_reply`.
+    pub dns_reply: bool,
     pub elapsed: Duration,
     pub reason: Option<String>,
     pub r2o_volume_observation: crate::r2o_volume::R2oVolumeObservation,
@@ -334,6 +350,8 @@ pub fn r2o_verify_tls_connected_stream_with_alpn(
         complete: false,
         application_verified: false,
         handshake_verified: true,
+        doh_probe: false,
+        dns_reply: false,
         elapsed: started.elapsed(),
         reason: Some("TLS-рукопожатие с ALPN клиента завершено; приложение не измерялось".into()),
         r2o_volume_observation: crate::r2o_volume::R2oVolumeObservation::default(),
@@ -380,6 +398,8 @@ pub fn r2o_verify_tls_replayed_client_hello(
         complete: false,
         application_verified: false,
         handshake_verified: proof,
+        doh_probe: false,
+        dns_reply: false,
         elapsed: started.elapsed(),
         reason: Some(if proof {
             "ServerHello получен на повтор ClientHello; приложение не измерялось".into()
@@ -1144,9 +1164,103 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
         .local_addr()
         .map_err(|error| format!("не удалось получить местный порт: {error}"))?
         .port();
+    // C `d2k_verify_dns_on` (DoT): не HTTP, а length-prefixed DNS-обмен через
+    // уже установленный TLS. DoH идёт ниже обычным fetch с POST.
+    let dot_query = r2o_fetch_dot_query();
+    if let Some(frame) = dot_query.as_ref() {
+        let mut reason = None;
+        let mut body_bytes = 0_u64;
+        let exchange = (|| -> Result<Vec<u8>, String> {
+            set_deadline(&stream.sock.socket, deadline)?;
+            stream
+                .write_all(frame)
+                .and_then(|()| stream.flush())
+                .map_err(|error| format!("DoT: отправка: {error}"))?;
+            let mut length = [0_u8; 2];
+            stream
+                .read_exact(&mut length)
+                .map_err(|error| format!("DoT: ответ не получен: {error}"))?;
+            let length = usize::from(u16::from_be_bytes(length));
+            if length == 0 || length > 4096 {
+                return Err("DoT: неверная длина DNS-ответа".into());
+            }
+            let mut body = vec![0_u8; length];
+            stream
+                .read_exact(&mut body)
+                .map_err(|error| format!("DoT: ответ не дочитан: {error}"))?;
+            Ok(body)
+        })();
+        let dns_reply = match exchange {
+            Ok(body) => {
+                body_bytes = body.len() as u64;
+                let id = frame
+                    .get(2..4)
+                    .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
+                    .unwrap_or(0);
+                let valid = crate::dns_health::dns_probe_reply(&body, id);
+                if !valid {
+                    reason = Some("DoT: DNS body не подтверждён".into());
+                }
+                valid
+            }
+            Err(error) => {
+                reason = Some(error);
+                false
+            }
+        };
+        if dns_reply {
+            reason = Some("DoT: получен корректный DNS-ответ".into());
+        } else if reason.is_none() {
+            reason = Some("DoT: нет подтверждённого DNS-ответа".into());
+        }
+        let negotiated_tls = match tls {
+            Some("1.3") => Some(0x0304),
+            Some("1.2") => Some(0x0303),
+            _ => None,
+        };
+        return Ok(FetchResult {
+            address,
+            local_port,
+            tls,
+            peer_name_ok,
+            ech_accepted,
+            status: 0,
+            http_outcome: R2oFetchHttpOutcome::Neutral,
+            cloudflare_challenge: false,
+            body_bytes,
+            body_expected: None,
+            body_has_length: false,
+            location: String::new(),
+            chunked: false,
+            gzip: false,
+            complete: dns_reply,
+            application_verified: dns_reply && peer_name_ok != Some(false),
+            handshake_verified: false,
+            doh_probe: false,
+            dns_reply,
+            elapsed: started.elapsed(),
+            reason,
+            r2o_volume_observation: crate::r2o_volume::R2oVolumeObservation {
+                stage: crate::r2o_volume::R2oVolumeProbeStage::Handshake,
+                name_valid: negotiated_tls.is_some(),
+                negotiated_tls,
+                status: 0,
+                body_complete: dns_reply,
+                body_bytes,
+                packet_budget: crate::r2o_volume::R2oVolumePacketBudget::NotApplicable,
+                ..Default::default()
+            },
+            budget_note: None,
+            r2o_resources: Vec::new(),
+        });
+    }
+
     let mut request_path = options.path.clone();
     let root_probe = options.path == "/";
     let mut redirects = 0;
+    // C `d2k_verify_doh_on`: DoH-запрос того же потока. Обычный GET его не
+    // несёт; запрос ставится вызывающим до `fetch`.
+    let doh_query = r2o_fetch_doh_query();
     // D2O различает корневой verifier-зонд (initial_path == NULL) и явный
     // ресурсный путь. В R2O корневой зонд представлен как "/", поэтому
     // Gateway-протокол проверяется для этого же пути.
@@ -1186,6 +1300,8 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
             complete: r2o_gateway.complete,
             application_verified: r2o_gateway.complete,
             handshake_verified: false,
+            doh_probe: false,
+            dns_reply: false,
             elapsed: started.elapsed(),
             reason: Some(r2o_gateway.reason),
             r2o_volume_observation: crate::r2o_volume::R2oVolumeObservation {
@@ -1208,7 +1324,12 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
                 .ok_or_else(|| "срок HTTP-шага слишком велик".to_owned())?,
             None => deadline,
         };
-        let request = build_request(&options.name, &request_path, r2o_encoding);
+        let request = build_request(
+            &options.name,
+            &request_path,
+            r2o_encoding,
+            doh_query.as_deref(),
+        );
         set_deadline(&stream.sock.socket, response_deadline)?;
         stream
             .write_all(&request)
@@ -1228,6 +1349,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
         let mut r2o_pending_overflow = false;
         let mut r2o_resource_tap: Option<crate::r2o_resource::R2oResourceBodyTap> = None;
         let mut r2o_reply_body_tap: Option<crate::r2o_resource::R2oResourceBodyTap> = None;
+        let mut r2o_doh_body_tap: Option<crate::r2o_resource::R2oResourceBodyTap> = None;
         loop {
             if parser.is_complete() || parser.is_invalid() {
                 break;
@@ -1255,6 +1377,9 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
                             tap.feed(r2o_bytes);
                         }
                         if let Some(tap) = &mut r2o_reply_body_tap {
+                            tap.feed(r2o_bytes);
+                        }
+                        if let Some(tap) = &mut r2o_doh_body_tap {
                             tap.feed(r2o_bytes);
                         }
                     } else if !r2o_pending_overflow {
@@ -1298,6 +1423,21 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
                                 );
                             r2o_tap.feed(&r2o_pending_response[r2o_body_start..]);
                             r2o_reply_body_tap = Some(r2o_tap);
+                        }
+                        if doh_query.is_some()
+                            && !parser.is_invalid()
+                            && !r2o_pending_overflow
+                            && let Some(r2o_header_start) = r2o_pending_response
+                                .windows(r2o_headers.len())
+                                .rposition(|window| window == r2o_headers)
+                        {
+                            let r2o_body_start = r2o_header_start + r2o_headers.len();
+                            let mut r2o_tap =
+                                crate::r2o_resource::R2oResourceBodyTap::new_body_only(
+                                    r2o_fetch_chunked(r2o_headers),
+                                );
+                            r2o_tap.feed(&r2o_pending_response[r2o_body_start..]);
+                            r2o_doh_body_tap = Some(r2o_tap);
                         }
                         r2o_pending_response.clear();
                     }
@@ -1375,7 +1515,16 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
                 R2oFetchHttpOutcome::Blocked | R2oFetchHttpOutcome::LegalDenial
             );
         let is_redirect = (300..400).contains(&parser.status());
-        if is_redirect {
+        if is_redirect && doh_query.is_some() {
+            // C `d2k_verify_doh_on`: другой цели DoH-зонд не посещает.
+            application_verified = false;
+            if reason.is_none() {
+                reason = Some(format!(
+                    "DoH: HTTP {} redirect не подтверждает endpoint",
+                    parser.status()
+                ));
+            }
+        } else if is_redirect {
             application_verified = false;
             let same_origin_path = r2o_fetch_same_origin_redirect(&location, &options.name);
             if complete
@@ -1406,6 +1555,36 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
                     "HTTP {} redirect не подтверждает страницу этой цели",
                     parser.status()
                 ));
+            }
+        }
+        let doh_probe = doh_query.is_some();
+        let dns_reply = if let Some(query) = doh_query.as_ref() {
+            let id = query
+                .get(..2)
+                .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]))
+                .unwrap_or(0);
+            let type_ok = header_value(headers, b"content-type").is_some_and(|value| {
+                trim_ascii(value.split(|byte| *byte == b';').next().unwrap_or_default())
+                    .eq_ignore_ascii_case(b"application/dns-message")
+            });
+            complete
+                && parser.status() == 200
+                && type_ok
+                && peer_name_ok != Some(false)
+                && r2o_doh_body_tap
+                    .as_ref()
+                    .is_some_and(|tap| crate::dns_health::dns_probe_reply(tap.prefix(), id))
+        } else {
+            false
+        };
+        if doh_probe {
+            if dns_reply {
+                reason = Some("DoH: получен корректный DNS-ответ".into());
+            } else {
+                application_verified = false;
+                if reason.is_none() {
+                    reason = Some("DoH: нет подтверждённого DNS-ответа".into());
+                }
             }
         }
         let r2o_resources = if complete && r2o_fetch_resource_scan_allowed(parser.status(), headers)
@@ -1493,6 +1672,8 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
             complete,
             application_verified,
             handshake_verified: false,
+            doh_probe,
+            dns_reply,
             elapsed: started.elapsed(),
             reason,
             r2o_volume_observation,
@@ -2552,8 +2733,57 @@ fn r2o_gateway_websocket_exchange(
     }
 }
 
-fn build_request(name: &str, path: &str, encoding: R2oFetchEncoding) -> Vec<u8> {
-    let mut request = Vec::with_capacity(name.len() + path.len() + 128);
+thread_local! {
+    /// DoH-запрос текущего потока зонда. Ставится перед проверкой DNS-endpoint
+    /// и снимается сразу после: тот же `fetch`, но POST `application/dns-message`.
+    static DOH_QUERY: std::cell::RefCell<Option<Vec<u8>>> = const {
+        std::cell::RefCell::new(None)
+    };
+    /// DoT-кадр (2-байтная длина + DNS message) текущего потока зонда.
+    static DOT_QUERY: std::cell::RefCell<Option<Vec<u8>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+/// C `d2k_verify_doh_on`: включить DoH-запрос для следующего `fetch` в этом
+/// потоке. `None` — обычный GET.
+pub fn r2o_fetch_doh_query_set(query: Option<Vec<u8>>) {
+    DOH_QUERY.with(|slot| *slot.borrow_mut() = query);
+}
+
+fn r2o_fetch_doh_query() -> Option<Vec<u8>> {
+    DOH_QUERY.with(|slot| slot.borrow().clone())
+}
+
+/// C `d2k_verify_dns_on` для DoT: length-prefixed DNS-обмен на том же TLS.
+pub fn r2o_fetch_dot_query_set(query: Option<Vec<u8>>) {
+    DOT_QUERY.with(|slot| *slot.borrow_mut() = query);
+}
+
+fn r2o_fetch_dot_query() -> Option<Vec<u8>> {
+    DOT_QUERY.with(|slot| slot.borrow().clone())
+}
+
+fn build_request(
+    name: &str,
+    path: &str,
+    encoding: R2oFetchEncoding,
+    doh_query: Option<&[u8]>,
+) -> Vec<u8> {
+    let mut request = Vec::with_capacity(name.len() + path.len() + 256);
+    if let Some(query) = doh_query {
+        request.extend_from_slice(b"POST ");
+        request.extend_from_slice(path.as_bytes());
+        request.extend_from_slice(b" HTTP/1.1\r\nHost: ");
+        request.extend_from_slice(name.as_bytes());
+        request.extend_from_slice(
+            b"\r\nAccept: application/dns-message\r\nContent-Type: application/dns-message\r\nContent-Length: ",
+        );
+        request.extend_from_slice(query.len().to_string().as_bytes());
+        request.extend_from_slice(b"\r\nConnection: keep-alive\r\n\r\n");
+        request.extend_from_slice(query);
+        return request;
+    }
     request.extend_from_slice(b"GET ");
     request.extend_from_slice(path.as_bytes());
     request.extend_from_slice(b" HTTP/1.1\r\nHost: ");
@@ -3716,6 +3946,8 @@ mod tests {
             complete,
             application_verified,
             handshake_verified: false,
+            doh_probe: false,
+            dns_reply: false,
             elapsed: Duration::ZERO,
             reason: None,
             r2o_volume_observation: crate::r2o_volume::R2oVolumeObservation::default(),
@@ -3772,9 +4004,9 @@ mod tests {
 
     #[test]
     fn запрос_проверки_передаёт_выбранное_кодирование() {
-        let identity = build_request("example.com", "/", R2oFetchEncoding::Identity);
-        let gzip = build_request("example.com", "/", R2oFetchEncoding::Gzip);
-        let gzip_deflate = build_request("example.com", "/", R2oFetchEncoding::GzipDeflate);
+        let identity = build_request("example.com", "/", R2oFetchEncoding::Identity, None);
+        let gzip = build_request("example.com", "/", R2oFetchEncoding::Gzip, None);
+        let gzip_deflate = build_request("example.com", "/", R2oFetchEncoding::GzipDeflate, None);
 
         assert!(
             identity
@@ -3790,6 +4022,283 @@ mod tests {
                 .windows(b"Accept-Encoding: gzip, deflate".len())
                 .any(|window| window == b"Accept-Encoding: gzip, deflate")
         );
+    }
+
+    #[test]
+    fn doh_request_is_post_with_dns_message_body() {
+        let query = crate::dns_health::dns_query_message(crate::dns_health::DNS_QUERY_ID_DOH);
+        let request = build_request(
+            "dns.example",
+            "/dns-query",
+            R2oFetchEncoding::Identity,
+            Some(&query),
+        );
+        assert!(request.starts_with(b"POST /dns-query HTTP/1.1\r\nHost: dns.example\r\n"));
+        assert!(
+            request
+                .windows(b"Accept: application/dns-message".len())
+                .any(|window| window == b"Accept: application/dns-message")
+        );
+        assert!(
+            request
+                .windows(b"Content-Type: application/dns-message".len())
+                .any(|window| window == b"Content-Type: application/dns-message")
+        );
+        let content_length = format!("Content-Length: {}", query.len());
+        assert!(
+            request
+                .windows(content_length.len())
+                .any(|window| window == content_length.as_bytes())
+        );
+        assert!(request.ends_with(&query));
+        // Потокобезопасный setter нужен потому, что fetch идёт в worker'е
+        // Discovery; после запроса он обязан сброситься.
+        r2o_fetch_doh_query_set(Some(query.clone()));
+        assert_eq!(r2o_fetch_doh_query(), Some(query.clone()));
+        let mut options = FetchOptions {
+            name: "dns.example".into(),
+            ip: None,
+            port: 443,
+            path: "/dns-query?token=secret".into(),
+            deadline: Duration::from_secs(1),
+            tls12: false,
+            wire_len: None,
+            mark: None,
+        };
+        assert!(options.validate().is_ok(), "DoH допускает query в path");
+        r2o_fetch_doh_query_set(None);
+        assert!(r2o_fetch_doh_query().is_none());
+        assert!(
+            options.validate().is_err(),
+            "обычный GET query не допускает"
+        );
+        options.path = "/".into();
+        assert!(options.validate().is_ok());
+    }
+
+    #[test]
+    fn doh_fetch_marks_valid_dns_reply_and_rejects_invalid_body() {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use rustls::{ServerConfig, ServerConnection};
+        use std::io::Read;
+        use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::sync::mpsc;
+        use std::thread;
+
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+            .expect("создать сертификат localhost");
+        let certificate_der = CertificateDer::from(certificate.serialize_der().unwrap());
+        let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certificate.serialize_private_key_der(),
+        ));
+        let server_config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate_der.clone()], private_key)
+            .unwrap();
+        let mut roots = RootCertStore::empty();
+        roots.add(certificate_der).unwrap();
+
+        let query = crate::dns_health::dns_query_message(crate::dns_health::DNS_QUERY_ID_DOH);
+        let mut reply = query.clone();
+        reply[2] = 0x81;
+        reply[3] = 0x80;
+        reply[6..8].copy_from_slice(&1_u16.to_be_bytes());
+        reply.extend_from_slice(&[
+            0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x04, 93, 184, 216,
+            34,
+        ]);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("открыть DoH-приёмник");
+        let address = listener.local_addr().unwrap();
+        let (request_sender, request_receiver) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (socket, _) = listener.accept().expect("принять DoH-соединение");
+            let connection = ServerConnection::new(Arc::new(server_config)).unwrap();
+            let mut stream = StreamOwned::new(connection, socket);
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            let mut content_length = 0usize;
+            loop {
+                let length = stream.read(&mut buffer).expect("прочитать DoH-запрос");
+                if length == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..length]);
+                if let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    if content_length == 0
+                        && let Some(header) = request[..header_end]
+                            .split(|byte| *byte == b'\n')
+                            .find(|line| line.to_ascii_lowercase().starts_with(b"content-length:"))
+                    {
+                        content_length = std::str::from_utf8(header)
+                            .ok()
+                            .and_then(|line| line.split(':').nth(1))
+                            .and_then(|value| value.trim().parse().ok())
+                            .unwrap_or(0);
+                    }
+                    if request.len() >= header_end + 4 + content_length {
+                        break;
+                    }
+                }
+            }
+            request_sender.send(request).unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                reply.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.write_all(&reply).unwrap();
+            stream.flush().unwrap();
+        });
+
+        let options = FetchOptions {
+            name: "localhost".into(),
+            port: address.port(),
+            ip: Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            path: "/dns-query".into(),
+            deadline: Duration::from_secs(3),
+            tls12: false,
+            wire_len: None,
+            mark: None,
+        };
+        r2o_fetch_doh_query_set(Some(query.clone()));
+        let result = r2o_fetch_with_roots_and_encoding(&options, R2oFetchEncoding::Identity, roots);
+        r2o_fetch_doh_query_set(None);
+        let request = request_receiver.recv().expect("получить DoH-запрос");
+        server.join().unwrap();
+        let result = result.expect("DoH fetch должен завершиться");
+        assert!(request.starts_with(b"POST /dns-query HTTP/1.1\r\n"));
+        assert!(request.ends_with(&query));
+        assert!(result.doh_probe);
+        assert!(result.dns_reply, "{}", result.reason.unwrap_or_default());
+        assert_eq!(result.status, 200);
+        assert!(result.application_verified);
+
+        // Невалидное тело: DoH-проба не выдаёт DNS-ответ и не подтверждает
+        // приложение, даже если HTTP 200.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("открыть DoH-приёмник");
+        let address = listener.local_addr().unwrap();
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+            .expect("создать сертификат localhost");
+        let certificate_der = CertificateDer::from(certificate.serialize_der().unwrap());
+        let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certificate.serialize_private_key_der(),
+        ));
+        let server_config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate_der.clone()], private_key)
+            .unwrap();
+        let mut roots_invalid = RootCertStore::empty();
+        roots_invalid.add(certificate_der).unwrap();
+        let server = thread::spawn(move || {
+            let (socket, _) = listener.accept().expect("принять DoH-соединение");
+            let connection = ServerConnection::new(Arc::new(server_config)).unwrap();
+            let mut stream = StreamOwned::new(connection, socket);
+            let mut buffer = [0_u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let response =
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\nContent-Length: 4\r\nConnection: close\r\n\r\nnope";
+            stream.write_all(response).unwrap();
+            stream.flush().unwrap();
+        });
+        let options = FetchOptions {
+            name: "localhost".into(),
+            port: address.port(),
+            ip: Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            path: "/dns-query".into(),
+            deadline: Duration::from_secs(3),
+            tls12: false,
+            wire_len: None,
+            mark: None,
+        };
+        r2o_fetch_doh_query_set(Some(query));
+        let result =
+            r2o_fetch_with_roots_and_encoding(&options, R2oFetchEncoding::Identity, roots_invalid);
+        r2o_fetch_doh_query_set(None);
+        server.join().unwrap();
+        let result = result.expect("DoH fetch с невалидным телом завершается");
+        assert!(result.doh_probe);
+        assert!(!result.dns_reply);
+        assert!(!result.application_verified);
+    }
+
+    #[test]
+    fn dot_fetch_exchanges_length_prefixed_dns_and_marks_reply() {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use rustls::{ServerConfig, ServerConnection};
+        use std::io::Read;
+        use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::sync::mpsc;
+        use std::thread;
+
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+            .expect("создать сертификат localhost");
+        let certificate_der = CertificateDer::from(certificate.serialize_der().unwrap());
+        let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certificate.serialize_private_key_der(),
+        ));
+        let server_config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate_der.clone()], private_key)
+            .unwrap();
+        let mut roots = RootCertStore::empty();
+        roots.add(certificate_der).unwrap();
+
+        let query = crate::dns_health::dns_query_message(1);
+        let mut reply = query.clone();
+        reply[2] = 0x81;
+        reply[3] = 0x80;
+        reply[6..8].copy_from_slice(&1_u16.to_be_bytes());
+        reply.extend_from_slice(&[
+            0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x04, 93, 184, 216,
+            34,
+        ]);
+        let listener = TcpListener::bind("127.0.0.1:0").expect("открыть DoT-приёмник");
+        let address = listener.local_addr().unwrap();
+        let (frame_sender, frame_receiver) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (socket, _) = listener.accept().expect("принять DoT-соединение");
+            let connection = ServerConnection::new(Arc::new(server_config)).unwrap();
+            let mut stream = StreamOwned::new(connection, socket);
+            let mut length = [0_u8; 2];
+            stream.read_exact(&mut length).expect("прочитать длину");
+            let mut frame = vec![0_u8; usize::from(u16::from_be_bytes(length))];
+            stream.read_exact(&mut frame).expect("прочитать DNS-кадр");
+            frame_sender.send(frame).unwrap();
+            stream
+                .write_all(&(reply.len() as u16).to_be_bytes())
+                .unwrap();
+            stream.write_all(&reply).unwrap();
+            stream.flush().unwrap();
+        });
+
+        let options = FetchOptions {
+            name: "localhost".into(),
+            port: address.port(),
+            ip: Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            path: "/".into(),
+            deadline: Duration::from_secs(3),
+            tls12: false,
+            wire_len: None,
+            mark: None,
+        };
+        let frame = {
+            let mut frame = (query.len() as u16).to_be_bytes().to_vec();
+            frame.extend_from_slice(&query);
+            frame
+        };
+        r2o_fetch_dot_query_set(Some(frame.clone()));
+        let result = r2o_fetch_with_roots_and_encoding(&options, R2oFetchEncoding::Identity, roots);
+        r2o_fetch_dot_query_set(None);
+        let received = frame_receiver.recv().expect("получить DoT-кадр");
+        server.join().unwrap();
+        let result = result.expect("DoT fetch должен завершиться");
+        assert_eq!(received, query);
+        assert!(!result.doh_probe);
+        assert!(result.dns_reply, "{}", result.reason.unwrap_or_default());
+        assert!(result.application_verified);
+        assert_eq!(result.status, 0);
     }
 
     #[test]

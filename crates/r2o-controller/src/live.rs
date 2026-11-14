@@ -18,6 +18,123 @@ pub enum DnsServiceState {
     Failed,
 }
 
+/// C `task_state` (`core/sched.c:597-635`). DNS-секция live.json различает
+/// только часть состояний, но ячейка задачи ведёт весь набор, чтобы переходы
+/// DNS-endpoint не подменялись вычислением из финального outcome.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DnsTaskState {
+    #[default]
+    Free,
+    Queued,
+    Asking,
+    ShapeWait,
+    PropsContact,
+    PropsWait,
+    Planning,
+    TrialSettle,
+    Verify,
+    VerifyWait,
+    Watching,
+    Resting,
+    VoiceMeasure,
+    VoiceTrial,
+    VoiceWatch,
+    DnsHealth,
+}
+
+/// C `d2k_ver_level` (`core/include/d2k_verify.h:70-77`).
+pub const D2K_VER_NOT_MEASURED: i32 = 0;
+pub const D2K_VER_TRANSPORT: i32 = 1;
+pub const D2K_VER_HANDSHAKE: i32 = 2;
+pub const D2K_VER_APPLICATION: i32 = 3;
+pub const D2K_VER_CHALLENGE: i32 = 4;
+pub const D2K_VER_BLOCKPAGE: i32 = 5;
+pub const D2K_VER_DENIED: i32 = 6;
+
+/// C `d2k_ver_result` в объёме, который читает `write_live_dns_services`.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DnsTaskVerify {
+    pub level: i32,
+    pub status: i32,
+    pub dns_reply: bool,
+    pub reason: String,
+}
+
+/// C `task` (`core/sched.c:646-...`) в объёме DNS-endpoint: поля задачи,
+/// которые ведёт планировщик и которые влияют на live-секцию, плюс
+/// plan/trial/budget-состояние для честного DNS lifecycle.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DnsTask {
+    pub state: DnsTaskState,
+    pub name: String,
+    pub ip: String,
+    pub port: u16,
+    pub transport: u8,
+    pub family: u8,
+    pub dns_protocol: String,
+    pub dns_host: String,
+    pub doh_path: String,
+    pub dns_bootstrap: String,
+    pub dns_service_generation: u64,
+    pub dns_health_probe: bool,
+    /// C `t->plans[]`/`n_plans`/`next_plan`: сколько кандидатов выведено и
+    /// какой испытывается следующим.
+    pub n_plans: usize,
+    pub next_plan: usize,
+    /// C `t->ver_plan_id`: id плана, с которым кандидат ушёл на провод.
+    pub ver_plan_id: [u8; 16],
+    /// C `t->trial_installed`/`trial_acked`: пробный план поставлен/принят.
+    pub trial_installed: bool,
+    pub trial_acked: bool,
+    /// C `t->probes`: сколько сетевых зондов потрачено на этот поиск.
+    pub probes: u32,
+    /// C `t->budget_pk`: бюджет потока испытания, пакеты.
+    pub budget_pk: u32,
+    /// C `t->ver_ok`: применение сошлось с потоком зонда.
+    pub ver_ok: bool,
+    pub ver: DnsTaskVerify,
+    /// Счётчик проб этой задачи и срок следующей автоматической проверки.
+    pub attempts: u32,
+    pub next_check_ms: i64,
+    /// Health-флаги задачи (для DNS-health — зеркало ver; writer обязан
+    /// брать их из `ver.level`, как C).
+    pub tcp_reachable: bool,
+    pub tls_handshake: bool,
+    pub http_status: i32,
+    pub dns_answer: bool,
+    /// C `t->started_ms`/`rest_until_ms`/`ver_until_ms`: сроки поиска.
+    pub started_ms: i64,
+    pub rest_until_ms: i64,
+    pub ver_until_ms: i64,
+}
+
+impl DnsTask {
+    /// C `task_reset`: обнулить ячейку; состояние — T_FREE.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    pub fn is_free(&self) -> bool {
+        self.state == DnsTaskState::Free
+    }
+
+    /// Отбор задачи в `write_live_dns_services` (`core/sched.c:6656-6666`).
+    pub fn matches_service(&self, service: &r2k_core::dns_config::DnsService) -> bool {
+        if self.state == DnsTaskState::Free
+            || self.state == DnsTaskState::DnsHealth
+            || self.dns_protocol.is_empty()
+            || self.dns_protocol != service.protocol
+            || self.port != service.port
+        {
+            return false;
+        }
+        if !service.sni.is_empty() && self.name.eq_ignore_ascii_case(&service.sni) {
+            return true;
+        }
+        self.name.eq_ignore_ascii_case(&service.host) || self.ip.eq_ignore_ascii_case(&service.host)
+    }
+}
+
 /// C `dns_service_live` (`core/sched.c:1276-1305`).
 #[derive(Clone, Debug)]
 pub struct DnsServiceLive {
@@ -30,12 +147,6 @@ pub struct DnsServiceLive {
     pub http_status: i32,
     pub dns_answer: bool,
     pub plan_applied: bool,
-    /// C `t->ver_ok` задачи T_DNS_HEALTH: план применился к пробному
-    /// DNS-соединению. Без plan-based health-пробы остаётся false.
-    pub candidate_plan_applied: bool,
-    /// C `t->state == T_RESTING`: DNS-поиск завершён без подтверждённого
-    /// плана; writer отдаёт state=no_bypass.
-    pub no_bypass: bool,
     pub attempts: u32,
     /// Стенные секунды для live.json; None — проверки ещё не было.
     pub checked_at: Option<i64>,
@@ -43,6 +154,10 @@ pub struct DnsServiceLive {
     pub next_check: Option<std::time::Instant>,
     pub plan_applied_at: Option<i64>,
     pub reason: String,
+    /// Внутренний признак: поток с адреса роутера уже наблюдался. C держит
+    /// это неявно — dns_protocol задачи выставляется только в
+    /// `dns_service_observe` под `client_is_router_address`.
+    pub router_seen: bool,
 }
 
 impl Default for DnsServiceLive {
@@ -57,13 +172,12 @@ impl Default for DnsServiceLive {
             http_status: 0,
             dns_answer: false,
             plan_applied: false,
-            candidate_plan_applied: false,
-            no_bypass: false,
             attempts: 0,
             checked_at: None,
             next_check: None,
             plan_applied_at: None,
             reason: String::new(),
+            router_seen: false,
         }
     }
 }
@@ -272,6 +386,7 @@ pub fn snapshot_with_areas(
         areas,
         &[],
         &[],
+        &[],
     )
 }
 
@@ -286,6 +401,7 @@ pub fn snapshot_with_areas_and_dns(
     areas: &[LiveAreaState],
     dns_services: &[r2k_core::dns_config::DnsService],
     dns_live: &[DnsServiceLive],
+    dns_tasks: &[DnsTask],
 ) -> Result<Value, CatalogError> {
     let mut boxes = Vec::with_capacity(catalog.boxes.len());
     let mut targets = 0_u64;
@@ -450,7 +566,7 @@ pub fn snapshot_with_areas_and_dns(
         }).collect::<Vec<_>>()
     }).unwrap_or_default();
 
-    let dns_services = r2o_live_dns_services(catalog, dns_services, dns_live);
+    let dns_services = r2o_live_dns_services(catalog, dns_services, dns_live, dns_tasks);
     Ok(json!({
         "linked": true,
         "link_note": "",
@@ -468,12 +584,15 @@ pub fn snapshot_with_areas_and_dns(
     }))
 }
 
-/// C `write_live_dns_services` (`sched.c:6652`) для состояния «конфигурация
-/// найдена, health-проб ещё нет»: state=detected, health-поля пустые.
+/// C `write_live_dns_services` (`core/sched.c:6652-6745`). Task-ячейка имеет
+/// приоритет над health-полями: если для endpoint нашлась не-FREE/не-DNS_HEALTH
+/// задача, tcp/tls/http берутся из её ver-результата, а candidate/bypass — из
+/// `ver_ok` и DNS-ответа задачи.
 fn r2o_live_dns_services(
     catalog: &Catalog,
     services: &[r2k_core::dns_config::DnsService],
     live: &[DnsServiceLive],
+    tasks: &[DnsTask],
 ) -> Vec<Value> {
     services
         .iter()
@@ -522,65 +641,81 @@ fn r2o_live_dns_services(
             } else {
                 "Адрес endpoint обнаружен; автоматическая проверка ожидает очереди."
             };
-            let candidate_plan_applied = state.candidate_plan_applied;
-            let dns_answer_via_plan = candidate_plan_applied && state.dns_answer;
-            let (state_name, reason) = if dns_answer_via_plan {
+
+            let task = tasks
+                .iter()
+                .find(|candidate| candidate.matches_service(service));
+            let mut candidate_plan_applied = false;
+            let mut candidate_answer = false;
+            let mut answered = state.dns_answer;
+            let mut tcp_reachable = state.tcp_reachable;
+            let mut tls_handshake = state.tls_handshake;
+            let mut http_status = state.http_status;
+            if let Some(task) = task {
+                candidate_plan_applied = task.ver_ok;
+                answered = answered || task.ver.dns_reply;
+                candidate_answer = candidate_plan_applied && answered;
+                tcp_reachable = task.ver.level >= D2K_VER_TRANSPORT;
+                tls_handshake = task.ver.level >= D2K_VER_HANDSHAKE;
+                http_status = task.ver.status;
+            }
+
+            let (state_name, reason) = if candidate_answer {
                 (
                     "bypass_ok",
                     "Плановый DoH-зонд получил корректный DNS-ответ; применение к обычному потоку показывается отдельно.".to_owned(),
                 )
+            } else if state.state == DnsServiceState::Checking {
+                ("checking", state.reason.clone())
+            } else if state.state == DnsServiceState::DirectOk {
+                ("direct_ok", state.reason.clone())
+            } else if task.is_some_and(|task| {
+                matches!(
+                    task.state,
+                    DnsTaskState::Verify | DnsTaskState::VerifyWait | DnsTaskState::TrialSettle
+                )
+            }) {
+                (
+                    "checking",
+                    if candidate_plan_applied {
+                        "План применён к пробному соединению D2O; корректный DNS-ответ ещё не подтверждён."
+                            .to_owned()
+                    } else {
+                        "Проверяется кандидат штатным конвейером D2O.".to_owned()
+                    },
+                )
+            } else if state.plan_applied {
+                let reason = if state.state == DnsServiceState::Failed {
+                    format!(
+                        "Датапат подтвердил план {} на DNS-соединении; DNS-ответ не подтверждён. Автопроверка: {}",
+                        state.applied_plan_id,
+                        r2o_c_precision(&state.reason, 100)
+                    )
+                } else {
+                    format!(
+                        "Датапат подтвердил план {} на DNS-соединении; DNS-ответ отдельно ещё не подтверждён.",
+                        state.applied_plan_id
+                    )
+                };
+                ("plan_applied", reason)
+            } else if task.is_some_and(|task| task.state == DnsTaskState::Resting) {
+                (
+                    "no_bypass",
+                    task.map(|task| task.ver.reason.clone())
+                        .filter(|reason| !reason.is_empty())
+                        .unwrap_or_else(|| {
+                            "Подбор завершён без подтверждённого плана.".to_owned()
+                        }),
+                )
+            } else if state.state == DnsServiceState::Failed {
+                ("failed", state.reason.clone())
+            } else if task.is_some() {
+                (
+                    "checking",
+                    "Подозрение передано в штатный конвейер D2O.".to_owned(),
+                )
             } else {
-                match state.state {
-                    DnsServiceState::Checking => (
-                        "checking",
-                        if state.reason.is_empty() {
-                            "Автоматически проверяется корректный DNS-ответ endpoint.".to_owned()
-                        } else {
-                            state.reason.clone()
-                        },
-                    ),
-                    DnsServiceState::DirectOk => (
-                        "direct_ok",
-                        if state.reason.is_empty() {
-                            "Прямое соединение подтверждено.".to_owned()
-                        } else {
-                            state.reason.clone()
-                        },
-                    ),
-                    DnsServiceState::Failed if state.plan_applied => (
-                        "plan_applied",
-                        format!(
-                            "Датапат подтвердил план {} на DNS-соединении; DNS-ответ отдельно ещё не подтверждён. Автопроверка: {}",
-                            state.applied_plan_id,
-                            if state.reason.is_empty() {
-                                "DNS-ответ не подтверждён; одиночная ошибка не считается блокировкой."
-                            } else {
-                                &state.reason
-                            }
-                        ),
-                    ),
-                    DnsServiceState::Detected if state.plan_applied => (
-                        "plan_applied",
-                        format!(
-                            "Датапат подтвердил план {} на DNS-соединении; DNS-ответ отдельно ещё не подтверждён.",
-                            state.applied_plan_id
-                        ),
-                    ),
-                    _ if state.no_bypass => (
-                        "no_bypass",
-                        "Подбор завершён без подтверждённого плана.".to_owned(),
-                    ),
-                    DnsServiceState::Failed => (
-                        "failed",
-                        if state.reason.is_empty() {
-                            "DNS-ответ не подтверждён; одиночная ошибка не считается блокировкой."
-                                .to_owned()
-                        } else {
-                            state.reason.clone()
-                        },
-                    ),
-                    DnsServiceState::Detected => ("detected", detected_reason.to_owned()),
-                }
+                ("detected", detected_reason.to_owned())
             };
             let path = service.path.split('?').next().unwrap_or("/").to_owned();
             json!({
@@ -594,20 +729,32 @@ fn r2o_live_dns_services(
                 "status_reason": reason,
                 "resolved_ip": resolved_ip,
                 "checked_at": r2o_live_optional_time(state.checked_at),
-                "direct_tcp_reachable": state.tcp_reachable,
-                "direct_tls_handshake": state.tls_handshake,
-                "http_status": state.http_status,
+                "direct_tcp_reachable": tcp_reachable,
+                "direct_tls_handshake": tls_handshake,
+                "http_status": http_status,
                 "check_attempts": state.attempts,
                 "known_plan_id": known_plan_id,
                 "applied_plan_id": state.applied_plan_id,
                 "plan_applied_at": r2o_live_optional_time(state.plan_applied_at),
                 "plan_applied": state.plan_applied,
                 "candidate_plan_applied": candidate_plan_applied,
-                "dns_answer_via_plan": dns_answer_via_plan,
-                "dns_answer_confirmed": state.dns_answer,
+                "dns_answer_via_plan": candidate_answer,
+                "dns_answer_confirmed": answered,
             })
         })
         .collect()
+}
+
+/// C `snprintf(..., "%.100s", text)`: точность в байтах, не в символах.
+fn r2o_c_precision(text: &str, precision: usize) -> &str {
+    if text.len() <= precision {
+        return text;
+    }
+    let mut end = precision;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 fn r2o_live_optional_time(seconds: Option<i64>) -> Value {
@@ -1362,6 +1509,7 @@ mod tests {
                 &[],
                 std::slice::from_ref(&service),
                 std::slice::from_ref(live),
+                &[],
             )
             .unwrap();
             assert_eq!(snapshot["dns_services"][0]["state"], expected);
@@ -1377,6 +1525,7 @@ mod tests {
             &[],
             std::slice::from_ref(&service),
             &[states[1].clone()],
+            &[],
         )
         .unwrap();
         assert_eq!(
@@ -1395,6 +1544,7 @@ mod tests {
             &[],
             std::slice::from_ref(&service),
             &[states[3].clone()],
+            &[],
         )
         .unwrap();
         assert_eq!(applied["dns_services"][0]["plan_applied"], true);
@@ -1478,6 +1628,7 @@ mod tests {
             &[],
             &services,
             &[],
+            &[],
         )
         .unwrap();
         if let Ok(path) = std::env::var("R2O_DNS_LIVE_DIFF_OUTPUT") {
@@ -1552,6 +1703,7 @@ mod tests {
             &[],
             &services,
             &[],
+            &[],
         )
         .unwrap();
         let section = live["dns_services"].as_array().unwrap();
@@ -1577,6 +1729,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         )
         .unwrap();
         assert_eq!(empty["dns_services"], json!([]));
@@ -1598,11 +1751,30 @@ mod tests {
         let live = DnsServiceLive {
             generation: 1,
             plan_applied: true,
-            candidate_plan_applied: true,
             applied_plan_id: "ab".repeat(16),
-            dns_answer: true,
+            dns_answer: false,
             plan_applied_at: Some(1000),
             ..DnsServiceLive::default()
+        };
+        let task = DnsTask {
+            state: DnsTaskState::Verify,
+            name: "dns.example".into(),
+            ip: "198.51.100.80".into(),
+            port: 443,
+            transport: 6,
+            family: 4,
+            dns_protocol: "doh".into(),
+            dns_host: "dns.example".into(),
+            doh_path: "/dns-query".into(),
+            dns_service_generation: 1,
+            ver_ok: true,
+            ver: DnsTaskVerify {
+                level: D2K_VER_APPLICATION,
+                status: 200,
+                dns_reply: true,
+                reason: "DoH: получен корректный DNS-ответ".into(),
+            },
+            ..DnsTask::default()
         };
         let snapshot = snapshot_with_areas_and_dns(
             &Catalog::default(),
@@ -1614,6 +1786,7 @@ mod tests {
             &[],
             std::slice::from_ref(&service),
             std::slice::from_ref(&live),
+            std::slice::from_ref(&task),
         )
         .unwrap();
         assert_eq!(snapshot["dns_services"][0]["state"], "bypass_ok");

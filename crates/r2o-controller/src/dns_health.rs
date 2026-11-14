@@ -15,7 +15,8 @@ pub const DOH_HEADER_MAX: usize = 8192;
 pub const DOH_BODY_MAX: usize = 4096;
 const DOH_RESPONSE_MAX: usize = DOH_HEADER_MAX + DOH_BODY_MAX * 2;
 const DNS_FRAME_MAX: usize = 4096;
-const DNS_QUERY_ID_DOH: u16 = 0x5a71;
+/// C `dns_query[2..4]` для DoH: `0x5a71`.
+pub const DNS_QUERY_ID_DOH: u16 = 0x5a71;
 const DNS_QUERY_ID_DOT: u16 = 1;
 
 /// Результат health-пробы для controller/live.json.

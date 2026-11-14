@@ -2819,11 +2819,19 @@ fn r2o_client_is_router_address(key: &[u8; r2k_core::control::KEY_LEN]) -> bool 
     found
 }
 
+/// C `SCHED_MAX_TASKS`.
+#[cfg(unix)]
+const R2O_DNS_TASK_CAPACITY: usize = 64;
+
 /// Состояние `dns_services`/`dns_service_live` текущего D2O main.
 #[cfg(unix)]
 struct R2oDnsServices {
     services: Vec<r2k_core::dns_config::DnsService>,
     live: Vec<r2o_controller::live::DnsServiceLive>,
+    /// C `s->tasks[SCHED_MAX_TASKS]`: настоящие ячейки задач. DNS-endpoint
+    /// занимает ячейку на время health-пробы или Discovery-поиска; live-писатель
+    /// читает её `ver_ok`/`ver.*`/state, как C `write_live_dns_services`.
+    tasks: Vec<r2o_controller::live::DnsTask>,
     generation: u64,
 }
 
@@ -2833,6 +2841,7 @@ impl R2oDnsServices {
         let mut state = Self {
             services: Vec::new(),
             live: Vec::new(),
+            tasks: vec![r2o_controller::live::DnsTask::default(); R2O_DNS_TASK_CAPACITY],
             generation: 0,
         };
         if let Some(services) = r2o_read_system_dns_services() {
@@ -2932,48 +2941,328 @@ impl R2oDnsServices {
             live.plan_applied = false;
             live.applied_plan_id.clear();
             live.plan_applied_at = None;
-            live.candidate_plan_applied = false;
-            live.no_bypass = false;
             live.checked_at = None;
             live.next_check = Some(mono);
             live.reason.clear();
+            live.router_seen = false;
         }
+        live.router_seen = true;
     }
 
-    /// C task-слой DNS: подтверждение кандидата ставит `candidate_plan_applied`
-    /// (t->ver_ok), неудачный поиск без плана — `T_RESTING`/`no_bypass`.
-    fn note_discovery_outcome(
+    /// C `task_free_slot`.
+    fn task_free_slot(&self) -> Option<usize> {
+        self.tasks
+            .iter()
+            .position(r2o_controller::live::DnsTask::is_free)
+    }
+
+    /// Найти уже заведённую задачу DNS-endpoint этого сервиса.
+    fn task_of_service(&self, service: &r2k_core::dns_config::DnsService) -> Option<usize> {
+        self.tasks
+            .iter()
+            .position(|task| task.matches_service(service))
+    }
+
+    /// C `dns_health_start_due`: занять настоящую ячейку T_DNS_HEALTH.
+    fn start_health_task(&mut self, service_index: usize, mono_ms: i64) -> Option<usize> {
+        let service = self.services.get(service_index)?.clone();
+        let live = self.live.get(service_index)?;
+        let slot = self.task_free_slot()?;
+        let task = &mut self.tasks[slot];
+        task.reset();
+        task.state = r2o_controller::live::DnsTaskState::DnsHealth;
+        task.dns_health_probe = true;
+        task.dns_service_generation = live.generation;
+        task.transport = if service.protocol == "doq" { 17 } else { 6 };
+        task.family = if !live.ip.is_empty() && live.ip.contains(':') {
+            6
+        } else {
+            4
+        };
+        task.port = service.port;
+        task.ip = live.ip.clone();
+        task.name = if service.sni.is_empty() {
+            service.host.clone()
+        } else {
+            service.sni.clone()
+        };
+        task.dns_protocol = service.protocol.clone();
+        task.dns_host = service.host.clone();
+        task.doh_path = service.path.clone();
+        task.dns_bootstrap = service.bootstrap_dns.clone();
+        task.started_ms = mono_ms;
+        task.probes = 1;
+        task.attempts = live.attempts.saturating_add(1);
+        task.next_check_ms = 0;
+        task.tcp_reachable = false;
+        task.tls_handshake = false;
+        task.http_status = 0;
+        task.dns_answer = false;
+        Some(slot)
+    }
+
+    /// C `dns_live_generation`: live-запись по generation, а не по индексу.
+    fn live_generation(&mut self, generation: u64) -> Option<usize> {
+        self.live
+            .iter()
+            .position(|live| live.generation == generation)
+    }
+
+    /// C `dns_health_finish`: применить результат T_DNS_HEALTH к live и
+    /// освободить ячейку. Смена IP сбрасывает план; чужая generation
+    /// игнорируется.
+    fn finish_health_task(
         &mut self,
-        target: &r2o_controller::discovery::DiscoveryTarget,
-        plan_confirmed: bool,
-        plan_found: bool,
-        direct_clear: bool,
-        queue_expired: bool,
+        slot: usize,
+        generation: u64,
+        resolved: Option<std::net::IpAddr>,
+        result: r2o_controller::dns_health::DnsHealthResult,
+        wall_now: i64,
+        mono_ms: i64,
     ) {
+        let Some(task) = self.tasks.get_mut(slot) else {
+            return;
+        };
+        if task.state != r2o_controller::live::DnsTaskState::DnsHealth {
+            return;
+        }
+        if task.dns_service_generation != generation {
+            // C всё равно доходит до `ver_close`/`task_reset`: результат
+            // устаревшей generation не применяется, но ячейка свободна.
+            task.reset();
+            return;
+        }
+        if let Some(ip) = resolved {
+            task.ip = ip.to_string();
+        }
+        let level = if result.dns_reply {
+            r2o_controller::live::D2K_VER_APPLICATION
+        } else if result.tls_handshake {
+            r2o_controller::live::D2K_VER_HANDSHAKE
+        } else if result.tcp_reachable {
+            r2o_controller::live::D2K_VER_TRANSPORT
+        } else {
+            r2o_controller::live::D2K_VER_NOT_MEASURED
+        };
+        task.ver = r2o_controller::live::DnsTaskVerify {
+            level,
+            status: result.http_status,
+            dns_reply: result.dns_reply,
+            reason: result.reason.clone(),
+        };
+        task.tcp_reachable = level >= r2o_controller::live::D2K_VER_TRANSPORT;
+        task.tls_handshake = level >= r2o_controller::live::D2K_VER_HANDSHAKE;
+        task.http_status = result.http_status;
+        task.dns_answer = result.dns_reply;
+        let bootstrap = !task.dns_bootstrap.is_empty();
+        let task_ip = task.ip.clone();
+        let task_generation = task.dns_service_generation;
+        if let Some(index) = self.live_generation(task_generation) {
+            let live = &mut self.live[index];
+            let accepted = (bootstrap && !task_ip.is_empty())
+                || (!task_ip.is_empty() && (live.ip.is_empty() || live.ip == task_ip))
+                || (task_ip.is_empty() && live.ip.is_empty());
+            if accepted {
+                if !task_ip.is_empty() && (bootstrap || live.ip.is_empty()) && live.ip != task_ip {
+                    live.ip = task_ip;
+                    live.plan_applied = false;
+                    live.applied_plan_id.clear();
+                    live.plan_applied_at = None;
+                }
+                live.checked_at = Some(wall_now.max(1));
+                live.tcp_reachable = level >= r2o_controller::live::D2K_VER_TRANSPORT;
+                live.tls_handshake = level >= r2o_controller::live::D2K_VER_HANDSHAKE;
+                live.http_status = result.http_status;
+                live.dns_answer = result.dns_reply;
+                live.state = if result.dns_reply {
+                    r2o_controller::live::DnsServiceState::DirectOk
+                } else {
+                    r2o_controller::live::DnsServiceState::Failed
+                };
+                live.next_check = Some(
+                    std::time::Instant::now()
+                        + if result.dns_reply {
+                            std::time::Duration::from_secs(5 * 60)
+                        } else {
+                            std::time::Duration::from_secs(60)
+                        },
+                );
+                live.reason = if result.dns_reply {
+                    result.reason.clone()
+                } else if result.http_status == 413 {
+                    "HTTP 413: это ошибка endpoint, а не доказательство DPI; подбор не запускается."
+                        .into()
+                } else {
+                    format!(
+                        "DNS-ответ не подтверждён ({}); одиночная ошибка не считается блокировкой.",
+                        if result.reason.is_empty() {
+                            "причина не определена"
+                        } else {
+                            &result.reason
+                        }
+                    )
+                };
+            }
+        }
+        // C `ver_close(t); task_reset(s, t)`: результат уже разобран, ячейка
+        // освобождается.
+        if let Some(task) = self.tasks.get_mut(slot) {
+            task.reset();
+        }
+        let _ = mono_ms;
+    }
+
+    /// Синхронизировать DNS task-ячейки с настоящим lifecycle Discovery:
+    /// active/pending → Queued/Asking/Planning/Verify, completed → Watching,
+    /// failure-cooldown → Resting. Никаких вычислений из финального outcome:
+    /// состояние задачи — это состояние реального поиска.
+    fn sync_discovery_tasks(&mut self, worker: &DiscoveryWorker, now: std::time::Instant) {
         if self.services.is_empty() {
             return;
         }
-        let Ok(endpoint) = target.endpoint.parse::<std::net::SocketAddr>() else {
-            return;
-        };
-        let transport = r2o_discovery_transport(target);
-        let Some(index) = r2k_core::dns_config::dns_service_match(
-            &self.services,
-            Some(&target.host),
-            Some(&endpoint.ip().to_string()),
-            endpoint.port(),
-            transport,
-        )
-        .and_then(|service| self.services.iter().position(|saved| saved == service)) else {
-            return;
-        };
-        let live = &mut self.live[index];
-        if plan_confirmed {
-            live.candidate_plan_applied = true;
-            live.no_bypass = false;
-        } else if !plan_found && !direct_clear && !queue_expired {
-            live.candidate_plan_applied = false;
-            live.no_bypass = true;
+        let searches = worker
+            .searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for index in 0..self.services.len() {
+            let service = self.services[index].clone();
+            if !self.live.get(index).is_some_and(|live| live.router_seen) {
+                if let Some(slot) = self.task_of_service(&service)
+                    && self.tasks[slot].state != r2o_controller::live::DnsTaskState::DnsHealth
+                {
+                    self.tasks[slot].reset();
+                }
+                continue;
+            }
+            let mut matched: Option<(
+                &r2o_controller::discovery::DiscoveryTarget,
+                r2o_controller::live::DnsTaskState,
+            )> = None;
+            for target in &worker.seen {
+                if !r2o_dns_service_matches_target(&service, target) {
+                    continue;
+                }
+                let key = r2o_discovery_task_key(target);
+                if worker.completed.contains(&key) {
+                    matched = Some((target, r2o_controller::live::DnsTaskState::Watching));
+                    break;
+                }
+                if worker.active.contains_key(&key) || worker.pending_rechecks.contains_key(&key) {
+                    let state = if r2o_dns_trial_settle_active(&key) {
+                        r2o_controller::live::DnsTaskState::TrialSettle
+                    } else {
+                        searches
+                            .entries
+                            .get(&key)
+                            .map(r2o_dns_task_state_from_search)
+                            .unwrap_or(r2o_controller::live::DnsTaskState::Planning)
+                    };
+                    matched = Some((target, state));
+                    break;
+                }
+                let failure_key = r2o_discovery_failure_key(target);
+                if !worker.clear_streaks.contains_key(&failure_key)
+                    && worker.failed_at.get(&failure_key).is_some_and(|failed_at| {
+                        now.saturating_duration_since(*failed_at) < R2O_DISCOVERY_TASK_REST
+                    })
+                {
+                    matched = Some((target, r2o_controller::live::DnsTaskState::Resting));
+                    break;
+                }
+            }
+            let Some((target, state)) = matched else {
+                if let Some(slot) = self.task_of_service(&service)
+                    && self.tasks[slot].state != r2o_controller::live::DnsTaskState::DnsHealth
+                {
+                    self.tasks[slot].reset();
+                }
+                continue;
+            };
+            let search = searches.entries.get(&r2o_discovery_task_key(target));
+            let slot = self
+                .task_of_service(&service)
+                .or_else(|| self.task_free_slot());
+            let Some(slot) = slot else {
+                continue;
+            };
+            let live = self.live.get(index).cloned().unwrap_or_default();
+            let task = &mut self.tasks[slot];
+            if task.state == r2o_controller::live::DnsTaskState::DnsHealth {
+                continue;
+            }
+            task.state = state;
+            task.name = if service.sni.is_empty() {
+                service.host.clone()
+            } else {
+                service.sni.clone()
+            };
+            task.ip = if !live.ip.is_empty() {
+                live.ip.clone()
+            } else if service.host.parse::<std::net::IpAddr>().is_ok() {
+                service.host.clone()
+            } else {
+                String::new()
+            };
+            task.port = service.port;
+            task.transport = r2o_discovery_transport(target);
+            task.family = target.family;
+            task.dns_protocol = service.protocol.clone();
+            task.dns_host = service.host.clone();
+            task.doh_path = service.path.clone();
+            task.dns_bootstrap = service.bootstrap_dns.clone();
+            task.dns_service_generation = live.generation;
+            task.dns_health_probe = false;
+            if let Some(search) = search {
+                task.n_plans = usize::from(!search.candidate.is_empty());
+                task.next_plan = usize::from(matches!(
+                    state,
+                    r2o_controller::live::DnsTaskState::TrialSettle
+                        | r2o_controller::live::DnsTaskState::Verify
+                        | r2o_controller::live::DnsTaskState::VerifyWait
+                        | r2o_controller::live::DnsTaskState::Watching
+                ));
+                task.trial_installed = task.next_plan > 0;
+                task.trial_acked = task.trial_installed;
+                task.probes = search.probes.min(u32::MAX as usize) as u32;
+                task.ver_ok =
+                    search.verify.applied || state == r2o_controller::live::DnsTaskState::Watching;
+                task.ver = r2o_controller::live::DnsTaskVerify {
+                    level: search.verify.level,
+                    status: search.verify.status,
+                    dns_reply: search.verify.dns_reply,
+                    reason: if !search.verify.reason.is_empty() {
+                        search.verify.reason.clone()
+                    } else if state == r2o_controller::live::DnsTaskState::Resting {
+                        search.last_result.clone()
+                    } else {
+                        String::new()
+                    },
+                };
+                task.tcp_reachable = task.ver.level >= r2o_controller::live::D2K_VER_TRANSPORT;
+                task.tls_handshake = task.ver.level >= r2o_controller::live::D2K_VER_HANDSHAKE;
+                task.http_status = task.ver.status;
+                task.dns_answer = task.ver.dns_reply;
+                task.attempts = task.probes;
+            } else {
+                task.n_plans = 0;
+                task.next_plan = 0;
+                task.trial_installed = false;
+                task.trial_acked = false;
+                task.probes = 0;
+                task.ver_ok = state == r2o_controller::live::DnsTaskState::Watching;
+                task.ver = Default::default();
+                task.tcp_reachable = false;
+                task.tls_handshake = false;
+                task.http_status = 0;
+                task.dns_answer = false;
+                task.attempts = 0;
+            }
+            task.rest_until_ms = if state == r2o_controller::live::DnsTaskState::Resting {
+                r2o_controller::now_ms::d2k_now_ms().saturating_add(120_000)
+            } else {
+                0
+            };
+            task.next_check_ms = task.rest_until_ms;
         }
     }
 
@@ -3021,20 +3310,19 @@ impl R2oDnsServices {
 }
 
 #[cfg(unix)]
+type R2oDnsHealthMessage = (
+    usize,
+    u64,
+    Option<std::net::IpAddr>,
+    r2o_controller::dns_health::DnsHealthResult,
+);
+
+#[cfg(unix)]
 struct R2oDnsHealth {
-    sender: std::sync::mpsc::Sender<(
-        usize,
-        u64,
-        Option<std::net::IpAddr>,
-        r2o_controller::dns_health::DnsHealthResult,
-    )>,
-    receiver: std::sync::mpsc::Receiver<(
-        usize,
-        u64,
-        Option<std::net::IpAddr>,
-        r2o_controller::dns_health::DnsHealthResult,
-    )>,
-    in_flight: bool,
+    sender: std::sync::mpsc::Sender<R2oDnsHealthMessage>,
+    receiver: std::sync::mpsc::Receiver<R2oDnsHealthMessage>,
+    /// Занятая ячейка T_DNS_HEALTH; C держит ровно одну сетевую DNS-пробу.
+    task_slot: Option<usize>,
 }
 
 #[cfg(unix)]
@@ -3044,15 +3332,24 @@ impl R2oDnsHealth {
         Self {
             sender,
             receiver,
-            in_flight: false,
+            task_slot: None,
         }
+    }
+
+    fn in_flight(&self, state: &R2oDnsServices) -> bool {
+        self.task_slot.is_some()
+            || state
+                .tasks
+                .iter()
+                .any(|task| task.state == r2o_controller::live::DnsTaskState::DnsHealth)
     }
 
     /// C `dns_health_start_due`: не более одной пробы, только
     /// `state != checking` и `now >= next_check`; блокирующая проба уходит в
-    /// отдельный поток.
+    /// отдельный поток, а в планировщике занята настоящая ячейка
+    /// T_DNS_HEALTH с protocol/host/path/bootstrap/generation.
     fn start_due(&mut self, state: &mut R2oDnsServices, mark: Option<u32>) {
-        if self.in_flight {
+        if self.in_flight(state) {
             return;
         }
         let now = std::time::Instant::now();
@@ -3080,6 +3377,10 @@ impl R2oDnsHealth {
         if !state.live[index].ip.is_empty() {
             probe.host = state.live[index].ip.clone();
         }
+        let Some(slot) = state.start_health_task(index, r2o_controller::now_ms::d2k_now_ms())
+        else {
+            return;
+        };
         {
             let live = &mut state.live[index];
             live.state = r2o_controller::live::DnsServiceState::Checking;
@@ -3095,33 +3396,39 @@ impl R2oDnsHealth {
                 "Автоматически проверяется корректный DNS-ответ endpoint.".into()
             };
         }
-        self.in_flight = true;
+        self.task_slot = Some(slot);
         let sender = self.sender.clone();
+        let dns_host = service.host.clone();
+        let bootstrap_dns = service.bootstrap_dns.clone();
         std::thread::spawn(move || {
             let mut resolved = None;
             let mut probe = probe;
-            if probe.host.parse::<std::net::IpAddr>().is_err() {
+            if !bootstrap_dns.is_empty() {
+                // C worker вызывает bootstrap ВСЕГДА, когда он настроен, даже
+                // если live.ip уже известен: так обновляется адрес endpoint.
                 match r2k_core::dns_config::dns_resolve_bootstrap(
-                    &probe.host,
-                    &probe.bootstrap_dns,
+                    &dns_host,
+                    &bootstrap_dns,
                     mark.unwrap_or(0),
                 ) {
                     Some(ip) => {
                         probe.host = ip.to_string();
                         resolved = Some(ip);
                     }
-                    None => {
+                    None if probe.host.parse::<std::net::IpAddr>().is_err() => {
                         let _ = sender.send((
-                            index,
+                            slot,
                             generation,
                             None,
                             r2o_controller::dns_health::DnsHealthResult {
-                                reason: "DNS: bootstrap не разрешил endpoint".into(),
+                                reason: "DNS: endpoint IP не получен от настроенного bootstrap DNS"
+                                    .into(),
                                 ..Default::default()
                             },
                         ));
                         return;
                     }
+                    None => {}
                 }
             }
             let result = r2o_controller::dns_health::probe_dns_health(
@@ -3129,63 +3436,23 @@ impl R2oDnsHealth {
                 mark,
                 std::time::Duration::from_millis(4000),
             );
-            let _ = sender.send((index, generation, resolved, result));
+            let _ = sender.send((slot, generation, resolved, result));
         });
     }
 
     fn poll(&mut self, state: &mut R2oDnsServices, wall_now: i64) {
-        while let Ok((index, generation, resolved, result)) = self.receiver.try_recv() {
-            self.in_flight = false;
-            let Some(live) = state.live.get_mut(index) else {
-                continue;
-            };
-            if live.generation != generation {
-                continue;
+        while let Ok((slot, generation, resolved, result)) = self.receiver.try_recv() {
+            if self.task_slot == Some(slot) {
+                self.task_slot = None;
             }
-            if let Some(ip) = resolved {
-                let ip = ip.to_string();
-                if live.ip != ip {
-                    live.ip = ip;
-                    live.plan_applied = false;
-                    live.applied_plan_id.clear();
-                    live.plan_applied_at = None;
-                    live.candidate_plan_applied = false;
-                    live.no_bypass = false;
-                }
-            }
-            live.checked_at = Some(wall_now.max(1));
-            live.tcp_reachable = result.tcp_reachable;
-            live.tls_handshake = result.tls_handshake;
-            live.http_status = result.http_status;
-            live.dns_answer = result.dns_reply;
-            live.state = if result.dns_reply {
-                r2o_controller::live::DnsServiceState::DirectOk
-            } else {
-                r2o_controller::live::DnsServiceState::Failed
-            };
-            live.next_check = Some(
-                std::time::Instant::now()
-                    + if result.dns_reply {
-                        std::time::Duration::from_secs(5 * 60)
-                    } else {
-                        std::time::Duration::from_secs(60)
-                    },
+            state.finish_health_task(
+                slot,
+                generation,
+                resolved,
+                result,
+                wall_now,
+                r2o_controller::now_ms::d2k_now_ms(),
             );
-            live.reason = if result.dns_reply {
-                result.reason
-            } else if result.http_status == 413 {
-                "HTTP 413: это ошибка endpoint, а не доказательство DPI; подбор не запускается."
-                    .into()
-            } else {
-                format!(
-                    "DNS-ответ не подтверждён ({}); одиночная ошибка не считается блокировкой.",
-                    if result.reason.is_empty() {
-                        "причина не определена"
-                    } else {
-                        &result.reason
-                    }
-                )
-            };
         }
     }
 }
@@ -7006,6 +7273,12 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
     bool,
     bool,
 ) {
+    let doh_request = r2o_dns_doh_request_for_target(target);
+    let dot_frame = r2o_dns_dot_frame_for_target(target);
+    r2o_controller::fetch::r2o_fetch_doh_query_set(
+        doh_request.as_ref().map(|(_, query)| query.clone()),
+    );
+    r2o_controller::fetch::r2o_fetch_dot_query_set(dot_frame);
     let result = (|| {
         let wire_shape = r2o_plan_wire_shape(target.shape, has_timestamp);
         let confirmation_mark = r2o_candidate_confirmation_mark(mark);
@@ -7051,6 +7324,9 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
             return Err("датапат отверг временный план семейной пробы".into());
         }
 
+        // C `T_TRIAL_SETTLE`: план уже записан/принят, сетевой зонд ещё не
+        // вернулся. Guard снимает метку на любом выходе.
+        let _trial_settle = R2oDnsTrialSettleGuard::new(target);
         let connected = bound
             .connect(
                 destination,
@@ -7080,7 +7356,10 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
                                 .unwrap_or_else(|| target.host.clone()),
                             ip: Some(destination.ip()),
                             port: destination.port(),
-                            path: candidate.probe_path.clone(),
+                            path: doh_request
+                                .as_ref()
+                                .map(|(path, _)| path.clone())
+                                .unwrap_or_else(|| candidate.probe_path.clone()),
                             deadline: std::time::Duration::from_secs(8),
                             tls12: target.shape == SHAPE_LEGACY,
                             wire_len,
@@ -7180,6 +7459,8 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
         });
         Ok((fetch_result, applied, transport_established))
     })();
+    r2o_controller::fetch::r2o_fetch_doh_query_set(None);
+    r2o_controller::fetch::r2o_fetch_dot_query_set(None);
     match result {
         Ok((fetch, applied, transport_established)) => (fetch, applied, transport_established),
         Err(error) => (Err(error), false, false),
@@ -9662,6 +9943,20 @@ struct R2oDiscoverySearches {
     last_suspect: Option<r2o_controller::discovery::DiscoveryTarget>,
 }
 
+/// Структурированный итог последней пробы кандидата: то, что C `task.ver`
+/// получает от `d2k_verify_*`. Строки progress остаются для журнала; эти поля
+/// питают DNS task-ячейку и live-секцию.
+#[cfg(unix)]
+#[derive(Clone, Debug, Default)]
+struct R2oDiscoveryVerify {
+    applied: bool,
+    verified: bool,
+    level: i32,
+    status: i32,
+    dns_reply: bool,
+    reason: String,
+}
+
 #[cfg(unix)]
 struct R2oDiscoverySearch {
     target: r2o_controller::discovery::DiscoveryTarget,
@@ -9678,6 +9973,7 @@ struct R2oDiscoverySearch {
     plan: String,
     application: String,
     last_result: String,
+    verify: R2oDiscoveryVerify,
 }
 
 #[cfg(unix)]
@@ -9736,6 +10032,7 @@ impl R2oDiscoverySearches {
                 plan: String::new(),
                 application: String::new(),
                 last_result: String::new(),
+                verify: R2oDiscoveryVerify::default(),
             });
         let starting_run = phase == "распознаём поведение" && search.started_at.is_none();
         if phase == "ожидает безопасного слота замера" || starting_run
@@ -9750,6 +10047,7 @@ impl R2oDiscoverySearches {
             search.plan.clear();
             search.application.clear();
             search.last_result.clear();
+            search.verify = R2oDiscoveryVerify::default();
         }
         if phase != "ожидает безопасного слота замера" && search.started_at.is_none()
         {
@@ -9897,6 +10195,22 @@ impl R2oDiscoverySearches {
         search.last_result = last_result.to_owned();
     }
 
+    /// Записать структурированный ver-результат последней пробы кандидата.
+    fn update_candidate_verify(
+        &mut self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        result: &Result<r2o_controller::fetch::FetchResult, String>,
+        applied: bool,
+        verified: bool,
+        transport_established: bool,
+    ) {
+        let Some(search) = self.entries.get_mut(&r2o_discovery_task_key(target)) else {
+            return;
+        };
+        search.verify =
+            r2o_discovery_verify_snapshot(result, applied, verified, transport_established);
+    }
+
     fn note_datapath_event(&mut self, kind: u16) {
         self.datapath_events = self.datapath_events.saturating_add(1);
         if matches!(
@@ -9965,6 +10279,186 @@ fn r2o_discovery_record_plan_progress(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .update_plan_progress(target, plan_text, source, application, last_result);
+}
+
+/// C `d2k_ver_result` из фактического результата пробы. Уровень — не догадка:
+/// APPLICATION только для полного прикладного ответа, HANDSHAKE — для
+/// завершённого рукопожатия/доказательства, TRANSPORT — когда TCP встал.
+#[cfg(unix)]
+fn r2o_discovery_verify_snapshot(
+    result: &Result<r2o_controller::fetch::FetchResult, String>,
+    applied: bool,
+    verified: bool,
+    transport_established: bool,
+) -> R2oDiscoveryVerify {
+    match result {
+        Ok(fetch) => {
+            let level = if fetch.doh_probe {
+                if fetch.dns_reply && fetch.peer_name_ok != Some(false) {
+                    r2o_controller::live::D2K_VER_APPLICATION
+                } else if fetch.handshake_verified || fetch.tls.is_some() {
+                    r2o_controller::live::D2K_VER_HANDSHAKE
+                } else {
+                    r2o_controller::live::D2K_VER_TRANSPORT
+                }
+            } else if fetch.application_verified {
+                r2o_controller::live::D2K_VER_APPLICATION
+            } else if fetch.handshake_verified || fetch.tls.is_some() {
+                r2o_controller::live::D2K_VER_HANDSHAKE
+            } else {
+                r2o_controller::live::D2K_VER_TRANSPORT
+            };
+            R2oDiscoveryVerify {
+                applied,
+                verified,
+                level,
+                status: i32::from(fetch.status),
+                dns_reply: fetch.dns_reply,
+                reason: fetch.reason.clone().unwrap_or_else(|| {
+                    format!(
+                        "проба завершилась: прикладной ответ HTTP {} {}",
+                        fetch.status,
+                        if verified {
+                            "подтверждён"
+                        } else {
+                            "не подтверждён"
+                        }
+                    )
+                }),
+            }
+        }
+        Err(error) => R2oDiscoveryVerify {
+            applied,
+            verified,
+            level: if transport_established {
+                r2o_controller::live::D2K_VER_TRANSPORT
+            } else {
+                r2o_controller::live::D2K_VER_NOT_MEASURED
+            },
+            status: 0,
+            dns_reply: false,
+            reason: error.clone(),
+        },
+    }
+}
+
+/// C `on_suspect` → `dns_service_observe` → `d2k_dns_service_match`: задача
+/// принадлежит DNS-endpoint, если совпали транспорт/порт и имя или IP.
+#[cfg(unix)]
+fn r2o_dns_service_matches_target(
+    service: &r2k_core::dns_config::DnsService,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+) -> bool {
+    let transport = if service.protocol == "doq" { 17 } else { 6 };
+    if r2o_discovery_transport(target) != transport {
+        return false;
+    }
+    let Ok(endpoint) = target.endpoint.parse::<std::net::SocketAddr>() else {
+        return false;
+    };
+    if endpoint.port() != service.port {
+        return false;
+    }
+    if !service.sni.is_empty() && target.host.eq_ignore_ascii_case(&service.sni) {
+        return true;
+    }
+    target.host.eq_ignore_ascii_case(&service.host)
+        || endpoint
+            .ip()
+            .to_string()
+            .eq_ignore_ascii_case(&service.host)
+}
+
+/// C `d2k_verify_doh_on`: для DoH-endpoint пробный поток должен нести
+/// настоящий DNS-запрос на `doh_path`, а не обычный GET.
+#[cfg(unix)]
+fn r2o_dns_doh_request(
+    services: &[r2k_core::dns_config::DnsService],
+    target: &r2o_controller::discovery::DiscoveryTarget,
+) -> Option<(String, Vec<u8>)> {
+    let service = services.iter().find(|service| {
+        service.protocol.eq_ignore_ascii_case("doh")
+            && r2o_dns_service_matches_target(service, target)
+    })?;
+    Some((
+        service.path.clone(),
+        r2o_controller::dns_health::dns_query_message(r2o_controller::dns_health::DNS_QUERY_ID_DOH),
+    ))
+}
+
+/// C `d2k_verify_dns_on` для DoT: length-prefixed DNS-запрос с ID 1.
+#[cfg(unix)]
+fn r2o_dns_dot_frame(
+    services: &[r2k_core::dns_config::DnsService],
+    target: &r2o_controller::discovery::DiscoveryTarget,
+) -> Option<Vec<u8>> {
+    services.iter().find(|service| {
+        service.protocol.eq_ignore_ascii_case("dot")
+            && r2o_discovery_transport(target) == 6
+            && r2o_dns_service_matches_target(service, target)
+    })?;
+    Some(r2o_controller::dns_health::dns_query_frame(1))
+}
+
+/// Снимок DNS-конфигурации для probe-потока Discovery. Обновляется при
+/// старте и при периодическом `r2o_read_system_dns_services`.
+#[cfg(unix)]
+fn r2o_dns_service_snapshot() -> &'static std::sync::Mutex<Vec<r2k_core::dns_config::DnsService>> {
+    static SNAPSHOT: std::sync::OnceLock<std::sync::Mutex<Vec<r2k_core::dns_config::DnsService>>> =
+        std::sync::OnceLock::new();
+    SNAPSHOT.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+#[cfg(unix)]
+fn r2o_publish_dns_services(services: &[r2k_core::dns_config::DnsService]) {
+    *r2o_dns_service_snapshot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = services.to_vec();
+}
+
+#[cfg(unix)]
+fn r2o_dns_doh_request_for_target(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+) -> Option<(String, Vec<u8>)> {
+    let services = r2o_dns_service_snapshot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    r2o_dns_doh_request(&services, target)
+}
+
+#[cfg(unix)]
+fn r2o_dns_dot_frame_for_target(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+) -> Option<Vec<u8>> {
+    let services = r2o_dns_service_snapshot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    r2o_dns_dot_frame(&services, target)
+}
+
+/// Реальная фаза Discovery → состояние DNS-задачи. Это не вердикт: фазу
+/// выставляет сам конвейер, а `ver_ok`/`ver.*` приходят из APPLIED и пробы.
+#[cfg(unix)]
+fn r2o_dns_task_state_from_search(
+    search: &R2oDiscoverySearch,
+) -> r2o_controller::live::DnsTaskState {
+    match search.phase {
+        "ожидает безопасного слота замера" => {
+            r2o_controller::live::DnsTaskState::Queued
+        }
+        "распознаём поведение" | "базовый вопрос перед своими планами" => {
+            r2o_controller::live::DnsTaskState::Asking
+        }
+        "выводим планы" => r2o_controller::live::DnsTaskState::Planning,
+        "проверяем выведенный план" => {
+            if search.verify.applied && !search.verify.verified {
+                r2o_controller::live::DnsTaskState::VerifyWait
+            } else {
+                r2o_controller::live::DnsTaskState::Verify
+            }
+        }
+        _ => r2o_controller::live::DnsTaskState::Planning,
+    }
 }
 
 #[cfg(unix)]
@@ -10349,6 +10843,60 @@ fn r2o_discovery_task_key(
         r2o_discovery_transport(target),
         target.family,
     )
+}
+
+/// Реальное окно C `T_TRIAL_SETTLE`: пробный план уже принят датапатом, но
+/// зонд ещё не завершился. Метка ставится вокруг сетевой пробы и снимается
+/// guard'ом, поэтому live-секция видит именно состояние конвейера, а не
+/// вычисленное «наверное, уже проверяем».
+#[cfg(unix)]
+#[derive(Default)]
+struct R2oDnsTrialSettle {
+    entries: std::sync::Mutex<HashMap<R2oDiscoveryTaskKey, std::time::Instant>>,
+}
+
+#[cfg(unix)]
+fn r2o_dns_trial_settle() -> &'static R2oDnsTrialSettle {
+    static STATE: std::sync::OnceLock<R2oDnsTrialSettle> = std::sync::OnceLock::new();
+    STATE.get_or_init(R2oDnsTrialSettle::default)
+}
+
+#[cfg(unix)]
+struct R2oDnsTrialSettleGuard {
+    key: R2oDiscoveryTaskKey,
+}
+
+#[cfg(unix)]
+impl R2oDnsTrialSettleGuard {
+    fn new(target: &r2o_controller::discovery::DiscoveryTarget) -> Self {
+        let key = r2o_discovery_task_key(target);
+        r2o_dns_trial_settle()
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key.clone(), std::time::Instant::now());
+        Self { key }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for R2oDnsTrialSettleGuard {
+    fn drop(&mut self) {
+        r2o_dns_trial_settle()
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.key);
+    }
+}
+
+#[cfg(unix)]
+fn r2o_dns_trial_settle_active(key: &R2oDiscoveryTaskKey) -> bool {
+    r2o_dns_trial_settle()
+        .entries
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains_key(key)
 }
 
 #[cfg(unix)]
@@ -12560,6 +13108,16 @@ impl DiscoveryWorker {
                             }
                             let verified = result_action
                                 == r2o_controller::discovery::OwnFirstResultAction::Accept;
+                            runner_searches
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .update_candidate_verify(
+                                    &target,
+                                    &result,
+                                    applied,
+                                    verified,
+                                    candidate_evidence.transport_established,
+                                );
                             let (application, mut last_result) =
                                 r2o_discovery_plan_result(&result, applied, verified);
                             if candidate_evidence.layered_rx_handled {
@@ -12809,7 +13367,7 @@ group_block_proven: false,
                                     &format!("проверка плана {attempt}/{total}: {result}"),
                                 );
                         };
-                    let (result, applied, attempts, _) =
+                    let (result, applied, attempts, candidate_evidence) =
                         r2o_run_discovery_candidate_trial_with_progress(
                             &target,
                             &candidate.text,
@@ -12843,6 +13401,16 @@ group_block_proven: false,
                         discovery_candidate_probes.saturating_add(attempts);
                     let verified = r2o_family_recovery_decision(&result, applied)
                         == R2oFamilyRecoveryDecision::Verified;
+                    runner_searches
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .update_candidate_verify(
+                            &target,
+                            &result,
+                            applied,
+                            verified,
+                            candidate_evidence.transport_established,
+                        );
                     let (application, last_result) =
                         r2o_discovery_plan_result(&result, applied, verified);
                     r2o_discovery_record_plan_progress(
@@ -13051,6 +13619,16 @@ group_block_proven: false,
             let mut probes_used = probe_counts.candidates;
             let primary_verified = r2o_family_recovery_decision(&result, applied)
                 == R2oFamilyRecoveryDecision::Verified;
+            runner_searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .update_candidate_verify(
+                    &target,
+                    &result,
+                    applied,
+                    primary_verified,
+                    candidate_evidence.transport_established,
+                );
             let (application, last_result) =
                 r2o_discovery_plan_result(&result, applied, primary_verified);
             r2o_discovery_record_plan_progress(
@@ -13158,7 +13736,7 @@ group_block_proven: false,
                         "ожидается точное подтверждение datapath",
                     );
                     let progress_base = probe_counts.total();
-                    let (result, applied, attempts, _) =
+                    let (result, applied, attempts, candidate_evidence) =
                         r2o_run_discovery_candidate_trial_with_progress(
                             &target,
                             &candidate,
@@ -13201,6 +13779,16 @@ group_block_proven: false,
                     probe_counts.candidates = probe_counts.candidates.saturating_add(attempts);
                     let verified = r2o_family_recovery_decision(&result, applied)
                         == R2oFamilyRecoveryDecision::Verified;
+                    runner_searches
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .update_candidate_verify(
+                            &target,
+                            &result,
+                            applied,
+                            verified,
+                            candidate_evidence.transport_established,
+                        );
                     let (application, last_result) =
                         r2o_discovery_plan_result(&result, applied, verified);
                     r2o_discovery_record_plan_progress(
@@ -16776,6 +17364,10 @@ fn r2o_discovery_volume_recovery(
         probe_counts.candidates = probe_counts.candidates.saturating_add(attempts);
         let verified =
             r2o_family_recovery_decision(&result, applied) == R2oFamilyRecoveryDecision::Verified;
+        live_searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .update_candidate_verify(target, &result, applied, verified, false);
         let (application, last_result) = r2o_discovery_plan_result(&result, applied, verified);
         live_searches
             .lock()
@@ -16877,6 +17469,10 @@ fn r2o_discovery_volume_recovery(
         probe_counts.candidates = probe_counts.candidates.saturating_add(attempts);
         let verified =
             r2o_family_recovery_decision(&result, applied) == R2oFamilyRecoveryDecision::Verified;
+        live_searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .update_candidate_verify(target, &result, applied, verified, false);
         let (application, last_result) = r2o_discovery_plan_result(&result, applied, verified);
         live_searches
             .lock()
@@ -17026,6 +17622,10 @@ fn r2o_discovery_volume_recovery(
             applied,
             tx_ladder_requires_packet_budget,
         ) == R2oFamilyRecoveryDecision::Verified;
+        live_searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .update_candidate_verify(target, &result, applied, verified, false);
         let (application, last_result) = r2o_discovery_plan_result(&result, applied, verified);
         live_searches
             .lock()
@@ -18716,6 +19316,7 @@ impl ControlClient {
         // C `dns_services_refresh`: чтение конфигурации на старте и не чаще
         // раза в 30 с; ошибка ndmc сохраняет прошлый удачный набор.
         let mut dns_services = R2oDnsServices::from_system();
+        r2o_publish_dns_services(&dns_services.services);
         let mut dns_health = R2oDnsHealth::new();
         let mut dns_services_refresh =
             std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -18873,6 +19474,9 @@ impl ControlClient {
                     .as_secs() as i64;
                 dns_health.poll(&mut dns_services, dns_wall_now);
                 dns_health.start_due(&mut dns_services, https_probe_mark);
+                if let Some((worker, _, _, _)) = &discovery {
+                    dns_services.sync_discovery_tasks(worker, std::time::Instant::now());
+                }
                 if let Some(diagnostics) = diagnostics.as_mut() {
                     diagnostics.tick(|| {
                         let catalog = discovery
@@ -19142,6 +19746,7 @@ impl ControlClient {
                 if r2o_now >= dns_services_refresh {
                     if let Some(next) = r2o_read_system_dns_services() {
                         dns_services.set_services(next);
+                        r2o_publish_dns_services(&dns_services.services);
                     }
                     dns_services_refresh = r2o_now + std::time::Duration::from_secs(30);
                 }
@@ -19212,6 +19817,7 @@ impl ControlClient {
                                 &live_areas,
                                 &dns_services.services,
                                 &dns_services.live,
+                                &dns_services.tasks,
                             )
                             .and_then(|value| r2o_controller::live::write_snapshot(path, &value))
                             {
@@ -19386,8 +19992,6 @@ impl ControlClient {
                     .0;
                     let measured_probe_path =
                         (measured_probe_path != "/").then_some(measured_probe_path);
-                    let direct_clear = outcome.direct_clear;
-                    let queue_expired = outcome.queue_expired;
                     let mut confirmed = false;
                     if outcome.queue_expired {
                         println!(
@@ -19432,13 +20036,6 @@ impl ControlClient {
                             worker.catalog_changed(catalog, &active_groups);
                         }
                     }
-                    dns_services.note_discovery_outcome(
-                        &target,
-                        confirmed,
-                        has_candidate,
-                        direct_clear,
-                        queue_expired,
-                    );
                     std::io::stdout().flush()?;
                     continue;
                 }
@@ -26300,6 +26897,11 @@ fn r2o_quic_binding_blocks_retry(binding_exists: bool, planned: bool) -> bool {
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
+    fn dns_tasks() -> Vec<r2o_controller::live::DnsTask> {
+        vec![r2o_controller::live::DnsTask::default(); super::R2O_DNS_TASK_CAPACITY]
+    }
+
+    #[cfg(unix)]
     #[test]
     fn ask_print_helpers_match_c_exactly() {
         use r2o_controller::classify::{DpiProps, TriState};
@@ -26964,6 +27566,7 @@ mod tests {
         let mut state = super::R2oDnsServices {
             services: Vec::new(),
             live: Vec::new(),
+            tasks: dns_tasks(),
             generation: 0,
         };
         state.set_services(vec![service("198.51.100.80", 443)]);
@@ -27063,6 +27666,7 @@ mod tests {
                 port: 443,
             }],
             live: Vec::new(),
+            tasks: dns_tasks(),
             generation: 0,
         };
         state.set_services(vec![DnsService {
@@ -27086,6 +27690,7 @@ mod tests {
                 &[],
                 &state.services,
                 &state.live,
+                &state.tasks,
             )
             .unwrap();
             scenarios.push(json!({
@@ -27144,24 +27749,175 @@ mod tests {
         state.live[0].dns_answer = true;
         snapshot(&state, "plan_applied_with_answer");
 
-        state.live[0].candidate_plan_applied = true;
-        state.live[0].tcp_reachable = true;
-        state.live[0].tls_handshake = true;
-        state.live[0].http_status = 200;
-        snapshot(&state, "bypass_ok");
+        state.live[0].state = r2o_controller::live::DnsServiceState::Failed;
+        state.live[0].checked_at = Some(2005);
+        state.live[0].reason =
+            "HTTP 413: это ошибка endpoint, а не доказательство DPI; подбор не запускается.".into();
+        snapshot(&state, "plan_applied_failed");
 
-        state.live[0].candidate_plan_applied = false;
-        state.live[0].dns_answer = false;
-        state.live[0].tcp_reachable = false;
-        state.live[0].tls_handshake = false;
-        state.live[0].http_status = 0;
+        fn set_task(
+            state: &mut super::R2oDnsServices,
+            task_state: r2o_controller::live::DnsTaskState,
+            ver_ok: bool,
+            level: i32,
+            status: i32,
+            dns_reply: bool,
+            reason: &str,
+        ) {
+            state.tasks[0] = r2o_controller::live::DnsTask {
+                state: task_state,
+                dns_protocol: "doh".into(),
+                name: "dns.example".into(),
+                ip: "198.51.100.81".into(),
+                port: 443,
+                transport: 6,
+                family: 4,
+                dns_service_generation: state.live[0].generation,
+                ver_ok,
+                ver: r2o_controller::live::DnsTaskVerify {
+                    level,
+                    status,
+                    dns_reply,
+                    reason: reason.into(),
+                },
+                ..Default::default()
+            };
+        }
+
+        // Task-candidate: ver_ok + DNS-ответ из t->ver.dns_reply, live.dns_answer
+        // сброшен — bypass_ok должен доказать именно task-ответ.
+        state.live[0].state = r2o_controller::live::DnsServiceState::Detected;
         state.live[0].plan_applied = false;
         state.live[0].plan_applied_at = None;
         state.live[0].applied_plan_id.clear();
-        state.live[0].state = r2o_controller::live::DnsServiceState::Detected;
+        state.live[0].dns_answer = false;
         state.live[0].checked_at = None;
-        state.live[0].no_bypass = true;
+        state.live[0].tcp_reachable = false;
+        state.live[0].tls_handshake = false;
+        state.live[0].http_status = 0;
+        set_task(
+            &mut state,
+            r2o_controller::live::DnsTaskState::Verify,
+            true,
+            r2o_controller::live::D2K_VER_APPLICATION,
+            200,
+            true,
+            "",
+        );
+        snapshot(&state, "bypass_ok");
+
+        // Кандидат применён, DNS-ответа нет: checking с причиной кандидата.
+        set_task(
+            &mut state,
+            r2o_controller::live::DnsTaskState::Verify,
+            true,
+            r2o_controller::live::D2K_VER_APPLICATION,
+            200,
+            false,
+            "",
+        );
+        snapshot(&state, "candidate_without_answer");
+
+        // Зонд вернулся, ждём применения плана к его потоку.
+        set_task(
+            &mut state,
+            r2o_controller::live::DnsTaskState::VerifyWait,
+            false,
+            r2o_controller::live::D2K_VER_TRANSPORT,
+            0,
+            false,
+            "проба не завершилась: таймаут",
+        );
+        snapshot(&state, "verify_wait");
+
+        // План записан в сокет, ждём принятия датапатом.
+        set_task(
+            &mut state,
+            r2o_controller::live::DnsTaskState::TrialSettle,
+            true,
+            r2o_controller::live::D2K_VER_APPLICATION,
+            200,
+            false,
+            "",
+        );
+        snapshot(&state, "trial_settle");
+
+        // Task перекрывает health-поля live.
+        set_task(
+            &mut state,
+            r2o_controller::live::DnsTaskState::Verify,
+            false,
+            r2o_controller::live::D2K_VER_TRANSPORT,
+            0,
+            false,
+            "",
+        );
+        state.live[0].tcp_reachable = true;
+        state.live[0].tls_handshake = true;
+        state.live[0].http_status = 200;
+        snapshot(&state, "task_overrides_health");
+
+        // Подтверждённая задача в T_WATCHING без плана live и без ответа:
+        // общая ветка «Подозрение передано в штатный конвейер D2O».
+        set_task(
+            &mut state,
+            r2o_controller::live::DnsTaskState::Watching,
+            true,
+            r2o_controller::live::D2K_VER_APPLICATION,
+            200,
+            false,
+            "",
+        );
+        state.live[0].tcp_reachable = false;
+        state.live[0].tls_handshake = false;
+        state.live[0].http_status = 0;
+        snapshot(&state, "generic_watching");
+
+        // T_RESTING после исчерпанного поиска: no_bypass с собственным
+        // t->ver.reason.
+        set_task(
+            &mut state,
+            r2o_controller::live::DnsTaskState::Resting,
+            false,
+            0,
+            0,
+            false,
+            "Поиск завершён: подходящего плана нет.",
+        );
         snapshot(&state, "no_bypass");
+
+        // Пустой ver.reason — C-текст по умолчанию.
+        set_task(
+            &mut state,
+            r2o_controller::live::DnsTaskState::Resting,
+            false,
+            0,
+            0,
+            false,
+            "",
+        );
+        snapshot(&state, "no_bypass_default");
+
+        // T_DNS_HEALTH не участвует в отборе writer: live отдаёт detected.
+        set_task(
+            &mut state,
+            r2o_controller::live::DnsTaskState::DnsHealth,
+            true,
+            r2o_controller::live::D2K_VER_APPLICATION,
+            200,
+            true,
+            "",
+        );
+        state.live[0].state = r2o_controller::live::DnsServiceState::Detected;
+        state.live[0].plan_applied = false;
+        state.live[0].plan_applied_at = None;
+        state.live[0].applied_plan_id.clear();
+        state.live[0].dns_answer = false;
+        state.live[0].checked_at = None;
+        state.live[0].tcp_reachable = false;
+        state.live[0].tls_handshake = false;
+        state.live[0].http_status = 0;
+        snapshot(&state, "task_health_ignored");
 
         if let Ok(path) = std::env::var("R2O_DNS_STATE_DIFF_OUTPUT") {
             std::fs::write(path, serde_json::to_string(&scenarios).unwrap()).unwrap();
@@ -27842,16 +28598,403 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn dns_discovery_outcome_sets_candidate_and_no_bypass_task_states() {
+    fn dns_task_cell_matches_service_and_excludes_health() {
+        use r2k_core::dns_config::DnsService;
+
+        let service = DnsService {
+            protocol: "doh".into(),
+            host: "198.51.100.80".into(),
+            sni: "DNS.Example".into(),
+            path: "/dns-query".into(),
+            bootstrap_dns: String::new(),
+            source: "https-dns-proxy".into(),
+            port: 443,
+        };
+        let mut task = r2o_controller::live::DnsTask {
+            state: r2o_controller::live::DnsTaskState::Verify,
+            dns_protocol: "doh".into(),
+            name: "dns.example".into(),
+            ip: String::new(),
+            port: 443,
+            ..Default::default()
+        };
+        assert!(
+            task.matches_service(&service),
+            "sni сравнивается без регистра"
+        );
+        task.dns_protocol = "dot".into();
+        assert!(!task.matches_service(&service), "protocol обязан совпасть");
+        task.dns_protocol = "doh".into();
+        task.port = 853;
+        assert!(!task.matches_service(&service), "port обязан совпасть");
+        task.port = 443;
+        task.state = r2o_controller::live::DnsTaskState::DnsHealth;
+        assert!(!task.matches_service(&service), "T_DNS_HEALTH не кандидат");
+        task.state = r2o_controller::live::DnsTaskState::Free;
+        assert!(!task.matches_service(&service), "T_FREE не кандидат");
+        // IP-литерал в host сравнивается с task.ip.
+        let literal = DnsService {
+            protocol: "dot".into(),
+            host: "1.1.1.1".into(),
+            sni: String::new(),
+            path: "/".into(),
+            bootstrap_dns: String::new(),
+            source: "dnsproxy".into(),
+            port: 853,
+        };
+        let literal_task = r2o_controller::live::DnsTask {
+            state: r2o_controller::live::DnsTaskState::Watching,
+            dns_protocol: "dot".into(),
+            name: "1.1.1.1".into(),
+            ip: "1.1.1.1".into(),
+            port: 853,
+            ..Default::default()
+        };
+        assert!(literal_task.matches_service(&literal));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dns_health_generation_mismatch_does_not_touch_live_and_frees_task() {
+        use r2k_core::dns_config::DnsService;
+
+        let service = DnsService {
+            protocol: "doh".into(),
+            host: "dns.example".into(),
+            sni: "dns.example".into(),
+            path: "/dns-query".into(),
+            bootstrap_dns: String::new(),
+            source: "https-dns-proxy".into(),
+            port: 443,
+        };
+        let mut state = super::R2oDnsServices {
+            services: vec![service],
+            live: vec![r2o_controller::live::DnsServiceLive {
+                generation: 5,
+                ip: "198.51.100.80".into(),
+                ..Default::default()
+            }],
+            tasks: dns_tasks(),
+            generation: 5,
+        };
+        state.tasks[0] = r2o_controller::live::DnsTask {
+            state: r2o_controller::live::DnsTaskState::DnsHealth,
+            dns_health_probe: true,
+            dns_protocol: "doh".into(),
+            dns_host: "dns.example".into(),
+            dns_service_generation: 5,
+            port: 443,
+            ..Default::default()
+        };
+        state.finish_health_task(
+            0,
+            4,
+            None,
+            r2o_controller::dns_health::DnsHealthResult {
+                tcp_reachable: true,
+                tls_handshake: true,
+                http_status: 200,
+                dns_reply: true,
+                reason: "чужая generation".into(),
+            },
+            2005,
+            0,
+        );
+        assert!(state.tasks[0].is_free(), "устаревшая задача освобождена");
+        assert!(state.live[0].checked_at.is_none());
+        assert_eq!(
+            state.live[0].state,
+            r2o_controller::live::DnsServiceState::Detected
+        );
+
+        state.tasks[0] = r2o_controller::live::DnsTask {
+            state: r2o_controller::live::DnsTaskState::DnsHealth,
+            dns_health_probe: true,
+            dns_protocol: "doh".into(),
+            dns_host: "dns.example".into(),
+            ip: "198.51.100.80".into(),
+            dns_service_generation: 5,
+            port: 443,
+            ..Default::default()
+        };
+        state.finish_health_task(
+            0,
+            5,
+            None,
+            r2o_controller::dns_health::DnsHealthResult {
+                tcp_reachable: true,
+                tls_handshake: true,
+                http_status: 200,
+                dns_reply: true,
+                reason: "DoH: получен корректный DNS-ответ".into(),
+            },
+            2005,
+            0,
+        );
+        assert!(state.tasks[0].is_free());
+        assert_eq!(state.live[0].checked_at, Some(2005));
+        assert_eq!(
+            state.live[0].state,
+            r2o_controller::live::DnsServiceState::DirectOk
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dns_task_limit_is_sched_max_tasks() {
+        let mut state = super::R2oDnsServices {
+            services: Vec::new(),
+            live: Vec::new(),
+            tasks: dns_tasks(),
+            generation: 0,
+        };
+        for (index, task) in state.tasks.iter_mut().enumerate() {
+            task.state = r2o_controller::live::DnsTaskState::Watching;
+            task.dns_protocol = "doh".into();
+            task.port = 443;
+            task.name = format!("dns-{index}.example");
+        }
+        assert_eq!(state.tasks.len(), 64);
+        assert!(state.task_free_slot().is_none());
+        state.services.push(r2k_core::dns_config::DnsService {
+            protocol: "doh".into(),
+            host: "dns.example".into(),
+            sni: "dns.example".into(),
+            path: "/dns-query".into(),
+            bootstrap_dns: String::new(),
+            source: "https-dns-proxy".into(),
+            port: 443,
+        });
+        state.live.push(r2o_controller::live::DnsServiceLive {
+            generation: 1,
+            ip: "198.51.100.80".into(),
+            ..Default::default()
+        });
+        assert!(
+            state.start_health_task(0, 0).is_none(),
+            "64 задачи — предел"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dns_discovery_verify_snapshot_maps_real_fetch_levels() {
+        let mut fetch = r2o_test_fetch_result();
+        let applied = super::r2o_discovery_verify_snapshot(&Ok(fetch.clone()), true, true, true);
+        assert!(applied.applied && applied.verified);
+        assert_eq!(applied.level, r2o_controller::live::D2K_VER_APPLICATION);
+        assert_eq!(applied.status, 200);
+        assert!(!applied.dns_reply);
+        assert!(!applied.reason.is_empty());
+
+        fetch.doh_probe = true;
+        fetch.dns_reply = true;
+        let doh = super::r2o_discovery_verify_snapshot(&Ok(fetch.clone()), true, true, true);
+        assert_eq!(doh.level, r2o_controller::live::D2K_VER_APPLICATION);
+        assert!(doh.dns_reply);
+        fetch.dns_reply = false;
+        let no_dns = super::r2o_discovery_verify_snapshot(&Ok(fetch.clone()), true, false, true);
+        assert_eq!(no_dns.level, r2o_controller::live::D2K_VER_HANDSHAKE);
+        assert!(!no_dns.dns_reply);
+
+        fetch.application_verified = false;
+        fetch.handshake_verified = true;
+        let handshake =
+            super::r2o_discovery_verify_snapshot(&Ok(fetch.clone()), false, false, true);
+        assert_eq!(handshake.level, r2o_controller::live::D2K_VER_HANDSHAKE);
+        assert!(!handshake.applied);
+
+        fetch.handshake_verified = false;
+        fetch.tls = None;
+        let transport = super::r2o_discovery_verify_snapshot(&Ok(fetch), false, false, true);
+        assert_eq!(transport.level, r2o_controller::live::D2K_VER_TRANSPORT);
+
+        let failed =
+            super::r2o_discovery_verify_snapshot(&Err("таймаут".into()), false, false, true);
+        assert_eq!(failed.level, r2o_controller::live::D2K_VER_TRANSPORT);
+        assert_eq!(failed.reason, "таймаут");
+        let no_transport = super::r2o_discovery_verify_snapshot(
+            &Err("нет соединения".into()),
+            false,
+            false,
+            false,
+        );
+        assert_eq!(
+            no_transport.level,
+            r2o_controller::live::D2K_VER_NOT_MEASURED
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dns_doh_request_uses_configured_path_and_real_query() {
+        use r2k_core::dns_config::DnsService;
+
+        let services = [DnsService {
+            protocol: "doh".into(),
+            host: "dns.example".into(),
+            sni: "dns.example".into(),
+            path: "/dns-query?token=secret".into(),
+            bootstrap_dns: String::new(),
+            source: "https-dns-proxy".into(),
+            port: 443,
+        }];
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "dns.example".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let (path, query) = super::r2o_dns_doh_request(&services, &target).unwrap();
+        assert_eq!(path, "/dns-query?token=secret");
+        assert_eq!(
+            query,
+            r2o_controller::dns_health::dns_query_message(
+                r2o_controller::dns_health::DNS_QUERY_ID_DOH
+            )
+        );
+        // Не-DoH endpoint обычный GET.
+        let dot = r2o_controller::discovery::DiscoveryTarget {
+            endpoint: "198.51.100.80:853".into(),
+            ..target
+        };
+        assert!(super::r2o_dns_doh_request(&services, &dot).is_none());
+        let dot_services = [DnsService {
+            protocol: "dot".into(),
+            host: "1.1.1.1".into(),
+            sni: String::new(),
+            path: "/".into(),
+            bootstrap_dns: String::new(),
+            source: "dnsproxy".into(),
+            port: 853,
+        }];
+        let dot_target = r2o_controller::discovery::DiscoveryTarget {
+            host: "1.1.1.1".into(),
+            endpoint: "1.1.1.1:853".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        assert_eq!(
+            super::r2o_dns_dot_frame(&dot_services, &dot_target),
+            Some(r2o_controller::dns_health::dns_query_frame(1))
+        );
+        assert!(super::r2o_dns_dot_frame(&services, &dot_target).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dns_task_state_maps_discovery_phases() {
+        use r2o_controller::live::DnsTaskState;
+
+        let mut search = super::R2oDiscoverySearch {
+            target: r2o_controller::discovery::DiscoveryTarget {
+                host: "dns.example".into(),
+                endpoint: "198.51.100.80:443".into(),
+                family: 4,
+                shape: SHAPE_MODERN,
+            },
+            queued_at: std::time::Instant::now(),
+            started_at: None,
+            report_id: None,
+            trigger_code: 0,
+            phase: "ожидает безопасного слота замера",
+            attempts: 0,
+            probes: 0,
+            question: String::new(),
+            candidate: String::new(),
+            source: String::new(),
+            plan: String::new(),
+            application: String::new(),
+            last_result: String::new(),
+            verify: Default::default(),
+        };
+        assert_eq!(
+            super::r2o_dns_task_state_from_search(&search),
+            DnsTaskState::Queued
+        );
+        search.phase = "распознаём поведение";
+        assert_eq!(
+            super::r2o_dns_task_state_from_search(&search),
+            DnsTaskState::Asking
+        );
+        search.phase = "выводим планы";
+        assert_eq!(
+            super::r2o_dns_task_state_from_search(&search),
+            DnsTaskState::Planning
+        );
+        search.phase = "проверяем выведенный план";
+        assert_eq!(
+            super::r2o_dns_task_state_from_search(&search),
+            DnsTaskState::Verify
+        );
+        search.verify.applied = true;
+        assert_eq!(
+            super::r2o_dns_task_state_from_search(&search),
+            DnsTaskState::VerifyWait
+        );
+        search.verify.verified = true;
+        assert_eq!(
+            super::r2o_dns_task_state_from_search(&search),
+            DnsTaskState::Verify
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dns_trial_settle_guard_marks_real_window() {
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "dns.example".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let key = super::r2o_discovery_task_key(&target);
+        assert!(!super::r2o_dns_trial_settle_active(&key));
+        {
+            let _guard = super::R2oDnsTrialSettleGuard::new(&target);
+            assert!(super::r2o_dns_trial_settle_active(&key));
+        }
+        assert!(!super::r2o_dns_trial_settle_active(&key));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dns_discovery_task_cell_follows_real_worker_state() {
         use r2k_core::dns_config::DnsService;
         use r2o_controller::discovery::DiscoveryTarget;
+        use r2o_controller::live::DnsTaskState;
 
+        let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
+        let mut worker = super::DiscoveryWorker::new(None, gate);
         let target = DiscoveryTarget {
             host: "dns.example".into(),
             endpoint: "198.51.100.80:443".into(),
             family: 4,
             shape: SHAPE_MODERN,
         };
+        let key = super::r2o_discovery_task_key(&target);
+        let failure_key = super::r2o_discovery_failure_key(&target);
+        worker.seen.insert(target.clone());
+        worker.active.insert(key.clone(), target.clone());
+        {
+            let mut searches = worker
+                .searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            searches.update(
+                &target,
+                "проверяем выведенный план",
+                1,
+                4,
+                "план",
+                "свой план каталога",
+            );
+            let mut fetch = r2o_test_fetch_result();
+            fetch.doh_probe = true;
+            fetch.dns_reply = true;
+            fetch.peer_name_ok = Some(true);
+            searches.update_candidate_verify(&target, &Ok(fetch), true, false, true);
+        }
         let mut state = super::R2oDnsServices {
             services: vec![DnsService {
                 protocol: "doh".into(),
@@ -27863,28 +29006,62 @@ mod tests {
                 port: 443,
             }],
             live: vec![r2o_controller::live::DnsServiceLive {
-                generation: 5,
+                generation: 1,
                 ip: "198.51.100.80".into(),
+                router_seen: true,
                 ..Default::default()
             }],
-            generation: 5,
+            tasks: dns_tasks(),
+            generation: 1,
         };
-        state.note_discovery_outcome(&target, false, false, false, false);
-        assert!(state.live[0].no_bypass);
-        assert!(!state.live[0].candidate_plan_applied);
-        state.note_discovery_outcome(&target, true, true, false, false);
-        assert!(state.live[0].candidate_plan_applied);
-        assert!(!state.live[0].no_bypass);
-        // direct clear/queue expiry не переводят в T_RESTING.
-        let mut fresh = super::R2oDnsServices {
-            services: state.services.clone(),
-            live: vec![r2o_controller::live::DnsServiceLive::default()],
-            generation: 0,
-        };
-        fresh.note_discovery_outcome(&target, false, false, true, false);
-        assert!(!fresh.live[0].no_bypass);
-        fresh.note_discovery_outcome(&target, false, false, false, true);
-        assert!(!fresh.live[0].no_bypass);
+        state.sync_discovery_tasks(&worker, std::time::Instant::now());
+        let slot = state.task_of_service(&state.services[0]).unwrap();
+        assert_eq!(state.tasks[slot].state, DnsTaskState::VerifyWait);
+        assert!(state.tasks[slot].ver_ok, "APPLIED зонда — это ver_ok");
+        assert_eq!(
+            state.tasks[slot].ver.level,
+            r2o_controller::live::D2K_VER_APPLICATION
+        );
+        assert_eq!(state.tasks[slot].ver.status, 200);
+        assert!(state.tasks[slot].ver.dns_reply, "DoH-ответ реального зонда");
+
+        worker.active.remove(&key);
+        worker.completed.insert(key.clone());
+        state.sync_discovery_tasks(&worker, std::time::Instant::now());
+        let slot = state.task_of_service(&state.services[0]).unwrap();
+        assert_eq!(state.tasks[slot].state, DnsTaskState::Watching);
+        assert!(state.tasks[slot].ver_ok);
+
+        worker.completed.remove(&key);
+        {
+            let mut searches = worker
+                .searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            searches.update_candidate_verify(
+                &target,
+                &Err("проба не завершилась: таймаут".into()),
+                false,
+                false,
+                false,
+            );
+        }
+        worker
+            .failed_at
+            .insert(failure_key.clone(), std::time::Instant::now());
+        state.sync_discovery_tasks(&worker, std::time::Instant::now());
+        let slot = state.task_of_service(&state.services[0]).unwrap();
+        assert_eq!(state.tasks[slot].state, DnsTaskState::Resting);
+        assert!(!state.tasks[slot].ver_ok);
+        assert_eq!(
+            state.tasks[slot].ver.reason,
+            "проба не завершилась: таймаут"
+        );
+
+        // Прямой CLEAR — не T_RESTING: задача снимается, no_bypass не врём.
+        worker.clear_streaks.insert(failure_key, 1);
+        state.sync_discovery_tasks(&worker, std::time::Instant::now());
+        assert!(state.task_of_service(&state.services[0]).is_none());
     }
 
     #[cfg(unix)]
@@ -27913,10 +29090,28 @@ mod tests {
                 attempts: 1,
                 ..Default::default()
             }],
+            tasks: {
+                let mut tasks = dns_tasks();
+                tasks[0] = r2o_controller::live::DnsTask {
+                    state: r2o_controller::live::DnsTaskState::DnsHealth,
+                    dns_health_probe: true,
+                    name: "dns.example".into(),
+                    ip: "198.51.100.80".into(),
+                    port: 443,
+                    transport: 6,
+                    family: 4,
+                    dns_protocol: "doh".into(),
+                    dns_host: "dns.example".into(),
+                    doh_path: "/dns-query".into(),
+                    dns_service_generation: 7,
+                    ..Default::default()
+                };
+                tasks
+            },
             generation: 7,
         };
         let mut health = super::R2oDnsHealth::new();
-        health.in_flight = true;
+        health.task_slot = Some(0);
         health
             .sender
             .send((
@@ -27933,6 +29128,7 @@ mod tests {
             ))
             .unwrap();
         health.poll(&mut state, 2005);
+        assert!(state.tasks[0].is_free());
         let live = &state.live[0];
         assert_eq!(live.ip, "198.51.100.80");
         assert_eq!(live.state, DnsServiceState::DirectOk);
@@ -27946,7 +29142,21 @@ mod tests {
         assert!(live.applied_plan_id.is_empty());
         assert!(live.plan_applied_at.is_none());
 
-        health.in_flight = true;
+        state.tasks[0] = r2o_controller::live::DnsTask {
+            state: r2o_controller::live::DnsTaskState::DnsHealth,
+            dns_health_probe: true,
+            name: "dns.example".into(),
+            ip: "198.51.100.80".into(),
+            port: 443,
+            transport: 6,
+            family: 4,
+            dns_protocol: "doh".into(),
+            dns_host: "dns.example".into(),
+            doh_path: "/dns-query".into(),
+            dns_service_generation: 7,
+            ..Default::default()
+        };
+        health.task_slot = Some(0);
         health
             .sender
             .send((
@@ -27989,21 +29199,37 @@ mod tests {
                 ip: "127.0.0.1".into(),
                 ..Default::default()
             }],
+            tasks: dns_tasks(),
             generation: 3,
         };
         let mut health = super::R2oDnsHealth::new();
         health.start_due(&mut state, None);
-        assert!(health.in_flight);
+        assert!(health.task_slot.is_some());
+        assert!(
+            state
+                .tasks
+                .iter()
+                .any(|task| task.state == r2o_controller::live::DnsTaskState::DnsHealth)
+        );
+        assert_eq!(state.tasks[health.task_slot.unwrap()].dns_protocol, "doh");
+        assert_eq!(state.tasks[health.task_slot.unwrap()].dns_host, "127.0.0.1");
+        assert_eq!(state.tasks[health.task_slot.unwrap()].port, 9);
         assert_eq!(state.live[0].state, DnsServiceState::Checking);
         assert_eq!(state.live[0].attempts, 1);
         for _ in 0..100 {
             health.poll(&mut state, 2005);
-            if !health.in_flight {
+            if health.task_slot.is_none() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        assert!(!health.in_flight);
+        assert!(health.task_slot.is_none());
+        assert!(
+            !state
+                .tasks
+                .iter()
+                .any(|task| { task.state == r2o_controller::live::DnsTaskState::DnsHealth })
+        );
         assert_eq!(state.live[0].generation, 3);
         assert_eq!(state.live[0].state, DnsServiceState::Failed);
         assert_eq!(state.live[0].checked_at, Some(2005));
@@ -28031,16 +29257,23 @@ mod tests {
                 state: DnsServiceState::Checking,
                 ..Default::default()
             }],
+            tasks: dns_tasks(),
             generation: 0,
         };
         let mut health = super::R2oDnsHealth::new();
         health.start_due(&mut state, None);
-        assert!(!health.in_flight);
+        assert!(health.task_slot.is_none());
+        assert!(
+            !state
+                .tasks
+                .iter()
+                .any(|task| { task.state == r2o_controller::live::DnsTaskState::DnsHealth })
+        );
         state.live[0].state = DnsServiceState::Detected;
         state.live[0].next_check =
             Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
         health.start_due(&mut state, None);
-        assert!(!health.in_flight);
+        assert!(health.task_slot.is_none());
     }
 
     #[cfg(unix)]
@@ -34615,6 +35848,8 @@ mod tests {
             complete: true,
             application_verified: true,
             handshake_verified: false,
+            doh_probe: false,
+            dns_reply: false,
             elapsed: std::time::Duration::from_millis(30),
             reason: None,
             r2o_volume_observation: Default::default(),
@@ -35238,6 +36473,8 @@ mod tests {
             complete: true,
             application_verified: true,
             handshake_verified: false,
+            doh_probe: false,
+            dns_reply: false,
             elapsed: std::time::Duration::from_millis(30),
             reason: None,
             r2o_volume_observation: Default::default(),
