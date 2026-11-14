@@ -5394,6 +5394,34 @@ mod tests {
         let data_existing = ipv4_tcp_packet(client, server, 0x18, 64, 3001, &[]);
         let value = feed(&mut sessions, &plan, &data_existing);
         print("I data-existing", &sessions, value);
+
+        fn print_plan(name: &str, decision: &PacketDecision) {
+            match decision {
+                PacketDecision::Transmit { packets, fate } => {
+                    print!(
+                        "{name} applied=1 verdict={} n={} lens=",
+                        u8::from(*fate == OriginalFate::Drop),
+                        packets.len()
+                    );
+                    for (index, packet) in packets.iter().enumerate() {
+                        if index != 0 {
+                            print!(",");
+                        }
+                        print!("{}", packet.packet.len());
+                    }
+                    println!();
+                }
+                _ => println!("{name} applied=0 verdict=0 n=0 lens="),
+            }
+        }
+        let fake_plan = tcp_fake_plan();
+        let mut planned = TcpSessions::default();
+        let syn = ipv4_tcp_packet(client, server, 0x02, 64, 1000, &[]);
+        let decision = decide_with_session(&mut planned, &fake_plan, &syn);
+        print_plan("J plan-syn", &decision);
+        let hello_packet = ipv4_tcp_packet(client, server, 0x18, 64, 1001, &client_hello());
+        let decision = decide_with_session(&mut planned, &fake_plan, &hello_packet);
+        print_plan("K plan-hello", &decision);
     }
 
     #[test]

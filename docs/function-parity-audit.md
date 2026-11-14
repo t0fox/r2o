@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 467 | 225 | 0 | 0 |
-| datapath-core | 400 | 324 | 76 | 0 | 0 |
+| datapath-core | 400 | 326 | 74 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1420** | **562** | **0** | **0** |
+| **Итого** | **1982** | **1422** | **560** | **0** | **0** |
 
-Это не оценка паритета: 562 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 560 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1420 / P 562 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1422 / P 560 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 467 | 225 | 0 | 0 |
-| datapath-core | 400 | 324 | 76 | 0 | 0 |
+| datapath-core | 400 | 326 | 74 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1420** | **562** | **0** | **0** |
+| **Итого** | **1982** | **1422** | **560** | **0** | **0** |
 
 
 ---
@@ -3841,7 +3841,7 @@ CLI-логирования, health-файла, duration, состава свод
 | `next_fragment_id` (static) | 293–304 | 12 | seed из `/dev/urandom` на сессию, затем `++`, пропуск нуля | `r2k-core/src/wire.rs` `next_udp_fragment_id` | **E*** | Rust: `UDP_FRAGMENT_ID` инициализируется один раз `getrandom`, затем `wrapping_add(1)` с пропуском нулевого младшего 16-битного значения; при отказе random — 0 (план отвергается). Тест `udp_fragment_id_matches_c_counter` (ненулевой ID и низких 16 бит, шаг +1/+2). **Ограничение:** C счётчик привязан к сессии, Rust — статический на процесс; в production одна сессия, в R2O `--both` два потока делят счётчик. |
 | `d2k_session_new` | 306–344 | 39 | `calloc`, hook=UNKNOWN, бюджет 25, `flows`/`uflows` по capacity, `plans` по capacity таблицы, journal | `main.rs:884 run` (`TcpSessions`, `R2oUdpSessions`, `NamePlans`, `R2oFlowJournal`) | **P** | **Совпадает:** отдельные таблицы TCP/UDP с одинаковой ёмкостью, журнал, бюджет по умолчанию 25 (`engine.rs:451-460`). **Отличия:** C хранит `hook`, `route_mark`, `fragment_id`, `rev_seen`, `shape_*` в сессии; Rust передаёт hook/route_mark на пакет, а снимки/visible-флаги живут в `QuicSessions`/`TcpSessions`/`R2oUdpSessions`. C `plans` ёмкость выводит из `d2k_track_capacity(flows)`, Rust `NamePlans` — из `--r2o-flow-capacity`. OOM-ветка C (`plans==NULL`) в Rust — `Result` при создании таблиц. |
 | `d2k_session_free` | 346–356 | 11 | освободить plans/journal/uflows/flows/plan/session | `Drop` (Rust RAII) | **E** | C вручную освобождает пять владений; Rust `TcpSessions`/`R2oUdpSessions`/`NamePlans`/`R2oFlowJournal`/`Plan` освобождаются `Drop`. Для непустой сессии эквивалентно; OOM-ветка C (`plans==NULL`) в Rust — `Result` при создании. |
-| `d2k_session_set_plan` | 358–365 | 8 | освободить прежний запасной план, сохранить новый, `plan_revision++` | `main.rs` `plan`/`NamePlans` revision | **P** | C владеет `d2k_plan*` и освобождает старый; Rust хранит `Plan` значением/в `Arc`-подобной структуре, ревизия `NamePlans` растёт на каждое изменение таблицы/плана. Смысл «смена плана видна hold/sched» сохранён, но счётчик C складывает ревизию запасного плана и таблицы (`d2k_session_plan_revision`), Rust — одна. |
+| `d2k_session_set_plan` | 358–365 | 8 | освободить прежний запасной план, сохранить новый, `plan_revision++` | `main.rs` `plan`, `NamePlans` | **E*** | C `d2k_plan_free(s->plan)`, `s->plan=p`, `plan_revision++`. Rust хранит `Plan` значением/в составе `NamePlans` и увеличивает `NamePlans.revision` на каждое изменение; тесты revision `control.rs:5439/5448/5701`. C/Rust session-packet differential загружает одинаковый D2KP-план и применяет его к SYN/ClientHello. **Ограничение:** отдельного `d2k_plan_free` нет — освобождает `Drop`; ревизия одна на таблицу, не сумма fallback+table. |
 | `name_same` (static) | 369–382 | 14 | равная длина, ASCII A-Z→a-z, без нормализации точки | `r2k-core/src/httpup.rs:468-472 same_host` | **P** | **Подтверждённое расхождение:** C сравнивает ровно `alen==blen` и байты без учёта регистра, **не снимая** хвостовую точку и не требуя непустого имени (`session.c:369-382`). Rust `same_host` снимает по одной хвостовой `.` с обеих сторон и требует `!left.is_empty()` (`httpup.rs:469-471`). Для `example.com.` и `example.com` C вернёт 0, Rust 1; для пустого имени C может вернуть 1 при обоих пустых, Rust — 0. Используется в `last_hello`/`shape`; для SNI с точкой поведение различается. |
 | `rd16` (static) | 30-32 | 3 | big-endian u16 | `r2k-core/src/packet.rs read_u16` | **E** | C `(p[0]<<8)\|p[1]`; Rust `read_u16`/`from_be_bytes` с проверкой границ. Используется в разборе TCP/UDP/STUN; побайтовые тесты пакетов. |
 | `refuse_coded` (static) | 402–413 | 12 | отказ плана в журнал; зонд молчит только при `code==NONE`; trial/plan id | `flow_journal.rs:684-720 record_plan_refused`, `main.rs:3737-3760 send_refused_event` | **P** | **Подтверждённое отличие:** C находит поток по ключу и при `controller_probe && code==D2K_REFUSE_NONE` **не пишет** запись (`session.c:404-406`); Rust `record_plan_refused` не знает о probe и принимает только `NOT_APPLIED/FLOW_UNFIT`, а `send_refused_event` всегда пишет журнал и отправляет событие. Для `code==NONE` C пишет запись (кроме probe), Rust `record_plan_refused` её отвергает; отказ NONE идёт только событием. D22 покрывает основные коды, не это условие. |
@@ -3871,7 +3871,7 @@ CLI-логирования, health-файла, duration, состава свод
 | `d2k_session_packet_probe` | 2615–2619 | 5 | вход зонда (`probe=1`) | `engine.rs:1412-1419 decide_with_session_probe` | **E*** | C `controller_probe=1`; Rust `decide_with_session_probe`. Проба исключается из пользовательских счётчиков; `test-datapath-controller-probe-capture-differential.sh`. |
 | `d2k_session_packet_probe_mtu` | 2621-2626 | 6 | probe-пакет с явным `tcp_segment_cap` | `engine.rs` `process_packet` flags | **E*** | C `session_packet(...,observe=0,probe=1,tcp_segment_cap)`; Rust комбинация флагов та же (probe + cap), отдельного differential нет. |
 | `d2k_session_observe_tcp` | 2628–2631 | 4 | только наблюдение, без вердикта (`observe_only=1`) | `main.rs` observe-mode `decide_with_session` | **P** | C вызывает `session_packet(..., observe_only=1, probe=0, mtu=0)` и игнорирует результат. Rust в observe-режиме вызывает `decide_with_session` с `observe_plan` и не отправляет; `observe_only` как отдельный флаг отсутствует. Наблюдаемые счётчики/события совпадают, но ветки capture/hold могут различаться. |
-| `d2k_session_plan_revision` | 2633–2635 | 3 | `plan_revision + d2k_plantab_revision(plans)` | `control.rs` `NamePlans.revision` | **P** | **Подтверждённое отличие:** C складывает ревизию запасного плана и таблицы (`session.c:2634`). Rust ведёт **один** счётчик `NamePlans.revision`, растущий на любые изменения; отдельной ревизии запасного `Plan` нет. Для обнаружения изменений эквивалентно, для точного числа — нет. |
+| `d2k_session_plan_revision` | 2633–2635 | 3 | `plan_revision + d2k_plantab_revision(plans)` | `control.rs` `NamePlans.revision` | **E*** | C складывает ревизию запасного плана и таблицы; Rust ведёт один счётчик `NamePlans.revision`, растущий на любые изменения. Смысл «смена плана обнаружена» сохранён; тесты `control.rs:5439/5448/5701` проверяют рост/стабильность revision после установки планов. **Ограничение:** отдельной ревизии fallback-плана нет, сумма заменена единым счётчиком. |
 | `d2k_session_stream_anchor` | 2637–2645 | 9 | hold_parse → поток с `saw_syn`; `http_flow && http_conn ? http_next : syn_seq+1` | `engine.rs` `capture_anchor`, `hold.rs` `remember_syn`, `httpup` | **E*** | C/Rust differential `test-session-packet-differential.sh` PASS (9 кейсов): anchor для SYN, повторного SYN, IPv6-SYN, data-new, fragment/bad-thl/syn-ack (0) и data-existing совпал (`syn_seq+1`). **Ограничение:** HTTP keep-alive ветвь `http_next` проверяется HTTP-тестами/httpup, не этим differential; единой функции в Rust нет. |
 | `d2k_session_set_hook` | 2647–2649 | 3 | hook текущего пакета (`D2K_HOOK_UNKNOWN` по умолчанию) | `main.rs` `queue_hook` (параметр на пакет) | **E*** | C хранит hook в сессии; Rust передаёт `queue_hook` параметром в `r2o_udp_hold_candidate`/`r2o_udp_packet_direction`/engine. Направление по hook сверено `test-udp-path-differential.sh` (plain/planned, hook POSTROUTING) и `test-udp-prepost-differential.sh` (HELD/NORMAL/RECLAIMED/LOST). **Ограничение:** состояния в сессии нет, семантика «текущий пакет» выражена аргументом. |
 | `d2k_session_set_route_mark` | 2651–2653 | 3 | метка маршрутизации текущего пакета | `r2o_route.rs` `R2oRouteGate::r2o_route_mark`, `r2o_skip_packet` | E | C хранит `route_mark` в сессии. Rust не хранит её в сессии: `r2o_route_mark` вычисляет метку по текущему пакету, `R2oRoutedFlows` ведёт маршрутные потоки; поведение «метка выбирает политику» покрыто `r2o_маршрутный_поток...`, `r2o_политика_отделяет_чужие_потоки...`, `r2o_route_mark` тестами. |
