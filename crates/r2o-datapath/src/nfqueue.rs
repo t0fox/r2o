@@ -126,7 +126,6 @@ pub struct QueueStats {
 pub struct QueueSocket {
     fd: OwnedFd,
     queue: u16,
-    protocol_family: u16,
     sequence: u32,
     lost_packets: Cell<u64>,
     stats: Cell<QueueStats>,
@@ -185,7 +184,6 @@ impl QueueSocket {
         let mut socket = Self {
             fd,
             queue,
-            protocol_family,
             sequence: 1,
             lost_packets: Cell::new(0),
             stats: Cell::new(QueueStats::default()),
@@ -194,7 +192,7 @@ impl QueueSocket {
             queue,
             socket.next_sequence(),
             NFQNL_CFG_CMD_BIND,
-            protocol_family,
+            libc::AF_INET as u16,
         );
         socket.configure(&bind)?;
         let params = config_params(
@@ -465,11 +463,12 @@ impl Drop for QueueSocket {
 impl QueueSocket {
     /// C `d2k_nfq_close`: UNBIND без ACK, `seq++`.
     fn unbind_message(&mut self) -> Vec<u8> {
+        // C `d2k_nfq_close` всегда шлёт UNBIND с AF_INET, как и BIND.
         config_command(
             self.queue,
             self.next_sequence(),
             NFQNL_CFG_CMD_UNBIND,
-            self.protocol_family,
+            libc::AF_INET as u16,
         )
     }
 }
@@ -551,7 +550,7 @@ mod tests {
         QueueSocket {
             fd,
             queue: 0,
-            protocol_family: libc::AF_INET as u16,
+
             sequence: 1,
             lost_packets: Cell::new(0),
             stats: Cell::new(Default::default()),
