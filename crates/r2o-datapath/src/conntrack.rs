@@ -387,7 +387,9 @@ pub struct R2oConntrackClient {
 }
 
 impl R2oConntrackClient {
-    pub fn open() -> Option<Self> {
+    /// C `d2k_ct_open` (`datapath/ctq.c:243-253`): socket/bind без проверки
+    /// подсистемы. Проверка — отдельный `probe`, как у C-вызывающего.
+    pub fn open_unprobed() -> Option<Self> {
         let fd = unsafe {
             libc::socket(
                 libc::AF_NETLINK,
@@ -398,20 +400,24 @@ impl R2oConntrackClient {
         if fd < 0 {
             return None;
         }
+        let client = Self { fd, sequence: 1 };
         let mut address: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
         address.nl_family = libc::AF_NETLINK as u16;
         let bound = unsafe {
             libc::bind(
-                fd,
+                client.fd,
                 &address as *const libc::sockaddr_nl as *const libc::sockaddr,
                 std::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t,
             )
         } == 0;
-        let mut client = Self { fd, sequence: 1 };
-        if !bound || !client.probe() {
-            return None;
-        }
-        Some(client)
+        bound.then_some(client)
+    }
+
+    /// Открыть клиент и сразу проверить подсистему — поведение прежнего
+    /// `open`, которое использует production-цикл.
+    pub fn open() -> Option<Self> {
+        let mut client = Self::open_unprobed()?;
+        client.probe().then_some(client)
     }
 
     pub fn query(&mut self, tuple: &R2oConntrackTuple) -> Option<R2oConntrackInfo> {
