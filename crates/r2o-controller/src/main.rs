@@ -43,8 +43,9 @@ use r2o_controller::classify::{
 use r2o_controller::classify_json::result_json_value as classify_result_json_value;
 use r2o_controller::domain::normalize;
 use r2o_controller::http_search::{
-    add_candidate, candidate_key_from_plan_text, candidate_keys, candidate_program, candidate_text,
-    http_plan_of, measured_poison_keys, stable_id,
+    R2oHttpPlanRecord, add_candidate, candidate_key_from_plan_text, candidate_keys,
+    candidate_program, candidate_text, http_plan_of, load_http_plans, measured_poison_keys,
+    save_http_plans, stable_id,
 };
 use r2o_controller::https_probe::{
     HttpsPortalOutcome, HttpsProbeWorker, target_from_http_response, target_from_portal,
@@ -2158,6 +2159,8 @@ fn serve_catalog(
         }
     );
     std::io::stdout().flush()?;
+    // C `d2k_httpsearch_load`: сохранённые HTTP-планы ставим датапату.
+    r2o_install_http_plans(&mut client, &catalog_path);
     let https_cache_path = catalog_path.with_file_name("https-cache.json");
     let active_groups = HashSet::new();
     let live_catalog = Some((catalog.clone(), catalog_path.clone()));
@@ -2356,12 +2359,119 @@ impl R2oCatalogPersistence {
 }
 
 #[cfg(unix)]
+fn r2o_http_plan_records(catalog: &Catalog) -> Vec<R2oHttpPlanRecord> {
+    let mut records: Vec<R2oHttpPlanRecord> = Vec::new();
+    for box_record in &catalog.boxes {
+        for binding in &box_record.bindings {
+            if binding.kind != "name"
+                || !binding.enabled
+                || binding.transport != 6
+                || !matches!(binding.family, 4 | 6)
+                || binding.shape != SHAPE_HTTP
+            {
+                continue;
+            }
+            let Some(plan) = box_record
+                .plans
+                .iter()
+                .find(|plan| plan.id.eq_ignore_ascii_case(&binding.plan_id))
+            else {
+                continue;
+            };
+            let Some(key) = candidate_key_from_plan_text(&plan.text) else {
+                continue;
+            };
+            let Ok(host) = normalize(&binding.target) else {
+                continue;
+            };
+            // C `rec_get`: одно host+family, последняя запись побеждает.
+            if let Some(record) = records
+                .iter_mut()
+                .find(|record| record.family == binding.family && record.host == host)
+            {
+                record.key = key;
+                record.wall = binding.confirmed;
+            } else {
+                records.push(R2oHttpPlanRecord {
+                    host,
+                    family: binding.family,
+                    key,
+                    wall: binding.confirmed,
+                    revoked: false,
+                });
+            }
+        }
+    }
+    records
+}
+
+/// C `hs_changed`: записать подтверждённые HTTP-планы в `http-plans.txt`.
+#[cfg(unix)]
+fn r2o_write_http_plans(path: &Path, catalog: &Catalog, now: i64) {
+    let plans_path = path.with_file_name("http-plans.txt");
+    let mut records = r2o_http_plan_records(catalog);
+    // Как C: пустой файл не создаётся без HTTP-изменений, но существующий
+    // очищается, когда записей не осталось.
+    if records.is_empty() && !plans_path.exists() {
+        return;
+    }
+    if let Err(error) = save_http_plans(&plans_path, &mut records, now) {
+        eprintln!("r2o-controller: планы HTTP не сохранены: {error}");
+    }
+}
+
+/// C `d2k_httpsearch_load` + `install`: поставить планы из файла датапату.
+#[cfg(unix)]
+fn r2o_install_http_plans(client: &mut ControlClient, catalog_path: &Path) {
+    let plans_path = catalog_path.with_file_name("http-plans.txt");
+    let loaded = match load_http_plans(&plans_path) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            eprintln!("r2o-controller: планы HTTP не прочитаны: {error}");
+            return;
+        }
+    };
+    let mut installed = 0_usize;
+    for record in &loaded.records {
+        let id = stable_id(&record.key);
+        let plan_id: String = id.iter().map(|byte| format!("{byte:02x}")).collect();
+        let Some(text) = candidate_text(&record.key, Some(&id)) else {
+            continue;
+        };
+        let Some((bytes, _plan)) = r2o_catalog_compile_plan(&text, &plan_id) else {
+            continue;
+        };
+        let Ok(command) = encode_set_name(&record.host, SHAPE_HTTP, record.family, &bytes) else {
+            continue;
+        };
+        if client.send_set_name(&command).is_err() {
+            eprintln!(
+                "r2o-controller: план HTTP {} не поставлен датапату",
+                record.host
+            );
+            break;
+        }
+        installed += 1;
+    }
+    if loaded.loaded != 0 {
+        println!(
+            "r2o-controller: планы HTTP {}: имён {} прочитано, {} поставлено датапату",
+            plans_path.display(),
+            loaded.loaded,
+            installed
+        );
+    }
+}
+
+#[cfg(unix)]
 fn persist_catalog_update(
     catalog: &Catalog,
     path: &Path,
     now: i64,
     persistence: Option<&mut R2oCatalogPersistence>,
 ) -> Result<(), Box<dyn Error>> {
+    // C `hs_changed`: подтверждённые HTTP-планы пишутся рядом с каталогом.
+    r2o_write_http_plans(path, catalog, now);
     if let Some(persistence) = persistence {
         persistence.mark_dirty();
         *persistence
@@ -31458,6 +31568,69 @@ mod tests {
         assert!(super::http_plan_of(&catalog, "other.example", 4).is_none());
         catalog.boxes[0].bindings[0].enabled = false;
         assert!(super::http_plan_of(&catalog, "example.com", 4).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_http_plans_round_trip_через_каталог() {
+        // C `hs_changed` → `d2k_httpsearch_save`: записи берутся из
+        // подтверждённых HTTP-привязок каталога, wall — `binding.confirmed`.
+        let id = [0x44_u8; 16];
+        let text = r2o_controller::http_search::candidate_text("split", Some(&id)).unwrap();
+        let plan_id: String = id.iter().map(|byte| format!("{byte:02x}")).collect();
+        let binding = r2o_controller::catalog::Binding {
+            kind: "name".into(),
+            target: "Confirmed.Example".into(),
+            plan_id: plan_id.clone(),
+            enabled: true,
+            transport: 6,
+            family: 4,
+            shape: r2k_core::control::SHAPE_HTTP,
+            confirmed: 1_700_000_000,
+            ..Default::default()
+        };
+        let mut catalog = r2o_controller::catalog::Catalog::default();
+        catalog.boxes.push(r2o_controller::catalog::BoxRecord {
+            plans: vec![r2o_controller::catalog::Plan {
+                id: plan_id,
+                text,
+                ..Default::default()
+            }],
+            bindings: vec![binding],
+            ..Default::default()
+        });
+
+        let records = super::r2o_http_plan_records(&catalog);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].host, "confirmed.example");
+        assert_eq!(records[0].family, 4);
+        assert_eq!(records[0].key, "split");
+        assert_eq!(records[0].wall, 1_700_000_000);
+
+        let directory =
+            std::env::temp_dir().join(format!("r2o-http-plans-roundtrip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let catalog_path = directory.join("catalog.json");
+        super::r2o_write_http_plans(&catalog_path, &catalog, 1_800_000_000);
+        let loaded =
+            r2o_controller::http_search::load_http_plans(&directory.join("http-plans.txt"))
+                .unwrap();
+        assert_eq!(loaded.loaded, 1);
+        assert_eq!(loaded.records[0].host, "confirmed.example");
+        assert_eq!(loaded.records[0].key, "split");
+        // Первое подтверждение сохраняется, повторная запись не переписывает.
+        assert_eq!(loaded.records[0].wall, 1_700_000_000);
+
+        // Выключенная привязка не попадает в файл; существующий файл
+        // очищается пустым списком.
+        catalog.boxes[0].bindings[0].enabled = false;
+        super::r2o_write_http_plans(&catalog_path, &catalog, 1_900_000_000);
+        let loaded =
+            r2o_controller::http_search::load_http_plans(&directory.join("http-plans.txt"))
+                .unwrap();
+        assert_eq!(loaded.loaded, 0);
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     #[cfg(unix)]
