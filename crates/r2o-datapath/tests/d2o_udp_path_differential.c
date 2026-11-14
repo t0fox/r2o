@@ -4,18 +4,29 @@
 
 #include "d2k_udp_path.h"
 #include "d2k_session.h"
+#include "d2k_track.h"
 
 static d2k_udp_out out;
 static d2k_udp_path path;
 static unsigned marked_calls;
+static uint32_t rel_ids[8];
+static uint32_t rel_verdicts[8];
+static size_t rel_count;
+static unsigned raw_sends;
 
 static int rec_verdict(void *ctx, uint32_t id, uint32_t verdict) {
-    (void)ctx; (void)id; (void)verdict;
+    (void)ctx;
+    if (rel_count < sizeof rel_ids / sizeof rel_ids[0]) {
+        rel_ids[rel_count] = id;
+        rel_verdicts[rel_count] = verdict;
+        rel_count++;
+    }
     return 0;
 }
 
 static int rec_now(void *ctx, const uint8_t *packet, size_t length) {
     (void)ctx; (void)packet; (void)length;
+    raw_sends++;
     return 0;
 }
 
@@ -118,6 +129,46 @@ static void feed(d2k_session *session, const uint8_t *packet, size_t length,
     }
 }
 
+static void run_release(const uint8_t source[4], const uint8_t destination[4]) {
+    d2k_udp_hold *hold;
+    d2k_udp_follow *follow;
+    d2k_session *session = fresh(&hold, &follow);
+    rel_count = 0;
+    raw_sends = 0;
+    uint8_t packet[64];
+    size_t length = udp_packet(packet, source, destination, 40000, 443, 17, 0, 4);
+    d2k_key key;
+    d2k_addr source_addr;
+    d2k_addr destination_addr;
+    memset(&source_addr, 0, sizeof source_addr);
+    memset(&destination_addr, 0, sizeof destination_addr);
+    source_addr.family = 4;
+    destination_addr.family = 4;
+    memcpy(source_addr.bytes, source, 4);
+    memcpy(destination_addr.bytes, destination, 4);
+    (void)d2k_key_make_addr(&key, 17, &source_addr, &destination_addr,
+                            packet + 20, packet + 22);
+    for (uint32_t id = 1; id <= 3; id++) {
+        (void)d2k_udp_hold_feed_marked(hold, &key, id, packet, length, 0,
+                                       1000 + id, d2k_udp_path_release, &path);
+    }
+    d2k_udp_hold_batch batch;
+    memset(&batch, 0, sizeof batch);
+    int taken = d2k_udp_hold_take(hold, &key, 1010, &batch);
+    path.now_ns = 1010;
+    path.seq = 7;
+    d2k_udp_path_release(&path, &batch);
+    printf("release taken=%d count=%zu\n", taken, batch.count);
+    for (size_t i = 0; i < rel_count; i++) {
+        printf("release verdict id=%u v=%u\n", rel_ids[i], rel_verdicts[i]);
+    }
+    printf("release raw=%u\n", raw_sends);
+    printf("release follow=%d live=%zu\n",
+           d2k_udp_follow_match(follow, packet, length, 1010, 7, NULL),
+           d2k_udp_follow_live(follow));
+    done(session, hold, follow);
+}
+
 int main(void) {
     static const uint8_t client[4] = {192, 0, 2, 1};
     static const uint8_t server[4] = {198, 51, 100, 2};
@@ -189,5 +240,7 @@ int main(void) {
     printf("short_passed rc=%d\n",
            d2k_udp_path_passed(&path, packet, 19, 0, 1001));
     done(session, hold, follow);
+
+    run_release(client, server);
     return 0;
 }

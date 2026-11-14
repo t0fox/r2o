@@ -1850,7 +1850,7 @@ mod app {
                                 bytes,
                                 now,
                             ) {
-                                R2oUdpHoldFeed::Held => {
+                                r2o_datapath::r2o_udp_hold::R2oUdpHoldFeed::Held => {
                                     prefetched_quic_hello =
                                         quic_sessions.capture_hello_at_hook(bytes, queue_hook);
                                     if prefetched_quic_hello.is_none() {
@@ -5741,6 +5741,60 @@ mod app {
                 ))
             )
             .unwrap();
+
+            {
+                let hold_now = Instant::now();
+                let mut hold = r2o_datapath::r2o_udp_hold::R2oUdpHoldTable::new();
+                for id in 1..=3_u32 {
+                    assert_eq!(
+                        hold.r2o_feed(
+                            id,
+                            0,
+                            &first,
+                            hold_now + Duration::from_millis(u64::from(id)),
+                        ),
+                        r2o_datapath::r2o_udp_hold::R2oUdpHoldFeed::Held
+                    );
+                }
+                let batch = hold.r2o_take(&first).unwrap();
+                let mut release_follow = R2oUdpFollowTable::new();
+                let mut verdicts = Vec::new();
+                let mut raw = 0_u32;
+                let stats = r2o_datapath::r2o_udp_hold::r2o_release_batch_with(
+                    &batch,
+                    1,
+                    false,
+                    true,
+                    |_| true,
+                    |_| {
+                        raw += 1;
+                        Ok::<_, io::Error>(())
+                    },
+                    |_, _| {},
+                    |id, verdict| {
+                        verdicts.push((id, verdict));
+                        Ok::<_, io::Error>(())
+                    },
+                );
+                release_follow.r2o_mark(&first, hold_now + Duration::from_millis(10), None, 7);
+                writeln!(output, "release taken=1 count={}", batch.packets.len()).unwrap();
+                for (id, verdict) in verdicts {
+                    writeln!(output, "release verdict id={id} v={verdict}").unwrap();
+                }
+                writeln!(output, "release raw={raw}").unwrap();
+                writeln!(
+                    output,
+                    "release follow={} live={}",
+                    u8::from(
+                        release_follow
+                            .r2o_match(&first, hold_now + Duration::from_millis(10), 7)
+                            .is_some()
+                    ),
+                    release_follow.r2o_stats().live
+                )
+                .unwrap();
+                assert_eq!(stats.resent, 2);
+            }
 
             if let Ok(path) = std::env::var("R2O_UDP_PATH_DIFF_OUTPUT") {
                 std::fs::write(path, &output).unwrap();
