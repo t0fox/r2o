@@ -17,6 +17,38 @@ struct CachedEntry {
     seen: Instant,
 }
 
+/// C `d2k_key`: состояние NAT принадлежит ПОТОКУ, а не направлению пакета.
+/// Канонический ключ (low/high) общий для прямого и обратного кортежа.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct R2oFlowKey {
+    family: u8,
+    protocol: u8,
+    low: [u8; 16],
+    high: [u8; 16],
+    low_port: u16,
+    high_port: u16,
+}
+
+impl R2oFlowKey {
+    fn r2o_from_tuple(tuple: R2oConntrackTuple) -> Self {
+        let forward = (tuple.source, tuple.source_port);
+        let reverse = (tuple.destination, tuple.destination_port);
+        let (low, low_port, high, high_port) = if forward <= reverse {
+            (forward.0, forward.1, reverse.0, reverse.1)
+        } else {
+            (reverse.0, reverse.1, forward.0, forward.1)
+        };
+        Self {
+            family: tuple.family,
+            protocol: tuple.protocol,
+            low,
+            high,
+            low_port,
+            high_port,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum CachedStatus {
     Tracked,
@@ -25,7 +57,7 @@ enum CachedStatus {
 
 /// Ограниченный кеш только подтверждённых записей conntrack.
 pub struct R2oConntrackGate {
-    entries: HashMap<R2oConntrackTuple, CachedEntry>,
+    entries: HashMap<R2oFlowKey, CachedEntry>,
     capacity: usize,
     idle_timeout: Duration,
     /// C `g_nat_ok/miss/none/retried` (`session.c:648-656`).
@@ -76,7 +108,8 @@ impl R2oConntrackGate {
     ) -> Confirmation {
         self.entries
             .retain(|_, cached| now.saturating_duration_since(cached.seen) < self.idle_timeout);
-        if let Some(cached) = self.entries.get_mut(&tuple) {
+        let key = R2oFlowKey::r2o_from_tuple(tuple);
+        if let Some(cached) = self.entries.get_mut(&key) {
             cached.seen = now;
             return match cached.status {
                 CachedStatus::Tracked => Confirmation::Tracked,
@@ -87,7 +120,7 @@ impl R2oConntrackGate {
             return Confirmation::FirstPacket;
         }
         if tuple.protocol == 6 && tcp_syn_ack_seen {
-            self.insert(tuple, CachedStatus::Tracked, now);
+            self.insert(key, CachedStatus::Tracked, now);
             self.nat_ok = self.nat_ok.saturating_add(1);
             return Confirmation::TcpSynAck;
         }
@@ -101,7 +134,7 @@ impl R2oConntrackGate {
                     if attempt > 0 {
                         self.nat_retried = self.nat_retried.saturating_add(1);
                     }
-                    self.insert(tuple, CachedStatus::NoConntrackTable, now);
+                    self.insert(key, CachedStatus::NoConntrackTable, now);
                     self.nat_none = self.nat_none.saturating_add(1);
                     return Confirmation::NoConntrackTable;
                 }
@@ -111,7 +144,7 @@ impl R2oConntrackGate {
             if attempt > 0 {
                 self.nat_retried = self.nat_retried.saturating_add(1);
             }
-            self.insert(tuple, CachedStatus::Tracked, now);
+            self.insert(key, CachedStatus::Tracked, now);
             self.nat_ok = self.nat_ok.saturating_add(1);
             return Confirmation::Tracked;
         }
@@ -119,11 +152,11 @@ impl R2oConntrackGate {
         Confirmation::Missing
     }
 
-    fn insert(&mut self, tuple: R2oConntrackTuple, status: CachedStatus, now: Instant) {
+    fn insert(&mut self, key: R2oFlowKey, status: CachedStatus, now: Instant) {
         if self.capacity == 0 {
             return;
         }
-        if self.entries.len() >= self.capacity && !self.entries.contains_key(&tuple) {
+        if self.entries.len() >= self.capacity && !self.entries.contains_key(&key) {
             if let Some(oldest) = self
                 .entries
                 .iter()
@@ -133,8 +166,7 @@ impl R2oConntrackGate {
                 self.entries.remove(&oldest);
             }
         }
-        self.entries
-            .insert(tuple, CachedEntry { status, seen: now });
+        self.entries.insert(key, CachedEntry { status, seen: now });
     }
 }
 
@@ -412,6 +444,192 @@ mod tests {
             address: [203, 0, 113, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             port: 62000,
         }
+    }
+
+    fn reverse_tuple(mut tuple: R2oConntrackTuple) -> R2oConntrackTuple {
+        std::mem::swap(&mut tuple.source, &mut tuple.destination);
+        std::mem::swap(&mut tuple.source_port, &mut tuple.destination_port);
+        tuple
+    }
+
+    #[test]
+    fn flow_tracked_differential_matches_c() {
+        use super::{CachedEntry, CachedStatus, R2oFlowKey};
+        use std::time::Instant;
+
+        fn seed(
+            gate: &mut R2oConntrackGate,
+            tuple: R2oConntrackTuple,
+            status: CachedStatus,
+            now: Instant,
+        ) {
+            gate.entries.insert(
+                R2oFlowKey::r2o_from_tuple(tuple),
+                CachedEntry { status, seen: now },
+            );
+        }
+        fn run(
+            name: &str,
+            proto: u8,
+            first: bool,
+            synack: bool,
+            preset: Option<CachedStatus>,
+            answers: &[R2oProcNatLookup],
+            output: &mut String,
+        ) {
+            let mut gate = R2oConntrackGate::with_capacity(4);
+            let now = Instant::now();
+            let tuple = tuple(proto);
+            if let Some(status) = preset {
+                seed(&mut gate, tuple, status, now);
+            }
+            let mut calls = 0_usize;
+            let confirmation = gate.confirm(tuple, first, synack, now, &mut |_| {
+                let value = answers[calls.min(answers.len().saturating_sub(1))];
+                calls += 1;
+                value
+            });
+            let (rc, state) = match confirmation {
+                Confirmation::Missing => (-1, 0),
+                Confirmation::FirstPacket => (0, 0),
+                Confirmation::Tracked | Confirmation::TcpSynAck => (0, 1),
+                Confirmation::NoConntrackTable => (0, 3),
+            };
+            let (ok, miss, none, retried) = gate.nat_stats();
+            output.push_str(&format!(
+                "{name} rc={rc} state={state} ok={ok} miss={miss} none={none} retried={retried} calls={calls}\n"
+            ));
+        }
+
+        let found = || R2oProcNatLookup::Found(mapped_source());
+        let missing = R2oProcNatLookup::Missing;
+        let table_missing = R2oProcNatLookup::TableMissing;
+        let mut output = String::new();
+        run(
+            "first_missing",
+            17,
+            true,
+            false,
+            None,
+            &[missing],
+            &mut output,
+        );
+        run("found", 17, false, false, None, &[found()], &mut output);
+        run(
+            "table_missing",
+            17,
+            false,
+            false,
+            None,
+            &[table_missing],
+            &mut output,
+        );
+        run(
+            "miss",
+            17,
+            false,
+            false,
+            None,
+            &[missing, missing, missing],
+            &mut output,
+        );
+        run(
+            "retry_found",
+            17,
+            false,
+            false,
+            None,
+            &[missing, found()],
+            &mut output,
+        );
+        run(
+            "retry_table_missing",
+            17,
+            false,
+            false,
+            None,
+            &[missing, table_missing],
+            &mut output,
+        );
+        run("synack", 6, false, true, None, &[missing], &mut output);
+        run(
+            "preset_known",
+            17,
+            false,
+            false,
+            Some(CachedStatus::Tracked),
+            &[missing],
+            &mut output,
+        );
+        run(
+            "preset_no_table",
+            17,
+            false,
+            false,
+            Some(CachedStatus::NoConntrackTable),
+            &[missing],
+            &mut output,
+        );
+        run(
+            "first_with_known",
+            17,
+            true,
+            false,
+            Some(CachedStatus::Tracked),
+            &[missing],
+            &mut output,
+        );
+        run(
+            "tcp_retry",
+            6,
+            false,
+            false,
+            None,
+            &[missing, found()],
+            &mut output,
+        );
+        if let Ok(path) = std::env::var("R2O_FLOW_TRACKED_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert!(output.contains("retry_table_missing rc=0 state=3"));
+    }
+
+    #[test]
+    fn состояние_nat_общее_для_обоих_направлений_потока_как_c() {
+        let forward = tuple(6);
+        let reverse = reverse_tuple(forward);
+        let mut gate = R2oConntrackGate::with_capacity(4);
+        let now = Instant::now();
+
+        assert_eq!(
+            gate.confirm(forward, true, false, now, &mut |_| panic!()),
+            Confirmation::FirstPacket
+        );
+        assert_eq!(
+            gate.confirm(forward, false, false, now, &mut |_| {
+                R2oProcNatLookup::Found(mapped_source())
+            }),
+            Confirmation::Tracked
+        );
+        // Обратный пакет того же потока не читает таблицу и не добавляет
+        // второй nat_ok: C хранит nat_state в записи потока.
+        assert_eq!(
+            gate.confirm(reverse, false, false, now, &mut |_| {
+                panic!("обратное направление должно попасть в кеш потока")
+            }),
+            Confirmation::Tracked
+        );
+        assert_eq!(gate.nat_stats(), (1, 0, 0, 0));
+
+        // Другой поток с теми же адресами, но другим портом — отдельный ключ.
+        let mut other = forward;
+        other.source_port = other.source_port.wrapping_add(1);
+        assert_eq!(
+            gate.confirm(other, false, false, now, &mut |_| {
+                R2oProcNatLookup::Missing
+            }),
+            Confirmation::Missing
+        );
     }
 
     #[test]
