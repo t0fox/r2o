@@ -46,7 +46,23 @@ pub enum HoldOutcome {
         event: Box<HttpResponseEvent>,
         portal: Option<HttpPortalEvent>,
         redirect: Option<Vec<u8>>,
+        /// C `http80_log` (`d2kd.c:717-728`): данные строки «вставка
+        /// провайдера — 30x». Заполняется только для распознанной вставки.
+        log: Option<Http80PortalLog>,
     },
+}
+
+/// Поля C `d2k_http80_res`, которые нужны только текстовой строке
+/// `http80_log`: адрес сервера, портал, задержка ответа и RTT потока.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Http80PortalLog {
+    pub host: Vec<u8>,
+    pub family: u8,
+    pub server: [u8; 16],
+    pub server_port: u16,
+    pub portal: Vec<u8>,
+    pub reply_ns: u64,
+    pub rtt_ns: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -579,7 +595,7 @@ impl HoldTable {
             if observe_http
                 && source.port == 80
                 && destination == anchor.client
-                && let Some((event, portal, redirect)) =
+                && let Some((event, portal, redirect, log)) =
                     self.observe_http_response(key, anchor, destination, &tcp, payload, now)
             {
                 return FeedResult {
@@ -588,6 +604,7 @@ impl HoldTable {
                         event: Box::new(event),
                         portal,
                         redirect,
+                        log,
                     },
                 };
             }
@@ -610,6 +627,7 @@ impl HoldTable {
                     event: Box::new(event),
                     portal: None,
                     redirect: None,
+                    log: None,
                 },
             };
         }
@@ -1224,7 +1242,12 @@ impl HoldTable {
         tcp: &TcpSegmentView,
         payload: &[u8],
         now: Instant,
-    ) -> Option<(HttpResponseEvent, Option<HttpPortalEvent>, Option<Vec<u8>>)> {
+    ) -> Option<(
+        HttpResponseEvent,
+        Option<HttpPortalEvent>,
+        Option<Vec<u8>>,
+        Option<Http80PortalLog>,
+    )> {
         let index = self.http_requests.iter().position(|flow| flow.key == key)?;
         let flow = &mut self.http_requests[index];
         if flow.client != client
@@ -1240,7 +1263,7 @@ impl HoldTable {
             .get_or_insert_with(|| server_sequence.wrapping_add(1));
         if tcp.acknowledgment != flow.request_end || tcp.flags & 0x04 != 0 {
             let (event, portal) = finish_http_response(flow, 2, None);
-            return Some((event, portal, None));
+            return Some((event, portal, None, None));
         }
         if tcp.sequence != *expected {
             let end = tcp.sequence.wrapping_add(payload.len() as u32);
@@ -1251,7 +1274,7 @@ impl HoldTable {
                 return None;
             }
             let (event, portal) = finish_http_response(flow, 2, None);
-            return Some((event, portal, None));
+            return Some((event, portal, None, None));
         }
         if !payload.is_empty() {
             flow.response_progress = now;
@@ -1263,7 +1286,8 @@ impl HoldTable {
         *expected = tcp.sequence.wrapping_add(payload.len() as u32);
         if !had_headers
             && flow.response.headers_complete()
-            && r2k_core::httpup::portal_location(&flow.host, flow.response.headers()).is_some()
+            && let Some(location) =
+                r2k_core::httpup::portal_location(&flow.host, flow.response.headers())
         {
             let portal = flow
                 .response_started
@@ -1281,22 +1305,47 @@ impl HoldTable {
                     .then(|| r2k_core::httpup::redirect_https(&flow.host, &flow.target))
                     .flatten()
             });
+            let log = portal.as_ref().map(|_| {
+                let (server_address, server_port) =
+                    if flow.key.low_address == client.address && flow.key.low_port == client.port {
+                        (flow.key.high_address, flow.key.high_port)
+                    } else {
+                        (flow.key.low_address, flow.key.low_port)
+                    };
+                Http80PortalLog {
+                    host: flow.host.clone(),
+                    family: server_address.family(),
+                    server: server_address.bytes(),
+                    server_port,
+                    portal: location.clone(),
+                    reply_ns: flow
+                        .response_started
+                        .map(|started| {
+                            started
+                                .saturating_duration_since(flow.seen)
+                                .as_nanos()
+                                .min(u64::MAX as u128) as u64
+                        })
+                        .unwrap_or(0),
+                    rtt_ns: flow.rtt.as_nanos().min(u64::MAX as u128) as u64,
+                }
+            });
             let (event, _) = finish_http_response(flow, 3, Some(flow.response.body_bytes()));
             if portal.is_some() {
                 self.http80.injections = self.http80.injections.saturating_add(1);
             }
-            return Some((event, portal, redirect));
+            return Some((event, portal, redirect, log));
         }
         if flow.response.fixed_body_remaining().is_some() {
             flow.body_start = Some(expected.wrapping_sub(flow.response.body_bytes() as u32));
         }
         if flow.response.is_invalid() {
             let (event, portal) = finish_http_response(flow, 2, None);
-            Some((event, portal, None))
+            Some((event, portal, None, None))
         } else if flow.response.is_complete() {
             let event = finish_http_response(flow, 1, None);
             flow.ready_for_next = tcp.flags & 0x05 == 0;
-            Some((event.0, event.1, None))
+            Some((event.0, event.1, None, None))
         } else {
             None
         }
@@ -2125,6 +2174,7 @@ mod tests {
             event,
             portal: None,
             redirect: None,
+            log: _,
         } = result.outcome
         else {
             panic!("complete ordinary response should emit HTTP_RESPONSE");
@@ -2186,6 +2236,7 @@ mod tests {
             event,
             portal: Some(portal_event),
             redirect: None,
+            log: Some(log),
         } = result.outcome
         else {
             panic!("recognized portal response should produce a response and portal event");
@@ -2197,6 +2248,13 @@ mod tests {
         assert_eq!(portal_event.host, b"example.test");
         assert!(!portal_event.answered);
         assert_eq!(event.key[37], 6);
+        assert_eq!(log.host, b"example.test");
+        assert_eq!(log.family, 4);
+        assert_eq!(log.server[..4], [198, 51, 100, 20]);
+        assert_eq!(log.server_port, 80);
+        assert_eq!(log.portal, b"lawfilter.example");
+        assert!(log.reply_ns >= 1_000_000);
+        assert_eq!(log.rtt_ns, 10_000_000);
     }
 
     #[test]
@@ -2268,6 +2326,7 @@ mod tests {
             event,
             portal: Some(_),
             redirect: Some(redirect),
+            log: _,
         } = result.outcome
         else {
             panic!("быстрый односегментный портал должен предложить 307");
@@ -2326,6 +2385,7 @@ mod tests {
             event,
             portal: None,
             redirect: None,
+            log: _,
         } = result.outcome
         else {
             panic!("server FIN should complete a close-delimited body");
@@ -2361,6 +2421,7 @@ mod tests {
             event,
             portal: None,
             redirect: None,
+            log: _,
         } = result.outcome
         else {
             panic!("client FIN before Content-Length should report an interrupted response");

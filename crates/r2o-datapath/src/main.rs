@@ -1932,6 +1932,7 @@ mod app {
                     let mut response_candidate = None;
                     let mut portal_candidate = None;
                     let mut redirect_candidate = None;
+                    let mut http80_log_candidate = None;
                     let mut udp_quic_deny = false;
                     let decision = if let Some(bytes) = original.filter(|_| udp_admitted) {
                         if options.mode == RuntimeMode::Apply {
@@ -2299,11 +2300,13 @@ mod app {
                                 event,
                                 portal,
                                 redirect,
+                                log,
                             } => {
                                 if !controller_probe {
                                     response_candidate = Some(event);
                                     portal_candidate = portal;
                                     redirect_candidate = redirect;
+                                    http80_log_candidate = log;
                                 }
                                 PacketDecision::Accept
                             }
@@ -2418,6 +2421,7 @@ mod app {
                     }
                     let mut execution_succeeded = false;
                     let mut response_delivered = false;
+                    let mut http80_swap_outcome: Option<bool> = None;
                     let mut udp_batch_handled = false;
                     let mut udp_batch_deferred = false;
                     let mut udp_head_verdict = NF_ACCEPT;
@@ -2427,6 +2431,7 @@ mod app {
                             if let Err(error) = socket.send_replacement(id, &replacement) {
                                 eprintln!("r2o-datapath: не отправлен HTTPS verdict: {error}");
                                 holding.r2o_apply_http_swap_result(None, None, false);
+                                http80_swap_outcome = Some(false);
                                 socket.send_verdict(id, NF_ACCEPT)?;
                                 if let Some(event) = applied_candidate.as_ref() {
                                     flow_journal.record_execution_failure(
@@ -2449,6 +2454,7 @@ mod app {
                                     portal_candidate.as_mut(),
                                     true,
                                 );
+                                http80_swap_outcome = Some(true);
                             }
                             response_delivered = true;
                         } else {
@@ -2944,6 +2950,19 @@ mod app {
                         }
                         send_http_response_event(&mut control, &event);
                         if let Some(portal) = portal_candidate {
+                            let outcome = match http80_swap_outcome {
+                                Some(true) => "замена: клиенту 307 на https, серверу RST",
+                                Some(false) => {
+                                    "замена НЕ ушла (вердикт с заменой отвергнут) — вставка пропущена как есть, поток не тронут"
+                                }
+                                None if raw.is_some() => {
+                                    "HTTPS имени не подтверждён и не срезан — пропущена клиенту как есть"
+                                }
+                                None => "наблюдение — пропущена как есть",
+                            };
+                            if let Some(log) = http80_log_candidate.as_ref() {
+                                r2o_log_http80_portal(log, outcome);
+                            }
                             send_http_portal_event(&mut control, &portal);
                         }
                     }
@@ -3512,6 +3531,32 @@ mod app {
                 eprintln!("r2o-datapath: событие ClientHello не отправлено: {error}");
             }
         }
+    }
+
+    /// C `http80_log` (`d2kd.c:717-728`): строка на каждую узнанную вставку
+    /// провайдера. Печатается рядом с событием портала.
+    fn r2o_http80_portal_line(log: &r2o_datapath::hold::Http80PortalLog, outcome: &str) -> String {
+        let server = match log.family {
+            6 => std::net::IpAddr::V6(std::net::Ipv6Addr::from(log.server)).to_string(),
+            _ => {
+                let bytes = [log.server[0], log.server[1], log.server[2], log.server[3]];
+                std::net::IpAddr::V4(std::net::Ipv4Addr::from(bytes)).to_string()
+            }
+        };
+        format!(
+            "r2o-datapath: HTTP {} (IPv{} {}:{}): вставка провайдера — 30x на {} через {} мкс после запроса при RTT потока {} мкс; {outcome}",
+            String::from_utf8_lossy(&log.host),
+            log.family,
+            server,
+            log.server_port,
+            String::from_utf8_lossy(&log.portal),
+            log.reply_ns / 1000,
+            log.rtt_ns / 1000
+        )
+    }
+
+    fn r2o_log_http80_portal(log: &r2o_datapath::hold::Http80PortalLog, outcome: &str) {
+        eprintln!("{}", r2o_http80_portal_line(log, outcome));
     }
 
     fn send_http_portal_event(control: &mut Option<ControlServer>, event: &HttpPortalEvent) {
@@ -4743,6 +4788,38 @@ mod app {
 
     #[cfg(test)]
     mod tests {
+        #[test]
+        fn http80_portal_line_matches_c_fields() {
+            let log = r2o_datapath::hold::Http80PortalLog {
+                host: b"RuTracker.org".to_vec(),
+                family: 4,
+                server: [195, 82, 146, 214, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                server_port: 80,
+                portal: b"http://lawfilter.ertelecom.ru".to_vec(),
+                reply_ns: 700_000,
+                rtt_ns: 2_000_000,
+            };
+            let line =
+                super::r2o_http80_portal_line(&log, "замена: клиенту 307 на https, серверу RST");
+            assert!(line.contains("HTTP RuTracker.org (IPv4 195.82.146.214:80)"));
+            assert!(line.contains("30x на http://lawfilter.ertelecom.ru"));
+            assert!(line.contains("через 700 мкс"));
+            assert!(line.contains("RTT потока 2000 мкс"));
+            assert!(line.ends_with("замена: клиенту 307 на https, серверу RST"));
+
+            let v6 = r2o_datapath::hold::Http80PortalLog {
+                host: b"example.test".to_vec(),
+                family: 6,
+                server: [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
+                server_port: 8080,
+                portal: b"http://portal.example".to_vec(),
+                reply_ns: 1_500,
+                rtt_ns: 0,
+            };
+            let line = super::r2o_http80_portal_line(&v6, "наблюдение — пропущена как есть");
+            assert!(line.contains("(IPv6 2001:db8::2:8080)"));
+            assert!(line.contains("через 1 мкс"));
+        }
         #[test]
         fn offline_self_check_matches_c() {
             assert!(super::offline_self_check().is_ok());
