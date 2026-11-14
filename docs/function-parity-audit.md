@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 346 | 54 | 0 | 0 |
+| datapath-core | 400 | 347 | 53 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1444** | **538** | **0** | **0** |
+| **Итого** | **1982** | **1445** | **537** | **0** | **0** |
 
-Это не оценка паритета: 538 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 537 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1444 / P 538 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1445 / P 537 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 346 | 54 | 0 | 0 |
+| datapath-core | 400 | 347 | 53 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1444** | **538** | **0** | **0** |
+| **Итого** | **1982** | **1445** | **537** | **0** | **0** |
 
 
 ---
@@ -4769,7 +4769,7 @@ flow-брони).
 | `sum16` (static) | 73-82 | 10 | RFC 1071: 16-битные слова, нечётный хвост `<<8`, без свёртки | `wire.rs:534-543 sum16` | **E** | C `i+1<n` складывает слова, хвост `b[i]<<8`. Rust `chunks(2)` — те же значения; аккумулятор `u64` вместо `u32`, для пакета ≤65535 переполнения нет. Golden wire. |
 | `fold` (static) | 84-89 | 6 | свёртка переносов + инверсия | `wire.rs:545-550 checksum_value` | **E** | C `while(acc>>16) acc=(acc&0xffff)+(acc>>16)`, `~(uint16_t)acc`. Rust тот же цикл над `u64`, `!(acc as u16)`; golden wire. C-строка: `while(acc>>16) acc=(acc&0xffff)+(acc>>16); return ~acc;`; Rust `checksum_value`. |
 | `pseudo_sum` (static) | 99-107 | 9 | псевдозаголовок TCP IPv4: src/dst сырыми байтами, 0, proto **6**, длина TCP | `wire.rs:516-532 pseudo_sum` | **E** | C 12 байт: `src4`, `dst4`, `0`, `6` (TCP), BE16 `tcp_len`; `sum16`. Rust `pseudo_sum` для family 4 складывает те же поля и `6+tcp_len`; для family 6 дополнительно адреса по 16 байт (C-функция IPv4-only, IPv6 считает inline). Для IPv4 эквивалентно. |
-| `d2k_wire_build` | 109-277 | 169 | сборка TCP: family 0/4/6, urgent, ipfrag/profile, MD5/TS/TS-up, native options, seq_shift, poison, TTL/autottl, IP-ID, окно, суммы | `r2k-core/src/wire.rs:18-209 build_tcp_packet` | **P** | **Совпадает:** IPv4/IPv6-заголовки, TCP без опций/MD5/TS, seq_shift, urgent/urgent_ptr, `pre+payload`, `total<=cap/0xffff`, badsum measured `^0xbeef`→0x1234 vs legacy `~`→0xffff, TS-back `-1000`, TS-up перенос 10 байт, measured DF=0/window=65535/TTL=64, native options ≤40/кратность 4/один TS/обязательный TS при TCPTS_BACK, IPv6 IPID_ZERO reject, MD5 только measured. **Подтверждённые отличия:** (1) C принимает `family=0` как IPv4 (`:114`), Rust `PacketView` допускает только 4/6 — вызов с family 0 Rust отвергнет; (2) C берёт src/dst/порты/ack/window/ttl/ip_id/опции из `d2k_conn`, Rust — из исходного `PacketView` того же пакета; для пути исполнения эквивалентно, но контракт функции иной; (3) measured IP-ID: C `random()%65535`, Rust `getrandom()%65535` — диапазон 0..65534 одинаков, источник разный, побайтовый differential невозможен; (4) IPv4 TOS в обоих случаях 0, IPv6 TC — из соединения/пакета. 12 golden/дифференциалов покрывают шаблон/TS-up/badsum/measured/MD5/v6/capacity. |
+| `d2k_wire_build` | 109-277 | 169 | сборка TCP: family 0/4/6, urgent, ipfrag/profile, MD5/TS/TS-up, native options, seq_shift, poison, TTL/autottl, IP-ID, окно, суммы | `r2k-core/src/wire.rs:42-209 build_tcp_packet` | **E*** | Новый C/Rust differential `scripts/test-wire-build-differential.sh` PASS (12 кейсов, legacy wire_profile=0): IPv4 plain, seq_shift+prefix, TTL=8, badsum, TCPTS_BACK, IPID_ZERO, urgent, IPv6, IPv6+shift+TTL, IPv6 IPID_ZERO reject, invalid urgent reject, cap reject — **весь пакет совпал побайтово**. Measured/native ветви покрыты `test-wire-ts-up-plan-differential.sh` (PASS) и wire unit/golden. **Ограничение:** C принимает family=0 как IPv4, Rust требует разбор 4/6 (в production только 4/6); measured IP-ID берётся из random()/getrandom — диапазон тот же, побайтового сравнения нет; native options C берёт из `d2k_conn`, Rust — из исходного пакета, для пути исполнения эквивалентно. |
 | `d2k_wire_tcp_checksum_ok` | 279-306 | 28 | IPv4: версия/proto/ihl/total; IPv6: len≥60/proto 6/base-only; сверка суммы | `r2k-core/wire.rs` `tcp_checksum_ok` | E | C проверяет IPv4 version/proto/IHL≥20/total≤len и IPv6 len≥60/proto 6/длину TCP, затем `pseudo_sum+sum16+fold==0`. Rust `tcp_checksum_ok` реализует те же проверки и суммы для базовых пакетов; тест `tcp_checksum_ok_matches_c_for_ipv4_and_ipv6` (валидный, испорченный, обрезанный, IPv6). Пакеты с расширенными заголовками/фрагментами `PacketView::parse` отвергает раньше C. |
 
 ### datapath/wire.c: построчная сверка
