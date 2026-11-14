@@ -160,6 +160,14 @@ static size_t packet_with_payload(uint8_t *o, uint8_t flags, uint32_t sequence,
 }
 
 
+static size_t http_packet_with_payload(uint8_t *o, uint8_t flags,
+                                       uint32_t sequence, const uint8_t *payload,
+                                       size_t payload_len) {
+    size_t total = packet_with_payload(o, flags, sequence, payload, payload_len);
+    o[22] = 0; o[23] = 80;
+    return total;
+}
+
 static size_t plan_with_records(uint8_t *o, uint16_t minexec, uint16_t kind2,
                                 const uint8_t *r1, size_t n1,
                                 const uint8_t *r2, size_t n2) {
@@ -240,6 +248,34 @@ static void probe_mtu_case(const char *name, d2k_session *session,
         printf("%s%zu", i ? "," : "", result.out[i].len);
     }
     printf("\n");
+}
+
+static void http_skip_case(const char *name, int with_syn, int first_valid,
+                           uint32_t sequence) {
+    static const uint8_t bad[] =
+        "GET / HTTP/1.1\r\nBad\r\n\r\n";
+    static const uint8_t valid[] =
+        "GET / HTTP/1.1\r\nHost: example.test\r\n\r\n";
+    d2k_session *s = d2k_session_new(64, 0);
+    uint8_t out[4096];
+    d2k_result result;
+    uint32_t anchor;
+    if (with_syn) {
+        size_t n = http_packet_with_payload(buffer, 0x02, 1000, NULL, 0);
+        feed(s, buffer, n, &anchor);
+    }
+    if (first_valid) {
+        size_t n = http_packet_with_payload(buffer, 0x18, 1001, valid,
+                                            sizeof valid - 1);
+        (void)d2k_session_packet(s, buffer, n, 1000, out, sizeof out, &result);
+    }
+    size_t n = http_packet_with_payload(buffer, 0x18, sequence, bad,
+                                        sizeof bad - 1);
+    memset(&result, 0, sizeof result);
+    (void)d2k_session_packet(s, buffer, n, 2000, out, sizeof out, &result);
+    printf("%s skipped=%s\n", name,
+           result.skipped && result.skipped[0] ? result.skipped : "-");
+    d2k_session_free(s);
 }
 
 static void print_case(const char *name, d2k_session *session, uint32_t anchor) {
@@ -455,6 +491,12 @@ int main(void) {
                (unsigned long long)d2k_session_suspects(fin));
         d2k_session_free(fin);
     }
+
+    /* V: точные тексты http_skip: нет SYN, первый сегмент, пройденная
+     * граница. */
+    http_skip_case("V1 http-no-syn", 0, 0, 1001);
+    http_skip_case("V2 http-first", 1, 0, 1001);
+    http_skip_case("V3 http-late", 1, 1, 1300);
 
     return 0;
 }

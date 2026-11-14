@@ -4990,6 +4990,14 @@ mod app {
         if selected.is_some() || global_plan_present {
             return;
         }
+        // C `session_packet`: для неразобранного HTTP-запроса причина в
+        // `out->skipped` называется точным текстом `http_skip`, а не общим
+        // «плана для этой цели нет». Журнального REFUSED здесь нет: C зовёт
+        // `refuse` только для разобранного `tls.is_client_hello`.
+        if let Some(note) = r2o_datapath::engine::r2o_http_skip_note(sessions, packet) {
+            r2o_datapath::reason_stats::record_reason(note);
+            return;
+        }
         // Форма — та же, что у выбора плана: C пишет её в `client_shape`
         // события REFUSED. Для оборванного ECH-hello это ANY (0).
         let Some(shape) = plans.r2o_observed_tcp_shape(packet, false) else {
@@ -7538,6 +7546,16 @@ mod app {
             assert_eq!(parse_options(&[]).unwrap().flow_capacity.limit(), 1536);
             assert!(parse_options(&["--r2o-flow-capacity".into(), "0".into(),]).is_err());
             assert!(parse_options(&["--r2o-flow-capacity".into(), "4294967296".into()]).is_err());
+        }
+
+        #[test]
+        fn session_new_plan_capacity_comes_from_flow_slots_like_c() {
+            // C `d2k_session_new`: plans capacity = d2k_track_capacity(flows).
+            let options = parse_options(&["--r2o-flow-capacity".into(), "64".into()]).unwrap();
+            let plans =
+                r2o_datapath::control::NamePlans::with_capacity(options.flow_capacity.slots());
+            assert_eq!(plans.r2o_plan_capacity(), options.flow_capacity.slots());
+            assert_eq!(plans.r2o_plan_capacity(), 64);
         }
 
         #[test]

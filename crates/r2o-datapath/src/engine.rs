@@ -2077,6 +2077,45 @@ pub fn r2o_udp_no_plan_note(
         .then_some("плана для этой цели нет")
 }
 
+/// C `session_packet` (`session.c:2112-2125`): диагностический текст
+/// `http_skip`, когда порт 80, запрос похож на HTTP, но Host/граница не
+/// разобраны. C использует его в `out->skipped` и в `count_reason`.
+pub fn r2o_http_skip_note(sessions: &TcpSessions, packet: &[u8]) -> Option<&'static str> {
+    let view = PacketView::parse(packet).filter(|view| view.protocol == 6)?;
+    let tcp = view.tcp_segment(packet)?;
+    if tcp.destination_port != 80 {
+        return None;
+    }
+    let payload = packet.get(tcp.payload)?;
+    if payload.is_empty() {
+        return None;
+    }
+    let mut method = 0;
+    while method < payload.len() && method < 20 && payload[method].is_ascii_uppercase() {
+        method += 1;
+    }
+    if method == 0
+        || method + 1 >= payload.len()
+        || payload[method] != b' '
+        || payload[method + 1] != b'/'
+    {
+        return None;
+    }
+    let key = TcpFlowKey::from_packet(packet)?;
+    let session = sessions.flows.get(&key)?;
+    if session.hello_at.is_some() {
+        return None;
+    }
+    if session.first_syn.is_none() {
+        return Some("HTTP: начало TCP не наблюдалось — граница запроса не доказана");
+    }
+    if session.capture_anchor == Some(tcp.sequence) {
+        Some("HTTP: Host или запрос не разобран в этом сегменте")
+    } else {
+        Some("HTTP: граница запроса не доказана или уже пройдена")
+    }
+}
+
 /// C `session_packet`: та же ветка `!use`, но для TCP ClientHello. `refuse`
 /// зовётся один раз на поток (C это даёт `saw_hello`).
 pub fn r2o_tcp_no_plan_note(
@@ -6499,6 +6538,48 @@ mod tests {
         fin.track_packet(&fin_packet, fin_start + Duration::from_millis(200));
         fin.track_packet(&fin_packet, fin_start + Duration::from_secs(10));
         println!("U fin-retry suspects={}", fin.fin_retry_candidates().len());
+
+        // V: тексты http_skip при порте 80 и HTTP-подобном сегменте.
+        let http_server = ([198, 51, 100, 20], 80);
+        let bad = b"GET / HTTP/1.1\r\nBad\r\n\r\n";
+        let valid = b"GET / HTTP/1.1\r\nHost: example.test\r\n\r\n";
+
+        let mut no_syn = TcpSessions::default();
+        let bad_packet = ipv4_tcp_packet(client, http_server, 0x18, 64, 1001, bad);
+        no_syn.track_packet(&bad_packet, fin_start);
+        println!(
+            "V1 http-no-syn skipped={}",
+            super::r2o_http_skip_note(&no_syn, &bad_packet).unwrap_or("-")
+        );
+
+        let mut first = TcpSessions::default();
+        first.track_packet(
+            &ipv4_tcp_packet(client, http_server, 0x02, 64, 1000, &[]),
+            fin_start,
+        );
+        let first_bad = ipv4_tcp_packet(client, http_server, 0x18, 64, 1001, bad);
+        first.track_packet(&first_bad, fin_start + Duration::from_millis(1));
+        println!(
+            "V2 http-first skipped={}",
+            super::r2o_http_skip_note(&first, &first_bad).unwrap_or("-")
+        );
+
+        let mut late = TcpSessions::default();
+        late.track_packet(
+            &ipv4_tcp_packet(client, http_server, 0x02, 64, 1000, &[]),
+            fin_start,
+        );
+        let _ = decide_with_session(
+            &mut late,
+            &Plan::default(),
+            &ipv4_tcp_packet(client, http_server, 0x18, 64, 1001, valid),
+        );
+        let late_bad = ipv4_tcp_packet(client, http_server, 0x18, 64, 1300, bad);
+        late.track_packet(&late_bad, fin_start + Duration::from_millis(2));
+        println!(
+            "V3 http-late skipped={}",
+            super::r2o_http_skip_note(&late, &late_bad).unwrap_or("-")
+        );
     }
 
     #[test]
@@ -6682,6 +6763,38 @@ mod tests {
         assert_eq!(
             decide_with_session(&mut sessions, &plan, &hello),
             PacketDecision::Accept,
+        );
+    }
+
+    #[test]
+    fn http_skip_texts_match_session_packet_reasons() {
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 80);
+        let malformed = b"GET / HTTP/1.1\r\nBad\r\n\r\n";
+        let start = Instant::now();
+
+        let mut no_syn = TcpSessions::default();
+        let packet = ipv4_tcp_packet(client, server, 0x18, 64, 1001, malformed);
+        no_syn.track_packet(&packet, start);
+        assert_eq!(
+            super::r2o_http_skip_note(&no_syn, &packet),
+            Some("HTTP: начало TCP не наблюдалось — граница запроса не доказана")
+        );
+
+        let mut first = TcpSessions::default();
+        first.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 1000, &[]), start);
+        let first_packet = ipv4_tcp_packet(client, server, 0x18, 64, 1001, malformed);
+        first.track_packet(&first_packet, start + Duration::from_millis(1));
+        assert_eq!(
+            super::r2o_http_skip_note(&first, &first_packet),
+            Some("HTTP: Host или запрос не разобран в этом сегменте")
+        );
+
+        let late = ipv4_tcp_packet(client, server, 0x18, 64, 1200, malformed);
+        first.track_packet(&late, start + Duration::from_millis(2));
+        assert_eq!(
+            super::r2o_http_skip_note(&first, &late),
+            Some("HTTP: граница запроса не доказана или уже пройдена")
         );
     }
 
