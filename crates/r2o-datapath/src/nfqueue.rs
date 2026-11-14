@@ -21,7 +21,7 @@ enum R2oNfqRecvOutcome {
 
 fn r2o_nfq_recv_error_outcome(error: &io::Error) -> R2oNfqRecvOutcome {
     match error.raw_os_error() {
-        Some(libc::EAGAIN) | Some(libc::EWOULDBLOCK) | Some(libc::EINTR) => R2oNfqRecvOutcome::Wait,
+        Some(libc::EAGAIN) | Some(libc::EINTR) => R2oNfqRecvOutcome::Wait,
         Some(libc::ENOBUFS) => R2oNfqRecvOutcome::Lost,
         _ => R2oNfqRecvOutcome::Io,
     }
