@@ -105,4 +105,8 @@ diff -q /mnt/e/d2o-a378w/datapath/session.c /mnt/e/d2o-current/datapath/session.
 diff -q /mnt/e/d2o-a378w/core/tls12.c /mnt/e/d2o-current/core/tls12.c
 diff -q /mnt/e/d2o-a378w/core/httpsearch.c /mnt/e/d2o-current/core/httpsearch.c
 diff -q /mnt/e/d2o-a378w/detect/classify.c /mnt/e/d2o-current/detect/classify.c
+R2O_DONOR_ROOT=/mnt/e/d2o-current sh scripts/test-dns-bootstrap-differential.sh
+R2O_DONOR_ROOT=/mnt/e/d2o-current sh scripts/test-tls-dns-health-differential.sh
+R2O_DONOR_ROOT=/mnt/e/d2o-current sh scripts/test-dns-state-differential.sh
+R2O_DONOR_ROOT=/mnt/e/d2o-current sh scripts/test-dns-live-differential.sh
 ```
