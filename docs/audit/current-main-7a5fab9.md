@@ -79,9 +79,15 @@ Pinned C/Rust differential-донор остаётся `a378e230...`; это о�
   (8 случаев точных байт PASS), `r2o_tls12_connect`/`r2o_tls12_resume`
   проходят loopback handshake и downgrade TLS1.3→1.2 с HTTP 200.
   Ограничение: production HTTP/TLS остаётся rustls; P-384 C отвергает.
-- Остаются: bootstrap DNS (`d2k_dns_resolve_bootstrap`), scheduler
-  `dns_services`/`dns_service_live`, health-пробы DoH/DoT/DoQ и
-  `write_live_dns_services`. Поэтому `d2k_sched_write_live` — P*.
+- **`dns_services` live:** R2O читает `/etc/config/https-dns-proxy`,
+  `/etc/config/dnsproxy`, `doqd` и Keenetic `ndmc -c "show dns-proxy"`
+  (250 мс, stderr null, пустой `LD_LIBRARY_PATH`), refresh раз в 30 с,
+  и всегда пишет live-секцию `dns_services` с полями C для состояния
+  `detected`. C/Rust differential `test-dns-live-differential.sh` PASS
+  (3 сервиса, current main 7a5fab9), пустого массива-заглушки нет.
+- Остаются: state machine `checking/direct_ok/plan_applied/bypass_ok`,
+  generation, `dns_service_observe`/`note_applied` и health-пробы
+  DoH/DoT/DoQ. Поэтому `d2k_sched_write_live` — P*.
 
 ## Команды проверки
 
