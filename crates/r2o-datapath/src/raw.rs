@@ -1121,3 +1121,89 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod tls_route_cap_tests {
+    use super::r2o_tls_route_segment_cap_with;
+
+    fn put16(packet: &mut [u8], at: usize, value: u16) {
+        packet[at..at + 2].copy_from_slice(&value.to_be_bytes());
+    }
+
+    fn fill(packet: &mut [u8]) {
+        for (index, byte) in packet.iter_mut().enumerate() {
+            *byte = 0x30_u8.wrapping_add(index as u8 & 0x3f);
+        }
+    }
+
+    fn v4(
+        length: usize,
+        ihl: u8,
+        proto: u8,
+        tcp_data_offset: u8,
+        first: u8,
+        second: u8,
+    ) -> Vec<u8> {
+        let mut packet = vec![0; 96];
+        fill(&mut packet);
+        packet[0] = 0x40 | ihl;
+        put16(&mut packet, 2, length as u16);
+        packet[8] = 64;
+        packet[9] = proto;
+        packet[12..16].copy_from_slice(&[192, 0, 2, 1]);
+        packet[16..20].copy_from_slice(&[198, 51, 100, 2]);
+        let tcp = usize::from(ihl) * 4;
+        put16(&mut packet, tcp, 40000);
+        put16(&mut packet, tcp + 2, 443);
+        packet[tcp + 12] = tcp_data_offset << 4;
+        let payload = tcp + usize::from(tcp_data_offset) * 4;
+        packet[payload] = first;
+        packet[payload + 1] = second;
+        packet.truncate(length);
+        packet
+    }
+
+    fn v6(length: usize, next: u8, tcp_data_offset: u8, first: u8, second: u8) -> Vec<u8> {
+        let mut packet = vec![0; 96];
+        fill(&mut packet);
+        packet[0] = 0x60;
+        packet[6] = next;
+        packet[7] = 64;
+        for offset in 0..16 {
+            packet[8 + offset] = 0x20 + offset as u8;
+            packet[24 + offset] = 0x40 + offset as u8;
+        }
+        packet[52] = tcp_data_offset << 4;
+        let payload = 40 + usize::from(tcp_data_offset) * 4;
+        packet[payload] = first;
+        packet[payload + 1] = second;
+        packet.truncate(length);
+        packet
+    }
+
+    fn run(name: &str, packet: &[u8], mtu: usize) {
+        let cap = r2o_tls_route_segment_cap_with(packet, |_, _| mtu);
+        println!("{name} cap={cap}");
+    }
+
+    #[test]
+    #[ignore]
+    fn d2o_tls_route_cap_trace() {
+        run("A v4-tls", &v4(60, 5, 6, 5, 0x16, 3), 1500);
+        run("B v4-ihl6", &v4(64, 6, 6, 5, 0x16, 3), 1400);
+        run("C v4-udp", &v4(60, 5, 17, 5, 0x16, 3), 1500);
+        run("D v4-not-tls", &v4(60, 5, 6, 5, 0x17, 3), 1500);
+        run("E v4-wrong-ver", &v4(60, 5, 6, 5, 0x16, 2), 1500);
+        run("F v4-short-doff", &v4(60, 5, 6, 4, 0x16, 3), 1500);
+        run("G v4-too-short", &v4(39, 5, 6, 5, 0x16, 3), 1500);
+        run("H v4-exact", &v4(45, 5, 6, 5, 0x16, 3), 1500);
+        run("I v4-small-mtu", &v4(60, 5, 6, 5, 0x16, 3), 40);
+        run("J v6-tls", &v6(70, 6, 5, 0x16, 3), 1280);
+        run("K v6-short", &v6(59, 6, 5, 0x16, 3), 1280);
+        run("L v6-not-tcp", &v6(70, 17, 5, 0x16, 3), 1280);
+        run("M v4-tls-2", &v4(60, 5, 6, 5, 0x16, 3), 1500);
+        let mut bad = v4(60, 5, 6, 5, 0x16, 3);
+        bad[0] = 0x55;
+        run("N bad-version", &bad, 1500);
+    }
+}
