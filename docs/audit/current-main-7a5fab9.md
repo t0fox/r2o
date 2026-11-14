@@ -87,7 +87,12 @@ Pinned C/Rust differential-донор остаётся `a378e230...`; это о�
   generation++) и `dns_service_note_applied` из non-trial `EVENT_APPLIED`;
   `d2k_sched_set_dns_services` сохраняет live при неизменной конфигурации.
   C/Rust differential `test-dns-state-differential.sh` PASS (4 кейса).
-- Остаются: health-пробы DoH/DoT/DoQ, `T_DNS_HEALTH`, bootstrap,
+- **Bootstrap/health 2026-11-14:** `dns_resolve_bootstrap` в
+  `r2k-core::dns_config` (UDP A→AAAA, 2 сервера, 400 мс, SO_MARK;
+  differential 18 vectors + loopback PASS) и `dns_health.rs` DoH/DoT/DoQ
+  (`probe_dns_health`, DNS wire/parse, DoH framing; differential 15 PASS,
+  loopback DoH/DoT/DoQ).
+- Остаются: проводка health в тик `dns_services`, `T_DNS_HEALTH`,
   `bypass_ok`/`no_bypass`/`candidate_plan_applied`/`dns_answer_via_plan`.
   Поэтому `d2k_sched_write_live` — P*.
 
