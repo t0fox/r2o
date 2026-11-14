@@ -56,6 +56,19 @@ mod app {
     static STOP: AtomicBool = AtomicBool::new(false);
     static R2O_SEND_FAIL_BUSY_LINES: std::sync::atomic::AtomicU32 =
         std::sync::atomic::AtomicU32::new(0);
+    /// C `st.hold_owned/hold_resent/hold_resend_fail`.
+    static R2O_HOLD_OWNED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static R2O_HOLD_RESENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static R2O_HOLD_RESEND_FAIL: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+    /// C `st.deferred/emitted_late/stale_deferred`.
+    static R2O_DEFERRED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static R2O_EMITTED_LATE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static R2O_STALE_DEFERRED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    fn r2o_note_counter(counter: &std::sync::atomic::AtomicU64, by: u64) {
+        counter.fetch_add(by, Ordering::Relaxed);
+    }
 
     /// C `log_send_fail` (`datapath/d2kd.c:253-261`): busy-ошибка сырой
     /// посылки (сокет полон) логируется не более 16 раз за процесс, на
@@ -383,7 +396,10 @@ mod app {
         if let Some(due) = matched.at {
             if neutral && raw.is_some() {
                 match deferred_resends.r2o_enqueue_with_error(due, id, packet) {
-                    Ok(()) => return true,
+                    Ok(()) => {
+                        r2o_note_counter(&R2O_DEFERRED, 1);
+                        return true;
+                    }
                     Err(R2oUdpDeferredEnqueueError::Full) => {
                         follow.r2o_note_queue_full();
                     }
@@ -842,6 +858,10 @@ mod app {
             "r2o-datapath: обрезано {}, без нагрузки {}, без заголовка {}",
             stats.truncated, stats.no_payload, stats.no_header
         );
+        eprintln!(
+            "r2o-datapath: ошибок вердикта {}, ошибок чтения {}",
+            stats.verdict_failures, stats.receive_errors
+        );
     }
 
     fn r2o_log_raw_stats(raw: Option<&RawSocket>) {
@@ -914,6 +934,88 @@ mod app {
                 stats.later
             );
         }
+    }
+
+    fn r2o_plan_stats_line(
+        applied: u64,
+        done: u64,
+        emitted: u64,
+        deferred: u64,
+        immediate: u64,
+        late: u64,
+        damaged: u64,
+        stale: u64,
+        lost: u64,
+    ) -> String {
+        format!(
+            "r2o-datapath: план подготовлен {applied}, ДОИСПОЛНЕН {done}, выпущено {emitted}, отложено {deferred} (сразу {immediate}, из очереди {late}), потоков испорчено {damaged}, отложенных протухло {stale}, уведомлений потеряно {lost}"
+        )
+    }
+
+    fn r2o_log_plan_stats(tcp_sessions: &TcpSessions, raw: Option<&RawSocket>) {
+        let emitted = raw.map_or(0, |raw| raw.send_stats().sent);
+        let late = R2O_EMITTED_LATE.load(Ordering::Relaxed);
+        let immediate = emitted.saturating_sub(late);
+        eprintln!(
+            "{}",
+            r2o_plan_stats_line(
+                tcp_sessions.session_applied(),
+                tcp_sessions.session_done(),
+                emitted,
+                R2O_DEFERRED.load(Ordering::Relaxed),
+                immediate,
+                late,
+                tcp_sessions.session_damaged(),
+                R2O_STALE_DEFERRED.load(Ordering::Relaxed),
+                tcp_sessions.session_sent_lost(),
+            )
+        );
+    }
+
+    fn r2o_hold_ownership_line(owned: u64, resent: u64, fail: u64) -> String {
+        format!(
+            "r2o-datapath: владение приветствием: взято у ядра={owned} возвращено на провод оригиналов={resent} не возвращено={fail}"
+        )
+    }
+
+    fn r2o_log_hold_ownership() {
+        eprintln!(
+            "{}",
+            r2o_hold_ownership_line(
+                R2O_HOLD_OWNED.load(Ordering::Relaxed),
+                R2O_HOLD_RESENT.load(Ordering::Relaxed),
+                R2O_HOLD_RESEND_FAIL.load(Ordering::Relaxed),
+            )
+        );
+    }
+
+    fn r2o_log_nat_stats(gate: &R2oConntrackGate) {
+        let (ok, miss, none, retried) = gate.nat_stats();
+        eprintln!(
+            "r2o-datapath: поток ведётся conntrack: да {ok}, нет {miss}, таблицы нет {none}, спасла перепроверка {retried}"
+        );
+    }
+
+    fn r2o_log_routed_stats(routed_flows: usize) {
+        eprintln!(
+            "r2o-datapath: потоков клиентов с меткой маршрутизации (ядром, без плана): {routed_flows}"
+        );
+        eprintln!(
+            "r2o-datapath: UDP с меткой клиента или через другой интерфейс, хвосты ядром: {} потоков",
+            R2O_UDP_MARKED_KEPT.load(Ordering::Relaxed)
+        );
+    }
+
+    fn r2o_log_plan_table_stats(name_plans: &NamePlans) {
+        eprintln!(
+            "r2o-datapath: отказов по форме приветствия {}",
+            name_plans.r2o_shape_misses()
+        );
+        eprintln!(
+            "r2o-datapath: планов по целям {} из {}",
+            name_plans.r2o_plan_count(),
+            name_plans.r2o_plan_capacity()
+        );
     }
 
     fn r2o_log_hold_stats(holding: &HoldTable) {
@@ -1400,6 +1502,11 @@ mod app {
                 r2o_log_capture_stats(&tcp_sessions);
                 r2o_log_hold_stats(&holding);
                 r2o_log_http80_stats(&holding);
+                r2o_log_plan_stats(&tcp_sessions, raw.as_ref());
+                r2o_log_hold_ownership();
+                r2o_log_nat_stats(&conntrack_gate);
+                r2o_log_routed_stats(routed_flows.len());
+                r2o_log_plan_table_stats(&name_plans);
                 r2o_log_raw_stats(raw.as_ref());
                 if raw.is_some() {
                     r2o_log_udp_follow_stats(&udp_follow, route_watch_notifications);
@@ -1435,6 +1542,11 @@ mod app {
                 r2o_log_payload_stats(&tcp_sessions);
                 r2o_log_hold_stats(&holding);
                 r2o_log_http80_stats(&holding);
+                r2o_log_plan_stats(&tcp_sessions, raw.as_ref());
+                r2o_log_hold_ownership();
+                r2o_log_nat_stats(&conntrack_gate);
+                r2o_log_routed_stats(routed_flows.len());
+                r2o_log_plan_table_stats(&name_plans);
                 r2o_log_raw_stats(raw.as_ref());
                 if raw.is_some() {
                     r2o_log_udp_follow_stats(&udp_follow, route_watch_notifications);
@@ -1562,6 +1674,7 @@ mod app {
                 Ok(ready) => ready,
                 Err(error) if !receive_error_requires_flush(&error) => (false, false),
                 Err(error) => {
+                    socket.record_receive_error();
                     match error {
                         ReceiveError::LostPackets => {
                             r2o_datapath::reason_stats::record_reason("ядро не отдало пакет");
@@ -2124,6 +2237,7 @@ mod app {
                             HoldOutcome::Waiting => continue,
                             HoldOutcome::OwnedWaiting => {
                                 socket.send_verdict(packet_id, NF_DROP)?;
+                                r2o_note_counter(&R2O_HOLD_OWNED, 1);
                                 continue;
                             }
                             HoldOutcome::Drop => PacketDecision::Drop,
@@ -2194,6 +2308,7 @@ mod app {
                                 originals,
                             } => {
                                 socket.send_verdict(packet_id, NF_DROP)?;
+                                r2o_note_counter(&R2O_HOLD_OWNED, 1);
                                 if !controller_probe
                                     && let Some(mut hello) = tcp_hello_from_packet(&packet)
                                         .or_else(|| tcp_http_hello_from_packet(&packet))
@@ -3030,6 +3145,7 @@ mod app {
                 },
                 |id, verdict| socket.send_verdict(id, verdict),
             );
+            r2o_note_counter(&R2O_EMITTED_LATE, deferred_resend_stats.resent as u64);
             udp_follow.r2o_note_busy(deferred_resend_stats.resend_busy);
             if deferred_resend_stats.resend_failed != 0 {
                 eprintln!(
@@ -4308,7 +4424,10 @@ mod app {
         };
         for packet in originals {
             if let Err(error) = raw.send_packet(packet) {
+                r2o_note_counter(&R2O_HOLD_RESEND_FAIL, 1);
                 r2o_log_send_fail("не возвращён owned TLS original через raw-send: ", &error);
+            } else {
+                r2o_note_counter(&R2O_HOLD_RESENT, 1);
             }
         }
     }
@@ -4570,7 +4689,11 @@ mod app {
                 });
             };
             let kind = emitted.kind;
-            if let Err(_emitted) = scheduled.push_reserved(ticket, due, emitted) {
+            let push_ok = scheduled.push_reserved(ticket, due, emitted).is_ok();
+            if push_ok {
+                r2o_note_counter(&R2O_DEFERRED, 1);
+            }
+            if !push_ok {
                 eprintln!("r2o-datapath: потерян зарезервированный emit; отменяю его пачку");
                 scheduled.cancel(ticket);
                 release_many(
@@ -4630,6 +4753,7 @@ mod app {
                     !tcp_sessions.r2o_send_pending(&execution.key, execution.id)
                 })
             {
+                r2o_note_counter(&R2O_STALE_DEFERRED, 1);
                 scheduled.cancel(ticket);
                 pending_applied.remove(&ticket);
                 continue;
@@ -4713,6 +4837,7 @@ mod app {
                     }
                 }
             } else {
+                r2o_note_counter(&R2O_EMITTED_LATE, 1);
                 if let Some(pending) = pending_applied.get_mut(&ticket) {
                     pending.r2o_sends_done = true;
                     pending.payload_on_wire |= emitted.kind == EmitKind::Payload;
@@ -4866,6 +4991,28 @@ mod app {
 
     #[cfg(test)]
     mod tests {
+        #[test]
+        fn run_stats_lines_include_c_fields() {
+            let plan = super::r2o_plan_stats_line(7, 5, 100, 20, 80, 20, 2, 3, 4);
+            for fragment in [
+                "план подготовлен 7",
+                "ДОИСПОЛНЕН 5",
+                "выпущено 100",
+                "отложено 20",
+                "сразу 80",
+                "из очереди 20",
+                "потоков испорчено 2",
+                "отложенных протухло 3",
+                "уведомлений потеряно 4",
+            ] {
+                assert!(plan.contains(fragment), "нет «{fragment}» в {plan}");
+            }
+            let hold = super::r2o_hold_ownership_line(10, 9, 1);
+            assert!(hold.contains("взято у ядра=10"));
+            assert!(hold.contains("возвращено на провод оригиналов=9"));
+            assert!(hold.contains("не возвращено=1"));
+        }
+
         #[test]
         fn parse_c_u32_matches_strtoul_base_zero() {
             for (input, expected) in [

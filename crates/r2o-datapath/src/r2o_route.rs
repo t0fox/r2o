@@ -755,6 +755,11 @@ impl Default for R2oRoutedFlows {
 }
 
 impl R2oRoutedFlows {
+    /// C `d2k_session_routed_flows`: число потоков с меткой маршрутизации.
+    pub fn len(&self) -> usize {
+        self.flows.len()
+    }
+
     /// Возвращает `true`, если пакет нужно оставить ядру без обработки датапатом.
     pub fn r2o_skip_packet(&mut self, packet: &[u8], route_mark: u32, now: Instant) -> bool {
         self.r2o_expire(now);

@@ -656,6 +656,7 @@ struct R2oUdpDeferredResend {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct R2oUdpDeferredResendStats {
     pub flushed: usize,
+    pub resent: usize,
     pub resend_failed: usize,
     pub resend_busy: usize,
     pub verdict_failed: usize,
@@ -758,7 +759,10 @@ impl R2oUdpDeferredResends {
             };
             let entry = self.slots[index].take().expect("созревший хвост найден");
             let verdict = match resend(entry.id, &entry.packet) {
-                Ok(()) => 0,
+                Ok(()) => {
+                    stats.resent += 1;
+                    0
+                }
                 Err(error) => {
                     stats.resend_failed += 1;
                     if r2o_udp_send_busy(&error) {

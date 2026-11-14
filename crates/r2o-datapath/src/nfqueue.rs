@@ -117,6 +117,10 @@ pub struct QueueStats {
     pub truncated: u64,
     pub no_payload: u64,
     pub no_header: u64,
+    /// C `st.verdict_fail`: ошибки выдачи вердикта NFQUEUE.
+    pub verdict_failures: u64,
+    /// C `st.recv_err`: ошибки чтения/потерь NFQUEUE.
+    pub receive_errors: u64,
 }
 
 pub struct QueueSocket {
@@ -320,6 +324,18 @@ impl QueueSocket {
         self.stats.set(stats);
     }
 
+    pub fn record_verdict_failure(&self) {
+        let mut stats = self.stats.get();
+        stats.verdict_failures = stats.verdict_failures.saturating_add(1);
+        self.stats.set(stats);
+    }
+
+    pub fn record_receive_error(&self) {
+        let mut stats = self.stats.get();
+        stats.receive_errors = stats.receive_errors.saturating_add(1);
+        self.stats.set(stats);
+    }
+
     fn record_verdict(&self, action: u32) {
         let mut stats = self.stats.get();
         if action == NF_DROP {
@@ -332,26 +348,35 @@ impl QueueSocket {
 
     pub fn send_verdict(&mut self, packet_id: u32, action: u32) -> io::Result<()> {
         let bytes = verdict(self.queue, self.next_sequence(), packet_id, action);
-        send_to_kernel(self.fd.as_raw_fd(), &bytes)?;
+        if let Err(error) = send_to_kernel(self.fd.as_raw_fd(), &bytes) {
+            self.record_verdict_failure();
+            return Err(error);
+        }
         self.record_verdict(action);
         Ok(())
     }
 
     pub fn send_replacement(&mut self, packet_id: u32, packet: &[u8]) -> io::Result<()> {
-        let bytes = verdict_payload(
+        let bytes = match verdict_payload(
             self.queue,
             self.next_sequence(),
             packet_id,
             NF_ACCEPT,
             packet,
-        )
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "замена не помещается в netlink",
-            )
-        })?;
-        send_to_kernel(self.fd.as_raw_fd(), &bytes)?;
+        ) {
+            Some(bytes) => bytes,
+            None => {
+                self.record_verdict_failure();
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "замена не помещается в netlink",
+                ));
+            }
+        };
+        if let Err(error) = send_to_kernel(self.fd.as_raw_fd(), &bytes) {
+            self.record_verdict_failure();
+            return Err(error);
+        }
         self.record_verdict(NF_ACCEPT);
         Ok(())
     }
