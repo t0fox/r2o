@@ -58,6 +58,17 @@ Pinned C/Rust differential-донор остаётся `a378e230...`; это о�
 - **`core/verify.c` health-пробы** относятся к dns_services; без подсистемы
   dns_services их нельзя считать закрытыми.
 
+## Что уже сделано в R2O (2026-11-14)
+
+- `crates/r2k-core/src/dns_config.rs`: `DnsService`, `dns_uri_parse`,
+  `dns_service_match`. C/Rust differential
+  `scripts/test-dns-config-differential.sh` PASS, **31 кейс** (22 URI +
+  9 match) против current main `7a5fab9`.
+- Unit: `cargo test -p r2k-core --lib dns_config` — 3 passed, 1 ignored.
+- Остаются: UCI/doqd/Keenetic readers, bootstrap DNS, scheduler
+  `dns_services`/`dns_service_live`, health-пробы DoH/DoT/DoQ и
+  `write_live_dns_services`. Поэтому `d2k_sched_write_live` — P*.
+
 ## Команды проверки
 
 ```sh
