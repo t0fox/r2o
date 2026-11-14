@@ -1,16 +1,16 @@
 use crate::engine::{R2oTcpExchangeEvent, R2oTcpRstCutEvent, R2oTcpRstEvent};
 use crate::r2o_quic::R2oUdpExchangeEvent;
 use r2k_core::control::{
-    AppliedEvent, BindingContext, EVENT_APPLIED, EVENT_HELLO, EVENT_R2O_JOURNAL_END,
-    EVENT_R2O_JOURNAL_ENTRY, EVENT_R2O_QUIC_STALL, EVENT_R2O_QUIC_SUSPECT,
-    EVENT_R2O_TCP_CLEAN_HANDSHAKE, EVENT_R2O_TCP_EARLY_RST, EVENT_R2O_TCP_FIN_RETRY,
-    EVENT_R2O_TCP_REPEAT, EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_RST_CUT, EVENT_R2O_TCP_SILENT,
-    EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF, EVENT_R2O_VOICE_RTP_PROOF,
-    EVENT_R2O_VOICE_STUN_PROOF, EVENT_R2O_VOICE_SUSPECT, Frame, KEY_LEN, decode_applied,
-    decode_r2o_quic_stall, decode_r2o_quic_suspect, decode_r2o_tcp_clean_handshake,
-    decode_r2o_tcp_early_rst, decode_r2o_tcp_fin_retry, decode_r2o_tcp_repeat,
-    decode_r2o_tcp_rst_after_app, decode_r2o_tcp_rst_cut_signal, decode_r2o_tcp_silence,
-    decode_r2o_tcp_stall, decode_r2o_voice_proof, decode_r2o_voice_suspect,
+    AppliedEvent, BindingContext, EVENT_APPLIED, EVENT_HELLO, EVENT_LEGACY_EXCHANGE,
+    EVENT_LEGACY_SUSPECT, EVENT_R2O_JOURNAL_END, EVENT_R2O_JOURNAL_ENTRY, EVENT_R2O_QUIC_STALL,
+    EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_CLEAN_HANDSHAKE, EVENT_R2O_TCP_EARLY_RST,
+    EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_REPEAT, EVENT_R2O_TCP_RST_AFTER_APP,
+    EVENT_R2O_TCP_RST_CUT, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF,
+    EVENT_R2O_VOICE_RTP_PROOF, EVENT_R2O_VOICE_STUN_PROOF, EVENT_R2O_VOICE_SUSPECT, EVENT_REFUSED,
+    Frame, KEY_LEN, decode_applied, decode_r2o_quic_stall, decode_r2o_quic_suspect,
+    decode_r2o_tcp_clean_handshake, decode_r2o_tcp_early_rst, decode_r2o_tcp_fin_retry,
+    decode_r2o_tcp_repeat, decode_r2o_tcp_rst_after_app, decode_r2o_tcp_rst_cut_signal,
+    decode_r2o_tcp_silence, decode_r2o_tcp_stall, decode_r2o_voice_proof, decode_r2o_voice_suspect,
 };
 
 pub const R2O_JOURNAL_NAME_MAX: usize = 63;
@@ -156,6 +156,75 @@ pub struct R2oFlowJournalEntry {
     pub trial_id: [u8; 16],
     pub name: [u8; R2O_JOURNAL_NAME_MAX + 1],
     pub note: Option<&'static str>,
+}
+
+impl R2oFlowJournalEntry {
+    /// C `d2k_ctlsrv_pump` (`ctlsrv.c:511-694`) для v22: journal entry →
+    /// один или несколько D2O-совместимых кадров. SHAPE/CLIENT_TCP требуют
+    /// session-shape, которого в записи журнала нет, и здесь не выдаются.
+    pub fn to_v22_frames(&self) -> Vec<(u16, Vec<u8>)> {
+        let mut body = Vec::with_capacity(KEY_LEN + 64);
+        body.extend_from_slice(&self.key);
+        let kind = match self.kind {
+            R2oFlowJournalKind::Hello => {
+                body.push(self.name_len);
+                let length = usize::from(self.name_len).min(R2O_JOURNAL_NAME_MAX);
+                body.extend_from_slice(&self.name[..length]);
+                EVENT_HELLO
+            }
+            R2oFlowJournalKind::Suspect => {
+                body.push(self.code);
+                body.push(self.ttl);
+                body.push(self.reference_ttl);
+                body.push(self.tos);
+                body.extend_from_slice(&self.ip_id.to_be_bytes());
+                body.push(self.planned);
+                body.push(self.client_shape);
+                let num = self.num.min(u32::from(u16::MAX)) as u16;
+                body.extend_from_slice(&num.to_be_bytes());
+                EVENT_LEGACY_SUSPECT
+            }
+            R2oFlowJournalKind::PlanApplied => return Vec::new(),
+            R2oFlowJournalKind::PlanDone => {
+                body.extend_from_slice(&self.plan_id);
+                body.extend_from_slice(&self.trial_id);
+                body.extend_from_slice(&self.execution_id.to_be_bytes());
+                append_binding(&mut body, self.binding.as_ref());
+                EVENT_APPLIED
+            }
+            R2oFlowJournalKind::PlanRefused
+            | R2oFlowJournalKind::PlanUnsent
+            | R2oFlowJournalKind::PlanDamaged => {
+                body.push(self.code);
+                body.extend_from_slice(&self.plan_id);
+                body.extend_from_slice(&self.trial_id);
+                body.push(self.client_shape);
+                body.extend_from_slice(&self.execution_id.to_be_bytes());
+                append_binding(&mut body, self.binding.as_ref());
+                EVENT_REFUSED
+            }
+            R2oFlowJournalKind::Exchange => {
+                body.push(self.code);
+                body.push(self.tos);
+                body.extend_from_slice(&self.num.to_be_bytes());
+                body.push(u8::from(self.server_hello));
+                body.push(self.planned);
+                EVENT_LEGACY_EXCHANGE
+            }
+            _ => return Vec::new(),
+        };
+        vec![(kind, body)]
+    }
+}
+
+fn append_binding(body: &mut Vec<u8>, binding: Option<&BindingContext>) {
+    let binding = binding.copied().unwrap_or_default();
+    body.extend_from_slice(&binding.generation.to_be_bytes());
+    body.push(binding.kind);
+    body.push(binding.family);
+    body.push(binding.shape);
+    body.push(u8::from(binding.temporary));
+    body.extend_from_slice(&binding.epoch);
 }
 
 impl Default for R2oFlowJournalEntry {

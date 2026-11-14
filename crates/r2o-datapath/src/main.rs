@@ -4749,7 +4749,9 @@ mod app {
 
             let mut sessions = TcpSessions::default();
             decide_with_session(&mut sessions, &Plan::default(), &packet);
-            let key = sessions.r2o_begin_execution(&packet, 77, 0, false).unwrap();
+            // C `d2k_session_exec_failed` решает по сохранённому на потоке
+            // `fl->orig_taken`; сценарий — оригинал снят DROP-вердиктом.
+            let key = sessions.r2o_begin_execution(&packet, 77, 0, true).unwrap();
             let event = r2k_core::control::AppliedEvent {
                 key,
                 plan_id: [0xa5; 16],
@@ -5922,6 +5924,116 @@ mod app {
             drop(snapshot);
             drop(control);
             std::fs::remove_dir_all(directory).unwrap();
+        }
+
+        #[test]
+        fn ctlsrv_pump_v22_frames_match_c() {
+            use std::fmt::Write as _;
+
+            let mut key = [0_u8; r2k_core::control::KEY_LEN];
+            key[0] = 4;
+            key[1..5].copy_from_slice(&[192, 0, 2, 1]);
+            key[17..21].copy_from_slice(&[198, 51, 100, 20]);
+            key[33..35].copy_from_slice(&[0x9c, 0x40]);
+            key[35..37].copy_from_slice(&[0x01, 0xbb]);
+            key[37] = 6;
+            let plan_id: [u8; 16] = std::array::from_fn(|index| index as u8);
+            let trial_id: [u8; 16] = std::array::from_fn(|index| 16 + index as u8);
+            let mut entries = Vec::new();
+            let mut hello = r2o_datapath::flow_journal::R2oFlowJournalEntry {
+                at_ns: 100,
+                key,
+                kind: r2o_datapath::flow_journal::R2oFlowJournalKind::Hello,
+                name_len: 11,
+                ..r2o_datapath::flow_journal::R2oFlowJournalEntry::default()
+            };
+            hello.name[..11].copy_from_slice(b"example.com");
+            entries.push(hello);
+
+            entries.push(r2o_datapath::flow_journal::R2oFlowJournalEntry {
+                at_ns: 101,
+                key,
+                kind: r2o_datapath::flow_journal::R2oFlowJournalKind::Suspect,
+                code: 3,
+                ttl: 63,
+                reference_ttl: 64,
+                tos: 46,
+                ip_id: 0x1234,
+                planned: 1,
+                client_shape: 1,
+                num: 1000,
+                ..r2o_datapath::flow_journal::R2oFlowJournalEntry::default()
+            });
+            entries.push(r2o_datapath::flow_journal::R2oFlowJournalEntry {
+                at_ns: 102,
+                key,
+                kind: r2o_datapath::flow_journal::R2oFlowJournalKind::PlanApplied,
+                plan_id,
+                trial_id,
+                ..r2o_datapath::flow_journal::R2oFlowJournalEntry::default()
+            });
+            entries.push(r2o_datapath::flow_journal::R2oFlowJournalEntry {
+                at_ns: 103,
+                key,
+                kind: r2o_datapath::flow_journal::R2oFlowJournalKind::PlanDone,
+                plan_id,
+                trial_id,
+                ..r2o_datapath::flow_journal::R2oFlowJournalEntry::default()
+            });
+            entries.push(r2o_datapath::flow_journal::R2oFlowJournalEntry {
+                at_ns: 104,
+                key,
+                kind: r2o_datapath::flow_journal::R2oFlowJournalKind::PlanRefused,
+                code: 5,
+                plan_id,
+                trial_id,
+                ..r2o_datapath::flow_journal::R2oFlowJournalEntry::default()
+            });
+            entries.push(r2o_datapath::flow_journal::R2oFlowJournalEntry {
+                at_ns: 105,
+                key,
+                kind: r2o_datapath::flow_journal::R2oFlowJournalKind::PlanUnsent,
+                code: 1,
+                plan_id,
+                trial_id,
+                ..r2o_datapath::flow_journal::R2oFlowJournalEntry::default()
+            });
+            entries.push(r2o_datapath::flow_journal::R2oFlowJournalEntry {
+                at_ns: 106,
+                key,
+                kind: r2o_datapath::flow_journal::R2oFlowJournalKind::PlanDamaged,
+                code: 4,
+                plan_id,
+                trial_id,
+                ..r2o_datapath::flow_journal::R2oFlowJournalEntry::default()
+            });
+            entries.push(r2o_datapath::flow_journal::R2oFlowJournalEntry {
+                at_ns: 107,
+                key,
+                kind: r2o_datapath::flow_journal::R2oFlowJournalKind::Exchange,
+                code: 22,
+                tos: 0x0f,
+                num: 500,
+                server_hello: true,
+                planned: 2,
+                ..r2o_datapath::flow_journal::R2oFlowJournalEntry::default()
+            });
+
+            let mut output = String::new();
+            for entry in entries {
+                for (kind, body) in entry.to_v22_frames() {
+                    write!(output, "frame type={kind:04x} body=").unwrap();
+                    for byte in body {
+                        write!(output, "{byte:02x}").unwrap();
+                    }
+                    output.push('\n');
+                }
+            }
+            if let Ok(path) = std::env::var("R2O_CTLSRV_PUMP_DIFF_OUTPUT") {
+                std::fs::write(path, &output).unwrap();
+            }
+            assert_eq!(output.lines().count(), 7);
+            assert!(output.contains("frame type=0001 body=04c0000201"));
         }
 
         #[test]

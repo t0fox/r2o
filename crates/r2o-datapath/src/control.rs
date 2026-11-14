@@ -2622,6 +2622,15 @@ fn shape_family_slot(family: u8) -> usize {
 /// События, формат которых в v22 совпадает с R2O. Остальные номера v22
 /// либо транслируются, либо не отправляются C-контроллеру вовсе.
 fn v22_event_frames(kind: u16, body: &[u8]) -> Vec<(u16, Vec<u8>)> {
+    if kind == control::EVENT_R2O_JOURNAL_ENTRY {
+        let frame = Frame {
+            kind,
+            body: body.to_vec(),
+        };
+        return crate::flow_journal::R2oFlowJournalEntry::from_event_frame(&frame)
+            .map(|entry| entry.to_v22_frames())
+            .unwrap_or_default();
+    }
     match kind {
         control::EVENT_HELLO
         | control::EVENT_STATS
