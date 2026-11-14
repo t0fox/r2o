@@ -10,6 +10,23 @@ const ACK_TIMEOUT_MS: i32 = 1000;
 const ACK_ATTEMPTS: usize = 8;
 const RECEIVE_CAPACITY: usize = 1 << 17;
 
+/// C `d2k_nfq_recv` (`datapath/nfq.c:254-274`): EAGAIN/EWOULDBLOCK/EINTR —
+/// пустое ожидание (0), ENOBUFS — потеря пакета (-2), иное — ошибка (-1).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum R2oNfqRecvOutcome {
+    Wait,
+    Lost,
+    Io,
+}
+
+fn r2o_nfq_recv_error_outcome(error: &io::Error) -> R2oNfqRecvOutcome {
+    match error.raw_os_error() {
+        Some(libc::EAGAIN) | Some(libc::EWOULDBLOCK) | Some(libc::EINTR) => R2oNfqRecvOutcome::Wait,
+        Some(libc::ENOBUFS) => R2oNfqRecvOutcome::Lost,
+        _ => R2oNfqRecvOutcome::Io,
+    }
+}
+
 fn set_receive_buffer_with(
     requested: i32,
     force_option: Option<i32>,
@@ -234,7 +251,12 @@ impl QueueSocket {
         }
         if ready < 0 {
             let error = io::Error::last_os_error();
-            return Err(ReceiveError::Wait(error));
+            // C `d2k_nfq_recv` на EINTR отдаёт 0 (пустое ожидание);
+            // остальные ошибки recv — -1, то есть сброс TCP-удержаний.
+            if error.kind() == io::ErrorKind::Interrupted {
+                return Ok((false, false));
+            }
+            return Err(ReceiveError::Io(error));
         }
         let extra_ready = extra_fd.is_some()
             && descriptors[1].revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0;
@@ -242,7 +264,7 @@ impl QueueSocket {
             if descriptors[0].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) == 0 {
                 return Ok((false, extra_ready));
             }
-            return Err(ReceiveError::Wait(io::Error::other(
+            return Err(ReceiveError::Io(io::Error::other(
                 "NFQUEUE socket сообщил ошибку без готового пакета",
             )));
         }
@@ -259,12 +281,13 @@ impl QueueSocket {
             return Ok((true, extra_ready));
         }
         let error = io::Error::last_os_error();
-        match error.raw_os_error() {
-            Some(libc::ENOBUFS) => {
+        match r2o_nfq_recv_error_outcome(&error) {
+            R2oNfqRecvOutcome::Wait => Ok((false, extra_ready)),
+            R2oNfqRecvOutcome::Lost => {
                 record_lost_packet(&self.lost_packets);
                 Err(ReceiveError::LostPackets)
             }
-            _ => Err(ReceiveError::Io(error)),
+            R2oNfqRecvOutcome::Io => Err(ReceiveError::Io(error)),
         }
     }
 
@@ -459,10 +482,30 @@ fn recv_once(fd: libc::c_int, bytes: &mut [u8]) -> io::Result<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::QueueSocket;
+    use super::{QueueSocket, R2oNfqRecvOutcome, r2o_nfq_recv_error_outcome};
     use std::cell::Cell;
+    use std::io;
     use std::io::ErrorKind;
     use std::os::fd::OwnedFd;
+
+    #[test]
+    fn nfq_recv_error_mapping_matches_c() {
+        for errno in [libc::EAGAIN, libc::EWOULDBLOCK, libc::EINTR] {
+            assert_eq!(
+                r2o_nfq_recv_error_outcome(&io::Error::from_raw_os_error(errno)),
+                R2oNfqRecvOutcome::Wait,
+                "errno {errno}"
+            );
+        }
+        assert_eq!(
+            r2o_nfq_recv_error_outcome(&io::Error::from_raw_os_error(libc::ENOBUFS)),
+            R2oNfqRecvOutcome::Lost
+        );
+        assert_eq!(
+            r2o_nfq_recv_error_outcome(&io::Error::from_raw_os_error(libc::EBADF)),
+            R2oNfqRecvOutcome::Io
+        );
+    }
 
     fn test_socket() -> QueueSocket {
         let fd: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
