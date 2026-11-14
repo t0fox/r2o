@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 466 | 226 | 0 | 0 |
-| datapath-core | 400 | 297 | 103 | 0 | 0 |
+| datapath-core | 400 | 298 | 102 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1392** | **590** | **0** | **0** |
+| **Итого** | **1982** | **1393** | **589** | **0** | **0** |
 
-Это не оценка паритета: 590 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 589 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1392 / P 590 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1393 / P 589 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 466 | 226 | 0 | 0 |
-| datapath-core | 400 | 297 | 103 | 0 | 0 |
+| datapath-core | 400 | 298 | 102 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1392** | **590** | **0** | **0** |
+| **Итого** | **1982** | **1393** | **589** | **0** | **0** |
 
 
 ---
@@ -4211,7 +4211,7 @@ R2O: `main.rs` (`r2o_release_udp_batch*`, `r2o_udp_handle_late_tail`),
 | `d2k_udp_out_owned_emit` | 417-421 | 5 | вердикт головы: ошибка → ACCEPT + busy, иначе DROP | `r2o_udp_hold.rs` `R2oUdpDeferredResends::r2o_flush` | **E*** | C: busy → `follow->busy++`, затем ровно один вердикт `err?ACCEPT:DROP`. Rust `r2o_flush` выдаёт DROP при успешном raw, ACCEPT при busy/постоянном отказе, busy считается в `resend_busy`; тест `deferred_owned_emit_выдаёт_accept_при_сбое_и_drop_при_успехе_как_c` (успех→DROP, ENOBUFS→ACCEPT+busy, EACCES→ACCEPT, ошибка вердикта → **одна** попытка). **Исправлено расхождение:** Rust повторял ACCEPT после ошибки DROP, C этого не делает. **Ограничение:** C возвращает 0/-1 и владеет ID в очереди, Rust агрегирует `verdict_failed`/`busy`. |
 | `refused_flow` (static) | 425-430 | 6 | учесть отказ и залогировать первые N | `r2o_udp_out_batch` (`main.rs`) | **P** | C `nth = o->follow ? ++o->follow->refused : 1`; если `resend_failed && nth<=D2K_UDP_REFUSED_LOG` — вызвать лог. Rust считает отказы в `r2o_udp_out_batch`; лимит/текст логирования иные. |
 | `out_verdict` (static) | 432-435 | 4 | адаптер вердикта `out_tail` | замыкание (`main.rs`) | **E** | C `out_tail *c=ctx; return c->o->verdict(c->o->ctx,id,verdict)`. Rust передаёт замыкание вердикта; тонкий адаптер, те же id/verdict. |
-| `d2k_udp_out_neutral` | 437-440 | 4 | нейтральный поток: mark 0/neutral_mark или не маршрутизируется | `r2o_udp_packet_is_neutral` (`main.rs:88`) | **P** | C `if (mark==0 \|\| (o && o->neutral_mark && mark==o->neutral_mark)) return 1; return o && o->routed && !o->routed(o->routes,ipver,mark);`. Rust `r2o_udp_packet_is_neutral(route_gate,probe_mark,mark,packet)` использует policy/route gate; API иной, смысл «не наш маршрут/нейтральный mark» сохранён. |
+| `d2k_udp_out_neutral` | 437-440 | 4 | нейтральный поток: mark 0/neutral_mark или не маршрутизируется | `main.rs:123 r2o_udp_packet_is_neutral` | **E*** | C: `mark==0 || (neutral_mark && mark==neutral_mark)` → 1, иначе `routed && !routed(routes,ipver,mark)`. Rust: mark 0 или `probe_mark` → true, иначе route gate по family/policy/правилам. Тесты `метка_зонда_требует_ненулевого_точного_совпадения` и C/Rust differential `test-udp-path-differential.sh` (нейтральная метка → follow, non-neutral → 0). **Ограничение:** Rust принимает `probe_mark` вместо `neutral_mark`, route gate имеет policy/rule-источники; для mark 0/зонда и маршрутизируемой метки поведение совпало. |
 | `d2k_udp_out_batch` | 442-473 | 32 | выдать пачку: may[], defer, release_batch, marked tail log, failed flow, follow_put | `main.rs` `r2o_udp_out_batch` | **P** | **Ветви сверены:** C `!o\|\|!verdict\|\|!b\|\|!count\|\|count>MAX` → 0; `out_tail`; `can=can_resend&&send_now`; may[i]=neutral; marked_tail при i>0 && !may; defer_op; `release_batch(...,out_verdict,out_resend)`; marked tail → `o->marked`; failed_pkt → refused_flow; follow_put головы, noted/failed. Rust `r2o_udp_out_batch` те же шаги; отдельной функции нет. |
 | `d2k_udp_out_late` | 475-509 | 35 | поздний хвост: find, failed → 0; neutral → defer/0; resend с owned/deferred; verdict DROP/ACCEPT | `main.rs` late UDP tail | **P** | **Ветви сверены:** C `!o\|\|!verdict\|\|!can_resend\|\|!send_now\|\|!follow` → 0; `follow_find`; `!e\|\|e->failed` → 0; `!neutral` → noted/marked, при at_ns+defer отложить ACCEPT, иначе 0; `out_resend` с at=deferred_at; rr==1 → 1 (очередь даст вердикт), rr==0 → DROP, иначе ACCEPT; failed → e->failed/refused_flow; `verdict`; 1. Rust `r2o_udp_out_late` те же ветви; API/структура иные. |
 
