@@ -5,6 +5,10 @@
 # netns: flow1 при nf_conntrack_acct=0 (запись без счётчиков, rc=2), flow2 при
 # acct=1 (rc=0 со счётчиками). Без root скрипт переисполняется через
 # `unshare -Urn`.
+#
+# ВАЖНО: все C/Rust бинарники собираются ДО создания conntrack-записей.
+# Иначе cargo test --no-run занимает десятки секунд, UDP-записи истекают
+# (nf_conntrack_udp_timeout=30) и Rust видит ENOENT вместо NoCounters/Info.
 set -eu
 
 if [ -z "${R2O_IN_USERNS:-}" ] && [ "$(id -u)" -ne 0 ]; then
@@ -19,10 +23,16 @@ DONOR_DATAPATH=${R2O_DONOR_DATAPATH:-"$D2O_ROOT/datapath"}
 CC=${CC:-cc}
 CARGO=${CARGO:-cargo}
 TMPDIR=${TMPDIR:-"${ROOT%/r2o}/r2o-tooling/tmp"}
+# Уникальные порты на прогон: при запуске от root старые записи в общем netns
+# не должны переиспользоваться новым flow.
+PORT_BASE=${R2O_CT_LIVE_PORT_BASE:-$((40000 + (($$ % 4000) / 4) * 4))}
 CHILD_PID=
 CHILD_NS=
 FLOW1=
 FLOW2=
+ACCT_SAVED=
+UDP_TIMEOUT_SAVED=
+UDP_STREAM_SAVED=
 
 if [ "$ACTUAL_D2O_SHA" != "$EXPECTED_D2O_SHA" ]; then
     printf 'Expected D2O %s, got %s\n' "$EXPECTED_D2O_SHA" "$ACTUAL_D2O_SHA" >&2
@@ -39,9 +49,53 @@ cleanup() {
     fi
     nft delete table ip r2oct 2>/dev/null || true
     ip link del v0 2>/dev/null || true
+    restore_sysctl /proc/sys/net/netfilter/nf_conntrack_acct "$ACCT_SAVED"
+    restore_sysctl /proc/sys/net/netfilter/nf_conntrack_udp_timeout "$UDP_TIMEOUT_SAVED"
+    restore_sysctl /proc/sys/net/netfilter/nf_conntrack_udp_timeout_stream "$UDP_STREAM_SAVED"
     rm -rf -- "$TEMP"
 }
 trap cleanup EXIT HUP INT TERM
+
+restore_sysctl() {
+    file=$1
+    value=$2
+    if [ -n "$value" ]; then
+        printf '%s\n' "$value" >"$file" 2>/dev/null || true
+    fi
+}
+
+save_sysctl() {
+    file=$1
+    if [ -r "$file" ]; then
+        cat "$file" 2>/dev/null || true
+    fi
+}
+
+# 1. Собрать ВСЕ бинарники до создания conntrack-записей.
+cd "$ROOT"
+"$CC" -std=c99 -O2 -Wall -Wextra -Werror \
+    -I"$DONOR_DATAPATH/include" \
+    -o "$TEMP/d2o-ct-live" \
+    "$ROOT/crates/r2o-datapath/tests/d2o_ct_live_differential.c" \
+    "$DONOR_DATAPATH/ctq.c" "$DONOR_DATAPATH/nl.c"
+
+"$CARGO" test --manifest-path "$ROOT/Cargo.toml" --locked --offline \
+    -p r2o-datapath --test d2o_conntrack --no-run >"$TEMP/build.log" 2>&1
+RUST_BIN=$(sed -n 's/.*Executable tests\/d2o_conntrack.rs (\(.*\))/\1/p' \
+    "$TEMP/build.log" | tail -1)
+if [ -z "$RUST_BIN" ]; then
+    echo "не найден тестовый бинарник d2o_conntrack" >&2
+    cat "$TEMP/build.log" >&2
+    exit 2
+fi
+case "$RUST_BIN" in
+    /*) ;;
+    *) RUST_BIN="$ROOT/$RUST_BIN" ;;
+esac
+[ -x "$RUST_BIN" ] || {
+    echo "тестовый бинарник не исполняется: $RUST_BIN" >&2
+    exit 2
+}
 
 create_flow() {
     port_rx=$1
@@ -94,12 +148,23 @@ setup_flows() {
     nft add chain ip r2oct out "{ type filter hook output priority -200 ; }"
     nft add rule ip r2oct out ct state new accept
 
+    # 2. Записи не должны истечь между C и Rust (по умолчанию 30/120 с).
+    ACCT_SAVED=$(save_sysctl /proc/sys/net/netfilter/nf_conntrack_acct)
+    UDP_TIMEOUT_SAVED=$(save_sysctl /proc/sys/net/netfilter/nf_conntrack_udp_timeout)
+    UDP_STREAM_SAVED=$(save_sysctl /proc/sys/net/netfilter/nf_conntrack_udp_timeout_stream)
+    if [ -w /proc/sys/net/netfilter/nf_conntrack_udp_timeout ]; then
+        echo 300 >/proc/sys/net/netfilter/nf_conntrack_udp_timeout
+    fi
+    if [ -w /proc/sys/net/netfilter/nf_conntrack_udp_timeout_stream ]; then
+        echo 300 >/proc/sys/net/netfilter/nf_conntrack_udp_timeout_stream
+    fi
+
     echo 0 > /proc/sys/net/netfilter/nf_conntrack_acct
-    create_flow 39010 39011 || return 1
+    create_flow "$((PORT_BASE + 0))" "$((PORT_BASE + 1))" || return 1
     echo 1 > /proc/sys/net/netfilter/nf_conntrack_acct
-    create_flow 39012 39013 || return 1
-    FLOW1="10.1.1.1 39011 10.1.1.2 39010"
-    FLOW2="10.1.1.1 39013 10.1.1.2 39012"
+    create_flow "$((PORT_BASE + 2))" "$((PORT_BASE + 3))" || return 1
+    FLOW1="10.1.1.1 $((PORT_BASE + 1)) 10.1.1.2 $((PORT_BASE + 0))"
+    FLOW2="10.1.1.1 $((PORT_BASE + 3)) 10.1.1.2 $((PORT_BASE + 2))"
     return 0
 }
 
@@ -110,18 +175,11 @@ else
     echo "live flow phase skipped: veth/nsenter/nft unavailable" >&2
 fi
 
-"$CC" -std=c99 -O2 -Wall -Wextra -Werror \
-    -I"$DONOR_DATAPATH/include" \
-    -o "$TEMP/d2o-ct-live" \
-    "$ROOT/crates/r2o-datapath/tests/d2o_ct_live_differential.c" \
-    "$DONOR_DATAPATH/ctq.c" "$DONOR_DATAPATH/nl.c"
+# 3. C и Rust запускаются сразу друг за другом, без компиляции между ними.
 "$TEMP/d2o-ct-live" >"$TEMP/c.out"
-
 R2O_CT_LIVE_DIFF_OUTPUT="$TEMP/rust.out" \
-    "$CARGO" test --manifest-path "$ROOT/Cargo.toml" --locked --offline \
-    -p r2o-datapath --test d2o_conntrack \
-    -- --ignored --exact ct_live_probe_and_query_match_d2o \
-    >"$TEMP/cargo.log" 2>&1
+    "$RUST_BIN" --ignored --exact ct_live_probe_and_query_match_d2o \
+    >"$TEMP/rust.log" 2>&1
 
 if [ "${R2O_SHOW_OUTPUT:-0}" = 1 ]; then
     cat "$TEMP/c.out"
