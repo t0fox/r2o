@@ -56,7 +56,15 @@ pub fn r2o_tls_client_connection(
     wire_len: Option<usize>,
     _roots: rustls::RootCertStore,
 ) -> Result<rustls::ClientConnection, String> {
-    r2o_tls_client_connection_with_alpn(name, tls12, wire_len, _roots, &[b"http/1.1".to_vec()])
+    // C `ch12_build` (`tls12.c`) не добавляет ALPN вовсе: TLS 1.2-сессия
+    // донора — только ECDHE+AES128-GCM и SNI. TLS 1.3-путь по-прежнему
+    // предлагает `http/1.1` (`d2k_tls_connect`).
+    let alpn = if tls12 {
+        Vec::new()
+    } else {
+        vec![b"http/1.1".to_vec()]
+    };
+    r2o_tls_client_connection_with_alpn(name, tls12, wire_len, _roots, &alpn)
 }
 
 /// Создать измерительное соединение с ALPN, снятым с клиентского приветствия.
@@ -719,7 +727,7 @@ fn push_u16(output: &mut Vec<u8>, value: u16) {
 
 #[cfg(test)]
 mod alpn_tests {
-    use super::{alpn_is_http, r2o_tls_client_hello_non_http_alpn};
+    use super::{alpn_is_http, r2o_tls_client_connection, r2o_tls_client_hello_non_http_alpn};
 
     #[test]
     fn alpn_is_http_matches_c() {
@@ -769,6 +777,20 @@ mod alpn_tests {
         record.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
         record.extend_from_slice(&body);
         record
+    }
+
+    #[test]
+    fn tls12_client_hello_omits_alpn_like_donor_ch12_build() {
+        let mut connection =
+            r2o_tls_client_connection("example.test", true, None, rustls::RootCertStore::empty())
+                .unwrap();
+        let mut wire = Vec::new();
+        connection.write_tls(&mut wire).unwrap();
+        assert_eq!(
+            r2o_tls_client_hello_non_http_alpn(&wire),
+            Some(Vec::new()),
+            "C ch12_build не добавляет ALPN"
+        );
     }
 
     #[test]
