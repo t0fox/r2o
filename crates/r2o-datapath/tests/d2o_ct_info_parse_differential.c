@@ -71,6 +71,15 @@ static void run(const char *name, const uint8_t *buffer, size_t length, uint32_t
                info.tcp_state_known, info.tcp_state);
     }
     printf("\n");
+
+    uint64_t orig = 0, reply = 0;
+    int counters_rc = d2k_ct_counters_parse(buffer, length, seq, &orig, &reply);
+    printf("counters_parse %s rc=%d", name, counters_rc);
+    if (counters_rc == 0) {
+        printf(" orig=%llu reply=%llu",
+               (unsigned long long)orig, (unsigned long long)reply);
+    }
+    printf("\n");
 }
 
 int main(void) {

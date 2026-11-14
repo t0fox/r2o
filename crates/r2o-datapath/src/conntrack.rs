@@ -206,6 +206,30 @@ pub fn r2o_ct_info_parse(bytes: &[u8], sequence: u32) -> R2oConntrackInfoParse {
     R2oConntrackInfoParse::Error
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct R2oConntrackCounters {
+    pub parsed: R2oConntrackInfoParse,
+    pub original_packets: u64,
+    pub reply_packets: u64,
+}
+
+/// C `d2k_ct_counters_parse` (`datapath/ctq.c:158-167`): сохранить код
+/// `info_parse` (включая 1/2) и скопировать счётчики только при rc=0.
+pub fn r2o_ct_counters_parse(bytes: &[u8], sequence: u32) -> R2oConntrackCounters {
+    match r2o_ct_info_parse(bytes, sequence) {
+        R2oConntrackInfoParse::Info(info) => R2oConntrackCounters {
+            parsed: R2oConntrackInfoParse::Info(info),
+            original_packets: info.original_packets,
+            reply_packets: info.reply_packets,
+        },
+        other => R2oConntrackCounters {
+            parsed: other,
+            original_packets: 0,
+            reply_packets: 0,
+        },
+    }
+}
+
 pub fn decode_info(bytes: &[u8], sequence: u32) -> Option<R2oConntrackInfo> {
     decode_entry(bytes, sequence).and_then(|entry| entry.info)
 }
@@ -371,11 +395,24 @@ impl R2oConntrackClient {
     }
 
     pub fn query(&mut self, tuple: &R2oConntrackTuple) -> Option<R2oConntrackInfo> {
+        match self.query_info(tuple) {
+            R2oConntrackInfoParse::Info(info) => Some(info),
+            _ => None,
+        }
+    }
+
+    /// C `d2k_ct_query_info_fd` (`datapath/ctq.c:169-186`): вернуть точный
+    /// код -1/0/1/2, а не только успешный `info`.
+    pub fn query_info(&mut self, tuple: &R2oConntrackTuple) -> R2oConntrackInfoParse {
         self.sequence = self.sequence.wrapping_add(1).max(1);
         let sequence = self.sequence;
-        let request = encode_get(sequence, tuple)?;
-        self.send(&request).ok()?;
-        self.receive_info(sequence)
+        let Some(request) = encode_get(sequence, tuple) else {
+            return R2oConntrackInfoParse::Error;
+        };
+        if self.send(&request).is_err() {
+            return R2oConntrackInfoParse::Error;
+        }
+        self.receive_info_parse(sequence)
     }
 
     pub fn query_entry(&mut self, tuple: &R2oConntrackTuple) -> Option<R2oConntrackEntry> {
@@ -483,9 +520,9 @@ impl R2oConntrackClient {
         None
     }
 
-    /// C `d2k_ct_query_info_fd` (`datapath/ctq.c:169-186`): до 8 recv, свой
-    /// seq, коды -1/0/1/2; здесь нужен только успешный `info`.
-    fn receive_info(&self, sequence: u32) -> Option<R2oConntrackInfo> {
+    /// C `d2k_ct_query_info_fd` (`datapath/ctq.c:169-186`): до 8 recv,
+    /// свой seq, коды -1/0/1/2.
+    fn receive_info_parse(&self, sequence: u32) -> R2oConntrackInfoParse {
         let mut response = [0_u8; 4096];
         for _ in 0..8 {
             let read = unsafe {
@@ -497,19 +534,18 @@ impl R2oConntrackClient {
                 )
             };
             if read <= 0 {
-                return None;
+                return R2oConntrackInfoParse::Error;
             }
             let response = &response[..read as usize];
             if !MessageIter::new(response).any(|message| message.sequence == sequence) {
                 continue;
             }
-            match r2o_ct_info_parse(response, sequence) {
-                R2oConntrackInfoParse::Info(info) => return Some(info),
-                R2oConntrackInfoParse::Reply | R2oConntrackInfoParse::NoCounters => return None,
-                R2oConntrackInfoParse::Error => continue,
+            let parsed = r2o_ct_info_parse(response, sequence);
+            if parsed != R2oConntrackInfoParse::Error {
+                return parsed;
             }
         }
-        None
+        R2oConntrackInfoParse::Error
     }
 }
 
@@ -677,6 +713,21 @@ mod tests {
                 ));
             }
             output.push('\n');
+            let counters = super::r2o_ct_counters_parse(&buffer, sequence);
+            let counters_rc = match counters.parsed {
+                R2oConntrackInfoParse::Info(_) => 0,
+                R2oConntrackInfoParse::Reply => 1,
+                R2oConntrackInfoParse::NoCounters => 2,
+                R2oConntrackInfoParse::Error => -1,
+            };
+            output.push_str(&format!("counters_parse {name} rc={counters_rc}"));
+            if counters_rc == 0 {
+                output.push_str(&format!(
+                    " orig={} reply={}",
+                    counters.original_packets, counters.reply_packets
+                ));
+            }
+            output.push('\n');
         }
         if let Ok(path) = std::env::var("R2O_CT_INFO_DIFF_OUTPUT") {
             std::fs::write(path, &output).unwrap();
@@ -685,6 +736,41 @@ mod tests {
         assert!(output.contains("no_counters rc=2\n"));
         assert!(output.contains("reply rc=1\n"));
         assert!(output.contains("ack rc=-1\n"));
+    }
+
+    #[test]
+    fn ct_counters_parse_differential_matches_c() {
+        let mut output = String::new();
+        let cases: [(&str, Vec<u8>, u32); 5] = [
+            ("counters", ответ_conntrack_без_кортежа(7, 22, 25), 7),
+            ("wrong_seq", ответ_conntrack_без_кортежа(7, 22, 25), 8),
+            ("no_counters", ответ_conntrack_без_счётчиков(7), 7),
+            ("reply", ошибка_conntrack(7, -2), 7),
+            ("ack", ошибка_conntrack(7, 0), 7),
+        ];
+        for (name, buffer, sequence) in cases {
+            let parsed = super::r2o_ct_counters_parse(&buffer, sequence);
+            let rc = match parsed.parsed {
+                R2oConntrackInfoParse::Info(_) => 0,
+                R2oConntrackInfoParse::Reply => 1,
+                R2oConntrackInfoParse::NoCounters => 2,
+                R2oConntrackInfoParse::Error => -1,
+            };
+            output.push_str(&format!("counters_parse {name} rc={rc}"));
+            if rc == 0 {
+                output.push_str(&format!(
+                    " orig={} reply={}",
+                    parsed.original_packets, parsed.reply_packets
+                ));
+            }
+            output.push('\n');
+        }
+        if let Ok(path) = std::env::var("R2O_CT_COUNTERS_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert!(output.contains("counters_parse counters rc=0 orig=22 reply=25\n"));
+        assert!(output.contains("counters_parse no_counters rc=2\n"));
+        assert!(output.contains("counters_parse reply rc=1\n"));
     }
 
     #[test]

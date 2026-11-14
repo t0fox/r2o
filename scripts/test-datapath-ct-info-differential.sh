@@ -34,5 +34,5 @@ R2O_CT_INFO_DIFF_OUTPUT="$TEMP/rust.out" \
     -- --exact >"$TEMP/cargo.log" 2>&1
 
 diff -u "$TEMP/c.out" "$TEMP/rust.out"
-printf 'cases=%s\n' "$(grep -c '^counters\|^wrong_seq\|^no_counters\|^reply\|^ack' "$TEMP/c.out")"
+printf 'cases=%s\n' "$(grep -c '^counters_parse ' "$TEMP/c.out")"
 printf 'PASS: d2k_ct_info_parse C/Rust match (D2O %s)\n' "$ACTUAL_D2O_SHA"
