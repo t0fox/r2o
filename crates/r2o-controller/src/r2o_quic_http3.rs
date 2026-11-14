@@ -173,6 +173,15 @@ pub fn r2o_quic_port_forget_all() {
     state.1 = 0;
 }
 
+/// C `d2k_udp_port_claim` (`core/meas.c:313-339`) без fd: `-1` — порт 0,
+/// `1` — порт уже занимали меньше 480 с назад, `0` — новый (записан).
+pub fn r2o_quic_udp_port_claim(port: u16) -> i32 {
+    if port == 0 {
+        return -1;
+    }
+    i32::from(r2o_quic_port_was_recently_claimed(port))
+}
+
 fn r2o_quic_port_was_recently_claimed(port: u16) -> bool {
     let state = R2O_QUIC_RECENT_PORTS_STATE
         .get_or_init(|| Mutex::new((VecDeque::with_capacity(R2O_QUIC_RECENT_PORTS), 0)));
@@ -1547,6 +1556,13 @@ mod tests {
     use std::net::SocketAddr;
     use std::time::Duration;
     use tokio::time::Instant;
+
+    #[test]
+    fn udp_port_claim_maps_zero_and_recent_ports_like_c() {
+        assert_eq!(super::r2o_quic_udp_port_claim(0), -1);
+        assert_eq!(super::r2o_quic_udp_port_claim(38_990), 0);
+        assert_eq!(super::r2o_quic_udp_port_claim(38_990), 1);
+    }
 
     #[test]
     fn quic_transport_parameters_match_c_tp_build() {
