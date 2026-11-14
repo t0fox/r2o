@@ -18809,6 +18809,12 @@ impl ControlClient {
                 if R2O_CONTROLLER_STOP.load(Ordering::Relaxed) {
                     break Ok(());
                 }
+                let dns_wall_now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                dns_health.poll(&mut dns_services, dns_wall_now);
+                dns_health.start_due(&mut dns_services, https_probe_mark);
                 if let Some(diagnostics) = diagnostics.as_mut() {
                     diagnostics.tick(|| {
                         let catalog = discovery
@@ -19081,12 +19087,6 @@ impl ControlClient {
                     }
                     dns_services_refresh = r2o_now + std::time::Duration::from_secs(30);
                 }
-                let dns_wall_now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64;
-                dns_health.poll(&mut dns_services, dns_wall_now);
-                dns_health.start_due(&mut dns_services, https_probe_mark);
                 if live_written_at.is_none_or(|last: std::time::Instant| {
                     r2o_now.saturating_duration_since(last) >= std::time::Duration::from_secs(2)
                 }) {
