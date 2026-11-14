@@ -1,9 +1,11 @@
+use crate::netlink::MessageIter;
 use r2k_core::{addr::Address, packet::PacketView};
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::time::{Duration, Instant};
 
 const R2O_ROUTE_MTU_CACHE_CAPACITY: usize = 16;
 const R2O_RAW_MTU_FLOOR: usize = 576;
@@ -56,6 +58,8 @@ pub struct RawSocket {
     /// исчезнут. C открывает его лениво при первом фрагменте и никогда не
     /// откатывается на обычный сокет.
     fragment_fd: RefCell<Option<OwnedFd>>,
+    /// C `d2k_raw.fragments6`: AF_PACKET sender для IPv6-фрагментов.
+    ip6_frag: RefCell<R2oIp6FragSender>,
 }
 
 /// C `d2k_send_nosig`: Linux глушит SIGPIPE флагом MSG_NOSIGNAL.
@@ -105,6 +109,7 @@ impl RawSocket {
             egress_mtu: Cell::new(None),
             route_mtu_cache: RefCell::new(R2oRouteMtuCache::default()),
             fragment_fd: RefCell::new(None),
+            ip6_frag: RefCell::new(R2oIp6FragSender::default()),
         })
     }
 
@@ -188,6 +193,11 @@ impl RawSocket {
                 io::ErrorKind::Unsupported,
                 "Linux IP_HDRINCL переписывает нулевой IPv4 ID",
             ));
+        }
+        // C `d2k_raw_send`: IPv6-фрагменты уходят AF_PACKET-отправителем
+        // (`d2k_ip6frag_send`), а не AF_INET6/IPPROTO_RAW.
+        if outbound.family == 6 && outbound.fragment {
+            return self.ip6_frag.borrow_mut().r2o_send(packet, self.mark);
         }
         // C `d2k_raw_prepare`: фрагменты IPv4 уходят отдельным сокетом с
         // IP_NODEFRAG. Откат на обычный сокет запрещён — иначе ядро соберёт
@@ -750,6 +760,472 @@ fn r2o_cached_fragment_fd(
     Ok(raw_fd)
 }
 
+const R2O_NETLINK_ROUTE_PROTO: i32 = 0;
+const R2O_NLMSG_ERROR: u16 = 2;
+const R2O_NLMSG_DONE: u16 = 3;
+const R2O_NLM_F_REQUEST: u16 = 1;
+const R2O_NLM_F_DUMP: u16 = 0x300;
+const R2O_RTM_NEWROUTE: u16 = 24;
+const R2O_RTM_GETROUTE: u16 = 26;
+const R2O_RTM_NEWNEIGH: u16 = 28;
+const R2O_RTM_GETNEIGH: u16 = 30;
+const R2O_RTMSG_LEN: usize = 12;
+const R2O_NDMSG_LEN: usize = 12;
+const R2O_RTN_UNICAST: u8 = 1;
+const R2O_RTN_LOCAL: u8 = 2;
+const R2O_RTA_DST: u16 = 1;
+const R2O_RTA_SRC: u16 = 2;
+const R2O_RTA_OIF: u16 = 4;
+const R2O_RTA_GATEWAY: u16 = 5;
+const R2O_RTA_MARK: u16 = 16;
+const R2O_NDA_DST: u16 = 1;
+const R2O_NDA_LLADDR: u16 = 2;
+const R2O_NUD_VALID: u16 = 0x02 | 0x04 | 0x08 | 0x10 | 0x80;
+const R2O_ETH_P_IPV6: u16 = 0x86dd;
+const R2O_ARPHRD_ETHER: u16 = 1;
+const R2O_F6_QUERY_TIMEOUT: Duration = Duration::from_millis(200);
+const R2O_F6_NEIGH_BATCHES: usize = 64;
+const R2O_F6_CACHE_LIFETIME: Duration = Duration::from_secs(1);
+
+/// C `d2k_ip6frag_sender`: AF_PACKET + route/neigh, кеш fd/mark/src/dst 1 с.
+struct R2oIp6FragSender {
+    fd: Option<OwnedFd>,
+    mtu: usize,
+    src: [u8; 16],
+    dst: [u8; 16],
+    mark: u32,
+    expires: Option<Instant>,
+    next: libc::sockaddr_ll,
+}
+
+impl Default for R2oIp6FragSender {
+    fn default() -> Self {
+        Self {
+            fd: None,
+            mtu: 0,
+            src: [0; 16],
+            dst: [0; 16],
+            mark: 0,
+            expires: None,
+            next: unsafe { std::mem::zeroed() },
+        }
+    }
+}
+
+impl std::fmt::Debug for R2oIp6FragSender {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("R2oIp6FragSender")
+            .field("fd", &self.fd.as_ref().map(AsRawFd::as_raw_fd))
+            .field("mtu", &self.mtu)
+            .field("mark", &self.mark)
+            .field("expires", &self.expires)
+            .finish()
+    }
+}
+
+impl R2oIp6FragSender {
+    /// C `d2k_ip6frag_prepare` + `d2k_ip6frag_send`.
+    fn r2o_send(&mut self, packet: &[u8], mark: u32) -> io::Result<()> {
+        self.r2o_prepare(packet, mark)?;
+        let Some(fd) = self.fd.as_ref() else {
+            return Err(io::Error::from_raw_os_error(libc::EBADF));
+        };
+        let result = loop {
+            let sent = unsafe {
+                libc::sendto(
+                    fd.as_raw_fd(),
+                    packet.as_ptr().cast(),
+                    packet.len(),
+                    r2o_raw_send_flags(),
+                    &self.next as *const libc::sockaddr_ll as *const libc::sockaddr,
+                    std::mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
+                )
+            };
+            if sent >= 0 {
+                break if sent as usize == packet.len() {
+                    Ok(())
+                } else {
+                    Err(io::Error::from_raw_os_error(libc::EIO))
+                };
+            }
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EINTR) {
+                break Err(error);
+            }
+        };
+        if result.is_err() {
+            self.expires = None;
+        }
+        result
+    }
+
+    fn r2o_prepare(&mut self, packet: &[u8], mark: u32) -> io::Result<()> {
+        if packet.len() < 48
+            || packet[0] >> 4 != 6
+            || packet[6] != 44
+            || packet.len() != 40 + usize::from(u16::from_be_bytes([packet[4], packet[5]]))
+        {
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
+        let now = Instant::now();
+        let mut src = [0_u8; 16];
+        src.copy_from_slice(&packet[8..24]);
+        let mut dst = [0_u8; 16];
+        dst.copy_from_slice(&packet[24..40]);
+        if self.fd.is_some()
+            && self.expires.is_some_and(|expires| now < expires)
+            && self.mark == mark
+            && self.src == src
+            && self.dst == dst
+        {
+            return if packet.len() <= self.mtu {
+                Ok(())
+            } else {
+                Err(io::Error::from_raw_os_error(libc::EMSGSIZE))
+            };
+        }
+        self.expires = None;
+
+        let (ifindex, gateway) = r2o_f6_route(&src, &dst, mark)?;
+        if self.fd.is_none() {
+            self.fd = Some(r2o_open_ipv6_fragment_socket()?);
+        }
+        let fd = self.fd.as_ref().expect("fd создан выше");
+        // C: SO_MARK ставится безусловно, включая mark=0.
+        set_option(fd.as_raw_fd(), libc::SOL_SOCKET, libc::SO_MARK, &mark)?;
+
+        let name = r2o_if_indextoname(ifindex)?;
+        let flags_buf = r2o_ioctl_ifreq(&name, libc::SIOCGIFFLAGS as libc::c_ulong)?;
+        let flags = i16::from_ne_bytes([flags_buf[16], flags_buf[17]]);
+        if flags & libc::IFF_UP as i16 == 0 {
+            return Err(io::Error::from_raw_os_error(libc::ENETDOWN));
+        }
+        let mtu_buf = r2o_ioctl_ifreq(&name, libc::SIOCGIFMTU as libc::c_ulong)?;
+        let mtu = i32::from_ne_bytes([mtu_buf[16], mtu_buf[17], mtu_buf[18], mtu_buf[19]]);
+        if mtu < 1280 || packet.len() > mtu as usize {
+            return Err(io::Error::from_raw_os_error(libc::EMSGSIZE));
+        }
+        self.mtu = mtu as usize;
+        let hw_buf = r2o_ioctl_ifreq(&name, libc::SIOCGIFHWADDR as libc::c_ulong)?;
+        let hw_family = u16::from_ne_bytes([hw_buf[16], hw_buf[17]]);
+
+        let mut next: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
+        next.sll_family = libc::AF_PACKET as libc::sa_family_t;
+        next.sll_protocol = R2O_ETH_P_IPV6.to_be();
+        next.sll_ifindex = ifindex as i32;
+        if hw_family == R2O_ARPHRD_ETHER && flags & libc::IFF_NOARP as i16 == 0 {
+            let mac = r2o_f6_neighbor(ifindex, &gateway)?;
+            next.sll_addr[..6].copy_from_slice(&mac);
+            next.sll_halen = 6;
+        } else if flags & (libc::IFF_LOOPBACK | libc::IFF_POINTOPOINT | libc::IFF_NOARP) as i16 == 0
+        {
+            return Err(io::Error::from_raw_os_error(libc::EAFNOSUPPORT));
+        }
+
+        self.next = next;
+        self.src = src;
+        self.dst = dst;
+        self.mark = mark;
+        self.expires = Some(now + R2O_F6_CACHE_LIFETIME);
+        Ok(())
+    }
+}
+
+fn r2o_open_ipv6_fragment_socket() -> io::Result<OwnedFd> {
+    let protocol = i32::from(R2O_ETH_P_IPV6.to_be());
+    let raw_fd = unsafe {
+        libc::socket(
+            libc::AF_PACKET,
+            libc::SOCK_DGRAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+            protocol,
+        )
+    };
+    if raw_fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(raw_fd) })
+}
+
+fn r2o_open_route_netlink() -> io::Result<OwnedFd> {
+    let raw_fd = unsafe {
+        libc::socket(
+            libc::AF_NETLINK,
+            libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+            R2O_NETLINK_ROUTE_PROTO,
+        )
+    };
+    if raw_fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+    let timeout = libc::timeval {
+        tv_sec: 0,
+        tv_usec: R2O_F6_QUERY_TIMEOUT.as_micros() as libc::suseconds_t,
+    };
+    let result = unsafe {
+        libc::setsockopt(
+            fd.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVTIMEO,
+            (&timeout as *const libc::timeval).cast(),
+            std::mem::size_of_val(&timeout) as libc::socklen_t,
+        )
+    };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(fd)
+}
+
+fn r2o_push_rtattr(message: &mut Vec<u8>, kind: u16, value: &[u8]) {
+    let length = 4 + value.len();
+    message.extend_from_slice(&(length as u16).to_ne_bytes());
+    message.extend_from_slice(&kind.to_ne_bytes());
+    message.extend_from_slice(value);
+    while message.len() % 4 != 0 {
+        message.push(0);
+    }
+}
+
+fn r2o_netlink_request(header_len: usize, kind: u16, flags: u16) -> Vec<u8> {
+    let mut message = vec![0_u8; header_len];
+    message[4..6].copy_from_slice(&kind.to_ne_bytes());
+    message[6..8].copy_from_slice(&flags.to_ne_bytes());
+    message[8..12].copy_from_slice(&1_u32.to_ne_bytes());
+    message
+}
+
+fn r2o_netlink_finish(message: &mut [u8]) {
+    let length = message.len() as u32;
+    message[..4].copy_from_slice(&length.to_ne_bytes());
+}
+
+fn r2o_netlink_send(fd: &OwnedFd, request: &[u8]) -> io::Result<()> {
+    let mut kernel: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+    kernel.nl_family = libc::AF_NETLINK as libc::sa_family_t;
+    let sent = unsafe {
+        libc::sendto(
+            fd.as_raw_fd(),
+            request.as_ptr().cast(),
+            request.len(),
+            0,
+            &kernel as *const libc::sockaddr_nl as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t,
+        )
+    };
+    if sent == request.len() as isize {
+        Ok(())
+    } else if sent < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Err(io::Error::from_raw_os_error(libc::EIO))
+    }
+}
+
+fn r2o_netlink_recv(fd: &OwnedFd, buffer: &mut [u8]) -> io::Result<usize> {
+    let mut source: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+    let mut source_len = std::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t;
+    let received = unsafe {
+        libc::recvfrom(
+            fd.as_raw_fd(),
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            0,
+            &mut source as *mut libc::sockaddr_nl as *mut libc::sockaddr,
+            &mut source_len,
+        )
+    };
+    if received < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if source_len < std::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t
+        || source.nl_pid != 0
+    {
+        return Err(io::Error::from_raw_os_error(libc::EPROTO));
+    }
+    Ok(received as usize)
+}
+
+fn r2o_for_each_rtattr(
+    body: &[u8],
+    mut offset: usize,
+    mut visit: impl FnMut(u16, &[u8]),
+) -> io::Result<()> {
+    while offset + 4 <= body.len() {
+        let length = usize::from(u16::from_ne_bytes([body[offset], body[offset + 1]]));
+        let kind = u16::from_ne_bytes([body[offset + 2], body[offset + 3]]) & 0x3fff;
+        if length < 4 || length > body.len() - offset {
+            return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        }
+        visit(kind, &body[offset + 4..offset + length]);
+        let step = (length + 3) & !3;
+        if step > body.len() - offset {
+            break;
+        }
+        offset += step;
+    }
+    Ok(())
+}
+
+/// C `d2k_f6_route`: RTM_GETROUTE с RTA_DST/RTA_SRC/RTA_MARK.
+fn r2o_f6_route(src: &[u8; 16], dst: &[u8; 16], mark: u32) -> io::Result<(u32, [u8; 16])> {
+    let fd = r2o_open_route_netlink()?;
+    let mut request = r2o_netlink_request(16 + R2O_RTMSG_LEN, R2O_RTM_GETROUTE, R2O_NLM_F_REQUEST);
+    let route = 16;
+    request[route] = libc::AF_INET6 as u8;
+    request[route + 1] = 128;
+    request[route + 2] = 128;
+    r2o_push_rtattr(&mut request, R2O_RTA_DST, dst);
+    r2o_push_rtattr(&mut request, R2O_RTA_SRC, src);
+    r2o_push_rtattr(&mut request, R2O_RTA_MARK, &mark.to_ne_bytes());
+    r2o_netlink_finish(&mut request);
+    r2o_netlink_send(&fd, &request)?;
+
+    let mut reply = [0_u8; 8192];
+    let received = r2o_netlink_recv(&fd, &mut reply)?;
+    let mut gateway = *dst;
+    for message in MessageIter::new(&reply[..received]) {
+        if message.sequence != 1 {
+            continue;
+        }
+        if message.kind == R2O_NLMSG_ERROR {
+            if message.body.len() < 4 {
+                return Err(io::Error::from_raw_os_error(libc::EPROTO));
+            }
+            let error = i32::from_ne_bytes(message.body[..4].try_into().expect("длина проверена"));
+            return Err(io::Error::from_raw_os_error(if error < 0 {
+                error.saturating_neg()
+            } else {
+                libc::EPROTO
+            }));
+        }
+        if message.kind != R2O_RTM_NEWROUTE || message.body.len() < R2O_RTMSG_LEN {
+            continue;
+        }
+        let body = message.body;
+        if body[0] != libc::AF_INET6 as u8 {
+            break;
+        }
+        if !matches!(body[7], R2O_RTN_UNICAST | R2O_RTN_LOCAL) {
+            break;
+        }
+        let mut ifindex = 0_u32;
+        r2o_for_each_rtattr(body, R2O_RTMSG_LEN, |kind, value| match kind {
+            R2O_RTA_OIF if value.len() == 4 => {
+                ifindex = u32::from_ne_bytes(value.try_into().expect("4 байта"));
+            }
+            R2O_RTA_GATEWAY if value.len() == 16 => {
+                gateway.copy_from_slice(value);
+            }
+            _ => {}
+        })?;
+        if ifindex > 0 {
+            return Ok((ifindex, gateway));
+        }
+    }
+    Err(io::Error::from_raw_os_error(libc::ENETUNREACH))
+}
+
+/// C `d2k_f6_neighbor`: RTM_GETNEIGH dump + NDA_DST/NDA_LLADDR.
+fn r2o_f6_neighbor(ifindex: u32, gateway: &[u8; 16]) -> io::Result<[u8; 6]> {
+    let fd = r2o_open_route_netlink()?;
+    let mut request = r2o_netlink_request(
+        16 + R2O_NDMSG_LEN,
+        R2O_RTM_GETNEIGH,
+        R2O_NLM_F_REQUEST | R2O_NLM_F_DUMP,
+    );
+    let neighbor = 16;
+    request[neighbor] = libc::AF_INET6 as u8;
+    request[neighbor + 4..neighbor + 8].copy_from_slice(&(ifindex as i32).to_ne_bytes());
+    r2o_netlink_finish(&mut request);
+    r2o_netlink_send(&fd, &request)?;
+
+    let deadline = Instant::now() + R2O_F6_QUERY_TIMEOUT;
+    let mut reply = [0_u8; 8192];
+    for _ in 0..R2O_F6_NEIGH_BATCHES {
+        if Instant::now() > deadline {
+            break;
+        }
+        let received = match r2o_netlink_recv(&fd, &mut reply) {
+            Ok(received) => received,
+            Err(error)
+                if matches!(error.raw_os_error(), Some(libc::EAGAIN) | Some(libc::EINTR)) =>
+            {
+                break;
+            }
+            Err(error) => return Err(error),
+        };
+        for message in MessageIter::new(&reply[..received]) {
+            if message.sequence == 1 && matches!(message.kind, R2O_NLMSG_DONE | R2O_NLMSG_ERROR) {
+                return Err(io::Error::from_raw_os_error(libc::EHOSTUNREACH));
+            }
+            if message.sequence != 1
+                || message.kind != R2O_RTM_NEWNEIGH
+                || message.body.len() < R2O_NDMSG_LEN
+            {
+                continue;
+            }
+            let body = message.body;
+            if body[0] != libc::AF_INET6 as u8
+                || i32::from_ne_bytes(body[4..8].try_into().expect("4 байта")) != ifindex as i32
+            {
+                continue;
+            }
+            let state = u16::from_ne_bytes([body[8], body[9]]);
+            if state & R2O_NUD_VALID == 0 {
+                continue;
+            }
+            let mut dst_ok = false;
+            let mut mac = None;
+            r2o_for_each_rtattr(body, R2O_NDMSG_LEN, |kind, value| match kind {
+                R2O_NDA_DST if value.len() == 16 => dst_ok = value == gateway,
+                R2O_NDA_LLADDR if value.len() == 6 => {
+                    let mut bytes = [0_u8; 6];
+                    bytes.copy_from_slice(value);
+                    mac = Some(bytes);
+                }
+                _ => {}
+            })?;
+            if dst_ok && let Some(mac) = mac {
+                return Ok(mac);
+            }
+        }
+    }
+    Err(io::Error::from_raw_os_error(libc::EHOSTUNREACH))
+}
+
+fn r2o_if_indextoname(ifindex: u32) -> io::Result<String> {
+    let mut name = [0 as libc::c_char; libc::IF_NAMESIZE];
+    if unsafe { libc::if_indextoname(ifindex, name.as_mut_ptr()) }.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }
+        .to_string_lossy()
+        .into_owned())
+}
+
+/// `struct ifreq` для ioctl: имя и 24 байта union (флаги/MTU/HWADDR).
+fn r2o_ioctl_ifreq(name: &str, request: libc::c_ulong) -> io::Result<[u8; 40]> {
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || bytes.len() >= libc::IF_NAMESIZE {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    }
+    let raw_fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+    if raw_fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+    let mut buffer = [0_u8; 40];
+    buffer[..bytes.len()].copy_from_slice(bytes);
+    let result = unsafe { libc::ioctl(fd.as_raw_fd(), request, buffer.as_mut_ptr()) };
+    if result == 0 {
+        Ok(buffer)
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 fn set_option<T>(fd: i32, level: i32, option: i32, value: &T) -> io::Result<()> {
     let result = unsafe {
         libc::setsockopt(
@@ -946,6 +1422,7 @@ mod tests {
             egress_mtu: Cell::new(None),
             route_mtu_cache: RefCell::new(cache),
             fragment_fd: RefCell::new(None),
+            ip6_frag: RefCell::new(super::R2oIp6FragSender::default()),
         };
         let result = if scenario == "invalid" {
             socket.send_packet(&packet[..19])
@@ -1408,6 +1885,7 @@ mod tests {
             egress_mtu: Cell::new(None),
             route_mtu_cache: RefCell::new(super::R2oRouteMtuCache::default()),
             fragment_fd: RefCell::new(None),
+            ip6_frag: RefCell::new(super::R2oIp6FragSender::default()),
         }
     }
 
@@ -1496,6 +1974,74 @@ mod tests {
             std::fs::write(path, &output).unwrap();
         }
         assert!(output.contains("hit_declared_cap 1200"));
+    }
+
+    #[test]
+    fn ip6frag_route_neighbor_differential_matches_c() {
+        use std::net::Ipv6Addr;
+
+        let src = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1).octets();
+        let dst = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2).octets();
+        let mut output = String::new();
+        let route = super::r2o_f6_route(&src, &dst, 0);
+        match route {
+            Ok((ifindex, gateway)) => {
+                let ifname = super::r2o_if_indextoname(ifindex).unwrap_or_default();
+                output.push_str(&format!(
+                    "route rc=0 ifname={ifname} gateway={}\n",
+                    Ipv6Addr::from(gateway)
+                ));
+                let neighbor = super::r2o_f6_neighbor(ifindex, &gateway);
+                match neighbor {
+                    Ok(mac) => output.push_str(&format!(
+                        "neigh rc=0 mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\n",
+                        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+                    )),
+                    Err(_) => output.push_str("neigh rc=-1 mac=00:00:00:00:00:00\n"),
+                }
+            }
+            Err(_) => {
+                output.push_str("route rc=-1 ifname= gateway=::\n");
+                output.push_str("neigh rc=-1 mac=00:00:00:00:00:00\n");
+            }
+        }
+
+        let mut packet = vec![0_u8; 56];
+        packet[0] = 0x60;
+        packet[5] = 16;
+        packet[6] = 44;
+        packet[7] = 64;
+        packet[8..24].copy_from_slice(&src);
+        packet[24..40].copy_from_slice(&dst);
+        packet[40] = 17;
+        packet[43] = 1;
+        packet[44..48].copy_from_slice(&0x1234_5001_u32.to_be_bytes());
+        packet[48..50].copy_from_slice(&0x1234_u16.to_be_bytes());
+        packet[50..52].copy_from_slice(&443_u16.to_be_bytes());
+        packet[52..54].copy_from_slice(&8_u16.to_be_bytes());
+        let mut sender = super::R2oIp6FragSender::default();
+        let prepare = u8::from(sender.r2o_prepare(&packet, 0).is_err());
+        output.push_str(&format!("prepare_short rc={}\n", -(i32::from(prepare))));
+        drop(sender);
+
+        let mut long_packet = vec![0_u8; 1300];
+        long_packet[0] = 0x60;
+        long_packet[4] = 0x04;
+        long_packet[5] = 0xec;
+        long_packet[6] = 44;
+        long_packet[7] = 64;
+        long_packet[8..24].copy_from_slice(&src);
+        long_packet[24..40].copy_from_slice(&dst);
+        long_packet[40] = 17;
+        long_packet[43] = 1;
+        long_packet[44..48].copy_from_slice(&0x1234_5002_u32.to_be_bytes());
+        let mut sender = super::R2oIp6FragSender::default();
+        let prepare = u8::from(sender.r2o_prepare(&long_packet, 0).is_err());
+        output.push_str(&format!("prepare_long rc={}\n", -(i32::from(prepare))));
+        if let Ok(path) = std::env::var("R2O_IP6FRAG_ROUTE_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert!(output.contains("route rc="));
     }
 
     #[test]
