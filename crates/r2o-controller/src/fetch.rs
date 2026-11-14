@@ -1423,7 +1423,11 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
                     &mut stream,
                     options,
                     r2o_encoding,
-                    deadline,
+                    &request,
+                    // C `budget_tcp` получает тот же `deadline_ms`, что и
+                    // `read_status_rd`, и каждый повтор читает с полным
+                    // сроком, а не с остатком общего.
+                    options.deadline,
                     need,
                     r2o_http_connection_closes(parser.headers()),
                     &mut packet_counter,
@@ -3002,8 +3006,9 @@ fn r2o_budget_say(
 fn r2o_measure_http_packet_budget(
     stream: &mut StreamOwned<rustls::ClientConnection, R2oTlsTcpStream>,
     options: &FetchOptions,
-    encoding: R2oFetchEncoding,
-    deadline: Instant,
+    _encoding: R2oFetchEncoding,
+    request: &[u8],
+    read_timeout: Duration,
     need: u32,
     mut connection_close: bool,
     packet_counter: &mut impl FnMut(&TcpStream) -> Option<u32>,
@@ -3036,7 +3041,10 @@ fn r2o_measure_http_packet_budget(
         }
         previous = Some(packets);
 
-        let remaining = deadline.saturating_duration_since(Instant::now());
+        let repeat_deadline = Instant::now()
+            .checked_add(read_timeout)
+            .unwrap_or_else(Instant::now);
+        let remaining = repeat_deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return r2o_budget_say(
                 Budget::Cut,
@@ -3054,10 +3062,9 @@ fn r2o_measure_http_packet_budget(
                 r2o_budget_replay_note(requests, false, "не удалось задать срок записи"),
             );
         }
-        let request = build_request(&options.name, &options.path, encoding);
         requests += 1;
         if stream
-            .write_all(&request)
+            .write_all(request)
             .and_then(|()| stream.flush())
             .is_err()
         {
@@ -3071,7 +3078,7 @@ fn r2o_measure_http_packet_budget(
         let mut buffer = [0_u8; 16 * 1024];
         let mut eof = false;
         while !parser.is_complete() && !parser.is_invalid() {
-            let remaining = deadline.saturating_duration_since(Instant::now());
+            let remaining = repeat_deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return r2o_budget_say(
                     Budget::Cut,
@@ -4250,6 +4257,102 @@ mod tests {
         server.join().unwrap();
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn budget_repeats_reuse_the_actual_redirected_request_like_c() {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use rustls::{ServerConfig, ServerConnection};
+        use std::net::{TcpListener, TcpStream};
+        use std::sync::Arc;
+        use std::sync::mpsc;
+        use std::thread;
+
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+            .expect("создать сертификат localhost");
+        let certificate_der = CertificateDer::from(certificate.serialize_der().unwrap());
+        let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certificate.serialize_private_key_der(),
+        ));
+        let server_config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate_der.clone()], private_key)
+            .unwrap();
+        let mut roots = RootCertStore::empty();
+        roots.add(certificate_der).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("открыть HTTPS-приёмник");
+        let address = listener.local_addr().unwrap();
+        let (request_sender, request_receiver) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (socket, _) = listener.accept().expect("принять HTTPS-соединение");
+            let connection = ServerConnection::new(Arc::new(server_config)).unwrap();
+            let mut stream = StreamOwned::new(connection, socket);
+            let mut requests = Vec::new();
+            for index in 0..3 {
+                let mut request = Vec::new();
+                let mut byte = [0_u8; 1];
+                while !request.ends_with(b"\r\n\r\n") {
+                    stream
+                        .read_exact(&mut byte)
+                        .expect("прочитать заголовки запроса");
+                    request.push(byte[0]);
+                }
+                requests.push(String::from_utf8_lossy(&request).into_owned());
+                let response = if index == 0 {
+                    b"HTTP/1.1 302 Found\r\nLocation: /landing\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n".as_slice()
+                } else {
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok"
+                        .as_slice()
+                };
+                stream.write_all(response).unwrap();
+                stream.flush().unwrap();
+            }
+            request_sender.send(requests).unwrap();
+        });
+
+        let options = FetchOptions {
+            name: "localhost".into(),
+            port: address.port(),
+            ip: Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            path: "/".into(),
+            deadline: Duration::from_secs(5),
+            tls12: false,
+            wire_len: None,
+            mark: None,
+        };
+        let stream = TcpStream::connect(address).expect("подключить HTTPS-пробу");
+        // need = 5 * 2 = 10: первый замер 4, повтор доводит до 12.
+        let mut packet_counts = [4_u32, 12].into_iter();
+        let result = r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
+            &options,
+            stream,
+            address,
+            Instant::now(),
+            R2oFetchEncoding::Identity,
+            roots,
+            None,
+            Some(5),
+            None,
+            |_| packet_counts.next(),
+        )
+        .expect("завершить HTTP-проверку бюджета с redirect");
+        let requests = request_receiver.recv().expect("получить HTTP-запросы");
+        server.join().unwrap();
+
+        assert_eq!(
+            result.r2o_volume_observation.packet_budget,
+            crate::r2o_volume::R2oVolumePacketBudget::Passed
+        );
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].starts_with("GET / HTTP/1.1\r\n"));
+        assert!(requests[1].starts_with("GET /landing HTTP/1.1\r\n"));
+        assert!(
+            requests[2].starts_with("GET /landing HTTP/1.1\r\n"),
+            "C budget_tcp повторяет фактический req: {}",
+            requests[2]
+        );
+    }
+
     #[test]
     fn https_замер_сохраняет_частичное_тело_tls_и_сетевые_счётчики() {
         use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -4403,10 +4506,9 @@ mod tests {
 
         assert_eq!(result.status, 0);
         assert_eq!(result.tls, Some("1.2"));
-        assert_eq!(
-            alpn_receiver.recv().unwrap().as_deref(),
-            Some(&b"http/1.1"[..])
-        );
+        // C `ch12_build` не предлагает ALPN: сервер не должен выбрать
+        // протокол, даже если его TLS1.2-конфигурация его объявляет.
+        assert_eq!(alpn_receiver.recv().unwrap(), None);
         assert_ne!(result.r2o_volume_observation.rx_tls_record_missing, 0);
         assert!(result.r2o_volume_observation.rx_tls_wire_bytes >= 12 * 1024);
         assert!(crate::r2o_volume::r2o_volume_rx_partial(
