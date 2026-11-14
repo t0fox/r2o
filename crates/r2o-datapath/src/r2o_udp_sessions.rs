@@ -855,6 +855,268 @@ mod tests {
             answered_udp.r2o_quic_hello_flows(),
             suspects
         );
+
+        // --- планы: выбор по имени/адресу/голосу и предел посылок --------
+        fn fnv1a(bytes: &[u8]) -> u64 {
+            let mut hash = 1469598103934665603_u64;
+            for byte in bytes {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(1099511628211);
+            }
+            hash
+        }
+        fn put_tlv(out: &mut Vec<u8>, kind: u16, value: &[u8]) {
+            out.extend_from_slice(&kind.to_be_bytes());
+            out.extend_from_slice(&(value.len() as u16).to_be_bytes());
+            out.extend_from_slice(value);
+        }
+        fn plan_header(out: &mut Vec<u8>, minexec: u16, records: u16, id_byte: u8) {
+            let mut id = [0_u8; 16];
+            id[0] = id_byte;
+            out.extend_from_slice(b"D2KP");
+            out.extend_from_slice(&1_u16.to_be_bytes());
+            out.extend_from_slice(&minexec.to_be_bytes());
+            out.extend_from_slice(&0_u16.to_be_bytes());
+            out.extend_from_slice(&records.to_be_bytes());
+            put_tlv(out, 0x0001, &id);
+        }
+        fn quic_qsplit_plan() -> Vec<u8> {
+            let mut plan = Vec::new();
+            plan_header(&mut plan, 10, 3, 0x51);
+            put_tlv(&mut plan, 0x0002, &[17, 2]);
+            put_tlv(&mut plan, 0x010f, &[1]);
+            plan
+        }
+        fn quic_fake_plan(fakes: u16) -> Vec<u8> {
+            let mut plan = Vec::new();
+            plan_header(&mut plan, 0, 3 + fakes, 0x52);
+            put_tlv(&mut plan, 0x0002, &[17, 2]);
+            put_tlv(&mut plan, 0x0010, &[0, 1, b'F', b'Q']);
+            for _ in 0..fakes {
+                put_tlv(&mut plan, 0x0101, &[0, 1, 0, 0, 1, 0, 0, 0, 0, 0]);
+            }
+            plan
+        }
+        fn voice_fake_plan() -> Vec<u8> {
+            let mut plan = Vec::new();
+            plan_header(&mut plan, 0, 4, 0x53);
+            put_tlv(&mut plan, 0x0002, &[17, 3]);
+            put_tlv(&mut plan, 0x0010, b"\0\x01VOICE");
+            put_tlv(&mut plan, 0x0101, &[0, 1, 0, 0, 1, 0, 0, 0, 0, 0]);
+            plan
+        }
+        fn install_name(plans: &mut crate::control::NamePlans, host: &str, shape: u8, plan: &[u8]) {
+            let mut body = Vec::new();
+            body.push(host.len() as u8);
+            body.extend_from_slice(host.as_bytes());
+            body.extend_from_slice(&[shape, 4]);
+            body.extend_from_slice(plan);
+            let ack = plans.handle(&r2k_core::control::Frame {
+                kind: r2k_core::control::COMMAND_SET_NAME,
+                body,
+            });
+            assert!(
+                ack.ok,
+                "SET_NAME {host} shape {shape} reason {}",
+                ack.reason
+            );
+        }
+        fn install_addr(
+            plans: &mut crate::control::NamePlans,
+            address: [u8; 4],
+            shape: u8,
+            plan: &[u8],
+        ) {
+            let mut body = vec![4];
+            body.extend_from_slice(&address);
+            body.extend_from_slice(&[0; 12]);
+            body.push(shape);
+            body.extend_from_slice(plan);
+            let ack = plans.handle(&r2k_core::control::Frame {
+                kind: r2k_core::control::COMMAND_SET_ADDR,
+                body,
+            });
+            assert!(ack.ok, "SET_ADDR {address:?} shape {shape}");
+        }
+        fn plan_case_ex(
+            name: &str,
+            plans: &crate::control::NamePlans,
+            packet: &[u8],
+            compare_skip: bool,
+        ) {
+            let selected = plans.select(packet);
+            let fallback = r2k_core::plan::Plan::default();
+            let mut sessions = crate::engine::TcpSessions::default();
+            let decision = crate::engine::decide_with_session(
+                &mut sessions,
+                selected.unwrap_or(&fallback),
+                packet,
+            );
+            let (applied, packets, skip) = match decision {
+                crate::engine::PacketDecision::Replace(packet) => (1, vec![packet], 0),
+                crate::engine::PacketDecision::Transmit { packets, .. } => (
+                    1,
+                    packets.into_iter().map(|packet| packet.packet).collect(),
+                    0,
+                ),
+                crate::engine::PacketDecision::Drop => (1, Vec::new(), 0),
+                crate::engine::PacketDecision::Refused { .. }
+                | crate::engine::PacketDecision::FlowUnfit { .. } => (0, Vec::new(), 1),
+                _ => (0, Vec::new(), 0),
+            };
+            print!("{name} applied={applied} n={} lens=", packets.len());
+            for (index, packet) in packets.iter().enumerate() {
+                if index != 0 {
+                    print!(",");
+                }
+                print!("{}", packet.len());
+            }
+            print!(" hash=");
+            for (index, packet) in packets.iter().enumerate() {
+                if index != 0 {
+                    print!(",");
+                }
+                print!("{:016x}", fnv1a(packet));
+            }
+            print!(" phash=");
+            for (index, packet) in packets.iter().enumerate() {
+                if index != 0 {
+                    print!(",");
+                }
+                let payload = packet.get(28..).unwrap_or_default();
+                print!("{:016x}", fnv1a(payload));
+            }
+            if compare_skip {
+                println!(" skip={skip}");
+            } else {
+                println!(" skip=-");
+            }
+        }
+        fn plan_case(name: &str, plans: &crate::control::NamePlans, packet: &[u8]) {
+            plan_case_ex(name, plans, packet, true);
+        }
+
+        let server_addr = [198, 51, 100, 20];
+        let client = ([192, 0, 2, 10], 50101);
+
+        let mut plans = crate::control::NamePlans::with_capacity(64);
+        install_name(
+            &mut plans,
+            "example.com",
+            r2k_core::control::SHAPE_QUIC,
+            &quic_qsplit_plan(),
+        );
+        plan_case(
+            "P1 name-quic-qsplit",
+            &plans,
+            &r2o_stun_packet(client, (server_addr, 443), initial),
+        );
+
+        let mut plans = crate::control::NamePlans::with_capacity(64);
+        install_name(
+            &mut plans,
+            "other.example",
+            r2k_core::control::SHAPE_QUIC,
+            &quic_qsplit_plan(),
+        );
+        plan_case_ex(
+            "P2 other-name",
+            &plans,
+            &r2o_stun_packet(([192, 0, 2, 10], 50102), (server_addr, 443), initial),
+            false,
+        );
+
+        let mut plans = crate::control::NamePlans::with_capacity(64);
+        install_addr(
+            &mut plans,
+            server_addr,
+            r2k_core::control::SHAPE_QUIC,
+            &quic_fake_plan(1),
+        );
+        plan_case(
+            "P3 addr-quic-fake",
+            &plans,
+            &r2o_stun_packet(([192, 0, 2, 10], 50103), (server_addr, 443), unnamed),
+        );
+
+        let mut plans = crate::control::NamePlans::with_capacity(64);
+        install_name(
+            &mut plans,
+            "example.com",
+            r2k_core::control::SHAPE_QUIC,
+            &quic_fake_plan(1),
+        );
+        plan_case(
+            "P4 name-quic-fake",
+            &plans,
+            &r2o_stun_packet(([192, 0, 2, 10], 50104), (server_addr, 443), initial),
+        );
+
+        let mut plans = crate::control::NamePlans::with_capacity(64);
+        install_name(
+            &mut plans,
+            "@discord-voice",
+            r2k_core::control::SHAPE_VOICE,
+            &voice_fake_plan(),
+        );
+        let mut voice_payload = [0_u8; 20];
+        voice_payload[0..2].copy_from_slice(&[0, 1]);
+        voice_payload[4..8].copy_from_slice(&[0x21, 0x12, 0xa4, 0x42]);
+        for (index, byte) in voice_payload.iter_mut().enumerate().skip(8) {
+            *byte = 0x40 + index as u8;
+        }
+        plan_case(
+            "P5 voice-name",
+            &plans,
+            &r2o_stun_packet(
+                ([192, 0, 2, 10], 50105),
+                (server_addr, 50010),
+                &voice_payload,
+            ),
+        );
+
+        let mut plans = crate::control::NamePlans::with_capacity(64);
+        install_addr(
+            &mut plans,
+            server_addr,
+            r2k_core::control::SHAPE_VOICE,
+            &voice_fake_plan(),
+        );
+        plan_case(
+            "P6 voice-addr",
+            &plans,
+            &r2o_stun_packet(
+                ([192, 0, 2, 10], 50106),
+                (server_addr, 50010),
+                &voice_payload,
+            ),
+        );
+
+        let mut plans = crate::control::NamePlans::with_capacity(64);
+        install_name(
+            &mut plans,
+            "example.com",
+            r2k_core::control::SHAPE_QUIC,
+            &quic_fake_plan(25),
+        );
+        plan_case(
+            "P7 quic-25-fakes",
+            &plans,
+            &r2o_stun_packet(([192, 0, 2, 10], 50107), (server_addr, 443), initial),
+        );
+
+        let mut plans = crate::control::NamePlans::with_capacity(64);
+        install_name(
+            &mut plans,
+            "example.com",
+            r2k_core::control::SHAPE_QUIC,
+            &quic_fake_plan(26),
+        );
+        plan_case(
+            "P8 quic-26-fakes",
+            &plans,
+            &r2o_stun_packet(([192, 0, 2, 10], 50108), (server_addr, 443), initial),
+        );
     }
 
     #[test]

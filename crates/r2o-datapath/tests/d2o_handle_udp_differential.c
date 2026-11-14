@@ -4,6 +4,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "d2k_ctl.h"
+#include "d2k_ctlsrv.h"
+#include "d2k_http80.h"
 #include "d2k_session.h"
 
 static uint8_t buffer[2048];
@@ -50,6 +53,134 @@ static void print(const char *name, const d2k_session *session) {
            (unsigned long long)d2k_session_hellos(session),
            (unsigned long long)d2k_session_with_sni(session),
            (unsigned long long)d2k_session_exchanges(session));
+}
+
+
+/* --- планы: установка через control и сверка применения ------------------ */
+
+static unsigned long long fnv1a(const uint8_t *p, size_t n) {
+    unsigned long long h = 1469598103934665603ull;
+    for (size_t i = 0; i < n; i++) { h ^= p[i]; h *= 1099511628211ull; }
+    return h;
+}
+
+static size_t put_tlv(uint8_t *o, size_t off, uint16_t kind, const uint8_t *v, size_t n) {
+    w16be(o + off, kind);
+    w16be(o + off + 2, (unsigned)n);
+    memcpy(o + off + 4, v, n);
+    return off + 4 + n;
+}
+
+static size_t plan_header(uint8_t *o, uint16_t minexec, uint16_t records, uint8_t idbyte) {
+    static const uint8_t id[16] = {0x51,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
+    uint8_t ids[16];
+    memcpy(ids, id, 16);
+    ids[0] = idbyte;
+    memcpy(o, "D2KP", 4);
+    o[4] = 0; o[5] = 1;
+    o[6] = (uint8_t)(minexec >> 8); o[7] = (uint8_t)minexec;
+    o[8] = 0; o[9] = 0;
+    o[10] = (uint8_t)(records >> 8); o[11] = (uint8_t)records;
+    return put_tlv(o, 12, 0x0001, ids, 16);
+}
+
+static size_t quic_qsplit_plan(uint8_t *o) {
+    static const uint8_t transport[2] = {17, 2};
+    static const uint8_t one[1] = {1};
+    size_t off = plan_header(o, 10, 3, 0x51);
+    off = put_tlv(o, off, 0x0002, transport, 2);
+    off = put_tlv(o, off, 0x010f, one, 1);
+    return off;
+}
+
+static size_t quic_fake_plan(uint8_t *o, unsigned fakes) {
+    static const uint8_t transport[2] = {17, 2};
+    static const uint8_t payload[4] = {0, 1, 'F', 'Q'};
+    static const uint8_t fake[10] = {0, 1, 0, 0, 1, 0, 0, 0, 0, 0};
+    size_t off = plan_header(o, 0, (uint16_t)(3 + fakes), 0x52);
+    off = put_tlv(o, off, 0x0002, transport, 2);
+    off = put_tlv(o, off, 0x0010, payload, sizeof payload);
+    for (unsigned i = 0; i < fakes; i++) off = put_tlv(o, off, 0x0101, fake, sizeof fake);
+    return off;
+}
+
+static size_t voice_fake_plan(uint8_t *o) {
+    static const uint8_t transport[2] = {17, 3};
+    static const uint8_t payload[7] = {0, 1, 'V', 'O', 'I', 'C', 'E'};
+    static const uint8_t fake[10] = {0, 1, 0, 0, 1, 0, 0, 0, 0, 0};
+    size_t off = plan_header(o, 0, 4, 0x53);
+    off = put_tlv(o, off, 0x0002, transport, 2);
+    off = put_tlv(o, off, 0x0010, payload, sizeof payload);
+    off = put_tlv(o, off, 0x0101, fake, sizeof fake);
+    return off;
+}
+
+static void install_name(d2k_ctlsrv *cx, const char *host, uint8_t shape,
+                         const uint8_t *plan, size_t plan_len) {
+    uint8_t cmd[1024];
+    size_t n = 0;
+    size_t host_len = strlen(host);
+    cmd[n++] = (uint8_t)host_len;
+    memcpy(cmd + n, host, host_len); n += host_len;
+    cmd[n++] = shape;
+    cmd[n++] = 4;
+    memcpy(cmd + n, plan, plan_len); n += plan_len;
+    d2k_ctlsrv_command(cx, D2K_CMD_SET_NAME, cmd, n);
+}
+
+static void install_addr(d2k_ctlsrv *cx, const uint8_t address[4], uint8_t shape,
+                         const uint8_t *plan, size_t plan_len) {
+    uint8_t cmd[1024];
+    size_t n = 0;
+    cmd[n++] = 4;
+    memset(cmd + n, 0, 16); n += 16;
+    memcpy(cmd + 1, address, 4);
+    cmd[n++] = shape;
+    memcpy(cmd + n, plan, plan_len); n += plan_len;
+    d2k_ctlsrv_command(cx, D2K_CMD_SET_ADDR, cmd, n);
+}
+
+static d2k_session *plan_session(d2k_ctlsrv *cx) {
+    d2k_session *s = d2k_session_new(64, 0);
+    memset(cx, 0, sizeof *cx);
+    cx->sess = s;
+    cx->now_ns = 1000;
+    d2k_session_set_hook(s, D2K_HOOK_POSTROUTING);
+    return s;
+}
+
+static void plan_case_ex(const char *name, d2k_session *s, const uint8_t *packet,
+                         size_t length, uint8_t *result_buffer, size_t result_cap,
+                         int compare_skip) {
+    d2k_result r;
+    memset(&r, 0, sizeof r);
+    (void)d2k_session_packet(s, packet, length, 1000, result_buffer, result_cap, &r);
+    printf("%s applied=%d n=%zu lens=", name, r.applied ? 1 : 0, r.n_out);
+    for (size_t i = 0; i < r.n_out; i++) {
+        printf("%s%zu", i ? "," : "", r.out[i].len);
+    }
+    printf(" hash=");
+    for (size_t i = 0; i < r.n_out; i++) {
+        printf("%s%016llx", i ? "," : "",
+               fnv1a(result_buffer + r.out[i].off, r.out[i].len));
+    }
+    printf(" phash=");
+    for (size_t i = 0; i < r.n_out; i++) {
+        size_t off = r.out[i].off;
+        size_t len = r.out[i].len;
+        printf("%s%016llx", i ? "," : "",
+               len > 28 ? fnv1a(result_buffer + off + 28, len - 28) : 0ull);
+    }
+    if (compare_skip) {
+        printf(" skip=%d\n", r.skipped && r.skipped[0] ? 1 : 0);
+    } else {
+        printf(" skip=-\n");
+    }
+}
+
+static void plan_case(const char *name, d2k_session *s, const uint8_t *packet,
+                      size_t length, uint8_t *result_buffer, size_t result_cap) {
+    plan_case_ex(name, s, packet, length, result_buffer, result_cap, 1);
 }
 
 static void print_short(const char *name, const d2k_session *session) {
@@ -157,5 +288,83 @@ int main(int argc, char **argv) {
            d2k_session_flows_udp(answered),
            (unsigned long long)d2k_session_hellos(answered), told);
     d2k_session_free(answered);
+
+    /* --- планы: выбор по имени/адресу/голосу и предел посылок ---------- */
+    {
+        static const uint8_t server_addr[4] = {198, 51, 100, 20};
+        uint8_t plan[4096];
+        uint8_t result_buffer[65536];
+        d2k_ctlsrv cx;
+
+        /* P1: QUIC имя + qsplit — пересборка CRYPTO. */
+        d2k_session *ps = plan_session(&cx);
+        size_t plan_len = quic_qsplit_plan(plan);
+        install_name(&cx, "example.com", 3, plan, plan_len);
+        length = udp_packet(buffer, client, server, 50101, 443, initial, initial_len);
+        plan_case("P1 name-quic-qsplit", ps, buffer, length, result_buffer, sizeof result_buffer);
+        d2k_session_free(ps);
+
+        /* P2: план на чужое имя — не применяется. */
+        ps = plan_session(&cx);
+        plan_len = quic_qsplit_plan(plan);
+        install_name(&cx, "other.example", 3, plan, plan_len);
+        length = udp_packet(buffer, client, server, 50102, 443, initial, initial_len);
+        /* C пишет skipped «плана для этой цели нет»; решение Rust такого
+         * поля не имеет — сверяем applied/n/lens, пробел отмечен в аудите. */
+        plan_case_ex("P2 other-name", ps, buffer, length, result_buffer,
+                     sizeof result_buffer, 0);
+        d2k_session_free(ps);
+
+        /* P3: адресный QUIC-план на Initial без имени. */
+        ps = plan_session(&cx);
+        plan_len = quic_fake_plan(plan, 1);
+        install_addr(&cx, server_addr, 3, plan, plan_len);
+        length = udp_packet(buffer, client, server, 50103, 443, unnamed, unnamed_len);
+        plan_case("P3 addr-quic-fake", ps, buffer, length, result_buffer, sizeof result_buffer);
+        d2k_session_free(ps);
+
+        /* P4: именной QUIC fake: фальшивка + собственный оригинал. */
+        ps = plan_session(&cx);
+        plan_len = quic_fake_plan(plan, 1);
+        install_name(&cx, "example.com", 3, plan, plan_len);
+        length = udp_packet(buffer, client, server, 50104, 443, initial, initial_len);
+        plan_case("P4 name-quic-fake", ps, buffer, length, result_buffer, sizeof result_buffer);
+        d2k_session_free(ps);
+
+        /* P5: голос по имени @discord-voice. */
+        ps = plan_session(&cx);
+        plan_len = voice_fake_plan(plan);
+        install_name(&cx, "@discord-voice", 5, plan, plan_len);
+        stun_request(payload);
+        length = udp_packet(buffer, client, server, 50105, 50010, payload, 20);
+        plan_case("P5 voice-name", ps, buffer, length, result_buffer, sizeof result_buffer);
+        d2k_session_free(ps);
+
+        /* P6: голос по адресу. */
+        ps = plan_session(&cx);
+        plan_len = voice_fake_plan(plan);
+        install_addr(&cx, server_addr, 5, plan, plan_len);
+        stun_request(payload);
+        length = udp_packet(buffer, client, server, 50106, 50010, payload, 20);
+        plan_case("P6 voice-addr", ps, buffer, length, result_buffer, sizeof result_buffer);
+        d2k_session_free(ps);
+
+        /* P7: 25 фальшивок + оригинал = 26 посылок — предел. */
+        ps = plan_session(&cx);
+        plan_len = quic_fake_plan(plan, 25);
+        install_name(&cx, "example.com", 3, plan, plan_len);
+        length = udp_packet(buffer, client, server, 50107, 443, initial, initial_len);
+        plan_case("P7 quic-25-fakes", ps, buffer, length, result_buffer, sizeof result_buffer);
+        d2k_session_free(ps);
+
+        /* P8: 26 фальшивок + оригинал = 27 > предела — отказ целиком. */
+        ps = plan_session(&cx);
+        plan_len = quic_fake_plan(plan, 26);
+        install_name(&cx, "example.com", 3, plan, plan_len);
+        length = udp_packet(buffer, client, server, 50108, 443, initial, initial_len);
+        plan_case("P8 quic-26-fakes", ps, buffer, length, result_buffer, sizeof result_buffer);
+        d2k_session_free(ps);
+    }
     return 0;
 }
+

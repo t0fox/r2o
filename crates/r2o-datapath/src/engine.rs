@@ -2020,7 +2020,9 @@ fn decide_packet_with_segment_cap(
     }
 
     let mut input = PacketInput::new(payload, 0);
-    input.own_after_fakes = clearance;
+    // C `session.c:1330`: для UDP `own_after_fakes = 1` всегда — оригинал
+    // идёт своей посылкой после фальшивок, иначе ядро снимает его как дубль.
+    input.own_after_fakes = true;
     let Ok(actions) = plan.apply(&input) else {
         return PacketDecision::Refused { plan_id: plan.id };
     };
@@ -2058,10 +2060,7 @@ fn decide_packet_with_segment_cap(
         };
         return PacketDecision::Replace(replacement);
     }
-    if (!clearance && !ttl_probe && !fake_probe)
-        || actions.emits.is_empty()
-        || ((!fake_probe) && actions.emits.len() != 2)
-    {
+    if (!clearance && !ttl_probe && !fake_probe) || actions.emits.is_empty() {
         return PacketDecision::Accept;
     }
     let mut packets = Vec::with_capacity(actions.emits.len());
@@ -2096,7 +2095,11 @@ fn decide_voice(plan: &Plan, packet: &[u8], view: &PacketView, payload: &[u8]) -
     {
         return PacketDecision::Accept;
     }
-    let Ok(actions) = plan.apply(&PacketInput::new(payload, 0)) else {
+    let mut input = PacketInput::new(payload, 0);
+    // C `session.c:1330`: голосовой UDP тоже владеет оригиналом после
+    // фальшивок — оригинал уходит своей посылкой.
+    input.own_after_fakes = true;
+    let Ok(actions) = plan.apply(&input) else {
         return PacketDecision::Refused { plan_id: plan.id };
     };
     if actions.emits.is_empty() {
@@ -2204,23 +2207,38 @@ fn replace_udp_payload(
     let total_len = view.l4_offset.checked_add(udp_len)?;
     let mut output = packet[..payload_range.start].to_vec();
     output.extend_from_slice(replacement);
-    if total_len != view.total_len {
-        match view.family {
-            4 => {
+    match view.family {
+        4 => {
+            // C `d2k_wire_build_udp` (IPv4) собирает заголовок заново:
+            // DSCP/ECN = 0, IP ID = исходный + 1 (ловушка совпадения
+            // идентификатора у сборщика фрагментов), DF = 1, контрольная
+            // сумма заголовка пересчитывается всегда.
+            *output.get_mut(1)? = 0;
+            output
+                .get_mut(4..6)?
+                .copy_from_slice(&view.ip_id.wrapping_add(1).to_be_bytes());
+            output
+                .get_mut(6..8)?
+                .copy_from_slice(&0x4000_u16.to_be_bytes());
+            if total_len != view.total_len {
                 let total_len_field = u16::try_from(total_len).ok()?;
                 output
                     .get_mut(2..4)?
                     .copy_from_slice(&total_len_field.to_be_bytes());
-                update_ipv4_checksum(&mut output, view.l4_offset)?;
             }
-            6 => {
+            update_ipv4_checksum(&mut output, view.l4_offset)?;
+        }
+        6 => {
+            if total_len != view.total_len {
                 let payload_len = u16::try_from(total_len.checked_sub(40)?).ok()?;
                 output
                     .get_mut(4..6)?
                     .copy_from_slice(&payload_len.to_be_bytes());
             }
-            _ => return None,
         }
+        _ => return None,
+    }
+    if total_len != view.total_len {
         output
             .get_mut(view.l4_offset + 4..view.l4_offset + 6)?
             .copy_from_slice(&udp_len_field.to_be_bytes());
@@ -4900,7 +4918,19 @@ mod tests {
         let payload = view.udp_payload_range(&output).unwrap();
         let expected = r2k_core::quic::initial_split_crypto(V1_INITIAL).unwrap();
         assert_eq!(&output[payload], expected);
-        assert_eq!(&output[..20], &input[..20]);
+        // C `d2k_wire_build_udp`: IPv4-заголовок пересобран — IP ID исходный+1,
+        // DF, DSCP=0, контрольная сумма заголовка посчитана.
+        assert_eq!(output[1], 0);
+        assert_eq!(
+            &output[4..6],
+            &u16::from_be_bytes([input[4], input[5]])
+                .wrapping_add(1)
+                .to_be_bytes()
+        );
+        assert_eq!(&output[6..8], &[0x40, 0x00]);
+        assert_eq!(output[8], input[8]);
+        assert_eq!(&output[12..20], &input[12..20]);
+        assert_ipv4_checksum_valid(&output, 20);
         assert_eq!(&output[20..26], &input[20..26]);
         assert_ne!(&output[26..28], &input[26..28]);
         assert_udp_checksum_valid(&output);
@@ -5127,8 +5157,8 @@ mod tests {
         let PacketDecision::Transmit { packets, fate } = decide(&plan, &input) else {
             panic!("Discord voice Binding request should produce its configured fake");
         };
-        assert_eq!(fate, OriginalFate::Pass);
-        assert_eq!(packets.len(), 1);
+        assert_eq!(fate, OriginalFate::Drop);
+        assert_eq!(packets.len(), 2);
         let fake = &packets[0].packet;
         let view = PacketView::parse(fake).unwrap();
         let payload = view.udp_payload_range(fake).unwrap();
@@ -5139,11 +5169,15 @@ mod tests {
         );
         assert_eq!(&fake[20..24], &input[20..24]);
         assert_udp_checksum_valid(fake);
+        let original = &packets[1].packet;
+        let view = PacketView::parse(original).unwrap();
+        let payload = view.udp_payload_range(original).unwrap();
+        assert_eq!(&original[payload], &stun);
         assert_eq!(
             decide(&plan, &input),
             PacketDecision::Transmit {
                 packets: packets.clone(),
-                fate: OriginalFate::Pass,
+                fate: OriginalFate::Drop,
             }
         );
 
@@ -5285,9 +5319,11 @@ mod tests {
             else {
                 panic!("D2O QUIC fake план должен отправить свои повторы");
             };
-            assert_eq!(fate, OriginalFate::Pass);
-            assert_eq!(packets.len(), usize::from(repeats));
-            for packet in packets {
+            // C: own_after_fakes → оригинал уходит своей посылкой, очередь
+            // снимает копию, fate = DROP.
+            assert_eq!(fate, OriginalFate::Drop);
+            assert_eq!(packets.len(), usize::from(repeats) + 1);
+            for packet in &packets[..usize::from(repeats)] {
                 assert_eq!(packet.kind, EmitKind::Fake);
                 assert_eq!(packet.delay_us, 0);
                 let view = PacketView::parse(&packet.packet).unwrap();
@@ -5297,6 +5333,11 @@ mod tests {
                 assert!(emitted.iter().all(|byte| *byte == 0));
                 assert_udp_checksum_valid(&packet.packet);
             }
+            let last = &packets[usize::from(repeats)];
+            assert_eq!(last.kind, EmitKind::Payload);
+            let view = PacketView::parse(&last.packet).unwrap();
+            let range = view.udp_payload_range(&last.packet).unwrap();
+            assert_eq!(&last.packet[range], V1_INITIAL);
             assert_eq!(
                 decide(&plan, &ipv4_udp(b"ordinary UDP")),
                 PacketDecision::Accept
@@ -5315,9 +5356,9 @@ mod tests {
         let PacketDecision::Transmit { packets, fate } = decide(&plan, &input) else {
             panic!("QUIC TTL-проба должна отправить две фальшивые датаграммы");
         };
-        assert_eq!(fate, OriginalFate::Pass);
-        assert_eq!(packets.len(), 2);
-        for packet in &packets {
+        assert_eq!(fate, OriginalFate::Drop);
+        assert_eq!(packets.len(), 3);
+        for packet in &packets[..2] {
             assert_eq!(packet.kind, EmitKind::Fake);
             assert_eq!(packet.packet[8], 3);
             let view = PacketView::parse(&packet.packet).unwrap();
@@ -5328,6 +5369,8 @@ mod tests {
             );
             assert_udp_checksum_valid(&packet.packet);
         }
+        assert_eq!(packets[2].kind, EmitKind::Payload);
+        assert_eq!(packets[2].packet[8], input[8]);
 
         assert_eq!(
             decide(&plan, &ipv4_udp("не QUIC Initial".as_bytes())),
@@ -5358,8 +5401,12 @@ mod tests {
             else {
                 panic!("резервная QUIC-проба TTL должна отправить две приманки");
             };
-            assert_eq!(packets.len(), 2);
-            assert!(packets.iter().all(|packet| packet.packet[8] == ttl));
+            assert_eq!(packets.len(), 3);
+            assert!(
+                packets[..2]
+                    .iter()
+                    .all(|packet| packet.kind == EmitKind::Fake && packet.packet[8] == ttl)
+            );
         }
 
         let invalid = Plan::parse(&plan_bytes(
@@ -5395,11 +5442,14 @@ mod tests {
         else {
             panic!("QUIC-проба должна отправить исходную приманку перед Initial");
         };
-        assert_eq!(fate, OriginalFate::Pass);
-        assert_eq!(packets.len(), 1);
+        assert_eq!(fate, OriginalFate::Drop);
+        assert_eq!(packets.len(), 2);
         let view = PacketView::parse(&packets[0].packet).unwrap();
         let range = view.udp_payload_range(&packets[0].packet).unwrap();
         assert_eq!(&packets[0].packet[range], decoy);
+        let view = PacketView::parse(&packets[1].packet).unwrap();
+        let range = view.udp_payload_range(&packets[1].packet).unwrap();
+        assert_eq!(&packets[1].packet[range], V1_INITIAL);
         assert_eq!(
             decide(&plan, &ipv4_udp(b"ordinary UDP")),
             PacketDecision::Accept
