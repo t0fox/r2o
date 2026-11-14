@@ -11,6 +11,7 @@ CC=${CC:-cc}
 CARGO=${CARGO:-cargo}
 TMPDIR=${TMPDIR:-"${ROOT%/r2o}/r2o-tooling/tmp"}
 FIXTURE="$ROOT/crates/r2k-core/tests/fixtures/quic_v1_initial.bin"
+FIXTURE_NO_SNI="$ROOT/crates/r2k-core/tests/fixtures/quic_v1_initial_no_sni.bin"
 
 if [ "$ACTUAL_D2O_SHA" != "$EXPECTED_D2O_SHA" ]; then
     printf 'Expected D2O %s, got %s\n' "$EXPECTED_D2O_SHA" "$ACTUAL_D2O_SHA" >&2
@@ -36,12 +37,12 @@ trap 'rm -rf -- "$TEMP"' EXIT HUP INT TERM
     "$DENY/plan_apply.o" "$DENY/core_quic.o" "$DENY/core_quicwire.o" \
     "$DENY/core_quicsnap.o" "$DENY/core_crypto.o" "$DENY/core_ipfrag.o" \
     "$DENY/core_httpup_logic.o" -pthread -lm
-"$TEMP/d2o-handle-udp" "$FIXTURE" >"$TEMP/c.out"
+"$TEMP/d2o-handle-udp" "$FIXTURE" "$FIXTURE_NO_SNI" >"$TEMP/c.out"
 
 "$CARGO" test --manifest-path "$ROOT/Cargo.toml" --locked --offline \
     -p r2o-datapath --lib r2o_udp_sessions::tests::d2o_handle_udp_trace \
     -- --ignored --nocapture >"$TEMP/rust.raw" 2>&1
-grep -E '^([QVR][0-9]) ' "$TEMP/rust.raw" >"$TEMP/rust.out"
+grep -E '^([QVRS][0-9]) ' "$TEMP/rust.raw" >"$TEMP/rust.out"
 
 diff -u "$TEMP/c.out" "$TEMP/rust.out"
 printf 'cases=%s\n' "$(wc -l < "$TEMP/c.out")"

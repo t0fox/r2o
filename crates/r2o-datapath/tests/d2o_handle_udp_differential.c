@@ -60,11 +60,16 @@ static void print_short(const char *name, const d2k_session *session) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 2) return 2;
+    if (argc != 3) return 2;
     FILE *file = fopen(argv[1], "rb");
     if (!file) return 3;
     uint8_t initial[2048];
     size_t initial_len = fread(initial, 1, sizeof initial, file);
+    fclose(file);
+    file = fopen(argv[2], "rb");
+    if (!file) return 3;
+    uint8_t unnamed[2048];
+    size_t unnamed_len = fread(unnamed, 1, sizeof unnamed, file);
     fclose(file);
 
     static const uint8_t client[4] = {192, 0, 2, 10};
@@ -118,5 +123,39 @@ int main(int argc, char **argv) {
     }
     print_short("R1", refusal);
     d2k_session_free(refusal);
+
+    /* Initial без имени: saw_initial, повтор PTO, затем sweep без ответа. */
+    d2k_session *silent = d2k_session_new(64, 0);
+    d2k_session_set_hook(silent, D2K_HOOK_POSTROUTING);
+    length = udp_packet(buffer, client, server, 50003, 443, unnamed, unnamed_len);
+    (void)d2k_session_packet(silent, buffer, length, 1000,
+                             result_buffer, sizeof result_buffer, &(d2k_result){0});
+    (void)d2k_session_packet(silent, buffer, length, 1800,
+                             result_buffer, sizeof result_buffer, &(d2k_result){0});
+    d2k_session_set_udp_reverse_hook(silent, 1);
+    size_t told = d2k_session_sweep(silent, 1000ull + 2000000000ull + 1ull);
+    printf("S1 flows=%zu hellos=%llu suspects=%zu\n",
+           d2k_session_flows_udp(silent),
+           (unsigned long long)d2k_session_hellos(silent), told);
+    d2k_session_free(silent);
+
+    /* Ответ после последнего PTO: sweep молчит. */
+    d2k_session *answered = d2k_session_new(64, 0);
+    d2k_session_set_hook(answered, D2K_HOOK_POSTROUTING);
+    length = udp_packet(buffer, client, server, 50004, 443, unnamed, unnamed_len);
+    (void)d2k_session_packet(answered, buffer, length, 1000,
+                             result_buffer, sizeof result_buffer, &(d2k_result){0});
+    (void)d2k_session_packet(answered, buffer, length, 1800,
+                             result_buffer, sizeof result_buffer, &(d2k_result){0});
+    d2k_session_set_hook(answered, D2K_HOOK_INPUT);
+    length = udp_packet(buffer, server, client, 443, 50004, (const uint8_t *)"resp", 4);
+    (void)d2k_session_packet(answered, buffer, length, 1900,
+                             result_buffer, sizeof result_buffer, &(d2k_result){0});
+    d2k_session_set_udp_reverse_hook(answered, 1);
+    told = d2k_session_sweep(answered, 1000ull + 2000000000ull + 1ull);
+    printf("S2 flows=%zu hellos=%llu suspects=%zu\n",
+           d2k_session_flows_udp(answered),
+           (unsigned long long)d2k_session_hellos(answered), told);
+    d2k_session_free(answered);
     return 0;
 }

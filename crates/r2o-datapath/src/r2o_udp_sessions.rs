@@ -782,6 +782,79 @@ mod tests {
             refusal.stats().refusals,
             refusal.session_exchanges()
         );
+
+        let unnamed = include_bytes!("../../r2k-core/tests/fixtures/quic_v1_initial_no_sni.bin");
+        let client = ([192, 0, 2, 10], 50003);
+        let server = ([198, 51, 100, 20], 443);
+        let mut silent_udp = R2oUdpSessions::new().unwrap();
+        let mut silent_quic = R2oQuicSessions::default();
+        let mut silent_exchanges = 0;
+        let packet = r2o_stun_packet(client, server, unnamed);
+        feed(
+            &mut silent_udp,
+            &mut silent_quic,
+            &mut silent_exchanges,
+            now,
+            &packet,
+            R2O_NF_INET_POST_ROUTING,
+        );
+        feed(
+            &mut silent_udp,
+            &mut silent_quic,
+            &mut silent_exchanges,
+            now + Duration::from_micros(800),
+            &packet,
+            R2O_NF_INET_POST_ROUTING,
+        );
+        let suspects = silent_quic
+            .sweep(now + Duration::from_nanos(2_000_000_001), true)
+            .len();
+        println!(
+            "S1 flows={} hellos={} suspects={}",
+            silent_udp.stats().flows,
+            silent_udp.r2o_quic_hello_flows(),
+            suspects
+        );
+
+        let client = ([192, 0, 2, 10], 50004);
+        let mut answered_udp = R2oUdpSessions::new().unwrap();
+        let mut answered_quic = R2oQuicSessions::default();
+        let mut answered_exchanges = 0;
+        let packet = r2o_stun_packet(client, server, unnamed);
+        feed(
+            &mut answered_udp,
+            &mut answered_quic,
+            &mut answered_exchanges,
+            now,
+            &packet,
+            R2O_NF_INET_POST_ROUTING,
+        );
+        feed(
+            &mut answered_udp,
+            &mut answered_quic,
+            &mut answered_exchanges,
+            now + Duration::from_micros(800),
+            &packet,
+            R2O_NF_INET_POST_ROUTING,
+        );
+        let response = r2o_stun_packet(server, client, b"resp");
+        feed(
+            &mut answered_udp,
+            &mut answered_quic,
+            &mut answered_exchanges,
+            now + Duration::from_micros(900),
+            &response,
+            R2O_NF_INET_LOCAL_IN,
+        );
+        let suspects = answered_quic
+            .sweep(now + Duration::from_nanos(2_000_000_001), true)
+            .len();
+        println!(
+            "S2 flows={} hellos={} suspects={}",
+            answered_udp.stats().flows,
+            answered_udp.r2o_quic_hello_flows(),
+            suspects
+        );
     }
 
     #[test]
