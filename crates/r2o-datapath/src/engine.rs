@@ -3998,6 +3998,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sweep_silent_обходит_все_потоки_как_sweep_one() {
+        // C `sweep_one`: told += tcp_silence_observe по каждому TCP-потоку.
+        let mut sessions = TcpSessions::default();
+        let start = Instant::now();
+        let server = ([198, 51, 100, 20], 443);
+        for port in [41010_u16, 41011] {
+            let client = ([192, 0, 2, 10], port);
+            sessions.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]), start);
+            sessions.track_packet(
+                &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+                start + Duration::from_millis(50),
+            );
+            sessions.track_packet(
+                &ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello()),
+                start + Duration::from_millis(100),
+            );
+            sessions.track_packet(
+                &ipv4_tcp_packet(server, client, 0x10, 124, 900, &[]),
+                start + Duration::from_millis(200),
+            );
+        }
+        let deadline = start + Duration::from_millis(1100);
+        assert!(sessions.sweep_silent(deadline, false).is_empty());
+        let events = sessions.sweep_silent(deadline, true);
+        assert_eq!(events.len(), 2, "оба потока дают по подозрению");
+        assert!(sessions.sweep_silent(deadline, true).is_empty());
+    }
+
     fn d2o_tcp_silence_packet(
         port: u16,
         reverse: bool,

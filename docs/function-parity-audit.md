@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 338 | 210 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 358 | 42 | 0 | 0 |
+| datapath-core | 400 | 359 | 41 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1458** | **524** | **0** | **0** |
+| **Итого** | **1982** | **1459** | **523** | **0** | **0** |
 
-Это не оценка паритета: 524 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 523 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1458 / P 524 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1459 / P 523 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 338 | 210 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 358 | 42 | 0 | 0 |
+| datapath-core | 400 | 359 | 41 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1458** | **524** | **0** | **0** |
+| **Итого** | **1982** | **1459** | **523** | **0** | **0** |
 
 
 ---
@@ -3897,7 +3897,7 @@ CLI-логирования, health-файла, duration, состава свод
 | `tcp_silence_observe` (static) | 3034–3049 | 16 | SILENT: не probe, есть hello, не told/suspected, `rev_pkts>0`, нет payload после hello, нет reverse RST; ждать deadline или повтор hello | `engine.rs` `tcp_silence_event` | E | C проверяет `!controller_probe`, наличие hello, `!silence_reported`, `reverse_seen`, `!response_payload`, `!saw_reverse_rst`, затем deadline или `hello_repeats>0`. Rust `tcp_silence_event` повторяет те же условия (флаги отправки события `silence_reported`/`repeat_reported`), deadline `clamp(8×RTT,1..5с)` или 2с; тест `tcp_silence_event_matches_c_conditions` (событие, payload, RST, probe). |
 | `fin_retry_window` (static) | 3063–3067 | 5 | окно повтора FIN: `3×max(3×RTT, 1с)` = `max(9×RTT, 3с)` | `engine.rs:1389 fin_retry_window` | **E** | Формула совпадает: Rust `rtt*9`, минимум 3 с; `None` (RTT неизвестен) → 3 с, что соответствует C `rtt_ns=0`. Тест `engine.rs:3823` (истечение ограниченного окна FIN) и `:3568` (повтор FIN). |
 | `fin_window_over` (static) | 3069-3073 | 5 | `pending_fin && now>=pending_fin_ns && elapsed>=3*max(3*rtt,1s)` | `engine.rs:708` (`pending_fin_at` + `fin_retry_window`) | **E** | C `f->pending_fin && now>=pending_fin_ns && now-pending_fin_ns >= fin_retry_window(f)`, где окно `3*max(3*rtt,1s)`. Rust `pending_fin_at.is_some_and(\|started\| elapsed >= fin_retry_window(session.rtt))`. |
-| `sweep_one` (static) | 3084–3087 | 4 | обход TCP-потоков, `told += tcp_silence_observe` | `engine.rs:693 expire_with_silent`, `:1330-1372` sweep | **P** | C проходит `d2k_track_walk(flows, sweep_one)` и считает подозрения. Rust `tcp_sessions.sweep_silent`/`tcp_silence_events`; счётчик `told` не возвращается, события забираются отдельно. Эквивалент по наблюдению, API иной. |
+| `sweep_one` (static) | 3084–3087 | 4 | обход TCP-потоков, `told += tcp_silence_observe` | `engine.rs` `sweep_silent` | **E*** | C проходит `d2k_track_walk(flows, sweep_one)` и суммирует подозрения; Rust `sweep_silent(now, visible)` обходит все потоки и возвращает события, число которых равно C `told`. Тест `sweep_silent_обходит_все_потоки_как_sweep_one`: два потока за deadline → 2 события; `visible=false` → 0; повторный sweep → 0 (duplicate guard). `tcp_silence_observe` уже E. **Ограничение:** C возвращает счётчик, Rust — `Vec<R2oTcpSilenceEvent>`; сумма = длина. |
 | `sweep_udp_one` (static) | 3112–3142 | 31 | UDP SILENT: saw_hello/saw_initial, не silence_told/suspected/quic_deny; ответ после последнего повтора; rev_seen или udp_reverse_hook; fwd_after_hello>0; deadline | `r2o_quic.rs:478 sweep`, `main.rs` quic sweep | **E*** | C/Rust differential `scripts/test-handle-udp-differential.sh` PASS (9 строк): **S1** — Initial без имени (fixture no_sni), повтор PTO, обратное направление видно → ровно одно подозрение; **S2** — ответ сервера после последнего повтора → 0 подозрений. Совпали flows/hellos/suspects. Дополнительно unit `quic_initial_молчание_требует_повтора_и_видимого_обратного_пути` (false → пусто, true → событие). **Ограничение:** C `saw_initial`/`last_rev_after_hello` в Rust распределены (`hello_seen`/`last_reverse`/`forward_after_initial`); `rev_seen[slot]` заменён `reverse_queue_visible`, `quic_deny` — отдельным состоянием. |
 | `quic_watch` (static) | 3164–3169 | 6 | кандидат QUIC-stall: proto 17, hello/initial, был ответ, не suspected/probe/quic_deny/voice/STUN | `r2o_quic.rs:503 r2o_quic_stall_candidates` | E | C: proto 17, было приветствие и ответ, не подозревался, не зонд, не quic_deny, не voice/STUN. Rust `r2o_quic_stall_candidates` фильтрует `suspected`, `quic_stall_excluded`, `last_reverse`, `first_response_rtt`; voice/STUN-потоки помечаются в `r2o_voice`/`suppress_packet`. Тесты `quic_зависание_не_срабатывает_без_скрытых_ответов_или_после_quicdeny`, `quic_зависание_исключает_stun_и_discord_discovery_из_одного_потока` (позитив/пусто/quicdeny/STUN/Discord). |
 | `flow_tuple` (static) | 3174–3187 | 14 | прямой кортеж клиент→сервер по `init_low` | `conntrack.rs` `tuple_from_packet`/`tuple_from_socket_addrs` | E | C строит прямой кортеж из канонического ключа и `init_low` (клиент ниже — `lo→hi`, иначе `hi→lo`). Rust `tuple_from_packet` берёт адреса/порты из пакета в направлении пакета, `tuple_from_socket_addrs` — из сокета; для известного `init_low` набор полей совпадает (family/proto/src/dst/sport/dport). Rust отвергает фрагменты с ненулевым offset (`fragment & 0x1fff`), как разбор ключа C. Тест `tuple_from_packet_matches_c_flow_tuple` (IPv4 TCP поля, MF-фрагмент, offset-фрагмент, ICMP, обрезанный пакет). |
