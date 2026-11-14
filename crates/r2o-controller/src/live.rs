@@ -9,6 +9,57 @@ const DOMAIN_BLOCKED: u8 = 1;
 const DOMAIN_DIRECT_CLEAR: u8 = 2;
 const DOMAIN_PLAN_FAILED: u8 = 4;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DnsServiceState {
+    #[default]
+    Detected,
+    Checking,
+    DirectOk,
+    Failed,
+}
+
+/// C `dns_service_live` (`core/sched.c:1276-1305`).
+#[derive(Clone, Debug)]
+pub struct DnsServiceLive {
+    pub generation: u64,
+    pub ip: String,
+    pub applied_plan_id: String,
+    pub state: DnsServiceState,
+    pub tcp_reachable: bool,
+    pub tls_handshake: bool,
+    pub http_status: i32,
+    pub dns_answer: bool,
+    pub plan_applied: bool,
+    pub attempts: u32,
+    /// Стенные секунды для live.json; None — проверки ещё не было.
+    pub checked_at: Option<i64>,
+    /// Монотонный срок следующей health-проверки.
+    pub next_check: Option<std::time::Instant>,
+    pub plan_applied_at: Option<i64>,
+    pub reason: String,
+}
+
+impl Default for DnsServiceLive {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            ip: String::new(),
+            applied_plan_id: String::new(),
+            state: DnsServiceState::Detected,
+            tcp_reachable: false,
+            tls_handshake: false,
+            http_status: 0,
+            dns_answer: false,
+            plan_applied: false,
+            attempts: 0,
+            checked_at: None,
+            next_check: None,
+            plan_applied_at: None,
+            reason: String::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct DiscoveryStatus {
     pub autopick: Value,
@@ -212,6 +263,7 @@ pub fn snapshot_with_areas(
         discovery_status,
         areas,
         &[],
+        &[],
     )
 }
 
@@ -225,6 +277,7 @@ pub fn snapshot_with_areas_and_dns(
     discovery_status: DiscoveryStatus,
     areas: &[LiveAreaState],
     dns_services: &[r2k_core::dns_config::DnsService],
+    dns_live: &[DnsServiceLive],
 ) -> Result<Value, CatalogError> {
     let mut boxes = Vec::with_capacity(catalog.boxes.len());
     let mut targets = 0_u64;
@@ -389,7 +442,7 @@ pub fn snapshot_with_areas_and_dns(
         }).collect::<Vec<_>>()
     }).unwrap_or_default();
 
-    let dns_services = r2o_live_dns_services(catalog, dns_services);
+    let dns_services = r2o_live_dns_services(catalog, dns_services, dns_live);
     Ok(json!({
         "linked": true,
         "link_note": "",
@@ -412,19 +465,21 @@ pub fn snapshot_with_areas_and_dns(
 fn r2o_live_dns_services(
     catalog: &Catalog,
     services: &[r2k_core::dns_config::DnsService],
+    live: &[DnsServiceLive],
 ) -> Vec<Value> {
     services
         .iter()
-        .map(|service| {
-            let resolved_ip = if service.host.parse::<std::net::IpAddr>().is_ok() {
-                service.host.clone()
+        .enumerate()
+        .map(|(index, service)| {
+            let state = live.get(index).cloned().unwrap_or_default();
+            let resolved_ip = if state.ip.is_empty() {
+                if service.host.parse::<std::net::IpAddr>().is_ok() {
+                    service.host.clone()
+                } else {
+                    String::new()
+                }
             } else {
-                String::new()
-            };
-            let reason = if resolved_ip.is_empty() {
-                "Конфигурация найдена; ожидается наблюдение реального адреса endpoint."
-            } else {
-                "Адрес endpoint обнаружен; автоматическая проверка ожидает очереди."
+                state.ip.clone()
             };
             let transport = if service.protocol == "doq" { 17 } else { 6 };
             let family = if resolved_ip.contains(':') { 6 } else { 4 };
@@ -454,6 +509,58 @@ fn r2o_live_dns_services(
                 })
                 .map(|binding| binding.plan_id.clone())
                 .unwrap_or_default();
+            let detected_reason = if resolved_ip.is_empty() {
+                "Конфигурация найдена; ожидается наблюдение реального адреса endpoint."
+            } else {
+                "Адрес endpoint обнаружен; автоматическая проверка ожидает очереди."
+            };
+            let (state_name, reason) = match state.state {
+                DnsServiceState::Checking => (
+                    "checking",
+                    if state.reason.is_empty() {
+                        "Автоматически проверяется корректный DNS-ответ endpoint.".to_owned()
+                    } else {
+                        state.reason.clone()
+                    },
+                ),
+                DnsServiceState::DirectOk => (
+                    "direct_ok",
+                    if state.reason.is_empty() {
+                        "Прямое соединение подтверждено.".to_owned()
+                    } else {
+                        state.reason.clone()
+                    },
+                ),
+                DnsServiceState::Failed if state.plan_applied => (
+                    "plan_applied",
+                    format!(
+                        "Датапат подтвердил план {} на DNS-соединении; DNS-ответ отдельно ещё не подтверждён. Автопроверка: {}",
+                        state.applied_plan_id,
+                        if state.reason.is_empty() {
+                            "DNS-ответ не подтверждён; одиночная ошибка не считается блокировкой."
+                        } else {
+                            &state.reason
+                        }
+                    ),
+                ),
+                DnsServiceState::Detected if state.plan_applied => (
+                    "plan_applied",
+                    format!(
+                        "Датапат подтвердил план {} на DNS-соединении; DNS-ответ отдельно ещё не подтверждён.",
+                        state.applied_plan_id
+                    ),
+                ),
+                DnsServiceState::Failed => (
+                    "failed",
+                    if state.reason.is_empty() {
+                        "DNS-ответ не подтверждён; одиночная ошибка не считается блокировкой."
+                            .to_owned()
+                    } else {
+                        state.reason.clone()
+                    },
+                ),
+                DnsServiceState::Detected => ("detected", detected_reason.to_owned()),
+            };
             let path = service.path.split('?').next().unwrap_or("/").to_owned();
             json!({
                 "protocol": service.protocol,
@@ -462,24 +569,34 @@ fn r2o_live_dns_services(
                 "sni": service.sni,
                 "path": path,
                 "source": service.source,
-                "state": "detected",
+                "state": state_name,
                 "status_reason": reason,
                 "resolved_ip": resolved_ip,
-                "checked_at": Value::Null,
-                "direct_tcp_reachable": false,
-                "direct_tls_handshake": false,
-                "http_status": 0,
-                "check_attempts": 0,
+                "checked_at": r2o_live_optional_time(state.checked_at),
+                "direct_tcp_reachable": state.tcp_reachable,
+                "direct_tls_handshake": state.tls_handshake,
+                "http_status": state.http_status,
+                "check_attempts": state.attempts,
                 "known_plan_id": known_plan_id,
-                "applied_plan_id": "",
-                "plan_applied_at": Value::Null,
-                "plan_applied": false,
+                "applied_plan_id": state.applied_plan_id,
+                "plan_applied_at": r2o_live_optional_time(state.plan_applied_at),
+                "plan_applied": state.plan_applied,
                 "candidate_plan_applied": false,
                 "dns_answer_via_plan": false,
-                "dns_answer_confirmed": false,
+                "dns_answer_confirmed": state.dns_answer,
             })
         })
         .collect()
+}
+
+fn r2o_live_optional_time(seconds: Option<i64>) -> Value {
+    use time::format_description::well_known::Rfc3339;
+    seconds
+        .filter(|value| *value > 0)
+        .and_then(|value| time::OffsetDateTime::from_unix_timestamp(value).ok())
+        .and_then(|value| value.format(&Rfc3339).ok())
+        .map(Value::String)
+        .unwrap_or(Value::Null)
 }
 
 pub fn write_snapshot(path: &Path, value: &Value) -> Result<(), CatalogError> {
@@ -1163,6 +1280,114 @@ mod tests {
     }
 
     #[test]
+    fn live_dns_state_machine_maps_current_d2o_states() {
+        use r2k_core::dns_config::DnsService;
+
+        let service = DnsService {
+            protocol: "doh".into(),
+            host: "dns.example".into(),
+            sni: "dns.example".into(),
+            path: "/dns-query".into(),
+            bootstrap_dns: String::new(),
+            source: "https-dns-proxy".into(),
+            port: 443,
+        };
+        let base = DnsServiceLive {
+            generation: 7,
+            ip: "198.51.100.80".into(),
+            ..DnsServiceLive::default()
+        };
+        let states = [
+            DnsServiceLive {
+                state: DnsServiceState::Checking,
+                attempts: 2,
+                reason: "Автоматически проверяется корректный DNS-ответ endpoint.".into(),
+                ..base.clone()
+            },
+            DnsServiceLive {
+                state: DnsServiceState::DirectOk,
+                tcp_reachable: true,
+                tls_handshake: true,
+                http_status: 200,
+                dns_answer: true,
+                attempts: 1,
+                checked_at: Some(1_700_000_000),
+                reason: "doh: получен корректный DNS-ответ".into(),
+                ..base.clone()
+            },
+            DnsServiceLive {
+                state: DnsServiceState::Failed,
+                tcp_reachable: true,
+                http_status: 413,
+                reason: "HTTP 413: это ошибка endpoint".into(),
+                ..base.clone()
+            },
+            DnsServiceLive {
+                plan_applied: true,
+                applied_plan_id: "ab".repeat(16),
+                plan_applied_at: Some(1_700_000_001),
+                ..base.clone()
+            },
+        ];
+        let expected = ["checking", "direct_ok", "failed", "plan_applied"];
+        for (live, expected) in states.iter().zip(expected) {
+            let snapshot = snapshot_with_areas_and_dns(
+                &Catalog::default(),
+                Path::new("/state/catalog.json"),
+                &HashSet::new(),
+                Vec::new(),
+                json!({}),
+                DiscoveryStatus::default(),
+                &[],
+                std::slice::from_ref(&service),
+                std::slice::from_ref(live),
+            )
+            .unwrap();
+            assert_eq!(snapshot["dns_services"][0]["state"], expected);
+            assert_eq!(snapshot["dns_services"][0]["resolved_ip"], "198.51.100.80");
+        }
+        let direct = snapshot_with_areas_and_dns(
+            &Catalog::default(),
+            Path::new("/state/catalog.json"),
+            &HashSet::new(),
+            Vec::new(),
+            json!({}),
+            DiscoveryStatus::default(),
+            &[],
+            std::slice::from_ref(&service),
+            &[states[1].clone()],
+        )
+        .unwrap();
+        assert_eq!(
+            direct["dns_services"][0]["checked_at"],
+            "2023-11-14T22:13:20Z"
+        );
+        assert_eq!(direct["dns_services"][0]["direct_tcp_reachable"], true);
+        assert_eq!(direct["dns_services"][0]["dns_answer_confirmed"], true);
+        let applied = snapshot_with_areas_and_dns(
+            &Catalog::default(),
+            Path::new("/state/catalog.json"),
+            &HashSet::new(),
+            Vec::new(),
+            json!({}),
+            DiscoveryStatus::default(),
+            &[],
+            std::slice::from_ref(&service),
+            &[states[3].clone()],
+        )
+        .unwrap();
+        assert_eq!(applied["dns_services"][0]["plan_applied"], true);
+        assert_eq!(
+            applied["dns_services"][0]["plan_applied_at"],
+            "2023-11-14T22:13:21Z"
+        );
+        assert_eq!(
+            applied["dns_services"][0]["applied_plan_id"],
+            "ab".repeat(16)
+        );
+    }
+
+    #[test]
     fn dns_live_differential_matches_current_d2o() {
         use crate::catalog::{Binding, BoxRecord, Plan};
         use r2k_core::dns_config::DnsService;
@@ -1231,6 +1456,7 @@ mod tests {
             DiscoveryStatus::default(),
             &[],
             &services,
+            &[],
         )
         .unwrap();
         if let Ok(path) = std::env::var("R2O_DNS_LIVE_DIFF_OUTPUT") {
@@ -1304,6 +1530,7 @@ mod tests {
             DiscoveryStatus::default(),
             &[],
             &services,
+            &[],
         )
         .unwrap();
         let section = live["dns_services"].as_array().unwrap();
@@ -1326,6 +1553,7 @@ mod tests {
             Vec::new(),
             json!({}),
             DiscoveryStatus::default(),
+            &[],
             &[],
             &[],
         )
