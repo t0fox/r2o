@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 338 | 210 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 366 | 34 | 0 | 0 |
+| datapath-core | 400 | 367 | 33 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1466** | **516** | **0** | **0** |
+| **Итого** | **1982** | **1467** | **515** | **0** | **0** |
 
-Это не оценка паритета: 516 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 515 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1466 / P 516 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1467 / P 515 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 338 | 210 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 366 | 34 | 0 | 0 |
+| datapath-core | 400 | 367 | 33 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1466** | **516** | **0** | **0** |
+| **Итого** | **1982** | **1467** | **515** | **0** | **0** |
 
 
 ---
@@ -3686,7 +3686,7 @@ R2O-владелец: `crates/r2o-datapath/src/main.rs` (`run`, `parse_options`,
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
-| `on_signal` (static) | 62 | 1 | SIGINT/SIGTERM → `stop_flag` | `main.rs:3762 install_signal_handlers`, `main.rs:55 STOP` | **P** | C `(void)sig; stop_flag=1` (`volatile sig_atomic_t`). Rust ставит atomic-флаг через `install_signal_handlers`; отдельного теста на сигнал нет. |
+| `on_signal` (static) | 62 | 1 | SIGINT/SIGTERM → `stop_flag` | `main.rs` `request_stop`, `STOP` | **E*** | C `(void)sig; stop_flag=1` (`volatile sig_atomic_t`). Rust `request_stop` ставит `STOP` (`AtomicBool`, Relaxed) — обработчик не делает ничего, кроме async-signal-safe записи; `install_signal_handlers` вешает его на SIGINT/SIGTERM. Тест `on_signal_ставит_stop_как_c`: SIGTERM → true, повторный SIGINT оставляет true. **Ограничение:** доставка реального сигнала в тесте не проверяется — только сам обработчик. |
 | `self_cost` (static) | 68-110 | 43 | CPU/RSS из `/proc/self/stat` (поля 14/15) и `statm` (resident) | `main.rs` `r2o_process_cost_from_proc`, `r2o_process_cost` | E | C/Rust differential `scripts/test-datapath-process-stats-differential.sh` PASS: точная пара `cpu_ms,rss_kb` на общих фикстурах `/proc/self/stat`/`statm`, включая `)` в comm и курсор C. |
 | `now_ns` (static) | 112-116 | 5 | `CLOCK_MONOTONIC` в наносекундах | `main.rs` `r2o_now_ns`, `std::time::Instant` для интервалов | **E*** | `r2o_now_ns` — точный вызов `clock_gettime(CLOCK_MONOTONIC)` с насыщением; записи журнала теперь помечаются абсолютным временем C, а не `elapsed()` от старта процесса. Тест `now_ns_uses_clock_monotonic_like_c` сверяет с независимым `clock_gettime` и монотонность. **Ограничение:** интервалы планировщика по-прежнему на `Instant` (для разностей эквивалентно); побайтовый differential абсолютных значений невозможен. |
 | `tls_route_segment_cap` (static) | 123-151 | 29 | MTU маршрута минус IP+32 только для TLS ClientHello | `raw.rs:130 tls_route_segment_cap`, `:119 packet_route_maxlen` | **P** | **Ветви сверены:** C `len<40` → 0; IPv4 `ihl>=20 && len>=ihl+20 && proto==6`, dst=+16; IPv6 `len>=60 && next==6`, dst=+24, ihl=40; `tcp_len>=20 && len>=tcp_off+tcp_len+5 && p[tcp]==0x16 && p[tcp+1]==3`; `mtu=route_maxlen_family(dst)`; `overhead=ihl+32`; `mtu>overhead?mtu-overhead:0`. Rust `raw.rs` воспроизводит «только для 0x16/0x03»; unit-тесты route cap. |

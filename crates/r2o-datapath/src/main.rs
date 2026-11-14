@@ -8532,6 +8532,19 @@ mod app {
         }
 
         #[test]
+        fn on_signal_ставит_stop_как_c() {
+            use std::sync::atomic::Ordering;
+
+            super::STOP.store(false, Ordering::Relaxed);
+            super::request_stop(libc::SIGTERM);
+            assert!(super::STOP.load(Ordering::Relaxed));
+            // Повторный сигнал оставляет флаг взведённым (C `stop_flag=1`).
+            super::request_stop(libc::SIGINT);
+            assert!(super::STOP.load(Ordering::Relaxed));
+            super::STOP.store(false, Ordering::Relaxed);
+        }
+
+        #[test]
         fn jrn_kind_c_names_match_donor() {
             use r2o_datapath::flow_journal::R2oFlowJournalKind as K;
             assert_eq!(K::Hello.c_name_with_name(true), "приветствие");
