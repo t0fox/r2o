@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 262 | 138 | 0 | 0 |
+| datapath-core | 400 | 263 | 137 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1350** | **632** | **0** | **0** |
+| **Итого** | **1982** | **1351** | **631** | **0** | **0** |
 
-Это не оценка паритета: 632 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 631 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1350 / P 632 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1351 / P 631 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 262 | 138 | 0 | 0 |
+| datapath-core | 400 | 263 | 137 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1350** | **632** | **0** | **0** |
+| **Итого** | **1982** | **1351** | **631** | **0** | **0** |
 
 
 ---
@@ -4450,7 +4450,7 @@ observation), `control.rs` (https names), `http_replace.rs` (пакеты),
 | `wr32` (static) | 134-136 | 3 | big-endian u32 | `wire.rs:556-558 write_u32` | **E** | C `p[0]=v>>24; p[1]=v>>16; p[2]=v>>8; p[3]=v`. Rust `write_u32` — `to_be_bytes` в 4 байта. C-строка: `p[0]=v>>24; p[1]=v>>16; p[2]=v>>8; p[3]=v;`; Rust `write_u32` — `to_be_bytes`. |
 | `sum16` (static) | 138-142 | 5 | RFC 1071: слова + нечётный хвост `<<8` | `wire.rs:534-543 sum16` | **E** | C `n>1` складывает слова, хвост `p[0]<<8`. Rust `chunks(2)` даёт те же значения, аккумулятор `u64`; для пакета ≤65535 переполнения нет. |
 | `fold` (static) | 144-147 | 4 | свёртка переносов + инверсия | `wire.rs:545-550 checksum_value` | **E** | C `while (acc>>16) acc=(acc&0xffff)+(acc>>16); return (uint16_t)~acc`. Rust тот же цикл над `u64`, `!(acc as u16)`. C-строка: `while(acc>>16) acc=(acc&0xffff)+(acc>>16); return ~acc;`; Rust `checksum_value`. |
-| `build` (static) | 156-188 | 33 | IP+TCP без опций: IPv4/IPv6, TOS/TC/flow/ip_id/TTL, длины, суммы; 307/RST | `http_replace.rs:79-145 build_segment` | **P** | **Ветви сверены:** C `family==6` → IPv6, иначе IPv4 (в т.ч. family 0/иная); `n=ip+20+plen`, `!o \|\| n>cap \|\| n>0xffff` → 0; IPv6: version/TC/flow, payload `20+plen`, next=6, hop, адреса, pseudo `len+6`; IPv4: 0x45/TOS/total/id/DF/TTL/proto 6/адреса/IP checksum/pseudo; TCP: sport/dport/seq/ack, data offset 0x50, flags, window, payload, checksum. Rust `build_segment` те же поля/порядок/суммы; **отличие:** принимает только family 4/6, C family 0 и прочие трактует как IPv4; Rust `vec![0; total]` вместо `memset` заголовков; тест `http_replace.rs:219` (v4/v6, суммы). |
+| `build` (static) | 156-188 | 33 | IP+TCP без опций: IPv4/IPv6, TOS/TC/flow/ip_id/TTL, длины, суммы; 307/RST | `http_replace.rs` `build_segment` | **E*** | C/Rust differential `scripts/test-http80-swap-bytes-differential.sh` PASS: 8 строк — IPv4 и IPv6, вход, 307 и RST побайтово, включая IP/TCP-суммы, TTL/TC/flow/ip_id, seq/ack, окно. **Исправлено реальное расхождение:** RST собирался с `ip_id+1`, C передаёт в `build(..., 0, ...)` — теперь 0. **Ограничение:** бренд `X-R2O` в тесте нормализован к `X-D2K` (осознанное отличие); C family 0/иную трактует как IPv4, Rust принимает только 4/6; переполнение `out_cap` не сравнивалось (Rust `Vec`). |
 | `rd32` (static) | 190-192 | 3 | big-endian u32 | `packet.rs:236 read_u32`/`u32::from_be_bytes` | **E*** | C `p[0]<<24 \| p[1]<<16 \| p[2]<<8 \| p[3]`. Rust `read_u32`/`from_be_bytes` с bounds-check; используется для seq/ack, тесты сети. C-строка: `p[0]<<24\|p[1]<<16\|p[2]<<8\|p[3]`; Rust `read_u32`/`from_be_bytes`; тесты сети. |
 | `stale` (static) | 196-198 | 3 | `now > touched` и разница > `D2K_HTTP80_IDLE_NS` | `hold.rs` HTTP flow `last_seen`/expire | **P** | C отдельный `flow.touched` и `D2K_HTTP80_IDLE_NS`; Rust HTTP-поток в `HoldTable.http_requests` имеет `seen`/`response_progress` и удаляется по правилам `expire`/`sweep_http_responses`. Порог/момент удаления не совпадают один-в-один. |
 | `find` (static) | 200-215 | 16 | линейный поиск по family/client/cport/server/80; stale → FREE/NULL | `hold.rs` `http_requests.iter().find` + `key.wire_key()` | **P** | C сравнивает 5-tuple (адреса 4/16, порты) и при `stale` освобождает слот; Rust ищет по `TcpFlowKey`/`wire_key` и `request_no`, stale-потоки удаляются отдельным sweep/expire. Ключ/lifetime различаются. |

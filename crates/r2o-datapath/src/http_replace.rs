@@ -35,11 +35,9 @@ pub fn build_http_redirect_packets(input: &[u8], redirect: &[u8]) -> Option<(Vec
         ip_id: view.ip_id,
         payload: redirect,
     })?;
-    let reset_id = if view.family == 4 {
-        view.ip_id.wrapping_add(1).max(1)
-    } else {
-        0
-    };
+    // C `d2k_http80_packet` (`http80.c:515-517`) собирает RST с `ip_id=0`,
+    // а не со следующим идентификатором: байты обязаны совпадать.
+    let reset_id = 0;
     let reset = build_segment(SegmentSpec {
         family: view.family,
         source: view.dst,
@@ -245,7 +243,7 @@ mod tests {
             assert_eq!(reset_tcp.flags, 0x14);
             assert!(tcp_checksum_ok(&reset));
             if family == 4 {
-                assert_ne!(reset_view.ip_id, 0);
+                assert_eq!(reset_view.ip_id, 0, "C build() получает ip_id=0 для RST");
             }
         }
     }
@@ -298,5 +296,100 @@ mod tests {
             pseudo_sum(6, source6, destination6, 4321),
             c_style_sum(&header6, 0)
         );
+    }
+
+    #[test]
+    fn swap_bytes_differential_matches_c() {
+        use std::fmt::Write as _;
+
+        const GET: &[u8] = b"GET /forum/index.php HTTP/1.1\r\nHost: RuTracker.org:80\r\n\
+User-Agent: test\r\nAccept: */*\r\n\r\n";
+        const INJECT: &[u8] = b"HTTP/1.1 302 Moved Temporarily\r\n\
+Location: http://lawfilter.ertelecom.ru\r\nConnection: close\r\n\
+Content-Length: 13\r\n\r\nlawfilter.ru\n";
+        let redirect = r2k_core::httpup::redirect_https(b"RuTracker.org", b"/forum/index.php")
+            .expect("redirect must build");
+        // Единственное осознанное отличие — бренд product-заголовка; для
+        // побайтовой сверки провода он нормализуется к C `X-D2K`.
+        let redirect = String::from_utf8(redirect)
+            .unwrap()
+            .replace("X-R2O-HTTP-Upgrade", "X-D2K-HTTP-Upgrade")
+            .into_bytes();
+
+        fn ipv4_input(client_port: u16, get_len: usize, inject: &[u8]) -> Vec<u8> {
+            let mut input = vec![0_u8; 20 + 20 + inject.len()];
+            input[0] = 0x45;
+            let total = input.len() as u16;
+            input[2..4].copy_from_slice(&total.to_be_bytes());
+            input[4..6].copy_from_slice(&0x1234_u16.to_be_bytes());
+            input[8] = 55;
+            input[9] = 6;
+            input[12..16].copy_from_slice(&[195, 82, 146, 214]);
+            input[16..20].copy_from_slice(&[192, 168, 1, 117]);
+            input[20..22].copy_from_slice(&80_u16.to_be_bytes());
+            input[22..24].copy_from_slice(&client_port.to_be_bytes());
+            input[24..28].copy_from_slice(&5_000_001_u32.to_be_bytes());
+            input[28..32].copy_from_slice(&(1001_u32 + get_len as u32).to_be_bytes());
+            input[32] = 0x50;
+            input[33] = 0x19;
+            input[34..36].copy_from_slice(&64240_u16.to_be_bytes());
+            input[40..].copy_from_slice(inject);
+            input
+        }
+
+        fn ipv6_input(client_port: u16, get_len: usize, inject: &[u8]) -> Vec<u8> {
+            let mut input = vec![0_u8; 40 + 20 + inject.len()];
+            input[0] = 0x60;
+            let payload_len = (20 + inject.len()) as u16;
+            input[4..6].copy_from_slice(&payload_len.to_be_bytes());
+            input[6] = 6;
+            input[7] = 55;
+            let mut server = [0_u8; 16];
+            server[0] = 0x20;
+            server[1] = 0x01;
+            server[15] = 0xd6;
+            let mut client = [0_u8; 16];
+            client[0] = 0x20;
+            client[1] = 0x01;
+            client[15] = 0x17;
+            input[8..24].copy_from_slice(&server);
+            input[24..40].copy_from_slice(&client);
+            let tcp = 40;
+            input[tcp..tcp + 2].copy_from_slice(&80_u16.to_be_bytes());
+            input[tcp + 2..tcp + 4].copy_from_slice(&client_port.to_be_bytes());
+            input[tcp + 4..tcp + 8].copy_from_slice(&5_000_001_u32.to_be_bytes());
+            input[tcp + 8..tcp + 12].copy_from_slice(&(1001_u32 + get_len as u32).to_be_bytes());
+            input[tcp + 12] = 0x50;
+            input[tcp + 13] = 0x19;
+            input[tcp + 14..tcp + 16].copy_from_slice(&64240_u16.to_be_bytes());
+            input[tcp + 20..].copy_from_slice(inject);
+            input
+        }
+
+        fn hex(bytes: &[u8]) -> String {
+            let mut text = String::with_capacity(bytes.len() * 2);
+            for byte in bytes {
+                write!(text, "{byte:02x}").unwrap();
+            }
+            text
+        }
+
+        fn record(output: &mut String, suffix: &str, input: &[u8], redirect: &[u8]) {
+            let (out, rst) = build_http_redirect_packets(input, redirect).unwrap();
+            writeln!(output, "input{suffix} {}", hex(input)).unwrap();
+            writeln!(output, "action{suffix}=replace").unwrap();
+            writeln!(output, "out{suffix} {}", hex(&out)).unwrap();
+            writeln!(output, "rst{suffix} {}", hex(&rst)).unwrap();
+        }
+
+        let mut output = String::new();
+        let input4 = ipv4_input(51_500, GET.len(), INJECT);
+        record(&mut output, "", &input4, &redirect);
+        assert_eq!(&input4[40..], INJECT);
+        let input6 = ipv6_input(51_600, GET.len(), INJECT);
+        record(&mut output, "6", &input6, &redirect);
+        if let Ok(path) = std::env::var("R2O_HTTP80_SWAP_BYTES_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
     }
 }
