@@ -4094,8 +4094,20 @@ mod app {
         text
     }
 
+    /// C `print_journal` пишет через `printf`, то есть в stdout (в конце —
+    /// `fflush(stdout)`). Отдельный writer нужен, чтобы поток можно было
+    /// проверить тестом без перехвата реального stdout.
+    fn r2o_write_journal(
+        writer: &mut impl std::io::Write,
+        journal: &R2oFlowJournal,
+        start_ns: u64,
+    ) -> std::io::Result<()> {
+        writer.write_all(r2o_format_journal(journal, start_ns).as_bytes())?;
+        writer.flush()
+    }
+
     fn r2o_print_journal(journal: &R2oFlowJournal, start_ns: u64) {
-        eprint!("{}", r2o_format_journal(journal, start_ns));
+        let _ = r2o_write_journal(&mut std::io::stdout().lock(), journal, start_ns);
     }
 
     fn format_journal_key(key: &[u8; r2k_core::control::KEY_LEN]) -> String {
@@ -9292,6 +9304,28 @@ mod app {
                 format_journal_line_c(1_000_000, &entry),
                 "       4 мс  udp 1.2.3.4:7 - 5.6.7.8:9  план не применён: плана для этой цели нет"
             );
+        }
+
+        #[test]
+        fn journal_writer_uses_the_c_stdout_text_contract() {
+            let mut journal = r2o_datapath::flow_journal::R2oFlowJournal::with_capacity(1).unwrap();
+            let mut out = Vec::new();
+            super::r2o_write_journal(&mut out, &journal, 0).unwrap();
+            assert_eq!(String::from_utf8(out).unwrap(), "журнал пуст\n");
+
+            let mut entry = r2o_datapath::flow_journal::R2oFlowJournalEntry {
+                at_ns: 1_000_000,
+                kind: r2o_datapath::flow_journal::R2oFlowJournalKind::Hello,
+                ..Default::default()
+            };
+            entry.key[0] = 4;
+            entry.key[37] = 6;
+            journal.push(entry);
+            let mut out = Vec::new();
+            super::r2o_write_journal(&mut out, &journal, 0).unwrap();
+            let text = String::from_utf8(out).unwrap();
+            assert!(text.starts_with("--- журнал: 1 записей, затёрто 0 ---\n"));
+            assert!(text.contains("tcp 0.0.0.0:0 - 0.0.0.0:0  приветствие без имени"));
         }
 
         #[test]

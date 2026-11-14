@@ -224,6 +224,24 @@ static void plan_case(const char *name, d2k_session *session, const uint8_t *pac
     printf("\n");
 }
 
+/* probe+MTU: та же сессия, отдельный флаг зонда и предел сегмента. */
+static void probe_mtu_case(const char *name, d2k_session *session,
+                           const uint8_t *packet, size_t length,
+                           size_t tcp_segment_cap) {
+    static uint8_t out[4096];
+    d2k_result result;
+    memset(&result, 0, sizeof result);
+    (void)d2k_session_packet_probe_mtu(session, packet, length, 2000,
+                                       tcp_segment_cap, out, sizeof out,
+                                       &result);
+    printf("%s applied=%d verdict=%d n=%zu lens=", name, result.applied ? 1 : 0,
+           (int)result.verdict, result.n_out);
+    for (size_t i = 0; i < result.n_out; i++) {
+        printf("%s%zu", i ? "," : "", result.out[i].len);
+    }
+    printf("\n");
+}
+
 static void print_case(const char *name, d2k_session *session, uint32_t anchor) {
     printf("%s flows=%zu refusals=%llu anchor=%u\n", name,
            d2k_session_flows_tcp(session),
@@ -395,6 +413,47 @@ int main(void) {
                (unsigned long long)d2k_session_with_sni(probe),
                (unsigned long long)d2k_session_tcp_hello_flows(probe));
         d2k_session_free(probe);
+    }
+
+    /* T: probe + MTU — тот же fake-план, но с controller_probe=1 и cap=128. */
+    {
+        d2k_session *probe_mtu = d2k_session_new(64, 0);
+        plan = NULL;
+        plan_length = fake_plan_bytes(plan_buffer);
+        if (d2k_plan_load(plan_buffer, plan_length, &plan, error, sizeof error) == 0) {
+            d2k_session_set_plan(probe_mtu, plan);
+            length = packet_with_payload(buffer, 0x18, 1001, CLIENT_HELLO,
+                                         sizeof CLIENT_HELLO);
+            probe_mtu_case("T probe-mtu", probe_mtu, buffer, length, 128);
+        } else {
+            printf("T probe-mtu load-error=%s\n", error);
+        }
+        d2k_session_free(probe_mtu);
+    }
+
+    /* U: повтор FIN до sweep. C узнаёт его по равенству seq, а
+     * fin_retry_window применяет только при удалении потока. */
+    {
+        d2k_session *fin = d2k_session_new(64, 0);
+        length = packet_with_payload(buffer, 0x02, 1000, NULL, 0);
+        feed(fin, buffer, length, &anchor);
+        length = server_packet_with_payload(buffer, 0x12, 900, 701, 124, NULL, 0);
+        feed(fin, buffer, length, &anchor);
+        length = packet_with_payload(buffer, 0x18, 701, CLIENT_HELLO,
+                                     sizeof CLIENT_HELLO);
+        feed(fin, buffer, length, &anchor);
+        static const uint8_t appdata[] = {0x17, 0x03, 0x03, 0, 1, 0};
+        length = server_packet_with_payload(buffer, 0x18, 900, 701, 124,
+                                            appdata, sizeof appdata);
+        feed(fin, buffer, length, &anchor);
+        length = packet_with_payload(buffer, 0x11,
+                                     701 + (uint32_t)sizeof CLIENT_HELLO,
+                                     NULL, 0);
+        feed(fin, buffer, length, &anchor);
+        feed(fin, buffer, length, &anchor);
+        printf("U fin-retry suspects=%llu\n",
+               (unsigned long long)d2k_session_suspects(fin));
+        d2k_session_free(fin);
     }
 
     return 0;

@@ -1663,11 +1663,12 @@ impl TcpSessions {
                 }) && session.reverse_server_hello;
             if session.reverse_tls_app_data || ack_beyond_response {
                 let fin_sequence_end = tcp.sequence.wrapping_add(payload.len() as u32);
+                // C `session_packet`: повтор узнаётся по равенству
+                // `pending_fin_seq`; `fin_retry_window` действует только в
+                // sweep, который снимает ожидающий поток. Проверять окно
+                // здесь значило бы пропустить повтор, пришедший до sweep.
                 let same_active_fin = session.pending_fin_sequence_end == Some(fin_sequence_end)
-                    && session.pending_fin_at.is_some_and(|started| {
-                        now.checked_duration_since(started)
-                            .is_some_and(|elapsed| elapsed < fin_retry_window(session.rtt))
-                    });
+                    && session.pending_fin_at.is_some();
                 if same_active_fin {
                     if !session.fin_retry_reported && !session.fin_retry_queued {
                         fin_retry_event = Some(R2oTcpFinRetryEvent {
@@ -5086,6 +5087,35 @@ mod tests {
     }
 
     #[test]
+    fn tcp_повтор_fin_после_окна_до_sweep_всё_ещё_подозрение_как_c() {
+        // C `session_packet`: повтор FIN узнаётся по равенству
+        // `pending_fin_seq`; окно `fin_retry_window` применяется только
+        // sweep-ем при удалении потока, а не в самой проверке повтора.
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+        sessions.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]), start);
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+            start + Duration::from_millis(50),
+        );
+        let mut hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello());
+        hello[28..32].copy_from_slice(&901_u32.to_be_bytes());
+        sessions.track_packet(&hello, start + Duration::from_millis(100));
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x18, 124, 900, &[0x17, 0x03, 0x03, 0, 1, 0]),
+            start + Duration::from_millis(150),
+        );
+        let fin_sequence = 701 + client_hello().len() as u32;
+        let fin = ipv4_tcp_packet(client, server, 0x11, 64, fin_sequence, &[]);
+        sessions.track_packet(&fin, start + Duration::from_millis(200));
+        sessions.track_packet(&fin, start + Duration::from_secs(10));
+
+        assert_eq!(sessions.fin_retry_candidates().len(), 1);
+    }
+
+    #[test]
     fn tcp_повтор_fin_передаёт_признак_применённого_плана() {
         let client = ([192, 0, 2, 10], 41000);
         let server = ([198, 51, 100, 20], 443);
@@ -6422,6 +6452,53 @@ mod tests {
             probe.r2o_tcp_hellos_with_sni(),
             probe.r2o_tcp_hello_flows()
         );
+
+        // T: probe + MTU. C `d2k_session_packet_probe_mtu`.
+        let mut probe_mtu = TcpSessions::default();
+        let probe_mtu_hello = ipv4_tcp_packet(client, server, 0x18, 64, 1001, &client_hello());
+        let before = probe_mtu.session_applied();
+        let decision = super::decide_with_session_probe_mtu(
+            &mut probe_mtu,
+            &tcp_fake_plan(),
+            &probe_mtu_hello,
+            128,
+        );
+        print_plan(
+            "T probe-mtu",
+            &decision,
+            probe_mtu.session_applied() > before,
+        );
+
+        // U: повтор FIN до sweep; окно действует только при удалении.
+        let mut fin = TcpSessions::default();
+        let fin_start = Instant::now();
+        fin.track_packet(
+            &ipv4_tcp_packet(client, server, 0x02, 64, 1000, &[]),
+            fin_start,
+        );
+        fin.track_packet(
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+            fin_start + Duration::from_millis(50),
+        );
+        fin.track_packet(
+            &ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello()),
+            fin_start + Duration::from_millis(100),
+        );
+        fin.track_packet(
+            &ipv4_tcp_packet(server, client, 0x18, 124, 900, &[0x17, 0x03, 0x03, 0, 1, 0]),
+            fin_start + Duration::from_millis(150),
+        );
+        let fin_packet = ipv4_tcp_packet(
+            client,
+            server,
+            0x11,
+            64,
+            701 + client_hello().len() as u32,
+            &[],
+        );
+        fin.track_packet(&fin_packet, fin_start + Duration::from_millis(200));
+        fin.track_packet(&fin_packet, fin_start + Duration::from_secs(10));
+        println!("U fin-retry suspects={}", fin.fin_retry_candidates().len());
     }
 
     #[test]
