@@ -508,13 +508,11 @@ fn parse_plan_request(input: &[u8]) -> Option<Request<'_>> {
         .position(|&byte| byte == b' ')?
         + target_start;
     let target = &first[target_start..second_space];
-    if target.first() != Some(&b'/') || target.len() >= 2048 {
+    if target.first() != Some(&b'/') {
         return None;
     }
     if !matches!(&first[second_space + 1..], b"HTTP/1.0" | b"HTTP/1.1")
-        || target
-            .iter()
-            .any(|&byte| byte <= 0x20 || byte == 0x7f || byte == b'#')
+        || target.iter().any(|&byte| byte <= 0x20 || byte == 0x7f)
     {
         return None;
     }

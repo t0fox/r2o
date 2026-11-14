@@ -117,9 +117,42 @@ fn http_request_differential_matches_c() {
             b"GET / HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\n\r\n",
         ),
         ("no_crlf", b"GET / HTTP/1.1\r\nHost: a\r\n"),
+        ("hash", b"GET /a#b HTTP/1.1\r\nHost: a\r\n\r\n"),
+        ("empty_host", b"GET / HTTP/1.1\r\nHost:\r\n\r\n"),
+        ("host_ws", b"GET / HTTP/1.1\r\nHost:   \r\n\r\n"),
+        ("host_tab", b"GET / HTTP/1.1\r\nHost:\ta\t\r\n\r\n"),
+        ("multi_colon", b"GET / HTTP/1.1\r\nHost: a:80:80\r\n\r\n"),
+        ("dot_only", b"GET / HTTP/1.1\r\nHost: .\r\n\r\n"),
+        ("numeric_last", b"GET / HTTP/1.1\r\nHost: a.123\r\n\r\n"),
+        ("upper_host", b"GET / HTTP/1.1\r\nHOST: EXAMPLE.COM\r\n\r\n"),
+        (
+            "method20",
+            b"ABCDEFGHIJKLMNOPQRST / HTTP/1.1\r\nHost: a\r\n\r\n",
+        ),
+        (
+            "method21",
+            b"ABCDEFGHIJKLMNOPQRSTU / HTTP/1.1\r\nHost: a\r\n\r\n",
+        ),
+        (
+            "tab_header",
+            b"GET / HTTP/1.1\r\nX: a\tb\r\nHost: a\r\n\r\n",
+        ),
+        ("http10", b"GET / HTTP/1.0\r\nHost: a\r\n\r\n"),
+        ("http12", b"GET / HTTP/1.2\r\nHost: a\r\n\r\n"),
+        ("host_underscore", b"GET / HTTP/1.1\r\nHost: a_b\r\n\r\n"),
+        ("lone_lf", b"GET / HTTP/1.1\nHost: a\n\n"),
+        ("target_ctl", b"GET /a\x01b HTTP/1.1\r\nHost: a\r\n\r\n"),
     ];
     let mut output = String::new();
-    for (name, bytes) in cases {
+    let long_target = {
+        let mut request = b"GET /".to_vec();
+        request.extend(std::iter::repeat_n(b'a', 2100));
+        request.extend_from_slice(b" HTTP/1.1\r\nHost: a\r\n\r\n");
+        request
+    };
+    let mut extra: Vec<(&str, &[u8])> = cases.to_vec();
+    extra.push(("long_target", &long_target));
+    for (name, bytes) in extra {
         let request = r2k_core::httpup::r2o_http_plan_request(bytes);
         let rc = u8::from(request.is_some());
         output.push_str(&format!("{name} rc={rc} host="));

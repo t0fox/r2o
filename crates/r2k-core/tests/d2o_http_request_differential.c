@@ -38,5 +38,28 @@ int main(void) {
     run("duplicate_cl", "GET / HTTP/1.1\r\nHost: a\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\n");
     run("cl", "GET / HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\n\r\n");
     run("no_crlf", "GET / HTTP/1.1\r\nHost: a\r\n");
+    run("hash", "GET /a#b HTTP/1.1\r\nHost: a\r\n\r\n");
+    run("empty_host", "GET / HTTP/1.1\r\nHost:\r\n\r\n");
+    run("host_ws", "GET / HTTP/1.1\r\nHost:   \r\n\r\n");
+    run("host_tab", "GET / HTTP/1.1\r\nHost:\ta\t\r\n\r\n");
+    run("multi_colon", "GET / HTTP/1.1\r\nHost: a:80:80\r\n\r\n");
+    run("dot_only", "GET / HTTP/1.1\r\nHost: .\r\n\r\n");
+    run("numeric_last", "GET / HTTP/1.1\r\nHost: a.123\r\n\r\n");
+    run("upper_host", "GET / HTTP/1.1\r\nHOST: EXAMPLE.COM\r\n\r\n");
+    run("method20", "ABCDEFGHIJKLMNOPQRST / HTTP/1.1\r\nHost: a\r\n\r\n");
+    run("method21", "ABCDEFGHIJKLMNOPQRSTU / HTTP/1.1\r\nHost: a\r\n\r\n");
+    run("tab_header", "GET / HTTP/1.1\r\nX: a\tb\r\nHost: a\r\n\r\n");
+    run("http10", "GET / HTTP/1.0\r\nHost: a\r\n\r\n");
+    run("http12", "GET / HTTP/1.2\r\nHost: a\r\n\r\n");
+    run("host_underscore", "GET / HTTP/1.1\r\nHost: a_b\r\n\r\n");
+    run("lone_lf", "GET / HTTP/1.1\nHost: a\n\n");
+    run("target_ctl", "GET /a\001b HTTP/1.1\r\nHost: a\r\n\r\n");
+    {
+        static char long_target[2300];
+        memcpy(long_target, "GET /", 5);
+        memset(long_target + 5, 'a', 2100);
+        memcpy(long_target + 2105, " HTTP/1.1\r\nHost: a\r\n\r\n", 24);
+        run("long_target", long_target);
+    }
     return 0;
 }

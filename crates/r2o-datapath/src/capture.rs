@@ -700,6 +700,8 @@ fn tls_ready(bytes: &[u8; CAPTURE_BYTES], contiguous: usize, high: usize) -> Res
 }
 
 fn http_ready(bytes: &[u8; CAPTURE_BYTES], contiguous: usize, high: usize) -> Result<bool, ()> {
+    // C `http_ready` (`hold.c:93-100`): готовность только при полном
+    // непрерывном префиксе; полный заголовок без имени — отказ.
     if contiguous != high {
         return Ok(false);
     }
@@ -707,10 +709,25 @@ fn http_ready(bytes: &[u8; CAPTURE_BYTES], contiguous: usize, high: usize) -> Re
     if r2k_core::httpup::request_host_range(input).is_some() {
         return Ok(true);
     }
-    if input.windows(4).any(|window| window == b"\r\n\r\n") || contiguous == CAPTURE_BYTES {
+    if input.windows(4).any(|window| window == b"\r\n\r\n") {
         return Err(());
     }
     Ok(false)
+}
+
+/// C `http_ready` для C/Rust differential: тот же tri-state без побочных
+/// эффектов. Возвращает 1 — готово, 0 — ждать, -1 — отказ.
+pub fn r2o_http_ready_trace(bytes: &[u8], high: usize) -> i32 {
+    let mut buffer = [0_u8; CAPTURE_BYTES];
+    let Some(target) = buffer.get_mut(..bytes.len()) else {
+        return -1;
+    };
+    target.copy_from_slice(bytes);
+    match http_ready(&buffer, bytes.len(), high) {
+        Ok(true) => 1,
+        Ok(false) => 0,
+        Err(()) => -1,
+    }
 }
 
 #[cfg(test)]

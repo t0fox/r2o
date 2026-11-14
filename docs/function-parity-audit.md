@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 351 | 49 | 0 | 0 |
+| datapath-core | 400 | 352 | 48 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1449** | **533** | **0** | **0** |
+| **Итого** | **1982** | **1450** | **532** | **0** | **0** |
 
-Это не оценка паритета: 533 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 532 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1449 / P 533 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1450 / P 532 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 351 | 49 | 0 | 0 |
+| datapath-core | 400 | 352 | 48 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1449** | **533** | **0** | **0** |
+| **Итого** | **1982** | **1450** | **532** | **0** | **0** |
 
 
 ---
@@ -4026,7 +4026,7 @@ R2O заменил структуру на `HashMap`, сохранив ключ,
 | `d2k_hold_next` | 73–80 | 8 | абсолютный минимальный deadline (ns), 0 если слотов нет | `hold.rs` `r2o_next_deadline`, `timeout_ms` | **E*** | `r2o_next_deadline` отдаёт абсолютный `Instant` ближайшего слота или `None` вместо C 0; `timeout_ms` строится на нём. Тест `hold_next_deadline_даёт_абсолютный_минимум_как_c`: пусто → None и max_ms; один слот → now+100 мс; второй поток со сроком now+120 мс — минимум по-прежнему now+100; после flush первого слота → now+120. **Ограничение:** C — ns, Rust — `Instant`; `timeout_ms` остаётся относительным для poll. |
 | `d2k_hold_get_stats` | 81–84 | 4 | снимок `d2k_hold_stats` | `hold.rs` `r2o_hold_stats` | E | C зануляет выход и копирует `h->stats`, если таблица есть. Rust `r2o_hold_stats()` возвращает копию `R2oHoldStats`; тест `hold_get_stats_returns_counter_snapshot_like_c` проверяет, что снимок до операций не меняется, а после split-hello даёт started=1/ready=1/joined=1/pending=0. |
 | `d2k_hold_verdicts` | 85–92 | 8 | выдать вердикт всем ID, считать ошибки, продолжить после отказа | `main.rs:4519 release_many_with` | E | C проходит все ID, считает ошибки и продолжает после отказа. Rust `release_many_with` также пытается отправить вердикт каждому ID, сохраняя первую ошибку и возвращая её после цикла; набор обработанных ID тот же. Тест `hold_verdicts_continue_after_failure_like_c` (ошибка на среднем ID, все три попытки). |
-| `http_ready` (static) | 93–100 | 8 | готовность HTTP-заголовка; полный заголовок без Host → -1 | `hold.rs:695 http_ready`, `:1343 incomplete_http_head` | **P** | C `d2k_http_request` vs Rust `request_host_range`: Rust требует полностью закрытые заголовки (`find_crlf`), C может вернуть 1 при завершённой строке Host без пустой строки; Rust отвергает `#` и target ≥2048, C — нет; см. также `capture.c`. Тест `hold.rs:2374`. |
+| `http_ready` (static) | 93–100 | 8 | готовность HTTP-заголовка; полный заголовок без Host → -1 | `capture.rs:702 http_ready`, `r2o_http_ready_trace` | **E*** | C/Rust differential `scripts/test-http-ready-differential.sh` PASS (**10 кейсов**): полный запрос → 1, Host без пустой строки → 1, неполная строка → 0, `n != high` → 0 даже для валидного/невалидного входа, полный заголовок без Host → -1, `#` в target → 1, control в target → 0, target 2101 → 1, 4096 байт мусора при `n==high` → 0. C-функция статическая, оракул включает `hold.c` с `--gc-sections`. **Исправлено:** Rust больше не отвергает слот при `contiguous==CAPTURE_BYTES` — C ждёт переполнения, а не полного буфера. **Ограничение:** `d2k_capture_feed_ready` HTTP-слот целиком не дифференцирован (TLS-часть — `test-capture-ready-differential.sh`). |
 | `d2k_hold_feed` | 101–236 | 136 | приём сегмента: flush, слот/сторона, лимиты 8×1600, capture, выбор головы, порядок оригиналов, синтетическая голова | `hold.rs` `feed_observing_mode`, `synthetic_packet` | **E*** | C/Rust differential `scripts/test-datapath-hold-differential.sh` PASS (15 кейсов, D6): split-hello 5+4, хвост раньше головы + anchor, flush по `HOLD_WAIT`, stats `timed_out/pending`, смена ревизии → `plan_changed`, 9-й пакет. **Ограничение:** HTTP-наблюдение (`allow_http`), серверная сторона и `own_packets` в оракуле не покрыты. |
 
 ### datapath/hold.c: построчная сверка
@@ -4060,7 +4060,8 @@ R2O заменил структуру на `HashMap`, сохранив ключ,
 - **`d2k_hold_verdicts` (85–92) ↔ `release_many_with`:** оба проходят
   все ID и продолжают после ошибки; C возвращает число ошибок, Rust —
   первую `io::Error`. P.
-- **`http_ready` (93–100) ↔ `hold.rs:695`:** C `d2k_http_request` vs
+- **`http_ready` (93–100) ↔ `capture.rs:702`:** E* —
+  `test-http-ready-differential.sh` (10 кейсов). C `d2k_http_request` vs
   Rust `request_host_range`; различия в полноте заголовков, `#`,
   target ≥2048. P; тест `hold.rs:2374`.
 - **`d2k_hold_feed` (101–236) ↔ `feed_observing_mode`:** константы
@@ -4469,10 +4470,9 @@ observation), `control.rs` (https names), `http_replace.rs` (пакеты),
 | `d2k_http80_packet` | 349-525 | 177 | стейт-машина HTTP/80: SYN/OPEN/IDLE/REQUEST/INJECTED/SWAP/ANSWERED/DONE, RTT, запрос/ответ, портал, 307+RST, CUT | `hold.rs` `observe_http_response`, `feed_observing_mode`, `observe_http_client_close`, `main.rs` | **E*** | D17 `scripts/test-datapath-http80-differential.sh` PASS (21 строка): SYN/OPEN/REQUEST, portal-вставка (no-https/https/slow/duplicate), 307+REPLACE, late server DROP после ANSWERED, post-client, FIN-CUT (`cut_result`: response=4, status=200, body=10), IPv6-поток, полный ответ (response=1) и битый заголовок (response=2); stats-строки совпали. Побайтовые 307/RST — отдельный swap-bytes differential. **Ограничение:** не сверены отдельно ретрансмиссия/дыра/перекрытие запроса, ACK/progress-поля, `request_feed` после ответа и тихий `d2k_http80_sweep` (3×RTT); Rust дополнительно собирает кросс-сегментный запрос, чего C не делает. |
 | `d2k_http80_swap` | 527-545 | 19 | вердикт с заменой + RST; ошибка → INJECTED, ACCEPT, swap_failed | `hold.rs` `r2o_apply_http_swap_result`, `main.rs` `send_replacement` | **E*** | C/Rust differential D17 (`scripts/test-datapath-http80-differential.sh`, 24 строки) PASS: успех — `answered=1`, `swap_failed=0`, поздний серверный пакет → DROP; отказ — `result=0`, `answered=0`, `swap_failed=1`, поздний пакет проходит (INJECTED). Побайтовые 307/RST — `scripts/test-http80-swap-bytes-differential.sh` (IPv4+IPv6). **Ограничение:** C `verdict_payload`/`verdict_accept`/`send_rst` — колбэки, Rust шлёт replacement/verdict напрямую; сравнивались исходы и счётчики, не порядок syscall-ов. |
 | `lc` (static) | 549-549 | 1 | ASCII-нижний регистр | `u8::to_ascii_lowercase` | **E** | C `('A'..='Z') ? c+32 : c`; Rust `to_ascii_lowercase()` понижает ровно `A..Z`, остальные байты не меняет. C-строка: `return (c>='A'&&c<='Z')?c+32:c;`; Rust `to_ascii_lowercase()`. |
-| `d2k_http_request` | 551-632 | 82 | строгий разбор: метод 1..20 заглавных, origin-form `/`, HTTP/1.x, ровно один Host:80, LDH/метки, не IPv4, framing | `r2k-core/src/httpup.rs` `parse_plan_request`/`r2o_http_plan_request` | **E*** | C/Rust differential `scripts/test-http-request-differential.sh` PASS: 15 кейсов — полный/частичный заголовок, `:80`/`:8080`, нет/два Host, хвостовая точка, IPv4-метка, нижний метод, absolute-form, плохая метка, TE, duplicate CL, Content-Length, отсутствие CRLF. Исправлено: неполная строка заголовка больше не отменяет уже найденный Host; `head_len=0`, `end_known=0`, как C. **Ограничение:** частичное перекрытие заголовка и точные 10-значные границы CL проверяются stream-дифференциалом. |
+| `d2k_http_request` | 551-632 | 82 | строгий разбор: метод 1..20 заглавных, origin-form `/`, HTTP/1.x, ровно один Host:80, LDH/метки, не IPv4, framing | `r2k-core/src/httpup.rs` `parse_plan_request`/`r2o_http_plan_request` | **E*** | C/Rust differential `scripts/test-http-request-differential.sh` PASS: **32 кейса** — полный/частичный заголовок, `:80`/`:8080`, нет/два Host, хвостовая точка, IPv4-метка, нижний метод, absolute-form, плохая метка, TE, duplicate CL, Content-Length, отсутствие CRLF, пустой/пробельный Host, табы, порт с двумя двоеточиями, `HOST` в верхнем регистре, method 20/21, HTTP/1.0/1.2, подчёркивание, lone LF, control в target, **`#` в target** и **target длиной 2101**. **Исправлено расхождение:** Rust отвергал `#` и target ≥2048; C принимает любой target с байтами >0x20 кроме 0x7f. Неполная строка заголовка больше не отменяет уже найденный Host; `head_len=0`, `end_known=0`, как C. **Ограничение:** точные 10-значные границы CL проверяются stream-дифференциалом. |
 
-`), Rust требует полный заголовок/`find_crlf`; C отвергает `#`/control в target, Rust — иные проверки `valid_dns_host`; C ограничивает method 20 символами, Rust — `parse_request`; C `d2k_http_request` возвращает 1 при завершённой строке Host без конца заголовка, Rust `parse_request` — только полный запрос. |
-| `d2k_http_hello` | 634-640 | 7 | `host_off/host_len` из `d2k_http_request` | `r2k-core/src/httpup.rs` `request_host_range` | **E*** | C-обёртка отдаёт смещение/длину Host, Rust — `Range`. Тот же C/Rust differential `scripts/test-http-request-differential.sh` (15 кейсов): host-байты полного и частичного заголовка совпали; `request_host_range` теперь возвращает Host и на неполной строке, как C. **Ограничение:** форма результата (`Range` vs off/len), не ABI. |
+| `d2k_http_hello` | 634-640 | 7 | `host_off/host_len` из `d2k_http_request` | `r2k-core/src/httpup.rs` `request_host_range` | **E*** | C-обёртка отдаёт смещение/длину Host, Rust — `Range`. Тот же C/Rust differential `scripts/test-http-request-differential.sh` (**32 кейса**): host-байты полного и частичного заголовка совпали; `request_host_range` возвращает Host и на неполной строке, как C. **Ограничение:** форма результата (`Range` vs off/len), не ABI. |
 
 ### datapath/http80.c: построчная сверка
 
