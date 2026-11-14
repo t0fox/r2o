@@ -688,6 +688,7 @@ fn журнал_сохраняет_все_типы_подозрений_r2o() {
                 elapsed_ms: 3400,
                 estimated_packets: 27,
                 planned: true,
+                server_hello: false,
             }
             .event_body()
             .unwrap(),

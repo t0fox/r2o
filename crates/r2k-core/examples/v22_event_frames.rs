@@ -79,6 +79,7 @@ fn main() {
             elapsed_ms: 4200,
             estimated_packets: 700,
             planned: true,
+            server_hello: false,
         }
         .event_body()
         .unwrap(),

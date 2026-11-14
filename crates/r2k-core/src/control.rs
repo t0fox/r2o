@@ -637,6 +637,8 @@ pub struct R2oTcpStallEvent {
     pub elapsed_ms: u32,
     pub estimated_packets: u32,
     pub planned: bool,
+    /// C `d2k_jrn_detail.server_hello`: был ли ServerHello до зависания.
+    pub server_hello: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -688,12 +690,13 @@ impl R2oTcpStallEvent {
         {
             return None;
         }
-        let mut body = Vec::with_capacity(KEY_LEN + 10);
+        let mut body = Vec::with_capacity(KEY_LEN + 11);
         body.extend_from_slice(&self.key);
         body.push(u8::from(self.client_is_low));
         body.extend_from_slice(&self.elapsed_ms.to_be_bytes());
         body.extend_from_slice(&self.estimated_packets.to_be_bytes());
         body.push(u8::from(self.planned));
+        body.push(u8::from(self.server_hello));
         Some(body)
     }
 }
@@ -3133,7 +3136,10 @@ pub fn decode_r2o_tcp_rst_after_app(frame: &Frame) -> Result<R2oTcpRstAfterAppEv
 }
 
 pub fn decode_r2o_tcp_stall(frame: &Frame) -> Result<R2oTcpStallEvent, &'static str> {
-    if frame.kind != EVENT_R2O_TCP_STALL || frame.body.len() != KEY_LEN + 10 {
+    // Длина 10 — прежний кадр без server_hello; 11 — текущий.
+    if frame.kind != EVENT_R2O_TCP_STALL
+        || (frame.body.len() != KEY_LEN + 10 && frame.body.len() != KEY_LEN + 11)
+    {
         return Err("неверный размер события зависшего TCP-потока");
     }
     let key: [u8; KEY_LEN] = frame.body[..KEY_LEN]
@@ -3158,6 +3164,12 @@ pub fn decode_r2o_tcp_stall(frame: &Frame) -> Result<R2oTcpStallEvent, &'static 
             .expect("длина проверена"),
     );
     let planned = frame.body[KEY_LEN + 9];
+    let server_hello = match frame.body.get(KEY_LEN + 10) {
+        None => false,
+        Some(0) => false,
+        Some(1) => true,
+        Some(_) => return Err("неверный ServerHello события зависшего TCP-потока"),
+    };
     if elapsed_ms == 0 || estimated_packets == 0 || planned > 1 {
         return Err("событие зависшего TCP-потока содержит пустую оценку");
     }
@@ -3167,6 +3179,7 @@ pub fn decode_r2o_tcp_stall(frame: &Frame) -> Result<R2oTcpStallEvent, &'static 
         elapsed_ms,
         estimated_packets,
         planned: planned == 1,
+        server_hello,
     })
 }
 
@@ -3790,6 +3803,7 @@ mod legacy_v22_wire_tests {
             elapsed_ms: 4200,
             estimated_packets: 700,
             planned: true,
+            server_hello: true,
         };
         let frames = translate_event_to_v22(EVENT_R2O_TCP_STALL, &stall.event_body().unwrap());
         assert_eq!(frames.len(), 1);

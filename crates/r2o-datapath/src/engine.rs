@@ -1140,8 +1140,10 @@ impl TcpSessions {
             key: flow_key.wire_key(),
             client_is_low: session.initiator == flow_key.low,
             elapsed_ms: elapsed.as_millis().min(u128::from(u32::MAX)) as u32,
-            estimated_packets: estimate.min(u64::from(u32::MAX)) as u32,
+            // C `suspect_num`: num капается до UINT16_MAX.
+            estimated_packets: estimate.min(u64::from(u16::MAX)) as u32,
             planned: session.plan_done,
+            server_hello: session.reverse_server_hello,
         })
     }
 
@@ -3664,6 +3666,245 @@ mod tests {
             session.stall_watch_off = mask & 32 != 0;
             println!("case={mask} rc={}", u8::from(session.r2o_tcp_watch()));
         }
+    }
+
+    #[test]
+    #[ignore]
+    fn d2o_ct_tcp_flow_trace() {
+        fn setup() -> (TcpSessions, [u8; KEY_LEN], Instant) {
+            let start = Instant::now();
+            let mut sessions =
+                TcpSessions::try_with_capacity(R2oFlowCapacity::from_requested(64).unwrap())
+                    .unwrap();
+            let client = ([192, 0, 2, 10], 40000);
+            let server = ([198, 51, 100, 20], 443);
+            sessions.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]), start);
+            sessions.track_packet(
+                &ipv4_tcp_packet(server, client, 0x12, 64, 900, &[]),
+                start + Duration::from_millis(50),
+            );
+            sessions.track_packet(
+                &ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello_with_sni()),
+                start + Duration::from_millis(100),
+            );
+            let server_hello = {
+                let mut record = vec![0x16, 0x03, 0x03, 0x00, 0x2a, 2, 0, 0, 38, 0x03, 0x03];
+                record.extend([0; 32]);
+                record.extend_from_slice(&[0, 0x13, 1, 0]);
+                record
+            };
+            sessions.track_packet(
+                &ipv4_tcp_packet(server, client, 0x18, 64, 900, &server_hello),
+                start + Duration::from_millis(200),
+            );
+            let key = TcpFlowKey::from_packet(&ipv4_tcp_packet(client, server, 0x18, 64, 701, &[]))
+                .unwrap()
+                .wire_key();
+            (sessions, key, start)
+        }
+        fn step(
+            name: &str,
+            sessions: &mut TcpSessions,
+            key: &[u8; KEY_LEN],
+            now: Instant,
+            info: R2oConntrackInfo,
+            suspicions: &mut u64,
+        ) {
+            let event = sessions.update_tcp_stall(now, key, info);
+            let told = u8::from(event.is_some());
+            let mut est = 0;
+            let mut server_hello = "-".to_owned();
+            let mut planned = "-".to_owned();
+            if let Some(event) = event {
+                est = event.estimated_packets;
+                server_hello = u8::from(event.server_hello).to_string();
+                planned = if event.planned { "1" } else { "2" }.to_owned();
+                sessions.mark_tcp_stall(&event.key);
+                if sessions.r2o_note_suspect(&event.key) {
+                    *suspicions += 1;
+                }
+            }
+            println!(
+                "{name} told={told} suspicions={suspicions} est={est} server_hello={server_hello} planned={planned}"
+            );
+        }
+        let info = |orig: u64, reply: u64, state: Option<u8>| R2oConntrackInfo {
+            original_packets: orig,
+            reply_packets: reply,
+            tcp_state: state,
+        };
+
+        let (mut sessions, key, start) = setup();
+        println!(
+            "H setup hellos={} with_sni={} hello_flows={}",
+            sessions.r2o_tcp_hello_flows(),
+            sessions.r2o_tcp_hellos_with_sni(),
+            sessions.r2o_tcp_hello_flows()
+        );
+        let mut suspicions = 0;
+        step(
+            "A state-unknown",
+            &mut sessions,
+            &key,
+            start + Duration::from_secs(2),
+            info(10, 25, None),
+            &mut suspicions,
+        );
+
+        let (mut sessions, key, start) = setup();
+        let mut suspicions = 0;
+        step(
+            "B syn-sent",
+            &mut sessions,
+            &key,
+            start + Duration::from_secs(2),
+            info(10, 25, Some(1)),
+            &mut suspicions,
+        );
+        step(
+            "B2 after-off",
+            &mut sessions,
+            &key,
+            start + Duration::from_secs(5),
+            info(13, 25, Some(3)),
+            &mut suspicions,
+        );
+
+        let (mut sessions, key, start) = setup();
+        let mut suspicions = 0;
+        step(
+            "C baseline",
+            &mut sessions,
+            &key,
+            start + Duration::from_secs(2),
+            info(10, 25, Some(3)),
+            &mut suspicions,
+        );
+        step(
+            "C orig-1",
+            &mut sessions,
+            &key,
+            start + Duration::from_secs(4),
+            info(11, 25, Some(3)),
+            &mut suspicions,
+        );
+        step(
+            "C rto-1",
+            &mut sessions,
+            &key,
+            start + Duration::from_millis(3900),
+            info(13, 25, Some(3)),
+            &mut suspicions,
+        );
+        step(
+            "C event",
+            &mut sessions,
+            &key,
+            start + Duration::from_millis(4100),
+            info(16, 25, Some(3)),
+            &mut suspicions,
+        );
+        step(
+            "C repeat",
+            &mut sessions,
+            &key,
+            start + Duration::from_secs(5),
+            info(19, 25, Some(3)),
+            &mut suspicions,
+        );
+
+        let (mut sessions, key, start) = setup();
+        let mut suspicions = 0;
+        step(
+            "D over-band",
+            &mut sessions,
+            &key,
+            start + Duration::from_secs(2),
+            info(10, 100, Some(3)),
+            &mut suspicions,
+        );
+        step(
+            "D after-off",
+            &mut sessions,
+            &key,
+            start + Duration::from_secs(5),
+            info(13, 100, Some(3)),
+            &mut suspicions,
+        );
+
+        let (mut sessions, key, start) = setup();
+        let mut suspicions = 0;
+        step(
+            "E baseline",
+            &mut sessions,
+            &key,
+            start + Duration::from_secs(2),
+            info(10, 1, Some(3)),
+            &mut suspicions,
+        );
+        step(
+            "E unseen-0",
+            &mut sessions,
+            &key,
+            start + Duration::from_secs(5),
+            info(13, 1, Some(3)),
+            &mut suspicions,
+        );
+
+        let (mut sessions, key, start) = setup();
+        sessions.set_tcp_stall_budgets(&[25, 60]).unwrap();
+        let mut suspicions = 0;
+        step(
+            "F baseline",
+            &mut sessions,
+            &key,
+            start + Duration::from_secs(2),
+            info(10, 62, Some(3)),
+            &mut suspicions,
+        );
+        step(
+            "F rto",
+            &mut sessions,
+            &key,
+            start + Duration::from_secs(3),
+            info(13, 62, Some(3)),
+            &mut suspicions,
+        );
+        step(
+            "F event",
+            &mut sessions,
+            &key,
+            start + Duration::from_secs(5),
+            info(16, 62, Some(3)),
+            &mut suspicions,
+        );
+
+        let (mut sessions, key, start) = setup();
+        let mut suspicions = 0;
+        step(
+            "G baseline",
+            &mut sessions,
+            &key,
+            start + Duration::from_secs(2),
+            info(10, 25, Some(3)),
+            &mut suspicions,
+        );
+        step(
+            "G orig-less",
+            &mut sessions,
+            &key,
+            start + Duration::from_secs(5),
+            info(9, 25, Some(3)),
+            &mut suspicions,
+        );
+        step(
+            "G orig-2",
+            &mut sessions,
+            &key,
+            start + Duration::from_secs(6),
+            info(12, 25, Some(3)),
+            &mut suspicions,
+        );
     }
 
     #[test]

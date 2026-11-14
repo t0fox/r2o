@@ -596,6 +596,7 @@ mod tests {
             elapsed_ms: 2_500,
             estimated_packets: 25,
             planned: false,
+            server_hello: false,
         };
 
         let input = cache.take_for_tcp_stall(&event, Some(17), now).unwrap();

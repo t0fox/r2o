@@ -962,16 +962,7 @@ impl R2oFlowJournal {
                 )
             }),
             EVENT_R2O_TCP_STALL => decode_r2o_tcp_stall(&frame).map(|event| {
-                self.record_direction_event(
-                    at_ns,
-                    event.key,
-                    R2oFlowJournalKind::R2oTcpStall,
-                    event.client_is_low,
-                    u8::from(event.planned),
-                    event.elapsed_ms,
-                    event.estimated_packets,
-                    8,
-                )
+                self.record_tcp_stall_event(at_ns, &event);
             }),
             EVENT_R2O_TCP_FIN_RETRY => decode_r2o_tcp_fin_retry(&frame).map(|event| {
                 self.record_direction_event(
@@ -1045,6 +1036,22 @@ impl R2oFlowJournal {
             _ => return false,
         }
         .is_ok()
+    }
+
+    fn record_tcp_stall_event(&mut self, at_ns: u64, event: &r2k_core::control::R2oTcpStallEvent) {
+        // C `suspect_num`: detail.server_hello из потока, planned и num.
+        self.push(R2oFlowJournalEntry {
+            at_ns,
+            key: event.key,
+            kind: R2oFlowJournalKind::R2oTcpStall,
+            code: 8,
+            client_is_low: Some(event.client_is_low),
+            planned: u8::from(event.planned),
+            elapsed_ms: event.elapsed_ms,
+            num: event.estimated_packets,
+            server_hello: event.server_hello,
+            ..R2oFlowJournalEntry::default()
+        });
     }
 
     fn record_direction_event(

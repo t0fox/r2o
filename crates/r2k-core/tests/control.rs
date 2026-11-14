@@ -372,6 +372,7 @@ fn событие_зависшего_tcp_потока_кодируется_и_с
         elapsed_ms: 2_500,
         estimated_packets: 25,
         planned: true,
+        server_hello: true,
     };
     let frame = Frame {
         kind: EVENT_R2O_TCP_STALL,
