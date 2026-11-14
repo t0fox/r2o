@@ -10,12 +10,13 @@ if [ "$actual_donor_sha" != "$expected_donor_sha" ]; then
     exit 2
 fi
 
+CC=${CC:-cc}
 tests="$repo_root/crates/r2o-controller/tests"
 fixture="$tests/fixtures/d2o_meas_send_timeout.tsv"
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/r2o-d2o-meas.XXXXXX")
 trap 'rm -rf -- "$tmp_dir"' EXIT HUP INT TERM
 
-cc -std=c99 -O2 -Wall -Wextra -Werror \
+"$CC" -std=c99 -O2 -Wall -Wextra -Werror \
     -I"$donor_root/core/include" \
     "$tests/d2o_meas_send_timeout.c" "$donor_root/core/meas.c" \
     -pthread -o "$tmp_dir/d2o_meas_send_timeout"
@@ -37,7 +38,7 @@ printf '%s\n' "$rust_output" | grep -F 'RUST_RESULT:ERROR' >/dev/null
 printf 'C/Rust send-timeout measurement result matches donor %s\n' "$expected_donor_sha"
 
 eintr_fixture="$tests/fixtures/d2o_meas_eintr.tsv"
-cc -std=c99 -O2 -Wall -Wextra -Werror -pthread \
+"$CC" -std=c99 -O2 -Wall -Wextra -Werror -pthread \
     -I"$donor_root/core/include" \
     "$tests/d2o_meas_eintr.c" "$donor_root/core/meas.c" \
     -o "$tmp_dir/d2o_meas_eintr"
@@ -74,3 +75,25 @@ printf '%s\n' "$rust_send_eintr_output"
 printf '%s\n' "$c_send_eintr_output" >"$tmp_dir/c-send-meas-eintr.out"
 diff -u "$tmp_dir/c-send-meas-eintr.out" "$tmp_dir/rust-send-meas-eintr.out"
 printf 'C/Rust send-interruption measurement result matches donor %s\n' "$expected_donor_sha"
+
+# Остальные ветви d2k_meas_once: ответ/UNPROVEN, закрытие, RST, локальные
+# ошибки, пустое приветствие и неверные разрезы.
+"$CC" -std=c99 -O2 -Wall -Wextra -Werror -pthread \
+    -I"$donor_root/core/include" \
+    -o "$tmp_dir/d2o_meas_branches" \
+    "$tests/d2o_meas_branches.c" "$donor_root/core/meas.c"
+: >"$tmp_dir/c-meas-branches.out"
+for scenario in pass-any serverhello bad-serverhello short-response closed rst \
+    connect-refused invalid-ip invalid-cuts empty-payload; do
+    "$tmp_dir/d2o_meas_branches" "$scenario" >>"$tmp_dir/c-meas-branches.out"
+done
+if rust_branch_output=$(R2O_MEAS_BRANCH_OUTPUT="$tmp_dir/rust-meas-branches.out" \
+    cargo test -p r2o-controller --locked --test d2o_meas_branches -- --nocapture 2>&1); then
+    rust_branch_status=0
+else
+    rust_branch_status=$?
+fi
+printf '%s\n' "$rust_branch_output"
+[ "$rust_branch_status" -eq 0 ] || exit "$rust_branch_status"
+diff -u "$tmp_dir/c-meas-branches.out" "$tmp_dir/rust-meas-branches.out"
+printf 'C/Rust response/local-error measurement branches match donor %s\n' "$expected_donor_sha"

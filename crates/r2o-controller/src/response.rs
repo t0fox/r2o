@@ -862,6 +862,16 @@ pub(crate) fn probe_trigger(
     client_tcp_has_timestamps: Option<bool>,
     cancel: Option<&AtomicBool>,
 ) -> Result<ProbeOutcome, ProbeError> {
+    // C `d2k_meas_once` (`core/meas.c:179`) отвергает пустое приветствие до
+    // сокета. Без этой проверки Rust просто ждал бы ответа и выдал бы
+    // SILENT вместо ошибки опыта.
+    if trigger.payload.is_empty() {
+        return Err(ProbeError::Local("empty measurement trigger".into()));
+    }
+    if target.host.is_empty() {
+        return Err(ProbeError::Local("empty measurement target".into()));
+    }
+
     #[cfg(target_os = "linux")]
     if raw_split_enabled(cuts, no_raw, crate::raw_probe::raw_supported) {
         return crate::raw_probe::probe_tcp_split(
