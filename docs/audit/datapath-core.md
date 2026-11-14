@@ -773,7 +773,7 @@ Netlink/NFQUEUE кодек: итератор сообщений, атрибут�
 | `wn32` (static) | 32-35 | 4 | запись network-order u32 | `to_be_bytes` (`netlink.rs:196-197,248,251-258`) | **E** | C `p[0]=v>>24…p[3]=v`. Rust `to_be_bytes` для verdict/copy_range/maxlen/flags/mask; тест `netlink.rs:304`. C-строка: `p[0]=v>>24…p[3]=v;`; Rust `to_be_bytes`; тест `netlink.rs:304`. |
 | `d2k_nl_iter_init` | 37-43 | 7 | инициализация итератора; NULL-буфер → пусто | `MessageIter::new` (`netlink.rs:64-70`) | **E** | C `it->p=buf`, `it->left=buf?len:0`. Rust `bytes`, `offset=0`, `stopped=false`; пустой срез даёт те же «нет сообщений». C-строка: `it->p=buf; it->left=buf?len:0;`; Rust `MessageIter::new`: `bytes`, `offset=0`, `stopped=false`. |
 | `d2k_nl_next` | 45-77 | 33 | следующее сообщение; `left<16`/`mlen<16`/`mlen>left` → стоп; `step=align4`; `step>=left` → конец | `MessageIter::next` (`netlink.rs:76-107`) | **E** | **Ветви сверены:** C `!it\|\|!m\|\|left<16` → 0 (left=0); `mlen=h32`; `mlen<16 \|\| mlen>left` → left=0; type/flags/seq/pid/body; `step=align4(mlen)`; `step>=left` → left=0, иначе `p+=step`, `left-=step`. Rust `stopped`, `remaining`, `message_len` в `16..=remaining`, те же поля, `step>=remaining` → `bytes.len()`, иначе `offset+step`. Тест `:355` (unpadded/bad length). |
-| `d2k_nl_packet` | 79-161 | 83 | атрибуты NFQA: hdr/payload/cap/skb/ts/mark/oif, `truncated` | `netlink.rs:125-180 QueuePacket::parse` | **P** | **Ветви сверены:** C `!m\|\|!out` → -1; `body_len<4` → -1; `pos=align4(4)`; цикл `pos+4<=body_len`; `alen`, `atype&0x3fff`; `alen<4 \|\| alen>body_len-pos` → break; value; PACKET_HDR vlen≥7 → id/hw_protocol/hook; PAYLOAD → срез; CAP_LEN/SKB_INFO/MARK vlen≥4; TIMESTAMP vlen≥16 → sec/usec BE, `sec && usec<1e6 && sec<18e9`; IFINDEX_OUTDEV vlen≥4; `step=align4`, `step>body_len-pos` → break. Rust те же поля/границы; `Option` вместо `have_*`; `checked_mul/add` для ns. **Расхождение `truncated`:** C `cap_len > payload_len` даже без PAYLOAD (`payload_len=0`) даёт `true` при `cap_len>0`; Rust `cap_len.zip(payload).is_some_and(...)` без PAYLOAD даёт `false`. Тесты `:371`, `:403` этот случай не покрывают. |
+| `d2k_nl_packet` | 79-161 | 83 | атрибуты NFQA: hdr/payload/cap/skb/ts/mark/oif, `truncated` | `netlink.rs:125-180 QueuePacket::parse` | **E*** | C/Rust differential `scripts/test-nl-packet-differential.sh` PASS (15 кейсов): все поля (id/hw/hook/mark/cap/skb/outdev/timestamp/plen/truncated), короткий заголовок, нулевой sec, `usec=1e6`, `sec=18e9`, маскированный тип `0x4000|PACKET_HDR`, битая/короткая длина атрибута, неизвестный атрибут, тело короче nfgenmsg, PAYLOAD без CAP_LEN и невыровненный хвост. **Исправлено расхождение:** `truncated` теперь считается как C `cap_len > payload_len` с `payload_len=0` по умолчанию, поэтому CAP_LEN без PAYLOAD при cap>0 даёт truncated=1 (тест `parser_marks_copy_range_truncation_and_rejects_short_nfgenmsg` дополнен). **Ограничение:** `d2k_nl_next` (итератор сообщений) в этот differential не входит — проверяется один `d2k_nl_msg`. |
 | `d2k_nl_errno` | 163-176 | 14 | знаковый errno из `NLMSG_ERROR` | `netlink.rs:183-186 kernel_error` | **E** | C требует `type==NLMSG_ERROR && body_len>=4`, читает host-int32, возвращает 0; иначе -1. Rust `(kind==NLMSG_ERROR && body.len()>=4).then(\|\| i32::from_ne_bytes(...))`; `None` вместо -1. Тест `:429`. |
 | `hdr_init` (static) | 181-197 | 17 | `nlmsghdr` + `nfgenmsg`: type/flags/seq/pid=0, family 0, v0, queue BE | `netlink.rs:263-272 header` | **E** | C `need=20`, `memset`, wh16 type/flags, wh32 seq, pid=0, `o[16]=0`, `o[17]=V0`, wn16 queue. Rust `vec![0;20]`, те же поля/смещения, pid остаётся 0. |
 | `put_attr` (static) | 200-216 | 17 | атрибут `len/type/value` + нулевой padding | `netlink.rs:274-280 push_attr` | **E** | C `alen=4+vlen`, `step=align4`, проверка `pos+step<=cap`, `wh16(len/type)`, `memcpy`, `memset` хвоста. Rust `extend` len/type/value, `resize(align4)`, нули; лимит `Vec` вместо cap. |
@@ -795,12 +795,12 @@ Netlink/NFQUEUE кодек: итератор сообщений, атрибут�
   гасит итератор; Rust те же проверки, `step>=remaining` →
   `bytes.len()`. Непакованный последний сообщение и битая длина
   покрыты `:355`. E.
-- **`d2k_nl_packet` (79–161) ↔ `QueuePacket::parse` (`:125`):** все
-  атрибуты и границы совпадают, включая timestamp-границы
-  `sec!=0/17e9`, `usec<1e6`, `skb_info`, `outdev`, `mark`, `cap_len`.
-  **Отличие:** `truncated = cap_len > payload_len` в C считается и при
-  отсутствующем `PAYLOAD` (`payload_len=0`), Rust использует
-  `cap_len.zip(payload)` и без payload даёт `false`. P.
+- **`d2k_nl_packet` (79–161) ↔ `QueuePacket::parse` (`:125`):** E*.
+  Атрибуты и границы совпадают, включая timestamp-границы
+  `sec!=0/17e9`, `usec<1e6`, `skb_info`, `outdev`, `mark`, `cap_len`;
+  C/Rust differential `test-nl-packet-differential.sh` (15 кейсов).
+  `truncated` исправлен: CAP_LEN без PAYLOAD даёт truncated при cap>0,
+  как C. Итератор `d2k_nl_next` differential не покрывает.
 - **`d2k_nl_errno` (163–176) ↔ `kernel_error` (`:183`):** C требует
   `NLMSG_ERROR` и body≥4, читает host-endian signed i32; Rust то же.
   E, `:429`.

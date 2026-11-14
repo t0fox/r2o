@@ -174,10 +174,13 @@ impl<'a> QueuePacket<'a> {
             }
             offset += step;
         }
+        // C `d2k_nl_packet`: `truncated = cap_len > payload_len`, где
+        // `payload_len` по умолчанию 0. Значит, CAP_LEN без PAYLOAD тоже
+        // даёт truncated при cap_len > 0.
+        let payload_len = packet.payload.map_or(0, <[u8]>::len);
         packet.truncated = packet
             .cap_len
-            .zip(packet.payload)
-            .is_some_and(|(cap_len, payload)| cap_len as usize > payload.len());
+            .is_some_and(|cap_len| cap_len as usize > payload_len);
         Some(packet)
     }
 }
@@ -430,6 +433,14 @@ mod tests {
             ..message
         };
         assert!(QueuePacket::parse(&message).unwrap().truncated);
+        // C `d2k_nl_packet`: CAP_LEN без PAYLOAD при cap>0 тоже truncated.
+        let mut cap_only = vec![0, 0, 0, 0];
+        add_test_attr(&mut cap_only, NFQA_CAP_LEN, &10_u32.to_be_bytes(), true);
+        let message = NetlinkMessage {
+            body: &cap_only,
+            ..message
+        };
+        assert!(QueuePacket::parse(&message).unwrap().truncated);
         let message = NetlinkMessage {
             body: &[0; 3],
             ..message
@@ -448,6 +459,152 @@ mod tests {
             body: &body,
         };
         assert_eq!(kernel_error(&message), Some(-22));
+    }
+
+    #[test]
+    #[ignore]
+    fn d2o_nl_packet_trace() {
+        fn parse_body(body: &[u8]) -> Option<QueuePacket<'_>> {
+            QueuePacket::parse(&NetlinkMessage {
+                kind: 0,
+                flags: 0,
+                sequence: 0,
+                pid: 0,
+                body,
+            })
+        }
+        fn print(name: &str, parsed: Option<QueuePacket<'_>>) {
+            let Some(packet) = parsed else {
+                println!("{name} rc=-1");
+                return;
+            };
+            let id = packet
+                .id
+                .map_or_else(|| "-".to_owned(), |v| format!("{v:08x}"));
+            let hw = packet
+                .hardware_protocol
+                .map_or_else(|| "-".to_owned(), |v| format!("{v:04x}"));
+            let hook = packet
+                .hook
+                .map_or_else(|| "-".to_owned(), |v| v.to_string());
+            let mark = packet
+                .mark
+                .map_or_else(|| "-".to_owned(), |v| format!("{v:x}"));
+            let outdev = packet
+                .output_device
+                .map_or_else(|| "-".to_owned(), |v| v.to_string());
+            let timestamp = packet
+                .timestamp_ns
+                .map_or_else(|| "-".to_owned(), |v| v.to_string());
+            let payload_len = packet.payload.map_or(0, <[u8]>::len);
+            println!(
+                "{name} rc=0 id={id} hw={hw} hook={hook} mark={mark} cap={} skb={} outdev={outdev} ts={timestamp} plen={payload_len} trunc={}",
+                packet.cap_len.unwrap_or(0),
+                packet.skb_info.unwrap_or(0),
+                u8::from(packet.truncated)
+            );
+        }
+        fn header() -> Vec<u8> {
+            vec![0, 0, 0, 0]
+        }
+
+        let mut body = header();
+        let mut packet_header = [0; 7];
+        packet_header[..4].copy_from_slice(&0x1122_3344_u32.to_be_bytes());
+        packet_header[4..6].copy_from_slice(&0x0800_u16.to_be_bytes());
+        packet_header[6] = 3;
+        add_test_attr(&mut body, NFQA_PACKET_HDR, &packet_header, true);
+        add_test_attr(&mut body, NFQA_PAYLOAD, b"abc", true);
+        add_test_attr(&mut body, NFQA_CAP_LEN, &3_u32.to_be_bytes(), true);
+        add_test_attr(&mut body, NFQA_MARK, &0x2e_u32.to_be_bytes(), true);
+        add_test_attr(&mut body, NFQA_SKB_INFO, &0x100_u32.to_be_bytes(), true);
+        add_test_attr(&mut body, NFQA_IFINDEX_OUTDEV, &7_u32.to_be_bytes(), true);
+        let mut timestamp = [0; 16];
+        timestamp[4..8].copy_from_slice(&1_u32.to_be_bytes());
+        timestamp[12..16].copy_from_slice(&500_000_u32.to_be_bytes());
+        add_test_attr(&mut body, NFQA_TIMESTAMP, &timestamp, true);
+        print("A all", parse_body(&body));
+
+        let mut body = header();
+        add_test_attr(&mut body, NFQA_PAYLOAD, b"abc", true);
+        add_test_attr(&mut body, NFQA_CAP_LEN, &10_u32.to_be_bytes(), true);
+        print("B truncated", parse_body(&body));
+
+        let mut body = header();
+        add_test_attr(&mut body, NFQA_CAP_LEN, &10_u32.to_be_bytes(), true);
+        print("C cap-only", parse_body(&body));
+
+        let mut body = header();
+        add_test_attr(&mut body, NFQA_CAP_LEN, &0_u32.to_be_bytes(), true);
+        print("D cap-zero", parse_body(&body));
+
+        let mut body = header();
+        add_test_attr(&mut body, NFQA_PACKET_HDR, &[0x11; 6], true);
+        print("E short-hdr", parse_body(&body));
+
+        let mut body = header();
+        add_test_attr(&mut body, NFQA_TIMESTAMP, &[0; 16], true);
+        print("F ts-sec-zero", parse_body(&body));
+
+        let mut body = header();
+        let mut timestamp = [0; 16];
+        timestamp[4..8].copy_from_slice(&1_u32.to_be_bytes());
+        timestamp[12..16].copy_from_slice(&1_000_000_u32.to_be_bytes());
+        add_test_attr(&mut body, NFQA_TIMESTAMP, &timestamp, true);
+        print("G ts-usec-big", parse_body(&body));
+
+        let mut body = header();
+        let mut timestamp = [0; 16];
+        timestamp[..8].copy_from_slice(&18_000_000_000_u64.to_be_bytes());
+        timestamp[12..16].copy_from_slice(&500_000_u32.to_be_bytes());
+        add_test_attr(&mut body, NFQA_TIMESTAMP, &timestamp, true);
+        print("H ts-sec-big", parse_body(&body));
+
+        let mut body = header();
+        let mut packet_header = [0; 7];
+        packet_header[..4].copy_from_slice(&0xAABB_CCDD_u32.to_be_bytes());
+        packet_header[4..6].copy_from_slice(&0x0800_u16.to_be_bytes());
+        packet_header[6] = 4;
+        add_test_attr(&mut body, 0x4000 | NFQA_PACKET_HDR, &packet_header, true);
+        print("I masked-type", parse_body(&body));
+
+        let mut body = header();
+        let mut packet_header = [0; 7];
+        packet_header[..4].copy_from_slice(&1_u32.to_be_bytes());
+        packet_header[4..6].copy_from_slice(&0x0800_u16.to_be_bytes());
+        packet_header[6] = 1;
+        add_test_attr(&mut body, NFQA_PACKET_HDR, &packet_header, true);
+        body.extend_from_slice(&100_u16.to_ne_bytes());
+        body.extend_from_slice(&NFQA_MARK.to_ne_bytes());
+        body.extend_from_slice(&[0; 4]);
+        print("J bad-len", parse_body(&body));
+
+        let mut body = header();
+        body.extend_from_slice(&2_u16.to_ne_bytes());
+        body.extend_from_slice(&NFQA_MARK.to_ne_bytes());
+        body.extend_from_slice(&[0; 2]);
+        print("K tiny-len", parse_body(&body));
+
+        let mut body = header();
+        add_test_attr(&mut body, 99, b"zz", true);
+        add_test_attr(&mut body, NFQA_MARK, &0x2e_u32.to_be_bytes(), true);
+        print("L unknown", parse_body(&body));
+
+        print("M short-body", parse_body(&[0; 3]));
+
+        let mut body = header();
+        add_test_attr(&mut body, NFQA_PAYLOAD, b"abcd", true);
+        print("N payload", parse_body(&body));
+
+        let mut body = header();
+        add_test_attr(&mut body, NFQA_PACKET_HDR, &[0x11; 6], true);
+        let mut packet_header = [0; 7];
+        packet_header[..4].copy_from_slice(&0x1122_3344_u32.to_be_bytes());
+        packet_header[4..6].copy_from_slice(&0x0800_u16.to_be_bytes());
+        packet_header[6] = 2;
+        add_test_attr(&mut body, NFQA_PACKET_HDR, &packet_header, true);
+        add_test_attr(&mut body, NFQA_PAYLOAD, b"abc", false);
+        print("O unaligned", parse_body(&body));
     }
 
     fn add_test_attr(body: &mut Vec<u8>, kind: u16, value: &[u8], padded: bool) {
