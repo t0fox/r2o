@@ -67,6 +67,18 @@ Pinned C/Rust differential-донор остаётся `a378e230...`; это о�
   **47 кейсов** (22 URI + 9 match + 16 reader/mixed) против current main
   `7a5fab9`.
 - Unit: `cargo test -p r2k-core --lib dns_config` — 8 passed, 2 ignored.
+- **FQDN trailing dot:** `https_dns_name_bytes_match` снимает завершающие
+  точки с pattern/host, включая wildcard; C/Rust differential
+  `test-tls-name-differential.sh` PASS **16/16** против current main.
+- **DoQ port 853:** `r2o_quic_address_pool_for_port` для 853 возвращает
+  только intercepted IP, resolver не вызывается; differential
+  `test-quic-doq-pool-differential.sh` PASS (443 resolver=1, 853 resolver=0,
+  IPv4/IPv6). Проводка main использует `primary.port()`, поэтому правило
+  действует в production-пути.
+- **TLS1.2:** `r2o_tls12_client_hello` повторяет donor `ch12_build`
+  (8 случаев точных байт PASS), `r2o_tls12_connect`/`r2o_tls12_resume`
+  проходят loopback handshake и downgrade TLS1.3→1.2 с HTTP 200.
+  Ограничение: production HTTP/TLS остаётся rustls; P-384 C отвергает.
 - Остаются: bootstrap DNS (`d2k_dns_resolve_bootstrap`), scheduler
   `dns_services`/`dns_service_live`, health-пробы DoH/DoT/DoQ и
   `write_live_dns_services`. Поэтому `d2k_sched_write_live` — P*.
