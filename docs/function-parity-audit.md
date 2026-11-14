@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 467 | 225 | 0 | 0 |
-| datapath-core | 400 | 303 | 97 | 0 | 0 |
+| datapath-core | 400 | 304 | 96 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1399** | **583** | **0** | **0** |
+| **Итого** | **1982** | **1400** | **582** | **0** | **0** |
 
-Это не оценка паритета: 583 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 582 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1399 / P 583 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1400 / P 582 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 467 | 225 | 0 | 0 |
-| datapath-core | 400 | 303 | 97 | 0 | 0 |
+| datapath-core | 400 | 304 | 96 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1399** | **583** | **0** | **0** |
+| **Итого** | **1982** | **1400** | **582** | **0** | **0** |
 
 
 ---
@@ -4201,7 +4201,7 @@ R2O: `main.rs` (`r2o_release_udp_batch*`, `r2o_udp_handle_late_tail`),
 | `d2k_udp_send_busy` | 294-296 | 3 | errnobusy: EAGAIN/EWOULDBLOCK/ENOBUFS | `r2o_udp_send_busy` (`r2o_udp_hold.rs:799`) | **E** | **Точное совпадение:** C `err==EAGAIN \|\| EWOULDBLOCK \|\| ENOBUFS`; Rust `r2o_udp_send_busy(&io::Error)` сопоставляет те же `ErrorKind`/errno. |
 | `d2k_udp_follow_new` | 298-298 | 1 | создать follow-таблицу | `R2oUdpFollowTable::new` | **E** | C `calloc(1,sizeof(d2k_udp_follow))`; Rust `new`/`Default` с массивами `[None;S]` и нулевыми счётчиками. OOM-ветвь отличается, обычный путь эквивалентен. |
 | `d2k_udp_follow_free` | 300-300 | 1 | освободить follow-таблицу | `Drop` | **E** | C-строка: `void d2k_udp_follow_free(d2k_udp_follow *f){free(f);}`. Rust владеющая структура `R2oUdpFollowTable` освобождается `Drop`; отдельной функции нет, утечек нет. |
-| `follow_tuple` (static) | 302-319 | 18 | разобрать UDP-кортеж: protocol 17, не поздний фрагмент, не broadcast/multicast, family/src/dst/ports | `r2o_udp_hold.rs:427-446 R2oUdpFollowKey::from_packet` | **P** | **Ветви сверены:** C `packet_parse`, protocol 17, `family==4 && fragment&0x2000` → -1, dst>=224 → -1, v6 dst first 0xff → -1; family/src/dst/ports. Rust `from_packet` требует `protocol==17 && fragment&0x3fff==0`, udp len>=8, те же broadcast/multicast фильтры; `fragment&0x3fff` строже C (C отбрасывает только `0x2000`), для первого фрагмента эквивалентно. |
+| `follow_tuple` (static) | 302-319 | 18 | разобрать UDP-кортеж: protocol 17, не поздний фрагмент, не broadcast/multicast, family/src/dst/ports | `r2o_udp_hold.rs:427-446 R2oUdpFollowKey::from_packet` | **E*** | C: `packet_parse` (сам отвергает поздние фрагменты), protocol 17, `family==4 && fragment&0x2000` → -1, dst>=224 → -1, v6 dst[0]==0xff → -1. Rust требует `protocol==17 && fragment & 0x3fff == 0` (MF или смещение), udp len>=8, те же broadcast/multicast фильтры. C/Rust differential `test-udp-path-differential.sh`: IPv4-фрагмент, TCP, IPv6, multicast → rc=0. **Ограничение:** C разделяет `packet_parse` и `follow_tuple`, Rust — один фильтр; для первого и позднего фрагмента результат тот же. |
 | `same_tuple` (static) | 321-324 | 4 | family + memcmp 16/16/4 | `R2oUdpFollowKey: Eq` | **E** | C `a->family==b->family && !memcmp(src,16) && !memcmp(dst,16) && !memcmp(ports,4)`. Rust typed `Eq` по тем же полям; эквивалентно. |
 | `d2k_udp_follow_mark` | 329-332 | 4 | запомнить пакет в follow-таблице | `R2oUdpFollowTable::r2o_mark` (`:508-548`) | **E*** | C `follow_put(...) ? 0 : -1`; Rust `r2o_mark` возвращает `bool`, `true` — успех. Тесты `r2o_udp_follow_ограничивает_поздний_хвост_пачкой_и_пятью_миллисекундами`, `r2o_udp_follow_сохраняет_срок_отложенной_головы_и_помечает_постоянный_отказ`, C/Rust differential `test-udp-path-differential.sh` (plain/planned follow). **Ограничение:** API `bool` вместо 0/-1. |
 | `follow_put` (static) | 334-355 | 22 | записать кортеж: until=`max(at,now)+window`, at_ns=`at>now?at:0`, seq/used, слот по tuple или наименьший until, live++ | `r2o_udp_hold.rs:508-547 r2o_mark` | **E*** | Те же вычисления (`deferred_at`, anchor, until), поиск same key/свободного/наименьшего until, `live++`; тесты follow пятимиллисекундного окна, сохранения срока отложенной головы и C/Rust differential `test-udp-path-differential.sh`. **Ограничение:** Rust хранит типизированный ключ, C — сырой кортеж; набор слотов/until совпадает. |
