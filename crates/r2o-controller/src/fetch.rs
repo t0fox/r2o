@@ -4353,6 +4353,156 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tcp_budget_remaining_branches_match_current_donor() {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use rustls::{ServerConfig, ServerConnection};
+        use std::net::{TcpListener, TcpStream};
+        use std::sync::Arc;
+        use std::thread;
+
+        fn serve_case(case: &'static str, config: Arc<ServerConfig>, listener: TcpListener) {
+            let Ok((socket, _)) = listener.accept() else {
+                return;
+            };
+            let connection = ServerConnection::new(config).unwrap();
+            let mut stream = rustls::StreamOwned::new(connection, socket);
+            let mut read_request =
+                |stream: &mut rustls::StreamOwned<ServerConnection, TcpStream>| {
+                    let mut request = Vec::new();
+                    let mut byte = [0_u8; 1];
+                    loop {
+                        if stream.read_exact(&mut byte).is_err() {
+                            return false;
+                        }
+                        request.push(byte[0]);
+                        if request.ends_with(b"\r\n\r\n") {
+                            return true;
+                        }
+                    }
+                };
+            let full = |stream: &mut rustls::StreamOwned<ServerConnection, TcpStream>,
+                        close: bool| {
+                let connection = if close { "close" } else { "keep-alive" };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: {connection}\r\n\r\nok"
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            };
+
+            if !read_request(&mut stream) {
+                return;
+            }
+            full(&mut stream, case == "conn-close");
+            if case == "conn-close" {
+                return;
+            }
+            if !read_request(&mut stream) {
+                return;
+            }
+            match case {
+                "passed" | "not-growing" => full(&mut stream, false),
+                "peer-spoke" => {
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nab");
+                    let _ = stream.flush();
+                }
+                "silent" => {
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nab");
+                    let _ = stream.flush();
+                    thread::sleep(Duration::from_millis(350));
+                }
+                _ => panic!("неизвестный case {case}"),
+            }
+        }
+
+        fn run_case(case: &'static str) -> crate::r2o_volume::R2oVolumePacketBudget {
+            let certificate =
+                rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+            let certificate_der = CertificateDer::from(certificate.serialize_der().unwrap());
+            let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                certificate.serialize_private_key_der(),
+            ));
+            let config = Arc::new(
+                ServerConfig::builder()
+                    .with_no_client_auth()
+                    .with_single_cert(vec![certificate_der.clone()], private_key)
+                    .unwrap(),
+            );
+            let mut roots = RootCertStore::empty();
+            roots.add(certificate_der).unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = thread::spawn(move || serve_case(case, config, listener));
+            let stream = TcpStream::connect(address).unwrap();
+            let mut counts = if case == "passed" {
+                vec![4_u32, 12].into_iter()
+            } else {
+                vec![4_u32, 4].into_iter()
+            };
+            let options = FetchOptions {
+                name: "localhost".into(),
+                port: address.port(),
+                ip: Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+                path: "/".into(),
+                deadline: if case == "silent" {
+                    Duration::from_millis(100)
+                } else {
+                    Duration::from_secs(2)
+                },
+                tls12: false,
+                wire_len: None,
+                mark: None,
+            };
+            let result = r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
+                &options,
+                stream,
+                address,
+                Instant::now(),
+                R2oFetchEncoding::Identity,
+                roots,
+                None,
+                Some(5),
+                None,
+                |_| counts.next(),
+            )
+            .expect("завершить HTTP budget differential");
+            let _ = server.join();
+            result.r2o_volume_observation.packet_budget
+        }
+
+        fn out_budget(budget: crate::r2o_volume::R2oVolumePacketBudget) -> u8 {
+            match budget {
+                crate::r2o_volume::R2oVolumePacketBudget::NotMeasured => 0,
+                crate::r2o_volume::R2oVolumePacketBudget::NotApplicable => 3,
+                crate::r2o_volume::R2oVolumePacketBudget::Cut => 2,
+                crate::r2o_volume::R2oVolumePacketBudget::Passed => 1,
+            }
+        }
+
+        let mut output = String::new();
+        for case in [
+            "passed",
+            "conn-close",
+            "not-growing",
+            "peer-spoke",
+            "silent",
+        ] {
+            output.push_str(&format!(
+                "case={case} budget={}\n",
+                out_budget(run_case(case))
+            ));
+        }
+        if let Ok(path) = std::env::var("R2O_HTTP_BUDGET_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert_eq!(
+            output,
+            "case=passed budget=1\ncase=conn-close budget=3\ncase=not-growing budget=3\ncase=peer-spoke budget=3\ncase=silent budget=2\n"
+        );
+    }
+
     #[test]
     fn https_замер_сохраняет_частичное_тело_tls_и_сетевые_счётчики() {
         use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
