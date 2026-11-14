@@ -91,11 +91,21 @@ pub fn r2o_quic_address_pool_for_port(
     resolved: impl IntoIterator<Item = SocketAddr>,
     port: u16,
 ) -> Vec<SocketAddr> {
+    r2o_quic_address_pool_with_resolver(primary, port, || resolved.into_iter().collect())
+}
+
+/// Вариант с ленивым резолвером: для DoQ 853 резолвер не вызывается вообще,
+/// как в C `classify_run` (иначе запрос к измеряемому DNS был бы лишним).
+pub fn r2o_quic_address_pool_with_resolver(
+    primary: SocketAddr,
+    port: u16,
+    resolver: impl FnOnce() -> Vec<SocketAddr>,
+) -> Vec<SocketAddr> {
     if port == 853 {
         return vec![primary];
     }
     let mut pool = vec![primary];
-    for address in resolved
+    for address in resolver()
         .into_iter()
         .filter(|address| address.is_ipv4() == primary.is_ipv4())
         .take(R2O_QUIC_MAX_ADDRS)
@@ -1196,6 +1206,30 @@ mod tests {
         if let Ok(path) = std::env::var("R2O_QUIC_DIRECT_HTTP3_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
         }
+    }
+
+    #[test]
+    fn r2o_quic_doq_pool_c_differential_matches_resolver_calls() {
+        fn run(name: &str, primary: std::net::SocketAddr, port: u16) -> String {
+            let mut calls = 0_u32;
+            let _pool = super::r2o_quic_address_pool_with_resolver(primary, port, || {
+                calls += 1;
+                vec![
+                    "192.0.2.2:443".parse().unwrap(),
+                    "[2001:db8::2]:443".parse().unwrap(),
+                ]
+            });
+            format!("case={name} port={port} resolve_calls={calls}\n")
+        }
+        let mut output = String::new();
+        output.push_str(&run("doq-v4", "192.0.2.10:853".parse().unwrap(), 853));
+        output.push_str(&run("regular-v4", "192.0.2.10:443".parse().unwrap(), 443));
+        output.push_str(&run("doq-v6", "[2001:db8::10]:853".parse().unwrap(), 853));
+        if let Ok(path) = std::env::var("R2O_QUIC_DOQ_POOL_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert!(output.contains("case=doq-v4 port=853 resolve_calls=0"));
+        assert!(output.contains("case=regular-v4 port=443 resolve_calls=1"));
     }
 
     #[test]
