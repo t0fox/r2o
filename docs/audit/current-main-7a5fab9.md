@@ -97,8 +97,13 @@ Pinned C/Rust differential-донор остаётся `a378e230...`; это о�
   `now>=next_check`), `probe.host=live.ip`/bootstrap, 4000 мс; состояния
   `direct_ok/failed/plan_applied/bypass_ok` и `candidate_plan_applied`
   покрыты `test-dns-state-differential.sh` **8 сценариев**.
-- Остаются: `no_bypass` и production `candidate_plan_applied` — нужен
-  task-слой `T_DNS_HEALTH`/`T_RESTING`. Поэтому `d2k_sched_write_live` — P*.
+- **Task states 2026-11-14:** `note_discovery_outcome` связывает Discovery
+  с dns_services; live.rs пишет `no_bypass`, `bypass_ok`,
+  `candidate_plan_applied`, `dns_answer_via_plan` в C-порядке;
+  `test-dns-state-differential.sh` PASS **9 сценариев** (включая
+  `no_bypass`/`bypass_ok`/health/ip change/plan applied).
+- Остаются: настоящая task-ячейка `T_DNS_HEALTH`/`T_RESTING` и полный
+  `--measure-mark` CLI differential. Поэтому `d2k_sched_write_live` — P*.
 
 ## Команды проверки
 
