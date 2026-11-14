@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 234 | 166 | 0 | 0 |
+| datapath-core | 400 | 235 | 165 | 0 | 0 |
 | datapath-plan | 183 | 177 | 6 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1316** | **666** | **0** | **0** |
+| **Итого** | **1982** | **1317** | **665** | **0** | **0** |
 
-Это не оценка паритета: 666 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 665 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1316 / P 666 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1317 / P 665 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 234 | 166 | 0 | 0 |
+| datapath-core | 400 | 235 | 165 | 0 | 0 |
 | datapath-plan | 183 | 177 | 6 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1316** | **666** | **0** | **0** |
+| **Итого** | **1982** | **1317** | **665** | **0** | **0** |
 
 
 ---
@@ -4644,7 +4644,7 @@ ctnetlink: сборка GET, разбор счётчиков/состояния 
 | `d2k_ct_get_req` | 52-81 | 30 | nlmsg CT_GET orig tuple: family 2/10, res_id 0, nested TUPLE_ORIG/IP/PROTO, src/dst, proto/ports, seq, pid 0 | `conntrack.rs` `encode_get` | **E*** | C/Rust differential `scripts/r2o-conntrack-ctget-differential.sh` PASS: 4 кортежа (IPv4/IPv6 × TCP/UDP), весь nlmsg сравнивается побайтово. **Ограничение:** Rust дополнительно требует `proto ∈ {6,17}`, C принимает любой байт; ошибки `cap<20`, `!o/!t`, family∉{4,6} не покрыты. |
 | `counter` (static) | 84-96 | 13 | вложенные counters: `PACKETS` 8 байт или `PACKETS32` 4 байта, иначе -1 | `conntrack.rs:211-226 parse_counter` | **E** | **Ветви сверены:** C обходит атрибуты, `alen<4 \|\| alen>n-off` → -1, `PACKETS && vl==8` → BE64, `PACKETS32 && vl==4` → BE32, иначе `off+=align4`. Rust `find_attribute(PACKETS)` → 8 байт, иначе `find_attribute(PACKETS32)` → 4; **отличие:** при `PACKETS` неверной длины C не пробует `PACKETS32`, Rust пробует. На валидных ядерных ответах не проявляется; тесты `:487`, `:529`. |
 | `tcp_state` (static) | 99-120 | 22 | nested PROTOINFO/TCP/TCP_STATE: байт+1, 0 — нет | `conntrack.rs:156-160` (`state.first().copied()`) | **E*** | **Совпадает по значению:** C ищет PROTOINFO→TCP→TCP_STATE, требует `l2>=4+1`, возвращает `state+1`; `d2k_ct_info_parse` вычитает 1. Rust та же цепочка `find_attribute`, `state.first()`, хранит исходный байт; `tcp_state_known` ↔ `Some`. Тест `:487` (state=3). |
-| `d2k_ct_info_parse` | 122-156 | 35 | seq-фильтр; NLMSG_ERROR → 1/-1; CT_NEW; orig/reply counters; tcp_state; коды -1/0/1/2 | `conntrack.rs:133-171 decode_info/decode_entry` | **P** | **Ветви сверены:** C перебирает сообщения; `seq` фильтр; `d2k_nl_errno` → `e==0 ? -1 : 1`; не CT_NEW или body<4 → -1; атрибуты: counters orig/reply, protoinfo; при отсутствии любого counters → 2; при `out` — orig/reply, state known/value; 0. Rust `decode_entry` пропускает несовпавшие seq/type/body<4 (**не** возвращает -1), **требует CTA_TUPLE_REPLY** и разбирает NAT-source, counters делает необязательными (`info=orig.zip(reply)`), tcp_state — `Option`; возвращает `Some(Entry)` даже без counters (`info=None`). NLMSG_ERROR отдельно не разбирает. Для успешного ответа с обоими counters поля совпадают; коды/наличие reply-tuple различаются. |
+| `d2k_ct_info_parse` | 122-156 | 35 | seq-фильтр; NLMSG_ERROR → 1/-1; CT_NEW; orig/reply counters; tcp_state; коды -1/0/1/2 | `conntrack.rs` `r2o_ct_info_parse`, production `query` | E | C/Rust differential `scripts/test-datapath-ct-info-differential.sh` PASS: 5 кейсов — счётчики 22/25, чужой seq → -1, нет счётчиков → 2, NLMSG_ERROR errno≠0 → 1, errno=0 → -1; Rust больше не требует reverse-кортеж для счётчиков. |
 | `d2k_ct_counters_parse` | 158-167 | 10 | обёртка `info_parse`, копирует orig/reply при rc=0 | `conntrack.rs:133-135 decode_info` | **P** | C сохраняет код `info_parse` (включая 1/2); Rust `decode_info` — `Option<Info>` только для успеха с обоими counters. Для успешного ответа эквивалентно. |
 | `d2k_ct_query_info_fd` | 169-186 | 18 | send GET `MSG_DONTWAIT`, до 8 recv `MSG_DONTWAIT`, вернуть 0/1/2/-1 | `conntrack.rs:301-307 query_entry`, `:384-404 receive_entry` | **P** | **Ветви сверены:** C `fd<0\|\|!t` → -1; сборка; send `MSG_DONTWAIT` ровно n; до 8 recv `MSG_DONTWAIT`; `info_parse` 0/1/2 → вернуть, иначе -1. Rust `query_entry`: sequence++, encode, send, `receive_entry`: до 8 recv; при **любом** сообщении с нужным seq → `decode_entry` (может быть None), иначе None. Коды 1/2 не возвращаются, `decode_entry` строже (reply tuple). |
 | `d2k_ct_query_fd` | 188-197 | 10 | обёртка `query_info_fd` для счётчиков | `conntrack.rs:297-299 query` | **P** | C возвращает код `info_parse`; Rust `query` — `Option<Info>` (только успех с обоими counters). Эквивалентно только для успешного ответа. |

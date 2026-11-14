@@ -130,6 +130,82 @@ pub fn encode_get(sequence: u32, tuple: &R2oConntrackTuple) -> Option<Vec<u8>> {
     Some(message)
 }
 
+/// C `d2k_ct_info_parse` (`datapath/ctq.c:122-156`): коды C
+/// -1/0/1/2, где 1 — NLMSG_ERROR с ненулевым errno, 2 — нет счётчиков.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum R2oConntrackInfoParse {
+    Info(R2oConntrackInfo),
+    Reply,
+    NoCounters,
+    Error,
+}
+
+pub fn r2o_ct_info_parse(bytes: &[u8], sequence: u32) -> R2oConntrackInfoParse {
+    for message in MessageIter::new(bytes) {
+        if message.sequence != sequence {
+            continue;
+        }
+        if message.kind == NLMSG_ERROR && message.body.len() >= 4 {
+            let errno = i32::from_ne_bytes(
+                message.body[..4]
+                    .try_into()
+                    .expect("длина NLMSG_ERROR проверена"),
+            );
+            return if errno == 0 {
+                R2oConntrackInfoParse::Error
+            } else {
+                R2oConntrackInfoParse::Reply
+            };
+        }
+        if message.kind != ((NFNL_SUBSYS_CTNETLINK << 8) | IPCTNL_MSG_CT_NEW)
+            || message.body.len() < 4
+        {
+            return R2oConntrackInfoParse::Error;
+        }
+        let attributes = &message.body[4..];
+        let mut offset = 0;
+        let mut original = None;
+        let mut reply = None;
+        let mut tcp_state = 0;
+        while offset + NLA_HEADER_LEN <= attributes.len() {
+            let header = &attributes[offset..offset + NLA_HEADER_LEN];
+            let length = usize::from(u16::from_ne_bytes([header[0], header[1]]));
+            let kind = u16::from_ne_bytes([header[2], header[3]]) & NLA_TYPE_MASK;
+            if length < NLA_HEADER_LEN || length > attributes.len() - offset {
+                return R2oConntrackInfoParse::Error;
+            }
+            let value = &attributes[offset + NLA_HEADER_LEN..offset + length];
+            match kind {
+                CTA_COUNTERS_ORIG => original = parse_counter(value),
+                CTA_COUNTERS_REPLY => reply = parse_counter(value),
+                CTA_PROTOINFO => {
+                    tcp_state = find_attribute(value, CTA_PROTOINFO_TCP)
+                        .ok()
+                        .flatten()
+                        .and_then(|tcp| find_attribute(tcp, CTA_PROTOINFO_TCP_STATE).ok().flatten())
+                        .and_then(|state| state.first().copied())
+                        .map_or(0, |state| state.saturating_add(1));
+                }
+                _ => {}
+            }
+            let step = align4(length).unwrap_or(0);
+            if step == 0 || step > attributes.len() - offset {
+                return R2oConntrackInfoParse::Error;
+            }
+            offset += step;
+        }
+        let (Some(original), Some(reply)) = (original, reply) else {
+            return R2oConntrackInfoParse::NoCounters;
+        };
+        return R2oConntrackInfoParse::Info(R2oConntrackInfo {
+            original_packets: original,
+            reply_packets: reply,
+            tcp_state: tcp_state.checked_sub(1),
+        });
+    }
+    R2oConntrackInfoParse::Error
+}
+
 pub fn decode_info(bytes: &[u8], sequence: u32) -> Option<R2oConntrackInfo> {
     decode_entry(bytes, sequence).and_then(|entry| entry.info)
 }
@@ -295,7 +371,11 @@ impl R2oConntrackClient {
     }
 
     pub fn query(&mut self, tuple: &R2oConntrackTuple) -> Option<R2oConntrackInfo> {
-        self.query_entry(tuple).and_then(|entry| entry.info)
+        self.sequence = self.sequence.wrapping_add(1).max(1);
+        let sequence = self.sequence;
+        let request = encode_get(sequence, tuple)?;
+        self.send(&request).ok()?;
+        self.receive_info(sequence)
     }
 
     pub fn query_entry(&mut self, tuple: &R2oConntrackTuple) -> Option<R2oConntrackEntry> {
@@ -402,6 +482,35 @@ impl R2oConntrackClient {
         }
         None
     }
+
+    /// C `d2k_ct_query_info_fd` (`datapath/ctq.c:169-186`): до 8 recv, свой
+    /// seq, коды -1/0/1/2; здесь нужен только успешный `info`.
+    fn receive_info(&self, sequence: u32) -> Option<R2oConntrackInfo> {
+        let mut response = [0_u8; 4096];
+        for _ in 0..8 {
+            let read = unsafe {
+                libc::recv(
+                    self.fd,
+                    response.as_mut_ptr() as *mut libc::c_void,
+                    response.len(),
+                    libc::MSG_DONTWAIT,
+                )
+            };
+            if read <= 0 {
+                return None;
+            }
+            let response = &response[..read as usize];
+            if !MessageIter::new(response).any(|message| message.sequence == sequence) {
+                continue;
+            }
+            match r2o_ct_info_parse(response, sequence) {
+                R2oConntrackInfoParse::Info(info) => return Some(info),
+                R2oConntrackInfoParse::Reply | R2oConntrackInfoParse::NoCounters => return None,
+                R2oConntrackInfoParse::Error => continue,
+            }
+        }
+        None
+    }
 }
 
 impl Drop for R2oConntrackClient {
@@ -478,8 +587,8 @@ mod tests {
         CTA_COUNTERS_ORIG, CTA_COUNTERS_PACKETS, CTA_COUNTERS_REPLY, CTA_COUNTERS32_PACKETS,
         CTA_IP_V4_DST, CTA_IP_V4_SRC, CTA_PROTO_DST_PORT, CTA_PROTO_NUM, CTA_PROTO_SRC_PORT,
         CTA_TUPLE_IP, CTA_TUPLE_ORIG, CTA_TUPLE_PROTO, CTA_TUPLE_REPLY, R2oConntrackInfo,
-        R2oConntrackNatSource, R2oConntrackTuple, decode_entry, decode_info, encode_get,
-        find_attribute, tuple_from_socket_addrs,
+        R2oConntrackInfoParse, R2oConntrackNatSource, R2oConntrackTuple, decode_entry, decode_info,
+        encode_get, find_attribute, r2o_ct_info_parse, tuple_from_socket_addrs,
     };
     use crate::netlink::MessageIter;
     use std::net::SocketAddr;
@@ -536,6 +645,79 @@ mod tests {
                 reply_packets: 25,
                 tcp_state: None,
             })
+        );
+    }
+
+    #[test]
+    fn ct_info_parse_differential_matches_c() {
+        let mut output = String::new();
+        let cases: [(&str, Vec<u8>, u32); 5] = [
+            ("counters", ответ_conntrack_без_кортежа(7, 22, 25), 7),
+            ("wrong_seq", ответ_conntrack_без_кортежа(7, 22, 25), 8),
+            ("no_counters", ответ_conntrack_без_счётчиков(7), 7),
+            ("reply", ошибка_conntrack(7, -2), 7),
+            ("ack", ошибка_conntrack(7, 0), 7),
+        ];
+        for (name, buffer, sequence) in cases {
+            let parsed = r2o_ct_info_parse(&buffer, sequence);
+            let rc = match parsed {
+                R2oConntrackInfoParse::Info(_) => 0,
+                R2oConntrackInfoParse::Reply => 1,
+                R2oConntrackInfoParse::NoCounters => 2,
+                R2oConntrackInfoParse::Error => -1,
+            };
+            output.push_str(&format!("{name} rc={rc}"));
+            if let R2oConntrackInfoParse::Info(info) = parsed {
+                output.push_str(&format!(
+                    " orig={} reply={} known={} state={}",
+                    info.original_packets,
+                    info.reply_packets,
+                    u8::from(info.tcp_state.is_some()),
+                    info.tcp_state.unwrap_or(0)
+                ));
+            }
+            output.push('\n');
+        }
+        if let Ok(path) = std::env::var("R2O_CT_INFO_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert!(output.contains("counters rc=0 orig=22 reply=25 known=0 state=0\n"));
+        assert!(output.contains("no_counters rc=2\n"));
+        assert!(output.contains("reply rc=1\n"));
+        assert!(output.contains("ack rc=-1\n"));
+    }
+
+    #[test]
+    fn ct_info_parse_matches_c_codes_and_does_not_require_reply_tuple() {
+        let message = ответ_conntrack(7, 22, 25, Some(3));
+        assert_eq!(
+            r2o_ct_info_parse(&message, 7),
+            R2oConntrackInfoParse::Info(R2oConntrackInfo {
+                original_packets: 22,
+                reply_packets: 25,
+                tcp_state: Some(3),
+            })
+        );
+        assert_eq!(
+            r2o_ct_info_parse(&ответ_conntrack_без_счётчиков(7), 7),
+            R2oConntrackInfoParse::NoCounters
+        );
+        assert_eq!(r2o_ct_info_parse(&message, 8), R2oConntrackInfoParse::Error);
+        assert_eq!(
+            r2o_ct_info_parse(&ответ_conntrack_без_кортежа(7, 11, 12), 7),
+            R2oConntrackInfoParse::Info(R2oConntrackInfo {
+                original_packets: 11,
+                reply_packets: 12,
+                tcp_state: None,
+            })
+        );
+        assert_eq!(
+            r2o_ct_info_parse(&ошибка_conntrack(7, -libc::ENOENT), 7),
+            R2oConntrackInfoParse::Reply
+        );
+        assert_eq!(
+            r2o_ct_info_parse(&ошибка_conntrack(7, 0), 7),
+            R2oConntrackInfoParse::Error
         );
     }
 
@@ -701,6 +883,44 @@ mod tests {
         message[..4].copy_from_slice(&message_len.to_ne_bytes());
         message[4..6].copy_from_slice(&0x0100_u16.to_ne_bytes());
         message[8..12].copy_from_slice(&sequence.to_ne_bytes());
+        message
+    }
+
+    fn ответ_conntrack_без_кортежа(
+        sequence: u32,
+        original: u64,
+        reply: u64,
+    ) -> Vec<u8> {
+        let mut body = vec![2, 0, 0, 0];
+        let mut original_counter = Vec::new();
+        атрибут(
+            &mut original_counter,
+            CTA_COUNTERS_PACKETS,
+            &original.to_be_bytes(),
+        );
+        let mut reply_counter = Vec::new();
+        атрибут(
+            &mut reply_counter,
+            CTA_COUNTERS_PACKETS,
+            &reply.to_be_bytes(),
+        );
+        атрибут(&mut body, CTA_COUNTERS_ORIG | 0x8000, &original_counter);
+        атрибут(&mut body, CTA_COUNTERS_REPLY | 0x8000, &reply_counter);
+        let mut message = vec![0; 16];
+        message.extend_from_slice(&body);
+        let message_len = message.len() as u32;
+        message[..4].copy_from_slice(&message_len.to_ne_bytes());
+        message[4..6].copy_from_slice(&0x0100_u16.to_ne_bytes());
+        message[8..12].copy_from_slice(&sequence.to_ne_bytes());
+        message
+    }
+
+    fn ошибка_conntrack(sequence: u32, errno: i32) -> Vec<u8> {
+        let mut message = vec![0; 20];
+        message[..4].copy_from_slice(&20_u32.to_ne_bytes());
+        message[4..6].copy_from_slice(&2_u16.to_ne_bytes());
+        message[8..12].copy_from_slice(&sequence.to_ne_bytes());
+        message[16..20].copy_from_slice(&errno.to_ne_bytes());
         message
     }
 
