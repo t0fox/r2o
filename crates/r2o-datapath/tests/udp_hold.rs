@@ -551,6 +551,33 @@ fn r2o_udp_hold_отказывает_для_датаграмм_больше_ты
 }
 
 #[test]
+fn r2o_udp_hold_next_deadline_даёт_абсолютный_минимум_как_c() {
+    let now = Instant::now();
+    let mut table = R2oUdpHoldTable::new();
+    assert_eq!(table.r2o_next_deadline(), None);
+    let first = r2o_udp_packet([192, 0, 2, 1], [198, 51, 100, 2], 50_011, 443, b"one");
+    let second = r2o_udp_packet([192, 0, 2, 2], [198, 51, 100, 2], 50_012, 443, b"two");
+    assert_eq!(table.r2o_feed(1, 0, &first, now), R2oUdpHoldFeed::Held);
+    assert_eq!(
+        table.r2o_feed(2, 0, &second, now + Duration::from_millis(20)),
+        R2oUdpHoldFeed::Held
+    );
+    assert_eq!(
+        table.r2o_next_deadline(),
+        Some(now + Duration::from_millis(100))
+    );
+    assert_eq!(table.timeout_ms(now, 200), 100);
+    assert_eq!(table.timeout_ms(now + Duration::from_millis(25), 200), 75);
+    assert!(table.r2o_take(&first).is_some());
+    assert_eq!(
+        table.r2o_next_deadline(),
+        Some(now + Duration::from_millis(120))
+    );
+    assert!(table.r2o_take(&second).is_some());
+    assert_eq!(table.r2o_next_deadline(), None);
+}
+
+#[test]
 fn r2o_udp_hold_drain_возвращает_все_слоты_для_release_как_free() {
     let now = Instant::now();
     let mut table = R2oUdpHoldTable::new();

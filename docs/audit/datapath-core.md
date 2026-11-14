@@ -512,7 +512,7 @@ R2O заменил структуру на `HashMap`, сохранив ключ,
 | `d2k_udp_hold_feed` | 54-58 | 5 | обёртка `feed_marked(...,mark=0,...)` | `r2o_udp_hold.rs` `r2o_feed` | **E*** | Rust `r2o_feed(id, 0, …)` — та же запись с нулевой меткой; тесты `r2o_udp_hold_сохраняет_датаграммы_потока_fifo_с_метками`, `...истекает_на_границе_ста_миллисекунд`, `...при_переполнении_возвращает_всю_старую_пачку`, `...отказывает_после_шестнадцати_потоков_без_вытеснения`, `...отказывает_для_датаграмм_больше_тысячи_шестисот_байт`; C/Rust differential `test-udp-prepost-differential.sh` использует mark=0. **Ограничение:** истёкшие слоты C flush-ит внутри feed, Rust — отдельным `r2o_flush` перед feed (production `main.rs`). |
 | `d2k_udp_hold_feed_marked` | 60–96 | 37 | валидация len 1..1600, flush истёкших, слот по ключу/свободный, переполнение 8, запись id/len/mark/packet | `:154 r2o_feed` (`R2O_UDP_HOLD_PACKETS=8`, max 1600) | **E*** | Тесты `tests/udp_hold.rs`: FIFO и метки (`...fifo_с_метками`, mark 7), истечение на границе 100 мс, переполнение 8 → `Overflow(batch)` со всей старой пачкой, отказ после 16 потоков без вытеснения, отказ для датаграмм >1600, отказ для фрагментов/не-Initial (`r2o_udp_hold_отказывает_для_фрагментов_и_не_initial`). **Ограничение:** C освобождает слот через callback и возвращает 0; Rust возвращает `Overflow(batch)`, который вызывающий обязан отпустить; flush истёкших — отдельный вызов, как в production. |
 | `d2k_udp_hold_take` | 98–113 | 16 | забрать пачку по ключу, очистить слот; `now_ns` не используется | `:198 r2o_take` | **E*** | Тесты `r2o_udp_hold_собирает_split_clienthello_и_возвращает_пачку_для_replay`, `...при_переполнении_возвращает_всю_старую_пачку`, `...fifo_с_метками`; C/Rust differential `test-udp-prepost-differential.sh` PASS: REPLAY (`post=2`, count=1), LOST после раннего take (`post=4`), RECLAIMED через release. **Ограничение:** C принимает key/now, Rust — пакет и выводит ключ; `now_ns` в C не используется. |
-| `d2k_udp_hold_next_ns` | 115–123 | 9 | абсолютный минимальный deadline (ns), 0 если пусто | `:240 timeout_ms` | **P** | C отдаёт абсолютные ns; Rust — относительные ms с `max_ms` и `0` при `deadline<=now`/`max_ms<=0`. Для poll эквивалентно, отдельного absolute-getter нет. |
+| `d2k_udp_hold_next_ns` | 115–123 | 9 | абсолютный минимальный deadline (ns), 0 если пусто | `r2o_udp_hold.rs` `r2o_next_deadline`, `timeout_ms` | **E*** | `r2o_next_deadline` возвращает абсолютный `Instant` ближайшего слота (`None` вместо C 0), `timeout_ms` строится на нём. Тест `r2o_udp_hold_next_deadline_даёт_абсолютный_минимум_как_c`: пусто → None; два слота со сроками now+100/now+120 → минимум 100, после take первого → 120, после второго → None. **Ограничение:** C отдаёт ns, Rust — `Instant`; для poll разница только в типе, production использует `timeout_ms`. |
 
 ### datapath/udp_hold.c: построчная сверка
 
@@ -534,7 +534,7 @@ R2O заменил структуру на `HashMap`, сохранив ключ,
 - **`d2k_udp_hold_take`:** E*. Тесты take и C/Rust differential
   pre/post (REPLAY/LOST/RECLAIMED) PASS; C принимает key/now, Rust —
   пакет.
-- **`d2k_udp_hold_next_ns`:** P. C — абсолютные ns; Rust `timeout_ms` —
+- **`d2k_udp_hold_next_ns`:** E*. Абсолютный `r2o_next_deadline` и тест; C — ns, Rust `timeout_ms` —
   относительные ms с `max_ms` и `0` при истёкшем deadline.
 - **Тесты:** прямых unit-тестов `R2oUdpHoldTable` в
   `r2o_udp_hold.rs` нет; тесты `:830+` относятся к follow/deferred.

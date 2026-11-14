@@ -237,13 +237,17 @@ impl R2oUdpHoldTable {
     }
 
     /// Вернуть срок до ближайшего истечения пачки.
-    pub fn timeout_ms(&self, now: Instant, max_ms: i32) -> i32 {
-        let Some(next) = self
-            .slots
+    /// C `d2k_udp_hold_next_ns`: абсолютный ближайший срок; `None` — пусто
+    /// (C отдаёт 0).
+    pub fn r2o_next_deadline(&self) -> Option<Instant> {
+        self.slots
             .iter()
             .filter_map(|slot| slot.as_ref().map(|entry| entry.deadline))
             .min()
-        else {
+    }
+
+    pub fn timeout_ms(&self, now: Instant, max_ms: i32) -> i32 {
+        let Some(next) = self.r2o_next_deadline() else {
             return max_ms.max(0);
         };
         if next <= now || max_ms <= 0 {
