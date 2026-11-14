@@ -2179,12 +2179,13 @@ mod app {
                                 execution_id: None,
                                 binding: None,
                             };
-                            send_refused_event(
+                            r2o_refuse_coded(
                                 &mut control,
                                 &mut flow_journal,
                                 journal_timestamp(&journal_origin),
                                 &refused,
                                 Some(note),
+                                controller_probe,
                             );
                         }
                         udp_quic_deny = selected_plan.qdeny != 0 && !controller_probe;
@@ -2572,12 +2573,13 @@ mod app {
                             execution_id: None,
                             binding: None,
                         };
-                        send_refused_event(
+                        r2o_refuse_coded(
                             &mut control,
                             &mut flow_journal,
                             journal_timestamp(&journal_origin),
                             &refused,
                             None,
+                            controller_probe,
                         );
                     }
                     let decision_execution_id = if matches!(
@@ -4484,13 +4486,30 @@ mod app {
             execution_id: None,
             binding: None,
         };
-        send_refused_event(
+        r2o_refuse_coded(
             control,
             flow_journal,
             journal_timestamp(journal_origin),
             &refused,
             Some(note),
+            controller_probe,
         );
+    }
+
+    /// C `refuse_coded` (`session.c:402-413`): зонд с кодом NONE в журнал не
+    /// пишет; остальные коды и обычные потоки идут общим путём.
+    fn r2o_refuse_coded(
+        control: &mut Option<ControlServer>,
+        flow_journal: &mut R2oFlowJournal,
+        at_ns: u64,
+        event: &RefusedEvent,
+        note: Option<&'static str>,
+        controller_probe: bool,
+    ) {
+        if controller_probe && event.code == r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_NONE {
+            return;
+        }
+        send_refused_event(control, flow_journal, at_ns, event, note);
     }
 
     fn send_refused_event(
@@ -8321,6 +8340,67 @@ mod app {
             assert_eq!(
                 super::refuse_of_errno(&send),
                 r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_SEND
+            );
+        }
+
+        #[test]
+        fn refuse_coded_silent_for_probe_none_like_c() {
+            use r2o_datapath::flow_journal::{
+                R2O_JOURNAL_REFUSE_NONE, R2O_JOURNAL_REFUSE_TOO_LONG, R2oFlowJournal,
+            };
+
+            let mut key = [0_u8; r2k_core::control::KEY_LEN];
+            key[0] = 4;
+            key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+            key[17..21].copy_from_slice(&[198, 51, 100, 20]);
+            key[33..35].copy_from_slice(&41000_u16.to_be_bytes());
+            key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+            key[37] = 6;
+            let event = |code| super::RefusedEvent {
+                key,
+                code,
+                plan_id: [0; 16],
+                trial_id: [0; 16],
+                client_shape: None,
+                execution_id: None,
+                binding: None,
+            };
+            let mut control: Option<super::ControlServer> = None;
+            let mut journal = R2oFlowJournal::with_capacity(4).unwrap();
+
+            super::r2o_refuse_coded(
+                &mut control,
+                &mut journal,
+                1,
+                &event(R2O_JOURNAL_REFUSE_NONE),
+                Some("плана для этой цели нет"),
+                true,
+            );
+            assert_eq!(journal.count(), 0, "проба с NONE молчит, как C");
+
+            super::r2o_refuse_coded(
+                &mut control,
+                &mut journal,
+                2,
+                &event(R2O_JOURNAL_REFUSE_TOO_LONG),
+                Some("слишком длинный"),
+                true,
+            );
+            assert_eq!(journal.count(), 1, "другой код пробы пишется");
+
+            super::r2o_refuse_coded(
+                &mut control,
+                &mut journal,
+                3,
+                &event(R2O_JOURNAL_REFUSE_NONE),
+                Some("плана для этой цели нет"),
+                false,
+            );
+            assert_eq!(journal.count(), 2, "обычный поток с NONE пишется");
+            assert_eq!(journal.get(1).unwrap().code, R2O_JOURNAL_REFUSE_NONE);
+            assert_eq!(
+                journal.get(1).unwrap().note.as_deref(),
+                Some("плана для этой цели нет")
             );
         }
 

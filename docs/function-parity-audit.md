@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 338 | 210 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 361 | 39 | 0 | 0 |
+| datapath-core | 400 | 364 | 36 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1461** | **521** | **0** | **0** |
+| **Итого** | **1982** | **1464** | **518** | **0** | **0** |
 
-Это не оценка паритета: 521 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 518 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1461 / P 521 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1464 / P 518 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 338 | 210 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 361 | 39 | 0 | 0 |
+| datapath-core | 400 | 364 | 36 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1461** | **521** | **0** | **0** |
+| **Итого** | **1982** | **1464** | **518** | **0** | **0** |
 
 
 ---
@@ -3844,14 +3844,14 @@ CLI-логирования, health-файла, duration, состава свод
 | `d2k_session_set_plan` | 358–365 | 8 | освободить прежний запасной план, сохранить новый, `plan_revision++` | `main.rs` `plan`, `NamePlans` | **E*** | C `d2k_plan_free(s->plan)`, `s->plan=p`, `plan_revision++`. Rust хранит `Plan` значением/в составе `NamePlans` и увеличивает `NamePlans.revision` на каждое изменение; тесты revision `control.rs:5439/5448/5701`. C/Rust session-packet differential загружает одинаковый D2KP-план и применяет его к SYN/ClientHello. **Ограничение:** отдельного `d2k_plan_free` нет — освобождает `Drop`; ревизия одна на таблицу, не сумма fallback+table. |
 | `name_same` (static) | 369–382 | 14 | равная длина, ASCII A-Z→a-z, без нормализации точки | `control.rs` `r2o_name_same` | **E*** | C/Rust differential `scripts/test-name-same-differential.sh` PASS (10 кейсов): equal, регистр, разная длина, хвостовая точка, цифры/дефис, пустые, high-byte 0x80/0x81, `A-B`/`a-b` — совпадение/различие без нормализации. Helper подключён к production-сравнениям кэша форм ClientHello/QUIC (6 мест вместо `eq_ignore_ascii_case`). **Ограничение:** C принимает произвольные байты; Rust-команды/снимки — `Vec<u8>`, high-byte differential покрыт, но не-UTF8 строки из control-сообщений не моделировались. |
 | `rd16` (static) | 30-32 | 3 | big-endian u16 | `r2k-core/src/packet.rs read_u16` | **E** | C `(p[0]<<8)\|p[1]`; Rust `read_u16`/`from_be_bytes` с проверкой границ. Используется в разборе TCP/UDP/STUN; побайтовые тесты пакетов. |
-| `refuse_coded` (static) | 402–413 | 12 | отказ плана в журнал; зонд молчит только при `code==NONE`; trial/plan id | `flow_journal.rs:684-720 record_plan_refused`, `main.rs:3737-3760 send_refused_event` | **P** | **Подтверждённое отличие:** C находит поток по ключу и при `controller_probe && code==D2K_REFUSE_NONE` **не пишет** запись (`session.c:404-406`); Rust `record_plan_refused` не знает о probe и принимает только `NOT_APPLIED/FLOW_UNFIT`, а `send_refused_event` всегда пишет журнал и отправляет событие. Для `code==NONE` C пишет запись (кроме probe), Rust `record_plan_refused` её отвергает; отказ NONE идёт только событием. D22 покрывает основные коды, не это условие. |
-| `refuse` (static) | 415–418 | 4 | `refuse_coded(..., NONE, NULL)` | `main.rs:3737 send_refused_event` (событие), `flow_journal.rs:684 record_plan_refused` | **P*** | C-обёртка передаёт `code=NONE`, без плана/trial. Rust отправляет `EVENT_REFUSED` и пишет журнал только для `NOT_APPLIED/FLOW_UNFIT`; отказ `NONE` в журнал не попадает (см. `refuse_coded`). |
+| `refuse_coded` (static) | 402–413 | 12 | отказ плана в журнал; зонд молчит только при `code==NONE`; trial/plan id | `main.rs` `r2o_refuse_coded`/`send_refused_event`, `flow_journal.rs` `record_plan_refused`/`_note` | **E*** | C находит поток по ключу и при `controller_probe && code==NONE` не пишет; Rust `r2o_refuse_coded` делает тот же гейт до записи, затем `send_refused_event` пишет журнал и шлёт EVENT_REFUSED. Журнал принимает любой code (включая NONE), plan/trial передаются из события. Тест `refuse_coded_silent_for_probe_none_like_c`: probe+NONE → 0, probe+TOO_LONG → 1, обычный NONE → 1; D22 проверяет поля и тексты. **Ограничение:** C находит поток по ключу ради probe; Rust probe передаёт вызывающий, потому что решение принимается в main. |
+| `refuse` (static) | 415–418 | 4 | `refuse_coded(..., NONE, NULL)` | `main.rs` no-plan call sites, `flow_journal.rs` `record_plan_refused_note` | **E*** | C-обёртка: code NONE, plan/trial NULL, note `why`. Rust no-plan пути UDP/TCP пишут `record_plan_refused_note` с code NONE, нулевыми plan/trial и точным текстом «плана для этой цели нет», затем шлют EVENT_REFUSED. Тесты `журнал_пишет_причину_отказа_без_плана_как_c`, `udp_no_plan_note_повторяет_ворота_c`, `tcp_no_plan_note_повторяет_ворота_c`; differential `test-tcp-no-plan-differential.sh` (4 строки) и `test-handle-udp-differential.sh` (17, P2 skip). **Ограничение:** отдельной функции-обёртки нет — семантика выражена вызовом. |
 | `tcp_options_timestamp_profile` (static) | 422–433 | 12 | профиль TCP-опций: UNKNOWN/NO_TS/TS; EOL, NOP, длина 2..n, TS len=10 | `r2k-core/src/packet.rs:39-64` | **E** | **Точное совпадение:** C `kind==0` → break, `kind==1` → off++, длина `<2`/`>n-off` → UNKNOWN, `kind==8 && len==10` → TS, иначе NO_TS (`session.c:422-433`); Rust `tcp_options_timestamp_profile` те же ветви (`packet.rs:39-64`). Unit-тесты packet/tcp. |
 | `tcp_options_have_timestamp` (static) | 435–437 | 3 | профиль == TS | `packet.rs:39` + сравнение с `TCP_PROFILE_TS` | **E*** | C-обёртка `tcp_options_timestamp_profile(o,n)==D2K_TCP_PROFILE_TS`; Rust сравнивает результат с `TCP_PROFILE_TS`. Используется в `D2K_FLOW_NEED_TCPTS`; тесты опций косвенные. |
 | `plan_handed_off` (static) | 446–473 | 28 | applied/key/plan/trial/binding; `orig_taken`; `sends_left=n_out+1`; execution id | `engine.rs:588-603 r2o_begin_execution`, `main.rs:411 R2oTcpExecution`, `PendingApplied` | **P** | **Совпадает:** Rust фиксирует `execution_id`, ключ, план/trial/binding, `payload_on_wire/original_spent/original_taken`, а завершение ждёт опустошения `ScheduledQueue` по ticket. **Подтверждённые отличия:** C ведёт **числовые** `sends_left = n_out+1`, `sends_done`, `sends_failed`, `udp_replan` на потоке и `sent_lost`; Rust использует булевы `TransmissionOutcome.r2o_sends_done`/`payload_on_wire` и `PendingApplied`, числовых счётчиков и `sent_lost` нет. C `orig_taken = verdict==DROP`; Rust `fate == OriginalFate::Drop`. |
 | `table_of` (static) | 477–479 | 3 | `proto==17 → uflows`, иначе `flows` | `TcpSessions`/`R2oUdpSessions` (разные типы) | E | C выбирает таблицу по `k->proto`. Rust держит TCP и UDP в разных типизированных структурах, выбор происходит на уровне типа в вызывающем коде; суммарные и раздельные счётчики/отказы/ёмкость покрыты `session_capacity_flows_and_refusals_match_c`, `session_flows_guards_shape_damaged_getters_match_c`. |
 | `suspect_num` (static) | 486–503 | 18 | не чаще раза на поток: `controller_probe`/`suspected` → выход; `suspects++`, journal SUSPECT с planned/client_shape | `engine.rs` `r2o_note_suspect` | E | C выходит для probe и уже подозревавшегося потока, иначе ставит `suspected` и учитывает подозрение. Rust `r2o_note_suspect` проверяет `controller_probe` и `suspect_counted`, увеличивает `session_stats`; журнал SUSPECT пишут вызывающие события. Тесты `session_suspect_counts_once_per_tcp_flow`, `suspect_num_skips_controller_probe_like_c`. |
-| `suspect` (static) | 505-508 | 4 | обёртка `suspect_num(..., num=0)` | события `R2oTcp*Event`/journal | **P*** | C `suspect_num(s,at,k,fl,code,det,0)`. Rust-события не имеют числового `num` (кроме stall), поэтому передача 0 эквивалентна; отдельной функции нет. |
+| `suspect` (static) | 505-508 | 4 | обёртка `suspect_num(..., num=0)` | `engine.rs` `r2o_note_suspect`, `flow_journal.rs` event decoders | **E*** | C передаёт num=0; в Rust у не-stall событий (REPEAT/SILENT/FIN_RETRY/RST_AFTER_APP) нет числового поля, и журнал пишет num=0 — тест `журнал_сохраняет_все_типы_подозрений_r2o` сверяет 0 для всех. planned/client_shape заполняются расшифровщиком; гейт probe/suspected — `r2o_note_suspect` (E). **Ограничение:** отдельной функции `suspect` нет; вызовы идут через события. |
 | `on_flow_expire` (static) | 521–530 | 10 | при истечении: `capture_forget` + повторный `track_find` + `tcp_silence_observe` | `engine.rs` `expire_with_silent` | E | C забывает capture, повторно ищет живой поток и выставляет `silence_told` до `track_expire`. Rust `expire_with_silent` вызывает `tcp_silence_event`/замыкание до `retain`-удаления и забывает capture (`capture.forget`); `silence_reported` хранится в `TcpSession`. Порядок эквивалентен. Тесты `tcp_capture_metrics_count_an_expired_incomplete_record`, `tcp_silence_event_matches_c_conditions`. |
 | `rd32` (static) | 532-535 | 4 | big-endian u32 | `u32::from_be_bytes`/`read_u32` (`packet.rs`) | **E*** | C `(p[0]<<24)\|(p[1]<<16)\|(p[2]<<8)\|p[3]`. Rust `from_be_bytes`/`read_u32` с bounds-check. Используется в QUIC/STUN; побайтовые тесты пакетов. |
 | `is_discord_ip_discovery` (static) | 544–550 | 7 | ровно 74 байта, `[0,1,0,70]`, нули 8..71 | `r2k-core/src/stun.rs:82-86` | **E** | **Точное совпадение:** C `n==74 && d[0..4]=={0,1,0,70}` и все `d[8..72]==0` (`session.c:544-550`); Rust `is_discord_ip_discovery_request` те же проверки (`stun.rs:82-86`). |
