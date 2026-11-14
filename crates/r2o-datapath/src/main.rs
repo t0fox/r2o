@@ -6,10 +6,11 @@ mod app {
         EVENT_R2O_QUIC_SUSPECT, EVENT_R2O_TCP_CLEAN_HANDSHAKE, EVENT_R2O_TCP_EARLY_RST,
         EVENT_R2O_TCP_EXCHANGE, EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_REPEAT,
         EVENT_R2O_TCP_RST_AFTER_APP, EVENT_R2O_TCP_RST_CUT, EVENT_R2O_TCP_SILENT,
-        EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_SUSPECT, EVENT_REFUSED, Frame, HttpPortalEvent,
-        HttpResponseEvent, PROTOCOL_VERSION, R2oTcpCleanHandshakeEvent, R2oTcpEarlyRstEvent,
-        R2oTcpExchangeEvent as R2oTcpExchangeControlEvent, R2oTcpFinRetryEvent, R2oTcpRepeatEvent,
-        R2oTcpRstCutSignalEvent, RELEASE_ID, RefusedEvent, decode_set_tcp_stall_budgets,
+        EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_SUSPECT, EVENT_REFUSED, EVENT_STATS, Frame,
+        HttpPortalEvent, HttpResponseEvent, PROTOCOL_VERSION, R2oTcpCleanHandshakeEvent,
+        R2oTcpEarlyRstEvent, R2oTcpExchangeEvent as R2oTcpExchangeControlEvent,
+        R2oTcpFinRetryEvent, R2oTcpRepeatEvent, R2oTcpRstCutSignalEvent, RELEASE_ID, RefusedEvent,
+        decode_set_tcp_stall_budgets,
     };
     use r2k_core::plan::{EmitKind, OriginalFate, PROTO_VOICE, Plan};
     use r2o_datapath::capture::{tcp_hello_from_packet, tcp_http_hello_from_packet};
@@ -909,6 +910,18 @@ mod app {
         )
     }
 
+    /// C `d2kd.c:2329-2352`: `EVENT_STATS` раз в секунду. Тело — нулевой
+    /// ключ потока, затем `dropped` и `sent` по u32 big-endian.
+    fn r2o_stats_event_body(dropped: u64, sent: u64) -> Vec<u8> {
+        let mut body = vec![0_u8; r2k_core::control::KEY_LEN + 8];
+        let dropped = dropped.min(u64::from(u32::MAX)) as u32;
+        let sent = sent.min(u64::from(u32::MAX)) as u32;
+        body[r2k_core::control::KEY_LEN..r2k_core::control::KEY_LEN + 4]
+            .copy_from_slice(&dropped.to_be_bytes());
+        body[r2k_core::control::KEY_LEN + 4..].copy_from_slice(&sent.to_be_bytes());
+        body
+    }
+
     fn r2o_log_process_stats(process_origin: &Instant, now: Instant) {
         let (cpu_ms, rss_kb) = r2o_process_cost();
         let elapsed = now.saturating_duration_since(*process_origin);
@@ -1551,6 +1564,7 @@ mod app {
         let mut next_stats = options
             .stats_interval
             .map(|interval| Instant::now() + interval);
+        let mut next_ctl_stats = Instant::now() + Duration::from_secs(1);
         let mut routed_flows = R2oRoutedFlows::default();
         let mut last_route_refresh = Instant::now();
         let mut next_route_refresh = last_route_refresh + R2O_ROUTE_REFRESH_INTERVAL;
@@ -1669,6 +1683,13 @@ mod app {
             }
             name_plans.r2o_set_send_maxlen(raw.as_ref().map_or(send_maxlen, RawSocket::maxlen));
             let now = Instant::now();
+            if let Some(control) = control.as_mut()
+                && now >= next_ctl_stats
+            {
+                let body = r2o_stats_event_body(control.dropped_events(), control.sent_events());
+                let _ = control.send_event(EVENT_STATS, &body);
+                next_ctl_stats = now + Duration::from_secs(1);
+            }
             if next_stats.is_some_and(|deadline| now >= deadline) {
                 r2o_log_process_stats(&journal_origin, Instant::now());
                 eprintln!("r2o-datapath: потеряно ядром {}", socket.lost_packets());
@@ -3705,7 +3726,7 @@ mod app {
         if client.is_none() {
             *client = R2oConntrackClient::open_unprobed();
         }
-        let mut log = |text: &'static str| eprintln!("r2o-datapath: {text}");
+        let log = |text: &'static str| eprintln!("r2o-datapath: {text}");
         match client.as_mut() {
             Some(client) => {
                 r2o_ct_probe_state(up, told_off, startup, |wait| client.r2o_probe(wait), log)
@@ -3724,7 +3745,7 @@ mod app {
             interface: None,
             probe_mark: 0,
             only_mark: None,
-            copy_range: u16::MAX as u32,
+            copy_range: 1600,
             queue_len: 1024,
             journal_capacity: 256,
             sched_slots: MAX_SCHEDULED_PACKETS,
@@ -3870,8 +3891,22 @@ mod app {
                 }
             }
         }
-        if !(64..=u16::MAX as u32).contains(&options.copy_range) {
-            return Err(invalid("--copy-range должен быть от 64 до 65535"));
+        // C `d2kd.c:1211` и `MAX_PKT`: копия не длиннее 1600 байт.
+        if !(64..=1600).contains(&options.copy_range) {
+            return Err(invalid("--copy-range должен быть от 64 до 1600"));
+        }
+        if options.mode == RuntimeMode::Apply
+            && !options.plan_explicit
+            && options.control_path.is_none()
+        {
+            return Err(invalid(
+                "режим apply без --plan и без --control ничего не сделал бы",
+            ));
+        }
+        if options.mode == RuntimeMode::Apply && options.mark == 0 {
+            return Err(invalid(
+                "режим apply без --mark запрещён: собственные пакеты нечем исключить из своей же очереди",
+            ));
         }
         if options.queue_len == 0 || options.receive_buffer < 0 {
             return Err(invalid(
@@ -4034,7 +4069,7 @@ mod app {
   --iface NAME       интерфейс, чей MTU ограничивает длину посылки
   --probe-mark N     метка зондов контроллера, исключаемая из route-gate
   --only-mark M[/K]|none  обслуживать только потоки с меткой выбранной политики
-  --copy-range N     размер копии пакета (64..65535)
+  --copy-range N     размер копии пакета (64..1600)
   --queue-len N      глубина очереди (по умолчанию 1024)
   --journal N        глубина журнала потоков (256; 0 — выключить)
   --sched-slots N    число слотов очереди отложенной отправки (по умолчанию 128)
@@ -5165,7 +5200,18 @@ mod app {
         {
             return Ok(Plan::default());
         }
-        let bytes = std::fs::read(&options.plan_path)?;
+        // C `d2kd.c:1258-1265`: план не длиннее 64 КиБ. Читаем на байт
+        // больше предела, чтобы отличить ровно 64 КиБ от превышения.
+        use std::io::Read as _;
+        let mut file = std::fs::File::open(&options.plan_path)?;
+        let mut bytes = Vec::new();
+        file.by_ref().take(64 * 1024 + 1).read_to_end(&mut bytes)?;
+        if bytes.len() > 64 * 1024 {
+            return Err(invalid(format!(
+                "план {} длиннее 64 КиБ",
+                options.plan_path.display()
+            )));
+        }
         let plan = Plan::parse_wire(&bytes)
             .map_err(|error| invalid(format!("план {}: {}", options.plan_path.display(), error)))?;
         validate_runtime_plan(&plan).map_err(invalid)?;
@@ -7776,6 +7822,98 @@ mod app {
                     .unwrap()
                     .health_path,
                 Some(std::path::PathBuf::from("/run/d2kd.health"))
+            );
+        }
+
+        #[test]
+        fn cli_apply_and_copy_range_match_d2kd_limits() {
+            assert_eq!(parse_options(&[]).unwrap().copy_range, 1600);
+            assert_eq!(
+                parse_options(&["--copy-range".into(), "64".into()])
+                    .unwrap()
+                    .copy_range,
+                64
+            );
+            assert_eq!(
+                parse_options(&["--copy-range".into(), "1600".into()])
+                    .unwrap()
+                    .copy_range,
+                1600
+            );
+            assert!(parse_options(&["--copy-range".into(), "1601".into()]).is_err());
+            assert!(parse_options(&["--copy-range".into(), "63".into()]).is_err());
+
+            // C `d2kd.c:1215-1230`: apply без источника планов и без метки
+            // запрещён ещё на разборе аргументов.
+            assert!(
+                parse_options(&[
+                    "--mode".into(),
+                    "apply".into(),
+                    "--mark".into(),
+                    "45".into()
+                ])
+                .is_err()
+            );
+            assert!(
+                parse_options(&[
+                    "--mode".into(),
+                    "apply".into(),
+                    "--control".into(),
+                    "/tmp/r2o.sock".into(),
+                ])
+                .is_err()
+            );
+            assert!(
+                parse_options(&[
+                    "--mode".into(),
+                    "apply".into(),
+                    "--mark".into(),
+                    "45".into(),
+                    "--control".into(),
+                    "/tmp/r2o.sock".into(),
+                ])
+                .is_ok()
+            );
+        }
+
+        #[test]
+        fn load_plan_rejects_more_than_64_kib_like_c() {
+            let path = std::env::temp_dir().join(format!(
+                "r2o-plan-limit-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let options = |path: &std::path::Path| super::Options {
+                plan_path: path.to_owned(),
+                plan_explicit: true,
+                ..parse_options(&[]).unwrap()
+            };
+            std::fs::write(&path, vec![0_u8; 64 * 1024 + 1]).unwrap();
+            let error = load_plan(&options(&path))
+                .err()
+                .expect("план длиннее 64 КиБ должен отвергаться")
+                .to_string();
+            assert!(error.contains("64 КиБ"), "неожиданная ошибка: {error}");
+            std::fs::write(&path, vec![0_u8; 64 * 1024]).unwrap();
+            let error = load_plan(&options(&path))
+                .err()
+                .expect("нулевой план не должен разбираться")
+                .to_string();
+            assert!(!error.contains("64 КиБ"), "предел сработал раньше: {error}");
+            let _ = std::fs::remove_file(path);
+        }
+
+        #[test]
+        fn stats_event_body_matches_c_zero_key_and_u32_counters() {
+            let body = super::r2o_stats_event_body(0x1_0000_0001, 7);
+            assert_eq!(body.len(), r2k_core::control::KEY_LEN + 8);
+            assert!(body[..r2k_core::control::KEY_LEN].iter().all(|b| *b == 0));
+            assert_eq!(
+                &body[r2k_core::control::KEY_LEN..],
+                &[0xff, 0xff, 0xff, 0xff, 0, 0, 0, 7]
             );
         }
 
