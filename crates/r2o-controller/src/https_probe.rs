@@ -446,13 +446,26 @@ impl HttpsProbeWorker {
             });
             return;
         }
-        // Как C `cache_put`: жертва — самая давняя запись; при равных
+        // Как C `cache_put`: жертва — самая давняя запись, но не запись,
+        // по которой ещё идёт зонд (`PROBING`, now < expires). При равных
         // отметках сохраняется порядок слотов.
+        let protected = |entry: &CachedResult| {
+            self.pending
+                .get(&entry.host)
+                .is_some_and(|started| now.saturating_duration_since(*started) < HTTPS_PROBING_TTL)
+        };
         let victim = self
             .cache
             .iter()
             .enumerate()
+            .filter(|(_, entry)| !protected(entry))
             .min_by_key(|(_, entry)| entry.stamp)
+            .or_else(|| {
+                self.cache
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, entry)| entry.stamp)
+            })
             .map(|(index, _)| index)
             .unwrap_or(0);
         self.cache[victim] = CachedResult {
@@ -551,6 +564,14 @@ impl HttpsProbeWorker {
         let path = path.as_ref();
         let mut bytes = format!("d2k-https 2 {wall_now}\n").into_bytes();
         for cached in &self.cache {
+            // C `save`: PROBING не сохраняется.
+            if self
+                .pending
+                .get(&cached.host)
+                .is_some_and(|started| now.saturating_duration_since(*started) < HTTPS_PROBING_TTL)
+            {
+                continue;
+            }
             let ttl = cached.expires.saturating_duration_since(now).as_secs();
             if ttl == 0 {
                 continue;
@@ -930,6 +951,36 @@ mod tests {
 
         drop(worker);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cache_put_does_not_evict_a_host_that_is_still_probing_like_c() {
+        let now = Instant::now();
+        let mut worker = HttpsProbeWorker::new(None);
+        for index in 0..super::CACHE_CAPACITY {
+            worker.cache.push(super::CachedResult {
+                host: format!("host-{index}.example"),
+                expires: now + Duration::from_secs(3600),
+                // host-0 — самая старая запись, её и вытеснил бы обычный
+                // выбор жертвы; она защищена PROBING.
+                stamp: if index == 0 {
+                    now - Duration::from_secs(1000)
+                } else {
+                    now
+                },
+                state: HttpsProbeState::Closed,
+            });
+        }
+        worker.pending.insert("host-0.example".into(), now);
+        worker.insert_cache("new.example".into(), HttpsProbeState::Closed, 3600, now);
+        assert!(
+            super::cache_find(&worker.cache, "host-0.example").is_some(),
+            "PROBING-запись не должна вытесняться"
+        );
+        assert!(
+            super::cache_find(&worker.cache, "host-1.example").is_none(),
+            "жертвой становится самая старая не-PROBING запись"
+        );
     }
 
     #[test]

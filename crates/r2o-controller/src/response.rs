@@ -1,7 +1,7 @@
 //! Наблюдение ответного направления TLS 1.2 и обработка вердиктов.
 
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -618,38 +618,33 @@ fn https_socket(
     Ok(stream)
 }
 
-fn receives_tls_record(
-    stream: &mut TcpStream,
-    config: std::sync::Arc<rustls::ClientConfig>,
-    host: &str,
-) -> bool {
-    let Ok(mut connection) = https_connection(config, host) else {
-        return false;
-    };
-    while connection.wants_write() {
-        if stream
-            .set_write_timeout(Some(Duration::from_millis(2000)))
-            .is_err()
-        {
-            return false;
-        }
-        match connection.write_tls(stream) {
-            Ok(0) | Err(_) => return false,
-            Ok(_) => {}
-        }
+/// C `first_flight` (`httpsprobe.c:171-200`): донорское `modern` приветствие,
+/// отдельное соединение, первый байт ответа.
+///
+/// `None` — приветствие не собралось (C возвращает -1 → Unconfirmed);
+/// `Some(false)` — отправка/чтение не дали TLS-записи (TlsBlocked);
+/// `Some(true)` — пришла запись TLS/alert.
+fn receives_tls_record(stream: &mut TcpStream, host: &str) -> Option<bool> {
+    let hello = crate::hello::modern_client_hello(host).ok()?;
+    if stream
+        .set_write_timeout(Some(Duration::from_millis(2000)))
+        .is_err()
+        || stream.write_all(&hello).is_err()
+    {
+        return Some(false);
     }
     if stream
         .set_read_timeout(Some(Duration::from_millis(2000)))
         .is_err()
     {
-        return false;
+        return Some(false);
     }
     let mut prefix = [0; 2];
     let length = match stream.read(&mut prefix) {
         Ok(length) => length,
-        Err(_) => return false,
+        Err(_) => return Some(false),
     };
-    length > 0 && matches!(prefix[0], 0x15 | 0x16) && (length < 2 || prefix[1] == 0x03)
+    Some(length > 0 && matches!(prefix[0], 0x15 | 0x16) && (length < 2 || prefix[1] == 0x03))
 }
 
 pub fn probe_https_state(host: &str, address: SocketAddr, mark: Option<u32>) -> HttpsProbeState {
@@ -662,8 +657,10 @@ pub fn probe_https_state(host: &str, address: SocketAddr, mark: Option<u32>) -> 
         Ok(stream) => stream,
         Err(state) => return state,
     };
-    if !receives_tls_record(&mut first_stream, std::sync::Arc::clone(&config), host) {
-        return HttpsProbeState::TlsBlocked;
+    match receives_tls_record(&mut first_stream, host) {
+        None => return HttpsProbeState::Unconfirmed,
+        Some(false) => return HttpsProbeState::TlsBlocked,
+        Some(true) => {}
     }
     drop(first_stream);
 
@@ -1931,5 +1928,96 @@ mod tcp_split_transport_tests {
             }
             Err(error) => panic!("неожиданная ошибка SO_MARK: {error}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod first_flight_tests {
+    use super::{HttpsProbeState, probe_https_state};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn https_first_flight_sends_donor_modern_client_hello() {
+        let certificate = rcgen::generate_simple_self_signed(vec!["example.test".to_owned()])
+            .expect("сертификат example.test");
+        let cert = rustls::pki_types::CertificateDer::from(certificate.serialize_der().unwrap());
+        let key =
+            rustls::pki_types::PrivatePkcs8KeyDer::from(certificate.serialize_private_key_der());
+        let config = Arc::new(
+            rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(vec![cert], key.into())
+                .unwrap(),
+        );
+        let expected = crate::hello::modern_client_hello("example.test").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            // Первое соединение — donor `first_flight`: ровно его байты.
+            let (mut first, _) = listener.accept().unwrap();
+            let mut hello = vec![0_u8; expected.len()];
+            first.read_exact(&mut hello).unwrap();
+            assert_eq!(hello, expected);
+            first.write_all(&[0x16, 0x03]).unwrap();
+
+            // Второе — полное rustls-рукопожатие для имени.
+            let (mut second, _) = listener.accept().unwrap();
+            second
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            second
+                .set_write_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut connection = rustls::ServerConnection::new(config).unwrap();
+            while connection.is_handshaking() {
+                if connection.complete_io(&mut second).is_err() {
+                    break;
+                }
+            }
+        });
+
+        assert_eq!(
+            probe_https_state("example.test", address, Some(0)),
+            HttpsProbeState::Served
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn plain_http_first_flight_is_tls_blocked() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut hello = [0_u8; 5];
+            stream.read_exact(&mut hello).unwrap();
+            stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
+        });
+        assert_eq!(
+            probe_https_state("example.test", address, Some(0)),
+            HttpsProbeState::TlsBlocked
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn empty_first_flight_prefix_stays_tls_blocked() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut hello = [0_u8; 5];
+            stream.read_exact(&mut hello).unwrap();
+            stream.write_all(&[0x17, 0x03]).unwrap();
+        });
+        assert_eq!(
+            probe_https_state("example.test", address, Some(0)),
+            HttpsProbeState::TlsBlocked
+        );
+        server.join().unwrap();
     }
 }
