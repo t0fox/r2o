@@ -2966,10 +2966,37 @@ mod app {
                                     &journal_origin,
                                 )? {
                                     TransmissionOutcome::Complete => {
-                                        if fate == OriginalFate::Pass
-                                            && let Some(originals) = batch_owned_originals.as_ref()
-                                        {
-                                            r2o_resend_owned_originals(raw.as_ref(), originals);
+                                        let originals_failed = fate == OriginalFate::Pass
+                                            && batch_owned_originals.as_ref().is_some_and(
+                                                |originals| {
+                                                    r2o_resend_owned_originals(
+                                                        raw.as_ref(),
+                                                        originals,
+                                                    ) != 0
+                                                },
+                                            );
+                                        if originals_failed {
+                                            // C `original_failed`: несостоявшийся
+                                            // возврат оригинала — отказ попытки
+                                            // REFUSE_SEND, а не «план доисполнен».
+                                            let damaged = r2o_finish_tcp_execution(
+                                                &mut tcp_sessions,
+                                                tcp_execution,
+                                                false,
+                                                false,
+                                                true,
+                                                true,
+                                            );
+                                            if let Some(event) = applied_candidate.as_ref() {
+                                                flow_journal.record_execution_failure(
+                                                    journal_timestamp(&journal_origin),
+                                                    event,
+                                                    r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_SEND,
+                                                    damaged,
+                                                );
+                                            }
+                                        } else {
+                                            execution_succeeded = true;
                                         }
                                         if udp_replay.is_some() {
                                             let verdict = if fate == OriginalFate::Pass {
@@ -2985,7 +3012,6 @@ mod app {
                                             )?;
                                             udp_head_verdict = verdict;
                                         }
-                                        execution_succeeded = true;
                                         response_delivered = fate == OriginalFate::Pass;
                                         if udp_replay.is_none()
                                             && fate == OriginalFate::Drop
@@ -4651,22 +4677,40 @@ mod app {
         STOP.store(true, Ordering::Relaxed);
     }
 
-    fn r2o_resend_owned_originals(raw: Option<&RawSocket>, originals: &[Vec<u8>]) {
+    /// C `resend_originals` (`d2kd.c:510-516`): попытаться вернуть каждый
+    /// оригинал, вернуть число ошибок. Вызывающий решает по `!= 0`, как C.
+    fn r2o_resend_originals_with(
+        originals: &[Vec<u8>],
+        mut send: impl FnMut(&[u8]) -> io::Result<()>,
+    ) -> usize {
+        let mut failed = 0;
+        for packet in originals {
+            if send(packet).is_err() {
+                failed += 1;
+            }
+        }
+        failed
+    }
+
+    fn r2o_resend_owned_originals(raw: Option<&RawSocket>, originals: &[Vec<u8>]) -> usize {
         if originals.is_empty() {
-            return;
+            return 0;
         }
         let Some(raw) = raw else {
             eprintln!("r2o-datapath: owned TLS originals остались без raw socket");
-            return;
+            return originals.len();
         };
-        for packet in originals {
-            if let Err(error) = raw.send_packet(packet) {
+        r2o_resend_originals_with(originals, |packet| match raw.send_packet(packet) {
+            Ok(()) => {
+                r2o_note_counter(&R2O_HOLD_RESENT, 1);
+                Ok(())
+            }
+            Err(error) => {
                 r2o_note_counter(&R2O_HOLD_RESEND_FAIL, 1);
                 r2o_log_send_fail("не возвращён owned TLS original через raw-send: ", &error);
-            } else {
-                r2o_note_counter(&R2O_HOLD_RESENT, 1);
+                Err(error)
             }
-        }
+        })
     }
 
     fn r2o_flush_owned_hold_releases(
@@ -8542,6 +8586,33 @@ mod app {
             super::request_stop(libc::SIGINT);
             assert!(super::STOP.load(Ordering::Relaxed));
             super::STOP.store(false, Ordering::Relaxed);
+        }
+
+        #[test]
+        fn resend_originals_считает_ошибки_и_пробует_все_как_c() {
+            let originals = vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()];
+            let mut attempted = Vec::new();
+            let failed = super::r2o_resend_originals_with(&originals, |packet| {
+                attempted.push(packet.to_vec());
+                if packet == b"b" {
+                    Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+                } else {
+                    Ok(())
+                }
+            });
+            assert_eq!(failed, 1);
+            assert_eq!(attempted, originals, "C пробует каждый оригинал");
+
+            let empty: Vec<Vec<u8>> = Vec::new();
+            assert_eq!(
+                super::r2o_resend_originals_with(&empty, |_| {
+                    panic!("пустой список не должен отправляться")
+                }),
+                0
+            );
+            // Без raw-сокета C-путь недостижим; Rust честно считает все
+            // оригиналы неотправленными.
+            assert_eq!(super::r2o_resend_owned_originals(None, &originals), 3);
         }
 
         #[test]
