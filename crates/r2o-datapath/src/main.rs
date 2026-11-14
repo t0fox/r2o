@@ -140,6 +140,50 @@ mod app {
         !route_gate.r2o_mark_is_routed(family, mark)
     }
 
+    static R2O_UDP_MARKED_KEPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// C `out_marked` (`datapath/d2kd.c:615-635`): датаграмма с чужой меткой
+    /// остаётся на пути ядра; первые 16 строк — с портами и меткой, на 16-й
+    /// предупреждение «дальше только счётчик».
+    fn r2o_udp_marked_line(kept: u64, mark: u32, sport: u16, dport: u16) -> Option<String> {
+        if kept > 16 {
+            return None;
+        }
+        let suffix = if kept == 16 {
+            " (дальше только счётчик)"
+        } else {
+            ""
+        };
+        if mark == r2o_datapath::r2o_route::R2O_ROUTE_OTHER_DEV {
+            Some(format!(
+                "r2o-datapath: поток UDP {sport} -> {dport} уходит через другой интерфейс: \
+                 хвосты идут ядром, не сырой посылкой{suffix}"
+            ))
+        } else {
+            Some(format!(
+                "r2o-datapath: поток UDP {sport} -> {dport} с меткой клиента 0x{mark:x}: \
+                 хвосты идут ядром, не сырой посылкой{suffix}"
+            ))
+        }
+    }
+
+    fn r2o_log_udp_marked(packet: &[u8], mark: u32) {
+        let kept = R2O_UDP_MARKED_KEPT.fetch_add(1, Ordering::Relaxed) + 1;
+        let (sport, dport) = r2k_core::packet::PacketView::parse(packet)
+            .filter(|view| view.protocol == 17)
+            .and_then(|view| packet.get(view.l4_offset..view.l4_offset + 4))
+            .map(|ports| {
+                (
+                    u16::from_be_bytes([ports[0], ports[1]]),
+                    u16::from_be_bytes([ports[2], ports[3]]),
+                )
+            })
+            .unwrap_or((0, 0));
+        if let Some(line) = r2o_udp_marked_line(kept, mark, sport, dport) {
+            eprintln!("{line}");
+        }
+    }
+
     fn r2o_udp_mark_plain_pass(
         sessions: &R2oUdpSessions,
         follow: &mut R2oUdpFollowTable,
@@ -157,8 +201,12 @@ mod app {
                 view.family == 4 && view.protocol == 17 && view.fragment & 0x3fff == 0
             })
             || !sessions.r2o_udp_opening_at_hook(packet, hook)
-            || !r2o_udp_packet_is_neutral(route_gate, probe_mark, mark, packet)
         {
+            return false;
+        }
+        if !r2o_udp_packet_is_neutral(route_gate, probe_mark, mark, packet) {
+            // C `d2k_udp_path_passed`: `marked`-колбэк вызывается до отказа.
+            r2o_log_udp_marked(packet, mark);
             return false;
         }
         follow.r2o_mark(packet, now, None, receive_seq)
@@ -4852,6 +4900,21 @@ mod app {
                 r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_QUEUE,
             ));
             assert_eq!(journal.count(), 2);
+        }
+
+        #[test]
+        fn udp_marked_line_matches_c_text_and_limit() {
+            let tagged = super::r2o_udp_marked_line(1, 0x2e, 40_000, 443).unwrap();
+            assert!(tagged.contains("поток UDP 40000 -> 443"));
+            assert!(tagged.contains("меткой клиента 0x2e"));
+            assert!(!tagged.contains("дальше"));
+            let sixteenth = super::r2o_udp_marked_line(16, 0x2e, 1, 2).unwrap();
+            assert!(sixteenth.contains("дальше только счётчик"));
+            assert!(super::r2o_udp_marked_line(17, 0x2e, 1, 2).is_none());
+            let other =
+                super::r2o_udp_marked_line(1, r2o_datapath::r2o_route::R2O_ROUTE_OTHER_DEV, 1, 2)
+                    .unwrap();
+            assert!(other.contains("другой интерфейс"));
         }
 
         #[test]

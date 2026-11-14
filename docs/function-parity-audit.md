@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 258 | 142 | 0 | 0 |
+| datapath-core | 400 | 259 | 141 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1346** | **636** | **0** | **0** |
+| **Итого** | **1982** | **1347** | **635** | **0** | **0** |
 
-Это не оценка паритета: 636 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 635 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1346 / P 636 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1347 / P 635 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 258 | 142 | 0 | 0 |
+| datapath-core | 400 | 259 | 141 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1346** | **636** | **0** | **0** |
+| **Итого** | **1982** | **1347** | **635** | **0** | **0** |
 
 
 ---
@@ -3707,7 +3707,7 @@ R2O-владелец: `crates/r2o-datapath/src/main.rs` (`run`, `parse_options`,
 | `ct_probe` (static) | 578-595 | 18 | одноразовая проба ctnetlink; включение/выключение детекторов тишины | `conntrack.rs:270-295 open`, `:309-357 probe` | **P** | **Ветви сверены:** C `!sess \|\| up` → выход; при `fd<0` открыть; `seq++` (0→1); `d2k_ct_probe_fd(fd,seq,startup?200:0)==1` → up=1, `set_ct_query`, лог «появился» при `told_off`; иначе `set_ct_query(NULL)`, лог «выключены» один раз. Rust `R2oConntrackClient::open` делает `probe()` (100 мс) и возвращает None при недоступности; отдельного повторного включения/логов нет. Семантика «нет подсистемы — нет запросов» сохранена, API/момент иные. |
 | `out_verdict` (static) | 597-599 | 3 | адаптер вердикта `out_tail` | `nfqueue.rs:310 send_verdict` | **E** | C `static int out_verdict(void *ctx,uint32_t id,uint32_t verdict){return send_original_verdict(ctx,id,verdict);}`. Rust `send_verdict`; тонкий адаптер, те же id/verdict. |
 | `out_fail` (static) | 603-607 | 5 | учесть отказ переиздания, сохранить errno | `main.rs:272` eprintln + `r2o_note_busy` | **P** | C `st.send_fail++`, `errno=err`, -1. Rust `main.rs:272`/`r2o_note_busy`; классификация busy есть (`r2o_udp_send_busy`), отдельного `send_fail`/сохранения errno для этой ветки нет. |
-| `out_marked` (static) | 615-635 | 21 | лог «метка клиента → хвосты ядром», первые 16 | `main.rs:88 r2o_udp_packet_is_neutral`, `r2o_route` gate | **P** | C `udp_marked_kept++`; первые 16: `packet_parse`, порты, при `mark==D2K_ROUTE_OTHER_DEV` — «другой интерфейс», иначе «метка клиента 0x%x»; на 16-й «дальше только счётчик». Rust `r2o_udp_packet_is_neutral`/route gate; счётчик `udp_marked_kept` отдельно не выводится. |
+| `out_marked` (static) | 615-635 | 21 | лог «метка клиента → хвосты ядром», первые 16 | `main.rs` `r2o_udp_marked_line`/`r2o_log_udp_marked`, `r2o_udp_mark_plain_pass` | **E*** | Перенесены счётчик `R2O_UDP_MARKED_KEPT`, порты/метка в строке, отдельный текст для `R2O_ROUTE_OTHER_DEV`, лимит 16 и предупреждение на 16-й. Тест `udp_marked_line_matches_c_text_and_limit`. Вызывается из plain-pass до отказа, как C `d2k_udp_path_passed`. **Ограничение:** префикс `r2o-datapath:` вместо `d2kd:`; C также зовёт `marked` из batch/late путей — там Rust пока только помечает follow без строки. |
 | `out_defer` (static) | 640-647 | 8 | вердикт позже, за отложенной головой | `r2o_udp_hold.rs:291 R2oUdpDeferredVerdicts::r2o_enqueue` | **P** | C `udp_releases && enqueue(at,&id,&verdict,1,&none,0)==0` → 0; иначе сразу `send_original_verdict`. Rust `r2o_enqueue`; `hold` D6; unit-теста именно на очередь вердиктов нет. |
 | `out_resend_failed` (static) | 651-671 | 21 | одна строка на поток при отказе хвоста, адрес/семейство/длина | `main.rs:287` лог позднего хвоста | **P** | C парсит пакет, `inet_ntop`, порты, `fam`, печатает `src:sport -> dst:dport (IPv%d, N байт)` + `strerror(err)`; хвост «дальше только счётчик» при `D2K_UDP_REFUSED_LOG`. Rust лог без лимита/адресной строки; лимит `D2K_UDP_REFUSED_LOG` не воспроизведён. |
 | `out_send_now` (static) | 673-684 | 12 | raw send немедленно | `raw.rs:147 send_packet` | **P** | C `!raw` → `out_fail(ENOTSOCK)`; `raw_prepare`/`raw_send`, ошибка → `out_fail(errno?:EIO)`; `emitted++/emitted_now++`. Rust `raw.rs:147 send_packet`; unit-тесты исходящего пакета. |
@@ -4132,7 +4132,7 @@ R2O: `main.rs` (`r2o_release_udp_batch*`, `r2o_udp_handle_late_tail`),
 | `d2k_udp_path_post` | 35–60 | 26 | `udp_hold_wait` → HELD/NORMAL; `udp_hold_ready` → take/replay → REPLAY, иначе LOST; `fed` → take/release → RECLAIMED | `main.rs:1600-2210` (late tail/replay/release) | **P** | C возвращает один из четырёх кодов и явно вызывает `hold_replay`/`hold_end`. Rust разносит это по веткам `PacketDecision`, `r2o_udp_handle_late_tail`, `r2o_mark_hold_replay_first` и `r2o_release_udp_batch`; отдельной функции с теми же четырьмя исходами нет. P — нужен differential на HELD/REPLAY/LOST/RECLAIMED. |
 | `d2k_udp_path_read` | 62–67 | 6 | `rseq++`, `seq=rseq`, `now_ns` | `main.rs` `udp_receive_seq` | **E*** | Rust приведён к C: голый `wrapping_add(1)` без `.max(1)`, поэтому переполнение даёт `seq=0`, как C. **Ограничение:** отдельного C/Rust differential нет; отличие было только на переполнении 64-битного счётчика, в production недостижимом. |
 | `d2k_udp_path_expire` | 69–74 | 6 | `seq = read_follows ? rseq+1 : NONE`, flush по таймеру | `main.rs` `follow_receive_seq`, `r2o_udp_hold.rs` `r2o_age` | E | C `D2K_UDP_SEQ_NONE=0`: при отсутствии чтения передаёт 0, иначе `rseq+1`. Rust в `main.rs` ставит `follow_receive_seq = received ? udp_receive_seq : 0` и вызывает `r2o_age` с тем же сентинелом; `r2o_age` удаляет по сроку и seq-правилам. C-тест `test_udp_path.c:393`, Rust-тест `udp_follow_age_matches_c_receive_seq_rules`. |
-| `d2k_udp_path_passed` | 76–88 | 13 | пассивный проход: IPv4, len≥20, `udp_opening`, neutral, follow_mark(0,seq) | `main.rs` `r2o_udp_mark_plain_pass` | **E*** | C/Rust differential `scripts/test-udp-path-differential.sh` PASS: 10 кейсов — первый клиентский пакет, второй пакет потока, non-neutral mark, TCP, IPv4-фрагмент, IPv6, multicast, planned now/at, короткий пакет; rc совпали. C-проверки proto 17/fragment 0/multicast делегированы `udp_opening`/`follow_tuple` — те же, что у Rust. **Ограничение:** C `out->marked` (счётчик `udp_marked_kept` и первые 16 строк лога) не портирован: Rust молча возвращает false; живой NFQUEUE-оракул не строился. |
+| `d2k_udp_path_passed` | 76–88 | 13 | пассивный проход: IPv4, len≥20, `udp_opening`, neutral, follow_mark(0,seq) | `main.rs` `r2o_udp_mark_plain_pass` | **E*** | C/Rust differential `scripts/test-udp-path-differential.sh` PASS: 10 кейсов — первый клиентский пакет, второй пакет потока, non-neutral mark, TCP, IPv4-фрагмент, IPv6, multicast, planned now/at, короткий пакет; rc совпали. C-проверки proto 17/fragment 0/multicast делегированы `udp_opening`/`follow_tuple` — те же, что у Rust. **Ограничение:** marked-строка теперь портирована и вызывается до отказа (ограничение — batch/late пути); живой NFQUEUE-оракул не строился. |
 | `d2k_udp_path_planned` | 90–97 | 8 | плановая посылка: те же проверки + follow_mark(at_ns,seq) | `main.rs` `r2o_udp_mark_planned` | **E*** | Тот же C/Rust differential: `first_planned rc=1` с `at_ns=now+30ms`, `bad_mark_planned rc=0`; `at_ns` ↔ `Option<Instant>`, `seq` ↔ `receive_seq`, broadcast/multicast отвергает `R2oUdpFollowKey` как C `follow_tuple`. **Ограничение:** `marked`-колбэка у planned нет и в C. |
 
 ### datapath/udp_path.c: построчная сверка
