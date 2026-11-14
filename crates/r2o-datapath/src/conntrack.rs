@@ -454,6 +454,16 @@ impl R2oConntrackClient {
         client.probe().then_some(client)
     }
 
+    /// Клиент над готовым дескриптором для дифференциала на socketpair.
+    #[cfg(test)]
+    fn r2o_test_client(fd: RawFd) -> Self {
+        Self {
+            fd,
+            sequence: 6,
+            told_accounting: false,
+        }
+    }
+
     pub fn query(&mut self, tuple: &R2oConntrackTuple) -> Option<R2oConntrackInfo> {
         match self.query_info(tuple) {
             R2oConntrackInfoParse::Info(info) => Some(info),
@@ -540,16 +550,15 @@ impl R2oConntrackClient {
     }
 
     fn send(&self, request: &[u8]) -> io::Result<()> {
-        let mut kernel: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
-        kernel.nl_family = libc::AF_NETLINK as u16;
+        // C `d2k_ct_query_info_fd`/`d2k_ct_probe_fd` используют `send` на
+        // привязанном netlink-сокете (адрес ядра подразумевается). Тот же
+        // вызов позволяет проверять протокол на socketpair без привилегий.
         let sent = unsafe {
-            libc::sendto(
+            libc::send(
                 self.fd,
                 request.as_ptr() as *const libc::c_void,
                 request.len(),
                 libc::MSG_DONTWAIT,
-                &kernel as *const libc::sockaddr_nl as *const libc::sockaddr,
-                std::mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t,
             )
         };
         if sent < 0 {
@@ -827,6 +836,149 @@ mod tests {
             &mut fresh
         ));
         assert!(!fresh);
+    }
+
+    #[test]
+    fn ct_query_socketpair_differential_matches_c() {
+        use super::R2oConntrackClient;
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+        fn pair() -> (R2oConntrackClient, OwnedFd) {
+            let mut fds = [-1_i32; 2];
+            let rc =
+                unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_DGRAM, 0, fds.as_mut_ptr()) };
+            assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
+            let client = R2oConntrackClient::r2o_test_client(fds[0]);
+            let peer = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+            (client, peer)
+        }
+        fn send_datagram(peer: &OwnedFd, bytes: &[u8]) {
+            let sent = unsafe {
+                libc::send(
+                    peer.as_raw_fd(),
+                    bytes.as_ptr() as *const libc::c_void,
+                    bytes.len(),
+                    0,
+                )
+            };
+            assert_eq!(sent, bytes.len() as isize, "socketpair send");
+        }
+        fn tuple() -> R2oConntrackTuple {
+            R2oConntrackTuple {
+                family: 4,
+                protocol: 17,
+                source: [0; 16],
+                destination: [0; 16],
+                source_port: 0,
+                destination_port: 0,
+            }
+        }
+        fn code(parsed: R2oConntrackInfoParse) -> i32 {
+            match parsed {
+                R2oConntrackInfoParse::Info(_) => 0,
+                R2oConntrackInfoParse::Reply => 1,
+                R2oConntrackInfoParse::NoCounters => 2,
+                R2oConntrackInfoParse::Error => -1,
+            }
+        }
+        fn query_case(
+            name: &str,
+            first: Option<&[u8]>,
+            second: Option<&[u8]>,
+            output: &mut String,
+        ) {
+            let (mut client, peer) = pair();
+            if let Some(first) = first {
+                send_datagram(&peer, first);
+            }
+            if let Some(second) = second {
+                send_datagram(&peer, second);
+            }
+            let parsed = client.query_info(&tuple());
+            let rc = code(parsed);
+            output.push_str(&format!("query {name} rc={rc}"));
+            if let R2oConntrackInfoParse::Info(info) = parsed {
+                output.push_str(&format!(
+                    " orig={} reply={}",
+                    info.original_packets, info.reply_packets
+                ));
+            }
+            output.push('\n');
+        }
+        fn probe_case(
+            name: &str,
+            first: Option<&[u8]>,
+            second: Option<&[u8]>,
+            output: &mut String,
+        ) {
+            let (mut client, peer) = pair();
+            if let Some(first) = first {
+                send_datagram(&peer, first);
+            }
+            if let Some(second) = second {
+                send_datagram(&peer, second);
+            }
+            output.push_str(&format!("probe {name} rc={}\n", u8::from(client.probe())));
+        }
+
+        let mut output = String::new();
+        query_case(
+            "valid",
+            Some(&ответ_conntrack_без_кортежа(7, 22, 25)),
+            None,
+            &mut output,
+        );
+        query_case(
+            "no_counters",
+            Some(&ответ_conntrack_без_счётчиков(7)),
+            None,
+            &mut output,
+        );
+        query_case(
+            "reply",
+            Some(&ошибка_conntrack(7, -libc::ENOENT)),
+            None,
+            &mut output,
+        );
+        query_case("ack", Some(&ошибка_conntrack(7, 0)), None, &mut output);
+        query_case(
+            "wrong_seq_then_valid",
+            Some(&ответ_conntrack_без_кортежа(99, 1, 1)),
+            Some(&ответ_conntrack_без_кортежа(7, 22, 25)),
+            &mut output,
+        );
+
+        probe_case(
+            "enoent",
+            Some(&ошибка_conntrack(7, -libc::ENOENT)),
+            None,
+            &mut output,
+        );
+        probe_case(
+            "ok",
+            Some(&ответ_conntrack_без_кортежа(7, 22, 25)),
+            None,
+            &mut output,
+        );
+        probe_case(
+            "unsupported",
+            Some(&ошибка_conntrack(7, -libc::EOPNOTSUPP)),
+            None,
+            &mut output,
+        );
+        probe_case("silent", None, None, &mut output);
+        probe_case(
+            "foreign_then_ok",
+            Some(&ответ_conntrack_без_кортежа(99, 1, 1)),
+            Some(&ошибка_conntrack(7, -libc::ENOENT)),
+            &mut output,
+        );
+
+        if let Ok(path) = std::env::var("R2O_CT_QUERY_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert!(output.contains("query valid rc=0 orig=22 reply=25"));
+        assert!(output.contains("probe unsupported rc=0"));
     }
 
     #[test]
