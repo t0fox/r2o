@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 353 | 47 | 0 | 0 |
+| datapath-core | 400 | 355 | 45 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1451** | **531** | **0** | **0** |
+| **Итого** | **1982** | **1453** | **529** | **0** | **0** |
 
-Это не оценка паритета: 531 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 529 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1451 / P 531 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1453 / P 529 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 353 | 47 | 0 | 0 |
+| datapath-core | 400 | 355 | 45 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1451** | **531** | **0** | **0** |
+| **Итого** | **1982** | **1453** | **529** | **0** | **0** |
 
 
 ---
@@ -3697,8 +3697,8 @@ R2O-владелец: `crates/r2o-datapath/src/main.rs` (`run`, `parse_options`,
 | `describe_oifs` (static) | 282-294 | 13 | имена выходных интерфейсов для лога | `r2o_route.rs:152 r2o_egress_ifindices`, строки `r2o_refresh` | **P** | C `!read` → «неизвестен…», `!n` → «нет», иначе `if_indextoname`/`#%u` через `, `. Rust `r2o_egress_ifindices`/`r2o_refresh`; формат лога иной, список oif читается. |
 | `routes_refresh` (static) | 302-370 | 69 | разбор ip rule/маршрутов, лог смен, quiet 600 с | `r2o_route.rs:372 r2o_refresh` (netlink-watch) | **P** | **Ветви сверены:** C `d2k_routemark_load`; при ошибке держит прежние, лог один раз; при успехе сравнивает `v4_ok/v6_ok/r4/r6`, логирует смены/truncated; `changes` и `ROUTES_QUIET_NS=600 с` — запись не чаще окна, с числом смен. Rust `r2o_refresh` по netlink-watch, без периодического цикла; quiet-окно/лог смен не воспроизведены; `r2o-route-gate-differential.sh`. |
 | `cap_refresh` (static) | 372-415 | 44 | adopt egress MTU → grow sched → greet control | `raw.rs:106 r2o_adopt_egress`, `scheduler.rs:260 grow_slot_size`, `main.rs` greet | **P** | **Ветви сверены:** C собирает oif4/oif6, `!n` → return; `d2k_raw_adopt_egress`, adopted<0 → return; лог при adopted>0; `d2k_sched_grow_slot_size(after)`, ошибка → лог один раз и return; если `send_maxlen==after` → return; иначе обновляет и `d2k_ctlsrv_greet`. Rust `r2o_adopt_egress`/`grow_slot_size`/greet; ветви реализованы, прямого differential нет. |
-| `send_original_verdict` (static) | 417-427 | 11 | вердикт NFQUEUE + счётчики accepted/dropped | `nfqueue.rs:310 send_verdict`; `main.rs:4335 release_with` | **P** | C `d2k_nfq_verdict`; ошибка → `verdict_fail++` и лог; иначе `DROP→dropped`, иначе `accepted`. Rust `send_verdict`/`release_with`; byte-level тесты netlink; счётчики `QueueStats`. |
-| `send_delayed_verdict` (static) | 429-431 | 3 | обёртка вердикта отложенной выдачи | `main.rs:319 r2o_release_delayed_udp_batch_with` | **P** | C `return send_original_verdict(ctx,id,verdict)`. Rust отдельная функция выпуска отложенных вердиктов; те же id/verdict, API иной. |
+| `send_original_verdict` (static) | 417-427 | 11 | вердикт NFQUEUE + счётчики accepted/dropped | `nfqueue.rs:347 send_verdict`, `:336 record_verdict`, `:325 record_verdict_failure` | **E*** | C `d2k_nfq_verdict`; ошибка → `verdict_fail++` и лог; иначе `DROP→dropped`, любой другой вердикт → `accepted`. Rust `send_verdict` на ошибке зовёт `record_verdict_failure` и возвращает `Err` (вызывающий пишет лог), на успехе — `record_verdict(action)` с тем же тернарным правилом. Тест `record_verdict_counts_accept_drop_and_failure_like_c` (ACCEPT/DROP/DROP/failure → 2/2/1). Побайтовые тесты netlink-вердикта уже есть. **Ограничение:** C возвращает `rc` наружу, Rust — `io::Result`. |
+| `send_delayed_verdict` (static) | 429-431 | 3 | обёртка вердикта отложенной выдачи | `main.rs` `r2o_release_delayed_udp_batch_with` → `QueueSocket::send_verdict` | **E*** | C дословно `return send_original_verdict(ctx,id,verdict)`. Rust выпускает отложенные вердикты тем же `send_verdict` (счётчики/ошибка как выше); отдельной обёртки нет. Тест `deferred_verdicts_enqueue_flush_and_full_match_c` покрывает порядок/срок/полную очередь. **Ограничение:** API-обёртки нет — поведение выражено вызовом. |
 | `delayed_verdict_done` (static) | 433-446 | 14 | complete → `session_sent`, иначе `exec_failed(REFUSE_SEND)` | `main.rs:411 r2o_finish_tcp_execution`, `:319` | **P** | C `execution==0` → return; `complete` → `session_sent(at,key,execution)`; иначе `session_exec_failed(..., D2K_REFUSE_SEND, execution, 0, sent!=0)`. Rust `r2o_finish_tcp_execution`/release; ветви token=0/complete/sent!=0 реализованы, прямого теста нет. |
 | `hold_owns` (static) | 484-489 | 6 | TLS-hold владеет ID, если это не порт 80 | `hold.rs` `current_owned = own_packets && destination.port != 80`, `main.rs` `own_packets: raw.is_some()` | **E*** | C/Rust differential D6 `scripts/test-datapath-hold-differential.sh` PASS: 15 кейсов ownership/release, `OwnedWaiting`/`OwnedReady`, повторная посылка оригиналов. Предикат C `c->raw && parse && dst_port != 80` разложен на `own_packets = raw.is_some()` и `destination.port != 80`; отказ `d2k_hold_parse` соответствует отсутствию владения в `feed`. **Ограничение:** сам порт-80-исключающий предикат в D6-оракуле не входит — он проверен по коду; полный HTTP/80 путь покрыт D17. |
 | `resend_original` (static) | 493-508 | 16 | вернуть снятый оригинал raw-посылкой; до 16 строк лога | `main.rs:3794 r2o_resend_owned_originals` | **P** | C `raw_prepare`+`raw_send`; ошибка → `hold_resend_fail++/send_fail++`, лог первых 16, -1; иначе `hold_resent++/emitted++/emitted_now++`. Rust `r2o_resend_owned_originals`; тест `hold.rs:2167` покрывает владение, не сокет. |

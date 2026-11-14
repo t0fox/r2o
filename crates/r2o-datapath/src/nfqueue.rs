@@ -558,6 +558,22 @@ mod tests {
     }
 
     #[test]
+    fn record_verdict_counts_accept_drop_and_failure_like_c() {
+        // C `send_original_verdict`: ошибка → verdict_fail++, иначе
+        // DROP → dropped, любой другой вердикт → accepted.
+        let socket = test_socket();
+        socket.record_verdict(1);
+        socket.record_verdict(crate::netlink::NF_ACCEPT);
+        socket.record_verdict(crate::netlink::NF_DROP);
+        socket.record_verdict(crate::netlink::NF_DROP);
+        socket.record_verdict_failure();
+        let stats = socket.stats();
+        assert_eq!(stats.accepted, 2);
+        assert_eq!(stats.dropped, 2);
+        assert_eq!(stats.verdict_failures, 1);
+    }
+
+    #[test]
     fn unbind_message_and_fd_match_c_close() {
         let mut socket = test_socket();
         let message = socket.unbind_message();
