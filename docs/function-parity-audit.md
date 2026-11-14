@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 336 | 64 | 0 | 0 |
+| datapath-core | 400 | 338 | 62 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1434** | **548** | **0** | **0** |
+| **Итого** | **1982** | **1436** | **546** | **0** | **0** |
 
-Это не оценка паритета: 548 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 546 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1434 / P 548 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1436 / P 546 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 336 | 64 | 0 | 0 |
+| datapath-core | 400 | 338 | 62 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1434** | **548** | **0** | **0** |
+| **Итого** | **1982** | **1436** | **546** | **0** | **0** |
 
 
 ---
@@ -3877,8 +3877,8 @@ CLI-логирования, health-файла, duration, состава свод
 | `d2k_session_set_route_mark` | 2651–2653 | 3 | метка маршрутизации текущего пакета | `r2o_route.rs` `R2oRouteGate::r2o_route_mark`, `r2o_skip_packet` | E | C хранит `route_mark` в сессии. Rust не хранит её в сессии: `r2o_route_mark` вычисляет метку по текущему пакету, `R2oRoutedFlows` ведёт маршрутные потоки; поведение «метка выбирает политику» покрыто `r2o_маршрутный_поток...`, `r2o_политика_отделяет_чужие_потоки...`, `r2o_route_mark` тестами. |
 | `d2k_session_route_mark` | 2655–2657 | 3 | чтение метки текущего пакета | `main.rs` `route_gate`/`packet.mark` | **E*** | C getter поля; Rust не хранит метку в сессии, а использует `route_gate` и `packet.mark`. Для UDP-hold явная проверка `route_mark==0` покрыта `test-udp-prepost-differential.sh` кейс F (`pre=0`), route-gate — `test-datapath-route-*`/unit. **Ограничение:** отдельного getter-а нет. |
 | `d2k_session_routed_flows` | 2659–2661 | 3 | счётчик routed-потоков | `r2o_route.rs` `R2oRoutedFlows::routed_flows` | **E*** | C `s->routed_flows++` — **кумулятивное** число впервые помеченных потоков. Rust раньше печатал текущий размер map; теперь `routed_flows()` возвращает кумулятивный счётчик, который растёт только при первом появлении ключа и не уменьшается при expiry/новом SYN. Тест `r2o_счётчик_маршрутных_потоков_кумулятивный_как_c`: повторная метка не считается, истечение не уменьшает, второй поток → 2; `r2o_маршрутный_поток...` подтверждает сброс флага на новом SYN. **Ограничение:** Rust хранит и reverse-ключ, поэтому `len()` вдвое больше числа потоков; для статистики используется `routed_flows()`. |
-| `d2k_session_set_udp_reverse_hook` | 2663–2665 | 3 | «обратное UDP видно» | `main.rs` `reverse_queue_visible` | **P** | C хранит флаг в сессии и использует в `sweep_udp_one`; Rust `options.reverse_queue_visible` + `ControlServer::is_connected`, передаётся в `sweep`. Смысл тот же, поле/условие иное. |
-| `d2k_session_set_ct_query` | 2667–2669 | 3 | включить ctnetlink-запросы | `conntrack.rs:264 R2oConntrackClient` (`Option`) | **P** | C инъектирует `ct_query`/`ctx`; Rust `conntrack: Option<R2oConntrackClient>` создаётся в `run`, `None` при недоступности. Эквивалентно по включению/выключению, API иной. |
+| `d2k_session_set_udp_reverse_hook` | 2663–2665 | 3 | «обратное UDP видно» | `main.rs` `reverse_queue_visible` | **E*** | C хранит флаг в сессии и проверяет его в `sweep_udp_one`; Rust `options.reverse_queue_visible` (`--both`/видимый control) передаётся в TCP/UDP/voice/QUIC sweep, а `--both` выставляет его при подключённом control. Тесты: `quic_initial_молчание_требует_повтора_и_видимого_обратного_пути` (false → пусто, true → событие), `sweep_silent(...,false).is_empty()` и парные TCP/QUIC-проверки в engine; `main.rs:6659` — `--both`. **Ограничение:** вместо поля сессии — параметр sweep; смысл «обратное видно» тот же. |
+| `d2k_session_set_ct_query` | 2667–2669 | 3 | включить ctnetlink-запросы | `conntrack.rs` `R2oConntrackClient` (`Option`) | **E*** | C инъектирует `ct_query`/`ctx`; Rust создаёт `Option<R2oConntrackClient>` в `run`: `None` при недоступной подсистеме, `Some` после успешного `probe`. `probe`/`r2o_ct_reply_errno` сверены тестом `ct_reply_errno_matches_c` (запись, чужой seq, ENOENT, ACK), `d2k_ct_probe_fd` — E*. **Ограничение:** включение выражено наличием `Option`, а не callback-полем; живой netlink C/Rust-оракул не строился. |
 | `d2k_session_udp_hold_begin` | 2671–2711 | 41 | route_mark=0, UDP не фрагмент, hook client/server, 443 fallback, QUIC Initial, поток не plan_done/damaged/saw_hello/routed, fwd_pkts<8 | `r2o_udp_hold.rs` `r2o_udp_hold_candidate`, `r2o_udp_sessions.rs` `r2o_begin_hold_at_mark` | **E*** | C-гейты перенесены: `route_mark==0` проверяется явно (`r2o_begin_hold_at_mark`, production передаёт `packet.mark`), фрагмент/направление/QUIC Initial — `r2o_udp_hold_candidate`, запрет после `plan_applied`/`hello_seen`, окно 8 попыток; **добавлен `damaged`** в UDP-FlowState и запрет hold после потерянного execution. C/Rust differential `test-udp-prepost-differential.sh` PASS (6 строк, включая F: route mark 0x2e → `pre=0`); тест `r2o_udp_hold_begin_отвергает_метку_маршрута_и_damaged_как_c`. **Ограничение:** `routed` не хранится в UDP-состоянии — production route-gate отсекает поток до hold; C `fwd_pkts<8` выражен `hold_attempts`/`client_packets_seen`, окно совпало. |
 | `d2k_session_udp_opening` | 2713–2736 | 24 | первый клиентский пакет: `fwd_pkts==1`, hook OUT/POST→клиент, IN/PRE→сервер, иначе flow, иначе 443 | `r2o_udp_sessions.rs` `r2o_udp_opening_at_hook` | E | C проверяет `fwd_pkts==1` и определяет клиента по hook: OUT/POST → клиент, IN/PRE → сервер, иначе сохранённое направление, иначе резерв по 443. Rust `r2o_udp_opening_at_hook(packet, hook)` передаёт hook в `r2o_udp_packet_direction` с тем же приоритетом; `r2o_udp_mark_plain_pass` пробрасывает `queue_hook`. Тест `обычный_принятый_первый_udp_пакет_открывает_окно_только_для_клиента` (OUT). |
 | `d2k_session_udp_hold_end` | 2738-2742 | 5 | закрыть транзакцию hold (`udp_hold_active=0`) | `r2o_udp_sessions.rs` `r2o_begin_hold`/`r2o_mark_hello_seen`, `r2o_udp_hold` slot ownership | **E*** | C снимает флаг active; Rust флага не хранит — транзакцию закрывает изъятие слота (`r2o_take`/release/overflow), а повторное удержание запрещают `hold_attempts`/`hello_seen`/`plan_applied`. Наблюдаемые исходы сверены C/Rust differential `test-udp-prepost-differential.sh`: RECLAIMED (`post=3`), LOST (`post=4`), REPLAY (`post=2`) и release/flush. **Ограничение:** отдельного вызова `hold_end` нет; Rust-модель состояний отличается, наблюдаемый выпуск ID совпадает. |
