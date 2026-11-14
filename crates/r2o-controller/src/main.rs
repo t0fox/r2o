@@ -986,7 +986,7 @@ fn r2o_ask_plans(plans: &[String], decoy: Option<&str>, no_decoy_reason: &str) -
 fn r2o_voice_check_command(r2o_arguments: &[std::ffi::OsString]) -> Option<i32> {
     if r2o_arguments
         .first()
-        .is_none_or(|r2o_argument| r2o_argument != "--voice-check")
+        .is_none_or(|r2o_argument| r2o_argument != "--voice-check" && r2o_argument != "--voice")
     {
         return None;
     }
@@ -995,7 +995,7 @@ fn r2o_voice_check_command(r2o_arguments: &[std::ffi::OsString]) -> Option<i32> 
         Err(r2o_error) => {
             eprintln!("r2o-controller: {r2o_error}");
             eprintln!(
-                "использование: r2o-controller --voice-check [--addr IPv4:ПОРТ] [--control ХОСТ:ПОРТ] [--conntrack ФАЙЛ] [--wait МС] [--mark 0xN] [--discovery]"
+                "использование: r2o-controller --voice-check|--voice [--addr IPv4:ПОРТ] [--control ХОСТ:ПОРТ] [--conntrack ФАЙЛ] [--wait МС] [--mark 0xN] [--discovery]"
             );
             return Some(2);
         }
@@ -1010,25 +1010,25 @@ fn r2o_voice_check_command(r2o_arguments: &[std::ffi::OsString]) -> Option<i32> 
 fn r2o_voice_list_command(r2o_arguments: &[std::ffi::OsString]) -> Option<i32> {
     if r2o_arguments
         .first()
-        .is_none_or(|r2o_argument| r2o_argument != "--voice-list")
+        .is_none_or(|r2o_argument| r2o_argument != "--voice-list" && r2o_argument != "--list")
     {
         return None;
     }
 
-    let r2o_path = match r2o_arguments {
-        [r2o_command] if r2o_command == "--voice-list" => None,
-        [r2o_command, r2o_option, r2o_path]
-            if r2o_command == "--voice-list" && r2o_option == "--conntrack" =>
-        {
-            Some(PathBuf::from(r2o_path))
-        }
-        _ => {
-            eprintln!("использование: r2o-controller --voice-list [--conntrack ФАЙЛ]");
+    // C `d2kvoice --list` разбирает весь набор флагов и игнорирует всё, кроме
+    // `--conntrack`; повторяем этот контракт, а не требуем ровно два слова.
+    let r2o_options = match r2o_parse_voice_options(&r2o_arguments[1..]) {
+        Ok(r2o_options) => r2o_options,
+        Err(r2o_error) => {
+            eprintln!("r2o-controller: {r2o_error}");
+            eprintln!(
+                "использование: r2o-controller --voice-list|--list [--addr IPv4:ПОРТ] [--control ХОСТ:ПОРТ] [--conntrack ФАЙЛ] [--wait МС] [--mark 0xN] [--discovery]"
+            );
             return Some(2);
         }
     };
 
-    let r2o_targets = r2o_read_voice_targets(r2o_path.as_deref());
+    let r2o_targets = r2o_read_voice_targets(r2o_options.conntrack_path.as_deref());
     print!("{}", r2o_format_voice_targets(&r2o_targets));
     Some(i32::from(r2o_targets.is_empty()))
 }
@@ -1929,9 +1929,11 @@ fn print_help() {
     println!(
         "  глобально: [--control-wire v22|v48] [--control-release-id ID] — профиль control-соединения (по умолчанию v48)"
     );
-    println!("  r2o-controller --voice-list [--conntrack ФАЙЛ]");
     println!(
-        "  r2o-controller --voice-check [--addr IPv4:ПОРТ] [--control ХОСТ:ПОРТ] [--conntrack ФАЙЛ] [--wait МС] [--mark 0xN] [--discovery]"
+        "  r2o-controller --voice-list|--list [--addr IPv4:ПОРТ] [--control ХОСТ:ПОРТ] [--conntrack ФАЙЛ] [--wait МС] [--mark 0xN] [--discovery]"
+    );
+    println!(
+        "  r2o-controller --voice-check|--voice [--addr IPv4:ПОРТ] [--control ХОСТ:ПОРТ] [--conntrack ФАЙЛ] [--wait МС] [--mark 0xN] [--discovery]"
     );
 }
 
@@ -2622,6 +2624,111 @@ fn r2o_update_network_whitelist(
         network.searched = true;
         network.confirmed_at = Some(now.max(1));
     }
+}
+
+#[cfg(unix)]
+fn r2o_read_dns_config_file(path: &str) -> Option<String> {
+    let metadata = std::fs::metadata(path).ok()?;
+    if metadata.len() > 65_536 {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// C `ndmc_path`: первый исполняемый ndmc из четырёх путей.
+#[cfg(unix)]
+fn r2o_ndmc_path() -> Option<&'static str> {
+    [
+        "/usr/bin/ndmc",
+        "/usr/sbin/ndmc",
+        "/opt/bin/ndmc",
+        "/opt/sbin/ndmc",
+    ]
+    .into_iter()
+    .find(|path| {
+        std::fs::metadata(path).is_ok_and(|metadata| {
+            use std::os::unix::fs::PermissionsExt;
+            metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+        })
+    })
+}
+
+/// C `read_ndmc_status`: `ndmc -c "show dns-proxy"`, stderr в /dev/null,
+/// LD_LIBRARY_PATH пуст, общий срок 250 мс.
+#[cfg(unix)]
+fn r2o_read_ndmc_status() -> Option<String> {
+    use std::process::{Command, Stdio};
+
+    let path = r2o_ndmc_path()?;
+    let mut child = Command::new(path)
+        .arg("-c")
+        .arg("show dns-proxy")
+        .env("LD_LIBRARY_PATH", "")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                break;
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Err(_) => return None,
+        }
+    }
+    let output = child.wait_with_output().ok()?;
+    if output.stdout.is_empty() || output.stdout.len() >= 65_536 {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
+}
+
+/// C `d2k_dns_services_read_system`: OpenWrt/doq-web пути, UCI/dnsproxy/doqd
+/// и Keenetic `show dns-proxy`; ошибка ndmc отменяет чтение (C возвращает -1).
+#[cfg(unix)]
+fn r2o_read_system_dns_services() -> Option<Vec<r2k_core::dns_config::DnsService>> {
+    let openwrt = std::path::Path::new("/etc/openwrt_release").exists();
+    let doqd_path = if openwrt {
+        "/etc/doqd.conf"
+    } else {
+        "/opt/etc/doqd.conf"
+    };
+    let doqd_source = if ["/usr/sbin/doq-web", "/opt/sbin/doq-web"]
+        .into_iter()
+        .any(|path| std::path::Path::new(path).exists())
+    {
+        "keenetic-doq-web"
+    } else {
+        "doqd"
+    };
+    let status = if r2o_ndmc_path().is_some() {
+        Some(r2o_read_ndmc_status()?)
+    } else {
+        None
+    };
+    let https = r2o_read_dns_config_file("/etc/config/https-dns-proxy");
+    let dnsproxy = r2o_read_dns_config_file("/etc/config/dnsproxy");
+    let doqd = r2o_read_dns_config_file(doqd_path);
+    Some(r2k_core::dns_config::read_dns_services(
+        https.as_deref(),
+        dnsproxy.as_deref(),
+        doqd.as_deref(),
+        doqd_source,
+        status.as_deref(),
+    ))
 }
 
 #[cfg(unix)]
@@ -18045,6 +18152,11 @@ impl ControlClient {
             r2o_controller::r2o_resource_limit::R2oMeasurementGate::r2o_with_start_gap(
                 r2o_controller::r2o_resource_limit::r2o_system_measurement_worker_cap(),
             );
+        // C `dns_services_refresh`: чтение конфигурации на старте и не чаще
+        // раза в 30 с; ошибка ndmc сохраняет прошлый удачный набор.
+        let mut dns_services = r2o_read_system_dns_services().unwrap_or_default();
+        let mut dns_services_refresh =
+            std::time::Instant::now() + std::time::Duration::from_secs(30);
         let http_search = discovery.as_ref().map(|(catalog, _, _)| {
             let worker = HttpSearchWorker::new(measurement_gate.clone());
             worker.seed_records(catalog);
@@ -18459,6 +18571,12 @@ impl ControlClient {
                         Err(error) => eprintln!("каталог не сохранён: {error}"),
                     }
                 }
+                if r2o_now >= dns_services_refresh {
+                    if let Some(next) = r2o_read_system_dns_services() {
+                        dns_services = next;
+                    }
+                    dns_services_refresh = r2o_now + std::time::Duration::from_secs(30);
+                }
                 if live_written_at.is_none_or(|last: std::time::Instant| {
                     r2o_now.saturating_duration_since(last) >= std::time::Duration::from_secs(2)
                 }) {
@@ -18516,7 +18634,7 @@ impl ControlClient {
                                     detail: area.detail.clone(),
                                 })
                                 .collect::<Vec<_>>();
-                            match r2o_controller::live::snapshot_with_areas(
+                            match r2o_controller::live::snapshot_with_areas_and_dns(
                                 catalog,
                                 catalog_path,
                                 &active_groups,
@@ -18524,6 +18642,7 @@ impl ControlClient {
                                 measurements,
                                 discovery_status,
                                 &live_areas,
+                                &dns_services,
                             )
                             .and_then(|value| r2o_controller::live::write_snapshot(path, &value))
                             {
@@ -24460,6 +24579,68 @@ fn r2o_props_bind_udp() -> std::io::Result<(std::os::fd::OwnedFd, u16)> {
     r2o_props_bind_udp_family(4)
 }
 
+/// C `d2k_props_contact_on_family_tcp_profile` (`compose.c:632-753`) в
+/// контрактной форме: `use_fd`/`out_fd` и коды -1/-3. Production
+/// `run_r2o_ask` продолжает пользоваться прежней обёрткой, которая отдаёт
+/// поток с уже выставленными таймаутами.
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn r2o_props_contact_on_family_tcp_profile_contract(
+    use_fd: Option<std::os::fd::OwnedFd>,
+    ip: &str,
+    port: u16,
+    hello: &[u8],
+    family: u8,
+    tcp_timestamps: i8,
+    want_fd: bool,
+) -> Result<(Option<std::net::TcpStream>, std::net::IpAddr, u16), i32> {
+    if !matches!(family, 4 | 6) || ip.contains('%') {
+        drop(use_fd);
+        return Err(-1);
+    }
+    let Ok(parsed) = ip.parse::<std::net::IpAddr>() else {
+        drop(use_fd);
+        return Err(-1);
+    };
+    if parsed.is_ipv4() != (family == 4) {
+        drop(use_fd);
+        return Err(-1);
+    }
+    let destination = std::net::SocketAddr::new(parsed, port);
+    let probe = match use_fd {
+        Some(fd) => BoundTcpProbe {
+            socket: fd,
+            local_port: 0,
+        },
+        None => match BoundTcpProbe::open_unmarked(family) {
+            Ok(probe) => probe,
+            Err(_) => return Err(-1),
+        },
+    };
+    let (mut stream, local_ip, local_port, _) =
+        match probe.connect_with_timestamps(destination, ASK_WAIT, tcp_timestamps) {
+            Ok(values) => values,
+            Err(error) => {
+                // C: вне диапазона -1..1 — обычная ошибка EBADF/EINVAL → -1;
+                // -3 только когда не удалось прочитать/записать sysctl профиля.
+                return Err(if error.kind() == std::io::ErrorKind::Other {
+                    -3
+                } else {
+                    -1
+                });
+            }
+        };
+    if r2o_props_contact_write(&mut stream, hello).is_err() {
+        return Err(-1);
+    }
+    if want_fd {
+        Ok((Some(stream), local_ip, local_port))
+    } else {
+        drop(stream);
+        Ok((None, local_ip, local_port))
+    }
+}
+
 /// C `d2k_props_contact_on_family_tcp_profile`: connect + отправка приветствия.
 #[cfg(unix)]
 fn r2o_props_contact_on_family_tcp_profile(
@@ -24530,6 +24711,13 @@ impl BoundTcpProbe {
         // C `props_bind_any` + R2O: общий bind, метка и nonblock.
         let (socket, local_port) =
             r2o_props_bind_socket(libc::SOCK_STREAM, family, Some(mark.unwrap_or(0x2d)), true)?;
+        Ok(Self { socket, local_port })
+    }
+
+    /// C `d2k_props_contact_on_family_tcp_profile` не ставит SO_MARK: метка
+    /// нужна только управляющим зондам R2O.
+    fn open_unmarked(family: u8) -> std::io::Result<Self> {
+        let (socket, local_port) = r2o_props_bind_socket(libc::SOCK_STREAM, family, None, true)?;
         Ok(Self { socket, local_port })
     }
 
@@ -26108,6 +26296,204 @@ mod tests {
             0
         );
         assert_eq!(v6only, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn props_contact_contract_differential_matches_c() {
+        use serde_json::json;
+        use std::io::Read;
+        use std::net::{SocketAddr, TcpListener};
+        use std::os::fd::FromRawFd;
+
+        fn server(listener: TcpListener) -> (std::thread::JoinHandle<usize>, SocketAddr) {
+            let address = listener.local_addr().unwrap();
+            let thread = std::thread::spawn(move || {
+                let _ = listener.set_nonblocking(true);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(pair) => break pair,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && std::time::Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        Err(_) => return 0,
+                    }
+                };
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(300)));
+                let mut total = 0;
+                let mut buffer = [0_u8; 64];
+                loop {
+                    match stream.read(&mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => total += read,
+                    }
+                }
+                total
+            });
+            (thread, address)
+        }
+
+        fn run_connected(
+            cases: &mut Vec<serde_json::Value>,
+            name: &str,
+            family: u8,
+            ip: &str,
+            hello: &str,
+            use_use_fd: bool,
+            want_fd: bool,
+        ) {
+            let bind_ip = if family == 6 {
+                "[::1]:0"
+            } else {
+                "127.0.0.1:0"
+            };
+            let listener = TcpListener::bind(bind_ip.parse::<SocketAddr>().unwrap()).unwrap();
+            let (thread, address) = server(listener);
+            let use_fd = use_use_fd.then(|| unsafe {
+                std::os::fd::OwnedFd::from_raw_fd(libc::socket(
+                    if family == 6 {
+                        libc::AF_INET6
+                    } else {
+                        libc::AF_INET
+                    },
+                    libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
+                    0,
+                ))
+            });
+            let result = super::r2o_props_contact_on_family_tcp_profile_contract(
+                use_fd,
+                ip,
+                address.port(),
+                hello.as_bytes(),
+                family,
+                -1,
+                want_fd,
+            );
+            let received = thread.join().unwrap() as i64;
+            match result {
+                Ok((stream, _local_ip, local_port)) => {
+                    let returned_fd = stream.is_some();
+                    drop(stream);
+                    cases.push(json!({
+                        "name": name,
+                        "rc": 0,
+                        "local_family": family,
+                        "local_port_nonzero": local_port != 0,
+                        "returned_fd": returned_fd,
+                        "received": received,
+                    }));
+                }
+                Err(code) => cases.push(json!({
+                    "name": name,
+                    "rc": code,
+                    "local_family": 0,
+                    "local_port_nonzero": false,
+                    "returned_fd": false,
+                    "received": received,
+                })),
+            }
+        }
+
+        let mut cases = Vec::new();
+        run_connected(&mut cases, "v4_new_fd", 4, "127.0.0.1", "abc", false, true);
+        run_connected(&mut cases, "v4_no_fd", 4, "127.0.0.1", "abcd", false, false);
+        run_connected(&mut cases, "v6_no_fd", 6, "::1", "xyz", false, false);
+        run_connected(
+            &mut cases,
+            "v4_empty_hello",
+            4,
+            "127.0.0.1",
+            "",
+            false,
+            true,
+        );
+        run_connected(&mut cases, "v4_use_fd", 4, "127.0.0.1", "use", true, false);
+
+        let invalid = |cases: &mut Vec<serde_json::Value>, name: &str, ip: &str, family: u8| {
+            let result = super::r2o_props_contact_on_family_tcp_profile_contract(
+                None, ip, 9, b"x", family, -1, false,
+            );
+            cases.push(json!({
+                "name": name,
+                "rc": result.err().unwrap_or(0),
+                "local_family": 0,
+                "local_port_nonzero": false,
+                "returned_fd": false,
+                "received": -1,
+            }));
+        };
+        invalid(&mut cases, "bad_family", "127.0.0.1", 5);
+        invalid(&mut cases, "scoped_ipv6", "fe80::1%eth0", 6);
+        invalid(&mut cases, "bad_ip", "not-an-ip", 4);
+
+        let current = std::fs::read_to_string("/proc/sys/net/ipv4/tcp_timestamps")
+            .ok()
+            .and_then(|text| text.trim().chars().next())
+            .unwrap_or('1');
+        let timestamps = if current == '1' { 0 } else { 1 };
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let (thread, address) = server(listener);
+        let result = super::r2o_props_contact_on_family_tcp_profile_contract(
+            None,
+            "127.0.0.1",
+            address.port(),
+            b"x",
+            4,
+            timestamps,
+            false,
+        );
+        let received = thread.join().unwrap() as i64;
+        match result {
+            Ok((_stream, _local_ip, local_port)) => cases.push(json!({
+                "name": "profile_write",
+                "rc": 0,
+                "local_family": 4,
+                "local_port_nonzero": local_port != 0,
+                "returned_fd": false,
+                "received": received,
+            })),
+            Err(code) => cases.push(json!({
+                "name": "profile_write",
+                "rc": code,
+                "local_family": 0,
+                "local_port_nonzero": false,
+                "returned_fd": false,
+                "received": received,
+            })),
+        }
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let result = super::r2o_props_contact_on_family_tcp_profile_contract(
+            None,
+            "127.0.0.1",
+            port,
+            b"x",
+            4,
+            -1,
+            false,
+        );
+        cases.push(json!({
+            "name": "closed_port",
+            "rc": result.err().unwrap_or(0),
+            "local_family": 0,
+            "local_port_nonzero": false,
+            "returned_fd": false,
+            "received": -1,
+        }));
+
+        if let Ok(path) = std::env::var("R2O_PROPS_CONTACT_DIFF_OUTPUT") {
+            std::fs::write(
+                path,
+                serde_json::to_string(&json!({"cases": cases})).unwrap(),
+            )
+            .unwrap();
+        }
     }
 
     #[cfg(unix)]

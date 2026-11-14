@@ -41,7 +41,9 @@ import sys
 
 def d2o_view(doc):
     """Оставить только поля, которые пишет D2O `d2k_sched_write_live`."""
-    out = {key: doc[key] for key in doc}
+    out = {key: doc[key] for key in doc if key != "dns_services"}
+    # `dns_services` появился только в D2O current main (7a5fab9); pinned
+    # a378 этого поля не знает. Секция проверяется отдельным differential.
     boxes = []
     for box in doc.get("boxes", []):
         boxes.append({

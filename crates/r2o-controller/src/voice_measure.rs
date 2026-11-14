@@ -120,7 +120,12 @@ pub fn r2o_parse_voice_options(
                 let r2o_millis = r2o_value
                     .parse::<u64>()
                     .map_err(|_| "--wait должен быть числом миллисекунд")?;
-                r2o_options.wait = Duration::from_millis(r2o_millis);
+                // C `d2k_voice_run`: 0 — «не задано», подставляется 3000 мс.
+                r2o_options.wait = if r2o_millis == 0 {
+                    R2O_VOICE_DEFAULT_WAIT
+                } else {
+                    Duration::from_millis(r2o_millis)
+                };
             }
             "--mark" => {
                 let r2o_value = r2o_voice_option_value(r2o_arguments, &mut r2o_index, "--mark")?;
@@ -1180,6 +1185,16 @@ mod tests {
         assert_eq!(r2o_options.wait, Duration::from_millis(25));
         assert_eq!(r2o_options.mark, Some(45));
         assert!(r2o_options.discovery);
+    }
+
+    #[test]
+    fn нулевое_ожидание_означает_донорские_3000_мс() {
+        let zero =
+            r2o_parse_voice_options(&[OsString::from("--wait"), OsString::from("0")]).unwrap();
+        assert_eq!(zero.wait, Duration::from_secs(3));
+        let one =
+            r2o_parse_voice_options(&[OsString::from("--wait"), OsString::from("1")]).unwrap();
+        assert_eq!(one.wait, Duration::from_millis(1));
     }
 
     #[test]

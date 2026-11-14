@@ -50,6 +50,74 @@ run_case() {
 run_case list "$FIXTURE"
 run_case empty "$TEMP/empty.txt"
 
-printf 'cases=2\n'
+run_list_extra() {
+    name=$1
+    shift
+    set +e
+    "$D2O_VOICE" --list "$@" >"$TEMP/c-$name.out" 2>"$TEMP/c-$name.err"
+    c_status=$?
+    "$CARGO" run --manifest-path "$ROOT/Cargo.toml" --locked --offline \
+        -q -p r2o-controller --bin r2o-controller -- \
+        --voice-list "$@" >"$TEMP/r-$name.out" 2>"$TEMP/r-$name.err"
+    r_status=$?
+    set -e
+    if [ "$c_status" != "$r_status" ]; then
+        printf 'FAIL: %s exit C=%s Rust=%s\n' "$name" "$c_status" "$r_status" >&2
+        return 1
+    fi
+    if ! diff -u "$TEMP/c-$name.out" "$TEMP/r-$name.out"; then
+        printf 'FAIL: %s output\n' "$name" >&2
+        return 1
+    fi
+}
+
+# C `--list` принимает весь набор флагов и игнорирует всё, кроме --conntrack.
+run_list_extra list_wait_zero --wait 0 --mark 0x2d --control 127.0.0.1:9 \
+    --conntrack "$FIXTURE"
+run_list_extra list_addr --addr 1.2.3.4:9 --conntrack "$FIXTURE"
+run_list_extra list_unknown --bogus
+run_list_extra list_missing --conntrack
+
+# Алиас `--list` у r2o-controller ведёт себя как d2kvoice --list.
+set +e
+"$D2O_VOICE" --list --conntrack "$FIXTURE" >"$TEMP/c-alias.out" 2>"$TEMP/c-alias.err"
+c_status=$?
+"$CARGO" run --manifest-path "$ROOT/Cargo.toml" --locked --offline \
+    -q -p r2o-controller --bin r2o-controller -- \
+    --list --conntrack "$FIXTURE" >"$TEMP/r-alias.out" 2>"$TEMP/r-alias.err"
+r_status=$?
+set -e
+if [ "$c_status" != "$r_status" ] || ! diff -u "$TEMP/c-alias.out" "$TEMP/r-alias.out"; then
+    printf 'FAIL: alias --list\n' >&2
+    exit 1
+fi
+
+run_measure() {
+    name=$1
+    shift
+    set +e
+    "$D2O_VOICE" --conntrack "$TEMP/empty.txt" "$@" >"$TEMP/c-$name.out" 2>"$TEMP/c-$name.err"
+    c_status=$?
+    "$CARGO" run --manifest-path "$ROOT/Cargo.toml" --locked --offline \
+        -q -p r2o-controller --bin r2o-controller -- \
+        --voice-check --conntrack "$TEMP/empty.txt" "$@" >"$TEMP/r-$name.out" 2>"$TEMP/r-$name.err"
+    r_status=$?
+    set -e
+    if [ "$c_status" != "$r_status" ]; then
+        printf 'FAIL: %s exit C=%s Rust=%s\n' "$name" "$c_status" "$r_status" >&2
+        printf 'C stdout: '; cat "$TEMP/c-$name.out" >&2
+        printf 'Rust stdout: '; cat "$TEMP/r-$name.out" >&2
+        return 1
+    fi
+    if ! diff -u "$TEMP/c-$name.out" "$TEMP/r-$name.out"; then
+        printf 'FAIL: %s output\n' "$name" >&2
+        return 1
+    fi
+}
+
+run_measure measure_no_call
+run_measure measure_wait_zero --wait 0
+
+printf 'cases=9\n'
 cat "$TEMP/c-list.out"
 printf 'PASS: C/Rust voice list matches (D2O %s)\n' "$ACTUAL_D2O_SHA"

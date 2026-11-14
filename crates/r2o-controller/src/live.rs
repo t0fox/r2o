@@ -203,6 +203,29 @@ pub fn snapshot_with_areas(
     discovery_status: DiscoveryStatus,
     areas: &[LiveAreaState],
 ) -> Result<Value, CatalogError> {
+    snapshot_with_areas_and_dns(
+        catalog,
+        catalog_path,
+        active_groups,
+        searches,
+        measurements,
+        discovery_status,
+        areas,
+        &[],
+    )
+}
+
+/// Полный снимок live.json с секцией `dns_services` (D2O current main).
+pub fn snapshot_with_areas_and_dns(
+    catalog: &Catalog,
+    catalog_path: &Path,
+    active_groups: &HashSet<LiveGroupKey>,
+    searches: Vec<Value>,
+    measurements: Value,
+    discovery_status: DiscoveryStatus,
+    areas: &[LiveAreaState],
+    dns_services: &[r2k_core::dns_config::DnsService],
+) -> Result<Value, CatalogError> {
     let mut boxes = Vec::with_capacity(catalog.boxes.len());
     let mut targets = 0_u64;
     for record in &catalog.boxes {
@@ -366,6 +389,7 @@ pub fn snapshot_with_areas(
         }).collect::<Vec<_>>()
     }).unwrap_or_default();
 
+    let dns_services = r2o_live_dns_services(catalog, dns_services);
     Ok(json!({
         "linked": true,
         "link_note": "",
@@ -379,7 +403,83 @@ pub fn snapshot_with_areas(
         "confirms": discovery_status.confirms,
         "probes_used": discovery_status.probes_used,
         "client_unfit": discovery_status.client_unfit,
+        "dns_services": dns_services,
     }))
+}
+
+/// C `write_live_dns_services` (`sched.c:6652`) для состояния «конфигурация
+/// найдена, health-проб ещё нет»: state=detected, health-поля пустые.
+fn r2o_live_dns_services(
+    catalog: &Catalog,
+    services: &[r2k_core::dns_config::DnsService],
+) -> Vec<Value> {
+    services
+        .iter()
+        .map(|service| {
+            let resolved_ip = if service.host.parse::<std::net::IpAddr>().is_ok() {
+                service.host.clone()
+            } else {
+                String::new()
+            };
+            let reason = if resolved_ip.is_empty() {
+                "Конфигурация найдена; ожидается наблюдение реального адреса endpoint."
+            } else {
+                "Адрес endpoint обнаружен; автоматическая проверка ожидает очереди."
+            };
+            let transport = if service.protocol == "doq" { 17 } else { 6 };
+            let family = if resolved_ip.contains(':') { 6 } else { 4 };
+            let target = if service.sni.is_empty() {
+                &service.host
+            } else {
+                &service.sni
+            };
+            let known_plan_id = catalog
+                .boxes
+                .iter()
+                .flat_map(|box_record| &box_record.bindings)
+                .find(|binding| {
+                    binding.enabled
+                        && binding.recheck_since.is_none()
+                        && binding.target == *target
+                        && (if binding.transport == 0 {
+                            6
+                        } else {
+                            binding.transport
+                        }) == transport
+                        && (if binding.family == 0 {
+                            4
+                        } else {
+                            binding.family
+                        }) == family
+                })
+                .map(|binding| binding.plan_id.clone())
+                .unwrap_or_default();
+            let path = service.path.split('?').next().unwrap_or("/").to_owned();
+            json!({
+                "protocol": service.protocol,
+                "host": service.host,
+                "port": service.port,
+                "sni": service.sni,
+                "path": path,
+                "source": service.source,
+                "state": "detected",
+                "status_reason": reason,
+                "resolved_ip": resolved_ip,
+                "checked_at": Value::Null,
+                "direct_tcp_reachable": false,
+                "direct_tls_handshake": false,
+                "http_status": 0,
+                "check_attempts": 0,
+                "known_plan_id": known_plan_id,
+                "applied_plan_id": "",
+                "plan_applied_at": Value::Null,
+                "plan_applied": false,
+                "candidate_plan_applied": false,
+                "dns_answer_via_plan": false,
+                "dns_answer_confirmed": false,
+            })
+        })
+        .collect()
 }
 
 pub fn write_snapshot(path: &Path, value: &Value) -> Result<(), CatalogError> {
@@ -1060,6 +1160,177 @@ mod tests {
         if let Ok(path) = std::env::var("R2O_LIVE_GROUPS_DIFF_OUTPUT") {
             std::fs::write(path, serde_json::to_string(&scenarios).unwrap()).unwrap();
         }
+    }
+
+    #[test]
+    fn dns_live_differential_matches_current_d2o() {
+        use crate::catalog::{Binding, BoxRecord, Plan};
+        use r2k_core::dns_config::DnsService;
+
+        let catalog = Catalog {
+            boxes: vec![BoxRecord {
+                id: "box-dns".into(),
+                plans: vec![Plan {
+                    id: "plan-dns".into(),
+                    proto: "tls".into(),
+                    text: "r2o-plan 1 11\nproto tcp tls\nsplit sni_middle +0\n".into(),
+                    enabled: true,
+                    successes: 1,
+                    ..Plan::default()
+                }],
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: "dns.example".into(),
+                    plan_id: "plan-dns".into(),
+                    level: 3,
+                    enabled: true,
+                    transport: 6,
+                    family: 4,
+                    shape: 1,
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        let services = vec![
+            DnsService {
+                protocol: "doh".into(),
+                host: "dns.example".into(),
+                sni: "dns.example".into(),
+                path: "/dns-query?token=secret".into(),
+                bootstrap_dns: String::new(),
+                source: "https-dns-proxy".into(),
+                port: 443,
+            },
+            DnsService {
+                protocol: "dot".into(),
+                host: "1.1.1.1".into(),
+                sni: String::new(),
+                path: "/".into(),
+                bootstrap_dns: String::new(),
+                source: "dnsproxy".into(),
+                port: 853,
+            },
+            DnsService {
+                protocol: "doq".into(),
+                host: "2001:db8::1".into(),
+                sni: String::new(),
+                path: "/".into(),
+                bootstrap_dns: String::new(),
+                source: "doqd".into(),
+                port: 853,
+            },
+        ];
+        let live = snapshot_with_areas_and_dns(
+            &catalog,
+            Path::new("/state/catalog.json"),
+            &HashSet::new(),
+            Vec::new(),
+            json!({}),
+            DiscoveryStatus::default(),
+            &[],
+            &services,
+        )
+        .unwrap();
+        if let Ok(path) = std::env::var("R2O_DNS_LIVE_DIFF_OUTPUT") {
+            std::fs::write(
+                path,
+                serde_json::to_string(&json!({"dns_services": live["dns_services"]})).unwrap(),
+            )
+            .unwrap();
+        }
+        assert_eq!(live["dns_services"][0]["known_plan_id"], "plan-dns");
+        assert_eq!(live["dns_services"][0]["path"], "/dns-query");
+        assert_eq!(live["dns_services"][1]["resolved_ip"], "1.1.1.1");
+        assert_eq!(live["dns_services"][2]["resolved_ip"], "2001:db8::1");
+    }
+
+    #[test]
+    fn live_dns_services_section_matches_current_d2o_shape() {
+        use crate::catalog::{Binding, BoxRecord};
+        use r2k_core::dns_config::DnsService;
+
+        let catalog = Catalog {
+            boxes: vec![BoxRecord {
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: "dns.example".into(),
+                    plan_id: "plan-dns".into(),
+                    enabled: true,
+                    transport: 6,
+                    family: 4,
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        let services = vec![
+            DnsService {
+                protocol: "doh".into(),
+                host: "dns.example".into(),
+                sni: "dns.example".into(),
+                path: "/dns-query?token=secret".into(),
+                bootstrap_dns: String::new(),
+                source: "https-dns-proxy".into(),
+                port: 443,
+            },
+            DnsService {
+                protocol: "dot".into(),
+                host: "1.1.1.1".into(),
+                sni: String::new(),
+                path: "/".into(),
+                bootstrap_dns: String::new(),
+                source: "dnsproxy".into(),
+                port: 853,
+            },
+            DnsService {
+                protocol: "doq".into(),
+                host: "2001:db8::1".into(),
+                sni: String::new(),
+                path: "/".into(),
+                bootstrap_dns: String::new(),
+                source: "doqd".into(),
+                port: 853,
+            },
+        ];
+        let live = snapshot_with_areas_and_dns(
+            &catalog,
+            Path::new("/state/catalog.json"),
+            &HashSet::new(),
+            Vec::new(),
+            json!({}),
+            DiscoveryStatus::default(),
+            &[],
+            &services,
+        )
+        .unwrap();
+        let section = live["dns_services"].as_array().unwrap();
+        assert_eq!(section.len(), 3);
+        assert_eq!(section[0]["protocol"], "doh");
+        assert_eq!(section[0]["path"], "/dns-query");
+        assert_eq!(section[0]["state"], "detected");
+        assert_eq!(section[0]["known_plan_id"], "plan-dns");
+        assert_eq!(section[0]["resolved_ip"], "");
+        assert_eq!(section[0]["plan_applied_at"], Value::Null);
+        assert_eq!(section[1]["resolved_ip"], "1.1.1.1");
+        assert_eq!(section[1]["known_plan_id"], "");
+        assert_eq!(section[2]["resolved_ip"], "2001:db8::1");
+        assert_eq!(section[2]["port"], 853);
+        // Плоский пустой набор — пустой массив, а не пропущенное поле.
+        let empty = snapshot_with_areas_and_dns(
+            &Catalog::default(),
+            Path::new("/state/catalog.json"),
+            &HashSet::new(),
+            Vec::new(),
+            json!({}),
+            DiscoveryStatus::default(),
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(empty["dns_services"], json!([]));
     }
 
     #[test]
