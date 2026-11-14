@@ -275,7 +275,10 @@ fn rewrite_fragment(packet: &mut [u8], mapping: R2oConntrackNatSource) -> Option
     }
     let (source_range, udp_offset, first) = if family == 4 {
         let header_len = usize::from(packet[0] & 0x0f).checked_mul(4)?;
-        if header_len < 20 || header_len.checked_add(8)? > packet.len() || packet[9] != 17 {
+        // C `handle_udp` строит IPv4-фрагменты только при ihl == 20:
+        // «copying/fragmenting IPv4 options needs its own measured path».
+        // Переписывать адрес в таком фрагменте, не пересчитав опции, нельзя.
+        if header_len != 20 || packet.len() < header_len + 8 || packet[9] != 17 {
             return None;
         }
         let flags_offset = u16::from_be_bytes([packet[6], packet[7]]);
@@ -611,6 +614,18 @@ mod tests {
                 assert_rewritten_fragment_group(&wires[1..], family, mapping);
             }
         }
+    }
+
+    #[test]
+    fn ipv4_фрагменты_с_опциями_не_переписываются_как_в_c() {
+        // C собирает IPv4-фрагменты только при ihl == 20: опции требуют
+        // отдельного измеренного пути. Переписать адрес, не пересчитав
+        // заголовок с опциями, нельзя — план должен быть отвергнут.
+        let mut wires = fragment_fixture(4, 1);
+        for wire in &mut wires[1..] {
+            wire.packet[0] = 0x46;
+        }
+        assert!(!rewrite_fragment_group(&mut wires, mapped_source()));
     }
 
     fn ipv4_udp_packet() -> Vec<u8> {
