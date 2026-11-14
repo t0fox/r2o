@@ -71,6 +71,7 @@ struct StunFlow {
 struct FlowState {
     last_seen: Instant,
     plan_applied: bool,
+    damaged: bool,
     hello_seen: bool,
     quic_hello_counted: bool,
     controller_probe: bool,
@@ -213,6 +214,7 @@ impl R2oUdpSessions {
             FlowState {
                 last_seen: now,
                 plan_applied: false,
+                damaged: false,
                 hello_seen: false,
                 quic_hello_counted: false,
                 controller_probe,
@@ -431,17 +433,28 @@ impl R2oUdpSessions {
         };
         if lost {
             flow.plan_applied = false;
+            flow.damaged = true;
         }
         lost
     }
 
     /// Начать удержание QUIC Initial только в пределах окна первых попыток.
     pub fn r2o_begin_hold(&mut self, packet: &[u8]) -> bool {
+        self.r2o_begin_hold_at_mark(packet, 0)
+    }
+
+    /// C `d2k_session_udp_hold_begin`: клиентская метка маршрутизации
+    /// запрещает удержание (`s->route_mark == 0`).
+    pub fn r2o_begin_hold_at_mark(&mut self, packet: &[u8], route_mark: u32) -> bool {
+        if route_mark != 0 {
+            return false;
+        }
         let Some(flow) = flow_key_from_packet(packet).and_then(|key| self.flows.get_mut(&key))
         else {
             return false;
         };
         if flow.plan_applied
+            || flow.damaged
             || flow.hello_seen
             || flow.hold_attempts >= UDP_HELLO_WINDOW
             || flow.r2o_client_packets_seen > UDP_HELLO_WINDOW
@@ -671,6 +684,26 @@ mod tests {
         assert!(sessions.r2o_plan_applied(&probe));
         assert!(sessions.r2o_observe_probe_packet_at_hook(&client, now, None));
         assert_eq!(sessions.stats().flows, 0);
+    }
+
+    #[test]
+    fn r2o_udp_hold_begin_отвергает_метку_маршрута_и_damaged_как_c() {
+        let now = Instant::now();
+        let packet = r2o_udp_packet(45_010);
+        let mut sessions = R2oUdpSessions::new().unwrap();
+        assert!(sessions.observe_packet(&packet, now));
+        assert!(
+            !sessions.r2o_begin_hold_at_mark(&packet, 0x2e),
+            "C route_mark != 0 запрещает hold"
+        );
+        assert!(sessions.r2o_begin_hold_at_mark(&packet, 0));
+
+        let packet = r2o_udp_packet(45_011);
+        let mut damaged = R2oUdpSessions::new().unwrap();
+        assert!(damaged.observe_packet(&packet, now));
+        assert!(damaged.r2o_mark_plan_applied(&packet));
+        assert!(damaged.r2o_note_execution_failure(&packet, false, false, true, true));
+        assert!(!damaged.r2o_begin_hold(&packet), "C damaged запрещает hold");
     }
 
     #[test]

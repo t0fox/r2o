@@ -172,5 +172,16 @@ int main(void) {
         done(s, h, f);
     }
 
+    {
+        d2k_udp_hold *h; d2k_udp_follow *f;
+        d2k_session *s = fresh(&h, &f);
+        size_t pn = unnamed_initial(pay, 1);
+        size_t n = build(pkt, 6, 50105, pay, pn);
+        d2k_session_set_route_mark(s, 0x2e);
+        int pre = d2k_udp_path_pre(&path, 6, pkt, n, 0x2e, 1000, &key);
+        printf("F pre=%d\n", pre);
+        done(s, h, f);
+    }
+
     return 0;
 }

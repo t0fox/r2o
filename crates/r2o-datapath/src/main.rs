@@ -1955,7 +1955,7 @@ mod app {
                             udp_holds.r2o_flush(now),
                         );
                         if r2o_udp_hold_candidate(bytes, queue_hook)
-                            && udp_sessions.r2o_begin_hold(bytes)
+                            && udp_sessions.r2o_begin_hold_at_mark(bytes, packet.mark.unwrap_or(0))
                         {
                             match udp_holds.r2o_feed(
                                 packet_id,
@@ -6298,12 +6298,27 @@ mod app {
                 writeln!(output, "E pre=1 post=2 count={}", batch.packets.len()).unwrap();
             }
 
+            {
+                let mut sessions = R2oUdpSessions::new().unwrap();
+                let packet = initial_packet(6, 50105, 1);
+                assert!(r2o_udp_packet_admitted_at_hook(
+                    &mut sessions,
+                    &packet,
+                    now,
+                    hook,
+                    false,
+                ));
+                assert!(!sessions.r2o_begin_hold_at_mark(&packet, 0x2e));
+                writeln!(output, "F pre=0").unwrap();
+            }
+
             if let Ok(path) = std::env::var("R2O_UDP_PREPOST_DIFF_OUTPUT") {
                 std::fs::write(path, &output).unwrap();
             }
             assert!(output.contains("A pre=1 wait=1 post=1 released=1 verdict=1\n"));
             assert!(output.contains("D pre=1 post=4\n"));
             assert!(output.contains("E pre=1 post=2 count=1\n"));
+            assert!(output.contains("F pre=0\n"));
         }
 
         #[test]
