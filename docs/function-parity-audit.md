@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 266 | 134 | 0 | 0 |
+| datapath-core | 400 | 268 | 132 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1354** | **628** | **0** | **0** |
+| **Итого** | **1982** | **1356** | **626** | **0** | **0** |
 
-Это не оценка паритета: 628 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 626 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1354 / P 628 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1356 / P 626 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 266 | 134 | 0 | 0 |
+| datapath-core | 400 | 268 | 132 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1354** | **628** | **0** | **0** |
+| **Итого** | **1982** | **1356** | **626** | **0** | **0** |
 
 
 ---
@@ -4128,8 +4128,8 @@ R2O: `main.rs` (`r2o_release_udp_batch*`, `r2o_udp_handle_late_tail`),
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
 | `d2k_udp_path_release` | 6–13 | 8 | закрыть session-hold и выпустить пачку `NF_ACCEPT` | `main.rs` `r2o_release_udp_batch`, `r2o_udp_hold.rs` `r2o_release_batch_with` | **E*** | C/Rust differential `scripts/test-udp-path-differential.sh` PASS: пачка из 3 датаграмм — `taken=1 count=3`, вердикты `id1=ACCEPT`, `id2=id3=DROP`, raw-переиздание хвостов 2, follow головы `=1`, `live=1`. **Ограничение:** C `d2k_session_udp_hold_end` не имеет Rust-аналога — флаг `udp_hold_active` не хранится; наблюдаемый выпуск/вердикты/follow совпадают. Остальные пути release (ошибки вердикта/raw) покрыты unit-тестами `udp_hold.rs`. |
-| `d2k_udp_path_pre` | 15–33 | 19 | flush истёкших, `session_udp_hold_begin`, `hold_feed_marked`; при отказе feed — `hold_end` | `main.rs:1560-1635` flush/release + begin_hold + feed | **P** | C: flush с release-callback → `hold_begin` → `feed_marked`; при отказе feed вызывает `hold_end`. Rust: `r2o_flush(now)` + `r2o_release_udp_batches`, затем `r2o_begin_hold` и `r2o_feed`; `Held` без собранного ClientHello делает `continue` без отката, `Overflow` отпускает пачку, `Refused` ничего; `hold_end` отсутствует. Логика близка, но ветви rollback/held-без-hello различаются. |
-| `d2k_udp_path_post` | 35–60 | 26 | `udp_hold_wait` → HELD/NORMAL; `udp_hold_ready` → take/replay → REPLAY, иначе LOST; `fed` → take/release → RECLAIMED | `main.rs:1600-2210` (late tail/replay/release) | **P** | C возвращает один из четырёх кодов и явно вызывает `hold_replay`/`hold_end`. Rust разносит это по веткам `PacketDecision`, `r2o_udp_handle_late_tail`, `r2o_mark_hold_replay_first` и `r2o_release_udp_batch`; отдельной функции с теми же четырьмя исходами нет. P — нужен differential на HELD/REPLAY/LOST/RECLAIMED. |
+| `d2k_udp_path_pre` | 15–33 | 19 | flush истёкших, `session_udp_hold_begin`, `hold_feed_marked`; при отказе feed — `hold_end` | `main.rs` flush/release + `r2o_begin_hold` + `r2o_feed` | **E*** | C/Rust differential `scripts/test-udp-prepost-differential.sh` PASS (4 строки): QUIC Initial без ClientHello → `pre=1` (begin_hold + feed Held), обычный UDP → `pre=0`; второй и третий Initial того же/другого потока — `pre=1`. **Ограничение:** C `hold_end` при отказе feed не имеет Rust-аналога — флаг `udp_hold_active` не хранится; flush истёкших проверен косвенно через release. |
+| `d2k_udp_path_post` | 35–60 | 26 | `udp_hold_wait` → HELD/NORMAL; `udp_hold_ready` → take/replay → REPLAY, иначе LOST; `fed` → take/release → RECLAIMED | `main.rs` late tail/replay/release | **E*** | C/Rust differential PASS: HELD (`post=1`, released=1), NORMAL (`post=0`), RECLAIMED (`post=3`, verdict=ACCEPT), LOST (`post=4` после take). Rust-коды собраны из `r2o_feed`/`r2o_take`/`r2o_release_batch_with`, как production-цикл. **Ограничение:** REPLAY (`2`) не покрыт — нужен собранный ClientHello; `hold_replay`/`hold_end` — флаги Rust-сессии не хранятся, наблюдаемый выпуск совпадает. |
 | `d2k_udp_path_read` | 62–67 | 6 | `rseq++`, `seq=rseq`, `now_ns` | `main.rs` `udp_receive_seq` | **E*** | Rust приведён к C: голый `wrapping_add(1)` без `.max(1)`, поэтому переполнение даёт `seq=0`, как C. **Ограничение:** отдельного C/Rust differential нет; отличие было только на переполнении 64-битного счётчика, в production недостижимом. |
 | `d2k_udp_path_expire` | 69–74 | 6 | `seq = read_follows ? rseq+1 : NONE`, flush по таймеру | `main.rs` `follow_receive_seq`, `r2o_udp_hold.rs` `r2o_age` | E | C `D2K_UDP_SEQ_NONE=0`: при отсутствии чтения передаёт 0, иначе `rseq+1`. Rust в `main.rs` ставит `follow_receive_seq = received ? udp_receive_seq : 0` и вызывает `r2o_age` с тем же сентинелом; `r2o_age` удаляет по сроку и seq-правилам. C-тест `test_udp_path.c:393`, Rust-тест `udp_follow_age_matches_c_receive_seq_rules`. |
 | `d2k_udp_path_passed` | 76–88 | 13 | пассивный проход: IPv4, len≥20, `udp_opening`, neutral, follow_mark(0,seq) | `main.rs` `r2o_udp_mark_plain_pass` | **E*** | C/Rust differential `scripts/test-udp-path-differential.sh` PASS: 10 кейсов — первый клиентский пакет, второй пакет потока, non-neutral mark, TCP, IPv4-фрагмент, IPv6, multicast, planned now/at, короткий пакет; rc совпали. C-проверки proto 17/fragment 0/multicast делегированы `udp_opening`/`follow_tuple` — те же, что у Rust. **Ограничение:** marked-строка теперь портирована и вызывается до отказа (ограничение — batch/late пути); живой NFQUEUE-оракул не строился. |

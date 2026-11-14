@@ -5806,6 +5806,152 @@ mod app {
         }
 
         #[test]
+        fn udp_prepost_codes_differential_matches_c() {
+            use std::fmt::Write as _;
+
+            fn initial_packet(id: u16, source_port: u16, salt: u8) -> Vec<u8> {
+                let mut packet = vec![0_u8; 28 + 1200];
+                packet[0] = 0x45;
+                let total = packet.len() as u16;
+                packet[2..4].copy_from_slice(&total.to_be_bytes());
+                packet[4..6].copy_from_slice(&id.to_be_bytes());
+                packet[8] = 64;
+                packet[9] = 17;
+                packet[12..16].copy_from_slice(&[192, 168, 1, 67]);
+                packet[16..20].copy_from_slice(&[57, 144, 248, 192]);
+                packet[20..22].copy_from_slice(&source_port.to_be_bytes());
+                packet[22..24].copy_from_slice(&443_u16.to_be_bytes());
+                packet[24..26].copy_from_slice(&(8_u16 + 1200).to_be_bytes());
+                let payload = &mut packet[28..];
+                payload.fill(salt);
+                payload[0] = 0xC3;
+                payload[1] = 0;
+                payload[2] = 0;
+                payload[3] = 0;
+                payload[4] = 1;
+                payload[5] = 8;
+                payload[6..14].fill(0x11);
+                payload[14] = 0;
+                payload[15] = 0;
+                payload[16] = 0x40 | ((1200 - 18) >> 8) as u8;
+                payload[17] = (1200 - 18) as u8;
+                packet
+            }
+
+            fn release_batch(
+                batch: &r2o_datapath::r2o_udp_hold::R2oUdpHoldBatch,
+                verdict: &mut Option<u32>,
+            ) {
+                let _ = r2o_datapath::r2o_udp_hold::r2o_release_batch_with(
+                    batch,
+                    NF_ACCEPT,
+                    false,
+                    true,
+                    |_| true,
+                    |_| Ok::<_, io::Error>(()),
+                    |_, _| {},
+                    |_, value| {
+                        *verdict = Some(value);
+                        Ok::<_, io::Error>(())
+                    },
+                );
+            }
+
+            let now = Instant::now();
+            let hook = Some(r2o_datapath::netlink::R2O_NF_INET_POST_ROUTING);
+            let mut output = String::new();
+
+            {
+                let mut sessions = R2oUdpSessions::new().unwrap();
+                let mut hold = r2o_datapath::r2o_udp_hold::R2oUdpHoldTable::new();
+                let packet = initial_packet(1, 50100, 1);
+                assert!(r2o_udp_packet_admitted_at_hook(
+                    &mut sessions,
+                    &packet,
+                    now,
+                    hook,
+                    false,
+                ));
+                assert!(r2o_datapath::r2o_udp_hold::r2o_udp_hold_candidate(
+                    &packet, hook
+                ));
+                assert!(sessions.r2o_begin_hold(&packet));
+                assert_eq!(
+                    hold.r2o_feed(1, 0, &packet, now),
+                    r2o_datapath::r2o_udp_hold::R2oUdpHoldFeed::Held
+                );
+                let mut verdict = None;
+                let batches = hold.r2o_flush(now + Duration::from_millis(100));
+                assert_eq!(batches.len(), 1);
+                release_batch(&batches[0], &mut verdict);
+                writeln!(
+                    output,
+                    "A pre=1 wait=1 post=1 released={} verdict={}",
+                    batches.len(),
+                    verdict.unwrap()
+                )
+                .unwrap();
+            }
+
+            {
+                let plain = udp_packet([192, 0, 2, 1], [198, 51, 100, 2], 50101, 443);
+                let pre = u8::from(r2o_datapath::r2o_udp_hold::r2o_udp_hold_candidate(
+                    &plain, hook,
+                ));
+                writeln!(output, "B pre={pre} post=0").unwrap();
+            }
+
+            {
+                let mut sessions = R2oUdpSessions::new().unwrap();
+                let mut hold = r2o_datapath::r2o_udp_hold::R2oUdpHoldTable::new();
+                let packet = initial_packet(3, 50102, 1);
+                assert!(r2o_udp_packet_admitted_at_hook(
+                    &mut sessions,
+                    &packet,
+                    now,
+                    hook,
+                    false,
+                ));
+                assert!(sessions.r2o_begin_hold(&packet));
+                assert_eq!(
+                    hold.r2o_feed(3, 0, &packet, now),
+                    r2o_datapath::r2o_udp_hold::R2oUdpHoldFeed::Held
+                );
+                let batch = hold.r2o_take(&packet).expect("slot is held");
+                let mut verdict = None;
+                release_batch(&batch, &mut verdict);
+                writeln!(output, "C pre=1 post=3 verdict={}", verdict.unwrap()).unwrap();
+            }
+
+            {
+                let mut sessions = R2oUdpSessions::new().unwrap();
+                let mut hold = r2o_datapath::r2o_udp_hold::R2oUdpHoldTable::new();
+                let packet = initial_packet(4, 50103, 1);
+                assert!(r2o_udp_packet_admitted_at_hook(
+                    &mut sessions,
+                    &packet,
+                    now,
+                    hook,
+                    false,
+                ));
+                assert!(sessions.r2o_begin_hold(&packet));
+                assert_eq!(
+                    hold.r2o_feed(4, 0, &packet, now),
+                    r2o_datapath::r2o_udp_hold::R2oUdpHoldFeed::Held
+                );
+                assert!(hold.r2o_take(&packet).is_some());
+                assert!(hold.r2o_take(&packet).is_none());
+                writeln!(output, "D pre=1 post=4").unwrap();
+            }
+
+            if let Ok(path) = std::env::var("R2O_UDP_PREPOST_DIFF_OUTPUT") {
+                std::fs::write(path, &output).unwrap();
+            }
+            assert!(output.contains("A pre=1 wait=1 post=1 released=1 verdict=1\n"));
+            assert!(output.contains("D pre=1 post=4\n"));
+        }
+
+        #[test]
         fn плановый_udp_drop_открывает_окно_для_позднего_хвоста() {
             let now = Instant::now();
             let due = now + Duration::from_millis(30);
