@@ -8,6 +8,50 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <unistd.h>
+
+static int (*real_socket_fn)(int, int, int);
+static int (*real_setsockopt_fn)(int, int, int, const void *, socklen_t);
+static int (*real_close_fn)(int);
+
+static const char *open_plan(void) {
+    return getenv("FAKE_OPEN_PLAN");
+}
+
+int socket(int domain, int type, int protocol) {
+    if (!open_plan()) {
+        if (!real_socket_fn) real_socket_fn = dlsym(RTLD_NEXT, "socket");
+        return real_socket_fn(domain, type, protocol);
+    }
+    if (!real_socket_fn) real_socket_fn = dlsym(RTLD_NEXT, "socket");
+    if (!strcmp(open_plan(), "socket_fail")) {
+        errno = EPERM;
+        return -1;
+    }
+    /* Тестовый fd: важно лишь, что он валиден и закрывается. */
+    return real_socket_fn(domain, SOCK_DGRAM, 0);
+}
+
+int setsockopt(int fd, int level, int option, const void *value, socklen_t length) {
+    if (!open_plan()) {
+        if (!real_setsockopt_fn) real_setsockopt_fn = dlsym(RTLD_NEXT, "setsockopt");
+        return real_setsockopt_fn(fd, level, option, value, length);
+    }
+    if (!strcmp(open_plan(), "hdrincl_fail")) {
+        errno = EPERM;
+        return -1;
+    }
+    if (!strcmp(open_plan(), "mark_fail") && level == SOL_SOCKET && option == SO_MARK) {
+        errno = EPERM;
+        return -1;
+    }
+    return 0;
+}
+
+int close(int fd) {
+    if (!real_close_fn) real_close_fn = dlsym(RTLD_NEXT, "close");
+    return real_close_fn(fd);
+}
 
 static ssize_t (*real_sendto)(int, const void *, size_t, int,
                               const struct sockaddr *, socklen_t);

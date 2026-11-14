@@ -743,6 +743,20 @@ mod tests {
     }
 
     #[test]
+    fn raw_open_differential_matches_c() {
+        let scenario = std::env::var("FAKE_OPEN_SCENARIO").unwrap_or_else(|_| "ok".into());
+        let mark = u32::from(scenario.contains("mark"));
+        let result = super::RawSocket::open(libc::AF_INET, mark, None);
+        let rc = if result.is_ok() { 0 } else { -1 };
+        drop(result);
+        let output = format!("{scenario} rc={rc}\n");
+        if let Ok(path) = std::env::var("R2O_RAW_OPEN_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert!(output.contains(&format!("{scenario} rc=")));
+    }
+
+    #[test]
     fn raw_prepare_differential_matches_c() {
         fn wr16(packet: &mut [u8], offset: usize, value: u16) {
             packet[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
