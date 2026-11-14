@@ -3,6 +3,26 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::process::Command;
 
 #[test]
+#[ignore = "run through scripts/test-datapath-ct-open-down-differential.sh"]
+fn ct_open_down_differential_matches_c() {
+    use r2o_datapath::conntrack::R2oConntrackClient;
+
+    if std::env::var_os("R2O_CT_OPEN_DOWN_DIFF_OUTPUT").is_none() {
+        eprintln!("ct_open_down: запускается только через script");
+        return;
+    }
+    let open = u8::from(R2oConntrackClient::open().is_some());
+    let output = format!("open={open}\n");
+    if let Ok(path) = std::env::var("R2O_CT_OPEN_DOWN_DIFF_OUTPUT") {
+        std::fs::write(path, &output).unwrap();
+    }
+    assert_eq!(
+        open, 0,
+        "при EAFNOSUPPORT ctnetlink клиент должен быть None"
+    );
+}
+
+#[test]
 #[ignore = "run through scripts/test-datapath-ct-live-differential.sh in unshare -Urn"]
 fn ct_live_probe_and_query_match_d2o() {
     use r2o_datapath::conntrack::{R2oConntrackClient, R2oConntrackInfoParse, R2oConntrackTuple};
