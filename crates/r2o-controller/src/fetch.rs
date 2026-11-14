@@ -3245,6 +3245,9 @@ fn r2o_measure_http_packet_budget(
 ) -> crate::r2o_volume::R2oPacketBudgetOutcome {
     use crate::r2o_volume::R2oVolumePacketBudget as Budget;
 
+    // C `budget_tcp`: `need = budget * 2` — поток должен перенести две
+    // серии, а не один исходный ответ.
+    let need = need.saturating_mul(2);
     let Some(mut packets) = packet_counter(&stream.sock.socket) else {
         return r2o_budget_say(
             Budget::NotApplicable,
@@ -4753,7 +4756,7 @@ mod tests {
             mark: None,
         };
         let stream = TcpStream::connect(address).expect("подключить HTTPS-пробу");
-        let mut packet_counts = [4, 12, 51].into_iter();
+        let mut packet_counts = [4, 51, 120].into_iter();
         let result = r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
             &options,
             stream,
@@ -4932,11 +4935,16 @@ mod tests {
                     let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nab");
                     let _ = stream.flush();
                 }
-                "silent" => {
+                "silent" | "deadline" => {
                     let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nab");
                     let _ = stream.flush();
                     thread::sleep(Duration::from_millis(350));
                 }
+                "eof" => {
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nab");
+                    let _ = stream.flush();
+                }
+                "closed" => {}
                 _ => panic!("неизвестный case {case}"),
             }
         }
@@ -4962,6 +4970,8 @@ mod tests {
             let stream = TcpStream::connect(address).unwrap();
             let mut counts = if case == "passed" {
                 vec![4_u32, 12].into_iter()
+            } else if case == "below-threshold" {
+                vec![4_u32, 8].into_iter()
             } else {
                 vec![4_u32, 4].into_iter()
             };
@@ -4970,7 +4980,7 @@ mod tests {
                 port: address.port(),
                 ip: Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
                 path: "/".into(),
-                deadline: if case == "silent" {
+                deadline: if case == "silent" || case == "deadline" {
                     Duration::from_millis(100)
                 } else {
                     Duration::from_secs(2)
@@ -5012,6 +5022,10 @@ mod tests {
             "not-growing",
             "peer-spoke",
             "silent",
+            "eof",
+            "closed",
+            "deadline",
+            "below-threshold",
         ] {
             output.push_str(&format!(
                 "case={case} budget={}\n",
@@ -5023,7 +5037,7 @@ mod tests {
         }
         assert_eq!(
             output,
-            "case=passed budget=1\ncase=conn-close budget=3\ncase=not-growing budget=3\ncase=peer-spoke budget=3\ncase=silent budget=2\n"
+            "case=passed budget=1\ncase=conn-close budget=3\ncase=not-growing budget=3\ncase=peer-spoke budget=3\ncase=silent budget=2\ncase=eof budget=3\ncase=closed budget=3\ncase=deadline budget=2\ncase=below-threshold budget=3\n"
         );
     }
 

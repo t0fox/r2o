@@ -18,6 +18,7 @@ typedef struct {
     size_t len;
     size_t offset;
     int timeout;
+    int eof;
 } mock_reader;
 
 static long mock_read(void *opaque, uint8_t *out, size_t cap, int wait_ms,
@@ -32,6 +33,7 @@ static long mock_read(void *opaque, uint8_t *out, size_t cap, int wait_ms,
         return -1;
     }
     if (reader->offset == reader->len) {
+        if (reader->eof) return 0;
         snprintf(err, errcap, "HTTP read timeout");
         return -1;
     }
@@ -74,10 +76,12 @@ static int mock_peer_spoke(void *opaque)
 
 static void run_case(const char *name, const char *response, size_t response_len,
                      long packets0, long packets1, int conn_close, int timeout,
-                     int peer_spoke, unsigned budget, int deadline_ms)
+                     int peer_spoke, unsigned budget, int deadline_ms, int eof)
 {
     static const char request[] = "GET / HTTP/1.1\r\n\r\n";
-    mock_reader reader = {.bytes = response, .len = response_len, .timeout = timeout};
+    mock_reader reader = {
+        .bytes = response, .len = response_len, .timeout = timeout, .eof = eof,
+    };
     mock_io io = {
         .values = {packets0, packets1},
         .count = 2,
@@ -104,10 +108,14 @@ int main(void)
         "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
     static const char partial[] = "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nab";
 
-    run_case("passed", ok, sizeof ok - 1, 4, 12, 0, 0, 0, 5, 80);
-    run_case("conn-close", close, sizeof close - 1, 4, 4, 0, 0, 0, 5, 80);
-    run_case("not-growing", ok, sizeof ok - 1, 4, 4, 0, 0, 0, 5, 80);
-    run_case("peer-spoke", partial, sizeof partial - 1, 4, 4, 0, 0, 1, 5, 80);
-    run_case("silent", partial, sizeof partial - 1, 4, 4, 0, 1, 0, 5, 20);
+    run_case("passed", ok, sizeof ok - 1, 4, 12, 0, 0, 0, 5, 80, 0);
+    run_case("conn-close", close, sizeof close - 1, 4, 4, 0, 0, 0, 5, 80, 0);
+    run_case("not-growing", ok, sizeof ok - 1, 4, 4, 0, 0, 0, 5, 80, 0);
+    run_case("peer-spoke", partial, sizeof partial - 1, 4, 4, 0, 0, 1, 5, 80, 0);
+    run_case("silent", partial, sizeof partial - 1, 4, 4, 0, 1, 0, 5, 20, 0);
+    run_case("eof", partial, sizeof partial - 1, 4, 4, 0, 0, 0, 5, 80, 1);
+    run_case("closed", NULL, 0, 4, 4, 0, 0, 0, 5, 80, 1);
+    run_case("deadline", partial, sizeof partial - 1, 4, 4, 0, 1, 0, 5, 20, 0);
+    run_case("below-threshold", ok, sizeof ok - 1, 4, 8, 0, 0, 0, 5, 80, 0);
     return 0;
 }
