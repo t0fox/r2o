@@ -3,7 +3,7 @@ set -eu
 
 ROOT=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
 D2O_ROOT=${R2O_DONOR_ROOT:?set R2O_DONOR_ROOT to the clean D2O checkout}
-EXPECTED_D2O_SHA=a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe
+EXPECTED_D2O_SHA=a378e230947ebfd011439e1cac0f1e994d883aae
 ACTUAL_D2O_SHA=$(git -C "$D2O_ROOT" rev-parse HEAD)
 CC=${CC:-cc}
 CARGO=${CARGO:-cargo}
