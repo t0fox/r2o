@@ -1962,9 +1962,12 @@ fn decide_with_session_mode(
     {
         session.guards = plan.guards;
     }
-    if applied && matches!(&decision, PacketDecision::Accept | PacketDecision::Drop) {
-        if let Some(session) = sessions.flows.get_mut(&key) {
-            session.plan_done = true;
+    // C `session_packet` (`session.c:1552,2587`) взводит `plan_done` сразу
+    // после успешной сборки/передачи плана, включая `Transmit` с отложенными
+    // посылками: повтор ClientHello до их завершения уже не получает план.
+    if applied && let Some(session) = sessions.flows.get_mut(&key) {
+        session.plan_done = true;
+        if matches!(&decision, PacketDecision::Accept | PacketDecision::Drop) {
             session.r2o_execution_pending = false;
         }
     }
@@ -6755,6 +6758,14 @@ mod tests {
             decide_with_session(&mut sessions, &plan, &hello),
             PacketDecision::Transmit { .. }
         ));
+        // C `session_packet` ставит `plan_done=1` уже на передаче плана,
+        // до фактического завершения отложенных посылок. Повтор
+        // ClientHello в этом окне обязан пройти без плана.
+        assert!(sessions.flows.values().next().unwrap().plan_done);
+        assert_eq!(
+            decide_with_session(&mut sessions, &plan, &hello),
+            PacketDecision::Accept,
+        );
         let key = sessions.r2o_begin_execution(&hello, 51, 0, false).unwrap();
         assert!(sessions.r2o_send_pending(&key, 51));
         assert!(sessions.r2o_mark_plan_done_for_execution(&key, 51));
