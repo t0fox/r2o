@@ -130,6 +130,11 @@ T_VERIFY_WAIT/T_TRIAL_SETTLE`, generic `T_WATCHING`, кастомный
 candidate-without-answer/T_VERIFY/T_WATCHING. Живые root/netns/OpenWrt/
 аппаратные сценарии покрыты не полностью.
 
+**Категоризация 504 P (2026-11-14, QA):** A — нужен Rust-код **121**;
+B — нужен только тест/differential **190**; C — архитектура/внешний стенд
+**193**. Полная карта: `docs/audit/p-categories-6966de5.tsv`
+(`AGENT_REPORT-qa-categorize.md`).
+
 
 ## Итог и подтверждённые расхождения (2026-11-14)
 
