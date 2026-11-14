@@ -856,6 +856,67 @@ mod tests {
             suspects
         );
 
+        silence_case(
+            "S3 repeat-after-response",
+            initial,
+            true,
+            true,
+            true,
+            now + Duration::from_nanos(2_000_000_001),
+            now,
+            server,
+        );
+        silence_case(
+            "S4 response-only",
+            initial,
+            true,
+            true,
+            false,
+            now + Duration::from_nanos(2_000_000_001),
+            now,
+            server,
+        );
+        silence_case(
+            "S5 no-forward-after-hello",
+            initial,
+            false,
+            false,
+            false,
+            now + Duration::from_nanos(2_000_000_001),
+            now,
+            server,
+        );
+        silence_case(
+            "S6 named-silence",
+            initial,
+            true,
+            false,
+            false,
+            now + Duration::from_nanos(2_000_000_001),
+            now,
+            server,
+        );
+        silence_case(
+            "S7 early-sweep",
+            initial,
+            true,
+            false,
+            false,
+            now + Duration::from_secs(1),
+            now,
+            server,
+        );
+        silence_case(
+            "S8 unnamed-repeat-after-response",
+            unnamed,
+            true,
+            true,
+            true,
+            now + Duration::from_nanos(2_000_000_001),
+            now,
+            server,
+        );
+
         // --- планы: выбор по имени/адресу/голосу и предел посылок --------
         fn fnv1a(bytes: &[u8]) -> u64 {
             let mut hash = 1469598103934665603_u64;
@@ -1000,6 +1061,68 @@ mod tests {
 
         let server_addr = [198, 51, 100, 20];
         let client = ([192, 0, 2, 10], 50101);
+
+        fn silence_case(
+            name: &str,
+            payload: &[u8],
+            with_repeat: bool,
+            with_response: bool,
+            final_repeat: bool,
+            sweep_at: Instant,
+            now: Instant,
+            server: ([u8; 4], u16),
+        ) {
+            let client = ([192, 0, 2, 10], 50005_u16);
+            let mut udp = R2oUdpSessions::new().unwrap();
+            let mut quic = R2oQuicSessions::default();
+            let mut exchanges = 0;
+            let packet = r2o_stun_packet(client, server, payload);
+            feed(
+                &mut udp,
+                &mut quic,
+                &mut exchanges,
+                now,
+                &packet,
+                R2O_NF_INET_POST_ROUTING,
+            );
+            if with_repeat {
+                feed(
+                    &mut udp,
+                    &mut quic,
+                    &mut exchanges,
+                    now + Duration::from_micros(800),
+                    &packet,
+                    R2O_NF_INET_POST_ROUTING,
+                );
+            }
+            if with_response {
+                let response = r2o_stun_packet(server, client, b"resp");
+                feed(
+                    &mut udp,
+                    &mut quic,
+                    &mut exchanges,
+                    now + Duration::from_micros(900),
+                    &response,
+                    R2O_NF_INET_LOCAL_IN,
+                );
+            }
+            if final_repeat {
+                feed(
+                    &mut udp,
+                    &mut quic,
+                    &mut exchanges,
+                    now + Duration::from_micros(1000),
+                    &packet,
+                    R2O_NF_INET_POST_ROUTING,
+                );
+            }
+            let suspects = quic.sweep(sweep_at, true).len();
+            println!(
+                "{name} flows={} hellos={} suspects={suspects}",
+                udp.stats().flows,
+                udp.r2o_quic_hello_flows()
+            );
+        }
 
         let mut plans = crate::control::NamePlans::with_capacity(64);
         install_name(

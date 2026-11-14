@@ -190,6 +190,45 @@ static void print_short(const char *name, const d2k_session *session) {
            (unsigned long long)d2k_session_exchanges(session));
 }
 
+static void silence_case(const char *name, const uint8_t *payload,
+                          size_t payload_len, int with_repeat, int with_response,
+                          int final_repeat, uint64_t sweep_at) {
+    static const uint8_t client[4] = {192, 0, 2, 10};
+    static const uint8_t server[4] = {198, 51, 100, 20};
+    uint8_t packet[2048];
+    uint8_t result[4096];
+    d2k_session *s = d2k_session_new(64, 0);
+    d2k_session_set_hook(s, D2K_HOOK_POSTROUTING);
+    size_t length = udp_packet(packet, client, server, 50005, 443, payload,
+                               payload_len);
+    (void)d2k_session_packet(s, packet, length, 1000, result, sizeof result,
+                             &(d2k_result){0});
+    if (with_repeat) {
+        (void)d2k_session_packet(s, packet, length, 1800, result, sizeof result,
+                                 &(d2k_result){0});
+    }
+    if (with_response) {
+        d2k_session_set_hook(s, D2K_HOOK_INPUT);
+        length = udp_packet(packet, server, client, 443, 50005,
+                            (const uint8_t *)"resp", 4);
+        (void)d2k_session_packet(s, packet, length, 1900, result, sizeof result,
+                                 &(d2k_result){0});
+    }
+    if (final_repeat) {
+        d2k_session_set_hook(s, D2K_HOOK_POSTROUTING);
+        length = udp_packet(packet, client, server, 50005, 443, payload,
+                            payload_len);
+        (void)d2k_session_packet(s, packet, length, 2000, result, sizeof result,
+                                 &(d2k_result){0});
+    }
+    d2k_session_set_udp_reverse_hook(s, 1);
+    size_t told = d2k_session_sweep(s, sweep_at);
+    printf("%s flows=%zu hellos=%llu suspects=%zu\n", name,
+           d2k_session_flows_udp(s),
+           (unsigned long long)d2k_session_hellos(s), told);
+    d2k_session_free(s);
+}
+
 int main(int argc, char **argv) {
     if (argc != 3) return 2;
     FILE *file = fopen(argv[1], "rb");
@@ -288,6 +327,20 @@ int main(int argc, char **argv) {
            d2k_session_flows_udp(answered),
            (unsigned long long)d2k_session_hellos(answered), told);
     d2k_session_free(answered);
+
+    /* S3-S8: rev_after_hello/last_fwd и saw_initial для молчания. */
+    silence_case("S3 repeat-after-response", initial, initial_len, 1, 1, 1,
+                 2000001001ull);
+    silence_case("S4 response-only", initial, initial_len, 1, 1, 0,
+                 2000001001ull);
+    silence_case("S5 no-forward-after-hello", initial, initial_len, 0, 0, 0,
+                 2000001001ull);
+    silence_case("S6 named-silence", initial, initial_len, 1, 0, 0,
+                 2000001001ull);
+    silence_case("S7 early-sweep", initial, initial_len, 1, 0, 0,
+                 1000001000ull);
+    silence_case("S8 unnamed-repeat-after-response", unnamed, unnamed_len, 1, 1,
+                 1, 2000001001ull);
 
     /* --- планы: выбор по имени/адресу/голосу и предел посылок ---------- */
     {
