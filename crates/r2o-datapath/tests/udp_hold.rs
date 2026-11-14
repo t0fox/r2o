@@ -551,6 +551,40 @@ fn r2o_udp_hold_отказывает_для_датаграмм_больше_ты
 }
 
 #[test]
+fn r2o_udp_deferred_verdicts_next_due_абсолютный_как_c() {
+    use r2o_datapath::r2o_udp_hold::R2oUdpDeferredVerdicts;
+
+    let now = Instant::now();
+    let packet = r2o_udp_packet([192, 0, 2, 1], [198, 51, 100, 2], 50_020, 443, b"due");
+    let mut queue = R2oUdpDeferredVerdicts::new();
+    assert_eq!(queue.r2o_next_due(), None);
+    assert!(queue.r2o_enqueue(now + Duration::from_millis(30), &[1], &[1], Some(&packet)));
+    assert!(queue.r2o_enqueue(now + Duration::from_millis(10), &[2], &[1], None));
+    assert_eq!(queue.r2o_next_due(), Some(now + Duration::from_millis(10)));
+    assert_eq!(queue.timeout_ms(now, 100), 10);
+    let mut sent = Vec::new();
+    queue
+        .r2o_flush(now + Duration::from_millis(15), |id, verdict| {
+            sent.push((id, verdict));
+            Ok::<_, std::io::Error>(())
+        })
+        .unwrap();
+    assert_eq!(sent, [(2, 1)]);
+    assert_eq!(queue.r2o_next_due(), Some(now + Duration::from_millis(30)));
+
+    let mut failing = R2oUdpDeferredVerdicts::new();
+    assert!(failing.r2o_enqueue(now, &[7, 8], &[1, 1], None));
+    let mut tried = 0;
+    let result = failing.r2o_flush(now, |_, _| {
+        tried += 1;
+        Err(std::io::Error::other("сбой вердикта"))
+    });
+    assert!(result.is_err());
+    assert_eq!(tried, 2);
+    assert!(failing.is_empty());
+}
+
+#[test]
 fn r2o_udp_hold_next_deadline_даёт_абсолютный_минимум_как_c() {
     let now = Instant::now();
     let mut table = R2oUdpHoldTable::new();

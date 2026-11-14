@@ -405,14 +405,18 @@ impl R2oUdpDeferredVerdicts {
         ids
     }
 
+    /// C `d2k_udp_release_next_ns`: абсолютный ближайший `due`; `None` —
+    /// очередь пуста (C отдаёт 0).
+    pub fn r2o_next_due(&self) -> Option<Instant> {
+        self.slots
+            .iter()
+            .filter_map(|slot| slot.as_ref().map(|entry| entry.due))
+            .min()
+    }
+
     /// Вернуть срок до следующей выдачи, ограниченный заданным интервалом.
     pub fn timeout_ms(&self, now: Instant, max_ms: i32) -> i32 {
-        let Some(next) = self
-            .slots
-            .iter()
-            .filter_map(|slot| slot.as_ref().map(|v| v.due))
-            .min()
-        else {
+        let Some(next) = self.r2o_next_due() else {
             return max_ms.max(0);
         };
         if next <= now || max_ms <= 0 {
