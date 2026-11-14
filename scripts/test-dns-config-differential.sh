@@ -25,12 +25,23 @@ trap 'rm -rf -- "$TEMP"' EXIT HUP INT TERM
     -o "$TEMP/d2o-dns-config" \
     "$ROOT/crates/r2k-core/tests/d2o_dns_config_differential.c"
 "$TEMP/d2o-dns-config" >"$TEMP/c.out"
+"$CC" -std=c99 -D_GNU_SOURCE -O2 -Wall -Wextra -Werror \
+    -I"$D2O_ROOT/runtime" \
+    -o "$TEMP/d2o-dns-readers" \
+    "$ROOT/crates/r2k-core/tests/d2o_dns_config_readers_differential.c"
+"$TEMP/d2o-dns-readers" >"$TEMP/c2.out"
+cat "$TEMP/c.out" "$TEMP/c2.out" >"$TEMP/c.all"
 
 "$CARGO" test --manifest-path "$ROOT/Cargo.toml" --locked --offline \
     -p r2k-core --lib dns_config::tests::d2o_dns_config_trace \
     -- --ignored --nocapture >"$TEMP/rust.raw" 2>&1
 grep -E '^[PM][0-9]+ ' "$TEMP/rust.raw" >"$TEMP/rust.out"
+"$CARGO" test --manifest-path "$ROOT/Cargo.toml" --locked --offline \
+    -p r2k-core --lib dns_config::tests::d2o_dns_config_readers_trace \
+    -- --ignored --nocapture >"$TEMP/rust2.raw" 2>&1
+grep -E '^[A-E][0-9]+ ' "$TEMP/rust2.raw" >"$TEMP/rust2.out"
+cat "$TEMP/rust.out" "$TEMP/rust2.out" >"$TEMP/rust.all"
 
-diff -u "$TEMP/c.out" "$TEMP/rust.out"
-printf 'cases=%s\n' "$(wc -l < "$TEMP/c.out")"
-printf 'PASS: D2O current-main DNS config parse/match (D2O %s)\n' "$ACTUAL_D2O_SHA"
+diff -u "$TEMP/c.all" "$TEMP/rust.all"
+printf 'cases=%s\n' "$(wc -l < "$TEMP/c.all")"
+printf 'PASS: D2O current-main DNS config parse/match/readers (D2O %s)\n' "$ACTUAL_D2O_SHA"
