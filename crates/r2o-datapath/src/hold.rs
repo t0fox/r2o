@@ -311,6 +311,15 @@ impl HoldTable {
         self.incomplete_diagnostics.drain(..).collect()
     }
 
+    /// Тестовый шов: подложить диагностику без реального таймаута.
+    #[doc(hidden)]
+    pub fn r2o_test_push_incomplete_diagnostic(
+        &mut self,
+        diagnostic: R2oIncompleteCaptureDiagnostic,
+    ) {
+        self.incomplete_diagnostics.push_back(diagnostic);
+    }
+
     pub fn mark_http_response_answered(
         &mut self,
         key: &[u8; r2k_core::control::KEY_LEN],

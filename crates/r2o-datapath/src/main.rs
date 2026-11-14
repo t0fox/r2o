@@ -702,28 +702,72 @@ mod app {
         Apply,
     }
 
-    fn r2o_report_incomplete_captures(holding: &mut HoldTable) {
+    /// C `d2k_session_note_unassembled` (`session.c:2753-2784`): причина
+    /// отказа по виду отпущенного удержания.
+    fn r2o_incomplete_note(kind: r2o_datapath::hold::R2oIncompleteCaptureKind) -> &'static str {
+        match kind {
+            r2o_datapath::hold::R2oIncompleteCaptureKind::Tls => {
+                "составное приветствие не собралось — план не применён к его пакетам"
+            }
+            r2o_datapath::hold::R2oIncompleteCaptureKind::Http => {
+                "HTTP: составной запрос отпущен — граница не доказана"
+            }
+        }
+    }
+
+    fn r2o_incomplete_refusal(
+        diagnostic: &r2o_datapath::hold::R2oIncompleteCaptureDiagnostic,
+        client_shape: u8,
+    ) -> RefusedEvent {
+        RefusedEvent {
+            key: diagnostic.flow.wire_key(),
+            code: r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_NONE,
+            plan_id: [0; 16],
+            trial_id: [0; 16],
+            client_shape: Some(client_shape),
+            execution_id: None,
+            binding: None,
+        }
+    }
+
+    fn r2o_report_incomplete_captures(
+        holding: &mut HoldTable,
+        sessions: &TcpSessions,
+        control: &mut Option<ControlServer>,
+        flow_journal: &mut R2oFlowJournal,
+        journal_origin: &Instant,
+    ) {
         for diagnostic in holding.r2o_take_incomplete_diagnostics() {
             match (diagnostic.kind, diagnostic.declared_record_bytes) {
                 (r2o_datapath::hold::R2oIncompleteCaptureKind::Tls, Some(declared)) => {
                     eprintln!(
-                        "r2o-datapath: TLS ClientHello не собрался для {:?}: запись объявляет {} байт, непрерывно собрано {}",
-                        diagnostic.flow, declared, diagnostic.captured_bytes
+                        "r2o-datapath: составное приветствие отпущено без сборки: объявлено {} байт записи, в этом куске {}",
+                        declared, diagnostic.captured_bytes
                     );
                 }
                 (r2o_datapath::hold::R2oIncompleteCaptureKind::Tls, None) => {
                     eprintln!(
-                        "r2o-datapath: TLS ClientHello не собрался для {:?}: заголовок записи не набран, непрерывно собрано {} байт",
-                        diagnostic.flow, diagnostic.captured_bytes
+                        "r2o-datapath: составное приветствие отпущено без сборки: заголовок записи не набран, непрерывно собрано {} байт",
+                        diagnostic.captured_bytes
                     );
                 }
                 (r2o_datapath::hold::R2oIncompleteCaptureKind::Http, _) => {
                     eprintln!(
-                        "r2o-datapath: HTTP-запрос не собрался для {:?}: непрерывно собрано {} байт",
-                        diagnostic.flow, diagnostic.captured_bytes
+                        "r2o-datapath: HTTP-запрос отпущен без сборки: непрерывно собрано {} байт",
+                        diagnostic.captured_bytes
                     );
                 }
             }
+            let key = diagnostic.flow.wire_key();
+            let refused = r2o_incomplete_refusal(&diagnostic, sessions.session_client_shape(&key));
+            r2o_refuse_coded(
+                control,
+                flow_journal,
+                journal_timestamp(journal_origin),
+                &refused,
+                Some(r2o_incomplete_note(diagnostic.kind)),
+                false,
+            );
         }
     }
 
@@ -1436,7 +1480,13 @@ mod app {
                 eprintln!("r2o-datapath: завершение по сигналу, освобождаю удержанные пакеты");
                 drain_queued(&mut socket, &mut batch, packet_type);
                 let released = holding.flush(Instant::now(), name_plans.revision(), true);
-                r2o_report_incomplete_captures(&mut holding);
+                r2o_report_incomplete_captures(
+                    &mut holding,
+                    &tcp_sessions,
+                    &mut control,
+                    &mut flow_journal,
+                    &journal_origin,
+                );
                 r2o_flush_owned_hold_releases(&mut holding, &mut tcp_sessions, raw.as_ref());
                 release_accepting(&mut socket, &released);
                 for (ticket, pending) in pending_udp_releases.drain() {
@@ -1700,7 +1750,13 @@ mod app {
                     // (`d2k_udp_path_expire(..., 0)`).
                     let failure_now = Instant::now();
                     let released = holding.flush(failure_now, name_plans.revision(), true);
-                    r2o_report_incomplete_captures(&mut holding);
+                    r2o_report_incomplete_captures(
+                        &mut holding,
+                        &tcp_sessions,
+                        &mut control,
+                        &mut flow_journal,
+                        &journal_origin,
+                    );
                     r2o_flush_owned_hold_releases(&mut holding, &mut tcp_sessions, raw.as_ref());
                     release_accepting(&mut socket, &released);
                     r2o_release_udp_batches(
@@ -1834,7 +1890,13 @@ mod app {
             }
             let release_now = Instant::now();
             let released = holding.flush(release_now, name_plans.revision(), false);
-            r2o_report_incomplete_captures(&mut holding);
+            r2o_report_incomplete_captures(
+                &mut holding,
+                &tcp_sessions,
+                &mut control,
+                &mut flow_journal,
+                &journal_origin,
+            );
             r2o_flush_owned_hold_releases(&mut holding, &mut tcp_sessions, raw.as_ref());
             release_accepting(&mut socket, &released);
             r2o_release_udp_batches(
@@ -2237,7 +2299,13 @@ mod app {
                         } else {
                             holding.feed_observing(packet_id, bytes, now, hold_options)
                         };
-                        r2o_report_incomplete_captures(&mut holding);
+                        r2o_report_incomplete_captures(
+                            &mut holding,
+                            &tcp_sessions,
+                            &mut control,
+                            &mut flow_journal,
+                            &journal_origin,
+                        );
                         r2o_flush_owned_hold_releases(
                             &mut holding,
                             &mut tcp_sessions,
@@ -8402,6 +8470,65 @@ mod app {
                 journal.get(1).unwrap().note.as_deref(),
                 Some("плана для этой цели нет")
             );
+        }
+
+        #[test]
+        fn note_unassembled_пишет_отказы_http_и_tls_как_c() {
+            use r2o_datapath::flow_journal::{
+                R2O_JOURNAL_REFUSE_NONE, R2oFlowJournal, R2oFlowJournalKind,
+            };
+            use r2o_datapath::hold::{R2oIncompleteCaptureDiagnostic, R2oIncompleteCaptureKind};
+
+            let flow = r2o_datapath::capture::TcpFlowKey {
+                low_address: r2k_core::addr::Address::parse("192.0.2.10").unwrap(),
+                high_address: r2k_core::addr::Address::parse("198.51.100.20").unwrap(),
+                low_port: 41000,
+                high_port: 443,
+            };
+            let mut holding = super::HoldTable::default();
+            holding.r2o_test_push_incomplete_diagnostic(R2oIncompleteCaptureDiagnostic {
+                flow,
+                kind: R2oIncompleteCaptureKind::Tls,
+                captured_bytes: 40,
+                declared_record_bytes: Some(1200),
+            });
+            holding.r2o_test_push_incomplete_diagnostic(R2oIncompleteCaptureDiagnostic {
+                flow,
+                kind: R2oIncompleteCaptureKind::Http,
+                captured_bytes: 12,
+                declared_record_bytes: None,
+            });
+
+            let sessions = super::TcpSessions::default();
+            let mut control: Option<super::ControlServer> = None;
+            let mut journal = R2oFlowJournal::with_capacity(4).unwrap();
+            super::r2o_report_incomplete_captures(
+                &mut holding,
+                &sessions,
+                &mut control,
+                &mut journal,
+                &std::time::Instant::now(),
+            );
+
+            assert_eq!(journal.count(), 2);
+            let tls = journal.get(0).unwrap();
+            assert_eq!(tls.kind, R2oFlowJournalKind::PlanRefused);
+            assert_eq!(tls.code, R2O_JOURNAL_REFUSE_NONE);
+            assert_eq!(
+                tls.note.as_deref(),
+                Some("составное приветствие не собралось — план не применён к его пакетам")
+            );
+            assert_eq!(tls.key, flow.wire_key());
+            assert_eq!(tls.plan_id, [0; 16]);
+            assert_eq!(tls.trial_id, [0; 16]);
+
+            let http = journal.get(1).unwrap();
+            assert_eq!(
+                http.note.as_deref(),
+                Some("HTTP: составной запрос отпущен — граница не доказана")
+            );
+            assert_eq!(http.code, R2O_JOURNAL_REFUSE_NONE);
+            assert!(holding.r2o_take_incomplete_diagnostics().is_empty());
         }
 
         #[test]
