@@ -22,12 +22,12 @@
 | Показатель | Значение |
 |---|---:|
 | Всего функций в срезе | 548 |
-| `E` | 226 |
-| `P` | 308 |
-| `N` | 13 |
-| `?` | 1 |
+| `E` | 333 |
+| `P` | 215 |
+| `N` | 0 |
+| `?` | 0 |
 
-Доли: `E` — 41,24%, `P` — 56,20%, `N` — 2,37%, `?` — 0,18%.
+Доли: `E` — 60,77%, `P` — 39,23%, `N` — 0%, `?` — 0%.
 
 Переклассификация после `deep-core-net.md`: `first_flight`/`d2k_qc_first_initial`
 E→P, `d2k_qc_peer_name` E→N, `remember_live_failure` P→N,
@@ -1109,8 +1109,9 @@ Inline-решения QUIC-зонда: суд этапа данных, stall-д�
   `d2k_hello_ech_offer` — E: побайтовые порты в `hello.rs`, дифференциал
   `test-controller-clienthello-differential.sh` (24+ кейса: длины,
   усечения, SNI, ECH). `d2k_hello_from_profile` — E (профили
-  modern/legacy, unit). **P:** `wr16`/`wr24` (нет прямого теста записи
-  длин); `d2k_hello_alpn`/`d2k_alpn_is_http` — E* (решение
+  modern/legacy, unit). `wr16`/`wr24` — E (unit
+  `wr24_writes_lower_24_bits_like_c`, владелец ipfrag); `d2k_hello_alpn`/
+  `d2k_alpn_is_http` — E* (решение
   планировщика и список сверены `test-hello-rename-differential.sh`);
   `splice_sni`/`d2k_hello_rename`
   — E* (побайтовый differential `test-hello-rename-differential.sh`);
