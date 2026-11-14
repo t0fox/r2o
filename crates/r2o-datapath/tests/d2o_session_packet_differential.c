@@ -278,6 +278,47 @@ static void http_skip_case(const char *name, int with_syn, int first_valid,
     d2k_session_free(s);
 }
 
+static size_t exchange_seen;
+
+static void print_new_exchange(const char *name, d2k_session *session) {
+    const d2k_journal *journal = d2k_session_journal(session);
+    size_t count = d2k_journal_count(journal);
+    for (; exchange_seen < count; exchange_seen++) {
+        const d2k_jrn_entry *entry = d2k_journal_at(journal, exchange_seen);
+        if (entry && entry->kind == D2K_JRN_EXCHANGE) {
+            printf("%s exchange code=%u num=%u sh=%u planned=%u tos=%u\n", name,
+                   entry->code, entry->num, entry->d_server_hello,
+                   entry->d_planned, entry->d_tos);
+        }
+    }
+}
+
+static void sequence_case(const char *name, d2k_session *session,
+                          const uint8_t *packet, size_t length) {
+    static uint8_t out[4096];
+    d2k_result result;
+    uint32_t anchor = 0;
+    uint64_t applied_before = d2k_session_applied(session);
+    memset(&result, 0, sizeof result);
+    (void)d2k_session_packet(session, packet, length, 2000, out, sizeof out,
+                             &result);
+    (void)d2k_session_stream_anchor(session, packet, length, &anchor);
+    printf("%s applied=%d verdict=%d n=%zu lens=", name,
+           result.applied ? 1 : 0, (int)result.verdict, result.n_out);
+    for (size_t i = 0; i < result.n_out; i++) {
+        printf("%s%zu", i ? "," : "", result.out[i].len);
+    }
+    printf(" plan=");
+    for (unsigned i = 0; i < D2K_PLAN_ID_LEN; i++) {
+        printf("%02x", result.plan_id[i]);
+    }
+    printf(" anchor=%u done=%llu applied_all=%llu\n", anchor,
+           (unsigned long long)d2k_session_done(session),
+           (unsigned long long)d2k_session_applied(session));
+    (void)applied_before;
+    print_new_exchange(name, session);
+}
+
 static void print_case(const char *name, d2k_session *session, uint32_t anchor) {
     printf("%s flows=%zu refusals=%llu anchor=%u\n", name,
            d2k_session_flows_tcp(session),
@@ -349,7 +390,7 @@ int main(void) {
         d2k_session_free(split);
     }
 
-    d2k_session *planned = d2k_session_new(64, 0);
+    d2k_session *planned = d2k_session_new(64, 64);
     uint8_t plan_buffer[256];
     d2k_plan *plan = NULL;
     char error[200];
@@ -361,6 +402,22 @@ int main(void) {
         length = packet_with_payload(buffer, 0x18, 1001, CLIENT_HELLO,
                                      sizeof CLIENT_HELLO);
         plan_case("K plan-hello", planned, buffer, length);
+        {
+            static const uint8_t k_server_hello[49] = {
+                0x16, 0x03, 0x03, 0x00, 44, 0x02, 0x00, 0x00, 40,
+            };
+            static const uint8_t k_app_data[] = {0x17, 0x03, 0x03, 0, 1, 0};
+            exchange_seen = 0;
+            length = server_packet_with_payload(
+                buffer, 0x18, 900, 1001 + (uint32_t)sizeof CLIENT_HELLO, 124,
+                k_server_hello, sizeof k_server_hello);
+            sequence_case("K2 planned-serverhello", planned, buffer, length);
+            length = server_packet_with_payload(
+                buffer, 0x18, 900 + (uint32_t)sizeof k_server_hello,
+                1001 + (uint32_t)sizeof CLIENT_HELLO, 124, k_app_data,
+                sizeof k_app_data);
+            sequence_case("K3 planned-appdata", planned, buffer, length);
+        }
         d2k_session_free(planned);
     } else {
         printf("J plan-syn load-error=%s\n", error);
@@ -497,6 +554,53 @@ int main(void) {
     http_skip_case("V1 http-no-syn", 0, 0, 1001);
     http_skip_case("V2 http-first", 1, 0, 1001);
     http_skip_case("V3 http-late", 1, 1, 1300);
+
+    /* W: полная последовательность SYN -> SYN-ACK -> split ClientHello ->
+     * ServerHello -> app-data. Сверяются не только вердикты, но и
+     * APPLIED/plan_id/форма/anchors и поля EXCHANGE (rev_first_type,
+     * rev_types, rev_server_hello). */
+    {
+        d2k_session *sequence = d2k_session_new(64, 64);
+        static const uint8_t server_hello[49] = {
+            0x16, 0x03, 0x03, 0x00, 44, 0x02, 0x00, 0x00, 40,
+        };
+        static const uint8_t app_data[] = {0x17, 0x03, 0x03, 0, 1, 0};
+        uint8_t hello[256];
+        size_t hello_len = client_hello_sni(hello);
+        exchange_seen = 0;
+        plan = NULL;
+        plan_length = fake_plan_bytes(plan_buffer);
+        if (d2k_plan_load(plan_buffer, plan_length, &plan, error, sizeof error) == 0) {
+            d2k_plantab *table = d2k_session_plans(sequence);
+            const char *host = "example.test";
+            if (d2k_plantab_set_name_family(
+                    table, (const uint8_t *)host, strlen(host), 1000, plan,
+                    D2K_PLAN_SHAPE_MODERN_NO_TS, 0, 4) != 0) {
+                printf("W sequence plan-install-error\n");
+            }
+            length = packet_with_payload(buffer, 0x02, 1000, NULL, 0);
+            sequence_case("W1 syn", sequence, buffer, length);
+            length = packet_with_payload(buffer, 0x18, 1001, hello, 5);
+            sequence_case("W2 split1", sequence, buffer, length);
+            length = packet_with_payload(buffer, 0x18, 1006, hello + 5,
+                                         hello_len - 5);
+            sequence_case("W3 split2", sequence, buffer, length);
+            length = server_packet_with_payload(buffer, 0x12, 900, 1001, 124,
+                                                NULL, 0);
+            sequence_case("W4 synack", sequence, buffer, length);
+            length = server_packet_with_payload(
+                buffer, 0x18, 900, 1001 + (uint32_t)hello_len, 124,
+                server_hello, sizeof server_hello);
+            sequence_case("W5 serverhello", sequence, buffer, length);
+            length = server_packet_with_payload(
+                buffer, 0x18, 900 + (uint32_t)sizeof server_hello,
+                1001 + (uint32_t)hello_len, 124, app_data, sizeof app_data);
+            sequence_case("W6 appdata", sequence, buffer, length);
+        } else {
+            printf("W sequence load-error=%s\n", error);
+        }
+        d2k_session_free(sequence);
+    }
 
     return 0;
 }

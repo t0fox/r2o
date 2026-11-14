@@ -6416,6 +6416,62 @@ mod tests {
             &decision,
             planned.session_applied() > before,
         );
+        let mut k_server_hello = [0_u8; 49];
+        k_server_hello[0] = 0x16;
+        k_server_hello[1] = 0x03;
+        k_server_hello[2] = 0x03;
+        k_server_hello[4] = 44;
+        k_server_hello[5] = 0x02;
+        k_server_hello[8] = 40;
+        let mut k_sh = ipv4_tcp_packet(server, client, 0x18, 124, 900, &k_server_hello);
+        k_sh[28..32].copy_from_slice(&(1001 + client_hello().len() as u32).to_be_bytes());
+        let before = planned.session_applied();
+        let decision = decide_with_session(&mut planned, &fake_plan, &k_sh);
+        print_sequence(
+            "K2 planned-serverhello",
+            &planned,
+            &decision,
+            planned.session_applied() > before,
+            anchor(&planned, &k_sh),
+        );
+        for event in planned.take_tcp_exchange_events() {
+            println!(
+                "K2 planned-serverhello exchange code={} num={} sh={} planned={} tos={}",
+                event.code,
+                event.num,
+                u8::from(event.server_hello),
+                event.planned,
+                event.tos
+            );
+        }
+        let mut k_app = ipv4_tcp_packet(
+            server,
+            client,
+            0x18,
+            124,
+            900 + k_server_hello.len() as u32,
+            &[0x17, 0x03, 0x03, 0, 1, 0],
+        );
+        k_app[28..32].copy_from_slice(&(1001 + client_hello().len() as u32).to_be_bytes());
+        let before = planned.session_applied();
+        let decision = decide_with_session(&mut planned, &fake_plan, &k_app);
+        print_sequence(
+            "K3 planned-appdata",
+            &planned,
+            &decision,
+            planned.session_applied() > before,
+            anchor(&planned, &k_app),
+        );
+        for event in planned.take_tcp_exchange_events() {
+            println!(
+                "K3 planned-appdata exchange code={} num={} sh={} planned={} tos={}",
+                event.code,
+                event.num,
+                u8::from(event.server_hello),
+                event.planned,
+                event.tos
+            );
+        }
 
         let guard_plan = tcp_guard_only_plan();
         let mut guarded = TcpSessions::default();
@@ -6583,6 +6639,148 @@ mod tests {
             "V3 http-late skipped={}",
             super::r2o_http_skip_note(&late, &late_bad).unwrap_or("-")
         );
+
+        // W: SYN -> split ClientHello -> SYN-ACK -> ServerHello -> app-data.
+        // План намеренно не ставится: сверяются вердикты, anchors и поля
+        // EXCHANGE (rev_first_type/rev_types/rev_server_hello), как C W.
+        fn print_sequence(
+            name: &str,
+            sessions: &TcpSessions,
+            decision: &PacketDecision,
+            applied: bool,
+            anchor: u32,
+        ) {
+            let verdict = match decision {
+                PacketDecision::Drop => 1,
+                PacketDecision::Transmit { fate, .. } => u8::from(*fate == OriginalFate::Drop),
+                _ => 0,
+            };
+            let packets = match decision {
+                PacketDecision::Transmit { packets, .. } => packets.as_slice(),
+                _ => &[],
+            };
+            print!(
+                "{name} applied={} verdict={verdict} n={} lens=",
+                u8::from(applied),
+                packets.len()
+            );
+            for (index, packet) in packets.iter().enumerate() {
+                if index != 0 {
+                    print!(",");
+                }
+                print!("{}", packet.packet.len());
+            }
+            println!(
+                " plan=00000000000000000000000000000000 anchor={anchor} done={} applied_all={}",
+                sessions.session_done(),
+                sessions.session_applied()
+            );
+        }
+        let seq_plan = Plan::default();
+        let seq_hello = client_hello_with_sni();
+        let mut seq_sessions = TcpSessions::default();
+        let seq_syn = ipv4_tcp_packet(client, server, 0x02, 64, 1000, &[]);
+        let before = seq_sessions.session_applied();
+        let decision = decide_with_session(&mut seq_sessions, &seq_plan, &seq_syn);
+        print_sequence(
+            "W1 syn",
+            &seq_sessions,
+            &decision,
+            seq_sessions.session_applied() > before,
+            anchor(&seq_sessions, &seq_syn),
+        );
+
+        let split1 = ipv4_tcp_packet(client, server, 0x18, 64, 1001, &seq_hello[..5]);
+        let before = seq_sessions.session_applied();
+        let decision = decide_with_session(&mut seq_sessions, &seq_plan, &split1);
+        print_sequence(
+            "W2 split1",
+            &seq_sessions,
+            &decision,
+            seq_sessions.session_applied() > before,
+            anchor(&seq_sessions, &split1),
+        );
+
+        let split2 = ipv4_tcp_packet(client, server, 0x18, 64, 1006, &seq_hello[5..]);
+        let before = seq_sessions.session_applied();
+        let decision = decide_with_session(&mut seq_sessions, &seq_plan, &split2);
+        print_sequence(
+            "W3 split2",
+            &seq_sessions,
+            &decision,
+            seq_sessions.session_applied() > before,
+            anchor(&seq_sessions, &split2),
+        );
+
+        let mut synack = ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]);
+        synack[28..32].copy_from_slice(&1001_u32.to_be_bytes());
+        let before = seq_sessions.session_applied();
+        let decision = decide_with_session(&mut seq_sessions, &seq_plan, &synack);
+        print_sequence(
+            "W4 synack",
+            &seq_sessions,
+            &decision,
+            seq_sessions.session_applied() > before,
+            anchor(&seq_sessions, &synack),
+        );
+
+        let mut server_hello = [0_u8; 49];
+        server_hello[0] = 0x16;
+        server_hello[1] = 0x03;
+        server_hello[2] = 0x03;
+        server_hello[4] = 44;
+        server_hello[5] = 0x02;
+        server_hello[8] = 40;
+        let mut sh_packet = ipv4_tcp_packet(server, client, 0x18, 124, 900, &server_hello);
+        sh_packet[28..32].copy_from_slice(&(1001 + seq_hello.len() as u32).to_be_bytes());
+        let before = seq_sessions.session_applied();
+        let decision = decide_with_session(&mut seq_sessions, &seq_plan, &sh_packet);
+        print_sequence(
+            "W5 serverhello",
+            &seq_sessions,
+            &decision,
+            seq_sessions.session_applied() > before,
+            anchor(&seq_sessions, &sh_packet),
+        );
+        for event in seq_sessions.take_tcp_exchange_events() {
+            println!(
+                "W5 serverhello exchange code={} num={} sh={} planned={} tos={}",
+                event.code,
+                event.num,
+                u8::from(event.server_hello),
+                event.planned,
+                event.tos
+            );
+        }
+
+        let mut appdata = ipv4_tcp_packet(
+            server,
+            client,
+            0x18,
+            124,
+            900 + server_hello.len() as u32,
+            &[0x17, 0x03, 0x03, 0, 1, 0],
+        );
+        appdata[28..32].copy_from_slice(&(1001 + seq_hello.len() as u32).to_be_bytes());
+        let before = seq_sessions.session_applied();
+        let decision = decide_with_session(&mut seq_sessions, &seq_plan, &appdata);
+        print_sequence(
+            "W6 appdata",
+            &seq_sessions,
+            &decision,
+            seq_sessions.session_applied() > before,
+            anchor(&seq_sessions, &appdata),
+        );
+        for event in seq_sessions.take_tcp_exchange_events() {
+            println!(
+                "W6 appdata exchange code={} num={} sh={} planned={} tos={}",
+                event.code,
+                event.num,
+                u8::from(event.server_hello),
+                event.planned,
+                event.tos
+            );
+        }
     }
 
     #[test]
