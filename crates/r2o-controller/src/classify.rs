@@ -961,8 +961,11 @@ impl Default for ClassifyOptions {
             long_gap: Duration::from_millis(700),
             allow_loopback: false,
             no_raw: false,
-            full_detect_semantics: false,
-            confirm_clear: true,
+            // Production discovery наследует донорскую семантику
+            // `d2k_classify_run`; R2O-ответвление включается явно только там,
+            // где оно нужно (CLI всё равно задаёт оба поля).
+            full_detect_semantics: true,
+            confirm_clear: false,
             only_poison: None,
             skip_poisons: Vec::new(),
             control: None,
@@ -3203,6 +3206,15 @@ mod qtrace_tests {
         options.only_poison = Some("badsum".into());
         assert!(!super::poison_selected(&options, "badsum"));
         assert!(!super::poison_selected(&options, "split"));
+    }
+
+    #[test]
+    fn production_defaults_use_donor_classify_semantics() {
+        // C `d2k_classify_run` всегда идёт полным деревом и не добавляет
+        // R2O-подтверждение whole; production discovery наследует default.
+        let options = ClassifyOptions::default();
+        assert!(options.full_detect_semantics);
+        assert!(!options.confirm_clear);
     }
 
     #[test]
