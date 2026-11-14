@@ -4369,6 +4369,97 @@ mod tests {
     }
 
     #[test]
+    fn ctlsrv_command_differential_matches_c() {
+        use std::fmt::Write as _;
+
+        const TLS_PLAN: &[u8] = &[
+            b'D', b'2', b'K', b'P', 0, 1, 0, 1, 0, 0, 0, 2, 0x00, 0x02, 0x00, 0x02, 6, 1, 0x01,
+            0x00, 0x00, 0x04, 0x00, 0x05, 0x00, 0x00,
+        ];
+        let host = b"RuTracker.org";
+        let mut plans = NamePlans::with_capacity(16);
+        let mut output = String::new();
+        let mut run = |name: &str, kind: u16, body: Vec<u8>, output: &mut String| {
+            let ack = plans.handle(&Frame { kind, body });
+            writeln!(output, "{name} ok={}", u8::from(ack.ok)).unwrap();
+        };
+
+        let mut https = vec![host.len() as u8];
+        https.extend_from_slice(host);
+        https.extend_from_slice(&60_u32.to_be_bytes());
+        run(
+            "https",
+            control::COMMAND_SET_HTTPS,
+            https.clone(),
+            &mut output,
+        );
+        run(
+            "https_bad",
+            control::COMMAND_SET_HTTPS,
+            https[..https.len() - 1].to_vec(),
+            &mut output,
+        );
+        let mut bad_name = https.clone();
+        bad_name[1] = b' ';
+        run(
+            "https_bad_name",
+            control::COMMAND_SET_HTTPS,
+            bad_name,
+            &mut output,
+        );
+
+        let mut set_name = vec![host.len() as u8];
+        set_name.extend_from_slice(host);
+        set_name.push(1);
+        set_name.push(4);
+        set_name.extend_from_slice(TLS_PLAN);
+        run(
+            "set_name",
+            control::COMMAND_SET_NAME,
+            set_name.clone(),
+            &mut output,
+        );
+        run(
+            "set_name_bad_plan",
+            control::COMMAND_SET_NAME,
+            set_name[..set_name.len() - 1].to_vec(),
+            &mut output,
+        );
+
+        let mut delete_name = vec![host.len() as u8];
+        delete_name.extend_from_slice(host);
+        delete_name.extend_from_slice(&[6, 1, 4]);
+        run(
+            "delete_name",
+            control::COMMAND_DEL_NAME,
+            delete_name.clone(),
+            &mut output,
+        );
+        run(
+            "delete_name_again",
+            control::COMMAND_DEL_NAME,
+            delete_name,
+            &mut output,
+        );
+
+        let mut bad_family = set_name;
+        bad_family[1 + host.len() + 1] = 5;
+        run(
+            "set_name_bad_family",
+            control::COMMAND_SET_NAME,
+            bad_family,
+            &mut output,
+        );
+
+        if let Ok(path) = std::env::var("R2O_CTLSRV_COMMAND_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert!(output.contains("set_name ok=1\n"));
+        assert!(output.contains("set_name_bad_plan ok=0\n"));
+        assert!(output.contains("set_name_bad_family ok=0\n"));
+    }
+
+    #[test]
     fn set_https_command_accepts_an_exact_name_with_a_bounded_ttl() {
         let mut plans = NamePlans::default();
         let mut body = vec![b"example.test".len() as u8];
