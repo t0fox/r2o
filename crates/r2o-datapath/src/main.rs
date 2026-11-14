@@ -5208,6 +5208,297 @@ mod app {
         }
 
         #[test]
+        fn udp_path_passed_planned_differential_matches_c() {
+            use std::fmt::Write as _;
+
+            let now = Instant::now();
+            let hook = Some(r2o_datapath::netlink::R2O_NF_INET_POST_ROUTING);
+            let mut output = String::new();
+            let client = [192, 0, 2, 1];
+            let server = [198, 51, 100, 2];
+            let multicast = [239, 1, 1, 1];
+
+            let mut first = udp_packet(client, server, 40_000, 443);
+            let mut sessions = R2oUdpSessions::new().unwrap();
+            let mut follow = R2oUdpFollowTable::new();
+            let route_gate = R2oRouteGate::default();
+            assert!(r2o_udp_packet_admitted_at_hook(
+                &mut sessions,
+                &first,
+                now,
+                hook,
+                false,
+            ));
+            writeln!(
+                output,
+                "first_passed rc={}",
+                u8::from(r2o_udp_mark_plain_pass(
+                    &sessions,
+                    &mut follow,
+                    &route_gate,
+                    0,
+                    0,
+                    &first,
+                    hook,
+                    now,
+                    1001,
+                    true,
+                ))
+            )
+            .unwrap();
+            assert!(r2o_udp_packet_admitted_at_hook(
+                &mut sessions,
+                &first,
+                now + Duration::from_millis(1),
+                hook,
+                false,
+            ));
+            writeln!(
+                output,
+                "second_passed rc={}",
+                u8::from(r2o_udp_mark_plain_pass(
+                    &sessions,
+                    &mut follow,
+                    &route_gate,
+                    0,
+                    0,
+                    &first,
+                    hook,
+                    now + Duration::from_millis(1),
+                    1002,
+                    true,
+                ))
+            )
+            .unwrap();
+
+            let mut sessions = R2oUdpSessions::new().unwrap();
+            let mut follow = R2oUdpFollowTable::new();
+            assert!(r2o_udp_packet_admitted_at_hook(
+                &mut sessions,
+                &first,
+                now,
+                hook,
+                false,
+            ));
+            writeln!(
+                output,
+                "marked_passed rc={}",
+                u8::from(r2o_udp_mark_plain_pass(
+                    &sessions,
+                    &mut follow,
+                    &route_gate,
+                    0,
+                    0x3f,
+                    &first,
+                    hook,
+                    now,
+                    1001,
+                    true,
+                ))
+            )
+            .unwrap();
+
+            let mut sessions = R2oUdpSessions::new().unwrap();
+            let mut follow = R2oUdpFollowTable::new();
+            let mut tcp = first.clone();
+            tcp[9] = 6;
+            assert!(r2o_udp_packet_admitted_at_hook(
+                &mut sessions,
+                &tcp,
+                now,
+                hook,
+                false,
+            ));
+            writeln!(
+                output,
+                "tcp_passed rc={}",
+                u8::from(r2o_udp_mark_plain_pass(
+                    &sessions,
+                    &mut follow,
+                    &route_gate,
+                    0,
+                    0,
+                    &tcp,
+                    hook,
+                    now,
+                    1001,
+                    true,
+                ))
+            )
+            .unwrap();
+
+            let mut sessions = R2oUdpSessions::new().unwrap();
+            let mut follow = R2oUdpFollowTable::new();
+            let mut fragment = first.clone();
+            fragment[6..8].copy_from_slice(&0x2000_u16.to_be_bytes());
+            assert!(r2o_udp_packet_admitted_at_hook(
+                &mut sessions,
+                &fragment,
+                now,
+                hook,
+                false,
+            ));
+            writeln!(
+                output,
+                "fragment_passed rc={}",
+                u8::from(r2o_udp_mark_plain_pass(
+                    &sessions,
+                    &mut follow,
+                    &route_gate,
+                    0,
+                    0,
+                    &fragment,
+                    hook,
+                    now,
+                    1001,
+                    true,
+                ))
+            )
+            .unwrap();
+
+            let mut sessions = R2oUdpSessions::new().unwrap();
+            let mut follow = R2oUdpFollowTable::new();
+            let mut ipv6 = vec![0_u8; 40 + 8 + 4];
+            ipv6[0] = 0x60;
+            ipv6[4..6].copy_from_slice(&((8 + 4) as u16).to_be_bytes());
+            ipv6[6] = 17;
+            ipv6[7] = 64;
+            ipv6[8] = 0x20;
+            ipv6[9] = 0x01;
+            ipv6[23] = 1;
+            ipv6[24] = 0x20;
+            ipv6[25] = 0x01;
+            ipv6[39] = 2;
+            ipv6[40..42].copy_from_slice(&40_000_u16.to_be_bytes());
+            ipv6[42..44].copy_from_slice(&443_u16.to_be_bytes());
+            ipv6[44..46].copy_from_slice(&((8 + 4) as u16).to_be_bytes());
+            assert!(r2o_udp_packet_admitted_at_hook(
+                &mut sessions,
+                &ipv6,
+                now,
+                hook,
+                false,
+            ));
+            writeln!(
+                output,
+                "ipv6_passed rc={}",
+                u8::from(r2o_udp_mark_plain_pass(
+                    &sessions,
+                    &mut follow,
+                    &route_gate,
+                    0,
+                    0,
+                    &ipv6,
+                    hook,
+                    now,
+                    1001,
+                    true,
+                ))
+            )
+            .unwrap();
+
+            let mut sessions = R2oUdpSessions::new().unwrap();
+            let mut follow = R2oUdpFollowTable::new();
+            let multicast_packet = udp_packet(client, multicast, 40_000, 443);
+            assert!(r2o_udp_packet_admitted_at_hook(
+                &mut sessions,
+                &multicast_packet,
+                now,
+                hook,
+                false,
+            ));
+            writeln!(
+                output,
+                "multicast_passed rc={}",
+                u8::from(r2o_udp_mark_plain_pass(
+                    &sessions,
+                    &mut follow,
+                    &route_gate,
+                    0,
+                    0,
+                    &multicast_packet,
+                    hook,
+                    now,
+                    1001,
+                    true,
+                ))
+            )
+            .unwrap();
+
+            let mut sessions = R2oUdpSessions::new().unwrap();
+            let mut follow = R2oUdpFollowTable::new();
+            assert!(r2o_udp_packet_admitted_at_hook(
+                &mut sessions,
+                &first,
+                now,
+                hook,
+                false,
+            ));
+            writeln!(
+                output,
+                "first_planned rc={}",
+                u8::from(r2o_udp_mark_planned(
+                    &mut follow,
+                    &route_gate,
+                    0,
+                    0,
+                    &first,
+                    now,
+                    Some(now + Duration::from_millis(30)),
+                    1001,
+                    true,
+                ))
+            )
+            .unwrap();
+
+            let mut follow = R2oUdpFollowTable::new();
+            writeln!(
+                output,
+                "bad_mark_planned rc={}",
+                u8::from(r2o_udp_mark_planned(
+                    &mut follow,
+                    &route_gate,
+                    0,
+                    0x3f,
+                    &first,
+                    now,
+                    Some(now + Duration::from_millis(30)),
+                    1001,
+                    true,
+                ))
+            )
+            .unwrap();
+
+            let mut sessions = R2oUdpSessions::new().unwrap();
+            let mut follow = R2oUdpFollowTable::new();
+            writeln!(
+                output,
+                "short_passed rc={}",
+                u8::from(r2o_udp_mark_plain_pass(
+                    &sessions,
+                    &mut follow,
+                    &route_gate,
+                    0,
+                    0,
+                    &first[..19],
+                    hook,
+                    now,
+                    1001,
+                    true,
+                ))
+            )
+            .unwrap();
+
+            if let Ok(path) = std::env::var("R2O_UDP_PATH_DIFF_OUTPUT") {
+                std::fs::write(path, &output).unwrap();
+            }
+            assert!(output.contains("first_passed rc=1\n"));
+            assert!(output.contains("second_passed rc=0\n"));
+            assert!(output.contains("marked_passed rc=0\n"));
+            assert!(output.contains("first_planned rc=1\n"));
+        }
+
+        #[test]
         fn плановый_udp_drop_открывает_окно_для_позднего_хвоста() {
             let now = Instant::now();
             let due = now + Duration::from_millis(30);

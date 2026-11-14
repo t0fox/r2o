@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 247 | 153 | 0 | 0 |
+| datapath-core | 400 | 249 | 151 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1335** | **647** | **0** | **0** |
+| **Итого** | **1982** | **1337** | **645** | **0** | **0** |
 
-Это не оценка паритета: 647 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 645 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1335 / P 647 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1337 / P 645 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 247 | 153 | 0 | 0 |
+| datapath-core | 400 | 249 | 151 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1335** | **647** | **0** | **0** |
+| **Итого** | **1982** | **1337** | **645** | **0** | **0** |
 
 
 ---
@@ -4132,8 +4132,8 @@ R2O: `main.rs` (`r2o_release_udp_batch*`, `r2o_udp_handle_late_tail`),
 | `d2k_udp_path_post` | 35–60 | 26 | `udp_hold_wait` → HELD/NORMAL; `udp_hold_ready` → take/replay → REPLAY, иначе LOST; `fed` → take/release → RECLAIMED | `main.rs:1600-2210` (late tail/replay/release) | **P** | C возвращает один из четырёх кодов и явно вызывает `hold_replay`/`hold_end`. Rust разносит это по веткам `PacketDecision`, `r2o_udp_handle_late_tail`, `r2o_mark_hold_replay_first` и `r2o_release_udp_batch`; отдельной функции с теми же четырьмя исходами нет. P — нужен differential на HELD/REPLAY/LOST/RECLAIMED. |
 | `d2k_udp_path_read` | 62–67 | 6 | `rseq++`, `seq=rseq`, `now_ns` | `main.rs` `udp_receive_seq` | **E*** | Rust приведён к C: голый `wrapping_add(1)` без `.max(1)`, поэтому переполнение даёт `seq=0`, как C. **Ограничение:** отдельного C/Rust differential нет; отличие было только на переполнении 64-битного счётчика, в production недостижимом. |
 | `d2k_udp_path_expire` | 69–74 | 6 | `seq = read_follows ? rseq+1 : NONE`, flush по таймеру | `main.rs` `follow_receive_seq`, `r2o_udp_hold.rs` `r2o_age` | E | C `D2K_UDP_SEQ_NONE=0`: при отсутствии чтения передаёт 0, иначе `rseq+1`. Rust в `main.rs` ставит `follow_receive_seq = received ? udp_receive_seq : 0` и вызывает `r2o_age` с тем же сентинелом; `r2o_age` удаляет по сроку и seq-правилам. C-тест `test_udp_path.c:393`, Rust-тест `udp_follow_age_matches_c_receive_seq_rules`. |
-| `d2k_udp_path_passed` | 76–88 | 13 | пассивный проход: IPv4, len≥20, `udp_opening`, neutral, follow_mark(0,seq) | `main.rs:108 r2o_udp_mark_plain_pass` | **P** | Rust дополнительно требует `view.protocol==17` и `fragment & 0x3fff == 0` через `PacketView`, C проверяет только `len>=20` и версию IPv4; C `d2k_udp_out_neutral` и Rust `r2o_udp_packet_is_neutral` учитывают route/probe mark. `follow_mark(...,0,seq)` ↔ `follow.r2o_mark(packet, now, None, receive_seq)`. P. |
-| `d2k_udp_path_planned` | 90–97 | 8 | плановая посылка: те же проверки + follow_mark(at_ns,seq) | `main.rs:131 r2o_udp_mark_planned` | **P** | То же отличие proto/fragment; `at_ns` ↔ `Option<Instant> at`, `seq` ↔ `receive_seq`. Отдельного differential на planned-путь с `at` нет. |
+| `d2k_udp_path_passed` | 76–88 | 13 | пассивный проход: IPv4, len≥20, `udp_opening`, neutral, follow_mark(0,seq) | `main.rs` `r2o_udp_mark_plain_pass` | **E*** | C/Rust differential `scripts/test-udp-path-differential.sh` PASS: 10 кейсов — первый клиентский пакет, второй пакет потока, non-neutral mark, TCP, IPv4-фрагмент, IPv6, multicast, planned now/at, короткий пакет; rc совпали. C-проверки proto 17/fragment 0/multicast делегированы `udp_opening`/`follow_tuple` — те же, что у Rust. **Ограничение:** C `out->marked` (счётчик `udp_marked_kept` и первые 16 строк лога) не портирован: Rust молча возвращает false; живой NFQUEUE-оракул не строился. |
+| `d2k_udp_path_planned` | 90–97 | 8 | плановая посылка: те же проверки + follow_mark(at_ns,seq) | `main.rs` `r2o_udp_mark_planned` | **E*** | Тот же C/Rust differential: `first_planned rc=1` с `at_ns=now+30ms`, `bad_mark_planned rc=0`; `at_ns` ↔ `Option<Instant>`, `seq` ↔ `receive_seq`, broadcast/multicast отвергает `R2oUdpFollowKey` как C `follow_tuple`. **Ограничение:** `marked`-колбэка у planned нет и в C. |
 
 ### datapath/udp_path.c: построчная сверка
 
