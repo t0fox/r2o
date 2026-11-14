@@ -3390,6 +3390,32 @@ fn r2o_target_confirmed_probe_path(
 }
 
 #[cfg(unix)]
+fn r2o_store_confirmed_probe_path(
+    catalog: &mut Catalog,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    plan_id: &str,
+    path: &str,
+) {
+    let transport = if target.shape == SHAPE_QUIC { 17 } else { 6 };
+    for box_record in &mut catalog.boxes {
+        for binding in &mut box_record.bindings {
+            if binding.target == target.host
+                && binding.plan_id == plan_id
+                && binding.transport == transport
+                && (if binding.family == 0 {
+                    4
+                } else {
+                    binding.family
+                }) == target.family
+                && binding.shape == target.shape
+            {
+                binding.probe_path = path.to_owned();
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
 fn r2o_discovery_resource_probe_paths(
     target: &r2o_controller::discovery::DiscoveryTarget,
     catalog: Option<&Catalog>,
@@ -8869,6 +8895,8 @@ struct R2oDiscoverySearches {
     suspect_events: u64,
     probes_used: u64,
     client_unfit: u64,
+    /// C `s->confirms`: подтверждения, полученные за сессию процесса.
+    confirms: u64,
     report_sequence: u64,
     last_suspect: Option<r2o_controller::discovery::DiscoveryTarget>,
 }
@@ -13504,6 +13532,7 @@ impl DiscoveryWorker {
             }),
             probes_used: searches.probes_used,
             client_unfit: searches.client_unfit,
+            confirms: searches.confirms,
         }
     }
 
@@ -13520,6 +13549,15 @@ impl DiscoveryWorker {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         searches.client_unfit = searches.client_unfit.saturating_add(1);
+    }
+
+    /// C `s->confirms++` после записи подтверждённой привязки в каталог.
+    fn record_confirmation(&self) {
+        let mut searches = self
+            .searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        searches.confirms = searches.confirms.saturating_add(1);
     }
 
     fn remember_proven_resource(&self, host: &str, path: &str, now: std::time::Instant) -> bool {
@@ -18346,6 +18384,18 @@ impl ControlClient {
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .get(&r2o_discovery_task_key(&outcome.target))
                         .copied();
+                    // C `select_resource_path` выбирает путь до испытания и
+                    // `verify_confirm` (`sched.c:9475-9489`) переносит его в
+                    // подтверждённую привязку. "/" — отсутствие измеренного
+                    // пути, в каталог он не пишется.
+                    let measured_probe_path = r2o_discovery_resource_probe_paths(
+                        &outcome.target,
+                        Some(catalog),
+                        &worker.resource_memory,
+                    )
+                    .0;
+                    let measured_probe_path =
+                        (measured_probe_path != "/").then_some(measured_probe_path);
                     if outcome.queue_expired {
                         println!(
                             "подозрение {} устарело в очереди Discovery; сетевой замер не запускался",
@@ -18353,14 +18403,21 @@ impl ControlClient {
                         );
                     } else {
                         let catalog_changed = outcome.plan_text.is_some() || outcome.direct_clear;
-                        match self.apply_discovery_outcome_with_input_and_persistence(
+                        let mut confirmed = false;
+                        let apply_result = self.apply_discovery_outcome_with_input_and_persistence(
                             outcome,
                             catalog,
                             path,
                             if client_input { 1 } else { 2 },
                             has_timestamp,
+                            measured_probe_path.as_deref(),
+                            &mut confirmed,
                             catalog_persistence.as_mut(),
-                        ) {
+                        );
+                        if confirmed {
+                            worker.record_confirmation();
+                        }
+                        match apply_result {
                             Ok(Some(_installed_groups)) => {}
                             Ok(None) if has_candidate => {
                                 println!(
@@ -19263,7 +19320,7 @@ impl ControlClient {
                     match proof.proof {
                         r2k_core::control::R2oVoiceProofKind::DiscordDiscovery { .. }
                         | r2k_core::control::R2oVoiceProofKind::StunBinding => {
-                            let Some((_, catalog, path, _)) = &mut discovery else {
+                            let Some((worker, catalog, path, _)) = &mut discovery else {
                                 println!(
                                     "{proof_name}-ответ получен без активного каталога автопоиска"
                                 );
@@ -19280,6 +19337,9 @@ impl ControlClient {
                                 catalog_persistence.as_mut(),
                             ) {
                                 Ok(deletion_succeeded) => {
+                                    // C `voice_confirm`: `s->confirms++` после
+                                    // записи постоянной привязки.
+                                    worker.record_confirmation();
                                     r2o_finish_voice_trial_confirmation(
                                         &mut r2o_voice_trials,
                                         confirmed_trial.clone(),
@@ -23238,6 +23298,8 @@ impl ControlClient {
             input,
             None,
             None,
+            &mut false,
+            None,
         )
     }
 
@@ -23248,6 +23310,8 @@ impl ControlClient {
         catalog_path: &std::path::Path,
         input: u8,
         has_timestamp: Option<bool>,
+        measured_probe_path: Option<&str>,
+        confirmed: &mut bool,
         mut persistence: Option<&mut R2oCatalogPersistence>,
     ) -> Result<Option<Vec<r2o_controller::live::LiveGroupKey>>, Box<dyn Error>> {
         if outcome.direct_clear {
@@ -23306,6 +23370,15 @@ impl ControlClient {
             outcome.volume_box_id.as_deref(),
         )
         .map_err(|error| format!("не удалось сохранить результат классификации: {error}"))?;
+        if binding_target.shape != SHAPE_HTTP
+            && let Some(path) = measured_probe_path
+            && r2o_controller::r2o_resource::r2o_resource_path_ok(path)
+        {
+            // C `verify_confirm` пишет измеренный путь в привязку после
+            // `bind_confirmed`; подтверждённый путь переживает рестарт.
+            r2o_store_confirmed_probe_path(&mut updated, &binding_target, &plan_id, path);
+        }
+        *confirmed = true;
         let plan_text = updated
             .boxes
             .iter()
@@ -25989,6 +26062,50 @@ mod tests {
         let fallback_a = super::r2o_fresh_id_fallback();
         let fallback_b = super::r2o_fresh_id_fallback();
         assert_ne!(fallback_a, fallback_b);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confirmed_probe_path_is_written_only_to_the_exact_binding() {
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "resource.example".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let plan_id = "44".repeat(16);
+        let mut catalog = Catalog {
+            boxes: vec![BoxRecord {
+                bindings: vec![
+                    Binding {
+                        kind: "name".into(),
+                        target: target.host.clone(),
+                        plan_id: plan_id.clone(),
+                        enabled: true,
+                        transport: 6,
+                        family: 4,
+                        shape: SHAPE_MODERN,
+                        ..Binding::default()
+                    },
+                    Binding {
+                        kind: "name".into(),
+                        target: target.host.clone(),
+                        plan_id: plan_id.clone(),
+                        enabled: true,
+                        transport: 6,
+                        family: 4,
+                        shape: r2k_core::control::SHAPE_LEGACY,
+                        probe_path: "/legacy.css".into(),
+                        ..Binding::default()
+                    },
+                ],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        super::r2o_store_confirmed_probe_path(&mut catalog, &target, &plan_id, "/public/site.css");
+        assert_eq!(catalog.boxes[0].bindings[0].probe_path, "/public/site.css");
+        assert_eq!(catalog.boxes[0].bindings[1].probe_path, "/legacy.css");
     }
 
     #[test]
@@ -39079,6 +39196,8 @@ mod tests {
                 &catalog_path,
                 2,
                 None,
+                None,
+                &mut false,
                 Some(&mut persistence),
             )
             .unwrap();
@@ -41283,6 +41402,8 @@ mod tests {
                 &catalog_path,
                 2,
                 None,
+                None,
+                &mut false,
                 Some(&mut persistence),
             );
             let mut server_stream = server.join().unwrap();

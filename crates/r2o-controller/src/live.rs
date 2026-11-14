@@ -14,6 +14,9 @@ pub struct DiscoveryStatus {
     pub autopick: Value,
     pub probes_used: u64,
     pub client_unfit: u64,
+    /// C `s->confirms`: подтверждения за сессию процесса, не число
+    /// подтверждённых привязок в каталоге.
+    pub confirms: u64,
 }
 
 impl Default for DiscoveryStatus {
@@ -31,6 +34,7 @@ impl Default for DiscoveryStatus {
             }),
             probes_used: 0,
             client_unfit: 0,
+            confirms: 0,
         }
     }
 }
@@ -201,7 +205,6 @@ pub fn snapshot_with_areas(
 ) -> Result<Value, CatalogError> {
     let mut boxes = Vec::with_capacity(catalog.boxes.len());
     let mut targets = 0_u64;
-    let mut confirms = 0_u64;
     for record in &catalog.boxes {
         let mut value = serde_json::to_value(record)
             .map_err(|error| CatalogError::new(format!("serialize live box: {error}")))?;
@@ -275,13 +278,6 @@ pub fn snapshot_with_areas(
             }
         }
         targets += record.bindings.len() as u64;
-        confirms += record
-            .bindings
-            .iter()
-            .filter(|binding| {
-                binding.enabled && binding.level >= 3 && binding.recheck_since.is_none()
-            })
-            .count() as u64;
         object.insert("signals".into(), Value::Array(signals));
         boxes.push(value);
     }
@@ -380,7 +376,7 @@ pub fn snapshot_with_areas(
         "measurements": measurements,
         "autopick": discovery_status.autopick,
         "targets": targets,
-        "confirms": confirms,
+        "confirms": discovery_status.confirms,
         "probes_used": discovery_status.probes_used,
         "client_unfit": discovery_status.client_unfit,
     }))
@@ -595,7 +591,10 @@ mod tests {
             &active,
             vec![search],
             json!({"active": 0, "limit": 2, "queued": 0}),
-            DiscoveryStatus::default(),
+            DiscoveryStatus {
+                confirms: 1,
+                ..DiscoveryStatus::default()
+            },
         )
         .unwrap();
         assert_eq!(live["linked"], true);
@@ -1060,6 +1059,290 @@ mod tests {
         );
         if let Ok(path) = std::env::var("R2O_LIVE_GROUPS_DIFF_OUTPUT") {
             std::fs::write(path, serde_json::to_string(&scenarios).unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn live_confirms_counts_session_events_not_catalog_bindings() {
+        use crate::catalog::{Binding, BoxRecord};
+
+        let catalog = Catalog {
+            boxes: vec![BoxRecord {
+                bindings: vec![
+                    Binding {
+                        kind: "name".into(),
+                        target: "a.example.com".into(),
+                        plan_id: "plan-1".into(),
+                        level: 3,
+                        confirmed: 10,
+                        successes: 2,
+                        enabled: true,
+                        transport: 6,
+                        family: 4,
+                        shape: 1,
+                        ..Binding::default()
+                    },
+                    Binding {
+                        kind: "name".into(),
+                        target: "b.example.com".into(),
+                        plan_id: "plan-1".into(),
+                        level: 4,
+                        confirmed: 11,
+                        successes: 3,
+                        enabled: true,
+                        transport: 6,
+                        family: 4,
+                        shape: 1,
+                        ..Binding::default()
+                    },
+                ],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        let snapshot = |confirms| {
+            snapshot(
+                &catalog,
+                Path::new("/state/catalog.json"),
+                &HashSet::new(),
+                Vec::new(),
+                json!({}),
+                DiscoveryStatus {
+                    confirms,
+                    ..DiscoveryStatus::default()
+                },
+            )
+            .unwrap()
+        };
+        // C `confirms` — счётчик подтверждений за сессию процесса, а не
+        // число подтверждённых привязок в каталоге.
+        assert_eq!(snapshot(0)["confirms"], 0);
+        assert_eq!(snapshot(0)["targets"], 2);
+        assert_eq!(snapshot(7)["confirms"], 7);
+    }
+
+    #[test]
+    fn live_snapshot_differential_matches_c() {
+        use crate::catalog::{Binding, BoxRecord, Fingerprint, GroupKey, Plan, Signal};
+
+        let key = GroupKey {
+            transport: 6,
+            family: 4,
+            shape: 1,
+            probe_path: String::new(),
+            ech_origin: String::new(),
+        };
+        let catalog = Catalog {
+            boxes: vec![
+                BoxRecord {
+                    id: "box-1".into(),
+                    created: 1000,
+                    updated: 2000,
+                    fingerprint: Fingerprint {
+                        method: 2,
+                        signals: vec![
+                            Signal {
+                                kind: "volume".into(),
+                                volume: 40,
+                                seen: 2,
+                                ..Signal::default()
+                            },
+                            Signal {
+                                kind: "rx-volume".into(),
+                                volume: 16,
+                                seen: 3,
+                                packets: 22,
+                                ..Signal::default()
+                            },
+                        ],
+                    },
+                    plans: vec![
+                        Plan {
+                            id: "plan-1".into(),
+                            proto: "tls".into(),
+                            text: "r2o-plan 1 11\nproto tcp tls\nsplit sni_middle +0\n".into(),
+                            added: 1100,
+                            successes: 5,
+                            enabled: true,
+                        },
+                        Plan {
+                            id: "plan-2".into(),
+                            proto: "http".into(),
+                            text: "r2o-plan 1 5\nproto tcp http\nsegment 1400\n".into(),
+                            added: 1200,
+                            successes: 1,
+                            enabled: true,
+                        },
+                    ],
+                    bindings: vec![
+                        Binding {
+                            kind: "name".into(),
+                            target: "example.com".into(),
+                            plan_id: "plan-1".into(),
+                            level: 3,
+                            confirmed: 1500,
+                            successes: 4,
+                            enabled: true,
+                            transport: 6,
+                            family: 4,
+                            shape: 1,
+                            tcp_profile: 0,
+                            verified_by: 1,
+                            input: 2,
+                            probe_path: "/main.css".into(),
+                            budget: 3,
+                            ..Binding::default()
+                        },
+                        Binding {
+                            kind: "name".into(),
+                            target: "other.example".into(),
+                            plan_id: "plan-3".into(),
+                            level: 1,
+                            confirmed: 1600,
+                            successes: 1,
+                            enabled: false,
+                            transport: 6,
+                            family: 6,
+                            shape: 0,
+                            recheck_since: Some(1700),
+                            ..Binding::default()
+                        },
+                    ],
+                    ..BoxRecord::default()
+                },
+                BoxRecord {
+                    id: "box-2".into(),
+                    created: 3000,
+                    updated: 3000,
+                    fingerprint: Fingerprint {
+                        method: 2,
+                        signals: vec![Signal {
+                            kind: "volume".into(),
+                            volume: 40,
+                            seen: 2,
+                            ..Signal::default()
+                        }],
+                    },
+                    plans: vec![Plan {
+                        id: "plan-3".into(),
+                        proto: "tls".into(),
+                        text: "r2o-plan 1 11\nproto tcp tls\nsplit sni_middle +0\n".into(),
+                        added: 1100,
+                        successes: 2,
+                        enabled: false,
+                    }],
+                    bindings: vec![Binding {
+                        kind: "addr".into(),
+                        target: "198.51.100.80".into(),
+                        plan_id: "plan-3".into(),
+                        level: 3,
+                        confirmed: 3000,
+                        successes: 2,
+                        enabled: true,
+                        transport: 6,
+                        family: 4,
+                        shape: 1,
+                        ..Binding::default()
+                    }],
+                    ..BoxRecord::default()
+                },
+            ],
+            domain_state: Some(DomainState {
+                groups: vec![DomainGroup {
+                    suffix: "example.com".into(),
+                    plan_id: "plan-1".into(),
+                    key: key.clone(),
+                    evidence_count: 2,
+                    at: 1500,
+                }],
+                observations: vec![
+                    DomainObservation {
+                        name: "a.example.com".into(),
+                        plan_id: "plan-1".into(),
+                        key: key.clone(),
+                        evidence: DOMAIN_BLOCKED,
+                        at: 1400,
+                    },
+                    DomainObservation {
+                        name: "b.example.com".into(),
+                        plan_id: "plan-1".into(),
+                        key,
+                        evidence: DOMAIN_DIRECT_CLEAR,
+                        at: 1450,
+                    },
+                ],
+                ..DomainState::default()
+            }),
+            ..Catalog::default()
+        };
+        let areas = [LiveAreaState {
+            kind: 1,
+            name: "example.com".into(),
+            transport: 6,
+            shape: 1,
+            family: 4,
+            plan_id: Some("plan-1".into()),
+            confirmed: true,
+            ..LiveAreaState::default()
+        }];
+        let measurements = json!({
+            "active": 1,
+            "limit": 3,
+            "queued": 0,
+            "cores": 4,
+            "free_pct": 75,
+            "mem_avail_mb": 500,
+            "mem_total_mb": 1024,
+            "conntrack_pct": 10,
+            "limited_by": "процессор",
+        });
+        let status = DiscoveryStatus {
+            autopick: json!({
+                "reason": "поиск не активен; ожидается новый сигнал datapath",
+                "target": "target.example",
+                "plan_id": "",
+                "datapath_events": 10,
+                "suspect_events": 5,
+                "transport": 6,
+                "family": 4,
+                "cooldown_seconds_left": null,
+            }),
+            probes_used: 42,
+            client_unfit: 3,
+            confirms: 7,
+        };
+        let searches = vec![json!({
+            "target": "",
+            "family": 0,
+            "transport": 0,
+            "ip": "",
+            "port": 0,
+            "phase": "распознаём поведение",
+            "since": "1970-01-01T00:33:24Z",
+            "attempts": 0,
+            "probes": 0,
+            "question": "",
+            "candidate": "",
+            "source": "",
+        })];
+        let live = snapshot_with_areas(
+            &catalog,
+            Path::new("catalog.json"),
+            &HashSet::new(),
+            searches,
+            measurements,
+            status,
+            &areas,
+        )
+        .unwrap();
+        assert_eq!(live["targets"], 3);
+        assert_eq!(live["confirms"], 7);
+        assert_eq!(live["groups"][0]["exception_install_state"], "pending");
+        assert_eq!(live["groups"][0]["install_state"], "removing");
+        assert_eq!(live["groups"][0]["active"], false);
+        assert_eq!(live["groups"][0]["possibly_active"], true);
+        if let Ok(path) = std::env::var("R2O_LIVE_SNAPSHOT_DIFF_OUTPUT") {
+            std::fs::write(path, serde_json::to_string(&live).unwrap()).unwrap();
         }
     }
 
