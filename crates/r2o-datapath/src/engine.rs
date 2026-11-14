@@ -7,7 +7,7 @@ use r2k_core::plan::{
     EmitKind, GUARD_RST_ALIEN, OriginalFate, POISON_IPID_ZERO, PROTO_HTTP, PROTO_VOICE,
     PacketInput, Plan,
 };
-use r2k_core::quic::is_authenticated_initial;
+use r2k_core::quic::r2k_quic_is_initial;
 use std::collections::{HashMap, TryReserveError, VecDeque};
 #[cfg(target_os = "linux")]
 use std::net::SocketAddr;
@@ -1955,7 +1955,7 @@ fn decide_packet_with_segment_cap(
     }
 
     if plan.qdeny != 0 {
-        return if payload.len() <= D2O_QUIC_MAX_DGRAM && is_authenticated_initial(payload) {
+        return if payload.len() <= D2O_QUIC_MAX_DGRAM && r2k_quic_is_initial(payload) {
             PacketDecision::Drop
         } else {
             PacketDecision::Accept
@@ -1976,7 +1976,7 @@ fn decide_packet_with_segment_cap(
         return PacketDecision::Accept;
     }
     if (plan.qsplit != 0 || length_probe || clearance || ttl_probe || fragment_probe || fake_probe)
-        && (payload.len() > D2O_QUIC_MAX_DGRAM || !is_authenticated_initial(payload))
+        && (payload.len() > D2O_QUIC_MAX_DGRAM || !r2k_quic_is_initial(payload))
     {
         return PacketDecision::Accept;
     }
@@ -4685,7 +4685,7 @@ mod tests {
     }
 
     #[test]
-    fn qdeny_only_drops_an_authenticated_quic_initial() {
+    fn qdeny_drops_structural_quic_initial_like_c() {
         let plan =
             Plan::parse(&plan_bytes(11, &[tlv(0x0002, &[17, 2]), tlv(0x0110, &[1])])).unwrap();
         assert!(validate_runtime_plan(&plan).is_ok());
@@ -4695,9 +4695,11 @@ mod tests {
             PacketDecision::Accept
         );
 
+        // C `d2k_quic_is_initial` проверяет только структуру: битый тег
+        // по-прежнему Initial, qdeny его снимает.
         let mut corrupted = V1_INITIAL.to_vec();
         corrupted[600] ^= 1;
-        assert_eq!(decide(&plan, &ipv4_udp(&corrupted)), PacketDecision::Accept);
+        assert_eq!(decide(&plan, &ipv4_udp(&corrupted)), PacketDecision::Drop);
 
         let mut oversized_initial = V1_INITIAL.to_vec();
         oversized_initial.resize(D2O_QUIC_MAX_DGRAM + 1, 0);

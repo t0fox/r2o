@@ -958,6 +958,13 @@ pub fn r2k_quic_initial_flight_id_structural(input: &[u8]) -> Option<(u32, Vec<u
     Some((header.version, input.get(header.dcid_offset..end)?.to_vec()))
 }
 
+/// C `d2k_quic_is_initial` (`core/quic.c:182-185`): только структура
+/// заголовка Initial v1/v2, без вывода ключей и проверки AEAD; предел
+/// дейтаграммы 1500 байт.
+pub fn r2k_quic_is_initial(input: &[u8]) -> bool {
+    input.len() <= 1500 && r2k_quic_initial_flight_id_structural(input).is_some()
+}
+
 fn derive_initial_keys(version: u32, dcid: &[u8]) -> Result<InitialKeys, QuicSplitError> {
     derive_initial_keys_for_role(version, dcid, b"client in")
 }
