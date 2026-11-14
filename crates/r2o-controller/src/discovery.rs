@@ -1212,6 +1212,52 @@ pub fn add_measured_binding_with_fingerprint_in_box(
     observed_fingerprint: Option<&crate::catalog::Fingerprint>,
     preferred_box_id: Option<&str>,
 ) -> Result<String, String> {
+    add_measured_binding_with_fingerprint_in_box_learn(
+        catalog,
+        target,
+        source_text,
+        now,
+        input,
+        observed_fingerprint,
+        preferred_box_id,
+        true,
+    )
+}
+
+/// Как `add_measured_binding_with_fingerprint_in_box`, но без неявной записи
+/// группы: C `verify_confirm` пишет её отдельным `group_record` только при
+/// `group_block_proven`.
+pub fn add_measured_binding_with_fingerprint_in_box_without_group(
+    catalog: &mut Catalog,
+    target: &DiscoveryTarget,
+    source_text: &str,
+    now: i64,
+    input: u8,
+    observed_fingerprint: Option<&crate::catalog::Fingerprint>,
+    preferred_box_id: Option<&str>,
+) -> Result<String, String> {
+    add_measured_binding_with_fingerprint_in_box_learn(
+        catalog,
+        target,
+        source_text,
+        now,
+        input,
+        observed_fingerprint,
+        preferred_box_id,
+        false,
+    )
+}
+
+fn add_measured_binding_with_fingerprint_in_box_learn(
+    catalog: &mut Catalog,
+    target: &DiscoveryTarget,
+    source_text: &str,
+    now: i64,
+    input: u8,
+    observed_fingerprint: Option<&crate::catalog::Fingerprint>,
+    preferred_box_id: Option<&str>,
+    learn_group: bool,
+) -> Result<String, String> {
     if !matches!(target.family, 4 | 6)
         || !(matches!(
             target.shape,
@@ -1387,7 +1433,7 @@ pub fn add_measured_binding_with_fingerprint_in_box(
         observed_fingerprint,
     )?;
 
-    if target.shape != SHAPE_HTTP {
+    if learn_group && target.shape != SHAPE_HTTP {
         let state = catalog
             .domain_state
             .get_or_insert_with(DomainState::default);
@@ -1509,6 +1555,23 @@ fn add_confirmed_quic_binding(
                 && binding.shape == SHAPE_QUIC
             {
                 binding.probe_path = probe_path.to_owned();
+            }
+        }
+    }
+    // C `verify_confirm` для QUIC/ECH с replay-proof: бюджет потока не
+    // применим, привязка помечается «бюджет не проверен» только на пустую
+    // отметку.
+    if let Some(record) = catalog.boxes.iter_mut().find(|record| record.id == box_id) {
+        for binding in &mut record.bindings {
+            if binding.kind == kind
+                && binding.target == target
+                && binding.plan_id == plan_id
+                && binding.transport == 17
+                && binding.family == family
+                && binding.shape == SHAPE_QUIC
+                && binding.budget == 0
+            {
+                binding.budget = 2;
             }
         }
     }

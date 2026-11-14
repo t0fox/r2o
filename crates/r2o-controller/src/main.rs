@@ -2739,6 +2739,8 @@ const DOMAIN_OPERATOR_REJECT: u8 = 32;
 #[cfg(unix)]
 const R2O_D2K_CAT_BUDGET_PASSED: u8 = 1;
 #[cfg(unix)]
+const R2O_D2K_CAT_BUDGET_UNCHECKED: u8 = 2;
+#[cfg(unix)]
 const R2O_D2K_CAT_BUDGET_CUT: u8 = 3;
 #[cfg(unix)]
 const R2O_D2K_VERBY_CLIENT: u8 = 2;
@@ -3413,6 +3415,88 @@ fn r2o_store_confirmed_probe_path(
             }
         }
     }
+}
+
+/// C `verify_confirm` (`sched.c:9449-9474`): отметка бюджета потока.
+/// PASSED сильнее всего и пишется всегда; UNCHECKED — только на пустую;
+/// CUT не переписывает PASSED.
+#[cfg(unix)]
+fn r2o_store_confirmed_budget(
+    catalog: &mut Catalog,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    plan_id: &str,
+    mark: u8,
+) {
+    if mark == 0 {
+        return;
+    }
+    let transport = if target.shape == SHAPE_QUIC { 17 } else { 6 };
+    let kind = if target.shape == SHAPE_QUIC {
+        "addr"
+    } else {
+        "name"
+    };
+    for box_record in &mut catalog.boxes {
+        for binding in &mut box_record.bindings {
+            if binding.target != target.host
+                || binding.plan_id != plan_id
+                || binding.kind != kind
+                || (if binding.family == 0 {
+                    4
+                } else {
+                    binding.family
+                }) != target.family
+                || binding.shape != target.shape
+                || binding.transport != transport
+            {
+                continue;
+            }
+            let allowed = mark == R2O_D2K_CAT_BUDGET_PASSED
+                || binding.budget == 0
+                || (mark == R2O_D2K_CAT_BUDGET_CUT && binding.budget != R2O_D2K_CAT_BUDGET_PASSED);
+            if allowed && binding.budget != mark {
+                binding.budget = mark;
+            }
+        }
+    }
+}
+
+/// C `group_record(BLOCKED_CONFIRMED)` (`sched.c:9013-9034`) для TCP-name:
+/// ключ области берётся с путём замера (`group_path`) и формой привязки.
+#[cfg(unix)]
+fn r2o_group_record_confirmed(
+    catalog: &mut Catalog,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    plan_id: &str,
+    shape: u8,
+    probe_path: &str,
+    ech_origin: &str,
+    now: i64,
+) -> Result<bool, String> {
+    if target.host.parse::<std::net::IpAddr>().is_ok()
+        || r2o_controller::domain::registrable_domain(&target.host).is_none()
+    {
+        return Ok(false);
+    }
+    let state = catalog
+        .domain_state
+        .get_or_insert_with(r2o_controller::catalog::DomainState::default);
+    state
+        .learn(r2o_controller::catalog::DomainObservation {
+            name: target.host.clone(),
+            plan_id: plan_id.to_owned(),
+            key: r2o_controller::catalog::GroupKey {
+                transport: 6,
+                family: target.family,
+                shape,
+                probe_path: group_path(6, probe_path).to_owned(),
+                ech_origin: ech_origin.to_owned(),
+            },
+            evidence: 1,
+            at: now,
+        })
+        .map_err(|error| format!("catalog domain observation: {error}"))?;
+    Ok(true)
 }
 
 #[cfg(unix)]
@@ -6072,11 +6156,38 @@ fn r2o_family_recovery_decision(
 }
 
 #[cfg(unix)]
+fn r2o_budget_mark_from_result(result: &Result<r2o_controller::fetch::FetchResult, String>) -> u8 {
+    use r2o_controller::r2o_volume::R2oVolumePacketBudget;
+    let Ok(fetch) = result.as_ref() else {
+        return 0;
+    };
+    // C `verify_confirm`: подтверждение повтором (replay proof) означает
+    // «бюджет не применим» → UNCHECKED.
+    if fetch.r2o_volume_observation.replay_proof {
+        return R2O_D2K_CAT_BUDGET_UNCHECKED;
+    }
+    match fetch.r2o_volume_observation.packet_budget {
+        R2oVolumePacketBudget::Passed => R2O_D2K_CAT_BUDGET_PASSED,
+        R2oVolumePacketBudget::NotApplicable => R2O_D2K_CAT_BUDGET_UNCHECKED,
+        R2oVolumePacketBudget::Cut => R2O_D2K_CAT_BUDGET_CUT,
+        _ => 0,
+    }
+}
+
+#[cfg(unix)]
+fn r2o_plan_wire_id(text: &str) -> Option<[u8; 16]> {
+    r2o_controller::discovery::plan_ident(text)
+        .ok()
+        .map(|(_, wire)| wire)
+}
+
+#[cfg(unix)]
 fn r2o_confirm_discovery_outcome(
     mut outcome: DiscoveryOutcome,
     result: Result<r2o_controller::fetch::FetchResult, String>,
     applied: bool,
 ) -> DiscoveryOutcome {
+    outcome.budget_mark = r2o_budget_mark_from_result(&result);
     if outcome.plan_text.is_none()
         || r2o_family_recovery_decision(&result, applied) == R2oFamilyRecoveryDecision::Verified
     {
@@ -6094,6 +6205,37 @@ fn r2o_confirm_discovery_outcome(
     } else {
         outcome.detail.push_str(
             "; кандидат не сохранён: временная проба не получила полный HTTPS-ответ и точное APPLIED",
+        );
+    }
+    outcome
+}
+
+/// Подтверждение с pre-confirm гейтом C `unfit_here` (`sched.c:9346-9365`):
+/// тот же план, который уже не подошёл потоку клиента (FLOW_UNFIT), не
+/// подтверждается; поиск уходит на повтор, как C `T_PLANNING`.
+#[cfg(unix)]
+fn r2o_confirm_discovery_outcome_checked(
+    outcome: DiscoveryOutcome,
+    result: Result<r2o_controller::fetch::FetchResult, String>,
+    applied: bool,
+    searches: &std::sync::Mutex<R2oDiscoverySearches>,
+) -> DiscoveryOutcome {
+    let mut outcome = r2o_confirm_discovery_outcome(outcome, result, applied);
+    let Some(text) = outcome.plan_text.as_deref() else {
+        return outcome;
+    };
+    let Some(wire_id) = r2o_plan_wire_id(text) else {
+        return outcome;
+    };
+    let unfit = searches
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .plan_unfit(&outcome.target, &wire_id);
+    if unfit {
+        outcome.plan_text = None;
+        outcome.retry_after = Some(R2O_DISCOVERY_FAILURE_RETRY);
+        outcome.detail.push_str(
+            "; этот план уже не подошёл потоку клиента (FLOW_UNFIT): подтверждение отменено, беру следующий кандидат",
         );
     }
     outcome
@@ -8070,6 +8212,12 @@ struct DiscoveryOutcome {
     address_recheck_probes: usize,
     direct_clear: bool,
     volume_recovery: bool,
+    /// C `t->ver.budget` после подтверждения: 1 PASSED, 2 UNCHECKED, 3 CUT,
+    /// 0 — не проверялся. Пишется в `Binding.budget` в том же проходе.
+    budget_mark: u8,
+    /// C `t->group_block_proven`: прямой замер доказал блокировку (Prefix/
+    /// Whole/Opaque или объёмный обрыв). Только тогда пишется группа.
+    group_block_proven: bool,
     volume_fingerprint: Option<r2o_controller::catalog::Fingerprint>,
     volume_box_id: Option<String>,
     retry_after: Option<std::time::Duration>,
@@ -8897,6 +9045,8 @@ struct R2oDiscoverySearches {
     client_unfit: u64,
     /// C `s->confirms`: подтверждения, полученные за сессию процесса.
     confirms: u64,
+    /// C `t->unfit_plan_id[]`: планы, которые уже не подошли клиенту.
+    unfit_plans: HashMap<R2oDiscoveryTaskKey, VecDeque<[u8; 16]>>,
     report_sequence: u64,
     last_suspect: Option<r2o_controller::discovery::DiscoveryTarget>,
 }
@@ -9036,6 +9186,39 @@ impl R2oDiscoverySearches {
         } else {
             self.asking.remove(&key);
         }
+    }
+
+    /// C `on_refused_foreign` (`sched.c:9920-9939`): запомнить план, который
+    /// не поместился/не подошёл потоку клиента. Кольцо на 8 планов.
+    fn note_unfit_plan(
+        &mut self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        plan_id: [u8; 16],
+    ) {
+        if !plan_id.iter().any(|byte| *byte != 0) {
+            return;
+        }
+        let key = r2o_discovery_task_key(target);
+        let plans = self.unfit_plans.entry(key).or_default();
+        if plans.contains(&plan_id) {
+            return;
+        }
+        if plans.len() == 8 {
+            plans.pop_front();
+        }
+        plans.push_back(plan_id);
+    }
+
+    /// C `verify_confirm` (`sched.c:9346-9365`): тот же план уже не подошёл
+    /// клиенту — подтверждать его нельзя.
+    fn plan_unfit(
+        &self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        plan_id: &[u8; 16],
+    ) -> bool {
+        self.unfit_plans
+            .get(&r2o_discovery_task_key(target))
+            .is_some_and(|plans| plans.contains(plan_id))
     }
 
     fn update_probe_progress(
@@ -10219,6 +10402,9 @@ struct DiscoveryWorker {
     measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
     client_hellos: Arc<std::sync::Mutex<HashMap<R2oDiscoveryTaskKey, Vec<u8>>>>,
     client_tcp_timestamps: Arc<std::sync::Mutex<HashMap<R2oDiscoveryTaskKey, bool>>>,
+    /// Cнимок TCP timestamp-профиля, снятый до очистки задачи: main loop
+    /// выбирает wire-shape по нему уже после `try_outcome`.
+    completed_timestamps: HashMap<R2oDiscoveryTaskKey, Option<bool>>,
     recent_client_shapes: Arc<std::sync::Mutex<R2oRecentClientShapeCache>>,
     resource_memory: Arc<std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>>,
     volume_searches: Arc<std::sync::Mutex<R2oDiscoveryVolumeSearchCache>>,
@@ -11804,6 +11990,8 @@ impl DiscoveryWorker {
                                     address_recheck_probes: 0,
                                     direct_clear: false,
                                     volume_recovery: false,
+                                    budget_mark: 0,
+                                    group_block_proven: true,
                                     volume_fingerprint: None,
                                     volume_box_id: Some(candidate.box_id),
                                     retry_after: None,
@@ -11822,6 +12010,8 @@ impl DiscoveryWorker {
                                     address_recheck_probes: 0,
                                     direct_clear: false,
                                     volume_recovery: true,
+budget_mark: 0,
+group_block_proven: false,
                                     volume_fingerprint: None,
                                     volume_box_id: None,
                                     retry_after: Some(R2O_DISCOVERY_CHALLENGE_RETRY),
@@ -12043,6 +12233,8 @@ impl DiscoveryWorker {
                             address_recheck_probes: 0,
                             direct_clear: false,
                             volume_recovery: false,
+                            budget_mark: 0,
+                            group_block_proven: false,
                             volume_fingerprint: None,
                             volume_box_id: Some(candidate.box_id),
                             retry_after: None,
@@ -12053,7 +12245,12 @@ impl DiscoveryWorker {
                             || fetch.http_outcome
                                 == r2o_controller::fetch::R2oFetchHttpOutcome::LegalDenial
                     }) {
-                        return r2o_confirm_discovery_outcome(outcome, result, applied);
+                        return r2o_confirm_discovery_outcome_checked(
+                            outcome,
+                            result,
+                            applied,
+                            &runner_searches,
+                        );
                     }
                 }
             }
@@ -12245,7 +12442,12 @@ impl DiscoveryWorker {
                             == r2o_controller::fetch::R2oFetchHttpOutcome::LegalDenial
                 });
                 if challenge_or_denial {
-                    let mut outcome = r2o_confirm_discovery_outcome(outcome, result, applied);
+                    let mut outcome = r2o_confirm_discovery_outcome_checked(
+                        outcome,
+                        result,
+                        applied,
+                        &runner_searches,
+                    );
                     outcome.retry_after = Some(R2O_DISCOVERY_CHALLENGE_RETRY);
                     return outcome;
                 }
@@ -12258,7 +12460,12 @@ impl DiscoveryWorker {
                             candidate_evidence,
                         ))
                 {
-                    return r2o_confirm_discovery_outcome(outcome, result, applied);
+                    return r2o_confirm_discovery_outcome_checked(
+                        outcome,
+                        result,
+                        applied,
+                        &runner_searches,
+                    );
                 }
                 let fallback_reason = if primary_from_owned_fallback {
                     "первый кандидат запасного списка не подтвердился на применённом потоке"
@@ -12390,8 +12597,12 @@ impl DiscoveryWorker {
                         || fetch.http_outcome
                             == r2o_controller::fetch::R2oFetchHttpOutcome::LegalDenial
                 });
-                let mut outcome =
-                    r2o_confirm_discovery_outcome(outcome, last_trial.0, last_trial.1);
+                let mut outcome = r2o_confirm_discovery_outcome_checked(
+                    outcome,
+                    last_trial.0,
+                    last_trial.1,
+                    &runner_searches,
+                );
                 outcome.retry_after = Some(if challenge_or_denial {
                     R2O_DISCOVERY_CHALLENGE_RETRY
                 } else {
@@ -12793,7 +13004,8 @@ impl DiscoveryWorker {
                 && result.as_ref().is_ok_and(|fetch| {
                     r2o_ech_witness_transport_proof(&target, &selected_config, fetch)
                 });
-            let mut outcome = r2o_confirm_discovery_outcome(outcome, result, applied);
+            let mut outcome =
+                r2o_confirm_discovery_outcome_checked(outcome, result, applied, &runner_searches);
             if let Some(plan) = owned_fallback_plan {
                 outcome.plan_text = Some(plan);
                 outcome.retry_after = None;
@@ -12940,6 +13152,8 @@ impl DiscoveryWorker {
                     address_recheck_probes: address_recheck.1,
                     direct_clear: false,
                     volume_recovery: false,
+budget_mark: 0,
+group_block_proven: false,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -12956,6 +13170,8 @@ impl DiscoveryWorker {
                     address_recheck_probes: address_recheck.1,
                     direct_clear: false,
                     volume_recovery: false,
+budget_mark: 0,
+group_block_proven: false,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -13161,6 +13377,8 @@ impl DiscoveryWorker {
                                             address_recheck_probes: 0,
                                             direct_clear: false,
                                             volume_recovery: false,
+                                            budget_mark: 0,
+                                            group_block_proven: false,
                                             volume_fingerprint: None,
                                             volume_box_id: None,
                                             retry_after: None,
@@ -13205,6 +13423,8 @@ impl DiscoveryWorker {
                                         address_recheck_probes: 0,
                                         direct_clear: false,
                                         volume_recovery: false,
+                                        budget_mark: 0,
+                                        group_block_proven: false,
                                         volume_fingerprint: None,
                                         volume_box_id: None,
                                         retry_after: None,
@@ -13235,6 +13455,8 @@ impl DiscoveryWorker {
                                             address_recheck_probes: 0,
                                             direct_clear: false,
                                             volume_recovery: false,
+budget_mark: 0,
+group_block_proven: false,
                                             volume_fingerprint: None,
                                             volume_box_id: None,
                                             retry_after: Some(R2O_DISCOVERY_FAILURE_RETRY),
@@ -13298,6 +13520,7 @@ impl DiscoveryWorker {
             measurement_gate,
             client_hellos,
             client_tcp_timestamps,
+            completed_timestamps: std::collections::HashMap::new(),
             recent_client_shapes,
             resource_memory,
             volume_searches,
@@ -14679,6 +14902,14 @@ impl DiscoveryWorker {
         expired
     }
 
+    fn take_completed_client_timestamp(
+        &mut self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+    ) -> Option<Option<bool>> {
+        self.completed_timestamps
+            .remove(&r2o_discovery_task_key(target))
+    }
+
     fn r2o_set_installed_groups(
         &mut self,
         active_groups: &HashSet<r2o_controller::live::LiveGroupKey>,
@@ -14688,6 +14919,53 @@ impl DiscoveryWorker {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .r2o_set_installed_groups(active_groups);
+    }
+
+    /// C `verify_confirm` (`sched.c:9622-9636`): после подтверждения своего
+    /// плана остановить чужие `T_ASKING`, у которых в каталоге появился
+    /// собственный подтверждённый план. Рабочие — on-demand потоки, поэтому
+    /// эквивалент `ot->stop=1` — их task cancel.
+    fn r2o_yield_asking_to_own_plan(&mut self, catalog: &Catalog) {
+        let asking: Vec<(
+            R2oDiscoveryTaskKey,
+            r2o_controller::discovery::DiscoveryTarget,
+        )> = {
+            let searches = self
+                .searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.active
+                .iter()
+                .filter(|(key, _)| {
+                    searches
+                        .entries
+                        .get(*key)
+                        .is_some_and(|search| search.phase == "распознаём поведение")
+                })
+                .map(|(key, target)| (key.clone(), target.clone()))
+                .collect()
+        };
+        if asking.is_empty() {
+            return;
+        }
+        let cancels = self
+            .active_cancels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (key, target) in asking {
+            if r2o_controller::discovery::own_first_plans(catalog, &target, false, None, &[], &[])
+                .is_empty()
+            {
+                continue;
+            }
+            if let Some(cancel) = cancels.get(&key) {
+                cancel.store(true, Ordering::Relaxed);
+                println!(
+                    "по {} замер прерывается: в каталоге появился подтверждённый план — перехожу к его проверке",
+                    target.host
+                );
+            }
+        }
     }
 
     fn catalog_changed(
@@ -15124,6 +15402,22 @@ impl DiscoveryWorker {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&task_key);
         if !self.pending_rechecks.contains_key(&task_key) {
+            self.searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unfit_plans
+                .remove(&task_key);
+            let timestamp = self
+                .client_tcp_timestamps
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&task_key)
+                .copied();
+            if self.completed_timestamps.len() >= R2O_DISCOVERY_TASK_CAPACITY {
+                self.completed_timestamps.clear();
+            }
+            self.completed_timestamps
+                .insert(task_key.clone(), timestamp);
             self.client_tcp_timestamps
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -15752,6 +16046,7 @@ fn r2o_discovery_volume_recovery(
 
     outcome.direct_clear = false;
     outcome.volume_recovery = true;
+    outcome.group_block_proven = true;
     let measured_candidate = outcome.plan_text.take();
     let tx_reason = search
         .tx
@@ -15842,6 +16137,7 @@ fn r2o_discovery_volume_recovery(
                 .remove(target);
             outcome.plan_text = Some(candidate.clone());
             outcome.volume_recovery = true;
+            outcome.group_block_proven = true;
             outcome.volume_fingerprint = Some(observed_fingerprint);
             outcome.volume_box_id = Some(box_id.clone());
             outcome.retry_after = None;
@@ -16100,6 +16396,7 @@ fn r2o_discovery_volume_recovery(
                 .remove(target);
             outcome.plan_text = Some(candidate);
             outcome.volume_recovery = true;
+            outcome.group_block_proven = true;
             outcome.volume_fingerprint = Some(observed_fingerprint.clone());
             outcome.retry_after = None;
             outcome.detail.push_str(&format!(
@@ -16432,6 +16729,8 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                 address_recheck_probes: 0,
                 direct_clear: false,
                 volume_recovery: false,
+                budget_mark: 0,
+                group_block_proven: false,
                 volume_fingerprint: None,
                 volume_box_id: None,
                 retry_after: None,
@@ -16460,6 +16759,8 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                     address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
+                    budget_mark: 0,
+                    group_block_proven: false,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -16570,6 +16871,12 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
             address_recheck_probes: 0,
             direct_clear: !timed_out && result.verdict == Verdict::Clear,
             volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: !timed_out
+                && matches!(
+                    result.verdict,
+                    Verdict::Prefix | Verdict::WholePacket | Verdict::Opaque
+                ),
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after,
@@ -18378,12 +18685,7 @@ impl ControlClient {
                     let has_candidate = outcome.plan_text.is_some();
                     let client_input = worker.take_client_snapshot_provenance(&outcome.target)
                         && outcome.plan_text.is_some();
-                    let has_timestamp = worker
-                        .client_tcp_timestamps
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .get(&r2o_discovery_task_key(&outcome.target))
-                        .copied();
+                    let has_timestamp = worker.take_completed_client_timestamp(&outcome.target);
                     // C `select_resource_path` выбирает путь до испытания и
                     // `verify_confirm` (`sched.c:9475-9489`) переносит его в
                     // подтверждённую привязку. "/" — отсутствие измеренного
@@ -18409,13 +18711,16 @@ impl ControlClient {
                             catalog,
                             path,
                             if client_input { 1 } else { 2 },
-                            has_timestamp,
+                            has_timestamp.flatten(),
                             measured_probe_path.as_deref(),
                             &mut confirmed,
                             catalog_persistence.as_mut(),
                         );
                         if confirmed {
                             worker.record_confirmation();
+                            // C `yield_to_own_plan`: останавливаем чужие
+                            // T_ASKING, у которых появился свой план.
+                            worker.r2o_yield_asking_to_own_plan(catalog);
                         }
                         match apply_result {
                             Ok(Some(_installed_groups)) => {}
@@ -20422,6 +20727,13 @@ impl ControlClient {
                         if let Some(target) = tcp_hello_names.target_for_tcp_flow(&refused.key, now)
                         {
                             if let Some((worker, catalog, catalog_path, _)) = &mut discovery {
+                                // C `on_refused_foreign`: план, не подошедший
+                                // клиенту, запоминается до подтверждения.
+                                worker
+                                    .searches
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .note_unfit_plan(&target, refused.plan_id);
                                 if worker.flow_unfit_done.contains(
                                     &target,
                                     &refused.plan_id,
@@ -23318,6 +23630,8 @@ impl ControlClient {
             self.apply_discovery_direct_clear(&outcome.target, catalog, catalog_path, persistence)?;
             return Ok(None);
         }
+        let group_block_proven = outcome.group_block_proven;
+        let budget_mark = outcome.budget_mark;
         let Some(source_text) = outcome.plan_text else {
             println!(
                 "автопоиск не дал применимого плана для {}: {}",
@@ -23360,16 +23674,17 @@ impl ControlClient {
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
         let mut updated = previous.clone();
-        let plan_id = r2o_controller::discovery::add_measured_binding_with_fingerprint_in_box(
-            &mut updated,
-            &binding_target,
-            &source_text,
-            now,
-            input,
-            outcome.volume_fingerprint.as_ref(),
-            outcome.volume_box_id.as_deref(),
-        )
-        .map_err(|error| format!("не удалось сохранить результат классификации: {error}"))?;
+        let plan_id =
+            r2o_controller::discovery::add_measured_binding_with_fingerprint_in_box_without_group(
+                &mut updated,
+                &binding_target,
+                &source_text,
+                now,
+                input,
+                outcome.volume_fingerprint.as_ref(),
+                outcome.volume_box_id.as_deref(),
+            )
+            .map_err(|error| format!("не удалось сохранить результат классификации: {error}"))?;
         if binding_target.shape != SHAPE_HTTP
             && let Some(path) = measured_probe_path
             && r2o_controller::r2o_resource::r2o_resource_path_ok(path)
@@ -23377,6 +23692,20 @@ impl ControlClient {
             // C `verify_confirm` пишет измеренный путь в привязку после
             // `bind_confirmed`; подтверждённый путь переживает рестарт.
             r2o_store_confirmed_probe_path(&mut updated, &binding_target, &plan_id, path);
+        }
+        r2o_store_confirmed_budget(&mut updated, &binding_target, &plan_id, budget_mark);
+        if group_block_proven
+            && let Err(error) = r2o_group_record_confirmed(
+                &mut updated,
+                &binding_target,
+                &plan_id,
+                binding_target.shape,
+                measured_probe_path.unwrap_or(""),
+                "",
+                now,
+            )
+        {
+            eprintln!("группа для {} не записана: {error}", binding_target.host);
         }
         *confirmed = true;
         let plan_text = updated
@@ -26108,6 +26437,595 @@ mod tests {
         assert_eq!(catalog.boxes[0].bindings[1].probe_path, "/legacy.css");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn apply_discovery_outcome_writes_budget_group_and_measure_path_like_c() {
+        let work = std::env::temp_dir().join(format!(
+            "r2o-apply-confirm-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&work).unwrap();
+        let catalog_path = work.join("catalog.json");
+        Catalog::default().save_atomic(&catalog_path, 1).unwrap();
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "apply.example.com".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let outcome = super::DiscoveryOutcome {
+            target: target.clone(),
+            plan_text: Some(
+                "r2o-plan 1 11\nid 00000000000000000000000000000000\nproto tcp tls\nsplit sni_middle +0\n"
+                    .into(),
+            ),
+            detail: String::new(),
+            queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
+            direct_clear: false,
+            volume_recovery: false,
+            budget_mark: super::R2O_D2K_CAT_BUDGET_PASSED,
+            group_block_proven: true,
+            volume_fingerprint: None,
+            volume_box_id: None,
+            retry_after: None,
+        };
+        let (client_stream, _server_stream) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut client = ControlClient {
+            socket: client_stream,
+            send_maxlen: 0,
+            send_cap: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            pending_events: std::collections::VecDeque::new(),
+            pending_applied_events: std::collections::VecDeque::new(),
+            dropped_events: Default::default(),
+            http_search_started: Default::default(),
+            http_acknowledged_bindings: std::collections::HashMap::new(),
+        };
+        let mut catalog = Catalog::default();
+        let mut confirmed = false;
+        client
+            .apply_discovery_outcome_with_input_and_persistence(
+                outcome,
+                &mut catalog,
+                &catalog_path,
+                2,
+                None,
+                Some("/main.css"),
+                &mut confirmed,
+                None,
+            )
+            .unwrap();
+        assert!(confirmed);
+        let binding = catalog
+            .boxes
+            .iter()
+            .flat_map(|box_record| &box_record.bindings)
+            .find(|binding| binding.target == target.host)
+            .unwrap();
+        assert_eq!(binding.budget, super::R2O_D2K_CAT_BUDGET_PASSED);
+        assert_eq!(binding.probe_path, "/main.css");
+        assert_eq!(binding.shape, SHAPE_MODERN);
+        let state = catalog.domain_state.as_ref().unwrap();
+        assert_eq!(state.observations.len(), 1);
+        assert_eq!(state.observations[0].name, "apply.example.com");
+        assert_eq!(state.observations[0].key.probe_path, "/main.css");
+
+        // TCP timestamp-профиль: C `trigger_tcp_profile` пишется в привязку,
+        // а форма становится контекстной (R2O модель shape 8-13).
+        Catalog::default().save_atomic(&catalog_path, 1).unwrap();
+        let outcome = super::DiscoveryOutcome {
+            target: target.clone(),
+            plan_text: Some(
+                "r2o-plan 1 11\nid 00000000000000000000000000000000\nproto tcp tls\nsplit sni_middle +0\n"
+                    .into(),
+            ),
+            detail: String::new(),
+            queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
+            direct_clear: false,
+            volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
+            volume_fingerprint: None,
+            volume_box_id: None,
+            retry_after: None,
+        };
+        let mut catalog = Catalog::default();
+        let mut confirmed = false;
+        client
+            .apply_discovery_outcome_with_input_and_persistence(
+                outcome,
+                &mut catalog,
+                &catalog_path,
+                2,
+                Some(true),
+                None,
+                &mut confirmed,
+                None,
+            )
+            .unwrap();
+        let binding = catalog
+            .boxes
+            .iter()
+            .flat_map(|box_record| &box_record.bindings)
+            .find(|binding| binding.target == target.host)
+            .unwrap();
+        assert_eq!(binding.tcp_profile, 2);
+        assert_eq!(binding.shape, r2k_core::control::SHAPE_MODERN_TS);
+        std::fs::remove_dir_all(work).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_confirm_gates_differential_matches_c() {
+        use serde_json::json;
+
+        let mut scenarios = Vec::new();
+        for (scenario, ech_origin, path) in [
+            ("group_path", "", "/main.css"),
+            ("group_no_path", "", ""),
+            ("group_ech_origin", "edge.example", "/ech.css"),
+        ] {
+            let mut catalog = Catalog::default();
+            for name in ["media.example.com", "a.example.com", "b.example.com"] {
+                let target = r2o_controller::discovery::DiscoveryTarget {
+                    host: name.into(),
+                    endpoint: "198.51.100.80:443".into(),
+                    family: 4,
+                    shape: SHAPE_MODERN,
+                };
+                super::r2o_group_record_confirmed(
+                    &mut catalog,
+                    &target,
+                    "plan-1",
+                    SHAPE_MODERN,
+                    path,
+                    ech_origin,
+                    2000,
+                )
+                .unwrap();
+            }
+            let state = catalog.domain_state.unwrap();
+            scenarios.push(json!({
+                "scenario": scenario,
+                "observations": state.observations.iter().map(|observation| json!({
+                    "name": observation.name,
+                    "plan_id": observation.plan_id,
+                    "transport": observation.key.transport,
+                    "family": observation.key.family,
+                    "shape": observation.key.shape,
+                    "probe_path": observation.key.probe_path,
+                    "ech_origin": observation.key.ech_origin,
+                    "evidence": observation.evidence,
+                    "at": observation.at,
+                })).collect::<Vec<_>>(),
+                "groups": state.groups.iter().map(|group| json!({
+                    "suffix": group.suffix,
+                    "plan_id": group.plan_id,
+                    "transport": group.key.transport,
+                    "family": group.key.family,
+                    "shape": group.key.shape,
+                    "probe_path": group.key.probe_path,
+                    "ech_origin": group.key.ech_origin,
+                    "evidence_count": group.evidence_count,
+                })).collect::<Vec<_>>(),
+            }));
+        }
+
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "budget.example".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let budgets = [0_u8, 1, 3, 2];
+        let mut catalog = Catalog {
+            boxes: vec![BoxRecord {
+                id: "box-1".into(),
+                bindings: budgets
+                    .iter()
+                    .map(|budget| Binding {
+                        kind: "name".into(),
+                        target: target.host.clone(),
+                        plan_id: "plan-1".into(),
+                        level: 3,
+                        enabled: true,
+                        transport: 6,
+                        family: 4,
+                        shape: SHAPE_MODERN,
+                        budget: *budget,
+                        ..Binding::default()
+                    })
+                    .collect(),
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        for (scenario, mark) in [
+            ("budget_cut", super::R2O_D2K_CAT_BUDGET_CUT),
+            ("budget_unchecked", super::R2O_D2K_CAT_BUDGET_UNCHECKED),
+            ("budget_passed", super::R2O_D2K_CAT_BUDGET_PASSED),
+        ] {
+            super::r2o_store_confirmed_budget(&mut catalog, &target, "plan-1", mark);
+            scenarios.push(json!({
+                "scenario": scenario,
+                "budgets": catalog.boxes[0].bindings.iter()
+                    .map(|binding| binding.budget).collect::<Vec<_>>(),
+            }));
+        }
+
+        let a = {
+            let mut id = [0_u8; 16];
+            id[0] = 1;
+            id
+        };
+        let b = {
+            let mut id = [0_u8; 16];
+            id[0] = 2;
+            id
+        };
+        let c = {
+            let mut id = [0_u8; 16];
+            id[0] = 3;
+            id
+        };
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "unfit.example".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let mut searches = super::R2oDiscoverySearches::default();
+        searches.note_unfit_plan(&target, a);
+        searches.note_unfit_plan(&target, b);
+        for (scenario, plan_id) in [("unfit_a_wire", &a), ("unfit_b_wire", &b)] {
+            assert!(searches.plan_unfit(&target, plan_id));
+            scenarios.push(json!({
+                "scenario": scenario,
+                "unfit": searches.plan_unfit(&target, plan_id),
+            }));
+        }
+        assert!(!searches.plan_unfit(&target, &c));
+        scenarios.push(json!({"scenario": "unfit_miss", "unfit": false}));
+        let mut zero = super::R2oDiscoverySearches::default();
+        zero.note_unfit_plan(&target, [0_u8; 16]);
+        assert!(!zero.plan_unfit(&target, &a));
+        scenarios.push(json!({"scenario": "unfit_zero_plan", "unfit": false}));
+
+        for (scenario, rx_cut) in [("net_rx_cut", true), ("net_tx_only", false)] {
+            let mut network = r2o_controller::catalog::NetworkWhitelist::default();
+            super::r2o_update_network_whitelist(
+                &mut network,
+                &super::R2oNetworkWhitelistUpdate {
+                    name: Some("9gag.com".into()),
+                    rx_cut,
+                },
+                2000,
+            );
+            scenarios.push(json!({
+                "scenario": scenario,
+                "network": {
+                    "name": network.name,
+                    "tx_only": network.tx_only,
+                    "searched": network.searched,
+                    "confirmed_at": network.confirmed_at.unwrap_or(0),
+                },
+            }));
+        }
+
+        if let Ok(path) = std::env::var("R2O_VERIFY_CONFIRM_DIFF_OUTPUT") {
+            std::fs::write(path, serde_json::to_string(&scenarios).unwrap()).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confirmed_budget_marks_follow_c_precedence() {
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "budget.example".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let plan_id = "55".repeat(16);
+        let mut catalog = Catalog {
+            boxes: vec![BoxRecord {
+                bindings: vec![
+                    Binding {
+                        kind: "name".into(),
+                        target: target.host.clone(),
+                        plan_id: plan_id.clone(),
+                        enabled: true,
+                        transport: 6,
+                        family: 4,
+                        shape: SHAPE_MODERN,
+                        ..Binding::default()
+                    },
+                    Binding {
+                        kind: "name".into(),
+                        target: target.host.clone(),
+                        plan_id: plan_id.clone(),
+                        enabled: true,
+                        transport: 6,
+                        family: 4,
+                        shape: SHAPE_MODERN,
+                        budget: super::R2O_D2K_CAT_BUDGET_PASSED,
+                        ..Binding::default()
+                    },
+                ],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        // CUT пишется только на пустую или уже CUT; PASSED не переписывает.
+        super::r2o_store_confirmed_budget(
+            &mut catalog,
+            &target,
+            &plan_id,
+            super::R2O_D2K_CAT_BUDGET_CUT,
+        );
+        assert_eq!(
+            catalog.boxes[0].bindings[0].budget,
+            super::R2O_D2K_CAT_BUDGET_CUT
+        );
+        assert_eq!(
+            catalog.boxes[0].bindings[1].budget,
+            super::R2O_D2K_CAT_BUDGET_PASSED
+        );
+        // PASSED сильнее всех и пишется всегда.
+        super::r2o_store_confirmed_budget(
+            &mut catalog,
+            &target,
+            &plan_id,
+            super::R2O_D2K_CAT_BUDGET_PASSED,
+        );
+        assert_eq!(
+            catalog.boxes[0].bindings[0].budget,
+            super::R2O_D2K_CAT_BUDGET_PASSED
+        );
+        // UNCHECKED не отменяет PASSED и не пишется поверх CUT.
+        super::r2o_store_confirmed_budget(
+            &mut catalog,
+            &target,
+            &plan_id,
+            super::R2O_D2K_CAT_BUDGET_UNCHECKED,
+        );
+        assert_eq!(
+            catalog.boxes[0].bindings[0].budget,
+            super::R2O_D2K_CAT_BUDGET_PASSED
+        );
+        catalog.boxes[0].bindings[0].budget = super::R2O_D2K_CAT_BUDGET_CUT;
+        super::r2o_store_confirmed_budget(
+            &mut catalog,
+            &target,
+            &plan_id,
+            super::R2O_D2K_CAT_BUDGET_UNCHECKED,
+        );
+        assert_eq!(
+            catalog.boxes[0].bindings[0].budget,
+            super::R2O_D2K_CAT_BUDGET_CUT
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn group_record_confirmed_uses_probe_path_and_registrable_suffix() {
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "media.example.com".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let mut catalog = Catalog::default();
+        let recorded = super::r2o_group_record_confirmed(
+            &mut catalog,
+            &target,
+            "plan-1",
+            SHAPE_MODERN,
+            "/main.css",
+            "",
+            100,
+        )
+        .unwrap();
+        assert!(recorded);
+        let state = catalog.domain_state.as_ref().unwrap();
+        assert_eq!(state.observations.len(), 1);
+        let observation = &state.observations[0];
+        assert_eq!(observation.name, "media.example.com");
+        assert_eq!(observation.plan_id, "plan-1");
+        assert_eq!(observation.evidence, 1);
+        assert_eq!(observation.key.transport, 6);
+        assert_eq!(observation.key.family, 4);
+        assert_eq!(observation.key.shape, SHAPE_MODERN);
+        assert_eq!(observation.key.probe_path, "/main.css");
+        // C `rebuild` создаёт группу только после трёх голосов; один обход
+        // остаётся наблюдением.
+        assert!(catalog.domain_state.as_ref().unwrap().groups.is_empty());
+        for name in ["a.example.com", "b.example.com"] {
+            let mut target = target.clone();
+            target.host = name.into();
+            super::r2o_group_record_confirmed(
+                &mut catalog,
+                &target,
+                "plan-1",
+                SHAPE_MODERN,
+                "/main.css",
+                "",
+                101,
+            )
+            .unwrap();
+        }
+        let state = catalog.domain_state.as_ref().unwrap();
+        assert_eq!(state.groups.len(), 1);
+        assert_eq!(state.groups[0].suffix, "example.com");
+        // Пустой измеренный путь в C `group_path` становится "/".
+        let mut no_path = Catalog::default();
+        super::r2o_group_record_confirmed(
+            &mut no_path,
+            &target,
+            "plan-1",
+            SHAPE_MODERN,
+            "",
+            "",
+            100,
+        )
+        .unwrap();
+        assert_eq!(
+            no_path.domain_state.unwrap().observations[0].key.probe_path,
+            "/"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unfit_plan_rejects_confirmation_like_c() {
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "unfit.example".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let plan_text = "r2o-plan 1 11\nid 00000000000000000000000000000000\nproto tcp tls\nsplit sni_middle +0\n";
+        let wire_id = super::r2o_plan_wire_id(plan_text).unwrap();
+        let mut searches = super::R2oDiscoverySearches::default();
+        searches.note_unfit_plan(&target, wire_id);
+        let outcome = super::DiscoveryOutcome {
+            target: target.clone(),
+            plan_text: Some(plan_text.into()),
+            detail: "кандидат подтверждён".into(),
+            queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
+            direct_clear: false,
+            volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
+            volume_fingerprint: None,
+            volume_box_id: None,
+            retry_after: None,
+        };
+        let rejected = super::r2o_confirm_discovery_outcome_checked(
+            outcome,
+            Ok(r2o_test_fetch_result()),
+            true,
+            &std::sync::Mutex::new(searches),
+        );
+        assert!(rejected.plan_text.is_none());
+        assert_eq!(
+            rejected.retry_after,
+            Some(super::R2O_DISCOVERY_FAILURE_RETRY)
+        );
+        assert!(rejected.detail.contains("FLOW_UNFIT"));
+
+        // Другой план не блокируется тем же списком.
+        let other = "r2o-plan 1 11\nid 11111111111111111111111111111111\nproto tcp tls\nsplit sni_middle +8\n";
+        let outcome = super::DiscoveryOutcome {
+            target,
+            plan_text: Some(other.into()),
+            detail: String::new(),
+            queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
+            direct_clear: false,
+            volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
+            volume_fingerprint: None,
+            volume_box_id: None,
+            retry_after: None,
+        };
+        let mut searches = super::R2oDiscoverySearches::default();
+        searches.note_unfit_plan(&outcome.target, super::r2o_plan_wire_id(plan_text).unwrap());
+        let accepted = super::r2o_confirm_discovery_outcome_checked(
+            outcome,
+            Ok(r2o_test_fetch_result()),
+            true,
+            &std::sync::Mutex::new(searches),
+        );
+        assert!(accepted.plan_text.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn yield_asking_stops_only_tasks_with_an_own_confirmed_plan() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        let tcp = r2o_controller::discovery::DiscoveryTarget {
+            host: "yield-tcp.example".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let quic = r2o_controller::discovery::DiscoveryTarget {
+            host: "yield-quic.example".into(),
+            endpoint: "198.51.100.81:443".into(),
+            family: 4,
+            shape: SHAPE_QUIC,
+        };
+        let tcp_key = super::r2o_discovery_task_key(&tcp);
+        let quic_key = super::r2o_discovery_task_key(&quic);
+        worker.active.insert(tcp_key.clone(), tcp.clone());
+        worker.active.insert(quic_key.clone(), quic.clone());
+        {
+            let mut searches = worker
+                .searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            searches.update(&tcp, "распознаём поведение", 0, 0, "", "");
+            searches.update(&quic, "распознаём поведение", 0, 0, "", "");
+        }
+        let tcp_cancel = Arc::new(AtomicBool::new(false));
+        let quic_cancel = Arc::new(AtomicBool::new(false));
+        {
+            let mut cancels = worker
+                .active_cancels
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            cancels.insert(tcp_key, Arc::clone(&tcp_cancel));
+            cancels.insert(quic_key, Arc::clone(&quic_cancel));
+        }
+        let catalog = Catalog {
+            boxes: vec![BoxRecord {
+                plans: vec![r2o_controller::catalog::Plan {
+                    id: "plan-yield".into(),
+                    proto: "tls".into(),
+                    text: "r2o-plan 1 11\nid 00000000000000000000000000000000\nproto tcp tls\nsplit sni_middle +0\n".into(),
+                    enabled: true,
+                    successes: 3,
+                    ..r2o_controller::catalog::Plan::default()
+                }],
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: "other.example".into(),
+                    plan_id: "plan-yield".into(),
+                    level: 3,
+                    enabled: true,
+                    transport: 6,
+                    family: 4,
+                    shape: SHAPE_MODERN,
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        worker.r2o_yield_asking_to_own_plan(&catalog);
+        assert!(tcp_cancel.load(Ordering::Relaxed));
+        assert!(!quic_cancel.load(Ordering::Relaxed));
+    }
+
     #[test]
     fn discovery_plan_shape_and_cached_shape_match_c() {
         assert_eq!(
@@ -27571,6 +28489,59 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn completed_outcome_keeps_client_tcp_timestamp_for_wire_shape() {
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "timestamp.example".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let key = super::r2o_discovery_task_key(&target);
+        worker
+            .client_tcp_timestamps
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key.clone(), true);
+        worker
+            .client_hellos
+            .lock()
+            .unwrap()
+            .insert(key.clone(), vec![1]);
+        let outcome = super::DiscoveryOutcome {
+            target: target.clone(),
+            plan_text: None,
+            detail: String::new(),
+            queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
+            direct_clear: false,
+            volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
+            volume_fingerprint: None,
+            volume_box_id: None,
+            retry_after: None,
+        };
+        worker.r2o_complete_outcome(outcome);
+        assert!(
+            worker
+                .client_tcp_timestamps
+                .lock()
+                .unwrap()
+                .get(&key)
+                .is_none()
+        );
+        assert_eq!(
+            worker.take_completed_client_timestamp(&target),
+            Some(Some(true))
+        );
+        assert_eq!(worker.take_completed_client_timestamp(&target), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn live_status_counts_session_confirmations_like_c() {
         let worker = r2o_test_discovery_worker_without_threads();
         let now = std::time::Instant::now();
@@ -27830,6 +28801,8 @@ mod tests {
                 address_recheck_probes: 0,
                 direct_clear: false,
                 volume_recovery: false,
+                budget_mark: 0,
+                group_block_proven: false,
                 volume_fingerprint: None,
                 volume_box_id: None,
                 retry_after: Some(Duration::from_millis(150)),
@@ -29563,6 +30536,7 @@ mod tests {
             client_tcp_timestamps: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            completed_timestamps: std::collections::HashMap::new(),
             recent_client_shapes: Arc::new(std::sync::Mutex::new(
                 super::R2oRecentClientShapeCache::default(),
             )),
@@ -29643,6 +30617,8 @@ mod tests {
             address_recheck_probes: 0,
             direct_clear,
             volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: Some(retry_after),
@@ -29837,6 +30813,8 @@ mod tests {
             address_recheck_probes: 0,
             direct_clear: true,
             volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: Some(std::time::Duration::from_secs(600)),
@@ -29897,6 +30875,8 @@ mod tests {
             address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -29956,6 +30936,8 @@ mod tests {
             address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: Some(super::R2O_DISCOVERY_INCOMPLETE_RETRY),
@@ -30282,6 +31264,8 @@ mod tests {
             address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: Some(super::R2O_DISCOVERY_INCOMPLETE_RETRY),
@@ -30786,6 +31770,8 @@ mod tests {
                 address_recheck_probes: 0,
                 direct_clear: false,
                 volume_recovery: false,
+                budget_mark: 0,
+                group_block_proven: false,
                 volume_fingerprint: None,
                 volume_box_id: None,
                 retry_after: None,
@@ -30916,6 +31902,8 @@ mod tests {
             address_recheck_probes: accepted_probes,
             direct_clear: false,
             volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -32512,6 +33500,8 @@ mod tests {
             address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -32876,6 +33866,8 @@ mod tests {
                 address_recheck_probes: 0,
                 direct_clear: true,
                 volume_recovery: false,
+                budget_mark: 0,
+                group_block_proven: false,
                 volume_fingerprint: None,
                 volume_box_id: None,
                 retry_after: None,
@@ -33793,6 +34785,8 @@ mod tests {
             address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
+budget_mark: 0,
+group_block_proven: false,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -33838,6 +34832,8 @@ mod tests {
             address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -33882,6 +34878,8 @@ mod tests {
             address_recheck_probes: 0,
             direct_clear: true,
             volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -34054,6 +35052,8 @@ mod tests {
             address_recheck_probes: 0,
             direct_clear: true,
             volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
             volume_fingerprint: Some(Default::default()),
             volume_box_id: Some("box".into()),
             retry_after: None,
@@ -37703,6 +38703,8 @@ mod tests {
             address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -37774,6 +38776,8 @@ mod tests {
             address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -37810,6 +38814,8 @@ mod tests {
             address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -37868,6 +38874,8 @@ mod tests {
             address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -38201,6 +39209,8 @@ mod tests {
                             address_recheck_probes: 0,
                             direct_clear: false,
                             volume_recovery: false,
+                            budget_mark: 0,
+                            group_block_proven: false,
                             volume_fingerprint: None,
                             volume_box_id: None,
                             retry_after: None,
@@ -38315,6 +39325,8 @@ mod tests {
                         address_recheck_probes: 0,
                         direct_clear: false,
                         volume_recovery: true,
+                        budget_mark: 0,
+                        group_block_proven: false,
                         volume_fingerprint: None,
                         volume_box_id: None,
                         retry_after: None,
@@ -38515,6 +39527,8 @@ mod tests {
                 address_recheck_probes: 0,
                 direct_clear: false,
                 volume_recovery: false,
+                budget_mark: 0,
+                group_block_proven: false,
                 volume_fingerprint: None,
                 volume_box_id: None,
                 retry_after: None,
@@ -38564,6 +39578,8 @@ mod tests {
                 address_recheck_probes: 0,
                 direct_clear: false,
                 volume_recovery: false,
+                budget_mark: 0,
+                group_block_proven: false,
                 volume_fingerprint: None,
                 volume_box_id: None,
                 retry_after: None,
@@ -39192,6 +40208,8 @@ mod tests {
             address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -39545,6 +40563,8 @@ mod tests {
                     address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
+                    budget_mark: 0,
+                    group_block_proven: false,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -39608,6 +40628,8 @@ mod tests {
                     address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
+                    budget_mark: 0,
+                    group_block_proven: false,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: Some(super::R2O_DISCOVERY_INCOMPLETE_RETRY),
@@ -39670,6 +40692,8 @@ mod tests {
                     address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
+                    budget_mark: 0,
+                    group_block_proven: false,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -39726,6 +40750,8 @@ mod tests {
                     address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
+                    budget_mark: 0,
+                    group_block_proven: false,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -39779,6 +40805,8 @@ mod tests {
                     address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
+                    budget_mark: 0,
+                    group_block_proven: false,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -39955,6 +40983,8 @@ mod tests {
                     address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
+                    budget_mark: 0,
+                    group_block_proven: false,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -40068,6 +41098,8 @@ mod tests {
                     address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
+                    budget_mark: 0,
+                    group_block_proven: false,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -40139,6 +41171,8 @@ mod tests {
                     address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
+                    budget_mark: 0,
+                    group_block_proven: false,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -40190,6 +41224,8 @@ mod tests {
                     address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
+                    budget_mark: 0,
+                    group_block_proven: false,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -40247,6 +41283,8 @@ mod tests {
                     address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
+                    budget_mark: 0,
+                    group_block_proven: false,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -40310,6 +41348,8 @@ mod tests {
                     address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
+                    budget_mark: 0,
+                    group_block_proven: false,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -40433,6 +41473,8 @@ mod tests {
                     address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
+                    budget_mark: 0,
+                    group_block_proven: false,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -40533,6 +41575,8 @@ mod tests {
                     address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
+                    budget_mark: 0,
+                    group_block_proven: false,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -40617,6 +41661,8 @@ mod tests {
                     address_recheck_probes: 0,
                     direct_clear: false,
                     volume_recovery: false,
+                    budget_mark: 0,
+                    group_block_proven: false,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -40773,6 +41819,8 @@ mod tests {
             address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -40820,6 +41868,8 @@ mod tests {
             address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -40952,6 +42002,8 @@ mod tests {
             address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: Some(retry_after),
@@ -41004,6 +42056,8 @@ mod tests {
                 address_recheck_probes: 0,
                 direct_clear: true,
                 volume_recovery: false,
+                budget_mark: 0,
+                group_block_proven: false,
                 volume_fingerprint: None,
                 volume_box_id: None,
                 retry_after: Some(Duration::from_secs(10 * 60)),
@@ -41056,6 +42110,8 @@ mod tests {
             address_recheck_probes: 0,
             direct_clear: false,
             volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: Some(super::R2O_DISCOVERY_TASK_LIFETIME),
@@ -41220,6 +42276,8 @@ mod tests {
             address_recheck_probes: 0,
             direct_clear: true,
             volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -41311,6 +42369,8 @@ mod tests {
             address_recheck_probes: 0,
             direct_clear: true,
             volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -41399,6 +42459,8 @@ mod tests {
                 address_recheck_probes: 0,
                 direct_clear: false,
                 volume_recovery: false,
+                budget_mark: 0,
+                group_block_proven: false,
                 volume_fingerprint: None,
                 volume_box_id: None,
                 retry_after: None,
@@ -43787,6 +44849,7 @@ mod tests {
             measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(64),
             client_hellos: Arc::new(Mutex::new(std::collections::HashMap::new())),
             client_tcp_timestamps: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            completed_timestamps: std::collections::HashMap::new(),
             recent_client_shapes: Arc::new(std::sync::Mutex::new(
                 super::R2oRecentClientShapeCache::default(),
             )),
