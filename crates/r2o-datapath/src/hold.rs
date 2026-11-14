@@ -235,6 +235,9 @@ pub struct HoldTable {
     stats: R2oHoldStats,
     http80: R2oHttp80Stats,
     owned_releases: Vec<Vec<u8>>,
+    /// C `release_original`: отпущенные сегменты сначала наблюдаются
+    /// (`d2k_session_observe_tcp`), затем возвращаются на провод.
+    observe_releases: Vec<Vec<u8>>,
 }
 
 impl HoldTable {
@@ -255,6 +258,12 @@ impl HoldTable {
     /// Take held originals that must be replayed through the raw socket on release.
     pub fn r2o_take_owned_releases(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.owned_releases)
+    }
+
+    /// C `release_original`: забрать отпущенные TCP-сегменты для
+    /// наблюдения без применения плана (`d2k_session_observe_tcp`).
+    pub fn r2o_take_observe_releases(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.observe_releases)
     }
 
     pub fn note_http_execution(&mut self, sequence: u32, event: &AppliedEvent) {
@@ -1433,6 +1442,9 @@ impl HoldTable {
     fn release_held_packets(&mut self, packets: Vec<HeldPacket>) -> Vec<u32> {
         let mut released = Vec::new();
         for packet in packets {
+            // C `release_original` наблюдает отпущенный оригинал до возврата
+            // на провод, и только потом решает, слать его raw-ом или ACCEPT.
+            self.observe_releases.push(packet.bytes.clone());
             if packet.owned {
                 self.owned_releases.push(packet.bytes);
             } else {
@@ -1901,6 +1913,26 @@ mod tests {
             Some(later + HOLD_WAIT),
             "после снятия первого слота остаётся второй"
         );
+    }
+
+    #[test]
+    fn hold_отпущенные_сегменты_попадают_в_наблюдение_как_release_original() {
+        let now = Instant::now();
+        let mut hold = HoldTable::default();
+        let syn = tcp_packet(1000, 0x02, &[]);
+        let _ = hold.feed(1, &syn, now, 0, true, false);
+        let hello = hello();
+        let first = tcp_packet(1001, 0x18, &hello[..5]);
+        assert_eq!(
+            hold.feed(2, &first, now, 0, true, false).outcome,
+            HoldOutcome::Waiting
+        );
+        let released = hold.flush(now + HOLD_WAIT, 0, false);
+        assert!(!released.is_empty());
+        let observed = hold.r2o_take_observe_releases();
+        assert_eq!(observed.len(), released.len());
+        assert_eq!(observed[0], first);
+        assert!(hold.r2o_take_observe_releases().is_empty());
     }
 
     #[test]

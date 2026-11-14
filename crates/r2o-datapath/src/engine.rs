@@ -495,6 +495,15 @@ impl TcpSessions {
         self.tcp_flow_refusals
     }
 
+    /// C `d2k_session_observe_tcp`: обработать отпущенный сегмент только для
+    /// наблюдения — без выбора/применения плана и без вердикта.
+    pub fn r2o_observe_tcp_packet(&mut self, packet: &[u8]) {
+        if !PacketView::parse(packet).is_some_and(|view| view.protocol == 6) {
+            return;
+        }
+        let _ = decide_with_session(self, &Plan::default(), packet);
+    }
+
     /// C `d2k_session_applied`: число применений плана к TCP-пакетам.
     pub fn session_applied(&self) -> u64 {
         self.session_applied
@@ -5284,6 +5293,36 @@ mod tests {
         assert!(!sessions.r2o_send_pending(&new_key, 41));
         assert!(!sessions.r2o_mark_damaged_for_execution(&new_key, 41));
         assert!(sessions.r2o_mark_plan_done_for_execution(&new_key, 43));
+    }
+
+    #[test]
+    #[ignore]
+    fn d2o_observe_tcp_trace() {
+        let mut sessions =
+            TcpSessions::try_with_capacity(R2oFlowCapacity::from_requested(64).unwrap()).unwrap();
+        fn run(name: &str, sessions: &mut TcpSessions, packet: &[u8]) {
+            sessions.r2o_observe_tcp_packet(packet);
+            let anchor = TcpFlowKey::from_packet(packet)
+                .and_then(|key| sessions.flows.get(&key))
+                .and_then(|session| session.capture_anchor)
+                .unwrap_or(0);
+            println!(
+                "{name} flows={} hello_flows={} applied={} done={} anchor={anchor}",
+                sessions.len(),
+                sessions.r2o_tcp_hello_flows(),
+                sessions.session_applied(),
+                sessions.session_done()
+            );
+        }
+        let client = ([192, 0, 2, 10], 50000);
+        let server = ([198, 51, 100, 20], 443);
+
+        run("A invalid", &mut sessions, &[0; 10]);
+        let syn = ipv4_tcp_packet(client, server, 0x02, 64, 1000, &[]);
+        run("B syn", &mut sessions, &syn);
+        let hello = ipv4_tcp_packet(client, server, 0x18, 64, 1001, &client_hello());
+        run("C hello", &mut sessions, &hello);
+        run("D udp", &mut sessions, &ipv4_udp(b"udp"));
     }
 
     #[test]

@@ -594,11 +594,12 @@ mod app {
         queue: &mut QueueSocket,
         raw: Option<&RawSocket>,
         holding: &mut HoldTable,
+        sessions: &mut TcpSessions,
         packet: Option<&[u8]>,
     ) {
         if let Some(packet) = packet {
             let ids = holding.r2o_release_damaged_flow(packet);
-            r2o_flush_owned_hold_releases(holding, raw);
+            r2o_flush_owned_hold_releases(holding, sessions, raw);
             release_accepting(queue, &ids);
         }
     }
@@ -1433,7 +1434,7 @@ mod app {
                 drain_queued(&mut socket, &mut batch, packet_type);
                 let released = holding.flush(Instant::now(), name_plans.revision(), true);
                 r2o_report_incomplete_captures(&mut holding);
-                r2o_flush_owned_hold_releases(&mut holding, raw.as_ref());
+                r2o_flush_owned_hold_releases(&mut holding, &mut tcp_sessions, raw.as_ref());
                 release_accepting(&mut socket, &released);
                 for (ticket, pending) in pending_udp_releases.drain() {
                     scheduled.cancel(ticket);
@@ -1460,6 +1461,7 @@ mod app {
                             &mut socket,
                             raw.as_ref(),
                             &mut holding,
+                            &mut tcp_sessions,
                             pending.r2o_tcp_packet.as_deref(),
                         );
                     }
@@ -1692,7 +1694,7 @@ mod app {
                     let failure_now = Instant::now();
                     let released = holding.flush(failure_now, name_plans.revision(), true);
                     r2o_report_incomplete_captures(&mut holding);
-                    r2o_flush_owned_hold_releases(&mut holding, raw.as_ref());
+                    r2o_flush_owned_hold_releases(&mut holding, &mut tcp_sessions, raw.as_ref());
                     release_accepting(&mut socket, &released);
                     r2o_release_udp_batches(
                         &mut socket,
@@ -1826,7 +1828,7 @@ mod app {
             let release_now = Instant::now();
             let released = holding.flush(release_now, name_plans.revision(), false);
             r2o_report_incomplete_captures(&mut holding);
-            r2o_flush_owned_hold_releases(&mut holding, raw.as_ref());
+            r2o_flush_owned_hold_releases(&mut holding, &mut tcp_sessions, raw.as_ref());
             release_accepting(&mut socket, &released);
             r2o_release_udp_batches(
                 &mut socket,
@@ -2123,7 +2125,11 @@ mod app {
                         let tcp_flow_damaged = tcp_sessions.r2o_is_damaged_packet(bytes);
                         if tcp_flow_damaged {
                             let released = holding.r2o_release_damaged_flow(bytes);
-                            r2o_flush_owned_hold_releases(&mut holding, raw.as_ref());
+                            r2o_flush_owned_hold_releases(
+                                &mut holding,
+                                &mut tcp_sessions,
+                                raw.as_ref(),
+                            );
                             release_accepting(&mut socket, &released);
                         }
                         let inspect_quic = observe_tls
@@ -2193,7 +2199,11 @@ mod app {
                             holding.feed_observing(packet_id, bytes, now, hold_options)
                         };
                         r2o_report_incomplete_captures(&mut holding);
-                        r2o_flush_owned_hold_releases(&mut holding, raw.as_ref());
+                        r2o_flush_owned_hold_releases(
+                            &mut holding,
+                            &mut tcp_sessions,
+                            raw.as_ref(),
+                        );
                         release_accepting(&mut socket, &fed.released);
                         match fed.outcome {
                             HoldOutcome::Pass => {
@@ -2748,6 +2758,7 @@ mod app {
                                                 &mut socket,
                                                 raw.as_ref(),
                                                 &mut holding,
+                                                &mut tcp_sessions,
                                                 tx_original,
                                             );
                                         }
@@ -3026,6 +3037,7 @@ mod app {
                                                 &mut socket,
                                                 raw.as_ref(),
                                                 &mut holding,
+                                                &mut tcp_sessions,
                                                 Some(tx_original),
                                             );
                                         }
@@ -4432,7 +4444,16 @@ mod app {
         }
     }
 
-    fn r2o_flush_owned_hold_releases(holding: &mut HoldTable, raw: Option<&RawSocket>) {
+    fn r2o_flush_owned_hold_releases(
+        holding: &mut HoldTable,
+        sessions: &mut TcpSessions,
+        raw: Option<&RawSocket>,
+    ) {
+        // C `release_original`: сначала наблюдение (route mark 0, без плана),
+        // затем возврат оригинала raw-ом либо ACCEPT вызывающего.
+        for packet in holding.r2o_take_observe_releases() {
+            sessions.r2o_observe_tcp_packet(&packet);
+        }
         let originals = holding.r2o_take_owned_releases();
         r2o_resend_owned_originals(raw, &originals);
     }
@@ -4783,6 +4804,7 @@ mod app {
                             queue,
                             raw,
                             holding,
+                            tcp_sessions,
                             pending.r2o_tcp_packet.as_deref(),
                         );
                     }
@@ -4823,6 +4845,7 @@ mod app {
                             queue,
                             Some(raw),
                             holding,
+                            tcp_sessions,
                             pending.r2o_tcp_packet.as_deref(),
                         );
                     }
@@ -4920,6 +4943,7 @@ mod app {
                         queue,
                         raw,
                         holding,
+                        tcp_sessions,
                         pending.r2o_tcp_packet.as_deref(),
                     );
                 }
