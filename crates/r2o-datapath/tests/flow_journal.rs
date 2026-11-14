@@ -675,3 +675,29 @@ fn журнал_сохраняет_все_типы_подозрений_r2o() {
         assert_eq!(entry.client_is_low, Some(body[KEY_LEN] == 1));
     }
 }
+
+#[test]
+fn журнал_пишет_невалидное_событие_байт_в_байт_как_c() {
+    let event = AppliedEvent {
+        key: [0; KEY_LEN],
+        plan_id: [0; 16],
+        trial_id: [0; 16],
+        execution_id: 0,
+        binding: BindingContext::default(),
+    };
+    let mut journal = R2oFlowJournal::with_capacity(8).unwrap();
+    assert!(journal.record_plan_prepared(1, &event));
+    assert!(journal.record_applied(2, &event));
+    assert!(journal.record_execution_failure(3, &event, 2, true));
+    assert_eq!(journal.count(), 4);
+    assert_eq!(
+        journal.get(0).unwrap().kind,
+        R2oFlowJournalKind::PlanApplied
+    );
+    assert_eq!(journal.get(1).unwrap().kind, R2oFlowJournalKind::PlanDone);
+    assert_eq!(journal.get(2).unwrap().kind, R2oFlowJournalKind::PlanUnsent);
+    assert_eq!(
+        journal.get(3).unwrap().kind,
+        R2oFlowJournalKind::PlanDamaged
+    );
+}

@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 342 | 58 | 0 | 0 |
+| datapath-core | 400 | 344 | 56 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1440** | **542** | **0** | **0** |
+| **Итого** | **1982** | **1442** | **540** | **0** | **0** |
 
-Это не оценка паритета: 542 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 540 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1440 / P 542 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1442 / P 540 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 342 | 58 | 0 | 0 |
+| datapath-core | 400 | 344 | 56 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1440** | **542** | **0** | **0** |
+| **Итого** | **1982** | **1442** | **540** | **0** | **0** |
 
 
 ---
@@ -4578,9 +4578,9 @@ execution/binding, added/dropped. R2O: `flow_journal.rs`.
 | `d2k_refuse_text` | 55-68 | 14 | 7 кодов REFUSE + default → русский текст | `flow_journal.rs:45-56 r2o_refuse_text` | **E** | **Точное совпадение:** C `NONE=0`…`FLOW_UNFIT=6`, default; Rust те же коды/тексты. Тест `:1027 journal_note_texts_match_d2o`. C: `NONE=0…FLOW_UNFIT=6`, иначе default; Rust те же тексты; тест `:1027`. |
 | `add_entry` (static) | 76-130 | 55 | `added++`; `cap=0` — не хранить; при переполнении `dropped++`; заполнить at/key/kind/code/num/detail/note; имя 0x20..0x7e иначе `.`, до 63; сдвиг head | `flow_journal.rs:565-581 push`, `:530-541 default_journal_note`, `:184-195 set_name` | **P** | **Ветви сверены:** C `!j` → NULL; `added++`; `cap==0` → NULL; `n==cap` → `dropped++`; слот `head`, `memset`; at, key (если есть), kind/code/num; detail: ttl/ref_ttl/tos/server_hello/planned/client_shape/ipid; `note = note ? note : (kind==SUSPECT ? suspect_text : NULL)`; имя: `take=min(len,63)`, каждый байт `0x20..0x7e` иначе `.`, NUL, `name_len`; `head=(head+1)%cap`, `n++` до cap; вернуть слот. Rust `push`: note по умолчанию заполняется не только для `Suspect`, но и для `PlanRefused/PlanUnsent/PlanDamaged` (`refuse_text`) и `PlanDone` («план доисполнен») — `default_journal_note`; `added` всегда, `cap=0` выход, `length==capacity` → dropped++, запись в `head`, сдвиг. `set_name` — те же 0x20..0x7e и 63. **Отличие:** C при `note=NULL` для не-SUSPECT оставляет note NULL, Rust подставляет текст; в C-пути эти виды всегда пишутся через функции с явным note, поэтому итог совпадает. |
 | `d2k_journal_add` | 132-137 | 6 | добавить наблюдение (kind/code/num/detail/name/note) | `flow_journal.rs:565-581 push` | **E*** | Тонкая обёртка `add_entry`; Rust `push` с теми же полями. Для `kind==SUSPECT` оба подставляют suspect-текст; для прочих C оставляет переданный note. |
-| `d2k_journal_add_applied` | 139-149 | 11 | `PLAN_APPLIED`, plan_id/trial_id байт-в-байт | `flow_journal.rs:667-682 record_plan_prepared` | **P** | **Совпадает:** kind `PlanApplied`, plan/trial копируются как двоичные 16 байт без санитизации, note не задаётся. **Отличие:** Rust `record_plan_prepared` требует валидное `event_body()` (длины/ключ/привязку) и возвращает `bool`; C пишет, если есть слот. |
+| `d2k_journal_add_applied` | 139-149 | 11 | `PLAN_APPLIED`, plan_id/trial_id байт-в-байт | `flow_journal.rs:667 record_plan_prepared` | **E*** | **Исправлено расхождение:** Rust больше не требует валидный `event_body()`; как C, копирует kind/plan/trial байт-в-байт. `record_control_event` по-прежнему декодирует APPLIED до записи. Тест `журнал_пишет_невалидное_событие_байт_в_байт_как_c` (нулевой ключ/plan/trial, execution=0 — запись состоялась). **Ограничение:** C принимает `plan_id==NULL`; Rust всегда передаёт 16 байт (нули). |
 | `d2k_journal_add_refused` | 151-158 | 8 | `PLAN_REFUSED`, code/plan/trial/note | `flow_journal.rs:684-720 record_plan_refused` | **P** | **Расхождение:** Rust принимает только `NOT_APPLIED`/`FLOW_UNFIT` и валидный ключ/привязку (`is_known`, family 4/6, shape≤HTTP, kind/proto); C пишет любой `code` (включая `NONE`) и не валидирует binding. Отказ `NONE` C попадает в журнал (кроме probe+`NONE` в `refuse_coded`), Rust — нет. D22 покрывает основные коды. |
-| `d2k_journal_add_fate_bound` | 160-176 | 17 | один kind за вызов (DONE/UNSENT/DAMAGED), note `refuse_text` для UNSENT/DAMAGED иначе «план доисполнен»; plan/trial/execution/binding | `flow_journal.rs:722-757 record_execution_failure`, `:650-665 record_applied` | **P** | **Совпадает:** за вызов один kind; note UNSENT/DAMAGED — `refuse_text(code)`, DONE — «план доисполнен»; plan/trial/execution/binding копируются. **Отличие:** C `d2k_session_exec_failed` делает два вызова (`UNSENT` + `fate_bound(DAMAGED)`), Rust `record_execution_failure` при `damaged` сам пишет `PlanUnsent`, затем `PlanDamaged` с кодом `DAMAGED` — итоговые две записи те же. `record_applied` соответствует C `PLAN_DONE`. |
+| `d2k_journal_add_fate_bound` | 160-176 | 17 | один kind за вызов (DONE/UNSENT/DAMAGED), note `refuse_text` для UNSENT/DAMAGED иначе «план доисполнен»; plan/trial/execution/binding | `flow_journal.rs:722 record_execution_failure`, `:650 record_applied` | **E*** | **Исправлено расхождение:** `record_applied`/`record_execution_failure` больше не требуют валидный `event_body()` и копируют контекст как C. Один вызов `record_execution_failure(damaged=true)` пишет UNSENT + DAMAGED с тем же execution/binding; note — `refuse_text`/«план доисполнен». Тест `журнал_пишет_невалидное_событие_байт_в_байт_как_c`. **Ограничение:** C `binding==NULL` пишет нулевую привязку, Rust всегда `Some(binding)`; production-события всегда имеют binding. |
 | `d2k_journal_add_fate` | 178-182 | 5 | обёртка `add_fate_bound(..., execution=0, binding=NULL)` | `flow_journal.rs:722-757`/`:650-665` | **P** | C-обёртка без execution/binding; Rust `record_applied`/`record_execution_failure` требуют `AppliedEvent` с execution/binding. Для DONE с `execution=0` C пишет запись, Rust с невалидным событием — нет. |
 | `d2k_journal_count` | 184-186 | 3 | число записей в кольце | `flow_journal.rs:990-992 count` | **E** | C-строка: `size_t d2k_journal_count(const d2k_journal *j){ return j ? j->n : 0; }`. Rust `self.length` — число записей (не capacity), растёт до `capacity`; те же значения при любом наполнении, тест `journal_count_matches_d2o`. |
 | `d2k_journal_at` | 188-196 | 9 | запись от старой к новой; `i>=n` → NULL | `flow_journal.rs:994-1004 get`, `:1014-1016 iter` | **E** | **Совпадает:** C `!j\|\|i>=n` → NULL; `start=(n==cap)?head:0`; `(start+i)%cap`. Rust `index>=length` → None; `start` тот же; `get`/`iter` идут от старой к новой. При `cap==0` оба возвращают None (C `n=0`). |

@@ -725,9 +725,8 @@ impl R2oFlowJournal {
     }
 
     pub fn record_applied(&mut self, at_ns: u64, event: &AppliedEvent) -> bool {
-        if event.event_body().is_none() {
-            return false;
-        }
+        // C `d2k_journal_add_fate_bound`: plan/trial/execution/binding
+        // пишутся байт-в-байт, без проверки события.
         self.push(R2oFlowJournalEntry {
             at_ns,
             execution_id: event.execution_id,
@@ -742,9 +741,7 @@ impl R2oFlowJournal {
     }
 
     pub fn record_plan_prepared(&mut self, at_ns: u64, event: &AppliedEvent) -> bool {
-        if event.event_body().is_none() {
-            return false;
-        }
+        // C `d2k_journal_add_applied`: plan/trial копируются без проверок.
         self.push(R2oFlowJournalEntry {
             at_ns,
             execution_id: event.execution_id,
@@ -803,9 +800,7 @@ impl R2oFlowJournal {
         code: u8,
         damaged: bool,
     ) -> bool {
-        if event.event_body().is_none() {
-            return false;
-        }
+        // C `d2k_journal_add_fate_bound`: без проверки события.
         self.push(R2oFlowJournalEntry {
             at_ns,
             execution_id: event.execution_id,
