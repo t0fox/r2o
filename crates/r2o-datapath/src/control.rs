@@ -513,6 +513,49 @@ impl NamePlans {
         self.select_with_quic_host_at_hook_probe(packet, quic_host, hook, false)
     }
 
+    /// Наблюдённая форма TCP ClientHello — ровно та же, что C кладёт в
+    /// `fl->client_shape` (`session.c:2306-2357`) и передаёт в выбор плана.
+    pub fn r2o_observed_tcp_shape(&self, packet: &[u8], controller_probe: bool) -> Option<u8> {
+        let view = PacketView::parse(packet)?;
+        if view.protocol != 6 {
+            return None;
+        }
+        let tcp = view.tcp_segment(packet)?;
+        let payload = packet.get(tcp.payload.clone())?;
+        let tls = r2k_core::tls::parse(payload);
+        if !tls.is_client_hello {
+            return None;
+        }
+        let sni = tls
+            .sni_range
+            .filter(|range| range.end <= payload.len())
+            .and_then(|range| payload.get(range));
+        let probe_port = if controller_probe { tcp.source_port } else { 0 };
+        let base_shape = if tls.ech_offer {
+            SHAPE_ECH_TCP
+        } else if tls.is_tls13 {
+            // C `session.c:2325-2334`: оборванный блок расширений при живом
+            // ECH-таргете не даёт объявлять MODERN.
+            let any_shape = tls.extensions_truncated
+                && sni.is_some_and(|sni| {
+                    self.has_ech_target(Some(sni), Some(view.dst), view.family, probe_port)
+                });
+            if any_shape { 0 } else { SHAPE_MODERN }
+        } else if tls.extensions_truncated {
+            // Признака нет, а блок оборван — формы не объявляем.
+            0
+        } else {
+            SHAPE_LEGACY
+        };
+        // D2O берёт TCP-профиль из самого ClientHello: при известном профиле
+        // форма переходит в контекст 8–13.
+        let tcp_profile = packet.get(tcp.options.clone()).map_or(
+            TCP_PROFILE_UNKNOWN,
+            PacketView::tcp_options_timestamp_profile,
+        );
+        Some(r2k_link_shape_tcp_context(base_shape, tcp_profile))
+    }
+
     /// То же, но с признаком управляющей пробы: C передаёт `probe_port` в
     /// `d2k_plantab_has_ech_target` только для `controller_probe`.
     pub fn select_with_quic_host_at_hook_probe(
@@ -636,30 +679,9 @@ impl NamePlans {
             .filter(|range| range.end <= payload.len())
             .and_then(|range| payload.get(range));
         let probe_port = if controller_probe { tcp.source_port } else { 0 };
-        let base_shape = if tls.ech_offer {
-            SHAPE_ECH_TCP
-        } else if tls.is_tls13 {
-            // C `session.c:2325-2334`: оборванный блок расширений при живом
-            // ECH-таргете не даёт объявлять MODERN.
-            let any_shape = tls.is_client_hello
-                && tls.extensions_truncated
-                && sni.is_some_and(|sni| {
-                    self.has_ech_target(Some(sni), Some(view.dst), view.family, probe_port)
-                });
-            if any_shape { 0 } else { SHAPE_MODERN }
-        } else if tls.is_client_hello && tls.extensions_truncated {
-            // Признака нет, а блок оборван — формы не объявляем.
-            0
-        } else {
-            SHAPE_LEGACY
-        };
-        // D2O берёт TCP-профиль из самого ClientHello: при известном профиле
-        // план ищется в контексте 8–13, иначе — в базовой форме 1/2/6.
-        let tcp_profile = packet.get(tcp.options.clone()).map_or(
-            TCP_PROFILE_UNKNOWN,
-            PacketView::tcp_options_timestamp_profile,
-        );
-        let shape = r2k_link_shape_tcp_context(base_shape, tcp_profile);
+        // Та же форма, что C сохраняет в `fl->client_shape` и отдаёт в
+        // журнале отказа: считается одним методом с выбором плана.
+        let shape = self.r2o_observed_tcp_shape(packet, controller_probe)?;
         // R2O-контроллер пока ставит планы в базовой форме 1/2/6, а D2O —
         // в контексте 8–13. Точный контекст имеет приоритет; базовая форма
         // остаётся совместимым мостом для уже установленных R2O-планов.
@@ -7123,11 +7145,25 @@ mod tests {
             plans.select(&hello).is_none(),
             "ECH-привязка при обрыве не даёт объявлять MODERN"
         );
+        assert_eq!(
+            plans.r2o_observed_tcp_shape(&hello, false),
+            Some(0),
+            "форма отказа при обрыве и ECH-таргете — ANY"
+        );
         assert_eq!(plans.select(&complete).map(|plan| plan.id), Some(modern));
+        assert_eq!(
+            plans.r2o_observed_tcp_shape(&complete, false),
+            Some(r2k_core::control::SHAPE_MODERN_NO_TS),
+            "полный hello без TCP timestamp — MODERN_NO_TS"
+        );
 
         let mut without_ech = NamePlans::with_capacity(64);
         r2o_set_name(&mut without_ech, "example.com", SHAPE_MODERN, modern);
         assert_eq!(without_ech.select(&hello).map(|plan| plan.id), Some(modern));
+        assert_eq!(
+            without_ech.r2o_observed_tcp_shape(&hello, false),
+            Some(r2k_core::control::SHAPE_MODERN_NO_TS)
+        );
 
         // Без признака TLS 1.3 оборванный блок тоже не объявляет LEGACY.
         let legacy = r2o_hello_packet(&{
@@ -7138,5 +7174,6 @@ mod tests {
         let mut legacy_plans = NamePlans::with_capacity(64);
         r2o_set_name(&mut legacy_plans, "example.com", SHAPE_LEGACY, [0x33; 16]);
         assert!(legacy_plans.select(&legacy).is_none());
+        assert_eq!(legacy_plans.r2o_observed_tcp_shape(&legacy, false), Some(0));
     }
 }

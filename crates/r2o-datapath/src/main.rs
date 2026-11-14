@@ -2306,6 +2306,16 @@ mod app {
                                         hello.shape_event_body(),
                                     );
                                 }
+                                r2o_note_tcp_no_plan_refusal(
+                                    &mut tcp_sessions,
+                                    &name_plans,
+                                    &mut control,
+                                    &mut flow_journal,
+                                    &journal_origin,
+                                    &packet,
+                                    global_plan_present,
+                                    controller_probe,
+                                );
                                 let decision = if options.mode == RuntimeMode::Observe {
                                     PacketDecision::Accept
                                 } else {
@@ -2381,6 +2391,16 @@ mod app {
                                         hello.shape_event_body(),
                                     );
                                 }
+                                r2o_note_tcp_no_plan_refusal(
+                                    &mut tcp_sessions,
+                                    &name_plans,
+                                    &mut control,
+                                    &mut flow_journal,
+                                    &journal_origin,
+                                    &packet,
+                                    global_plan_present,
+                                    controller_probe,
+                                );
                                 let decision = if options.mode == RuntimeMode::Observe {
                                     PacketDecision::Accept
                                 } else {
@@ -4422,6 +4442,55 @@ mod app {
         if let Err(error) = control.send_event(EVENT_APPLIED, &body) {
             eprintln!("r2o-datapath: событие APPLIED не отправлено: {error}");
         }
+    }
+
+    fn r2o_note_tcp_no_plan_refusal(
+        sessions: &mut TcpSessions,
+        plans: &NamePlans,
+        control: &mut Option<ControlServer>,
+        flow_journal: &mut R2oFlowJournal,
+        journal_origin: &Instant,
+        packet: &[u8],
+        global_plan_present: bool,
+        controller_probe: bool,
+    ) {
+        if controller_probe {
+            return;
+        }
+        let selected = plans.select_with_quic_host_probe(packet, None, false);
+        if selected.is_some() || global_plan_present {
+            return;
+        }
+        // Форма — та же, что у выбора плана: C пишет её в `client_shape`
+        // события REFUSED. Для оборванного ECH-hello это ANY (0).
+        let Some(shape) = plans.r2o_observed_tcp_shape(packet, false) else {
+            return;
+        };
+        if !sessions.r2o_mark_no_plan_refusal(packet) {
+            return;
+        }
+        let Some(note) = r2o_datapath::engine::r2o_tcp_no_plan_note(None, false, true) else {
+            return;
+        };
+        let Some(key) = r2o_datapath::control::flow_journal_key_for_packet(packet) else {
+            return;
+        };
+        let refused = RefusedEvent {
+            key,
+            code: r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_NONE,
+            plan_id: [0; 16],
+            trial_id: [0; 16],
+            client_shape: Some(shape),
+            execution_id: None,
+            binding: None,
+        };
+        send_refused_event(
+            control,
+            flow_journal,
+            journal_timestamp(journal_origin),
+            &refused,
+            Some(note),
+        );
     }
 
     fn send_refused_event(

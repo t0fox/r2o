@@ -170,6 +170,9 @@ struct TcpSession {
     /// C `fl->suspected`: подозрение уже учтено в общем счётчике.
     suspect_counted: bool,
     client_shape: u8,
+    /// C `session_packet`: отказ «плана для этой цели нет» уже сообщён по
+    /// первому ClientHello этого потока.
+    no_plan_refused: bool,
     hello_capture_done: bool,
     last_seen: Instant,
 }
@@ -238,6 +241,7 @@ impl TcpSession {
             r2o_reply_hidden_reported: false,
             suspect_counted: false,
             client_shape: 0,
+            no_plan_refused: false,
             hello_capture_done: false,
             last_seen: now,
         }
@@ -730,6 +734,42 @@ impl TcpSessions {
 
     pub fn r2o_tcp_rst_dropped(&self) -> u64 {
         self.r2o_tcp_rst_dropped
+    }
+
+    /// C `session_packet` (ветка `!use`): первый ClientHello потока без
+    /// плана. Возвращает наблюдённую форму для EVENT_REFUSED; повторный
+    /// вызов для того же потока — `None` (C `saw_hello`).
+    /// C `session_packet` (ветка `!use`): пометить, что отказ «плана для этой
+    /// цели нет» уже сообщён по первому ClientHello этого потока. Форму
+    /// считает `NamePlans::r2o_observed_tcp_shape`. Повторный вызов для того
+    /// же потока — `false` (C `saw_hello`).
+    pub fn r2o_mark_no_plan_refusal(&mut self, packet: &[u8]) -> bool {
+        let Some(view) = PacketView::parse(packet) else {
+            return false;
+        };
+        if view.protocol != 6 {
+            return false;
+        }
+        let Some(tcp) = view.tcp_segment(packet) else {
+            return false;
+        };
+        let Some(payload) = packet.get(tcp.payload) else {
+            return false;
+        };
+        if !r2k_core::tls::parse(payload).is_client_hello {
+            return false;
+        }
+        let Some(key) = TcpFlowKey::from_packet(packet) else {
+            return false;
+        };
+        let Some(session) = self.flows.get_mut(&key) else {
+            return false;
+        };
+        if session.no_plan_refused {
+            return false;
+        }
+        session.no_plan_refused = true;
+        true
     }
 
     pub fn take_tcp_exchange_events(&mut self) -> Vec<R2oTcpExchangeEvent> {
@@ -1970,6 +2010,17 @@ pub fn r2o_udp_no_plan_note(
     first_named_hello: bool,
 ) -> Option<&'static str> {
     (selected.is_none() && !global_plan_present && first_named_hello)
+        .then_some("плана для этой цели нет")
+}
+
+/// C `session_packet`: та же ветка `!use`, но для TCP ClientHello. `refuse`
+/// зовётся один раз на поток (C это даёт `saw_hello`).
+pub fn r2o_tcp_no_plan_note(
+    selected: Option<&Plan>,
+    global_plan_present: bool,
+    is_client_hello: bool,
+) -> Option<&'static str> {
+    (selected.is_none() && !global_plan_present && is_client_hello)
         .then_some("плана для этой цели нет")
 }
 
@@ -3700,6 +3751,121 @@ mod tests {
 
     #[test]
     #[ignore]
+    fn d2o_tcp_no_plan_trace() {
+        use crate::flow_journal::{R2O_JOURNAL_REFUSE_NONE, R2oFlowJournal};
+
+        fn hex16(bytes: &[u8; 16]) -> String {
+            let mut text = String::new();
+            for byte in bytes {
+                text.push_str(&format!("{byte:02x}"));
+            }
+            text
+        }
+        fn hello_packet(client: ([u8; 4], u16), server: ([u8; 4], u16), sequence: u32) -> Vec<u8> {
+            ipv4_tcp_packet(client, server, 0x18, 64, sequence, &client_hello_with_sni())
+        }
+        fn open_flow(
+            sessions: &mut TcpSessions,
+            start: Instant,
+            client: ([u8; 4], u16),
+            server: ([u8; 4], u16),
+            syn_sequence: u32,
+            server_sequence: u32,
+        ) {
+            sessions.track_packet(
+                &ipv4_tcp_packet(client, server, 0x02, 64, syn_sequence, &[]),
+                start,
+            );
+            sessions.track_packet(
+                &ipv4_tcp_packet(server, client, 0x12, 124, server_sequence, &[]),
+                start + Duration::from_millis(50),
+            );
+        }
+        fn report(name: &str, journal: &R2oFlowJournal, shape: Option<u8>, before: usize) {
+            let after = journal.count();
+            print!("{name} refusals={after}");
+            if after > before {
+                let refused = journal.get(after - 1);
+                print!(
+                    " code={} plan={} trial={} note={}",
+                    refused.map_or(255, |entry| entry.code),
+                    refused.map_or_else(String::new, |entry| hex16(&entry.plan_id)),
+                    refused.map_or_else(String::new, |entry| hex16(&entry.trial_id)),
+                    refused.and_then(|entry| entry.note).unwrap_or("-")
+                );
+                if let Some(shape) = shape {
+                    print!(" shape={shape}");
+                }
+            }
+            println!(" new={}", u8::from(after > before));
+        }
+        fn note() -> &'static str {
+            super::r2o_tcp_no_plan_note(None, false, true).unwrap()
+        }
+        fn record(
+            journal: &mut R2oFlowJournal,
+            at_ns: u64,
+            key: [u8; KEY_LEN],
+            note: &'static str,
+        ) {
+            journal.record_plan_refused_note(
+                at_ns,
+                key,
+                R2O_JOURNAL_REFUSE_NONE,
+                [0; 16],
+                [0; 16],
+                0,
+                None,
+                note,
+            );
+        }
+
+        let mut sessions = TcpSessions::default();
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        open_flow(&mut sessions, start, client, server, 700, 900);
+        let hello = hello_packet(client, server, 701);
+        sessions.track_packet(&hello, start + Duration::from_millis(100));
+
+        let plans = crate::control::NamePlans::with_capacity(16);
+        let mut journal = R2oFlowJournal::with_capacity(16).unwrap();
+        let shape = plans.r2o_observed_tcp_shape(&hello, false);
+        if shape.is_some() && sessions.r2o_mark_no_plan_refusal(&hello) {
+            let key = TcpFlowKey::from_packet(&hello).unwrap().wire_key();
+            record(&mut journal, 1, key, note());
+        }
+        report("T1 first", &journal, shape, 0);
+
+        let repeat = plans.r2o_observed_tcp_shape(&hello, false);
+        assert!(
+            !sessions.r2o_mark_no_plan_refusal(&hello),
+            "повтор hello не даёт второго отказа"
+        );
+        report("T2 repeat", &journal, repeat, 1);
+
+        let data = ipv4_tcp_packet(client, server, 0x18, 64, 702, b"x");
+        let after_data = plans.r2o_observed_tcp_shape(&data, false);
+        assert!(
+            !sessions.r2o_mark_no_plan_refusal(&data),
+            "данные не дают отказа"
+        );
+        report("T3 data", &journal, after_data, 1);
+
+        let other_client = ([192, 0, 2, 10], 41001);
+        open_flow(&mut sessions, start, other_client, server, 1700, 1900);
+        let other_hello = hello_packet(other_client, server, 1701);
+        sessions.track_packet(&other_hello, start + Duration::from_millis(200));
+        let other_shape = plans.r2o_observed_tcp_shape(&other_hello, false);
+        if other_shape.is_some() && sessions.r2o_mark_no_plan_refusal(&other_hello) {
+            let key = TcpFlowKey::from_packet(&other_hello).unwrap().wire_key();
+            record(&mut journal, 2, key, note());
+        }
+        report("T4 new-flow", &journal, other_shape, 1);
+    }
+
+    #[test]
+    #[ignore]
     fn d2o_ct_tcp_flow_trace() {
         fn setup() -> (TcpSessions, [u8; KEY_LEN], Instant) {
             let start = Instant::now();
@@ -3934,6 +4100,44 @@ mod tests {
             start + Duration::from_secs(6),
             info(12, 25, Some(3)),
             &mut suspicions,
+        );
+    }
+
+    #[test]
+    fn tcp_no_plan_note_повторяет_ворота_c() {
+        let plan = Plan::default();
+        assert_eq!(
+            super::r2o_tcp_no_plan_note(None, false, true),
+            Some("плана для этой цели нет")
+        );
+        assert_eq!(super::r2o_tcp_no_plan_note(None, false, false), None);
+        assert_eq!(super::r2o_tcp_no_plan_note(None, true, true), None);
+        assert_eq!(super::r2o_tcp_no_plan_note(Some(&plan), false, true), None);
+    }
+
+    #[test]
+    fn r2o_отказ_без_плана_пишется_один_раз_на_поток() {
+        let start = Instant::now();
+        let mut sessions = TcpSessions::default();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        sessions.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]), start);
+        let hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello_with_sni());
+        sessions.track_packet(&hello, start + Duration::from_millis(100));
+        assert!(sessions.r2o_mark_no_plan_refusal(&hello));
+        assert!(
+            !sessions.r2o_mark_no_plan_refusal(&hello),
+            "повтор hello не даёт второго отказа"
+        );
+        let data = ipv4_tcp_packet(client, server, 0x18, 64, 702, b"x");
+        assert!(!sessions.r2o_mark_no_plan_refusal(&data));
+        let other = ([192, 0, 2, 10], 41001);
+        sessions.track_packet(&ipv4_tcp_packet(other, server, 0x02, 64, 900, &[]), start);
+        let other_hello = ipv4_tcp_packet(other, server, 0x18, 64, 901, &client_hello_with_sni());
+        sessions.track_packet(&other_hello, start + Duration::from_millis(200));
+        assert!(
+            sessions.r2o_mark_no_plan_refusal(&other_hello),
+            "новый поток — новый отказ"
         );
     }
 
