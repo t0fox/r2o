@@ -1272,6 +1272,166 @@ mod tests {
     }
 
     #[test]
+    fn route_nl_differential_matches_c() {
+        fn hex(bytes: &[u8]) -> String {
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+        }
+        fn append(destination: &mut Vec<u8>, message: &[u8]) {
+            destination.extend_from_slice(message);
+        }
+
+        let mut output = String::new();
+        output.push_str(&format!(
+            "request rules_v4 {}\n",
+            hex(&r2o_route_rule_request(R2oRouteFamily::Ipv4, 7))
+        ));
+        output.push_str(&format!(
+            "request rules_v6 {}\n",
+            hex(&r2o_route_rule_request(R2oRouteFamily::Ipv6, 8))
+        ));
+        output.push_str(&format!(
+            "request lookup_v4 {}\n",
+            hex(&r2o_route_lookup_request(R2oRouteFamily::Ipv4, 9))
+        ));
+        output.push_str(&format!(
+            "request lookup_v6 {}\n",
+            hex(&r2o_route_lookup_request(R2oRouteFamily::Ipv6, 10))
+        ));
+
+        fn rule(mark: u32, mask: Option<u32>, flags: u32) -> Vec<u8> {
+            let mut body = vec![0; R2O_FIB_RULE_HEADER_LEN];
+            body[0] = 2;
+            body[8..12].copy_from_slice(&flags.to_ne_bytes());
+            r2o_test_attr(&mut body, R2O_FRA_FWMARK, &mark.to_ne_bytes());
+            if let Some(mask) = mask {
+                r2o_test_attr(&mut body, R2O_FRA_FWMASK, &mask.to_ne_bytes());
+            }
+            r2o_test_message(R2O_RTM_NEWRULE, &body)
+        }
+        fn print_rules(name: &str, bytes: &[u8], output: &mut String) {
+            let (rc, found, kerr) = match r2o_route_parse_rules(bytes) {
+                Ok(batch) => (i32::from(batch.done), batch.selectors, 0),
+                Err(R2oRouteParseError::Kernel(code)) => (-1, Vec::new(), code),
+                Err(R2oRouteParseError::Malformed) => (-1, Vec::new(), 0),
+            };
+            output.push_str(&format!(
+                "rules {name} rc={rc} n={} kerr={kerr}",
+                found.len()
+            ));
+            for (index, selector) in found.iter().take(2).enumerate() {
+                output.push_str(&format!(
+                    " mark{index}=0x{:x} mask{index}=0x{:x} family{index}={}",
+                    selector.mark,
+                    selector.mask,
+                    if selector.family == R2oRouteFamily::Ipv6 {
+                        10
+                    } else {
+                        2
+                    }
+                ));
+            }
+            output.push('\n');
+        }
+        fn print_lookup(name: &str, bytes: &[u8], output: &mut String) {
+            let (rc, ifindices, kerr) = match r2o_route_parse_lookup(bytes) {
+                Ok(R2oRouteLookup::Unicast(ifindices)) => (1, ifindices, 0),
+                Ok(R2oRouteLookup::NoRoute) => (2, Vec::new(), 0),
+                Ok(R2oRouteLookup::Pending) => (0, Vec::new(), 0),
+                Err(R2oRouteParseError::Kernel(code)) => (-1, Vec::new(), code),
+                Err(R2oRouteParseError::Malformed) => (-1, Vec::new(), 0),
+            };
+            let oifs = ifindices
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            output.push_str(&format!(
+                "lookup {name} rc={rc} n={} kerr={kerr} oifs={oifs}\n",
+                ifindices.len()
+            ));
+        }
+
+        let mut buffer = Vec::new();
+        append(&mut buffer, &rule(0x1234, Some(0xff00), 0));
+        append(&mut buffer, &rule(0x200, None, 0));
+        append(&mut buffer, &r2o_test_message(R2O_NLMSG_DONE, &[]));
+        print_rules("two", &buffer, &mut output);
+
+        let mut buffer = Vec::new();
+        append(&mut buffer, &rule(0x1234, Some(0), 0));
+        append(&mut buffer, &rule(0x500, Some(0xff), R2O_FIB_RULE_INVERT));
+        append(&mut buffer, &r2o_test_message(R2O_NLMSG_DONE, &[]));
+        print_rules("skip", &buffer, &mut output);
+
+        let buffer = rule(0x1234, Some(0xff00), 0);
+        print_rules("incomplete", &buffer, &mut output);
+        let error = r2o_test_message(R2O_NLMSG_ERROR, &(-22_i32).to_ne_bytes());
+        print_rules("error", &error, &mut output);
+
+        fn route_body(route_type: u8) -> Vec<u8> {
+            let mut body = vec![0; R2O_ROUTE_HEADER_LEN];
+            body[0] = 2;
+            body[7] = route_type;
+            body
+        }
+        let mut body = route_body(R2O_RTN_UNICAST);
+        r2o_test_attr(&mut body, R2O_RTA_OIF, &5_u32.to_ne_bytes());
+        let mut multipath = Vec::new();
+        r2o_test_hop(&mut multipath, 8);
+        r2o_test_hop(&mut multipath, 5);
+        r2o_test_hop(&mut multipath, 0);
+        r2o_test_attr(&mut body, R2O_RTA_MULTIPATH, &multipath);
+        let message = r2o_test_message(R2O_RTM_NEWROUTE, &body);
+        print_lookup("oif_multipath", &message, &mut output);
+
+        let message = r2o_test_message(R2O_RTM_NEWROUTE, &route_body(R2O_RTN_UNICAST));
+        print_lookup("no_device", &message, &mut output);
+        let message = r2o_test_message(R2O_RTM_NEWROUTE, &route_body(7));
+        print_lookup("unreachable", &message, &mut output);
+
+        let mut body = route_body(R2O_RTN_UNICAST);
+        let offset = body.len();
+        body.resize(offset + 8, 0);
+        body[offset..offset + 2].copy_from_slice(&4_u16.to_ne_bytes());
+        body[offset + 2..offset + 4].copy_from_slice(&R2O_RTA_MULTIPATH.to_ne_bytes());
+        let message = r2o_test_message(R2O_RTM_NEWROUTE, &body);
+        print_lookup("bad_multipath", &message, &mut output);
+
+        let error = r2o_test_message(R2O_NLMSG_ERROR, &(-101_i32).to_ne_bytes());
+        print_lookup("error", &error, &mut output);
+
+        let incomplete = r2o_test_message(R2O_RTM_NEWROUTE, &vec![0; 8]);
+        print_lookup("incomplete", &incomplete, &mut output);
+
+        let rule_message = r2o_test_message(R2O_RTM_NEWRULE, &[]);
+        output.push_str(&format!(
+            "watch rule={}\n",
+            u8::from(r2o_route_watch_relevant(&rule_message))
+        ));
+        let default_route = r2o_test_message(R2O_RTM_NEWROUTE, &route_body(R2O_RTN_UNICAST));
+        output.push_str(&format!(
+            "watch default_route={}\n",
+            u8::from(r2o_route_watch_relevant(&default_route))
+        ));
+        let mut other = route_body(R2O_RTN_UNICAST);
+        other[1] = 24;
+        let other_route = r2o_test_message(R2O_RTM_NEWROUTE, &other);
+        output.push_str(&format!(
+            "watch other_route={}\n",
+            u8::from(r2o_route_watch_relevant(&other_route))
+        ));
+        output.push_str(&format!(
+            "watch malformed={}\n",
+            u8::from(r2o_route_watch_relevant(&[0; 3]))
+        ));
+
+        if let Ok(path) = std::env::var("R2O_ROUTE_NL_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert!(output.contains("rules two rc=1 n=2"));
+    }
+
+    #[test]
     fn r2o_метки_fwmark_учитывают_маску_семейство_и_неизвестные_правила() {
         let mut gate = R2oRouteGate::default();
         assert!(gate.r2o_mark_is_routed(R2oRouteFamily::Ipv4, 0x1234));

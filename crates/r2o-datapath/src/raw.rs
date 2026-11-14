@@ -1260,6 +1260,69 @@ mod tests {
         assert_eq!(value, 1, "IP_NODEFRAG должен быть включён");
     }
 
+    fn тестовый_raw_сокет(declared: bool) -> super::RawSocket {
+        use std::cell::{Cell, RefCell};
+        use std::os::fd::{FromRawFd, OwnedFd};
+
+        let fd: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+        super::RawSocket {
+            fd,
+            family: libc::AF_INET,
+            mark: 0,
+            send_stats: Cell::new(super::RawSendStats::default()),
+            maxlen: Cell::new(super::r2o_pick_maxlen(None)),
+            maxlen_declared: declared,
+            egress_mtu: Cell::new(None),
+            route_mtu_cache: RefCell::new(super::R2oRouteMtuCache::default()),
+            fragment_fd: RefCell::new(None),
+        }
+    }
+
+    #[test]
+    fn raw_adopt_egress_differential_matches_c() {
+        let loopback = unsafe { libc::if_nametoindex(b"lo\0".as_ptr().cast()) };
+        assert_ne!(loopback, 0, "интерфейс lo отсутствует");
+
+        let mut output = String::new();
+        output.push_str(&format!("pick_null {}\n", super::r2o_pick_maxlen(None)));
+        output.push_str(&format!("pick_lo {}\n", super::r2o_pick_maxlen(Some("lo"))));
+
+        let socket = тестовый_raw_сокет(false);
+        let adopted = socket.r2o_adopt_egress(&[loopback]);
+        output.push_str(&format!(
+            "adopt_lo {} maxlen={} egress={}\n",
+            i32::from(adopted.is_some()),
+            socket.maxlen.get(),
+            socket.egress_mtu.get().unwrap_or(0)
+        ));
+        let again = socket.r2o_adopt_egress(&[loopback]);
+        output.push_str(&format!(
+            "adopt_lo_again {} maxlen={} egress={}\n",
+            i32::from(again.is_some()),
+            socket.maxlen.get(),
+            socket.egress_mtu.get().unwrap_or(0)
+        ));
+        let missing = socket.r2o_adopt_egress(&[0x7fff_fff0]);
+        output.push_str(&format!(
+            "adopt_missing {} maxlen={}\n",
+            if missing.is_some() { 1 } else { -1 },
+            socket.maxlen.get()
+        ));
+
+        let declared = тестовый_raw_сокет(true);
+        let refused = declared.r2o_adopt_egress(&[loopback]);
+        output.push_str(&format!(
+            "adopt_declared {} maxlen={}\n",
+            if refused.is_some() { 1 } else { -1 },
+            declared.maxlen.get()
+        ));
+
+        if let Ok(path) = std::env::var("R2O_RAW_ADOPT_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert!(output.contains("adopt_lo "));
+    }
+
     #[test]
     fn raw_fragment_differential_matches_c() {
         let scenario = std::env::var("FAKE_OPEN_SCENARIO").unwrap_or_else(|_| "ok".into());
