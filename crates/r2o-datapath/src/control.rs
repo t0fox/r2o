@@ -2728,13 +2728,14 @@ pub struct ControlServer {
     // терялся на занятом роутере: ARM_SHAPE приходил уже после того, как его
     // вытеснило приветствие другого клиента, и Discovery шёл без ClientHello.
     last_client_shapes: VecDeque<CachedClientShape>,
-    armed_client_shapes: [Option<Vec<u8>>; 2],
+    /// C `shape_armed[shape_slot(transport, family)]`: 4 слота
+    /// TCP/UDP × IPv4/IPv6.
+    armed_shapes: [Option<Vec<u8>>; 4],
     /// QUIC-снимки C `last_hello[shape_slot(17, family)]`: QSN-пачка
     /// совместима с `d2k_qsnap_pack`, а событие для v22 — `EV_SHAPE`.
     last_quic_shapes: VecDeque<CachedQuicShape>,
-    armed_quic_shapes: [Option<Vec<u8>>; 2],
     /// C `shape_opts[shape_slot(6,family)]`: TCP-опции клиента для формы TCP.
-    shape_tcp_options: [Option<Vec<u8>>; 2],
+    shape_tcp_options: [Option<Vec<u8>>; 4],
 }
 
 const CLIENT_SHAPE_CACHE_MAX: usize = 512;
@@ -2756,8 +2757,14 @@ struct CachedQuicShape {
     snapshot: Vec<u8>,
 }
 
-fn shape_family_slot(family: u8) -> usize {
-    usize::from(family == 6)
+/// C `slot_of`: всё, кроме UDP, — слот TCP.
+fn slot_of(transport: u8) -> usize {
+    usize::from(transport == 17)
+}
+
+/// C `shape_slot`: TCP4=0, UDP4=1, TCP6=2, UDP6=3.
+fn shape_slot(transport: u8, family: u8) -> usize {
+    slot_of(transport) + usize::from(family == 6) * 2
 }
 
 /// События, формат которых в v22 совпадает с R2O. Остальные номера v22
@@ -2850,10 +2857,9 @@ impl ControlServer {
             sent_events: 0,
             disconnect_hook: None,
             last_client_shapes: VecDeque::new(),
-            armed_client_shapes: [None, None],
+            armed_shapes: [None, None, None, None],
             last_quic_shapes: VecDeque::new(),
-            armed_quic_shapes: [None, None],
-            shape_tcp_options: [None, None],
+            shape_tcp_options: [None, None, None, None],
         })
     }
 
@@ -2902,7 +2908,7 @@ impl ControlServer {
             return None;
         }
         Some(
-            self.shape_tcp_options[shape_family_slot(family)]
+            self.shape_tcp_options[shape_slot(6, family)]
                 .as_deref()
                 .unwrap_or(&[]),
         )
@@ -2911,7 +2917,7 @@ impl ControlServer {
     /// Запомнить набор TCP-опций наблюдённого ClientHello (C `shape_opts[k]`).
     pub fn record_shape_tcp_options(&mut self, family: u8, options: &[u8]) {
         if matches!(family, 4 | 6) {
-            let slot = shape_family_slot(family);
+            let slot = shape_slot(6, family);
             self.shape_tcp_options[slot] = Some(options[..options.len().min(40)].to_vec());
         }
     }
@@ -3043,7 +3049,7 @@ impl ControlServer {
         let Ok(command) = decode_arm_shape(frame) else {
             return (Self::arm_ack(false, control::ACK_BAD_ARGS), None);
         };
-        let slot = shape_family_slot(command.family);
+        let slot = shape_slot(command.transport, command.family);
         match command.transport {
             6 => {
                 if let Some(position) = self.last_client_shapes.iter().position(|cached| {
@@ -3062,7 +3068,7 @@ impl ControlServer {
                         Some((control::EVENT_CLIENT_SHAPE, body)),
                     );
                 }
-                self.armed_client_shapes[slot] = Some(command.name);
+                self.armed_shapes[slot] = Some(command.name);
                 (Self::arm_ack(true, control::ACK_OK), None)
             }
             17 => {
@@ -3078,7 +3084,7 @@ impl ControlServer {
                     self.last_quic_shapes.push_back(cached);
                     return (Self::arm_ack(true, control::ACK_OK), Some(event));
                 }
-                self.armed_quic_shapes[slot] = Some(command.name);
+                self.armed_shapes[slot] = Some(command.name);
                 (Self::arm_ack(true, control::ACK_OK), None)
             }
             _ => (Self::arm_ack(false, control::ACK_BAD_ARGS), None),
@@ -3106,7 +3112,7 @@ impl ControlServer {
             body: body.to_vec(),
         })?;
         let family = event.key[0];
-        let slot = shape_family_slot(family);
+        let slot = shape_slot(6, family);
         if let Some(position) = self
             .last_client_shapes
             .iter()
@@ -3122,11 +3128,11 @@ impl ControlServer {
         while self.last_client_shapes.len() > CLIENT_SHAPE_CACHE_MAX {
             self.last_client_shapes.pop_front();
         }
-        if self.armed_client_shapes[slot]
+        if self.armed_shapes[slot]
             .as_ref()
             .is_some_and(|host| host.is_empty() || r2o_name_same(host, &event.host))
         {
-            self.armed_client_shapes[slot] = None;
+            self.armed_shapes[slot] = None;
             Ok(Some(body.to_vec()))
         } else {
             Ok(None)
@@ -3165,12 +3171,12 @@ impl ControlServer {
         while self.last_quic_shapes.len() > CLIENT_SHAPE_CACHE_MAX {
             self.last_quic_shapes.pop_front();
         }
-        let slot = shape_family_slot(family);
-        if self.armed_quic_shapes[slot]
+        let slot = shape_slot(17, family);
+        if self.armed_shapes[slot]
             .as_ref()
             .is_some_and(|host| host.is_empty() || r2o_name_same(host, &hello.host))
         {
-            self.armed_quic_shapes[slot] = None;
+            self.armed_shapes[slot] = None;
             if self.wire_profile == control::WireProfile::V22 {
                 let cached = self
                     .last_quic_shapes
@@ -3619,6 +3625,66 @@ mod tests {
             Some((EVENT_CLIENT_SHAPE, first.as_slice())),
             "снимок старой цели должен отдаваться из кэша, а не теряться"
         );
+
+        drop(server);
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn shape_slots_совпадают_с_c_и_независимы() {
+        assert_eq!(super::slot_of(6), 0);
+        assert_eq!(super::slot_of(17), 1);
+        assert_eq!(super::slot_of(0), 0);
+        assert_eq!(super::shape_slot(6, 4), 0);
+        assert_eq!(super::shape_slot(17, 4), 1);
+        assert_eq!(super::shape_slot(6, 6), 2);
+        assert_eq!(super::shape_slot(17, 6), 3);
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "r2o-control-shape-slots-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("control.sock");
+        let mut server = ControlServer::open(&path, u16::MAX as u32).unwrap();
+
+        for (transport, family, name) in [
+            (6_u8, 4_u8, b"tcp4".as_slice()),
+            (17, 4, b"udp4".as_slice()),
+            (6, 6, b"tcp6".as_slice()),
+            (17, 6, b"udp6".as_slice()),
+        ] {
+            let mut body = vec![name.len() as u8];
+            body.extend_from_slice(name);
+            body.extend_from_slice(&[transport, family]);
+            let (ack, cached) = server.arm_client_shape(&Frame {
+                kind: COMMAND_ARM_SHAPE,
+                body,
+            });
+            assert!(ack.ok, "ARM_SHAPE {transport}/{family}");
+            assert!(cached.is_none());
+        }
+        assert_eq!(server.armed_shapes[0].as_deref(), Some(b"tcp4".as_slice()));
+        assert_eq!(server.armed_shapes[1].as_deref(), Some(b"udp4".as_slice()));
+        assert_eq!(server.armed_shapes[2].as_deref(), Some(b"tcp6".as_slice()));
+        assert_eq!(server.armed_shapes[3].as_deref(), Some(b"udp6".as_slice()));
+
+        server.record_shape_tcp_options(4, &[2, 4, 1, 1]);
+        server.record_shape_tcp_options(6, &[2, 4, 8, 10]);
+        assert_eq!(
+            server.shape_tcp_options[0].as_deref(),
+            Some(&[2, 4, 1, 1][..])
+        );
+        assert!(server.shape_tcp_options[1].is_none());
+        assert_eq!(
+            server.shape_tcp_options[2].as_deref(),
+            Some(&[2, 4, 8, 10][..])
+        );
+        assert!(server.shape_tcp_options[3].is_none());
 
         drop(server);
         std::fs::remove_dir(&directory).unwrap();
