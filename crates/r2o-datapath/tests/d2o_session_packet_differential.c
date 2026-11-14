@@ -128,6 +128,57 @@ static size_t packet_with_payload(uint8_t *o, uint8_t flags, uint32_t sequence,
     return total;
 }
 
+
+static size_t plan_with_records(uint8_t *o, uint16_t minexec, uint16_t kind2,
+                                const uint8_t *r1, size_t n1,
+                                const uint8_t *r2, size_t n2) {
+    memcpy(o, "D2KP", 4);
+    wr16be(o + 4, 1);
+    wr16be(o + 6, minexec);
+    wr16be(o + 8, 0);
+    wr16be(o + 10, 2);
+    size_t off = 12;
+    off = put_tlv(o, off, 0x0002, r1, n1);
+    off = put_tlv(o, off, kind2, r2, n2);
+    return off;
+}
+
+static size_t build_guard_plan(uint8_t *o) {
+    static const uint8_t transport[] = {6, 1};
+    static const uint8_t guard[] = {1};
+    return plan_with_records(o, 0, 0x0104, transport, sizeof transport, guard, sizeof guard);
+}
+
+
+static size_t server_packet_with_payload(uint8_t *o, uint8_t flags,
+                                         uint32_t sequence, uint32_t acknowledgment,
+                                         uint8_t ttl, const uint8_t *payload,
+                                         size_t payload_len) {
+    size_t total = 40 + payload_len;
+    memset(o, 0, total);
+    o[0] = 0x45;
+    o[2] = (uint8_t)(total >> 8);
+    o[3] = (uint8_t)total;
+    o[8] = ttl;
+    o[9] = 6;
+    o[12] = 198; o[13] = 51; o[14] = 100; o[15] = 20;
+    o[16] = 192; o[17] = 0; o[18] = 2; o[19] = 10;
+    o[20] = 0x01; o[21] = 0xBB;
+    o[22] = 0xC3; o[23] = 0x50;
+    o[24] = (uint8_t)(sequence >> 24);
+    o[25] = (uint8_t)(sequence >> 16);
+    o[26] = (uint8_t)(sequence >> 8);
+    o[27] = (uint8_t)sequence;
+    o[28] = (uint8_t)(acknowledgment >> 24);
+    o[29] = (uint8_t)(acknowledgment >> 16);
+    o[30] = (uint8_t)(acknowledgment >> 8);
+    o[31] = (uint8_t)acknowledgment;
+    o[32] = 0x50;
+    o[33] = flags;
+    memcpy(o + 40, payload, payload_len);
+    return total;
+}
+
 static void plan_case(const char *name, d2k_session *session, const uint8_t *packet,
                       size_t length) {
     static uint8_t out[4096];
@@ -211,5 +262,26 @@ int main(void) {
         printf("K plan-hello load-error=%s\n", error);
         d2k_session_free(planned);
     }
+
+    d2k_session *guarded = d2k_session_new(64, 0);
+    plan = NULL;
+    plan_length = build_guard_plan(plan_buffer);
+    if (d2k_plan_load(plan_buffer, plan_length, &plan, error, sizeof error) == 0) {
+        d2k_session_set_plan(guarded, plan);
+        length = packet_with_payload(buffer, 0x02, 700, NULL, 0);
+        plan_case("L guard-syn", guarded, buffer, length);
+        length = server_packet_with_payload(buffer, 0x12, 900, 701, 124, NULL, 0);
+        plan_case("M guard-synack", guarded, buffer, length);
+        length = packet_with_payload(buffer, 0x18, 701, CLIENT_HELLO,
+                                     sizeof CLIENT_HELLO);
+        plan_case("N guard-hello", guarded, buffer, length);
+        length = server_packet_with_payload(buffer, 0x14, 900, 701, 127, NULL, 0);
+        plan_case("O guard-rst", guarded, buffer, length);
+        d2k_session_free(guarded);
+    } else {
+        printf("L guard-syn load-error=%s\n", error);
+        d2k_session_free(guarded);
+    }
+
     return 0;
 }

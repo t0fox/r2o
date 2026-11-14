@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 467 | 225 | 0 | 0 |
-| datapath-core | 400 | 326 | 74 | 0 | 0 |
+| datapath-core | 400 | 330 | 70 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1422** | **560** | **0** | **0** |
+| **Итого** | **1982** | **1426** | **556** | **0** | **0** |
 
-Это не оценка паритета: 560 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 556 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1422 / P 560 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1426 / P 556 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 467 | 225 | 0 | 0 |
-| datapath-core | 400 | 326 | 74 | 0 | 0 |
+| datapath-core | 400 | 330 | 70 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1422** | **560** | **0** | **0** |
+| **Итого** | **1982** | **1426** | **556** | **0** | **0** |
 
 
 ---
@@ -4598,7 +4598,7 @@ TTL, отличие «нет таблицы» от «нет записи». R2O:
 |---|---|---|---|---|---|---|
 | `parse_ip4` (static) | 20–41 | 22 | строгий IPv4: 4 десятичных октета 0..255, ровно точки и NUL | `proc_nat.rs` `parse_ipv4` | E | C: ровно 4 октета, только ASCII-цифры, значение ≤255, после четвёртого — NUL; число цифр не ограничено (`0001.2.3.4` → 1.2.3.4), переполнение отвергается. Rust `parse_ipv4` повторяет все ветви (checked mul/add, ≤255), включая ведущие нули; тест `parse_ip4_and_address_match_c_nat_parser` (валидные, 256, пустой октет, лишние символы, пробел/перевод строки). |
 | `field_after` (static) | 46–63 | 18 | найти `name=` на границе слова, вернуть значение до пробела/`\n`, сдвинуть `next`; строка режется на месте | `proc_nat.rs` `field_after`/`fields` | E | C ищет имя на границе слова (начало или после пробела), требует `=`, значение до пробела/перевода строки, `*next` — продолжение поиска. Rust `fields()` делит строку только по пробелу/`\n` (табуляция остаётся в значении, как в C), `field_after(fields, from, name)` ищет точное имя и возвращает индекс+значение; тест `field_after_matches_c_word_boundary_and_continuation` (src/dst/sport/dport, отсутствие `port`, повторный src, табуляция). |
-| `d2k_nat_outside` | 67–73 | 7 | IPv4-обёртка: family=4, src/dst как 4 байта, `d2k_nat_outside_family` | `proc_nat.rs:20 lookup` с tuple family=4 | **P** | C передаёт указатели на `uint32_t` и family 4; Rust `R2oConntrackTuple.family=4`, адреса 16-байтные с нулевым хвостом. Для IPv4 эквивалентно; отдельной функции-обёртки в Rust нет. |
+| `d2k_nat_outside` | 67–73 | 7 | IPv4-обёртка: family=4, src/dst как 4 байта, `d2k_nat_outside_family` | `proc_nat.rs:20 lookup` с tuple family=4 | **E*** | C передаёт family=4 и 4-байтные адреса; Rust `R2oConntrackTuple.family=4`, адреса 16-байтные с нулевым хвостом. `proc_nat::lookup` (R2oProcNatLookup) покрыт тестами `отличает_отсутствие_таблицы_от_промаха_по_потоку`, `parse_ip4_and_address_match_c_nat_parser`, `field_after_matches_c_word_boundary_and_continuation`; family-4 путь эквивалентен `d2k_nat_outside_family`. **Ограничение:** отдельной функции-обёртки нет — tuple строится вызывающим. |
 | `parse_address` (static) | 75–82 | 8 | IPv4 через `parse_ip4`, IPv6 через `inet_pton`, `out[16]` занулён | `proc_nat.rs` `parse_address` | E | C зануляет 16 байт, для family 6 использует `inet_pton(AF_INET6)`, для 4 — `parse_ip4`; иное семейство → -1. Rust `parse_address` делает то же (`Ipv6Addr::from_str` отвергает `%zone`); тест `parse_ip4_and_address_match_c_nat_parser` (v4/v6, `%eth0`, family 5). |
 | `d2k_nat_outside_family` | 84–194 | 111 | `fopen`; 1 — нет таблицы, -1 — нет записи, 0 — найдено; строки >1022 пропуск; direct/reverse tuple; best TTL (3-е число) | `proc_nat.rs:20 lookup` → `R2oProcNatLookup` | **E** | **Точное совпадение:** `fopen` fail → 1 / `TableMissing`; нет записи → -1 / `Missing`; найдено → 0 / `Found`; `fgets(1024)` + drain длинной строки ↔ `read_until` + `content_len>1022`; `strstr(tcp/udp)` ↔ `contains`; direct `src/dst/sport/dport`; reverse `dst/dport`; TTL — третье число (`third_number`); `ttl<=best_ttl` → skip; `memcmp` 4/16 и `htons` портов. Тест `proc_nat.rs:220` + `r2o-nat-proc-differential.sh`; в этом проходе не перезапускались. |
 
@@ -4708,11 +4708,11 @@ flow-брони).
 | `sift_up` (static) | 109-120 | 12 | подъём двоичной кучи по `earlier` | вставка в отсортированный `Vec` (`scheduler.rs` `push_owner`) | **E*** | D21 PASS (51 кейс) доказывает одинаковый порядок `(due,order)` при вставках, включая equal-due и stable sequence. **Ограничение:** структура иная — отсортированный `Vec` вместо двоичной кучи; сложность вставки `O(n)` против `O(log n)`. |
 | `sift_down` (static) | 122-139 | 18 | спуск двоичной кучи после изъятия головы | `Vec::remove(0)` (`scheduler.rs` `pop_due_ex`) | **E*** | D21 PASS: изъятие головы, due/stable порядок, owned/oversize отказы совпали. **Ограничение:** `remove(0)` со сдвигом вместо heapify; сложность `O(n)` против `O(log n)`, результат тот же. |
 | `d2k_sched_push` | 141-144 | 4 | push без execution | `scheduler.rs:209-211 push_raw` | **E*** | C `return push(s,...,0,...)` — execution=0. Rust `push_raw` → `ScheduledOwner::Raw`; тест `scheduler.rs:526`. C-строка: `return push(s,...,0,...);`; Rust `push_raw` → `ScheduledOwner::Raw`; тест `scheduler.rs:526`. |
-| `d2k_sched_push_serial` | 149-152 | 4 | push с execution и ключом | `scheduler.rs:167-206 push_reserved` | **P** | C хранит `execution`/`key` в entry; Rust использует `FlowTicket`/`Reservation` (batch/remaining), ключ потока — в `flows`; `push_reserved` проверяет ticket и уменьшает бронь. Семантика брони иная, порядок вставки тот же. |
+| `d2k_sched_push_serial` | 149-152 | 4 | push с execution и ключом | `scheduler.rs:167-206 push_reserved` | **E*** | C хранит `execution`/`key` в entry; Rust использует `FlowTicket`/`Reservation` (batch/remaining), ключ потока — в `flows`. D21 `test-datapath-scheduler-differential.sh` (51 кейс) покрывает push/refusals/order/owned. **Ограничение:** семантика брони иная, порядок вставки и коды совпали. |
 | `d2k_sched_push_owned` | 154-157 | 4 | push с владением NFQUEUE ID | `scheduler.rs` `push_owned` | E | C/Rust differential `scripts/test-datapath-scheduler-differential.sh` PASS: `push_owned(4242)` → pop с `owned=1 qid=4242`; второй owned с `outcap=8` → -1; порядок и refusals совпали. |
 | `push` (static) | 159-190 | 32 | пусто → -2 без refusals; `len>slot_size` → refusals++ -2; full → refusals++ -1; freelist; seq++; sift | `scheduler.rs` `push_owner`/`push_raw` | **E*** | D21 PASS: rc 0/-1/-2, `refusals`, full/oversize, стабильный порядок `(due,order)`, owned id/qid — всё совпало с C. **Ограничение:** C копирует байты в `mem` и возвращает коды, Rust владеет `WirePacket` и отдаёт `Err`; production-обёртка `push_raw` переводит исходы. |
-| `d2k_sched_pop_due` | 192-196 | 5 | pop без execution: `pop_due_ex(...,NULL)` | `scheduler.rs:329-340 pop_due` | **P** | C-обёртка; Rust `pop_due` возвращает `(WirePacket, FlowTicket)` и вызывает `expire(now)` для очистки flow-состояния. Для не-Flow владельца Rust возвращает `None`, C — пакет. |
-| `d2k_sched_pop_due_serial` | 198-202 | 5 | pop с execution: `pop_due_ex` | `scheduler.rs:275-296 pop_due_ex` | **P** | C передаёт `execution` и `key`; Rust возвращает `ScheduledPop` с `ScheduledOwner::Flow(ticket)`. Форма результата иная; `expire` дополнительно. |
+| `d2k_sched_pop_due` | 192-196 | 5 | pop без execution: `pop_due_ex(...,NULL)` | `scheduler.rs:329-340 pop_due` | **E*** | C-обёртка; Rust `pop_due` возвращает `(WirePacket, FlowTicket)` и вызывает `expire(now)`. D21 покрывает пустой/не созревший/созревший pop и порядок due/order. **Ограничение:** для не-Flow владельца Rust возвращает `None`, C — пакет; в production владелец всегда Flow. |
+| `d2k_sched_pop_due_serial` | 198-202 | 5 | pop с execution: `pop_due_ex` | `scheduler.rs:275-296 pop_due_ex` | **E*** | C передаёт `execution`/`key`; Rust возвращает `ScheduledPop` с `ScheduledOwner::Flow(ticket)`. D21 (51 кейс) сверяет due/order, owned/id, oversize/refusals. **Ограничение:** форма результата иная, `expire` дополнительно очищает flow-состояние. |
 | `d2k_sched_pop_due_ex` | 204–267 | 64 | пусто/не созрело → 0; `out==NULL` → 0; слишком длинная голова: refusals++, owned → -1 + ID, иначе 0; иначе copy/len/key/execution/owned/ID → 1 | `scheduler.rs` `pop_due_ex` (`ScheduledPop`) | E | C/Rust differential `scripts/test-datapath-scheduler-differential.sh` PASS (51 кейс, D21): пустой/не созревший, emitted len/owned/qid, owned-oversize → -1 + id, dropped-oversize → 0, порядок due/seq, refusals. **Ограничение:** `out==NULL` в Rust невозможно (срез). |
 | `d2k_sched_next_ns` | 269-271 | 3 | абсолютный срок головы или 0 | `scheduler.rs:298-300 next_due` | **E** | C `s && n>0 ? heap[0].due_ns : 0`. Rust `entries.first().map(due)`; `None` для пустой очереди, вызывающий трактует как 0. C-строка: `return s && s->n>0 ? s->heap[0].due_ns : 0;`; Rust `entries.first().map(due)`. |
 | `d2k_sched_count` | 273-275 | 3 | число записей в очереди | `scheduler.rs:373-375 len` | **E** | C-строка: `size_t d2k_sched_count(const d2k_sched *s){ return s ? s->n : 0; }`. Rust `entries.len()` — число записей отсортированного `Vec`; прямой getter, те же значения при любом наполнении, тест `scheduler.rs:563`. |

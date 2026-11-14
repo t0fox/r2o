@@ -5395,33 +5395,73 @@ mod tests {
         let value = feed(&mut sessions, &plan, &data_existing);
         print("I data-existing", &sessions, value);
 
-        fn print_plan(name: &str, decision: &PacketDecision) {
-            match decision {
-                PacketDecision::Transmit { packets, fate } => {
-                    print!(
-                        "{name} applied=1 verdict={} n={} lens=",
-                        u8::from(*fate == OriginalFate::Drop),
-                        packets.len()
-                    );
-                    for (index, packet) in packets.iter().enumerate() {
-                        if index != 0 {
-                            print!(",");
-                        }
-                        print!("{}", packet.packet.len());
-                    }
-                    println!();
+        fn print_plan(name: &str, decision: &PacketDecision, applied: bool) {
+            let verdict = match decision {
+                PacketDecision::Drop => 1,
+                PacketDecision::Transmit { fate, .. } => u8::from(*fate == OriginalFate::Drop),
+                _ => 0,
+            };
+            let packets = match decision {
+                PacketDecision::Transmit { packets, .. } => packets.as_slice(),
+                _ => &[],
+            };
+            print!(
+                "{name} applied={} verdict={verdict} n={} lens=",
+                u8::from(applied),
+                packets.len()
+            );
+            for (index, packet) in packets.iter().enumerate() {
+                if index != 0 {
+                    print!(",");
                 }
-                _ => println!("{name} applied=0 verdict=0 n=0 lens="),
+                print!("{}", packet.packet.len());
             }
+            println!();
         }
         let fake_plan = tcp_fake_plan();
         let mut planned = TcpSessions::default();
         let syn = ipv4_tcp_packet(client, server, 0x02, 64, 1000, &[]);
+        let before = planned.session_applied();
         let decision = decide_with_session(&mut planned, &fake_plan, &syn);
-        print_plan("J plan-syn", &decision);
+        print_plan("J plan-syn", &decision, planned.session_applied() > before);
         let hello_packet = ipv4_tcp_packet(client, server, 0x18, 64, 1001, &client_hello());
+        let before = planned.session_applied();
         let decision = decide_with_session(&mut planned, &fake_plan, &hello_packet);
-        print_plan("K plan-hello", &decision);
+        print_plan(
+            "K plan-hello",
+            &decision,
+            planned.session_applied() > before,
+        );
+
+        let guard_plan = tcp_guard_only_plan();
+        let mut guarded = TcpSessions::default();
+        let syn = ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]);
+        let before = guarded.session_applied();
+        let decision = decide_with_session(&mut guarded, &guard_plan, &syn);
+        print_plan("L guard-syn", &decision, guarded.session_applied() > before);
+        let mut synack = ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]);
+        synack[28..32].copy_from_slice(&701_u32.to_be_bytes());
+        let before = guarded.session_applied();
+        let decision = decide_with_session(&mut guarded, &guard_plan, &synack);
+        print_plan(
+            "M guard-synack",
+            &decision,
+            guarded.session_applied() > before,
+        );
+        let mut guard_hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello());
+        guard_hello[28..32].copy_from_slice(&900_u32.to_be_bytes());
+        let before = guarded.session_applied();
+        let decision = decide_with_session(&mut guarded, &guard_plan, &guard_hello);
+        print_plan(
+            "N guard-hello",
+            &decision,
+            guarded.session_applied() > before,
+        );
+        let mut forged = ipv4_tcp_packet(server, client, 0x14, 127, 900, &[]);
+        forged[28..32].copy_from_slice(&701_u32.to_be_bytes());
+        let before = guarded.session_applied();
+        let decision = decide_with_session(&mut guarded, &guard_plan, &forged);
+        print_plan("O guard-rst", &decision, guarded.session_applied() > before);
     }
 
     #[test]
