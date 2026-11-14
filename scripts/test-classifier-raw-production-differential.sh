@@ -1,6 +1,19 @@
 #!/bin/sh
 set -eu
 
+# Сырой путь требует CAP_NET_RAW/CAP_NET_ADMIN и отдельного netns. Без
+# root-прав то же даёт user namespace: внутри него доступны свои netns,
+# nft и raw-сокеты, а хостовые таблицы не затрагиваются.
+if [ "$(id -u)" -ne 0 ] && [ "${R2O_RAW_IN_USERNS:-0}" != 1 ] &&
+    command -v unshare >/dev/null 2>&1; then
+    export R2O_RAW_IN_USERNS=1
+    exec unshare -Urnm sh -c '
+        mount -t tmpfs tmpfs /run 2>/dev/null || true
+        mkdir -p /run/netns 2>/dev/null || true
+        exec sh "$1"
+    ' sh "$0"
+fi
+
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 D2O_ROOT=${R2O_DONOR_ROOT:-${ROOT%/r2o}/d2o}
 EXPECTED_D2O_SHA=a378e230947ebfd011439e1cac0f1e994d883aae
