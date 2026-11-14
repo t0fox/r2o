@@ -72,6 +72,34 @@ static void run(const char *name, uint8_t proto, int first, int synack,
            calls);
 }
 
+static void run_table_missing_permanent(void) {
+    d2k_flow flow;
+    memset(&flow, 0, sizeof flow);
+    d2k_conn conn;
+    memset(&conn, 0, sizeof conn);
+    conn.family = 4;
+    conn.src_ip = 0x0a000001u;
+    conn.dst_ip = 0xcb007102u;
+    conn.src_port = htons(40000);
+    conn.dst_port = htons(443);
+    g_nat_ok = g_nat_miss = g_nat_none = g_nat_retried = 0;
+    plan[0] = 1;
+    plan_len = 1;
+    plan_at = 0;
+    calls = 0;
+    int rc1 = flow_tracked(&flow, &conn, 17, 0);
+    /* nat_state=3: повторный вызов не читает таблицу и не сбрасывается. */
+    plan[0] = -1;
+    plan_at = 0;
+    int rc2 = flow_tracked(&flow, &conn, 17, 0);
+    printf("table_missing_permanent rc1=%d rc2=%d state=%u ok=%llu miss=%llu "
+           "none=%llu retried=%llu calls=%d\n",
+           rc1, rc2, (unsigned)flow.nat_state,
+           (unsigned long long)g_nat_ok, (unsigned long long)g_nat_miss,
+           (unsigned long long)g_nat_none, (unsigned long long)g_nat_retried,
+           calls);
+}
+
 int main(void) {
     d2k_nat_hook = fake_nat;
     d2k_nat_family_hook = fake_nat6;
@@ -87,5 +115,6 @@ int main(void) {
     run("preset_no_table", 17, 0, 0, 3, (const int[]){-1}, 1);
     run("first_with_known", 17, 1, 0, 1, (const int[]){-1}, 1);
     run("tcp_retry", 6, 0, 0, 0, (const int[]){-1, 0}, 2);
+    run_table_missing_permanent();
     return 0;
 }

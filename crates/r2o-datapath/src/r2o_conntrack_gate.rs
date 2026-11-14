@@ -49,7 +49,7 @@ impl R2oFlowKey {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum CachedStatus {
     Tracked,
     NoConntrackTable,
@@ -106,8 +106,10 @@ impl R2oConntrackGate {
         now: Instant,
         query: &mut impl FnMut(&R2oConntrackTuple) -> R2oProcNatLookup,
     ) -> Confirmation {
-        self.entries
-            .retain(|_, cached| now.saturating_duration_since(cached.seen) < self.idle_timeout);
+        self.entries.retain(|_, cached| {
+            cached.status == CachedStatus::NoConntrackTable
+                || now.saturating_duration_since(cached.seen) < self.idle_timeout
+        });
         let key = R2oFlowKey::r2o_from_tuple(tuple);
         if let Some(cached) = self.entries.get_mut(&key) {
             cached.seen = now;
@@ -116,6 +118,9 @@ impl R2oConntrackGate {
                 CachedStatus::NoConntrackTable => Confirmation::NoConntrackTable,
             };
         }
+        // C `session_packet` всегда передаёт first_packet=0 для TCP; API
+        // остаётся безопасным, даже если вызывающий передаст 1.
+        let first_packet = first_packet && tuple.protocol == 17;
         if first_packet {
             return Confirmation::FirstPacket;
         }
@@ -167,6 +172,39 @@ impl R2oConntrackGate {
             }
         }
         self.entries.insert(key, CachedEntry { status, seen: now });
+    }
+
+    /// C `flow_tracked` ДО `plan_apply`: `false` — план нельзя применять
+    /// (`-1`), оригинал должен пройти как есть.
+    pub fn r2o_preflight(
+        &mut self,
+        packet: &[u8],
+        first_packet: bool,
+        tcp_syn_ack_seen: bool,
+    ) -> bool {
+        self.r2o_preflight_with_lookup(packet, first_packet, tcp_syn_ack_seen, |tuple| {
+            crate::proc_nat::lookup(Path::new(D2O_CONNTRACK_PATH), tuple)
+        })
+    }
+
+    /// То же с подставляемым procfs-lookup для unit-тестов.
+    pub fn r2o_preflight_with_lookup(
+        &mut self,
+        packet: &[u8],
+        first_packet: bool,
+        tcp_syn_ack_seen: bool,
+        mut lookup: impl FnMut(&R2oConntrackTuple) -> R2oProcNatLookup,
+    ) -> bool {
+        let Some(tuple) = tuple_from_packet(packet) else {
+            return true;
+        };
+        self.confirm(
+            tuple,
+            first_packet,
+            tcp_syn_ack_seen,
+            Instant::now(),
+            &mut lookup,
+        ) != Confirmation::Missing
     }
 }
 
@@ -453,6 +491,43 @@ mod tests {
     }
 
     #[test]
+    fn отсутствие_таблицы_не_истекает_как_nat_state_3_c() {
+        let mut gate = R2oConntrackGate::with_idle_timeout(4, std::time::Duration::from_secs(120));
+        let now = Instant::now();
+        assert_eq!(
+            gate.confirm(tuple(17), false, false, now, &mut |_| {
+                R2oProcNatLookup::TableMissing
+            }),
+            Confirmation::NoConntrackTable
+        );
+        // C nat_state=3 не сбрасывается по времени; запись потока живёт до
+        // собственного истечения/вытеснения, а не 120 с NAT-кеша.
+        assert_eq!(
+            gate.confirm(
+                tuple(17),
+                false,
+                false,
+                now + std::time::Duration::from_secs(121),
+                &mut |_| panic!("nat_state=3 должен остаться навсегда")
+            ),
+            Confirmation::NoConntrackTable
+        );
+        assert_eq!(gate.nat_stats(), (0, 0, 1, 0));
+    }
+
+    #[test]
+    fn tcp_первый_пакет_не_получает_исключение_как_c() {
+        let mut gate = R2oConntrackGate::with_capacity(4);
+        assert_eq!(
+            gate.confirm(tuple(6), true, false, Instant::now(), &mut |_| {
+                R2oProcNatLookup::Missing
+            }),
+            Confirmation::Missing
+        );
+        assert_eq!(gate.nat_stats(), (0, 1, 0, 0));
+    }
+
+    #[test]
     fn flow_tracked_differential_matches_c() {
         use super::{CachedEntry, CachedStatus, R2oFlowKey};
         use std::time::Instant;
@@ -588,6 +663,27 @@ mod tests {
             &[missing, found()],
             &mut output,
         );
+
+        // C nat_state=3: table-missing не истекает по времени NAT-кеша.
+        let mut gate = R2oConntrackGate::with_idle_timeout(4, std::time::Duration::from_secs(120));
+        let now = Instant::now();
+        let first = gate.confirm(tuple(17), false, false, now, &mut |_| {
+            R2oProcNatLookup::TableMissing
+        });
+        let second = gate.confirm(
+            tuple(17),
+            false,
+            false,
+            now + std::time::Duration::from_secs(121),
+            &mut |_| panic!("nat_state=3 должен остаться навсегда"),
+        );
+        let (ok, miss, none, retried) = gate.nat_stats();
+        output.push_str(&format!(
+            "table_missing_permanent rc1={} rc2={} state={} ok={ok} miss={miss} none={none} retried={retried} calls=1\n",
+            i32::from(first == Confirmation::Missing),
+            i32::from(second == Confirmation::Missing),
+            if second == Confirmation::NoConntrackTable { 3 } else { 0 }
+        ));
         if let Ok(path) = std::env::var("R2O_FLOW_TRACKED_DIFF_OUTPUT") {
             std::fs::write(path, &output).unwrap();
         }
@@ -596,7 +692,7 @@ mod tests {
 
     #[test]
     fn состояние_nat_общее_для_обоих_направлений_потока_как_c() {
-        let forward = tuple(6);
+        let forward = tuple(17);
         let reverse = reverse_tuple(forward);
         let mut gate = R2oConntrackGate::with_capacity(4);
         let now = Instant::now();
@@ -795,6 +891,73 @@ mod tests {
                 R2oProcNatLookup::TableMissing
             },),
             PacketDecision::Refused { plan_id: [4; 16] }
+        );
+    }
+
+    #[test]
+    fn preflight_отказывает_missing_до_применения_плана() {
+        let source = ipv4_udp_packet();
+        let mut gate = R2oConntrackGate::with_capacity(4);
+        assert!(
+            !gate.r2o_preflight_with_lookup(&source, false, false, |_| {
+                R2oProcNatLookup::Missing
+            })
+        );
+        assert_eq!(gate.nat_stats(), (0, 1, 0, 0));
+
+        let mut gate = R2oConntrackGate::with_capacity(4);
+        assert!(gate.r2o_preflight_with_lookup(&source, true, false, |_| {
+            panic!("первому пакету таблицу не читаем")
+        }));
+        let mut gate = R2oConntrackGate::with_capacity(4);
+        assert!(gate.r2o_preflight_with_lookup(&source, false, false, |_| {
+            R2oProcNatLookup::Found(mapped_source())
+        }));
+        let mut gate = R2oConntrackGate::with_capacity(4);
+        assert!(gate.r2o_preflight_with_lookup(&source, false, false, |_| {
+            R2oProcNatLookup::TableMissing
+        }));
+
+        let mut tcp = vec![0_u8; 40];
+        tcp[0] = 0x45;
+        tcp[2..4].copy_from_slice(&40_u16.to_be_bytes());
+        tcp[8] = 64;
+        tcp[9] = 6;
+        tcp[12..16].copy_from_slice(&[192, 168, 1, 67]);
+        tcp[16..20].copy_from_slice(&[198, 51, 100, 8]);
+        tcp[20..22].copy_from_slice(&51000_u16.to_be_bytes());
+        tcp[22..24].copy_from_slice(&443_u16.to_be_bytes());
+        tcp[32] = 5 << 4;
+        let mut gate = R2oConntrackGate::with_capacity(4);
+        assert!(
+            !gate.r2o_preflight_with_lookup(&tcp, true, false, |_| { R2oProcNatLookup::Missing })
+        );
+    }
+
+    #[test]
+    fn tcp_первый_пакет_не_проходит_по_исключению_первого_пакета() {
+        let mut packet = vec![0_u8; 40];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&40_u16.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 6;
+        packet[12..16].copy_from_slice(&[192, 168, 1, 67]);
+        packet[16..20].copy_from_slice(&[198, 51, 100, 8]);
+        packet[20..22].copy_from_slice(&51000_u16.to_be_bytes());
+        packet[22..24].copy_from_slice(&443_u16.to_be_bytes());
+        packet[32] = 5 << 4;
+        let mut gate = R2oConntrackGate::with_capacity(4);
+        assert_eq!(
+            guard_decision_with_lookup(
+                &mut gate,
+                &packet,
+                PacketDecision::Drop,
+                [7; 16],
+                true,
+                false,
+                |_| R2oProcNatLookup::Missing,
+            ),
+            PacketDecision::Refused { plan_id: [7; 16] }
         );
     }
 
