@@ -852,6 +852,91 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
+    fn d2o_capture_ready_trace() {
+        fn print(name: &str, result: &CaptureResult, capture: &CaptureTable) {
+            let stats = capture.stats();
+            let (rc, len, seq) = match result {
+                CaptureResult::Complete { sequence, bytes } => (1, bytes.len(), *sequence),
+                CaptureResult::Rejected => (-1, 0, 0),
+                CaptureResult::Full => (-2, 0, 0),
+                _ => (0, 0, 0),
+            };
+            println!(
+                "{name} rc={rc} len={len} seq={seq} rejected={} completed={} expired={} full={}",
+                stats.rejected, stats.completed, stats.expired, stats.full
+            );
+        }
+        let key = key(50000);
+        let hello = hello(20);
+        let start = Instant::now();
+
+        let mut capture = CaptureTable::default();
+        let result = capture.feed(key, 1, start, 1000, Some(1000), &hello);
+        print("A complete", &result, &capture);
+
+        let mut capture = CaptureTable::default();
+        let _ = capture.feed(key, 1, start, 1000, Some(1000), &hello[..10]);
+        let result = capture.feed(key, 1, start, 1010, Some(1000), &hello[10..]);
+        print("B split", &result, &capture);
+
+        let mut capture = CaptureTable::default();
+        let _ = capture.feed(key, 1, start, 1000, Some(1000), &hello[..10]);
+        let _ = capture.feed(key, 1, start, 1010, Some(1000), &hello[10..]);
+        let result = capture.feed(key, 1, start, 1000, Some(1000), &hello);
+        print("C retransmit", &result, &capture);
+
+        let mut capture = CaptureTable::default();
+        let _ = capture.feed(key, 1, start, 1000, Some(1000), &hello[..10]);
+        let mut conflict = hello[10..].to_vec();
+        conflict[0] ^= 0xFF;
+        let result = capture.feed(key, 1, start, 1010, Some(1000), &conflict);
+        print("D conflict", &result, &capture);
+
+        let mut capture = CaptureTable::default();
+        let result = capture.feed(key, 1, start, 1000, None, &hello);
+        print("E no-anchor head", &result, &capture);
+
+        let mut capture = CaptureTable::default();
+        let mut not_tls = hello.clone();
+        not_tls[0] = b'G';
+        let result = capture.feed(key, 1, start, 1000, None, &not_tls);
+        print("F no-anchor tail", &result, &capture);
+
+        let mut capture = CaptureTable::default();
+        let result = capture.feed(key, 1, start, 6000, Some(1000), &hello);
+        print("G far anchor", &result, &capture);
+
+        let mut capture = CaptureTable::default();
+        let _ = capture.feed(key, 1, start, 1000, Some(1000), &hello[..10]);
+        let result = capture.feed(
+            key,
+            1,
+            start + Duration::from_secs(5),
+            1010,
+            Some(1000),
+            &hello[10..],
+        );
+        print("H ttl", &result, &capture);
+
+        let mut capture = CaptureTable::default();
+        let _ = capture.feed(key, 1, start, 1000, Some(1000), &hello[..10]);
+        let result = capture.feed(key, 2, start, 1000, Some(1000), &hello);
+        print("I generation", &result, &capture);
+
+        let mut capture = CaptureTable::default();
+        let _ = capture.feed(key, 1, start, 0xFFFF_FFF0, Some(0xFFFF_FFF0), &hello[..16]);
+        let result = capture.feed(key, 1, start, 0, Some(0xFFFF_FFF0), &hello[16..]);
+        print("J wrap", &result, &capture);
+
+        let mut capture = CaptureTable::default();
+        let _ = capture.feed(key, 1, start, 1000, Some(1000), &hello[..10]);
+        let _ = capture.feed(key, 1, start, 1010, Some(1000), &conflict);
+        let result = capture.feed(key, 1, start, 1000, Some(1000), &hello);
+        print("K rejected-retry", &result, &capture);
+    }
+
+    #[test]
     fn assembles_every_segment_boundary_across_sequence_wrap() {
         let hello = hello(1544);
         let start = Instant::now();
