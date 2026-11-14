@@ -44,7 +44,9 @@ mod app {
     use r2o_datapath::r2o_udp_sessions::R2oUdpSessions;
     use r2o_datapath::r2o_voice::{R2oVoiceSessions, R2oVoiceTrialProofs};
     use r2o_datapath::raw::{RawSocket, r2o_pick_maxlen};
-    use r2o_datapath::scheduler::{FlowTicket, MAX_SCHEDULED_PACKETS, ScheduledQueue};
+    use r2o_datapath::scheduler::{
+        FlowTicket, MAX_SCHEDULED_PACKETS, ScheduledOwner, ScheduledPop, ScheduledQueue,
+    };
     use sha2::{Digest, Sha256};
     use std::cell::RefCell;
     use std::collections::HashMap;
@@ -1598,6 +1600,21 @@ mod app {
                 );
                 r2o_flush_owned_hold_releases(&mut holding, &mut tcp_sessions, raw.as_ref());
                 release_accepting(&mut socket, &released);
+                r2o_drain_scheduled_shutdown(
+                    &mut socket,
+                    raw.as_ref(),
+                    &mut scheduled,
+                    &mut pending_applied,
+                    &mut pending_udp_releases,
+                    &mut udp_follow,
+                    &mut udp_deferred_verdicts,
+                    &mut udp_deferred_resends,
+                    &mut tcp_sessions,
+                    &mut udp_sessions,
+                    &mut holding,
+                    &mut flow_journal,
+                    &journal_origin,
+                );
                 for (ticket, pending) in pending_udp_releases.drain() {
                     scheduled.cancel(ticket);
                     r2o_cancel_delayed_udp_batch(
@@ -5565,6 +5582,85 @@ mod app {
                 payload_on_wire,
             }
         }))
+    }
+
+    /// C `d2kd.c:2369-2388`: при завершении очередь отложенной отправки
+    /// дренируется с `UINT64_MAX`. Уже отправлять нельзя: Flow-записи с
+    /// ожидающим исполнением получают `exec_failed(QUEUE)`, владеющие
+    /// UDP-хвосты отменяются, остальное считается `stale_deferred`.
+    #[allow(clippy::too_many_arguments)]
+    fn r2o_drain_scheduled_shutdown(
+        queue: &mut QueueSocket,
+        raw: Option<&RawSocket>,
+        scheduled: &mut ScheduledQueue,
+        pending_applied: &mut HashMap<FlowTicket, PendingApplied>,
+        pending_udp_releases: &mut HashMap<FlowTicket, PendingUdpRelease>,
+        udp_follow: &mut R2oUdpFollowTable,
+        udp_deferred_verdicts: &mut R2oUdpDeferredVerdicts,
+        udp_deferred_resends: &mut R2oUdpDeferredResends,
+        tcp_sessions: &mut TcpSessions,
+        udp_sessions: &mut R2oUdpSessions,
+        holding: &mut HoldTable,
+        flow_journal: &mut R2oFlowJournal,
+        journal_origin: &Instant,
+    ) {
+        let far = Instant::now() + Duration::from_secs(100 * 365 * 24 * 3600);
+        loop {
+            match scheduled.pop_due_ex(far, 65536) {
+                ScheduledPop::Empty => break,
+                ScheduledPop::Emitted { owner, .. } => {
+                    match owner {
+                        ScheduledOwner::Flow(ticket) => {
+                            if let Some(pending) = pending_applied.remove(&ticket) {
+                                let damaged = r2o_fail_pending_applied(
+                                    tcp_sessions,
+                                    flow_journal,
+                                    journal_timestamp(journal_origin),
+                                    &pending,
+                                    r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_QUEUE,
+                                );
+                                if damaged {
+                                    r2o_release_damaged_tcp_hold(
+                                        queue,
+                                        raw,
+                                        holding,
+                                        tcp_sessions,
+                                        pending.r2o_tcp_packet.as_deref(),
+                                    );
+                                }
+                                if let Some(packet) = pending.r2o_udp_packet.as_deref() {
+                                    udp_sessions.r2o_note_execution_failure(
+                                        packet,
+                                        pending.r2o_sends_done,
+                                        pending.payload_on_wire,
+                                        pending.original_spent,
+                                        pending.original_taken,
+                                    );
+                                }
+                            } else if let Some(pending) = pending_udp_releases.remove(&ticket) {
+                                r2o_cancel_delayed_udp_batch(
+                                    queue,
+                                    udp_follow,
+                                    udp_deferred_verdicts,
+                                    udp_deferred_resends,
+                                    pending,
+                                );
+                            }
+                            r2o_note_counter(&R2O_STALE_DEFERRED, 1);
+                        }
+                        // C `d2k_udp_out_owned_emit(..., ECANCELED)`; в
+                        // production-пути R2O владеющие записи сейчас не
+                        // создаются, но очередь обязана быть дренирована.
+                        ScheduledOwner::Owned(_) | ScheduledOwner::Raw => {
+                            r2o_note_counter(&R2O_STALE_DEFERRED, 1);
+                        }
+                    }
+                }
+                ScheduledPop::OversizedOwned { .. } | ScheduledPop::Dropped => {
+                    r2o_note_counter(&R2O_STALE_DEFERRED, 1);
+                }
+            }
+        }
     }
 
     fn flush_scheduled(
