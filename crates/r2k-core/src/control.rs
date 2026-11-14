@@ -2532,7 +2532,8 @@ pub fn decode_refused(frame: &Frame) -> Result<RefusedEvent, &'static str> {
 #[cfg(test)]
 mod refused_event_tests {
     use super::{
-        BindingContext, EVENT_REFUSED, Frame, KEY_LEN, RefusedEvent, SHAPE_LEGACY, decode_refused,
+        BindingContext, EVENT_APPLIED, EVENT_REFUSED, Frame, KEY_LEN, RefusedEvent, SHAPE_LEGACY,
+        decode_refused,
     };
 
     fn key() -> [u8; KEY_LEN] {
@@ -2590,6 +2591,67 @@ mod refused_event_tests {
         };
         assert_eq!(frame.body.len(), KEY_LEN + 1 + 16 + 16 + 1);
         assert_eq!(decode_refused(&frame), Ok(expected));
+    }
+
+    fn refused_with_binding(kind: u8, family: u8, shape: u8, temporary: u8) -> Frame {
+        let mut body = Vec::new();
+        body.extend_from_slice(&key());
+        body.push(3);
+        body.extend_from_slice(&[7; 16]);
+        body.extend_from_slice(&[8; 16]);
+        body.push(SHAPE_LEGACY);
+        body.extend_from_slice(&9_u64.to_be_bytes());
+        let mut binding = [0; 28];
+        binding[..8].copy_from_slice(&10_u64.to_be_bytes());
+        binding[8] = kind;
+        binding[9] = family;
+        binding[10] = shape;
+        binding[11] = temporary;
+        binding[12..].copy_from_slice(&[11; 16]);
+        body.extend_from_slice(&binding);
+        Frame {
+            kind: EVENT_REFUSED,
+            body,
+        }
+    }
+
+    #[test]
+    fn refused_binding_read_enforces_c_bounds_for_each_field() {
+        // C `d2k_ctl_binding_read`: kind<=4, family 0/4/6, shape<=MAX,
+        // temporary 0/1. Границы проверяются независимо.
+        assert!(decode_refused(&refused_with_binding(4, 6, SHAPE_LEGACY, 1)).is_ok());
+        assert!(decode_refused(&refused_with_binding(5, 4, SHAPE_LEGACY, 0)).is_err());
+        assert!(decode_refused(&refused_with_binding(1, 1, SHAPE_LEGACY, 0)).is_err());
+        assert!(decode_refused(&refused_with_binding(1, 4, u8::MAX, 0)).is_err());
+        assert!(decode_refused(&refused_with_binding(1, 4, SHAPE_LEGACY, 2)).is_err());
+    }
+
+    #[test]
+    fn applied_binding_read_enforces_c_bounds_for_each_field() {
+        fn applied_with_binding(kind: u8, family: u8, shape: u8, temporary: u8) -> Frame {
+            let mut body = Vec::new();
+            body.extend_from_slice(&key());
+            body.extend_from_slice(&[7; 16]);
+            body.extend_from_slice(&[8; 16]);
+            body.extend_from_slice(&9_u64.to_be_bytes());
+            let mut binding = [0; 28];
+            binding[..8].copy_from_slice(&10_u64.to_be_bytes());
+            binding[8] = kind;
+            binding[9] = family;
+            binding[10] = shape;
+            binding[11] = temporary;
+            binding[12..].copy_from_slice(&[11; 16]);
+            body.extend_from_slice(&binding);
+            Frame {
+                kind: EVENT_APPLIED,
+                body,
+            }
+        }
+        assert!(super::decode_applied(&applied_with_binding(0, 0, 0, 0)).is_ok());
+        assert!(super::decode_applied(&applied_with_binding(5, 4, SHAPE_LEGACY, 0)).is_err());
+        assert!(super::decode_applied(&applied_with_binding(1, 1, SHAPE_LEGACY, 0)).is_err());
+        assert!(super::decode_applied(&applied_with_binding(1, 4, u8::MAX, 0)).is_err());
+        assert!(super::decode_applied(&applied_with_binding(1, 4, SHAPE_LEGACY, 2)).is_err());
     }
 
     #[test]

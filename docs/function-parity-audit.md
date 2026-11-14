@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 467 | 225 | 0 | 0 |
-| datapath-core | 400 | 334 | 66 | 0 | 0 |
+| datapath-core | 400 | 335 | 65 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1430** | **552** | **0** | **0** |
+| **Итого** | **1982** | **1431** | **551** | **0** | **0** |
 
-Это не оценка паритета: 552 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 551 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1430 / P 552 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1431 / P 551 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 467 | 225 | 0 | 0 |
-| datapath-core | 400 | 334 | 66 | 0 | 0 |
+| datapath-core | 400 | 335 | 65 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1430** | **552** | **0** | **0** |
+| **Итого** | **1982** | **1431** | **551** | **0** | **0** |
 
 
 ---
@@ -4945,7 +4945,7 @@ ECH, середина приветствия. R2O: `r2k-core/src/tls.rs`.
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
 | `d2k_ctl_binding_write` (inline) | 86–90 | 5 | запись binding: BE u64 generation, kind/family/shape/temporary, 16-байтная epoch | `r2k-core/control.rs` `AppliedEvent::event_body` | E | Раскладка построчно совпадает: generation BE u64 (8), kind/family/shape/temporary (4), epoch 16 = 28 байт. Rust `AppliedEvent::event_body` пишет те же поля в хвост события; тест `binding_write_matches_c_layout` проверяет длину и байты. |
-| `d2k_ctl_binding_read` (inline) | 91–99 | 9 | чтение/валидация binding: n=28, kind≤4, family 0/4/6, shape≤MAX, temporary≤1 | `control.rs:2373 decode_applied`, `:2445 decode_refused`, `:3104 valid_binding` | **P** | Валидации совпадают: `kind<=4`, `family in {0,4,6}`, `shape<=SHAPE_ECH_TS`, temporary только 0/1. Тесты: REFUSED roundtrip/truncated (`:2528-2607`), APPLIED; ветки `kind=5`, `family=1`, `shape>MAX` отдельным тестом не покрыты. |
+| `d2k_ctl_binding_read` (inline) | 91–99 | 9 | чтение/валидация binding: n=28, kind≤4, family 0/4/6, shape≤MAX, temporary≤1 | `control.rs:2373 decode_applied`, `:2445 decode_refused`, `:3104 valid_binding` | **E*** | Границы C перенесены в `valid_binding` и вызываются из `decode_applied`/`decode_refused`. Тесты `refused_binding_read_enforces_c_bounds_for_each_field` и `applied_binding_read_enforces_c_bounds_for_each_field`: валидное kind=4/family=6, затем kind=5, family=1, shape=0xFF и temporary=2 — каждый отвергнут; REFUSED/APPLIED roundtrip и усечение уже покрыты. **Ограничение:** C-функция inline, отдельного differential нет. |
 
 ## datapath/include/d2k_http_request_stream.h (3 inline-функции)
 
