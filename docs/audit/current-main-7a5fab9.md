@@ -61,11 +61,13 @@ Pinned C/Rust differential-донор остаётся `a378e230...`; это о�
 ## Что уже сделано в R2O (2026-11-14)
 
 - `crates/r2k-core/src/dns_config.rs`: `DnsService`, `dns_uri_parse`,
-  `dns_service_match`. C/Rust differential
-  `scripts/test-dns-config-differential.sh` PASS, **31 кейс** (22 URI +
-  9 match) против current main `7a5fab9`.
-- Unit: `cargo test -p r2k-core --lib dns_config` — 3 passed, 1 ignored.
-- Остаются: UCI/doqd/Keenetic readers, bootstrap DNS, scheduler
+  `dns_service_match`, UCI/doqd/Keenetic readers (`parse_https_dns_proxy`,
+  `parse_dnsproxy`, `parse_doqd`, `parse_keenetic`, `read_dns_services`).
+  C/Rust differential `scripts/test-dns-config-differential.sh` PASS,
+  **47 кейсов** (22 URI + 9 match + 16 reader/mixed) против current main
+  `7a5fab9`.
+- Unit: `cargo test -p r2k-core --lib dns_config` — 8 passed, 2 ignored.
+- Остаются: bootstrap DNS (`d2k_dns_resolve_bootstrap`), scheduler
   `dns_services`/`dns_service_live`, health-пробы DoH/DoT/DoQ и
   `write_live_dns_services`. Поэтому `d2k_sched_write_live` — P*.
 
