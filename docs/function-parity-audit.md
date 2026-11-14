@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 272 | 128 | 0 | 0 |
+| datapath-core | 400 | 273 | 127 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1360** | **622** | **0** | **0** |
+| **Итого** | **1982** | **1361** | **621** | **0** | **0** |
 
-Это не оценка паритета: 622 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 621 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1360 / P 622 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1361 / P 621 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 272 | 128 | 0 | 0 |
+| datapath-core | 400 | 273 | 127 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1360** | **622** | **0** | **0** |
+| **Итого** | **1982** | **1361** | **621** | **0** | **0** |
 
 
 ---
@@ -4460,7 +4460,7 @@ observation), `control.rs` (https names), `http_replace.rs` (пакеты),
 | `d2k_http80_delivered` | 267-276 | 10 | отказ доставки замены: найти обратный поток, `invalid=1`, `complete=0`, `DONE`, `response=2` | `hold.rs` `r2o_http_delivery_rejected`, `main.rs` | **E*** | C/Rust differential D17 (`scripts/test-datapath-http80-differential.sh`, 28 строк) PASS: полный ответ (code=1) после `accepted=0` → `delivered-reject code=2`, поздний серверный пакет проходит (DONE), не DROP. Rust помечает `ready_for_next=false` и меняет код события в том же месте production-цикла. **Ограничение:** `accepted=1` — ранний выход в C и не вызывается в Rust; гейты dport/FIN/RST и `find(now=0)` отдельно не дифференцированы. |
 | `seq_after` (static) | 281-281 | 1 | `(int32_t)(a-b)>0` — знаковое сравнение с переполнением | `hold.rs:1318 seq_after` | **E** | **Точное совпадение:** C `(int32_t)(a-b)>0`; Rust `a.wrapping_sub(b) as i32 > 0`, те же знаковые переходы. C-строка: `return (int32_t)(a-b)>0;`; Rust `a.wrapping_sub(b) as i32 > 0`; те же переходы. |
 | `delivered` (static) | 285-287 | 3 | дальний из `acked` и `reply_next` | `hold.rs:276-280` | **E** | **Точное совпадение:** C `seq_after(acked,reply_next) ? acked : reply_next`. Rust тот же выбор по `seq_after`. C-строка: `return seq_after(acked,reply_next)?acked:reply_next;`; Rust тот же выбор. |
-| `cut_pending` (static) | 289-293 | 5 | `REQUEST && body_end_known && !cut_told && header_done && !complete && !invalid && body_end>delivered` | `hold.rs:255-296 sweep_http_responses` | **P** | **Совпадает по смыслу:** Rust проверяет `!response_reported && !invalid`, `fixed_body_remaining()>0`, `body_start`, `body_end>delivered`. **Отличия:** C требует `state==REQUEST` и отдельный `cut_told`; Rust — `response_progress`/`response_reported` и наличие body. |
+| `cut_pending` (static) | 289-293 | 5 | state=REQUEST, body_end_known, header_done, не complete/invalid, `body_end > delivered` | `hold.rs` `observe_http_client_close`, `sweep_http_responses` | **E*** | C/Rust differential D17 (`scripts/test-datapath-http80-differential.sh`, 29 строк) PASS: частичный ответ + FIN с ack ниже body_end → CUT (response=4); FIN с ack на body_end → обрыва нет, response=0. **Исправлено реальное расхождение:** Rust объявлял CUT при подтверждённом клиентом body_end; добавлена проверка `seq_after(body_end, delivered)`, как C. **Ограничение:** `cut_told` выражен через `response_reported`; тихий sweep с тем же предикатом покрыт unit-тестом, не differential. |
 | `cut_result` (static) | 295-303 | 9 | CUT: `request_result`, response=4, body_bytes=max, rtt, cut_told, DONE | `hold.rs:1269 finish_http_response(...4...)` | **E*** | **Совпадает:** Rust `sweep_http_responses` вызывает `finish_http_response(flow, 4, Some(body_bytes))`, `body_bytes = max(response.body_bytes, delivered-body_start)`; C `response=4`, max, `rtt`, `cut_told`, DONE. Отличие флага `cut_told` ↔ `response_reported`; тест `hold.rs:2082`. |
 | `d2k_http80_sweep` | 305-323 | 19 | тишина `3*RTT` (мин. 2 с) → CUT, callback | `hold.rs:255-296 sweep_http_responses` | **E** | **Ветви сверены:** C пропускает `!cut_pending` и `now<=progress`; `quiet=max(3*rtt, CUT_MIN_NS)`, `now-progress<=quiet` → пропуск; `r` нули, action=PASS, `cut_result`, `told++`, `cb`. Rust те же `3*rtt`/2 с и `finish_http_response(...4...)`; `hold.rs:2082`. |
 | `request_prefix` (static) | 327-341 | 15 | GET/HEAD, target без пробелов/`#`, Host из `d2k_http_request` | `r2k-core/src/httpup.rs:220-229 parse_request`, `:180-187` | **P** | **Ветви сверены:** C `d2k_http_request(p,n,&req)` (может принять неполный заголовок), `host_len<256`; метод ровно `GET `/`HEAD `; target до SP, отвергает `<=0x20`, `0x7f`, `#`; `end==n` или длина ≥ target → 0; копия target/host. Rust `parse_request` требует **полный** запрос (`header_len==input.len()`), GET/HEAD, Host:80, target без `#`/control; возвращает host/target. C может начать поток по префиксу без конца заголовка, Rust — нет. |

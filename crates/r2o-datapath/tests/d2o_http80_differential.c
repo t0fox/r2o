@@ -232,6 +232,26 @@ int main(void) {
     }
 
     {
+        d2k_http80 *acked = d2k_http80_new();
+        flow acked_flow = flow4(53500);
+        open_flow(acked, &acked_flow, T);
+        const char *partial =
+            "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n0123456789";
+        size_t n = packet(&acked_flow, 0, F_ACK | F_PSH, SISN + 1,
+                          CISN + 1 + (uint32_t)strlen(GET), partial, b);
+        d2k_http80_packet(acked, b, n, T + 99 * MS + 700000ull, 0, out, sizeof out,
+                          rst, sizeof rst, &r);
+        n = packet(&acked_flow, 1, F_ACK | F_FIN,
+                   CISN + 1 + (uint32_t)strlen(GET),
+                   SISN + 1 + (uint32_t)strlen(partial) + 90, NULL, b);
+        d2k_http80_packet(acked, b, n, T + 99 * MS + 120 * MS, 0, out, sizeof out,
+                          rst, sizeof rst, &r);
+        printf("D17 cut-acked-ahead action=%s response=%d\n",
+               action_name(r.action), r.response);
+        d2k_http80_free(acked);
+    }
+
+    {
         d2k_http80 *v6 = d2k_http80_new();
         flow v6_flow = flow6(54000);
         open_flow(v6, &v6_flow, T);

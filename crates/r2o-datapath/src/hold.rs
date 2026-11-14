@@ -1318,19 +1318,27 @@ impl HoldTable {
                 && !flow.response_reported
                 && now.saturating_duration_since(flow.seen) < SYN_TRACK_TTL
         })?;
-        if flow
-            .response
-            .fixed_body_remaining()
-            .is_none_or(|remaining| remaining == 0)
-        {
+        let remaining = flow.response.fixed_body_remaining()?;
+        if remaining == 0 {
+            return None;
+        }
+        // C `cut_pending`: обрыв фиксируется, только пока клиент не
+        // подтвердил весь `Content-Length` (body_end > delivered).
+        let body_start = flow.body_start?;
+        let body_end =
+            body_start.wrapping_add(flow.response.body_bytes().saturating_add(remaining) as u32);
+        let response_next = flow.response_next.unwrap_or(body_start);
+        let delivered = if seq_after(flow.acked_response, response_next) {
+            flow.acked_response
+        } else {
+            response_next
+        };
+        if !seq_after(body_end, delivered) {
             return None;
         }
         let mut body_bytes = flow.response.body_bytes();
-        if let Some(body_start) = flow.body_start {
-            let delivered = tcp.acknowledgment.wrapping_sub(body_start);
-            if seq_after(tcp.acknowledgment, body_start) {
-                body_bytes = body_bytes.max(u64::from(delivered));
-            }
+        if seq_after(tcp.acknowledgment, body_start) {
+            body_bytes = body_bytes.max(u64::from(tcp.acknowledgment.wrapping_sub(body_start)));
         }
         Some(finish_http_response(flow, 4, Some(body_bytes)).0)
     }
@@ -3136,6 +3144,26 @@ mod tests {
                 println!("D17 cut action={action} response=- status=0 body=0");
             }
             d17_stats("cut", &cut);
+        }
+
+        {
+            let mut acked = d17_start(start, options, request);
+            let partial: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n0123456789";
+            let _ = acked.feed_observing(
+                4,
+                &http_response_packet(9001, request_end, 0x18, partial),
+                start + Duration::from_millis(12),
+                options,
+            );
+            let mut fin = http_packet(request_end, 0x11, &[]);
+            fin[28..32].copy_from_slice(&(9001 + partial.len() as u32 + 90).to_be_bytes());
+            let result = acked.feed_observing(5, &fin, start + Duration::from_millis(13), options);
+            let (action, _) = d17_action(&result, false);
+            let response = match &result.outcome {
+                HoldOutcome::HttpResponse { event, .. } => event.code,
+                _ => 0,
+            };
+            println!("D17 cut-acked-ahead action={action} response={response}");
         }
 
         {
