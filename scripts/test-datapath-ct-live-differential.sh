@@ -26,6 +26,10 @@ TMPDIR=${TMPDIR:-"${ROOT%/r2o}/r2o-tooling/tmp"}
 # Уникальные порты на прогон: при запуске от root старые записи в общем netns
 # не должны переиспользоваться новым flow.
 PORT_BASE=${R2O_CT_LIVE_PORT_BASE:-$((40000 + (($$ % 4000) / 4) * 4))}
+# Уникальные имена: при запуске от root не трогаем чужие v0/v1 и nft-таблицу.
+VETH0="r2c$$"
+VETH1="r2s$$"
+NFT_TABLE="r2oct$$"
 CHILD_PID=
 CHILD_NS=
 FLOW1=
@@ -47,8 +51,8 @@ cleanup() {
         kill "$CHILD_PID" 2>/dev/null || true
         wait "$CHILD_PID" 2>/dev/null || true
     fi
-    nft delete table ip r2oct 2>/dev/null || true
-    ip link del v0 2>/dev/null || true
+    nft delete table ip "$NFT_TABLE" 2>/dev/null || true
+    ip link del "$VETH0" 2>/dev/null || true
     restore_sysctl /proc/sys/net/netfilter/nf_conntrack_acct "$ACCT_SAVED"
     restore_sysctl /proc/sys/net/netfilter/nf_conntrack_udp_timeout "$UDP_TIMEOUT_SAVED"
     restore_sysctl /proc/sys/net/netfilter/nf_conntrack_udp_timeout_stream "$UDP_STREAM_SAVED"
@@ -126,8 +130,8 @@ s.sendto(b"ct-live", ("10.1.1.2", int(sys.argv[2])))
 setup_flows() {
     command -v nsenter >/dev/null 2>&1 || return 1
     command -v nft >/dev/null 2>&1 || return 1
-    nft delete table ip r2oct 2>/dev/null || true
-    ip link add v0 type veth peer name v1 || return 1
+    nft delete table ip "$NFT_TABLE" 2>/dev/null || true
+    ip link add "$VETH0" type veth peer name "$VETH1" || return 1
     pidfile="$TEMP/child.pid"
     unshare -n sh -c 'echo $$ > "$1"; exec sleep 60' sh "$pidfile" &
     CHILD_PID=$!
@@ -138,15 +142,15 @@ setup_flows() {
         if [ "$attempt" -gt 200 ]; then return 1; fi
     done
     CHILD_NS=$(cat "$pidfile")
-    ip link set v1 netns "$CHILD_NS" || return 1
-    ip addr add 10.1.1.1/24 dev v0
-    ip link set v0 up
+    ip link set "$VETH1" netns "$CHILD_NS" || return 1
+    ip addr add 10.1.1.1/24 dev "$VETH0"
+    ip link set "$VETH0" up
     nsenter -t "$CHILD_NS" -n ip link set lo up
-    nsenter -t "$CHILD_NS" -n ip link set v1 up
-    nsenter -t "$CHILD_NS" -n ip addr add 10.1.1.2/24 dev v1
-    nft add table ip r2oct
-    nft add chain ip r2oct out "{ type filter hook output priority -200 ; }"
-    nft add rule ip r2oct out ct state new accept
+    nsenter -t "$CHILD_NS" -n ip link set "$VETH1" up
+    nsenter -t "$CHILD_NS" -n ip addr add 10.1.1.2/24 dev "$VETH1"
+    nft add table ip "$NFT_TABLE"
+    nft add chain ip "$NFT_TABLE" out "{ type filter hook output priority -200 ; }"
+    nft add rule ip "$NFT_TABLE" out ct state new accept
 
     # 2. Записи не должны истечь между C и Rust (по умолчанию 30/120 с).
     ACCT_SAVED=$(save_sysctl /proc/sys/net/netfilter/nf_conntrack_acct)
