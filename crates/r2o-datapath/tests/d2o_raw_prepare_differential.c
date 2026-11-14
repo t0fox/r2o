@@ -54,6 +54,11 @@ int main(void) {
     wr16(fragment + 4, 0);
     run("fragment_zero_id", fragment, sizeof fragment);
 
+    memcpy(fragment, udp, sizeof udp);
+    wr16(fragment + 6, 0x2000);
+    fragment[0] = 0x46;
+    run("fragment_ihl6", fragment, sizeof fragment);
+
     uint8_t ipv6_bad[56];
     memset(ipv6_bad, 0, sizeof ipv6_bad);
     ipv6_bad[0] = 0x60;

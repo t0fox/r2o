@@ -848,6 +848,9 @@ mod tests {
         let mut zero_id = udp.clone();
         wr16(&mut zero_id, 6, 0x2000);
         wr16(&mut zero_id, 4, 0);
+        let mut ihl6 = udp.clone();
+        wr16(&mut ihl6, 6, 0x2000);
+        ihl6[0] = 0x46;
         let mut ipv6_bad = vec![0_u8; 56];
         ipv6_bad[0] = 0x60;
         wr16(&mut ipv6_bad, 4, 8);
@@ -859,6 +862,7 @@ mod tests {
             ("ipv4_bad_version", bad_version),
             ("fragment_bad_proto", bad_proto),
             ("fragment_zero_id", zero_id),
+            ("fragment_ihl6", ihl6),
             ("ipv6_bad_len", ipv6_bad),
         ] {
             let family = if packet[0] >> 4 == 6 {
@@ -1261,7 +1265,7 @@ mod tests {
 
     fn тестовый_raw_сокет(declared: bool) -> super::RawSocket {
         use std::cell::{Cell, RefCell};
-        use std::os::fd::{FromRawFd, OwnedFd};
+        use std::os::fd::OwnedFd;
 
         let fd: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
         super::RawSocket {
