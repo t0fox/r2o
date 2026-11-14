@@ -5268,6 +5268,116 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
+    fn d2o_session_packet_trace() {
+        let plan = Plan::default();
+        let mut sessions =
+            TcpSessions::try_with_capacity(R2oFlowCapacity::from_requested(64).unwrap()).unwrap();
+        fn anchor(sessions: &TcpSessions, packet: &[u8]) -> u32 {
+            TcpFlowKey::from_packet(packet)
+                .and_then(|key| sessions.flows.get(&key))
+                .and_then(|session| session.capture_anchor)
+                .unwrap_or(0)
+        }
+        fn feed(sessions: &mut TcpSessions, plan: &Plan, packet: &[u8]) -> u32 {
+            let _ = decide_with_session(sessions, plan, packet);
+            anchor(sessions, packet)
+        }
+        fn print(name: &str, sessions: &TcpSessions, anchor: u32) {
+            println!(
+                "{name} flows={} refusals={} anchor={anchor}",
+                sessions.len(),
+                sessions.r2o_tcp_flow_refusals()
+            );
+        }
+        let client = ([192, 0, 2, 10], 50000);
+        let server = ([198, 51, 100, 20], 443);
+
+        let invalid = vec![0_u8; 10];
+        let value = feed(&mut sessions, &plan, &invalid);
+        print("A invalid", &sessions, value);
+
+        let syn = ipv4_tcp_packet(client, server, 0x02, 64, 1000, &[]);
+        let value = feed(&mut sessions, &plan, &syn);
+        print("B syn", &sessions, value);
+
+        let repeat = ipv4_tcp_packet(client, server, 0x02, 64, 2000, &[]);
+        let value = feed(&mut sessions, &plan, &repeat);
+        print("C syn-repeat", &sessions, value);
+
+        let data_new = ipv4_tcp_packet(client, ([198, 51, 100, 20], 443), 0x18, 64, 3000, &[]);
+        let data_new = {
+            let mut packet = data_new;
+            packet[20..22].copy_from_slice(&50001_u16.to_be_bytes());
+            packet
+        };
+        let value = feed(&mut sessions, &plan, &data_new);
+        print("D data-new", &sessions, value);
+
+        let mut ipv6 = vec![0_u8; 60];
+        ipv6[0] = 0x60;
+        ipv6[5] = 20;
+        ipv6[6] = 6;
+        ipv6[7] = 64;
+        ipv6[8] = 0x20;
+        ipv6[9] = 0x01;
+        ipv6[10] = 0x0d;
+        ipv6[11] = 0xb8;
+        ipv6[23] = 1;
+        ipv6[24] = 0x20;
+        ipv6[25] = 0x01;
+        ipv6[26] = 0x0d;
+        ipv6[27] = 0xb8;
+        ipv6[39] = 2;
+        ipv6[40..42].copy_from_slice(&50001_u16.to_be_bytes());
+        ipv6[42..44].copy_from_slice(&443_u16.to_be_bytes());
+        ipv6[44..48].copy_from_slice(&4000_u32.to_be_bytes());
+        ipv6[52] = 0x50;
+        ipv6[53] = 0x02;
+        let value = feed(&mut sessions, &plan, &ipv6);
+        print("E ipv6-syn", &sessions, value);
+
+        let mut fragment = ipv4_tcp_packet(
+            ([192, 0, 2, 10], 50002),
+            ([198, 51, 100, 20], 443),
+            0x02,
+            64,
+            5000,
+            &[],
+        );
+        fragment[6..8].copy_from_slice(&1_u16.to_be_bytes());
+        let value = feed(&mut sessions, &plan, &fragment);
+        print("F fragment", &sessions, value);
+
+        let mut bad_thl = ipv4_tcp_packet(
+            ([192, 0, 2, 10], 50003),
+            ([198, 51, 100, 20], 443),
+            0x02,
+            64,
+            6000,
+            &[],
+        );
+        bad_thl[32] = 0x40;
+        let value = feed(&mut sessions, &plan, &bad_thl);
+        print("G bad-thl", &sessions, value);
+
+        let syn_ack = ipv4_tcp_packet(
+            ([192, 0, 2, 10], 50004),
+            ([198, 51, 100, 20], 443),
+            0x12,
+            64,
+            7000,
+            &[],
+        );
+        let value = feed(&mut sessions, &plan, &syn_ack);
+        print("H syn-ack", &sessions, value);
+
+        let data_existing = ipv4_tcp_packet(client, server, 0x18, 64, 3001, &[]);
+        let value = feed(&mut sessions, &plan, &data_existing);
+        print("I data-existing", &sessions, value);
+    }
+
+    #[test]
     fn новый_syn_сохраняет_учёт_посылок_и_execution_как_c() {
         let plan = Plan::default();
         let client = ([192, 0, 2, 10], 41000);
