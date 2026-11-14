@@ -16,7 +16,7 @@ pub const R2O_QUIC_HTTP3_DEFAULT_BUDGET_PACKETS: u32 = 25;
 const R2O_QUIC_RECENT_PORTS: usize = 4096;
 const R2O_QUIC_HTTP3_HEADER_LIMIT: u64 = 65_536;
 const R2O_QUIC_FRESH_PORT_TRIES: usize = 16;
-const R2O_QUIC_RESIDUAL_PORT_AGE: Duration = Duration::from_secs(480);
+const R2O_QUIC_RESIDUAL_PORT_MS: i64 = 480_000;
 
 /// C `tp_build` (`core/quicconn.c:380-403`): транспортные параметры
 /// клиентского QUIC-зонда.
@@ -55,7 +55,7 @@ pub(crate) fn r2o_quic_endpoint_config() -> Result<quinn::EndpointConfig, String
     Ok(endpoint)
 }
 
-static R2O_QUIC_RECENT_PORTS_STATE: OnceLock<Mutex<(VecDeque<(u16, Instant)>, usize)>> =
+static R2O_QUIC_RECENT_PORTS_STATE: OnceLock<Mutex<(VecDeque<(u16, i64)>, usize)>> =
     OnceLock::new();
 
 #[cfg(target_has_atomic = "64")]
@@ -182,6 +182,21 @@ pub fn r2o_quic_udp_port_claim(port: u16) -> i32 {
     i32::from(r2o_quic_port_was_recently_claimed(port))
 }
 
+/// C `udp_now_ms` (`core/meas.c:307-311`): `CLOCK_MONOTONIC` в целых мс.
+pub(crate) fn r2o_udp_now_ms() -> i64 {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) } != 0 {
+        return 0;
+    }
+    i64::try_from(time.tv_sec)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(1_000)
+        .saturating_add(i64::try_from(time.tv_nsec).unwrap_or_default() / 1_000_000)
+}
+
 fn r2o_quic_port_was_recently_claimed(port: u16) -> bool {
     let state = R2O_QUIC_RECENT_PORTS_STATE
         .get_or_init(|| Mutex::new((VecDeque::with_capacity(R2O_QUIC_RECENT_PORTS), 0)));
@@ -189,13 +204,13 @@ fn r2o_quic_port_was_recently_claimed(port: u16) -> bool {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (ports, next) = &mut *state;
-    if ports
-        .iter()
-        .any(|(recent_port, at)| *recent_port == port && at.elapsed() < R2O_QUIC_RESIDUAL_PORT_AGE)
-    {
+    let now = r2o_udp_now_ms();
+    if ports.iter().any(|(recent_port, at)| {
+        *recent_port == port && *at != 0 && now - *at < R2O_QUIC_RESIDUAL_PORT_MS
+    }) {
         return true;
     }
-    let entry = (port, Instant::now());
+    let entry = (port, if now != 0 { now } else { 1 });
     if ports.len() < R2O_QUIC_RECENT_PORTS {
         ports.push_back(entry);
     } else {
@@ -1556,6 +1571,26 @@ mod tests {
     use std::net::SocketAddr;
     use std::time::Duration;
     use tokio::time::Instant;
+
+    #[test]
+    fn udp_now_ms_совпадает_с_clock_monotonic() {
+        let before = super::r2o_udp_now_ms();
+        assert!(before > 0, "CLOCK_MONOTONIC не вернул время");
+        let mut time = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        assert_eq!(
+            unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) },
+            0
+        );
+        let direct = time.tv_sec * 1000 + time.tv_nsec / 1_000_000;
+        assert!(
+            (direct - before).abs() < 1_000,
+            "udp_now_ms={before}, clock_gettime={direct}"
+        );
+        assert!(super::r2o_udp_now_ms() >= before);
+    }
 
     #[test]
     fn udp_port_claim_maps_zero_and_recent_ports_like_c() {

@@ -85,13 +85,13 @@ recheck 1982 1982 equal True
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
-| core-state | 692 | 466 | 226 | 0 | 0 |
+| core-state | 692 | 467 | 225 | 0 | 0 |
 | datapath-core | 400 | 300 | 100 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1395** | **587** | **0** | **0** |
+| **Итого** | **1982** | **1396** | **586** | **0** | **0** |
 
-Это не оценка паритета: 587 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 586 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1395 / P 587 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1396 / P 586 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -343,11 +343,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
-| core-state | 692 | 466 | 226 | 0 | 0 |
+| core-state | 692 | 467 | 225 | 0 | 0 |
 | datapath-core | 400 | 300 | 100 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1395** | **587** | **0** | **0** |
+| **Итого** | **1982** | **1396** | **586** | **0** | **0** |
 
 
 ---
@@ -2317,8 +2317,8 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `connect_bounded` | 142–173 | 32 | fcntl nonblock; connect; immediate success → restore flags; EINPROGRESS → poll(POLLOUT,timeout) → SO_ERROR; restore flags | `response.rs:254-287 connect_until`, `:289-310 probe_socket` | **P** | Ветви совпадают: `EINPROGRESS/EALREADY/EINTR`, poll по `POLLOUT` до дедлайна, затем `SO_ERROR`. C восстанавливает исходные `fcntl` flags и работает блокирующе; R2O `SOCK_NONBLOCK` оставляет сокет неблокирующим, а send/recv обходят `EAGAIN` через poll. Поведение эквивалентно; differential на все errno-ветви не заявлен. |
 | `d2k_meas_once` | 175–267 | 93 | literal IPv4/IPv6 (zone-id отвергнут), mark, TCP_NODELAY, SO_RCVTIMEO/SNDTIMEO, connect/send/recv, accept-функция, частичная отправка/приём | `raw_probe`/`response` measurement paths | **E*** | C/Rust differential `scripts/r2o-meas-differential.sh` на пине `a378e230`: send-timeout → ERROR, recv EINTR → тишина/REJECTED, send EINTR → ERROR, полное совпадение с C. **Ограничение:** differential покрывает тайм-ауты и EINTR, не все ветви literal IPv6/TCP_NODELAY; отдельного differential каждой опции нет. |
 | `d2k_meas` | 269–293 | 25 | серия: `repeats<=0→3`; ERR→err+fail; PASS→pass; UNPROVEN→unproven; mark по AND | measurement wrappers `raw_probe`/`response` | **E*** | C/Rust differential `scripts/r2o-meas-differential.sh` (send-timeout, recv/send EINTR) PASS; счётчики и `marked` по AND совпадают в покрытых сценариях. **Ограничение:** не все комбинации repeats/accept/mark покрыты одним differential. |
-| `udp_now_ms` | 307-311 | 5 | `CLOCK_MONOTONIC` в мс для реестра UDP-портов | `std::time::Instant` | **P*** | C `clock_gettime(CLOCK_MONOTONIC)`, `tv_sec*1000+tv_nsec/1e6`; Rust `Instant`/`Duration`. Монотонность та же, абсолютное значение/точка отсчёта иные. |
-| `d2k_udp_port_claim` | 313–339 | 27 | `getsockname(fd)` → порт; `port==0→-1`; кольцо 4096, возраст 480 с; недавний → 1 без записи, иначе запись/0 | `r2o_quic_http3.rs` `r2o_quic_udp_port_claim`, `r2o_quic_port_was_recently_claimed` | **E*** | C/Rust differential `scripts/test-udp-port-claim-differential.sh` PASS (10 портов с повторами: новый → 0, повтор <480 с → 1, порядок кольца совпал). `r2o_quic_udp_port_claim(0)` → -1, тест `udp_port_claim_maps_zero_and_recent_ports_like_c`. Кольцо 4096, вытеснение по кругу, возраст `< 480 с` — как C. **Ограничение:** C принимает fd и делает `getsockname`, Rust — уже полученный порт; C имеет `d2k_udp_port_forget_all`, у Rust сброса нет (свежий процесс в differential); истечение 480 с не выжидалось. |
+| `udp_now_ms` | 307-311 | 5 | `CLOCK_MONOTONIC` в мс для реестра UDP-портов | `r2o_quic_http3.rs` `r2o_udp_now_ms` | **E*** | Точный порт формулы C: `clock_gettime(CLOCK_MONOTONIC)`, `tv_sec*1000 + tv_nsec/1e6`; тем же временем теперь живёт кольцо недавних портов (`at_ms`, возраст `< 480000`). Тест `udp_now_ms_совпадает_с_clock_monotonic` сверяет с независимым `clock_gettime` и монотонность. **Ограничение:** абсолютное значение не сравнимо между процессами/хостами, как и у C. |
+| `d2k_udp_port_claim` | 313–339 | 27 | `getsockname(fd)` → порт; `port==0→-1`; кольцо 4096, возраст 480 с; недавний → 1 без записи, иначе запись/0 | `r2o_quic_http3.rs` `r2o_quic_udp_port_claim`, `r2o_quic_port_was_recently_claimed` | **E*** | C/Rust differential `scripts/test-udp-port-claim-differential.sh` PASS (10 портов с повторами: новый → 0, повтор <480 с → 1, порядок кольца совпал). `r2o_quic_udp_port_claim(0)` → -1, тест `udp_port_claim_maps_zero_and_recent_ports_like_c`. Кольцо 4096, вытеснение по кругу, `at_ms` из `r2o_udp_now_ms`, возраст `< 480000` мс — как C. **Ограничение:** C принимает fd и делает `getsockname`, Rust — уже полученный порт; C имеет `d2k_udp_port_forget_all`, у Rust сброса нет (свежий процесс в differential); истечение 480 с не выжидалось (сравнение в мс точное). |
 | `d2k_udp_port_forget_all` | 341–346 | 6 | сброс реестра недавних UDP-портов | `r2o_quic_http3.rs` `r2o_quic_port_forget_all` | E | C сбрасывает реестр недавних UDP-портов (вызов только из теста). Rust `r2o_quic_port_forget_all()` очищает `VecDeque` и индекс кольца; тест `forget_all_clears_recent_udp_ports`: порт сначала «свежий», после сброса снова свободен. |
 
 ### `core/measured.c`
