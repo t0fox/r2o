@@ -969,6 +969,62 @@ mod tests {
     }
 
     #[test]
+    fn deferred_verdicts_enqueue_flush_and_full_match_c() {
+        use crate::netlink::NF_ACCEPT;
+        use std::time::Duration;
+
+        let now = Instant::now();
+        let packet = udp_packet();
+        let mut table = R2oUdpDeferredVerdicts::new();
+        assert!(table.r2o_enqueue(
+            now + Duration::from_millis(10),
+            &[7],
+            &[NF_ACCEPT],
+            Some(&packet),
+        ));
+        let mut sent = Vec::new();
+        assert_eq!(
+            table
+                .r2o_flush(now, |id, verdict| {
+                    sent.push((id, verdict));
+                    Ok(())
+                })
+                .unwrap(),
+            0
+        );
+        assert!(sent.is_empty(), "вердикт выдан раньше срока");
+        assert_eq!(
+            table
+                .r2o_flush(now + Duration::from_millis(11), |id, verdict| {
+                    sent.push((id, verdict));
+                    Ok(())
+                })
+                .unwrap(),
+            1
+        );
+        assert_eq!(sent, [(7, NF_ACCEPT)]);
+
+        let mut table = R2oUdpDeferredVerdicts::new();
+        assert!(table.r2o_enqueue(
+            now + Duration::from_millis(10),
+            &[11],
+            &[NF_ACCEPT],
+            Some(&packet),
+        ));
+        assert_eq!(table.r2o_cancel_flow(&packet), [11]);
+        assert!(table.is_empty());
+
+        let mut table = R2oUdpDeferredVerdicts::new();
+        for index in 0..R2O_UDP_RELEASE_SLOTS as u32 {
+            assert!(table.r2o_enqueue(now + Duration::from_secs(1), &[index], &[NF_ACCEPT], None,));
+        }
+        assert!(
+            !table.r2o_enqueue(now + Duration::from_secs(1), &[999], &[NF_ACCEPT], None),
+            "полная очередь вердиктов должна отказывать"
+        );
+    }
+
+    #[test]
     fn nfqueue_error_releases_only_due_udp_deferred_entries_like_c() {
         let now = Instant::now();
         let packet = udp_packet();
