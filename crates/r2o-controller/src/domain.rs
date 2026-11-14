@@ -118,6 +118,28 @@ pub fn registrable_domain(name: &str) -> Option<String> {
 }
 
 /// Проверить, совпадает ли `name` с суффиксом или является его поддоменом.
+/// C `SCHED_DECOY` (`core/sched.c:356`): имя-приманка D2K, не цель.
+pub const SCHED_DECOY: &str = "disk.rzd.ru";
+
+/// C `is_telegram_tunnel_domain` (`core/sched.c:8167-8178`): точное
+/// `telegram.org` или поддомен с границей DNS-метки, без учёта регистра.
+pub fn is_telegram_tunnel_domain(name: &str) -> bool {
+    const DOMAIN: &[u8] = b"telegram.org";
+    let bytes = name.as_bytes();
+    if bytes.len() == DOMAIN.len() {
+        return bytes.eq_ignore_ascii_case(DOMAIN);
+    }
+    if bytes.len() <= DOMAIN.len() || bytes[bytes.len() - DOMAIN.len() - 1] != b'.' {
+        return false;
+    }
+    bytes[bytes.len() - DOMAIN.len()..].eq_ignore_ascii_case(DOMAIN)
+}
+
+/// C `!strcasecmp(name, SCHED_DECOY)` в `on_suspect`.
+pub fn is_sched_decoy(name: &str) -> bool {
+    name.eq_ignore_ascii_case(SCHED_DECOY)
+}
+
 pub fn is_member(name: &str, suffix: &str) -> bool {
     let (Ok(name), Ok(suffix)) = (normalize(name), normalize(suffix)) else {
         return false;
@@ -129,4 +151,41 @@ pub fn is_member(name: &str, suffix: &str) -> bool {
         || name
             .strip_suffix(&suffix)
             .is_some_and(|prefix| prefix.ends_with('.'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SCHED_DECOY, is_sched_decoy, is_telegram_tunnel_domain};
+
+    #[test]
+    fn telegram_tunnel_matches_dns_label_boundary_like_c() {
+        for name in [
+            "telegram.org",
+            "TELEGRAM.ORG",
+            "web.telegram.org",
+            "a.b.Telegram.Org",
+            ".telegram.org",
+        ] {
+            assert!(is_telegram_tunnel_domain(name), "{name}");
+        }
+        for name in [
+            "",
+            "telegram.or",
+            "nottelegram.org",
+            "xtelegram.org",
+            "telegram.org.evil",
+            "telegram.org.",
+            "telegramxorg",
+        ] {
+            assert!(!is_telegram_tunnel_domain(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn sched_decoy_matches_case_insensitively_like_c() {
+        assert!(is_sched_decoy(SCHED_DECOY));
+        assert!(is_sched_decoy("DISK.RZD.RU"));
+        assert!(!is_sched_decoy("disk.rzd.ru."));
+        assert!(!is_sched_decoy("ddos-guard.net"));
+    }
 }

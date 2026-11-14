@@ -21145,6 +21145,21 @@ impl ControlClient {
             );
             return;
         };
+        // C `on_suspect`: Telegram VPS-туннель и имя-приманка D2K не цели.
+        if r2o_controller::domain::is_telegram_tunnel_domain(&target.host) {
+            println!(
+                "v22 SUSPECT {}: замер не запускаю: домен обслуживается Telegram VPS-туннелем",
+                target.host
+            );
+            return;
+        }
+        if r2o_controller::domain::is_sched_decoy(&target.host) {
+            println!(
+                "v22 SUSPECT {}: замер не запускаю: это имя-приманка D2K, а не цель",
+                target.host
+            );
+            return;
+        };
         let planned = event.planned == r2k_core::control::LEGACY_PLANNED_YES;
         if clean_handshakes.suppresses_unplanned_tcp_suspicion(
             &target.host,
@@ -21304,6 +21319,21 @@ impl ControlClient {
         mode: R2oSuspectQueueMode,
         trigger_planned: bool,
     ) -> bool {
+        // C `on_suspect`: единая точка до очереди для всех SUSPECT-событий.
+        if r2o_controller::domain::is_telegram_tunnel_domain(&target.host) {
+            println!(
+                "v22 SUSPECT {}: замер не запускаю: домен обслуживается Telegram VPS-туннелем",
+                target.host
+            );
+            return false;
+        }
+        if r2o_controller::domain::is_sched_decoy(&target.host) {
+            println!(
+                "v22 SUSPECT {}: замер не запускаю: это имя-приманка D2K, а не цель",
+                target.host
+            );
+            return false;
+        }
         let (snapshot, capture_error) = if worker.has_recent_client_shape(&target) {
             (None, None)
         } else {
