@@ -743,6 +743,64 @@ mod tests {
     }
 
     #[test]
+    fn raw_prepare_differential_matches_c() {
+        fn wr16(packet: &mut [u8], offset: usize, value: u16) {
+            packet[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
+        }
+        let mut udp = vec![0_u8; 36];
+        udp[0] = 0x45;
+        let udp_len = udp.len() as u16;
+        wr16(&mut udp, 2, udp_len);
+        wr16(&mut udp, 4, 9);
+        udp[8] = 64;
+        udp[9] = 17;
+        udp[12..16].copy_from_slice(&[192, 0, 2, 1]);
+        udp[16..20].copy_from_slice(&[198, 51, 100, 2]);
+        wr16(&mut udp, 20, 51234);
+        wr16(&mut udp, 22, 443);
+        wr16(&mut udp, 24, 16);
+
+        let mut bad_version = udp.clone();
+        bad_version[0] = 0x75;
+        let mut bad_proto = udp.clone();
+        wr16(&mut bad_proto, 6, 0x2000);
+        bad_proto[9] = 6;
+        let mut zero_id = udp.clone();
+        wr16(&mut zero_id, 6, 0x2000);
+        wr16(&mut zero_id, 4, 0);
+        let mut ipv6_bad = vec![0_u8; 56];
+        ipv6_bad[0] = 0x60;
+        wr16(&mut ipv6_bad, 4, 8);
+        ipv6_bad[6] = 17;
+
+        let mut output = String::new();
+        for (name, packet) in [
+            ("ipv4_plain", udp),
+            ("ipv4_bad_version", bad_version),
+            ("fragment_bad_proto", bad_proto),
+            ("fragment_zero_id", zero_id),
+            ("ipv6_bad_len", ipv6_bad),
+        ] {
+            let family = if packet[0] >> 4 == 6 {
+                libc::AF_INET6
+            } else {
+                libc::AF_INET
+            };
+            let rc = if super::outgoing_packet(&packet, family).is_some() {
+                0
+            } else {
+                -1
+            };
+            output.push_str(&format!("{name} rc={rc}\n"));
+        }
+        if let Ok(path) = std::env::var("R2O_RAW_PREPARE_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert!(output.contains("ipv4_plain rc=0\n"));
+        assert!(output.contains("fragment_zero_id rc=-1\n"));
+    }
+
+    #[test]
     fn raw_send_differential_matches_c() {
         use std::cell::{Cell, RefCell};
         use std::os::fd::{FromRawFd, OwnedFd};
