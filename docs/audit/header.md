@@ -116,11 +116,19 @@ production-путь не ставится. Формулировки «теста
 После пачек Datapath/Detection/Corenet часть строк возвращена в E\* с
 differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` понижен
 обратно из-за приблизительных полей. Финальный QA
-(`AGENT_REPORT-qa-final.md`) подтвердил численно **E 1478 / P 504**
-(948 обычных E, 530 E\*), но не 100 % паритет: 58 E\* имеют явные
-ограничения. `ct_probe` live-differential после prebuild/окна conntrack
-проходит дважды подряд (6/6). Живые root/netns/OpenWrt/аппаратные сценарии
-покрыты не полностью.
+(`AGENT_REPORT-qa-final4.md`) подтвердил численно **E 1478 / P 504**
+(948 обычных E, 530 E\*), но не 100 % паритет: 54 E\* и 4 обычных E имеют
+явные ограничения. `ct_probe` live-differential после prebuild/окна
+conntrack проходит дважды подряд (6/6).
+
+`d2k_sched_write_live` оставлен **P\***: 9-сценарный differential покрывает
+все наблюдаемые состояния `dns_services`, но C-writer использует task-слой
+(`t->ver_ok`, `t->ver.dns_reply/level/status/reason`, `T_VERIFY/
+T_VERIFY_WAIT/T_TRIAL_SETTLE`, generic `T_WATCHING`, кастомный
+`no_bypass` reason), которого в Rust-модели `DnsServiceLive` нет. Для E\*
+нужно повторить task-состояния/reason-тексты и добавить differential на
+candidate-without-answer/T_VERIFY/T_WATCHING. Живые root/netns/OpenWrt/
+аппаратные сценарии покрыты не полностью.
 
 
 ## Итог и подтверждённые расхождения (2026-11-14)
