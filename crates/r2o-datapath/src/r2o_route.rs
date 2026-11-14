@@ -794,8 +794,36 @@ impl R2oRoutedFlows {
     /// Возвращает `true`, если пакет нужно оставить ядру без обработки датапатом.
     pub fn r2o_skip_packet(&mut self, packet: &[u8], route_mark: u32, now: Instant) -> bool {
         self.r2o_expire(now);
-        let Some(key) = r2o_route_flow_key(packet) else {
+        // C `routed_flow`: только целый не-фрагмент TCP/UDP с 4 байтами L4.
+        // Иначе метка не делает пакет «нашим» — он идёт обычным путём.
+        // `PacketView::parse` сам отвергает фрагменты, поэтому проверяем
+        // заголовок до него.
+        match packet.first().map(|first| first >> 4) {
+            Some(4) if packet.len() >= 20 => {
+                if !matches!(packet[9], 6 | 17)
+                    || u16::from_be_bytes([packet[6], packet[7]]) & 0x1fff != 0
+                {
+                    return false;
+                }
+            }
+            Some(6) if packet.len() >= 40 => {
+                if !matches!(packet[6], 6 | 17) {
+                    return false;
+                }
+            }
+            _ => return route_mark != 0,
+        }
+        let Some(view) = r2k_core::packet::PacketView::parse(packet) else {
             return route_mark != 0;
+        };
+        if !matches!(view.protocol, 6 | 17)
+            || view.fragment & 0x1fff != 0
+            || packet.len() < view.l4_offset.saturating_add(4)
+        {
+            return false;
+        }
+        let Some(key) = r2o_route_flow_key(packet) else {
+            return false;
         };
         let reverse = key.r2o_reverse();
         if route_mark != 0 {
@@ -1542,6 +1570,86 @@ mod tests {
     }
 
     #[test]
+    fn r2o_маршрутная_метка_не_берёт_фрагменты_и_чужие_протоколы_как_c() {
+        let mut flows = R2oRoutedFlows::default();
+        let now = Instant::now();
+        let mut fragment = r2o_test_tcp([192, 0, 2, 1], [198, 51, 100, 2], 40_000, 443, 0x02);
+        fragment[6..8].copy_from_slice(&1_u16.to_be_bytes());
+        assert!(
+            !flows.r2o_skip_packet(&fragment, R2O_ROUTE_OTHER_DEV, now),
+            "C routed_flow отвергает не первый фрагмент"
+        );
+        let mut icmp = vec![0_u8; 28];
+        icmp[0] = 0x45;
+        icmp[2..4].copy_from_slice(&28_u16.to_be_bytes());
+        icmp[8] = 64;
+        icmp[9] = 1;
+        icmp[12..16].copy_from_slice(&[192, 0, 2, 1]);
+        icmp[16..20].copy_from_slice(&[198, 51, 100, 2]);
+        assert!(
+            !flows.r2o_skip_packet(&icmp, R2O_ROUTE_OTHER_DEV, now),
+            "C routed_flow ведёт только TCP/UDP"
+        );
+        assert_eq!(flows.routed_flows(), 0);
+    }
+
+    #[test]
+    #[ignore]
+    fn d2o_routed_flow_trace() {
+        fn run_ex(
+            name: &str,
+            flows: &mut R2oRoutedFlows,
+            packet: &[u8],
+            mark: u32,
+            now: Instant,
+            compare_skip: bool,
+        ) {
+            let before = flows.routed_flows();
+            let skip = flows.r2o_skip_packet(packet, mark, now);
+            let first = flows.routed_flows() != before;
+            let skip = if compare_skip {
+                u8::from(skip).to_string()
+            } else {
+                "-".to_owned()
+            };
+            println!(
+                "{name} skip={skip} first={} mark={}",
+                u8::from(first),
+                if first { mark } else { 0 }
+            );
+        }
+        fn run(name: &str, flows: &mut R2oRoutedFlows, packet: &[u8], mark: u32, now: Instant) {
+            run_ex(name, flows, packet, mark, now, true);
+        }
+        let mut flows = R2oRoutedFlows::default();
+        let start = Instant::now();
+        let syn = r2o_test_tcp([192, 0, 2, 10], [198, 51, 100, 20], 40_000, 443, 0x02);
+        run("A mark-syn", &mut flows, &syn, 77, start);
+        let data = {
+            let mut packet = r2o_test_tcp([192, 0, 2, 10], [198, 51, 100, 20], 40_000, 443, 0x18);
+            packet.push(b'x');
+            packet[2..4].copy_from_slice(&41_u16.to_be_bytes());
+            packet
+        };
+        run("B follow", &mut flows, &data, 0, start);
+        let again = {
+            let mut packet = syn.clone();
+            packet[24..28].copy_from_slice(&2000_u32.to_be_bytes());
+            packet
+        };
+        run_ex("C new-syn", &mut flows, &again, 0, start, false);
+        run("K mark-after-new-syn", &mut flows, &again, 77, start);
+        let other = r2o_test_tcp([192, 0, 2, 10], [198, 51, 100, 20], 40_001, 443, 0x02);
+        run_ex("D unknown", &mut flows, &other, 0, start, false);
+        run("L mark-unknown", &mut flows, &other, 77, start);
+        let udp = r2o_test_udp([192, 0, 2, 10], [198, 51, 100, 20], 50_000, 443, b"q");
+        run("E mark-udp", &mut flows, &udp, 77, start);
+        let reverse = r2o_test_udp([198, 51, 100, 20], [192, 0, 2, 10], 443, 50_000, b"r");
+        run("F udp-reverse", &mut flows, &reverse, 0, start);
+        run("J udp-again", &mut flows, &udp, 77, start);
+    }
+
+    #[test]
     fn r2o_счётчик_маршрутных_потоков_кумулятивный_как_c() {
         let mut flows = R2oRoutedFlows::default();
         let now = Instant::now();
@@ -1658,6 +1766,28 @@ mod tests {
         packet[22..24].copy_from_slice(&destination_port.to_be_bytes());
         packet[32] = 0x50;
         packet[33] = flags;
+        packet
+    }
+
+    fn r2o_test_udp(
+        source: [u8; 4],
+        destination: [u8; 4],
+        source_port: u16,
+        destination_port: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut packet = vec![0; 28 + payload.len()];
+        let total = packet.len() as u16;
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&total.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 17;
+        packet[12..16].copy_from_slice(&source);
+        packet[16..20].copy_from_slice(&destination);
+        packet[20..22].copy_from_slice(&source_port.to_be_bytes());
+        packet[22..24].copy_from_slice(&destination_port.to_be_bytes());
+        packet[24..26].copy_from_slice(&(8_u16 + payload.len() as u16).to_be_bytes());
+        packet[28..].copy_from_slice(payload);
         packet
     }
 
