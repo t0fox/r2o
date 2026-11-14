@@ -438,6 +438,9 @@ pub struct TcpSessions {
     tcp_stall_budgets: Vec<u16>,
     r2o_tcp_hello_flows: u64,
     r2o_tcp_hellos_with_sni: u64,
+    /// C `d2k_session.hellos`: все приветствия TCP, включая зонды
+    /// контроллера. `r2o_tcp_hello_flows` — только пользовательские потоки.
+    r2o_tcp_hellos_all: u64,
     tcp_hello_capture: CaptureTable,
     r2o_reply_hidden: u64,
     r2o_tcp_rst_dropped: u64,
@@ -486,6 +489,7 @@ impl TcpSessions {
             tcp_stall_budgets: vec![TCP_STALL_PACKET_BUDGET as u16],
             r2o_tcp_hello_flows: 0,
             r2o_tcp_hellos_with_sni: 0,
+            r2o_tcp_hellos_all: 0,
             tcp_hello_capture: CaptureTable::default(),
             r2o_reply_hidden: 0,
             r2o_tcp_rst_dropped: 0,
@@ -733,6 +737,11 @@ impl TcpSessions {
 
     pub fn r2o_tcp_hellos_with_sni(&self) -> u64 {
         self.r2o_tcp_hellos_with_sni
+    }
+
+    /// C `d2k_session_hellos` (TCP-половина): все приветствия, включая зонды.
+    pub fn r2o_tcp_hellos_all(&self) -> u64 {
+        self.r2o_tcp_hellos_all
     }
 
     /// Число потоков, где ACK указал на невидимый очереди ответ сервера.
@@ -1288,6 +1297,7 @@ impl TcpSessions {
 
         let r2o_tcp_hello_flows = &mut self.r2o_tcp_hello_flows;
         let r2o_tcp_hellos_with_sni = &mut self.r2o_tcp_hellos_with_sni;
+        let r2o_tcp_hellos_all = &mut self.r2o_tcp_hellos_all;
         let tcp_hello_capture = &mut self.tcp_hello_capture;
         let r2o_reply_hidden = &mut self.r2o_reply_hidden;
         let r2o_tcp_rst_dropped = &mut self.r2o_tcp_rst_dropped;
@@ -1357,6 +1367,7 @@ impl TcpSessions {
             }
             session.hello_at = Some(now);
             session.hello_seq = Some(tcp.sequence);
+            *r2o_tcp_hellos_all = (*r2o_tcp_hellos_all).wrapping_add(1);
             if !controller_probe {
                 *r2o_tcp_hello_flows = (*r2o_tcp_hello_flows).wrapping_add(1);
                 if hello.sni_range.is_some() {
@@ -1435,6 +1446,7 @@ impl TcpSessions {
                             // объявлении приветствия и запоминает ACK именно
                             // того пакета.
                             session.hello_ack = ack.then_some(tcp.acknowledgment);
+                            *r2o_tcp_hellos_all = (*r2o_tcp_hellos_all).wrapping_add(1);
                             if !controller_probe {
                                 *r2o_tcp_hello_flows = (*r2o_tcp_hello_flows).wrapping_add(1);
                             }
@@ -2572,7 +2584,7 @@ pub fn r2o_session_flows(
 
 /// C `d2k_session_hellos`: приветствия TCP+QUIC.
 pub fn r2o_session_hellos(tcp: &TcpSessions, udp: &crate::r2o_udp_sessions::R2oUdpSessions) -> u64 {
-    tcp.r2o_tcp_hello_flows()
+    tcp.r2o_tcp_hellos_all()
         .saturating_add(udp.r2o_quic_hello_flows())
 }
 
@@ -2581,6 +2593,9 @@ pub fn r2o_session_with_sni(
     tcp: &TcpSessions,
     udp: &crate::r2o_udp_sessions::R2oUdpSessions,
 ) -> u64 {
+    // C `session.c:2155`: TCP-половина with_sni не считает зонды
+    // контроллера, а `hellos` выше — считает. UDP-половина в C зонды
+    // включает.
     tcp.r2o_tcp_hellos_with_sni()
         .saturating_add(udp.r2o_quic_hellos_with_sni())
 }
@@ -6339,6 +6354,18 @@ mod tests {
         let before = full.session_applied();
         let decision = decide_with_session(&mut full, &tcp_fake_plan(), &full_hello);
         print_plan("Q full-table", &decision, full.session_applied() > before);
+
+        // R: зонд контроллера считается в hellos/with_sni, но не в
+        // пользовательском tcp_hello_flows.
+        let mut probe = TcpSessions::default();
+        let probe_hello = ipv4_tcp_packet(client, server, 0x18, 64, 2001, &client_hello_with_sni());
+        let _ = decide_with_session_probe(&mut probe, &Plan::default(), &probe_hello);
+        println!(
+            "R probe-hello hellos={} with_sni={} user={}",
+            probe.r2o_tcp_hellos_all(),
+            probe.r2o_tcp_hellos_with_sni(),
+            probe.r2o_tcp_hello_flows()
+        );
     }
 
     #[test]

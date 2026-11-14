@@ -354,5 +354,24 @@ int main(void) {
         d2k_session_free(full);
     }
 
+    /* R: зонд контроллера учитывается в s->hellos/with_sni, но не в
+     * tcp_hello_flows (C `note_tcp_hello`). */
+    {
+        d2k_session *probe = d2k_session_new(64, 0);
+        uint8_t hello[256];
+        size_t hello_len = client_hello_sni(hello);
+        length = packet_with_payload(buffer, 0x18, 2001, hello, hello_len);
+        uint8_t out[4096];
+        d2k_result result;
+        memset(&result, 0, sizeof result);
+        (void)d2k_session_packet_probe(probe, buffer, length, 2000,
+                                       out, sizeof out, &result);
+        printf("R probe-hello hellos=%llu with_sni=%llu user=%llu\n",
+               (unsigned long long)d2k_session_hellos(probe),
+               (unsigned long long)d2k_session_with_sni(probe),
+               (unsigned long long)d2k_session_tcp_hello_flows(probe));
+        d2k_session_free(probe);
+    }
+
     return 0;
 }

@@ -1177,17 +1177,15 @@ mod app {
         );
         eprintln!(
             "r2o-datapath: распознано TCP ClientHello {}, из них с именем {}",
-            tcp_sessions.r2o_tcp_hello_flows(),
+            tcp_sessions.r2o_tcp_hellos_all(),
             tcp_sessions.r2o_tcp_hellos_with_sni()
         );
+        // C `print_stats` печатает `d2k_session_hellos/with_sni`: TCP+QUIC,
+        // включая зонды контроллера.
         eprintln!(
             "r2o-datapath: узнано приветствий {}, из них с именем {}",
-            tcp_sessions
-                .r2o_tcp_hello_flows()
-                .wrapping_add(udp_sessions.r2o_quic_hello_flows()),
-            tcp_sessions
-                .r2o_tcp_hellos_with_sni()
-                .wrapping_add(udp_sessions.r2o_quic_hellos_with_sni())
+            r2o_datapath::engine::r2o_session_hellos(tcp_sessions, udp_sessions),
+            r2o_datapath::engine::r2o_session_with_sni(tcp_sessions, udp_sessions)
         );
         eprintln!(
             "r2o-datapath: снято чужих сбросов {}",
@@ -1485,6 +1483,7 @@ mod app {
         )?;
         let mut flow_journal = R2oFlowJournal::with_capacity(options.journal_capacity as usize)?;
         let journal_origin = Instant::now();
+        let journal_origin_ns = r2o_now_ns();
         let mut journal_seen = 0_u64;
         let mut journal_peer_connected = false;
         eprintln!(
@@ -1640,19 +1639,7 @@ mod app {
                 if let Some(line) = icmp_guard.r2o_stats_line() {
                     eprintln!("r2o-datapath: {line}");
                 }
-                for entry in flow_journal.iter() {
-                    let name = String::from_utf8_lossy(&entry.name[..usize::from(entry.name_len)]);
-                    let details = format_journal_details(entry);
-                    eprintln!(
-                        "r2o-datapath: [{} нс] {} {} {} {}{}",
-                        entry.at_ns,
-                        proto_name(entry.key[37]),
-                        entry.kind.c_name_with_name(entry.name_len != 0),
-                        format_journal_key(&entry.key),
-                        name,
-                        details
-                    );
-                }
+                r2o_print_journal(&flow_journal, journal_origin_ns);
                 return Ok(());
             }
             name_plans.r2o_set_send_maxlen(raw.as_ref().map_or(send_maxlen, RawSocket::maxlen));
@@ -3853,6 +3840,61 @@ mod app {
         }
     }
 
+    /// C `print_journal` (`d2kd.c:1070-1104`): ключ печатается канонической
+    /// парой low-high. Для IPv6 донор печатает первые четыре байта адреса
+    /// тем же `%u.%u.%u.%u`, поэтому формат совпадает байт в байт.
+    fn format_journal_key_c(key: &[u8; r2k_core::control::KEY_LEN]) -> String {
+        let low_port = u16::from_be_bytes([key[33], key[34]]);
+        let high_port = u16::from_be_bytes([key[35], key[36]]);
+        format!(
+            "{}.{}.{}.{}:{} - {}.{}.{}.{}:{}",
+            key[1], key[2], key[3], key[4], low_port, key[17], key[18], key[19], key[20], high_port
+        )
+    }
+
+    /// C `print_journal`: время в миллисекундах от старта, без пояснения у
+    /// записи с пустым видом (PLAN_DONE) и с двоеточием перед непустым.
+    fn format_journal_line_c(start_ns: u64, entry: &R2oFlowJournalEntry) -> String {
+        let kind = entry.kind.c_name_with_name(entry.name_len != 0);
+        let name = if entry.name_len == 0 {
+            String::new()
+        } else {
+            String::from_utf8_lossy(&entry.name[..usize::from(entry.name_len)]).into_owned()
+        };
+        let note = entry.note.unwrap_or("");
+        let separator = if !note.is_empty() && !kind.is_empty() {
+            ": "
+        } else {
+            ""
+        };
+        format!(
+            "  {:>6} мс  {} {}  {}{}{}{}{}",
+            entry.at_ns.saturating_sub(start_ns) / 1_000_000,
+            proto_name(entry.key[37]),
+            format_journal_key_c(&entry.key),
+            kind,
+            if name.is_empty() { "" } else { " " },
+            name,
+            separator,
+            note
+        )
+    }
+
+    fn r2o_print_journal(journal: &R2oFlowJournal, start_ns: u64) {
+        if journal.count() == 0 {
+            eprintln!("журнал пуст");
+            return;
+        }
+        eprintln!(
+            "--- журнал: {} записей, затёрто {} ---",
+            journal.count(),
+            journal.dropped()
+        );
+        for entry in journal.iter() {
+            eprintln!("{}", format_journal_line_c(start_ns, entry));
+        }
+    }
+
     fn format_journal_key(key: &[u8; r2k_core::control::KEY_LEN]) -> String {
         use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -5582,16 +5624,17 @@ mod app {
             ControlServer, EmitKind, NF_ACCEPT, NF_DROP, OriginalFate, PacketDecision,
             PendingApplied, Plan, R2oFlowJournal, R2oQuicSessions, R2oTcpExecution, ReceiveError,
             RuntimeMode, TcpSessions, WirePacket, decide_with_tcp_session_mode,
-            format_journal_details, format_journal_key, handle_control_command, load_plan,
-            needs_raw_socket, observe_quic_packet, observe_stun_packet, parse_options,
-            r2o_both_family_arguments, r2o_clean_handshake_event, r2o_datapath_payload,
-            r2o_execution_is_damaged, r2o_fail_pending_applied, r2o_finish_tcp_execution,
-            r2o_first_oversized_emit, r2o_is_controller_probe, r2o_packet_route_skip,
-            r2o_release_delayed_udp_batch_with, r2o_tcp_early_rst_event,
-            r2o_tcp_rst_cut_signal_event, r2o_udp_decide_once, r2o_udp_hold_ready,
-            r2o_udp_mark_plain_pass, r2o_udp_mark_planned, r2o_udp_packet_admitted_at_hook,
-            r2o_udp_packet_admitted_for_mode, release_many_with, release_with, send_applied_event,
-            send_hello_event, send_journal_snapshot, send_journal_updates, udp_packet_admitted,
+            format_journal_details, format_journal_key, format_journal_line_c,
+            handle_control_command, load_plan, needs_raw_socket, observe_quic_packet,
+            observe_stun_packet, parse_options, r2o_both_family_arguments,
+            r2o_clean_handshake_event, r2o_datapath_payload, r2o_execution_is_damaged,
+            r2o_fail_pending_applied, r2o_finish_tcp_execution, r2o_first_oversized_emit,
+            r2o_is_controller_probe, r2o_packet_route_skip, r2o_release_delayed_udp_batch_with,
+            r2o_tcp_early_rst_event, r2o_tcp_rst_cut_signal_event, r2o_udp_decide_once,
+            r2o_udp_hold_ready, r2o_udp_mark_plain_pass, r2o_udp_mark_planned,
+            r2o_udp_packet_admitted_at_hook, r2o_udp_packet_admitted_for_mode, release_many_with,
+            release_with, send_applied_event, send_hello_event, send_journal_snapshot,
+            send_journal_updates, udp_packet_admitted,
         };
         use r2k_core::control::{
             KEY_LEN, R2oTcpCleanHandshakeEvent, R2oTcpEarlyRstEvent, R2oTcpRstCutSignalEvent,
@@ -8959,6 +9002,26 @@ mod app {
             assert_eq!(K::PlanDone.c_name(), "");
             assert_eq!(K::PlanUnsent.c_name(), "посылка не ушла");
             assert_eq!(K::PlanDamaged.c_name(), "поток испорчен");
+        }
+
+        #[test]
+        fn journal_line_matches_c_print_journal_format() {
+            let mut entry = r2o_datapath::flow_journal::R2oFlowJournalEntry {
+                at_ns: 5_000_000,
+                kind: r2o_datapath::flow_journal::R2oFlowJournalKind::PlanRefused,
+                note: Some("плана для этой цели нет"),
+                ..Default::default()
+            };
+            entry.key[0] = 4;
+            entry.key[1..5].copy_from_slice(&[1, 2, 3, 4]);
+            entry.key[17..21].copy_from_slice(&[5, 6, 7, 8]);
+            entry.key[33..35].copy_from_slice(&7_u16.to_be_bytes());
+            entry.key[35..37].copy_from_slice(&9_u16.to_be_bytes());
+            entry.key[37] = 17;
+            assert_eq!(
+                format_journal_line_c(1_000_000, &entry),
+                "       4 мс  udp 1.2.3.4:7 - 5.6.7.8:9  план не применён: плана для этой цели нет"
+            );
         }
     }
 }
