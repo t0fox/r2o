@@ -189,6 +189,253 @@ fn truncate_source(source: &str) -> String {
     String::from_utf8(bytes).unwrap_or_default()
 }
 
+/// C `dns_name_encode`: DNS-имя в последовательность length-prefixed labels.
+/// Только ASCII alnum/'-', нижний регистр, метка 1..63, имя до 253.
+pub fn dns_name_encode(name: &str) -> Option<Vec<u8>> {
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || bytes.len() > 253 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() + 2);
+    let mut index = 0;
+    while index < bytes.len() {
+        let end = bytes[index..]
+            .iter()
+            .position(|byte| *byte == b'.')
+            .map_or(bytes.len(), |offset| index + offset);
+        let len = end - index;
+        if len == 0 || len > 63 || out.len() + len + 1 >= 256 {
+            return None;
+        }
+        out.push(len as u8);
+        for byte in &bytes[index..end] {
+            if !(byte.is_ascii_alphanumeric() || *byte == b'-') {
+                return None;
+            }
+            out.push(byte.to_ascii_lowercase());
+        }
+        index = end + 1;
+        if end == bytes.len() {
+            break;
+        }
+    }
+    out.push(0);
+    Some(out)
+}
+
+/// C `dns_skip_name`: пропустить имя с compression pointer, не более 16
+/// переходов; `offset` обновляется только при первом (не jumped) проходе.
+pub fn dns_skip_name(packet: &[u8], offset: &mut usize) -> bool {
+    let len = packet.len();
+    let mut at = *offset;
+    let mut jumps = 0;
+    let mut jumped = false;
+    while at < len {
+        let n = packet[at];
+        at += 1;
+        if n == 0 {
+            if !jumped {
+                *offset = at;
+            }
+            return true;
+        }
+        if n & 0xc0 == 0xc0 {
+            if at >= len {
+                return false;
+            }
+            jumps += 1;
+            if jumps > 16 {
+                return false;
+            }
+            let target = (usize::from(n & 0x3f) << 8) | usize::from(packet[at]);
+            at += 1;
+            if target >= len {
+                return false;
+            }
+            if !jumped {
+                *offset = at;
+                jumped = true;
+            }
+            at = target;
+        } else {
+            if n & 0xc0 != 0 || n > 63 || at + usize::from(n) > len {
+                return false;
+            }
+            at += usize::from(n);
+            if !jumped {
+                *offset = at;
+            }
+        }
+    }
+    false
+}
+
+/// C `dns_response_address`: разобрать ответ DNS и вернуть первый A/AAAA
+/// class IN для совпавшего вопроса.
+pub fn dns_response_address(
+    packet: &[u8],
+    id: u16,
+    qname: &[u8],
+    qtype: u16,
+) -> Option<std::net::IpAddr> {
+    let len = packet.len();
+    if len < 12
+        || packet[0] != (id >> 8) as u8
+        || packet[1] != (id & 0xff) as u8
+        || packet[2] & 0x80 == 0
+        || packet[2] & 0x78 != 0
+        || packet[2] & 0x02 != 0
+        || packet[3] & 0x0f != 0
+        || (u16::from(packet[4]) << 8 | u16::from(packet[5])) != 1
+    {
+        return None;
+    }
+    let mut at = 12;
+    if at + qname.len() + 4 > len
+        || packet[at..at + qname.len()] != *qname
+        || packet[at + qname.len()] != (qtype >> 8) as u8
+        || packet[at + qname.len() + 1] != (qtype & 0xff) as u8
+        || packet[at + qname.len() + 2] != 0
+        || packet[at + qname.len() + 3] != 1
+    {
+        return None;
+    }
+    at += qname.len() + 4;
+    let answers = (u16::from(packet[6]) << 8 | u16::from(packet[7])) as usize;
+    if answers == 0 || answers > 128 {
+        return None;
+    }
+    for _ in 0..answers {
+        if !dns_skip_name(packet, &mut at) || at + 10 > len {
+            return None;
+        }
+        let record_type = u16::from(packet[at]) << 8 | u16::from(packet[at + 1]);
+        let class = u16::from(packet[at + 2]) << 8 | u16::from(packet[at + 3]);
+        let rdlen = (u16::from(packet[at + 8]) << 8 | u16::from(packet[at + 9])) as usize;
+        at += 10;
+        if at + rdlen > len {
+            return None;
+        }
+        if class == 1 && record_type == qtype {
+            match (qtype, rdlen) {
+                (1, 4) => {
+                    let octets: [u8; 4] = packet[at..at + 4].try_into().ok()?;
+                    return Some(std::net::IpAddr::V4(octets.into()));
+                }
+                (28, 16) => {
+                    let octets: [u8; 16] = packet[at..at + 16].try_into().ok()?;
+                    return Some(std::net::IpAddr::V6(octets.into()));
+                }
+                _ => {}
+            }
+        }
+        at += rdlen;
+    }
+    None
+}
+
+/// C `dns_query_one`: UDP/53, один A или AAAA запрос, SO_RCVTIMEO 400 мс,
+/// SO_MARK при mark != 0.
+#[cfg(unix)]
+pub fn dns_query_one(host: &str, server: &str, qtype: u16, mark: u32) -> Option<std::net::IpAddr> {
+    use std::os::fd::AsRawFd;
+    use std::time::Duration;
+
+    let qname = dns_name_encode(host)?;
+    let server_ip: std::net::IpAddr = server.parse().ok()?;
+    let peer = std::net::SocketAddr::new(server_ip, 53);
+    let bind = if server_ip.is_ipv4() {
+        std::net::SocketAddr::from(([0, 0, 0, 0], 0))
+    } else {
+        std::net::SocketAddr::from(([0u16; 8], 0))
+    };
+    let socket = std::net::UdpSocket::bind(bind).ok()?;
+    if mark != 0 {
+        #[cfg(target_os = "linux")]
+        {
+            const SOL_SOCKET: std::os::raw::c_int = 1;
+            const SO_MARK: std::os::raw::c_int = 36;
+            unsafe extern "C" {
+                fn setsockopt(
+                    fd: std::os::raw::c_int,
+                    level: std::os::raw::c_int,
+                    option: std::os::raw::c_int,
+                    value: *const std::os::raw::c_void,
+                    length: u32,
+                ) -> std::os::raw::c_int;
+            }
+            let result = unsafe {
+                setsockopt(
+                    socket.as_raw_fd(),
+                    SOL_SOCKET,
+                    SO_MARK,
+                    (&mark as *const u32).cast(),
+                    std::mem::size_of_val(&mark) as u32,
+                )
+            };
+            if result != 0 {
+                return None;
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        return None;
+    }
+    socket
+        .set_read_timeout(Some(Duration::from_millis(400)))
+        .ok()?;
+    socket.connect(peer).ok()?;
+    let id = (std::process::id() as u16)
+        ^ (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs() as u16)
+        ^ (&qname as *const _ as usize as u16);
+    let mut packet = vec![0_u8; 12 + qname.len() + 4];
+    packet[0] = (id >> 8) as u8;
+    packet[1] = (id & 0xff) as u8;
+    packet[2] = 1;
+    packet[5] = 1;
+    packet[12..12 + qname.len()].copy_from_slice(&qname);
+    let mut at = 12 + qname.len();
+    packet[at] = (qtype >> 8) as u8;
+    packet[at + 1] = (qtype & 0xff) as u8;
+    packet[at + 2] = 0;
+    packet[at + 3] = 1;
+    at += 4;
+    socket.send(&packet[..at]).ok()?;
+    let mut response = [0_u8; 1024];
+    let got = socket.recv(&mut response).ok()?;
+    dns_response_address(&response[..got], id, &qname, qtype)
+}
+
+/// C `d2k_dns_resolve_bootstrap`: IP literal возвращается как есть; иначе до
+/// двух серверов из списка, A затем AAAA. Ошибка/таймаут — None.
+#[cfg(unix)]
+pub fn dns_resolve_bootstrap(host: &str, servers: &str, mark: u32) -> Option<std::net::IpAddr> {
+    if host.is_empty() || servers.is_empty() {
+        return None;
+    }
+    if let Ok(address) = host.parse::<std::net::IpAddr>() {
+        return Some(address);
+    }
+    if servers.len() >= DNS_BOOTSTRAP_MAX {
+        return None;
+    }
+    for server in servers.split(',').take(2) {
+        let server = server.trim_matches([' ', '\t', '\r']);
+        if server.is_empty() {
+            continue;
+        }
+        if let Some(address) = dns_query_one(host, server, 1, mark) {
+            return Some(address);
+        }
+        if let Some(address) = dns_query_one(host, server, 28, mark) {
+            return Some(address);
+        }
+    }
+    None
+}
+
 /// C `d2k_dns_service_match`: первый подходящий endpoint.
 ///
 /// `transport` — 6 (TCP: doh/dot) или 17 (UDP: doq). `name`/`ip` могут быть
@@ -1052,6 +1299,244 @@ server-https:
                 None => println!("{name} none"),
                 Some(found) => println!("{name} {}", found.host),
             }
+        }
+    }
+
+    #[test]
+    fn dns_name_encode_повторяет_донорские_метки() {
+        assert_eq!(
+            super::dns_name_encode("Example.COM").unwrap(),
+            b"\x07example\x03com\x00"
+        );
+        assert_eq!(
+            super::dns_name_encode("a-b.example").unwrap(),
+            b"\x03a-b\x07example\x00"
+        );
+        for bad in ["", "a..b", ".a", "a_b", "a b", "a/b"] {
+            assert!(super::dns_name_encode(bad).is_none(), "принят {bad:?}");
+        }
+        let long_label = "a".repeat(64);
+        assert!(super::dns_name_encode(&long_label).is_none());
+        let long_name = std::iter::repeat_n("abcdefghi", 29)
+            .collect::<Vec<_>>()
+            .join(".");
+        assert!(super::dns_name_encode(&long_name).is_none());
+    }
+
+    fn a_response(id: u16, tc: bool, rcode: u8, class: u16) -> (Vec<u8>, Vec<u8>) {
+        let qname = super::dns_name_encode("bootstrap.example").unwrap();
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&id.to_be_bytes());
+        packet.push(0x81);
+        packet.push(0x80 | u8::from(tc) << 1 | rcode);
+        packet.extend_from_slice(&1_u16.to_be_bytes());
+        packet.extend_from_slice(&1_u16.to_be_bytes());
+        packet.extend_from_slice(&0_u16.to_be_bytes());
+        packet.extend_from_slice(&0_u16.to_be_bytes());
+        packet.extend_from_slice(&qname);
+        packet.extend_from_slice(&1_u16.to_be_bytes());
+        packet.extend_from_slice(&1_u16.to_be_bytes());
+        packet.extend_from_slice(&[0xc0, 0x0c]);
+        packet.extend_from_slice(&1_u16.to_be_bytes());
+        packet.extend_from_slice(&class.to_be_bytes());
+        packet.extend_from_slice(&60_u32.to_be_bytes());
+        packet.extend_from_slice(&4_u16.to_be_bytes());
+        packet.extend_from_slice(&[203, 0, 113, 7]);
+        (packet, qname)
+    }
+
+    #[test]
+    fn dns_response_address_повторяет_донорские_проверки() {
+        let (packet, qname) = a_response(0x1234, false, 0, 1);
+        assert_eq!(
+            super::dns_response_address(&packet, 0x1234, &qname, 1),
+            Some(std::net::IpAddr::from([203, 0, 113, 7]))
+        );
+        assert!(super::dns_response_address(&packet, 0x1235, &qname, 1).is_none());
+        assert!(super::dns_response_address(&packet, 0x1234, &qname, 28).is_none());
+        let (truncated, _) = a_response(0x1234, true, 0, 1);
+        assert!(super::dns_response_address(&truncated, 0x1234, &qname, 1).is_none());
+        let (rcode, _) = a_response(0x1234, false, 3, 1);
+        assert!(super::dns_response_address(&rcode, 0x1234, &qname, 1).is_none());
+        let (wrong_class, _) = a_response(0x1234, false, 0, 3);
+        assert!(super::dns_response_address(&wrong_class, 0x1234, &qname, 1).is_none());
+
+        // AAAA-ответ.
+        let mut aaaa = packet.clone();
+        let qtype_at = 12 + qname.len();
+        aaaa[qtype_at..qtype_at + 2].copy_from_slice(&28_u16.to_be_bytes());
+        aaaa.truncate(qtype_at + 4);
+        aaaa.extend_from_slice(&[0xc0, 0x0c]);
+        aaaa.extend_from_slice(&28_u16.to_be_bytes());
+        aaaa.extend_from_slice(&1_u16.to_be_bytes());
+        aaaa.extend_from_slice(&60_u32.to_be_bytes());
+        aaaa.extend_from_slice(&16_u16.to_be_bytes());
+        let address = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7];
+        aaaa.extend_from_slice(&address);
+        assert_eq!(
+            super::dns_response_address(&aaaa, 0x1234, &qname, 28),
+            Some(std::net::IpAddr::from(address))
+        );
+    }
+
+    #[test]
+    fn dns_skip_name_ограничивает_compression_прыжки() {
+        let mut offset = 0;
+        assert!(super::dns_skip_name(b"\x03one\x03two\x00tail", &mut offset));
+        assert_eq!(offset, 9);
+        // Указатель назад на терминатор; offset — после указателя.
+        let mut offset = 0;
+        assert!(super::dns_skip_name(b"\x03one\xc0\x06\x00", &mut offset));
+        assert_eq!(offset, 6);
+        // Петля: указатель на самого себя.
+        let mut offset = 0;
+        assert!(!super::dns_skip_name(b"\xc0\x00", &mut offset));
+        // Указатель за пределы пакета.
+        let mut offset = 0;
+        assert!(!super::dns_skip_name(b"\xc0\xff", &mut offset));
+    }
+
+    #[test]
+    fn dns_bootstrap_vectors_differential() {
+        let names = [
+            "Example.COM",
+            "a-b.example",
+            "",
+            "a..b",
+            ".a",
+            "a_b",
+            "a b",
+            "abcdefghijklmnopqrstuvwxyz.ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        ];
+        let mut out = String::new();
+        for name in names {
+            let encoded = super::dns_name_encode(name);
+            let hex = encoded
+                .as_ref()
+                .map(|bytes| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>())
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "E|{name}|{}|{hex}\n",
+                if encoded.is_some() { 1 } else { 0 }
+            ));
+        }
+        let skips: [(&[u8], usize); 4] = [
+            (b"\x03one\x03two\x00tail", 11),
+            (b"\x03one\xc0\x06\x00", 7),
+            (b"\xc0\x00", 2),
+            (b"\xc0\xff", 2),
+        ];
+        for (case, (packet, len)) in skips.iter().enumerate() {
+            let mut offset = 0;
+            let ok = super::dns_skip_name(&packet[..*len], &mut offset);
+            out.push_str(&format!("S|{case}|{}|{offset}\n", if ok { 1 } else { 0 }));
+        }
+        let (packet, qname) = a_response(0x1234, false, 0, 1);
+        let cases: [(&str, u16, bool, u8, u16, bool); 6] = [
+            ("a", 1, false, 0, 1, false),
+            ("aaaa", 28, false, 0, 1, false),
+            ("wrong_id", 1, false, 0, 1, true),
+            ("tc", 1, true, 0, 1, false),
+            ("rcode", 1, false, 3, 1, false),
+            ("class3", 1, false, 0, 3, false),
+        ];
+        for (name, qtype, tc, rcode, class, wrong_id) in cases {
+            let (mut response, qname_for_case) = a_response(0x1234, tc, rcode, class);
+            let qtype_at = 12 + qname_for_case.len();
+            response[qtype_at..qtype_at + 2].copy_from_slice(&qtype.to_be_bytes());
+            response[qtype_at + 2..qtype_at + 4].copy_from_slice(&class.to_be_bytes());
+            response.truncate(qtype_at + 4);
+            response.extend_from_slice(&[0xc0, 0x0c]);
+            response.extend_from_slice(&qtype.to_be_bytes());
+            response.extend_from_slice(&1_u16.to_be_bytes());
+            response.extend_from_slice(&60_u32.to_be_bytes());
+            if qtype == 1 {
+                response.extend_from_slice(&4_u16.to_be_bytes());
+                response.extend_from_slice(&[203, 0, 113, 7]);
+            } else {
+                response.extend_from_slice(&16_u16.to_be_bytes());
+                response.extend_from_slice(&[
+                    0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7,
+                ]);
+            }
+            let id = if wrong_id { 0x1235 } else { 0x1234 };
+            let parsed = super::dns_response_address(&response, id, &qname, qtype);
+            out.push_str(&format!(
+                "R|{name}|{}|{}\n",
+                if parsed.is_some() { 1 } else { 0 },
+                parsed.map(|ip| ip.to_string()).unwrap_or_default()
+            ));
+        }
+        if let Ok(path) = std::env::var("R2O_DNS_BOOTSTRAP_VECTORS") {
+            std::fs::write(path, out.clone()).unwrap();
+        }
+        assert!(out.contains("R|a|1|203.0.113.7\n"));
+        assert!(out.contains("R|aaaa|1|2001:db8::7\n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "нужен bind UDP/53: запускать в unshare -Urn через differential"]
+    fn dns_bootstrap_loopback() {
+        use std::net::{IpAddr, UdpSocket};
+        use std::time::Duration;
+
+        let server = UdpSocket::bind(("127.0.0.1", 53)).unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_millis(400)))
+            .unwrap();
+        let thread = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let mut request = [0_u8; 1024];
+                let Ok((got, peer)) = server.recv_from(&mut request) else {
+                    break;
+                };
+                let qname = super::dns_name_encode("bootstrap.example").unwrap();
+                let qtype_at = 12 + qname.len();
+                let qtype = u16::from_be_bytes([request[qtype_at], request[qtype_at + 1]]);
+                let mut response = Vec::new();
+                response.extend_from_slice(&request[..2]);
+                response.extend_from_slice(&[0x81, 0x80]);
+                response.extend_from_slice(&1_u16.to_be_bytes());
+                response.extend_from_slice(&1_u16.to_be_bytes());
+                response.extend_from_slice(&0_u16.to_be_bytes());
+                response.extend_from_slice(&0_u16.to_be_bytes());
+                response.extend_from_slice(&request[12..qtype_at + 4]);
+                response.extend_from_slice(&[0xc0, 0x0c]);
+                response.extend_from_slice(&qtype.to_be_bytes());
+                response.extend_from_slice(&1_u16.to_be_bytes());
+                response.extend_from_slice(&60_u32.to_be_bytes());
+                if qtype == 1 {
+                    response.extend_from_slice(&4_u16.to_be_bytes());
+                    response.extend_from_slice(&[203, 0, 113, 7]);
+                } else {
+                    response.extend_from_slice(&16_u16.to_be_bytes());
+                    response.extend_from_slice(&[
+                        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7,
+                    ]);
+                }
+                let _ = server.send_to(&response, peer);
+                let _ = got;
+            }
+        });
+        let resolved = super::dns_resolve_bootstrap("bootstrap.example", "127.0.0.1", 0);
+        assert_eq!(resolved, Some(IpAddr::from([203, 0, 113, 7])));
+        thread.join().unwrap();
+        let literal = super::dns_resolve_bootstrap("203.0.113.9", "127.0.0.1", 0);
+        assert_eq!(literal, Some(IpAddr::from([203, 0, 113, 9])));
+        let bad = super::dns_resolve_bootstrap("bootstrap.example", "not-an-ip", 0);
+        assert!(bad.is_none());
+        if let Ok(path) = std::env::var("R2O_DNS_BOOTSTRAP_LOOPBACK") {
+            let text = format!(
+                "a {} {}\nliteral {} {}\nbad {} {}\n",
+                u8::from(resolved.is_some()),
+                resolved.map(|ip| ip.to_string()).unwrap_or_default(),
+                u8::from(literal.is_some()),
+                literal.map(|ip| ip.to_string()).unwrap_or_default(),
+                u8::from(bad.is_some()),
+                bad.map(|ip| ip.to_string()).unwrap_or_default(),
+            );
+            std::fs::write(path, text).unwrap();
         }
     }
 }

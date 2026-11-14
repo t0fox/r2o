@@ -229,6 +229,7 @@ struct ClassifyCliOptions {
 struct ServeCliOptions {
     discover: bool,
     mark: Option<u32>,
+    measure_mark: Option<u32>,
     live_path: Option<PathBuf>,
     no_diagnostics: bool,
 }
@@ -240,6 +241,7 @@ struct ServeBothOptions {
     catalog: PathBuf,
     discover: bool,
     mark: Option<u32>,
+    measure_mark: Option<u32>,
     live4: Option<PathBuf>,
     live6: Option<PathBuf>,
 }
@@ -1240,7 +1242,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
         #[cfg(not(unix))]
         return Err("управляющий AF_UNIX сокет поддерживается только на Unix".into());
     }
-    if (3..=9).contains(&arguments.len()) && arguments[0] == "--serve" {
+    if (3..=13).contains(&arguments.len()) && arguments[0] == "--serve" {
         #[cfg(unix)]
         {
             let options = parse_serve_options(&arguments[3..])?;
@@ -1249,6 +1251,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
                 PathBuf::from(&arguments[2]),
                 options.discover,
                 options.mark,
+                options.measure_mark,
                 options.live_path,
                 options.no_diagnostics,
             );
@@ -1793,6 +1796,7 @@ fn parse_serve_options(arguments: &[std::ffi::OsString]) -> Result<ServeCliOptio
     let mut options = ServeCliOptions {
         discover: false,
         mark: None,
+        measure_mark: None,
         live_path: None,
         no_diagnostics: false,
     };
@@ -1807,6 +1811,14 @@ fn parse_serve_options(arguments: &[std::ffi::OsString]) -> Result<ServeCliOptio
                     .and_then(|value| value.to_str())
                     .ok_or("--mark требует числовую метку")?;
                 options.mark = Some(parse_mark(value)?);
+            }
+            Some("--measure-mark") if options.measure_mark.is_none() => {
+                index += 1;
+                let value = arguments
+                    .get(index)
+                    .and_then(|value| value.to_str())
+                    .ok_or("--measure-mark требует числовую метку")?;
+                options.measure_mark = Some(parse_mark(value)?);
             }
             Some("--live") if options.live_path.is_none() => {
                 index += 1;
@@ -1836,6 +1848,7 @@ fn parse_serve_both_options(arguments: &[std::ffi::OsString]) -> Result<ServeBot
     let mut catalog = None;
     let mut discover = false;
     let mut mark = None;
+    let mut measure_mark = None;
     let mut live4 = None;
     let mut live6 = None;
     let mut index = 1;
@@ -1865,6 +1878,14 @@ fn parse_serve_both_options(arguments: &[std::ffi::OsString]) -> Result<ServeBot
                 index += 1;
                 mark = Some(parse_mark(value)?);
             }
+            "--measure-mark" if measure_mark.is_none() => {
+                let value = arguments
+                    .get(index)
+                    .and_then(|value| value.to_str())
+                    .ok_or("--measure-mark требует числовую метку")?;
+                index += 1;
+                measure_mark = Some(parse_mark(value)?);
+            }
             value if value.starts_with("--") => {
                 return Err(format!("неизвестный параметр --serve-both: {value}"));
             }
@@ -1881,6 +1902,7 @@ fn parse_serve_both_options(arguments: &[std::ffi::OsString]) -> Result<ServeBot
         catalog: catalog.ok_or("--serve-both требует путь каталога")?,
         discover,
         mark,
+        measure_mark,
         live4,
         live6,
     })
@@ -1903,7 +1925,7 @@ fn save_plan_file(path: &std::path::Path, plan: &[u8]) -> std::io::Result<()> {
 
 fn print_help() {
     println!(
-        "r2o-controller — каталог и контроллер r2o\n\nИспользование:\n  r2o-controller --check-catalog ФАЙЛ\n  r2o-controller --clear-catalog ФАЙЛ\n  r2o-controller --classify HOST PORT SNI [REPEATS] [--modern] [--allow-loopback] [--mark N] [--only ИМЯ] [--skip ИМЯ ...] [--save-plan ФАЙЛ] [--arm СОКЕТ]\n  r2o-controller --probe-response HOST PORT SNI [REPEATS]\n  r2o-controller --set-name СОКЕТ HOST FAMILY SHAPE ПЛАН.r2op\n  r2o-controller --set-addr СОКЕТ IP SHAPE ПЛАН.r2op\n  r2o-controller --del-addr СОКЕТ IP SHAPE\n  r2o-controller --apply-catalog СОКЕТ КАТАЛОГ.json\n  r2o-controller --recheck-name СОКЕТ HOST FAMILY SHAPE КАТАЛОГ.json\n  r2o-controller --mark-recheck HOST FAMILY SHAPE КАТАЛОГ.json\n  r2o-controller --serve СОКЕТ КАТАЛОГ.json [--discover] [--mark N]\n  r2o-controller --watch СОКЕТ\n  r2o-controller --journal СОКЕТ\n  r2o-controller --http-candidates\n  r2o-controller --self-check\n  r2o-controller --version\n  r2o-controller --help\n\nFAMILY: ipv4 или ipv6. SHAPE: modern, legacy, ech, http, quic или voice; voice использует HOST @discord-voice. Адресная привязка принимает modern, legacy, ech, quic или voice. QUIC поддерживает планы quicsplit, quicdeny, четыре формы IP-фрагментации после контрольной пробы, удлинение UDP, нулевую 16-байтовую фальшивку и пару фальшивых quic5 с TTL 3 после подтверждённого рукопожатия и зависания; --modern использует сохранённый TLS 1.3 ClientHello; --discover ставит новые TCP SNI в ограниченную очередь классификации и ищет обход HTTP-портала, а для Discord voice запускает ограниченный IP Discovery поиск, требующий --mark; --mark задаёт SO_MARK управляющим зондам и raw-пакетам; --save-plan создаёт новый файл и не перезаписывает существующий; --arm передаёт найденный план работающему r2o-datapath для соответствующей формы."
+        "r2o-controller — каталог и контроллер r2o\n\nИспользование:\n  r2o-controller --check-catalog ФАЙЛ\n  r2o-controller --clear-catalog ФАЙЛ\n  r2o-controller --classify HOST PORT SNI [REPEATS] [--modern] [--allow-loopback] [--mark N] [--only ИМЯ] [--skip ИМЯ ...] [--save-plan ФАЙЛ] [--arm СОКЕТ]\n  r2o-controller --probe-response HOST PORT SNI [REPEATS]\n  r2o-controller --set-name СОКЕТ HOST FAMILY SHAPE ПЛАН.r2op\n  r2o-controller --set-addr СОКЕТ IP SHAPE ПЛАН.r2op\n  r2o-controller --del-addr СОКЕТ IP SHAPE\n  r2o-controller --apply-catalog СОКЕТ КАТАЛОГ.json\n  r2o-controller --recheck-name СОКЕТ HOST FAMILY SHAPE КАТАЛОГ.json\n  r2o-controller --mark-recheck HOST FAMILY SHAPE КАТАЛОГ.json\n  r2o-controller --serve СОКЕТ КАТАЛОГ.json [--discover] [--mark N] [--measure-mark N]\n  r2o-controller --watch СОКЕТ\n  r2o-controller --journal СОКЕТ\n  r2o-controller --http-candidates\n  r2o-controller --self-check\n  r2o-controller --version\n  r2o-controller --help\n\nFAMILY: ipv4 или ipv6. SHAPE: modern, legacy, ech, http, quic или voice; voice использует HOST @discord-voice. Адресная привязка принимает modern, legacy, ech, quic или voice. QUIC поддерживает планы quicsplit, quicdeny, четыре формы IP-фрагментации после контрольной пробы, удлинение UDP, нулевую 16-байтовую фальшивку и пару фальшивых quic5 с TTL 3 после подтверждённого рукопожатия и зависания; --modern использует сохранённый TLS 1.3 ClientHello; --discover ставит новые TCP SNI в ограниченную очередь классификации и ищет обход HTTP-портала, а для Discord voice запускает ограниченный IP Discovery поиск, требующий --mark; --mark задаёт SO_MARK управляющим зондам и raw-пакетам; --measure-mark задаёт отдельную метку измерений (без неё измерения идут меткой --mark); --save-plan создаёт новый файл и не перезаписывает существующий; --arm передаёт найденный план работающему r2o-datapath для соответствующей формы."
     );
     println!("  classify: [--white ИМЯ] задаёт ECH-приманку для гипотезы белого ClientHello");
     println!("  classify: [--control-sni ИМЯ] задаёт подтверждённое контрольное имя");
@@ -2137,12 +2159,16 @@ fn serve_catalog(
     catalog_path: PathBuf,
     discover: bool,
     mark: Option<u32>,
+    measure_mark: Option<u32>,
     live_path: Option<PathBuf>,
     no_diagnostics: bool,
 ) -> Result<(), Box<dyn Error>> {
     use std::io::Write;
 
     install_r2o_controller_signal_handlers()?;
+    // C `d2k_sched_set_measure_mark`: без --measure-mark измерения идут
+    // меткой --mark.
+    let measure_mark = measure_mark.or(mark);
     let catalog = Catalog::load(&catalog_path)?;
     let mut client = ControlClient::connect(socket_path)?;
     let (catalog, compiled) = catalog_commands_for_runtime(
@@ -2167,9 +2193,9 @@ fn serve_catalog(
     let active_groups = HashSet::new();
     let live_catalog = Some((catalog.clone(), catalog_path.clone()));
     client.watch_events(
-        discover.then_some((catalog, catalog_path.clone(), mark)),
+        discover.then_some((catalog, catalog_path.clone(), measure_mark)),
         Some(https_cache_path),
-        mark,
+        measure_mark,
         live_catalog,
         live_path,
         active_groups,
@@ -2185,6 +2211,7 @@ fn serve_catalog_both(options: ServeBothOptions) -> Result<(), Box<dyn Error>> {
         catalog: &std::path::Path,
         discover: bool,
         mark: Option<u32>,
+        measure_mark: Option<u32>,
         live: Option<PathBuf>,
         no_diagnostics: bool,
     ) -> Vec<std::ffi::OsString> {
@@ -2199,6 +2226,10 @@ fn serve_catalog_both(options: ServeBothOptions) -> Result<(), Box<dyn Error>> {
         if let Some(mark) = mark {
             args.push("--mark".into());
             args.push(mark.to_string().into());
+        }
+        if let Some(measure_mark) = measure_mark {
+            args.push("--measure-mark".into());
+            args.push(measure_mark.to_string().into());
         }
         if let Some(live) = live {
             args.push("--live".into());
@@ -2219,6 +2250,7 @@ fn serve_catalog_both(options: ServeBothOptions) -> Result<(), Box<dyn Error>> {
                 &options.catalog,
                 options.discover,
                 options.mark,
+                options.measure_mark,
                 options.live4,
                 false,
             ),
@@ -2232,6 +2264,7 @@ fn serve_catalog_both(options: ServeBothOptions) -> Result<(), Box<dyn Error>> {
                 &options.catalog,
                 options.discover,
                 options.mark,
+                options.measure_mark,
                 options.live6,
                 !jobs.is_empty(),
             ),
@@ -3736,6 +3769,37 @@ fn r2o_store_confirmed_probe_path(
                 && binding.shape == target.shape
             {
                 binding.probe_path = path.to_owned();
+            }
+        }
+    }
+}
+
+/// C `verify_confirm` (`sched.c:9435-9447`): подтверждение ECH не стирает
+/// известного ранее публичного имени свидетеля.
+#[cfg(unix)]
+fn r2o_store_confirmed_ech_origin(
+    catalog: &mut Catalog,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    plan_id: &str,
+    origin: &str,
+) {
+    if origin.is_empty() {
+        return;
+    }
+    let transport = if target.shape == SHAPE_QUIC { 17 } else { 6 };
+    for box_record in &mut catalog.boxes {
+        for binding in &mut box_record.bindings {
+            if binding.target == target.host
+                && binding.plan_id == plan_id
+                && binding.transport == transport
+                && (if binding.family == 0 {
+                    4
+                } else {
+                    binding.family
+                }) == target.family
+                && binding.shape == target.shape
+            {
+                binding.ech_origin = origin.to_owned();
             }
         }
     }
@@ -6505,6 +6569,14 @@ fn r2o_plan_wire_id(text: &str) -> Option<[u8; 16]> {
         .map(|(_, wire)| wire)
 }
 
+/// Идентификатор каталога из строки `id <32 hex>` текста плана.
+fn r2o_catalog_plan_id(text: &str) -> Option<String> {
+    text.lines()
+        .find_map(|line| line.strip_prefix("id "))
+        .filter(|value| value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(str::to_ascii_lowercase)
+}
+
 #[cfg(unix)]
 fn r2o_confirm_discovery_outcome(
     mut outcome: DiscoveryOutcome,
@@ -8542,6 +8614,12 @@ struct DiscoveryOutcome {
     /// C `t->group_block_proven`: прямой замер доказал блокировку (Prefix/
     /// Whole/Opaque или объёмный обрыв). Только тогда пишется группа.
     group_block_proven: bool,
+    /// C `t->own_first == 2`: план перенесён с другой цели.
+    transferred_own_plan: bool,
+    /// C `t->bound_plan_id`: план, под которым шёл поток подозрения.
+    bound_plan_id: Option<String>,
+    /// C `t->ech_origin`: публичное имя ECH-свидетеля для привязки/группы.
+    ech_origin: Option<String>,
     volume_fingerprint: Option<r2o_controller::catalog::Fingerprint>,
     volume_box_id: Option<String>,
     retry_after: Option<std::time::Duration>,
@@ -12316,6 +12394,9 @@ impl DiscoveryWorker {
                                     volume_recovery: false,
                                     budget_mark: 0,
                                     group_block_proven: true,
+                                    transferred_own_plan: true,
+                                    bound_plan_id: own_bound_plan_id.clone(),
+                                    ech_origin: None,
                                     volume_fingerprint: None,
                                     volume_box_id: Some(candidate.box_id),
                                     retry_after: None,
@@ -12336,6 +12417,9 @@ impl DiscoveryWorker {
                                     volume_recovery: true,
 budget_mark: 0,
 group_block_proven: false,
+                transferred_own_plan: false,
+                bound_plan_id: None,
+                ech_origin: None,
                                     volume_fingerprint: None,
                                     volume_box_id: None,
                                     retry_after: Some(R2O_DISCOVERY_CHALLENGE_RETRY),
@@ -12559,6 +12643,9 @@ group_block_proven: false,
                             volume_recovery: false,
                             budget_mark: 0,
                             group_block_proven: false,
+                            transferred_own_plan: false,
+                            bound_plan_id: None,
+                            ech_origin: None,
                             volume_fingerprint: None,
                             volume_box_id: Some(candidate.box_id),
                             retry_after: None,
@@ -13363,6 +13450,13 @@ group_block_proven: false,
                     selected_config.origin_name
                 ));
             }
+            if target.shape == SHAPE_ECH_TCP
+                && outcome.plan_text.is_some()
+                && !selected_config.origin_name.is_empty()
+                && selected_config.origin_name != target.host
+            {
+                outcome.ech_origin = Some(selected_config.origin_name.clone());
+            }
             if !rejected_witnesses.is_empty() && outcome.plan_text.is_none() {
                 outcome
                     .detail
@@ -13478,6 +13572,9 @@ group_block_proven: false,
                     volume_recovery: false,
 budget_mark: 0,
 group_block_proven: false,
+                transferred_own_plan: false,
+                bound_plan_id: None,
+                ech_origin: None,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -13496,6 +13593,9 @@ group_block_proven: false,
                     volume_recovery: false,
 budget_mark: 0,
 group_block_proven: false,
+                transferred_own_plan: false,
+                bound_plan_id: None,
+                ech_origin: None,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -13703,6 +13803,9 @@ group_block_proven: false,
                                             volume_recovery: false,
                                             budget_mark: 0,
                                             group_block_proven: false,
+                                            transferred_own_plan: false,
+                                            bound_plan_id: None,
+                                            ech_origin: None,
                                             volume_fingerprint: None,
                                             volume_box_id: None,
                                             retry_after: None,
@@ -13749,6 +13852,9 @@ group_block_proven: false,
                                         volume_recovery: false,
                                         budget_mark: 0,
                                         group_block_proven: false,
+                                        transferred_own_plan: false,
+                                        bound_plan_id: None,
+                                        ech_origin: None,
                                         volume_fingerprint: None,
                                         volume_box_id: None,
                                         retry_after: None,
@@ -13781,6 +13887,9 @@ group_block_proven: false,
                                             volume_recovery: false,
 budget_mark: 0,
 group_block_proven: false,
+                transferred_own_plan: false,
+                bound_plan_id: None,
+                ech_origin: None,
                                             volume_fingerprint: None,
                                             volume_box_id: None,
                                             retry_after: Some(R2O_DISCOVERY_FAILURE_RETRY),
@@ -17055,6 +17164,9 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                 volume_recovery: false,
                 budget_mark: 0,
                 group_block_proven: false,
+                transferred_own_plan: false,
+                bound_plan_id: None,
+                ech_origin: None,
                 volume_fingerprint: None,
                 volume_box_id: None,
                 retry_after: None,
@@ -17085,6 +17197,9 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                     volume_recovery: false,
                     budget_mark: 0,
                     group_block_proven: false,
+                    transferred_own_plan: false,
+                    bound_plan_id: None,
+                    ech_origin: None,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -17201,6 +17316,9 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                     result.verdict,
                     Verdict::Prefix | Verdict::WholePacket | Verdict::Opaque
                 ),
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after,
@@ -24002,6 +24120,9 @@ impl ControlClient {
         }
         let group_block_proven = outcome.group_block_proven;
         let budget_mark = outcome.budget_mark;
+        let transferred_own_plan = outcome.transferred_own_plan;
+        let bound_plan_id = outcome.bound_plan_id.clone();
+        let ech_origin = outcome.ech_origin.clone();
         let Some(source_text) = outcome.plan_text else {
             println!(
                 "автопоиск не дал применимого плана для {}: {}",
@@ -24011,6 +24132,20 @@ impl ControlClient {
         };
         let mut binding_target = outcome.target.clone();
         binding_target.shape = r2o_plan_wire_shape(binding_target.shape, has_timestamp);
+        if transferred_own_plan
+            && bound_plan_id.as_deref() == r2o_catalog_plan_id(&source_text).as_deref()
+            && budget_mark != R2O_D2K_CAT_BUDGET_PASSED
+        {
+            // C `verify_confirm` (sched.c:9610-9620): план, под которым шёл
+            // поток подозрения, снимает подозрение только пройденным
+            // бюджетом; иначе не подтверждаем и оставляем поиск открытым.
+            println!(
+                "автопоиск не подтверждает план {} для {}: это был план потока подозрения, а бюджет не пройден — подозрение не снято",
+                bound_plan_id.as_deref().unwrap_or_default(),
+                outcome.target.host
+            );
+            return Ok(None);
+        }
         if r2o_discovery_existing_binding_blocks_outcome(
             catalog,
             &binding_target,
@@ -24063,6 +24198,9 @@ impl ControlClient {
             // `bind_confirmed`; подтверждённый путь переживает рестарт.
             r2o_store_confirmed_probe_path(&mut updated, &binding_target, &plan_id, path);
         }
+        if let Some(origin) = ech_origin.as_deref() {
+            r2o_store_confirmed_ech_origin(&mut updated, &binding_target, &plan_id, origin);
+        }
         r2o_store_confirmed_budget(&mut updated, &binding_target, &plan_id, budget_mark);
         if group_block_proven
             && let Err(error) = r2o_group_record_confirmed(
@@ -24071,7 +24209,7 @@ impl ControlClient {
                 &plan_id,
                 binding_target.shape,
                 measured_probe_path.unwrap_or(""),
-                "",
+                ech_origin.as_deref().unwrap_or(""),
                 now,
             )
         {
@@ -26748,6 +26886,148 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn budget_uncountable_maps_to_unchecked_not_cut() {
+        use r2o_controller::r2o_volume::R2oVolumePacketBudget;
+
+        let mut fetch = r2o_test_fetch_result();
+        fetch.r2o_volume_observation.packet_budget = R2oVolumePacketBudget::NotApplicable;
+        assert_eq!(
+            super::r2o_budget_mark_from_result(&Ok(fetch.clone())),
+            super::R2O_D2K_CAT_BUDGET_UNCHECKED
+        );
+        // «Не запрашивали» — не «не посчитать»: отметка не ставится.
+        fetch.r2o_volume_observation.packet_budget = R2oVolumePacketBudget::NotMeasured;
+        assert_eq!(super::r2o_budget_mark_from_result(&Ok(fetch.clone())), 0);
+        // Replay proof тоже budget-unchecked, даже если счётчик не спросили.
+        fetch.r2o_volume_observation.replay_proof = true;
+        assert_eq!(
+            super::r2o_budget_mark_from_result(&Ok(fetch.clone())),
+            super::R2O_D2K_CAT_BUDGET_UNCHECKED
+        );
+        fetch.r2o_volume_observation.replay_proof = false;
+        fetch.r2o_volume_observation.packet_budget = R2oVolumePacketBudget::Cut;
+        assert_eq!(
+            super::r2o_budget_mark_from_result(&Ok(fetch.clone())),
+            super::R2O_D2K_CAT_BUDGET_CUT
+        );
+        fetch.r2o_volume_observation.packet_budget = R2oVolumePacketBudget::Passed;
+        assert_eq!(
+            super::r2o_budget_mark_from_result(&Ok(fetch)),
+            super::R2O_D2K_CAT_BUDGET_PASSED
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bound_plan_without_passed_budget_is_not_confirmed_like_c() {
+        let work = std::env::temp_dir().join(format!(
+            "r2o-bound-plan-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&work).unwrap();
+        let catalog_path = work.join("catalog.json");
+        Catalog::default().save_atomic(&catalog_path, 1).unwrap();
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "bound.example.com".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let bound_id = "ab".repeat(16);
+        let text = format!("r2o-plan 1 11\nid {bound_id}\nproto tcp tls\nsplit sni_middle +0\n");
+        let outcome = super::DiscoveryOutcome {
+            target: target.clone(),
+            plan_text: Some(text.clone()),
+            detail: String::new(),
+            queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
+            direct_clear: false,
+            volume_recovery: false,
+            budget_mark: super::R2O_D2K_CAT_BUDGET_CUT,
+            group_block_proven: false,
+            transferred_own_plan: true,
+            bound_plan_id: Some(bound_id.clone()),
+            ech_origin: None,
+            volume_fingerprint: None,
+            volume_box_id: None,
+            retry_after: None,
+        };
+        let (client_stream, _server_stream) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut client = ControlClient {
+            socket: client_stream,
+            send_maxlen: 0,
+            send_cap: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            pending_events: std::collections::VecDeque::new(),
+            pending_applied_events: std::collections::VecDeque::new(),
+            dropped_events: Default::default(),
+            http_search_started: Default::default(),
+            http_acknowledged_bindings: std::collections::HashMap::new(),
+        };
+        let mut catalog = Catalog::default();
+        let mut confirmed = false;
+        client
+            .apply_discovery_outcome_with_input_and_persistence(
+                outcome,
+                &mut catalog,
+                &catalog_path,
+                2,
+                None,
+                None,
+                &mut confirmed,
+                None,
+            )
+            .unwrap();
+        assert!(!confirmed);
+        assert!(catalog.boxes.is_empty());
+
+        // Тот же перенесённый план с PASSED-бюджетом подтверждается.
+        Catalog::default().save_atomic(&catalog_path, 1).unwrap();
+        let outcome = super::DiscoveryOutcome {
+            target,
+            plan_text: Some(text),
+            detail: String::new(),
+            queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
+            direct_clear: false,
+            volume_recovery: false,
+            budget_mark: super::R2O_D2K_CAT_BUDGET_PASSED,
+            group_block_proven: false,
+            transferred_own_plan: true,
+            bound_plan_id: Some(bound_id),
+            ech_origin: None,
+            volume_fingerprint: None,
+            volume_box_id: None,
+            retry_after: None,
+        };
+        let mut catalog = Catalog::default();
+        let mut confirmed = false;
+        client
+            .apply_discovery_outcome_with_input_and_persistence(
+                outcome,
+                &mut catalog,
+                &catalog_path,
+                2,
+                None,
+                None,
+                &mut confirmed,
+                None,
+            )
+            .unwrap();
+        assert!(confirmed);
+        assert_eq!(catalog.boxes[0].bindings[0].budget, 1);
+        std::fs::remove_dir_all(work).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn props_contact_contract_differential_matches_c() {
         use serde_json::json;
         use std::io::Read;
@@ -27306,6 +27586,9 @@ mod tests {
             volume_recovery: false,
             budget_mark: super::R2O_D2K_CAT_BUDGET_PASSED,
             group_block_proven: true,
+                transferred_own_plan: false,
+                bound_plan_id: None,
+                ech_origin: Some("edge.example".into()),
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -27344,11 +27627,13 @@ mod tests {
             .unwrap();
         assert_eq!(binding.budget, super::R2O_D2K_CAT_BUDGET_PASSED);
         assert_eq!(binding.probe_path, "/main.css");
+        assert_eq!(binding.ech_origin, "edge.example");
         assert_eq!(binding.shape, SHAPE_MODERN);
         let state = catalog.domain_state.as_ref().unwrap();
         assert_eq!(state.observations.len(), 1);
         assert_eq!(state.observations[0].name, "apply.example.com");
         assert_eq!(state.observations[0].key.probe_path, "/main.css");
+        assert_eq!(state.observations[0].key.ech_origin, "edge.example");
 
         // TCP timestamp-профиль: C `trigger_tcp_profile` пишется в привязку,
         // а форма становится контекстной (R2O модель shape 8-13).
@@ -27368,6 +27653,9 @@ mod tests {
             volume_recovery: false,
             budget_mark: 0,
             group_block_proven: false,
+                transferred_own_plan: false,
+                bound_plan_id: None,
+                ech_origin: None,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -27743,6 +28031,9 @@ mod tests {
             volume_recovery: false,
             budget_mark: 0,
             group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -27774,6 +28065,9 @@ mod tests {
             volume_recovery: false,
             budget_mark: 0,
             group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -29354,6 +29648,9 @@ mod tests {
             volume_recovery: false,
             budget_mark: 0,
             group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -29637,6 +29934,9 @@ mod tests {
                 volume_recovery: false,
                 budget_mark: 0,
                 group_block_proven: false,
+                transferred_own_plan: false,
+                bound_plan_id: None,
+                ech_origin: None,
                 volume_fingerprint: None,
                 volume_box_id: None,
                 retry_after: Some(Duration::from_millis(150)),
@@ -31453,6 +31753,9 @@ mod tests {
             volume_recovery: false,
             budget_mark: 0,
             group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: Some(retry_after),
@@ -31649,6 +31952,9 @@ mod tests {
             volume_recovery: false,
             budget_mark: 0,
             group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: Some(std::time::Duration::from_secs(600)),
@@ -31711,6 +32017,9 @@ mod tests {
             volume_recovery: false,
             budget_mark: 0,
             group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -31772,6 +32081,9 @@ mod tests {
             volume_recovery: false,
             budget_mark: 0,
             group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: Some(super::R2O_DISCOVERY_INCOMPLETE_RETRY),
@@ -32100,6 +32412,9 @@ mod tests {
             volume_recovery: false,
             budget_mark: 0,
             group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: Some(super::R2O_DISCOVERY_INCOMPLETE_RETRY),
@@ -32606,6 +32921,9 @@ mod tests {
                 volume_recovery: false,
                 budget_mark: 0,
                 group_block_proven: false,
+                transferred_own_plan: false,
+                bound_plan_id: None,
+                ech_origin: None,
                 volume_fingerprint: None,
                 volume_box_id: None,
                 retry_after: None,
@@ -32738,6 +33056,9 @@ mod tests {
             volume_recovery: false,
             budget_mark: 0,
             group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -34336,6 +34657,9 @@ mod tests {
             volume_recovery: false,
             budget_mark: 0,
             group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -34702,6 +35026,9 @@ mod tests {
                 volume_recovery: false,
                 budget_mark: 0,
                 group_block_proven: false,
+                transferred_own_plan: false,
+                bound_plan_id: None,
+                ech_origin: None,
                 volume_fingerprint: None,
                 volume_box_id: None,
                 retry_after: None,
@@ -35621,6 +35948,9 @@ mod tests {
             volume_recovery: false,
 budget_mark: 0,
 group_block_proven: false,
+                transferred_own_plan: false,
+                bound_plan_id: None,
+                ech_origin: None,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -35668,6 +35998,9 @@ group_block_proven: false,
             volume_recovery: false,
             budget_mark: 0,
             group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -35714,6 +36047,9 @@ group_block_proven: false,
             volume_recovery: false,
             budget_mark: 0,
             group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -35888,6 +36224,9 @@ group_block_proven: false,
             volume_recovery: false,
             budget_mark: 0,
             group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
             volume_fingerprint: Some(Default::default()),
             volume_box_id: Some("box".into()),
             retry_after: None,
@@ -39539,6 +39878,9 @@ group_block_proven: false,
             volume_recovery: false,
             budget_mark: 0,
             group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -39612,6 +39954,9 @@ group_block_proven: false,
             volume_recovery: false,
             budget_mark: 0,
             group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -39650,6 +39995,9 @@ group_block_proven: false,
             volume_recovery: false,
             budget_mark: 0,
             group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -39710,6 +40058,9 @@ group_block_proven: false,
             volume_recovery: false,
             budget_mark: 0,
             group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -40045,6 +40396,9 @@ group_block_proven: false,
                             volume_recovery: false,
                             budget_mark: 0,
                             group_block_proven: false,
+                            transferred_own_plan: false,
+                            bound_plan_id: None,
+                            ech_origin: None,
                             volume_fingerprint: None,
                             volume_box_id: None,
                             retry_after: None,
@@ -40161,6 +40515,9 @@ group_block_proven: false,
                         volume_recovery: true,
                         budget_mark: 0,
                         group_block_proven: false,
+                        transferred_own_plan: false,
+                        bound_plan_id: None,
+                        ech_origin: None,
                         volume_fingerprint: None,
                         volume_box_id: None,
                         retry_after: None,
@@ -40363,6 +40720,9 @@ group_block_proven: false,
                 volume_recovery: false,
                 budget_mark: 0,
                 group_block_proven: false,
+                transferred_own_plan: false,
+                bound_plan_id: None,
+                ech_origin: None,
                 volume_fingerprint: None,
                 volume_box_id: None,
                 retry_after: None,
@@ -40414,6 +40774,9 @@ group_block_proven: false,
                 volume_recovery: false,
                 budget_mark: 0,
                 group_block_proven: false,
+                transferred_own_plan: false,
+                bound_plan_id: None,
+                ech_origin: None,
                 volume_fingerprint: None,
                 volume_box_id: None,
                 retry_after: None,
@@ -41044,6 +41407,9 @@ group_block_proven: false,
             volume_recovery: false,
             budget_mark: 0,
             group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -41399,6 +41765,9 @@ group_block_proven: false,
                     volume_recovery: false,
                     budget_mark: 0,
                     group_block_proven: false,
+                    transferred_own_plan: false,
+                    bound_plan_id: None,
+                    ech_origin: None,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -41464,6 +41833,9 @@ group_block_proven: false,
                     volume_recovery: false,
                     budget_mark: 0,
                     group_block_proven: false,
+                    transferred_own_plan: false,
+                    bound_plan_id: None,
+                    ech_origin: None,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: Some(super::R2O_DISCOVERY_INCOMPLETE_RETRY),
@@ -41528,6 +41900,9 @@ group_block_proven: false,
                     volume_recovery: false,
                     budget_mark: 0,
                     group_block_proven: false,
+                    transferred_own_plan: false,
+                    bound_plan_id: None,
+                    ech_origin: None,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -41586,6 +41961,9 @@ group_block_proven: false,
                     volume_recovery: false,
                     budget_mark: 0,
                     group_block_proven: false,
+                    transferred_own_plan: false,
+                    bound_plan_id: None,
+                    ech_origin: None,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -41641,6 +42019,9 @@ group_block_proven: false,
                     volume_recovery: false,
                     budget_mark: 0,
                     group_block_proven: false,
+                    transferred_own_plan: false,
+                    bound_plan_id: None,
+                    ech_origin: None,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -41819,6 +42200,9 @@ group_block_proven: false,
                     volume_recovery: false,
                     budget_mark: 0,
                     group_block_proven: false,
+                    transferred_own_plan: false,
+                    bound_plan_id: None,
+                    ech_origin: None,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -41934,6 +42318,9 @@ group_block_proven: false,
                     volume_recovery: false,
                     budget_mark: 0,
                     group_block_proven: false,
+                    transferred_own_plan: false,
+                    bound_plan_id: None,
+                    ech_origin: None,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -42007,6 +42394,9 @@ group_block_proven: false,
                     volume_recovery: false,
                     budget_mark: 0,
                     group_block_proven: false,
+                    transferred_own_plan: false,
+                    bound_plan_id: None,
+                    ech_origin: None,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -42060,6 +42450,9 @@ group_block_proven: false,
                     volume_recovery: false,
                     budget_mark: 0,
                     group_block_proven: false,
+                    transferred_own_plan: false,
+                    bound_plan_id: None,
+                    ech_origin: None,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -42119,6 +42512,9 @@ group_block_proven: false,
                     volume_recovery: false,
                     budget_mark: 0,
                     group_block_proven: false,
+                    transferred_own_plan: false,
+                    bound_plan_id: None,
+                    ech_origin: None,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -42184,6 +42580,9 @@ group_block_proven: false,
                     volume_recovery: false,
                     budget_mark: 0,
                     group_block_proven: false,
+                    transferred_own_plan: false,
+                    bound_plan_id: None,
+                    ech_origin: None,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -42309,6 +42708,9 @@ group_block_proven: false,
                     volume_recovery: false,
                     budget_mark: 0,
                     group_block_proven: false,
+                    transferred_own_plan: false,
+                    bound_plan_id: None,
+                    ech_origin: None,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -42411,6 +42813,9 @@ group_block_proven: false,
                     volume_recovery: false,
                     budget_mark: 0,
                     group_block_proven: false,
+                    transferred_own_plan: false,
+                    bound_plan_id: None,
+                    ech_origin: None,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -42497,6 +42902,9 @@ group_block_proven: false,
                     volume_recovery: false,
                     budget_mark: 0,
                     group_block_proven: false,
+                    transferred_own_plan: false,
+                    bound_plan_id: None,
+                    ech_origin: None,
                     volume_fingerprint: None,
                     volume_box_id: None,
                     retry_after: None,
@@ -42655,6 +43063,9 @@ group_block_proven: false,
             volume_recovery: false,
             budget_mark: 0,
             group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -42704,6 +43115,9 @@ group_block_proven: false,
             volume_recovery: false,
             budget_mark: 0,
             group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -42838,6 +43252,9 @@ group_block_proven: false,
             volume_recovery: false,
             budget_mark: 0,
             group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: Some(retry_after),
@@ -42892,6 +43309,9 @@ group_block_proven: false,
                 volume_recovery: false,
                 budget_mark: 0,
                 group_block_proven: false,
+                transferred_own_plan: false,
+                bound_plan_id: None,
+                ech_origin: None,
                 volume_fingerprint: None,
                 volume_box_id: None,
                 retry_after: Some(Duration::from_secs(10 * 60)),
@@ -42946,6 +43366,9 @@ group_block_proven: false,
             volume_recovery: false,
             budget_mark: 0,
             group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: Some(super::R2O_DISCOVERY_TASK_LIFETIME),
@@ -43112,6 +43535,9 @@ group_block_proven: false,
             volume_recovery: false,
             budget_mark: 0,
             group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -43205,6 +43631,9 @@ group_block_proven: false,
             volume_recovery: false,
             budget_mark: 0,
             group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
@@ -43295,6 +43724,9 @@ group_block_proven: false,
                 volume_recovery: false,
                 budget_mark: 0,
                 group_block_proven: false,
+                transferred_own_plan: false,
+                bound_plan_id: None,
+                ech_origin: None,
                 volume_fingerprint: None,
                 volume_box_id: None,
                 retry_after: None,
@@ -43854,6 +44286,8 @@ group_block_proven: false,
             OsString::from("--discover"),
             OsString::from("--mark"),
             OsString::from("77"),
+            OsString::from("--measure-mark"),
+            OsString::from("47"),
             OsString::from("--live"),
             OsString::from("/tmp/live6.json"),
         ])
@@ -43863,6 +44297,7 @@ group_block_proven: false,
             ServeCliOptions {
                 discover: true,
                 mark: Some(77),
+                measure_mark: Some(47),
                 live_path: Some(PathBuf::from("/tmp/live6.json")),
                 no_diagnostics: false,
             }
@@ -43884,6 +44319,8 @@ group_block_proven: false,
             OsString::from("--discover"),
             OsString::from("--mark"),
             OsString::from("46"),
+            OsString::from("--measure-mark"),
+            OsString::from("45"),
             OsString::from("/state/catalog.json"),
         ])
         .unwrap();
@@ -43894,6 +44331,7 @@ group_block_proven: false,
         assert_eq!(options.catalog, PathBuf::from("/state/catalog.json"));
         assert!(options.discover);
         assert_eq!(options.mark, Some(46));
+        assert_eq!(options.measure_mark, Some(45));
     }
 
     #[test]
