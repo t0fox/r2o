@@ -145,6 +145,10 @@ pub struct R2oQuicSessions {
     flows: HashMap<FlowKey, FlowState>,
     initial_ring: VecDeque<InitialDatagram>,
     hello_reported: HashMap<FlowKey, Instant>,
+    /// Пустой host уже отдан один раз; кольцо при этом НЕ очищается, иначе
+    /// последующий Initial с именем не соберётся (C `qsnap_done` ставится
+    /// только для named).
+    empty_reported: HashMap<FlowKey, Instant>,
     udp_exchange_events: VecDeque<R2oUdpExchangeEvent>,
     flow_limit: usize,
     r2o_idle_timeout: Duration,
@@ -160,12 +164,15 @@ impl R2oQuicSessions {
         flows.try_reserve(flow_limit)?;
         let mut hello_reported = HashMap::new();
         hello_reported.try_reserve(flow_limit)?;
+        let mut empty_reported = HashMap::new();
+        empty_reported.try_reserve(flow_limit)?;
         let mut udp_exchange_events = VecDeque::new();
         udp_exchange_events.try_reserve(flow_limit)?;
         Ok(Self {
             flows,
             initial_ring: VecDeque::new(),
             hello_reported,
+            empty_reported,
             udp_exchange_events,
             flow_limit,
             r2o_idle_timeout: QUIC_IDLE,
@@ -266,6 +273,30 @@ impl R2oQuicSessions {
             (host, snapshot)
         };
 
+        if host.is_empty() {
+            // C `handle_udp`: имя не собрано (`named=0`), `qsnap_done` не
+            // ставится, кольцо продолжает накапливать Initial. Событие с
+            // пустым именем R2O отдаёт один раз, но не запрещает более
+            // позднему Initial с именем собрать полёт.
+            if self.empty_reported.contains_key(&key) {
+                return None;
+            }
+            self.empty_reported
+                .retain(|_, last_seen| now.saturating_duration_since(*last_seen) < idle_timeout);
+            if self.empty_reported.len() == self.flow_limit
+                && let Some(oldest) = self.empty_reported.keys().next().copied()
+            {
+                self.empty_reported.remove(&oldest);
+            }
+            self.empty_reported.insert(key, now);
+            return Some(super::capture::QuicHello {
+                key: key.wire_key(),
+                host,
+                snapshot: Some(snapshot),
+            });
+        }
+
+        self.empty_reported.remove(&key);
         self.initial_ring.retain(|entry| entry.key != key);
         if self.hello_reported.len() == self.flow_limit {
             if let Some(oldest) = self.hello_reported.keys().next().copied() {
@@ -620,6 +651,8 @@ impl R2oQuicSessions {
             .retain(|_, flow| now.saturating_duration_since(flow.last_seen) < idle_timeout);
         self.hello_reported
             .retain(|_, last_seen| now.saturating_duration_since(*last_seen) < idle_timeout);
+        self.empty_reported
+            .retain(|_, last_seen| now.saturating_duration_since(*last_seen) < idle_timeout);
     }
 }
 
@@ -629,6 +662,7 @@ impl Default for R2oQuicSessions {
             flows: HashMap::new(),
             initial_ring: VecDeque::new(),
             hello_reported: HashMap::new(),
+            empty_reported: HashMap::new(),
             udp_exchange_events: VecDeque::new(),
             flow_limit: R2oFlowCapacity::default().limit(),
             r2o_idle_timeout: QUIC_IDLE,
@@ -951,6 +985,9 @@ mod tests {
         assert_eq!(event.key[37], 17);
         assert!(event.quic_snapshot.is_some());
         assert!(sessions.capture_hello(&initial).is_none());
+        // C `qsnap_done` не взводится для пустого имени: кольцо остаётся
+        // для следующего Initial, а повторный пустой host не выдаётся.
+        assert_eq!(sessions.initial_ring.len(), 1);
     }
 
     #[test]

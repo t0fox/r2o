@@ -66,6 +66,9 @@ pub struct R2oUdpReleaseStats {
     pub resent: usize,
     pub resend_failed: usize,
     pub resend_busy: usize,
+    /// C `out_resend`: ENOSPC — полная очередь отложенной отправки, а не
+    /// отказ raw-сокета; учитывается отдельно в `follow.queue_full`.
+    pub resend_queue_full: usize,
     pub verdict_failures: usize,
     pub head_succeeded: bool,
 }
@@ -96,8 +99,15 @@ pub fn r2o_release_batch_with(
     };
     stats.head_succeeded = head_succeeded;
 
+    // C `release_batch`: `vfail` отключает повтор последующих хвостов, пока
+    // голова не «owned». Если голова уже была выдана вызывающим
+    // (`head_already_released`), это owned-путь и повтор сохраняется.
+    let mut verdict_failed = !head_succeeded;
     for tail in batch.packets.iter().skip(1) {
-        let can_send_raw = head_succeeded && can_resend && is_neutral(tail);
+        let can_send_raw = head_succeeded
+            && can_resend
+            && is_neutral(tail)
+            && !(verdict_failed && !head_already_released);
         let verdict = if can_send_raw {
             match resend(tail) {
                 Ok(()) => {
@@ -105,11 +115,17 @@ pub fn r2o_release_batch_with(
                     0
                 }
                 Err(error) => {
-                    stats.resend_failed += 1;
-                    if r2o_udp_send_busy(&error) {
-                        stats.resend_busy += 1;
+                    if error.raw_os_error() == Some(libc::ENOSPC) {
+                        // C `out_resend`: полная очередь — не отказ raw;
+                        // копия идёт ядру, считается queue_full.
+                        stats.resend_queue_full += 1;
                     } else {
-                        on_permanent_failure(tail, &error);
+                        stats.resend_failed += 1;
+                        if r2o_udp_send_busy(&error) {
+                            stats.resend_busy += 1;
+                        } else {
+                            on_permanent_failure(tail, &error);
+                        }
                     }
                     1
                 }
@@ -119,8 +135,9 @@ pub fn r2o_release_batch_with(
         };
         if send_verdict(tail.id, verdict).is_err() {
             // C `release_batch`: ошибка вердикта считается, повторной
-            // выдачи ACCEPT нет.
+            // выдачи ACCEPT нет; следующие хвосты (не owned) идут ядру.
             stats.verdict_failures += 1;
+            verdict_failed = true;
         }
     }
     stats
@@ -955,6 +972,154 @@ mod tests {
 
         assert_eq!(stats.resend_failed, 1);
         assert_eq!(stats.resend_busy, 1);
+    }
+
+    #[test]
+    fn release_batch_enospc_and_tail_verdict_failure_match_c() {
+        let packet = udp_packet();
+        let batch = R2oUdpHoldBatch {
+            key: flow_key_from_packet(&packet).unwrap(),
+            packets: (1_u32..5)
+                .map(|id| R2oUdpHeldPacket {
+                    id,
+                    mark: 0,
+                    packet: packet.clone(),
+                })
+                .collect(),
+        };
+
+        let mut sent = Vec::new();
+        let stats = r2o_release_batch_with(
+            &batch,
+            crate::netlink::NF_ACCEPT,
+            false,
+            true,
+            |_| true,
+            |held| {
+                sent.push(held.id);
+                if held.id == 3 {
+                    Err(io::Error::from_raw_os_error(libc::ENOSPC))
+                } else {
+                    Ok(())
+                }
+            },
+            |_, _| panic!("ENOSPC is queue_full, not a permanent refusal"),
+            |_, _| Ok(()),
+        );
+        assert_eq!(sent, [2, 3, 4]);
+        assert_eq!(stats.resend_queue_full, 1);
+        assert_eq!(stats.resend_failed, 0);
+        assert_eq!(stats.resend_busy, 0);
+
+        let mut sent = Vec::new();
+        let stats = r2o_release_batch_with(
+            &batch,
+            crate::netlink::NF_ACCEPT,
+            false,
+            true,
+            |_| true,
+            |held| {
+                sent.push(held.id);
+                Ok(())
+            },
+            |_, _| {},
+            |id, _| {
+                if id == 3 {
+                    Err(io::Error::from_raw_os_error(libc::EIO))
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(sent, [2, 3]);
+        assert_eq!(stats.verdict_failures, 1);
+    }
+
+    #[test]
+    #[ignore = "C/Rust differential d2k_udp_out_batch"]
+    fn d2o_udp_release_trace() {
+        fn release_packet() -> Vec<u8> {
+            udp_packet()
+        }
+        fn batch_of_four(packet: &[u8]) -> R2oUdpHoldBatch {
+            R2oUdpHoldBatch {
+                key: flow_key_from_packet(packet).unwrap(),
+                packets: (10_u32..14)
+                    .map(|id| R2oUdpHeldPacket {
+                        id,
+                        mark: 0,
+                        packet: packet.to_vec(),
+                    })
+                    .collect(),
+            }
+        }
+        fn run(
+            name: &str,
+            head_error: bool,
+            fail_verdict: Option<u32>,
+            fail_send: Option<(u32, i32)>,
+        ) {
+            let packet = release_packet();
+            let batch = batch_of_four(&packet);
+            let mut sent = Vec::new();
+            let mut verdicts = Vec::new();
+            let mut told = Vec::new();
+            let stats = r2o_release_batch_with(
+                &batch,
+                crate::netlink::NF_ACCEPT,
+                false,
+                true,
+                |_| true,
+                |held| {
+                    sent.push(held.id);
+                    match fail_send {
+                        Some((id, errno)) if id == held.id => {
+                            Err(io::Error::from_raw_os_error(errno))
+                        }
+                        _ => Ok(()),
+                    }
+                },
+                |held, _| told.push(held.id),
+                |id, verdict| {
+                    verdicts.push((id, verdict));
+                    if head_error && id == 10 {
+                        Err(io::Error::from_raw_os_error(libc::EIO))
+                    } else if fail_verdict == Some(id) {
+                        Err(io::Error::from_raw_os_error(libc::EIO))
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            print!(
+                "{name} vfail={} sent=",
+                u8::from(stats.verdict_failures != 0)
+            );
+            for (index, id) in sent.iter().enumerate() {
+                print!("{}{}", if index == 0 { "" } else { "," }, id);
+            }
+            print!(" verdicts=");
+            for (index, (id, verdict)) in verdicts.iter().enumerate() {
+                print!("{}{}:{}", if index == 0 { "" } else { "," }, id, verdict);
+            }
+            print!(
+                " busy={} queue_full={} refused={} told=",
+                stats.resend_busy,
+                stats.resend_queue_full,
+                told.len()
+            );
+            for (index, id) in told.iter().enumerate() {
+                print!("{}{}", if index == 0 { "" } else { "," }, id);
+            }
+            println!();
+        }
+
+        run("A success", false, None, None);
+        run("B busy", false, None, Some((12, libc::EAGAIN)));
+        run("C permanent", false, None, Some((13, libc::EACCES)));
+        run("D tail-verdict-fail", false, Some(12), None);
+        run("E head-verdict-fail", true, None, None);
+        run("F enospc", false, None, Some((12, libc::ENOSPC)));
     }
 
     #[test]

@@ -328,6 +328,9 @@ mod app {
             |id, verdict| queue.send_verdict(id, verdict),
         );
         follow.r2o_note_busy(stats.resend_busy);
+        for _ in 0..stats.resend_queue_full {
+            follow.r2o_note_queue_full();
+        }
         if head_neutral && let Some(head) = head {
             follow.r2o_mark(&head.packet, now, None, receive_seq);
         }
