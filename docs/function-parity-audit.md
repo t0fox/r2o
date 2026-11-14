@@ -116,19 +116,17 @@ production-путь не ставится. Формулировки «теста
 После пачек Datapath/Detection/Corenet часть строк возвращена в E\* с
 differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` понижен
 обратно из-за приблизительных полей. Финальный QA
-(`AGENT_REPORT-qa-final4.md`) подтвердил численно **E 1478 / P 504**
-(948 обычных E, 530 E\*), но не 100 % паритет: 54 E\* и 4 обычных E имеют
+(`AGENT_REPORT-qa-final6.md`) подтвердил численно **E 1485 / P 497**
+(948 обычных E, 537 E\*), но не 100 % паритет: 55 E\* и 4 обычных E имеют
 явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
-`d2k_sched_write_live` оставлен **P\***: 9-сценарный differential покрывает
-все наблюдаемые состояния `dns_services`, но C-writer использует task-слой
-(`t->ver_ok`, `t->ver.dns_reply/level/status/reason`, `T_VERIFY/
-T_VERIFY_WAIT/T_TRIAL_SETTLE`, generic `T_WATCHING`, кастомный
-`no_bypass` reason), которого в Rust-модели `DnsServiceLive` нет. Для E\*
-нужно повторить task-состояния/reason-тексты и добавить differential на
-candidate-without-answer/T_VERIFY/T_WATCHING. Живые root/netns/OpenWrt/
-аппаратные сценарии покрыты не полностью.
+`d2k_sched_write_live` оставлен **P\***: task-слой теперь реальный
+(`DnsTask/DnsTaskState/DnsTaskVerify`, 17 общих + 4 DoQ сценария), но
+C-вывод зависит от end-to-end планового DoQ через реальный C datapath,
+SO_MARK verifier-сокета и отдельной direct-clear/cooldown-лестницы; эти
+три ветви не проверены. Живые root/netns/OpenWrt/аппаратные сценарии
+покрыты не полностью.
 
 **Категоризация 504 P (2026-11-14, QA):** A — нужен Rust-код **121**;
 B — нужен только тест/differential **190**; C — архитектура/внешний стенд
@@ -6291,29 +6289,29 @@ Static-хелперы наследуют статус владельца; в к�
 
 | Статус | Кол-во |
 |---|---:|
-| E | 58 |
-| P | 101 |
+| E | 111 |
+| P | 48 |
 | N | 0 |
 | ? | 0 |
 | **Всего** | **159** |
 
-Доли: E — 29.6 % (47/159); E или P — 93.7 % (149/159); N — 6.3 % (10/159).
-P не считается доказанным паритетом: это покрытие без полного доказательства ветвей.
+Актуальные counts: **E 111 / P 48 / N 0** (срез main 2026-11-15).
+Доли: E — 69.8 % (111/159); E или P — 100 %; N — 0.
 
 По файлам:
 
 | Файл | Функций | E | P | N |
 |---|---:|---:|---:|---:|
-| detect/bridge.c | 17 | 2 | 14 | 1 |
-| detect/classify.c | 36 | 16 | 18 | 2 |
-| detect/main.c | 8 | 0 | 8 | 0 |
-| detect/poison.c | 12 | 8 | 4 | 0 |
-| detect/props.c | 7 | 0 | 7 | 0 |
-| detect/raw.c | 62 | 13 | 42 | 7 |
-| detect/response.c | 7 | 5 | 2 | 0 |
-| detect/trigger.c | 9 | 3 | 6 | 0 |
-| detect/include/d2k_detect.h | 1 | 0 | 1 | 0 |
-| **Всего** | **159** | **47** | **102** | **10** |
+| detect/bridge.c | 17 | 4 | 13 | 0 |
+| detect/classify.c | 36 | 33 | 3 | 0 |
+| detect/main.c | 8 | 3 | 5 | 0 |
+| detect/poison.c | 12 | 11 | 1 | 0 |
+| detect/props.c | 7 | 2 | 5 | 0 |
+| detect/raw.c | 62 | 41 | 21 | 0 |
+| detect/response.c | 7 | 7 | 0 | 0 |
+| detect/trigger.c | 9 | 9 | 0 | 0 |
+| detect/include/d2k_detect.h | 1 | 1 | 0 | 0 |
+| **Всего** | **159** | **111** | **48** | **0** |
 
 ---
 
@@ -6451,19 +6449,18 @@ raw_recheck, sweep_poisons (свойства → compose → перебор), cr
 - **sweep/classify (887–1494):** `sweep_poisons` — нет trace о
   непринятом RST, иной текст selftest, compose без контроля;
   `cross_check_tls12` — C-заглушка, Rust поля `covers_tls12` нет, N;
-  `d2k_classify_run` — полное дерево, но production-discovery
-  использует `full_detect_semantics=false`, `confirm_clear=true`
-  (`classify.rs:869-870`, `main.rs:15380-15391`): нет удвоенного
-  dial-retry, иначе обрабатываются частичные transport-ошибки,
-  control без `until_pass`, добавлен whole-confirm; дифференциалы
-  идут с `true` и этот путь не покрывают; `d2k_send_nosig` —
+  `d2k_classify_run` — production default теперь
+  `full_detect_semantics=true`, `confirm_clear=false`; full-tree 24
+  покрывает response/control/repeats/gaps/raw; остаются field-by-field
+  `d2k_arm` и реальный DPI/OpenWrt; `d2k_send_nosig` —
   `MSG_NOSIGNAL` + `SO_NOSIGPIPE` в C, Rust только `MSG_NOSIGNAL`.
 
 ## detect/main.c (8 функций)
 
-CLI `d2k-detect` и форматы вывода. R2O использует другой интерфейс (`r2o-controller --classify HOST PORT`),
-поэтому соответствие функциональное, а не построчное. В JSON R2O нет массива `notes` и поля `covers_tls12`,
-порядок ключей и форма `response` иные; в человеческом отчёте нет блока свойств коробки и оговорок.
+CLI `d2k-detect` и форматы вывода. C-совместимый `r2o-detect`/`detect_cli` повторяет флаги, JSON/human/usage
+(6 triggers / 19 exits, `json=equal`, `human=equal`), но бинарник не входит в `package-release.sh`, а
+controller `--classify` по-прежнему использует старый JSON/human/usage. Поэтому `usage`/`print_json`/
+`print_human`/`main` — P* до упаковки/проводки.
 
 **Прочитано построчно: 8/8 функций, 450 строк C (1–450).** Сверено с `classify_json.rs:4-118` (`result_json_value`: `props/trace/response`, без `notes`/`covers_tls12`), `main.rs:811` (`r2o_tri_state`), `:1104-1306` (разбор `--classify`), `:1555-1584` (`classify_control_trigger`, modern `tls13`), `:1586-1604` (`classify_target_trigger`), `:1719+` (help).
 
@@ -6949,10 +6946,9 @@ production-сеттер `raw_set_segment_max`. Ни одна N не являет
   `raw_recheck` = `raw_probe.rs:746` + C/Rust recheck-тест.
   **P:** `raw_selftest` — цикл встроен в `sweep`, отдельного теста цикла
   нет; `sweep_poisons` — `control=None` C выдаёт «всё сразу», R2O нет;
-  `d2k_classify_run` — production-discovery `full_detect_semantics=false`,
-  `confirm_clear=true`, дифференциалы идут с `true`; `d2k_send_nosig` —
-  macOS-ветка `SO_NOSIGPIPE` не перенесена; `d2k_trigger_sni`/`trace_add`/
-  `opts_*` — P на форматы/лимиты.
+  `d2k_classify_run` — E\* (full-tree 24, production true/false);
+  `d2k_send_nosig` — macOS-ветка `SO_NOSIGPIPE` не перенесена;
+  `d2k_trigger_sni`/`trace_add`/`opts_*` — P на форматы/лимиты.
 - **`raw.c` (62 функции):** разбор RST-правил (`d2k_parse_rst_rule`,
   `d2k_parse_stale_rst_rule`, `d2k_rst_rule_stale`) — N (R2O создаёт nft
   rule, но чужой/legacy текст не разбирает); nft lifecycle
@@ -6969,7 +6965,7 @@ production-сеттер `raw_set_segment_max`. Ни одна N не являет
 - **Вывод:** classify/raw — 98 функций; новые подтверждённые E:
   split_offsets, unacked_bytes, probe_data_ack, raw_recheck. Основные
   пробелы — RST-парсеры, `raw_set_segment_max`, `sweep_poisons` control=None,
-  production `full_detect_semantics=false`, macOS send_nosig.
+  field-by-field `d2k_arm`, macOS send_nosig; `d2k_classify_run` — E\*.
 
 ## Углублённая сверка: bridge/main/poison/props/response/trigger
 
@@ -7098,12 +7094,10 @@ r2o-tls-verify-differential.sh                       16/16 PASS
 
 ## Итог
 
-- Полностью подтверждено разбором и наличием профильного теста/дифференциала (E): **49 из 159 (30.8 %)**.
-- Покрыто реализацией, но без полного доказательства ветвей (P): **100 из 159**.
-- Не перенесено (N): **10 из 159 (6.3 %)**. Из них 4 — диагностические
-  геттеры/заглушки (`trace_questions`, `note_gap_loss`, `cross_check_tls12`,
-  `d2k_raw_pending_count`), 3 — разбор чужих RST-правил, 2 строки —
-  `d2k_raw_set_segment_max` (production-сеттер, packet-path-риск для
-  measured-планов), 1 — не-Linux stub.
-- Не установлено (?): **0**.
-- Для паритета среза остаётся закрыть 10 N и доказать ветви у 100 P; один только факт наличия теста в дереве не заменяет прогон.
+- Актуальные counts: **E 111 / P 48 / N 0** из 159 (срез main 2026-11-15).
+- P не считается паритетом: 48 строк без полного доказательства ветвей
+  (bridge/sweep/props/raw/MCP-подобные helpers).
+- N больше нет; ранее N-строки перенесены или переклассифицированы.
+- Ключевые ограничения: реальный DPI, OpenWrt/musl/mipsel, root-raw,
+  field-by-field `d2k_arm`, `sweep_poisons` compose `control=None`,
+  detect CLI (`r2o-detect` не упакован).

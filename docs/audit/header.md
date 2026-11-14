@@ -116,19 +116,17 @@ production-путь не ставится. Формулировки «теста
 После пачек Datapath/Detection/Corenet часть строк возвращена в E\* с
 differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` понижен
 обратно из-за приблизительных полей. Финальный QA
-(`AGENT_REPORT-qa-final4.md`) подтвердил численно **E 1478 / P 504**
-(948 обычных E, 530 E\*), но не 100 % паритет: 54 E\* и 4 обычных E имеют
+(`AGENT_REPORT-qa-final6.md`) подтвердил численно **E 1485 / P 497**
+(948 обычных E, 537 E\*), но не 100 % паритет: 55 E\* и 4 обычных E имеют
 явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
-`d2k_sched_write_live` оставлен **P\***: 9-сценарный differential покрывает
-все наблюдаемые состояния `dns_services`, но C-writer использует task-слой
-(`t->ver_ok`, `t->ver.dns_reply/level/status/reason`, `T_VERIFY/
-T_VERIFY_WAIT/T_TRIAL_SETTLE`, generic `T_WATCHING`, кастомный
-`no_bypass` reason), которого в Rust-модели `DnsServiceLive` нет. Для E\*
-нужно повторить task-состояния/reason-тексты и добавить differential на
-candidate-without-answer/T_VERIFY/T_WATCHING. Живые root/netns/OpenWrt/
-аппаратные сценарии покрыты не полностью.
+`d2k_sched_write_live` оставлен **P\***: task-слой теперь реальный
+(`DnsTask/DnsTaskState/DnsTaskVerify`, 17 общих + 4 DoQ сценария), но
+C-вывод зависит от end-to-end планового DoQ через реальный C datapath,
+SO_MARK verifier-сокета и отдельной direct-clear/cooldown-лестницы; эти
+три ветви не проверены. Живые root/netns/OpenWrt/аппаратные сценарии
+покрыты не полностью.
 
 **Категоризация 504 P (2026-11-14, QA):** A — нужен Rust-код **121**;
 B — нужен только тест/differential **190**; C — архитектура/внешний стенд
