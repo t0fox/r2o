@@ -54,6 +54,18 @@ const R2O_LOOKUP_BUFFER: usize = 8192;
 const R2O_DUMP_ROUNDS: usize = 4096;
 const R2O_DUMP_BUFFER: usize = 32768;
 
+/// C `routes_refresh` (`d2kd.c:302-370`): состояние одной из четырёх частей.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum R2oRoutePartStatus {
+    /// Часть не прочитана; прежнее значение сохраняется.
+    #[default]
+    Unread,
+    /// Прочитана (маршрут может быть и пустым).
+    Read,
+    /// Маршрут есть, но интерфейса в ответе нет: проверка выхода выключена.
+    NoDevice,
+}
+
 /// C `d2k_routemark_status`: итог merge/refresh по семействам.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct R2oRouteRefreshStatus {
@@ -62,10 +74,151 @@ pub struct R2oRouteRefreshStatus {
     pub found: usize,
     pub truncated: bool,
     pub changed: bool,
+    /// C `routes4_ok/routes6_ok`: 0 — не прочитан, 1 — прочитан,
+    /// 2 — маршрут без интерфейса (только проверка метки).
+    pub v4_route: R2oRoutePartStatus,
+    pub v6_route: R2oRoutePartStatus,
     /// Первый текст ошибки, как C `d2k_routemark_load`.
     pub first_error: Option<String>,
     /// Все четыре части (правила/маршруты v4/v6) упали.
     pub all_failed: bool,
+}
+
+/// C `routes_refresh`: четыре части в порядке логов C.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum R2oRoutesPart {
+    RulesV4,
+    RulesV6,
+    RouteV4,
+    RouteV6,
+}
+
+/// События C `routes_refresh`; текст с префиксом `d2kd:` формирует `main.rs`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum R2oRoutesChange {
+    RefreshFailed {
+        first: bool,
+    },
+    RefreshRecovered,
+    PartAgain(R2oRoutesPart),
+    PartNoDevice(R2oRoutesPart),
+    PartUnread(R2oRoutesPart),
+    Truncated {
+        found: usize,
+    },
+    /// Смена применена сразу; строка печатается не чаще раза в 600 с.
+    Changed {
+        changes: u32,
+    },
+}
+
+/// C `ROUTES_QUIET_NS = 600 с`.
+pub const R2O_ROUTES_QUIET: Duration = Duration::from_secs(600);
+
+/// Состояние лога `routes_refresh` между обновлениями.
+#[derive(Clone, Debug)]
+pub struct R2oRoutesRefreshLog {
+    last_fail: bool,
+    last: [R2oRoutePartStatus; 4],
+    last_truncated: bool,
+    first: bool,
+    changes: u32,
+    quiet_until: Option<Instant>,
+}
+
+impl Default for R2oRoutesRefreshLog {
+    fn default() -> Self {
+        // C: last_v4=last_v6=last_r4=last_r6=1, first=1, last_trunc=0.
+        Self {
+            last_fail: false,
+            last: [
+                R2oRoutePartStatus::Read,
+                R2oRoutePartStatus::Read,
+                R2oRoutePartStatus::Read,
+                R2oRoutePartStatus::Read,
+            ],
+            last_truncated: false,
+            first: true,
+            changes: 0,
+            quiet_until: None,
+        }
+    }
+}
+
+impl R2oRoutesRefreshLog {
+    /// C `routes_refresh`: вернуть события в порядке печати C.
+    pub fn r2o_observe(
+        &mut self,
+        status: &R2oRouteRefreshStatus,
+        now: Instant,
+    ) -> Vec<R2oRoutesChange> {
+        let mut events = Vec::new();
+        if status.all_failed {
+            if !self.last_fail {
+                events.push(R2oRoutesChange::RefreshFailed { first: self.first });
+            }
+            self.last_fail = true;
+            self.first = false;
+            return events;
+        }
+        if self.last_fail {
+            events.push(R2oRoutesChange::RefreshRecovered);
+        }
+        self.last_fail = false;
+        self.first = false;
+
+        let now_parts = [
+            if status.v4_ok {
+                R2oRoutePartStatus::Read
+            } else {
+                R2oRoutePartStatus::Unread
+            },
+            if status.v6_ok {
+                R2oRoutePartStatus::Read
+            } else {
+                R2oRoutePartStatus::Unread
+            },
+            status.v4_route,
+            status.v6_route,
+        ];
+        let parts = [
+            R2oRoutesPart::RulesV4,
+            R2oRoutesPart::RulesV6,
+            R2oRoutesPart::RouteV4,
+            R2oRoutesPart::RouteV6,
+        ];
+        for index in 0..4 {
+            if now_parts[index] == self.last[index] {
+                continue;
+            }
+            let event = match now_parts[index] {
+                R2oRoutePartStatus::NoDevice => R2oRoutesChange::PartNoDevice(parts[index]),
+                R2oRoutePartStatus::Read => R2oRoutesChange::PartAgain(parts[index]),
+                R2oRoutePartStatus::Unread => R2oRoutesChange::PartUnread(parts[index]),
+            };
+            events.push(event);
+            self.last[index] = now_parts[index];
+        }
+        if status.truncated != self.last_truncated {
+            if status.truncated {
+                events.push(R2oRoutesChange::Truncated {
+                    found: status.found,
+                });
+            }
+            self.last_truncated = status.truncated;
+        }
+        if status.changed {
+            self.changes = self.changes.saturating_add(1);
+        }
+        if self.changes != 0 && self.quiet_until.is_none_or(|until| now >= until) {
+            events.push(R2oRoutesChange::Changed {
+                changes: self.changes,
+            });
+            self.changes = 0;
+            self.quiet_until = Some(now + R2O_ROUTES_QUIET);
+        }
+        events
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -527,19 +680,27 @@ impl R2oRouteMonitor {
             r2o_route_merge_status(previous4, previous6, v4_ok, found4, v6_ok, found6, changed);
         let mut lookup4_ok = false;
         let mut lookup6_ok = false;
+        let mut route4 = R2oRoutePartStatus::Unread;
+        let mut route6 = R2oRoutePartStatus::Unread;
         for family in [R2oRouteFamily::Ipv4, R2oRouteFamily::Ipv6] {
             let mut lookup_ok = false;
+            let mut route_status = R2oRoutePartStatus::Unread;
             match self.r2o_lookup_default(family) {
                 Ok(R2oRouteLookup::Unicast(ifindices)) if ifindices.is_empty() => {
+                    // C `lookup_route`: маршрут без устройства — rc=2.
                     lookup_ok = true;
+                    route_status = R2oRoutePartStatus::NoDevice;
                     gate.r2o_set_default_ifindices(family, None);
                 }
                 Ok(R2oRouteLookup::Unicast(ifindices)) => {
                     lookup_ok = true;
+                    route_status = R2oRoutePartStatus::Read;
                     gate.r2o_set_default_ifindices(family, Some(ifindices));
                 }
                 Ok(R2oRouteLookup::NoRoute) => {
+                    // C rc=3: известный пустой список устройств.
                     lookup_ok = true;
+                    route_status = R2oRoutePartStatus::Read;
                     gate.r2o_set_default_ifindices(family, Some(Vec::new()));
                 }
                 Ok(R2oRouteLookup::Pending) => errors.push(format!(
@@ -548,11 +709,19 @@ impl R2oRouteMonitor {
                 Err(error) => errors.push(format!("маршрут {family:?}: {error}")),
             }
             match family {
-                R2oRouteFamily::Ipv4 => lookup4_ok = lookup_ok,
-                R2oRouteFamily::Ipv6 => lookup6_ok = lookup_ok,
+                R2oRouteFamily::Ipv4 => {
+                    lookup4_ok = lookup_ok;
+                    route4 = route_status;
+                }
+                R2oRouteFamily::Ipv6 => {
+                    lookup6_ok = lookup_ok;
+                    route6 = route_status;
+                }
             }
         }
         let mut status = status;
+        status.v4_route = route4;
+        status.v6_route = route6;
         status.first_error = errors.first().cloned();
         status.all_failed = r2o_route_all_failed(v4_ok, v6_ok, lookup4_ok, lookup6_ok);
         (errors, status)
@@ -972,8 +1141,7 @@ fn r2o_route_merge_status(
         found,
         truncated: found > R2O_ROUTE_RULE_CAPACITY,
         changed,
-        first_error: None,
-        all_failed: false,
+        ..R2oRouteRefreshStatus::default()
     }
 }
 
@@ -1272,6 +1440,110 @@ mod tests {
         }
     }
 
+    fn route_status(
+        v4_ok: bool,
+        v6_ok: bool,
+        v4_route: R2oRoutePartStatus,
+        v6_route: R2oRoutePartStatus,
+    ) -> R2oRouteRefreshStatus {
+        R2oRouteRefreshStatus {
+            v4_ok,
+            v6_ok,
+            v4_route,
+            v6_route,
+            ..R2oRouteRefreshStatus::default()
+        }
+    }
+
+    #[test]
+    fn routes_refresh_log_повторяет_переходы_c() {
+        use R2oRoutePartStatus::{NoDevice, Read, Unread};
+        use R2oRoutesChange::{
+            Changed, PartAgain, PartNoDevice, PartUnread, RefreshFailed, RefreshRecovered,
+            Truncated,
+        };
+        use R2oRoutesPart::{RouteV4, RulesV4};
+
+        let t0 = Instant::now();
+        let mut log = R2oRoutesRefreshLog::default();
+
+        // Первый полный отказ печатается один раз, с first=1.
+        let mut failed = route_status(false, false, Unread, Unread);
+        failed.all_failed = true;
+        assert_eq!(
+            log.r2o_observe(&failed, t0),
+            vec![RefreshFailed { first: true }]
+        );
+        assert!(log.r2o_observe(&failed, t0).is_empty());
+
+        // Восстановление.
+        assert_eq!(
+            log.r2o_observe(&route_status(true, true, Read, Read), t0),
+            vec![RefreshRecovered]
+        );
+
+        // Части: unread -> again -> no-device -> again.
+        assert_eq!(
+            log.r2o_observe(&route_status(false, true, Unread, Read), t0),
+            vec![PartUnread(RulesV4), PartUnread(RouteV4),]
+        );
+        assert_eq!(
+            log.r2o_observe(&route_status(true, true, Read, Read), t0),
+            vec![PartAgain(RulesV4), PartAgain(RouteV4)]
+        );
+        assert_eq!(
+            log.r2o_observe(&route_status(true, true, NoDevice, Read), t0),
+            vec![PartNoDevice(RouteV4)]
+        );
+        assert_eq!(
+            log.r2o_observe(&route_status(true, true, Read, Read), t0),
+            vec![PartAgain(RouteV4)]
+        );
+
+        // Усечение — один раз при появлении.
+        let mut truncated = route_status(true, true, Read, Read);
+        truncated.truncated = true;
+        truncated.found = 33;
+        assert_eq!(
+            log.r2o_observe(&truncated, t0),
+            vec![Truncated { found: 33 }]
+        );
+        assert!(log.r2o_observe(&truncated, t0).is_empty());
+    }
+
+    #[test]
+    fn routes_refresh_quiet_окно_600_с_и_счётчик_смен_как_c() {
+        use R2oRoutePartStatus::Read;
+        use R2oRoutesChange::Changed;
+
+        let t0 = Instant::now();
+        let mut log = R2oRoutesRefreshLog::default();
+        let mut status = route_status(true, true, Read, Read);
+        assert!(log.r2o_observe(&status, t0).is_empty());
+
+        status.changed = true;
+        assert_eq!(log.r2o_observe(&status, t0), vec![Changed { changes: 1 }]);
+        // Внутри окна смены применяются, но не печатаются.
+        assert!(
+            log.r2o_observe(&status, t0 + Duration::from_secs(1))
+                .is_empty()
+        );
+        assert!(
+            log.r2o_observe(&status, t0 + Duration::from_secs(2))
+                .is_empty()
+        );
+        // Через 600 с печатается число смен, накопленных после прошлой строки.
+        assert_eq!(
+            log.r2o_observe(&status, t0 + R2O_ROUTES_QUIET),
+            vec![Changed { changes: 3 }]
+        );
+        // Без новых смен строки нет.
+        assert!(
+            log.r2o_observe(&route_status(true, true, Read, Read), t0 + R2O_ROUTES_QUIET)
+                .is_empty()
+        );
+    }
+
     #[test]
     fn route_nl_differential_matches_c() {
         fn hex(bytes: &[u8]) -> String {
@@ -1366,6 +1638,57 @@ mod tests {
 
         let buffer = rule(0x1234, Some(0xff00), 0);
         print_rules("incomplete", &buffer, &mut output);
+
+        let mut body = vec![0; R2O_FIB_RULE_HEADER_LEN];
+        body[0] = 2;
+        r2o_test_attr(&mut body, R2O_FRA_FWMASK, &0xff00_u32.to_ne_bytes());
+        let mut buffer = r2o_test_message(R2O_RTM_NEWRULE, &body);
+        append(&mut buffer, &r2o_test_message(R2O_NLMSG_DONE, &[]));
+        print_rules("mask_only", &buffer, &mut output);
+
+        let mut body = vec![0; R2O_FIB_RULE_HEADER_LEN];
+        body[0] = 2;
+        let mut wide = [0_u8; 8];
+        wide[..4].copy_from_slice(&0x4321_u32.to_ne_bytes());
+        r2o_test_attr(&mut body, R2O_FRA_FWMARK, &wide);
+        let mut buffer = r2o_test_message(R2O_RTM_NEWRULE, &body);
+        append(&mut buffer, &r2o_test_message(R2O_NLMSG_DONE, &[]));
+        print_rules("wide_mark", &buffer, &mut output);
+
+        let mut body = vec![0; R2O_FIB_RULE_HEADER_LEN + 4];
+        body[0] = 2;
+        body[R2O_FIB_RULE_HEADER_LEN..R2O_FIB_RULE_HEADER_LEN + 2]
+            .copy_from_slice(&3_u16.to_ne_bytes());
+        body[R2O_FIB_RULE_HEADER_LEN + 2..R2O_FIB_RULE_HEADER_LEN + 4]
+            .copy_from_slice(&R2O_FRA_FWMARK.to_ne_bytes());
+        let buffer = r2o_test_message(R2O_RTM_NEWRULE, &body);
+        print_rules("malformed", &buffer, &mut output);
+
+        let mut buffer = r2o_test_message(R2O_NLMSG_DONE, &[]);
+        append(&mut buffer, &rule(0x1234, Some(0xff00), 0));
+        print_rules("done_first", &buffer, &mut output);
+
+        let mut truncated = vec![0; 17];
+        truncated[..4].copy_from_slice(&32_u32.to_ne_bytes());
+        truncated[4..6].copy_from_slice(&R2O_RTM_NEWRULE.to_ne_bytes());
+        print_rules("truncated", &truncated, &mut output);
+
+        let mut done_tail = r2o_test_message(R2O_NLMSG_DONE, &[]);
+        done_tail.extend_from_slice(&[0; 3]);
+        print_rules("done_tail", &done_tail, &mut output);
+
+        let mut body = vec![0; R2O_FIB_RULE_HEADER_LEN + 8];
+        body[0] = 2;
+        body[R2O_FIB_RULE_HEADER_LEN..R2O_FIB_RULE_HEADER_LEN + 2]
+            .copy_from_slice(&20_u16.to_ne_bytes());
+        body[R2O_FIB_RULE_HEADER_LEN + 2..R2O_FIB_RULE_HEADER_LEN + 4]
+            .copy_from_slice(&R2O_FRA_FWMARK.to_ne_bytes());
+        let buffer = r2o_test_message(R2O_RTM_NEWRULE, &body);
+        print_rules("bad_attr", &buffer, &mut output);
+
+        let buffer = r2o_test_message(R2O_NLMSG_ERROR, &[0, 0]);
+        print_rules("short_error", &buffer, &mut output);
+
         let error = r2o_test_message(R2O_NLMSG_ERROR, &(-22_i32).to_ne_bytes());
         print_rules("error", &error, &mut output);
 
@@ -1406,6 +1729,29 @@ mod tests {
         body[offset + 2..offset + 4].copy_from_slice(&R2O_RTA_MULTIPATH.to_ne_bytes());
         let message = r2o_test_message(R2O_RTM_NEWROUTE, &body);
         print_lookup("bad_multipath", &message, &mut output);
+
+        let mut body = route_body(R2O_RTN_UNICAST);
+        let mut bad_hop = vec![0_u8; 8];
+        bad_hop[..2].copy_from_slice(&4_u16.to_ne_bytes());
+        r2o_test_attr(&mut body, R2O_RTA_MULTIPATH, &bad_hop);
+        let message = r2o_test_message(R2O_RTM_NEWROUTE, &body);
+        print_lookup("bad_hop", &message, &mut output);
+
+        let mut body = route_body(R2O_RTN_UNICAST);
+        r2o_test_attr(&mut body, R2O_RTA_MULTIPATH, &[]);
+        let message = r2o_test_message(R2O_RTM_NEWROUTE, &body);
+        print_lookup("empty_multipath", &message, &mut output);
+
+        let done_only = r2o_test_message(R2O_NLMSG_DONE, &[]);
+        print_lookup("done_only", &done_only, &mut output);
+
+        let mut truncated = vec![0; 20];
+        truncated[..4].copy_from_slice(&32_u32.to_ne_bytes());
+        truncated[4..6].copy_from_slice(&R2O_RTM_NEWROUTE.to_ne_bytes());
+        print_lookup("truncated", &truncated, &mut output);
+
+        let short_error = r2o_test_message(R2O_NLMSG_ERROR, &[0, 0]);
+        print_lookup("short_error", &short_error, &mut output);
 
         let error = r2o_test_message(R2O_NLMSG_ERROR, &(-101_i32).to_ne_bytes());
         print_lookup("error", &error, &mut output);

@@ -143,6 +143,95 @@ int main(void) {
     used = append_rule(buffer, used, 0x1234, 0xff00, 1, 0);
     print_rules("incomplete", buffer, used);
 
+    // Только маска без метки: C оставляет mark=0 & mask.
+    used = 0;
+    {
+        uint8_t body[64];
+        size_t body_len = RM_FIB_HDR;
+        uint32_t mask = 0xff00;
+        memset(body, 0, sizeof body);
+        body[0] = 2;
+        body_len = append_attr(body, body_len, RM_FRA_FWMASK, &mask, 4);
+        used = append_message(buffer, used, RM_RTM_NEWRULE, D2K_NLM_F_REQUEST,
+                              1, body, body_len);
+        used = append_message(buffer, used, D2K_NLMSG_DONE, 0, 1, NULL, 0);
+    }
+    print_rules("mask_only", buffer, used);
+
+    // FWMARK длиной 8: C читает первые 4 байта, как и Rust.
+    used = 0;
+    {
+        uint8_t body[64];
+        size_t body_len = RM_FIB_HDR;
+        uint32_t mark = 0x4321;
+        uint8_t wide[8] = {0};
+        memcpy(wide, &mark, 4);
+        memset(body, 0, sizeof body);
+        body[0] = 2;
+        body_len = append_attr(body, body_len, RM_FRA_FWMARK, wide, 8);
+        used = append_message(buffer, used, RM_RTM_NEWRULE, D2K_NLM_F_REQUEST,
+                              1, body, body_len);
+        used = append_message(buffer, used, D2K_NLMSG_DONE, 0, 1, NULL, 0);
+    }
+    print_rules("wide_mark", buffer, used);
+
+    // Повреждённый атрибут (длина 3 < заголовка) — отказ разбора.
+    used = 0;
+    {
+        uint8_t body[32];
+        memset(body, 0, sizeof body);
+        body[0] = 2;
+        wr16(body + RM_FIB_HDR, 3);
+        wr16(body + RM_FIB_HDR + 2, RM_FRA_FWMARK);
+        used = append_message(buffer, used, RM_RTM_NEWRULE, D2K_NLM_F_REQUEST,
+                              1, body, RM_FIB_HDR + 4);
+    }
+    print_rules("malformed", buffer, used);
+
+    // DONE первым: C прекращает разбор и не смотрит на следующие правила.
+    used = 0;
+    used = append_message(buffer, used, D2K_NLMSG_DONE, 0, 1, NULL, 0);
+    used = append_rule(buffer, used, 0x1234, 0xff00, 1, 0);
+    print_rules("done_first", buffer, used);
+
+    // Обрезанное сообщение: nlmsg_len больше буфера.
+    used = 0;
+    memset(buffer, 0, 17);
+    wr32(buffer, 32);
+    wr16(buffer + 4, RM_RTM_NEWRULE);
+    print_rules("truncated", buffer, 17);
+
+    // DONE и 1-3 байта хвоста: это ещё успешный конец дампа.
+    used = 0;
+    used = append_message(buffer, used, D2K_NLMSG_DONE, 0, 1, NULL, 0);
+    buffer[used] = 0;
+    buffer[used + 1] = 0;
+    buffer[used + 2] = 0;
+    print_rules("done_tail", buffer, used + 3);
+
+    // Атрибут обещает 20 байт, а в теле только 8.
+    used = 0;
+    {
+        uint8_t body[32];
+        memset(body, 0, sizeof body);
+        body[0] = 2;
+        wr16(body + RM_FIB_HDR, 20);
+        wr16(body + RM_FIB_HDR + 2, RM_FRA_FWMARK);
+        used = append_message(buffer, used, RM_RTM_NEWRULE, D2K_NLM_F_REQUEST,
+                              1, body, RM_FIB_HDR + 8);
+    }
+    print_rules("bad_attr", buffer, used);
+
+    // NLMSG_ERROR короче 4 байт: C отдаёт kerr=0 и rc=-1.
+    used = 0;
+    uint8_t short_error[18];
+    memset(short_error, 0, sizeof short_error);
+    wr32(short_error, sizeof short_error);
+    wr16(short_error + 4, D2K_NLMSG_ERROR);
+    used = append_message(buffer, 0, D2K_NLMSG_ERROR, 0, 1,
+                          short_error + 16, 2);
+    print_rules("short_error", buffer, used);
+
     used = 0;
     int32_t error = -22;
     used = append_message(buffer, used, D2K_NLMSG_ERROR, 0, 1,
@@ -209,6 +298,47 @@ int main(void) {
     route_len += 8;
     used = append_route(buffer, 0, D2K_NLM_F_REQUEST, route, route_len);
     print_lookup("bad_multipath", buffer, used);
+
+    // Явно повреждённый hop: длина 4 меньше struct rtnexthop.
+    memset(route, 0, sizeof route);
+    route[0] = 2;
+    route[7] = RM_RTN_UNICAST;
+    route_len = RM_RTMSG;
+    uint8_t bad_hop[8] = {0};
+    wr16(bad_hop, 4);
+    route_len = append_attr(route, route_len, RM_RTA_MULTIPATH, bad_hop,
+                            sizeof bad_hop);
+    used = append_route(buffer, 0, D2K_NLM_F_REQUEST, route, route_len);
+    print_lookup("bad_hop", buffer, used);
+
+    // Пустой multipath: маршрут без устройств (rc=1, n=0).
+    memset(route, 0, sizeof route);
+    route[0] = 2;
+    route[7] = RM_RTN_UNICAST;
+    route_len = RM_RTMSG;
+    uint8_t empty = 0;
+    route_len = append_attr(route, route_len, RM_RTA_MULTIPATH, &empty, 0);
+    used = append_route(buffer, 0, D2K_NLM_F_REQUEST, route, route_len);
+    print_lookup("empty_multipath", buffer, used);
+
+    // Только DONE: ответ неполный (rc=0), а не маршрут.
+    used = append_message(buffer, 0, D2K_NLMSG_DONE, 0, 1, NULL, 0);
+    print_lookup("done_only", buffer, used);
+
+    // Обрезанный маршрут: nlmsg_len больше буфера.
+    used = 0;
+    memset(buffer, 0, 20);
+    wr32(buffer, 32);
+    wr16(buffer + 4, RM_RTM_NEWROUTE);
+    print_lookup("truncated", buffer, 20);
+
+    // NLMSG_ERROR короче 4 байт: kerr=0, rc=-1.
+    used = 0;
+    {
+        uint8_t short_body[2] = {0, 0};
+        used = append_message(buffer, used, D2K_NLMSG_ERROR, 0, 1, short_body, 2);
+    }
+    print_lookup("short_error", buffer, used);
 
     used = 0;
     error = -101;
