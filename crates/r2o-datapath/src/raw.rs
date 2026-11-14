@@ -109,8 +109,11 @@ impl RawSocket {
     }
 
     /// Возвращает общий предел длины одной посылки.
+    /// C `d2k_raw_maxlen`: ноль означает «предел не объявлен», а не ноль
+    /// байт; наружу отдаётся D2K_RAW_MTU_FALLBACK.
     pub fn maxlen(&self) -> usize {
-        self.maxlen.get()
+        let value = self.maxlen.get();
+        if value == 0 { 1500 } else { value }
     }
 
     pub fn send_stats(&self) -> RawSendStats {
@@ -139,10 +142,10 @@ impl RawSocket {
     /// Возвращает предел посылки для семейства и адреса назначения.
     pub fn packet_route_maxlen(&self, packet: &[u8]) -> usize {
         let Some((family, destination)) = r2o_packet_route_key(packet) else {
-            return self.maxlen.get();
+            return self.maxlen();
         };
         if packet.len() < if family == 6 { 40 } else { 20 } {
-            return self.maxlen.get();
+            return self.maxlen();
         }
         self.r2o_route_maxlen(family, destination)
     }
@@ -161,7 +164,7 @@ impl RawSocket {
                 .r2o_get_or_lookup(family, destination, || {
                     r2o_route_mtu(self.mark, family, destination)
                 });
-        r2o_effective_route_maxlen(route, self.maxlen.get(), self.maxlen_declared)
+        r2o_effective_route_maxlen(route, self.maxlen(), self.maxlen_declared)
     }
 
     /// Отправить пакет, не ожидая освобождения очереди raw-сокета.
@@ -302,45 +305,73 @@ pub fn r2o_pick_maxlen(interface: Option<&str>) -> usize {
     if let Some(interface) = interface.filter(|name| !name.is_empty()) {
         return r2o_interface_mtu(interface).unwrap_or(1500);
     }
-    let Ok(interfaces) = std::fs::read_dir("/sys/class/net") else {
+    // C `pick_maxlen` (`datapath/raw.c`) перечисляет интерфейсы через
+    // getifaddrs и читает MTU ioctl'ом SIOCGIFMTU на сокете текущего
+    // сетевого namespace. `/sys/class/net` — глобальный sysfs и в netns
+    // показывает чужие интерфейсы, поэтому он здесь непригоден.
+    use std::ffi::CStr;
+
+    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut list) } != 0 || list.is_null() {
         return 1500;
-    };
-    let mut smallest = None;
-    for interface in interfaces.flatten() {
-        let path = interface.path();
-        let flags = std::fs::read_to_string(path.join("flags"))
-            .ok()
-            .and_then(|value| r2o_parse_interface_flags(&value));
-        let Some(flags) = flags else {
+    }
+    let mut smallest = 0_usize;
+    let mut cursor = list;
+    while !cursor.is_null() {
+        let entry = unsafe { &*cursor };
+        cursor = entry.ifa_next;
+        if entry.ifa_name.is_null() {
             continue;
-        };
+        }
+        let flags = entry.ifa_flags;
         if flags & libc::IFF_UP as u32 == 0 || flags & libc::IFF_LOOPBACK as u32 != 0 {
             continue;
         }
-        let Some(mtu) = std::fs::read_to_string(path.join("mtu"))
-            .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .filter(|mtu| *mtu != 0)
-        else {
+        let Ok(name) = unsafe { CStr::from_ptr(entry.ifa_name) }.to_str() else {
             continue;
         };
-        smallest = Some(smallest.map_or(mtu, |current: usize| current.min(mtu)));
+        let Some(mtu) = r2o_interface_mtu(name).filter(|mtu| *mtu != 0) else {
+            continue;
+        };
+        smallest = if smallest == 0 {
+            mtu
+        } else {
+            smallest.min(mtu)
+        };
     }
-    smallest.unwrap_or(1500)
+    unsafe { libc::freeifaddrs(list) };
+    if smallest != 0 { smallest } else { 1500 }
 }
 
 fn r2o_interface_mtu(interface: &str) -> Option<usize> {
-    if interface.contains('/') || interface.contains('\\') || interface == "." || interface == ".."
-    {
+    let name = interface.as_bytes();
+    // C `snprintf(ifr_name, IF_NAMESIZE, ...)`: имя интерфейса Linux не
+    // длиннее IF_NAMESIZE-1, более длинное всё равно не разрешится.
+    if name.is_empty() || name.len() >= libc::IF_NAMESIZE {
         return None;
     }
-    let path = std::path::Path::new("/sys/class/net").join(interface);
-    std::fs::read_to_string(path.join("mtu"))
-        .ok()?
-        .trim()
-        .parse::<usize>()
-        .ok()
-        .filter(|mtu| *mtu != 0)
+    let socket = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+    if socket < 0 {
+        return None;
+    }
+    // struct ifreq: char ifr_name[IF_NAMESIZE]; union { ... int ifr_mtu; }.
+    // Первые 20 байт одинаковы на 32- и 64-битных Linux.
+    let mut request = [0_u8; 40];
+    request[..name.len()].copy_from_slice(name);
+    let result = unsafe {
+        libc::ioctl(
+            socket,
+            libc::SIOCGIFMTU as libc::c_ulong,
+            request.as_mut_ptr(),
+        )
+    };
+    let mtu = i32::from_ne_bytes(
+        request[libc::IF_NAMESIZE..libc::IF_NAMESIZE + 4]
+            .try_into()
+            .ok()?,
+    );
+    unsafe { libc::close(socket) };
+    (result == 0 && mtu > 0).then_some(mtu as usize)
 }
 
 fn r2o_interface_mtu_by_index(ifindex: u32) -> Option<usize> {
@@ -372,11 +403,6 @@ fn r2o_select_egress_mtu(
         smallest = Some(smallest.map_or(mtu, |current: usize| current.min(mtu)));
     }
     smallest
-}
-
-fn r2o_parse_interface_flags(value: &str) -> Option<u32> {
-    let value = value.trim();
-    u32::from_str_radix(value.strip_prefix("0x").unwrap_or(value), 16).ok()
 }
 
 fn r2o_effective_route_maxlen(route: usize, maxlen: usize, declared: bool) -> usize {
@@ -746,8 +772,8 @@ mod tests {
     use super::{
         R2O_RAW_CANT_IPID, R2O_RAW_CANT_IPSUM, R2O_RAW_LIMITS, R2O_ROUTE_MTU_CACHE_CAPACITY,
         R2oRouteMtuCache, outgoing_packet, r2o_effective_route_maxlen, r2o_interface_mtu,
-        r2o_packet_route_key, r2o_parse_interface_flags, r2o_pick_maxlen, r2o_raw_mark_option,
-        r2o_route_mtu, r2o_select_egress_mtu, r2o_tls_route_segment_cap_with,
+        r2o_packet_route_key, r2o_pick_maxlen, r2o_raw_mark_option, r2o_route_mtu,
+        r2o_select_egress_mtu, r2o_tls_route_segment_cap_with,
     };
     use proptest::prelude::*;
     use r2k_core::plan::{Emission, EmitKind};
@@ -1058,13 +1084,6 @@ mod tests {
     }
 
     #[test]
-    fn читает_шестнадцатеричные_флаги_интерфейса_из_sysfs() {
-        assert_eq!(r2o_parse_interface_flags("0x1003\n"), Some(0x1003));
-        assert_eq!(r2o_parse_interface_flags("1003"), Some(0x1003));
-        assert_eq!(r2o_parse_interface_flags("unknown"), None);
-    }
-
-    #[test]
     fn общий_предел_берёт_наименьший_доступный_mtu_выходных_интерфейсов() {
         let mut queried = Vec::new();
         let mtu = r2o_select_egress_mtu(&[7, 0, 9, 7, 11], |ifindex| {
@@ -1101,6 +1120,117 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn ipv6_fragment_build_differential_matches_c() {
+        let mut payload = vec![0_u8; 64];
+        for (index, byte) in payload.iter_mut().enumerate() {
+            *byte = (index * 7 + 3) as u8;
+        }
+        let source = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let destination = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+        let mut original = vec![0_u8; 40 + 8 + payload.len()];
+        let datagram_len = (8 + payload.len()) as u16;
+        original[..4].copy_from_slice(&0x62e1_2345_u32.to_be_bytes());
+        original[4..6].copy_from_slice(&datagram_len.to_be_bytes());
+        original[6] = 17;
+        original[7] = 48;
+        original[8..24].copy_from_slice(&source);
+        original[24..40].copy_from_slice(&destination);
+        original[40..42].copy_from_slice(&40000_u16.to_be_bytes());
+        original[42..44].copy_from_slice(&443_u16.to_be_bytes());
+        original[44..46].copy_from_slice(&datagram_len.to_be_bytes());
+        original[48..].copy_from_slice(&payload);
+
+        let hex =
+            |bytes: &[u8]| -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() };
+        let mut output = String::new();
+        for shape in 1..=4_u8 {
+            let emission = Emission {
+                kind: EmitKind::Payload,
+                delay_us: 0,
+                seq: 0,
+                ttl: 0,
+                poison: 0,
+                seq_shift: 0,
+                wire_profile: 0,
+                ipfrag: shape,
+                urgent: false,
+                urgent_ptr: 0,
+                prefix: Vec::new(),
+                bytes: payload.clone(),
+            };
+            let fragments =
+                r2k_core::wire::build_udp_fragments(&original, &emission).expect("IPv6 fragments");
+            output.push_str(&format!("shape{shape}_count {}\n", fragments.len()));
+            let expected_id = 0x1234_5000_u32 + u32::from(shape);
+            let mut nonzero = true;
+            let mut same = true;
+            let mut first_id = None;
+            for (index, fragment) in fragments.iter().enumerate() {
+                let id = u32::from_be_bytes(
+                    fragment[44..48]
+                        .try_into()
+                        .expect("идентификатор IPv6-фрагмента"),
+                );
+                if id == 0 {
+                    nonzero = false;
+                }
+                if let Some(first) = first_id {
+                    if id != first {
+                        same = false;
+                    }
+                } else {
+                    first_id = Some(id);
+                }
+                let mut normalized = fragment.clone();
+                normalized[44..48].copy_from_slice(&expected_id.to_be_bytes());
+                output.push_str(&format!("shape{shape}_{index} {}\n", hex(&normalized)));
+            }
+            output.push_str(&format!(
+                "shape{shape}_ids nonzero={} same={}\n",
+                u8::from(nonzero),
+                u8::from(same)
+            ));
+        }
+        if let Ok(path) = std::env::var("R2O_IPV6_FRAG_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert!(output.contains("shape1_count 2"));
+        assert!(output.contains("shape4_count 3"));
+    }
+
+    #[test]
+    fn ipv6_фрагменты_проверяют_id_offset_и_зарезервированные_биты() {
+        let fragments = fragments(&original_v6());
+        for fragment in &fragments {
+            assert!(
+                outgoing_packet(fragment, libc::AF_INET6).is_some(),
+                "собранный IPv6-фрагмент должен приниматься"
+            );
+        }
+        let mut zero_id = fragments[0].clone();
+        zero_id[44..48].fill(0);
+        assert!(outgoing_packet(&zero_id, libc::AF_INET6).is_none());
+
+        let mut reserved = fragments[0].clone();
+        reserved[42..44].copy_from_slice(&0x0002_u16.to_be_bytes());
+        assert!(outgoing_packet(&reserved, libc::AF_INET6).is_none());
+
+        let mut too_far = fragments[0].clone();
+        too_far[42..44].copy_from_slice(&0xfff8_u16.to_be_bytes());
+        assert!(outgoing_packet(&too_far, libc::AF_INET6).is_none());
+
+        let mut not_udp = fragments[0].clone();
+        not_udp[40] = 6;
+        assert!(outgoing_packet(&not_udp, libc::AF_INET6).is_none());
+
+        let mut bad_length = fragments[0].clone();
+        bad_length[5] = bad_length[5].wrapping_add(1);
+        assert!(outgoing_packet(&bad_length, libc::AF_INET6).is_none());
+
+        assert!(outgoing_packet(&fragments[0][..55], libc::AF_INET6).is_none());
     }
 
     #[test]
@@ -1167,7 +1297,7 @@ mod tests {
     }
 
     #[test]
-    fn interface_mtu_reads_sysfs_and_named_limit_uses_it() {
+    fn interface_mtu_uses_ioctl_and_named_limit_uses_it() {
         assert_eq!(r2o_interface_mtu("../lo"), None);
         assert_eq!(r2o_interface_mtu("."), None);
         if let Some(mtu) = r2o_interface_mtu("lo") {
@@ -1324,6 +1454,48 @@ mod tests {
             std::fs::write(path, &output).unwrap();
         }
         assert!(output.contains("adopt_lo "));
+    }
+
+    #[test]
+    fn raw_route_cache_differential_matches_c() {
+        let v4 = [198, 51, 100, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let v6 = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
+
+        let mut output = String::new();
+        let mut socket = тестовый_raw_сокет(false);
+        socket
+            .route_mtu_cache
+            .borrow_mut()
+            .r2o_get_or_lookup(4, v4, || 1400);
+        socket.maxlen.set(1500);
+        output.push_str(&format!("hit_plain {}\n", socket.r2o_route_maxlen(4, v4)));
+        socket.maxlen.set(1200);
+        socket.maxlen_declared = true;
+        output.push_str(&format!(
+            "hit_declared_cap {}\n",
+            socket.r2o_route_maxlen(4, v4)
+        ));
+        socket.maxlen_declared = false;
+        output.push_str(&format!(
+            "hit_route_above_cap {}\n",
+            socket.r2o_route_maxlen(4, v4)
+        ));
+        socket.maxlen.set(0);
+        output.push_str(&format!("maxlen_zero {}\n", socket.maxlen()));
+
+        let socket = тестовый_raw_сокет(true);
+        socket
+            .route_mtu_cache
+            .borrow_mut()
+            .r2o_get_or_lookup(6, v6, || 1400);
+        socket.maxlen.set(1500);
+        output.push_str(&format!("v6_hit {}\n", socket.r2o_route_maxlen(6, v6)));
+        socket.route_mtu_cache.borrow_mut().r2o_lower(6, v6, 1300);
+        output.push_str(&format!("v6_lowered {}\n", socket.r2o_route_maxlen(6, v6)));
+        if let Ok(path) = std::env::var("R2O_RAW_ROUTE_CACHE_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert!(output.contains("hit_declared_cap 1200"));
     }
 
     #[test]

@@ -4,6 +4,10 @@
 # Требует CAP_NET_RAW/CAP_NET_ADMIN (root или сетевой namespace).
 set -eu
 
+if [ -z "${R2O_IN_USERNS:-}" ] && [ "$(id -u)" -ne 0 ]; then
+    R2O_IN_USERNS=1 exec unshare -Urn sh "$0" "$@"
+fi
+
 ROOT=$(CDPATH='' cd -P "$(dirname -- "$0")/.." && pwd)
 D2O_ROOT=${R2O_DONOR_ROOT:?set R2O_DONOR_ROOT to the pinned D2O checkout}
 EXPECTED_D2O_SHA=a378e230947ebfd011439e1cac0f1e994d883aae
@@ -20,6 +24,8 @@ fi
     echo "IPv6 raw-send differential requires Linux" >&2
     exit 77
 }
+
+ip link set lo up 2>/dev/null || true
 
 mkdir -p "$TMPDIR"
 TEMP=$(mktemp -d "$TMPDIR/r2o-raw6-differential.XXXXXX")
