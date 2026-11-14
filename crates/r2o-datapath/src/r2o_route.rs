@@ -256,6 +256,43 @@ fn r2o_interface_name(ifindex: u32) -> Option<String> {
     )
 }
 
+/// C-текст события `routes_refresh` без префикса `d2kd:`/`r2o-datapath:`.
+///
+/// `Changed` возвращает `None`: его строку собирает `r2o_routes_quiet_line`
+/// после `describe_oifs`/`r2o_describe_rules`.
+pub fn r2o_routes_change_line(change: R2oRoutesChange, error: Option<&str>) -> Option<String> {
+    let error = error.unwrap_or("");
+    Some(match change {
+        R2oRoutesChange::RefreshFailed { first } => format!(
+            "правила и маршруты не прочитаны: {error} — держу прежние{}",
+            if first {
+                " (до первого чтения клиент с чужой меткой идёт ядром)"
+            } else {
+                ""
+            }
+        ),
+        R2oRoutesChange::RefreshRecovered => "правила и маршруты снова читаются".to_owned(),
+        R2oRoutesChange::PartNoDevice(part) => format!(
+            "{} без интерфейса в ответе ядра — проверка выхода по интерфейсу \
+             для этого семейства выключена, действует только метка",
+            part.r2o_c_name()
+        ),
+        R2oRoutesChange::PartAgain(part) => {
+            format!("{} снова читаются", part.r2o_c_name())
+        }
+        R2oRoutesChange::PartUnread(part) => {
+            format!(
+                "{} не прочитаны: {error} — держу прежние",
+                part.r2o_c_name()
+            )
+        }
+        R2oRoutesChange::Truncated { found } => {
+            format!("правил по метке {found}, учтены первые {R2O_ROUTE_RULE_CAPACITY}")
+        }
+        R2oRoutesChange::Changed { .. } => return None,
+    })
+}
+
 /// C `routes_refresh` quiet-строка (без префикса и перевода строки).
 pub fn r2o_routes_quiet_line(rules: &str, oifs4: &str, oifs6: &str, changes: u32) -> String {
     let more = if changes > 1 {
@@ -1617,6 +1654,48 @@ mod tests {
     }
 
     #[test]
+    fn routes_change_line_повторяет_c_тексты() {
+        use R2oRoutesChange::{
+            PartAgain, PartNoDevice, PartUnread, RefreshFailed, RefreshRecovered, Truncated,
+        };
+        assert_eq!(
+            r2o_routes_change_line(RefreshFailed { first: true }, Some("нет таблицы")),
+            Some(
+                "правила и маршруты не прочитаны: нет таблицы — держу прежние \
+                 (до первого чтения клиент с чужой меткой идёт ядром)"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            r2o_routes_change_line(RefreshRecovered, None).as_deref(),
+            Some("правила и маршруты снова читаются")
+        );
+        assert_eq!(
+            r2o_routes_change_line(PartAgain(R2oRoutesPart::RulesV4), None).as_deref(),
+            Some("правила IPv4 по метке снова читаются")
+        );
+        assert_eq!(
+            r2o_routes_change_line(PartUnread(R2oRoutesPart::RouteV6), Some("err")).as_deref(),
+            Some("маршрут IPv6 не прочитаны: err — держу прежние")
+        );
+        assert_eq!(
+            r2o_routes_change_line(PartNoDevice(R2oRoutesPart::RouteV4), None).as_deref(),
+            Some(
+                "маршрут IPv4 без интерфейса в ответе ядра — проверка выхода по \
+                 интерфейсу для этого семейства выключена, действует только метка"
+            )
+        );
+        assert_eq!(
+            r2o_routes_change_line(Truncated { found: 40 }, None).as_deref(),
+            Some("правил по метке 40, учтены первые 32")
+        );
+        assert_eq!(
+            r2o_routes_change_line(R2oRoutesChange::Changed { changes: 2 }, None),
+            None
+        );
+    }
+
+    #[test]
     fn routes_quiet_строка_повторяет_c_и_счётчик_смен() {
         let without = r2o_routes_quiet_line("0x1/0xff v4", "eth0", "#7", 1);
         assert_eq!(
@@ -1635,8 +1714,7 @@ mod tests {
     fn routes_refresh_log_повторяет_переходы_c() {
         use R2oRoutePartStatus::{NoDevice, Read, Unread};
         use R2oRoutesChange::{
-            Changed, PartAgain, PartNoDevice, PartUnread, RefreshFailed, RefreshRecovered,
-            Truncated,
+            PartAgain, PartNoDevice, PartUnread, RefreshFailed, RefreshRecovered, Truncated,
         };
         use R2oRoutesPart::{RouteV4, RulesV4};
 
