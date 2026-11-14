@@ -691,6 +691,7 @@ mod tests {
         packet[0] = 0x45;
         packet[2..4].copy_from_slice(&36u16.to_be_bytes());
         packet[4..6].copy_from_slice(&9u16.to_be_bytes());
+        packet[4..6].copy_from_slice(&9_u16.to_be_bytes());
         packet[8] = 64;
         packet[9] = 17;
         packet[12..16].copy_from_slice(&[192, 0, 2, 1]);
@@ -739,6 +740,64 @@ mod tests {
         packet[52] = 5 << 4;
         packet[60..65].copy_from_slice(&[0x16, 3, 3, 0, 0]);
         packet
+    }
+
+    #[test]
+    fn raw_send_differential_matches_c() {
+        use std::cell::{Cell, RefCell};
+        use std::os::fd::{FromRawFd, OwnedFd};
+
+        let scenario = std::env::var("FAKE_SENDTO_SCENARIO").unwrap_or_else(|_| "ok".into());
+        let large = scenario == "emsgsize";
+        let mut packet = vec![0_u8; if large { 1200 } else { 36 }];
+        packet[0] = 0x45;
+        let packet_len = packet.len();
+        packet[2..4].copy_from_slice(&(packet_len as u16).to_be_bytes());
+        packet[4..6].copy_from_slice(&9_u16.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 17;
+        packet[12..16].copy_from_slice(&[192, 0, 2, 1]);
+        packet[16..20].copy_from_slice(&[198, 51, 100, 2]);
+        packet[20..22].copy_from_slice(&51234_u16.to_be_bytes());
+        packet[22..24].copy_from_slice(&443_u16.to_be_bytes());
+        packet[24..26].copy_from_slice(&((packet_len - 20) as u16).to_be_bytes());
+
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+        assert!(fd >= 0);
+        let mut destination = [0_u8; 16];
+        destination[..4].copy_from_slice(&packet[16..20]);
+        let mut cache = super::R2oRouteMtuCache::default();
+        cache.r2o_get_or_lookup(4, destination, || 1500);
+        let socket = super::RawSocket {
+            fd: unsafe { OwnedFd::from_raw_fd(fd) },
+            family: libc::AF_INET,
+            mark: 0,
+            send_stats: Cell::new(super::RawSendStats::default()),
+            maxlen: Cell::new(1500),
+            maxlen_declared: true,
+            egress_mtu: Cell::new(None),
+            route_mtu_cache: RefCell::new(cache),
+        };
+        let result = if scenario == "invalid" {
+            socket.send_packet(&packet[..19])
+        } else {
+            socket.send_packet(&packet)
+        };
+        let stats = socket.send_stats.get();
+        let route = socket.route_mtu_cache.borrow().entries[0].mtu;
+        let output = format!(
+            "{scenario} rc={} sent={} errors={} busy={} maxlen={} route={}\n",
+            if result.is_ok() { 0 } else { -1 },
+            stats.sent,
+            stats.errors,
+            stats.busy,
+            socket.maxlen.get(),
+            route
+        );
+        if let Ok(path) = std::env::var("R2O_RAW_SEND_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert!(output.contains(&format!("{scenario} rc=")));
     }
 
     #[test]
