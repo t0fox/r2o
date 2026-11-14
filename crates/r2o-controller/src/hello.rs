@@ -527,13 +527,10 @@ fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
-fn decode_profile(profile: &str) -> Option<Vec<u8>> {
-    let mut hex = Vec::new();
-    for line in profile.lines() {
-        let source = line.split('#').next()?;
-        hex.extend(source.bytes().filter(|byte| !byte.is_ascii_whitespace()));
-    }
-    if hex.len() % 2 != 0 || hex.len() / 2 > TEMPLATE_MAX {
+/// C `hex_decode` (`core/hello.c:480-498`): строгие hex-пары без
+/// комментариев и пробелов, `n<=cap`.
+pub fn r2o_hex_decode(hex: &[u8], cap: usize) -> Option<Vec<u8>> {
+    if hex.len() % 2 != 0 || hex.len() / 2 > cap {
         return None;
     }
     let mut bytes = Vec::with_capacity(hex.len() / 2);
@@ -543,6 +540,17 @@ fn decode_profile(profile: &str) -> Option<Vec<u8>> {
         bytes.push((high << 4) | low);
     }
     Some(bytes)
+}
+
+fn decode_profile(profile: &str) -> Option<Vec<u8>> {
+    let mut hex = Vec::new();
+    for line in profile.lines() {
+        let source = line.split('#').next()?;
+        hex.extend(source.bytes().filter(|byte| !byte.is_ascii_whitespace()));
+    }
+    // Очистка комментариев/пробелов — расширение загрузчика профилей;
+    // сам разбор пар повторяет C `hex_decode` вплоть до предела 4096.
+    r2o_hex_decode(&hex, TEMPLATE_MAX)
 }
 
 fn read_len(bytes: &[u8], offset: usize, width: usize) -> Option<usize> {

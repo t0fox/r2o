@@ -84,14 +84,14 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 333 | 215 | 0 | 0 |
+| core-net | 548 | 334 | 214 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
 | datapath-core | 400 | 286 | 114 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1377** | **605** | **0** | **0** |
+| **Итого** | **1982** | **1378** | **604** | **0** | **0** |
 
-Это не оценка паритета: 605 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 604 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1377 / P 605 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1378 / P 604 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -342,12 +342,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 333 | 215 | 0 | 0 |
+| core-net | 548 | 334 | 214 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
 | datapath-core | 400 | 286 | 114 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1377** | **605** | **0** | **0** |
+| **Итого** | **1982** | **1378** | **604** | **0** | **0** |
 
 
 ---
@@ -484,7 +484,7 @@ Rust-владелец: `crates/r2o-controller/src/hello.rs` (почти пост
 | `d2k_alpn_is_http` | 377-387 | 11 | список имён: `http/1.1`, `http/1.0`, `h2`, границы `q+1+l<=len` | `r2o_tls.rs` `alpn_is_http` | E | C отдельный предикат с проверкой границ; Rust `alpn_is_http(name)` сравнивает ровно три протокола, границы списка проверяются в `r2o_tls_client_hello_non_http_alpn`. Тест `alpn_is_http_matches_c` (http/1.1, http/1.0, h2, h3, регистр, пусто). |
 | `splice_sni` | 409-452 | 44 | заменить SNI, обновить 6 длин: name/list/ext/exts/hs24/rec | `hello.rs` `rename_sni`, публичная обёртка `r2o_hello_rename` | **E*** | C/Rust differential `scripts/test-hello-rename-differential.sh` PASS (20 кейсов): `d2k_hello_rename` прогоняет обе реализации на одной и той же записи и сравнивает **все байты** результата — значит, все шесть длин (name/list/ext/[exts]/hs24/rec) пересчитаны одинаково. Покрыты имена короче/длиннее/равной длины, SNI первым/последним, modern/legacy, без SNI, пустой SNI, два имени, битые длины, хвост за рукопожатием, усечение, не-TLS, пустое тело, короткая declared handshake. **Ограничение:** `splice_sni` статическая — вызывается через `d2k_hello_rename`; отдельная ветвь `new_total > cap` не проверена (Rust заранее ограничивает 4096, C cap=4096). |
 | `hex_nibble` | 462-473 | 12 | hex-цифра → значение, иначе -1 | `hello.rs` `hex_nibble` | E | C helper для чистого hex (`0-9a-fA-F`, иначе -1). Rust `hex_nibble(u8) -> Option<u8>` даёт те же значения и используется в `decode_profile`; тест `hex_nibble_matches_c` (0,9,a,F,g,NUL,пробел). |
-| `hex_decode` | 480-498 | 19 | чётная длина, `n<=cap`, hex → байты; -1 при ошибке | `hello.rs:501-517 decode_profile` | **P** | C: нечётная длина/`n>cap`/невалидный nibble → -1, комментарии и пробелы не допускает. Rust: режет каждую строку по `#`, удаляет ASCII-пробелы, проверяет чётность и `<=4096`, затем `to_digit(16)` → `None` при ошибке. Для сгенерированных C-профилей и `include_str!`-профилей R2O байты совпадают; API `Vec`/`Option` вместо кода. |
+| `hex_decode` | 480-498 | 19 | чётная длина, `n<=cap`, hex → байты; -1 при ошибке | `hello.rs` `r2o_hex_decode`, `decode_profile` | **E*** | C/Rust differential `scripts/test-hello-hex-differential.sh` PASS (16 кейсов): пустая строка, верхний/нижний регистр, нечётная длина, не-hex (`gg`, `zz`, `00#11`, `1 0`, `0x10`), предел 16 байт и переполнение 17/18 байт — rc/len/hex совпали. `r2o_hex_decode` — построчный порт C; загрузчик профилей перед ним вырезает `#`-комментарии и ASCII-пробелы. **Ограничение:** C-функция статическая и вызывается включением `core/hello.c` в тестовый оракул; расширение загрузчика профилей (комментарии/пробелы) остаётся осознанным отличием входа. |
 | `d2k_hello_rename` | 500-535 | 36 | обернуть CH в TLS-запись, `splice_sni`, вернуть тело; `n>0xffff` или `n+5>4096` → -1 | `hello.rs` `r2o_hello_rename`/`rename_sni` | **E*** | Тот же C/Rust differential (20 кейсов) PASS — rc/len/hex совпали побайтово. Rust-обёртка повторяет C-гейты (`n>0xffff`, `n+5>4096`, непустое имя без NUL) и возвращает тело без 5-байтной записи. **Ограничение:** C берёт имя через `strlen`, Rust — байты с явным запретом NUL; переполнение `cap` проверяется до вызова. |
 | `d2k_hello_without_sni` | 537-576 | 40 | требует complete/!truncated/have_exts/have_sni; удаляет server_name, обновляет ext/hs/rec | `r2k-core/quic.rs` `r2k_quic_client_hello_rename_sni(..., None)` | E | C принимает тело ClientHello, оборачивает в TLS-запись, требует complete/!truncated/have_exts/have_sni, проверяет границы SNI-расширения и после удаления обновляет длины расширений/handshake/record; без SNI — отказ. Rust `r2k_quic_client_hello_rename_sni(bytes, None)` удаляет server_name из handshake (4-байтный заголовок вместо record-обёртки), пересчитывает extensions/handshake длины, идемпотентен при повторном удалении и отвергает добавление SNI в hello без SNI. Тест `переименовывает_или_удаляет_sni_с_пересчётом_длин_clienthello`. |
 | `d2k_hello_from_profile` | 578-609 | 32 | modern/legacy профиль → `splice_sni`; UNKNOWN → -1 | `hello.rs:549-598 client_hello_from_profile` + `legacy/modern_client_hello` | **E** | C: `sni/out/out_len` не NULL, имя непустое; modern/legacy decode, `tmpl_len!=0`, `splice_sni`. Rust: имя непустое/без NUL/`<=u16::MAX`; `decode_profile`; `locate_sni`; `new_len<=4096`; шесть длин; валидация результата. C-профили modern/legacy и R2O `include_str!` дают те же байты (unit `shape_distinguishes_modern_and_legacy_profiles`, тесты профилей); Rust дополнительно имеет профиль `r2o_rx_fake`, которого в C нет. E. |
@@ -1535,7 +1535,7 @@ Inline-решения QUIC-зонда: суд этапа данных, stall-д�
   планировщика и список сверены `test-hello-rename-differential.sh`);
   `splice_sni`/`d2k_hello_rename`
   — E* (побайтовый differential `test-hello-rename-differential.sh`);
-  `d2k_hello_without_sni` — TLS-путь отдельной функции не имеет, только
+  `hex_decode` — E* (`test-hello-hex-differential.sh`); `d2k_hello_without_sni` — TLS-путь отдельной функции не имеет, только
   QUIC-путь `r2k_quic_client_hello_rename_sni(..., None)`; hex-хелперы
   отличаются обработкой комментариев/пробелов.
 - **`tls13core.c` (24):** `put16`, `get16`, `der_len`, `ascii_lower`,
