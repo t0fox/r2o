@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 467 | 225 | 0 | 0 |
-| datapath-core | 400 | 316 | 84 | 0 | 0 |
+| datapath-core | 400 | 317 | 83 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1412** | **570** | **0** | **0** |
+| **Итого** | **1982** | **1413** | **569** | **0** | **0** |
 
-Это не оценка паритета: 570 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 569 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1412 / P 570 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1413 / P 569 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 467 | 225 | 0 | 0 |
-| datapath-core | 400 | 316 | 84 | 0 | 0 |
+| datapath-core | 400 | 317 | 83 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1412** | **570** | **0** | **0** |
+| **Итого** | **1982** | **1413** | **569** | **0** | **0** |
 
 
 ---
@@ -3938,7 +3938,7 @@ CLI-логирования, health-файла, duration, состава свод
 | `d2k_session_reply_hidden` | 3609-3611 | 3 | ACK указал на невидимый ответ | `TcpSessions::r2o_reply_hidden` | E | C `s->reply_hidden`. Rust `r2o_reply_hidden()`; дифференциал `r2o-tcp-reply-hidden-differential.sh` и unit-проверки 0/1. |
 | `d2k_session_tcp_hello_flows` | 3613-3615 | 3 | TCP-потоки с ClientHello | `TcpSessions::r2o_tcp_hello_flows` | E | C `s->tcp_hello_flows` (`session.c:1577`). Rust `r2o_tcp_hello_flows()`; unit-тесты проверяют 1 после ClientHello и неизменность на повторе. |
 | `d2k_session_payload_stats` | 3617–3638 | 22 | снимок: reverse/after_hello/late/not_hello/first_byte/sni_next_seg/capture + http_later/unaligned/open_end | `engine.rs` `R2oSessionPayloadStats`/`session_payload_stats` | E | C заполняет `d2k_payload_stats` из `s->pay_*`, `capture` и HTTP-счётчиков. Rust `R2oSessionPayloadStats` объединяет `R2oTcpPayloadStats`, `CaptureStats` и `R2oHttpKeepAliveStats`; тест `session_payload_stats_combines_capture_and_http_like_c` проверяет поля и значения. |
-| `d2k_session_journal` | 3640-3642 | 3 | вернуть журнал сессии | `R2oFlowJournal` (`flow_journal.rs:543`) | **P** | C `return s ? s->jrn : NULL`. Rust журнал `R2oFlowJournal` живёт в движке/`run`; отдельного getter-а нет. D22 сверяет записи журнала. |
+| `d2k_session_journal` | 3640-3642 | 3 | вернуть журнал сессии | `flow_journal.rs` `R2oFlowJournal` | **E*** | C `return s ? s->jrn : NULL`. Rust журнал `R2oFlowJournal` создаётся в run-цикле и передаётся по ссылке всем потребителям; C/Rust differential `test-journal-c-parity-differential.sh` PASS: кольцо, retention, поля записей и note-тексты совпали. **Ограничение:** отдельного getter-а от session-объекта нет — журнал живёт рядом с сессией, а не внутри неё. |
 
 ## datapath/track.c (18 функций)
 
