@@ -242,6 +242,18 @@ impl TcpSession {
             last_seen: now,
         }
     }
+
+    /// C `tcp_watch` (`session.c:3257-3261`): поток — кандидат на TCP-stall.
+    /// `proto == 6` неявен (таблица только TCP), `routed` проверяет
+    /// вызывающий по таблице маршрутов.
+    fn r2o_tcp_watch(&self) -> bool {
+        self.hello_has_sni
+            && self.response_payload
+            && !self.suspect_counted
+            && !self.controller_probe
+            && self.pending_fin_at.is_none()
+            && !self.stall_watch_off
+    }
 }
 
 fn tcp_silence_event(
@@ -1043,15 +1055,7 @@ impl TcpSessions {
         self.flows
             .iter()
             .filter_map(|(key, session)| {
-                if !session.direction_known
-                    || session.controller_probe
-                    || !session.hello_has_sni
-                    || !session.response_payload
-                    || session.reverse_rst
-                    || session.guards != 0
-                    || session.stall_watch_off
-                    || session.stall_reported
-                {
+                if !session.r2o_tcp_watch() {
                     return None;
                 }
                 let server = if session.initiator == key.low {
@@ -1083,7 +1087,7 @@ impl TcpSessions {
             .flows
             .iter_mut()
             .find(|(flow_key, _)| flow_key.wire_key() == *key)?;
-        if session.stall_watch_off || session.stall_reported || session.guards != 0 {
+        if !session.r2o_tcp_watch() {
             return None;
         }
         let Some(state) = info.tcp_state else {
@@ -2414,9 +2418,9 @@ pub fn r2o_session_with_sni(
 #[cfg(test)]
 mod tests {
     use super::{
-        D2O_QUIC_MAX_DGRAM, KEY_LEN, PacketDecision, R2oTcpFlowMetrics, TcpFlowKey, TcpSessions,
-        decide, decide_with_session, decide_with_session_mtu, decide_with_session_probe,
-        tcp_plan_input, validate_runtime_plan,
+        D2O_QUIC_MAX_DGRAM, KEY_LEN, PacketDecision, R2oTcpFlowMetrics, TcpEndpoint, TcpFlowKey,
+        TcpSession, TcpSessions, decide, decide_with_session, decide_with_session_mtu,
+        decide_with_session_probe, tcp_plan_input, validate_runtime_plan,
     };
     #[cfg(target_os = "linux")]
     use crate::conntrack::R2oConntrackInfo;
@@ -3634,6 +3638,86 @@ mod tests {
         let events = sessions.take_tcp_exchange_events();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].planned, 1);
+    }
+
+    #[test]
+    #[ignore]
+    fn d2o_tcp_watch_trace() {
+        // Битовая раскладка совпадает с `d2o_tcp_watch_differential.c`:
+        // 0 — нет SNI, 1 — нет payload, 2 — suspected, 3 — probe,
+        // 4 — pending_fin, 5 — tcp_watch_off.
+        for mask in 0_u32..64 {
+            let mut session = TcpSession::new(
+                TcpEndpoint {
+                    address: r2k_core::addr::Address::parse("192.0.2.1").unwrap(),
+                    port: 40_000,
+                },
+                true,
+                None,
+                Instant::now(),
+            );
+            session.hello_has_sni = mask & 1 == 0;
+            session.response_payload = mask & 2 == 0;
+            session.suspect_counted = mask & 4 != 0;
+            session.controller_probe = mask & 8 != 0;
+            session.pending_fin_at = (mask & 16 != 0).then(Instant::now);
+            session.stall_watch_off = mask & 32 != 0;
+            println!("case={mask} rc={}", u8::from(session.r2o_tcp_watch()));
+        }
+    }
+
+    #[test]
+    fn tcp_stall_watch_повторяет_набор_c() {
+        // C `tcp_watch`: guards и reverse_rst не исключают поток; pending_fin,
+        // уже учтённое подозрение и probe — исключают.
+        let start = Instant::now();
+        let mut sessions = TcpSessions::default();
+        let client = ([192, 0, 2, 10], 41001);
+        let server = ([198, 51, 100, 20], 443);
+        sessions.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]), start);
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+            start + Duration::from_millis(50),
+        );
+        sessions.track_packet(
+            &ipv4_tcp_packet(
+                client,
+                server,
+                0x18,
+                64,
+                701,
+                &client_hello_with_sni_and_large_extension(),
+            ),
+            start + Duration::from_millis(100),
+        );
+        sessions.track_packet(
+            &ipv4_tcp_packet(server, client, 0x18, 124, 900, &[1, 2, 3]),
+            start + Duration::from_millis(200),
+        );
+        assert_eq!(sessions.tcp_stall_candidates().len(), 1);
+        let key =
+            TcpFlowKey::from_packet(&ipv4_tcp_packet(client, server, 0x18, 64, 701, &[])).unwrap();
+        {
+            let session = sessions.flows.get_mut(&key).unwrap();
+            session.guards = 1;
+            session.reverse_rst = true;
+        }
+        assert_eq!(
+            sessions.tcp_stall_candidates().len(),
+            1,
+            "guards/reverse_rst не исключают поток, как C"
+        );
+        sessions.flows.get_mut(&key).unwrap().pending_fin_at = Some(start);
+        assert!(sessions.tcp_stall_candidates().is_empty(), "pending_fin");
+        sessions.flows.get_mut(&key).unwrap().pending_fin_at = None;
+        sessions.flows.get_mut(&key).unwrap().suspect_counted = true;
+        assert!(sessions.tcp_stall_candidates().is_empty(), "suspected");
+        sessions.flows.get_mut(&key).unwrap().suspect_counted = false;
+        sessions.flows.get_mut(&key).unwrap().controller_probe = true;
+        assert!(sessions.tcp_stall_candidates().is_empty(), "probe");
+        sessions.flows.get_mut(&key).unwrap().controller_probe = false;
+        sessions.flows.get_mut(&key).unwrap().stall_watch_off = true;
+        assert!(sessions.tcp_stall_candidates().is_empty(), "tcp_watch_off");
     }
 
     #[test]

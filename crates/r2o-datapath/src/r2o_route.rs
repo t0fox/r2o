@@ -1,7 +1,9 @@
 //! Сопоставление меток маршрутизации и выходных интерфейсов для потоков R2O.
 
+use r2k_core::addr::Address;
 use std::collections::HashMap;
 use std::convert::TryInto;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::{Duration, Instant};
 
 pub const R2O_ROUTE_OTHER_DEV: u32 = u32::MAX;
@@ -769,6 +771,26 @@ impl R2oRoutedFlows {
         self.flows.len()
     }
 
+    /// C `fl->routed`: поток уже пропущен ядром по метке маршрутизатора.
+    /// Ключ канонический (low/high), поэтому проверяются оба направления.
+    pub fn r2o_is_routed_key(&self, key: &[u8; r2k_core::control::KEY_LEN]) -> bool {
+        let Some(low) = r2o_route_key_address(key[0], key.get(1..17)) else {
+            return false;
+        };
+        let Some(high) = r2o_route_key_address(key[0], key.get(17..33)) else {
+            return false;
+        };
+        let forward = R2oRouteFlowKey {
+            family: key[0],
+            protocol: key[37],
+            source: low,
+            destination: high,
+            source_port: u16::from_be_bytes([key[33], key[34]]),
+            destination_port: u16::from_be_bytes([key[35], key[36]]),
+        };
+        self.flows.contains_key(&forward) || self.flows.contains_key(&forward.r2o_reverse())
+    }
+
     /// Возвращает `true`, если пакет нужно оставить ядру без обработки датапатом.
     pub fn r2o_skip_packet(&mut self, packet: &[u8], route_mark: u32, now: Instant) -> bool {
         self.r2o_expire(now);
@@ -827,6 +849,19 @@ impl R2oRoutedFlows {
         };
         self.flows.remove(&oldest);
         self.flows.remove(&oldest.r2o_reverse());
+    }
+}
+
+fn r2o_route_key_address(family: u8, bytes: Option<&[u8]>) -> Option<Address> {
+    let bytes = bytes?;
+    match family {
+        4 => Some(Address::new(IpAddr::V4(Ipv4Addr::from(
+            <[u8; 4]>::try_from(bytes.get(..4)?).ok()?,
+        )))),
+        6 => Some(Address::new(IpAddr::V6(Ipv6Addr::from(
+            <[u8; 16]>::try_from(bytes.get(..16)?).ok()?,
+        )))),
+        _ => None,
     }
 }
 
@@ -1475,6 +1510,35 @@ mod tests {
             &[]
         )));
         assert!(r2o_route_watch_relevant(&[0; 4]));
+    }
+
+    #[test]
+    fn r2o_маршрутный_ключ_виден_по_каноническому_wire_key() {
+        let mut flows = R2oRoutedFlows::default();
+        let now = Instant::now();
+        let client_syn = r2o_test_tcp([192, 0, 2, 1], [198, 51, 100, 2], 40_000, 443, 0x02);
+        let server_syn_ack = r2o_test_tcp([198, 51, 100, 2], [192, 0, 2, 1], 443, 40_000, 0x12);
+        let other_syn = r2o_test_tcp([192, 0, 2, 1], [198, 51, 100, 2], 40_001, 443, 0x02);
+        let key = crate::capture::TcpFlowKey::from_packet(&client_syn)
+            .unwrap()
+            .wire_key();
+        let reverse_key = crate::capture::TcpFlowKey::from_packet(&server_syn_ack)
+            .unwrap()
+            .wire_key();
+        let other_key = crate::capture::TcpFlowKey::from_packet(&other_syn)
+            .unwrap()
+            .wire_key();
+        assert!(!flows.r2o_is_routed_key(&key));
+        assert!(flows.r2o_skip_packet(&client_syn, R2O_ROUTE_OTHER_DEV, now));
+        assert!(flows.r2o_is_routed_key(&key));
+        assert!(flows.r2o_is_routed_key(&reverse_key));
+        assert!(!flows.r2o_is_routed_key(&other_key));
+        // Новый SYN снимает метку — C сбрасывает `fl->routed`.
+        assert!(!flows.r2o_skip_packet(&client_syn, 0, now + Duration::from_millis(1)));
+        assert!(
+            !flows.r2o_is_routed_key(&key),
+            "новый SYN без метки — новое соединение"
+        );
     }
 
     #[test]

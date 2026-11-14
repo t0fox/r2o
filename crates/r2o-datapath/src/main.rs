@@ -1585,6 +1585,10 @@ mod app {
                 if conntrack.is_some() && control.as_ref().is_some_and(ControlServer::is_connected)
                 {
                     for probe in tcp_sessions.tcp_stall_candidates() {
+                        // C `tcp_watch`: поток с меткой маршрутизатора не цель.
+                        if routed_flows.r2o_is_routed_key(&probe.key) {
+                            continue;
+                        }
                         let Some(info) = conntrack
                             .as_mut()
                             .and_then(|client| client.query(&probe.tuple))
