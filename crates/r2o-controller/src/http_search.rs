@@ -1,6 +1,6 @@
 use r2k_core::control::{AppliedEvent, BindingContext, KEY_LEN, SHAPE_HTTP};
 use r2k_core::httpup::portal_location;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Instant;
 
@@ -1007,6 +1007,276 @@ mod d2o_http_judge_differential {
         assert_eq!(probe.answer, Answer::Real);
         assert!(probe.complete);
     }
+}
+
+/// C `D2K_HS_RECORD_MAX_BYTES`: предел памяти под записи HTTP-планов.
+pub const HTTP_PLANS_RECORD_MAX_BYTES: usize = 256 * 1024;
+/// Заголовок файла планов: C сравнивает строку целиком, включая `\n`.
+pub const HTTP_PLANS_HEADER: &str = "d2k-http-plans 1\n";
+
+/// Запись подтверждённого HTTP-кандидата (C `rec`): host/family/key/wall.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct R2oHttpPlanRecord {
+    pub host: String,
+    pub family: u8,
+    pub key: String,
+    /// Стенные часы подтверждения; 0 — проставить при первом сохранении.
+    pub wall: i64,
+    pub revoked: bool,
+}
+
+/// C `d2k_httpsearch_save` (`httpsearch.c:1446-1473`): атомарная запись
+/// `d2k-http-plans 1`; `wall==0` получает `wall_s`, отозванные и пустые
+/// ключи пропускаются.
+pub fn save_http_plans(
+    path: &std::path::Path,
+    records: &mut [R2oHttpPlanRecord],
+    wall_s: i64,
+) -> Result<(), String> {
+    let path_text = path.to_string_lossy().into_owned();
+    let tmp = format!("{path_text}.tmp");
+    if tmp.len() >= 1100 {
+        return Err(format!("путь длиннее {}", 1100));
+    }
+    let mut text = String::with_capacity(HTTP_PLANS_HEADER.len() + records.len() * 64);
+    text.push_str(HTTP_PLANS_HEADER);
+    for record in records.iter_mut() {
+        if record.key.is_empty() || record.revoked {
+            continue;
+        }
+        // Время подтверждения — первое сохранение после него.
+        if record.wall == 0 {
+            record.wall = wall_s;
+        }
+        text.push_str(&format!(
+            "{} {} {} {}\n",
+            record.host, record.family, record.key, record.wall
+        ));
+    }
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("{tmp}: {error}"));
+    }
+    if std::fs::rename(&tmp, path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("{path_text}: rename"));
+    }
+    Ok(())
+}
+
+/// Результат C `d2k_httpsearch_load`: записи в порядке появления и счётчик
+/// принятых строк.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct R2oHttpPlanLoad {
+    pub records: Vec<R2oHttpPlanRecord>,
+    pub loaded: usize,
+}
+
+/// C `d2k_httpsearch_load` (`httpsearch.c:1475-1514`): заголовок обязателен,
+/// битые строки пропускаются, `loaded` считает только принятые.
+pub fn load_http_plans(path: &std::path::Path) -> Result<R2oHttpPlanLoad, String> {
+    let path_text = path.to_string_lossy().into_owned();
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(R2oHttpPlanLoad::default());
+        }
+        Err(error) => return Err(format!("{path_text}: {error}")),
+    };
+    let chunks = r2o_fgets_chunks(&bytes);
+    let Some(header) = chunks.first() else {
+        return Err(format!(
+            "{path_text}: не планы HTTP d2k (нет заголовка «d2k-http-plans 1»)"
+        ));
+    };
+    if *header != HTTP_PLANS_HEADER.as_bytes() {
+        return Err(format!(
+            "{path_text}: не планы HTTP d2k (нет заголовка «d2k-http-plans 1»)"
+        ));
+    }
+    let mut result = R2oHttpPlanLoad::default();
+    // C: максимум записей по бюджету памяти; при переполнении загрузка
+    // останавливается на первой сверх лимита.
+    let max_records = HTTP_PLANS_RECORD_MAX_BYTES / R2O_HTTP_PLAN_RECORD_BYTES;
+    for chunk in chunks.iter().skip(1) {
+        let Some((host, family, key, wall)) = r2o_parse_http_plan_line(chunk) else {
+            continue;
+        };
+        let position = result
+            .records
+            .iter()
+            .position(|record| record.family == family && record.host.eq_ignore_ascii_case(&host));
+        let record = match position {
+            Some(index) => &mut result.records[index],
+            None => {
+                if result.records.len() >= max_records {
+                    break;
+                }
+                result.records.push(R2oHttpPlanRecord::default());
+                let record = result.records.last_mut().expect("только что добавлена");
+                record.host = host;
+                record.family = family;
+                record
+            }
+        };
+        // C `snprintf(r->key, sizeof r->key, "%.39s", key)`.
+        record.key = key.chars().take(39).collect();
+        record.wall = wall;
+        result.loaded += 1;
+    }
+    Ok(result)
+}
+
+/// Приблизительный размер C `rec` для предела числа записей.
+const R2O_HTTP_PLAN_RECORD_BYTES: usize = 1_400;
+
+/// C `fgets(line, 512, f)`: не больше 511 байт за вызов, включая `\n`.
+fn r2o_fgets_chunks(bytes: &[u8]) -> Vec<&[u8]> {
+    let mut chunks = Vec::new();
+    let mut position = 0;
+    while position < bytes.len() {
+        let max = (position + 511).min(bytes.len());
+        let slice = &bytes[position..max];
+        let end = slice
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(max, |offset| position + offset + 1);
+        chunks.push(&bytes[position..end]);
+        position = end;
+    }
+    chunks
+}
+
+fn r2o_http_plan_whitespace(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
+}
+
+/// C `sscanf("%299s %u %47s %lld %n")` + `line[used]=='\0'`.
+fn r2o_parse_http_plan_line(line: &[u8]) -> Option<(String, u8, String, i64)> {
+    let mut offset = 0;
+    let skip = |offset: &mut usize| {
+        while *offset < line.len() && r2o_http_plan_whitespace(line[*offset]) {
+            *offset += 1;
+        }
+    };
+    let token = |offset: &mut usize, width: usize| -> Option<&[u8]> {
+        skip(offset);
+        let start = *offset;
+        while *offset < line.len() && !r2o_http_plan_whitespace(line[*offset]) {
+            *offset += 1;
+        }
+        if *offset - start > width {
+            return None;
+        }
+        Some(&line[start..*offset])
+    };
+
+    let host_token = token(&mut offset, 299)?;
+    let family_token = token(&mut offset, 32)?;
+    let key_token = token(&mut offset, 47)?;
+    let wall_token = token(&mut offset, 32)?;
+    skip(&mut offset);
+    if offset != line.len() {
+        return None;
+    }
+    if host_token.is_empty() || key_token.is_empty() || wall_token.is_empty() {
+        return None;
+    }
+
+    let family = r2o_parse_unsigned_number(family_token)?;
+    if family != 4 && family != 6 {
+        return None;
+    }
+    let wall = r2o_parse_signed_number(wall_token)?;
+
+    let host = std::str::from_utf8(host_token).ok()?;
+    if !r2o_http_plan_host_ok(host) {
+        return None;
+    }
+    let key = std::str::from_utf8(key_token).ok()?;
+    if !known_key(key) {
+        return None;
+    }
+    Some((host.to_owned(), family as u8, key.to_owned(), wall))
+}
+
+/// C `%u`: необязательный знак и цифры; значение обрезается до 32 бит.
+fn r2o_parse_unsigned_number(bytes: &[u8]) -> Option<u64> {
+    let mut offset = 0;
+    while offset < bytes.len() && r2o_http_plan_whitespace(bytes[offset]) {
+        offset += 1;
+    }
+    let negative = bytes.get(offset) == Some(&b'-');
+    if matches!(bytes.get(offset), Some(b'+') | Some(b'-')) {
+        offset += 1;
+    }
+    let start = offset;
+    let mut value: u64 = 0;
+    while let Some(byte) = bytes.get(offset) {
+        if !byte.is_ascii_digit() {
+            break;
+        }
+        value = value.wrapping_mul(10).wrapping_add(u64::from(*byte - b'0'));
+        offset += 1;
+    }
+    if offset == start || offset != bytes.len() {
+        return None;
+    }
+    let value = if negative {
+        (value as u32 as i32 as i64).unsigned_abs()
+    } else {
+        value
+    };
+    Some(value)
+}
+
+/// C `%lld`: необязательный знак и цифры, переполнение — отказ.
+fn r2o_parse_signed_number(bytes: &[u8]) -> Option<i64> {
+    let mut offset = 0;
+    while offset < bytes.len() && r2o_http_plan_whitespace(bytes[offset]) {
+        offset += 1;
+    }
+    let negative = bytes.get(offset) == Some(&b'-');
+    if matches!(bytes.get(offset), Some(b'+') | Some(b'-')) {
+        offset += 1;
+    }
+    let start = offset;
+    let mut value: i64 = 0;
+    while let Some(byte) = bytes.get(offset) {
+        if !byte.is_ascii_digit() {
+            break;
+        }
+        value = value
+            .checked_mul(10)?
+            .checked_add(i64::from(*byte - b'0'))?;
+        offset += 1;
+    }
+    if offset == start || offset != bytes.len() {
+        return None;
+    }
+    Some(if negative { -value } else { value })
+}
+
+/// C `host_ok`: 1..253, только буквы/цифры/`-`/`.`; последняя метка не IPv4.
+fn r2o_http_plan_host_ok(host: &str) -> bool {
+    let bytes = host.as_bytes();
+    if bytes.is_empty() || bytes.len() > 253 {
+        return false;
+    }
+    if !bytes
+        .iter()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.'))
+    {
+        return false;
+    }
+    let last = host.rsplit('.').next().unwrap_or(host);
+    !last.is_empty() && !last.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 #[cfg(test)]
