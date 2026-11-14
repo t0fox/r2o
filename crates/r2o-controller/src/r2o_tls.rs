@@ -147,9 +147,13 @@ pub fn r2o_tls_client_hello_non_http_alpn(client_hello: &[u8]) -> Option<Vec<Vec
     offset = r2o_tls_skip_vector(client_hello, offset, end, 1)?;
     offset = r2o_tls_skip_vector(client_hello, offset, end, 2)?;
     offset = r2o_tls_skip_vector(client_hello, offset, end, 1)?;
+    if offset == end {
+        // C `d2k_hello_alpn`: расширений нет вовсе — rc 0, клиент без ALPN.
+        return Some(Vec::new());
+    }
     let (extensions_length, extensions_start) = r2o_tls_u16(client_hello, offset, end)?;
     let extensions_end = extensions_start.checked_add(extensions_length)?;
-    if extensions_end != end {
+    if extensions_end > end {
         return None;
     }
     let mut extension = extensions_start;
@@ -159,9 +163,6 @@ pub fn r2o_tls_client_hello_non_http_alpn(client_hello: &[u8]) -> Option<Vec<Vec
         let (length, data) = r2o_tls_u16(client_hello, value, extensions_end)?;
         let extension_end = data.checked_add(length)?;
         if extension_end > extensions_end {
-            return None;
-        }
-        if kind == 0xfe0d {
             return None;
         }
         if kind == 0x0010 {
@@ -718,7 +719,7 @@ fn push_u16(output: &mut Vec<u8>, value: u16) {
 
 #[cfg(test)]
 mod alpn_tests {
-    use super::alpn_is_http;
+    use super::{alpn_is_http, r2o_tls_client_hello_non_http_alpn};
 
     #[test]
     fn alpn_is_http_matches_c() {
@@ -728,6 +729,79 @@ mod alpn_tests {
         assert!(!alpn_is_http(b"h3"));
         assert!(!alpn_is_http(b"HTTP/1.1"));
         assert!(!alpn_is_http(b""));
+    }
+
+    fn extension(kind: u16, value: &[u8]) -> Vec<u8> {
+        let mut output = Vec::new();
+        output.extend_from_slice(&kind.to_be_bytes());
+        output.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        output.extend_from_slice(value);
+        output
+    }
+
+    fn alpn(names: &[&[u8]]) -> Vec<u8> {
+        let mut wire = Vec::new();
+        for name in names {
+            wire.push(name.len() as u8);
+            wire.extend_from_slice(name);
+        }
+        let mut value = Vec::new();
+        value.extend_from_slice(&(wire.len() as u16).to_be_bytes());
+        value.extend_from_slice(&wire);
+        extension(0x0010, &value)
+    }
+
+    /// ClientHello с точными record/handshake длинами; `extensions=None`
+    /// оставляет законное приветствие без блока расширений.
+    fn client_hello(extensions: Option<&[u8]>) -> Vec<u8> {
+        let mut body = vec![0x03, 0x03];
+        body.extend_from_slice(&[1; 32]);
+        body.push(0);
+        body.extend_from_slice(&[0, 2, 0x13, 0x01]);
+        body.extend_from_slice(&[1, 0]);
+        if let Some(extensions) = extensions {
+            body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+            body.extend_from_slice(extensions);
+        }
+        let mut record = vec![0x16, 0x03, 0x01];
+        record.extend_from_slice(&((body.len() + 4) as u16).to_be_bytes());
+        record.push(1);
+        record.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+        record.extend_from_slice(&body);
+        record
+    }
+
+    #[test]
+    fn non_http_alpn_decision_matches_c_scheduler() {
+        // C `d2k_hello_alpn` rc 0 → не-HTTP клиент без ALPN.
+        assert_eq!(
+            r2o_tls_client_hello_non_http_alpn(&client_hello(None)),
+            Some(Vec::new())
+        );
+        let sni_only = extension(0x0000, &[0, 3, 0, 0, 0]);
+        assert_eq!(
+            r2o_tls_client_hello_non_http_alpn(&client_hello(Some(&sni_only))),
+            Some(Vec::new())
+        );
+        let mqtt = alpn(&[b"mqtt"]);
+        let mut mqtt_ech = mqtt.clone();
+        mqtt_ech.extend_from_slice(&extension(0xfe0d, &[0, 0, 1, 0, 0]));
+        assert_eq!(
+            r2o_tls_client_hello_non_http_alpn(&client_hello(Some(&mqtt_ech))),
+            Some(vec![b"mqtt".to_vec()])
+        );
+        assert_eq!(
+            r2o_tls_client_hello_non_http_alpn(&client_hello(Some(&alpn(&[b"h2"])))),
+            None
+        );
+        assert_eq!(
+            r2o_tls_client_hello_non_http_alpn(&client_hello(Some(&alpn(&[b"h2", b"mqtt"])))),
+            None
+        );
+        assert_eq!(
+            r2o_tls_client_hello_non_http_alpn(&client_hello(Some(&alpn(&[])))),
+            None
+        );
     }
 }
 

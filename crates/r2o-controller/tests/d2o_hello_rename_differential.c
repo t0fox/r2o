@@ -72,6 +72,16 @@ int main(int argc, char **argv) {
                                   &out_len);
         printf("%s rename=%d len=%zu hex=", name, rc == 0 ? 0 : -1, out_len);
         if (rc == 0) print_hex(out, out_len);
+        uint8_t list[512];
+        size_t list_len = 0;
+        int alpn_rc = d2k_hello_alpn(bytes, bytes_len, list, sizeof list, &list_len);
+        int non_http = alpn_rc == 0 ? 1
+                       : (alpn_rc == 1 && list_len > 0
+                              ? !d2k_alpn_is_http(list, list_len)
+                              : 0);
+        printf(" alpn_non_http=%d alpn_len=%zu alpn=", non_http,
+               non_http ? list_len : 0);
+        if (non_http) print_hex(list, list_len);
         printf("\n");
         free(bytes);
     }

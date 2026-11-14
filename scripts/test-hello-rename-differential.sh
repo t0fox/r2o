@@ -47,6 +47,18 @@ def key_share():
     return ext(0x33, struct.pack("!H", len(share)) + share)
 
 
+def alpn(names):
+    wire = b"".join(bytes([len(name)]) + name for name in names)
+    return ext(0x10, struct.pack("!H", len(wire)) + wire)
+
+
+def ech(payload=b"\xaa\xbb", config_id=0x2A):
+    body = b"\x00" + b"\x13\x01\x00\x01" + bytes([config_id])
+    body += struct.pack("!H", 0)
+    body += struct.pack("!H", len(payload)) + payload
+    return ext(0xFE0D, body)
+
+
 def hello(extensions, record_type=0x16, extra=b"", declared_handshake=None):
     body = struct.pack("!H", 0x0303) + b"\x01" * 32 + b"\x00"
     body += struct.pack("!H", 2) + b"\x13\x01" + b"\x01\x00"
@@ -84,6 +96,21 @@ cases = {
     "short-4": b"\x16\x03\x01\x00",
     "zero-body": b"\x16\x03\x01\x00\x00",
     "handshake-short": hello(sni(b"example.com"), declared_handshake=10),
+    "alpn-mqtt": hello(sni(b"example.com") + alpn([b"mqtt"])),
+    "alpn-h2": hello(sni(b"example.com") + alpn([b"h2"])),
+    "alpn-http11": hello(sni(b"example.com") + alpn([b"http/1.1"])),
+    "alpn-http10": hello(sni(b"example.com") + alpn([b"http/1.0"])),
+    "alpn-mixed": hello(sni(b"example.com") + alpn([b"h2", b"mqtt"])),
+    "alpn-mqtt-h2": hello(sni(b"example.com") + alpn([b"mqtt", b"h2"])),
+    "alpn-case": hello(sni(b"example.com") + alpn([b"H2"])),
+    "alpn-empty-list": hello(sni(b"example.com") + ext(0x10, b"\x00\x00")),
+    "alpn-empty-name": hello(sni(b"example.com") + ext(0x10, b"\x00\x01\x00")),
+    "alpn-list-over": hello(
+        sni(b"example.com") + ext(0x10, struct.pack("!H", 5) + b"\x03mqtt")
+    ),
+    "alpn-ech-mqtt": hello(sni(b"example.com") + alpn([b"mqtt"]) + ech()),
+    "alpn-no-ext": hello(b""),
+    "alpn-other-ext": hello(sni(b"example.com")),
 }
 
 for name, payload in cases.items():

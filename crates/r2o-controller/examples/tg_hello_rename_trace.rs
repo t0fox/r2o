@@ -5,6 +5,7 @@
 //! ```
 
 use r2o_controller::hello::r2o_hello_rename;
+use r2o_controller::r2o_tls::r2o_tls_client_hello_non_http_alpn;
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -23,15 +24,41 @@ fn main() {
             bytes.as_slice()
         };
         let renamed = r2o_hello_rename(body, b"new.example");
+        let alpn = r2o_tls_client_hello_non_http_alpn(&bytes);
+        let mut alpn_wire = Vec::new();
+        if let Some(protocols) = &alpn {
+            for protocol in protocols {
+                alpn_wire.push(protocol.len() as u8);
+                alpn_wire.extend_from_slice(protocol);
+            }
+        }
         match &renamed {
             Some(output) => {
                 print!("{name} rename=0 len={} hex=", output.len());
                 for byte in output {
                     print!("{byte:02x}");
                 }
+                print!(
+                    " alpn_non_http={} alpn_len={} alpn=",
+                    u8::from(alpn.is_some()),
+                    alpn_wire.len()
+                );
+                for byte in &alpn_wire {
+                    print!("{byte:02x}");
+                }
                 println!();
             }
-            None => println!("{name} rename=-1 len=0 hex="),
+            None => {
+                print!(
+                    "{name} rename=-1 len=0 hex= alpn_non_http={} alpn_len={} alpn=",
+                    u8::from(alpn.is_some()),
+                    alpn_wire.len()
+                );
+                for byte in &alpn_wire {
+                    print!("{byte:02x}");
+                }
+                println!();
+            }
         }
     }
 }
