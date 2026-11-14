@@ -108,6 +108,22 @@ int main(void) {
     t->ver.status = 200;
     emit("bypass_ok");
 
+    // T_RESTING после исчерпанного поиска: no_bypass.
+    t->state = T_RESTING;
+    t->ver_ok = 0;
+    t->ver.dns_reply = 0;
+    t->ver.status = 0;
+    t->ver.level = 0;
+    snprintf(t->ver.reason, sizeof t->ver.reason,
+             "Подбор завершён без подтверждённого плана.");
+    s.dns_service_live[0].state = DNS_SERVICE_DETECTED;
+    s.dns_service_live[0].plan_applied = 0;
+    s.dns_service_live[0].applied_plan_id[0] = '\0';
+    s.dns_service_live[0].plan_applied_ms = 0;
+    s.dns_service_live[0].dns_answer = 0;
+    s.dns_service_live[0].checked_ms = 0;
+    emit("no_bypass");
+
     printf("]\n");
     return 0;
 }

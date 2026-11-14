@@ -2932,9 +2932,48 @@ impl R2oDnsServices {
             live.plan_applied = false;
             live.applied_plan_id.clear();
             live.plan_applied_at = None;
+            live.candidate_plan_applied = false;
+            live.no_bypass = false;
             live.checked_at = None;
             live.next_check = Some(mono);
             live.reason.clear();
+        }
+    }
+
+    /// C task-слой DNS: подтверждение кандидата ставит `candidate_plan_applied`
+    /// (t->ver_ok), неудачный поиск без плана — `T_RESTING`/`no_bypass`.
+    fn note_discovery_outcome(
+        &mut self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        plan_confirmed: bool,
+        plan_found: bool,
+        direct_clear: bool,
+        queue_expired: bool,
+    ) {
+        if self.services.is_empty() {
+            return;
+        }
+        let Ok(endpoint) = target.endpoint.parse::<std::net::SocketAddr>() else {
+            return;
+        };
+        let transport = r2o_discovery_transport(target);
+        let Some(index) = r2k_core::dns_config::dns_service_match(
+            &self.services,
+            Some(&target.host),
+            Some(&endpoint.ip().to_string()),
+            endpoint.port(),
+            transport,
+        )
+        .and_then(|service| self.services.iter().position(|saved| saved == service)) else {
+            return;
+        };
+        let live = &mut self.live[index];
+        if plan_confirmed {
+            live.candidate_plan_applied = true;
+            live.no_bypass = false;
+        } else if !plan_found && !direct_clear && !queue_expired {
+            live.candidate_plan_applied = false;
+            live.no_bypass = true;
         }
     }
 
@@ -3110,6 +3149,8 @@ impl R2oDnsHealth {
                     live.plan_applied = false;
                     live.applied_plan_id.clear();
                     live.plan_applied_at = None;
+                    live.candidate_plan_applied = false;
+                    live.no_bypass = false;
                 }
             }
             live.checked_at = Some(wall_now.max(1));
@@ -12537,6 +12578,20 @@ impl DiscoveryWorker {
                                 &last_result,
                             );
                             if verified {
+                                // C `verify_confirm`: bound-план без
+                                // PASSED-бюджета не подтверждается; поиск
+                                // продолжается следующими кандидатами.
+                                if own_bound_plan_id.as_deref()
+                                    == r2o_catalog_plan_id(&candidate.text).as_deref()
+                                    && r2o_budget_mark_from_result(&result)
+                                        != R2O_D2K_CAT_BUDGET_PASSED
+                                {
+                                    println!(
+                                        "по {} план {} — это план потока подозрения, бюджет не пройден: кандидат не подтверждаю, продолжаю свои планы",
+                                        target.host, candidate.box_id
+                                    );
+                                    break;
+                                }
                                 runner_searches
                                     .lock()
                                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -12564,7 +12619,10 @@ impl DiscoveryWorker {
                                     group_block_proven: true,
                                     transferred_own_plan: true,
                                     bound_plan_id: own_bound_plan_id.clone(),
-                                    ech_origin: None,
+                                    ech_origin: ech_config
+                                        .as_ref()
+                                        .map(|config| config.origin_name.clone())
+                                        .filter(|name| name != &target.host),
                                     volume_fingerprint: None,
                                     volume_box_id: Some(candidate.box_id),
                                     retry_after: None,
@@ -19328,6 +19386,9 @@ impl ControlClient {
                     .0;
                     let measured_probe_path =
                         (measured_probe_path != "/").then_some(measured_probe_path);
+                    let direct_clear = outcome.direct_clear;
+                    let queue_expired = outcome.queue_expired;
+                    let mut confirmed = false;
                     if outcome.queue_expired {
                         println!(
                             "подозрение {} устарело в очереди Discovery; сетевой замер не запускался",
@@ -19335,7 +19396,6 @@ impl ControlClient {
                         );
                     } else {
                         let catalog_changed = outcome.plan_text.is_some() || outcome.direct_clear;
-                        let mut confirmed = false;
                         let apply_result = self.apply_discovery_outcome_with_input_and_persistence(
                             outcome,
                             catalog,
@@ -19372,6 +19432,13 @@ impl ControlClient {
                             worker.catalog_changed(catalog, &active_groups);
                         }
                     }
+                    dns_services.note_discovery_outcome(
+                        &target,
+                        confirmed,
+                        has_candidate,
+                        direct_clear,
+                        queue_expired,
+                    );
                     std::io::stdout().flush()?;
                     continue;
                 }
@@ -27083,6 +27150,19 @@ mod tests {
         state.live[0].http_status = 200;
         snapshot(&state, "bypass_ok");
 
+        state.live[0].candidate_plan_applied = false;
+        state.live[0].dns_answer = false;
+        state.live[0].tcp_reachable = false;
+        state.live[0].tls_handshake = false;
+        state.live[0].http_status = 0;
+        state.live[0].plan_applied = false;
+        state.live[0].plan_applied_at = None;
+        state.live[0].applied_plan_id.clear();
+        state.live[0].state = r2o_controller::live::DnsServiceState::Detected;
+        state.live[0].checked_at = None;
+        state.live[0].no_bypass = true;
+        snapshot(&state, "no_bypass");
+
         if let Ok(path) = std::env::var("R2O_DNS_STATE_DIFF_OUTPUT") {
             std::fs::write(path, serde_json::to_string(&scenarios).unwrap()).unwrap();
         }
@@ -27758,6 +27838,53 @@ mod tests {
         super::r2o_store_confirmed_probe_path(&mut catalog, &target, &plan_id, "/public/site.css");
         assert_eq!(catalog.boxes[0].bindings[0].probe_path, "/public/site.css");
         assert_eq!(catalog.boxes[0].bindings[1].probe_path, "/legacy.css");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dns_discovery_outcome_sets_candidate_and_no_bypass_task_states() {
+        use r2k_core::dns_config::DnsService;
+        use r2o_controller::discovery::DiscoveryTarget;
+
+        let target = DiscoveryTarget {
+            host: "dns.example".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let mut state = super::R2oDnsServices {
+            services: vec![DnsService {
+                protocol: "doh".into(),
+                host: "dns.example".into(),
+                sni: "dns.example".into(),
+                path: "/dns-query".into(),
+                bootstrap_dns: String::new(),
+                source: "https-dns-proxy".into(),
+                port: 443,
+            }],
+            live: vec![r2o_controller::live::DnsServiceLive {
+                generation: 5,
+                ip: "198.51.100.80".into(),
+                ..Default::default()
+            }],
+            generation: 5,
+        };
+        state.note_discovery_outcome(&target, false, false, false, false);
+        assert!(state.live[0].no_bypass);
+        assert!(!state.live[0].candidate_plan_applied);
+        state.note_discovery_outcome(&target, true, true, false, false);
+        assert!(state.live[0].candidate_plan_applied);
+        assert!(!state.live[0].no_bypass);
+        // direct clear/queue expiry не переводят в T_RESTING.
+        let mut fresh = super::R2oDnsServices {
+            services: state.services.clone(),
+            live: vec![r2o_controller::live::DnsServiceLive::default()],
+            generation: 0,
+        };
+        fresh.note_discovery_outcome(&target, false, false, true, false);
+        assert!(!fresh.live[0].no_bypass);
+        fresh.note_discovery_outcome(&target, false, false, false, true);
+        assert!(!fresh.live[0].no_bypass);
     }
 
     #[cfg(unix)]

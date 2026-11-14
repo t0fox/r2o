@@ -33,6 +33,9 @@ pub struct DnsServiceLive {
     /// C `t->ver_ok` задачи T_DNS_HEALTH: план применился к пробному
     /// DNS-соединению. Без plan-based health-пробы остаётся false.
     pub candidate_plan_applied: bool,
+    /// C `t->state == T_RESTING`: DNS-поиск завершён без подтверждённого
+    /// плана; writer отдаёт state=no_bypass.
+    pub no_bypass: bool,
     pub attempts: u32,
     /// Стенные секунды для live.json; None — проверки ещё не было.
     pub checked_at: Option<i64>,
@@ -55,6 +58,7 @@ impl Default for DnsServiceLive {
             dns_answer: false,
             plan_applied: false,
             candidate_plan_applied: false,
+            no_bypass: false,
             attempts: 0,
             checked_at: None,
             next_check: None,
@@ -561,6 +565,10 @@ fn r2o_live_dns_services(
                             "Датапат подтвердил план {} на DNS-соединении; DNS-ответ отдельно ещё не подтверждён.",
                             state.applied_plan_id
                         ),
+                    ),
+                    _ if state.no_bypass => (
+                        "no_bypass",
+                        "Подбор завершён без подтверждённого плана.".to_owned(),
                     ),
                     DnsServiceState::Failed => (
                         "failed",
