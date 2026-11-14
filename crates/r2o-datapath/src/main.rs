@@ -2143,10 +2143,11 @@ mod app {
                             udp_sessions.r2o_mark_hello_seen(bytes, !hello.host.is_empty());
                         }
                         let selected_plan = name_plans
-                            .select_with_quic_host_at_hook(
+                            .select_with_quic_host_at_hook_probe(
                                 bytes,
                                 quic_hello.as_ref().map(|hello| hello.host.as_slice()),
                                 quic_hook,
+                                controller_probe,
                             )
                             .unwrap_or(&plan);
                         udp_quic_deny = selected_plan.qdeny != 0 && !controller_probe;
@@ -2274,7 +2275,11 @@ mod app {
                                     let decision = decide_with_tcp_session_mode(
                                         &mut tcp_sessions,
                                         name_plans
-                                            .select_with_quic_host(&packet, None)
+                                            .select_with_quic_host_probe(
+                                                &packet,
+                                                None,
+                                                controller_probe,
+                                            )
                                             .unwrap_or(&plan),
                                         &packet,
                                         &mut control,
@@ -2285,7 +2290,11 @@ mod app {
                                             .map_or(0, |raw| raw.tls_route_segment_cap(&packet)),
                                     );
                                     let selected = name_plans
-                                        .select_with_quic_host(&packet, None)
+                                        .select_with_quic_host_probe(
+                                            &packet,
+                                            None,
+                                            controller_probe,
+                                        )
                                         .unwrap_or(&plan);
                                     let tcp_syn_ack_seen =
                                         tcp_sessions.r2o_syn_ack_seen_for_packet(&packet);
@@ -2341,7 +2350,11 @@ mod app {
                                     let decision = decide_with_tcp_session_mode(
                                         &mut tcp_sessions,
                                         name_plans
-                                            .select_with_quic_host(&packet, None)
+                                            .select_with_quic_host_probe(
+                                                &packet,
+                                                None,
+                                                controller_probe,
+                                            )
                                             .unwrap_or(&plan),
                                         &packet,
                                         &mut control,
@@ -2352,7 +2365,11 @@ mod app {
                                             .map_or(0, |raw| raw.tls_route_segment_cap(&packet)),
                                     );
                                     let selected = name_plans
-                                        .select_with_quic_host(&packet, None)
+                                        .select_with_quic_host_probe(
+                                            &packet,
+                                            None,
+                                            controller_probe,
+                                        )
                                         .unwrap_or(&plan);
                                     let tcp_syn_ack_seen =
                                         tcp_sessions.r2o_syn_ack_seen_for_packet(&packet);

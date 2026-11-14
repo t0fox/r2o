@@ -494,11 +494,33 @@ impl NamePlans {
         self.select_with_quic_host_at_hook(packet, quic_host, None)
     }
 
+    /// Выбор плана для TCP-пакета с признаком управляющей пробы.
+    pub fn select_with_quic_host_probe(
+        &self,
+        packet: &[u8],
+        quic_host: Option<&[u8]>,
+        controller_probe: bool,
+    ) -> Option<&Plan> {
+        self.select_with_quic_host_at_hook_probe(packet, quic_host, None, controller_probe)
+    }
+
     pub fn select_with_quic_host_at_hook(
         &self,
         packet: &[u8],
         quic_host: Option<&[u8]>,
         hook: Option<u8>,
+    ) -> Option<&Plan> {
+        self.select_with_quic_host_at_hook_probe(packet, quic_host, hook, false)
+    }
+
+    /// То же, но с признаком управляющей пробы: C передаёт `probe_port` в
+    /// `d2k_plantab_has_ech_target` только для `controller_probe`.
+    pub fn select_with_quic_host_at_hook_probe(
+        &self,
+        packet: &[u8],
+        quic_host: Option<&[u8]>,
+        hook: Option<u8>,
+        controller_probe: bool,
     ) -> Option<&Plan> {
         let view = PacketView::parse(packet)?;
         if view.protocol == 17 {
@@ -613,10 +635,21 @@ impl NamePlans {
             .sni_range
             .filter(|range| range.end <= payload.len())
             .and_then(|range| payload.get(range));
+        let probe_port = if controller_probe { tcp.source_port } else { 0 };
         let base_shape = if tls.ech_offer {
             SHAPE_ECH_TCP
         } else if tls.is_tls13 {
-            SHAPE_MODERN
+            // C `session.c:2325-2334`: оборванный блок расширений при живом
+            // ECH-таргете не даёт объявлять MODERN.
+            let any_shape = tls.is_client_hello
+                && tls.extensions_truncated
+                && sni.is_some_and(|sni| {
+                    self.has_ech_target(Some(sni), Some(view.dst), view.family, probe_port)
+                });
+            if any_shape { 0 } else { SHAPE_MODERN }
+        } else if tls.is_client_hello && tls.extensions_truncated {
+            // Признака нет, а блок оборван — формы не объявляем.
+            0
         } else {
             SHAPE_LEGACY
         };
@@ -650,6 +683,15 @@ impl NamePlans {
             }
             return plan;
         };
+        // C `find_target` с формой ANY: точная портовая проба без сверки
+        // формы, затем записи ANY/GRANDFATHER и адресная совместимость.
+        if shape == 0 {
+            let plan = self.find_target(Some(sni), Some(view.dst), view.family, 0, probe_port);
+            if plan.is_none() {
+                self.note_shape_miss(Some(sni), view.dst, view.family, 0);
+            }
+            return plan;
+        }
         if let Some(probe) = self
             .probes
             .get(&NameProbeKey {
@@ -6996,5 +7038,105 @@ mod tests {
         assert_eq!(super::r2o_probe_transport(&plan, SHAPE_MODERN), 6);
         plan.transport = 6;
         assert_eq!(super::r2o_probe_transport(&plan, SHAPE_QUIC), 6);
+    }
+    /// Оборванный TLS 1.3 ClientHello с SNI: объявленные длины больше
+    /// пришедшего, supported_versions прочитан целиком.
+    fn r2o_truncated_tls13_hello(complete: bool) -> Vec<u8> {
+        fn put16(out: &mut Vec<u8>, value: u16) {
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+        let host = b"example.com";
+        let mut out = Vec::new();
+        out.extend_from_slice(&[0x16, 0x03, 0x03]);
+        put16(&mut out, if complete { 74 } else { 400 });
+        out.push(0x01);
+        let hs_len: u32 = if complete { 70 } else { 390 };
+        out.push((hs_len >> 16) as u8);
+        out.push((hs_len >> 8) as u8);
+        out.push(hs_len as u8);
+        put16(&mut out, 0x0303);
+        out.extend((0x20_u8..0x40).take(32));
+        out.push(0);
+        put16(&mut out, 2);
+        out.extend_from_slice(&[0x13, 0x01]);
+        out.extend_from_slice(&[1, 0]);
+        put16(&mut out, if complete { 27 } else { 300 });
+        put16(&mut out, 0x0000);
+        put16(&mut out, 2 + 1 + 2 + host.len() as u16);
+        put16(&mut out, 1 + 2 + host.len() as u16);
+        out.push(0);
+        put16(&mut out, host.len() as u16);
+        out.extend_from_slice(host);
+        put16(&mut out, 0x002b);
+        put16(&mut out, 3);
+        out.push(2);
+        put16(&mut out, 0x0304);
+        if complete {
+            assert_eq!(out.len(), 79);
+        }
+        out
+    }
+
+    fn r2o_hello_packet(payload: &[u8]) -> Vec<u8> {
+        let mut packet = vec![0; 40 + payload.len()];
+        let total = packet.len() as u16;
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&total.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 6;
+        packet[12..16].copy_from_slice(&[192, 0, 2, 10]);
+        packet[16..20].copy_from_slice(&[198, 51, 100, 20]);
+        packet[20..22].copy_from_slice(&40000_u16.to_be_bytes());
+        packet[22..24].copy_from_slice(&443_u16.to_be_bytes());
+        packet[32] = 5 << 4;
+        packet[33] = 0x18;
+        packet[34..36].copy_from_slice(&50240_u16.to_be_bytes());
+        packet[40..].copy_from_slice(payload);
+        packet
+    }
+
+    fn r2o_set_name(plans: &mut NamePlans, host: &str, shape: u8, id: [u8; 16]) {
+        let mut body = vec![host.len() as u8];
+        body.extend_from_slice(host.as_bytes());
+        body.extend_from_slice(&[shape, 4]);
+        body.extend_from_slice(&tls_plan_records(id));
+        let ack = plans.handle(&Frame {
+            kind: COMMAND_SET_NAME,
+            body,
+        });
+        assert!(ack.ok, "SET_NAME shape {shape} reason {}", ack.reason);
+    }
+
+    #[test]
+    fn truncated_tls13_uses_any_shape_only_with_an_ech_binding() {
+        // C `session.c:2325-2334`: при обрыве и живом ECH-таргете форма ANY,
+        // иначе сохраняется прежний быстрый путь MODERN.
+        let hello = r2o_hello_packet(&r2o_truncated_tls13_hello(false));
+        let complete = r2o_hello_packet(&r2o_truncated_tls13_hello(true));
+        let modern = [0x11; 16];
+        let ech = [0x22; 16];
+
+        let mut plans = NamePlans::with_capacity(64);
+        r2o_set_name(&mut plans, "example.com", SHAPE_MODERN, modern);
+        r2o_set_name(&mut plans, "example.com", SHAPE_ECH_TCP, ech);
+        assert!(
+            plans.select(&hello).is_none(),
+            "ECH-привязка при обрыве не даёт объявлять MODERN"
+        );
+        assert_eq!(plans.select(&complete).map(|plan| plan.id), Some(modern));
+
+        let mut without_ech = NamePlans::with_capacity(64);
+        r2o_set_name(&mut without_ech, "example.com", SHAPE_MODERN, modern);
+        assert_eq!(without_ech.select(&hello).map(|plan| plan.id), Some(modern));
+
+        // Без признака TLS 1.3 оборванный блок тоже не объявляет LEGACY.
+        let legacy = r2o_hello_packet(&{
+            let mut packet = r2o_truncated_tls13_hello(false);
+            packet.truncate(72);
+            packet
+        });
+        let mut legacy_plans = NamePlans::with_capacity(64);
+        r2o_set_name(&mut legacy_plans, "example.com", SHAPE_LEGACY, [0x33; 16]);
+        assert!(legacy_plans.select(&legacy).is_none());
     }
 }
