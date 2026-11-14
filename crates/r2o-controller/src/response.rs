@@ -550,6 +550,18 @@ fn https_dns_name_bytes_match(pattern: &[u8], host: &[u8]) -> bool {
         }
     }
 
+    // C `name_matches` (`tls13core.c:73-102`): FQDN с точкой на конце — то же
+    // имя (RFC 1035 §3.1). Точки снимаются и с шаблона, и с хоста ДО пустой
+    // проверки и wildcard-сравнения.
+    fn trim_trailing_dots(mut value: &[u8]) -> &[u8] {
+        while value.last() == Some(&b'.') {
+            value = &value[..value.len() - 1];
+        }
+        value
+    }
+    let pattern = trim_trailing_dots(pattern);
+    let host = trim_trailing_dots(host);
+
     if pattern.is_empty() || host.is_empty() {
         return false;
     }
@@ -1463,6 +1475,90 @@ mod x509_tests {
             "a.b.example.test"
         ));
         assert!(https_dns_name_matches("EXAMPLE.test", "example.TEST"));
+    }
+
+    #[test]
+    fn https_probe_normalizes_trailing_fqdn_dots_like_donor() {
+        // C `name_matches` снимает все завершающие точки с pattern и host.
+        assert!(https_dns_name_matches("example.test", "example.test."));
+        assert!(https_dns_name_matches("example.test.", "example.test"));
+        assert!(https_dns_name_matches("example.test.", "example.test."));
+        assert!(https_dns_name_matches("example.test..", "example.test..."));
+        assert!(https_dns_name_matches("*.example.test", "a.example.test."));
+        assert!(https_dns_name_matches("*.example.test.", "a.example.test."));
+        assert!(https_dns_name_matches(
+            "*.example.test..",
+            "a.example.test..."
+        ));
+        assert!(!https_dns_name_matches("*.example.test.", "example.test."));
+        assert!(!https_dns_name_matches(".", "."));
+        assert!(!https_dns_name_matches("", "example.test"));
+        assert!(!https_dns_name_matches("example.test", ""));
+        assert!(!https_dns_name_matches("*.", "a."));
+
+        let certificate =
+            rcgen::generate_simple_self_signed(vec!["example.test".to_owned()]).unwrap();
+        let der = certificate.serialize_der().unwrap();
+        assert_eq!(
+            https_certificate_name_matches(&der, "example.test."),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn tls_name_normalization_matches_current_donor_vectors() {
+        let cases = [
+            ("exact", "example.test", "example.test", true),
+            ("host-dot", "example.test", "example.test.", true),
+            ("pattern-dot", "example.test.", "example.test", true),
+            ("both-dot", "example.test.", "example.test.", true),
+            ("many-dots", "example.test..", "example.test...", true),
+            ("wildcard", "*.example.test", "a.example.test", true),
+            (
+                "wildcard-host-dot",
+                "*.example.test",
+                "a.example.test.",
+                true,
+            ),
+            (
+                "wildcard-pattern-dot",
+                "*.example.test.",
+                "a.example.test.",
+                true,
+            ),
+            (
+                "wildcard-both-dot",
+                "*.example.test..",
+                "a.example.test...",
+                true,
+            ),
+            (
+                "wildcard-no-label",
+                "*.example.test.",
+                "example.test.",
+                false,
+            ),
+            (
+                "wildcard-two-labels",
+                "*.example.test",
+                "a.b.example.test",
+                false,
+            ),
+            ("empty-pattern", "", "example.test", false),
+            ("empty-host", "example.test", "", false),
+            ("only-dots", ".", ".", false),
+            ("short-wildcard", "*.", "a.", false),
+            ("case-insensitive", "EXAMPLE.TEST.", "example.TEST.", true),
+        ];
+        let mut output = String::new();
+        for (name, pattern, host, expected) in cases {
+            let matched = https_dns_name_matches(pattern, host);
+            output.push_str(&format!("case={name} match={}\n", u8::from(matched)));
+            assert_eq!(matched, expected, "case={name}");
+        }
+        if let Ok(path) = std::env::var("R2O_TLS_NAME_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
     }
 
     #[test]
