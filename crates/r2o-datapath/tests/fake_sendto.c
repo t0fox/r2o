@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <errno.h>
+#include <netinet/in.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,6 +43,12 @@ int setsockopt(int fd, int level, int option, const void *value, socklen_t lengt
         return -1;
     }
     if (!strcmp(open_plan(), "mark_fail") && level == SOL_SOCKET && option == SO_MARK) {
+        errno = EPERM;
+        return -1;
+    }
+    // C `d2k_raw_prepare` считает отказ IP_NODEFRAG смертельным для
+    // фрагментного сокета и не откатывается на обычный.
+    if (!strcmp(open_plan(), "nofrag_fail") && level == IPPROTO_IP && option == IP_NODEFRAG) {
         errno = EPERM;
         return -1;
     }

@@ -49,6 +49,13 @@ pub struct RawSocket {
     maxlen_declared: bool,
     egress_mtu: Cell<Option<usize>>,
     route_mtu_cache: RefCell<R2oRouteMtuCache>,
+    /// C `d2k_raw.fragment_fd`: отдельный IPv4-сокет с `IP_NODEFRAG`.
+    ///
+    /// Обычный сокет не годится: ядро соберёт измеренные фрагменты обратно
+    /// перед отправкой и порядок/перекрытие, ради которых они и собраны,
+    /// исчезнут. C открывает его лениво при первом фрагменте и никогда не
+    /// откатывается на обычный сокет.
+    fragment_fd: RefCell<Option<OwnedFd>>,
 }
 
 /// C `d2k_send_nosig`: Linux глушит SIGPIPE флагом MSG_NOSIGNAL.
@@ -97,6 +104,7 @@ impl RawSocket {
             maxlen_declared,
             egress_mtu: Cell::new(None),
             route_mtu_cache: RefCell::new(R2oRouteMtuCache::default()),
+            fragment_fd: RefCell::new(None),
         })
     }
 
@@ -178,6 +186,16 @@ impl RawSocket {
                 "Linux IP_HDRINCL переписывает нулевой IPv4 ID",
             ));
         }
+        // C `d2k_raw_prepare`: фрагменты IPv4 уходят отдельным сокетом с
+        // IP_NODEFRAG. Откат на обычный сокет запрещён — иначе ядро соберёт
+        // измеренные фрагменты и отправит не то, что просил план.
+        let send_fd = if outbound.fragment && outbound.family == 4 {
+            r2o_cached_fragment_fd(&self.fragment_fd, || {
+                r2o_open_ipv4_fragment_socket(self.mark)
+            })?
+        } else {
+            self.fd.as_raw_fd()
+        };
 
         let mut destination: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
         let destination_len = if outbound.family == 4 {
@@ -199,7 +217,7 @@ impl RawSocket {
         loop {
             let sent = unsafe {
                 libc::sendto(
-                    self.fd.as_raw_fd(),
+                    send_fd,
                     packet.as_ptr().cast(),
                     packet.len(),
                     r2o_raw_send_flags(),
@@ -562,6 +580,8 @@ struct OutboundDestination {
     family: u8,
     address: Address,
     ipv4_id: Option<u16>,
+    /// Пакет несёт заголовок фрагментации (MF или ненулевой offset).
+    fragment: bool,
 }
 
 fn outgoing_packet(packet: &[u8], socket_family: i32) -> Option<OutboundDestination> {
@@ -593,6 +613,7 @@ fn outgoing_packet(packet: &[u8], socket_family: i32) -> Option<OutboundDestinat
         family,
         address: view.dst,
         ipv4_id: (family == 4).then_some(view.ip_id),
+        fragment: false,
     })
 }
 
@@ -624,6 +645,7 @@ fn ipv4_udp_fragment(packet: &[u8], family: u8) -> Option<OutboundDestination> {
         family,
         address: Address::new(IpAddr::V4(Ipv4Addr::from(address))),
         ipv4_id: Some(ip_id),
+        fragment: true,
     })
 }
 
@@ -655,7 +677,51 @@ fn ipv6_udp_fragment(packet: &[u8], family: u8) -> Option<OutboundDestination> {
         family,
         address: Address::new(IpAddr::V6(Ipv6Addr::from(address))),
         ipv4_id: None,
+        fragment: true,
     })
+}
+
+/// C `d2k_raw_prepare` (ветка IPv4-фрагмента): отдельный raw-сокет,
+/// `IP_HDRINCL`, `IP_NODEFRAG`, метка. Без `IP_NODEFRAG` ядро имеет право
+/// собрать фрагменты обратно — тогда на провод уйдёт не измеренная форма.
+fn r2o_open_ipv4_fragment_socket(mark: u32) -> io::Result<OwnedFd> {
+    let raw_fd = unsafe {
+        libc::socket(
+            libc::AF_INET,
+            libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+            libc::IPPROTO_RAW,
+        )
+    };
+    if raw_fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+    let one: libc::c_int = 1;
+    set_option(fd.as_raw_fd(), libc::IPPROTO_IP, libc::IP_HDRINCL, &one)?;
+    // C: при сборке без IP_NODEFRAG prepare завершается ENOPROTOOPT, а не
+    // отправляет фрагменты обычным путём.
+    set_option(fd.as_raw_fd(), libc::IPPROTO_IP, libc::IP_NODEFRAG, &one)?;
+    if let Some(mark) = r2o_raw_mark_option(mark) {
+        set_option(fd.as_raw_fd(), libc::SOL_SOCKET, libc::SO_MARK, &mark)?;
+    }
+    Ok(fd)
+}
+
+/// Ленивый кеш дескриптора фрагментов, как `r->fragment_fd` в C.
+///
+/// Ошибка открытия не кешируется: C оставляет `fragment_fd == -1` и повторяет
+/// попытку на следующем фрагменте.
+fn r2o_cached_fragment_fd(
+    cache: &RefCell<Option<OwnedFd>>,
+    open: impl FnOnce() -> io::Result<OwnedFd>,
+) -> io::Result<libc::c_int> {
+    if let Some(fd) = cache.borrow().as_ref() {
+        return Ok(fd.as_raw_fd());
+    }
+    let fd = open()?;
+    let raw_fd = fd.as_raw_fd();
+    *cache.borrow_mut() = Some(fd);
+    Ok(raw_fd)
 }
 
 fn set_option<T>(fd: i32, level: i32, option: i32, value: &T) -> io::Result<()> {
@@ -849,6 +915,7 @@ mod tests {
             maxlen_declared: true,
             egress_mtu: Cell::new(None),
             route_mtu_cache: RefCell::new(cache),
+            fragment_fd: RefCell::new(None),
         };
         let result = if scenario == "invalid" {
             socket.send_packet(&packet[..19])
@@ -1119,6 +1186,118 @@ mod tests {
             let _ = outgoing_packet(&packet, libc::AF_INET);
             let _ = outgoing_packet(&packet, libc::AF_INET6);
         }
+    }
+
+    #[test]
+    fn исходящий_разбор_помечает_фрагменты_для_отдельного_сокета() {
+        let ipv4 = fragments(&original_v4());
+        assert!(outgoing_packet(&ipv4[0], libc::AF_INET).unwrap().fragment);
+        assert!(outgoing_packet(&ipv4[1], libc::AF_INET).unwrap().fragment);
+        assert!(
+            !outgoing_packet(&original_v4(), libc::AF_INET)
+                .unwrap()
+                .fragment
+        );
+
+        let ipv6 = fragments(&original_v6());
+        assert!(outgoing_packet(&ipv6[0], libc::AF_INET6).unwrap().fragment);
+        assert!(
+            !outgoing_packet(&original_v6(), libc::AF_INET6)
+                .unwrap()
+                .fragment
+        );
+    }
+
+    #[test]
+    fn ленивый_сокет_фрагментов_открывается_один_раз_и_не_кеширует_ошибку() {
+        use std::cell::RefCell;
+        use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+
+        let cache = RefCell::new(None);
+        let mut opens = 0;
+        let open = |opens: &mut usize| -> std::io::Result<OwnedFd> {
+            *opens += 1;
+            let file = std::fs::File::open("/dev/null")?;
+            Ok(unsafe { OwnedFd::from_raw_fd(file.into_raw_fd()) })
+        };
+        let first = super::r2o_cached_fragment_fd(&cache, || open(&mut opens)).unwrap();
+        let second = super::r2o_cached_fragment_fd(&cache, || open(&mut opens)).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(opens, 1);
+
+        // Ошибка не запоминается: C оставляет fragment_fd == -1 и повторяет.
+        let cache = RefCell::new(None);
+        let mut opens = 0;
+        let error = super::r2o_cached_fragment_fd(&cache, || {
+            opens += 1;
+            Err(std::io::Error::from_raw_os_error(libc::EPERM))
+        })
+        .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+        let recovered = super::r2o_cached_fragment_fd(&cache, || open(&mut opens)).unwrap();
+        assert!(recovered >= 0);
+        assert_eq!(opens, 2);
+    }
+
+    #[test]
+    #[ignore = "нужен Linux CAP_NET_RAW"]
+    fn сокет_фрагментов_выключает_дефрагментацию_ядра() {
+        use std::os::fd::AsRawFd;
+
+        let fd = super::r2o_open_ipv4_fragment_socket(0).expect("открыть сокет фрагментов");
+        let mut value: libc::c_int = 0;
+        let mut length = std::mem::size_of_val(&value) as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                fd.as_raw_fd(),
+                libc::IPPROTO_IP,
+                libc::IP_NODEFRAG,
+                &mut value as *mut libc::c_int as *mut libc::c_void,
+                &mut length,
+            )
+        };
+        assert_eq!(result, 0, "{}", std::io::Error::last_os_error());
+        assert_eq!(value, 1, "IP_NODEFRAG должен быть включён");
+    }
+
+    #[test]
+    fn raw_fragment_differential_matches_c() {
+        let scenario = std::env::var("FAKE_OPEN_SCENARIO").unwrap_or_else(|_| "ok".into());
+        let mut output = String::new();
+        let socket = match super::RawSocket::open(libc::AF_INET, 0, None) {
+            Ok(socket) => socket,
+            Err(error) => {
+                // Без CAP_NET_RAW тест не может открыть сокет; содержательная
+                // проверка идёт через scripts/test-datapath-raw-fragment-differential.sh
+                // с LD_PRELOAD-шивом socket/setsockopt.
+                output.push_str(&format!("{scenario} open rc=-1 error={error}\n"));
+                if let Ok(path) = std::env::var("R2O_RAW_FRAGMENT_DIFF_OUTPUT") {
+                    std::fs::write(path, &output).unwrap();
+                }
+                eprintln!("raw socket не открылся ({error}); differential требует CAP_NET_RAW");
+                return;
+            }
+        };
+        let fragments = fragments(&original_v4());
+        let mut plain = original_v4();
+        plain[6..8].fill(0);
+
+        for (kind, packet) in [("fragment", &fragments[0]), ("plain", &plain)] {
+            let result = socket.send_packet(packet);
+            let stats = socket.send_stats();
+            let fragment_open = usize::from(socket.fragment_fd.borrow().is_some());
+            output.push_str(&format!(
+                "{scenario} {kind} rc={} fd={fragment_open} sent={} errors={} busy={}\n",
+                if result.is_ok() { 0 } else { -1 },
+                stats.sent,
+                stats.errors,
+                stats.busy
+            ));
+        }
+        if let Ok(path) = std::env::var("R2O_RAW_FRAGMENT_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert!(output.contains(&format!("{scenario} fragment rc=")));
     }
 }
 

@@ -86,6 +86,27 @@ fn set_receive_buffer(fd: RawFd, requested: i32) -> io::Result<i32> {
     )
 }
 
+/// C `d2kd.c:1313-1319`: `SO_TIMESTAMP` включает `NFQA_TIMESTAMP` в пакетах
+/// очереди. По ним HTTP80 меряет RTT без задержки очереди и самой службы.
+/// Отказ не выключает очередь: замер идёт по своим часам, как раньше.
+fn r2o_enable_receive_timestamps(fd: RawFd) -> io::Result<()> {
+    let one: libc::c_int = 1;
+    let result = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_TIMESTAMP,
+            &one as *const libc::c_int as *const libc::c_void,
+            std::mem::size_of_val(&one) as libc::socklen_t,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 #[derive(Debug)]
 pub enum ReceiveError {
     Wait(io::Error),
@@ -203,6 +224,13 @@ impl QueueSocket {
             fail_open,
         );
         socket.configure(&params)?;
+        // C ставит SO_TIMESTAMP сразу после открытия очереди и не считает
+        // отказ смертельным.
+        if let Err(error) = r2o_enable_receive_timestamps(socket.fd.as_raw_fd()) {
+            eprintln!(
+                "r2o-datapath: метки времени ядра недоступны ({error}) — RTT HTTP по своим часам"
+            );
+        }
         Ok(socket)
     }
 
@@ -524,7 +552,7 @@ mod tests {
     use std::cell::Cell;
     use std::io;
     use std::io::ErrorKind;
-    use std::os::fd::{AsRawFd, OwnedFd};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
     #[test]
     fn nfq_recv_error_mapping_matches_c() {
@@ -730,5 +758,64 @@ mod tests {
 
         assert_eq!(error.raw_os_error(), Some(libc::EPERM));
         assert!(!readback_called);
+    }
+
+    fn netlink_queue_descriptor() -> OwnedFd {
+        let fd = unsafe {
+            libc::socket(
+                libc::AF_NETLINK,
+                libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+                crate::netlink::NETLINK_NETFILTER,
+            )
+        };
+        assert!(fd >= 0, "{}", io::Error::last_os_error());
+        unsafe { OwnedFd::from_raw_fd(fd) }
+    }
+
+    fn kernel_timestamp_value(fd: i32) -> Option<i32> {
+        let mut value: libc::c_int = 0;
+        let mut length = std::mem::size_of_val(&value) as libc::socklen_t;
+        let result = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_TIMESTAMP,
+                &mut value as *mut libc::c_int as *mut libc::c_void,
+                &mut length,
+            )
+        };
+        (result == 0).then_some(value)
+    }
+
+    #[test]
+    fn nfqueue_enables_kernel_timestamps_like_d2kd() {
+        let socket = netlink_queue_descriptor();
+        assert_eq!(kernel_timestamp_value(socket.as_raw_fd()), Some(0));
+        super::r2o_enable_receive_timestamps(socket.as_raw_fd()).unwrap();
+        assert_eq!(kernel_timestamp_value(socket.as_raw_fd()), Some(1));
+        assert_eq!(
+            super::r2o_enable_receive_timestamps(-1)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(libc::EBADF)
+        );
+    }
+
+    #[test]
+    fn nfq_timestamp_differential_matches_c() {
+        let socket = netlink_queue_descriptor();
+        let set = super::r2o_enable_receive_timestamps(socket.as_raw_fd()).is_ok();
+        let readback = kernel_timestamp_value(socket.as_raw_fd());
+        let bad = super::r2o_enable_receive_timestamps(-1).is_err();
+        let output = format!(
+            "set={} readback={} bad={}\n",
+            u8::from(set),
+            readback.map_or(-1, |value| value),
+            u8::from(bad)
+        );
+        if let Ok(path) = std::env::var("R2O_NFQ_TIMESTAMP_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert_eq!(output, "set=1 readback=1 bad=1\n");
     }
 }

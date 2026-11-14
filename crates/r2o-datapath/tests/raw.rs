@@ -3,9 +3,13 @@ use r2o_datapath::raw::RawSocket;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 #[test]
-fn raw_tcp_sender_requires_a_nonzero_queue_bypass_mark() {
-    let error = RawSocket::open(libc::AF_INET, 0, None).unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+fn raw_sender_rejects_unsupported_families_before_opening_a_socket() {
+    // C `d2k_raw_open` не принимает семейство вовсе; Rust-обёртка выбирает
+    // сокет по семейству, поэтому проверка идёт до `socket(2)`.
+    for family in [libc::AF_UNSPEC, libc::AF_PACKET, libc::AF_INET6 + 1] {
+        let error = RawSocket::open(family, 0, None).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
 }
 
 #[test]
