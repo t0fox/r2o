@@ -9,6 +9,7 @@ mod classify_measured;
 pub mod compose_d2o;
 pub mod diagnostics;
 pub mod discovery;
+pub mod dns_health;
 pub mod domain;
 pub mod ech;
 pub mod fetch;

@@ -3458,7 +3458,7 @@ fn set_deadline(stream: &TcpStream, deadline: Instant) -> Result<(), String> {
 }
 
 #[derive(Debug)]
-struct ConnectTargetError {
+pub(crate) struct ConnectTargetError {
     source: io::Error,
     local_refusal: bool,
 }
@@ -3491,7 +3491,7 @@ impl std::fmt::Display for ConnectTargetError {
     }
 }
 
-fn connect_target(
+pub(crate) fn connect_target(
     address: SocketAddr,
     mark: Option<u32>,
     timeout: Duration,
