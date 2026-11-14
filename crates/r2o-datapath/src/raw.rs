@@ -1211,14 +1211,13 @@ mod tests {
     #[test]
     fn ленивый_сокет_фрагментов_открывается_один_раз_и_не_кеширует_ошибку() {
         use std::cell::RefCell;
-        use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+        use std::os::fd::OwnedFd;
 
         let cache = RefCell::new(None);
         let mut opens = 0;
         let open = |opens: &mut usize| -> std::io::Result<OwnedFd> {
             *opens += 1;
-            let file = std::fs::File::open("/dev/null")?;
-            Ok(unsafe { OwnedFd::from_raw_fd(file.into_raw_fd()) })
+            Ok(std::fs::File::open("/dev/null")?.into())
         };
         let first = super::r2o_cached_fragment_fd(&cache, || open(&mut opens)).unwrap();
         let second = super::r2o_cached_fragment_fd(&cache, || open(&mut opens)).unwrap();
