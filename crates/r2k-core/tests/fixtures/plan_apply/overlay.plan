@@ -1,0 +1,6 @@
+d2k-plan 1 1
+id 00000000000000000000000000000000
+proto tcp tls
+payload 1 0f0f
+seqovl payload=1 poison=0
+order forward

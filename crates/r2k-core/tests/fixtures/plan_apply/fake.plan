@@ -1,0 +1,7 @@
+d2k-plan 1 1
+id 00000000000000000000000000000000
+proto tcp tls
+payload 1 00
+poison 1 badsum
+fake payload=1 poison=1 repeats=1 gap_us=5000 place=before
+order forward

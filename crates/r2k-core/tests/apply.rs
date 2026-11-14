@@ -1,4 +1,4 @@
-use r2k_core::plan::{EmitKind, OriginalFate, PLAN_MAGIC, PacketInput, Plan};
+use r2k_core::plan::{EmitKind, OriginalFate, PLAN_MAGIC, POISON_TS_UP, PacketInput, Plan};
 
 #[test]
 fn no_action_plan_passes_original_and_fake_only_plan_keeps_original() {
@@ -669,4 +669,73 @@ fn tls_client_hello() -> Vec<u8> {
     }
     hello[76..84].copy_from_slice(&[0, 2, 0x13, 1, 1, 0, 0, 0]);
     hello
+}
+
+#[test]
+fn plan_apply_differential_matches_c() {
+    use std::fmt::Write as _;
+
+    let Ok(directory) = std::env::var("R2O_PLAN_APPLY_FIXTURES") else {
+        return;
+    };
+    let mut files = std::fs::read_dir(&directory)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "tlv"))
+        .collect::<Vec<_>>();
+    files.sort();
+    let mut output = String::new();
+    for path in files {
+        let name = format!("{}.plan", path.file_stem().unwrap().to_string_lossy());
+        let bytes = std::fs::read(&path).unwrap();
+        let plan = Plan::parse_wire(&bytes).unwrap();
+        let mut input = PacketInput::new(b"abcdefghij", 1000);
+        input.have_sni = true;
+        input.sni_off = 2;
+        input.sni_len = 4;
+        input.segment_cap = 1400;
+        let actions = plan.apply(&input).unwrap();
+        let fate = match actions.fate {
+            OriginalFate::Pass => 0,
+            OriginalFate::Drop => 1,
+            OriginalFate::Hold => 2,
+        };
+        writeln!(
+            output,
+            "case {name} rc=0 fate={fate} n={} why=",
+            actions.emits.len()
+        )
+        .unwrap();
+        for (index, emit) in actions.emits.iter().enumerate() {
+            let kind = match emit.kind {
+                EmitKind::Fake => 0,
+                EmitKind::Payload => 1,
+            };
+            let poison = emit.poison & !POISON_TS_UP;
+            let ts_up = u8::from(emit.poison & POISON_TS_UP != 0);
+            write!(
+                output,
+                "emit {index} kind={kind} delay={} seq={} ttl={} ts_up={ts_up} poison={poison} seq_shift={} pre={} len={} bytes=",
+                emit.delay_us,
+                emit.seq,
+                emit.ttl,
+                emit.seq_shift,
+                emit.prefix.len(),
+                emit.bytes.len()
+            )
+            .unwrap();
+            for byte in &emit.prefix {
+                write!(output, "{byte:02x}").unwrap();
+            }
+            output.push('/');
+            for byte in &emit.bytes {
+                write!(output, "{byte:02x}").unwrap();
+            }
+            output.push('\n');
+        }
+    }
+    if let Ok(path) = std::env::var("R2O_PLAN_APPLY_DIFF_OUTPUT") {
+        std::fs::write(path, output).unwrap();
+    }
 }

@@ -87,11 +87,11 @@ recheck 1982 1982 equal True
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
 | datapath-core | 400 | 245 | 155 | 0 | 0 |
-| datapath-plan | 183 | 180 | 3 | 0 | 0 |
+| datapath-plan | 183 | 181 | 2 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1330** | **652** | **0** | **0** |
+| **Итого** | **1982** | **1331** | **651** | **0** | **0** |
 
-Это не оценка паритета: 652 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 651 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1330 / P 652 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1331 / P 651 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -345,9 +345,9 @@ P означает неполное доказательство ветвей, N
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
 | datapath-core | 400 | 245 | 155 | 0 | 0 |
-| datapath-plan | 183 | 180 | 3 | 0 | 0 |
+| datapath-plan | 183 | 181 | 2 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1330** | **652** | **0** | **0** |
+| **Итого** | **1982** | **1331** | **651** | **0** | **0** |
 
 
 ---
@@ -5469,7 +5469,7 @@ transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-со�
 | emit_vec_free | 268-272 | 5 | static: освободить массив посылок и owned_bytes | `plan/apply.rs:61` `Emission` (Vec) + `Drop` | E* | C `if(!v) return`; цикл `free(v[i].owned_bytes)`; `free(v)`. Rust владеет байтами через `Vec<u8>` в `Emission`, массив — `Vec<Emission>`; освобождение при `Drop`, отдельных утечек нет по типам. Теста на освобождение нет — свойство выражено типами. |
 | emit_overhead | 285-295 | 11 | static: заголовки IP+TCP/UDP, MD5/TS-опция | `plan/apply.rs:737` `emit_overhead` | E | **Ветви C:** `hdr=20 + (transport==17 ? 8 : 20)`; при `po && transport!=17`: `MD5 → +20`, иначе `TCPTS_BACK → +12`; транспорт 0 считается TCP. Rust те же константы и порядок. Тест `max_emit_counts_udp_tcp_options_seq_overlay_and_udplen` проверяет UDP (28), TCP+TCPTS_BACK (52) и overlay; MD5 — прежним `max_emit()==171`. |
 | d2k_plan_max_emit | 297-341 | 45 | верхняя оценка одной посылки плана | `plan/apply.rs:418` `Plan::max_emit` | E | **Ветви C:** fake с `payload + (DUPSID?32:0)` и зажимом `segment_size`; seqovl только приставка; `udplen` — `1200+udplen` для QUIC или `1+udplen`; максимум. Rust те же три цикла. Тест `max_emit_counts_udp_tcp_options_seq_overlay_and_udplen` проверяет UDP fake, TCP+TCPTS_BACK, seqovl, QUIC/не-QUIC `udplen`; fake+DUPSID — прежним `max_emit()==171`. |
-| d2k_plan_apply | 343-873 | 531 | превратить план+пакет в посылки, судьбу оригинала и причину отказа | `plan/apply.rs:155` `Plan::apply` | **P** | 17 тестов tests/apply.rs покрывают split/fake/overlay/order/pace/settle/delay/udplen/qsplit/qdeny/oob/metric. **Закрыто 2026-11-12:** OOB и qsplit проходят общий finalize — `wire_profile` ставится всем посылкам, `apply_timing` применяется, нарезка вызывается; тесты `urgent_oob_plan_sends_prefix_urgent_byte_and_suffix` (все три emission с `wire_profile=1`) и `quic_split_applies_delay_us_like_d2o` (`delay_us=25`). **Остаются:** (1) `MAX_EMISSIONS = 26` в Rust (`plan.rs:10`, `apply.rs:9,335,704`); C в `plan_apply.c` не ограничивает число посылок 26 — предел 65536 относится только к числу сегментов (`:830`), а отказ >26 приходит позже из `session.c:2517` (`D2K_RESULT_MAX`). Наблюдаемый отказ сессии совпадает, слой и текст ошибки различаются. (2) `emit_fake` C копирует `ts_up/autottl`-поля, Rust переносит `ts_up` через флаг `POISON_TS_UP`, а autottl вычисляет в `ttl` по `reference_ttl` (`apply.rs:764-781`); для одного и того же `reference_ttl` результат совпадает, при смене TTL между apply и отправкой C пересчитал бы, Rust — нет. |
+| d2k_plan_apply | 343-873 | 531 | применение плана: fate, split/fake/reverse/pace/seq/overlay, отказы | `r2k-core/src/plan/apply.rs` `Plan::apply` | **E*** | C/Rust differential `scripts/test-plan-apply-differential.sh` PASS: 6 простых планов — empty, fake badsum, fake ttl+seqshift, overlay/seqovl, reverse split, forward split; fate, число посылок, kind/delay/seq/ttl/poison/seq_shift/prefix/bytes совпали. **Ограничение:** не покрыты все 531 строка C: autottl, QUIC/udplen/qsplit, TLS-шаблоны, лимиты 65536 сегментов; тест фиксирует базовые пути. |
 | d2k_actions_cancel | 891-921 | 31 | правила отмены недосланного исполнения | `plan/apply.rs:104` `Actions::cancel` | E | **Ветви C:** `!out→return`; `memset`; `!a→fate=PASS`; `emitted=min(emitted,a->n)`; скан первых `emitted` на `kind==PAYLOAD`; `partial=emitted<a->n`; `stream_damaged=payload_out && partial`; `fate=payload_out?DROP:PASS`. Rust `sent=min(emitted,len)`; `any(kind==Payload)` по `[..sent]`; `partial`; `fate`; `stream_damaged=payload_out && partial`. Тест `cancellation_drops_only_after_payload_bytes_were_emitted` (tests/apply.rs:303): до нагрузки PASS/partial, после — DROP/damaged. |
 | d2k_actions_free | 923-931 | 9 | освободить посылки | `plan/apply.rs:61` `Emission` + `Actions` (RAII) | E* | C `if(!a) return`; цикл `free(a->v[i].owned_bytes)`; `free(a->v)`; `v=NULL`, `n=0`. Rust `Actions` владеет `Vec<Emission>`, каждый `Emission` — `Vec<u8>`; освобождение при `Drop`, повторный вызов невозможен по заимствованию. Отдельного теста нет — свойство типов. |
 
