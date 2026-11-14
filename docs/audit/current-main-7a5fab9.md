@@ -79,15 +79,17 @@ Pinned C/Rust differential-донор остаётся `a378e230...`; это о�
   (8 случаев точных байт PASS), `r2o_tls12_connect`/`r2o_tls12_resume`
   проходят loopback handshake и downgrade TLS1.3→1.2 с HTTP 200.
   Ограничение: production HTTP/TLS остаётся rustls; P-384 C отвергает.
-- **`dns_services` live:** R2O читает `/etc/config/https-dns-proxy`,
-  `/etc/config/dnsproxy`, `doqd` и Keenetic `ndmc -c "show dns-proxy"`
-  (250 мс, stderr null, пустой `LD_LIBRARY_PATH`), refresh раз в 30 с,
-  и всегда пишет live-секцию `dns_services` с полями C для состояния
-  `detected`. C/Rust differential `test-dns-live-differential.sh` PASS
-  (3 сервиса, current main 7a5fab9), пустого массива-заглушки нет.
-- Остаются: state machine `checking/direct_ok/plan_applied/bypass_ok`,
-  generation, `dns_service_observe`/`note_applied` и health-пробы
-  DoH/DoT/DoQ. Поэтому `d2k_sched_write_live` — P*.
+- **`dns_services` state 2026-11-14:** реализованы `dns_service_live`
+  (`generation/ip/applied_plan_id/health-флаги/dns_answer/plan_applied/
+  attempts/checked_at/next_check/plan_applied_at/reason`), состояния
+  `Detected/Checking/DirectOk/Failed`, production `dns_service_observe`
+  из `EVENT_HELLO` (router-source, `server_is_low`, sni/host/ip matching,
+  generation++) и `dns_service_note_applied` из non-trial `EVENT_APPLIED`;
+  `d2k_sched_set_dns_services` сохраняет live при неизменной конфигурации.
+  C/Rust differential `test-dns-state-differential.sh` PASS (4 кейса).
+- Остаются: health-пробы DoH/DoT/DoQ, `T_DNS_HEALTH`, bootstrap,
+  `bypass_ok`/`no_bypass`/`candidate_plan_applied`/`dns_answer_via_plan`.
+  Поэтому `d2k_sched_write_live` — P*.
 
 ## Команды проверки
 
