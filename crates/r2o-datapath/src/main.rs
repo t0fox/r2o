@@ -1937,7 +1937,7 @@ mod app {
                                 &mut control,
                                 &mut r2o_snapshot_control,
                                 &mut flow_journal,
-                                journal_origin.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                                r2o_now_ns(),
                                 &body,
                                 None,
                             );
@@ -2015,8 +2015,7 @@ mod app {
                                         &mut control,
                                         &mut r2o_snapshot_control,
                                         &mut flow_journal,
-                                        journal_origin.elapsed().as_nanos().min(u64::MAX as u128)
-                                            as u64,
+                                        r2o_now_ns(),
                                         &hello.event_body(),
                                         hello.shape_event_body(),
                                     );
@@ -2082,8 +2081,7 @@ mod app {
                                         &mut control,
                                         &mut r2o_snapshot_control,
                                         &mut flow_journal,
-                                        journal_origin.elapsed().as_nanos().min(u64::MAX as u128)
-                                            as u64,
+                                        r2o_now_ns(),
                                         &hello.event_body(),
                                         hello.shape_event_body(),
                                     );
@@ -2143,8 +2141,7 @@ mod app {
                                         &mut control,
                                         &mut r2o_snapshot_control,
                                         &mut flow_journal,
-                                        journal_origin.elapsed().as_nanos().min(u64::MAX as u128)
-                                            as u64,
+                                        r2o_now_ns(),
                                         &hello.event_body(),
                                         hello.shape_event_body(),
                                     );
@@ -2850,7 +2847,7 @@ mod app {
                             &mut tcp_sessions,
                             &mut control,
                             &mut flow_journal,
-                            journal_origin.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                            r2o_now_ns(),
                             &event,
                         );
                     }
@@ -3234,8 +3231,25 @@ mod app {
         }
     }
 
-    fn journal_timestamp(journal_origin: &Instant) -> u64 {
-        journal_origin.elapsed().as_nanos().min(u64::MAX as u128) as u64
+    /// C `now_ns` (`datapath/d2kd.c:112-116`): CLOCK_MONOTONIC в целых
+    /// наносекундах. Тем же временем помечаются записи журнала, поэтому база
+    /// совпадает с C, а не отсчитывается от старта процесса.
+    fn r2o_now_ns() -> u64 {
+        let mut time = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) } != 0 {
+            return 0;
+        }
+        u64::try_from(time.tv_sec)
+            .unwrap_or_default()
+            .saturating_mul(1_000_000_000)
+            .saturating_add(u64::try_from(time.tv_nsec).unwrap_or_default())
+    }
+
+    fn journal_timestamp(_journal_origin: &Instant) -> u64 {
+        r2o_now_ns()
     }
 
     fn format_journal_details(entry: &R2oFlowJournalEntry) -> String {
@@ -4838,6 +4852,27 @@ mod app {
                 r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_QUEUE,
             ));
             assert_eq!(journal.count(), 2);
+        }
+
+        #[test]
+        fn now_ns_uses_clock_monotonic_like_c() {
+            let before = super::r2o_now_ns();
+            assert!(before > 0, "CLOCK_MONOTONIC не вернул время");
+            let mut direct = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            assert_eq!(
+                unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut direct) },
+                0
+            );
+            let direct_ns = u64::try_from(direct.tv_sec).unwrap() * 1_000_000_000
+                + u64::try_from(direct.tv_nsec).unwrap();
+            assert!(
+                direct_ns.abs_diff(before) < 1_000_000_000,
+                "now_ns не совпал с CLOCK_MONOTONIC: {before} vs {direct_ns}"
+            );
+            assert!(super::r2o_now_ns() >= before);
         }
 
         #[test]
