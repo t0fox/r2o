@@ -54,6 +54,40 @@ mod app {
     use std::time::{Duration, Instant};
 
     static STOP: AtomicBool = AtomicBool::new(false);
+    static R2O_SEND_FAIL_BUSY_LINES: std::sync::atomic::AtomicU32 =
+        std::sync::atomic::AtomicU32::new(0);
+
+    /// C `log_send_fail` (`datapath/d2kd.c:253-261`): busy-ошибка сырой
+    /// посылки (сокет полон) логируется не более 16 раз за процесс, на
+    /// 16-й строке — предупреждение «дальше только счётчик». Не-busy ошибка
+    /// логируется всегда.
+    fn r2o_send_fail_line(what: &str, error: &io::Error, busy_lines: &mut u32) -> Option<String> {
+        if r2o_udp_send_busy(error) {
+            *busy_lines = busy_lines.saturating_add(1);
+            if *busy_lines > 16 {
+                return None;
+            }
+            let suffix = if *busy_lines == 16 {
+                " (дальше только счётчик «сокет полон»)"
+            } else {
+                ""
+            };
+            return Some(format!("r2o-datapath: {what}{error}{suffix}"));
+        }
+        Some(format!("r2o-datapath: {what}{error}"))
+    }
+
+    fn r2o_log_send_fail(what: &str, error: &io::Error) {
+        let line = {
+            let mut busy_lines = R2O_SEND_FAIL_BUSY_LINES.load(Ordering::Relaxed);
+            let line = r2o_send_fail_line(what, error, &mut busy_lines);
+            R2O_SEND_FAIL_BUSY_LINES.store(busy_lines, Ordering::Relaxed);
+            line
+        };
+        if let Some(line) = line {
+            eprintln!("{line}");
+        }
+    }
 
     fn receive_error_requires_flush(error: &ReceiveError) -> bool {
         match error {
@@ -4016,7 +4050,7 @@ mod app {
         };
         for packet in originals {
             if let Err(error) = raw.send_packet(packet) {
-                eprintln!("r2o-datapath: не возвращён owned TLS original через raw-send: {error}");
+                r2o_log_send_fail("не возвращён owned TLS original через raw-send: ", &error);
             }
         }
     }
@@ -4237,7 +4271,7 @@ mod app {
             due = next_due;
             if index < first_delayed {
                 if let Err(error) = raw.send_packet(&emitted.packet) {
-                    eprintln!("r2o-datapath: raw-send не выполнен: {error}");
+                    r2o_log_send_fail("raw-send не выполнен: ", &error);
                     if let Some(ticket) = ticket {
                         scheduled.cancel(ticket);
                     }
@@ -4383,7 +4417,7 @@ mod app {
                 continue;
             };
             if let Err(error) = raw.send_packet(&emitted.packet) {
-                eprintln!("r2o-datapath: отложенный raw-send не выполнен: {error}");
+                r2o_log_send_fail("отложенный raw-send не выполнен: ", &error);
                 scheduled.cancel(ticket);
                 if let Some(pending) = pending_udp_releases.remove(&ticket) {
                     r2o_cancel_delayed_udp_batch(
@@ -4804,6 +4838,32 @@ mod app {
                 r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_QUEUE,
             ));
             assert_eq!(journal.count(), 2);
+        }
+
+        #[test]
+        fn log_send_fail_limits_busy_lines_like_c() {
+            let busy = io::Error::from_raw_os_error(libc::ENOBUFS);
+            let mut lines = 0_u32;
+            for _ in 0..15 {
+                let line = super::r2o_send_fail_line("raw: ", &busy, &mut lines).unwrap();
+                assert!(!line.contains("дальше"));
+            }
+            let line = super::r2o_send_fail_line("raw: ", &busy, &mut lines).unwrap();
+            assert!(line.contains("дальше только счётчик «сокет полон»"));
+            assert_eq!(lines, 16);
+            assert!(super::r2o_send_fail_line("raw: ", &busy, &mut lines).is_none());
+            assert_eq!(lines, 17);
+
+            let eagain = io::Error::from_raw_os_error(libc::EAGAIN);
+            assert!(super::r2o_send_fail_line("raw: ", &eagain, &mut 0).is_some());
+
+            // Не-busy ошибка не ограничена счётчиком.
+            let other = io::Error::from_raw_os_error(libc::EACCES);
+            let mut other_lines = 0_u32;
+            for _ in 0..20 {
+                assert!(super::r2o_send_fail_line("raw: ", &other, &mut other_lines).is_some());
+            }
+            assert_eq!(other_lines, 0);
         }
 
         #[test]
