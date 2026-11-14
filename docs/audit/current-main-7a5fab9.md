@@ -97,13 +97,15 @@ Pinned C/Rust differential-донор остаётся `a378e230...`; это о�
   `now>=next_check`), `probe.host=live.ip`/bootstrap, 4000 мс; состояния
   `direct_ok/failed/plan_applied/bypass_ok` и `candidate_plan_applied`
   покрыты `test-dns-state-differential.sh` **8 сценариев**.
-- **Task states 2026-11-14:** `note_discovery_outcome` связывает Discovery
-  с dns_services; live.rs пишет `no_bypass`, `bypass_ok`,
-  `candidate_plan_applied`, `dns_answer_via_plan` в C-порядке;
-  `test-dns-state-differential.sh` PASS **9 сценариев** (включая
-  `no_bypass`/`bypass_ok`/health/ip change/plan applied).
-- Остаются: настоящая task-ячейка `T_DNS_HEALTH`/`T_RESTING` и полный
-  `--measure-mark` CLI differential. Поэтому `d2k_sched_write_live` — P*.
+- **Task cells 2026-11-14:** реальные `DnsTask/DnsTaskState/DnsTaskVerify`
+  (64 ячейки), `T_DNS_HEALTH` start_due/finish, переходы `Queued/Asking/
+  Planning/Verify`, `T_TRIAL_SETTLE`, `T_VERIFY_WAIT`, `T_WATCHING`,
+  `T_RESTING` (120 с); live.rs берёт task по C-правилам, task-over-health,
+  `candidate_plan_applied=t.ver_ok`, `dns_answer_via_plan=ver_ok&&answered`,
+  custom `no_bypass`. `test-dns-state-differential.sh` PASS **17 сценариев**.
+- Остаются: DoQ endpoint не синхронизирован с task-ячейкой; R2O
+  completed-watcher 10 мин vs C WATCHING; локальные ошибки start_due;
+  полный `--measure-mark` CLI differential. Поэтому `d2k_sched_write_live` — P*.
 
 ## Команды проверки
 
