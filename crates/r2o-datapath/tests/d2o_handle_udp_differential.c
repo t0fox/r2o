@@ -128,6 +128,14 @@ static size_t quic_deny_plan(uint8_t *o) {
     return put_tlv(o, off, 0x0110, deny, 1);
 }
 
+/* План TCP, поставленный общим для UDP-пакета: C `plan_fits_transport`
+ * отказывает до исполнения. */
+static size_t tcp_global_plan(uint8_t *o) {
+    static const uint8_t transport[2] = {6, 1};
+    size_t off = plan_header(o, 0, 2, 0x56);
+    return put_tlv(o, off, 0x0002, transport, 2);
+}
+
 static size_t voice_fake_plan(uint8_t *o) {
     static const uint8_t transport[2] = {17, 3};
     static const uint8_t payload[7] = {0, 1, 'V', 'O', 'I', 'C', 'E'};
@@ -526,6 +534,13 @@ int main(int argc, char **argv) {
                        (const uint8_t *)"later", 5);
         qdeny_flow_case("P10 qdeny-flow", plan, plan_len, first, first_len,
                         second, second_len);
+
+        /* P11: TCP-план как общий для UDP — отказ по транспорту. */
+        plan_len = tcp_global_plan(plan);
+        global_plan_case("P11 other-transport", plan, plan_len, buffer,
+                         udp_packet(buffer, client, server, 50111, 443,
+                                    initial, initial_len),
+                         result_buffer, sizeof result_buffer);
     }
     return 0;
 }

@@ -43,14 +43,14 @@ mod app {
     use r2o_datapath::r2o_udp_sessions::R2oUdpSessions;
     use r2o_datapath::r2o_voice::{R2oVoiceSessions, R2oVoiceTrialProofs};
     use r2o_datapath::raw::{RawSocket, r2o_pick_maxlen};
-    use r2o_datapath::scheduler::{FlowTicket, ScheduledQueue};
+    use r2o_datapath::scheduler::{FlowTicket, MAX_SCHEDULED_PACKETS, ScheduledQueue};
     use sha2::{Digest, Sha256};
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::error::Error;
     use std::io;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::{Duration, Instant};
 
     static STOP: AtomicBool = AtomicBool::new(false);
@@ -753,8 +753,12 @@ mod app {
         copy_range: u32,
         queue_len: u32,
         journal_capacity: u32,
+        sched_slots: usize,
         flow_capacity: R2oFlowCapacity,
         stats_interval: Option<Duration>,
+        duration: Option<Duration>,
+        log_path: Option<PathBuf>,
+        health_path: Option<PathBuf>,
         r2o_idle_timeout: Duration,
         receive_buffer: i32,
         control_path: Option<PathBuf>,
@@ -1363,6 +1367,14 @@ mod app {
             return run_both(&arguments);
         }
         let options = parse_options(&arguments)?;
+        if let Some(path) = options.log_path.as_deref()
+            && let Err(error) = r2o_install_log(path)
+        {
+            return Err(invalid(format!(
+                "не открыть журнал {}: {error}",
+                path.display()
+            )));
+        }
         let plan = load_plan(&options)?;
         let mode = if options.mode == RuntimeMode::Observe {
             "observe"
@@ -1501,7 +1513,11 @@ mod app {
         // C `s->plan == NULL`: в observe без явного --plan и в controller-only
         // общего плана нет.
         let global_plan_present = options.plan_explicit;
-        let mut scheduled = ScheduledQueue::default();
+        let mut scheduled = ScheduledQueue::with_limits(options.sched_slots, 65536)?;
+        // C `cap_refresh`: предел слота очереди догоняет принятый MTU ДО
+        // первого объявления `send_maxlen` контроллеру.
+        let initial_slot_size = raw.as_ref().map_or(send_maxlen, RawSocket::maxlen);
+        let _ = scheduled.grow_slot_size(initial_slot_size);
         let mut pending_applied = HashMap::<FlowTicket, PendingApplied>::new();
         let mut pending_udp_releases = HashMap::<FlowTicket, PendingUdpRelease>::new();
         let mut holding = HoldTable::default();
@@ -1546,8 +1562,23 @@ mod app {
         let mut next_route_refresh = last_route_refresh + R2O_ROUTE_REFRESH_INTERVAL;
         install_signal_handlers()?;
         loop {
-            if STOP.load(Ordering::Relaxed) {
-                eprintln!("r2o-datapath: завершение по сигналу, освобождаю удержанные пакеты");
+            if let Some(path) = options.health_path.as_deref() {
+                r2o_write_heartbeat(
+                    path,
+                    control.as_ref().is_some_and(ControlServer::is_connected),
+                );
+            }
+            let duration_done = options
+                .duration
+                .is_some_and(|limit| journal_origin.elapsed() >= limit);
+            if STOP.load(Ordering::Relaxed) || duration_done {
+                if STOP.load(Ordering::Relaxed) {
+                    eprintln!("r2o-datapath: завершение по сигналу, освобождаю удержанные пакеты");
+                } else {
+                    eprintln!(
+                        "r2o-datapath: завершение по --duration, освобождаю удержанные пакеты"
+                    );
+                }
                 drain_queued(&mut socket, &mut batch, packet_type);
                 let released = holding.flush(Instant::now(), name_plans.revision(), true);
                 r2o_report_incomplete_captures(
@@ -1868,14 +1899,23 @@ mod app {
                     (raw.as_ref(), route_gate.r2o_egress_ifindices())
                     && let Some(maxlen) = raw.r2o_adopt_egress(&ifindices)
                 {
-                    name_plans.r2o_set_send_maxlen(maxlen);
-                    if let Some(control) = control.as_mut() {
-                        control.r2o_set_send_maxlen(maxlen as u32)?;
+                    // C `cap_refresh`: grow sched → greet. Ошибка роста
+                    // оставляет контроллеру прежний предел, как в C.
+                    if scheduled.grow_slot_size(maxlen) < 0 {
+                        eprintln!(
+                            "r2o-datapath: не удалось увеличить очередь до {} байт — контроллеру оставлен прежний предел",
+                            maxlen
+                        );
+                    } else {
+                        name_plans.r2o_set_send_maxlen(maxlen);
+                        if let Some(control) = control.as_mut() {
+                            control.r2o_set_send_maxlen(maxlen as u32)?;
+                        }
+                        eprintln!(
+                            "r2o-datapath: предел посылки обновлён до {} байт по MTU выходного маршрута",
+                            maxlen
+                        );
                     }
-                    eprintln!(
-                        "r2o-datapath: предел посылки обновлён до {} байт по MTU выходного маршрута",
-                        maxlen
-                    );
                 }
                 if conntrack.is_none() {
                     conntrack = R2oConntrackClient::open();
@@ -2679,14 +2719,24 @@ mod app {
                         && let Some(packet) = tx_original
                         && let Some(key) =
                             r2o_datapath::control::flow_journal_key_for_packet(packet)
-                        && key[37] == 17
+                        && (key[37] == 17
+                            || key[37] == 6 && tcp_hello_from_packet(packet).is_some())
                     {
+                        let client_shape = if key[37] == 6 {
+                            // C `session.c:2382`: журнал только для
+                            // разобранного ClientHello.
+                            name_plans.r2o_observed_tcp_shape(packet, false)
+                        } else if key[37] == 17 {
+                            Some(r2o_udp_client_shape(packet))
+                        } else {
+                            None
+                        };
                         let refused = RefusedEvent {
                             key,
                             code: r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_NONE,
                             plan_id: [0; 16],
                             trial_id: [0; 16],
-                            client_shape: Some(r2o_udp_client_shape(packet)),
+                            client_shape,
                             execution_id: None,
                             binding: None,
                         };
@@ -3511,6 +3561,124 @@ mod app {
         Ok(())
     }
 
+    /// C `--log` (`d2kd.c:1236-1245`): `freopen(path, "a", stdout/stderr)`
+    /// до первой печати. В Rust перенаправляем fd 1/2 на один append-файл;
+    /// stderr в Rust небуферизован, stdout — построчный, как `_IOLBF`.
+    fn r2o_install_log(path: &std::path::Path) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o644)
+            .open(path)?;
+        let fd = file.as_raw_fd();
+        for target in [libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+            if unsafe { libc::dup2(fd, target) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    static R2O_HEALTH_LAST_MS: AtomicU64 = AtomicU64::new(0);
+
+    /// C `d2k_runtime_start_ticks` (`runtime/d2k_runtime.h:39-48`): поле 22
+    /// `/proc/self/stat` после закрывающей скобки comm.
+    fn r2o_proc_start_ticks() -> u64 {
+        let Ok(stat) = std::fs::read_to_string("/proc/self/stat") else {
+            return 0;
+        };
+        let Some((_, fields)) = stat.rsplit_once(") ") else {
+            return 0;
+        };
+        fields
+            .split_ascii_whitespace()
+            .nth(19)
+            .and_then(|field| field.parse::<u64>().ok())
+            .unwrap_or(0)
+    }
+
+    fn r2o_boot_id() -> String {
+        match std::fs::read_to_string("/proc/sys/kernel/random/boot_id") {
+            Ok(text) => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    "unknown".to_owned()
+                } else {
+                    trimmed.to_owned()
+                }
+            }
+            Err(_) => "local".to_owned(),
+        }
+    }
+
+    /// C `d2k_runtime_heartbeat`: `D2KH1 pid start_ticks mono_ms boot_id
+    /// release_id wire peer connected ready external`.
+    fn r2o_heartbeat_body(
+        pid: u32,
+        start_ticks: u64,
+        now_ms: u64,
+        boot_id: &str,
+        release_id: &str,
+        wire: u16,
+        peer: &str,
+        connected: bool,
+        ready: bool,
+        external: bool,
+    ) -> String {
+        format!(
+            "D2KH1 {pid} {start_ticks} {now_ms} {boot_id} {release_id} {wire} {peer} {} {} {}\n",
+            u8::from(connected),
+            u8::from(ready),
+            u8::from(external)
+        )
+    }
+
+    fn r2o_write_heartbeat(path: &std::path::Path, connected: bool) {
+        let now_ms = r2o_now_ns() / 1_000_000;
+        let last = R2O_HEALTH_LAST_MS.load(Ordering::Relaxed);
+        if last != 0 && now_ms >= last && now_ms - last < 1000 {
+            return;
+        }
+        let release_id = r2k_core::control::RELEASE_ID;
+        let body = r2o_heartbeat_body(
+            std::process::id(),
+            r2o_proc_start_ticks(),
+            now_ms,
+            &r2o_boot_id(),
+            release_id,
+            r2k_core::control::PROTOCOL_VERSION,
+            "-",
+            connected,
+            true,
+            true,
+        );
+        let mut temporary = path.as_os_str().to_owned();
+        temporary.push(format!(".tmp.{}", std::process::id()));
+        let temporary = std::path::PathBuf::from(temporary);
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let written = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)
+            .and_then(|mut file| {
+                file.write_all(body.as_bytes())?;
+                file.flush()
+            });
+        if written.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+            return;
+        }
+        if std::fs::rename(&temporary, path).is_err() {
+            let _ = std::fs::remove_file(&temporary);
+            return;
+        }
+        R2O_HEALTH_LAST_MS.store(now_ms, Ordering::Relaxed);
+    }
+
     fn parse_options(arguments: &[String]) -> Result<Options, Box<dyn Error>> {
         let mut options = Options {
             plan_path: PathBuf::from("/etc/r2o/plans/current.r2op"),
@@ -3524,8 +3692,12 @@ mod app {
             copy_range: u16::MAX as u32,
             queue_len: 1024,
             journal_capacity: 256,
+            sched_slots: MAX_SCHEDULED_PACKETS,
             flow_capacity: R2oFlowCapacity::default(),
             stats_interval: Some(Duration::from_secs(10)),
+            duration: None,
+            log_path: None,
+            health_path: None,
             r2o_idle_timeout: Duration::from_secs(120),
             receive_buffer: 4 * 1024 * 1024,
             control_path: None,
@@ -3577,6 +3749,26 @@ mod app {
                 }
                 "--journal" => {
                     options.journal_capacity = parse_u32_option(arguments, &mut cursor, option)?
+                }
+                "--sched-slots" => {
+                    let slots = parse_u32_option(arguments, &mut cursor, option)?;
+                    if slots == 0 {
+                        return Err(invalid("--sched-slots должен быть больше нуля"));
+                    }
+                    options.sched_slots = slots as usize;
+                }
+                "--duration" => {
+                    let seconds = parse_u32_option(arguments, &mut cursor, option)?;
+                    options.duration =
+                        (seconds != 0).then(|| Duration::from_secs(u64::from(seconds)));
+                }
+                "--log" => {
+                    options.log_path =
+                        Some(PathBuf::from(next_value(arguments, &mut cursor, option)?))
+                }
+                "--health-file" => {
+                    options.health_path =
+                        Some(PathBuf::from(next_value(arguments, &mut cursor, option)?))
                 }
                 "--r2o-flow-capacity" | "--flows" => {
                     let requested: u32 = parse_u32_option(arguments, &mut cursor, option)?;
@@ -3810,6 +4002,10 @@ mod app {
   --copy-range N     размер копии пакета (64..65535)
   --queue-len N      глубина очереди (по умолчанию 1024)
   --journal N        глубина журнала потоков (256; 0 — выключить)
+  --sched-slots N    число слотов очереди отложенной отправки (по умолчанию 128)
+  --duration SEC     остановиться через SEC секунд (0 — без ограничения)
+  --log FILE         писать stdout/stderr в FILE (append)
+  --health-file FILE heartbeat D2KH1 раз в секунду
   --rcvbuf N         размер приёмного буфера сокета
   --control PATH     Unix-сокет r2o-controller; также открывает PATH.snapshot для снимков
   --control-wire v22|v48  профиль управляющего провода (по умолчанию v48)
@@ -7387,6 +7583,73 @@ mod app {
                 17
             );
             assert!(parse_options(&["--journal".into(), "bad".into()]).is_err());
+        }
+
+        #[test]
+        fn cli_sched_slots_duration_log_and_health_match_donor_flags() {
+            assert_eq!(parse_options(&[]).unwrap().sched_slots, 128);
+            assert_eq!(
+                parse_options(&["--sched-slots".into(), "17".into()])
+                    .unwrap()
+                    .sched_slots,
+                17
+            );
+            assert!(parse_options(&["--sched-slots".into(), "0".into()]).is_err());
+            assert_eq!(parse_options(&[]).unwrap().duration, None);
+            assert_eq!(
+                parse_options(&["--duration".into(), "17".into()])
+                    .unwrap()
+                    .duration,
+                Some(Duration::from_secs(17))
+            );
+            assert_eq!(
+                parse_options(&["--duration".into(), "0".into()])
+                    .unwrap()
+                    .duration,
+                None
+            );
+            assert_eq!(
+                parse_options(&["--log".into(), "/tmp/d2kd.log".into()])
+                    .unwrap()
+                    .log_path,
+                Some(std::path::PathBuf::from("/tmp/d2kd.log"))
+            );
+            assert_eq!(
+                parse_options(&["--health-file".into(), "/run/d2kd.health".into()])
+                    .unwrap()
+                    .health_path,
+                Some(std::path::PathBuf::from("/run/d2kd.health"))
+            );
+        }
+
+        #[test]
+        fn heartbeat_body_matches_d2k_runtime_format() {
+            assert_eq!(
+                super::r2o_heartbeat_body(42, 7, 1000, "boot", "rel-1", 48, "-", true, true, true),
+                "D2KH1 42 7 1000 boot rel-1 48 - 1 1 1\n"
+            );
+            assert_eq!(
+                super::r2o_heartbeat_body(1, 2, 3, "local", "dev", 48, "-", false, true, true),
+                "D2KH1 1 2 3 local dev 48 - 0 1 1\n"
+            );
+        }
+
+        #[test]
+        fn heartbeat_file_is_written_atomically_with_private_mode() {
+            use std::os::unix::fs::PermissionsExt;
+            let path = std::env::temp_dir().join(format!(
+                "r2o-heartbeat-{}-{}.health",
+                std::process::id(),
+                line!()
+            ));
+            let _ = std::fs::remove_file(&path);
+            super::r2o_write_heartbeat(&path, false);
+            let body = std::fs::read_to_string(&path).expect("heartbeat file");
+            assert!(body.starts_with("D2KH1 "));
+            assert!(body.ends_with(" - 0 1 1\n"));
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+            let _ = std::fs::remove_file(&path);
         }
 
         #[test]

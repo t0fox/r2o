@@ -354,6 +354,30 @@ int main(void) {
         d2k_session_free(full);
     }
 
+    /* S: глобальный UDP-план на TCP ClientHello: C `plan_fits_transport`
+     * отказывает, оригинал проходит. */
+    {
+        static const uint8_t udp_plan[] = {
+            'D', '2', 'K', 'P', 0, 1, 0, 0, 0, 0, 0, 1,
+            0x00, 0x02, 0x00, 0x02, 17, 2,
+        };
+        d2k_plan *other = NULL;
+        char load_error[200];
+        if (d2k_plan_load(udp_plan, sizeof udp_plan, &other, load_error,
+                          sizeof load_error) == 0) {
+            d2k_session *mixed = d2k_session_new(64, 0);
+            d2k_session_set_plan(mixed, other);
+            length = packet_with_payload(buffer, 0x02, 1000, NULL, 0);
+            feed(mixed, buffer, length, &anchor);
+            length = packet_with_payload(buffer, 0x18, 1001, CLIENT_HELLO,
+                                         sizeof CLIENT_HELLO);
+            plan_case("S other-transport", mixed, buffer, length);
+            d2k_session_free(mixed);
+        } else {
+            printf("S other-transport load-error=%s\n", load_error);
+        }
+    }
+
     /* R: зонд контроллера учитывается в s->hellos/with_sni, но не в
      * tcp_hello_flows (C `note_tcp_hello`). */
     {

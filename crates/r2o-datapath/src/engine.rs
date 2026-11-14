@@ -2114,6 +2114,14 @@ fn decide_packet_with_segment_cap(
     };
     let payload = &packet[payload_range.clone()];
 
+    // C `handle_udp` (`session.c:1282-1286`): план объявлен для другого
+    // транспорта — оригинал проходит, план не исполняется.
+    if !plan_fits_transport(Some(plan), 17) {
+        return PacketDecision::RefusedUdp {
+            note: "план объявлен для другого транспорта",
+        };
+    }
+
     if plan.transport == 17 && plan.proto == PROTO_VOICE {
         return decide_voice(plan, packet, &view, payload);
     }
@@ -2295,6 +2303,13 @@ fn decide_tcp(
     tcp_segment_cap: usize,
     reference_ttl: u8,
 ) -> PacketDecision {
+    // C `session_packet` (`session.c:2380-2385`): план другого транспорта
+    // не применяется; оригинал проходит, вызывающему названа причина.
+    if !plan_fits_transport(Some(plan), 6) {
+        return PacketDecision::RefusedUdp {
+            note: "план объявлен для другого транспорта",
+        };
+    }
     let Some(input) = tcp_plan_input(plan, packet, view, tcp_segment_cap, reference_ttl) else {
         return PacketDecision::Accept;
     };
@@ -2634,6 +2649,31 @@ mod tests {
         plan.transport = 17;
         assert!(!super::plan_fits_transport(Some(&plan), 6));
         assert!(super::plan_fits_transport(Some(&plan), 17));
+    }
+
+    #[test]
+    fn tcp_packet_with_udp_plan_is_refused_by_transport_like_c() {
+        let plan = Plan {
+            transport: 17,
+            proto: 2,
+            ..Plan::default()
+        };
+        let mut sessions = TcpSessions::default();
+        let hello = ipv4_tcp_packet(
+            ([192, 0, 2, 10], 41_000),
+            ([198, 51, 100, 20], 443),
+            0x18,
+            64,
+            1001,
+            &client_hello(),
+        );
+        assert_eq!(
+            decide_with_session(&mut sessions, &plan, &hello),
+            PacketDecision::RefusedUdp {
+                note: "план объявлен для другого транспорта",
+            }
+        );
+        assert_eq!(sessions.len(), 1);
     }
 
     #[test]
@@ -6354,6 +6394,22 @@ mod tests {
         let before = full.session_applied();
         let decision = decide_with_session(&mut full, &tcp_fake_plan(), &full_hello);
         print_plan("Q full-table", &decision, full.session_applied() > before);
+
+        // S: глобальный UDP-план на TCP ClientHello — отказ по транспорту.
+        let other_transport = Plan {
+            transport: 17,
+            proto: 2,
+            ..Plan::default()
+        };
+        let mut mixed = TcpSessions::default();
+        let _ = decide_with_session(
+            &mut mixed,
+            &other_transport,
+            &ipv4_tcp_packet(client, server, 0x02, 64, 1000, &[]),
+        );
+        let mixed_hello = ipv4_tcp_packet(client, server, 0x18, 64, 1001, &client_hello());
+        let decision = decide_with_session(&mut mixed, &other_transport, &mixed_hello);
+        print_plan("S other-transport", &decision, false);
 
         // R: зонд контроллера считается в hellos/with_sni, но не в
         // пользовательском tcp_hello_flows.

@@ -1064,6 +1064,12 @@ mod tests {
             put_tlv(&mut plan, 0x0110, &[1]);
             plan
         }
+        fn tcp_global_plan() -> Vec<u8> {
+            let mut plan = Vec::new();
+            plan_header(&mut plan, 0, 2, 0x56);
+            put_tlv(&mut plan, 0x0002, &[6, 1]);
+            plan
+        }
         fn voice_fake_plan() -> Vec<u8> {
             let mut plan = Vec::new();
             plan_header(&mut plan, 0, 4, 0x53);
@@ -1399,6 +1405,14 @@ mod tests {
             "P10 qdeny-flow verdict={}/{} n=0/0",
             verdict(&first_decision),
             verdict(&second_decision)
+        );
+
+        let other_transport =
+            r2k_core::plan::Plan::parse_wire(&tcp_global_plan()).expect("P11 plan parses");
+        global_plan_case(
+            "P11 other-transport",
+            &other_transport,
+            &r2o_stun_packet(([192, 0, 2, 10], 50111), (server_addr, 443), initial),
         );
     }
 
