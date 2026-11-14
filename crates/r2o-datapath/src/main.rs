@@ -3161,24 +3161,30 @@ mod app {
                     }
                     options.control_release_id = value.to_owned();
                 }
-                "--queue" => options.queue = Some(parse_value(arguments, &mut cursor, option)?),
+                "--queue" => {
+                    let queue = parse_u32_option(arguments, &mut cursor, option)?;
+                    options.queue = Some(
+                        u16::try_from(queue)
+                            .map_err(|_| invalid("--queue должен быть от 0 до 65535"))?,
+                    );
+                }
                 "--journal" => {
-                    options.journal_capacity = parse_value(arguments, &mut cursor, option)?
+                    options.journal_capacity = parse_u32_option(arguments, &mut cursor, option)?
                 }
                 "--r2o-flow-capacity" | "--flows" => {
-                    let requested: u32 = parse_value(arguments, &mut cursor, option)?;
+                    let requested: u32 = parse_u32_option(arguments, &mut cursor, option)?;
                     options.flow_capacity = R2oFlowCapacity::from_requested(requested as usize)
                         .ok_or_else(|| {
                             invalid("--flows/--r2o-flow-capacity должен быть больше нуля")
                         })?;
                 }
                 "--stats" => {
-                    let seconds: u32 = parse_value(arguments, &mut cursor, option)?;
+                    let seconds: u32 = parse_u32_option(arguments, &mut cursor, option)?;
                     options.stats_interval =
                         (seconds != 0).then(|| Duration::from_secs(u64::from(seconds)));
                 }
                 "--idle" => {
-                    let seconds: u32 = parse_value(arguments, &mut cursor, option)?;
+                    let seconds: u32 = parse_u32_option(arguments, &mut cursor, option)?;
                     options.r2o_idle_timeout = Duration::from_secs(u64::from(seconds));
                 }
                 "--family" => {
@@ -3214,8 +3220,12 @@ mod app {
                         option,
                     )?)?);
                 }
-                "--copy-range" => options.copy_range = parse_value(arguments, &mut cursor, option)?,
-                "--queue-len" => options.queue_len = parse_value(arguments, &mut cursor, option)?,
+                "--copy-range" => {
+                    options.copy_range = parse_u32_option(arguments, &mut cursor, option)?
+                }
+                "--queue-len" => {
+                    options.queue_len = parse_u32_option(arguments, &mut cursor, option)?
+                }
                 "--rcvbuf" => options.receive_buffer = parse_value(arguments, &mut cursor, option)?,
                 "--no-fail-open" => options.fail_open = false,
                 "--check" => options.check_only = true,
@@ -3275,18 +3285,86 @@ mod app {
             .map_err(|error| invalid(format!("неверное значение {option}: {error}")))
     }
 
+    /// C `arg_u32` (`d2kd.c:863-871`): `strtoul(v, &end, 0)`, затем
+    /// `*end == '\0'` и `n <= 0xffffffff`. База 0 — десятичное, `0x` hex,
+    /// ведущий `0` — восьмеричное; ведущие пробелы и знак допускаются.
+    /// Пустая строка даёт 0 (`end == v`, `*end == '\0'`).
+    fn parse_c_u32(value: &str) -> Option<u32> {
+        let bytes = value.as_bytes();
+        if bytes.is_empty() {
+            return Some(0);
+        }
+        let mut index = 0;
+        while index < bytes.len()
+            && matches!(bytes[index], b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+        {
+            index += 1;
+        }
+        let mut negative = false;
+        if index < bytes.len() && matches!(bytes[index], b'+' | b'-') {
+            negative = bytes[index] == b'-';
+            index += 1;
+        }
+        let (radix, mut cursor, leading_zero) = if index + 1 < bytes.len()
+            && bytes[index] == b'0'
+            && matches!(bytes[index + 1], b'x' | b'X')
+        {
+            (16_u64, index + 2, false)
+        } else if index < bytes.len() && bytes[index] == b'0' {
+            // C `strtoul` уже потребил ведущий ноль: база 8, значение 0.
+            (8_u64, index, true)
+        } else {
+            (10_u64, index, false)
+        };
+        let mut number = 0_u64;
+        let mut parsed = false;
+        if leading_zero {
+            parsed = true;
+            cursor = index + 1;
+        }
+        while cursor < bytes.len() {
+            let digit = match bytes[cursor] {
+                b'0'..=b'9' => u64::from(bytes[cursor] - b'0'),
+                b'a'..=b'f' => u64::from(bytes[cursor] - b'a') + 10,
+                b'A'..=b'F' => u64::from(bytes[cursor] - b'A') + 10,
+                _ => break,
+            };
+            if digit >= radix {
+                break;
+            }
+            parsed = true;
+            number = number.saturating_mul(radix).saturating_add(digit);
+            cursor += 1;
+        }
+        if !parsed || cursor != bytes.len() {
+            return None;
+        }
+        if negative {
+            // На 64-битной хостовой платформе `strtoul` возвращает дополнение
+            // до 2^64 — любое ненулевое значение больше u32::MAX.
+            return (number == 0).then_some(0);
+        }
+        if number > u64::from(u32::MAX) {
+            return None;
+        }
+        Some(number as u32)
+    }
+
+    fn parse_u32_option(
+        arguments: &[String],
+        cursor: &mut usize,
+        option: &str,
+    ) -> Result<u32, Box<dyn Error>> {
+        let value = next_value(arguments, cursor, option)?;
+        parse_c_u32(value).ok_or_else(|| invalid(format!("неверное значение {option}")))
+    }
+
     fn invalid(message: impl Into<String>) -> Box<dyn Error> {
         Box::new(io::Error::new(io::ErrorKind::InvalidInput, message.into()))
     }
 
     fn parse_mark(value: &str) -> Option<u32> {
-        value
-            .strip_prefix("0x")
-            .or_else(|| value.strip_prefix("0X"))
-            .map_or_else(
-                || value.parse().ok(),
-                |hex| u32::from_str_radix(hex, 16).ok(),
-            )
+        parse_c_u32(value)
     }
 
     fn parse_only_mark(value: &str) -> Result<R2oRoutePolicy, Box<dyn Error>> {
@@ -4788,6 +4866,39 @@ mod app {
 
     #[cfg(test)]
     mod tests {
+        #[test]
+        fn parse_c_u32_matches_strtoul_base_zero() {
+            for (input, expected) in [
+                ("", Some(0)),
+                (" ", None),
+                ("10", Some(10)),
+                ("0x10", Some(16)),
+                ("0X10", Some(16)),
+                ("010", Some(8)),
+                ("+10", Some(10)),
+                (" 10", Some(10)),
+                ("\t0x20", Some(32)),
+                ("10 ", None),
+                ("-1", None),
+                ("-0", Some(0)),
+                ("0x", None),
+                ("09", None),
+                ("00", Some(0)),
+                ("0xffffffff", Some(u32::MAX)),
+                ("0x100000000", None),
+                ("4294967295", Some(u32::MAX)),
+                ("4294967296", None),
+                ("abc", None),
+                ("0x1g", None),
+                ("1/2", None),
+            ] {
+                assert_eq!(super::parse_c_u32(input), expected, "arg_u32({input:?})");
+            }
+            assert_eq!(super::parse_mark("010"), Some(8));
+            assert_eq!(super::parse_mark("0x2e"), Some(0x2e));
+            assert_eq!(super::parse_mark("2e"), None);
+        }
+
         #[test]
         fn http80_portal_line_matches_c_fields() {
             let log = r2o_datapath::hold::Http80PortalLog {
