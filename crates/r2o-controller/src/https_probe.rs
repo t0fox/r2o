@@ -9,6 +9,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -126,6 +128,29 @@ pub fn mono_ms() -> i64 {
     start.elapsed().as_millis().min(i64::MAX as u128) as i64
 }
 
+/// C `worker`: результат кладётся в `done[]`; при переполнении `lost++` и
+/// воркер продолжает, а не блокируется на полном потребителе.
+fn deliver_result(
+    sender: &SyncSender<HttpsProbeResult>,
+    wake_write: &Option<UnixStream>,
+    result: HttpsProbeResult,
+    lost: &AtomicU64,
+) -> bool {
+    match sender.try_send(result) {
+        Ok(()) => {
+            if let Some(wake) = wake_write.as_ref() {
+                let _ = (&*wake).write(b"x");
+            }
+            true
+        }
+        Err(TrySendError::Full(_)) => {
+            lost.fetch_add(1, Ordering::Relaxed);
+            true
+        }
+        Err(TrySendError::Disconnected(_)) => false,
+    }
+}
+
 pub struct HttpsProbeWorker {
     jobs: Option<SyncSender<Job>>,
     result_sender: SyncSender<HttpsProbeResult>,
@@ -137,8 +162,9 @@ pub struct HttpsProbeWorker {
     mark: Option<u32>,
     thread: Option<JoinHandle<()>>,
     pending: HashSet<String>,
-    /// C `d2k_httpsprobe.lost`: запросы, не влезшие в очередь.
-    lost: u64,
+    /// C `d2k_httpsprobe.lost`: результаты, не влезшие в `done[17]`.
+    /// Заполненная очередь заданий, наоборот, просто не принимает новое имя.
+    lost: Arc<AtomicU64>,
     /// Слоты кэша в порядке C-массива: загрузка и сохранение обязаны давать
     /// тот же файл, что `d2k_httpsprobe_load/save`.
     cache: Vec<CachedResult>,
@@ -154,7 +180,9 @@ pub enum HttpsPortalOutcome {
 
 impl HttpsProbeWorker {
     pub fn new(mark: Option<u32>) -> Self {
-        let (result_sender, results) = mpsc::sync_channel::<HttpsProbeResult>(QUEUE_CAPACITY);
+        // C `done[D2K_HTTPSPROBE_JOBS + 1]`: на один готовый результат больше
+        // числа заданий.
+        let (result_sender, results) = mpsc::sync_channel::<HttpsProbeResult>(QUEUE_CAPACITY + 1);
         // C `wake`: неблокирующая пара; ошибка pipe → wake=-1, new→NULL.
         // В Rust нет NULL-контракта: при ошибке wake_fd() отдаёт -1.
         let (wake_read, wake_write) = match UnixStream::pair() {
@@ -174,7 +202,7 @@ impl HttpsProbeWorker {
             mark,
             thread: None,
             pending: HashSet::new(),
-            lost: 0,
+            lost: Arc::new(AtomicU64::new(0)),
             cache: Vec::new(),
         };
         worker.r2o_ensure_worker();
@@ -220,6 +248,7 @@ impl HttpsProbeWorker {
             .as_ref()
             .and_then(|stream| stream.try_clone().ok());
         let mark = self.mark;
+        let lost = Arc::clone(&self.lost);
         let thread = thread::Builder::new()
             .name("r2o-проверка-https".into())
             .spawn(move || {
@@ -239,12 +268,8 @@ impl HttpsProbeWorker {
                         },
                         state,
                     };
-                    if result_sender.send(result).is_err() {
+                    if !deliver_result(&result_sender, &wake_write, result, &lost) {
                         break;
-                    }
-                    // C `worker`: result положен → будим pollable wake-fd.
-                    if let Some(wake) = wake_write.as_mut() {
-                        let _ = wake.write(b"x");
                     }
                 }
             })
@@ -275,7 +300,8 @@ impl HttpsProbeWorker {
                 true
             }
             Err(TrySendError::Full(_)) => {
-                self.lost = self.lost.saturating_add(1);
+                // C `d2k_httpsprobe_portal`: полная очередь заданий просто
+                // возвращает 0, не увеличивая `lost`.
                 false
             }
             Err(TrySendError::Disconnected(job)) => {
@@ -326,7 +352,7 @@ impl HttpsProbeWorker {
 
     /// C `d2k_httpsprobe_lost`: число запросов, потерянных при полной очереди.
     pub fn lost(&self) -> u64 {
-        self.lost
+        self.lost.load(Ordering::Relaxed)
     }
 
     pub fn cached_state(&self, host: &str, now: Instant) -> Option<HttpsProbeState> {
@@ -989,7 +1015,7 @@ mod tests {
             mark: None,
             thread: Some(thread),
             pending: std::collections::HashSet::new(),
-            lost: 0,
+            lost: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cache: Vec::new(),
         };
         release.send(()).unwrap();
@@ -1042,7 +1068,7 @@ mod tests {
     }
 
     #[test]
-    fn lost_counts_requests_that_do_not_fit_the_queue() {
+    fn full_job_queue_is_busy_but_not_lost_like_c_portal() {
         let address: SocketAddr = "127.0.0.1:443".parse().unwrap();
         let (jobs, _receiver) = std::sync::mpsc::sync_channel(1);
         jobs.try_send(super::Job {
@@ -1064,12 +1090,39 @@ mod tests {
             mark: None,
             thread: Some(thread),
             pending: std::collections::HashSet::new(),
-            lost: 0,
+            lost: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cache: Vec::new(),
         };
-        assert!(!worker.submit("lost.example", address, Instant::now()));
-        assert_eq!(worker.lost(), 1);
+        assert!(!worker.submit("busy.example", address, Instant::now()));
+        // C `d2k_httpsprobe_portal` при полной очереди заданий возвращает 0
+        // и не трогает `lost`.
+        assert_eq!(worker.lost(), 0);
         release.send(()).unwrap();
         drop(worker);
+    }
+
+    #[test]
+    fn lost_counts_results_that_do_not_fit_the_done_buffer() {
+        let (sender, receiver) = mpsc::sync_channel::<super::HttpsProbeResult>(1);
+        sender
+            .send(super::HttpsProbeResult {
+                host: "prefill.example".into(),
+                ttl_seconds: 0,
+                state: HttpsProbeState::Closed,
+            })
+            .unwrap();
+        let lost = std::sync::atomic::AtomicU64::new(0);
+        assert!(super::deliver_result(
+            &sender,
+            &None,
+            super::HttpsProbeResult {
+                host: "dropped.example".into(),
+                ttl_seconds: 0,
+                state: HttpsProbeState::Closed,
+            },
+            &lost,
+        ));
+        assert_eq!(lost.load(std::sync::atomic::Ordering::Relaxed), 1);
+        drop(receiver);
     }
 }
