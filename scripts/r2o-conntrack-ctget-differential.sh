@@ -29,5 +29,5 @@ trap 'rm -rf -- "$TEMP"' EXIT HUP INT TERM
 
 D2O_CONNTRACK_ORACLE="$TEMP/d2o-conntrack-oracle" \
     "$CARGO" test --manifest-path "$ROOT/Cargo.toml" --locked --offline \
-    -p r2o-datapath --test d2o_conntrack -- --ignored --nocapture
+    -p r2o-datapath --test d2o_conntrack -- --ignored --nocapture ct_get
 printf 'PASS: d2k_ct_get_req C/Rust match (D2O %s)\n' "$ACTUAL_D2O_SHA"

@@ -3,6 +3,103 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::process::Command;
 
 #[test]
+#[ignore = "run through scripts/test-datapath-ct-live-differential.sh in unshare -Urn"]
+fn ct_live_probe_and_query_match_d2o() {
+    use r2o_datapath::conntrack::{R2oConntrackClient, R2oConntrackInfoParse, R2oConntrackTuple};
+
+    if std::env::var_os("R2O_CT_LIVE_DIFF_OUTPUT").is_none() {
+        eprintln!(
+            "ct_live: запускается только через scripts/test-datapath-ct-live-differential.sh"
+        );
+        return;
+    }
+
+    fn code(parsed: R2oConntrackInfoParse) -> i32 {
+        match parsed {
+            R2oConntrackInfoParse::Info(_) => 0,
+            R2oConntrackInfoParse::Reply => 1,
+            R2oConntrackInfoParse::NoCounters => 2,
+            R2oConntrackInfoParse::Error => -1,
+        }
+    }
+
+    let zero = R2oConntrackTuple {
+        family: 4,
+        protocol: 17,
+        source: [0; 16],
+        destination: [0; 16],
+        source_port: 0,
+        destination_port: 0,
+    };
+    let mut output = String::new();
+    let Some(mut client) = R2oConntrackClient::open_unprobed() else {
+        output.push_str("open=0\n");
+        if let Ok(path) = std::env::var("R2O_CT_LIVE_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        return;
+    };
+    output.push_str("open=1\n");
+    // C `ct_probe(sess, 1)` — стартовая проба с ожиданием 200 мс.
+    let probe = client.r2o_probe(200);
+    output.push_str(&format!("probe={}\n", u8::from(probe)));
+    output.push_str(&format!("query_zero={}\n", code(client.query_info(&zero))));
+    output.push_str(&format!(
+        "query_zero_again={}\n",
+        code(client.query_info(&zero))
+    ));
+    let mut flow_code = 0;
+    if let Some(spec) = std::env::var_os("R2O_CT_LIVE_FLOW1") {
+        let (rc, line) = query_live_flow(&mut client, &spec.to_string_lossy(), 1);
+        flow_code = rc;
+        output.push_str(&line);
+    }
+    if let Some(spec) = std::env::var_os("R2O_CT_LIVE_FLOW2") {
+        let (_, line) = query_live_flow(&mut client, &spec.to_string_lossy(), 2);
+        output.push_str(&line);
+    }
+    if let Ok(path) = std::env::var("R2O_CT_LIVE_DIFF_OUTPUT") {
+        std::fs::write(path, &output).unwrap();
+    }
+    assert!(probe, "ctnetlink должен быть доступен в netns: {output}");
+    // C `told_acct`: NoCounters на flow1 — единственный случай за процесс.
+    assert_eq!(client.r2o_told_accounting(), flow_code == 2, "{output}");
+}
+
+fn query_live_flow(
+    client: &mut r2o_datapath::conntrack::R2oConntrackClient,
+    spec: &str,
+    index: u8,
+) -> (i32, String) {
+    use r2o_datapath::conntrack::{R2oConntrackInfoParse, R2oConntrackTuple};
+    let fields: Vec<&str> = spec.split_ascii_whitespace().collect();
+    assert_eq!(fields.len(), 4, "flow spec: {spec}");
+    let mut source = [0_u8; 16];
+    let mut destination = [0_u8; 16];
+    source[..4].copy_from_slice(&fields[0].parse::<std::net::Ipv4Addr>().unwrap().octets());
+    destination[..4].copy_from_slice(&fields[2].parse::<std::net::Ipv4Addr>().unwrap().octets());
+    let tuple = R2oConntrackTuple {
+        family: 4,
+        protocol: 17,
+        source,
+        destination,
+        source_port: fields[1].parse().unwrap(),
+        destination_port: fields[3].parse().unwrap(),
+    };
+    let parsed = client.query_info(&tuple);
+    let (rc, orig, reply) = match parsed {
+        R2oConntrackInfoParse::Info(info) => (0, info.original_packets, info.reply_packets),
+        R2oConntrackInfoParse::Reply => (1, 0, 0),
+        R2oConntrackInfoParse::NoCounters => (2, 0, 0),
+        R2oConntrackInfoParse::Error => (-1, 0, 0),
+    };
+    (
+        rc,
+        format!("flow{index} rc={rc} orig={orig} reply={reply}\n"),
+    )
+}
+
+#[test]
 #[ignore = "run through scripts/r2o-conntrack-ctget-differential.sh"]
 fn ct_get_bytes_match_d2o_for_ipv4_and_ipv6() {
     let oracle = std::env::var_os("D2O_CONNTRACK_ORACLE").expect("C oracle path is set");

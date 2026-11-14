@@ -454,6 +454,11 @@ impl R2oConntrackClient {
         client.probe().then_some(client)
     }
 
+    /// C `ct_link.told_acct`: предупреждение уже напечатано.
+    pub fn r2o_told_accounting(&self) -> bool {
+        self.told_accounting
+    }
+
     /// Клиент над готовым дескриптором для дифференциала на socketpair.
     #[cfg(test)]
     fn r2o_test_client(fd: RawFd) -> Self {
@@ -501,6 +506,14 @@ impl R2oConntrackClient {
     }
 
     fn probe(&mut self) -> bool {
+        self.r2o_probe(100)
+    }
+
+    /// C `d2k_ct_probe_fd(fd, seq, wait_ms)`: одна проба ctnetlink.
+    ///
+    /// `wait_ms` — сколько ждать ответа на каждый poll. C на старте передаёт
+    /// 200 мс, на обновлении маршрутов — 0.
+    pub fn r2o_probe(&mut self, wait_ms: i32) -> bool {
         let tuple = R2oConntrackTuple {
             family: 4,
             protocol: 17,
@@ -526,7 +539,7 @@ impl R2oConntrackClient {
         };
         let mut response = [0_u8; 4096];
         for _ in 0..8 {
-            if unsafe { libc::poll(&mut poll, 1, 100) } <= 0 {
+            if unsafe { libc::poll(&mut poll, 1, wait_ms) } <= 0 {
                 return false;
             }
             let read = unsafe {
