@@ -154,24 +154,27 @@ candidate_plan_applied, dns_answer_via_plan, dns_answer_confirmed
   reason «<protocol>: получен корректный DNS-ответ».
 - `quicprobe.c`: для `port == 853` пул = один intercepted IP.
 
-## 8. Что нужно в R2O
+## 8. Состояние реализации в R2O (2026-11-14)
 
-1. Новый модуль `crates/r2k-core/src/dns_config.rs` (или отдельный crate):
-   `DnsService`, `dns_uri_parse`, UCI/doqd/Keenetic parsers, dedup,
-   `dns_service_match`, bootstrap resolver. Чистые функции + unit/C/Rust
-   differential на фикстурах.
-2. Controller state: `dns_services`, `dns_service_live`, generation,
-   observe/note_applied; вызовы из обработки событий (router-source,
-   non-trial APPLIED).
-3. Health-пробы DoH/DoT/DoQ: переиспользовать существующие `https_probe`/
-   `quic`/TLS-пути, но с DNS-запросом и разбором ответа; отдельный
-   `DnsHealth` job и лимит попыток.
-4. `live.json`: секция строго по полям выше; `path` без query.
-5. Конфигурационные пути OpenWrt/Keenetic, `/etc/openwrt_release`,
-   `doq-web`, `ndmc`, таймаут 250 мс.
-6. C/Rust differential: `d2k_dns_uri_parse`, UCI/doqd/Keenetic fixtures,
-   match, bootstrap DNS (loopback UDP), live JSON с dns_services.
+1. **Реализовано:** `crates/r2k-core/src/dns_config.rs` —
+   `DnsService`, `dns_uri_parse`, `dns_service_match`, UCI/doqd/Keenetic
+   readers, `read_dns_services`; **47-case** differential.
+2. **Реализовано:** bootstrap resolver (`dns_name_encode`,
+   `dns_skip_name`, `dns_response_address`, `dns_query_one`,
+   `dns_resolve_bootstrap`); **18 vectors + loopback** differential.
+3. **Реализовано:** controller `dns_service_live`, states
+   `Detected/Checking/DirectOk/Failed`, `dns_service_observe`,
+   `dns_service_note_applied`, `d2k_sched_set_dns_services`;
+   **4-case** state differential.
+4. **Реализовано:** live-секция `dns_services` для `detected` и
+   state-полей; **3-case** `test-dns-live-differential.sh`.
+5. **Реализовано:** `dns_health.rs` DoH/DoT/DoQ (`probe_dns_health`,
+   DNS wire/parse, DoH framing); **15-case** differential + loopback
+   DoH/DoT/DoQ.
+6. **Осталось:** проводка health в тик `dns_services`/`T_DNS_HEALTH`,
+   состояния `bypass_ok`/`no_bypass`/`candidate_plan_applied`/
+   `dns_answer_via_plan`; полный state machine live-секции.
 
-Пока этот контракт не реализован, `d2k_sched_write_live` остаётся **P***:
-против pinned `a378` full live-differential PASS, против current main —
-секция `dns_services` отсутствует.
+`d2k_sched_write_live` остаётся **P***: против pinned `a378` full
+live-differential PASS, против current main секция `dns_services` уже
+пишется, но health/state-ветви ещё не подключены к production-тику.
