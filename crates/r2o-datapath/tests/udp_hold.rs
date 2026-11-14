@@ -532,6 +532,67 @@ fn r2o_udp_hold_отказывает_после_шестнадцати_пото�
 }
 
 #[test]
+fn deferred_owned_emit_выдаёт_accept_при_сбое_и_drop_при_успехе_как_c() {
+    use r2o_datapath::r2o_udp_hold::R2oUdpDeferredResends;
+
+    let now = Instant::now();
+    let packet = r2o_udp_packet([192, 0, 2, 1], [198, 51, 100, 2], 50_030, 443, b"emit");
+
+    let mut queue = R2oUdpDeferredResends::new();
+    assert!(queue.r2o_enqueue(now, 1, &packet));
+    let mut verdicts = Vec::new();
+    let stats = queue.r2o_flush(
+        now,
+        |_, _| Ok::<_, std::io::Error>(()),
+        |id, verdict| {
+            verdicts.push((id, verdict));
+            Ok(())
+        },
+    );
+    assert_eq!(verdicts, [(1, 0)], "успешный raw → DROP");
+    assert_eq!(stats.resend_failed, 0);
+
+    assert!(queue.r2o_enqueue(now, 2, &packet));
+    let mut verdicts = Vec::new();
+    let stats = queue.r2o_flush(
+        now,
+        |_, _| Err(std::io::Error::from_raw_os_error(libc::ENOBUFS)),
+        |id, verdict| {
+            verdicts.push((id, verdict));
+            Ok(())
+        },
+    );
+    assert_eq!(verdicts, [(2, 1)], "busy raw → ACCEPT");
+    assert_eq!(stats.resend_busy, 1);
+
+    assert!(queue.r2o_enqueue(now, 3, &packet));
+    let mut verdicts = Vec::new();
+    let stats = queue.r2o_flush(
+        now,
+        |_, _| Err(std::io::Error::from_raw_os_error(libc::EACCES)),
+        |id, verdict| {
+            verdicts.push((id, verdict));
+            Ok(())
+        },
+    );
+    assert_eq!(verdicts, [(3, 1)], "постоянный отказ → ACCEPT");
+    assert_eq!(stats.resend_busy, 0);
+
+    assert!(queue.r2o_enqueue(now, 4, &packet));
+    let mut attempts = 0;
+    let stats = queue.r2o_flush(
+        now,
+        |_, _| Ok::<_, std::io::Error>(()),
+        |_, _| {
+            attempts += 1;
+            Err(std::io::Error::other("вердикт не выдан"))
+        },
+    );
+    assert_eq!(attempts, 1, "C не повторяет ACCEPT после ошибки DROP");
+    assert_eq!(stats.verdict_failed, 1);
+}
+
+#[test]
 fn r2o_udp_hold_отказывает_для_датаграмм_больше_тысячи_шестисот_байт() {
     let now = Instant::now();
     let mut table = R2oUdpHoldTable::new();

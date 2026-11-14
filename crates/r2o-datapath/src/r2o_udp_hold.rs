@@ -769,10 +769,9 @@ impl R2oUdpDeferredResends {
                 }
             };
             if send_verdict(entry.id, verdict).is_err() {
+                // C `d2k_udp_out_owned_emit`: ошибка вердикта считается,
+                // но повторного ACCEPT нет.
                 stats.verdict_failed += 1;
-                if verdict == 0 && send_verdict(entry.id, 1).is_err() {
-                    stats.verdict_failed += 1;
-                }
             }
             stats.flushed += 1;
         }
