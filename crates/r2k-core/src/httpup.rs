@@ -73,6 +73,16 @@ impl R2oHttpRequestStream {
         }
     }
 
+    /// C `request_feed` (`datapath/http80.c:342-347`): обновить поток и
+    /// вычислить `client_next`/`next_known` для HTTP80-flow.
+    pub fn feed_and_next_known(&mut self, sequence: u32, bytes: &[u8]) -> (u32, bool) {
+        self.feed(sequence, bytes);
+        (
+            self.next,
+            self.header_done && !self.invalid && !self.past_end && self.next == self.end,
+        )
+    }
+
     fn finish_line(&mut self) {
         if self.first {
             self.first = false;

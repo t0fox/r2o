@@ -28,6 +28,63 @@ fn partial_header_keeps_known_host_like_c() {
 }
 
 #[test]
+fn request_feed_differential_matches_c() {
+    fn dump(output: &mut String, label: &str, stream: &R2oHttpRequestStream) {
+        let (client_next, next_known) = (stream.next, {
+            stream.header_done && !stream.invalid && !stream.past_end && stream.next == stream.end
+        });
+        output.push_str(&format!(
+            "{label} client_next={client_next} next_known={} next={} end={} hd={} invalid={} past={}\n",
+            u8::from(next_known),
+            stream.next,
+            stream.end,
+            u8::from(stream.header_done),
+            u8::from(stream.invalid),
+            u8::from(stream.past_end)
+        ));
+    }
+
+    let mut output = String::new();
+    let mut stream = R2oHttpRequestStream::new(1000);
+    stream.feed_and_next_known(1000, b"GET / HTTP/1.1\r\nHost: ex");
+    dump(&mut output, "split1", &stream);
+    stream.feed_and_next_known(stream.next, b"ample.com\r\nContent-Length: 3\r\n\r\n");
+    dump(&mut output, "split2", &stream);
+    stream.feed_and_next_known(stream.next, b"abcd");
+    dump(&mut output, "body", &stream);
+
+    let mut te = R2oHttpRequestStream::new(2000);
+    te.feed_and_next_known(
+        2000,
+        b"GET / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n",
+    );
+    dump(&mut output, "te", &te);
+
+    let mut first = R2oHttpRequestStream::new(3000);
+    first.feed_and_next_known(3000, b"GET / HTTP/1.1\r\nHost: a\r\n\r\n");
+    dump(&mut output, "first", &first);
+    first.feed_and_next_known(2999, b"x");
+    dump(&mut output, "old", &first);
+    first.feed_and_next_known(first.next.wrapping_add(3), b"y");
+    dump(&mut output, "gap", &first);
+
+    if let Ok(path) = std::env::var("R2O_REQUEST_FEED_DIFF_OUTPUT") {
+        std::fs::write(path, &output).unwrap();
+    }
+    assert!(output.contains(
+        "split2 client_next=1056 next_known=0 next=1056 end=1059 hd=1 invalid=0 past=0\n"
+    ));
+    assert!(output.contains(
+        "first client_next=3027 next_known=1 next=3027 end=3027 hd=1 invalid=0 past=0\n"
+    ));
+    assert!(
+        output.contains(
+            "gap client_next=3027 next_known=0 next=3027 end=3027 hd=1 invalid=1 past=0\n"
+        )
+    );
+}
+
+#[test]
 fn http_request_differential_matches_c() {
     let cases: &[(&str, &[u8])] = &[
         ("simple", b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"),

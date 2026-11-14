@@ -128,6 +128,9 @@ struct HttpRequestFlow {
     target: Vec<u8>,
     request_sequence: u32,
     request_end: u32,
+    request_stream: r2k_core::httpup::R2oHttpRequestStream,
+    client_next: u32,
+    next_known: bool,
     request_ms: u64,
     request_no: u64,
     applied: Option<AppliedEvent>,
@@ -143,6 +146,14 @@ struct HttpRequestFlow {
     answered: bool,
     ready_for_next: bool,
     seen: Instant,
+}
+
+impl HttpRequestFlow {
+    fn feed_request(&mut self, sequence: u32, bytes: &[u8]) {
+        let (next, known) = self.request_stream.feed_and_next_known(sequence, bytes);
+        self.client_next = next;
+        self.next_known = known;
+    }
 }
 
 struct HttpRequestObservation<'a> {
@@ -536,6 +547,14 @@ impl HoldTable {
                 released,
                 outcome: HoldOutcome::Pass,
             };
+        }
+        if destination.port == 80
+            && source == anchor.client
+            && let Some(flow) = self.http_requests.iter_mut().find(|flow| {
+                flow.key == key && flow.client == source && flow.generation == anchor.generation
+            })
+        {
+            flow.feed_request(tcp.sequence, payload);
         }
         let offset = tcp.sequence.wrapping_sub(anchor.sequence.wrapping_add(1));
         let r2o_http_followup = anchor.r2o_http_requests.is_checked();
@@ -1042,6 +1061,8 @@ impl HoldTable {
         } else {
             Vec::new()
         };
+        let mut request_stream = r2k_core::httpup::R2oHttpRequestStream::new(sequence);
+        let (client_next, next_known) = request_stream.feed_and_next_known(sequence, request);
         let replacement = HttpRequestFlow {
             key,
             client,
@@ -1051,6 +1072,9 @@ impl HoldTable {
             target,
             request_sequence: sequence,
             request_end: sequence.wrapping_add(request.len() as u32),
+            request_stream,
+            client_next,
+            next_known,
             request_ms: monotonic_ms(),
             request_no,
             applied: None,
