@@ -440,6 +440,35 @@ int main(int argc, char **argv) {
     silence_case("S8 unnamed-repeat-after-response", unnamed, unnamed_len, 1, 1,
                  1, 2000001001ull);
 
+    /* S9: unnamed Initial -> повтор PTO -> ответ сервера -> named Initial.
+     * Один поток, последовательность состояний, а не изолированная ветвь. */
+    {
+        d2k_session *seq = d2k_session_new(64, 0);
+        d2k_session_set_hook(seq, D2K_HOOK_POSTROUTING);
+        length = udp_packet(buffer, client, server, 50006, 443, unnamed,
+                            unnamed_len);
+        (void)d2k_session_packet(seq, buffer, length, 1000,
+                                 result_buffer, sizeof result_buffer,
+                                 &(d2k_result){0});
+        (void)d2k_session_packet(seq, buffer, length, 1800,
+                                 result_buffer, sizeof result_buffer,
+                                 &(d2k_result){0});
+        d2k_session_set_hook(seq, D2K_HOOK_INPUT);
+        length = udp_packet(buffer, server, client, 443, 50006,
+                            (const uint8_t *)"resp", 4);
+        (void)d2k_session_packet(seq, buffer, length, 1900,
+                                 result_buffer, sizeof result_buffer,
+                                 &(d2k_result){0});
+        d2k_session_set_hook(seq, D2K_HOOK_POSTROUTING);
+        length = udp_packet(buffer, client, server, 50006, 443, initial,
+                            initial_len);
+        (void)d2k_session_packet(seq, buffer, length, 2000,
+                                 result_buffer, sizeof result_buffer,
+                                 &(d2k_result){0});
+        print("S9 unnamed-pto-response-named", seq);
+        d2k_session_free(seq);
+    }
+
     /* --- планы: выбор по имени/адресу/голосу и предел посылок ---------- */
     {
         static const uint8_t server_addr[4] = {198, 51, 100, 20};

@@ -1007,6 +1007,54 @@ mod tests {
             server,
         );
 
+        // S9: unnamed Initial -> repeat PTO -> server response -> named Initial.
+        let mut sequence_udp = R2oUdpSessions::new().unwrap();
+        let mut sequence_quic = R2oQuicSessions::default();
+        let mut sequence_exchanges = 0;
+        let client = ([192, 0, 2, 10], 50006);
+        let unnamed_packet = r2o_stun_packet(client, server, unnamed);
+        feed(
+            &mut sequence_udp,
+            &mut sequence_quic,
+            &mut sequence_exchanges,
+            now,
+            &unnamed_packet,
+            R2O_NF_INET_POST_ROUTING,
+        );
+        feed(
+            &mut sequence_udp,
+            &mut sequence_quic,
+            &mut sequence_exchanges,
+            now + Duration::from_micros(800),
+            &unnamed_packet,
+            R2O_NF_INET_POST_ROUTING,
+        );
+        let sequence_response = r2o_stun_packet(server, client, b"resp");
+        feed(
+            &mut sequence_udp,
+            &mut sequence_quic,
+            &mut sequence_exchanges,
+            now + Duration::from_micros(900),
+            &sequence_response,
+            R2O_NF_INET_LOCAL_IN,
+        );
+        let named_packet = r2o_stun_packet(client, server, initial);
+        feed(
+            &mut sequence_udp,
+            &mut sequence_quic,
+            &mut sequence_exchanges,
+            now + Duration::from_micros(1000),
+            &named_packet,
+            R2O_NF_INET_POST_ROUTING,
+        );
+        print_quic(
+            "S9 unnamed-pto-response-named",
+            &sequence_udp,
+            sequence_exchanges,
+            sequence_udp.r2o_quic_hello_flows(),
+            sequence_udp.r2o_quic_hellos_with_sni(),
+        );
+
         // --- планы: выбор по имени/адресу/голосу и предел посылок --------
         fn fnv1a(bytes: &[u8]) -> u64 {
             let mut hash = 1469598103934665603_u64;
