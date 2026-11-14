@@ -869,10 +869,17 @@ impl HoldTable {
             }
             self.stats.mismatched = self.stats.mismatched.saturating_add(1);
             released.extend(self.remove_slot(index));
-            if current_owned {
-                self.owned_releases.push(packet[..view.total_len].to_vec());
-            } else {
-                released.push(id);
+            // C `d2k_hold_feed` (`hold.c:142-149`): после release_slot
+            // отпускает и ТЕКУЩИЙ несовместимый сегмент через тот же
+            // release-колбэк. `release_original` сначала наблюдает его, затем
+            // решает raw-возврат/ACCEPT — как для удержанных.
+            if let Some(current) = self.release_current_packet(
+                id,
+                tcp.sequence,
+                &packet[..view.total_len],
+                current_owned,
+            ) {
+                released.push(current);
             }
             self.stats.released = self.stats.released.saturating_add(1);
             self.capture.forget(&key);
@@ -888,7 +895,14 @@ impl HoldTable {
 
         if self.slots[index].packets.try_reserve(1).is_err() {
             released.extend(self.remove_slot(index));
-            released.push(id);
+            if let Some(current) = self.release_current_packet(
+                id,
+                tcp.sequence,
+                &packet[..view.total_len],
+                current_owned,
+            ) {
+                released.push(current);
+            }
             self.stats.released = self.stats.released.saturating_add(1);
             self.capture.forget(&key);
             return FeedResult {
@@ -1447,6 +1461,24 @@ impl HoldTable {
         self.stats.pending = self.stats.pending.saturating_sub(packets.len());
         self.stats.released = self.stats.released.saturating_add(packets.len() as u64);
         self.release_held_packets(packets)
+    }
+
+    /// C `release_original` для текущего пакета, не попавшего в слот: сначала
+    /// наблюдение, затем raw-возврат (owned) либо ACCEPT (не owned).
+    fn release_current_packet(
+        &mut self,
+        id: u32,
+        sequence: u32,
+        bytes: &[u8],
+        owned: bool,
+    ) -> Option<u32> {
+        self.release_held_packets(vec![HeldPacket {
+            id,
+            sequence,
+            bytes: bytes.to_vec(),
+            owned,
+        }])
+        .pop()
     }
 
     fn release_held_packets(&mut self, packets: Vec<HeldPacket>) -> Vec<u32> {
@@ -3157,6 +3189,186 @@ mod tests {
                 _ => "other",
             }
         );
+    }
+
+    #[test]
+    #[ignore]
+    fn release_original_trace() {
+        use std::fmt::Write as _;
+
+        fn fnv1a(bytes: &[u8]) -> u64 {
+            let mut hash = 14695981039346656037_u64;
+            for byte in bytes {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(1099511628211);
+            }
+            hash
+        }
+        fn packet_on_port(port: u16, sequence: u32, flags: u8, payload: &[u8]) -> Vec<u8> {
+            let mut packet = tcp_packet(sequence, flags, payload);
+            packet[20..22].copy_from_slice(&port.to_be_bytes());
+            packet
+        }
+        fn sequence_of(packet: &[u8]) -> u32 {
+            u32::from_be_bytes(packet[24..28].try_into().unwrap())
+        }
+        fn id_for_sequence(sequence: u32) -> u32 {
+            match sequence {
+                1001 => 11,
+                1006 => 12,
+                2001 => 21,
+                2006 => 22,
+                3001 => 31,
+                3006 => 32,
+                _ => 0,
+            }
+        }
+        fn write_packet(out: &mut String, prefix: &str, id: u32, packet: &[u8]) {
+            writeln!(
+                out,
+                "{prefix} id={id} seq={} len={} fnv={:016x}",
+                sequence_of(packet),
+                packet.len(),
+                fnv1a(packet)
+            )
+            .unwrap();
+        }
+
+        let now = Instant::now();
+        let hello = hello();
+        let owned_options = HoldOptions {
+            allow_tls: true,
+            own_packets: true,
+            ..HoldOptions::default()
+        };
+        let mut out = String::new();
+
+        // Два слота: owned (11,12) и не-owned (21,22), затем flush ALL.
+        let mut hold = HoldTable::default();
+        out.push_str("== flush ==\n");
+        let _ = hold.feed_observing(
+            10,
+            &packet_on_port(50000, 1000, 0x02, &[]),
+            now,
+            owned_options,
+        );
+        let _ = hold.feed_observing(
+            11,
+            &packet_on_port(50000, 1001, 0x18, &hello[..5]),
+            now,
+            owned_options,
+        );
+        let _ = hold.feed_observing(
+            12,
+            &packet_on_port(50000, 1006, 0x18, &hello[5..7]),
+            now,
+            owned_options,
+        );
+        let _ = hold.feed(
+            20,
+            &packet_on_port(50001, 2000, 0x02, &[]),
+            now,
+            0,
+            true,
+            false,
+        );
+        let _ = hold.feed(
+            21,
+            &packet_on_port(50001, 2001, 0x18, &hello[..5]),
+            now,
+            0,
+            true,
+            false,
+        );
+        writeln!(out, "flush pending={}", hold.r2o_hold_stats().pending).unwrap();
+        let released = hold.flush(now + HOLD_WAIT, 0, true);
+        let observed = hold.r2o_take_observe_releases();
+        let owned = hold.r2o_take_owned_releases();
+        for packet in &observed {
+            let id = id_for_sequence(sequence_of(packet));
+            write_packet(&mut out, "obs", id, packet);
+            if matches!(id, 11 | 12) {
+                let owned_packet = owned
+                    .iter()
+                    .find(|candidate| sequence_of(candidate) == sequence_of(packet))
+                    .expect("owned-пакет должен быть среди отпущенных");
+                assert_eq!(owned_packet, packet);
+                write_packet(&mut out, "own", id, packet);
+            }
+        }
+        writeln!(
+            out,
+            "flush released={}",
+            released
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+        .unwrap();
+        let stats = hold.r2o_hold_stats();
+        writeln!(
+            out,
+            "flush stats pending={} released={} mismatched={}",
+            stats.pending, stats.released, stats.mismatched
+        )
+        .unwrap();
+
+        // Mismatch: старый слот 31 отпускается, затем текущий 32.
+        let mut hold = HoldTable::default();
+        out.push_str("== mismatch ==\n");
+        let _ = hold.feed(
+            30,
+            &packet_on_port(50002, 3000, 0x02, &[]),
+            now,
+            0,
+            true,
+            false,
+        );
+        let _ = hold.feed(
+            31,
+            &packet_on_port(50002, 3001, 0x18, &hello[..5]),
+            now,
+            0,
+            true,
+            false,
+        );
+        let result = hold.feed(
+            32,
+            &packet_on_port(50002, 3006, 0x08, &hello[5..]),
+            now,
+            0,
+            true,
+            false,
+        );
+        for packet in hold.r2o_take_observe_releases() {
+            let id = id_for_sequence(sequence_of(&packet));
+            write_packet(&mut out, "obs", id, &packet);
+        }
+        writeln!(
+            out,
+            "mismatch rc=1 released={}",
+            result
+                .released
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+        .unwrap();
+        let stats = hold.r2o_hold_stats();
+        writeln!(
+            out,
+            "mismatch stats pending={} released={} mismatched={}",
+            stats.pending, stats.released, stats.mismatched
+        )
+        .unwrap();
+
+        if let Ok(path) = std::env::var("R2O_RELEASE_ORIGINAL_DIFF_OUTPUT") {
+            std::fs::write(path, &out).unwrap();
+        }
+        assert!(out.contains("own id=11"));
+        assert!(out.contains("mismatch rc=1 released=31,32\n"));
     }
 
     fn d17_action(result: &super::FeedResult, https: bool) -> (&'static str, bool) {
