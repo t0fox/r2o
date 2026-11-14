@@ -468,6 +468,31 @@ fn журнал_пишет_fate_без_execution_и_binding_как_c() {
 }
 
 #[test]
+fn журнал_пишет_причину_отказа_без_плана_как_c() {
+    // C `refuse_coded`: NONE с текстом вызывающего, plan/trial нулевые.
+    let mut key = [0; KEY_LEN];
+    key[0] = 4;
+    key[37] = 17;
+    let mut journal = R2oFlowJournal::with_capacity(2).unwrap();
+    assert!(journal.record_plan_refused_note(
+        5,
+        key,
+        r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_NONE,
+        [0; 16],
+        [0; 16],
+        0,
+        None,
+        "плана для этой цели нет",
+    ));
+    let entry = journal.get(0).unwrap();
+    assert_eq!(entry.kind, R2oFlowJournalKind::PlanRefused);
+    assert_eq!(entry.code, 0);
+    assert_eq!(entry.note.as_deref(), Some("плана для этой цели нет"));
+    assert_eq!(entry.plan_id, [0; 16]);
+    assert_eq!(entry.trial_id, [0; 16]);
+}
+
+#[test]
 fn журнал_пишет_отказ_none_и_невалидный_ключ_как_c() {
     // C `d2k_journal_add_refused`: code=NONE и любой ключ попадают в кольцо;
     // отсев «проба + NONE» делает `refuse_coded`, а не журнал.

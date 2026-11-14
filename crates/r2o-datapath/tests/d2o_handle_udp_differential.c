@@ -309,10 +309,8 @@ int main(int argc, char **argv) {
         plan_len = quic_qsplit_plan(plan);
         install_name(&cx, "other.example", 3, plan, plan_len);
         length = udp_packet(buffer, client, server, 50102, 443, initial, initial_len);
-        /* C пишет skipped «плана для этой цели нет»; решение Rust такого
-         * поля не имеет — сверяем applied/n/lens, пробел отмечен в аудите. */
-        plan_case_ex("P2 other-name", ps, buffer, length, result_buffer,
-                     sizeof result_buffer, 0);
+        plan_case("P2 other-name", ps, buffer, length, result_buffer,
+                  sizeof result_buffer);
         d2k_session_free(ps);
 
         /* P3: адресный QUIC-план на Initial без имени. */

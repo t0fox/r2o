@@ -952,6 +952,7 @@ mod tests {
                 selected.unwrap_or(&fallback),
                 packet,
             );
+            let no_plan_note = crate::engine::r2o_udp_no_plan_note(selected, false, true).is_some();
             let (applied, packets, skip) = match decision {
                 crate::engine::PacketDecision::Replace(packet) => (1, vec![packet], 0),
                 crate::engine::PacketDecision::Transmit { packets, .. } => (
@@ -978,6 +979,7 @@ mod tests {
                 }
                 print!("{:016x}", fnv1a(packet));
             }
+            let skip = skip | u8::from(no_plan_note);
             print!(" phash=");
             for (index, packet) in packets.iter().enumerate() {
                 if index != 0 {
@@ -1019,11 +1021,10 @@ mod tests {
             r2k_core::control::SHAPE_QUIC,
             &quic_qsplit_plan(),
         );
-        plan_case_ex(
+        plan_case(
             "P2 other-name",
             &plans,
             &r2o_stun_packet(([192, 0, 2, 10], 50102), (server_addr, 443), initial),
-            false,
         );
 
         let mut plans = crate::control::NamePlans::with_capacity(64);

@@ -1961,6 +1961,18 @@ pub struct WirePacket {
 
 /// Применить план без состояния потока. Планы с защитами проходят без изменений;
 /// для них демон должен использовать [`decide_with_session`].
+/// C `handle_udp`: если плана нет ни по цели, ни общего, первый именованный
+/// hello получает журнальный отказ `NONE` с причиной «плана для этой цели
+/// нет» (`session.c` ветка `!use`).
+pub fn r2o_udp_no_plan_note(
+    selected: Option<&Plan>,
+    global_plan_present: bool,
+    first_named_hello: bool,
+) -> Option<&'static str> {
+    (selected.is_none() && !global_plan_present && first_named_hello)
+        .then_some("плана для этой цели нет")
+}
+
 pub fn decide(plan: &Plan, packet: &[u8]) -> PacketDecision {
     if plan.guards & GUARD_RST_ALIEN != 0 {
         return PacketDecision::Accept;
@@ -3923,6 +3935,18 @@ mod tests {
             info(12, 25, Some(3)),
             &mut suspicions,
         );
+    }
+
+    #[test]
+    fn udp_no_plan_note_повторяет_ворота_c() {
+        let plan = Plan::default();
+        assert_eq!(
+            super::r2o_udp_no_plan_note(None, false, true),
+            Some("плана для этой цели нет")
+        );
+        assert_eq!(super::r2o_udp_no_plan_note(None, false, false), None);
+        assert_eq!(super::r2o_udp_no_plan_note(None, true, true), None);
+        assert_eq!(super::r2o_udp_no_plan_note(Some(&plan), false, true), None);
     }
 
     #[test]

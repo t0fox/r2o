@@ -782,6 +782,34 @@ impl R2oFlowJournal {
         true
     }
 
+    /// C `refuse_coded` с готовой причиной (`why`): отказ без плана получает
+    /// текст вызывающего, а не `refuse_text(NONE)`.
+    pub fn record_plan_refused_note(
+        &mut self,
+        at_ns: u64,
+        key: [u8; KEY_LEN],
+        code: u8,
+        plan_id: [u8; 16],
+        trial_id: [u8; 16],
+        execution_id: u64,
+        binding: Option<BindingContext>,
+        note: &'static str,
+    ) -> bool {
+        self.push(R2oFlowJournalEntry {
+            at_ns,
+            execution_id,
+            binding,
+            key,
+            kind: R2oFlowJournalKind::PlanRefused,
+            code,
+            plan_id,
+            trial_id,
+            note: Some(note),
+            ..R2oFlowJournalEntry::default()
+        });
+        true
+    }
+
     pub fn record_execution_failure(
         &mut self,
         at_ns: u64,

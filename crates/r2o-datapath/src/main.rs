@@ -1384,6 +1384,9 @@ mod app {
         let packet_type = (NFNL_SUBSYS_QUEUE << 8) | NFQNL_MSG_PACKET as u16;
         let mut batch = vec![0; 1 << 17];
         let observe_plan = Plan::default();
+        // C `s->plan == NULL`: в observe без явного --plan и в controller-only
+        // общего плана нет.
+        let global_plan_present = options.plan_explicit;
         let mut scheduled = ScheduledQueue::default();
         let mut pending_applied = HashMap::<FlowTicket, PendingApplied>::new();
         let mut pending_udp_releases = HashMap::<FlowTicket, PendingUdpRelease>::new();
@@ -2143,17 +2146,47 @@ mod app {
                                 .then(|| quic_sessions.capture_hello_at_hook(bytes, queue_hook))
                                 .flatten()
                         });
+                        let mut first_named_hello = false;
                         if let Some(hello) = quic_hello.as_ref() {
-                            udp_sessions.r2o_mark_hello_seen(bytes, !hello.host.is_empty());
+                            let named = !hello.host.is_empty();
+                            first_named_hello =
+                                udp_sessions.r2o_mark_hello_seen(bytes, named) && named;
                         }
-                        let selected_plan = name_plans
-                            .select_with_quic_host_at_hook_probe(
-                                bytes,
-                                quic_hello.as_ref().map(|hello| hello.host.as_slice()),
-                                quic_hook,
-                                controller_probe,
+                        let selected = name_plans.select_with_quic_host_at_hook_probe(
+                            bytes,
+                            quic_hello.as_ref().map(|hello| hello.host.as_slice()),
+                            quic_hook,
+                            controller_probe,
+                        );
+                        let selected_plan = selected.unwrap_or(&plan);
+                        // C `handle_udp`: плана нет ни по цели, ни общего — первый
+                        // именованный hello даёт журнальный отказ NONE.
+                        if !controller_probe
+                            && let Some(note) = r2o_datapath::engine::r2o_udp_no_plan_note(
+                                selected,
+                                global_plan_present,
+                                first_named_hello,
                             )
-                            .unwrap_or(&plan);
+                            && let Some(key) =
+                                r2o_datapath::control::flow_journal_key_for_packet(bytes)
+                        {
+                            let refused = RefusedEvent {
+                                key,
+                                code: r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_NONE,
+                                plan_id: [0; 16],
+                                trial_id: [0; 16],
+                                client_shape: Some(r2k_core::control::SHAPE_QUIC),
+                                execution_id: None,
+                                binding: None,
+                            };
+                            send_refused_event(
+                                &mut control,
+                                &mut flow_journal,
+                                journal_timestamp(&journal_origin),
+                                &refused,
+                                Some(note),
+                            );
+                        }
                         udp_quic_deny = selected_plan.qdeny != 0 && !controller_probe;
                         if options.mode == RuntimeMode::Apply {
                             if selected_plan.qdeny != 0 && !controller_probe {
@@ -2524,6 +2557,7 @@ mod app {
                             &mut flow_journal,
                             journal_timestamp(&journal_origin),
                             &refused,
+                            None,
                         );
                     }
                     let decision_execution_id = if matches!(
@@ -4395,19 +4429,33 @@ mod app {
         flow_journal: &mut R2oFlowJournal,
         at_ns: u64,
         event: &RefusedEvent,
+        note: Option<&'static str>,
     ) {
         let Some(body) = event.event_body() else {
             return;
         };
-        flow_journal.record_plan_refused(
-            at_ns,
-            event.key,
-            event.code,
-            event.plan_id,
-            event.trial_id,
-            event.execution_id.unwrap_or(0),
-            event.binding,
-        );
+        if let Some(note) = note {
+            flow_journal.record_plan_refused_note(
+                at_ns,
+                event.key,
+                event.code,
+                event.plan_id,
+                event.trial_id,
+                event.execution_id.unwrap_or(0),
+                event.binding,
+                note,
+            );
+        } else {
+            flow_journal.record_plan_refused(
+                at_ns,
+                event.key,
+                event.code,
+                event.plan_id,
+                event.trial_id,
+                event.execution_id.unwrap_or(0),
+                event.binding,
+            );
+        }
         if let Some(control) = control.as_mut()
             && let Err(error) = control.send_event(EVENT_REFUSED, &body)
         {
