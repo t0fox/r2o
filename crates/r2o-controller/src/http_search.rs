@@ -244,6 +244,13 @@ mod tests {
         assert_eq!(closed.body, BodyMode::UntilClose);
         assert!(closed.connection_close);
         assert!(parse_response_head(b"HTTP/1.1 200 OK\r\nContent-Length: 1 2\r\n\r\n").is_none());
+        // C `read_status_buf`: CL вместе с TE — неоднозначный framing.
+        assert!(
+            parse_response_head(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\n"
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -415,7 +422,8 @@ mod tests {
         // (заголовки и тело вместе), и `d2k_hs_judge` видит только их.
         let head = b"HTTP/1.1 200 OK\r\nContent-Length: 5000\r\n\r\n";
         let mut inside = vec![b'a'; 5000];
-        let decoy_at = 4096 - head.len() - 11;
+        // C `hs_read` оставляет 4095 байт; decoy должен целиком лежать в них.
+        let decoy_at = 4095 - head.len() - 11;
         inside[decoy_at..decoy_at + 11].copy_from_slice(b"disk.rzd.ru");
         let mut response = head.to_vec();
         response.extend_from_slice(&inside);
@@ -606,13 +614,14 @@ pub fn read_probe_response(
         &body_prefix,
         body_bytes.saturating_add(u64::from(!complete)),
     );
-    // C `hs_read` складывает в `reader.head` первые 4096 байт ответа вместе
-    // с телом, и `d2k_hs_judge` видит их все (в том числе подпись приманки).
-    let mut judge_view = Vec::with_capacity(head.len().min(HTTP_REPLY_BODY_PREFIX));
+    // C `hs_read` держит `char head[4096]` и копирует не больше
+    // `sizeof head - 1` = 4095 байт вместе с телом; `d2k_hs_judge` видит
+    // ровно этот префикс. 4096-й байт уже не попадает в приговор.
+    let mut judge_view = Vec::with_capacity(head.len().min(HTTP_JUDGE_HEAD_MAX));
     judge_view.extend(
         head.iter()
             .chain(body_prefix.iter())
-            .take(HTTP_REPLY_BODY_PREFIX),
+            .take(HTTP_JUDGE_HEAD_MAX),
     );
     let judged = judge(host, &judge_view, rtt_us, reply_us);
     // C `d2k_hs_probe_run`: BLOKED-тело важнее неполноты, а CUT получается
@@ -703,6 +712,9 @@ fn read_response_head(
 
 /// C `body_stream.prefix[4096]`: начало тела для `d2k_http_reply_classify`.
 const HTTP_REPLY_BODY_PREFIX: usize = 4096;
+/// C `hs_reader.head[4096]` хранит 4095 байт: `d2k_hs_judge` видит
+/// заголовки и тело вместе, но не больше `sizeof head - 1`.
+const HTTP_JUDGE_HEAD_MAX: usize = 4095;
 
 fn capture_body_prefix(prefix: &mut Vec<u8>, bytes: &[u8]) {
     if prefix.len() >= HTTP_REPLY_BODY_PREFIX {
@@ -916,6 +928,11 @@ fn parse_response_head(head: &[u8]) -> Option<ParsedResponseHead> {
             }
             _ => {}
         }
+    }
+    // C `read_status_buf`: Content-Length вместе с Transfer-Encoding —
+    // неоднозначный framing, тело не считается полным.
+    if chunked && content_length.is_some() {
+        return None;
     }
     let body = if (100..200).contains(&status) || matches!(status, 204 | 304) {
         BodyMode::Empty

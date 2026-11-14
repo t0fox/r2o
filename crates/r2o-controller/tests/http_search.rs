@@ -63,6 +63,19 @@ fn d2o_response_state_differential_preserves_portal_and_partial_head_outcomes() 
     const INVALID_FRAMING: &[u8] =
         b"HTTP/1.1 200 OK\r\nContent-Length: 1 2\r\nConnection: close\r\n\r\n";
     const BODY_DECOY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\nsee disk.rzd.ru";
+    const BOTH_CL_TE: &[u8] =
+        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n";
+    const CLOSE_DELIMITED: &[u8] = b"HTTP/1.0 200 OK\r\n\r\nhello";
+    const TIMEOUT_MID_BODY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nabc";
+    let large_head = b"HTTP/1.1 200 OK\r\nContent-Length: 5000\r\n\r\n";
+    let mut large_inside = vec![b'a'; large_head.len() + 5000];
+    let mut large_outside = vec![b'a'; large_head.len() + 5000];
+    large_inside[..large_head.len()].copy_from_slice(large_head);
+    large_outside[..large_head.len()].copy_from_slice(large_head);
+    let decoy_at = 4095 - large_head.len() - 11;
+    let decoy_start = large_head.len() + decoy_at;
+    large_inside[decoy_start..decoy_start + 11].copy_from_slice(b"disk.rzd.ru");
+    large_outside[decoy_start + 1..decoy_start + 12].copy_from_slice(b"disk.rzd.ru");
 
     let mut portal_reader = TimeoutReader::new(PORTAL_TRUNCATED);
     let portal = read_probe_response(
@@ -131,8 +144,48 @@ fn d2o_response_state_differential_preserves_portal_and_partial_head_outcomes() 
         donor_request_sent(),
     )
     .unwrap();
+    let mut both_reader = Cursor::new(BOTH_CL_TE);
+    let both_cl_te = read_probe_response(
+        &mut both_reader,
+        Some(b"rutracker.org"),
+        98_000,
+        donor_request_sent(),
+    )
+    .unwrap();
+    let mut close_reader = Cursor::new(CLOSE_DELIMITED);
+    let close_delimited = read_probe_response(
+        &mut close_reader,
+        Some(b"rutracker.org"),
+        98_000,
+        donor_request_sent(),
+    )
+    .unwrap();
+    let mut timeout_reader = TimeoutReader::new(TIMEOUT_MID_BODY);
+    let timeout_mid_body = read_probe_response(
+        &mut timeout_reader,
+        Some(b"rutracker.org"),
+        98_000,
+        donor_request_sent(),
+    )
+    .unwrap();
+    let mut large_inside_reader = Cursor::new(large_inside.as_slice());
+    let large_inside = read_probe_response(
+        &mut large_inside_reader,
+        Some(b"rutracker.org"),
+        98_000,
+        donor_request_sent(),
+    )
+    .unwrap();
+    let mut large_outside_reader = Cursor::new(large_outside.as_slice());
+    let large_outside = read_probe_response(
+        &mut large_outside_reader,
+        Some(b"rutracker.org"),
+        98_000,
+        donor_request_sent(),
+    )
+    .unwrap();
     let output = format!(
-        "portal_truncated={}\npartial_header_timeout={}\nblocked_body={}/{}\nportal_body={}/{}\ngzip_body={}/{}\nupgrade={}/{}\ninvalid_framing={}/{}\nbody_decoy={}/{}\n",
+        "portal_truncated={}\npartial_header_timeout={}\nblocked_body={}/{}\nportal_body={}/{}\ngzip_body={}/{}\nupgrade={}/{}\ninvalid_framing={}/{}\nbody_decoy={}/{}\nboth_cl_te={}/{}\nclose_delimited={}/{}\ntimeout_mid_body={}/{}\nlarge_inside={}/{}\nlarge_outside={}/{}\n",
         answer_name(portal.answer),
         partial,
         answer_name(blocked.answer),
@@ -147,6 +200,16 @@ fn d2o_response_state_differential_preserves_portal_and_partial_head_outcomes() 
         u8::from(invalid.complete),
         answer_name(body_decoy.answer),
         u8::from(body_decoy.complete),
+        answer_name(both_cl_te.answer),
+        u8::from(both_cl_te.complete),
+        answer_name(close_delimited.answer),
+        u8::from(close_delimited.complete),
+        answer_name(timeout_mid_body.answer),
+        u8::from(timeout_mid_body.complete),
+        answer_name(large_inside.answer),
+        u8::from(large_inside.complete),
+        answer_name(large_outside.answer),
+        u8::from(large_outside.complete),
     );
     if let Ok(path) = std::env::var("R2O_HTTP_RESPONSE_DIFF_OUTPUT") {
         std::fs::write(path, &output).unwrap();
@@ -154,7 +217,7 @@ fn d2o_response_state_differential_preserves_portal_and_partial_head_outcomes() 
 
     assert_eq!(
         output,
-        "portal_truncated=injected\npartial_header_timeout=garbage\nblocked_body=injected/1\nportal_body=injected/1\ngzip_body=real/1\nupgrade=cut/0\ninvalid_framing=cut/0\nbody_decoy=decoy/1\n"
+        "portal_truncated=injected\npartial_header_timeout=garbage\nblocked_body=injected/1\nportal_body=injected/1\ngzip_body=real/1\nupgrade=cut/0\ninvalid_framing=cut/0\nbody_decoy=decoy/1\nboth_cl_te=cut/0\nclose_delimited=real/1\ntimeout_mid_body=cut/0\nlarge_inside=decoy/1\nlarge_outside=real/1\n"
     );
     assert!(!portal.complete);
 }
