@@ -602,6 +602,43 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::TimedOut);
         assert_eq!(calls.get(), 1);
     }
+    fn netlink_error_ack(sequence: u32, errno: i32) -> Vec<u8> {
+        let mut message = vec![0_u8; 20];
+        message[0..4].copy_from_slice(&20_u32.to_ne_bytes());
+        message[4..6].copy_from_slice(&2_u16.to_ne_bytes());
+        message[8..12].copy_from_slice(&sequence.to_ne_bytes());
+        message[16..20].copy_from_slice(&errno.to_ne_bytes());
+        message
+    }
+
+    fn await_ack_once(sequence: u32, errno: i32) -> io::Result<()> {
+        let message = netlink_error_ack(sequence, errno);
+        QueueSocket::await_ack_with(7, |bytes| {
+            bytes[..message.len()].copy_from_slice(&message);
+            Ok(Some(message.len()))
+        })
+    }
+
+    #[test]
+    fn send_and_ack_reads_success_error_and_ignores_foreign_sequence() {
+        // C `reply_errno`: NLMSG_ERROR с errno 0 — успех, отрицательный —
+        // ошибка, ответ на чужой seq пропускается.
+        assert!(await_ack_once(7, 0).is_ok());
+        let error = await_ack_once(7, -libc::EINVAL).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EINVAL));
+
+        let calls = Cell::new(0);
+        let error = QueueSocket::await_ack_with(7, |bytes| {
+            calls.set(calls.get() + 1);
+            let message = netlink_error_ack(8, 0);
+            bytes[..message.len()].copy_from_slice(&message);
+            Ok(Some(message.len()))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::TimedOut);
+        assert_eq!(calls.get(), super::ACK_ATTEMPTS);
+    }
+
     #[test]
     fn record_lost_packet_counts_each_kernel_report() {
         let count = Cell::new(0_u64);
