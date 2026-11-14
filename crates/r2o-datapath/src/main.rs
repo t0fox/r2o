@@ -4077,9 +4077,30 @@ mod app {
     fn format_journal_key_c(key: &[u8; r2k_core::control::KEY_LEN]) -> String {
         let low_port = u16::from_be_bytes([key[33], key[34]]);
         let high_port = u16::from_be_bytes([key[35], key[36]]);
+        // C `print_journal` (`d2kd.c:1088-1093`) печатает `key.low_ip` и
+        // `key.high_ip` — первые четыре байта IPv4-полей. У IPv6-ключа эти
+        // поля нулевые: адреса лежат в `low_ip6/high_ip6` (`track.c:55-72`).
+        // Порты общие для обоих семейств и печатаются как есть.
+        let (low_ip, high_ip) = if key[0] == 6 {
+            ([0_u8; 4], [0_u8; 4])
+        } else {
+            (
+                [key[1], key[2], key[3], key[4]],
+                [key[17], key[18], key[19], key[20]],
+            )
+        };
         format!(
             "{}.{}.{}.{}:{} - {}.{}.{}.{}:{}",
-            key[1], key[2], key[3], key[4], low_port, key[17], key[18], key[19], key[20], high_port
+            low_ip[0],
+            low_ip[1],
+            low_ip[2],
+            low_ip[3],
+            low_port,
+            high_ip[0],
+            high_ip[1],
+            high_ip[2],
+            high_ip[3],
+            high_port
         )
     }
 
@@ -9450,6 +9471,121 @@ mod app {
             let text = String::from_utf8(out).unwrap();
             assert!(text.starts_with("--- журнал: 1 записей, затёрто 0 ---\n"));
             assert!(text.contains("tcp 0.0.0.0:0 - 0.0.0.0:0  приветствие без имени"));
+        }
+
+        #[test]
+        fn journal_differential_matches_c() {
+            use r2o_datapath::flow_journal::{
+                R2oFlowJournal, R2oFlowJournalEntry, R2oFlowJournalKind,
+            };
+
+            fn ipv4_key_6() -> [u8; r2k_core::control::KEY_LEN] {
+                let mut key = [0_u8; r2k_core::control::KEY_LEN];
+                key[0] = 4;
+                key[1..5].copy_from_slice(&[192, 0, 2, 1]);
+                key[17..21].copy_from_slice(&[198, 51, 100, 2]);
+                key[33..35].copy_from_slice(&[0x1f, 0x90]);
+                key[35..37].copy_from_slice(&[0x00, 0x50]);
+                key[37] = 6;
+                key
+            }
+            fn ipv4_key_17() -> [u8; r2k_core::control::KEY_LEN] {
+                let mut key = ipv4_key_6();
+                key[37] = 17;
+                key
+            }
+            fn ipv6_key() -> [u8; r2k_core::control::KEY_LEN] {
+                let mut key = [0_u8; r2k_core::control::KEY_LEN];
+                key[0] = 6;
+                let low: [u8; 16] = std::array::from_fn(|i| 0x20 + i as u8);
+                let high: [u8; 16] = std::array::from_fn(|i| 0x30 + i as u8);
+                key[1..17].copy_from_slice(&low);
+                key[17..33].copy_from_slice(&high);
+                key[33..35].copy_from_slice(&[0x1f, 0x90]);
+                key[35..37].copy_from_slice(&[0x00, 0x50]);
+                key[37] = 6;
+                key
+            }
+            fn with_name(mut entry: R2oFlowJournalEntry, name: &str) -> R2oFlowJournalEntry {
+                entry.name_len = name.len() as u8;
+                entry.name[..name.len()].copy_from_slice(name.as_bytes());
+                entry
+            }
+
+            let start = 1_000_000_000_u64;
+            let mut out = Vec::new();
+
+            let empty = R2oFlowJournal::with_capacity(2).unwrap();
+            out.extend_from_slice(b"== empty ==\n");
+            super::r2o_write_journal(&mut out, &empty, start).unwrap();
+
+            let mut records = R2oFlowJournal::with_capacity(8).unwrap();
+            records.push(with_name(
+                R2oFlowJournalEntry {
+                    at_ns: start + 500_000_000,
+                    key: ipv4_key_6(),
+                    kind: R2oFlowJournalKind::Hello,
+                    ..Default::default()
+                },
+                "example.com",
+            ));
+            records.push(R2oFlowJournalEntry {
+                at_ns: start + 1_000_000_000,
+                key: ipv4_key_17(),
+                kind: R2oFlowJournalKind::PlanRefused,
+                note: Some("плана для этой цели нет"),
+                ..Default::default()
+            });
+            records.push(R2oFlowJournalEntry {
+                at_ns: start + 1_500_000_000,
+                key: ipv6_key(),
+                kind: R2oFlowJournalKind::PlanDone,
+                ..Default::default()
+            });
+            records.push(R2oFlowJournalEntry {
+                at_ns: start + 1_750_000_000,
+                key: ipv4_key_6(),
+                kind: R2oFlowJournalKind::Hello,
+                ..Default::default()
+            });
+            out.extend_from_slice(b"== records ==\n");
+            super::r2o_write_journal(&mut out, &records, start).unwrap();
+
+            let mut ring = R2oFlowJournal::with_capacity(2).unwrap();
+            ring.push(with_name(
+                R2oFlowJournalEntry {
+                    at_ns: start + 100_000_000,
+                    key: ipv4_key_6(),
+                    kind: R2oFlowJournalKind::Hello,
+                    ..Default::default()
+                },
+                "example.com",
+            ));
+            ring.push(with_name(
+                R2oFlowJournalEntry {
+                    at_ns: start + 200_000_000,
+                    key: ipv4_key_6(),
+                    kind: R2oFlowJournalKind::PlanApplied,
+                    ..Default::default()
+                },
+                "example.com",
+            ));
+            ring.push(R2oFlowJournalEntry {
+                at_ns: start + 300_000_000,
+                key: ipv4_key_6(),
+                kind: R2oFlowJournalKind::Suspect,
+                code: 1,
+                ..Default::default()
+            });
+            out.extend_from_slice(b"== ring ==\n");
+            super::r2o_write_journal(&mut out, &ring, start).unwrap();
+
+            if let Ok(path) = std::env::var("R2O_JOURNAL_DIFF_OUTPUT") {
+                std::fs::write(path, &out).unwrap();
+            }
+            let text = String::from_utf8(out).unwrap();
+            assert!(text.contains("== records ==\n--- журнал: 4 записей, затёрто 0 ---\n"));
+            assert!(text.contains("== ring ==\n--- журнал: 2 записей, затёрто 1 ---\n"));
         }
 
         #[test]
