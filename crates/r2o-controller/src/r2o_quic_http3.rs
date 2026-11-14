@@ -18,6 +18,43 @@ const R2O_QUIC_HTTP3_HEADER_LIMIT: u64 = 65_536;
 const R2O_QUIC_FRESH_PORT_TRIES: usize = 16;
 const R2O_QUIC_RESIDUAL_PORT_AGE: Duration = Duration::from_secs(480);
 
+/// C `tp_build` (`core/quicconn.c:380-403`): транспортные параметры
+/// клиентского QUIC-зонда.
+pub(crate) const R2O_QUIC_TP_IDLE_MS: u64 = 30_000;
+pub(crate) const R2O_QUIC_TP_MAX_UDP_PAYLOAD: u16 = 1452;
+pub(crate) const R2O_QUIC_TP_INITIAL_MAX_DATA: u64 = 1024 * 1024;
+pub(crate) const R2O_QUIC_TP_STREAM_WINDOW: u64 = 256 * 1024;
+pub(crate) const R2O_QUIC_TP_STREAMS: u64 = 16;
+
+/// Собрать `TransportConfig` со значениями C `tp_build`. Отображение на
+/// параметры QUIC (quinn `TransportParameters::new`):
+/// `receive_window` → initial_max_data, `stream_receive_window` → три
+/// initial_max_stream_data, `max_concurrent_*` → initial_max_streams_*,
+/// `max_idle_timeout` → max_idle_timeout.
+pub(crate) fn r2o_quic_transport_config() -> Result<quinn::TransportConfig, String> {
+    let idle = quinn::IdleTimeout::try_from(Duration::from_millis(R2O_QUIC_TP_IDLE_MS))
+        .map_err(|_| "idle timeout QUIC вне диапазона".to_owned())?;
+    let varint = |value: u64| {
+        quinn::VarInt::from_u64(value).map_err(|_| format!("QUIC varint вне диапазона: {value}"))
+    };
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_idle_timeout(Some(idle));
+    transport.receive_window(varint(R2O_QUIC_TP_INITIAL_MAX_DATA)?);
+    transport.stream_receive_window(varint(R2O_QUIC_TP_STREAM_WINDOW)?);
+    transport.max_concurrent_bidi_streams(varint(R2O_QUIC_TP_STREAMS)?);
+    transport.max_concurrent_uni_streams(varint(R2O_QUIC_TP_STREAMS)?);
+    Ok(transport)
+}
+
+/// `max_udp_payload_size` клиентского TP берётся из `EndpointConfig`.
+pub(crate) fn r2o_quic_endpoint_config() -> Result<quinn::EndpointConfig, String> {
+    let mut endpoint = quinn::EndpointConfig::default();
+    endpoint
+        .max_udp_payload_size(R2O_QUIC_TP_MAX_UDP_PAYLOAD)
+        .map_err(|_| "max_udp_payload_size QUIC вне диапазона".to_owned())?;
+    Ok(endpoint)
+}
+
 static R2O_QUIC_RECENT_PORTS_STATE: OnceLock<Mutex<(VecDeque<(u16, Instant)>, usize)>> =
     OnceLock::new();
 
@@ -1038,15 +1075,30 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
             return result.lock().unwrap().clone();
         }
     };
-    let mut endpoint =
-        match quinn::Endpoint::new(quinn::EndpointConfig::default(), None, socket, runtime) {
-            Ok(endpoint) => endpoint,
-            Err(error) => {
-                result.lock().unwrap().error = Some(format!("не создан QUIC endpoint: {error}"));
-                return result.lock().unwrap().clone();
-            }
-        };
-    endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(crypto)));
+    let transport = match r2o_quic_transport_config() {
+        Ok(transport) => transport,
+        Err(error) => {
+            result.lock().unwrap().error = Some(error);
+            return result.lock().unwrap().clone();
+        }
+    };
+    let endpoint_config = match r2o_quic_endpoint_config() {
+        Ok(config) => config,
+        Err(error) => {
+            result.lock().unwrap().error = Some(error);
+            return result.lock().unwrap().clone();
+        }
+    };
+    let mut endpoint = match quinn::Endpoint::new(endpoint_config, None, socket, runtime) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            result.lock().unwrap().error = Some(format!("не создан QUIC endpoint: {error}"));
+            return result.lock().unwrap().clone();
+        }
+    };
+    let mut client_config = quinn::ClientConfig::new(Arc::new(crypto));
+    client_config.transport_config(Arc::new(transport));
+    endpoint.set_default_client_config(client_config);
 
     let connecting = match endpoint.connect(server, server_name) {
         Ok(connecting) => connecting,
@@ -1485,14 +1537,32 @@ async fn r2o_quic_http3_wait_with_stall<F: Future>(
 #[cfg(test)]
 mod tests {
     use super::{
-        R2oQuicHttp3AppByteCounter, R2oQuicHttp3Budget, R2oQuicHttp3Stall,
-        R2oQuicHttp3StallAction as Action, r2o_quic_http3_app_bytes_load, r2o_quic_http3_authority,
+        R2O_QUIC_TP_IDLE_MS, R2O_QUIC_TP_INITIAL_MAX_DATA, R2O_QUIC_TP_MAX_UDP_PAYLOAD,
+        R2O_QUIC_TP_STREAM_WINDOW, R2O_QUIC_TP_STREAMS, R2oQuicHttp3AppByteCounter,
+        R2oQuicHttp3Budget, R2oQuicHttp3Stall, R2oQuicHttp3StallAction as Action,
+        r2o_quic_endpoint_config, r2o_quic_http3_app_bytes_load, r2o_quic_http3_authority,
         r2o_quic_http3_bounded_timeout_at, r2o_quic_http3_count_app_bytes,
-        r2o_quic_http3_udp_socket_with_mark_setter,
+        r2o_quic_http3_udp_socket_with_mark_setter, r2o_quic_transport_config,
     };
     use std::net::SocketAddr;
     use std::time::Duration;
     use tokio::time::Instant;
+
+    #[test]
+    fn quic_transport_parameters_match_c_tp_build() {
+        // C `tp_build` (`core/quicconn.c:380-403`).
+        assert_eq!(R2O_QUIC_TP_IDLE_MS, 30_000);
+        assert_eq!(R2O_QUIC_TP_MAX_UDP_PAYLOAD, 1452);
+        assert_eq!(R2O_QUIC_TP_INITIAL_MAX_DATA, 1024 * 1024);
+        assert_eq!(R2O_QUIC_TP_STREAM_WINDOW, 256 * 1024);
+        assert_eq!(R2O_QUIC_TP_STREAMS, 16);
+        let endpoint = r2o_quic_endpoint_config().expect("endpoint config");
+        assert_eq!(
+            endpoint.get_max_udp_payload_size(),
+            u64::from(R2O_QUIC_TP_MAX_UDP_PAYLOAD)
+        );
+        let _transport = r2o_quic_transport_config().expect("transport config");
+    }
 
     #[test]
     fn http3_app_byte_counter_matches_d2o_unique_range_totals() {

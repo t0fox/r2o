@@ -84,14 +84,14 @@ recheck 1982 1982 equal True
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 335 | 213 | 0 | 0 |
+| core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
 | datapath-core | 400 | 292 | 108 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1385** | **597** | **0** | **0** |
+| **Итого** | **1982** | **1386** | **596** | **0** | **0** |
 
-Это не оценка паритета: 597 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 596 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1385 / P 597 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1386 / P 596 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -342,12 +342,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 335 | 213 | 0 | 0 |
+| core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
 | datapath-core | 400 | 292 | 108 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1385** | **597** | **0** | **0** |
+| **Итого** | **1982** | **1386** | **596** | **0** | **0** |
 
 
 ---
@@ -1142,7 +1142,7 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 | `seal_level` | 281-350 | 70 | запечатать пакет уровня: Initial/Handshake long header + token, APP short header; padding в тело; `d2k_qw_seal`; `next_pn++` | quinn packet builder/`r2k_quic_initial_build` | **P** | **C-ветви проверены:** нет ключей → error; APP: padding тела до `pn_len+blen>=4` (RFC 9001 §5.4.2), заголовок `0x40` + DCID; long: тип Initial/Handshake, предварительный `d2k_qw_long_hdr_token` для `pad_to`, padding внутри тела, повторная сборка заголовка, Retry-token для Initial; `d2k_qw_seal`, трассировка, инкремент PN. Rust Initial собирает `r2k_quic_initial_build` для 1200-байтного v1, остальные пакеты/PN/паддинг — quinn. Побайтового паритета long/short header нет. |
 | `send_level` | 352-363 | 12 | запечатать и отправить датаграмму, `tx_dgrams++` | quinn `send_datagram` | **P** | C `seal_level` + `send`, ошибка → -1, счётчик `tx_dgrams`; Rust отправляет через quinn/`UdpSocket`, счётчики берёт из quinn stats (`r2o_quic_http3_datagrams`). |
 | `tp_put_int` | 367-374 | 8 | transport parameter: `id`, длина значения, значение — три varint | `quinn::TransportConfig` | **P** | C `vlen=varint_len(v)`, затем `write(id)`, `write(vlen)`, `write(v)`; кодирование RFC 9000 §18. Rust TP задаёт `quinn::TransportConfig`, varint-кодирование внутри quinn; собственной функции/байтовой сверки нет. |
-| `tp_build` | 380-403 | 24 | TP: idle 30000, max_udp 1452, max_data 1 МиБ, bidi_local/remote/uni 256 КиБ, streams bidi/uni 16, CID limit 2, initial_source_connection_id; расширение 0x0039 | quinn defaults (своего `TransportConfig` в `r2o_quic_http3.rs`/`quic_replay.rs` нет) | **P** | **Подтверждённое расхождение:** C собирает ровно этот набор (`quicconn.c:383-396`) и вставляет как расширение `0x0039`; R2O не вызывает `quinn::TransportConfig`, поэтому действуют умолчания quinn (иные idle timeout/окна/лимиты потоков). Влияет на flow control, число потоков и бюджет data-stage. |
+| `tp_build` | 380-403 | 24 | TP: idle 30000, max_udp 1452, max_data 1 МиБ, bidi_local/remote/uni 256 КиБ, streams bidi/uni 16, CID limit 2, initial_source_connection_id; расширение 0x0039 | `r2o_quic_http3.rs` `r2o_quic_transport_config`/`r2o_quic_endpoint_config` | **E*** | Значения C перенесены: `max_idle_timeout=30000 мс`, `receive_window=1 МиБ` (initial_max_data), `stream_receive_window=256 КиБ` (три initial_max_stream_data), `max_concurrent_bidi/uni=16`, `EndpointConfig.max_udp_payload_size=1452` (quinn берёт его для TP). Отображение проверено по `vendor/quinn-proto/src/transport_parameters.rs`; конфиг подключён к production HTTP/3-зонду (`set_default_client_config`), тест `quic_transport_parameters_match_c_tp_build` проверяет константы и `get_max_udp_payload_size()==1452`. **Ограничение:** quinn жёстко отправляет `active_connection_id_limit=CidQueue::LEN=5` (C — 2) и сам генерирует `initial_source_connection_id`; побайтового differential Initial-TP нет. |
 | `tp_server_parse` | 418-453 | 36 | разбор серверных TP: 0x04 max_data, 0x06/0x07 sdata, 0x08/0x09 streams; неизвестные по длине; значение только ровно-varint | quinn transport params | **P** | **C-ветви проверены:** цикл `id,len`, `len>n-i` → return, `d2k_qw_varint_read(p+i,len)` и `vw==len` — только тогда число; 0x04/0x06/0x07/0x08/0x09 заполняют `peer_*` и `*_set`; неизвестные пропускаются по `len`. Rust значения TP живут внутри quinn; C-поля `peer_streams/sdata/max_data` наружу не выставляются, сопоставление значений не сделано. |
 | `tp_server_ee` | 460-473 | 14 | найти 0x0039 в EncryptedExtensions: общая длина, тип/длина расширений, границы | quinn/rustls | **P** | C разбирает `total`, `while end-p>=4`, `et/el`, `el>end-p` → return, 0x0039 → `tp_server_parse`; Rust EncryptedExtensions обрабатывает rustls/quinn, отдельного разбора 0x0039 в коде контроллера нет. |
 | `frames_in` | 479-696 | 218 | кадры: PADDING/PING/ACK/ACK_ECN, CRYPTO, NEW_TOKEN, HANDSHAKE_DONE, NEW_CONN_ID+retire, MAX_DATA/MAX_STREAMS, RETIRE/DATA_BLOCKED/STREAMS_BLOCKED, MAX_STREAM_DATA/STREAM_DATA_BLOCKED/STOP_SENDING, RESET_STREAM, PATH_*, CONNECTION_CLOSE, STREAM (off/len/fin), flow credit/app_rx | quinn frame layer | **P** | **C-ветви проверены:** ACK/ACK_ECN читает largest/delay/cnt/first+диапазоны+ECN, обновляет `largest_acked`; CRYPTO `crypto_put`; NEW_TOKEN пропуск; HANDSHAKE_DONE; NEW_CONN_ID читает seq/retire_prior_to/CID+16-байтный токен, при `ret>0` меняет `dcid`; MAX_DATA/MAX_STREAMS только увеличивают; RETIRE/DATA_BLOCKED/STREAMS_BLOCKED читают один varint; MAX_STREAM_DATA/STREAM_DATA_BLOCKED/STOP_SENDING — два; RESET_STREAM — три; PATH_* — 8 байт; CONNECTION_CLOSE — код/тип/причина, `closed=1`, возврат -1; STREAM — sid/off/len/fin, кредит половины окна (`fc_stream_limit`/`fc_conn_limit`), `app_rx` для своего потока, прочие в `rx_other`. Rust всё это делает quinn; собственных полей/точной политики кредита нет. |
