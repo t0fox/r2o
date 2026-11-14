@@ -344,6 +344,26 @@ fn template_profile_preserves_options_and_shifts_timestamp_only_on_fake() {
 }
 
 #[test]
+fn template_batch_increments_ip_id_per_emission_like_c() {
+    // C `session.c:2524-2530`: для профиля tcp-template-v1 каждая посылка
+    // пачки получает `ip_id = ip.ip_id + i`. Один и тот же ID у нескольких
+    // посылок склеил бы их на получателе как фрагменты одной датаграммы.
+    let packet = original_v4(&[1, 1, 0, 0]);
+    let mut emitted = emission(&[0x16, 3, 1]);
+    emitted.wire_profile = WIRE_TCP_TEMPLATE;
+    let mut out = [0; 256];
+    for index in 0..3 {
+        let len = wire::build_tcp_packet_at(&packet, &emitted, index, &mut out).unwrap();
+        assert_eq!(&out[4..6], &(0x1000u16 + index as u16).to_be_bytes());
+        assert_eq!(len, 20 + 24 + 3);
+    }
+    // Обёртка без номера ведёт себя как первая посылка пачки.
+    let len = wire::build_tcp_packet(&packet, &emitted, &mut out).unwrap();
+    assert_eq!(len, 20 + 24 + 3);
+    assert_eq!(&out[4..6], &0x1000u16.to_be_bytes());
+}
+
+#[test]
 fn malformed_inputs_and_inapplicable_emissions_fail_closed() {
     let packet = original_v4(&[]);
     let mut emitted = emission(&[0x0f]);

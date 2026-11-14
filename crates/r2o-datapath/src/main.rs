@@ -2390,11 +2390,12 @@ mod app {
                                 } else {
                                     let first_udp_packet =
                                         udp_sessions.r2o_is_first_client_packet(bytes);
-                                    r2o_udp_decide_once(
+                                    r2o_udp_decide_once_mode(
                                         &mut udp_sessions,
                                         &mut quic_sessions,
                                         selected_plan,
                                         bytes,
+                                        controller_probe,
                                         || {
                                             let decision = decide_with_tcp_session_mode(
                                                 &mut tcp_sessions,
@@ -2682,6 +2683,35 @@ mod app {
                             .tcp_segment(packet)
                             .map(|segment| segment.sequence)
                     });
+                    // C `handle_udp` `refuse`: отказы, у которых нет плана и
+                    // нет кода, всё равно обязаны попасть в журнал с текстом
+                    // причины. Иначе «план не применился» неотличим от
+                    // «пакета не было».
+                    if !controller_probe
+                        && let PacketDecision::RefusedUdp { note } = &decision
+                        && let Some(packet) = tx_original
+                        && let Some(key) =
+                            r2o_datapath::control::flow_journal_key_for_packet(packet)
+                        && key[37] == 17
+                    {
+                        let refused = RefusedEvent {
+                            key,
+                            code: r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_NONE,
+                            plan_id: [0; 16],
+                            trial_id: [0; 16],
+                            client_shape: Some(r2o_udp_client_shape(packet)),
+                            execution_id: None,
+                            binding: None,
+                        };
+                        r2o_refuse_coded(
+                            &mut control,
+                            &mut flow_journal,
+                            journal_timestamp(&journal_origin),
+                            &refused,
+                            Some(note),
+                            controller_probe,
+                        );
+                    }
                     let refused_plan = match &decision {
                         PacketDecision::Refused { plan_id } => Some((
                             *plan_id,
@@ -2862,7 +2892,9 @@ mod app {
                                 }
                                 response_delivered = true;
                             }
-                            PacketDecision::Refused { .. } | PacketDecision::FlowUnfit { .. } => {
+                            PacketDecision::Refused { .. }
+                            | PacketDecision::RefusedUdp { .. }
+                            | PacketDecision::FlowUnfit { .. } => {
                                 let late_tail_handled = udp_replay.is_none()
                                     && original.is_some_and(|bytes| {
                                         r2o_udp_handle_late_tail(
@@ -4470,6 +4502,35 @@ mod app {
         mode == RuntimeMode::Observe || admitted
     }
 
+    /// C `handle_udp`: `seen_shape = voice ? D2K_PLAN_SHAPE_VOICE :
+    /// D2K_PLAN_SHAPE_QUIC`. Журнальный отказ несёт эту форму потока.
+    fn r2o_udp_client_shape(packet: &[u8]) -> u8 {
+        let Some(view) = r2k_core::packet::PacketView::parse(packet) else {
+            return r2k_core::control::SHAPE_QUIC;
+        };
+        let Some(payload) = view
+            .udp_payload_range(packet)
+            .and_then(|range| packet.get(range))
+        else {
+            return r2k_core::control::SHAPE_QUIC;
+        };
+        let destination_port = view
+            .l4_offset
+            .checked_add(2)
+            .and_then(|offset| packet.get(offset..offset + 2))
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u16::from_be_bytes)
+            .unwrap_or(0);
+        if r2k_core::stun::is_binding_request(payload)
+            || r2k_core::stun::is_discord_ip_discovery_request(payload)
+            || r2k_core::stun::is_discord_voice_request(payload, destination_port)
+        {
+            r2k_core::control::SHAPE_VOICE
+        } else {
+            r2k_core::control::SHAPE_QUIC
+        }
+    }
+
     fn r2o_udp_decide_once(
         sessions: &mut R2oUdpSessions,
         quic_sessions: &mut R2oQuicSessions,
@@ -4477,6 +4538,22 @@ mod app {
         packet: &[u8],
         decide: impl FnOnce() -> PacketDecision,
     ) -> PacketDecision {
+        r2o_udp_decide_once_mode(sessions, quic_sessions, plan, packet, false, decide)
+    }
+
+    fn r2o_udp_decide_once_mode(
+        sessions: &mut R2oUdpSessions,
+        quic_sessions: &mut R2oQuicSessions,
+        plan: &Plan,
+        packet: &[u8],
+        controller_probe: bool,
+        decide: impl FnOnce() -> PacketDecision,
+    ) -> PacketDecision {
+        // C `handle_udp`: `fl->quic_deny` проверяется до разбора содержимого,
+        // поэтому повтор Initial и 0-RTT клиента тоже снимаются.
+        if !controller_probe && sessions.r2o_quic_deny_for_packet(packet) {
+            return PacketDecision::Drop;
+        }
         if sessions.r2o_plan_applied(packet) {
             return PacketDecision::Accept;
         }
@@ -4488,6 +4565,10 @@ mod app {
         if applied {
             sessions.r2o_mark_plan_applied(packet);
             quic_sessions.mark_plan_applied(packet);
+        }
+        if !controller_probe && plan.qdeny != 0 && decision == PacketDecision::Drop {
+            sessions.r2o_mark_quic_deny(packet);
+            quic_sessions.suppress_packet(packet);
         }
         decision
     }
@@ -6839,7 +6920,10 @@ mod app {
                 qdeny: 1,
                 ..Plan::default()
             };
-            for expected_executions in [3, 4] {
+            // C: первый `quicdeny` ставит `fl->quic_deny`, следующие
+            // клиентские датаграммы снимаются ДО выбора/исполнения плана.
+            // Поэтому замыкание исполняется только на первом пакете.
+            for expected_executions in [3, 3] {
                 assert_eq!(
                     r2o_udp_decide_once(
                         &mut sessions,

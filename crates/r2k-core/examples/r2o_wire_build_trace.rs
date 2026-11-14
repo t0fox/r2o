@@ -1,7 +1,9 @@
 //! C/Rust differential: `d2k_wire_build` legacy wire_profile=0.
 
-use r2k_core::plan::{Emission, EmitKind, POISON_BADSUM, POISON_IPID_ZERO, POISON_TCPTS_BACK};
-use r2k_core::wire::build_tcp_packet;
+use r2k_core::plan::{
+    Emission, EmitKind, POISON_BADSUM, POISON_IPID_ZERO, POISON_TCPTS_BACK, WIRE_TCP_TEMPLATE,
+};
+use r2k_core::wire::{build_tcp_packet, build_tcp_packet_at};
 
 fn input4() -> Vec<u8> {
     let mut packet = vec![0; 44];
@@ -20,6 +22,26 @@ fn input4() -> Vec<u8> {
     packet[33] = 0x18;
     packet[34..36].copy_from_slice(&50240_u16.to_be_bytes());
     packet[40..44].copy_from_slice(b"orig");
+    packet
+}
+
+fn input4_opts() -> Vec<u8> {
+    let mut packet = vec![0; 44];
+    packet[0] = 0x45;
+    packet[2..4].copy_from_slice(&44_u16.to_be_bytes());
+    packet[4..6].copy_from_slice(&0x1000_u16.to_be_bytes());
+    packet[8] = 64;
+    packet[9] = 6;
+    packet[12..16].copy_from_slice(&[192, 168, 1, 67]);
+    packet[16..20].copy_from_slice(&[1, 2, 3, 4]);
+    packet[20..22].copy_from_slice(&40000_u16.to_be_bytes());
+    packet[22..24].copy_from_slice(&443_u16.to_be_bytes());
+    packet[24..28].copy_from_slice(&1000_u32.to_be_bytes());
+    packet[28..32].copy_from_slice(&777_u32.to_be_bytes());
+    packet[32] = 6 << 4;
+    packet[33] = 0x18;
+    packet[34..36].copy_from_slice(&50240_u16.to_be_bytes());
+    packet[40..44].copy_from_slice(&[1, 1, 0, 0]);
     packet
 }
 
@@ -152,4 +174,17 @@ fn main() {
         &emission(0, 0, 0, &[], false, 0, b"hello"),
         40,
     );
+    let template_input = input4_opts();
+    for index in 0..3 {
+        let mut emitted = emission(0, 0, 0, &[], false, 0, b"hello");
+        emitted.seq = 1000 + index as u32;
+        emitted.wire_profile = WIRE_TCP_TEMPLATE;
+        let mut out = vec![0; 512];
+        let rc = build_tcp_packet_at(&template_input, &emitted, index, &mut out).unwrap_or(0);
+        print!("M template-batch.{index} len={rc} hex=");
+        for byte in &out[..rc] {
+            print!("{byte:02x}");
+        }
+        println!();
+    }
 }

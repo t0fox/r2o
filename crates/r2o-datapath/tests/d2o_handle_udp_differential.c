@@ -104,6 +104,30 @@ static size_t quic_fake_plan(uint8_t *o, unsigned fakes) {
     return off;
 }
 
+/* План с фальшивкой и обычным разрезом payload: для UDP C отвергает
+ * несколько payload-посылок целиком (`session.c:1372-1386`). */
+static size_t quic_split_fake_plan(uint8_t *o) {
+    static const uint8_t transport[2] = {17, 2};
+    static const uint8_t payload[4] = {0, 1, 'F', 'Q'};
+    static const uint8_t fake[10] = {0, 1, 0, 0, 1, 0, 0, 0, 0, 0};
+    static const uint8_t split[4] = {0, 0, 0, 16};
+    size_t off = plan_header(o, 0, 5, 0x54);
+    off = put_tlv(o, off, 0x0002, transport, 2);
+    off = put_tlv(o, off, 0x0010, payload, sizeof payload);
+    off = put_tlv(o, off, 0x0100, split, sizeof split);
+    off = put_tlv(o, off, 0x0101, fake, sizeof fake);
+    return off;
+}
+
+/* quicdeny: единственное содержание плана — снять QUIC-поток имени. */
+static size_t quic_deny_plan(uint8_t *o) {
+    static const uint8_t transport[2] = {17, 2};
+    static const uint8_t deny[1] = {1};
+    size_t off = plan_header(o, 11, 3, 0x55);
+    off = put_tlv(o, off, 0x0002, transport, 2);
+    return put_tlv(o, off, 0x0110, deny, 1);
+}
+
 static size_t voice_fake_plan(uint8_t *o) {
     static const uint8_t transport[2] = {17, 3};
     static const uint8_t payload[7] = {0, 1, 'V', 'O', 'I', 'C', 'E'};
@@ -181,6 +205,53 @@ static void plan_case_ex(const char *name, d2k_session *s, const uint8_t *packet
 static void plan_case(const char *name, d2k_session *s, const uint8_t *packet,
                       size_t length, uint8_t *result_buffer, size_t result_cap) {
     plan_case_ex(name, s, packet, length, result_buffer, result_cap, 1);
+}
+
+/* C `handle_udp`: после quicdeny снимается каждая клиентская датаграмма
+ * потока, не только Initial. Печатаем вердикты обоих пакетов. */
+static void qdeny_flow_case(const char *name, const uint8_t *plan_bytes,
+                            size_t plan_len, const uint8_t *first,
+                            size_t first_len, const uint8_t *second,
+                            size_t second_len) {
+    d2k_plan *plan = NULL;
+    char error[200];
+    if (d2k_plan_load(plan_bytes, plan_len, &plan, error, sizeof error) != 0) {
+        printf("%s load-error=%s\n", name, error);
+        return;
+    }
+    d2k_session *s = d2k_session_new(64, 0);
+    d2k_session_set_hook(s, D2K_HOOK_POSTROUTING);
+    d2k_session_set_plan(s, plan);
+    uint8_t out[4096];
+    d2k_result r;
+    memset(&r, 0, sizeof r);
+    (void)d2k_session_packet(s, first, first_len, 1000, out, sizeof out, &r);
+    int first_verdict = r.verdict;
+    size_t first_n = r.n_out;
+    memset(&r, 0, sizeof r);
+    (void)d2k_session_packet(s, second, second_len, 2000, out, sizeof out, &r);
+    printf("%s verdict=%d/%d n=%zu/%zu\n", name, first_verdict, r.verdict,
+           first_n, r.n_out);
+    d2k_session_free(s);
+}
+
+/* План ставится общим (`d2k_session_set_plan`), как файл `--plan` в d2kd:
+ * control-проверка формы QUIC здесь не участвует. */
+static void global_plan_case(const char *name, const uint8_t *plan_bytes,
+                             size_t plan_len, const uint8_t *packet,
+                             size_t length, uint8_t *result_buffer,
+                             size_t result_cap) {
+    d2k_plan *plan = NULL;
+    char error[200];
+    if (d2k_plan_load(plan_bytes, plan_len, &plan, error, sizeof error) != 0) {
+        printf("%s load-error=%s\n", name, error);
+        return;
+    }
+    d2k_session *s = d2k_session_new(64, 0);
+    d2k_session_set_hook(s, D2K_HOOK_POSTROUTING);
+    d2k_session_set_plan(s, plan);
+    plan_case(name, s, packet, length, result_buffer, result_cap);
+    d2k_session_free(s);
 }
 
 static void print_short(const char *name, const d2k_session *session) {
@@ -280,6 +351,25 @@ int main(int argc, char **argv) {
     (void)d2k_session_packet(voice, buffer, length, 3000, result_buffer, sizeof result_buffer, &(d2k_result){0});
     print_short("V2", voice);
     d2k_session_free(voice);
+
+    /* V3: направление доказано другим пакетом, STUN приходит на FORWARD.
+     * C берёт сторону из fl->dir_known, а не только из крючка. */
+    d2k_session *forward_voice = d2k_session_new(64, 0);
+    d2k_session_set_hook(forward_voice, D2K_HOOK_POSTROUTING);
+    length = udp_packet(buffer, client, server, 50011, 50010, initial, initial_len);
+    (void)d2k_session_packet(forward_voice, buffer, length, 1000,
+                             result_buffer, sizeof result_buffer, &(d2k_result){0});
+    d2k_session_set_hook(forward_voice, D2K_HOOK_FORWARD);
+    stun_request(payload);
+    length = udp_packet(buffer, client, server, 50011, 50010, payload, 20);
+    (void)d2k_session_packet(forward_voice, buffer, length, 2000,
+                             result_buffer, sizeof result_buffer, &(d2k_result){0});
+    stun_response(response);
+    length = udp_packet(buffer, server, client, 50010, 50011, response, 20);
+    (void)d2k_session_packet(forward_voice, buffer, length, 3000,
+                             result_buffer, sizeof result_buffer, &(d2k_result){0});
+    print_short("V3", forward_voice);
+    d2k_session_free(forward_voice);
 
 
     /* Отказ таблицы: 60 корректных UDP-потоков при 64 слотах (порог 3/4). */
@@ -415,6 +505,27 @@ int main(int argc, char **argv) {
         length = udp_packet(buffer, client, server, 50108, 443, initial, initial_len);
         plan_case("P8 quic-26-fakes", ps, buffer, length, result_buffer, sizeof result_buffer);
         d2k_session_free(ps);
+
+        /* P9: разрез payload + фальшивка как общий план. Датаграмма
+         * атомарна: C не отправляет ни одной посылки и пишет отказ. */
+        plan_len = quic_split_fake_plan(plan);
+        global_plan_case("P9 quic-split-fake", plan, plan_len, buffer,
+                         udp_packet(buffer, client, server, 50109, 443,
+                                    initial, initial_len),
+                         result_buffer, sizeof result_buffer);
+
+        /* P10: quicdeny снимает и повтор Initial, и обычную клиентскую
+         * датаграмму того же потока. */
+        plan_len = quic_deny_plan(plan);
+        uint8_t first[2048];
+        size_t first_len =
+            udp_packet(first, client, server, 50110, 443, initial, initial_len);
+        uint8_t second[64];
+        size_t second_len =
+            udp_packet(second, client, server, 50110, 443,
+                       (const uint8_t *)"later", 5);
+        qdeny_flow_case("P10 qdeny-flow", plan, plan_len, first, first_len,
+                        second, second_len);
     }
     return 0;
 }

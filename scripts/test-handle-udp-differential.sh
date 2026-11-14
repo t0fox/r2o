@@ -43,7 +43,7 @@ trap 'rm -rf -- "$TEMP"' EXIT HUP INT TERM
 "$CARGO" test --manifest-path "$ROOT/Cargo.toml" --locked --offline \
     -p r2o-datapath --lib r2o_udp_sessions::tests::d2o_handle_udp_trace \
     -- --ignored --nocapture >"$TEMP/rust.raw" 2>&1
-grep -E '^([QVRSP][0-9]) ' "$TEMP/rust.raw" >"$TEMP/rust.out"
+grep -E '^([QVRSP][0-9]+) ' "$TEMP/rust.raw" >"$TEMP/rust.out"
 
 diff -u "$TEMP/c.out" "$TEMP/rust.out"
 printf 'cases=%s\n' "$(wc -l < "$TEMP/c.out")"

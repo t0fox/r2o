@@ -65,6 +65,28 @@ static size_t input6(uint8_t *packet) {
     return total;
 }
 
+static size_t input4_opts(uint8_t *packet) {
+    static const uint8_t options[] = {1, 1, 0, 0};
+    size_t total = 20 + 20 + sizeof options;
+    memset(packet, 0, total);
+    packet[0] = 0x45;
+    wr16(packet + 2, (uint16_t)total);
+    wr16(packet + 4, 0x1000);
+    packet[8] = 64;
+    packet[9] = 6;
+    packet[12] = 192; packet[13] = 168; packet[14] = 1; packet[15] = 67;
+    packet[16] = 1; packet[17] = 2; packet[18] = 3; packet[19] = 4;
+    wr16(packet + 20, 40000);
+    wr16(packet + 22, 443);
+    wr32(packet + 24, 1000);
+    wr32(packet + 28, 777);
+    packet[32] = 6 << 4;
+    packet[33] = 0x18;
+    wr16(packet + 34, 50240);
+    memcpy(packet + 40, options, sizeof options);
+    return total;
+}
+
 static d2k_conn conn_from(const uint8_t *packet, int family) {
     d2k_conn c;
     memset(&c, 0, sizeof c);
@@ -119,6 +141,32 @@ static void run(const char *name, int family, uint8_t ttl, uint8_t poison,
     printf("\n");
 }
 
+/* Профиль tcp-template-v1: C `session.c:2524-2530` перед каждой посылкой
+ * пачки ставит `c.ip_id = ip.ip_id + i`. Повторяем продовый цикл. */
+static void run_template_batch(const char *name) {
+    static const uint8_t payload[] = "hello";
+    uint8_t packet[128];
+    (void)input4_opts(packet);
+    d2k_conn c = conn_from(packet, 4);
+    memcpy(c.tcp_options, packet + 40, 4);
+    c.tcp_options_len = 4;
+    for (size_t i = 0; i < 3; i++) {
+        d2k_emit e;
+        memset(&e, 0, sizeof e);
+        e.kind = D2K_EMIT_PAYLOAD;
+        e.seq = 1000 + (uint32_t)i;
+        e.wire_profile = D2K_WIRE_TCP_TEMPLATE;
+        e.bytes = payload;
+        e.len = sizeof payload - 1;
+        c.ip_id = (uint16_t)(0x1000 + i);
+        uint8_t out[512];
+        size_t rc = d2k_wire_build(&c, &e, out, sizeof out);
+        printf("%s.%zu len=%zu hex=", name, i, rc);
+        for (size_t k = 0; k < rc; k++) printf("%02x", out[k]);
+        printf("\n");
+    }
+}
+
 int main(void) {
     static const uint8_t payload[] = "hello";
     static const uint8_t pre[] = "ab";
@@ -144,5 +192,6 @@ int main(void) {
     run("K urgent-bad", 4, 0, 0, 0, NULL, 0, 1, 9, abcd, sizeof abcd - 1, 512);
     run("L cap-small", 4, 0, 0, 0, NULL, 0, 0, 0, payload, sizeof payload - 1,
         40);
+    run_template_batch("M template-batch");
     return 0;
 }

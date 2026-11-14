@@ -104,6 +104,37 @@ static const uint8_t CLIENT_HELLO[] = {
     0, 0, 2, 0x13, 1, 1, 0, 0, 0
 };
 
+/* Тот же ClientHello с SNI, что в Rust-тесте
+ * `client_hello_with_sni`: example.test. */
+static size_t client_hello_sni(uint8_t *o) {
+    static const uint8_t host[] = "example.test";
+    const size_t host_len = sizeof host - 1;
+    const size_t sni_len = 5 + host_len;
+    const size_t ext_len = 4 + sni_len;
+    const size_t body_len = 2 + 32 + 7 + 2 + ext_len;
+    const size_t hs_len = 4 + body_len;
+    size_t off = 0;
+    o[off++] = 0x16; o[off++] = 0x03; o[off++] = 0x03;
+    o[off++] = (uint8_t)(hs_len >> 8); o[off++] = (uint8_t)hs_len;
+    o[off++] = 1;
+    o[off++] = (uint8_t)(body_len >> 16);
+    o[off++] = (uint8_t)(body_len >> 8);
+    o[off++] = (uint8_t)body_len;
+    o[off++] = 0x03; o[off++] = 0x03;
+    memset(o + off, 0, 32); off += 32;
+    o[off++] = 0; o[off++] = 0; o[off++] = 2; o[off++] = 0x13;
+    o[off++] = 1; o[off++] = 1; o[off++] = 0;
+    o[off++] = (uint8_t)(ext_len >> 8); o[off++] = (uint8_t)ext_len;
+    o[off++] = 0; o[off++] = 0;
+    o[off++] = (uint8_t)(sni_len >> 8); o[off++] = (uint8_t)sni_len;
+    o[off++] = (uint8_t)((host_len + 3) >> 8); o[off++] = (uint8_t)(host_len + 3);
+    o[off++] = 0;
+    o[off++] = (uint8_t)(host_len >> 8); o[off++] = (uint8_t)host_len;
+    memcpy(o + off, host, host_len);
+    off += host_len;
+    return off;
+}
+
 static size_t packet_with_payload(uint8_t *o, uint8_t flags, uint32_t sequence,
                                   const uint8_t *payload, size_t payload_len) {
     size_t total = 40 + payload_len;
@@ -243,6 +274,26 @@ int main(void) {
     print_case("I data-existing", session, anchor);
 
     d2k_session_free(session);
+
+    /* P: приветствие, собранное из двух сегментов. Первые 5 байт ещё не
+     * позволяют разобрать ClientHello; целым его доказывает сборщик. C
+     * объявляет приветствие и учитывает его (session.c:2194-2232). */
+    {
+        uint8_t hello[256];
+        size_t hello_len = client_hello_sni(hello);
+        d2k_session *split = d2k_session_new(64, 0);
+        length = packet_with_payload(buffer, 0x02, 1000, NULL, 0);
+        feed(split, buffer, length, &anchor);
+        length = packet_with_payload(buffer, 0x18, 1001, hello, 5);
+        feed(split, buffer, length, &anchor);
+        length = packet_with_payload(buffer, 0x18, 1006, hello + 5, hello_len - 5);
+        feed(split, buffer, length, &anchor);
+        printf("P split-capture flows=%zu hellos=%llu with_sni=%llu anchor=%u\n",
+               d2k_session_flows_tcp(split),
+               (unsigned long long)d2k_session_hellos(split),
+               (unsigned long long)d2k_session_with_sni(split), anchor);
+        d2k_session_free(split);
+    }
 
     d2k_session *planned = d2k_session_new(64, 0);
     uint8_t plan_buffer[256];

@@ -72,6 +72,10 @@ struct FlowState {
     last_seen: Instant,
     plan_applied: bool,
     damaged: bool,
+    /// C `d2k_flow.quic_deny`: «QUIC для имени не пропускается». Поток
+    /// снимается целиком на клиентской стороне, не только первый Initial,
+    /// иначе повтор/0-RTT проходит мимо решения контроллера.
+    quic_deny: bool,
     hello_seen: bool,
     quic_hello_counted: bool,
     controller_probe: bool,
@@ -82,21 +86,27 @@ struct FlowState {
     stun: Option<StunFlow>,
 }
 
-pub(crate) fn flow_key_from_packet(packet: &[u8]) -> Option<R2oUdpFlowKey> {
+fn flow_endpoints_from_packet(packet: &[u8]) -> Option<(Endpoint, Endpoint)> {
     let view = PacketView::parse(packet)
         .filter(|view| view.protocol == 17 && view.fragment & 0x1fff == 0)?;
     let udp = packet.get(view.l4_offset..view.total_len)?;
     if udp.len() < 8 {
         return None;
     }
-    let source = Endpoint {
-        address: view.src,
-        port: u16::from_be_bytes([udp[0], udp[1]]),
-    };
-    let destination = Endpoint {
-        address: view.dst,
-        port: u16::from_be_bytes([udp[2], udp[3]]),
-    };
+    Some((
+        Endpoint {
+            address: view.src,
+            port: u16::from_be_bytes([udp[0], udp[1]]),
+        },
+        Endpoint {
+            address: view.dst,
+            port: u16::from_be_bytes([udp[2], udp[3]]),
+        },
+    ))
+}
+
+pub(crate) fn flow_key_from_packet(packet: &[u8]) -> Option<R2oUdpFlowKey> {
+    let (source, destination) = flow_endpoints_from_packet(packet)?;
     Some(R2oUdpFlowKey::new(source, destination))
 }
 
@@ -215,6 +225,7 @@ impl R2oUdpSessions {
                 last_seen: now,
                 plan_applied: false,
                 damaged: false,
+                quic_deny: false,
                 hello_seen: false,
                 quic_hello_counted: false,
                 controller_probe,
@@ -270,7 +281,14 @@ impl R2oUdpSessions {
             address: view.dst,
             port: u16::from_be_bytes([udp[2], udp[3]]),
         };
-        let client_hook = matches!(hook, Some(R2O_NF_INET_LOCAL_OUT | R2O_NF_INET_POST_ROUTING));
+        // C `handle_udp` доказывает клиентскую сторону крючком ЛИБО уже
+        // известным направлением потока (`fl->dir_known`), а не только
+        // OUTPUT/POSTROUTING. На FORWARD запрос голоса приходит после того,
+        // как направление установлено другим пакетом, и STUN-транзакция
+        // обязана сохраниться так же, как на POSTROUTING.
+        let known_client_is_low = self.flows.get(&key).and_then(|flow| flow.r2o_client_is_low);
+        let (client_packet, _) = r2o_udp_packet_direction(packet, key, hook, known_client_is_low)
+            .unwrap_or((false, known_client_is_low));
 
         let Some(flow) = self.flows.get_mut(&key) else {
             return;
@@ -278,7 +296,7 @@ impl R2oUdpSessions {
         flow.last_seen = now;
 
         if flow.stun.is_none() {
-            if !client_hook || !r2k_core::stun::is_binding_request(payload) {
+            if !client_packet || !r2k_core::stun::is_binding_request(payload) {
                 return;
             }
             let Some(transaction_id) = payload.get(8..20).and_then(|bytes| bytes.try_into().ok())
@@ -408,6 +426,39 @@ impl R2oUdpSessions {
             self.applied = self.applied.saturating_add(1);
         }
         !was_applied
+    }
+
+    /// C `handle_udp` (`session.c:967-974`): после `quicdeny` каждая
+    /// клиентская датаграмма этого потока снимается — не только Initial.
+    /// Сторона берётся из сохранённого направления, а при его отсутствии —
+    /// из того же резерва по порту 443, что и в C. Зонд контроллера не
+    /// снимается: `fl->controller_probe` исключает и флаг, и снятие.
+    pub fn r2o_quic_deny_for_packet(&self, packet: &[u8]) -> bool {
+        let Some((source, destination)) = flow_endpoints_from_packet(packet) else {
+            return false;
+        };
+        let key = R2oUdpFlowKey::new(source, destination);
+        let Some(flow) = self.flows.get(&key) else {
+            return false;
+        };
+        if !flow.quic_deny || flow.controller_probe {
+            return false;
+        }
+        let source_is_low = source.order_key() <= destination.order_key();
+        let client_packet = match flow.r2o_client_is_low {
+            Some(client_is_low) => source_is_low == client_is_low,
+            None => destination.port == 443 && source.port != 443,
+        };
+        client_packet
+    }
+
+    /// Запомнить решение `quicdeny` на потоках, как C `fl->quic_deny`.
+    pub fn r2o_mark_quic_deny(&mut self, packet: &[u8]) -> bool {
+        let Some(flow) = flow_key_from_packet(packet).and_then(|key| self.flows.get_mut(&key))
+        else {
+            return false;
+        };
+        !std::mem::replace(&mut flow.quic_deny, true)
     }
 
     /// Разрешить повтор плана после потери UDP-датаграммы при его исполнении.
@@ -588,6 +639,7 @@ mod tests {
     use super::R2oUdpSessions;
     use crate::flow_capacity::R2oFlowCapacity;
     use crate::netlink::{R2O_NF_INET_FORWARD, R2O_NF_INET_LOCAL_OUT, R2O_NF_INET_POST_ROUTING};
+    use crate::r2o_quic::R2oUdpExchangeEvent;
     use r2k_core::stun::binding_request;
     use std::time::{Duration, Instant};
 
@@ -764,6 +816,41 @@ mod tests {
             voice.stats().flows,
             voice.stats().refusals,
             voice.session_exchanges()
+        );
+
+        // V3: направление доказано QUIC Initial на POSTROUTING, затем STUN
+        // приходит на FORWARD. C берёт сторону из fl->dir_known.
+        let mut forward_voice = R2oUdpSessions::new().unwrap();
+        let forward_client = ([192, 0, 2, 10], 50011);
+        let seed = r2o_stun_packet(forward_client, server, initial);
+        forward_voice.r2o_observe_packet_at_hook(&seed, now, Some(R2O_NF_INET_POST_ROUTING));
+        let request = r2o_stun_packet(forward_client, server, &binding_request(txid));
+        forward_voice.r2o_observe_packet_at_hook(
+            &request,
+            now,
+            Some(crate::netlink::R2O_NF_INET_FORWARD),
+        );
+        forward_voice.r2o_observe_stun_packet_at_hook(
+            &request,
+            now,
+            Some(crate::netlink::R2O_NF_INET_FORWARD),
+        );
+        let response = r2o_stun_packet(server, forward_client, &r2o_stun_response(txid));
+        forward_voice.r2o_observe_packet_at_hook(
+            &response,
+            now,
+            Some(crate::netlink::R2O_NF_INET_FORWARD),
+        );
+        forward_voice.r2o_observe_stun_packet_at_hook(
+            &response,
+            now,
+            Some(crate::netlink::R2O_NF_INET_FORWARD),
+        );
+        println!(
+            "V3 flows={} refusals={} exchanges={}",
+            forward_voice.stats().flows,
+            forward_voice.stats().refusals,
+            forward_voice.session_exchanges()
         );
 
         let mut refusal =
@@ -958,6 +1045,22 @@ mod tests {
             }
             plan
         }
+        fn quic_split_fake_plan() -> Vec<u8> {
+            let mut plan = Vec::new();
+            plan_header(&mut plan, 0, 5, 0x54);
+            put_tlv(&mut plan, 0x0002, &[17, 2]);
+            put_tlv(&mut plan, 0x0010, &[0, 1, b'F', b'Q']);
+            put_tlv(&mut plan, 0x0100, &[0, 0, 0, 16]);
+            put_tlv(&mut plan, 0x0101, &[0, 1, 0, 0, 1, 0, 0, 0, 0, 0]);
+            plan
+        }
+        fn quic_deny_plan() -> Vec<u8> {
+            let mut plan = Vec::new();
+            plan_header(&mut plan, 11, 3, 0x55);
+            put_tlv(&mut plan, 0x0002, &[17, 2]);
+            put_tlv(&mut plan, 0x0110, &[1]);
+            plan
+        }
         fn voice_fake_plan() -> Vec<u8> {
             let mut plan = Vec::new();
             plan_header(&mut plan, 0, 4, 0x53);
@@ -999,21 +1102,12 @@ mod tests {
             });
             assert!(ack.ok, "SET_ADDR {address:?} shape {shape}");
         }
-        fn plan_case_ex(
+        fn print_plan_decision(
             name: &str,
-            plans: &crate::control::NamePlans,
-            packet: &[u8],
+            decision: crate::engine::PacketDecision,
             compare_skip: bool,
+            no_plan_note: bool,
         ) {
-            let selected = plans.select(packet);
-            let fallback = r2k_core::plan::Plan::default();
-            let mut sessions = crate::engine::TcpSessions::default();
-            let decision = crate::engine::decide_with_session(
-                &mut sessions,
-                selected.unwrap_or(&fallback),
-                packet,
-            );
-            let no_plan_note = crate::engine::r2o_udp_no_plan_note(selected, false, true).is_some();
             let (applied, packets, skip) = match decision {
                 crate::engine::PacketDecision::Replace(packet) => (1, vec![packet], 0),
                 crate::engine::PacketDecision::Transmit { packets, .. } => (
@@ -1023,6 +1117,7 @@ mod tests {
                 ),
                 crate::engine::PacketDecision::Drop => (1, Vec::new(), 0),
                 crate::engine::PacketDecision::Refused { .. }
+                | crate::engine::PacketDecision::RefusedUdp { .. }
                 | crate::engine::PacketDecision::FlowUnfit { .. } => (0, Vec::new(), 1),
                 _ => (0, Vec::new(), 0),
             };
@@ -1055,8 +1150,32 @@ mod tests {
                 println!(" skip=-");
             }
         }
+        fn plan_case_ex(
+            name: &str,
+            plans: &crate::control::NamePlans,
+            packet: &[u8],
+            compare_skip: bool,
+        ) {
+            let selected = plans.select(packet);
+            let fallback = r2k_core::plan::Plan::default();
+            let mut sessions = crate::engine::TcpSessions::default();
+            let decision = crate::engine::decide_with_session(
+                &mut sessions,
+                selected.unwrap_or(&fallback),
+                packet,
+            );
+            let no_plan_note = crate::engine::r2o_udp_no_plan_note(selected, false, true).is_some();
+            print_plan_decision(name, decision, compare_skip, no_plan_note);
+        }
         fn plan_case(name: &str, plans: &crate::control::NamePlans, packet: &[u8]) {
             plan_case_ex(name, plans, packet, true);
+        }
+        /// Общий план из файла `--plan`: control-проверка формы QUIC здесь не
+        /// участвует, как `d2k_session_set_plan` в C.
+        fn global_plan_case(name: &str, plan: &r2k_core::plan::Plan, packet: &[u8]) {
+            let mut sessions = crate::engine::TcpSessions::default();
+            let decision = crate::engine::decide_with_session(&mut sessions, plan, packet);
+            print_plan_decision(name, decision, true, false);
         }
 
         let server_addr = [198, 51, 100, 20];
@@ -1241,6 +1360,43 @@ mod tests {
             &plans,
             &r2o_stun_packet(([192, 0, 2, 10], 50108), (server_addr, 443), initial),
         );
+
+        let split_fake =
+            r2k_core::plan::Plan::parse_wire(&quic_split_fake_plan()).expect("P9 plan parses");
+        global_plan_case(
+            "P9 quic-split-fake",
+            &split_fake,
+            &r2o_stun_packet(([192, 0, 2, 10], 50109), (server_addr, 443), initial),
+        );
+
+        // P10: quicdeny снимает повтор Initial и обычную клиентскую
+        // датаграмму — как C `fl->quic_deny`.
+        let deny = r2k_core::plan::Plan::parse_wire(&quic_deny_plan()).expect("P10 plan parses");
+        let mut deny_sessions = R2oUdpSessions::new().unwrap();
+        let first = r2o_stun_packet(([192, 0, 2, 10], 50110), (server_addr, 443), initial);
+        let second = r2o_stun_packet(([192, 0, 2, 10], 50110), (server_addr, 443), b"later");
+        deny_sessions.r2o_observe_packet_at_hook(&first, now, Some(R2O_NF_INET_POST_ROUTING));
+        let mut sessions = crate::engine::TcpSessions::default();
+        let mut first_decision = crate::engine::decide_with_session(&mut sessions, &deny, &first);
+        if first_decision == crate::engine::PacketDecision::Drop {
+            deny_sessions.r2o_mark_quic_deny(&first);
+        }
+        deny_sessions.r2o_observe_packet_at_hook(&second, now, Some(R2O_NF_INET_POST_ROUTING));
+        let second_decision = if deny_sessions.r2o_quic_deny_for_packet(&second) {
+            first_decision = crate::engine::PacketDecision::Drop;
+            crate::engine::PacketDecision::Drop
+        } else {
+            crate::engine::decide_with_session(&mut sessions, &deny, &second)
+        };
+        let verdict = |decision: &crate::engine::PacketDecision| match decision {
+            crate::engine::PacketDecision::Drop => 1,
+            _ => 0,
+        };
+        println!(
+            "P10 qdeny-flow verdict={}/{} n=0/0",
+            verdict(&first_decision),
+            verdict(&second_decision)
+        );
     }
 
     #[test]
@@ -1348,6 +1504,47 @@ mod tests {
     }
 
     #[test]
+    fn quic_deny_flow_drops_later_client_packets_like_c() {
+        let client = ([192, 0, 2, 10], 50_500);
+        let server = ([198, 51, 100, 20], 443);
+        let now = Instant::now();
+        let mut sessions = R2oUdpSessions::new().unwrap();
+        let request = r2o_stun_packet(client, server, b"initial");
+        assert!(sessions.r2o_observe_packet_at_hook(&request, now, Some(R2O_NF_INET_POST_ROUTING)));
+        assert!(!sessions.r2o_quic_deny_for_packet(&request));
+        assert!(sessions.r2o_mark_quic_deny(&request));
+        assert!(
+            !sessions.r2o_mark_quic_deny(&request),
+            "флаг ставится один раз"
+        );
+
+        // Повтор Initial и обычная клиентская датаграмма снимаются.
+        assert!(sessions.r2o_quic_deny_for_packet(&request));
+        let later = r2o_stun_packet(client, server, b"0-rtt-data");
+        assert!(sessions.r2o_quic_deny_for_packet(&later));
+        // Ответ сервера — не клиентская сторона, его снимать нельзя.
+        let response = r2o_stun_packet(server, client, b"response");
+        assert!(!sessions.r2o_quic_deny_for_packet(&response));
+        // Другой поток решением не затронут.
+        let other = r2o_stun_packet(([192, 0, 2, 10], 50_501), server, b"other");
+        assert!(!sessions.r2o_quic_deny_for_packet(&other));
+    }
+
+    #[test]
+    fn quic_deny_forward_falls_back_to_port_443_like_c() {
+        let client = ([192, 0, 2, 10], 50_510);
+        let server = ([198, 51, 100, 20], 443);
+        let now = Instant::now();
+        let mut sessions = R2oUdpSessions::new().unwrap();
+        let request = r2o_stun_packet(client, server, b"initial");
+        assert!(sessions.r2o_observe_packet_at_hook(&request, now, Some(R2O_NF_INET_FORWARD)));
+        assert!(sessions.r2o_mark_quic_deny(&request));
+        assert!(sessions.r2o_quic_deny_for_packet(&request));
+        let response = r2o_stun_packet(server, client, b"response");
+        assert!(!sessions.r2o_quic_deny_for_packet(&response));
+    }
+
+    #[test]
     fn r2o_udp_повторяет_план_только_если_исполнение_потеряло_датаграмму() {
         let packet = r2o_udp_packet(44300);
         let mut sessions = R2oUdpSessions::new().unwrap();
@@ -1428,6 +1625,36 @@ mod tests {
             Some(R2O_NF_INET_FORWARD),
         );
         assert!(sessions.r2o_take_udp_exchange_events().is_empty());
+    }
+
+    #[test]
+    fn stun_forward_uses_known_direction_like_c() {
+        // C `handle_udp`: на FORWARD направление берётся из `fl->dir_known`,
+        // когда оно уже установлено. STUN-запрос и ответ на media-порту
+        // обязаны дать то же подтверждение, что и на POSTROUTING.
+        let client = ([192, 0, 2, 10], 50_111);
+        let server = ([198, 51, 100, 20], 50_010);
+        let transaction_id = [0x11; 12];
+        let request = r2o_stun_packet(client, server, &binding_request(transaction_id));
+        let response = r2o_stun_packet(server, client, &r2o_stun_response(transaction_id));
+        let start = Instant::now();
+        let mut sessions = R2oUdpSessions::new().unwrap();
+
+        // Первый пакет на POSTROUTING доказывает клиентскую сторону.
+        let seed = r2o_stun_packet(client, server, b"seed");
+        assert!(sessions.r2o_observe_packet_at_hook(&seed, start, Some(R2O_NF_INET_POST_ROUTING)));
+        // Дальше запрос и ответ идут через FORWARD — крючок сам по себе
+        // сторону не доказывает, но поток её уже знает.
+        assert!(sessions.r2o_observe_packet_at_hook(&request, start, Some(R2O_NF_INET_FORWARD)));
+        sessions.r2o_observe_stun_packet_at_hook(&request, start, Some(R2O_NF_INET_FORWARD));
+        assert!(sessions.r2o_take_udp_exchange_events().is_empty());
+
+        assert!(sessions.r2o_observe_packet_at_hook(&response, start, Some(R2O_NF_INET_FORWARD)));
+        sessions.r2o_observe_stun_packet_at_hook(&response, start, Some(R2O_NF_INET_FORWARD));
+        let events: Vec<R2oUdpExchangeEvent> = sessions.r2o_take_udp_exchange_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].code, 2, "STUN Binding proof");
+        assert_eq!(sessions.session_exchanges(), 1);
     }
 
     #[test]

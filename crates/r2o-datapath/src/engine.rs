@@ -1396,16 +1396,48 @@ impl TcpSessions {
                 !controller_probe,
             );
             match capture_result {
-                CaptureResult::Complete { bytes, .. } => {
+                CaptureResult::Complete { sequence, bytes } => {
                     let complete_hello = r2k_core::tls::parse(&bytes);
+                    // C `session.c:2204-2232`: только целое приветствие
+                    // (есть конец записи, середина рукопожатия и блок
+                    // расширений не оборван) объявляется приветствием.
                     if complete_hello.is_client_hello
-                        && complete_hello.sni_range.is_some()
-                        && !session.hello_has_sni
+                        && complete_hello.record_end.is_some()
+                        && complete_hello.hello_middle.is_some()
+                        && !complete_hello.extensions_truncated
                     {
-                        session.hello_has_sni = true;
-                        if !controller_probe {
-                            *r2o_tcp_hellos_with_sni = (*r2o_tcp_hellos_with_sni).wrapping_add(1);
+                        if complete_hello.ech_offer {
+                            if session.client_shape == r2k_core::control::SHAPE_MODERN {
+                                session.client_shape = r2k_core::control::SHAPE_ECH_TCP;
+                            } else if session.client_shape == r2k_core::control::SHAPE_MODERN_NO_TS
+                            {
+                                session.client_shape = r2k_core::control::SHAPE_ECH_NO_TS;
+                            } else if session.client_shape == r2k_core::control::SHAPE_MODERN_TS {
+                                session.client_shape = r2k_core::control::SHAPE_ECH_TS;
+                            }
                         }
+                        // C ставит `saw_hello` и считает приветствие, даже
+                        // если текущий сегмент не разобрался как ClientHello:
+                        // приветствие собрано из нескольких сегментов, и
+                        // именно сборщик доказал его целостность.
+                        if session.hello_at.is_none() {
+                            session.hello_at = Some(now);
+                            session.hello_seq = Some(sequence);
+                            if !controller_probe {
+                                *r2o_tcp_hello_flows = (*r2o_tcp_hello_flows).wrapping_add(1);
+                            }
+                        }
+                        if complete_hello.sni_range.is_some() && !session.hello_has_sni {
+                            session.hello_has_sni = true;
+                            if !controller_probe {
+                                *r2o_tcp_hellos_with_sni =
+                                    (*r2o_tcp_hellos_with_sni).wrapping_add(1);
+                            }
+                        }
+                        // C `note_tcp_hello` запоминает подтверждение hello
+                        // для reply_hidden независимо от того, кто первым
+                        // увидел приветствие — сегмент или сборщик.
+                        session.hello_ack = ack.then_some(tcp.acknowledgment);
                     }
                     session.hello_capture_done = true;
                     tcp_hello_capture.forget(&capture_key);
@@ -1982,6 +2014,12 @@ pub enum PacketDecision {
     Refused {
         plan_id: [u8; 16],
     },
+    /// C `handle_udp` `refuse`: журнальный отказ с кодом NONE и без плана
+    /// (невыполнимый для датаграммы план, переполнение буфера результата).
+    /// Оригинал при этом проходит: ни одна посылка не ушла.
+    RefusedUdp {
+        note: &'static str,
+    },
     FlowUnfit {
         plan_id: [u8; 16],
     },
@@ -2089,6 +2127,20 @@ fn decide_packet_with_segment_cap(
     let Ok(actions) = plan.apply(&input) else {
         return PacketDecision::Refused { plan_id: plan.id };
     };
+    // C `handle_udp` (`session.c:1372-1386`): датаграмма атомарна, разрез
+    // payload на несколько посылок — порча, а не разрез TCP-потока. C
+    // отказывает целиком и не отправляет ни одной посылки.
+    if actions
+        .emits
+        .iter()
+        .filter(|emission| emission.kind == EmitKind::Payload)
+        .count()
+        > 1
+    {
+        return PacketDecision::RefusedUdp {
+            note: "план режет датаграмму на части — для UDP это порча, не разрез",
+        };
+    }
     if fragment_probe {
         if actions.emits.len() != 1 || actions.emits[0].ipfrag != plan.ipfrag {
             return PacketDecision::Accept;
@@ -2097,7 +2149,9 @@ fn decide_packet_with_segment_cap(
         let Some(fragments) =
             r2k_core::wire::build_udp_fragments_with_capacity(packet, emission, D2O_OUT_BUF_BYTES)
         else {
-            return PacketDecision::Accept;
+            return PacketDecision::RefusedUdp {
+                note: "посылка невыполнима для UDP",
+            };
         };
         let packets = fragments
             .into_iter()
@@ -2130,7 +2184,9 @@ fn decide_packet_with_segment_cap(
     for emission in &actions.emits {
         let mut wire = vec![0; emission.bytes.len().saturating_add(48)];
         let Some(length) = r2k_core::wire::build_udp_packet(packet, emission, &mut wire) else {
-            return PacketDecision::Accept;
+            return PacketDecision::RefusedUdp {
+                note: "посылка невыполнима для UDP",
+            };
         };
         wire.truncate(length);
         packets.push(WirePacket {
@@ -2165,6 +2221,19 @@ fn decide_voice(plan: &Plan, packet: &[u8], view: &PacketView, payload: &[u8]) -
     let Ok(actions) = plan.apply(&input) else {
         return PacketDecision::Refused { plan_id: plan.id };
     };
+    // C `handle_udp` режет по этому признаку и голосовой путь: датаграмма
+    // Voice/STUN атомарна так же, как QUIC Initial.
+    if actions
+        .emits
+        .iter()
+        .filter(|emission| emission.kind == EmitKind::Payload)
+        .count()
+        > 1
+    {
+        return PacketDecision::RefusedUdp {
+            note: "план режет датаграмму на части — для UDP это порча, не разрез",
+        };
+    }
     if actions.emits.is_empty() {
         return if actions.fate == OriginalFate::Drop {
             PacketDecision::Drop
@@ -2177,7 +2246,9 @@ fn decide_voice(plan: &Plan, packet: &[u8], view: &PacketView, payload: &[u8]) -
     for emission in &actions.emits {
         let mut wire = vec![0; emission.bytes.len().saturating_add(48)];
         let Some(length) = r2k_core::wire::build_udp_packet(packet, emission, &mut wire) else {
-            return PacketDecision::Accept;
+            return PacketDecision::RefusedUdp {
+                note: "посылка невыполнима для UDP",
+            };
         };
         wire.truncate(length);
         packets.push(WirePacket {
@@ -2240,8 +2311,11 @@ fn decide_tcp(
     };
     let mut buffer = vec![0; max_packet_len];
     let mut packets = Vec::with_capacity(actions.emits.len());
-    for emission in &actions.emits {
-        let Some(len) = r2k_core::wire::build_tcp_packet(packet, emission, &mut buffer) else {
+    for (index, emission) in actions.emits.iter().enumerate() {
+        // C `session.c:2524-2530`: профиль tcp-template-v1 получает
+        // `ip_id = ip.ip_id + i`, где i — номер посылки в пачке плана.
+        let Some(len) = r2k_core::wire::build_tcp_packet_at(packet, emission, index, &mut buffer)
+        else {
             return PacketDecision::Accept;
         };
         packets.push(WirePacket {
@@ -2645,7 +2719,6 @@ mod tests {
         let hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello_with_sni());
         decide_with_session(&mut sessions, &plan, &hello);
         let flow_key = TcpFlowKey::from_packet(&hello).unwrap();
-        let key = flow_key.wire_key();
 
         // C `plan_handed_off`: sends_left = n_out + 1, orig_taken из вердикта.
         let key = sessions.r2o_begin_execution(&hello, 100, 2, false).unwrap();
@@ -3258,6 +3331,49 @@ mod tests {
 
         assert_eq!(sessions.r2o_tcp_hello_flows(), 1);
         assert_eq!(sessions.r2o_tcp_hellos_with_sni(), 1);
+    }
+
+    #[test]
+    fn split_client_hello_capture_marks_hello_like_c() {
+        // C `session.c:2194-2232`: приветствие, собранное из сегментов,
+        // объявляется приветствием и учитывается, даже если ни один сегмент
+        // по отдельности не разобрался как ClientHello.
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let hello = client_hello_with_sni();
+        assert!(hello.len() > 40);
+        let split_at = 5;
+        let mut sessions = TcpSessions::default();
+        sessions.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 1000, &[]), start);
+        sessions.track_packet(
+            &ipv4_tcp_packet(client, server, 0x18, 64, 1001, &hello[..split_at]),
+            start + Duration::from_millis(1),
+        );
+        assert_eq!(sessions.r2o_tcp_hello_flows(), 0);
+        sessions.track_packet(
+            &ipv4_tcp_packet(
+                client,
+                server,
+                0x18,
+                64,
+                1001 + split_at as u32,
+                &hello[split_at..],
+            ),
+            start + Duration::from_millis(2),
+        );
+        assert_eq!(sessions.r2o_tcp_hello_flows(), 1);
+        assert_eq!(sessions.r2o_tcp_hellos_with_sni(), 1);
+        let key = TcpFlowKey::from_packet(&ipv4_tcp_packet(
+            client,
+            server,
+            0x18,
+            64,
+            1001,
+            &hello[..split_at],
+        ))
+        .unwrap();
+        assert_eq!(sessions.flows[&key].hello_seq, Some(1001));
     }
 
     #[test]
@@ -6065,6 +6181,34 @@ mod tests {
         let data_existing = ipv4_tcp_packet(client, server, 0x18, 64, 3001, &[]);
         let value = feed(&mut sessions, &plan, &data_existing);
         print("I data-existing", &sessions, value);
+
+        // P: ClientHello, собранный из двух сегментов; первый сегмент
+        // короче заголовка рукопожатия и сам по себе не ClientHello.
+        let hello = client_hello_with_sni();
+        let mut split = TcpSessions::default();
+        let value = feed(
+            &mut split,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x02, 64, 1000, &[]),
+        );
+        let _ = value;
+        let value = feed(
+            &mut split,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x18, 64, 1001, &hello[..5]),
+        );
+        let _ = value;
+        let value = feed(
+            &mut split,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x18, 64, 1006, &hello[5..]),
+        );
+        println!(
+            "P split-capture flows={} hellos={} with_sni={} anchor={value}",
+            split.len(),
+            split.r2o_tcp_hello_flows(),
+            split.r2o_tcp_hellos_with_sni()
+        );
 
         fn print_plan(name: &str, decision: &PacketDecision, applied: bool) {
             let verdict = match decision {

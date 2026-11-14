@@ -40,6 +40,22 @@ fn next_udp_fragment_id() -> u32 {
 /// Буфером `out` владеет вызывающий код и он же его переиспользует; при неверном
 /// или слишком большом действии буфер остаётся нетронутым.
 pub fn build_tcp_packet(input: &[u8], emission: &Emission, out: &mut [u8]) -> Option<usize> {
+    build_tcp_packet_at(input, emission, 0, out)
+}
+
+/// Собрать TCP-посылку с номером в пачке плана.
+///
+/// C `d2k_session_packet` перед каждой посылкой профиля
+/// `tcp-template-v1` присваивает `c.ip_id = ip.ip_id + i`, где `i` — номер
+/// посылки в массиве `acts.v` (`session.c:2524-2530`). Поэтому несколько
+/// посылок одной пачки несут разные IP ID; сборка без номера повторила бы
+/// один и тот же ID и получила бы на получателе ложную связь с фрагментами.
+pub fn build_tcp_packet_at(
+    input: &[u8],
+    emission: &Emission,
+    emission_index: usize,
+    out: &mut [u8],
+) -> Option<usize> {
     let view = PacketView::parse(input)?;
     if view.protocol != 6
         || (emission.urgent
@@ -147,7 +163,7 @@ pub fn build_tcp_packet(input: &[u8], emission: &Emission, out: &mut [u8]) -> Op
         } else if measured {
             measured_ip_id?
         } else if native {
-            view.ip_id
+            view.ip_id.wrapping_add(emission_index as u16)
         } else {
             view.ip_id.wrapping_add(1)
         };
@@ -339,6 +355,15 @@ pub fn build_udp_fragments_with_capacity(
     whole_emission.ipfrag = 0;
     let whole_len = build_udp_packet(input, &whole_emission, &mut whole_packet)?;
     whole_packet.truncate(whole_len);
+    // C `d2k_udpfrag_build_ex` (`core/ipfrag.c:52-74`) получает TOS явно:
+    // `session.c:1499` передаёт `pkt[1]` исходного пакета. Обычная сборка
+    // UDP (`wire_udp.c:130`) пишет TOS=0, но фрагментный путь сохраняет
+    // исходный DSCP/ECN. Заголовок надо пересчитать после правки байта.
+    if view.family == 4 {
+        whole_packet[1] = view.traffic_class;
+        let checksum = checksum_value(sum16(&whole_packet[..IPV4_HEADER_LEN], 0));
+        write_u16(&mut whole_packet[10..12], checksum);
+    }
     let datagram = whole_packet.get(ip_header_len..whole_len)?;
     let cuts = udp_fragment_cuts(datagram.len(), emission.ipfrag)?;
     let reverse = emission.ipfrag > 1;

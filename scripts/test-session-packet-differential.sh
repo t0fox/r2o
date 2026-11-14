@@ -39,7 +39,7 @@ trap 'rm -rf -- "$TEMP"' EXIT HUP INT TERM
 "$CARGO" test --manifest-path "$ROOT/Cargo.toml" --locked --offline \
     -p r2o-datapath --lib engine::tests::d2o_session_packet_trace \
     -- --ignored --nocapture >"$TEMP/rust.raw" 2>&1
-grep -E '^([A-O]) ' "$TEMP/rust.raw" >"$TEMP/rust.out"
+grep -E '^([A-Z]) ' "$TEMP/rust.raw" >"$TEMP/rust.out"
 
 diff -u "$TEMP/c.out" "$TEMP/rust.out"
 printf 'cases=%s\n' "$(wc -l < "$TEMP/c.out")"
