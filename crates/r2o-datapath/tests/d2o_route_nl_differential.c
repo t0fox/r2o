@@ -150,14 +150,14 @@ int main(void) {
     print_rules("error", buffer, used);
 
     used = 0;
-    uint8_t route[128];
+    uint8_t route[512];
     size_t route_len = RM_RTMSG;
     memset(route, 0, sizeof route);
     route[0] = 2;
     route[7] = RM_RTN_UNICAST;
     uint32_t ifindex = 5;
     route_len = append_attr(route, route_len, RM_RTA_OIF, &ifindex, 4);
-    uint8_t multipath[64];
+    uint8_t multipath[256];
     size_t mp_len = 0;
     uint16_t hop_len = (uint16_t)RM_RTNH_LEN;
     wr16(multipath + mp_len, hop_len);
@@ -172,6 +172,20 @@ int main(void) {
     route_len = append_attr(route, route_len, RM_RTA_MULTIPATH, multipath, mp_len);
     used = append_route(buffer, 0, D2K_NLM_F_REQUEST, route, route_len);
     print_lookup("oif_multipath", buffer, used);
+
+    memset(route, 0, sizeof route);
+    route[0] = 2;
+    route[7] = RM_RTN_UNICAST;
+    route_len = RM_RTMSG;
+    mp_len = 0;
+    for (uint32_t hop = 100; hop < 120; hop++) {
+        wr16(multipath + mp_len, hop_len);
+        wr32(multipath + mp_len + 4, hop);
+        mp_len += RM_RTNH_LEN;
+    }
+    route_len = append_attr(route, route_len, RM_RTA_MULTIPATH, multipath, mp_len);
+    used = append_route(buffer, 0, D2K_NLM_F_REQUEST, route, route_len);
+    print_lookup("many_hops", buffer, used);
 
     memset(route, 0, sizeof route);
     route[0] = 2;

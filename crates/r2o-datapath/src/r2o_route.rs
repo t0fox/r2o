@@ -46,6 +46,9 @@ pub const R2O_ROUTE_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 #[cfg(target_os = "linux")]
 pub const R2O_ROUTE_SETTLE_INTERVAL: Duration = Duration::from_millis(100);
 const R2O_ROUTE_RULE_CAPACITY: usize = 32;
+/// C `D2K_ROUTEMARK_OIF_MAX`: устройства сверх 16 отбрасываются, а не
+/// превращают чтение маршрута в ошибку.
+const R2O_ROUTEMARK_OIF_MAX: usize = 16;
 const R2O_LOOKUP_ROUNDS: usize = 4;
 const R2O_LOOKUP_BUFFER: usize = 8192;
 const R2O_DUMP_ROUNDS: usize = 4096;
@@ -597,12 +600,6 @@ impl R2oRouteMonitor {
                 }
                 Err(error) => return Err(r2o_parse_io_error(error)),
             };
-            if matches!(&result, R2oRouteLookup::Unicast(ifindices) if ifindices.len() > 16) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "число выходных интерфейсов превышает безопасный предел",
-                ));
-            }
             Ok(!matches!(result, R2oRouteLookup::Pending))
         })?;
         Ok(result)
@@ -1243,7 +1240,10 @@ fn r2o_route_parse_multipath(
 }
 
 fn r2o_route_add_ifindex(ifindices: &mut Vec<u32>, ifindex: u32) {
-    if ifindex != 0 && !ifindices.contains(&ifindex) {
+    // C `add_oif`: ноль пропускается, дубли не хранятся, а всё сверх
+    // D2K_ROUTEMARK_OIF_MAX отбрасывается (счётчик C растёт, но копируется
+    // только 16 значений). Ошибкой это не считается.
+    if ifindex != 0 && ifindices.len() < R2O_ROUTEMARK_OIF_MAX && !ifindices.contains(&ifindex) {
         ifindices.push(ifindex);
     }
 }
@@ -1383,6 +1383,15 @@ mod tests {
         r2o_test_attr(&mut body, R2O_RTA_MULTIPATH, &multipath);
         let message = r2o_test_message(R2O_RTM_NEWROUTE, &body);
         print_lookup("oif_multipath", &message, &mut output);
+
+        let mut body = route_body(R2O_RTN_UNICAST);
+        let mut multipath = Vec::new();
+        for ifindex in 100..120 {
+            r2o_test_hop(&mut multipath, ifindex);
+        }
+        r2o_test_attr(&mut body, R2O_RTA_MULTIPATH, &multipath);
+        let message = r2o_test_message(R2O_RTM_NEWROUTE, &body);
+        print_lookup("many_hops", &message, &mut output);
 
         let message = r2o_test_message(R2O_RTM_NEWROUTE, &route_body(R2O_RTN_UNICAST));
         print_lookup("no_device", &message, &mut output);

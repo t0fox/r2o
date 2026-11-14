@@ -95,6 +95,12 @@ impl R2oConntrackGate {
         for attempt in 0..R2O_CONNTRACK_LOOKUP_ATTEMPTS {
             match query(&tuple) {
                 R2oProcNatLookup::TableMissing => {
+                    // C `flow_tracked`: `rc >= 0` завершает цикл, и при
+                    // attempt > 0 счётчик перепроверки увеличивается ещё до
+                    // разбора rc (в том числе для «таблицы нет»).
+                    if attempt > 0 {
+                        self.nat_retried = self.nat_retried.saturating_add(1);
+                    }
                     self.insert(tuple, CachedStatus::NoConntrackTable, now);
                     self.nat_none = self.nat_none.saturating_add(1);
                     return Confirmation::NoConntrackTable;
@@ -833,5 +839,24 @@ mod nat_stats_tests {
         );
         assert_eq!(calls, 2);
         assert_eq!(gate.nat_stats(), (1, 0, 0, 1));
+
+        // C `flow_tracked`: повторная попытка, на которой таблица исчезла,
+        // тоже считается перепроверкой (`g_nat_retried++`), а не только
+        // успешный повтор.
+        let mut gate = R2oConntrackGate::with_capacity(8);
+        let mut calls = 0;
+        assert_eq!(
+            gate.confirm(tuple(17), false, false, now, &mut |_| {
+                calls += 1;
+                if calls == 1 {
+                    R2oProcNatLookup::Missing
+                } else {
+                    R2oProcNatLookup::TableMissing
+                }
+            }),
+            Confirmation::NoConntrackTable
+        );
+        assert_eq!(calls, 2);
+        assert_eq!(gate.nat_stats(), (0, 0, 1, 1));
     }
 }
