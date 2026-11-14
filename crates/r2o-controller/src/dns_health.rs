@@ -865,12 +865,13 @@ impl rustls::client::danger::ServerCertVerifier for DnsQuicVerifier {
 }
 
 fn probe_doq(service: &DnsService, mark: Option<u32>, deadline: Instant) -> DnsHealthResult {
-    let mut result = DnsHealthResult::default();
     let address = match resolve_service(service) {
         Ok(address) => address,
         Err(reason) => {
-            result.reason = reason;
-            return result;
+            return DnsHealthResult {
+                reason,
+                ..Default::default()
+            };
         }
     };
     let host = if service.sni.is_empty() {
@@ -882,10 +883,36 @@ fn probe_doq(service: &DnsService, mark: Option<u32>, deadline: Instant) -> DnsH
     let socket = match crate::r2o_quic_http3::r2o_quic_http3_udp_socket_fresh(address, mark) {
         Ok((socket, _)) => socket,
         Err(error) => {
-            result.reason = format!("DoQ: UDP: {}", error.source);
-            return result;
+            return DnsHealthResult {
+                reason: format!("DoQ: UDP: {}", error.source),
+                ..Default::default()
+            };
         }
     };
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            return DnsHealthResult {
+                reason: format!("DoQ: нет Tokio runtime: {error}"),
+                ..Default::default()
+            };
+        }
+    };
+    runtime.block_on(probe_doq_on(socket, address, host, timeout))
+}
+
+/// C `d2k_verify_dns_on` для DoQ на уже занятом (и, при испытании, плановом)
+/// UDP-сокете: QUIC с ALPN `doq`, stream 0, zero ID, length-prefixed DNS.
+pub async fn probe_doq_on(
+    socket: std::net::UdpSocket,
+    address: SocketAddr,
+    host: &str,
+    timeout: Duration,
+) -> DnsHealthResult {
+    let mut result = DnsHealthResult::default();
     let provider = rustls::crypto::ring::default_provider();
     let name = Arc::new(Mutex::new(-1_i8));
     let verifier = Arc::new(DnsQuicVerifier {
@@ -913,37 +940,24 @@ fn probe_doq(service: &DnsService, mark: Option<u32>, deadline: Instant) -> DnsH
             return result;
         }
     };
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            result.reason = format!("DoQ: нет Tokio runtime: {error}");
-            return result;
-        }
-    };
     let quinn_runtime: Arc<dyn quinn::Runtime> = Arc::new(quinn::TokioRuntime);
-    let mut endpoint = {
-        let _guard = runtime.enter();
-        match quinn::Endpoint::new(
-            quinn::EndpointConfig::default(),
-            None,
-            socket,
-            quinn_runtime,
-        ) {
-            Ok(endpoint) => endpoint,
-            Err(error) => {
-                result.reason = format!("DoQ: endpoint: {error}");
-                return result;
-            }
+    let mut endpoint = match quinn::Endpoint::new(
+        quinn::EndpointConfig::default(),
+        None,
+        socket,
+        quinn_runtime,
+    ) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            result.reason = format!("DoQ: endpoint: {error}");
+            return result;
         }
     };
     let mut client_config = quinn::ClientConfig::new(Arc::new(crypto));
     client_config.transport_config(Arc::new(quinn::TransportConfig::default()));
     endpoint.set_default_client_config(client_config);
     let query = dns_query_frame(0);
-    let result_from_runtime: Result<(Vec<u8>, i8), String> = runtime.block_on(async {
+    let result_from_runtime: Result<(Vec<u8>, i8), String> = async {
         let connecting = endpoint
             .connect(address, host)
             .map_err(|error| format!("DoQ: {error}"))?;
@@ -974,7 +988,8 @@ fn probe_doq(service: &DnsService, mark: Option<u32>, deadline: Instant) -> DnsH
             .await
             .map_err(|error| format!("DoQ: frame body: {error}"))?;
         Ok::<(Vec<u8>, i8), String>((body, peer))
-    });
+    }
+    .await;
     endpoint.close(quinn::VarInt::from_u32(0), b"");
     match result_from_runtime {
         Ok((body, peer)) => {
