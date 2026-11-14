@@ -221,6 +221,67 @@ impl R2oRoutesRefreshLog {
     }
 }
 
+/// C `describe_oifs` (`d2kd.c:282-294`): точный текст выхода сырой посылки.
+pub fn r2o_describe_oifs(oifs: &[u32], read: bool, cap: usize) -> String {
+    if cap == 0 {
+        return String::new();
+    }
+    let mut text = String::new();
+    if !read {
+        text.push_str("неизвестен (проверка по интерфейсу выключена)");
+    } else if oifs.is_empty() {
+        text.push_str("нет");
+    } else {
+        for (index, &ifindex) in oifs.iter().enumerate() {
+            if index != 0 {
+                text.push_str(", ");
+            }
+            text.push_str(&r2o_interface_name(ifindex).unwrap_or_else(|| format!("#{ifindex}")));
+        }
+    }
+    // C snprintf всегда оставляет место под NUL: не длиннее cap-1 байт.
+    text.truncate(cap.saturating_sub(1));
+    text
+}
+
+fn r2o_interface_name(ifindex: u32) -> Option<String> {
+    let mut name = [0 as libc::c_char; libc::IF_NAMESIZE];
+    if unsafe { libc::if_indextoname(ifindex, name.as_mut_ptr()) }.is_null() {
+        return None;
+    }
+    Some(
+        unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+/// C `routes_refresh` quiet-строка (без префикса и перевода строки).
+pub fn r2o_routes_quiet_line(rules: &str, oifs4: &str, oifs6: &str, changes: u32) -> String {
+    let more = if changes > 1 {
+        format!(" [смен с прошлой записи: {changes}]")
+    } else {
+        String::new()
+    };
+    format!(
+        "метки маршрута по ip rule (клиент с такой меткой — без плана): {rules}; \
+         выход сырой посылки IPv4: {oifs4}, IPv6: {oifs6} \
+         (клиент, уходящий через другой интерфейс, — без плана){more}"
+    )
+}
+
+/// C `what[]` в `routes_refresh`: имена четырёх частей.
+impl R2oRoutesPart {
+    pub const fn r2o_c_name(self) -> &'static str {
+        match self {
+            Self::RulesV4 => "правила IPv4 по метке",
+            Self::RulesV6 => "правила IPv6 по метке",
+            Self::RouteV4 => "маршрут IPv4",
+            Self::RouteV6 => "маршрут IPv6",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum R2oRouteFamily {
     Ipv4,
@@ -390,6 +451,22 @@ impl R2oRouteGate {
         described
     }
 
+    /// C `describe_oifs`: точный формат выхода сырой посылки.
+    ///
+    /// `read=false` — «неизвестен…», `Some(empty)` — «нет», иначе имена
+    /// через `, ` и `#%u` для неразрешённого ifindex. `cap` — размер буфера
+    /// C, результат не длиннее `cap - 1` байт.
+    pub fn r2o_describe_default_ifindices(&self, family: R2oRouteFamily, cap: usize) -> String {
+        let slot = match family {
+            R2oRouteFamily::Ipv4 => self.r2o_default_ifindices_v4.as_deref(),
+            R2oRouteFamily::Ipv6 => self.r2o_default_ifindices_v6.as_deref(),
+        };
+        match slot {
+            Some(ifindices) => r2o_describe_oifs(ifindices, true, cap),
+            None => r2o_describe_oifs(&[], false, cap),
+        }
+    }
+
     /// Возвращает объединённые выходные интерфейсы известных IPv4/IPv6 маршрутов.
     pub fn r2o_egress_ifindices(&self) -> Option<Vec<u32>> {
         let mut ifindices = Vec::new();
@@ -550,6 +627,33 @@ impl Default for R2oRouteMonitor {
 impl R2oRouteMonitor {
     /// Подписывается на группы IPv4/IPv6; при недоступности подписки остаётся опрос.
     pub fn r2o_open_watch(&mut self) -> std::io::Result<()> {
+        let fd = Self::r2o_open_watch_with(|fd, group| {
+            let result = unsafe {
+                libc::setsockopt(
+                    fd,
+                    R2O_SOL_NETLINK,
+                    R2O_NETLINK_ADD_MEMBERSHIP,
+                    &group as *const i32 as *const libc::c_void,
+                    std::mem::size_of_val(&group) as libc::socklen_t,
+                )
+            };
+            if result == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+        self.watch = Some(fd?);
+        Ok(())
+    }
+
+    /// Открыть watch-сокет с подставляемым `setsockopt(NETLINK_ADD_MEMBERSHIP)`.
+    ///
+    /// C `d2k_routemark_watch_open`: группы IPv4 (8/7) обязательны, IPv6
+    /// (19/11) — нет. Выделено для unit/differential без LD_PRELOAD.
+    fn r2o_open_watch_with(
+        mut add_membership: impl FnMut(i32, i32) -> std::io::Result<()>,
+    ) -> std::io::Result<std::os::fd::OwnedFd> {
         use std::os::fd::{FromRawFd, OwnedFd};
 
         let raw_fd = unsafe {
@@ -576,21 +680,13 @@ impl R2oRouteMonitor {
             return Err(std::io::Error::last_os_error());
         }
         for (group, required) in [(8_i32, true), (7, true), (19, false), (11, false)] {
-            let result = unsafe {
-                libc::setsockopt(
-                    raw_fd,
-                    R2O_SOL_NETLINK,
-                    R2O_NETLINK_ADD_MEMBERSHIP,
-                    &group as *const i32 as *const libc::c_void,
-                    std::mem::size_of_val(&group) as libc::socklen_t,
-                )
-            };
-            if result != 0 && required {
-                return Err(std::io::Error::last_os_error());
+            if let Err(error) = add_membership(raw_fd, group) {
+                if required {
+                    return Err(error);
+                }
             }
         }
-        self.watch = Some(fd);
-        Ok(())
+        Ok(fd)
     }
 
     /// Дескриптор уведомлений для совместного ожидания с NFQUEUE.
@@ -1456,6 +1552,86 @@ mod tests {
     }
 
     #[test]
+    fn describe_oifs_повторяет_c_формат_и_усечение_по_cap() {
+        let loopback = unsafe { libc::if_nametoindex(b"lo\0".as_ptr().cast()) };
+        assert_ne!(loopback, 0);
+        let unknown = 0x7fff_fff0_u32;
+        assert_eq!(
+            r2o_describe_oifs(&[], false, 256),
+            "неизвестен (проверка по интерфейсу выключена)"
+        );
+        assert_eq!(r2o_describe_oifs(&[], true, 256), "нет");
+        assert_eq!(
+            r2o_describe_oifs(&[loopback, unknown], true, 256),
+            format!("lo, #{unknown}")
+        );
+        // C snprintf в буфер 8 оставляет 7 байт.
+        assert_eq!(r2o_describe_oifs(&[loopback, unknown], true, 8), "lo, #21");
+        assert_eq!(r2o_describe_oifs(&[loopback], true, 1), "");
+        assert_eq!(r2o_describe_oifs(&[loopback], true, 0), "");
+
+        let mut gate = R2oRouteGate::default();
+        assert_eq!(
+            gate.r2o_describe_default_ifindices(R2oRouteFamily::Ipv4, 256),
+            "неизвестен (проверка по интерфейсу выключена)"
+        );
+        gate.r2o_set_default_ifindices(R2oRouteFamily::Ipv4, Some(Vec::new()));
+        assert_eq!(
+            gate.r2o_describe_default_ifindices(R2oRouteFamily::Ipv4, 256),
+            "нет"
+        );
+        gate.r2o_set_default_ifindices(R2oRouteFamily::Ipv4, Some(vec![loopback, unknown]));
+        assert_eq!(
+            gate.r2o_describe_default_ifindices(R2oRouteFamily::Ipv4, 256),
+            format!("lo, #{unknown}")
+        );
+    }
+
+    #[test]
+    fn describe_oifs_differential_matches_c() {
+        let loopback = unsafe { libc::if_nametoindex(b"lo\0".as_ptr().cast()) };
+        assert_ne!(loopback, 0);
+        let oifs = [loopback, 0x7fff_fff0_u32];
+        let mut output = String::new();
+        output.push_str(&format!(
+            "lo_unknown <{}>\n",
+            r2o_describe_oifs(&oifs, true, 256)
+        ));
+        output.push_str(&format!(
+            "none <{}>\n",
+            r2o_describe_oifs(&oifs[..0], true, 256)
+        ));
+        output.push_str(&format!(
+            "unknown <{}>\n",
+            r2o_describe_oifs(&oifs, false, 256)
+        ));
+        output.push_str(&format!("cap8 <{}>\n", r2o_describe_oifs(&oifs, true, 8)));
+        output.push_str(&format!(
+            "cap1 <{}>\n",
+            r2o_describe_oifs(&oifs[..1], true, 1)
+        ));
+        if let Ok(path) = std::env::var("R2O_DESCRIBE_OIFS_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert!(output.contains("lo_unknown <lo, #2147483632>"));
+    }
+
+    #[test]
+    fn routes_quiet_строка_повторяет_c_и_счётчик_смен() {
+        let without = r2o_routes_quiet_line("0x1/0xff v4", "eth0", "#7", 1);
+        assert_eq!(
+            without,
+            "метки маршрута по ip rule (клиент с такой меткой — без плана): 0x1/0xff v4; \
+             выход сырой посылки IPv4: eth0, IPv6: #7 \
+             (клиент, уходящий через другой интерфейс, — без плана)"
+        );
+        let with = r2o_routes_quiet_line("нет", "нет", "нет", 3);
+        assert!(with.ends_with(" [смен с прошлой записи: 3]"));
+        assert_eq!(R2oRoutesPart::RulesV4.r2o_c_name(), "правила IPv4 по метке");
+        assert_eq!(R2oRoutesPart::RouteV6.r2o_c_name(), "маршрут IPv6");
+    }
+
+    #[test]
     fn routes_refresh_log_повторяет_переходы_c() {
         use R2oRoutePartStatus::{NoDevice, Read, Unread};
         use R2oRoutesChange::{
@@ -2231,6 +2407,48 @@ mod tests {
         let now = Instant::now();
         assert!(flows.r2o_skip_packet(&[0; 12], R2O_ROUTE_OUTSIDE, now));
         assert!(!flows.r2o_skip_packet(&[0; 12], 0, now));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn r2o_watch_open_differential_matches_c() {
+        let scenario = std::env::var("FAKE_WATCH_SCENARIO").unwrap_or_else(|_| "ok".into());
+        let mut monitor = R2oRouteMonitor::default();
+        let success = u8::from(monitor.r2o_open_watch().is_ok());
+        let output = format!("{scenario} success={success}\n");
+        if let Ok(path) = std::env::var("R2O_WATCH_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert!(output.contains("success="));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn r2o_watch_ipv4_groups_required_ipv6_optional_like_c() {
+        use std::io;
+
+        for (fail_group, expect_ok, expected_attempts) in [
+            (None, true, vec![8, 7, 19, 11]),
+            (Some(8), false, vec![8]),
+            (Some(7), false, vec![8, 7]),
+            (Some(19), true, vec![8, 7, 19, 11]),
+            (Some(11), true, vec![8, 7, 19, 11]),
+        ] {
+            let mut attempted = Vec::new();
+            let result = R2oRouteMonitor::r2o_open_watch_with(|_fd, group| {
+                attempted.push(group);
+                if Some(group) == fail_group {
+                    Err(io::Error::from_raw_os_error(libc::EPERM))
+                } else {
+                    Ok(())
+                }
+            });
+            assert_eq!(result.is_ok(), expect_ok, "fail={fail_group:?}");
+            assert_eq!(attempted, expected_attempts, "fail={fail_group:?}");
+            if let Err(error) = result {
+                assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+            }
+        }
     }
 
     #[cfg(target_os = "linux")]
