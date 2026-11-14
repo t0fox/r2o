@@ -3085,6 +3085,9 @@ fn r2o_measure_http_packet_budget(
                     r2o_budget_cut_note(requests, packets, need, "тайм-аут чтения повтора"),
                 );
             }
+            let silent_after = repeat_deadline
+                .checked_sub(Duration::from_millis(20))
+                .unwrap_or(repeat_deadline);
             if stream
                 .sock
                 .socket
@@ -3109,6 +3112,18 @@ fn r2o_measure_http_packet_budget(
                         io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
                     ) =>
                 {
+                    // C `budget_tcp`: CUT только если срок истёк целиком
+                    // (с допуском 20 мс); ранний тайм-аут — не измерение.
+                    if Instant::now() < silent_after {
+                        return r2o_budget_say(
+                            Budget::NotApplicable,
+                            r2o_budget_replay_note(
+                                requests,
+                                false,
+                                "ранний тайм-аут чтения повтора",
+                            ),
+                        );
+                    }
                     return r2o_budget_say(
                         Budget::Cut,
                         r2o_budget_cut_note(requests, packets, need, "тайм-аут чтения повтора"),
