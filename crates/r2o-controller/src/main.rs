@@ -7093,7 +7093,7 @@ fn r2o_family_applied_flow_matches(
     if event.key[0] != target.family
         || event.key[37] != 6
         || event.trial_id != trial_id
-        || event.plan_id != plan_id
+        || !r2o_plan_id_is_ours(plan_id, event.plan_id)
     {
         return false;
     }
@@ -11146,7 +11146,7 @@ fn applied_quic_trial_matches(
     let key = &event.key;
     if !r2o_trial_present(&event.trial_id)
         || event.trial_id != trial_id
-        || event.plan_id != plan_id
+        || !r2o_plan_id_is_ours(plan_id, event.plan_id)
         || key[37] != 17
         || key[0] != if server.is_ipv4() { 4 } else { 6 }
     {
@@ -23567,6 +23567,12 @@ fn r2o_sched_set_send_cap(send_cap: &AtomicUsize, send_maxlen: usize) {
 }
 
 #[cfg(unix)]
+fn r2o_plan_id_is_ours(plan_id: [u8; 16], event_plan_id: [u8; 16]) -> bool {
+    // C `plan_id_is_ours`: все нули — «идентификатора нет», отвергается даже
+    // при нулевом ожидаемом id.
+    plan_id != [0; 16] && event_plan_id == plan_id
+}
+
 fn r2o_ask_applied_matches(
     event: &r2k_core::control::AppliedEvent,
     key: &[u8; r2k_core::control::KEY_LEN],
@@ -23575,7 +23581,7 @@ fn r2o_ask_applied_matches(
 ) -> bool {
     r2o_trial_present(&event.trial_id)
         && event.key == *key
-        && event.plan_id == plan_id
+        && r2o_plan_id_is_ours(plan_id, event.plan_id)
         && event.trial_id == trial_id
 }
 
@@ -31519,6 +31525,14 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn plan_id_is_ours_rejects_zero_like_c() {
+        assert!(super::r2o_plan_id_is_ours([0x11; 16], [0x11; 16]));
+        assert!(!super::r2o_plan_id_is_ours([0x11; 16], [0x22; 16]));
+        assert!(!super::r2o_plan_id_is_ours([0; 16], [0; 16]));
+        assert!(!super::r2o_plan_id_is_ours([0; 16], [0x11; 16]));
+    }
+
     #[test]
     fn семейный_план_требует_https_и_applied_точного_потока_и_trial() {
         let target = DiscoveryTarget {
