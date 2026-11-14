@@ -2982,6 +2982,174 @@ impl R2oDnsServices {
 }
 
 #[cfg(unix)]
+struct R2oDnsHealth {
+    sender: std::sync::mpsc::Sender<(
+        usize,
+        u64,
+        Option<std::net::IpAddr>,
+        r2o_controller::dns_health::DnsHealthResult,
+    )>,
+    receiver: std::sync::mpsc::Receiver<(
+        usize,
+        u64,
+        Option<std::net::IpAddr>,
+        r2o_controller::dns_health::DnsHealthResult,
+    )>,
+    in_flight: bool,
+}
+
+#[cfg(unix)]
+impl R2oDnsHealth {
+    fn new() -> Self {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        Self {
+            sender,
+            receiver,
+            in_flight: false,
+        }
+    }
+
+    /// C `dns_health_start_due`: не более одной пробы, только
+    /// `state != checking` и `now >= next_check`; блокирующая проба уходит в
+    /// отдельный поток.
+    fn start_due(&mut self, state: &mut R2oDnsServices, mark: Option<u32>) {
+        if self.in_flight {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let index = state
+            .services
+            .iter()
+            .enumerate()
+            .find_map(|(index, service)| {
+                let live = state.live.get(index)?;
+                if live.state == r2o_controller::live::DnsServiceState::Checking
+                    || live.next_check.is_some_and(|next| now < next)
+                    || (live.ip.is_empty() && service.bootstrap_dns.is_empty())
+                {
+                    return None;
+                }
+                Some(index)
+            });
+        let Some(index) = index else {
+            return;
+        };
+        let service = state.services[index].clone();
+        let generation = state.live[index].generation;
+        let bootstrap = !service.bootstrap_dns.is_empty();
+        let mut probe = service.clone();
+        if !state.live[index].ip.is_empty() {
+            probe.host = state.live[index].ip.clone();
+        }
+        {
+            let live = &mut state.live[index];
+            live.state = r2o_controller::live::DnsServiceState::Checking;
+            live.tcp_reachable = false;
+            live.tls_handshake = false;
+            live.http_status = 0;
+            live.dns_answer = false;
+            live.attempts = live.attempts.saturating_add(1);
+            live.reason = if bootstrap && live.ip.is_empty() {
+                "Получается IP endpoint через настроенный bootstrap DNS перед проверкой RFC 8484."
+                    .into()
+            } else {
+                "Автоматически проверяется корректный DNS-ответ endpoint.".into()
+            };
+        }
+        self.in_flight = true;
+        let sender = self.sender.clone();
+        std::thread::spawn(move || {
+            let mut resolved = None;
+            let mut probe = probe;
+            if probe.host.parse::<std::net::IpAddr>().is_err() {
+                match r2k_core::dns_config::dns_resolve_bootstrap(
+                    &probe.host,
+                    &probe.bootstrap_dns,
+                    mark.unwrap_or(0),
+                ) {
+                    Some(ip) => {
+                        probe.host = ip.to_string();
+                        resolved = Some(ip);
+                    }
+                    None => {
+                        let _ = sender.send((
+                            index,
+                            generation,
+                            None,
+                            r2o_controller::dns_health::DnsHealthResult {
+                                reason: "DNS: bootstrap не разрешил endpoint".into(),
+                                ..Default::default()
+                            },
+                        ));
+                        return;
+                    }
+                }
+            }
+            let result = r2o_controller::dns_health::probe_dns_health(
+                &probe,
+                mark,
+                std::time::Duration::from_millis(4000),
+            );
+            let _ = sender.send((index, generation, resolved, result));
+        });
+    }
+
+    fn poll(&mut self, state: &mut R2oDnsServices, wall_now: i64) {
+        while let Ok((index, generation, resolved, result)) = self.receiver.try_recv() {
+            self.in_flight = false;
+            let Some(live) = state.live.get_mut(index) else {
+                continue;
+            };
+            if live.generation != generation {
+                continue;
+            }
+            if let Some(ip) = resolved {
+                let ip = ip.to_string();
+                if live.ip != ip {
+                    live.ip = ip;
+                    live.plan_applied = false;
+                    live.applied_plan_id.clear();
+                    live.plan_applied_at = None;
+                }
+            }
+            live.checked_at = Some(wall_now.max(1));
+            live.tcp_reachable = result.tcp_reachable;
+            live.tls_handshake = result.tls_handshake;
+            live.http_status = result.http_status;
+            live.dns_answer = result.dns_reply;
+            live.state = if result.dns_reply {
+                r2o_controller::live::DnsServiceState::DirectOk
+            } else {
+                r2o_controller::live::DnsServiceState::Failed
+            };
+            live.next_check = Some(
+                std::time::Instant::now()
+                    + if result.dns_reply {
+                        std::time::Duration::from_secs(5 * 60)
+                    } else {
+                        std::time::Duration::from_secs(60)
+                    },
+            );
+            live.reason = if result.dns_reply {
+                result.reason
+            } else if result.http_status == 413 {
+                "HTTP 413: это ошибка endpoint, а не доказательство DPI; подбор не запускается."
+                    .into()
+            } else {
+                format!(
+                    "DNS-ответ не подтверждён ({}); одиночная ошибка не считается блокировкой.",
+                    if result.reason.is_empty() {
+                        "причина не определена"
+                    } else {
+                        &result.reason
+                    }
+                )
+            };
+        }
+    }
+}
+
+#[cfg(unix)]
 fn clear_catalog(path: PathBuf) -> Result<(), Box<dyn Error>> {
     let (_lock, _current) = locked_catalog(&path, &Catalog::default())?;
     let updated = std::time::SystemTime::now()
@@ -18490,6 +18658,7 @@ impl ControlClient {
         // C `dns_services_refresh`: чтение конфигурации на старте и не чаще
         // раза в 30 с; ошибка ndmc сохраняет прошлый удачный набор.
         let mut dns_services = R2oDnsServices::from_system();
+        let mut dns_health = R2oDnsHealth::new();
         let mut dns_services_refresh =
             std::time::Instant::now() + std::time::Duration::from_secs(30);
         let http_search = discovery.as_ref().map(|(catalog, _, _)| {
@@ -18912,6 +19081,12 @@ impl ControlClient {
                     }
                     dns_services_refresh = r2o_now + std::time::Duration::from_secs(30);
                 }
+                let dns_wall_now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                dns_health.poll(&mut dns_services, dns_wall_now);
+                dns_health.start_due(&mut dns_services, https_probe_mark);
                 if live_written_at.is_none_or(|last: std::time::Instant| {
                     r2o_now.saturating_duration_since(last) >= std::time::Duration::from_secs(2)
                 }) {
@@ -26874,6 +27049,40 @@ mod tests {
         state.observe(&changed, "dns.example", 6, now);
         snapshot(&state, "ip_changed");
 
+        state.live[0].checked_at = Some(2005);
+        state.live[0].tcp_reachable = true;
+        state.live[0].tls_handshake = true;
+        state.live[0].http_status = 200;
+        state.live[0].dns_answer = true;
+        state.live[0].state = r2o_controller::live::DnsServiceState::DirectOk;
+        state.live[0].attempts = 2;
+        state.live[0].reason = "DoH: получен корректный DNS-ответ".into();
+        snapshot(&state, "health_success");
+
+        state.live[0].checked_at = Some(2005);
+        state.live[0].tcp_reachable = true;
+        state.live[0].tls_handshake = false;
+        state.live[0].http_status = 413;
+        state.live[0].dns_answer = false;
+        state.live[0].state = r2o_controller::live::DnsServiceState::Failed;
+        state.live[0].attempts = 3;
+        state.live[0].reason =
+            "HTTP 413: это ошибка endpoint, а не доказательство DPI; подбор не запускается.".into();
+        snapshot(&state, "health_413");
+
+        state.live[0].state = r2o_controller::live::DnsServiceState::Detected;
+        state.live[0].plan_applied = true;
+        state.live[0].plan_applied_at = Some(2005);
+        state.live[0].applied_plan_id = "ab".repeat(16);
+        state.live[0].dns_answer = true;
+        snapshot(&state, "plan_applied_with_answer");
+
+        state.live[0].candidate_plan_applied = true;
+        state.live[0].tcp_reachable = true;
+        state.live[0].tls_handshake = true;
+        state.live[0].http_status = 200;
+        snapshot(&state, "bypass_ok");
+
         if let Ok(path) = std::env::var("R2O_DNS_STATE_DIFF_OUTPUT") {
             std::fs::write(path, serde_json::to_string(&scenarios).unwrap()).unwrap();
         }
@@ -27549,6 +27758,162 @@ mod tests {
         super::r2o_store_confirmed_probe_path(&mut catalog, &target, &plan_id, "/public/site.css");
         assert_eq!(catalog.boxes[0].bindings[0].probe_path, "/public/site.css");
         assert_eq!(catalog.boxes[0].bindings[1].probe_path, "/legacy.css");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dns_health_poll_updates_state_and_clears_plan_on_ip_change() {
+        use r2k_core::dns_config::DnsService;
+        use r2o_controller::dns_health::DnsHealthResult;
+        use r2o_controller::live::DnsServiceState;
+
+        let service = DnsService {
+            protocol: "doh".into(),
+            host: "dns.example".into(),
+            sni: "dns.example".into(),
+            path: "/dns-query".into(),
+            bootstrap_dns: String::new(),
+            source: "https-dns-proxy".into(),
+            port: 443,
+        };
+        let mut state = super::R2oDnsServices {
+            services: vec![service.clone()],
+            live: vec![r2o_controller::live::DnsServiceLive {
+                generation: 7,
+                plan_applied: true,
+                applied_plan_id: "ab".repeat(16),
+                plan_applied_at: Some(1000),
+                attempts: 1,
+                ..Default::default()
+            }],
+            generation: 7,
+        };
+        let mut health = super::R2oDnsHealth::new();
+        health.in_flight = true;
+        health
+            .sender
+            .send((
+                0,
+                7,
+                Some(std::net::IpAddr::from([198, 51, 100, 80])),
+                DnsHealthResult {
+                    tcp_reachable: true,
+                    tls_handshake: true,
+                    http_status: 200,
+                    dns_reply: true,
+                    reason: "DoH: получен корректный DNS-ответ".into(),
+                },
+            ))
+            .unwrap();
+        health.poll(&mut state, 2005);
+        let live = &state.live[0];
+        assert_eq!(live.ip, "198.51.100.80");
+        assert_eq!(live.state, DnsServiceState::DirectOk);
+        assert!(live.dns_answer);
+        assert!(live.tcp_reachable && live.tls_handshake);
+        assert_eq!(live.http_status, 200);
+        assert_eq!(live.checked_at, Some(2005));
+        assert!(live.next_check.is_some());
+        assert_eq!(live.reason, "DoH: получен корректный DNS-ответ");
+        assert!(!live.plan_applied);
+        assert!(live.applied_plan_id.is_empty());
+        assert!(live.plan_applied_at.is_none());
+
+        health.in_flight = true;
+        health
+            .sender
+            .send((
+                0,
+                7,
+                None,
+                DnsHealthResult {
+                    tcp_reachable: true,
+                    http_status: 413,
+                    reason: "HTTP 413".into(),
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        health.poll(&mut state, 2006);
+        let live = &state.live[0];
+        assert_eq!(live.state, DnsServiceState::Failed);
+        assert!(live.reason.contains("HTTP 413"));
+        assert!(live.next_check.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dns_health_start_due_runs_one_nonblocking_probe_and_stores_failure() {
+        use r2k_core::dns_config::DnsService;
+        use r2o_controller::live::DnsServiceState;
+
+        let mut state = super::R2oDnsServices {
+            services: vec![DnsService {
+                protocol: "doh".into(),
+                host: "127.0.0.1".into(),
+                sni: "dns.example".into(),
+                path: "/dns-query".into(),
+                bootstrap_dns: String::new(),
+                source: "https-dns-proxy".into(),
+                port: 9,
+            }],
+            live: vec![r2o_controller::live::DnsServiceLive {
+                generation: 3,
+                ip: "127.0.0.1".into(),
+                ..Default::default()
+            }],
+            generation: 3,
+        };
+        let mut health = super::R2oDnsHealth::new();
+        health.start_due(&mut state, None);
+        assert!(health.in_flight);
+        assert_eq!(state.live[0].state, DnsServiceState::Checking);
+        assert_eq!(state.live[0].attempts, 1);
+        for _ in 0..100 {
+            health.poll(&mut state, 2005);
+            if !health.in_flight {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(!health.in_flight);
+        assert_eq!(state.live[0].generation, 3);
+        assert_eq!(state.live[0].state, DnsServiceState::Failed);
+        assert_eq!(state.live[0].checked_at, Some(2005));
+        assert!(!state.live[0].reason.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dns_health_start_due_skips_checking_and_future_slots() {
+        use r2k_core::dns_config::DnsService;
+        use r2o_controller::live::DnsServiceState;
+
+        let service = DnsService {
+            protocol: "doh".into(),
+            host: "dns.example".into(),
+            sni: "dns.example".into(),
+            path: "/dns-query".into(),
+            bootstrap_dns: String::new(),
+            source: "https-dns-proxy".into(),
+            port: 443,
+        };
+        let mut state = super::R2oDnsServices {
+            services: vec![service],
+            live: vec![r2o_controller::live::DnsServiceLive {
+                state: DnsServiceState::Checking,
+                ..Default::default()
+            }],
+            generation: 0,
+        };
+        let mut health = super::R2oDnsHealth::new();
+        health.start_due(&mut state, None);
+        assert!(!health.in_flight);
+        state.live[0].state = DnsServiceState::Detected;
+        state.live[0].next_check =
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        health.start_due(&mut state, None);
+        assert!(!health.in_flight);
     }
 
     #[cfg(unix)]

@@ -30,6 +30,9 @@ pub struct DnsServiceLive {
     pub http_status: i32,
     pub dns_answer: bool,
     pub plan_applied: bool,
+    /// C `t->ver_ok` задачи T_DNS_HEALTH: план применился к пробному
+    /// DNS-соединению. Без plan-based health-пробы остаётся false.
+    pub candidate_plan_applied: bool,
     pub attempts: u32,
     /// Стенные секунды для live.json; None — проверки ещё не было.
     pub checked_at: Option<i64>,
@@ -51,6 +54,7 @@ impl Default for DnsServiceLive {
             http_status: 0,
             dns_answer: false,
             plan_applied: false,
+            candidate_plan_applied: false,
             attempts: 0,
             checked_at: None,
             next_check: None,
@@ -514,52 +518,61 @@ fn r2o_live_dns_services(
             } else {
                 "Адрес endpoint обнаружен; автоматическая проверка ожидает очереди."
             };
-            let (state_name, reason) = match state.state {
-                DnsServiceState::Checking => (
-                    "checking",
-                    if state.reason.is_empty() {
-                        "Автоматически проверяется корректный DNS-ответ endpoint.".to_owned()
-                    } else {
-                        state.reason.clone()
-                    },
-                ),
-                DnsServiceState::DirectOk => (
-                    "direct_ok",
-                    if state.reason.is_empty() {
-                        "Прямое соединение подтверждено.".to_owned()
-                    } else {
-                        state.reason.clone()
-                    },
-                ),
-                DnsServiceState::Failed if state.plan_applied => (
-                    "plan_applied",
-                    format!(
-                        "Датапат подтвердил план {} на DNS-соединении; DNS-ответ отдельно ещё не подтверждён. Автопроверка: {}",
-                        state.applied_plan_id,
+            let candidate_plan_applied = state.candidate_plan_applied;
+            let dns_answer_via_plan = candidate_plan_applied && state.dns_answer;
+            let (state_name, reason) = if dns_answer_via_plan {
+                (
+                    "bypass_ok",
+                    "Плановый DoH-зонд получил корректный DNS-ответ; применение к обычному потоку показывается отдельно.".to_owned(),
+                )
+            } else {
+                match state.state {
+                    DnsServiceState::Checking => (
+                        "checking",
+                        if state.reason.is_empty() {
+                            "Автоматически проверяется корректный DNS-ответ endpoint.".to_owned()
+                        } else {
+                            state.reason.clone()
+                        },
+                    ),
+                    DnsServiceState::DirectOk => (
+                        "direct_ok",
+                        if state.reason.is_empty() {
+                            "Прямое соединение подтверждено.".to_owned()
+                        } else {
+                            state.reason.clone()
+                        },
+                    ),
+                    DnsServiceState::Failed if state.plan_applied => (
+                        "plan_applied",
+                        format!(
+                            "Датапат подтвердил план {} на DNS-соединении; DNS-ответ отдельно ещё не подтверждён. Автопроверка: {}",
+                            state.applied_plan_id,
+                            if state.reason.is_empty() {
+                                "DNS-ответ не подтверждён; одиночная ошибка не считается блокировкой."
+                            } else {
+                                &state.reason
+                            }
+                        ),
+                    ),
+                    DnsServiceState::Detected if state.plan_applied => (
+                        "plan_applied",
+                        format!(
+                            "Датапат подтвердил план {} на DNS-соединении; DNS-ответ отдельно ещё не подтверждён.",
+                            state.applied_plan_id
+                        ),
+                    ),
+                    DnsServiceState::Failed => (
+                        "failed",
                         if state.reason.is_empty() {
                             "DNS-ответ не подтверждён; одиночная ошибка не считается блокировкой."
+                                .to_owned()
                         } else {
-                            &state.reason
-                        }
+                            state.reason.clone()
+                        },
                     ),
-                ),
-                DnsServiceState::Detected if state.plan_applied => (
-                    "plan_applied",
-                    format!(
-                        "Датапат подтвердил план {} на DNS-соединении; DNS-ответ отдельно ещё не подтверждён.",
-                        state.applied_plan_id
-                    ),
-                ),
-                DnsServiceState::Failed => (
-                    "failed",
-                    if state.reason.is_empty() {
-                        "DNS-ответ не подтверждён; одиночная ошибка не считается блокировкой."
-                            .to_owned()
-                    } else {
-                        state.reason.clone()
-                    },
-                ),
-                DnsServiceState::Detected => ("detected", detected_reason.to_owned()),
+                    DnsServiceState::Detected => ("detected", detected_reason.to_owned()),
+                }
             };
             let path = service.path.split('?').next().unwrap_or("/").to_owned();
             json!({
@@ -581,8 +594,8 @@ fn r2o_live_dns_services(
                 "applied_plan_id": state.applied_plan_id,
                 "plan_applied_at": r2o_live_optional_time(state.plan_applied_at),
                 "plan_applied": state.plan_applied,
-                "candidate_plan_applied": false,
-                "dns_answer_via_plan": false,
+                "candidate_plan_applied": candidate_plan_applied,
+                "dns_answer_via_plan": dns_answer_via_plan,
                 "dns_answer_confirmed": state.dns_answer,
             })
         })
@@ -1559,6 +1572,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(empty["dns_services"], json!([]));
+    }
+
+    #[test]
+    fn live_dns_bypass_state_requires_plan_and_dns_answer() {
+        use r2k_core::dns_config::DnsService;
+
+        let service = DnsService {
+            protocol: "doh".into(),
+            host: "dns.example".into(),
+            sni: "dns.example".into(),
+            path: "/dns-query".into(),
+            bootstrap_dns: String::new(),
+            source: "https-dns-proxy".into(),
+            port: 443,
+        };
+        let live = DnsServiceLive {
+            generation: 1,
+            plan_applied: true,
+            candidate_plan_applied: true,
+            applied_plan_id: "ab".repeat(16),
+            dns_answer: true,
+            plan_applied_at: Some(1000),
+            ..DnsServiceLive::default()
+        };
+        let snapshot = snapshot_with_areas_and_dns(
+            &Catalog::default(),
+            Path::new("/state/catalog.json"),
+            &HashSet::new(),
+            Vec::new(),
+            json!({}),
+            DiscoveryStatus::default(),
+            &[],
+            std::slice::from_ref(&service),
+            std::slice::from_ref(&live),
+        )
+        .unwrap();
+        assert_eq!(snapshot["dns_services"][0]["state"], "bypass_ok");
+        assert_eq!(snapshot["dns_services"][0]["candidate_plan_applied"], true);
+        assert_eq!(snapshot["dns_services"][0]["dns_answer_via_plan"], true);
     }
 
     #[test]

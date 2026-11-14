@@ -62,6 +62,52 @@ int main(void) {
     dns_service_observe(&s, &ev, ev.name);
     emit("ip_changed");
 
+    s.dns_service_live[0].checked_ms = 5000;
+    s.dns_service_live[0].tcp_reachable = 1;
+    s.dns_service_live[0].tls_handshake = 1;
+    s.dns_service_live[0].http_status = 200;
+    s.dns_service_live[0].dns_answer = 1;
+    s.dns_service_live[0].state = DNS_SERVICE_DIRECT_OK;
+    s.dns_service_live[0].attempts = 2;
+    snprintf(s.dns_service_live[0].reason, sizeof s.dns_service_live[0].reason,
+             "DoH: получен корректный DNS-ответ");
+    emit("health_success");
+
+    s.dns_service_live[0].checked_ms = 5001;
+    s.dns_service_live[0].tcp_reachable = 1;
+    s.dns_service_live[0].tls_handshake = 0;
+    s.dns_service_live[0].http_status = 413;
+    s.dns_service_live[0].dns_answer = 0;
+    s.dns_service_live[0].state = DNS_SERVICE_FAILED;
+    s.dns_service_live[0].attempts = 3;
+    snprintf(s.dns_service_live[0].reason, sizeof s.dns_service_live[0].reason,
+             "HTTP 413: это ошибка endpoint, а не доказательство DPI; подбор не запускается.");
+    emit("health_413");
+
+    // План применён к живому DNS-соединению, DNS-ответ прямого health-зонда
+    // есть: без task-candidate C оставляет state plan_applied.
+    s.dns_service_live[0].state = DNS_SERVICE_DETECTED;
+    s.dns_service_live[0].plan_applied = 1;
+    s.dns_service_live[0].plan_applied_ms = 5000;
+    snprintf(s.dns_service_live[0].applied_plan_id,
+             sizeof s.dns_service_live[0].applied_plan_id, "abababababababababababababababab");
+    s.dns_service_live[0].dns_answer = 1;
+    emit("plan_applied_with_answer");
+
+    // Task-candidate: plan применён к пробному DNS-соединению и получен
+    // DNS-ответ — bypass_ok.
+    task *t = &s.tasks[0];
+    memset(t, 0, sizeof *t);
+    t->state = T_VERIFY;
+    snprintf(t->dns_protocol, sizeof t->dns_protocol, "doh");
+    snprintf(t->name, sizeof t->name, "dns.example");
+    t->port = 443;
+    t->ver_ok = 1;
+    t->ver.dns_reply = 1;
+    t->ver.level = D2K_VER_APPLICATION;
+    t->ver.status = 200;
+    emit("bypass_ok");
+
     printf("]\n");
     return 0;
 }
