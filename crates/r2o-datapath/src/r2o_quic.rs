@@ -15,6 +15,8 @@ use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 const MAX_INITIAL_RING: usize = 32;
+/// C `D2K_QW_MAX_DGRAM` (`core/include/d2k_quicwire.h:53`).
+const MAX_INITIAL_DGRAM: usize = 1500;
 const MAX_INITIAL_DATAGRAMS: usize = 4;
 const QUIC_SILENCE: Duration = Duration::from_secs(2);
 const QUIC_IDLE: Duration = Duration::from_secs(120);
@@ -134,7 +136,6 @@ pub struct R2oQuicStallProbe {
 
 struct InitialDatagram {
     key: FlowKey,
-    version: u32,
     dcid: Vec<u8>,
     bytes: Vec<u8>,
 }
@@ -176,6 +177,18 @@ impl R2oQuicSessions {
         self.r2o_idle_timeout = timeout;
     }
 
+    /// C `init_ring_pack` (`session.c:253-283`): датаграммы потока с тем же
+    /// DCID от самой старой к новой, не больше `MAX_INITIAL_DATAGRAMS`.
+    /// Версия не входит в ключ: C хранит только DCID.
+    fn r2o_initial_flight(&self, key: &FlowKey, dcid: &[u8]) -> Vec<&[u8]> {
+        self.initial_ring
+            .iter()
+            .filter(|entry| entry.key == *key && entry.dcid == dcid)
+            .take(MAX_INITIAL_DATAGRAMS)
+            .map(|entry| entry.bytes.as_slice())
+            .collect()
+    }
+
     /// Собрать имя из проверенных Initial одного UDP-потока.
     pub fn capture_hello(&mut self, packet: &[u8]) -> Option<super::capture::QuicHello> {
         self.capture_hello_at_hook(packet, None)
@@ -214,7 +227,10 @@ impl R2oQuicSessions {
             return None;
         }
         let payload = packet.get(view.udp_payload_range(packet)?)?;
-        let (version, dcid) = r2k_core::quic::r2k_quic_initial_flight_id_structural(payload)?;
+        if payload.len() > MAX_INITIAL_DGRAM {
+            return None;
+        }
+        let (_, dcid) = r2k_core::quic::r2k_quic_initial_flight_id_structural(payload)?;
         let key = FlowKey::new(source, destination).0;
 
         let idle_timeout = self.r2o_idle_timeout;
@@ -236,23 +252,13 @@ impl R2oQuicSessions {
             }
             self.initial_ring.push_back(InitialDatagram {
                 key,
-                version,
                 dcid: dcid.clone(),
                 bytes: payload.to_vec(),
             });
         }
 
         let (host, snapshot) = {
-            let matching = self
-                .initial_ring
-                .iter()
-                .filter(|entry| entry.key == key && entry.version == version && entry.dcid == dcid)
-                .collect::<Vec<_>>();
-            let start = matching.len().saturating_sub(MAX_INITIAL_DATAGRAMS);
-            let datagrams = matching[start..]
-                .iter()
-                .map(|entry| entry.bytes.as_slice())
-                .collect::<Vec<_>>();
+            let datagrams = self.r2o_initial_flight(&key, &dcid);
             let host = r2k_core::quic::r2k_quic_initial_sni_result_from_datagrams(&datagrams)
                 .ok()?
                 .unwrap_or_default();
@@ -781,6 +787,57 @@ mod tests {
             kind: EVENT_R2O_QUIC_SUSPECT,
             body: event.event_body().unwrap(),
         }
+    }
+
+    #[test]
+    fn init_ring_add_дедуп_и_предел_1500_как_c() {
+        let start = Instant::now();
+        let client = [192, 0, 2, 10];
+        let server = [198, 51, 100, 20];
+        let mut sessions = R2oQuicSessions::default();
+        let packet = ipv4_packet(client, server, 53_123, 443, INITIAL_FIRST);
+        let _ = sessions.capture_hello(&packet);
+        let _ = sessions.capture_hello(&packet);
+        assert_eq!(sessions.initial_ring.len(), 1, "повтор PTO не удваивается");
+        let mut oversized = INITIAL_FIRST.to_vec();
+        oversized.resize(1501, 0);
+        let oversized_packet = ipv4_packet(client, server, 53_124, 443, &oversized);
+        assert!(
+            sessions
+                .capture_hello_at_hook_at(&oversized_packet, None, start)
+                .is_none()
+        );
+        assert_eq!(sessions.initial_ring.len(), 1, "C отбрасывает >1500");
+    }
+
+    #[test]
+    fn init_ring_pack_берёт_первые_четыре_датаграммы_как_c() {
+        let start = Instant::now();
+        let client = [192, 0, 2, 10];
+        let server = [198, 51, 100, 20];
+        let mut sessions = R2oQuicSessions::default();
+        let mut variants = Vec::new();
+        for index in 0..5_u8 {
+            let mut datagram = INITIAL_FIRST.to_vec();
+            // Правим только шифротекст: заголовок, длины и DCID те же.
+            datagram[200 + usize::from(index)] ^= 0x40 + index;
+            let packet = ipv4_packet(client, server, 53_123, 443, &datagram);
+            let _ = sessions.capture_hello_at_hook_at(
+                &packet,
+                None,
+                start + Duration::from_millis(u64::from(index)),
+            );
+            variants.push(datagram);
+        }
+        assert_eq!(sessions.initial_ring.len(), 5);
+        let entry = sessions.initial_ring.front().expect("ring entry");
+        let flight = sessions.r2o_initial_flight(&entry.key, &entry.dcid);
+        assert_eq!(flight.len(), 4);
+        assert_eq!(
+            flight,
+            variants[..4].iter().map(Vec::as_slice).collect::<Vec<_>>(),
+            "C init_ring_pack идёт от самой старой записи"
+        );
     }
 
     #[test]

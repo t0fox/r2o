@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 466 | 226 | 0 | 0 |
-| datapath-core | 400 | 294 | 106 | 0 | 0 |
+| datapath-core | 400 | 296 | 104 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1389** | **593** | **0** | **0** |
+| **Итого** | **1982** | **1391** | **591** | **0** | **0** |
 
-Это не оценка паритета: 593 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 591 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1389 / P 593 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1391 / P 591 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 466 | 226 | 0 | 0 |
-| datapath-core | 400 | 294 | 106 | 0 | 0 |
+| datapath-core | 400 | 296 | 104 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1389** | **593** | **0** | **0** |
+| **Итого** | **1982** | **1391** | **591** | **0** | **0** |
 
 
 ---
@@ -879,7 +879,7 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 | `rd16` | 97-99 | 3 | big-endian u16 | `u16::from_be_bytes` (`quic.rs`) | **E*** | C `(p[0]<<8)\|p[1]`; Rust `from_be_bytes`/`read_u16` с bounds-check. Владельцы (`find_sni`, `skip_u16_vec`) покрыты RFC-тестами SNI/CH. |
 | `read_varint` | 110-125 | 16 | QUIC varint: ширина `1<<(p[0]>>6)`, проверка `avail`, значение из младших 6 бит + BE; при отказе `val/width` не трогаются | `quic.rs:1057-1068 read_varint` | **E** | **Совпадает:** `avail<1`/`avail<w` → -1/None, значение из `p[0]&0x3f` и последующих байт BE. Rust `read_varint` двигает cursor только после полного чтения; C также не пишет `val/width` при отказе. RFC 9001/9369 Initial-тесты. |
 | `parse_initial_header` | 149-180 | 32 | `n<=1500`, общий `d2k_qw_hdr_parse`, требование long header, version V1/V2, type Initial; копия version/DCID/PN/length | `quic.rs:796-847 parse_initial_header` | **E** | C: `n>D2K_QUIC_MAX_DGRAM=1500` → -1, `d2k_qw_hdr_parse(...,dcid_len_short=0)`, `!long_hdr`/version∉{V1,V2}/type≠Initial → -1. Rust: `len>=7`, long, version V1/V2, raw type 0/1, DCID≤20, SCID≤20, token varint, length varint, `length>=17 && <=len-cursor`, `pn_offset+20<=len`. Для Initial v1/v2 поля/границы совпадают; RFC-тесты `splits_rfc_9001_initial...`, v2-тест. |
-| `d2k_quic_is_initial` | 182-185 | 4 | предикат: только структура Initial v1/v2, без ключей/AEAD, предел 1500 | `quic.rs` `r2k_quic_is_initial`; engine qdeny/QUIC-план | **E*** | C/Rust differential `scripts/test-quic-initial-differential.sh` PASS (26 кейсов): v1/v2, **битый тег → true**, Handshake-тип/неизвестная версия/короткий заголовок → false, усечения 0..1199, DCID 0/21, 1501/65535 байт, хвост, случайные байты. **Исправлено расхождение:** engine проверял AEAD (`is_authenticated_initial`) и не снимал qdeny/не применял QUIC-план к структурно валидному Initial с битым тегом; теперь используется структурный предикат, как C `session.c:1314`. **Ограничение:** наблюдение QUIC-потоков в `r2o_quic.rs` по-прежнему требует AEAD (счётчики/тишина); C структурный вызов в `session.c:1030` также ведёт кольцо полёта без расшифровки — эта ветвь в Rust покрыта `r2k_quic_initial_flight_id_structural`, но наблюдение потока строже. |
+| `d2k_quic_is_initial` | 182-185 | 4 | предикат: только структура Initial v1/v2, без ключей/AEAD, предел 1500 | `quic.rs` `r2k_quic_is_initial`; qdeny/QUIC-планы и `r2o_quic` наблюдение | **E*** | C/Rust differential `scripts/test-quic-initial-differential.sh` PASS (26 кейсов): v1/v2, **битый тег → true**, Handshake-тип/неизвестная версия/короткий заголовок → false, усечения 0..1199, DCID 0/21, 1501/65535 байт, хвост, случайные байты. **Исправлено расхождение:** engine (`qdeny`, QUIC-планы) и наблюдение `r2o_quic.rs` теперь используют структурный предикат, как C `session.c:1030/1314`; битый тег учитывается как `saw_initial` и ведёт наблюдение молчания (тест `структурный_initial_с_битым_тегом_учитывается_как_saw_initial`). AEAD остаётся только там, где C тоже расшифровывает: извлечение имени ClientHello. **Ограничение:** C дополнительно ведёт кольцо полёта для снимка — Rust использует тот же структурный разбор; побайтового differential полного Initial (заголовок+AEAD) нет. |
 | `decrypt_initial` | 191-216 | 26 | вывести client Initial keys из DCID и открыть пакет с `largest_pn=0` | `quic.rs:721-730/908-966 open_initial` | **E** | C: `d2k_qw_initial_secret(version,DCID,CLIENT)` → `d2k_qw_keys_from_secret` → `qh` (long/INITIAL, те же поля) → `d2k_qw_open(...,largest_pn=0)`. Rust `open_initial` выводит client keys из DCID, снимает HP, `decode_packet_number(0,...)`, AES-GCM open, проверяет reserved. RFC-тесты split/SNI. |
 | `collect_crypto_frames` | 239-416 | 178 | разбор PADDING/PING/ACK(0x02/0x03)/CRYPTO(0x06)/CONNECTION_CLOSE(0x1c); сборка потока по смещениям; неизвестный/битый кадр → стоп; `max_end` для CRYPTO за буфером | `quic.rs:632-719 collect_initial_crypto_frames + skip_initial_ack` | **E*** | **Ветви совпадают:** PADDING серией, PING +1, ACK/ACK_ECN читает largest/delay/range_count/first + пары (+3 ECN), CRYPTO offset/len, проверка `len<=plen-j`, `max_end`, запись `stream/seen` без перезаписи, 0x1c err/frame/reason со skip reason, 0x1d/неизвестный → break, возврат непрерывного префикса. **Отличие:** C ведёт `max_end` и `D2K_QUIC_ASSEMBLY_MAX`; Rust `max_end` не возвращает, а `open_initial_crypto` вычисляет непрерывный префикс из `seen`; инкрементальная сборка не портирована. RFC-тест `opened_frames`/crypto stream. |
 | `skip_u8_vec` | 434-444 | 11 | пропуск TLS-вектора u8: `off+1<=len`, `off+1+n<=len` | `quic.rs:1321-1336 skip_u8_vector` | **E** | **Ветви сверены:** C `*off+1>len` → -1; `n=b[*off]`; `*off+1+n>len` → -1; `*off+=1+n`. Rust `bytes.get(*offset)` → false; `checked_add(1).and_then(\|s\| s.checked_add(length))` → false; `next>end` → false; `*offset=next`. Владелец `find_client_hello_sni`; RFC-тест SNI/CH. |
@@ -3833,9 +3833,9 @@ CLI-логирования, health-файла, duration, состава свод
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
 | `initial_dcid` (static) | 202–211 | 10 | DCID открытого Initial: `d2k_qw_hdr_parse`, long header, тип Initial, `dcid_len <= D2K_QW_CID_MAX` | `r2k-core/quic.rs` `r2k_quic_initial_flight_id_structural` | E | C извлекает DCID из структурно корректного Initial без проверки тега. Rust `r2k_quic_initial_flight_id_structural` делает то же (long header/version/type/DCID, границы) и используется в датапате для кольца полёта/UDP-hold; аутентифицирующий `r2k_quic_initial_flight_id` остаётся для проверок контроллера. Тест `initial_dcid_structural_matches_c_without_tag_check` (испорченный тег: structural Some, auth None; обрезанный None). |
-| `init_ring_add` (static) | 215–236 | 22 | кольцо 32: дедуп по key+len+байтам, запись key/DCID/len/dg | `r2o_quic.rs:229-243` (`MAX_INITIAL_RING=32`) | **P** | **Совпадает:** дедуп по `key + bytes`, кольцо 32, вытеснение старого, запись DCID/version/байт. **Отличия:** (1) C хранит `dcid` без версии, Rust — `version + dcid`; (2) Rust при уже отправленном приветствии (`hello_reported`) удаляет записи потока и не добавляет датаграмму (`r2o_quic.rs:223-227`), C добавляет до `qsnap_done`; (3) C проверяет `len <= D2K_QW_MAX_DGRAM`, Rust — разбор Initial. Unit-тесты `:1041-1056`. |
+| `init_ring_add` (static) | 215–236 | 22 | кольцо 32: дедуп по key+len+байтам, запись key/DCID/len/dg | `r2o_quic.rs` `initial_ring` (`MAX_INITIAL_RING=32`) | **E*** | Кольцо 32, дедуп по key+bytes, вытеснение старого, запись DCID+байт; предел датаграммы 1500 (`MAX_INITIAL_DGRAM`, C `D2K_QW_MAX_DGRAM`). Тесты `init_ring_add_дедуп_и_предел_1500_как_c` (повтор PTO не удваивает, 1501 байт отброшен), `r2o_quic_сохраняет_неполный_initial_после_истечения_состояния_потока`. **Ограничение:** C хранит DCID без версии — Rust тоже больше не использует версию в полёте; после отправленного приветствия Rust очищает кольцо потока, C — по `qsnap_done`. |
 | `init_ring_drop` (static) | 239–247 | 9 | забыть датаграммы потока (обнулить записи) | `r2o_quic.rs:225,263` (`retain`) | **E*** | C обнуляет `len/dcid_len/key` у совпавших записей, Rust удаляет их `retain`; для последующего `pack` оба варианта эквивалентны (нулевые записи пропускаются). |
-| `init_ring_pack` (static) | 253–283 | 31 | собрать полёт по key+DCID от самой старой записи, до `D2K_QSNAP_MAX_DGRAMS`, `d2k_qsnap_pack` | `r2o_quic.rs:245-260` | **P** | **Подтверждённое отличие порядка отбора:** C идёт по кольцу от `init_ring_next - init_ring_n` (старые→новые) и берёт **первые** `MAX_DGRAMS`; Rust фильтрует `key+version+dcid`, затем `matching.len().saturating_sub(MAX_INITIAL_DATAGRAMS)` берёт **последние** N (`r2o_quic.rs:249-255`). При числе датаграмм больше предела наборы различаются. C дополнительно требует совпадения DCID, Rust — DCID и version. |
+| `init_ring_pack` (static) | 253–283 | 31 | собрать полёт по key+DCID от самой старой записи, до `D2K_QSNAP_MAX_DGRAMS`, `d2k_qsnap_pack` | `r2o_quic.rs` `r2o_initial_flight` | **E*** | **Исправлено реальное расхождение порядка:** Rust брал **последние** 4 датаграммы, C — **первые** от самой старой. Теперь `r2o_initial_flight` идёт от старых к новым и делает `take(4)`; тест `init_ring_pack_берёт_первые_четыре_датаграммы_как_c` (5 вариантов с одним DCID) доказывает выбор первых четырёх. DCID-only ключ, как C. **Ограничение:** C дополнительно проверяет DCID последней датаграммы через `initial_dcid`; Rust использует DCID, уже разобранный из текущего пакета. |
 | `slot_of` (static) | 288 | 1 | слот снимка: UDP=1, иначе TCP=0 | `r2o_udp_sessions.rs`/`r2o_quic.rs` (снимок в потоке) | **P** | C держит четыре глобальных слота `last_hello[4]`; Rust хранит снимок в `QuicHello`/`ClientShapeEvent` и ключе потока, без глобального индекса. Поведение «TCP и UDP не делят снимок» сохраняется, структура иная. |
 | `shape_slot` (static) | 289–291 | 3 | индекс слота: `slot_of + (family==6 ? 2 : 0)` | ключ потока включает family (`r2o_quic.rs`/`r2o_udp_sessions.rs`) | **P** | C вычисляет глобальный индекс 0..3; Rust не имеет массива слотов, family входит в ключ `FlowKey`/`R2oUdpFlowKey`. Эквивалентно по различимости TCP/UDP и 4/6, не по API. |
 | `next_fragment_id` (static) | 293–304 | 12 | seed из `/dev/urandom` на сессию, затем `++`, пропуск нуля | `r2k-core/src/wire.rs:334-337` | **P** | **Подтверждённое отличие:** C сеет **один** `fragment_id` на сессию из `/dev/urandom` и инкрементирует его, пропуская нулевое 16-битное значение (`session.c:293-304`). Rust `wire.rs:334-337` берёт `getrandom` **на каждую сборку** фрагментов, `max(1)`; сессионного счётчика нет. Оба дают ненулевой ID, но последовательность и момент отказа (`urandom` недоступен → C 0, Rust `None`) различаются. |
