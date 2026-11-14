@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 260 | 140 | 0 | 0 |
+| datapath-core | 400 | 261 | 139 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1348** | **634** | **0** | **0** |
+| **Итого** | **1982** | **1349** | **633** | **0** | **0** |
 
-Это не оценка паритета: 634 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 633 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1348 / P 634 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1349 / P 633 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 260 | 140 | 0 | 0 |
+| datapath-core | 400 | 261 | 139 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1348** | **634** | **0** | **0** |
+| **Итого** | **1982** | **1349** | **633** | **0** | **0** |
 
 
 ---
@@ -4440,9 +4440,9 @@ observation), `control.rs` (https names), `http_replace.rs` (пакеты),
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---|---|---|---|---|
-| `d2k_http80_new` | 67-69 | 3 | `calloc` таблицы: 128 потоков, 256 HTTPS-имён, статистика | `control.rs` `NamePlans` (`MAX_HTTPS_NAMES=256`), `hold.rs` `HoldTable` | **E*** | Ёмкости совпадают: `HTTP_FLOW_CAPACITY=128` и при заполнении вытесняется самый старый поток, как C `make` (`http80.c:217-236`); HTTPS-имён 256. Тест `http_flow_table_evicts_oldest_at_128_like_c`. **Ограничение:** единого `calloc`-объекта нет — потоки и имена разнесены, состав `get_stats` иной. |
+| `d2k_http80_new` | 67-69 | 3 | `calloc` таблицы: 128 потоков, 256 HTTPS-имён, статистика | `control.rs` `NamePlans` (`MAX_HTTPS_NAMES=256`), `hold.rs` `HoldTable` | **E*** | Ёмкости совпадают: `HTTP_FLOW_CAPACITY=128` и при заполнении вытесняется самый старый поток, как C `make` (`http80.c:217-236`); HTTPS-имён 256. Тест `http_flow_table_evicts_oldest_at_128_like_c`. **Ограничение:** единого `calloc`-объекта нет — потоки и имена разнесены; `R2oHttp80Stats` повторяет поля C. |
 | `d2k_http80_free` | 71-73 | 3 | освободить таблицу HTTP/80 | `Drop` | **E** | C `free(h)`. Rust владеющие `HashMap`/`Vec` (потоки/имена/статистика) освобождаются `Drop`; отдельной функции нет. C-строка: `free(h);`; Rust владеющие `HashMap`/`Vec` освобождаются `Drop`. |
-| `d2k_http80_get_stats` | 75-79 | 5 | снимок `d2k_http80_stats`; NULL → нули | `hold.rs:200 r2o_hold_stats` + `R2oTcpPayloadStats`/control | **P** | **Состав различается:** C `requests/injections/evicted/untracked/unparsed/later/dropped/answered/swap_failed`; Rust `R2oHoldStats` (`started/ready/released/...`), HTTP-счётчики (`http_later/http_unaligned/http_open_end`) — в `R2oTcpPayloadStats`, часть — в control/capture. Набор полей и точки инкремента иные. |
+| `d2k_http80_get_stats` | 75-79 | 5 | снимок `d2k_http80_stats`; NULL → нули | `hold.rs` `R2oHttp80Stats`, `r2o_http80_stats` | **E*** | Добавлен снимок со всеми C-полями: `requests/injections/answered/swap_failed/dropped/evicted/untracked/unparsed/later`. Инкременты: запрос при распознавании, вставка при portal, ответ при successful swap, swap_failed при отказе verdict, dropped для серверного пакета после ответа, evicted при вытеснении 128-слота, untracked для :80-нагрузки без потока, unparsed для неразбираемого кандидата, later для продолжения. D17 `scripts/test-datapath-http80-differential.sh` теперь сравнивает и stats-строки (6 точек: no-https/https/slow/duplicate/https-swap/post-server/post-client). Тесты `http_flow_table_evicts_oldest_at_128_like_c` (requests=129, evicted=1), `http80_stats_count_untracked_and_swap_failures_like_c`. Production: строка сводки `r2o_log_http80_stats`. **Ограничение:** `unparsed`/`later` приблизительны — Rust собирает кросс-сегментный запрос, который C счёл бы `unparsed`; в D17 эти поля нулевые, отдельного packed-оракула для них нет. |
 | `name_norm` (static) | 83-95 | 13 | снять одну хвостовую точку, len 1..253, только LDH, нижний регистр | `control.rs:2234-2261 canonical_name` | **P** | **C принимает:** односложные имена (`localhost`), чисто цифровые, пустые метки (`a..b`), метки с ведущим/хвостовым `-` — проверяется только набор символов `a-z/A-Z/0-9/-/.`. **Rust строже:** ≥2 метки, каждая 1..63, без ведущего/хвостового `-`, хотя бы одна нецифровая, ASCII, ≤253, одна хвостовая точка снимается. Для обычных доменов совпадает; набор принимаемых имён различается. |
 | `d2k_http80_set_https` | 97-118 | 22 | найти/создать имя; `expires=0` — удалить; иначе занять пустой слот или вытеснить минимальный `expires` | `control.rs` `set_https_at` | **E*** | C/Rust differential `scripts/test-http80-https-differential.sh` PASS: 17 set-команд, 38 проверок — TTL и истечение, `expires=0`, повторная установка, clamp 7 суток, 256 слотов, вытеснение минимального `expires`, повтор слота после удаления, равенство `expires` (первый слот). **Исправлено реальное расхождение:** Rust применял строгий `canonical_name`, C — `name_norm`; теперь `canonical_https_name` принимает односложные/цифровые/пустые метки и крайние дефисы, как C. Слоты — массив 256 вместо `HashMap`, поэтому порядок вытеснения совпадает. **Ограничение:** Rust использует `Instant` вместо абсолютных нс; сравнивались эти две функции, а не весь `d2k_http80`. |
 | `d2k_http80_https` | 120-129 | 10 | имя найдено и `now < expires` | `control.rs` `has_verified_https` | **E*** | Тот же differential: нормализация (регистр, хвостовая точка), строгий `<`, истёкшее имя, удалённое имя, все 256 слотов. Rust теперь использует `canonical_https_name` и линейный поиск по слотам, как C. **Ограничение:** нет живого HTTP/80 differential с `d2k_http80` целиком. |

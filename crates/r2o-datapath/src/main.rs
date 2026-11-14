@@ -843,6 +843,28 @@ mod app {
         );
     }
 
+    fn r2o_log_http80_stats(holding: &HoldTable) {
+        let stats = holding.r2o_http80_stats();
+        if stats.requests != 0
+            || stats.injections != 0
+            || stats.untracked != 0
+            || stats.unparsed != 0
+            || stats.later != 0
+        {
+            eprintln!(
+                "r2o-datapath: HTTP: запросов {}, вставок провайдера {}, потоков вытеснено {}; \
+                 не разобрать, пакетов клиента: поток без SYN {}, не целый запрос {}, \
+                 после первой нагрузки потока {}",
+                stats.requests,
+                stats.injections,
+                stats.evicted,
+                stats.untracked,
+                stats.unparsed,
+                stats.later
+            );
+        }
+    }
+
     fn r2o_log_hold_stats(holding: &HoldTable) {
         let stats = holding.r2o_hold_stats();
         eprintln!(
@@ -1326,6 +1348,7 @@ mod app {
                 r2o_log_payload_stats(&tcp_sessions);
                 r2o_log_capture_stats(&tcp_sessions);
                 r2o_log_hold_stats(&holding);
+                r2o_log_http80_stats(&holding);
                 r2o_log_raw_stats(raw.as_ref());
                 if raw.is_some() {
                     r2o_log_udp_follow_stats(&udp_follow, route_watch_notifications);
@@ -1360,6 +1383,7 @@ mod app {
                 r2o_log_capture_stats(&tcp_sessions);
                 r2o_log_payload_stats(&tcp_sessions);
                 r2o_log_hold_stats(&holding);
+                r2o_log_http80_stats(&holding);
                 r2o_log_raw_stats(raw.as_ref());
                 if raw.is_some() {
                     r2o_log_udp_follow_stats(&udp_follow, route_watch_notifications);
@@ -2351,6 +2375,7 @@ mod app {
                             let id = ids[0];
                             if let Err(error) = socket.send_replacement(id, &replacement) {
                                 eprintln!("r2o-datapath: не отправлен HTTPS verdict: {error}");
+                                holding.note_http_swap_failed();
                                 socket.send_verdict(id, NF_ACCEPT)?;
                                 if let Some(event) = applied_candidate.as_ref() {
                                     flow_journal.record_execution_failure(

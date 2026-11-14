@@ -96,6 +96,21 @@ pub struct R2oHoldStats {
     pub pending: usize,
 }
 
+/// C `d2k_http80_stats` (`datapath/http80.c:100-115`): снимок счётчиков
+/// HTTP/80, который C печатает в сводке (`d2kd.c:894-905`).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct R2oHttp80Stats {
+    pub requests: u64,
+    pub injections: u64,
+    pub answered: u64,
+    pub swap_failed: u64,
+    pub dropped: u64,
+    pub evicted: u64,
+    pub untracked: u64,
+    pub unparsed: u64,
+    pub later: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct Endpoint {
     address: Address,
@@ -200,6 +215,7 @@ pub struct HoldTable {
     incomplete_diagnostics: VecDeque<R2oIncompleteCaptureDiagnostic>,
     next_generation: u64,
     stats: R2oHoldStats,
+    http80: R2oHttp80Stats,
     owned_releases: Vec<Vec<u8>>,
 }
 
@@ -211,6 +227,11 @@ impl HoldTable {
 
     pub fn r2o_hold_stats(&self) -> R2oHoldStats {
         self.stats
+    }
+
+    /// C `d2k_http80_get_stats`: снимок счётчиков HTTP/80.
+    pub fn r2o_http80_stats(&self) -> R2oHttp80Stats {
+        self.http80
     }
 
     /// Take held originals that must be replayed through the raw socket on release.
@@ -261,7 +282,13 @@ impl HoldTable {
             return false;
         };
         flow.answered = true;
+        self.http80.answered = self.http80.answered.saturating_add(1);
         true
+    }
+
+    /// C `d2k_http80_swap`: вердикт с заменой не принят — вставка ушла как есть.
+    pub fn note_http_swap_failed(&mut self) {
+        self.http80.swap_failed = self.http80.swap_failed.saturating_add(1);
     }
 
     pub fn sweep_http_responses(&mut self, now: Instant) -> Vec<HttpResponseEvent> {
@@ -483,6 +510,10 @@ impl HoldTable {
             }
         }
         let Some(anchor_index) = anchor_index else {
+            if destination.port == 80 && !payload.is_empty() {
+                // C `d2k_http80_packet`: нагрузка клиента к :80 без потока.
+                self.http80.untracked = self.http80.untracked.saturating_add(1);
+            }
             if let Some(index) = slot_index {
                 released.extend(self.remove_slot(index));
                 self.capture.forget(&key);
@@ -500,6 +531,7 @@ impl HoldTable {
                     && flow.generation == anchor.generation
                     && flow.answered
             }) {
+                self.http80.dropped = self.http80.dropped.saturating_add(1);
                 return FeedResult {
                     released,
                     outcome: HoldOutcome::Drop,
@@ -548,13 +580,18 @@ impl HoldTable {
                 outcome: HoldOutcome::Pass,
             };
         }
+        let mut http_later = false;
         if destination.port == 80
             && source == anchor.client
             && let Some(flow) = self.http_requests.iter_mut().find(|flow| {
                 flow.key == key && flow.client == source && flow.generation == anchor.generation
             })
         {
+            http_later = flow.request_stream.header_done || tcp.sequence != flow.request_sequence;
             flow.feed_request(tcp.sequence, payload);
+        }
+        if http_later {
+            self.http80.later = self.http80.later.saturating_add(1);
         }
         let offset = tcp.sequence.wrapping_sub(anchor.sequence.wrapping_add(1));
         let r2o_http_followup = anchor.r2o_http_requests.is_checked();
@@ -576,6 +613,10 @@ impl HoldTable {
                 self.syns[anchor_index]
                     .r2o_http_requests
                     .observe(tcp.sequence, payload);
+            }
+            if !complete && !incomplete_http_head(payload) {
+                // C `d2k_http80_packet`: request_prefix не разобрал запрос.
+                self.http80.unparsed = self.http80.unparsed.saturating_add(1);
             }
         }
         let r2o_next_http_request =
@@ -1037,6 +1078,7 @@ impl HoldTable {
             rtt,
             now,
         } = observation;
+        self.http80.requests = self.http80.requests.saturating_add(1);
         self.http_requests
             .retain(|flow| now.saturating_duration_since(flow.seen) < SYN_TRACK_TTL);
         let previous = self
@@ -1112,6 +1154,7 @@ impl HoldTable {
                 .min_by_key(|(_, flow)| flow.seen)
         {
             self.http_requests.remove(oldest);
+            self.http80.evicted = self.http80.evicted.saturating_add(1);
         }
         if self.http_requests.try_reserve(1).is_err() {
             return;
@@ -1185,6 +1228,9 @@ impl HoldTable {
                     .flatten()
             });
             let (event, _) = finish_http_response(flow, 3, Some(flow.response.body_bytes()));
+            if portal.is_some() {
+                self.http80.injections = self.http80.injections.saturating_add(1);
+            }
             return Some((event, portal, redirect));
         }
         if flow.response.fixed_body_remaining().is_some() {
@@ -1491,6 +1537,29 @@ mod tests {
         assert_eq!(table.http_requests.len(), HTTP_FLOW_CAPACITY);
         assert!(!table.http_requests.iter().any(|flow| flow.key == keys[0]));
         assert!(table.http_requests.iter().any(|flow| flow.key == fresh));
+        let stats = table.r2o_http80_stats();
+        assert_eq!(stats.requests as usize, HTTP_FLOW_CAPACITY + 1);
+        assert_eq!(stats.evicted, 1);
+    }
+
+    #[test]
+    fn http80_stats_count_untracked_and_swap_failures_like_c() {
+        let start = Instant::now();
+        let options = HoldOptions {
+            observe_http: true,
+            ..HoldOptions::default()
+        };
+        let mut table = HoldTable::default();
+        // Нагрузка к :80 без SYN — C `untracked++`.
+        let mut packet = tcp_packet(5000, 0x18, b"later-data");
+        packet[22..24].copy_from_slice(&80_u16.to_be_bytes());
+        table.feed_observing(1, &packet, start, options);
+        let stats = table.r2o_http80_stats();
+        assert_eq!(stats.untracked, 1);
+        assert_eq!(stats.requests, 0);
+
+        table.note_http_swap_failed();
+        assert_eq!(table.r2o_http80_stats().swap_failed, 1);
     }
 
     fn client_hello(host: &[u8]) -> Vec<u8> {
@@ -2788,6 +2857,23 @@ mod tests {
         hold
     }
 
+    fn d17_stats(label: &str, hold: &HoldTable) {
+        let stats = hold.r2o_http80_stats();
+        println!(
+            "D17 {label} stats requests={} injections={} answered={} swap_failed={} \
+             dropped={} evicted={} untracked={} unparsed={} later={}",
+            stats.requests,
+            stats.injections,
+            stats.answered,
+            stats.swap_failed,
+            stats.dropped,
+            stats.evicted,
+            stats.untracked,
+            stats.unparsed,
+            stats.later,
+        );
+    }
+
     #[test]
     #[ignore]
     fn d17_http80_trace() {
@@ -2809,6 +2895,7 @@ mod tests {
         );
         let (action, portal) = d17_action(&result, false);
         println!("D17 no-https action={action} portal={}", u8::from(portal));
+        d17_stats("no-https", &no_https);
 
         let mut https = d17_start(start, options, request);
         let result = https.feed_observing(
@@ -2819,6 +2906,7 @@ mod tests {
         );
         let (action, portal) = d17_action(&result, true);
         println!("D17 https action={action} portal={}", u8::from(portal));
+        d17_stats("https", &https);
         let answered = match &result.outcome {
             HoldOutcome::HttpResponse { event, .. } => Some((event.key, event.request_no)),
             _ => None,
@@ -2833,6 +2921,7 @@ mod tests {
         );
         let (action, portal) = d17_action(&result, false);
         println!("D17 slow action={action} portal={}", u8::from(portal));
+        d17_stats("slow", &slow);
 
         let mut duplicate = d17_start(start, options, request);
         let _ = duplicate.feed_observing(
@@ -2849,9 +2938,11 @@ mod tests {
         );
         let (action, portal) = d17_action(&result, false);
         println!("D17 duplicate action={action} portal={}", u8::from(portal));
+        d17_stats("duplicate", &duplicate);
 
         if let Some((key, request_no)) = answered {
             assert!(https.mark_http_response_answered(&key, request_no));
+            d17_stats("https-swap", &https);
             let server = https.feed_observing(
                 5,
                 &http_response_packet(9001 + response.len() as u32, request_end, 0x18, b"late"),
@@ -2860,12 +2951,14 @@ mod tests {
             );
             let (action, _) = d17_action(&server, true);
             println!("D17 post-server action={action}");
+            d17_stats("post-server", &https);
             let mut client = http_packet(request_end, 0x10, &[]);
             client[28..32].copy_from_slice(&(9001 + response.len() as u32).to_be_bytes());
             let client =
                 https.feed_observing(6, &client, start + Duration::from_millis(14), options);
             let (action, _) = d17_action(&client, true);
             println!("D17 post-client action={action}");
+            d17_stats("post-client", &https);
         }
     }
 }

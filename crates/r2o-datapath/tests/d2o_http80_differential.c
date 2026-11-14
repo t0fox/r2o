@@ -118,6 +118,17 @@ static void print_result(const char *label) {
     printf("D17 %s action=%s portal=%d\n", label, action_name(r.action), r.injection);
 }
 
+static void print_http_stats(const char *label, const d2k_http80 *h) {
+    d2k_http80_stats st = d2k_http80_get_stats(h);
+    printf("D17 %s stats requests=%llu injections=%llu answered=%llu swap_failed=%llu "
+           "dropped=%llu evicted=%llu untracked=%llu unparsed=%llu later=%llu\n",
+           label, (unsigned long long)st.requests, (unsigned long long)st.injections,
+           (unsigned long long)st.answered, (unsigned long long)st.swap_failed,
+           (unsigned long long)st.dropped, (unsigned long long)st.evicted,
+           (unsigned long long)st.untracked, (unsigned long long)st.unparsed,
+           (unsigned long long)st.later);
+}
+
 typedef struct {
     int fail_verdict, payload_calls, accept_calls, rst_calls;
     size_t payload_len;
@@ -153,6 +164,7 @@ int main(void) {
         open_flow(h, &f, T);
         feed_inject(h, &f, T + 99 * MS + 700000ull);
         print_result("no-https");
+        print_http_stats("no-https", h);
         d2k_http80_free(h);
     }
 
@@ -162,6 +174,7 @@ int main(void) {
     open_flow(h, &f, T);
     feed_inject(h, &f, T + 99 * MS + 700000ull);
     print_result("https");
+    print_http_stats("https", h);
     d2k_http80_res https_result = r;
 
     {
@@ -170,6 +183,7 @@ int main(void) {
         open_flow(slow, &slow_flow, T);
         feed_inject(slow, &slow_flow, T + 99 * MS + 120 * MS);
         print_result("slow");
+        print_http_stats("slow", slow);
         d2k_http80_free(slow);
     }
 
@@ -180,6 +194,7 @@ int main(void) {
         feed_inject(duplicate, &duplicate_flow, T + 99 * MS + 700000ull);
         feed_inject(duplicate, &duplicate_flow, T + 99 * MS + 900000ull);
         print_result("duplicate");
+        print_http_stats("duplicate", duplicate);
         d2k_http80_free(duplicate);
     }
 
@@ -188,17 +203,20 @@ int main(void) {
         fake_io io = { 0, 0, 0, 0, 0 };
         d2k_http80_io callbacks = { io_payload, io_accept, io_rst, &io };
         d2k_http80_swap(h, &keep, out, rst, &callbacks);
+        print_http_stats("https-swap", h);
         size_t n = packet(&f, 0, F_ACK | F_PSH,
                           SISN + 1 + (uint32_t)strlen(INJECT),
                           CISN + 1 + (uint32_t)strlen(GET), "late", b);
         d2k_http80_packet(h, b, n, T + 99 * MS + 120 * MS, 0, out, sizeof out,
                           rst, sizeof rst, &r);
         printf("D17 post-server action=%s\n", action_name(r.action));
+        print_http_stats("post-server", h);
         n = packet(&f, 1, F_ACK, CISN + 1 + (uint32_t)strlen(GET),
                    SISN + 1 + (uint32_t)strlen(INJECT), NULL, b);
         d2k_http80_packet(h, b, n, T + 99 * MS + 121 * MS, 0, out, sizeof out,
                           rst, sizeof rst, &r);
         printf("D17 post-client action=%s\n", action_name(r.action));
+        print_http_stats("post-client", h);
     }
     d2k_http80_free(h);
     return 0;
