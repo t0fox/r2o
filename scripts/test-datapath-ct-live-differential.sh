@@ -156,11 +156,11 @@ setup_flows() {
     ACCT_SAVED=$(save_sysctl /proc/sys/net/netfilter/nf_conntrack_acct)
     UDP_TIMEOUT_SAVED=$(save_sysctl /proc/sys/net/netfilter/nf_conntrack_udp_timeout)
     UDP_STREAM_SAVED=$(save_sysctl /proc/sys/net/netfilter/nf_conntrack_udp_timeout_stream)
-    if [ -w /proc/sys/net/netfilter/nf_conntrack_udp_timeout ]; then
-        echo 300 >/proc/sys/net/netfilter/nf_conntrack_udp_timeout
+    if [ -e /proc/sys/net/netfilter/nf_conntrack_udp_timeout ]; then
+        echo 300 >/proc/sys/net/netfilter/nf_conntrack_udp_timeout || return 1
     fi
-    if [ -w /proc/sys/net/netfilter/nf_conntrack_udp_timeout_stream ]; then
-        echo 300 >/proc/sys/net/netfilter/nf_conntrack_udp_timeout_stream
+    if [ -e /proc/sys/net/netfilter/nf_conntrack_udp_timeout_stream ]; then
+        echo 300 >/proc/sys/net/netfilter/nf_conntrack_udp_timeout_stream || return 1
     fi
 
     echo 0 > /proc/sys/net/netfilter/nf_conntrack_acct
