@@ -1446,7 +1446,9 @@ mod app {
                 }
             };
             if received {
-                udp_receive_seq = udp_receive_seq.wrapping_add(1).max(1);
+                // C `d2k_udp_path_read`: голый `rseq++`, включая переход
+                // через 0; Rust повторяет это, а не подменяет 1.
+                udp_receive_seq = udp_receive_seq.wrapping_add(1);
             }
             let follow_receive_seq = if received { udp_receive_seq } else { 0 };
             udp_follow.r2o_age(now, follow_receive_seq);
