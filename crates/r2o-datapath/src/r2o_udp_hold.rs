@@ -11,6 +11,8 @@ const R2O_UDP_HOLD_PACKETS: usize = 8;
 const R2O_UDP_HOLD_PACKET_MAX: usize = 1600;
 const R2O_UDP_HOLD_WAIT: Duration = Duration::from_millis(100);
 const R2O_UDP_RELEASE_SLOTS: usize = 16;
+/// C `--sched-slots` по умолчанию 128: ёмкость отложенных UDP-переизданий.
+const R2O_UDP_DEFERRED_RESEND_SLOTS: usize = 128;
 const R2O_UDP_RELEASE_PACKETS: usize = 8;
 const R2O_UDP_FOLLOW_SLOTS: usize = 256;
 const R2O_UDP_FOLLOW_WAIT: Duration = Duration::from_millis(5);
@@ -671,7 +673,7 @@ pub enum R2oUdpDeferredEnqueueError {
 
 /// Ограниченное хранение позднего хвоста до завершения отложенной головы.
 pub struct R2oUdpDeferredResends {
-    slots: [Option<R2oUdpDeferredResend>; R2O_UDP_RELEASE_SLOTS],
+    slots: [Option<R2oUdpDeferredResend>; R2O_UDP_DEFERRED_RESEND_SLOTS],
     next_order: u64,
 }
 
@@ -844,9 +846,9 @@ pub fn r2o_udp_send_busy(error: &std::io::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        R2O_UDP_RELEASE_SLOTS, R2oUdpDeferredEnqueueError, R2oUdpDeferredResends,
-        R2oUdpDeferredVerdicts, R2oUdpFollowTable, R2oUdpHeldPacket, R2oUdpHoldBatch,
-        r2o_release_batch_with,
+        R2O_UDP_DEFERRED_RESEND_SLOTS, R2O_UDP_RELEASE_SLOTS, R2oUdpDeferredEnqueueError,
+        R2oUdpDeferredResends, R2oUdpDeferredVerdicts, R2oUdpFollowTable, R2oUdpHeldPacket,
+        R2oUdpHoldBatch, r2o_release_batch_with,
     };
     use crate::r2o_udp_sessions::flow_key_from_packet;
     use std::io;
@@ -960,7 +962,7 @@ mod tests {
         let now = Instant::now();
         let packet = udp_packet();
         let mut deferred = R2oUdpDeferredResends::new();
-        for id in 0..R2O_UDP_RELEASE_SLOTS {
+        for id in 0..R2O_UDP_DEFERRED_RESEND_SLOTS {
             assert!(deferred.r2o_enqueue(now, id as u32, &packet));
         }
         assert_eq!(
@@ -973,9 +975,9 @@ mod tests {
             |_id, _packet| Err(io::Error::from_raw_os_error(libc::EAGAIN)),
             |_id, _verdict| Ok(()),
         );
-        assert_eq!(stats.flushed, R2O_UDP_RELEASE_SLOTS);
-        assert_eq!(stats.resend_failed, R2O_UDP_RELEASE_SLOTS);
-        assert_eq!(stats.resend_busy, R2O_UDP_RELEASE_SLOTS);
+        assert_eq!(stats.flushed, R2O_UDP_DEFERRED_RESEND_SLOTS);
+        assert_eq!(stats.resend_failed, R2O_UDP_DEFERRED_RESEND_SLOTS);
+        assert_eq!(stats.resend_busy, R2O_UDP_DEFERRED_RESEND_SLOTS);
     }
 
     #[test]
