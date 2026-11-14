@@ -341,7 +341,7 @@ impl R2oQuicSessions {
         };
 
         if r2o_quic_client_direction(source.port, destination.port, hook)
-            && r2k_core::quic::is_authenticated_initial(payload)
+            && r2k_core::quic::r2k_quic_is_initial(payload)
         {
             let (key, client_is_low) = FlowKey::new(source, destination);
             if let Some(last_seen) = self.hello_reported.get_mut(&key) {
@@ -1255,6 +1255,27 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].key[0], 6);
         assert_eq!(&events[0].key[1..17], &Ipv6Addr::from(client).octets());
+    }
+
+    #[test]
+    fn структурный_initial_с_битым_тегом_учитывается_как_saw_initial() {
+        let start = Instant::now();
+        let mut corrupted = INITIAL.to_vec();
+        let last = corrupted.len() - 1;
+        corrupted[last] ^= 0xFF;
+        assert!(r2k_core::quic::r2k_quic_is_initial(&corrupted));
+        assert!(!r2k_core::quic::is_authenticated_initial(&corrupted));
+        let client = [192, 0, 2, 10];
+        let server = [198, 51, 100, 20];
+        let mut sessions = R2oQuicSessions::default();
+        sessions.observe_packet(&ipv4_packet(client, server, 53_123, 443, &corrupted), start);
+        sessions.observe_packet(
+            &ipv4_packet(client, server, 53_123, 443, &corrupted),
+            start + Duration::from_millis(800),
+        );
+        let events = sessions.sweep(start + QUIC_SILENCE, true);
+        assert_eq!(events.len(), 1, "C saw_initial ведёт наблюдение молчания");
+        assert!(!events[0].planned);
     }
 
     #[test]
