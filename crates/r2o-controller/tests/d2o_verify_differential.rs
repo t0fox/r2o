@@ -1044,7 +1044,12 @@ fn donor_and_r2o_require_server_hello_when_replaying_captured_ech() {
     let helper = std::env::var_os("R2O_D2O_VERIFY_HELPER")
         .expect("differential script must provide the donor C verifier");
     let client_hello = captured_tls13_client_hello(None, true);
-    assert!(r2o_controller::r2o_tls::r2o_tls_client_hello_non_http_alpn(&client_hello).is_none());
+    // C `d2k_hello_alpn`: полный ClientHello без расширения ALPN — rc 0,
+    // список пуст, а не «не разобрано».
+    assert_eq!(
+        r2o_controller::r2o_tls::r2o_tls_client_hello_non_http_alpn(&client_hello),
+        Some(Vec::new())
+    );
     assert!(client_hello.windows(2).any(|window| window == [0xfe, 0x0d]));
     let hex = client_hello
         .iter()

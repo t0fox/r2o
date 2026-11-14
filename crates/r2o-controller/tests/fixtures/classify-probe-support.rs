@@ -13,6 +13,18 @@ pub mod response {
         Flaky,
     }
 
+    impl ResponseVerdict {
+        /// C `d2k_resp_name`: строки, которые использует `classify_json`.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Self::Clear => "clear",
+                Self::Blocked => "blocked",
+                Self::Flaky => "flaky",
+                Self::NotApplicable => "not_applicable",
+            }
+        }
+    }
+
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub struct ResponseResult {
         pub verdict: ResponseVerdict,

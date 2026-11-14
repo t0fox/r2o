@@ -1168,9 +1168,10 @@ impl HoldTable {
             rtt,
             now,
         } = observation;
-        // C `request_prefix` принимает только `GET `/`HEAD `: остальные
-        // методы в HTTP/80 не ведутся и попадают в `unparsed`.
-        if !(request.starts_with(b"GET ") || request.starts_with(b"HEAD ")) {
+        // C `request_prefix` (`http80.c:327-341`) принимает только
+        // `GET `/`HEAD ` и проверяет target ДО `requests++`: байты <=0x20,
+        // 0x7f и `#` негодны и дают `unparsed++`, поток не ведётся.
+        if !r2o_http_target_ok(request) {
             self.http80.unparsed = self.http80.unparsed.saturating_add(1);
             return;
         }
@@ -1556,6 +1557,27 @@ fn incomplete_tls_head(payload: &[u8]) -> bool {
     }
     payload.len() < 5
         || payload.len() < 5 + usize::from(u16::from_be_bytes([payload[3], payload[4]]))
+}
+
+/// C `request_prefix` (`http80.c:327-341`): метод `GET `/`HEAD `, затем
+/// target до пробела без байтов <=0x20, 0x7f и `#`; длина target < 1024.
+fn r2o_http_target_ok(request: &[u8]) -> bool {
+    let start = if request.starts_with(b"GET ") {
+        4
+    } else if request.starts_with(b"HEAD ") {
+        5
+    } else {
+        return false;
+    };
+    let mut end = start;
+    while end < request.len() && request[end] != b' ' {
+        let byte = request[end];
+        if byte < 0x21 || byte == 0x7f || byte == b'#' {
+            return false;
+        }
+        end += 1;
+    }
+    end != request.len() && end - start < 1024
 }
 
 fn incomplete_http_head(payload: &[u8]) -> bool {

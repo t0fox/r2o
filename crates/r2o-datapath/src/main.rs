@@ -3880,19 +3880,26 @@ mod app {
         )
     }
 
-    fn r2o_print_journal(journal: &R2oFlowJournal, start_ns: u64) {
+    /// Полный текст C `print_journal` (пусто/шапка/строки) — отдельно от
+    /// вывода, чтобы формат можно было сверить тестом.
+    fn r2o_format_journal(journal: &R2oFlowJournal, start_ns: u64) -> String {
         if journal.count() == 0 {
-            eprintln!("журнал пуст");
-            return;
+            return "журнал пуст\n".to_owned();
         }
-        eprintln!(
-            "--- журнал: {} записей, затёрто {} ---",
+        let mut text = format!(
+            "--- журнал: {} записей, затёрто {} ---\n",
             journal.count(),
             journal.dropped()
         );
         for entry in journal.iter() {
-            eprintln!("{}", format_journal_line_c(start_ns, entry));
+            text.push_str(&format_journal_line_c(start_ns, entry));
+            text.push('\n');
         }
+        text
+    }
+
+    fn r2o_print_journal(journal: &R2oFlowJournal, start_ns: u64) {
+        eprint!("{}", r2o_format_journal(journal, start_ns));
     }
 
     fn format_journal_key(key: &[u8; r2k_core::control::KEY_LEN]) -> String {
@@ -9022,6 +9029,32 @@ mod app {
                 format_journal_line_c(1_000_000, &entry),
                 "       4 мс  udp 1.2.3.4:7 - 5.6.7.8:9  план не применён: плана для этой цели нет"
             );
+        }
+
+        #[test]
+        fn journal_text_matches_c_print_journal_empty_and_header() {
+            let empty = r2o_datapath::flow_journal::R2oFlowJournal::with_capacity(2).unwrap();
+            assert_eq!(super::r2o_format_journal(&empty, 0), "журнал пуст\n");
+
+            let mut journal = r2o_datapath::flow_journal::R2oFlowJournal::with_capacity(2).unwrap();
+            journal.push(r2o_datapath::flow_journal::R2oFlowJournalEntry {
+                at_ns: 1_000_000,
+                kind: r2o_datapath::flow_journal::R2oFlowJournalKind::PlanDone,
+                ..Default::default()
+            });
+            journal.push(r2o_datapath::flow_journal::R2oFlowJournalEntry {
+                at_ns: 2_000_000,
+                kind: r2o_datapath::flow_journal::R2oFlowJournalKind::PlanDone,
+                ..Default::default()
+            });
+            journal.push(r2o_datapath::flow_journal::R2oFlowJournalEntry {
+                at_ns: 3_000_000,
+                kind: r2o_datapath::flow_journal::R2oFlowJournalKind::PlanDone,
+                ..Default::default()
+            });
+            let text = super::r2o_format_journal(&journal, 0);
+            assert!(text.starts_with("--- журнал: 2 записей, затёрто 1 ---\n"));
+            assert_eq!(text.lines().count(), 3, "шапка + две строки");
         }
     }
 }

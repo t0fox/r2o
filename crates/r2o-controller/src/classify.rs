@@ -1600,10 +1600,10 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
         }
 
         result.verdict = Verdict::Clear;
-        result.reason = format!(
-            "триггер проходит как есть — обходить нечего{}",
-            r2o_reverse_note(trigger)
-        );
+        // C `d2k_classify_run` (`detect/classify.c:1215-1221`): CLEAR
+        // формулируется без оговорки reverse_note; её несёт только
+        // отдельное дерево `core/verdict.c`, которого нет в detect-пути.
+        result.reason = "триггер проходит как есть — обходить нечего".into();
         let sni = trigger.name.strip_prefix("tls:").unwrap_or("");
         if !sni.is_empty() {
             let response = probe_response(
