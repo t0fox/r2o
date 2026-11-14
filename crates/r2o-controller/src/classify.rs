@@ -2315,6 +2315,8 @@ mod raw_connect_fallback_tests {
             repeats: 1,
             timeout: Duration::from_millis(600),
             mark: Some(0x2d),
+            full_detect_semantics: false,
+            confirm_clear: true,
             ..ClassifyOptions::default()
         };
         let result = ClassifyResult::new("split.example:443", 1);
@@ -2364,6 +2366,10 @@ mod raw_connect_fallback_tests {
         let options = ClassifyOptions {
             repeats: 3,
             allow_loopback: true,
+            // Эти тесты проверяют R2O cancelable-путь явно; production
+            // default теперь donor-семантика.
+            full_detect_semantics: false,
+            confirm_clear: true,
             ..ClassifyOptions::default()
         };
 
@@ -2391,6 +2397,10 @@ mod raw_connect_fallback_tests {
         let options = ClassifyOptions {
             repeats: 3,
             allow_loopback: true,
+            // Эти тесты проверяют R2O cancelable-путь явно; production
+            // default теперь donor-семантика.
+            full_detect_semantics: false,
+            confirm_clear: true,
             ..ClassifyOptions::default()
         };
 
@@ -2419,6 +2429,8 @@ mod raw_connect_fallback_tests {
             repeats: 3,
             allow_loopback: true,
             mark: Some(0x2d),
+            full_detect_semantics: false,
+            confirm_clear: true,
             ..ClassifyOptions::default()
         };
 
@@ -2473,6 +2485,10 @@ mod raw_connect_fallback_tests {
         let options = ClassifyOptions {
             repeats: 3,
             allow_loopback: true,
+            // Эти тесты проверяют R2O cancelable-путь явно; production
+            // default теперь donor-семантика.
+            full_detect_semantics: false,
+            confirm_clear: true,
             ..ClassifyOptions::default()
         };
 
@@ -2502,6 +2518,8 @@ mod raw_connect_fallback_tests {
             repeats: 3,
             allow_loopback: true,
             cancel: Some(cancel),
+            full_detect_semantics: false,
+            confirm_clear: true,
             ..ClassifyOptions::default()
         };
 
@@ -2530,6 +2548,10 @@ mod raw_connect_fallback_tests {
         let options = ClassifyOptions {
             repeats: 3,
             allow_loopback: true,
+            // Эти тесты проверяют R2O cancelable-путь явно; production
+            // default теперь donor-семантика.
+            full_detect_semantics: false,
+            confirm_clear: true,
             ..ClassifyOptions::default()
         };
 
@@ -2565,6 +2587,10 @@ mod raw_connect_fallback_tests {
         let options = ClassifyOptions {
             repeats: 3,
             allow_loopback: true,
+            // Эти тесты проверяют R2O cancelable-путь явно; production
+            // default теперь donor-семантика.
+            full_detect_semantics: false,
+            confirm_clear: true,
             ..ClassifyOptions::default()
         };
 
@@ -2624,6 +2650,8 @@ mod raw_connect_fallback_tests {
             &trigger,
             ClassifyOptions {
                 repeats: 3,
+                full_detect_semantics: false,
+                confirm_clear: true,
                 ..ClassifyOptions::default()
             },
             &mut base_backend,
@@ -2654,6 +2682,8 @@ mod raw_connect_fallback_tests {
                 accept: super::Accept::Any,
             }),
             seed_whole: base.seed_whole,
+            full_detect_semantics: false,
+            confirm_clear: true,
             ..ClassifyOptions::default()
         };
 
