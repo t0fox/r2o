@@ -1861,27 +1861,9 @@ impl NamePlans {
         {
             return (false, control::ACK_BAD_ARGS);
         }
-        let context = &body[context_start..];
-        let binding = BindingContext {
-            generation: u64::from_be_bytes(context[..8].try_into().expect("длина проверена")),
-            kind: context[8],
-            family: context[9],
-            shape: context[10],
-            temporary: match context[11] {
-                0 => false,
-                1 => true,
-                _ => return (false, control::ACK_BAD_ARGS),
-            },
-            epoch: context[12..28]
-                .try_into()
-                .expect("размер binding context проверен"),
-        };
-        if binding.kind > 4
-            || !matches!(binding.family, 0 | 4 | 6)
-            || !valid_binding_shape(binding.shape)
-        {
+        let Some(binding) = read_binding_context(&body[context_start..]) else {
             return (false, control::ACK_BAD_ARGS);
-        }
+        };
         let Some(host) = canonical_plan_name(&body[1..1 + name_len], binding.shape) else {
             return (true, control::ACK_OK);
         };
@@ -2681,8 +2663,33 @@ fn valid_tcp_shape(shape: u8) -> bool {
     is_tcp_plan_shape(shape) || shape == SHAPE_GRANDFATHER
 }
 
-fn valid_binding_shape(shape: u8) -> bool {
-    valid_tcp_shape(shape) || matches!(shape, SHAPE_QUIC | SHAPE_VOICE)
+/// C `d2k_ctl_binding_read` (`datapath/include/d2k_ctl.h:91-99`): ровно 28
+/// байт; kind<=BIND_FLOW(4), family 0/4/6, shape<=TCP_SHAPE_MAX(13),
+/// temporary 0/1. Известность привязки (generation/epoch) здесь не
+/// проверяется — это делает удаление записи, а не чтение контекста.
+fn read_binding_context(context: &[u8]) -> Option<BindingContext> {
+    if context.len() != control::BINDING_CONTEXT_LEN {
+        return None;
+    }
+    let binding = BindingContext {
+        generation: u64::from_be_bytes(context[..8].try_into().ok()?),
+        kind: context[8],
+        family: context[9],
+        shape: context[10],
+        temporary: match context[11] {
+            0 => false,
+            1 => true,
+            _ => return None,
+        },
+        epoch: context[12..28].try_into().ok()?,
+    };
+    if binding.kind > 4
+        || !matches!(binding.family, 0 | 4 | 6)
+        || binding.shape > control::SHAPE_ECH_TS
+    {
+        return None;
+    }
+    Some(binding)
 }
 
 fn valid_tcp_probe_shape(shape: u8) -> bool {
@@ -4693,6 +4700,462 @@ mod tests {
         assert!(output.contains("set_name ok=1\n"));
         assert!(output.contains("set_name_bad_plan ok=0\n"));
         assert!(output.contains("set_name_bad_family ok=0\n"));
+    }
+
+    #[test]
+    fn binding_control_differential_matches_c() {
+        use r2k_core::control::{COMMAND_DEL_NAME_BOUND, COMMAND_SET_NAME};
+        use std::fmt::Write as _;
+
+        fn hex(bytes: &[u8]) -> String {
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+        }
+        fn send_case(
+            output: &mut String,
+            label: &str,
+            name: &str,
+            transport: u8,
+            binding: BindingContext,
+        ) {
+            match r2k_core::control::encode_delete_name_bound(name, transport, binding) {
+                Ok(frame) => {
+                    writeln!(output, "send {label} rc=0 bytes={}", hex(&frame)).unwrap();
+                }
+                Err(_) => writeln!(output, "send {label} rc=-1").unwrap(),
+            }
+        }
+        fn read_case(output: &mut String, label: &str, context: &[u8]) {
+            match super::read_binding_context(context) {
+                Some(binding) => {
+                    writeln!(
+                        output,
+                        "read {label} rc=0 gen={:016x} kind={} family={} shape={} temp={} epoch={}",
+                        binding.generation,
+                        binding.kind,
+                        binding.family,
+                        binding.shape,
+                        u8::from(binding.temporary),
+                        hex(&binding.epoch)
+                    )
+                    .unwrap();
+                }
+                None => writeln!(output, "read {label} rc=-1").unwrap(),
+            }
+        }
+        fn binding(
+            generation: u64,
+            kind: u8,
+            family: u8,
+            shape: u8,
+            temporary: bool,
+            epoch: [u8; 16],
+        ) -> BindingContext {
+            BindingContext {
+                generation,
+                kind,
+                family,
+                shape,
+                temporary,
+                epoch,
+            }
+        }
+        fn delete_body(name: &[u8], transport: u8, binding: &BindingContext) -> Vec<u8> {
+            let mut body = Vec::with_capacity(2 + name.len() + 28);
+            body.push(name.len() as u8);
+            body.extend_from_slice(name);
+            body.push(transport);
+            body.extend_from_slice(&binding.generation.to_be_bytes());
+            body.extend_from_slice(&[
+                binding.kind,
+                binding.family,
+                binding.shape,
+                u8::from(binding.temporary),
+            ]);
+            body.extend_from_slice(&binding.epoch);
+            body
+        }
+        fn install_http(plans: &mut NamePlans) -> BindingContext {
+            let host = b"example.test";
+            let mut records = plan_header(11, 2);
+            records.extend_from_slice(&[0x00, 0x01, 0x00, 0x10]);
+            records.extend_from_slice(&[0x41; 16]);
+            records.extend_from_slice(&[0x00, 0x02, 0x00, 0x02, 0x06, 0x04]);
+            let mut body = vec![host.len() as u8];
+            body.extend_from_slice(host);
+            body.extend_from_slice(&[SHAPE_HTTP, 4]);
+            body.extend_from_slice(&records);
+            let ack = plans.handle(&Frame {
+                kind: COMMAND_SET_NAME,
+                body,
+            });
+            assert!(ack.ok, "HTTP SET_NAME должен установиться");
+            ack.binding_context.expect("HTTP SET_NAME ACK binding")
+        }
+        fn delete_context_case(
+            output: &mut String,
+            label: &str,
+            name: &[u8],
+            transport: u8,
+            mutate: impl FnOnce(&mut [u8; 28]),
+        ) {
+            let mut plans = NamePlans::with_capacity(16);
+            let installed = install_http(&mut plans);
+            let mut body = delete_body(name, transport, &installed);
+            let start = body.len() - 28;
+            let mut context: [u8; 28] = body[start..].try_into().unwrap();
+            mutate(&mut context);
+            body[start..].copy_from_slice(&context);
+            let ack = plans.handle(&Frame {
+                kind: COMMAND_DEL_NAME_BOUND,
+                body,
+            });
+            writeln!(
+                output,
+                "del {label} ok={} live={}",
+                u8::from(ack.ok),
+                plans.r2o_plan_count()
+            )
+            .unwrap();
+        }
+        fn delete_case(
+            output: &mut String,
+            label: &str,
+            name: &[u8],
+            transport: u8,
+            mutate: impl FnOnce(&mut BindingContext),
+            context_delta: i32,
+        ) {
+            let mut plans = NamePlans::with_capacity(16);
+            let installed = install_http(&mut plans);
+            assert_eq!(plans.r2o_plan_count(), 1);
+            let mut binding = installed;
+            mutate(&mut binding);
+            let mut body = delete_body(name, transport, &binding);
+            if context_delta < 0 {
+                body.pop();
+            } else if context_delta > 0 {
+                body.push(0);
+            }
+            let ack = plans.handle(&Frame {
+                kind: COMMAND_DEL_NAME_BOUND,
+                body,
+            });
+            writeln!(
+                output,
+                "del {label} ok={} live={}",
+                u8::from(ack.ok),
+                plans.r2o_plan_count()
+            )
+            .unwrap();
+        }
+
+        let mut output = String::new();
+        let epoch_a = [0xAB; 16];
+        let epoch_seq: [u8; 16] = std::array::from_fn(|index| index as u8);
+        let name255 = "n".repeat(255);
+        let name256 = "n".repeat(256);
+
+        // C `d2k_link_del_name_bound`: точные байты кадра и отказы отправителя.
+        send_case(
+            &mut output,
+            "name1_tcp",
+            "a",
+            6,
+            binding(1, 1, 4, 1, false, epoch_a),
+        );
+        send_case(
+            &mut output,
+            "name255_udp",
+            &name255,
+            17,
+            binding(0x1122_3344_5566_7788, 1, 6, 13, false, epoch_seq),
+        );
+        send_case(
+            &mut output,
+            "name0",
+            "",
+            6,
+            binding(1, 1, 4, 1, false, epoch_a),
+        );
+        send_case(
+            &mut output,
+            "name256",
+            &name256,
+            6,
+            binding(1, 1, 4, 1, false, epoch_a),
+        );
+        send_case(
+            &mut output,
+            "transport0",
+            "a",
+            0,
+            binding(1, 1, 4, 1, false, epoch_a),
+        );
+        send_case(
+            &mut output,
+            "transport5",
+            "a",
+            5,
+            binding(1, 1, 4, 1, false, epoch_a),
+        );
+        send_case(
+            &mut output,
+            "generation0",
+            "a",
+            6,
+            binding(0, 1, 4, 1, false, epoch_a),
+        );
+        send_case(
+            &mut output,
+            "epoch0",
+            "a",
+            6,
+            binding(1, 1, 4, 1, false, [0; 16]),
+        );
+        send_case(
+            &mut output,
+            "kind0",
+            "a",
+            6,
+            binding(1, 0, 4, 1, false, epoch_a),
+        );
+        send_case(
+            &mut output,
+            "kind2",
+            "a",
+            6,
+            binding(1, 2, 4, 1, false, epoch_a),
+        );
+        send_case(
+            &mut output,
+            "temporary",
+            "a",
+            6,
+            binding(1, 1, 4, 1, true, epoch_a),
+        );
+        send_case(
+            &mut output,
+            "family0_shape0",
+            "a",
+            6,
+            binding(1, 1, 0, 0, false, epoch_a),
+        );
+        send_case(
+            &mut output,
+            "shape7",
+            "a",
+            6,
+            binding(1, 1, 4, 7, false, epoch_a),
+        );
+        send_case(
+            &mut output,
+            "shape14",
+            "a",
+            6,
+            binding(1, 1, 4, 14, false, epoch_a),
+        );
+        send_case(
+            &mut output,
+            "generation_max",
+            "a",
+            6,
+            binding(u64::MAX, 1, 6, 13, false, epoch_seq),
+        );
+
+        // C `d2k_ctl_binding_read`: длина, поля и границы.
+        let mut base = [0_u8; 28];
+        base[..8].copy_from_slice(&0x1122_3344_5566_7788_u64.to_be_bytes());
+        base[8] = 1;
+        base[9] = 4;
+        base[10] = 1;
+        base[11] = 0;
+        base[12..].copy_from_slice(&epoch_seq);
+        read_case(&mut output, "len27", &base[..27]);
+        read_case(&mut output, "len28_base", &base);
+        let mut longer = base.to_vec();
+        longer.push(0);
+        read_case(&mut output, "len29", &longer);
+        for (label, index, value) in [
+            ("kind0", 8, 0_u8),
+            ("kind4", 8, 4),
+            ("kind5", 8, 5),
+            ("family0", 9, 0),
+            ("family4", 9, 4),
+            ("family6", 9, 6),
+            ("family5", 9, 5),
+            ("family255", 9, 255),
+            ("shape0", 10, 0),
+            ("shape7", 10, 7),
+            ("shape13", 10, 13),
+            ("shape14", 10, 14),
+            ("shape255", 10, 255),
+            ("temp0", 11, 0),
+            ("temp1", 11, 1),
+            ("temp2", 11, 2),
+            ("temp255", 11, 255),
+        ] {
+            let mut context = base;
+            context[index] = value;
+            read_case(&mut output, label, &context);
+        }
+        let mut unknown = base;
+        unknown[..8].fill(0);
+        read_case(&mut output, "generation0", &unknown);
+        let mut no_epoch = base;
+        no_epoch[12..].fill(0);
+        read_case(&mut output, "epoch0", &no_epoch);
+
+        // Приёмник DEL_NAME_BOUND: ACK и снятие/неснятие записи.
+        delete_case(&mut output, "match", b"example.test", 6, |_| {}, 0);
+        delete_case(
+            &mut output,
+            "generation_plus1",
+            b"example.test",
+            6,
+            |binding| binding.generation += 1,
+            0,
+        );
+        delete_case(
+            &mut output,
+            "generation0",
+            b"example.test",
+            6,
+            |binding| binding.generation = 0,
+            0,
+        );
+        delete_case(
+            &mut output,
+            "epoch_changed",
+            b"example.test",
+            6,
+            |binding| binding.epoch[15] ^= 1,
+            0,
+        );
+        delete_case(
+            &mut output,
+            "epoch0",
+            b"example.test",
+            6,
+            |binding| binding.epoch = [0; 16],
+            0,
+        );
+        delete_case(
+            &mut output,
+            "kind0",
+            b"example.test",
+            6,
+            |binding| binding.kind = 0,
+            0,
+        );
+        delete_case(
+            &mut output,
+            "kind2",
+            b"example.test",
+            6,
+            |binding| binding.kind = 2,
+            0,
+        );
+        delete_case(
+            &mut output,
+            "temporary",
+            b"example.test",
+            6,
+            |binding| binding.temporary = true,
+            0,
+        );
+        delete_case(
+            &mut output,
+            "family0",
+            b"example.test",
+            6,
+            |binding| binding.family = 0,
+            0,
+        );
+        delete_case(
+            &mut output,
+            "family6",
+            b"example.test",
+            6,
+            |binding| binding.family = 6,
+            0,
+        );
+        delete_case(
+            &mut output,
+            "shape0",
+            b"example.test",
+            6,
+            |binding| binding.shape = 0,
+            0,
+        );
+        delete_case(
+            &mut output,
+            "shape13",
+            b"example.test",
+            6,
+            |binding| binding.shape = 13,
+            0,
+        );
+        delete_case(&mut output, "transport17", b"example.test", 17, |_| {}, 0);
+        delete_case(&mut output, "name_other", b"other.test", 6, |_| {}, 0);
+        delete_case(&mut output, "name_upper", b"EXAMPLE.TEST", 6, |_| {}, 0);
+        delete_case(
+            &mut output,
+            "invalid_kind5",
+            b"example.test",
+            6,
+            |binding| binding.kind = 5,
+            0,
+        );
+        delete_case(
+            &mut output,
+            "invalid_family5",
+            b"example.test",
+            6,
+            |binding| binding.family = 5,
+            0,
+        );
+        delete_case(
+            &mut output,
+            "invalid_shape14",
+            b"example.test",
+            6,
+            |binding| binding.shape = 14,
+            0,
+        );
+        delete_context_case(
+            &mut output,
+            "invalid_temp2",
+            b"example.test",
+            6,
+            |context| context[11] = 2,
+        );
+        delete_case(
+            &mut output,
+            "invalid_transport0",
+            b"example.test",
+            0,
+            |_| {},
+            0,
+        );
+        delete_case(&mut output, "invalid_len27", b"example.test", 6, |_| {}, -1);
+        delete_case(&mut output, "invalid_len29", b"example.test", 6, |_| {}, 1);
+        delete_case(&mut output, "invalid_name0", b"", 6, |_| {}, 0);
+        delete_case(
+            &mut output,
+            "invalid_name256",
+            name256.as_bytes(),
+            6,
+            |_| {},
+            0,
+        );
+
+        if let Ok(path) = std::env::var("R2O_BINDING_CONTROL_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert!(output.contains("send name1_tcp rc=0 bytes="));
+        assert!(output.contains("read shape14 rc=-1\n"));
+        assert!(output.contains("del match ok=1 live=0\n"));
+        assert!(output.contains("del generation_plus1 ok=1 live=1\n"));
     }
 
     #[test]
