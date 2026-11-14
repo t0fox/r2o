@@ -3178,6 +3178,96 @@ mod tests {
             d17_stats("invalid", &invalid);
         }
 
+        {
+            let request_packet = http_packet(2001, 0x18, request);
+            let key = crate::capture::TcpFlowKey::from_packet(&request_packet)
+                .unwrap()
+                .wire_key();
+            let applied = r2k_core::control::AppliedEvent {
+                key,
+                plan_id: std::array::from_fn(|index| index as u8),
+                trial_id: std::array::from_fn(|index| 16 + index as u8),
+                execution_id: 777,
+                binding: r2k_core::control::BindingContext {
+                    generation: 9,
+                    kind: 1,
+                    family: 4,
+                    shape: 2,
+                    temporary: true,
+                    epoch: [0x3c; 16],
+                },
+            };
+            let mut executed = d17_start(start, options, request);
+            executed.note_http_execution(2001, &applied);
+            let result = executed.feed_observing(
+                4,
+                &http_response_packet(9001, request_end, 0x18, response),
+                start + Duration::from_millis(12),
+                options,
+            );
+            let (action, portal) = d17_action(&result, false);
+            if let HoldOutcome::HttpResponse { event, .. } = &result.outcome {
+                println!(
+                    "D17 executed action={action} portal={} execution={} plan={} trial={} binding={}/{}/{}",
+                    u8::from(portal),
+                    event.execution_id,
+                    event
+                        .plan_id
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>(),
+                    event
+                        .trial_id
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>(),
+                    event.binding.generation,
+                    event.binding.kind,
+                    event.binding.shape
+                );
+            } else {
+                println!(
+                    "D17 executed action={action} portal={} execution=0 plan= trial= binding=0/0/0",
+                    u8::from(portal)
+                );
+            }
+
+            let mut wrong = d17_start(start, options, request);
+            wrong.note_http_execution(2002, &applied);
+            let result = wrong.feed_observing(
+                4,
+                &http_response_packet(9001, request_end, 0x18, response),
+                start + Duration::from_millis(12),
+                options,
+            );
+            let (action, portal) = d17_action(&result, false);
+            if let HoldOutcome::HttpResponse { event, .. } = &result.outcome {
+                println!(
+                    "D17 executed-wrong action={action} portal={} execution={} plan={} trial={} binding={}/{}/{}",
+                    u8::from(portal),
+                    event.execution_id,
+                    event
+                        .plan_id
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>(),
+                    event
+                        .trial_id
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>(),
+                    event.binding.generation,
+                    event.binding.kind,
+                    event.binding.shape
+                );
+            } else {
+                println!(
+                    "D17 executed-wrong action={action} portal={} execution=0 plan= trial= binding=0/0/0",
+                    u8::from(portal)
+                );
+            }
+        }
+
         if let Some((key, request_no)) = answered {
             assert!(https.mark_http_response_answered(&key, request_no));
             d17_stats("https-swap", &https);

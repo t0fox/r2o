@@ -274,6 +274,55 @@ int main(void) {
     }
 
     {
+        d2k_http80 *executed = d2k_http80_new();
+        flow executed_flow = flow4(57000);
+        open_flow(executed, &executed_flow, T);
+        size_t n = packet(&executed_flow, 1, F_ACK | F_PSH, CISN + 1,
+                          SISN + 1, GET, b);
+        uint8_t plan_id[16], trial_id[16];
+        for (unsigned i = 0; i < 16; i++) { plan_id[i] = (uint8_t)i; trial_id[i] = (uint8_t)(16 + i); }
+        d2k_binding_context binding;
+        memset(&binding, 0, sizeof binding);
+        binding.generation = 9;
+        binding.kind = 1;
+        binding.family = 4;
+        binding.shape = 2;
+        binding.temporary = 1;
+        memset(binding.epoch, 0x3c, sizeof binding.epoch);
+        d2k_http80_executed(executed, b, n, T + 99 * MS, 777, plan_id, trial_id, &binding);
+        feed_inject(executed, &executed_flow, T + 99 * MS + 700000ull);
+        printf("D17 executed action=%s portal=%d execution=%llu plan=",
+               action_name(r.action), r.injection, (unsigned long long)r.execution_id);
+        for (unsigned i = 0; i < 16; i++) printf("%02x", r.plan_id[i]);
+        printf(" trial=");
+        for (unsigned i = 0; i < 16; i++) printf("%02x", r.trial_id[i]);
+        printf(" binding=%llu/%u/%u\n",
+               (unsigned long long)r.binding.generation, r.binding.kind, r.binding.shape);
+        d2k_http80_free(executed);
+    }
+
+    {
+        d2k_http80 *wrong = d2k_http80_new();
+        flow wrong_flow = flow4(57500);
+        open_flow(wrong, &wrong_flow, T);
+        size_t n = packet(&wrong_flow, 1, F_ACK | F_PSH, CISN + 2,
+                          SISN + 1, GET, b);
+        uint8_t plan_id[16], trial_id[16];
+        memset(plan_id, 0xa5, sizeof plan_id);
+        memset(trial_id, 0x5a, sizeof trial_id);
+        d2k_http80_executed(wrong, b, n, T + 99 * MS, 778, plan_id, trial_id, NULL);
+        feed_inject(wrong, &wrong_flow, T + 99 * MS + 700000ull);
+        printf("D17 executed-wrong action=%s portal=%d execution=%llu plan=",
+               action_name(r.action), r.injection, (unsigned long long)r.execution_id);
+        for (unsigned i = 0; i < 16; i++) printf("%02x", r.plan_id[i]);
+        printf(" trial=");
+        for (unsigned i = 0; i < 16; i++) printf("%02x", r.trial_id[i]);
+        printf(" binding=%llu/%u/%u\n",
+               (unsigned long long)r.binding.generation, r.binding.kind, r.binding.shape);
+        d2k_http80_free(wrong);
+    }
+
+    {
         d2k_http80_res keep = https_result;
         fake_io io = { 0, 0, 0, 0, 0 };
         d2k_http80_io callbacks = { io_payload, io_accept, io_rst, &io };
