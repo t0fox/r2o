@@ -817,6 +817,29 @@ impl R2oFlowJournal {
         true
     }
 
+    /// C `d2k_journal_add_fate` (`journal.c:178-182`): обёртка
+    /// `add_fate_bound` без execution и binding — они остаются нулевыми.
+    pub fn record_fate(
+        &mut self,
+        at_ns: u64,
+        key: [u8; KEY_LEN],
+        kind: R2oFlowJournalKind,
+        code: u8,
+        plan_id: [u8; 16],
+        trial_id: [u8; 16],
+    ) -> bool {
+        self.push(R2oFlowJournalEntry {
+            at_ns,
+            key,
+            kind,
+            code,
+            plan_id,
+            trial_id,
+            ..R2oFlowJournalEntry::default()
+        });
+        true
+    }
+
     pub fn record_tcp_exchange(&mut self, at_ns: u64, event: &R2oTcpExchangeEvent) {
         self.push(R2oFlowJournalEntry {
             at_ns,

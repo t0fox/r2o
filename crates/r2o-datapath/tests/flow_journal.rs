@@ -417,6 +417,57 @@ fn отказ_исполнителя_сохраняет_код_плана_поп
 }
 
 #[test]
+fn журнал_пишет_fate_без_execution_и_binding_как_c() {
+    // C `d2k_journal_add_fate`: execution=0, binding=NULL, note по kind.
+    let mut key = [0; KEY_LEN];
+    key[0] = 4;
+    key[37] = 6;
+    let mut journal = R2oFlowJournal::with_capacity(4).unwrap();
+    assert!(journal.record_fate(
+        1,
+        key,
+        R2oFlowJournalKind::PlanDone,
+        r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_NONE,
+        [0x10; 16],
+        [0x20; 16],
+    ));
+    assert!(journal.record_fate(
+        2,
+        key,
+        R2oFlowJournalKind::PlanUnsent,
+        r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_TOO_LONG,
+        [0x11; 16],
+        [0x21; 16],
+    ));
+    assert!(journal.record_fate(
+        3,
+        key,
+        R2oFlowJournalKind::PlanDamaged,
+        r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_DAMAGED,
+        [0x12; 16],
+        [0x22; 16],
+    ));
+    assert_eq!(journal.count(), 3);
+    let done = journal.get(0).unwrap();
+    assert_eq!(done.kind, R2oFlowJournalKind::PlanDone);
+    assert_eq!(done.execution_id, 0);
+    assert_eq!(done.binding, None);
+    assert_eq!(done.note.as_deref(), Some("план доисполнен"));
+    assert_eq!(
+        journal.get(1).unwrap().note.as_deref(),
+        Some(r2o_datapath::flow_journal::r2o_refuse_text(
+            r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_TOO_LONG
+        ))
+    );
+    assert_eq!(
+        journal.get(2).unwrap().note.as_deref(),
+        Some(r2o_datapath::flow_journal::r2o_refuse_text(
+            r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_DAMAGED
+        ))
+    );
+}
+
+#[test]
 fn журнал_пишет_отказ_none_и_невалидный_ключ_как_c() {
     // C `d2k_journal_add_refused`: code=NONE и любой ключ попадают в кольцо;
     // отсев «проба + NONE» делает `refuse_coded`, а не журнал.
