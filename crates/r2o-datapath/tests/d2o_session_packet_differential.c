@@ -334,5 +334,25 @@ int main(void) {
         d2k_session_free(guarded);
     }
 
+    /* Q: таблица TCP-потоков полна. C отвечает «таблица потоков полна» и
+     * НЕ применяет план: состояние потока не заведено. */
+    {
+        d2k_session *full = d2k_session_new(16, 0);
+        for (unsigned i = 0; i < 12; i++) {
+            length = ipv4_tcp(buffer, 0x02, 1000 + i,
+                              (uint16_t)(41000 + i), 443, 0);
+            feed(full, buffer, length, &anchor);
+        }
+        plan = NULL;
+        plan_length = fake_plan_bytes(plan_buffer);
+        if (d2k_plan_load(plan_buffer, plan_length, &plan, error, sizeof error) == 0) {
+            d2k_session_set_plan(full, plan);
+        }
+        length = packet_with_payload(buffer, 0x18, 1001, CLIENT_HELLO,
+                                     sizeof CLIENT_HELLO);
+        plan_case("Q full-table", full, buffer, length);
+        d2k_session_free(full);
+    }
+
     return 0;
 }

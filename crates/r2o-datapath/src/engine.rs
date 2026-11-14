@@ -511,6 +511,14 @@ impl TcpSessions {
         self.tcp_flow_refusals
     }
 
+    /// C `session_packet`: новый корректный TCP-поток не заведён из-за
+    /// предела таблицы. Такой пакет обязан пройти БЕЗ плана: исполнение без
+    /// записи потока применило бы план повторно к тому же соединению.
+    fn r2o_tcp_flow_refused_for_packet(&self, packet: &[u8]) -> bool {
+        TcpFlowKey::from_packet(packet).is_some_and(|key| !self.flows.contains_key(&key))
+            && self.flows.len() >= self.flow_capacity.limit()
+    }
+
     /// C `d2k_session_observe_tcp`: обработать отпущенный сегмент только для
     /// наблюдения — без выбора/применения плана и без вердикта.
     pub fn r2o_observe_tcp_packet(&mut self, packet: &[u8]) {
@@ -1790,6 +1798,11 @@ fn decide_with_session_mode(
     let now = Instant::now();
     let Some(tracked) = sessions.track_packet_mode(packet, now, controller_probe) else {
         let is_tcp = PacketView::parse(packet).is_some_and(|view| view.protocol == 6);
+        // C `session_packet`: отказ таблицы — окончательный ответ «пропустить
+        // без плана», а не повод исполнить план вне состояния потока.
+        if is_tcp && sessions.r2o_tcp_flow_refused_for_packet(packet) {
+            return PacketDecision::Accept;
+        }
         if is_tcp && plan.transport == 6 && plan.proto == PROTO_HTTP {
             return PacketDecision::Accept;
         }
@@ -3582,6 +3595,34 @@ mod tests {
         );
         assert!(sessions.track_packet(&known, start).is_some());
         assert_eq!(sessions.len(), 48);
+    }
+
+    #[test]
+    fn full_tcp_table_passes_packet_without_plan_like_c() {
+        // C `session_packet`: `d2k_track_get` == NULL — «таблица потоков
+        // полна», и план не применяется. Rust не должен исполнять план без
+        // записи потока: иначе один и тот же план применится повторно.
+        let capacity = R2oFlowCapacity::from_requested(16).unwrap();
+        assert_eq!(capacity.limit(), 12);
+        let mut sessions = TcpSessions::try_with_capacity(capacity).unwrap();
+        let server = ([198, 51, 100, 20], 443);
+        for port in 41_000..41_000 + capacity.limit() as u16 {
+            let syn = ipv4_tcp_packet(([192, 0, 2, 10], port), server, 0x02, 64, 1000, &[]);
+            assert!(sessions.track_packet(&syn, Instant::now()).is_some());
+        }
+        let hello = ipv4_tcp_packet(
+            ([192, 0, 2, 10], 41_000 + capacity.limit() as u16),
+            server,
+            0x18,
+            64,
+            1001,
+            &client_hello(),
+        );
+        assert_eq!(
+            decide_with_session(&mut sessions, &tcp_fake_plan(), &hello),
+            PacketDecision::Accept
+        );
+        assert_eq!(sessions.r2o_tcp_flow_refusals(), 1);
     }
 
     #[test]
@@ -6278,6 +6319,26 @@ mod tests {
         let before = guarded.session_applied();
         let decision = decide_with_session(&mut guarded, &guard_plan, &forged);
         print_plan("O guard-rst", &decision, guarded.session_applied() > before);
+
+        // Q: таблица TCP-потоков полна — план не применяется без потока.
+        let start = Instant::now();
+        let mut full =
+            TcpSessions::try_with_capacity(R2oFlowCapacity::from_requested(16).unwrap()).unwrap();
+        for port in 41_000..41_012 {
+            let syn = ipv4_tcp_packet(([192, 0, 2, 10], port), server, 0x02, 64, 1000, &[]);
+            full.track_packet(&syn, start);
+        }
+        let full_hello = ipv4_tcp_packet(
+            ([192, 0, 2, 10], 50_000),
+            server,
+            0x18,
+            64,
+            1001,
+            &client_hello(),
+        );
+        let before = full.session_applied();
+        let decision = decide_with_session(&mut full, &tcp_fake_plan(), &full_hello);
+        print_plan("Q full-table", &decision, full.session_applied() > before);
     }
 
     #[test]
