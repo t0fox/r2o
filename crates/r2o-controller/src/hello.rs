@@ -479,6 +479,25 @@ pub(crate) fn rename_sni(bytes: &[u8], name: &[u8]) -> Option<Vec<u8>> {
     .then_some(renamed)
 }
 
+/// C `d2k_hello_rename` (`core/hello.c:500-535`): принять тело
+/// ClientHello, обернуть его в TLS-запись, заменить SNI и вернуть тело.
+pub fn r2o_hello_rename(client_hello: &[u8], name: &[u8]) -> Option<Vec<u8>> {
+    if client_hello.is_empty()
+        || client_hello.len() > 0xffff
+        || client_hello.len() + 5 > TEMPLATE_MAX
+        || name.is_empty()
+        || name.contains(&0)
+    {
+        return None;
+    }
+    let mut record = Vec::with_capacity(client_hello.len() + 5);
+    record.extend_from_slice(&[0x16, 0x03, 0x01]);
+    record.extend_from_slice(&(client_hello.len() as u16).to_be_bytes());
+    record.extend_from_slice(client_hello);
+    let renamed = rename_sni(&record, name)?;
+    renamed.get(5..).map(|body| body.to_vec())
+}
+
 fn locate_sni_for_record(bytes: &[u8]) -> Option<SniLayout> {
     let (handshake_len, _) = u24_at(bytes, 6, bytes.len())?;
     let handshake_end = 9usize.checked_add(handshake_len)?;
