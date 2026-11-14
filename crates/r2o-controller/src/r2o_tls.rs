@@ -1,3 +1,5 @@
+use std::io::Write;
+
 const R2O_TLS13_CLIENT_HELLO_MAX: usize = 4096;
 
 /// d2o records the peer name separately and does not gate the TLS result on
@@ -723,6 +725,709 @@ fn push_extension(output: &mut Vec<u8>, kind: u16, value: &[u8]) -> Result<(), &
 
 fn push_u16(output: &mut Vec<u8>, value: u16) {
     output.extend_from_slice(&value.to_be_bytes());
+}
+
+// --- TLS 1.2 client (C `tls12.c`) -----------------------------------------
+
+const TLS12_REC_MAX: usize = 18_432;
+const TLS12_TR_MAX: usize = TLS12_REC_MAX * 4;
+const TLS12_HS_PSEUDO_CCS: u8 = 0xfe;
+
+/// C `ch12_build` (`core/tls12.c:415-485`): старая форма ClientHello без
+/// `supported_versions` и ALPN, с двумя шифрнаборами, группами
+/// X25519/P-256/P-384, форматами точек и четырьмя sigalg. `want_wire` — полная
+/// длина записи; набивка доводит её до этой длины, как padding extension 21.
+pub fn r2o_tls12_client_hello(
+    sni: Option<&str>,
+    random: &[u8; 32],
+    want_wire: usize,
+) -> Result<Vec<u8>, String> {
+    let sni = sni.unwrap_or("");
+    let sni_len = if sni.is_empty() { 0 } else { sni.len() };
+    if sni_len >= 256 {
+        // C добавляет SNI только при `0 < len < 256`, остальное — без SNI.
+    }
+    let sni_bytes = if (1..256).contains(&sni_len) {
+        &sni.as_bytes()[..sni_len]
+    } else {
+        &[][..]
+    };
+    if sni_bytes.len() > 255 {
+        return Err("SNI длиннее 255 байт".into());
+    }
+
+    let mut out = Vec::with_capacity(512 + sni_bytes.len());
+    out.extend_from_slice(&[0x16, 0x03, 0x03, 0, 0]); // record header
+    out.extend_from_slice(&[0x01, 0, 0, 0]); // handshake header
+    let body_start = out.len();
+    out.extend_from_slice(&[0x03, 0x03]);
+    out.extend_from_slice(random);
+    out.push(0); // session_id пуст
+    out.extend_from_slice(&4_u16.to_be_bytes());
+    out.extend_from_slice(&0xc02b_u16.to_be_bytes()); // ECDHE_ECDSA_AES128_GCM_SHA256
+    out.extend_from_slice(&0xc02f_u16.to_be_bytes()); // ECDHE_RSA_AES128_GCM_SHA256
+    out.extend_from_slice(&[1, 0]); // compression: null
+
+    let extensions_length_offset = out.len();
+    out.extend_from_slice(&0_u16.to_be_bytes());
+    let extensions_start = out.len();
+
+    if !sni_bytes.is_empty() {
+        push_u16(&mut out, 0);
+        push_u16(&mut out, (sni_bytes.len() + 5) as u16);
+        push_u16(&mut out, (sni_bytes.len() + 3) as u16);
+        out.push(0);
+        push_u16(&mut out, sni_bytes.len() as u16);
+        out.extend_from_slice(sni_bytes);
+    }
+
+    push_u16(&mut out, 10);
+    push_u16(&mut out, 8);
+    push_u16(&mut out, 6);
+    push_u16(&mut out, 0x001d);
+    push_u16(&mut out, 0x0017);
+    push_u16(&mut out, 0x0018);
+
+    push_u16(&mut out, 11);
+    push_u16(&mut out, 2);
+    out.extend_from_slice(&[1, 0]);
+
+    push_u16(&mut out, 13);
+    push_u16(&mut out, 10);
+    push_u16(&mut out, 8);
+    for algorithm in [0x0403_u16, 0x0804, 0x0401, 0x0203] {
+        push_u16(&mut out, algorithm);
+    }
+
+    if want_wire > 0 {
+        let now = out.len() + 2; // + длина расширений
+        if want_wire > now + 4 && want_wire - now - 4 < 65_535 {
+            let pad = want_wire - now - 4;
+            if out.len() + 4 + pad + 16 <= 512 + sni_bytes.len() + 65_519 {
+                push_u16(&mut out, 21);
+                push_u16(&mut out, pad as u16);
+                out.resize(out.len() + pad, 0);
+            }
+        }
+    }
+
+    let extensions_len = out.len() - extensions_start;
+    out[extensions_length_offset..extensions_length_offset + 2]
+        .copy_from_slice(&(extensions_len as u16).to_be_bytes());
+    let body_len = out.len() - body_start;
+    out[5] = 0x01; // ClientHello
+    out[6..9].copy_from_slice(&(body_len as u32).to_be_bytes()[1..]);
+    out[3..5].copy_from_slice(&((4 + body_len) as u16).to_be_bytes());
+    Ok(out)
+}
+
+/// C `tls12_finish` + сессия `d2k_tls12`: продолжение после сохранённого
+/// ServerHello/флайта. В production TLS1.2 ведёт rustls; этот API повторяет
+/// донорский контракт для downgrade-проверок и C/Rust differential.
+pub struct R2oTls12Session {
+    app: crate::tls12::Tls12AppReader,
+    writer: crate::tls12::Tls12RecordWriter,
+    peer_name: Option<bool>,
+    client_random: [u8; 32],
+    server_random: [u8; 32],
+}
+
+impl R2oTls12Session {
+    pub fn peer_name(&self) -> Option<bool> {
+        self.peer_name
+    }
+
+    pub fn client_random(&self) -> [u8; 32] {
+        self.client_random
+    }
+
+    pub fn server_random(&self) -> [u8; 32] {
+        self.server_random
+    }
+
+    pub fn read(
+        &mut self,
+        stream: &mut impl std::io::Read,
+        buffer: &mut [u8],
+    ) -> Result<usize, String> {
+        self.app.read(stream, buffer)
+    }
+
+    pub fn write(&mut self, stream: &mut impl std::io::Write, data: &[u8]) -> Result<(), String> {
+        crate::tls12::tls12_write(stream, &mut self.writer, data)
+    }
+}
+
+fn tls12_default_timeout(timeout: std::time::Duration) -> std::time::Duration {
+    if timeout.is_zero() {
+        std::time::Duration::from_millis(5000)
+    } else {
+        timeout
+    }
+}
+
+fn tls12_remaining(deadline: std::time::Instant) -> Result<std::time::Duration, String> {
+    let left = deadline.saturating_duration_since(std::time::Instant::now());
+    if left.is_zero() {
+        Err("не дождались TLS1.2-рукопожатия за отведённое время".into())
+    } else {
+        Ok(left)
+    }
+}
+
+fn tls12_set_deadline(
+    stream: &std::net::TcpStream,
+    deadline: std::time::Instant,
+) -> Result<(), String> {
+    let left = tls12_remaining(deadline)?;
+    stream
+        .set_read_timeout(Some(left))
+        .and_then(|()| stream.set_write_timeout(Some(left)))
+        .map_err(|error| format!("TLS1.2 timeout: {error}"))
+}
+
+fn tls12_read_message(
+    reader: &mut crate::tls12::Tls12RecordReader,
+    stream: &mut std::net::TcpStream,
+    hs: &mut Vec<u8>,
+    offset: &mut usize,
+    deadline: std::time::Instant,
+) -> Result<(u8, Vec<u8>), String> {
+    loop {
+        if hs.len().saturating_sub(*offset) >= 4 {
+            let length = (usize::from(hs[*offset + 1]) << 16)
+                | (usize::from(hs[*offset + 2]) << 8)
+                | usize::from(hs[*offset + 3]);
+            if hs.len().saturating_sub(*offset) >= 4 + length {
+                let start = *offset;
+                *offset += 4 + length;
+                return Ok((hs[start], hs[start..start + 4 + length].to_vec()));
+            }
+        }
+        tls12_set_deadline(stream, deadline)?;
+        let mut payload = Vec::new();
+        let (content_type, length) = reader.read_record(stream, &mut payload, TLS12_REC_MAX)?;
+        match content_type {
+            21 => {
+                let level = payload.first().copied().unwrap_or(0);
+                let description = payload.get(1).copied().unwrap_or(0);
+                return Err(format!(
+                    "сервер прислал тревогу {description} уровня {level}"
+                ));
+            }
+            20 => return Ok((TLS12_HS_PSEUDO_CCS, Vec::new())),
+            22 => {}
+            other => return Err(format!("запись типа {other} посреди рукопожатия")),
+        }
+        if payload.len() != length {
+            return Err("TLS1.2: неверная длина handshake-записи".into());
+        }
+        if *offset > 0 {
+            hs.drain(..*offset);
+            *offset = 0;
+        }
+        if hs.len() + payload.len() > TLS12_TR_MAX {
+            return Err("рукопожатие длиннее предела".into());
+        }
+        hs.extend_from_slice(&payload);
+    }
+}
+
+fn tls12_expand_shared(shared: &[u8]) -> Result<[u8; 32], String> {
+    if shared.len() > 32 {
+        return Err(format!("ECDHE-секрет длиной {} вместо 32", shared.len()));
+    }
+    let mut out = [0_u8; 32];
+    out[32 - shared.len()..].copy_from_slice(shared);
+    Ok(out)
+}
+
+fn tls12_finish(
+    stream: &mut std::net::TcpStream,
+    sni: &str,
+    deadline: std::time::Instant,
+    c_random: [u8; 32],
+    transcript: &mut crate::tls12::Tls12Transcript,
+    hs: &mut Vec<u8>,
+) -> Result<R2oTls12Session, String> {
+    let mut reader = crate::tls12::Tls12RecordReader::new([0; 4], [0; 16], 0, false);
+    let mut offset = 0_usize;
+    let mut s_random = [0_u8; 32];
+    let mut suite = 0_u16;
+    let mut peer_pub: Option<Vec<u8>> = None;
+    let mut group = 0_u16;
+    let mut peer_name = None;
+
+    loop {
+        let (kind, msg) = tls12_read_message(&mut reader, stream, hs, &mut offset, deadline)?;
+        if kind == TLS12_HS_PSEUDO_CCS {
+            return Err("смена шифра раньше ServerHelloDone".into());
+        }
+        if msg.len() < 4 {
+            return Err("рукопожатие TLS1.2 обрезано".into());
+        }
+        transcript.add(&msg);
+        let body = &msg[4..];
+        match kind {
+            2 => {
+                if body.len() < 2 + 32 + 1 {
+                    return Err("ServerHello обрезан".into());
+                }
+                s_random.copy_from_slice(&body[2..34]);
+                let session_len = usize::from(body[34]);
+                let cursor = 34 + 1 + session_len;
+                if cursor + 2 > body.len() {
+                    return Err("ServerHello обрезан на шифре".into());
+                }
+                suite = u16::from_be_bytes([body[cursor], body[cursor + 1]]);
+                if !matches!(suite, 0xc02b | 0xc02f) {
+                    return Err(format!(
+                        "сервер выбрал шифрнабор 0x{suite:04x} — зонд умеет только ECDHE+AES128-GCM-SHA256"
+                    ));
+                }
+            }
+            11 => {
+                if !sni.is_empty() {
+                    peer_name = crate::response::https_certificate_name_matches(body, sni);
+                }
+            }
+            12 => {
+                if body.len() < 4 {
+                    return Err("ServerKeyExchange обрезан".into());
+                }
+                if body[0] != 3 {
+                    return Err(format!(
+                        "сервер предложил не именованную кривую ({})",
+                        body[0]
+                    ));
+                }
+                group = u16::from_be_bytes([body[1], body[2]]);
+                let want = match group {
+                    0x001d => 32,
+                    0x0017 => 65,
+                    _ => 0,
+                };
+                if want == 0 {
+                    return Err(format!(
+                        "сервер выбрал группу 0x{group:04x} — зонд умеет X25519 и secp256r1"
+                    ));
+                }
+                if body[3] as usize != want || body.len() < 4 + want {
+                    return Err(format!(
+                        "открытый ключ сервера длиной {} вместо {want}",
+                        body[3]
+                    ));
+                }
+                peer_pub = Some(body[4..4 + want].to_vec());
+            }
+            13 => {
+                return Err("сервер требует клиентский сертификат — зонду его негде взять".into());
+            }
+            14 => break,
+            _ => {}
+        }
+    }
+
+    let peer_pub = peer_pub.ok_or_else(|| "флайт сервера неполон".to_owned())?;
+    if suite == 0 {
+        return Err("флайт сервера неполон".into());
+    }
+
+    let kx: &'static dyn rustls::crypto::SupportedKxGroup = match group {
+        0x001d => rustls::crypto::ring::kx_group::X25519,
+        0x0017 => rustls::crypto::ring::kx_group::SECP256R1,
+        _ => return Err("неподдерживаемая группа TLS1.2".into()),
+    };
+    let active = kx
+        .start()
+        .map_err(|error| format!("ECDHE не начался: {error}"))?;
+    let our_pub = active.pub_key().to_vec();
+    let shared = active
+        .complete(&peer_pub)
+        .map_err(|error| format!("ECDHE не сошёлся: {error}"))?;
+    let shared = tls12_expand_shared(shared.secret_bytes())?;
+
+    let mut seed = [0_u8; 64];
+    seed[..32].copy_from_slice(&c_random);
+    seed[32..].copy_from_slice(&s_random);
+    let master = crate::tls12::d2k_tls12_prf_for_test(&shared, "master secret", &seed, 48);
+    seed[..32].copy_from_slice(&s_random);
+    seed[32..].copy_from_slice(&c_random);
+    let key_block = crate::tls12::d2k_tls12_prf_for_test(&master, "key expansion", &seed, 40);
+    let c_key: [u8; 16] = key_block[..16].try_into().expect("fixed key length");
+    let s_key: [u8; 16] = key_block[16..32].try_into().expect("fixed key length");
+    let c_salt: [u8; 4] = key_block[32..36].try_into().expect("fixed salt length");
+    let s_salt: [u8; 4] = key_block[36..40].try_into().expect("fixed salt length");
+
+    let mut cke = Vec::with_capacity(4 + 1 + our_pub.len());
+    cke.extend_from_slice(&[16, 0, 0, (1 + our_pub.len()) as u8]);
+    cke.push(our_pub.len() as u8);
+    cke.extend_from_slice(&our_pub);
+    tls12_send_plain(stream, 22, &cke)?;
+    transcript.add(&cke);
+
+    tls12_send_plain(stream, 20, &[1])?;
+    let hash = {
+        use sha2::Digest;
+        sha2::Sha256::digest(transcript.as_slice())
+    };
+    let verify = crate::tls12::d2k_tls12_prf_for_test(&master, "client finished", &hash, 12);
+    let mut finished = vec![20, 0, 0, 12];
+    finished.extend_from_slice(&verify);
+    let mut writer = crate::tls12::Tls12RecordWriter::new(c_salt, c_key, 0);
+    let wire = writer.seal(22, &finished)?;
+    stream
+        .write_all(&wire)
+        .map_err(|error| format!("запись Finished не ушла: {error}"))?;
+    transcript.add(&finished);
+
+    let mut server_reader = crate::tls12::Tls12RecordReader::new(s_salt, s_key, 0, true);
+    let mut shs = Vec::new();
+    let mut shs_offset = 0_usize;
+    let mut seen_ccs = false;
+    loop {
+        tls12_set_deadline(stream, deadline)?;
+        let (kind, msg) = tls12_read_message(
+            &mut server_reader,
+            stream,
+            &mut shs,
+            &mut shs_offset,
+            deadline,
+        )?;
+        if kind == TLS12_HS_PSEUDO_CCS {
+            seen_ccs = true;
+            shs.clear();
+            shs_offset = 0;
+            continue;
+        }
+        if kind == 4 {
+            continue;
+        }
+        if kind == 20 {
+            if msg.len() != 16 {
+                return Err(format!("Finished сервера длиной {} вместо 16", msg.len()));
+            }
+            break;
+        }
+        if !seen_ccs {
+            return Err("сервер прислал сообщение до CCS".into());
+        }
+    }
+
+    Ok(R2oTls12Session {
+        app: crate::tls12::Tls12AppReader::new(server_reader),
+        writer,
+        peer_name,
+        client_random: c_random,
+        server_random: s_random,
+    })
+}
+
+fn tls12_send_plain(
+    stream: &mut std::net::TcpStream,
+    content_type: u8,
+    body: &[u8],
+) -> Result<(), String> {
+    if body.len() > TLS12_REC_MAX {
+        return Err("запись TLS1.2 длиннее предела".into());
+    }
+    let mut wire = Vec::with_capacity(5 + body.len());
+    wire.push(content_type);
+    wire.extend_from_slice(&[3, 3]);
+    wire.extend_from_slice(&(body.len() as u16).to_be_bytes());
+    wire.extend_from_slice(body);
+    stream
+        .write_all(&wire)
+        .map_err(|error| format!("TLS1.2-запись не ушла: {error}"))
+}
+
+/// C `d2k_tls12_connect`: собрать ch12, отправить и довести рукопожатие.
+pub fn r2o_tls12_connect(
+    stream: &mut std::net::TcpStream,
+    sni: &str,
+    timeout: std::time::Duration,
+    want_wire: usize,
+) -> Result<R2oTls12Session, String> {
+    let timeout = tls12_default_timeout(timeout);
+    let deadline = std::time::Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| "TLS1.2 timeout слишком велик".to_owned())?;
+    tls12_set_deadline(stream, deadline)?;
+    let mut random = [0_u8; 32];
+    rustls::crypto::ring::default_provider()
+        .secure_random
+        .fill(&mut random)
+        .map_err(|error| format!("нет случайных байт: {error:?}"))?;
+    let hello = r2o_tls12_client_hello(Some(sni), &random, want_wire)?;
+    stream
+        .write_all(&hello)
+        .map_err(|error| format!("ClientHello не ушёл: {error}"))?;
+    let mut transcript = crate::tls12::Tls12Transcript::new(TLS12_TR_MAX);
+    transcript.add(&hello[5..]);
+    let mut hs = Vec::new();
+    tls12_finish(stream, sni, deadline, random, &mut transcript, &mut hs)
+}
+
+/// C `d2k_tls12_resume`: продолжить рукопожатие по уже прочитанному флайту
+/// сервера после TLS1.3 ClientHello, на который сервер ответил TLS1.2.
+pub fn r2o_tls12_resume(
+    stream: &mut std::net::TcpStream,
+    sni: &str,
+    timeout: std::time::Duration,
+    c_random: [u8; 32],
+    ch_msg: &[u8],
+    srv: &[u8],
+) -> Result<R2oTls12Session, String> {
+    if ch_msg.len() > TLS12_TR_MAX || srv.len() > TLS12_TR_MAX {
+        return Err("рукопожатие длиннее предела".into());
+    }
+    let timeout = tls12_default_timeout(timeout);
+    let deadline = std::time::Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| "TLS1.2 timeout слишком велик".to_owned())?;
+    tls12_set_deadline(stream, deadline)?;
+    let mut transcript = crate::tls12::Tls12Transcript::new(TLS12_TR_MAX);
+    transcript.add(ch_msg);
+    let mut hs = srv.to_vec();
+    tls12_finish(stream, sni, deadline, c_random, &mut transcript, &mut hs)
+}
+
+#[cfg(test)]
+mod tls12_client_tests {
+    use super::{
+        R2oTls13ClientHelloOptions, r2o_tls12_client_hello, r2o_tls12_connect, r2o_tls12_resume,
+        r2o_tls13_client_hello,
+    };
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use rustls::{ServerConfig, ServerConnection};
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+
+    fn server_config() -> (ServerConfig, CertificateDer<'static>) {
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+            .expect("сертификат localhost");
+        let certificate_der = CertificateDer::from(certificate.serialize_der().unwrap());
+        let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certificate.serialize_private_key_der(),
+        ));
+        let config = ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS12])
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate_der.clone()], private_key)
+            .unwrap();
+        (config, certificate_der)
+    }
+
+    fn serve(config: ServerConfig, listener: TcpListener, expected_request: &'static [u8]) {
+        let (socket, _) = listener.accept().expect("принять TLS1.2-соединение");
+        let connection = ServerConnection::new(Arc::new(config)).unwrap();
+        let mut stream = rustls::StreamOwned::new(connection, socket);
+        let mut request = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !request.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).expect("прочитать запрос");
+            request.push(byte[0]);
+        }
+        assert!(request.starts_with(expected_request), "request={request:?}");
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            .unwrap();
+        stream.flush().unwrap();
+    }
+
+    fn read_http_ok(session: &mut super::R2oTls12Session, stream: &mut TcpStream) -> Vec<u8> {
+        let mut response = Vec::new();
+        let mut buffer = [0_u8; 256];
+        for _ in 0..16 {
+            let read = session.read(stream, &mut buffer).expect("прочитать ответ");
+            if read == 0 {
+                break;
+            }
+            response.extend_from_slice(&buffer[..read]);
+            if response.ends_with(b"ok") {
+                break;
+            }
+        }
+        response
+    }
+
+    #[test]
+    fn ch12_build_matches_donor_shape_and_padding() {
+        let random = [0x41; 32];
+        let hello = r2o_tls12_client_hello(Some("example.test"), &random, 0).unwrap();
+        assert_eq!(&hello[0..3], &[0x16, 3, 3]);
+        assert_eq!(
+            usize::from(u16::from_be_bytes([hello[3], hello[4]])),
+            hello.len() - 5
+        );
+        assert_eq!(hello[5], 1);
+        let body_len =
+            (usize::from(hello[6]) << 16) | (usize::from(hello[7]) << 8) | usize::from(hello[8]);
+        assert_eq!(body_len + 9, hello.len());
+        assert_eq!(&hello[9..11], &[3, 3]);
+        assert_eq!(&hello[11..43], &random);
+        // session_id, cipher suites, compression
+        assert_eq!(hello[43], 0);
+        assert_eq!(&hello[44..46], &[0, 4]);
+        assert_eq!(&hello[46..50], &[0xc0, 0x2b, 0xc0, 0x2f]);
+        assert_eq!(&hello[50..52], &[1, 0]);
+        let ext_len = u16::from_be_bytes([hello[52], hello[53]]) as usize;
+        assert_eq!(52 + 2 + ext_len, hello.len());
+        // C `ch12_build` считает `now` с уже зарезервированным полем длины
+        // расширений и потому даёт на два байта меньше `want_wire`; это
+        // донорская арифметика, а не округление.
+        let padded = r2o_tls12_client_hello(Some("example.test"), &random, 700).unwrap();
+        assert_eq!(padded.len(), 698);
+        assert_eq!(&padded[0..3], &[0x16, 3, 3]);
+        assert_eq!(usize::from(u16::from_be_bytes([padded[3], padded[4]])), 693);
+        let pad_len = 698 - hello.len() - 4;
+        assert_eq!(
+            &padded[hello.len()..hello.len() + 4],
+            &[0, 21, (pad_len >> 8) as u8, pad_len as u8]
+        );
+        assert!(padded[hello.len() + 4..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn ch12_build_c_differential_matches_donor_bytes() {
+        fn hex(bytes: &[u8]) -> String {
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+        }
+        let random = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+            0x1c, 0x1d, 0x1e, 0x1f,
+        ];
+        let max_sni = "a".repeat(247);
+        let cases: [(&str, Option<&str>, usize); 8] = [
+            ("none", None, 0),
+            ("empty", Some(""), 0),
+            ("short", Some("a"), 0),
+            ("example", Some("example.test"), 0),
+            ("example-600", Some("example.test"), 600),
+            ("example-700", Some("example.test"), 700),
+            (
+                "long-sni",
+                Some("very-long-name-for-the-tls12-clienthello.example"),
+                1200,
+            ),
+            ("max-sni", Some(&max_sni), 0),
+        ];
+        let mut output = String::new();
+        for (name, sni, want_wire) in cases {
+            let hello = r2o_tls12_client_hello(sni, &random, want_wire).unwrap();
+            output.push_str(&format!(
+                "case={name} len={} hex={}\n",
+                hello.len(),
+                hex(&hello)
+            ));
+        }
+        if let Ok(path) = std::env::var("R2O_TLS12_CH12_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert!(output.contains("case=example len=107 "));
+        assert!(output.contains("case=example-700 len=698 "));
+    }
+
+    #[test]
+    fn tls12_connect_completes_and_reports_donor_peer_name() {
+        let (config, _) = server_config();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || serve(config, listener, b"GET / HTTP/1.1\r\n"));
+        let mut stream = TcpStream::connect(address).unwrap();
+        let mut session =
+            r2o_tls12_connect(&mut stream, "localhost", Duration::from_secs(3), 0).unwrap();
+        assert_eq!(session.peer_name(), Some(true));
+        session
+            .write(&mut stream, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        let response = read_http_ok(&mut session, &mut stream);
+        assert!(
+            response.starts_with(b"HTTP/1.1 200 OK"),
+            "response={response:?}"
+        );
+        server.join().unwrap();
+    }
+
+    fn read_server_flight(stream: &mut TcpStream) -> Vec<u8> {
+        let mut handshake = Vec::new();
+        loop {
+            let mut header = [0_u8; 5];
+            stream
+                .read_exact(&mut header)
+                .expect("прочитать TLS-запись сервера");
+            assert_eq!(header[0], 22, "сервер шлёт handshake");
+            let length = usize::from(u16::from_be_bytes([header[3], header[4]]));
+            let mut body = vec![0_u8; length];
+            stream.read_exact(&mut body).expect("прочитать тело записи");
+            handshake.extend_from_slice(&body);
+            let mut offset = 0_usize;
+            while handshake.len().saturating_sub(offset) >= 4 {
+                let size = (usize::from(handshake[offset + 1]) << 16)
+                    | (usize::from(handshake[offset + 2]) << 8)
+                    | usize::from(handshake[offset + 3]);
+                if handshake.len().saturating_sub(offset) < 4 + size {
+                    break;
+                }
+                if handshake[offset] == 14 {
+                    return handshake;
+                }
+                offset += 4 + size;
+            }
+        }
+    }
+
+    #[test]
+    fn tls12_resume_after_tls13_client_hello_completes_downgrade() {
+        let (config, _) = server_config();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || serve(config, listener, b"GET / HTTP/1.1\r\n"));
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let random = [0x55; 32];
+        let ch = r2o_tls13_client_hello(&R2oTls13ClientHelloOptions {
+            server_name: Some("localhost"),
+            public_key: &[7; 32],
+            random: &random,
+            session_id_len: 0,
+            offer_tls12: true,
+            alpn: Some("http/1.1"),
+            alpn_wire: None,
+            extra_extensions: &[],
+            pad_to: 0,
+        })
+        .unwrap();
+        let mut record = vec![22, 3, 1];
+        record.extend_from_slice(&(ch.len() as u16).to_be_bytes());
+        record.extend_from_slice(&ch);
+        stream.write_all(&record).unwrap();
+        let flight = read_server_flight(&mut stream);
+        let mut session = r2o_tls12_resume(
+            &mut stream,
+            "localhost",
+            Duration::from_secs(3),
+            random,
+            &ch,
+            &flight,
+        )
+        .expect("TLS1.2 resume после TLS1.3 ClientHello");
+        assert_eq!(session.peer_name(), Some(true));
+        session
+            .write(&mut stream, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        let response = read_http_ok(&mut session, &mut stream);
+        assert!(
+            response.starts_with(b"HTTP/1.1 200 OK"),
+            "response={response:?}"
+        );
+        server.join().unwrap();
+    }
 }
 
 #[cfg(test)]
