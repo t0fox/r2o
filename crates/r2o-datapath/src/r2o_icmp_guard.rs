@@ -268,3 +268,100 @@ fn r2o_copy_address(address: &[u8]) -> [u8; 16] {
     result[..address.len()].copy_from_slice(address);
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::r2o_parse_icmp_quote;
+
+    fn put16(packet: &mut [u8], at: usize, value: u16) {
+        packet[at..at + 2].copy_from_slice(&value.to_be_bytes());
+    }
+
+    fn fill(packet: &mut [u8]) {
+        for (index, byte) in packet.iter_mut().enumerate() {
+            *byte = 0x30_u8.wrapping_add(index as u8 & 0x3f);
+        }
+    }
+
+    fn v4(
+        length: usize,
+        ihl: u8,
+        fragment: u16,
+        proto: u8,
+        ttl: u8,
+        ip_len: u16,
+        ip_id: u16,
+    ) -> Vec<u8> {
+        let mut packet = vec![0; 64];
+        fill(&mut packet);
+        packet[0] = 0x40 | ihl;
+        put16(&mut packet, 2, ip_len);
+        put16(&mut packet, 4, ip_id);
+        put16(&mut packet, 6, fragment);
+        packet[8] = ttl;
+        packet[9] = proto;
+        packet[12..16].copy_from_slice(&[10, 0, 2, 1]);
+        packet[16..20].copy_from_slice(&[10, 0, 2, 2]);
+        packet.truncate(length);
+        packet
+    }
+
+    fn v6(length: usize, proto: u8, ttl: u8, payload_len: u16) -> Vec<u8> {
+        let mut packet = vec![0; 64];
+        fill(&mut packet);
+        packet[0] = 0x60;
+        put16(&mut packet, 4, payload_len);
+        packet[6] = proto;
+        packet[7] = ttl;
+        for offset in 0..16 {
+            packet[8 + offset] = 0x20 + offset as u8;
+            packet[24 + offset] = 0x40 + offset as u8;
+        }
+        packet.truncate(length);
+        packet
+    }
+
+    fn run(name: &str, packet: &[u8]) {
+        match r2o_parse_icmp_quote(packet) {
+            None => println!("{name} ok=0"),
+            Some(quote) => {
+                print!(
+                    "{name} ok=1 fam={} proto={} ttl={} ip_len={} ip_id={} src=",
+                    quote.family, quote.protocol, quote.ttl, quote.ip_len, quote.ip_id
+                );
+                for byte in quote.source {
+                    print!("{byte:02x}");
+                }
+                print!(" dst=");
+                for byte in quote.destination {
+                    print!("{byte:02x}");
+                }
+                print!(" l4=");
+                for byte in quote.transport {
+                    print!("{byte:02x}");
+                }
+                println!();
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn d2o_parse_ip_trace() {
+        run("A v4-tcp", &v4(28, 5, 0, 6, 64, 40, 1));
+        run("B v4-udp", &v4(28, 5, 0, 17, 63, 40, 2));
+        run("C v4-short20", &v4(19, 5, 0, 6, 64, 40, 1));
+        run("D v4-bad-ihl", &v4(28, 4, 0, 6, 64, 40, 1));
+        run("E v4-fragment", &v4(28, 5, 1, 6, 64, 40, 1));
+        run("F v4-icmp-proto", &v4(28, 5, 0, 1, 64, 40, 1));
+        run("G v4-need-l4", &v4(27, 5, 0, 6, 64, 40, 1));
+        run("H v4-mf-first", &v4(28, 5, 0x2000, 6, 64, 40, 7));
+        run("I v6-tcp", &v6(48, 6, 64, 8));
+        run("J v6-short", &v6(39, 6, 64, 0));
+        run("K v6-icmpv6-proto", &v6(48, 58, 64, 8));
+        run("L v6-need-l4", &v6(47, 6, 64, 7));
+        run("M v6-udp-ttl1", &v6(48, 17, 1, 8));
+        run("N one-byte", &v4(1, 5, 0, 6, 64, 40, 1));
+        run("O empty", &[]);
+    }
+}

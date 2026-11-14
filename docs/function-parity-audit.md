@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 338 | 210 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 364 | 36 | 0 | 0 |
+| datapath-core | 400 | 365 | 35 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1464** | **518** | **0** | **0** |
+| **Итого** | **1982** | **1465** | **517** | **0** | **0** |
 
-Это не оценка паритета: 518 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 517 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1464 / P 518 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1465 / P 517 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 338 | 210 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 364 | 36 | 0 | 0 |
+| datapath-core | 400 | 365 | 35 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1464** | **518** | **0** | **0** |
+| **Итого** | **1982** | **1465** | **517** | **0** | **0** |
 
 
 ---
@@ -4401,7 +4401,7 @@ R2O: `r2o_icmp_guard.rs`.
 |---|---|---|---|---|---|---|
 | `d2k_icmpguard_init` | 6-8 | 3 | обнулить кольцо 256 и счётчики | `Default for R2oIcmpGuard` (`r2o_icmp_guard.rs:32-42`) | **E** | C `memset(g,0,sizeof *g)` (слоты, next, seen/noted/dropped). Rust `[Slot::default(); 256]`, `next=0`, `seen/noted/dropped=0` — то же состояние. |
 | `u16` (static) | 10-10 | 1 | big-endian u16 без проверки границ | `r2o_icmp_guard.rs:257-264 r2o_u16` | **E** | C `(p[0]<<8)\|p[1]`, все вызовы после проверки длины. Rust `get(offset..offset+2)` + `checked_add`, возвращает `Option`; значение для проверенных вызовов то же. |
-| `parse_ip` (static) | 21-47 | 27 | IP-заголовок цитаты: IPv4/IPv6, proto 6/17, отказ non-first fragment, `n>=hl+8` | `r2o_icmp_guard.rs:204-255 r2o_parse_icmp_quote` | **P** | **Ветви сверены:** C `!p\|\|n<1` → 0; `family=p[0]>>4`; IPv4 `n<20`, `hl=(p[0]&15)*4`, `hl<20`, `fragment&0x1fff` → 0; proto=p[9], ttl=p[8], ip_len=BE16(+2), ip_id=BE16(+4), src=+12, dst=+16; IPv6 `hl=40`, `n<40`, proto=p[6], ttl=p[7], ip_len=BE16(+4), ip_id=0, src=+8, dst=+24; иная версия → 0; proto не 6/17 → 0; `n<hl+8` → 0; `l4=p+hl`. Rust те же поля/проверки, `checked_add` и `get`; `ip_id=0` для IPv6. **Не покрыто differential:** `test-icmp-guard-current-differential.sh` сравнивает только сводные счётчики/строку, не разбор цитат; unit-тестов в модуле нет. |
+| `parse_ip` (static) | 21-47 | 27 | IP-заголовок цитаты: IPv4/IPv6, proto 6/17, отказ non-first fragment, `n>=hl+8` | `r2o_icmp_guard.rs:204-255 r2o_parse_icmp_quote` | **E*** | C/Rust differential `scripts/test-parse-ip-differential.sh` PASS (**15 строк**): IPv4 TCP/UDP, короткий `n<20`, `ihl<20`, non-first fragment, ICMP-протокол, `n<hl+8`, первый фрагмент с MF (принимается — C проверяет только offset), IPv6 TCP/UDP/ICMPv6, `n<40`, `n<48`, один байт, пусто. Совпали family/proto/ttl/ip_len/ip_id/src/dst/l4. **Ограничение:** IPv6 extension headers и вложенные фрагменты не разбираются ни в C, ни в Rust. |
 | `d2k_icmpguard_note` | 49-69 | 21 | запомнить фальшивку: `ttl<orig_ttl`, ring 256, `at=max(now,1)`, family/proto/ttl, src/dst, ports, l4word, ip_len, ip_id | `r2o_icmp_guard.rs:56-88 r2o_note` | **E*** | C/Rust differential `scripts/test-icmpguard-check-differential.sh` PASS (25 кейсов): TCP/UDP exact, `orig_ttl==q.ttl` → 0, `ip_id=0` → have_id=false, не первый фрагмент → 0, proto 1 → 0, `now=0` → at=1, IPv4/IPv6, `noted`; кольцо 256 и порядок слотов совпадают. **Ограничение:** C для UDP копирует в `l4word` 2 байта, Rust — 4; `check` для UDP сравнивает только 2, результат тот же (кейс `O udp-checksum-ignored`). |
 | `d2k_icmpguard_check` | 71-110 | 40 | ICMPv4 type 11/0, v6 type 3/0; `fragment & 0x3fff`; цитата family; 7 полей; `q.ttl<=s.ttl`; dropped++ | `r2o_icmp_guard.rs:90-125 r2o_check`, `:175-202 r2o_icmp_quote_start` | **E*** | Тот же C/Rust differential (25 кейсов) сравнивает **каждый исход** `note/check` и `noted/dropped`: seq/sport/dport/ip_len/ip_id/ttl/src/dst, UDP length vs checksum, IPv6 dst, family mismatch, outer fragment/short, inner fragment/proto, ровно 5 с хранения и 5 с + 1 нс. Порядок сравнений (l4word/ip_len) не влияет — конъюнкция. **Ограничение:** IPv6 extension headers не рассматриваются (как C); hook-фильтр `r2o_handle_at_hook` — R2O-расширение, вне differential. |
 | `d2k_icmpguard_dropped` | 112-112 | 1 | счётчик снятых ICMP | `r2o_icmp_guard.rs:149-151 r2o_dropped` | **E** | C `return g ? g->dropped : 0`; Rust `self.dropped`; differential сверяет поле сводки. C-строка: `return g ? g->dropped : 0;`; Rust `self.dropped`; differential сверяет поле сводки. |
