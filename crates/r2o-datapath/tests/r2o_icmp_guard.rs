@@ -326,3 +326,264 @@ fn r2o_periodic_icmp_summary_matches_d2o_fields() {
         .unwrap();
     }
 }
+
+#[test]
+#[ignore]
+fn d2o_icmpguard_check_trace() {
+    fn inner4(
+        proto: u8,
+        ttl: u8,
+        id: u16,
+        sport: u16,
+        dport: u16,
+        w0: u16,
+        w1: u16,
+        ip_len_override: u16,
+    ) -> Vec<u8> {
+        let mut packet = vec![0; 28];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(
+            &(if ip_len_override == 0 {
+                28
+            } else {
+                ip_len_override
+            })
+            .to_be_bytes(),
+        );
+        packet[4..6].copy_from_slice(&id.to_be_bytes());
+        packet[8] = ttl;
+        packet[9] = proto;
+        packet[12..16].copy_from_slice(&[192, 0, 2, 10]);
+        packet[16..20].copy_from_slice(&[198, 51, 100, 20]);
+        packet[20..22].copy_from_slice(&sport.to_be_bytes());
+        packet[22..24].copy_from_slice(&dport.to_be_bytes());
+        packet[24..26].copy_from_slice(&w0.to_be_bytes());
+        packet[26..28].copy_from_slice(&w1.to_be_bytes());
+        packet
+    }
+    fn inner4_fragment() -> Vec<u8> {
+        let mut packet = inner4(6, 63, 0x1234, 50000, 443, 1, 2, 0);
+        packet[6..8].copy_from_slice(&1_u16.to_be_bytes());
+        packet
+    }
+    fn icmp4(kind: u8, code: u8, quote: &[u8]) -> Vec<u8> {
+        let mut packet = vec![0; 28 + quote.len()];
+        let total = packet.len() as u16;
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&total.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 1;
+        packet[12..16].copy_from_slice(&[203, 0, 113, 9]);
+        packet[16..20].copy_from_slice(&[192, 0, 2, 10]);
+        packet[20] = kind;
+        packet[21] = code;
+        packet[28..].copy_from_slice(quote);
+        packet
+    }
+    fn icmp4_fragment(quote: &[u8]) -> Vec<u8> {
+        let mut packet = icmp4(11, 0, quote);
+        packet[6..8].copy_from_slice(&1_u16.to_be_bytes());
+        packet
+    }
+    fn inner6(proto: u8, ttl: u8, sport: u16, dport: u16, w0: u16, w1: u16) -> Vec<u8> {
+        let mut packet = vec![0; 48];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&8_u16.to_be_bytes());
+        packet[6] = proto;
+        packet[7] = ttl;
+        packet[8..24]
+            .copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        packet[24..40]
+            .copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+        packet[40..42].copy_from_slice(&sport.to_be_bytes());
+        packet[42..44].copy_from_slice(&dport.to_be_bytes());
+        packet[44..46].copy_from_slice(&w0.to_be_bytes());
+        packet[46..48].copy_from_slice(&w1.to_be_bytes());
+        packet
+    }
+    fn icmp6(kind: u8, code: u8, quote: &[u8]) -> Vec<u8> {
+        let mut packet = vec![0; 48 + quote.len()];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&((8 + quote.len()) as u16).to_be_bytes());
+        packet[6] = 58;
+        packet[7] = 64;
+        packet[8..24]
+            .copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9]);
+        packet[24..40]
+            .copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        packet[40] = kind;
+        packet[41] = code;
+        packet[48..].copy_from_slice(quote);
+        packet
+    }
+    fn run(name: &str, fake: &[u8], original_ttl: u8, note_now: u64, icmp: &[u8], check_now: u64) {
+        let mut guard = R2oIcmpGuard::default();
+        let noted = guard.r2o_note(fake, original_ttl, note_now);
+        let checked = guard.r2o_check(icmp, check_now);
+        println!(
+            "{name} note={} check={} noted={} dropped={}",
+            u8::from(noted),
+            u8::from(checked),
+            guard.r2o_noted(),
+            guard.r2o_dropped()
+        );
+    }
+
+    let fake = inner4(6, 63, 0x1234, 50000, 443, 0x0102, 0x0304, 0);
+    let quote = inner4(6, 63, 0x1234, 50000, 443, 0x0102, 0x0304, 0);
+    run("A tcp-exact", &fake, 64, 1000, &icmp4(11, 0, &quote), 1000);
+
+    let fake = inner4(17, 63, 0x1234, 50000, 443, 0x0010, 0, 0);
+    let quote = inner4(17, 63, 0x1234, 50000, 443, 0x0010, 0, 0);
+    run("B udp-exact", &fake, 64, 1000, &icmp4(11, 0, &quote), 1000);
+
+    let fake = inner4(6, 63, 0x1234, 50000, 443, 0x0102, 0x0304, 0);
+    let quote = inner4(6, 63, 0x1234, 50000, 443, 0x0103, 0x0304, 0);
+    run("C seq-diff", &fake, 64, 1000, &icmp4(11, 0, &quote), 1000);
+
+    let quote = inner4(6, 64, 0x1234, 50000, 443, 0x0102, 0x0304, 0);
+    run(
+        "D ttl-greater",
+        &fake,
+        64,
+        1000,
+        &icmp4(11, 0, &quote),
+        1000,
+    );
+
+    let quote = inner4(6, 62, 0x1234, 50000, 443, 0x0102, 0x0304, 0);
+    run("E ttl-lower", &fake, 64, 1000, &icmp4(11, 0, &quote), 1000);
+
+    let quote = inner4(6, 63, 0x1234, 50001, 443, 0x0102, 0x0304, 0);
+    run("F sport-diff", &fake, 64, 1000, &icmp4(11, 0, &quote), 1000);
+
+    let quote = inner4(6, 63, 0x1234, 50000, 444, 0x0102, 0x0304, 0);
+    run("G dport-diff", &fake, 64, 1000, &icmp4(11, 0, &quote), 1000);
+
+    let quote = inner4(6, 63, 0x1234, 50000, 443, 0x0102, 0x0304, 29);
+    run("H iplen-diff", &fake, 64, 1000, &icmp4(11, 0, &quote), 1000);
+
+    let quote = inner4(6, 63, 0x9999, 50000, 443, 0x0102, 0x0304, 0);
+    run("I ipid-diff", &fake, 64, 1000, &icmp4(11, 0, &quote), 1000);
+
+    let quote = inner4(6, 63, 0x1234, 50000, 443, 0x0102, 0x0304, 0);
+    run(
+        "J orig-ttl-equal",
+        &fake,
+        63,
+        1000,
+        &icmp4(11, 0, &quote),
+        1000,
+    );
+
+    let fake_zero = inner4(6, 63, 0, 50000, 443, 0x0102, 0x0304, 0);
+    let quote = inner4(6, 63, 0x9999, 50000, 443, 0x0102, 0x0304, 0);
+    run(
+        "K ipid-zero",
+        &fake_zero,
+        64,
+        1000,
+        &icmp4(11, 0, &quote),
+        1000,
+    );
+
+    let quote = inner4(6, 63, 0x1234, 50000, 443, 0x0102, 0x0304, 0);
+    run(
+        "L expired",
+        &fake,
+        64,
+        1000,
+        &icmp4(11, 0, &quote),
+        1000 + 5_000_000_000 + 1,
+    );
+    run(
+        "M kept-5s",
+        &fake,
+        64,
+        1000,
+        &icmp4(11, 0, &quote),
+        1000 + 5_000_000_000,
+    );
+
+    run("N icmp-type", &fake, 64, 1000, &icmp4(3, 0, &quote), 1000);
+
+    let fake_udp = inner4(17, 63, 0x1234, 50000, 443, 0x0010, 0x1111, 0);
+    let quote = inner4(17, 63, 0x1234, 50000, 443, 0x0010, 0x2222, 0);
+    run(
+        "O udp-checksum-ignored",
+        &fake_udp,
+        64,
+        1000,
+        &icmp4(11, 0, &quote),
+        1000,
+    );
+
+    let quote = inner4(17, 63, 0x1234, 50000, 443, 0x0011, 0x2222, 0);
+    run(
+        "P udp-len-diff",
+        &fake_udp,
+        64,
+        1000,
+        &icmp4(11, 0, &quote),
+        1000,
+    );
+
+    let fake6 = inner6(6, 63, 50000, 443, 1, 2);
+    let quote = inner6(6, 63, 50000, 443, 1, 2);
+    run("Q v6-exact", &fake, 64, 1000, &icmp6(3, 0, &quote), 1000);
+    run("R v6-real", &fake6, 64, 1000, &icmp6(3, 0, &quote), 1000);
+
+    let mut quote = inner6(6, 63, 50000, 443, 1, 2);
+    quote[39] = 3;
+    run(
+        "S v6-dst-diff",
+        &fake6,
+        64,
+        1000,
+        &icmp6(3, 0, &quote),
+        1000,
+    );
+
+    let quote = inner4(6, 63, 0x1234, 50000, 443, 0x0102, 0x0304, 0);
+    run(
+        "T family-mismatch",
+        &fake6,
+        64,
+        1000,
+        &icmp4(11, 0, &quote),
+        1000,
+    );
+    run(
+        "U outer-fragment",
+        &fake,
+        64,
+        1000,
+        &icmp4_fragment(&quote),
+        1000,
+    );
+    run(
+        "V outer-short",
+        &fake,
+        64,
+        1000,
+        &icmp4(11, 0, &quote)[..27],
+        1000,
+    );
+    run(
+        "W inner-fragment",
+        &inner4_fragment(),
+        64,
+        1000,
+        &icmp4(11, 0, &quote),
+        1000,
+    );
+    run(
+        "X inner-proto",
+        &inner4(1, 63, 0x1234, 50000, 443, 1, 2, 0),
+        64,
+        1000,
+        &icmp4(11, 0, &quote),
+        1000,
+    );
+    run("Y note-at-zero", &fake, 64, 0, &icmp4(11, 0, &quote), 1);
+}
