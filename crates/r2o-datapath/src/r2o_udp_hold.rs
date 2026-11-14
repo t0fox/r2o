@@ -116,10 +116,9 @@ pub fn r2o_release_batch_with(
             1
         };
         if send_verdict(tail.id, verdict).is_err() {
+            // C `release_batch`: ошибка вердикта считается, повторной
+            // выдачи ACCEPT нет.
             stats.verdict_failures += 1;
-            if verdict == 0 && send_verdict(tail.id, 1).is_err() {
-                stats.verdict_failures += 1;
-            }
         }
     }
     stats

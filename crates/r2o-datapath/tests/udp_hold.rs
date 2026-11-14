@@ -532,6 +532,38 @@ fn r2o_udp_hold_отказывает_после_шестнадцати_пото�
 }
 
 #[test]
+fn release_batch_не_повторяет_accept_после_ошибки_вердикта_как_c() {
+    let now = Instant::now();
+    let mut table = R2oUdpHoldTable::new();
+    let head = r2o_udp_packet([192, 0, 2, 1], [198, 51, 100, 2], 50_040, 443, b"head");
+    let tail = r2o_udp_packet([192, 0, 2, 1], [198, 51, 100, 2], 50_040, 443, b"tail");
+    assert_eq!(table.r2o_feed(51, 0, &head, now), R2oUdpHoldFeed::Held);
+    assert_eq!(table.r2o_feed(52, 0, &tail, now), R2oUdpHoldFeed::Held);
+    let batch = table.r2o_take(&head).unwrap();
+    assert_eq!(batch.packets.len(), 2);
+    let mut attempts = 0;
+    let stats = r2o_release_batch_with(
+        &batch,
+        1,
+        false,
+        true,
+        |_| true,
+        |_| Ok::<_, std::io::Error>(()),
+        |_, _| {},
+        |_, _| {
+            attempts += 1;
+            if attempts == 2 {
+                Err(std::io::Error::other("вердикт хвоста не выдан"))
+            } else {
+                Ok(())
+            }
+        },
+    );
+    assert_eq!(attempts, 2, "C не повторяет ACCEPT после ошибки DROP");
+    assert_eq!(stats.verdict_failures, 1);
+}
+
+#[test]
 fn deferred_owned_emit_выдаёт_accept_при_сбое_и_drop_при_успехе_как_c() {
     use r2o_datapath::r2o_udp_hold::R2oUdpDeferredResends;
 
