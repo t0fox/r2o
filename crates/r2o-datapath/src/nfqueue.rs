@@ -449,15 +449,28 @@ impl QueueSocket {
     }
 }
 
+impl AsRawFd for QueueSocket {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
+}
+
 impl Drop for QueueSocket {
     fn drop(&mut self) {
-        let message = config_command(
+        let message = self.unbind_message();
+        let _ = send_to_kernel(self.fd.as_raw_fd(), &message);
+    }
+}
+
+impl QueueSocket {
+    /// C `d2k_nfq_close`: UNBIND без ACK, `seq++`.
+    fn unbind_message(&mut self) -> Vec<u8> {
+        config_command(
             self.queue,
             self.next_sequence(),
             NFQNL_CFG_CMD_UNBIND,
             self.protocol_family,
-        );
-        let _ = send_to_kernel(self.fd.as_raw_fd(), &message);
+        )
     }
 }
 
@@ -508,10 +521,11 @@ fn recv_once(fd: libc::c_int, bytes: &mut [u8]) -> io::Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::{QueueSocket, R2oNfqRecvOutcome, r2o_nfq_recv_error_outcome};
+    use crate::netlink::{NFQNL_CFG_CMD_UNBIND, config_command};
     use std::cell::Cell;
     use std::io;
     use std::io::ErrorKind;
-    use std::os::fd::OwnedFd;
+    use std::os::fd::{AsRawFd, OwnedFd};
 
     #[test]
     fn nfq_recv_error_mapping_matches_c() {
@@ -542,6 +556,23 @@ mod tests {
             lost_packets: Cell::new(0),
             stats: Cell::new(Default::default()),
         }
+    }
+
+    #[test]
+    fn unbind_message_and_fd_match_c_close() {
+        let mut socket = test_socket();
+        let message = socket.unbind_message();
+        assert_eq!(
+            message,
+            config_command(0, 1, NFQNL_CFG_CMD_UNBIND, libc::AF_INET as u16)
+        );
+        assert_eq!(socket.sequence, 2, "C seq++ после UNBIND");
+
+        let fd = socket.as_raw_fd();
+        assert!(fd >= 0);
+        drop(socket);
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
     }
 
     #[test]

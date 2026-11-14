@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 344 | 56 | 0 | 0 |
+| datapath-core | 400 | 346 | 54 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1442** | **540** | **0** | **0** |
+| **Итого** | **1982** | **1444** | **538** | **0** | **0** |
 
-Это не оценка паритета: 540 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 538 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1442 / P 540 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1444 / P 538 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 344 | 56 | 0 | 0 |
+| datapath-core | 400 | 346 | 54 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1442** | **540** | **0** | **0** |
+| **Итого** | **1982** | **1444** | **538** | **0** | **0** |
 
 
 ---
@@ -4292,8 +4292,8 @@ R2O: `nfqueue.rs`, `netlink.rs`.
 | `send_and_ack` (static) | 111-122 | 12 | len==0 → ошибка; `nl_write`; `await_ack(seq)` | `nfqueue.rs:336-340 configure` | **P** | C seq передаётся явно, len==0 — отдельная ошибка. Rust `configure` берёт seq из заголовка `message[8..12]`, затем `send_to_kernel` + `await_ack`; пустое сообщение невозможно (билдеры всегда ≥16 байт), отдельной проверки len нет. Для реальных команд эквивалентно; теста `configure` нет. |
 | `set_rcvbuf` (static) | 127-145 | 19 | `SO_RCVBUFFORCE` → `SO_RCVBUF`, `getsockopt`; 0/1/-1 | `nfqueue.rs:13-70 set_receive_buffer(_with)` | **E** | **Ветви сверены:** C пробует FORCE (если определён), при неудаче — RCVBUF; если оба не удались → -1; `getsockopt(SO_RCVBUF)`; `effective`; `return v>=requested ? 0 : 1`. Rust `set_receive_buffer_with`: FORCE `is_ok`, иначе RCVBUF, `getsockopt`; возвращает effective; `open` сравнивает с requested и логирует cap. Тесты `nfqueue.rs:512`, `:535`, `:563`. |
 | `d2k_nfq_open` | 147-230 | 84 | socket/bind/BIND+ACK/PARAMS(fail_open, GSO off), rcvbuf | `nfqueue.rs:115-188 open` | **P** | **Ветви сверены:** C `!cfg`/calloc; `queue`, `seq=1`; `socket(AF_NETLINK, SOCK_RAW, NETLINK_NETFILTER)`; `bind` с `nl_pid=0`; `rcvbuf` FORCE/RCVBUF + логи cap; `BIND AF_INET` с ACK; `PARAMS`: copy_range, COPY_PACKET, maxlen, flags=fail_open, mask=fail_open\|GSO (GSO в маске, не в значении); ошибки → close/free. Rust: валидация `copy_range>=64`, `max_len!=0`, family 2\|10; `SOCK_RAW\|SOCK_CLOEXEC`; bind; rcvbuf; `config_command(BIND, family)` + `config_params` (те же attrs/mask); `Drop` вместо free. **Отличия:** C всегда AF_INET и не проверяет copy_range/maxlen; Rust поддерживает IPv4/IPv6 и отвергает негодные параметры; Rust `next_sequence` не отдаёт 0 при переполнении (`wrapping_add(1).max(1)`), C `seq++` может дать 0. |
-| `d2k_nfq_close` | 232-248 | 17 | UNBIND без ACK, close, free | `nfqueue.rs:404-414 Drop` | **P** | C при `fd>=0` строит UNBIND с `seq++`, шлёт без ACK, close, free. Rust `Drop` строит UNBIND с `protocol_family`, шлёт без ACK, `OwnedFd` закрывает; отдельного close-API нет. Эквивалентно. |
-| `d2k_nfq_fd` | 250-252 | 3 | дескриптор NFQUEUE-сокета | `AsRawFd for QueueSocket` (`nfqueue.rs`) | **P** | C `return q ? q->fd : -1`. Rust `AsRawFd` для непустого `QueueSocket`; NULL-объекта нет, отказ выражается `Option`/ошибкой. C-строка: `return q ? q->fd : -1;`; Rust `AsRawFd for QueueSocket`; NULL-объекта нет. |
+| `d2k_nfq_close` | 232-248 | 17 | UNBIND без ACK, close, free | `nfqueue.rs` `unbind_message` + `Drop` | **E*** | C при `fd>=0` строит UNBIND с `seq++`, шлёт без ACK, close/free. Rust `unbind_message` вызывает тот же `config_command(queue, seq++, UNBIND, family)`, `Drop` шлёт его и закрывает `OwnedFd`; ошибка отправки игнорируется, как C. Тест `unbind_message_and_fd_match_c_close`: байты равны `config_command(0,1,UNBIND,AF_INET)`, `sequence` стал 2, после Drop `fcntl(F_GETFD)` → `EBADF`. **Ограничение:** ACK не запрашивается и не проверяется — как C. |
+| `d2k_nfq_fd` | 250-252 | 3 | дескриптор NFQUEUE-сокета | `impl AsRawFd for QueueSocket` (`nfqueue.rs`) | **E*** | C `return q ? q->fd : -1`; Rust добавлен `AsRawFd` для `QueueSocket`, возвращающий `OwnedFd`; NULL-объекта нет, отказ выражается `Option`/ошибкой. Тот же тест проверяет `as_raw_fd() >= 0` и закрытие после Drop. **Ограничение:** API возвращает `RawFd`, а не `-1` для отсутствующего объекта. |
 | `d2k_nfq_recv` | 254-274 | 21 | recv; EAGAIN/EWOULDBLOCK/EINTR→0, ENOBUFS→lost++, -2, иначе -1 | `nfqueue.rs` `receive_timeout_with_fd`, `r2o_nfq_recv_error_outcome` | **E*** | Отображение errno приведено к C: EAGAIN/EWOULDBLOCK/EINTR → пустое ожидание (`Wait`, без сброса), ENOBUFS → `LostPackets` + счётчик, иное → `Io`. Poll EINTR → пустое ожидание, HUP/ERR/POLLNVAL без POLLIN → `Io`. Тест `nfq_recv_error_mapping_matches_c`. **Ограничение:** живой C/Rust netlink-оракул не построен; проверены исходные ветви C и отображение errno, а не реальный NFQUEUE-сокет. |
 | `d2k_nfq_verdict` | 276-292 | 17 | вердикт без payload | `nfqueue.rs:310-315 send_verdict` | **E** | C `d2k_nl_verdict` + `nl_write`, ошибки в err. Rust `verdict(queue, seq, pkt_id, action)` + `send_to_kernel` + `record_verdict`; те же поля/порядок. Тесты `netlink.rs:304`. |
 | `d2k_nfq_verdict_payload` | 294-311 | 18 | вердикт с заменой; буфер `64+2048` | `nfqueue.rs` `send_replacement`, `netlink.rs` `verdict_payload` | E | C: `uint8_t msg[64+2048]`; пустая замена, `len > 0xffff-4` или не влезающая в 2112 байт → отказ; раскладка NLMSG(16)+nfgenmsg(4)+VERDICT_HDR(12)+PAYLOAD(4+len,padded). Rust `verdict_payload` строит те же поля и отвергает `message.len() > 2112`; тесты `replacement_verdict_carries_payload_and_zero_padding`, `replacement_verdict_respects_c_message_capacity` (2076 влезает, 2077 нет). |
