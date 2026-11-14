@@ -765,20 +765,9 @@ impl R2oFlowJournal {
         execution_id: u64,
         binding: Option<BindingContext>,
     ) -> bool {
-        if !valid_journal_key(&key)
-            || !matches!(
-                code,
-                R2O_JOURNAL_REFUSE_NOT_APPLIED | R2O_JOURNAL_REFUSE_FLOW_UNFIT
-            )
-            || binding.is_some_and(|binding| {
-                !binding.is_known()
-                    || !matches!(binding.family, 4 | 6)
-                    || binding.shape > r2k_core::control::SHAPE_HTTP
-                    || !matches!((binding.kind, key[37]), (1, 6) | (2, 17))
-            })
-        {
-            return false;
-        }
+        // C `d2k_journal_add_refused` пишет любой code (включая NONE) и не
+        // проверяет ни ключ, ни binding: отсев проба/NONE делает вызывающий
+        // `refuse_coded`, а не журнал.
         self.push(R2oFlowJournalEntry {
             at_ns,
             execution_id,

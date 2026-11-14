@@ -417,6 +417,38 @@ fn отказ_исполнителя_сохраняет_код_плана_поп
 }
 
 #[test]
+fn журнал_пишет_отказ_none_и_невалидный_ключ_как_c() {
+    // C `d2k_journal_add_refused`: code=NONE и любой ключ попадают в кольцо;
+    // отсев «проба + NONE» делает `refuse_coded`, а не журнал.
+    let mut journal = R2oFlowJournal::with_capacity(2).unwrap();
+    assert!(journal.record_plan_refused(
+        10,
+        [0; KEY_LEN],
+        r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_NONE,
+        [0; 16],
+        [0; 16],
+        0,
+        None,
+    ));
+    assert!(journal.record_plan_refused(
+        11,
+        [0; KEY_LEN],
+        r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_TOO_LONG,
+        [0x11; 16],
+        [0; 16],
+        0,
+        Some(BindingContext::default()),
+    ));
+    assert_eq!(journal.count(), 2);
+    assert_eq!(
+        journal.get(0).unwrap().kind,
+        R2oFlowJournalKind::PlanRefused
+    );
+    assert_eq!(journal.get(0).unwrap().code, 0);
+    assert_eq!(journal.get(1).unwrap().code, 3);
+}
+
+#[test]
 fn журнал_сохраняет_детали_подозрения_quic_и_отвергает_повреждённое_событие() {
     let mut key = [0; KEY_LEN];
     key[0] = 4;
