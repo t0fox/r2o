@@ -4789,14 +4789,20 @@ mod app {
             eprintln!("r2o-datapath: owned TLS originals остались без raw socket");
             return originals.len();
         };
+        let mut failed = 0;
         r2o_resend_originals_with(originals, |packet| match raw.send_packet(packet) {
             Ok(()) => {
                 r2o_note_counter(&R2O_HOLD_RESENT, 1);
                 Ok(())
             }
             Err(error) => {
+                failed += 1;
                 r2o_note_counter(&R2O_HOLD_RESEND_FAIL, 1);
-                r2o_log_send_fail("не возвращён owned TLS original через raw-send: ", &error);
+                // C `resend_original`: строки только первые 16 отказов,
+                // дальше счётчик в сводке.
+                if failed <= 16 {
+                    eprintln!("r2o-datapath: оригинал приветствия не возвращён на провод: {error}");
+                }
                 Err(error)
             }
         })
