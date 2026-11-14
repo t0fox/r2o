@@ -92,9 +92,13 @@ Pinned C/Rust differential-донор остаётся `a378e230...`; это о�
   differential 18 vectors + loopback PASS) и `dns_health.rs` DoH/DoT/DoQ
   (`probe_dns_health`, DNS wire/parse, DoH framing; differential 15 PASS,
   loopback DoH/DoT/DoQ).
-- Остаются: проводка health в тик `dns_services`, `T_DNS_HEALTH`,
-  `bypass_ok`/`no_bypass`/`candidate_plan_applied`/`dns_answer_via_plan`.
-  Поэтому `d2k_sched_write_live` — P*.
+- **Health wiring 2026-11-14:** `dns_health` подключён в main loop
+  неблокирующим worker'ом (одна проба, `state!=Checking`,
+  `now>=next_check`), `probe.host=live.ip`/bootstrap, 4000 мс; состояния
+  `direct_ok/failed/plan_applied/bypass_ok` и `candidate_plan_applied`
+  покрыты `test-dns-state-differential.sh` **8 сценариев**.
+- Остаются: `no_bypass` и production `candidate_plan_applied` — нужен
+  task-слой `T_DNS_HEALTH`/`T_RESTING`. Поэтому `d2k_sched_write_live` — P*.
 
 ## Команды проверки
 
