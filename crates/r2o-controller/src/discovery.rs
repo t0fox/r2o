@@ -7,7 +7,9 @@ use r2k_core::control::{
 use r2k_core::plan::Plan as RuntimePlan;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use crate::catalog::{Binding, BoxRecord, Catalog, DomainObservation, DomainState, GroupKey, Plan};
+use crate::catalog::{
+    Binding, BoxRecord, Catalog, DomainObservation, DomainState, Fingerprint, GroupKey, Plan,
+};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct DiscoveryTarget {
@@ -1016,6 +1018,149 @@ pub fn update_direct_clear_bindings(
     update
 }
 
+/// C `bind_confirmed` (`core/sched.c:3463-3571`): записать подтверждённую
+/// привязку в указанную коробку. Ключ — цель, транспорт, вид, семейство,
+/// TCP-профиль и совместимая форма; найденная привязка обновляется на месте.
+/// Уровень, `enabled`, `probe_path`, `ech_origin` и `budget` при обновлении
+/// не сбрасываются: C меняет только измеренные поля.
+#[allow(clippy::too_many_arguments)]
+pub fn bind_confirmed(
+    catalog: &mut Catalog,
+    box_id: &str,
+    plan_id: &str,
+    plan_text: &str,
+    proto: &str,
+    target: &str,
+    kind: &str,
+    transport: u8,
+    family: u8,
+    shape: u8,
+    tcp_profile: u8,
+    verified_by: u8,
+    input: u8,
+    at: i64,
+    fingerprint: Option<&Fingerprint>,
+) -> Result<(), String> {
+    if box_id.is_empty() || box_id.len() >= 40 {
+        return Err("catalog box id is invalid".into());
+    }
+    if plan_id.is_empty() || plan_id.len() >= 40 {
+        return Err("catalog plan id is invalid".into());
+    }
+    if kind.is_empty() || kind.len() >= 8 || target.is_empty() || target.len() > 255 {
+        return Err("catalog binding kind or target is invalid".into());
+    }
+    if !matches!(family, 4 | 6) {
+        return Err("catalog binding family is invalid".into());
+    }
+    let index = match catalog.boxes.iter().position(|record| record.id == box_id) {
+        Some(index) => index,
+        None => {
+            catalog.boxes.push(BoxRecord {
+                id: box_id.to_owned(),
+                created: at,
+                updated: at,
+                ..BoxRecord::default()
+            });
+            catalog.boxes.len() - 1
+        }
+    };
+    let selected = &mut catalog.boxes[index];
+    if selected.created == 0 {
+        selected.created = at;
+    }
+    if let Some(observed) = fingerprint {
+        if selected.fingerprint.signals.is_empty() {
+            if !observed.signals.is_empty() {
+                selected.fingerprint = observed.clone();
+            }
+        } else {
+            // C обновляет только бюджет пакетов RX-объёма и не переписывает
+            // identity-приметы; `seen` здесь не растёт.
+            for signal in &observed.signals {
+                if !matches!(signal.kind.as_str(), "rx-volume" | "rx-volume-wire")
+                    || signal.packets <= 0
+                {
+                    continue;
+                }
+                for saved in &mut selected.fingerprint.signals {
+                    let delta = (i64::from(saved.volume) - i64::from(signal.volume)).abs();
+                    if saved.kind == signal.kind
+                        && delta <= crate::catalog::VOLUME_SLACK
+                        && saved.packets != signal.packets
+                    {
+                        saved.packets = signal.packets;
+                    }
+                }
+            }
+        }
+    }
+    selected.updated = at;
+    if let Some(saved) = selected.plans.iter_mut().find(|plan| plan.id == plan_id) {
+        saved.successes = saved.successes.saturating_add(1);
+    } else {
+        selected.plans.push(Plan {
+            id: plan_id.to_owned(),
+            proto: proto.to_owned(),
+            text: plan_text.to_owned(),
+            added: at,
+            successes: 1,
+            enabled: true,
+        });
+    }
+    if let Some(saved) = selected.bindings.iter_mut().find(|binding| {
+        binding.transport == transport
+            && binding.target == target
+            && binding.kind == kind
+            && (if binding.family == 0 {
+                4
+            } else {
+                binding.family
+            }) == family
+            && binding.tcp_profile == tcp_profile
+            && crate::catalog::binding_shape_fits(binding.shape, shape)
+    }) {
+        saved.successes = saved.successes.saturating_add(1);
+        saved.confirmed = at;
+        saved.recheck_since = None;
+        saved.recheck_mono = None;
+        if saved.plan_id != plan_id {
+            saved.budget = 0;
+        }
+        saved.plan_id = plan_id.to_owned();
+        if shape != 0 {
+            saved.shape = shape;
+        }
+        saved.tcp_profile = tcp_profile;
+        if verified_by != 0 {
+            saved.verified_by = verified_by;
+        }
+        // Полнота входа пишется только сильнее прежней: замер байтами
+        // клиента отменяет прежнюю заготовку, обратное — нет.
+        if input == 1 || saved.input == 0 {
+            saved.input = input;
+        }
+        return Ok(());
+    }
+    selected.bindings.push(Binding {
+        kind: kind.to_owned(),
+        target: target.to_owned(),
+        plan_id: plan_id.to_owned(),
+        level: 3,
+        confirmed: at,
+        successes: 1,
+        enabled: true,
+        transport,
+        family,
+        shape,
+        tcp_profile,
+        verified_by,
+        input,
+        ..Binding::default()
+    });
+    Ok(())
+}
+
 /// Сохранить измеренный план и соответствующую точную привязку имени.
 pub fn add_measured_binding(
     catalog: &mut Catalog,
@@ -1219,73 +1364,28 @@ pub fn add_measured_binding_with_fingerprint_in_box(
         catalog.boxes.len() - 1
     };
 
-    let mut prior_successes = 0_i32;
-    for box_record in &mut catalog.boxes {
-        for binding in &box_record.bindings {
-            if exact_key(binding, target) {
-                prior_successes = prior_successes.max(binding.successes);
-            }
-        }
-        box_record
-            .bindings
-            .retain(|binding| !exact_key(binding, target));
-    }
-
-    let selected = &mut catalog.boxes[box_index];
-    if let Some(observed) = observed_fingerprint {
-        if selected.fingerprint.signals.is_empty() {
-            selected.fingerprint = observed.clone();
-        } else if selected.fingerprint.is_compatible_with(observed) {
-            selected.fingerprint.merge_observed(observed);
-        } else {
-            // C bind_confirmed: у заведённой коробки обновляются только
-            // объёмные приметы; identity не переписывается чужым замером.
-            selected.fingerprint.merge_volume_observed(observed);
-        }
-    }
-    if let Some(saved) = selected.plans.iter_mut().find(|saved| saved.id == plan_id) {
-        saved.text = plan_text;
-        saved.proto = if target.shape == SHAPE_HTTP {
+    let box_id = catalog.boxes[box_index].id.clone();
+    bind_confirmed(
+        catalog,
+        &box_id,
+        &plan_id,
+        &plan_text,
+        if target.shape == SHAPE_HTTP {
             "http"
         } else {
             "tls"
-        }
-        .into();
-        saved.enabled = true;
-        saved.added = now;
-        saved.successes = saved.successes.saturating_add(1);
-    } else {
-        selected.plans.push(Plan {
-            id: plan_id.clone(),
-            proto: if target.shape == SHAPE_HTTP {
-                "http"
-            } else {
-                "tls"
-            }
-            .into(),
-            text: plan_text,
-            added: now,
-            successes: 1,
-            enabled: true,
-        });
-    }
-    selected.updated = now;
-    selected.bindings.push(Binding {
-        kind: "name".into(),
-        target: target.host.clone(),
-        plan_id: plan_id.clone(),
-        level: 3,
-        confirmed: now,
-        successes: prior_successes.saturating_add(1),
-        enabled: true,
-        transport: 6,
-        family: target.family,
-        shape: target.shape,
-        tcp_profile: r2k_core::control::r2k_link_shape_tcp_profile(target.shape),
-        verified_by: 1,
+        },
+        &target.host,
+        "name",
+        6,
+        target.family,
+        target.shape,
+        r2k_core::control::r2k_link_shape_tcp_profile(target.shape),
+        1,
         input,
-        ..Binding::default()
-    });
+        now,
+        observed_fingerprint,
+    )?;
 
     if target.shape != SHAPE_HTTP {
         let state = catalog
@@ -1389,61 +1489,29 @@ fn add_confirmed_quic_binding(
         catalog.boxes.len() - 1
     };
 
-    let matches_binding = |binding: &Binding| {
-        if kind == "addr" {
-            quic_binding_key(binding, target, family)
-        } else {
-            binding.kind == kind
+    let box_id = catalog.boxes[box_index].id.clone();
+    bind_confirmed(
+        catalog, &box_id, &plan_id, &plan_text, "quic", target, kind, 17, family, SHAPE_QUIC, 0, 6,
+        1, now, None,
+    )?;
+    // C `verify_confirm` (`sched.c:9475-9489`) переносит измеренный путь в
+    // подтверждённую привязку уже после `bind_confirmed`; пустой путь
+    // прежнюю отметку не стирает.
+    if !probe_path.is_empty()
+        && let Some(record) = catalog.boxes.iter_mut().find(|record| record.id == box_id)
+    {
+        for binding in &mut record.bindings {
+            if binding.kind == kind
                 && binding.target == target
+                && binding.plan_id == plan_id
                 && binding.transport == 17
-                && (binding.family == family || binding.family == 0 && family == 4)
+                && binding.family == family
                 && binding.shape == SHAPE_QUIC
-        }
-    };
-    let mut prior_successes = 0_i32;
-    for record in &mut catalog.boxes {
-        for binding in &record.bindings {
-            if matches_binding(binding) {
-                prior_successes = prior_successes.max(binding.successes);
+            {
+                binding.probe_path = probe_path.to_owned();
             }
         }
-        record.bindings.retain(|binding| !matches_binding(binding));
     }
-
-    let selected = &mut catalog.boxes[box_index];
-    if let Some(saved) = selected.plans.iter_mut().find(|saved| saved.id == plan_id) {
-        saved.proto = "quic".into();
-        saved.text = plan_text;
-        saved.enabled = true;
-        saved.added = now;
-        saved.successes = saved.successes.saturating_add(1);
-    } else {
-        selected.plans.push(crate::catalog::Plan {
-            id: plan_id.clone(),
-            proto: "quic".into(),
-            text: plan_text,
-            added: now,
-            successes: 1,
-            enabled: true,
-        });
-    }
-    selected.updated = now;
-    selected.bindings.push(Binding {
-        kind: kind.into(),
-        target: target.into(),
-        plan_id: plan_id.clone(),
-        level: 3,
-        confirmed: now,
-        successes: prior_successes.saturating_add(1),
-        enabled: true,
-        transport: 17,
-        family,
-        shape: SHAPE_QUIC,
-        verified_by: 6,
-        input: 1,
-        probe_path: probe_path.into(),
-        ..Binding::default()
-    });
     Ok(plan_id)
 }
 
@@ -2328,7 +2396,9 @@ mod tests {
             .find(|signal| signal.kind == "rx-volume")
             .unwrap();
         assert_eq!(volume.packets, 22);
-        assert_eq!(volume.seen, 4);
+        // C `bind_confirmed` обновляет у заведённой коробки только бюджет
+        // пакетов RX-объёма; счётчик встреч `seen` не растёт.
+        assert_eq!(volume.seen, 3);
         let rst = catalog.boxes[0]
             .fingerprint
             .signals
@@ -2426,7 +2496,9 @@ mod tests {
         assert_eq!(catalog.boxes[0].id, "rx-volume-16kb");
         let saved = &catalog.boxes[0].fingerprint.signals[0];
         assert_eq!(saved.volume, 16);
-        assert_eq!(saved.seen, 4);
+        // C `bind_confirmed` не увеличивает `seen` при обновлении бюджета
+        // пакетов уже заведённой коробки.
+        assert_eq!(saved.seen, 3);
         assert_eq!(saved.packets, 22);
         assert_eq!(catalog.boxes[0].plans.len(), 1);
 
@@ -2551,7 +2623,431 @@ mod tests {
         assert_eq!(catalog.boxes[1].bindings[0].target, target.host);
         assert_eq!(catalog.boxes[1].bindings[0].plan_id, plan_b_id);
         assert_eq!(catalog.boxes[0].fingerprint.signals[0].seen, 1);
-        assert_eq!(catalog.boxes[1].fingerprint.signals[0].seen, 2);
+        assert_eq!(catalog.boxes[1].fingerprint.signals[0].seen, 1);
+    }
+
+    #[test]
+    fn bind_confirmed_updates_the_binding_in_place_like_c() {
+        use crate::catalog::{Binding, BoxRecord, Plan};
+
+        let mut catalog = crate::catalog::Catalog {
+            boxes: vec![BoxRecord {
+                id: "box-1".into(),
+                created: 10,
+                updated: 20,
+                plans: vec![Plan {
+                    id: "plan-1".into(),
+                    proto: "tls".into(),
+                    text: "old text".into(),
+                    added: 15,
+                    successes: 4,
+                    enabled: true,
+                }],
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: "example.com".into(),
+                    plan_id: "plan-1".into(),
+                    level: 5,
+                    confirmed: 20,
+                    successes: 4,
+                    enabled: false,
+                    transport: 6,
+                    family: 4,
+                    // Старый каталог: форма не измерена и совместима с любой.
+                    shape: 0,
+                    tcp_profile: 0,
+                    verified_by: 2,
+                    input: 1,
+                    probe_path: "/main.css".into(),
+                    ech_origin: "edge.example".into(),
+                    recheck_since: Some(30),
+                    budget: 3,
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            ..crate::catalog::Catalog::default()
+        };
+
+        super::bind_confirmed(
+            &mut catalog,
+            "box-1",
+            "plan-1",
+            "new text",
+            "tls",
+            "example.com",
+            "name",
+            6,
+            4,
+            1,
+            0,
+            1,
+            2,
+            40,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(catalog.boxes.len(), 1);
+        assert_eq!(catalog.boxes[0].updated, 40);
+        let plan = &catalog.boxes[0].plans[0];
+        // C увеличивает только счётчик успехов; текст, протокол и дата
+        // добавления плана не переписываются.
+        assert_eq!(plan.successes, 5);
+        assert_eq!(plan.text, "old text");
+        assert_eq!(plan.added, 15);
+        let binding = &catalog.boxes[0].bindings[0];
+        assert_eq!(catalog.boxes[0].bindings.len(), 1);
+        assert_eq!(binding.successes, 5);
+        assert_eq!(binding.confirmed, 40);
+        assert_eq!(binding.level, 5);
+        assert!(!binding.enabled);
+        assert_eq!(binding.shape, 1);
+        assert_eq!(binding.tcp_profile, 0);
+        assert_eq!(binding.verified_by, 1);
+        // Вход не откатывается с клиентского на профильный.
+        assert_eq!(binding.input, 1);
+        assert_eq!(binding.probe_path, "/main.css");
+        assert_eq!(binding.ech_origin, "edge.example");
+        assert_eq!(binding.recheck_since, None);
+        assert_eq!(binding.budget, 3);
+
+        // Смена плана снимает отметку бюджета и добавляет новый план, не
+        // трогая прежний.
+        super::bind_confirmed(
+            &mut catalog,
+            "box-1",
+            "plan-2",
+            "second text",
+            "tls",
+            "example.com",
+            "name",
+            6,
+            4,
+            1,
+            0,
+            1,
+            2,
+            50,
+            None,
+        )
+        .unwrap();
+        let binding = &catalog.boxes[0].bindings[0];
+        assert_eq!(binding.plan_id, "plan-2");
+        assert_eq!(binding.budget, 0);
+        assert_eq!(binding.successes, 6);
+        assert_eq!(catalog.boxes[0].plans.len(), 2);
+        assert_eq!(catalog.boxes[0].plans[0].successes, 5);
+        assert_eq!(catalog.boxes[0].plans[1].successes, 1);
+    }
+
+    #[test]
+    fn bind_confirmed_keeps_other_boxes_and_creates_success_one_like_c() {
+        use crate::catalog::{Binding, BoxRecord};
+
+        let mut catalog = crate::catalog::Catalog {
+            boxes: vec![BoxRecord {
+                id: "old-box".into(),
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: "example.com".into(),
+                    plan_id: "plan-1".into(),
+                    level: 4,
+                    successes: 9,
+                    enabled: true,
+                    transport: 6,
+                    family: 4,
+                    shape: 1,
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            ..crate::catalog::Catalog::default()
+        };
+
+        super::bind_confirmed(
+            &mut catalog,
+            "new-box",
+            "plan-1",
+            "text",
+            "tls",
+            "example.com",
+            "name",
+            6,
+            4,
+            1,
+            0,
+            1,
+            2,
+            60,
+            None,
+        )
+        .unwrap();
+
+        // C ищет ключ только в коробке `box_id`; привязка другой коробки
+        // остаётся на месте, а новая начинается с одного успеха.
+        assert_eq!(catalog.boxes.len(), 2);
+        assert_eq!(catalog.boxes[0].bindings[0].successes, 9);
+        assert_eq!(catalog.boxes[1].bindings[0].successes, 1);
+        assert_eq!(catalog.boxes[1].bindings[0].level, 3);
+    }
+
+    #[test]
+    fn bind_confirmed_differential_matches_c() {
+        use crate::catalog::{Catalog, Fingerprint, Signal};
+        use serde_json::{Value, json};
+
+        fn do_bind(
+            catalog: &mut Catalog,
+            box_id: &str,
+            plan_id: &str,
+            text: &str,
+            target: &str,
+            shape: u8,
+            verified_by: u8,
+            input: u8,
+            at: i64,
+            fingerprint: Option<&Fingerprint>,
+        ) {
+            super::bind_confirmed(
+                catalog,
+                box_id,
+                plan_id,
+                text,
+                "tls",
+                target,
+                "name",
+                6,
+                4,
+                shape,
+                0,
+                verified_by,
+                input,
+                at,
+                fingerprint,
+            )
+            .unwrap();
+        }
+
+        fn dump(catalog: &Catalog) -> Value {
+            json!({
+                "boxes": catalog.boxes.iter().map(|box_record| json!({
+                    "id": box_record.id,
+                    "created": box_record.created,
+                    "updated": box_record.updated,
+                    "plans": box_record.plans.iter().map(|plan| json!({
+                        "id": plan.id,
+                        "proto": plan.proto,
+                        "text": plan.text,
+                        "added": plan.added,
+                        "successes": plan.successes,
+                        "enabled": plan.enabled,
+                    })).collect::<Vec<_>>(),
+                    "bindings": box_record.bindings.iter().map(|binding| json!({
+                        "kind": binding.kind,
+                        "target": binding.target,
+                        "plan_id": binding.plan_id,
+                        "level": binding.level,
+                        "confirmed": binding.confirmed,
+                        "successes": binding.successes,
+                        "enabled": binding.enabled,
+                        "transport": binding.transport,
+                        "family": binding.family,
+                        "shape": binding.shape,
+                        "tcp_profile": binding.tcp_profile,
+                        "verified_by": binding.verified_by,
+                        "input": binding.input,
+                        "probe_path": binding.probe_path,
+                        "ech_origin": binding.ech_origin,
+                        "recheck_since": binding.recheck_since.unwrap_or(0),
+                        "budget": binding.budget,
+                    })).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+            })
+        }
+
+        let fingerprint = |packets: u16| Fingerprint {
+            method: 2,
+            signals: vec![
+                Signal {
+                    kind: "rx-volume".into(),
+                    volume: if packets == 30 { 16 } else { 19 },
+                    seen: if packets == 30 { 3 } else { 4 },
+                    packets: i32::from(packets),
+                    ..Signal::default()
+                },
+                Signal {
+                    kind: "volume".into(),
+                    volume: 40,
+                    seen: 2,
+                    packets: 99,
+                    ..Signal::default()
+                },
+            ],
+        };
+
+        let mut catalog = Catalog::default();
+        let mut steps = Vec::new();
+        do_bind(
+            &mut catalog,
+            "box-1",
+            "plan-1",
+            "old text",
+            "example.com",
+            0,
+            2,
+            1,
+            20,
+            None,
+        );
+        steps.push(json!({"step": "new_binding", "boxes": dump(&catalog)["boxes"]}));
+        do_bind(
+            &mut catalog,
+            "box-1",
+            "plan-1",
+            "new text",
+            "example.com",
+            1,
+            1,
+            2,
+            40,
+            None,
+        );
+        steps.push(json!({"step": "update_same_plan", "boxes": dump(&catalog)["boxes"]}));
+        {
+            let binding = &mut catalog.boxes[0].bindings[0];
+            binding.level = 5;
+            binding.enabled = false;
+            binding.budget = 3;
+            binding.recheck_since = Some(30);
+            binding.probe_path = "/main.css".into();
+            binding.ech_origin = "edge.example".into();
+        }
+        do_bind(
+            &mut catalog,
+            "box-1",
+            "plan-1",
+            "new text",
+            "example.com",
+            1,
+            1,
+            1,
+            50,
+            None,
+        );
+        steps.push(json!({"step": "update_preserves_state", "boxes": dump(&catalog)["boxes"]}));
+        do_bind(
+            &mut catalog,
+            "box-1",
+            "plan-2",
+            "second text",
+            "example.com",
+            1,
+            1,
+            2,
+            60,
+            None,
+        );
+        steps.push(json!({"step": "new_plan_resets_budget", "boxes": dump(&catalog)["boxes"]}));
+        do_bind(
+            &mut catalog,
+            "box-2",
+            "plan-1",
+            "old text",
+            "example.com",
+            1,
+            1,
+            2,
+            70,
+            None,
+        );
+        steps.push(json!({"step": "second_box_new_success_one", "boxes": dump(&catalog)["boxes"]}));
+        do_bind(
+            &mut catalog,
+            "box-3",
+            "plan-3",
+            "text",
+            "fp.example.com",
+            1,
+            1,
+            2,
+            80,
+            Some(&fingerprint(30)),
+        );
+        steps.push(json!({"step": "fingerprint_seeded", "boxes": dump(&catalog)["boxes"]}));
+        do_bind(
+            &mut catalog,
+            "box-3",
+            "plan-3",
+            "text",
+            "fp.example.com",
+            1,
+            1,
+            2,
+            90,
+            Some(&fingerprint(22)),
+        );
+        steps.push(json!({"step": "fingerprint_packets_only", "boxes": dump(&catalog)["boxes"]}));
+        do_bind(
+            &mut catalog,
+            "box-4",
+            "plan-4",
+            "text",
+            "shape.example.com",
+            1,
+            1,
+            2,
+            100,
+            None,
+        );
+        do_bind(
+            &mut catalog,
+            "box-4",
+            "plan-4",
+            "text",
+            "shape.example.com",
+            2,
+            1,
+            2,
+            101,
+            None,
+        );
+        steps.push(json!({"step": "shape_mismatch_new_binding", "boxes": dump(&catalog)["boxes"]}));
+        do_bind(
+            &mut catalog,
+            "box-5",
+            "plan-5",
+            "text",
+            "legacy.example.com",
+            1,
+            1,
+            2,
+            110,
+            None,
+        );
+        catalog.boxes[4].bindings[0].family = 0;
+        do_bind(
+            &mut catalog,
+            "box-5",
+            "plan-5",
+            "text",
+            "legacy.example.com",
+            1,
+            1,
+            2,
+            111,
+            None,
+        );
+        steps.push(json!({"step": "legacy_family_zero_kept", "boxes": dump(&catalog)["boxes"]}));
+
+        if let Ok(path) = std::env::var("R2O_BIND_CONFIRMED_DIFF_OUTPUT") {
+            std::fs::write(path, serde_json::to_string(&steps).unwrap()).unwrap();
+        }
+        assert_eq!(
+            catalog.boxes[2].fingerprint.signals[0].packets, 22,
+            "C обновляет только packets RX-объёма"
+        );
+        assert_eq!(catalog.boxes[2].fingerprint.signals[0].seen, 3);
     }
 
     #[test]

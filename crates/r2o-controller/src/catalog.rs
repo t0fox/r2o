@@ -16,7 +16,7 @@ const MAX_SIGNALS: usize = 8;
 const MAX_DOMAIN_GROUPS: usize = 64;
 const MAX_DOMAIN_OBSERVATIONS: usize = 256;
 const TTL_SLACK: u8 = 2;
-const VOLUME_SLACK: i64 = 4;
+pub(crate) const VOLUME_SLACK: i64 = 4;
 pub const FINGERPRINT_METHOD: i32 = 2;
 static NEXT_DONOR_IMPORT: AtomicUsize = AtomicUsize::new(0);
 
@@ -196,6 +196,13 @@ pub struct Binding {
     pub recheck_mono: Option<std::time::Instant>,
     #[serde(skip_serializing_if = "is_zero")]
     pub budget: u8,
+}
+
+/// C `d2k_cat_shape_fits` (`core/catalog.c:905-912`): ноль означает
+/// «форма не измерена» и совместим с любой формой; иначе требуется
+/// точное равенство.
+pub fn binding_shape_fits(stored: u8, observed: u8) -> bool {
+    stored == 0 || observed == 0 || stored == observed
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
