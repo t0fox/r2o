@@ -2108,15 +2108,15 @@ mod app {
                                 r2o_datapath::r2o_udp_hold::R2oUdpHoldFeed::Held => {
                                     prefetched_quic_hello =
                                         quic_sessions.capture_hello_at_hook(bytes, queue_hook);
-                                    if prefetched_quic_hello.is_none() {
+                                    // C `handle_udp`: пока ClientHello не
+                                    // собран в имя, `udp_hold_wait` — пачка
+                                    // остаётся удержанной. Пустое имя — не
+                                    // повод выпускать оригинал: план по имени
+                                    // ещё не выбран.
+                                    if !r2o_udp_hold_ready(prefetched_quic_hello.as_ref()) {
                                         continue;
                                     }
-                                    udp_sessions.r2o_mark_hello_seen(
-                                        bytes,
-                                        prefetched_quic_hello
-                                            .as_ref()
-                                            .is_some_and(|hello| !hello.host.is_empty()),
-                                    );
+                                    udp_sessions.r2o_mark_hello_seen(bytes, true);
                                     let Some(batch) = udp_holds.r2o_take(bytes) else {
                                         continue;
                                     };
@@ -4531,6 +4531,12 @@ mod app {
         }
     }
 
+    /// C `handle_udp`: удержанная пачка ждёт, пока `named` не станет true.
+    /// Пустой host — это `udp_hold_wait`, а не готовность к replay.
+    fn r2o_udp_hold_ready(hello: Option<&r2o_datapath::capture::QuicHello>) -> bool {
+        hello.is_some_and(|hello| !hello.host.is_empty())
+    }
+
     fn r2o_udp_decide_once(
         sessions: &mut R2oUdpSessions,
         quic_sessions: &mut R2oQuicSessions,
@@ -5582,8 +5588,8 @@ mod app {
             r2o_execution_is_damaged, r2o_fail_pending_applied, r2o_finish_tcp_execution,
             r2o_first_oversized_emit, r2o_is_controller_probe, r2o_packet_route_skip,
             r2o_release_delayed_udp_batch_with, r2o_tcp_early_rst_event,
-            r2o_tcp_rst_cut_signal_event, r2o_udp_decide_once, r2o_udp_mark_plain_pass,
-            r2o_udp_mark_planned, r2o_udp_packet_admitted_at_hook,
+            r2o_tcp_rst_cut_signal_event, r2o_udp_decide_once, r2o_udp_hold_ready,
+            r2o_udp_mark_plain_pass, r2o_udp_mark_planned, r2o_udp_packet_admitted_at_hook,
             r2o_udp_packet_admitted_for_mode, release_many_with, release_with, send_applied_event,
             send_hello_event, send_journal_snapshot, send_journal_updates, udp_packet_admitted,
         };
@@ -5897,6 +5903,24 @@ mod app {
                 Some((1501, 1500))
             );
             assert_eq!(checked, 2);
+        }
+
+        #[test]
+        fn udp_hold_ready_требует_имя_а_не_пустой_снимок() {
+            let key = [0; r2k_core::control::KEY_LEN];
+            let empty = r2o_datapath::capture::QuicHello {
+                key,
+                host: Vec::new(),
+                snapshot: None,
+            };
+            assert!(!r2o_udp_hold_ready(Some(&empty)));
+            assert!(!r2o_udp_hold_ready(None));
+            let named = r2o_datapath::capture::QuicHello {
+                key,
+                host: b"example.test".to_vec(),
+                snapshot: None,
+            };
+            assert!(r2o_udp_hold_ready(Some(&named)));
         }
 
         #[test]
