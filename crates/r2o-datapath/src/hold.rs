@@ -3212,18 +3212,20 @@ mod tests {
                     epoch: [0x3c; 16],
                 },
             };
-            let mut executed = d17_start(start, options, request);
+            let c_get: &[u8] = b"GET /forum/index.php HTTP/1.1\r\nHost: RuTracker.org:80\r\nUser-Agent: test\r\nAccept: */*\r\n\r\n";
+            let c_request_end = 2001 + c_get.len() as u32;
+            let mut executed = d17_start(start, options, c_get);
             executed.note_http_execution(2001, &applied);
             let result = executed.feed_observing(
                 4,
-                &http_response_packet(9001, request_end, 0x18, response),
+                &http_response_packet(9001, c_request_end, 0x18, response),
                 start + Duration::from_millis(12),
                 options,
             );
             let (action, portal) = d17_action(&result, false);
             if let HoldOutcome::HttpResponse { event, .. } = &result.outcome {
                 println!(
-                    "D17 executed action={action} portal={} execution={} plan={} trial={} binding={}/{}/{}",
+                    "D17 executed action={action} portal={} execution={} plan={} trial={} binding={}/{}/{} host={} path={} request_no={}",
                     u8::from(portal),
                     event.execution_id,
                     event
@@ -3238,7 +3240,10 @@ mod tests {
                         .collect::<String>(),
                     event.binding.generation,
                     event.binding.kind,
-                    event.binding.shape
+                    event.binding.shape,
+                    String::from_utf8_lossy(&event.host),
+                    String::from_utf8_lossy(&event.path),
+                    event.request_no
                 );
             } else {
                 println!(

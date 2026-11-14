@@ -296,8 +296,9 @@ int main(void) {
         for (unsigned i = 0; i < 16; i++) printf("%02x", r.plan_id[i]);
         printf(" trial=");
         for (unsigned i = 0; i < 16; i++) printf("%02x", r.trial_id[i]);
-        printf(" binding=%llu/%u/%u\n",
-               (unsigned long long)r.binding.generation, r.binding.kind, r.binding.shape);
+        printf(" binding=%llu/%u/%u host=%s path=%s request_no=%llu\n",
+               (unsigned long long)r.binding.generation, r.binding.kind, r.binding.shape,
+               r.host, r.request_path, (unsigned long long)r.request_no);
         d2k_http80_free(executed);
     }
 

@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 271 | 129 | 0 | 0 |
+| datapath-core | 400 | 272 | 128 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1359** | **623** | **0** | **0** |
+| **Итого** | **1982** | **1360** | **622** | **0** | **0** |
 
-Это не оценка паритета: 623 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 622 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1359 / P 623 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1360 / P 622 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 271 | 129 | 0 | 0 |
+| datapath-core | 400 | 272 | 128 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1359** | **623** | **0** | **0** |
+| **Итого** | **1982** | **1360** | **622** | **0** | **0** |
 
 
 ---
@@ -4456,7 +4456,7 @@ observation), `control.rs` (https names), `http_replace.rs` (пакеты),
 | `find` (static) | 200-215 | 16 | линейный поиск по family/client/cport/server/80; stale → FREE/NULL | `hold.rs` `http_requests.iter().find` + `key.wire_key()` | **P** | C сравнивает 5-tuple (адреса 4/16, порты) и при `stale` освобождает слот; Rust ищет по `TcpFlowKey`/`wire_key` и `request_no`, stale-потоки удаляются отдельным sweep/expire. Ключ/lifetime различаются. |
 | `make` (static) | 217-236 | 20 | свободный или самый старый по `touched`; вытеснение → `evicted++` | `hold.rs` создание `HttpRequestFlow` | **P** | C выбирает первый `ST_FREE`/stale, иначе минимальный `touched`; если вытесняет живую — `evicted++`; `memset`, family/адреса/порты/touched. Rust создаёт запись при SYN/запросе, ограничивает общий `HOLD_SLOTS`, отдельного `evicted` нет. |
 | `d2k_http80_executed` | 238-254 | 17 | привязать execution/binding/plan/trial при `state==REQUEST && request_seq==seq` | `hold.rs` `note_http_execution` | **E*** | C/Rust differential D17 (`scripts/test-datapath-http80-differential.sh`, 26 строк) PASS: `execution=777`, plan/trial 16 байт и binding 9/1/2 перенесены в ответ; неверный seq → execution=0, plan/trial нули, binding 0/0/0. **Ограничение:** C проверяет `state==REQUEST` и dport 80; Rust-вызов гейтится HTTP-исходом и `!response_reported`, отдельный тест «executed после ответа» не добавлен. |
-| `request_result` (static) | 256-265 | 10 | заполнить `d2k_http80_res`: family/адреса/порты/execution/binding/request_ms/request_no/status/body_bytes/plan/trial/path/host | `hold.rs:1269 finish_http_response`, `HttpResponseEvent` | **P** | **Совпадает:** ключ/порты/execution/binding/plan/trial/status/body_bytes/host/path. **Отличия:** C `request_ms = t_req/1e6` — абсолютные монотонные мс, Rust `elapsed_ms`; C путь копирует только для GET без `?`, `#`, `\\`, Rust — `r2o_http_plan_request`/path; C `status/body_bytes` из `d2k_http_response`, Rust из `http_response.rs`. |
+| `request_result` (static) | 256-265 | 10 | заполнить `d2k_http80_res`: family/адреса/порты/execution/binding/request_ms/request_no/status/body_bytes/plan/trial/path/host | `hold.rs` `finish_http_response`, `HttpResponseEvent` | **E*** | D17 (`scripts/test-datapath-http80-differential.sh`, 28 строк) PASS: `executed` сверяет execution=777, plan/trial 16 байт, binding 9/1/2, host=RuTracker.org, path=/forum/index.php, request_no=1; `https-fail`/`post-server`/`delivered-reject` сверяют status/body/answered. `request_ms` у Rust — `CLOCK_MONOTONIC` мс, как C `t_req/1e6`. **Ограничение:** family/адреса/порты Rust не дублирует в событии — они в ключе потока; абсолютные `request_ms` побайтово не сравнимы. |
 | `d2k_http80_delivered` | 267-276 | 10 | отказ доставки замены: найти обратный поток, `invalid=1`, `complete=0`, `DONE`, `response=2` | `hold.rs` `r2o_http_delivery_rejected`, `main.rs` | **E*** | C/Rust differential D17 (`scripts/test-datapath-http80-differential.sh`, 28 строк) PASS: полный ответ (code=1) после `accepted=0` → `delivered-reject code=2`, поздний серверный пакет проходит (DONE), не DROP. Rust помечает `ready_for_next=false` и меняет код события в том же месте production-цикла. **Ограничение:** `accepted=1` — ранний выход в C и не вызывается в Rust; гейты dport/FIN/RST и `find(now=0)` отдельно не дифференцированы. |
 | `seq_after` (static) | 281-281 | 1 | `(int32_t)(a-b)>0` — знаковое сравнение с переполнением | `hold.rs:1318 seq_after` | **E** | **Точное совпадение:** C `(int32_t)(a-b)>0`; Rust `a.wrapping_sub(b) as i32 > 0`, те же знаковые переходы. C-строка: `return (int32_t)(a-b)>0;`; Rust `a.wrapping_sub(b) as i32 > 0`; те же переходы. |
 | `delivered` (static) | 285-287 | 3 | дальний из `acked` и `reply_next` | `hold.rs:276-280` | **E** | **Точное совпадение:** C `seq_after(acked,reply_next) ? acked : reply_next`. Rust тот же выбор по `seq_after`. C-строка: `return seq_after(acked,reply_next)?acked:reply_next;`; Rust тот же выбор. |
