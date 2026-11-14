@@ -1,6 +1,7 @@
 pub mod addr;
 pub mod control;
 pub mod dns;
+pub mod dns_config;
 pub mod error_text;
 pub mod h3;
 pub mod http_response;
