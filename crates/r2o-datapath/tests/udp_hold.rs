@@ -643,6 +643,13 @@ fn r2o_udp_deferred_verdicts_next_due_абсолютный_как_c() {
     assert!(result.is_err());
     assert_eq!(tried, 2);
     assert!(failing.is_empty());
+
+    // C `d2k_udp_release_new(16, 8)`: пачка до 8, очередь 16.
+    let mut sized = R2oUdpDeferredVerdicts::new();
+    let eight = [1, 2, 3, 4, 5, 6, 7, 8];
+    assert!(sized.r2o_enqueue(now, &eight, &eight, None));
+    let nine = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+    assert!(!sized.r2o_enqueue(now, &nine, &nine, None));
 }
 
 #[test]
