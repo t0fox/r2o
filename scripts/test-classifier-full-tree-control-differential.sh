@@ -29,7 +29,7 @@ build_target=${CARGO_BUILD_TARGET:-$($rustc_cmd -vV | sed -n 's/^host: //p')}
 
 "$CC" -std=c99 -O2 -Wall -Wextra -Werror -Wno-unused-variable -Wno-unused-function \
     -pthread -Wl,--wrap=accept -Wl,--wrap=close -Wl,--wrap=recv \
-    -Wl,--wrap=connect -Wl,--wrap=poll \
+    -Wl,--wrap=send -Wl,--wrap=connect -Wl,--wrap=poll \
     -I"$D2O_ROOT/detect" -I"$D2O_ROOT/detect/include" \
     -I"$D2O_ROOT/core/include" -I"$D2O_ROOT/datapath/include" \
     -o "$TEMP/d2o-classifier" \
@@ -76,6 +76,8 @@ mod classify_measured;
 pub mod classify;
 #[path = "$rust_root/crates/r2o-controller/src/classify_json.rs"]
 pub mod classify_json;
+#[path = "$rust_root/crates/r2o-controller/src/detect_cli.rs"]
+pub mod detect_cli;
 EOF
 cat "$ROOT/crates/r2o-controller/tests/fixtures/classify-full-tree-control-r2o.rs" >> "$TEMP/rust/src/main.rs"
 
@@ -121,6 +123,38 @@ R2O_TLS_RESPONSE_CLASSIFY_OUTPUT="$TEMP/tls-response-classify-r2o.out" \
     d2o_tls_response_classifier_clear_follow_up_matches_c
 diff -u "$TEMP/tls-response-classify-d2o.out" "$TEMP/tls-response-classify-r2o.out"
 printf 'C/Rust classifier CLEAR follow-up response verdicts match.\n'
+
+# Полное дерево d2k_classify_run: Каждый вердикт, repeats, gap, raw/no-raw,
+# control и ответное направление сверяются построчно.
+"$TEMP/d2o-classifier" tree-diff > "$TEMP/tree-d2o.out"
+CARGO_TARGET_DIR=$rust_target \
+RUSTFLAGS="${RUSTFLAGS:--Awarnings}" \
+CARGO_MAKEFLAGS='' \
+    "$CARGO" run --quiet --target "$build_target" \
+        --manifest-path "$rust_temp/rust/Cargo.toml" -- tree-diff > "$TEMP/tree-r2o.out"
+if ! cmp -s "$TEMP/tree-d2o.out" "$TEMP/tree-r2o.out"; then
+    diff -u "$TEMP/tree-d2o.out" "$TEMP/tree-r2o.out" || true
+    printf 'FAIL: classifier tree differential\n' >&2
+    exit 1
+fi
+printf 'cases=%s\n' "$(grep -c '^CASE|' "$TEMP/tree-d2o.out")"
+printf 'C/Rust classifier tree (all verdicts, repeats, gaps, control, raw) match.\n'
+
+# Точный print_json/print_human: все необязательные поля, экранирование,
+# заметки, response, props и трасса.
+"$TEMP/d2o-classifier" display-diff > "$TEMP/display-d2o.out"
+CARGO_TARGET_DIR=$rust_target \
+RUSTFLAGS="${RUSTFLAGS:--Awarnings}" \
+CARGO_MAKEFLAGS='' \
+    "$CARGO" run --quiet --target "$build_target" \
+        --manifest-path "$rust_temp/rust/Cargo.toml" -- display-diff \
+        > "$TEMP/display-r2o.out"
+if ! cmp -s "$TEMP/display-d2o.out" "$TEMP/display-r2o.out"; then
+    diff -u "$TEMP/display-d2o.out" "$TEMP/display-r2o.out" || true
+    printf 'FAIL: print_json/print_human differential\n' >&2
+    exit 1
+fi
+printf 'C/Rust print_json/print_human exact output match.\n'
 timeout_output=$TEMP/r2o-probe-timeout.out
 if command -v cygpath >/dev/null 2>&1; then
     timeout_output=$(cygpath -am "$timeout_output")

@@ -7,6 +7,7 @@ pub mod classify;
 pub mod classify_json;
 mod classify_measured;
 pub mod compose_d2o;
+pub mod detect_cli;
 pub mod diagnostics;
 pub mod discovery;
 pub mod dns_health;

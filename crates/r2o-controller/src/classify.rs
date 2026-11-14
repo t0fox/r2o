@@ -1087,7 +1087,7 @@ pub struct ClassifyResult {
 }
 
 impl ClassifyResult {
-    fn new(target: &str, repeats: usize) -> Self {
+    pub(crate) fn new(target: &str, repeats: usize) -> Self {
         Self {
             target: target.to_owned(),
             verdict: Verdict::Flaky,
@@ -1851,16 +1851,10 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
         result.verdict = Verdict::Opaque;
         result.reason = if !result.raw_usable {
             if raw_available {
-                let detail = result
-                    .trace
-                    .iter()
-                    .rev()
-                    .find(|observation| observation.probe == "raw-selftest")
-                    .and_then(|observation| observation.error.as_deref())
-                    .unwrap_or("самопроверка не прошла");
-                format!(
-                    "разрез не помогает, контроль проходит; сырые зонды недоступны: {detail} — результата поиска нет"
-                )
+                // C `d2k_classify_run` (`detect/classify.c:1374-1378`):
+                // провал самопроверки называется теми же словами и не
+                // выдаёт отрицательный вывод за измеренный.
+                "разрез не помогает, контроль проходит; сырые зонды НЕ РАБОТАЮТ (самопроверка не прошла) — про отравление вывода нет".into()
             } else {
                 "разрез не помогает, а контроль проходит: решение по содержимому, поток пересобирается — сырые зонды выключены или недоступны".into()
             }
@@ -1972,12 +1966,17 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
     result.boundary = Some(hi);
     result.split_pos = Some(1);
     result.strategy = Some(strategy_for(1));
-    // C `pause_note` (`core/verdict.c:74-80`): вывод о разрезе обязан
-    // называть паузу, на которой он снят.
-    result.reason = format!(
-        "префиксный матчер: сигнатура кончается на байте {hi}, разрез левее её ломает; {}",
-        pause_note(options.write_gap.as_micros().min(u128::from(u32::MAX)) as u32)
-    );
+    // `pause_note` принадлежит core-дереву (`core/verdict.c:74-80`); detect
+    // `d2k_classify_run` (`detect/classify.c:1434-1437`) этой оговорки не
+    // печатает. Выбор семантики определяется `full_detect_semantics`.
+    result.reason = if options.full_detect_semantics {
+        format!("префиксный матчер: сигнатура кончается на байте {hi}, разрез левее её ломает")
+    } else {
+        format!(
+            "префиксный матчер: сигнатура кончается на байте {hi}, разрез левее её ломает; {}",
+            pause_note(options.write_gap.as_micros().min(u128::from(u32::MAX)) as u32)
+        )
+    };
     if reassembles {
         result.reason.push_str(&format!(
             "; при паузе {}ms блок возвращается — у коробки есть буфер пересборки",

@@ -55,6 +55,10 @@ fn run_case(
     };
     let options = ClassifyOptions {
         repeats: 3,
+        // C-оракул — core `d2k_classify_cancelable`, а не detect
+        // `d2k_classify_run`: нужны подтверждение CLEAR и core-семантика.
+        full_detect_semantics: false,
+        confirm_clear: true,
         cancel: cancel_after.map(|_| cancel),
         control,
         ..ClassifyOptions::default()

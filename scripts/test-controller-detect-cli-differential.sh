@@ -21,9 +21,10 @@ trap 'rm -rf -- "$TEMP"' EXIT HUP INT TERM
 make -C "$D2O_ROOT/detect" d2k-detect >/dev/null
 DETECT="$D2O_ROOT/detect/d2k-detect"
 R2O="$ROOT/target/debug/r2o-controller"
+R2O_DETECT="$ROOT/target/debug/r2o-detect"
 "$CARGO" build --manifest-path "$ROOT/Cargo.toml" --locked --offline \
-    -q -p r2o-controller --bin r2o-controller
-printf '%s\n' 'R2O CLI: r2o-controller --classify' > "$TEMP/r2o-cli.txt"
+    -q -p r2o-controller --bin r2o-controller --bin r2o-detect
+printf '%s\n' 'R2O CLI: r2o-controller --classify / r2o-detect classify' > "$TEMP/r2o-cli.txt"
 
 trigger_cases=0
 for name in example.com disk.rzd.ru a.example; do
@@ -79,14 +80,73 @@ check_exit "classify 127.0.0.1:443 --hello both" \
 check_exit "classify 127.0.0.1:443 --sni" \
     "--classify 127.0.0.1 443 example.com --sni"
 
+# Отдельный detect-совместимый бинарник: точные тексты stderr, JSON и
+# человеческий отчёт C `d2k-detect`. Это не `--classify` контроллера.
+check_detect_exact() {
+    detect_args=$1
+    set +e
+    # shellcheck disable=SC2086 # набор аргументов задан списком
+    "$DETECT" $detect_args >"$TEMP/detect-c.out" 2>"$TEMP/detect-c.err"
+    c_status=$?
+    # shellcheck disable=SC2086
+    "$R2O_DETECT" $detect_args >"$TEMP/detect-r.out" 2>"$TEMP/detect-r.err"
+    r_status=$?
+    set -e
+    if [ "$c_status" != "$r_status" ]; then
+        printf 'FAIL: detect exit C(%s)=%s Rust(%s)=%s\n' \
+            "$detect_args" "$c_status" "$r_status" >&2
+        exit 1
+    fi
+    if ! cmp -s "$TEMP/detect-c.err" "$TEMP/detect-r.err"; then
+        printf 'FAIL: detect stderr (%s)\n' "$detect_args" >&2
+        diff -u "$TEMP/detect-c.err" "$TEMP/detect-r.err" >&2 || true
+        exit 1
+    fi
+    if ! cmp -s "$TEMP/detect-c.out" "$TEMP/detect-r.out"; then
+        printf 'FAIL: detect stdout (%s)\n' "$detect_args" >&2
+        diff -u "$TEMP/detect-c.out" "$TEMP/detect-r.out" >&2 || true
+        exit 1
+    fi
+    exit_cases=$((exit_cases + 1))
+}
+
+check_detect_exact ""
+check_detect_exact "classify"
+check_detect_exact "classify 127.0.0.1:443 --bad"
+check_detect_exact "classify 127.0.0.1:443 --hello both"
+check_detect_exact "classify 127.0.0.1:443 --sni"
+check_detect_exact "classify 127.0.0.1:443 --raw zz"
+check_detect_exact "classify 127.0.0.1:443 --raw 57"
+check_detect_exact "classify 127.0.0.1:443 --sni example.com --raw 5741"
+check_detect_exact "classify 127.0.0.1:443 --sni example.com --control-sni example.com"
+check_detect_exact "classify 127.0.0.1:443 --control-sni a --control-raw 0000"
+check_detect_exact "classify 127.0.0.1:443 --sni example.com --dump-trigger"
+check_detect_exact "classify 127.0.0.1:443 --sni example.com --hello legacy --dump-trigger"
+check_detect_exact "classify 127.0.0.1:443 --raw 57410603 --dump-trigger"
+check_detect_exact "classify 127.0.0.1:443 --raw 57 41:06-03 --dump-trigger"
+
+# JSON и человеческий отчёт достижимой цели: точная форма полей, кроме
+# длительности и текста ошибки соединения (нормализуются как в CL16).
 "$DETECT" classify 127.0.0.1:1 --sni example.com --allow-loopback \
-    --timeout 100 --repeats 1 --json >"$TEMP/c.json" 2>/dev/null
-"$R2O" --classify 127.0.0.1 1 example.com --allow-loopback \
-    --timeout 100 --repeats 1 --json >"$TEMP/r.json" 2>/dev/null
+    --timeout 100 --repeats 1 --write-gap 7 --json >"$TEMP/c.json" 2>/dev/null
+"$R2O_DETECT" classify 127.0.0.1:1 --sni example.com --allow-loopback \
+    --timeout 100 --repeats 1 --write-gap 7 --json >"$TEMP/r.json" 2>/dev/null
 python3 "$ROOT/scripts/fixtures/detect-json-normalize.py" \
     "$TEMP/c.json" "$TEMP/r.json" >"$TEMP/json.result"
 grep -qx 'JSON-EQUAL' "$TEMP/json.result"
 
-printf 'triggers=%s exits=%s json=equal\n' "$trigger_cases" "$exit_cases"
-printf 'PASS: C/Rust detect CLI dump-trigger/exit/JSON match (D2O %s)\n' \
+"$DETECT" classify 127.0.0.1:1 --sni example.com --allow-loopback \
+    --timeout 100 --repeats 1 >"$TEMP/c.human" 2>/dev/null
+"$R2O_DETECT" classify 127.0.0.1:1 --sni example.com --allow-loopback \
+    --timeout 100 --repeats 1 >"$TEMP/r.human" 2>/dev/null
+sed 's/ за [0-9][0-9]*ms (по / за <duration>ms (по /' "$TEMP/c.human" >"$TEMP/c.human.norm"
+sed 's/ за [0-9][0-9]*ms (по / за <duration>ms (по /' "$TEMP/r.human" >"$TEMP/r.human.norm"
+if ! cmp -s "$TEMP/c.human.norm" "$TEMP/r.human.norm"; then
+    printf 'FAIL: detect human output\n' >&2
+    diff -u "$TEMP/c.human.norm" "$TEMP/r.human.norm" >&2 || true
+    exit 1
+fi
+
+printf 'triggers=%s exits=%s json=equal human=equal\n' "$trigger_cases" "$exit_cases"
+printf 'PASS: C/Rust detect CLI dump-trigger/exit/JSON/human match (D2O %s)\n' \
     "$ACTUAL_D2O_SHA"
