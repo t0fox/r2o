@@ -180,9 +180,9 @@ impl R2oRouteGate {
         ifindices: Option<Vec<u32>>,
     ) -> bool {
         let ifindices = ifindices.map(|values| {
-            let mut unique = Vec::with_capacity(values.len());
+            let mut unique = Vec::with_capacity(values.len().min(R2O_ROUTEMARK_OIF_MAX));
             for value in values {
-                if value != 0 && !unique.contains(&value) {
+                if value != 0 && unique.len() < R2O_ROUTEMARK_OIF_MAX && !unique.contains(&value) {
                     unique.push(value);
                 }
             }
@@ -240,16 +240,17 @@ impl R2oRouteGate {
     /// Возвращает объединённые выходные интерфейсы известных IPv4/IPv6 маршрутов.
     pub fn r2o_egress_ifindices(&self) -> Option<Vec<u32>> {
         let mut ifindices = Vec::new();
-        for family in [
+        for values in [
             self.r2o_default_ifindices_v4.as_deref(),
             self.r2o_default_ifindices_v6.as_deref(),
         ]
         .into_iter()
         .flatten()
-        .flatten()
         {
-            if *family != 0 && !ifindices.contains(family) {
-                ifindices.push(*family);
+            for ifindex in values {
+                if *ifindex != 0 && !ifindices.contains(ifindex) {
+                    ifindices.push(*ifindex);
+                }
             }
         }
         (!ifindices.is_empty()).then_some(ifindices)
@@ -1545,6 +1546,22 @@ mod tests {
         gate.r2o_set_default_ifindices(R2oRouteFamily::Ipv4, Some(Vec::new()));
         gate.r2o_set_default_ifindices(R2oRouteFamily::Ipv6, Some(Vec::new()));
         assert_eq!(gate.r2o_egress_ifindices(), None);
+    }
+
+    #[test]
+    fn r2o_устройства_маршрута_усекаются_до_16_как_c() {
+        let mut gate = R2oRouteGate::default();
+        gate.r2o_set_default_ifindices(R2oRouteFamily::Ipv4, Some((1..21).collect()));
+        assert_eq!(
+            gate.r2o_egress_ifindices(),
+            Some((1..=16).collect::<Vec<u32>>())
+        );
+        // Нули и дубли не занимают места в пределе 16; 8/9 уже есть в IPv4.
+        gate.r2o_set_default_ifindices(R2oRouteFamily::Ipv6, Some(vec![0, 0, 8, 8, 17]));
+        assert_eq!(
+            gate.r2o_egress_ifindices(),
+            Some((1..=16).chain([17]).collect())
+        );
     }
 
     #[test]
