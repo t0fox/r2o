@@ -4517,6 +4517,81 @@ mod tests {
     }
 
     #[test]
+    fn tls13_offer_downgrades_to_tls12_like_donor_resume_path() {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use rustls::{ServerConfig, ServerConnection};
+        use std::net::{TcpListener, TcpStream};
+        use std::sync::Arc;
+        use std::thread;
+
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+            .expect("создать сертификат localhost");
+        let certificate_der = CertificateDer::from(certificate.serialize_der().unwrap());
+        let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certificate.serialize_private_key_der(),
+        ));
+        let mut server_config =
+            ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS12])
+                .with_no_client_auth()
+                .with_single_cert(vec![certificate_der.clone()], private_key)
+                .unwrap();
+        server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let mut roots = RootCertStore::empty();
+        roots.add(certificate_der).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("открыть TLS1.2-приёмник");
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (socket, _) = listener.accept().expect("принять TLS1.2-соединение");
+            let connection = ServerConnection::new(Arc::new(server_config)).unwrap();
+            let mut stream = StreamOwned::new(connection, socket);
+            let mut request = Vec::new();
+            let mut byte = [0_u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).expect("прочитать запрос");
+                request.push(byte[0]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .unwrap();
+            stream.flush().unwrap();
+        });
+
+        let options = FetchOptions {
+            name: "localhost".into(),
+            port: address.port(),
+            ip: Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            path: "/".into(),
+            deadline: Duration::from_secs(3),
+            // Как C `tls_connect`: TLS1.3 CH предлагает и 1.2; сервер выбрал
+            // 1.2 — рукопожатие продолжается в том же соединении.
+            tls12: false,
+            wire_len: None,
+            mark: None,
+        };
+        let stream = TcpStream::connect(address).unwrap();
+        let result = r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
+            &options,
+            stream,
+            address,
+            Instant::now(),
+            R2oFetchEncoding::Identity,
+            roots,
+            None,
+            None,
+            None,
+            |_| None,
+        )
+        .expect("завершить downgrade-замер");
+        server.join().unwrap();
+
+        assert_eq!(result.tls, Some("1.2"));
+        assert_eq!(result.peer_name_ok, Some(true));
+        assert_eq!(result.status, 200);
+        assert!(result.complete);
+    }
+
+    #[test]
     fn rx_повторяет_тот_же_запрос_после_незавершённого_tls_ответа() {
         use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
         use rustls::{ServerConfig, ServerConnection};
