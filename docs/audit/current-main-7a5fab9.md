@@ -103,9 +103,14 @@ Pinned C/Rust differential-донор остаётся `a378e230...`; это о�
   `T_RESTING` (120 с); live.rs берёт task по C-правилам, task-over-health,
   `candidate_plan_applied=t.ver_ok`, `dns_answer_via_plan=ver_ok&&answered`,
   custom `no_bypass`. `test-dns-state-differential.sh` PASS **17 сценариев**.
-- Остаются: DoQ endpoint не синхронизирован с task-ячейкой; R2O
-  completed-watcher 10 мин vs C WATCHING; локальные ошибки start_due;
-  полный `--measure-mark` CLI differential. Поэтому `d2k_sched_write_live` — P*.
+- **DoQ/WATCHING/CLI 2026-11-14:** DoQ endpoint синхронизирован с task-ячейкой
+  (`probe_doq_on`, ALPN doq/stream 0/zero ID, plan-bound DNS), 4-case
+  differential PASS; T_WATCHING переживает >10 мин (cap 64/вытеснение);
+  локальные start_due — точные C-тексты; `--measure-mark` split через v22
+  ctlprobe PASS.
+- Остаются: end-to-end планового DoQ через реальный C datapath в CI,
+  verifier-сокет SO_MARK, DoQ direct-clear/cooldown. Поэтому
+  `d2k_sched_write_live` — P*.
 
 ## Команды проверки
 
