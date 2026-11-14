@@ -1173,10 +1173,19 @@ impl TcpSessions {
                 self.tcp_flow_refusals = self.tcp_flow_refusals.wrapping_add(1);
                 return None;
             }
-            let metrics = self
-                .flows
-                .get(&key)
-                .map_or_else(R2oTcpFlowMetrics::default, |session| session.metrics);
+            let (metrics, execution_id, execution_pending, sends_left, sends_failed) =
+                self.flows.get(&key).map_or_else(
+                    || (R2oTcpFlowMetrics::default(), 0, false, 0, false),
+                    |session| {
+                        (
+                            session.metrics,
+                            session.execution_id,
+                            session.r2o_execution_pending,
+                            session.sends_left,
+                            session.sends_failed,
+                        )
+                    },
+                );
             let mut session = TcpSession::new(source, true, Some(now), now);
             session.capture_anchor = Some(tcp.sequence.wrapping_add(1));
             session.controller_probe = controller_probe;
@@ -1189,6 +1198,12 @@ impl TcpSessions {
                     r2k_core::httpup::R2oHttpRequestSequence::new(tcp.sequence.wrapping_add(1));
             }
             session.metrics = metrics;
+            // C `d2k_track_new_connection`: учёт посылок и execution
+            // переживают новый SYN; sends_done C обнуляет.
+            session.execution_id = execution_id;
+            session.r2o_execution_pending = execution_pending;
+            session.sends_left = sends_left;
+            session.sends_failed = sends_failed;
             self.flows.insert(key, session);
         } else if !self.flows.contains_key(&key) {
             if self.flows.len() >= self.flow_capacity.limit() {
@@ -5250,6 +5265,39 @@ mod tests {
         assert!(!sessions.r2o_send_pending(&new_key, 41));
         assert!(!sessions.r2o_mark_damaged_for_execution(&new_key, 41));
         assert!(sessions.r2o_mark_plan_done_for_execution(&new_key, 43));
+    }
+
+    #[test]
+    fn новый_syn_сохраняет_учёт_посылок_и_execution_как_c() {
+        let plan = Plan::default();
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+        let syn = ipv4_tcp_packet(client, server, 0x02, 64, 3000, &[]);
+        assert_eq!(
+            decide_with_session(&mut sessions, &plan, &syn),
+            PacketDecision::Accept
+        );
+        let key = TcpFlowKey::from_packet(&syn).unwrap();
+        {
+            let session = sessions.flows.get_mut(&key).unwrap();
+            session.execution_id = 77;
+            session.r2o_execution_pending = true;
+            session.sends_left = 3;
+            session.sends_done = 2;
+            session.sends_failed = true;
+        }
+        let new_syn = ipv4_tcp_packet(client, server, 0x02, 64, 3001, &[]);
+        assert_eq!(
+            decide_with_session(&mut sessions, &plan, &new_syn),
+            PacketDecision::Accept
+        );
+        let session = &sessions.flows[&key];
+        assert_eq!(session.execution_id, 77);
+        assert!(session.r2o_execution_pending);
+        assert_eq!(session.sends_left, 3);
+        assert_eq!(session.sends_done, 0, "C обнуляет sends_done");
+        assert!(session.sends_failed);
     }
 
     #[test]
