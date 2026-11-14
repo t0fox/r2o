@@ -109,13 +109,18 @@ production-путь не ставится. Формулировки «теста
 
 **Строгая проверка E\* (2026-11-14).** После введения правил `E*` QA нашёл
 60 E\* и 8 обычных E с самопризнаками «теста нет / дифференциала нет /
-не перезапускался». 15 строк с самыми явными пробелами были понижены до P/P\*; после пачки Datapath 2026-11-14 три строки (`print_journal`, `release_original`, `d2k_session_packet_probe_mtu`) возвращены в E\* с differential/writer-тестом
+не перезапускался». 15 строк с самыми явными пробелами были понижены до P/P\*
 (`body_byte`, `d2k_voice_run`, `d2k_props_contact*`, `release_original`,
 `print_journal`, `d2k_session_packet_probe_mtu`, `d2k_udp_path_read`,
 `d2k_routemark_watch_open`, `volume_bucket`, `cmp_size`, `wr16`, `wr24`).
-Оставшиеся E\* имеют differential/тест и явное внешнее ограничение; это не
-подтверждённый 100 % паритет. Живые root/netns/OpenWrt/аппаратные сценарии
-по-прежнему не проверены.
+После пачек Datapath/Detection/Corenet часть строк возвращена в E\* с
+differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` понижен
+обратно из-за приблизительных полей. Финальный QA
+(`AGENT_REPORT-qa-final.md`) подтвердил численно **E 1478 / P 504**
+(948 обычных E, 530 E\*), но не 100 % паритет: 58 E\* имеют явные
+ограничения. `ct_probe` live-differential после prebuild/окна conntrack
+проходит дважды подряд (6/6). Живые root/netns/OpenWrt/аппаратные сценарии
+покрыты не полностью.
 
 
 ## Итог и подтверждённые расхождения (2026-11-14)
