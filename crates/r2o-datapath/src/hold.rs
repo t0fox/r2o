@@ -17,6 +17,8 @@ pub const HOLD_WAIT: Duration = Duration::from_millis(100);
 const HOLD_EARLY_WINDOW: u32 = 16_384;
 const SYN_TRACK_CAPACITY: usize = 1024;
 const SYN_TRACK_TTL: Duration = Duration::from_secs(120);
+/// C `D2K_HTTP80_IDLE_NS` (`datapath/include/d2k_http80.h:50`).
+const HTTP_FLOW_IDLE: Duration = Duration::from_secs(60);
 /// C `D2K_HTTP80_FLOWS=128` (`datapath/include/d2k_http80.h:40`).
 pub const HTTP_FLOW_CAPACITY: usize = 128;
 
@@ -449,7 +451,7 @@ impl HoldTable {
         self.syns
             .retain(|anchor| now.saturating_duration_since(anchor.seen) < SYN_TRACK_TTL);
         self.http_requests
-            .retain(|flow| now.saturating_duration_since(flow.seen) < SYN_TRACK_TTL);
+            .retain(|flow| now.saturating_duration_since(flow.seen) <= HTTP_FLOW_IDLE);
         let Some((view, tcp, key, source, destination)) = parse_tcp(packet) else {
             return FeedResult {
                 released,
@@ -1117,7 +1119,7 @@ impl HoldTable {
         } = observation;
         self.http80.requests = self.http80.requests.saturating_add(1);
         self.http_requests
-            .retain(|flow| now.saturating_duration_since(flow.seen) < SYN_TRACK_TTL);
+            .retain(|flow| now.saturating_duration_since(flow.seen) <= HTTP_FLOW_IDLE);
         let previous = self
             .http_requests
             .iter()
@@ -1212,7 +1214,7 @@ impl HoldTable {
         let flow = &mut self.http_requests[index];
         if flow.client != client
             || flow.generation != anchor.generation
-            || now.saturating_duration_since(flow.seen) >= SYN_TRACK_TTL
+            || now.saturating_duration_since(flow.seen) > HTTP_FLOW_IDLE
             || flow.response_reported
         {
             return None;
@@ -1316,7 +1318,7 @@ impl HoldTable {
                 && flow.client == client
                 && flow.generation == anchor.generation
                 && !flow.response_reported
-                && now.saturating_duration_since(flow.seen) < SYN_TRACK_TTL
+                && now.saturating_duration_since(flow.seen) <= HTTP_FLOW_IDLE
         })?;
         let remaining = flow.response.fixed_body_remaining()?;
         if remaining == 0 {
@@ -3164,6 +3166,51 @@ mod tests {
                 _ => 0,
             };
             println!("D17 cut-acked-ahead action={action} response={response}");
+        }
+
+        {
+            let mut stale = d17_start(start, options, request);
+            let full: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+            let result = stale.feed_observing(
+                4,
+                &http_response_packet(9001, request_end, 0x18, full),
+                start + Duration::from_millis(11) + Duration::from_secs(61),
+                options,
+            );
+            let (action, _) = d17_action(&result, false);
+            let response = match &result.outcome {
+                HoldOutcome::HttpResponse { event, .. } => event.code,
+                _ => 0,
+            };
+            println!("D17 stale action={action} response={response}");
+
+            let mut edge = d17_start(start, options, request);
+            let result = edge.feed_observing(
+                4,
+                &http_response_packet(9001, request_end, 0x18, full),
+                start + Duration::from_millis(11) + Duration::from_secs(60),
+                options,
+            );
+            let (action, _) = d17_action(&result, false);
+            let response = match &result.outcome {
+                HoldOutcome::HttpResponse { event, .. } => event.code,
+                _ => 0,
+            };
+            println!("D17 stale-edge action={action} response={response}");
+        }
+
+        {
+            let mut find = d17_start(start, options, request);
+            let full: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+            let mut spoof = http_response_packet(9001, request_end, 0x18, full);
+            spoof[22..24].copy_from_slice(&50_001_u16.to_be_bytes());
+            let result = find.feed_observing(4, &spoof, start + Duration::from_millis(12), options);
+            let (action, _) = d17_action(&result, false);
+            let response = match &result.outcome {
+                HoldOutcome::HttpResponse { event, .. } => event.code,
+                _ => 0,
+            };
+            println!("D17 find-miss action={action} response={response}");
         }
 
         {

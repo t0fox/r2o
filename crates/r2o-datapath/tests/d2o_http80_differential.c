@@ -252,6 +252,45 @@ int main(void) {
     }
 
     {
+        d2k_http80 *stale = d2k_http80_new();
+        flow stale_flow = flow4(53600);
+        open_flow(stale, &stale_flow, T);
+        const char *full = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        size_t n = packet(&stale_flow, 0, F_ACK | F_PSH, SISN + 1,
+                          CISN + 1 + (uint32_t)strlen(GET), full, b);
+        d2k_http80_packet(stale, b, n, T + 99 * MS + 61 * 1000000000ull, 0,
+                          out, sizeof out, rst, sizeof rst, &r);
+        printf("D17 stale action=%s response=%d\n", action_name(r.action), r.response);
+        d2k_http80_free(stale);
+
+        d2k_http80 *edge = d2k_http80_new();
+        flow edge_flow = flow4(53650);
+        open_flow(edge, &edge_flow, T);
+        n = packet(&edge_flow, 0, F_ACK | F_PSH, SISN + 1,
+                   CISN + 1 + (uint32_t)strlen(GET), full, b);
+        d2k_http80_packet(edge, b, n, T + 99 * MS + 60 * 1000000000ull, 0,
+                          out, sizeof out, rst, sizeof rst, &r);
+        printf("D17 stale-edge action=%s response=%d\n",
+               action_name(r.action), r.response);
+        d2k_http80_free(edge);
+    }
+
+    {
+        d2k_http80 *find = d2k_http80_new();
+        flow find_flow = flow4(53700);
+        flow other_flow = flow4(53701);
+        open_flow(find, &find_flow, T);
+        const char *full = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        size_t n = packet(&other_flow, 0, F_ACK | F_PSH, SISN + 1,
+                          CISN + 1 + (uint32_t)strlen(GET), full, b);
+        d2k_http80_packet(find, b, n, T + 99 * MS + 700000ull, 0, out,
+                          sizeof out, rst, sizeof rst, &r);
+        printf("D17 find-miss action=%s response=%d\n",
+               action_name(r.action), r.response);
+        d2k_http80_free(find);
+    }
+
+    {
         d2k_http80 *v6 = d2k_http80_new();
         flow v6_flow = flow6(54000);
         open_flow(v6, &v6_flow, T);
