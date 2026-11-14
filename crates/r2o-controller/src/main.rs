@@ -27571,6 +27571,19 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn live_status_counts_session_confirmations_like_c() {
+        let worker = r2o_test_discovery_worker_without_threads();
+        let now = std::time::Instant::now();
+        let before = worker.r2o_live_status(&Catalog::default(), now, false);
+        assert_eq!(before.confirms, 0);
+        worker.record_confirmation();
+        worker.record_confirmation();
+        let after = worker.r2o_live_status(&Catalog::default(), now, false);
+        assert_eq!(after.confirms, 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn quic_candidate_trials_use_fresh_conntrack_tuples() {
         let server = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let endpoint = server.local_addr().unwrap();
