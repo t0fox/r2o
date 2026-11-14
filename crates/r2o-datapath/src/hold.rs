@@ -2871,6 +2871,40 @@ mod tests {
 
     #[test]
     #[ignore]
+    fn d2o_hold_candidate_trace() {
+        fn candidate(with_syn: bool, packet: &[u8]) -> u8 {
+            let start = Instant::now();
+            let options = HoldOptions {
+                allow_tls: true,
+                ..HoldOptions::default()
+            };
+            let mut hold = HoldTable::default();
+            if with_syn {
+                let _ = hold.feed_observing(1, &tcp_packet(1000, 0x02, &[]), start, options);
+            }
+            let result = hold.feed_observing(2, packet, start + Duration::from_millis(1), options);
+            u8::from(matches!(result.outcome, HoldOutcome::Waiting))
+        }
+        fn line(name: &str, with_syn: bool, flags: u8, sequence: u32, payload: &[u8]) {
+            println!(
+                "{name} candidate={}",
+                candidate(with_syn, &tcp_packet(sequence, flags, payload))
+            );
+        }
+        let tls_head: &[u8] = &[22, 3, 3, 0, 16, 1, 0, 0, 12];
+        let complete: &[u8] = &[22, 3, 3, 0, 1, 0];
+        let get: &[u8] = b"GET / HTTP/1.1\r\nHost: h\r\n\r\n";
+        line("A no_syn", false, 0x18, 1001, tls_head);
+        line("B no_ack", true, 0x08, 1001, tls_head);
+        line("C fin", true, 0x11, 1001, tls_head);
+        line("D empty", true, 0x18, 1001, &[]);
+        line("E far_tail", true, 0x18, 1001 + 16384, tls_head);
+        line("F not_tls", true, 0x18, 1001, get);
+        line("G complete", true, 0x18, 1001, complete);
+    }
+
+    #[test]
+    #[ignore]
     fn d6_hold_trace() {
         let now = Instant::now();
         let hello = hello();
