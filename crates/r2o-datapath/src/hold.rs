@@ -1587,6 +1587,16 @@ mod tests {
         let stats = table.r2o_http80_stats();
         assert_eq!(stats.requests as usize, HTTP_FLOW_CAPACITY + 1);
         assert_eq!(stats.evicted, 1);
+        if let Ok(path) = std::env::var("R2O_HTTP80_MAKE_DIFF_OUTPUT") {
+            std::fs::write(
+                path,
+                format!(
+                    "make evicted={} requests={}\n",
+                    stats.evicted, stats.requests
+                ),
+            )
+            .unwrap();
+        }
     }
 
     #[test]
