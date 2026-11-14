@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 257 | 143 | 0 | 0 |
+| datapath-core | 400 | 258 | 142 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1345** | **637** | **0** | **0** |
+| **Итого** | **1982** | **1346** | **636** | **0** | **0** |
 
-Это не оценка паритета: 637 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 636 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1345 / P 637 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1346 / P 636 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 330 | 218 | 0 | 0 |
 | core-state | 692 | 465 | 227 | 0 | 0 |
-| datapath-core | 400 | 257 | 143 | 0 | 0 |
+| datapath-core | 400 | 258 | 142 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1345** | **637** | **0** | **0** |
+| **Итого** | **1982** | **1346** | **636** | **0** | **0** |
 
 
 ---
@@ -3699,7 +3699,7 @@ R2O-владелец: `crates/r2o-datapath/src/main.rs` (`run`, `parse_options`,
 | `send_original_verdict` (static) | 417-427 | 11 | вердикт NFQUEUE + счётчики accepted/dropped | `nfqueue.rs:310 send_verdict`; `main.rs:4335 release_with` | **P** | C `d2k_nfq_verdict`; ошибка → `verdict_fail++` и лог; иначе `DROP→dropped`, иначе `accepted`. Rust `send_verdict`/`release_with`; byte-level тесты netlink; счётчики `QueueStats`. |
 | `send_delayed_verdict` (static) | 429-431 | 3 | обёртка вердикта отложенной выдачи | `main.rs:319 r2o_release_delayed_udp_batch_with` | **P** | C `return send_original_verdict(ctx,id,verdict)`. Rust отдельная функция выпуска отложенных вердиктов; те же id/verdict, API иной. |
 | `delayed_verdict_done` (static) | 433-446 | 14 | complete → `session_sent`, иначе `exec_failed(REFUSE_SEND)` | `main.rs:411 r2o_finish_tcp_execution`, `:319` | **P** | C `execution==0` → return; `complete` → `session_sent(at,key,execution)`; иначе `session_exec_failed(..., D2K_REFUSE_SEND, execution, 0, sent!=0)`. Rust `r2o_finish_tcp_execution`/release; ветви token=0/complete/sent!=0 реализованы, прямого теста нет. |
-| `hold_owns` (static) | 484-489 | 6 | TLS-hold владеет ID, если это не порт 80 | `hold.rs:298 feed`, `main.rs:2148 batch_owned_originals` | **P** | **Ветви сверены:** C `!c \|\| !c->raw \|\| !d2k_hold_parse` → 0; `tcp=p+ihl`; `return !(tcp[2]==0 && tcp[3]==80)`. Rust `hold.rs`/`batch_owned_originals` отделяет HTTP/80 от TLS-hold; D6 `test-datapath-hold-differential.sh`. |
+| `hold_owns` (static) | 484-489 | 6 | TLS-hold владеет ID, если это не порт 80 | `hold.rs` `current_owned = own_packets && destination.port != 80`, `main.rs` `own_packets: raw.is_some()` | **E*** | C/Rust differential D6 `scripts/test-datapath-hold-differential.sh` PASS: 15 кейсов ownership/release, `OwnedWaiting`/`OwnedReady`, повторная посылка оригиналов. Предикат C `c->raw && parse && dst_port != 80` разложен на `own_packets = raw.is_some()` и `destination.port != 80`; отказ `d2k_hold_parse` соответствует отсутствию владения в `feed`. **Ограничение:** сам порт-80-исключающий предикат в D6-оракуле не входит — он проверен по коду; полный HTTP/80 путь покрыт D17. |
 | `resend_original` (static) | 493-508 | 16 | вернуть снятый оригинал raw-посылкой; до 16 строк лога | `main.rs:3794 r2o_resend_owned_originals` | **P** | C `raw_prepare`+`raw_send`; ошибка → `hold_resend_fail++/send_fail++`, лог первых 16, -1; иначе `hold_resent++/emitted++/emitted_now++`. Rust `r2o_resend_owned_originals`; тест `hold.rs:2167` покрывает владение, не сокет. |
 | `resend_originals` (static) | 510-516 | 7 | цикл по `orig[]`, вернуть число ошибок | `main.rs:3794` | **P** | C `for orig_count resend_original`, `failed++`; возвращает failed. Rust тот же цикл в `r2o_resend_owned_originals`; отдельной функции нет. |
 | `release_original` (static) | 518-542 | 25 | таймаут: сохранить/сбросить route mark, закрыть UDP-hold, note_unassembled, observe, resend/ACCEPT | `hold.rs:888 flush`, `main.rs:433 r2o_release_damaged_tcp_hold` | **P** | **Ветви сверены:** C `keep_mark=route_mark`, `set_route_mark(0)`, `udp_hold_begin/end`, `note_unassembled`, `observe_tcp`, restore mark; `hold_owns` → `resend_original`, иначе `send_original_verdict(ACCEPT)`. Rust `hold.rs:888`/`r2o_release_damaged_tcp_hold`; порядок side effects воспроизведён в main; D6. |
