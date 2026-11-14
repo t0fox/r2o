@@ -1037,6 +1037,47 @@ mod tests {
     }
 
     #[test]
+    fn next_due_выбирает_минимум_по_сроку_и_порядку_как_c() {
+        use crate::netlink::NF_ACCEPT;
+        use std::time::Duration;
+
+        // C `next_due`: due<=now, минимум по due, при равенстве — меньший seq.
+        let now = Instant::now();
+        let mut table = R2oUdpDeferredVerdicts::new();
+        assert!(table.r2o_enqueue(now + Duration::from_millis(30), &[30], &[NF_ACCEPT], None));
+        assert!(table.r2o_enqueue(now + Duration::from_millis(10), &[11], &[NF_ACCEPT], None));
+        assert!(table.r2o_enqueue(now + Duration::from_millis(10), &[12], &[NF_ACCEPT], None));
+        assert_eq!(table.r2o_next_due(), Some(now + Duration::from_millis(10)));
+
+        let mut sent = Vec::new();
+        assert_eq!(
+            table
+                .r2o_flush(now + Duration::from_millis(11), |id, _| {
+                    sent.push(id);
+                    Ok(())
+                })
+                .unwrap(),
+            2
+        );
+        assert_eq!(sent, [11, 12], "равный срок — порядок постановки");
+        assert_eq!(table.r2o_next_due(), Some(now + Duration::from_millis(30)));
+
+        sent.clear();
+        assert_eq!(
+            table
+                .r2o_flush(now + Duration::from_millis(31), |id, _| {
+                    sent.push(id);
+                    Ok(())
+                })
+                .unwrap(),
+            1
+        );
+        assert_eq!(sent, [30]);
+        assert_eq!(table.r2o_next_due(), None);
+        assert_eq!(table.timeout_ms(now, 500), 500);
+    }
+
+    #[test]
     fn nfqueue_error_releases_only_due_udp_deferred_entries_like_c() {
         let now = Instant::now();
         let packet = udp_packet();

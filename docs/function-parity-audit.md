@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 355 | 45 | 0 | 0 |
+| datapath-core | 400 | 356 | 44 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1453** | **529** | **0** | **0** |
+| **Итого** | **1982** | **1454** | **528** | **0** | **0** |
 
-Это не оценка паритета: 529 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 528 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1453 / P 529 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1454 / P 528 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 469 | 223 | 0 | 0 |
-| datapath-core | 400 | 355 | 45 | 0 | 0 |
+| datapath-core | 400 | 356 | 44 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1453** | **529** | **0** | **0** |
+| **Итого** | **1982** | **1454** | **528** | **0** | **0** |
 
 
 ---
@@ -4186,9 +4186,9 @@ R2O: `main.rs` (`r2o_release_udp_batch*`, `r2o_udp_handle_late_tail`),
 | `d2k_udp_release_new` | 29-51 | 23 | создать очередь отложенных вердиктов: проверка размеров, `slots*batch_size`, три массива, указатели слотов | `r2o_udp_hold.rs` `R2oUdpDeferredVerdicts::new` | **E*** | Production `d2kd` создаёт `d2k_udp_release_new(16, 8)`; Rust использует те же `R2O_UDP_RELEASE_SLOTS=16` и `R2O_UDP_RELEASE_PACKETS=8` фиксированными массивами. Тест `deferred_verdicts_enqueue_flush_and_full_match_c`: пачка 8 принята, 9 отвергнута, после 16 занятых слотов enqueue → false. **Ограничение:** C умеет произвольные `slots/batch_size` и возвращает NULL на 0/overflow/OOM; Rust-конструктор без параметров, ёмкости заданы константами production-значений. |
 | `d2k_udp_release_free` | 53-59 | 7 | освободить массивы вердиктов/ID/слотов и очередь | `Drop` | **E** | C `if (!q) return`; `free(q->verdicts)`, `free(q->ids)`, `free(q->slot)`, `free(q)`. Rust владеет массивами/`Vec` и освобождает их `Drop`; отдельной функции нет. |
 | `d2k_udp_release_enqueue` | 61-81 | 21 | принять пачку ID/вердиктов: count 1..batch_size, свободный слот, due/seq/key/token/count | `r2o_udp_hold.rs:291 r2o_enqueue` | **E*** | Тесты `deferred_verdicts_enqueue_flush_and_full_match_c`, `r2o_udp_deferred_verdicts_next_due_абсолютный_как_c`: пустая/чужая длина → false, копия ids/verdicts, свободный слот, полная очередь 16 → false; порядок `order=next_order++`. **Ограничение:** C хранит `key` и `token` отдельно, Rust — `flow_key` (если передан пакет) и порядковый `order`; token=0 путь (out_defer) эквивалентен, план-execution token в эту очередь R2O не кладёт. |
-| `next_due` (static) | 83-94 | 12 | ближайший созревший слот: `due<=now`, минимум по `due`, затем `seq` | `r2o_udp_hold.rs:352-362` (`min_by_key(due,order)`) | **P** | C линейно ищет `used && due<=now`, выбирает `due` меньше, при равенстве `seq` меньше. Rust `r2o_flush` тем же `min_by_key((due, order))`; эквивалентно. |
+| `next_due` (static) | 83-94 | 12 | ближайший созревший слот: `due<=now`, минимум по `due`, затем `seq` | `r2o_udp_hold.rs` `r2o_flush` (`min_by_key(due,order)`), `r2o_next_due` | **E*** | C линейно ищет `used && due<=now`, выбирает меньший `due`, при равенстве — меньший `seq`. Rust `r2o_flush` тем же `min_by_key((due, order))`, `r2o_next_due` — абсолютный минимум. Тест `next_due_выбирает_минимум_по_сроку_и_порядку_как_c`: +30/+10/+10 → +10, flush выдаёт 11,12 (порядок), затем 30, пустая очередь → None и `timeout_ms=max`. **Ограничение:** C `seq` — номер постановки, Rust `order`; смысл тот же. |
 | `d2k_udp_release_flush` | 96-122 | 27 | выдать все созревшие пачки: send каждого id/verdict, complete/sent, done(ctx,key,token,...), released | `r2o_udp_hold.rs:345 r2o_flush` | **E*** | Те же тесты + ошибочный send: все ID пачки всё равно отправляются (tried=2), слоты очищаются, возвращается `Err`; до срока — пусто, на сроке — по `(due, order)`. **Ограничение:** C вызывает `done(key,token,complete,sent)`, Rust `done`-колбэка не имеет; для token=0 C `delayed_verdict_done` сразу возвращается, поэтому production-путь out_defer совпадает. |
-| `d2k_udp_release_next_ns` | 124-133 | 10 | ближайший `due_ns` среди занятых слотов | `R2oUdpDeferredVerdicts::r2o_next_due`, `timeout_ms` | **E*** | `r2o_next_due` отдаёт абсолютный `Instant` (None вместо C 0), `timeout_ms` строится на нём. Тест `r2o_udp_deferred_verdicts_next_due_абсолютный_как_c`: сроки +30/+10 → минимум +10, после flush +15 → +30, пустая очередь → None. **Ограничение:** C — ns, Rust — `Instant`; poll использует `timeout_ms`. |
+| `d2k_udp_release_next_ns` | 124-133 | 10 | ближайший `due_ns` среди занятых слотов | `R2oUdpDeferredVerdicts::r2o_next_due`, `timeout_ms` | **E*** | `r2o_next_due` отдаёт абсолютный `Instant` (None вместо C 0), `timeout_ms` строится на нём. Тест `next_due_выбирает_минимум_по_сроку_и_порядку_как_c`: сроки +30/+10/+10 → минимум +10, flush по порядку, после flush → +30, пустая очередь → None и `timeout_ms=max`. **Ограничение:** C — ns, Rust — `Instant`; poll использует `timeout_ms`. |
 | `d2k_udp_replay_fates` | 135-154 | 20 | судьбы пачки: owned → can_resend; i=0 DROP/head; i>0 DROP+resend или ACCEPT | `r2o_udp_hold.rs` `r2o_release_batch_with` | **E*** | Rust вычисляет ту же выдачу: голова — `head_verdict`/`head_already_released` (owned выражает вызывающий), хвост при `can_resend` → raw+DROP, иначе → ACCEPT; busy/постоянный отказ → ACCEPT. Тесты `r2o_udp_освобождает_голову_перед_raw_хвостом_и_его_drop`, `r2o_udp_при_ошибке_вердикта_головы_не_обгоняет_её_raw_хвостом`, `release_batch_не_повторяет_accept_после_ошибки_вердикта_как_c`, `r2o_udp_busy_raw_отказ_не_закрывает_follow`. **Ограничение:** C разделяет owned/head_verdict явно, Rust — аргументами вызова. |
 | `plain_verdict` (static) | 174-177 | 4 | адаптер вердикта без контекста | замыкание вердикта (`r2o_release_batch_with`) | **E** | C `plain_ctx *p=ctx; return p->verdict(p->ctx,id,v)`. Rust передаёт замыкание вердикта в `r2o_release_batch_with`; тонкий адаптер, те же id/verdict. |
 | `plain_resend` (static) | 178-182 | 5 | адаптер повторной отправки: id игнорируется | замыкание resend (`r2o_release_batch_with`) | **E** | C `(void)id; return p->resend(p->ctx,pkt,len)==0 ? 0 : -1`. Rust замыкание возвращает `io::Result`, успех/ошибка те же; id не используется. |
