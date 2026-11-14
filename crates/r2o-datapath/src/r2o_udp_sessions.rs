@@ -458,6 +458,9 @@ impl R2oUdpSessions {
         else {
             return false;
         };
+        if flow.controller_probe {
+            return false;
+        }
         !std::mem::replace(&mut flow.quic_deny, true)
     }
 
