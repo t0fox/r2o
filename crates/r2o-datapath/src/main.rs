@@ -1522,19 +1522,10 @@ mod app {
         let mut pending_udp_releases = HashMap::<FlowTicket, PendingUdpRelease>::new();
         let mut holding = HoldTable::default();
         let mut tcp_sessions = TcpSessions::try_with_capacity(options.flow_capacity)?;
-        let mut conntrack = R2oConntrackClient::open();
-        let no_conntrack_table = !std::path::Path::new("/proc/net/nf_conntrack").exists();
-        if conntrack.is_none() {
-            if no_conntrack_table {
-                eprintln!(
-                    "r2o-datapath: таблица conntrack отсутствует; NAT-проверка планов использует исходный кортеж без трансляции"
-                );
-            } else {
-                eprintln!(
-                    "r2o-datapath: ctnetlink недоступен; наблюдение счётчиков соединений выключено, NAT-проверка планов продолжает читать /proc/net/nf_conntrack"
-                );
-            }
-        }
+        let mut conntrack = R2oConntrackClient::open_unprobed();
+        let mut ct_up = false;
+        let mut ct_told_off = false;
+        r2o_ct_probe(&mut conntrack, &mut ct_up, &mut ct_told_off, true);
         let mut conntrack_gate = R2oConntrackGate::with_idle_timeout(
             options.flow_capacity.limit(),
             options.r2o_idle_timeout,
@@ -1724,8 +1715,7 @@ mod app {
                         tcp_sessions.r2o_note_suspect(&event.key);
                     }
                 }
-                if conntrack.is_some() && control.as_ref().is_some_and(ControlServer::is_connected)
-                {
+                if ct_up && control.as_ref().is_some_and(ControlServer::is_connected) {
                     for probe in tcp_sessions.tcp_stall_candidates() {
                         // C `tcp_watch`: поток с меткой маршрутизатора не цель.
                         if routed_flows.r2o_is_routed_key(&probe.key) {
@@ -1752,7 +1742,7 @@ mod app {
                         }
                     }
                 }
-                if conntrack.is_some() && reverse_queue_visible {
+                if ct_up && reverse_queue_visible {
                     for probe in quic_sessions.r2o_quic_stall_candidates() {
                         let Some(info) = conntrack
                             .as_mut()
@@ -1917,14 +1907,7 @@ mod app {
                         );
                     }
                 }
-                if conntrack.is_none() {
-                    conntrack = R2oConntrackClient::open();
-                    if conntrack.is_some() {
-                        eprintln!(
-                            "r2o-datapath: ctnetlink восстановлен; наблюдение счётчиков включено"
-                        );
-                    }
-                }
+                r2o_ct_probe(&mut conntrack, &mut ct_up, &mut ct_told_off, false);
                 last_route_refresh = Instant::now();
                 next_route_refresh = last_route_refresh + R2O_ROUTE_REFRESH_INTERVAL;
             }
@@ -3677,6 +3660,55 @@ mod app {
             return;
         }
         R2O_HEALTH_LAST_MS.store(now_ms, Ordering::Relaxed);
+    }
+
+    /// C `ct_probe` (`d2kd.c:570-595`): переходы up/down и одноразовый лог.
+    /// Проба сама по себе отделена, чтобы состояния можно было проверить
+    /// mock-замыканием без netlink/root.
+    fn r2o_ct_probe_state(
+        up: &mut bool,
+        told_off: &mut bool,
+        startup: bool,
+        mut probe: impl FnMut(i32) -> bool,
+        mut log: impl FnMut(&'static str),
+    ) {
+        if *up {
+            return;
+        }
+        if probe(if startup { 200 } else { 0 }) {
+            *up = true;
+            if *told_off {
+                log("ctnetlink появился — детекторы тишины QUIC и TCP включены");
+            }
+            return;
+        }
+        *up = false;
+        if !*told_off {
+            *told_off = true;
+            log("детекторы тишины QUIC и TCP выключены: нет ctnetlink");
+        }
+    }
+
+    fn r2o_ct_probe(
+        client: &mut Option<R2oConntrackClient>,
+        up: &mut bool,
+        told_off: &mut bool,
+        startup: bool,
+    ) {
+        if *up {
+            return;
+        }
+        // C при `fd < 0` пробует `d2k_ct_open` на каждом обновлении правил.
+        if client.is_none() {
+            *client = R2oConntrackClient::open_unprobed();
+        }
+        let mut log = |text: &'static str| eprintln!("r2o-datapath: {text}");
+        match client.as_mut() {
+            Some(client) => {
+                r2o_ct_probe_state(up, told_off, startup, |wait| client.r2o_probe(wait), log)
+            }
+            None => r2o_ct_probe_state(up, told_off, startup, |_| false, log),
+        }
     }
 
     fn parse_options(arguments: &[String]) -> Result<Options, Box<dyn Error>> {
@@ -7613,6 +7645,77 @@ mod app {
                 17
             );
             assert!(parse_options(&["--journal".into(), "bad".into()]).is_err());
+        }
+
+        #[test]
+        fn ct_probe_transitions_match_d2kd_up_down_and_quiet_log() {
+            let mut up = false;
+            let mut told_off = false;
+            let mut logs = Vec::new();
+            let mut probes = Vec::new();
+            super::r2o_ct_probe_state(
+                &mut up,
+                &mut told_off,
+                true,
+                |wait| {
+                    probes.push(wait);
+                    false
+                },
+                |text| logs.push(text),
+            );
+            assert_eq!(probes, [200]);
+            assert!(!up);
+            assert!(told_off);
+            assert_eq!(
+                logs,
+                ["детекторы тишины QUIC и TCP выключены: нет ctnetlink"]
+            );
+
+            // Повторный down не повторяет строку и на обновлении ждёт 0 мс.
+            super::r2o_ct_probe_state(
+                &mut up,
+                &mut told_off,
+                false,
+                |wait| {
+                    probes.push(wait);
+                    false
+                },
+                |text| logs.push(text),
+            );
+            assert_eq!(probes, [200, 0]);
+            assert_eq!(logs.len(), 1);
+
+            // Появился: одно сообщение, после up проба не вызывается.
+            super::r2o_ct_probe_state(
+                &mut up,
+                &mut told_off,
+                false,
+                |wait| {
+                    probes.push(wait);
+                    true
+                },
+                |text| logs.push(text),
+            );
+            assert!(up);
+            assert_eq!(
+                logs,
+                [
+                    "детекторы тишины QUIC и TCP выключены: нет ctnetlink",
+                    "ctnetlink появился — детекторы тишины QUIC и TCP включены"
+                ]
+            );
+            super::r2o_ct_probe_state(
+                &mut up,
+                &mut told_off,
+                false,
+                |wait| {
+                    probes.push(wait);
+                    true
+                },
+                |text| logs.push(text),
+            );
+            assert_eq!(probes, [200, 0, 0]);
+            assert_eq!(logs.len(), 2);
         }
 
         #[test]
