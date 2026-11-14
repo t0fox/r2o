@@ -264,6 +264,21 @@ impl HoldTable {
         }
     }
 
+    /// C `d2k_http80_delivered` с `accepted=0` (`http80.c:267-276`): замена
+    /// не дошла, ответ помечается неизвестным (код 2), поток — DONE.
+    pub fn r2o_http_delivery_rejected(&mut self, event: &mut HttpResponseEvent) -> bool {
+        let Some(flow) = self
+            .http_requests
+            .iter_mut()
+            .find(|flow| flow.key.wire_key() == event.key && flow.request_no == event.request_no)
+        else {
+            return false;
+        };
+        flow.ready_for_next = false;
+        event.code = 2;
+        true
+    }
+
     /// Забрать диагностику TLS/HTTP-заголовков, которые истекли до сборки.
     pub fn r2o_take_incomplete_diagnostics(&mut self) -> Vec<R2oIncompleteCaptureDiagnostic> {
         self.incomplete_diagnostics.drain(..).collect()
@@ -3266,6 +3281,40 @@ mod tests {
                     u8::from(portal)
                 );
             }
+        }
+
+        {
+            let mut rejected = d17_start(start, options, request);
+            let result = rejected.feed_observing(
+                4,
+                &http_response_packet(
+                    9001,
+                    request_end,
+                    0x18,
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+                ),
+                start + Duration::from_millis(12),
+                options,
+            );
+            let HoldOutcome::HttpResponse { event, .. } = result.outcome else {
+                panic!("HTTPS injection must be recognized");
+            };
+            let mut event = *event;
+            assert!(rejected.r2o_http_delivery_rejected(&mut event));
+            println!("D17 delivered-reject code={}", event.code);
+            let late = rejected.feed_observing(
+                5,
+                &http_response_packet(
+                    9001 + b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".len() as u32,
+                    request_end,
+                    0x18,
+                    b"late",
+                ),
+                start + Duration::from_millis(13),
+                options,
+            );
+            let (action, _) = d17_action(&late, false);
+            println!("D17 delivered-reject-late action={action}");
         }
 
         if let Some((key, request_no)) = answered {

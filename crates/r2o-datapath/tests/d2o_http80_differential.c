@@ -323,6 +323,27 @@ int main(void) {
     }
 
     {
+        d2k_http80 *dr = d2k_http80_new();
+        flow dr_flow = flow4(58000);
+        open_flow(dr, &dr_flow, T);
+        const char *full = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        size_t n = packet(&dr_flow, 0, F_ACK | F_PSH, SISN + 1,
+                          CISN + 1 + (uint32_t)strlen(GET), full, b);
+        d2k_http80_packet(dr, b, n, T + 99 * MS + 700000ull, 0, out, sizeof out,
+                          rst, sizeof rst, &r);
+        d2k_http80_res keep = r;
+        d2k_http80_delivered(dr, b, n, 0, &keep);
+        printf("D17 delivered-reject code=%d\n", keep.response);
+        n = packet(&dr_flow, 0, F_ACK | F_PSH,
+                   SISN + 1 + (uint32_t)strlen(full),
+                   CISN + 1 + (uint32_t)strlen(GET), "late", b);
+        d2k_http80_packet(dr, b, n, T + 99 * MS + 121 * MS, 0, out, sizeof out,
+                          rst, sizeof rst, &r);
+        printf("D17 delivered-reject-late action=%s\n", action_name(r.action));
+        d2k_http80_free(dr);
+    }
+
+    {
         d2k_http80_res keep = https_result;
         fake_io io = { 0, 0, 0, 0, 0 };
         d2k_http80_io callbacks = { io_payload, io_accept, io_rst, &io };

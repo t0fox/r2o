@@ -2939,8 +2939,7 @@ mod app {
                     }
                     if !controller_probe && let Some(mut event) = response_candidate {
                         if !response_delivered {
-                            holding.reject_http_response(&event.key, event.request_no);
-                            event.code = 2;
+                            holding.r2o_http_delivery_rejected(&mut event);
                             portal_candidate = None;
                         }
                         send_http_response_event(&mut control, &event);
