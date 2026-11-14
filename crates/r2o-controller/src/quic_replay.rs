@@ -82,10 +82,18 @@ pub fn r2o_quic_address_is_local(address: SocketAddr) -> bool {
 }
 
 /// Build the same-family, deduplicated address pool used by d2o `build_pool`.
-pub fn r2o_quic_address_pool(
+///
+/// C `classify_run` (`quicprobe.c`, current main `7a5fab9`): for DoQ port 853
+/// the resolver being measured may be the system's only upstream, so the pool
+/// is exactly the intercepted IP and `d2k_quic_build_pool` is not called.
+pub fn r2o_quic_address_pool_for_port(
     primary: SocketAddr,
     resolved: impl IntoIterator<Item = SocketAddr>,
+    port: u16,
 ) -> Vec<SocketAddr> {
+    if port == 853 {
+        return vec![primary];
+    }
     let mut pool = vec![primary];
     for address in resolved
         .into_iter()
@@ -101,6 +109,16 @@ pub fn r2o_quic_address_pool(
         }
     }
     pool
+}
+
+/// Совместимая обёртка для вызовов без явного порта: порт цели — это порт
+/// `primary`, поэтому DoQ-правило 853 срабатывает и в production-вызове
+/// `main.rs:22063`.
+pub fn r2o_quic_address_pool(
+    primary: SocketAddr,
+    resolved: impl IntoIterator<Item = SocketAddr>,
+) -> Vec<SocketAddr> {
+    r2o_quic_address_pool_for_port(primary, resolved, primary.port())
 }
 
 /// Select the address for one question using d2o `qp_pinned_or_next` rules.
@@ -1178,6 +1196,50 @@ mod tests {
         if let Ok(path) = std::env::var("R2O_QUIC_DIRECT_HTTP3_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
         }
+    }
+
+    #[test]
+    fn r2o_quic_doq_port_853_keeps_only_the_intercepted_ip_like_current_donor() {
+        for primary in [
+            "192.0.2.10:853".parse::<std::net::SocketAddr>().unwrap(),
+            "[2001:db8::10]:853".parse().unwrap(),
+        ] {
+            let resolved = [
+                "192.0.2.11:853".parse().unwrap(),
+                "[2001:db8::11]:853".parse().unwrap(),
+                primary,
+            ];
+            assert_eq!(
+                super::r2o_quic_address_pool_for_port(primary, resolved, 853),
+                vec![primary],
+                "DoQ должен игнорировать резолвер и дубли: {primary}"
+            );
+            assert_eq!(
+                super::r2o_quic_address_pool(primary, resolved),
+                vec![primary],
+                "production-обёртка берёт порт цели"
+            );
+        }
+
+        // Не-853 и явный порт сохраняют прежний same-family пул.
+        let primary: std::net::SocketAddr = "192.0.2.10:443".parse().unwrap();
+        let resolved = [
+            "192.0.2.11:443".parse().unwrap(),
+            "192.0.2.11:8443".parse().unwrap(),
+            "[2001:db8::11]:443".parse().unwrap(),
+        ];
+        assert_eq!(
+            super::r2o_quic_address_pool_for_port(primary, resolved, 443),
+            [
+                "192.0.2.10:443".parse().unwrap(),
+                "192.0.2.11:443".parse().unwrap()
+            ]
+        );
+        // Явный port=853 при другом порте primary — тоже DoQ-правило.
+        assert_eq!(
+            super::r2o_quic_address_pool_for_port(primary, resolved, 853),
+            vec![primary]
+        );
     }
 
     #[test]
