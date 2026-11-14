@@ -762,12 +762,15 @@ impl R2oFlowJournal {
         code: u8,
         plan_id: [u8; 16],
         trial_id: [u8; 16],
+        client_shape: u8,
         execution_id: u64,
         binding: Option<BindingContext>,
     ) -> bool {
         // C `d2k_journal_add_refused` пишет любой code (включая NONE) и не
         // проверяет ни ключ, ни binding: отсев проба/NONE делает вызывающий
-        // `refuse_coded`, а не журнал.
+        // `refuse_coded`, а не журнал. Форму C `d2k_ctlsrv_pump` берёт из
+        // потока (`d2k_session_client_shape`), поэтому она должна быть в
+        // записи уже здесь.
         self.push(R2oFlowJournalEntry {
             at_ns,
             execution_id,
@@ -775,6 +778,7 @@ impl R2oFlowJournal {
             key,
             kind: R2oFlowJournalKind::PlanRefused,
             code,
+            client_shape,
             plan_id,
             trial_id,
             ..R2oFlowJournalEntry::default()
@@ -791,6 +795,7 @@ impl R2oFlowJournal {
         code: u8,
         plan_id: [u8; 16],
         trial_id: [u8; 16],
+        client_shape: u8,
         execution_id: u64,
         binding: Option<BindingContext>,
         note: &'static str,
@@ -802,6 +807,7 @@ impl R2oFlowJournal {
             key,
             kind: R2oFlowJournalKind::PlanRefused,
             code,
+            client_shape,
             plan_id,
             trial_id,
             note: Some(note),

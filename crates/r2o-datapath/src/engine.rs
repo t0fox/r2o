@@ -1423,6 +1423,10 @@ impl TcpSessions {
                         if session.hello_at.is_none() {
                             session.hello_at = Some(now);
                             session.hello_seq = Some(sequence);
+                            // C `note_tcp_hello` вызывается только на первом
+                            // объявлении приветствия и запоминает ACK именно
+                            // того пакета.
+                            session.hello_ack = ack.then_some(tcp.acknowledgment);
                             if !controller_probe {
                                 *r2o_tcp_hello_flows = (*r2o_tcp_hello_flows).wrapping_add(1);
                             }
@@ -1434,10 +1438,6 @@ impl TcpSessions {
                                     (*r2o_tcp_hellos_with_sni).wrapping_add(1);
                             }
                         }
-                        // C `note_tcp_hello` запоминает подтверждение hello
-                        // для reply_hidden независимо от того, кто первым
-                        // увидел приветствие — сегмент или сборщик.
-                        session.hello_ack = ack.then_some(tcp.acknowledgment);
                     }
                     session.hello_capture_done = true;
                     tcp_hello_capture.forget(&capture_key);
@@ -3930,6 +3930,7 @@ mod tests {
                 R2O_JOURNAL_REFUSE_NONE,
                 [0; 16],
                 [0; 16],
+                0,
                 0,
                 None,
                 note,

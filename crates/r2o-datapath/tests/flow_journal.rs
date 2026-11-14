@@ -379,6 +379,7 @@ fn отказ_исполнителя_сохраняет_код_плана_поп
         r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_NOT_APPLIED,
         [0xa5; 16],
         [0x5a; 16],
+        3,
         77,
         Some(binding),
     ));
@@ -389,6 +390,10 @@ fn отказ_исполнителя_сохраняет_код_плана_поп
     assert_eq!(refused.key, key);
     assert_eq!(refused.plan_id, [0xa5; 16]);
     assert_eq!(refused.trial_id, [0x5a; 16]);
+    assert_eq!(
+        refused.client_shape, 3,
+        "форма потока не теряется в журнале"
+    );
     assert_eq!(refused.execution_id, 77);
     assert_eq!(refused.binding, Some(binding));
     let mut restored =
@@ -403,6 +408,7 @@ fn отказ_исполнителя_сохраняет_код_плана_поп
         r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_FLOW_UNFIT,
         [0xb6; 16],
         [0; 16],
+        1,
         0,
         None,
     ));
@@ -480,6 +486,7 @@ fn журнал_пишет_причину_отказа_без_плана_как_
         r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_NONE,
         [0; 16],
         [0; 16],
+        3,
         0,
         None,
         "плана для этой цели нет",
@@ -488,6 +495,7 @@ fn журнал_пишет_причину_отказа_без_плана_как_
     assert_eq!(entry.kind, R2oFlowJournalKind::PlanRefused);
     assert_eq!(entry.code, 0);
     assert_eq!(entry.note.as_deref(), Some("плана для этой цели нет"));
+    assert_eq!(entry.client_shape, 3);
     assert_eq!(entry.plan_id, [0; 16]);
     assert_eq!(entry.trial_id, [0; 16]);
 }
@@ -504,6 +512,7 @@ fn журнал_пишет_отказ_none_и_невалидный_ключ_ка
         [0; 16],
         [0; 16],
         0,
+        0,
         None,
     ));
     assert!(journal.record_plan_refused(
@@ -512,6 +521,7 @@ fn журнал_пишет_отказ_none_и_невалидный_ключ_ка
         r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_TOO_LONG,
         [0x11; 16],
         [0; 16],
+        2,
         0,
         Some(BindingContext::default()),
     ));

@@ -2308,7 +2308,7 @@ mod app {
                                 code: r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_NONE,
                                 plan_id: [0; 16],
                                 trial_id: [0; 16],
-                                client_shape: Some(r2k_core::control::SHAPE_QUIC),
+                                client_shape: Some(r2o_udp_client_shape(bytes)),
                                 execution_id: None,
                                 binding: None,
                             };
@@ -4793,6 +4793,7 @@ mod app {
                 event.code,
                 event.plan_id,
                 event.trial_id,
+                event.client_shape.unwrap_or(0),
                 event.execution_id.unwrap_or(0),
                 event.binding,
                 note,
@@ -4804,6 +4805,7 @@ mod app {
                 event.code,
                 event.plan_id,
                 event.trial_id,
+                event.client_shape.unwrap_or(0),
                 event.execution_id.unwrap_or(0),
                 event.binding,
             );
