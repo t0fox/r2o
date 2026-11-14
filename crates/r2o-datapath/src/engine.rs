@@ -589,6 +589,14 @@ impl TcpSessions {
         Ok(())
     }
 
+    /// C `d2k_session_stall_budgets`: копировать до `cap`, вернуть полное
+    /// число бюджетов.
+    pub fn r2o_stall_budgets(&self, out: &mut [u16]) -> usize {
+        let copied = out.len().min(self.tcp_stall_budgets.len());
+        out[..copied].copy_from_slice(&self.tcp_stall_budgets[..copied]);
+        self.tcp_stall_budgets.len()
+    }
+
     /// Возвращает счётчики активного потока по его ключу сетевого протокола.
     pub fn r2o_flow_metrics(&self, key: &[u8; KEY_LEN]) -> Option<R2oTcpFlowMetrics> {
         self.flows.iter().find_map(|(flow_key, session)| {
@@ -2992,6 +3000,17 @@ mod tests {
         assert!(sessions.set_tcp_stall_budgets(&[1; 9]).is_err());
         sessions.set_tcp_stall_budgets(&[]).unwrap();
         assert!(sessions.set_tcp_stall_budgets(&[25]).is_ok());
+        let mut one = [0_u16; 2];
+        assert_eq!(sessions.r2o_stall_budgets(&mut one), 1);
+        assert_eq!(one[0], 25);
+        assert_eq!(sessions.r2o_stall_budgets(&mut []), 1);
+        sessions.set_tcp_stall_budgets(&[15, 35]).unwrap();
+        let mut first = [0_u16; 1];
+        assert_eq!(sessions.r2o_stall_budgets(&mut first), 2);
+        assert_eq!(first[0], 15);
+        let mut both = [0_u16; 4];
+        assert_eq!(sessions.r2o_stall_budgets(&mut both), 2);
+        assert_eq!(&both[..2], &[15, 35]);
     }
 
     #[test]

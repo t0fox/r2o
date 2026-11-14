@@ -86,12 +86,12 @@ recheck 1982 1982 equal True
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 467 | 225 | 0 | 0 |
-| datapath-core | 400 | 323 | 77 | 0 | 0 |
+| datapath-core | 400 | 324 | 76 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1419** | **563** | **0** | **0** |
+| **Итого** | **1982** | **1420** | **562** | **0** | **0** |
 
-Это не оценка паритета: 563 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 562 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -101,7 +101,7 @@ recheck 1982 1982 equal True
 
 ## Итог и подтверждённые расхождения (2026-11-12)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1419 / P 563 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1420 / P 562 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -344,10 +344,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 336 | 212 | 0 | 0 |
 | core-state | 692 | 467 | 225 | 0 | 0 |
-| datapath-core | 400 | 323 | 77 | 0 | 0 |
+| datapath-core | 400 | 324 | 76 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 110 | 49 | 0 | 0 |
-| **Итого** | **1982** | **1419** | **563** | **0** | **0** |
+| **Итого** | **1982** | **1420** | **562** | **0** | **0** |
 
 
 ---
@@ -3907,7 +3907,7 @@ CLI-логирования, health-файла, duration, состава свод
 | `tcp_band_top` (static) | 3271–3277 | 7 | максимум бюджетов + 3; пустой список → 3 | `engine.rs` `tcp_band_top` | E | C: `top = max(budgets)`, `return top + D2K_TCP_STALL_SLACK`; пустой список даёт 0+3. Rust `tcp_band_top(&[u16])` использует `max().unwrap_or(0) + SLACK` и вызывается из `update_tcp_stall`; тест `tcp_band_top_matches_c` (пусто, [25], [15,35], [1,2]). |
 | `ct_tcp_flow` (static) | 3279–3328 | 50 | TCP stall: ESTABLISHED, unseen = reply-rev_pkts_conn, est = fwd+rev+unseen, band top, reply change → mark, orig delta>=3, RTO=max(3*rtt,2с), band, suspect с est | `engine.rs` conntrack stall detection | **P** | **Совпадает:** ESTABLISHED-only, `unseen`, `est`, верхняя полоса, обновление mark при смене reply, `orig` delta ≥3, RTO `3*rtt` минимум 2 с, `tcp_in_band`, событие с `num=est`. **Отличия:** C `tcp_watch_off=1` при не-ESTABLISHED/выше полосы; Rust `stall_watch_off`/`stall_reported`; C `suspect_num` с деталями server_hello, Rust `R2oTcpStallEvent` с полями. Полного differential нет. |
 | `d2k_session_set_stall_budgets` | 3330–3343 | 14 | до 8 ненулевых бюджетов, пусто → полевой 25 | `engine.rs:451-460 set_tcp_stall_budgets` | **E** | Точное совпадение: `>8` или любой `0` → отказ; пустой список → `[25]`; иначе копия. Тесты `engine.rs:2431-2434` (нулевой/9/пусто/25). |
-| `d2k_session_stall_budgets` | 3345–3351 | 7 | чтение бюджетов до cap, вернуть полное число | `engine.rs:371/850` поле `tcp_stall_budgets` | **P** | C getter копирует до `cap` и возвращает `n_stall_budget`; Rust поле используется напрямую в `tcp_in_band`/`tcp_band_top`, отдельного getter с cap нет. Эквивалент для чтения. |
+| `d2k_session_stall_budgets` | 3345–3351 | 7 | чтение бюджетов до cap, вернуть полное число | `engine.rs` `r2o_stall_budgets` | **E*** | C копирует до `cap` значений и возвращает полное `n_stall_budget`; Rust-геттер `r2o_stall_budgets(&mut out)` делает то же (копия `min(len,cap)`, возврат полной длины). Тест `tcp_бюджеты_отвергают_ноль_и_список_длиннее_восьми`: default [25] → len 1; cap 0 → 1; `[15,35]` → cap 1 копирует 15 и возвращает 2, cap 4 — оба значения. **Ограничение:** C API `(s,out,cap)`, Rust — срез. |
 | `d2k_session_sweep` | 3353–3370 | 18 | TCP sweep + UDP sweep; при `ct_query` — обход uflows/flows через `ct_flow`/`ct_tcp_flow`, вернуть число подозрений | `main.rs:1197-1263` periodic sweep, `engine.rs`, `r2o_quic.rs`, `conntrack.rs` | **P** | **Совпадает:** раз в секунду TCP/UDP sweep, затем conntrack-запросы для наблюдаемых потоков, сумма `told`. **Отличия:** C `d2k_track_walk` по двум таблицам и единый `told`; Rust отдельные `tcp_sessions.sweep_silent`, `quic_sessions`/`voice_sessions/udp_sessions` и `conntrack.query`; порядок uflows→flows не гарантирован. Полного differential нет. |
 | `d2k_session_expire` | 3372–3395 | 24 | удалить FIN-окно, expire TCP с callback, expire UDP без callback | `engine.rs:928 expire_with_silent`, `r2o_udp_sessions.rs:493 expire` | E | C: снять FIN-окно, затем TCP-expire с callback, UDP-expire без callback. Rust `expire_with_silent` проверяет `idle_expired`/`fin_expired`, вызывает `tcp_silence_event` и `capture.forget` до удаления; `R2oUdpSessions::expire` удаляет UDP по idle без callback. Тесты `r2o_tcp_silence_requires_a_recognized_clienthello`, `tcp_истечение_не_сообщает_если_после_clienthello_была_полезная_нагрузка`, `R2oUdpSessions::expire` (4с/5с). |
 | `d2k_session_flows` | 3397–3399 | 3 | сумма TCP+UDP потоков | `engine.rs` `r2o_session_flows` | E | C `track_count(flows)+track_count(uflows)`. Rust `r2o_session_flows(tcp,udp)` суммирует `TcpSessions::len` и `R2oUdpSessions::len`; тест `session_flows_guards_shape_damaged_getters_match_c`. |
