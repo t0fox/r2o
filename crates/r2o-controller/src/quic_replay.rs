@@ -610,6 +610,221 @@ pub fn r2o_quic_plan_text_from_state(state: &R2oQuicPlanState<'_>) -> Result<Str
     Ok(text)
 }
 
+/// C `d2k_quic_arm_kind` (`core/include/d2k_quicprobe.h`): вид измеренного
+/// плеча. FLAKY и NOT_FOUND не являются планами, но нужны для compose.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum R2oQuicArmKind {
+    Blob,
+    Copies,
+    Ttl,
+    Frag,
+    NotFound,
+    Flaky,
+    Split,
+    Udplen,
+}
+
+impl R2oQuicArmKind {
+    /// C `quic_arm_found`: какие виды плеча компилируются в plan text.
+    fn r2o_quic_arm_found(self) -> bool {
+        matches!(
+            self,
+            Self::Blob | Self::Copies | Self::Ttl | Self::Frag | Self::Split | Self::Udplen
+        )
+    }
+}
+
+/// C `d2k_quic_arm` в части, нужной компилятору плана. `bytes` — точные
+/// байты измеренной приманки; для UDPLEN/FRAG пусто.
+#[derive(Clone, Copy, Debug)]
+pub struct R2oQuicArm<'a> {
+    pub kind: R2oQuicArmKind,
+    pub bytes: &'a [u8],
+    pub original: bool,
+    pub frag_kind: i32,
+    pub ttl: i32,
+    pub copies: i32,
+    pub udplen: u32,
+    /// C `frag_survives == D2K_PROP_YES`.
+    pub frag_survives: bool,
+}
+
+/// C `d2k_quic_props` в части, нужной `d2k_quic_compose_plan`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct R2oQuicPlanProps {
+    /// C `junk_ahead == D2K_PROP_YES`.
+    pub junk_ahead: bool,
+    /// C `longer == D2K_PROP_YES`.
+    pub longer: bool,
+}
+
+/// Строки payload/poison/fake для измеренной приманки. Вынесены из arm_plan,
+/// чтобы текст собирал один `r2o_quic_plan_text_from_state`, как в C — один
+/// `quic_plan_text` на оба входа.
+fn r2o_quic_arm_directives(blob: &[u8], ttl: i32, copies: i32) -> String {
+    let payload: String = blob.iter().map(|byte| format!("{byte:02x}")).collect();
+    let mut text = format!("payload 1 {payload}\n");
+    if ttl != 0 {
+        text.push_str(&format!("poison 1 ttl={ttl}\n"));
+    } else {
+        text.push_str("poison 1\n");
+    }
+    text.push_str(&format!(
+        "fake payload=1 poison=1 repeats={copies} gap_us=0 place=before\n"
+    ));
+    text
+}
+
+/// C `d2k_quic_arm_plan` (`core/udpplan.c:173-186`): UDPLEN — только отдельное
+/// удлинение; SPLIT без len — фиксированный split-план; иначе обычный
+/// plan text с измеренной приманкой. Текст собирает production
+/// `r2o_quic_plan_text_from_state`, здесь остаются только проверки C.
+pub fn r2o_quic_arm_plan(arm: &R2oQuicArm<'_>, blob: &[u8]) -> Result<String, String> {
+    if !arm.original {
+        return Err("QUIC arm plan: плечо не original".into());
+    }
+    if !arm.kind.r2o_quic_arm_found() {
+        return Err("QUIC arm plan: плечо не найдено".into());
+    }
+    if arm.kind == R2oQuicArmKind::Udplen {
+        if arm.udplen != 100
+            || !arm.bytes.is_empty()
+            || !blob.is_empty()
+            || arm.ttl != 0
+            || arm.frag_kind != 0
+            || arm.copies != 0
+        {
+            return Err("QUIC arm plan: udplen смешан с другим воздействием".into());
+        }
+        return r2o_quic_plan_text_from_state(&R2oQuicPlanState {
+            kind: Some(R2oQuicCandidateKind::UdpLength),
+            directives: "",
+            plan_id: None,
+            udplen: 100,
+            junk: false,
+            non_original: false,
+            frag_survives: true,
+        });
+    }
+    if arm.udplen != 0 {
+        return Err("QUIC arm plan: udplen только отдельным плечом".into());
+    }
+    // C проверяет этот случай до quic_plan_text и не смотрит на ttl/frag/
+    // copies: split без len — одно фиксированное действие.
+    if arm.kind == R2oQuicArmKind::Split && arm.bytes.is_empty() {
+        if !blob.is_empty() {
+            return Err("QUIC arm plan: split без len не принимает blob".into());
+        }
+        return Ok(r2o_quic_split_plan_text());
+    }
+    if arm.kind == R2oQuicArmKind::Split && (arm.frag_kind != 0 || arm.ttl != 0) {
+        return Err("QUIC arm plan: split не сочетается с frag/ttl".into());
+    }
+    let fragment = arm.frag_kind;
+    if fragment != 0 && (!(1..=4).contains(&fragment) || !arm.frag_survives) {
+        return Err("QUIC arm plan: неподтверждённая форма фрагментации".into());
+    }
+    let has_fake = arm.kind != R2oQuicArmKind::Frag;
+    let mut ttl = 0;
+    if has_fake {
+        if !(1..=255).contains(&arm.copies) {
+            return Err("QUIC arm plan: copies вне 1..=255".into());
+        }
+        if arm.bytes.is_empty() || arm.bytes.len() > 2048 || blob != arm.bytes {
+            return Err("QUIC arm plan: приманка не совпадает с arm.bytes".into());
+        }
+        if arm.kind == R2oQuicArmKind::Ttl {
+            if !(1..=255).contains(&arm.ttl) {
+                return Err("QUIC arm plan: ttl вне 1..=255".into());
+            }
+            ttl = arm.ttl;
+        }
+    } else if !arm.bytes.is_empty() || !blob.is_empty() {
+        return Err("QUIC arm plan: fragment не несёт приманку".into());
+    }
+    if !has_fake && fragment == 0 {
+        return Err("QUIC arm plan: нет воздействия".into());
+    }
+    let directives = if has_fake {
+        r2o_quic_arm_directives(blob, ttl, arm.copies)
+    } else {
+        String::new()
+    };
+    // C склеивает fragment с любым fake-плечом; тогда шапка плана — ipfrag.
+    let kind = if fragment != 0 {
+        R2oQuicCandidateKind::FragmentShape(fragment as u8)
+    } else {
+        match arm.kind {
+            R2oQuicArmKind::Blob => R2oQuicCandidateKind::OriginalSingle(0),
+            R2oQuicArmKind::Copies => R2oQuicCandidateKind::OriginalRepeats {
+                blob: 0,
+                copies: arm.copies as u8,
+            },
+            R2oQuicArmKind::Ttl => R2oQuicCandidateKind::OriginalTtl(ttl as u8),
+            R2oQuicArmKind::Split => R2oQuicCandidateKind::SplitCrypto,
+            R2oQuicArmKind::Frag
+            | R2oQuicArmKind::Udplen
+            | R2oQuicArmKind::NotFound
+            | R2oQuicArmKind::Flaky => unreachable!(),
+        }
+    };
+    r2o_quic_plan_text_from_state(&R2oQuicPlanState {
+        kind: Some(kind),
+        directives: &directives,
+        plan_id: None,
+        udplen: 0,
+        junk: false,
+        non_original: false,
+        frag_survives: true,
+    })
+}
+
+/// C `d2k_quic_compose_plan` (`core/udpplan.c:188-203`): FLAKY всегда отказ;
+/// SPLIT без len — split-план; годное плечо — arm_plan; иначе подтверждённые
+/// свойства (junk важнее longer, произведение не выдумывается).
+pub fn r2o_quic_compose_plan(
+    arm: Option<&R2oQuicArm<'_>>,
+    props: &R2oQuicPlanProps,
+) -> Result<String, String> {
+    if let Some(arm) = arm {
+        if arm.udplen != 0 && arm.kind != R2oQuicArmKind::Udplen {
+            return Err("QUIC compose: udplen смешан с плечом".into());
+        }
+        if arm.kind == R2oQuicArmKind::Flaky {
+            return Err("QUIC compose: измерению нельзя верить".into());
+        }
+        if arm.kind == R2oQuicArmKind::Split && arm.bytes.is_empty() {
+            return if arm.original {
+                Ok(r2o_quic_split_plan_text())
+            } else {
+                Err("QUIC compose: split не original".into())
+            };
+        }
+        if arm.kind.r2o_quic_arm_found() {
+            return r2o_quic_arm_plan(arm, arm.bytes);
+        }
+    }
+    // C `quic_plan_text(NULL, …, junk=0, udplen=0)` отказывает: пустые
+    // свойства не образуют план.
+    if !props.junk_ahead && !props.longer {
+        return Err("QUIC compose: нет подтверждённых свойств".into());
+    }
+    let udplen = if props.junk_ahead { 0 } else { 100 };
+    r2o_quic_plan_text_from_state(&R2oQuicPlanState {
+        kind: if udplen != 0 {
+            Some(R2oQuicCandidateKind::UdpLength)
+        } else {
+            None
+        },
+        directives: "",
+        plan_id: None,
+        udplen,
+        junk: props.junk_ahead,
+        non_original: false,
+        frag_survives: true,
+    })
+}
+
 /// Построить начальные QUIC-вопросы по порядку донорской стратегии.
 pub fn r2o_quic_discovery_candidates(
     baseline: Option<&crate::r2o_quic_http3::R2oQuicHttp3Result>,
@@ -2248,7 +2463,10 @@ mod tests {
 
     #[test]
     fn quic_plan_text_from_state_matches_c_oracle() {
-        use super::{R2oQuicCandidateKind, R2oQuicPlanState, r2o_quic_plan_text_from_state};
+        use super::{
+            R2oQuicArm, R2oQuicArmKind, R2oQuicCandidateKind, R2oQuicPlanProps, R2oQuicPlanState,
+            r2o_quic_arm_plan, r2o_quic_compose_plan, r2o_quic_plan_text_from_state,
+        };
 
         fn emit(name: &str, state: R2oQuicPlanState<'_>, output: &mut String) {
             match r2o_quic_plan_text_from_state(&state) {
@@ -2257,6 +2475,44 @@ mod tests {
                     output.push_str(&text);
                 }
                 Err(_) => output.push_str(&format!("plan|{name}|-1\n")),
+            }
+        }
+
+        fn emit_arm(name: &str, arm: &R2oQuicArm<'_>, blob: &[u8], output: &mut String) {
+            match r2o_quic_arm_plan(arm, blob) {
+                Ok(text) => {
+                    output.push_str(&format!("plan|{name}|0\n"));
+                    output.push_str(&text);
+                }
+                Err(_) => output.push_str(&format!("plan|{name}|-1\n")),
+            }
+        }
+
+        fn emit_compose(
+            name: &str,
+            arm: Option<&R2oQuicArm<'_>>,
+            props: &R2oQuicPlanProps,
+            output: &mut String,
+        ) {
+            match r2o_quic_compose_plan(arm, props) {
+                Ok(text) => {
+                    output.push_str(&format!("plan|{name}|0\n"));
+                    output.push_str(&text);
+                }
+                Err(_) => output.push_str(&format!("plan|{name}|-1\n")),
+            }
+        }
+
+        fn arm<'a>(kind: R2oQuicArmKind, bytes: &'a [u8], copies: i32) -> R2oQuicArm<'a> {
+            R2oQuicArm {
+                kind,
+                bytes,
+                original: true,
+                frag_kind: 0,
+                ttl: 0,
+                copies,
+                udplen: 0,
+                frag_survives: false,
             }
         }
         let payload = "payload 1 aabbccdd\n";
@@ -2428,6 +2684,87 @@ mod tests {
                 non_original: true,
                 frag_survives: true,
             },
+            &mut output,
+        );
+        let blob = [0xaa_u8, 0xbb, 0xcc, 0xdd];
+        let arm_blob = arm(R2oQuicArmKind::Blob, &blob, 2);
+        emit_arm("arm-blob", &arm_blob, &blob, &mut output);
+        let arm_copies = arm(R2oQuicArmKind::Copies, &blob, 3);
+        emit_arm("arm-copies3", &arm_copies, &blob, &mut output);
+        let arm_ttl = R2oQuicArm {
+            ttl: 3,
+            ..arm(R2oQuicArmKind::Ttl, &blob, 2)
+        };
+        emit_arm("arm-ttl3", &arm_ttl, &blob, &mut output);
+        let arm_frag = R2oQuicArm {
+            frag_kind: 2,
+            frag_survives: true,
+            ..arm(R2oQuicArmKind::Frag, &[], 0)
+        };
+        emit_arm("arm-frag2", &arm_frag, &[], &mut output);
+        let arm_udplen = R2oQuicArm {
+            udplen: 100,
+            ..arm(R2oQuicArmKind::Udplen, &[], 0)
+        };
+        emit_arm("arm-udplen", &arm_udplen, &[], &mut output);
+        let arm_udplen_len = R2oQuicArm {
+            udplen: 100,
+            ..arm(R2oQuicArmKind::Udplen, &blob, 0)
+        };
+        emit_arm("arm-udplen-len", &arm_udplen_len, &blob, &mut output);
+        let arm_split = arm(R2oQuicArmKind::Split, &[], 0);
+        emit_arm("arm-split", &arm_split, &[], &mut output);
+        let arm_split_blob = arm(R2oQuicArmKind::Split, &blob, 2);
+        emit_arm("arm-split-blob", &arm_split_blob, &blob, &mut output);
+        let arm_frag_nosurvive = R2oQuicArm {
+            frag_kind: 2,
+            ..arm(R2oQuicArmKind::Frag, &[], 0)
+        };
+        emit_arm("arm-frag-nosurvive", &arm_frag_nosurvive, &[], &mut output);
+        let props_none = R2oQuicPlanProps::default();
+        let props_junk_longer = R2oQuicPlanProps {
+            junk_ahead: true,
+            longer: true,
+        };
+        let arm_flaky = arm(R2oQuicArmKind::Flaky, &[], 0);
+        emit_compose(
+            "compose-flaky",
+            Some(&arm_flaky),
+            &props_junk_longer,
+            &mut output,
+        );
+        emit_compose("compose-split", Some(&arm_split), &props_none, &mut output);
+        emit_compose("compose-blob", Some(&arm_blob), &props_none, &mut output);
+        emit_compose("compose-junk", None, &props_junk_longer, &mut output);
+        emit_compose(
+            "compose-longer",
+            None,
+            &R2oQuicPlanProps {
+                junk_ahead: false,
+                longer: true,
+            },
+            &mut output,
+        );
+        emit_compose("compose-empty", None, &props_none, &mut output);
+        let arm_notfound = arm(R2oQuicArmKind::NotFound, &[], 0);
+        emit_compose(
+            "compose-notfound-junk",
+            Some(&arm_notfound),
+            &R2oQuicPlanProps {
+                junk_ahead: true,
+                longer: false,
+            },
+            &mut output,
+        );
+        emit_compose("compose-frag", Some(&arm_frag), &props_none, &mut output);
+        let arm_udplen_blob = R2oQuicArm {
+            udplen: 100,
+            ..arm(R2oQuicArmKind::Blob, &[], 0)
+        };
+        emit_compose(
+            "compose-udplen-blob",
+            Some(&arm_udplen_blob),
+            &props_none,
             &mut output,
         );
         if let Ok(path) = std::env::var("R2O_QUIC_PLAN_TEXT_DIFF_OUTPUT") {

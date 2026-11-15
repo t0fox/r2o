@@ -17,6 +17,24 @@ static void run(const char *name, const d2k_quic_arm *arm, const uint8_t *data,
     if (rc == 0) fputs(text, stdout);
 }
 
+static void run_arm(const char *name, const d2k_quic_arm *arm,
+                    const uint8_t *data, size_t length)
+{
+    char text[4096];
+    int rc = d2k_quic_arm_plan(arm, data, length, text, sizeof text);
+    printf("plan|%s|%d\n", name, rc);
+    if (rc == 0) fputs(text, stdout);
+}
+
+static void run_compose(const char *name, const d2k_quic_arm *arm,
+                        const d2k_quic_props *props)
+{
+    char text[4096];
+    int rc = d2k_quic_compose_plan(arm, props, text, sizeof text);
+    printf("plan|%s|%d\n", name, rc);
+    if (rc == 0) fputs(text, stdout);
+}
+
 int main(void)
 {
     memset(blob, 0, sizeof blob);
@@ -130,6 +148,170 @@ int main(void)
         a.kind = D2K_QA_SPLIT;
         a.original = 0;
         run("split-non-original", &a, NULL, 0, 0, 0);
+    }
+    {
+        d2k_quic_arm a;
+        memset(&a, 0, sizeof a);
+        a.kind = D2K_QA_BLOB;
+        a.original = 1;
+        a.copies = 2;
+        a.len = 4;
+        memcpy(a.bytes, blob, 4);
+        run_arm("arm-blob", &a, blob, 4);
+    }
+    {
+        d2k_quic_arm a;
+        memset(&a, 0, sizeof a);
+        a.kind = D2K_QA_COPIES;
+        a.original = 1;
+        a.copies = 3;
+        a.len = 4;
+        memcpy(a.bytes, blob, 4);
+        run_arm("arm-copies3", &a, blob, 4);
+    }
+    {
+        d2k_quic_arm a;
+        memset(&a, 0, sizeof a);
+        a.kind = D2K_QA_TTL;
+        a.original = 1;
+        a.copies = 2;
+        a.ttl = 3;
+        a.len = 4;
+        memcpy(a.bytes, blob, 4);
+        run_arm("arm-ttl3", &a, blob, 4);
+    }
+    {
+        d2k_quic_arm a;
+        memset(&a, 0, sizeof a);
+        a.kind = D2K_QA_FRAG;
+        a.original = 1;
+        a.frag_kind = 2;
+        a.frag_survives = D2K_PROP_YES;
+        run_arm("arm-frag2", &a, NULL, 0);
+    }
+    {
+        d2k_quic_arm a;
+        memset(&a, 0, sizeof a);
+        a.kind = D2K_QA_UDPLEN;
+        a.original = 1;
+        a.udplen = 100;
+        run_arm("arm-udplen", &a, NULL, 0);
+    }
+    {
+        d2k_quic_arm a;
+        memset(&a, 0, sizeof a);
+        a.kind = D2K_QA_UDPLEN;
+        a.original = 1;
+        a.udplen = 100;
+        a.len = 4;
+        memcpy(a.bytes, blob, 4);
+        run_arm("arm-udplen-len", &a, blob, 4);
+    }
+    {
+        d2k_quic_arm a;
+        memset(&a, 0, sizeof a);
+        a.kind = D2K_QA_SPLIT;
+        a.original = 1;
+        run_arm("arm-split", &a, NULL, 0);
+    }
+    {
+        d2k_quic_arm a;
+        memset(&a, 0, sizeof a);
+        a.kind = D2K_QA_SPLIT;
+        a.original = 1;
+        a.copies = 2;
+        a.len = 4;
+        memcpy(a.bytes, blob, 4);
+        run_arm("arm-split-blob", &a, blob, 4);
+    }
+    {
+        d2k_quic_arm a;
+        memset(&a, 0, sizeof a);
+        a.kind = D2K_QA_FRAG;
+        a.original = 1;
+        a.frag_kind = 2;
+        a.frag_survives = D2K_PROP_NO;
+        run_arm("arm-frag-nosurvive", &a, NULL, 0);
+    }
+    {
+        d2k_quic_arm a;
+        d2k_quic_props p;
+        memset(&a, 0, sizeof a);
+        memset(&p, 0, sizeof p);
+        a.kind = D2K_QA_FLAKY;
+        a.original = 1;
+        p.junk_ahead = D2K_PROP_YES;
+        run_compose("compose-flaky", &a, &p);
+    }
+    {
+        d2k_quic_arm a;
+        d2k_quic_props p;
+        memset(&a, 0, sizeof a);
+        memset(&p, 0, sizeof p);
+        a.kind = D2K_QA_SPLIT;
+        a.original = 1;
+        run_compose("compose-split", &a, &p);
+    }
+    {
+        d2k_quic_arm a;
+        d2k_quic_props p;
+        memset(&a, 0, sizeof a);
+        memset(&p, 0, sizeof p);
+        a.kind = D2K_QA_BLOB;
+        a.original = 1;
+        a.copies = 2;
+        a.len = 4;
+        memcpy(a.bytes, blob, 4);
+        run_compose("compose-blob", &a, &p);
+    }
+    {
+        d2k_quic_props p;
+        memset(&p, 0, sizeof p);
+        p.junk_ahead = D2K_PROP_YES;
+        p.longer = D2K_PROP_YES;
+        run_compose("compose-junk", NULL, &p);
+    }
+    {
+        d2k_quic_props p;
+        memset(&p, 0, sizeof p);
+        p.longer = D2K_PROP_YES;
+        run_compose("compose-longer", NULL, &p);
+    }
+    {
+        d2k_quic_props p;
+        memset(&p, 0, sizeof p);
+        run_compose("compose-empty", NULL, &p);
+    }
+    {
+        d2k_quic_arm a;
+        d2k_quic_props p;
+        memset(&a, 0, sizeof a);
+        memset(&p, 0, sizeof p);
+        a.kind = D2K_QA_NOT_FOUND;
+        a.original = 1;
+        p.junk_ahead = D2K_PROP_YES;
+        run_compose("compose-notfound-junk", &a, &p);
+    }
+    {
+        d2k_quic_arm a;
+        d2k_quic_props p;
+        memset(&a, 0, sizeof a);
+        memset(&p, 0, sizeof p);
+        a.kind = D2K_QA_FRAG;
+        a.original = 1;
+        a.frag_kind = 2;
+        a.frag_survives = D2K_PROP_YES;
+        run_compose("compose-frag", &a, &p);
+    }
+    {
+        d2k_quic_arm a;
+        d2k_quic_props p;
+        memset(&a, 0, sizeof a);
+        memset(&p, 0, sizeof p);
+        a.kind = D2K_QA_BLOB;
+        a.original = 1;
+        a.udplen = 100;
+        run_compose("compose-udplen-blob", &a, &p);
     }
     return 0;
 }
