@@ -10019,6 +10019,11 @@ struct R2oBudgetPartialState {
     partial: R2oBudgetPartial,
     owned_fallback: bool,
     volume_cut: bool,
+    trial_retired: bool,
+    ver_closed: bool,
+    state: u8,
+    revision: u32,
+    sync_pending: bool,
 }
 
 #[cfg(unix)]
@@ -10048,6 +10053,7 @@ fn r2o_budget_partial_update(
     target: &r2o_controller::discovery::DiscoveryTarget,
     pending: &R2oBudgetCutPending,
     successes: u32,
+    marked: usize,
 ) -> R2oBudgetCutDecision {
     let transport = if target.shape == SHAPE_QUIC { 17 } else { 6 };
     let mut states = r2o_budget_partial_map()
@@ -10071,6 +10077,13 @@ fn r2o_budget_partial_update(
     if pending.volume_block {
         state.volume_cut = true;
     }
+    // C : trial_retire/ver_close, T_PLANNING и
+    // revision++/sync_pending для каждой перемаркированной привязки.
+    state.trial_retired = true;
+    state.ver_closed = true;
+    state.state = 6;
+    state.revision = state.revision.saturating_add(marked as u32);
+    state.sync_pending |= marked > 0;
     let owned = !pending.volume_block
         && transport == 6
         && pending.search_owned
@@ -27070,7 +27083,7 @@ impl ControlClient {
                 .map(|plan| plan.successes.max(0) as u32)
                 .max()
                 .unwrap_or(0);
-            let decision = r2o_budget_partial_update(&outcome.target, &pending, successes);
+            let decision = r2o_budget_partial_update(&outcome.target, &pending, successes, marked);
             if decision.partial_changed {
                 println!(
                     "частичный обход {}: {} пакетов, successes={successes}, план {plan_id}",
@@ -27095,9 +27108,9 @@ impl ControlClient {
                     // единственным планом; бюджет остаётся «оборван».
                     outcome.plan_text = Some(state.partial.text);
                     outcome.budget_mark = R2O_D2K_CAT_BUDGET_CUT;
-                    outcome.detail.push_str(
-                        "; проходящего бюджета нет — беру лучший частичный обход",
-                    );
+                    outcome
+                        .detail
+                        .push_str("; проходящего бюджета нет — беру лучший частичный обход");
                 }
             }
             if marked > 0 {
@@ -33277,7 +33290,7 @@ mod tests {
                 ver_status: 200,
                 ver_budget: R2O_D2K_CAT_BUDGET_CUT,
             };
-            let decision = r2o_budget_partial_update(&target, &pending, succ);
+            let decision = r2o_budget_partial_update(&target, &pending, succ, 1);
             let state = super::r2o_budget_partial_map()
                 .lock()
                 .unwrap()
@@ -33292,12 +33305,17 @@ mod tests {
                 .collect::<String>();
             writeln!(
                 output,
-                "case {name} valid={} pk={} succ={} text={text_hex} box={} owned={}",
+                "case {name} valid={} pk={} succ={} text={text_hex} box={} owned={} state={} trial={} verfd={} revision={} sync={}",
                 u8::from(state.partial.valid),
                 state.partial.pk,
                 state.partial.succ,
                 state.partial.box_id,
-                u8::from(state.owned_fallback)
+                u8::from(state.owned_fallback),
+                state.state,
+                if state.trial_retired { 0 } else { 1 },
+                if state.ver_closed { -1 } else { 0 },
+                state.revision,
+                u8::from(state.sync_pending)
             )
             .unwrap();
             let _ = (decision, owned_fallback);

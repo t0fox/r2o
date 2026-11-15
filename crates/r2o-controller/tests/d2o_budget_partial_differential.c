@@ -70,6 +70,7 @@ int main(void) {
         t.search_owned = cases[i].search_owned;
         t.owned_fallback = cases[i].owned_fallback;
         t.own_first = cases[i].own_first;
+        t.trial_installed = 1;
 
         cat->n_boxes = 1;
         d2k_cat_plan *plans = cat->boxes[0].plans;
@@ -99,7 +100,9 @@ int main(void) {
         printf("case %s valid=%d pk=%u succ=%u text=", cases[i].name,
                t.partial_valid, t.partial_pk, t.partial_succ);
         print_hex(t.partial_text);
-        printf(" box=%s owned=%d\n", t.partial_box, t.owned_fallback);
+        printf(" box=%s owned=%d state=%d trial=%d verfd=%d revision=%zu sync=%d\n",
+               t.partial_box, t.owned_fallback, (int)t.state, t.trial_installed,
+               t.ver.fd, s->cat->revision, s->sync_pending);
     }
     pthread_mutex_destroy(&s->mu);
     free(cat->boxes[0].plans);
