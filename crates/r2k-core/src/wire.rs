@@ -16,7 +16,7 @@ const TCP_TIMESTAMP_OPTION_LEN: usize = 12;
 /// при отказе random — 0 (вызывающий отвергает план).
 static UDP_FRAGMENT_ID: std::sync::Mutex<Option<u32>> = std::sync::Mutex::new(None);
 
-fn next_udp_fragment_id() -> u32 {
+pub(crate) fn next_udp_fragment_id() -> u32 {
     let mut state = UDP_FRAGMENT_ID
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -657,14 +657,63 @@ mod udp_pseudo_sum_tests {
 
 #[cfg(test)]
 mod udp_fragment_id_tests {
+    use std::sync::{Mutex, OnceLock};
+
+    fn sequence_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
     #[test]
     fn udp_fragment_id_matches_c_counter() {
+        let _guard = sequence_lock().lock().unwrap();
         let a = super::next_udp_fragment_id();
         assert_ne!(a, 0);
         assert_ne!(a as u16, 0);
         let b = super::next_udp_fragment_id();
         assert_ne!(b as u16, 0);
         assert!(b == a.wrapping_add(1) || b == a.wrapping_add(2));
+    }
+
+    #[test]
+    fn udp_fragment_id_sequence_is_monotonic_32() {
+        let _guard = sequence_lock().lock().unwrap();
+        let mut ids: Vec<u32> = Vec::with_capacity(32);
+        let mut bad_step = 0_u32;
+        let mut low16_zero = 0_u32;
+        let mut zero = 0_u32;
+        for index in 0..32 {
+            let id = super::next_udp_fragment_id();
+            if id == 0 {
+                zero += 1;
+            }
+            if id as u16 == 0 {
+                low16_zero += 1;
+            }
+            if index > 0 {
+                let previous = ids[index - 1];
+                if id != previous.wrapping_add(1) && id != previous.wrapping_add(2) {
+                    bad_step += 1;
+                }
+            }
+            ids.push(id);
+        }
+        let unique = {
+            let mut sorted = ids.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            sorted.len()
+        };
+        let output = format!(
+            "calls=32 unique={unique} low16_zero={low16_zero} bad_step={bad_step} zero={zero}\n"
+        );
+        if let Ok(path) = std::env::var("R2O_FRAGMENT_ID_INVARIANT_OUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert_eq!(zero, 0);
+        assert_eq!(low16_zero, 0);
+        assert_eq!(bad_step, 0);
+        assert_eq!(unique, 32);
     }
 }
 

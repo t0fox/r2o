@@ -507,10 +507,8 @@ fn r2o_fragment_id() -> Result<u32, i32> {
     if let Some(id) = r2o_test_fragment_id() {
         return Ok(id);
     }
-    let mut bytes = [0_u8; 4];
-    getrandom::getrandom(&mut bytes).map_err(|_| -1_i32)?;
-    let id = u32::from_ne_bytes(bytes);
-    if id as u16 == 0 { Ok(1) } else { Ok(id) }
+    let id = crate::wire::next_udp_fragment_id();
+    if id == 0 { Err(-1) } else { Ok(id) }
 }
 
 #[cfg(all(unix, test))]
