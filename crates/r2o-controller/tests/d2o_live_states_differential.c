@@ -172,13 +172,15 @@ static void emit_groups(void) {
     s.areas = areas;
     s.n_areas = 1;
     set_suspect("target.example");
-    /* Активный challenge-cooldown: autopick печатает остаток секунд. */
-    s.cooldowns[0].used = 1;
-    s.cooldowns[0].challenge = 1;
-    s.cooldowns[0].transport = 6;
-    s.cooldowns[0].family = 4;
-    s.cooldowns[0].until_ms = 6000;
-    snprintf(s.cooldowns[0].name, sizeof s.cooldowns[0].name, "target.example");
+    /* Подтверждённая привязка + T_WATCHING: autopick отдаёт plan_id. */
+    binding(&binds[0], "target.example", "plan-1", "name", 6, 4, 1, 3, 1, 0);
+    boxes[0].binds = binds;
+    boxes[0].n_binds = 1;
+    task *watching = &s.tasks[0];
+    snprintf(watching->name, sizeof watching->name, "target.example");
+    watching->transport = 6;
+    watching->family = 4;
+    watching->state = T_WATCHING;
     s.confirms = 7;
     s.probes_used = 42;
     s.unfit_client = 3;
@@ -196,6 +198,13 @@ static void emit_measurements(void) {
     s.ct_max = 1000;
     s.limiter = MEAS_LIM_CPU;
     set_suspect("target.example");
+    /* Активный challenge-cooldown: autopick печатает остаток секунд. */
+    s.cooldowns[0].used = 1;
+    s.cooldowns[0].challenge = 1;
+    s.cooldowns[0].transport = 6;
+    s.cooldowns[0].family = 4;
+    s.cooldowns[0].until_ms = 6000;
+    snprintf(s.cooldowns[0].name, sizeof s.cooldowns[0].name, "target.example");
     s.confirms = 7;
     s.probes_used = 42;
     s.unfit_client = 3;

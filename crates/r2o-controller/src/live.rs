@@ -2190,6 +2190,19 @@ mod tests {
             value.autopick["cooldown_seconds_left"] = json!(1);
             value
         };
+        let known_plan_status = || {
+            let mut value = status(
+                "используется ранее подтверждённый Plan",
+                "target.example",
+                10,
+                5,
+                7,
+                42,
+                3,
+            );
+            value.autopick["plan_id"] = json!("plan-1");
+            value
+        };
         let measurements = || {
             json!({
                 "active": 0,
@@ -2390,6 +2403,19 @@ mod tests {
         };
         let groups_catalog = || {
             let mut catalog = boxes_catalog();
+            catalog.boxes[0].bindings = vec![Binding {
+                kind: "name".into(),
+                target: "target.example".into(),
+                plan_id: "plan-1".into(),
+                level: 3,
+                confirmed: 1500,
+                successes: 1,
+                enabled: true,
+                transport: 6,
+                family: 4,
+                shape: 1,
+                ..Binding::default()
+            }];
             let key = GroupKey {
                 transport: 6,
                 family: 4,
@@ -2475,7 +2501,7 @@ mod tests {
                 &active_groups,
                 searches(),
                 empty_measurements(),
-                cooldown_status(),
+                known_plan_status(),
                 &areas(),
             )
             .unwrap(),
@@ -2487,7 +2513,7 @@ mod tests {
                 &active_groups,
                 searches(),
                 measurements(),
-                base_status(),
+                cooldown_status(),
                 &[],
             )
             .unwrap(),
