@@ -2409,6 +2409,7 @@ mod app {
                         }
                         let inspect_quic = observe_tls
                             || family.is_some_and(|family| name_plans.has_quic_candidate(family));
+                        quic_sessions.r2o_clear_quic_audit();
                         let quic_hello = prefetched_quic_hello.take().or_else(|| {
                             inspect_quic
                                 .then(|| quic_sessions.capture_hello_at_hook(bytes, queue_hook))

@@ -160,6 +160,10 @@ pub struct R2oQuicSessions {
     quic_name: u64,
     /// C `out->quic_shape_miss`: имя известно, плана этой формы нет.
     quic_shape_miss: u64,
+    /// C `out->quic_name` последнего пакета (per-packet, не кумулятивно).
+    last_quic_name: Vec<u8>,
+    /// C `out->quic_shape_miss` последнего пакета.
+    last_quic_shape_miss: bool,
 }
 
 impl R2oQuicSessions {
@@ -188,6 +192,8 @@ impl R2oQuicSessions {
             qsnap_done: 0,
             quic_name: 0,
             quic_shape_miss: 0,
+            last_quic_name: Vec::new(),
+            last_quic_shape_miss: false,
         })
     }
 
@@ -216,6 +222,21 @@ impl R2oQuicSessions {
     /// C `out->quic_shape_miss`: имя известно, плана нужной формы нет.
     pub fn r2o_note_quic_shape_miss(&mut self) {
         self.quic_shape_miss = self.quic_shape_miss.saturating_add(1);
+        self.last_quic_shape_miss = true;
+    }
+
+    /// Per-packet аудит: начинается с пустых полей, как `d2k_result`.
+    pub fn r2o_clear_quic_audit(&mut self) {
+        self.last_quic_name.clear();
+        self.last_quic_shape_miss = false;
+    }
+
+    pub fn r2o_last_quic_name(&self) -> &[u8] {
+        &self.last_quic_name
+    }
+
+    pub fn r2o_last_quic_shape_miss(&self) -> bool {
+        self.last_quic_shape_miss
     }
 
     /// C `init_ring_pack` (`session.c:253-283`): датаграммы потока с тем же
@@ -341,6 +362,8 @@ impl R2oQuicSessions {
         self.hello_reported.insert(key, now);
         self.qsnap_done = self.qsnap_done.saturating_add(1);
         self.quic_name = self.quic_name.saturating_add(1);
+        self.last_quic_name.clear();
+        self.last_quic_name.extend_from_slice(&host);
         Some(super::capture::QuicHello {
             key: key.wire_key(),
             host,
@@ -707,6 +730,8 @@ impl Default for R2oQuicSessions {
             qsnap_done: 0,
             quic_name: 0,
             quic_shape_miss: 0,
+            last_quic_name: Vec::new(),
+            last_quic_shape_miss: false,
         }
     }
 }
@@ -987,6 +1012,8 @@ mod tests {
         assert_eq!(sessions.r2o_init_ring_done(), 1);
         assert_eq!(sessions.r2o_qsnap_done(), 1);
         assert_eq!(sessions.r2o_quic_name(), 1);
+        assert_eq!(sessions.r2o_last_quic_name(), b"example.com");
+        assert!(!sessions.r2o_last_quic_shape_miss());
         assert_eq!(event.key[0], 4);
         assert_eq!(&event.key[1..5], &client);
         assert_eq!(&event.key[17..21], &server);
@@ -1035,6 +1062,17 @@ mod tests {
         assert_eq!(sessions.r2o_init_ring_done(), 1);
         assert_eq!(sessions.r2o_qsnap_done(), 0);
         assert_eq!(sessions.r2o_quic_name(), 0);
+        assert!(sessions.r2o_last_quic_name().is_empty());
+    }
+
+    #[test]
+    fn quic_per_packet_audit_clear_and_shape_miss_like_c() {
+        let mut sessions = R2oQuicSessions::default();
+        sessions.r2o_note_quic_shape_miss();
+        assert!(sessions.r2o_last_quic_shape_miss());
+        sessions.r2o_clear_quic_audit();
+        assert!(!sessions.r2o_last_quic_shape_miss());
+        assert!(sessions.r2o_last_quic_name().is_empty());
     }
 
     #[test]
