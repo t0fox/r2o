@@ -10166,21 +10166,36 @@ fn r2o_say_quiet(key: &str, line: String) {
     }
 }
 
+/// C `client_ip_of` по ключу потока: клиент — противоположный серверу конец.
+#[cfg(unix)]
+fn r2o_clean_handshake_client_ip(key: &[u8; r2k_core::control::KEY_LEN]) -> [u8; 16] {
+    let low_ip: [u8; 16] = key[1..17].try_into().unwrap_or_default();
+    let high_ip: [u8; 16] = key[17..33].try_into().unwrap_or_default();
+    let low_port = u16::from_be_bytes([key[33], key[34]]);
+    let high_port = u16::from_be_bytes([key[35], key[36]]);
+    r2o_controller::discovery::client_ip_of(key[0], low_ip, high_ip, low_port, high_port)
+}
+
+/// C `clean_hs_seen`: ключ — имя + транспорт + семейство + IP клиента.
+/// Раньше Rust хранил только имя/семейство и гасил подозрение ЧУЖОГО клиента.
 #[cfg(unix)]
 #[derive(Default)]
 struct R2oCleanHandshakeCache {
-    entries: VecDeque<(String, u8, std::time::Instant)>,
+    entries: VecDeque<(String, u8, [u8; 16], std::time::Instant)>,
 }
 
 #[cfg(unix)]
 impl R2oCleanHandshakeCache {
-    fn note(&mut self, name: &str, family: u8, now: std::time::Instant) {
-        self.entries
-            .retain(|(_, _, seen)| now.saturating_duration_since(*seen) <= R2O_CLEAN_HANDSHAKE_TTL);
-        if let Some((_, _, seen)) = self
-            .entries
-            .iter_mut()
-            .find(|(entry_name, entry_family, _)| entry_name == name && *entry_family == family)
+    fn note(&mut self, name: &str, family: u8, client_ip: [u8; 16], now: std::time::Instant) {
+        self.entries.retain(|(_, _, _, seen)| {
+            now.saturating_duration_since(*seen) <= R2O_CLEAN_HANDSHAKE_TTL
+        });
+        if let Some((_, _, _, seen)) =
+            self.entries
+                .iter_mut()
+                .find(|(entry_name, entry_family, entry_ip, _)| {
+                    entry_name == name && *entry_family == family && *entry_ip == client_ip
+                })
         {
             *seen = now;
             return;
@@ -10188,26 +10203,54 @@ impl R2oCleanHandshakeCache {
         if self.entries.len() == R2O_CLEAN_HANDSHAKE_CAPACITY {
             self.entries.pop_front();
         }
-        self.entries.push_back((name.to_owned(), family, now));
+        self.entries
+            .push_back((name.to_owned(), family, client_ip, now));
     }
 
-    fn r2o_recent(&self, name: &str, family: u8, now: std::time::Instant) -> bool {
-        self.entries.iter().any(|(entry_name, entry_family, seen)| {
-            entry_name == name
-                && *entry_family == family
-                && now.saturating_duration_since(*seen) <= R2O_CLEAN_HANDSHAKE_TTL
-        })
+    fn r2o_recent(
+        &self,
+        name: &str,
+        family: u8,
+        client_ip: [u8; 16],
+        now: std::time::Instant,
+    ) -> bool {
+        self.entries
+            .iter()
+            .any(|(entry_name, entry_family, entry_ip, seen)| {
+                entry_name == name
+                    && *entry_family == family
+                    && *entry_ip == client_ip
+                    && now.saturating_duration_since(*seen) <= R2O_CLEAN_HANDSHAKE_TTL
+            })
     }
 
     fn suppresses_unplanned_tcp_suspicion(
         &self,
         name: &str,
         family: u8,
+        client_ip: [u8; 16],
         planned: bool,
         now: std::time::Instant,
     ) -> bool {
-        !planned && self.r2o_recent(name, family, now)
+        !planned && self.r2o_recent(name, family, client_ip, now)
     }
+}
+
+/// C `on_suspect`: чистое рукопожатие гасит только коды рукопожатия
+/// (RST/повтор/молчание — 1/2/3). Защитно снятый RST (4) и поздние коды
+/// (5/6/8) остаются уликами.
+#[cfg(unix)]
+fn r2o_suspect_clean_handshake_suppressed(
+    cache: &R2oCleanHandshakeCache,
+    name: &str,
+    family: u8,
+    client_ip: [u8; 16],
+    planned: bool,
+    code: u8,
+    now: std::time::Instant,
+) -> bool {
+    matches!(code, 1 | 2 | 3)
+        && cache.suppresses_unplanned_tcp_suspicion(name, family, client_ip, planned, now)
 }
 
 #[cfg(unix)]
@@ -22109,6 +22152,7 @@ impl ControlClient {
                             if clean_handshakes.suppresses_unplanned_tcp_suspicion(
                                 &target.host,
                                 target.family,
+                                r2o_clean_handshake_client_ip(&event.key),
                                 event.planned,
                                 now,
                             ) {
@@ -22221,6 +22265,7 @@ impl ControlClient {
                         if clean_handshakes.suppresses_unplanned_tcp_suspicion(
                             &target.host,
                             target.family,
+                            r2o_clean_handshake_client_ip(&event.key),
                             event.planned,
                             now,
                         ) {
@@ -22311,6 +22356,7 @@ impl ControlClient {
                         if clean_handshakes.suppresses_unplanned_tcp_suspicion(
                             &target.host,
                             target.family,
+                            r2o_clean_handshake_client_ip(&event.key),
                             event.planned,
                             now,
                         ) {
@@ -22946,7 +22992,12 @@ impl ControlClient {
                         .recall(&event.key)
                         .map(str::to_owned);
                     if let Some(name) = recalled {
-                        clean_handshakes.note(&name, event.key[0], now);
+                        clean_handshakes.note(
+                            &name,
+                            event.key[0],
+                            r2o_clean_handshake_client_ip(&event.key),
+                            now,
+                        );
                     }
                     continue;
                 }
@@ -23768,10 +23819,16 @@ impl ControlClient {
             return;
         };
         let planned = event.planned == r2k_core::control::LEGACY_PLANNED_YES;
-        if clean_handshakes.suppresses_unplanned_tcp_suspicion(
+        // C `on_suspect`: чистое рукопожатие гасит только подозрения уровня
+        // рукопожатия — RST (1), повтор (2), молчание (3). Защитно снятый RST
+        // (4), ранние/поздние коды (5/6/8) уликой рукопожатия не являются.
+        if r2o_suspect_clean_handshake_suppressed(
+            clean_handshakes,
             &target.host,
             target.family,
+            r2o_clean_handshake_client_ip(&event.key),
             planned,
+            event.code,
             now,
         ) {
             println!(
@@ -23885,7 +23942,12 @@ impl ControlClient {
         if r2o_legacy_exchange_is_clean(event) {
             if let Some(name) = recent_tcp_names.recall(&event.key) {
                 let name = name.to_owned();
-                clean_handshakes.note(&name, event.key[0], now);
+                clean_handshakes.note(
+                    &name,
+                    event.key[0],
+                    r2o_clean_handshake_client_ip(&event.key),
+                    now,
+                );
                 println!(
                     "v22 EXCHANGE {}: ответ сервера без плана отмечен как чистое рукопожатие",
                     name
@@ -36766,24 +36828,195 @@ mod tests {
     }
 
     #[test]
-    fn кэш_чистого_tcp_рукопожатия_сверяет_имя_семейство_срок_и_ёмкость() {
+    fn кэш_чистого_tcp_рукопожатия_сверяет_имя_семейство_клиента_срок_и_ёмкость() {
         let now = std::time::Instant::now();
+        let mut client_a = [0_u8; 16];
+        client_a[..4].copy_from_slice(&[192, 0, 2, 10]);
+        let mut client_b = [0_u8; 16];
+        client_b[..4].copy_from_slice(&[192, 0, 2, 11]);
+        let mut key = [0_u8; KEY_LEN];
+        key[0] = 4;
+        key[1..5].copy_from_slice(&client_a[..4]);
+        key[17..21].copy_from_slice(&[198, 51, 100, 80]);
+        key[33..35].copy_from_slice(&45_000_u16.to_be_bytes());
+        key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+        key[37] = 6;
+        assert_eq!(
+            super::r2o_clean_handshake_client_ip(&key),
+            client_a,
+            "C client_ip_of: клиент — противоположный серверу конец"
+        );
         let mut cache = super::R2oCleanHandshakeCache::default();
-        cache.note("clean.example", 4, now);
+        cache.note("clean.example", 4, client_a, now);
 
-        assert!(cache.r2o_recent("clean.example", 4, now));
-        assert!(cache.suppresses_unplanned_tcp_suspicion("clean.example", 4, false, now));
-        assert!(!cache.suppresses_unplanned_tcp_suspicion("clean.example", 4, true, now));
-        assert!(!cache.r2o_recent("other.example", 4, now));
-        assert!(!cache.r2o_recent("clean.example", 6, now));
-        assert!(!cache.suppresses_unplanned_tcp_suspicion("clean.example", 6, false, now));
-        assert!(cache.r2o_recent("clean.example", 4, now + std::time::Duration::from_secs(60),));
-        assert!(!cache.r2o_recent("clean.example", 4, now + std::time::Duration::from_secs(61),));
+        assert!(cache.r2o_recent("clean.example", 4, client_a, now));
+        assert!(cache.suppresses_unplanned_tcp_suspicion("clean.example", 4, client_a, false, now));
+        assert!(!cache.suppresses_unplanned_tcp_suspicion("clean.example", 4, client_a, true, now));
+        // C `clean_handshake_recent`: чужой IP клиента не гасится.
+        assert!(!cache.r2o_recent("clean.example", 4, client_b, now));
+        assert!(!cache.r2o_recent("other.example", 4, client_a, now));
+        assert!(!cache.r2o_recent("clean.example", 6, client_a, now));
+        assert!(cache.r2o_recent(
+            "clean.example",
+            4,
+            client_a,
+            now + std::time::Duration::from_secs(60),
+        ));
+        assert!(!cache.r2o_recent(
+            "clean.example",
+            4,
+            client_a,
+            now + std::time::Duration::from_secs(61),
+        ));
 
         for index in 0..16 {
-            cache.note(&format!("other-{index}.example"), 4, now);
+            cache.note(&format!("other-{index}.example"), 4, client_b, now);
         }
-        assert!(!cache.r2o_recent("clean.example", 4, now));
+        assert!(!cache.r2o_recent("clean.example", 4, client_a, now));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn d2o_clean_handshake_suppression_matches_c() {
+        let now = std::time::Instant::now();
+        let mut client_a = [0_u8; 16];
+        client_a[..4].copy_from_slice(&[192, 0, 2, 10]);
+        let mut client_b = [0_u8; 16];
+        client_b[..4].copy_from_slice(&[192, 0, 2, 11]);
+        let mut client6 = [0_u8; 16];
+        client6.copy_from_slice(&[
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+        ]);
+        let mut cache = super::R2oCleanHandshakeCache::default();
+        cache.note("clean.example", 4, client_a, now);
+
+        let mut output = String::new();
+        let mut scenario = |label: &str,
+                            cache: &super::R2oCleanHandshakeCache,
+                            name: &str,
+                            family: u8,
+                            client_ip: [u8; 16],
+                            planned: bool,
+                            code: u8,
+                            at: std::time::Instant| {
+            let suppressed = super::r2o_suspect_clean_handshake_suppressed(
+                cache, name, family, client_ip, planned, code, at,
+            );
+            output.push_str(&format!("{label}={}\n", u8::from(suppressed)));
+            suppressed
+        };
+        assert!(scenario(
+            "client_a_rst",
+            &cache,
+            "clean.example",
+            4,
+            client_a,
+            false,
+            1,
+            now
+        ));
+        assert!(scenario(
+            "client_a_repeat",
+            &cache,
+            "clean.example",
+            4,
+            client_a,
+            false,
+            2,
+            now
+        ));
+        assert!(scenario(
+            "client_a_silent",
+            &cache,
+            "clean.example",
+            4,
+            client_a,
+            false,
+            3,
+            now
+        ));
+        for (label, code) in [
+            ("client_a_rst_cut", 4),
+            ("client_a_rst_after_app", 5),
+            ("client_a_fin_retry", 6),
+            ("client_a_tcp_stall", 8),
+        ] {
+            assert!(!scenario(
+                label,
+                &cache,
+                "clean.example",
+                4,
+                client_a,
+                false,
+                code,
+                now
+            ));
+        }
+        assert!(!scenario(
+            "client_b_rst",
+            &cache,
+            "clean.example",
+            4,
+            client_b,
+            false,
+            1,
+            now
+        ));
+        assert!(!scenario(
+            "client_a_planned",
+            &cache,
+            "clean.example",
+            4,
+            client_a,
+            true,
+            1,
+            now
+        ));
+        assert!(!scenario(
+            "other_name",
+            &cache,
+            "other.example",
+            4,
+            client_a,
+            false,
+            1,
+            now
+        ));
+        assert!(!scenario(
+            "family6",
+            &cache,
+            "clean.example",
+            6,
+            client6,
+            false,
+            1,
+            now
+        ));
+        assert!(scenario(
+            "ttl_60s",
+            &cache,
+            "clean.example",
+            4,
+            client_a,
+            false,
+            1,
+            now + std::time::Duration::from_secs(60)
+        ));
+        assert!(!scenario(
+            "ttl_61s",
+            &cache,
+            "clean.example",
+            4,
+            client_a,
+            false,
+            1,
+            now + std::time::Duration::from_secs(61)
+        ));
+
+        drop(scenario);
+        if let Ok(path) = std::env::var("R2O_CLEAN_HANDSHAKE_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
     }
 
     #[test]
