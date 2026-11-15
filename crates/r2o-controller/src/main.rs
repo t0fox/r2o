@@ -7721,7 +7721,26 @@ fn r2o_confirm_discovery_outcome(
             .is_ok_and(|fetch| fetch.application_verified)
     {
         if let Some(plan_id) = outcome.plan_text.as_deref().and_then(r2o_catalog_plan_id) {
-            r2o_budget_cut_pending_set(&outcome.target, plan_id);
+            let (budget_packets, ver_status) = result.as_ref().map_or((0, 0), |fetch| {
+                (
+                    fetch.r2o_volume_observation.data_packets,
+                    i32::from(fetch.status),
+                )
+            });
+            r2o_budget_cut_pending_set(
+                &outcome.target,
+                R2oBudgetCutPending {
+                    plan_id,
+                    plan_text: outcome.plan_text.clone().unwrap_or_default(),
+                    box_id: outcome.volume_box_id.clone().unwrap_or_default(),
+                    budget_packets,
+                    volume_block: outcome.volume_recovery,
+                    search_owned: true,
+                    own_first_two: outcome.transferred_own_plan,
+                    ver_status,
+                    ver_budget: outcome.budget_mark,
+                },
+            );
         }
         outcome.plan_text = None;
         outcome.retry_after = None;
@@ -9926,12 +9945,27 @@ fn r2o_plan_arm_rst_guard(text: &str) -> String {
 
 /// План, отклонённый C `budget_cut_reject`: worker выясняет это на стадии
 /// подтверждения, а каталог и его блокировка живут в главном цикле. Ключ —
-/// цель, значение — id отклонённого плана.
+/// цель, значение — данные отклонённого плана и текущего частичного обхода.
 #[cfg(unix)]
-fn r2o_budget_cut_map()
--> &'static std::sync::Mutex<HashMap<r2o_controller::discovery::DiscoveryTarget, String>> {
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct R2oBudgetCutPending {
+    plan_id: String,
+    plan_text: String,
+    box_id: String,
+    budget_packets: u32,
+    volume_block: bool,
+    search_owned: bool,
+    own_first_two: bool,
+    ver_status: i32,
+    ver_budget: u8,
+}
+
+#[cfg(unix)]
+fn r2o_budget_cut_map() -> &'static std::sync::Mutex<
+    HashMap<r2o_controller::discovery::DiscoveryTarget, R2oBudgetCutPending>,
+> {
     static CUTS: std::sync::OnceLock<
-        std::sync::Mutex<HashMap<r2o_controller::discovery::DiscoveryTarget, String>>,
+        std::sync::Mutex<HashMap<r2o_controller::discovery::DiscoveryTarget, R2oBudgetCutPending>>,
     > = std::sync::OnceLock::new();
     CUTS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
@@ -9939,12 +9973,12 @@ fn r2o_budget_cut_map()
 #[cfg(unix)]
 fn r2o_budget_cut_pending_set(
     target: &r2o_controller::discovery::DiscoveryTarget,
-    plan_id: String,
+    pending: R2oBudgetCutPending,
 ) {
     r2o_budget_cut_map()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(target.clone(), plan_id);
+        .insert(target.clone(), pending);
 }
 
 #[cfg(unix)]
@@ -9958,11 +9992,126 @@ fn r2o_budget_cut_pending(target: &r2o_controller::discovery::DiscoveryTarget) -
 #[cfg(unix)]
 fn r2o_budget_cut_pending_take(
     target: &r2o_controller::discovery::DiscoveryTarget,
-) -> Option<String> {
+) -> Option<R2oBudgetCutPending> {
     r2o_budget_cut_map()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(target)
+}
+
+/// C `t->partial_*`: лучший частичный обход по `budget_packets`, затем
+/// successes плана в каталоге.
+#[cfg(unix)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct R2oBudgetPartial {
+    valid: bool,
+    pk: u32,
+    succ: u32,
+    text: String,
+    box_id: String,
+    ver_status: i32,
+    ver_budget: u8,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct R2oBudgetPartialState {
+    partial: R2oBudgetPartial,
+    owned_fallback: bool,
+    volume_cut: bool,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct R2oBudgetCutDecision {
+    partial_changed: bool,
+    owned_fallback: bool,
+    volume_block: bool,
+}
+
+#[cfg(unix)]
+fn r2o_budget_partial_map() -> &'static std::sync::Mutex<
+    HashMap<r2o_controller::discovery::DiscoveryTarget, R2oBudgetPartialState>,
+> {
+    static PARTIAL: std::sync::OnceLock<
+        std::sync::Mutex<
+            HashMap<r2o_controller::discovery::DiscoveryTarget, R2oBudgetPartialState>,
+        >,
+    > = std::sync::OnceLock::new();
+    PARTIAL.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Обновить частичный обход и флаги бюджета. Production вызывается из
+/// `apply_discovery_outcome` после `r2o_budget_cut_reject`.
+#[cfg(unix)]
+fn r2o_budget_partial_update(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    pending: &R2oBudgetCutPending,
+    successes: u32,
+) -> R2oBudgetCutDecision {
+    let transport = if target.shape == SHAPE_QUIC { 17 } else { 6 };
+    let mut states = r2o_budget_partial_map()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let state = states.entry(target.clone()).or_default();
+    let changed = !state.partial.valid
+        || pending.budget_packets > state.partial.pk
+        || (pending.budget_packets == state.partial.pk && successes > state.partial.succ);
+    if changed {
+        state.partial = R2oBudgetPartial {
+            valid: true,
+            pk: pending.budget_packets,
+            succ: successes,
+            text: pending.plan_text.clone(),
+            box_id: pending.box_id.clone(),
+            ver_status: pending.ver_status,
+            ver_budget: pending.ver_budget,
+        };
+    }
+    if pending.volume_block {
+        state.volume_cut = true;
+    }
+    let owned = !pending.volume_block
+        && transport == 6
+        && pending.search_owned
+        && !state.owned_fallback
+        && !pending.own_first_two;
+    if owned {
+        state.owned_fallback = true;
+    }
+    R2oBudgetCutDecision {
+        partial_changed: changed,
+        owned_fallback: owned,
+        volume_block: pending.volume_block,
+    }
+}
+
+#[cfg(unix)]
+fn r2o_budget_partial_take(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+) -> Option<R2oBudgetPartialState> {
+    r2o_budget_partial_map()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(target)
+}
+
+#[cfg(unix)]
+fn r2o_budget_volume_cut(target: &r2o_controller::discovery::DiscoveryTarget) -> bool {
+    r2o_budget_partial_map()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(target)
+        .is_some_and(|state| state.volume_cut)
+}
+
+#[cfg(unix)]
+fn r2o_budget_owned_fallback(target: &r2o_controller::discovery::DiscoveryTarget) -> bool {
+    r2o_budget_partial_map()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(target)
+        .is_some_and(|state| state.owned_fallback)
 }
 
 #[cfg(unix)]
@@ -26882,7 +27031,7 @@ impl ControlClient {
 
     fn apply_discovery_outcome_with_input_and_persistence(
         &mut self,
-        outcome: DiscoveryOutcome,
+        mut outcome: DiscoveryOutcome,
         catalog: &mut Catalog,
         catalog_path: &std::path::Path,
         input: u8,
@@ -26895,7 +27044,8 @@ impl ControlClient {
             self.apply_discovery_direct_clear(&outcome.target, catalog, catalog_path, persistence)?;
             return Ok(None);
         }
-        if let Some(plan_id) = r2o_budget_cut_pending_take(&outcome.target) {
+        if let Some(pending) = r2o_budget_cut_pending_take(&outcome.target) {
+            let plan_id = pending.plan_id.clone();
             let (_lock, previous) =
                 locked_catalog_for_persistence(catalog_path, catalog, persistence.as_deref())?;
             let now = std::time::SystemTime::now()
@@ -26912,6 +27062,44 @@ impl ControlClient {
             let shape = r2o_plan_wire_shape(outcome.target.shape, has_timestamp);
             let marked =
                 r2o_budget_cut_reject(&mut updated, &outcome.target, &plan_id, shape, transport);
+            let successes = updated
+                .boxes
+                .iter()
+                .flat_map(|box_record| &box_record.plans)
+                .filter(|plan| plan.id == plan_id)
+                .map(|plan| plan.successes.max(0) as u32)
+                .max()
+                .unwrap_or(0);
+            let decision = r2o_budget_partial_update(&outcome.target, &pending, successes);
+            if decision.partial_changed {
+                println!(
+                    "частичный обход {}: {} пакетов, successes={successes}, план {plan_id}",
+                    outcome.target.host, pending.budget_packets
+                );
+            }
+            if decision.owned_fallback {
+                println!(
+                    "по {} приём замера режется бюджетом — ищу проходящий бюджет в запасном списке",
+                    outcome.target.host
+                );
+            }
+            if decision.volume_block {
+                println!(
+                    "по {} обрыв объёма измерен — дальнейший перебор по этому бюджету остановлен",
+                    outcome.target.host
+                );
+                if let Some(state) = r2o_budget_partial_take(&outcome.target)
+                    && state.partial.valid
+                {
+                    // C `partial_finish`: лучший частичный обход ставится
+                    // единственным планом; бюджет остаётся «оборван».
+                    outcome.plan_text = Some(state.partial.text);
+                    outcome.budget_mark = R2O_D2K_CAT_BUDGET_CUT;
+                    outcome.detail.push_str(
+                        "; проходящего бюджета нет — беру лучший частичный обход",
+                    );
+                }
+            }
             if marked > 0 {
                 persist_catalog_update(&updated, catalog_path, now, persistence.as_deref_mut())?;
                 println!(
@@ -33041,6 +33229,86 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn budget_partial_best_matches_c() {
+        use super::{
+            R2O_D2K_CAT_BUDGET_CUT, R2oBudgetCutPending, r2o_budget_partial_take,
+            r2o_budget_partial_update,
+        };
+        use std::fmt::Write as _;
+
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "partial.example".into(),
+            endpoint: "198.51.100.90:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let _ = r2o_budget_partial_take(&target);
+        let plan_text =
+            "d2k-plan 1 1\nid 00112233445566778899aabbccddeeff\nproto tcp tls\norder forward\n";
+        let cases = [
+            ("first", 100u32, 1u32, 1u32, 0u32, 0u32),
+            ("lower-pk", 50, 9, 1, 0, 0),
+            ("tie-better-succ", 100, 5, 1, 0, 0),
+            ("tie-worse-succ", 100, 2, 1, 0, 0),
+            ("higher-pk", 120, 0, 1, 0, 0),
+            ("higher-pk-tie-succ", 120, 5, 1, 0, 0),
+            ("own-first-two", 130, 9, 1, 0, 2),
+            ("already-owned", 140, 9, 1, 1, 0),
+        ];
+        let mut output = String::new();
+        for (index, (name, pk, succ, search_owned, owned_fallback, own_first)) in
+            cases.into_iter().enumerate()
+        {
+            if let Some(state) = super::r2o_budget_partial_map()
+                .lock()
+                .unwrap()
+                .get_mut(&target)
+            {
+                state.owned_fallback = owned_fallback != 0;
+            }
+            let pending = R2oBudgetCutPending {
+                plan_id: "00112233445566778899aabbccddeeff".into(),
+                plan_text: plan_text.into(),
+                box_id: format!("box-{index}"),
+                budget_packets: pk,
+                volume_block: false,
+                search_owned: search_owned != 0,
+                own_first_two: own_first == 2,
+                ver_status: 200,
+                ver_budget: R2O_D2K_CAT_BUDGET_CUT,
+            };
+            let decision = r2o_budget_partial_update(&target, &pending, succ);
+            let state = super::r2o_budget_partial_map()
+                .lock()
+                .unwrap()
+                .get(&target)
+                .cloned()
+                .unwrap();
+            let text_hex = state
+                .partial
+                .text
+                .bytes()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            writeln!(
+                output,
+                "case {name} valid={} pk={} succ={} text={text_hex} box={} owned={}",
+                u8::from(state.partial.valid),
+                state.partial.pk,
+                state.partial.succ,
+                state.partial.box_id,
+                u8::from(state.owned_fallback)
+            )
+            .unwrap();
+            let _ = (decision, owned_fallback);
+        }
+        if let Ok(path) = std::env::var("R2O_BUDGET_PARTIAL_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn budget_cut_reject_binding_marks_match_c() {
         use std::fmt::Write as _;
 
@@ -33181,7 +33449,10 @@ mod tests {
         let confirmed = super::r2o_confirm_discovery_outcome(outcome, Ok(fetch), true);
         assert_eq!(confirmed.budget_mark, super::R2O_D2K_CAT_BUDGET_CUT);
         assert!(confirmed.plan_text.is_none());
-        assert_eq!(super::r2o_budget_cut_pending_take(&target), Some(plan_id));
+        assert_eq!(
+            super::r2o_budget_cut_pending_take(&target).map(|pending| pending.plan_id),
+            Some(plan_id)
+        );
     }
 
     #[cfg(unix)]
