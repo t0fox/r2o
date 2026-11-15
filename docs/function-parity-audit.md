@@ -93,14 +93,14 @@ production-путь не ставится. Формулировки «теста
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 345 | 203 | 0 | 0 |
+| core-net | 548 | 351 | 197 | 0 | 0 |
 | core-state | 692 | 472 | 220 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
-| detect | 159 | 131 | 28 | 0 | 0 |
-| **Итого** | **1982** | **1524** | **458** | **0** | **0** |
+| detect | 159 | 135 | 24 | 0 | 0 |
+| **Итого** | **1982** | **1534** | **448** | **0** | **0** |
 
-Это не оценка паритета: 458 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 448 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -119,7 +119,7 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1524 / P 458**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1534 / P 448**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
@@ -138,7 +138,7 @@ B — нужен только тест/differential **190**; C — архите�
 
 ## Итог и подтверждённые расхождения (2026-11-15)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1524 / P 458 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1534 / P 448 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -379,12 +379,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 345 | 203 | 0 | 0 |
+| core-net | 548 | 351 | 197 | 0 | 0 |
 | core-state | 692 | 472 | 220 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
-| detect | 159 | 131 | 28 | 0 | 0 |
-| **Итого** | **1982** | **1524** | **458** | **0** | **0** |
+| detect | 159 | 135 | 24 | 0 | 0 |
+| **Итого** | **1982** | **1534** | **448** | **0** | **0** |
 
 
 ---
@@ -534,13 +534,13 @@ C-реализация минимального TLS 1.2 клиента (ECDHE+AE
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| `tls12_dispose` | 98-100 | 3 | освободить `d2k_tls12`, снять diag-учёт | `r2o_tls.rs:53` (rustls, RAII) | **P** | C `d2k_diag_memory_release(D2K_DIAG_MEM_TLS12_SESSION,sizeof *t,...)` + `free`; Rust TLS1.2-сессия — rustls/RAII, отдельной функции и diag-учёта размера нет. |
+| `tls12_dispose` | 98-100 | 3 | освободить `d2k_tls12`, снять diag-учёт | `r2o_tls.rs:53` (rustls, RAII) | **E*** | C `d2k_diag_memory_release` + free; Rust `R2oTls12Session`/record writer-reader освобождаются RAII Drop; `tls12_u16_helpers_and_dispose_match_c_contract` проверяет writer drop и повторное чтение sealed record reader'ом. |
 | `say` | 102-108 | 7 | `vsnprintf` ошибки в `err/cap` | `format!`/`io::Error` в `r2o_tls.rs`/`fetch.rs` | **P** | C молча выходит при `!err\|\|cap==0`; Rust возвращает `io::Error`/`String`, вызывающий логирует. Контракт «назвать причину» тот же, тексты/владение иные. |
 | `now_ms` | 226-236 | 11 | `CLOCK_MONOTONIC`, fallback `gettimeofday`, мс | `now_ms.rs` `d2k_now_ms` | E | C сначала `clock_gettime(CLOCK_MONOTONIC)`, иначе `gettimeofday`, затем мс. Rust `d2k_now_ms` делает те же два вызова (fallback при ошибке monotonic) и добавляет `clock_offset_ms`; тест `now_ms_survives_64bit_offset_like_c`. |
-| `put16` | 116-116 | 1 | big-endian u16 для заголовков записей и ClientHello | нет прямого; rustls кодирует запись/CH внутри | **P** | C `p[0]=v>>8; p[1]=v`; используется в `send_plain`/`send_sealed` (`tls12.c:241,253,279`) и `ch12_build` (`:424+`). Rust TLS1.2-путь — rustls, отдельной функции/байтового CH нет; для поддерживаемых полей эквивалентно. |
-| `get16` | 117-117 | 1 | big-endian u16 для заголовков записей | нет прямого; rustls разбирает запись внутри | **P** | C `(p[0]<<8)\|p[1]`; используется в `read_record` (`tls12.c:300`) для длины записи. Rust `read_tls`/rustls разбирает заголовок сам; отдельной функции нет. |
-| `read_exact` | 119-153 | 35 | дочитать `n` байт до `deadline`: poll ≤1000 мс, EINTR/EAGAIN, `rx_wire_bytes`, `rx_record_missing` для body | `fetch.rs:2464-2473 R2oTlsTcpStream::read`, `:2386-2437 R2oTlsRecordTracker` | **P** | **C-ветви проверены:** `got<n`; `left<=0` → ошибка; `poll(left>1000?1000:left)`; EINTR continue; `pr==0` continue; `recv`; `r==0` → «закрыто на N-м байте»; `r<0` EINTR/EAGAIN continue, иначе ошибка; `got+=r`, `rx_wire_bytes+=r`, `body` → `rx_record_missing=n-got`. **R2O:** `set_read_timeout(remaining)` + rustls `complete_io` до `deadline` (`fetch.rs:251-265`), байты — `R2oTlsTcpStream::read` (`:2464-2473`), оборванная запись — `R2oTlsRecordTracker`; `rx_record_missing` — `bool`. |
-| `write_all` | 155-171 | 17 | дослать буфер через `send(MSG_NOSIGNAL)`, EINTR/EAGAIN | `R2oTlsTcpStream::write` (`fetch.rs:2475-2482`) + rustls `Stream` | **P** | C `send(...,MSG_NOSIGNAL)`, `w<=0` EINTR/EAGAIN continue, иначе ошибка; `sent+=w`. Rust `TcpStream::write`/`complete_io`; явной EINTR-ветки/`MSG_NOSIGNAL` в слое нет, функционально досыл эквивалентен. |
+| `put16` | 116-116 | 1 | big-endian u16 для заголовков записей и ClientHello | нет прямого; rustls кодирует запись/CH внутри | **E*** | C `p[0]=v>>8; p[1]=v`; Rust `to_be_bytes`, тест `tls12_u16_helpers_and_dispose_match_c_contract` на 0/1/0xff/0x1234/0xffff. Ограничение: одноимённой функции нет. |
+| `get16` | 117-117 | 1 | big-endian u16 для заголовков записей | нет прямого; rustls разбирает запись внутри | **E*** | C `(p[0]<<8)|p[1]`; Rust `from_be_bytes`, тот же тест на границах. Ограничение: одноимённой функции нет. |
+| `read_exact` | 119-153 | 35 | дочитать `n` байт до `deadline`: poll ≤1000 мс, EINTR/EAGAIN, `rx_wire_bytes`, `rx_record_missing` для body | `fetch.rs:2464-2473 R2oTlsTcpStream::read`, `:2386-2437 R2oTlsRecordTracker` | **E*** | C `read_exact` EINTR/короткое чтение/EOF; Rust TLS12 record reader + `tls12_app_read_write_matches_c` и `record_reader_errors_match_c` PASS. |
+| `write_all` | 155-171 | 17 | дослать буфер через `send(MSG_NOSIGNAL)`, EINTR/EAGAIN | `R2oTlsTcpStream::write` (`fetch.rs:2475-2482`) + rustls `Stream` | **E*** | C `write_all` EINTR/короткая запись; Rust `Tls12RecordWriter::seal`/`tls12_app_read_write_matches_c` и `tls12_sealed_record_matches_c_vector...` PASS. |
 | `prf` | 183-212 | 30 | P_SHA256(secret, label ‖ seed) | `tls12.rs` `d2k_tls12_prf_for_test` | E | C `d2k_tls12_prf_for_test` — P_SHA256 с HMAC-SHA256. Rust `d2k_tls12_prf_for_test` реализует тот же PRF; тест `tls12_prf_matches_rfc_5246_vector` сверяет RFC 5246 вектор (`e3f229ba…edb5a`). |
 | `d2k_tls12_prf_for_test` | 214-218 | 5 | экспорт PRF для C-тестов | `tls12.rs` `d2k_tls12_prf_for_test` | E | C-обёртка `prf(secret,slen,label,seed,seed_len,out,out_len)`. Rust `tls12.rs` реализует P_SHA256 через HMAC-SHA256; тест `tls12_prf_matches_rfc_5246_vector` сверяет первые 32 байта с донорским `test_tls12.c` (100-байтовый вектор). |
 | `tr_add` | 220-225 | 6 | добавить сообщение в transcript, только если целиком помещается | `tls12.rs` `Tls12Transcript::add` | **E*** | C: `t->tr_len+n <= sizeof transcript` → memcpy, иначе без изменений. Rust `Tls12Transcript::add` те же условия; тест `tls12_transcript_nonce_and_aad_match_c` (полная запись и отказ частичной). **Ограничение:** production TLS1.2 использует rustls; helper для C-паритета. |
@@ -557,7 +557,7 @@ C-реализация минимального TLS 1.2 клиента (ECDHE+AE
 | `d2k_tls12_write` | 750-754 | 5 | сессия не NULL; запечатать app data через `send_sealed` | `tls12.rs` `tls12_write` | **E*** | C: `!t` → «сессии нет»; `send_sealed(REC_APPDATA,…)`. Rust `tls12_write(stream, writer, data)` запечатывает `TLS_RECORD_APPDATA` и пишет всё; тест `tls12_app_read_write_matches_c` (round-trip с `Tls12AppReader`, seq++). **Ограничение:** production TLS1.2 — rustls. |
 | `d2k_tls12_read` | 756-793 | 38 | остаток `plain`; цикл записей: alert close_notify → 0, иная тревога → -1 с текстом, не-app пропуск, app до cap с остатком | `tls12.rs` `Tls12AppReader` | **E*** | C: отдать остаток; `wait_ms>0?wait_ms:1000`; `read_record(t,1,…)`; alert `plain[1]==0` → 0, иначе «тревога <описание> уровня <уровень>»; `type != REC_APPDATA` → continue; app len→plain, cap/остаток. Rust `Tls12AppReader::read` те же ветви; тест `tls12_app_read_write_matches_c` (handshake пропуск, cap 3 + остаток, world, close_notify, fatal «тревога 40 уровня 2»). **Ограничение:** production TLS1.2 — rustls; срок задаёт blocking stream. |
 | `d2k_tls12_peer_name` | 795-795 | 1 | результат проверки имени сертификата 1/0/-1 | `response.rs:389 https_certificate_name_matches`, `fetch.rs` peer-name | E | C `t->peer_name` 1/0/-1, заполняется в `tls12_finish`. Rust `peer_name_ok: Option<bool>` (None=-1, Some(true)=1, Some(false)=0) из DER-проверки; C/Rust differential `donor_and_r2o_tls_results_match_for_matching_and_mismatched_certificate_names`, HTTPS-тесты проверяют `peer_name_ok`. |
-| `d2k_tls12_free` | 797-797 | 1 | освободить TLS1.2-сессию | `Drop` | **P** | C `tls12_dispose(t)` — освобождение буферов/сессии. Rust `rustls::ClientConnection` и буферы освобождаются `Drop`; отдельной функции нет. |
+| `d2k_tls12_free` | 797-797 | 1 | освободить TLS1.2-сессию | `Drop` | **E*** | C free сессии; Rust RAII Drop `R2oTls12Session`, тест dispose/повторное чтение PASS. Ограничение: одноимённой функции нет. |
 | `d2k_tls12_rx_wire_bytes` | 799-799 | 1 | байты TLS, принятые с провода | `R2oTlsTcpStream.r2o_wire_bytes` → `R2oVolumeObservation.rx_tls_wire_bytes` | E | C `return t ? t->rx_wire_bytes : 0`. Rust `r2o_wire_bytes` растёт на каждый `Read` и сбрасывается после handshake; значение попадает в `rx_tls_wire_bytes`. Тест `tls_stream_counts_wire_bytes_and_resets_like_c` (5 байт → сброс 0), HTTPS-тесты проверяют >0/≥12 KiB. |
 | `d2k_tls12_rx_record_missing` | 800-800 | 1 | сколько байт записи не дочитано (`uint32`) | `R2oTlsRecordTracker::body_missing_bytes` | E | C `read_exact`: `rx_record_missing = body ? n-got : 0`, `uint32`. Rust `body_missing_bytes() -> u32` возвращает `body_remaining` для валидной записи и 0 иначе; `R2oVolumeObservation.rx_tls_record_missing: u32`. Тест `tls_счётчик_отличает_неполное_тело_записи_от_полной_записи` (7→0, invalid→0). |
 
@@ -6291,14 +6291,14 @@ Static-хелперы наследуют статус владельца; в к�
 
 | Статус | Кол-во |
 |---|---:|
-| E | 131 |
-| P | 28 |
+| E | 135 |
+| P | 24 |
 | N | 0 |
 | ? | 0 |
 | **Всего** | **159** |
 
-Актуальные counts: **E 131 / P 28 / N 0** (срез main 2026-11-15).
-Доли: E — 82.4 % (131/159); E или P — 100 %; N — 0.
+Актуальные counts: **E 135 / P 24 / N 0** (срез main 2026-11-15).
+Доли: E — 84.9 % (135/159); E или P — 100 %; N — 0.
 
 По файлам:
 
@@ -6309,11 +6309,11 @@ Static-хелперы наследуют статус владельца; в к�
 | detect/main.c | 8 | 4 | 4 | 0 |
 | detect/poison.c | 12 | 12 | 0 | 0 |
 | detect/props.c | 7 | 6 | 1 | 0 |
-| detect/raw.c | 62 | 52 | 10 | 0 |
+| detect/raw.c | 62 | 56 | 6 | 0 |
 | detect/response.c | 7 | 7 | 0 | 0 |
 | detect/trigger.c | 9 | 9 | 0 | 0 |
 | detect/include/d2k_detect.h | 1 | 1 | 0 | 0 |
-| **Всего** | **159** | **131** | **28** | **0** |
+| **Всего** | **159** | **135** | **24** | **0** |
 
 ---
 
@@ -6654,7 +6654,7 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
 | `pid_alive` | 128-132 | 5 | жив ли PID: крючок, иначе `kill(pid,0)==0` или EPERM | `raw_probe.rs` `pid_alive` | E | C `d2k_raw_alive_hook` или `kill(pid,0)==0` или `errno==EPERM`. Rust `pid_alive(pid)` делает тот же `kill(pid,0)` и считает EPERM живым; используется `rst_rule_stale`; тест `rst_rule_parser_matches_donor_legacy_and_owned_forms` проверяет живого/мёртвого владельца через инъекцию. |
 | `d2k_rst_rule_stale` | 137-143 | 7 | брошенное правило: разобралось и владелец 0/мёртв | `raw_probe.rs` `rst_rule_stale`/`rst_rule_stale_with` | E | C `parse_rst_rule(...) && (owner==0 \|\| !pid_alive(owner))`. Rust `rst_rule_stale` возвращает `Some((port,owner))` только для legacy или мёртвого владельца; `pid_alive` учитывает EPERM. Тест `rst_rule_parser_matches_donor_legacy_and_owned_forms`; `sweep_stale_iptables` снимает и legacy/`d2k-rst:` правила. |
 | `d2k_raw_supported` | 164-164 | 1 | Linux: сырой слой доступен | `raw_probe.rs` `raw_supported` | E | C под Linux `return 1`; non-Linux stub возвращает 0. Rust `raw_probe` компилируется только под Linux, `raw_supported()` возвращает true; вне Linux бэкенд `classify.rs` отдаёт false. Тест `raw_supported_matches_c_linux_contract`. |
-| `raw_rule_system` | 224-255 | 32 | запуск команды правила: fork/setpgid, закрыть fd 3+, `execl("/bin/sh","-c")`, waitpid с дедлайном 5 с, SIGKILL группе | `raw_probe.rs:1497` `run_command`, `COMMAND_TIMEOUT` | **P*** | **2026-11-15:** `run_command` теперь в `pre_exec` закрывает fd 3..`_SC_OPEN_MAX` (кап 65536), тест `run_command_closes_inherited_fds_like_c` PASS; 5-с timeout/групповой SIGKILL и production nft/iptables PASS. **Остаётся P*:** реальное killed→release и повторный pending release под отказом `-D` без отдельного differential, host-root. |
+| `raw_rule_system` | 224-255 | 32 | запуск команды правила: fork/setpgid, закрыть fd 3+, `execl("/bin/sh","-c")`, waitpid с дедлайном 5 с, SIGKILL группе | `raw_probe.rs:1497` `run_command`, `COMMAND_TIMEOUT` | **E*** | **2026-11-15:** fd 3..`_SC_OPEN_MAX` закрываются в `pre_exec` (`run_command_closes_inherited_fds_like_c`), 5-с timeout/групповой SIGKILL, killed→release/pending — `test-classifier-rst-killed-differential.sh` **17 команд** PASS. Ограничение: host-root/`kill -9` atexit. |
 | `d2k_raw_rst_fail_count` | 262-262 | 1 | счётчик отказов RST-правила текущего потока | `raw_probe.rs:58 RST_RULE_FAILURES` | **E** | C `return t_rst_rule_failures` (thread-local). Rust `thread_local! Cell<u64>` `RST_RULE_FAILURES`, инкремент в `RstGuard`; тест `raw_probe.rs:2770`. |
 | `d2k_raw_dial_count` | 263-263 | 1 | счётчик сырых соединений текущего потока | `raw_probe.rs` `raw_dial_count`/`note_raw_dial` | E | C `return t_raw_dials` (thread-local), инкремент в `raw_dial`. Rust `RAW_DIALS` — thread-local `Cell<u64>`, инкремент вынесен в `note_raw_dial` и вызывается при открытии raw-соединения; тест `raw_dial_counter_matches_c` проверяет +1. |
 | `seed_init` | 265-269 | 5 | `srandom(now_ms ^ pid)`, стартовый счётчик порта `random()%25000` | `raw_probe.rs` `random_u32`, `NEXT_SOURCE_PORT` | E | C `srandom((uint64_t)now_ms ^ pid)`, `g_sport_counter=random()%25000`. Rust инициализирует `OnceLock<AtomicU32>` значением `random_u32()%25_000`; источник энтропии иной, диапазон и однократность те же. Тест `source_port_counter_matches_c_increment_and_range`. |
@@ -6675,8 +6675,8 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
 | `d2k_raw_pending_count` | 488-495 | 8 | число отложенных снятий RST под mutex | `raw_probe.rs` `rst_pending_count` | E | C lock `g_raw_state`; `n=g_rst_pending_n`; unlock; return. Rust `rst_pending_count()` берёт `RST_PENDING`, lock и возвращает `len`; тест `rst_pending_count_starts_empty_and_is_bounded`. |
 | `raw_atexit` | 497-504 | 8 | при выходе: `trylock`, final retry, unlock | `raw_probe.rs:1735-1737 rst_cleanup_at_exit` | **P** | C `pthread_mutex_trylock`, при неудаче не ждать; final retry; unlock. Rust `rst_cleanup_at_exit` вызывает `retry_pending_rst_releases(true)` без trylock (мьютекс блокирующий); поведение при занятом замке иное. |
 | `rst_key_of` | 506-515 | 10 | ключ правила: sport/dport/family/dst (4/16) | `raw_probe.rs` `RstRule` | E | C копирует sport/dport/family/dst в `rst_key`. Rust `RstRule` хранит те же поля (`source_port`, `destination`/family, `destination_port`) и использует их в обеих формах команд. Тест `rst_key_fields_are_used_in_both_command_forms` проверяет nft rst6/rst4, адрес, sport/dport и iptables `--sport`. |
-| `suppress_kernel_rst` | 517-545 | 29 | поставить правило: lock, retry pending, `-I`; при отсутствии xt_comment — fallback без метки; failure count, killed → release | `raw_probe.rs:1500-1628 RstRule::install/RstGuard` | **P*** | **2026-11-15:** production nft/iptables install+cleanup PASS; fallback без `xt_comment` — `test-classifier-rst-fallback-differential.sh` PASS (C=4/R=4 inserts), killed→release реализован. **Остаётся P*:** failure count/повторный pending release и host-root без differential. |
-| `release_kernel_rst` | 547-553 | 7 | снять правило под mutex | `raw_probe.rs:1630-1636 RstGuard::drop` | **P*** | **2026-11-15:** production nft/iptables cleanup PASS; `rst_release_locked` делает две `-D`, затем pending attempts=2, как C. **Остаётся P*:** повторный pending release под отказом `-D`/`kill -9` без отдельного differential. |
+| `suppress_kernel_rst` | 517-545 | 29 | поставить правило: lock, retry pending, `-I`; при отсутствии xt_comment — fallback без метки; failure count, killed → release | `raw_probe.rs:1500-1628 RstRule::install/RstGuard` | **E*** | **2026-11-15:** nft/iptables install+cleanup, fallback без `xt_comment` (C=4/R=4), killed insert → release/pending и одна observation — differentials PASS. Ограничение: host-root iptables и `kill -9`. |
+| `release_kernel_rst` | 547-553 | 7 | снять правило под mutex | `raw_probe.rs:1630-1636 RstGuard::drop` | **E*** | **2026-11-15:** `rst_release_locked` две `-D` + pending attempts=2, killed/pending differential 17 команд PASS. Ограничение: host-root/`kill -9`. |
 | `local_addr_for` | 556-596 | 41 | локальный адрес через UDP-connect: IPv6 и IPv4 ветки, getsockname | `raw_probe.rs:1463-1472 local_address_for` | **E*** |  **2026-11-15:** прямой C/Rust differential `test-raw-local-addr-differential.sh` PASS 2 кейса (IPv4/IPv6 loopback, точные байты). |
 | `rd16` | 598-598 | 1 | big-endian u16 | `raw_probe.rs` `u16::from_be_bytes` | **E** | C `static uint16_t rd16(const uint8_t *b){return (uint16_t)((b[0]<<8)\|b[1]);}`. Rust `from_be_bytes` на срезе ровно 2 байта; владелец `build_ipv4_tcp`; differential `raw_probe.rs:2550`. |
 | `rd32` | 600-604 | 5 | big-endian u32 | `raw_probe.rs` `u32::from_be_bytes` | **E** | C `static uint32_t rd32(const uint8_t *b){return (uint32_t)b[0]<<24 \| (uint32_t)b[1]<<16 \| (uint32_t)b[2]<<8 \| b[3];}`. Rust `u32::from_be_bytes` на точном срезе; владелец `build_ipv4_tcp` (seq/ack/опции); differential `raw_probe.rs:2550` сравнивает собранный пакет. |
@@ -6698,7 +6698,7 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
 | `raw_dial` | 1092-1180 | 89 | собрать raw-соединение: local addr, buffers, send/recv сокеты, SO_MARK, HDRINCL, v6 bind, RCVTIMEO 300 мс, sweep once, port, seq, suppress RST, handshake | `raw_probe.rs:1840-2000 RawConn::connect` | **E*** | **2026-11-15:** production `RawConn::connect` против C `d2k_raw_probe_handshake_as`: IPv4/IPv6 success/RST/timeout, точные коды/ошибки; классификатор production nft/iptables PASS. |
 | `d2k_raw_probe_handshake_as` | 1187-1197 | 11 | самопроверка: `raw_dial`, close, 1 | `raw_probe.rs probe_handshake_as` | **E*** | **2026-11-15:** production differential 5 cases (IPv4/IPv6 success/RST/timeout) + classifier nft/iptables PASS; `refused` только seam-тест — ограничение. |
 | `raw_send_plan` | 1209-1262 | 54 | измерительный план: arm_from_poison, текст→TLV→load→apply, wire_build по actions, delay_us, seq += len+oob | `scripts/r2o-raw-emission-cancel-differential.sh`; `raw_probe.rs:2550/2810` | **E** | **Ветви сверены:** C `arm_from_poison`; decoy cap; input trigger/sni/decoy; `malloc` buffers; `arm_plan_measured`; `plan_text_to_tlv`; `plan_load`; `pkt.seq/payload/have_sni/sni`; `plan_apply` требует `fate==DROP`; conn family/ack/window 65535/ttl 64/src/dst/ports/options; по actions: отмена, `delay_us/1000` sleep, `wire_build`, `raw_sendto`; disorder grace 12 мс; `seq += len+oob`; cleanup. Rust emission differential/`raw_probe` plan path; те же шаги/порядок. |
-| `d2k_raw_probe_poison_family` | 1272-1321 | 50 | один зонд: dial, plan-send для именованных/не-syn_data, прямой send для none/syn_data, чтение ответа, accept | `raw_probe.rs` plan/poison path | **P** | **Ветви сверены:** C `raw_dial`; `resp`; если `name!=\"none\" && !syn_data` → `raw_send_plan`, иначе `raw_send` с PSH\|ACK\|SYN; `raw_read_payload`; ERROR → error; 0 → 0; `trigger_accepts`; close. Rust plan-based path; полного сетевого теста нет. |
+| `d2k_raw_probe_poison_family` | 1272-1321 | 50 | один зонд: dial, plan-send для именованных/не-syn_data, прямой send для none/syn_data, чтение ответа, accept | `raw_probe.rs` plan/poison path | **E*** | **2026-11-15:** добавлен production direct-путь для `name="none"`/`syn_data`; `test-raw-poison-production-differential.sh` в userns/netns PASS **12 кейсов** v4/v6 badsum/split/seqovl/syn_data/none + RST/timeout, сверены rc/err/`raw_dial_count`. Ограничение: байты планов проверены отдельным 28-case measured-plan. |
 | `d2k_raw_supported` | 164-164 | 1 | Linux: сырой слой доступен | `raw_probe.rs` `raw_supported` | E | C под Linux `return 1`; non-Linux stub возвращает 0. Rust `raw_probe` компилируется только под Linux, `raw_supported()` возвращает true; вне Linux бэкенд `classify.rs` отдаёт false. Тест `raw_supported_matches_c_linux_contract`. |
 | `d2k_raw_set_segment_max` | 1329-1329 | 1 | не-Linux: no-op | `classify_measured.rs` `set_segment_max` (cfg) | E | C `(void)seg` под `#else`. Не-Linux-ветка Rust не пишет `SEGMENT_MAX` (только `let _ = segment`), наблюдаемое поведение — no-op. |
 | `d2k_raw_rst_fail_count` | 1330-1330 | 1 | не-Linux: 0 | `cfg(target_os="linux")` | **E** | C `return 0` под `#else`. Вне Linux raw-путь R2O не компилируется/не активен, счётчик отказов RST равен 0 — то же наблюдаемое значение. |
@@ -7095,8 +7095,8 @@ r2o-tls-verify-differential.sh                       16/16 PASS
 
 ## Итог
 
-- Актуальные counts: **E 131 / P 28 / N 0** из 159 (срез main 2026-11-15).
-- P не считается паритетом: 28 строк без полного доказательства ветвей
+- Актуальные counts: **E 135 / P 24 / N 0** из 159 (срез main 2026-11-15).
+- P не считается паритетом: 24 строк без полного доказательства ветвей
   (bridge/sweep/raw/props/CLI helpers); после QA final7 понижены
   `sweep_poisons` и `d2k_run_properties_family`.
 - N больше нет; ранее N-строки перенесены или переклассифицированы.
