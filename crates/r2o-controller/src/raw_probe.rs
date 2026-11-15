@@ -1324,6 +1324,22 @@ fn run_command(program: &str, args: &[String]) -> Result<std::process::ExitStatu
     // C `raw_rule_system`: своя группа процессов, чтобы по сроку убить и sh,
     // и iptables/nft, а не оставить потомка ждать замок xtables.
     command.process_group(0);
+    // C `raw_rule_system` закрывает fd 3+ перед execl: правило не должно
+    // унаследовать NFQUEUE, сокеты зондов и журналы d2kc.
+    unsafe {
+        command.pre_exec(|| {
+            let max = libc::sysconf(libc::_SC_OPEN_MAX);
+            let max = if max < 0 || max > 65_536 {
+                65_536
+            } else {
+                max as libc::c_int
+            };
+            for fd in 3..max {
+                libc::close(fd);
+            }
+            Ok(())
+        });
+    }
     let mut child = command
         .spawn()
         .map_err(|error| format!("{program}: {error}"))?;
@@ -1543,6 +1559,24 @@ fn r2o_rst_uses_nft(d2k_fw: Option<&str>, r2o_fw: Option<&str>) -> bool {
     d2k_fw.or(r2o_fw) == Some("nft")
 }
 
+fn run_rule_command(
+    program: &str,
+    args: &[String],
+    rule: &RstRule,
+) -> Result<std::process::ExitStatus, ProbeError> {
+    match run_command(program, args) {
+        Ok(status) => Ok(status),
+        Err(error) => {
+            // C `raw_rule_system` мог успеть зафиксировать правило за миг до
+            // SIGKILL: D2K_RAW_RULE_KILLED → rst_release_locked.
+            if error.ends_with("command timed out") {
+                rst_release_locked(rule);
+            }
+            Err(ProbeError::Local(format!("classify: {error}")))
+        }
+    }
+}
+
 impl RstRule {
     fn install(source_port: u16, destination: SocketAddr) -> Result<Self, ProbeError> {
         // C `rst_nft` читает `D2K_FW`; R2O дополнительно принимает `R2O_FW`.
@@ -1567,8 +1601,7 @@ impl RstRule {
         register_rst_cleanup();
         if nft {
             let args = guard.nft_args("add");
-            let status = run_command("nft", &args)
-                .map_err(|error| ProbeError::Local(format!("classify: {error}")))?;
+            let status = run_rule_command("nft", &args, &guard)?;
             if !status.success() {
                 return Err(ProbeError::Local(
                     "classify: nft не добавил ключ подавления RST".into(),
@@ -1583,8 +1616,7 @@ impl RstRule {
         } else {
             "iptables"
         };
-        let status = run_command(program, &args)
-            .map_err(|error| ProbeError::Local(format!("classify: {error}")))?;
+        let status = run_rule_command(program, &args, &guard)?;
         if status.success() {
             return Ok(guard);
         }
@@ -1594,8 +1626,7 @@ impl RstRule {
             )));
         }
         let fallback = guard.iptables_args(false, "-I");
-        let status = run_command(program, &fallback)
-            .map_err(|error| ProbeError::Local(format!("classify: {error}")))?;
+        let status = run_rule_command(program, &fallback, &guard)?;
         if status.success() {
             RST_COMMENT_SUPPORTED.store(false, Ordering::Relaxed);
             guard.comment = false;
@@ -1738,27 +1769,32 @@ fn r2o_rst_abandon_message(rule: &RstRule) -> String {
     )
 }
 
-fn rst_release(rule: &RstRule) {
-    for _ in 0..2 {
-        if rst_delete_once(rule) {
-            return;
+fn rst_release_locked(rule: &RstRule) {
+    if !rst_delete_once_locked(rule) && !rst_delete_once_locked(rule) {
+        let pending = RST_PENDING.get_or_init(|| Mutex::new(Vec::new()));
+        let mut pending = pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending.len() < RST_PENDING_MAX {
+            pending.push(PendingRstRelease {
+                rule: rule.clone(),
+                attempts: 2,
+            });
+        } else {
+            let message = r2o_rst_abandon_message(rule);
+            RST_ABANDON_REPORTED.call_once(|| {
+                eprintln!("{message}");
+            });
         }
     }
-    let pending = RST_PENDING.get_or_init(|| Mutex::new(Vec::new()));
-    let mut pending = pending
+}
+
+fn rst_release(rule: &RstRule) {
+    let _lock = IPTABLES_LOCK
+        .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if pending.len() < RST_PENDING_MAX {
-        pending.push(PendingRstRelease {
-            rule: rule.clone(),
-            attempts: 2,
-        });
-    } else {
-        let message = r2o_rst_abandon_message(rule);
-        RST_ABANDON_REPORTED.call_once(|| {
-            eprintln!("{message}");
-        });
-    }
+    rst_release_locked(rule);
 }
 
 fn retry_pending_rst_releases_locked(final_attempt: bool) {
@@ -3948,6 +3984,86 @@ mod tests {
             .expect_err("command must time out");
         assert!(error.contains("command timed out"), "{error}");
         assert!(started.elapsed() < COMMAND_TIMEOUT * 2);
+    }
+
+    #[test]
+    #[ignore = "C/Rust live raw socket differential: run inside netns"]
+    fn raw_live_io_harness() {
+        use std::time::Duration;
+        let target = std::env::var("R2O_RAW_LIVE_TARGET").expect("target");
+        let timeout = std::env::var("R2O_RAW_LIVE_TIMEOUT_MS")
+            .expect("timeout")
+            .parse::<u64>()
+            .expect("timeout number");
+        let remote = target
+            .parse::<std::net::SocketAddr>()
+            .expect("socket address");
+        let line = match RawConn::connect(remote, Duration::from_millis(timeout), 0, None, true) {
+            Ok(None) => "io|dial=-2|err=classify: SYN-ACK не пришёл\n".to_string(),
+            Err(error) => format!("io|dial=-1|err={}\n", error.message()),
+            Ok(Some(mut connection)) => {
+                let send = connection.send_payload_io(b"hello", TCP_PSH | TCP_ACK, &[]);
+                if let Err(error) = send {
+                    format!("io|dial=0|send=-1|err={}\n", raw_error_text(&error))
+                } else {
+                    connection.sequence = connection.sequence.wrapping_add(5);
+                    let read = connection
+                        .read_payload(Duration::from_millis(timeout), None)
+                        .map_err(|error| error.message().to_string());
+                    let _ = connection.close();
+                    match read {
+                        Ok(Some(data)) => {
+                            let printable: String = data
+                                .iter()
+                                .take(32)
+                                .map(|byte| {
+                                    if (0x20..0x7f).contains(byte) {
+                                        char::from(*byte).to_string()
+                                    } else {
+                                        format!("\\x{byte:02x}")
+                                    }
+                                })
+                                .collect();
+                            format!(
+                                "io|dial=0|send=0|read=0|len={}|data={printable}\nclose=0\n",
+                                data.len()
+                            )
+                        }
+                        Ok(None) => "io|dial=0|send=0|read=-1|len=0|data=\nclose=0\n".to_string(),
+                        Err(_) => "io|dial=0|send=0|read=-2|len=0|data=\nclose=0\n".to_string(),
+                    }
+                }
+            }
+        };
+        if let Ok(path) = std::env::var("R2O_RAW_LIVE_OUTPUT") {
+            std::fs::write(path, line).expect("write live output");
+        }
+    }
+
+    #[test]
+    fn run_command_closes_inherited_fds_like_c() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let (left, right) = UnixStream::pair().expect("unix stream pair");
+        let inherited = left.as_raw_fd();
+        let marker = format!("test -e /dev/fd/{inherited}");
+        let status = run_command("sh", &["-c".to_owned(), marker]).expect("command");
+        assert!(
+            !status.success(),
+            "raw rule child inherited fd {inherited}: {status:?}"
+        );
+
+        let visible = right.as_raw_fd();
+        let status = run_command(
+            "sh",
+            &["-c".to_owned(), format!("test -e /dev/fd/{visible}")],
+        )
+        .expect("command");
+        assert!(
+            !status.success(),
+            "raw rule child inherited peer fd {visible}: {status:?}"
+        );
     }
 
     #[test]
