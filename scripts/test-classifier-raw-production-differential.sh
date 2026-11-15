@@ -637,3 +637,59 @@ for path in sys.argv[3:]:
             raise SystemExit(f"positive response arrived before the full sweep: {path}")
 print("D2O/R2O late poison hit after 11 property, compose, and first poison misses matched")
 PY
+
+# White ECH-приманка + клон клиента + --skip: проверяем 12-й вопрос и labels.
+export R2O_CLASSIFIER_POSITIVE_AFTER=13
+start_positive_server "$TEMP/white-d2o.ready" "$TEMP/white-d2o-server.log"
+WHITE_PORT=$(cat "$TEMP/white-d2o.ready")
+ip netns exec "$NS" env D2K_FW=nft "$D2K_BIN" classify "127.0.0.1:$WHITE_PORT" \
+    --sni classifier.example --control-sni probe-d2k.invalid-control.example \
+    --white hcaptcha.com --repeats 1 --timeout 350 --allow-loopback --mark 0 \
+    --skip badsum --json >"$TEMP/white-d2o.json" 2>"$TEMP/white-d2o.err"
+wait_positive_response "$TEMP/white-d2o-server.log"
+kill "$SERVER_PID" 2>/dev/null || true
+wait "$SERVER_PID" 2>/dev/null || true
+SERVER_PID=
+
+start_positive_server "$TEMP/white-r2o.ready" "$TEMP/white-r2o-server.log"
+WHITE_PORT=$(cat "$TEMP/white-r2o.ready")
+ip netns exec "$NS" env R2O_FW=nft "$R2O_BIN" \
+    --classify 127.0.0.1 "$WHITE_PORT" classifier.example --repeats 1 \
+    --control-sni probe-d2k.invalid-control.example --white hcaptcha.com \
+    --timeout 350 --allow-loopback --mark 0 --skip badsum --json \
+    >"$TEMP/white-r2o.json" 2>"$TEMP/white-r2o.err"
+wait_positive_response "$TEMP/white-r2o-server.log"
+kill "$SERVER_PID" 2>/dev/null || true
+wait "$SERVER_PID" 2>/dev/null || true
+SERVER_PID=
+unset R2O_CLASSIFIER_POSITIVE_AFTER
+
+python3 - "$TEMP/white-d2o.json" "$TEMP/white-r2o.json" <<'PY' || exit 1
+import json
+import sys
+
+def properties(path):
+    with open(path, "rb") as source:
+        # C-донор иногда обрезает UTF-8 в reason; trace-поля при этом целы.
+        data = json.loads(source.read().decode("utf-8", errors="replace"))
+    return [
+        item["probe"]
+        for item in data["trace"]
+        if item.get("probe", "").startswith("свойство:")
+    ]
+
+c_probes = properties(sys.argv[1])
+r_probes = properties(sys.argv[2])
+if c_probes != r_probes:
+    print(f"C properties: {c_probes}", file=sys.stderr)
+    print(f"R properties: {r_probes}", file=sys.stderr)
+    raise SystemExit("white property labels differ")
+if not any(probe.startswith("свойство:ECH-приветствие") for probe in c_probes):
+    raise SystemExit("white ECH property is missing from the trace")
+if "свойство:контрольная сумма" in c_probes:
+    raise SystemExit("--skip badsum did not skip the property")
+print(f"D2O/R2O white ECH property and --skip matched ({len(c_probes)} properties)")
+PY
+
+printf 'PASSED: actual D2O and R2O production white ECH property and --skip matched\n'
+

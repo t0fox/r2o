@@ -189,6 +189,25 @@ pub fn sweep_poisons(
     }
     result.raw_usable = true;
 
+    // C `classify.c:945`: отказ правила подавления RST — не свойство сети,
+    // а своя поломка; трасса обязана сказать это до отрицательных исходов.
+    if result.rst_rule_failures_since_start() > 0 {
+        add_observation(
+            result,
+            Observation {
+                probe: "внимание:правило подавления RST не встало".into(),
+                cuts: Vec::new(),
+                delay: Duration::ZERO,
+                pass: 0,
+                fail: 0,
+                error: Some(
+                    "iptables отверг вставку; отрицательные исходы сырых зондов недостоверны"
+                        .into(),
+                ),
+            },
+        );
+    }
+
     for property in property_probes()
         .into_iter()
         .filter(|_| options.only_poison.is_none())

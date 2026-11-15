@@ -1169,6 +1169,10 @@ pub struct ClassifyResult {
 }
 
 impl ClassifyResult {
+    pub(crate) fn rst_rule_failures_since_start(&self) -> u64 {
+        crate::raw_probe::rst_rule_failure_count().saturating_sub(self.rst_rule_failure_base)
+    }
+
     pub(crate) fn new(target: &str, repeats: usize) -> Self {
         Self {
             target: target.to_owned(),

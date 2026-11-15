@@ -11,6 +11,22 @@ const MAX_TRIGGER: usize = 16_384;
 const MAX_DECOY: usize = 2_048;
 const MAX_TEXT: usize = 8_192;
 pub const DEFAULT_SEGMENT_MAX: usize = 1_400;
+/// C `D2K_ARM_SEGMENT_HEADS` (`core/include/d2k_arm.h`): IPv6 40 + TCP 20 +
+/// timestamps 12. Датапат считает IPv4, поэтому сегмент под этим запасом
+/// проходит всегда.
+const ARM_SEGMENT_HEADS: usize = 72;
+
+/// C `d2k_arm_segment`: сегмент плана под объявленный предел канала.
+/// `0` — предел не объявлен, тогда прежние 1400.
+fn arm_segment(send_cap: usize) -> usize {
+    if send_cap == 0 {
+        return DEFAULT_SEGMENT_MAX;
+    }
+    if send_cap <= ARM_SEGMENT_HEADS {
+        return 0;
+    }
+    (send_cap - ARM_SEGMENT_HEADS).min(DEFAULT_SEGMENT_MAX)
+}
 /// C `seg_max` (`detect/raw.c:814`): потолок сегмента, общий для замера и
 /// исполнения. Ноль означает значение по умолчанию.
 static SEGMENT_MAX: AtomicUsize = AtomicUsize::new(DEFAULT_SEGMENT_MAX);
@@ -79,7 +95,10 @@ fn measured_plan_text(
     decoy: Option<&[u8]>,
     send_cap: usize,
 ) -> Result<String, String> {
-    let segment_size = segment_max();
+    let segment_size = arm_segment(send_cap);
+    if segment_size == 0 {
+        return Err("measured send cap leaves no segment".into());
+    }
     let n = trigger.payload.len();
     if !(2..=MAX_TRIGGER).contains(&n) {
         return Err("measured trigger length is outside 2..=16384".into());

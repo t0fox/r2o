@@ -213,6 +213,222 @@ fn compose_all_at_once_accepts_an_empty_control_like_c() {
     assert!(text.contains("order reverse"), "{text}");
 }
 
+#[test]
+#[ignore = "C/Rust full measured-plan differential: run by scripts/test-plan-measured-cap-differential.sh"]
+fn d2o_arm_plan_measured_cap_differential_matches_c() {
+    use r2o_controller::hello::sni_bounds;
+
+    let trigger = Trigger::tls13("probe.example").unwrap();
+    assert_eq!(trigger.payload.len(), 1536);
+    assert_eq!(sni_bounds(&trigger.payload), Some((137, 13)));
+    let decoy: Vec<u8> = (0..681).map(|index| (index * 23 + 5) as u8).collect();
+
+    let cases: Vec<(&str, Poison)> = vec![
+        ("default", Poison::default()),
+        (
+            "badsum",
+            Poison {
+                badsum: true,
+                ..Poison::default()
+            },
+        ),
+        (
+            "badsum-x2",
+            Poison {
+                badsum: true,
+                repeats: 2,
+                gap_ms: 20,
+                ..Poison::default()
+            },
+        ),
+        (
+            "autottl",
+            Poison {
+                autottl: true,
+                autottl_delta: -3,
+                autottl_min: 2,
+                autottl_max: 10,
+                ..Poison::default()
+            },
+        ),
+        (
+            "ts-up",
+            Poison {
+                tcp_ts: true,
+                tcp_ts_up: true,
+                ..Poison::default()
+            },
+        ),
+        (
+            "seqovl-1",
+            Poison {
+                seqovl: 1,
+                ..Poison::default()
+            },
+        ),
+        (
+            "seqovl-hello",
+            Poison {
+                seqovl_exact: true,
+                seqovl: 681,
+                ..Poison::default()
+            },
+        ),
+        (
+            "seqovl-hello-empty",
+            Poison {
+                seqovl_exact: true,
+                seqovl: 681,
+                ..Poison::default()
+            },
+        ),
+        (
+            "decoy-badsum",
+            Poison {
+                decoy_hello: true,
+                badsum: true,
+                repeats: 7,
+                ..Poison::default()
+            },
+        ),
+        (
+            "composite-ts",
+            Poison {
+                decoy_hello: true,
+                tcp_ts: true,
+                repeats: 8,
+                split_pos: 2,
+                ..Poison::default()
+            },
+        ),
+        (
+            "between",
+            Poison {
+                fake_between: true,
+                badsum: true,
+                repeats: 7,
+                gap_ms: 300,
+                ..Poison::default()
+            },
+        ),
+        (
+            "disorder",
+            Poison {
+                disorder: true,
+                disorder_pos: 2,
+                ..Poison::default()
+            },
+        ),
+        (
+            "oob",
+            Poison {
+                oob: true,
+                ..Poison::default()
+            },
+        ),
+        (
+            "md5",
+            Poison {
+                md5: true,
+                ..Poison::default()
+            },
+        ),
+        (
+            "split",
+            Poison {
+                split_pos: 2,
+                ..Poison::default()
+            },
+        ),
+        (
+            "ipid",
+            Poison {
+                ip_id_zero: true,
+                ..Poison::default()
+            },
+        ),
+        (
+            "syn-data",
+            Poison {
+                syn_data: true,
+                ..Poison::default()
+            },
+        ),
+        (
+            "seq-invalid",
+            Poison {
+                seq_shift: -123,
+                ..Poison::default()
+            },
+        ),
+    ];
+    let runs: &[(&str, Option<&[u8]>, usize)] = &[
+        ("default", None, 1500),
+        ("badsum", None, 1500),
+        ("badsum-x2", None, 1500),
+        ("autottl", None, 1280),
+        ("ts-up", None, 1400),
+        ("seqovl-1", None, 1500),
+        ("seqovl-hello", Some(&decoy), 1280),
+        ("seqovl-hello", Some(&decoy), 1500),
+        ("seqovl-hello-empty", None, 1400),
+        ("decoy-badsum", Some(&decoy), 1280),
+        ("decoy-badsum", Some(&decoy), 1500),
+        ("composite-ts", Some(&decoy), 1500),
+        ("composite-ts", Some(&decoy), 1280),
+        ("between", None, 1400),
+        ("disorder", None, 1500),
+        ("oob", None, 1500),
+        ("md5", None, 1280),
+        ("split", None, 1400),
+        ("ipid", None, 1500),
+        ("syn-data", None, 1500),
+        ("seq-invalid", None, 1500),
+        ("badsum", None, 72),
+        ("badsum", None, 1),
+        ("badsum", None, 65535),
+        ("badsum", None, 1280),
+        ("badsum", None, 1400),
+        ("badsum", None, 1500),
+    ];
+
+    let mut output = String::new();
+    for (name, decoy_bytes, send_cap) in runs {
+        let poison = cases
+            .iter()
+            .find(|(case, _)| case == name)
+            .map(|(_, poison)| poison.clone())
+            .expect("plan case");
+        let result = plan_text_for_poison(&poison, &trigger, *decoy_bytes, *send_cap);
+        output.push_str(&format!(
+            "plan|{name}|{}|{send_cap}|{}\n",
+            decoy_bytes.map_or(0, <[u8]>::len),
+            i32::from(result.is_err()).wrapping_neg()
+        ));
+        if let Ok(text) = result {
+            output.push_str(&text);
+        }
+    }
+    let nameless = Trigger::raw_hex(&"16".repeat(200)).unwrap();
+    let nameless_badsum = Poison {
+        badsum: true,
+        ..Poison::default()
+    };
+    let result = plan_text_for_poison(&nameless_badsum, &nameless, None, 1400);
+    output.push_str(&format!(
+        "plan|badsum-nameless|0|1400|{}\n",
+        i32::from(result.is_err()).wrapping_neg()
+    ));
+    if let Ok(text) = result {
+        output.push_str(&text);
+    }
+    if let Ok(path) = std::env::var("R2O_PLAN_MEASURED_OUTPUT") {
+        std::fs::write(path, &output).expect("write measured plan output");
+    }
+    assert!(output.contains("plan|badsum|0|1500|0\n"));
+    assert!(output.contains("segment 1208\n"));
+}
+
 fn ipv4_tcp(payload: &[u8]) -> Vec<u8> {
     let mut packet = vec![0; 40 + payload.len()];
     packet[0] = 0x45;
