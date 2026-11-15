@@ -13392,6 +13392,36 @@ impl DiscoveryWorker {
         >::new()));
         let runner_suspect_fingerprints = Arc::clone(&suspect_fingerprints);
         let runner: Arc<R2oDiscoveryRunner> = Arc::new(move |target, trigger_planned, cancel| {
+            // C `detect/classify.c` резолвит host перед пробами. Событие
+            // ctlprobe может нести unspecified server IP (`0.0.0.0`/`::`);
+            // без резолва R2O отвергал такую цель как localhost и не открывал
+            // ни одного verifier/measurement-сокета. Резолв — в worker-потоке,
+            // не в главном цикле.
+            let target = match r2o_controller::discovery::resolve_unspecified_endpoint(&target) {
+                Ok(target) => target,
+                Err(error) => {
+                    println!("по {} замер не состоялся: {error}", target.host);
+                    return DiscoveryOutcome {
+                        target,
+                        plan_text: None,
+                        detail: error,
+                        queue_expired: false,
+                        address_failure: false,
+                        address_recheck_acknowledged: false,
+                        address_recheck_probes: 0,
+                        direct_clear: false,
+                        volume_recovery: false,
+                        budget_mark: 0,
+                        group_block_proven: false,
+                        transferred_own_plan: false,
+                        bound_plan_id: None,
+                        ech_origin: None,
+                        volume_fingerprint: None,
+                        volume_box_id: None,
+                        retry_after: Some(R2O_DISCOVERY_INCOMPLETE_RETRY),
+                    };
+                }
+            };
             let mut runner_started = std::time::Instant::now();
             runner_searches
                 .lock()

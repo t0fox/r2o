@@ -416,6 +416,59 @@ pub fn server_of(
     }
 }
 
+/// Резолв имени для цели, у которой `server_of` дал unspecified-адрес
+/// (`0.0.0.0`/`::`). C-планировщик получает адрес из события, но классификатор
+/// `detect/classify.c` резолвит host через `getaddrinfo`; R2O классификатор
+/// работает по endpoint, поэтому адрес обязан быть разрешён до проб.
+/// Резолвер внедряется, чтобы unit-тесты не зависели от DNS.
+pub fn resolve_unspecified_endpoint_with<F>(
+    target: &DiscoveryTarget,
+    mut resolve: F,
+) -> Result<DiscoveryTarget, String>
+where
+    F: FnMut(&str, u16, u8) -> Result<Vec<IpAddr>, String>,
+{
+    let Ok(address) = target.endpoint.parse::<std::net::SocketAddr>() else {
+        // Цель без разбираемого endpoint — не наша забота: её отвергнет
+        // классификатор с собственной причиной.
+        return Ok(target.clone());
+    };
+    if !address.ip().is_unspecified() {
+        return Ok(target.clone());
+    }
+    if !matches!(target.family, 4 | 6) || address.is_ipv4() != (target.family == 4) {
+        return Ok(target.clone());
+    }
+    let addresses = resolve(&target.host, address.port(), target.family)?;
+    let Some(resolved) = addresses
+        .into_iter()
+        .find(|ip| ip.is_ipv4() == (target.family == 4) && !ip.is_unspecified())
+    else {
+        return Err(format!(
+            "dial tcp: {}: нет IPv{} адреса",
+            target.host, target.family
+        ));
+    };
+    let mut target = target.clone();
+    target.endpoint = match resolved {
+        IpAddr::V4(ip) => format!("{ip}:{}", address.port()),
+        IpAddr::V6(ip) => format!("[{ip}]:{}", address.port()),
+    };
+    Ok(target)
+}
+
+/// Production-резолвер: host → адреса нужного семейства через системный
+/// `getaddrinfo`. Ошибка формулируется как C `dial tcp: ...`.
+pub fn resolve_unspecified_endpoint(target: &DiscoveryTarget) -> Result<DiscoveryTarget, String> {
+    resolve_unspecified_endpoint_with(target, |host, port, family| {
+        use std::net::ToSocketAddrs;
+        let addresses = (host, port)
+            .to_socket_addrs()
+            .map_err(|error| format!("dial tcp: {error}"))?;
+        Ok(addresses.map(|address| address.ip()).collect())
+    })
+}
+
 impl DiscoveryTarget {
     /// TCP-профиль цели: контекстные формы 8–13 несут NO_TS/TS, базовые
     /// 1/2/6 — «не измерено» (0), как C `task_wire_shape`/`trigger_tcp_profile`.
@@ -1805,6 +1858,120 @@ mod tests {
         };
         let target = DiscoveryTarget::from_event(&event).unwrap();
         assert_eq!(target.endpoint, "192.0.2.10:443");
+    }
+
+    #[test]
+    fn unspecified_event_with_host_resolves_to_family_address() {
+        use super::{DiscoveryTarget, resolve_unspecified_endpoint_with};
+
+        let unspecified4 = [0_u8; 4];
+        let event = r2k_core::control::HelloEvent {
+            key: hello_key(4, &unspecified4, &unspecified4, 40_000, 443),
+            host: Some(b"example.com".to_vec()),
+            shape: Some(SHAPE_MODERN),
+            r2o_wire_len: None,
+            quic_snapshot: None,
+            tcp_has_timestamp: None,
+        };
+        let target = DiscoveryTarget::from_event(&event).unwrap();
+        assert_eq!(target.endpoint, "0.0.0.0:443");
+        let resolved = resolve_unspecified_endpoint_with(&target, |host, port, family| {
+            assert_eq!(host, "example.com");
+            assert_eq!(port, 443);
+            assert_eq!(family, 4);
+            Ok(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))])
+        })
+        .unwrap();
+        assert_eq!(resolved.endpoint, "93.184.216.34:443");
+
+        // IPv6 unspecified: `server_of` даёт `::`, резолв — в AAAA.
+        let unspecified6 = [0_u8; 16];
+        let event = r2k_core::control::HelloEvent {
+            key: hello_key(6, &unspecified6, &unspecified6, 40_000, 443),
+            host: Some(b"example.com".to_vec()),
+            shape: Some(SHAPE_MODERN),
+            r2o_wire_len: None,
+            quic_snapshot: None,
+            tcp_has_timestamp: None,
+        };
+        let target = DiscoveryTarget::from_event(&event).unwrap();
+        assert_eq!(target.endpoint, "[::]:443");
+        let resolved = resolve_unspecified_endpoint_with(&target, |_, _, family| {
+            assert_eq!(family, 6);
+            Ok(vec![IpAddr::V6(
+                "2606:2800:220:1:248:1893:25c8:1946".parse().unwrap(),
+            )])
+        })
+        .unwrap();
+        assert_eq!(
+            resolved.endpoint,
+            "[2606:2800:220:1:248:1893:25c8:1946]:443"
+        );
+
+        // Конкретный адрес не трогается и резолвер не зовётся.
+        let client = [192, 0, 2, 10];
+        let server = [198, 51, 100, 20];
+        let mut concrete = DiscoveryTarget::from_event(&r2k_core::control::HelloEvent {
+            key: hello_key(4, &client, &server, 40_000, 443),
+            host: Some(b"example.com".to_vec()),
+            shape: Some(SHAPE_MODERN),
+            r2o_wire_len: None,
+            quic_snapshot: None,
+            tcp_has_timestamp: None,
+        })
+        .unwrap();
+        let untouched = resolve_unspecified_endpoint_with(&concrete, |_, _, _| {
+            panic!("резолвер не должен зваться для конкретного IP")
+        })
+        .unwrap();
+        assert_eq!(untouched, concrete);
+        concrete.endpoint = "198.51.100.20:8443".into();
+        assert_eq!(
+            resolve_unspecified_endpoint_with(&concrete, |_, _, _| {
+                panic!("резолвер не должен зваться для конкретного IP")
+            })
+            .unwrap()
+            .endpoint,
+            "198.51.100.20:8443"
+        );
+
+        // Ошибка резолва обязана вернуть Err, а не оставить 0.0.0.0.
+        let failed = resolve_unspecified_endpoint_with(&target, |_, _, _| {
+            Err("dial tcp: Name or service not known".to_string())
+        });
+        assert_eq!(
+            failed,
+            Err("dial tcp: Name or service not known".to_string())
+        );
+        let empty = resolve_unspecified_endpoint_with(&target, |_, _, _| Ok(Vec::new()));
+        assert!(empty.is_err());
+    }
+
+    #[test]
+    fn production_resolver_uses_real_a_and_aaaa_for_example_com() {
+        use super::{DiscoveryTarget, resolve_unspecified_endpoint};
+
+        let target = DiscoveryTarget {
+            host: "example.com".into(),
+            endpoint: "0.0.0.0:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let resolved = resolve_unspecified_endpoint(&target).unwrap();
+        let address: std::net::SocketAddr = resolved.endpoint.parse().unwrap();
+        assert!(address.ip().is_ipv4() && !address.ip().is_unspecified());
+        assert_eq!(address.port(), 443);
+
+        let target = DiscoveryTarget {
+            host: "example.com".into(),
+            endpoint: "[::]:443".into(),
+            family: 6,
+            shape: SHAPE_MODERN,
+        };
+        let resolved = resolve_unspecified_endpoint(&target).unwrap();
+        let address: std::net::SocketAddr = resolved.endpoint.parse().unwrap();
+        assert!(address.ip().is_ipv6() && !address.ip().is_unspecified());
+        assert_eq!(address.port(), 443);
     }
 
     #[test]
