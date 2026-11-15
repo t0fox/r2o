@@ -2826,6 +2826,98 @@ mod tests {
     }
 
     #[test]
+    fn http_keepalive_second_get_uses_http_next_and_keeps_plan_state() {
+        use crate::control::NamePlans;
+        use r2k_core::control::{COMMAND_SET_NAME, Frame, SHAPE_HTTP};
+
+        fn install_http(plans: &mut NamePlans) {
+            let host = b"example.test";
+            let mut records = Vec::new();
+            records.extend_from_slice(b"D2KP");
+            records.extend_from_slice(&1_u16.to_be_bytes());
+            records.extend_from_slice(&11_u16.to_be_bytes());
+            records.extend_from_slice(&0_u16.to_be_bytes());
+            records.extend_from_slice(&4_u16.to_be_bytes());
+            records.extend_from_slice(&[0x00, 0x01, 0x00, 0x10]);
+            records.extend_from_slice(&[0x41; 16]);
+            records.extend_from_slice(&[0x00, 0x02, 0x00, 0x02, 0x06, 0x04]);
+            records.extend_from_slice(&[0x00, 0x10, 0x00, 0x04, 0, 1, b'F', b'H']);
+            records.extend_from_slice(&[0x01, 0x01, 0x00, 0x0a, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0]);
+            let mut body = vec![host.len() as u8];
+            body.extend_from_slice(host);
+            body.extend_from_slice(&[SHAPE_HTTP, 4]);
+            body.extend_from_slice(&records);
+            let ack = plans.handle(&Frame {
+                kind: COMMAND_SET_NAME,
+                body,
+            });
+            assert!(ack.ok, "HTTP SET_NAME должен установиться");
+        }
+
+        let mut plans = NamePlans::with_capacity(8);
+        install_http(&mut plans);
+        let client = ([192, 0, 2, 10], 50000);
+        let server = ([198, 51, 100, 20], 80);
+        let mut sessions = TcpSessions::default();
+        let syn = ipv4_tcp_packet(client, server, 0x02, 64, 1000, &[]);
+        let _ = decide_with_session(&mut sessions, &Plan::default(), &syn);
+
+        let get1 = ipv4_tcp_packet(
+            client,
+            server,
+            0x18,
+            64,
+            1001,
+            b"GET /one HTTP/1.1\r\nHost: example.test\r\n\r\n",
+        );
+        let selected1 = plans
+            .select_with_quic_host_probe(&get1, None, false)
+            .expect("HTTP-план по Host");
+        let before = sessions.session_applied();
+        let decision1 = decide_with_session(&mut sessions, selected1, &get1);
+        assert!(
+            sessions.session_applied() > before,
+            "первый GET должен применить HTTP-план, decision={decision1:?}"
+        );
+        assert!(sessions.r2o_plan_done_for_packet(&get1));
+        let key = sessions
+            .r2o_begin_execution(&get1, 1, 1, false)
+            .expect("HTTP execution");
+        let first_sends_left = sessions.r2o_sends_left_for_packet(&get1);
+        assert!(first_sends_left > 0);
+        while sessions.r2o_sends_left_for_packet(&get1) > 0 {
+            let _ = sessions.r2o_session_sent(&key, 1);
+        }
+        assert_eq!(sessions.r2o_sends_left_for_packet(&get1), 0);
+
+        let get2 = ipv4_tcp_packet(
+            client,
+            server,
+            0x18,
+            64,
+            1001 + b"GET /one HTTP/1.1\r\nHost: example.test\r\n\r\n".len() as u32,
+            b"GET /two HTTP/1.1\r\nHost: example.test\r\n\r\n",
+        );
+        let selected2 = plans
+            .select_with_quic_host_probe(&get2, None, false)
+            .expect("HTTP-план для keep-alive");
+        let before = sessions.session_applied();
+        let decision2 = decide_with_session(&mut sessions, selected2, &get2);
+        assert!(
+            sessions.session_applied() > before,
+            "второй GET на том же соединении должен применить план через http_next, decision={decision2:?}"
+        );
+        assert!(sessions.r2o_plan_done_for_packet(&get2));
+        let _ = sessions.r2o_begin_execution(&get2, 2, 1, false);
+        let second_sends_left = sessions.r2o_sends_left_for_packet(&get2);
+        assert!(second_sends_left > 0);
+        assert!(
+            sessions.r2o_http_keepalive_stats().later >= 1,
+            "второй GET — keep-alive later"
+        );
+    }
+
+    #[test]
     fn session_execution_counters_match_c_sent_unsent_damaged() {
         let plan = tcp_fake_plan_with_rst_guard();
         let client = ([192, 0, 2, 10], 41000);
