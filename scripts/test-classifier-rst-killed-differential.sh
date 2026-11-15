@@ -173,6 +173,9 @@ if c_ops.count("-I") < 2:
     raise SystemExit(f"second insert/retry was not reached: {c_rules}")
 if not c_ops or c_ops[-1] != "-D":
     raise SystemExit(f"process exit did not retry pending release: {c_rules}")
+last_insert = max(index for index, op in enumerate(c_ops) if op == "-I")
+if c_ops[last_insert + 1 :].count("-D") < 3:
+    raise SystemExit(f"pending release was not retried at process exit: {c_rules}")
 print(f"D2O/R2O killed insert release matched: {len(c_rules)} rule commands, attention={len(c['attention'])}")
 PY
 
