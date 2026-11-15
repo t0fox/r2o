@@ -95,12 +95,12 @@ production-путь не ставится. Формулировки «теста
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 345 | 203 | 0 | 0 |
 | core-state | 692 | 471 | 221 | 0 | 0 |
-| datapath-core | 400 | 392 | 8 | 0 | 0 |
+| datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 134 | 25 | 0 | 0 |
-| **Итого** | **1982** | **1525** | **457** | **0** | **0** |
+| **Итого** | **1982** | **1526** | **456** | **0** | **0** |
 
-Это не оценка паритета: 457 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 456 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -138,7 +138,7 @@ B — нужен только тест/differential **190**; C — архите�
 
 ## Итог и подтверждённые расхождения (2026-11-14)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1525 / P 457 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1526 / P 456 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -381,10 +381,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 345 | 203 | 0 | 0 |
 | core-state | 692 | 471 | 221 | 0 | 0 |
-| datapath-core | 400 | 392 | 8 | 0 | 0 |
+| datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 134 | 25 | 0 | 0 |
-| **Итого** | **1982** | **1525** | **457** | **0** | **0** |
+| **Итого** | **1982** | **1526** | **456** | **0** | **0** |
 
 
 ---
@@ -3733,7 +3733,7 @@ R2O-владелец: `crates/r2o-datapath/src/main.rs` (`run`, `parse_options`,
 | `routes_routed` (static) | 278-280 | 3 | предикат «метка выбирает политику» | `r2o_route.rs:259 r2o_mark_is_routed` | E | C `d2k_routemark_routed`: `!mark→0`; OTHER_DEV/OUTSIDE→1; policy_match→0; непрочитанные правила семейства→1 (fail closed); совпадение селектора→1. Rust `r2o_mark_is_routed` повторяет эти ветви, `None`-правила дают true; тесты `r2o_route.rs:1216-1265` (policy, OTHER_DEV/OUTSIDE, IPv4/IPv6, fail closed). |
 | `describe_oifs` (static) | 282-294 | 13 | имена выходных интерфейсов для лога | `r2o_route.rs:152 r2o_egress_ifindices`, строки `r2o_refresh` | **E*** |  C `!read` → «неизвестен…», `!n` → «нет», иначе `if_indextoname`/`#%u` через `, `. Rust `r2o_egress_ifindices`/`r2o_refresh`; формат лога иной, список oif читается. **Интеграция 2026-11-14:** добавлены `r2o_describe_oifs`/`r2o_describe_default_ifindices` с точным C-форматом; C/Rust differential `test-datapath-describe-oifs-differential.sh` PASS (5 строк: unknown/none/#%u/усечение). |
 | `routes_refresh` (static) | 302-370 | 69 | разбор ip rule/маршрутов, лог смен, quiet 600 с | `r2o_route.rs:372 r2o_refresh` (netlink-watch) | **E*** |    **Ветви сверены:** C `d2k_routemark_load`; при ошибке держит прежние, лог один раз; при успехе сравнивает `v4_ok/v6_ok/r4/r6`, логирует смены/truncated; `changes` и `ROUTES_QUIET_NS=600 с` — запись не чаще окна, с числом смен. Rust `r2o_refresh` по netlink-watch, без периодического цикла; quiet-окно/лог смен не воспроизведены; `r2o-route-gate-differential.sh`. **Интеграция 2026-11-14:** реализованы `R2oRoutesRefreshLog`, `R2oRoutesChange`, `R2oRoutePartStatus::{Unread,Read,NoDevice}`, quiet-окно 600 с; `test-datapath-route-nl-differential.sh` расширен до **32 кейсов** (partial reads, DONE+tail, битые атрибуты, короткий NLMSG_ERROR, 20 hops). State machine пока не подключён в `main.rs` — P. **2026-11-14:** `r2o_routes_change_line` для всех C-текстов failure/recovered/part/unread/no-device/truncated; 32-case route-nl PASS. Wiring `R2oRoutesRefreshLog`/quiet в `main.rs` остаётся — P. **Wiring 2026-11-14:** `R2oRoutesRefreshLog` подключён на старте и каждом обновлении маршрутов; тексты failure/recovered/part/unread/no-device/truncated, `Changed` через quiet-строку 600 с с describe_rules/oifs. Unit-переходы/quiet и 32-case route-nl differential PASS. |
-| `cap_refresh` (static) | 372-415 | 44 | adopt egress MTU → grow sched → greet control | `raw.rs:106 r2o_adopt_egress`, `scheduler.rs:260 grow_slot_size`, `main.rs` greet | **P** | **Ветви сверены:** C собирает oif4/oif6, `!n` → return; `d2k_raw_adopt_egress`, adopted<0 → return; лог при adopted>0; `d2k_sched_grow_slot_size(after)`, ошибка → лог один раз и return; если `send_maxlen==after` → return; иначе обновляет и `d2k_ctlsrv_greet`. Rust `r2o_adopt_egress`/`grow_slot_size`/greet; ветви реализованы, прямого differential нет. **Интеграция 2026-11-14:** после `r2o_adopt_egress` вызывается `ScheduledQueue::grow_slot_size`; при отказе контроллеру остаётся прежний `send_maxlen`, при успехе — `r2o_set_send_maxlen` и greet; стартовый слот догоняется до принятого MTU. Остаётся P*: прямого теста композиции `grow_slot_size`+greet нет, `r2o_adopt_egress` покрыт unit-тестами raw.rs. |
+| `cap_refresh` (static) | 372-415 | 44 | adopt egress MTU → grow sched → greet control | `raw.rs:106 r2o_adopt_egress`, `scheduler.rs:260 grow_slot_size`, `main.rs` greet | **E*** | C: oif4/oif6 → `d2k_raw_adopt_egress` → `d2k_sched_grow_slot_size` → `send_maxlen`/`d2k_ctlsrv_greet`. R2O `r2o_apply_route_maxlen` выполняет тот же порядок grow→send_maxlen→greet, production-вызов после adopt; unit `cap_refresh_composition_orders_grow_send_maxlen_greet` проверяет порядок и отказ grow без send_maxlen/greet. Ограничение: exact greet-байты C/Rust отдельно не сравнивались. |
 | `send_original_verdict` (static) | 417-427 | 11 | вердикт NFQUEUE + счётчики accepted/dropped | `nfqueue.rs:347 send_verdict`, `:336 record_verdict`, `:325 record_verdict_failure` | **E*** | C `d2k_nfq_verdict`; ошибка → `verdict_fail++` и лог; иначе `DROP→dropped`, любой другой вердикт → `accepted`. Rust `send_verdict` на ошибке зовёт `record_verdict_failure` и возвращает `Err` (вызывающий пишет лог), на успехе — `record_verdict(action)` с тем же тернарным правилом. Тест `record_verdict_counts_accept_drop_and_failure_like_c` (ACCEPT/DROP/DROP/failure → 2/2/1). Побайтовые тесты netlink-вердикта уже есть. **Ограничение:** C возвращает `rc` наружу, Rust — `io::Result`. |
 | `send_delayed_verdict` (static) | 429-431 | 3 | обёртка вердикта отложенной выдачи | `main.rs` `r2o_release_delayed_udp_batch_with` → `QueueSocket::send_verdict` | **E*** | C дословно `return send_original_verdict(ctx,id,verdict)`. Rust выпускает отложенные вердикты тем же `send_verdict` (счётчики/ошибка как выше); отдельной обёртки нет. Тест `deferred_verdicts_enqueue_flush_and_full_match_c` покрывает порядок/срок/полную очередь. **Ограничение:** API-обёртки нет — поведение выражено вызовом. |
 | `delayed_verdict_done` (static) | 433-446 | 14 | complete → `session_sent`, иначе `exec_failed(REFUSE_SEND)` | `main.rs` `r2o_delayed_verdict_done`, `r2o_complete_delayed_udp_batch` | **E*** | C: `execution==0` → выход; `complete` → `session_sent`; иначе `session_exec_failed(..., REFUSE_SEND, execution, payload_on_wire=0, orig_spent=sent!=0)`. Rust `PendingUdpRelease` теперь хранит key/id исполнения; `r2o_release_delayed_udp_batch_with` возвращает `(complete,sent)` по вердиктам, `r2o_delayed_verdict_done` повторяет ветви: token 0 — no-op; TCP complete — `r2o_mark_plan_done_for_execution` (иначе `sent_lost`); TCP incomplete — damaged/unsent по sent/orig_taken; UDP incomplete — `r2o_note_execution_failure` сбрасывает `plan_applied`. Тест `delayed_verdict_done_повторяет_ветви_c`: token 0, complete UDP, incomplete sent=1 → повтор плана, sent=0 → план цел, TCP complete → `session_done=1`, TCP incomplete+orig_taken → damaged. **Ограничение:** C вызывает `session_sent` один раз на пачку; Rust завершает оставшиеся посылки сразу (модель `r2o_finish_tcp_execution`). Для UDP complete отдельного счётчика посылок нет — `plan_applied` уже стоит. |
