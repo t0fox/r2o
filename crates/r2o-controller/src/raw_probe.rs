@@ -2396,7 +2396,10 @@ fn timestamp_options(server_timestamp: u32) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Property, apply_property, compose_from_props, property_probes};
+    use super::{
+        Property, RAW_SELFTESTS, RawSelftestState, apply_property, compose_from_props,
+        note_raw_probe, property_probes, raw_selftest_age, raw_selftest_index,
+    };
     use crate::classify::{DpiProps, Poison, TriState};
 
     fn set_name(property: Property) -> &'static str {
@@ -3357,6 +3360,60 @@ mod tests {
     }
 
     #[test]
+    fn selftest_cache_age_and_local_error_streak_match_c() {
+        let index = raw_selftest_index(6, false);
+        {
+            let mut cache = RAW_SELFTESTS
+                .get_or_init(|| std::sync::Mutex::new(RawSelftestState::default()))
+                .lock()
+                .unwrap();
+            cache.checked_at[index] = Some(
+                std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_secs(599))
+                    .unwrap(),
+            );
+            cache.error_streak[1] = 0;
+        }
+        assert!(raw_selftest_age(6, false).is_some());
+        {
+            let mut cache = RAW_SELFTESTS
+                .get_or_init(|| std::sync::Mutex::new(RawSelftestState::default()))
+                .lock()
+                .unwrap();
+            cache.checked_at[index] = Some(
+                std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_secs(600))
+                    .unwrap(),
+            );
+        }
+        assert!(raw_selftest_age(6, false).is_none());
+
+        {
+            let mut cache = RAW_SELFTESTS
+                .get_or_init(|| std::sync::Mutex::new(RawSelftestState::default()))
+                .lock()
+                .unwrap();
+            cache.checked_at[raw_selftest_index(6, true)] = Some(std::time::Instant::now());
+            cache.checked_at[index] = Some(std::time::Instant::now());
+            cache.error_streak[1] = 0;
+        }
+        note_raw_probe(6, true);
+        note_raw_probe(6, true);
+        note_raw_probe(6, true);
+        assert!(raw_selftest_age(6, true).is_none());
+        assert!(raw_selftest_age(6, false).is_none());
+        note_raw_probe(6, false);
+        assert_eq!(
+            RAW_SELFTESTS
+                .get_or_init(|| std::sync::Mutex::new(RawSelftestState::default()))
+                .lock()
+                .unwrap()
+                .error_streak[1],
+            0
+        );
+    }
+
+    #[test]
     fn raw_supported_matches_c_linux_contract() {
         // C `detect/raw.c:164`: на Linux всегда 1, отказ ядра виден при отправке.
         assert!(raw_supported());
@@ -3498,6 +3555,36 @@ mod tests {
         if let Ok(v6) = local_address_for("[::1]:9".parse().unwrap()) {
             assert_eq!(v6, "::1".parse::<std::net::IpAddr>().unwrap());
         }
+    }
+
+    #[test]
+    fn d2o_raw_local_addr_differential_matches_c() {
+        fn hex(address: std::net::IpAddr) -> String {
+            match address {
+                std::net::IpAddr::V4(value) => value
+                    .octets()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+                std::net::IpAddr::V6(value) => value
+                    .octets()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+            }
+        }
+        let mut output = String::new();
+        for (name, remote) in [("v4-loopback", "127.0.0.1:9"), ("v6-loopback", "[::1]:9")] {
+            let address = local_address_for(remote.parse().unwrap());
+            match address {
+                Ok(address) => output.push_str(&format!("{name}|1|{}\n", hex(address))),
+                Err(_) => output.push_str(&format!("{name}|0|\n")),
+            }
+        }
+        if let Ok(path) = std::env::var("R2O_RAW_LOCAL_ADDR_OUTPUT") {
+            std::fs::write(path, &output).expect("write local address output");
+        }
+        assert!(output.contains("v4-loopback|1|7f000001"));
     }
 
     #[test]
