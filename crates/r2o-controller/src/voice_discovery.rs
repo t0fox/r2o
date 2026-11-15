@@ -563,7 +563,9 @@ pub fn r2o_probe_discovery_endpoint(
             r2o_request[..4].copy_from_slice(&[0, 1, 0, 70]);
             r2o_request[4..8].copy_from_slice(&r2o_txid[..4]);
 
-            if r2o_index == 0 && let Some(r2o_prefix) = r2o_prefix {
+            if r2o_index == 0
+                && let Some(r2o_prefix) = r2o_prefix
+            {
                 let r2o_plan = r2o_voice_arm_plan(r2o_prefix)?;
                 r2k_core::udp_plan::r2o_udp_plan_send(
                     &r2o_socket,
