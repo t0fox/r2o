@@ -71,6 +71,8 @@ struct StunFlow {
 struct FlowState {
     last_seen: Instant,
     plan_applied: bool,
+    /// C `fl->sends_left` для UDP-исполнения: n_out + оригинал.
+    plan_sends_left: u8,
     damaged: bool,
     /// C `d2k_flow.quic_deny`: «QUIC для имени не пропускается». Поток
     /// снимается целиком на клиентской стороне, не только первый Initial,
@@ -224,6 +226,7 @@ impl R2oUdpSessions {
             FlowState {
                 last_seen: now,
                 plan_applied: false,
+                plan_sends_left: 0,
                 damaged: false,
                 quic_deny: false,
                 hello_seen: false,
@@ -423,15 +426,27 @@ impl R2oUdpSessions {
 
     /// Отметить первое применение плана к UDP-потоку.
     pub fn r2o_mark_plan_applied(&mut self, packet: &[u8]) -> bool {
+        self.r2o_mark_plan_applied_with_sends(packet, 0)
+    }
+
+    /// C `plan_handed_off`: `sends_left = n_out + 1`.
+    pub fn r2o_mark_plan_applied_with_sends(&mut self, packet: &[u8], n_out: usize) -> bool {
         let Some(flow) = flow_key_from_packet(packet).and_then(|key| self.flows.get_mut(&key))
         else {
             return false;
         };
+        flow.plan_sends_left = n_out.saturating_add(1) as u8;
         let was_applied = std::mem::replace(&mut flow.plan_applied, true);
         if !was_applied {
             self.applied = self.applied.saturating_add(1);
         }
         !was_applied
+    }
+
+    pub fn r2o_sends_left_for_packet(&self, packet: &[u8]) -> u8 {
+        flow_key_from_packet(packet)
+            .and_then(|key| self.flows.get(&key))
+            .map_or(0, |flow| flow.plan_sends_left)
     }
 
     /// C `handle_udp` (`session.c:967-974`): после `quicdeny` каждая

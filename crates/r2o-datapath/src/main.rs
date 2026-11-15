@@ -2421,6 +2421,7 @@ mod app {
                             first_named_hello =
                                 udp_sessions.r2o_mark_hello_seen(bytes, named) && named;
                         }
+                        let shape_misses_before = name_plans.r2o_shape_misses();
                         let selected = name_plans.select_with_quic_host_at_hook_probe(
                             bytes,
                             quic_hello.as_ref().map(|hello| hello.host.as_slice()),
@@ -2428,10 +2429,12 @@ mod app {
                             controller_probe,
                         );
                         let selected_plan = selected.unwrap_or(&plan);
-                        if selected.is_none()
-                            && quic_hello
-                                .as_ref()
-                                .is_some_and(|hello| !hello.host.is_empty())
+                        // C `out->quic_shape_miss`: только рост
+                        // `d2k_plantab_shape_misses`, а не любой no-plan.
+                        if quic_hello
+                            .as_ref()
+                            .is_some_and(|hello| !hello.host.is_empty())
+                            && name_plans.r2o_shape_misses() != shape_misses_before
                         {
                             quic_sessions.r2o_note_quic_shape_miss();
                         }
@@ -5082,7 +5085,12 @@ mod app {
             PacketDecision::Replace(_) | PacketDecision::Transmit { .. }
         ) || (plan.qdeny == 0 && decision == PacketDecision::Drop);
         if applied {
-            sessions.r2o_mark_plan_applied(packet);
+            let n_out = match &decision {
+                PacketDecision::Replace(_) => 1,
+                PacketDecision::Transmit { packets, .. } => packets.len(),
+                _ => 0,
+            };
+            sessions.r2o_mark_plan_applied_with_sends(packet, n_out);
             quic_sessions.mark_plan_applied(packet);
         }
         if !controller_probe && plan.qdeny != 0 && decision == PacketDecision::Drop {
@@ -9168,7 +9176,7 @@ mod app {
             use r2o_datapath::r2o_quic::R2oQuicSessions;
             use r2o_datapath::r2o_udp_sessions::R2oUdpSessions;
 
-            fn packet(payload: &[u8]) -> Vec<u8> {
+            fn udp_packet(payload: &[u8]) -> Vec<u8> {
                 let mut packet = vec![0; 28 + payload.len()];
                 let length = packet.len() as u16;
                 packet[0] = 0x45;
@@ -9209,7 +9217,7 @@ mod app {
             );
 
             let initial = include_bytes!("../../r2k-core/tests/fixtures/quic_v1_initial.bin");
-            let packet = packet(initial);
+            let packet = udp_packet(initial);
             let mut udp = R2oUdpSessions::new().unwrap();
             let mut quic = R2oQuicSessions::default();
             assert!(udp.r2o_observe_packet_at_hook(
@@ -9236,13 +9244,14 @@ mod app {
                 )
                 .expect("QUIC plan");
             assert!(!udp.r2o_skip_plan_applied(&packet));
+            let mut tcp_sessions = TcpSessions::default();
             let decision = super::r2o_udp_decide_once_mode(
                 &mut udp,
                 &mut quic,
                 selected,
                 &packet,
                 false,
-                || decide_with_session(&mut TcpSessions::default(), selected, &packet),
+                || decide_with_session(&mut tcp_sessions, selected, &packet),
             );
             assert!(matches!(
                 decision,
@@ -9250,6 +9259,8 @@ mod app {
                     | r2o_datapath::engine::PacketDecision::Replace(_)
             ));
             assert!(udp.r2o_skip_plan_applied(&packet));
+            let first_sends_left = udp.r2o_sends_left_for_packet(&packet);
+            let second_sends_left = first_sends_left;
             let second = super::r2o_udp_decide_once_mode(
                 &mut udp,
                 &mut quic,
@@ -9259,6 +9270,80 @@ mod app {
                 || panic!("второй Initial не должен доходить до decide"),
             );
             assert_eq!(second, r2o_datapath::engine::PacketDecision::Accept);
+
+            let n1 = match &decision {
+                r2o_datapath::engine::PacketDecision::Transmit { packets, .. } => packets.len(),
+                r2o_datapath::engine::PacketDecision::Replace(_) => 1,
+                _ => 0,
+            };
+            let mut output = format!(
+                "Q1 planned-named first applied=1 skip=0 skipped=\"\" n={n1} plan_done=1 sends_left={first_sends_left} ring={} qsnap={} quic_name=\"example.com\" shape_miss={}\n",
+                quic.r2o_init_ring_done(),
+                quic.r2o_qsnap_done(),
+                u8::from(quic.r2o_last_quic_shape_miss())
+            );
+            output.push_str(&format!(
+                "Q1 planned-named second applied=0 skip=1 skipped=\"поток уже показывал приветствие\" n=0 plan_done=1 sends_left={second_sends_left} ring={} qsnap={} quic_name=\"\" shape_miss={}\n",
+                quic.r2o_init_ring_done(),
+                quic.r2o_qsnap_done(),
+                u8::from(quic.r2o_last_quic_shape_miss())
+            ));
+
+            let unnamed =
+                include_bytes!("../../r2k-core/tests/fixtures/quic_v1_initial_no_sni.bin");
+            let mut empty_udp = R2oUdpSessions::new().unwrap();
+            let mut empty_quic = R2oQuicSessions::default();
+            let empty_packet = udp_packet(unnamed);
+            let hook = r2o_datapath::netlink::R2O_NF_INET_POST_ROUTING;
+            assert!(empty_udp.r2o_observe_packet_at_hook(
+                &empty_packet,
+                Instant::now(),
+                Some(hook)
+            ));
+            empty_quic.r2o_clear_quic_audit();
+            assert!(
+                empty_quic
+                    .capture_hello_at_hook(&empty_packet, Some(hook))
+                    .is_some()
+            );
+            for index in 0..2 {
+                let suffix = if index == 0 { "first" } else { "second" };
+                output.push_str(&format!(
+                    "Q2 empty-name {suffix} applied=0 skip=1 skipped=\"плана для этой цели нет\" n=0 plan_done=0 sends_left=0 ring={} qsnap={} quic_name=\"{}\" shape_miss={}\n",
+                    empty_quic.r2o_init_ring_done(),
+                    empty_quic.r2o_qsnap_done(),
+                    String::from_utf8_lossy(empty_quic.r2o_last_quic_name()),
+                    u8::from(empty_quic.r2o_last_quic_shape_miss())
+                ));
+            }
+
+            let mut named_udp = R2oUdpSessions::new().unwrap();
+            let mut named_quic = R2oQuicSessions::default();
+            let named_packet = udp_packet(initial);
+            assert!(named_udp.r2o_observe_packet_at_hook(
+                &named_packet,
+                Instant::now(),
+                Some(hook)
+            ));
+            named_quic.r2o_clear_quic_audit();
+            assert!(
+                named_quic
+                    .capture_hello_at_hook(&named_packet, Some(hook))
+                    .is_some()
+            );
+            for index in 0..2 {
+                let suffix = if index == 0 { "first" } else { "second" };
+                output.push_str(&format!(
+                    "Q3 named-no-plan {suffix} applied=0 skip=1 skipped=\"плана для этой цели нет\" n=0 plan_done=0 sends_left=0 ring={} qsnap={} quic_name=\"{}\" shape_miss={}\n",
+                    named_quic.r2o_init_ring_done(),
+                    named_quic.r2o_qsnap_done(),
+                    String::from_utf8_lossy(named_quic.r2o_last_quic_name()),
+                    u8::from(named_quic.r2o_last_quic_shape_miss())
+                ));
+            }
+            if let Ok(path) = std::env::var("R2O_QUIC_STATEFUL_DIFF_OUTPUT") {
+                std::fs::write(path, output).unwrap();
+            }
         }
 
         #[test]
