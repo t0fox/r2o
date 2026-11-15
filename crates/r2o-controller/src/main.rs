@@ -39787,6 +39787,40 @@ mod tests {
                 hex(plan.as_bytes())
             ));
         }
+        {
+            use r2o_controller::quic_replay::{
+                R2oQuicCandidateKind, R2oQuicPlanState, r2o_quic_plan_text_from_state,
+            };
+            let mut quic_case =
+                |label: &str, kind: R2oQuicCandidateKind, directives: &str, udplen: u32| {
+                    let mut text = r2o_quic_plan_text_from_state(&R2oQuicPlanState {
+                        kind: Some(kind),
+                        directives,
+                        plan_id: None,
+                        udplen,
+                        junk: false,
+                        non_original: false,
+                        frag_survives: true,
+                    })
+                    .unwrap();
+                    if text.starts_with("d2k-plan") {
+                        text.replace_range(..8, "r2o-plan");
+                    }
+                    output.push_str(&format!("{label}\tn=1\t{}\n", hex(text.as_bytes())));
+                };
+            let ttl3 = "payload 1 aabbccdd\npoison 1 ttl=3\nfake payload=1 poison=1 repeats=2 gap_us=0 place=before\n";
+            let ttl5 = "payload 1 aabbccdd\npoison 1 ttl=5\nfake payload=1 poison=1 repeats=2 gap_us=0 place=before\n";
+            let copies2 = "payload 1 aabbccdd\npoison 1\nfake payload=1 poison=1 repeats=2 gap_us=0 place=before\n";
+            quic_case("quic_ttl3", R2oQuicCandidateKind::OriginalTtl(3), ttl3, 0);
+            quic_case(
+                "quic_copies2",
+                R2oQuicCandidateKind::OriginalRepeats { blob: 0, copies: 2 },
+                copies2,
+                0,
+            );
+            quic_case("quic_frag2", R2oQuicCandidateKind::FragmentShape(2), "", 0);
+            quic_case("quic_ttl5", R2oQuicCandidateKind::OriginalTtl(5), ttl5, 0);
+        }
         if let Ok(path) = std::env::var("R2O_VERDICT_TO_PLANS_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
         }

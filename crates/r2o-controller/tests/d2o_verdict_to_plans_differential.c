@@ -59,6 +59,54 @@ static void scenario(const char *label, d2k_verdict verdict, int owns_search,
     free(scheduler); free(target); free(result);
 }
 
+
+static void quic_arm_scenario(const char *label, uint8_t kind, unsigned copies,
+                              int ttl, int frag_kind)
+{
+    d2k_sched *scheduler = calloc(1, sizeof *scheduler);
+    task *target = calloc(1, sizeof *target);
+    d2k_vres *result = calloc(1, sizeof *result);
+    if (!scheduler || !target || !result) {
+        printf("%s\talloc-failed\n", label);
+        free(scheduler); free(target); free(result);
+        return;
+    }
+    scheduler->send_cap = 0;
+    snprintf(target->name, sizeof target->name, "quic-arm.example");
+    snprintf(target->ip, sizeof target->ip, "198.51.100.77");
+    target->transport = 17;
+    target->family = 4;
+    target->state = T_ASKING;
+    target->arm_ready = 1;
+    target->arm.kind = kind;
+    target->arm.original = 1;
+    target->arm.copies = copies;
+    target->arm.ttl = (uint8_t)ttl;
+    target->arm.frag_kind = (uint8_t)frag_kind;
+    target->arm.frag_survives = frag_kind ? D2K_PROP_YES : D2K_PROP_UNKNOWN;
+    target->arm.probes = 3;
+    snprintf(target->arm.reason, sizeof target->arm.reason, "fixture");
+    target->arm.len = frag_kind ? 0 : 4;
+    if (!frag_kind) {
+        target->arm.bytes[0] = 0xaa; target->arm.bytes[1] = 0xbb;
+        target->arm.bytes[2] = 0xcc; target->arm.bytes[3] = 0xdd;
+    }
+    result->verdict = D2K_V_OPAQUE;
+    result->owns_search = 1;
+    verdict_to_plans(scheduler, target, result);
+    for (size_t i = 0; i < target->n_plans; i++) {
+        if (!strncmp(target->plans[i], "d2k-plan", 8)) {
+            memcpy(target->plans[i], "r2o-plan", 8);
+        }
+    }
+    printf("%s	n=%zu	", label, target->n_plans);
+    for (size_t i = 0; i < target->n_plans; i++) {
+        print_hex((const uint8_t *)target->plans[i], strlen(target->plans[i]));
+        printf("\n");
+    }
+    free(scheduler); free(target); free(result);
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -71,5 +119,9 @@ int main(void)
     scenario("prefix", D2K_V_PREFIX, 1, 7, 0, 16);
     scenario("whole", D2K_V_WHOLE, 1, 7, 0, 16);
     scenario("opaque_fallback", D2K_V_OPAQUE, 1, 0, 0, 0);
+    quic_arm_scenario("quic_ttl3", D2K_QA_TTL, 2, 3, 0);
+    quic_arm_scenario("quic_copies2", D2K_QA_COPIES, 2, 0, 0);
+    quic_arm_scenario("quic_frag2", D2K_QA_FRAG, 0, 0, 2);
+    quic_arm_scenario("quic_ttl5", D2K_QA_TTL, 2, 5, 0);
     return 0;
 }

@@ -41,5 +41,5 @@ R2O_VERDICT_TO_PLANS_DIFF_OUTPUT="$tmp_dir/rust.out" \
     d2o_verdict_to_plans_order_matches_c >"$tmp_dir/rust.log" 2>&1
 
 diff -u "$tmp_dir/c.out" "$tmp_dir/rust.out"
-printf 'C/Rust verdict_to_plans categorical, PREFIX/WHOLE and owned fallback match d2o %s.\n' \
+printf 'C/Rust verdict_to_plans categorical, PREFIX/WHOLE, owned fallback and QUIC arm match d2o %s.\n' \
     "$actual_donor_sha"
