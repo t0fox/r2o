@@ -94,13 +94,13 @@ production-путь не ставится. Формулировки «теста
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 345 | 203 | 0 | 0 |
-| core-state | 692 | 475 | 217 | 0 | 0 |
+| core-state | 692 | 476 | 216 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 139 | 20 | 0 | 0 |
-| **Итого** | **1982** | **1535** | **447** | **0** | **0** |
+| **Итого** | **1982** | **1536** | **446** | **0** | **0** |
 
-Это не оценка паритета: 447 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 446 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -119,7 +119,7 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1535 / P 447**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1536 / P 446**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
@@ -138,7 +138,7 @@ B — нужен только тест/differential **190**; C — архите�
 
 ## Итог и подтверждённые расхождения (2026-11-15)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1535 / P 447 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1536 / P 446 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -380,11 +380,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 345 | 203 | 0 | 0 |
-| core-state | 692 | 475 | 217 | 0 | 0 |
+| core-state | 692 | 476 | 216 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 139 | 20 | 0 | 0 |
-| **Итого** | **1982** | **1535** | **447** | **0** | **0** |
+| **Итого** | **1982** | **1536** | **446** | **0** | **0** |
 
 
 ---
@@ -2626,7 +2626,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_sched_diagnostic_counts` | 5826–5875 | 50 | counts: boxes/bindings/plans/observations/active/queued/catalog bytes/limit/resources/cpu/mem/conntrack/workers/task_states/snapshots | `main.rs:16688-16806`, `diagnostics.rs:461-464,676-679`, `r2o_resource_limit` | **P** | **Подтверждённые пробелы:** `worker_start_failures` всегда 0 (`main.rs:16806`), `last_measurement_age_ms` = None (`:16803`), `worker_join_failures`/`worker_oldest_age_ms` не заполняются; task_states/снимки считаются иначе (HashMap/очередь). Diagnostics differential частичный. |
 | `d2k_sched_diagnostic_madvise` | 5876–5876 | 1 | отдать `MadviseStats` | `diagnostics.rs` `Recorder::madvise_stats` | E | C возвращает копию `s->madvise`. Rust `madvise_stats()` возвращает копию; тест `madvise_get_and_reset_match_c`; JSON-форма покрыта `memory_tracking_and_madvise_json_match_d2o_shape`. |
 | `d2k_sched_diagnostic_madvise_reset` | 5877-5877 | 1 | обнулить статистику madvise | `diagnostics.rs` `Recorder::reset_madvise` | E | C `memset(&s->madvise,0)`. Rust `reset_madvise()` присваивает `MadviseStats::default()`; тест `madvise_get_and_reset_match_c`. |
-| `d2k_sched_write_live` | 5879–6049 | 171 | атомарно `live.json`: boxes/signals/plans/bindings/groups/searches/measurements/autopick/targets/confirms/probes/client_unfit | `live.rs` `live_snapshot`; `main.rs` `r2o_write_live` | **P*** | **Task/direct-clear 2026-11-15:** DNS task-слой 17 + DoQ 4; verifier mark split PASS дважды. DoQ direct CLEAR: гейты `vol_cut/ech_trial/rx_partial_bytes/rx_partial_wire_bytes/rx_direct_complete` доказанно false для DNS-endpoint, поэтому group evidence 2 **не** пишется (как C), но `update_direct_clear_bindings` (recheck 60с, DEL_NAME transport 17), `clear_backoff_ms` 10/30/60 и cooldown работают; differential 5 + unit backoff/no-group PASS. **Остаётся P*:** live-поля/task-state/queue/snapshot без полного C/Rust differential, end-to-end планового DoQ через реальный C datapath, DoQ `search_report` заменён DNS live-состоянием. |
+| `d2k_sched_write_live` | 5879–6049 | 171 | атомарно `live.json`: boxes/signals/plans/bindings/groups/searches/measurements/autopick/targets/confirms/probes/client_unfit | `live.rs` `live_snapshot`; `main.rs` `r2o_write_live` | **E*** | **2026-11-15:** full `live.json` дифференциал против current D2O main `7a5fab9` — **12 состояний** (rich, empty, boxes, bindings, groups, measurements, tasks, dns, watch, watch_noplan, rest, rest_local), точное равенство JSON-значений/полей/порядка массивов; `write_live_groups` 10 сценариев; DNS 17/4/3. Исправлены реальные расхождения: лишние поля `searches`, autopick default transport, нулевые времена (0001-01-01), binding transport 0→6, `%.100s` UTF-8. Ограничение: end-to-end планового DoQ через реальный C datapath не прогнан. |
 | `d2k_sched_free` | 6051–6072 | 22 | снять addr-probe, join worker, report shutdown, close contact/prop/ver, destroy cond/mutex, close pipe, free areas | `main.rs:7113-7119` (`Drop for R2oQuicDiscoveryWorker`), `:10205-10213` (`Drop for R2oVoiceDiscoveryWorker`), RAII `R2oHttpSearchWorker`/`OwnedFd` | **P** | **Совпадает по результату:** воркеры останавливаются и join-ятся в `Drop` (QUIC: `r2o_begin_shutdown`+`r2o_join`; voice: `cancel`+`jobs.take`+`thread.join`), каналы закрываются, сокеты освобождаются RAII. **Отличия:** C явно проходит 64 задачи, снимает addr-probe (`addr_probe_remove`), печатает `search_report(\"shutdown\")` и уничтожает `question_cv`/`mu`, закрывает `wake[0..1]`, освобождает `areas` и сам `sched`; в Rust строка `\"shutdown\"` в отчёте отсутствует, addr-probe снимается в своих путях, `areas` живут в каталоге/очереди. Shutdown-тесты частичные. |
 | `wake_loop` | 6077–6080 | 4 | записать байт в wake-pipe, чтобы разбудить `poll` | канал/condvar worker (`wake.notify_one`/`notify_all`), `main.rs:12123-12126` | **P*** | C `write(s->wake[1], \"w\", 1)` будит цикл `d2kc`; Rust использует `Condvar`/`notify_one` очереди и `sync_channel` воркеров (`main.rs:12123-12126`, `13095-13106`). Механизм заменён; отдельного differential нет. |
 | `d2k_sched_wake_fd` | 6082–6082 | 1 | fd для `poll` в `d2kc` | нет (канал/`try_recv`/`Condvar`) | **P*** | C отдаёт читающий конец self-pipe для `poll`; Rust не имеет fd-контракта: цикл воркеров использует `Condvar`/каналы, `d2kc`-цикл заменён `tokio`/каналом событий. Эквивалент по пробуждению, не по API. |
