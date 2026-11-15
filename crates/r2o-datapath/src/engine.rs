@@ -3893,6 +3893,33 @@ mod tests {
 
         let refusals_at_limit = sessions.r2o_tcp_flow_refusals();
         let count_at_limit = sessions.len();
+        let duplicate_packet = ipv4_tcp_packet(
+            ([10, 0, 0, 1], 10_001),
+            ([203, 0, 113, 8], 443),
+            0x10,
+            64,
+            1,
+            &[],
+        );
+        assert!(
+            sessions
+                .track_packet(&duplicate_packet, start + Duration::from_nanos(203))
+                .is_some()
+        );
+        let count_after_duplicate = sessions.len();
+        for index in [1_u16, 24, 48] {
+            let packet = ipv4_tcp_packet(
+                ([10, 0, 0, index as u8], 10_000 + index),
+                ([203, 0, 113, 8], 443),
+                0x10,
+                64,
+                u32::from(index),
+                &[],
+            );
+            let key = TcpFlowKey::from_packet(&packet).unwrap();
+            sessions.flows.remove(&key).expect("remove head/mid/tail");
+        }
+        let walked = sessions.len();
         let expired = sessions.expire(
             start + Duration::from_nanos(60_202),
             Duration::from_nanos(60_000),
@@ -3906,7 +3933,9 @@ mod tests {
 
         assert_eq!(refusals_at_limit, 2);
         assert_eq!(count_at_limit, 48);
-        assert_eq!(expired, 48);
+        assert_eq!(count_after_duplicate, 48);
+        assert_eq!(walked, 45);
+        assert_eq!(expired, 45);
         assert_eq!(count_after_expiry, 0);
         assert!(accepted_after_expiry);
         assert_eq!(refusals_after_expiry, 2);
@@ -3914,7 +3943,7 @@ mod tests {
 
         if let Ok(path) = std::env::var("R2O_TCP_TABLE_DIFF_OUTPUT") {
             let output = format!(
-                "request64_slots={}_limit={}_inserted=48_refused=2_reverse_hit=1_count={count_at_limit}_refusals={refusals_at_limit}\nrequest65_slots={}_limit={}\nexpired={expired}_remaining={count_after_expiry}_accepted_after_expiry={}_refusals={refusals_after_expiry}_count={count_after_reuse}\n",
+                "request64_slots={}_limit={}_inserted=48_refused=2_reverse_hit=1_count={count_at_limit}_refusals={refusals_at_limit}\nrequest65_slots={}_limit={}\nduplicate_count={count_after_duplicate}_remove_count={walked}_walk={walked}\nexpired={expired}_remaining={count_after_expiry}_accepted_after_expiry={}_refusals={refusals_after_expiry}_count={count_after_reuse}\n",
                 sessions.r2o_tcp_flow_capacity(),
                 capacity64.limit(),
                 capacity65.slots(),

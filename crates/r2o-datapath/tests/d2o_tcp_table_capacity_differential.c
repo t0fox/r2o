@@ -18,6 +18,11 @@ static void make_key(d2k_key *key, uint16_t index, int reverse) {
     }
 }
 
+static void count_flow(void *ctx, d2k_flow *flow) {
+    (void)flow;
+    (*(size_t *)ctx)++;
+}
+
 int main(void) {
     d2k_table *table = d2k_track_new(64);
     if (!table) return 2;
@@ -37,6 +42,20 @@ int main(void) {
     const int second_refused = d2k_track_get(table, &refused_b, 201) == NULL;
     const int reverse_hit = d2k_track_get(table, &reverse_known, 202) != NULL;
     const size_t count_at_limit = d2k_track_count(table);
+    d2k_key duplicate;
+    make_key(&duplicate, 1, 0);
+    (void)d2k_track_get(table, &duplicate, 203);
+    const size_t count_after_duplicate = d2k_track_count(table);
+    d2k_key head, middle, tail;
+    make_key(&head, 1, 0);
+    make_key(&middle, 24, 0);
+    make_key(&tail, 48, 0);
+    d2k_track_remove(table, &head);
+    d2k_track_remove(table, &middle);
+    d2k_track_remove(table, &tail);
+    size_t walked = 0;
+    d2k_track_walk(table, count_flow, &walked);
+    const size_t count_after_remove = d2k_track_count(table);
     const uint64_t refusals_at_limit = d2k_track_refusals(table);
     const size_t expired = d2k_track_expire(table, 60202, 60000, NULL, NULL);
     const size_t count_after_expiry = d2k_track_count(table);
@@ -51,6 +70,8 @@ int main(void) {
            inserted, first_refused + second_refused, reverse_hit, count_at_limit, refusals_at_limit);
     printf("request65_slots=%zu_limit=%zu\n", d2k_track_capacity(rounded),
            d2k_track_capacity(rounded) - d2k_track_capacity(rounded) / 4);
+    printf("duplicate_count=%zu_remove_count=%zu_walk=%zu\n",
+           count_after_duplicate, count_after_remove, walked);
     printf("expired=%zu_remaining=%zu_accepted_after_expiry=%d_refusals=%" PRIu64 "_count=%zu\n",
            expired, count_after_expiry, accepted_after_expiry,
            refusals_after_expiry, count_after_reuse);
@@ -58,7 +79,9 @@ int main(void) {
     d2k_track_free(rounded);
     d2k_track_free(table);
     return inserted == 48 && first_refused && second_refused && reverse_hit &&
-                   count_at_limit == 48 && refusals_at_limit == 2 && expired == 48 &&
+                   count_at_limit == 48 && refusals_at_limit == 2 &&
+                   count_after_duplicate == 48 && count_after_remove == 45 &&
+                   walked == 45 && expired == 45 &&
                    count_after_expiry == 0 && accepted_after_expiry &&
                    refusals_after_expiry == 2 && count_after_reuse == 1
                ? 0

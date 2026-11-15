@@ -1138,6 +1138,12 @@ mod app {
     /// C `routes_refresh` (`d2kd.c:300-368`): печать переходов и quiet-строки
     /// смен не чаще раза в 600 с.
     /// C main `poll`: extra fd готов, если POLLIN/POLLERR/POLLHUP.
+    /// C `d2k_udp_path_read`: `rseq++` без насыщения; переполнение
+    /// u64 заворачивается, отдельного DROP/счётчика в C нет.
+    fn r2o_next_udp_receive_seq(sequence: u64) -> u64 {
+        sequence.wrapping_add(1)
+    }
+
     fn r2o_poll_extra_ready(revents: &[libc::c_short], index: Option<usize>) -> bool {
         index.is_some_and(|index| {
             revents.get(index).is_some_and(|revents| {
@@ -1963,7 +1969,7 @@ mod app {
             if received {
                 // C `d2k_udp_path_read`: голый `rseq++`, включая переход
                 // через 0; Rust повторяет это, а не подменяет 1.
-                udp_receive_seq = udp_receive_seq.wrapping_add(1);
+                udp_receive_seq = r2o_next_udp_receive_seq(udp_receive_seq);
             }
             let follow_receive_seq = if received { udp_receive_seq } else { 0 };
             udp_follow.r2o_age(now, follow_receive_seq);
@@ -6243,6 +6249,13 @@ mod app {
         use r2o_datapath::r2o_udp_hold::R2oUdpHeldPacket;
         use r2o_datapath::r2o_udp_sessions::R2oUdpSessions;
         use std::io;
+
+        #[test]
+        fn udp_receive_sequence_wraps_without_drop_like_c() {
+            assert_eq!(super::r2o_next_udp_receive_seq(0), 1);
+            assert_eq!(super::r2o_next_udp_receive_seq(u64::MAX - 1), u64::MAX);
+            assert_eq!(super::r2o_next_udp_receive_seq(u64::MAX), 0);
+        }
 
         #[test]
         fn poll_extra_ready_matches_c_route_and_control_masks() {
