@@ -5792,6 +5792,15 @@ mod app {
     /// ожидающим исполнением получают `exec_failed(QUEUE)`, владеющие
     /// UDP-хвосты отменяются, остальное считается `stale_deferred`.
     #[allow(clippy::too_many_arguments)]
+    /// C `d2k_udp_out_owned_emit`: ECANCELED — ненулевая ошибка, поэтому
+    /// владелец получает NF_ACCEPT, а не остаётся без вердикта.
+    fn r2o_shutdown_owned_verdict(
+        owner_id: u32,
+        mut send_verdict: impl FnMut(u32, u32) -> io::Result<()>,
+    ) {
+        let _ = send_verdict(owner_id, NF_ACCEPT);
+    }
+
     fn r2o_drain_scheduled_shutdown(
         queue: &mut QueueSocket,
         raw: Option<&RawSocket>,
@@ -5851,15 +5860,27 @@ mod app {
                             }
                             r2o_note_counter(&R2O_STALE_DEFERRED, 1);
                         }
-                        // C `d2k_udp_out_owned_emit(..., ECANCELED)`; в
-                        // production-пути R2O владеющие записи сейчас не
-                        // создаются, но очередь обязана быть дренирована.
-                        ScheduledOwner::Owned(_) | ScheduledOwner::Raw => {
+                        // C `d2k_udp_out_owned_emit(..., ECANCELED)`:
+                        // ненулевая ошибка → NF_ACCEPT, чтобы ID не остался
+                        // без вердикта. Raw — только stale.
+                        ScheduledOwner::Owned(owner_id) => {
+                            r2o_shutdown_owned_verdict(owner_id, |id, verdict| {
+                                queue.send_verdict(id, verdict)
+                            });
+                            r2o_note_counter(&R2O_STALE_DEFERRED, 1);
+                        }
+                        ScheduledOwner::Raw => {
                             r2o_note_counter(&R2O_STALE_DEFERRED, 1);
                         }
                     }
                 }
-                ScheduledPop::OversizedOwned { .. } | ScheduledPop::Dropped => {
+                ScheduledPop::OversizedOwned { owner_id } => {
+                    r2o_shutdown_owned_verdict(owner_id, |id, verdict| {
+                        queue.send_verdict(id, verdict)
+                    });
+                    r2o_note_counter(&R2O_STALE_DEFERRED, 1);
+                }
+                ScheduledPop::Dropped => {
                     r2o_note_counter(&R2O_STALE_DEFERRED, 1);
                 }
             }
@@ -6226,6 +6247,44 @@ mod app {
         #[test]
         fn offline_self_check_matches_c() {
             assert!(super::offline_self_check().is_ok());
+        }
+
+        #[test]
+        fn shutdown_owned_emits_accept_once_and_drain_is_idempotent() {
+            use r2o_datapath::scheduler::{ScheduledOwner, ScheduledPop, ScheduledQueue};
+
+            let mut scheduled = ScheduledQueue::with_limits(8, 65536).unwrap();
+            scheduled
+                .push_owned(
+                    Instant::now(),
+                    WirePacket {
+                        packet: vec![0x45; 28],
+                        kind: EmitKind::Payload,
+                        delay_us: 0,
+                    },
+                    42,
+                )
+                .unwrap();
+            let far = Instant::now() + Duration::from_secs(3600);
+            let first = scheduled.pop_due_ex(far, 65536);
+            assert!(matches!(
+                first,
+                ScheduledPop::Emitted {
+                    owner: ScheduledOwner::Owned(42),
+                    ..
+                }
+            ));
+            assert!(matches!(
+                scheduled.pop_due_ex(far, 65536),
+                ScheduledPop::Empty
+            ));
+
+            let mut verdicts = Vec::new();
+            super::r2o_shutdown_owned_verdict(42, |id, verdict| {
+                verdicts.push((id, verdict));
+                Ok(())
+            });
+            assert_eq!(verdicts, [(42, NF_ACCEPT)]);
         }
 
         #[test]
