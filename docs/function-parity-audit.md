@@ -93,14 +93,14 @@ production-путь не ставится. Формулировки «теста
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 343 | 205 | 0 | 0 |
+| core-net | 548 | 345 | 203 | 0 | 0 |
 | core-state | 692 | 470 | 222 | 0 | 0 |
 | datapath-core | 400 | 388 | 12 | 0 | 0 |
 | datapath-plan | 183 | 180 | 3 | 0 | 0 |
 | detect | 159 | 118 | 41 | 0 | 0 |
-| **Итого** | **1982** | **1499** | **483** | **0** | **0** |
+| **Итого** | **1982** | **1501** | **481** | **0** | **0** |
 
-Это не оценка паритета: 483 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 481 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -136,7 +136,7 @@ B — нужен только тест/differential **190**; C — архите�
 
 ## Итог и подтверждённые расхождения (2026-11-14)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1499 / P 483 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1501 / P 481 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -377,12 +377,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 343 | 205 | 0 | 0 |
+| core-net | 548 | 345 | 203 | 0 | 0 |
 | core-state | 692 | 470 | 222 | 0 | 0 |
 | datapath-core | 400 | 388 | 12 | 0 | 0 |
 | datapath-plan | 183 | 180 | 3 | 0 | 0 |
 | detect | 159 | 118 | 41 | 0 | 0 |
-| **Итого** | **1982** | **1499** | **483** | **0** | **0** |
+| **Итого** | **1982** | **1501** | **481** | **0** | **0** |
 
 
 ---
@@ -1424,8 +1424,8 @@ Inline-классификация HTTP-ответа: 451/2xx/3xx-портал, �
 | `d2k_f6_now` | 41-45 | 5 | монотонное время в мс для IPv6-фрагментера | `Instant`/`Duration` | **P*** | C `clock_gettime(CLOCK_MONOTONIC,&t)`; при ошибке 0; иначе `tv_sec*1000 + tv_nsec/1e6`. Rust использует `Instant`/`Duration` (монотонные) для сроков фрагментера; отдельной функции с возвратом 0 при сбое нет. |
 | `d2k_f6_attr` | 46-55 | 10 | rtattr: `NLMSG_ALIGN`, `RTA_LENGTH`, проверка `at+RTA_ALIGN<=cap`, запись и обновление `nlmsg_len` | `r2o_route.rs:691-707 r2o_route_lookup_request` | **P** | C — общий хелпер с проверкой ёмкости и `EMSGSIZE`; Rust вручную собирает **один** `RTA_DST` с фиксированными NLA-заголовком/выравниванием, без generic-хелпера и без `RTA_SRC`/`RTA_MARK`. |
 | `d2k_f6_query` | 56-72 | 17 | AF_NETLINK/SOCK_RAW/NETLINK_ROUTE, `SO_RCVTIMEO` 200 мс, sendto/recvfrom, `nl_pid==0`, восстановление errno | `r2o_route.rs:283-371` (`r2o_open_watch`, `r2o_drain_watch`) | **P** | R2O держит постоянный watch-сокет для правил/маршрута по умолчанию (`r2o_open_watch`), а не открывает сокет на каждый запрос; таймауты/цикл чтения иные. Контроллерного вызова `d2k_f6_query`-аналога нет. |
-| `d2k_f6_route` | 73-106 | 34 | RTM_GETROUTE IPv6: `RTA_DST`+`RTA_SRC`+`RTA_MARK`, `dst_len=src_len=128`; NLMSG_ERROR, RTM_NEWROUTE, `RTN_UNICAST` или `RTN_LOCAL`, `RTA_OIF`, `RTA_GATEWAY`; иначе ENETUNREACH | `r2o_route.rs:691-708 r2o_route_lookup_request`, `:774-803 r2o_route_parse_lookup` | **P** | **Подтверждённые отличия:** Rust-запрос содержит только `RTA_DST` (`:700-706`) и `dst_len=probe.len()*8`, без `RTA_SRC`/`RTA_MARK`/`src_len=128`; разбор принимает только `RTN_UNICAST` (без `RTN_LOCAL`), извлекает `RTA_OIF`/`RTA_MULTIPATH`, но **не `RTA_GATEWAY`**. C-путь нужен AF_PACKET/MAC; R2O-путь — только ifindex для MTU/egress. |
-| `d2k_f6_neighbor` | 107-154 | 48 | RTM_GETNEIGH dump: AF_INET6/ifindex, NUD_REACHABLE/STALE/DELAY/PROBE/PERMANENT, `NDA_DST`+`NDA_LLADDR`, 64 батча/200 мс, EHOSTUNREACH | нет функции; резолв делегирован ядру | **P** | Осознанная замена: R2O шлёт через `IPPROTO_RAW`, ядро само резолвит neighbor; `r2o_route_mtu` использует UDP-connect/`IP_MTU` (`raw.rs:484-550`). Ручной `RTM_GETNEIGH`/MAC и AF_PACKET-путь не портированы; это не N, потому что отправка закрыта ядром. |
+| `d2k_f6_route` | 73-106 | 34 | RTM_GETROUTE IPv6: `RTA_DST`+`RTA_SRC`+`RTA_MARK`, `dst_len=src_len=128`; NLMSG_ERROR, RTM_NEWROUTE, `RTN_UNICAST` или `RTN_LOCAL`, `RTA_OIF`, `RTA_GATEWAY`; иначе ENETUNREACH | `r2o_route.rs:691-708 r2o_route_lookup_request`, `:774-803 r2o_route_parse_lookup` | **E*** | R2O `raw.rs:1072 r2o_f6_route`: RTM_GETROUTE с RTA_DST/RTA_SRC/RTA_MARK, dst/src_len=128, NLMSG_ERROR, RTN_UNICAST/RTN_LOCAL, RTA_OIF/RTA_GATEWAY. `test-datapath-ip6frag-route-differential.sh` PASS **8 кейсов** на veth (route rc=0/gateway, neigh MAC, MTU 1500/1280, prepare short/long) + live raw6 base+shapes 1–4. Ограничение: root/netns и реальный OpenWrt не проверялись. |
+| `d2k_f6_neighbor` | 107-154 | 48 | RTM_GETNEIGH dump: AF_INET6/ifindex, NUD_REACHABLE/STALE/DELAY/PROBE/PERMANENT, `NDA_DST`+`NDA_LLADDR`, 64 батча/200 мс, EHOSTUNREACH | нет функции; резолв делегирован ядру | **E*** | R2O `raw.rs:1131 r2o_f6_neighbor`: RTM_GETNEIGH dump, AF_INET6/ifindex, NUD REACHABLE/STALE/DELAY/PROBE/PERMANENT, NDA_DST/NDA_LLADDR, EHOSTUNREACH; AF_PACKET sender использует результат. `test-datapath-ip6frag-route-differential.sh` PASS **8 кейсов** (neigh rc=0 mac=02:11:22:33:44:55) + live raw6. Ограничение: root/netns/реальный сосед не проверялись. |
 | `d2k_ip6frag_prepare` | 155-195 | 41 | проверка IPv6+Fragment header и точной длины; кеш 1 с по `fd/mark/src/dst`; `d2k_f6_route`; AF_PACKET/SOCK_DGRAM/ETH_P_IPV6; SO_MARK; if_up/MTU/MTU≥1280; HWADDR; neighbor для Ether !NOARP; иначе loopback/pointopoint/noarp; сохранение src/dst/mark/expires | `raw.rs:48-93 RawSocket::open`, `:484-550 r2o_route_mtu`, `:622-651 ipv6_udp_fragment`, `r2k-core/src/wire.rs:294-324 build_udp_fragments` | **E*** |   **Подтверждённые отличия:** (1) R2O `RawSocket` — `AF_INET/AF_INET6` + `IPPROTO_RAW` + `IP_HDRINCL`/`IPV6_HDRINCL`, **не AF_PACKET**; (2) нет ручного neighbor/MAC, `sockaddr_ll`, `SIOCGIFHWADDR`; (3) нет sender-кеша `fd/mark/src/dst` на 1 с — есть кеш route-MTU 16 записей (`raw.rs:359-371`); (4) MTU берётся из `r2o_pick_maxlen`/`r2o_select_egress_mtu` с полом 576 (`R2O_RAW_MTU_FLOOR`), проверки `MTU>=1280` в prepare нет; (5) `IP_NODEFRAG`/`IPV6_NODEFRAG` отсутствуют, поэтому AF_INET6/LOCAL_OUT может дефрагментировать IPv6-фрагменты — AF_PACKET-путь это исключал. Фрагменты строит `build_udp_fragments`, валидирует `ipv6_udp_fragment`. **Живой raw6 2026-11-14:** `test-raw6-send-differential.sh` PASS на live loopback для base+shapes 1–4; AF_PACKET/neigh/MAC-внутренности по-прежнему делегированы ядру — P. **Порт 2026-11-14:** `r2o_f6_route`/`r2o_f6_neighbor`/AF_PACKET/ETH_P_IPV6/SO_MARK/MTU>=1280/HWADDR/кеш 1 с; 8-case veth differential PASS (route/neigh/MAC, MTU1500/1280), live raw6 base+shapes 1–4 PASS. |
 | `d2k_ip6frag_send` | 196-204 | 9 | prepare; блокирующий `sendto` AF_PACKET sockaddr_ll; EINTR-повтор; точная длина; при ошибке `expires=0`, при короткой отправке `EIO` | `raw.rs:147-223 RawSocket::send_packet/send_packet_inner` | **E*** |   **Совпадает:** EINTR-повтор (`:207`), проверка точной длины (`:198-204`). **Отличия:** C — блокирующий AF_PACKET `sendto`, R2O — `sendto(MSG_DONTWAIT)` на `IPPROTO_RAW`; при `EAGAIN/ENOBUFS` C ждёт, R2O возвращает ошибку и учитывает `busy`; C сбрасывает кеш при любой ошибке, R2O при `EMSGSIZE` понижает route-MTU/maxlen (`:208-219`), а не сбрасывает кеш. **Живой raw6 2026-11-14:** base+shapes 1–4 PASS; сборка фрагментов (18 кейсов) и live-отправка совпали, транспорт делегирован ядру — P. **Порт 2026-11-14:** AF_PACKET sockaddr_ll, блокирующий sendto, EINTR, точная длина/EIO, сброс кеша; live raw6 base+shapes 1–4 PASS. |
 
