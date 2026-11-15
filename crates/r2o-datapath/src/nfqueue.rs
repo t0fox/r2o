@@ -1005,6 +1005,62 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "запускается вручную под unshare -Urn: scripts/test-datapath-enobufs-differential.sh"]
+    fn enobufs_rcvbuf_overflow_is_deterministic() {
+        use std::process::Command;
+        use std::time::Duration;
+
+        let queue = 65001_u16;
+        let setup = Command::new("sh")
+            .arg("-c")
+            .arg(
+                "ip link set lo up; \
+                 nft delete table inet r2o_enobufs 2>/dev/null || true; \
+                 nft add table inet r2o_enobufs; \
+                 nft 'add chain inet r2o_enobufs out { type filter hook output priority 0; }'; \
+                 nft add rule inet r2o_enobufs out udp dport 9999 queue num 65001 bypass",
+            )
+            .status()
+            .unwrap();
+        assert!(setup.success(), "не удалось поставить nft-правило NFQUEUE");
+
+        let socket =
+            super::QueueSocket::open(queue, libc::AF_INET as u16, 0xffff, 0xffff, true, 4096)
+                .unwrap();
+        let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let payload = vec![0_u8; 60_000];
+        for _ in 0..512 {
+            let _ = udp.send_to(&payload, "127.0.0.1:9999");
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        let mut bytes = Vec::new();
+        let mut received = 0_u32;
+        let mut rc = 0_i32;
+        for _ in 0..256 {
+            match socket.receive_timeout(&mut bytes, 0) {
+                Err(super::ReceiveError::LostPackets) => {
+                    rc = -2;
+                    break;
+                }
+                Ok(true) => received += 1,
+                Ok(false) => break,
+                Err(_) => {
+                    rc = -1;
+                    break;
+                }
+            }
+        }
+        let lost = socket.lost_packets();
+        let output = format!("recv_rc={rc} lost={lost}\n");
+        if let Ok(path) = std::env::var("R2O_NFQ_ENOBUFS_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        eprintln!("enobufs received={received} {output}");
+        assert_eq!(rc, -2, "ожидался ENOBUFS после переполнения rcvbuf");
+        assert!(lost > 0, "счётчик потерянных сообщений не вырос");
+    }
+
+    #[test]
     fn nfq_timestamp_differential_matches_c() {
         let socket = netlink_queue_descriptor();
         let set = super::r2o_enable_receive_timestamps(socket.as_raw_fd()).is_ok();
