@@ -137,6 +137,7 @@ def summarize(path):
         "selftest": None if selftest is None else (selftest.get("pass", 0), selftest.get("fail", 0)),
         "verdict": result.get("verdict"),
         "path": result.get("path"),
+        "notes": result.get("notes", []),
     }
 
 c = summarize(sys.argv[1])
