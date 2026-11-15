@@ -96,11 +96,11 @@ production-путь не ставится. Формулировки «теста
 | core-net | 548 | 345 | 203 | 0 | 0 |
 | core-state | 692 | 470 | 222 | 0 | 0 |
 | datapath-core | 400 | 388 | 12 | 0 | 0 |
-| datapath-plan | 183 | 180 | 3 | 0 | 0 |
+| datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 118 | 41 | 0 | 0 |
-| **Итого** | **1982** | **1501** | **481** | **0** | **0** |
+| **Итого** | **1982** | **1504** | **478** | **0** | **0** |
 
-Это не оценка паритета: 481 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 478 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -136,7 +136,7 @@ B — нужен только тест/differential **190**; C — архите�
 
 ## Итог и подтверждённые расхождения (2026-11-14)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1501 / P 481 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1504 / P 478 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -380,9 +380,9 @@ P означает неполное доказательство ветвей, N
 | core-net | 548 | 345 | 203 | 0 | 0 |
 | core-state | 692 | 470 | 222 | 0 | 0 |
 | datapath-core | 400 | 388 | 12 | 0 | 0 |
-| datapath-plan | 183 | 180 | 3 | 0 | 0 |
+| datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 118 | 41 | 0 | 0 |
-| **Итого** | **1982** | **1501** | **481** | **0** | **0** |
+| **Итого** | **1982** | **1504** | **478** | **0** | **0** |
 
 
 ---
@@ -5494,12 +5494,12 @@ transport+shape, v22 CLIENT_TCP с пустыми TCP-опциями, HTTP-со�
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | anchor_offset | 26-80 | 55 | static: вычислить якорь разреза или отказать | `plan/apply.rs:862` `anchor_offset` | E | **Ветви C:** 0→0; 1 требует `have_sni`; 2 требует `have_sni`, `sni_off+sni_len`; 3→`payload_len/2`; 5 требует `have_sni`, середина с зажимами; 4→отказ; default→«якорь не известен». Rust те же семь ветвей. Тест `anchor_two_three_four_and_unknown_cover_all_anchor_branches` покрывает 2/3/4/default и отсутствие SNI для 2; якоря 0/1/5 — прежними тестами. |
-| cmp_size | 82-85 | 4 | static: qsort-компаратор size_t | `plan/apply.rs:920` `points.sort_unstable()` | **P*** |  C возвращает -1/0/1 строгим сравнением `size_t`; Rust сортирует `Vec<usize>` тем же отношением. `interleaved_fakes...` (tests/apply.rs:53) задаёт разрезы 3 и 6 и проверяет возрастающие куски под `order reverse`; `split_owns...` (:31) — один разрез. Отдельного C/Rust differential нет. Понижено 2026-11-14: отдельного differential нет; проверена только сортировка. |
+| cmp_size | 82-85 | 4 | static: qsort-компаратор size_t | `plan/apply.rs:920` `points.sort_unstable()` | **E*** | `test-plan-helpers-differential.sh` PASS: C static `cmp_size` + `qsort` против Rust `sort_unstable` на значениях 0/1/0xff/0x100/0xffff/0x10000/0xffffff/0x1000000 с дубликатами; порядок совпал. **cases=17**. |
 | split_points | 90-118 | 29 | static: якорь+смещение, сортировка, дедуп, отброс краёв | `plan/apply.rs:921` `split_points` | E | **Ветви C:** `anchor_offset` ошибка → -1; `v<=0` или `v>=payload_len` → `continue`; сортировка и дедуп соседних. Rust: `i128`-сложение, тот же отбор, `sort_unstable`, `dedup`. Тест `split_points_dedup_and_drop_out_of_range_points` проверяет дубль точки (одна нарезка) и края 0/8 (обе точки отброшены, оригинал проходит без посылок). |
 | tls_ch_layout | 120-154 | 35 | static: разметка ClientHello (rnd/session id), три разных отказа | `plan/apply.rs:970` `tls_client_hello_layout` | E | **Ветви C:** короткий/не-ClientHello, расхождение длин, «пришло больше», `allow_prefix`, session id >32 или вне байтов. Rust те же проверки и смещения `rnd_off=11/sid_off=44`. Тест `tls_shape_errors_and_template_prefix_are_checked_like_c` покрывает короткий вход, чужой content type, расхождение длин, запрет префикса в обычном профиле и разрешённый префикс в `WIRE_TCP_TEMPLATE`. |
 | random_bytes | 156-163 | 8 | static: 32 случайных байта из `/dev/urandom` | `plan/apply.rs:1019` `secure_random` (`getrandom`) | E* | C `fopen("/dev/urandom","rb")`; `fread(out,1,n)`; `ferror`; `fclose`; успех только `got==n && !bad`. Rust `getrandom::getrandom(output)` с ошибкой `random-source`. `tls_fake_modifiers...` проверяет, что `TLS_MOD_RND` меняет random и session id; отказ источника не тестируется (внешнее состояние ОС). |
-| wr16 | 165-167 | 3 | static: записать u16 BE | `plan/apply.rs:1036` `write_u16` | **P*** |  C `b[off]=v>>8; b[off+1]=v`. Rust те же два байта. `tls_fake_modifiers...` с `DUPSID` проверяет перезапись длины записи после вставки session id; дифференциала нет. Понижено 2026-11-14: отдельного differential нет. |
-| wr24 | 168-171 | 4 | static: записать u24 BE | `plan/apply.rs:1041` `write_u24` | **P*** |  C `b[off]=v>>16; b[off+1]=v>>8; b[off+2]=v`. Rust те же три байта в `write_u24`; `tls_fake_modifiers_copy_session_id_randomize_and_keep_repeat_bytes_equal` (tests/apply.rs:233) проверяет перезапись длины рукопожатия после вставки session id. Отдельного C/Rust differential нет. Понижено 2026-11-14: отдельного differential нет. |
+| wr16 | 165-167 | 3 | static: записать u16 BE | `plan/apply.rs:1036` `write_u16` | **E*** | `test-plan-helpers-differential.sh` PASS: C `wr16` против Rust `write_u16` на 0/1/0xff/0x100/0xffff/0x10000/0xffffff/0x1000000, точные байты и усечение 16 бит. **cases=17**. |
+| wr24 | 168-171 | 4 | static: записать u24 BE | `plan/apply.rs:1041` `write_u24` | **E*** | `test-plan-helpers-differential.sh` PASS: C `wr24` против Rust `write_u24` на 0/1/0xff/0x100/0xffff/0x10000/0xffffff/0x1000000, точные байты и усечение 24 бит. **cases=17**. |
 | fake_tls_bytes | 173-237 | 65 | static: собрать копию приманки с правкой random/SID | `plan/apply.rs:531` `fake_tls_bytes` | E | **Ветви C:** отказ при не-TLS1.3 и не-template; разметка входа/приманки; template копирует и меняет random, DUPSID только при равных SID; non-template пересчитывает длину и копирует SID. Rust те же ветви и границы. Тесты `tls_fake_modifiers_copy_session_id_randomize_and_keep_repeat_bytes_equal` (равные SID), `tls_fake_template_keeps_unequal_sid_and_non_template_rebuilds_length` (template сохраняет длину, non-template пересчитывает 87→103), `tls_shape_errors...` (отказы разметки). |
 | emit_fake | 239-266 | 28 | static: заполнить `d2k_emit` из приманки и порчи | `plan/apply.rs:486` `emit_fake` | E | **Ветви C:** найти payload, иначе «фальшивка ссылается на нагрузку, которой нет»; `po = poison_id ? find : NULL`; `memset`; kind FAKE; `delay_us`; `seq`; `bytes/len` приманки; при `tls_mod` — `fake_tls_bytes`, `bytes=owned`; при порче — `ttl/flags/seq_shift/ts_up/autottl/autottl_delta/min/max`. Rust (`apply.rs:486-528`) те же шаги; `wire_profile` ставится сразу, C — на `finalize` всем посылкам; autottl вычисляется из `input.reference_ttl` в `poison_ttl` (`apply.rs:764-783`), C хранит поля и пересчитывает при отправке. `no_action...fake_only`, `tls_fake_modifiers...`, `interleaved...` покрывают fake/delay/ttl/poison/порядок. |
 | emit_vec_free | 268-272 | 5 | static: освободить массив посылок и owned_bytes | `plan/apply.rs:61` `Emission` (Vec) + `Drop` | E* | C `if(!v) return`; цикл `free(v[i].owned_bytes)`; `free(v)`. Rust владеет байтами через `Vec<u8>` в `Emission`, массив — `Vec<Emission>`; освобождение при `Drop`, отдельных утечек нет по типам. Теста на освобождение нет — свойство выражено типами. Исключение `header.md`: для free-функций доказательство — владение Rust/Drop, отдельный runtime-тест не требуется. |
