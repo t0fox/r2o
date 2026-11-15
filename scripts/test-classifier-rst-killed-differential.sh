@@ -171,6 +171,8 @@ if c_ops.count("-D") < 4:
     raise SystemExit(f"pending release was not retried: {c_rules}")
 if c_ops.count("-I") < 2:
     raise SystemExit(f"second insert/retry was not reached: {c_rules}")
+if not c_ops or c_ops[-1] != "-D":
+    raise SystemExit(f"process exit did not retry pending release: {c_rules}")
 print(f"D2O/R2O killed insert release matched: {len(c_rules)} rule commands, attention={len(c['attention'])}")
 PY
 

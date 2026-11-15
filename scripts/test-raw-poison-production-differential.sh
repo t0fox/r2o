@@ -147,8 +147,14 @@ run_open_case() {
     label=$4
     port=$5
     poison=$6
-    ip netns exec "$NS" env D2K_FW=nft "$TEMP/c-poison" "$family" "$address" "$port" 500 "$poison" \
-        >"$TEMP/c-$label.out" 2>"$TEMP/c-$label.err"
+    wrapper=${7:-}
+    if [ -n "$wrapper" ]; then
+        ip netns exec "$NS" env D2K_FW=nft "$TEMP/c-poison" "$family" "$address" "$port" 500 "$poison" "$wrapper" \
+            >"$TEMP/c-$label.out" 2>"$TEMP/c-$label.err"
+    else
+        ip netns exec "$NS" env D2K_FW=nft "$TEMP/c-poison" "$family" "$address" "$port" 500 "$poison" \
+            >"$TEMP/c-$label.out" 2>"$TEMP/c-$label.err"
+    fi
     ip netns exec "$NS" env R2O_FW=nft \
         R2O_RAW_POISON_TARGET="$target:$port" R2O_RAW_POISON_TIMEOUT_MS=500 \
         R2O_RAW_POISON_NAME="$poison" R2O_RAW_POISON_OUTPUT="$TEMP/rust-$label.out" \
@@ -189,6 +195,7 @@ V4=$(cat "$TEMP/ready-v4")
 for poison in badsum split seqovl syn_data none; do
     run_open_case 4 127.0.0.1 127.0.0.1 "v4-$poison" "$V4" "$poison"
 done
+run_open_case 4 127.0.0.1 127.0.0.1 "v4-wrapper" "$V4" badsum wrapper
 wait_server
 start_server 6 v6
 V6=$(cat "$TEMP/ready-v6")

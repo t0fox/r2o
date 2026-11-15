@@ -54,8 +54,8 @@ static void make_trigger(d2k_trigger *trigger)
 
 int main(int argc, char **argv)
 {
-    if (argc != 6) {
-        fprintf(stderr, "usage: %s FAMILY ADDRESS PORT TIMEOUT POISON\n", argv[0]);
+    if (argc != 6 && argc != 7) {
+        fprintf(stderr, "usage: %s FAMILY ADDRESS PORT TIMEOUT POISON [wrapper]\n", argv[0]);
         return 2;
     }
     uint8_t family = (uint8_t)atoi(argv[1]);
@@ -84,9 +84,21 @@ int main(int argc, char **argv)
         fprintf(stderr, "unknown poison: %s\n", name);
         return 2;
     }
-    int rc = d2k_raw_probe_poison_family(address, family, (uint16_t)atoi(argv[3]),
+    int rc;
+    if (argc == 7 && strcmp(argv[6], "wrapper") == 0) {
+        if (family != 4) {
+            fprintf(stderr, "wrapper is IPv4-only: %s\n", argv[6]);
+            return 2;
+        }
+        uint8_t ip4[4];
+        memcpy(ip4, address, sizeof ip4);
+        rc = d2k_raw_probe_poison(ip4, (uint16_t)atoi(argv[3]), &trigger, &poison,
+                                  atoi(argv[4]), 0, NULL, err, sizeof err);
+    } else {
+        rc = d2k_raw_probe_poison_family(address, family, (uint16_t)atoi(argv[3]),
                                          &trigger, &poison, atoi(argv[4]), 0, NULL,
                                          err, sizeof err);
+    }
     printf("poison|%s|%d|err=%s|dials=%lu\n", name, rc, err,
            d2k_raw_dial_count());
     return 0;

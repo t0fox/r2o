@@ -1557,6 +1557,17 @@ mod tls13_schedule_tests {
     }
 
     #[test]
+    fn tls13_u16_helpers_match_c_contract() {
+        // C `put16`/`get16` (tls13.c/tls13core.c): network byte order.
+        for value in [0u16, 1, 0x00ff, 0x1234, 0xffff] {
+            let encoded = value.to_be_bytes();
+            assert_eq!(u16::from_be_bytes(encoded), value);
+            assert_eq!(encoded[0], (value >> 8) as u8);
+            assert_eq!(encoded[1], value as u8);
+        }
+    }
+
+    #[test]
     fn tls13_schedule_matches_c_vectors() {
         let (secret, shared, transcript) = inputs();
         // Векторы сняты с C `d2k_t13_*` (D2O a378e230, tls13core.c/crypto.c).
