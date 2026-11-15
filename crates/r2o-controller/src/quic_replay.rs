@@ -2450,6 +2450,61 @@ mod tests {
     }
 
     #[test]
+    fn quic_run_with_plan_sends_ttl_fakes_head_and_plain_tail() {
+        use super::{R2oQuicCandidateKind, R2oQuicPlanState, r2o_quic_plan_text_from_state};
+        use r2k_core::plan::Plan;
+        use std::net::UdpSocket;
+        use std::time::Duration;
+
+        let first = super::r2o_quic_profile_snapshot(Some("quic-a.example")).unwrap();
+        let first_parsed = r2k_core::quic_snapshot::r2k_quic_snapshot_parse(&first).unwrap();
+        let head = first_parsed.datagrams()[0].to_vec();
+        let tail = head.clone();
+        let snapshot =
+            r2k_core::quic_snapshot::r2k_quic_snapshot_pack(&[&head[..], &tail[..]]).unwrap();
+
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let endpoint = server.local_addr().unwrap();
+        let receiver = std::thread::spawn(move || {
+            let mut packets = Vec::new();
+            for _ in 0..5 {
+                let mut packet = [0_u8; 2048];
+                match server.recv_from(&mut packet) {
+                    Ok((length, _)) => packets.push(packet[..length].to_vec()),
+                    Err(_) => break,
+                }
+            }
+            packets
+        });
+
+        let directives = "payload 1 aabbccdd\npoison 1 ttl=3\nfake payload=1 poison=1 repeats=2 gap_us=0 place=before\n";
+        let text = r2o_quic_plan_text_from_state(&R2oQuicPlanState {
+            kind: Some(R2oQuicCandidateKind::OriginalTtl(3)),
+            directives,
+            plan_id: None,
+            udplen: 0,
+            junk: false,
+            non_original: false,
+            frag_survives: true,
+        })
+        .unwrap();
+        let plan = Plan::parse(&crate::plan_text::compile_text(&text).unwrap()).unwrap();
+        let mut probe = QuicReplayProbe::prepare(endpoint, &snapshot, None).unwrap();
+        probe
+            .run_with_plan(&plan, Duration::from_millis(30))
+            .unwrap();
+        let packets = receiver.join().unwrap();
+        assert_eq!(packets.len(), 4, "2 fake + head + tail");
+        assert_eq!(&packets[0], b"\xaa\xbb\xcc\xdd");
+        assert_eq!(&packets[1], b"\xaa\xbb\xcc\xdd");
+        assert_eq!(packets[2].len(), head.len());
+        assert_eq!(packets[3].len(), tail.len());
+    }
+
+    #[test]
     fn quic_plan_send_routes_ipfrag_to_sink_and_plain_to_socket() {
         use super::{R2oQuicCandidateKind, R2oQuicPlanState, r2o_quic_plan_text_from_state};
         use r2k_core::plan::Plan;
