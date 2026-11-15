@@ -12911,6 +12911,22 @@ struct R2oPendingQuicDiscovery {
     deny_recheck: bool,
 }
 
+/// C `T_SHAPE_WAIT`: QUIC-задача ждёт снимок приветствия своего имени.
+/// Поля названы как у C `task`: `name`, `transport`, `family`, `started_ms`
+/// (здесь `since`). Пока задача ждёт, worker не запускается и permit не
+/// занимается.
+#[cfg(unix)]
+#[derive(Clone, Debug)]
+struct R2oShapeWait {
+    target: r2o_controller::discovery::DiscoveryTarget,
+    name: String,
+    transport: u8,
+    family: u8,
+    since: std::time::Instant,
+    r2o_mark: Option<u32>,
+    deny_recheck: bool,
+}
+
 #[cfg(unix)]
 fn r2o_enqueue_quic_discovery(
     pending: &mut VecDeque<R2oPendingQuicDiscovery>,
@@ -13063,6 +13079,11 @@ struct DiscoveryWorker {
         ),
     >,
     dns_watching_order: VecDeque<R2oDiscoveryTaskKey>,
+    /// C `T_SHAPE_WAIT`: ожидание снимка QUIC по имени/транспорту/семейству.
+    /// Карта ведётся задачей Discovery, а не очередью замеров: worker и
+    /// permit не занимаются, пока снимка нет.
+    shape_waits: HashMap<R2oDiscoveryTaskKey, R2oShapeWait>,
+    shape_wait_order: VecDeque<R2oDiscoveryTaskKey>,
     task_slots: Vec<Option<R2oDiscoveryTaskKey>>,
     flow_unfit_done: R2oFlowUnfitDone,
     threads: Vec<JoinHandle<()>>,
@@ -16338,6 +16359,8 @@ group_block_proven: false,
             completed_started_at: HashMap::new(),
             dns_watching: HashMap::new(),
             dns_watching_order: VecDeque::new(),
+            shape_waits: HashMap::new(),
+            shape_wait_order: VecDeque::new(),
             task_slots: vec![None; R2O_DISCOVERY_TASK_CAPACITY],
             flow_unfit_done: R2oFlowUnfitDone::default(),
             threads: Vec::new(),
@@ -16733,6 +16756,7 @@ group_block_proven: false,
             .active
             .keys()
             .chain(self.pending_rechecks.keys())
+            .chain(self.shape_waits.keys())
             .cloned()
             .collect::<HashSet<_>>();
         for (failure_key, failed_at) in &self.failed_at {
@@ -16802,6 +16826,7 @@ group_block_proven: false,
             .active
             .keys()
             .chain(self.pending_rechecks.keys())
+            .chain(self.shape_waits.keys())
             .cloned()
             .collect::<HashSet<_>>();
         // Новый поиск по имени снимает прежний T_WATCHING: C отдаёт слот
@@ -16898,6 +16923,130 @@ group_block_proven: false,
     fn r2o_forget_dns_watching(&mut self, task_key: &R2oDiscoveryTaskKey) {
         self.dns_watching.remove(task_key);
         self.dns_watching_order.retain(|saved| saved != task_key);
+    }
+
+    /// C `start_search`: `fill_hellos` не смог собрать QUIC-вход, но задача
+    /// уже заняла слот — переводим её в `T_SHAPE_WAIT`, worker не запускаем.
+    /// Возвращает false, если слотов ожидания нет (C `task_free_slot`).
+    fn r2o_begin_shape_wait(
+        &mut self,
+        target: r2o_controller::discovery::DiscoveryTarget,
+        name: String,
+        transport: u8,
+        family: u8,
+        r2o_mark: Option<u32>,
+        deny_recheck: bool,
+        now: std::time::Instant,
+    ) -> bool {
+        let key = r2o_discovery_task_key(&target);
+        if self.shape_waits.contains_key(&key) {
+            return true;
+        }
+        if self.shape_waits.len() >= R2O_DISCOVERY_TASK_CAPACITY {
+            return false;
+        }
+        let Some((task_slot, evicted_watcher)) = self.r2o_reusable_task_slot(&key) else {
+            return false;
+        };
+        self.shape_waits.insert(
+            key.clone(),
+            R2oShapeWait {
+                target: target.clone(),
+                name,
+                transport,
+                family,
+                since: now,
+                r2o_mark,
+                deny_recheck,
+            },
+        );
+        self.shape_wait_order.push_back(key.clone());
+        if let Some(evicted_watcher) = evicted_watcher {
+            self.r2o_forget_watching_task(&evicted_watcher);
+        }
+        self.task_slots[task_slot] = Some(key);
+        let mut searches = self
+            .searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        searches.update(&target, "ждём форму приветствия", 0, 0, "", "");
+        searches.record_admission(&target, None);
+        drop(searches);
+        self.r2o_reconcile_task_slots(now);
+        true
+    }
+
+    /// C `on_shape` ветка `T_SHAPE_WAIT`: снимок имени/транспорта/семейства
+    /// снимает ожидание. Вызывающий запускает `launch_or_queue` (в R2O —
+    /// постановку в очередь QUIC-замера) полученным target/snapshot.
+    fn r2o_take_shape_wait(
+        &mut self,
+        name: &str,
+        transport: u8,
+        family: u8,
+    ) -> Option<R2oShapeWait> {
+        let key = self
+            .shape_waits
+            .iter()
+            .find(|(_, wait)| {
+                wait.name == name && wait.transport == transport && wait.family == family
+            })
+            .map(|(key, _)| key.clone())?;
+        self.shape_wait_order.retain(|saved| saved != &key);
+        self.shape_waits.remove(&key)
+    }
+
+    /// C lifetime-ветка `T_SHAPE_WAIT`: формы так и не дождались — `task_done`
+    /// без failure/плана, терминальный отчёт `cancelled`.
+    fn r2o_expire_shape_waits(
+        &mut self,
+        now: std::time::Instant,
+    ) -> Vec<r2o_controller::discovery::DiscoveryTarget> {
+        let expired_keys = self
+            .shape_waits
+            .iter()
+            .filter(|(_, wait)| {
+                now.saturating_duration_since(wait.since) > R2O_DISCOVERY_TASK_LIFETIME
+            })
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        let mut expired = Vec::new();
+        for key in expired_keys {
+            let Some(wait) = self.shape_waits.remove(&key) else {
+                continue;
+            };
+            self.shape_wait_order.retain(|saved| saved != &key);
+            let target = wait.target;
+            self.searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .report_terminal(&target, "cancelled", None, None, now);
+            self.seen.remove(&target);
+            self.seen_order.retain(|seen| seen != &target);
+            self.suspect_fingerprints
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&target);
+            self.suspect_fingerprint_order
+                .retain(|seen| seen != &target);
+            self.client_snapshot_targets
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&target);
+            self.client_snapshot_reasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&key);
+            self.volume_searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .forget_carried_rx(&key);
+            expired.push(target);
+        }
+        if !expired.is_empty() {
+            self.r2o_reconcile_task_slots(now);
+        }
+        expired
     }
 
     fn r2o_forget_watching_task(&mut self, task_key: &R2oDiscoveryTaskKey) {
@@ -22364,6 +22513,15 @@ impl ControlClient {
                         continue;
                     }
                     let now = std::time::Instant::now();
+                    if let Some((worker, _, _, _)) = &mut discovery {
+                        for target in worker.r2o_expire_shape_waits(now) {
+                            println!(
+                                "по {} (QUIC) формы приветствия так и не пришло — мерить нечем",
+                                target.host
+                            );
+                            std::io::stdout().flush()?;
+                        }
+                    }
                     if let Some((host, family)) =
                         quic_deny.r2o_pending_removals(now).into_iter().next()
                     {
@@ -22886,7 +23044,7 @@ impl ControlClient {
                             event.planned
                         );
                     }
-                    let Some((_, catalog, _, r2o_mark)) = &mut discovery else {
+                    let Some((worker, catalog, _, r2o_mark)) = &mut discovery else {
                         std::io::stdout().flush()?;
                         continue;
                     };
@@ -22950,9 +23108,42 @@ impl ControlClient {
                             let Some(snapshot) =
                                 r2o_controller::quic_replay::r2o_quic_profile_snapshot(server_name)
                             else {
-                                println!(
-                                    "QUIC-проба пропущена: не удалось собрать профиль Initial"
-                                );
+                                // C `start_search`: fill_hellos не собрал
+                                // QUIC-вход, но задача уже есть — ждём
+                                // снимок имени вместо потери подозрения.
+                                let Some(host) = server_name.map(str::to_owned) else {
+                                    println!(
+                                        "QUIC-проба пропущена: не удалось собрать профиль Initial"
+                                    );
+                                    std::io::stdout().flush()?;
+                                    continue;
+                                };
+                                let family = if server.is_ipv4() { 4 } else { 6 };
+                                let target = r2o_controller::discovery::DiscoveryTarget {
+                                    host: host.clone(),
+                                    endpoint: server.to_string(),
+                                    family,
+                                    shape: SHAPE_QUIC,
+                                };
+                                if worker.r2o_begin_shape_wait(
+                                    target,
+                                    host.clone(),
+                                    17,
+                                    family,
+                                    *r2o_mark,
+                                    false,
+                                    now,
+                                ) {
+                                    println!(
+                                        "по {} (QUIC) жду форму приветствия: собрать Initial не удалось, мерить до снимка нечем",
+                                        host
+                                    );
+                                } else {
+                                    println!(
+                                        "по {} (QUIC) форма приветствия не заказана: слотов ожидания нет",
+                                        host
+                                    );
+                                }
                                 std::io::stdout().flush()?;
                                 continue;
                             };
@@ -24082,6 +24273,70 @@ impl ControlClient {
                                 r2o_quic_note_multi(&name, family);
                             }
                         }
+                    }
+                }
+                if let Some(snapshot) = hello.quic_snapshot.as_ref()
+                    && let Some((worker, _, _, mark)) = &mut discovery
+                {
+                    let family = hello.key[0];
+                    let snapshot_name = r2o_quic_snapshot_client_name(snapshot);
+                    let hello_name = hello
+                        .host
+                        .as_deref()
+                        .and_then(|host| std::str::from_utf8(host).ok())
+                        .filter(|name| !name.is_empty());
+                    let mut shape_wait = None;
+                    for name in [snapshot_name.as_deref(), hello_name].into_iter().flatten() {
+                        if let Some(wait) = worker.r2o_take_shape_wait(name, 17, family) {
+                            shape_wait = Some(wait);
+                            break;
+                        }
+                    }
+                    if let Some(wait) = shape_wait {
+                        let now = std::time::Instant::now();
+                        let Ok(server) = wait.target.endpoint.parse::<std::net::SocketAddr>()
+                        else {
+                            continue;
+                        };
+                        if r2o_pending_quic_discovery.len() >= R2O_QUIC_TRIAL_QUEUE_CAPACITY {
+                            worker
+                                .searches
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .report_terminal(
+                                    &wait.target,
+                                    "queue-full",
+                                    Some("none"),
+                                    None,
+                                    now,
+                                );
+                            println!(
+                                "по {} (QUIC) снимок приветствия пришёл, но очередь замеров заполнена",
+                                wait.target.host
+                            );
+                            std::io::stdout().flush()?;
+                            continue;
+                        }
+                        quic_trial_cooldowns
+                            .insert(server.ip(), now + std::time::Duration::from_secs(60 * 60));
+                        let queued = r2o_enqueue_quic_discovery(
+                            &mut r2o_pending_quic_discovery,
+                            server,
+                            snapshot.clone(),
+                            now,
+                            wait.r2o_mark.or(*mark),
+                            &measurement_gate,
+                            wait.deny_recheck,
+                        );
+                        println!(
+                            "по {} (QUIC) поймана форма приветствия: {} байт — проба поставлена в общую очередь ({}/{})",
+                            wait.target.host,
+                            snapshot.len(),
+                            queued,
+                            R2O_QUIC_TRIAL_QUEUE_CAPACITY
+                        );
+                        std::io::stdout().flush()?;
+                        continue;
                     }
                 }
                 if let Some((discovery_worker, catalog, _, _)) = discovery.as_ref()
@@ -37817,6 +38072,94 @@ mod tests {
         assert!(worker.searches.lock().unwrap().entries.is_empty());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn shape_wait_state_matches_c() {
+        use super::R2O_DISCOVERY_TASK_LIFETIME;
+        use r2o_controller::discovery::DiscoveryTarget;
+        use std::fmt::Write as _;
+        use std::time::{Duration, Instant};
+
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        let now = Instant::now();
+        let name = "shape-wait.example.com".to_string();
+        let target = DiscoveryTarget {
+            host: name.clone(),
+            endpoint: "198.51.100.20:443".into(),
+            family: 4,
+            shape: SHAPE_QUIC,
+        };
+        let key = super::r2o_discovery_task_key(&target);
+        let mut output = String::new();
+        let mut emit =
+            |label: &str, matched: bool, snapped: bool, trig_any: bool, wait: bool, done: bool| {
+                writeln!(
+                    output,
+                    "{label} matched={} snapped={} trig_any={} wait={} done={}",
+                    u8::from(matched),
+                    u8::from(snapped),
+                    u8::from(trig_any),
+                    u8::from(wait),
+                    u8::from(done)
+                )
+                .unwrap();
+            };
+
+        // Своё имя+транспорт+семейство: ожидание снято, снимок получен.
+        assert!(worker.r2o_begin_shape_wait(target.clone(), name.clone(), 17, 4, None, false, now));
+        let taken = worker.r2o_take_shape_wait(&name, 17, 4);
+        let matched = taken.is_some();
+        emit("own_quic", matched, matched, matched, false, false);
+
+        // Чужое имя, чужой транспорт, чужое семейство — ожидание стоит.
+        for (label, candidate, transport, family) in [
+            ("foreign_name", "other.example.com", 17u8, 4u8),
+            ("foreign_transport", name.as_str(), 6, 4),
+            ("foreign_family", name.as_str(), 17, 6),
+        ] {
+            assert!(worker.r2o_begin_shape_wait(
+                target.clone(),
+                name.clone(),
+                17,
+                4,
+                None,
+                false,
+                now
+            ));
+            let taken = worker.r2o_take_shape_wait(candidate, transport, family);
+            assert!(taken.is_none());
+            emit(
+                label,
+                false,
+                false,
+                false,
+                worker.shape_waits.contains_key(&key),
+                false,
+            );
+            let _ = worker.r2o_take_shape_wait(&name, 17, 4);
+        }
+
+        // Срок вышел: task_done без failure/плана, ожидание снято.
+        assert!(
+            worker.r2o_begin_shape_wait(
+                target.clone(),
+                name.clone(),
+                17,
+                4,
+                None,
+                false,
+                now.checked_sub(R2O_DISCOVERY_TASK_LIFETIME + Duration::from_secs(1))
+                    .unwrap()
+            )
+        );
+        let expired = worker.r2o_expire_shape_waits(now);
+        emit("timeout", false, false, false, false, expired.len() == 1);
+
+        if let Ok(path) = std::env::var("R2O_SHAPE_WAIT_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
+
     fn r2o_test_discovery_worker_without_threads() -> super::DiscoveryWorker {
         let (_sender, outcomes) = std::sync::mpsc::sync_channel(8);
         super::DiscoveryWorker {
@@ -37892,6 +38235,8 @@ mod tests {
             completed_started_at: std::collections::HashMap::new(),
             dns_watching: std::collections::HashMap::new(),
             dns_watching_order: VecDeque::new(),
+            shape_waits: std::collections::HashMap::new(),
+            shape_wait_order: VecDeque::new(),
             task_slots: vec![None; super::R2O_DISCOVERY_TASK_CAPACITY],
             flow_unfit_done: super::R2oFlowUnfitDone::default(),
             threads: Vec::new(),
@@ -53615,6 +53960,8 @@ group_block_proven: false,
             completed_started_at: std::collections::HashMap::new(),
             dns_watching: std::collections::HashMap::new(),
             dns_watching_order: VecDeque::new(),
+            shape_waits: std::collections::HashMap::new(),
+            shape_wait_order: VecDeque::new(),
             active: std::collections::HashMap::new(),
             task_slots: vec![None; super::R2O_DISCOVERY_TASK_CAPACITY],
             flow_unfit_done: super::R2oFlowUnfitDone::default(),
