@@ -86,6 +86,8 @@ static R2O_DISCOVERY_WORKERS_STARTED: AtomicUsize = AtomicUsize::new(0);
 static R2O_DISCOVERY_WORKERS_JOINED: AtomicUsize = AtomicUsize::new(0);
 #[cfg(unix)]
 static R2O_DISCOVERY_WORKERS_START_FAILURES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(unix)]
+static R2O_DISCOVERY_WORKERS_JOIN_FAILURES: AtomicUsize = AtomicUsize::new(0);
 /// C `start_worker`: pthread stack явно 1 МиБ, иначе на musl (128 КиБ)
 /// глубокий измерительный стек может тихо испортить память.
 #[cfg(unix)]
@@ -12800,6 +12802,8 @@ struct DiscoveryWorker {
     spawn_worker: Arc<dyn Fn() -> std::io::Result<std::thread::JoinHandle<()>> + Send + Sync>,
     worker_target: usize,
     worker_live: Arc<AtomicUsize>,
+    /// C `s->last_measurement_done_ms`: срок последнего завершённого замера.
+    last_measurement_done_at: Option<std::time::Instant>,
     active: HashMap<R2oDiscoveryTaskKey, r2o_controller::discovery::DiscoveryTarget>,
     completed: HashSet<R2oDiscoveryTaskKey>,
     completed_started_at: HashMap<R2oDiscoveryTaskKey, std::time::Instant>,
@@ -16083,6 +16087,7 @@ group_block_proven: false,
             spawn_worker,
             worker_target,
             worker_live,
+            last_measurement_done_at: None,
             active: HashMap::new(),
             completed: HashSet::new(),
             completed_started_at: HashMap::new(),
@@ -16100,7 +16105,9 @@ group_block_proven: false,
         while index < self.threads.len() {
             if self.threads[index].is_finished() {
                 let thread = self.threads.swap_remove(index);
-                let _ = thread.join();
+                if thread.join().is_err() {
+                    R2O_DISCOVERY_WORKERS_JOIN_FAILURES.fetch_add(1, Ordering::Relaxed);
+                }
             } else {
                 index += 1;
             }
@@ -16433,6 +16440,46 @@ group_block_proven: false,
             R2O_DISCOVERY_WORKERS_JOINED.load(Ordering::Relaxed) as u64,
             R2O_DISCOVERY_WORKERS_START_FAILURES.load(Ordering::Relaxed) as u64,
         )
+    }
+
+    fn r2o_worker_join_failures(&self) -> u64 {
+        R2O_DISCOVERY_WORKERS_JOIN_FAILURES.load(Ordering::Relaxed) as u64
+    }
+
+    /// C `worker_oldest_age_ms`: возраст самого старого живого worker'а.
+    /// В R2O worker общий для активной задачи; возраст берётся из
+    /// `R2oDiscoverySearch.started_at` активных целей.
+    fn r2o_worker_oldest(&self, now: std::time::Instant) -> (Option<u64>, &'static str) {
+        let searches = self
+            .searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let oldest = self
+            .active
+            .iter()
+            .filter_map(|(key, target)| {
+                let started = searches.entries.get(key)?.started_at?;
+                Some((
+                    started,
+                    if r2o_discovery_transport(target) == 17 {
+                        "QUIC"
+                    } else {
+                        "TCP"
+                    },
+                ))
+            })
+            .min_by_key(|(started, _)| *started);
+        oldest.map_or((None, ""), |(started, kind)| {
+            (
+                Some(now.saturating_duration_since(started).as_millis() as u64),
+                kind,
+            )
+        })
+    }
+
+    fn r2o_last_measurement_age(&self, now: std::time::Instant) -> Option<u64> {
+        self.last_measurement_done_at
+            .map(|done| now.saturating_duration_since(done).as_millis() as u64)
     }
 
     fn r2o_outstanding_task_count(&self, now: std::time::Instant) -> usize {
@@ -18146,6 +18193,7 @@ group_block_proven: false,
             self.failed_retry_after
                 .insert(failure_key, R2O_DISCOVERY_TASK_REST);
         }
+        self.last_measurement_done_at = Some(std::time::Instant::now());
         outcome
     }
 
@@ -20914,6 +20962,17 @@ impl ControlClient {
                             .as_ref()
                             .map(|(worker, _, _, _)| worker.r2o_worker_counts())
                             .unwrap_or_default();
+                        let now = std::time::Instant::now();
+                        let worker_join_failures = discovery
+                            .as_ref()
+                            .map_or(0, |(worker, _, _, _)| worker.r2o_worker_join_failures());
+                        let (worker_oldest_age_ms, worker_oldest_type) =
+                            discovery.as_ref().map_or((None, ""), |(worker, _, _, _)| {
+                                worker.r2o_worker_oldest(now)
+                            });
+                        let last_measurement_age_ms = discovery
+                            .as_ref()
+                            .and_then(|(worker, _, _, _)| worker.r2o_last_measurement_age(now));
                         let limiter = measurements.limited_by.as_deref().unwrap_or_default();
                         let limiter_mask = u32::from(limiter.contains("процессор"))
                             | u32::from(limiter.contains("память")) << 1
@@ -21047,13 +21106,13 @@ impl ControlClient {
                             workers_live: (measurements.active + measurements.queued) as u64,
                             workers_result_pending: measurements.queued as u64,
                             workers_join_pending: 0,
-                            worker_oldest_age_ms: None,
-                            last_measurement_age_ms: None,
+                            worker_oldest_age_ms,
+                            last_measurement_age_ms,
                             workers_started,
                             workers_joined,
                             worker_start_failures,
-                            worker_join_failures: 0,
-                            worker_oldest_type: "",
+                            worker_join_failures,
+                            worker_oldest_type,
                             ..r2o_controller::diagnostics::Counts::default()
                         }
                     });
@@ -30589,6 +30648,51 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn diagnostic_counts_worker_fields_match_c() {
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        let now = std::time::Instant::now();
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "counts.example".into(),
+            endpoint: "198.51.100.91:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let key = super::r2o_discovery_task_key(&target);
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        worker.active.insert(key.clone(), target.clone());
+        {
+            let mut searches = worker.searches.lock().unwrap();
+            searches.update(&target, "распознаём поведение", 0, 0, "", "");
+            searches.entries.get_mut(&key).unwrap().started_at = Some(now - Duration::from_secs(4));
+        }
+        worker.last_measurement_done_at = Some(now - Duration::from_secs(2));
+        super::R2O_DISCOVERY_WORKERS_STARTED.store(5, Ordering::Relaxed);
+        super::R2O_DISCOVERY_WORKERS_JOINED.store(4, Ordering::Relaxed);
+        super::R2O_DISCOVERY_WORKERS_START_FAILURES.store(2, Ordering::Relaxed);
+        super::R2O_DISCOVERY_WORKERS_JOIN_FAILURES.store(1, Ordering::Relaxed);
+
+        let (started, joined, start_failures) = worker.r2o_worker_counts();
+        let (oldest_age, oldest_type) = worker.r2o_worker_oldest(now);
+        let last_age = worker.r2o_last_measurement_age(now);
+        let output = format!(
+            "workers_started={started}\nworkers_joined={joined}\nworker_start_failures={start_failures}\nworker_join_failures={}\nworker_oldest_age_s={}\nworker_oldest_type={oldest_type}\nlast_measurement_age_s={}\n",
+            worker.r2o_worker_join_failures(),
+            oldest_age.unwrap_or(0) / 1000,
+            last_age.unwrap_or(0) / 1000
+        );
+        assert_eq!(
+            output,
+            "workers_started=5\nworkers_joined=4\nworker_start_failures=2\nworker_join_failures=1\nworker_oldest_age_s=4\nworker_oldest_type=TCP\nlast_measurement_age_s=2\n"
+        );
+        if let Ok(path) = std::env::var("R2O_DIAGNOSTIC_COUNTS_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn dns_task_cell_matches_service_and_excludes_health() {
         use r2k_core::dns_config::DnsService;
 
@@ -32090,6 +32194,61 @@ mod tests {
             catalog.boxes[0].bindings[0].budget,
             super::R2O_D2K_CAT_BUDGET_CUT
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn budget_cut_reject_binding_marks_match_c() {
+        use std::fmt::Write as _;
+
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "cut.example".into(),
+            endpoint: "198.51.100.82:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let plan_id = "11".repeat(16);
+        let cases = [
+            ("passed", 1u8, "cut.example", 6u8, 4u8, 1u8),
+            ("unchecked", 2, "cut.example", 6, 4, 1),
+            ("none", 0, "cut.example", 6, 4, 1),
+            ("already_cut", 3, "cut.example", 6, 4, 1),
+            ("shape", 1, "cut.example", 6, 4, 2),
+            ("transport", 1, "cut.example", 17, 4, 1),
+            ("family", 1, "cut.example", 6, 6, 1),
+            ("target", 1, "other.example", 6, 4, 1),
+        ];
+        let mut output = String::new();
+        for (name, budget, bind_target, transport, family, shape) in cases {
+            let mut catalog = Catalog {
+                boxes: vec![BoxRecord {
+                    bindings: vec![Binding {
+                        kind: "name".into(),
+                        target: bind_target.into(),
+                        plan_id: plan_id.clone(),
+                        enabled: true,
+                        budget,
+                        transport,
+                        family,
+                        shape,
+                        ..Binding::default()
+                    }],
+                    ..BoxRecord::default()
+                }],
+                ..Catalog::default()
+            };
+            // C `record_shape(t)`: TCP shape 1, QUIC shape 4.
+            let cut_shape = if transport == 17 { 4 } else { 1 };
+            super::r2o_budget_cut_reject(&mut catalog, &target, &plan_id, cut_shape, transport);
+            writeln!(output, "{name}={}", catalog.boxes[0].bindings[0].budget).unwrap();
+        }
+        assert_eq!(
+            output,
+            "passed=3\nunchecked=3\nnone=3\nalready_cut=3\nshape=1\ntransport=1\nfamily=1\ntarget=1\n"
+        );
+        if let Ok(path) = std::env::var("R2O_BUDGET_CUT_REJECT_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
     }
 
     #[cfg(unix)]
@@ -36387,6 +36546,7 @@ mod tests {
             spawn_worker: Arc::new(|| unreachable!("тестовый worker без потоков")),
             worker_target: 0,
             worker_live: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            last_measurement_done_at: None,
             active: std::collections::HashMap::new(),
             completed: std::collections::HashSet::new(),
             completed_started_at: std::collections::HashMap::new(),
@@ -51902,6 +52062,7 @@ group_block_proven: false,
             spawn_worker: Arc::new(|| unreachable!("тестовый worker без потоков")),
             worker_target: 0,
             worker_live: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            last_measurement_done_at: None,
             outcomes,
             network_whitelist_updates: Arc::new(Mutex::new(VecDeque::new())),
             cancel: Arc::new(AtomicBool::new(false)),

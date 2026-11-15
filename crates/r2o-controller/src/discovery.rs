@@ -347,6 +347,80 @@ fn volume_bucket(volume: i32) -> i32 {
     (i32::BITS - volume.leading_zeros()) as i32
 }
 
+/// C `fnv1a` (`core/sched.c`): полный 64-битный хеш без замены `r2o-plan`.
+fn r2o_box_fnv1a(text: &str) -> u64 {
+    text.bytes()
+        .fold(1_469_598_103_934_665_603_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(1_099_511_628_211)
+        })
+}
+
+fn r2o_is_volume_signal(kind: &str) -> bool {
+    matches!(kind, "volume" | "rx-volume" | "rx-volume-wire")
+}
+
+/// C `box_id_for` (`core/sched.c:7648-7729`): имя коробки из отпечатка,
+/// `t->box_id`, текста плана и соли конфликта.
+pub(crate) fn r2o_box_id_for(
+    catalog: &Catalog,
+    plan_text: &str,
+    observed: Option<&crate::catalog::Fingerprint>,
+    preferred_box_id: Option<&str>,
+) -> String {
+    if let Some(box_id) = preferred_box_id {
+        return box_id.to_owned();
+    }
+    let Some(observed) = observed else {
+        return "box-без-приметы".to_owned();
+    };
+    if observed.signals.is_empty() {
+        return "box-без-приметы".to_owned();
+    }
+    let mut matches = catalog
+        .boxes
+        .iter()
+        .filter(|record| record.fingerprint.is_compatible_with(observed));
+    if let Some(only) = matches.next()
+        && matches.next().is_none()
+    {
+        return only.id.clone();
+    }
+
+    let mut hash = 1_469_598_103_934_665_603_u64;
+    for signal in &observed.signals {
+        let evidence = if r2o_is_volume_signal(&signal.kind) {
+            format!(
+                "{}/{}/{}/{}/b{}",
+                signal.kind,
+                signal.ttl,
+                signal.tos,
+                signal.ipid,
+                volume_bucket(signal.volume)
+            )
+        } else {
+            format!(
+                "{}/{}/{}/{}",
+                signal.kind, signal.ttl, signal.tos, signal.ipid
+            )
+        };
+        hash ^= r2o_box_fnv1a(&evidence);
+        hash = hash.wrapping_mul(1_099_511_628_211);
+    }
+    hash ^= r2o_box_fnv1a(plan_text);
+    let mut box_id = format!("box-{:08x}", (hash & 0xffff_ffff) as u32);
+    for salt in 1..64_u64 {
+        let Some(clash) = catalog.boxes.iter().find(|record| record.id == box_id) else {
+            break;
+        };
+        if clash.fingerprint.signals.is_empty() || clash.fingerprint.is_compatible_with(observed) {
+            break;
+        }
+        hash = (hash ^ salt).wrapping_mul(1_099_511_628_211);
+        box_id = format!("box-{:08x}", (hash & 0xffff_ffff) as u32);
+    }
+    box_id
+}
+
 fn own_rank_before(left: &RankedOwnPlan, right: &RankedOwnPlan) -> bool {
     left.lead > right.lead
         || left.lead == right.lead
@@ -1416,57 +1490,22 @@ fn add_measured_binding_with_fingerprint_in_box_learn(
     r2o_datapath::engine::validate_runtime_plan(&plan)
         .map_err(|error| format!("r2o-datapath runtime rejected measured plan: {error}"))?;
 
-    let matching_plan_box = plan_search_boxes.iter().copied().find(|index| {
-        catalog.boxes[*index]
-            .plans
-            .iter()
-            .any(|saved| saved.id == plan_id)
-    });
-    let box_index = if let Some(index) = preferred_box_index {
-        index
-    } else if let Some(index) = matching_plan_box {
-        index
-    } else if observed_fingerprint.is_some() && compatible_boxes.len() == 1 {
-        compatible_boxes[0]
-    } else if observed_fingerprint.is_none()
-        && let Some(index) = catalog
-            .boxes
-            .iter()
-            .position(|box_record| box_record.plans.iter().any(|saved| saved.id == plan_id))
+    let box_id = r2o_box_id_for(catalog, &plan_text, observed_fingerprint, preferred_box_id);
+    let box_index = if let Some(index) = catalog
+        .boxes
+        .iter()
+        .position(|box_record| box_record.id == box_id)
     {
         index
     } else {
-        let base_id = format!("auto-{plan_id}");
-        let id = if catalog
-            .boxes
-            .iter()
-            .all(|box_record| box_record.id != base_id)
-        {
-            base_id
-        } else {
-            let mut selected_id = None;
-            for salt in 0_u8..=u8::MAX {
-                let candidate = format!("auto-{}-{salt:02x}", &plan_id[..30]);
-                if catalog
-                    .boxes
-                    .iter()
-                    .all(|box_record| box_record.id != candidate)
-                {
-                    selected_id = Some(candidate);
-                    break;
-                }
-            }
-            selected_id.ok_or("could not allocate a catalog box id")?
-        };
         catalog.boxes.push(BoxRecord {
-            id,
+            id: box_id.clone(),
             created: now,
             updated: now,
             ..BoxRecord::default()
         });
         catalog.boxes.len() - 1
     };
-
     let box_id = catalog.boxes[box_index].id.clone();
     bind_confirmed(
         catalog,
@@ -3908,5 +3947,131 @@ mod tests {
             own_first_plans(&catalog, &base_target, false, None, &[], &[]).len(),
             1
         );
+    }
+
+    #[test]
+    fn box_id_for_matches_c() {
+        use crate::catalog::{BoxRecord, Catalog, Fingerprint, Signal};
+        use std::fmt::Write as _;
+
+        const TEXT: &str = "r2o-plan 1 11\nproto tcp tls\nsplit sni_middle +0\n";
+        let fp = |kind: &str, volume: i32, ttl: u8, tos: u8, ipid: u16| Fingerprint {
+            method: 2,
+            signals: vec![Signal {
+                kind: kind.into(),
+                volume,
+                ttl,
+                tos,
+                ipid,
+                ..Signal::default()
+            }],
+        };
+        let boxrec = |id: &str, fingerprint: Fingerprint| BoxRecord {
+            id: id.into(),
+            fingerprint,
+            ..BoxRecord::default()
+        };
+        let id_for =
+            |catalog: &Catalog, observed: Option<&Fingerprint>, preferred: Option<&str>| {
+                super::r2o_box_id_for(catalog, TEXT, observed, preferred)
+            };
+        let mut output = String::new();
+        let volume = fp("volume", 40, 0, 0, 0);
+        let rst = fp("rst", 0, 1, 0x88, 7);
+
+        let case1 = id_for(&Catalog::default(), Some(&Fingerprint::default()), None);
+        writeln!(output, "case1_no_fp={case1}").unwrap();
+
+        let one = Catalog {
+            boxes: vec![boxrec("box-existing", volume.clone())],
+            ..Catalog::default()
+        };
+        writeln!(output, "case2_one_fp={}", id_for(&one, Some(&volume), None)).unwrap();
+
+        let multi = Catalog {
+            boxes: vec![
+                boxrec("box-existing", volume.clone()),
+                boxrec("box-second", volume.clone()),
+            ],
+            ..Catalog::default()
+        };
+        let base = id_for(&multi, Some(&volume), None);
+        writeln!(output, "case3_multi_fp={base}").unwrap();
+
+        writeln!(
+            output,
+            "case4_preferred={}",
+            id_for(&Catalog::default(), Some(&volume), Some("box-preferred"))
+        )
+        .unwrap();
+
+        let conflict = Catalog {
+            boxes: vec![boxrec(&base, rst.clone())],
+            ..Catalog::default()
+        };
+        let salt1 = id_for(&conflict, Some(&volume), None);
+        writeln!(output, "case5_conflict={salt1}").unwrap();
+
+        let conflict2 = Catalog {
+            boxes: vec![boxrec(&base, rst.clone()), boxrec(&salt1, rst.clone())],
+            ..Catalog::default()
+        };
+        writeln!(
+            output,
+            "case6_salt2={}",
+            id_for(&conflict2, Some(&volume), None)
+        )
+        .unwrap();
+
+        let empty_clash = Catalog {
+            boxes: vec![BoxRecord {
+                id: base.clone(),
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        writeln!(
+            output,
+            "case7_empty_clash={}",
+            id_for(&empty_clash, Some(&volume), None)
+        )
+        .unwrap();
+
+        writeln!(
+            output,
+            "case8_other_text={}",
+            super::r2o_box_id_for(
+                &Catalog::default(),
+                "r2o-plan 1 11\nproto tcp tls\nsplit payload_start +1\n",
+                Some(&volume),
+                None
+            )
+        )
+        .unwrap();
+
+        let bucket = fp("volume", 80, 0, 0, 0);
+        writeln!(
+            output,
+            "case9_bucket={}",
+            id_for(&Catalog::default(), Some(&bucket), None)
+        )
+        .unwrap();
+
+        // В Rust нет поля revision; посторонняя коробка играет ту же роль:
+        // имя новой коробки от неё не зависит.
+        let revision = Catalog {
+            boxes: vec![boxrec("box-unrelated", rst.clone())],
+            ..Catalog::default()
+        };
+        writeln!(
+            output,
+            "case10_revision={}",
+            id_for(&revision, Some(&volume), None)
+        )
+        .unwrap();
+
+        if let Ok(path) = std::env::var("R2O_BOX_ID_FOR_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
     }
 }
