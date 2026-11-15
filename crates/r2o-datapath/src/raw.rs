@@ -1983,6 +1983,104 @@ mod tests {
     }
 
     #[test]
+    fn r2o_push_rtattr_выравнивает_и_пишет_длину() {
+        let mut message = vec![0_u8; 16];
+        super::r2o_push_rtattr(&mut message, 1, &[0xaa; 16]);
+        assert_eq!(message.len(), 16 + 4 + 16);
+        assert_eq!(u16::from_ne_bytes([message[16], message[17]]), 20);
+        assert_eq!(u16::from_ne_bytes([message[18], message[19]]), 1);
+        assert_eq!(&message[20..36], &[0xaa; 16]);
+
+        super::r2o_push_rtattr(&mut message, 2, &[1, 2, 3]);
+        assert_eq!(message.len(), 16 + 20 + 8);
+        assert_eq!(u16::from_ne_bytes([message[36], message[37]]), 7);
+        assert_eq!(u16::from_ne_bytes([message[38], message[39]]), 2);
+        assert_eq!(&message[40..43], &[1, 2, 3]);
+        assert_eq!(&message[43..44], &[0]);
+    }
+
+    #[test]
+    #[ignore = "netns/CAP_NET_RAW: scripts/test-datapath-ip6frag-sender-state-differential.sh"]
+    fn ip6frag_sender_state_differential_matches_c() {
+        use std::os::fd::AsRawFd;
+
+        let mut sender = super::R2oIp6FragSender::default();
+        let mut output = String::new();
+        output.push_str(&format!(
+            "sender_init_fd={}\n",
+            sender.fd.as_ref().map_or(-1, |fd| fd.as_raw_fd())
+        ));
+        sender.fd = None;
+        output.push_str(&format!(
+            "sender_close1_fd={}\n",
+            sender.fd.as_ref().map_or(-1, |fd| fd.as_raw_fd())
+        ));
+        sender.fd = None;
+        output.push_str(&format!(
+            "sender_close2_fd={}\n",
+            sender.fd.as_ref().map_or(-1, |fd| fd.as_raw_fd())
+        ));
+
+        let mut packet = vec![0_u8; 56];
+        packet[0] = 0x60;
+        packet[5] = 16;
+        packet[6] = 44;
+        packet[7] = 64;
+        packet[8..24]
+            .copy_from_slice(&std::net::Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1).octets());
+        packet[24..40].copy_from_slice(
+            &std::net::Ipv6Addr::new(0x2001, 0xdb8, 0xdead, 0, 0, 0, 0, 1).octets(),
+        );
+        packet[40] = 17;
+        packet[43] = 1;
+        packet[44..48].copy_from_slice(&0x1234_5001_u32.to_be_bytes());
+        let error = sender.r2o_send(&packet, 0).unwrap_err();
+        output.push_str(&format!(
+            "sender_send_after_close rc=-1 errno={} fd_after={}\n",
+            error.raw_os_error().unwrap_or(libc::EIO),
+            sender.fd.as_ref().map_or(-1, |fd| fd.as_raw_fd())
+        ));
+        if let Ok(path) = std::env::var("R2O_IP6FRAG_SENDER_STATE_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert!(output.contains("sender_init_fd=-1"));
+        assert!(output.contains("sender_send_after_close rc=-1 errno=101"));
+    }
+
+    #[test]
+    #[ignore = "netns/CAP_NET_RAW: scripts/test-datapath-ip6frag-sender-state-differential.sh"]
+    fn raw_socket_open_drop_ipv4_ipv6() {
+        use std::os::fd::AsRawFd;
+
+        let count_fds = || std::fs::read_dir("/proc/self/fd").unwrap().count();
+        for family in [libc::AF_INET, libc::AF_INET6] {
+            let socket = super::RawSocket::open(family, 0, None).unwrap();
+            let fd = socket.fd.as_raw_fd();
+            assert!(unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0);
+            drop(socket);
+            assert_eq!(
+                unsafe { libc::fcntl(fd, libc::F_GETFD) },
+                -1,
+                "fd {fd} должен быть закрыт Drop"
+            );
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::EBADF)
+            );
+        }
+        let before = count_fds();
+        for _ in 0..32 {
+            let socket = super::RawSocket::open(libc::AF_INET, 0, None).unwrap();
+            drop(socket);
+        }
+        assert_eq!(
+            count_fds(),
+            before,
+            "RawSocket::open/Drop не должен течь fd"
+        );
+    }
+
+    #[test]
     fn ip6frag_route_neighbor_differential_matches_c() {
         use std::net::Ipv6Addr;
 

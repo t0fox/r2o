@@ -247,6 +247,10 @@ static size_t build_done(uint8_t *buffer) {
 static ssize_t fake_recv(void *buffer, size_t capacity) {
     (void)capacity;
     if (request_type == RTM_GETROUTE) {
+        if (starts_with(scenario, "route_recv_eintr")) {
+            errno = EINTR;
+            return -1;
+        }
         if (starts_with(scenario, "route_eagain")) {
             errno = EAGAIN;
             return -1;
@@ -288,6 +292,10 @@ static ssize_t fake_recv(void *buffer, size_t capacity) {
     }
     if (request_type == RTM_GETNEIGH) {
         neighbor_calls++;
+        if (starts_with(scenario, "neighbor_recv_eintr")) {
+            errno = EINTR;
+            return -1;
+        }
         if (starts_with(scenario, "neighbor_error")) {
             return (ssize_t)build_neighbor_error(buffer);
         }
@@ -359,6 +367,12 @@ ssize_t sendto(int fd, const void *buffer, size_t length, int flags,
     }
     const struct nlmsghdr *header = buffer;
     request_type = header->nlmsg_type;
+    if (request_type == RTM_GETROUTE &&
+        starts_with(scenario, "route_send_eintr")) {
+        write_log();
+        errno = EINTR;
+        return -1;
+    }
     if (request_type == RTM_GETROUTE) {
         route_req_ok = validate_route(header, length);
     } else if (request_type == RTM_GETNEIGH) {

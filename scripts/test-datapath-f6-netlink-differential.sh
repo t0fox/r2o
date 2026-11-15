@@ -59,12 +59,12 @@ for scenario in \
     route_success route_error route_empty route_local route_no_oif \
     route_no_gateway route_mark route_wrong_seq route_nonipv6 \
     route_nonunicast route_short_oif route_error_short route_error_positive \
-    route_eagain route_short_gateway route_bad_source \
+    route_eagain route_recv_eintr route_send_eintr route_short_gateway route_bad_source \
     neighbor_stale neighbor_delay neighbor_probe neighbor_reachable \
     neighbor_permanent neighbor_no_lladdr neighbor_short_lladdr \
     neighbor_wrong_ifindex neighbor_empty neighbor_done neighbor_batch64 \
     neighbor_eagain neighbor_error neighbor_incomplete neighbor_nonipv6 \
-    neighbor_dst_short neighbor_timeout neighbor_bad_source
+    neighbor_dst_short neighbor_timeout neighbor_bad_source neighbor_recv_eintr
 do
     rm -f "$TEMP/one.out" "$TEMP/one.log"
     R2O_F6_SCENARIO="$scenario" R2O_F6_SHIM_LOG="$TEMP/one.log" \
