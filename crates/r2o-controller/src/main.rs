@@ -8092,7 +8092,15 @@ fn r2o_run_discovery_candidate_trial_with_progress(
         Err(error) => return (Err(error), false, 0, Default::default()),
     };
     let plan_text = match r2o_controller::discovery::plan_text_for_trial(source_text, plan_id) {
-        Ok(text) => text,
+        Ok(text) => {
+            // C `install_next`: защита добавляется только в проводную копию,
+            // каталог сохраняет исходный текст и его plan_ident.
+            if r2o_discovery_rst_guard_wanted(target) {
+                r2o_plan_arm_rst_guard(&text)
+            } else {
+                text
+            }
+        }
         Err(error) => return (Err(error), false, 0, Default::default()),
     };
     let destination = match target.endpoint.parse::<std::net::SocketAddr>() {
@@ -9605,6 +9613,63 @@ fn r2o_discovery_meta_take(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(target)
+}
+
+/// C `task.trigger_code` для кандидатов: нужен `install_next`-эффект
+/// `rst_guard_wanted` (RST/RST_CUT/RST_AFTER_APP), который worker применяет к
+/// проводной копии плана. Ключ — task key, не endpoint: резолв цели меняет
+/// endpoint уже в worker-потоке.
+#[cfg(unix)]
+fn r2o_discovery_trigger_map() -> &'static std::sync::Mutex<HashMap<R2oDiscoveryTaskKey, u8>> {
+    static TRIGGERS: std::sync::OnceLock<std::sync::Mutex<HashMap<R2oDiscoveryTaskKey, u8>>> =
+        std::sync::OnceLock::new();
+    TRIGGERS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+#[cfg(unix)]
+fn r2o_discovery_trigger_set(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    trigger_code: u8,
+) {
+    r2o_discovery_trigger_map()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(r2o_discovery_task_key(target), trigger_code);
+}
+
+#[cfg(unix)]
+fn r2o_discovery_trigger_remove(target: &r2o_controller::discovery::DiscoveryTarget) {
+    r2o_discovery_trigger_map()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&r2o_discovery_task_key(target));
+}
+
+#[cfg(unix)]
+fn r2o_discovery_trigger_code(target: &r2o_controller::discovery::DiscoveryTarget) -> Option<u8> {
+    r2o_discovery_trigger_map()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&r2o_discovery_task_key(target))
+        .copied()
+}
+
+/// C `rst_guard_wanted`: защита нужна TCP-кандидату, пришедшему из RST.
+#[cfg(unix)]
+fn r2o_discovery_rst_guard_wanted(target: &r2o_controller::discovery::DiscoveryTarget) -> bool {
+    r2o_discovery_transport(target) == 6
+        && matches!(r2o_discovery_trigger_code(target), Some(1 | 4 | 5))
+}
+
+/// C `plan_arm_rst_guard`: `guard rst_alien` один раз, в конец текста.
+#[cfg(unix)]
+fn r2o_plan_arm_rst_guard(text: &str) -> String {
+    if text.contains("guard ") || text.len() + "guard rst_alien\n".len() >= 4096 {
+        return text.to_owned();
+    }
+    let mut armed = text.to_owned();
+    armed.push_str("guard rst_alien\n");
+    armed
 }
 
 /// План, отклонённый C `budget_cut_reject`: worker выясняет это на стадии
@@ -16195,6 +16260,9 @@ group_block_proven: false,
         trigger_code: Option<u8>,
     ) -> bool {
         let now = std::time::Instant::now();
+        if let Some(trigger_code) = trigger_code {
+            r2o_discovery_trigger_set(&target, trigger_code);
+        }
         self.r2o_reconcile_task_slots(now);
         self.searches
             .lock()
@@ -17331,6 +17399,7 @@ group_block_proven: false,
     }
 
     fn r2o_complete_outcome(&mut self, mut outcome: DiscoveryOutcome) -> DiscoveryOutcome {
+        r2o_discovery_trigger_remove(&outcome.target);
         if !outcome.direct_clear {
             // Метаданные нужны только DIRECT_CLEAR; иначе ключ цели копил бы
             // записи каждого классификатора.
@@ -36873,6 +36942,54 @@ mod tests {
             cache.note(&format!("other-{index}.example"), 4, client_b, now);
         }
         assert!(!cache.r2o_recent("clean.example", 4, client_a, now));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_next_rst_guard_is_added_to_wire_text_once_for_rst_triggers() {
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "guard.example".into(),
+            endpoint: "198.51.100.83:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        assert!(!super::r2o_discovery_rst_guard_wanted(&target));
+        let mut output = String::new();
+        for code in [1_u8, 2, 3, 4, 5, 6, 8] {
+            super::r2o_discovery_trigger_set(&target, code);
+            let wanted = super::r2o_discovery_rst_guard_wanted(&target);
+            output.push_str(&format!("code_{code}={}\n", u8::from(wanted)));
+            if matches!(code, 1 | 4 | 5) {
+                assert!(wanted, "код {code} требует guard rst_alien");
+            } else {
+                assert!(!wanted, "код {code} не требует guard rst_alien");
+            }
+        }
+        super::r2o_discovery_trigger_remove(&target);
+
+        let base = "r2o-plan 1 8\nid 00000000000000000000000000000000\nproto tcp tls\nsplit sni_middle +0\n";
+        let armed = super::r2o_plan_arm_rst_guard(base);
+        assert_eq!(armed, format!("{base}guard rst_alien\n"));
+        assert_eq!(super::r2o_plan_arm_rst_guard(&armed), armed);
+        let with_own_guard =
+            "r2o-plan 1 8\nid 00000000000000000000000000000000\nproto tcp tls\nguard rst_alien\n";
+        assert_eq!(
+            super::r2o_plan_arm_rst_guard(with_own_guard),
+            with_own_guard
+        );
+        assert!(super::compile_text(&armed).is_ok());
+        fn hex(bytes: &[u8]) -> String {
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+        }
+        output.push_str(&format!(
+            "arm_added=1\narm1={}\narm_added_twice=0\narm2={}\nexisting_added=0\nexisting={}\n",
+            hex(armed.as_bytes()),
+            hex(armed.as_bytes()),
+            hex(with_own_guard.as_bytes())
+        ));
+        if let Ok(path) = std::env::var("R2O_INSTALL_RST_GUARD_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
     }
 
     #[cfg(unix)]
