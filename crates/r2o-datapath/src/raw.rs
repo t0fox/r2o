@@ -371,7 +371,7 @@ fn r2o_interface_mtu(interface: &str) -> Option<usize> {
     let result = unsafe {
         libc::ioctl(
             socket,
-            libc::SIOCGIFMTU as libc::c_ulong,
+            libc::SIOCGIFMTU as libc::Ioctl,
             request.as_mut_ptr(),
         )
     };
@@ -896,18 +896,18 @@ impl R2oIp6FragSender {
         set_option(fd.as_raw_fd(), libc::SOL_SOCKET, libc::SO_MARK, &mark)?;
 
         let name = r2o_if_indextoname(ifindex)?;
-        let flags_buf = r2o_ioctl_ifreq(&name, libc::SIOCGIFFLAGS as libc::c_ulong)?;
+        let flags_buf = r2o_ioctl_ifreq(&name, libc::SIOCGIFFLAGS as libc::Ioctl)?;
         let flags = i16::from_ne_bytes([flags_buf[16], flags_buf[17]]);
         if flags & libc::IFF_UP as i16 == 0 {
             return Err(io::Error::from_raw_os_error(libc::ENETDOWN));
         }
-        let mtu_buf = r2o_ioctl_ifreq(&name, libc::SIOCGIFMTU as libc::c_ulong)?;
+        let mtu_buf = r2o_ioctl_ifreq(&name, libc::SIOCGIFMTU as libc::Ioctl)?;
         let mtu = i32::from_ne_bytes([mtu_buf[16], mtu_buf[17], mtu_buf[18], mtu_buf[19]]);
         if mtu < 1280 || packet.len() > mtu as usize {
             return Err(io::Error::from_raw_os_error(libc::EMSGSIZE));
         }
         self.mtu = mtu as usize;
-        let hw_buf = r2o_ioctl_ifreq(&name, libc::SIOCGIFHWADDR as libc::c_ulong)?;
+        let hw_buf = r2o_ioctl_ifreq(&name, libc::SIOCGIFHWADDR as libc::Ioctl)?;
         let hw_family = u16::from_ne_bytes([hw_buf[16], hw_buf[17]]);
 
         let mut next: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
@@ -1212,7 +1212,7 @@ fn r2o_if_indextoname(ifindex: u32) -> io::Result<String> {
 }
 
 /// `struct ifreq` для ioctl: имя и 24 байта union (флаги/MTU/HWADDR).
-fn r2o_ioctl_ifreq(name: &str, request: libc::c_ulong) -> io::Result<[u8; 40]> {
+fn r2o_ioctl_ifreq(name: &str, request: libc::Ioctl) -> io::Result<[u8; 40]> {
     let bytes = name.as_bytes();
     if bytes.is_empty() || bytes.len() >= libc::IF_NAMESIZE {
         return Err(io::Error::from_raw_os_error(libc::EINVAL));

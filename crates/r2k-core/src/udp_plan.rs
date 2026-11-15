@@ -16,6 +16,7 @@ use crate::plan::{
 use crate::wire::{build_udp_fragments, build_udp_packet};
 use std::io;
 use std::net::{IpAddr, SocketAddr, UdpSocket};
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
 
 /// Максимум посылок одной пачки, как `D2K_UDP_BATCH_MAX`.
@@ -238,6 +239,7 @@ pub fn r2o_udp_plan_batch(
 }
 
 /// C `d2k_udp_plan_send`: отправить UDP-план с connected-сокета.
+#[cfg(unix)]
 pub fn r2o_udp_plan_send(
     socket: &UdpSocket,
     plan: &Plan,
@@ -249,6 +251,7 @@ pub fn r2o_udp_plan_send(
 }
 
 /// То же с явным fragment-sink (Controller передаёт `RawSocket`-адаптер).
+#[cfg(unix)]
 pub fn r2o_udp_plan_send_with_sink(
     socket: &UdpSocket,
     plan: &Plan,
@@ -327,6 +330,30 @@ pub fn r2o_udp_plan_send_with_sink(
         result = Err(-1);
     }
     result
+}
+
+/// На не-Unix raw-сокеты и TTL через libc недоступны; batch остаётся
+/// переносимым, а отправка честно отказывает, как C `#ifndef __linux__`
+/// для raw-sink.
+#[cfg(not(unix))]
+pub fn r2o_udp_plan_send(
+    _socket: &UdpSocket,
+    _plan: &Plan,
+    _payload: &[u8],
+    _mark: u32,
+) -> Result<(), i32> {
+    Err(-1)
+}
+
+#[cfg(not(unix))]
+pub fn r2o_udp_plan_send_with_sink(
+    _socket: &UdpSocket,
+    _plan: &Plan,
+    _payload: &[u8],
+    _mark: u32,
+    _sink: &mut dyn R2oUdpRawSink,
+) -> Result<(), i32> {
+    Err(-1)
 }
 
 fn r2o_udp_input_packet(
@@ -578,7 +605,7 @@ fn r2o_fragment_id() -> Result<u32, i32> {
     Err(-1)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::{
         R2oUdpRawSink, r2o_udp_plan_send_with_sink, r2o_udp_test_delays, r2o_udp_test_reset,
