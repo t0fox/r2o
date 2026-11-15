@@ -525,6 +525,13 @@ fn r2o_quic_plan_id<'a>(state: &'a R2oQuicPlanState<'a>) -> &'a str {
         .unwrap_or("00000000000000000000000000000000")
 }
 
+/// C `quic_split_plan_text` (`core/udpplan.c:59-64`): фиксированный план
+/// разреза CRYPTO, schema 10.
+pub fn r2o_quic_split_plan_text() -> String {
+    "d2k-plan 1 10\nid 00000000000000000000000000000000\nproto udp quic\nquicsplit 1\norder forward\n"
+        .to_string()
+}
+
 /// Production `quic_plan_text`: minexec 1/7/9/10, payload/poison/udplen/
 /// order/pace так же, как C `core/udpplan.c`.
 pub fn r2o_quic_plan_text_from_state(state: &R2oQuicPlanState<'_>) -> Result<String, String> {
@@ -2267,6 +2274,8 @@ mod tests {
             },
             &mut output,
         );
+        output.push_str("plan|split-wrapper|0\n");
+        output.push_str(&super::r2o_quic_split_plan_text());
         let split_blob_directives = "payload 1 aabbccdd\nquicsplit 1\npoison 1\nfake payload=1 poison=1 repeats=2 gap_us=0 place=before\n";
         emit(
             "split-blob",

@@ -30,6 +30,12 @@ int main(void)
         run("split", &a, NULL, 0, 0, 0);
     }
     {
+        char text[4096];
+        int rc = quic_split_plan_text(text, sizeof text);
+        printf("plan|split-wrapper|%d\n", rc);
+        if (rc == 0) fputs(text, stdout);
+    }
+    {
         d2k_quic_arm a;
         memset(&a, 0, sizeof a);
         a.kind = D2K_QA_SPLIT;
