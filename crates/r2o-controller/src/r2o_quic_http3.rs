@@ -1787,6 +1787,56 @@ mod tests {
     }
 
     #[test]
+    fn d2o_quic_budget_growth_differential_matches_c() {
+        let mut output = String::new();
+        for budget in [0u32, 1, 25, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff] {
+            output.push_str(&format!(
+                "need|{budget}|{}\n",
+                R2oQuicHttp3Budget::r2o_initialize(budget).need
+            ));
+        }
+        fn run(name: &str, budget: u32, steps: &[(u64, u64, u16)], output: &mut String) {
+            let mut state = R2oQuicHttp3Budget::r2o_initialize(budget);
+            output.push_str(&format!("budget|{name}|need={}\n", state.need));
+            let now = tokio::time::Instant::now();
+            for (index, (packets, progress, status)) in steps.iter().enumerate() {
+                let grew = state.r2o_step(
+                    *packets,
+                    *progress,
+                    *status,
+                    now,
+                    now,
+                    Duration::from_secs(1),
+                );
+                output.push_str(&format!("grew|{name}|{index}|{}\n", u8::from(grew)));
+            }
+        }
+        run(
+            "grow",
+            1,
+            &[
+                (1, 100, 200),
+                (2, 100, 200),
+                (2, 100, 200),
+                (2, 120, 200),
+                (2, 130, 0),
+            ],
+            &mut output,
+        );
+        run(
+            "status",
+            1,
+            &[(2, 100, 200), (3, 100, 0), (3, 101, 200)],
+            &mut output,
+        );
+        run("double", 2, &[(4, 50, 200), (5, 60, 200)], &mut output);
+        if let Ok(path) = std::env::var("R2O_QUIC_BUDGET_DIFF_OUTPUT") {
+            std::fs::write(path, &output).expect("write QUIC budget output");
+        }
+        assert!(output.contains("budget|grow|need=2\n"));
+    }
+
+    #[test]
     fn r2o_quic_бюджет_требует_свежий_рост_после_порога() {
         let start = Instant::now() + Duration::from_millis(10);
         let mut budget = R2oQuicHttp3Budget::r2o_initialize(1);
