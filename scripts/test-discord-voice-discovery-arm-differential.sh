@@ -29,8 +29,9 @@ fi
 rust_source=$ROOT/crates/r2o-controller/src/voice_measure.rs
 rust_record=$(sed -n '/^fn r2o_record_voice_discovery_arm(/,/^}/p' "$rust_source")
 rust_format=$(sed -n '/^pub fn r2o_format_voice_measurement(/,/^}/p' "$rust_source")
+rust_verdict=$(sed -n '/^pub const fn r2o_voice_verdict_word(/,/^}/p' "$rust_source")
 rust_blocked_arm=$(sed -n '/R2oDiscoveryVerdict::Blocked { cutoff, prefix }/,/return r2o_result;/p' "$rust_source")
-if [ -z "$rust_record" ] || [ -z "$rust_format" ] ||
+if [ -z "$rust_record" ] || [ -z "$rust_format" ] || [ -z "$rust_verdict" ] ||
    ! printf '%s\n' "$rust_blocked_arm" | grep -Fq 'r2o_record_voice_discovery_arm(&mut r2o_result, prefix);'; then
     cat "$TEMP/d2o.out"
     echo "Rust voice measurement drops D2O's verified Discovery arm" >&2
@@ -56,7 +57,7 @@ struct R2oVoiceMeasurement {
     arm: Option<R2oVoiceArm>,
 }
 RUST_HEAD
-printf '%s\n' "$rust_record" "$rust_format" >>"$TEMP/r2o.rs"
+printf '%s\n' "$rust_verdict" "$rust_record" "$rust_format" >>"$TEMP/r2o.rs"
 sed "s/@D2O_PREFIX@/$d2o_prefix/" >>"$TEMP/r2o.rs" <<'RUST_MAIN'
 fn main() {
     let mut result = R2oVoiceMeasurement {

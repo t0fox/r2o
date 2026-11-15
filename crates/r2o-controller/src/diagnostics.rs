@@ -2168,6 +2168,7 @@ mod tests {
     fn memory_history_rollup_fields_match_c() {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
+        let _guard = MEMORY_TEST_LOCK.lock().unwrap();
         let root = std::env::temp_dir().join(format!("r2o-diag-history-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let proc_dir = root.join("proc");
@@ -2288,6 +2289,7 @@ mod tests {
     fn d2o_periodic_rss_sample_matches_c() {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
+        let _guard = MEMORY_TEST_LOCK.lock().unwrap();
         let root = std::path::PathBuf::from(
             std::env::var_os("R2O_DIAG_RSS_ROOT").expect("test helper provides proc/run root"),
         );
@@ -2385,6 +2387,7 @@ mod tests {
     #[test]
     fn records_only_while_enabled_and_exports_d2o_ring_shape() {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let _guard = MEMORY_TEST_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("r2o-diagnostics-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let mut recorder = Recorder::new(dir.clone(), dir.join("run"));
@@ -2446,6 +2449,7 @@ mod tests {
     #[test]
     fn legacy_split_pidfile_is_visible_under_merged_process_name() {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let _guard = MEMORY_TEST_LOCK.lock().unwrap();
         let root = std::env::temp_dir().join(format!("r2o-diag-legacy-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let diag = root.join("diag");
@@ -2485,6 +2489,7 @@ mod tests {
     fn diagnostic_tick_lifecycle_matches_d2o() {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
+        let _guard = MEMORY_TEST_LOCK.lock().unwrap();
         let root =
             std::env::temp_dir().join(format!("r2o-diagnostics-tick-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -2546,6 +2551,7 @@ mod tests {
     fn diagnostics_id_and_counts_match_d2o() {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
+        let _guard = MEMORY_TEST_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("r2o-diagnostics-diff-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir(&dir).unwrap();
@@ -2639,6 +2645,7 @@ mod tests {
     #[test]
     fn first_process_detail_survives_process_exit_like_d2o() {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let _guard = MEMORY_TEST_LOCK.lock().unwrap();
         let root = std::env::temp_dir().join(format!("r2o-diag-exit-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let diag = root.join("diag");
@@ -2687,6 +2694,7 @@ mod tests {
     #[test]
     fn process_memory_follows_pidfiles_and_restarts_first_detail_on_pid_reuse() {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let _guard = MEMORY_TEST_LOCK.lock().unwrap();
         let root =
             std::env::temp_dir().join(format!("r2o-diagnostics-proc-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
