@@ -17,7 +17,12 @@ fi
 
 mkdir -p "$TMPDIR"
 TEMP=$(mktemp -d "$TMPDIR/r2o-arm-from-poison.XXXXXX")
-trap 'rm -rf -- "$TEMP"' EXIT HUP INT TERM
+cleanup() {
+    status=$?
+    rm -rf -- "$TEMP"
+    exit "$status"
+}
+trap cleanup EXIT HUP INT TERM
 
 "$CC" -std=gnu11 -O2 -Wall -Wextra -Werror \
     -ffunction-sections -fdata-sections \

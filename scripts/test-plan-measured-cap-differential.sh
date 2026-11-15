@@ -19,7 +19,12 @@ fi
 
 mkdir -p "$TMPDIR"
 TEMP=$(mktemp -d "$TMPDIR/r2o-plan-measured.XXXXXX")
-trap 'rm -rf -- "$TEMP"' EXIT HUP INT TERM
+cleanup() {
+    status=$?
+    rm -rf -- "$TEMP"
+    exit "$status"
+}
+trap cleanup EXIT HUP INT TERM
 
 INCLUDES="-I$D2O_ROOT/detect -I$D2O_ROOT/core -I$D2O_ROOT/detect/include -I$D2O_ROOT/core/include -I$D2O_ROOT/datapath/include"
 # poison.c и measured.c определяют одноимённые static append_fmt/append_hex,

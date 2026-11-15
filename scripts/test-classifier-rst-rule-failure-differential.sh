@@ -32,8 +32,18 @@ done
 
 D2K_BIN=${D2K_DETECT_BIN:-$D2O_ROOT/detect/d2k-detect}
 R2O_BIN=${R2O_CONTROLLER_BIN:-${CARGO_TARGET_DIR:-$ROOT/target}/release/r2o-controller}
+if [ "${R2O_SKIP_RELEASE_BUILD:-0}" != 1 ]; then
+    (cd "$ROOT" && cargo build --release --locked --offline \
+        -p r2o-controller --bin r2o-controller) || {
+        echo "failed to build release r2o-controller" >&2
+        exit 1
+    }
+fi
 [ -x "$D2K_BIN" ] || { echo "missing C binary: $D2K_BIN" >&2; exit 1; }
-[ -x "$R2O_BIN" ] || { echo "missing Rust binary: $R2O_BIN" >&2; exit 1; }
+[ -x "$R2O_BIN" ] || {
+    echo "missing Rust binary after build: $R2O_BIN" >&2
+    exit 1
+}
 
 TEMP_BASE=${R2O_TEST_TMP:-${ROOT%/r2o}/r2o-tooling/tests}
 mkdir -p "$TEMP_BASE"
@@ -52,6 +62,7 @@ cleanup() {
         done
     fi
     [ "${KEEP_TEST_WORK:-0}" = 1 ] && echo "saved: $TEMP" >&2 || rm -rf "$TEMP"
+    exit "$status"
 }
 trap cleanup EXIT HUP INT TERM
 

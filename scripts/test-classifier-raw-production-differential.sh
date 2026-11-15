@@ -67,6 +67,7 @@ cleanup() {
     else
         rm -rf "$TEMP"
     fi
+    exit "$test_exit_status"
 }
 trap cleanup EXIT HUP INT TERM
 
