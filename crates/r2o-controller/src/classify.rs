@@ -180,6 +180,14 @@ pub struct Poison {
     pub ip_id_zero: bool,
     /// C `d2k_poison.autottl`: TTL по измеренному пути — тоже подделка.
     pub autottl: bool,
+    /// C `d2k_poison.autottl_delta`: поправка к измеренному TTL.
+    pub autottl_delta: i32,
+    /// C `d2k_poison.autottl_min`: минимум autottl, 0 — не задан.
+    pub autottl_min: i32,
+    /// C `d2k_poison.autottl_max`: максимум autottl, 0 — не задан.
+    pub autottl_max: i32,
+    /// C `d2k_poison.tcp_ts_up`: поднять опцию метки в начало TCP options.
+    pub tcp_ts_up: bool,
     pub gap_ms: i32,
     pub syn_data: bool,
     pub oob: bool,
@@ -412,6 +420,80 @@ fn build_poisons() -> Vec<Poison> {
 pub fn poisons() -> &'static [Poison] {
     static POISONS: OnceLock<Vec<Poison>> = OnceLock::new();
     POISONS.get_or_init(build_poisons)
+}
+
+/// Поле-в-поле проекция `d2k_arm` (`detect/poison.c:413-475`).
+///
+/// Нужна там, где измеренную гипотезу передают сборщику плана отдельной
+/// структурой, а не пересчитывают поля заново. Имя в C-структуре — указатель
+/// на живой результат и здесь намеренно отсутствует.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct D2kArm {
+    pub seqovl: u32,
+    pub seqovl_hello: bool,
+    pub badsum: bool,
+    pub repeats: u32,
+    pub gap_ms: u32,
+    pub disorder: bool,
+    pub disorder_pos: u32,
+    pub between: bool,
+    pub ttl: u32,
+    pub autottl: bool,
+    pub autottl_delta: i32,
+    pub autottl_min: u32,
+    pub autottl_max: u32,
+    pub seq_out: bool,
+    pub decoy_hello: bool,
+    pub md5: bool,
+    pub tcpts: bool,
+    pub tcpts_up: bool,
+    pub ipidzero: bool,
+    pub oob: bool,
+    pub split_pos: u32,
+}
+
+/// C `d2k_arm_from_poison`: перенести измеренную гипотезу в поля плеча.
+pub fn arm_from_poison(poison: &Poison) -> Result<D2kArm, String> {
+    if poison.syn_data {
+        return Err("данные в SYN языком плана не выражаются".into());
+    }
+    if poison.seq_shift != 0 && poison.seq_shift != -66_000 {
+        return Err(format!(
+            "сдвиг TCP seq {} не выражается флагом seq_out",
+            poison.seq_shift
+        ));
+    }
+    let mut arm = D2kArm {
+        oob: poison.oob,
+        badsum: poison.badsum,
+        md5: poison.md5,
+        repeats: poison.repeats.max(0) as u32,
+        gap_ms: poison.gap_ms.max(0) as u32,
+        disorder: poison.disorder,
+        disorder_pos: poison.disorder_pos.max(0) as u32,
+        between: poison.fake_between,
+        ttl: poison.ttl.max(0) as u32,
+        autottl: poison.autottl,
+        autottl_delta: poison.autottl_delta,
+        autottl_min: poison.autottl_min.max(0) as u32,
+        autottl_max: poison.autottl_max.max(0) as u32,
+        seq_out: poison.seq_shift != 0,
+        decoy_hello: poison.decoy_hello,
+        tcpts: poison.tcp_ts,
+        tcpts_up: poison.tcp_ts_up,
+        ipidzero: poison.ip_id_zero,
+        split_pos: poison.split_pos.max(0) as u32,
+        ..D2kArm::default()
+    };
+    if arm.repeats == 0 && poison_has_fake(poison) {
+        arm.repeats = 1;
+    }
+    if poison.seqovl_exact {
+        arm.seqovl_hello = true;
+    } else if poison.seqovl > 0 {
+        arm.seqovl = poison.seqovl as u32;
+    }
+    Ok(arm)
 }
 
 pub fn poison_has_fake(poison: &Poison) -> bool {
@@ -3346,7 +3428,7 @@ mod qtrace_tests {
 
 #[cfg(test)]
 mod probes_word_tests {
-    use super::probes_word;
+    use super::{Poison, arm_from_poison, probes_word};
 
     #[test]
     fn probes_word_matches_c_declension() {
@@ -3373,5 +3455,108 @@ mod probes_word_tests {
         ] {
             assert_eq!(probes_word(n), expected, "probes_word({n})");
         }
+    }
+
+    #[test]
+    fn d2o_arm_from_poison_differential_matches_c() {
+        fn print_arm(name: &str, poison: &Poison) -> String {
+            match arm_from_poison(poison) {
+                Err(why) => format!("arm|{name}|-1|{why}\n"),
+                Ok(arm) => format!(
+                    "arm|{name}|0||{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n",
+                    arm.seqovl,
+                    u8::from(arm.seqovl_hello),
+                    u8::from(arm.badsum),
+                    arm.repeats,
+                    arm.gap_ms,
+                    u8::from(arm.disorder),
+                    arm.disorder_pos,
+                    u8::from(arm.between),
+                    arm.ttl,
+                    u8::from(arm.autottl),
+                    arm.autottl_delta,
+                    arm.autottl_min,
+                    arm.autottl_max,
+                    u8::from(arm.seq_out),
+                    u8::from(arm.decoy_hello),
+                    u8::from(arm.md5),
+                    u8::from(arm.tcpts),
+                    u8::from(arm.tcpts_up),
+                    u8::from(arm.ipidzero),
+                    u8::from(arm.oob),
+                    arm.split_pos
+                ),
+            }
+        }
+
+        let mut output = String::new();
+        let mut poison = Poison::default();
+        output.push_str(&print_arm("default", &poison));
+        poison.ttl = 8;
+        output.push_str(&print_arm("ttl", &poison));
+        poison = Poison::default();
+        poison.seq_shift = -66_000;
+        output.push_str(&print_arm("seq-out", &poison));
+        poison.seq_shift = -123;
+        output.push_str(&print_arm("seq-invalid", &poison));
+        poison = Poison::default();
+        poison.disorder = true;
+        poison.disorder_pos = 2;
+        output.push_str(&print_arm("disorder-pos", &poison));
+        poison = Poison::default();
+        poison.syn_data = true;
+        output.push_str(&print_arm("syn-data", &poison));
+        poison = Poison::default();
+        poison.oob = true;
+        output.push_str(&print_arm("oob", &poison));
+        poison = Poison::default();
+        poison.md5 = true;
+        output.push_str(&print_arm("md5", &poison));
+        poison = Poison::default();
+        poison.tcp_ts = true;
+        poison.decoy_hello = true;
+        poison.repeats = 8;
+        poison.split_pos = 2;
+        output.push_str(&print_arm("composite", &poison));
+        poison = Poison::default();
+        poison.seqovl_exact = true;
+        poison.seqovl = 681;
+        output.push_str(&print_arm("seqovl-exact", &poison));
+        poison = Poison::default();
+        poison.seqovl = 5;
+        output.push_str(&print_arm("seqovl", &poison));
+        poison = Poison::default();
+        poison.fake_between = true;
+        poison.badsum = true;
+        poison.repeats = 7;
+        poison.gap_ms = 300;
+        output.push_str(&print_arm("between", &poison));
+        poison = Poison::default();
+        poison.autottl = true;
+        poison.autottl_delta = -3;
+        poison.autottl_min = 2;
+        poison.autottl_max = 10;
+        output.push_str(&print_arm("autottl", &poison));
+        poison = Poison::default();
+        poison.tcp_ts = true;
+        poison.tcp_ts_up = true;
+        output.push_str(&print_arm("ts-up", &poison));
+        poison = Poison::default();
+        poison.repeats = -2;
+        poison.gap_ms = -5;
+        poison.ttl = -1;
+        poison.disorder_pos = -4;
+        poison.autottl_min = -2;
+        poison.autottl_max = -3;
+        output.push_str(&print_arm("negative", &poison));
+        poison = Poison::default();
+        poison.badsum = true;
+        poison.repeats = 0;
+        output.push_str(&print_arm("badsum-default-copy", &poison));
+        if let Ok(path) = std::env::var("R2O_ARM_FROM_POISON_OUTPUT") {
+            std::fs::write(path, &output).expect("write arm-from-poison output");
+        }
+        assert!(output.contains("arm|ttl|0||0|0|0|1|"));
+        assert!(output.contains("arm|syn-data|-1|данные в SYN"));
     }
 }

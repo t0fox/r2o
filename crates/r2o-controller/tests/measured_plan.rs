@@ -1,5 +1,5 @@
 use r2k_core::plan::{POISON_BADSUM, Plan};
-use r2o_controller::classify::{Poison, Trigger, plan_for_poison, poisons};
+use r2o_controller::classify::{Poison, Trigger, plan_for_poison, plan_text_for_poison, poisons};
 use std::net::Ipv4Addr;
 
 fn trigger() -> Trigger {
@@ -163,6 +163,54 @@ fn every_catalog_hypothesis_is_either_planned_or_explicitly_unrepresentable() {
             "Linux raw socket меняет нулевой IPv4 ID; такой poison не исполняется"
         )]
     );
+}
+
+#[test]
+fn autottl_fields_reach_the_plan_like_c_arm() {
+    let poison = Poison {
+        name: "autottl".into(),
+        autottl: true,
+        autottl_delta: -3,
+        autottl_min: 2,
+        autottl_max: 10,
+        ..Poison::default()
+    };
+    let text = plan_text_for_poison(&poison, &trigger(), None, 0).unwrap();
+    assert!(text.starts_with("r2o-plan 1 13\n"), "{text}");
+    assert!(text.contains(" autottl=-3,2-10"), "{text}");
+    let plan = plan_for_poison(&poison, &trigger(), None, 0).unwrap();
+    assert_eq!(plan.minexec, 13);
+    assert!(!plan.fakes.is_empty());
+}
+
+#[test]
+fn tcp_ts_up_reaches_the_plan_like_c_arm() {
+    let poison = Poison {
+        name: "ts-up".into(),
+        tcp_ts: true,
+        tcp_ts_up: true,
+        ..Poison::default()
+    };
+    let text = plan_text_for_poison(&poison, &trigger(), None, 0).unwrap();
+    assert!(text.contains(" tcpts tsup"), "{text}");
+}
+
+#[test]
+fn compose_all_at_once_accepts_an_empty_control_like_c() {
+    let poison = Poison {
+        name: "СОБРАНО: всё сразу".into(),
+        badsum: true,
+        decoy_hello: true,
+        seqovl_exact: true,
+        disorder: true,
+        repeats: 7,
+        ..Poison::default()
+    };
+    let text = plan_text_for_poison(&poison, &trigger(), Some(&[]), 0).unwrap();
+    assert!(text.contains("payload-pad64 1"), "{text}");
+    assert!(text.contains("poison 1 badsum"), "{text}");
+    assert!(text.contains("fake payload=1"), "{text}");
+    assert!(text.contains("order reverse"), "{text}");
 }
 
 fn ipv4_tcp(payload: &[u8]) -> Vec<u8> {
