@@ -10109,6 +10109,16 @@ fn r2o_budget_partial_take(
         .remove(target)
 }
 
+/// C `partial_finish`: объёмный блок подтверждает лучший partial одним
+/// планом с `budget=CUT`; без partial возвращает None, перебор продолжается.
+#[cfg(unix)]
+fn r2o_budget_partial_finish(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+) -> Option<String> {
+    let state = r2o_budget_partial_take(target)?;
+    (state.volume_cut && state.partial.valid).then_some(state.partial.text)
+}
+
 #[cfg(unix)]
 fn r2o_budget_volume_cut(target: &r2o_controller::discovery::DiscoveryTarget) -> bool {
     r2o_budget_partial_map()
@@ -27101,12 +27111,10 @@ impl ControlClient {
                     "по {} обрыв объёма измерен — дальнейший перебор по этому бюджету остановлен",
                     outcome.target.host
                 );
-                if let Some(state) = r2o_budget_partial_take(&outcome.target)
-                    && state.partial.valid
-                {
+                if let Some(text) = r2o_budget_partial_finish(&outcome.target) {
                     // C `partial_finish`: лучший частичный обход ставится
                     // единственным планом; бюджет остаётся «оборван».
-                    outcome.plan_text = Some(state.partial.text);
+                    outcome.plan_text = Some(text);
                     outcome.budget_mark = R2O_D2K_CAT_BUDGET_CUT;
                     outcome
                         .detail
@@ -33323,6 +33331,205 @@ mod tests {
         if let Ok(path) = std::env::var("R2O_BUDGET_PARTIAL_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
         }
+    }
+
+    /// C `budget_cut_reject` при `t->vol.rx_cut=1`: лучший partial
+    /// подтверждается одним планом с бюджетом «оборван», дальнейшего
+    /// перебора нет. C-оракул — production `budget_cut_reject`/`partial_finish`;
+    /// Rust — production `r2o_budget_partial_update`/`r2o_budget_partial_finish`
+    /// и полный `apply_discovery_outcome` (запись привязки с бюджетом CUT).
+    #[cfg(unix)]
+    #[test]
+    fn budget_volume_partial_finish_matches_c() {
+        use super::{
+            R2O_D2K_CAT_BUDGET_CUT, R2oBudgetCutPending, r2o_budget_cut_pending_set,
+            r2o_budget_partial_finish, r2o_budget_partial_take, r2o_budget_partial_update,
+        };
+        use std::fmt::Write as _;
+
+        fn hex(text: &str) -> String {
+            let mut output = String::with_capacity(text.len() * 2);
+            for byte in text.bytes() {
+                let _ = write!(output, "{byte:02x}");
+            }
+            output
+        }
+
+        let plan_text =
+            "d2k-plan 1 1\nid 00112233445566778899aabbccddeeff\nproto tcp tls\norder forward\n";
+        let preset_text =
+            "d2k-plan 1 7\nid 8899aabbccddeeff0011223344556677\nproto tcp tls\norder reverse\n";
+        let cases = [
+            ("volume_current", 0u32, 0u32),
+            ("volume_preset_better", 150, 9),
+            ("volume_preset_worse", 50, 9),
+        ];
+        let mut output = String::new();
+        for (label, preset_pk, preset_succ) in cases {
+            let target = r2o_controller::discovery::DiscoveryTarget {
+                host: "volume.example".into(),
+                endpoint: "198.51.100.91:443".into(),
+                family: 4,
+                shape: SHAPE_MODERN,
+            };
+            let _ = r2o_budget_partial_take(&target);
+            if preset_pk > 0 {
+                // C fixture кладёт partial прямо в task до объёмного отказа,
+                // без budget_cut_reject: owned_fallback остаётся нулём.
+                super::r2o_budget_partial_map().lock().unwrap().insert(
+                    target.clone(),
+                    super::R2oBudgetPartialState {
+                        partial: super::R2oBudgetPartial {
+                            valid: true,
+                            pk: preset_pk,
+                            succ: preset_succ,
+                            text: preset_text.into(),
+                            box_id: "box-preset".into(),
+                            ver_status: 200,
+                            ver_budget: R2O_D2K_CAT_BUDGET_CUT,
+                        },
+                        ..Default::default()
+                    },
+                );
+            }
+            let pending = R2oBudgetCutPending {
+                plan_id: "00112233445566778899aabbccddeeff".into(),
+                plan_text: plan_text.into(),
+                box_id: "box-vol".into(),
+                budget_packets: 100,
+                volume_block: true,
+                search_owned: true,
+                own_first_two: false,
+                ver_status: 200,
+                ver_budget: R2O_D2K_CAT_BUDGET_CUT,
+            };
+            let decision = r2o_budget_partial_update(&target, &pending, 1, 1);
+            assert!(decision.volume_block);
+            assert!(!decision.owned_fallback);
+            let state = super::r2o_budget_partial_map()
+                .lock()
+                .unwrap()
+                .get(&target)
+                .cloned()
+                .unwrap();
+            let text = r2o_budget_partial_finish(&target).unwrap();
+            writeln!(
+                output,
+                "{label} plan={} planbox={} plans=1 next=1 budget={} owned={} volume={}",
+                hex(&text),
+                state.partial.box_id,
+                R2O_D2K_CAT_BUDGET_CUT,
+                u8::from(state.owned_fallback),
+                u8::from(state.volume_cut)
+            )
+            .unwrap();
+        }
+        if let Ok(path) = std::env::var("R2O_BUDGET_VOLUME_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+
+        // Полный путь: объёмный блок ставит частичный план и подтверждает
+        // его привязкой с бюджетом CUT; второго плана в исходе нет.
+        let work = std::env::temp_dir().join(format!(
+            "r2o-budget-volume-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&work).unwrap();
+        let catalog_path = work.join("catalog.json");
+        Catalog::default().save_atomic(&catalog_path, 1).unwrap();
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "volume-e2e.example.com".into(),
+            endpoint: "198.51.100.92:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let _ = r2o_budget_partial_take(&target);
+        r2o_budget_cut_pending_set(
+            &target,
+            R2oBudgetCutPending {
+                plan_id: "00112233445566778899aabbccddeeff".into(),
+                plan_text: plan_text.into(),
+                box_id: "box-vol".into(),
+                budget_packets: 100,
+                volume_block: true,
+                search_owned: true,
+                own_first_two: false,
+                ver_status: 200,
+                ver_budget: R2O_D2K_CAT_BUDGET_CUT,
+            },
+        );
+        let outcome = super::DiscoveryOutcome {
+            target: target.clone(),
+            plan_text: None,
+            detail: String::new(),
+            queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
+            direct_clear: false,
+            volume_recovery: true,
+            budget_mark: 0,
+            group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
+            volume_fingerprint: None,
+            volume_box_id: None,
+            retry_after: None,
+        };
+        let (client_stream, _server_stream) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut client = ControlClient {
+            socket: client_stream,
+            send_maxlen: 0,
+            send_cap: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            pending_events: std::collections::VecDeque::new(),
+            pending_applied_events: std::collections::VecDeque::new(),
+            dropped_events: Default::default(),
+            http_search_started: Default::default(),
+            http_acknowledged_bindings: std::collections::HashMap::new(),
+        };
+        let mut catalog = Catalog::default();
+        let mut confirmed = false;
+        client
+            .apply_discovery_outcome_with_input_and_persistence(
+                outcome,
+                &mut catalog,
+                &catalog_path,
+                2,
+                None,
+                None,
+                &mut confirmed,
+                None,
+            )
+            .unwrap();
+        assert!(confirmed);
+        let binding = catalog
+            .boxes
+            .iter()
+            .flat_map(|box_record| &box_record.bindings)
+            .find(|binding| binding.target == target.host)
+            .unwrap();
+        assert_eq!(binding.budget, R2O_D2K_CAT_BUDGET_CUT);
+        let saved_plan = catalog
+            .boxes
+            .iter()
+            .flat_map(|box_record| &box_record.plans)
+            .find(|plan| plan.text.contains("proto tcp tls") && plan.text.contains("order forward"))
+            .unwrap();
+        assert_eq!(binding.plan_id, saved_plan.id);
+        assert_eq!(
+            catalog
+                .boxes
+                .iter()
+                .flat_map(|box_record| &box_record.plans)
+                .count(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(&work);
     }
 
     #[cfg(unix)]
@@ -39822,6 +40029,141 @@ mod tests {
             quic_case("quic_ttl5", R2oQuicCandidateKind::OriginalTtl(5), ttl5, 0);
         }
         if let Ok(path) = std::env::var("R2O_VERDICT_TO_PLANS_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn on_applied_voice_flow_matches_c() {
+        use super::{R2oVoiceTrialContext, r2o_voice_applied_flow_matches};
+        use std::fmt::Write as _;
+        use std::time::Instant;
+
+        let plan_id = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ];
+        let plan_id_hex = plan_id
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let plan_text = format!(
+            "r2o-plan 1 1\nid {plan_id_hex}\nproto udp voice\npayload 1 000100002112a442404142434445464748494a4b\npoison 1\nfake payload=1 poison=1 repeats=1 gap_us=0 place=before\norder forward\npace 15000\n"
+        );
+        let trial_id = [
+            0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+            0x1e, 0x1f,
+        ];
+        let now = Instant::now();
+        let trial = R2oVoiceTrialContext {
+            target: r2o_controller::voice_discovery::R2oVoiceTarget {
+                client: "192.0.2.10".parse().unwrap(),
+                server: "198.51.100.20:19327".parse().unwrap(),
+            },
+            trial_id,
+            plan_text,
+            discovery_verified: false,
+            voice_flow_key: None,
+            started_at: now,
+            renew_at: now,
+            expires_at: now,
+            response_confirmed: false,
+            diagnostic: None,
+        };
+        let mut output = String::new();
+        let mut run = |label: &str,
+                       trial_override: [u8; 16],
+                       plan_override: [u8; 16],
+                       client_port: u16,
+                       server_ip: [u8; 4],
+                       server_port: u16,
+                       transport: u8,
+                       family: u8| {
+            let mut key = [0_u8; r2k_core::control::KEY_LEN];
+            key[0] = family;
+            key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+            key[17..21].copy_from_slice(&server_ip);
+            key[33..35].copy_from_slice(&client_port.to_be_bytes());
+            key[35..37].copy_from_slice(&server_port.to_be_bytes());
+            key[37] = transport;
+            let event = r2k_core::control::AppliedEvent {
+                key,
+                plan_id: plan_override,
+                trial_id: trial_override,
+                execution_id: 1,
+                binding: Default::default(),
+            };
+            writeln!(
+                output,
+                "{label} applied={}",
+                u8::from(r2o_voice_applied_flow_matches(&trial, &event))
+            )
+            .unwrap();
+        };
+        run(
+            "voice_match",
+            trial_id,
+            plan_id,
+            41000,
+            [198, 51, 100, 20],
+            19327,
+            17,
+            4,
+        );
+        let mut wrong_trial = trial_id;
+        wrong_trial[0] ^= 0xff;
+        run(
+            "voice_wrong_trial",
+            wrong_trial,
+            plan_id,
+            41000,
+            [198, 51, 100, 20],
+            19327,
+            17,
+            4,
+        );
+        run(
+            "voice_wrong_port",
+            trial_id,
+            plan_id,
+            41000,
+            [198, 51, 100, 20],
+            19328,
+            17,
+            4,
+        );
+        run(
+            "voice_wrong_server",
+            trial_id,
+            plan_id,
+            41000,
+            [203, 0, 113, 20],
+            19327,
+            17,
+            4,
+        );
+        run(
+            "voice_wrong_transport",
+            trial_id,
+            plan_id,
+            41000,
+            [198, 51, 100, 20],
+            19327,
+            6,
+            4,
+        );
+        run(
+            "voice_wrong_family",
+            trial_id,
+            plan_id,
+            41000,
+            [198, 51, 100, 20],
+            19327,
+            17,
+            6,
+        );
+        if let Ok(path) = std::env::var("R2O_ON_APPLIED_VOICE_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
         }
     }
