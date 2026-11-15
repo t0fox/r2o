@@ -97,10 +97,10 @@ production-путь не ставится. Формулировки «теста
 | core-state | 692 | 471 | 221 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
-| detect | 159 | 134 | 25 | 0 | 0 |
-| **Итого** | **1982** | **1526** | **456** | **0** | **0** |
+| detect | 159 | 130 | 29 | 0 | 0 |
+| **Итого** | **1982** | **1522** | **460** | **0** | **0** |
 
-Это не оценка паритета: 456 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 460 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -119,7 +119,7 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1510 / P 472**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1522 / P 460**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
@@ -136,9 +136,9 @@ B — нужен только тест/differential **190**; C — архите�
 (`AGENT_REPORT-qa-categorize.md`).
 
 
-## Итог и подтверждённые расхождения (2026-11-14)
+## Итог и подтверждённые расхождения (2026-11-15)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1526 / P 456 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1522 / P 460 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -148,8 +148,8 @@ P означает неполное доказательство ветвей, N
 | 2 | `ARM_SHAPE` | принимает transport 6 и 17 (`ctlsrv.c:329`) | **закрыто 2026-11-12:** R2O принимает 6/17, кэширует QSN-снимок и отдаёт `EV_SHAPE` (v22)/`EVENT_HELLO` (v48), пустое имя — wildcard; тест `arm_shape_serves_quic_snapshot_and_empty_name_is_wildcard` | `deep-datapath-core.md` |
 | 3 | `wire_udp` IPv4 | `POISON_IPID_ZERO` разрешён, ID=0 (`wire_udp.c:75,136`); TOS из пакета | любой poison отвергнут (`wire.rs:213`), TOS иной | C/Rust harness 4 poison-кейса |
 | 4 | raw UDP/TTL | `IP_HDRINCL`+`IP_NODEFRAG`+TTL get/set/restore, `qp_recv_ttl` | `IP_NODEFRAG` отсутствует, TTL не принимается; датапат raw без controller API | `deep-core-net.md` |
-| 5 | production classify | donor-семантика C | discovery: `full_detect_semantics=false`, `confirm_clear=true` (`classify.rs:869-870`, `main.rs:15380-15391`), дифференциалы идут с `true` | `deep-detect-plan.md` |
-| 6 | `d2k_compose_from_props` | при `control=None` всегда «всё сразу» (`props.c:477-486`) | кандидат не выдаётся (`raw_probe.rs:1094-1096`) | `deep-detect-plan.md` |
+| 5 | production classify | donor-семантика C | **закрыто 2026-11-14/15:** production default `full_detect_semantics=true`, `confirm_clear=false`; full-tree 24 + exact display PASS | `detect.md` |
+| 6 | `d2k_compose_from_props` | при `control=None` всегда «всё сразу» | **закрыто 2026-11-15:** R2O выдаёт «всё сразу», 42-case differential PASS | `detect.md` |
 | 7 | `d2k_raw_set_segment_max` | production `d2kc.c:575,789` ставит `d2k_arm_segment(send_maxlen)` | measured-план жёстко 1400 (`classify_measured.rs:12,143`) | `deep-detect-plan.md` |
 | 8 | HTTP80 capacity | 128 потоков **с вытеснением** (`http80.h:40-41`, `http80.c:217-236`) | 1024 потока **без вытеснения** (`hold.rs:20,1080-1084`) | `deep-datapath-core.md` |
 | 9 | ENOBUFS | TCP hold flush all, UDP — только истёкшие (`d2kd.c:1590`) | дренирует **все** UDP hold/deferred (`main.rs:1312-1335`) | `deep-datapath-core.md` |
@@ -162,7 +162,7 @@ P означает неполное доказательство ветвей, N
 | 16 | Binding | `tcp_profile` хранится, `family` default 4 (`catalog.c:834-890`) | **закрыто 2026-11-12 (данные):** `Binding.tcp_profile` и `default_family()=4` добавлены, читаются/пишутся/проверяются (`catalog.rs:166-201`, тест `binding_tcp_profile_round_trips_and_rejects_unknown_values`); **частично закрыто:** `exact_key`, `own_first_bound_plan_id`, `own_first_plans`, `newer_name_binding` (discovery), `has_covering_binding` сравнивают профиль, выведенный из shape; остаются `family_recovery`, `unfit` и отсутствие отдельного `trigger_tcp_profile` | `core-state.md` |
 | 17 | plan identity | FNV-1a `plan-%08x` в TLV (`compose.c:218-240`) | trial-id 16 байт (`discovery.rs:1450`) | `core-state.md` |
 | 18 | P-256 | production TLS1.2 ECDHE (`tls12.c:650-655`) | `ring`; прямых C/Rust-векторов нет | `core-state.md` |
-| 19 | HTTP-search `probe_run` | 403 с телом РКН → `INJECTED`; 101/битый CL/TE → CUT; `head` включает тело | Rust не классифицирует тело, 101 → `Empty`, битый CL/TE → `InvalidData`; judge видит только заголовки | `deep-core-verify.md` |
+| 19 | HTTP-search `probe_run` | 403 с телом РКН → `INJECTED`; 101/битый CL/TE → CUT; judge видит первые 4095 байт | **закрыто 2026-11-14/15:** тело классифицируется, 101/CL+TE → CUT, judge prefix 4095; `test-http-search-response-differential.sh` 13 PASS | `core-net.md` |
 | 20 | HTTP-search кандидаты | `CANDS[]`: split, disorder, fake-badsum, fake-seqshift (4) | 5 кандидатов, включая `fake-badsum-whole`, другой порядок | `deep-core-verify.md` |
 | 21 | HTTP-search save | файл `d2k-http-plans 1`, `fflush/fsync/rename` | JSON-каталог, отдельного файла/формата нет | `deep-core-verify.md` |
 | 22 | verify page budget | бюджетный повтор шлёт фактический `req`, дедлайн сбрасывается | повтор строит запрос из `options.path`, общий deadline; redirect только при `complete` | `deep-core-verify.md` |
@@ -186,8 +186,8 @@ P означает неполное доказательство ветвей, N
   ECH+volume/addr+voice/QUIC-deny не доказаны.
 - HTTP-search — переходы/таймеры задач, live failures, диагностические
   счётчики; HTTPS-probe — live-тайминги и `lost`.
-- datapath — сложные ветви session/hold/capture, `nfq` ENOBUFS, HTTP80
-  capacity; detect — bridge/CLI, autottl/tsup, handshake12.
+- datapath — сложные ветви session/hold/capture, `nfq` IPv6 live, HTTP80
+  capacity; detect — bridge/CLI, handshake12, properties-loop labels.
 - core-state — CLI-флаги/вывод, PSL/catalog-парсер, crypto HKDF-границы,
   voice-blob, volume resource-retry.
 - `?` (0): не осталось; все строки реестра разобраны и имеют E/P/N.

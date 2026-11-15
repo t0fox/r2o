@@ -36,14 +36,14 @@ Static-хелперы наследуют статус владельца; в к�
 
 | Статус | Кол-во |
 |---|---:|
-| E | 134 |
-| P | 25 |
+| E | 130 |
+| P | 29 |
 | N | 0 |
 | ? | 0 |
 | **Всего** | **159** |
 
-Актуальные counts: **E 134 / P 25 / N 0** (срез main 2026-11-15).
-Доли: E — 84.3 % (134/159); E или P — 100 %; N — 0.
+Актуальные counts: **E 130 / P 29 / N 0** (срез main 2026-11-15).
+Доли: E — 81.8 % (130/159); E или P — 100 %; N — 0.
 
 По файлам:
 
@@ -54,11 +54,11 @@ Static-хелперы наследуют статус владельца; в к�
 | detect/main.c | 8 | 4 | 4 | 0 |
 | detect/poison.c | 12 | 12 | 0 | 0 |
 | detect/props.c | 7 | 6 | 1 | 0 |
-| detect/raw.c | 62 | 56 | 6 | 0 |
+| detect/raw.c | 62 | 52 | 10 | 0 |
 | detect/response.c | 7 | 7 | 0 | 0 |
 | detect/trigger.c | 9 | 9 | 0 | 0 |
 | detect/include/d2k_detect.h | 1 | 1 | 0 | 0 |
-| **Всего** | **159** | **134** | **25** | **0** |
+| **Всего** | **159** | **130** | **29** | **0** |
 
 ---
 
@@ -401,7 +401,7 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
 | `pid_alive` | 128-132 | 5 | жив ли PID: крючок, иначе `kill(pid,0)==0` или EPERM | `raw_probe.rs` `pid_alive` | E | C `d2k_raw_alive_hook` или `kill(pid,0)==0` или `errno==EPERM`. Rust `pid_alive(pid)` делает тот же `kill(pid,0)` и считает EPERM живым; используется `rst_rule_stale`; тест `rst_rule_parser_matches_donor_legacy_and_owned_forms` проверяет живого/мёртвого владельца через инъекцию. |
 | `d2k_rst_rule_stale` | 137-143 | 7 | брошенное правило: разобралось и владелец 0/мёртв | `raw_probe.rs` `rst_rule_stale`/`rst_rule_stale_with` | E | C `parse_rst_rule(...) && (owner==0 \|\| !pid_alive(owner))`. Rust `rst_rule_stale` возвращает `Some((port,owner))` только для legacy или мёртвого владельца; `pid_alive` учитывает EPERM. Тест `rst_rule_parser_matches_donor_legacy_and_owned_forms`; `sweep_stale_iptables` снимает и legacy/`d2k-rst:` правила. |
 | `d2k_raw_supported` | 164-164 | 1 | Linux: сырой слой доступен | `raw_probe.rs` `raw_supported` | E | C под Linux `return 1`; non-Linux stub возвращает 0. Rust `raw_probe` компилируется только под Linux, `raw_supported()` возвращает true; вне Linux бэкенд `classify.rs` отдаёт false. Тест `raw_supported_matches_c_linux_contract`. |
-| `raw_rule_system` | 224-255 | 32 | запуск команды правила: fork/setpgid, закрыть fd 3+, `execl("/bin/sh","-c")`, waitpid с дедлайном 5 с, SIGKILL группе | `raw_probe.rs:1497` `run_command`, `COMMAND_TIMEOUT` | **E*** | **2026-11-15:** `run_command` запускает команду в своей группе процессов и по 5-с запросу убивает группу `kill(-pid,SIGKILL)`; тест `run_command_timeout_matches_c_rule_deadline` + production nft/iptables PASS. Ограничение: host-root и `kill -9` atexit не проверялись. |
+| `raw_rule_system` | 224-255 | 32 | запуск команды правила: fork/setpgid, закрыть fd 3+, `execl("/bin/sh","-c")`, waitpid с дедлайном 5 с, SIGKILL группе | `raw_probe.rs:1497` `run_command`, `COMMAND_TIMEOUT` | **P*** | **2026-11-15:** `run_command` 5-с timeout/групповой SIGKILL + production nft/iptables PASS. **QA final8:** C закрывает fd 3+ перед `execl`; Rust этого не делает, ветвь не покрыта differential — P*. |
 | `d2k_raw_rst_fail_count` | 262-262 | 1 | счётчик отказов RST-правила текущего потока | `raw_probe.rs:58 RST_RULE_FAILURES` | **E** | C `return t_rst_rule_failures` (thread-local). Rust `thread_local! Cell<u64>` `RST_RULE_FAILURES`, инкремент в `RstGuard`; тест `raw_probe.rs:2770`. |
 | `d2k_raw_dial_count` | 263-263 | 1 | счётчик сырых соединений текущего потока | `raw_probe.rs` `raw_dial_count`/`note_raw_dial` | E | C `return t_raw_dials` (thread-local), инкремент в `raw_dial`. Rust `RAW_DIALS` — thread-local `Cell<u64>`, инкремент вынесен в `note_raw_dial` и вызывается при открытии raw-соединения; тест `raw_dial_counter_matches_c` проверяет +1. |
 | `seed_init` | 265-269 | 5 | `srandom(now_ms ^ pid)`, стартовый счётчик порта `random()%25000` | `raw_probe.rs` `random_u32`, `NEXT_SOURCE_PORT` | E | C `srandom((uint64_t)now_ms ^ pid)`, `g_sport_counter=random()%25000`. Rust инициализирует `OnceLock<AtomicU32>` значением `random_u32()%25_000`; источник энтропии иной, диапазон и однократность те же. Тест `source_port_counter_matches_c_increment_and_range`. |
@@ -422,8 +422,8 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
 | `d2k_raw_pending_count` | 488-495 | 8 | число отложенных снятий RST под mutex | `raw_probe.rs` `rst_pending_count` | E | C lock `g_raw_state`; `n=g_rst_pending_n`; unlock; return. Rust `rst_pending_count()` берёт `RST_PENDING`, lock и возвращает `len`; тест `rst_pending_count_starts_empty_and_is_bounded`. |
 | `raw_atexit` | 497-504 | 8 | при выходе: `trylock`, final retry, unlock | `raw_probe.rs:1735-1737 rst_cleanup_at_exit` | **P** | C `pthread_mutex_trylock`, при неудаче не ждать; final retry; unlock. Rust `rst_cleanup_at_exit` вызывает `retry_pending_rst_releases(true)` без trylock (мьютекс блокирующий); поведение при занятом замке иное. |
 | `rst_key_of` | 506-515 | 10 | ключ правила: sport/dport/family/dst (4/16) | `raw_probe.rs` `RstRule` | E | C копирует sport/dport/family/dst в `rst_key`. Rust `RstRule` хранит те же поля (`source_port`, `destination`/family, `destination_port`) и использует их в обеих формах команд. Тест `rst_key_fields_are_used_in_both_command_forms` проверяет nft rst6/rst4, адрес, sport/dport и iptables `--sport`. |
-| `suppress_kernel_rst` | 517-545 | 29 | поставить правило: lock, retry pending, `-I`; при отсутствии xt_comment — fallback без метки; failure count, killed → release | `raw_probe.rs:1500-1628 RstRule::install/RstGuard` | **E*** | **2026-11-15:** production `nft`/`iptables` RST-правило в userns: установка и очистка проверены raw handshake production differential (v4/v6/iptables), `iptables -S OUTPUT`/nft set пусты после прогона. Ограничение: host-root iptables и `kill -9`. |
-| `release_kernel_rst` | 547-553 | 7 | снять правило под mutex | `raw_probe.rs:1630-1636 RstGuard::drop` | **E*** | **2026-11-15:** очистка nft/iptables RST-правил после classifier-прогонов проверена production differential (nft set и `iptables -S OUTPUT` пусты). Ограничение: host-root и аварийный `kill -9`. |
+| `suppress_kernel_rst` | 517-545 | 29 | поставить правило: lock, retry pending, `-I`; при отсутствии xt_comment — fallback без метки; failure count, killed → release | `raw_probe.rs:1500-1628 RstRule::install/RstGuard` | **P*** | **2026-11-15:** production nft/iptables install + cleanup после classifier PASS (userns). **QA final8:** не покрыты отказ/fallback без `xt_comment`, `t_rst_rule_failures`, killed→release — P* до отдельного failure differential. |
+| `release_kernel_rst` | 547-553 | 7 | снять правило под mutex | `raw_probe.rs:1630-1636 RstGuard::drop` | **P*** | **2026-11-15:** production nft/iptables cleanup PASS. **QA final8:** ветви отказа удаления/повторного release/`kill -9` не покрыты — P*. |
 | `local_addr_for` | 556-596 | 41 | локальный адрес через UDP-connect: IPv6 и IPv4 ветки, getsockname | `raw_probe.rs:1463-1472 local_address_for` | **E*** |  **2026-11-15:** прямой C/Rust differential `test-raw-local-addr-differential.sh` PASS 2 кейса (IPv4/IPv6 loopback, точные байты). |
 | `rd16` | 598-598 | 1 | big-endian u16 | `raw_probe.rs` `u16::from_be_bytes` | **E** | C `static uint16_t rd16(const uint8_t *b){return (uint16_t)((b[0]<<8)\|b[1]);}`. Rust `from_be_bytes` на срезе ровно 2 байта; владелец `build_ipv4_tcp`; differential `raw_probe.rs:2550`. |
 | `rd32` | 600-604 | 5 | big-endian u32 | `raw_probe.rs` `u32::from_be_bytes` | **E** | C `static uint32_t rd32(const uint8_t *b){return (uint32_t)b[0]<<24 \| (uint32_t)b[1]<<16 \| (uint32_t)b[2]<<8 \| b[3];}`. Rust `u32::from_be_bytes` на точном срезе; владелец `build_ipv4_tcp` (seq/ack/опции); differential `raw_probe.rs:2550` сравнивает собранный пакет. |
@@ -438,9 +438,9 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
 | `d2k_raw_set_segment_max` | 814-814 | 1 | установить потолок сегмента (0 → 1400) | `classify_measured.rs` `set_segment_max`/`segment_max` | E | C `seg_max = seg ? seg : D2K_ARM_SEGMENT_MAX`. Rust `seg_max` — `AtomicUsize`, ноль заменяется на `DEFAULT_SEGMENT_MAX=1400`; `measured_plan_text` и расчёт `send_cap` используют `segment_max()`. Тест `segment_max_zero_uses_default_and_restores`. |
 | `raw_send` | 830-858 | 29 | отправка нагрузки сегментами ≤`seg_max`: seq+off, seq_shift, сборка/отправка, seq не двигается | `raw_probe.rs:1209-1262 raw_send_plan` | **E*** | **2026-11-15:** test-only seam + `test-raw-io-differential.sh` **30 кейсов**: small/split/zero/ENOBUFS/EMSGSIZE/EINTR/short4/short6, точные сегменты и errno; SYN-data режется по `segment_max`, как C. |
 | `raw_send_syn` | 864-896 | 33 | SYN с опциями: MSS 1452, SACK, TS или plain (MSS/NOP/WS 7/SACK), сборка и отправка | `raw_probe.rs:1941,1964` (`raw_syn_options`/`build_control_packet`) | **E** | C `opts_ts` 20 байт (`02 04 05 ac`, `04 02`, `08 0a`, `1`, `03 03 07`) или `opts_plain` 14 байт; `build_ip_tcp(...SYN...)`; `raw_sendto`. Rust `raw_syn_options(offer_ts)` и `build_control_packet`; `scripts/r2o-raw-profile-differential.sh`/`RAW_SYN_PROFILE`. |
-| `raw_recv` | 900-949 | 50 | recvfrom с фильтрами: дедлайн/отмена, family/peer, IPv4 ihl/len/dst, порты, data_off | `raw_probe.rs:2041+ receive_segment` | **E*** | **2026-11-15:** seam differential: valid/RST/noise/short/EAGAIN/EINTR/EIO/POLLERR/IPv6 — C/Rust коды/поля совпали. |
-| `raw_read_payload` | 952-988 | 37 | ждать данные: RST → -1, выравнивание по `c->ack`, обрезка повторов | `raw_probe.rs:2041+ receive_segment`/`read_payload` | **E*** | **2026-11-15:** seam differential: data/RST/silence/ahead/overlap/error — точные байты и коды совпали. |
-| `raw_close` | 990-1006 | 17 | снять правило, закрыть send/recv fd, освободить buffers | `RawConn`/`OwnedFd`/`RstGuard::drop` | **E*** | **2026-11-15:** seam differential: порядок `release rule → close(send) → close(recv)`, cleared/fds совпали с C. |
+| `raw_recv` | 900-949 | 50 | recvfrom с фильтрами: дедлайн/отмена, family/peer, IPv4 ihl/len/dst, порты, data_off | `raw_probe.rs:2041+ receive_segment` | **E*** | **2026-11-15:** test-only seam differential: valid/RST/noise/short/EAGAIN/EINTR/EIO/POLLERR/IPv6; production — handshake/classifier используют тот же `RawConn`. Ограничение: изолированного live production differential для recv нет. |
+| `raw_read_payload` | 952-988 | 37 | ждать данные: RST → -1, выравнивание по `c->ack`, обрезка повторов | `raw_probe.rs:2041+ receive_segment`/`read_payload` | **E*** | **2026-11-15:** seam differential: data/RST/silence/ahead/overlap/error; production raw classifier 93 использует путь. Ограничение: изолированного live production differential нет. |
+| `raw_close` | 990-1006 | 17 | снять правило, закрыть send/recv fd, освободить buffers | `RawConn`/`OwnedFd`/`RstGuard::drop` | **E*** | **2026-11-15:** seam differential: порядок `release rule → close(send) → close(recv)`, cleared/fds; production handshake/classifier закрывают соединение тем же путём. Ограничение: изолированного live production differential нет. |
 | `raw_handshake` | 1008-1089 | 82 | SYN с RTO 1s→2×, RST/SYN-ACK, ack==seq+1, timestamp option, ACK, таймаут → `RAW_CONNECT_TIMEOUT` | `raw_probe.rs:1942-1999` (`RawConn::connect` loop) | **E*** | **2026-11-15:** seam + production `d2k_raw_probe_handshake_as`: IPv4/IPv6 success/RST (`classify: сервер ответил RST на SYN`)/timeout (`SYN-ACK не пришёл`)/no-ts — 5 function cases PASS; production classifier nft/iptables PASS. |
 | `raw_dial` | 1092-1180 | 89 | собрать raw-соединение: local addr, buffers, send/recv сокеты, SO_MARK, HDRINCL, v6 bind, RCVTIMEO 300 мс, sweep once, port, seq, suppress RST, handshake | `raw_probe.rs:1840-2000 RawConn::connect` | **E*** | **2026-11-15:** production `RawConn::connect` против C `d2k_raw_probe_handshake_as`: IPv4/IPv6 success/RST/timeout, точные коды/ошибки; классификатор production nft/iptables PASS. |
 | `d2k_raw_probe_handshake_as` | 1187-1197 | 11 | самопроверка: `raw_dial`, close, 1 | `raw_probe.rs probe_handshake_as` | **E*** | **2026-11-15:** production differential 5 cases (IPv4/IPv6 success/RST/timeout) + classifier nft/iptables PASS; `refused` только seam-тест — ограничение. |
@@ -453,7 +453,7 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
 | `d2k_raw_flush_pending` | 1332-1332 | 1 | не-Linux: no-op | `cfg(target_os="linux")` | **P** | C пустая функция под `#else`. Rust вне Linux raw-путь не активен, `RST_PENDING`/`RstGuard` не используются; отложенных снятий RST нет — наблюдаемое поведение no-op. |
 | `d2k_raw_pending_count` | 1333-1333 | 1 | не-Linux: 0 | `lib.rs` `rst_pending_count` (cfg) | E | C `return 0`. На не-Linux Rust-функция `rst_pending_count()` возвращает 0; на Linux — длину `RST_PENDING`. |
 | `d2k_raw_probe_poison_family` | 1335-1343 | 9 | не-Linux: ошибка «сырой слой только на Linux» | `ProbeError::Unsupported` | **P** | C `snprintf(err,...,"сырой слой только на Linux")`, return -1. Rust вне Linux raw-путь возвращает `Unsupported` с аналогичным смыслом; текст иной. |
-| `d2k_raw_probe_handshake_as` | 1345-1353 | 9 | не-Linux: ошибка «сырой слой только на Linux» | `ProbeError::Unsupported` | **E*** | **2026-11-15:** production differential 5 cases (IPv4/IPv6 success/RST/timeout) + classifier nft/iptables PASS; `refused` только seam-тест — ограничение. |
+| `d2k_raw_probe_handshake_as` | 1345-1353 | 9 | не-Linux: ошибка «сырой слой только на Linux» | `ProbeError::Unsupported` | **P*** | C non-Linux stub: `snprintf(err, "classify: сырой слой доступен только на Linux")`, return -1; Rust `ProbeError::Unsupported`. Смысл совпадает, текст/API иные; non-Linux сборка/поведение не проверялись — P* (Linux-строка 1187-1197 имеет отдельный production differential). |
 | `d2k_raw_probe_handshake` | 1357-1361 | 5 | обёртка family 4 | `raw_probe.rs` (family из адреса) | **E*** | **2026-11-15:** production differential 5 cases (IPv4/IPv6 success/RST/timeout) + nft/iptables cleanup PASS. |
 | `d2k_raw_probe_handshake_family` | 1364-1370 | 7 | обёртка `offer_ts=1` | `raw_probe.rs` (offer_ts параметр) | **E*** | **2026-11-15:** family 4/6 success/RST/timeout в production differential PASS. |
 | `d2k_raw_probe_poison` | 1372-1377 | 6 | обёртка family 4 | `raw_probe.rs` (family из адреса) | **P** | C `return d2k_raw_probe_poison_family(ip4,ip6,4,ip,port,mark,hello,plan,err,cap)`. Rust family берёт из адреса/`PacketView`; отдельного символа с фиксированной 4 нет. |
@@ -842,8 +842,8 @@ r2o-tls-verify-differential.sh                       16/16 PASS
 
 ## Итог
 
-- Актуальные counts: **E 134 / P 25 / N 0** из 159 (срез main 2026-11-15).
-- P не считается паритетом: 25 строк без полного доказательства ветвей
+- Актуальные counts: **E 130 / P 29 / N 0** из 159 (срез main 2026-11-15).
+- P не считается паритетом: 29 строк без полного доказательства ветвей
   (bridge/sweep/raw/props/CLI helpers); после QA final7 понижены
   `sweep_poisons` и `d2k_run_properties_family`.
 - N больше нет; ранее N-строки перенесены или переклассифицированы.
