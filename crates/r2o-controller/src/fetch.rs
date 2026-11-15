@@ -2043,6 +2043,28 @@ fn r2o_fetch_measure_rx_volume_with_roots_and_phase_timeout(
     r2o_retry
 }
 
+fn r2o_volume_identity_reason(result: &FetchResult) -> String {
+    format!(
+        "identity-1 HTTP {}, тело {}/{}, complete={}, TLS={:04x} wire={} missing={}: {}",
+        result.status,
+        result.body_bytes,
+        result.body_expected.unwrap_or(0),
+        u8::from(result.complete),
+        result.r2o_volume_observation.negotiated_tls.unwrap_or(0),
+        result.r2o_volume_observation.rx_tls_wire_bytes,
+        result.r2o_volume_observation.rx_tls_record_missing,
+        r2o_budget_error(result.reason.as_deref().unwrap_or(""))
+    )
+}
+
+/// C `measure_response_volume`: `rx_tls_unavailable` — TCP поднялся
+/// (`level == TRANSPORT`), но рукопожатие/HTTP не дали статуса. В Rust
+/// ошибка контакта приходит строкой, поэтому отказ TCP (`нет TCP`/`dial`)
+/// обязан остаться false; только TLS-ошибка даёт true.
+fn r2o_volume_error_is_tls_unavailable(error: &str) -> bool {
+    error.starts_with("TLS-рукопожатие не завершилось:")
+}
+
 fn r2o_fetch_measure_rx_volume_once(
     options: &FetchOptions,
     roots: RootCertStore,
@@ -2056,7 +2078,7 @@ fn r2o_fetch_measure_rx_volume_once(
     }
     let mut r2o_options = options.clone();
     r2o_options.deadline = R2O_D2O_VOLUME_RX_TIMEOUT;
-    let r2o_first = match r2o_fetch_rx_probe(
+    let mut r2o_first = match r2o_fetch_rx_probe(
         &r2o_options,
         R2oFetchEncoding::Identity,
         roots.clone(),
@@ -2065,12 +2087,18 @@ fn r2o_fetch_measure_rx_volume_once(
     ) {
         Ok(result) => result,
         Err(error) => {
-            r2o_result.rx_tls_unavailable = error.starts_with("TLS-рукопожатие не завершилось:");
+            r2o_result.rx_tls_unavailable = r2o_volume_error_is_tls_unavailable(&error);
             r2o_result.failures.push(error.clone());
             r2o_result.reason = format!("первая identity-проверка не установила TLS/HTTP: {error}");
             return r2o_result;
         }
     };
+    // C `measure_response_volume` копирует `resources` только для complete
+    // 2xx не-Blocked/Legal. Иначе короткий 401/403 не должен запускать
+    // resource_retry_path.
+    if !r2o_fetch_result_can_remember_resources(&r2o_first) {
+        r2o_first.r2o_resources.clear();
+    }
     r2o_result.direct_complete = r2o_fetch_result_is_direct_complete(&r2o_first);
     let r2o_first_observation = r2o_first.r2o_volume_observation;
     if !crate::r2o_volume::r2o_volume_rx_partial(&r2o_first_observation) {
@@ -2079,22 +2107,8 @@ fn r2o_fetch_measure_rx_volume_once(
             && !r2o_result.rx_tls_unavailable;
         if r2o_first.status > 0 && r2o_first.complete && r2o_first.body_bytes < 12 * 1024 {
             r2o_result.short_bytes = Some(r2o_first.body_bytes);
-            r2o_result.reason = format!(
-                "полный ответ содержит {} байт, меньше порога 12 КБ; RX-обрыв не измерен",
-                r2o_first.body_bytes
-            );
-        } else {
-            r2o_result.reason = format!(
-                "первая identity-проверка не подтвердила RX-обрыв: HTTP {}, {} байт{}",
-                r2o_first.status,
-                r2o_first.body_bytes,
-                r2o_first
-                    .reason
-                    .as_deref()
-                    .map(|reason| format!(" ({reason})"))
-                    .unwrap_or_default()
-            );
         }
+        r2o_result.reason = r2o_volume_identity_reason(&r2o_first);
         r2o_result.first = Some(r2o_first);
         return r2o_result;
     }
@@ -3964,6 +3978,35 @@ mod tests {
             budget_note: None,
             r2o_resources: Vec::new(),
         }
+    }
+
+    #[test]
+    fn volume_tls_unavailable_matches_transport_without_status() {
+        assert!(!r2o_volume_error_is_tls_unavailable(
+            "нет TCP к 127.0.0.1:443: Connection refused"
+        ));
+        assert!(!r2o_volume_error_is_tls_unavailable(
+            "dial tcp 127.0.0.1:443: i/o timeout"
+        ));
+        assert!(r2o_volume_error_is_tls_unavailable(
+            "TLS-рукопожатие не завершилось: unexpected eof"
+        ));
+    }
+
+    #[test]
+    fn volume_identity_reason_matches_c_format() {
+        let mut result =
+            response_for_classification(403, R2oFetchHttpOutcome::Blocked, true, false);
+        result.body_bytes = 243;
+        result.body_expected = Some(0);
+        result.reason = Some("forbidden".into());
+        result.r2o_volume_observation.negotiated_tls = Some(0x0304);
+        result.r2o_volume_observation.rx_tls_wire_bytes = 777;
+        result.r2o_volume_observation.rx_tls_record_missing = 12;
+        assert_eq!(
+            r2o_volume_identity_reason(&result),
+            "identity-1 HTTP 403, тело 243/0, complete=1, TLS=0304 wire=777 missing=12: forbidden"
+        );
     }
 
     #[test]
