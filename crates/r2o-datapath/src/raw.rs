@@ -1090,8 +1090,11 @@ fn r2o_f6_route(src: &[u8; 16], dst: &[u8; 16], mark: u32) -> io::Result<(u32, [
             continue;
         }
         if message.kind == R2O_NLMSG_ERROR {
-            if message.body.len() < 4 {
-                return Err(io::Error::from_raw_os_error(libc::EPROTO));
+            // C `d2k_f6_route`: `nlmsg_len < NLMSG_LENGTH(struct nlmsgerr)`
+            // считается неполным ответом и уводит в ENETUNREACH, а не в
+            // EPROTO. Полный nlmsgerr — 4 байта error + nlmsghdr.
+            if message.body.len() < std::mem::size_of::<libc::nlmsgerr>() {
+                break;
             }
             let error = i32::from_ne_bytes(message.body[..4].try_into().expect("длина проверена"));
             return Err(io::Error::from_raw_os_error(if error < 0 {
@@ -1149,10 +1152,13 @@ fn r2o_f6_neighbor(ifindex: u32, gateway: &[u8; 16]) -> io::Result<[u8; 6]> {
         }
         let received = match r2o_netlink_recv(&fd, &mut reply) {
             Ok(received) => received,
+            // C `d2k_f6_neighbor` на recvfrom < 0 делает goto done и
+            // сохраняет errno (в том числе EAGAIN по SO_RCVTIMEO/EINTR), а
+            // не подменяет его на EHOSTUNREACH.
             Err(error)
                 if matches!(error.raw_os_error(), Some(libc::EAGAIN) | Some(libc::EINTR)) =>
             {
-                break;
+                return Err(error);
             }
             Err(error) => return Err(error),
         };
@@ -2042,6 +2048,42 @@ mod tests {
             std::fs::write(path, &output).unwrap();
         }
         assert!(output.contains("route rc="));
+    }
+
+    #[test]
+    #[ignore = "инъекция netlink: scripts/test-datapath-f6-netlink-differential.sh"]
+    fn f6_netlink_differential_matches_c() {
+        use std::net::Ipv6Addr;
+
+        let src = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1).octets();
+        let dst = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2).octets();
+        let mut output = String::new();
+        match super::r2o_f6_route(&src, &dst, 0x2e) {
+            Ok((ifindex, gateway)) => {
+                output.push_str(&format!(
+                    "route rc=0 ifindex={ifindex} gateway={}\n",
+                    Ipv6Addr::from(gateway)
+                ));
+                match super::r2o_f6_neighbor(ifindex, &gateway) {
+                    Ok(mac) => output.push_str(&format!(
+                        "neighbor rc=0 mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\n",
+                        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+                    )),
+                    Err(error) => output.push_str(&format!(
+                        "neighbor rc=-1 errno={}\n",
+                        error.raw_os_error().unwrap_or(libc::EIO)
+                    )),
+                }
+            }
+            Err(error) => output.push_str(&format!(
+                "route rc=-1 errno={}\n",
+                error.raw_os_error().unwrap_or(libc::EIO)
+            )),
+        }
+        if let Ok(path) = std::env::var("R2O_F6_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert!(output.starts_with("route rc="));
     }
 
     #[test]
