@@ -283,6 +283,24 @@ pub fn format_json(result: &ClassifyResult, trigger_len: usize) -> String {
     out
 }
 
+/// Точный перенос C `print_progress` (`detect/main.c:193-200`): каждая
+/// завершённая запись трассы, включая `err`, в stderr.
+pub fn format_progress(result: &ClassifyResult, elapsed_secs: u64) -> String {
+    let mut out = String::new();
+    for observation in &result.trace {
+        let _ = writeln!(
+            out,
+            "  [{:4} с] {:<28} прошло={} не прошло={} {}",
+            elapsed_secs,
+            observation.probe,
+            observation.pass,
+            observation.fail,
+            observation.error.as_deref().unwrap_or("")
+        );
+    }
+    out
+}
+
 fn tri_word(state: TriState) -> &'static str {
     match state {
         TriState::Unset => "не измерено",
@@ -782,23 +800,7 @@ pub fn run(
     }
     let started = Instant::now();
     let progress_enabled = options.progress;
-    let repeats = options.repeats;
-    let mut progress = |probe: &str, _probes: usize, passed: usize, failed: usize| {
-        let completed = passed.saturating_add(failed);
-        let observation_complete = completed >= repeats
-            || (probe == "control" || probe == "neutral-ack") && passed > 0
-            || probe.starts_with("transport:");
-        if progress_enabled && completed > 0 && observation_complete {
-            let _ = writeln!(
-                stderr,
-                "  [{:4} с] {:<28} прошло={} не прошло={}",
-                started.elapsed().as_secs(),
-                probe,
-                passed,
-                failed
-            );
-        }
-    };
+    let mut progress = |_: &str, _: usize, _: usize, _: usize| {};
     let classify_options = ClassifyOptions {
         repeats: options.repeats,
         timeout: options.timeout,
@@ -827,6 +829,9 @@ pub fn run(
         &mut TcpProbeBackend,
         &mut progress,
     );
+    if progress_enabled {
+        let _ = stderr.write_all(format_progress(&result, started.elapsed().as_secs()).as_bytes());
+    }
     if options.json {
         let _ = stdout.write_all(format_json(&result, trigger.payload.len()).as_bytes());
         let _ = stdout.flush();
@@ -901,6 +906,16 @@ mod tests {
         assert!(text.contains("Граница:  сигнатура кончается на байте 7\n"));
         assert!(text.contains("Стратегия: --lua-desync=multisplit\n"));
         assert!(text.contains("Трасса:\n  whole       cuts=[1 2]"));
+    }
+
+    #[test]
+    fn progress_line_includes_every_observation_and_error_like_c() {
+        let mut result = sample();
+        result.trace[0].error = Some("dial tcp: refused".into());
+        assert_eq!(
+            format_progress(&result, 0),
+            "  [   0 с] whole                        прошло=3 не прошло=0 dial tcp: refused\n"
+        );
     }
 
     #[test]

@@ -147,6 +147,31 @@ if ! cmp -s "$TEMP/c.human.norm" "$TEMP/r.human.norm"; then
     exit 1
 fi
 
-printf 'triggers=%s exits=%s json=equal human=equal\n' "$trigger_cases" "$exit_cases"
-printf 'PASS: C/Rust detect CLI dump-trigger/exit/JSON/human match (D2O %s)\n' \
+# Defaults без флагов: C d2k_opts_defaults (3/6000/60/700/mark) и JSON.
+"$DETECT" classify 127.0.0.1:1 --json >"$TEMP/c-default.json" 2>/dev/null
+"$R2O_DETECT" classify 127.0.0.1:1 --json >"$TEMP/r-default.json" 2>/dev/null
+python3 "$ROOT/scripts/fixtures/detect-json-normalize.py" \
+    "$TEMP/c-default.json" "$TEMP/r-default.json" >"$TEMP/default.result"
+grep -qx 'JSON-EQUAL' "$TEMP/default.result"
+
+# --progress: каждая запись трассы и err, побайтово после нормализации часа.
+"$DETECT" classify 127.0.0.1:1 --sni example.com --allow-loopback \
+    --timeout 100 --repeats 1 --progress --json >"$TEMP/c-progress.json" \
+    2>"$TEMP/c-progress.err"
+"$R2O_DETECT" classify 127.0.0.1:1 --sni example.com --allow-loopback \
+    --timeout 100 --repeats 1 --progress --json >"$TEMP/r-progress.json" \
+    2>"$TEMP/r-progress.err"
+sed -E 's/\[ *[0-9]+ с\]/[   0 с]/; s/ \(os error [0-9]+\)//' \
+    "$TEMP/c-progress.err" >"$TEMP/c-progress.norm"
+sed -E 's/\[ *[0-9]+ с\]/[   0 с]/; s/ \(os error [0-9]+\)//' \
+    "$TEMP/r-progress.err" >"$TEMP/r-progress.norm"
+if ! cmp -s "$TEMP/c-progress.norm" "$TEMP/r-progress.norm"; then
+    printf 'FAIL: detect progress output\n' >&2
+    diff -u "$TEMP/c-progress.norm" "$TEMP/r-progress.norm" >&2 || true
+    exit 1
+fi
+
+printf 'triggers=%s exits=%s json=equal human=equal progress=equal defaults=equal\n' \
+    "$trigger_cases" "$exit_cases"
+printf 'PASS: C/Rust detect CLI dump-trigger/exit/JSON/human/progress/defaults match (D2O %s)\n' \
     "$ACTUAL_D2O_SHA"
