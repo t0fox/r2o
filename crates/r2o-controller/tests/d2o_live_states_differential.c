@@ -415,6 +415,74 @@ static task *dns_task(size_t index, const char *name, const char *ip,
     return t;
 }
 
+/* generic T_WATCHING: planned=NO/YES, профильная привязка, since/queued,
+   attempts. В searches задача не попадает — проверяется autopick и то, что
+   writer не прячет от панели лишнюю ветвь. */
+static void emit_watch(int planned) {
+    emit_boxes();
+    set_suspect("watch.example");
+    task *t = &s.tasks[0];
+    snprintf(t->name, sizeof t->name, "watch.example");
+    snprintf(t->ip, sizeof t->ip, "198.51.100.40");
+    t->port = 443;
+    t->transport = 6;
+    t->family = 4;
+    t->state = T_WATCHING;
+    t->queued_ms = 1700;
+    t->started_ms = 1800;
+    t->began_ms = 2000;
+    t->probes = 2;
+    t->ask_probes = 1;
+    t->next_plan = 1;
+    t->n_plans = 2;
+    t->n_known = 1;
+    t->trigger_planned = (uint8_t)planned;
+    t->ver_ok = 1;
+    t->ver.level = D2K_VER_APPLICATION;
+    t->ver.status = 200;
+    if (planned) {
+        binding(&binds[0], "watch.example", "plan-1", "name", 6, 4, 2, 3, 1, 0);
+        binds[0].tcp_profile = 2; /* profile binding */
+        boxes[0].binds = binds;
+        boxes[0].n_binds = 1;
+        snprintf(t->bound_plan_id, sizeof t->bound_plan_id, "plan-1");
+        /* T_WATCHING с DNS-endpoint: write_live_dns_services не исключает
+           его, в отличие от searches. */
+        snprintf(t->dns_protocol, sizeof t->dns_protocol, "doh");
+        snprintf(t->dns_host, sizeof t->dns_host, "watch.example");
+        snprintf(t->doh_path, sizeof t->doh_path, "/dns-query");
+        d2k_dns_service dns = {0};
+        snprintf(dns.protocol, sizeof dns.protocol, "doh");
+        snprintf(dns.host, sizeof dns.host, "watch.example");
+        snprintf(dns.sni, sizeof dns.sni, "watch.example");
+        snprintf(dns.path, sizeof dns.path, "/dns-query");
+        snprintf(dns.source, sizeof dns.source, "https-dns-proxy");
+        dns.port = 443;
+        d2k_sched_set_dns_services(&s, &dns, 1);
+        snprintf(s.dns_service_live[0].ip,
+                 sizeof s.dns_service_live[0].ip, "198.51.100.40");
+    }
+}
+
+/* T_RESTING без плана: rest_until даёт cooldown, local_error — причину. */
+static void emit_rest(int local_error) {
+    set_suspect("rest.example");
+    task *t = &s.tasks[0];
+    snprintf(t->name, sizeof t->name, "rest.example");
+    snprintf(t->ip, sizeof t->ip, "198.51.100.41");
+    t->port = 443;
+    t->transport = 6;
+    t->family = 4;
+    t->state = T_RESTING;
+    t->started_ms = 1800;
+    t->began_ms = 2000;
+    t->rest_until_ms = 8000;
+    t->probes = 3;
+    t->next_plan = 0;
+    t->n_plans = 0;
+    t->local_error = (uint8_t)local_error;
+}
+
 static void emit_dns(void) {
     dns_catalog();
     d2k_dns_service services[16];
@@ -583,6 +651,14 @@ static int emit(const char *mode) {
         emit_tasks();
     } else if (!strcmp(mode, "dns")) {
         emit_dns();
+    } else if (!strcmp(mode, "watch")) {
+        emit_watch(1);
+    } else if (!strcmp(mode, "watch_noplan")) {
+        emit_watch(0);
+    } else if (!strcmp(mode, "rest")) {
+        emit_rest(0);
+    } else if (!strcmp(mode, "rest_local")) {
+        emit_rest(1);
     } else {
         fprintf(stderr, "unknown mode %s\n", mode);
         return 2;

@@ -1,11 +1,13 @@
 #!/bin/sh
-# C/Rust differential: полный live.json в 8 состояниях против C
+# C/Rust differential: полный live.json в 12 состояниях против C
 # `d2k_sched_write_live` current main 7a5fab9.
 #
 # Состояния: rich (areas/autopick/исключения), empty, boxes, bindings,
-# groups, measurements, tasks (T_ASKING/T_VERIFY/T_VERIFY_WAIT/
-# T_TRIAL_SETTLE/T_WATCHING/T_RESTING), dns (detected/checking/direct_ok/
-# plan_applied/bypass_ok/no_bypass/failed/candidate-without-answer/DoQ).
+# groups, measurements, tasks (T_QUEUED/T_SHAPE_WAIT/T_ASKING/
+# T_PROPS_*/T_PLANNING/T_TRIAL_SETTLE/T_VERIFY/T_VERIFY_WAIT/T_VOICE*/
+# T_DNS_HEALTH), dns (detected/checking/direct_ok/plan_applied/bypass_ok/
+# no_bypass/failed/candidate-without-answer/DoQ), watch (T_WATCHING planned
+# NO/YES), rest (T_RESTING cooldown/local_error).
 #
 # Сравнивается весь JSON без фильтрации: поля, значения, типы, порядок
 # массивов. Порядок ключей объекта не сравнивается — JSON-объект неупорядочен.
@@ -42,7 +44,7 @@ CORE_SOURCES="$D2O_ROOT/core/catalog.c $D2O_ROOT/core/groups.c $D2O_ROOT/core/do
     $CORE_SOURCES -Wl,--gc-sections -lpthread -lm
 
 "$TEMP/d2o-live-rich" >"$TEMP/rich.json"
-for mode in empty boxes bindings groups measurements tasks dns; do
+for mode in empty boxes bindings groups measurements tasks dns watch watch_noplan rest rest_local; do
     "$TEMP/d2o-live-states" "$mode" >"$TEMP/state_$mode.json"
 done
 
@@ -51,7 +53,19 @@ import json
 import sys
 
 root = sys.argv[1]
-modes = ["empty", "boxes", "bindings", "groups", "measurements", "tasks", "dns"]
+modes = [
+    "empty",
+    "boxes",
+    "bindings",
+    "groups",
+    "measurements",
+    "tasks",
+    "dns",
+    "watch",
+    "watch_noplan",
+    "rest",
+    "rest_local",
+]
 # C `%.100s` может оборвать UTF-8: панель (Go) читает такой JSON с U+FFFD.
 # errors="replace" воспроизводит именно то, что видит панель.
 states = [json.load(open(f"{root}/rich.json", encoding="utf-8", errors="replace"))]
@@ -85,7 +99,20 @@ python3 - "$TEMP/c.json" "$TEMP/r.json" <<'PY'
 import json
 import sys
 
-NAMES = ["rich", "empty", "boxes", "bindings", "groups", "measurements", "tasks", "dns"]
+NAMES = [
+    "rich",
+    "empty",
+    "boxes",
+    "bindings",
+    "groups",
+    "measurements",
+    "tasks",
+    "dns",
+    "watch",
+    "watch_noplan",
+    "rest",
+    "rest_local",
+]
 
 
 def walk(left, right, path):

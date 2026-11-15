@@ -33927,6 +33927,49 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn live_status_resting_target_reports_retry_cooldown_and_rest_reason() {
+        use super::{Catalog, SHAPE_MODERN, r2o_discovery_failure_key};
+        use r2o_controller::discovery::DiscoveryTarget;
+        use std::time::Duration;
+
+        let target = DiscoveryTarget {
+            host: "rest.example".into(),
+            endpoint: "198.51.100.41:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        let now = std::time::Instant::now();
+        {
+            let mut searches = worker.searches.lock().unwrap();
+            searches.last_suspect = Some(target.clone());
+            searches.datapath_events = 10;
+            searches.suspect_events = 5;
+        }
+        let failure_key = r2o_discovery_failure_key(&target);
+        worker
+            .failed_at
+            .insert(failure_key.clone(), now - Duration::from_secs(10));
+        worker
+            .failed_retry_after
+            .insert(failure_key.clone(), Duration::from_secs(30));
+        let status = worker.r2o_live_status(&Catalog::default(), now, false);
+        assert_eq!(status.autopick["reason"], "ожидание cooldown");
+        assert_eq!(status.autopick["cooldown_seconds_left"], 20);
+
+        worker
+            .failed_retry_after
+            .insert(failure_key, Duration::from_secs(5));
+        let status = worker.r2o_live_status(&Catalog::default(), now, false);
+        assert_eq!(status.autopick["reason"], "поиск исчерпан; задача отдыхает");
+        assert_eq!(
+            status.autopick["cooldown_seconds_left"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn quic_candidate_trials_use_fresh_conntrack_tuples() {
         let server = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let endpoint = server.local_addr().unwrap();

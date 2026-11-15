@@ -2830,6 +2830,164 @@ mod tests {
             .unwrap(),
         );
 
+        // generic T_WATCHING (planned NO/YES, profile binding) и T_RESTING
+        // (cooldown, local_error). В searches они не попадают; writer обязан
+        // не менять остальные секции и отдать autopick.
+        let watch_catalog = || {
+            let mut catalog = boxes_catalog();
+            catalog.boxes[0].bindings = vec![Binding {
+                kind: "name".into(),
+                target: "watch.example".into(),
+                plan_id: "plan-1".into(),
+                level: 3,
+                confirmed: 1500,
+                successes: 1,
+                enabled: true,
+                transport: 6,
+                family: 4,
+                shape: 2,
+                tcp_profile: 2,
+                probe_path: "/probe.css".into(),
+                ech_origin: "edge.example".into(),
+                budget: 3,
+                ..Binding::default()
+            }];
+            catalog
+        };
+        let watch_status = || {
+            let mut value = status(
+                "используется ранее подтверждённый Plan",
+                "watch.example",
+                10,
+                5,
+                0,
+                0,
+                0,
+            );
+            value.autopick["plan_id"] = json!("plan-1");
+            value
+        };
+        let watch_noplan_status = || {
+            status(
+                "используется ранее подтверждённый Plan",
+                "watch.example",
+                10,
+                5,
+                0,
+                0,
+                0,
+            )
+        };
+        let rest_status = || {
+            let mut value = status(
+                "поиск исчерпан; задача отдыхает",
+                "rest.example",
+                10,
+                5,
+                0,
+                0,
+                0,
+            );
+            value.autopick["cooldown_seconds_left"] = json!(3);
+            value
+        };
+        let rest_local_status = || {
+            let mut value = status(
+                "локальная ошибка: рабочий поток не запустился",
+                "rest.example",
+                10,
+                5,
+                0,
+                0,
+                0,
+            );
+            value.autopick["cooldown_seconds_left"] = json!(3);
+            value
+        };
+        let watch_services = vec![DnsService {
+            protocol: "doh".into(),
+            host: "watch.example".into(),
+            sni: "watch.example".into(),
+            path: "/dns-query".into(),
+            bootstrap_dns: String::new(),
+            source: "https-dns-proxy".into(),
+            port: 443,
+        }];
+        let watch_live = vec![DnsServiceLive {
+            ip: "198.51.100.40".into(),
+            ..DnsServiceLive::default()
+        }];
+        let watch_dns_tasks = vec![DnsTask {
+            state: DnsTaskState::Watching,
+            name: "watch.example".into(),
+            ip: "198.51.100.40".into(),
+            port: 443,
+            transport: 6,
+            family: 4,
+            dns_protocol: "doh".into(),
+            dns_host: "watch.example".into(),
+            doh_path: "/dns-query".into(),
+            ver_ok: true,
+            ver: DnsTaskVerify {
+                level: D2K_VER_APPLICATION,
+                status: 200,
+                dns_reply: false,
+                reason: String::new(),
+            },
+            ..DnsTask::default()
+        }];
+        states.push(
+            snapshot_with_areas_and_dns(
+                &watch_catalog(),
+                Path::new("catalog.json"),
+                &active_groups,
+                searches(),
+                empty_measurements(),
+                watch_status(),
+                &[],
+                &watch_services,
+                &watch_live,
+                &watch_dns_tasks,
+            )
+            .unwrap(),
+        );
+        states.push(
+            snapshot_with_areas(
+                &boxes_catalog(),
+                Path::new("catalog.json"),
+                &active_groups,
+                searches(),
+                empty_measurements(),
+                watch_noplan_status(),
+                &[],
+            )
+            .unwrap(),
+        );
+        states.push(
+            snapshot_with_areas(
+                &Catalog::default(),
+                Path::new("catalog.json"),
+                &active_groups,
+                searches(),
+                empty_measurements(),
+                rest_status(),
+                &[],
+            )
+            .unwrap(),
+        );
+        states.push(
+            snapshot_with_areas(
+                &Catalog::default(),
+                Path::new("catalog.json"),
+                &active_groups,
+                searches(),
+                empty_measurements(),
+                rest_local_status(),
+                &[],
+            )
+            .unwrap(),
+        );
+
         if let Ok(path) = std::env::var("R2O_LIVE_STATES_DIFF_OUTPUT") {
             std::fs::write(path, serde_json::to_string(&states).unwrap()).unwrap();
         }
