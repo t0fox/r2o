@@ -16048,11 +16048,12 @@ group_block_proven: false,
                     .parse::<std::net::SocketAddr>()
                     .map(|endpoint| (endpoint.ip().to_string(), endpoint.port()))
                     .unwrap_or_default();
+                // Точный набор C `write_live` searches: shape/plan/
+                // application/last_result панель не получает.
                 let mut search = serde_json::json!({
                     "target": target.host,
                     "family": target.family,
                     "transport": r2o_discovery_transport(target),
-                    "shape": target.shape,
                     "ip": ip,
                     "port": port,
                     "phase": entry.phase,
@@ -16061,15 +16062,11 @@ group_block_proven: false,
                     "question": entry.question,
                     "candidate": entry.candidate,
                     "source": entry.source,
-                    "plan": entry.plan,
-                    "application": entry.application,
-                    "last_result": entry.last_result,
                 });
-                if let Some(since) =
+                search["since"] = serde_json::Value::String(
                     r2o_live_timestamp(entry.started_at.unwrap_or(entry.queued_at), now)
-                {
-                    search["since"] = serde_json::Value::String(since);
-                }
+                        .unwrap_or_else(|| "0001-01-01T00:00:00Z".to_owned()),
+                );
                 search
             })
             .collect()
@@ -16179,7 +16176,7 @@ group_block_proven: false,
                 "plan_id": plan_id,
                 "datapath_events": searches.datapath_events,
                 "suspect_events": searches.suspect_events,
-                "transport": target.map_or(6, r2o_discovery_transport),
+                "transport": target.map_or(0, r2o_discovery_transport),
                 "family": target.map_or(4, |target| target.family),
                 "cooldown_seconds_left": cooldown_seconds_left,
             }),
@@ -33822,6 +33819,33 @@ mod tests {
         let now = std::time::Instant::now();
         let live = worker.r2o_live_searches(now);
         assert_eq!(live.len(), 1);
+        // Точный набор C `write_live` searches: никаких plan/application/
+        // last_result/shape сверх схемы панели.
+        let mut keys = live[0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        keys.sort();
+        let mut expected = [
+            "target",
+            "family",
+            "transport",
+            "ip",
+            "port",
+            "phase",
+            "since",
+            "attempts",
+            "probes",
+            "question",
+            "candidate",
+            "source",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        expected.sort();
+        assert_eq!(keys, expected);
         assert_eq!(live[0]["phase"], "спрашиваем коробку о свойствах");
         assert_eq!(live[0]["probes"], 2);
         assert_eq!(

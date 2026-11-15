@@ -4,6 +4,8 @@ use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 const DOMAIN_BLOCKED: u8 = 1;
 const DOMAIN_DIRECT_CLEAR: u8 = 2;
@@ -201,7 +203,9 @@ impl Default for DiscoveryStatus {
                 "plan_id": "",
                 "datapath_events": 0,
                 "suspect_events": 0,
-                "transport": 6,
+                // C печатает last_suspect_transport как есть: до первого
+                // подозрения это 0, а не 6.
+                "transport": 0,
                 "family": 4,
                 "cooldown_seconds_left": null,
             }),
@@ -390,6 +394,21 @@ pub fn snapshot_with_areas(
     )
 }
 
+/// C `json_time`: любое неположительное время пишется как нулевое время Go.
+/// Каталог для этого использует отдельный `format_rfc3339`, где эпоха 0 —
+/// обычная дата, поэтому переводим только live-поля.
+fn c_live_time(value: &Value) -> Value {
+    let unix = value
+        .as_str()
+        .and_then(|text| OffsetDateTime::parse(text, &Rfc3339).ok())
+        .map_or(0, |time| time.unix_timestamp());
+    if unix <= 0 {
+        json!("0001-01-01T00:00:00Z")
+    } else {
+        value.clone()
+    }
+}
+
 /// Полный снимок live.json с секцией `dns_services` (D2O current main).
 pub fn snapshot_with_areas_and_dns(
     catalog: &Catalog,
@@ -411,6 +430,12 @@ pub fn snapshot_with_areas_and_dns(
         let object = value
             .as_object_mut()
             .ok_or_else(|| CatalogError::new("serialized live box is not an object"))?;
+        for key in ["created", "updated"] {
+            if let Some(timestamp) = object.get(key) {
+                let timestamp = c_live_time(timestamp);
+                object.insert(key.into(), timestamp);
+            }
+        }
         let fingerprint = object
             .remove("fingerprint")
             .unwrap_or_else(|| json!({"signals": []}));
@@ -492,6 +517,15 @@ pub fn snapshot_with_areas_and_dns(
                     "budget",
                 ] {
                     binding.remove(key);
+                }
+                if let Some(timestamp) = binding.get("confirmed") {
+                    let timestamp = c_live_time(timestamp);
+                    binding.insert("confirmed".into(), timestamp);
+                }
+                // C `write_live`: старый файл с transport 0 панель видит
+                // как TCP 6; family 0 уже нормализован сериализатором в 4.
+                if binding.get("transport").and_then(Value::as_u64) == Some(0) {
+                    binding.insert("transport".into(), json!(6));
                 }
                 binding.insert("level_name".into(), Value::String(level_name(level).into()));
                 binding.insert("recheck".into(), Value::Bool(recheck));
@@ -766,15 +800,14 @@ fn r2o_live_dns_services(
 }
 
 /// C `snprintf(..., "%.100s", text)`: точность в байтах, не в символах.
-fn r2o_c_precision(text: &str, precision: usize) -> &str {
+/// C режет сырые байты и может оборвать UTF-8; панель (Go) читает такой
+/// JSON с заменой неполной последовательности на U+FFFD. Повторяем именно
+/// то, что видит панель, а не сырые байты: Rust-строка обязана быть UTF-8.
+fn r2o_c_precision(text: &str, precision: usize) -> std::borrow::Cow<'_, str> {
     if text.len() <= precision {
-        return text;
+        return std::borrow::Cow::Borrowed(text);
     }
-    let mut end = precision;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
+    std::borrow::Cow::Owned(String::from_utf8_lossy(&text.as_bytes()[..precision]).into_owned())
 }
 
 fn r2o_live_optional_time(seconds: Option<i64>) -> Value {
@@ -2095,6 +2128,684 @@ mod tests {
         assert_eq!(live["groups"][0]["possibly_active"], true);
         if let Ok(path) = std::env::var("R2O_LIVE_SNAPSHOT_DIFF_OUTPUT") {
             std::fs::write(path, serde_json::to_string(&live).unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn live_snapshot_states_differential_matches_c() {
+        use crate::catalog::{Binding, BoxRecord, Fingerprint, GroupKey, Plan, Signal};
+        use std::collections::HashSet;
+        use std::path::Path;
+
+        fn status(
+            reason: &str,
+            target: &str,
+            datapath_events: u64,
+            suspect_events: u64,
+            confirms: u64,
+            probes_used: u64,
+            client_unfit: u64,
+        ) -> DiscoveryStatus {
+            DiscoveryStatus {
+                autopick: json!({
+                    "reason": reason,
+                    "target": target,
+                    "plan_id": "",
+                    "datapath_events": datapath_events,
+                    "suspect_events": suspect_events,
+                    "transport": if target.is_empty() { 0 } else { 6 },
+                    "family": 4,
+                    "cooldown_seconds_left": null,
+                }),
+                probes_used,
+                client_unfit,
+                confirms,
+            }
+        }
+        let empty_status = || status("нет событий от datapath", "", 0, 0, 0, 0, 0);
+        let base_status = || {
+            status(
+                "поиск не активен; ожидается новый сигнал datapath",
+                "target.example",
+                10,
+                5,
+                7,
+                42,
+                3,
+            )
+        };
+        let tasks_status = || {
+            status(
+                "поиск не активен; ожидается новый сигнал datapath",
+                "target.example",
+                10,
+                5,
+                0,
+                0,
+                0,
+            )
+        };
+        let cooldown_status = || {
+            let mut value = status("ожидание cooldown", "target.example", 10, 5, 7, 42, 3);
+            value.autopick["cooldown_seconds_left"] = json!(1);
+            value
+        };
+        let measurements = || {
+            json!({
+                "active": 0,
+                "limit": 3,
+                "queued": 0,
+                "cores": 4,
+                "free_pct": 75,
+                "mem_avail_mb": 500,
+                "mem_total_mb": 1024,
+                "conntrack_pct": 10,
+                "limited_by": "процессор",
+            })
+        };
+        let empty_measurements = || {
+            json!({
+                "active": 0,
+                "limit": 3,
+                "queued": 0,
+                "cores": null,
+                "free_pct": null,
+                "mem_avail_mb": null,
+                "mem_total_mb": null,
+                "conntrack_pct": null,
+                "limited_by": null,
+            })
+        };
+
+        let box_signals = || {
+            vec![
+                Signal {
+                    kind: "rst".into(),
+                    ttl: 64,
+                    ttl_delta: -3,
+                    tos: 0x88,
+                    ipid: 1234,
+                    seen: 1,
+                    ..Signal::default()
+                },
+                Signal {
+                    kind: "volume".into(),
+                    volume: 40,
+                    seen: 2,
+                    ..Signal::default()
+                },
+                Signal {
+                    kind: "rx-volume".into(),
+                    volume: 16,
+                    packets: 22,
+                    seen: 3,
+                    ..Signal::default()
+                },
+                Signal {
+                    kind: "rx-volume-wire".into(),
+                    volume: 12,
+                    seen: 4,
+                    ..Signal::default()
+                },
+                Signal {
+                    kind: "silent".into(),
+                    seen: 5,
+                    ..Signal::default()
+                },
+                Signal {
+                    kind: "repeat".into(),
+                    seen: 6,
+                    ..Signal::default()
+                },
+                Signal {
+                    kind: "custom-kind".into(),
+                    seen: 7,
+                    ..Signal::default()
+                },
+            ]
+        };
+        let plan = || Plan {
+            id: "plan-1".into(),
+            proto: "tls".into(),
+            text: "r2o-plan 1 11\nproto tcp tls\nsplit sni_middle +0\n".into(),
+            added: 1100,
+            successes: 5,
+            enabled: true,
+        };
+        let boxes_catalog = || Catalog {
+            boxes: vec![BoxRecord {
+                id: "box-1".into(),
+                created: 1000,
+                updated: 2000,
+                fingerprint: Fingerprint {
+                    method: 2,
+                    signals: box_signals(),
+                },
+                plans: vec![plan()],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        let bindings_catalog = || {
+            let mut catalog = boxes_catalog();
+            catalog.boxes[0].bindings = vec![
+                Binding {
+                    kind: "name".into(),
+                    target: "perm.example".into(),
+                    plan_id: "plan-1".into(),
+                    level: 3,
+                    confirmed: 1500,
+                    successes: 1,
+                    enabled: true,
+                    transport: 6,
+                    family: 4,
+                    shape: 1,
+                    ..Binding::default()
+                },
+                Binding {
+                    kind: "name".into(),
+                    target: "temp.example".into(),
+                    plan_id: "plan-1".into(),
+                    level: 2,
+                    confirmed: 1501,
+                    successes: 2,
+                    enabled: false,
+                    transport: 6,
+                    family: 4,
+                    shape: 1,
+                    recheck_since: Some(1700),
+                    ..Binding::default()
+                },
+                Binding {
+                    kind: "name".into(),
+                    target: "quic.example".into(),
+                    plan_id: "plan-1".into(),
+                    level: 3,
+                    confirmed: 1502,
+                    successes: 3,
+                    enabled: true,
+                    transport: 17,
+                    family: 4,
+                    shape: 3,
+                    tcp_profile: 2,
+                    probe_path: "/p2.css".into(),
+                    ech_origin: "edge2.example".into(),
+                    budget: 3,
+                    ..Binding::default()
+                },
+                Binding {
+                    kind: "addr".into(),
+                    target: "addr.example".into(),
+                    plan_id: "plan-1".into(),
+                    level: 1,
+                    confirmed: 1503,
+                    successes: 4,
+                    enabled: true,
+                    transport: 6,
+                    family: 6,
+                    shape: 2,
+                    ..Binding::default()
+                },
+                Binding {
+                    kind: "name".into(),
+                    target: "legacy.example".into(),
+                    plan_id: "plan-1".into(),
+                    level: 0,
+                    confirmed: 1504,
+                    successes: 5,
+                    enabled: true,
+                    transport: 0,
+                    family: 0,
+                    shape: 0,
+                    ..Binding::default()
+                },
+                Binding {
+                    kind: "addr".into(),
+                    target: "level4.example".into(),
+                    plan_id: "plan-1".into(),
+                    level: 4,
+                    confirmed: 1505,
+                    successes: 6,
+                    enabled: true,
+                    transport: 6,
+                    family: 4,
+                    shape: 1,
+                    ..Binding::default()
+                },
+                Binding {
+                    kind: "addr".into(),
+                    target: "level5.example".into(),
+                    plan_id: "plan-1".into(),
+                    level: 5,
+                    confirmed: 1506,
+                    successes: 7,
+                    enabled: true,
+                    transport: 6,
+                    family: 4,
+                    shape: 1,
+                    ..Binding::default()
+                },
+            ];
+            catalog
+        };
+        let groups_catalog = || {
+            let mut catalog = boxes_catalog();
+            let key = GroupKey {
+                transport: 6,
+                family: 4,
+                shape: 1,
+                probe_path: String::new(),
+                ech_origin: String::new(),
+            };
+            catalog.domain_state = Some(DomainState {
+                groups: vec![DomainGroup {
+                    suffix: "example.com".into(),
+                    plan_id: "plan-1".into(),
+                    key: key.clone(),
+                    evidence_count: 2,
+                    at: 1500,
+                }],
+                observations: vec![DomainObservation {
+                    name: "a.example.com".into(),
+                    plan_id: "plan-1".into(),
+                    key,
+                    evidence: DOMAIN_BLOCKED,
+                    at: 1400,
+                }],
+                ..DomainState::default()
+            });
+            catalog
+        };
+        let areas = || {
+            vec![LiveAreaState {
+                kind: 1,
+                name: "example.com".into(),
+                transport: 6,
+                shape: 1,
+                family: 4,
+                plan_id: Some("plan-1".into()),
+                confirmed: true,
+                ..LiveAreaState::default()
+            }]
+        };
+        let searches = || Vec::<Value>::new();
+        let active_groups = HashSet::new();
+        let mut states = Vec::new();
+
+        states.push(
+            snapshot_with_areas(
+                &Catalog::default(),
+                Path::new("catalog.json"),
+                &active_groups,
+                searches(),
+                empty_measurements(),
+                empty_status(),
+                &[],
+            )
+            .unwrap(),
+        );
+        states.push(
+            snapshot_with_areas(
+                &boxes_catalog(),
+                Path::new("catalog.json"),
+                &active_groups,
+                searches(),
+                empty_measurements(),
+                empty_status(),
+                &[],
+            )
+            .unwrap(),
+        );
+        states.push(
+            snapshot_with_areas(
+                &bindings_catalog(),
+                Path::new("catalog.json"),
+                &active_groups,
+                searches(),
+                empty_measurements(),
+                empty_status(),
+                &[],
+            )
+            .unwrap(),
+        );
+        states.push(
+            snapshot_with_areas(
+                &groups_catalog(),
+                Path::new("catalog.json"),
+                &active_groups,
+                searches(),
+                empty_measurements(),
+                cooldown_status(),
+                &areas(),
+            )
+            .unwrap(),
+        );
+        states.push(
+            snapshot_with_areas(
+                &Catalog::default(),
+                Path::new("catalog.json"),
+                &active_groups,
+                searches(),
+                measurements(),
+                base_status(),
+                &[],
+            )
+            .unwrap(),
+        );
+        let task_searches = vec![
+            json!({"target":"ask.example","family":4,"transport":6,"ip":"198.51.100.10","port":443,"phase":"распознаём поведение","since":"1970-01-01T00:33:21Z","attempts":0,"probes":3,"question":"вопрос","candidate":"","source":""}),
+            json!({"target":"verify.example","family":4,"transport":6,"ip":"198.51.100.11","port":443,"phase":"проверяем готовое узнанной коробки","since":"1970-01-01T00:33:22Z","attempts":1,"probes":3,"question":"","candidate":"план поставлен","source":"готовый план узнанной коробки"}),
+            json!({"target":"verifywait.example","family":4,"transport":6,"ip":"198.51.100.12","port":443,"phase":"проверяем выведенный план","since":"1970-01-01T00:33:23Z","attempts":2,"probes":4,"question":"","candidate":"план поставлен","source":"выведен из замера"}),
+            json!({"target":"trial.example","family":4,"transport":6,"ip":"198.51.100.13","port":443,"phase":"проверяем выведенный план","since":"1970-01-01T00:33:24Z","attempts":2,"probes":5,"question":"","candidate":"план поставлен","source":"запасной перебор"}),
+            json!({"target":"queued.example","family":4,"transport":6,"ip":"198.51.100.14","port":443,"phase":"ожидает безопасного слота замера","since":"1970-01-01T00:33:22Z","attempts":0,"probes":0,"question":"","candidate":"","source":""}),
+            json!({"target":"shapewait.example","family":4,"transport":6,"ip":"198.51.100.15","port":443,"phase":"ждём форму приветствия","since":"1970-01-01T00:33:21Z","attempts":0,"probes":1,"question":"","candidate":"","source":""}),
+            json!({"target":"propscontact.example","family":4,"transport":6,"ip":"198.51.100.16","port":443,"phase":"спрашиваем коробку о свойствах","since":"1970-01-01T00:33:21Z","attempts":0,"probes":1,"question":"","candidate":"","source":""}),
+            json!({"target":"propswait.example","family":4,"transport":6,"ip":"198.51.100.17","port":443,"phase":"спрашиваем коробку о свойствах","since":"1970-01-01T00:33:21Z","attempts":0,"probes":1,"question":"","candidate":"","source":""}),
+            json!({"target":"planning.example","family":4,"transport":6,"ip":"198.51.100.18","port":443,"phase":"выводим планы","since":"1970-01-01T00:33:21Z","attempts":0,"probes":2,"question":"","candidate":"","source":""}),
+            json!({"target":"voicemeasure.example","family":4,"transport":6,"ip":"198.51.100.19","port":443,"phase":"измеряем живой голосовой поток","since":"1970-01-01T00:33:21Z","attempts":0,"probes":1,"question":"","candidate":"","source":""}),
+            json!({"target":"voicetrial.example","family":4,"transport":6,"ip":"198.51.100.20","port":443,"phase":"приём голоса стоит, ждём разговора","since":"1970-01-01T00:33:22Z","attempts":0,"probes":0,"question":"","candidate":"","source":""}),
+            json!({"target":"voicewatch.example","family":4,"transport":6,"ip":"198.51.100.21","port":443,"phase":"приём применился к разговору, ждём ответа сервера","since":"1970-01-01T00:33:22Z","attempts":0,"probes":0,"question":"","candidate":"","source":""}),
+            json!({"target":"dnshealth.example","family":4,"transport":6,"ip":"198.51.100.22","port":443,"phase":"проверяем DNS-ответ","since":"1970-01-01T00:33:22Z","attempts":0,"probes":1,"question":"","candidate":"","source":""}),
+        ];
+        states.push(
+            snapshot_with_areas(
+                &Catalog::default(),
+                Path::new("catalog.json"),
+                &active_groups,
+                task_searches,
+                json!({
+                    "active": 8,
+                    "limit": 3,
+                    "queued": 1,
+                    "cores": null,
+                    "free_pct": null,
+                    "mem_avail_mb": null,
+                    "mem_total_mb": null,
+                    "conntrack_pct": null,
+                    "limited_by": null,
+                }),
+                tasks_status(),
+                &[],
+            )
+            .unwrap(),
+        );
+
+        // DNS-состояние: detected (без адреса/с адресом), checking,
+        // direct_ok, plan_applied, bypass_ok, no_bypass, failed,
+        // candidate-without-answer и DoQ IPv6.
+        use crate::live::{DnsServiceLive, DnsServiceState, DnsTask, DnsTaskState, DnsTaskVerify};
+        use r2k_core::dns_config::DnsService;
+
+        let dns_catalog = Catalog {
+            boxes: vec![BoxRecord {
+                id: "box-dns".into(),
+                plans: vec![
+                    Plan {
+                        id: "plan-doh".into(),
+                        proto: "tls".into(),
+                        text: "r2o-plan 1 11\nproto tcp tls\nsplit sni_middle +0\n".into(),
+                        added: 0,
+                        successes: 0,
+                        enabled: true,
+                    },
+                    Plan {
+                        id: "plan-doq".into(),
+                        proto: "quic".into(),
+                        text: "r2o-plan 2 11\nproto quic h3\nsplit sni_middle +0\n".into(),
+                        added: 0,
+                        successes: 0,
+                        enabled: true,
+                    },
+                ],
+                bindings: vec![
+                    Binding {
+                        kind: "name".into(),
+                        target: "checking.example".into(),
+                        plan_id: "plan-doh".into(),
+                        level: 3,
+                        confirmed: 1500,
+                        successes: 1,
+                        enabled: true,
+                        transport: 6,
+                        family: 4,
+                        shape: 1,
+                        ..Binding::default()
+                    },
+                    Binding {
+                        kind: "name".into(),
+                        target: "bypass.example".into(),
+                        plan_id: "plan-doh".into(),
+                        level: 3,
+                        confirmed: 1500,
+                        successes: 1,
+                        enabled: true,
+                        transport: 6,
+                        family: 4,
+                        shape: 1,
+                        ..Binding::default()
+                    },
+                    Binding {
+                        kind: "name".into(),
+                        target: "candidate.example".into(),
+                        plan_id: "plan-doh".into(),
+                        level: 3,
+                        confirmed: 1500,
+                        successes: 1,
+                        enabled: true,
+                        transport: 6,
+                        family: 4,
+                        shape: 1,
+                        ..Binding::default()
+                    },
+                    Binding {
+                        kind: "name".into(),
+                        target: "2001:db8::1".into(),
+                        plan_id: "plan-doq".into(),
+                        level: 3,
+                        confirmed: 1500,
+                        successes: 1,
+                        enabled: true,
+                        transport: 17,
+                        family: 6,
+                        shape: 3,
+                        ..Binding::default()
+                    },
+                ],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        let dns_service = |protocol: &str, host: &str, sni: &str, port: u16| DnsService {
+            protocol: protocol.into(),
+            host: host.into(),
+            sni: sni.into(),
+            path: "/dns-query".into(),
+            bootstrap_dns: String::new(),
+            source: "https-dns-proxy".into(),
+            port,
+        };
+        let mut dns_services = vec![
+            DnsService {
+                path: "/dns-query?token=secret".into(),
+                ..dns_service("doh", "detected.example", "detected.example", 443)
+            },
+            DnsService {
+                path: "/".into(),
+                source: "dnsproxy".into(),
+                ..dns_service("dot", "1.1.1.1", "", 853)
+            },
+            dns_service("doh", "checking.example", "checking.example", 443),
+            dns_service("doh", "direct.example", "direct.example", 443),
+            dns_service("doh", "applied.example", "applied.example", 443),
+            dns_service("doh", "bypass.example", "bypass.example", 443),
+            dns_service("doh", "nobypass.example", "nobypass.example", 443),
+            dns_service("doh", "failed.example", "failed.example", 443),
+            dns_service("doh", "candidate.example", "candidate.example", 443),
+            DnsService {
+                path: "/".into(),
+                source: "doqd".into(),
+                ..dns_service("doq", "2001:db8::1", "", 853)
+            },
+            dns_service("doh", "appliedfailed.example", "appliedfailed.example", 443),
+            dns_service("doh", "split.example", "split.example", 443),
+            dns_service("doh", "liveanswer.example", "liveanswer.example", 443),
+            dns_service("doh", "noreason.example", "noreason.example", 443),
+            dns_service("doh", "taskother.example", "taskother.example", 443),
+            dns_service("doh", "verifyplain.example", "verifyplain.example", 443),
+        ];
+        dns_services[1].path = "/".into();
+        dns_services[1].source = "dnsproxy".into();
+        dns_services[9].path = "/".into();
+        dns_services[9].source = "doqd".into();
+        let mut dns_live = vec![DnsServiceLive::default(); dns_services.len()];
+        dns_live[1].ip = "1.1.1.1".into();
+        dns_live[2].ip = "198.51.100.20".into();
+        dns_live[2].state = DnsServiceState::Checking;
+        dns_live[2].reason = "Проверяем прямой HTTPS-ответ endpoint.".into();
+        dns_live[2].attempts = 2;
+        dns_live[2].checked_at = Some(2002);
+        dns_live[3].ip = "198.51.100.21".into();
+        dns_live[3].state = DnsServiceState::DirectOk;
+        dns_live[3].reason = "Прямой HTTPS-ответ endpoint получен.".into();
+        dns_live[3].tcp_reachable = true;
+        dns_live[3].tls_handshake = true;
+        dns_live[3].http_status = 200;
+        dns_live[3].dns_answer = true;
+        dns_live[3].attempts = 3;
+        dns_live[3].checked_at = Some(2002);
+        dns_live[4].ip = "198.51.100.22".into();
+        dns_live[4].plan_applied = true;
+        dns_live[4].applied_plan_id = "a".repeat(32);
+        dns_live[4].plan_applied_at = Some(2003);
+        dns_live[5].ip = "198.51.100.23".into();
+        dns_live[6].ip = "198.51.100.24".into();
+        dns_live[7].ip = "198.51.100.25".into();
+        dns_live[7].state = DnsServiceState::Failed;
+        dns_live[7].reason = "Прямая проверка endpoint не удалась.".into();
+        dns_live[7].attempts = 4;
+        dns_live[7].checked_at = Some(2003);
+        dns_live[8].ip = "198.51.100.26".into();
+        dns_live[9].ip = "2001:db8::1".into();
+        dns_live[10].ip = "198.51.100.27".into();
+        dns_live[10].state = DnsServiceState::Failed;
+        dns_live[10].plan_applied = true;
+        dns_live[10].applied_plan_id = "b".repeat(32);
+        dns_live[10].reason = "abcdefghijklmnopqrstuvwxyz".repeat(5);
+        dns_live[10].attempts = 5;
+        dns_live[10].checked_at = Some(2004);
+        dns_live[10].plan_applied_at = Some(2004);
+        dns_live[11].ip = "198.51.100.28".into();
+        dns_live[11].state = DnsServiceState::Failed;
+        dns_live[11].plan_applied = true;
+        dns_live[11].applied_plan_id = "c".repeat(32);
+        dns_live[11].reason = format!("{}б", "a".repeat(99));
+        dns_live[11].attempts = 6;
+        dns_live[11].checked_at = Some(2004);
+        dns_live[11].plan_applied_at = Some(2004);
+        dns_live[12].ip = "198.51.100.29".into();
+        dns_live[12].dns_answer = true;
+        dns_live[13].ip = "198.51.100.30".into();
+        dns_live[14].ip = "198.51.100.31".into();
+        dns_live[15].ip = "198.51.100.32".into();
+        let dns_task = |name: &str, ip: &str, state: DnsTaskState| DnsTask {
+            state,
+            name: name.into(),
+            ip: ip.into(),
+            port: 443,
+            transport: 6,
+            family: 4,
+            dns_protocol: "doh".into(),
+            dns_host: name.into(),
+            doh_path: "/dns-query".into(),
+            ..DnsTask::default()
+        };
+        let dns_tasks = vec![
+            DnsTask {
+                ver_ok: true,
+                ver: DnsTaskVerify {
+                    level: D2K_VER_APPLICATION,
+                    status: 200,
+                    dns_reply: true,
+                    reason: String::new(),
+                },
+                ..dns_task("bypass.example", "198.51.100.23", DnsTaskState::Verify)
+            },
+            DnsTask {
+                ver: DnsTaskVerify {
+                    reason: "Подбор завершён без подтверждённого плана.".into(),
+                    ..DnsTaskVerify::default()
+                },
+                ..dns_task("nobypass.example", "198.51.100.24", DnsTaskState::Resting)
+            },
+            DnsTask {
+                ver_ok: true,
+                ver: DnsTaskVerify {
+                    level: D2K_VER_APPLICATION,
+                    status: 200,
+                    dns_reply: false,
+                    reason: String::new(),
+                },
+                ..dns_task(
+                    "candidate.example",
+                    "198.51.100.26",
+                    DnsTaskState::TrialSettle,
+                )
+            },
+            DnsTask {
+                ver_ok: true,
+                ver: DnsTaskVerify {
+                    level: D2K_VER_APPLICATION,
+                    status: 200,
+                    dns_reply: false,
+                    reason: String::new(),
+                },
+                ..dns_task("liveanswer.example", "198.51.100.29", DnsTaskState::Verify)
+            },
+            DnsTask {
+                ..dns_task("noreason.example", "198.51.100.30", DnsTaskState::Resting)
+            },
+            DnsTask {
+                ..dns_task("taskother.example", "198.51.100.31", DnsTaskState::Asking)
+            },
+            DnsTask {
+                ..dns_task("verifyplain.example", "198.51.100.32", DnsTaskState::Verify)
+            },
+        ];
+        let dns_searches = vec![
+            json!({"target":"bypass.example","family":4,"transport":6,"ip":"198.51.100.23","port":443,"phase":"проверяем готовое узнанной коробки","since":"1970-01-01T00:33:21Z","attempts":1,"probes":2,"question":"","candidate":"план поставлен","source":"готовый план узнанной коробки"}),
+            json!({"target":"candidate.example","family":4,"transport":6,"ip":"198.51.100.26","port":443,"phase":"проверяем выведенный план","since":"1970-01-01T00:33:22Z","attempts":1,"probes":1,"question":"","candidate":"план поставлен","source":"выведен из замера"}),
+            json!({"target":"liveanswer.example","family":4,"transport":6,"ip":"198.51.100.29","port":443,"phase":"проверяем выведенный план","since":"1970-01-01T00:33:23Z","attempts":1,"probes":1,"question":"","candidate":"план поставлен","source":"выведен из замера"}),
+            json!({"target":"taskother.example","family":4,"transport":6,"ip":"198.51.100.31","port":443,"phase":"распознаём поведение","since":"1970-01-01T00:33:23Z","attempts":0,"probes":2,"question":"","candidate":"","source":""}),
+            json!({"target":"verifyplain.example","family":4,"transport":6,"ip":"198.51.100.32","port":443,"phase":"проверяем выведенный план","since":"1970-01-01T00:33:23Z","attempts":2,"probes":2,"question":"","candidate":"план поставлен","source":"выведен из замера"}),
+        ];
+        states.push(
+            snapshot_with_areas_and_dns(
+                &dns_catalog,
+                Path::new("catalog.json"),
+                &active_groups,
+                dns_searches,
+                json!({
+                    "active": 5,
+                    "limit": 3,
+                    "queued": 0,
+                    "cores": null,
+                    "free_pct": null,
+                    "mem_avail_mb": null,
+                    "mem_total_mb": null,
+                    "conntrack_pct": null,
+                    "limited_by": null,
+                }),
+                empty_status(),
+                &[],
+                &dns_services,
+                &dns_live,
+                &dns_tasks,
+            )
+            .unwrap(),
+        );
+
+        if let Ok(path) = std::env::var("R2O_LIVE_STATES_DIFF_OUTPUT") {
+            std::fs::write(path, serde_json::to_string(&states).unwrap()).unwrap();
         }
     }
 
