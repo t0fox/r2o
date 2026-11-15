@@ -6853,6 +6853,14 @@ enum HttpSearchCommand {
         port: u16,
         reply: SyncSender<Result<(), String>>,
     },
+    PropsSend {
+        command: Vec<u8>,
+        reply: SyncSender<Result<(), String>>,
+    },
+    PropsDelete {
+        command: Vec<u8>,
+        reply: SyncSender<Result<(), String>>,
+    },
     CollectApplied {
         trial_id: [u8; 16],
         timeout: std::time::Duration,
@@ -8291,6 +8299,183 @@ struct R2oCandidateTrialEvidence {
 }
 
 #[cfg(unix)]
+fn r2o_props_send_command(
+    commands: &SyncSender<HttpSearchCommand>,
+    command: Vec<u8>,
+    delete: bool,
+) -> Result<(), String> {
+    ask_http_controller(commands, |reply| {
+        if delete {
+            HttpSearchCommand::PropsDelete { command, reply }
+        } else {
+            HttpSearchCommand::PropsSend { command, reply }
+        }
+    })
+}
+
+/// C `prop_send_next`: до пяти вопросов, первый прошедший обновляет
+/// `DpiProps` и завершает опрос. Ожидание APPLIED/EXCHANGE идёт через
+/// main-loop: события кормят `R2oDiscoverySearch.props` из основного цикла,
+/// worker только опрашивает состояние с паузой 20 мс.
+#[cfg(unix)]
+fn r2o_run_discovery_props_questions(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    trigger: &Trigger,
+    control: &[u8],
+    commands: &SyncSender<HttpSearchCommand>,
+    mark: Option<u32>,
+    has_timestamp: Option<bool>,
+    searches: &Arc<std::sync::Mutex<R2oDiscoverySearches>>,
+    cancel: &AtomicBool,
+) -> Option<r2o_controller::classify::DpiProps> {
+    use std::time::{Duration, Instant};
+
+    let destination = target.endpoint.parse::<std::net::SocketAddr>().ok()?;
+    let wire_shape = r2o_plan_wire_shape(target.shape, has_timestamp);
+    for question in AskQuestion::ALL {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let Ok(plan_id) = random_id() else {
+            continue;
+        };
+        let Ok(trial_id) = random_id() else {
+            continue;
+        };
+        let Ok((plan_text, plan)) = question_plan(question, trigger, Some(control), plan_id) else {
+            continue;
+        };
+        if plan.id != plan_id {
+            continue;
+        }
+        let Ok(records) = compile_text(&plan_text) else {
+            continue;
+        };
+        let Ok(wire_records) = r2o_plan_records_for_wire(&records) else {
+            continue;
+        };
+        let Ok(bound) = BoundTcpProbe::open(target.family, mark) else {
+            continue;
+        };
+        let source_port = bound.local_port;
+        let Ok(command) = encode_set_name_family(
+            &target.host,
+            6,
+            wire_shape,
+            target.family,
+            source_port,
+            &wire_records,
+            trial_id,
+        ) else {
+            continue;
+        };
+        let delete_command =
+            encode_delete_name_probe(&target.host, wire_shape, target.family, source_port).ok();
+        let begun = searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .props_begin(
+                target,
+                question,
+                plan_id,
+                trial_id,
+                source_port,
+                target.family,
+            );
+        if !begun {
+            if let Some(delete) = delete_command {
+                let _ = r2o_props_send_command(commands, delete, true);
+            }
+            continue;
+        }
+        if r2o_props_send_command(commands, command, false).is_err() {
+            searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .props_clear(target);
+            if let Some(delete) = delete_command {
+                let _ = r2o_props_send_command(commands, delete, true);
+            }
+            continue;
+        }
+        let contact = r2o_props_contact_on_family_tcp_profile_contract(
+            Some(bound.socket),
+            &destination.ip().to_string(),
+            destination.port(),
+            &trigger.payload,
+            target.family,
+            -1,
+            true,
+        );
+        let (stream, local_ip, local_port) = match contact {
+            Ok((Some(stream), local_ip, local_port)) => (stream, local_ip, local_port),
+            Ok((None, _, _)) | Err(_) => {
+                searches
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .props_clear(target);
+                if let Some(delete) = delete_command {
+                    let _ = r2o_props_send_command(commands, delete, true);
+                }
+                continue;
+            }
+        };
+        if local_port != source_port {
+            drop(stream);
+            searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .props_clear(target);
+            if let Some(delete) = delete_command {
+                let _ = r2o_props_send_command(commands, delete, true);
+            }
+            continue;
+        }
+        let flow = r2o_ask_flow_key(local_ip, local_port, destination);
+        searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .props_enter_wait(target, flow);
+        let deadline = Instant::now() + ASK_WAIT;
+        let mut passed = false;
+        let mut refused = false;
+        while Instant::now() < deadline && !cancel.load(Ordering::Relaxed) {
+            let snapshot = searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .props_snapshot(target);
+            if let Some(state) = snapshot {
+                passed = state.passed;
+                refused = state.refused_code.is_some();
+                if passed || refused {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(stream);
+        if let Some(delete) = delete_command {
+            let _ = r2o_props_send_command(commands, delete, true);
+        }
+        let snapshot = searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .props_snapshot(target);
+        let result = passed.then(|| snapshot.map(|state| state.props)).flatten();
+        searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .props_clear(target);
+        if result.is_some() {
+            return result;
+        }
+        if refused {
+            continue;
+        }
+    }
+    None
+}
+
 fn r2o_run_discovery_candidate_trial_with_progress(
     target: &r2o_controller::discovery::DiscoveryTarget,
     source_text: &str,
@@ -11061,6 +11246,8 @@ struct R2oDiscoverySearch {
     verify: R2oDiscoveryVerify,
     /// C `t->report_closed`: терминальный отчёт по поиску уже выдан.
     report_closed: bool,
+    /// C `t->props`/`prop_*`: текущий вопрос о свойствах.
+    props: R2oPropsState,
 }
 
 #[cfg(unix)]
@@ -11131,6 +11318,7 @@ impl R2oDiscoverySearches {
                 last_result: String::new(),
                 verify: R2oDiscoveryVerify::default(),
                 report_closed: false,
+                props: R2oPropsState::default(),
             });
         if phase == "ожидает безопасного слота замера" || starting_run
         {
@@ -11148,6 +11336,7 @@ impl R2oDiscoverySearches {
             search.report_id = None;
             search.trigger_code = 0;
             search.report_closed = false;
+            search.props = R2oPropsState::default();
         }
         if phase != "ожидает безопасного слота замера" && search.started_at.is_none()
         {
@@ -11244,6 +11433,7 @@ impl R2oDiscoverySearches {
         search.last_result.clear();
         search.verify = R2oDiscoveryVerify::default();
         search.report_closed = false;
+        search.props = R2oPropsState::default();
     }
 
     fn record_admission(
@@ -11259,6 +11449,82 @@ impl R2oDiscoverySearches {
             Some(self.report_sequence)
         } else {
             None
+        }
+    }
+
+    fn props_begin(
+        &mut self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        question: AskQuestion,
+        plan_id: [u8; 16],
+        trial_id: [u8; 16],
+        local_port: u16,
+        family: u8,
+    ) -> bool {
+        let Some(search) = self.entries.get_mut(&r2o_discovery_task_key(target)) else {
+            return false;
+        };
+        search
+            .props
+            .begin_question(question, plan_id, trial_id, local_port, family, 6);
+        true
+    }
+
+    fn props_enter_wait(
+        &mut self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        flow: [u8; r2k_core::control::KEY_LEN],
+    ) -> bool {
+        self.entries
+            .get_mut(&r2o_discovery_task_key(target))
+            .is_some_and(|search| search.props.enter_wait(flow))
+    }
+
+    fn props_observe_applied(&mut self, event: &r2k_core::control::AppliedEvent) -> bool {
+        let mut matched = false;
+        for search in self.entries.values_mut() {
+            if search.props.question.is_none() || search.props.finished {
+                continue;
+            }
+            matched |= search.props.observe_applied(event);
+        }
+        matched
+    }
+
+    fn props_observe_exchange(&mut self, event: &r2k_core::control::R2oTcpExchangeEvent) -> bool {
+        let mut matched = false;
+        for search in self.entries.values_mut() {
+            if search.props.question.is_none() || search.props.finished {
+                continue;
+            }
+            matched |= search.props.observe_exchange(event);
+        }
+        matched
+    }
+
+    fn props_observe_refused(&mut self, event: &r2k_core::control::RefusedEvent) -> bool {
+        let mut matched = false;
+        for search in self.entries.values_mut() {
+            if search.props.question.is_none() || search.props.finished {
+                continue;
+            }
+            matched |= search.props.observe_refused(event);
+        }
+        matched
+    }
+
+    fn props_snapshot(
+        &self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+    ) -> Option<R2oPropsState> {
+        self.entries
+            .get(&r2o_discovery_task_key(target))
+            .map(|search| search.props.clone())
+    }
+
+    fn props_clear(&mut self, target: &r2o_controller::discovery::DiscoveryTarget) {
+        if let Some(search) = self.entries.get_mut(&r2o_discovery_task_key(target)) {
+            search.props = R2oPropsState::default();
         }
     }
 
@@ -12925,6 +13191,176 @@ struct R2oShapeWait {
     since: std::time::Instant,
     r2o_mark: Option<u32>,
     deny_recheck: bool,
+}
+
+/// C `task.prop_*`: состояние вопроса о свойствах.
+///
+/// `T_PROPS_CONTACT` копит применения/ответы до ключа потока (`early`,
+/// `early_x`), `T_PROPS_WAIT` сверяет полный ключ (`flow`) и plan_id.
+/// Первый прошедший вопрос обновляет `DpiProps` и завершает опрос — как
+/// `d2k_props_question_passed` + `question_retire` в C.
+#[cfg(unix)]
+#[derive(Clone, Debug, Default)]
+struct R2oPropsState {
+    props: r2o_controller::classify::DpiProps,
+    question: Option<AskQuestion>,
+    plan_id: [u8; 16],
+    trial_id: [u8; 16],
+    local_port: u16,
+    family: u8,
+    transport: u8,
+    flow: Option<[u8; r2k_core::control::KEY_LEN]>,
+    early: VecDeque<[u8; r2k_core::control::KEY_LEN]>,
+    early_x: VecDeque<r2k_core::control::R2oTcpExchangeEvent>,
+    reply: Option<r2k_core::control::R2oTcpExchangeEvent>,
+    refused_code: Option<u8>,
+    applied: bool,
+    waiting: bool,
+    finished: bool,
+    passed: bool,
+}
+
+#[cfg(unix)]
+impl R2oPropsState {
+    const EARLY_LIMIT: usize = 8;
+
+    fn begin_question(
+        &mut self,
+        question: AskQuestion,
+        plan_id: [u8; 16],
+        trial_id: [u8; 16],
+        local_port: u16,
+        family: u8,
+        transport: u8,
+    ) {
+        self.question = Some(question);
+        self.plan_id = plan_id;
+        self.trial_id = trial_id;
+        self.local_port = local_port;
+        self.family = family;
+        self.transport = transport;
+        self.flow = None;
+        self.early.clear();
+        self.early_x.clear();
+        self.reply = None;
+        self.refused_code = None;
+        self.applied = false;
+        self.waiting = false;
+        self.finished = false;
+        self.passed = false;
+    }
+
+    /// C `T_PROPS_CONTACT → T_PROPS_WAIT`: применить накопленные early
+    /// применения/ответы к известному ключу потока вопроса.
+    fn enter_wait(&mut self, flow: [u8; r2k_core::control::KEY_LEN]) -> bool {
+        self.flow = Some(flow);
+        self.waiting = true;
+        if self.early.iter().any(|key| *key == flow) {
+            self.applied = true;
+        }
+        self.early.clear();
+        if let Some(position) = self.early_x.iter().position(|event| event.key == flow) {
+            let event = self.early_x.remove(position).expect("найденный ответ");
+            self.early_x.clear();
+            if self.applied {
+                self.check_passed();
+            } else if event.server_hello {
+                self.reply = Some(event);
+            }
+        } else {
+            self.early_x.clear();
+        }
+        self.check_passed()
+    }
+
+    /// C `on_applied` для `T_PROPS_CONTACT`/`T_PROPS_WAIT`.
+    fn observe_applied(&mut self, event: &r2k_core::control::AppliedEvent) -> bool {
+        if event.plan_id != self.plan_id {
+            return false;
+        }
+        if !self.waiting {
+            if self.early.iter().any(|key| *key == event.key) {
+                return true;
+            }
+            if self.early.len() == Self::EARLY_LIMIT {
+                return false;
+            }
+            self.early.push_back(event.key);
+            return true;
+        }
+        if self.applied || self.flow != Some(event.key) {
+            return false;
+        }
+        self.applied = true;
+        self.check_passed();
+        true
+    }
+
+    /// C `on_exchange`: в `T_PROPS_CONTACT` ответ ищется по занятому
+    /// локальному порту вопроса, в `T_PROPS_WAIT` — по полному ключу.
+    fn observe_exchange(&mut self, event: &r2k_core::control::R2oTcpExchangeEvent) -> bool {
+        if !self.waiting {
+            if self.transport != 6
+                || event.key[37] != 6
+                || event.key[0] != self.family
+                || !event.server_hello
+                || self.local_port == 0
+                || !r2o_key_has_port(&event.key, self.local_port)
+            {
+                return false;
+            }
+            if self.early_x.len() == Self::EARLY_LIMIT {
+                return false;
+            }
+            self.early_x.push_back(*event);
+            return true;
+        }
+        if self.flow != Some(event.key) || !event.server_hello {
+            return false;
+        }
+        if !self.applied {
+            self.reply = Some(*event);
+            return false;
+        }
+        self.reply = Some(*event);
+        self.check_passed();
+        true
+    }
+
+    /// C `on_refused` для пробного плана вопроса: локальный отказ с
+    /// ненулевым кодом означает «опыта не было», вопрос не засчитывается.
+    fn observe_refused(&mut self, event: &r2k_core::control::RefusedEvent) -> bool {
+        if event.plan_id != self.plan_id || event.trial_id != self.trial_id {
+            return false;
+        }
+        if let Some(flow) = self.flow
+            && event.key != flow
+        {
+            return false;
+        }
+        if event.code != 0 {
+            self.refused_code = Some(event.code);
+        }
+        true
+    }
+
+    fn check_passed(&mut self) -> bool {
+        if self.passed || !self.applied || self.reply.map_or(true, |reply| !reply.server_hello) {
+            return false;
+        }
+        if let Some(question) = self.question {
+            record_question_passed(&mut self.props, question);
+        }
+        self.reply = None;
+        self.finished = true;
+        self.passed = true;
+        true
+    }
+}
+
+#[cfg(unix)]
+fn r2o_key_has_port(key: &[u8; r2k_core::control::KEY_LEN], port: u16) -> bool {
+    u16::from_be_bytes([key[33], key[34]]) == port || u16::from_be_bytes([key[35], key[36]]) == port
 }
 
 #[cfg(unix)]
@@ -14785,6 +15221,7 @@ group_block_proven: false,
                 known_plans_allowed,
                 measured_arm_candidate,
                 client_alpn_handshake_blocked,
+                props_eligible,
             ) = r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                 target.clone(),
                 client_hello.as_deref(),
@@ -14806,6 +15243,103 @@ group_block_proven: false,
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .update(&target, "выводим планы", 0, classify_probes, "", "");
             let mut outcome = outcome;
+            if props_eligible
+                && let Ok(props_trigger) =
+                    r2o_discovery_trigger(&target, client_hello.as_deref(), ech_config.as_ref())
+                && let Ok(control) = Trigger::tls("disk.rzd.ru").map(|control| Trigger {
+                    accept: Accept::TlsRecord,
+                    ..control
+                })
+            {
+                runner_searches
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .update(
+                        &target,
+                        "спрашиваем коробку о свойствах",
+                        classify_probes,
+                        classify_probes,
+                        "",
+                        "",
+                    );
+                if let Some(props) = r2o_run_discovery_props_questions(
+                    &target,
+                    &props_trigger,
+                    &control.payload,
+                    &commands,
+                    mark,
+                    client_has_tcp_timestamps,
+                    &runner_searches,
+                    &cancel,
+                ) {
+                    let Ok(plans) = compose_plan_texts(
+                        &props,
+                        &props_trigger,
+                        target.shape,
+                        Some("disk.rzd.ru"),
+                        runner_send_cap.load(Ordering::Relaxed),
+                    ) else {
+                        return outcome;
+                    };
+                    runner_searches
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .update(
+                            &target,
+                            "выводим планы из свойств",
+                            classify_probes,
+                            classify_probes,
+                            "",
+                            "свойства коробки",
+                        );
+                    if let Some(plan) = plans.first() {
+                        let (probe_path, _) = r2o_discovery_resource_probe_paths(
+                            &target,
+                            candidate_catalog.as_ref(),
+                            &runner_resource_memory,
+                        );
+                        let mut progress = |_: usize, _: usize, _: &str, _: &str| {};
+                        let (result, applied, _attempts, _) =
+                            r2o_run_discovery_candidate_trial_with_progress(
+                                &target,
+                                plan,
+                                &probe_path,
+                                mark,
+                                confirm_mark,
+                                &commands,
+                                client_hello.as_deref(),
+                                client_has_tcp_timestamps,
+                                r2o_discovery_client_alpn_verification_allowed(
+                                    &target,
+                                    client_hello.as_deref(),
+                                    &probe_path,
+                                    client_alpn_handshake_blocked,
+                                    false,
+                                ),
+                                ech_config.as_ref(),
+                                &runner_resource_memory,
+                                R2O_DISCOVERY_PROBE_CAP.saturating_sub(classify_probes),
+                                None,
+                                r2o_controller::fetch::r2o_d2o_verification_encoding(&probe_path),
+                                false,
+                                || !cancel.load(Ordering::Relaxed),
+                                false,
+                                Some(&dropped_events),
+                                &mut progress,
+                            );
+                        if r2o_family_recovery_decision(&result, applied)
+                            == R2oFamilyRecoveryDecision::Verified
+                        {
+                            outcome.plan_text = Some(plan.clone());
+                            outcome.detail = format!(
+                                "вопросы о свойствах прошли; план из свойств подтверждён (вариантов {})",
+                                plans.len()
+                            );
+                            return outcome;
+                        }
+                    }
+                }
+            }
             let cached_volume_cut = r2o_discovery_cached_volume_cut(
                 &runner_volume_searches,
                 &target,
@@ -19684,7 +20218,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech(
     ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
     white_name: &str,
 ) -> (DiscoveryOutcome, usize) {
-    let (outcome, probes, _, _, _, _) =
+    let (outcome, probes, _, _, _, _, _) =
         r2o_classify_discovery_target_with_client_hello_and_ech_progress(
             target,
             client_hello,
@@ -19818,7 +20352,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
     seed_whole: Option<r2o_controller::classify::SeedWhole>,
     send_cap: usize,
     progress: &mut dyn FnMut(&str, usize, usize, usize),
-) -> (DiscoveryOutcome, usize, bool, bool, bool, bool) {
+) -> (DiscoveryOutcome, usize, bool, bool, bool, bool, bool) {
     let Ok(trigger) = r2o_discovery_trigger(&target, client_hello, ech_config) else {
         return (
             DiscoveryOutcome {
@@ -19841,6 +20375,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                 retry_after: None,
             },
             0,
+            false,
             false,
             false,
             false,
@@ -19874,6 +20409,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                     retry_after: None,
                 },
                 0,
+                false,
                 false,
                 false,
                 false,
@@ -19972,6 +20508,11 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
         .response
         .as_ref()
         .is_some_and(|response| response.verdict == ResponseVerdict::Clear);
+    let props_eligible = !timed_out
+        && result.verdict == Verdict::Opaque
+        && r2o_discovery_transport(&target) == 6
+        && !measured_arm
+        && !search_owned;
     r2o_discovery_meta_set(&target, rx_direct_complete, target.shape);
     (
         DiscoveryOutcome {
@@ -20002,6 +20543,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
         known_plans_allowed,
         measured_arm,
         client_alpn_handshake_blocked,
+        props_eligible,
     )
 }
 
@@ -23961,6 +24503,13 @@ impl ControlClient {
                     {
                         r2o_trial.voice_flow_key = Some(applied.key);
                     }
+                    if let Some((worker, _, _, _)) = &mut discovery {
+                        worker
+                            .searches
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .props_observe_applied(&applied);
+                    }
                     self.remember_applied_event(applied.clone());
                     println!(
                         "исполнение подтверждено: plan={:02x?}, trial={:02x?}, execution={}, привязка известна={}",
@@ -23975,6 +24524,13 @@ impl ControlClient {
                 if frame.kind == EVENT_REFUSED {
                     let refused = decode_refused(&frame)
                         .map_err(|error| format!("событие REFUSED: {error}"))?;
+                    if let Some((worker, _, _, _)) = &mut discovery {
+                        worker
+                            .searches
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .props_observe_refused(&refused);
+                    }
                     if matches!(
                         refused.code,
                         r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_TOO_LONG
@@ -24180,6 +24736,19 @@ impl ControlClient {
                         println!("ClientHello {}: {reason}", target.host);
                     }
                     std::io::stdout().flush()?;
+                    continue;
+                }
+                if frame.kind == EVENT_R2O_TCP_EXCHANGE {
+                    let event = decode_r2o_tcp_exchange(&frame)
+                        .map_err(|error| format!("событие TCP-обмена: {error}"))?;
+                    if let Some((worker, _, _, _)) = &mut discovery {
+                        worker
+                            .searches
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .props_observe_exchange(&event);
+                    }
+                    self.queue_async_frame(frame)?;
                     continue;
                 }
                 if frame.kind != EVENT_HELLO {
@@ -24729,6 +25298,18 @@ impl ControlClient {
                     return Err(error.into());
                 }
                 let _ = reply.send(Ok(()));
+            }
+            HttpSearchCommand::PropsSend { command, reply } => {
+                let result = self
+                    .write_command(&command)
+                    .map_err(|error| error.to_string());
+                let _ = reply.send(result);
+            }
+            HttpSearchCommand::PropsDelete { command, reply } => {
+                let result = self
+                    .write_command(&command)
+                    .map_err(|error| error.to_string());
+                let _ = reply.send(result);
             }
             HttpSearchCommand::CollectApplied {
                 trial_id,
@@ -31643,6 +32224,7 @@ mod tests {
                     last_result: String::new(),
                     verify: R2oDiscoveryVerify::default(),
                     report_closed: false,
+                    props: crate::R2oPropsState::default(),
                 },
             );
             let event = match scenario.kind {
@@ -31761,6 +32343,7 @@ mod tests {
                         ..R2oDiscoveryVerify::default()
                     },
                     report_closed: false,
+                    props: crate::R2oPropsState::default(),
                 },
             );
         }
@@ -32309,6 +32892,7 @@ mod tests {
             last_result: String::new(),
             verify: Default::default(),
             report_closed: false,
+            props: crate::R2oPropsState::default(),
         };
         assert_eq!(
             super::r2o_dns_task_state_from_search(&search),
@@ -35818,6 +36402,7 @@ mod tests {
                     last_result: "внутренний результат".into(),
                     verify: R2oDiscoveryVerify::default(),
                     report_closed: false,
+                    props: crate::R2oPropsState::default(),
                 },
             );
             searches.order.push_back(task_key);
@@ -38156,6 +38741,179 @@ mod tests {
         emit("timeout", false, false, false, false, expired.len() == 1);
 
         if let Ok(path) = std::env::var("R2O_SHAPE_WAIT_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn props_question_state_matches_c() {
+        use super::R2oPropsState;
+        use r2o_controller::ask::AskQuestion;
+        use r2o_controller::classify::TriState;
+        use std::fmt::Write as _;
+
+        fn tri(value: TriState) -> i32 {
+            match value {
+                TriState::Unset => 0,
+                TriState::True => 1,
+                TriState::False => 2,
+            }
+        }
+        fn q_index(state: &R2oPropsState) -> i32 {
+            state
+                .question
+                .and_then(|question| {
+                    AskQuestion::ALL
+                        .iter()
+                        .position(|candidate| *candidate == question)
+                })
+                .map_or(-1, |index| index as i32)
+        }
+
+        let client = "192.0.2.10".parse().unwrap();
+        let server = "198.51.100.20:443".parse().unwrap();
+        let local_port = 40_000u16;
+        let flow = super::r2o_ask_flow_key(client, local_port, server);
+        let foreign_flow = super::r2o_ask_flow_key(client, local_port + 1, server);
+        let plan_id = [0x11; 16];
+        let trial_id = [0x22; 16];
+        let mut output = String::new();
+
+        let mut emit = |label: &str, state: &R2oPropsState| {
+            writeln!(
+                output,
+                "{label} applied={} reply={} passed={} q={} state={} left={} reorder={} checksum={} parse={} dup={}",
+                u8::from(state.applied),
+                u8::from(state.reply.is_some()),
+                u8::from(state.passed),
+                if state.passed { -1 } else { q_index(state) },
+                if state.passed {
+                    6
+                } else if state.waiting {
+                    5
+                } else {
+                    4
+                },
+                tri(state.props.tolerates_left_overlap),
+                tri(state.props.tolerates_reorder),
+                tri(state.props.validates_checksum),
+                tri(state.props.parses_l7),
+                tri(state.props.counts_duplicates)
+            )
+            .unwrap();
+        };
+        let applied_event = |key: [u8; r2k_core::control::KEY_LEN], plan_id: [u8; 16]| {
+            r2k_core::control::AppliedEvent {
+                key,
+                plan_id,
+                trial_id,
+                execution_id: 1,
+                binding: Default::default(),
+            }
+        };
+        let exchange_event = |key: [u8; r2k_core::control::KEY_LEN], server_hello: bool| {
+            r2k_core::control::R2oTcpExchangeEvent {
+                key,
+                first_record_type: 22,
+                bytes_after_client_hello: 64,
+                record_types: 0x04,
+                server_hello,
+                planned: false,
+            }
+        };
+
+        // applied → exchange.
+        let mut state = R2oPropsState::default();
+        state.begin_question(
+            AskQuestion::LeftOverlap,
+            plan_id,
+            trial_id,
+            local_port,
+            4,
+            6,
+        );
+        state.enter_wait(flow);
+        state.observe_applied(&applied_event(flow, plan_id));
+        state.observe_exchange(&exchange_event(flow, true));
+        emit("applied_then_exchange", &state);
+
+        // exchange → applied (ответ раньше применения).
+        let mut state = R2oPropsState::default();
+        state.begin_question(
+            AskQuestion::LeftOverlap,
+            plan_id,
+            trial_id,
+            local_port,
+            4,
+            6,
+        );
+        state.enter_wait(flow);
+        state.observe_exchange(&exchange_event(flow, true));
+        state.observe_applied(&applied_event(flow, plan_id));
+        emit("reply_before_applied", &state);
+
+        // чужой plan_id.
+        let mut state = R2oPropsState::default();
+        state.begin_question(
+            AskQuestion::LeftOverlap,
+            plan_id,
+            trial_id,
+            local_port,
+            4,
+            6,
+        );
+        state.enter_wait(flow);
+        state.observe_applied(&applied_event(flow, [0x33; 16]));
+        state.observe_exchange(&exchange_event(flow, true));
+        emit("foreign_plan", &state);
+
+        // чужой поток.
+        let mut state = R2oPropsState::default();
+        state.begin_question(
+            AskQuestion::LeftOverlap,
+            plan_id,
+            trial_id,
+            local_port,
+            4,
+            6,
+        );
+        state.enter_wait(flow);
+        state.observe_applied(&applied_event(foreign_flow, plan_id));
+        state.observe_exchange(&exchange_event(foreign_flow, true));
+        emit("foreign_flow", &state);
+
+        // обмен без ServerHello.
+        let mut state = R2oPropsState::default();
+        state.begin_question(
+            AskQuestion::LeftOverlap,
+            plan_id,
+            trial_id,
+            local_port,
+            4,
+            6,
+        );
+        state.enter_wait(flow);
+        state.observe_applied(&applied_event(flow, plan_id));
+        state.observe_exchange(&exchange_event(flow, false));
+        emit("no_server_hello", &state);
+
+        // вопрос разбора протокола: parses_l7=YES, checksum=NO; q после pass = -1.
+        let mut state = R2oPropsState::default();
+        state.begin_question(
+            AskQuestion::ProtocolParse,
+            plan_id,
+            trial_id,
+            local_port,
+            4,
+            6,
+        );
+        state.enter_wait(flow);
+        state.observe_applied(&applied_event(flow, plan_id));
+        state.observe_exchange(&exchange_event(flow, true));
+        emit("question_parse", &state);
+
+        if let Ok(path) = std::env::var("R2O_PROPS_QUESTION_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
         }
     }
