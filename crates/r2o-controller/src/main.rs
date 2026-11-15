@@ -36877,6 +36877,74 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn d2o_verdict_to_plans_order_matches_c() {
+        use r2o_controller::classify::Verdict;
+
+        fn hex(bytes: &[u8]) -> String {
+            let mut output = String::with_capacity(bytes.len() * 2);
+            for byte in bytes {
+                use std::fmt::Write as _;
+                let _ = write!(output, "{byte:02x}");
+            }
+            output
+        }
+        let mut output = String::new();
+        let mut emit_empty = |label: &str| {
+            output.push_str(&format!(
+                "{label}\tn=0\tbox=\thash=0\tpath=\tstall=0\trx_pending=0\n"
+            ));
+        };
+        for label in [
+            "clear",
+            "unreachable",
+            "address",
+            "response",
+            "no_quic",
+            "local_address",
+        ] {
+            emit_empty(label);
+        }
+        for (label, verdict) in [("prefix", Verdict::Prefix), ("whole", Verdict::WholePacket)] {
+            let plan =
+                super::r2o_discovery_measured_split_plan(verdict, true, Some(7), 16, 20_000, 0)
+                    .unwrap();
+            output.push_str(&format!(
+                "{label}\tn=1\tbox=\thash=0\tpath=\tstall=0\trx_pending=0\n"
+            ));
+            output.push_str(&format!(
+                "{label}\tplan=0\tbox=\tnet=\t{}\n",
+                hex(plan.as_bytes())
+            ));
+        }
+        // C `refill_from_fallback` для OPAQUE+owns_search: до 8 планов
+        // запасного перебора, если форма приветствия известна. В C-фикстуре
+        // trig_len=0 (форма unknown) — тогда очередь пуста.
+        let mut fallback =
+            r2o_controller::r2o_fallback::FallbackQueue::new_owned_search_with_tried(&[]);
+        let mut plans = Vec::new();
+        while plans.len() < 8 {
+            let Some(plan) = fallback.next(r2k_core::control::SHAPE_MODERN, 0) else {
+                break;
+            };
+            plans.push(plan);
+        }
+        output.push_str(&format!(
+            "opaque_fallback\tn={}\tbox=\thash=0\tpath=\tstall=0\trx_pending=0\n",
+            plans.len()
+        ));
+        for (index, plan) in plans.iter().enumerate() {
+            output.push_str(&format!(
+                "opaque_fallback\tplan={index}\tbox=\tnet=\t{}\n",
+                hex(plan.as_bytes())
+            ));
+        }
+        if let Ok(path) = std::env::var("R2O_VERDICT_TO_PLANS_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn d2o_clean_handshake_suppression_matches_c() {
         let now = std::time::Instant::now();
         let mut client_a = [0_u8; 16];
