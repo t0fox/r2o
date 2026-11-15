@@ -2006,6 +2006,18 @@ struct RawConn {
     recv_buffer: Vec<u8>,
 }
 
+/// C `raw_sendto` (`detect/raw.c:773`): IPv4 считает успехом любой
+/// неотрицательный результат (короткая запись не проверяется), IPv6 требует
+/// ровно `len`. Это решение обязано совпадать с донором, даже если Linux
+/// обычно не режет датаграмму.
+fn raw_sendto_ok(family: u8, sent: isize, len: usize) -> bool {
+    if family == 6 {
+        sent >= 0 && sent as usize == len
+    } else {
+        sent >= 0
+    }
+}
+
 impl RawConn {
     fn connect(
         remote: SocketAddr,
@@ -2169,6 +2181,11 @@ impl RawConn {
     }
 
     fn send_ip_packet(&self, packet: &[u8]) -> Result<(), ProbeError> {
+        let family = if matches!(self.remote, IpAddr::V6(_)) {
+            6
+        } else {
+            4
+        };
         let mut destination: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
         let destination_len = match self.remote {
             IpAddr::V4(address) => {
@@ -2196,7 +2213,7 @@ impl RawConn {
                 destination_len,
             )
         };
-        if sent >= 0 && sent as usize == packet.len() {
+        if raw_sendto_ok(family, sent, packet.len()) {
             return Ok(());
         }
         let error = if sent < 0 {
@@ -2398,7 +2415,7 @@ fn timestamp_options(server_timestamp: u32) -> Vec<u8> {
 mod tests {
     use super::{
         Property, RAW_SELFTESTS, RawSelftestState, apply_property, compose_from_props,
-        note_raw_probe, property_probes, raw_selftest_age, raw_selftest_index,
+        note_raw_probe, property_probes, raw_selftest_age, raw_selftest_index, raw_sendto_ok,
     };
     use crate::classify::{DpiProps, Poison, TriState};
 
@@ -3555,6 +3572,31 @@ mod tests {
         if let Ok(v6) = local_address_for("[::1]:9".parse().unwrap()) {
             assert_eq!(v6, "::1".parse::<std::net::IpAddr>().unwrap());
         }
+    }
+
+    #[test]
+    fn d2o_raw_sendto_short_write_matches_c() {
+        let mut output = String::new();
+        for (name, family, sent, len) in [
+            ("v4-short", 4, 10, 20),
+            ("v4-full", 4, 20, 20),
+            ("v4-error", 4, -1, 20),
+            ("v6-short", 6, 10, 20),
+            ("v6-full", 6, 20, 20),
+            ("v6-error", 6, -1, 20),
+        ] {
+            let rc = if raw_sendto_ok(family, sent, len) {
+                0
+            } else {
+                -1
+            };
+            output.push_str(&format!("{name}|{rc}\n"));
+        }
+        if let Ok(path) = std::env::var("R2O_RAW_SENDTO_OUTPUT") {
+            std::fs::write(path, &output).expect("write raw sendto output");
+        }
+        assert!(output.contains("v4-short|0"));
+        assert!(output.contains("v6-short|-1"));
     }
 
     #[test]
