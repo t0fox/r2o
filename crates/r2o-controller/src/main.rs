@@ -7002,6 +7002,163 @@ fn r2o_quic_snapshot_server_name(snapshot: &[u8], server: std::net::SocketAddr) 
     }
 }
 
+/// C `quic_named[16]` (снимок QUIC по имени, reuse 10 минут) и
+/// `quic_multi[16]` (имя clienthello шире датаграммы, без TTL).
+#[cfg(unix)]
+#[derive(Default)]
+struct R2oQuicNamedCache {
+    named: VecDeque<(String, u8, bool, Vec<u8>, std::time::Instant)>,
+    multi: VecDeque<(String, u8)>,
+}
+
+#[cfg(unix)]
+impl R2oQuicNamedCache {
+    fn note(
+        &mut self,
+        name: &str,
+        family: u8,
+        ech: bool,
+        snapshot: &[u8],
+        now: std::time::Instant,
+    ) {
+        self.named.retain(|(_, _, _, _, seen)| {
+            now.saturating_duration_since(*seen) <= R2O_QUIC_NAMED_TTL
+        });
+        if let Some((_, _, _, bytes, seen)) = self
+            .named
+            .iter_mut()
+            .find(|(saved, fam, _, _, _)| saved == name && *fam == family)
+        {
+            *bytes = snapshot.to_vec();
+            *seen = now;
+            return;
+        }
+        if self.named.len() == R2O_QUIC_NAMED_SLOTS {
+            self.named.pop_front();
+        }
+        self.named
+            .push_back((name.to_owned(), family, ech, snapshot.to_vec(), now));
+    }
+
+    fn find(
+        &self,
+        name: &str,
+        family: u8,
+        now: std::time::Instant,
+    ) -> Option<&(String, u8, bool, Vec<u8>, std::time::Instant)> {
+        self.named.iter().find(|(saved, fam, _, _, seen)| {
+            saved == name
+                && *fam == family
+                && now.saturating_duration_since(*seen) <= R2O_QUIC_NAMED_TTL
+        })
+    }
+
+    fn note_multi(&mut self, name: &str, family: u8) {
+        if self
+            .multi
+            .iter()
+            .any(|(saved, fam)| saved == name && *fam == family)
+        {
+            return;
+        }
+        if self.multi.len() == R2O_QUIC_MULTI_SLOTS {
+            self.multi.pop_front();
+        }
+        self.multi.push_back((name.to_owned(), family));
+    }
+
+    fn is_multi(&self, name: &str, family: u8) -> bool {
+        self.multi
+            .iter()
+            .any(|(saved, fam)| saved == name && *fam == family)
+    }
+
+    fn split_unfit(
+        &self,
+        name: &str,
+        family: u8,
+        by_addr: bool,
+        snapped: bool,
+        trig_len: usize,
+        trig_incomplete: bool,
+    ) -> bool {
+        if by_addr {
+            return false;
+        }
+        if self.is_multi(name, family) {
+            return true;
+        }
+        if snapped {
+            return false;
+        }
+        trig_len == 0 || trig_incomplete
+    }
+}
+
+#[cfg(unix)]
+const R2O_QUIC_NAMED_SLOTS: usize = 16;
+#[cfg(unix)]
+const R2O_QUIC_MULTI_SLOTS: usize = 16;
+#[cfg(unix)]
+const R2O_QUIC_NAMED_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+#[cfg(unix)]
+fn r2o_quic_named_cache() -> &'static std::sync::Mutex<R2oQuicNamedCache> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<R2oQuicNamedCache>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(R2oQuicNamedCache::default()))
+}
+
+#[cfg(unix)]
+fn r2o_quic_named_note(
+    name: &str,
+    family: u8,
+    ech: bool,
+    snapshot: &[u8],
+    now: std::time::Instant,
+) {
+    r2o_quic_named_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .note(name, family, ech, snapshot, now);
+}
+
+#[cfg(unix)]
+fn r2o_quic_note_multi(name: &str, family: u8) {
+    r2o_quic_named_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .note_multi(name, family);
+}
+
+#[cfg(unix)]
+fn r2o_quic_split_unfit(
+    name: &str,
+    family: u8,
+    by_addr: bool,
+    snapped: bool,
+    trig_len: usize,
+    trig_incomplete: bool,
+) -> bool {
+    r2o_quic_named_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .split_unfit(name, family, by_addr, snapped, trig_len, trig_incomplete)
+}
+
+/// Имя из целой пачки Initial; `None` — обрывок/Retry/вытесненная датаграмма.
+#[cfg(unix)]
+fn r2o_quic_snapshot_client_name(snapshot: &[u8]) -> Option<String> {
+    let parsed = r2k_core::quic_snapshot::r2k_quic_snapshot_parse(snapshot)?;
+    match r2k_core::quic::r2k_quic_initial_sni_result_from_datagrams(parsed.datagrams()).ok()? {
+        Some(host) => {
+            let host = String::from_utf8(host).ok()?;
+            r2o_controller::domain::normalize(&host).ok()
+        }
+        None => None,
+    }
+}
+
 #[cfg(unix)]
 fn r2o_quic_snapshot_has_ech(snapshot: &[u8]) -> bool {
     let Some(parsed) = r2k_core::quic_snapshot::r2k_quic_snapshot_parse(snapshot) else {
@@ -16954,6 +17111,12 @@ group_block_proven: false,
         self.active.contains_key(&r2o_discovery_task_key(target))
     }
 
+    /// C `T_WATCHING`: подтверждённая цель продолжает наблюдение.
+    fn r2o_is_watching(&self, target: &r2o_controller::discovery::DiscoveryTarget) -> bool {
+        let task_key = r2o_discovery_task_key(target);
+        self.completed.contains(&task_key) || self.dns_watching.contains_key(&task_key)
+    }
+
     fn record_install_failure(&mut self, target: &r2o_controller::discovery::DiscoveryTarget) {
         let now = std::time::Instant::now();
         let task_key = r2o_discovery_task_key(target);
@@ -23214,6 +23377,30 @@ impl ControlClient {
                         }
                     }
                     quic_snapshots.insert(hello.key, (snapshot.clone(), now));
+                    // C `on_shape`: целая пачка Initial — в quic_named
+                    // (reuse 10 мин); обрывок с известным именем — в
+                    // quic_multi, чтобы разрез CRYPTO не ставился клиенту.
+                    let family = hello.key[0];
+                    match r2o_quic_snapshot_client_name(snapshot) {
+                        Some(name) => r2o_quic_named_note(
+                            &name,
+                            family,
+                            r2o_quic_snapshot_has_ech(snapshot),
+                            snapshot,
+                            now,
+                        ),
+                        None => {
+                            if let Some(name) = hello
+                                .host
+                                .as_deref()
+                                .and_then(|host| std::str::from_utf8(host).ok())
+                                .filter(|name| !name.is_empty())
+                                .and_then(|name| r2o_controller::domain::normalize(name).ok())
+                            {
+                                r2o_quic_note_multi(&name, family);
+                            }
+                        }
+                    }
                 }
                 if let Some((discovery_worker, catalog, _, _)) = discovery.as_ref()
                     && quic_discovery.as_ref().is_some_and(|worker| {
@@ -23913,6 +24100,25 @@ impl ControlClient {
             );
             return;
         };
+        // C `on_suspect` T_WATCHING + planned=NO: цель уже подтверждена и
+        // только наблюдается. Новое подозрение без плана не запускает поиск,
+        // но просит снимок формы — вдруг клиент говорит другим приветствием.
+        let watching = worker.r2o_is_watching(&target);
+        if !planned && watching {
+            if let Err(error) = self.arm_client_shape(&target.host, target.family) {
+                println!(
+                    "v22 SUSPECT {}: подтверждённая цель подозревается без плана, снимок формы не запрошен: {error}",
+                    target.host
+                );
+            } else {
+                println!(
+                    "v22 SUSPECT {}: подтверждённая цель подозревается без плана — запрашиваю снимок формы, наблюдение продолжаю",
+                    target.host
+                );
+            }
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            return;
+        }
         let has_solution = r2o_controller::discovery::has_usable_binding(catalog, &target)
             || r2o_controller::discovery::has_covering_binding(catalog, &target);
         let signal = r2o_discovery_suspect_signal(
@@ -25206,7 +25412,15 @@ impl ControlClient {
         let split_applicable = parsed_snapshot
             .datagrams()
             .iter()
-            .any(|datagram| r2k_core::quic::initial_split_crypto(datagram).is_ok());
+            .any(|datagram| r2k_core::quic::initial_split_crypto(datagram).is_ok())
+            && !r2o_quic_split_unfit(
+                &server_name,
+                if server.is_ipv6() { 6 } else { 4 },
+                false,
+                true,
+                snapshot.len(),
+                false,
+            );
         let mut selected_plan = None;
         let mut fragment_control_passed = false;
         let mut benign_asked = false;
@@ -36988,6 +37202,97 @@ mod tests {
             hex(with_own_guard.as_bytes())
         ));
         if let Ok(path) = std::env::var("R2O_INSTALL_RST_GUARD_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watching_target_is_visible_to_t_watching_suspect_branch() {
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "watching.example".into(),
+            endpoint: "198.51.100.84:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let key = super::r2o_discovery_task_key(&target);
+        assert!(!worker.r2o_is_watching(&target));
+        worker.completed.insert(key.clone());
+        assert!(worker.r2o_is_watching(&target));
+        worker.completed.remove(&key);
+        worker
+            .dns_watching
+            .insert(key, (target.clone(), std::time::Instant::now()));
+        assert!(worker.r2o_is_watching(&target));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn d2o_quic_named_multi_state_matches_c() {
+        let now = std::time::Instant::now();
+        let mut cache = super::R2oQuicNamedCache::default();
+        cache.note("named.example", 4, false, b"init", now);
+        let mut output = String::new();
+        output.push_str(&format!(
+            "named_found={}\n",
+            u8::from(cache.find("named.example", 4, now).is_some())
+        ));
+        assert!(cache.find("named.example", 4, now).is_some());
+        assert!(
+            cache
+                .find(
+                    "named.example",
+                    4,
+                    now + std::time::Duration::from_secs(600)
+                )
+                .is_some()
+        );
+        output.push_str("named_at_ttl=1\n");
+        assert!(
+            cache
+                .find(
+                    "named.example",
+                    4,
+                    now + std::time::Duration::from_secs(601)
+                )
+                .is_none()
+        );
+        output.push_str("named_expired=0\n");
+        assert!(cache.find("named.example", 6, now).is_none());
+        output.push_str("named_family=0\n");
+
+        cache.note_multi("multi.example", 4);
+        output.push_str(&format!(
+            "multi_found={}\n",
+            u8::from(cache.is_multi("multi.example", 4))
+        ));
+        assert!(cache.is_multi("multi.example", 4));
+        assert!(!cache.is_multi("multi.example", 6));
+        output.push_str("multi_family=0\n");
+
+        output.push_str(&format!(
+            "split_multi={}\n",
+            u8::from(cache.split_unfit("multi.example", 4, false, true, 100, false))
+        ));
+        assert!(cache.split_unfit("multi.example", 4, false, true, 100, false));
+        output.push_str(&format!(
+            "split_snapped={}\n",
+            u8::from(cache.split_unfit("clean.example", 4, false, true, 100, false))
+        ));
+        assert!(!cache.split_unfit("clean.example", 4, false, true, 100, false));
+        output.push_str(&format!(
+            "split_no_snapshot={}\n",
+            u8::from(cache.split_unfit("clean.example", 4, false, false, 0, false))
+        ));
+        assert!(cache.split_unfit("clean.example", 4, false, false, 0, false));
+        output.push_str(&format!(
+            "split_by_addr={}\n",
+            u8::from(cache.split_unfit("clean.example", 4, true, true, 100, false))
+        ));
+        assert!(!cache.split_unfit("clean.example", 4, true, true, 100, false));
+
+        if let Ok(path) = std::env::var("R2O_QUIC_NAMED_MULTI_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
         }
     }
