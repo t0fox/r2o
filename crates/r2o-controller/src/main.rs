@@ -7146,6 +7146,70 @@ fn r2o_quic_split_unfit(
         .split_unfit(name, family, by_addr, snapped, trig_len, trig_incomplete)
 }
 
+/// DoQ direct CLEAR: worker не владеет каталогом. Цель кладётся сюда, главный
+/// цикл применяет C-лестницу `group_record(DIRECT_CLEAR)` +
+/// `forget_clear_target_bindings` + `clear_backoff_ms`.
+#[cfg(unix)]
+fn r2o_quic_direct_clear_map()
+-> &'static std::sync::Mutex<Vec<r2o_controller::discovery::DiscoveryTarget>> {
+    static CLEARS: std::sync::OnceLock<
+        std::sync::Mutex<Vec<r2o_controller::discovery::DiscoveryTarget>>,
+    > = std::sync::OnceLock::new();
+    CLEARS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+#[cfg(unix)]
+fn r2o_quic_direct_clear_enqueue(target: r2o_controller::discovery::DiscoveryTarget) {
+    r2o_quic_direct_clear_map()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(target);
+}
+
+#[cfg(unix)]
+fn r2o_quic_direct_clear_take_all() -> Vec<r2o_controller::discovery::DiscoveryTarget> {
+    std::mem::take(
+        &mut *r2o_quic_direct_clear_map()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
+}
+
+/// C `cooldown_record(kind=0)`/`clear_backoff_ms`: negative streak 10/30/60 мин.
+#[cfg(unix)]
+fn r2o_quic_clear_streaks()
+-> &'static std::sync::Mutex<HashMap<(String, u8), (u8, std::time::Instant)>> {
+    static STREAKS: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<(String, u8), (u8, std::time::Instant)>>,
+    > = std::sync::OnceLock::new();
+    STREAKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+#[cfg(unix)]
+fn r2o_quic_note_direct_clear(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+) -> std::time::Duration {
+    let mut streaks = r2o_quic_clear_streaks()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let key = (target.host.clone(), target.family);
+    let streak = streaks
+        .get(&key)
+        .map_or(1, |(streak, _)| streak.saturating_add(1));
+    let delay = r2o_discovery_clear_retry_after(streak);
+    streaks.insert(key, (streak, std::time::Instant::now() + delay));
+    delay
+}
+
+#[cfg(unix)]
+fn r2o_quic_clear_cooldown_active(host: &str, family: u8, now: std::time::Instant) -> bool {
+    r2o_quic_clear_streaks()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&(host.to_owned(), family))
+        .is_some_and(|(_, until)| now < *until)
+}
+
 /// Имя из целой пачки Initial; `None` — обрывок/Retry/вытесненная датаграмма.
 #[cfg(unix)]
 fn r2o_quic_snapshot_client_name(snapshot: &[u8]) -> Option<String> {
@@ -9474,6 +9538,15 @@ impl R2oQuicDiscoveryWorker {
         let Some(host) = r2o_quic_snapshot_server_name(&task.snapshot, server) else {
             return false;
         };
+        // C `cooldown_record(kind=0)`/`clear_backoff_ms`: после прямого DoQ
+        // CLEAR повторный поиск ждёт 10/30/60 минут.
+        if r2o_quic_clear_cooldown_active(
+            &host,
+            if server.is_ipv6() { 6 } else { 4 },
+            std::time::Instant::now(),
+        ) {
+            return false;
+        }
         let Some(jobs) = self.jobs.as_ref() else {
             return false;
         };
@@ -20527,6 +20600,16 @@ impl ControlClient {
                     dns_services.sync_discovery_tasks(worker, std::time::Instant::now());
                 }
                 dns_services.sync_quic_dns_tasks(std::time::Instant::now());
+                if let Some((_, catalog, path, _)) = discovery.as_mut() {
+                    let changed = self.r2o_apply_quic_direct_clears(
+                        catalog,
+                        path,
+                        catalog_persistence.as_mut(),
+                    )?;
+                    if changed {
+                        catalog_sync_dirty = true;
+                    }
+                }
                 // C `d2k_sched_tick`: отказы узлов семейства стареют раз в час
                 // и сразу после запуска; запись старше 7 суток ничего не
                 // говорит о плане.
@@ -24926,7 +25009,23 @@ impl ControlClient {
             match direct {
                 Ok(result) if result.dns_reply => {
                     r2o_quic_dns_live_clear(server);
-                    println!("DoQ {server}: прямой DNS-ответ получен; план не требуется");
+                    let host =
+                        r2o_controller::domain::normalize(host).unwrap_or_else(|_| host.to_owned());
+                    let family = if server.is_ipv6() { 6 } else { 4 };
+                    let target = r2o_controller::discovery::DiscoveryTarget {
+                        host,
+                        endpoint: server.to_string(),
+                        family,
+                        shape: SHAPE_QUIC,
+                    };
+                    // C `T_ASKING`: прямой CLEAR с `rx_direct_complete`
+                    // закрывает привязки и пишет group(DIRECT_CLEAR);
+                    // каталог живёт в главном цикле.
+                    r2o_discovery_meta_set(&target, true, SHAPE_QUIC);
+                    r2o_quic_direct_clear_enqueue(target);
+                    println!(
+                        "DoQ {server}: прямой DNS-ответ получен; план не требуется, прямой CLEAR закрывает привязки"
+                    );
                     return Ok(None);
                 }
                 Ok(result) => {
@@ -26603,6 +26702,33 @@ impl ControlClient {
         Ok(())
     }
 
+    fn r2o_apply_quic_direct_clears(
+        &mut self,
+        catalog: &mut Catalog,
+        catalog_path: &std::path::Path,
+        mut persistence: Option<&mut R2oCatalogPersistence>,
+    ) -> Result<bool, Box<dyn Error>> {
+        let targets = r2o_quic_direct_clear_take_all();
+        if targets.is_empty() {
+            return Ok(false);
+        }
+        for target in targets {
+            self.apply_discovery_direct_clear(
+                &target,
+                catalog,
+                catalog_path,
+                persistence.as_deref_mut(),
+            )?;
+            let delay = r2o_quic_note_direct_clear(&target);
+            println!(
+                "DoQ {}: прямой CLEAR записан; повторный поиск отложен на {} мин",
+                target.host,
+                delay.as_secs().div_ceil(60)
+            );
+        }
+        Ok(true)
+    }
+
     fn apply_discovery_direct_clear(
         &mut self,
         target: &r2o_controller::discovery::DiscoveryTarget,
@@ -26660,7 +26786,8 @@ impl ControlClient {
 
         persist_catalog_update(&updated, catalog_path, now, persistence)?;
         if result.delete_runtime {
-            let command = encode_delete_name(&target.host, 6, target.shape, target.family)?;
+            let transport = if target.shape == SHAPE_QUIC { 17 } else { 6 };
+            let command = encode_delete_name(&target.host, transport, target.shape, target.family)?;
             if let Err(delete_error) = self.send_command(&command, control::COMMAND_DEL_NAME) {
                 *catalog = updated;
                 return Err(format!(
@@ -37204,6 +37331,156 @@ mod tests {
         if let Ok(path) = std::env::var("R2O_INSTALL_RST_GUARD_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn d2o_doq_direct_clear_state_matches_c() {
+        use r2o_controller::catalog::{Binding, BoxRecord, Catalog};
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "doq.example".into(),
+            endpoint: "198.51.100.90:853".into(),
+            family: 4,
+            shape: SHAPE_QUIC,
+        };
+        let mut catalog = Catalog {
+            boxes: vec![BoxRecord {
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: target.host.clone(),
+                    enabled: true,
+                    level: 3,
+                    transport: 17,
+                    family: 4,
+                    shape: SHAPE_QUIC,
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        let mono = std::time::Instant::now();
+        let mut output = String::new();
+        for streak in [1_u8, 2, 3] {
+            output.push_str(&format!(
+                "backoff_{streak}={}\n",
+                super::r2o_discovery_clear_retry_after(streak).as_millis()
+            ));
+        }
+        let first = r2o_controller::discovery::update_direct_clear_bindings(
+            &mut catalog,
+            &target,
+            1000,
+            mono,
+        );
+        output.push_str(&format!(
+            "quic_marked={}\nquic_binds_after_first={}\n",
+            u8::from(first.marked == 1 && first.delete_runtime),
+            catalog.boxes[0].bindings.len()
+        ));
+        // Пометка пережила рестарт: recheck_mono отсутствует.
+        catalog.boxes[0].bindings[0].recheck_mono = None;
+        let second = r2o_controller::discovery::update_direct_clear_bindings(
+            &mut catalog,
+            &target,
+            2000,
+            mono,
+        );
+        assert_eq!(second.removed, 1);
+        output.push_str(&format!(
+            "quic_binds_after_second={}\n",
+            catalog.boxes[0].bindings.len()
+        ));
+        if let Ok(path) = std::env::var("R2O_DOQ_DIRECT_CLEAR_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doq_direct_clear_drain_writes_group_and_backoff() {
+        let work = std::env::temp_dir().join(format!(
+            "r2o-doq-clear-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&work).unwrap();
+        let catalog_path = work.join("catalog.json");
+        Catalog::default().save_atomic(&catalog_path, 1).unwrap();
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "doq-drain.example.com".into(),
+            endpoint: "198.51.100.92:853".into(),
+            family: 4,
+            shape: SHAPE_QUIC,
+        };
+        let (client_stream, _server_stream) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut client = ControlClient {
+            socket: client_stream,
+            send_maxlen: 0,
+            send_cap: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            pending_events: std::collections::VecDeque::new(),
+            pending_applied_events: std::collections::VecDeque::new(),
+            dropped_events: Default::default(),
+            http_search_started: Default::default(),
+            http_acknowledged_bindings: std::collections::HashMap::new(),
+        };
+        super::r2o_discovery_meta_set(&target, true, SHAPE_QUIC);
+        super::r2o_quic_direct_clear_enqueue(target.clone());
+        let mut catalog = Catalog::default();
+        assert!(
+            client
+                .r2o_apply_quic_direct_clears(&mut catalog, &catalog_path, None)
+                .unwrap()
+        );
+        let saved = Catalog::load(&catalog_path).unwrap();
+        let state = saved.domain_state.as_ref().unwrap();
+        assert_eq!(state.observations.len(), 1);
+        assert_eq!(state.observations[0].name, target.host);
+        assert_eq!(state.observations[0].evidence, super::DOMAIN_DIRECT_CLEAR);
+        assert_eq!(state.observations[0].key.transport, 17);
+        assert_eq!(state.observations[0].key.probe_path, "/");
+        assert!(super::r2o_quic_clear_cooldown_active(
+            &target.host,
+            target.family,
+            std::time::Instant::now()
+        ));
+        std::fs::remove_dir_all(work).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quic_direct_clear_uses_donor_backoff_streak() {
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "backoff-doq.example".into(),
+            endpoint: "198.51.100.91:853".into(),
+            family: 4,
+            shape: SHAPE_QUIC,
+        };
+        assert_eq!(
+            super::r2o_quic_note_direct_clear(&target),
+            std::time::Duration::from_secs(10 * 60)
+        );
+        assert_eq!(
+            super::r2o_quic_note_direct_clear(&target),
+            std::time::Duration::from_secs(30 * 60)
+        );
+        assert_eq!(
+            super::r2o_quic_note_direct_clear(&target),
+            std::time::Duration::from_secs(60 * 60)
+        );
+        assert!(super::r2o_quic_clear_cooldown_active(
+            &target.host,
+            target.family,
+            std::time::Instant::now()
+        ));
+        assert!(!super::r2o_quic_clear_cooldown_active(
+            &target.host,
+            target.family,
+            std::time::Instant::now() + std::time::Duration::from_secs(61 * 60)
+        ));
     }
 
     #[cfg(unix)]

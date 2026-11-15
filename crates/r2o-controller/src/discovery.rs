@@ -1004,10 +1004,14 @@ pub fn update_direct_clear_bindings(
     let mut update = DirectClearBindingUpdate::default();
     if now < 0
         || !matches!(target.family, 4 | 6)
-        || !matches!(target.shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP)
+        || !matches!(
+            target.shape,
+            SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP | SHAPE_QUIC
+        )
     {
         return update;
     }
+    let target_transport = if target.shape == SHAPE_QUIC { 17 } else { 6 };
 
     for box_record in &mut catalog.boxes {
         let mut changed = false;
@@ -1030,9 +1034,9 @@ pub fn update_direct_clear_bindings(
             let modern_covers_ech = binding.shape == SHAPE_MODERN && target.shape == SHAPE_ECH_TCP;
             let matches_target = binding.kind == "name"
                 && binding.target == target.host
-                && transport == 6
+                && transport == target_transport
                 && family == target.family
-                && binding.tcp_profile == target.tcp_profile()
+                && (transport != 6 || binding.tcp_profile == target.tcp_profile())
                 && (binding.shape == 0 || binding.shape == target.shape || modern_covers_ech);
             if !matches_target {
                 index += 1;
@@ -1058,7 +1062,7 @@ pub fn update_direct_clear_bindings(
             binding.recheck_mono = Some(monotonic_now);
             update.marked += 1;
             changed = true;
-            update.delete_runtime |= transport == 6
+            update.delete_runtime |= transport == target_transport
                 && family == target.family
                 && (binding.shape == target.shape || modern_covers_ech);
             index += 1;
@@ -1945,6 +1949,52 @@ mod tests {
         );
         let empty = resolve_unspecified_endpoint_with(&target, |_, _, _| Ok(Vec::new()));
         assert!(empty.is_err());
+    }
+
+    #[test]
+    fn quic_direct_clear_marks_then_removes_binding() {
+        use super::{DiscoveryTarget, update_direct_clear_bindings};
+        use crate::catalog::{Binding, BoxRecord, Catalog};
+        use r2k_core::control::SHAPE_QUIC;
+        use std::time::{Duration, Instant};
+
+        let target = DiscoveryTarget {
+            host: "doq.example".into(),
+            endpoint: "198.51.100.90:853".into(),
+            family: 4,
+            shape: SHAPE_QUIC,
+        };
+        let mut catalog = Catalog {
+            boxes: vec![BoxRecord {
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: target.host.clone(),
+                    enabled: true,
+                    level: 3,
+                    transport: 17,
+                    family: 4,
+                    shape: SHAPE_QUIC,
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        let mono = Instant::now();
+        let first = update_direct_clear_bindings(&mut catalog, &target, 100, mono);
+        assert_eq!(first.marked, 1);
+        assert!(first.delete_runtime);
+        assert!(catalog.boxes[0].bindings[0].recheck_since.is_some());
+        let waiting = update_direct_clear_bindings(&mut catalog, &target, 101, mono);
+        assert_eq!(waiting.waiting, 1);
+        let removed = update_direct_clear_bindings(
+            &mut catalog,
+            &target,
+            102,
+            mono + Duration::from_secs(61),
+        );
+        assert_eq!(removed.removed, 1);
+        assert!(catalog.boxes[0].bindings.is_empty());
     }
 
     #[test]
