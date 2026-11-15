@@ -364,6 +364,12 @@ impl R2oUdpSessions {
     }
 
     /// Проверить, применялся ли уже план к этому UDP-потоку.
+    /// C `out->skipped = "план уже применён к этому потоку"`: второй
+    /// Initial после успешного применения плана проходит без повторного.
+    pub fn r2o_skip_plan_applied(&self, packet: &[u8]) -> bool {
+        self.r2o_plan_applied(packet)
+    }
+
     pub fn r2o_plan_applied(&self, packet: &[u8]) -> bool {
         flow_key_from_packet(packet)
             .and_then(|key| self.flows.get(&key))

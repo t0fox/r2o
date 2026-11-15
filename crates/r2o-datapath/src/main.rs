@@ -2367,6 +2367,13 @@ mod app {
                             controller_probe,
                         );
                         let selected_plan = selected.unwrap_or(&plan);
+                        if selected.is_none()
+                            && quic_hello
+                                .as_ref()
+                                .is_some_and(|hello| !hello.host.is_empty())
+                        {
+                            quic_sessions.r2o_note_quic_shape_miss();
+                        }
                         // C `handle_udp`: плана нет ни по цели, ни общего — первый
                         // именованный hello даёт журнальный отказ NONE.
                         if !controller_probe

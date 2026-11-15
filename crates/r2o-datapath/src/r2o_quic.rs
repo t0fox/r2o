@@ -152,6 +152,14 @@ pub struct R2oQuicSessions {
     udp_exchange_events: VecDeque<R2oUdpExchangeEvent>,
     flow_limit: usize,
     r2o_idle_timeout: Duration,
+    /// C `init_ring_add`: датаграмма принята в кольцо Initial.
+    init_ring_done: u64,
+    /// C `qsnap_done`: снимок named Initial отдан.
+    qsnap_done: u64,
+    /// C `out->quic_name`: имя собрано.
+    quic_name: u64,
+    /// C `out->quic_shape_miss`: имя известно, плана этой формы нет.
+    quic_shape_miss: u64,
 }
 
 impl R2oQuicSessions {
@@ -176,12 +184,38 @@ impl R2oQuicSessions {
             udp_exchange_events,
             flow_limit,
             r2o_idle_timeout: QUIC_IDLE,
+            init_ring_done: 0,
+            qsnap_done: 0,
+            quic_name: 0,
+            quic_shape_miss: 0,
         })
     }
 
     /// Настроить срок хранения состояния QUIC-потоков и снимков приветствий.
     pub fn r2o_set_idle_timeout(&mut self, timeout: Duration) {
         self.r2o_idle_timeout = timeout;
+    }
+
+    /// C `out->quic_name`/`init_ring`/`qsnap_done` для sequence-differential.
+    pub fn r2o_init_ring_done(&self) -> u64 {
+        self.init_ring_done
+    }
+
+    pub fn r2o_qsnap_done(&self) -> u64 {
+        self.qsnap_done
+    }
+
+    pub fn r2o_quic_name(&self) -> u64 {
+        self.quic_name
+    }
+
+    pub fn r2o_quic_shape_miss(&self) -> u64 {
+        self.quic_shape_miss
+    }
+
+    /// C `out->quic_shape_miss`: имя известно, плана нужной формы нет.
+    pub fn r2o_note_quic_shape_miss(&mut self) {
+        self.quic_shape_miss = self.quic_shape_miss.saturating_add(1);
     }
 
     /// C `init_ring_pack` (`session.c:253-283`): датаграммы потока с тем же
@@ -262,6 +296,7 @@ impl R2oQuicSessions {
                 dcid: dcid.clone(),
                 bytes: payload.to_vec(),
             });
+            self.init_ring_done = self.init_ring_done.saturating_add(1);
         }
 
         let (host, snapshot) = {
@@ -304,6 +339,8 @@ impl R2oQuicSessions {
             }
         }
         self.hello_reported.insert(key, now);
+        self.qsnap_done = self.qsnap_done.saturating_add(1);
+        self.quic_name = self.quic_name.saturating_add(1);
         Some(super::capture::QuicHello {
             key: key.wire_key(),
             host,
@@ -666,6 +703,10 @@ impl Default for R2oQuicSessions {
             udp_exchange_events: VecDeque::new(),
             flow_limit: R2oFlowCapacity::default().limit(),
             r2o_idle_timeout: QUIC_IDLE,
+            init_ring_done: 0,
+            qsnap_done: 0,
+            quic_name: 0,
+            quic_shape_miss: 0,
         }
     }
 }
@@ -943,6 +984,9 @@ mod tests {
         })
         .unwrap();
         assert_eq!(event.host.as_deref(), Some(b"example.com".as_slice()));
+        assert_eq!(sessions.r2o_init_ring_done(), 1);
+        assert_eq!(sessions.r2o_qsnap_done(), 1);
+        assert_eq!(sessions.r2o_quic_name(), 1);
         assert_eq!(event.key[0], 4);
         assert_eq!(&event.key[1..5], &client);
         assert_eq!(&event.key[17..21], &server);
@@ -988,6 +1032,9 @@ mod tests {
         // C `qsnap_done` не взводится для пустого имени: кольцо остаётся
         // для следующего Initial, а повторный пустой host не выдаётся.
         assert_eq!(sessions.initial_ring.len(), 1);
+        assert_eq!(sessions.r2o_init_ring_done(), 1);
+        assert_eq!(sessions.r2o_qsnap_done(), 0);
+        assert_eq!(sessions.r2o_quic_name(), 0);
     }
 
     #[test]
