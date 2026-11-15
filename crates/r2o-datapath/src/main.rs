@@ -1137,6 +1137,22 @@ mod app {
 
     /// C `routes_refresh` (`d2kd.c:300-368`): печать переходов и quiet-строки
     /// смен не чаще раза в 600 с.
+    /// C `cap_refresh`: после adopt egress MTU — grow sched → send_maxlen →
+    /// greet. Ошибка роста оставляет контроллеру прежний предел.
+    fn r2o_apply_route_maxlen(
+        maxlen: usize,
+        grow: impl FnOnce(usize) -> i32,
+        set_name_maxlen: impl FnOnce(usize),
+        greet: impl FnOnce(usize) -> io::Result<()>,
+    ) -> io::Result<bool> {
+        if grow(maxlen) < 0 {
+            return Ok(false);
+        }
+        set_name_maxlen(maxlen);
+        greet(maxlen)?;
+        Ok(true)
+    }
+
     /// C main `poll`: extra fd готов, если POLLIN/POLLERR/POLLHUP.
     /// C `d2k_udp_path_read`: `rseq++` без насыщения; переполнение
     /// u64 заворачивается, отдельного DROP/счётчика в C нет.
@@ -1995,20 +2011,23 @@ mod app {
                     (raw.as_ref(), route_gate.r2o_egress_ifindices())
                     && let Some(maxlen) = raw.r2o_adopt_egress(&ifindices)
                 {
-                    // C `cap_refresh`: grow sched → greet. Ошибка роста
-                    // оставляет контроллеру прежний предел, как в C.
-                    if scheduled.grow_slot_size(maxlen) < 0 {
+                    let applied = r2o_apply_route_maxlen(
+                        maxlen,
+                        |value| scheduled.grow_slot_size(value),
+                        |value| name_plans.r2o_set_send_maxlen(value),
+                        |value| match control.as_mut() {
+                            Some(control) => control.r2o_set_send_maxlen(value as u32),
+                            None => Ok(()),
+                        },
+                    )?;
+                    if applied {
                         eprintln!(
-                            "r2o-datapath: не удалось увеличить очередь до {} байт — контроллеру оставлен прежний предел",
+                            "r2o-datapath: предел посылки обновлён до {} байт по MTU выходного маршрута",
                             maxlen
                         );
                     } else {
-                        name_plans.r2o_set_send_maxlen(maxlen);
-                        if let Some(control) = control.as_mut() {
-                            control.r2o_set_send_maxlen(maxlen as u32)?;
-                        }
                         eprintln!(
-                            "r2o-datapath: предел посылки обновлён до {} байт по MTU выходного маршрута",
+                            "r2o-datapath: не удалось увеличить очередь до {} байт — контроллеру оставлен прежний предел",
                             maxlen
                         );
                     }
@@ -6249,6 +6268,46 @@ mod app {
         use r2o_datapath::r2o_udp_hold::R2oUdpHeldPacket;
         use r2o_datapath::r2o_udp_sessions::R2oUdpSessions;
         use std::io;
+
+        #[test]
+        fn cap_refresh_composition_orders_grow_send_maxlen_greet() {
+            let order = std::cell::RefCell::new(Vec::new());
+            let applied = super::r2o_apply_route_maxlen(
+                1600,
+                |value| {
+                    order.borrow_mut().push(("grow", value));
+                    1
+                },
+                |value| order.borrow_mut().push(("send_maxlen", value)),
+                |value| {
+                    order.borrow_mut().push(("greet", value));
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert!(applied);
+            assert_eq!(
+                order.into_inner(),
+                [("grow", 1600), ("send_maxlen", 1600), ("greet", 1600)]
+            );
+
+            let after_refusal = std::cell::RefCell::new(Vec::new());
+            let applied = super::r2o_apply_route_maxlen(
+                9000,
+                |value| {
+                    after_refusal.borrow_mut().push(("grow", value));
+                    -1
+                },
+                |value| after_refusal.borrow_mut().push(("send_maxlen", value)),
+                |value| {
+                    after_refusal.borrow_mut().push(("greet", value));
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert!(!applied);
+            assert_eq!(after_refusal.into_inner(), [("grow", 9000)]);
+        }
 
         #[test]
         fn udp_receive_sequence_wraps_without_drop_like_c() {
