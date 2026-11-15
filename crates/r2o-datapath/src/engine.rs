@@ -600,6 +600,20 @@ impl TcpSessions {
             .map_or(0, |(_, session)| session.client_shape)
     }
 
+    /// C `fl->plan_done` для пакета: доступ для sequence-differential.
+    pub fn r2o_plan_done_for_packet(&self, packet: &[u8]) -> bool {
+        TcpFlowKey::from_packet(packet)
+            .and_then(|key| self.flows.get(&key))
+            .is_some_and(|session| session.plan_done)
+    }
+
+    /// C `fl->sends_left` для пакета: сколько посылок ещё не зачтено.
+    pub fn r2o_sends_left_for_packet(&self, packet: &[u8]) -> u8 {
+        TcpFlowKey::from_packet(packet)
+            .and_then(|key| self.flows.get(&key))
+            .map_or(0, |session| session.sends_left)
+    }
+
     /// C `d2k_session_damaged`: флаг повреждения потока.
     pub fn session_flow_damaged(&self, key: &[u8; KEY_LEN]) -> bool {
         self.flows
@@ -2836,6 +2850,8 @@ mod tests {
         assert_eq!(key, flow_key.wire_key());
         let session = &sessions.flows[&flow_key];
         assert_eq!(session.sends_left, 3);
+        assert_eq!(sessions.r2o_sends_left_for_packet(&hello), 3);
+        assert!(sessions.r2o_plan_done_for_packet(&hello));
         assert_eq!(session.sends_done, 0);
         assert!(!session.sends_failed);
         assert!(!session.orig_taken);
