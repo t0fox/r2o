@@ -1211,6 +1211,88 @@ pub(crate) fn probe_tcp_split(
     }
 }
 
+#[cfg(test)]
+mod test_script {
+    use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[derive(Clone, Copy, Debug)]
+    pub(super) enum Outcome {
+        Pass,
+        Fail,
+        Error,
+    }
+
+    thread_local! {
+        static SCRIPT: RefCell<Option<Script>> = const { RefCell::new(None) };
+    }
+
+    struct Script {
+        replies: VecDeque<(Option<String>, Outcome)>,
+        cancel: Option<(Arc<AtomicBool>, usize)>,
+        calls: usize,
+        connect_ok: bool,
+    }
+
+    pub(super) fn begin(
+        replies: Vec<(Option<&str>, Outcome)>,
+        cancel_after: Option<(Arc<AtomicBool>, usize)>,
+        connect_ok: bool,
+    ) {
+        SCRIPT.with(|cell| {
+            *cell.borrow_mut() = Some(Script {
+                replies: replies
+                    .into_iter()
+                    .map(|(name, outcome)| (name.map(str::to_owned), outcome))
+                    .collect(),
+                cancel: cancel_after,
+                calls: 0,
+                connect_ok,
+            });
+        });
+    }
+
+    pub(super) fn take(name: &str) -> Option<Outcome> {
+        SCRIPT.with(|cell| {
+            let mut script = cell.borrow_mut();
+            let script = script.as_mut()?;
+            script.calls += 1;
+            if let Some((cancel, after)) = &script.cancel {
+                if script.calls >= *after {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            }
+            let position = script
+                .replies
+                .iter()
+                .position(|(filter, _)| filter.as_deref().is_none_or(|filter| filter == name));
+            Some(
+                position
+                    .and_then(|index| script.replies.remove(index))
+                    .map_or(Outcome::Error, |(_, outcome)| outcome),
+            )
+        })
+    }
+
+    pub(super) fn connect_ok() -> bool {
+        SCRIPT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .is_some_and(|script| script.connect_ok)
+        })
+    }
+
+    pub(super) fn calls() -> usize {
+        SCRIPT.with(|cell| cell.borrow().as_ref().map_or(0, |script| script.calls))
+    }
+
+    pub(super) fn finish() {
+        SCRIPT.with(|cell| *cell.borrow_mut() = None);
+    }
+}
+
 fn raw_probe_once(
     remote: SocketAddr,
     trigger: &Trigger,
@@ -1221,6 +1303,14 @@ fn raw_probe_once(
     offer_ts: bool,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<bool, ProbeError> {
+    #[cfg(test)]
+    if let Some(outcome) = test_script::take(&poison.name) {
+        return match outcome {
+            test_script::Outcome::Pass => Ok(true),
+            test_script::Outcome::Fail => Ok(false),
+            test_script::Outcome::Error => Err(ProbeError::Local("scripted local error".into())),
+        };
+    }
     let mut connection =
         match RawConn::connect(remote, timeout, effective_mark(mark), cancel, offer_ts)? {
             Some(connection) => connection,
@@ -2351,6 +2441,17 @@ impl RawConn {
         cancel: Option<&std::sync::atomic::AtomicBool>,
         offer_ts: bool,
     ) -> Result<Option<Self>, ProbeError> {
+        #[cfg(test)]
+        if test_script::connect_ok() {
+            return Ok(Some(Self::test_connection(
+                remote.ip(),
+                remote.ip(),
+                40_000,
+                remote.port(),
+                1000,
+                0,
+            )));
+        }
         let local = local_address_for(remote).map_err(|error| {
             ProbeError::Local(format!(
                 "classify: не удалось определить свой адрес: {error}"
@@ -2842,8 +2943,13 @@ mod tests {
     use super::{
         Property, RAW_SELFTESTS, RawSelftestState, apply_property, compose_from_props,
         note_raw_probe, property_probes, raw_selftest_age, raw_selftest_index, raw_sendto_ok,
+        store_raw_selftest, sweep_poisons, test_script,
     };
-    use crate::classify::{DpiProps, Poison, TriState};
+    use crate::classify::{
+        Accept, ClassifyOptions, ClassifyResult, DpiProps, Poison, ProbeTarget, TriState, Trigger,
+    };
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
 
     fn set_name(property: Property) -> &'static str {
         match property {
@@ -4675,6 +4781,147 @@ mod tests {
         assert!(output.contains("read|data|0|abc"));
         assert!(output.contains("send|split|0|segs=0:1400,1400:1400,2800:100"));
         assert!(output.contains("hs|v4-success|ok|ts=12"));
+    }
+
+    #[test]
+    fn scripted_property_local_error_does_not_change_props() {
+        let trigger = Trigger::tls13("probe.example").unwrap();
+        let target = ProbeTarget {
+            host: "127.0.0.1".into(),
+            port: 443,
+        };
+        let mut options = ClassifyOptions {
+            repeats: 3,
+            white: Some(Trigger {
+                name: "white".into(),
+                payload: vec![0, 1],
+                accept: Accept::TlsRecord,
+            }),
+            ..ClassifyOptions::default()
+        };
+        options.only_poison = None;
+        store_raw_selftest(4, true, true);
+        store_raw_selftest(4, false, true);
+        let mut result = ClassifyResult::new("127.0.0.1:443", 3);
+        test_script::begin(vec![(None, test_script::Outcome::Error)], None, true);
+        let outcome = sweep_poisons(
+            &target,
+            &trigger,
+            &options,
+            &mut result,
+            &mut |_, _, _, _| {},
+        );
+        test_script::finish();
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert_eq!(result.props, DpiProps::default());
+        assert!(result.hit.is_none());
+        assert!(result.path.is_none());
+        let properties: Vec<_> = result
+            .trace
+            .iter()
+            .filter(|observation| observation.probe.starts_with("свойство:"))
+            .collect();
+        assert!(!properties.is_empty());
+        assert!(
+            properties
+                .iter()
+                .all(|observation| observation.error.is_some())
+        );
+        if let Ok(path) = std::env::var("R2O_PROPS_LOCAL_OUTPUT") {
+            std::fs::write(path, "LOCAL rc=0 props_zero=1 answered=0 hit=0\n")
+                .expect("write local error row");
+        }
+    }
+
+    #[test]
+    fn scripted_md5_local_error_keeps_md5_in_sweep() {
+        let trigger = Trigger::tls13("probe.example").unwrap();
+        let target = ProbeTarget {
+            host: "127.0.0.1".into(),
+            port: 443,
+        };
+        let options = ClassifyOptions {
+            repeats: 1,
+            ..ClassifyOptions::default()
+        };
+        store_raw_selftest(4, true, true);
+        store_raw_selftest(4, false, true);
+        let mut result = ClassifyResult::new("127.0.0.1:443", 1);
+        test_script::begin(
+            vec![
+                (Some("md5"), test_script::Outcome::Error),
+                (None, test_script::Outcome::Fail),
+            ],
+            None,
+            true,
+        );
+        let outcome = sweep_poisons(
+            &target,
+            &trigger,
+            &options,
+            &mut result,
+            &mut |_, _, _, _| {},
+        );
+        test_script::finish();
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert!(
+            result
+                .trace
+                .iter()
+                .any(|observation| observation.probe == "poison:md5"),
+            "local md5 error removed md5 from the fallback sweep"
+        );
+        if let Ok(path) = std::env::var("R2O_PROPS_MD5_OUTPUT") {
+            std::fs::write(path, "MD5_ERR poison_md5=1\n").expect("write md5 row");
+        }
+    }
+
+    #[test]
+    fn scripted_property_stop_does_not_run_extra_probes() {
+        let trigger = Trigger::tls13("probe.example").unwrap();
+        let target = ProbeTarget {
+            host: "127.0.0.1".into(),
+            port: 443,
+        };
+        let mut options = ClassifyOptions {
+            repeats: 1,
+            ..ClassifyOptions::default()
+        };
+        store_raw_selftest(4, true, true);
+        store_raw_selftest(4, false, true);
+        let cancel = Arc::new(AtomicBool::new(false));
+        options.cancel = Some(Arc::clone(&cancel));
+        let mut result = ClassifyResult::new("127.0.0.1:443", 1);
+        test_script::begin(
+            vec![(None, test_script::Outcome::Fail)],
+            Some((Arc::clone(&cancel), 2)),
+            true,
+        );
+        let outcome = sweep_poisons(
+            &target,
+            &trigger,
+            &options,
+            &mut result,
+            &mut |_, _, _, _| {},
+        );
+        let calls = test_script::calls();
+        test_script::finish();
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert!(result.stopped);
+        assert_eq!(calls, 2, "stop must not run extra property probes");
+        let properties = result
+            .trace
+            .iter()
+            .filter(|observation| observation.probe.starts_with("свойство:"))
+            .count();
+        assert_eq!(properties, 2);
+        if let Ok(path) = std::env::var("R2O_PROPS_STOP_OUTPUT") {
+            std::fs::write(
+                path,
+                format!("STOP rc=0 obs={calls} probes={calls} stopped=1\n"),
+            )
+            .expect("write stop row");
+        }
     }
 
     #[test]
