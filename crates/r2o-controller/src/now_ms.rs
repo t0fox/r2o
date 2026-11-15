@@ -3,10 +3,11 @@
 //! Ширина закреплена как 64 бита: на mipsel `long` 32-битный, поэтому
 //! используется `i64`, как в C-typedef-проверке.
 
-use std::sync::atomic::{AtomicI64, Ordering};
+use crate::portable_atomic::R2oAtomicI64;
+use std::sync::atomic::Ordering;
 
 /// C `d2k_clock_offset_ms`: глобальный сдвиг для тестов и стенда.
-static CLOCK_OFFSET_MS: AtomicI64 = AtomicI64::new(0);
+static CLOCK_OFFSET_MS: R2oAtomicI64 = R2oAtomicI64::new(0);
 
 /// Задать сдвиг монотонных часов (C-переменная `d2k_clock_offset_ms`).
 pub fn set_clock_offset_ms(offset_ms: i64) {

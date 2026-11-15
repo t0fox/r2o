@@ -21,6 +21,7 @@ pub mod https_probe;
 pub mod live;
 pub mod now_ms;
 pub mod plan_text;
+pub mod portable_atomic;
 pub mod quic_props;
 pub mod quic_replay;
 pub mod r2o_fallback;

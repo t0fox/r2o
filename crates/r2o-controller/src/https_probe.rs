@@ -1,5 +1,6 @@
 //! Ограниченная очередь проверок HTTPS для имён из HTTP-порталов.
 
+use crate::portable_atomic::R2oAtomicU64;
 use crate::response::{HttpsProbeState, probe_https_state};
 use r2k_core::control::{HttpPortalEvent, HttpResponseEvent, KEY_LEN};
 use std::collections::HashMap;
@@ -10,7 +11,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -137,7 +138,7 @@ fn deliver_result(
     sender: &SyncSender<HttpsProbeResult>,
     wake_write: &Option<UnixStream>,
     result: HttpsProbeResult,
-    lost: &AtomicU64,
+    lost: &R2oAtomicU64,
 ) -> bool {
     match sender.try_send(result) {
         Ok(()) => {
@@ -168,7 +169,7 @@ pub struct HttpsProbeWorker {
     pending: HashMap<String, Instant>,
     /// C `d2k_httpsprobe.lost`: результаты, не влезшие в `done[17]`.
     /// Заполненная очередь заданий, наоборот, просто не принимает новое имя.
-    lost: Arc<AtomicU64>,
+    lost: Arc<R2oAtomicU64>,
     /// Слоты кэша в порядке C-массива: загрузка и сохранение обязаны давать
     /// тот же файл, что `d2k_httpsprobe_load/save`.
     cache: Vec<CachedResult>,
@@ -206,7 +207,7 @@ impl HttpsProbeWorker {
             mark,
             thread: None,
             pending: HashMap::new(),
-            lost: Arc::new(AtomicU64::new(0)),
+            lost: Arc::new(R2oAtomicU64::new(0)),
             cache: Vec::new(),
         };
         worker.r2o_ensure_worker();
@@ -647,6 +648,7 @@ mod tests {
         HttpsPortalOutcome, HttpsProbeWorker, cache_host_ok, target_from_http_response,
         target_from_portal,
     };
+    use crate::portable_atomic::R2oAtomicU64;
     use crate::response::{
         HTTPS_CONNECTED, HTTPS_NO_ANSWER, HTTPS_REFUSED, HttpsProbeState, classify_https_probe,
     };
@@ -1082,7 +1084,7 @@ mod tests {
             mark: None,
             thread: Some(thread),
             pending: std::collections::HashMap::new(),
-            lost: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            lost: std::sync::Arc::new(R2oAtomicU64::new(0)),
             cache: Vec::new(),
         };
         release.send(()).unwrap();
@@ -1157,7 +1159,7 @@ mod tests {
             mark: None,
             thread: Some(thread),
             pending: std::collections::HashMap::new(),
-            lost: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            lost: std::sync::Arc::new(R2oAtomicU64::new(0)),
             cache: Vec::new(),
         };
         assert!(!worker.submit("busy.example", address, Instant::now()));
@@ -1178,7 +1180,7 @@ mod tests {
                 state: HttpsProbeState::Closed,
             })
             .unwrap();
-        let lost = std::sync::atomic::AtomicU64::new(0);
+        let lost = R2oAtomicU64::new(0);
         assert!(super::deliver_result(
             &sender,
             &None,

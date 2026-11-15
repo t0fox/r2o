@@ -74,7 +74,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 #[cfg(unix)]
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use r2o_controller::portable_atomic::R2oAtomicU64;
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[cfg(unix)]
 static R2O_CONTROLLER_STOP: AtomicBool = AtomicBool::new(false);
@@ -9098,8 +9100,8 @@ struct HttpSearchWorker {
     outcomes: Option<Receiver<HttpSearchOutcome>>,
     pending_jobs: Arc<AtomicUsize>,
     /// C `queue_limit_hits`/`queue_alloc_failures`.
-    queue_limit_hits: AtomicU64,
-    queue_alloc_failures: AtomicU64,
+    queue_limit_hits: R2oAtomicU64,
+    queue_alloc_failures: R2oAtomicU64,
     records: Arc<std::sync::Mutex<HttpSearchRecordCache>>,
     cancel: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -9188,8 +9190,8 @@ impl HttpSearchWorker {
             commands: Some(commands),
             outcomes: Some(outcomes),
             pending_jobs,
-            queue_limit_hits: AtomicU64::new(0),
-            queue_alloc_failures: AtomicU64::new(0),
+            queue_limit_hits: R2oAtomicU64::new(0),
+            queue_alloc_failures: R2oAtomicU64::new(0),
             records,
             cancel,
             thread: Some(thread),
@@ -28864,9 +28866,10 @@ fn random_id() -> std::io::Result<[u8; 16]> {
 /// C `fresh_id` fallback: `mono_ms ^ (++ctr * 0x9e3779b97f4a7c15)`, затем LCG.
 #[cfg(unix)]
 fn r2o_fresh_id_fallback() -> [u8; 16] {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use r2o_controller::portable_atomic::R2oAtomicU64;
+    use std::sync::atomic::Ordering;
 
-    static CTR: AtomicU64 = AtomicU64::new(0);
+    static CTR: R2oAtomicU64 = R2oAtomicU64::new(0);
     let ctr = CTR.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
     let mono = r2o_controller::now_ms::d2k_now_ms() as u64;
     let mut h = mono ^ ctr.wrapping_mul(0x9e37_79b9_7f4a_7c15);

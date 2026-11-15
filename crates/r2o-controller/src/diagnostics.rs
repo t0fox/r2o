@@ -1,5 +1,6 @@
 //! Локальный opt-in снимок истории поиска и ресурсов для панели.
 
+use crate::portable_atomic::R2oAtomicU64;
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{c_int, c_long};
@@ -7,78 +8,8 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
-#[cfg(not(target_has_atomic = "64"))]
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-#[cfg(target_has_atomic = "64")]
-type AtomicU64 = std::sync::atomic::AtomicU64;
-
-#[cfg(not(target_has_atomic = "64"))]
-#[derive(Default)]
-struct AtomicU64(Mutex<u64>);
-
-#[cfg(not(target_has_atomic = "64"))]
-#[allow(dead_code)]
-impl AtomicU64 {
-    const fn new(value: u64) -> Self {
-        Self(Mutex::new(value))
-    }
-
-    fn load(&self, _ordering: Ordering) -> u64 {
-        *self
-            .0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    fn store(&self, value: u64, _ordering: Ordering) {
-        *self
-            .0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = value;
-    }
-
-    fn fetch_add(&self, value: u64, _ordering: Ordering) -> u64 {
-        let mut current = self
-            .0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let previous = *current;
-        *current = current.wrapping_add(value);
-        previous
-    }
-
-    fn fetch_sub(&self, value: u64, _ordering: Ordering) -> u64 {
-        let mut current = self
-            .0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let previous = *current;
-        *current = current.wrapping_sub(value);
-        previous
-    }
-
-    fn compare_exchange_weak(
-        &self,
-        current: u64,
-        new: u64,
-        _success: Ordering,
-        _failure: Ordering,
-    ) -> Result<u64, u64> {
-        let mut value = self
-            .0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if *value == current {
-            *value = new;
-            Ok(current)
-        } else {
-            Err(*value)
-        }
-    }
-}
 
 pub const MEMORY_SITE_COUNT: usize = 6;
 /// C `D2K_DIAG_MEM_TCP_TLS_RX`: сайт HTTP/TLS receive buffer.
@@ -127,23 +58,23 @@ static MEMORY_SITES: [MemorySiteCounters; MEMORY_SITE_COUNT] = [
 ];
 
 struct MemorySiteCounters {
-    live_bytes: AtomicU64,
-    peak_bytes: AtomicU64,
-    live_objects: AtomicU64,
-    created: AtomicU64,
-    destroyed: AtomicU64,
-    alloc_failures: AtomicU64,
+    live_bytes: R2oAtomicU64,
+    peak_bytes: R2oAtomicU64,
+    live_objects: R2oAtomicU64,
+    created: R2oAtomicU64,
+    destroyed: R2oAtomicU64,
+    alloc_failures: R2oAtomicU64,
 }
 
 impl MemorySiteCounters {
     const fn new() -> Self {
         Self {
-            live_bytes: AtomicU64::new(0),
-            peak_bytes: AtomicU64::new(0),
-            live_objects: AtomicU64::new(0),
-            created: AtomicU64::new(0),
-            destroyed: AtomicU64::new(0),
-            alloc_failures: AtomicU64::new(0),
+            live_bytes: R2oAtomicU64::new(0),
+            peak_bytes: R2oAtomicU64::new(0),
+            live_objects: R2oAtomicU64::new(0),
+            created: R2oAtomicU64::new(0),
+            destroyed: R2oAtomicU64::new(0),
+            alloc_failures: R2oAtomicU64::new(0),
         }
     }
 }
