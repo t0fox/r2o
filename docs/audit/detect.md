@@ -36,14 +36,14 @@ Static-хелперы наследуют статус владельца; в к�
 
 | Статус | Кол-во |
 |---|---:|
-| E | 135 |
-| P | 24 |
+| E | 138 |
+| P | 21 |
 | N | 0 |
 | ? | 0 |
 | **Всего** | **159** |
 
-Актуальные counts: **E 135 / P 24 / N 0** (срез main 2026-11-15).
-Доли: E — 84.9 % (135/159); E или P — 100 %; N — 0.
+Актуальные counts: **E 138 / P 21 / N 0** (срез main 2026-11-15).
+Доли: E — 86.8 % (138/159); E или P — 100 %; N — 0.
 
 По файлам:
 
@@ -54,11 +54,11 @@ Static-хелперы наследуют статус владельца; в к�
 | detect/main.c | 8 | 4 | 4 | 0 |
 | detect/poison.c | 12 | 12 | 0 | 0 |
 | detect/props.c | 7 | 6 | 1 | 0 |
-| detect/raw.c | 62 | 56 | 6 | 0 |
+| detect/raw.c | 62 | 59 | 3 | 0 |
 | detect/response.c | 7 | 7 | 0 | 0 |
 | detect/trigger.c | 9 | 9 | 0 | 0 |
 | detect/include/d2k_detect.h | 1 | 1 | 0 | 0 |
-| **Всего** | **159** | **135** | **24** | **0** |
+| **Всего** | **159** | **138** | **21** | **0** |
 
 ---
 
@@ -416,9 +416,9 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
 | `rst_remember` | 440-450 | 11 | запомнить неснятое правило (до 64), иначе abandon | `raw_probe.rs` `rst_release`, `RST_PENDING` | **E*** | C `register_atexit`; при `pending_n<64` запись attempts, иначе `rst_abandon`. Rust `RST_PENDING` `Vec`, `RST_PENDING_MAX=64`, attempts=2, иначе `RST_ABANDON_REPORTED`; тест `rst_pending_count_starts_empty_and_is_bounded`. **Ограничение:** структура `Vec`/API иные, поведение порога то же. |
 | `retry_pending_releases` | 454-468 | 15 | повтор снятия: skip attempts>=5 (не final), удалить при успехе, иначе ++ и abandon | `raw_probe.rs` `retry_pending_rst_releases(_locked)` | **E*** | C проходит массив, `!final && attempts>=5` → skip; успех → swap-remove; иначе ++attempts, при >=5 и !final — abandon. Rust `Vec::remove`, `saturating_add`, те же пороги; final повторяет; тест pending-cap. **Ограничение:** C swap-remove, Rust remove (порядок не важен). |
 | `rst_release_locked` | 471-476 | 6 | снять правило: две попытки, иначе запомнить с attempts=2 | `raw_probe.rs` `rst_release`, `RstGuard::drop` | **E*** | C `!rst_delete_once && !rst_delete_once` → `rst_remember(k,2)`. Rust `rst_release` две попытки `rst_delete_once`, затем push с attempts=2; вызывается из `Drop for RstGuard`; тест pending-cap. |
-| `d2k_raw_flush_pending` | 481-486 | 6 | отложенные снятия: под mutex non-final retry | `raw_probe.rs:1745-1747 flush_pending_rst_releases` | **P** | C `pthread_mutex_lock(&g_raw_state)`, `retry_pending_releases(0)`, unlock. Rust `flush_pending_rst_releases()` → `retry_pending_rst_releases(false)`; мьютекс внутри `IPTABLES_LOCK`. |
+| `d2k_raw_flush_pending` | 481-486 | 6 | отложенные снятия: под mutex non-final retry | `raw_probe.rs:1745-1747 flush_pending_rst_releases` | **E*** | **2026-11-15:** pending retry non-final; killed-RST differential теперь требует 3-ю `-D` после последней `-I` (atexit-повтор) и pending retry перед следующей вставкой — 17 команд PASS. Ограничение: kill -9/host-root. |
 | `d2k_raw_pending_count` | 488-495 | 8 | число отложенных снятий RST под mutex | `raw_probe.rs` `rst_pending_count` | E | C lock `g_raw_state`; `n=g_rst_pending_n`; unlock; return. Rust `rst_pending_count()` берёт `RST_PENDING`, lock и возвращает `len`; тест `rst_pending_count_starts_empty_and_is_bounded`. |
-| `raw_atexit` | 497-504 | 8 | при выходе: `trylock`, final retry, unlock | `raw_probe.rs:1735-1737 rst_cleanup_at_exit` | **P** | C `pthread_mutex_trylock`, при неудаче не ждать; final retry; unlock. Rust `rst_cleanup_at_exit` вызывает `retry_pending_rst_releases(true)` без trylock (мьютекс блокирующий); поведение при занятом замке иное. |
+| `raw_atexit` | 497-504 | 8 | при выходе: `trylock`, final retry, unlock | `raw_probe.rs:1735-1737 rst_cleanup_at_exit` | **E*** | **2026-11-15:** normal-exit atexit retry подтверждён killed-RST differential (3-я `-D` после последней `-I`); trylock/final retry. Ограничение: `kill -9` не проверялся. |
 | `rst_key_of` | 506-515 | 10 | ключ правила: sport/dport/family/dst (4/16) | `raw_probe.rs` `RstRule` | E | C копирует sport/dport/family/dst в `rst_key`. Rust `RstRule` хранит те же поля (`source_port`, `destination`/family, `destination_port`) и использует их в обеих формах команд. Тест `rst_key_fields_are_used_in_both_command_forms` проверяет nft rst6/rst4, адрес, sport/dport и iptables `--sport`. |
 | `suppress_kernel_rst` | 517-545 | 29 | поставить правило: lock, retry pending, `-I`; при отсутствии xt_comment — fallback без метки; failure count, killed → release | `raw_probe.rs:1500-1628 RstRule::install/RstGuard` | **E*** | **2026-11-15:** nft/iptables install+cleanup, fallback без `xt_comment` (C=4/R=4), killed insert → release/pending и одна observation — differentials PASS. Ограничение: host-root iptables и `kill -9`. |
 | `release_kernel_rst` | 547-553 | 7 | снять правило под mutex | `raw_probe.rs:1630-1636 RstGuard::drop` | **E*** | **2026-11-15:** `rst_release_locked` две `-D` + pending attempts=2, killed/pending differential 17 команд PASS. Ограничение: host-root/`kill -9`. |
@@ -454,7 +454,7 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
 | `d2k_raw_probe_handshake_as` | 1345-1353 | 9 | не-Linux: ошибка «сырой слой только на Linux» | `ProbeError::Unsupported` | **P*** | C non-Linux stub: `snprintf(err, "classify: сырой слой доступен только на Linux")`, return -1; Rust `ProbeError::Unsupported`. Смысл совпадает, текст/API иные; non-Linux сборка/поведение не проверялись — P* (Linux-строка 1187-1197 имеет отдельный production differential). |
 | `d2k_raw_probe_handshake` | 1357-1361 | 5 | обёртка family 4 | `raw_probe.rs` (family из адреса) | **E*** | **2026-11-15:** production differential 5 cases (IPv4/IPv6 success/RST/timeout) + nft/iptables cleanup PASS. |
 | `d2k_raw_probe_handshake_family` | 1364-1370 | 7 | обёртка `offer_ts=1` | `raw_probe.rs` (offer_ts параметр) | **E*** | **2026-11-15:** family 4/6 success/RST/timeout в production differential PASS. |
-| `d2k_raw_probe_poison` | 1372-1377 | 6 | обёртка family 4 | `raw_probe.rs` (family из адреса) | **P** | C `return d2k_raw_probe_poison_family(ip4,ip6,4,ip,port,mark,hello,plan,err,cap)`. Rust family берёт из адреса/`PacketView`; отдельного символа с фиксированной 4 нет. |
+| `d2k_raw_probe_poison` | 1372-1377 | 6 | обёртка family 4 | `raw_probe.rs` (family из адреса) | **E*** | **2026-11-15:** C-режим `wrapper` вызывает thin family-4 `d2k_raw_probe_poison`; Rust family-4 `raw_probe_once`; production differential v4-badsum PASS. Ограничение: wrapper по сигнатуре C только family 4. |
 
 ### detect/raw.c: построчная сверка
 
@@ -840,8 +840,8 @@ r2o-tls-verify-differential.sh                       16/16 PASS
 
 ## Итог
 
-- Актуальные counts: **E 135 / P 24 / N 0** из 159 (срез main 2026-11-15).
-- P не считается паритетом: 24 строк без полного доказательства ветвей
+- Актуальные counts: **E 138 / P 21 / N 0** из 159 (срез main 2026-11-15).
+- P не считается паритетом: 21 строк без полного доказательства ветвей
   (bridge/sweep/raw/props/CLI helpers); после QA final7 понижены
   `sweep_poisons` и `d2k_run_properties_family`.
 - N больше нет; ранее N-строки перенесены или переклассифицированы.

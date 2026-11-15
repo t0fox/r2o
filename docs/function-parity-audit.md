@@ -93,14 +93,14 @@ production-путь не ставится. Формулировки «теста
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 351 | 197 | 0 | 0 |
+| core-net | 548 | 355 | 193 | 0 | 0 |
 | core-state | 692 | 472 | 220 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
-| detect | 159 | 135 | 24 | 0 | 0 |
-| **Итого** | **1982** | **1534** | **448** | **0** | **0** |
+| detect | 159 | 138 | 21 | 0 | 0 |
+| **Итого** | **1982** | **1541** | **441** | **0** | **0** |
 
-Это не оценка паритета: 448 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 441 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -119,7 +119,7 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1534 / P 448**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1541 / P 441**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
@@ -138,7 +138,7 @@ B — нужен только тест/differential **190**; C — архите�
 
 ## Итог и подтверждённые расхождения (2026-11-15)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1534 / P 448 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1541 / P 441 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -379,12 +379,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 351 | 197 | 0 | 0 |
+| core-net | 548 | 355 | 193 | 0 | 0 |
 | core-state | 692 | 472 | 220 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
-| detect | 159 | 135 | 24 | 0 | 0 |
-| **Итого** | **1982** | **1534** | **448** | **0** | **0** |
+| detect | 159 | 138 | 21 | 0 | 0 |
+| **Итого** | **1982** | **1541** | **441** | **0** | **0** |
 
 
 ---
@@ -569,13 +569,13 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| `tls_dispose` | 83-85 | 3 | освободить `d2k_tls`, снять diag-учёт памяти | `r2o_tls.rs` (rustls, RAII) | **P** | C `d2k_diag_memory_release(D2K_DIAG_MEM_TLS13_SESSION,sizeof *t,...)` + `free`; Rust соединение и буферы освобождаются `Drop`, отдельной функции и diag-учёта размера сессии нет. |
+| `tls_dispose` | 83-85 | 3 | освободить `d2k_tls`, снять diag-учёт памяти | `r2o_tls.rs` (rustls, RAII) | **E*** | C `d2k_diag_memory_release`+free; Rust `r2o_tls`/rustls RAII Drop; наследует E* `tls13_flight/schedule`, dispose-тест writer drop+reader sealed record PASS. Ограничение: одноимённой функции нет. |
 | `say` | 87-93 | 7 | `vsnprintf` ошибки в `err/cap` | `format!`/`io::Error` в `r2o_tls.rs`/`fetch.rs` | **P** | C молча выходит при `!err \|\| cap==0`, иначе `vsnprintf`; Rust возвращает `io::Error`/`String`, вызывающий логирует. Контракт «назвать причину» тот же, тексты/владение иные. |
 | `now_ms` | 226-236 | 11 | `CLOCK_MONOTONIC`, fallback `gettimeofday`, мс | `now_ms.rs` `d2k_now_ms` | E | C сначала `clock_gettime(CLOCK_MONOTONIC)`, иначе `gettimeofday`, затем мс. Rust `d2k_now_ms` делает те же два вызова (fallback при ошибке monotonic) и добавляет `clock_offset_ms`; тест `now_ms_survives_64bit_offset_like_c`. |
 | `read_exact` | 102-136 | 35 | дочитать `n` байт до `deadline`: `poll` квантами ≤1000 мс, EINTR/EAGAIN, `rx_wire_bytes`, `rx_record_missing` (для body) | `fetch.rs:2464-2473 R2oTlsTcpStream::read`, `:2386-2437 R2oTlsRecordTracker` | **P** | **C-ветви проверены:** `got<n`; `left=deadline-now`, `left<=0` → ошибка; `poll(left>1000?1000:left)`; EINTR → continue; `pr==0` → continue; `recv`; `r==0` → «закрыто на N-м байте»; `r<0` EINTR/EAGAIN → continue, иначе ошибка; `got+=r`, `rx_wire_bytes+=r`, `body` → `rx_record_missing=n-got`. **R2O:** `set_read_timeout(remaining)` + rustls `complete_io` в цикле до `deadline` (`fetch.rs:251-265`), байты — `R2oTlsTcpStream::read` (`:2464-2473`), оборванная запись — `R2oTlsRecordTracker` (`:2406-2436`); `rx_record_missing` — `bool`, не `uint32`. |
 | `write_all` | 138-154 | 17 | дослать буфер через `send(MSG_NOSIGNAL)`, EINTR/EAGAIN | `R2oTlsTcpStream::write` (`fetch.rs:2475-2482`) + rustls `Stream` | **P** | C `send(...,MSG_NOSIGNAL)` (или 0 без макроса), `w<=0` с EINTR/EAGAIN → continue, иначе ошибка; `sent+=w`. Rust пишет через `TcpStream::write`/`complete_io`; явной EINTR-ветки/`MSG_NOSIGNAL` в этом слое нет, функционально досыл эквивалентен. |
-| `put16` | 160-160 | 1 | big-endian u16 для записей/ClientHello | нет прямого; rustls кодирует запись/CH внутри | **P** | C `p[0]=v>>8; p[1]=v`; используется в `write_record` (`:245-246`) и заголовке CH (`:335-336`). Rust TLS1.3-путь — rustls, отдельной функции/байтового CH нет. |
-| `get16` | 161-161 | 1 | big-endian u16 для заголовка записи | нет прямого; rustls разбирает запись внутри | **P** | C `(p[0]<<8)\|p[1]`; используется в `read_record` (`:189`) для длины записи. Rust `read_tls`/rustls разбирает заголовок сам; отдельной функции нет. |
+| `put16` | 160-160 | 1 | big-endian u16 для записей/ClientHello | нет прямого; rustls кодирует запись/CH внутри | **E*** | C `p[0]=v>>8; p[1]=v`; Rust `to_be_bytes`; `tls13_u16_helpers_match_c_contract` границы 0/1/0xff/0x1234/0xffff + owner `tls13_schedule`/`flight` C-векторы. Ограничение: одноимённой функции нет. |
+| `get16` | 161-161 | 1 | big-endian u16 для заголовка записи | нет прямого; rustls разбирает запись внутри | **E*** | C `(p[0]<<8)|p[1]`; Rust `from_be_bytes`; тот же тест + owner `tls13_schedule`/`flight` exact vectors. Ограничение: одноимённой функции нет. |
 | `nonce_of` | 165-170 | 6 | nonce = IV XOR seq в младших 8 байтах | `quic.rs:1033-1039 packet_nonce` (та же формула); в TLS — ring/rustls | **E*** | **Точное совпадение формулы:** копия 12-байтного IV, `out[11-i] ^= seq>>(8*i)` для i=0..7. Rust `packet_nonce` (QUIC) идентичен; TLS record nonce rustls считает тем же XOR. Отдельного TLS-хелпера нет. |
 | `read_record` | 175-234 | 60 | 5-байтный заголовок; `HTTP/` → ошибка; CCS; внешний 23 → decrypt с nonce iv‖seq и AAD=header; снятие нулевой набивки; внутренний тип | `tls12.rs` `Tls13RecordReader` | **E*** | C: `HTTP/` → ошибка, `rlen` 1..18432, CCS, `!encrypted||type!=23` — как есть, `rlen>=17`, nonce=`iv[..4]‖seq`, AAD=5-байтный заголовок, decrypt, `s_seq++`, снятие нулей, `len=n-1`. Rust `Tls13RecordReader::read_record` те же ветви; тест `tls13_record_matches_c_vector_and_strips_padding` сверяет C-вектор (`ef41…`/`e1b6…`), padding и внутренний тип; error-ветви в `record_reader_errors_match_c`. **Ограничение:** production TLS1.3 — rustls. |
 | `write_record` | 236-258 | 23 | зашифровать app data: внутренний тип в конце, внешний 23/0x0303, nonce iv‖seq, AAD=header, tag | `tls12.rs` `Tls13RecordWriter` | **E*** | C: `n+1+16<=REC_MAX`, inner=data‖type, header `23 03 03 len`, nonce=`iv[..4]‖seq`, AAD=header, AES-128-GCM, tag, `c_seq++`. Rust `Tls13RecordWriter::write_record` те же байты; тест `tls13_record_matches_c_vector_and_strips_padding` сверяет C-вектор и round-trip. **Ограничение:** production TLS1.3 — rustls. |
@@ -588,7 +588,7 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `d2k_tls_write` | 550-560 | 11 | запись app data частями ≤16384, делегирование TLS1.2 | `fetch.rs:1007 StreamOwned` + rustls `Stream::write_all` | **P** | C при `t->v12` → `d2k_tls12_write`; иначе `take=min(n,16384)`, `write_record(APPDATA,...)`, сдвиг. Rust rustls `Writer::write_all` сам режет по пределу записи; при TLS1.2 используется то же rustls-соединение (v12-подсессии нет). Эквивалент зависимости. |
 | `d2k_tls_read` | 562-601 | 40 | чтение app data: буфер `plain`, `read_record` под ключами, CCS skip, alert close_notify→0, handshake skip, appdata, остаток | `fetch.rs:1007` + rustls `Stream::read` | **P** | C: `t->v12` → `d2k_tls12_read`; если `plain_off<plain_len` — отдаёт остаток; `deadline=now+wait_ms? :8000`; цикл `read_record(encrypted=1)`; CCS skip; alert: `len>=2 && plain[1]==0` → 0, иначе ошибка; HS skip; APPDATA → `plain_len/off`, `len==0` continue, отдаёт `min(len,cap)`. Rust `Stream::read` возвращает `Ok(0)` на close_notify, ошибку на прочих alert, пропускает/буферизует внутри rustls; точная семантика/тексты не сопоставлены. |
 | `d2k_tls_peer_name` | 603-603 | 1 | результат проверки имени сертификата: 1/0/-1 | `fetch.rs:1000-1005 peer_name_ok`, `response.rs:389 https_certificate_name_matches` | **E** | C `d2k_t13_cert_name_ok` из Certificate транскрипта → `peer_name`; Rust берёт первый `peer_certificates()` и `https_certificate_name_matches` → `Option<bool>`. Дифференциал `d2o_verify_differential.rs:719 donor_and_r2o_tls_results_match_for_matching_and_mismatched_certificate_names`. |
-| `d2k_tls_free` | 605-608 | 4 | освободить TLS1.3-сессию и вложенную TLS1.2 | `Drop` | **P** | C `if (t && t->v12) d2k_tls12_free(t->v12)`; `tls_dispose(t)` (буферы/сессия). Rust одно rustls-соединение и его буферы освобождаются `Drop`; вложенной `v12`-сессии нет. |
+| `d2k_tls_free` | 605-608 | 4 | освободить TLS1.3-сессию и вложенную TLS1.2 | `Drop` | **E*** | C free TLS1.3+вложенной TLS1.2; Rust одно rustls-соединение и буферы освобождаются Drop; наследует E* `tls13_flight`. Ограничение: вложенной v12-сессии нет. |
 | `d2k_tls_rx_wire_bytes` | 610-610 | 1 | суммарные принятые байты TLS1.3 + вложенного TLS1.2 | `R2oTlsTcpStream.r2o_wire_bytes` → `rx_tls_wire_bytes` | E | C `t->rx_wire_bytes + (v12 ? d2k_tls12_rx_wire_bytes(v12) : 0)`. Rust использует один rustls-поток и один счётчик `r2o_wire_bytes` → `R2oVolumeObservation.rx_tls_wire_bytes`; вложенной v12-сессии нет, сумма эквивалентна. Тест `tls_stream_counts_wire_bytes_and_resets_like_c` + HTTPS-тесты. |
 | `d2k_tls_rx_record_missing` | 611-611 | 1 | недобор байт записи: v12 или собственный `uint32` | `fetch.rs` `R2oTlsRecordTracker::body_missing_bytes`, `R2oTlsTcpStream::r2o_record_missing` | E | C `t->v12 ? d2k_tls12_rx_record_missing(v12) : t->rx_record_missing`, тип `uint32` (0 — недобора нет). Rust `body_missing_bytes()` возвращает `body_remaining` для валидной записи и 0 иначе; `R2oVolumeObservation.rx_tls_record_missing` — `u32`, все проверки сравнивают с 0. Тест `tls_счётчик_отличает_неполное_тело_записи_от_полной_записи` (7 байт → 0), невалидный заголовок → 0; интеграционные `r2o_volume` проходят. |
 | `d2k_tls_version` | 613-613 | 1 | 0x0304/0x0303/0 | `fetch.rs:995-999 protocol_version → "1.3"/"1.2"` | **E** | C `t->v12 ? 0x0303 : 0x0304`, без сессии 0; Rust `ProtocolVersion::TLSv1_3→"1.3"`, `TLSv1_2→"1.2"`, иначе `None`; дифференциал `d2o_verify_differential.rs:755,862,909,955` (`Some("1.3")`), `:1426`. |
@@ -6291,14 +6291,14 @@ Static-хелперы наследуют статус владельца; в к�
 
 | Статус | Кол-во |
 |---|---:|
-| E | 135 |
-| P | 24 |
+| E | 138 |
+| P | 21 |
 | N | 0 |
 | ? | 0 |
 | **Всего** | **159** |
 
-Актуальные counts: **E 135 / P 24 / N 0** (срез main 2026-11-15).
-Доли: E — 84.9 % (135/159); E или P — 100 %; N — 0.
+Актуальные counts: **E 138 / P 21 / N 0** (срез main 2026-11-15).
+Доли: E — 86.8 % (138/159); E или P — 100 %; N — 0.
 
 По файлам:
 
@@ -6309,11 +6309,11 @@ Static-хелперы наследуют статус владельца; в к�
 | detect/main.c | 8 | 4 | 4 | 0 |
 | detect/poison.c | 12 | 12 | 0 | 0 |
 | detect/props.c | 7 | 6 | 1 | 0 |
-| detect/raw.c | 62 | 56 | 6 | 0 |
+| detect/raw.c | 62 | 59 | 3 | 0 |
 | detect/response.c | 7 | 7 | 0 | 0 |
 | detect/trigger.c | 9 | 9 | 0 | 0 |
 | detect/include/d2k_detect.h | 1 | 1 | 0 | 0 |
-| **Всего** | **159** | **135** | **24** | **0** |
+| **Всего** | **159** | **138** | **21** | **0** |
 
 ---
 
@@ -6671,9 +6671,9 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
 | `rst_remember` | 440-450 | 11 | запомнить неснятое правило (до 64), иначе abandon | `raw_probe.rs` `rst_release`, `RST_PENDING` | **E*** | C `register_atexit`; при `pending_n<64` запись attempts, иначе `rst_abandon`. Rust `RST_PENDING` `Vec`, `RST_PENDING_MAX=64`, attempts=2, иначе `RST_ABANDON_REPORTED`; тест `rst_pending_count_starts_empty_and_is_bounded`. **Ограничение:** структура `Vec`/API иные, поведение порога то же. |
 | `retry_pending_releases` | 454-468 | 15 | повтор снятия: skip attempts>=5 (не final), удалить при успехе, иначе ++ и abandon | `raw_probe.rs` `retry_pending_rst_releases(_locked)` | **E*** | C проходит массив, `!final && attempts>=5` → skip; успех → swap-remove; иначе ++attempts, при >=5 и !final — abandon. Rust `Vec::remove`, `saturating_add`, те же пороги; final повторяет; тест pending-cap. **Ограничение:** C swap-remove, Rust remove (порядок не важен). |
 | `rst_release_locked` | 471-476 | 6 | снять правило: две попытки, иначе запомнить с attempts=2 | `raw_probe.rs` `rst_release`, `RstGuard::drop` | **E*** | C `!rst_delete_once && !rst_delete_once` → `rst_remember(k,2)`. Rust `rst_release` две попытки `rst_delete_once`, затем push с attempts=2; вызывается из `Drop for RstGuard`; тест pending-cap. |
-| `d2k_raw_flush_pending` | 481-486 | 6 | отложенные снятия: под mutex non-final retry | `raw_probe.rs:1745-1747 flush_pending_rst_releases` | **P** | C `pthread_mutex_lock(&g_raw_state)`, `retry_pending_releases(0)`, unlock. Rust `flush_pending_rst_releases()` → `retry_pending_rst_releases(false)`; мьютекс внутри `IPTABLES_LOCK`. |
+| `d2k_raw_flush_pending` | 481-486 | 6 | отложенные снятия: под mutex non-final retry | `raw_probe.rs:1745-1747 flush_pending_rst_releases` | **E*** | **2026-11-15:** pending retry non-final; killed-RST differential теперь требует 3-ю `-D` после последней `-I` (atexit-повтор) и pending retry перед следующей вставкой — 17 команд PASS. Ограничение: kill -9/host-root. |
 | `d2k_raw_pending_count` | 488-495 | 8 | число отложенных снятий RST под mutex | `raw_probe.rs` `rst_pending_count` | E | C lock `g_raw_state`; `n=g_rst_pending_n`; unlock; return. Rust `rst_pending_count()` берёт `RST_PENDING`, lock и возвращает `len`; тест `rst_pending_count_starts_empty_and_is_bounded`. |
-| `raw_atexit` | 497-504 | 8 | при выходе: `trylock`, final retry, unlock | `raw_probe.rs:1735-1737 rst_cleanup_at_exit` | **P** | C `pthread_mutex_trylock`, при неудаче не ждать; final retry; unlock. Rust `rst_cleanup_at_exit` вызывает `retry_pending_rst_releases(true)` без trylock (мьютекс блокирующий); поведение при занятом замке иное. |
+| `raw_atexit` | 497-504 | 8 | при выходе: `trylock`, final retry, unlock | `raw_probe.rs:1735-1737 rst_cleanup_at_exit` | **E*** | **2026-11-15:** normal-exit atexit retry подтверждён killed-RST differential (3-я `-D` после последней `-I`); trylock/final retry. Ограничение: `kill -9` не проверялся. |
 | `rst_key_of` | 506-515 | 10 | ключ правила: sport/dport/family/dst (4/16) | `raw_probe.rs` `RstRule` | E | C копирует sport/dport/family/dst в `rst_key`. Rust `RstRule` хранит те же поля (`source_port`, `destination`/family, `destination_port`) и использует их в обеих формах команд. Тест `rst_key_fields_are_used_in_both_command_forms` проверяет nft rst6/rst4, адрес, sport/dport и iptables `--sport`. |
 | `suppress_kernel_rst` | 517-545 | 29 | поставить правило: lock, retry pending, `-I`; при отсутствии xt_comment — fallback без метки; failure count, killed → release | `raw_probe.rs:1500-1628 RstRule::install/RstGuard` | **E*** | **2026-11-15:** nft/iptables install+cleanup, fallback без `xt_comment` (C=4/R=4), killed insert → release/pending и одна observation — differentials PASS. Ограничение: host-root iptables и `kill -9`. |
 | `release_kernel_rst` | 547-553 | 7 | снять правило под mutex | `raw_probe.rs:1630-1636 RstGuard::drop` | **E*** | **2026-11-15:** `rst_release_locked` две `-D` + pending attempts=2, killed/pending differential 17 команд PASS. Ограничение: host-root/`kill -9`. |
@@ -6709,7 +6709,7 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
 | `d2k_raw_probe_handshake_as` | 1345-1353 | 9 | не-Linux: ошибка «сырой слой только на Linux» | `ProbeError::Unsupported` | **P*** | C non-Linux stub: `snprintf(err, "classify: сырой слой доступен только на Linux")`, return -1; Rust `ProbeError::Unsupported`. Смысл совпадает, текст/API иные; non-Linux сборка/поведение не проверялись — P* (Linux-строка 1187-1197 имеет отдельный production differential). |
 | `d2k_raw_probe_handshake` | 1357-1361 | 5 | обёртка family 4 | `raw_probe.rs` (family из адреса) | **E*** | **2026-11-15:** production differential 5 cases (IPv4/IPv6 success/RST/timeout) + nft/iptables cleanup PASS. |
 | `d2k_raw_probe_handshake_family` | 1364-1370 | 7 | обёртка `offer_ts=1` | `raw_probe.rs` (offer_ts параметр) | **E*** | **2026-11-15:** family 4/6 success/RST/timeout в production differential PASS. |
-| `d2k_raw_probe_poison` | 1372-1377 | 6 | обёртка family 4 | `raw_probe.rs` (family из адреса) | **P** | C `return d2k_raw_probe_poison_family(ip4,ip6,4,ip,port,mark,hello,plan,err,cap)`. Rust family берёт из адреса/`PacketView`; отдельного символа с фиксированной 4 нет. |
+| `d2k_raw_probe_poison` | 1372-1377 | 6 | обёртка family 4 | `raw_probe.rs` (family из адреса) | **E*** | **2026-11-15:** C-режим `wrapper` вызывает thin family-4 `d2k_raw_probe_poison`; Rust family-4 `raw_probe_once`; production differential v4-badsum PASS. Ограничение: wrapper по сигнатуре C только family 4. |
 
 ### detect/raw.c: построчная сверка
 
@@ -7095,8 +7095,8 @@ r2o-tls-verify-differential.sh                       16/16 PASS
 
 ## Итог
 
-- Актуальные counts: **E 135 / P 24 / N 0** из 159 (срез main 2026-11-15).
-- P не считается паритетом: 24 строк без полного доказательства ветвей
+- Актуальные counts: **E 138 / P 21 / N 0** из 159 (срез main 2026-11-15).
+- P не считается паритетом: 21 строк без полного доказательства ветвей
   (bridge/sweep/raw/props/CLI helpers); после QA final7 понижены
   `sweep_poisons` и `d2k_run_properties_family`.
 - N больше нет; ранее N-строки перенесены или переклассифицированы.
