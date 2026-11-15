@@ -1232,9 +1232,14 @@ fn raw_probe_once(
             }
         };
 
-    if poison.syn_data {
+    if poison.name == "none" || poison.syn_data {
+        let flags = if poison.syn_data {
+            TCP_PSH | TCP_ACK | TCP_SYN
+        } else {
+            TCP_PSH | TCP_ACK
+        };
         connection
-            .send_payload_io(&trigger.payload, TCP_PSH | TCP_ACK | TCP_SYN, &[])
+            .send_payload_io(&trigger.payload, flags, &[])
             .map_err(|error| ProbeError::Local(format!("classify: {error}")))?;
         connection.sequence = connection
             .sequence
@@ -3984,6 +3989,63 @@ mod tests {
             .expect_err("command must time out");
         assert!(error.contains("command timed out"), "{error}");
         assert!(started.elapsed() < COMMAND_TIMEOUT * 2);
+    }
+
+    #[test]
+    #[ignore = "C/Rust production poison differential: run inside netns"]
+    fn raw_poison_production_harness() {
+        use std::time::Duration;
+        let target = std::env::var("R2O_RAW_POISON_TARGET").expect("target");
+        let timeout = std::env::var("R2O_RAW_POISON_TIMEOUT_MS")
+            .expect("timeout")
+            .parse::<u64>()
+            .expect("timeout number");
+        let name = std::env::var("R2O_RAW_POISON_NAME").expect("poison name");
+        let remote = target
+            .parse::<std::net::SocketAddr>()
+            .expect("socket address");
+        let trigger = Trigger {
+            accept: crate::classify::Accept::Any,
+            ..Trigger::tls13("probe.example").expect("modern hello")
+        };
+        let offer_ts = raw_offer_timestamps(None);
+        let mut poison = Poison {
+            name: name.clone(),
+            ..Poison::default()
+        };
+        match name.as_str() {
+            "badsum" => poison.badsum = true,
+            "split" => {
+                poison.split_pos = 1;
+                poison.gap_ms = 20;
+            }
+            "seqovl" => poison.seqovl = 1,
+            "syn_data" => poison.syn_data = true,
+            "none" => {}
+            other => panic!("unknown poison {other}"),
+        }
+        let before = raw_dial_count();
+        let result = raw_probe_once(
+            remote,
+            &trigger,
+            &poison,
+            None,
+            Duration::from_millis(timeout),
+            Some(0),
+            false,
+            None,
+        );
+        let dials = raw_dial_count().saturating_sub(before);
+        let (rc, error) = match result {
+            Ok(true) => (1, String::new()),
+            Ok(false) => (0, String::new()),
+            Err(ProbeError::RawConnectTimeout { message, .. }) => (-2, message),
+            Err(error) => (-1, error.message().to_string()),
+        };
+        let line = format!("poison|{name}|{rc}|err={error}|dials={dials}\n");
+        if let Ok(path) = std::env::var("R2O_RAW_POISON_OUTPUT") {
+            std::fs::write(path, line).expect("write poison output");
+        }
     }
 
     #[test]

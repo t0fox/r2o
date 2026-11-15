@@ -655,4 +655,29 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("не помещается"), "{error}");
     }
+
+    #[test]
+    fn tls12_u16_helpers_and_dispose_match_c_contract() {
+        // C `put16`/`get16`: network byte order, включая границы.
+        for value in [0u16, 1, 0x00ff, 0x1234, 0xffff] {
+            let encoded = value.to_be_bytes();
+            assert_eq!(u16::from_be_bytes(encoded), value);
+            assert_eq!(encoded[0], (value >> 8) as u8);
+            assert_eq!(encoded[1], value as u8);
+        }
+        // C `tls12_dispose`/`d2k_tls12_free`: освобождение состояния при
+        // выходе; в Rust это RAII Drop, повторное использование невозможно.
+        let mut writer = Tls12RecordWriter::new([0; 4], key(), 0);
+        let wire = writer.seal(TLS_RECORD_APPDATA, &[0x41; 8]).unwrap();
+        drop(writer);
+        let mut reader = Tls12RecordReader::new([0; 4], key(), 0, true);
+        let mut payload = Vec::new();
+        assert_eq!(
+            reader
+                .read_record(&mut Cursor::new(&wire), &mut payload, TLS_RECORD_MAX)
+                .unwrap(),
+            (TLS_RECORD_APPDATA, 8)
+        );
+        drop(reader);
+    }
 }
