@@ -12834,6 +12834,21 @@ fn r2o_handle_client_shape_event(
         );
     }
     let key = r2o_discovery_task_key(&target);
+    // C `T_WATCHING` + `watch_shape_pending`: снимок пришёл на заявку
+    // remeasure — кладём его в pending и сразу запускаем новый поиск.
+    if let Some(entry) = worker.pending_rechecks.get_mut(&key) {
+        entry.1 = Some(shape.client_hello.clone());
+        entry.2 |= false;
+        if let Some(timestamp) = shape.tcp_has_timestamp {
+            worker
+                .client_tcp_timestamps
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(key.clone(), timestamp);
+        }
+        worker.r2o_schedule_pending_rechecks();
+        return Some(target);
+    }
     let compatible = worker.active.get(&key).is_some_and(|active| {
         !matches!(active.shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP)
             || active.shape == target.shape
@@ -24329,6 +24344,15 @@ impl ControlClient {
         // но просит снимок формы — вдруг клиент говорит другим приветствием.
         let watching = worker.r2o_is_watching(&target);
         if !planned && watching {
+            // C `watch_shape_pending` + `remeasure_snapped`: подтверждённая
+            // profile-привязка перемеряется снимком, а не ждёт следующего
+            // подозрения. Заявка ждёт SHAPE и снимок кладёт on_shape.
+            if r2o_controller::discovery::has_usable_profile_binding(catalog, &target) {
+                worker.pending_rechecks.insert(
+                    r2o_discovery_task_key(&target),
+                    (target.clone(), None, false),
+                );
+            }
             if let Err(error) = self.arm_client_shape(&target.host, target.family) {
                 println!(
                     "v22 SUSPECT {}: подтверждённая цель подозревается без плана, снимок формы не запрошен: {error}",
@@ -37476,6 +37500,55 @@ mod tests {
         if let Ok(path) = std::env::var("R2O_INSTALL_RST_GUARD_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watch_shape_snapshot_triggers_pending_remeasure() {
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "watch-remeasure.example.com".into(),
+            endpoint: "198.51.100.95:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let key = super::r2o_discovery_task_key(&target);
+        worker.completed.insert(key.clone());
+        worker
+            .pending_rechecks
+            .insert(key.clone(), (target.clone(), None, false));
+        let hello = super::Trigger::tls13(&target.host).unwrap().payload;
+        let mut flow_key = [0_u8; KEY_LEN];
+        flow_key[0] = 4;
+        flow_key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+        flow_key[17..21].copy_from_slice(&[198, 51, 100, 95]);
+        flow_key[33..35].copy_from_slice(&45_000_u16.to_be_bytes());
+        flow_key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+        flow_key[37] = 6;
+        let shape = r2k_core::control::ClientShapeEvent {
+            key: flow_key,
+            host: target.host.as_bytes().to_vec(),
+            shape: SHAPE_MODERN,
+            client_hello: hello.clone(),
+            tcp_has_timestamp: Some(true),
+        };
+        assert!(r2o_handle_client_shape_event(&mut worker, &shape).is_some());
+        assert!(!worker.pending_rechecks.contains_key(&key));
+        assert_eq!(
+            worker.client_hellos.lock().unwrap().get(&key).cloned(),
+            Some(hello)
+        );
+        assert!(
+            worker.active.contains_key(&key)
+                || worker
+                    .jobs
+                    .0
+                    .lock()
+                    .unwrap()
+                    .entries
+                    .iter()
+                    .any(|entry| { super::r2o_discovery_task_key(&entry.target) == key })
+        );
     }
 
     #[cfg(unix)]
