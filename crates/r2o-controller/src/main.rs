@@ -2218,6 +2218,16 @@ fn apply_catalog(socket_path: PathBuf, catalog_path: PathBuf) -> Result<(), Box<
     Ok(())
 }
 
+/// C `d2kc`: `--mark` — метка verifier-зондов (`s->mark`), `--measure-mark` —
+/// метка измерений (`s->measure_mark`); без второй измерения идут первой.
+#[cfg(unix)]
+fn r2o_serve_probe_marks(
+    mark: Option<u32>,
+    measure_mark: Option<u32>,
+) -> (Option<u32>, Option<u32>) {
+    (mark, measure_mark.or(mark))
+}
+
 #[cfg(unix)]
 fn serve_catalog(
     socket_path: PathBuf,
@@ -2231,9 +2241,7 @@ fn serve_catalog(
     use std::io::Write;
 
     install_r2o_controller_signal_handlers()?;
-    // C `d2k_sched_set_measure_mark`: без --measure-mark измерения идут
-    // меткой --mark.
-    let measure_mark = measure_mark.or(mark);
+    let (mark, measure_mark) = r2o_serve_probe_marks(mark, measure_mark);
     let catalog = Catalog::load(&catalog_path)?;
     let mut client = ControlClient::connect(socket_path)?;
     let (catalog, compiled) = catalog_commands_for_runtime(
@@ -2261,6 +2269,7 @@ fn serve_catalog(
         discover.then_some((catalog, catalog_path.clone(), measure_mark)),
         Some(https_cache_path),
         measure_mark,
+        mark,
         live_catalog,
         live_path,
         active_groups,
@@ -4596,6 +4605,42 @@ fn r2o_store_confirmed_budget(
             }
         }
     }
+}
+
+/// C `budget_cut_reject` (`sched.c:9397-9434`): привязка плана, оборванного
+/// посреди повторов, получает отметку «оборван». Уже отмеченная CUT не
+/// трогается; PASSED перекрывается CUT, как в C.
+#[cfg(unix)]
+fn r2o_budget_cut_reject(
+    catalog: &mut Catalog,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    plan_id: &str,
+    shape: u8,
+    transport: u8,
+) -> usize {
+    let kind = if target.host.parse::<std::net::IpAddr>().is_ok() {
+        "addr"
+    } else {
+        "name"
+    };
+    let mut marked = 0;
+    for box_record in &mut catalog.boxes {
+        for binding in &mut box_record.bindings {
+            if binding.plan_id != plan_id
+                || binding.target != target.host
+                || binding.kind != kind
+                || r2o_catalog_binding_transport(binding) != transport
+                || r2o_catalog_binding_family(binding) != target.family
+                || binding.shape != shape
+                || binding.budget == R2O_D2K_CAT_BUDGET_CUT
+            {
+                continue;
+            }
+            binding.budget = R2O_D2K_CAT_BUDGET_CUT;
+            marked += 1;
+        }
+    }
+    marked
 }
 
 /// C `group_record` (`sched.c:9338-9360`): единый вход evidence/key/path/
@@ -7420,6 +7465,28 @@ fn r2o_confirm_discovery_outcome(
     applied: bool,
 ) -> DiscoveryOutcome {
     outcome.budget_mark = r2o_budget_mark_from_result(&result);
+    // C `T_VERIFY_WAIT`: `ver.level == APPLICATION && ver.budget == CUT` —
+    // поток оборван посреди повторов при полном ответе приложения. Это не
+    // подтверждение плана, а частичный обход: кандидат отклоняется, привязка
+    // получает отметку CUT. Немедленное продолжение перебора в C —
+    // `T_PLANNING`; Rust возвращает исход в очередь, где действует обычная
+    // пауза (остаток зафиксирован в отчёте).
+    if outcome.plan_text.is_some()
+        && outcome.budget_mark == R2O_D2K_CAT_BUDGET_CUT
+        && result
+            .as_ref()
+            .is_ok_and(|fetch| fetch.application_verified)
+    {
+        if let Some(plan_id) = outcome.plan_text.as_deref().and_then(r2o_catalog_plan_id) {
+            r2o_budget_cut_pending_set(&outcome.target, plan_id);
+        }
+        outcome.plan_text = None;
+        outcome.retry_after = None;
+        outcome.detail.push_str(
+            "; поток оборван посреди повторов при полном ответе приложения — бюджет не пройден, кандидат не подтверждён, отметка привязки «оборван»",
+        );
+        return outcome;
+    }
     if outcome.plan_text.is_none()
         || r2o_family_recovery_decision(&result, applied) == R2oFamilyRecoveryDecision::Verified
     {
@@ -7491,7 +7558,9 @@ fn r2o_family_recovery_fetch(
         deadline: std::time::Duration::from_secs(8),
         tls12: target.shape == SHAPE_LEGACY,
         wire_len: None,
-        mark: r2o_candidate_confirmation_mark(mark),
+        // Семейное восстановление — измерение C (`s->measure_mark`), не
+        // verifier-сокет install_next.
+        mark,
     };
     r2o_controller::fetch::r2o_verify_probe(&options)
         .map_err(|error| format!("проверка известного семейного плана не завершилась: {error}"))
@@ -7602,6 +7671,9 @@ fn r2o_family_recovery_sibling_trial_with_ech(
         destination,
         candidate,
         mark,
+        // Семейное восстановление — измерение C (`s->measure_mark`), не
+        // verifier-сокет install_next.
+        mark,
         commands,
         ech,
         None,
@@ -7620,6 +7692,7 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
     destination: std::net::SocketAddr,
     candidate: &R2oFamilyRecoveryCandidate,
     mark: Option<u32>,
+    confirm_mark: Option<u32>,
     commands: &SyncSender<HttpSearchCommand>,
     ech: Option<&r2o_controller::ech::R2oEchConfig>,
     client_hello: Option<&[u8]>,
@@ -7641,7 +7714,7 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
     r2o_controller::fetch::r2o_fetch_dot_query_set(dot_frame);
     let result = (|| {
         let wire_shape = r2o_plan_wire_shape(target.shape, has_timestamp);
-        let confirmation_mark = r2o_candidate_confirmation_mark(mark);
+        let confirmation_mark = r2o_candidate_confirmation_mark(confirm_mark);
         let bound = BoundTcpProbe::open(target.family, confirmation_mark)
             .map_err(|error| format!("не удалось открыть сокет семейной пробы: {error}"))?;
         let local_port = bound.local_port;
@@ -7833,6 +7906,7 @@ fn r2o_run_discovery_candidate_trial(
     source_text: &str,
     probe_path: &str,
     mark: Option<u32>,
+    confirm_mark: Option<u32>,
     commands: &SyncSender<HttpSearchCommand>,
     client_hello: Option<&[u8]>,
     has_timestamp: Option<bool>,
@@ -7849,6 +7923,7 @@ fn r2o_run_discovery_candidate_trial(
         source_text,
         probe_path,
         mark,
+        confirm_mark,
         commands,
         client_hello,
         has_timestamp,
@@ -7865,6 +7940,7 @@ fn r2o_run_discovery_candidate_trial_with_encoding(
     source_text: &str,
     probe_path: &str,
     mark: Option<u32>,
+    confirm_mark: Option<u32>,
     commands: &SyncSender<HttpSearchCommand>,
     client_hello: Option<&[u8]>,
     has_timestamp: Option<bool>,
@@ -7882,6 +7958,7 @@ fn r2o_run_discovery_candidate_trial_with_encoding(
         source_text,
         probe_path,
         mark,
+        confirm_mark,
         commands,
         client_hello,
         has_timestamp,
@@ -7901,6 +7978,7 @@ fn r2o_run_discovery_candidate_trial_with_retries(
     source_text: &str,
     probe_path: &str,
     mark: Option<u32>,
+    confirm_mark: Option<u32>,
     commands: &SyncSender<HttpSearchCommand>,
     client_hello: Option<&[u8]>,
     has_timestamp: Option<bool>,
@@ -7920,6 +7998,7 @@ fn r2o_run_discovery_candidate_trial_with_retries(
         source_text,
         probe_path,
         mark,
+        confirm_mark,
         commands,
         client_hello,
         has_timestamp,
@@ -7955,6 +8034,7 @@ fn r2o_run_discovery_candidate_trial_with_progress(
     source_text: &str,
     probe_path: &str,
     mark: Option<u32>,
+    confirm_mark: Option<u32>,
     commands: &SyncSender<HttpSearchCommand>,
     client_hello: Option<&[u8]>,
     has_timestamp: Option<bool>,
@@ -8077,6 +8157,7 @@ fn r2o_run_discovery_candidate_trial_with_progress(
                                     destination,
                                     &candidate,
                                     mark,
+                                    confirm_mark,
                                     commands,
                                     trial_ech_config.as_ref(),
                                     client_hello,
@@ -8166,7 +8247,7 @@ fn r2o_run_discovery_candidate_trial_with_progress(
             target,
             &candidate.plan_text,
             client_hello,
-            mark,
+            confirm_mark,
             commands,
         )
         .unwrap_or(false);
@@ -8201,10 +8282,12 @@ fn r2o_discovery_candidate_retry_count(probe_budget_remaining: usize) -> Option<
     })
 }
 
-fn r2o_candidate_confirmation_mark(_direct_probe_mark: Option<u32>) -> Option<u32> {
-    // The direct-probe mark deliberately bypasses NFQUEUE. Candidate proof must
-    // traverse the datapath; None would inherit BoundTcpProbe's bypass default.
-    Some(0)
+fn r2o_candidate_confirmation_mark(direct_probe_mark: Option<u32>) -> Option<u32> {
+    // C `install_next` (`sched.c:4798-4804`) ставит на пробный сокет
+    // `s->mark` (CLI `--mark`), а не `measure_mark`: verifier обязан пройти
+    // те же NFQUEUE-правила, что и клиент. `--mark 0` — явный отказ от
+    // метки; отсутствие `--mark` даёт штатную 0x2d внутри BoundTcpProbe.
+    direct_probe_mark
 }
 
 #[cfg(unix)]
@@ -8497,14 +8580,14 @@ fn r2o_discovery_client_shape_trial(
     target: &r2o_controller::discovery::DiscoveryTarget,
     source_text: &str,
     client_hello: &[u8],
-    mark: Option<u32>,
+    confirm_mark: Option<u32>,
     commands: &SyncSender<HttpSearchCommand>,
 ) -> Result<bool, String> {
     let destination = target
         .endpoint
         .parse::<std::net::SocketAddr>()
         .map_err(|error| format!("адрес снимка ClientHello недопустим: {error}"))?;
-    let bound = BoundTcpProbe::open(target.family, r2o_candidate_confirmation_mark(mark))
+    let bound = BoundTcpProbe::open(target.family, r2o_candidate_confirmation_mark(confirm_mark))
         .map_err(|error| format!("не удалось открыть сокет снимка ClientHello: {error}"))?;
     let local_port = bound.local_port;
     let trial_id = random_id().map_err(|error| error.to_string())?;
@@ -9349,6 +9432,7 @@ fn watch(socket_path: PathBuf) -> Result<(), Box<dyn Error>> {
         None,
         None,
         None,
+        None,
         HashSet::new(),
         None,
         false,
@@ -9473,6 +9557,95 @@ struct DiscoveryOutcome {
     volume_fingerprint: Option<r2o_controller::catalog::Fingerprint>,
     volume_box_id: Option<String>,
     retry_after: Option<std::time::Duration>,
+}
+
+/// Метаданные последнего классификатора для production group_record:
+/// C `task.vol.rx_direct_complete` и `task.asked_shape`. Ключ — цель, потому
+/// что worker и main loop разделены каналом исходов.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct R2oDiscoveryMeta {
+    rx_direct_complete: bool,
+    asked_shape: u8,
+}
+
+#[cfg(unix)]
+fn r2o_discovery_meta_map()
+-> &'static std::sync::Mutex<HashMap<r2o_controller::discovery::DiscoveryTarget, R2oDiscoveryMeta>>
+{
+    static META: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<r2o_controller::discovery::DiscoveryTarget, R2oDiscoveryMeta>>,
+    > = std::sync::OnceLock::new();
+    META.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+#[cfg(unix)]
+fn r2o_discovery_meta_set(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    rx_direct_complete: bool,
+    asked_shape: u8,
+) {
+    r2o_discovery_meta_map()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            target.clone(),
+            R2oDiscoveryMeta {
+                rx_direct_complete,
+                asked_shape,
+            },
+        );
+}
+
+#[cfg(unix)]
+fn r2o_discovery_meta_take(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+) -> Option<R2oDiscoveryMeta> {
+    r2o_discovery_meta_map()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(target)
+}
+
+/// План, отклонённый C `budget_cut_reject`: worker выясняет это на стадии
+/// подтверждения, а каталог и его блокировка живут в главном цикле. Ключ —
+/// цель, значение — id отклонённого плана.
+#[cfg(unix)]
+fn r2o_budget_cut_map()
+-> &'static std::sync::Mutex<HashMap<r2o_controller::discovery::DiscoveryTarget, String>> {
+    static CUTS: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<r2o_controller::discovery::DiscoveryTarget, String>>,
+    > = std::sync::OnceLock::new();
+    CUTS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+#[cfg(unix)]
+fn r2o_budget_cut_pending_set(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    plan_id: String,
+) {
+    r2o_budget_cut_map()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(target.clone(), plan_id);
+}
+
+#[cfg(unix)]
+fn r2o_budget_cut_pending(target: &r2o_controller::discovery::DiscoveryTarget) -> bool {
+    r2o_budget_cut_map()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains_key(target)
+}
+
+#[cfg(unix)]
+fn r2o_budget_cut_pending_take(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+) -> Option<String> {
+    r2o_budget_cut_map()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(target)
 }
 
 #[cfg(unix)]
@@ -13165,6 +13338,7 @@ impl DiscoveryWorker {
 
     fn new_with_confirmation(
         mark: Option<u32>,
+        confirm_mark: Option<u32>,
         send_cap: Arc<AtomicUsize>,
         dropped_events: Arc<AtomicUsize>,
         measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
@@ -13534,6 +13708,7 @@ impl DiscoveryWorker {
                                     &candidate.text,
                                     &probe_path,
                                     mark,
+                                    confirm_mark,
                                     &commands,
                                     client_hello.as_deref(),
                                     client_has_tcp_timestamps,
@@ -13850,6 +14025,7 @@ group_block_proven: false,
                             &candidate.text,
                             &known_probe_path,
                             mark,
+                            confirm_mark,
                             &commands,
                             client_hello.as_deref(),
                             client_has_tcp_timestamps,
@@ -14062,6 +14238,7 @@ group_block_proven: false,
                     plan_text,
                     &probe_path,
                     mark,
+                    confirm_mark,
                     &commands,
                     client_hello.as_deref(),
                     client_has_tcp_timestamps,
@@ -14219,6 +14396,7 @@ group_block_proven: false,
                             &candidate,
                             &probe_path,
                             mark,
+                            confirm_mark,
                             &commands,
                             client_hello.as_deref(),
                             client_has_tcp_timestamps,
@@ -14352,6 +14530,7 @@ group_block_proven: false,
                             retry_plan,
                             &probe_path,
                             mark,
+                            confirm_mark,
                             &commands,
                             client_hello.as_deref(),
                             client_has_tcp_timestamps,
@@ -14452,6 +14631,7 @@ group_block_proven: false,
                         &candidate,
                         &probe_path,
                         mark,
+                        confirm_mark,
                         &commands,
                         client_hello.as_deref(),
                         client_has_tcp_timestamps,
@@ -14601,6 +14781,7 @@ group_block_proven: false,
                         &candidate,
                         &probe_path,
                         mark,
+                        confirm_mark,
                         &commands,
                         client_hello.as_deref(),
                         client_has_tcp_timestamps,
@@ -14648,6 +14829,7 @@ group_block_proven: false,
                                     retry_plan,
                                     &probe_path,
                                     mark,
+                                    confirm_mark,
                                     &commands,
                                     client_hello.as_deref(),
                                     client_has_tcp_timestamps,
@@ -17076,6 +17258,11 @@ group_block_proven: false,
     }
 
     fn r2o_complete_outcome(&mut self, mut outcome: DiscoveryOutcome) -> DiscoveryOutcome {
+        if !outcome.direct_clear {
+            // Метаданные нужны только DIRECT_CLEAR; иначе ключ цели копил бы
+            // записи каждого классификатора.
+            let _ = r2o_discovery_meta_take(&outcome.target);
+        }
         if outcome.address_recheck_probes > 0 {
             let mut searches = self
                 .searches
@@ -17891,6 +18078,7 @@ fn r2o_discovery_volume_recovery(
             candidate,
             &candidate_probe_path,
             mark,
+            mark,
             commands,
             client_hello,
             Some(client_has_tcp_timestamps),
@@ -17990,6 +18178,7 @@ fn r2o_discovery_volume_recovery(
             target,
             candidate,
             &candidate_probe_path,
+            mark,
             mark,
             commands,
             client_hello,
@@ -18145,6 +18334,7 @@ fn r2o_discovery_volume_recovery(
             target,
             &candidate,
             &candidate_probe_path,
+            mark,
             mark,
             commands,
             client_hello,
@@ -18663,6 +18853,11 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
             | Verdict::Poisonable
             | Verdict::Flaky
     );
+    let rx_direct_complete = result
+        .response
+        .as_ref()
+        .is_some_and(|response| response.verdict == ResponseVerdict::Clear);
+    r2o_discovery_meta_set(&target, rx_direct_complete, target.shape);
     (
         DiscoveryOutcome {
             target,
@@ -19844,6 +20039,9 @@ impl ControlClient {
         discovery: Option<(Catalog, PathBuf, Option<u32>)>,
         https_cache_path: Option<PathBuf>,
         https_probe_mark: Option<u32>,
+        // CLI `--mark`: метка verifier-зондов (C `s->mark`). Не путать с
+        // measurement-меткой из `discovery.2`.
+        confirm_mark: Option<u32>,
         mut live_catalog: Option<(Catalog, PathBuf)>,
         explicit_live_path: Option<PathBuf>,
         mut active_groups: HashSet<r2o_controller::live::LiveGroupKey>,
@@ -19884,6 +20082,7 @@ impl ControlClient {
         let mut discovery = discovery.map(|(catalog, path, mark)| {
             let mut worker = DiscoveryWorker::new_with_confirmation(
                 mark,
+                confirm_mark,
                 Arc::clone(&self.send_cap),
                 Arc::clone(&self.dropped_events),
                 measurement_gate.clone(),
@@ -19980,6 +20179,7 @@ impl ControlClient {
             })
             .transpose()?;
         let mut catalog_sync_dirty = false;
+        let mut groups_expired_at: Option<std::time::Instant> = None;
         let mut catalog_sync_refusals = 0;
         let mut catalog_sync_refusal_reason = control::ACK_OK;
         let live_path = explicit_live_path.or_else(|| {
@@ -20022,6 +20222,27 @@ impl ControlClient {
                     dns_services.sync_discovery_tasks(worker, std::time::Instant::now());
                 }
                 dns_services.sync_quic_dns_tasks(std::time::Instant::now());
+                // C `d2k_sched_tick`: отказы узлов семейства стареют раз в час
+                // и сразу после запуска; запись старше 7 суток ничего не
+                // говорит о плане.
+                let groups_expire_due = groups_expired_at.is_none_or(|last| {
+                    std::time::Instant::now().saturating_duration_since(last)
+                        >= std::time::Duration::from_secs(60 * 60)
+                });
+                if groups_expire_due {
+                    groups_expired_at = Some(std::time::Instant::now());
+                    if let Some((_, catalog, _, _)) = &mut discovery {
+                        let dropped = catalog
+                            .domain_state
+                            .as_mut()
+                            .map(|state| state.expire_failures(dns_wall_now, 7 * 86400))
+                            .unwrap_or(0);
+                        if dropped > 0 {
+                            catalog_sync_dirty = true;
+                            println!("семейства: убраны отказы узлов старше 7 суток ({dropped})");
+                        }
+                    }
+                }
                 if let Some(diagnostics) = diagnostics.as_mut() {
                     diagnostics.tick(|| {
                         let catalog = discovery
@@ -20461,7 +20682,7 @@ impl ControlClient {
                                     &pending.request_path,
                                     pending.expected_baseline,
                                     catalog,
-                                    *mark,
+                                    confirm_mark,
                                     pending.live_bound_cut,
                                 );
                                 if !queued {
@@ -20544,7 +20765,9 @@ impl ControlClient {
                             outcome.target.host
                         );
                     } else {
-                        let catalog_changed = outcome.plan_text.is_some() || outcome.direct_clear;
+                        let catalog_changed = outcome.plan_text.is_some()
+                            || outcome.direct_clear
+                            || r2o_budget_cut_pending(&outcome.target);
                         let apply_result = self.apply_discovery_outcome_with_input_and_persistence(
                             outcome,
                             catalog,
@@ -22510,7 +22733,7 @@ impl ControlClient {
                                                 request_path,
                                                 expected,
                                                 catalog,
-                                                *mark,
+                                                confirm_mark,
                                                 live_bound_cut,
                                             )
                                         });
@@ -25747,6 +25970,32 @@ impl ControlClient {
             self.apply_discovery_direct_clear(&outcome.target, catalog, catalog_path, persistence)?;
             return Ok(None);
         }
+        if let Some(plan_id) = r2o_budget_cut_pending_take(&outcome.target) {
+            let (_lock, previous) =
+                locked_catalog_for_persistence(catalog_path, catalog, persistence.as_deref())?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs() as i64;
+            let mut updated = previous;
+            let transport = if outcome.target.shape == SHAPE_QUIC {
+                17
+            } else {
+                6
+            };
+            // C `budget_cut_reject` сравнивает `record_shape(t)` — форму
+            // провода, а не базовую форму цели.
+            let shape = r2o_plan_wire_shape(outcome.target.shape, has_timestamp);
+            let marked =
+                r2o_budget_cut_reject(&mut updated, &outcome.target, &plan_id, shape, transport);
+            if marked > 0 {
+                persist_catalog_update(&updated, catalog_path, now, persistence.as_deref_mut())?;
+                println!(
+                    "привязка плана {plan_id} для {}: бюджет «оборван» ({marked})",
+                    outcome.target.host
+                );
+            }
+            *catalog = updated;
+        }
         let group_block_proven = outcome.group_block_proven;
         let budget_mark = outcome.budget_mark;
         let transferred_own_plan = outcome.transferred_own_plan;
@@ -25998,7 +26247,27 @@ impl ControlClient {
             now,
             std::time::Instant::now(),
         );
-        if result.marked == 0 && result.removed == 0 {
+        // C `d2k_sched_tick`: DIRECT_CLEAR пишется в group_record только когда
+        // прямой ответ измерен прикладным уровнем (`vol.rx_direct_complete`).
+        // Метаданные классификатора приходят отдельно от канала исходов.
+        let meta = r2o_discovery_meta_take(target);
+        let group_recorded = if meta.is_some_and(|meta| meta.rx_direct_complete) {
+            let probe_path =
+                r2o_target_confirmed_probe_path(&updated, target).unwrap_or_else(|| "/".to_owned());
+            match r2o_group_record_direct_clear(&mut updated, target, &probe_path, now) {
+                Ok(recorded) => recorded,
+                Err(error) => {
+                    eprintln!(
+                        "группа DIRECT_CLEAR для {} не записана: {error}",
+                        target.host
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        if result.marked == 0 && result.removed == 0 && !group_recorded {
             *catalog = previous;
             if result.waiting != 0 {
                 println!(
@@ -30637,6 +30906,94 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn direct_clear_group_record_needs_rx_direct_complete() {
+        let work = std::env::temp_dir().join(format!(
+            "r2o-direct-clear-group-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&work).unwrap();
+        let catalog_path = work.join("catalog.json");
+        Catalog::default().save_atomic(&catalog_path, 1).unwrap();
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "direct.example.com".into(),
+            endpoint: "198.51.100.81:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let (client_stream, _server_stream) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut client = ControlClient {
+            socket: client_stream,
+            send_maxlen: 0,
+            send_cap: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            pending_events: std::collections::VecDeque::new(),
+            pending_applied_events: std::collections::VecDeque::new(),
+            dropped_events: Default::default(),
+            http_search_started: Default::default(),
+            http_acknowledged_bindings: std::collections::HashMap::new(),
+        };
+        let direct_outcome =
+            |target: &r2o_controller::discovery::DiscoveryTarget| super::DiscoveryOutcome {
+                target: target.clone(),
+                plan_text: None,
+                detail: "прямой CLEAR".into(),
+                queue_expired: false,
+                address_failure: false,
+                address_recheck_acknowledged: false,
+                address_recheck_probes: 0,
+                direct_clear: true,
+                volume_recovery: false,
+                budget_mark: 0,
+                group_block_proven: false,
+                transferred_own_plan: false,
+                bound_plan_id: None,
+                ech_origin: None,
+                volume_fingerprint: None,
+                volume_box_id: None,
+                retry_after: None,
+            };
+
+        // C `t->vol.rx_direct_complete == 1`: DIRECT_CLEAR пишется в группу
+        // даже без единой привязки, и каталог сохраняется.
+        super::r2o_discovery_meta_set(&target, true, target.shape);
+        let mut catalog = Catalog::default();
+        client
+            .apply_discovery_outcome_with_input(
+                direct_outcome(&target),
+                &mut catalog,
+                &catalog_path,
+                2,
+            )
+            .unwrap();
+        let saved = Catalog::load(&catalog_path).unwrap();
+        let state = saved.domain_state.as_ref().unwrap();
+        assert_eq!(state.observations.len(), 1);
+        assert_eq!(state.observations[0].name, target.host);
+        assert_eq!(state.observations[0].evidence, super::DOMAIN_DIRECT_CLEAR);
+        assert_eq!(state.observations[0].key.probe_path, "/");
+
+        // Без меты (прямой ответ не подтверждён прикладным уровнем) группа не
+        // пишется, и пустой каталог остаётся как был.
+        Catalog::default().save_atomic(&catalog_path, 1).unwrap();
+        let mut catalog = Catalog::default();
+        client
+            .apply_discovery_outcome_with_input(
+                direct_outcome(&target),
+                &mut catalog,
+                &catalog_path,
+                2,
+            )
+            .unwrap();
+        let saved = Catalog::load(&catalog_path).unwrap();
+        assert!(saved.domain_state.is_none());
+        std::fs::remove_dir_all(work).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn verify_confirm_gates_differential_matches_c() {
         use serde_json::json;
 
@@ -30794,6 +31151,12 @@ mod tests {
                     .map(|binding| binding.budget).collect::<Vec<_>>(),
             }));
         }
+        super::r2o_budget_cut_reject(&mut catalog, &target, "plan-1", SHAPE_MODERN, 6);
+        scenarios.push(json!({
+            "scenario": "budget_cut_reject",
+            "budgets": catalog.boxes[0].bindings.iter()
+                .map(|binding| binding.budget).collect::<Vec<_>>(),
+        }));
 
         let a = {
             let mut id = [0_u8; 16];
@@ -30946,6 +31309,96 @@ mod tests {
             catalog.boxes[0].bindings[0].budget,
             super::R2O_D2K_CAT_BUDGET_CUT
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn budget_cut_reject_marks_binding_and_refuses_candidate() {
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "cut.example".into(),
+            endpoint: "198.51.100.82:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let plan_id = "55".repeat(16);
+        let mut catalog = Catalog {
+            boxes: vec![BoxRecord {
+                bindings: vec![
+                    Binding {
+                        kind: "name".into(),
+                        target: target.host.clone(),
+                        plan_id: plan_id.clone(),
+                        enabled: true,
+                        transport: 6,
+                        family: 4,
+                        shape: SHAPE_MODERN,
+                        budget: super::R2O_D2K_CAT_BUDGET_PASSED,
+                        ..Binding::default()
+                    },
+                    Binding {
+                        kind: "name".into(),
+                        target: "other.example".into(),
+                        plan_id: plan_id.clone(),
+                        enabled: true,
+                        transport: 6,
+                        family: 4,
+                        shape: SHAPE_MODERN,
+                        budget: super::R2O_D2K_CAT_BUDGET_PASSED,
+                        ..Binding::default()
+                    },
+                ],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        // C `budget_cut_reject` перекрывает PASSED и не трогает чужую цель.
+        assert_eq!(
+            super::r2o_budget_cut_reject(&mut catalog, &target, &plan_id, SHAPE_MODERN, 6),
+            1
+        );
+        assert_eq!(
+            catalog.boxes[0].bindings[0].budget,
+            super::R2O_D2K_CAT_BUDGET_CUT
+        );
+        assert_eq!(
+            catalog.boxes[0].bindings[1].budget,
+            super::R2O_D2K_CAT_BUDGET_PASSED
+        );
+        assert_eq!(
+            super::r2o_budget_cut_reject(&mut catalog, &target, &plan_id, SHAPE_MODERN, 6),
+            0
+        );
+
+        // Production-гейт подтверждения: полный ответ приложения + CUT не
+        // подтверждает кандидата и оставляет заявку на отметку привязки.
+        let outcome = super::DiscoveryOutcome {
+            target: target.clone(),
+            plan_text: Some(format!(
+                "r2o-plan 1 11\nid {plan_id}\nproto tcp tls\nsplit sni_middle +0\n"
+            )),
+            detail: "полный ответ".into(),
+            queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
+            direct_clear: false,
+            volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
+            volume_fingerprint: None,
+            volume_box_id: None,
+            retry_after: None,
+        };
+        let mut fetch = r2o_test_fetch_result();
+        fetch.r2o_volume_observation.packet_budget =
+            r2o_controller::r2o_volume::R2oVolumePacketBudget::Cut;
+        let confirmed = super::r2o_confirm_discovery_outcome(outcome, Ok(fetch), true);
+        assert_eq!(confirmed.budget_mark, super::R2O_D2K_CAT_BUDGET_CUT);
+        assert!(confirmed.plan_text.is_none());
+        assert_eq!(super::r2o_budget_cut_pending_take(&target), Some(plan_id));
     }
 
     #[cfg(unix)]
@@ -32469,29 +32922,92 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "linux")]
+    fn r2o_socket_mark(probe: &super::BoundTcpProbe) -> u32 {
+        use std::os::fd::AsRawFd;
+        let mut actual_mark: u32 = u32::MAX;
+        let mut length = std::mem::size_of_val(&actual_mark) as libc::socklen_t;
+        assert_eq!(
+            unsafe {
+                libc::getsockopt(
+                    probe.socket.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_MARK,
+                    (&mut actual_mark as *mut u32).cast(),
+                    &mut length,
+                )
+            },
+            0
+        );
+        actual_mark
+    }
+
     #[test]
-    fn candidate_confirmation_uses_datapath_mark_even_when_direct_probe_has_a_bypass_mark() {
+    fn verifier_and_measurement_marks_follow_the_cli_split() {
+        // C `d2kc`: --mark 0x2e --measure-mark 0x2f — verifier 0x2e,
+        // измерение 0x2f.
+        let (confirm, measure) = super::r2o_serve_probe_marks(Some(0x2e), Some(0x2f));
+        assert_eq!(confirm, Some(0x2e));
+        assert_eq!(measure, Some(0x2f));
+        assert_eq!(super::r2o_candidate_confirmation_mark(confirm), Some(0x2e));
+        // Без --measure-mark измерения идут меткой --mark.
+        let (confirm, measure) = super::r2o_serve_probe_marks(Some(0x2e), None);
+        assert_eq!(confirm, Some(0x2e));
+        assert_eq!(measure, Some(0x2e));
+        // --mark 0 — явный отказ от метки verifier-сокета.
+        let (confirm, measure) = super::r2o_serve_probe_marks(Some(0), Some(0x2f));
+        assert_eq!(confirm, Some(0));
+        assert_eq!(measure, Some(0x2f));
+        assert_eq!(super::r2o_candidate_confirmation_mark(confirm), Some(0));
+
         #[cfg(target_os = "linux")]
-        for direct_mark in [Some(45), None] {
-            use std::os::fd::AsRawFd;
-            let probe = super::BoundTcpProbe::open(4, r2o_candidate_confirmation_mark(direct_mark))
-                .unwrap();
-            let mut actual_mark: u32 = u32::MAX;
-            let mut length = std::mem::size_of_val(&actual_mark) as libc::socklen_t;
-            assert_eq!(
-                unsafe {
-                    libc::getsockopt(
-                        probe.socket.as_raw_fd(),
-                        libc::SOL_SOCKET,
-                        libc::SO_MARK,
-                        (&mut actual_mark as *mut u32).cast(),
-                        &mut length,
-                    )
-                },
-                0
-            );
-            assert_eq!(actual_mark, 0, "candidate socket bypasses NFQUEUE");
+        {
+            // Без CAP_NET_ADMIN ядро отвергает SO_MARK != 0; сам выбор метки
+            // уже проверен выше, а сокет с нулевой меткой проверяем всегда.
+            let verifier =
+                super::BoundTcpProbe::open(4, super::r2o_candidate_confirmation_mark(confirm))
+                    .unwrap();
+            assert_eq!(r2o_socket_mark(&verifier), 0);
+            drop(verifier);
+            match super::BoundTcpProbe::open(4, measure) {
+                Ok(measurement) => assert_eq!(r2o_socket_mark(&measurement), 0x2f),
+                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                    eprintln!("пропуск SO_MARK=0x2f: нет CAP_NET_ADMIN ({error})");
+                }
+                Err(error) => panic!("сокет измерения: {error}"),
+            }
+            match super::BoundTcpProbe::open(4, Some(0x2e)) {
+                Ok(verifier) => assert_eq!(r2o_socket_mark(&verifier), 0x2e),
+                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                    eprintln!("пропуск SO_MARK=0x2e: нет CAP_NET_ADMIN ({error})");
+                }
+                Err(error) => panic!("verifier-сокет: {error}"),
+            }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn serve_cli_mark_and_measure_mark_split_like_d2kc() {
+        let split = super::parse_serve_options(
+            &["--mark", "0x2e", "--measure-mark", "0x2f"].map(std::ffi::OsString::from),
+        )
+        .unwrap();
+        assert_eq!(split.mark, Some(0x2e));
+        assert_eq!(split.measure_mark, Some(0x2f));
+        assert_eq!(
+            super::r2o_serve_probe_marks(split.mark, split.measure_mark),
+            (Some(0x2e), Some(0x2f))
+        );
+
+        let no_measure =
+            super::parse_serve_options(&["--mark", "0x2e"].map(std::ffi::OsString::from)).unwrap();
+        assert_eq!(no_measure.mark, Some(0x2e));
+        assert_eq!(no_measure.measure_mark, None);
+        assert_eq!(
+            super::r2o_serve_probe_marks(no_measure.mark, no_measure.measure_mark),
+            (Some(0x2e), Some(0x2e))
+        );
     }
 
     #[cfg(unix)]

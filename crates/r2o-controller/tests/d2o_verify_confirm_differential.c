@@ -101,6 +101,23 @@ static void budget_apply(uint8_t mark) {
     }
 }
 
+/* Дословный перенос цикла sched.c:9418-9434 (budget_cut_reject). */
+static void budget_reject_apply(void) {
+    for (size_t bi = 0; bi < cat.n_boxes; bi++) {
+        d2k_cat_box *b = &cat.boxes[bi];
+        if (strcmp(b->id, "box-1")) continue;
+        for (size_t j = 0; j < b->n_binds; j++) {
+            d2k_cat_binding *bd = &b->binds[j];
+            if (strcmp(bd->plan_id, "plan-1") || strcmp(bd->target, t.name) ||
+                strcmp(bd->kind, t.by_addr ? "addr" : "name") ||
+                (bd->transport ? bd->transport : 6) != t.transport ||
+                (bd->family ? bd->family : 4) != t.family || bd->shape != 1 ||
+                bd->budget == D2K_CAT_BUDGET_CUT) continue;
+            bd->budget = D2K_CAT_BUDGET_CUT;
+        }
+    }
+}
+
 static void dump_budgets(const char *scenario) {
     emit(scenario);
     printf(",\"budgets\":[");
@@ -246,6 +263,8 @@ int main(void) {
     dump_budgets("budget_unchecked");
     budget_apply(D2K_CAT_BUDGET_PASSED);
     dump_budgets("budget_passed");
+    budget_reject_apply();
+    dump_budgets("budget_cut_reject");
 
     uint8_t a[16] = {0}, b[16] = {0}, c[16] = {0}, unfit[8][16];
     memset(unfit, 0, sizeof unfit);

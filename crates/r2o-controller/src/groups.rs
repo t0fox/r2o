@@ -1122,4 +1122,29 @@ mod tests {
         s.disabled = true;
         assert!(match_domain(&s, "a.sub.example.org", &k).is_none());
     }
+
+    #[test]
+    fn expire_failures_drops_only_old_plan_failures() {
+        let k = key(1);
+        let mut s = state(vec![
+            observation("old.example.com", "p-old", PLAN_FAILED, 100, &k),
+            observation("new.example.com", "p-new", PLAN_FAILED, 900, &k),
+            observation("blocked.example.com", "p-blocked", BLOCKED, 100, &k),
+        ]);
+        assert_eq!(expire_failures(&mut s, 1000, 500), 1);
+        assert!(
+            s.observations
+                .iter()
+                .all(|observation| { observation.name != "old.example.com" })
+        );
+        assert!(s.observations.iter().any(|observation| {
+            observation.name == "new.example.com" && observation.evidence & PLAN_FAILED != 0
+        }));
+        assert!(s.observations.iter().any(|observation| {
+            observation.name == "blocked.example.com" && observation.evidence & BLOCKED != 0
+        }));
+        // Неполные часы/нулевой возраст — ничего не трогаем.
+        assert_eq!(expire_failures(&mut s, 0, 500), 0);
+        assert_eq!(expire_failures(&mut s, 1000, 0), 0);
+    }
 }
