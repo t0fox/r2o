@@ -1056,3 +1056,44 @@ fn write_u24(bytes: &mut [u8], offset: usize, value: usize) {
     bytes[offset + 1] = (value >> 8) as u8;
     bytes[offset + 2] = value as u8;
 }
+
+#[cfg(test)]
+mod helper_differential_tests {
+    #[test]
+    #[ignore]
+    fn plan_helper_differential_matches_c() {
+        use super::{write_u16, write_u24};
+        use std::fmt::Write as _;
+
+        fn hex(bytes: &[u8]) -> String {
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+        }
+        let mut out = String::new();
+        for value in [
+            0_usize, 1, 0xff, 0x100, 0xffff, 0x10000, 0xffffff, 0x1000000,
+        ] {
+            let mut bytes = [0xaa_u8; 2];
+            write_u16(&mut bytes, 0, value);
+            writeln!(out, "wr16 {value} {}", hex(&bytes)).unwrap();
+        }
+        for value in [
+            0_usize, 1, 0xff, 0x100, 0xffff, 0x10000, 0xffffff, 0x1000000,
+        ] {
+            let mut bytes = [0xaa_u8; 3];
+            write_u24(&mut bytes, 0, value);
+            writeln!(out, "wr24 {value} {}", hex(&bytes)).unwrap();
+        }
+        let mut values = [9_usize, 1, 7, 1, 0xffff, 0, 7, 0x10000];
+        values.sort_unstable();
+        write!(out, "sort").unwrap();
+        for value in values {
+            write!(out, " {value}").unwrap();
+        }
+        out.push('\n');
+        if let Ok(path) = std::env::var("R2O_PLAN_HELPERS_DIFF_OUTPUT") {
+            std::fs::write(path, &out).unwrap();
+        }
+        assert!(out.contains("wr16 65536 0000\n"));
+        assert!(out.contains("wr24 16777216 000000\n"));
+    }
+}
