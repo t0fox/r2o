@@ -119,18 +119,16 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1535 / P 447**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1537 / P 445**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
-`d2k_sched_write_live` остаётся **P\***: 12 состояний full `live.json`
-против current `7a5fab9` PASS, verifier SO_MARK и DoQ direct-clear/
-cooldown закрыты. **QA final11:** Rust-сторона дифференциала вручную
-собирала `searches` (`json!`), production `r2o_live_searches` не вызывался —
-`phase/since/attempts/candidate/source` и порядок searches без C-оракула.
-Нужен production-builder differential; после него — E* с внешним
-ограничением e2e DoQ. Живые root/netns/OpenWrt/аппаратные сценарии
-покрыты не полностью.
+`d2k_sched_write_live` — **E\***: 12 состояний full `live.json` против
+current `7a5fab9` PASS; production `r2o_live_searches_from_state` отдельно
+сверен с C `write_live` для 6 task-состояний (phase/since/attempts/
+candidate/source/order); groups 10, DNS 17/4/3. Единственное внешнее
+ограничение — end-to-end планового DoQ через реальный C datapath не
+прогнан. Живые root/netns/OpenWrt/аппаратные сценарии покрыты не полностью.
 
 **Исходная карта 504 P (срез `6966de5`, 2026-11-14, QA):** A — нужен Rust-код **121**;
 B — нужен только тест/differential **190**; C — архитектура/внешний стенд
