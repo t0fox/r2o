@@ -12178,6 +12178,104 @@ impl R2oRecentClientShapeCache {
     }
 }
 
+/// C `ech_inputs[8]`: снимки ECH-приветствий по имени/семейству, reuse 10 мин.
+/// Нужен `fill_hellos`, когда задача стартует позже снимка и своей копии ещё
+/// не имеет. opts в controller — только `tcp_has_timestamp`.
+#[cfg(unix)]
+#[derive(Default)]
+struct R2oEchInputCache {
+    entries: VecDeque<(String, u8, Vec<u8>, Option<bool>, std::time::Instant)>,
+}
+
+#[cfg(unix)]
+impl R2oEchInputCache {
+    fn note(
+        &mut self,
+        name: &str,
+        family: u8,
+        client_hello: &[u8],
+        tcp_has_timestamp: Option<bool>,
+        now: std::time::Instant,
+    ) {
+        self.entries
+            .retain(|(_, _, _, _, seen)| now.saturating_duration_since(*seen) <= R2O_ECH_INPUT_TTL);
+        if let Some((_, _, bytes, timestamp, seen)) = self
+            .entries
+            .iter_mut()
+            .find(|(saved, fam, _, _, _)| saved == name && *fam == family)
+        {
+            *bytes = client_hello.to_vec();
+            *timestamp = tcp_has_timestamp;
+            *seen = now;
+            return;
+        }
+        if self.entries.len() == R2O_ECH_INPUT_SLOTS {
+            self.entries.pop_front();
+        }
+        self.entries.push_back((
+            name.to_owned(),
+            family,
+            client_hello.to_vec(),
+            tcp_has_timestamp,
+            now,
+        ));
+    }
+
+    fn find(
+        &self,
+        name: &str,
+        family: u8,
+        now: std::time::Instant,
+    ) -> Option<(Vec<u8>, Option<bool>)> {
+        self.entries
+            .iter()
+            .find(|(saved, fam, _, _, seen)| {
+                saved == name
+                    && *fam == family
+                    && now.saturating_duration_since(*seen) <= R2O_ECH_INPUT_TTL
+            })
+            .map(|(_, _, bytes, timestamp, _)| (bytes.clone(), *timestamp))
+    }
+}
+
+#[cfg(unix)]
+const R2O_ECH_INPUT_SLOTS: usize = 8;
+#[cfg(unix)]
+const R2O_ECH_INPUT_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+#[cfg(unix)]
+fn r2o_ech_input_cache() -> &'static std::sync::Mutex<R2oEchInputCache> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<R2oEchInputCache>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(R2oEchInputCache::default()))
+}
+
+#[cfg(unix)]
+fn r2o_ech_input_note(
+    name: &str,
+    family: u8,
+    client_hello: &[u8],
+    tcp_has_timestamp: Option<bool>,
+    now: std::time::Instant,
+) {
+    r2o_ech_input_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .note(name, family, client_hello, tcp_has_timestamp, now);
+}
+
+#[cfg(unix)]
+fn r2o_ech_input_find(
+    name: &str,
+    family: u8,
+    now: std::time::Instant,
+) -> Option<(Vec<u8>, Option<bool>)> {
+    r2o_ech_input_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .find(name, family, now)
+}
+
 #[cfg(unix)]
 fn r2o_own_first_client_snapshot(
     cache: &R2oRecentClientShapeCache,
@@ -12725,6 +12823,15 @@ fn r2o_handle_client_shape_event(
     let target = r2o_controller::discovery::DiscoveryTarget::from_client_shape(shape)?;
     if !worker.remember_client_snapshot(&target, &shape.client_hello, shape.tcp_has_timestamp) {
         return None;
+    }
+    if shape.shape == SHAPE_ECH_TCP {
+        r2o_ech_input_note(
+            &target.host,
+            target.family,
+            &shape.client_hello,
+            shape.tcp_has_timestamp,
+            std::time::Instant::now(),
+        );
     }
     let key = r2o_discovery_task_key(&target);
     let compatible = worker.active.get(&key).is_some_and(|active| {
@@ -16594,12 +16701,20 @@ group_block_proven: false,
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get_for_host(&target)
             .map(|(shape, snapshot, timestamp)| (shape, snapshot.to_vec(), timestamp));
-        // Кеш снимков относится к TLS-целям (TCP); C-гейт транспорта
-        // `hello_fits_client` здесь всегда проходит.
-        let cached_client_hello = cached_shape
+        // C `fill_hellos`: сначала ech_inputs[8] по имени/семейству (reuse
+        // 10 мин), затем общий tcp_shape. Кеш снимков относится к TCP.
+        let ech_input = (r2o_discovery_transport(&target) == 6 && target.shape == SHAPE_ECH_TCP)
+            .then(|| r2o_ech_input_find(&target.host, target.family, now))
+            .flatten();
+        let cached_client_hello = ech_input
             .as_ref()
-            .filter(|(shape, _, _)| r2o_cached_shape_fits(6, *shape, target.shape))
-            .map(|(_, snapshot, _)| snapshot.clone());
+            .map(|(snapshot, _)| snapshot.clone())
+            .or_else(|| {
+                cached_shape
+                    .as_ref()
+                    .filter(|(shape, _, _)| r2o_cached_shape_fits(6, *shape, target.shape))
+                    .map(|(_, snapshot, _)| snapshot.clone())
+            });
         if let Some(client_hello) = cached_client_hello.as_ref() {
             self.client_hellos
                 .lock()
@@ -16609,7 +16724,15 @@ group_block_proven: false,
                 .client_tcp_timestamps
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(has_timestamp) = cached_shape.and_then(|(_, _, timestamp)| timestamp) {
+            let timestamp = ech_input
+                .as_ref()
+                .and_then(|(_, timestamp)| *timestamp)
+                .or_else(|| {
+                    cached_shape
+                        .as_ref()
+                        .and_then(|(_, _, timestamp)| *timestamp)
+                });
+            if let Some(has_timestamp) = timestamp {
                 client_tcp_timestamps.insert(task_key.clone(), has_timestamp);
             } else {
                 client_tcp_timestamps.remove(&task_key);
@@ -37351,6 +37474,133 @@ mod tests {
             hex(with_own_guard.as_bytes())
         ));
         if let Ok(path) = std::env::var("R2O_INSTALL_RST_GUARD_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ech_input_cache_keeps_eight_names_for_ten_minutes() {
+        let now = std::time::Instant::now();
+        let mut cache = super::R2oEchInputCache::default();
+        for index in 0..8 {
+            cache.note(
+                &format!("ech-{index}.example.com"),
+                4,
+                format!("hello-{index}").as_bytes(),
+                Some(index % 2 == 0),
+                now,
+            );
+        }
+        assert_eq!(cache.entries.len(), 8);
+        cache.note("ech-8.example.com", 4, b"hello-8", Some(false), now);
+        assert_eq!(cache.entries.len(), 8);
+        assert!(
+            !cache
+                .entries
+                .iter()
+                .any(|(name, _, _, _, _)| name == "ech-0.example.com")
+        );
+        assert_eq!(
+            cache.find("ech-8.example.com", 4, now),
+            Some((b"hello-8".to_vec(), Some(false)))
+        );
+        assert!(cache.find("ech-8.example.com", 6, now).is_none());
+        assert_eq!(
+            cache.find(
+                "ech-8.example.com",
+                4,
+                now + std::time::Duration::from_secs(600)
+            ),
+            Some((b"hello-8".to_vec(), Some(false)))
+        );
+        assert!(
+            cache
+                .find(
+                    "ech-8.example.com",
+                    4,
+                    now + std::time::Duration::from_secs(601)
+                )
+                .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tcp_queue_adopts_ech_input_cache_like_fill_hellos() {
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "ech-adopt.example.com".into(),
+            endpoint: "198.51.100.93:443".into(),
+            family: 4,
+            shape: SHAPE_ECH_TCP,
+        };
+        super::r2o_ech_input_note(
+            &target.host,
+            target.family,
+            b"ech-client-hello",
+            Some(true),
+            std::time::Instant::now(),
+        );
+        assert!(worker.queue_with_planned(target.clone(), false));
+        let key = super::r2o_discovery_task_key(&target);
+        assert_eq!(
+            worker.client_hellos.lock().unwrap().get(&key).cloned(),
+            Some(b"ech-client-hello".to_vec())
+        );
+        assert_eq!(
+            worker
+                .client_tcp_timestamps
+                .lock()
+                .unwrap()
+                .get(&key)
+                .copied(),
+            Some(true)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn d2o_ech_input_ring_matches_c() {
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "ech-ring.example.com".into(),
+            endpoint: "198.51.100.94:443".into(),
+            family: 4,
+            shape: SHAPE_ECH_TCP,
+        };
+        let hello = r2o_test_tls_ech_client_hello();
+        super::r2o_ech_input_note(
+            &target.host,
+            target.family,
+            &hello,
+            Some(true),
+            std::time::Instant::now(),
+        );
+        assert!(worker.queue_with_planned(target.clone(), false));
+        let key = super::r2o_discovery_task_key(&target);
+        let adopted = worker
+            .client_hellos
+            .lock()
+            .unwrap()
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        let ech_offer = r2k_core::tls::parse(&adopted).ech_offer;
+        let opts_known = worker
+            .client_tcp_timestamps
+            .lock()
+            .unwrap()
+            .get(&key)
+            .copied()
+            .unwrap_or(false);
+        let output = format!(
+            "fill_rc=0\ntrig_set={}\nech_offer={}\nopts_known={}\n",
+            u8::from(!adopted.is_empty()),
+            u8::from(ech_offer),
+            u8::from(opts_known)
+        );
+        if let Ok(path) = std::env::var("R2O_ECH_INPUT_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
         }
     }
