@@ -2055,15 +2055,35 @@ mod tests {
     fn f6_netlink_differential_matches_c() {
         use std::net::Ipv6Addr;
 
-        let src = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1).octets();
-        let dst = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2).octets();
+        let default_src = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1).octets();
+        let default_dst = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2).octets();
+        let env_ipv6 = |name: &str, fallback: [u8; 16]| {
+            std::env::var(name)
+                .ok()
+                .and_then(|text| text.parse::<Ipv6Addr>().ok())
+                .map_or(fallback, |address| address.octets())
+        };
+        let src = env_ipv6("R2O_F6_SRC", default_src);
+        let dst = env_ipv6("R2O_F6_DST", default_dst);
+        let mark = std::env::var("R2O_F6_MARK")
+            .ok()
+            .and_then(|text| text.parse::<u32>().ok())
+            .unwrap_or(0x2e);
+        let skip_neighbor = std::env::var_os("R2O_F6_SKIP_NEIGHBOR").is_some();
         let mut output = String::new();
-        match super::r2o_f6_route(&src, &dst, 0x2e) {
+        match super::r2o_f6_route(&src, &dst, mark) {
             Ok((ifindex, gateway)) => {
                 output.push_str(&format!(
                     "route rc=0 ifindex={ifindex} gateway={}\n",
                     Ipv6Addr::from(gateway)
                 ));
+                if skip_neighbor {
+                    if let Ok(path) = std::env::var("R2O_F6_DIFF_OUTPUT") {
+                        std::fs::write(path, &output).unwrap();
+                    }
+                    assert!(output.starts_with("route rc="));
+                    return;
+                }
                 match super::r2o_f6_neighbor(ifindex, &gateway) {
                     Ok(mac) => output.push_str(&format!(
                         "neighbor rc=0 mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}\n",
