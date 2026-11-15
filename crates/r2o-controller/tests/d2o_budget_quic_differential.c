@@ -15,10 +15,12 @@ size_t d2k_h3_request(const char *host, const char *path, uint8_t *out, size_t c
     (void)host; (void)path; (void)out; (void)cap;
     return 0;
 }
+static int mock_h3_status_code;
+
 int d2k_h3_status(const uint8_t *buf, size_t n, int *status)
 {
-    (void)buf; (void)n;
-    if (status) *status = 0;
+    (void)buf;
+    if (status) *status = n && mock_h3_status_code ? mock_h3_status_code : 0;
     return 0;
 }
 int d2k_qc_stream_send(d2k_qc *c, uint64_t stream_id, const uint8_t *data, size_t n,
@@ -57,6 +59,7 @@ typedef struct {
     int request_rc;
     int recv_rc;
     int recv_bytes;
+    int h3_status;
 } mock_quic;
 
 static int mock_request(void *ctx, uint64_t sid, char *err, size_t cap)
@@ -102,6 +105,7 @@ static void run(const char *name, mock_quic *q, int deadline, unsigned budget)
         .packets = mock_packets,
         .ctx = q,
     };
+    mock_h3_status_code = q->h3_status;
     d2k_ver_result result;
     memset(&result, 0, sizeof result);
     budget_quic(&io, deadline, budget, &result);
@@ -150,6 +154,43 @@ int main(void)
         q.complete[0] = 0;
         q.recv_rc = -1;
         run("recv-error", &q, 20, 1);
+    }
+    {
+        mock_quic q = {0};
+        q.packets[0] = 0; q.packets[1] = 2; q.packets[2] = 2;
+        q.packet_count = 3;
+        q.progress[0] = 0; q.progress[1] = 120; q.progress[2] = 130;
+        q.complete[0] = 1; q.complete[1] = 1; q.complete[2] = 1;
+        q.progress_count = 3;
+        q.recv_rc = 1;
+        q.h3_status = 200;
+        run("complete-headers-pass", &q, 100, 1);
+    }
+    {
+        mock_quic q = {0};
+        q.packets[0] = 0; q.packet_count = 1;
+        q.progress[0] = 0; q.progress_count = 1;
+        q.complete[0] = 1;
+        q.recv_rc = 1;
+        q.h3_status = 0;
+        run("complete-headers-unparsed", &q, 100, 1);
+    }
+    {
+        mock_quic q = {0};
+        q.packets[0] = 0; q.packet_count = 1;
+        q.progress[0] = 0; q.progress_count = 1;
+        q.complete[0] = 1;
+        q.recv_rc = 0;
+        q.h3_status = 0;
+        run("complete-headers-silence", &q, 20, 1);
+    }
+    {
+        mock_quic q = {0};
+        q.packets[0] = 0; q.packet_count = 1;
+        q.progress[0] = 0; q.progress_count = 1;
+        q.complete[0] = 1;
+        q.recv_rc = -1;
+        run("complete-closed", &q, 100, 1);
     }
     return 0;
 }

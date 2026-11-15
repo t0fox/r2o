@@ -299,6 +299,7 @@ pub struct R2oQuicHttp3Result {
     pub datagrams: u64,
     pub budget_required: bool,
     pub budget_passed: bool,
+    pub budget: R2oQuicBudgetOutcome,
     pub r2o_quic_stalled: bool,
     pub r2o_quic_one_way: bool,
     pub r2o_ping_probes: u32,
@@ -321,6 +322,7 @@ impl Default for R2oQuicHttp3Result {
             datagrams: 0,
             budget_required: false,
             budget_passed: false,
+            budget: R2oQuicBudgetOutcome::NotChecked,
             r2o_quic_stalled: false,
             r2o_quic_one_way: false,
             r2o_ping_probes: 0,
@@ -718,6 +720,8 @@ enum R2oQuicHttp3StallEnd {
 struct R2oQuicHttp3Budget {
     need: u64,
     progress_mark: Option<u64>,
+    requests: u32,
+    last_complete_packets: Option<u64>,
 }
 
 pub fn r2o_quic_http3_budget_datagrams(budget_packets: u32) -> u32 {
@@ -734,6 +738,8 @@ impl R2oQuicHttp3Budget {
         Self {
             need: u64::from(r2o_quic_http3_budget_datagrams(budget_packets)),
             progress_mark: None,
+            requests: 1,
+            last_complete_packets: None,
         }
     }
 
@@ -757,6 +763,163 @@ impl R2oQuicHttp3Budget {
             && self.progress_mark.is_some_and(|mark| progress > mark)
             && now.saturating_duration_since(last_progress_at) < rto
     }
+
+    /// C `budget_quic`: решение о завершённом ответе перед новым потоком.
+    /// `NotGrowing` — счётчик пакетов не вырос; `Request` — C отправляет
+    /// следующий запрос на `sid + 4`.
+    fn r2o_complete_decision(&mut self, packets: u64) -> R2oQuicBudgetCompleteDecision {
+        if self
+            .last_complete_packets
+            .is_some_and(|asked| packets <= asked)
+        {
+            return R2oQuicBudgetCompleteDecision::NotGrowing;
+        }
+        self.last_complete_packets = Some(packets);
+        self.requests = self.requests.saturating_add(1);
+        R2oQuicBudgetCompleteDecision::Request
+    }
+}
+
+/// C `budget_quic`: итоговый бюджет и счётчики одного прогона.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum R2oQuicBudgetOutcome {
+    #[default]
+    NotChecked,
+    Passed,
+    Cut,
+    NotApplicable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct R2oQuicBudgetResult {
+    pub budget: R2oQuicBudgetOutcome,
+    pub need: u32,
+    pub requests: u32,
+    pub packets: u32,
+    pub uncountable: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum R2oQuicBudgetCompleteDecision {
+    Request,
+    NotGrowing,
+}
+
+/// Событие C `budget_quic` без IO: scripted-ответы mock `quic_budget_io`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum R2oQuicBudgetEvent {
+    Packets(i64),
+    Progress {
+        progress: u64,
+        status: u16,
+    },
+    Complete {
+        progress: u64,
+        request_ok: bool,
+    },
+    Headers {
+        closed: bool,
+        status: i32,
+        got: usize,
+    },
+    Recv {
+        n: i64,
+        progress_changed: bool,
+        timed_out: bool,
+    },
+}
+
+/// Production-порт C `budget_quic` без IO: те же порог, рост, новый поток,
+/// HEADERS и молчание. Возвращает ровно поля C `d2k_ver_result`.
+pub fn r2o_quic_budget_from_events(
+    budget_packets: u32,
+    events: &[R2oQuicBudgetEvent],
+) -> R2oQuicBudgetResult {
+    let need = r2o_quic_http3_budget_datagrams(budget_packets);
+    let mut result = R2oQuicBudgetResult {
+        budget: R2oQuicBudgetOutcome::NotChecked,
+        need,
+        requests: 1,
+        packets: 0,
+        uncountable: false,
+    };
+    let mut marked = false;
+    let mut progress_mark = 0_u64;
+    let mut asked_at: Option<u64> = None;
+    let mut done = 0_u64;
+    let mut packets = 0_i64;
+    for event in events {
+        match *event {
+            R2oQuicBudgetEvent::Packets(value) => {
+                if value < 0 {
+                    result.uncountable = true;
+                    result.budget = R2oQuicBudgetOutcome::NotApplicable;
+                    break;
+                }
+                packets = value;
+                result.packets = value as u32;
+            }
+            R2oQuicBudgetEvent::Progress { progress, status } => {
+                let progress = done.saturating_add(progress);
+                if packets >= 0 && packets as u64 >= u64::from(need) {
+                    if !marked {
+                        marked = true;
+                        progress_mark = progress;
+                    }
+                    if status > 0 && progress > progress_mark {
+                        result.budget = R2oQuicBudgetOutcome::Passed;
+                        break;
+                    }
+                }
+            }
+            R2oQuicBudgetEvent::Complete {
+                progress,
+                request_ok,
+            } => {
+                let current = packets.max(0) as u64;
+                if asked_at.is_some_and(|asked| current <= asked) {
+                    result.budget = R2oQuicBudgetOutcome::NotApplicable;
+                    break;
+                }
+                asked_at = Some(current);
+                done = done.saturating_add(progress);
+                result.requests = result.requests.saturating_add(1);
+                if !request_ok {
+                    result.budget = R2oQuicBudgetOutcome::NotApplicable;
+                    break;
+                }
+            }
+            R2oQuicBudgetEvent::Headers {
+                closed,
+                status,
+                got,
+            } => {
+                if closed || (status == 0 && got > 0) {
+                    result.budget = R2oQuicBudgetOutcome::NotApplicable;
+                    break;
+                }
+                if status == 0 {
+                    result.budget = R2oQuicBudgetOutcome::Cut;
+                    break;
+                }
+            }
+            R2oQuicBudgetEvent::Recv {
+                n,
+                progress_changed,
+                timed_out,
+            } => {
+                if n < 0 {
+                    result.budget = R2oQuicBudgetOutcome::NotApplicable;
+                    break;
+                }
+                if !progress_changed && timed_out {
+                    result.budget = R2oQuicBudgetOutcome::Cut;
+                    break;
+                }
+            }
+        }
+    }
+    result
 }
 
 struct R2oQuicHttp3Stall {
@@ -1211,6 +1374,7 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
     // A one-shot default-budget check is reserved for the short-control probe.
     let mut budget = R2oQuicHttp3Budget::r2o_initialize(budget_packets);
     let mut budget_passed = false;
+    let mut budget_outcome = R2oQuicBudgetOutcome::NotChecked;
     let mut stall = R2oQuicHttp3Stall::r2o_initialize(
         connection.rtt(),
         last_app_progress,
@@ -1425,6 +1589,9 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                 if repeated && last_response_complete && requests == requests_before_attempt {
                     failed_repeat_app_bytes = last_complete_response_app_bytes;
                 }
+                if repeated && budget_active {
+                    budget_outcome = R2oQuicBudgetOutcome::NotApplicable;
+                }
                 let mut state = result.lock().unwrap();
                 state.error = Some(error);
                 if let Some(end) = stall_end {
@@ -1437,7 +1604,20 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                 if repeated && last_response_complete && requests == requests_before_attempt {
                     failed_repeat_app_bytes = last_complete_response_app_bytes;
                 }
+                if repeated && budget_active {
+                    budget_outcome = R2oQuicBudgetOutcome::Cut;
+                }
                 result.lock().unwrap().error = Some("истёк срок HTTP/3 GET".into());
+                break;
+            }
+        }
+
+        if repeated && budget_active && last_response_complete && !budget_passed {
+            let packets = r2o_quic_http3_datagrams(&connection).saturating_sub(datagrams_before);
+            if budget.r2o_complete_decision(packets) == R2oQuicBudgetCompleteDecision::NotGrowing {
+                budget_outcome = R2oQuicBudgetOutcome::NotApplicable;
+                result.lock().unwrap().error =
+                    Some("счётчик датаграмм не растёт — бюджет не проверен".into());
                 break;
             }
         }
@@ -1449,6 +1629,9 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
 
     let datagrams = r2o_quic_http3_datagrams(&connection).saturating_sub(datagrams_before);
     stall.r2o_capture_ack(connection.r2o_largest_acked_packet_number());
+    if budget_passed {
+        budget_outcome = R2oQuicBudgetOutcome::Passed;
+    }
     {
         let mut state = result.lock().unwrap();
         state.requests = requests;
@@ -1456,6 +1639,7 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
             r2o_quic_http3_app_bytes_load(&app_bytes).saturating_add(failed_repeat_app_bytes);
         state.datagrams = datagrams;
         state.budget_passed = budget_passed;
+        state.budget = budget_outcome;
         state.complete = !repeated && last_response_complete && !state.r2o_quic_stalled;
         state.r2o_ping_probes = stall.probes_sent;
         state.r2o_ping_acks = stall.probes_acked;
@@ -1834,6 +2018,209 @@ mod tests {
             std::fs::write(path, &output).expect("write QUIC budget output");
         }
         assert!(output.contains("budget|grow|need=2\n"));
+    }
+
+    #[test]
+    fn d2o_quic_budget_io_oracle_differential_matches_c() {
+        use super::{
+            R2oQuicBudgetEvent as Event, R2oQuicBudgetOutcome as Outcome,
+            r2o_quic_budget_from_events,
+        };
+
+        fn emit(name: &str, budget: u32, events: &[Event], output: &mut String) {
+            let result = r2o_quic_budget_from_events(budget, events);
+            let value = match result.budget {
+                Outcome::NotChecked => 0,
+                Outcome::Passed => 1,
+                Outcome::Cut => 2,
+                Outcome::NotApplicable => 3,
+            };
+            output.push_str(&format!(
+                "quic|{name}|budget={value}|need={}|requests={}|packets={}|uncountable={}|reason=\n",
+                result.need, result.requests, result.packets, u8::from(result.uncountable)
+            ));
+        }
+
+        let mut output = String::new();
+        emit("packets-negative", 1, &[Event::Packets(-1)], &mut output);
+        emit(
+            "grew",
+            3,
+            &[
+                Event::Packets(6),
+                Event::Progress {
+                    progress: 100,
+                    status: 200,
+                },
+                Event::Recv {
+                    n: 1,
+                    progress_changed: true,
+                    timed_out: false,
+                },
+                Event::Packets(6),
+                Event::Progress {
+                    progress: 120,
+                    status: 200,
+                },
+            ],
+            &mut output,
+        );
+        emit(
+            "request-error",
+            2,
+            &[
+                Event::Packets(0),
+                Event::Progress {
+                    progress: 0,
+                    status: 200,
+                },
+                Event::Complete {
+                    progress: 0,
+                    request_ok: false,
+                },
+            ],
+            &mut output,
+        );
+        emit(
+            "silence",
+            1,
+            &[
+                Event::Packets(0),
+                Event::Progress {
+                    progress: 0,
+                    status: 200,
+                },
+                Event::Recv {
+                    n: 0,
+                    progress_changed: false,
+                    timed_out: true,
+                },
+            ],
+            &mut output,
+        );
+        emit(
+            "recv-error",
+            1,
+            &[
+                Event::Packets(0),
+                Event::Progress {
+                    progress: 0,
+                    status: 200,
+                },
+                Event::Recv {
+                    n: -1,
+                    progress_changed: false,
+                    timed_out: false,
+                },
+            ],
+            &mut output,
+        );
+        emit(
+            "complete-headers-pass",
+            1,
+            &[
+                Event::Packets(0),
+                Event::Progress {
+                    progress: 0,
+                    status: 200,
+                },
+                Event::Complete {
+                    progress: 0,
+                    request_ok: true,
+                },
+                Event::Headers {
+                    closed: false,
+                    status: 200,
+                    got: 1,
+                },
+                Event::Packets(2),
+                Event::Progress {
+                    progress: 120,
+                    status: 200,
+                },
+                Event::Complete {
+                    progress: 120,
+                    request_ok: true,
+                },
+                Event::Headers {
+                    closed: false,
+                    status: 200,
+                    got: 1,
+                },
+                Event::Packets(2),
+                Event::Progress {
+                    progress: 10,
+                    status: 200,
+                },
+            ],
+            &mut output,
+        );
+        emit(
+            "complete-headers-unparsed",
+            1,
+            &[
+                Event::Packets(0),
+                Event::Progress {
+                    progress: 0,
+                    status: 200,
+                },
+                Event::Complete {
+                    progress: 0,
+                    request_ok: true,
+                },
+                Event::Headers {
+                    closed: false,
+                    status: 0,
+                    got: 1,
+                },
+            ],
+            &mut output,
+        );
+        emit(
+            "complete-headers-silence",
+            1,
+            &[
+                Event::Packets(0),
+                Event::Progress {
+                    progress: 0,
+                    status: 200,
+                },
+                Event::Complete {
+                    progress: 0,
+                    request_ok: true,
+                },
+                Event::Headers {
+                    closed: false,
+                    status: 0,
+                    got: 0,
+                },
+            ],
+            &mut output,
+        );
+        emit(
+            "complete-closed",
+            1,
+            &[
+                Event::Packets(0),
+                Event::Progress {
+                    progress: 0,
+                    status: 200,
+                },
+                Event::Complete {
+                    progress: 0,
+                    request_ok: true,
+                },
+                Event::Headers {
+                    closed: true,
+                    status: 0,
+                    got: 0,
+                },
+            ],
+            &mut output,
+        );
+        if let Ok(path) = std::env::var("R2O_QUIC_BUDGET_ORACLE_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
     }
 
     #[test]

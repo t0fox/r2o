@@ -1,8 +1,8 @@
 #!/bin/sh
-# C oracle request_page_budget + Rust branch tests. Это не полный
-# field-by-field differential: Rust request_page_budget не выделен в
-# самостоятельную функцию. C fixture доказывает, что verify.c линкуется с
-# mock budget_io; Rust-тесты покрывают redirect/challenge/keep-alive ветви.
+# C field-by-field oracle request_page_budget против production
+# r2o_request_page_budget_from_state. 9 кейсов: same-origin/external redirect,
+# challenge, denied-451, complete-2xx, short-body, keepalive-pass, conn-close,
+# silence.
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -38,6 +38,13 @@ trap cleanup EXIT HUP INT TERM
 "$TEMP/d2o-request-budget" >"$TEMP/c.out"
 cat "$TEMP/c.out"
 
+R2O_REQUEST_PAGE_BUDGET_DIFF_OUTPUT="$TEMP/rust.out" \
+    "$CARGO" test --manifest-path "$ROOT/Cargo.toml" --locked --offline \
+    -p r2o-controller --lib \
+    fetch::tests::request_page_budget_c_differential_matches_c \
+    -- --exact >"$TEMP/rust-diff.log" 2>&1
+diff -u "$TEMP/c.out" "$TEMP/rust.out"
+
 "$CARGO" test --manifest-path "$ROOT/Cargo.toml" --locked --offline \
     -p r2o-controller --lib same_origin_redirects_are_safe_and_portals_match_donor_signatures \
     -- --exact >"$TEMP/rust-redirect.log" 2>&1
@@ -48,5 +55,5 @@ cat "$TEMP/c.out"
     -p r2o-controller --lib budget_repeats_reuse_the_actual_redirected_request_like_c \
     -- --exact >"$TEMP/rust-keepalive.log" 2>&1
 
-printf 'PASS: C request_page_budget oracle and Rust redirect/challenge/keep-alive branches (D2O %s)\n' \
+printf 'PASS: C request_page_budget oracle and Rust production builder match (9 cases, D2O %s)\n' \
     "$ACTUAL_D2O_SHA"

@@ -1,6 +1,7 @@
 #!/bin/sh
-# C oracle budget_quic (verify.c + mock quic_budget_io) и Rust
-# threshold/growth differential. Полный Rust-аналог budget_quic отсутствует.
+# C field-by-field oracle budget_quic против production
+# r2o_quic_budget_from_events. 9 кейсов: packets<0, grew, request/recv error,
+# silence, complete+HEADERS pass/unparsed/silence, closed.
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -36,10 +37,17 @@ trap cleanup EXIT HUP INT TERM
 "$TEMP/d2o-budget-quic" >"$TEMP/c.out"
 cat "$TEMP/c.out"
 
+R2O_QUIC_BUDGET_ORACLE_OUTPUT="$TEMP/rust.out" \
+    "$CARGO" test --manifest-path "$ROOT/Cargo.toml" --locked --offline \
+    -p r2o-controller --lib \
+    r2o_quic_http3::tests::d2o_quic_budget_io_oracle_differential_matches_c \
+    -- --exact >"$TEMP/rust-budget.log" 2>&1
+diff -u "$TEMP/c.out" "$TEMP/rust.out"
+
 "$CARGO" test --manifest-path "$ROOT/Cargo.toml" --locked --offline \
     -p r2o-controller --lib \
     r2o_quic_http3::tests::d2o_quic_budget_growth_differential_matches_c \
     -- --exact >"$TEMP/cargo.log" 2>&1
 
-printf 'PASS: C budget_quic oracle and Rust QUIC threshold/growth differential (D2O %s)\n' \
+printf 'PASS: C budget_quic oracle and Rust production builder match (9 cases, D2O %s)\n' \
     "$ACTUAL_D2O_SHA"

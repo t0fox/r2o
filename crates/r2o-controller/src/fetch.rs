@@ -251,6 +251,261 @@ pub struct R2oHttpReadResponse {
     pub connection_close: bool,
 }
 
+/// Уровень C `d2k_ver_level`, который выставляет `request_page_budget`.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum R2oRequestPageLevel {
+    #[default]
+    NotMeasured = 0,
+    Transport = 1,
+    Handshake = 2,
+    Application = 3,
+    Challenge = 4,
+    BlockPage = 5,
+    Denied = 6,
+}
+
+/// Уже разобранный ответ/IO-исход одного шага `request_page_budget`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct R2oRequestPageResponse {
+    pub status: u16,
+    pub body_bytes: u64,
+    pub body_expected: u64,
+    pub complete: bool,
+    pub framing_valid: bool,
+    pub cloudflare_challenge: bool,
+    pub location: String,
+    pub outcome: R2oFetchHttpOutcome,
+    pub evidence: String,
+    pub connection_close: bool,
+    pub local_limit: bool,
+    /// Текст ошибки чтения, который C передаёт в `read_status_rd`.
+    pub read_error: String,
+}
+
+/// Результат одного шага C `request_page_budget`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct R2oRequestPageBudgetOutcome {
+    pub level: R2oRequestPageLevel,
+    pub status: u16,
+    pub complete: bool,
+    pub budget: crate::r2o_volume::R2oVolumePacketBudget,
+    pub location: String,
+    pub reason: String,
+}
+
+/// `Follow` — same-origin redirect, который C проходит следующим запросом.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum R2oRequestPageDecision {
+    Follow(String),
+    Final(R2oRequestPageBudgetOutcome),
+}
+
+/// Вход чистого `request_page_budget`: ответ, путь и уже полученный
+/// бюджетный исход. `initial_path == None` — корневой verifier-зонд C
+/// (`initial_path == NULL`), `Some` — явный ресурсный путь.
+#[derive(Clone, Debug)]
+pub struct R2oRequestPageBudgetState<'a> {
+    pub host: &'a str,
+    pub initial_path: Option<&'a str>,
+    pub redirects: u32,
+    pub tls12: bool,
+    pub response: &'a R2oRequestPageResponse,
+    pub budget: Option<&'a crate::r2o_volume::R2oPacketBudgetOutcome>,
+    pub write_error: Option<&'a str>,
+}
+
+fn r2o_request_page_reason_arg(text: &str, limit: usize) -> String {
+    text.chars().take(limit).collect()
+}
+
+fn r2o_request_page_budget_value(
+    state: &R2oRequestPageBudgetState<'_>,
+    level: R2oRequestPageLevel,
+    complete: bool,
+) -> crate::r2o_volume::R2oVolumePacketBudget {
+    if level == R2oRequestPageLevel::Application && complete {
+        state.budget.map_or(
+            crate::r2o_volume::R2oVolumePacketBudget::NotMeasured,
+            |budget| budget.budget,
+        )
+    } else {
+        crate::r2o_volume::R2oVolumePacketBudget::NotMeasured
+    }
+}
+
+fn r2o_request_page_final(
+    state: &R2oRequestPageBudgetState<'_>,
+    level: R2oRequestPageLevel,
+    reason: String,
+) -> R2oRequestPageDecision {
+    let response = state.response;
+    R2oRequestPageDecision::Final(R2oRequestPageBudgetOutcome {
+        level,
+        status: response.status,
+        complete: response.complete,
+        budget: r2o_request_page_budget_value(state, level, response.complete),
+        location: response.location.clone(),
+        reason,
+    })
+}
+
+/// C `request_page_budget` без IO: принимает уже разобранный ответ и
+/// возвращает ровно те level/status/complete/budget/location/reason, которые
+/// C выставил бы после `read_status_rd`/`budget_tcp`.
+pub fn r2o_request_page_budget_from_state(
+    state: &R2oRequestPageBudgetState<'_>,
+) -> R2oRequestPageDecision {
+    let response = state.response;
+    if let Some(error) = state.write_error {
+        return r2o_request_page_final(
+            state,
+            R2oRequestPageLevel::NotMeasured,
+            format!(
+                "запрос не ушёл: {}",
+                r2o_request_page_reason_arg(error, 150)
+            ),
+        );
+    }
+    if response.cloudflare_challenge {
+        return r2o_request_page_final(state, R2oRequestPageLevel::Challenge, String::new());
+    }
+    if response.outcome == R2oFetchHttpOutcome::Blocked {
+        return r2o_request_page_final(
+            state,
+            R2oRequestPageLevel::BlockPage,
+            format!("HTTP отказ: {}", response.evidence),
+        );
+    }
+    if response.outcome == R2oFetchHttpOutcome::LegalDenial {
+        return r2o_request_page_final(
+            state,
+            R2oRequestPageLevel::Denied,
+            format!("HTTP отказ: {}", response.evidence),
+        );
+    }
+    if (300..400).contains(&response.status) {
+        let same_origin = r2o_fetch_same_origin_redirect(&response.location, state.host);
+        if response.framing_valid
+            && state.redirects < 3
+            && let Some(next_path) = same_origin.as_ref()
+        {
+            if state.initial_path.is_some() && !crate::r2o_resource::r2o_resource_path_ok(next_path)
+            {
+                return r2o_request_page_final(
+                    state,
+                    R2oRequestPageLevel::Handshake,
+                    "stylesheet перенаправлен не на ресурс; не подтверждено".into(),
+                );
+            }
+            return R2oRequestPageDecision::Follow(next_path.clone());
+        }
+        if state.initial_path.is_none()
+            && response.complete
+            && same_origin.is_none()
+            && r2o_fetch_external_https_redirect(response.status, response.location.as_bytes())
+        {
+            return r2o_request_page_final(
+                state,
+                R2oRequestPageLevel::Application,
+                format!(
+                    "HTTP {}, HTTPS redirect получен полностью ({} байт); цель перехода не проверялась",
+                    response.status, response.body_bytes
+                ),
+            );
+        }
+        return r2o_request_page_final(
+            state,
+            R2oRequestPageLevel::Handshake,
+            format!(
+                "HTTP {} redirect не является подтверждением страницы этой цели",
+                response.status
+            ),
+        );
+    }
+    if response.status != 0 && response.complete {
+        return r2o_request_page_final(
+            state,
+            R2oRequestPageLevel::Application,
+            format!(
+                "HTTP {}, тело загружено полностью ({} байт){}",
+                response.status,
+                response.body_bytes,
+                if state.tls12 { " по TLS 1.2" } else { "" }
+            ),
+        );
+    }
+    if response.status != 0 {
+        return r2o_request_page_final(
+            state,
+            R2oRequestPageLevel::NotMeasured,
+            format!(
+                "HTTP {}, тело оборвалось ({}/{} байт): {}",
+                response.status,
+                response.body_bytes,
+                response.body_expected,
+                r2o_request_page_reason_arg(&response.read_error, 80)
+            ),
+        );
+    }
+    r2o_request_page_final(
+        state,
+        R2oRequestPageLevel::NotMeasured,
+        format!(
+            "нет полных заголовков окончательного HTTP-ответа: {}",
+            r2o_request_page_reason_arg(&response.read_error, 100)
+        ),
+    )
+}
+
+/// Шаг C `budget_tcp` без IO: порог, keep-alive-закрытие и рост счётчика.
+/// Production `r2o_measure_http_packet_budget` использует те же решения.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum R2oBudgetTcpAction {
+    Uncountable,
+    Passed,
+    ConnectionClose,
+    NotGrowing,
+    Repeat,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct R2oBudgetTcpState {
+    pub need: u32,
+    pub requests: u32,
+    last_packets: Option<u32>,
+}
+
+impl R2oBudgetTcpState {
+    pub fn r2o_new(budget: u32) -> Self {
+        Self {
+            need: budget.saturating_mul(2),
+            requests: 1,
+            last_packets: None,
+        }
+    }
+
+    pub fn r2o_step(&mut self, packets: Option<u32>, connection_close: bool) -> R2oBudgetTcpAction {
+        let Some(packets) = packets else {
+            return R2oBudgetTcpAction::Uncountable;
+        };
+        if packets >= self.need {
+            return R2oBudgetTcpAction::Passed;
+        }
+        if connection_close {
+            return R2oBudgetTcpAction::ConnectionClose;
+        }
+        if self
+            .last_packets
+            .is_some_and(|previous| packets <= previous)
+        {
+            return R2oBudgetTcpAction::NotGrowing;
+        }
+        self.last_packets = Some(packets);
+        R2oBudgetTcpAction::Repeat
+    }
+}
+
 /// Подтвердить только TLS-рукопожатие с ALPN, предложенным исходным клиентом.
 /// Этот путь намеренно не отправляет HTTP-запрос для MQTT и прочих протоколов.
 pub fn r2o_verify_tls_connected_stream_with_alpn(
@@ -1498,7 +1753,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
             && (location.is_empty() || !location.bytes().any(|byte| byte <= 0x20 || byte == 0x7f));
         r2o_framing_valid &= location_valid;
         let complete = parser.is_complete() && !parser.is_invalid() && location_valid;
-        let http_outcome = r2o_fetch_http_outcome(
+        let http_reply = r2o_http_reply_classify(
             parser.status(),
             location.as_bytes(),
             r2o_body_encoding == crate::r2o_volume::R2oVolumeRxEncoding::Identity,
@@ -1507,6 +1762,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
                 .map_or(&[][..], crate::r2o_resource::R2oResourceBodyTap::prefix),
             parser.body_bytes().saturating_add(u64::from(!complete)),
         );
+        let http_outcome = http_reply.outcome;
         let mut application_verified = complete
             && parser.status() >= 200
             && !cloudflare_challenge
@@ -1524,37 +1780,61 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
                     parser.status()
                 ));
             }
-        } else if is_redirect {
-            application_verified = false;
-            let same_origin_path = r2o_fetch_same_origin_redirect(&location, &options.name);
-            if complete
-                && r2o_framing_valid
-                && let Some(next_path) = same_origin_path.as_ref()
-            {
-                if redirects < 3
-                    && (root_probe || crate::r2o_resource::r2o_resource_path_ok(next_path))
-                {
-                    request_path.clone_from(next_path);
+        }
+        let request_page_initial_path = if root_probe {
+            None
+        } else {
+            Some(options.path.as_str())
+        };
+        let mut request_page_response = None;
+        if doh_query.is_none() {
+            // C `request_page_budget`: уже разобранный ответ решает
+            // level/complete/reason; IO-повторы бюджета добавляются ниже.
+            let read_error = reason.as_deref().map_or_else(String::new, |text| {
+                if text == "срок ожидания HTTP-ответа истёк" {
+                    "HTTP read timeout".to_owned()
+                } else {
+                    text.to_owned()
+                }
+            });
+            let page_response = R2oRequestPageResponse {
+                status: parser.status(),
+                body_bytes: parser.body_bytes(),
+                body_expected: body_expected.unwrap_or(0),
+                complete,
+                framing_valid: r2o_framing_valid,
+                cloudflare_challenge,
+                location: location.clone(),
+                outcome: http_outcome,
+                evidence: http_reply.evidence.to_owned(),
+                connection_close: r2o_http_connection_closes(headers),
+                local_limit: r2o_local_limit,
+                read_error,
+            };
+            let page_state = R2oRequestPageBudgetState {
+                host: &options.name,
+                initial_path: request_page_initial_path,
+                redirects,
+                tls12: options.tls12,
+                response: &page_response,
+                budget: None,
+                write_error: None,
+            };
+            match r2o_request_page_budget_from_state(&page_state) {
+                R2oRequestPageDecision::Follow(next_path) => {
+                    request_path.clone_from(&next_path);
                     redirects += 1;
                     continue;
                 }
-                if !root_probe && !crate::r2o_resource::r2o_resource_path_ok(next_path) {
-                    reason = Some("stylesheet перенаправлен не на ресурс; не подтверждено".into());
+                R2oRequestPageDecision::Final(outcome) => {
+                    application_verified = outcome.level == R2oRequestPageLevel::Application;
+                    reason = if outcome.reason.is_empty() {
+                        None
+                    } else {
+                        Some(outcome.reason)
+                    };
+                    request_page_response = Some(page_response);
                 }
-            } else if root_probe
-                && complete
-                && same_origin_path.is_none()
-                && http_outcome != R2oFetchHttpOutcome::Blocked
-                && !cloudflare_challenge
-                && r2o_fetch_external_https_redirect(parser.status(), location.as_bytes())
-            {
-                application_verified = true;
-            }
-            if !application_verified && reason.is_none() {
-                reason = Some(format!(
-                    "HTTP {} redirect не подтверждает страницу этой цели",
-                    parser.status()
-                ));
             }
         }
         let doh_probe = doh_query.is_some();
@@ -1619,7 +1899,27 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
                     r2o_http_connection_closes(parser.headers()),
                     &mut packet_counter,
                 );
-                (outcome.budget, Some(outcome.note))
+                let mut page_budget = outcome.budget;
+                if let Some(page_response) = request_page_response.as_ref() {
+                    let page_state = R2oRequestPageBudgetState {
+                        host: &options.name,
+                        initial_path: request_page_initial_path,
+                        redirects,
+                        tls12: options.tls12,
+                        response: page_response,
+                        budget: Some(&outcome),
+                        write_error: None,
+                    };
+                    if let R2oRequestPageDecision::Final(page_outcome) =
+                        r2o_request_page_budget_from_state(&page_state)
+                    {
+                        page_budget = page_outcome.budget;
+                        if !page_outcome.reason.is_empty() {
+                            reason = Some(page_outcome.reason);
+                        }
+                    }
+                }
+                (page_budget, Some(outcome.note))
             } else {
                 // C оставляет `r.budget` равным NOT_CHECKED до вызова
                 // `budget_tcp`; это ноль, а не NOT_APPLICABLE.
@@ -3268,32 +3568,39 @@ fn r2o_measure_http_packet_budget(
 
     // C `budget_tcp`: `need = budget * 2` — поток должен перенести две
     // серии, а не один исходный ответ.
-    let need = need.saturating_mul(2);
+    let mut state = R2oBudgetTcpState::r2o_new(need);
+    let need = state.need;
     let Some(mut packets) = packet_counter(&stream.sock.socket) else {
         return r2o_budget_say(
             Budget::NotApplicable,
             "пакеты потока не считаются (нет TCP_INFO data_segs) — бюджет не проверен",
         );
     };
-    let mut previous = None;
-    let mut requests = 1_u32;
     loop {
-        if packets >= need {
-            return r2o_budget_say(
-                Budget::Passed,
-                r2o_budget_passed_note(packets, need, requests),
-            );
+        match state.r2o_step(Some(packets), connection_close) {
+            R2oBudgetTcpAction::Uncountable => {
+                return r2o_budget_say(
+                    Budget::NotApplicable,
+                    "пакеты потока не считаются (нет TCP_INFO data_segs) — бюджет не проверен",
+                );
+            }
+            R2oBudgetTcpAction::Passed => {
+                return r2o_budget_say(
+                    Budget::Passed,
+                    r2o_budget_passed_note(packets, need, state.requests),
+                );
+            }
+            R2oBudgetTcpAction::ConnectionClose => {
+                return r2o_budget_say(
+                    Budget::NotApplicable,
+                    r2o_budget_conn_close_note(state.requests, packets, need),
+                );
+            }
+            R2oBudgetTcpAction::NotGrowing => {
+                return r2o_budget_say(Budget::NotApplicable, r2o_budget_not_growing_note(packets));
+            }
+            R2oBudgetTcpAction::Repeat => {}
         }
-        if connection_close {
-            return r2o_budget_say(
-                Budget::NotApplicable,
-                r2o_budget_conn_close_note(requests, packets, need),
-            );
-        }
-        if previous.is_some_and(|last| packets <= last) {
-            return r2o_budget_say(Budget::NotApplicable, r2o_budget_not_growing_note(packets));
-        }
-        previous = Some(packets);
 
         let repeat_deadline = Instant::now()
             .checked_add(read_timeout)
@@ -3302,7 +3609,7 @@ fn r2o_measure_http_packet_budget(
         if remaining.is_zero() {
             return r2o_budget_say(
                 Budget::Cut,
-                r2o_budget_cut_note(requests, packets, need, "истёк срок ожидания повтора"),
+                r2o_budget_cut_note(state.requests, packets, need, "истёк срок ожидания повтора"),
             );
         }
         if stream
@@ -3313,10 +3620,10 @@ fn r2o_measure_http_packet_budget(
         {
             return r2o_budget_say(
                 Budget::NotApplicable,
-                r2o_budget_replay_note(requests, false, "не удалось задать срок записи"),
+                r2o_budget_replay_note(state.requests, false, "не удалось задать срок записи"),
             );
         }
-        requests += 1;
+        state.requests += 1;
         if stream
             .write_all(request)
             .and_then(|()| stream.flush())
@@ -3324,7 +3631,7 @@ fn r2o_measure_http_packet_budget(
         {
             return r2o_budget_say(
                 Budget::NotApplicable,
-                r2o_budget_closed_note(requests, packets, need, "запись запроса не прошла"),
+                r2o_budget_closed_note(state.requests, packets, need, "запись запроса не прошла"),
             );
         }
         let mut parser = HttpResponseParser::with_header_capacity(false, 65_536);
@@ -3336,7 +3643,7 @@ fn r2o_measure_http_packet_budget(
             if remaining.is_zero() {
                 return r2o_budget_say(
                     Budget::Cut,
-                    r2o_budget_cut_note(requests, packets, need, "тайм-аут чтения повтора"),
+                    r2o_budget_cut_note(state.requests, packets, need, "тайм-аут чтения повтора"),
                 );
             }
             let silent_after = repeat_deadline
@@ -3350,7 +3657,7 @@ fn r2o_measure_http_packet_budget(
             {
                 return r2o_budget_say(
                     Budget::NotApplicable,
-                    r2o_budget_replay_note(requests, false, "не удалось задать срок чтения"),
+                    r2o_budget_replay_note(state.requests, false, "не удалось задать срок чтения"),
                 );
             }
             match stream.read(&mut buffer) {
@@ -3372,7 +3679,7 @@ fn r2o_measure_http_packet_budget(
                         return r2o_budget_say(
                             Budget::NotApplicable,
                             r2o_budget_replay_note(
-                                requests,
+                                state.requests,
                                 false,
                                 "ранний тайм-аут чтения повтора",
                             ),
@@ -3380,13 +3687,18 @@ fn r2o_measure_http_packet_budget(
                     }
                     return r2o_budget_say(
                         Budget::Cut,
-                        r2o_budget_cut_note(requests, packets, need, "тайм-аут чтения повтора"),
+                        r2o_budget_cut_note(
+                            state.requests,
+                            packets,
+                            need,
+                            "тайм-аут чтения повтора",
+                        ),
                     );
                 }
                 Err(error) => {
                     return r2o_budget_say(
                         Budget::NotApplicable,
-                        r2o_budget_replay_note(requests, false, &error.to_string()),
+                        r2o_budget_replay_note(state.requests, false, &error.to_string()),
                     );
                 }
             }
@@ -3395,7 +3707,7 @@ fn r2o_measure_http_packet_budget(
             return r2o_budget_say(
                 Budget::NotApplicable,
                 r2o_budget_replay_note(
-                    requests,
+                    state.requests,
                     r2o_http_local_limit(&parser),
                     r2o_http_error_reason(&parser),
                 ),
@@ -3404,14 +3716,14 @@ fn r2o_measure_http_packet_budget(
         if !parser.is_complete() {
             return r2o_budget_say(
                 Budget::NotApplicable,
-                r2o_budget_closed_note(requests, packets, need, "ответ не дочитан"),
+                r2o_budget_closed_note(state.requests, packets, need, "ответ не дочитан"),
             );
         }
         connection_close = eof || r2o_http_connection_closes(parser.headers());
         let Some(current) = packet_counter(&stream.sock.socket) else {
             return r2o_budget_say(
                 Budget::NotApplicable,
-                r2o_budget_replay_note(requests, false, "счётчик пакетов пропал"),
+                r2o_budget_replay_note(state.requests, false, "счётчик пакетов пропал"),
             );
         };
         packets = current;
@@ -6504,5 +6816,227 @@ mod tests {
             301,
             b"https://example.com:8443/[::1]"
         ));
+    }
+
+    #[test]
+    fn request_page_budget_c_differential_matches_c() {
+        use super::{
+            R2oBudgetTcpAction, R2oBudgetTcpState, R2oFetchHttpOutcome, R2oRequestPageBudgetState,
+            R2oRequestPageDecision, R2oRequestPageLevel, R2oRequestPageResponse,
+            r2o_budget_passed_note, r2o_budget_say, r2o_request_page_budget_from_state,
+        };
+        use crate::r2o_volume::{R2oPacketBudgetOutcome, R2oVolumePacketBudget};
+
+        fn response(
+            status: u16,
+            body_bytes: u64,
+            body_expected: u64,
+            complete: bool,
+            framing_valid: bool,
+            cloudflare_challenge: bool,
+            location: &str,
+            outcome: R2oFetchHttpOutcome,
+            evidence: &str,
+            connection_close: bool,
+            read_error: &str,
+        ) -> R2oRequestPageResponse {
+            R2oRequestPageResponse {
+                status,
+                body_bytes,
+                body_expected,
+                complete,
+                framing_valid,
+                cloudflare_challenge,
+                location: location.into(),
+                outcome,
+                evidence: evidence.into(),
+                connection_close,
+                local_limit: false,
+                read_error: read_error.into(),
+            }
+        }
+
+        fn budget_number(budget: R2oVolumePacketBudget) -> u8 {
+            match budget {
+                R2oVolumePacketBudget::NotMeasured => 0,
+                R2oVolumePacketBudget::NotApplicable => 3,
+                R2oVolumePacketBudget::Cut => 2,
+                R2oVolumePacketBudget::Passed => 1,
+            }
+        }
+
+        fn emit(
+            name: &str,
+            response: &R2oRequestPageResponse,
+            initial_path: Option<&str>,
+            budget: Option<&R2oPacketBudgetOutcome>,
+            output: &mut String,
+        ) {
+            let state = R2oRequestPageBudgetState {
+                host: "budget.example",
+                initial_path,
+                redirects: 0,
+                tls12: false,
+                response,
+                budget,
+                write_error: None,
+            };
+            match r2o_request_page_budget_from_state(&state) {
+                R2oRequestPageDecision::Follow(path) => {
+                    output.push_str(&format!("request|{name}|follow={path}\n"));
+                }
+                R2oRequestPageDecision::Final(result) => {
+                    output.push_str(&format!(
+                        "request|{name}|level={}|status={}|complete={}|budget={}|location={}|reason={}\n",
+                        result.level as u8,
+                        result.status,
+                        u8::from(result.complete),
+                        budget_number(result.budget),
+                        result.location,
+                        result.reason
+                    ));
+                }
+            }
+        }
+
+        let mut output = String::new();
+        let same_origin = response(
+            302,
+            0,
+            0,
+            true,
+            true,
+            false,
+            "/next",
+            R2oFetchHttpOutcome::Positive,
+            "",
+            false,
+            "",
+        );
+        emit("same-origin", &same_origin, Some("/"), None, &mut output);
+        let external = response(
+            302,
+            0,
+            0,
+            true,
+            true,
+            false,
+            "https://other.example/x",
+            R2oFetchHttpOutcome::Positive,
+            "",
+            false,
+            "",
+        );
+        emit("external-redirect", &external, Some("/"), None, &mut output);
+        let challenge = response(
+            403,
+            0,
+            0,
+            true,
+            true,
+            true,
+            "",
+            R2oFetchHttpOutcome::Positive,
+            "",
+            false,
+            "",
+        );
+        emit("challenge", &challenge, Some("/"), None, &mut output);
+        let denied = response(
+            451,
+            0,
+            0,
+            true,
+            true,
+            false,
+            "",
+            R2oFetchHttpOutcome::LegalDenial,
+            "HTTP 451",
+            false,
+            "",
+        );
+        emit("denied-451", &denied, Some("/"), None, &mut output);
+        let ok = response(
+            200,
+            2,
+            2,
+            true,
+            true,
+            false,
+            "",
+            R2oFetchHttpOutcome::Positive,
+            "",
+            false,
+            "",
+        );
+        emit("complete-2xx", &ok, Some("/"), None, &mut output);
+        let short = response(
+            200,
+            2,
+            10,
+            false,
+            true,
+            false,
+            "",
+            R2oFetchHttpOutcome::Positive,
+            "",
+            false,
+            "сервер закрыл соединение посреди тела",
+        );
+        emit("short-body", &short, Some("/"), None, &mut output);
+        let mut keepalive = R2oBudgetTcpState::r2o_new(3);
+        assert_eq!(
+            keepalive.r2o_step(Some(2), false),
+            R2oBudgetTcpAction::Repeat
+        );
+        assert_eq!(
+            keepalive.r2o_step(Some(6), false),
+            R2oBudgetTcpAction::Passed
+        );
+        let keepalive_budget = r2o_budget_say(
+            R2oVolumePacketBudget::Passed,
+            r2o_budget_passed_note(6, keepalive.need, keepalive.requests),
+        );
+        emit(
+            "keepalive-pass",
+            &ok,
+            Some("/"),
+            Some(&keepalive_budget),
+            &mut output,
+        );
+        let mut close = R2oBudgetTcpState::r2o_new(3);
+        assert_eq!(
+            close.r2o_step(Some(2), true),
+            R2oBudgetTcpAction::ConnectionClose
+        );
+        let close_budget = R2oPacketBudgetOutcome {
+            budget: R2oVolumePacketBudget::NotApplicable,
+            note: String::new(),
+        };
+        emit(
+            "conn-close",
+            &ok,
+            Some("/"),
+            Some(&close_budget),
+            &mut output,
+        );
+        let silence = response(
+            0,
+            0,
+            0,
+            false,
+            false,
+            false,
+            "",
+            R2oFetchHttpOutcome::Neutral,
+            "",
+            false,
+            "HTTP read timeout",
+        );
+        emit("silence", &silence, Some("/"), None, &mut output);
+        assert_eq!(R2oRequestPageLevel::Application as u8, 3);
+        if let Ok(path) = std::env::var("R2O_REQUEST_PAGE_BUDGET_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
     }
 }
