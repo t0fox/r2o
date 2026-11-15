@@ -8157,9 +8157,25 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
                 );
             }
         }
+        let mut applied_flow = None;
         let applied = events.iter().any(|event| {
-            r2o_family_applied_flow_matches(event, target, local_port, candidate.plan_id, trial_id)
+            let matched = r2o_family_applied_flow_matches(
+                event,
+                target,
+                local_port,
+                candidate.plan_id,
+                trial_id,
+            );
+            if matched {
+                applied_flow = Some(event.key);
+            }
+            matched
         });
+        // C `t->ver_flow` заполняется по ключу реального зонда; здесь тот же
+        // ключ берётся из подтверждённого APPLIED и передаётся main loop.
+        if let Some(flow) = applied_flow {
+            r2o_discovery_verified_flow_set(target, flow);
+        }
         Ok((fetch_result, applied, transport_established))
     })();
     r2o_controller::fetch::r2o_fetch_doh_query_set(None);
@@ -10071,6 +10087,61 @@ fn r2o_discovery_meta_take(
         .remove(target)
 }
 
+/// Ключ потока подтверждённой пробы — C `task.ver_flow`. Worker и main loop
+/// разделены каналом исходов, поэтому ключ передаётся отдельной картой по
+/// цели: `on_exchange` сверяет с ним последующее наблюдение и не засчитывает
+/// собственный зонд как чужое живое соединение.
+#[cfg(unix)]
+fn r2o_discovery_verified_flow_map() -> &'static std::sync::Mutex<
+    HashMap<r2o_controller::discovery::DiscoveryTarget, [u8; r2k_core::control::KEY_LEN]>,
+> {
+    static FLOWS: std::sync::OnceLock<
+        std::sync::Mutex<
+            HashMap<r2o_controller::discovery::DiscoveryTarget, [u8; r2k_core::control::KEY_LEN]>,
+        >,
+    > = std::sync::OnceLock::new();
+    FLOWS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+#[cfg(unix)]
+fn r2o_discovery_verified_flow_set(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    key: [u8; r2k_core::control::KEY_LEN],
+) {
+    r2o_discovery_verified_flow_map()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(target.clone(), key);
+}
+
+#[cfg(unix)]
+fn r2o_discovery_verified_flow_take(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+) -> Option<[u8; r2k_core::control::KEY_LEN]> {
+    r2o_discovery_verified_flow_map()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(target)
+}
+
+/// C `ev_matches_flow` (`core/compose.c:351-366`): поток сравнивается как
+/// НЕУПОРЯДОЧЕННАЯ пара адрес:порт плюс транспорт/семейство.
+#[cfg(unix)]
+fn r2o_flow_keys_match(
+    left: &[u8; r2k_core::control::KEY_LEN],
+    right: &[u8; r2k_core::control::KEY_LEN],
+) -> bool {
+    let left_family = if left[0] == 0 { 4 } else { left[0] };
+    let right_family = if right[0] == 0 { 4 } else { right[0] };
+    if left_family != right_family || !matches!(left_family, 4 | 6) || left[37] != right[37] {
+        return false;
+    }
+    let (left_low, left_high) = flow_socket_addresses(left, true);
+    let (right_low, right_high) = flow_socket_addresses(right, true);
+    (left_low == right_low && left_high == right_high)
+        || (left_low == right_high && left_high == right_low)
+}
+
 /// C `task.trigger_code` для кандидатов: нужен `install_next`-эффект
 /// `rst_guard_wanted` (RST/RST_CUT/RST_AFTER_APP), который worker применяет к
 /// проводной копии плана. Ключ — task key, не endpoint: резолв цели меняет
@@ -10805,6 +10876,48 @@ fn r2o_legacy_exchange_is_clean(event: &r2k_core::control::LegacyExchangeEvent) 
 #[cfg(unix)]
 fn r2o_ev_outer_appdata(event: Option<&r2k_core::control::LegacyExchangeEvent>) -> bool {
     event.is_some_and(|event| event.seen_types & 0x08 != 0)
+}
+
+/// C `on_exchange` (`sched.c:10626-10649`), ветвь `d2k_ev_outer_appdata`:
+/// последующий TLS-ответ по подтверждённому имени освобождает только задачу
+/// наблюдения (`T_WATCHING`), но не подтверждённый план. Собственный зонд
+/// узнаётся по ключу потока (`t->ver_flow`), а не по флагу `planned`.
+#[cfg(unix)]
+fn r2o_handle_outer_appdata_followup(
+    worker: &mut DiscoveryWorker,
+    event: &r2k_core::control::LegacyExchangeEvent,
+    recent_tcp_names: &R2oRecentTcpNameCache,
+) -> bool {
+    if !r2o_ev_outer_appdata(Some(event)) {
+        return false;
+    }
+    let Some(name) = recent_tcp_names.recall(&event.key) else {
+        return false;
+    };
+    let name = name.to_owned();
+    // R2oDiscoveryTaskKey = (host, transport, family) — транспорт раньше
+    // семейства, как в `r2o_discovery_task_key`.
+    let task_key = (name.clone(), event.key[37], event.key[0]);
+    if !worker.r2o_is_watching_task(&task_key) {
+        return false;
+    }
+    if worker.r2o_watching_flow_matches(&task_key, &event.key) {
+        return false;
+    }
+    let now = std::time::Instant::now();
+    if !worker.r2o_finish_watching_task(&task_key, now) {
+        return false;
+    }
+    r2o_say_quiet(
+        &format!("followup-tls:{name}"),
+        format!(
+            "v22 EXCHANGE {name}: замечен последующий TLS-ответ ({} байт); \
+             это не доказательство работы приложения клиента — уровень и \
+             источник подтверждения не меняются",
+            event.num
+        ),
+    );
+    true
 }
 
 #[cfg(unix)]
@@ -13515,6 +13628,9 @@ struct DiscoveryWorker {
         ),
     >,
     dns_watching_order: VecDeque<R2oDiscoveryTaskKey>,
+    /// C `t->ver_flow` подтверждённой задачи: по нему `on_exchange`
+    /// отличает собственный зонд от последующего живого соединения.
+    watching_flow: HashMap<R2oDiscoveryTaskKey, [u8; r2k_core::control::KEY_LEN]>,
     /// C `T_SHAPE_WAIT`: ожидание снимка QUIC по имени/транспорту/семейству.
     /// Карта ведётся задачей Discovery, а не очередью замеров: worker и
     /// permit не занимаются, пока снимка нет.
@@ -16893,6 +17009,7 @@ group_block_proven: false,
             completed_started_at: HashMap::new(),
             dns_watching: HashMap::new(),
             dns_watching_order: VecDeque::new(),
+            watching_flow: HashMap::new(),
             shape_waits: HashMap::new(),
             shape_wait_order: VecDeque::new(),
             task_slots: vec![None; R2O_DISCOVERY_TASK_CAPACITY],
@@ -17425,14 +17542,67 @@ group_block_proven: false,
             })
     }
 
-    /// C `on_exchange` (`sched.c:10311-10322`): последующий TLS-ответ по
+    /// C `on_exchange` (`sched.c:10626-10649`): последующий TLS-ответ по
     /// подтверждённому имени — только наблюдение. Задача наблюдения
-    /// освобождается, подтверждённый план остаётся стоять.
+    /// освобождается (`task_done`), подтверждённый план остаётся стоять.
     fn r2o_note_followup_tls_observation(&mut self, task_key: &R2oDiscoveryTaskKey) -> bool {
-        if !self.completed.remove(task_key) {
+        if !self.completed.contains(task_key) {
             return false;
         }
-        self.completed_started_at.remove(task_key);
+        self.r2o_forget_completed_task(task_key, true);
+        true
+    }
+
+    /// C `t->state == T_WATCHING`: задача подтверждена и смотрит живой трафик.
+    fn r2o_is_watching_task(&self, task_key: &R2oDiscoveryTaskKey) -> bool {
+        self.completed.contains(task_key) || self.dns_watching.contains_key(task_key)
+    }
+
+    /// C `ev_matches_flow(ev, &t->ver_flow)`: событие принадлежит
+    /// собственному зонду подтверждённой задачи, а не чужому соединению.
+    fn r2o_watching_flow_matches(
+        &self,
+        task_key: &R2oDiscoveryTaskKey,
+        flow: &[u8; r2k_core::control::KEY_LEN],
+    ) -> bool {
+        self.watching_flow
+            .get(task_key)
+            .is_some_and(|own| r2o_flow_keys_match(own, flow))
+    }
+
+    /// C `task_done` для наблюдателя: `search_report("cancelled")`, закрытие
+    /// contact/prop/ver и освобождение слота. Подтверждённый план не трогаем.
+    fn r2o_finish_watching_task(
+        &mut self,
+        task_key: &R2oDiscoveryTaskKey,
+        now: std::time::Instant,
+    ) -> bool {
+        if !self.r2o_is_watching_task(task_key) {
+            return false;
+        }
+        let target = self
+            .dns_watching
+            .get(task_key)
+            .map(|(target, _)| target.clone())
+            .or_else(|| {
+                let searches = self
+                    .searches
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                searches
+                    .entries
+                    .get(task_key)
+                    .map(|search| search.target.clone())
+            });
+        let Some(target) = target else {
+            return false;
+        };
+        self.searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .report_terminal(&target, "cancelled", None, None, now);
+        self.r2o_forget_completed_task(task_key, true);
+        self.r2o_reconcile_task_slots(now);
         true
     }
 
@@ -17596,6 +17766,7 @@ group_block_proven: false,
     ) {
         self.completed.remove(task_key);
         self.completed_started_at.remove(task_key);
+        self.watching_flow.remove(task_key);
         if drop_dns_watching {
             self.r2o_forget_dns_watching(task_key);
         }
@@ -18889,6 +19060,10 @@ group_block_proven: false,
 
     fn r2o_complete_outcome(&mut self, mut outcome: DiscoveryOutcome) -> DiscoveryOutcome {
         r2o_discovery_trigger_remove(&outcome.target);
+        // Ключ зонда берём один раз: подтверждение сохраняет его как
+        // `t->ver_flow`, любой другой исход запись снимает — карта не должна
+        // копить цели на 128 МиБ роутере.
+        let verified_flow = r2o_discovery_verified_flow_take(&outcome.target);
         if !outcome.direct_clear {
             // Метаданные нужны только DIRECT_CLEAR; иначе ключ цели копил бы
             // записи каждого классификатора.
@@ -19126,6 +19301,16 @@ group_block_proven: false,
                     .unwrap_or_else(std::time::Instant::now);
                 self.completed.insert(task_key.clone());
                 self.r2o_remember_dns_watching(task_key.clone(), outcome.target.clone());
+                // C `t->ver_flow`: ключ подтверждённой пробы. Без него
+                // `on_exchange` не отличит свой зонд от чужого соединения.
+                match verified_flow {
+                    Some(flow) => {
+                        self.watching_flow.insert(task_key.clone(), flow);
+                    }
+                    None => {
+                        self.watching_flow.remove(&task_key);
+                    }
+                }
                 self.completed_started_at.insert(task_key, started_at);
             }
             self.failed_at.remove(&failure_key);
@@ -25757,27 +25942,10 @@ impl ControlClient {
             }
         }
         // C `on_exchange`: внешний тип 23 по подтверждённому имени — лишь
-        // наблюдение «последующего TLS-ответа». Поток собственного зонда под
-        // планом не считается последующим соединением.
-        if r2o_ev_outer_appdata(Some(event))
-            && event.planned != r2k_core::control::LEGACY_PLANNED_YES
-            && let Some(name) = recent_tcp_names.recall(&event.key)
-        {
-            let task_key = (name.to_owned(), event.key[0], event.key[37]);
-            let freed = discovery.as_mut().is_some_and(|(worker, _, _, _)| {
-                worker.r2o_note_followup_tls_observation(&task_key)
-            });
-            if freed {
-                r2o_say_quiet(
-                    &format!("followup-tls:{name}"),
-                    format!(
-                        "v22 EXCHANGE {name}: замечен последующий TLS-ответ ({} байт); \
-                         это не доказательство работы приложения клиента — уровень и \
-                         источник подтверждения не меняются",
-                        event.num
-                    ),
-                );
-            }
+        // наблюдение «последующего TLS-ответа». Собственный зонд отличается
+        // ключом потока (`t->ver_flow`), а не флагом planned.
+        if let Some((worker, _, _, _)) = discovery.as_mut() {
+            r2o_handle_outer_appdata_followup(worker, event, recent_tcp_names);
         }
         let _ = std::io::Write::flush(&mut std::io::stdout());
     }
@@ -38993,6 +39161,7 @@ mod tests {
             completed_started_at: std::collections::HashMap::new(),
             dns_watching: std::collections::HashMap::new(),
             dns_watching_order: VecDeque::new(),
+            watching_flow: std::collections::HashMap::new(),
             shape_waits: std::collections::HashMap::new(),
             shape_wait_order: VecDeque::new(),
             task_slots: vec![None; super::R2O_DISCOVERY_TASK_CAPACITY],
@@ -40451,6 +40620,221 @@ mod tests {
         // Имя без подтверждённой задачи не освобождается.
         let unknown = ("unknown.example".to_string(), 4, 6);
         assert!(!worker.r2o_note_followup_tls_observation(&unknown));
+    }
+
+    /// C-дифференциал `on_exchange`/`d2k_ev_outer_appdata`: задачу
+    /// `T_WATCHING` освобождает только ЧУЖОЙ поток; собственный зонд
+    /// (`t->ver_flow`) и неподтверждённая задача остаются на месте.
+    #[cfg(unix)]
+    #[test]
+    fn outer_appdata_followup_matches_c() {
+        use super::{
+            R2oRecentTcpNameCache, SHAPE_MODERN, r2o_discovery_task_key,
+            r2o_handle_outer_appdata_followup,
+        };
+        use r2k_core::control::{
+            HelloEvent, KEY_LEN, LEGACY_PLANNED_NO, LEGACY_PLANNED_YES, LegacyExchangeEvent,
+        };
+        use r2o_controller::discovery::DiscoveryTarget;
+
+        fn flow_key(client_port: u16) -> [u8; KEY_LEN] {
+            let mut key = [0_u8; KEY_LEN];
+            key[0] = 4;
+            key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+            key[17..21].copy_from_slice(&[198, 51, 100, 10]);
+            key[33..35].copy_from_slice(&client_port.to_be_bytes());
+            key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+            key[37] = 6;
+            key
+        }
+
+        let appdata = 1_u8 << (23 - 20);
+        let handshake_only = 1_u8 << (22 - 20);
+        let target = DiscoveryTarget {
+            host: "watch.example".into(),
+            endpoint: "198.51.100.10:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let task_key = r2o_discovery_task_key(&target);
+
+        struct Scenario {
+            label: &'static str,
+            task_state: &'static str,
+            known_name: bool,
+            event_port: u16,
+            ver_flow: bool,
+            seen_types: u8,
+            planned: u8,
+        }
+        let scenarios = [
+            Scenario {
+                label: "foreign_flow",
+                task_state: "watching",
+                known_name: true,
+                event_port: 40001,
+                ver_flow: true,
+                seen_types: appdata,
+                planned: LEGACY_PLANNED_NO,
+            },
+            Scenario {
+                label: "own_probe_flow",
+                task_state: "watching",
+                known_name: true,
+                event_port: 40000,
+                ver_flow: true,
+                seen_types: appdata,
+                planned: LEGACY_PLANNED_NO,
+            },
+            Scenario {
+                label: "foreign_flow_planned_yes",
+                task_state: "watching",
+                known_name: true,
+                event_port: 40001,
+                ver_flow: true,
+                seen_types: appdata,
+                planned: LEGACY_PLANNED_YES,
+            },
+            Scenario {
+                label: "not_watching",
+                task_state: "planning",
+                known_name: true,
+                event_port: 40001,
+                ver_flow: true,
+                seen_types: appdata,
+                planned: LEGACY_PLANNED_NO,
+            },
+            Scenario {
+                label: "no_ver_flow_foreign",
+                task_state: "watching",
+                known_name: true,
+                event_port: 40001,
+                ver_flow: false,
+                seen_types: appdata,
+                planned: LEGACY_PLANNED_NO,
+            },
+            Scenario {
+                label: "unknown_name",
+                task_state: "watching",
+                known_name: false,
+                event_port: 40001,
+                ver_flow: true,
+                seen_types: appdata,
+                planned: LEGACY_PLANNED_NO,
+            },
+            Scenario {
+                label: "non_appdata",
+                task_state: "watching",
+                known_name: true,
+                event_port: 40001,
+                ver_flow: true,
+                seen_types: handshake_only,
+                planned: LEGACY_PLANNED_NO,
+            },
+        ];
+
+        let mut output = String::new();
+        for scenario in scenarios {
+            let mut worker = r2o_test_discovery_worker_without_threads();
+            {
+                let mut searches = worker
+                    .searches
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                searches.update(
+                    &target,
+                    "проверяем выведенный план",
+                    1,
+                    1,
+                    "candidate",
+                    "свой план каталога",
+                );
+                searches.record_admission(&target, Some(3));
+            }
+            if scenario.task_state == "watching" {
+                worker.completed.insert(task_key.clone());
+                worker
+                    .completed_started_at
+                    .insert(task_key.clone(), std::time::Instant::now());
+                worker.r2o_remember_dns_watching(task_key.clone(), target.clone());
+            }
+            if scenario.ver_flow {
+                worker
+                    .watching_flow
+                    .insert(task_key.clone(), flow_key(40000));
+            }
+
+            let event_key = flow_key(scenario.event_port);
+            let mut names = R2oRecentTcpNameCache::default();
+            if scenario.known_name {
+                names.note(
+                    &HelloEvent {
+                        key: event_key,
+                        host: Some(b"watch.example".to_vec()),
+                        shape: None,
+                        r2o_wire_len: None,
+                        quic_snapshot: None,
+                        tcp_has_timestamp: None,
+                    },
+                    std::time::Instant::now(),
+                );
+            }
+            let event = LegacyExchangeEvent {
+                key: event_key,
+                first_record_type: 23,
+                seen_types: scenario.seen_types,
+                num: 1234,
+                server_hello: false,
+                planned: scenario.planned,
+            };
+            r2o_handle_outer_appdata_followup(&mut worker, &event, &names);
+
+            let state = if scenario.task_state != "watching" {
+                "other"
+            } else if worker.r2o_is_watching_task(&task_key) {
+                "watching"
+            } else {
+                "free"
+            };
+            let report = {
+                let searches = worker
+                    .searches
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if searches
+                    .entries
+                    .get(&task_key)
+                    .is_some_and(|search| search.report_closed)
+                {
+                    "cancelled"
+                } else {
+                    "-"
+                }
+            };
+            output.push_str(&format!(
+                "{} state={state} report={report}\n",
+                scenario.label
+            ));
+        }
+        if let Ok(path) = std::env::var("R2O_OUTER_APPDATA_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        assert!(
+            output.contains("foreign_flow state=free report=cancelled"),
+            "{output}"
+        );
+        assert!(
+            output.contains("own_probe_flow state=watching report=-"),
+            "{output}"
+        );
+        assert!(
+            output.contains("foreign_flow_planned_yes state=free report=cancelled"),
+            "{output}"
+        );
+        assert!(
+            output.contains("not_watching state=other report=-"),
+            "{output}"
+        );
     }
 
     #[test]
@@ -54718,6 +55102,7 @@ group_block_proven: false,
             completed_started_at: std::collections::HashMap::new(),
             dns_watching: std::collections::HashMap::new(),
             dns_watching_order: VecDeque::new(),
+            watching_flow: std::collections::HashMap::new(),
             shape_waits: std::collections::HashMap::new(),
             shape_wait_order: VecDeque::new(),
             active: std::collections::HashMap::new(),
