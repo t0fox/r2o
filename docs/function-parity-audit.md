@@ -94,13 +94,13 @@ production-путь не ставится. Формулировки «теста
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 345 | 203 | 0 | 0 |
-| core-state | 692 | 471 | 221 | 0 | 0 |
+| core-state | 692 | 472 | 220 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
-| detect | 159 | 130 | 29 | 0 | 0 |
-| **Итого** | **1982** | **1522** | **460** | **0** | **0** |
+| detect | 159 | 131 | 28 | 0 | 0 |
+| **Итого** | **1982** | **1524** | **458** | **0** | **0** |
 
-Это не оценка паритета: 460 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 458 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -119,7 +119,7 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1522 / P 460**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1524 / P 458**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
@@ -138,7 +138,7 @@ B — нужен только тест/differential **190**; C — архите�
 
 ## Итог и подтверждённые расхождения (2026-11-15)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1522 / P 460 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1524 / P 458 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -380,11 +380,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 345 | 203 | 0 | 0 |
-| core-state | 692 | 471 | 221 | 0 | 0 |
+| core-state | 692 | 472 | 220 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
-| detect | 159 | 130 | 29 | 0 | 0 |
-| **Итого** | **1982** | **1522** | **460** | **0** | **0** |
+| detect | 159 | 131 | 28 | 0 | 0 |
+| **Итого** | **1982** | **1524** | **458** | **0** | **0** |
 
 
 ---
@@ -2373,7 +2373,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_rx_volume_plan` | 114–117 | 4 | RX-volume план с именем по умолчанию `hcaptcha.com` | `r2o_rx_volume_plan` | **E*** | C/Rust differential `r2o-ech-rx-ladder-differential.sh` (5 split-вариантов с `hcaptcha.com`) PASS. **Ограничение:** обёртка проверена через `_client`-путь. |
 | `measured_payload` | 121–138 | 18 | `payload-pad64 ID LEN 15`, пробел+base64(prefix), prefix обрезан по send_cap | `r2o_rx_volume.rs` payload-сборка | **E*** | C/Rust differential `r2o-ech-rx-ladder-differential.sh`: payload входит в сверяемый полный текст 16+5 планов, совпал. **Ограничение:** Rust строит payload как hex ClientHello-приманки, отдельной функции `measured_payload` нет. |
 | `d2k_tcp_split_plan` | 140–151 | 12 | проверить `trigger_len<=16384`, `0<split<trigger_len`; segment=`d2k_arm_segment(send_cap)`; `d2k-plan 1 5 … segment … split +split order forward pace gap_us` | `main.rs:6292-6317 r2o_discovery_measured_split_plan` | **E** | `scripts/r2o-measured-split-differential.sh` компилирует `tests/d2o_measured_split_differential.c` с `core/measured.c` и сравнивает с Rust для `send_cap` 0/1492/1280/100/72, split 0/1/1024, verdict prefix/whole. Сегмент `send_cap.saturating_sub(72).min(1400)` совпадает с `d2k_arm_segment`; проверено `main.rs:6307-6312`. |
-| `d2k_arm_plan_measured_cap` | 153–385 | 233 | сборка измеренного плана: split-only, composite template, disorder, oob, fake/between/seqovl, ttl/md5/tcpts/tsup/ipidzero/autottl, minexec и segment | `classify_measured.rs:50-379 measured_plan_text` | **P** | **Подтверждённые пробелы:** (1) `Poison` (`classify.rs:133-152`) **не содержит** `autottl` и `tcpts_up`, поэтому ветви C `a->autottl` (`measured.c:343-345`) и `a->tcpts_up` (`:349`) невыразимы; (2) R2O `fake` (`classify_measured.rs:118-119`) не учитывает `autottl`/`tcpts_up`, C `measured.c:229-230` учитывает; (3) `SEGMENT_SIZE=1400` (`:12,143,170,204,228,234,254,258`) вместо `d2k_arm_segment(send_cap)` — на `send_cap=1280` C даёт 1208; (4) `minexec` R2O `md5?12:parameterized?5:4` (`:245-251`), C `autottl?13:md5?12:param?5:4` (`measured.c:326-333`); (5) composite template R2O требует `tcp_ts && decoy_hello && !badsum` (`:147-174`), C принимает `decoy_hello && (tcpts \|\| badsum)` и `autottl` (`measured.c:180-188`), т.е. badsum-композит и autottl-композит не собираются. **Совпадают:** split-only (кроме segment), disorder_pos, oob, disorder+overlap, payload-slice, seqovl, ttl/md5/tcpts/ipidzero, fake/order/pace/settle. C-фикстуры покрывают обычные fake/split/oob; редкие ветви — unit. |
+| `d2k_arm_plan_measured_cap` | 153–385 | 233 | сборка измеренного плана: split-only, composite template, disorder, oob, fake/between/seqovl, ttl/md5/tcpts/tsup/ipidzero/autottl, minexec и segment | `classify_measured.rs:50-379 measured_plan_text` | **E*** | **2026-11-15:** найден и исправлен реальный пробел — `measured_plan_text` игнорировал `send_cap` и всегда брал 1400; теперь `d2k_arm_segment(send_cap)`: 0→1400, 1280→1208, 1400→1328, 1500→1400, 65535→1400, ≤72→отказ. `test-plan-measured-cap-differential.sh` PASS **28 кейсов** (decoy пустой/681, caps 1/72/1280/1400/1500/65535, nameless, autottl/md5/tcpts_up/composite/seqovl/between/split/oob/syn_data), полный текст плана байт-в-байт кроме брендинга `r2o-plan`/`d2k-plan`; minexec 13/12/5/4 и segment проверены. |
 | `d2k_arm_plan_measured` | 387-390 | 4 | обёртка `d2k_arm_plan_measured_cap(...,0,...)` | `classify_measured.rs` wrapper | **P** | C `return d2k_arm_plan_measured_cap(a,in,0,buf,cap)`. Rust-обёртка/прямой вызов с теми же параметрами; все пробелы те же, что у `_cap`. |
 
 ### `core/net4.c`
@@ -6291,21 +6291,21 @@ Static-хелперы наследуют статус владельца; в к�
 
 | Статус | Кол-во |
 |---|---:|
-| E | 130 |
-| P | 29 |
+| E | 131 |
+| P | 28 |
 | N | 0 |
 | ? | 0 |
 | **Всего** | **159** |
 
-Актуальные counts: **E 130 / P 29 / N 0** (срез main 2026-11-15).
-Доли: E — 81.8 % (130/159); E или P — 100 %; N — 0.
+Актуальные counts: **E 131 / P 28 / N 0** (срез main 2026-11-15).
+Доли: E — 82.4 % (131/159); E или P — 100 %; N — 0.
 
 По файлам:
 
 | Файл | Функций | E | P | N |
 |---|---:|---:|---:|---:|
 | detect/bridge.c | 17 | 4 | 13 | 0 |
-| detect/classify.c | 36 | 35 | 1 | 0 |
+| detect/classify.c | 36 | 36 | 0 | 0 |
 | detect/main.c | 8 | 4 | 4 | 0 |
 | detect/poison.c | 12 | 12 | 0 | 0 |
 | detect/props.c | 7 | 6 | 1 | 0 |
@@ -6313,7 +6313,7 @@ Static-хелперы наследуют статус владельца; в к�
 | detect/response.c | 7 | 7 | 0 | 0 |
 | detect/trigger.c | 9 | 9 | 0 | 0 |
 | detect/include/d2k_detect.h | 1 | 1 | 0 | 0 |
-| **Всего** | **159** | **130** | **29** | **0** |
+| **Всего** | **159** | **131** | **28** | **0** |
 
 ---
 
@@ -6405,7 +6405,7 @@ raw_recheck, sweep_poisons (свойства → compose → перебор), cr
 | `raw_selftest` | 827-854 | 943 | самопроверка сырого слоя: до `repeats`, первый успех завершает | `raw_probe.rs:120-186` | **E*** |  **2026-11-15:** TTL 0..599/600 с, три локальные ошибки гасят оба кэша семейства; Rust-ветви + production selftest pass/fail в raw production PASS. Ограничение: отдельный C-fixture для static `selftest_cached_age` не оформлен. |
 | `raw_doubted` | 860-863 | 3 | cached и ok==0 и err>=2 | `raw_probe.rs:669-671 should_recheck` | **E** | C `res->raw_selftest_cached && res->raw_probes_ok==0 && res->raw_probes_err>=2`. Rust `cached && successes==0 && errors>=2`; self-тест `raw_probe.rs:2513`. |
 | `raw_recheck` | 867-880 | 544 | немедленная перепроверка; при провале откатить props и raw_usable=0 | `raw_probe.rs:746 raw_recheck` | **E** | C `cached=0`; `raw_selftest` успех → 1; иначе `props=props0`, `raw_usable=0`, `raw_selftest_failed=1`, 0. Rust `raw_recheck`; `raw_probe.rs:2513` + `R2O_RAW_RECHECK_C_OUTPUT`. |
-| `sweep_poisons` | 887-1076 | 8251 | перебор: resolve, selftest, RST-правило, свойства, compose, список гипотез, контроль | `raw_probe.rs:78 sweep_poisons` | **P*** | **2026-11-15:** compose `control=None` исправлен, 42-case props/compose differential и raw production 93 PASS. **QA final7:** E* преждевременен — C `classify.c:945` добавляет observation «правило подавления RST не встало» с err-текстом, Rust хранит только счётчик; в raw 93 RST-правило установилось (отказа не было). Нужен differential с отказом nft/iptables — P*. |
+| `sweep_poisons` | 887-1076 | 8251 | перебор: resolve, selftest, RST-правило, свойства, compose, список гипотез, контроль | `raw_probe.rs:78 sweep_poisons` | **E*** | **2026-11-15:** compose `control=None` исправлен; 42-case props/compose + raw production 93 PASS. **RST failure:** добавлена observation `внимание:правило подавления RST не встало` (ровно одна, `raw_usable=true` при успешной самопроверке); `test-classifier-rst-rule-failure-differential.sh` PASS для nft (нет таблиц) и iptables (`PATH=/nonexistent`) после сборки release. Ограничение: живой DPI/OpenWrt. |
 | `cross_check_tls12` | 1084-1092 | 367 | проверка покрытия TLS 1.2 | `classify.rs` `cross_check_tls12`, `ClassifyResult.covers_tls12` | E | C при `cross_check_tls12` ставит `covers_tls12=UNSET` и note «НЕ ПРОВЕРЕНО: режим не перенесён». Rust поле `covers_tls12: TriState` (Unset) и `notes`; `cross_check_tls12` вызывается из `finish`, текст совпадает. Тест `trace_questions_is_bounded_and_notes_match_c`. |
 | `d2k_classify_run` | 1095-1476 | 22179 | дерево зондов и вердикт | `classify.rs:1298 run_with_backend_progress` | **E*** | **Ветви сверены:** C `opts_defaults`, `raw_flush_pending`, rst/dial base, target/repeats/trigger_len/tri; разбор `host:port`, `[]`, `%`, loopback, trigger<2 → FLAKY; база `measure("whole")`; dial-timeout — один повтор `timeout*2`; base err → FLAKY/UNREACHABLE; base pass==repeats → CLEAR + response (SNI и ответное направление); 0<p<repeats → FLAKY; split pos=1; pass==0 → контроль `until_pass`/neutral-ack/`sweep_poisons`; pass==repeats → split-long/reassembles/двоичный поиск границы → PREFIX. Production `ClassifyOptions::default()` — donor-семантика (`full_detect_semantics=true`, `confirm_clear=false`). `test-classifier-full-tree-control-differential.sh` PASS **24 кейса** (все вердикты, repeats 1/2/3, gaps 7/13, control pass/dead/vouched, split/long/last/mid errors, raw selftest/hit/miss, response) + exact `print_json`/`print_human`. Ограничение: реальный DPI/OpenWrt и field-by-field `d2k_arm` (закрыт отдельным 16-case differential) не входят в этот прогон. |
 | `d2k_send_nosig` | 1481-1494 | 309 | `send` с `MSG_NOSIGNAL` (если есть) и `SO_NOSIGPIPE` (если есть) | `raw.rs` `r2o_raw_send_flags` | **E** | C под `#ifdef MSG_NOSIGNAL` ставит флаг, под `#ifdef SO_NOSIGPIPE` — опцию сокета. Rust raw-модуль собирается только на Linux, где действует `MSG_NOSIGNAL`; флаг включён в каждый `sendto`. Тест `raw_send_flags_include_nosignal`. macOS-ветка неприменима: датапат Linux-only. |
@@ -6592,7 +6592,7 @@ syn_data — совпадают. Все ветви `apply_set` (`props.c:198-257
 | `prop_probes` | 49-196 | 147 | 12 вопросов в порядке стоимости | `raw_probe.rs:840-965 property_probes` | **E*** |  **Состав сверен:** C при `cap<12` → 0; `memset` 12; далее `seqovl-1`/SET_LEFT_OVERLAP, `disorder`/SET_REORDER, `badsum`/SET_CHECKSUM, `badsum+hello`/SET_PARSES_L7, `badsum-x2-g20`/SET_DUPLICATES, `md5`/SET_MD5, `seq-out-of-window` (-66000)/SET_SEQ_WINDOW, `ts`/SET_TIMESTAMPS, `seqovl-sni`/SET_OVERLAP_SNI, `badsum-x7`/SET_DUP_DENSE, `white-hello-ts` (tcp_ts+decoy+repeats 8+split_pos 2)/SET_WHITE_TS, `syndata`/SET_SYN. Autottl/tcp_ts_up сняты. Rust `property_probes` те же 12 вопросов/порядок; API `Vec` без жёсткого cap. Полного C/Rust differential списка нет; ECH/self-test покрыты.  **2026-11-15:** `test-classifier-compose-props-differential.sh` PASS **42 кейса**, включая все 12 вопросов `prop_probes`/порядок, `apply_set` и `compose_from_props`; raw production 93/11 properties PASS. |
 | `apply_set` | 198-257 | 60 | ответ вопроса → `d2k_dprops` | `raw_probe.rs:1005-1045 apply_property` | **E*** |  **Ветви сверены:** C LEFT_OVERLAP/REORDER → `ok?FALSE:TRUE`; CHECKSUM только ok→FALSE; PARSES_L7 ok→`TRUE`+checksum FALSE; DUPLICATES/DUP_DENSE ok→TRUE; SYN/MD5/SEQ_WINDOW/TIMESTAMPS ok→FALSE; OVERLAP_SNI ok→TRUE; WHITE_TS ok→`parses_l7=TRUE`, `timestamps=FALSE` только при `p->tcp_ts`, `checksum=FALSE` только при `p->badsum`. Rust `apply_property` те же ветви; unit на все ветви нет, white-ts покрыт.  **2026-11-15:** все ветви LEFT_OVERLAP/REORDER/CHECKSUM/PARSES_L7/DUPLICATES/DUP_DENSE/SYN/MD5/SEQ_WINDOW/TIMESTAMPS/OVERLAP_SNI/WHITE_TS сверены в 42-кейсовом differential PASS. |
 | `d2k_run_properties` | 261-265 | 5 | IPv4-обёртка `run_properties_family(...,4,...)` | `raw_probe.rs:85-87` (`property` path) | **E*** |  C `d2k_run_properties_family(ip4,4,...)`. Rust семейство берёт из адреса цели/`PacketView`, отдельного символа с фиксированной 4 нет.  **2026-11-15:** отдельного символа нет — семейство берётся из адреса/`PacketView`, ветви встроены в `sweep_poisons`; 42-кейсовый props differential и raw production 93/positive property PASS. |
-| `d2k_run_properties_family` | 267-416 | 150 | цикл вопросов: stop/skip, tcp_ts fallback, overlap SNI, decoy/white, label, majority, local_err, apply_set, acceptable-hit | `raw_probe.rs:189-345 sweep_poisons` | **P*** | **2026-11-15:** 42-case differential покрывает все 12 `prop_probes`/`apply_set`, raw production 93 — 11 trace-label `свойство:*`. **QA final7:** не покрыты цикл stop/skip/local_err, `white-hello-ts`, decoy-label `клон клиента`/`битая сумма`; статус понижен до P*. |
+| `d2k_run_properties_family` | 267-416 | 150 | цикл вопросов: stop/skip, tcp_ts fallback, overlap SNI, decoy/white, label, majority, local_err, apply_set, acceptable-hit | `raw_probe.rs:189-345 sweep_poisons` | **P*** | **2026-11-15:** 42-case props/apply differential, raw production 93 + white-ECH (`--white hcaptcha.com`, `--control-sni`, `--skip badsum`), bridge clone-decoy, raw profile/white composite PASS; 11 property-labels включая ECH. **QA final7/8:** цикл `stop`/`local_err` внутри функции не покрыт differential — P*. |
 | `tri_no` | 418-418 | 1 | проверка `D2K_TRI_FALSE` | `raw_probe.rs` `tri_no` | E | C `return t == D2K_TRI_FALSE`. Rust `tri_no` используется в `compose_from_props`; тест `tri_yes_no_match_donor` проверяет False/True/Unset. |
 | `tri_yes` | 419-419 | 1 | проверка `D2K_TRI_TRUE` | `raw_probe.rs` `tri_yes` | E | C `return t == D2K_TRI_TRUE`. Rust `tri_yes` используется в `property_probe_poison`/`compose_from_props`; тест `tri_yes_no_match_donor`. |
 | `d2k_compose_from_props` | 426-498 | 73 | кандидаты из вектора: base badsum/decoy, серия 2/20 и 7/0, fake+overlap, fake+disorder, «всё сразу», decoy/seqovl из ctl | `raw_probe.rs:1047-1099 compose_from_props` | **E*** |  **Ветви сверены:** C `base.badsum = !tri_yes(checksum)`; `parses_l7==TRUE → decoy_hello`; duplicates TRUE и место ≥2 → 2 кандидата (repeats 2/gap 20; repeats 7); overlap FALSE → fake+seqovl_exact+decoy+repeats 7; reorder FALSE → fake+disorder+repeats 7; при `n==0` → «всё сразу» (badsum/decoy/seqovl_exact/disorder/repeats 7); затем для decoy_hello `decoy=ctl/ctl_len`, при seqovl_exact `seqovl=ctl_len`. Rust `compose_from_props` те же кандидаты/порядок; **подтверждённое отличие:** при `control=None` C всё равно выдаёт «всё сразу», Rust — нет (header, п. 6).  **2026-11-15:** `control=None` теперь даёт «СОБРАНО: всё сразу»; `test-classifier-compose-props-differential.sh` PASS **42 кейса** (empty-none/empty-control/duplicates/all/overlap/reorder и др.) — кандидаты, порядок, repeats/gap/seqovl/decoy сверены с C. |
@@ -7095,8 +7095,8 @@ r2o-tls-verify-differential.sh                       16/16 PASS
 
 ## Итог
 
-- Актуальные counts: **E 130 / P 29 / N 0** из 159 (срез main 2026-11-15).
-- P не считается паритетом: 29 строк без полного доказательства ветвей
+- Актуальные counts: **E 131 / P 28 / N 0** из 159 (срез main 2026-11-15).
+- P не считается паритетом: 28 строк без полного доказательства ветвей
   (bridge/sweep/raw/props/CLI helpers); после QA final7 понижены
   `sweep_poisons` и `d2k_run_properties_family`.
 - N больше нет; ранее N-строки перенесены или переклассифицированы.

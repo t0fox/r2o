@@ -36,21 +36,21 @@ Static-хелперы наследуют статус владельца; в к�
 
 | Статус | Кол-во |
 |---|---:|
-| E | 130 |
-| P | 29 |
+| E | 131 |
+| P | 28 |
 | N | 0 |
 | ? | 0 |
 | **Всего** | **159** |
 
-Актуальные counts: **E 130 / P 29 / N 0** (срез main 2026-11-15).
-Доли: E — 81.8 % (130/159); E или P — 100 %; N — 0.
+Актуальные counts: **E 131 / P 28 / N 0** (срез main 2026-11-15).
+Доли: E — 82.4 % (131/159); E или P — 100 %; N — 0.
 
 По файлам:
 
 | Файл | Функций | E | P | N |
 |---|---:|---:|---:|---:|
 | detect/bridge.c | 17 | 4 | 13 | 0 |
-| detect/classify.c | 36 | 35 | 1 | 0 |
+| detect/classify.c | 36 | 36 | 0 | 0 |
 | detect/main.c | 8 | 4 | 4 | 0 |
 | detect/poison.c | 12 | 12 | 0 | 0 |
 | detect/props.c | 7 | 6 | 1 | 0 |
@@ -58,7 +58,7 @@ Static-хелперы наследуют статус владельца; в к�
 | detect/response.c | 7 | 7 | 0 | 0 |
 | detect/trigger.c | 9 | 9 | 0 | 0 |
 | detect/include/d2k_detect.h | 1 | 1 | 0 | 0 |
-| **Всего** | **159** | **130** | **29** | **0** |
+| **Всего** | **159** | **131** | **28** | **0** |
 
 ---
 
@@ -150,7 +150,7 @@ raw_recheck, sweep_poisons (свойства → compose → перебор), cr
 | `raw_selftest` | 827-854 | 943 | самопроверка сырого слоя: до `repeats`, первый успех завершает | `raw_probe.rs:120-186` | **E*** |  **2026-11-15:** TTL 0..599/600 с, три локальные ошибки гасят оба кэша семейства; Rust-ветви + production selftest pass/fail в raw production PASS. Ограничение: отдельный C-fixture для static `selftest_cached_age` не оформлен. |
 | `raw_doubted` | 860-863 | 3 | cached и ok==0 и err>=2 | `raw_probe.rs:669-671 should_recheck` | **E** | C `res->raw_selftest_cached && res->raw_probes_ok==0 && res->raw_probes_err>=2`. Rust `cached && successes==0 && errors>=2`; self-тест `raw_probe.rs:2513`. |
 | `raw_recheck` | 867-880 | 544 | немедленная перепроверка; при провале откатить props и raw_usable=0 | `raw_probe.rs:746 raw_recheck` | **E** | C `cached=0`; `raw_selftest` успех → 1; иначе `props=props0`, `raw_usable=0`, `raw_selftest_failed=1`, 0. Rust `raw_recheck`; `raw_probe.rs:2513` + `R2O_RAW_RECHECK_C_OUTPUT`. |
-| `sweep_poisons` | 887-1076 | 8251 | перебор: resolve, selftest, RST-правило, свойства, compose, список гипотез, контроль | `raw_probe.rs:78 sweep_poisons` | **P*** | **2026-11-15:** compose `control=None` исправлен, 42-case props/compose differential и raw production 93 PASS. **QA final7:** E* преждевременен — C `classify.c:945` добавляет observation «правило подавления RST не встало» с err-текстом, Rust хранит только счётчик; в raw 93 RST-правило установилось (отказа не было). Нужен differential с отказом nft/iptables — P*. |
+| `sweep_poisons` | 887-1076 | 8251 | перебор: resolve, selftest, RST-правило, свойства, compose, список гипотез, контроль | `raw_probe.rs:78 sweep_poisons` | **E*** | **2026-11-15:** compose `control=None` исправлен; 42-case props/compose + raw production 93 PASS. **RST failure:** добавлена observation `внимание:правило подавления RST не встало` (ровно одна, `raw_usable=true` при успешной самопроверке); `test-classifier-rst-rule-failure-differential.sh` PASS для nft (нет таблиц) и iptables (`PATH=/nonexistent`) после сборки release. Ограничение: живой DPI/OpenWrt. |
 | `cross_check_tls12` | 1084-1092 | 367 | проверка покрытия TLS 1.2 | `classify.rs` `cross_check_tls12`, `ClassifyResult.covers_tls12` | E | C при `cross_check_tls12` ставит `covers_tls12=UNSET` и note «НЕ ПРОВЕРЕНО: режим не перенесён». Rust поле `covers_tls12: TriState` (Unset) и `notes`; `cross_check_tls12` вызывается из `finish`, текст совпадает. Тест `trace_questions_is_bounded_and_notes_match_c`. |
 | `d2k_classify_run` | 1095-1476 | 22179 | дерево зондов и вердикт | `classify.rs:1298 run_with_backend_progress` | **E*** | **Ветви сверены:** C `opts_defaults`, `raw_flush_pending`, rst/dial base, target/repeats/trigger_len/tri; разбор `host:port`, `[]`, `%`, loopback, trigger<2 → FLAKY; база `measure("whole")`; dial-timeout — один повтор `timeout*2`; base err → FLAKY/UNREACHABLE; base pass==repeats → CLEAR + response (SNI и ответное направление); 0<p<repeats → FLAKY; split pos=1; pass==0 → контроль `until_pass`/neutral-ack/`sweep_poisons`; pass==repeats → split-long/reassembles/двоичный поиск границы → PREFIX. Production `ClassifyOptions::default()` — donor-семантика (`full_detect_semantics=true`, `confirm_clear=false`). `test-classifier-full-tree-control-differential.sh` PASS **24 кейса** (все вердикты, repeats 1/2/3, gaps 7/13, control pass/dead/vouched, split/long/last/mid errors, raw selftest/hit/miss, response) + exact `print_json`/`print_human`. Ограничение: реальный DPI/OpenWrt и field-by-field `d2k_arm` (закрыт отдельным 16-case differential) не входят в этот прогон. |
 | `d2k_send_nosig` | 1481-1494 | 309 | `send` с `MSG_NOSIGNAL` (если есть) и `SO_NOSIGPIPE` (если есть) | `raw.rs` `r2o_raw_send_flags` | **E** | C под `#ifdef MSG_NOSIGNAL` ставит флаг, под `#ifdef SO_NOSIGPIPE` — опцию сокета. Rust raw-модуль собирается только на Linux, где действует `MSG_NOSIGNAL`; флаг включён в каждый `sendto`. Тест `raw_send_flags_include_nosignal`. macOS-ветка неприменима: датапат Linux-only. |
@@ -337,7 +337,7 @@ syn_data — совпадают. Все ветви `apply_set` (`props.c:198-257
 | `prop_probes` | 49-196 | 147 | 12 вопросов в порядке стоимости | `raw_probe.rs:840-965 property_probes` | **E*** |  **Состав сверен:** C при `cap<12` → 0; `memset` 12; далее `seqovl-1`/SET_LEFT_OVERLAP, `disorder`/SET_REORDER, `badsum`/SET_CHECKSUM, `badsum+hello`/SET_PARSES_L7, `badsum-x2-g20`/SET_DUPLICATES, `md5`/SET_MD5, `seq-out-of-window` (-66000)/SET_SEQ_WINDOW, `ts`/SET_TIMESTAMPS, `seqovl-sni`/SET_OVERLAP_SNI, `badsum-x7`/SET_DUP_DENSE, `white-hello-ts` (tcp_ts+decoy+repeats 8+split_pos 2)/SET_WHITE_TS, `syndata`/SET_SYN. Autottl/tcp_ts_up сняты. Rust `property_probes` те же 12 вопросов/порядок; API `Vec` без жёсткого cap. Полного C/Rust differential списка нет; ECH/self-test покрыты.  **2026-11-15:** `test-classifier-compose-props-differential.sh` PASS **42 кейса**, включая все 12 вопросов `prop_probes`/порядок, `apply_set` и `compose_from_props`; raw production 93/11 properties PASS. |
 | `apply_set` | 198-257 | 60 | ответ вопроса → `d2k_dprops` | `raw_probe.rs:1005-1045 apply_property` | **E*** |  **Ветви сверены:** C LEFT_OVERLAP/REORDER → `ok?FALSE:TRUE`; CHECKSUM только ok→FALSE; PARSES_L7 ok→`TRUE`+checksum FALSE; DUPLICATES/DUP_DENSE ok→TRUE; SYN/MD5/SEQ_WINDOW/TIMESTAMPS ok→FALSE; OVERLAP_SNI ok→TRUE; WHITE_TS ok→`parses_l7=TRUE`, `timestamps=FALSE` только при `p->tcp_ts`, `checksum=FALSE` только при `p->badsum`. Rust `apply_property` те же ветви; unit на все ветви нет, white-ts покрыт.  **2026-11-15:** все ветви LEFT_OVERLAP/REORDER/CHECKSUM/PARSES_L7/DUPLICATES/DUP_DENSE/SYN/MD5/SEQ_WINDOW/TIMESTAMPS/OVERLAP_SNI/WHITE_TS сверены в 42-кейсовом differential PASS. |
 | `d2k_run_properties` | 261-265 | 5 | IPv4-обёртка `run_properties_family(...,4,...)` | `raw_probe.rs:85-87` (`property` path) | **E*** |  C `d2k_run_properties_family(ip4,4,...)`. Rust семейство берёт из адреса цели/`PacketView`, отдельного символа с фиксированной 4 нет.  **2026-11-15:** отдельного символа нет — семейство берётся из адреса/`PacketView`, ветви встроены в `sweep_poisons`; 42-кейсовый props differential и raw production 93/positive property PASS. |
-| `d2k_run_properties_family` | 267-416 | 150 | цикл вопросов: stop/skip, tcp_ts fallback, overlap SNI, decoy/white, label, majority, local_err, apply_set, acceptable-hit | `raw_probe.rs:189-345 sweep_poisons` | **P*** | **2026-11-15:** 42-case differential покрывает все 12 `prop_probes`/`apply_set`, raw production 93 — 11 trace-label `свойство:*`. **QA final7:** не покрыты цикл stop/skip/local_err, `white-hello-ts`, decoy-label `клон клиента`/`битая сумма`; статус понижен до P*. |
+| `d2k_run_properties_family` | 267-416 | 150 | цикл вопросов: stop/skip, tcp_ts fallback, overlap SNI, decoy/white, label, majority, local_err, apply_set, acceptable-hit | `raw_probe.rs:189-345 sweep_poisons` | **P*** | **2026-11-15:** 42-case props/apply differential, raw production 93 + white-ECH (`--white hcaptcha.com`, `--control-sni`, `--skip badsum`), bridge clone-decoy, raw profile/white composite PASS; 11 property-labels включая ECH. **QA final7/8:** цикл `stop`/`local_err` внутри функции не покрыт differential — P*. |
 | `tri_no` | 418-418 | 1 | проверка `D2K_TRI_FALSE` | `raw_probe.rs` `tri_no` | E | C `return t == D2K_TRI_FALSE`. Rust `tri_no` используется в `compose_from_props`; тест `tri_yes_no_match_donor` проверяет False/True/Unset. |
 | `tri_yes` | 419-419 | 1 | проверка `D2K_TRI_TRUE` | `raw_probe.rs` `tri_yes` | E | C `return t == D2K_TRI_TRUE`. Rust `tri_yes` используется в `property_probe_poison`/`compose_from_props`; тест `tri_yes_no_match_donor`. |
 | `d2k_compose_from_props` | 426-498 | 73 | кандидаты из вектора: base badsum/decoy, серия 2/20 и 7/0, fake+overlap, fake+disorder, «всё сразу», decoy/seqovl из ctl | `raw_probe.rs:1047-1099 compose_from_props` | **E*** |  **Ветви сверены:** C `base.badsum = !tri_yes(checksum)`; `parses_l7==TRUE → decoy_hello`; duplicates TRUE и место ≥2 → 2 кандидата (repeats 2/gap 20; repeats 7); overlap FALSE → fake+seqovl_exact+decoy+repeats 7; reorder FALSE → fake+disorder+repeats 7; при `n==0` → «всё сразу» (badsum/decoy/seqovl_exact/disorder/repeats 7); затем для decoy_hello `decoy=ctl/ctl_len`, при seqovl_exact `seqovl=ctl_len`. Rust `compose_from_props` те же кандидаты/порядок; **подтверждённое отличие:** при `control=None` C всё равно выдаёт «всё сразу», Rust — нет (header, п. 6).  **2026-11-15:** `control=None` теперь даёт «СОБРАНО: всё сразу»; `test-classifier-compose-props-differential.sh` PASS **42 кейса** (empty-none/empty-control/duplicates/all/overlap/reorder и др.) — кандидаты, порядок, repeats/gap/seqovl/decoy сверены с C. |
@@ -840,8 +840,8 @@ r2o-tls-verify-differential.sh                       16/16 PASS
 
 ## Итог
 
-- Актуальные counts: **E 130 / P 29 / N 0** из 159 (срез main 2026-11-15).
-- P не считается паритетом: 29 строк без полного доказательства ветвей
+- Актуальные counts: **E 131 / P 28 / N 0** из 159 (срез main 2026-11-15).
+- P не считается паритетом: 28 строк без полного доказательства ветвей
   (bridge/sweep/raw/props/CLI helpers); после QA final7 понижены
   `sweep_poisons` и `d2k_run_properties_family`.
 - N больше нет; ранее N-строки перенесены или переклассифицированы.
