@@ -40637,11 +40637,20 @@ mod tests {
         };
         use r2o_controller::discovery::DiscoveryTarget;
 
-        fn flow_key(client_port: u16) -> [u8; KEY_LEN] {
+        fn flow_key(family: u8, client_port: u16) -> [u8; KEY_LEN] {
             let mut key = [0_u8; KEY_LEN];
-            key[0] = 4;
-            key[1..5].copy_from_slice(&[192, 0, 2, 10]);
-            key[17..21].copy_from_slice(&[198, 51, 100, 10]);
+            key[0] = family;
+            if family == 6 {
+                key[1..17].copy_from_slice(&[
+                    0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+                ]);
+                key[17..33].copy_from_slice(&[
+                    0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x20,
+                ]);
+            } else {
+                key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+                key[17..21].copy_from_slice(&[198, 51, 100, 10]);
+            }
             key[33..35].copy_from_slice(&client_port.to_be_bytes());
             key[35..37].copy_from_slice(&443_u16.to_be_bytes());
             key[37] = 6;
@@ -40650,16 +40659,10 @@ mod tests {
 
         let appdata = 1_u8 << (23 - 20);
         let handshake_only = 1_u8 << (22 - 20);
-        let target = DiscoveryTarget {
-            host: "watch.example".into(),
-            endpoint: "198.51.100.10:443".into(),
-            family: 4,
-            shape: SHAPE_MODERN,
-        };
-        let task_key = r2o_discovery_task_key(&target);
 
         struct Scenario {
             label: &'static str,
+            family: u8,
             task_state: &'static str,
             known_name: bool,
             event_port: u16,
@@ -40670,6 +40673,7 @@ mod tests {
         let scenarios = [
             Scenario {
                 label: "foreign_flow",
+                family: 4,
                 task_state: "watching",
                 known_name: true,
                 event_port: 40001,
@@ -40679,6 +40683,7 @@ mod tests {
             },
             Scenario {
                 label: "own_probe_flow",
+                family: 4,
                 task_state: "watching",
                 known_name: true,
                 event_port: 40000,
@@ -40688,6 +40693,7 @@ mod tests {
             },
             Scenario {
                 label: "foreign_flow_planned_yes",
+                family: 4,
                 task_state: "watching",
                 known_name: true,
                 event_port: 40001,
@@ -40697,6 +40703,7 @@ mod tests {
             },
             Scenario {
                 label: "not_watching",
+                family: 4,
                 task_state: "planning",
                 known_name: true,
                 event_port: 40001,
@@ -40706,6 +40713,7 @@ mod tests {
             },
             Scenario {
                 label: "no_ver_flow_foreign",
+                family: 4,
                 task_state: "watching",
                 known_name: true,
                 event_port: 40001,
@@ -40715,6 +40723,7 @@ mod tests {
             },
             Scenario {
                 label: "unknown_name",
+                family: 4,
                 task_state: "watching",
                 known_name: false,
                 event_port: 40001,
@@ -40724,6 +40733,7 @@ mod tests {
             },
             Scenario {
                 label: "non_appdata",
+                family: 4,
                 task_state: "watching",
                 known_name: true,
                 event_port: 40001,
@@ -40731,10 +40741,41 @@ mod tests {
                 seen_types: handshake_only,
                 planned: LEGACY_PLANNED_NO,
             },
+            Scenario {
+                label: "foreign_flow_v6",
+                family: 6,
+                task_state: "watching",
+                known_name: true,
+                event_port: 40001,
+                ver_flow: true,
+                seen_types: appdata,
+                planned: LEGACY_PLANNED_NO,
+            },
+            Scenario {
+                label: "own_probe_flow_v6",
+                family: 6,
+                task_state: "watching",
+                known_name: true,
+                event_port: 40000,
+                ver_flow: true,
+                seen_types: appdata,
+                planned: LEGACY_PLANNED_NO,
+            },
         ];
 
         let mut output = String::new();
         for scenario in scenarios {
+            let target = DiscoveryTarget {
+                host: "watch.example".into(),
+                endpoint: if scenario.family == 6 {
+                    "[2001:db8::20]:443".into()
+                } else {
+                    "198.51.100.10:443".into()
+                },
+                family: scenario.family,
+                shape: SHAPE_MODERN,
+            };
+            let task_key = r2o_discovery_task_key(&target);
             let mut worker = r2o_test_discovery_worker_without_threads();
             {
                 let mut searches = worker
@@ -40761,10 +40802,10 @@ mod tests {
             if scenario.ver_flow {
                 worker
                     .watching_flow
-                    .insert(task_key.clone(), flow_key(40000));
+                    .insert(task_key.clone(), flow_key(scenario.family, 40000));
             }
 
-            let event_key = flow_key(scenario.event_port);
+            let event_key = flow_key(scenario.family, scenario.event_port);
             let mut names = R2oRecentTcpNameCache::default();
             if scenario.known_name {
                 names.note(
@@ -40833,6 +40874,14 @@ mod tests {
         );
         assert!(
             output.contains("not_watching state=other report=-"),
+            "{output}"
+        );
+        assert!(
+            output.contains("foreign_flow_v6 state=free report=cancelled"),
+            "{output}"
+        );
+        assert!(
+            output.contains("own_probe_flow_v6 state=watching report=-"),
             "{output}"
         );
     }
