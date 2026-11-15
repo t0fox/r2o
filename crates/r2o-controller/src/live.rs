@@ -446,6 +446,10 @@ pub fn snapshot_with_areas_and_dns(
                     .get("ipid")
                     .and_then(Value::as_u64)
                     .unwrap_or(0) as u16;
+                // C `write_live` отдаёт сигнал только как kind/human/seen.
+                for key in ["volume", "packets", "ttl", "ttl_delta", "tos", "ipid"] {
+                    signal_object.remove(key);
+                }
                 signal_object.insert(
                     "human".into(),
                     Value::String(signal_human(&kind, volume, ttl, ttl_delta, tos, ipid)),
@@ -459,6 +463,8 @@ pub fn snapshot_with_areas_and_dns(
             .flatten()
         {
             if let Some(plan) = plan.as_object_mut() {
+                // C `write_live` не пишет added/внутренние поля.
+                plan.remove("added");
                 plan.insert("human".into(), Value::String(String::new()));
             }
         }
@@ -473,6 +479,20 @@ pub fn snapshot_with_areas_and_dns(
                 let recheck = binding
                     .get("recheck_since")
                     .is_some_and(|value| !value.is_null());
+                // Точный C-набор `write_live`: внутренние поля каталога
+                // (профиль/input/путь/ECH/budget/recheck_since) панель не
+                // получает.
+                for key in [
+                    "tcp_profile",
+                    "verified_by",
+                    "input",
+                    "probe_path",
+                    "ech_origin",
+                    "recheck_since",
+                    "budget",
+                ] {
+                    binding.remove(key);
+                }
                 binding.insert("level_name".into(), Value::String(level_name(level).into()));
                 binding.insert("recheck".into(), Value::Bool(recheck));
             }
