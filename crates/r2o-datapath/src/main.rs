@@ -9160,6 +9160,107 @@ mod app {
         }
 
         #[test]
+        fn udp_plan_already_applied_skips_second_initial_and_quic_accessors_match() {
+            use r2k_core::control::{COMMAND_SET_NAME, Frame, SHAPE_QUIC};
+            use r2o_datapath::control::NamePlans;
+            use r2o_datapath::engine::{TcpSessions, decide_with_session};
+            use r2o_datapath::r2o_quic::R2oQuicSessions;
+            use r2o_datapath::r2o_udp_sessions::R2oUdpSessions;
+
+            fn packet(payload: &[u8]) -> Vec<u8> {
+                let mut packet = vec![0; 28 + payload.len()];
+                let length = packet.len() as u16;
+                packet[0] = 0x45;
+                packet[2..4].copy_from_slice(&length.to_be_bytes());
+                packet[8] = 64;
+                packet[9] = 17;
+                packet[12..16].copy_from_slice(&[192, 0, 2, 10]);
+                packet[16..20].copy_from_slice(&[198, 51, 100, 20]);
+                packet[20..22].copy_from_slice(&53_123_u16.to_be_bytes());
+                packet[22..24].copy_from_slice(&443_u16.to_be_bytes());
+                packet[24..26].copy_from_slice(&(8_u16 + payload.len() as u16).to_be_bytes());
+                packet[28..].copy_from_slice(payload);
+                packet
+            }
+
+            let mut records = Vec::new();
+            records.extend_from_slice(b"D2KP");
+            records.extend_from_slice(&1_u16.to_be_bytes());
+            records.extend_from_slice(&10_u16.to_be_bytes());
+            records.extend_from_slice(&0_u16.to_be_bytes());
+            records.extend_from_slice(&3_u16.to_be_bytes());
+            records.extend_from_slice(&[0x00, 0x01, 0x00, 0x10]);
+            records.extend_from_slice(&[0x51; 16]);
+            records.extend_from_slice(&[0x00, 0x02, 0x00, 0x02, 17, 2]);
+            records.extend_from_slice(&[0x01, 0x0f, 0x00, 0x01, 0x01]);
+            let mut body = vec![b"example.com".len() as u8];
+            body.extend_from_slice(b"example.com");
+            body.extend_from_slice(&[SHAPE_QUIC, 4]);
+            body.extend_from_slice(&records);
+            let mut plans = NamePlans::with_capacity(8);
+            assert!(
+                plans
+                    .handle(&Frame {
+                        kind: COMMAND_SET_NAME,
+                        body,
+                    })
+                    .ok
+            );
+
+            let initial = include_bytes!("../../r2k-core/tests/fixtures/quic_v1_initial.bin");
+            let packet = packet(initial);
+            let mut udp = R2oUdpSessions::new().unwrap();
+            let mut quic = R2oQuicSessions::default();
+            assert!(udp.r2o_observe_packet_at_hook(
+                &packet,
+                Instant::now(),
+                Some(r2o_datapath::netlink::R2O_NF_INET_POST_ROUTING),
+            ));
+            let hello = quic
+                .capture_hello_at_hook(
+                    &packet,
+                    Some(r2o_datapath::netlink::R2O_NF_INET_POST_ROUTING),
+                )
+                .expect("QUIC hello");
+            assert_eq!(hello.host, b"example.com");
+            assert_eq!(quic.r2o_init_ring_done(), 1);
+            assert_eq!(quic.r2o_qsnap_done(), 1);
+            assert_eq!(quic.r2o_quic_name(), 1);
+            let selected = plans
+                .select_with_quic_host_at_hook_probe(
+                    &packet,
+                    Some(hello.host.as_slice()),
+                    None,
+                    false,
+                )
+                .expect("QUIC plan");
+            assert!(!udp.r2o_skip_plan_applied(&packet));
+            let decision = super::r2o_udp_decide_once_mode(
+                &mut udp,
+                &mut quic,
+                selected,
+                &packet,
+                false,
+                || decide_with_session(&mut TcpSessions::default(), selected, &packet),
+            );
+            assert!(matches!(
+                decision,
+                r2o_datapath::engine::PacketDecision::Transmit { .. }
+                    | r2o_datapath::engine::PacketDecision::Replace(_)
+            ));
+            assert!(udp.r2o_skip_plan_applied(&packet));
+            let second = super::r2o_udp_decide_once_mode(
+                &mut udp,
+                &mut quic,
+                selected,
+                &packet,
+                false,
+                || panic!("второй Initial не должен доходить до decide"),
+            );
+            assert_eq!(second, r2o_datapath::engine::PacketDecision::Accept);
+        }
+
+        #[test]
         fn r2o_передаёт_первый_udp_ответ_из_runtime_в_общий_журнал() {
             fn пакет_udp(
                 source: ([u8; 4], u16),
