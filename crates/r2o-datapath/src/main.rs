@@ -48,29 +48,29 @@ mod app {
     use r2o_datapath::scheduler::{
         FlowTicket, MAX_SCHEDULED_PACKETS, ScheduledOwner, ScheduledPop, ScheduledQueue,
     };
+    use r2o_datapath::session_stats::R2oAtomicU64;
     use sha2::{Digest, Sha256};
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::error::Error;
     use std::io;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
 
     static STOP: AtomicBool = AtomicBool::new(false);
     static R2O_SEND_FAIL_BUSY_LINES: std::sync::atomic::AtomicU32 =
         std::sync::atomic::AtomicU32::new(0);
     /// C `st.hold_owned/hold_resent/hold_resend_fail`.
-    static R2O_HOLD_OWNED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    static R2O_HOLD_RESENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    static R2O_HOLD_RESEND_FAIL: std::sync::atomic::AtomicU64 =
-        std::sync::atomic::AtomicU64::new(0);
+    static R2O_HOLD_OWNED: R2oAtomicU64 = R2oAtomicU64::new(0);
+    static R2O_HOLD_RESENT: R2oAtomicU64 = R2oAtomicU64::new(0);
+    static R2O_HOLD_RESEND_FAIL: R2oAtomicU64 = R2oAtomicU64::new(0);
     /// C `st.deferred/emitted_late/stale_deferred`.
-    static R2O_DEFERRED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    static R2O_EMITTED_LATE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    static R2O_STALE_DEFERRED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static R2O_DEFERRED: R2oAtomicU64 = R2oAtomicU64::new(0);
+    static R2O_EMITTED_LATE: R2oAtomicU64 = R2oAtomicU64::new(0);
+    static R2O_STALE_DEFERRED: R2oAtomicU64 = R2oAtomicU64::new(0);
 
-    fn r2o_note_counter(counter: &std::sync::atomic::AtomicU64, by: u64) {
+    fn r2o_note_counter(counter: &R2oAtomicU64, by: u64) {
         counter.fetch_add(by, Ordering::Relaxed);
     }
 
@@ -157,7 +157,7 @@ mod app {
         !route_gate.r2o_mark_is_routed(family, mark)
     }
 
-    static R2O_UDP_MARKED_KEPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static R2O_UDP_MARKED_KEPT: R2oAtomicU64 = R2oAtomicU64::new(0);
 
     /// C `out_marked` (`datapath/d2kd.c:615-635`): датаграмма с чужой меткой
     /// остаётся на пути ядра; первые 16 строк — с портами и меткой, на 16-й
@@ -251,8 +251,7 @@ mod app {
         follow.r2o_mark(packet, now, at, receive_seq)
     }
 
-    static R2O_UDP_REFUSED_LOGGED: std::sync::atomic::AtomicU64 =
-        std::sync::atomic::AtomicU64::new(0);
+    static R2O_UDP_REFUSED_LOGGED: R2oAtomicU64 = R2oAtomicU64::new(0);
 
     /// C `out_resend_failed` (`datapath/d2kd.c:651-671`): одна строка на
     /// поток при постоянном отказе raw-переиздания, первые 16 потоков.
@@ -3756,7 +3755,7 @@ mod app {
         Ok(())
     }
 
-    static R2O_HEALTH_LAST_MS: AtomicU64 = AtomicU64::new(0);
+    static R2O_HEALTH_LAST_MS: R2oAtomicU64 = R2oAtomicU64::new(0);
 
     /// C `d2k_runtime_start_ticks` (`runtime/d2k_runtime.h:39-48`): поле 22
     /// `/proc/self/stat` после закрывающей скобки comm.
