@@ -4,7 +4,7 @@ set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 D2O_ROOT=${R2O_DONOR_ROOT:?set R2O_DONOR_ROOT to the pinned D2O checkout}
-EXPECTED_D2O_SHA=a378e230947ebfd011439e1cac0f1e994d883aae
+EXPECTED_D2O_SHA=${EXPECTED_D2O_SHA:-a378e230947ebfd011439e1cac0f1e994d883aae}
 ACTUAL_D2O_SHA=$(git -C "$D2O_ROOT" rev-parse HEAD)
 CC=${CC:-cc}
 CARGO=${CARGO:-cargo}
