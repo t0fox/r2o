@@ -97,10 +97,10 @@ production-путь не ставится. Формулировки «теста
 | core-state | 692 | 475 | 217 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
-| detect | 159 | 138 | 21 | 0 | 0 |
-| **Итого** | **1982** | **1534** | **448** | **0** | **0** |
+| detect | 159 | 139 | 20 | 0 | 0 |
+| **Итого** | **1982** | **1535** | **447** | **0** | **0** |
 
-Это не оценка паритета: 448 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 447 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -119,7 +119,7 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1534 / P 448**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1535 / P 447**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
@@ -138,7 +138,7 @@ B — нужен только тест/differential **190**; C — архите�
 
 ## Итог и подтверждённые расхождения (2026-11-15)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1534 / P 448 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1535 / P 447 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -383,8 +383,8 @@ P означает неполное доказательство ветвей, N
 | core-state | 692 | 475 | 217 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
-| detect | 159 | 138 | 21 | 0 | 0 |
-| **Итого** | **1982** | **1534** | **448** | **0** | **0** |
+| detect | 159 | 139 | 20 | 0 | 0 |
+| **Итого** | **1982** | **1535** | **447** | **0** | **0** |
 
 
 ---
@@ -6291,14 +6291,14 @@ Static-хелперы наследуют статус владельца; в к�
 
 | Статус | Кол-во |
 |---|---:|
-| E | 138 |
-| P | 21 |
+| E | 139 |
+| P | 20 |
 | N | 0 |
 | ? | 0 |
 | **Всего** | **159** |
 
-Актуальные counts: **E 138 / P 21 / N 0** (срез main 2026-11-15).
-Доли: E — 86.8 % (138/159); E или P — 100 %; N — 0.
+Актуальные counts: **E 139 / P 20 / N 0** (срез main 2026-11-15).
+Доли: E — 87.4 % (139/159); E или P — 100 %; N — 0.
 
 По файлам:
 
@@ -6308,12 +6308,12 @@ Static-хелперы наследуют статус владельца; в к�
 | detect/classify.c | 36 | 36 | 0 | 0 |
 | detect/main.c | 8 | 4 | 4 | 0 |
 | detect/poison.c | 12 | 12 | 0 | 0 |
-| detect/props.c | 7 | 6 | 1 | 0 |
+| detect/props.c | 7 | 7 | 0 | 0 |
 | detect/raw.c | 62 | 59 | 3 | 0 |
 | detect/response.c | 7 | 7 | 0 | 0 |
 | detect/trigger.c | 9 | 9 | 0 | 0 |
 | detect/include/d2k_detect.h | 1 | 1 | 0 | 0 |
-| **Всего** | **159** | **138** | **21** | **0** |
+| **Всего** | **159** | **139** | **20** | **0** |
 
 ---
 
@@ -6592,7 +6592,7 @@ syn_data — совпадают. Все ветви `apply_set` (`props.c:198-257
 | `prop_probes` | 49-196 | 147 | 12 вопросов в порядке стоимости | `raw_probe.rs:840-965 property_probes` | **E*** |  **Состав сверен:** C при `cap<12` → 0; `memset` 12; далее `seqovl-1`/SET_LEFT_OVERLAP, `disorder`/SET_REORDER, `badsum`/SET_CHECKSUM, `badsum+hello`/SET_PARSES_L7, `badsum-x2-g20`/SET_DUPLICATES, `md5`/SET_MD5, `seq-out-of-window` (-66000)/SET_SEQ_WINDOW, `ts`/SET_TIMESTAMPS, `seqovl-sni`/SET_OVERLAP_SNI, `badsum-x7`/SET_DUP_DENSE, `white-hello-ts` (tcp_ts+decoy+repeats 8+split_pos 2)/SET_WHITE_TS, `syndata`/SET_SYN. Autottl/tcp_ts_up сняты. Rust `property_probes` те же 12 вопросов/порядок; API `Vec` без жёсткого cap. Полного C/Rust differential списка нет; ECH/self-test покрыты.  **2026-11-15:** `test-classifier-compose-props-differential.sh` PASS **42 кейса**, включая все 12 вопросов `prop_probes`/порядок, `apply_set` и `compose_from_props`; raw production 93/11 properties PASS. |
 | `apply_set` | 198-257 | 60 | ответ вопроса → `d2k_dprops` | `raw_probe.rs:1005-1045 apply_property` | **E*** |  **Ветви сверены:** C LEFT_OVERLAP/REORDER → `ok?FALSE:TRUE`; CHECKSUM только ok→FALSE; PARSES_L7 ok→`TRUE`+checksum FALSE; DUPLICATES/DUP_DENSE ok→TRUE; SYN/MD5/SEQ_WINDOW/TIMESTAMPS ok→FALSE; OVERLAP_SNI ok→TRUE; WHITE_TS ok→`parses_l7=TRUE`, `timestamps=FALSE` только при `p->tcp_ts`, `checksum=FALSE` только при `p->badsum`. Rust `apply_property` те же ветви; unit на все ветви нет, white-ts покрыт.  **2026-11-15:** все ветви LEFT_OVERLAP/REORDER/CHECKSUM/PARSES_L7/DUPLICATES/DUP_DENSE/SYN/MD5/SEQ_WINDOW/TIMESTAMPS/OVERLAP_SNI/WHITE_TS сверены в 42-кейсовом differential PASS. |
 | `d2k_run_properties` | 261-265 | 5 | IPv4-обёртка `run_properties_family(...,4,...)` | `raw_probe.rs:85-87` (`property` path) | **E*** |  C `d2k_run_properties_family(ip4,4,...)`. Rust семейство берёт из адреса цели/`PacketView`, отдельного символа с фиксированной 4 нет.  **2026-11-15:** отдельного символа нет — семейство берётся из адреса/`PacketView`, ветви встроены в `sweep_poisons`; 42-кейсовый props differential и raw production 93/positive property PASS. |
-| `d2k_run_properties_family` | 267-416 | 150 | цикл вопросов: stop/skip, tcp_ts fallback, overlap SNI, decoy/white, label, majority, local_err, apply_set, acceptable-hit | `raw_probe.rs:189-345 sweep_poisons` | **P*** | **2026-11-15:** 42-case props/apply differential, raw production 93 + white-ECH (`--white hcaptcha.com`, `--control-sni`, `--skip badsum`), bridge clone-decoy, raw profile/white composite PASS; 11 property-labels включая ECH. **QA final7/8:** цикл `stop`/`local_err` внутри функции не покрыт differential — P*. |
+| `d2k_run_properties_family` | 267-416 | 150 | цикл вопросов: stop/skip, tcp_ts fallback, overlap SNI, decoy/white, label, majority, local_err, apply_set, acceptable-hit | `raw_probe.rs:189-345 sweep_poisons` | **E*** | **2026-11-15:** добавлен test-only seam `raw_probe_once`/`RawConn::connect` и C-оракул из `detect/test_repeats.c`; `test-props-scripted-differential.sh` PASS: local_err (props=0/answered=0/hit=0), md5-err (poison:md5 остаётся), stop после 2 зондов (obs=2/probes=2/stopped=1); white ECH/decoy labels — raw production/bridge/raw-profile. Seam только `#[cfg(test)]`, production не изменён. |
 | `tri_no` | 418-418 | 1 | проверка `D2K_TRI_FALSE` | `raw_probe.rs` `tri_no` | E | C `return t == D2K_TRI_FALSE`. Rust `tri_no` используется в `compose_from_props`; тест `tri_yes_no_match_donor` проверяет False/True/Unset. |
 | `tri_yes` | 419-419 | 1 | проверка `D2K_TRI_TRUE` | `raw_probe.rs` `tri_yes` | E | C `return t == D2K_TRI_TRUE`. Rust `tri_yes` используется в `property_probe_poison`/`compose_from_props`; тест `tri_yes_no_match_donor`. |
 | `d2k_compose_from_props` | 426-498 | 73 | кандидаты из вектора: base badsum/decoy, серия 2/20 и 7/0, fake+overlap, fake+disorder, «всё сразу», decoy/seqovl из ctl | `raw_probe.rs:1047-1099 compose_from_props` | **E*** |  **Ветви сверены:** C `base.badsum = !tri_yes(checksum)`; `parses_l7==TRUE → decoy_hello`; duplicates TRUE и место ≥2 → 2 кандидата (repeats 2/gap 20; repeats 7); overlap FALSE → fake+seqovl_exact+decoy+repeats 7; reorder FALSE → fake+disorder+repeats 7; при `n==0` → «всё сразу» (badsum/decoy/seqovl_exact/disorder/repeats 7); затем для decoy_hello `decoy=ctl/ctl_len`, при seqovl_exact `seqovl=ctl_len`. Rust `compose_from_props` те же кандидаты/порядок; **подтверждённое отличие:** при `control=None` C всё равно выдаёт «всё сразу», Rust — нет (header, п. 6).  **2026-11-15:** `control=None` теперь даёт «СОБРАНО: всё сразу»; `test-classifier-compose-props-differential.sh` PASS **42 кейса** (empty-none/empty-control/duplicates/all/overlap/reorder и др.) — кандидаты, порядок, repeats/gap/seqovl/decoy сверены с C. |
@@ -7094,8 +7094,8 @@ r2o-tls-verify-differential.sh                       16/16 PASS
 
 ## Итог
 
-- Актуальные counts: **E 138 / P 21 / N 0** из 159 (срез main 2026-11-15).
-- P не считается паритетом: 21 строк без полного доказательства ветвей
+- Актуальные counts: **E 139 / P 20 / N 0** из 159 (срез main 2026-11-15).
+- P не считается паритетом: 20 строк без полного доказательства ветвей
   (bridge/sweep/raw/props/CLI helpers); после QA final7 понижены
   `sweep_poisons` и `d2k_run_properties_family`.
 - N больше нет; ранее N-строки перенесены или переклассифицированы.
