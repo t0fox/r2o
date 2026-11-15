@@ -1137,6 +1137,15 @@ mod app {
 
     /// C `routes_refresh` (`d2kd.c:300-368`): печать переходов и quiet-строки
     /// смен не чаще раза в 600 с.
+    /// C main `poll`: extra fd готов, если POLLIN/POLLERR/POLLHUP.
+    fn r2o_poll_extra_ready(revents: &[libc::c_short], index: Option<usize>) -> bool {
+        index.is_some_and(|index| {
+            revents.get(index).is_some_and(|revents| {
+                revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0
+            })
+        })
+    }
+
     fn r2o_log_routes_refresh(
         log: &mut R2oRoutesRefreshLog,
         gate: &R2oRouteGate,
@@ -1870,13 +1879,36 @@ mod app {
                         .min(200) as i32,
                 )
                 .min(stats_timeout);
-            let (received, route_ready) = match socket.receive_timeout_with_fd(
+            // C `d2kd.c:1523-1536`: один poll на NFQUEUE, route-watch и
+            // control listen/peer. Набор — только реально открытые fd.
+            let mut extra_fds = Vec::with_capacity(3);
+            let route_poll_index = route_monitor.r2o_watch_fd().map(|fd| {
+                extra_fds.push(fd);
+                extra_fds.len() - 1
+            });
+            let control_listen_index = control.as_ref().map(|control| {
+                extra_fds.push(control.listen_fd());
+                extra_fds.len() - 1
+            });
+            let control_peer_index = control.as_ref().and_then(|control| {
+                (control.peer_fd() >= 0).then(|| {
+                    extra_fds.push(control.peer_fd());
+                    extra_fds.len() - 1
+                })
+            });
+            let borrowed: Vec<std::os::fd::BorrowedFd<'_>> = extra_fds
+                .iter()
+                .map(|fd| unsafe { std::os::fd::BorrowedFd::borrow_raw(*fd) })
+                .collect();
+            let mut extra_revents = vec![0 as libc::c_short; borrowed.len()];
+            let received = match socket.receive_timeout_with_fds(
                 &mut batch,
                 timeout,
-                route_monitor.r2o_watch_fd(),
+                &borrowed,
+                &mut extra_revents,
             ) {
                 Ok(ready) => ready,
-                Err(error) if !receive_error_requires_flush(&error) => (false, false),
+                Err(error) if !receive_error_requires_flush(&error) => false,
                 Err(error) => {
                     socket.record_receive_error();
                     match error {
@@ -1922,9 +1954,12 @@ mod app {
                         &mut socket,
                         &udp_deferred_resends.r2o_take_due_accept(failure_now),
                     );
-                    (false, false)
+                    false
                 }
             };
+            let route_ready = r2o_poll_extra_ready(&extra_revents, route_poll_index);
+            let control_wake = r2o_poll_extra_ready(&extra_revents, control_listen_index)
+                || r2o_poll_extra_ready(&extra_revents, control_peer_index);
             if received {
                 // C `d2k_udp_path_read`: голый `rseq++`, включая переход
                 // через 0; Rust повторяет это, а не подменяет 1.
@@ -1976,7 +2011,7 @@ mod app {
                 last_route_refresh = Instant::now();
                 next_route_refresh = last_route_refresh + R2O_ROUTE_REFRESH_INTERVAL;
             }
-            if let Some(control) = control.as_mut() {
+            if control_wake && let Some(control) = control.as_mut() {
                 for command in control.poll()? {
                     let ack = if command.kind == r2k_core::control::COMMAND_ARM_SHAPE {
                         let (ack, captured) = control.arm_client_shape(&command);
@@ -6208,6 +6243,19 @@ mod app {
         use r2o_datapath::r2o_udp_hold::R2oUdpHeldPacket;
         use r2o_datapath::r2o_udp_sessions::R2oUdpSessions;
         use std::io;
+
+        #[test]
+        fn poll_extra_ready_matches_c_route_and_control_masks() {
+            let none = [0 as libc::c_short; 3];
+            assert!(!super::r2o_poll_extra_ready(&none, None));
+            assert!(!super::r2o_poll_extra_ready(&none, Some(0)));
+            let ready = [libc::POLLIN, libc::POLLHUP, libc::POLLERR];
+            assert!(super::r2o_poll_extra_ready(&ready, Some(0)));
+            assert!(super::r2o_poll_extra_ready(&ready, Some(1)));
+            assert!(super::r2o_poll_extra_ready(&ready, Some(2)));
+            assert!(!super::r2o_poll_extra_ready(&ready, Some(3)));
+            assert!(!super::r2o_poll_extra_ready(&[libc::POLLOUT], Some(0)));
+        }
 
         #[test]
         fn receive_error_policy_preserves_poll_and_empty_queue_cases() {
