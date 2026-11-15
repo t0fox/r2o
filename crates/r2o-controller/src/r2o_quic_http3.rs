@@ -716,12 +716,13 @@ enum R2oQuicHttp3StallEnd {
     OneWay,
 }
 
-/// Хранит порог пакетов и рост байтов целевого QUIC-потока для бюджета.
+/// Хранит порог пакетов и рост байтов целевого QUIC-потока для freshness
+/// проверки `d2k_qbudget_ok`. Production budget_quic использует
+/// `R2oQuicBudgetDriver`; этот helper оставлен только для unit-тестов.
+#[cfg(test)]
 struct R2oQuicHttp3Budget {
     need: u64,
     progress_mark: Option<u64>,
-    requests: u32,
-    last_complete_packets: Option<u64>,
 }
 
 pub fn r2o_quic_http3_budget_datagrams(budget_packets: u32) -> u32 {
@@ -733,13 +734,12 @@ pub fn r2o_quic_http3_budget_datagrams(budget_packets: u32) -> u32 {
     packets.wrapping_mul(2)
 }
 
+#[cfg(test)]
 impl R2oQuicHttp3Budget {
     fn r2o_initialize(budget_packets: u32) -> Self {
         Self {
             need: u64::from(r2o_quic_http3_budget_datagrams(budget_packets)),
             progress_mark: None,
-            requests: 1,
-            last_complete_packets: None,
         }
     }
 
@@ -763,21 +763,6 @@ impl R2oQuicHttp3Budget {
             && self.progress_mark.is_some_and(|mark| progress > mark)
             && now.saturating_duration_since(last_progress_at) < rto
     }
-
-    /// C `budget_quic`: решение о завершённом ответе перед новым потоком.
-    /// `NotGrowing` — счётчик пакетов не вырос; `Request` — C отправляет
-    /// следующий запрос на `sid + 4`.
-    fn r2o_complete_decision(&mut self, packets: u64) -> R2oQuicBudgetCompleteDecision {
-        if self
-            .last_complete_packets
-            .is_some_and(|asked| packets <= asked)
-        {
-            return R2oQuicBudgetCompleteDecision::NotGrowing;
-        }
-        self.last_complete_packets = Some(packets);
-        self.requests = self.requests.saturating_add(1);
-        R2oQuicBudgetCompleteDecision::Request
-    }
 }
 
 /// C `budget_quic`: итоговый бюджет и счётчики одного прогона.
@@ -797,12 +782,6 @@ pub struct R2oQuicBudgetResult {
     pub requests: u32,
     pub packets: u32,
     pub uncountable: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum R2oQuicBudgetCompleteDecision {
-    Request,
-    NotGrowing,
 }
 
 /// Событие C `budget_quic` без IO: scripted-ответы mock `quic_budget_io`.
@@ -827,67 +806,98 @@ pub enum R2oQuicBudgetEvent {
         progress_changed: bool,
         timed_out: bool,
     },
+    Closed,
+    Error,
+    Silence,
 }
 
-/// Production-порт C `budget_quic` без IO: те же порог, рост, новый поток,
-/// HEADERS и молчание. Возвращает ровно поля C `d2k_ver_result`.
-pub fn r2o_quic_budget_from_events(
-    budget_packets: u32,
-    events: &[R2oQuicBudgetEvent],
-) -> R2oQuicBudgetResult {
-    let need = r2o_quic_http3_budget_datagrams(budget_packets);
-    let mut result = R2oQuicBudgetResult {
-        budget: R2oQuicBudgetOutcome::NotChecked,
-        need,
-        requests: 1,
-        packets: 0,
-        uncountable: false,
-    };
-    let mut marked = false;
-    let mut progress_mark = 0_u64;
-    let mut asked_at: Option<u64> = None;
-    let mut done = 0_u64;
-    let mut packets = 0_i64;
-    for event in events {
-        match *event {
+/// Решение production-loop после события. `Request` — complete-ответ
+/// требует новый поток (`sid + 4`), остальные — финальные/продолжение.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum R2oQuicBudgetDecision {
+    Continue,
+    Passed,
+    Cut,
+    NotApplicable,
+    Request,
+}
+
+/// Единый stateful-драйвер C `budget_quic`: каждое событие проходит здесь,
+/// batch-функция ниже использует тот же драйвер.
+#[derive(Clone, Debug)]
+pub struct R2oQuicBudgetDriver {
+    need: u32,
+    requests: u32,
+    packets: u32,
+    uncountable: bool,
+    budget: R2oQuicBudgetOutcome,
+    marked: bool,
+    progress_mark: u64,
+    asked_at: Option<u64>,
+    done: u64,
+    current_packets: i64,
+}
+
+impl R2oQuicBudgetDriver {
+    pub fn r2o_new(budget_packets: u32) -> Self {
+        Self {
+            need: r2o_quic_http3_budget_datagrams(budget_packets),
+            requests: 1,
+            packets: 0,
+            uncountable: false,
+            budget: R2oQuicBudgetOutcome::NotChecked,
+            marked: false,
+            progress_mark: 0,
+            asked_at: None,
+            done: 0,
+            current_packets: 0,
+        }
+    }
+
+    pub fn r2o_event(&mut self, event: R2oQuicBudgetEvent) -> R2oQuicBudgetDecision {
+        match event {
             R2oQuicBudgetEvent::Packets(value) => {
                 if value < 0 {
-                    result.uncountable = true;
-                    result.budget = R2oQuicBudgetOutcome::NotApplicable;
-                    break;
+                    self.uncountable = true;
+                    self.budget = R2oQuicBudgetOutcome::NotApplicable;
+                    return R2oQuicBudgetDecision::NotApplicable;
                 }
-                packets = value;
-                result.packets = value as u32;
+                self.current_packets = value;
+                self.packets = value as u32;
+                R2oQuicBudgetDecision::Continue
             }
             R2oQuicBudgetEvent::Progress { progress, status } => {
-                let progress = done.saturating_add(progress);
-                if packets >= 0 && packets as u64 >= u64::from(need) {
-                    if !marked {
-                        marked = true;
-                        progress_mark = progress;
+                let progress = self.done.saturating_add(progress);
+                if self.current_packets >= 0 && self.current_packets as u64 >= u64::from(self.need)
+                {
+                    if !self.marked {
+                        self.marked = true;
+                        self.progress_mark = progress;
                     }
-                    if status > 0 && progress > progress_mark {
-                        result.budget = R2oQuicBudgetOutcome::Passed;
-                        break;
+                    if status > 0 && progress > self.progress_mark {
+                        self.budget = R2oQuicBudgetOutcome::Passed;
+                        return R2oQuicBudgetDecision::Passed;
                     }
                 }
+                R2oQuicBudgetDecision::Continue
             }
             R2oQuicBudgetEvent::Complete {
                 progress,
                 request_ok,
             } => {
-                let current = packets.max(0) as u64;
-                if asked_at.is_some_and(|asked| current <= asked) {
-                    result.budget = R2oQuicBudgetOutcome::NotApplicable;
-                    break;
+                let current = self.current_packets.max(0) as u64;
+                if self.asked_at.is_some_and(|asked| current <= asked) {
+                    self.budget = R2oQuicBudgetOutcome::NotApplicable;
+                    return R2oQuicBudgetDecision::NotApplicable;
                 }
-                asked_at = Some(current);
-                done = done.saturating_add(progress);
-                result.requests = result.requests.saturating_add(1);
+                self.asked_at = Some(current);
+                self.done = self.done.saturating_add(progress);
+                self.requests = self.requests.saturating_add(1);
                 if !request_ok {
-                    result.budget = R2oQuicBudgetOutcome::NotApplicable;
-                    break;
+                    self.budget = R2oQuicBudgetOutcome::NotApplicable;
+                    return R2oQuicBudgetDecision::NotApplicable;
                 }
+                R2oQuicBudgetDecision::Request
             }
             R2oQuicBudgetEvent::Headers {
                 closed,
@@ -895,13 +905,14 @@ pub fn r2o_quic_budget_from_events(
                 got,
             } => {
                 if closed || (status == 0 && got > 0) {
-                    result.budget = R2oQuicBudgetOutcome::NotApplicable;
-                    break;
+                    self.budget = R2oQuicBudgetOutcome::NotApplicable;
+                    return R2oQuicBudgetDecision::NotApplicable;
                 }
                 if status == 0 {
-                    result.budget = R2oQuicBudgetOutcome::Cut;
-                    break;
+                    self.budget = R2oQuicBudgetOutcome::Cut;
+                    return R2oQuicBudgetDecision::Cut;
                 }
+                R2oQuicBudgetDecision::Continue
             }
             R2oQuicBudgetEvent::Recv {
                 n,
@@ -909,17 +920,91 @@ pub fn r2o_quic_budget_from_events(
                 timed_out,
             } => {
                 if n < 0 {
-                    result.budget = R2oQuicBudgetOutcome::NotApplicable;
-                    break;
+                    self.budget = R2oQuicBudgetOutcome::NotApplicable;
+                    return R2oQuicBudgetDecision::NotApplicable;
                 }
                 if !progress_changed && timed_out {
-                    result.budget = R2oQuicBudgetOutcome::Cut;
-                    break;
+                    self.budget = R2oQuicBudgetOutcome::Cut;
+                    return R2oQuicBudgetDecision::Cut;
                 }
+                R2oQuicBudgetDecision::Continue
+            }
+            R2oQuicBudgetEvent::Closed | R2oQuicBudgetEvent::Error => {
+                self.budget = R2oQuicBudgetOutcome::NotApplicable;
+                R2oQuicBudgetDecision::NotApplicable
+            }
+            R2oQuicBudgetEvent::Silence => {
+                self.budget = R2oQuicBudgetOutcome::Cut;
+                R2oQuicBudgetDecision::Cut
             }
         }
     }
-    result
+
+    pub fn r2o_result(&self) -> R2oQuicBudgetResult {
+        R2oQuicBudgetResult {
+            budget: self.budget,
+            need: self.need,
+            requests: self.requests,
+            packets: self.packets,
+            uncountable: self.uncountable,
+        }
+    }
+}
+
+/// Production-порт C `budget_quic` без IO: те же порог, рост, новый поток,
+/// HEADERS и молчание. Batch-путь использует единый R2oQuicBudgetDriver.
+pub fn r2o_quic_budget_from_events(
+    budget_packets: u32,
+    events: &[R2oQuicBudgetEvent],
+) -> R2oQuicBudgetResult {
+    let mut driver = R2oQuicBudgetDriver::r2o_new(budget_packets);
+    for event in events {
+        if matches!(
+            driver.r2o_event(*event),
+            R2oQuicBudgetDecision::Passed
+                | R2oQuicBudgetDecision::Cut
+                | R2oQuicBudgetDecision::NotApplicable
+        ) {
+            break;
+        }
+    }
+    driver.r2o_result()
+}
+
+/// Production-loop: Packets и Progress всегда идут парой через драйвер.
+fn r2o_quic_budget_observe(
+    driver: &mut R2oQuicBudgetDriver,
+    result: &mut R2oQuicHttp3Result,
+    packets: u64,
+    progress: u64,
+    status: u16,
+) -> R2oQuicBudgetDecision {
+    match r2o_quic_budget_apply_event(driver, result, R2oQuicBudgetEvent::Packets(packets as i64)) {
+        R2oQuicBudgetDecision::Continue => {}
+        decision => return decision,
+    }
+    r2o_quic_budget_apply_event(
+        driver,
+        result,
+        R2oQuicBudgetEvent::Progress {
+            progress,
+            status: if status == 0 { 200 } else { status },
+        },
+    )
+}
+
+/// Единая точка production-loop: событие → драйвер → поля
+/// `R2oQuicHttp3Result.budget/budget_passed`.
+fn r2o_quic_budget_apply_event(
+    driver: &mut R2oQuicBudgetDriver,
+    result: &mut R2oQuicHttp3Result,
+    event: R2oQuicBudgetEvent,
+) -> R2oQuicBudgetDecision {
+    let decision = driver.r2o_event(event);
+    let budget = driver.r2o_result();
+    result.budget = budget.budget;
+    result.budget_passed = budget.budget == R2oQuicBudgetOutcome::Passed;
+    decision
 }
 
 struct R2oQuicHttp3Stall {
@@ -1372,9 +1457,7 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
     let mut last_progress_at = tokio::time::Instant::now();
     let mut last_app_progress = r2o_quic_http3_app_bytes_load(&app_bytes);
     // A one-shot default-budget check is reserved for the short-control probe.
-    let mut budget = R2oQuicHttp3Budget::r2o_initialize(budget_packets);
-    let mut budget_passed = false;
-    let mut budget_outcome = R2oQuicBudgetOutcome::NotChecked;
+    let mut budget_driver = R2oQuicBudgetDriver::r2o_new(budget_packets);
     let mut stall = R2oQuicHttp3Stall::r2o_initialize(
         connection.rtt(),
         last_app_progress,
@@ -1387,6 +1470,28 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
         if request_timeout.is_zero() {
             result.lock().unwrap().error = Some("истёк срок HTTP/3-пробы для задачи".into());
             break;
+        }
+        if budget_active && requests > 0 {
+            let packets = r2o_quic_http3_datagrams(&connection).saturating_sub(datagrams_before);
+            let progress = r2o_quic_http3_app_bytes_load(&app_bytes);
+            let decision = {
+                let mut state = result.lock().unwrap();
+                r2o_quic_budget_observe(&mut budget_driver, &mut state, packets, progress, status)
+            };
+            match decision {
+                R2oQuicBudgetDecision::Passed => break,
+                R2oQuicBudgetDecision::Cut => {
+                    result.lock().unwrap().error =
+                        Some("сервер замолчал посреди повторов HTTP/3".into());
+                    break;
+                }
+                R2oQuicBudgetDecision::NotApplicable => {
+                    result.lock().unwrap().error =
+                        Some("счётчик датаграмм не растёт — бюджет не проверен".into());
+                    break;
+                }
+                R2oQuicBudgetDecision::Continue | R2oQuicBudgetDecision::Request => {}
+            }
         }
         let requests_before_attempt = requests;
         let request_app_bytes_start = r2o_quic_http3_app_bytes_load(&app_bytes);
@@ -1430,9 +1535,6 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                 let response_status = r2o_quic_http3_wait_with_stall(
                     &connection,
                     &mut stall,
-                    &mut budget,
-                    budget_active,
-                    datagrams_before,
                     &app_bytes,
                     stream.recv_response(),
                 )
@@ -1459,6 +1561,31 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                 if status == 451 {
                     return Ok::<bool, String>(false);
                 }
+                if budget_active {
+                    let decision = {
+                        let mut state = result.lock().unwrap();
+                        r2o_quic_budget_apply_event(
+                            &mut budget_driver,
+                            &mut state,
+                            R2oQuicBudgetEvent::Headers {
+                                closed: false,
+                                status: response_status as i32,
+                                got: 1,
+                            },
+                        )
+                    };
+                    match decision {
+                        R2oQuicBudgetDecision::Cut => {
+                            return Err("сервер замолчал на HEADERS HTTP/3".to_owned());
+                        }
+                        R2oQuicBudgetDecision::NotApplicable => {
+                            return Err(
+                                "HEADERS HTTP/3 не разобран — бюджет не проверен".to_owned()
+                            );
+                        }
+                        _ => {}
+                    }
+                }
                 let app_progress = r2o_quic_http3_app_bytes_load(&app_bytes);
                 let now = tokio::time::Instant::now();
                 if app_progress > last_app_progress {
@@ -1468,10 +1595,27 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                 if budget_active {
                     let packets =
                         r2o_quic_http3_datagrams(&connection).saturating_sub(datagrams_before);
-                    budget_passed =
-                        budget.r2o_step(packets, app_progress, status, now, last_progress_at, rto);
-                    if budget_passed {
-                        return Ok::<bool, String>(false);
+                    let decision = {
+                        let mut state = result.lock().unwrap();
+                        r2o_quic_budget_observe(
+                            &mut budget_driver,
+                            &mut state,
+                            packets,
+                            app_progress,
+                            status,
+                        )
+                    };
+                    match decision {
+                        R2oQuicBudgetDecision::Passed => return Ok::<bool, String>(false),
+                        R2oQuicBudgetDecision::Cut => {
+                            return Err("сервер замолчал посреди повторов HTTP/3".to_owned());
+                        }
+                        R2oQuicBudgetDecision::NotApplicable => {
+                            return Err(
+                                "датаграммы HTTP/3 не считаются — бюджет не проверен".to_owned()
+                            );
+                        }
+                        _ => {}
                     }
                 }
                 if response_status == 101 || !(100..200).contains(&response_status) {
@@ -1482,9 +1626,6 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                 let received = r2o_quic_http3_wait_with_stall(
                     &connection,
                     &mut stall,
-                    &mut budget,
-                    budget_active,
-                    datagrams_before,
                     &app_bytes,
                     stream.recv_data(),
                 )
@@ -1515,23 +1656,42 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                             last_progress_at = now;
                         }
                         if budget_active {
-                            budget_passed = budget.r2o_step(
-                                packets,
-                                app_progress,
-                                status,
-                                now,
-                                last_progress_at,
-                                rto,
-                            );
+                            let decision = {
+                                let mut state = result.lock().unwrap();
+                                r2o_quic_budget_observe(
+                                    &mut budget_driver,
+                                    &mut state,
+                                    packets,
+                                    app_progress,
+                                    status,
+                                )
+                            };
+                            match decision {
+                                R2oQuicBudgetDecision::Passed => {
+                                    let mut state = result.lock().unwrap();
+                                    state.body_bytes = total_body_bytes;
+                                    state.app_bytes = app_progress;
+                                    state.datagrams = packets;
+                                    return Ok(false);
+                                }
+                                R2oQuicBudgetDecision::Cut => {
+                                    return Err("сервер замолчал посреди тела HTTP/3".to_owned());
+                                }
+                                R2oQuicBudgetDecision::NotApplicable => {
+                                    return Err(
+                                        "счётчик датаграмм HTTP/3 не растёт — бюджет не проверен"
+                                            .to_owned(),
+                                    );
+                                }
+                                _ => {}
+                            }
                         }
                         let mut state = result.lock().unwrap();
                         state.body_bytes = total_body_bytes;
                         state.app_bytes = app_progress;
                         state.datagrams = packets;
-                        state.budget_passed = budget_passed;
-                        if budget_passed {
-                            return Ok(false);
-                        }
+                        state.budget_passed =
+                            budget_driver.r2o_result().budget == R2oQuicBudgetOutcome::Passed;
                     }
                     Ok(None) => {
                         if stream
@@ -1551,23 +1711,61 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                         if budget_active {
                             let packets = r2o_quic_http3_datagrams(&connection)
                                 .saturating_sub(datagrams_before);
-                            budget_passed = budget.r2o_step(
-                                packets,
-                                app_progress,
-                                status,
-                                now,
-                                last_progress_at,
-                                rto,
-                            );
-                        }
-                        if budget_passed {
-                            let mut state = result.lock().unwrap();
-                            state.body_bytes = total_body_bytes;
-                            state.app_bytes = app_progress;
-                            state.datagrams = r2o_quic_http3_datagrams(&connection)
-                                .saturating_sub(datagrams_before);
-                            state.budget_passed = true;
-                            return Ok(false);
+                            let decision = {
+                                let mut state = result.lock().unwrap();
+                                r2o_quic_budget_observe(
+                                    &mut budget_driver,
+                                    &mut state,
+                                    packets,
+                                    app_progress,
+                                    status,
+                                )
+                            };
+                            match decision {
+                                R2oQuicBudgetDecision::Passed => {
+                                    let mut state = result.lock().unwrap();
+                                    state.body_bytes = total_body_bytes;
+                                    state.app_bytes = app_progress;
+                                    state.datagrams = packets;
+                                    return Ok(false);
+                                }
+                                R2oQuicBudgetDecision::Cut => {
+                                    return Err(
+                                        "сервер замолчал на завершении тела HTTP/3".to_owned()
+                                    );
+                                }
+                                R2oQuicBudgetDecision::NotApplicable => {
+                                    return Err(
+                                        "счётчик датаграмм HTTP/3 не растёт — бюджет не проверен"
+                                            .to_owned(),
+                                    );
+                                }
+                                _ => {}
+                            }
+                            let decision = {
+                                let mut state = result.lock().unwrap();
+                                r2o_quic_budget_apply_event(
+                                    &mut budget_driver,
+                                    &mut state,
+                                    R2oQuicBudgetEvent::Complete {
+                                        progress: 0,
+                                        request_ok: true,
+                                    },
+                                )
+                            };
+                            match decision {
+                                R2oQuicBudgetDecision::Request => {}
+                                R2oQuicBudgetDecision::NotApplicable => {
+                                    return Err(
+                                        "счётчик датаграмм HTTP/3 не растёт — бюджет не проверен"
+                                            .to_owned(),
+                                    );
+                                }
+                                R2oQuicBudgetDecision::Cut => {
+                                    return Err("сервер замолчал на новом потоке HTTP/3".to_owned());
+                                }
+                                _ => {}
+                            }
                         }
                         return Ok(true);
                     }
@@ -1589,8 +1787,17 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                 if repeated && last_response_complete && requests == requests_before_attempt {
                     failed_repeat_app_bytes = last_complete_response_app_bytes;
                 }
-                if repeated && budget_active {
-                    budget_outcome = R2oQuicBudgetOutcome::NotApplicable;
+                if repeated
+                    && budget_active
+                    && budget_driver.r2o_result().budget == R2oQuicBudgetOutcome::NotChecked
+                {
+                    let event = if connection.close_reason().is_some() {
+                        R2oQuicBudgetEvent::Closed
+                    } else {
+                        R2oQuicBudgetEvent::Error
+                    };
+                    let mut state = result.lock().unwrap();
+                    r2o_quic_budget_apply_event(&mut budget_driver, &mut state, event);
                 }
                 let mut state = result.lock().unwrap();
                 state.error = Some(error);
@@ -1604,34 +1811,35 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                 if repeated && last_response_complete && requests == requests_before_attempt {
                     failed_repeat_app_bytes = last_complete_response_app_bytes;
                 }
-                if repeated && budget_active {
-                    budget_outcome = R2oQuicBudgetOutcome::Cut;
+                if repeated
+                    && budget_active
+                    && budget_driver.r2o_result().budget == R2oQuicBudgetOutcome::NotChecked
+                {
+                    let mut state = result.lock().unwrap();
+                    r2o_quic_budget_apply_event(
+                        &mut budget_driver,
+                        &mut state,
+                        R2oQuicBudgetEvent::Silence,
+                    );
                 }
                 result.lock().unwrap().error = Some("истёк срок HTTP/3 GET".into());
                 break;
             }
         }
 
-        if repeated && budget_active && last_response_complete && !budget_passed {
-            let packets = r2o_quic_http3_datagrams(&connection).saturating_sub(datagrams_before);
-            if budget.r2o_complete_decision(packets) == R2oQuicBudgetCompleteDecision::NotGrowing {
-                budget_outcome = R2oQuicBudgetOutcome::NotApplicable;
-                result.lock().unwrap().error =
-                    Some("счётчик датаграмм не растёт — бюджет не проверен".into());
-                break;
-            }
-        }
-
-        if !repeated || budget_passed || status == 451 || !last_response_complete {
+        if !repeated
+            || budget_driver.r2o_result().budget == R2oQuicBudgetOutcome::Passed
+            || status == 451
+            || !last_response_complete
+        {
             break;
         }
     }
 
     let datagrams = r2o_quic_http3_datagrams(&connection).saturating_sub(datagrams_before);
     stall.r2o_capture_ack(connection.r2o_largest_acked_packet_number());
-    if budget_passed {
-        budget_outcome = R2oQuicBudgetOutcome::Passed;
-    }
+    let budget_result = budget_driver.r2o_result();
+    let budget_passed = budget_result.budget == R2oQuicBudgetOutcome::Passed;
     {
         let mut state = result.lock().unwrap();
         state.requests = requests;
@@ -1639,7 +1847,7 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
             r2o_quic_http3_app_bytes_load(&app_bytes).saturating_add(failed_repeat_app_bytes);
         state.datagrams = datagrams;
         state.budget_passed = budget_passed;
-        state.budget = budget_outcome;
+        state.budget = budget_result.budget;
         state.complete = !repeated && last_response_complete && !state.r2o_quic_stalled;
         state.r2o_ping_probes = stall.probes_sent;
         state.r2o_ping_acks = stall.probes_acked;
@@ -1670,6 +1878,7 @@ fn r2o_quic_http3_datagrams(connection: &quinn::Connection) -> u64 {
 /// C `d2k_qbudget_grew` (`core/include/d2k_quicprobe.h:637-639`): при
 /// `pkts>=need` отметить прогресс, затем `status>0 && progress>mark`;
 /// свежесть при `now=last=0, rto=1` всегда истинна.
+#[cfg(test)]
 fn r2o_quic_budget_grew(
     packets: u32,
     need: u32,
@@ -1695,9 +1904,6 @@ fn r2o_quic_http3_wire_bytes(connection: &quinn::Connection) -> u64 {
 async fn r2o_quic_http3_wait_with_stall<F: Future>(
     connection: &quinn::Connection,
     stall: &mut R2oQuicHttp3Stall,
-    budget: &mut R2oQuicHttp3Budget,
-    budget_active: bool,
-    datagrams_before: u64,
     app_bytes: &R2oQuicHttp3AppByteCounter,
     future: F,
 ) -> Result<F::Output, R2oQuicHttp3StallEnd> {
@@ -1711,12 +1917,6 @@ async fn r2o_quic_http3_wait_with_stall<F: Future>(
             _ = interval.tick() => {
                 let now = tokio::time::Instant::now();
                 let progress = r2o_quic_http3_app_bytes_load(app_bytes);
-                if budget_active {
-                    budget.r2o_mark(
-                        r2o_quic_http3_datagrams(connection).saturating_sub(datagrams_before),
-                        progress,
-                    );
-                }
                 let action = stall.r2o_step(
                     now,
                     progress,
@@ -2221,6 +2421,133 @@ mod tests {
         if let Ok(path) = std::env::var("R2O_QUIC_BUDGET_ORACLE_OUTPUT") {
             std::fs::write(path, output).unwrap();
         }
+    }
+
+    #[test]
+    fn production_budget_loop_sequences_update_result_budget() {
+        use super::{
+            R2oQuicBudgetDriver, R2oQuicBudgetEvent as Event, R2oQuicBudgetOutcome as Outcome,
+            R2oQuicHttp3Result, r2o_quic_budget_apply_event,
+        };
+
+        fn run(events: &[Event]) -> (R2oQuicHttp3Result, R2oQuicBudgetDriver) {
+            let mut result = R2oQuicHttp3Result::default();
+            let mut driver = R2oQuicBudgetDriver::r2o_new(1);
+            for event in events {
+                r2o_quic_budget_apply_event(&mut driver, &mut result, *event);
+            }
+            (result, driver)
+        }
+
+        let (passed, driver) = run(&[
+            Event::Packets(2),
+            Event::Progress {
+                progress: 0,
+                status: 200,
+            },
+            Event::Packets(2),
+            Event::Progress {
+                progress: 10,
+                status: 200,
+            },
+        ]);
+        assert_eq!(passed.budget, Outcome::Passed);
+        assert!(passed.budget_passed);
+        assert_eq!(driver.r2o_result().need, 2);
+        assert_eq!(driver.r2o_result().packets, 2);
+
+        let (silence, _) = run(&[
+            Event::Packets(0),
+            Event::Progress {
+                progress: 0,
+                status: 200,
+            },
+            Event::Recv {
+                n: 0,
+                progress_changed: false,
+                timed_out: true,
+            },
+        ]);
+        assert_eq!(silence.budget, Outcome::Cut);
+        assert!(!silence.budget_passed);
+
+        let (closed, _) = run(&[
+            Event::Packets(0),
+            Event::Progress {
+                progress: 0,
+                status: 200,
+            },
+            Event::Closed,
+        ]);
+        assert_eq!(closed.budget, Outcome::NotApplicable);
+
+        let (recv_error, _) = run(&[
+            Event::Packets(0),
+            Event::Progress {
+                progress: 0,
+                status: 200,
+            },
+            Event::Recv {
+                n: -1,
+                progress_changed: false,
+                timed_out: false,
+            },
+        ]);
+        assert_eq!(recv_error.budget, Outcome::NotApplicable);
+
+        let (unparsed, _) = run(&[
+            Event::Packets(0),
+            Event::Progress {
+                progress: 0,
+                status: 200,
+            },
+            Event::Headers {
+                closed: false,
+                status: 0,
+                got: 1,
+            },
+        ]);
+        assert_eq!(unparsed.budget, Outcome::NotApplicable);
+
+        let (complete_headers, driver) = run(&[
+            Event::Packets(0),
+            Event::Progress {
+                progress: 0,
+                status: 200,
+            },
+            Event::Complete {
+                progress: 0,
+                request_ok: true,
+            },
+            Event::Headers {
+                closed: false,
+                status: 200,
+                got: 1,
+            },
+            Event::Packets(2),
+            Event::Progress {
+                progress: 120,
+                status: 200,
+            },
+            Event::Complete {
+                progress: 120,
+                request_ok: true,
+            },
+            Event::Headers {
+                closed: false,
+                status: 200,
+                got: 1,
+            },
+            Event::Packets(2),
+            Event::Progress {
+                progress: 10,
+                status: 200,
+            },
+        ]);
+        assert_eq!(complete_headers.budget, Outcome::Passed);
+        assert!(complete_headers.budget_passed);
+        assert_eq!(driver.r2o_result().requests, 3);
+        assert_eq!(driver.r2o_result().packets, 2);
     }
 
     #[test]
