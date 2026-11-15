@@ -175,6 +175,6 @@ candidate_plan_applied, dns_answer_via_plan, dns_answer_confirmed
    состояния `bypass_ok`/`no_bypass`/`candidate_plan_applied`/
    `dns_answer_via_plan`; полный state machine live-секции.
 
-`d2k_sched_write_live` остаётся **P***: против pinned `a378` full
-live-differential PASS, против current main секция `dns_services` уже
-пишется, но health/state-ветви ещё не подключены к production-тику.
+`d2k_sched_write_live` остаётся **P***: 12-state full live PASS (включая
+DNS watch/rest), но production `r2o_live_searches` не вызывается в
+Rust-дифференциале — нужен production-builder differential.

@@ -94,13 +94,13 @@ production-путь не ставится. Формулировки «теста
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 345 | 203 | 0 | 0 |
-| core-state | 692 | 476 | 216 | 0 | 0 |
+| core-state | 692 | 475 | 217 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 139 | 20 | 0 | 0 |
-| **Итого** | **1982** | **1536** | **446** | **0** | **0** |
+| **Итого** | **1982** | **1535** | **447** | **0** | **0** |
 
-Это не оценка паритета: 446 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 447 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -119,15 +119,17 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1536 / P 446**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1535 / P 447**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
-`d2k_sched_write_live` оставлен **P\***: task-слой теперь реальный
-(`DnsTask/DnsTaskState/DnsTaskVerify`, 17 общих + 4 DoQ сценария), но
-C-вывод зависит от end-to-end планового DoQ через реальный C datapath,
-SO_MARK verifier-сокета и отдельной direct-clear/cooldown-лестницы; эти
-три ветви не проверены. Живые root/netns/OpenWrt/аппаратные сценарии
+`d2k_sched_write_live` остаётся **P\***: 12 состояний full `live.json`
+против current `7a5fab9` PASS, verifier SO_MARK и DoQ direct-clear/
+cooldown закрыты. **QA final11:** Rust-сторона дифференциала вручную
+собирала `searches` (`json!`), production `r2o_live_searches` не вызывался —
+`phase/since/attempts/candidate/source` и порядок searches без C-оракула.
+Нужен production-builder differential; после него — E* с внешним
+ограничением e2e DoQ. Живые root/netns/OpenWrt/аппаратные сценарии
 покрыты не полностью.
 
 **Исходная карта 504 P (срез `6966de5`, 2026-11-14, QA):** A — нужен Rust-код **121**;
@@ -138,7 +140,7 @@ B — нужен только тест/differential **190**; C — архите�
 
 ## Итог и подтверждённые расхождения (2026-11-15)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1536 / P 446 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1535 / P 447 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -380,11 +382,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 345 | 203 | 0 | 0 |
-| core-state | 692 | 476 | 216 | 0 | 0 |
+| core-state | 692 | 475 | 217 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 139 | 20 | 0 | 0 |
-| **Итого** | **1982** | **1536** | **446** | **0** | **0** |
+| **Итого** | **1982** | **1535** | **447** | **0** | **0** |
 
 
 ---
@@ -2626,7 +2628,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_sched_diagnostic_counts` | 5826–5875 | 50 | counts: boxes/bindings/plans/observations/active/queued/catalog bytes/limit/resources/cpu/mem/conntrack/workers/task_states/snapshots | `main.rs:16688-16806`, `diagnostics.rs:461-464,676-679`, `r2o_resource_limit` | **P** | **Подтверждённые пробелы:** `worker_start_failures` всегда 0 (`main.rs:16806`), `last_measurement_age_ms` = None (`:16803`), `worker_join_failures`/`worker_oldest_age_ms` не заполняются; task_states/снимки считаются иначе (HashMap/очередь). Diagnostics differential частичный. |
 | `d2k_sched_diagnostic_madvise` | 5876–5876 | 1 | отдать `MadviseStats` | `diagnostics.rs` `Recorder::madvise_stats` | E | C возвращает копию `s->madvise`. Rust `madvise_stats()` возвращает копию; тест `madvise_get_and_reset_match_c`; JSON-форма покрыта `memory_tracking_and_madvise_json_match_d2o_shape`. |
 | `d2k_sched_diagnostic_madvise_reset` | 5877-5877 | 1 | обнулить статистику madvise | `diagnostics.rs` `Recorder::reset_madvise` | E | C `memset(&s->madvise,0)`. Rust `reset_madvise()` присваивает `MadviseStats::default()`; тест `madvise_get_and_reset_match_c`. |
-| `d2k_sched_write_live` | 5879–6049 | 171 | атомарно `live.json`: boxes/signals/plans/bindings/groups/searches/measurements/autopick/targets/confirms/probes/client_unfit | `live.rs` `live_snapshot`; `main.rs` `r2o_write_live` | **E*** | **2026-11-15:** full `live.json` дифференциал против current D2O main `7a5fab9` — **12 состояний** (rich, empty, boxes, bindings, groups, measurements, tasks, dns, watch, watch_noplan, rest, rest_local), точное равенство JSON-значений/полей/порядка массивов; `write_live_groups` 10 сценариев; DNS 17/4/3. Исправлены реальные расхождения: лишние поля `searches`, autopick default transport, нулевые времена (0001-01-01), binding transport 0→6, `%.100s` UTF-8. Ограничение: end-to-end планового DoQ через реальный C datapath не прогнан. |
+| `d2k_sched_write_live` | 5879–6049 | 171 | атомарно `live.json`: boxes/signals/plans/bindings/groups/searches/measurements/autopick/targets/confirms/probes/client_unfit | `live.rs` `live_snapshot`; `main.rs` `r2o_write_live` | **P*** | **2026-11-15:** 12 состояний full `live.json` против current `7a5fab9` (rich/empty/boxes/bindings/groups/measurements/tasks/dns/watch/watch_noplan/rest/rest_local) PASS; groups 10, DNS 17/4/3. **QA final11 нашёл скрытый пробел:** Rust-сторона дифференциала вручную собирает `json!`-массивы (`live.rs:2521,2800`), production `r2o_live_searches` (`main.rs:16034`) не вызывается — `phase/since/attempts/candidate/source` и порядок searches не имеют C-оракула. До production-builder differential строка остаётся **P***; после PASS — E* с ограничением e2e DoQ. |
 | `d2k_sched_free` | 6051–6072 | 22 | снять addr-probe, join worker, report shutdown, close contact/prop/ver, destroy cond/mutex, close pipe, free areas | `main.rs:7113-7119` (`Drop for R2oQuicDiscoveryWorker`), `:10205-10213` (`Drop for R2oVoiceDiscoveryWorker`), RAII `R2oHttpSearchWorker`/`OwnedFd` | **P** | **Совпадает по результату:** воркеры останавливаются и join-ятся в `Drop` (QUIC: `r2o_begin_shutdown`+`r2o_join`; voice: `cancel`+`jobs.take`+`thread.join`), каналы закрываются, сокеты освобождаются RAII. **Отличия:** C явно проходит 64 задачи, снимает addr-probe (`addr_probe_remove`), печатает `search_report(\"shutdown\")` и уничтожает `question_cv`/`mu`, закрывает `wake[0..1]`, освобождает `areas` и сам `sched`; в Rust строка `\"shutdown\"` в отчёте отсутствует, addr-probe снимается в своих путях, `areas` живут в каталоге/очереди. Shutdown-тесты частичные. |
 | `wake_loop` | 6077–6080 | 4 | записать байт в wake-pipe, чтобы разбудить `poll` | канал/condvar worker (`wake.notify_one`/`notify_all`), `main.rs:12123-12126` | **P*** | C `write(s->wake[1], \"w\", 1)` будит цикл `d2kc`; Rust использует `Condvar`/`notify_one` очереди и `sync_channel` воркеров (`main.rs:12123-12126`, `13095-13106`). Механизм заменён; отдельного differential нет. |
 | `d2k_sched_wake_fd` | 6082–6082 | 1 | fd для `poll` в `d2kc` | нет (канал/`try_recv`/`Condvar`) | **P*** | C отдаёт читающий конец self-pipe для `poll`; Rust не имеет fd-контракта: цикл воркеров использует `Condvar`/каналы, `d2kc`-цикл заменён `tokio`/каналом событий. Эквивалент по пробуждению, не по API. |
@@ -6732,24 +6734,21 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
   `rst_key_of` — поля на месте; `suppress_kernel_rst/
   release_kernel_rst` — RstRule/RstGuard, нет снятия после таймаута
   команды; `local_addr_for` — UDP connect. P/N по строкам.
-- **Сборка пакетов (556–771):** `local_addr_for` P; `rd16/rd32/
-  wr16/wr32/checksum/tcp_checksum/build_ipv4_tcp/tcp_checksum_family/
-  build_ip_tcp` — E, differential `raw_profile`/`measured_tcp_split`
-  и checksum-тесты.
-- **Отправка/приём/план (773–1321):** `raw_sendto` — C IPv4
-  `sin_port=dport`, IPv6 port 0, Rust `send_ip_packet` порт не
-  заполняет; сокетного теста нет. `d2k_raw_set_segment_max` — N
-  (production gap). `raw_send` — C нарезает по `seg_max` (1400),
-  Rust plan-путь E, syn_data одним пакетом. `raw_send_syn` — E,
-  `r2o-raw-profile-differential.sh`. `raw_recv` — Rust строже
-  фильтрует длины/фрагменты/локальный адрес; `raw_read_payload` —
-  якорь есть, теста нет; `raw_close` — Drop; `raw_handshake/raw_dial`
-  — RTO/эхо есть, полного сетевого теста нет; `d2k_raw_probe_
-  handshake_as` P; `raw_send_plan` E; `d2k_raw_probe_poison_family`
-  P — план покрыт, сетевой путь нет.
+- **Сборка пакетов (556–771):** `local_addr_for` E (2-case differential);
+  `rd16/rd32/wr16/wr32/checksum/tcp_checksum/build_ipv4_tcp/
+  tcp_checksum_family/build_ip_tcp` — E, differential `raw_profile`/
+  `measured_tcp_split` и checksum-тесты.
+- **Отправка/приём/план (773–1321):** `raw_sendto` E (IPv4 short OK/
+  IPv6 full, 6-case differential); `d2k_raw_set_segment_max` — N
+  (production gap); `raw_send` E (SYN-data по `segment_max`, 30-case seam);
+  `raw_send_syn` E (`r2o-raw-profile-differential.sh`); `raw_recv`/
+  `raw_read_payload`/`raw_close` E (live v4/v6 + seam 30);
+  `raw_handshake/raw_dial` E (5-case production function);
+  `d2k_raw_probe_handshake_as` E (5 cases); `raw_send_plan` E;
+  `d2k_raw_probe_poison_family` E (13 live cases v4/v6+wrapper).
 - **Не-Linux ветки (1328–1377):** `d2k_raw_supported` false,
   `d2k_raw_set_segment_max` N, counters P/E, `d2k_raw_pending_count`
-  N, `d2k_raw_probe_*` stubs P, обёртки IPv4 P.
+  E, `d2k_raw_probe_*` stubs P (кроме Linux-строк), обёртки IPv4 P.
 
 ## detect/response.c (7 функций)
 
@@ -6946,15 +6945,15 @@ production-сеттер `raw_set_segment_max`. Ни одна N не являет
   probe_neutral_ack` (нейтральный байт, TIOCOUTQ, poll, «любое событие =
   не тишина»; тест `live_neutral_ack_confirms_delivery_even_when_control_is_silent`);
   `raw_recheck` = `raw_probe.rs:746` + C/Rust recheck-тест.
-  **P:** `d2k_run_properties_family` — цикл stop/skip/local_err/white-ts/decoy
-  labels; `d2k_classify_run` — E\* (full-tree 24, production true/false);
-  `d2k_send_nosig` — macOS-ветка `SO_NOSIGPIPE` не перенесена;
-  `d2k_trigger_sni`/`trace_add`/`opts_*` — P на форматы/лимиты.
+  `d2k_run_properties_family` — E\* (scripted stop/local_err/md5 + white/decoy);
+  `d2k_classify_run` — E\* (full-tree 24, production true/false);
+  **P:** `d2k_send_nosig` — macOS-ветка `SO_NOSIGPIPE` не перенесена;
+  `d2k_trigger_sni`/`trace_add`/`opts_*` — форматы/лимиты.
 - **`raw.c` (62 функции):** разбор RST-правил (`d2k_parse_rst_rule`,
   `d2k_parse_stale_rst_rule`, `d2k_rst_rule_stale`) — N (R2O создаёт nft
   rule, но чужой/legacy текст не разбирает); nft lifecycle
   (`rst_nft`, `rst_rule_cmd*`, `rst_delete_once`, `retry_pending_releases`,
-  `d2k_raw_flush_pending`) — P; packet build/checksum
+  `d2k_raw_flush_pending`) — E/P по строкам (killed/atexit PASS); packet build/checksum
   (`build_ipv4_tcp`, `tcp_checksum*`, `build_ip_tcp`) — E по
   `raw_probe.rs` тестам; `raw_send` — E (SYN-data режется по
   `segment_max`, 30-case seam); `raw_send_syn/raw_recv/raw_read_payload/
@@ -6964,9 +6963,9 @@ production-сеттер `raw_set_segment_max`. Ни одна N не являет
   differential); non-Linux stubs — N/P. `d2k_raw_supported` — E;
   `d2k_raw_probe_*` — poison/handshake E, остальные P.
 - **Вывод:** classify/raw — 98 функций; новые подтверждённые E:
-  split_offsets, unacked_bytes, probe_data_ack, raw_recheck. Основные
-  пробелы — RST-парсеры, `raw_set_segment_max`, цикл/метки
-  `d2k_run_properties_family`, macOS send_nosig; `d2k_classify_run` — E\*.
+  split_offsets, unacked_bytes, probe_data_ack, raw_recheck, raw I/O,
+  handshake/dial, poison/handshake probes. Основные пробелы — RST-парсеры,
+  `raw_set_segment_max`, macOS send_nosig; `d2k_classify_run` — E\*.
 
 ## Углублённая сверка: bridge/main/poison/props/response/trigger
 
@@ -7012,8 +7011,7 @@ production-сеттер `raw_set_segment_max`. Ни одна N не являет
   differential нет).
 - **Вывод:** 60 функций; E — списки/парсеры триггеров, scan12,
   neutral/decide/probe, tri-state; P — bridge-оркестрация, CLI-вывод,
-  отказ RST-правила в `sweep_poisons`, цикл/метки
-  `d2k_run_properties_family`, handshake12, host_ts; N —
+  handshake12, host_ts; N —
   `trace_questions`, `note_gap_loss`, `cross_check_tls12`,
   `d2k_raw_pending_count`, RST-парсеры, `set_segment_max` (см. выше).
 
@@ -7096,9 +7094,9 @@ r2o-tls-verify-differential.sh                       16/16 PASS
 
 - Актуальные counts: **E 139 / P 20 / N 0** из 159 (срез main 2026-11-15).
 - P не считается паритетом: 20 строк без полного доказательства ветвей
-  (bridge/sweep/raw/props/CLI helpers); после QA final7 понижены
-  `sweep_poisons` и `d2k_run_properties_family`.
+  (bridge/raw/CLI helpers); `sweep_poisons` и
+  `d2k_run_properties_family` закрыты differential.
 - N больше нет; ранее N-строки перенесены или переклассифицированы.
 - Ключевые ограничения: реальный DPI, OpenWrt/musl/mipsel, root-raw,
-  field-by-field `d2k_arm` (закрыт), отказ RST-правила в `sweep_poisons`,
+  field-by-field `d2k_arm` (закрыт), bridge/CLI,
   detect CLI (`r2o-detect` не упакован).

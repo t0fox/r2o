@@ -477,24 +477,21 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
   `rst_key_of` — поля на месте; `suppress_kernel_rst/
   release_kernel_rst` — RstRule/RstGuard, нет снятия после таймаута
   команды; `local_addr_for` — UDP connect. P/N по строкам.
-- **Сборка пакетов (556–771):** `local_addr_for` P; `rd16/rd32/
-  wr16/wr32/checksum/tcp_checksum/build_ipv4_tcp/tcp_checksum_family/
-  build_ip_tcp` — E, differential `raw_profile`/`measured_tcp_split`
-  и checksum-тесты.
-- **Отправка/приём/план (773–1321):** `raw_sendto` — C IPv4
-  `sin_port=dport`, IPv6 port 0, Rust `send_ip_packet` порт не
-  заполняет; сокетного теста нет. `d2k_raw_set_segment_max` — N
-  (production gap). `raw_send` — C нарезает по `seg_max` (1400),
-  Rust plan-путь E, syn_data одним пакетом. `raw_send_syn` — E,
-  `r2o-raw-profile-differential.sh`. `raw_recv` — Rust строже
-  фильтрует длины/фрагменты/локальный адрес; `raw_read_payload` —
-  якорь есть, теста нет; `raw_close` — Drop; `raw_handshake/raw_dial`
-  — RTO/эхо есть, полного сетевого теста нет; `d2k_raw_probe_
-  handshake_as` P; `raw_send_plan` E; `d2k_raw_probe_poison_family`
-  P — план покрыт, сетевой путь нет.
+- **Сборка пакетов (556–771):** `local_addr_for` E (2-case differential);
+  `rd16/rd32/wr16/wr32/checksum/tcp_checksum/build_ipv4_tcp/
+  tcp_checksum_family/build_ip_tcp` — E, differential `raw_profile`/
+  `measured_tcp_split` и checksum-тесты.
+- **Отправка/приём/план (773–1321):** `raw_sendto` E (IPv4 short OK/
+  IPv6 full, 6-case differential); `d2k_raw_set_segment_max` — N
+  (production gap); `raw_send` E (SYN-data по `segment_max`, 30-case seam);
+  `raw_send_syn` E (`r2o-raw-profile-differential.sh`); `raw_recv`/
+  `raw_read_payload`/`raw_close` E (live v4/v6 + seam 30);
+  `raw_handshake/raw_dial` E (5-case production function);
+  `d2k_raw_probe_handshake_as` E (5 cases); `raw_send_plan` E;
+  `d2k_raw_probe_poison_family` E (13 live cases v4/v6+wrapper).
 - **Не-Linux ветки (1328–1377):** `d2k_raw_supported` false,
   `d2k_raw_set_segment_max` N, counters P/E, `d2k_raw_pending_count`
-  N, `d2k_raw_probe_*` stubs P, обёртки IPv4 P.
+  E, `d2k_raw_probe_*` stubs P (кроме Linux-строк), обёртки IPv4 P.
 
 ## detect/response.c (7 функций)
 
@@ -691,15 +688,15 @@ production-сеттер `raw_set_segment_max`. Ни одна N не являет
   probe_neutral_ack` (нейтральный байт, TIOCOUTQ, poll, «любое событие =
   не тишина»; тест `live_neutral_ack_confirms_delivery_even_when_control_is_silent`);
   `raw_recheck` = `raw_probe.rs:746` + C/Rust recheck-тест.
-  **P:** `d2k_run_properties_family` — цикл stop/skip/local_err/white-ts/decoy
-  labels; `d2k_classify_run` — E\* (full-tree 24, production true/false);
-  `d2k_send_nosig` — macOS-ветка `SO_NOSIGPIPE` не перенесена;
-  `d2k_trigger_sni`/`trace_add`/`opts_*` — P на форматы/лимиты.
+  `d2k_run_properties_family` — E\* (scripted stop/local_err/md5 + white/decoy);
+  `d2k_classify_run` — E\* (full-tree 24, production true/false);
+  **P:** `d2k_send_nosig` — macOS-ветка `SO_NOSIGPIPE` не перенесена;
+  `d2k_trigger_sni`/`trace_add`/`opts_*` — форматы/лимиты.
 - **`raw.c` (62 функции):** разбор RST-правил (`d2k_parse_rst_rule`,
   `d2k_parse_stale_rst_rule`, `d2k_rst_rule_stale`) — N (R2O создаёт nft
   rule, но чужой/legacy текст не разбирает); nft lifecycle
   (`rst_nft`, `rst_rule_cmd*`, `rst_delete_once`, `retry_pending_releases`,
-  `d2k_raw_flush_pending`) — P; packet build/checksum
+  `d2k_raw_flush_pending`) — E/P по строкам (killed/atexit PASS); packet build/checksum
   (`build_ipv4_tcp`, `tcp_checksum*`, `build_ip_tcp`) — E по
   `raw_probe.rs` тестам; `raw_send` — E (SYN-data режется по
   `segment_max`, 30-case seam); `raw_send_syn/raw_recv/raw_read_payload/
@@ -709,9 +706,9 @@ production-сеттер `raw_set_segment_max`. Ни одна N не являет
   differential); non-Linux stubs — N/P. `d2k_raw_supported` — E;
   `d2k_raw_probe_*` — poison/handshake E, остальные P.
 - **Вывод:** classify/raw — 98 функций; новые подтверждённые E:
-  split_offsets, unacked_bytes, probe_data_ack, raw_recheck. Основные
-  пробелы — RST-парсеры, `raw_set_segment_max`, цикл/метки
-  `d2k_run_properties_family`, macOS send_nosig; `d2k_classify_run` — E\*.
+  split_offsets, unacked_bytes, probe_data_ack, raw_recheck, raw I/O,
+  handshake/dial, poison/handshake probes. Основные пробелы — RST-парсеры,
+  `raw_set_segment_max`, macOS send_nosig; `d2k_classify_run` — E\*.
 
 ## Углублённая сверка: bridge/main/poison/props/response/trigger
 
@@ -757,8 +754,7 @@ production-сеттер `raw_set_segment_max`. Ни одна N не являет
   differential нет).
 - **Вывод:** 60 функций; E — списки/парсеры триггеров, scan12,
   neutral/decide/probe, tri-state; P — bridge-оркестрация, CLI-вывод,
-  отказ RST-правила в `sweep_poisons`, цикл/метки
-  `d2k_run_properties_family`, handshake12, host_ts; N —
+  handshake12, host_ts; N —
   `trace_questions`, `note_gap_loss`, `cross_check_tls12`,
   `d2k_raw_pending_count`, RST-парсеры, `set_segment_max` (см. выше).
 
@@ -841,9 +837,9 @@ r2o-tls-verify-differential.sh                       16/16 PASS
 
 - Актуальные counts: **E 139 / P 20 / N 0** из 159 (срез main 2026-11-15).
 - P не считается паритетом: 20 строк без полного доказательства ветвей
-  (bridge/sweep/raw/props/CLI helpers); после QA final7 понижены
-  `sweep_poisons` и `d2k_run_properties_family`.
+  (bridge/raw/CLI helpers); `sweep_poisons` и
+  `d2k_run_properties_family` закрыты differential.
 - N больше нет; ранее N-строки перенесены или переклассифицированы.
 - Ключевые ограничения: реальный DPI, OpenWrt/musl/mipsel, root-raw,
-  field-by-field `d2k_arm` (закрыт), отказ RST-правила в `sweep_poisons`,
+  field-by-field `d2k_arm` (закрыт), bridge/CLI,
   detect CLI (`r2o-detect` не упакован).

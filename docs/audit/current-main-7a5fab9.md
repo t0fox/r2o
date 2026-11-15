@@ -110,7 +110,8 @@ Pinned C/Rust differential-донор остаётся `a378e230...`; это о�
   ctlprobe PASS.
 - Остаются: end-to-end планового DoQ через реальный C datapath в CI,
   verifier-сокет SO_MARK, DoQ direct-clear/cooldown. Поэтому
-  `d2k_sched_write_live` — P*.
+  `d2k_sched_write_live` — P*: 12-state full live PASS, но production
+  `r2o_live_searches` не вызывается в differential (QA final11).
 
 ## Команды проверки
 
