@@ -667,6 +667,28 @@ mod tests {
             0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
             0xee, 0xff, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
         ];
+        if std::env::var_os("R2O_UDP_PLAN_BUILD_ONLY").is_some() {
+            let empty = std::env::var_os("R2O_UDP_PLAN_EMPTY").is_some();
+            let bytes: &[u8] = if empty { &[] } else { &payload };
+            let result = super::r2o_udp_plan_batch(
+                &plan,
+                sender.local_addr().unwrap(),
+                sender.peer_addr().unwrap(),
+                47,
+                0x1234_5678,
+                bytes,
+            );
+            let code = match result {
+                Ok(_) => 0,
+                Err(code) => code,
+            };
+            let output = format!("build rc={code}\n");
+            if let Ok(path) = std::env::var("R2O_UDP_PLAN_BUILD_DIFF_OUTPUT") {
+                std::fs::write(path, output).unwrap();
+            }
+            assert!(code == 0 || code == -1);
+            return;
+        }
         r2o_udp_test_reset(Some(0x1234_5678));
         if let Ok(path) = std::env::var("R2O_UDP_PLAN_BUILD_OUT") {
             let mut build = String::new();

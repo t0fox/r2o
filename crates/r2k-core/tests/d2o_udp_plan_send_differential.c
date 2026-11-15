@@ -212,6 +212,33 @@ int main(void) {
     }
     fclose(out);
 
+    if (getenv("R2O_UDP_PLAN_BUILD_ONLY")) {
+        d2k_conn context;
+        memset(&context, 0, sizeof context);
+        context.family = (family == AF_INET6) ? 6 : 4;
+        context.ttl = 47;
+        if (family == AF_INET6) {
+            (void)inet_pton(AF_INET6, "::1", context.src_ip6);
+            (void)inet_pton(AF_INET6, "::1", context.dst_ip6);
+        } else {
+            (void)inet_pton(AF_INET, "127.0.0.1", &context.src_ip);
+            (void)inet_pton(AF_INET, "127.0.0.1", &context.dst_ip);
+        }
+        context.src_port = htons(40000);
+        context.dst_port = htons(40001);
+        d2k_udp_batch batch;
+        memset(&batch, 0, sizeof batch);
+        int empty = getenv("R2O_UDP_PLAN_EMPTY") != NULL;
+        int rc = d2k_udp_plan_build(text, &context, 0x12345678u,
+                                    empty ? NULL : payload,
+                                    empty ? 0 : sizeof payload, &batch);
+        printf("build rc=%d\n", rc);
+        if (rc == 0) {
+            d2k_udp_batch_free(&batch);
+        }
+        return 0;
+    }
+
     int fd = connected_socket(family);
     if (fd < 0) {
         perror("connected_socket");
