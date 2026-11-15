@@ -319,6 +319,20 @@ static void sequence_case(const char *name, d2k_session *session,
     print_new_exchange(name, session);
 }
 
+static void tcp_sequence_case(const char *name, d2k_session *session,
+                              const uint8_t *packet, size_t length) {
+    static uint8_t out[4096];
+    d2k_result result;
+    memset(&result, 0, sizeof result);
+    (void)d2k_session_packet(session, packet, length, 2000, out, sizeof out,
+                             &result);
+    printf("%s applied=%d verdict=%d n=%zu skip=%d done=%llu applied_all=%llu\n",
+           name, result.applied ? 1 : 0, (int)result.verdict, result.n_out,
+           result.skipped && result.skipped[0] ? 1 : 0,
+           (unsigned long long)d2k_session_done(session),
+           (unsigned long long)d2k_session_applied(session));
+}
+
 static void print_case(const char *name, d2k_session *session, uint32_t anchor) {
     printf("%s flows=%zu refusals=%llu anchor=%u\n", name,
            d2k_session_flows_tcp(session),
@@ -598,6 +612,37 @@ int main(void) {
             sequence_case("W6 appdata", sequence, buffer, length);
         } else {
             printf("W sequence load-error=%s\n", error);
+        }
+        d2k_session_free(sequence);
+    }
+
+    /* X: production-последовательность с планом: SYN -> ClientHello ->
+     * повтор hello (plan_done) -> данные сервера -> FIN клиента -> RST. */
+    {
+        d2k_session *sequence = d2k_session_new(64, 64);
+        static const uint8_t app_data[] = {0x17, 0x03, 0x03, 0, 1, 0};
+        plan = NULL;
+        plan_length = fake_plan_bytes(plan_buffer);
+        if (d2k_plan_load(plan_buffer, plan_length, &plan, error, sizeof error) == 0) {
+            d2k_session_set_plan(sequence, plan);
+            length = packet_with_payload(buffer, 0x02, 1000, NULL, 0);
+            tcp_sequence_case("X1 syn", sequence, buffer, length);
+            length = packet_with_payload(buffer, 0x18, 1001, CLIENT_HELLO,
+                                         sizeof CLIENT_HELLO);
+            tcp_sequence_case("X2 hello-plan", sequence, buffer, length);
+            tcp_sequence_case("X3 hello-repeat", sequence, buffer, length);
+            length = server_packet_with_payload(
+                buffer, 0x18, 900, 1001 + (uint32_t)sizeof CLIENT_HELLO, 124,
+                app_data, sizeof app_data);
+            tcp_sequence_case("X4 server-data", sequence, buffer, length);
+            length = packet_with_payload(
+                buffer, 0x11, 1001 + (uint32_t)sizeof CLIENT_HELLO, NULL, 0);
+            tcp_sequence_case("X5 client-fin", sequence, buffer, length);
+            length = server_packet_with_payload(buffer, 0x14, 900, 1100, 124,
+                                                NULL, 0);
+            tcp_sequence_case("X6 server-rst", sequence, buffer, length);
+        } else {
+            printf("X sequence load-error=%s\n", error);
         }
         d2k_session_free(sequence);
     }

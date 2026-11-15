@@ -6936,6 +6936,98 @@ mod tests {
                 event.tos
             );
         }
+
+        // X: SYN -> ClientHello+план -> повтор hello -> данные -> FIN -> RST.
+        fn print_tcp_sequence(
+            name: &str,
+            sessions: &TcpSessions,
+            decision: &PacketDecision,
+            applied: bool,
+            skip: bool,
+        ) {
+            let verdict = match decision {
+                PacketDecision::Drop => 1,
+                PacketDecision::Transmit { fate, .. } => u8::from(*fate == OriginalFate::Drop),
+                _ => 0,
+            };
+            let n = match decision {
+                PacketDecision::Transmit { packets, .. } => packets.len(),
+                PacketDecision::Replace(_) => 1,
+                _ => 0,
+            };
+            println!(
+                "{name} applied={} verdict={verdict} n={n} skip={} done={} applied_all={}",
+                u8::from(applied),
+                u8::from(skip),
+                sessions.session_done(),
+                sessions.session_applied()
+            );
+        }
+        let x_plan = tcp_fake_plan();
+        let mut x = TcpSessions::default();
+        let x_syn = ipv4_tcp_packet(client, server, 0x02, 64, 1000, &[]);
+        let before = x.session_applied();
+        let decision = decide_with_session(&mut x, &x_plan, &x_syn);
+        print_tcp_sequence("X1 syn", &x, &decision, x.session_applied() > before, true);
+        let x_hello = ipv4_tcp_packet(client, server, 0x18, 64, 1001, &client_hello());
+        let before = x.session_applied();
+        let decision = decide_with_session(&mut x, &x_plan, &x_hello);
+        print_tcp_sequence(
+            "X2 hello-plan",
+            &x,
+            &decision,
+            x.session_applied() > before,
+            false,
+        );
+        let before = x.session_applied();
+        let decision = decide_with_session(&mut x, &x_plan, &x_hello);
+        print_tcp_sequence(
+            "X3 hello-repeat",
+            &x,
+            &decision,
+            x.session_applied() > before,
+            x.r2o_plan_done_for_packet(&x_hello) && matches!(decision, PacketDecision::Accept),
+        );
+        let mut x_data =
+            ipv4_tcp_packet(server, client, 0x18, 124, 900, &[0x17, 0x03, 0x03, 0, 1, 0]);
+        x_data[28..32].copy_from_slice(&(1001 + client_hello().len() as u32).to_be_bytes());
+        let before = x.session_applied();
+        let decision = decide_with_session(&mut x, &x_plan, &x_data);
+        print_tcp_sequence(
+            "X4 server-data",
+            &x,
+            &decision,
+            x.session_applied() > before,
+            x.r2o_plan_done_for_packet(&x_data) && matches!(&decision, PacketDecision::Accept),
+        );
+        let x_fin = ipv4_tcp_packet(
+            client,
+            server,
+            0x11,
+            64,
+            1001 + client_hello().len() as u32,
+            &[],
+        );
+        let before = x.session_applied();
+        let decision = decide_with_session(&mut x, &x_plan, &x_fin);
+        print_tcp_sequence(
+            "X5 client-fin",
+            &x,
+            &decision,
+            x.session_applied() > before,
+            x.r2o_plan_done_for_packet(&x_fin) && matches!(&decision, PacketDecision::Accept),
+        );
+        let mut x_rst = ipv4_tcp_packet(server, client, 0x14, 124, 900, &[]);
+        x_rst[28..32].copy_from_slice(&1100_u32.to_be_bytes());
+        let before = x.session_applied();
+        let decision = decide_with_session(&mut x, &x_plan, &x_rst);
+        print_tcp_sequence(
+            "X6 server-rst",
+            &x,
+            &decision,
+            x.session_applied() > before,
+            true,
+        );
     }
 
     #[test]
