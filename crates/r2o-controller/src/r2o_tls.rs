@@ -226,7 +226,7 @@ pub fn r2o_tls_replay_client_hello(
         timeout
     };
     stream.set_write_timeout(Some(timeout))?;
-    if stream.write_all(client_hello).is_err() {
+    if crate::tls12::r2o_tls12_write_all(stream, client_hello).is_err() {
         return Ok(false);
     }
     let deadline = std::time::Instant::now()
@@ -906,7 +906,8 @@ fn tls12_read_message(
         }
         tls12_set_deadline(stream, deadline)?;
         let mut payload = Vec::new();
-        let (content_type, length) = reader.read_record(stream, &mut payload, TLS12_REC_MAX)?;
+        let (content_type, length) =
+            reader.read_record_until(stream, &mut payload, TLS12_REC_MAX, deadline)?;
         match content_type {
             21 => {
                 let level = payload.first().copied().unwrap_or(0);
@@ -1076,8 +1077,7 @@ fn tls12_finish(
     finished.extend_from_slice(&verify);
     let mut writer = crate::tls12::Tls12RecordWriter::new(c_salt, c_key, 0);
     let wire = writer.seal(22, &finished)?;
-    stream
-        .write_all(&wire)
+    crate::tls12::r2o_tls12_write_all(stream, &wire)
         .map_err(|error| format!("запись Finished не ушла: {error}"))?;
     transcript.add(&finished);
 
@@ -1136,8 +1136,7 @@ fn tls12_send_plain(
     wire.extend_from_slice(&[3, 3]);
     wire.extend_from_slice(&(body.len() as u16).to_be_bytes());
     wire.extend_from_slice(body);
-    stream
-        .write_all(&wire)
+    crate::tls12::r2o_tls12_write_all(stream, &wire)
         .map_err(|error| format!("TLS1.2-запись не ушла: {error}"))
 }
 
@@ -1159,8 +1158,7 @@ pub fn r2o_tls12_connect(
         .fill(&mut random)
         .map_err(|error| format!("нет случайных байт: {error:?}"))?;
     let hello = r2o_tls12_client_hello(Some(sni), &random, want_wire)?;
-    stream
-        .write_all(&hello)
+    crate::tls12::r2o_tls12_write_all(stream, &hello)
         .map_err(|error| format!("ClientHello не ушёл: {error}"))?;
     let mut transcript = crate::tls12::Tls12Transcript::new(TLS12_TR_MAX);
     transcript.add(&hello[5..]);

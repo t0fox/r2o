@@ -7,6 +7,7 @@ use aes_gcm::aead::{AeadInPlace, KeyInit};
 use aes_gcm::{Aes128Gcm, Nonce};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
+use std::time::{Duration, Instant};
 
 /// C `REC_MAX` (`tls12.c`/`tls13.c`): предел тела одной записи.
 pub const TLS_RECORD_MAX: usize = 18_432;
@@ -33,6 +34,89 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     }
     outer.update(inner);
     outer.finalize().into()
+}
+
+/// C `strerror(errno)` без Rust-суффикса «(os error N)».
+fn r2o_tls12_strerror(error: &std::io::Error) -> String {
+    if let Some(code) = error.raw_os_error() {
+        let text = unsafe { libc::strerror(code) };
+        if !text.is_null() {
+            return unsafe { std::ffi::CStr::from_ptr(text) }
+                .to_string_lossy()
+                .into_owned();
+        }
+    }
+    error.to_string()
+}
+
+/// C `read_exact` (`core/tls12.c:119-153`) поверх `Read`: EINTR/EAGAIN
+/// повторяются, EOF и прочие ошибки возвращаются точным C-текстом.
+pub fn r2o_tls12_read_exact(
+    reader: &mut impl Read,
+    buf: &mut [u8],
+    deadline: Instant,
+    body: bool,
+    rx_wire_bytes: &mut u64,
+    rx_record_missing: &mut u32,
+) -> Result<(), String> {
+    let length = buf.len();
+    let mut got = 0_usize;
+    *rx_record_missing = if body { length as u32 } else { 0 };
+    while got < length {
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "не дождались {} байт за отведённое время",
+                length - got
+            ));
+        }
+        match reader.read(&mut buf[got..]) {
+            Ok(0) => {
+                return Err(format!("соединение закрыто на {got}-м байте из {length}"));
+            }
+            Ok(read) => {
+                got += read;
+                *rx_wire_bytes = rx_wire_bytes.saturating_add(read as u64);
+                if body {
+                    *rx_record_missing = (length - got) as u32;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                // C после EAGAIN возвращается на poll с оставшимся сроком.
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => return Err(format!("чтение: {}", r2o_tls12_strerror(&error))),
+        }
+    }
+    Ok(())
+}
+
+/// C `write_all` (`core/tls12.c:155-171`): короткие записи дописываются,
+/// EINTR/EAGAIN повторяются, нулевая запись — ошибка C-текстом.
+pub fn r2o_tls12_write_all(writer: &mut impl Write, buf: &[u8]) -> Result<(), String> {
+    let mut sent = 0_usize;
+    while sent < buf.len() {
+        match writer.write(&buf[sent..]) {
+            Ok(0) => return Err("запись: Success".into()),
+            Ok(written) => sent += written,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => return Err(format!("запись: {}", r2o_tls12_strerror(&error))),
+        }
+    }
+    Ok(())
 }
 
 /// C `d2k_tls12_prf_for_test`: P_SHA256(secret, label || seed).
@@ -100,6 +184,39 @@ pub fn tls12_aad(sequence: u64, content_type: u8, payload_len: usize) -> [u8; 13
     aad
 }
 
+fn read_record_header_until(
+    reader: &mut impl Read,
+    deadline: Instant,
+) -> Result<([u8; 5], usize), String> {
+    let mut header = [0_u8; 5];
+    let mut wire = 0_u64;
+    let mut missing = 0_u32;
+    r2o_tls12_read_exact(
+        reader,
+        &mut header,
+        deadline,
+        false,
+        &mut wire,
+        &mut missing,
+    )?;
+    // Сетевой узел на TLS/443 иногда отвечает открытым HTTP; нельзя читать
+    // «P/» как старший байт длины записи.
+    if &header == b"HTTP/" {
+        return Err(format!(
+            "не TLS: открытый HTTP-ответ вместо TLS (заголовок {:02x} {:02x} {:02x} {:02x} {:02x})",
+            header[0], header[1], header[2], header[3], header[4]
+        ));
+    }
+    let length = usize::from(u16::from_be_bytes([header[3], header[4]]));
+    if length == 0 || length > TLS_RECORD_MAX {
+        return Err(format!(
+            "не TLS-заголовок {:02x} {:02x} {:02x} {:02x} {:02x}: длина {length} вне предела",
+            header[0], header[1], header[2], header[3], header[4]
+        ));
+    }
+    Ok((header, length))
+}
+
 fn read_record_header(reader: &mut impl Read) -> Result<([u8; 5], usize), String> {
     let mut header = [0_u8; 5];
     reader
@@ -140,6 +257,20 @@ pub struct Tls12RecordReader {
 }
 
 impl Tls12RecordReader {
+    pub fn read_record(
+        &mut self,
+        reader: &mut impl Read,
+        payload: &mut Vec<u8>,
+        capacity: usize,
+    ) -> Result<(u8, usize), String> {
+        self.read_record_until(
+            reader,
+            payload,
+            capacity,
+            Instant::now() + Duration::from_secs(5),
+        )
+    }
+
     pub fn new(salt: [u8; 4], key: [u8; 16], sequence: u64, encrypted: bool) -> Self {
         Self {
             salt,
@@ -153,17 +284,18 @@ impl Tls12RecordReader {
         self.sequence
     }
 
-    pub fn read_record(
+    pub fn read_record_until(
         &mut self,
         reader: &mut impl Read,
         payload: &mut Vec<u8>,
         capacity: usize,
+        deadline: Instant,
     ) -> Result<(u8, usize), String> {
-        let (header, record_len) = read_record_header(reader)?;
+        let (header, record_len) = read_record_header_until(reader, deadline)?;
         let mut raw = vec![0_u8; record_len];
-        reader
-            .read_exact(&mut raw)
-            .map_err(|error| format!("не прочитана TLS-запись: {error}"))?;
+        let mut wire = 0_u64;
+        let mut missing = 0_u32;
+        r2o_tls12_read_exact(reader, &mut raw, deadline, true, &mut wire, &mut missing)?;
         if header[0] == TLS_RECORD_CCS {
             payload.clear();
             return Ok((TLS_RECORD_CCS, 0));
@@ -243,6 +375,17 @@ impl Tls12RecordWriter {
         wire[13 + body.len()..].copy_from_slice(&tag);
         self.sequence += 1;
         Ok(wire)
+    }
+
+    /// C `send_sealed` + `write_all`: запечатать и записать всю запись.
+    pub fn write_record(
+        &mut self,
+        writer: &mut impl Write,
+        content_type: u8,
+        body: &[u8],
+    ) -> Result<(), String> {
+        let wire = self.seal(content_type, body)?;
+        r2o_tls12_write_all(writer, &wire)
     }
 }
 
@@ -679,5 +822,188 @@ mod tests {
             (TLS_RECORD_APPDATA, 8)
         );
         drop(reader);
+    }
+
+    #[test]
+    fn tls12_io_c_differential_trace_matches_c_fixture() {
+        use super::{r2o_tls12_read_exact, r2o_tls12_write_all};
+        use std::io::{ErrorKind, Read, Write};
+        use std::time::{Duration, Instant};
+
+        let Some(path) = std::env::var_os("R2O_TLS12_IO_DIFF_OUTPUT") else {
+            return;
+        };
+
+        enum ReadEvent {
+            Data(&'static [u8]),
+            Error(ErrorKind),
+            Raw(i32),
+        }
+
+        struct MockReader {
+            events: Vec<ReadEvent>,
+        }
+
+        impl Read for MockReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.events.is_empty() {
+                    return Ok(0);
+                }
+                match self.events.remove(0) {
+                    ReadEvent::Data(data) => {
+                        let n = data.len().min(buf.len());
+                        buf[..n].copy_from_slice(&data[..n]);
+                        Ok(n)
+                    }
+                    ReadEvent::Error(kind) => Err(std::io::Error::new(kind, "test")),
+                    ReadEvent::Raw(code) => Err(std::io::Error::from_raw_os_error(code)),
+                }
+            }
+        }
+
+        enum WriteEvent {
+            Limit(usize),
+            Error(ErrorKind),
+            Raw(i32),
+        }
+
+        struct MockWriter {
+            events: Vec<WriteEvent>,
+            sent: Vec<u8>,
+        }
+
+        impl Write for MockWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                if self.events.is_empty() {
+                    return Ok(0);
+                }
+                match self.events.remove(0) {
+                    WriteEvent::Limit(limit) => {
+                        let n = limit.min(buf.len());
+                        self.sent.extend_from_slice(&buf[..n]);
+                        Ok(n)
+                    }
+                    WriteEvent::Error(kind) => Err(std::io::Error::new(kind, "test")),
+                    WriteEvent::Raw(code) => Err(std::io::Error::from_raw_os_error(code)),
+                }
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        fn hex(bytes: &[u8]) -> String {
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+        }
+
+        fn emit(
+            output: &mut String,
+            name: &str,
+            result: Result<(), String>,
+            rx: u64,
+            missing: u32,
+            buf: &[u8],
+            sent: &[u8],
+        ) {
+            let (rc, err) = match result {
+                Ok(()) => (0, String::new()),
+                Err(error) => (-1, error),
+            };
+            output.push_str(&format!(
+                "io|{name}|rc={rc}|err={err}|rx={rx}|missing={missing}|buf={}|sent={}\n",
+                hex(buf),
+                hex(sent)
+            ));
+        }
+
+        fn read_case(name: &str, events: Vec<ReadEvent>, deadline: Instant, output: &mut String) {
+            let mut reader = MockReader { events };
+            let mut buf = [0_u8; 4];
+            let mut rx = 0_u64;
+            let mut missing = 0_u32;
+            let result = r2o_tls12_read_exact(
+                &mut reader,
+                &mut buf,
+                deadline,
+                false,
+                &mut rx,
+                &mut missing,
+            );
+            emit(output, name, result, rx, missing, &buf, &[]);
+        }
+
+        fn write_case(name: &str, events: Vec<WriteEvent>, output: &mut String) {
+            let mut writer = MockWriter {
+                events,
+                sent: Vec::new(),
+            };
+            let buf = [0xa0_u8, 0xa1, 0xa2, 0xa3];
+            let result = r2o_tls12_write_all(&mut writer, &buf);
+            emit(output, name, result, 0, 0, &buf, &writer.sent);
+        }
+
+        static DATA: [u8; 4] = [1, 2, 3, 4];
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(1);
+        let mut output = String::new();
+        read_case(
+            "read-full",
+            vec![ReadEvent::Data(&DATA)],
+            deadline,
+            &mut output,
+        );
+        read_case(
+            "read-short",
+            vec![ReadEvent::Data(&DATA[..2]), ReadEvent::Data(&DATA[2..])],
+            deadline,
+            &mut output,
+        );
+        read_case(
+            "read-eintr",
+            vec![
+                ReadEvent::Error(ErrorKind::Interrupted),
+                ReadEvent::Data(&DATA),
+            ],
+            deadline,
+            &mut output,
+        );
+        read_case(
+            "read-eagain",
+            vec![
+                ReadEvent::Error(ErrorKind::WouldBlock),
+                ReadEvent::Data(&DATA),
+            ],
+            deadline,
+            &mut output,
+        );
+        read_case("read-eof", vec![], deadline, &mut output);
+        read_case("read-error", vec![ReadEvent::Raw(5)], deadline, &mut output);
+        read_case("read-deadline", vec![], Instant::now(), &mut output);
+        write_case("write-full", vec![WriteEvent::Limit(4)], &mut output);
+        write_case(
+            "write-short",
+            vec![WriteEvent::Limit(1), WriteEvent::Limit(3)],
+            &mut output,
+        );
+        write_case(
+            "write-eintr",
+            vec![
+                WriteEvent::Error(ErrorKind::Interrupted),
+                WriteEvent::Limit(4),
+            ],
+            &mut output,
+        );
+        write_case(
+            "write-eagain",
+            vec![
+                WriteEvent::Error(ErrorKind::WouldBlock),
+                WriteEvent::Limit(4),
+            ],
+            &mut output,
+        );
+        write_case("write-error", vec![WriteEvent::Raw(5)], &mut output);
+        write_case("write-zero", vec![WriteEvent::Limit(0)], &mut output);
+        std::fs::write(path, output).unwrap();
     }
 }
