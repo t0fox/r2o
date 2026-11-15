@@ -2915,6 +2915,24 @@ mod tests {
             sessions.r2o_http_keepalive_stats().later >= 1,
             "второй GET — keep-alive later"
         );
+        let n1 = match &decision1 {
+            PacketDecision::Transmit { packets, .. } => packets.len(),
+            PacketDecision::Replace(_) => 1,
+            _ => 0,
+        };
+        let n2 = match &decision2 {
+            PacketDecision::Transmit { packets, .. } => packets.len(),
+            PacketDecision::Replace(_) => 1,
+            _ => 0,
+        };
+        let output = format!(
+            "first applied=1 n={n1} skip=0 plan_done={} sends_left={first_sends_left}\nsecond applied=1 n={n2} skip=0 plan_done={} sends_left={second_sends_left}\n",
+            u8::from(sessions.r2o_plan_done_for_packet(&get1)),
+            u8::from(sessions.r2o_plan_done_for_packet(&get2))
+        );
+        if let Ok(path) = std::env::var("R2O_HTTP_KEEPALIVE_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
     }
 
     #[test]
