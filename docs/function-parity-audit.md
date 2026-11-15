@@ -93,14 +93,14 @@ production-путь не ставится. Формулировки «теста
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 347 | 201 | 0 | 0 |
+| core-net | 548 | 345 | 203 | 0 | 0 |
 | core-state | 692 | 475 | 217 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 138 | 21 | 0 | 0 |
-| **Итого** | **1982** | **1536** | **446** | **0** | **0** |
+| **Итого** | **1982** | **1534** | **448** | **0** | **0** |
 
-Это не оценка паритета: 446 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 448 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -119,7 +119,7 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1536 / P 446**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1534 / P 448**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
@@ -138,7 +138,7 @@ B — нужен только тест/differential **190**; C — архите�
 
 ## Итог и подтверждённые расхождения (2026-11-15)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1536 / P 446 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1534 / P 448 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -379,12 +379,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 347 | 201 | 0 | 0 |
+| core-net | 548 | 345 | 203 | 0 | 0 |
 | core-state | 692 | 475 | 217 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 138 | 21 | 0 | 0 |
-| **Итого** | **1982** | **1536** | **446** | **0** | **0** |
+| **Итого** | **1982** | **1534** | **448** | **0** | **0** |
 
 
 ---
@@ -601,8 +601,8 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| `put16` | 16-16 | 1 | big-endian u16 | `r2o_tls.rs:486 push_u16` | **E** | C `p[0]=v>>8; p[1]=v`; Rust `push_u16` те же два байта. Владелец `d2k_t13_ch_build` → `r2o_tls13_client_hello`, unit `tests/r2o_tls.rs`. |
-| `get16` | 17-17 | 1 | big-endian u16 | `u16::from_be_bytes` | **E** | C `(p[0]<<8)\|p[1]`; Rust `from_be_bytes`. Владельцы (`sh_version`, `sh_parse`, `ech_config_parse`) покрыты differential/ECH-тестами. |
+| `put16` | 16-16 | 1 | big-endian u16 | `r2o_tls.rs:486 push_u16` | **P*** | C `p[0]=v>>8; p[1]=v` в tls13core.c; Rust `push_u16`/`to_be_bytes`, владелец `r2o_tls13_client_hello`. **QA final9/10:** прямого C/Rust differential для tls13core no; E переоценён — P*. |
+| `get16` | 17-17 | 1 | big-endian u16 | `u16::from_be_bytes` | **P*** | C `(p[0]<<8)|p[1]`; Rust `from_be_bytes`; владельцы `sh_version/sh_parse/ech_config_parse` покрыты ECH-тестами, но прямого C/Rust differential для tls13core put16/get16 нет. **QA final9/10:** P*. |
 | `d2k_t13_random` | 21-27 | 7 | `n` случайных байт из `/dev/urandom`; точное чтение, иначе -1 | `ring`/`getrandom` через rustls/ECH | **P** | C `fopen("/dev/urandom","rb")`, `fread(b,1,n)`, `fclose`, `got==n?0:-1`; Rust использует `ring`/`getrandom`/rustls `secure_random`, отдельной функции с тем же контрактом нет. |
 | `der_len` | 53-62 | 10 | DER-длина: short `<0x80`; long `n&0x7f` 1..4; `n==0`/`avail<1+n` → 0, `*hdr` | `response.rs:485-500 https_der_length` | **E** | **Совпадает:** `first<0x80 → (first,1)`; `n=first&0x7f`, `n==0\|\|n>4\|\|len<n+1 → 0`; значение big-endian; `hdr=1+n`. Rust `https_der_length` те же ветви/границы; differential `d2o_shared_tls_response_vectors_match`. |
 | `ascii_lower` | 64-64 | 1 | ASCII-нижний регистр для SAN-сравнения | `to_ascii_lowercase`/`eq_ignore_ascii_case` (`domain.rs:21`, `fetch.rs`) | **E** | C `(c>='A' && c<='Z') ? c+32 : c`. Rust в сравнении имён использует `eq_ignore_ascii_case`/`u8::to_ascii_lowercase`, которые понижают ровно `A..Z` и не трогают остальные байты; побайтово эквивалентно. SAN-сравнение покрыто TLS-дифференциалом. |
@@ -6359,9 +6359,9 @@ base.valid/base_blocked) и neutral-ack.
 
 Ядро дерева: триггер, опции, трасса, measure, самопроверка сырого слоя, перебор и итоговый вердикт.
 Сильные места R2O: `measure`, `split_offsets`, `trigger_accepts`, нейтральный ACK и кэш самопроверки
-покрыты тестами и C/Rust-дифференциалами. Слабые: нет `notes`/`covers_tls12`, нет trace о непринятом
-правиле RST, текст причины при отказе сырого слоя и счёт probes ответного направления отличаются,
-`note_gap_loss` отсутствует вовсе.
+покрыты тестами и C/Rust-дифференциалами. Слабые: `notes`/`covers_tls12` неполны, но RST-failure observation/trace,
+raw I/O/live и raw_rule fd close закрыты differential; остаются
+`note_gap_loss`, bridge-оркестрация и часть CLI.
 
 **Прочитано построчно: 36/36 функций, 1494 строки C (1–1494).** Сверено с `classify.rs:28-58` (`split_offsets`), `:60-130` (`Trigger`), `:543-558` (`trigger_accepts`), `:1076-1240` (`measure`/run), `:1298+` (`run_with_backend_progress`), `:1939-1941` (`strategy_for`), `raw_probe.rs:120-186` (`raw_selftest`), `:189-345` (`sweep_poisons`), `:602-760` (`select_bridge_decoy`/`raw_offer_timestamps`/selftest), `:840-1099` (`property_probes`/`compose_from_props`), `response.rs:254-310,776-889,898,953-963` (`connect`/`probe_trigger`/`neutral_ack`/`unacked_bytes`). Сверены: имена вердиктов/ответа,
 часы/сон/отмена, accept-критерии, опции и skip/only, трасса/notes, split_offsets, dial с SO_MARK и
@@ -6719,8 +6719,9 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
   `d2k_parse_stale_rst_rule` — N (R2O не разбирает строки iptables);
   `pid_alive` — `kill(pid,0)||EPERM`, Rust `libc::kill`; `raw_supported`
   — C 1, Rust реальная проба сокета; `raw_rule_system` — C
-  fork/setpgid/close fd/deadline/kill group, Rust `run_command` без
-  группы; `d2k_raw_rst_fail_count` E, `d2k_raw_dial_count` P;
+  fork/setpgid/close fd/deadline/kill group, Rust `run_command` с
+  pre_exec close fd/группой/deadline; `d2k_raw_rst_fail_count` E,
+  `d2k_raw_dial_count` E;
   `seed_init/seed_once` — srandom vs getrandom/OnceLock;
   `next_source_port` — 30000..54999 совпадает; `rst_nft` — D2K_FW vs
   R2O_FW; `sweep_stale_rst_rules` — C legacy+owned+range 30000..54999,
@@ -6955,18 +6956,17 @@ production-сеттер `raw_set_segment_max`. Ни одна N не являет
   (`rst_nft`, `rst_rule_cmd*`, `rst_delete_once`, `retry_pending_releases`,
   `d2k_raw_flush_pending`) — P; packet build/checksum
   (`build_ipv4_tcp`, `tcp_checksum*`, `build_ip_tcp`) — E по
-  `raw_probe.rs` тестам; `raw_send` — P (`syn_data` одним пакетом вместо
-  нарезки по `seg_max`); `raw_send_syn/raw_recv/raw_read_payload/
-  raw_close/raw_handshake/raw_dial` — P (RTO/эхо/сеть не покрыты полным
-  differential); `d2k_raw_set_segment_max` — N, production-вызов
-  `d2kc.c:575,789`, R2O measured-план жёстко 1400 (см. N-раздел);
-  non-Linux stubs — N/P. `d2k_raw_supported` — E; `d2k_raw_probe_*` —
-  P (плановая часть покрыта, сетевой путь — нет).
+  `raw_probe.rs` тестам; `raw_send` — E (SYN-data режется по
+  `segment_max`, 30-case seam); `raw_send_syn/raw_recv/raw_read_payload/
+  raw_close/raw_handshake/raw_dial` — E (seam 30 + live production
+  handshake/raw I/O); `d2k_raw_set_segment_max` — N, production-вызов
+  `d2kc.c:575,789`, measured-план использует `send_cap` (28-case cap
+  differential); non-Linux stubs — N/P. `d2k_raw_supported` — E;
+  `d2k_raw_probe_*` — poison/handshake E, остальные P.
 - **Вывод:** classify/raw — 98 функций; новые подтверждённые E:
   split_offsets, unacked_bytes, probe_data_ack, raw_recheck. Основные
-  пробелы — RST-парсеры, `raw_set_segment_max`, отказ RST-правила в
-  `sweep_poisons`, цикл/метки `d2k_run_properties_family`, macOS send_nosig;
-  `d2k_classify_run` — E\*.
+  пробелы — RST-парсеры, `raw_set_segment_max`, цикл/метки
+  `d2k_run_properties_family`, macOS send_nosig; `d2k_classify_run` — E\*.
 
 ## Углублённая сверка: bridge/main/poison/props/response/trigger
 

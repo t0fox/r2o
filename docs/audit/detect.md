@@ -104,9 +104,9 @@ base.valid/base_blocked) и neutral-ack.
 
 Ядро дерева: триггер, опции, трасса, measure, самопроверка сырого слоя, перебор и итоговый вердикт.
 Сильные места R2O: `measure`, `split_offsets`, `trigger_accepts`, нейтральный ACK и кэш самопроверки
-покрыты тестами и C/Rust-дифференциалами. Слабые: нет `notes`/`covers_tls12`, нет trace о непринятом
-правиле RST, текст причины при отказе сырого слоя и счёт probes ответного направления отличаются,
-`note_gap_loss` отсутствует вовсе.
+покрыты тестами и C/Rust-дифференциалами. Слабые: `notes`/`covers_tls12` неполны, но RST-failure observation/trace,
+raw I/O/live и raw_rule fd close закрыты differential; остаются
+`note_gap_loss`, bridge-оркестрация и часть CLI.
 
 **Прочитано построчно: 36/36 функций, 1494 строки C (1–1494).** Сверено с `classify.rs:28-58` (`split_offsets`), `:60-130` (`Trigger`), `:543-558` (`trigger_accepts`), `:1076-1240` (`measure`/run), `:1298+` (`run_with_backend_progress`), `:1939-1941` (`strategy_for`), `raw_probe.rs:120-186` (`raw_selftest`), `:189-345` (`sweep_poisons`), `:602-760` (`select_bridge_decoy`/`raw_offer_timestamps`/selftest), `:840-1099` (`property_probes`/`compose_from_props`), `response.rs:254-310,776-889,898,953-963` (`connect`/`probe_trigger`/`neutral_ack`/`unacked_bytes`). Сверены: имена вердиктов/ответа,
 часы/сон/отмена, accept-критерии, опции и skip/only, трасса/notes, split_offsets, dial с SO_MARK и
@@ -464,8 +464,9 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
   `d2k_parse_stale_rst_rule` — N (R2O не разбирает строки iptables);
   `pid_alive` — `kill(pid,0)||EPERM`, Rust `libc::kill`; `raw_supported`
   — C 1, Rust реальная проба сокета; `raw_rule_system` — C
-  fork/setpgid/close fd/deadline/kill group, Rust `run_command` без
-  группы; `d2k_raw_rst_fail_count` E, `d2k_raw_dial_count` P;
+  fork/setpgid/close fd/deadline/kill group, Rust `run_command` с
+  pre_exec close fd/группой/deadline; `d2k_raw_rst_fail_count` E,
+  `d2k_raw_dial_count` E;
   `seed_init/seed_once` — srandom vs getrandom/OnceLock;
   `next_source_port` — 30000..54999 совпадает; `rst_nft` — D2K_FW vs
   R2O_FW; `sweep_stale_rst_rules` — C legacy+owned+range 30000..54999,
@@ -700,18 +701,17 @@ production-сеттер `raw_set_segment_max`. Ни одна N не являет
   (`rst_nft`, `rst_rule_cmd*`, `rst_delete_once`, `retry_pending_releases`,
   `d2k_raw_flush_pending`) — P; packet build/checksum
   (`build_ipv4_tcp`, `tcp_checksum*`, `build_ip_tcp`) — E по
-  `raw_probe.rs` тестам; `raw_send` — P (`syn_data` одним пакетом вместо
-  нарезки по `seg_max`); `raw_send_syn/raw_recv/raw_read_payload/
-  raw_close/raw_handshake/raw_dial` — P (RTO/эхо/сеть не покрыты полным
-  differential); `d2k_raw_set_segment_max` — N, production-вызов
-  `d2kc.c:575,789`, R2O measured-план жёстко 1400 (см. N-раздел);
-  non-Linux stubs — N/P. `d2k_raw_supported` — E; `d2k_raw_probe_*` —
-  P (плановая часть покрыта, сетевой путь — нет).
+  `raw_probe.rs` тестам; `raw_send` — E (SYN-data режется по
+  `segment_max`, 30-case seam); `raw_send_syn/raw_recv/raw_read_payload/
+  raw_close/raw_handshake/raw_dial` — E (seam 30 + live production
+  handshake/raw I/O); `d2k_raw_set_segment_max` — N, production-вызов
+  `d2kc.c:575,789`, measured-план использует `send_cap` (28-case cap
+  differential); non-Linux stubs — N/P. `d2k_raw_supported` — E;
+  `d2k_raw_probe_*` — poison/handshake E, остальные P.
 - **Вывод:** classify/raw — 98 функций; новые подтверждённые E:
   split_offsets, unacked_bytes, probe_data_ack, raw_recheck. Основные
-  пробелы — RST-парсеры, `raw_set_segment_max`, отказ RST-правила в
-  `sweep_poisons`, цикл/метки `d2k_run_properties_family`, macOS send_nosig;
-  `d2k_classify_run` — E\*.
+  пробелы — RST-парсеры, `raw_set_segment_max`, цикл/метки
+  `d2k_run_properties_family`, macOS send_nosig; `d2k_classify_run` — E\*.
 
 ## Углублённая сверка: bridge/main/poison/props/response/trigger
 
