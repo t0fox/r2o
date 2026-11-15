@@ -312,12 +312,13 @@ tcp_ts/ip_id_zero/seq_shift — совпадают; дедупликация `ba
   «нет стратегии» эквивалентен. E.
 - **`d2k_strategy_for` (401–404) ↔ `strategy_for` (`:1933`):** та же
   строка `multisplit:payload=unknown:...`, теста нет. P.
-- **`d2k_arm_from_poison` (413–475) ↔ `plan_text_for_poison/
-  measured_plan_text`:** C переносит oob/badsum/md5/repeats/gap/
+- **`d2k_arm_from_poison` (413–475) ↔ `arm_from_poison`/
+  `measured_plan_text`:** C переносит oob/badsum/md5/repeats/gap/
   disorder/between/ttl/autottl/delta/min/max/seq_out/decoy/tcpts/
-  tcpts_up/ipidzero/split_pos/seqovl_hello/seqovl; Rust `Poison`
-  не имеет autottl/tcp_ts_up, эти оси не выражаются. Дифференциалы
-  split/badsum есть, полного набора нет. P.
+  tcpts_up/ipidzero/split_pos/seqovl_hello/seqovl; Rust `Poison` теперь
+  содержит autottl/`tcp_ts_up`, `D2kArm`/`arm_from_poison` проведён в
+  production `measured_plan_text`; 16-case differential сравнивает все
+  21 поле и отказы syn_data/seq-invalid. E*.
 
 ## detect/props.c (7 функций)
 
@@ -711,8 +712,9 @@ production-сеттер `raw_set_segment_max`. Ни одна N не являет
   P (плановая часть покрыта, сетевой путь — нет).
 - **Вывод:** classify/raw — 98 функций; новые подтверждённые E:
   split_offsets, unacked_bytes, probe_data_ack, raw_recheck. Основные
-  пробелы — RST-парсеры, `raw_set_segment_max`, `sweep_poisons` control=None,
-  field-by-field `d2k_arm`, macOS send_nosig; `d2k_classify_run` — E\*.
+  пробелы — RST-парсеры, `raw_set_segment_max`, отказ RST-правила в
+  `sweep_poisons`, цикл/метки `d2k_run_properties_family`, macOS send_nosig;
+  `d2k_classify_run` — E\*.
 
 ## Углублённая сверка: bridge/main/poison/props/response/trigger
 
@@ -738,9 +740,8 @@ production-сеттер `raw_set_segment_max`. Ни одна N не являет
 - **`props.c` (7):** `prop_probes`, `apply_set`,
   `d2k_run_properties(_family)` — E/P: 5 вопросов и tri-state
   перенесены в `raw_probe.rs`; `tri_no/tri_yes` — E*.
-  **P:** `d2k_compose_from_props` при `control=None` C выдаёт
-  «всё сразу» (`props.c:477-486`), R2O — нет
-  (`raw_probe.rs:1094-1096`).
+  `d2k_compose_from_props` исправлен: при `control=None` R2O выдаёт
+  «всё сразу», как C; 42-case differential PASS. E*.
 - **`response.c` (7):** `resp_timeout`, `d2k_resp_scan12`,
   `d2k_resp_handshake12`, `count_handshakes`, `d2k_neutral_sni`,
   `d2k_resp_decide`, `d2k_probe_response` — E/P. `scan12`/neutral/
@@ -759,7 +760,8 @@ production-сеттер `raw_set_segment_max`. Ни одна N не являет
   differential нет).
 - **Вывод:** 60 функций; E — списки/парсеры триггеров, scan12,
   neutral/decide/probe, tri-state; P — bridge-оркестрация, CLI-вывод,
-  autottl/tsup, control=None compose, handshake12, host_ts; N —
+  отказ RST-правила в `sweep_poisons`, цикл/метки
+  `d2k_run_properties_family`, handshake12, host_ts; N —
   `trace_questions`, `note_gap_loss`, `cross_check_tls12`,
   `d2k_raw_pending_count`, RST-парсеры, `set_segment_max` (см. выше).
 
