@@ -513,19 +513,13 @@ pub fn r2o_probe_discovery_endpoint(
     use std::os::fd::AsRawFd;
     use std::time::{Duration, Instant};
 
-    let mut r2o_probe = R2oDiscoveryProbe {
-        marked: r2o_mark.is_some_and(|mark| mark != 0),
-        ..R2oDiscoveryProbe::default()
-    };
+    let mut r2o_probe = R2oDiscoveryProbe::default();
     let r2o_result = (|| -> Result<(), String> {
         if r2o_server.port() == 0
             || r2o_server.ip().is_unspecified()
             || r2o_server.ip().is_multicast()
         {
             return Err("адрес Discord Discovery некорректен".into());
-        }
-        if r2o_prefix.is_some() && !r2o_probe.marked {
-            return Err("кандидатный зонд требует подтверждённую ненулевую метку".into());
         }
         let r2o_socket = UdpSocket::bind(std::net::SocketAddrV4::new(
             std::net::Ipv4Addr::UNSPECIFIED,
@@ -535,6 +529,7 @@ pub fn r2o_probe_discovery_endpoint(
         if let Some(r2o_mark) = r2o_mark.filter(|r2o_mark| *r2o_mark != 0) {
             r2o_set_socket_mark(r2o_socket.as_raw_fd(), r2o_mark)
                 .map_err(|error| format!("не подтвердить метку UDP-сокета: {error}"))?;
+            r2o_probe.marked = true;
         }
         r2o_socket
             .connect(SocketAddr::V4(r2o_server))
@@ -1502,5 +1497,44 @@ mod tests {
         assert_eq!(r2o_calls, 1);
         assert_eq!(r2o_result.verdict, R2oDiscoveryVerdict::Unmeasured);
         assert_eq!(r2o_result.error.as_deref(), Some("сокет недоступен"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn discovery_probe_diagnostic_trace_matches_c() {
+        use super::r2o_probe_discovery_endpoint;
+
+        let Ok(server) = std::env::var("R2O_DISCOVERY_SEND_SERVER") else {
+            return;
+        };
+        let wait_ms: u64 = std::env::var("R2O_DISCOVERY_SEND_WAIT_MS")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let mark = std::env::var("R2O_DISCOVERY_SEND_MARK")
+            .ok()
+            .filter(|mark| !mark.is_empty())
+            .map(|mark| mark.parse::<u32>().unwrap());
+        let prefix = (std::env::var("R2O_DISCOVERY_SEND_PREFIX").unwrap() == "1").then_some([
+            0x00, 0x01, 0x00, 0x00, 0x21, 0x12, 0xa4, 0x42, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98,
+            0x99, 0x9a, 0x9b, 0x9c, 0x9d, 0x9e,
+        ]);
+        let outcome = r2o_probe_discovery_endpoint(
+            server.parse().unwrap(),
+            prefix.as_ref(),
+            std::time::Duration::from_millis(wait_ms),
+            mark,
+        );
+        let line = format!(
+            "probe sent={} received={} error={} marked={}\n",
+            outcome.probe.sent,
+            outcome.probe.received,
+            u8::from(outcome.error.is_some()),
+            u8::from(outcome.probe.marked)
+        );
+        print!("{line}");
+        if let Ok(path) = std::env::var("R2O_DISCOVERY_SEND_OUTPUT") {
+            std::fs::write(path, line).unwrap();
+        }
     }
 }

@@ -1,5 +1,6 @@
 #!/bin/sh
-# C/Rust differential: search_report/d2k_diag_event на 6 событиях.
+# C/Rust differential: search_report/d2k_diag_event на всех 20 call-site
+# сценариях (включая stun/discovery-confirmed и reason_source).
 set -eu
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 DONOR=${R2O_DONOR_ROOT:-/mnt/e/d2o-current}
@@ -26,4 +27,5 @@ R2O_SEARCH_REPORT_DIFF_OUTPUT="$TEMP/rust.out" \
     -p r2o-controller --bin r2o-controller search_report_events_match_c \
     >"$TEMP/rust.log" 2>&1
 diff -u "$TEMP/c.out" "$TEMP/rust.out"
+printf 'cases=%s\n' "$(wc -l <"$TEMP/c.out")"
 printf 'PASS: search_report events match C (%s).\n' "$ACTUAL_SHA"

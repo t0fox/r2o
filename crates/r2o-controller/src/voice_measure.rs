@@ -1670,6 +1670,46 @@ mod tests {
         assert!(!r2o_result.marked);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn voice_send_one_diagnostic_trace_matches_c() {
+        const R2O_TRACE_ARM: &[u8] = b"r2o-test-voice-arm!!";
+        let Ok(server) = std::env::var("R2O_VOICE_SEND_SERVER") else {
+            return;
+        };
+        let copies: u8 = std::env::var("R2O_VOICE_SEND_COPIES")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let wait_ms: u64 = std::env::var("R2O_VOICE_SEND_WAIT_MS")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let arm = (copies > 0).then_some(R2oVoiceArm {
+            name: "trace",
+            bytes: R2O_TRACE_ARM,
+            copies,
+        });
+        let result = r2o_ask_voice_with_arm(
+            server.parse().unwrap(),
+            Duration::from_millis(wait_ms),
+            None,
+            arm,
+        );
+        let fail = R2O_VOICE_REPEATS.saturating_sub(result.passed);
+        let line = format!(
+            "tally pass={} fail={fail} err={} marked={} rtt={}\n",
+            result.passed,
+            result.errors,
+            u8::from(result.marked),
+            result.rtt_ms.unwrap_or(0)
+        );
+        print!("{line}");
+        if let Ok(path) = std::env::var("R2O_VOICE_SEND_OUTPUT") {
+            std::fs::write(path, line).unwrap();
+        }
+    }
+
     #[test]
     fn voice_ask_real_points_to_production_probe() {
         let ask = super::voice_ask_real();

@@ -30662,128 +30662,486 @@ mod tests {
     fn search_report_events_match_c() {
         use super::{
             R2oDiscoverySearch, R2oDiscoverySearches, R2oDiscoveryVerify,
-            r2o_discovery_diagnostic_event, r2o_discovery_task_key,
+            R2oVoiceDiagnosticContext, r2o_discovery_diagnostic_event, r2o_discovery_task_key,
+            r2o_voice_diagnostic_target, r2o_voice_search_diagnostic_event,
+            r2o_voice_terminal_diagnostic_event,
         };
+        use r2o_controller::voice_discovery::{R2oDiscoveryVerdict, R2oVoiceTarget};
         use std::fmt::Write as _;
         use std::time::{Duration, Instant};
 
-        let now = Instant::now();
+        #[derive(Clone, Copy)]
+        enum Kind {
+            Generic,
+            VoiceTerminal,
+            VoiceSearch { known_prefix: bool, clear: bool },
+        }
+
+        struct Scenario {
+            name: &'static str,
+            host: &'static str,
+            ip: &'static str,
+            transport: u8,
+            family: u8,
+            shape: u8,
+            probes: usize,
+            ask_probes: usize,
+            elapsed_ms: u64,
+            queue_ms: u64,
+            outcome: &'static str,
+            path: &'static str,
+            reason: &'static str,
+            kind: Kind,
+        }
+
         let scenarios = [
-            (
-                "asking",
-                "asking.example",
-                "198.51.100.10",
-                6u8,
-                4u8,
-                1u8,
-                8,
-                "property",
-                "inconclusive",
-            ),
-            (
-                "queued",
-                "queued.example",
-                "198.51.100.11",
-                6,
-                4,
-                1,
-                0,
-                "none",
-                "queue-full",
-            ),
-            (
-                "planning",
-                "planning.example",
-                "198.51.100.12",
-                6,
-                6,
-                2,
-                3,
-                "own-plan",
-                "probe-confirmed",
-            ),
-            (
-                "verify",
-                "verify.example",
-                "198.51.100.13",
-                17,
-                4,
-                3,
-                5,
-                "ladder",
-                "probe-confirmed",
-            ),
-            (
-                "addr",
-                "198.51.100.14",
-                "198.51.100.14",
-                6,
-                4,
-                1,
-                3,
-                "direct",
-                "probe-clear",
-            ),
-            (
-                "fallback",
-                "fallback.example",
-                "198.51.100.15",
-                6,
-                4,
-                1,
-                8,
-                "fallback",
-                "failed",
-            ),
+            Scenario {
+                name: "asking",
+                host: "asking.example",
+                ip: "198.51.100.10",
+                transport: 6,
+                family: 4,
+                shape: 1,
+                probes: 5,
+                ask_probes: 3,
+                elapsed_ms: 1000,
+                queue_ms: 1000,
+                outcome: "inconclusive",
+                path: "property",
+                reason: "проба не подтвердила",
+                kind: Kind::Generic,
+            },
+            Scenario {
+                name: "queued",
+                host: "queued.example",
+                ip: "198.51.100.11",
+                transport: 6,
+                family: 4,
+                shape: 1,
+                probes: 0,
+                ask_probes: 0,
+                elapsed_ms: 2000,
+                queue_ms: 2000,
+                outcome: "queue-full",
+                path: "none",
+                reason: "очередь переполнена",
+                kind: Kind::Generic,
+            },
+            Scenario {
+                name: "planning",
+                host: "planning.example",
+                ip: "198.51.100.12",
+                transport: 6,
+                family: 6,
+                shape: 2,
+                probes: 2,
+                ask_probes: 1,
+                elapsed_ms: 3000,
+                queue_ms: 3000,
+                outcome: "probe-confirmed",
+                path: "own-plan",
+                reason: "план применён",
+                kind: Kind::Generic,
+            },
+            Scenario {
+                name: "verify",
+                host: "verify.example",
+                ip: "198.51.100.13",
+                transport: 17,
+                family: 4,
+                shape: 3,
+                probes: 3,
+                ask_probes: 2,
+                elapsed_ms: 4000,
+                queue_ms: 4000,
+                outcome: "probe-confirmed",
+                path: "ladder",
+                reason: "лестница подтверждена",
+                kind: Kind::Generic,
+            },
+            Scenario {
+                name: "addr",
+                host: "198.51.100.14",
+                ip: "198.51.100.14",
+                transport: 6,
+                family: 4,
+                shape: 1,
+                probes: 1,
+                ask_probes: 2,
+                elapsed_ms: 5000,
+                queue_ms: 5000,
+                outcome: "probe-clear",
+                path: "direct",
+                reason: "адрес проходит",
+                kind: Kind::Generic,
+            },
+            Scenario {
+                name: "fallback",
+                host: "fallback.example",
+                ip: "198.51.100.15",
+                transport: 6,
+                family: 4,
+                shape: 1,
+                probes: 4,
+                ask_probes: 4,
+                elapsed_ms: 6000,
+                queue_ms: 6000,
+                outcome: "failed",
+                path: "fallback",
+                reason: "нет ответа",
+                kind: Kind::Generic,
+            },
+            Scenario {
+                name: "local-abort",
+                host: "local-abort.example",
+                ip: "198.51.100.16",
+                transport: 6,
+                family: 4,
+                shape: 1,
+                probes: 0,
+                ask_probes: 0,
+                elapsed_ms: 7000,
+                queue_ms: 7000,
+                outcome: "local-abort",
+                path: "none",
+                reason: "локальный сбой",
+                kind: Kind::Generic,
+            },
+            Scenario {
+                name: "cancelled",
+                host: "cancelled.example",
+                ip: "198.51.100.17",
+                transport: 6,
+                family: 4,
+                shape: 1,
+                probes: 1,
+                ask_probes: 0,
+                elapsed_ms: 8000,
+                queue_ms: 8000,
+                outcome: "cancelled",
+                path: "none",
+                reason: "поиск отменён",
+                kind: Kind::Generic,
+            },
+            Scenario {
+                name: "shutdown",
+                host: "shutdown.example",
+                ip: "198.51.100.18",
+                transport: 6,
+                family: 4,
+                shape: 1,
+                probes: 2,
+                ask_probes: 1,
+                elapsed_ms: 9000,
+                queue_ms: 9000,
+                outcome: "shutdown",
+                path: "ladder",
+                reason: "остановка",
+                kind: Kind::Generic,
+            },
+            Scenario {
+                name: "superseded",
+                host: "superseded.example",
+                ip: "198.51.100.19",
+                transport: 6,
+                family: 4,
+                shape: 1,
+                probes: 3,
+                ask_probes: 1,
+                elapsed_ms: 10000,
+                queue_ms: 10000,
+                outcome: "superseded",
+                path: "own-plan",
+                reason: "заменён новым поиском",
+                kind: Kind::Generic,
+            },
+            Scenario {
+                name: "probe-direct",
+                host: "probe-direct.example",
+                ip: "198.51.100.20",
+                transport: 6,
+                family: 4,
+                shape: 1,
+                probes: 4,
+                ask_probes: 1,
+                elapsed_ms: 11000,
+                queue_ms: 11000,
+                outcome: "probe-direct",
+                path: "direct",
+                reason: "прямой ответ",
+                kind: Kind::Generic,
+            },
+            Scenario {
+                name: "unknown",
+                host: "unknown.example",
+                ip: "198.51.100.21",
+                transport: 6,
+                family: 4,
+                shape: 1,
+                probes: 5,
+                ask_probes: 1,
+                elapsed_ms: 12000,
+                queue_ms: 12000,
+                outcome: "unknown",
+                path: "none",
+                reason: "адрес не принимал соединений",
+                kind: Kind::Generic,
+            },
+            Scenario {
+                name: "probe-partial",
+                host: "probe-partial.example",
+                ip: "198.51.100.22",
+                transport: 6,
+                family: 4,
+                shape: 1,
+                probes: 6,
+                ask_probes: 1,
+                elapsed_ms: 13000,
+                queue_ms: 13000,
+                outcome: "probe-partial",
+                path: "own-plan",
+                reason: "бюджет исчерпан",
+                kind: Kind::Generic,
+            },
+            Scenario {
+                name: "failed-default",
+                host: "failed-default.example",
+                ip: "198.51.100.23",
+                transport: 6,
+                family: 4,
+                shape: 1,
+                probes: 7,
+                ask_probes: 1,
+                elapsed_ms: 14000,
+                queue_ms: 14000,
+                outcome: "failed",
+                path: "property",
+                reason: "сбой по умолчанию",
+                kind: Kind::Generic,
+            },
+            Scenario {
+                name: "cancelled-default",
+                host: "cancelled-default.example",
+                ip: "198.51.100.24",
+                transport: 6,
+                family: 4,
+                shape: 1,
+                probes: 8,
+                ask_probes: 1,
+                elapsed_ms: 15000,
+                queue_ms: 15000,
+                outcome: "cancelled",
+                path: "fallback",
+                reason: "отмена по умолчанию",
+                kind: Kind::Generic,
+            },
+            Scenario {
+                name: "inconclusive-voice",
+                host: "@discord-voice",
+                ip: "198.51.100.25",
+                transport: 17,
+                family: 4,
+                shape: 5,
+                probes: 4,
+                ask_probes: 2,
+                elapsed_ms: 16000,
+                queue_ms: 16000,
+                outcome: "inconclusive",
+                path: "none",
+                reason: "",
+                kind: Kind::VoiceSearch {
+                    known_prefix: false,
+                    clear: false,
+                },
+            },
+            Scenario {
+                name: "probe-clear-voice",
+                host: "@discord-voice",
+                ip: "198.51.100.26",
+                transport: 17,
+                family: 4,
+                shape: 5,
+                probes: 3,
+                ask_probes: 2,
+                elapsed_ms: 17000,
+                queue_ms: 17000,
+                outcome: "probe-clear",
+                path: "unknown",
+                reason: "",
+                kind: Kind::VoiceSearch {
+                    known_prefix: true,
+                    clear: true,
+                },
+            },
+            Scenario {
+                name: "probe-direct-voice",
+                host: "@discord-voice",
+                ip: "198.51.100.27",
+                transport: 17,
+                family: 4,
+                shape: 5,
+                probes: 2,
+                ask_probes: 2,
+                elapsed_ms: 18000,
+                queue_ms: 18000,
+                outcome: "probe-direct",
+                path: "direct",
+                reason: "",
+                kind: Kind::VoiceSearch {
+                    known_prefix: false,
+                    clear: true,
+                },
+            },
+            Scenario {
+                name: "stun-confirmed",
+                host: "@discord-voice",
+                ip: "198.51.100.28",
+                transport: 17,
+                family: 4,
+                shape: 5,
+                probes: 3,
+                ask_probes: 2,
+                elapsed_ms: 19000,
+                queue_ms: 200,
+                outcome: "stun-confirmed",
+                path: "property",
+                reason: "",
+                kind: Kind::VoiceTerminal,
+            },
+            Scenario {
+                name: "discovery-confirmed",
+                host: "@discord-voice",
+                ip: "198.51.100.29",
+                transport: 17,
+                family: 4,
+                shape: 5,
+                probes: 4,
+                ask_probes: 2,
+                elapsed_ms: 20000,
+                queue_ms: 200,
+                outcome: "discovery-confirmed",
+                path: "property",
+                reason: "",
+                kind: Kind::VoiceTerminal,
+            },
         ];
+
+        let now = Instant::now();
         let mut output = String::new();
-        for (index, (name, host, ip, transport, family, shape, probes, path, outcome)) in
-            scenarios.into_iter().enumerate()
-        {
+        for (index, scenario) in scenarios.iter().enumerate() {
             let target = r2o_controller::discovery::DiscoveryTarget {
-                host: host.into(),
-                endpoint: format!("{ip}:443"),
-                family,
-                shape,
+                host: scenario.host.into(),
+                endpoint: format!("{}:443", scenario.ip),
+                family: scenario.family,
+                shape: scenario.shape,
             };
+            let voice_target = R2oVoiceTarget {
+                client: "192.0.2.10".parse().unwrap(),
+                server: format!("{}:19327", scenario.ip).parse().unwrap(),
+            };
+            let diagnostic_target = if matches!(scenario.kind, Kind::Generic) {
+                target.clone()
+            } else {
+                r2o_voice_diagnostic_target(&voice_target)
+            };
+            let elapsed = Duration::from_millis(scenario.elapsed_ms);
+            let queued_at = now - elapsed;
+            let started_at = if scenario.outcome == "queue-full" {
+                None
+            } else {
+                Some(now - Duration::from_millis(scenario.elapsed_ms - scenario.queue_ms))
+            };
+            let probes = scenario.probes + scenario.ask_probes;
             let mut searches = R2oDiscoverySearches::default();
-            let elapsed = Duration::from_secs(index as u64 + 1);
             searches.entries.insert(
-                r2o_discovery_task_key(&target),
+                r2o_discovery_task_key(&diagnostic_target),
                 R2oDiscoverySearch {
-                    target: target.clone(),
-                    queued_at: now - elapsed,
-                    started_at: (outcome != "queue-full").then_some(now),
+                    target: diagnostic_target.clone(),
+                    queued_at,
+                    started_at,
                     report_id: Some(index as u64 + 1),
-                    trigger_code: index as u8 + 1,
+                    trigger_code: if scenario.host == "@discord-voice" {
+                        3
+                    } else {
+                        index as u8 + 1
+                    },
                     phase: "распознаём поведение",
                     attempts: 0,
                     probes,
                     question: String::new(),
                     candidate: String::new(),
-                    source: path.into(),
+                    source: scenario.path.into(),
                     plan: String::new(),
                     application: String::new(),
                     last_result: String::new(),
                     verify: R2oDiscoveryVerify::default(),
                 },
             );
-            let mut event = r2o_discovery_diagnostic_event(&searches, &target, now);
-            event["outcome"] = serde_json::json!(outcome);
-            event["reason"] = serde_json::json!("");
+            let event = match scenario.kind {
+                Kind::Generic => {
+                    let mut event = r2o_discovery_diagnostic_event(&searches, &target, now);
+                    event["outcome"] = serde_json::json!(scenario.outcome);
+                    event["path"] = serde_json::json!(scenario.path);
+                    event["reason"] = serde_json::json!(scenario.reason);
+                    event
+                }
+                Kind::VoiceTerminal => {
+                    let report = R2oVoiceDiagnosticContext {
+                        report_id: Some(index as u64 + 1),
+                        queued_at,
+                        started_at,
+                        probe_units: probes,
+                    };
+                    r2o_voice_terminal_diagnostic_event(
+                        &voice_target,
+                        &report,
+                        scenario.outcome,
+                        scenario.path,
+                        now,
+                    )
+                    .unwrap()
+                }
+                Kind::VoiceSearch {
+                    known_prefix,
+                    clear,
+                } => {
+                    let verdict = if clear {
+                        R2oDiscoveryVerdict::Clear
+                    } else {
+                        R2oDiscoveryVerdict::Unmeasured
+                    };
+                    r2o_voice_search_diagnostic_event(
+                        &searches,
+                        &voice_target,
+                        known_prefix,
+                        &verdict,
+                        now,
+                    )
+                    .unwrap()
+                }
+            };
             writeln!(
                 output,
-                "{name} id={} target={} protocol={} family={} trigger={} outcome={} path={} probe_units={} elapsed_ms={} queue_ms={} ip={} kind={} shape={}",
-                event["id"], event["target"].as_str().unwrap(),
-                event["protocol"].as_str().unwrap(), event["family"],
-                event["trigger"], event["outcome"].as_str().unwrap(),
-                event["path"].as_str().unwrap(), event["probe_units"],
-                event["elapsed_ms"], event["queue_ms"],
-                event["ip"].as_str().unwrap(), event["kind"].as_str().unwrap(),
+                "{} id={} target={} protocol={} family={} trigger={} outcome={} path={} probe_units={} elapsed_ms={} queue_ms={} ip={} kind={} shape={} reason={} reason_source={}",
+                scenario.name,
+                event["id"],
+                event["target"].as_str().unwrap_or(""),
+                event["protocol"].as_str().unwrap_or(""),
+                event["family"],
+                event["trigger"],
+                event["outcome"].as_str().unwrap_or(""),
+                event["path"].as_str().unwrap_or(""),
+                event["probe_units"],
+                event["elapsed_ms"],
+                event["queue_ms"],
+                event["ip"].as_str().unwrap_or(""),
+                event["kind"].as_str().unwrap_or(""),
                 event["shape"],
+                event["reason"].as_str().unwrap_or(""),
+                event["reason_source"].as_str().unwrap_or(""),
             )
             .unwrap();
-            let _ = transport;
+            let _ = scenario.transport;
         }
         if let Ok(path) = std::env::var("R2O_SEARCH_REPORT_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
