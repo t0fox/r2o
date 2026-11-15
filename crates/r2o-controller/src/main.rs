@@ -10885,6 +10885,8 @@ struct R2oDiscoverySearch {
     application: String,
     last_result: String,
     verify: R2oDiscoveryVerify,
+    /// C `t->report_closed`: терминальный отчёт по поиску уже выдан.
+    report_closed: bool,
 }
 
 #[cfg(unix)]
@@ -10925,6 +10927,16 @@ impl R2oDiscoverySearches {
             self.order.push_back(key.clone());
         }
         let now = std::time::Instant::now();
+        let starting_run = phase == "распознаём поведение"
+            && self
+                .entries
+                .get(&key)
+                .is_some_and(|search| search.started_at.is_some());
+        if starting_run {
+            // C `task_reset`: прежний поиск закрывается `local-abort`
+            // до очистки полей и выдачи нового report_id.
+            self.report_terminal(target, "local-abort", None, None, now);
+        }
         let search = self
             .entries
             .entry(key)
@@ -10944,8 +10956,8 @@ impl R2oDiscoverySearches {
                 application: String::new(),
                 last_result: String::new(),
                 verify: R2oDiscoveryVerify::default(),
+                report_closed: false,
             });
-        let starting_run = phase == "распознаём поведение" && search.started_at.is_none();
         if phase == "ожидает безопасного слота замера" || starting_run
         {
             search.queued_at = now;
@@ -10959,6 +10971,9 @@ impl R2oDiscoverySearches {
             search.application.clear();
             search.last_result.clear();
             search.verify = R2oDiscoveryVerify::default();
+            search.report_id = None;
+            search.trigger_code = 0;
+            search.report_closed = false;
         }
         if phase != "ожидает безопасного слота замера" && search.started_at.is_none()
         {
@@ -10980,10 +10995,64 @@ impl R2oDiscoverySearches {
         }
     }
 
+    /// Закрыть поиск одним терминальным событием, как C `search_report`.
+    /// Повторный вызов для того же report_id ничего не делает.
+    fn report_terminal(
+        &mut self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        outcome: &str,
+        path: Option<&str>,
+        reason: Option<&str>,
+        now: std::time::Instant,
+    ) -> bool {
+        let key = r2o_discovery_task_key(target);
+        let Some(search) = self.entries.get(&key) else {
+            return false;
+        };
+        if search.report_closed || search.report_id.is_none() {
+            return false;
+        }
+        let source = if search.source.is_empty() {
+            "none".to_owned()
+        } else {
+            search.source.clone()
+        };
+        let verify_reason = search.verify.reason.clone();
+        let mut event = r2o_discovery_diagnostic_event(self, target, now);
+        if let Some(search) = self.entries.get_mut(&key) {
+            search.report_closed = true;
+        }
+        event["outcome"] = serde_json::json!(outcome);
+        event["path"] = serde_json::json!(path.unwrap_or(&source));
+        event["reason"] = serde_json::json!(reason.unwrap_or(&verify_reason));
+        event["reason_source"] = serde_json::json!("last-classifier-context");
+        self.pending_reports.push_back(event);
+        true
+    }
+
+    /// C `d2k_sched_free`: по одному `shutdown` на каждый незакрытый поиск,
+    /// включая активные и ждущие в очереди.
+    fn report_shutdown(&mut self, now: std::time::Instant) -> usize {
+        let mut targets = self
+            .entries
+            .values()
+            .filter(|search| search.report_id.is_some() && !search.report_closed)
+            .map(|search| (search.report_id.unwrap_or(0), search.target.clone()))
+            .collect::<Vec<_>>();
+        // C `d2k_sched_free` идёт по слотам задач, т.е. по порядку report_id.
+        targets.sort_by_key(|(report_id, _)| *report_id);
+        let mut emitted = 0;
+        for (_, target) in targets {
+            emitted += usize::from(self.report_terminal(&target, "shutdown", None, None, now));
+        }
+        emitted
+    }
+
     /// C `remeasure_snapped`: перемер — новый поиск. Старый прогресс,
     /// кандидаты и вердикт не должны доживать до установки.
     fn reset_for_remeasure(&mut self, target: &r2o_controller::discovery::DiscoveryTarget) {
         let key = r2o_discovery_task_key(target);
+        self.report_terminal(target, "superseded", None, None, std::time::Instant::now());
         let Some(search) = self.entries.get_mut(&key) else {
             return;
         };
@@ -11000,6 +11069,7 @@ impl R2oDiscoverySearches {
         search.application.clear();
         search.last_result.clear();
         search.verify = R2oDiscoveryVerify::default();
+        search.report_closed = false;
     }
 
     fn record_admission(
@@ -11011,6 +11081,7 @@ impl R2oDiscoverySearches {
         if let Some(search) = self.entries.get_mut(&r2o_discovery_task_key(target)) {
             search.report_id = Some(self.report_sequence);
             search.trigger_code = trigger_code.unwrap_or_default();
+            search.report_closed = false;
             Some(self.report_sequence)
         } else {
             None
@@ -16966,6 +17037,8 @@ group_block_proven: false,
                 searches.record_admission(&target, trigger_code);
                 if let Some(search) = searches.entries.get_mut(&task_key) {
                     search.phase = "очередь заполнена";
+                    // C `search_report("queue-full")` закрывает report.
+                    search.report_closed = true;
                 }
                 drop(searches);
 
@@ -17500,6 +17573,11 @@ group_block_proven: false,
         };
         for target in &expired {
             let task_key = r2o_discovery_task_key(target);
+            // C `task_done`: истёкшая очередь закрывается `cancelled`.
+            self.searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .report_terminal(target, "cancelled", None, None, std::time::Instant::now());
             self.active_cancels
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -17606,6 +17684,11 @@ group_block_proven: false,
         };
         for target in removed {
             let task_key = r2o_discovery_task_key(&target);
+            // C `task_done`: запись снята каталогом — поиск `cancelled`.
+            self.searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .report_terminal(&target, "cancelled", None, None, std::time::Instant::now());
             self.active_cancels
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -18115,6 +18198,17 @@ group_block_proven: false,
             && self.seen.contains(&outcome.target)
             && (!tcp_address_failure || post_ack_address_failure)
         {
+            // C `task_fail`: поиск закрывается `failed` с текущим res.reason.
+            self.searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .report_terminal(
+                    &outcome.target,
+                    "failed",
+                    None,
+                    Some(outcome.detail.as_str()),
+                    std::time::Instant::now(),
+                );
             self.completed.remove(&task_key);
             if ech_witness_exhausted {
                 self.r2o_record_late_rst_only_cooldown(&outcome.target);
@@ -18208,6 +18302,12 @@ group_block_proven: false,
 #[cfg(unix)]
 impl Drop for DiscoveryWorker {
     fn drop(&mut self) {
+        // C `d2k_sched_free`: каждому незакрытому поиску — один `shutdown`
+        // (активные, ждущие очередь и ещё не закрытые watcher-записи).
+        self.searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .report_shutdown(std::time::Instant::now());
         self.cancel.store(true, Ordering::Relaxed);
         for cancel in self
             .active_cancels
@@ -31075,6 +31175,7 @@ mod tests {
                     application: String::new(),
                     last_result: String::new(),
                     verify: R2oDiscoveryVerify::default(),
+                    report_closed: false,
                 },
             );
             let event = match scenario.kind {
@@ -31145,6 +31246,242 @@ mod tests {
         }
         if let Ok(path) = std::env::var("R2O_SEARCH_REPORT_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scheduler_terminal_reports_match_c() {
+        use super::{
+            DiscoveryOutcome, R2oDiscoverySearch, R2oDiscoverySearches, R2oDiscoveryVerify,
+            r2o_discovery_task_key,
+        };
+        use std::fmt::Write as _;
+        use std::time::{Duration, Instant};
+
+        fn insert(
+            searches: &mut R2oDiscoverySearches,
+            target: &r2o_controller::discovery::DiscoveryTarget,
+            id: u64,
+            trigger: u8,
+            probes: usize,
+            elapsed_ms: u64,
+            queue_ms: u64,
+            reason: &str,
+            now: Instant,
+        ) {
+            searches.entries.insert(
+                r2o_discovery_task_key(target),
+                R2oDiscoverySearch {
+                    target: target.clone(),
+                    queued_at: now - Duration::from_millis(elapsed_ms),
+                    started_at: Some(
+                        now - Duration::from_millis(elapsed_ms.saturating_sub(queue_ms)),
+                    ),
+                    report_id: Some(id),
+                    trigger_code: trigger,
+                    phase: "распознаём поведение",
+                    attempts: 0,
+                    probes,
+                    question: String::new(),
+                    candidate: String::new(),
+                    source: "none".into(),
+                    plan: String::new(),
+                    application: String::new(),
+                    last_result: String::new(),
+                    verify: R2oDiscoveryVerify {
+                        reason: reason.into(),
+                        ..R2oDiscoveryVerify::default()
+                    },
+                    report_closed: false,
+                },
+            );
+        }
+
+        fn target(host: &str, ip: &str, shape: u8) -> r2o_controller::discovery::DiscoveryTarget {
+            r2o_controller::discovery::DiscoveryTarget {
+                host: host.into(),
+                endpoint: format!("{ip}:443"),
+                family: 4,
+                shape,
+            }
+        }
+
+        fn write_event(
+            output: &mut String,
+            event: &serde_json::Value,
+            elapsed_ms: u64,
+            queue_ms: u64,
+        ) {
+            writeln!(
+                output,
+                "event id={} target={} protocol={} family={} trigger={} outcome={} path={} probe_units={} elapsed_ms={} queue_ms={} ip={} kind={} shape={} reason={} reason_source={}",
+                event["id"],
+                event["target"].as_str().unwrap_or(""),
+                event["protocol"].as_str().unwrap_or(""),
+                event["family"],
+                event["trigger"],
+                event["outcome"].as_str().unwrap_or(""),
+                event["path"].as_str().unwrap_or(""),
+                event["probe_units"],
+                elapsed_ms,
+                queue_ms,
+                event["ip"].as_str().unwrap_or(""),
+                event["kind"].as_str().unwrap_or(""),
+                event["shape"],
+                event["reason"].as_str().unwrap_or(""),
+                event["reason_source"].as_str().unwrap_or(""),
+            )
+            .unwrap();
+        }
+
+        let now = Instant::now();
+        let mut output = String::new();
+
+        // 1. task_reset -> local-abort.
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        let abort = target("abort.example", "198.51.100.60", 1);
+        insert(
+            &mut worker.searches.lock().unwrap(),
+            &abort,
+            1,
+            1,
+            8,
+            1000,
+            200,
+            "локальный сброс",
+            now,
+        );
+        worker
+            .searches
+            .lock()
+            .unwrap()
+            .update(&abort, "распознаём поведение", 0, 0, "", "");
+        let event = worker.try_diagnostic_report().unwrap();
+        write_event(&mut output, &event, 1000, 200);
+        worker.searches.lock().unwrap().entries.clear();
+
+        // 2. task_fail -> failed.
+        let failed = target("failed.example", "198.51.100.61", 1);
+        insert(
+            &mut worker.searches.lock().unwrap(),
+            &failed,
+            2,
+            2,
+            6,
+            2000,
+            300,
+            "измерение без классификации",
+            now,
+        );
+        worker.seen.insert(failed.clone());
+        worker.seen_order.push_back(failed.clone());
+        worker.r2o_complete_outcome(DiscoveryOutcome {
+            target: failed.clone(),
+            plan_text: None,
+            detail: "измерение без классификации".into(),
+            queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
+            direct_clear: false,
+            volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
+            volume_fingerprint: None,
+            volume_box_id: None,
+            retry_after: None,
+        });
+        let event = worker.try_diagnostic_report().unwrap();
+        write_event(&mut output, &event, 2000, 300);
+        worker.searches.lock().unwrap().entries.clear();
+
+        // 3. task_done -> cancelled (production helper).
+        let cancelled = target("cancelled.example", "198.51.100.62", 1);
+        insert(
+            &mut worker.searches.lock().unwrap(),
+            &cancelled,
+            3,
+            3,
+            4,
+            3000,
+            400,
+            "поиск отменён",
+            now,
+        );
+        worker
+            .searches
+            .lock()
+            .unwrap()
+            .report_terminal(&cancelled, "cancelled", None, None, now);
+        let event = worker.try_diagnostic_report().unwrap();
+        write_event(&mut output, &event, 3000, 400);
+        worker.searches.lock().unwrap().entries.clear();
+
+        // 4. remeasure_snapped -> superseded.
+        let superseded = target("superseded.example", "198.51.100.63", 1);
+        insert(
+            &mut worker.searches.lock().unwrap(),
+            &superseded,
+            4,
+            4,
+            3,
+            4000,
+            500,
+            "перемер снимком",
+            now,
+        );
+        worker
+            .searches
+            .lock()
+            .unwrap()
+            .reset_for_remeasure(&superseded);
+        let event = worker.try_diagnostic_report().unwrap();
+        write_event(&mut output, &event, 4000, 500);
+        worker.searches.lock().unwrap().entries.clear();
+
+        // 5/6. d2k_sched_free -> shutdown для двух незакрытых задач.
+        let shutdown_a = target("shutdown-a.example", "198.51.100.64", 1);
+        let shutdown_b = target("shutdown-b.example", "198.51.100.65", 3);
+        {
+            let mut searches = worker.searches.lock().unwrap();
+            insert(
+                &mut searches,
+                &shutdown_a,
+                5,
+                5,
+                2,
+                5000,
+                600,
+                "остановка A",
+                now,
+            );
+            insert(
+                &mut searches,
+                &shutdown_b,
+                6,
+                6,
+                3,
+                6000,
+                700,
+                "остановка B",
+                now,
+            );
+            searches.report_shutdown(now);
+        }
+        let event = worker.try_diagnostic_report().unwrap();
+        write_event(&mut output, &event, 5000, 600);
+        let event = worker.try_diagnostic_report().unwrap();
+        write_event(&mut output, &event, 6000, 700);
+
+        if let Ok(path) = std::env::var("R2O_SCHED_TERMINAL_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+        while let Some(extra) = worker.try_diagnostic_report() {
+            eprintln!("unexpected scheduler report: {extra}");
         }
     }
 
@@ -31504,6 +31841,7 @@ mod tests {
             application: String::new(),
             last_result: String::new(),
             verify: Default::default(),
+            report_closed: false,
         };
         assert_eq!(
             super::r2o_dns_task_state_from_search(&search),
@@ -34725,6 +35063,7 @@ mod tests {
                     application: "внутренний APPLIED".into(),
                     last_result: "внутренний результат".into(),
                     verify: R2oDiscoveryVerify::default(),
+                    report_closed: false,
                 },
             );
             searches.order.push_back(task_key);
