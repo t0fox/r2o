@@ -172,6 +172,30 @@ static void group_case(const char *scenario, int ech, const char *path) {
     d2k_catalog_free(&cat);
 }
 
+static void group_evidence_case(const char *scenario, int by_addr, uint8_t transport,
+                                const char *name, unsigned evidence,
+                                const char *plan_id, uint8_t shape,
+                                const char *path, const char *ech_origin) {
+    memset(&cat, 0, sizeof cat);
+    memset(&t, 0, sizeof t);
+    s.cat = &cat;
+    s.wall_base_s = 2000;
+    s.mono_base_ms = 1000;
+    t.by_addr = (uint8_t)by_addr;
+    t.transport = transport;
+    t.family = 4;
+    if (ech_origin && *ech_origin) {
+        t.ech_offer = 1;
+        snprintf(t.ech_origin, sizeof t.ech_origin, "%s", ech_origin);
+    }
+    snprintf(t.name, sizeof t.name, "%s", name);
+    snprintf(t.measure_path, sizeof t.measure_path, "%s", path);
+    group_record(&s, &t, evidence, plan_id, shape, 1000);
+    emit(scenario);
+    dump_groups();
+    d2k_catalog_free(&cat);
+}
+
 int main(void) {
     printf("[");
     memset(&s, 0, sizeof s);
@@ -179,6 +203,15 @@ int main(void) {
     group_case("group_path", 0, "/main.css");
     group_case("group_no_path", 0, "");
     group_case("group_ech_origin", 1, "/ech.css");
+    group_evidence_case("group_direct_clear", 0, 6, "media.example.com",
+                        D2K_GROUP_DIRECT_CLEAR, NULL, 1, "/direct.css", "");
+    group_evidence_case("group_plan_failed", 0, 6, "media.example.com",
+                        D2K_GROUP_PLAN_FAILED, "plan-fail", 1, "/fail.css", "");
+    group_evidence_case("group_by_addr", 1, 6, "203.0.113.8",
+                        D2K_GROUP_DIRECT_CLEAR, NULL, 1, "/", "");
+    group_evidence_case("group_quic", 0, 17, "media.example.com",
+                        D2K_GROUP_BLOCKED_CONFIRMED, "plan-q",
+                        D2K_LINK_SHAPE_QUIC, "/ignored", "");
 
     memset(&cat, 0, sizeof cat);
     memset(&t, 0, sizeof t);

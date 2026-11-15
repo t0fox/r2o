@@ -84,6 +84,31 @@ static R2O_CONTROLLER_STOP: AtomicBool = AtomicBool::new(false);
 static R2O_DISCOVERY_WORKERS_STARTED: AtomicUsize = AtomicUsize::new(0);
 #[cfg(unix)]
 static R2O_DISCOVERY_WORKERS_JOINED: AtomicUsize = AtomicUsize::new(0);
+#[cfg(unix)]
+static R2O_DISCOVERY_WORKERS_START_FAILURES: AtomicUsize = AtomicUsize::new(0);
+/// C `start_worker`: pthread stack явно 1 МиБ, иначе на musl (128 КиБ)
+/// глубокий измерительный стек может тихо испортить память.
+#[cfg(unix)]
+const R2O_WORKER_STACK_SIZE: usize = 1 << 20;
+
+#[cfg(test)]
+#[cfg(unix)]
+static R2O_DISCOVERY_SPAWN_FORCE_FAIL: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+fn r2o_spawn_worker_thread<F>(name: &str, worker: F) -> std::io::Result<std::thread::JoinHandle<()>>
+where
+    F: FnOnce() + Send + 'static,
+{
+    #[cfg(test)]
+    if R2O_DISCOVERY_SPAWN_FORCE_FAIL.load(Ordering::Relaxed) {
+        return Err(std::io::Error::other("spawn hook: принудительный отказ"));
+    }
+    std::thread::Builder::new()
+        .name(name.to_owned())
+        .stack_size(R2O_WORKER_STACK_SIZE)
+        .spawn(worker)
+}
 
 #[cfg(unix)]
 fn r2o_controller_signal_stop(stop: &AtomicBool) {
@@ -631,10 +656,49 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
             continue;
         }
 
-        let connection = r2o_props_contact_connect(bound, destination, ASK_WAIT);
-        let (mut stream, local_ip, local_port, _) = match connection {
-            Ok(connection) => connection,
-            Err(error) => {
+        // Production call-site C `d2k_props_contact_on_family`: тот же
+        // контракт use_fd/out_fd, что проверяет test-props-contact. Сокет уже
+        // занят под вопрос, план стоит ровно на его местном порту; contract
+        // подключается, выставляет таймауты, шлёт снимок и возвращает fd.
+        let contact = r2o_props_contact_on_family_tcp_profile_contract(
+            Some(bound.socket),
+            &destination.ip().to_string(),
+            destination.port(),
+            &trigger_bytes,
+            family,
+            -1,
+            true,
+        );
+        let (stream, local_ip, local_port) = match contact {
+            Ok((Some(stream), local_ip, local_port)) => (stream, local_ip, local_port),
+            Ok((None, local_ip, local_port)) => {
+                // want_fd=true всегда возвращает fd; ветка оставлена, чтобы
+                // не выдумывать несуществующий успех без сокета.
+                let cleanup = client.delete_name_probe(&options.sni, shape, family, source_port);
+                if let Err(cleanup_error) = cleanup {
+                    return Err(format!(
+                        "вопрос {} завершился без сокета; временный план не снят: {cleanup_error}",
+                        question.label()
+                    )
+                    .into());
+                }
+                let _ = (local_ip, local_port);
+                r2o_print_ask_trace(
+                    plan_len,
+                    "датапат принял",
+                    None,
+                    None,
+                    "обращение к цели не вернуло сокет",
+                );
+                println!(
+                    "[{}/5] {} — не измерено: обращение не вернуло сокет; временный план снят",
+                    index + 1,
+                    question.label()
+                );
+                continue;
+            }
+            Err(code) => {
+                let error = r2o_props_contact_error_text(code);
                 let cleanup = client.delete_name_probe(&options.sni, shape, family, source_port);
                 if let Err(cleanup_error) = cleanup {
                     return Err(format!(
@@ -676,23 +740,6 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
             continue;
         }
         let expected_key = r2o_ask_flow_key(local_ip, local_port, destination);
-        if let Err(error) = r2o_props_contact_write(&mut stream, &trigger_bytes) {
-            drop(stream);
-            client.retire_question(&options.sni, shape, family, source_port);
-            r2o_print_ask_trace(
-                plan_len,
-                "датапат принял",
-                Some(local_port),
-                None,
-                "снимок ClientHello не отправился полностью",
-            );
-            println!(
-                "[{}/5] {} — не измерено: снимок ClientHello не отправился ({error}); временный план снят",
-                index + 1,
-                question.label()
-            );
-            continue;
-        }
         let proof = client.wait_for_ask_proof(trial_id, plan_id, expected_key, ASK_WAIT);
         let proof = match proof {
             Ok(proof) => proof,
@@ -4551,19 +4598,26 @@ fn r2o_store_confirmed_budget(
     }
 }
 
-/// C `group_record(BLOCKED_CONFIRMED)` (`sched.c:9013-9034`) для TCP-name:
-/// ключ области берётся с путём замера (`group_path`) и формой привязки.
+/// C `group_record` (`sched.c:9338-9360`): единый вход evidence/key/path/
+/// ech_origin/by_addr. Возвращает false, если запись не положена (by_addr,
+/// IP-литерал, нерегистрируемое имя).
 #[cfg(unix)]
-fn r2o_group_record_confirmed(
+#[allow(clippy::too_many_arguments)]
+fn r2o_group_record(
     catalog: &mut Catalog,
     target: &r2o_controller::discovery::DiscoveryTarget,
+    evidence: u8,
     plan_id: &str,
     shape: u8,
+    transport: u8,
+    family: u8,
     probe_path: &str,
     ech_origin: &str,
+    by_addr: bool,
     now: i64,
 ) -> Result<bool, String> {
-    if target.host.parse::<std::net::IpAddr>().is_ok()
+    if by_addr
+        || target.host.parse::<std::net::IpAddr>().is_ok()
         || r2o_controller::domain::registrable_domain(&target.host).is_none()
     {
         return Ok(false);
@@ -4576,17 +4630,97 @@ fn r2o_group_record_confirmed(
             name: target.host.clone(),
             plan_id: plan_id.to_owned(),
             key: r2o_controller::catalog::GroupKey {
-                transport: 6,
-                family: target.family,
+                transport,
+                family,
                 shape,
-                probe_path: group_path(6, probe_path).to_owned(),
+                probe_path: group_path(transport, probe_path).to_owned(),
                 ech_origin: ech_origin.to_owned(),
             },
-            evidence: 1,
+            evidence,
             at: now,
         })
         .map_err(|error| format!("catalog domain observation: {error}"))?;
     Ok(true)
+}
+
+/// C `group_record(BLOCKED_CONFIRMED)` — подтверждение TCP-name.
+#[cfg(unix)]
+fn r2o_group_record_confirmed(
+    catalog: &mut Catalog,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    plan_id: &str,
+    shape: u8,
+    probe_path: &str,
+    ech_origin: &str,
+    now: i64,
+) -> Result<bool, String> {
+    r2o_group_record(
+        catalog,
+        target,
+        1,
+        plan_id,
+        shape,
+        6,
+        target.family,
+        probe_path,
+        ech_origin,
+        false,
+        now,
+    )
+}
+
+/// C `group_record(DIRECT_CLEAR)` для DNS/TCP/QUIC-цели.
+#[cfg(unix)]
+fn r2o_group_record_direct_clear(
+    catalog: &mut Catalog,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    probe_path: &str,
+    now: i64,
+) -> Result<bool, String> {
+    let transport = if target.shape == SHAPE_QUIC { 17 } else { 6 };
+    let by_addr = target.host.parse::<std::net::IpAddr>().is_ok();
+    r2o_group_record(
+        catalog,
+        target,
+        2,
+        "",
+        target.shape,
+        transport,
+        target.family,
+        probe_path,
+        "",
+        by_addr,
+        now,
+    )
+}
+
+/// C `group_record(PLAN_FAILED)` для конкретного провалившегося плана.
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn r2o_group_record_plan_failed(
+    catalog: &mut Catalog,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    failed_plan_id: &str,
+    shape: u8,
+    transport: u8,
+    probe_path: &str,
+    ech_origin: &str,
+    by_addr: bool,
+    now: i64,
+) -> Result<bool, String> {
+    r2o_group_record(
+        catalog,
+        target,
+        4,
+        failed_plan_id,
+        shape,
+        transport,
+        target.family,
+        probe_path,
+        ech_origin,
+        by_addr,
+        now,
+    )
 }
 
 #[cfg(unix)]
@@ -11936,7 +12070,7 @@ struct DiscoveryWorker {
             bool,
         ),
     >,
-    spawn_worker: Arc<dyn Fn() -> std::thread::JoinHandle<()> + Send + Sync>,
+    spawn_worker: Arc<dyn Fn() -> std::io::Result<std::thread::JoinHandle<()>> + Send + Sync>,
     worker_target: usize,
     worker_live: Arc<AtomicUsize>,
     active: HashMap<R2oDiscoveryTaskKey, r2o_controller::discovery::DiscoveryTarget>,
@@ -12038,6 +12172,10 @@ fn r2o_client_shape_from_legacy(
     } else {
         SHAPE_LEGACY
     };
+    // C `take_shape_opts` хранит до 40 байт TCP options, но единственный
+    // потребитель в планировщике — `client_tcp_profile`/`d2k_trigger_offers_ts`:
+    // он ищет kind 8 len 10. Rust хранит результат того же разбора (bool), а
+    // `raw_send_syn` в C и R2O использует те же два фиксированных профиля.
     let tcp_has_timestamp = tcp_options.map(|options| {
         r2k_core::packet::PacketView::tcp_options_timestamp_profile(options)
             == r2k_core::control::TCP_PROFILE_TS
@@ -14849,7 +14987,9 @@ group_block_proven: false,
             .r2o_max_slots()
             .min(R2O_DISCOVERY_WORKER_THREADS);
         let worker_live = Arc::new(AtomicUsize::new(0));
-        let spawn_worker: Arc<dyn Fn() -> std::thread::JoinHandle<()> + Send + Sync> = {
+        let spawn_worker: Arc<
+            dyn Fn() -> std::io::Result<std::thread::JoinHandle<()>> + Send + Sync,
+        > = {
             let base_cancel = Arc::clone(&cancel);
             let base_gate = measurement_gate.clone();
             let base_jobs = Arc::clone(&jobs);
@@ -14870,7 +15010,8 @@ group_block_proven: false,
                 let worker_searches = Arc::clone(&base_searches);
                 let worker_live = Arc::clone(&base_live);
                 worker_live.fetch_add(1, Ordering::AcqRel);
-                std::thread::spawn(move || {
+                let live_for_failure = Arc::clone(&worker_live);
+                let spawned = r2o_spawn_worker_thread("r2o-discovery", move || {
                     let life = R2oDiscoveryWorkerLife::new(worker_live);
                     loop {
                         let has_jobs = {
@@ -15098,7 +15239,11 @@ group_block_proven: false,
                         }
                         R2O_DISCOVERY_WORKERS_JOINED.fetch_add(1, Ordering::Relaxed);
                     }
-                })
+                });
+                if spawned.is_err() {
+                    live_for_failure.fetch_sub(1, Ordering::AcqRel);
+                }
+                spawned
             })
         };
         Self {
@@ -15185,7 +15330,14 @@ group_block_proven: false,
         // поэтому новая задача не примет выходящий поток за свободный.
         let desired = self.active.len().min(self.worker_target);
         while self.worker_live.load(Ordering::Acquire) < desired {
-            self.threads.push((self.spawn_worker)());
+            match (self.spawn_worker)() {
+                Ok(thread) => self.threads.push(thread),
+                Err(error) => {
+                    R2O_DISCOVERY_WORKERS_START_FAILURES.fetch_add(1, Ordering::Relaxed);
+                    eprintln!("Discovery worker не запустился: {error}");
+                    break;
+                }
+            }
         }
     }
 
@@ -15511,10 +15663,11 @@ group_block_proven: false,
         self.challenge_cooldowns.insert(key, expires_at);
     }
 
-    fn r2o_worker_counts(&self) -> (u64, u64) {
+    fn r2o_worker_counts(&self) -> (u64, u64, u64) {
         (
             R2O_DISCOVERY_WORKERS_STARTED.load(Ordering::Relaxed) as u64,
             R2O_DISCOVERY_WORKERS_JOINED.load(Ordering::Relaxed) as u64,
+            R2O_DISCOVERY_WORKERS_START_FAILURES.load(Ordering::Relaxed) as u64,
         )
     }
 
@@ -19882,7 +20035,7 @@ impl ControlClient {
                                 worker.r2o_outstanding_task_count(std::time::Instant::now())
                             })
                             .unwrap_or_default();
-                        let (workers_started, workers_joined) = discovery
+                        let (workers_started, workers_joined, worker_start_failures) = discovery
                             .as_ref()
                             .map(|(worker, _, _, _)| worker.r2o_worker_counts())
                             .unwrap_or_default();
@@ -20023,7 +20176,7 @@ impl ControlClient {
                             last_measurement_age_ms: None,
                             workers_started,
                             workers_joined,
-                            worker_start_failures: 0,
+                            worker_start_failures,
                             worker_join_failures: 0,
                             worker_oldest_type: "",
                             ..r2o_controller::diagnostics::Counts::default()
@@ -26506,6 +26659,16 @@ fn r2o_props_contact_on_family_tcp_profile_contract(
     }
 }
 
+/// Коды контракта `d2k_props_contact_on_family_tcp_profile` словами.
+#[cfg(unix)]
+fn r2o_props_contact_error_text(code: i32) -> String {
+    match code {
+        -3 => "профиль tcp_timestamps недоступен".to_owned(),
+        -1 => "обращение к цели не состоялось".to_owned(),
+        other => format!("обращение к цели: код {other}"),
+    }
+}
+
 /// C `d2k_props_contact_on_family_tcp_profile`: connect + отправка приветствия.
 #[cfg(unix)]
 fn r2o_props_contact_on_family_tcp_profile(
@@ -26531,36 +26694,6 @@ fn r2o_props_contact_on_family(
     timeout: std::time::Duration,
 ) -> std::io::Result<(std::net::TcpStream, std::net::IpAddr, u16, i64)> {
     r2o_props_contact_on_family_tcp_profile(family, destination, hello, timeout, -1)
-}
-
-/// C `d2k_props_contact_on`: IPv4.
-#[cfg(unix)]
-fn r2o_props_contact_on(
-    destination: std::net::SocketAddr,
-    hello: &[u8],
-    timeout: std::time::Duration,
-) -> std::io::Result<(std::net::TcpStream, std::net::IpAddr, u16, i64)> {
-    r2o_props_contact_on_family(4, destination, hello, timeout)
-}
-
-/// C `d2k_props_contact`: IPv4.
-#[cfg(unix)]
-fn r2o_props_contact(
-    destination: std::net::SocketAddr,
-    hello: &[u8],
-    timeout: std::time::Duration,
-) -> std::io::Result<(std::net::TcpStream, std::net::IpAddr, u16, i64)> {
-    r2o_props_contact_on(destination, hello, timeout)
-}
-
-/// Общий шаг `contact`: connect уже открытого зонда.
-#[cfg(unix)]
-fn r2o_props_contact_connect(
-    probe: BoundTcpProbe,
-    destination: std::net::SocketAddr,
-    timeout: std::time::Duration,
-) -> std::io::Result<(std::net::TcpStream, std::net::IpAddr, u16, i64)> {
-    probe.connect(destination, timeout)
 }
 
 /// Общий шаг `contact`: отправить снимок приветствия.
@@ -28905,6 +29038,47 @@ mod tests {
         );
         run_connected(&mut cases, "v4_use_fd", 4, "127.0.0.1", "use", true, false);
 
+        // Production `run_r2o_ask`: сокет занят до установки плана; contract
+        // обязан использовать его и вернуть тот же местный порт.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let (thread, address) = server(listener);
+        let probe = super::BoundTcpProbe::open(4, Some(0)).unwrap();
+        let bound_port = probe.local_port;
+        let result = super::r2o_props_contact_on_family_tcp_profile_contract(
+            Some(probe.socket),
+            "127.0.0.1",
+            address.port(),
+            b"bound",
+            4,
+            -1,
+            true,
+        );
+        let received = thread.join().unwrap() as i64;
+        match result {
+            Ok((stream, _local_ip, local_port)) => {
+                let returned_fd = stream.is_some();
+                drop(stream);
+                cases.push(json!({
+                    "name": "v4_use_bound_fd",
+                    "rc": 0,
+                    "local_family": 4,
+                    "local_port_nonzero": local_port != 0,
+                    "bound_port_match": local_port == bound_port,
+                    "returned_fd": returned_fd,
+                    "received": received,
+                }));
+            }
+            Err(code) => cases.push(json!({
+                "name": "v4_use_bound_fd",
+                "rc": code,
+                "local_family": 0,
+                "local_port_nonzero": false,
+                "bound_port_match": false,
+                "returned_fd": false,
+                "received": received,
+            })),
+        }
+
         let invalid = |cases: &mut Vec<serde_json::Value>, name: &str, ip: &str, family: u8| {
             let result = super::r2o_props_contact_on_family_tcp_profile_contract(
                 None, ip, 9, b"x", family, -1, false,
@@ -29313,6 +29487,54 @@ mod tests {
         super::r2o_store_confirmed_probe_path(&mut catalog, &target, &plan_id, "/public/site.css");
         assert_eq!(catalog.boxes[0].bindings[0].probe_path, "/public/site.css");
         assert_eq!(catalog.boxes[0].bindings[1].probe_path, "/legacy.css");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn discovery_worker_thread_uses_one_mib_stack() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let handle = super::r2o_spawn_worker_thread("r2o-stack-test", move || {
+            let mut attr = unsafe { std::mem::zeroed::<libc::pthread_attr_t>() };
+            let mut size = 0usize;
+            let rc = unsafe { libc::pthread_getattr_np(libc::pthread_self(), &mut attr) };
+            if rc == 0 {
+                unsafe {
+                    libc::pthread_attr_getstacksize(&attr, &mut size);
+                    libc::pthread_attr_destroy(&mut attr);
+                }
+            }
+            sender.send(size).unwrap();
+        })
+        .unwrap();
+        handle.join().unwrap();
+        assert!(
+            receiver.recv().unwrap() >= super::R2O_WORKER_STACK_SIZE,
+            "C start_worker задаёт 1 МиБ; Rust worker обязан иметь не меньше"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_spawn_failure_increments_worker_start_failures() {
+        let before =
+            super::R2O_DISCOVERY_WORKERS_START_FAILURES.load(std::sync::atomic::Ordering::Relaxed);
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        worker.worker_target = 1;
+        worker.spawn_worker =
+            std::sync::Arc::new(|| Err(std::io::Error::other("тестовый отказ spawn")));
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "spawn-failure.example".into(),
+            endpoint: "198.51.100.90:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let _ = worker.queue_with_planned(target, false);
+        let after =
+            super::R2O_DISCOVERY_WORKERS_START_FAILURES.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            after > before,
+            "неудачный spawn обязан попасть в worker_start_failures"
+        );
     }
 
     #[cfg(unix)]
@@ -30418,33 +30640,9 @@ mod tests {
     fn verify_confirm_gates_differential_matches_c() {
         use serde_json::json;
 
-        let mut scenarios = Vec::new();
-        for (scenario, ech_origin, path) in [
-            ("group_path", "", "/main.css"),
-            ("group_no_path", "", ""),
-            ("group_ech_origin", "edge.example", "/ech.css"),
-        ] {
-            let mut catalog = Catalog::default();
-            for name in ["media.example.com", "a.example.com", "b.example.com"] {
-                let target = r2o_controller::discovery::DiscoveryTarget {
-                    host: name.into(),
-                    endpoint: "198.51.100.80:443".into(),
-                    family: 4,
-                    shape: SHAPE_MODERN,
-                };
-                super::r2o_group_record_confirmed(
-                    &mut catalog,
-                    &target,
-                    "plan-1",
-                    SHAPE_MODERN,
-                    path,
-                    ech_origin,
-                    2000,
-                )
-                .unwrap();
-            }
-            let state = catalog.domain_state.unwrap();
-            scenarios.push(json!({
+        fn group_snapshot(catalog: Catalog, scenario: &str) -> serde_json::Value {
+            let state = catalog.domain_state.unwrap_or_default();
+            json!({
                 "scenario": scenario,
                 "observations": state.observations.iter().map(|observation| json!({
                     "name": observation.name,
@@ -30467,8 +30665,93 @@ mod tests {
                     "ech_origin": group.key.ech_origin,
                     "evidence_count": group.evidence_count,
                 })).collect::<Vec<_>>(),
-            }));
+            })
         }
+
+        fn group_target(host: &str, shape: u8) -> r2o_controller::discovery::DiscoveryTarget {
+            r2o_controller::discovery::DiscoveryTarget {
+                host: host.into(),
+                endpoint: "198.51.100.80:443".into(),
+                family: 4,
+                shape,
+            }
+        }
+
+        let mut scenarios = Vec::new();
+        for (scenario, ech_origin, path) in [
+            ("group_path", "", "/main.css"),
+            ("group_no_path", "", ""),
+            ("group_ech_origin", "edge.example", "/ech.css"),
+        ] {
+            let mut catalog = Catalog::default();
+            for name in ["media.example.com", "a.example.com", "b.example.com"] {
+                super::r2o_group_record_confirmed(
+                    &mut catalog,
+                    &group_target(name, SHAPE_MODERN),
+                    "plan-1",
+                    SHAPE_MODERN,
+                    path,
+                    ech_origin,
+                    2000,
+                )
+                .unwrap();
+            }
+            scenarios.push(group_snapshot(catalog, scenario));
+        }
+
+        let mut catalog = Catalog::default();
+        super::r2o_group_record_direct_clear(
+            &mut catalog,
+            &group_target("media.example.com", SHAPE_MODERN),
+            "/direct.css",
+            2000,
+        )
+        .unwrap();
+        scenarios.push(group_snapshot(catalog, "group_direct_clear"));
+
+        let mut catalog = Catalog::default();
+        super::r2o_group_record_plan_failed(
+            &mut catalog,
+            &group_target("media.example.com", SHAPE_MODERN),
+            "plan-fail",
+            SHAPE_MODERN,
+            6,
+            "/fail.css",
+            "",
+            false,
+            2000,
+        )
+        .unwrap();
+        scenarios.push(group_snapshot(catalog, "group_plan_failed"));
+
+        let mut catalog = Catalog::default();
+        assert!(
+            !super::r2o_group_record_direct_clear(
+                &mut catalog,
+                &group_target("203.0.113.8", SHAPE_MODERN),
+                "/",
+                2000,
+            )
+            .unwrap()
+        );
+        scenarios.push(group_snapshot(catalog, "group_by_addr"));
+
+        let mut catalog = Catalog::default();
+        super::r2o_group_record(
+            &mut catalog,
+            &group_target("media.example.com", SHAPE_QUIC),
+            1,
+            "plan-q",
+            SHAPE_QUIC,
+            17,
+            4,
+            "/ignored",
+            "",
+            false,
+            2000,
+        )
+        .unwrap();
+        scenarios.push(group_snapshot(catalog, "group_quic"));
 
         let target = r2o_controller::discovery::DiscoveryTarget {
             host: "budget.example".into(),
@@ -31279,6 +31562,25 @@ mod tests {
         let with_ts = [1, 1, 8, 10, 0, 0, 0, 1, 0, 0, 0, 0];
         let with_ts = r2o_client_shape_from_legacy(&event, Some(&with_ts)).unwrap();
         assert_eq!(with_ts.tcp_has_timestamp, Some(true));
+
+        // C `d2k_trigger_offers_ts`: TS ищется по kind/len с шагом опции,
+        // kind 0 завершает список, битая длина — «не предлагает».
+        for (options, expected) in [
+            (
+                &[2, 4, 0x05, 0xac, 1, 8, 10, 0, 0, 0, 1, 0, 0, 0, 0][..],
+                Some(true),
+            ),
+            (
+                &[2, 4, 0x05, 0xac, 0, 8, 10, 0, 0, 0, 1, 0, 0, 0, 0][..],
+                Some(false),
+            ),
+            (&[8, 9, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0][..], Some(false)),
+            (&[8, 1][..], Some(false)),
+            (&[8][..], Some(false)),
+        ] {
+            let shape = r2o_client_shape_from_legacy(&event, Some(options)).unwrap();
+            assert_eq!(shape.tcp_has_timestamp, expected, "options {options:?}");
+        }
 
         // Снимок обязан проходить ту же проверку, что и R2O CLIENT_SHAPE.
         assert!(with_ts.event_body().is_some());

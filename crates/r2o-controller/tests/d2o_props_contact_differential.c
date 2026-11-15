@@ -89,6 +89,20 @@ static void emit(const char *name, int rc, uint8_t family, uint16_t local_port,
     first = 0;
 }
 
+/* Production-подобный вход `run_r2o_ask`: сокет уже занят ДО установки плана,
+   contract обязан использовать именно его и вернуть тот же местный порт. */
+static void emit_bound(const char *name, int rc, uint8_t family, uint16_t local_port,
+                       uint16_t bound_port, int out_fd, int received) {
+    printf("%s{\"name\":\"%s\",\"rc\":%d,\"local_family\":%d,"
+           "\"local_port_nonzero\":%s,\"bound_port_match\":%s,"
+           "\"returned_fd\":%s,\"received\":%d}",
+           first ? "" : ",\n", name, rc, rc == 0 ? family : 0,
+           rc == 0 && local_port != 0 ? "true" : "false",
+           rc == 0 && local_port == bound_port ? "true" : "false",
+           out_fd >= 0 ? "true" : "false", received);
+    first = 0;
+}
+
 static void run_connected(const char *name, uint8_t family, const char *ip,
                           const char *hello_text, int use_use_fd, int want_fd) {
     struct server server;
@@ -114,6 +128,47 @@ static void run_connected(const char *name, uint8_t family, const char *ip,
     emit(name, rc, family, local_port, out_fd, server.received);
 }
 
+static void run_bound_fd(const char *name) {
+    struct server server;
+    int port = start_server(4, &server);
+    if (port < 0) {
+        emit_bound(name, -100, 4, 0, 0, -1, -1);
+        return;
+    }
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in local;
+    memset(&local, 0, sizeof local);
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (fd < 0 || bind(fd, (struct sockaddr *)&local, sizeof local) != 0) {
+        if (fd >= 0) close(fd);
+        close(server.listener);
+        emit_bound(name, -100, 4, 0, 0, -1, -1);
+        return;
+    }
+    socklen_t length = sizeof local;
+    if (getsockname(fd, (struct sockaddr *)&local, &length) != 0) {
+        close(fd);
+        close(server.listener);
+        emit_bound(name, -100, 4, 0, 0, -1, -1);
+        return;
+    }
+    uint16_t bound_port = ntohs(local.sin_port);
+    pthread_t thread;
+    pthread_create(&thread, NULL, server_main, &server);
+    d2k_hello hello = {(unsigned char *)"bound", 5};
+    uint8_t local_addr[16] = {0};
+    uint16_t local_port = 0;
+    int out_fd = -1;
+    int rc = d2k_props_contact_on_family_tcp_profile(
+        fd, "127.0.0.1", (uint16_t)port, hello, 4, -1, local_addr, &local_port,
+        &out_fd);
+    pthread_join(thread, NULL);
+    close(server.listener);
+    if (out_fd >= 0) close(out_fd);
+    emit_bound(name, rc, 4, local_port, bound_port, out_fd, server.received);
+}
+
 static uint8_t current_timestamps(void) {
     FILE *f = fopen("/proc/sys/net/ipv4/tcp_timestamps", "r");
     if (!f) return 1;
@@ -130,6 +185,7 @@ int main(void) {
     run_connected("v6_no_fd", 6, "::1", "xyz", 0, 0);
     run_connected("v4_empty_hello", 4, "127.0.0.1", "", 0, 1);
     run_connected("v4_use_fd", 4, "127.0.0.1", "use", 1, 0);
+    run_bound_fd("v4_use_bound_fd");
 
     uint8_t local_addr[16] = {0};
     uint16_t local_port = 0;

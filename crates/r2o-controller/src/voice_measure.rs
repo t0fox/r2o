@@ -117,9 +117,9 @@ pub fn r2o_parse_voice_options(
             }
             "--wait" => {
                 let r2o_value = r2o_voice_option_value(r2o_arguments, &mut r2o_index, "--wait")?;
-                let r2o_millis = r2o_value
-                    .parse::<u64>()
-                    .map_err(|_| "--wait должен быть числом миллисекунд")?;
+                // C `strtoul(value, NULL, 10)` без проверки errno: мусор даёт
+                // 0, хвост после цифр игнорируется.
+                let r2o_millis = u64::from(r2o_voice_strtoul(r2o_value, 10));
                 // C `d2k_voice_run`: 0 — «не задано», подставляется 3000 мс.
                 r2o_options.wait = if r2o_millis == 0 {
                     R2O_VOICE_DEFAULT_WAIT
@@ -129,7 +129,9 @@ pub fn r2o_parse_voice_options(
             }
             "--mark" => {
                 let r2o_value = r2o_voice_option_value(r2o_arguments, &mut r2o_index, "--mark")?;
-                r2o_options.mark = Some(r2o_parse_voice_mark(r2o_value)?);
+                // C `strtoul(value, NULL, 0)`: decimal, 0x hex, ведущий 0 octal.
+                // Мусор и хвост — как strtoul: 0 / только цифры.
+                r2o_options.mark = Some(r2o_voice_strtoul(r2o_value, 0));
             }
             "--discovery" => r2o_options.discovery = true,
             _ => {
@@ -409,7 +411,7 @@ where
                 );
             } else if r2o_direct.errors != 0 {
                 r2o_result.reason = format!(
-                    "прямой STUN-зонд к {r2o_address} не ушёл ({} из {} — местная ошибка сокета или отправки): измерение не закончено",
+                    "прямой STUN-зонд к {r2o_address} не ушёл ({} из {} — местная ошибка сокета/отправки): измерение не закончено",
                     r2o_direct.errors, R2O_VOICE_REPEATS
                 );
             } else if let Some(r2o_control_address) = r2o_control {
@@ -422,19 +424,19 @@ where
                 r2o_record_voice_tally(&mut r2o_result, r2o_control_tally);
                 if r2o_control_tally.passed == 0 && r2o_control_tally.errors != 0 {
                     r2o_result.reason = format!(
-                        "поток к {r2o_address} идёт без ответов, но контрольный зонд к {} не ушёл (местная ошибка сокета или отправки): измерение не закончено",
+                        "поток к {r2o_address} идёт без единого ответа, но контрольный зонд к {} не ушёл (местная ошибка сокета/отправки): измерение не закончено",
                         r2o_options.control
                     );
                 } else if r2o_control_tally.passed == 0 {
                     r2o_result.verdict = R2oVoiceVerdict::NoUdp;
                     r2o_result.reason = format!(
-                        "поток к {r2o_address} идёт без ответов, и публичный STUN {} тоже молчит: на этом канале не ходит UDP или его режут целиком — обходить голос отдельно бессмысленно",
+                        "поток к {r2o_address} идёт без единого ответа, и публичный STUN {} тоже молчит: на этом канале не ходит UDP или его режут целиком — обходить голос отдельно бессмысленно",
                         r2o_options.control
                     );
                 } else {
                     r2o_result.verdict = R2oVoiceVerdict::Blocked;
                     r2o_result.reason = format!(
-                        "поток к {r2o_address} идёт, а ответов нет ни одного, при живом публичном STUN: режут именно этот поток"
+                        "поток к {r2o_address} идёт, а ответов нет НИ ОДНОГО, при живом публичном STUN: режут именно этот поток"
                     );
                     r2o_search_voice_arms(
                         &mut r2o_result,
@@ -462,6 +464,11 @@ where
                     r2o_options.control
                 );
             }
+            if !r2o_result.marked && !r2o_result.reason.contains("СОКЕТ НЕ ПОМЕЧЕН") {
+                r2o_result
+                    .reason
+                    .push_str("; СОКЕТ НЕ ПОМЕЧЕН — зонд шёл через наш же обход");
+            }
         }
         R2oVoiceObservation::Unseen => {
             let r2o_direct = r2o_ask(r2o_address, r2o_options.wait, r2o_options.mark, None);
@@ -483,11 +490,26 @@ where
             } else {
                 r2o_result.verdict = R2oVoiceVerdict::NoOracle;
                 r2o_result.reason = format!(
-                    "зонд к {r2o_address} молчит (0/{}), а разговора к этой точке ядро не видит — опровергнуть молчание нечем. Голосовая точка не отвечает посторонним и на исправной линии, поэтому её молчание блокировкой не является: мерить этим способом нечем",
+                    "зонд к {r2o_address} молчит (0/{}), а разговора к этой точке ядро не видит — опровергнуть молчание нечем. Голосовая точка не отвечает посторонним и на исправной линии, поэтому её молчание блокировкой НЕ является: мерить этим способом нечем",
                     R2O_VOICE_REPEATS
                 );
             }
+            if !r2o_result.marked && !r2o_result.reason.contains("СОКЕТ НЕ ПОМЕЧЕН") {
+                r2o_result.reason.push_str(
+                    "; СОКЕТ НЕ ПОМЕЧЕН — зонд шёл через наш же обход, замер не про коробку провайдера",
+                );
+            }
         }
+    }
+    // C `say_reason`/`add_reason`: `char reason[D2K_REASON_MAX]` (384),
+    // vsnprintf пишет не больше 383 байт. Хвост за пределом не появляется,
+    // даже если это часть нашего суффикса.
+    if r2o_result.reason.len() >= 384 {
+        let mut r2o_end = 383;
+        while r2o_end > 0 && !r2o_result.reason.is_char_boundary(r2o_end) {
+            r2o_end -= 1;
+        }
+        r2o_result.reason.truncate(r2o_end);
     }
     r2o_result
 }
@@ -879,17 +901,33 @@ fn r2o_parse_voice_address(r2o_value: &str) -> Result<SocketAddrV4, String> {
     Ok(SocketAddrV4::new(r2o_ip, r2o_port))
 }
 
-fn r2o_parse_voice_mark(r2o_value: &str) -> Result<u32, String> {
-    let (r2o_digits, r2o_radix) = if let Some(r2o_hex) = r2o_value
-        .strip_prefix("0x")
-        .or_else(|| r2o_value.strip_prefix("0X"))
-    {
-        (r2o_hex, 16)
+/// C `strtoul(value, NULL, radix)` в объёме CLI d2kvoice: ведущие пробелы и
+/// `+`, затем только цифры выбранного основания; мусор/пусто — 0, хвост
+/// игнорируется, переполнение — `u32::MAX` (низшие 32 бита ULONG_MAX).
+fn r2o_voice_strtoul(r2o_value: &str, r2o_radix: u32) -> u32 {
+    let r2o_value = r2o_value.trim_start();
+    let r2o_value = r2o_value.strip_prefix('+').unwrap_or(r2o_value);
+    let (r2o_digits, r2o_radix) = if r2o_radix == 0 {
+        if let Some(r2o_hex) = r2o_value
+            .strip_prefix("0x")
+            .or_else(|| r2o_value.strip_prefix("0X"))
+        {
+            (r2o_hex, 16)
+        } else if r2o_value.len() > 1 && r2o_value.starts_with('0') {
+            (&r2o_value[1..], 8)
+        } else {
+            (r2o_value, 10)
+        }
     } else {
-        (r2o_value, 10)
+        (r2o_value, r2o_radix)
     };
-    u32::from_str_radix(r2o_digits, r2o_radix)
-        .map_err(|_| "--mark должен быть числом от 0 до 4294967295".into())
+    let r2o_end = r2o_digits
+        .find(|r2o_character: char| !r2o_character.is_digit(r2o_radix))
+        .unwrap_or(r2o_digits.len());
+    if r2o_end == 0 {
+        return 0;
+    }
+    u32::from_str_radix(&r2o_digits[..r2o_end], r2o_radix).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]
@@ -1195,6 +1233,33 @@ mod tests {
         let one =
             r2o_parse_voice_options(&[OsString::from("--wait"), OsString::from("1")]).unwrap();
         assert_eq!(one.wait, Duration::from_millis(1));
+    }
+
+    #[test]
+    fn wait_и_mark_повторяют_strtoul_как_d2kvoice() {
+        let junk = r2o_parse_voice_options(&[
+            OsString::from("--wait"),
+            OsString::from("abc"),
+            OsString::from("--mark"),
+            OsString::from("zz"),
+        ])
+        .unwrap();
+        assert_eq!(junk.wait, Duration::from_secs(3));
+        assert_eq!(junk.mark, Some(0));
+
+        let tail = r2o_parse_voice_options(&[
+            OsString::from("--wait"),
+            OsString::from("25xyz"),
+            OsString::from("--mark"),
+            OsString::from("0x2djunk"),
+        ])
+        .unwrap();
+        assert_eq!(tail.wait, Duration::from_millis(25));
+        assert_eq!(tail.mark, Some(45));
+
+        let octal =
+            r2o_parse_voice_options(&[OsString::from("--mark"), OsString::from("057")]).unwrap();
+        assert_eq!(octal.mark, Some(0o57));
     }
 
     #[test]
