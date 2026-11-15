@@ -2925,4 +2925,371 @@ mod tests {
         let (original_len, _) = receiver.recv_from(&mut original).unwrap();
         assert_eq!(&original[..original_len], payload.as_slice());
     }
+
+    /// C/Rust differential qp_send_one/qp_arm_first_send/qp_send_fragmented.
+    ///
+    /// Rust пишет QSN-снимки и trace; C fixture
+    /// `d2o_quic_send_one_differential.c` читает их и повторяет production
+    /// qp_send_one/qp_arm_first_send/qp_send_fragmented через mock-I/O.
+    /// Без `R2O_QUIC_SEND_ONE_DIR` тест ничего не делает.
+    #[test]
+    fn quic_send_one_c_differential_harness() {
+        #[cfg(not(target_os = "linux"))]
+        {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use super::{
+                QuicReplayProbe, R2oQuicCandidateKind, R2oQuicPlanState,
+                r2o_quic_plan_text_from_state, r2o_quic_split_plan_text,
+            };
+            use r2k_core::plan::Plan;
+            use r2k_core::quic_snapshot::{r2k_quic_snapshot_pack, r2k_quic_snapshot_parse};
+            use r2k_core::udp_plan::{R2oUdpRawSink, r2o_udp_plan_send_with_sink};
+            use std::io;
+            use std::os::fd::AsRawFd;
+            use std::path::{Path, PathBuf};
+            use std::time::Duration;
+
+            let Some(dir) = std::env::var_os("R2O_QUIC_SEND_ONE_DIR").map(PathBuf::from) else {
+                return;
+            };
+            std::fs::create_dir_all(&dir).unwrap();
+
+            #[derive(Default)]
+            struct CaptureSink {
+                prepared: usize,
+                sent: Vec<Vec<u8>>,
+            }
+
+            impl R2oUdpRawSink for CaptureSink {
+                fn r2o_prepare(&mut self, packet: &[u8], _mark: u32) -> Result<(), i32> {
+                    if packet.first().is_none_or(|byte| byte >> 4 != 4) {
+                        return Err(-1);
+                    }
+                    self.prepared += 1;
+                    Ok(())
+                }
+
+                fn r2o_send(&mut self, packet: &[u8], _mark: u32) -> Result<(), i32> {
+                    self.sent.push(packet.to_vec());
+                    Ok(())
+                }
+            }
+
+            fn set_ttl(socket: &UdpSocket, ttl: i32) {
+                let value = ttl;
+                let rc = unsafe {
+                    libc::setsockopt(
+                        socket.as_raw_fd(),
+                        libc::IPPROTO_IP,
+                        libc::IP_TTL,
+                        &value as *const _ as *const _,
+                        std::mem::size_of::<libc::c_int>() as _,
+                    )
+                };
+                assert_eq!(rc, 0, "IP_TTL={ttl} не выставлен");
+            }
+
+            fn socket_ttl(socket: &UdpSocket) -> i32 {
+                let mut value: libc::c_int = 0;
+                let mut length = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+                let rc = unsafe {
+                    libc::getsockopt(
+                        socket.as_raw_fd(),
+                        libc::IPPROTO_IP,
+                        libc::IP_TTL,
+                        &mut value as *mut _ as *mut _,
+                        &mut length,
+                    )
+                };
+                assert_eq!(rc, 0, "IP_TTL не прочитан");
+                value
+            }
+
+            fn enable_recvttl(socket: &UdpSocket) {
+                let on: libc::c_int = 1;
+                let rc = unsafe {
+                    libc::setsockopt(
+                        socket.as_raw_fd(),
+                        libc::IPPROTO_IP,
+                        libc::IP_RECVTTL,
+                        &on as *const _ as *const _,
+                        std::mem::size_of::<libc::c_int>() as _,
+                    )
+                };
+                assert_eq!(rc, 0, "IP_RECVTTL не включён");
+            }
+
+            fn recv_with_ttl(socket: &UdpSocket) -> io::Result<Option<(Vec<u8>, i32)>> {
+                let mut buffer = vec![0_u8; 65_535];
+                let mut control = [0_u8; 256];
+                let mut iov = libc::iovec {
+                    iov_base: buffer.as_mut_ptr().cast(),
+                    iov_len: buffer.len(),
+                };
+                let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+                message.msg_iov = &mut iov;
+                message.msg_iovlen = 1;
+                message.msg_control = control.as_mut_ptr().cast();
+                message.msg_controllen = control.len() as _;
+                let length = unsafe { libc::recvmsg(socket.as_raw_fd(), &mut message, 0) };
+                if length < 0 {
+                    let error = io::Error::last_os_error();
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) {
+                        return Ok(None);
+                    }
+                    return Err(error);
+                }
+                let mut ttl = 0_i32;
+                let mut header = unsafe { libc::CMSG_FIRSTHDR(&message) };
+                while !header.is_null() {
+                    unsafe {
+                        if (*header).cmsg_level == libc::IPPROTO_IP
+                            && (*header).cmsg_type == libc::IP_TTL
+                        {
+                            ttl = *(libc::CMSG_DATA(header) as *const libc::c_int);
+                        }
+                        header = libc::CMSG_NXTHDR(&message, header);
+                    }
+                }
+                Ok(Some((buffer[..length as usize].to_vec(), ttl)))
+            }
+
+            fn capture(socket: &UdpSocket) -> Vec<(Vec<u8>, i32)> {
+                let mut packets = Vec::new();
+                while let Ok(Some(packet)) = recv_with_ttl(socket) {
+                    packets.push(packet);
+                }
+                packets
+            }
+
+            fn hex(bytes: &[u8]) -> String {
+                let mut text = String::with_capacity(bytes.len() * 2);
+                for byte in bytes {
+                    text.push_str(&format!("{byte:02x}"));
+                }
+                text
+            }
+
+            fn write_trace(
+                path: &Path,
+                name: &str,
+                code: i32,
+                packets: &[(Vec<u8>, i32)],
+                restored_ttl: i32,
+            ) {
+                let mut text = format!(
+                    "case|{name}|code={code}|marked=1|n={}|restored={restored_ttl}\n",
+                    packets.len()
+                );
+                for (index, (bytes, ttl)) in packets.iter().enumerate() {
+                    text.push_str(&format!(
+                        "dg|{name}|{index}|len={}|ttl={ttl}|hex={}\n",
+                        bytes.len(),
+                        hex(bytes)
+                    ));
+                }
+                std::fs::write(path, text).unwrap();
+            }
+
+            fn write_snapshot(path: &Path, probe: &QuicReplayProbe) {
+                let datagrams: Vec<&[u8]> = probe.datagrams.iter().map(Vec::as_slice).collect();
+                let packed = r2k_quic_snapshot_pack(&datagrams).unwrap();
+                std::fs::write(path, packed).unwrap();
+            }
+
+            fn make_snapshot(two: bool) -> Vec<u8> {
+                let profile =
+                    super::r2o_quic_profile_snapshot(Some("quic-send-one.example")).unwrap();
+                let parsed = r2k_quic_snapshot_parse(&profile).unwrap();
+                let datagram = parsed.datagrams()[0];
+                if two {
+                    r2k_quic_snapshot_pack(&[datagram, datagram]).unwrap()
+                } else {
+                    r2k_quic_snapshot_pack(&[datagram]).unwrap()
+                }
+            }
+
+            fn compile(text: &str) -> Plan {
+                Plan::parse(&crate::plan_text::compile_text(text).unwrap()).unwrap()
+            }
+
+            fn run_code(result: io::Result<super::QuicReplayResult>) -> i32 {
+                match result {
+                    Ok(_) => 0,
+                    Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => -2,
+                    Err(_) => -1,
+                }
+            }
+
+            fn plan_code(result: Result<(), i32>) -> i32 {
+                match result {
+                    Ok(()) => 0,
+                    Err(code) if code == -2 => -2,
+                    Err(_) => -1,
+                }
+            }
+
+            let one = make_snapshot(false);
+            let two = make_snapshot(true);
+            let ttl_text = r2o_quic_plan_text_from_state(&R2oQuicPlanState {
+                kind: Some(R2oQuicCandidateKind::OriginalTtl(3)),
+                directives: "payload 1 aabbccdd\npoison 1 ttl=3\nfake payload=1 poison=1 repeats=2 gap_us=0 place=before\n",
+                plan_id: None,
+                udplen: 0,
+                junk: false,
+                non_original: false,
+                frag_survives: true,
+            })
+            .unwrap();
+            let ttl_plan = compile(&ttl_text);
+            let split_plan = compile(&r2o_quic_split_plan_text());
+
+            let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+            receiver
+                .set_read_timeout(Some(Duration::from_millis(100)))
+                .unwrap();
+            enable_recvttl(&receiver);
+
+            for (name, snapshot, plan) in [
+                ("plain", &one, None),
+                ("tail", &two, None),
+                ("ttl", &two, Some(&ttl_plan)),
+                ("split", &two, Some(&split_plan)),
+            ] {
+                let mut probe =
+                    QuicReplayProbe::prepare(receiver.local_addr().unwrap(), snapshot, None)
+                        .unwrap();
+                set_ttl(&probe.socket, 47);
+                let code = match plan {
+                    Some(plan) => run_code(probe.run_with_plan(plan, Duration::from_millis(30))),
+                    None => run_code(probe.run(Duration::from_millis(30))),
+                };
+                let packets = capture(&receiver);
+                let restored = socket_ttl(&probe.socket);
+                write_snapshot(&dir.join(format!("{name}.qsn")), &probe);
+                write_trace(
+                    &dir.join(format!("{name}.rust")),
+                    name,
+                    code,
+                    &packets,
+                    restored,
+                );
+            }
+
+            {
+                let mut probe =
+                    QuicReplayProbe::prepare(receiver.local_addr().unwrap(), &one, None).unwrap();
+                set_ttl(&probe.socket, 47);
+                let mut sink = CaptureSink::default();
+                let code = plan_code(r2o_udp_plan_send_with_sink(
+                    &probe.socket,
+                    &ttl_plan,
+                    &probe.datagrams[0],
+                    0,
+                    &mut sink,
+                ));
+                let packets = capture(&receiver);
+                let restored = socket_ttl(&probe.socket);
+                write_snapshot(&dir.join("arm-ttl.qsn"), &probe);
+                write_trace(
+                    &dir.join("arm-ttl.rust"),
+                    "arm-ttl",
+                    code,
+                    &packets,
+                    restored,
+                );
+            }
+
+            for shape in 1_u8..=4 {
+                let frag_text = r2o_quic_plan_text_from_state(&R2oQuicPlanState {
+                    kind: Some(R2oQuicCandidateKind::FragmentShape(shape)),
+                    directives: "",
+                    plan_id: None,
+                    udplen: 0,
+                    junk: false,
+                    non_original: false,
+                    frag_survives: true,
+                })
+                .unwrap();
+                let frag_plan = compile(&frag_text);
+                let name = format!("frag{shape}");
+                let mut probe =
+                    QuicReplayProbe::prepare(receiver.local_addr().unwrap(), &one, None).unwrap();
+                set_ttl(&probe.socket, 47);
+                let mut sink = CaptureSink::default();
+                let code = plan_code(r2o_udp_plan_send_with_sink(
+                    &probe.socket,
+                    &frag_plan,
+                    &probe.datagrams[0],
+                    0,
+                    &mut sink,
+                ));
+                let packets: Vec<(Vec<u8>, i32)> = sink
+                    .sent
+                    .iter()
+                    .map(|packet| {
+                        let ttl = if packet[0] >> 4 == 6 {
+                            packet[7] as i32
+                        } else {
+                            packet[8] as i32
+                        };
+                        (packet.clone(), ttl)
+                    })
+                    .collect();
+                write_snapshot(&dir.join(format!("{name}.qsn")), &probe);
+                let restored = socket_ttl(&probe.socket);
+                write_trace(
+                    &dir.join(format!("{name}.rust")),
+                    &name,
+                    code,
+                    &packets,
+                    restored,
+                );
+                std::fs::write(
+                    dir.join(format!("{name}.meta")),
+                    format!(
+                        "{} {}\n",
+                        probe.socket.local_addr().unwrap().port(),
+                        probe.socket.peer_addr().unwrap().port()
+                    ),
+                )
+                .unwrap();
+            }
+
+            let mut refused_code = 0;
+            let mut refused_probe = None;
+            for _ in 0..10 {
+                let closed = UdpSocket::bind("127.0.0.1:0")
+                    .unwrap()
+                    .local_addr()
+                    .unwrap();
+                let mut probe = QuicReplayProbe::prepare(closed, &one, None).unwrap();
+                set_ttl(&probe.socket, 47);
+                let _ = probe.socket.send(b"x");
+                std::thread::sleep(Duration::from_millis(20));
+                refused_code = run_code(probe.run(Duration::from_millis(20)));
+                refused_probe = Some(probe);
+                if refused_code == -2 {
+                    break;
+                }
+            }
+            let refused_probe = refused_probe.unwrap();
+            write_snapshot(&dir.join("refused.qsn"), &refused_probe);
+            let restored = socket_ttl(&refused_probe.socket);
+            write_trace(
+                &dir.join("refused.rust"),
+                "refused",
+                refused_code,
+                &[],
+                restored,
+            );
+            assert_eq!(refused_code, -2, "ECONNREFUSED не воспроизведён");
+        }
+    }
 }
