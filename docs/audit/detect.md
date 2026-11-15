@@ -258,9 +258,9 @@ controller `--classify` по-прежнему использует старый 
 ## detect/poison.c (12 функций)
 
 Каталог гипотез и перевод находки в строку стратегии/язык плана. Порядок и состав 85 гипотез совпадают
-и закреплены тестом. `poison_has_fake` и `arm_from_poison` не знают осей `autottl`/`tcp_ts_up`,
-которые есть в C-структуре; на текущем каталоге это не проявляется, но функция не эквивалентна для
-произвольного `d2k_poison`.
+и закреплены тестом. `poison_has_fake` учитывает `autottl` (как C), `arm_from_poison`/
+`measured_plan_text` переносят `autottl`/`tcp_ts_up` и проведены в production; 16-case differential
+и `poison_has_fake_and_same_match_c` PASS.
 
 **Прочитано построчно: 12/12 функций, 475 строк C (1–475).** Сверено с `classify.rs:178-201` (`note_props_hit/miss`), `:203-219` (`same_hypothesis`), `:221-380` (`build_poisons`, 85 записей), `:382-397` (`poison_has_fake`/`poison_supports_family`), `:399-540` (`strategy_for_poison`/`overlap_fake`/`disorder_fake`), `:1939-1941` (`strategy_for`), `classify_measured.rs:30-379` (`arm_from_poison` → план). Список `init_poisons` сверен с
 `build_poisons` (`classify.rs:229-380`) по каждой из 85 записей: имена, порядок, ttl/repeats/gap_ms,
@@ -288,18 +288,16 @@ tcp_ts/ip_id_zero/seq_shift — совпадают; дедупликация `ba
   `poison_supports_family` (`:389`):** C `family==4` или
   `family==6 && !ip_id_zero`; Rust то же. E.
 - **`d2k_poison_has_fake` (24–40) ↔ `poison_has_fake`
-  (`:382`):** C учитывает `badsum/md5/ttl/autottl/seq_shift/tcp_ts`;
-  Rust `Poison` не имеет `autottl/tcp_ts_up` и проверяет
-  `badsum/md5/ttl/seq_shift/tcp_ts`. autottl-only: C true, Rust
-  false. P.
+  (`:499`):** C учитывает `badsum/md5/ttl/autottl/seq_shift/tcp_ts`;
+  Rust проверяет те же поля, включая `autottl`; `poison_has_fake_and_same_match_c` PASS. E.
 - **`add`/`already_listed`/`init_poisons`/`d2k_poisons` (47–189):**
   C cap 128 и 85 гипотез, `pthread_once`; Rust `Vec`/`OnceLock`,
   `build_poisons` 85 в том же порядке, `same_hypothesis` для дедупа.
   E, `tests/classify.rs:861`.
-- **`d2k_poison_same` (62–70) ↔ `same_hypothesis` (`:200`):** C
-  `memcmp` всего struct после зануления имени и нормализации repeats;
-  Rust сравнивает подмножество полей `Poison`; autottl/tcp_ts_up не
-  входят. Для каталога совпадает, для произвольной гипотезы — нет. P.
+- **`d2k_poison_same` (62–70) ↔ `poison_same`/`same_hypothesis`:**
+  C `memcmp` всего struct после зануления имени и нормализации repeats;
+  Rust `Poison` содержит autottl/`tcp_ts_up` и `poison_same` сравнивает
+  все поля; тест `poison_has_fake_and_same_match_c` PASS. E.
 - **`d2k_note_props_hit/miss` (194–223) ↔ `note_props_hit/miss`:**
   C и Rust одинаковые ветви badsum/ttl/disorder/seqovl/decoy;
   miss не выводит `validates_checksum=true`. E,
@@ -781,10 +779,10 @@ production-сеттер `raw_set_segment_max`. Ни одна N не являет
 ## Ключевые частичные пробелы (P)
 
 - `sweep_poisons`/`d2k_classify_run`: нет `notes`, нет trace «правило подавления RST не встало», иной текст причины при отказе самопроверки, счёт probes ответного направления берётся из фактических попыток, а не `2 × repeats`.
-- `raw_send`: `syndata` в R2O уходит одним пакетом, в C — нарезается по `seg_max`.
-- `d2k_poison_has_fake`: не учитывает `autottl`/`tcp_ts_up` (P).
+- `raw_send`: SYN-data теперь режется по `segment_max`, как C; 30-case seam differential PASS.
 - `d2k_trigger_offers_ts`: R2O получает булев признак из снятого профиля, а не разбирает байты TCP-опций триггера; произвольный набор опций не переносится.
-- `main.c` целиком: интерфейс, человеческий отчёт и JSON расходятся по форме (см. таблицу).
+- `main.c`/`usage`/`print_json`/`print_human`: C-совместимый вывод точный, но `r2o-detect`
+  не упакован, а controller `--classify` использует старый формат (P*).
 
 ## Проверки, выполненные в этой сессии
 
