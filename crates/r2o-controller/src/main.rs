@@ -33898,6 +33898,117 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn on_suspect_watching_planned_no_arms_shape_like_c() {
+        use super::{
+            Catalog, ControlClient, R2oCleanHandshakeCache, R2oTcpHelloCache,
+            r2o_discovery_task_key,
+        };
+        use r2k_core::control::{
+            ACK_OK, COMMAND_ARM_SHAPE, HelloEvent, KEY_LEN, LEGACY_PLANNED_NO, LegacySuspectEvent,
+            encode_ack, read_frame,
+        };
+        use r2o_controller::catalog::{Binding, BoxRecord, Plan};
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        let peer_thread = std::thread::spawn(move || {
+            let frame = read_frame(&mut peer).unwrap();
+            peer.write_all(&encode_ack(frame.kind, true, ACK_OK).unwrap())
+                .unwrap();
+            frame.kind
+        });
+        let mut client = ControlClient {
+            socket,
+            send_maxlen: 1500,
+            send_cap: Arc::new(AtomicUsize::new(1500)),
+            pending_events: Default::default(),
+            pending_applied_events: Default::default(),
+            dropped_events: Arc::new(AtomicUsize::new(0)),
+            http_search_started: Default::default(),
+            http_acknowledged_bindings: Default::default(),
+        };
+
+        let mut key = [0_u8; KEY_LEN];
+        key[0] = 4;
+        key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+        key[17..21].copy_from_slice(&[198, 51, 100, 20]);
+        key[33..35].copy_from_slice(&40_000_u16.to_be_bytes());
+        key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+        key[37] = 6;
+        let now = std::time::Instant::now();
+        let mut hellos = R2oTcpHelloCache::default();
+        hellos.note(
+            HelloEvent {
+                key,
+                host: Some(b"watch.example.com".to_vec()),
+                shape: Some(SHAPE_MODERN),
+                r2o_wire_len: Some(512),
+                quic_snapshot: None,
+                tcp_has_timestamp: Some(true),
+            },
+            now,
+        );
+        let target = hellos.target_for_tcp_flow(&key, now).unwrap();
+        let catalog = Catalog {
+            boxes: vec![BoxRecord {
+                plans: vec![Plan {
+                    id: "plan-watch".into(),
+                    proto: "tls".into(),
+                    text: "r2o-plan 1 11\nproto tcp tls\nsplit sni_middle +0\n".into(),
+                    enabled: true,
+                    ..Plan::default()
+                }],
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: "watch.example.com".into(),
+                    plan_id: "plan-watch".into(),
+                    level: 3,
+                    enabled: true,
+                    transport: 6,
+                    family: 4,
+                    shape: 1,
+                    input: 2,
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        worker.completed.insert(r2o_discovery_task_key(&target));
+        let mut discovery = Some((
+            worker,
+            catalog,
+            std::path::PathBuf::from("/tmp/catalog.json"),
+            None,
+        ));
+        let clean = R2oCleanHandshakeCache::default();
+        let event = LegacySuspectEvent {
+            key,
+            code: 1,
+            ttl: 64,
+            reference_ttl: 0,
+            traffic_class: 0,
+            ip_id: 0,
+            planned: LEGACY_PLANNED_NO,
+            client_shape: SHAPE_MODERN,
+            num: 0,
+        };
+        client.r2o_handle_legacy_suspect(&event, &mut discovery, &hellos, &clean);
+        let command = peer_thread.join().unwrap();
+        let (worker, _, _, _) = discovery.unwrap();
+        let task_key = r2o_discovery_task_key(&target);
+        assert_eq!(command, COMMAND_ARM_SHAPE);
+        assert!(worker.pending_rechecks.contains_key(&task_key));
+        assert!(!worker.is_active(&target));
+        if let Ok(path) = std::env::var("R2O_ON_SUSPECT_WATCH_DIFF_OUTPUT") {
+            std::fs::write(path, "watch_pending=1 arm_sent=1 queued=0\n").unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn live_searches_production_builder_matches_c_task_states() {
         use super::{
             R2oDiscoverySearch, R2oDiscoverySearches, R2oDiscoveryVerify, SHAPE_MODERN,
