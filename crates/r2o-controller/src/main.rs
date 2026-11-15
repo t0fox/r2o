@@ -7175,6 +7175,24 @@ fn r2o_quic_direct_clear_take_all() -> Vec<r2o_controller::discovery::DiscoveryT
     )
 }
 
+/// C direct-clear гейты для DoQ DNS-endpoint. `t->vol` у DoQ не заполняется,
+/// ECH trial — только TCP/TLS, partial RX — только объёмный TCP-замер.
+/// `rx_direct_complete` выставляет только ECH baseline, поэтому для DoQ он 0:
+/// group_record(DIRECT_CLEAR) не пишется, а bindings/cooldown/report — да.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct R2oDoqDirectClearGates {
+    volume_proven: bool,
+    ech_trial: bool,
+    rx_partial: bool,
+    rx_direct_complete: bool,
+}
+
+#[cfg(unix)]
+fn r2o_doq_direct_clear_gates() -> R2oDoqDirectClearGates {
+    R2oDoqDirectClearGates::default()
+}
+
 /// C `cooldown_record(kind=0)`/`clear_backoff_ms`: negative streak 10/30/60 мин.
 #[cfg(unix)]
 fn r2o_quic_clear_streaks()
@@ -25018,10 +25036,14 @@ impl ControlClient {
                         family,
                         shape: SHAPE_QUIC,
                     };
-                    // C `T_ASKING`: прямой CLEAR с `rx_direct_complete`
-                    // закрывает привязки и пишет group(DIRECT_CLEAR);
-                    // каталог живёт в главном цикле.
-                    r2o_discovery_meta_set(&target, true, SHAPE_QUIC);
+                    // C `T_ASKING`: DoQ-ответ не заполняет `t->vol`
+                    // (`rx_direct_complete` ставит только ECH baseline),
+                    // поэтому group_record(DIRECT_CLEAR) для DoQ НЕ пишется.
+                    // Закрытие привязок/cooldown/report — пишутся.
+                    let gates = r2o_doq_direct_clear_gates();
+                    debug_assert!(!gates.volume_proven && !gates.ech_trial);
+                    debug_assert!(!gates.rx_partial && !gates.rx_direct_complete);
+                    r2o_discovery_meta_set(&target, gates.rx_direct_complete, SHAPE_QUIC);
                     r2o_quic_direct_clear_enqueue(target);
                     println!(
                         "DoQ {server}: прямой DNS-ответ получен; план не требуется, прямой CLEAR закрывает привязки"
@@ -37391,6 +37413,14 @@ mod tests {
             "quic_binds_after_second={}\n",
             catalog.boxes[0].bindings.len()
         ));
+        let gates = super::r2o_doq_direct_clear_gates();
+        output.push_str(&format!(
+            "doq_volume_proven={}\ndoq_ech_trial={}\ndoq_rx_partial={}\ndoq_rx_direct_complete={}\n",
+            u8::from(gates.volume_proven),
+            u8::from(gates.ech_trial),
+            u8::from(gates.rx_partial),
+            u8::from(gates.rx_direct_complete)
+        ));
         if let Ok(path) = std::env::var("R2O_DOQ_DIRECT_CLEAR_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
         }
@@ -37398,7 +37428,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn doq_direct_clear_drain_writes_group_and_backoff() {
+    fn doq_direct_clear_drain_applies_backoff_without_group_evidence() {
         let work = std::env::temp_dir().join(format!(
             "r2o-doq-clear-{}-{}",
             std::process::id(),
@@ -37427,7 +37457,12 @@ mod tests {
             http_search_started: Default::default(),
             http_acknowledged_bindings: std::collections::HashMap::new(),
         };
-        super::r2o_discovery_meta_set(&target, true, SHAPE_QUIC);
+        let gates = super::r2o_doq_direct_clear_gates();
+        assert!(!gates.volume_proven);
+        assert!(!gates.ech_trial);
+        assert!(!gates.rx_partial);
+        assert!(!gates.rx_direct_complete);
+        super::r2o_discovery_meta_set(&target, gates.rx_direct_complete, SHAPE_QUIC);
         super::r2o_quic_direct_clear_enqueue(target.clone());
         let mut catalog = Catalog::default();
         assert!(
@@ -37436,12 +37471,10 @@ mod tests {
                 .unwrap()
         );
         let saved = Catalog::load(&catalog_path).unwrap();
-        let state = saved.domain_state.as_ref().unwrap();
-        assert_eq!(state.observations.len(), 1);
-        assert_eq!(state.observations[0].name, target.host);
-        assert_eq!(state.observations[0].evidence, super::DOMAIN_DIRECT_CLEAR);
-        assert_eq!(state.observations[0].key.transport, 17);
-        assert_eq!(state.observations[0].key.probe_path, "/");
+        assert!(
+            saved.domain_state.is_none(),
+            "DoQ rx_direct_complete=0: group evidence 2 не пишется"
+        );
         assert!(super::r2o_quic_clear_cooldown_active(
             &target.host,
             target.family,

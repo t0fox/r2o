@@ -59,6 +59,16 @@ int main(void)
     bd->recheck_since = 1;
     forget_clear_target_bindings(scheduler, target, 2000);
     printf("quic_binds_after_second=%zu\n", box->n_binds);
+    /* DoQ-задача не заполняет t->vol и не входит в TCP ECH-trial:
+       direct-clear гейты остаются выключенными. */
+    target->transport = 17;
+    printf("doq_volume_proven=%d\n",
+           target->vol.verdict == D2K_VOL_CUT || target->vol.rx_cut);
+    printf("doq_ech_trial=%d\n", target->ech_trial);
+    printf("doq_rx_partial=%d\n",
+           target->vol.rx_partial_bytes != 0 ||
+           target->vol.rx_partial_wire_bytes != 0);
+    printf("doq_rx_direct_complete=%d\n", target->vol.rx_direct_complete);
     free(cat); free(box); free(bd); free(scheduler); free(target);
     return 0;
 }
