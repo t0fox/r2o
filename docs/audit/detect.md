@@ -193,9 +193,9 @@ raw_recheck, sweep_poisons (свойства → compose → перебор), cr
   `store_raw_selftest`; `d2k_raw_note_rc` — `note_raw_probe`;
   `raw_selftest` — цикл встроен в sweep; `raw_doubted` —
   `should_recheck`; `raw_recheck` — `raw_recheck`. E/P.
-- **sweep/classify (887–1494):** `sweep_poisons` — нет trace о
-  непринятом RST, иной текст selftest, compose без контроля;
-  `cross_check_tls12` — C-заглушка, Rust поля `covers_tls12` нет, N;
+- **sweep/classify (887–1494):** `sweep_poisons` — compose `control=None`,
+  RST-failure observation и trace закрыты differential; `cross_check_tls12` —
+  C-заглушка, Rust поля `covers_tls12` нет, N;
   `d2k_classify_run` — production default теперь
   `full_detect_semantics=true`, `confirm_clear=false`; full-tree 24
   покрывает response/control/repeats/gaps/raw; остаются field-by-field
@@ -443,7 +443,7 @@ seq += len + oob); probe_poison (plan для выразимых, raw_send тол
 | `raw_dial` | 1092-1180 | 89 | собрать raw-соединение: local addr, buffers, send/recv сокеты, SO_MARK, HDRINCL, v6 bind, RCVTIMEO 300 мс, sweep once, port, seq, suppress RST, handshake | `raw_probe.rs:1840-2000 RawConn::connect` | **E*** | **2026-11-15:** production `RawConn::connect` против C `d2k_raw_probe_handshake_as`: IPv4/IPv6 success/RST/timeout, точные коды/ошибки; классификатор production nft/iptables PASS. |
 | `d2k_raw_probe_handshake_as` | 1187-1197 | 11 | самопроверка: `raw_dial`, close, 1 | `raw_probe.rs probe_handshake_as` | **E*** | **2026-11-15:** production differential 5 cases (IPv4/IPv6 success/RST/timeout) + classifier nft/iptables PASS; `refused` только seam-тест — ограничение. |
 | `raw_send_plan` | 1209-1262 | 54 | измерительный план: arm_from_poison, текст→TLV→load→apply, wire_build по actions, delay_us, seq += len+oob | `scripts/r2o-raw-emission-cancel-differential.sh`; `raw_probe.rs:2550/2810` | **E** | **Ветви сверены:** C `arm_from_poison`; decoy cap; input trigger/sni/decoy; `malloc` buffers; `arm_plan_measured`; `plan_text_to_tlv`; `plan_load`; `pkt.seq/payload/have_sni/sni`; `plan_apply` требует `fate==DROP`; conn family/ack/window 65535/ttl 64/src/dst/ports/options; по actions: отмена, `delay_us/1000` sleep, `wire_build`, `raw_sendto`; disorder grace 12 мс; `seq += len+oob`; cleanup. Rust emission differential/`raw_probe` plan path; те же шаги/порядок. |
-| `d2k_raw_probe_poison_family` | 1272-1321 | 50 | один зонд: dial, plan-send для именованных/не-syn_data, прямой send для none/syn_data, чтение ответа, accept | `raw_probe.rs` plan/poison path | **E*** | **2026-11-15:** добавлен production direct-путь для `name="none"`/`syn_data`; `test-raw-poison-production-differential.sh` в userns/netns PASS **12 кейсов** v4/v6 badsum/split/seqovl/syn_data/none + RST/timeout, сверены rc/err/`raw_dial_count`. Ограничение: байты планов проверены отдельным 28-case measured-plan. |
+| `d2k_raw_probe_poison_family` | 1272-1321 | 50 | один зонд: dial, plan-send для именованных/не-syn_data, прямой send для none/syn_data, чтение ответа, accept | `raw_probe.rs` plan/poison path | **E*** | **2026-11-15:** добавлен production direct-путь для `name="none"`/`syn_data`; `test-raw-poison-production-differential.sh` в userns/netns PASS **13 кейсов** v4/v6 badsum/split/seqovl/syn_data/none (+wrapper) + RST/timeout, сверены rc/err/`raw_dial_count`. Ограничение: байты планов проверены отдельным 28-case measured-plan. |
 | `d2k_raw_supported` | 164-164 | 1 | Linux: сырой слой доступен | `raw_probe.rs` `raw_supported` | E | C под Linux `return 1`; non-Linux stub возвращает 0. Rust `raw_probe` компилируется только под Linux, `raw_supported()` возвращает true; вне Linux бэкенд `classify.rs` отдаёт false. Тест `raw_supported_matches_c_linux_contract`. |
 | `d2k_raw_set_segment_max` | 1329-1329 | 1 | не-Linux: no-op | `classify_measured.rs` `set_segment_max` (cfg) | E | C `(void)seg` под `#else`. Не-Linux-ветка Rust не пишет `SEGMENT_MAX` (только `let _ = segment`), наблюдаемое поведение — no-op. |
 | `d2k_raw_rst_fail_count` | 1330-1330 | 1 | не-Linux: 0 | `cfg(target_os="linux")` | **E** | C `return 0` под `#else`. Вне Linux raw-путь R2O не компилируется/не активен, счётчик отказов RST равен 0 — то же наблюдаемое значение. |
@@ -690,8 +690,7 @@ production-сеттер `raw_set_segment_max`. Ни одна N не являет
   probe_neutral_ack` (нейтральный байт, TIOCOUTQ, poll, «любое событие =
   не тишина»; тест `live_neutral_ack_confirms_delivery_even_when_control_is_silent`);
   `raw_recheck` = `raw_probe.rs:746` + C/Rust recheck-тест.
-  **P:** `sweep_poisons` — не покрыт отказ правила подавления RST;
-  `d2k_run_properties_family` — цикл stop/skip/local_err/white-ts/decoy
+  **P:** `d2k_run_properties_family` — цикл stop/skip/local_err/white-ts/decoy
   labels; `d2k_classify_run` — E\* (full-tree 24, production true/false);
   `d2k_send_nosig` — macOS-ветка `SO_NOSIGPIPE` не перенесена;
   `d2k_trigger_sni`/`trace_add`/`opts_*` — P на форматы/лимиты.
@@ -778,7 +777,7 @@ production-сеттер `raw_set_segment_max`. Ни одна N не являет
 
 ## Ключевые частичные пробелы (P)
 
-- `sweep_poisons`/`d2k_classify_run`: нет `notes`, нет trace «правило подавления RST не встало», иной текст причины при отказе самопроверки, счёт probes ответного направления берётся из фактических попыток, а не `2 × repeats`.
+- `sweep_poisons`: RST-failure observation/trace теперь есть; `d2k_classify_run` — full-tree exact display, но отдельные `notes`-ветви вне 24 кейсов.
 - `raw_send`: SYN-data теперь режется по `segment_max`, как C; 30-case seam differential PASS.
 - `d2k_trigger_offers_ts`: R2O получает булев признак из снятого профиля, а не разбирает байты TCP-опций триггера; произвольный набор опций не переносится.
 - `main.c`/`usage`/`print_json`/`print_human`: C-совместимый вывод точный, но `r2o-detect`
