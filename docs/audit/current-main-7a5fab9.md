@@ -108,10 +108,11 @@ Pinned C/Rust differential-донор остаётся `a378e230...`; это о�
   differential PASS; T_WATCHING переживает >10 мин (cap 64/вытеснение);
   локальные start_due — точные C-тексты; `--measure-mark` split через v22
   ctlprobe PASS.
-- Остаются: end-to-end планового DoQ через реальный C datapath в CI,
-  verifier-сокет SO_MARK, DoQ direct-clear/cooldown. Поэтому
-  `d2k_sched_write_live` — P*: 12-state full live PASS, но production
-  `r2o_live_searches` не вызывается в differential (QA final11).
+- `d2k_sched_write_live` — **E\***: 12-state full live differential PASS,
+  production `r2o_live_searches_from_state` сверен с C `write_live`
+  (T_QUEUED/T_ASKING/T_PLANNING/T_VERIFY; T_WATCHING/T_RESTING исключены)
+  PASS, `write_live_groups` 10 и DNS 17/4/3 PASS. Остаётся только
+  end-to-end планового DoQ через реальный C datapath в CI.
 
 ## Команды проверки
 

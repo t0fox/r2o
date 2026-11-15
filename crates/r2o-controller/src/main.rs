@@ -10157,6 +10157,26 @@ impl R2oDiscoveryVolumeSearchCache {
         Some(search)
     }
 
+    /// C `remeasure_snapped`: курсоры источников кандидатов и список
+    /// испытанных текстов принадлежат прошлому поиску. Снимок клиента
+    /// начинает новый поиск, поэтому кэш задачи снимается целиком — в том
+    /// числе записи другого shape: смена ECH/MODERN не должна оставлять
+    /// курсор прошлого поиска.
+    fn forget_task(&mut self, task_key: &R2oDiscoveryTaskKey) {
+        self.entries
+            .retain(|(candidate, _)| r2o_discovery_task_key(candidate) != *task_key);
+    }
+
+    /// Подтверждённый RX-обрыв — знание о цели, а не курсор прошлого поиска:
+    /// C `remeasure_snapped` его не стирает. Стираются только испытанные
+    /// тексты/курсор, чтобы новый поиск не пропустил кандидатов.
+    fn reset_carried_cursor(&mut self, task_key: &R2oDiscoveryTaskKey) {
+        if let Some(search) = self.carried_rx.get_mut(task_key) {
+            search.next_candidate = 0;
+            search.tried_plans.clear();
+        }
+    }
+
     fn carry_proven_rx_for_snapshot(
         &mut self,
         target: &r2o_controller::discovery::DiscoveryTarget,
@@ -10956,6 +10976,28 @@ impl R2oDiscoverySearches {
         ) {
             search.question.clear();
         }
+    }
+
+    /// C `remeasure_snapped`: перемер — новый поиск. Старый прогресс,
+    /// кандидаты и вердикт не должны доживать до установки.
+    fn reset_for_remeasure(&mut self, target: &r2o_controller::discovery::DiscoveryTarget) {
+        let key = r2o_discovery_task_key(target);
+        let Some(search) = self.entries.get_mut(&key) else {
+            return;
+        };
+        search.queued_at = std::time::Instant::now();
+        search.started_at = None;
+        search.report_id = None;
+        search.trigger_code = 0;
+        search.attempts = 0;
+        search.probes = 0;
+        search.question.clear();
+        search.candidate.clear();
+        search.source.clear();
+        search.plan.clear();
+        search.application.clear();
+        search.last_result.clear();
+        search.verify = R2oDiscoveryVerify::default();
     }
 
     fn record_admission(
@@ -12114,14 +12156,67 @@ fn r2o_json_time(unix_s: i64) -> String {
 }
 
 #[cfg(unix)]
-fn r2o_live_timestamp(seen: std::time::Instant, now: std::time::Instant) -> Option<String> {
-    let elapsed = now.saturating_duration_since(seen).as_secs();
-    let unix = SystemTime::now()
+fn r2o_wall_now_unix() -> Option<i64> {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .ok()?
-        .as_secs()
-        .saturating_sub(elapsed);
-    Some(r2o_json_time(i64::try_from(unix).ok()?))
+        .ok()
+        .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
+}
+
+#[cfg(unix)]
+fn r2o_live_timestamp_at(
+    seen: std::time::Instant,
+    now: std::time::Instant,
+    wall_now: Option<i64>,
+) -> Option<String> {
+    let elapsed = i64::try_from(now.saturating_duration_since(seen).as_secs()).ok()?;
+    let unix = wall_now?.saturating_sub(elapsed);
+    (unix > 0).then(|| r2o_json_time(unix))
+}
+
+/// Чистый production-builder `searches` для live.json. Отделён от
+/// `DiscoveryWorker`, чтобы differential вызывал тот же код, что и main-loop.
+#[cfg(unix)]
+fn r2o_live_searches_from_state(
+    searches: &R2oDiscoverySearches,
+    active: &HashMap<R2oDiscoveryTaskKey, r2o_controller::discovery::DiscoveryTarget>,
+    now: std::time::Instant,
+    wall_now: Option<i64>,
+) -> Vec<serde_json::Value> {
+    searches
+        .order
+        .iter()
+        .filter(|key| active.contains_key(*key))
+        .filter_map(|key| searches.entries.get(key))
+        .map(|entry| {
+            let target = &entry.target;
+            let (ip, port) = target
+                .endpoint
+                .parse::<std::net::SocketAddr>()
+                .map(|endpoint| (endpoint.ip().to_string(), endpoint.port()))
+                .unwrap_or_default();
+            // Точный набор C `write_live` searches: shape/plan/
+            // application/last_result панель не получает.
+            let mut search = serde_json::json!({
+                "target": target.host,
+                "family": target.family,
+                "transport": r2o_discovery_transport(target),
+                "ip": ip,
+                "port": port,
+                "phase": entry.phase,
+                "attempts": entry.attempts,
+                "probes": entry.probes,
+                "question": entry.question,
+                "candidate": entry.candidate,
+                "source": entry.source,
+            });
+            search["since"] = serde_json::Value::String(
+                r2o_live_timestamp_at(entry.started_at.unwrap_or(entry.queued_at), now, wall_now)
+                    .unwrap_or_else(|| "0001-01-01T00:00:00Z".to_owned()),
+            );
+            search
+        })
+        .collect()
 }
 
 #[cfg(unix)]
@@ -12656,6 +12751,11 @@ struct DiscoveryWorker {
     recent_client_shapes: Arc<std::sync::Mutex<R2oRecentClientShapeCache>>,
     resource_memory: Arc<std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>>,
     volume_searches: Arc<std::sync::Mutex<R2oDiscoveryVolumeSearchCache>>,
+    /// C `t->tried`/`rx_volume_next_variant`: курсор ECH RX-лестницы
+    /// переживает отдельный job, поэтому перемер обязан его снять.
+    ech_rx_cursor: Arc<
+        std::sync::Mutex<HashMap<r2o_controller::discovery::DiscoveryTarget, R2oEchRxProgress>>,
+    >,
     active_cancels: Arc<std::sync::Mutex<HashMap<R2oDiscoveryTaskKey, Arc<AtomicBool>>>>,
     catalog_refreshes: Arc<std::sync::Mutex<HashSet<R2oDiscoveryTaskKey>>>,
     searches: Arc<std::sync::Mutex<R2oDiscoverySearches>>,
@@ -12837,6 +12937,10 @@ fn r2o_handle_client_shape_event(
     // C `T_WATCHING` + `watch_shape_pending`: снимок пришёл на заявку
     // remeasure — кладём его в pending и сразу запускаем новый поиск.
     if let Some(entry) = worker.pending_rechecks.get_mut(&key) {
+        // Снимок — новые байты и, возможно, другая форма (ECH/MODERN).
+        // Перемер обязан идти новым target, иначе ECH-решение останется
+        // от прошлого поиска.
+        entry.0 = target.clone();
         entry.1 = Some(shape.client_hello.clone());
         entry.2 |= false;
         if let Some(timestamp) = shape.tcp_has_timestamp {
@@ -15600,6 +15704,7 @@ group_block_proven: false,
             client_snapshot_targets,
             resource_memory,
             volume_searches,
+            ech_rx_cursor,
             searches,
             network_whitelist_updates,
         );
@@ -15645,6 +15750,7 @@ group_block_proven: false,
             Arc::new(std::sync::Mutex::new(
                 R2oDiscoveryVolumeSearchCache::default(),
             )),
+            Arc::new(std::sync::Mutex::new(HashMap::new())),
             Arc::new(std::sync::Mutex::new(R2oDiscoverySearches::default())),
             network_whitelist_updates,
         )
@@ -15662,6 +15768,9 @@ group_block_proven: false,
         >,
         resource_memory: Arc<std::sync::Mutex<r2o_controller::r2o_resource::R2oResourceMemory>>,
         volume_searches: Arc<std::sync::Mutex<R2oDiscoveryVolumeSearchCache>>,
+        ech_rx_cursor: Arc<
+            std::sync::Mutex<HashMap<r2o_controller::discovery::DiscoveryTarget, R2oEchRxProgress>>,
+        >,
         searches: Arc<std::sync::Mutex<R2oDiscoverySearches>>,
         network_whitelist_updates: Arc<std::sync::Mutex<VecDeque<R2oNetworkWhitelistUpdate>>>,
     ) -> Self {
@@ -15945,6 +16054,7 @@ group_block_proven: false,
             recent_client_shapes,
             resource_memory,
             volume_searches,
+            ech_rx_cursor,
             active_cancels,
             catalog_refreshes,
             searches,
@@ -16036,40 +16146,7 @@ group_block_proven: false,
             .searches
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        searches
-            .order
-            .iter()
-            .filter(|key| self.active.contains_key(*key))
-            .filter_map(|key| searches.entries.get(key))
-            .map(|entry| {
-                let target = &entry.target;
-                let (ip, port) = target
-                    .endpoint
-                    .parse::<std::net::SocketAddr>()
-                    .map(|endpoint| (endpoint.ip().to_string(), endpoint.port()))
-                    .unwrap_or_default();
-                // Точный набор C `write_live` searches: shape/plan/
-                // application/last_result панель не получает.
-                let mut search = serde_json::json!({
-                    "target": target.host,
-                    "family": target.family,
-                    "transport": r2o_discovery_transport(target),
-                    "ip": ip,
-                    "port": port,
-                    "phase": entry.phase,
-                    "attempts": entry.attempts,
-                    "probes": entry.probes,
-                    "question": entry.question,
-                    "candidate": entry.candidate,
-                    "source": entry.source,
-                });
-                search["since"] = serde_json::Value::String(
-                    r2o_live_timestamp(entry.started_at.unwrap_or(entry.queued_at), now)
-                        .unwrap_or_else(|| "0001-01-01T00:00:00Z".to_owned()),
-                );
-                search
-            })
-            .collect()
+        r2o_live_searches_from_state(&searches, &self.active, now, r2o_wall_now_unix())
     }
 
     fn r2o_diagnostic_event(
@@ -17712,6 +17789,31 @@ group_block_proven: false,
         true
     }
 
+    /// C `remeasure_snapped`: снять состояние прошлого поиска до нового
+    /// запуска. `own_seen`/`own_first`/`rx_bootstrap_only`/`family_reuse`/
+    /// `ech_grease` в R2O — локальные переменные запуска и каждый новый job
+    /// начинает их с нуля; долговременные курсоры (`tried`, ECH RX,
+    /// volume candidates) живут здесь и снимаются явно.
+    fn r2o_reset_recheck_state(&mut self, target: &r2o_controller::discovery::DiscoveryTarget) {
+        let task_key = r2o_discovery_task_key(target);
+        {
+            let mut volume_searches = self
+                .volume_searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            volume_searches.forget_task(&task_key);
+            volume_searches.reset_carried_cursor(&task_key);
+        }
+        self.ech_rx_cursor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|candidate, _| r2o_discovery_task_key(candidate) != task_key);
+        self.searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .reset_for_remeasure(target);
+    }
+
     fn r2o_schedule_pending_rechecks(&mut self) {
         let ready = self
             .pending_rechecks
@@ -17745,6 +17847,17 @@ group_block_proven: false,
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(&target);
                 continue;
+            }
+            // T_ASKING snapshot reask сохраняет доказанный RX-курсор (C
+            // перезапускает рабочий поток снимком, а не remeasure_snapped).
+            // Полный reset — только для T_WATCHING/подтверждённой цели.
+            let snapshot_reask = self
+                .client_snapshot_reasks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(&task_key);
+            if !snapshot_reask {
+                self.r2o_reset_recheck_state(&target);
             }
             self.seen.remove(&target);
             self.seen_order.retain(|seen| seen != &target);
@@ -33785,6 +33898,158 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn live_searches_production_builder_matches_c_task_states() {
+        use super::{
+            R2oDiscoverySearch, R2oDiscoverySearches, R2oDiscoveryVerify, SHAPE_MODERN,
+            r2o_discovery_task_key, r2o_live_searches_from_state,
+        };
+        use r2o_controller::discovery::DiscoveryTarget;
+        use std::collections::HashMap;
+        use std::time::{Duration, Instant};
+
+        let now = Instant::now();
+        let target = |host: &str, last: u8| DiscoveryTarget {
+            host: host.into(),
+            endpoint: format!("198.51.100.{last}:443"),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let verify = target("verify.example", 11);
+        let ask = target("ask.example", 10);
+        let queued = target("queued.example", 12);
+        let planning = target("planning.example", 13);
+        let watching = target("watching.example", 14);
+        let resting = target("resting.example", 15);
+        let key = |target: &DiscoveryTarget| r2o_discovery_task_key(target);
+
+        let mut searches = R2oDiscoverySearches::default();
+        let mut entry = |target: &DiscoveryTarget,
+                         queued_at: Instant,
+                         started_at: Option<Instant>,
+                         phase: &'static str,
+                         attempts: usize,
+                         probes: usize,
+                         question: &str,
+                         candidate: &str,
+                         source: &str| {
+            let task_key = key(target);
+            searches.entries.insert(
+                task_key.clone(),
+                R2oDiscoverySearch {
+                    target: target.clone(),
+                    queued_at,
+                    started_at,
+                    report_id: None,
+                    trigger_code: 0,
+                    phase,
+                    attempts,
+                    probes,
+                    question: question.into(),
+                    candidate: candidate.into(),
+                    source: source.into(),
+                    // Внутренние поля диагностики не входят в C live-схему;
+                    // differential доказывает, что builder их не сериализует.
+                    plan: "внутренний план".into(),
+                    application: "внутренний APPLIED".into(),
+                    last_result: "внутренний результат".into(),
+                    verify: R2oDiscoveryVerify::default(),
+                },
+            );
+            searches.order.push_back(task_key);
+        };
+        entry(
+            &verify,
+            now,
+            Some(now),
+            "проверяем готовое узнанной коробки",
+            1,
+            3,
+            "",
+            "план поставлен",
+            "готовый план узнанной коробки",
+        );
+        entry(
+            &ask,
+            now,
+            Some(now - Duration::from_secs(2)),
+            "распознаём поведение",
+            0,
+            3,
+            "вопрос",
+            "",
+            "",
+        );
+        entry(
+            &queued,
+            now - Duration::from_secs(1),
+            None,
+            "ожидает безопасного слота замера",
+            0,
+            0,
+            "",
+            "",
+            "",
+        );
+        entry(
+            &planning,
+            now,
+            Some(now - Duration::from_secs(1)),
+            "выводим планы",
+            0,
+            2,
+            "",
+            "",
+            "",
+        );
+        entry(
+            &watching,
+            now,
+            Some(now),
+            "подтверждено, смотрим живой трафик",
+            1,
+            2,
+            "",
+            "план поставлен",
+            "готовый план узнанной коробки",
+        );
+        entry(
+            &resting,
+            now,
+            Some(now),
+            "цель отдыхает после неудачи",
+            0,
+            0,
+            "",
+            "",
+            "",
+        );
+        let mut active = HashMap::new();
+        for target in [&verify, &ask, &queued, &planning] {
+            active.insert(key(target), (*target).clone());
+        }
+
+        let live = r2o_live_searches_from_state(&searches, &active, now, Some(2003));
+        assert_eq!(live.len(), 4);
+        for search in &live {
+            for key in ["plan", "application", "last_result"] {
+                assert!(search.get(key).is_none(), "лича {key} нет в C live");
+            }
+        }
+        assert_eq!(live[0]["target"], "verify.example");
+        assert_eq!(live[1]["target"], "ask.example");
+        assert_eq!(live[2]["target"], "queued.example");
+        assert_eq!(live[3]["target"], "planning.example");
+        assert_eq!(live[0]["phase"], "проверяем готовое узнанной коробки");
+        assert_eq!(live[1]["question"], "вопрос");
+        assert_eq!(live[2]["phase"], "ожидает безопасного слота замера");
+        assert_eq!(live[3]["phase"], "выводим планы");
+        if let Ok(path) = std::env::var("R2O_LIVE_SEARCHES_DIFF_OUTPUT") {
+            std::fs::write(path, serde_json::to_string(&live).unwrap()).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn discovery_live_status_tracks_each_probe_while_search_is_active() {
         let target = DiscoveryTarget {
             host: "example.com".into(),
@@ -35966,6 +36231,7 @@ mod tests {
             volume_searches: Arc::new(std::sync::Mutex::new(
                 super::R2oDiscoveryVolumeSearchCache::default(),
             )),
+            ech_rx_cursor: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             active_cancels: std::sync::Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
@@ -37580,10 +37846,39 @@ mod tests {
             shape: SHAPE_MODERN,
         };
         let key = super::r2o_discovery_task_key(&target);
+        let old_target = r2o_controller::discovery::DiscoveryTarget {
+            shape: SHAPE_ECH_TCP,
+            ..target.clone()
+        };
         worker.completed.insert(key.clone());
+        worker.ech_rx_cursor.lock().unwrap().insert(
+            old_target.clone(),
+            super::R2oEchRxProgress {
+                next_candidate: 3,
+                tried: vec![1, 2, 3],
+            },
+        );
+        worker.volume_searches.lock().unwrap().entries.push_back((
+            old_target.clone(),
+            super::R2oDiscoveryVolumeSearch {
+                key: super::R2oDiscoveryVolumeSearchKey {
+                    wire_len: Some(812),
+                    send_cap: 1492,
+                    probe_path: "/".into(),
+                    alternate_path: None,
+                    network_probe: false,
+                    white_name: String::new(),
+                },
+                measured_at: std::time::Instant::now(),
+                tx: Err("старый замер".into()),
+                rx: r2o_controller::fetch::R2oFetchVolumeRxResult::default(),
+                next_candidate: 7,
+                tried_plans: vec!["old".into()],
+            },
+        ));
         worker
             .pending_rechecks
-            .insert(key.clone(), (target.clone(), None, false));
+            .insert(key.clone(), (old_target, None, false));
         let hello = super::Trigger::tls13(&target.host).unwrap().payload;
         let mut flow_key = [0_u8; KEY_LEN];
         flow_key[0] = 4;
@@ -37605,16 +37900,44 @@ mod tests {
             worker.client_hellos.lock().unwrap().get(&key).cloned(),
             Some(hello)
         );
-        assert!(
-            worker.active.contains_key(&key)
-                || worker
+        let queued_shape = worker
+            .active
+            .get(&key)
+            .map(|target| target.shape)
+            .or_else(|| {
+                worker
                     .jobs
                     .0
                     .lock()
                     .unwrap()
                     .entries
                     .iter()
-                    .any(|entry| { super::r2o_discovery_task_key(&entry.target) == key })
+                    .find(|entry| super::r2o_discovery_task_key(&entry.target) == key)
+                    .map(|entry| entry.target.shape)
+            });
+        assert_eq!(
+            queued_shape,
+            Some(SHAPE_MODERN),
+            "перемер пошёл новой формой из снимка"
+        );
+        assert!(
+            !worker
+                .ech_rx_cursor
+                .lock()
+                .unwrap()
+                .keys()
+                .any(|candidate| super::r2o_discovery_task_key(candidate) == key),
+            "ECH RX-курсор прошлого shape снят"
+        );
+        assert!(
+            !worker
+                .volume_searches
+                .lock()
+                .unwrap()
+                .entries
+                .iter()
+                .any(|(candidate, _)| super::r2o_discovery_task_key(candidate) == key),
+            "volume-курсор прошлого shape снят"
         );
     }
 
@@ -40168,6 +40491,154 @@ mod tests {
                 .is_none()
         );
         assert!(cache.entries.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_recheck_resets_candidate_cursors_and_tried_plans() {
+        use r2o_controller::discovery::DiscoveryTarget;
+        use r2o_controller::fetch::R2oFetchVolumeRxResult;
+        use std::time::Instant;
+
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        let target = DiscoveryTarget {
+            host: "remeasure.example".into(),
+            endpoint: "198.51.100.77:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let other = DiscoveryTarget {
+            host: "other.example".into(),
+            endpoint: "198.51.100.78:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let task_key = super::r2o_discovery_task_key(&target);
+        let now = Instant::now();
+        let volume_search =
+            |next_candidate: usize, tried_plans: Vec<String>| super::R2oDiscoveryVolumeSearch {
+                key: super::R2oDiscoveryVolumeSearchKey {
+                    wire_len: Some(812),
+                    send_cap: 1492,
+                    probe_path: "/".into(),
+                    alternate_path: None,
+                    network_probe: false,
+                    white_name: String::new(),
+                },
+                measured_at: now,
+                tx: Err("старый замер".into()),
+                rx: R2oFetchVolumeRxResult::default(),
+                next_candidate,
+                tried_plans,
+            };
+        {
+            let mut cache = worker.volume_searches.lock().unwrap();
+            cache
+                .entries
+                .push_back((target.clone(), volume_search(7, vec!["old".into()])));
+            cache
+                .entries
+                .push_back((other.clone(), volume_search(5, vec!["other".into()])));
+            cache
+                .carried_rx
+                .insert(task_key.clone(), volume_search(4, vec!["carried".into()]));
+        }
+        {
+            let mut cursor = worker.ech_rx_cursor.lock().unwrap();
+            cursor.insert(
+                target.clone(),
+                super::R2oEchRxProgress {
+                    next_candidate: 3,
+                    tried: vec![1, 2, 3],
+                },
+            );
+            cursor.insert(
+                other.clone(),
+                super::R2oEchRxProgress {
+                    next_candidate: 2,
+                    tried: vec![9],
+                },
+            );
+        }
+        {
+            let mut searches = worker.searches.lock().unwrap();
+            searches.update(
+                &target,
+                "проверяем выведенный план",
+                4,
+                9,
+                "старый кандидат",
+                "выведен из замера",
+            );
+            searches.update_plan_progress(
+                &target,
+                "r2o-plan 1 11\nproto tcp tls\nsplit sni_middle +0\n",
+                "выведен из замера",
+                "точный APPLIED",
+                "старый результат",
+            );
+            searches.entries.get_mut(&task_key).unwrap().started_at = Some(now);
+        }
+
+        worker.r2o_reset_recheck_state(&target);
+
+        {
+            let cache = worker.volume_searches.lock().unwrap();
+            assert!(
+                !cache
+                    .entries
+                    .iter()
+                    .any(|(candidate, _)| candidate == &target)
+            );
+            assert!(
+                cache
+                    .entries
+                    .iter()
+                    .any(|(candidate, _)| candidate == &other)
+            );
+            let carried = cache.carried_rx.get(&task_key).unwrap();
+            assert_eq!(carried.next_candidate, 0);
+            assert!(carried.tried_plans.is_empty());
+        }
+        {
+            let cursor = worker.ech_rx_cursor.lock().unwrap();
+            assert!(!cursor.contains_key(&target));
+            assert!(cursor.contains_key(&other));
+        }
+        let (attempts, probes, plan_empty) = {
+            let searches = worker.searches.lock().unwrap();
+            let search = searches.entries.get(&task_key).unwrap();
+            assert_eq!(search.attempts, 0);
+            assert_eq!(search.probes, 0);
+            assert!(search.question.is_empty());
+            assert!(search.candidate.is_empty());
+            assert!(search.source.is_empty());
+            assert!(search.plan.is_empty());
+            assert!(search.application.is_empty());
+            assert!(search.last_result.is_empty());
+            assert!(search.started_at.is_none());
+            (search.attempts, search.probes, search.plan.is_empty())
+        };
+        if let Ok(path) = std::env::var("R2O_REMEASURE_DIFF_OUTPUT") {
+            let cache = worker.volume_searches.lock().unwrap();
+            let volume_cleared = !cache
+                .entries
+                .iter()
+                .any(|(candidate, _)| candidate == &target)
+                && cache.carried_rx.get(&task_key).is_some_and(|search| {
+                    search.next_candidate == 0 && search.tried_plans.is_empty()
+                });
+            drop(cache);
+            let cursor_cleared = !worker.ech_rx_cursor.lock().unwrap().contains_key(&target);
+            let output = serde_json::json!({
+                "candidate_cursor_cleared": volume_cleared && attempts == 0,
+                "tried_cleared": volume_cleared && cursor_cleared,
+                "probes_cleared": probes == 0,
+                "plans_cleared": plan_empty && volume_cleared,
+                "rx_cursor_cleared": cursor_cleared,
+            });
+            std::fs::write(path, serde_json::to_string_pretty(&output).unwrap()).unwrap();
+        }
     }
 
     #[cfg(unix)]
@@ -43620,6 +44091,162 @@ group_block_proven: false,
         assert!(r2o_tcp_stall_in_name_band(&catalog, "example.com", 29));
         assert!(!r2o_tcp_stall_in_name_band(&catalog, "example.com", 28));
         assert!(r2o_tcp_stall_in_name_band(&catalog, "other.example", 7));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn on_suspect_late_close_and_stall_band_match_donor() {
+        use std::fmt::Write as _;
+
+        let measured = |kind: &str, packets: i32| Signal {
+            kind: kind.to_owned(),
+            packets,
+            ..Signal::default()
+        };
+        let bound = |target: &str, enabled: bool| Binding {
+            kind: "name".to_owned(),
+            target: target.to_owned(),
+            transport: 6,
+            enabled,
+            ..Binding::default()
+        };
+        let catalog = Catalog {
+            boxes: vec![
+                BoxRecord {
+                    fingerprint: Fingerprint {
+                        signals: vec![measured("rx-volume", 29)],
+                        ..Fingerprint::default()
+                    },
+                    bindings: vec![bound("band.example", true)],
+                    ..BoxRecord::default()
+                },
+                BoxRecord {
+                    fingerprint: Fingerprint {
+                        signals: vec![measured("rx-volume-wire", 45)],
+                        ..Fingerprint::default()
+                    },
+                    bindings: vec![bound("band.example", true)],
+                    ..BoxRecord::default()
+                },
+                BoxRecord {
+                    fingerprint: Fingerprint {
+                        signals: vec![measured("rx-volume", 60)],
+                        ..Fingerprint::default()
+                    },
+                    bindings: vec![bound("disabled.example", false)],
+                    ..BoxRecord::default()
+                },
+            ],
+            ..Catalog::default()
+        };
+
+        let text = |value: bool| if value { "true" } else { "false" };
+        let mut output = String::new();
+        for code in 0..=9 {
+            writeln!(
+                output,
+                "late_{code}={}",
+                text(super::r2o_discovery_late_trigger(Some(code)))
+            )
+            .unwrap();
+        }
+        for packets in [0_u32, 27, 28, 29, 30, 31, 43, 44, 45, 46, 47, 100] {
+            writeln!(
+                output,
+                "band_{packets}={}",
+                text(super::r2o_tcp_stall_in_name_band(
+                    &catalog,
+                    "band.example",
+                    packets
+                ))
+            )
+            .unwrap();
+        }
+        for packets in [0_u32, 29, 100] {
+            writeln!(
+                output,
+                "other_{packets}={}",
+                text(super::r2o_tcp_stall_in_name_band(
+                    &catalog,
+                    "other.example",
+                    packets
+                ))
+            )
+            .unwrap();
+        }
+
+        use super::{R2oVoiceDiscoveryJob, R2oVoiceLatestQueue};
+        use std::net::{Ipv4Addr, SocketAddrV4};
+        let voice_job = |client: [u8; 4], server_port: u16| R2oVoiceDiscoveryJob {
+            target: r2o_controller::voice_discovery::R2oVoiceTarget {
+                client: Ipv4Addr::from(client),
+                server: SocketAddrV4::new(Ipv4Addr::new(198, 51, 100, 20), server_port),
+            },
+            flow: None,
+            known_prefix: None,
+            queued_at: std::time::Instant::now(),
+            diagnostic: super::R2oVoiceDiagnosticContext {
+                report_id: None,
+                queued_at: std::time::Instant::now(),
+                started_at: None,
+                probe_units: 0,
+            },
+        };
+        let mut queue = R2oVoiceLatestQueue::default();
+        let first = voice_job([192, 0, 2, 10], 50_004);
+        assert_eq!(queue.offer(first.clone(), true), Some(first.clone()));
+        let same = queue.offer(first, true);
+        assert!(same.is_none());
+        writeln!(
+            output,
+            "voice_same_context_pending={}",
+            u8::from(queue.pending.is_some())
+        )
+        .unwrap();
+        assert!(
+            queue
+                .offer(voice_job([192, 0, 2, 10], 50_005), true)
+                .is_none()
+        );
+        writeln!(
+            output,
+            "voice_new_server_pending={}",
+            u8::from(queue.pending.is_some())
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "voice_new_server_port={}",
+            queue
+                .pending
+                .as_ref()
+                .map(|job| job.target.server.port())
+                .unwrap_or(0)
+        )
+        .unwrap();
+        assert!(
+            queue
+                .offer(voice_job([192, 0, 2, 11], 50_004), true)
+                .is_none()
+        );
+        writeln!(
+            output,
+            "voice_new_client_pending={}",
+            u8::from(queue.pending.is_some())
+        )
+        .unwrap();
+        let mut idle = R2oVoiceLatestQueue::default();
+        let started = idle.offer(voice_job([192, 0, 2, 10], 50_006), true);
+        assert!(started.is_some() && idle.pending.is_none());
+        writeln!(
+            output,
+            "voice_watching_no_pending={}",
+            u8::from(idle.pending.is_some())
+        )
+        .unwrap();
+        if let Ok(path) = std::env::var("R2O_ON_SUSPECT_LATE_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
     }
 
     #[cfg(unix)]
@@ -51150,6 +51777,7 @@ group_block_proven: false,
                 r2o_controller::r2o_resource::R2oResourceMemory::default(),
             )),
             volume_searches: Arc::new(Mutex::new(super::R2oDiscoveryVolumeSearchCache::default())),
+            ech_rx_cursor: Arc::new(Mutex::new(std::collections::HashMap::new())),
             active_cancels: Arc::new(Mutex::new(std::collections::HashMap::new())),
             catalog_refreshes: Arc::new(Mutex::new(std::collections::HashSet::new())),
             searches: Arc::new(Mutex::new(super::R2oDiscoverySearches::default())),

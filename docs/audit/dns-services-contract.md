@@ -175,6 +175,9 @@ candidate_plan_applied, dns_answer_via_plan, dns_answer_confirmed
    состояния `bypass_ok`/`no_bypass`/`candidate_plan_applied`/
    `dns_answer_via_plan`; полный state machine live-секции.
 
-`d2k_sched_write_live` остаётся **P***: 12-state full live PASS (включая
-DNS watch/rest), но production `r2o_live_searches` не вызывается в
-Rust-дифференциале — нужен production-builder differential.
+`d2k_sched_write_live` — **E\***: 12-state full live differential против
+current main PASS, включая `dns_services` (detected/checking/direct_ok/
+plan_applied/bypass_ok/no_bypass/failed, candidate-without-answer, DoQ);
+production `r2o_live_searches_from_state` отдельно сверен с C `write_live`.
+Единственное внешнее ограничение — end-to-end планового DoQ через реальный
+C datapath в CI не прогнан.
