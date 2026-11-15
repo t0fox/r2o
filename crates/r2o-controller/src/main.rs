@@ -24915,8 +24915,8 @@ impl ControlClient {
         doq: Option<&r2k_core::dns_config::DnsService>,
     ) -> Result<Option<QuicDiscoveryTrialOutcome>, Box<dyn Error>> {
         use r2o_controller::quic_replay::{
-            R2oQuicCandidateKind, R2oQuicFilterDecision, R2oQuicFilterResult,
-            r2o_quic_strategy_attempt_decision,
+            R2oQuicCandidateKind, R2oQuicFilterDecision, R2oQuicFilterResult, R2oQuicPlanState,
+            r2o_quic_plan_text_from_state, r2o_quic_strategy_attempt_decision,
         };
 
         let trial_id = random_id()?;
@@ -24925,10 +24925,21 @@ impl ControlClient {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        let plan_text = format!(
-            "r2o-plan 1 10\nid {plan_id_text}\nproto udp quic\n{}",
-            candidate.directives
-        );
+        let udplen = candidate
+            .directives
+            .lines()
+            .find_map(|line| line.strip_prefix("udplen "))
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .unwrap_or(0);
+        let plan_text = r2o_quic_plan_text_from_state(&R2oQuicPlanState {
+            kind: Some(candidate.kind),
+            directives: &candidate.directives,
+            plan_id: Some(&plan_id_text),
+            udplen,
+            junk: false,
+            non_original: matches!(candidate.kind, R2oQuicCandidateKind::AdaptiveSplit),
+            frag_survives: true,
+        })?;
         let plan_records = compile_text(&plan_text)?;
         let wire_records = r2o_plan_records_for_wire(&plan_records)?;
         let plan = Plan::parse(&plan_records)?;
@@ -24990,7 +25001,7 @@ impl ControlClient {
                 if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
                     return Err("истёк срок QUIC-испытания".into());
                 }
-                let filter = probe.r2o_quic_probe_filter(request_timeout, attempt);
+                let filter = probe.r2o_quic_probe_filter_with_plan(&plan, request_timeout, attempt);
                 let events = r2o_collect_controller_applied_events_until(
                     commands,
                     trial_id,
@@ -43784,10 +43795,23 @@ group_block_proven: false,
         );
         assert!(peers.len() >= 48);
         let candidate_peers: std::collections::HashSet<_> = peers.iter().copied().collect();
+        // C `ipfrag` не откатывается на целую датаграмму: без CAP_NET_RAW
+        // фрагментный кандидат остаётся неотправленным, а не подменяется.
+        let raw_probe = unsafe {
+            libc::socket(
+                libc::AF_INET,
+                libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+                libc::IPPROTO_RAW,
+            )
+        };
+        let raw_fragments = raw_probe >= 0;
+        if raw_fragments {
+            unsafe { libc::close(raw_probe) };
+        }
         assert_eq!(
             candidate_peers.len(),
-            16,
-            "каждый из 16 кандидатов должен получить отдельный UDP tuple"
+            if raw_fragments { 16 } else { 15 },
+            "каждый отправленный кандидат должен получить отдельный UDP tuple"
         );
         assert!(saw_tcp_while_quic_active);
         assert!(matches!(outcome.result, Ok(None)));

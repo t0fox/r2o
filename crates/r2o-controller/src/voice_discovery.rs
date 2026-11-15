@@ -546,15 +546,6 @@ pub fn r2o_probe_discovery_endpoint(
             SocketAddr::V4(address) => address,
             SocketAddr::V6(_) => return Err("UDP-сокет Discovery выбрал не IPv4".into()),
         };
-        let r2o_sender = match (r2o_prefix, r2o_mark) {
-            (Some(_), Some(mark)) => Some(
-                r2o_datapath::raw::RawSocket::open(libc::AF_INET, mark, None).map_err(|error| {
-                    format!("не открыть отмеченный raw-сокет Discovery: {error}")
-                })?,
-            ),
-            (Some(_), None) => return Err("кандидатный зонд требует ненулевую метку".into()),
-            (None, _) => None,
-        };
         let mut r2o_random = std::fs::File::open("/dev/urandom")
             .map_err(|error| format!("не открыть источник случайных ID: {error}"))?;
         let r2o_wait = if r2o_wait.is_zero() {
@@ -572,35 +563,15 @@ pub fn r2o_probe_discovery_endpoint(
             r2o_request[..4].copy_from_slice(&[0, 1, 0, 70]);
             r2o_request[4..8].copy_from_slice(&r2o_txid[..4]);
 
-            if r2o_index == 0
-                && let (Some(r2o_prefix), Some(r2o_sender)) = (r2o_prefix, r2o_sender.as_ref())
-            {
-                let r2o_input = r2o_build_ipv4_udp_template(
-                    *r2o_local.ip(),
-                    r2o_local.port(),
-                    r2o_server,
-                    1,
-                    64,
-                    &r2o_request,
-                )
-                .ok_or_else(|| "не собрать UDP-пакет Discord Discovery".to_owned())?;
+            if r2o_index == 0 && let Some(r2o_prefix) = r2o_prefix {
                 let r2o_plan = r2o_voice_arm_plan(r2o_prefix)?;
-                let r2o_packets = match r2o_datapath::engine::decide(&r2o_plan, &r2o_input) {
-                    r2o_datapath::engine::PacketDecision::Transmit { packets, .. }
-                        if packets.len() == 2 =>
-                    {
-                        packets
-                    }
-                    _ => return Err("R2O-движок не сформировал пару Discord Discovery".into()),
-                };
-                for r2o_packet in r2o_packets {
-                    if r2o_packet.delay_us != 0 {
-                        std::thread::sleep(Duration::from_micros(u64::from(r2o_packet.delay_us)));
-                    }
-                    r2o_sender
-                        .send_packet(&r2o_packet.packet)
-                        .map_err(|error| format!("не отправить Discord Discovery: {error}"))?;
-                }
+                r2k_core::udp_plan::r2o_udp_plan_send(
+                    &r2o_socket,
+                    &r2o_plan,
+                    &r2o_request,
+                    r2o_mark.unwrap_or(0),
+                )
+                .map_err(|code| format!("не отправить Discord Discovery plan-send: {code}"))?;
             } else {
                 let r2o_sent = r2o_socket
                     .send(&r2o_request)

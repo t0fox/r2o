@@ -387,7 +387,6 @@ impl Plan {
     pub fn r2k_is_quic_clearance_probe(&self) -> bool {
         if self.transport != 17
             || self.proto != PROTO_QUIC
-            || self.minexec < 10
             || self.ipfrag != 0
             || self.udplen != 0
             || self.qsplit != 0
@@ -438,7 +437,6 @@ impl Plan {
     fn r2k_is_quic_ttl_probe_for(&self, allowed_ttl: &[u8]) -> bool {
         if self.transport != 17
             || self.proto != PROTO_QUIC
-            || self.minexec < 10
             || self.ipfrag != 0
             || self.udplen != 0
             || self.qsplit != 0

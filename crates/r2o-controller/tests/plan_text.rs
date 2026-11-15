@@ -104,12 +104,26 @@ fn r2o_compiles_quic_ttl_probe_and_datapath_accepts_only_its_shape() {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    let text = format!(
-        "r2o-plan 1 10\nproto udp quic\npayload 1 {payload}\npoison 1 ttl=3\nfake payload=1 poison=1 repeats=2 gap_us=0 place=before\n"
-    );
-    let plan = Plan::parse(&compile_text(&text).unwrap()).unwrap();
+    // C `quic_plan_text` выдаёт schema 1 для TTL-плеча; schema 10 остаётся
+    // совместимым старым маркером измеренного QUIC-плана.
+    for minexec in [1, 10] {
+        let text = format!(
+            "r2o-plan 1 {minexec}\nproto udp quic\npayload 1 {payload}\npoison 1 ttl=3\nfake payload=1 poison=1 repeats=2 gap_us=0 place=before\n"
+        );
+        let plan = Plan::parse(&compile_text(&text).unwrap()).unwrap();
 
-    assert!(plan.r2k_is_quic_ttl_probe());
+        assert!(plan.r2k_is_quic_ttl_probe());
+        assert!(plan.r2k_is_quic_address_plan());
+        assert!(r2o_datapath::engine::validate_runtime_plan(&plan).is_ok());
+    }
+}
+
+#[test]
+fn r2o_compiles_schema_one_quic_clearance_plan() {
+    let text = "r2o-plan 1 1\nproto udp quic\npayload 1 00000000000000000000000000000000\nfake payload=1 poison=0 repeats=1 gap_us=0 place=before\n";
+    let plan = Plan::parse(&compile_text(text).unwrap()).unwrap();
+
+    assert!(plan.r2k_is_quic_clearance_probe());
     assert!(plan.r2k_is_quic_address_plan());
     assert!(r2o_datapath::engine::validate_runtime_plan(&plan).is_ok());
 }

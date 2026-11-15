@@ -87,7 +87,7 @@ production-путь не ставится. Формулировки «теста
 Точные суммы по файлам и группам — в отчётах ниже. Итоговые counts E/P/N/?
 считаются сборщиком `scripts/audit/render_audit.py` из таблиц групп.
 
-### Текущий прогресс (2026-11-14)
+### Текущий прогресс (2026-11-15)
 
 Проверены все пять групп, **1982 из 1982** функций:
 
@@ -98,9 +98,9 @@ production-путь не ставится. Формулировки «теста
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 139 | 20 | 0 | 0 |
-| **Итого** | **1982** | **1544** | **438** | **0** | **0** |
+| **Итого** | **1982** | **1546** | **436** | **0** | **0** |
 
-Это не оценка паритета: 438 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 436 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -119,7 +119,7 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1544 / P 438**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1546 / P 436**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
@@ -138,7 +138,7 @@ B — нужен только тест/differential **190**; C — архите�
 
 ## Итог и подтверждённые расхождения (2026-11-15)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1544 / P 438 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1546 / P 436 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -147,7 +147,7 @@ P означает неполное доказательство ветвей, N
 | 1 | `SET_HTTPS` TTL | обрезает до **7 суток** (`d2k_ctl.h:231`, `ctlsrv.c:446`) | **закрыто 2026-11-12:** датапат обрезает до 7 суток, кодировщик принимает любой `u32`; тесты `encodes_the_exact_https_name_and_ttl_for_the_datapath`, `set_https_command_accepts_an_exact_name_with_a_bounded_ttl` | `core-state.md`, `datapath-plan.md` |
 | 2 | `ARM_SHAPE` | принимает transport 6 и 17 (`ctlsrv.c:329`) | **закрыто 2026-11-12:** R2O принимает 6/17, кэширует QSN-снимок и отдаёт `EV_SHAPE` (v22)/`EVENT_HELLO` (v48), пустое имя — wildcard; тест `arm_shape_serves_quic_snapshot_and_empty_name_is_wildcard` | `deep-datapath-core.md` |
 | 3 | `wire_udp` IPv4 | `POISON_IPID_ZERO` разрешён, ID=0 (`wire_udp.c:75,136`); TOS из пакета | любой poison отвергнут (`wire.rs:213`), TOS иной | C/Rust harness 4 poison-кейса |
-| 4 | raw UDP/TTL | `IP_HDRINCL`+`IP_NODEFRAG`+TTL get/set/restore, `qp_recv_ttl` | `IP_NODEFRAG` отсутствует, TTL не принимается; датапат raw без controller API | `deep-core-net.md` |
+| 4 | raw UDP/TTL | `IP_HDRINCL`+`IP_NODEFRAG`+TTL get/set/restore, `qp_recv_ttl` | **закрыто 2026-11-15 для plan-send:** `IP_NODEFRAG`, TTL get/set/restore, фрагменты и `ECONNREFUSED→-2` в `r2k-core::udp_plan` (16-case differential PASS), три call-site подключены; `qp_recv_ttl` (приём TTL ответа) остаётся P | `deep-core-net.md` |
 | 5 | production classify | donor-семантика C | **закрыто 2026-11-14/15:** production default `full_detect_semantics=true`, `confirm_clear=false`; full-tree 24 + exact display PASS | `detect.md` |
 | 6 | `d2k_compose_from_props` | при `control=None` всегда «всё сразу» | **закрыто 2026-11-15:** R2O выдаёт «всё сразу», 42-case differential PASS | `detect.md` |
 | 7 | `d2k_raw_set_segment_max` | production `d2kc.c:575,789` ставит `d2k_arm_segment(send_maxlen)` | measured-план жёстко 1400 (`classify_measured.rs:12,143`) | `deep-detect-plan.md` |

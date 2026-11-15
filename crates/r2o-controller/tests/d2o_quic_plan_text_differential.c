@@ -32,6 +32,26 @@ int main(void)
     {
         d2k_quic_arm a;
         memset(&a, 0, sizeof a);
+        a.kind = D2K_QA_SPLIT;
+        a.original = 1;
+        a.copies = 2;
+        a.len = 4;
+        memcpy(a.bytes, blob, 4);
+        run("split-blob", &a, blob, 4, 0, 0);
+    }
+    {
+        d2k_quic_arm a;
+        memset(&a, 0, sizeof a);
+        a.kind = D2K_QA_SPLIT;
+        a.original = 1;
+        a.copies = 2;
+        a.len = 4;
+        memcpy(a.bytes, blob, 4);
+        run("split-blob-udplen", &a, blob, 4, 0, 100);
+    }
+    {
+        d2k_quic_arm a;
+        memset(&a, 0, sizeof a);
         a.kind = D2K_QA_COPIES;
         a.original = 1;
         a.copies = 2;

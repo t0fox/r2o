@@ -696,6 +696,35 @@ fn r2o_ask_voice_with_arm(
         } else {
             r2o_wait
         };
+        let r2o_plan = match r2o_arm {
+            Some(r2o_arm) => {
+                let r2o_text = match r2o_measured_voice_arm_plan_text(r2o_arm) {
+                    Ok(text) => text,
+                    Err(_) => {
+                        r2o_tally.errors = R2O_VOICE_REPEATS;
+                        r2o_tally.marked = false;
+                        return r2o_tally;
+                    }
+                };
+                let r2o_bytes = match crate::plan_text::compile_text(&r2o_text) {
+                    Ok(bytes) => bytes,
+                    Err(_) => {
+                        r2o_tally.errors = R2O_VOICE_REPEATS;
+                        r2o_tally.marked = false;
+                        return r2o_tally;
+                    }
+                };
+                match r2k_core::plan::Plan::parse(&r2o_bytes) {
+                    Ok(plan) => Some(plan),
+                    Err(_) => {
+                        r2o_tally.errors = R2O_VOICE_REPEATS;
+                        r2o_tally.marked = false;
+                        return r2o_tally;
+                    }
+                }
+            }
+            None => None,
+        };
         let mut r2o_pending = Vec::with_capacity(usize::from(R2O_VOICE_REPEATS));
 
         for _ in 0..R2O_VOICE_REPEATS {
@@ -728,21 +757,22 @@ fn r2o_ask_voice_with_arm(
                 r2o_tally.errors = r2o_tally.errors.saturating_add(1);
                 continue;
             }
-            if let Some(r2o_arm) = r2o_arm {
-                let mut r2o_failed = false;
-                for _ in 0..r2o_arm.copies {
-                    if r2o_socket.send(r2o_arm.bytes).ok() != Some(r2o_arm.bytes.len()) {
-                        r2o_failed = true;
-                        break;
-                    }
-                }
-                if r2o_failed {
+            let r2o_request = r2k_core::stun::binding_request(r2o_txid);
+            if let Some(r2o_plan) = r2o_plan.as_ref() {
+                // C `send_one`: arm plan + STUN request одним
+                // `d2k_udp_plan_send`; отдельных копий arm и send(req) нет.
+                if r2k_core::udp_plan::r2o_udp_plan_send(
+                    &r2o_socket,
+                    r2o_plan,
+                    &r2o_request,
+                    r2o_mark.unwrap_or(0),
+                )
+                .is_err()
+                {
                     r2o_tally.errors = r2o_tally.errors.saturating_add(1);
                     continue;
                 }
-            }
-            let r2o_request = r2k_core::stun::binding_request(r2o_txid);
-            if r2o_socket.send(&r2o_request).ok() != Some(r2o_request.len()) {
+            } else if r2o_socket.send(&r2o_request).ok() != Some(r2o_request.len()) {
                 r2o_tally.errors = r2o_tally.errors.saturating_add(1);
                 continue;
             }

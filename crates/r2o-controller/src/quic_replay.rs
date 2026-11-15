@@ -1,9 +1,11 @@
 //! Повторить ограниченный снимок QUIC Initial через заранее занятый UDP-сокет.
 
+use r2k_core::plan::Plan;
 use r2k_core::quic::{R2kQuicDataVerdict, r2k_quic_data_judge};
 use r2k_core::quic_snapshot::{
     r2k_quic_snapshot_parse, r2k_quic_snapshot_reseal, r2k_quic_snapshot_verify_bound_response,
 };
+use r2k_core::udp_plan::{R2oUdpRawSink, r2o_udp_plan_send_with_sink};
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
@@ -502,6 +504,105 @@ pub fn r2o_quic_short_control_data_verdict(
     )
 }
 
+/// Состояние `quic_plan_text` (`core/udpplan.c:69-171`).
+pub struct R2oQuicPlanState<'a> {
+    pub kind: Option<R2oQuicCandidateKind>,
+    pub directives: &'a str,
+    pub plan_id: Option<&'a str>,
+    pub udplen: u32,
+    pub junk: bool,
+    pub non_original: bool,
+    pub frag_survives: bool,
+}
+
+const R2O_QUIC_JUNK_LEN: usize = 16;
+const R2O_QUIC_PACE_SETTLE_US: u32 = 15_000;
+
+fn r2o_quic_plan_id<'a>(state: &'a R2oQuicPlanState<'a>) -> &'a str {
+    state
+        .plan_id
+        .filter(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .unwrap_or("00000000000000000000000000000000")
+}
+
+/// Production `quic_plan_text`: minexec 1/7/9/10, payload/poison/udplen/
+/// order/pace так же, как C `core/udpplan.c`.
+pub fn r2o_quic_plan_text_from_state(state: &R2oQuicPlanState<'_>) -> Result<String, String> {
+    let plan_id = r2o_quic_plan_id(state);
+    let split = matches!(
+        state.kind,
+        Some(R2oQuicCandidateKind::SplitCrypto | R2oQuicCandidateKind::AdaptiveSplit)
+    );
+    let fragment = matches!(
+        state.kind,
+        Some(R2oQuicCandidateKind::FragmentControl | R2oQuicCandidateKind::FragmentShape(_))
+    );
+    if fragment && (!state.frag_survives || state.non_original) {
+        return Err("QUIC fragment plan без выжившей формы".into());
+    }
+    if matches!(state.kind, Some(R2oQuicCandidateKind::SplitCrypto))
+        && (state.non_original || state.directives.is_empty())
+    {
+        return Err("split CRYPTO без payload/fake не plan".into());
+    }
+    if matches!(state.kind, Some(R2oQuicCandidateKind::AdaptiveSplit))
+        && state.directives.is_empty()
+    {
+        return Err("адаптивный split без payload/fake не plan".into());
+    }
+    // C `if (frag) { udplen = 0; }`: фрагментация гасит удлинение.
+    let udplen = if fragment { 0 } else { state.udplen };
+
+    let mut text = String::new();
+    if split {
+        text.push_str(&format!(
+            "d2k-plan 1 10\nid {plan_id}\nproto udp quic\nquicsplit 1\n"
+        ));
+    } else if let Some(R2oQuicCandidateKind::FragmentShape(shape)) = state.kind {
+        text.push_str(&format!(
+            "d2k-plan 1 7\nid {plan_id}\nproto udp quic\nipfrag {shape}\n"
+        ));
+    } else if let Some(R2oQuicCandidateKind::FragmentControl) = state.kind {
+        text.push_str(&format!(
+            "d2k-plan 1 7\nid {plan_id}\nproto udp quic\nipfrag 1\n"
+        ));
+    } else if udplen != 0 {
+        text.push_str(&format!("d2k-plan 1 9\nid {plan_id}\nproto udp quic\n"));
+    } else {
+        text.push_str(&format!("d2k-plan 1 1\nid {plan_id}\nproto udp quic\n"));
+    }
+
+    // Мусорная приманка C подставляется только когда фальшивки плеча нет.
+    if state.junk && state.directives.trim().is_empty() {
+        let payload = "00".repeat(R2O_QUIC_JUNK_LEN);
+        text.push_str(&format!("payload 1 {payload}\npoison 1\n"));
+        text.push_str("fake payload=1 poison=1 repeats=1 gap_us=0 place=before\n");
+    } else {
+        // quicsplit/udplen/order/pace принадлежат шапке и хвосту сборщика.
+        for line in state.directives.lines() {
+            let line = line.trim();
+            if line.is_empty()
+                || line == "quicsplit 1"
+                || line.starts_with("udplen ")
+                || line.starts_with("order ")
+                || line.starts_with("pace ")
+            {
+                continue;
+            }
+            text.push_str(line);
+            text.push('\n');
+        }
+    }
+    if udplen != 0 {
+        text.push_str(&format!("udplen {udplen}\n"));
+    }
+    text.push_str("order forward\n");
+    if state.non_original && !split && !fragment {
+        text.push_str(&format!("pace {R2O_QUIC_PACE_SETTLE_US}\n"));
+    }
+    Ok(text)
+}
+
 /// Построить начальные QUIC-вопросы по порядку донорской стратегии.
 pub fn r2o_quic_discovery_candidates(
     baseline: Option<&crate::r2o_quic_http3::R2oQuicHttp3Result>,
@@ -697,8 +798,43 @@ pub struct QuicReplayProbe {
     socket: UdpSocket,
     endpoint: SocketAddr,
     local_endpoint: SocketAddr,
+    mark: u32,
     snapshot: Vec<u8>,
     datagrams: Vec<Vec<u8>>,
+}
+
+/// Controller-адаптер fragment-sink для `r2o_udp_plan_send_with_sink`.
+/// QUIC planned probe — IPv4; IPv6-фрагменты сюда не входят.
+struct R2oQuicPlanSink {
+    raw: Option<r2o_datapath::raw::RawSocket>,
+}
+
+impl R2oQuicPlanSink {
+    fn new() -> Self {
+        Self { raw: None }
+    }
+}
+
+impl R2oUdpRawSink for R2oQuicPlanSink {
+    fn r2o_prepare(&mut self, packet: &[u8], mark: u32) -> Result<(), i32> {
+        if packet.first().is_none_or(|byte| byte >> 4 != 4) {
+            return Err(-1);
+        }
+        if self.raw.is_none() {
+            self.raw = Some(
+                r2o_datapath::raw::RawSocket::open(libc::AF_INET, mark, None).map_err(|_| -1)?,
+            );
+        }
+        Ok(())
+    }
+
+    fn r2o_send(&mut self, packet: &[u8], _mark: u32) -> Result<(), i32> {
+        self.raw
+            .as_ref()
+            .ok_or(-1)?
+            .send_packet(packet)
+            .map_err(|_| -1)
+    }
 }
 
 impl QuicReplayProbe {
@@ -711,7 +847,7 @@ impl QuicReplayProbe {
             ));
         }
         let socket = crate::r2o_quic_http3::r2o_quic_http3_udp_socket(endpoint, mark)?;
-        Self::from_socket(endpoint, snapshot, socket)
+        Self::from_socket(endpoint, snapshot, socket, mark.unwrap_or(0))
     }
 
     /// Подготовить снимок на новом UDP-порту с best-effort SO_MARK, как d2o.
@@ -723,10 +859,18 @@ impl QuicReplayProbe {
         let (socket, marked) =
             crate::r2o_quic_http3::r2o_quic_http3_udp_socket_fresh(endpoint, mark)
                 .map_err(|error| error.source)?;
-        Ok((Self::from_socket(endpoint, snapshot, socket)?, marked))
+        Ok((
+            Self::from_socket(endpoint, snapshot, socket, mark.unwrap_or(0))?,
+            marked,
+        ))
     }
 
-    fn from_socket(endpoint: SocketAddr, snapshot: &[u8], socket: UdpSocket) -> io::Result<Self> {
+    fn from_socket(
+        endpoint: SocketAddr,
+        snapshot: &[u8],
+        socket: UdpSocket,
+        mark: u32,
+    ) -> io::Result<Self> {
         if endpoint.port() == 0 || endpoint.ip().is_unspecified() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -756,6 +900,7 @@ impl QuicReplayProbe {
             socket,
             endpoint,
             local_endpoint,
+            mark,
             snapshot,
             datagrams,
         })
@@ -784,7 +929,33 @@ impl QuicReplayProbe {
         }
     }
 
+    /// C `qp_ask_ex` с планом: head-датаграмма уходит `d2k_udp_plan_send`,
+    /// хвост пачки — обычным send.
+    pub fn run_with_plan(
+        &mut self,
+        plan: &Plan,
+        timeout: Duration,
+    ) -> io::Result<QuicReplayResult> {
+        let result = self.r2o_run_inner_with_plan(Some(plan), timeout);
+        let reset_timeout = self.socket.set_read_timeout(None);
+        match result {
+            Err(error) => Err(error),
+            Ok(result) => {
+                reset_timeout?;
+                Ok(result)
+            }
+        }
+    }
+
     fn r2o_run_inner(&mut self, timeout: Duration) -> io::Result<QuicReplayResult> {
+        self.r2o_run_inner_with_plan(None, timeout)
+    }
+
+    fn r2o_run_inner_with_plan(
+        &mut self,
+        plan: Option<&Plan>,
+        timeout: Duration,
+    ) -> io::Result<QuicReplayResult> {
         let snapshot = r2k_quic_snapshot_reseal(&self.snapshot).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -806,13 +977,30 @@ impl QuicReplayProbe {
         self.datagrams = datagrams;
 
         let mut result = QuicReplayResult::default();
-        for datagram in &self.datagrams {
-            let sent = self.socket.send(datagram)?;
-            if sent != datagram.len() {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "датаграмма QUIC Initial отправлена не полностью",
-                ));
+        let mut sink = R2oQuicPlanSink::new();
+        for (index, datagram) in self.datagrams.iter().enumerate() {
+            if index == 0
+                && let Some(plan) = plan
+            {
+                r2o_udp_plan_send_with_sink(&self.socket, plan, datagram, self.mark, &mut sink)
+                    .map_err(|code| {
+                        io::Error::new(
+                            if code == -2 {
+                                io::ErrorKind::ConnectionRefused
+                            } else {
+                                io::ErrorKind::Other
+                            },
+                            format!("QUIC plan-send отказал ({code})"),
+                        )
+                    })?;
+            } else {
+                let sent = self.socket.send(datagram)?;
+                if sent != datagram.len() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "датаграмма QUIC Initial отправлена не полностью",
+                    ));
+                }
             }
             result.sent_datagrams += 1;
         }
@@ -858,11 +1046,35 @@ impl QuicReplayProbe {
         timeout: Duration,
         attempt: usize,
     ) -> R2oQuicFilterResult {
+        self.r2o_quic_probe_filter_inner(None, timeout, attempt)
+    }
+
+    /// C `qp_ask` с планом: head-датаграмма каждого повтора идёт
+    /// `d2k_udp_plan_send`.
+    pub fn r2o_quic_probe_filter_with_plan(
+        &mut self,
+        plan: &Plan,
+        timeout: Duration,
+        attempt: usize,
+    ) -> R2oQuicFilterResult {
+        self.r2o_quic_probe_filter_inner(Some(plan), timeout, attempt)
+    }
+
+    fn r2o_quic_probe_filter_inner(
+        &mut self,
+        plan: Option<&Plan>,
+        timeout: Duration,
+        attempt: usize,
+    ) -> R2oQuicFilterResult {
         const REPEATS: usize = 3;
         let mut answered = 0;
         let mut measured = 0;
         for _ in 0..REPEATS {
-            match self.run(timeout) {
+            let result = match plan {
+                Some(plan) => self.run_with_plan(plan, timeout),
+                None => self.run(timeout),
+            };
+            match result {
                 Ok(result) if result.sent_datagrams > 0 => {
                     measured += 1;
                     answered += usize::from(result.handshake_confirmed);
@@ -974,13 +1186,14 @@ pub async fn r2o_quic_ask_donor_parallel(
                 }
             };
         result.marked &= marked;
-        let probe = match QuicReplayProbe::from_socket(endpoint, snapshot, socket) {
-            Ok(probe) => probe,
-            Err(_) => {
-                result.err = result.err.saturating_add(1);
-                continue;
-            }
-        };
+        let probe =
+            match QuicReplayProbe::from_socket(endpoint, snapshot, socket, mark.unwrap_or(0)) {
+                Ok(probe) => probe,
+                Err(_) => {
+                    result.err = result.err.saturating_add(1);
+                    continue;
+                }
+            };
         let Some(client_initial) = probe.datagrams.first() else {
             result.err = result.err.saturating_add(1);
             continue;
@@ -2024,5 +2237,291 @@ mod tests {
         assert_eq!(super::r2o_qp_addr_parse("fe80::1%eth0"), None);
         assert_eq!(super::r2o_qp_addr_parse("not-an-ip"), None);
         assert_eq!(super::r2o_qp_addr_parse(""), None);
+    }
+
+    #[test]
+    fn quic_plan_text_from_state_matches_c_oracle() {
+        use super::{R2oQuicCandidateKind, R2oQuicPlanState, r2o_quic_plan_text_from_state};
+
+        fn emit(name: &str, state: R2oQuicPlanState<'_>, output: &mut String) {
+            match r2o_quic_plan_text_from_state(&state) {
+                Ok(text) => {
+                    output.push_str(&format!("plan|{name}|0\n"));
+                    output.push_str(&text);
+                }
+                Err(_) => output.push_str(&format!("plan|{name}|-1\n")),
+            }
+        }
+        let payload = "payload 1 aabbccdd\n";
+        let mut output = String::new();
+        emit(
+            "split",
+            R2oQuicPlanState {
+                kind: Some(R2oQuicCandidateKind::SplitCrypto),
+                directives: "",
+                plan_id: None,
+                udplen: 0,
+                junk: false,
+                non_original: false,
+                frag_survives: true,
+            },
+            &mut output,
+        );
+        let split_blob_directives = "payload 1 aabbccdd\nquicsplit 1\npoison 1\nfake payload=1 poison=1 repeats=2 gap_us=0 place=before\n";
+        emit(
+            "split-blob",
+            R2oQuicPlanState {
+                kind: Some(R2oQuicCandidateKind::SplitCrypto),
+                directives: &split_blob_directives,
+                plan_id: None,
+                udplen: 0,
+                junk: false,
+                non_original: false,
+                frag_survives: true,
+            },
+            &mut output,
+        );
+        emit(
+            "split-blob-udplen",
+            R2oQuicPlanState {
+                kind: Some(R2oQuicCandidateKind::SplitCrypto),
+                directives: &split_blob_directives,
+                plan_id: None,
+                udplen: 100,
+                junk: false,
+                non_original: false,
+                frag_survives: true,
+            },
+            &mut output,
+        );
+        for copies in [2_u8, 3_u8] {
+            let directives = format!(
+                "{payload}poison 1\nfake payload=1 poison=1 repeats={copies} gap_us=0 place=before\n"
+            );
+            emit(
+                &format!("copies{copies}"),
+                R2oQuicPlanState {
+                    kind: Some(R2oQuicCandidateKind::OriginalRepeats { blob: 0, copies }),
+                    directives: &directives,
+                    plan_id: None,
+                    udplen: 0,
+                    junk: false,
+                    non_original: false,
+                    frag_survives: true,
+                },
+                &mut output,
+            );
+        }
+        let ttl_directives = format!(
+            "{payload}poison 1 ttl=3\nfake payload=1 poison=1 repeats=2 gap_us=0 place=before\n"
+        );
+        emit(
+            "ttl3",
+            R2oQuicPlanState {
+                kind: Some(R2oQuicCandidateKind::OriginalTtl(3)),
+                directives: &ttl_directives,
+                plan_id: None,
+                udplen: 0,
+                junk: false,
+                non_original: false,
+                frag_survives: true,
+            },
+            &mut output,
+        );
+        emit(
+            "frag2",
+            R2oQuicPlanState {
+                kind: Some(R2oQuicCandidateKind::FragmentShape(2)),
+                directives: "",
+                plan_id: None,
+                udplen: 0,
+                junk: false,
+                non_original: false,
+                frag_survives: true,
+            },
+            &mut output,
+        );
+        emit(
+            "frag2-udplen",
+            R2oQuicPlanState {
+                kind: Some(R2oQuicCandidateKind::FragmentShape(2)),
+                directives: "",
+                plan_id: None,
+                udplen: 100,
+                junk: false,
+                non_original: false,
+                frag_survives: true,
+            },
+            &mut output,
+        );
+        emit(
+            "junk",
+            R2oQuicPlanState {
+                kind: None,
+                directives: "",
+                plan_id: None,
+                udplen: 0,
+                junk: true,
+                non_original: false,
+                frag_survives: true,
+            },
+            &mut output,
+        );
+        emit(
+            "udplen",
+            R2oQuicPlanState {
+                kind: Some(R2oQuicCandidateKind::UdpLength),
+                directives: "",
+                plan_id: None,
+                udplen: 100,
+                junk: false,
+                non_original: false,
+                frag_survives: true,
+            },
+            &mut output,
+        );
+        let non_original =
+            format!("{payload}poison 1\nfake payload=1 poison=1 repeats=1 gap_us=0 place=before\n");
+        emit(
+            "non-original",
+            R2oQuicPlanState {
+                kind: Some(R2oQuicCandidateKind::OriginalRepeats { blob: 0, copies: 1 }),
+                directives: &non_original,
+                plan_id: None,
+                udplen: 0,
+                junk: false,
+                non_original: true,
+                frag_survives: true,
+            },
+            &mut output,
+        );
+        emit(
+            "frag-no-survive",
+            R2oQuicPlanState {
+                kind: Some(R2oQuicCandidateKind::FragmentShape(2)),
+                directives: "",
+                plan_id: None,
+                udplen: 0,
+                junk: false,
+                non_original: false,
+                frag_survives: false,
+            },
+            &mut output,
+        );
+        emit(
+            "split-non-original",
+            R2oQuicPlanState {
+                kind: Some(R2oQuicCandidateKind::SplitCrypto),
+                directives: "",
+                plan_id: None,
+                udplen: 0,
+                junk: false,
+                non_original: true,
+                frag_survives: true,
+            },
+            &mut output,
+        );
+        if let Ok(path) = std::env::var("R2O_QUIC_PLAN_TEXT_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
+
+    #[test]
+    fn quic_adaptive_split_plan_keeps_schema_ten_quicsplit() {
+        use super::{R2oQuicCandidateKind, R2oQuicPlanState, r2o_quic_plan_text_from_state};
+        use r2k_core::plan::Plan;
+
+        let text = r2o_quic_plan_text_from_state(&R2oQuicPlanState {
+            kind: Some(R2oQuicCandidateKind::AdaptiveSplit),
+            directives: "payload 1 aabbccdd\nquicsplit 1\npoison 1\nfake payload=1 poison=1 repeats=2 gap_us=0 place=before\n",
+            plan_id: None,
+            udplen: 0,
+            junk: false,
+            non_original: true,
+            frag_survives: true,
+        })
+        .unwrap();
+        assert!(text.starts_with("d2k-plan 1 10\n"));
+        assert_eq!(text.matches("quicsplit 1").count(), 1);
+        let plan = Plan::parse(&crate::plan_text::compile_text(&text).unwrap()).unwrap();
+        assert_eq!(plan.minexec, 10);
+        assert_eq!(plan.qsplit, 1);
+        assert!(r2o_datapath::engine::validate_runtime_plan(&plan).is_ok());
+    }
+
+    #[test]
+    fn quic_plan_send_routes_ipfrag_to_sink_and_plain_to_socket() {
+        use super::{R2oQuicCandidateKind, R2oQuicPlanState, r2o_quic_plan_text_from_state};
+        use r2k_core::plan::Plan;
+        use r2k_core::udp_plan::{R2oUdpRawSink, r2o_udp_plan_send_with_sink};
+
+        #[derive(Default)]
+        struct R2oCaptureSink {
+            prepared: usize,
+            sent: Vec<Vec<u8>>,
+        }
+
+        impl R2oUdpRawSink for R2oCaptureSink {
+            fn r2o_prepare(&mut self, packet: &[u8], _mark: u32) -> Result<(), i32> {
+                if packet.first().is_none_or(|byte| byte >> 4 != 4) {
+                    return Err(-1);
+                }
+                self.prepared += 1;
+                Ok(())
+            }
+
+            fn r2o_send(&mut self, packet: &[u8], _mark: u32) -> Result<(), i32> {
+                self.sent.push(packet.to_vec());
+                Ok(())
+            }
+        }
+
+        let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender.connect(receiver.local_addr().unwrap()).unwrap();
+        sender.set_ttl(64).unwrap();
+        let payload = vec![0x5a; 1200];
+
+        // C `qp_ask`: схема 7 (`ipfrag 1`) уходит только во fragment-sink.
+        let frag_text = r2o_quic_plan_text_from_state(&R2oQuicPlanState {
+            kind: Some(R2oQuicCandidateKind::FragmentControl),
+            directives: "",
+            plan_id: None,
+            udplen: 0,
+            junk: false,
+            non_original: false,
+            frag_survives: true,
+        })
+        .unwrap();
+        let frag_plan = Plan::parse(&crate::plan_text::compile_text(&frag_text).unwrap()).unwrap();
+        let mut sink = R2oCaptureSink::default();
+        r2o_udp_plan_send_with_sink(&sender, &frag_plan, &payload, 0, &mut sink).unwrap();
+        assert_eq!(sink.prepared, 2, "ipfrag 1 даёт два фрагмента");
+        assert_eq!(sink.sent.len(), 2);
+        let mut whole = [0_u8; 64];
+        assert!(
+            receiver.recv_from(&mut whole).is_err(),
+            "фрагментный план не отправляет целую датаграмму"
+        );
+
+        // Схема 1 идёт обычным UDP-путём, sink не задействован.
+        let plain_text = "r2o-plan 1 1\nproto udp quic\npayload 1 00000000000000000000000000000000\nfake payload=1 poison=0 repeats=1 gap_us=0 place=before\n";
+        let plain_plan = Plan::parse(&crate::plan_text::compile_text(plain_text).unwrap()).unwrap();
+        let mut sink = R2oCaptureSink::default();
+        r2o_udp_plan_send_with_sink(&sender, &plain_plan, &payload, 0, &mut sink).unwrap();
+        assert_eq!(sink.prepared, 0);
+        assert!(sink.sent.is_empty());
+        let mut fake = [0_u8; 2048];
+        let (fake_len, _) = receiver.recv_from(&mut fake).unwrap();
+        assert_eq!(
+            fake_len, 16,
+            "clearance сначала отправляет безобидную приманку"
+        );
+        let mut original = [0_u8; 2048];
+        let (original_len, _) = receiver.recv_from(&mut original).unwrap();
+        assert_eq!(&original[..original_len], payload.as_slice());
     }
 }
