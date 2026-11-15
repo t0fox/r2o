@@ -12,4 +12,5 @@ pub mod quic;
 pub mod quic_snapshot;
 pub mod stun;
 pub mod tls;
+pub mod udp_plan;
 pub mod wire;
