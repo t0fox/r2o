@@ -30648,6 +30648,139 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn search_report_events_match_c() {
+        use super::{
+            R2oDiscoverySearch, R2oDiscoverySearches, R2oDiscoveryVerify,
+            r2o_discovery_diagnostic_event, r2o_discovery_task_key,
+        };
+        use std::fmt::Write as _;
+        use std::time::{Duration, Instant};
+
+        let now = Instant::now();
+        let scenarios = [
+            (
+                "asking",
+                "asking.example",
+                "198.51.100.10",
+                6u8,
+                4u8,
+                1u8,
+                8,
+                "property",
+                "inconclusive",
+            ),
+            (
+                "queued",
+                "queued.example",
+                "198.51.100.11",
+                6,
+                4,
+                1,
+                0,
+                "none",
+                "queue-full",
+            ),
+            (
+                "planning",
+                "planning.example",
+                "198.51.100.12",
+                6,
+                6,
+                2,
+                3,
+                "own-plan",
+                "probe-confirmed",
+            ),
+            (
+                "verify",
+                "verify.example",
+                "198.51.100.13",
+                17,
+                4,
+                3,
+                5,
+                "ladder",
+                "probe-confirmed",
+            ),
+            (
+                "addr",
+                "198.51.100.14",
+                "198.51.100.14",
+                6,
+                4,
+                1,
+                3,
+                "direct",
+                "probe-clear",
+            ),
+            (
+                "fallback",
+                "fallback.example",
+                "198.51.100.15",
+                6,
+                4,
+                1,
+                8,
+                "fallback",
+                "failed",
+            ),
+        ];
+        let mut output = String::new();
+        for (index, (name, host, ip, transport, family, shape, probes, path, outcome)) in
+            scenarios.into_iter().enumerate()
+        {
+            let target = r2o_controller::discovery::DiscoveryTarget {
+                host: host.into(),
+                endpoint: format!("{ip}:443"),
+                family,
+                shape,
+            };
+            let mut searches = R2oDiscoverySearches::default();
+            let elapsed = Duration::from_secs(index as u64 + 1);
+            searches.entries.insert(
+                r2o_discovery_task_key(&target),
+                R2oDiscoverySearch {
+                    target: target.clone(),
+                    queued_at: now - elapsed,
+                    started_at: (outcome != "queue-full").then_some(now),
+                    report_id: Some(index as u64 + 1),
+                    trigger_code: index as u8 + 1,
+                    phase: "распознаём поведение",
+                    attempts: 0,
+                    probes,
+                    question: String::new(),
+                    candidate: String::new(),
+                    source: path.into(),
+                    plan: String::new(),
+                    application: String::new(),
+                    last_result: String::new(),
+                    verify: R2oDiscoveryVerify::default(),
+                },
+            );
+            let mut event = r2o_discovery_diagnostic_event(&searches, &target, now);
+            event["outcome"] = serde_json::json!(outcome);
+            event["reason"] = serde_json::json!("");
+            writeln!(
+                output,
+                "{name} id={} target={} protocol={} family={} trigger={} outcome={} path={} probe_units={} elapsed_ms={} queue_ms={} ip={} kind={} shape={}",
+                event["id"], event["target"].as_str().unwrap(),
+                event["protocol"].as_str().unwrap(), event["family"],
+                event["trigger"], event["outcome"].as_str().unwrap(),
+                event["path"].as_str().unwrap(), event["probe_units"],
+                event["elapsed_ms"], event["queue_ms"],
+                event["ip"].as_str().unwrap(), event["kind"].as_str().unwrap(),
+                event["shape"],
+            )
+            .unwrap();
+            let _ = transport;
+        }
+        if let Ok(path) = std::env::var("R2O_SEARCH_REPORT_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn diagnostic_counts_worker_fields_match_c() {
         use std::sync::atomic::Ordering;
         use std::time::Duration;
