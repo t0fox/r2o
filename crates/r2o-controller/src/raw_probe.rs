@@ -166,7 +166,7 @@ pub fn sweep_poisons(
                 Err(error) => {
                     observation.fail += 1;
                     if observation.error.is_none() {
-                        observation.error = Some(format!("{error:?}"));
+                        observation.error = Some(error.message().to_string());
                     }
                     last_error = Some(error);
                     progress(
@@ -275,7 +275,7 @@ pub fn sweep_poisons(
                     local_error = true;
                     raw_errors += 1;
                     observation.fail += 1;
-                    observation.error = Some(format!("{error:?}"));
+                    observation.error = Some(error.message().to_string());
                     progress(
                         &observation.probe,
                         result.probes,
@@ -405,7 +405,7 @@ pub fn sweep_poisons(
                 Err(error) => {
                     note_raw_probe(family, true);
                     observation.fail += 1;
-                    observation.error = Some(format!("{error:?}"));
+                    observation.error = Some(error.message().to_string());
                     raw_errors += 1;
                     local_error = true;
                     progress(
@@ -524,7 +524,7 @@ pub fn sweep_poisons(
                     note_raw_probe(family, true);
                     observation.fail += 1;
                     raw_errors += 1;
-                    observation.error = Some(format!("{error:?}"));
+                    observation.error = Some(error.message().to_string());
                     local_error = true;
                     progress(
                         &observation.probe,
@@ -793,6 +793,9 @@ fn raw_recheck(
             }
             Ok(None) => {
                 observation.fail += 1;
+                if observation.error.is_none() {
+                    observation.error = Some("classify: SYN-ACK не пришёл".into());
+                }
                 progress(
                     "raw-selftest",
                     result.probes,
@@ -803,7 +806,7 @@ fn raw_recheck(
             Err(error) => {
                 observation.fail += 1;
                 if observation.error.is_none() {
-                    observation.error = Some(format!("{error:?}"));
+                    observation.error = Some(error.message().to_string());
                 }
                 progress(
                     "raw-selftest",
@@ -1211,19 +1214,9 @@ fn raw_probe_once(
         };
 
     if poison.syn_data {
-        let packet = build_control_packet(
-            connection.local,
-            connection.remote,
-            connection.source_port,
-            connection.destination_port,
-            connection.sequence,
-            connection.acknowledgment,
-            TCP_PSH | TCP_ACK | TCP_SYN,
-            &[],
-            &trigger.payload,
-        )
-        .ok_or_else(|| ProbeError::Local("classify: SYN-data пакет не собран".into()))?;
-        connection.send_ip_packet(&packet)?;
+        connection
+            .send_payload_io(&trigger.payload, TCP_PSH | TCP_ACK | TCP_SYN, &[])
+            .map_err(|error| ProbeError::Local(format!("classify: {error}")))?;
         connection.sequence = connection
             .sequence
             .wrapping_add(trigger.payload.len() as u32);
@@ -1652,6 +1645,12 @@ impl RstGuard {
         })
     }
 
+    fn release(&mut self) {
+        if let Some(rule) = self.rule.take() {
+            rst_release(&rule);
+        }
+    }
+
     fn from_install_result(result: Result<RstRule, ProbeError>, failures: &Cell<u64>) -> Self {
         match result {
             Ok(rule) => Self { rule: Some(rule) },
@@ -1665,9 +1664,7 @@ impl RstGuard {
 
 impl Drop for RstGuard {
     fn drop(&mut self) {
-        if let Some(rule) = &self.rule {
-            rst_release(rule);
-        }
+        self.release();
     }
 }
 
@@ -1993,9 +1990,9 @@ fn sweep_stale_iptables() {
 }
 
 struct RawConn {
-    sender: OwnedFd,
-    receiver: OwnedFd,
-    _rst_guard: RstGuard,
+    sender: Option<OwnedFd>,
+    receiver: Option<OwnedFd>,
+    rst_guard: RstGuard,
     local: IpAddr,
     remote: IpAddr,
     source_port: u16,
@@ -2016,6 +2013,274 @@ fn raw_sendto_ok(family: u8, sent: isize, len: usize) -> bool {
     } else {
         sent >= 0
     }
+}
+
+/// Test-only инъекция системных вызовов сырого слоя. В production-сборке
+/// модуль отсутствует, а обёртки ниже вызывают libc напрямую.
+#[cfg(test)]
+mod test_io {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::io;
+    use std::net::IpAddr;
+
+    #[derive(Clone, Copy)]
+    pub(super) enum SendReply {
+        Ok(isize),
+        OkLen,
+        Err(i32),
+    }
+    pub(super) enum RecvReply {
+        Packet {
+            bytes: Vec<u8>,
+            peer: Option<(libc::c_int, IpAddr)>,
+        },
+        Err(i32),
+    }
+
+    pub(super) enum PollReply {
+        Ready(i16),
+        Timeout,
+        Err(i32),
+    }
+
+    pub(super) enum CloseReply {
+        Ok,
+        Err(i32),
+    }
+
+    #[derive(Default)]
+    pub(super) struct Script {
+        pub active: bool,
+        pub send: VecDeque<SendReply>,
+        pub recv: VecDeque<RecvReply>,
+        pub poll: VecDeque<PollReply>,
+        pub close: VecDeque<CloseReply>,
+        pub sent: Vec<Vec<u8>>,
+        pub closed: Vec<&'static str>,
+    }
+
+    thread_local! {
+        static SCRIPT: RefCell<Script> = RefCell::new(Script::default());
+    }
+
+    pub(super) fn begin(script: Script) {
+        SCRIPT.with(|cell| {
+            let mut script = script;
+            script.active = true;
+            *cell.borrow_mut() = script;
+        });
+    }
+
+    pub(super) fn finish() -> Script {
+        SCRIPT.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
+    }
+
+    pub(super) fn sendto(bytes: &[u8]) -> Option<io::Result<isize>> {
+        SCRIPT.with(|cell| {
+            let mut script = cell.borrow_mut();
+            if !script.active {
+                return None;
+            }
+            script.sent.push(bytes.to_vec());
+            Some(script.send.pop_front().map_or(
+                Err(io::Error::from_raw_os_error(libc::EAGAIN)),
+                |reply| match reply {
+                    SendReply::Ok(sent) => Ok(sent),
+                    SendReply::OkLen => Ok(bytes.len() as isize),
+                    SendReply::Err(errno) => Err(io::Error::from_raw_os_error(errno)),
+                },
+            ))
+        })
+    }
+
+    pub(super) fn recvfrom() -> Option<RecvReply> {
+        SCRIPT.with(|cell| {
+            let mut script = cell.borrow_mut();
+            if !script.active {
+                return None;
+            }
+            Some(
+                script
+                    .recv
+                    .pop_front()
+                    .unwrap_or(RecvReply::Err(libc::EAGAIN)),
+            )
+        })
+    }
+
+    pub(super) fn poll() -> Option<io::Result<(i32, i16)>> {
+        SCRIPT.with(|cell| {
+            let mut script = cell.borrow_mut();
+            if !script.active {
+                return None;
+            }
+            Some(
+                script
+                    .poll
+                    .pop_front()
+                    .map_or(Ok((0, 0)), |reply| match reply {
+                        PollReply::Ready(revents) => Ok((1, revents)),
+                        PollReply::Timeout => Ok((0, 0)),
+                        PollReply::Err(errno) => Err(io::Error::from_raw_os_error(errno)),
+                    }),
+            )
+        })
+    }
+
+    pub(super) fn close() -> Option<io::Result<()>> {
+        SCRIPT.with(|cell| {
+            let mut script = cell.borrow_mut();
+            if !script.active {
+                return None;
+            }
+            Some(
+                script
+                    .close
+                    .pop_front()
+                    .map_or(Ok(()), |reply| match reply {
+                        CloseReply::Ok => Ok(()),
+                        CloseReply::Err(errno) => Err(io::Error::from_raw_os_error(errno)),
+                    }),
+            )
+        })
+    }
+
+    pub(super) fn note_closed(label: &'static str) {
+        SCRIPT.with(|cell| cell.borrow_mut().closed.push(label));
+    }
+}
+
+#[cfg(test)]
+fn test_peer_sockaddr(
+    storage: &mut libc::sockaddr_storage,
+    len: &mut libc::socklen_t,
+    family: libc::c_int,
+    address: IpAddr,
+) {
+    match address {
+        IpAddr::V4(value) => {
+            let peer = unsafe { &mut *(storage as *mut _ as *mut libc::sockaddr_in) };
+            peer.sin_family = family as libc::sa_family_t;
+            peer.sin_addr.s_addr = u32::from_ne_bytes(value.octets());
+            *len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        }
+        IpAddr::V6(value) => {
+            let peer = unsafe { &mut *(storage as *mut _ as *mut libc::sockaddr_in6) };
+            peer.sin6_family = family as libc::sa_family_t;
+            peer.sin6_addr.s6_addr = value.octets();
+            *len = std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t;
+        }
+    }
+}
+
+fn sys_sendto(
+    fd: libc::c_int,
+    packet: &[u8],
+    flags: libc::c_int,
+    destination: *const libc::sockaddr_storage,
+    destination_len: libc::socklen_t,
+) -> io::Result<isize> {
+    #[cfg(test)]
+    if let Some(reply) = test_io::sendto(packet) {
+        return reply;
+    }
+    let sent = unsafe {
+        libc::sendto(
+            fd,
+            packet.as_ptr().cast(),
+            packet.len(),
+            flags,
+            destination.cast(),
+            destination_len,
+        )
+    };
+    if sent < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(sent)
+    }
+}
+
+fn sys_poll(fd: libc::c_int, events: i16, timeout_ms: libc::c_int) -> io::Result<(i32, i16)> {
+    #[cfg(test)]
+    if let Some(reply) = test_io::poll() {
+        return reply;
+    }
+    let mut pollfd = libc::pollfd {
+        fd,
+        events,
+        revents: 0,
+    };
+    let polled = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
+    if polled < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok((polled, pollfd.revents))
+    }
+}
+
+fn sys_recvfrom(
+    fd: libc::c_int,
+    buffer: &mut [u8],
+    peer: &mut libc::sockaddr_storage,
+    peer_len: &mut libc::socklen_t,
+) -> io::Result<usize> {
+    #[cfg(test)]
+    if let Some(reply) = test_io::recvfrom() {
+        return match reply {
+            test_io::RecvReply::Err(errno) => Err(io::Error::from_raw_os_error(errno)),
+            test_io::RecvReply::Packet {
+                bytes,
+                peer: address,
+            } => {
+                let count = bytes.len().min(buffer.len());
+                buffer[..count].copy_from_slice(&bytes[..count]);
+                if let Some((family, address)) = address {
+                    test_peer_sockaddr(peer, peer_len, family, address);
+                }
+                Ok(count)
+            }
+        };
+    }
+    let count = unsafe {
+        libc::recvfrom(
+            fd,
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            libc::MSG_DONTWAIT,
+            (peer as *mut libc::sockaddr_storage).cast(),
+            peer_len,
+        )
+    };
+    if count < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(count as usize)
+    }
+}
+
+/// C `strerror(errno)` без приписки Rust `(os error N)`.
+fn raw_error_text(error: &io::Error) -> String {
+    if let Some(errno) = error.raw_os_error() {
+        let message = unsafe { libc::strerror(errno) };
+        if !message.is_null() {
+            return unsafe { std::ffi::CStr::from_ptr(message) }
+                .to_string_lossy()
+                .into_owned();
+        }
+    }
+    error.to_string()
+}
+
+fn raw_close_fd(fd: libc::c_int) -> bool {
+    #[cfg(test)]
+    if let Some(result) = test_io::close() {
+        let _ = result;
+        return false;
+    }
+    let _ = unsafe { libc::close(fd) };
+    true
 }
 
 impl RawConn {
@@ -2107,9 +2372,9 @@ impl RawConn {
         note_raw_dial();
         let rst_guard = RstGuard::install(source_port, remote);
         let mut connection = Self {
-            sender,
-            receiver,
-            _rst_guard: rst_guard,
+            sender: Some(sender),
+            receiver: Some(receiver),
+            rst_guard,
             local,
             remote: remote.ip(),
             source_port,
@@ -2120,6 +2385,16 @@ impl RawConn {
             recv_buffer: vec![0; u16::MAX as usize],
         };
         let syn_options = raw_syn_options(offer_ts);
+        let established = connection.handshake(timeout, cancel, syn_options)?;
+        Ok(established.then_some(connection))
+    }
+
+    fn handshake(
+        &mut self,
+        timeout: Duration,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+        syn_options: &[u8],
+    ) -> Result<bool, ProbeError> {
         let mut rto = Duration::from_secs(1);
         let deadline = Instant::now() + timeout;
         let mut next_syn = Instant::now();
@@ -2128,59 +2403,77 @@ impl RawConn {
                 return Err(ProbeError::Local("context canceled".into()));
             }
             if Instant::now() >= deadline {
-                return Ok(None);
+                return Ok(false);
             }
             if Instant::now() >= next_syn {
                 let packet = build_control_packet(
-                    connection.local,
-                    connection.remote,
-                    connection.source_port,
-                    connection.destination_port,
-                    connection.sequence,
+                    self.local,
+                    self.remote,
+                    self.source_port,
+                    self.destination_port,
+                    self.sequence,
                     0,
                     TCP_SYN,
                     syn_options,
                     &[],
                 )
                 .ok_or_else(|| ProbeError::Local("classify: SYN пакет не собран".into()))?;
-                connection.send_ip_packet(&packet)?;
+                self.send_packet_io(&packet)
+                    .map_err(|error| ProbeError::Local(raw_error_text(&error)))?;
                 next_syn = Instant::now() + rto;
                 rto = rto.saturating_mul(2);
             }
             let wait_until = deadline.min(next_syn);
-            let Some(segment) = connection.receive_segment(wait_until, cancel)? else {
+            let Some(segment) = self.receive_segment(wait_until, cancel)? else {
                 continue;
             };
             if segment.flags & TCP_RST != 0 {
-                return Ok(None);
+                return Err(ProbeError::Local(
+                    "classify: сервер ответил RST на SYN".into(),
+                ));
             }
             if segment.flags & (TCP_SYN | TCP_ACK) == TCP_SYN | TCP_ACK
-                && segment.acknowledgment == connection.sequence.wrapping_add(1)
+                && segment.acknowledgment == self.sequence.wrapping_add(1)
             {
                 if let Some(timestamp) = timestamp_value(&segment.options) {
-                    connection.template_options = Some(timestamp_options(timestamp));
+                    self.template_options = Some(timestamp_options(timestamp));
                 }
-                connection.sequence = connection.sequence.wrapping_add(1);
-                connection.acknowledgment = segment.sequence.wrapping_add(1);
+                self.sequence = self.sequence.wrapping_add(1);
+                self.acknowledgment = segment.sequence.wrapping_add(1);
                 let ack = build_control_packet(
-                    connection.local,
-                    connection.remote,
-                    connection.source_port,
-                    connection.destination_port,
-                    connection.sequence,
-                    connection.acknowledgment,
+                    self.local,
+                    self.remote,
+                    self.source_port,
+                    self.destination_port,
+                    self.sequence,
+                    self.acknowledgment,
                     TCP_ACK,
                     &[],
                     &[],
                 )
                 .ok_or_else(|| ProbeError::Local("classify: ACK пакет не собран".into()))?;
-                connection.send_ip_packet(&ack)?;
-                return Ok(Some(connection));
+                self.send_packet_io(&ack)
+                    .map_err(|error| ProbeError::Local(raw_error_text(&error)))?;
+                return Ok(true);
             }
         }
     }
 
-    fn send_ip_packet(&self, packet: &[u8]) -> Result<(), ProbeError> {
+    fn sender_fd(&self) -> io::Result<libc::c_int> {
+        self.sender
+            .as_ref()
+            .map(AsRawFd::as_raw_fd)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotConnected))
+    }
+
+    fn receiver_fd(&self) -> io::Result<libc::c_int> {
+        self.receiver
+            .as_ref()
+            .map(AsRawFd::as_raw_fd)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotConnected))
+    }
+
+    fn send_packet_io(&self, packet: &[u8]) -> io::Result<()> {
         let family = if matches!(self.remote, IpAddr::V6(_)) {
             6
         } else {
@@ -2203,25 +2496,50 @@ impl RawConn {
                 std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t
             }
         };
-        let sent = unsafe {
-            libc::sendto(
-                self.sender.as_raw_fd(),
-                packet.as_ptr().cast(),
-                packet.len(),
-                libc::MSG_DONTWAIT,
-                (&destination as *const libc::sockaddr_storage).cast(),
-                destination_len,
-            )
-        };
+        let sent = sys_sendto(
+            self.sender_fd()?,
+            packet,
+            libc::MSG_DONTWAIT,
+            &destination,
+            destination_len,
+        )?;
         if raw_sendto_ok(family, sent, packet.len()) {
-            return Ok(());
-        }
-        let error = if sent < 0 {
-            io::Error::last_os_error()
+            Ok(())
         } else {
-            io::Error::from(io::ErrorKind::WriteZero)
-        };
-        Err(ProbeError::Local(format!("classify: {error}")))
+            Err(io::Error::from(io::ErrorKind::WriteZero))
+        }
+    }
+
+    /// C `raw_send` (`detect/raw.c:830`): полезная нагрузка уходит
+    /// сегментами не длиннее `segment_max`, номера идут встык.
+    fn send_payload_io(&self, payload: &[u8], flags: u8, options: &[u8]) -> io::Result<()> {
+        let segment = crate::classify_measured::segment_max().max(1);
+        let mut offset = 0;
+        loop {
+            let end = (offset + segment).min(payload.len());
+            let packet = build_control_packet(
+                self.local,
+                self.remote,
+                self.source_port,
+                self.destination_port,
+                self.sequence.wrapping_add(offset as u32),
+                self.acknowledgment,
+                flags,
+                options,
+                &payload[offset..end],
+            )
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+            self.send_packet_io(&packet)?;
+            if end >= payload.len() {
+                return Ok(());
+            }
+            offset = end;
+        }
+    }
+
+    fn send_ip_packet(&self, packet: &[u8]) -> Result<(), ProbeError> {
+        self.send_packet_io(packet)
+            .map_err(|error| ProbeError::Local(format!("classify: {error}")))
     }
 
     fn receive_segment(
@@ -2242,45 +2560,37 @@ impl RawConn {
                 .min(Duration::from_millis(100))
                 .as_millis()
                 .max(1) as libc::c_int;
-            let mut pollfd = libc::pollfd {
-                fd: self.receiver.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let polled = unsafe { libc::poll(&mut pollfd, 1, millis) };
-            if polled < 0 {
-                let error = io::Error::last_os_error();
-                if error.kind() == io::ErrorKind::Interrupted {
-                    continue;
+            let receiver_fd = self
+                .receiver_fd()
+                .map_err(|error| ProbeError::Local(format!("classify: poll: {error}")))?;
+            let (polled, _revents) = match sys_poll(receiver_fd, libc::POLLIN, millis) {
+                Ok(result) => result,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    return Err(ProbeError::Local(format!("classify: poll: {error}")));
                 }
-                return Err(ProbeError::Local(format!("classify: poll: {error}")));
-            }
+            };
             if polled == 0 {
                 continue;
             }
             let mut peer: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
             let mut peer_len = std::mem::size_of_val(&peer) as libc::socklen_t;
-            let count = unsafe {
-                libc::recvfrom(
-                    self.receiver.as_raw_fd(),
-                    self.recv_buffer.as_mut_ptr().cast(),
-                    self.recv_buffer.len(),
-                    libc::MSG_DONTWAIT,
-                    (&mut peer as *mut libc::sockaddr_storage).cast(),
-                    &mut peer_len,
-                )
-            };
-            if count < 0 {
-                let error = io::Error::last_os_error();
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                ) {
-                    continue;
-                }
-                return Err(ProbeError::Local(format!("classify: recvfrom: {error}")));
-            }
-            let packet = &self.recv_buffer[..count as usize];
+            let count =
+                match sys_recvfrom(receiver_fd, &mut self.recv_buffer, &mut peer, &mut peer_len) {
+                    Ok(count) => count,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                        ) =>
+                    {
+                        continue;
+                    }
+                    Err(error) => {
+                        return Err(ProbeError::Local(format!("classify: recvfrom: {error}")));
+                    }
+                };
+            let packet = &self.recv_buffer[..count];
             let (tcp_offset, packet_end) = match self.remote {
                 IpAddr::V4(remote) => {
                     if packet.len() < 40
@@ -2370,6 +2680,62 @@ impl RawConn {
             }
         }
         Ok(None)
+    }
+
+    /// C `raw_close` (`detect/raw.c:990`): сначала снять правило подавления
+    /// RST, затем закрыть сокеты отправки и приёма.
+    fn close(&mut self) {
+        self.rst_guard.release();
+        if let Some(fd) = self.sender.take() {
+            #[cfg(test)]
+            test_io::note_closed("send");
+            let raw = fd.as_raw_fd();
+            if raw_close_fd(raw) {
+                std::mem::forget(fd);
+            }
+        }
+        if let Some(fd) = self.receiver.take() {
+            #[cfg(test)]
+            test_io::note_closed("recv");
+            let raw = fd.as_raw_fd();
+            if raw_close_fd(raw) {
+                std::mem::forget(fd);
+            }
+        }
+        self.recv_buffer.clear();
+    }
+}
+
+impl Drop for RawConn {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+#[cfg(test)]
+impl RawConn {
+    fn test_connection(
+        remote: IpAddr,
+        local: IpAddr,
+        source_port: u16,
+        destination_port: u16,
+        sequence: u32,
+        acknowledgment: u32,
+    ) -> Self {
+        let open = || std::fs::File::open("/dev/null").expect("/dev/null").into();
+        Self {
+            sender: Some(open()),
+            receiver: Some(open()),
+            rst_guard: RstGuard { rule: None },
+            local,
+            remote,
+            source_port,
+            destination_port,
+            sequence,
+            acknowledgment,
+            template_options: None,
+            recv_buffer: vec![0; u16::MAX as usize],
+        }
     }
 }
 
@@ -3572,6 +3938,546 @@ mod tests {
         if let Ok(v6) = local_address_for("[::1]:9".parse().unwrap()) {
             assert_eq!(v6, "::1".parse::<std::net::IpAddr>().unwrap());
         }
+    }
+
+    #[test]
+    #[ignore = "C/Rust production handshake differential: run inside netns"]
+    fn raw_connect_production_harness() {
+        use std::time::Duration;
+        let target = std::env::var("R2O_RAW_CONNECT_TARGET").expect("target");
+        let timeout = std::env::var("R2O_RAW_CONNECT_TIMEOUT_MS")
+            .expect("timeout")
+            .parse::<u64>()
+            .expect("timeout number");
+        let remote = target
+            .parse::<std::net::SocketAddr>()
+            .expect("socket address");
+        let line = match RawConn::connect(remote, Duration::from_millis(timeout), 0, None, true) {
+            Ok(Some(connection)) => {
+                drop(connection);
+                "1|\n".to_string()
+            }
+            Ok(None) => "-2|classify: SYN-ACK не пришёл\n".to_string(),
+            Err(error) => format!("-1|{}\n", error.message()),
+        };
+        if let Ok(path) = std::env::var("R2O_RAW_CONNECT_OUTPUT") {
+            std::fs::write(path, line).expect("write handshake output");
+        }
+    }
+
+    #[test]
+    #[ignore = "C/Rust raw I/O differential: run alone (segment_max is global)"]
+    fn d2o_raw_io_differential_matches_c() {
+        use super::test_io::{self, CloseReply, PollReply, RecvReply, Script, SendReply};
+        fn connection(family: u8) -> RawConn {
+            let (remote, local) = if family == 6 {
+                (
+                    "2001:db8::7".parse::<std::net::IpAddr>().unwrap(),
+                    "2001:db8::1".parse::<std::net::IpAddr>().unwrap(),
+                )
+            } else {
+                (
+                    "198.51.100.7".parse::<std::net::IpAddr>().unwrap(),
+                    "192.0.2.1".parse::<std::net::IpAddr>().unwrap(),
+                )
+            };
+            RawConn::test_connection(remote, local, 40_000, 443, 1000, 0)
+        }
+        fn packet(
+            src: std::net::IpAddr,
+            dst: std::net::IpAddr,
+            sport: u16,
+            dport: u16,
+            seq: u32,
+            ack: u32,
+            flags: u8,
+            payload: &[u8],
+            options: &[u8],
+        ) -> Vec<u8> {
+            build_control_packet(src, dst, sport, dport, seq, ack, flags, options, payload)
+                .expect("packet")
+        }
+        fn inbound(conn: &RawConn, seq: u32, flags: u8, payload: &[u8]) -> Vec<u8> {
+            packet(
+                conn.remote,
+                conn.local,
+                conn.destination_port,
+                conn.source_port,
+                seq,
+                conn.sequence,
+                flags,
+                payload,
+                &[],
+            )
+        }
+        fn receive(
+            conn: &mut RawConn,
+            pieces: Vec<Vec<u8>>,
+            peer: Option<(libc::c_int, std::net::IpAddr)>,
+            error: Option<libc::c_int>,
+            timeout: Duration,
+        ) -> String {
+            let mut script = Script::default();
+            if let Some(errno) = error {
+                script.poll.push_back(PollReply::Ready(libc::POLLIN));
+                script.recv.push_back(RecvReply::Err(errno));
+            } else {
+                for bytes in pieces {
+                    script.poll.push_back(PollReply::Ready(libc::POLLIN));
+                    script.recv.push_back(RecvReply::Packet { bytes, peer });
+                }
+            }
+            test_io::begin(script);
+            let result = conn.receive_segment(Instant::now() + timeout, None);
+            let _ = test_io::finish();
+            match result {
+                Ok(Some(segment)) => format!(
+                    "0|flags={}|seq={}|ack={}|payload={}",
+                    segment.flags,
+                    segment.sequence,
+                    segment.acknowledgment,
+                    String::from_utf8_lossy(&segment.payload)
+                ),
+                Ok(None) => "wait".into(),
+                Err(_) => "error".into(),
+            }
+        }
+        fn read(
+            conn: &mut RawConn,
+            pieces: Vec<Vec<u8>>,
+            error: Option<libc::c_int>,
+            timeout: Duration,
+        ) -> String {
+            let mut script = Script::default();
+            if let Some(errno) = error {
+                script.poll.push_back(PollReply::Ready(libc::POLLIN));
+                script.recv.push_back(RecvReply::Err(errno));
+            } else {
+                for bytes in pieces {
+                    script.poll.push_back(PollReply::Ready(libc::POLLIN));
+                    script
+                        .recv
+                        .push_back(RecvReply::Packet { bytes, peer: None });
+                }
+            }
+            test_io::begin(script);
+            let result = conn.read_payload(timeout, None);
+            let _ = test_io::finish();
+            match result {
+                Ok(Some(payload)) => {
+                    format!("0|{}", String::from_utf8_lossy(&payload))
+                }
+                Ok(None) => "-1|".into(),
+                Err(_) => "-2|".into(),
+            }
+        }
+        fn segment_label(packet: &[u8], family: u8) -> String {
+            let ip = if family == 6 { 40 } else { 20 };
+            let tcp = &packet[ip..];
+            let seq = u32::from_be_bytes(tcp[4..8].try_into().unwrap());
+            let header = usize::from(tcp[12] >> 4) * 4;
+            format!("{}:{}", seq.wrapping_sub(1000), packet.len() - ip - header)
+        }
+        fn send_case(name: &str, family: u8, size: usize, reply: SendReply) -> String {
+            let segment = crate::classify_measured::segment_max().max(1);
+            let replies = size.div_ceil(segment).max(1);
+            test_io::begin(Script {
+                send: vec![reply; replies].into(),
+                ..Script::default()
+            });
+            let conn = connection(family);
+            let payload = vec![0x5a; size];
+            let result = conn.send_payload_io(&payload, TCP_PSH | TCP_ACK, &[]);
+            let script = test_io::finish();
+            match result {
+                Ok(()) => format!(
+                    "send|{name}|0|segs={}",
+                    script
+                        .sent
+                        .iter()
+                        .map(|packet| segment_label(packet, family))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                Err(error) => format!(
+                    "send|{name}|-1|errno={}|segs=",
+                    error
+                        .raw_os_error()
+                        .map_or_else(|| "short".to_string(), |errno| errno.to_string())
+                ),
+            }
+        }
+        fn handshake(
+            name: &str,
+            family: u8,
+            send: Vec<SendReply>,
+            poll: Vec<PollReply>,
+            recv: Vec<RecvReply>,
+            timeout: Duration,
+        ) -> String {
+            test_io::begin(Script {
+                send: send.into(),
+                poll: poll.into(),
+                recv: recv.into(),
+                ..Script::default()
+            });
+            let mut conn = connection(family);
+            let result = conn.handshake(timeout, None, raw_syn_options(true));
+            let options = conn.template_options.as_ref().map_or(0, Vec::len);
+            let _ = conn.close();
+            let _ = test_io::finish();
+            match result {
+                Ok(true) => format!("hs|{name}|ok|ts={options}"),
+                Ok(false) => {
+                    format!("hs|{name}|-2|err=classify: SYN-ACK не пришёл")
+                }
+                Err(ProbeError::Local(message)) => format!("hs|{name}|-1|err={message}"),
+                Err(error) => format!("hs|{name}|-1|err={error:?}"),
+            }
+        }
+        fn synack(conn: &RawConn, options: &[u8], family: u8) -> Vec<u8> {
+            let full = packet(
+                conn.remote,
+                conn.local,
+                conn.destination_port,
+                conn.source_port,
+                7000,
+                conn.sequence.wrapping_add(1),
+                TCP_SYN | TCP_ACK,
+                &[],
+                options,
+            );
+            if family == 6 {
+                full[40..].to_vec()
+            } else {
+                full
+            }
+        }
+
+        let mut lines = Vec::new();
+        {
+            let mut conn = connection(4);
+            let valid = inbound(&conn, 1001, TCP_ACK, b"abc");
+            lines.push(format!(
+                "recv|valid|{}",
+                receive(
+                    &mut conn,
+                    vec![valid],
+                    None,
+                    None,
+                    Duration::from_millis(20)
+                )
+            ));
+        }
+        {
+            let mut conn = connection(4);
+            let rst = inbound(&conn, 1001, TCP_RST, b"");
+            lines.push(format!(
+                "recv|rst|{}",
+                receive(&mut conn, vec![rst], None, None, Duration::from_millis(20))
+            ));
+        }
+        {
+            let mut conn = connection(4);
+            let noise = packet(
+                "203.0.113.9".parse().unwrap(),
+                conn.local,
+                443,
+                conn.source_port,
+                1001,
+                conn.sequence,
+                TCP_ACK,
+                b"noise",
+                &[],
+            );
+            let valid = inbound(&conn, 1001, TCP_ACK, b"abc");
+            lines.push(format!(
+                "recv|noise|{}",
+                receive(
+                    &mut conn,
+                    vec![noise, valid],
+                    None,
+                    None,
+                    Duration::from_millis(20)
+                )
+            ));
+        }
+        {
+            let mut conn = connection(4);
+            let valid = inbound(&conn, 1001, TCP_ACK, b"abc");
+            lines.push(format!(
+                "recv|short|{}",
+                receive(
+                    &mut conn,
+                    vec![vec![0; 10], valid],
+                    None,
+                    None,
+                    Duration::from_millis(20)
+                )
+            ));
+        }
+        {
+            let mut conn = connection(4);
+            test_io::begin(Script {
+                poll: [PollReply::Ready(libc::POLLIN)].into(),
+                recv: [RecvReply::Err(libc::EAGAIN)].into(),
+                ..Script::default()
+            });
+            let result = conn.receive_segment(Instant::now() + Duration::from_millis(2), None);
+            let _ = test_io::finish();
+            lines.push(format!(
+                "recv|eagain|{}",
+                if result.ok().flatten().is_none() {
+                    "wait"
+                } else {
+                    "unexpected"
+                }
+            ));
+        }
+        {
+            let mut conn = connection(4);
+            test_io::begin(Script {
+                poll: [PollReply::Ready(libc::POLLIN)].into(),
+                recv: [RecvReply::Err(libc::EINTR)].into(),
+                ..Script::default()
+            });
+            let result = conn.receive_segment(Instant::now() + Duration::from_millis(2), None);
+            let _ = test_io::finish();
+            lines.push(format!(
+                "recv|eintr|{}",
+                if result.ok().flatten().is_none() {
+                    "wait"
+                } else {
+                    "unexpected"
+                }
+            ));
+        }
+        {
+            let mut conn = connection(4);
+            lines.push(format!(
+                "recv|error|{}",
+                receive(
+                    &mut conn,
+                    Vec::new(),
+                    None,
+                    Some(libc::EIO),
+                    Duration::from_millis(20)
+                )
+            ));
+        }
+        {
+            let mut conn = connection(4);
+            test_io::begin(Script {
+                poll: [PollReply::Ready(libc::POLLERR)].into(),
+                recv: [RecvReply::Err(libc::ECONNRESET)].into(),
+                ..Script::default()
+            });
+            let result = conn.receive_segment(Instant::now() + Duration::from_millis(20), None);
+            let _ = test_io::finish();
+            lines.push(format!(
+                "recv|pollerr|{}",
+                if result.is_err() {
+                    "error"
+                } else {
+                    "unexpected"
+                }
+            ));
+        }
+        {
+            let mut conn = connection(6);
+            let valid = inbound(&conn, 1001, TCP_ACK, b"abc");
+            let peer = conn.remote;
+            lines.push(format!(
+                "recv|v6|{}",
+                receive(
+                    &mut conn,
+                    vec![valid[40..].to_vec()],
+                    Some((libc::AF_INET6, peer)),
+                    None,
+                    Duration::from_millis(20)
+                )
+            ));
+        }
+
+        {
+            let mut conn = connection(4);
+            conn.acknowledgment = 1001;
+            let data = inbound(&conn, 1001, TCP_ACK, b"abc");
+            lines.push(format!(
+                "read|data|{}",
+                read(&mut conn, vec![data], None, Duration::from_millis(20))
+            ));
+        }
+        {
+            let mut conn = connection(4);
+            conn.acknowledgment = 1001;
+            let rst = inbound(&conn, 1001, TCP_RST, b"");
+            lines.push(format!(
+                "read|rst|{}",
+                read(&mut conn, vec![rst], None, Duration::from_millis(20))
+            ));
+        }
+        {
+            let mut conn = connection(4);
+            conn.acknowledgment = 1001;
+            lines.push(format!(
+                "read|silence|{}",
+                read(&mut conn, Vec::new(), None, Duration::from_millis(2))
+            ));
+        }
+        {
+            let mut conn = connection(4);
+            conn.acknowledgment = 1001;
+            let later = inbound(&conn, 2441, TCP_ACK, b"later");
+            let start = inbound(&conn, 1001, TCP_ACK, b"start");
+            lines.push(format!(
+                "read|ahead|{}",
+                read(
+                    &mut conn,
+                    vec![later, start],
+                    None,
+                    Duration::from_millis(20)
+                )
+            ));
+        }
+        {
+            let mut conn = connection(4);
+            conn.acknowledgment = 1001;
+            let overlap = inbound(&conn, 999, TCP_ACK, b"xxabc");
+            lines.push(format!(
+                "read|overlap|{}",
+                read(&mut conn, vec![overlap], None, Duration::from_millis(20))
+            ));
+        }
+        {
+            let mut conn = connection(4);
+            conn.acknowledgment = 1001;
+            lines.push(format!(
+                "read|error|{}",
+                read(
+                    &mut conn,
+                    Vec::new(),
+                    Some(libc::EIO),
+                    Duration::from_millis(20)
+                )
+            ));
+        }
+
+        {
+            test_io::begin(Script {
+                close: [CloseReply::Ok, CloseReply::Ok].into(),
+                ..Script::default()
+            });
+            let mut conn = connection(4);
+            conn.recv_buffer = vec![1, 2, 3];
+            conn.close();
+            let script = test_io::finish();
+            lines.push(format!(
+                "close|order={}|cleared={}|fds={}",
+                script.closed.join(","),
+                u8::from(conn.recv_buffer.is_empty()),
+                u8::from(conn.sender.is_none() && conn.receiver.is_none())
+            ));
+        }
+
+        let before = crate::classify_measured::segment_max();
+        crate::classify_measured::set_segment_max(1400);
+        lines.push(send_case("small", 4, 10, SendReply::OkLen));
+        lines.push(send_case("split", 4, 2900, SendReply::OkLen));
+        lines.push(send_case("zero", 4, 0, SendReply::OkLen));
+        lines.push(send_case("enobufs", 4, 20, SendReply::Err(libc::ENOBUFS)));
+        lines.push(send_case("emsgsize", 4, 20, SendReply::Err(libc::EMSGSIZE)));
+        lines.push(send_case("eintr", 4, 20, SendReply::Err(libc::EINTR)));
+        lines.push(send_case("short4", 4, 20, SendReply::Ok(10)));
+        lines.push(send_case("short6", 6, 20, SendReply::Ok(10)));
+        let _ = crate::classify_measured::set_segment_max(before);
+
+        let ts = [1u8, 1, 8, 10, 0, 0, 0x23, 0x28, 0, 0, 0, 1];
+        {
+            let conn = connection(4);
+            let synack = synack(&conn, &ts, 4);
+            lines.push(handshake(
+                "v4-success",
+                4,
+                vec![SendReply::OkLen, SendReply::OkLen],
+                vec![PollReply::Ready(libc::POLLIN)],
+                vec![RecvReply::Packet {
+                    bytes: synack,
+                    peer: None,
+                }],
+                Duration::from_millis(50),
+            ));
+        }
+        {
+            let conn = connection(4);
+            let rst = inbound(&conn, 7000, TCP_RST, b"");
+            lines.push(handshake(
+                "v4-rst",
+                4,
+                vec![SendReply::OkLen],
+                vec![PollReply::Ready(libc::POLLIN)],
+                vec![RecvReply::Packet {
+                    bytes: rst,
+                    peer: None,
+                }],
+                Duration::from_millis(50),
+            ));
+        }
+        lines.push(handshake(
+            "refused",
+            4,
+            vec![SendReply::Err(libc::ECONNREFUSED)],
+            Vec::new(),
+            Vec::new(),
+            Duration::from_millis(50),
+        ));
+        lines.push(handshake(
+            "timeout",
+            4,
+            vec![SendReply::OkLen],
+            Vec::new(),
+            Vec::new(),
+            Duration::from_millis(2),
+        ));
+        {
+            let conn = connection(6);
+            let synack = synack(&conn, &ts, 6);
+            lines.push(handshake(
+                "v6-success",
+                6,
+                vec![SendReply::OkLen, SendReply::OkLen],
+                vec![PollReply::Ready(libc::POLLIN)],
+                vec![RecvReply::Packet {
+                    bytes: synack,
+                    peer: Some((libc::AF_INET6, conn.remote)),
+                }],
+                Duration::from_millis(50),
+            ));
+        }
+        {
+            let conn = connection(4);
+            let synack = synack(&conn, &[], 4);
+            lines.push(handshake(
+                "no-ts",
+                4,
+                vec![SendReply::OkLen, SendReply::OkLen],
+                vec![PollReply::Ready(libc::POLLIN)],
+                vec![RecvReply::Packet {
+                    bytes: synack,
+                    peer: None,
+                }],
+                Duration::from_millis(50),
+            ));
+        }
+
+        let output = lines.join("\n") + "\n";
+        if let Ok(path) = std::env::var("R2O_RAW_IO_OUTPUT") {
+            std::fs::write(path, &output).expect("write raw I/O output");
+        }
+        assert!(output.contains("recv|valid|0|flags="));
+        assert!(output.contains("read|data|0|abc"));
+        assert!(output.contains("send|split|0|segs=0:1400,1400:1400,2800:100"));
+        assert!(output.contains("hs|v4-success|ok|ts=12"));
     }
 
     #[test]

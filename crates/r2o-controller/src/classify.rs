@@ -720,7 +720,7 @@ pub enum ProbeError {
 }
 
 impl ProbeError {
-    fn message(&self) -> &str {
+    pub(crate) fn message(&self) -> &str {
         match self {
             Self::DialTimeout(message)
             | Self::RawConnectTimeout { message, .. }
@@ -1899,14 +1899,23 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
                 Ok(None) => {}
                 Err(error) => {
                     result.raw_usable = false;
-                    result.trace.push(Observation {
-                        probe: "raw-selftest".into(),
-                        cuts: Vec::new(),
-                        delay: Duration::ZERO,
-                        pass: 0,
-                        fail: 1,
-                        error: Some(error.message().to_owned()),
-                    });
+                    // `raw_probe::sweep_poisons` уже положил наблюдение
+                    // самопроверки с точным числом pass/fail. Не дублируем
+                    // его; сторонние backend'ы обязаны получить запись.
+                    if !result
+                        .trace
+                        .last()
+                        .is_some_and(|observation| observation.probe == "raw-selftest")
+                    {
+                        result.trace.push(Observation {
+                            probe: "raw-selftest".into(),
+                            cuts: Vec::new(),
+                            delay: Duration::ZERO,
+                            pass: 0,
+                            fail: 1,
+                            error: Some(error.message().to_owned()),
+                        });
+                    }
                 }
             }
         }
