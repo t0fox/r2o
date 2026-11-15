@@ -1597,7 +1597,15 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
             Vec::new()
         };
         let (r2o_packet_budget, r2o_budget_note) = if let Some(need) = packet_budget {
-            if complete && parser.status() >= 100 && parser.headers_complete() {
+            // C `request_page_budget` вызывает `budget_tcp` только после
+            // успешной/подтверждённой страницы; challenge, BLOCKED/LEGAL_DENIAL
+            // и неподтверждённый redirect выходят раньше, оставляя
+            // NOT_CHECKED (0), а не NOT_APPLICABLE.
+            if complete
+                && parser.status() >= 100
+                && parser.headers_complete()
+                && application_verified
+            {
                 let outcome = r2o_measure_http_packet_budget(
                     &mut stream,
                     options,
@@ -1613,10 +1621,9 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
                 );
                 (outcome.budget, Some(outcome.note))
             } else {
-                (
-                    crate::r2o_volume::R2oVolumePacketBudget::NotApplicable,
-                    None,
-                )
+                // C оставляет `r.budget` равным NOT_CHECKED до вызова
+                // `budget_tcp`; это ноль, а не NOT_APPLICABLE.
+                (crate::r2o_volume::R2oVolumePacketBudget::NotMeasured, None)
             }
         } else {
             (crate::r2o_volume::R2oVolumePacketBudget::NotMeasured, None)
@@ -4922,6 +4929,20 @@ mod tests {
             if !read_request(&mut stream) {
                 return;
             }
+            if case == "challenge" {
+                let _ = stream.write_all(
+                    b"HTTP/1.1 403 Forbidden\r\ncf-mitigated: challenge\r\nContent-Length: 0\r\n\r\n",
+                );
+                let _ = stream.flush();
+                return;
+            }
+            if case == "denied" {
+                let _ = stream.write_all(
+                    b"HTTP/1.1 451 Unavailable For Legal Reasons\r\nContent-Length: 0\r\n\r\n",
+                );
+                let _ = stream.flush();
+                return;
+            }
             full(&mut stream, case == "conn-close");
             if case == "conn-close" {
                 return;
@@ -5026,6 +5047,8 @@ mod tests {
             "closed",
             "deadline",
             "below-threshold",
+            "challenge",
+            "denied",
         ] {
             output.push_str(&format!(
                 "case={case} budget={}\n",
@@ -5037,7 +5060,7 @@ mod tests {
         }
         assert_eq!(
             output,
-            "case=passed budget=1\ncase=conn-close budget=3\ncase=not-growing budget=3\ncase=peer-spoke budget=3\ncase=silent budget=2\ncase=eof budget=3\ncase=closed budget=3\ncase=deadline budget=2\ncase=below-threshold budget=3\n"
+            "case=passed budget=1\ncase=conn-close budget=3\ncase=not-growing budget=3\ncase=peer-spoke budget=3\ncase=silent budget=2\ncase=eof budget=3\ncase=closed budget=3\ncase=deadline budget=2\ncase=below-threshold budget=3\ncase=challenge budget=0\ncase=denied budget=0\n"
         );
     }
 

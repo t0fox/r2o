@@ -33,10 +33,17 @@ R2O_HTTP_BUDGET_DIFF_OUTPUT="$TEMP/rust.out" \
     -p r2o-controller --lib tcp_budget_remaining_branches_match_current_donor \
     >/dev/null
 
-if ! diff -u "$TEMP/c.out" "$TEMP/rust.out"; then
+# Первые девять строк — общий C `budget_tcp` oracle. Ранние ветви
+# `request_page_budget` (challenge/denied) C-фикстурой не покрыты: статическая
+# функция требует полного verify.c и mock budget_io; проверяем их отдельной
+# Rust-строкой по исходному early-return C.
+head -n 9 "$TEMP/rust.out" >"$TEMP/rust-core.out"
+if ! diff -u "$TEMP/c.out" "$TEMP/rust-core.out"; then
     printf 'FAIL: HTTP budget differential\n' >&2
     exit 1
 fi
+grep -qx 'case=challenge budget=0' "$TEMP/rust.out"
+grep -qx 'case=denied budget=0' "$TEMP/rust.out"
 
 cat "$TEMP/c.out"
 printf 'PASS: C/Rust HTTP budget branches match (D2O %s)\n' "$ACTUAL_D2O_SHA"
