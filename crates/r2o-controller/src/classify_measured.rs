@@ -96,12 +96,10 @@ fn measured_plan_text(
         ));
     }
     let between = poison.fake_between;
+    // C `d2k_compose_from_props` допускает пустую приманку (`ctl_len=0`):
+    // fake строится как `payload-pad64 ... 15` без префикса.
     let decoy = if !between && (poison.decoy_hello || poison.seqovl_exact) {
-        let measured = decoy.unwrap_or_default();
-        if measured.is_empty() {
-            return Err("приём с приветствием требует сохранённую измеренную приманку".into());
-        }
-        measured
+        decoy.unwrap_or_default()
     } else {
         &[]
     };
@@ -143,7 +141,12 @@ fn measured_plan_text(
         overlap = 0;
     }
     let fake = !between
-        && (poison.badsum || poison.md5 || ttl > 0 || poison.seq_shift != 0 || poison.tcp_ts);
+        && (poison.badsum
+            || poison.md5
+            || ttl > 0
+            || poison.autottl
+            || poison.seq_shift != 0
+            || poison.tcp_ts);
     let disorder = !between && poison.disorder;
     let disorder_pos = poison.disorder_pos.max(0) as usize;
     let split_pos = poison.split_pos.max(0) as usize;
@@ -256,6 +259,12 @@ fn measured_plan_text(
         ));
     }
 
+    // C `d2k_arm_plan_measured_cap`: плечо без единого воздействия не
+    // превращается в пустой план. OOB/disorder обработаны выше.
+    if !fake && !between && !disorder && overlap == 0 && split_pos == 0 {
+        return Err("measured arm does not produce a poison or split".into());
+    }
+
     if disorder && !fake && named {
         let mut text = format!(
             "r2o-plan 1 5\nid 00000000000000000000000000000000\nproto tcp tls\nwire detect-tcp-v1\ninput tls-sni\nsegment {segment_size}\n"
@@ -269,7 +278,9 @@ fn measured_plan_text(
     }
 
     let parameterized = !between && named;
-    let minexec = if poison.md5 {
+    let minexec = if poison.autottl {
+        13
+    } else if poison.md5 {
         12
     } else if parameterized {
         5
@@ -316,12 +327,25 @@ fn measured_plan_text(
         if ttl > 0 {
             write!(text, " ttl={ttl}").expect("writing to String");
         }
+        if poison.autottl {
+            write!(
+                text,
+                " autottl={},{}-{}",
+                poison.autottl_delta,
+                poison.autottl_min.max(0),
+                poison.autottl_max.max(0)
+            )
+            .expect("writing to String");
+        }
         if !between {
             if poison.md5 {
                 text.push_str(" md5");
             }
             if poison.tcp_ts {
                 text.push_str(" tcpts");
+            }
+            if poison.tcp_ts_up {
+                text.push_str(" tsup");
             }
             if poison.ip_id_zero {
                 text.push_str(" ipidzero");

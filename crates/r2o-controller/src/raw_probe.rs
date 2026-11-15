@@ -225,10 +225,9 @@ pub fn sweep_poisons(
                 decoy = Some(white.payload.as_slice());
             }
             _ if poison.decoy_hello => {
-                let Some(selected_decoy) = selected_decoy.as_deref() else {
-                    continue;
-                };
-                decoy = Some(selected_decoy);
+                // C `d2k_opts_decoy`: при отсутствии контроля приманка —
+                // пустой буфер, а не повод пропустить вопрос.
+                decoy = Some(selected_decoy.as_deref().unwrap_or(&[]));
             }
             _ => {}
         }
@@ -360,11 +359,7 @@ pub fn sweep_poisons(
         }
         let decoy = poison
             .decoy_hello
-            .then_some(selected_decoy.as_deref())
-            .flatten();
-        if poison.decoy_hello && decoy.is_none() {
-            continue;
-        }
+            .then_some(selected_decoy.as_deref().unwrap_or(&[]));
         let mut observation = Observation {
             probe: poison.name.clone(),
             cuts: Vec::new(),
@@ -480,14 +475,9 @@ pub fn sweep_poisons(
         {
             continue;
         }
-        let decoy = if poison.decoy_hello {
-            let Some(selected_decoy) = selected_decoy.as_deref() else {
-                continue;
-            };
-            Some(selected_decoy)
-        } else {
-            None
-        };
+        let decoy = poison
+            .decoy_hello
+            .then_some(selected_decoy.as_deref().unwrap_or(&[]));
         let mut observation = Observation {
             probe: format!("poison:{}", poison.name),
             cuts: Vec::new(),
@@ -1118,9 +1108,9 @@ fn compose_from_props(props: &DpiProps, control: Option<&[u8]>) -> Vec<Poison> {
             seqovl: control.map_or(0, |bytes| bytes.len() as i32),
             ..Poison::default()
         };
-        if control.is_some() {
-            out.push(base);
-        }
+        // C `d2k_compose_from_props` выдаёт «всё сразу» и без контроля:
+        // пустая приманка — допустимый вход, а не отсутствие кандидата.
+        out.push(base);
     }
     out
 }
@@ -1311,11 +1301,18 @@ fn emit_plan_packets(
 }
 
 fn run_command(program: &str, args: &[String]) -> Result<std::process::ExitStatus, String> {
-    let mut child = Command::new(program)
+    use std::os::unix::process::CommandExt;
+
+    let mut command = Command::new(program);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    // C `raw_rule_system`: своя группа процессов, чтобы по сроку убить и sh,
+    // и iptables/nft, а не оставить потомка ждать замок xtables.
+    command.process_group(0);
+    let mut child = command
         .spawn()
         .map_err(|error| format!("{program}: {error}"))?;
     let deadline = Instant::now() + COMMAND_TIMEOUT;
@@ -1324,6 +1321,8 @@ fn run_command(program: &str, args: &[String]) -> Result<std::process::ExitStatu
             Ok(Some(status)) => return Ok(status),
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
             Ok(None) => {
+                let pid = child.id() as libc::pid_t;
+                let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(format!("{program}: command timed out"));
@@ -2397,6 +2396,162 @@ fn timestamp_options(server_timestamp: u32) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use super::{Property, apply_property, compose_from_props, property_probes};
+    use crate::classify::{DpiProps, Poison, TriState};
+
+    fn set_name(property: Property) -> &'static str {
+        match property {
+            Property::LeftOverlap => "LEFT_OVERLAP",
+            Property::Reorder => "REORDER",
+            Property::Checksum => "CHECKSUM",
+            Property::ParsesL7 => "PARSES_L7",
+            Property::Duplicates => "DUPLICATES",
+            Property::Syn => "SYN",
+            Property::Md5 => "MD5",
+            Property::SequenceWindow => "SEQ_WINDOW",
+            Property::Timestamps => "TIMESTAMPS",
+            Property::OverlapSni => "OVERLAP_SNI",
+            Property::DenseDuplicates => "DUP_DENSE",
+            Property::WhiteTimestamp => "WHITE_TS",
+        }
+    }
+
+    fn tri(value: TriState) -> &'static str {
+        match value {
+            TriState::True => "1",
+            TriState::False => "0",
+            TriState::Unset => "u",
+        }
+    }
+
+    fn poison_fields(poison: &Poison) -> String {
+        format!(
+            "|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            poison.name,
+            poison.ttl,
+            u8::from(poison.badsum),
+            poison.seq_shift,
+            u8::from(poison.md5),
+            u8::from(poison.decoy_hello),
+            u8::from(poison.disorder),
+            poison.disorder_pos,
+            u8::from(poison.tcp_ts),
+            u8::from(poison.ip_id_zero),
+            u8::from(poison.autottl),
+            poison.gap_ms,
+            u8::from(poison.syn_data),
+            u8::from(poison.oob),
+            u8::from(poison.fake_between),
+            poison.repeats,
+            u8::from(poison.seqovl_exact),
+            poison.seqovl,
+            poison.split_pos
+        )
+    }
+
+    fn props_fields(props: &DpiProps) -> String {
+        format!(
+            "|{}{}{}{}{}{}{}{}{}{}{}|{}",
+            tri(props.reassembles),
+            tri(props.parses_l7),
+            tri(props.validates_checksum),
+            tri(props.tolerates_reorder),
+            tri(props.tolerates_left_overlap),
+            tri(props.counts_duplicates),
+            tri(props.inspects_syn),
+            tri(props.validates_md5),
+            tri(props.validates_seq_window),
+            tri(props.validates_timestamps),
+            tri(props.overlap_covers_sni),
+            props.hop_ttl.unwrap_or(0)
+        )
+    }
+
+    #[test]
+    fn d2o_props_compose_differential_matches_c() {
+        let mut output = String::new();
+        let probes = property_probes();
+        output.push_str(&format!("props|{}\n", probes.len()));
+        for (index, probe) in probes.iter().enumerate() {
+            output.push_str(&format!(
+                "prop|{}|{}|{}{}\n",
+                index,
+                probe.label,
+                set_name(probe.set),
+                poison_fields(&probe.poison)
+            ));
+        }
+        let sets = [
+            Property::LeftOverlap,
+            Property::Reorder,
+            Property::Checksum,
+            Property::ParsesL7,
+            Property::Duplicates,
+            Property::Syn,
+            Property::Md5,
+            Property::SequenceWindow,
+            Property::Timestamps,
+            Property::OverlapSni,
+            Property::DenseDuplicates,
+            Property::WhiteTimestamp,
+        ];
+        for property in sets {
+            for ok in [false, true] {
+                let mut props = DpiProps::default();
+                apply_property(&mut props, property, ok, &Poison::default());
+                output.push_str(&format!(
+                    "apply|{}|{}{}\n",
+                    set_name(property),
+                    u8::from(ok),
+                    props_fields(&props)
+                ));
+            }
+        }
+        let compose = |name: &str, props: &DpiProps, control: Option<&[u8]>| {
+            let out = compose_from_props(props, control);
+            let mut line = format!("compose|{name}|{}", out.len());
+            for poison in &out {
+                line.push_str(&poison_fields(poison));
+            }
+            line.push('\n');
+            line
+        };
+        let empty = DpiProps::default();
+        output.push_str(&compose("empty-none", &empty, None));
+        output.push_str(&compose(
+            "empty-control",
+            &empty,
+            Some(b"BENIGN-CONTROL-PAYLOAD"),
+        ));
+        let duplicates = DpiProps {
+            counts_duplicates: TriState::True,
+            ..DpiProps::default()
+        };
+        output.push_str(&compose("duplicates", &duplicates, None));
+        let all = DpiProps {
+            counts_duplicates: TriState::True,
+            tolerates_left_overlap: TriState::False,
+            tolerates_reorder: TriState::False,
+            ..DpiProps::default()
+        };
+        output.push_str(&compose("all", &all, None));
+        let overlap = DpiProps {
+            tolerates_left_overlap: TriState::False,
+            ..DpiProps::default()
+        };
+        output.push_str(&compose("overlap", &overlap, None));
+        let reorder = DpiProps {
+            tolerates_reorder: TriState::False,
+            ..DpiProps::default()
+        };
+        output.push_str(&compose("reorder", &reorder, None));
+        if let Ok(path) = std::env::var("R2O_COMPOSE_PROPS_OUTPUT") {
+            std::fs::write(path, &output).expect("write compose/props output");
+        }
+        assert!(output.starts_with("props|12\n"));
+        assert!(output.contains("compose|empty-none|1|СОБРАНО: всё сразу|"));
+    }
+
     #[test]
     fn trigger_timestamp_helpers_match_c() {
         let plain = super::Poison::default();
@@ -3328,6 +3483,24 @@ mod tests {
     }
 
     #[test]
+    fn run_command_timeout_matches_c_rule_deadline() {
+        let started = std::time::Instant::now();
+        let error = run_command("sh", &["-c".to_owned(), "sleep 30".to_owned()])
+            .expect_err("command must time out");
+        assert!(error.contains("command timed out"), "{error}");
+        assert!(started.elapsed() < COMMAND_TIMEOUT * 2);
+    }
+
+    #[test]
+    fn local_address_for_loopback_matches_c() {
+        let v4 = local_address_for("127.0.0.1:9".parse().unwrap()).expect("IPv4 local address");
+        assert_eq!(v4, "127.0.0.1".parse::<std::net::IpAddr>().unwrap());
+        if let Ok(v6) = local_address_for("[::1]:9".parse().unwrap()) {
+            assert_eq!(v6, "::1".parse::<std::net::IpAddr>().unwrap());
+        }
+    }
+
+    #[test]
     fn register_rst_cleanup_is_once() {
         // C `register_atexit` вызывается под `pthread_once`.
         register_rst_cleanup();
@@ -3344,5 +3517,121 @@ mod tests {
         assert_eq!(raw_selftest_index(6, true), 1);
         assert_eq!(raw_selftest_index(4, false), 2);
         assert_eq!(raw_selftest_index(6, false), 3);
+    }
+
+    #[test]
+    fn compose_from_props_without_control_keeps_all_at_once_like_c() {
+        let empty = compose_from_props(&DpiProps::default(), None);
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0].name, "СОБРАНО: всё сразу");
+        assert!(empty[0].badsum);
+        assert!(empty[0].decoy_hello);
+        assert!(empty[0].seqovl_exact);
+        assert!(empty[0].disorder);
+        assert_eq!(empty[0].repeats, 7);
+        assert_eq!(empty[0].seqovl, 0);
+
+        let with_empty = compose_from_props(&DpiProps::default(), Some(&[]));
+        assert_eq!(with_empty.len(), 1);
+        assert_eq!(with_empty[0].name, empty[0].name);
+        assert_eq!(with_empty[0].seqovl, 0);
+
+        let control = b"BENIGN-CONTROL-PAYLOAD";
+        let with_control = compose_from_props(&DpiProps::default(), Some(control));
+        assert_eq!(with_control.len(), 1);
+        assert_eq!(with_control[0].seqovl, control.len() as i32);
+    }
+
+    #[test]
+    fn compose_from_props_order_and_maximum_match_c() {
+        let duplicates = DpiProps {
+            counts_duplicates: TriState::True,
+            ..DpiProps::default()
+        };
+        let series = compose_from_props(&duplicates, None);
+        assert_eq!(series.len(), 2);
+        assert_eq!(series[0].name, "СОБРАНО: серия с паузой");
+        assert_eq!(series[0].repeats, 2);
+        assert_eq!(series[0].gap_ms, 20);
+        assert_eq!(series[1].name, "СОБРАНО: плотная серия");
+        assert_eq!(series[1].repeats, 7);
+
+        let all = DpiProps {
+            counts_duplicates: TriState::True,
+            tolerates_left_overlap: TriState::False,
+            tolerates_reorder: TriState::False,
+            ..DpiProps::default()
+        };
+        let candidates = compose_from_props(&all, None);
+        assert_eq!(candidates.len(), 4);
+        assert_eq!(candidates[0].name, "СОБРАНО: серия с паузой");
+        assert_eq!(candidates[1].name, "СОБРАНО: плотная серия");
+        assert_eq!(candidates[2].name, "СОБРАНО: фальшивка + перекрытие");
+        assert_eq!(candidates[2].seqovl_exact, true);
+        assert_eq!(candidates[2].seqovl, 0);
+        assert_eq!(candidates[3].name, "СОБРАНО: фальшивка + порядок");
+        assert!(candidates[3].disorder);
+        // C `d2k_compose_from_props` имеет cap 8; Rust Vec не переполняет
+        // массив, но максимум тоже 4.
+        assert!(candidates.len() <= 8);
+    }
+
+    #[test]
+    fn prop_probes_order_names_and_apply_set_match_c() {
+        let probes = property_probes();
+        assert_eq!(probes.len(), 12);
+        let expected = [
+            ("перекрытие слева", "seqovl-1"),
+            ("порядок сегментов", "disorder"),
+            ("контрольная сумма", "badsum"),
+            ("разбор протокола", "badsum+hello"),
+            ("повтор как ретрансмит", "badsum-x2-g20"),
+            ("сверка MD5", "md5"),
+            ("окно seq", "seq-out-of-window"),
+            ("метка времени", "ts"),
+            ("перекрытие до конца имени", "seqovl-sni"),
+            ("плотная серия", "badsum-x7"),
+            ("ECH-приветствие под меткой", "white-hello-ts"),
+            ("данные в SYN", "syndata"),
+        ];
+        for (index, (label, name)) in expected.iter().enumerate() {
+            assert_eq!(probes[index].label, *label);
+            assert_eq!(probes[index].poison.name, *name);
+        }
+        assert_eq!(probes[0].poison.seqovl, 1);
+        assert!(probes[1].poison.disorder);
+        assert!(probes[2].poison.badsum);
+        assert!(probes[3].poison.decoy_hello);
+        assert_eq!(probes[4].poison.repeats, 2);
+        assert_eq!(probes[4].poison.gap_ms, 20);
+        assert!(probes[5].poison.md5);
+        assert_eq!(probes[6].poison.seq_shift, -66_000);
+        assert!(probes[7].poison.tcp_ts);
+        assert_eq!(probes[8].poison.seqovl, 0);
+        assert_eq!(probes[9].poison.repeats, 7);
+        assert_eq!(probes[10].poison.repeats, 8);
+        assert_eq!(probes[10].poison.split_pos, 2);
+        assert!(probes[11].poison.syn_data);
+
+        let mut props = DpiProps::default();
+        apply_property(&mut props, Property::LeftOverlap, false, &probes[0].poison);
+        assert_eq!(props.tolerates_left_overlap, TriState::True);
+        apply_property(&mut props, Property::LeftOverlap, true, &probes[0].poison);
+        assert_eq!(props.tolerates_left_overlap, TriState::False);
+        apply_property(&mut props, Property::Checksum, false, &probes[2].poison);
+        assert_eq!(props.validates_checksum, TriState::Unset);
+        apply_property(&mut props, Property::ParsesL7, true, &probes[3].poison);
+        assert_eq!(props.parses_l7, TriState::True);
+        assert_eq!(props.validates_checksum, TriState::False);
+        apply_property(&mut props, Property::Syn, true, &probes[11].poison);
+        assert_eq!(props.inspects_syn, TriState::False);
+        apply_property(
+            &mut props,
+            Property::WhiteTimestamp,
+            true,
+            &probes[10].poison,
+        );
+        assert_eq!(props.validates_timestamps, TriState::False);
+        assert_eq!(props.validates_checksum, TriState::False);
     }
 }
