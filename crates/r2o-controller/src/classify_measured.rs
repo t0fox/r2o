@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use r2k_core::plan::Plan;
 
-use crate::classify::{Poison, Trigger, poison_has_fake};
+use crate::classify::{D2kArm, Poison, Trigger, arm_from_poison};
 
 const MAX_TRIGGER: usize = 16_384;
 const MAX_DECOY: usize = 2_048;
@@ -86,19 +86,13 @@ fn measured_plan_text(
     }
     let (sni_off, sni_len) = crate::hello::sni_bounds(&trigger.payload).unwrap_or((0, 0));
     let named = sni_off > 0 && sni_len > 1;
-    if poison.syn_data {
-        return Err("данные в SYN языком плана не выражаются".into());
-    }
-    if poison.seq_shift != 0 && poison.seq_shift != -66_000 {
-        return Err(format!(
-            "сдвиг TCP seq {} не выражается флагом seq_out",
-            poison.seq_shift
-        ));
-    }
-    let between = poison.fake_between;
+    // Единственный источник полей C `d2k_arm_from_poison`: дальнейшая
+    // сборка плана не имеет права пересчитывать поля из Poison.
+    let arm: D2kArm = arm_from_poison(poison)?;
+    let between = arm.between;
     // C `d2k_compose_from_props` допускает пустую приманку (`ctl_len=0`):
     // fake строится как `payload-pad64 ... 15` без префикса.
-    let decoy = if !between && (poison.decoy_hello || poison.seqovl_exact) {
+    let decoy = if !between && (arm.decoy_hello || arm.seqovl_hello) {
         decoy.unwrap_or_default()
     } else {
         &[]
@@ -106,32 +100,22 @@ fn measured_plan_text(
     if decoy.len() > MAX_DECOY {
         return Err("measured decoy exceeds 2048 bytes".into());
     }
-    if poison.repeats > u8::MAX as i32 {
+    if arm.repeats > u8::MAX as u32 {
         return Err("measured repeat count exceeds 255".into());
     }
-    if poison.ttl > u8::MAX as i32 {
+    if arm.ttl > u8::MAX as u32 {
         return Err("measured TTL exceeds 255".into());
     }
-    if poison.gap_ms > (u32::MAX / 1000) as i32 {
+    if arm.gap_ms > u32::MAX / 1000 {
         return Err("measured gap exceeds the plan range".into());
     }
-    let repeats = if poison.repeats > 0 {
-        poison.repeats as u32
-    } else if poison_has_fake(poison) {
-        1
-    } else {
-        0
-    };
-    let gap_us = if poison.gap_ms > 0 {
-        poison.gap_ms as u32 * 1000
-    } else {
-        0
-    };
-    let ttl = poison.ttl.max(0) as u32;
-    let mut overlap = if poison.seqovl_exact {
+    let repeats = arm.repeats;
+    let gap_us = arm.gap_ms * 1000;
+    let ttl = arm.ttl;
+    let mut overlap = if arm.seqovl_hello {
         decoy.len()
     } else {
-        poison.seqovl.max(0) as usize
+        arm.seqovl as usize
     };
     if overlap > MAX_DECOY {
         return Err("measured overlap exceeds 2048 bytes".into());
@@ -140,31 +124,26 @@ fn measured_plan_text(
     if between {
         overlap = 0;
     }
-    let fake = !between
-        && (poison.badsum
-            || poison.md5
-            || ttl > 0
-            || poison.autottl
-            || poison.seq_shift != 0
-            || poison.tcp_ts);
-    let disorder = !between && poison.disorder;
-    let disorder_pos = poison.disorder_pos.max(0) as usize;
-    let split_pos = poison.split_pos.max(0) as usize;
+    let fake =
+        !between && (arm.badsum || arm.md5 || ttl > 0 || arm.autottl || arm.seq_out || arm.tcpts);
+    let disorder = !between && arm.disorder;
+    let disorder_pos = arm.disorder_pos as usize;
+    let split_pos = arm.split_pos as usize;
 
     if split_pos != 0
-        && !poison.badsum
-        && !poison.md5
+        && !arm.badsum
+        && !arm.md5
         && repeats == 0
         && ttl == 0
-        && poison.seq_shift == 0
-        && !poison.decoy_hello
-        && !poison.tcp_ts
-        && !poison.ip_id_zero
-        && !poison.disorder
+        && !arm.seq_out
+        && !arm.decoy_hello
+        && !arm.tcpts
+        && !arm.ipidzero
+        && !arm.disorder
         && disorder_pos == 0
         && !between
         && overlap == 0
-        && !poison.oob
+        && !arm.oob
     {
         if split_pos >= n {
             return Err("measured split is outside the trigger".into());
@@ -174,21 +153,21 @@ fn measured_plan_text(
         ));
     }
 
-    if poison.tcp_ts
-        && poison.decoy_hello
+    if arm.tcpts
+        && arm.decoy_hello
         && repeats == 8
         && split_pos == 2
-        && !poison.badsum
-        && !poison.md5
+        && !arm.badsum
+        && !arm.md5
         && ttl == 0
-        && poison.seq_shift == 0
+        && !arm.seq_out
         && gap_us == 0
-        && !poison.disorder
+        && !arm.disorder
         && disorder_pos == 0
         && !between
         && overlap == 0
-        && !poison.ip_id_zero
-        && !poison.oob
+        && !arm.ipidzero
+        && !arm.oob
     {
         if !named || decoy.is_empty() {
             return Err("composite timestamp plan requires a measured named hello".into());
@@ -204,21 +183,21 @@ fn measured_plan_text(
     }
 
     if disorder_pos != 0 {
-        if !poison.disorder
+        if !arm.disorder
             || disorder_pos >= n
             || overlap != 0
-            || poison.seqovl_exact
-            || poison.badsum
-            || poison.md5
+            || arm.seqovl_hello
+            || arm.badsum
+            || arm.md5
             || repeats != 0
             || gap_us != 0
             || between
             || ttl != 0
-            || poison.seq_shift != 0
-            || poison.decoy_hello
-            || poison.tcp_ts
-            || poison.ip_id_zero
-            || poison.oob
+            || arm.seq_out
+            || arm.decoy_hello
+            || arm.tcpts
+            || arm.ipidzero
+            || arm.oob
             || split_pos != 0
         {
             return Err(
@@ -235,20 +214,20 @@ fn measured_plan_text(
         ));
     }
 
-    if poison.oob {
+    if arm.oob {
         if overlap != 0
-            || poison.seqovl_exact
-            || poison.badsum
-            || poison.md5
+            || arm.seqovl_hello
+            || arm.badsum
+            || arm.md5
             || repeats != 0
             || gap_us != 0
-            || poison.disorder
+            || arm.disorder
             || between
             || ttl != 0
-            || poison.seq_shift != 0
-            || poison.decoy_hello
-            || poison.tcp_ts
-            || poison.ip_id_zero
+            || arm.seq_out
+            || arm.decoy_hello
+            || arm.tcpts
+            || arm.ipidzero
             || split_pos != 0
             || !named
         {
@@ -278,9 +257,9 @@ fn measured_plan_text(
     }
 
     let parameterized = !between && named;
-    let minexec = if poison.autottl {
+    let minexec = if arm.autottl {
         13
-    } else if poison.md5 {
+    } else if arm.md5 {
         12
     } else if parameterized {
         5
@@ -321,36 +300,34 @@ fn measured_plan_text(
     if fake || between {
         append_measured_payload(&mut text, 1, fake_len, if between { &[] } else { decoy })?;
         text.push_str("poison 1");
-        if poison.badsum {
+        if arm.badsum {
             text.push_str(" badsum");
         }
         if ttl > 0 {
             write!(text, " ttl={ttl}").expect("writing to String");
         }
-        if poison.autottl {
+        if arm.autottl {
             write!(
                 text,
                 " autottl={},{}-{}",
-                poison.autottl_delta,
-                poison.autottl_min.max(0),
-                poison.autottl_max.max(0)
+                arm.autottl_delta, arm.autottl_min, arm.autottl_max
             )
             .expect("writing to String");
         }
         if !between {
-            if poison.md5 {
+            if arm.md5 {
                 text.push_str(" md5");
             }
-            if poison.tcp_ts {
+            if arm.tcpts {
                 text.push_str(" tcpts");
             }
-            if poison.tcp_ts_up {
+            if arm.tcpts_up {
                 text.push_str(" tsup");
             }
-            if poison.ip_id_zero {
+            if arm.ipidzero {
                 text.push_str(" ipidzero");
             }
-            if poison.seq_shift != 0 {
+            if arm.seq_out {
                 text.push_str(" seqshift=-66000");
             }
         }
@@ -415,9 +392,9 @@ fn measured_plan_text(
         };
         body = body.max(overlap).min(segment_size);
         let header = 40
-            + if fake && poison.md5 {
+            + if fake && arm.md5 {
                 20
-            } else if fake && poison.tcp_ts {
+            } else if fake && arm.tcpts {
                 12
             } else {
                 0
