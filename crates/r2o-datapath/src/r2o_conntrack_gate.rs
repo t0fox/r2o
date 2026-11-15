@@ -935,6 +935,94 @@ mod tests {
     }
 
     #[test]
+    fn preflight_покрывает_четыре_call_site_и_не_повторяет_lookup() {
+        // 1. UDP Pass первого пакета: исключение first_packet не читает
+        // таблицу ни в preflight, ни в guard_decision.
+        let udp = ipv4_udp_packet();
+        let mut gate = R2oConntrackGate::with_capacity(4);
+        let mut calls = 0;
+        assert!(gate.r2o_preflight_with_lookup(&udp, true, false, |_| {
+            calls += 1;
+            panic!("первому UDP-пакету таблица не нужна")
+        }));
+        let _ = guard_decision_with_lookup(
+            &mut gate,
+            &udp,
+            PacketDecision::Drop,
+            [9; 16],
+            true,
+            false,
+            |_| {
+                calls += 1;
+                panic!("guard первого UDP-пакета не читает таблицу")
+            },
+        );
+        assert_eq!(calls, 0);
+
+        // 2. UDP Pass не первого пакета: preflight читает ровно один раз и
+        // кеширует Tracked; guard_decision обязан попасть в кеш.
+        let mut gate = R2oConntrackGate::with_capacity(4);
+        let mut calls = 0;
+        assert!(gate.r2o_preflight_with_lookup(&udp, false, false, |_| {
+            calls += 1;
+            R2oProcNatLookup::Found(mapped_source())
+        }));
+        let _ = guard_decision_with_lookup(
+            &mut gate,
+            &udp,
+            PacketDecision::Drop,
+            [9; 16],
+            false,
+            false,
+            |_| {
+                calls += 1;
+                panic!("guard после preflight не должен повторять lookup")
+            },
+        );
+        assert_eq!(calls, 1);
+
+        // 3. TCP Ready/Observed: preflight получает Missing и отказывает до
+        // применения плана; guard_decision в этом call-site не вызывается.
+        // C `flow_tracked` делает три попытки lookup, поэтому здесь тоже 3.
+        let mut tcp = udp.clone();
+        tcp.resize(40, 0);
+        tcp[2..4].copy_from_slice(&40_u16.to_be_bytes());
+        tcp[9] = 6;
+        tcp[32] = 5 << 4;
+        let mut gate = R2oConntrackGate::with_capacity(4);
+        let mut calls = 0;
+        assert!(!gate.r2o_preflight_with_lookup(&tcp, false, false, |_| {
+            calls += 1;
+            R2oProcNatLookup::Missing
+        }));
+        assert_eq!(calls, 3);
+        assert_eq!(gate.nat_stats(), (0, 1, 0, 0));
+
+        // 4. TCP с отсутствующей таблицей: preflight разрешает (nat_state=3),
+        // guard берёт кеш и не повторяет lookup.
+        let mut gate = R2oConntrackGate::with_capacity(4);
+        let mut calls = 0;
+        assert!(gate.r2o_preflight_with_lookup(&tcp, false, false, |_| {
+            calls += 1;
+            R2oProcNatLookup::TableMissing
+        }));
+        let _ = guard_decision_with_lookup(
+            &mut gate,
+            &tcp,
+            PacketDecision::Drop,
+            [9; 16],
+            false,
+            false,
+            |_| {
+                calls += 1;
+                panic!("nat_state=3 кешируется и не читает таблицу повторно")
+            },
+        );
+        assert_eq!(calls, 1);
+        assert_eq!(gate.nat_stats(), (0, 0, 1, 0));
+    }
+
+    #[test]
     fn tcp_первый_пакет_не_проходит_по_исключению_первого_пакета() {
         let mut packet = vec![0_u8; 40];
         packet[0] = 0x45;
