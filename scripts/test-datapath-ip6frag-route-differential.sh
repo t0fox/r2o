@@ -24,12 +24,10 @@ if [ "$ACTUAL_D2O_SHA" != "$EXPECTED_D2O_SHA" ]; then
     printf 'Expected D2O %s, got %s\n' "$EXPECTED_D2O_SHA" "$ACTUAL_D2O_SHA" >&2
     exit 2
 fi
-for tool in ip; do
-    command -v "$tool" >/dev/null 2>&1 || {
-        echo "required command is missing: $tool" >&2
-        exit 1
-    }
-done
+if ! command -v ip >/dev/null 2>&1; then
+    echo "required command is missing: ip" >&2
+    exit 1
+fi
 
 mkdir -p "$TMPDIR"
 TEMP=$(mktemp -d "$TMPDIR/r2o-ip6frag-route.XXXXXX")

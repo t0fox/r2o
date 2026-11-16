@@ -39,22 +39,24 @@ if [ ! -f "$D2O_ROOT/core/hello_profiles.inc" ]; then
     make -s -C "$D2O_ROOT/core" hello_profiles.inc
 fi
 
-CFLAGS="-std=c99 -O2 -Wall -Wextra -Werror -Wno-unused-function \
-    -ffunction-sections -fdata-sections \
-    -I$D2O_ROOT/core/include -I$D2O_ROOT/detect/include \
-    -I$D2O_ROOT/datapath/include -I$D2O_ROOT/core \
-    -DR2O_BRIDGE_C=\"$D2O_ROOT/detect/bridge.c\""
-# shellcheck disable=SC2086
-"$CC" $CFLAGS \
+# Флаги передаются функцией, а не строкой: иначе кавычки для
+# `-DR2O_BRIDGE_C="..."` теряются при разбиении (SC2089/SC2090).
+bridge_cc() {
+    "$CC" -std=c99 -O2 -Wall -Wextra -Werror -Wno-unused-function \
+        -ffunction-sections -fdata-sections \
+        -I"$D2O_ROOT/core/include" -I"$D2O_ROOT/detect/include" \
+        -I"$D2O_ROOT/datapath/include" -I"$D2O_ROOT/core" \
+        -DR2O_BRIDGE_C="\"$D2O_ROOT/detect/bridge.c\"" \
+        "$@"
+}
+bridge_cc \
     "$ROOT/crates/r2o-controller/tests/d2o_bridge_input_differential.c" \
     "$D2O_ROOT/core/hello.c" "$D2O_ROOT/detect/trigger.c" \
     -Wl,--gc-sections -o "$TEMP/input"
-# shellcheck disable=SC2086
-"$CC" $CFLAGS \
+bridge_cc \
     "$ROOT/crates/r2o-controller/tests/d2o_bridge_ack_differential.c" \
     -Wl,--gc-sections -o "$TEMP/ack"
-# shellcheck disable=SC2086
-"$CC" $CFLAGS \
+bridge_cc \
     "$ROOT/crates/r2o-controller/tests/d2o_bridge_stop_differential.c" \
     -Wl,--gc-sections -o "$TEMP/stop"
 

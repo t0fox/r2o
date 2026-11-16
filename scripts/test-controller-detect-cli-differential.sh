@@ -94,7 +94,7 @@ check_detect_exact() {
     set -e
     if [ "$c_status" != "$r_status" ]; then
         printf 'FAIL: detect exit C(%s)=%s Rust(%s)=%s\n' \
-            "$detect_args" "$c_status" "$r_status" >&2
+            "$detect_args" "$c_status" "$detect_args" "$r_status" >&2
         exit 1
     fi
     if ! cmp -s "$TEMP/detect-c.err" "$TEMP/detect-r.err"; then

@@ -113,14 +113,14 @@ run_case() {
         R2O_UDP_PLAN_TLV_OUT="$TEMP/$name.tlv" \
         R2O_UDP_PLAN_BUILD_ONLY=1 \
         R2O_UDP_PLAN_EMPTY=1 \
-        LD_PRELOAD= \
+        LD_PRELOAD='' \
             "$TEMP/d2o-build" >"$TEMP/c-one.out"
         R2O_UDP_PLAN_TLV_OUT="$TEMP/$name.tlv" \
         R2O_UDP_PLAN_FAMILY="$family" \
         R2O_UDP_PLAN_BUILD_ONLY=1 \
         R2O_UDP_PLAN_EMPTY=1 \
         R2O_UDP_PLAN_BUILD_DIFF_OUTPUT="$TEMP/r-one.out" \
-        LD_PRELOAD= \
+        LD_PRELOAD='' \
             "$RUST_BIN" --exact --nocapture \
             udp_plan::tests::udp_plan_send_differential_matches_c \
             >"$TEMP/r-$name.log" 2>&1
@@ -129,13 +129,13 @@ run_case() {
         R2O_UDP_PLAN_FAMILY="$family" \
         R2O_UDP_PLAN_TLV_OUT="$TEMP/$name.tlv" \
         R2O_UDP_PLAN_BUILD_ONLY=1 \
-        LD_PRELOAD= \
+        LD_PRELOAD='' \
             "$TEMP/d2o-build" >"$TEMP/c-one.out"
         R2O_UDP_PLAN_TLV_OUT="$TEMP/$name.tlv" \
         R2O_UDP_PLAN_FAMILY="$family" \
         R2O_UDP_PLAN_BUILD_ONLY=1 \
         R2O_UDP_PLAN_BUILD_DIFF_OUTPUT="$TEMP/r-one.out" \
-        LD_PRELOAD= \
+        LD_PRELOAD='' \
             "$RUST_BIN" --exact --nocapture \
             udp_plan::tests::udp_plan_send_differential_matches_c \
             >"$TEMP/r-$name.log" 2>&1
