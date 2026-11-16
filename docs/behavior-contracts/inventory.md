@@ -69,10 +69,10 @@
 
 ## Следующий шаг
 
-`CS-LINK-IO`, `CS-MEASUREMENT` и `CS-CATALOG-TLV` закрыты;
-`send_area_key` (11), `wait_readable` (8), `hex_decode` (6) и
-`say` (4+3) сверены C/Rust differential. Следующий кандидат —
-`CS-CLI-TOOLS` (`d2kask`/`d2kfetch`), отдельный CLI-контракт.
+Закрыты `CS-LINK-IO`, `CS-MEASUREMENT`, `CS-CATALOG-TLV`,
+`DP-TRACK`, `CN-IP6FRAG` и `CS-VERDICT`. Следующие приоритеты —
+QUIC wire (ranges/seal/open), TLS record/handshake, NFQUEUE
+error text, `d2kask`/`d2kc main`.
 
 ## Ограничение TTL-контракта
 
