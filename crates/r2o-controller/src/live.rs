@@ -932,6 +932,35 @@ mod tests {
     use super::*;
     use crate::catalog::{Binding, BoxRecord, DomainState, Fingerprint, Plan, Signal};
 
+    /// C/Rust differential: C-стенд вызывает production `signal_human`
+    /// из sched.c; Rust — production `live::signal_human`.
+    #[test]
+    fn signal_human_differential_matches_c() {
+        let Some(path) = std::env::var_os("R2O_SIGNAL_HUMAN_DIFF_OUTPUT") else {
+            return;
+        };
+        let cases: [(&str, i32, u8, i32, u8, u16); 9] = [
+            ("rst", 0, 55, -7, 0x88, 12_345),
+            ("volume", 40, 0, 0, 0, 0),
+            ("rx-volume", 19, 0, 0, 0, 0),
+            ("rx-volume-wire", 23, 0, 0, 0, 0),
+            ("silent", 0, 0, 0, 0, 0),
+            ("repeat", 0, 0, 0, 0, 0),
+            ("unknown-kind", 0, 0, 0, 0, 0),
+            ("rst", 0, 0, i32::MIN, 255, 65_535),
+            ("volume", -1, 0, i32::MAX, 0, 0),
+        ];
+        let mut output = String::new();
+        for (kind, volume, ttl, ttl_delta, tos, ipid) in cases {
+            output.push_str(&super::signal_human(
+                kind, volume, ttl, ttl_delta, tos, ipid,
+            ));
+            output.push('\n');
+        }
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
+    }
+
     #[test]
     fn snapshot_projects_saved_catalog_and_exact_group_install_status() {
         let key = crate::catalog::GroupKey {

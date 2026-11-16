@@ -95,13 +95,13 @@ production-путь не ставится. Формулировки «теста
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 363 | 185 | 0 | 0 |
-| core-state | 692 | 504 | 188 | 0 | 0 |
+| core-state | 692 | 505 | 187 | 0 | 0 |
 | datapath-core | 400 | 394 | 6 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1591** | **391** | **0** | **0** |
+| **Итого** | **1982** | **1592** | **390** | **0** | **0** |
 
-Это не оценка паритета: 391 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 390 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -120,7 +120,7 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1591 / P 391**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1592 / P 390**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
@@ -192,7 +192,7 @@ P означает неполное доказательство ветвей, N
 - core-state — CLI-флаги/вывод, PSL/catalog-парсер, crypto HKDF-границы,
   voice-blob, volume resource-retry.
 - `?` (0): не осталось; все строки реестра разобраны и имеют E/P/N.
-- Поведенческая группировка 391 P (27 контрактов, 0 без контракта):
+- Поведенческая группировка 390 P (27 контрактов, 0 без контракта):
   `docs/behavior-contracts/inventory.md` и
   `docs/behavior-contracts/p-contract-map.tsv`. Это не меняет статусы
   реестра и не является заявлением паритета.
@@ -385,11 +385,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 363 | 185 | 0 | 0 |
-| core-state | 692 | 504 | 188 | 0 | 0 |
+| core-state | 692 | 505 | 187 | 0 | 0 |
 | datapath-core | 400 | 394 | 6 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1591** | **391** | **0** | **0** |
+| **Итого** | **1982** | **1592** | **390** | **0** | **0** |
 
 
 ---
@@ -2629,7 +2629,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `json_str` | 5624-5632 | 9 | JSON-строка: `"`/`\\` escape, control → `\u%04x`, UTF-8 как есть | `serde_json` | **E*** | C: кавычка/обратная косая, `<0x20` → `\u%04x`, UTF-8-байты как есть. Rust `serde_json::to_string` даёт те же escape (`\"`, `\\`, `\n`, `\r`, `\t`, `\b`, `\f`, `\u0001`); тест `json_time_and_string_escaping_match_c` сверяет побайтно. **Ограничение:** отдельной функции нет — сериализатор serde_json. |
 | `json_time` | 5634-5645 | 12 | unix-время → RFC3339, `<=0` → `0001-01-01T00:00:00Z` | `main.rs` `r2o_json_time` | E | C: `unix_s<=0` → нулевое время Go; иначе `floor_div`/`civil_from_days` + `%Y-%m-%dT%H:%M:%SZ`. Rust `r2o_json_time` использует `r2o_floor_div`/`r2o_civil_from_days`; используется `r2o_live_timestamp`; тест `json_time_and_string_escaping_match_c` (0/-1, epoch+1, 1700000000). |
 | `level_name` | 5650-5659 | 10 | уровень доказательства 1..5 словами, default «не измерено» | `main.rs` level text | **P*** | C пять строк: транспорт/сервер ответил/обмен/прикладной объём/подтверждён; default. Rust тексты уровней есть, дословное совпадение не сверялось. |
-| `signal_human` | 5663-5680 | 18 | примета словами: rst/volume/rx-volume/rx-volume-wire/silent/repeat, иначе kind | `main.rs` signal text | **P*** | C шесть шаблонов с числами (TTL/delta/ToS/ipid, КБ), иначе `kind`. Rust набор родов и формат текста иные; отдельного differential нет. |
+| `signal_human` | 5663-5680 | 18 | примета словами: rst/volume/rx-volume/rx-volume-wire/silent/repeat, иначе kind | `live.rs:914 signal_human` | **E*** | **2026-11-17:** C/Rust differential `scripts/r2o-signal-human-differential.sh` PASS **9 кейсов**: C-оракул — production `signal_human` из sched.c, Rust — production `live::signal_human`. Совпали rst (TTL/delta/ToS/ipid), volume/rx-volume/rx-volume-wire, silent, repeat, неизвестный kind и крайние `i32::MIN`/`i32::MAX`, TTL 0/255, ipid 65535, volume -1. |
 | `task_phase` | 5685-5705 | 21 | фаза задачи словами по T_* | `main.rs` phase text | **P*** | C `T_QUEUED/T_SHAPE_WAIT/T_ASKING/T_PROPS_*/T_PLANNING/T_TRIAL_SETTLE/T_VERIFY*/T_WATCHING/T_RESTING/T_VOICE_*` → строки; T_WATCHING «подтверждено, смотрим живой трафик». Rust-строки фаз не сопоставлены дословно, T_WATCHING-фазы нет. |
 | `live_binding_for` | 5707-5721 | 15 | активная name-привязка: enabled, !recheck, transport(default 6), family(default 4), target | `main.rs` live binding | **P*** | C перебирает boxes/binds: `enabled && !recheck_since && (transport?:6)==transport && (family?:4)==family && target==name`. Rust ищет активную привязку для live-снимка, отдельной функции нет. |
 | `live_autopick_status` | 5723–5807 | 85 | причина autopick: нет событий/подозрений/имени, local error, cooldown, T_QUEUED/WATCHING/RESTING/VOICE, иначе phase + binding | `main.rs` r2o_live_status/autopick, `live.rs` | **P** | **Совпадает:** основные причины и cooldown_seconds. **Отличия:** C-состояния T_* и Rust-фазы/очередь различны; panel live tests, C/Rust diff нет. |
