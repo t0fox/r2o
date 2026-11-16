@@ -40952,7 +40952,7 @@ mod tests {
         };
         let public_key = [0x11_u8; 32];
         let random = [0x22_u8; 32];
-        let hello = |alpn: &'static str| {
+        let hello = |alpn: Option<&'static str>| {
             let handshake = r2o_controller::r2o_tls::r2o_tls13_client_hello(
                 &r2o_controller::r2o_tls::R2oTls13ClientHelloOptions {
                     server_name: Some("mqtt.example"),
@@ -40960,7 +40960,7 @@ mod tests {
                     random: &random,
                     session_id_len: 0,
                     offer_tls12: false,
-                    alpn: Some(alpn),
+                    alpn,
                     alpn_wire: None,
                     extra_extensions: &[],
                     pad_to: 0,
@@ -40973,8 +40973,19 @@ mod tests {
             record.extend_from_slice(&handshake);
             record
         };
-        let mqtt = hello("mqtt");
-        let http = hello("h2");
+        let mqtt = hello(Some("mqtt"));
+        let http = hello(Some("h2"));
+        // C `d2k_hello_alpn` rc 0: клиент без ALPN повторяется как есть.
+        // Это не то же самое, что «ALPN не разобрался»: пустой список
+        // разрешён, а битый ClientHello — нет.
+        let no_alpn = hello(None);
+        assert!(super::r2o_discovery_client_alpn_verification_allowed(
+            &target,
+            Some(&no_alpn),
+            "/",
+            true,
+            false
+        ));
         assert!(super::r2o_discovery_client_alpn_verification_allowed(
             &target,
             Some(&mqtt),
