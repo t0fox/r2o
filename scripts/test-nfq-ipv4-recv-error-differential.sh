@@ -142,7 +142,7 @@ for magic, path in ((b"R2OP", sys.argv[1]), (b"D2KP", sys.argv[2])):
         output.write(header + b"".join(records))
 PY
 "$R2OD_BIN" --plan "$TEMP/empty.r2op" --mode observe --check >/dev/null
-"$R2OD_BIN" --plan "$TEMP/tcp-hold.r2op" --mode apply --check >/dev/null
+"$R2OD_BIN" --plan "$TEMP/tcp-hold.r2op" --mode apply --mark 180001 --check >/dev/null
 
 cat >"$TEMP/echo.py" <<'PY'
 import socket
