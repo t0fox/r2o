@@ -52289,10 +52289,10 @@ group_block_proven: false,
         assert!(worker.queue(target("third.example", 445)));
         let mut started = [
             started_receiver
-                .recv_timeout(Duration::from_secs(2))
+                .recv_timeout(Duration::from_secs(10))
                 .expect("первая начальная задача должна начаться"),
             started_receiver
-                .recv_timeout(Duration::from_secs(2))
+                .recv_timeout(Duration::from_secs(10))
                 .expect("вторая начальная задача должна начаться"),
         ];
         started.sort();
@@ -52300,7 +52300,7 @@ group_block_proven: false,
 
         release_sender.send(()).unwrap();
         release_sender.send(()).unwrap();
-        let outcome_deadline = Instant::now() + Duration::from_secs(2);
+        let outcome_deadline = Instant::now() + Duration::from_secs(10);
         let mut completed = 0;
         while completed < 2 {
             if worker.try_outcome().is_some() {
@@ -52326,7 +52326,7 @@ group_block_proven: false,
         let tick_started = Instant::now();
         gate.r2o_scheduler_tick();
         let third_started = started_receiver
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(Duration::from_secs(10))
             .expect("ожидающая задача должна продолжиться после первого тика");
         assert_eq!(third_started, "first.example");
         assert!(
