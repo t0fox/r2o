@@ -2356,6 +2356,51 @@ mod tests {
     }
 
     #[test]
+    fn quic_replay_probe_records_ttl_of_accepted_retry() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let endpoint = server.local_addr().unwrap();
+        let server_thread = std::thread::spawn(move || {
+            let mut packet = [0_u8; 2048];
+            let (length, peer) = server.recv_from(&mut packet).unwrap();
+            let (version, original_dcid) =
+                r2k_core::quic::r2k_quic_initial_flight_id(&packet[..length]).unwrap();
+            // SCID клиента — это DCID ответа; Retry обязан быть привязан к нему.
+            let dcid_len = usize::from(packet[5]);
+            let scid_len_offset = 6 + dcid_len;
+            let scid_len = usize::from(packet[scid_len_offset]);
+            let scid = packet[scid_len_offset + 1..scid_len_offset + 1 + scid_len].to_vec();
+            let retry = r2k_core::quic::build_retry(
+                version,
+                &original_dcid,
+                &scid,
+                b"r2o-srv",
+                b"token",
+                1500,
+            )
+            .unwrap();
+            server.send_to(&retry, peer).unwrap();
+        });
+
+        let initial = include_bytes!("../../r2k-core/tests/fixtures/quic_v1_initial.bin");
+        let snapshot = r2k_core::quic_snapshot::r2k_quic_snapshot_pack(&[&initial[..]]).unwrap();
+        let mut probe = QuicReplayProbe::prepare(endpoint, &snapshot, None).unwrap();
+        let result = probe.run(Duration::from_secs(1)).unwrap();
+        server_thread.join().unwrap();
+
+        assert!(
+            result.handshake_confirmed,
+            "подлинный Retry обязан подтвердить обмен"
+        );
+        assert!(
+            result.server_ttl_in > 0,
+            "TTL подтверждённого ответа обязан быть измерен"
+        );
+    }
+
+    #[test]
     fn рукопожатие_и_applied_без_http3_ответа_не_подтверждают_обход() {
         assert!(!r2o_quic_data_proof_confirmed(
             true,

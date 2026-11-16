@@ -59,6 +59,10 @@ cargo test -p r2o-controller --lib recv_ttl::tests --locked --offline
 cargo test -p r2o-controller --lib \
   server_ttl_records_only_first_measured_authenticated_response --locked --offline
 # 1 passed
+
+cargo test -p r2o-controller --lib \
+  quic_replay_probe_records_ttl_of_accepted_retry --locked --offline
+# 1 passed: подлинный Retry по loopback, server_ttl_in > 0
 ```
 
 C-фикстура `crates/r2o-controller/tests/d2o_quic_recv_ttl_differential.c`
@@ -81,5 +85,5 @@ C-единицы (`qp_recv_ttl`, участок `qp_send_one`, `quic_ask`, уч�
 
 Новый метод фиксирует один контракт «TTL/hop limit входящего ответа» и
 проверяет его через наблюдаемые входы/выходы. Объём: 3 production-файла
-Rust, 1 C-фикстура, 1 differential-скрипт, 6 Rust-тестов и 4 differential-
+Rust, 1 C-фикстура, 1 differential-скрипт, 7 Rust-тестов и 4 differential-
 кейса. Внутренняя структура C-хелперов не является единицей переноса.
