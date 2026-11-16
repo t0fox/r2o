@@ -95,13 +95,13 @@ production-путь не ставится. Формулировки «теста
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 360 | 188 | 0 | 0 |
-| core-state | 692 | 487 | 205 | 0 | 0 |
+| core-state | 692 | 488 | 204 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1570** | **412** | **0** | **0** |
+| **Итого** | **1982** | **1571** | **411** | **0** | **0** |
 
-Это не оценка паритета: 412 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 411 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -120,7 +120,7 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1570 / P 412**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1571 / P 411**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
@@ -139,7 +139,7 @@ B — нужен только тест/differential **190**; C — архите�
 
 ## Итог и подтверждённые расхождения (2026-11-15)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1570 / P 412 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1571 / P 411 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -192,7 +192,7 @@ P означает неполное доказательство ветвей, N
 - core-state — CLI-флаги/вывод, PSL/catalog-парсер, crypto HKDF-границы,
   voice-blob, volume resource-retry.
 - `?` (0): не осталось; все строки реестра разобраны и имеют E/P/N.
-- Поведенческая группировка 412 P (32 контракта, 0 без контракта):
+- Поведенческая группировка 411 P (32 контракта, 0 без контракта):
   `docs/behavior-contracts/inventory.md` и
   `docs/behavior-contracts/p-contract-map.tsv`. Это не меняет статусы
   реестра и не является заявлением паритета.
@@ -385,11 +385,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 360 | 188 | 0 | 0 |
-| core-state | 692 | 487 | 205 | 0 | 0 |
+| core-state | 692 | 488 | 204 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1570** | **412** | **0** | **0** |
+| **Итого** | **1982** | **1571** | **411** | **0** | **0** |
 
 
 ---
@@ -2489,7 +2489,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `mem_read_proc` | 562-570 | 9 | `/proc/meminfo` в буфер 4096 и разбор | resource differential | **E** | C `fopen("/proc/meminfo")`, `fread(buf,4096-1)`, NUL, `d2k_sched_meminfo_parse`. Rust читает meminfo в resource-limit path; differential. |
 | `read_u64_file` | 573-582 | 10 | одно `%llu` из файла | resource-limit path | **E*** | C `fopen(path,"r")`, `fscanf("%llu",&x)`, `fclose`; `ok` → `*v=x`, иначе -1 (открытие/разбор). Rust resource-limit path читает те же файлы; `r2o-resource-limit-differential.sh`. |
 | `ct_read_proc` | 584-589 | 6 | `nf_conntrack_count` и `_max`, `max!=0` | resource-limit differential | **E** | C `read_u64_file(count)` и `read_u64_file(max)`; при ошибке любого или `*max==0` → -1. Rust resource-limit path те же файлы/условие; `r2o-resource-limit-differential.sh` PASS. |
-| `client_alpn_nonhttp` | 1114–1137 | 24 | TCP, не ECH, пустой `measure_path`, MODERN; блок рукопожатия/`own_first==2+base_blocked`; нет RX/TX-cut; вернуть ALPN клиента, в т.ч. **пустой** (rc=0), если он не HTTP | `main.rs:15331-15350 r2o_discovery_client_alpn_verification_allowed` | **P** | **2026-11-16:** C-ветка `d2k_hello_alpn rc==0` (ALPN нет) сверена: Rust `r2o_tls_client_hello_non_http_alpn` возвращает `Some(empty)`, а `is_some_and(...)` допускает пустой список — зонд повторяет клиента без ALPN; unit-тест `captured_non_http_alpn_requires_handshake_block_and_no_volume_cut` PASS. **Остаются отличия:** (1) C проверяет `measure_path[0]==0`, Rust — `probe_path == "/"`; (2) C `handshake_blocked = verdict_proves_block \|\| (own_first==2 && base_blocked)`, Rust получает готовый bool. Дифференциал `donor_and_r2o_preserve_captured_mqtt_and_absent_alpn` покрывает MQTT/absent; C/Rust differential именно решения `client_alpn_nonhttp` не собран. |
+| `client_alpn_nonhttp` | 1114–1137 | 24 | TCP, не ECH, пустой `measure_path`, MODERN; блок рукопожатия/`own_first==2+base_blocked`; нет RX/TX-cut; вернуть ALPN клиента, в т.ч. **пустой** (rc=0), если он не HTTP | `main.rs:15331-15350 r2o_discovery_client_alpn_verification_allowed` | **E*** | **2026-11-16:** C/Rust differential `scripts/r2o-client-alpn-differential.sh` PASS **6 кейсов**: HTTP (h2) → 0, mqtt → 1, без ALPN → 1, clear (нет блока рукопожатия) → 0, rx_cut → 0, measure_path → 0. C-оракул — production `client_alpn_nonhttp` на modern-шаблоне и его вариантах; обе стороны получают одни байты ClientHello. **Ограничение:** C-гейт `ech_offer` не входит в Rust-функцию (ECH обрабатывается вызывающим); C возвращает ALPN-список, Rust — bool; сравнивалось решение, а не байты списка. |
 | `fresh_trial_id` | 1139–1154 | 16 | 16 случайных байт из `/dev/urandom`; нулевой id делается ненулевым | `main.rs` `random_id`, `r2o_fresh_id_fallback` | **E*** | C читает urandom до 16 байт с повтором на EINTR; при нулевом результате пишет 1 в последний байт; ошибка urandom → -1. Rust `random_id` читает `read_exact` (тот же повтор), гарантирует ненулевой id (`id[0] |= 1`), при невозможности чтения уходит в `r2o_fresh_id_fallback` (mono_ms ^ ctr*GOLDEN + LCG). Тест `fresh_id_matches_c_nonzero_and_random` (два разных, ненулевые, fallback различается). **Ограничение:** C при отказе urandom возвращает ошибку, R2O продолжает с fallback; бит ненулевизны ставится в первом байте, а не в последнем (id непрозрачен). |
 | `addr_probe_remove` | 1516–1535 | 20 | если identity валидна: dst из сохранённой пары либо `t->ip:port/443`; `DEL_ADDR_PROBE` transport 17; identity сбрасывается **только после успешной отправки** | `main.rs:20340-20347 encode_delete_addr_probe` (QUIC), `:16359,17917 encode_delete_voice_addr_probe` (voice) | **E** | Совпадает: удаление по сохранённым client/server/trial, повтор при ошибке. C использует `d2k_link_del_addr_probe_family` с transport 17; Rust — отдельные QUIC/voice команды. `test-discord-voice-confirm-delete-retry/shutdown-cleanup` + QUIC addr cleanup тесты. |
 | `question_retire` | 1557–1570 | 14 | если план вопроса стоял и порт известен: `DEL_NAME_PROBE` по форме вопроса/порту; закрыть bound fd, сбросить флаги | CLI `main.rs:528-713 delete_name_probe`; в discovery control-план вопроса не ставится | **P*** | C-очистка точная; Rust CLI снимает пробу после каждого вопроса, а production-discovery вопроса через control не задаёт (см. `prop_send_next`), поэтому снимать нечего. Отдельного C/Rust differential нет. |

@@ -407,8 +407,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 412:
-        raise SystemExit(f"expected 412 P rows, got {len(rows)}")
+    if len(rows) != 411:
+        raise SystemExit(f"expected 411 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")

@@ -41225,6 +41225,65 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn client_alpn_nonhttp_matches_c() {
+        // C-оракул — scripts/r2o-client-alpn-differential.sh: C
+        // `client_alpn_nonhttp` на modern-шаблоне и его вариантах.
+        let Some(path) = std::env::var_os("R2O_CLIENT_ALPN_DIFF_FILE") else {
+            return;
+        };
+        let text = std::fs::read_to_string(path).unwrap();
+        let mut hellos = std::collections::HashMap::new();
+        for line in text.lines() {
+            let (name, hex) = line.split_once(' ').unwrap();
+            let bytes: Vec<u8> = hex
+                .as_bytes()
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| {
+                    let digit = |byte: u8| match byte {
+                        b'0'..=b'9' => byte - b'0',
+                        b'a'..=b'f' => byte - b'a' + 10,
+                        _ => panic!("bad hex"),
+                    };
+                    (digit(pair[0]) << 4) | digit(pair[1])
+                })
+                .collect();
+            hellos.insert(name.to_owned(), bytes);
+        }
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "example.test".into(),
+            endpoint: "198.51.100.20:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let mut output = String::new();
+        for (label, hello_key, handshake_blocked, volume_cut, probe_path) in [
+            ("http", "http", true, false, "/"),
+            ("mqtt", "mqtt", true, false, "/"),
+            ("no_alpn", "no_alpn", true, false, "/"),
+            ("clear", "http", false, false, "/"),
+            ("rx_cut", "http", true, true, "/"),
+            ("measure_path", "http", true, false, "/x"),
+        ] {
+            let hello = hellos.get(hello_key).expect(hello_key);
+            let allowed = super::r2o_discovery_client_alpn_verification_allowed(
+                &target,
+                Some(hello),
+                probe_path,
+                handshake_blocked,
+                volume_cut,
+            );
+            output.push_str(&format!("{label} {}\n", u8::from(allowed)));
+        }
+        if let Ok(output_path) = std::env::var("R2O_CLIENT_ALPN_DIFF_OUTPUT") {
+            std::fs::write(output_path, &output).unwrap();
+        }
+        print!("{output}");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn client_shape_event_remembers_hello_without_starting_discovery() {
         let mut worker = r2o_test_discovery_worker_without_threads();
         let mut key = [0; KEY_LEN];

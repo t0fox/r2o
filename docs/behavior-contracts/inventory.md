@@ -5,12 +5,12 @@
 поведенческие контракты. Источник — канонические таблицы
 `docs/audit/{core-net,core-state,datapath-core,datapath-plan,detect}.md`.
 
-Строк P: **412**; контрактов: **32**; без контракта: **0**.
+Строк P: **411**; контрактов: **32**; без контракта: **0**.
 
 | Группа | P |
 |---|---:|
 | core-net | 188 |
-| core-state | 205 |
+| core-state | 204 |
 | datapath-core | 7 |
 | datapath-plan | 0 |
 | detect | 12 |
@@ -35,7 +35,7 @@
 | `CN-IP6FRAG` | IPv6 fragment probe helper | Единый monotonic timestamp для IPv6-fragment probe. | 1 | d2k_ip6frag_send.h: 1 P; helper-level, нужен вызов в живом probe. |
 | `CS-SCHED-TASK-LIFECYCLE` | Scheduler task/worker lifecycle | Слоты, worker permits, reset/done/fail/join, retire, queue wake, guards. | 31 | sched.c: worker/task/queue/guard; Rust R2oDiscoverySearches/Queue/Life; полная матрица T_* не доказана. |
 | `CS-SCHED-SUSPECT-ADMISSION` | Scheduler suspect admission and refusal | on_suspect, cooldown, dead/refusal, shape/family, refused outcomes. | 32 | sched.c: admission/refusal; Rust queue/cooldown/family recovery; полный differential кодов/порядка. |
-| `CS-SCHED-CANDIDATE-VERIFY` | Scheduler candidate verification | verify_confirm, partial_finish, ACK/APPLIED, own plan, exchange. | 22 | sched.c: verify/applied/exchange; production verify_confirm 30 cases, остальные ветви P. |
+| `CS-SCHED-CANDIDATE-VERIFY` | Scheduler candidate verification | verify_confirm, partial_finish, ACK/APPLIED, own plan, exchange. | 21 | sched.c: verify/applied/exchange; production verify_confirm 30 cases, остальные ветви P. |
 | `CS-SCHED-PLAN-GENERATION` | Scheduler plan generation | verdict_to_plans, own_first, area/resource path, plan identity, RX bootstrap. | 25 | sched.c: plans/area/resources/identity; Rust candidates/compose; порядок и поля не сверены. |
 | `CS-SCHED-VOLUME-VOICE` | Scheduler volume ladder and voice trials | volume bucket/ladder/room, rx pending, voice trial/observe/fail. | 19 | sched.c: volume/voice; budget/voice differentials частичные, поля plan_boxes/rx queue иные. |
 | `CS-SCHED-ECH-QUIC` | Scheduler ECH witness and QUIC initial/address control | ECH witness, quic own initial/address/multi. | 9 | sched.c: ECH/QUIC; Rust ech/quic initial; e2e DoQ и полный порядок не доказаны. |
