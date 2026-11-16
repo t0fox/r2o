@@ -32,10 +32,14 @@ TCP_CONTROL_QUEUE=65522
 TCP_CONTROL_MARK=21078
 TCP_HOLD_QUEUE=65520
 TCP_HOLD_MARK=21080
+QUIC_MARK=21073
+UDPLEN_MARK=21077
+IPV6_QUIC_MARK=21079
 VOICE_QUEUE=65519
 VOICE_MARK=21081
 OBSERVE_QUEUE=65518
 R2OD_OVERFLOW_PID=
+QUIC_SERVE_PID=
 NS="r2o-nfq-test-$$"
 PEER_NS="r2o-nfq-peer-$$"
 R2O_VETH_CLIENT="r2c$$"
@@ -44,6 +48,11 @@ WORK=$(mktemp -d)
 
 cleanup() {
     test_exit_status=$?
+    if [ -n "$QUIC_SERVE_PID" ]; then
+        kill -TERM "$QUIC_SERVE_PID" 2>/dev/null || true
+        wait "$QUIC_SERVE_PID" 2>/dev/null || true
+        QUIC_SERVE_PID=
+    fi
     if [ -n "$R2OD_OVERFLOW_PID" ]; then
         kill -CONT "$R2OD_OVERFLOW_PID" 2>/dev/null || true
         kill -TERM "$R2OD_OVERFLOW_PID" 2>/dev/null || true
@@ -109,7 +118,24 @@ with open(sys.argv[1], "wb") as output:
     output.write(header + b"".join(records))
 PY
 printf '\122\062\117\120\000\001\000\011\000\000\000\002\000\002\000\002\021\002\001\016\000\002\000\007' >"$WORK/udplen.r2op"
-printf '\122\062\117\120\000\001\000\002\000\000\000\002\000\002\000\002\006\001\001\000\000\004\000\005\000\000' >"$WORK/tcp-split.r2op"
+python3 - "$WORK/tcp-split.r2op" <<'PY'
+import struct
+import sys
+
+def tlv(kind, value):
+    return struct.pack("!HH", kind, len(value)) + value
+
+# minexec=11 и input tls-sni: план обязан удерживать неполный ClientHello
+# до появления SNI, затем разрезать его на границе имени.
+records = [
+    tlv(0x0002, b"\x06\x01"),
+    tlv(0x010a, b""),
+    tlv(0x0100, b"\x00\x05\x00\x00"),
+]
+header = b"R2OP" + struct.pack("!HHHH", 1, 11, 0, len(records))
+with open(sys.argv[1], "wb") as output:
+    output.write(header + b"".join(records))
+PY
 python3 - "$WORK/tcp-hold.r2op" <<'PY'
 import struct
 import sys
@@ -208,6 +234,7 @@ ip netns exec "$NS" nft add rule inet r2o quic_control ip daddr 127.0.0.1 udp dp
 
 ip netns exec "$NS" "$R2OD_BIN" \
     --mode apply --queue "$QUEUE" --family ipv4 --plan "$WORK/quicsplit.r2op" \
+    --mark "$QUIC_MARK" --control "$WORK/r2o-datapath-quic.sock" \
     >"$WORK/r2o-datapath.log" 2>&1 &
 R2OD_PID=$!
 sleep 0.2
@@ -218,6 +245,7 @@ fi
 
 ip netns exec "$NS" "$R2OD_BIN" \
     --mode apply --queue 65528 --family ipv4 --plan "$WORK/udplen.r2op" \
+    --mark "$UDPLEN_MARK" \
     >"$WORK/r2o-datapath-udplen.log" 2>&1 &
 R2OD_UDPLEN_PID=$!
 sleep 0.2
@@ -228,6 +256,7 @@ fi
 
 ip netns exec "$NS" "$R2OD_BIN" \
     --mode apply --queue "$TCP_QUEUE" --family ipv4 --plan "$WORK/tcp-split.r2op" --mark "$TCP_MARK" \
+    --control "$WORK/r2o-datapath-tcp.sock" \
     >"$WORK/r2o-datapath-tcp.log" 2>&1 &
 R2OD_TCP_PID=$!
 sleep 0.2
@@ -238,6 +267,7 @@ fi
 
 ip netns exec "$NS" "$R2OD_BIN" \
     --mode apply --queue "$TCP6_QUEUE" --family ipv6 --plan "$WORK/tcp-split.r2op" --mark "$TCP6_MARK" \
+    --control "$WORK/r2o-datapath-tcp6.sock" \
     >"$WORK/r2o-datapath-tcp6.log" 2>&1 &
 R2OD_TCP6_PID=$!
 sleep 0.2
@@ -315,12 +345,11 @@ import json
 import sys
 
 plan = (
-    "r2o-plan 1 0\n"
+    "r2o-plan 1 11\n"
     "id 00000000000000000000000000000000\n"
     "proto tcp tls\n"
-    "payload 1 46414b45\n"
-    "poison 1 badsum\n"
-    "fake payload=1 poison=1 repeats=2 gap_us=100000 place=before\n"
+    "input tls-sni\n"
+    "split sni_middle 0\n"
 )
 http_plan = (
     "r2o-plan 1 11\n"
@@ -379,6 +408,18 @@ catalog = {
                 "family": 4,
                 "shape": 7,
             },
+            {
+                "kind": "name",
+                "target": "example.test",
+                "plan_id": "netns-delay",
+                "level": 3,
+                "confirmed": now,
+                "successes": 1,
+                "enabled": True,
+                "transport": 6,
+                "family": 6,
+                "shape": 1,
+            },
         ],
     }],
 }
@@ -387,6 +428,10 @@ with open(sys.argv[1], "w", encoding="utf-8") as output:
 PY
 ip netns exec "$NS" "$R2OC_BIN" --apply-catalog \
     "$WORK/r2o-datapath-control.sock" "$WORK/catalog.json"
+ip netns exec "$NS" "$R2OC_BIN" --apply-catalog \
+    "$WORK/r2o-datapath-tcp.sock" "$WORK/catalog.json"
+ip netns exec "$NS" "$R2OC_BIN" --apply-catalog \
+    "$WORK/r2o-datapath-tcp6.sock" "$WORK/catalog.json"
 catalog_sha_before_restart=$(sha256sum "$WORK/catalog.json" | cut -d' ' -f1)
 kill -TERM "$R2OD_CONTROL_PID"
 wait "$R2OD_CONTROL_PID" 2>/dev/null || true
@@ -474,8 +519,62 @@ while ! grep -Fq 'наблюдение QUIC: IPv4, форма=QUIC, SNI="example
 done
 echo "ПРОЙДЕНО: r2o-controller --serve принял проверенное событие QUIC HELLO из NFQUEUE"
 
-ip netns exec "$NS" "$R2OC_BIN" --set-name "$WORK/r2o-datapath-control.sock" \
-    example.com ipv4 quic "$WORK/quicdeny.r2op"
+python3 - "$WORK/quic-catalog.json" <<'PY'
+import json
+import sys
+
+now = "2026-10-18T00:00:00Z"
+plan = (
+    "r2o-plan 1 11\n"
+    "id 33333333333333333333333333333333\n"
+    "proto udp quic\n"
+    "quicdeny 1\n"
+    "order forward\n"
+)
+catalog = {
+    "schema": 1,
+    "updated": now,
+    "boxes": [{
+        "id": "netns-quic",
+        "created": now,
+        "updated": now,
+        "plans": [{
+            "id": "netns-quic-deny",
+            "proto": "quic",
+            "text": plan,
+            "added": now,
+            "successes": 1,
+            "enabled": True,
+        }],
+        "bindings": [{
+            "kind": "name",
+            "target": "example.com",
+            "plan_id": "netns-quic-deny",
+            "level": 3,
+            "confirmed": now,
+            "successes": 1,
+            "enabled": True,
+            "transport": 17,
+            "family": 4,
+            "shape": 3,
+        }],
+    }],
+}
+with open(sys.argv[1], "w", encoding="utf-8") as output:
+    json.dump(catalog, output)
+PY
+ip netns exec "$NS" "$R2OC_BIN" --serve "$WORK/r2o-datapath-quic.sock" \
+    "$WORK/quic-catalog.json" >"$WORK/r2o-controller-quic.log" 2>&1 &
+QUIC_SERVE_PID=$!
+quic_plan_attempt=0
+while ! grep -Eq 'каталог (загружен|обработан|синхронизирован)' "$WORK/r2o-controller-quic.log"; do
+    if ! kill -0 "$QUIC_SERVE_PID" 2>/dev/null || [ "$quic_plan_attempt" -ge 40 ]; then
+        cat "$WORK/r2o-controller-quic.log" >&2
+        exit 1
+    fi
+    sleep 0.05
+    quic_plan_attempt=$((quic_plan_attempt + 1))
+done
 ip netns exec "$NS" python3 - "$FIXTURE" <<'PY'
 import socket
 import sys
@@ -493,6 +592,11 @@ except socket.timeout:
 else:
     raise SystemExit("ОШИБКА: план QUIC с SNI, установленный контроллером, не отбросил Initial")
 PY
+if [ -n "$QUIC_SERVE_PID" ]; then
+    kill -TERM "$QUIC_SERVE_PID" 2>/dev/null || true
+    wait "$QUIC_SERVE_PID" 2>/dev/null || true
+    QUIC_SERVE_PID=
+fi
 
 ip netns exec "$NS" python3 - <<'PY'
 import socket
@@ -1444,6 +1548,7 @@ ip netns exec "$NS" nft 'add rule inet r2o ipv6_fragments ip6 nexthdr ipv6-frag 
 ip netns exec "$NS" ip -6 route get 2001:db8:100::2 mark 0x123 | grep -F "dev $R2O_VETH_CLIENT" | grep -Fq 'table 100'
 ip netns exec "$NS" "$R2OD_BIN" \
     --mode apply --queue 65529 --family ipv6 --plan "$WORK/quicdeny.r2op" \
+    --mark "$IPV6_QUIC_MARK" \
     >"$WORK/r2o-datapath-ipv6.log" 2>&1 &
 R2OD_IPV6_PID=$!
 sleep 0.2

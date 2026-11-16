@@ -2038,8 +2038,17 @@ mod tests {
     }
 
     #[test]
-    fn production_resolver_selects_ipv4_and_ipv6_from_system_lookup() {
-        use super::{DiscoveryTarget, resolve_unspecified_endpoint};
+    fn production_resolver_selects_ipv4_and_ipv6_by_family() {
+        use super::{DiscoveryTarget, resolve_unspecified_endpoint_with};
+
+        // Резолвер инжектируется: результат не должен зависеть от
+        // /etc/hosts и IPv6-настроек конкретного runner'а.
+        let resolve = |_: &str, _: u16, _: u8| {
+            Ok(vec![
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+            ])
+        };
 
         let target = DiscoveryTarget {
             host: "localhost".into(),
@@ -2047,7 +2056,7 @@ mod tests {
             family: 4,
             shape: SHAPE_MODERN,
         };
-        let resolved = resolve_unspecified_endpoint(&target).unwrap();
+        let resolved = resolve_unspecified_endpoint_with(&target, resolve).unwrap();
         let address: std::net::SocketAddr = resolved.endpoint.parse().unwrap();
         assert_eq!(address.ip(), std::net::Ipv4Addr::LOCALHOST);
         assert_eq!(address.port(), 443);
@@ -2058,7 +2067,7 @@ mod tests {
             family: 6,
             shape: SHAPE_MODERN,
         };
-        let resolved = resolve_unspecified_endpoint(&target).unwrap();
+        let resolved = resolve_unspecified_endpoint_with(&target, resolve).unwrap();
         let address: std::net::SocketAddr = resolved.endpoint.parse().unwrap();
         assert_eq!(address.ip(), std::net::Ipv6Addr::LOCALHOST);
         assert_eq!(address.port(), 443);

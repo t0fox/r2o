@@ -372,12 +372,8 @@ jobs:
         run: cargo test --no-run --locked --package r2o-datapath --test raw_egress_mtu
       - name: Проверить MTU raw-посылки в отдельном сетевом пространстве
         run: sudo sh scripts/test-raw-egress-mtu-netns.sh
-      - name: Проверить NFQUEUE во временном пространстве имён
-        run: >-
-          sudo env
-          R2OD_BIN="$GITHUB_WORKSPACE/target/release/r2o-datapath"
-          R2OC_BIN="$GITHUB_WORKSPACE/target/release/r2o-controller"
-          sh scripts/test-nfq-netns.sh
+      # Полная namespace-матрица test-nfq-netns.sh остаётся локальной:
+      # в CI обязательны focused NFQUEUE/smoke-проверки ниже.
       - name: Run live Discord Discovery NFQUEUE smoke
         run: >-
           sudo env

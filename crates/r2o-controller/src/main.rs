@@ -45174,11 +45174,13 @@ mod tests {
             .unwrap();
         assert_eq!(worker_counter.load(Ordering::Relaxed), 7);
         assert!(client.pending_events.is_empty());
+        let mut malformed = vec![0; KEY_LEN + 8];
+        malformed[0] = 5; // недопустимое семейство STATS
         assert!(
             client
                 .queue_async_frame(Frame {
                     kind: r2k_core::control::EVENT_STATS,
-                    body: vec![0; KEY_LEN + 8]
+                    body: malformed
                 })
                 .is_err()
         );
