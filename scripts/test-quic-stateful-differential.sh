@@ -1,7 +1,8 @@
 #!/bin/sh
 # C/Rust differential: stateful handle_udp skip/name/shape/ring, кольцо до
 # qsnap_done (включая UDP hold), пустое имя, Retry/неполный Initial,
-# разрез payload на две посылки и защитная судьба HOLD.
+# разрез payload на две посылки, защитная судьба HOLD, проба контроллера
+# без ring/qsnap, SNI-first неполный ClientHello, plan_done и wire_count.
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)

@@ -135,6 +135,7 @@ fn quic_event_body_accepts_the_maximum_dns_name_length() {
         key,
         host: host.clone(),
         snapshot: None,
+        r2o_first_hello: true,
     };
 
     let decoded = decode_hello(&Frame {

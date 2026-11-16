@@ -1,6 +1,7 @@
 /* C stateful QUIC handle_udp fixture: plan-applied skip, name/shape/ring,
- * кольцо до qsnap_done, пустое имя, Retry/неполный Initial, разрез payload
- * и защитная судьба HOLD. */
+ * кольцо до qsnap_done, пустое имя, Retry/неполный Initial, разрез payload,
+ * защитная судьба HOLD, проба контроллера без ring/qsnap, SNI-first
+ * неполный ClientHello, ветка plan_done и wire_count до HOLD. */
 #define _POSIX_C_SOURCE 200809L
 
 #include <stdio.h>
@@ -13,7 +14,7 @@
  * `d2k_plan_apply` её не возвращает. Чтобы проверить именно production-
  * ветку `handle_udp`, подменяем только сам вызов исполнителя. Остальной
  * `session.c` остаётся настоящим. */
-static int g_hold_mode;
+static int g_actions_mode;
 static int (*const g_real_plan_apply)(const d2k_plan *, const d2k_flow *,
                                       const d2k_pkt *, d2k_actions *) = d2k_plan_apply;
 static int harness_plan_apply(const d2k_plan *, const d2k_flow *,
@@ -22,21 +23,38 @@ static int harness_plan_apply(const d2k_plan *, const d2k_flow *,
 #include "session.c"
 #undef d2k_plan_apply
 
+/* 1 — HOLD с одной payload-посылкой; 2/3 — 27 фальшивок, больше
+ * D2K_RESULT_MAX (26), с судьбой PASS/HOLD. Проверяет, что wire_count
+ * отвергает план ДО ветки удержания, как в `handle_udp`. */
 static int harness_plan_apply(const d2k_plan *p, const d2k_flow *f,
                               const d2k_pkt *in, d2k_actions *out) {
-    if (!g_hold_mode) {
+    if (!g_actions_mode) {
         return g_real_plan_apply(p, f, in, out);
     }
     memset(out, 0, sizeof *out);
-    out->fate = D2K_ORIG_HOLD;
-    out->v = calloc(1, sizeof *out->v);
+    if (g_actions_mode == 1) {
+        out->fate = D2K_ORIG_HOLD;
+        out->v = calloc(1, sizeof *out->v);
+        if (!out->v) {
+            return -1;
+        }
+        out->n = 1;
+        out->v[0].kind = D2K_EMIT_PAYLOAD;
+        out->v[0].bytes = in->payload;
+        out->v[0].len = in->payload_len;
+        return 0;
+    }
+    out->fate = g_actions_mode == 3 ? D2K_ORIG_HOLD : D2K_ORIG_PASS;
+    out->v = calloc(D2K_RESULT_MAX + 1, sizeof *out->v);
     if (!out->v) {
         return -1;
     }
-    out->n = 1;
-    out->v[0].kind = D2K_EMIT_PAYLOAD;
-    out->v[0].bytes = in->payload;
-    out->v[0].len = in->payload_len;
+    out->n = D2K_RESULT_MAX + 1;
+    for (size_t i = 0; i < out->n; i++) {
+        out->v[i].kind = D2K_EMIT_FAKE;
+        out->v[i].bytes = in->payload;
+        out->v[i].len = in->payload_len;
+    }
     return 0;
 }
 
@@ -90,6 +108,45 @@ static size_t split_plan(uint8_t *out) {
     out[off++] = 0x00; out[off++] = 0x04;
     out[off++] = 0x00; out[off++] = 0x00;
     out[off++] = 0x00; out[off++] = 100;
+    return off;
+}
+
+/* План с 27 фальшивками: больше D2K_RESULT_MAX, но меньше байтового
+ * потолка repeats. Проверяет именно production `d2k_plan_apply` + wire_count. */
+static size_t overflow_plan(uint8_t *out) {
+    size_t off = plan_header(out, 4);
+    out[off++] = 0x00; out[off++] = 0x10;
+    out[off++] = 0x00; out[off++] = 0x03;
+    out[off++] = 0x00; out[off++] = 0x01;
+    out[off++] = 0xAA;
+    out[off++] = 0x01; out[off++] = 0x01;
+    out[off++] = 0x00; out[off++] = 0x0A;
+    out[off++] = 0x00; out[off++] = 0x01;
+    out[off++] = 0x00; out[off++] = 0x00;
+    out[off++] = D2K_RESULT_MAX + 1;
+    out[off++] = 0x00;
+    out[off++] = 0x00; out[off++] = 0x00;
+    out[off++] = 0x00; out[off++] = 0x00;
+    return off;
+}
+
+/* План без разреза: одна фальшивка, применимая к любой UDP-датаграмме,
+ * включая Initial без имени. Нужен, чтобы `plan_done` взвёлся по адресу
+ * (глобальный план), как в C `d2k_session_set_plan`. */
+static size_t plain_quic_plan(uint8_t *out) {
+    size_t off = plan_header(out, 4);
+    out[off++] = 0x00; out[off++] = 0x10;
+    out[off++] = 0x00; out[off++] = 0x03;
+    out[off++] = 0x00; out[off++] = 0x01;
+    out[off++] = 0xAA;
+    out[off++] = 0x01; out[off++] = 0x01;
+    out[off++] = 0x00; out[off++] = 0x0A;
+    out[off++] = 0x00; out[off++] = 0x01;
+    out[off++] = 0x00; out[off++] = 0x00;
+    out[off++] = 0x01;
+    out[off++] = 0x00;
+    out[off++] = 0x00; out[off++] = 0x00;
+    out[off++] = 0x00; out[off++] = 0x00;
     return off;
 }
 
@@ -199,6 +256,22 @@ static void send_one(const char *label, d2k_session *s, const uint8_t *payload,
     d2k_result result;
     size_t n = udp_packet(buffer, client, server, 50001, 443, payload, payload_len);
     send_packet(s, payload, payload_len, now, &result);
+    print_result(label, s, &result, buffer, n);
+}
+
+/* Зонд контроллера: C `d2k_session_packet_probe` ставит
+ * `controller_probe=1` на поток и не пишет кольцо/снимок. */
+static void send_one_probe(const char *label, d2k_session *s,
+                           const uint8_t *payload, size_t payload_len,
+                           uint64_t now) {
+    static const uint8_t client[4] = {192,0,2,10};
+    static const uint8_t server[4] = {198,51,100,20};
+    uint8_t buffer[2048];
+    uint8_t out[4096];
+    d2k_result result;
+    size_t n = udp_packet(buffer, client, server, 50001, 443, payload, payload_len);
+    memset(&result, 0, sizeof result);
+    (void)d2k_session_packet_probe(s, buffer, n, now, out, sizeof out, &result);
     print_result(label, s, &result, buffer, n);
 }
 
@@ -313,9 +386,90 @@ int main(int argc, char **argv) {
         size_t plan_len = quic_plan(plan_bytes);
         d2k_session *s = d2k_session_new(64, 0);
         install_plan(s, "example.com", plan_bytes, plan_len);
-        g_hold_mode = 1;
+        g_actions_mode = 1;
         send_one("Q8 hold-fate first", s, initial, initial_len, 1000);
-        g_hold_mode = 0;
+        g_actions_mode = 0;
+        d2k_session_free(s);
+    }
+
+    /* Q9: зонд контроллера имя получает и план исполняет, но ring/qsnap
+       остаются пустыми; второй Initial — точный текст C. */
+    {
+        char error[200];
+        uint8_t plan_bytes[256];
+        size_t plan_len = plain_quic_plan(plan_bytes);
+        d2k_plan *p = NULL;
+        d2k_session *s = d2k_session_new(64, 0);
+        if (d2k_plan_load(plan_bytes, plan_len, &p, error, sizeof error) != 0) {
+            printf("Q9 plan load-error=%s\n", error);
+        }
+        d2k_session_set_plan(s, p);
+        d2k_session_set_hook(s, D2K_HOOK_POSTROUTING);
+        send_one_probe("Q9 controller-probe first", s, initial, initial_len, 1000);
+        send_one_probe("Q9 controller-probe second", s, initial, initial_len, 1100);
+        d2k_session_free(s);
+    }
+
+    /* Q10: план уже применён к потоку без имени; именованный Initial даёт
+       ветку plan_done с другим текстом, снимок при этом уже снят. */
+    {
+        char error[200];
+        uint8_t plan_bytes[256];
+        size_t plan_len = plain_quic_plan(plan_bytes);
+        d2k_plan *p = NULL;
+        d2k_session *s = d2k_session_new(64, 0);
+        if (d2k_plan_load(plan_bytes, plan_len, &p, error, sizeof error) != 0) {
+            printf("Q10 plan load-error=%s\n", error);
+        }
+        d2k_session_set_plan(s, p);
+        d2k_session_set_hook(s, D2K_HOOK_POSTROUTING);
+        send_one("Q10 plan-done first", s, unnamed, unnamed_len, 1000);
+        send_one("Q10 plan-done second", s, unnamed, unnamed_len, 1100);
+        d2k_session_free(s);
+    }
+
+    /* Q11/Q12: wire_count больше D2K_RESULT_MAX отвергается ДО судьбы
+       оригинала; HOLD не меняет исход. */
+    {
+        uint8_t plan_bytes[256];
+        size_t plan_len = quic_plan(plan_bytes);
+        d2k_session *s = d2k_session_new(64, 0);
+        install_plan(s, "example.com", plan_bytes, plan_len);
+        g_actions_mode = 2;
+        send_one("Q11 wire-count accept", s, initial, initial_len, 1000);
+        g_actions_mode = 3;
+        send_one("Q12 wire-count hold", s, initial, initial_len, 1100);
+        g_actions_mode = 0;
+        d2k_session_free(s);
+    }
+
+    /* Q13: SNI-first неполный ClientHello — имя есть, план применён,
+       assembly_complete=0: ring остаётся, qsnap не взведён. Повтор Initial
+       выходит по `saw_hello && plan_done` до разбора. */
+    {
+        char error[200];
+        uint8_t plan_bytes[256];
+        size_t plan_len = plain_quic_plan(plan_bytes);
+        d2k_plan *p = NULL;
+        d2k_session *s = d2k_session_new(64, 0);
+        if (d2k_plan_load(plan_bytes, plan_len, &p, error, sizeof error) != 0) {
+            printf("Q13 plan load-error=%s\n", error);
+        }
+        d2k_session_set_plan(s, p);
+        d2k_session_set_hook(s, D2K_HOOK_POSTROUTING);
+        send_one("Q13 sni-first incomplete first", s, first, first_len, 1000);
+        send_one("Q13 sni-first incomplete second", s, first, first_len, 1100);
+        d2k_session_free(s);
+    }
+
+    /* Q14: сериализованный план с 27 фальшивками — реальный путь
+       `d2k_plan_apply` + wire_count, без инъекции действий. */
+    {
+        uint8_t plan_bytes[256];
+        size_t plan_len = overflow_plan(plan_bytes);
+        d2k_session *s = d2k_session_new(64, 0);
+        install_plan(s, "example.com", plan_bytes, plan_len);
+        send_one("Q14 serialized 27-fakes", s, initial, initial_len, 1000);
         d2k_session_free(s);
     }
     return 0;

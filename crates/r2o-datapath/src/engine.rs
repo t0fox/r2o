@@ -2063,6 +2063,12 @@ pub enum PacketDecision {
     RefusedUdp {
         note: &'static str,
     },
+    /// C `out->skipped` без отказа: поток уже показывал приветствие или план
+    /// уже применён. Оригинал проходит; текст нужен для журнала/сводки, как
+    /// `d2kd.c:count_reason(out->skipped)`.
+    SkippedUdp {
+        note: &'static str,
+    },
     FlowUnfit {
         plan_id: [u8; 16],
     },
@@ -2217,8 +2223,17 @@ fn decide_packet_with_segment_cap(
     // C `session.c:1330`: для UDP `own_after_fakes = 1` всегда — оригинал
     // идёт своей посылкой после фальшивок, иначе ядро снимает его как дубль.
     input.own_after_fakes = true;
-    let Ok(actions) = plan.apply(&input) else {
-        return PacketDecision::Refused { plan_id: plan.id };
+    let actions = match plan.apply(&input) {
+        Ok(actions) => actions,
+        // C `d2k_plan_apply` отдаёт до 255 посылок, а `handle_udp` отвергает
+        // переполнение `out[]` своим текстом. Rust ограничивает сборку
+        // раньше; наблюдаемый исход и текст обязаны совпасть.
+        Err(error) if error.kind() == "too-many-emissions" => {
+            return PacketDecision::RefusedUdp {
+                note: R2O_RESULT_OVERFLOW_NOTE,
+            };
+        }
+        Err(_) => return PacketDecision::Refused { plan_id: plan.id },
     };
     decide_udp_after_apply(
         plan,
@@ -2231,6 +2246,26 @@ fn decide_packet_with_segment_cap(
         fake_probe,
         fragment_probe,
     )
+}
+
+/// C `handle_udp` (`session.c:1452-1470`): `wire_count` — посылки плюс
+/// IP-фрагменты, которые из них получатся.
+const R2O_RESULT_OVERFLOW_NOTE: &str =
+    "план описывает больше посылок, чем вмещает буфер результата";
+
+fn r2o_udp_wire_count(actions: &r2k_core::plan::Actions) -> usize {
+    actions
+        .emits
+        .iter()
+        .fold(actions.emits.len(), |count, emit| {
+            count.saturating_add(if emit.ipfrag == 0 {
+                0
+            } else if emit.ipfrag <= 2 {
+                1
+            } else {
+                2
+            })
+        })
 }
 
 /// C `handle_udp` после `d2k_plan_apply`: проверка атомарности датаграммы,
@@ -2264,9 +2299,19 @@ fn decide_udp_after_apply(
             note: "план режет датаграмму на части — для UDP это порча, не разрез",
         };
     }
+    // C `handle_udp` (`session.c:1452-1470`): `wire_count` считает посылки и
+    // IP-фрагменты, которые из них получатся, и сверяется с `D2K_RESULT_MAX`
+    // ДО судьбы оригинала. Переполнение результата — отказ целиком, а не
+    // обрезанное исполнение; для HOLD это тоже срабатывает раньше отказа
+    // удержания.
+    if r2o_udp_wire_count(&actions) > r2k_core::plan::WIRE_BATCH_MAX {
+        return PacketDecision::RefusedUdp {
+            note: R2O_RESULT_OVERFLOW_NOTE,
+        };
+    }
     // C `handle_udp` (`session.c:1540-1547`): удержание оригинала датапат не
     // умеет вовсе — отказ без единой посылки, оригинал проходит (ACCEPT).
-    // Проверка стоит после запрета разреза, как в C.
+    // Проверка стоит после запрета разреза и переполнения результата, как в C.
     if actions.fate == OriginalFate::Hold {
         return PacketDecision::RefusedUdp {
             note: "удержание оригинала не поддержано",
@@ -2377,8 +2422,14 @@ fn decide_voice(plan: &Plan, packet: &[u8], view: &PacketView, payload: &[u8]) -
     // C `session.c:1330`: голосовой UDP тоже владеет оригиналом после
     // фальшивок — оригинал уходит своей посылкой.
     input.own_after_fakes = true;
-    let Ok(actions) = plan.apply(&input) else {
-        return PacketDecision::Refused { plan_id: plan.id };
+    let actions = match plan.apply(&input) {
+        Ok(actions) => actions,
+        Err(error) if error.kind() == "too-many-emissions" => {
+            return PacketDecision::RefusedUdp {
+                note: R2O_RESULT_OVERFLOW_NOTE,
+            };
+        }
+        Err(_) => return PacketDecision::Refused { plan_id: plan.id },
     };
     // C `handle_udp` режет по этому признаку и голосовой путь: датаграмма
     // Voice/STUN атомарна так же, как QUIC Initial.
@@ -2391,6 +2442,13 @@ fn decide_voice(plan: &Plan, packet: &[u8], view: &PacketView, payload: &[u8]) -
     {
         return PacketDecision::RefusedUdp {
             note: "план режет датаграмму на части — для UDP это порча, не разрез",
+        };
+    }
+    // Переполнение `out[]` C проверяет до судьбы оригинала, в том числе
+    // для голоса.
+    if r2o_udp_wire_count(&actions) > r2k_core::plan::WIRE_BATCH_MAX {
+        return PacketDecision::RefusedUdp {
+            note: R2O_RESULT_OVERFLOW_NOTE,
         };
     }
     // C `handle_udp` (`session.c:1540-1547`): голосовой путь отвергает

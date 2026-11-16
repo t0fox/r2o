@@ -215,6 +215,10 @@ pub struct QuicHello {
     pub key: [u8; r2k_core::control::KEY_LEN],
     pub host: Vec<u8>,
     pub snapshot: Option<Vec<u8>>,
+    /// C `first_hello`: имя этого потока отдаётся событием впервые. Снимок
+    /// может появиться позже (SNI-first неполный ClientHello), и повторять
+    /// HELLO тогда нельзя.
+    pub r2o_first_hello: bool,
 }
 
 impl QuicHello {
@@ -283,10 +287,12 @@ pub fn quic_hello_from_packet(packet: &[u8]) -> Option<QuicHello> {
     key[35..37].copy_from_slice(&high.1.to_be_bytes());
     key[37] = 17;
     let snapshot = r2k_core::quic_snapshot::r2k_quic_snapshot_pack(&[payload])?;
+    let r2o_first_hello = !host.is_empty();
     Some(QuicHello {
         key,
         host,
         snapshot: Some(snapshot),
+        r2o_first_hello,
     })
 }
 

@@ -404,16 +404,21 @@ pub(crate) fn r2k_quic_initial_reseal_for_dcid(input: &[u8], new_dcid: &[u8]) ->
     Some(sealed)
 }
 
-/// Собрать ClientHello из Initial-датаграмм одного QUIC-полёта.
-pub fn r2k_quic_initial_client_hello_from_datagrams(datagrams: &[&[u8]]) -> Option<Vec<u8>> {
+/// Раскрыть Initial-датаграммы одного полёта в общий поток CRYPTO.
+/// Возвращает поток и карту заполненных байт; `None` — любая датаграмма
+/// не раскрылась или относится к другому полёту. C
+/// `d2k_quic_assembly_feed` в этом случае не меняет состояние сборки.
+fn r2k_quic_initial_crypto_stream(
+    datagrams: &[&[u8]],
+    stream: &mut [u8],
+    seen: &mut [bool],
+) -> Option<()> {
     if datagrams.is_empty() || datagrams.len() > MAX_INITIAL_DATAGRAMS {
         return None;
     }
     let first = parse_initial_header(datagrams[0])?;
     let dcid = datagrams[0].get(first.dcid_offset..first.dcid_offset + first.dcid_len)?;
     let keys = derive_initial_keys(first.version, dcid).ok()?;
-    let mut stream = [0; MAX_CLIENT_HELLO];
-    let mut seen = [false; MAX_CLIENT_HELLO];
 
     for datagram in datagrams {
         if datagram.len() > MAX_PACKET {
@@ -427,8 +432,16 @@ pub fn r2k_quic_initial_client_hello_from_datagrams(datagrams: &[&[u8]]) -> Opti
             return None;
         }
         let (plain, _, _) = open_initial(datagram, header, keys).ok()?;
-        collect_initial_crypto_frames(&plain, &mut stream, &mut seen);
+        collect_initial_crypto_frames(&plain, stream, seen);
     }
+    Some(())
+}
+
+/// Собрать ClientHello из Initial-датаграмм одного QUIC-полёта.
+pub fn r2k_quic_initial_client_hello_from_datagrams(datagrams: &[&[u8]]) -> Option<Vec<u8>> {
+    let mut stream = [0; MAX_CLIENT_HELLO];
+    let mut seen = [false; MAX_CLIENT_HELLO];
+    r2k_quic_initial_crypto_stream(datagrams, &mut stream, &mut seen)?;
 
     let filled = seen.iter().take_while(|present| **present).count();
     if filled < 4 || stream[0] != 0x01 {
@@ -438,6 +451,120 @@ pub fn r2k_quic_initial_client_hello_from_datagrams(datagrams: &[&[u8]]) -> Opti
         (usize::from(stream[1]) << 16) | (usize::from(stream[2]) << 8) | usize::from(stream[3]);
     let whole = 4usize.checked_add(claimed)?;
     (whole <= filled).then(|| stream[..whole].to_vec())
+}
+
+/// Имя SNI из ещё НЕ собранного целиком ClientHello (C `find_client_hello_sni`
+/// поверх непрерывного префикса CRYPTO, `core/quic.c:503-544`).
+///
+/// C `d2k_quic_assembly_feed` отдаёт имя, как только расширение SNI целиком
+/// попало в непрерывный префикс, даже если сообщение Handshake ещё не
+/// закончилось. `d2k_quic_assembly_complete` при этом остаётся ложным, и
+/// снимок полёта не снимается. Здесь тот же разбор границ: доступная длина —
+/// непрерывный префикс, заявленная длина Handshake и длина блока расширений
+/// проверяются отдельно.
+pub fn r2k_quic_initial_sni_prefix_result_from_datagrams(
+    datagrams: &[&[u8]],
+) -> Result<Option<Vec<u8>>, &'static str> {
+    let mut stream = [0; MAX_CLIENT_HELLO];
+    let mut seen = [false; MAX_CLIENT_HELLO];
+    r2k_quic_initial_crypto_stream(datagrams, &mut stream, &mut seen)
+        .ok_or("QUIC Initial не раскрылся или относится к другому полёту")?;
+    let filled = seen.iter().take_while(|present| **present).count();
+    let Some((offset, length)) = find_client_hello_sni_prefix(&stream[..filled])? else {
+        return Ok(None);
+    };
+    let end = offset
+        .checked_add(length)
+        .ok_or("неверная длина имени SNI в ClientHello")?;
+    Ok(Some(
+        stream
+            .get(offset..end)
+            .ok_or("имя SNI выходит за границы собранного префикса")?
+            .to_vec(),
+    ))
+}
+
+/// Разбор SNI по непрерывному префиксу ClientHello, как C
+/// `find_client_hello_sni`.
+fn find_client_hello_sni_prefix(bytes: &[u8]) -> Result<Option<(usize, usize)>, &'static str> {
+    if bytes.len() < 4 {
+        return Ok(None);
+    }
+    if bytes[0] != 0x01 {
+        return Ok(None);
+    }
+    let handshake_len = read_u24(bytes, 1).ok_or("неверная длина TLS ClientHello")?;
+    let claimed = 4usize
+        .checked_add(handshake_len)
+        .ok_or("неверная длина TLS ClientHello")?;
+    let end = claimed.min(bytes.len());
+    let mut offset = 4usize;
+    if offset.checked_add(34).is_none_or(|next| next > end) {
+        return Ok(None);
+    }
+    offset += 34;
+    if !skip_u8_vector(bytes, end, &mut offset)
+        || !skip_u16_vector(bytes, end, &mut offset)
+        || !skip_u8_vector(bytes, end, &mut offset)
+    {
+        return Ok(None);
+    }
+    if offset.checked_add(2).is_none_or(|next| next > end) {
+        return Ok(None);
+    }
+    let extensions_len = read_u16(bytes, offset).ok_or("неверная длина расширений ClientHello")?;
+    offset += 2;
+    if offset
+        .checked_add(extensions_len)
+        .is_none_or(|next| next > claimed)
+    {
+        return Ok(None);
+    }
+    let extensions_end = offset
+        .checked_add(extensions_len)
+        .map(|next| next.min(bytes.len()))
+        .ok_or("неверная длина расширений ClientHello")?;
+    while offset
+        .checked_add(4)
+        .is_some_and(|next| next <= extensions_end)
+    {
+        let extension_type =
+            read_u16(bytes, offset).ok_or("неверный тип расширения ClientHello")?;
+        let extension_len =
+            read_u16(bytes, offset + 2).ok_or("неверная длина расширения ClientHello")?;
+        offset += 4;
+        let extension_end = offset
+            .checked_add(extension_len)
+            .filter(|next| *next <= extensions_end)
+            .ok_or("расширение ClientHello выходит за границы списка")?;
+        if extension_type == 0 {
+            let list_len = read_u16(bytes, offset).ok_or("неверная длина списка SNI")?;
+            let mut cursor = offset.checked_add(2).ok_or("неверная длина списка SNI")?;
+            let list_end = cursor
+                .checked_add(list_len)
+                .filter(|next| *next <= extension_end)
+                .ok_or("неверная длина списка SNI")?;
+            while cursor.checked_add(3).is_some_and(|next| next <= list_end) {
+                let name_type = bytes[cursor];
+                let name_len = read_u16(bytes, cursor + 1).ok_or("неверная длина имени SNI")?;
+                cursor = cursor.checked_add(3).ok_or("неверная длина имени SNI")?;
+                let name_end = cursor
+                    .checked_add(name_len)
+                    .filter(|next| *next <= list_end)
+                    .ok_or("имя выходит за границы списка SNI")?;
+                if name_type == 0 {
+                    if name_len == 0 {
+                        return Ok(None);
+                    }
+                    return Ok(Some((cursor, name_len)));
+                }
+                cursor = name_end;
+            }
+            return Ok(None);
+        }
+        offset = extension_end;
+    }
+    Ok(None)
 }
 
 /// Вернуть версию и DCID аутентифицированного QUIC Initial.
@@ -1711,6 +1838,37 @@ mod tests {
         let mut malformed = client_hello;
         malformed[1..4].copy_from_slice(&[0, 0, 0]);
         assert!(find_client_hello_sni_result(&malformed).is_err());
+    }
+
+    #[test]
+    fn sni_из_неполного_initial_собирается_как_c() {
+        // C `d2k_quic_assembly_feed`: имя из первого Initial доступно, хотя
+        // `d2k_quic_assembly_complete` ещё ложно (второй Initial продолжает
+        // ClientHello).
+        let first = include_bytes!("../../r2o-datapath/tests/fixtures/quic_v1_initial_first.bin");
+        let second = include_bytes!("../../r2o-datapath/tests/fixtures/quic_v1_initial_second.bin");
+
+        assert!(
+            super::r2k_quic_initial_client_hello_from_datagrams(&[first]).is_none(),
+            "C assembly_complete на первом Initial ложно"
+        );
+        assert_eq!(
+            super::r2k_quic_initial_sni_prefix_result_from_datagrams(&[first]),
+            Ok(Some(b"example.com".to_vec()))
+        );
+        assert_eq!(
+            super::r2k_quic_initial_sni_prefix_result_from_datagrams(&[second]),
+            Ok(None),
+            "второй Initial один имени не содержит"
+        );
+        assert_eq!(
+            super::r2k_quic_initial_sni_prefix_result_from_datagrams(&[first, second]),
+            Ok(Some(b"example.com".to_vec()))
+        );
+        assert!(
+            super::r2k_quic_initial_client_hello_from_datagrams(&[first, second]).is_some(),
+            "вдвоём ClientHello уже целый"
+        );
     }
 
     #[test]

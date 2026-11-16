@@ -125,7 +125,9 @@ fn r2o_udp_hold_собирает_split_clienthello_и_возвращает_па�
         assert_eq!(holds.r2o_feed(id, 0, packet, now), R2oUdpHoldFeed::Held);
         let hello = quic.capture_hello(packet).map(|hello| hello.host);
         if id == 71 {
-            assert!(hello.is_none());
+            // C уже называет поток по первому Initial с SNI, хотя ClientHello
+            // ещё не целый; hold-готовность при этом наступает.
+            assert_eq!(hello.as_deref(), Some(b"example.com".as_slice()));
         } else {
             assert_eq!(hello.as_deref(), Some(b"example.com".as_slice()));
             let batch = holds.r2o_take(packet).unwrap();

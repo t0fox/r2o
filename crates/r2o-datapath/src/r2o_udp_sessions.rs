@@ -379,6 +379,75 @@ impl R2oUdpSessions {
             .is_some_and(|flow| flow.plan_applied)
     }
 
+    /// Клиентская сторона уже известного UDP-потока. C проверяет пропуски
+    /// `handle_udp` только после того, как доказал клиентское направление.
+    fn r2o_client_flow(&self, packet: &[u8]) -> Option<&FlowState> {
+        let (source, destination) = flow_endpoints_from_packet(packet)?;
+        let key = R2oUdpFlowKey::new(source, destination);
+        let flow = self.flows.get(&key)?;
+        let source_is_low = source.order_key() <= destination.order_key();
+        let client = match flow.r2o_client_is_low {
+            Some(client_is_low) => source_is_low == client_is_low,
+            None => destination.port == 443 && source.port != 443,
+        };
+        client.then_some(flow)
+    }
+
+    /// C `(fl->saw_hello && fl->plan_done && !fl->udp_replan) ||
+    /// fl->fwd_pkts > D2K_HELLO_WINDOW`: точный текст до разбора содержимого.
+    /// `quic_hello_counted` взводится только именем, как C `saw_hello`;
+    /// `r2o_client_packets_seen` соответствует `fwd_pkts` (текущий пакет уже
+    /// учтён `observe`).
+    pub fn r2o_second_hello_skip_note(&self, packet: &[u8]) -> Option<&'static str> {
+        let flow = self.r2o_client_flow(packet)?;
+        if (flow.plan_applied && flow.quic_hello_counted)
+            || flow.r2o_client_packets_seen > UDP_HELLO_WINDOW
+        {
+            return Some(if flow.quic_hello_counted {
+                "поток уже показывал приветствие"
+            } else {
+                "за окном поиска"
+            });
+        }
+        None
+    }
+
+    /// C `if (fl->plan_done && !fl->udp_replan)` после выбора плана: текст
+    /// «план уже применён к этому потоку». Для не-Initial и не-голоса C до
+    /// этой ветки не доходит и объясняет пропуск содержимым.
+    pub fn r2o_plan_applied_skip_note(
+        &self,
+        packet: &[u8],
+        plan_available: bool,
+    ) -> Option<&'static str> {
+        let flow = self.r2o_client_flow(packet)?;
+        if !flow.plan_applied {
+            return None;
+        }
+        if flow.quic_hello_counted {
+            return Some("поток уже показывал приветствие");
+        }
+        let view = PacketView::parse(packet).filter(|view| view.protocol == 17)?;
+        let udp = packet.get(view.l4_offset..view.total_len)?;
+        let payload = packet.get(view.udp_payload_range(packet)?)?;
+        if payload.is_empty() {
+            return Some("нет полезной нагрузки");
+        }
+        let destination_port = u16::from_be_bytes([udp[2], udp[3]]);
+        let voice = r2k_core::stun::is_binding_request(payload)
+            || r2k_core::stun::is_discord_ip_discovery_request(payload)
+            || r2k_core::stun::is_discord_voice_request(payload, destination_port);
+        if r2k_core::quic::r2k_quic_is_initial(payload) || voice {
+            Some(if plan_available {
+                "план уже применён к этому потоку"
+            } else {
+                "плана для этой цели нет"
+            })
+        } else {
+            Some("не QUIC Initial и не голос Дискорда")
+        }
+    }
+
     /// Определить, является ли пакет первым клиентским пакетом потока UDP.
     /// Сохранить исключение первого UDP-пакета для повторной головы QUIC.
     pub fn r2o_mark_hold_replay_first(&mut self, packet: &[u8]) -> bool {

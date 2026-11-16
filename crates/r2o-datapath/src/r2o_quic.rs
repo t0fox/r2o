@@ -145,6 +145,14 @@ pub struct R2oQuicSessions {
     flows: HashMap<FlowKey, FlowState>,
     initial_ring: VecDeque<InitialDatagram>,
     hello_reported: HashMap<FlowKey, Instant>,
+    /// Имя уже отдано событием HELLO (C `fl->saw_hello`). Отдельно от
+    /// `hello_reported`: неполный ClientHello даёт имя и событие, но снимок
+    /// ещё не снят и кольцо не очищено.
+    named_reported: HashMap<FlowKey, Instant>,
+    /// Кольцо Initial только проб контроллера. C не пишет пробу в
+    /// `init_ring` и не снимает по ней `qsnap_done`, но имя из Initial
+    /// собирает; отдельное кольцо не даёт пробе загрязнять снимок клиента.
+    probe_ring: HashMap<FlowKey, (Instant, VecDeque<InitialDatagram>)>,
     /// Пустой host уже отдан один раз; кольцо при этом НЕ очищается, иначе
     /// последующий Initial с именем не соберётся (C `qsnap_done` ставится
     /// только для named).
@@ -176,6 +184,10 @@ impl R2oQuicSessions {
         flows.try_reserve(flow_limit)?;
         let mut hello_reported = HashMap::new();
         hello_reported.try_reserve(flow_limit)?;
+        let mut named_reported = HashMap::new();
+        named_reported.try_reserve(flow_limit)?;
+        let mut probe_ring = HashMap::new();
+        probe_ring.try_reserve(flow_limit)?;
         let mut empty_reported = HashMap::new();
         empty_reported.try_reserve(flow_limit)?;
         let mut udp_exchange_events = VecDeque::new();
@@ -184,6 +196,8 @@ impl R2oQuicSessions {
             flows,
             initial_ring: VecDeque::new(),
             hello_reported,
+            named_reported,
+            probe_ring,
             empty_reported,
             udp_exchange_events,
             flow_limit,
@@ -293,13 +307,12 @@ impl R2oQuicSessions {
         self.capture_hello_at_hook_at_mode(packet, hook, now, true)
     }
 
-    fn capture_hello_at_hook_at_mode(
-        &mut self,
-        packet: &[u8],
+    /// Проверить пакет и вернуть ключ потока, payload и DCID Initial.
+    fn r2o_initial_packet_parts<'a>(
+        &self,
+        packet: &'a [u8],
         hook: Option<u8>,
-        now: Instant,
-        commit_snapshot: bool,
-    ) -> Option<super::capture::QuicHello> {
+    ) -> Option<(FlowKey, &'a [u8], Vec<u8>)> {
         let view = PacketView::parse(packet)
             .filter(|view| view.protocol == 17 && view.fragment & 0x3fff == 0)?;
         let udp = packet.get(view.l4_offset..view.total_len)?;
@@ -323,11 +336,86 @@ impl R2oQuicSessions {
             return None;
         }
         let (_, dcid) = r2k_core::quic::r2k_quic_initial_flight_id_structural(payload)?;
-        let key = FlowKey::new(source, destination).0;
+        Some((FlowKey::new(source, destination).0, payload, dcid))
+    }
+
+    /// Имя из Initial пробы контроллера. C `handle_udp` с `controller_probe`
+    /// собирает имя, но не пишет `init_ring`, не ставит `qsnap_done` и не
+    /// трогает событие/снимок клиента; для этого у пробы своё кольцо.
+    pub fn r2o_capture_hello_probe_at_hook(
+        &mut self,
+        packet: &[u8],
+        hook: Option<u8>,
+    ) -> Option<super::capture::QuicHello> {
+        self.r2o_capture_hello_probe_at_hook_at(packet, hook, Instant::now())
+    }
+
+    fn r2o_capture_hello_probe_at_hook_at(
+        &mut self,
+        packet: &[u8],
+        hook: Option<u8>,
+        now: Instant,
+    ) -> Option<super::capture::QuicHello> {
+        let (key, payload, dcid) = self.r2o_initial_packet_parts(packet, hook)?;
+        let idle_timeout = self.r2o_idle_timeout;
+        self.probe_ring
+            .retain(|_, (last_seen, _)| now.saturating_duration_since(*last_seen) < idle_timeout);
+        if !self.probe_ring.contains_key(&key) && self.probe_ring.len() == self.flow_limit {
+            if let Some(oldest) = self.probe_ring.keys().next().copied() {
+                self.probe_ring.remove(&oldest);
+            }
+        }
+        let host = {
+            let (last_seen, ring) = self
+                .probe_ring
+                .entry(key)
+                .or_insert_with(|| (now, VecDeque::new()));
+            *last_seen = now;
+            if !ring
+                .iter()
+                .any(|entry| entry.dcid == dcid && entry.bytes == payload)
+            {
+                if ring.len() == MAX_INITIAL_DATAGRAMS {
+                    ring.pop_front();
+                }
+                ring.push_back(InitialDatagram {
+                    key,
+                    dcid,
+                    bytes: payload.to_vec(),
+                });
+            }
+            let datagrams: Vec<&[u8]> = ring.iter().map(|entry| entry.bytes.as_slice()).collect();
+            r2k_core::quic::r2k_quic_initial_sni_prefix_result_from_datagrams(&datagrams)
+                .ok()?
+                .unwrap_or_default()
+        };
+        if host.is_empty() {
+            return None;
+        }
+        self.last_quic_name.clear();
+        self.last_quic_name.extend_from_slice(&host);
+        Some(super::capture::QuicHello {
+            key: key.wire_key(),
+            host,
+            snapshot: None,
+            r2o_first_hello: false,
+        })
+    }
+
+    fn capture_hello_at_hook_at_mode(
+        &mut self,
+        packet: &[u8],
+        hook: Option<u8>,
+        now: Instant,
+        commit_snapshot: bool,
+    ) -> Option<super::capture::QuicHello> {
+        let (key, payload, dcid) = self.r2o_initial_packet_parts(packet, hook)?;
 
         let idle_timeout = self.r2o_idle_timeout;
         if commit_snapshot {
             self.hello_reported
+                .retain(|_, last_seen| now.saturating_duration_since(*last_seen) < idle_timeout);
+            self.named_reported
                 .retain(|_, last_seen| now.saturating_duration_since(*last_seen) < idle_timeout);
             if let Some(last_seen) = self.hello_reported.get_mut(&key) {
                 *last_seen = now;
@@ -356,13 +444,18 @@ impl R2oQuicSessions {
             self.init_ring_done = self.init_ring_done.saturating_add(1);
         }
 
-        let (host, snapshot) = {
+        let (host, complete, snapshot) = {
             let datagrams = self.r2o_initial_flight(&key, &dcid);
-            let host = r2k_core::quic::r2k_quic_initial_sni_result_from_datagrams(&datagrams)
-                .ok()?
-                .unwrap_or_default();
-            let snapshot = r2k_core::quic_snapshot::r2k_quic_snapshot_pack(&datagrams)?;
-            (host, snapshot)
+            let complete =
+                r2k_core::quic::r2k_quic_initial_client_hello_from_datagrams(&datagrams).is_some();
+            let host =
+                r2k_core::quic::r2k_quic_initial_sni_prefix_result_from_datagrams(&datagrams)
+                    .ok()?
+                    .unwrap_or_default();
+            let snapshot = complete
+                .then(|| r2k_core::quic_snapshot::r2k_quic_snapshot_pack(&datagrams))
+                .flatten();
+            (host, complete, snapshot)
         };
 
         if host.is_empty() {
@@ -370,11 +463,15 @@ impl R2oQuicSessions {
             // ставится, кольцо продолжает накапливать Initial. Событие с
             // пустым именем R2O отдаёт один раз, но не запрещает более
             // позднему Initial с именем собрать полёт.
+            if !complete {
+                return None;
+            }
             if !commit_snapshot {
                 return Some(super::capture::QuicHello {
                     key: key.wire_key(),
                     host,
-                    snapshot: Some(snapshot),
+                    snapshot,
+                    r2o_first_hello: false,
                 });
             }
             if self.empty_reported.contains_key(&key) {
@@ -391,7 +488,8 @@ impl R2oQuicSessions {
             return Some(super::capture::QuicHello {
                 key: key.wire_key(),
                 host,
-                snapshot: Some(snapshot),
+                snapshot,
+                r2o_first_hello: false,
             });
         }
 
@@ -401,7 +499,29 @@ impl R2oQuicSessions {
             return Some(super::capture::QuicHello {
                 key: key.wire_key(),
                 host,
-                snapshot: Some(snapshot),
+                snapshot,
+                r2o_first_hello: false,
+            });
+        }
+
+        let first_hello = !self.named_reported.contains_key(&key);
+        if self.named_reported.len() == self.flow_limit
+            && let Some(oldest) = self.named_reported.keys().next().copied()
+        {
+            self.named_reported.remove(&oldest);
+        }
+        self.named_reported.insert(key, now);
+        self.last_quic_name.clear();
+        self.last_quic_name.extend_from_slice(&host);
+
+        if !complete {
+            // SNI-first неполный ClientHello: C уже назвал поток, но снимок
+            // (`qsnap_done`) не снимает и кольцо не чистит.
+            return Some(super::capture::QuicHello {
+                key: key.wire_key(),
+                host,
+                snapshot: None,
+                r2o_first_hello: first_hello,
             });
         }
 
@@ -415,12 +535,11 @@ impl R2oQuicSessions {
         self.hello_reported.insert(key, now);
         self.qsnap_done = self.qsnap_done.saturating_add(1);
         self.quic_name = self.quic_name.saturating_add(1);
-        self.last_quic_name.clear();
-        self.last_quic_name.extend_from_slice(&host);
         Some(super::capture::QuicHello {
             key: key.wire_key(),
             host,
-            snapshot: Some(snapshot),
+            snapshot,
+            r2o_first_hello: first_hello,
         })
     }
 
@@ -764,6 +883,10 @@ impl R2oQuicSessions {
             .retain(|_, flow| now.saturating_duration_since(flow.last_seen) < idle_timeout);
         self.hello_reported
             .retain(|_, last_seen| now.saturating_duration_since(*last_seen) < idle_timeout);
+        self.named_reported
+            .retain(|_, last_seen| now.saturating_duration_since(*last_seen) < idle_timeout);
+        self.probe_ring
+            .retain(|_, (last_seen, _)| now.saturating_duration_since(*last_seen) < idle_timeout);
         self.empty_reported
             .retain(|_, last_seen| now.saturating_duration_since(*last_seen) < idle_timeout);
     }
@@ -775,6 +898,8 @@ impl Default for R2oQuicSessions {
             flows: HashMap::new(),
             initial_ring: VecDeque::new(),
             hello_reported: HashMap::new(),
+            named_reported: HashMap::new(),
+            probe_ring: HashMap::new(),
             empty_reported: HashMap::new(),
             udp_exchange_events: VecDeque::new(),
             flow_limit: R2oFlowCapacity::default().limit(),
@@ -1220,11 +1345,13 @@ mod tests {
         let server = [198, 51, 100, 20];
         let mut sessions = R2oQuicSessions::default();
 
-        assert!(
-            sessions
-                .capture_hello(&ipv4_packet(client, server, 53_123, 443, INITIAL_FIRST),)
-                .is_none()
-        );
+        // C `d2k_quic_assembly_feed` уже назвал поток по первому Initial,
+        // хотя ClientHello ещё не целый и снимка нет.
+        let first = sessions
+            .capture_hello(&ipv4_packet(client, server, 53_123, 443, INITIAL_FIRST))
+            .expect("имя из первого Initial");
+        assert_eq!(first.host, b"example.com");
+        assert!(first.snapshot.is_none());
         assert!(
             sessions
                 .capture_hello(&ipv4_packet(
@@ -1263,15 +1390,15 @@ mod tests {
         let mut sessions = R2oQuicSessions::default();
         sessions.r2o_set_idle_timeout(Duration::from_secs(5));
 
-        assert!(
-            sessions
-                .capture_hello_at_hook_at(
-                    &ipv4_packet(client, server, 53_123, 443, INITIAL_FIRST),
-                    None,
-                    start,
-                )
-                .is_none()
-        );
+        let first = sessions
+            .capture_hello_at_hook_at(
+                &ipv4_packet(client, server, 53_123, 443, INITIAL_FIRST),
+                None,
+                start,
+            )
+            .expect("имя из неполного ClientHello");
+        assert_eq!(first.host, b"example.com");
+        assert!(first.snapshot.is_none());
         assert_eq!(sessions.initial_ring.len(), 1);
         assert!(
             sessions
@@ -1552,6 +1679,29 @@ mod tests {
         out
     }
 
+    /// Одна фальшивка без разреза: применима и к Initial без имени, чтобы
+    /// получить `plan_done` по глобальному плану (C `d2k_session_set_plan`).
+    fn plain_quic_diff_plan() -> Vec<u8> {
+        let mut out = diff_plan_header(4);
+        out.extend_from_slice(&[0x00, 0x10, 0x00, 0x03, 0x00, 0x01, 0xAA]);
+        out.extend_from_slice(&[0x01, 0x01, 0x00, 0x0A]);
+        out.extend_from_slice(&[0x00, 0x01, 0x00, 0x00, 0x01, 0x00]);
+        out.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+        out
+    }
+
+    /// Сериализованный план с `D2K_RESULT_MAX+1` фальшивками: C собирает
+    /// 27 действий и отвергает их по wire_count, Rust ограничивает сборку
+    /// раньше и обязан отдать тот же текст.
+    fn overflow_quic_diff_plan() -> Vec<u8> {
+        let mut out = diff_plan_header(4);
+        out.extend_from_slice(&[0x00, 0x10, 0x00, 0x03, 0x00, 0x01, 0xAA]);
+        out.extend_from_slice(&[0x01, 0x01, 0x00, 0x0A]);
+        out.extend_from_slice(&[0x00, 0x01, 0x00, 0x00, 0x1B, 0x00]);
+        out.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+        out
+    }
+
     fn hold_actions(packet: &[u8]) -> r2k_core::plan::Actions {
         use r2k_core::plan::{Actions, Emission, EmitKind, OriginalFate};
         let payload = r2k_core::packet::PacketView::parse(packet)
@@ -1575,6 +1725,40 @@ mod tests {
                 prefix: Vec::new(),
                 bytes: payload,
             }],
+        }
+    }
+
+    /// Действия, которых больше, чем `D2K_RESULT_MAX`/`WIRE_BATCH_MAX`;
+    /// проверяют отказ `handle_udp` до судьбы оригинала.
+    fn many_fake_actions(
+        packet: &[u8],
+        count: usize,
+        fate: r2k_core::plan::OriginalFate,
+    ) -> r2k_core::plan::Actions {
+        use r2k_core::plan::{Actions, Emission, EmitKind};
+        let payload = r2k_core::packet::PacketView::parse(packet)
+            .and_then(|view| view.udp_payload_range(packet))
+            .and_then(|range| packet.get(range))
+            .unwrap()
+            .to_vec();
+        Actions {
+            fate,
+            emits: (0..count)
+                .map(|_| Emission {
+                    kind: EmitKind::Fake,
+                    delay_us: 0,
+                    seq: 0,
+                    ttl: 0,
+                    poison: 0,
+                    seq_shift: 0,
+                    wire_profile: 0,
+                    ipfrag: 0,
+                    urgent: false,
+                    urgent_ptr: 0,
+                    prefix: Vec::new(),
+                    bytes: payload.clone(),
+                })
+                .collect(),
         }
     }
 
@@ -1604,9 +1788,14 @@ mod tests {
             let mut holds = R2oUdpHoldTable::new();
             assert!(udp.r2o_observe_packet_at_hook(&first, start, hook));
             assert!(udp.r2o_begin_hold(&first));
-            assert!(
+            // C `d2k_quic_assembly_feed` называет поток уже по первому
+            // Initial с SNI, хотя ClientHello ещё не целый: hold готов к
+            // replay головы, снимок при этом не снимается.
+            assert_eq!(
                 quic.r2o_capture_hello_prefetch_at_hook(&first, hook)
-                    .is_none_or(|hello| hello.host.is_empty())
+                    .expect("имя из первого Initial")
+                    .host,
+                b"example.com"
             );
             assert_eq!(holds.r2o_feed(1, 0, &first, start), R2oUdpHoldFeed::Held);
             out.push_str(&format!(
@@ -1698,9 +1887,14 @@ mod tests {
             let mut udp = R2oUdpSessions::new().unwrap();
             let mut quic = R2oQuicSessions::default();
             assert!(udp.r2o_observe_packet_at_hook(&first, start, hook));
-            // Неполный Initial: имя не собрано, события нет, но кольцо
-            // пополнено — как C `init_ring_add`.
-            assert!(quic.capture_hello_at_hook(&first, hook).is_none());
+            // C `d2k_quic_assembly_feed`: имя из первого Initial уже есть,
+            // хотя ClientHello не целый; `qsnap_done` при этом не ставится.
+            assert_eq!(
+                quic.capture_hello_at_hook(&first, hook)
+                    .expect("имя из неполного ClientHello")
+                    .host,
+                b"example.com"
+            );
             out.push_str(&format!(
                 "Q6 incomplete first ring_live={} qsnap={} plan_done={}\n",
                 quic.initial_ring.len(),
@@ -1779,6 +1973,254 @@ mod tests {
             assert_eq!(note, "удержание оригинала не поддержано");
             out.push_str(&format!(
                 "Q8 hold-fate first applied=0 skip=1 skipped=\"{note}\" n=0 plan_done={} sends_left=0 ring={} ring_live={} qsnap={} quic_name=\"{}\" shape_miss={} verdict=0\n",
+                u8::from(udp.r2o_plan_applied(&packet)),
+                quic.r2o_init_ring_done(),
+                quic.r2o_init_ring_len(),
+                quic.r2o_qsnap_done(),
+                String::from_utf8_lossy(quic.r2o_last_quic_name()),
+                u8::from(quic.r2o_last_quic_shape_miss())
+            ));
+        }
+
+        // Q9: проба контроллера — имя и план есть, ring/qsnap пусты;
+        // повтор даёт точный C-текст «поток уже показывал приветствие».
+        {
+            let start = Instant::now();
+            let plan = Plan::parse_wire(&plain_quic_diff_plan()).expect("plain plan");
+            let packet = ipv4_packet(client, server, 50_001, 443, INITIAL);
+            let mut udp = R2oUdpSessions::new().unwrap();
+            let mut quic = R2oQuicSessions::default();
+            assert!(udp.r2o_observe_packet_at_hook(&packet, start, hook));
+            quic.r2o_clear_quic_audit();
+            let hello = quic
+                .r2o_capture_hello_probe_at_hook(&packet, hook)
+                .expect("имя пробы");
+            assert_eq!(hello.host, b"example.com");
+            assert!(hello.snapshot.is_none(), "у пробы снимка нет");
+            assert_eq!(quic.r2o_init_ring_len(), 0);
+            assert_eq!(quic.r2o_qsnap_done(), 0);
+            assert!(udp.r2o_mark_hello_seen(&packet, true));
+            let mut tcp = TcpSessions::default();
+            let decision = decide_with_session(&mut tcp, &plan, &packet);
+            let (n1, verdict1) = match &decision {
+                PacketDecision::Replace(_) => (1, 1),
+                PacketDecision::Transmit { packets, fate } => (
+                    packets.len(),
+                    u8::from(*fate == r2k_core::plan::OriginalFate::Drop),
+                ),
+                other => panic!("Q9 ожидался план, получено {other:?}"),
+            };
+            assert!(udp.r2o_mark_plan_applied_with_sends(&packet, n1));
+            quic.mark_plan_applied(&packet);
+            out.push_str(&format!(
+                "Q9 controller-probe first applied=1 skip=0 skipped=\"\" n={n1} plan_done=1 sends_left={} ring={} ring_live={} qsnap={} quic_name=\"{}\" shape_miss=0 verdict={verdict1}\n",
+                udp.r2o_sends_left_for_packet(&packet),
+                quic.r2o_init_ring_done(),
+                quic.r2o_init_ring_len(),
+                quic.r2o_qsnap_done(),
+                String::from_utf8_lossy(quic.r2o_last_quic_name())
+            ));
+
+            let sends_left = udp.r2o_sends_left_for_packet(&packet);
+            quic.r2o_clear_quic_audit();
+            let skip = udp
+                .r2o_second_hello_skip_note(&packet)
+                .expect("C saw_hello && plan_done");
+            assert_eq!(skip, "поток уже показывал приветствие");
+            let decision = PacketDecision::SkippedUdp { note: skip };
+            out.push_str(&format!(
+                "Q9 controller-probe second applied=0 skip=1 skipped=\"{skip}\" n=0 plan_done=1 sends_left={sends_left} ring={} ring_live={} qsnap={} quic_name=\"{}\" shape_miss=0 verdict=0\n",
+                quic.r2o_init_ring_done(),
+                quic.r2o_init_ring_len(),
+                quic.r2o_qsnap_done(),
+                String::from_utf8_lossy(quic.r2o_last_quic_name())
+            ));
+            assert_eq!(
+                decision,
+                PacketDecision::SkippedUdp {
+                    note: "поток уже показывал приветствие"
+                }
+            );
+        }
+
+        // Q10: план уже применён к потоку без имени — именованный Initial
+        // даёт ветку plan_done ДРУГИМ текстом, но снимок уже снимается.
+        {
+            let start = Instant::now();
+            let plan = Plan::parse_wire(&plain_quic_diff_plan()).expect("plain plan");
+            let unnamed = ipv4_packet(client, server, 50_001, 443, INITIAL_NO_SNI);
+            let mut udp = R2oUdpSessions::new().unwrap();
+            let mut quic = R2oQuicSessions::default();
+            assert!(udp.r2o_observe_packet_at_hook(&unnamed, start, hook));
+            quic.r2o_clear_quic_audit();
+            assert!(
+                quic.capture_hello_at_hook(&unnamed, hook)
+                    .is_some_and(|hello| hello.host.is_empty())
+            );
+            udp.r2o_mark_hello_seen(&unnamed, false);
+            assert!(udp.r2o_plan_applied_skip_note(&unnamed, true).is_none());
+            let mut tcp = TcpSessions::default();
+            let decision = decide_with_session(&mut tcp, &plan, &unnamed);
+            let (n1, verdict1) = match &decision {
+                PacketDecision::Replace(_) => (1, 1),
+                PacketDecision::Transmit { packets, fate } => (
+                    packets.len(),
+                    u8::from(*fate == r2k_core::plan::OriginalFate::Drop),
+                ),
+                other => panic!("Q10 ожидался план, получено {other:?}"),
+            };
+            assert!(udp.r2o_mark_plan_applied_with_sends(&unnamed, n1));
+            quic.mark_plan_applied(&unnamed);
+            out.push_str(&format!(
+                "Q10 plan-done first applied=1 skip=0 skipped=\"\" n={n1} plan_done=1 sends_left={} ring={} ring_live={} qsnap={} quic_name=\"{}\" shape_miss=0 verdict={verdict1}\n",
+                udp.r2o_sends_left_for_packet(&unnamed),
+                quic.r2o_init_ring_done(),
+                quic.r2o_init_ring_len(),
+                quic.r2o_qsnap_done(),
+                String::from_utf8_lossy(quic.r2o_last_quic_name())
+            ));
+
+            let next = start + Duration::from_millis(1);
+            assert!(udp.r2o_observe_packet_at_hook(&unnamed, next, hook));
+            let sends_left = udp.r2o_sends_left_for_packet(&unnamed);
+            assert!(udp.r2o_second_hello_skip_note(&unnamed).is_none());
+            quic.r2o_clear_quic_audit();
+            assert!(
+                quic.capture_hello_at_hook(&unnamed, hook).is_none(),
+                "повторный пустой host не отдаётся"
+            );
+            let skip = udp
+                .r2o_plan_applied_skip_note(&unnamed, true)
+                .expect("C plan_done");
+            assert_eq!(skip, "план уже применён к этому потоку");
+            udp.r2o_mark_hello_seen(&unnamed, false);
+            out.push_str(&format!(
+                "Q10 plan-done second applied=0 skip=1 skipped=\"{skip}\" n=0 plan_done=1 sends_left={sends_left} ring={} ring_live={} qsnap={} quic_name=\"{}\" shape_miss=0 verdict=0\n",
+                quic.r2o_init_ring_done(),
+                quic.r2o_init_ring_len(),
+                quic.r2o_qsnap_done(),
+                String::from_utf8_lossy(quic.r2o_last_quic_name())
+            ));
+        }
+
+        // Q11/Q12: wire_count > D2K_RESULT_MAX — отказ до судьбы оригинала.
+        for (label, fate) in [
+            ("Q11 wire-count accept", r2k_core::plan::OriginalFate::Pass),
+            ("Q12 wire-count hold", r2k_core::plan::OriginalFate::Hold),
+        ] {
+            let start = Instant::now();
+            let plan = Plan::parse_wire(&quic_diff_plan()).expect("quic plan");
+            let packet = ipv4_packet(client, server, 50_001, 443, INITIAL);
+            let mut udp = R2oUdpSessions::new().unwrap();
+            let mut quic = R2oQuicSessions::default();
+            assert!(udp.r2o_observe_packet_at_hook(&packet, start, hook));
+            quic.r2o_clear_quic_audit();
+            assert!(
+                quic.capture_hello_at_hook(&packet, hook)
+                    .is_some_and(|hello| hello.host == b"example.com")
+            );
+            let decision = crate::engine::r2o_decide_udp_actions(
+                &plan,
+                &packet,
+                many_fake_actions(&packet, r2k_core::plan::WIRE_BATCH_MAX + 1, fate),
+            );
+            let PacketDecision::RefusedUdp { note } = decision else {
+                panic!("{label}: ожидался RefusedUdp, получено {decision:?}");
+            };
+            assert_eq!(
+                note,
+                "план описывает больше посылок, чем вмещает буфер результата"
+            );
+            out.push_str(&format!(
+                "{label} applied=0 skip=1 skipped=\"{note}\" n=0 plan_done={} sends_left=0 ring={} ring_live={} qsnap={} quic_name=\"{}\" shape_miss={} verdict=0\n",
+                u8::from(udp.r2o_plan_applied(&packet)),
+                quic.r2o_init_ring_done(),
+                quic.r2o_init_ring_len(),
+                quic.r2o_qsnap_done(),
+                String::from_utf8_lossy(quic.r2o_last_quic_name()),
+                u8::from(quic.r2o_last_quic_shape_miss())
+            ));
+        }
+
+        // Q13: SNI-first неполный ClientHello — имя есть и план применён,
+        // assembly_complete=0: ring остаётся, qsnap не взведён; повтор
+        // выходит по `saw_hello && plan_done` до разбора.
+        {
+            let start = Instant::now();
+            let plan = Plan::parse_wire(&plain_quic_diff_plan()).expect("plain plan");
+            let packet = ipv4_packet(client, server, 50_001, 443, INITIAL_FIRST);
+            let mut udp = R2oUdpSessions::new().unwrap();
+            let mut quic = R2oQuicSessions::default();
+            assert!(udp.r2o_observe_packet_at_hook(&packet, start, hook));
+            quic.r2o_clear_quic_audit();
+            let hello = quic
+                .capture_hello_at_hook(&packet, hook)
+                .expect("имя из неполного ClientHello");
+            assert_eq!(hello.host, b"example.com");
+            assert!(hello.snapshot.is_none(), "assembly_complete=0");
+            assert!(udp.r2o_mark_hello_seen(&packet, true));
+            let mut tcp = TcpSessions::default();
+            let decision = decide_with_session(&mut tcp, &plan, &packet);
+            let (n1, verdict1) = match &decision {
+                PacketDecision::Replace(_) => (1, 1),
+                PacketDecision::Transmit { packets, fate } => (
+                    packets.len(),
+                    u8::from(*fate == r2k_core::plan::OriginalFate::Drop),
+                ),
+                other => panic!("Q13 ожидался план, получено {other:?}"),
+            };
+            assert!(udp.r2o_mark_plan_applied_with_sends(&packet, n1));
+            quic.mark_plan_applied(&packet);
+            out.push_str(&format!(
+                "Q13 sni-first incomplete first applied=1 skip=0 skipped=\"\" n={n1} plan_done=1 sends_left={} ring={} ring_live={} qsnap={} quic_name=\"{}\" shape_miss=0 verdict={verdict1}\n",
+                udp.r2o_sends_left_for_packet(&packet),
+                quic.r2o_init_ring_done(),
+                quic.r2o_init_ring_len(),
+                quic.r2o_qsnap_done(),
+                String::from_utf8_lossy(quic.r2o_last_quic_name())
+            ));
+
+            let sends_left = udp.r2o_sends_left_for_packet(&packet);
+            quic.r2o_clear_quic_audit();
+            let skip = udp
+                .r2o_second_hello_skip_note(&packet)
+                .expect("C saw_hello && plan_done");
+            assert_eq!(skip, "поток уже показывал приветствие");
+            out.push_str(&format!(
+                "Q13 sni-first incomplete second applied=0 skip=1 skipped=\"{skip}\" n=0 plan_done=1 sends_left={sends_left} ring={} ring_live={} qsnap={} quic_name=\"{}\" shape_miss=0 verdict=0\n",
+                quic.r2o_init_ring_done(),
+                quic.r2o_init_ring_len(),
+                quic.r2o_qsnap_done(),
+                String::from_utf8_lossy(quic.r2o_last_quic_name())
+            ));
+        }
+
+        // Q14: сериализованный план с 27 фальшивками — реальный путь
+        // `Plan::apply`, а не инъекция. C отвергает по wire_count; Rust
+        // ограничивает сборку раньше и отдаёт тот же текст.
+        {
+            let start = Instant::now();
+            let plan = Plan::parse_wire(&overflow_quic_diff_plan()).expect("overflow plan");
+            let packet = ipv4_packet(client, server, 50_001, 443, INITIAL);
+            let mut udp = R2oUdpSessions::new().unwrap();
+            let mut quic = R2oQuicSessions::default();
+            assert!(udp.r2o_observe_packet_at_hook(&packet, start, hook));
+            quic.r2o_clear_quic_audit();
+            assert!(
+                quic.capture_hello_at_hook(&packet, hook)
+                    .is_some_and(|hello| hello.host == b"example.com")
+            );
+            let mut tcp = TcpSessions::default();
+            let decision = decide_with_session(&mut tcp, &plan, &packet);
+            let PacketDecision::RefusedUdp { note } = decision else {
+                panic!("Q14: ожидался RefusedUdp, получено {decision:?}");
+            };
+            assert_eq!(
+                note,
+                "план описывает больше посылок, чем вмещает буфер результата"
+            );
+            out.push_str(&format!(
+                "Q14 serialized 27-fakes applied=0 skip=1 skipped=\"{note}\" n=0 plan_done={} sends_left=0 ring={} ring_live={} qsnap={} quic_name=\"{}\" shape_miss={} verdict=0\n",
                 u8::from(udp.r2o_plan_applied(&packet)),
                 quic.r2o_init_ring_done(),
                 quic.r2o_init_ring_len(),

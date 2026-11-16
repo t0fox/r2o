@@ -2416,28 +2416,67 @@ mod app {
                             );
                             release_accepting(&mut socket, &released);
                         }
-                        let inspect_quic = observe_tls
-                            || family.is_some_and(|family| name_plans.has_quic_candidate(family));
+                        // C `handle_udp`: при `saw_hello && plan_done` поток
+                        // выходит ДО разбора содержимого, поэтому ни кольцо,
+                        // ни снимок этой датаграммой не трогаются.
+                        let quic_second_hello_skip = udp_sessions.r2o_second_hello_skip_note(bytes);
+                        // C `fl->quic_deny` проверяется ДО кольца, сборки
+                        // имени и выбора плана: повторный Initial снятого
+                        // потока не должен попадать в снимок.
+                        let quic_deny_skip =
+                            !controller_probe && udp_sessions.r2o_quic_deny_for_packet(bytes);
                         quic_sessions.r2o_clear_quic_audit();
-                        let quic_hello = prefetched_quic_hello.take().or_else(|| {
-                            inspect_quic
-                                .then(|| quic_sessions.capture_hello_at_hook(bytes, queue_hook))
-                                .flatten()
-                        });
+                        let quic_hello = if quic_second_hello_skip.is_some() || quic_deny_skip {
+                            None
+                        } else {
+                            prefetched_quic_hello.take().or_else(|| {
+                                // C пишет кольцо и собирает имя на любом
+                                // клиентском Initial, а не только когда уже
+                                // есть кандидат/канал контроллера. Проба
+                                // контроллера имя получает, но своё кольцо и
+                                // без `qsnap_done` не трогает.
+                                if controller_probe {
+                                    quic_sessions.r2o_capture_hello_probe_at_hook(bytes, queue_hook)
+                                } else {
+                                    quic_sessions.capture_hello_at_hook(bytes, queue_hook)
+                                }
+                            })
+                        };
+                        let shape_misses_before = name_plans.r2o_shape_misses();
+                        // C на раннем выходе `saw_hello && plan_done` и в
+                        // ветке `quic_deny` не доходит ни до выбора плана,
+                        // ни до `shape_misses`.
+                        let selected = if quic_second_hello_skip.is_some() || quic_deny_skip {
+                            None
+                        } else {
+                            name_plans.select_with_quic_host_at_hook_probe(
+                                bytes,
+                                quic_hello.as_ref().map(|hello| hello.host.as_slice()),
+                                quic_hook,
+                                controller_probe,
+                            )
+                        };
+                        let selected_plan = selected.unwrap_or(&plan);
+                        // Текст C `plan_done` считается по состоянию ДО
+                        // отметки текущего приветствия: именованный Initial,
+                        // впервые названный этим пакетом, в C ещё не взвёл
+                        // `saw_hello` в момент проверки.
+                        let quic_plan_skip_note = if quic_deny_skip {
+                            None
+                        } else {
+                            quic_second_hello_skip.or_else(|| {
+                                udp_sessions.r2o_plan_applied_skip_note(
+                                    bytes,
+                                    selected.is_some() || global_plan_present,
+                                )
+                            })
+                        };
                         let mut first_named_hello = false;
                         if let Some(hello) = quic_hello.as_ref() {
                             let named = !hello.host.is_empty();
                             first_named_hello =
                                 udp_sessions.r2o_mark_hello_seen(bytes, named) && named;
                         }
-                        let shape_misses_before = name_plans.r2o_shape_misses();
-                        let selected = name_plans.select_with_quic_host_at_hook_probe(
-                            bytes,
-                            quic_hello.as_ref().map(|hello| hello.host.as_slice()),
-                            quic_hook,
-                            controller_probe,
-                        );
-                        let selected_plan = selected.unwrap_or(&plan);
                         // C `out->quic_shape_miss`: только рост
                         // `d2k_plantab_shape_misses`, а не любой no-plan.
                         if quic_hello
@@ -2449,7 +2488,9 @@ mod app {
                         }
                         // C `handle_udp`: плана нет ни по цели, ни общего — первый
                         // именованный hello даёт журнальный отказ NONE.
-                        if !controller_probe
+                        if quic_second_hello_skip.is_none()
+                            && !quic_deny_skip
+                            && !controller_probe
                             && let Some(note) = r2o_datapath::engine::r2o_udp_no_plan_note(
                                 selected,
                                 global_plan_present,
@@ -2476,8 +2517,14 @@ mod app {
                                 controller_probe,
                             );
                         }
-                        udp_quic_deny = selected_plan.qdeny != 0 && !controller_probe;
-                        if options.mode == RuntimeMode::Apply {
+                        udp_quic_deny = quic_second_hello_skip.is_none()
+                            && !quic_deny_skip
+                            && selected_plan.qdeny != 0
+                            && !controller_probe;
+                        if options.mode == RuntimeMode::Apply
+                            && quic_second_hello_skip.is_none()
+                            && !quic_deny_skip
+                        {
                             if selected_plan.qdeny != 0 && !controller_probe {
                                 quic_sessions.suppress_packet(bytes);
                             } else if !controller_probe {
@@ -2494,23 +2541,31 @@ mod app {
                         if !controller_probe
                             && observe_tls
                             && let Some(hello) = quic_hello.as_ref()
-                            && let Some(body) = hello.event_body()
                         {
                             // ARM_SHAPE transport 17: C отдаёт QSN-пачку как
                             // EV_SHAPE, R2O кэширует её для того же запроса.
+                            // Снимок мог появиться позже имени (SNI-first
+                            // неполный ClientHello) — кэш обновляется всегда.
                             if let Some(control) = control.as_mut()
                                 && let Some((kind, response)) = control.observe_quic_hello(hello)
                             {
                                 let _ = control.send_event(kind, &response);
                             }
-                            send_hello_event(
-                                &mut control,
-                                &mut r2o_snapshot_control,
-                                &mut flow_journal,
-                                r2o_now_ns(),
-                                &body,
-                                None,
-                            );
+                            // C `first_hello = named && !saw_hello`: HELLO
+                            // уходит ровно один раз, даже если снимок полёта
+                            // снят следующим Initial.
+                            if hello.r2o_first_hello
+                                && let Some(body) = hello.event_body()
+                            {
+                                send_hello_event(
+                                    &mut control,
+                                    &mut r2o_snapshot_control,
+                                    &mut flow_journal,
+                                    r2o_now_ns(),
+                                    &body,
+                                    None,
+                                );
+                            }
                         }
                         let hold_options = HoldOptions {
                             revision: name_plans.revision(),
@@ -2565,6 +2620,7 @@ mod app {
                                             selected_plan,
                                             bytes,
                                             controller_probe,
+                                            quic_plan_skip_note,
                                             || {
                                                 let decision = decide_with_tcp_session_mode(
                                                     &mut tcp_sessions,
@@ -3055,7 +3111,7 @@ mod app {
                         }
                     } else {
                         match decision {
-                            PacketDecision::Accept => {
+                            PacketDecision::Accept | PacketDecision::SkippedUdp { .. } => {
                                 let late_tail_handled = udp_replay.is_none()
                                     && original.is_some_and(|bytes| {
                                         r2o_udp_handle_late_tail(
@@ -5069,7 +5125,16 @@ mod app {
         packet: &[u8],
         decide: impl FnOnce() -> PacketDecision,
     ) -> PacketDecision {
-        r2o_udp_decide_once_mode(sessions, quic_sessions, plan, packet, false, decide)
+        let plan_skip = sessions.r2o_plan_applied_skip_note(packet, true);
+        r2o_udp_decide_once_mode(
+            sessions,
+            quic_sessions,
+            plan,
+            packet,
+            false,
+            plan_skip,
+            decide,
+        )
     }
 
     fn r2o_udp_decide_once_mode(
@@ -5078,6 +5143,7 @@ mod app {
         plan: &Plan,
         packet: &[u8],
         controller_probe: bool,
+        plan_skip: Option<&'static str>,
         decide: impl FnOnce() -> PacketDecision,
     ) -> PacketDecision {
         // C `handle_udp`: `fl->quic_deny` проверяется до разбора содержимого,
@@ -5085,8 +5151,18 @@ mod app {
         if !controller_probe && sessions.r2o_quic_deny_for_packet(packet) {
             return PacketDecision::Drop;
         }
+        if let Some(note) = plan_skip {
+            // C `out->skipped`: поток уже получал план (или уже показывал
+            // приветствие) — план не применяется повторно, оригинал проходит.
+            r2o_datapath::reason_stats::record_reason(note);
+            return PacketDecision::SkippedUdp { note };
+        }
         if sessions.r2o_plan_applied(packet) {
-            return PacketDecision::Accept;
+            // План уже на потоке, но датаграмма не клиентская: C уходит в
+            // ветку обратного направления до выбора/исполнения плана.
+            return PacketDecision::SkippedUdp {
+                note: "датаграмма едет от сервера — не клиентский Initial",
+            };
         }
         let decision = decide();
         let applied = matches!(
@@ -6708,6 +6784,7 @@ mod app {
                 key,
                 host: Vec::new(),
                 snapshot: None,
+                r2o_first_hello: false,
             };
             assert!(!r2o_udp_hold_ready(Some(&empty)));
             assert!(!r2o_udp_hold_ready(None));
@@ -6715,6 +6792,7 @@ mod app {
                 key,
                 host: b"example.test".to_vec(),
                 snapshot: None,
+                r2o_first_hello: true,
             };
             assert!(r2o_udp_hold_ready(Some(&named)));
         }
@@ -7715,7 +7793,12 @@ mod app {
                     executions += 1;
                     PacketDecision::Drop
                 });
-            assert_eq!(repeated, PacketDecision::Accept);
+            assert_eq!(
+                repeated,
+                PacketDecision::SkippedUdp {
+                    note: "датаграмма едет от сервера — не клиентский Initial"
+                }
+            );
             assert_eq!(executions, 1);
 
             sessions.expire(now + Duration::from_secs(120) + Duration::from_millis(1));
@@ -9300,6 +9383,7 @@ mod app {
                 )
                 .expect("QUIC hello");
             assert_eq!(hello.host, b"example.com");
+            assert!(udp.r2o_mark_hello_seen(&packet, true));
             assert_eq!(quic.r2o_init_ring_done(), 1);
             assert_eq!(quic.r2o_qsnap_done(), 1);
             assert_eq!(quic.r2o_quic_name(), 1);
@@ -9319,6 +9403,7 @@ mod app {
                 selected,
                 &packet,
                 false,
+                None,
                 || decide_with_session(&mut tcp_sessions, selected, &packet),
             );
             assert!(matches!(
@@ -9329,15 +9414,24 @@ mod app {
             assert!(udp.r2o_skip_plan_applied(&packet));
             let first_sends_left = udp.r2o_sends_left_for_packet(&packet);
             let second_sends_left = first_sends_left;
+            let second_skip = udp
+                .r2o_second_hello_skip_note(&packet)
+                .expect("C saw_hello && plan_done");
             let second = super::r2o_udp_decide_once_mode(
                 &mut udp,
                 &mut quic,
                 selected,
                 &packet,
                 false,
+                Some(second_skip),
                 || panic!("второй Initial не должен доходить до decide"),
             );
-            assert_eq!(second, r2o_datapath::engine::PacketDecision::Accept);
+            assert_eq!(
+                second,
+                r2o_datapath::engine::PacketDecision::SkippedUdp {
+                    note: "поток уже показывал приветствие"
+                }
+            );
 
             let n1 = match &decision {
                 r2o_datapath::engine::PacketDecision::Transmit { packets, .. } => packets.len(),
