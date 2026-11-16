@@ -214,15 +214,15 @@ fn repeated_measurement_updates_one_binding_and_keeps_other_shapes_independent()
     assert_ne!(modern_id, legacy_id);
     assert!(has_usable_binding(&catalog, &modern));
     assert!(has_usable_binding(&catalog, &legacy));
-    assert_eq!(catalog.boxes.len(), 2);
-    assert_eq!(
-        catalog
-            .boxes
-            .iter()
-            .map(|record| record.bindings.len())
-            .sum::<usize>(),
-        2
-    );
+    assert_eq!(catalog.boxes.len(), 1);
+    let record = &catalog.boxes[0];
+    assert_eq!(record.plans.len(), 2);
+    assert_eq!(record.bindings.len(), 2);
+    for (shape, id) in [(SHAPE_MODERN, &modern_id), (SHAPE_LEGACY, &legacy_id)] {
+        assert!(record.bindings.iter().any(|binding| {
+            binding.enabled && binding.shape == shape && &binding.plan_id == id
+        }));
+    }
 }
 
 #[test]

@@ -593,7 +593,8 @@ fn raw_selftest_failure_is_visible_and_does_not_claim_a_completed_sweep() {
 
     assert_eq!(result.verdict, Verdict::Opaque);
     assert!(!result.raw_usable);
-    assert!(result.reason.contains("raw handshake unavailable"));
+    assert!(result.reason.contains("самопроверка не прошла"));
+    assert!(result.reason.contains("про отравление вывода нет"));
     assert!(result.trace.iter().any(|probe| {
         probe.probe == "raw-selftest" && probe.error.as_deref() == Some("raw handshake unavailable")
     }));
