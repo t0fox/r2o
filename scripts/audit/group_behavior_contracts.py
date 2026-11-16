@@ -198,11 +198,6 @@ CONTRACTS = {
         "readable wait, hex decode, area key, error text.",
         "link: 1 P; send_area_key 11 + wait_readable 8 + hex_decode 6 кейсов C/Rust PASS; остаётся say.",
     ),
-    "CS-MEASUREMENT": (
-        "Measurement transport helpers",
-        "connect_bounded, send_all, delay, measured arm plan.",
-        "meas: 1 P; connect_bounded/send_all/arm_plan_measured PASS (send differential + 28 cases); остаётся nap_us.",
-    ),
     "CS-PROPS": (
         "QUIC properties text",
         "original/strategy measure and wire properties.",
@@ -412,8 +407,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 413:
-        raise SystemExit(f"expected 413 P rows, got {len(rows)}")
+    if len(rows) != 412:
+        raise SystemExit(f"expected 412 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")
@@ -476,14 +471,14 @@ def main() -> int:
         "| ID | Контракт | Доказательство |",
         "|---|---|---|",
         "| `DT-CLI-OUTPUT` | Detect CLI JSON/human/usage/exit | 2026-11-16: `r2o-detect` добавлен в `package-release.sh` и release-артефакт; `r2o-manager` активирует его как необязательный компонент; `test-detect-release-artifact.sh` распаковывает архив и даёт `6 triggers / 19 exits / json=equal / human=equal` на packaged binary. `r2o-controller --classify` остаётся отдельным CLI-путём. |",
+        "| `CS-MEASUREMENT` | Measurement transport helpers | 2026-11-16: `connect_bounded` success/refused/badfd, `send_all` send-timeout/EINTR/10 ветвей, `d2k_arm_plan_measured` 28 кейсов, `nap_us` 20 мс/EINTR — все C/Rust differential PASS; production nap переведён на `libc::nanosleep` с C-семантикой. |",
         "",
         "## Следующий шаг",
         "",
         "`CS-LINK-IO` сокращён до 1 P: `send_area_key` (11), `wait_readable`",
         "(8) и `hex_decode` (6) сверены C/Rust differential. Остаётся `say`.",
-        "`CS-MEASUREMENT` сокращён до 1 P: `connect_bounded` (success/refused/",
-        "badfd), `send_all` (send differential) и `arm_plan_measured` (28",
-        "cases) PASS; остаётся `nap_us`. Затем — `CS-CLI-TOOLS`",
+        "`CS-MEASUREMENT` закрыт; следующий кандидат — `CS-CLI-TOOLS`",
+        "(`d2kask`/`d2kfetch`), отдельный пользовательский CLI-контракт.",
         "",
         "## Ограничение TTL-контракта",
         "",

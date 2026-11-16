@@ -837,6 +837,31 @@ fn dial_probe_target_mode(
     }
 }
 
+/// C `nap_us` (`core/meas.c:52-55`): `nanosleep` на точное число
+/// микросекунд, результат прерывания игнорируется (как и в C).
+#[cfg(unix)]
+pub(crate) fn r2o_nap_us(microseconds: u32) {
+    if microseconds == 0 {
+        return;
+    }
+    let request = libc::timespec {
+        tv_sec: (microseconds / 1_000_000) as libc::time_t,
+        tv_nsec: ((microseconds % 1_000_000) * 1_000) as libc::c_long,
+    };
+    unsafe {
+        libc::nanosleep(&request, std::ptr::null_mut());
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn r2o_nap_us(microseconds: u32) {
+    std::thread::sleep(Duration::from_micros(u64::from(microseconds)));
+}
+
+pub(crate) fn r2o_nap(duration: Duration) {
+    r2o_nap_us(duration.as_micros().min(u32::MAX as u128) as u32);
+}
+
 pub(crate) fn probe_tcp_control_peer(
     peer: SocketAddr,
     timeout: Duration,
@@ -944,7 +969,7 @@ pub(crate) fn probe_trigger(
                 return Err(ProbeError::Local("context canceled".into()));
             }
             if !gap.is_zero() {
-                std::thread::sleep(gap);
+                r2o_nap(gap);
             }
         }
     }
@@ -2072,6 +2097,78 @@ mod connect_bounded_tests {
         output.push_str(&format!("badfd {}\n", if badfd { 1 } else { -1 }));
 
         if let Ok(path) = std::env::var("R2O_CONNECT_BOUNDED_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        print!("{output}");
+    }
+}
+
+#[cfg(test)]
+mod nap_tests {
+    use super::r2o_nap_us;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Instant;
+
+    static ALARM_SEEN: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn on_alarm(_: libc::c_int) {
+        ALARM_SEEN.store(true, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn nap_us_matches_c() {
+        // C `nap_us` (`core/meas.c:52-55`): nanosleep и игнорирование
+        // результата. C-оракул — `scripts/r2o-nap-us-differential.sh`.
+        let mut output = String::new();
+        let started = Instant::now();
+        r2o_nap_us(20_000);
+        let normal_ms = started.elapsed().as_millis();
+        output.push_str(&format!(
+            "nap20_ok {}\n",
+            u8::from((15..2000).contains(&normal_ms))
+        ));
+
+        // C-стенд ставит обработчик через sigaction с sa_flags=0; glibc
+        // `signal` включает SA_RESTART, поэтому используем sigaction, иначе
+        // nanosleep продолжится после сигнала и тест перестанет быть C-ветвью.
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = on_alarm as *const () as libc::sighandler_t;
+        action.sa_flags = 0;
+        unsafe {
+            libc::sigemptyset(&mut action.sa_mask);
+        }
+        let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::sigaction(libc::SIGALRM, &action, &mut previous);
+        }
+        // setitimer доставляет SIGALRM произвольному потоку процесса, а
+        // тестовый harness многопоточен: signal может уйти не спящему
+        // потоку. Шлём его адресно в текущий поток, как это делает
+        // однопоточный C-стенд.
+        let thread = unsafe { libc::pthread_self() };
+        let kick = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            unsafe {
+                libc::pthread_kill(thread, libc::SIGALRM);
+            }
+        });
+        let started = Instant::now();
+        r2o_nap_us(100_000);
+        let interrupted_ms = started.elapsed().as_millis();
+        kick.join().unwrap();
+        unsafe {
+            libc::sigaction(libc::SIGALRM, &previous, std::ptr::null_mut());
+        }
+        output.push_str(&format!(
+            "nap100_eintr_ok {}\n",
+            u8::from((10..80).contains(&interrupted_ms))
+        ));
+        output.push_str(&format!(
+            "nap100_seen {}\n",
+            u8::from(ALARM_SEEN.load(Ordering::SeqCst))
+        ));
+
+        if let Ok(path) = std::env::var("R2O_NAP_US_DIFF_OUTPUT") {
             std::fs::write(path, &output).unwrap();
         }
         print!("{output}");

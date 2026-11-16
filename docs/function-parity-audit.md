@@ -95,13 +95,13 @@ production-путь не ставится. Формулировки «теста
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 360 | 188 | 0 | 0 |
-| core-state | 692 | 486 | 206 | 0 | 0 |
+| core-state | 692 | 487 | 205 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1569** | **413** | **0** | **0** |
+| **Итого** | **1982** | **1570** | **412** | **0** | **0** |
 
-Это не оценка паритета: 413 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 412 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -120,7 +120,7 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1569 / P 413**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1570 / P 412**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
@@ -139,7 +139,7 @@ B — нужен только тест/differential **190**; C — архите�
 
 ## Итог и подтверждённые расхождения (2026-11-15)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1569 / P 413 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1570 / P 412 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -192,7 +192,7 @@ P означает неполное доказательство ветвей, N
 - core-state — CLI-флаги/вывод, PSL/catalog-парсер, crypto HKDF-границы,
   voice-blob, volume resource-retry.
 - `?` (0): не осталось; все строки реестра разобраны и имеют E/P/N.
-- Поведенческая группировка 413 P (33 контракта, 0 без контракта):
+- Поведенческая группировка 412 P (32 контракта, 0 без контракта):
   `docs/behavior-contracts/inventory.md` и
   `docs/behavior-contracts/p-contract-map.tsv`. Это не меняет статусы
   реестра и не является заявлением паритета.
@@ -385,11 +385,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 360 | 188 | 0 | 0 |
-| core-state | 692 | 486 | 206 | 0 | 0 |
+| core-state | 692 | 487 | 205 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1569** | **413** | **0** | **0** |
+| **Итого** | **1982** | **1570** | **412** | **0** | **0** |
 
 
 ---
@@ -2356,7 +2356,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `nap_us` | 52–55 | 4 | `nanosleep` на us: `tv_sec=us/1e6`, `tv_nsec=(us%1e6)*1000` | `std::thread::sleep(Duration::from_micros)` (`raw_probe.rs:1238` в `emit_plan_packets`, `response.rs:856` в `probe_trigger`) | **P*** | C округляет в нс; Rust `Duration::from_micros` точен до нс. Оба игнорируют результат прерывания (C `nanosleep` → `(void)`, Rust sleep не возвращает ошибку). Фактическая пауза не измерялась. |
+| `nap_us` | 52–55 | 4 | `nanosleep` на us: `tv_sec=us/1e6`, `tv_nsec=(us%1e6)*1000` | `response.rs r2o_nap_us` (production), используется в `probe_trigger` gap и `raw_probe::emit_plan_packets` | **E*** | **2026-11-16:** production заменён на `r2o_nap_us`: `libc::nanosleep` с точным us и игнорированием результата, как C `nap_us`; `std::thread::sleep` больше не используется на Linux-пути. C/Rust differential `scripts/r2o-nap-us-differential.sh` PASS: пауза 20 мс и EINTR (сигнал адресно в спящий поток, ранний возврат ~20 мс вместо 100). **Ограничение:** на не-Unix остаётся `thread::sleep`; проверен Linux. |
 | `d2k_mark_real` | 61–70 | 10 | `setsockopt(SO_MARK, int mark)`; вне Linux/без `SO_MARK` → -1 | `response.rs` `r2o_mark_real`, `probe_socket_with_mark` | E | C приводит u32→int и возвращает результат `setsockopt`; R2O `r2o_mark_real` делает то же через `set_socket_option`, `probe_socket_with_mark` использует его. Тест `mark_real_sets_so_mark_like_c`: под root ставит 0x2d и читает обратно, затем 0; без CAP_NET_ADMIN принимает EPERM и проверяет, что метка осталась 0. |
 | `d2k_accept_serverhello` | 87–94 | 8 | `len>=6 && b[0]==0x16 && b[1]==0x03 && b[5]==0x02` | `classify.rs:549-553 trigger_accepts(ServerHello)` | **E*** | **Точное совпадение:** C проверяет ровно `len>=6 && buf[0]==0x16 && buf[1]==0x03 && buf[5]==0x02` (`meas.c:87-94`); Rust `trigger_accepts(Accept::ServerHello)` — те же байты/длина (`classify.rs:551-553`). Сокетные тесты `response.rs:1442-1463`; C/Rust differential не нужен для побайтового предиката. |
 | `d2k_accept_tls_record` | 96–99 | 4 | `len>=3`, `b[0]` ∈ {0x16,0x15}, `b[1]==0x03` | `classify.rs:554-556 trigger_accepts(TlsRecord)` | **E*** | **Точное совпадение:** C проверяет `len>=3`, `buf[0]` ∈ {0x16,0x15}, `buf[1]==0x03` (`meas.c:96-99`); Rust `trigger_accepts(Accept::TlsRecord)` — те же значения (`classify.rs:554-556`). Используется для белого ClientHello (`main.rs:34054`); предикат побайтовый. |

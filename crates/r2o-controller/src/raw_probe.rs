@@ -1342,7 +1342,7 @@ fn raw_probe_once(
                         .into_iter()
                         .map(|packet| (packet.delay_us, packet.packet)),
                     cancel,
-                    thread::sleep,
+                    crate::response::r2o_nap,
                     |packet| connection.send_ip_packet(packet),
                 )?;
             }

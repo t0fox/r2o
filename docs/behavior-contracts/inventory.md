@@ -5,12 +5,12 @@
 поведенческие контракты. Источник — канонические таблицы
 `docs/audit/{core-net,core-state,datapath-core,datapath-plan,detect}.md`.
 
-Строк P: **413**; контрактов: **33**; без контракта: **0**.
+Строк P: **412**; контрактов: **32**; без контракта: **0**.
 
 | Группа | P |
 |---|---:|
 | core-net | 188 |
-| core-state | 206 |
+| core-state | 205 |
 | datapath-core | 7 |
 | datapath-plan | 0 |
 | detect | 12 |
@@ -44,7 +44,6 @@
 | `CS-CATALOG-TLV` | Catalog TLV plan encoding | plan TLV stamp/overlap/reorder/badsum/checksum. | 5 | compose: 5 P; текст/компилятор покрыты, TLV только C-тест. |
 | `CS-CLI-TOOLS` | CLI tools d2kc/d2kask/d2kfetch/d2kvoice | Флаги, stdout/exit, snapshot wire, usage. | 10 | d2kc/d2kask/d2kfetch/d2kvoice: 10 P; CLI differentials частичные. |
 | `CS-LINK-IO` | Link/control I/O helpers | readable wait, hex decode, area key, error text. | 1 | link: 1 P; send_area_key 11 + wait_readable 8 + hex_decode 6 кейсов C/Rust PASS; остаётся say. |
-| `CS-MEASUREMENT` | Measurement transport helpers | connect_bounded, send_all, delay, measured arm plan. | 1 | meas: 1 P; connect_bounded/send_all/arm_plan_measured PASS (send differential + 28 cases); остаётся nap_us. |
 | `CS-PROPS` | QUIC properties text | original/strategy measure and wire properties. | 5 | props: 5 P; quic props findings текстовый контракт не полный. |
 | `CS-VERDICT` | Classify verdict | C d2k_classify verdict mapping. | 1 | verdict: 1 P; C-путь в d2kc мёртв, Rust classify иной API. |
 | `DP-SESSION-LIFECYCLE` | Datapath session lifecycle | d2kd main/usage, session_new, UDP handle, session_packet. | 5 | session/d2kd: 5 P; session_packet/handle_udp live не сверены. |
@@ -66,14 +65,14 @@
 | ID | Контракт | Доказательство |
 |---|---|---|
 | `DT-CLI-OUTPUT` | Detect CLI JSON/human/usage/exit | 2026-11-16: `r2o-detect` добавлен в `package-release.sh` и release-артефакт; `r2o-manager` активирует его как необязательный компонент; `test-detect-release-artifact.sh` распаковывает архив и даёт `6 triggers / 19 exits / json=equal / human=equal` на packaged binary. `r2o-controller --classify` остаётся отдельным CLI-путём. |
+| `CS-MEASUREMENT` | Measurement transport helpers | 2026-11-16: `connect_bounded` success/refused/badfd, `send_all` send-timeout/EINTR/10 ветвей, `d2k_arm_plan_measured` 28 кейсов, `nap_us` 20 мс/EINTR — все C/Rust differential PASS; production nap переведён на `libc::nanosleep` с C-семантикой. |
 
 ## Следующий шаг
 
 `CS-LINK-IO` сокращён до 1 P: `send_area_key` (11), `wait_readable`
 (8) и `hex_decode` (6) сверены C/Rust differential. Остаётся `say`.
-`CS-MEASUREMENT` сокращён до 1 P: `connect_bounded` (success/refused/
-badfd), `send_all` (send differential) и `arm_plan_measured` (28
-cases) PASS; остаётся `nap_us`. Затем — `CS-CLI-TOOLS`
+`CS-MEASUREMENT` закрыт; следующий кандидат — `CS-CLI-TOOLS`
+(`d2kask`/`d2kfetch`), отдельный пользовательский CLI-контракт.
 
 ## Ограничение TTL-контракта
 
