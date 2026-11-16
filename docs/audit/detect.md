@@ -36,20 +36,20 @@ Static-хелперы наследуют статус владельца; в к�
 
 | Статус | Кол-во |
 |---|---:|
-| E | 139 |
-| P | 20 |
+| E | 143 |
+| P | 16 |
 | N | 0 |
 | ? | 0 |
 | **Всего** | **159** |
 
-Актуальные counts: **E 139 / P 20 / N 0** (срез main 2026-11-15).
-Доли: E — 87.4 % (139/159); E или P — 100 %; N — 0.
+Актуальные counts: **E 143 / P 16 / N 0** (срез main 2026-11-16).
+Доли: E — 89.9 % (143/159); E или P — 100 %; N — 0.
 
 По файлам:
 
 | Файл | Функций | E | P | N |
 |---|---:|---:|---:|---:|
-| detect/bridge.c | 17 | 4 | 13 | 0 |
+| detect/bridge.c | 17 | 8 | 9 | 0 |
 | detect/classify.c | 36 | 36 | 0 | 0 |
 | detect/main.c | 8 | 4 | 4 | 0 |
 | detect/poison.c | 12 | 12 | 0 | 0 |
@@ -58,7 +58,7 @@ Static-хелперы наследуют статус владельца; в к�
 | detect/response.c | 7 | 7 | 0 | 0 |
 | detect/trigger.c | 9 | 9 | 0 | 0 |
 | detect/include/d2k_detect.h | 1 | 1 | 0 | 0 |
-| **Всего** | **159** | **139** | **20** | **0** |
+| **Всего** | **159** | **143** | **16** | **0** |
 
 ---
 
@@ -835,10 +835,11 @@ r2o-tls-verify-differential.sh                       16/16 PASS
 
 ## Итог
 
-- Актуальные counts: **E 139 / P 20 / N 0** из 159 (срез main 2026-11-15).
-- P не считается паритетом: 20 строк без полного доказательства ветвей
-  (bridge/raw/CLI helpers); `sweep_poisons` и
-  `d2k_run_properties_family` закрыты differential.
+- Актуальные counts: **E 143 / P 16 / N 0** из 159 (срез main 2026-11-16).
+- P не считается паритетом: 16 строк без полного доказательства ветвей
+  (raw/CLI helpers); `sweep_poisons`, `d2k_run_properties_family`,
+  `bridge_input`, `d2k_detect_stop_all`, `stop_asked` и
+  `d2k_detect_sched_tcp_ack` закрыты differential.
 - N больше нет; ранее N-строки перенесены или переклассифицированы.
 - Ключевые ограничения: реальный DPI, OpenWrt/musl/mipsel, root-raw,
   field-by-field `d2k_arm` (закрыт), bridge/CLI,

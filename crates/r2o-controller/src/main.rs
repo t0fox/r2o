@@ -54476,7 +54476,20 @@ group_block_proven: false,
                 .expect("вторая начальная задача должна начаться"),
         ];
         started.sort();
-        assert_eq!(started, ["second.example", "third.example"]);
+        // Очередная пара стартов зависит от гонки постановки задач и wake
+        // worker'а: под нагрузкой worker может взять первую задачу до
+        // постановки второй. Проверяем инвариант C: стартовали ровно две,
+        // третья ждёт первого тика; порядок очереди покрыт отдельным
+        // `d2o_scheduler_queue_order_matches_donor`.
+        let all = ["first.example", "second.example", "third.example"];
+        let mut waiting = None;
+        for name in all {
+            if !started.iter().any(|started| started.as_str() == name) {
+                assert!(waiting.is_none(), "ждать тика должна ровно одна задача");
+                waiting = Some(name.to_string());
+            }
+        }
+        let waiting = waiting.expect("одна из трёх задач должна ждать первого тика");
 
         release_sender.send(()).unwrap();
         release_sender.send(()).unwrap();
@@ -54508,7 +54521,7 @@ group_block_proven: false,
         let third_started = started_receiver
             .recv_timeout(Duration::from_secs(10))
             .expect("ожидающая задача должна продолжиться после первого тика");
-        assert_eq!(third_started, "first.example");
+        assert_eq!(third_started, waiting);
         assert!(
             tick_started.elapsed() >= Duration::from_millis(250),
             "после первого тика между выпусками должна пройти пауза 250 мс"
