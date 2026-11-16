@@ -75,6 +75,13 @@ IPv4 без `IP_RECVTTL`, нулевая датаграмма, IPv6 hop limit. R
 Значение TTL зависит от ядра, поэтому контракт фиксирует факт измерения и
 семантику «0/None = не измерено», а не конкретное число.
 
+Граница с полным `d2k_quic_run`: этот документ закрывает только приём
+TTL/hop limit и выдачу `QuicReplayResult.server_ttl_in`. Проводка поля в
+итоговый verdict/props (`R2oQuicProps.server_ttl_in`) и полный qprops
+pipeline — отдельные открытые контракты `CN-QUIC-VERIFY`/`CS-PROPS` в
+`docs/behavior-contracts/inventory.md`, а не закрытая часть TTL receive-
+контракта.
+
 ## Старый и новый метод
 
 Старый пофункциональный подход требовал бы перенести как минимум четыре
