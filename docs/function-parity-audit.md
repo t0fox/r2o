@@ -95,13 +95,13 @@ production-путь не ставится. Формулировки «теста
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 360 | 188 | 0 | 0 |
-| core-state | 692 | 491 | 201 | 0 | 0 |
+| core-state | 692 | 492 | 200 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1574** | **408** | **0** | **0** |
+| **Итого** | **1982** | **1575** | **407** | **0** | **0** |
 
-Это не оценка паритета: 408 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 407 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -120,7 +120,7 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1574 / P 408**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1575 / P 407**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
@@ -192,7 +192,7 @@ P означает неполное доказательство ветвей, N
 - core-state — CLI-флаги/вывод, PSL/catalog-парсер, crypto HKDF-границы,
   voice-blob, volume resource-retry.
 - `?` (0): не осталось; все строки реестра разобраны и имеют E/P/N.
-- Поведенческая группировка 408 P (32 контракта, 0 без контракта):
+- Поведенческая группировка 407 P (32 контракта, 0 без контракта):
   `docs/behavior-contracts/inventory.md` и
   `docs/behavior-contracts/p-contract-map.tsv`. Это не меняет статусы
   реестра и не является заявлением паритета.
@@ -385,11 +385,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 360 | 188 | 0 | 0 |
-| core-state | 692 | 491 | 201 | 0 | 0 |
+| core-state | 692 | 492 | 200 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1574** | **408** | **0** | **0** |
+| **Итого** | **1982** | **1575** | **407** | **0** | **0** |
 
 
 ---
@@ -2190,7 +2190,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `usage` | 394-404 | 11 | справка: `--control/--catalog/--live/--log/https-cache/--mark/--measure-mark` | `main.rs` `print_help`, `--serve` | **E*** | C печатает d2kc usage и флаги. Rust `print_help` перечисляет `--serve/--check-catalog/.../--self-check/--version` и дополнительные `--discover/--mark`; набор production-флагов покрыт CLI-тестом `ask_help_exposes_snapshot_and_saved_hello_inputs`, `--self-check` — `offline_self_check_matches_c`. **Ограничение:** текст/порядок справки иные, часть d2kc-only флагов (`--health-file`, `--https-cache`) не выведена. |
 | `offline_self_check` | 406-411 | 6 | `D2K_CTL_PROTO_VERSION == D2K_RUNTIME_WIRE` и SHA-256(`abc`) == `ba78…15ad` | `main.rs` `r2o_offline_self_check`, `--self-check` | E | C проверяет wire-версию и SHA-256("abc") и вызывается через `--self-check`. Rust `r2o_offline_self_check` проверяет `PROTOCOL_VERSION==48` и SHA-256(`abc`); добавлен CLI-флаг `--self-check` (help + ветка `run`), тест `offline_self_check_matches_c`. |
 | `diagnostic_event` | 415-417 | 3 | `d2k_diag_record` события планировщика/HTTP | `Recorder::record` (`diagnostics.rs`) | **P** | C `(void)ctx; d2k_diag_record(diagnostics,e)`. Rust `Recorder::record`; состав полей/точки вызова проверяются частично differential/unit. |
-| `diagnostic_limit` | 418-420 | 3 | записать смену лимита в диагностику | `diagnostics.rs record_limit` | **P** | C `d2k_diag_record_limit(diagnostics,mono,c)` пишет `limit_event` из `d2k_diag_counts`. Rust `record_limit` с `Counts`; API/момент иные, C-событие пишется из sched-хука. |
+| `diagnostic_limit` | 418-420 | 3 | записать смену лимита в диагностику | `diagnostics.rs limit_event_json`/`Recorder` | **E*** | **2026-11-16:** C/Rust differential `scripts/r2o-diagnostic-limit-differential.sh` PASS **8 кейсов**: C-оракул `d2k_diag_record_limit` + `d2k_diag_write`, Rust `limit_event_json`; сравнивались объекты `limit_transitions` (wall-clock `at` нормализован). Покрыты `resources_valid=0`, нет лимита, cpu/memory/conntrack/slots по отдельности, все лимиты + `grow_pending` + последовательности, маска без валидных полей. **Ограничение:** момент вызова sched-хука и запись снимка в ring не покрыты — только формат/поля перехода. |
 | `diagnostic_tick` | 421-468 | 48 | раз в 1 с проверка `D2K_DIAG_DIR`, раз в 60 с sample+`report.json` через `report.new` + rename, madvise reset, memory enable | `Recorder::tick/write_report` (`:790`, `:1179`) | **P** | **Ветви сверены:** C статические `checked/written`; `now>=checked && now-checked<1000` → return; `checked=now`; если diag выключен: toggle 0, memory 0, free, снять хуки sched/httpsearch; если `!diagnostics`: new, `madvise_reset`, memory enable, хуки; `written=now-60000`; throttle 60 с; counts sched/httpsearch/memory; madvise; sample(`/proc`,`/opt/d2k/run`); path report.json/report.new; unlink tmp; open O_EXCL 0600; fdopen; write; size/ftell/limit; fclose; при ошибке/enabled=0 unlink; rename. Rust `Recorder::tick/write_report`; жизненный цикл и temp+rename перенесены, madvise/memory-детали и часть JSON сверены лишь unit `diagnostic_tick_lifecycle_matches_d2o`. |
 | `main` | 470-931 | 462 | главный цикл d2kc: CLI, каталог, greeting, link, sched, https/httpsearch, hooks, sync, poll (4 fd), save/live/report, health, graceful stop, exit 1 при потере link | `serve_catalog` + `ControlClient` + `R2oCatalogPersistence` + `diagnostics` (`main.rs`) | **P** | **C-ветви сверены:** `--version`; `d2k_runtime_offline`; разбор `--health-file/--control/--catalog/--live/--log/--https-cache/--mark/--measure-mark` (strtoul base 0, неизвестный → usage/2); `!sock` → usage/2; `freopen(log,"a",stdout)` + `dup2` + line-buffer; `signal(SIGPIPE,IGN)`, INT/TERM; `d2k_catalog_load` (нет файла → пусто, битый → exit 1); `d2k_link_open`; greeting 2000 мс, `D2K_EV_PROTO`/version/release_id; `d2k_sched_new(mark)`, measure_mark, send_cap, `d2k_raw_set_segment_max(arm_segment)`, say; httpsprobe new/load/cache; httpsearch runner/new/load; tcp/quic hooks; `sched_sync`; цикл `while(!stop_asked)`: heartbeat, poll `fd/wake/sched/https/hs` до TICK_MS (0 при sync_pending), drain до 256×события, HTTP portal/ACK/APPLIED, proto version/cap, `sched_event`, https result, hs result, `httpsearch_tick`, push_all раз в 30 мин, peer_closed/proto_bad → break, sync_step, tick, report раз в 15 мин, live раз в 2 с, save раз в 60 с при revision!=dirty; выход: stop_all, free, save, close, `link_lost?1:0`. **R2O-отличия:** нет `--measure-mark`, `--log`, `--health-file`, `--https-cache=`, `--release-id`, `--self-check`, периодической сводки событий; `--serve` позиционный; health пишется иначе; каталог JSON; отдельного C/Rust differential `main` нет. |
 
@@ -3262,10 +3262,11 @@ memory_bytes, load с проверкой хвоста, все writer'ы, `d2k_ca
   `--release-id`; `offline_self_check` — P: `--self-check` в
   `r2o-controller` отсутствует, SHA-256(abc) покрыт только
   crypto-дифференциалом.
-- **Диагностика:** `diagnostic_event/limit` ↔ `Recorder::record/
-  record_limit`; `diagnostic_tick` ↔ `Recorder::tick/write_report`
+- **Диагностика:** `diagnostic_event` ↔ `Recorder::record` (P);
+  `diagnostic_limit` ↔ `limit_event_json` (E*, 8 переходов
+  C/Rust differential); `diagnostic_tick` ↔ `Recorder::tick/write_report`
   (1 с/60 с, tmp+rename), unit `diagnostic_tick_lifecycle_matches_d2o`;
-  C/Rust differential сравнивает только часть JSON. P.
+  C/Rust differential тика сравнивает только часть JSON. P.
 - **`main` (462 строки):** P. Каталог, greeting, link, sched,
   https/httpsearch, hooks, poll, sync, save/live/report, health,
   graceful stop и exit 1 перенесены в `serve_catalog`; полного
@@ -3300,7 +3301,7 @@ memory_bytes, load с проверкой хвоста, все writer'ы, `d2k_ca
 | `usage` | 394–404 | `main.rs` help/serve args | **P** | C поддерживает `--health-file`, `--log`, `--https-cache`, `--measure-mark`; Rust `--serve` позиционный и не имеет части флагов. |
 | `offline_self_check` | 406–411 | `--self-check` | **P** | C проверяет `D2K_CTL_PROTO_VERSION == D2K_RUNTIME_WIRE` и SHA-256("abc"); в `r2o-controller` отдельного `--self-check` нет, SHA-256 покрыт crypto-дифференциалом. |
 | `diagnostic_event` | 415–417 | `Recorder::record` | **P** | Тот же колбэк события; Rust хранит поля в `Recorder`. |
-| `diagnostic_limit` | 418–420 | `Recorder::record_limit` | **P** | Тот же колбэк лимита; формат/счётчики различаются. |
+| `diagnostic_limit` | 418–420 | `Recorder`/`limit_event_json` | **E*** | `r2o-diagnostic-limit-differential.sh`: 8 переходов `limit_transitions` совпали с C. Ограничение — момент sched-хука не покрыт. |
 | `diagnostic_tick` | 421–468 | `Recorder::tick`/`write_report` | **P** | C 1 с/60 с, `report.new`+rename, лимит `D2K_DIAG_REPORT_MAX`; Rust `tick`/`write_report` с tmp+rename. Unit `diagnostic_tick_lifecycle_matches_d2o`; C/Rust differential сравнивает только часть JSON. |
 | `main` | 470–931 | `main.rs` serve loop | **P** | **Совпадает:** загрузка каталога, приветствие PROTO с version/release, `TICK_MS=3000`, `SAVE_EVERY_MS=60000`, `REPORT_EVERY_MS=15 мин`, `LIVE_EVERY_MS=2 с`, 256 событий за круг, обработка HELLO/SUSPECT/EXCHANGE/APPLIED/REFUSED/HTTP, сохранение каталога, health-file, остановка измерителя. **Отличия:** Rust не имеет `--health-file/--log/--https-cache/--measure-mark`, `http-plans.txt` и `d2k_httpsprobe_lost`; структура цикла и набор колбэков иные. Полного C/Rust differential `d2kc` нет. |
 

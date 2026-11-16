@@ -2074,6 +2074,99 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_limit_transition_matches_c() {
+        let Some(path) = std::env::var_os("R2O_DIAG_LIMIT_DIFF_OUTPUT") else {
+            return;
+        };
+        let mut events = Vec::new();
+        let mut push = |mono_ms: u64, counts: &Counts| {
+            events.push(limit_event_json(0, mono_ms, counts));
+        };
+
+        // 1. Ресурсы не измерены.
+        let mut counts = Counts::default();
+        counts.cpu_free_pct = None;
+        push(1000, &counts);
+
+        // 2. Валидные ресурсы без активного лимита.
+        let mut counts = Counts::default();
+        counts.resources_valid = true;
+        counts.cpu_valid = true;
+        counts.mem_valid = true;
+        counts.conntrack_valid = true;
+        counts.cpu_free_pct = Some(77);
+        counts.mem_avail_kb = 120_000;
+        counts.mem_total_kb = 131_072;
+        counts.mem_reserve_kb = 8_192;
+        counts.conntrack_count = 321;
+        counts.conntrack_max = 65_536;
+        push(1250, &counts);
+
+        // 3. CPU.
+        let mut counts = Counts::default();
+        counts.resources_valid = true;
+        counts.cpu_valid = true;
+        counts.limiter_mask = 1;
+        counts.cpu_free_pct = Some(12);
+        push(1500, &counts);
+
+        // 4. Память.
+        let mut counts = Counts::default();
+        counts.resources_valid = true;
+        counts.mem_valid = true;
+        counts.limiter_mask = 2;
+        counts.mem_avail_kb = 90_000;
+        counts.mem_total_kb = 131_072;
+        counts.mem_reserve_kb = 4_096;
+        push(1750, &counts);
+
+        // 5. Conntrack.
+        let mut counts = Counts::default();
+        counts.resources_valid = true;
+        counts.conntrack_valid = true;
+        counts.limiter_mask = 4;
+        counts.conntrack_count = 65_000;
+        counts.conntrack_max = 65_536;
+        push(2000, &counts);
+
+        // 6. Слоты.
+        let mut counts = Counts::default();
+        counts.resources_valid = true;
+        counts.limiter_mask = 8;
+        push(2250, &counts);
+
+        // 7. Все лимиты, grow_pending и последовательности.
+        let mut counts = Counts::default();
+        counts.resources_valid = true;
+        counts.cpu_valid = true;
+        counts.mem_valid = true;
+        counts.conntrack_valid = true;
+        counts.grow_pending = true;
+        counts.limiter_mask = 15;
+        counts.cpu_free_pct = Some(33);
+        counts.mem_avail_kb = 50_000;
+        counts.mem_total_kb = 131_072;
+        counts.mem_reserve_kb = 2_048;
+        counts.conntrack_count = 40_000;
+        counts.conntrack_max = 65_536;
+        counts.resource_sequence = 14;
+        counts.limit_sequence = 12;
+        counts.measurement_limit = 7;
+        counts.measurement_slots = 12;
+        push(2500, &counts);
+
+        // 8. Маска есть, но память/conntrack не измерены.
+        let mut counts = Counts::default();
+        counts.resources_valid = true;
+        counts.limiter_mask = 15;
+        counts.cpu_free_pct = None;
+        push(2750, &counts);
+
+        std::fs::write(path, serde_json::to_string(&events).unwrap()).unwrap();
+        print!("{}", serde_json::to_string(&events).unwrap());
+    }
+
+    #[test]
     fn limit_event_json_matches_c_fields() {
         let mut counts = Counts::default();
         counts.measurement_limit = 7;
