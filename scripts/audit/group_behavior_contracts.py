@@ -191,7 +191,7 @@ CONTRACTS = {
     "CS-CLI-TOOLS": (
         "CLI tools d2kc/d2kask/d2kfetch/d2kvoice",
         "Флаги, stdout/exit, snapshot wire, usage.",
-        "d2kc/d2kask/d2kfetch/d2kvoice: 9 P; d2kvoice main — 11+9 CLI differential PASS; usage и остальные CLI остаются.",
+        "d2kc/d2kask/d2kfetch/d2kvoice: 8 P; d2kvoice main — 11+9 CLI differential PASS; usage flag set — differential PASS; остальные CLI.",
     ),
     "CS-LINK-IO": (
         "Link/control I/O helpers",
@@ -407,8 +407,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 410:
-        raise SystemExit(f"expected 410 P rows, got {len(rows)}")
+    if len(rows) != 409:
+        raise SystemExit(f"expected 409 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")
