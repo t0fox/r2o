@@ -291,6 +291,20 @@ pub fn initial_client_hello_sni(input: &[u8]) -> Option<Vec<u8>> {
     )
 }
 
+/// C `d2k_qw_pn_len` (`core/quicwire.c:277-293`): минимальная ширина
+/// packet number по RFC 9000 A.2. `largest_acked = None` соответствует
+/// C `largest_acked < 0` (ничего не подтверждено).
+pub fn r2k_quic_packet_number_len(pn: u64, largest_acked: Option<u64>) -> usize {
+    let unacked = match largest_acked {
+        None => pn.wrapping_add(1),
+        // C вычитает беззнаково: pn < largest_acked тоже заворачивается.
+        Some(largest) => pn.wrapping_sub(largest),
+    };
+    let unacked = unacked.max(1);
+    let bits = (64 - unacked.leading_zeros()) as usize;
+    ((bits + 8) / 8).clamp(1, 4)
+}
+
 /// Собрать свежий QUIC v1 Initial с одним полным TLS ClientHello.
 pub fn r2k_quic_initial_build(
     client_hello: &[u8],
@@ -339,6 +353,10 @@ pub fn r2k_quic_initial_build(
     write_varint(client_hello.len() as u64, &mut plain).ok()?;
     plain.extend_from_slice(client_hello);
 
+    // Первый номер пакета — 0, подтверждённых нет; C `seal_one` с
+    // pn_len=0 вызывает `d2k_qw_pn_len(0,-1)` и получает один байт.
+    let pn_len = r2k_quic_packet_number_len(0, None);
+    let overhead = pn_len.checked_add(16)?;
     let (length_width, body_len) = [1usize, 2, 4, 8].into_iter().find_map(|width| {
         let length = target_len.checked_sub(clear_header.len().checked_add(width)?)?;
         let varint_width = match length {
@@ -347,24 +365,24 @@ pub fn r2k_quic_initial_build(
             16_384..=1_073_741_823 => 4,
             _ => 8,
         };
-        if varint_width != width || length < 20 {
+        if varint_width != width || length < overhead {
             return None;
         }
-        let body_len = usize::try_from(length).ok()?.checked_sub(20)?;
+        let body_len = usize::try_from(length).ok()?.checked_sub(overhead)?;
         (body_len >= plain.len()).then_some((width, body_len))
     })?;
     plain.resize(body_len, 0);
-    let length = u64::try_from(body_len.checked_add(20)?).ok()?;
+    let length = u64::try_from(body_len.checked_add(overhead)?).ok()?;
     let header_len = clear_header.len();
     write_varint(length, &mut clear_header).ok()?;
     if clear_header.len() - header_len != length_width
-        || clear_header.len() + body_len + 20 != target_len
+        || clear_header.len() + body_len + overhead != target_len
     {
         return None;
     }
 
     let keys = derive_initial_keys(QUIC_V1, &dcid).ok()?;
-    let packet = seal_initial(&clear_header, &plain, 0, 4, keys).ok()?;
+    let packet = seal_initial(&clear_header, &plain, 0, pn_len, keys).ok()?;
     (packet.len() == target_len && is_authenticated_initial(&packet)).then_some(packet)
 }
 
@@ -1803,6 +1821,41 @@ mod tests {
             super::r2k_quic_initial_flight_id(RFC_9001_INITIAL),
             super::r2k_quic_initial_flight_id(RFC_9369_INITIAL)
         );
+    }
+
+    /// C/Rust differential: C-стенд вызывает production `d2k_qw_pn_len`
+    /// из quicwire.c на той же таблице; вывод сравнивается построчно.
+    #[test]
+    fn packet_number_len_matches_c() {
+        let Some(path) = std::env::var_os("R2O_QUIC_PN_LEN_DIFF_OUTPUT") else {
+            return;
+        };
+        let cases: [(u64, Option<u64>); 14] = [
+            (0, None),
+            (1, None),
+            (127, None),
+            (128, None),
+            (255, None),
+            (256, None),
+            (16_383, None),
+            (16_384, None),
+            (65_535, None),
+            (65_536, None),
+            (0xac_5c_02, Some(0xab_e8_b3)),
+            (0xac_e8_fe, Some(0xab_e8_b3)),
+            (0, Some(0)),
+            (5, Some(10)),
+        ];
+        let mut output = String::new();
+        for (pn, largest) in cases {
+            let largest_text = largest.map_or("-1".to_owned(), |value| value.to_string());
+            output.push_str(&format!(
+                "{pn} {largest_text} {}\n",
+                super::r2k_quic_packet_number_len(pn, largest)
+            ));
+        }
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
     }
 
     #[test]

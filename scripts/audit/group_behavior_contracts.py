@@ -76,7 +76,7 @@ CONTRACTS = {
     "CN-QUIC-WIRE": (
         "QUIC wire: long header, PN length, seal/open, packet ranges",
         "Побайтовые операции над QUIC long-header/PN/AEAD/ranges.",
-        "quicwire: 11 P; Rust r2k_core::quic; нужны C/Rust vectors на ranges/seal/open.",
+        "quicwire: 10 P; pn_len — 14 значений C/Rust differential PASS; нужны vectors на ranges/seal/open.",
     ),
     "CN-QUIC-INITIAL": (
         "QUIC Initial: snapshot, reseal, rename, split, assembly",
@@ -392,8 +392,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 395:
-        raise SystemExit(f"expected 395 P rows, got {len(rows)}")
+    if len(rows) != 394:
+        raise SystemExit(f"expected 394 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")
