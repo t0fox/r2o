@@ -10680,6 +10680,13 @@ const R2O_DISCOVERY_CLEAR_RETRY_SECOND: std::time::Duration =
 const R2O_DISCOVERY_CLEAR_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 #[cfg(unix)]
 const R2O_DISCOVERY_INCOMPLETE_RETRY: std::time::Duration = std::time::Duration::from_secs(15);
+/// C `partial_finish` → `cooldown_record(kind 2)`:
+/// `SCHED_INCOMPLETE_BACKOFF_MS = 10 * 60 * 1000` (`sched.c:166,2197`).
+/// Отдельная константа, потому что общий incomplete-retry Rust (15 с)
+/// обслуживает и другие пути; менять его глобально нельзя без их сверки.
+#[cfg(unix)]
+const R2O_DISCOVERY_PARTIAL_FINISH_RETRY: std::time::Duration =
+    std::time::Duration::from_secs(10 * 60);
 /// Повтор late-RST-only подозрения не должен превращаться в поток зондов:
 /// это отдельный часовой интервал, как прежний 10-минутный отдых endpoint.
 #[cfg(unix)]
@@ -28686,6 +28693,9 @@ impl ControlClient {
                     // единственным планом; бюджет остаётся «оборван».
                     outcome.plan_text = Some(text);
                     outcome.budget_mark = R2O_D2K_CAT_BUDGET_CUT;
+                    // C `cooldown_record(kind 2)` — 10 минут, а не общий
+                    // 15-секундный incomplete-retry Rust.
+                    outcome.retry_after = Some(R2O_DISCOVERY_PARTIAL_FINISH_RETRY);
                     outcome
                         .detail
                         .push_str("; проходящего бюджета нет — беру лучший частичный обход");
@@ -55741,6 +55751,21 @@ group_block_proven: false,
             failed_at,
             failed_at + std::time::Duration::from_secs(120)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn partial_finish_retry_matches_donor() {
+        // C `SCHED_INCOMPLETE_BACKOFF_MS` = 10 минут для partial_finish;
+        // общий incomplete-retry Rust остаётся 15 с и проверяется отдельно.
+        assert_eq!(
+            super::R2O_DISCOVERY_PARTIAL_FINISH_RETRY,
+            std::time::Duration::from_secs(10 * 60)
+        );
+        assert_eq!(
+            super::R2O_DISCOVERY_INCOMPLETE_RETRY,
+            std::time::Duration::from_secs(15)
+        );
     }
 
     #[cfg(unix)]
