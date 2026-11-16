@@ -37271,7 +37271,8 @@ mod tests {
         extern "C" fn on_alarm(_: libc::c_int) {
             ALARM_SEEN.store(true, Ordering::SeqCst);
         }
-        let previous = unsafe { libc::signal(libc::SIGALRM, on_alarm as libc::sighandler_t) };
+        let previous =
+            unsafe { libc::signal(libc::SIGALRM, on_alarm as *const () as libc::sighandler_t) };
         let timer = libc::itimerval {
             it_interval: libc::timeval {
                 tv_sec: 0,
