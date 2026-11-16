@@ -94,14 +94,14 @@ production-путь не ставится. Формулировки «теста
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 362 | 186 | 0 | 0 |
+| core-net | 548 | 363 | 185 | 0 | 0 |
 | core-state | 692 | 503 | 189 | 0 | 0 |
 | datapath-core | 400 | 394 | 6 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1589** | **393** | **0** | **0** |
+| **Итого** | **1982** | **1590** | **392** | **0** | **0** |
 
-Это не оценка паритета: 393 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 392 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -120,7 +120,7 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1589 / P 393**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1590 / P 392**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
@@ -192,7 +192,7 @@ P означает неполное доказательство ветвей, N
 - core-state — CLI-флаги/вывод, PSL/catalog-парсер, crypto HKDF-границы,
   voice-blob, volume resource-retry.
 - `?` (0): не осталось; все строки реестра разобраны и имеют E/P/N.
-- Поведенческая группировка 393 P (29 контрактов, 0 без контракта):
+- Поведенческая группировка 392 P (28 контрактов, 0 без контракта):
   `docs/behavior-contracts/inventory.md` и
   `docs/behavior-contracts/p-contract-map.tsv`. Это не меняет статусы
   реестра и не является заявлением паритета.
@@ -384,12 +384,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 362 | 186 | 0 | 0 |
+| core-net | 548 | 363 | 185 | 0 | 0 |
 | core-state | 692 | 503 | 189 | 0 | 0 |
 | datapath-core | 400 | 394 | 6 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1589** | **393** | **0** | **0** |
+| **Итого** | **1982** | **1590** | **392** | **0** | **0** |
 
 
 ---
@@ -1429,7 +1429,7 @@ Inline-классификация HTTP-ответа: 451/2xx/3xx-портал, �
 |---|---|---:|---|---|---|---|
 | `d2k_ip6frag_sender_init` | 34-36 | 3 | `memset` sender, `fd=-1` | `raw.rs:48-93 RawSocket::open`, `R2oIp6FragSender::default` | **E*** | Rust `R2oIp6FragSender::default` даёт fd=None (на проводе -1), `RawSocket::open` создаёт `OwnedFd` только для реального сокета. `test-datapath-ip6frag-sender-state-differential.sh` 1 кейс PASS: `sender_init_fd=-1` C/Rust; Rust unit `raw_socket_open_drop_ipv4_ipv6` проверяет open/Drop для AF_INET/AF_INET6 и отсутствие утечки на 32 циклах. **Ограничение:** C `d2k_ip6frag_sender_init` на уже открытом sender делает memset без close и течёт fd; Rust этот переход не выражает (владелец — `Option<OwnedFd>`), эквивалентность определена для штатного init-before-use. |
 | `d2k_ip6frag_sender_close` | 37-40 | 4 | закрыть fd и вернуть структуру в исходное состояние | `RawSocket`/`Drop`, `R2oIp6FragSender::default` | **E*** | C `if (s->fd>=0) close(s->fd); init(s)`; `test-datapath-ip6frag-sender-state-differential.sh` PASS: close1/close2 = -1, send после close → ENETUNREACH, fd_after=-1. Rust `RawSocket`/`R2oIp6FragSender` закрывают `OwnedFd` через `Drop`, повторный сброс — `None`; unit `raw_socket_open_drop_ipv4_ipv6` подтверждает EBADF после Drop и отсутствие утечки. **Ограничение:** Rust не позволяет отправить после close (тип уже уничтожен) — это сильнее C, а не расхождение. |
-| `d2k_f6_now` | 41-45 | 5 | монотонное время в мс для IPv6-фрагментера | `Instant`/`Duration` | **P*** | C `clock_gettime(CLOCK_MONOTONIC,&t)`; при ошибке 0; иначе `tv_sec*1000 + tv_nsec/1e6`. Rust использует `Instant`/`Duration` (монотонные) для сроков фрагментера; отдельной функции с возвратом 0 при сбое нет. |
+| `d2k_f6_now` | 41-45 | 5 | монотонное время в мс для IPv6-фрагментера | `Instant`/`Duration` в `R2oIp6FragSender` | **E*** | **2026-11-17:** production `R2oIp6FragSender` использует `Instant` для тех же монотонных сроков: кеш fd/mark/src/dst 1 с и neighbor-deadline 200 мс. C/Rust differential `scripts/test-datapath-ip6frag-sender-state-differential.sh` PASS: init/close/send-after-close и fd не расходятся. **Ограничение:** отдельной функции `d2k_f6_now` нет — `Instant` идиоматичен и не возвращает ошибку `clock_gettime`; ветка «сбой → 0» не воспроизводится. |
 | `d2k_f6_attr` | 46-55 | 10 | rtattr: `NLMSG_ALIGN`, `RTA_LENGTH`, проверка `at+RTA_ALIGN<=cap`, запись и обновление `nlmsg_len` | `raw.rs:r2o_push_rtattr` | **E*** | R2O `raw.rs` `r2o_push_rtattr` пишет `nlmsg_len`/`rta_type`/`rta_len`, добавляет padding до 4 байт и используется `r2o_f6_route` для RTA_DST(16)/RTA_SRC(16)/RTA_MARK(4). `test-datapath-f6-netlink-differential.sh` 37 кейсов PASS: шим проверяет побайтно наличие/длины всех трёх атрибутов и alignment через `RTA_OK`, плюс `dst_len=src_len=128`. **Ограничение:** C-ветка нехватки фиксированной ёмкости (`EMSGSIZE`) в Rust структурно отсутствует — `Vec` растёт; все production-запросы (48 байт атрибутов при cap 96) укладываются. |
 | `d2k_f6_query` | 56-72 | 17 | AF_NETLINK/SOCK_RAW/NETLINK_ROUTE, `SO_RCVTIMEO` 200 мс, sendto/recvfrom, `nl_pid==0`, восстановление errno | `raw.rs:r2o_open_route_netlink`, `r2o_netlink_send/recv` | **E*** | R2O `raw.rs` открывает one-shot AF_NETLINK/NETLINK_ROUTE, ставит SO_RCVTIMEO 200 мс, проверяет `nl_pid==0` и сохраняет errno. `test-datapath-f6-netlink-differential.sh` 37 кейсов PASS: seq=1/flags запроса, NLMSG_ERROR/пустой ответ, EAGAIN/EINTR send/recv, неверный source nl_pid, короткий ответ. Живой netns 11 кейсов PASS на реальном ядре. `r2o_route.rs` watch — отдельный долгоживущий сокет для правил/маршрута по умолчанию, не замена one-shot f6 query. **Ограничение:** 200-мс timeout и битые ответы проверены шимом; живой kernel timeout не воспроизводился. |
 | `d2k_f6_route` | 73-106 | 34 | RTM_GETROUTE IPv6: `RTA_DST`+`RTA_SRC`+`RTA_MARK`, `dst_len=src_len=128`; NLMSG_ERROR, RTM_NEWROUTE, `RTN_UNICAST` или `RTN_LOCAL`, `RTA_OIF`, `RTA_GATEWAY`; иначе ENETUNREACH | `raw.rs:1072 r2o_f6_route` | **E*** | R2O `raw.rs:1072 r2o_f6_route`: RTM_GETROUTE RTA_DST/RTA_SRC/RTA_MARK, dst/src_len=128, RTN_UNICAST/RTN_LOCAL, RTA_OIF/RTA_GATEWAY. `test-datapath-ip6frag-route-differential.sh` 8 кейсов + live raw6 PASS; **2026-11-15:** `test-datapath-f6-netlink-differential.sh` 37 кейсов PASS — NLMSG_ERROR (включая короткий/положительный), EAGAIN/таймаут, пустой ответ, ENETUNREACH, RTN_LOCAL, отсутствие/короткие RTA_OIF и RTA_GATEWAY, чужой sequence, не-IPv6/не-unicast, побайтная проверка RTA_DST/SRC/MARK и dst_len/src_len=128. **Живой netns 2026-11-15:** `test-datapath-f6-netns-differential.sh` 11 кейсов PASS — RTN_UNREACHABLE (ядро отдаёт EHOSTUNREACH 113), отсутствие маршрута (ENETUNREACH 101), RTN_LOCAL (::1), policy route по RTA_MARK 0x2e и отказ при неверной метке 0x2f. **Ограничение:** batch/200-мс timeout, короткие/битые rtattr и NLMSG_ERROR остаются проверены только netlink-моком; живой kernel timeout/битый ответ не воспроизводился. |

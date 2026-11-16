@@ -138,11 +138,6 @@ CONTRACTS = {
         "STUN request, DNS/voice blob, prefix, local failure.",
         "voice/voice_discovery/stun: 10 P; voice differentials частичные.",
     ),
-    "CN-IP6FRAG": (
-        "IPv6 fragment probe helper",
-        "Единый monotonic timestamp для IPv6-fragment probe.",
-        "d2k_ip6frag_send.h: 1 P; helper-level, нужен вызов в живом probe.",
-    ),
     "CS-SCHED-TASK-LIFECYCLE": (
         "Scheduler task/worker lifecycle",
         "Слоты, worker permits, reset/done/fail/join, retire, queue wake, guards.",
@@ -392,8 +387,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 393:
-        raise SystemExit(f"expected 393 P rows, got {len(rows)}")
+    if len(rows) != 392:
+        raise SystemExit(f"expected 392 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")
@@ -460,6 +455,7 @@ def main() -> int:
         "| `CS-CATALOG-TLV` | Catalog TLV plan encoding | 2026-11-16: `r2o-compose-tlv-differential.sh` — overlap/reorder/badsum/badsum_gap/checksum и `plan_tlv_stamp_ident` (id + stamped D2KP, guard'ы layout'а) совпали с C; оба ask-пути удостоверяют план по TLV. |",
         "| `CS-LINK-IO` | Link/control I/O helpers | 2026-11-16: send_area_key 11, wait_readable 8, hex_decode 6, say 4+3 — все C/Rust differential PASS; `r2o_link_open` даёт те же тексты пустого/длинного/отсутствующего сокета. |",
         "| `DP-TRACK` | Datapath flow table key hash | 2026-11-17: `test-datapath-tcp-capacity-differential.sh` PASS (capacity/refusal/reverse/duplicate/remove/expiry); `key_hash` осознанно заменён на `HashMap` RandomState — внутренний порядок коллизий не наблюдаем, HashDoS-устойчивость не ослаблена. |",
+        "| `CN-IP6FRAG` | IPv6 fragment probe helper | 2026-11-17: `test-datapath-ip6frag-sender-state-differential.sh` PASS (init/close/send-after-close, fd); production sender uses `Instant` for the same 1s cache and 200ms neighbor deadline. |",
         "",
         "## Следующий шаг",
         "",

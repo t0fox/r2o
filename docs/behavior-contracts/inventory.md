@@ -5,11 +5,11 @@
 поведенческие контракты. Источник — канонические таблицы
 `docs/audit/{core-net,core-state,datapath-core,datapath-plan,detect}.md`.
 
-Строк P: **393**; контрактов: **29**; без контракта: **0**.
+Строк P: **392**; контрактов: **28**; без контракта: **0**.
 
 | Группа | P |
 |---|---:|
-| core-net | 186 |
+| core-net | 185 |
 | core-state | 189 |
 | datapath-core | 6 |
 | datapath-plan | 0 |
@@ -32,7 +32,6 @@
 | `CN-HTTP-SEARCH` | HTTP search lifecycle and candidates | Задачи, кандидаты, judge, fallback, runner, diagnostics, persist. | 26 | httpsearch: 26 P; test-http-search-response PASS 13; diagnostic_end — event JSON differential PASS; переходы/таймеры/live — нет. |
 | `CN-VOLUME` | Response volume probe | TLS/plain drain, rx volume, bounded connect, path probe. | 8 | volume: 8 P; budget volume differentials частичные, полный path — нет. |
 | `CN-VOICE` | Voice/STUN discovery | STUN request, DNS/voice blob, prefix, local failure. | 10 | voice/voice_discovery/stun: 10 P; voice differentials частичные. |
-| `CN-IP6FRAG` | IPv6 fragment probe helper | Единый monotonic timestamp для IPv6-fragment probe. | 1 | d2k_ip6frag_send.h: 1 P; helper-level, нужен вызов в живом probe. |
 | `CS-SCHED-TASK-LIFECYCLE` | Scheduler task/worker lifecycle | Слоты, worker permits, reset/done/fail/join, retire, queue wake, guards. | 31 | sched.c: worker/task/queue/guard; Rust R2oDiscoverySearches/Queue/Life; полная матрица T_* не доказана. |
 | `CS-SCHED-SUSPECT-ADMISSION` | Scheduler suspect admission and refusal | on_suspect, cooldown, dead/refusal, shape/family, refused outcomes. | 32 | sched.c: admission/refusal; Rust queue/cooldown/family recovery; полный differential кодов/порядка. |
 | `CS-SCHED-CANDIDATE-VERIFY` | Scheduler candidate verification | verify_confirm, partial_finish, ACK/APPLIED, own plan, exchange. | 21 | sched.c: verify/applied/exchange; production verify_confirm 30 cases, остальные ветви P. |
@@ -66,6 +65,7 @@
 | `CS-CATALOG-TLV` | Catalog TLV plan encoding | 2026-11-16: `r2o-compose-tlv-differential.sh` — overlap/reorder/badsum/badsum_gap/checksum и `plan_tlv_stamp_ident` (id + stamped D2KP, guard'ы layout'а) совпали с C; оба ask-пути удостоверяют план по TLV. |
 | `CS-LINK-IO` | Link/control I/O helpers | 2026-11-16: send_area_key 11, wait_readable 8, hex_decode 6, say 4+3 — все C/Rust differential PASS; `r2o_link_open` даёт те же тексты пустого/длинного/отсутствующего сокета. |
 | `DP-TRACK` | Datapath flow table key hash | 2026-11-17: `test-datapath-tcp-capacity-differential.sh` PASS (capacity/refusal/reverse/duplicate/remove/expiry); `key_hash` осознанно заменён на `HashMap` RandomState — внутренний порядок коллизий не наблюдаем, HashDoS-устойчивость не ослаблена. |
+| `CN-IP6FRAG` | IPv6 fragment probe helper | 2026-11-17: `test-datapath-ip6frag-sender-state-differential.sh` PASS (init/close/send-after-close, fd); production sender uses `Instant` for the same 1s cache and 200ms neighbor deadline. |
 
 ## Следующий шаг
 
