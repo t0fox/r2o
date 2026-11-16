@@ -511,22 +511,27 @@ fn r2o_tls_skip_vector(bytes: &[u8], offset: usize, end: usize, prefix: usize) -
 }
 
 /// Создать TLS 1.3 измерительное соединение с ECH по правилам d2o.
+///
+/// C `d2k_tls_connect_ech`: origin и конфигурация обязательны, `client_alpn=0`
+/// (то есть `http/1.1`), TLS 1.2 не предлагается. C `d2k_t13_ech_build`
+/// оставляет в ECH-приветствии одну группу X25519 и один шифр 0x1301 —
+/// ровно их ждёт `d2k_t13_sh_parse`, поэтому rustls получает тот же набор.
 pub fn r2o_tls_ech_client_connection(
     name: &str,
     _roots: rustls::RootCertStore,
     ech: rustls::client::EchConfig,
     wire_len: Option<usize>,
 ) -> Result<rustls::ClientConnection, String> {
+    if name.is_empty() {
+        return Err("ECH требует origin и конфигурацию".to_owned());
+    }
     let mut provider = rustls::crypto::ring::default_provider();
     let verifier = R2oD2oServerCertVerifier {
         algorithms: provider.signature_verification_algorithms.clone(),
         verify_finished: true,
     };
     provider.cipher_suites = vec![rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256];
-    provider.kx_groups = vec![
-        rustls::crypto::ring::kx_group::X25519,
-        rustls::crypto::ring::kx_group::SECP256R1,
-    ];
+    provider.kx_groups = vec![rustls::crypto::ring::kx_group::X25519];
     let mut config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(provider))
         .with_ech(rustls::client::EchMode::Enable(ech))
         .map_err(|error| format!("не удалось включить ECH: {error}"))?
@@ -539,6 +544,16 @@ pub fn r2o_tls_ech_client_connection(
         .map_err(|_| "имя цели недопустимо для внутреннего TLS SNI".to_owned())?;
     rustls::ClientConnection::new(std::sync::Arc::new(config), server_name)
         .map_err(|error| format!("не удалось начать ECH-рукопожатие: {error}"))
+}
+
+/// C `d2k_tls_ech_accepted`: флаг `t->ech_accepted`.
+///
+/// В C сессия без ECH даёт 0, ECH-сессия с подтверждённым accept_confirmation —
+/// 1, а отвергнутый ECH не создаёт сессию вовсе (`d2k_tls_connect_ech`
+/// возвращает ошибку). Тип `Option` передаёт отсутствие сессии, `Accepted` —
+/// единственный статус rustls, означающий проверенный accept_confirmation.
+pub fn r2o_tls_ech_accepted(status: Option<rustls::client::EchStatus>) -> bool {
+    status == Some(rustls::client::EchStatus::Accepted)
 }
 
 /// Собрать зашифрованный ClientHello, чтобы классификатор проверял ту же форму.

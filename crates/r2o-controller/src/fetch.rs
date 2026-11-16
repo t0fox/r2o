@@ -1092,6 +1092,407 @@ pub fn r2o_fetch_ech_connected_stream_with_phase_timeout(
     )
 }
 
+const R2O_ECH_PROBE_CONFIG_REASON: &str = "нет ECH-конфигурации/origin; опыт не состоялся";
+const R2O_ECH_PROBE_PATH_REASON: &str = "недопустимый путь stylesheet-пробы";
+const R2O_ECH_PROBE_HOST_REASON: &str = "недопустимый символ в имени HTTP";
+const R2O_ECH_PROBE_WITNESS_REASON: &str = "ECH witness/config не совпали; опыт не состоялся";
+const R2O_ECH_PROBE_MARK_REASON: &str = "метка измерительного сокета не поставилась";
+/// C `D2K_PROPS_ASK_WAIT_MS` (`compose.c`): contact не наследует deadline
+/// TLS/HTTP-фазы.
+const R2O_ECH_PROBE_CONTACT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// C `d2k_ver_result` в объёме ECH-пробы. Сокет остаётся открытым до
+/// `r2o_ech_probe_close`, как у C (комментарий `d2k_verify_close`).
+#[derive(Debug)]
+pub struct R2oEchProbeOutcome {
+    pub level: i32,
+    pub name_ok: i32,
+    pub ech_accepted: bool,
+    pub status: u16,
+    pub body_complete: bool,
+    pub body_bytes: u64,
+    pub local_port: u16,
+    pub reason: String,
+    stream: Option<TcpStream>,
+    /// C `r.fd`. На ветви «недопустимый символ в имени HTTP» C оставляет
+    /// use_fd открытым, но в результате пишет -1; Rust повторяет поле и
+    /// хранит сокет до `close`, чтобы не терять владение.
+    reported_fd: i32,
+}
+
+impl R2oEchProbeOutcome {
+    /// Дескриптор в смысле C `r.fd`; -1, если результата-сокета нет.
+    pub fn fd(&self) -> i32 {
+        self.reported_fd
+    }
+
+    /// Фактически удерживаемый дескриптор (для закрытия/диагностики).
+    pub fn retained_fd(&self) -> i32 {
+        self.stream.as_ref().map_or(-1, TcpStream::as_raw_fd)
+    }
+
+    /// Закрыть сокет; C `d2k_verify_close`.
+    pub fn close(&mut self) {
+        self.stream.take();
+        self.reported_fd = -1;
+    }
+}
+
+fn r2o_ech_probe_outcome(stream: Option<TcpStream>) -> R2oEchProbeOutcome {
+    let reported_fd = stream.as_ref().map_or(-1, TcpStream::as_raw_fd);
+    R2oEchProbeOutcome {
+        level: crate::live::D2K_VER_NOT_MEASURED,
+        name_ok: -1,
+        ech_accepted: false,
+        status: 0,
+        body_complete: false,
+        body_bytes: 0,
+        local_port: 0,
+        reason: String::new(),
+        stream,
+        reported_fd,
+    }
+}
+
+fn r2o_ech_stream_local_port(stream: &Option<TcpStream>) -> u16 {
+    stream
+        .as_ref()
+        .and_then(|stream| stream.local_addr().ok())
+        .map_or(0, |address| address.port())
+}
+
+/// C `verify_contact` с `use_fd >= 0` соединяет уже открытый (обычно bound)
+/// сокет. Rust ECH-путь принимает и уже соединённый `TcpStream`, поэтому
+/// connect выполняется только для несоединённого дескриптора.
+fn r2o_ech_connect_existing(
+    stream: &TcpStream,
+    address: SocketAddr,
+    timeout: Duration,
+) -> Result<(), String> {
+    if stream.peer_addr().is_ok() {
+        return Ok(());
+    }
+    let fd = stream.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error().to_string());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error().to_string());
+    }
+    let result = (|| {
+        let rc = connect_socket(fd, address).map_err(|error| error.to_string())?;
+        if rc != 0 {
+            let error = io::Error::last_os_error();
+            if !matches!(
+                error.raw_os_error(),
+                Some(libc::EINPROGRESS | libc::EALREADY | libc::EINTR)
+            ) {
+                return Err(error.to_string());
+            }
+            let deadline = Instant::now()
+                .checked_add(timeout)
+                .ok_or_else(|| "слишком долгий срок".to_owned())?;
+            let mut descriptor = libc::pollfd {
+                fd,
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err("срок подключения истёк".to_owned());
+                }
+                let milliseconds = remaining.as_millis().min(libc::c_int::MAX as u128);
+                let ready =
+                    unsafe { libc::poll(&mut descriptor, 1, milliseconds.max(1) as libc::c_int) };
+                if ready > 0 {
+                    break;
+                }
+                if ready < 0 {
+                    let error = io::Error::last_os_error();
+                    if error.kind() != io::ErrorKind::Interrupted {
+                        return Err(error.to_string());
+                    }
+                }
+            }
+            if let Some(error) = stream.take_error().map_err(|error| error.to_string())? {
+                return Err(error.to_string());
+            }
+        }
+        Ok(())
+    })();
+    let _ = unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+    result
+}
+
+/// C `ech_http_denial` + уровни `request_page_budget`: 429 становится
+/// CHALLENGE только если ответ ещё не DENIED/BLOCKPAGE.
+fn r2o_ech_fetch_level(fetch: &FetchResult, host: &str) -> i32 {
+    let base = if fetch.cloudflare_challenge {
+        crate::live::D2K_VER_CHALLENGE
+    } else if fetch.http_outcome == R2oFetchHttpOutcome::Blocked {
+        crate::live::D2K_VER_BLOCKPAGE
+    } else if fetch.http_outcome == R2oFetchHttpOutcome::LegalDenial {
+        crate::live::D2K_VER_DENIED
+    } else if (300..400).contains(&fetch.status) {
+        if fetch.complete
+            && r2o_fetch_external_https_redirect(fetch.status, fetch.location.as_bytes())
+            && r2o_fetch_same_origin_redirect(&fetch.location, host).is_none()
+        {
+            crate::live::D2K_VER_APPLICATION
+        } else {
+            crate::live::D2K_VER_HANDSHAKE
+        }
+    } else if fetch.status != 0 && fetch.complete {
+        crate::live::D2K_VER_APPLICATION
+    } else {
+        crate::live::D2K_VER_HANDSHAKE
+    };
+    if fetch.status == 429
+        && base != crate::live::D2K_VER_DENIED
+        && base != crate::live::D2K_VER_BLOCKPAGE
+    {
+        crate::live::D2K_VER_CHALLENGE
+    } else {
+        base
+    }
+}
+
+fn r2o_ech_probe_reason(fetch: &FetchResult, level: i32) -> String {
+    if fetch.status == 429 && level == crate::live::D2K_VER_CHALLENGE {
+        return format!(
+            "ECH origin ответил HTTP {}; подбор не должен усиливать отказ сервера",
+            fetch.status
+        );
+    }
+    fetch.reason.clone().unwrap_or_default()
+}
+
+/// C `d2k_verify_probe_ech_on`: origin + config обязательны, затем
+/// `verify_probe13_internal` с ECH и `ech_http_denial`.
+///
+/// `use_fd=None` — C `use_fd < 0`: сокет создаётся здесь с `mark`.
+/// `use_fd=Some` — уже открытый (обычно подтверждённый) сокет; при ошибке
+/// контракта он закрывается, как `close(use_fd)` в C.
+#[allow(clippy::too_many_arguments)]
+pub fn r2o_verify_probe_ech_on(
+    use_fd: Option<TcpStream>,
+    ip: IpAddr,
+    port: u16,
+    origin: Option<&str>,
+    config: Option<&rustls::client::EchConfig>,
+    deadline: Duration,
+    wire_len: Option<usize>,
+    mark: Option<u32>,
+    path: Option<&str>,
+) -> R2oEchProbeOutcome {
+    let use_fd_present = use_fd.is_some();
+    if config.is_none() || origin.is_none_or(str::is_empty) {
+        drop(use_fd);
+        let mut outcome = r2o_ech_probe_outcome(None);
+        outcome.reason = R2O_ECH_PROBE_CONFIG_REASON.into();
+        return outcome;
+    }
+    if let Some(path) = path
+        && !crate::r2o_resource::r2o_resource_path_ok(path)
+    {
+        drop(use_fd);
+        let mut outcome = r2o_ech_probe_outcome(None);
+        outcome.reason = R2O_ECH_PROBE_PATH_REASON.into();
+        return outcome;
+    }
+    let origin = origin.unwrap_or_default();
+    // C `verify_probe13_internal` не закрывает use_fd на этой ветви: сокет
+    // ещё не передавался в contact, и вызывающий закрывает его сам.
+    if origin.bytes().any(|byte| byte <= 32 || byte == 127) {
+        let mut outcome = r2o_ech_probe_outcome(use_fd);
+        outcome.reason = R2O_ECH_PROBE_HOST_REASON.into();
+        // C `verify_probe13_internal` выходит до contact: local_port остаётся 0,
+        // r.fd — -1, а use_fd не закрывается.
+        outcome.reported_fd = -1;
+        return outcome;
+    }
+    let config = config.expect("config проверен выше");
+    let address = SocketAddr::new(ip, port);
+    let deadline = if deadline.is_zero() {
+        Duration::from_secs(8)
+    } else {
+        deadline
+    };
+    let stream = if use_fd_present {
+        let Some(stream) = use_fd else {
+            unreachable!("use_fd_present выставлен по Some");
+        };
+        if let Some(mark) = effective_mark(mark)
+            && set_socket_option(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                SO_MARK,
+                mark as libc::c_int,
+            )
+            .is_err()
+        {
+            drop(stream);
+            let mut outcome = r2o_ech_probe_outcome(None);
+            outcome.reason = R2O_ECH_PROBE_MARK_REASON.into();
+            return outcome;
+        }
+        if r2o_ech_connect_existing(&stream, address, R2O_ECH_PROBE_CONTACT_TIMEOUT).is_err() {
+            drop(stream);
+            let mut outcome = r2o_ech_probe_outcome(None);
+            outcome.reason = "нет TCP".into();
+            return outcome;
+        }
+        stream
+    } else {
+        match connect_target(address, mark, R2O_ECH_PROBE_CONTACT_TIMEOUT) {
+            Ok(stream) => stream,
+            Err(error) => {
+                let mut outcome = r2o_ech_probe_outcome(None);
+                outcome.reason = if error.local_refusal {
+                    R2O_ECH_PROBE_MARK_REASON.into()
+                } else {
+                    "нет TCP".into()
+                };
+                return outcome;
+            }
+        }
+    };
+    let mut outcome = r2o_ech_probe_outcome(Some(stream));
+    outcome.level = crate::live::D2K_VER_TRANSPORT;
+    outcome.local_port = r2o_ech_stream_local_port(&outcome.stream);
+    let options = FetchOptions {
+        name: origin.to_owned(),
+        ip: Some(ip),
+        port,
+        path: path.unwrap_or("/").to_owned(),
+        deadline,
+        tls12: false,
+        wire_len,
+        // Метка уже стоит на use_fd; connect_target ставит её только при
+        // собственном сокете, как C `verify_contact`.
+        mark: if use_fd_present { None } else { mark },
+    };
+    let stream = outcome
+        .stream
+        .as_ref()
+        .expect("сокет только что создан")
+        .try_clone();
+    let Ok(stream) = stream else {
+        outcome.reason = "нет TCP".into();
+        return outcome;
+    };
+    match r2o_fetch_ech_connected_stream_with_phase_timeout(&options, stream, config, deadline) {
+        Ok(fetch) => {
+            outcome.level = r2o_ech_fetch_level(&fetch, origin);
+            outcome.name_ok = match fetch.peer_name_ok {
+                Some(true) => 1,
+                Some(false) => 0,
+                None => -1,
+            };
+            outcome.ech_accepted = fetch.ech_accepted == Some(true);
+            outcome.status = fetch.status;
+            outcome.body_complete = fetch.complete;
+            outcome.body_bytes = fetch.body_bytes;
+            outcome.local_port = fetch.local_port;
+            outcome.reason = r2o_ech_probe_reason(&fetch, outcome.level);
+        }
+        Err(error) => {
+            outcome.level = crate::live::D2K_VER_TRANSPORT;
+            outcome.reason = format!("нет TLS: {error}");
+        }
+    }
+    outcome
+}
+
+/// C `d2k_verify_probe_ech_origin_on` с уже разрешённой конфигурацией.
+/// `use_fd >= 0` не получает dns_mark (`use_fd < 0 ? dns_mark : 0`).
+#[allow(clippy::too_many_arguments)]
+pub fn r2o_verify_probe_ech_origin_on_with_config(
+    use_fd: Option<TcpStream>,
+    ip: IpAddr,
+    port: u16,
+    outer_name: Option<&str>,
+    origin: Option<&str>,
+    config: Option<&crate::ech::R2oEchConfig>,
+    deadline: Duration,
+    wire_len: Option<usize>,
+    dns_mark: Option<u32>,
+    path: Option<&str>,
+) -> R2oEchProbeOutcome {
+    let use_fd_present = use_fd.is_some();
+    let guard_failed = match (outer_name, origin, config) {
+        (Some(_), Some(origin), Some(config)) => {
+            origin.is_empty() || config.public_name != outer_name.unwrap_or_default()
+        }
+        _ => true,
+    };
+    if guard_failed {
+        drop(use_fd);
+        let mut outcome = r2o_ech_probe_outcome(None);
+        outcome.reason = R2O_ECH_PROBE_WITNESS_REASON.into();
+        return outcome;
+    }
+    let config = config.expect("config проверен выше");
+    let Ok(ech) = crate::ech::r2o_ech_tls_config(config) else {
+        drop(use_fd);
+        let mut outcome = r2o_ech_probe_outcome(None);
+        outcome.reason = R2O_ECH_PROBE_WITNESS_REASON.into();
+        return outcome;
+    };
+    let mark = if use_fd_present {
+        None
+    } else {
+        effective_mark(dns_mark)
+    };
+    r2o_verify_probe_ech_on(
+        use_fd,
+        ip,
+        port,
+        origin,
+        Some(&ech),
+        deadline,
+        wire_len,
+        mark,
+        path,
+    )
+}
+
+/// C `d2k_verify_probe_ech_origin_on`: bounded HTTPS-RR resolve of origin с
+/// `dns_mark`, затем сверка `outer_name == config.public_name`.
+#[allow(clippy::too_many_arguments)]
+pub fn r2o_verify_probe_ech_origin_on(
+    use_fd: Option<TcpStream>,
+    ip: IpAddr,
+    port: u16,
+    outer_name: Option<&str>,
+    origin: Option<&str>,
+    deadline: Duration,
+    wire_len: Option<usize>,
+    dns_mark: Option<u32>,
+    path: Option<&str>,
+) -> R2oEchProbeOutcome {
+    let resolved = match (outer_name, origin) {
+        (Some(_), Some(origin)) if !origin.is_empty() => {
+            crate::ech::resolve_ech_config(origin, effective_mark(dns_mark)).ok()
+        }
+        _ => None,
+    };
+    r2o_verify_probe_ech_origin_on_with_config(
+        use_fd,
+        ip,
+        port,
+        outer_name,
+        origin,
+        resolved.as_ref(),
+        deadline,
+        wire_len,
+        dns_mark,
+        path,
+    )
+}
+
 /// Выполнить HTTPS GET с выбранным кодированием тела и собрать сетевые признаки.
 pub fn r2o_fetch_with_encoding(
     options: &FetchOptions,
@@ -1392,13 +1793,13 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
             }
         }
     }
-    if ech.is_some() && !r2o_ech_accepted(connection.ech_status()) {
-        return Err(format!(
-            "сервер не подтвердил ECH: {:?}",
-            connection.ech_status()
-        ));
+    if ech.is_some() && !crate::r2o_tls::r2o_tls_ech_accepted(Some(connection.ech_status())) {
+        // C `d2k_tls_connect_ech`: отвергнутый ECH — ошибка рукопожатия ровно
+        // с этим текстом, а не продолжение обычной внешней сессии.
+        return Err("ECH не принят сервером: публичное имя не подтверждает origin".into());
     }
-    let ech_accepted = ech.map(|_| r2o_ech_accepted(connection.ech_status()));
+    let ech_accepted =
+        ech.map(|_| crate::r2o_tls::r2o_tls_ech_accepted(Some(connection.ech_status())));
     r2o_socket.r2o_reset_after_handshake();
     let tls = match connection.protocol_version() {
         Some(ProtocolVersion::TLSv1_3) => Some("1.3"),
@@ -2064,7 +2465,7 @@ impl Drop for R2oHttpResponseBufferTracking {
 
 /// rustls `EchStatus::Accepted` означает проверенный accept_confirmation.
 fn r2o_ech_accepted(status: rustls::client::EchStatus) -> bool {
-    status == rustls::client::EchStatus::Accepted
+    crate::r2o_tls::r2o_tls_ech_accepted(Some(status))
 }
 
 /// C `read_http_body`: для chunked/close-delimited `body_expected=body_bytes`.
@@ -6525,6 +6926,10 @@ mod tests {
     fn ech_acceptance_requires_rustls_accepted_status() {
         use rustls::client::EchStatus;
         assert!(r2o_ech_accepted(EchStatus::Accepted));
+        assert!(crate::r2o_tls::r2o_tls_ech_accepted(Some(
+            EchStatus::Accepted
+        )));
+        assert!(!crate::r2o_tls::r2o_tls_ech_accepted(None));
         for status in [
             EchStatus::NotOffered,
             EchStatus::Grease,
@@ -6532,7 +6937,78 @@ mod tests {
             EchStatus::Rejected,
         ] {
             assert!(!r2o_ech_accepted(status), "{status:?}");
+            assert!(!crate::r2o_tls::r2o_tls_ech_accepted(Some(status)));
         }
+    }
+
+    #[test]
+    fn ech_probe_levels_match_request_page_budget_and_ech_http_denial() {
+        use crate::live::{
+            D2K_VER_APPLICATION, D2K_VER_BLOCKPAGE, D2K_VER_CHALLENGE, D2K_VER_DENIED,
+            D2K_VER_HANDSHAKE,
+        };
+
+        let mut fetch = response_for_classification(200, R2oFetchHttpOutcome::Neutral, true, true);
+        assert_eq!(
+            r2o_ech_fetch_level(&fetch, "origin.example"),
+            D2K_VER_APPLICATION
+        );
+
+        fetch.complete = false;
+        assert_eq!(
+            r2o_ech_fetch_level(&fetch, "origin.example"),
+            D2K_VER_HANDSHAKE
+        );
+
+        fetch.status = 403;
+        fetch.complete = true;
+        fetch.http_outcome = R2oFetchHttpOutcome::Blocked;
+        assert_eq!(
+            r2o_ech_fetch_level(&fetch, "origin.example"),
+            D2K_VER_BLOCKPAGE
+        );
+
+        fetch.http_outcome = R2oFetchHttpOutcome::LegalDenial;
+        assert_eq!(
+            r2o_ech_fetch_level(&fetch, "origin.example"),
+            D2K_VER_DENIED
+        );
+
+        fetch.status = 429;
+        fetch.http_outcome = R2oFetchHttpOutcome::Neutral;
+        fetch.complete = true;
+        assert_eq!(
+            r2o_ech_fetch_level(&fetch, "origin.example"),
+            D2K_VER_CHALLENGE
+        );
+        assert_eq!(
+            r2o_ech_probe_reason(&fetch, D2K_VER_CHALLENGE),
+            "ECH origin ответил HTTP 429; подбор не должен усиливать отказ сервера"
+        );
+
+        fetch.http_outcome = R2oFetchHttpOutcome::Blocked;
+        assert_eq!(
+            r2o_ech_fetch_level(&fetch, "origin.example"),
+            D2K_VER_BLOCKPAGE
+        );
+        fetch.http_outcome = R2oFetchHttpOutcome::LegalDenial;
+        assert_eq!(
+            r2o_ech_fetch_level(&fetch, "origin.example"),
+            D2K_VER_DENIED
+        );
+
+        fetch.status = 302;
+        fetch.http_outcome = R2oFetchHttpOutcome::Neutral;
+        fetch.location = "https://other.example/next".into();
+        assert_eq!(
+            r2o_ech_fetch_level(&fetch, "origin.example"),
+            D2K_VER_APPLICATION
+        );
+        fetch.location = "/next".into();
+        assert_eq!(
+            r2o_ech_fetch_level(&fetch, "origin.example"),
+            D2K_VER_HANDSHAKE
+        );
     }
 
     #[test]
