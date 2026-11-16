@@ -552,6 +552,12 @@ jobs:
           ref: a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe
           path: d2o
           persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
+        with:
+          repository: t0fox/d2o
+          ref: a378e230947ebfd011439e1cac0f1e994d883aae
+          path: d2o-a378
+          persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
         with:
           toolchain: 1.98.0
@@ -559,7 +565,7 @@ jobs:
         run: cargo fetch --locked
       - name: Сверить TCP silence с текущим D2O main
         env:
-          R2O_DONOR_ROOT: ${{ github.workspace }}/d2o
+          R2O_DONOR_ROOT: ${{ github.workspace }}/d2o-a378
           TMPDIR: ${{ runner.temp }}
         run: sh scripts/test-tcp-silence-current-differential.sh
       - name: Сверить безопасный режим datapath по умолчанию с текущим D2O main
@@ -574,7 +580,7 @@ jobs:
         run: sh scripts/test-icmp-guard-current-differential.sh
       - name: Compare D2O and R2O fragment helpers and production session path
         env:
-          R2O_DONOR_ROOT: ${{ github.workspace }}/d2o
+          R2O_DONOR_ROOT: ${{ github.workspace }}/d2o-a378
           TMPDIR: ${{ runner.temp }}
         run: sh scripts/test-ipfrag-differential.sh
       - name: Compare ctnetlink retry after startup failure
