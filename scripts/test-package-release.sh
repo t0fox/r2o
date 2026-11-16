@@ -5,7 +5,7 @@ ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 TEMP=$(mktemp -d)
 trap 'rm -rf "$TEMP"' EXIT HUP INT TERM
 mkdir -p "$TEMP/builds" "$TEMP/out"
-for component in r2o-datapath r2o-controller r2o-panel r2o-telegram r2o-manager r2o-fetch; do
+for component in r2o-datapath r2o-controller r2o-panel r2o-telegram r2o-manager r2o-fetch r2o-detect; do
     printf '%s\n' "$component fixture" > "$TEMP/builds/$component-linux-mipsel"
 done
 RELEASE_ID=r2o-test VERSION=0.1.0 NOTES='fixture release' \
@@ -19,6 +19,7 @@ printf '%s\n' \
     builds/r2o-panel-linux-mipsel \
     builds/r2o-telegram-linux-mipsel \
     builds/r2o-fetch-linux-mipsel \
+    builds/r2o-detect-linux-mipsel \
     router/ \
     router/files/ \
     router/files/meta-ranges.txt \
@@ -59,7 +60,7 @@ mkdir -p "$TEMP/multi-builds/mipsel" "$TEMP/multi-builds/mipsel-openwrt-musl" \
     "$TEMP/multi-builds/aarch64-openwrt-musl" "$TEMP/multi-builds/armv5-musleabi" \
     "$TEMP/multi-builds/armv7-openwrt-musl" "$TEMP/multi-out"
 for architecture in mipsel mipsel-openwrt-musl aarch64-openwrt-musl armv5-musleabi armv7-openwrt-musl; do
-    for component in r2o-datapath r2o-controller r2o-panel r2o-telegram r2o-manager r2o-fetch; do
+    for component in r2o-datapath r2o-controller r2o-panel r2o-telegram r2o-manager r2o-fetch r2o-detect; do
         printf '%s %s\n' "$component" "$architecture" \
             > "$TEMP/multi-builds/$architecture/$component-linux-$architecture"
     done

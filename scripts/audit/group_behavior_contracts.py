@@ -233,11 +233,6 @@ CONTRACTS = {
         "base/tcp/white/seeded/progress/stop bridge.",
         "bridge: 9 P; bridge differential 8 cases, seeded/white ветви P.",
     ),
-    "DT-CLI-OUTPUT": (
-        "Detect CLI JSON/human output",
-        "usage/print_json/print_human/main.",
-        "main: 4 P; exact display PASS, но r2o-detect не упакован в release.",
-    ),
     "DT-RAW-HANDSHAKE": (
         "Detect raw handshake/probe",
         "flush pending, poison family, handshake_as.",
@@ -417,8 +412,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 423:
-        raise SystemExit(f"expected 423 P rows, got {len(rows)}")
+    if len(rows) != 419:
+        raise SystemExit(f"expected 419 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")
@@ -476,14 +471,18 @@ def main() -> int:
         "- Статус E/P в `docs/function-parity-audit.md` не меняется этим инвентарём.",
         "- Карта «контракт → функция»: `p-contract-map.tsv`.",
         "",
-        "## Следующий контракт",
+        "## Закрытые контракты",
         "",
-        "`DT-CLI-OUTPUT` (`detect/main.c`: `usage`, `print_json`, `print_human`,",
-        "`main`) — пользовательский CLI-контракт. Exact-display C/Rust уже PASS,",
-        "но `r2o-detect` не входит в упаковку/релиз, поэтому production-путь не",
-        "подтверждён. Следующий небольшой срез: упаковка/установка `r2o-detect` и",
-        "C/Rust differential JSON/human/exit на release-артефакте, без нового",
-        "массового переноса.",
+        "| ID | Контракт | Доказательство |",
+        "|---|---|---|",
+        "| `DT-CLI-OUTPUT` | Detect CLI JSON/human/usage/exit | 2026-11-16: `r2o-detect` добавлен в `package-release.sh` и release-артефакт; `r2o-manager` активирует его как необязательный компонент; `test-detect-release-artifact.sh` распаковывает архив и даёт `6 triggers / 19 exits / json=equal / human=equal` на packaged binary. `r2o-controller --classify` остаётся отдельным CLI-путём. |",
+        "",
+        "## Следующий шаг",
+        "",
+        "Новый контракт в этом срезе не начинался. Кандидат — `CS-CLI-TOOLS`",
+        "(`d2kask`/`d2kfetch`/`d2kvoice`): `d2kvoice` list/check уже покрыт",
+        "C/Rust differential, остаются `d2kask` и `d2kfetch`; это отдельный",
+        "пользовательский CLI-контракт, не массовый перенос.",
         "",
         "## Ограничение TTL-контракта",
         "",

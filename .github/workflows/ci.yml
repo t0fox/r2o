@@ -152,6 +152,10 @@ jobs:
           package-manager-cache: false
       - name: Проверить упаковку выпуска
         run: sh scripts/test-package-release.sh
+      - name: Проверить r2o-detect в release-артефакте
+        env:
+          R2O_DONOR_ROOT: ${{ github.workspace }}/d2o-a378
+        run: sh scripts/test-detect-release-artifact.sh
       - name: Проверить сценарии обновления и службы роутера
         env:
           R2O_DONOR_ROOT: ${{ github.workspace }}/d2o

@@ -16,6 +16,9 @@ const MANAGER_COMPONENTS: [&str; 6] = [
     "r2o-manager",
     "r2o-fetch",
 ];
+/// Необязательный диагностический CLI. Новый менеджер не требует его от
+/// старых выпусков, но активирует и отдаёт, если файл есть в архиве.
+const AUXILIARY_COMPONENTS: [&str; 1] = ["r2o-detect"];
 const ARCHIVE_MAX_BYTES: u64 = 256 * 1024 * 1024;
 const ARCHIVE_MAX_ENTRIES: usize = 4096;
 const ARCHIVE_MAX_EXPANDED_BYTES: u64 = 256 * 1024 * 1024;
@@ -551,7 +554,7 @@ pub fn read_install_architecture(root: &Path) -> Result<Option<String>, InstallE
 
 /// Найти компонент только внутри текущего неизменяемого выпуска.
 pub fn active_component_path(root: &Path, component: &str) -> Result<PathBuf, InstallError> {
-    if !MANAGER_COMPONENTS.contains(&component) {
+    if !MANAGER_COMPONENTS.contains(&component) && !AUXILIARY_COMPONENTS.contains(&component) {
         return Err(InstallError::InvalidComponent);
     }
     let slots = read_install_slots(root)?.ok_or(InstallError::NoActiveRelease)?;
@@ -1086,6 +1089,33 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o7777, 0o755);
         }
+    }
+
+    #[test]
+    fn auxiliary_detect_component_is_optional_and_available_when_present() {
+        let temp = TestDir::new();
+        let root = temp.0.join("install");
+        let with_detect = bundle(&temp.0, "with-detect", "mipsel");
+        let detect = with_detect.join("builds/r2o-detect-linux-mipsel");
+        fs::write(&detect, b"detect-binary").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&detect, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        activate_bundle(&root, &with_detect, "r2o-with-detect", "mipsel").unwrap();
+        assert_eq!(
+            fs::read_to_string(active_component_path(&root, "r2o-detect").unwrap()).unwrap(),
+            "detect-binary"
+        );
+
+        // Старый выпуск без r2o-detect обязан активироваться без изменений.
+        let legacy = bundle(&temp.0, "legacy", "mipsel");
+        activate_bundle(&root, &legacy, "r2o-legacy", "mipsel").unwrap();
+        assert!(matches!(
+            active_component_path(&root, "r2o-detect"),
+            Err(InstallError::MissingComponent(name)) if name == "r2o-detect"
+        ));
     }
 
     #[test]

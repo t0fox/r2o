@@ -20,10 +20,14 @@ trap 'rm -rf -- "$TEMP"' EXIT HUP INT TERM
 
 make -C "$D2O_ROOT/detect" d2k-detect >/dev/null
 DETECT="$D2O_ROOT/detect/d2k-detect"
-R2O="$ROOT/target/debug/r2o-controller"
-R2O_DETECT="$ROOT/target/debug/r2o-detect"
-"$CARGO" build --manifest-path "$ROOT/Cargo.toml" --locked --offline \
-    -q -p r2o-controller --bin r2o-controller --bin r2o-detect
+R2O="${R2O_CONTROLLER_BIN:-$ROOT/target/debug/r2o-controller}"
+R2O_DETECT="${R2O_DETECT_BIN:-$ROOT/target/debug/r2o-detect}"
+if [ -z "${R2O_CONTROLLER_BIN:-}" ] || [ -z "${R2O_DETECT_BIN:-}" ]; then
+    "$CARGO" build --manifest-path "$ROOT/Cargo.toml" --locked --offline \
+        -q -p r2o-controller --bin r2o-controller --bin r2o-detect
+fi
+test -x "$R2O" || { printf 'R2O controller is not executable: %s\n' "$R2O" >&2; exit 1; }
+test -x "$R2O_DETECT" || { printf 'R2O detect is not executable: %s\n' "$R2O_DETECT" >&2; exit 1; }
 printf '%s\n' 'R2O CLI: r2o-controller --classify / r2o-detect classify' > "$TEMP/r2o-cli.txt"
 
 trigger_cases=0
