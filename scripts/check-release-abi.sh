@@ -17,13 +17,15 @@ case "$abi" in
         loader=/lib/ld-musl-mipsel-sf.so.1
         cache=${R2O_OPENWRT_TOOLCHAIN_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/r2o/openwrt}
         sdk=${R2O_OPENWRT_MIPSEL_SDK:-"$cache/openwrt-mipsel-musl-sdk"}
-        libc=$(find -L "$sdk" -path '*/lib/libc.so' -print -quit)
-        test -f "$libc"
+        libc="$sdk/lib/libc.so"
+        libgcc="$sdk/lib/libgcc_s.so.1"
+        test -f "$libc" && test -f "$libgcc"
         prefix=$(mktemp -d)
         trap 'rm -rf -- "$prefix"' EXIT HUP INT TERM
         mkdir "$prefix/lib"
         ln -s "$libc" "$prefix$loader"
-        ln -s "$libc" "$prefix/lib/libc.so" ;;
+        ln -s "$libc" "$prefix/lib/libc.so"
+        ln -s "$libgcc" "$prefix/lib/libgcc_s.so.1" ;;
     aarch64-openwrt-musl) cpu=aarch64; class=64; endian=little; machine=AArch64 ;;
     armv5-musleabi|armv7-musleabi)
         cpu=arm; class=32; endian=little; machine=ARM; flags='Version5 EABI'

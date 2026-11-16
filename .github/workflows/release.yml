@@ -160,6 +160,7 @@ jobs:
             asset_suffix: riscv64-musl
     env:
       CARGO_BUILD_WARNINGS: deny
+      R2O_RELEASE_ID: ${{ needs.plan.outputs.release_id }}
       ABI: ${{ matrix.abi }}
       TARGET: ${{ matrix.target }}
       ASSET_SUFFIX: ${{ matrix.asset_suffix }}
