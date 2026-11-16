@@ -5,13 +5,13 @@
 поведенческие контракты. Источник — канонические таблицы
 `docs/audit/{core-net,core-state,datapath-core,datapath-plan,detect}.md`.
 
-Строк P: **396**; контрактов: **30**; без контракта: **0**.
+Строк P: **395**; контрактов: **29**; без контракта: **0**.
 
 | Группа | P |
 |---|---:|
 | core-net | 187 |
 | core-state | 190 |
-| datapath-core | 7 |
+| datapath-core | 6 |
 | datapath-plan | 0 |
 | detect | 12 |
 
@@ -45,7 +45,6 @@
 | `CS-PROPS` | QUIC properties text | original/strategy measure and wire properties. | 5 | props: 5 P; quic props findings текстовый контракт не полный. |
 | `CS-VERDICT` | Classify verdict | C d2k_classify verdict mapping. | 1 | verdict: 1 P; C-путь в d2kc мёртв, Rust classify иной API. |
 | `DP-SESSION-LIFECYCLE` | Datapath session lifecycle | d2kd main/usage, session_new, UDP handle, session_packet. | 5 | session/d2kd: 5 P; session_packet/handle_udp live не сверены. |
-| `DP-TRACK` | Datapath flow table key hash | key_hash static helper. | 1 | track: 1 P; helper-level. |
 | `DP-NFQ` | Datapath NFQUEUE error text | nfq say static helper. | 1 | nfq: 1 P; error text/ветви NFQUEUE. |
 | `DT-BRIDGE` | Detect bridge scheduler | base/tcp/white/seeded/progress/stop bridge. | 9 | bridge: 9 P; bridge differential 8 cases, seeded/white ветви P. |
 | `DT-RAW-HANDSHAKE` | Detect raw handshake/probe | flush pending, poison family, handshake_as. | 3 | raw: 3 P; raw probe live/ветви. |
@@ -66,6 +65,7 @@
 | `CS-MEASUREMENT` | Measurement transport helpers | 2026-11-16: `connect_bounded` success/refused/badfd, `send_all` send-timeout/EINTR/10 ветвей, `d2k_arm_plan_measured` 28 кейсов, `nap_us` 20 мс/EINTR — все C/Rust differential PASS; production nap переведён на `libc::nanosleep` с C-семантикой. |
 | `CS-CATALOG-TLV` | Catalog TLV plan encoding | 2026-11-16: `r2o-compose-tlv-differential.sh` — overlap/reorder/badsum/badsum_gap/checksum и `plan_tlv_stamp_ident` (id + stamped D2KP, guard'ы layout'а) совпали с C; оба ask-пути удостоверяют план по TLV. |
 | `CS-LINK-IO` | Link/control I/O helpers | 2026-11-16: send_area_key 11, wait_readable 8, hex_decode 6, say 4+3 — все C/Rust differential PASS; `r2o_link_open` даёт те же тексты пустого/длинного/отсутствующего сокета. |
+| `DP-TRACK` | Datapath flow table key hash | 2026-11-17: `test-datapath-tcp-capacity-differential.sh` PASS (capacity/refusal/reverse/duplicate/remove/expiry); `key_hash` осознанно заменён на `HashMap` RandomState — внутренний порядок коллизий не наблюдаем, HashDoS-устойчивость не ослаблена. |
 
 ## Следующий шаг
 

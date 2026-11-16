@@ -203,11 +203,6 @@ CONTRACTS = {
         "d2kd main/usage, session_new, UDP handle, session_packet.",
         "session/d2kd: 5 P; session_packet/handle_udp live не сверены.",
     ),
-    "DP-TRACK": (
-        "Datapath flow table key hash",
-        "key_hash static helper.",
-        "track: 1 P; helper-level.",
-    ),
     "DP-NFQ": (
         "Datapath NFQUEUE error text",
         "nfq say static helper.",
@@ -397,8 +392,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 396:
-        raise SystemExit(f"expected 396 P rows, got {len(rows)}")
+    if len(rows) != 395:
+        raise SystemExit(f"expected 395 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")
@@ -464,6 +459,7 @@ def main() -> int:
         "| `CS-MEASUREMENT` | Measurement transport helpers | 2026-11-16: `connect_bounded` success/refused/badfd, `send_all` send-timeout/EINTR/10 ветвей, `d2k_arm_plan_measured` 28 кейсов, `nap_us` 20 мс/EINTR — все C/Rust differential PASS; production nap переведён на `libc::nanosleep` с C-семантикой. |",
         "| `CS-CATALOG-TLV` | Catalog TLV plan encoding | 2026-11-16: `r2o-compose-tlv-differential.sh` — overlap/reorder/badsum/badsum_gap/checksum и `plan_tlv_stamp_ident` (id + stamped D2KP, guard'ы layout'а) совпали с C; оба ask-пути удостоверяют план по TLV. |",
         "| `CS-LINK-IO` | Link/control I/O helpers | 2026-11-16: send_area_key 11, wait_readable 8, hex_decode 6, say 4+3 — все C/Rust differential PASS; `r2o_link_open` даёт те же тексты пустого/длинного/отсутствующего сокета. |",
+        "| `DP-TRACK` | Datapath flow table key hash | 2026-11-17: `test-datapath-tcp-capacity-differential.sh` PASS (capacity/refusal/reverse/duplicate/remove/expiry); `key_hash` осознанно заменён на `HashMap` RandomState — внутренний порядок коллизий не наблюдаем, HashDoS-устойчивость не ослаблена. |",
         "",
         "## Следующий шаг",
         "",

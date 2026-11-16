@@ -96,12 +96,12 @@ production-путь не ставится. Формулировки «теста
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 361 | 187 | 0 | 0 |
 | core-state | 692 | 502 | 190 | 0 | 0 |
-| datapath-core | 400 | 393 | 7 | 0 | 0 |
+| datapath-core | 400 | 394 | 6 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1586** | **396** | **0** | **0** |
+| **Итого** | **1982** | **1587** | **395** | **0** | **0** |
 
-Это не оценка паритета: 396 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 395 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -120,7 +120,7 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1586 / P 396**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1587 / P 395**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
@@ -192,7 +192,7 @@ P означает неполное доказательство ветвей, N
 - core-state — CLI-флаги/вывод, PSL/catalog-парсер, crypto HKDF-границы,
   voice-blob, volume resource-retry.
 - `?` (0): не осталось; все строки реестра разобраны и имеют E/P/N.
-- Поведенческая группировка 396 P (30 контрактов, 0 без контракта):
+- Поведенческая группировка 395 P (29 контрактов, 0 без контракта):
   `docs/behavior-contracts/inventory.md` и
   `docs/behavior-contracts/p-contract-map.tsv`. Это не меняет статусы
   реестра и не является заявлением паритета.
@@ -386,10 +386,10 @@ P означает неполное доказательство ветвей, N
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 361 | 187 | 0 | 0 |
 | core-state | 692 | 502 | 190 | 0 | 0 |
-| datapath-core | 400 | 393 | 7 | 0 | 0 |
+| datapath-core | 400 | 394 | 6 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1586** | **396** | **0** | **0** |
+| **Итого** | **1982** | **1587** | **395** | **0** | **0** |
 
 
 ---
@@ -4056,7 +4056,7 @@ R2O заменил структуру на `HashMap`, сохранив ключ,
 | `d2k_key_make_addr` | 55–74 | 20 | IPv4 делегирует `d2k_key_make`; IPv6 — 16 байт адреса, затем порт; family=6 | `capture.rs` `TcpFlowKey::wire_key`, `r2o_udp_sessions.rs` `flow_key_from_packet` | E | C для IPv6 кладёт 16-байтные адреса, затем BE-порты, family=6; IPv4 делегирует общий конструктор. Rust `TcpFlowKey::wire_key`/`R2oUdpFlowKey::wire_key` дают ту же раскладку (family, 16+16 адресов, BE-порты, proto 6/17); тест `engine.rs:2499` сверяет ключ из пакета с `wire_key`. |
 | `round_pow2` (static) | 84-90 | 7 | `max(16).next_power_of_two`, потолок `1<<20` | `flow_capacity.rs:12-21 from_requested` | **E** | **Точное совпадение:** C `v<16?16`, удвоение, `>1<<20` → `1<<20`; Rust `max(16).next_power_of_two().min(1<<20)`. Тест `flow_capacity.rs:45` (`1→16`, `64→64`, `65→128`). |
 | `key_eq` (static) | 92–104 | 13 | `memcmp` всего `d2k_key`; padding занулён `memset` | `#[derive(Eq, Hash)]` (`engine.rs:42`, `capture.rs:14`) | **E** | C сравнивает 16 байт, включая занулённые хвосты; Rust сравнивает все поля типизированного ключа, padding отсутствует. Семантика равенства совпадает; используется во всех тестах ключей. |
-| `key_hash` (static) | 108–115 | 8 | FNV-1a по всем байтам ключа | `HashMap` SipHash (по умолчанию) | **P** |  Хеш-функция намеренно иная; на семантику поиска не влияет, но порядок коллизий/пробирования и устойчивость к HashDoS отличаются. C/Rust differential хеша нет. **2026-11-15:** функции нет: Rust `HashMap` использует собственный RandomState; на контракт поиска/лимита/expiry не влияет (capacity differential PASS), но детерминизм FNV и HashDoS-устойчивость отличаются — P. |
+| `key_hash` (static) | 108–115 | 8 | FNV-1a по всем байтам ключа | `HashMap` SipHash/RandomState (по умолчанию) | **E*** | **2026-11-17:** C/Rust differential `scripts/test-datapath-tcp-capacity-differential.sh` PASS: `request64_slots=64_limit=48_inserted=48_refused=2_reverse_hit=1_count=48_refusals=2`, `request65_slots=128_limit=96`, `duplicate_count=48_remove_count=45_walk=45`, `expired=45_remaining=0_accepted_after_expiry=1_refusals=2_count=1`. Это доказывает, что хеш не меняет наблюдаемые lookup/capacity/refusal/reverse/expiry. **Архитектурное отличие осознанно:** детерминированный FNV-1a заменён `HashMap` с RandomState SipHash; внутренний порядок коллизий/пробирования не наблюдаем снаружи, а HashDoS-устойчивость не ослаблена (ключи рандомизированы на процесс). Порядок обхода остаётся отдельной строкой `d2k_track_walk` с зафиксированным ограничением. |
 | `d2k_track_new` | 117–133 | 17 | `calloc` таблицы, `round_pow2`, отдельные `slots/state`; при сбое — `free` | `engine.rs` `TcpSessions::try_with_capacity`, `flow_capacity.rs` `R2oFlowCapacity` | E | C округляет ёмкость до степени двойки (min 16) и при частичном сбое освобождает массивы; предел новых записей — 3/4 слотов. Rust `R2oFlowCapacity::from_requested` даёт те же slots/limit, `try_with_capacity` резервирует HashMap и очереди через `try_reserve` (отказ возвращается без частичного состояния). Тесты `r2o_ёмкость_повторяет_округление_таблицы_донора`, `tcp_отказывает_сверх_порога...` (48 вставок, 2 отказа, повтор после expiry). |
 | `d2k_track_free` | 135-142 | 8 | освободить slots/states/table | `Drop` | **E** | C `free(t->slots); free(t->states); free(t);`. Rust владеющие `HashMap`/`Vec` освобождаются `Drop`; отдельной функции нет. C-строка: `free(t->slots); free(t->states); free(t);`; Rust освобождает `HashMap`/`Vec` через `Drop`. |
 | `d2k_track_find` | 144–160 | 17 | линейное пробирование, остановка на свободной ячейке | `engine.rs` `self.flows.get` (напр. `:1578`) | **E*** |  C ищет по FNV-хешу и обрывает цепочку на `SLOT_FREE`; Rust — `HashMap::get`. Результат поиска по ключу тот же, внутренний порядок и пробирование иные. `test-datapath-tcp-capacity-differential.sh` PASS: find по ключу, duplicate не увеличивает count, reverse/expiry; C/Rust результаты совпали. Ограничение: C FNV/линейное пробирование, Rust `HashMap` — внутренний порядок иной, но контракт поиска по ключу тот же. |
@@ -5337,7 +5337,10 @@ packet-path-пробел (`shape_tcp_options_family`). Счётчики собы
   `flow_capacity.rs` (`try_with_capacity`, лимит 3/4 слота, округление
   capacity). `d2k_track_new_connection` сбрасывает поля, сохраняя учёт
   посылок; R2O создаёт новый `TcpSession`, а execution-идентификаторы
-  переносит через tickets. P, полного C/Rust differential таблицы нет.
+  переносит через tickets. Все 18 функций имеют E/E*: `key_hash` —
+  осознанная замена FNV-1a на `HashMap` RandomState (capacity/refusal/
+  reverse/expiry differential PASS), порядок обхода `d2k_track_walk`
+  остаётся зафиксированным ограничением.
 - **`hold.c`:** `d2k_hold_parse/new/free/flush/next/get_stats/verdicts/
   feed` сверены с `hold.rs` (`HOLD_SLOTS=16`, `HOLD_PACKETS=8`,
   `HOLD_PACKET_BYTES=1600`, `HOLD_WAIT=100ms`, `FeedResult`,
