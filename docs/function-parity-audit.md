@@ -97,10 +97,10 @@ production-путь не ставится. Формулировки «теста
 | core-state | 692 | 480 | 212 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
-| detect | 159 | 139 | 20 | 0 | 0 |
-| **Итого** | **1982** | **1555** | **427** | **0** | **0** |
+| detect | 159 | 143 | 16 | 0 | 0 |
+| **Итого** | **1982** | **1559** | **423** | **0** | **0** |
 
-Это не оценка паритета: 427 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 423 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -119,7 +119,7 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1555 / P 427**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1559 / P 423**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
@@ -138,7 +138,7 @@ B — нужен только тест/differential **190**; C — архите�
 
 ## Итог и подтверждённые расхождения (2026-11-15)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1555 / P 427 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1559 / P 423 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -383,8 +383,8 @@ P означает неполное доказательство ветвей, N
 | core-state | 692 | 480 | 212 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
-| detect | 159 | 139 | 20 | 0 | 0 |
-| **Итого** | **1982** | **1555** | **427** | **0** | **0** |
+| detect | 159 | 143 | 16 | 0 | 0 |
+| **Итого** | **1982** | **1559** | **423** | **0** | **0** |
 
 
 ---
@@ -6361,11 +6361,11 @@ base.valid/base_blocked) и neutral-ack.
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
-| `d2k_detect_stop_all` | 45 | 1 | липкий общий флаг остановки службы (`g_stop_all=1`) | `Drop for DiscoveryWorker` (`main.rs:14251-14261`), `STOP`/`cancel` | **P** | C ставит один `volatile sig_atomic_t` на процесс; снять его нельзя. Rust останавливает воркеры через `cancel`/`active_cancels` и join в `Drop`; отдельного глобального липкого флага и C/Rust differential «остановить все» нет. |
-| `stop_asked` | 50–55 | 6 | две причины: общий `g_stop_all` и флаг задачи (`task_stop`) | `classify.rs:1041 stopped`, `raw_probe.rs:641 is_cancelled`, `main.rs` cancel | **P** | C проверяет оба источника, задачный флаг важнее; Rust обычно один `AtomicBool` на задачу/воркер, общего флага службы нет. Для одной задачи эквивалентно; для «остановить службу» C срабатывает даже без флага задачи, Rust — через отмену всех воркеров. |
+| `d2k_detect_stop_all` | 45 | 1 | липкий общий флаг остановки службы (`g_stop_all=1`) | `classify.rs` `r2o_detect_stop_all`/`R2O_DETECT_STOP_ALL`; `main.rs` signal-handler и shutdown `serve_catalog` | **E*** | C ставит один `volatile sig_atomic_t` на процесс; снять его нельзя. Rust production: липкий `AtomicBool`, взводится по SIGINT/SIGTERM и перед остановкой discovery; `classify.rs::stopped` и `raw_probe::is_cancelled` читают его первым, поэтому остановка действует и на замер без собственного флага. C/Rust differential `scripts/r2o-detect-bridge-differential.sh` (stop, 6 строк: нет флагов, task, global, both, null, после stop) — `diff` пуст; `r2o_detect_stop_all` в Rust отдельного сброса в production не имеет. |
+| `stop_asked` | 50–55 | 6 | две причины: общий `g_stop_all` и флаг задачи (`task_stop`) | `classify.rs` `stopped`, `raw_probe.rs` `is_cancelled`, `r2o_detect_stop_all_requested` | **E*** | C проверяет общий флаг первым, затем флаг задачи. Rust production делает то же в `stopped` (`classify_run`, `run_base`, перебор) и `is_cancelled` (raw-пробы): `глобальный || задача`. C/Rust differential stop в `scripts/r2o-detect-bridge-differential.sh` даёт те же 6 строк (`task=0/1`, `global=0/1`, NULL, после stop), `diff` пуст; отдельный тест `tests/d2o_detect_stop.rs` подтверждает `stopped=true, probes=0` при взведённом общем флаге. |
 | `plannable_hit` | 76–93 | 18 | фильтр находок: `d2k_arm_from_poison` успешен → 1; иначе запомнить первое невыразимое (`name/why`) и остальные имена, вернуть 0 | `raw_probe.rs:1122 executable_poison_hit`, `classify.rs:1252 append_reason` | **E** | **Совпадает:** невыразимое планом не обрывает перебор; первое сохраняется с причиной, остальные — списком; вызывающий продолжает искать выразимое. Тест `tests/classify.rs:599 accepted_but_unplannable_poison_keeps_opaque_verdict_and_search_ownership`; `r2o-measured-split-differential.sh`. |
 | `map_verdict` | 95–112 | 18 | D2K_DV_* → D2K_V_*: CLEAR/PREFIX/WHOLE/OPAQUE/ADDRESS/RESPONSE/UNREACHABLE/FLAKY; POISONABLE→OPAQUE; default→INCONCLUSIVE | `classify.rs` `r2o_map_verdict` | E | C держит таблицу перевода; POISONABLE намеренно сводится к OPAQUE. Rust `r2o_map_verdict` повторяет все коды 0..10 и default; тест `map_verdict_matches_donor_table`. Отдельный `Verdict::Poisonable` остаётся для внутренней классификации. |
-| `bridge_input` | 116–255 | 140 | вход измерителя из `d2k_hello`: trigger 2..16384, accept ServerHello, TCP-опции при `tcp_known`, SNI-имя `tls:<sni>`, control 2..16384/TLSRecord/`vouched=0`, клон приманки через `d2k_hello_rename`, white, repeats/gap/timeout/mark/cancel, `[ip]:port` | `main.rs:15396-15466` discovery-адаптер, `raw_probe.rs:602 select_bridge_decoy` | **P** | **Совпадает:** `owns_search=1` ставится до проверок; trigger копируется побайтно, accept ServerHello; TCP-опции только при `tcp_known && len<=buf`; SNI → `tls:` при `0<len<=253` и без NUL; control TLSRecord и `control_vouched=0`; decoy-клон только `snapped && len>5 && b[0]==0x16` и валидном SNI контроля — `d2k_hello_rename` тела + запись `16 03 xx`, иначе `decoy.len=0`; white TLSRecord; `repeats`, `write_gap_ms=gap_us/1000`, `timeout=wait_ms`, `mark`, `cancel`; IPv6-адрес `[ip]:port`. **Отличия:** R2O-адаптер не выделен одним символом; клон-приманка покрыта `raw_probe.rs:2235`, полного C/Rust differential входа нет. |
+| `bridge_input` | 116–255 | 140 | вход измерителя из `d2k_hello`: trigger 2..16384, accept ServerHello, TCP-опции при `tcp_known`, SNI-имя `tls:<sni>`, control 2..16384/TLSRecord/`vouched=0`, клон приманки через `d2k_hello_rename`, white, repeats/gap/timeout/mark/cancel, `[ip]:port` | `classify.rs` `r2o_bridge_input` (production discovery `main.rs`), `select_bridge_decoy` | **E*** | **Совпадает:** `owns_search=1` ставится до проверок; trigger копируется побайтно, accept ServerHello; TCP-опции при `tcp_known && len<=40` (иначе `known=0`); SNI → `tls:` при `0<len<=253` и без NUL; control TLSRecord/`control_vouched=0`; decoy-клон только `snapped && len>5 && b[0]==0x16` и валидном SNI контроля — `d2k_hello_rename` + запись `16 03 xx`, иначе `decoy.len=0`; white TLSRecord; `repeats`, `write_gap_ms=gap_us/1000`, `timeout=wait_ms`, `mark`, `cancel`; IPv6-адрес `[ip]:port`. **Доказательство:** `scripts/r2o-detect-bridge-differential.sh` включает production `detect/bridge.c` (gc-sections) и сверяет 12 кейсов (ошибки входа, клон, control/white, TCP options/overflow, SNI 256/NUL/без SNI, IPv6, task-stop) — `diff` пуст. **Ограничение:** discovery-адаптер не несёт сырые байты TCP-опций клиента и передаёт `tcp_known=false` + уже разрешённый `client_tcp_has_timestamps`; сам `r2o_bridge_input` сохраняет/отклоняет точные опции так же, как C, если они переданы. |
 | `progress_seen` | 261–273 | 13 | прогресс вопроса планировщику; для seeded-«whole» отдать `(0,0)` один раз, чтобы счётчики прошлого прогона не удваивались | `main.rs:10573` closure + `update_probe_progress` | **P** | C при `seeded_whole && probe=="whole"` вызывает `d2k_sched_progress_note(probe,0,0)` и сбрасывает флаг; иначе передаёт `pass/fail`. Rust closure передаёт прогресс без отдельного подавления seeded-whole, поэтому счётчики прошлого прогона могут печататься повторно. |
 | `trace_questions` | 284–309 | 26 | перенести наблюдения `свойство:*` в `d2k_vres.qtrace`: обрезка label по границе UTF-8, `sent/answered` ≤255, outcome UNKNOWN/YES/NO по `d2k_prop_majority` | `classify.rs` `trace_questions`, `ClassifyResult.qtrace` | E | C отбирает только `probe` с префиксом `свойство:`, режет label до 63 байт по границе UTF-8, `sent=pass+fail` (clamp 255), `answered=pass` (clamp), `err→UNKNOWN`, иначе `pass*2>repeats` → YES/NO. Rust `trace_questions` делает то же, `qtrace` ограничен `QTRACE_MAX=16` и заполняется в `finish`. Тест `trace_questions_matches_c_for_property_observations` (включая UTF-8 и UNKNOWN) и `trace_questions_is_bounded_and_notes_match_c`. |
 | `retry_base_timeout` | 314–316 | 3 | распознать наш `dial tcp ...: i/o timeout` для seed базового вопроса | `classify.rs:1244 is_dial_timeout_text` | **E** | **Точное совпадение:** префикс `dial tcp ` и подстрока `: i/o timeout`; тест `tests/classify.rs:796 only_our_connect_deadline_gets_one_doubled_retry_and_stays_flaky`. |
@@ -6376,7 +6376,7 @@ base.valid/base_blocked) и neutral-ack.
 | `d2k_detect_sched_tcp_seeded_white` | 503-511 | 9 | прогон с seed и white одновременно | `main.rs:10580-10923` (`white_name` + `seed_whole`) | **P** | C `sched_tcp(...,white,...,seed)` — оба входа сразу; `bridge_input` заполняет `opt.white` (accept TLSRECORD) и `white.name=\"white\"`, а `sched_tcp` — seed-поля. Rust discovery передаёт `white_name` и `seed_whole` в один и тот же вызов измерения (`main.rs:10902-10923`); отдельного символа нет. |
 | `base_seen` | 531–535 | 5 | прогресс + отметка `base_done` по наблюдению `whole` | `classify.rs:1842 run_base_with_backend_progress` | **P** | C использует `on_obs` и `strcmp(probe,"whole")`; Rust `run_base` спрашивает только базу, отдельного колбэка отметки нет — останов структурный. |
 | `base_stop` | 537-541 | 5 | останов базового вопроса: `base_done` или внешний stop | `main.rs` base discovery (cancel/`base.seed_whole`) | **P** | C `return b->base_done \|\| stop_asked(b->task_stop)`; `base_done` ставит `base_seen` при наблюдении `probe==\"whole\"`, `stop_asked` читает общий и задачный флаги. Rust базовый вопрос завершается по наблюдению whole/`seed_whole` и cancel-токену; отдельной функции нет. |
-| `d2k_detect_sched_tcp_ack` | 548–573 | 26 | перепроверка мёртвого адреса нейтральным ACK: до `repeats`, `probes`, -1/0/1 | `response.rs:898 probe_neutral_ack`, `classify.rs:1588` | **P** | **Совпадает:** `d2k_opts_defaults` (repeats=3), mark/cancel, до `repeats` вызовов `d2k_probe_data_ack`; `-2`/локальная ошибка/отмена → -1, подтверждение → 1, тишина на всех → 0; `probes` считает соединения. **Отличия:** Rust `probe_neutral_ack` вызывается из дерева, отдельного hook-символа с `probes` нет; тест `tests/classify.rs:679`. |
+| `d2k_detect_sched_tcp_ack` | 548–573 | 26 | перепроверка мёртвого адреса нейтральным ACK: до `repeats`, `probes`, -1/0/1 | `classify.rs` `r2o_detect_sched_tcp_ack[_with]`; production `main.rs` `r2o_saved_address_recheck` | **E*** | **Совпадает:** `d2k_opts_defaults` (repeats=3, timeout=6000), mark/cancel, проверка stop перед каждым вызовом; `-2`/Unsupported не увеличивает `probes`, локальная ошибка/отмена → -1 с `probes+1`, подтверждение → 1, тишина на всех → 0; `probes` считает заданные соединения. Production `r2o_saved_address_recheck` вызывает общий loop с тем же контрактом и маппингом результата в Accepted/Silent/Unmeasured. **Доказательство:** `scripts/r2o-detect-bridge-differential.sh` (C fixture с production `bridge.c` + подменённым `d2k_probe_data_ack`) сверяет 7 кейсов: тишина, ACK после двух, локальная ошибка, unsupported, stop до вызова, пустой ip, порт 0 — код/`probes`/число вызовов/аргументы совпадают, `diff` пуст. |
 | `d2k_detect_sched_tcp_base` | 575-641 | 67 | базовый вопрос: `bridge_input`, `tr.name=""`, `no_raw=1`, `base_stop`, `classify_run`, разбор `trace[0]=="whole"`, base.valid, вердикты CLEAR/UNREACHABLE/FLAKY/INCONCLUSIVE/base_blocked | `main.rs` base discovery | **P** | **Ветви сверены:** C `bridge_input` (при ошибке — out); `tr.name=""`, `opt.no_raw=1`; `bc.task_stop=stop`, `base_done=0`, `cancel=base_stop`, `on_obs=base_seen`; `classify_run`; `b = trace[0]=="whole" ? &trace[0] : NULL`; `asked=pass+fail`; `out.probes=asked`; при `asked>=repeats && !retry_base_timeout(err)` — `base.valid/repeats/pass/fail/err`; вердикты: `!b` → map_verdict, `asked<repeats` → INCONCLUSIVE, `err && pass==0` → UNREACHABLE, `pass==repeats` → CLEAR, `pass>0` → FLAKY, иначе INCONCLUSIVE + `base_blocked=1`. Rust базовый вопрос в discovery; условия/тексты иные, C/Rust differential нет. |
 
 ## detect/classify.c (36 функций)
