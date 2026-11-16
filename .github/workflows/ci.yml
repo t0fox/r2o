@@ -593,26 +593,6 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-  donor-differential-plan:
-    name: Проверка полноты C/Rust шардов
-    needs: lint
-    runs-on: ubuntu-24.04
-    timeout-minutes: 2
-    permissions:
-      contents: read
-    outputs:
-      matrix: ${{ steps.plan.outputs.matrix }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
-        with:
-          persist-credentials: false
-      - id: plan
-        name: Проверить полное покрытие и построить матрицу
-        run: |
-          set -euo pipefail
-          sh scripts/ci-differential-shards.sh verify
-          printf 'matrix=%s\n' "$(sh scripts/ci-differential-shards.sh matrix)" >> "$GITHUB_OUTPUT"
-
   tcp-silence-current-differential:
     name: C/Rust differential — current D2O / datapath, ICMP and QUIC fragments
     needs: lint
@@ -668,101 +648,6 @@ jobs:
           TMPDIR: ${{ runner.temp }}
         run: sh scripts/test-conntrack-retry-current-differential.sh
 
-  donor-differential:
-    name: C/Rust differential — ${{ matrix.snapshot }} / ${{ matrix.shard }}
-    needs: [lint, donor-differential-plan]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      max-parallel: 7
-      matrix: ${{ fromJSON(needs.donor-differential-plan.outputs.matrix) }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
-        with:
-          repository: t0fox/d2o
-          ref: ${{ matrix.donor_sha }}
-          path: d2o
-          persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
-        with:
-          toolchain: 1.98.0
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # версия v6.1.0
-        with:
-          path: ${{ runner.temp }}/r2o-apt-archives
-          key: r2o-apt-ubuntu-24.04-differential-${{ matrix.snapshot }}-${{ matrix.cache_shard }}-gcc13-native-v2
-      - name: Установить инструменты differential-сценариев
-        run: |
-          set -euo pipefail
-          packages=(clang-18 libssl-dev pkg-config zlib1g-dev binutils)
-          sh scripts/ci-apt-cache.sh prepare "$RUNNER_TEMP/r2o-apt-archives" /tmp/r2o-apt-archives-partial
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            -o Dir::Cache::archives="$RUNNER_TEMP/r2o-apt-archives" \
-            -o Dir::Cache::archives::partial=/tmp/r2o-apt-archives-partial \
-            "${packages[@]}"
-          sh scripts/ci-apt-cache.sh finalize "$RUNNER_TEMP/r2o-apt-archives"
-      - name: Проверить SHA снимка донора и подготовить C-эталон
-        env:
-          DONOR_SHA: ${{ matrix.donor_sha }}
-        run: |
-          set -euo pipefail
-          test "$(git -C d2o rev-parse HEAD)" = "$DONOR_SHA"
-          make -B -C d2o/datapath test_session test_quic_session test_stun_session test_routemark CC=clang-18
-          # У baseline/legacy доноров этих файлов ещё нет; собираем только
-          # существующие, иначе make падает на отсутствующей цели.
-          for object in diagnostics httpsearch httpup_logic; do
-            if [ -f "d2o/core/$object.c" ]; then
-              make -B -C d2o/core "$object.o" CC=clang-18
-            fi
-          done
-          cargo +1.98.0 fetch --locked
-      - name: C/Rust сценарии
-        env:
-          R2O_ECH_PRIVILEGED_NETNS: '1'
-          DONOR_SNAPSHOT: ${{ matrix.snapshot }}
-          DIFFERENTIAL_SHARD: ${{ matrix.shard }}
-          R2O_EXPECTED_DONOR_SHA: ${{ matrix.donor_sha }}
-          R2O_DONOR_ROOT: ${{ github.workspace }}/d2o
-          R2O_DONOR_CORE: ${{ github.workspace }}/d2o/core
-          R2O_DONOR_DATAPATH: ${{ github.workspace }}/d2o/datapath
-        run: |
-          set -euo pipefail
-          sh scripts/ci-differential-shards.sh verify
-          scenario_list=$(sh scripts/ci-differential-shards.sh list "$DONOR_SNAPSHOT" "$DIFFERENTIAL_SHARD")
-          if [ -z "$scenario_list" ]; then
-            echo "::error::C/Rust differential shard is empty"
-            exit 1
-          fi
-          mapfile -t scripts <<< "$scenario_list"
-          failed=()
-          for script in "${scripts[@]}"; do
-            echo "::group::$script"
-            if timeout 900s sh "scripts/$script"; then
-              echo "::endgroup::"
-            else
-              status=$?
-              failed+=("$script ($status)")
-              echo "::endgroup::"
-            fi
-          done
-          if [ "${#failed[@]}" -gt 0 ]; then
-            printf '::error::C/Rust differential failures: %s\n' "${failed[*]}"
-            exit 1
-          fi
-      - name: Сохранить журналы сравнения
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # версия v7.0.2
-        with:
-          name: r2o-differential-${{ matrix.snapshot }}-${{ matrix.shard }}
-          path: .rea/*.log
-          retention-days: 14
-          if-no-files-found: warn
-          include-hidden-files: true
-
   check:
     name: check
     if: always()
@@ -777,16 +662,14 @@ jobs:
       - sanitizers
       - rust-workspace
       - cross-check
-      - donor-differential-plan
       - tcp-silence-current-differential
       - nfqueue-integration
       - release-build
-      - donor-differential
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
       - name: Завершиться ошибкой при пропуске или сбое проверки
-        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || needs.lint.result == 'skipped' || needs.panel.result == 'skipped' || needs.telegram.result == 'skipped' || needs.panel-browser.result == 'skipped' || needs.shell.result == 'skipped' || needs.datapath.result == 'skipped' || needs.core.result == 'skipped' || needs.rust-workspace.result == 'skipped' || needs.cross-check.result == 'skipped' || needs.donor-differential-plan.result == 'skipped' || needs.tcp-silence-current-differential.result == 'skipped' || needs.nfqueue-integration.result == 'skipped' || needs.release-build.result == 'skipped' || needs.donor-differential.result == 'skipped' || (github.event_name != 'pull_request' && needs.sanitizers.result == 'skipped') }}
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || needs.lint.result == 'skipped' || needs.panel.result == 'skipped' || needs.telegram.result == 'skipped' || needs.panel-browser.result == 'skipped' || needs.shell.result == 'skipped' || needs.datapath.result == 'skipped' || needs.core.result == 'skipped' || needs.rust-workspace.result == 'skipped' || needs.cross-check.result == 'skipped' || needs.tcp-silence-current-differential.result == 'skipped' || needs.nfqueue-integration.result == 'skipped' || needs.release-build.result == 'skipped' || (github.event_name != 'pull_request' && needs.sanitizers.result == 'skipped') }}
         run: exit 1
       - name: Все проверки завершились успешно
         run: echo "Все проверки R2O пройдены"

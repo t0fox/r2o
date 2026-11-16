@@ -350,7 +350,33 @@ cargo check --workspace --all-targets --locked
 cargo build --workspace --release --locked
 ```
 
-CI включает unit/integration, санитайзеры, сетевые NFQUEUE-тесты, Chrome, C/Rust-сверку по закреплённым ревизиям d2o и QEMU-проверки пяти ABI. Дифференциальные сценарии распределены по параллельным заданиям с проверкой полноты покрытия.
+Обязательный CI включает Rust-тесты, ShellCheck, санитайзеры, NFQUEUE, проверки wire-протокола и безопасности, Chrome и сборку ABI с проверкой ELF и запуском в QEMU. Подписанный релиз требует успешного CI для того же коммита `main`.
+
+Полная C/Rust-сверка запускается локально. Разместите закреплённые checkout D2O в `$D2O_SNAPSHOTS/<SHA>` и установите Clang 18, libssl-dev, pkg-config, zlib1g-dev и binutils. SHA и имена шардов выводит `sh scripts/ci-differential-shards.sh matrix`.
+
+Скрипт ниже запускает все шарды. Для одного шарда перед запуском задайте, например, `export SNAPSHOT=upstream SHARD=scheduler`.
+
+```bash
+set -euo pipefail
+cargo +1.98.0 fetch --locked
+sh scripts/ci-differential-shards.sh matrix |
+  jq -r --arg snapshot "${SNAPSHOT:-}" --arg shard "${SHARD:-}" '
+    .include[] | select(($snapshot == "" or .snapshot == $snapshot)
+      and ($shard == "" or .shard == $shard)) | [.snapshot, .shard, .donor_sha] | @tsv' |
+  while IFS=$'\t' read -r snapshot shard sha; do
+    export R2O_DONOR_ROOT="${D2O_SNAPSHOTS:?}/$sha" R2O_EXPECTED_DONOR_SHA="$sha"
+    export R2O_DONOR_CORE="$R2O_DONOR_ROOT/core" R2O_DONOR_DATAPATH="$R2O_DONOR_ROOT/datapath"
+    test "$(git -C "$R2O_DONOR_ROOT" rev-parse HEAD)" = "$sha"
+    make -C "$R2O_DONOR_DATAPATH" test_session test_quic_session test_stun_session test_routemark CC=clang-18
+    for obj in diagnostics httpsearch httpup_logic; do
+      if [ -f "$R2O_DONOR_CORE/$obj.c" ]; then
+        make -C "$R2O_DONOR_CORE" "$obj.o" CC=clang-18
+      fi
+    done
+    sh scripts/ci-differential-shards.sh list "$snapshot" "$shard" |
+      while IFS= read -r script; do sh "scripts/$script"; done
+  done
+```
 
 | Документ | Для чего |
 |---|---|
