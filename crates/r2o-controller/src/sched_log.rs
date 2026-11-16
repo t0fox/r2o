@@ -7,6 +7,10 @@
 //! планировщика в d2kc имеют тот же префикс времени.
 
 #[cfg(unix)]
+// libc помечает `time_t` deprecated на musl: в будущем тип станет 64-битным.
+// `localtime_r` всё ещё принимает именно его, а R2O уже собирается с
+// 64-битным `time_t` на musl-целях; подавляем только это предупреждение.
+#[allow(deprecated)]
 pub fn r2o_sched_say_at(epoch_seconds: i64, line: &str) -> String {
     let moment = epoch_seconds as libc::time_t;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
