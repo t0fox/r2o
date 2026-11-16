@@ -1,6 +1,9 @@
 #!/bin/sh
 # C/Rust differential: dns_service_observe / dns_service_note_applied,
-# task-ячейки DNS и live-состояния dns_services current main 7a5fab9.
+# task-ячейки DNS, live-состояния dns_services и production
+# dns_health_start_due/dns_health_finish current main 7a5fab9.
+# Health-ветка линкует полный C core/datapath; результат finish подаётся
+# mock-полями worker'а, сеть — только закрытый 127.0.0.1:1.
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -55,3 +58,59 @@ print("PASS: dns_services observe/applied live C/Rust match (current main)")
 PY
 
 printf 'cases=%s\n' "$(grep -o '"scenario"' "$TEMP/c.json" | wc -l)"
+
+# --- Production dns_health_start_due/dns_health_finish ---------------------
+# Health-ветка start_due требует настоящий sched.c worker, поэтому линкуется
+# полный набор C-объектов core/datapath (без libd2k_udp.a: он собирается из
+# тех же исходников). Сеть не нужна: проба идёт на закрытый 127.0.0.1:1, а
+# результаты finish подаются в поля задачи напрямую.
+HEALTH_SRC="verify tls13 tls12 p256 tls13core x25519 crypto quicconn quicwire h3 compose measured hello meas link quicprobe quicsnap quicsnap_reseal quic quicarms ipfrag props voice voice_discovery stun net4 volume plantlv quichello verify_quic_replay catalog groups domain match diagnostics udpplan udpruntime"
+HEALTH_DP_SRC="plan_parse plan_apply wire wire_udp"
+for name in $HEALTH_SRC; do
+    "$CC" -std=gnu11 -O1 -ffunction-sections -fdata-sections \
+        -I"$DNS_DONOR_ROOT/core" -I"$DNS_DONOR_ROOT/core/include" \
+        -I"$DNS_DONOR_ROOT/datapath/include" -I"$DNS_DONOR_ROOT/runtime" \
+        -c -o "$TEMP/health-$name.o" "$DNS_DONOR_ROOT/core/$name.c"
+done
+for name in $HEALTH_DP_SRC; do
+    "$CC" -std=gnu11 -O1 -ffunction-sections -fdata-sections \
+        -I"$DNS_DONOR_ROOT/core" -I"$DNS_DONOR_ROOT/core/include" \
+        -I"$DNS_DONOR_ROOT/datapath/include" -I"$DNS_DONOR_ROOT/runtime" \
+        -c -o "$TEMP/dphealth-$name.o" "$DNS_DONOR_ROOT/datapath/$name.c"
+done
+"$CC" -std=gnu11 -O1 -ffunction-sections -fdata-sections \
+    -I"$DNS_DONOR_ROOT/core" -I"$DNS_DONOR_ROOT/core/include" \
+    -I"$DNS_DONOR_ROOT/datapath/include" -I"$DNS_DONOR_ROOT/runtime" \
+    -c -o "$TEMP/health-d2k_dns_config.o" "$DNS_DONOR_ROOT/runtime/d2k_dns_config.c"
+"$CC" -std=gnu11 -O1 -ffunction-sections -fdata-sections \
+    -I"$DNS_DONOR_ROOT/core" -I"$DNS_DONOR_ROOT/core/include" \
+    -I"$DNS_DONOR_ROOT/datapath/include" -I"$DNS_DONOR_ROOT/runtime" \
+    -c -o "$TEMP/health-fixture.o" \
+    "$ROOT/crates/r2o-controller/tests/d2o_dns_health_state_differential.c"
+"$CC" -o "$TEMP/d2o-dns-health-state" "$TEMP"/health-*.o \
+    "$TEMP"/dphealth-*.o -Wl,--gc-sections -lpthread -lm
+"$TEMP/d2o-dns-health-state" >"$TEMP/health-c.json"
+
+R2O_DNS_HEALTH_STATE_DIFF_OUTPUT="$TEMP/health-rust.json" \
+    "$CARGO" test --manifest-path "$ROOT/Cargo.toml" --locked --offline \
+    -p r2o-controller --bin r2o-controller \
+    tests::dns_health_state_differential_matches_current_d2o \
+    -- --exact >"$TEMP/health-cargo.log" 2>&1
+
+python3 - "$TEMP/health-c.json" "$TEMP/health-rust.json" <<'PY'
+import json
+import sys
+
+c = json.load(open(sys.argv[1], encoding="utf-8"))
+r = json.load(open(sys.argv[2], encoding="utf-8"))
+if c != r:
+    for left, right in zip(c, r):
+        if left != right:
+            print("C:", json.dumps(left, ensure_ascii=False, sort_keys=True))
+            print("R:", json.dumps(right, ensure_ascii=False, sort_keys=True))
+            break
+    raise SystemExit(1)
+print("PASS: dns_health_start_due/finish C/Rust match (current main)")
+PY
+
+printf 'health_cases=%s\n' "$(grep -o '"scenario"' "$TEMP/health-c.json" | wc -l)"

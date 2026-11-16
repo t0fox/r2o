@@ -20,6 +20,34 @@ static void emit(const char *scenario) {
     printf("\"end\":true}");
 }
 
+/* Сбросить live-поля, как их заводит dns_service_observe после смены IP. */
+static void reset_live(void) {
+    dns_service_live *live = &s.dns_service_live[0];
+    live->state = DNS_SERVICE_DETECTED;
+    live->tcp_reachable = live->tls_handshake = live->http_status = live->dns_answer = 0;
+    live->plan_applied = 0;
+    live->applied_plan_id[0] = '\0';
+    live->plan_applied_ms = 0;
+    live->checked_ms = 0;
+    live->attempts = 0;
+    live->reason[0] = '\0';
+}
+
+/* Задача-кандидат DNS-endpoint: protocol/name/port обязательны для отбора. */
+static void reset_task(task *t, task_state state, int ver_ok, int level, int status,
+                       int dns_reply, const char *reason) {
+    memset(t, 0, sizeof *t);
+    t->state = state;
+    snprintf(t->dns_protocol, sizeof t->dns_protocol, "doh");
+    snprintf(t->name, sizeof t->name, "dns.example");
+    t->port = 443;
+    t->ver_ok = ver_ok;
+    t->ver.level = level;
+    t->ver.status = status;
+    t->ver.dns_reply = dns_reply;
+    snprintf(t->ver.reason, sizeof t->ver.reason, "%s", reason);
+}
+
 int main(void) {
     memset(&s, 0, sizeof s);
     memset(&cat, 0, sizeof cat);
@@ -209,6 +237,91 @@ int main(void) {
     s.dns_service_live[0].tls_handshake = 0;
     s.dns_service_live[0].http_status = 0;
     emit("task_health_ignored");
+
+    // Кандидат применён, DNS-ответа нет, поиск уже в T_RESTING: no_bypass
+    // с собственной причиной, candidate_plan_applied=1, via_plan=0.
+    reset_live();
+    reset_task(t, T_RESTING, 1, D2K_VER_APPLICATION, 200, 0,
+               "Кандидат применён, но DNS-ответ не получен: проба завершилась без ответа.");
+    emit("candidate_without_answer_no_bypass");
+
+    // Тот же кандидат, но датапат подтвердил план на живом DNS-соединении:
+    // ветка plan_applied идёт раньше T_RESTING, via_plan всё ещё 0.
+    s.dns_service_live[0].plan_applied = 1;
+    s.dns_service_live[0].plan_applied_ms = 5000;
+    snprintf(s.dns_service_live[0].applied_plan_id,
+             sizeof s.dns_service_live[0].applied_plan_id, "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd");
+    emit("candidate_without_answer_plan_applied");
+
+    // Кандидат без ответа, но health-проба прямого потока ответ получила:
+    // answered = live.dns_answer, и candidate_answer становится bypass_ok.
+    s.dns_service_live[0].plan_applied = 0;
+    s.dns_service_live[0].plan_applied_ms = 0;
+    s.dns_service_live[0].applied_plan_id[0] = '\0';
+    s.dns_service_live[0].dns_answer = 1;
+    emit("candidate_without_answer_live_answer");
+
+    // T_WATCHING с применённым кандидатом без ответа: не Verify/Resting,
+    // общая ветка «Подозрение передано в штатный конвейер D2O».
+    reset_live();
+    reset_task(t, T_WATCHING, 1, D2K_VER_APPLICATION, 200, 0, "");
+    emit("candidate_without_answer_watching");
+
+    // T_QUEUED — та же общая ветка.
+    reset_task(t, T_QUEUED, 1, D2K_VER_APPLICATION, 200, 0, "");
+    emit("candidate_without_answer_queued");
+
+    // План live применён, но task в T_VERIFY: проверка кандидата приоритетнее
+    // plan_applied, candidate_plan_applied=0.
+    reset_live();
+    s.dns_service_live[0].plan_applied = 1;
+    s.dns_service_live[0].plan_applied_ms = 5000;
+    snprintf(s.dns_service_live[0].applied_plan_id,
+             sizeof s.dns_service_live[0].applied_plan_id, "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd");
+    reset_task(t, T_VERIFY, 0, D2K_VER_TRANSPORT, 0, 0, "");
+    emit("plan_applied_task_verify");
+
+    // live.state=checking приоритетнее task-candidate: writer отдаёт причину
+    // самой health-пробы, а не «Проверяется кандидат…».
+    s.dns_service_live[0].plan_applied = 0;
+    s.dns_service_live[0].plan_applied_ms = 0;
+    s.dns_service_live[0].applied_plan_id[0] = '\0';
+    s.dns_service_live[0].state = DNS_SERVICE_CHECKING;
+    snprintf(s.dns_service_live[0].reason, sizeof s.dns_service_live[0].reason,
+             "Автоматически проверяется корректный DNS-ответ endpoint.");
+    emit("live_checking_with_task");
+
+    // live.state=direct_ok приоритетнее T_RESTING: остаётся direct_ok.
+    s.dns_service_live[0].state = DNS_SERVICE_DIRECT_OK;
+    s.dns_service_live[0].checked_ms = 5001;
+    s.dns_service_live[0].tcp_reachable = 1;
+    s.dns_service_live[0].tls_handshake = 1;
+    s.dns_service_live[0].http_status = 200;
+    s.dns_service_live[0].dns_answer = 1;
+    snprintf(s.dns_service_live[0].reason, sizeof s.dns_service_live[0].reason,
+             "DoH: получен корректный DNS-ответ");
+    reset_task(t, T_RESTING, 0, D2K_VER_TRANSPORT, 0, 0, "");
+    emit("live_direct_ok_with_task");
+
+    // live.state=failed и task не Verify/Resting: failed, а не generic
+    // checking (ветка failed идёт раньше общего task).
+    s.dns_service_live[0].state = DNS_SERVICE_FAILED;
+    s.dns_service_live[0].checked_ms = 5001;
+    s.dns_service_live[0].tcp_reachable = 1;
+    s.dns_service_live[0].tls_handshake = 0;
+    s.dns_service_live[0].http_status = 413;
+    s.dns_service_live[0].dns_answer = 0;
+    snprintf(s.dns_service_live[0].reason, sizeof s.dns_service_live[0].reason,
+             "HTTP 413: это ошибка endpoint, а не доказательство DPI; подбор не запускается.");
+    reset_task(t, T_QUEUED, 0, D2K_VER_TRANSPORT, 0, 0, "");
+    emit("live_failed_with_task");
+
+    // no_bypass не режет причину по точности: причина длиннее 100 байт
+    // остаётся целиком, в отличие от «Автопроверка: %.100s».
+    reset_live();
+    reset_task(t, T_RESTING, 0, D2K_VER_TRANSPORT, 0, 0,
+               "Поиск завершён: все кандидаты отклонены, повторный замер не назначен.");
+    emit("no_bypass_long_reason");
 
     printf("]\n");
     return 0;

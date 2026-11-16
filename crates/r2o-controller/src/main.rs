@@ -2985,7 +2985,7 @@ impl R2oDnsServices {
         key: &[u8; r2k_core::control::KEY_LEN],
         name: &str,
         transport: u8,
-        mono: std::time::Instant,
+        mono_ms: i64,
     ) {
         if self.services.is_empty() || name.is_empty() || !r2o_client_is_router_address(key) {
             return;
@@ -3020,7 +3020,7 @@ impl R2oDnsServices {
             live.applied_plan_id.clear();
             live.plan_applied_at = None;
             live.checked_at = None;
-            live.next_check = Some(mono);
+            live.next_check_ms = mono_ms;
             live.reason.clear();
             live.router_seen = false;
         }
@@ -3157,14 +3157,11 @@ impl R2oDnsServices {
                 } else {
                     r2o_controller::live::DnsServiceState::Failed
                 };
-                live.next_check = Some(
-                    std::time::Instant::now()
-                        + if result.dns_reply {
-                            std::time::Duration::from_secs(5 * 60)
-                        } else {
-                            std::time::Duration::from_secs(60)
-                        },
-                );
+                live.next_check_ms = mono_ms.saturating_add(if result.dns_reply {
+                    5 * 60 * 1000
+                } else {
+                    60 * 1000
+                });
                 live.reason = if result.dns_reply {
                     result.reason.clone()
                 } else if result.http_status == 413 {
@@ -3187,7 +3184,6 @@ impl R2oDnsServices {
         if let Some(task) = self.tasks.get_mut(slot) {
             task.reset();
         }
-        let _ = mono_ms;
     }
 
     /// Синхронизировать DNS task-ячейки с настоящим lifecycle Discovery:
@@ -3480,7 +3476,7 @@ impl R2oDnsServices {
             return;
         };
         if self.live[index].ip != ip {
-            self.observe(key, name, transport, std::time::Instant::now());
+            self.observe(key, name, transport, r2o_controller::now_ms::d2k_now_ms());
         }
         let live = &mut self.live[index];
         live.applied_plan_id = plan_id.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -3594,19 +3590,19 @@ impl R2oDnsHealth {
     }
 
     /// C `dns_health_start_due`: не более одной пробы, только
-    /// `state != checking` и `now >= next_check`; блокирующая проба уходит в
+    /// `state != checking` и `now >= next_check_ms`; блокирующая проба уходит в
     /// отдельный поток, а в планировщике занята настоящая ячейка
     /// T_DNS_HEALTH с protocol/host/path/bootstrap/generation.
     fn start_due(&mut self, state: &mut R2oDnsServices, mark: Option<u32>) {
         if self.in_flight(state) {
             return;
         }
-        let now = std::time::Instant::now();
+        let now_ms = r2o_controller::now_ms::d2k_now_ms();
         for index in 0..state.services.len() {
             let service = state.services[index].clone();
             let live = state.live.get(index).cloned().unwrap_or_default();
             if live.state == r2o_controller::live::DnsServiceState::Checking
-                || live.next_check.is_some_and(|next| now < next)
+                || (live.next_check_ms != 0 && now_ms < live.next_check_ms)
                 || (live.ip.is_empty() && service.bootstrap_dns.is_empty())
             {
                 continue;
@@ -3632,8 +3628,7 @@ impl R2oDnsHealth {
                             .unwrap_or_default()
                             .as_secs() as i64,
                     );
-                    live.next_check =
-                        Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+                    live.next_check_ms = now_ms.saturating_add(60 * 1000);
                     live.reason = r2o_dns_health_preflight_text(preflight).into();
                     continue;
                 }
@@ -3655,7 +3650,7 @@ impl R2oDnsHealth {
                 live.http_status = 0;
                 live.dns_answer = false;
                 live.attempts = live.attempts.saturating_add(1);
-                live.reason = if bootstrap && live.ip.is_empty() {
+                live.reason = if bootstrap {
                     "Получается IP endpoint через настроенный bootstrap DNS перед проверкой RFC 8484."
                         .into()
                 } else {
@@ -25057,7 +25052,7 @@ impl ControlClient {
                         &hello.key,
                         name,
                         hello.key[37],
-                        std::time::Instant::now(),
+                        r2o_controller::now_ms::d2k_now_ms(),
                     );
                 }
                 if r2o_late_rx.is_some() {
@@ -30896,19 +30891,19 @@ mod tests {
         );
 
         let mut current = key([127, 0, 0, 1], [198, 51, 100, 80], 40_000, 443, 6);
-        let now = std::time::Instant::now();
-        state.observe(&current, "dns.example", 6, now);
+        let now_ms = r2o_controller::now_ms::d2k_now_ms();
+        state.observe(&current, "dns.example", 6, now_ms);
         assert_eq!(state.live[0].ip, "198.51.100.80");
         // IP-литерал уже записан set_services; наблюдение того же IP не
         // создаёт новую generation (C сравнивает live->ip).
         assert_eq!(state.live[0].generation, 1);
         // Тот же IP не создаёт новую generation.
-        state.observe(&current, "dns.example", 6, now);
+        state.observe(&current, "dns.example", 6, now_ms);
         assert_eq!(state.live[0].generation, 1);
 
         // Поток не с адреса роутера игнорируется.
         let foreign = key([203, 0, 113, 5], [198, 51, 100, 80], 40_001, 443, 6);
-        state.observe(&foreign, "dns.example", 6, now);
+        state.observe(&foreign, "dns.example", 6, now_ms);
         assert_eq!(state.live[0].ip, "198.51.100.80");
 
         state.note_applied(
@@ -30945,7 +30940,7 @@ mod tests {
 
         // Смена серверного IP при наблюдении сбрасывает health/plan.
         let changed = key([127, 0, 0, 1], [198, 51, 100, 81], 40_000, 8443, 6);
-        state.observe(&changed, "dns.example", 6, now);
+        state.observe(&changed, "dns.example", 6, now_ms);
         assert_eq!(state.live[0].ip, "198.51.100.81");
         assert_eq!(state.live[0].generation, 3);
         assert!(!state.live[0].plan_applied);
@@ -31019,9 +31014,9 @@ mod tests {
         };
         snapshot(&state, "configured");
 
-        let now = std::time::Instant::now();
+        let now_ms = r2o_controller::now_ms::d2k_now_ms();
         let current = key([198, 51, 100, 80], 443);
-        state.observe(&current, "dns.example", 6, now);
+        state.observe(&current, "dns.example", 6, now_ms);
         snapshot(&state, "observed");
         state.note_applied(
             &current,
@@ -31037,7 +31032,7 @@ mod tests {
         );
         snapshot(&state, "applied");
         let changed = key([198, 51, 100, 81], 443);
-        state.observe(&changed, "dns.example", 6, now);
+        state.observe(&changed, "dns.example", 6, now_ms);
         snapshot(&state, "ip_changed");
 
         state.live[0].checked_at = Some(2005);
@@ -31238,6 +31233,150 @@ mod tests {
         state.live[0].http_status = 0;
         snapshot(&state, "task_health_ignored");
 
+        fn reset_live(state: &mut super::R2oDnsServices) {
+            let live = &mut state.live[0];
+            live.state = r2o_controller::live::DnsServiceState::Detected;
+            live.tcp_reachable = false;
+            live.tls_handshake = false;
+            live.http_status = 0;
+            live.dns_answer = false;
+            live.plan_applied = false;
+            live.applied_plan_id.clear();
+            live.plan_applied_at = None;
+            live.checked_at = None;
+            live.attempts = 0;
+            live.reason.clear();
+        }
+
+        // Кандидат применён, DNS-ответа нет, поиск уже в T_RESTING.
+        reset_live(&mut state);
+        set_task(
+            &mut state,
+            r2o_controller::live::DnsTaskState::Resting,
+            true,
+            r2o_controller::live::D2K_VER_APPLICATION,
+            200,
+            false,
+            "Кандидат применён, но DNS-ответ не получен: проба завершилась без ответа.",
+        );
+        snapshot(&state, "candidate_without_answer_no_bypass");
+
+        // Датапат подтвердил план на живом DNS-соединении: plan_applied
+        // раньше T_RESTING, via_plan всё ещё 0.
+        state.live[0].plan_applied = true;
+        state.live[0].plan_applied_at = Some(2005);
+        state.live[0].applied_plan_id = "cd".repeat(16);
+        snapshot(&state, "candidate_without_answer_plan_applied");
+
+        // Health-проба прямого потока получила ответ: bypass_ok.
+        state.live[0].plan_applied = false;
+        state.live[0].plan_applied_at = None;
+        state.live[0].applied_plan_id.clear();
+        state.live[0].dns_answer = true;
+        snapshot(&state, "candidate_without_answer_live_answer");
+
+        // T_WATCHING с применённым кандидатом без ответа — общая ветка.
+        reset_live(&mut state);
+        set_task(
+            &mut state,
+            r2o_controller::live::DnsTaskState::Watching,
+            true,
+            r2o_controller::live::D2K_VER_APPLICATION,
+            200,
+            false,
+            "",
+        );
+        snapshot(&state, "candidate_without_answer_watching");
+
+        // T_QUEUED — та же общая ветка.
+        set_task(
+            &mut state,
+            r2o_controller::live::DnsTaskState::Queued,
+            true,
+            r2o_controller::live::D2K_VER_APPLICATION,
+            200,
+            false,
+            "",
+        );
+        snapshot(&state, "candidate_without_answer_queued");
+
+        // Live plan_applied, но task в T_VERIFY: проверка кандидата
+        // приоритетнее plan_applied.
+        reset_live(&mut state);
+        state.live[0].plan_applied = true;
+        state.live[0].plan_applied_at = Some(2005);
+        state.live[0].applied_plan_id = "cd".repeat(16);
+        set_task(
+            &mut state,
+            r2o_controller::live::DnsTaskState::Verify,
+            false,
+            r2o_controller::live::D2K_VER_TRANSPORT,
+            0,
+            false,
+            "",
+        );
+        snapshot(&state, "plan_applied_task_verify");
+
+        // live.state=checking приоритетнее task-candidate.
+        state.live[0].plan_applied = false;
+        state.live[0].plan_applied_at = None;
+        state.live[0].applied_plan_id.clear();
+        state.live[0].state = r2o_controller::live::DnsServiceState::Checking;
+        state.live[0].reason = "Автоматически проверяется корректный DNS-ответ endpoint.".into();
+        snapshot(&state, "live_checking_with_task");
+
+        // live.state=direct_ok приоритетнее T_RESTING.
+        state.live[0].state = r2o_controller::live::DnsServiceState::DirectOk;
+        state.live[0].checked_at = Some(2005);
+        state.live[0].tcp_reachable = true;
+        state.live[0].tls_handshake = true;
+        state.live[0].http_status = 200;
+        state.live[0].dns_answer = true;
+        state.live[0].reason = "DoH: получен корректный DNS-ответ".into();
+        set_task(
+            &mut state,
+            r2o_controller::live::DnsTaskState::Resting,
+            false,
+            r2o_controller::live::D2K_VER_TRANSPORT,
+            0,
+            false,
+            "",
+        );
+        snapshot(&state, "live_direct_ok_with_task");
+
+        // live.state=failed и task не Verify/Resting: failed.
+        state.live[0].state = r2o_controller::live::DnsServiceState::Failed;
+        state.live[0].checked_at = Some(2005);
+        state.live[0].tcp_reachable = true;
+        state.live[0].tls_handshake = false;
+        state.live[0].http_status = 413;
+        state.live[0].dns_answer = false;
+        state.live[0].reason =
+            "HTTP 413: это ошибка endpoint, а не доказательство DPI; подбор не запускается.".into();
+        set_task(
+            &mut state,
+            r2o_controller::live::DnsTaskState::Queued,
+            false,
+            r2o_controller::live::D2K_VER_TRANSPORT,
+            0,
+            false,
+            "",
+        );
+        snapshot(&state, "live_failed_with_task");
+
+        // no_bypass не режет причину по точности.
+        reset_live(&mut state);
+        set_task(
+            &mut state,
+            r2o_controller::live::DnsTaskState::Resting,
+            false,
+            r2o_controller::live::D2K_VER_TRANSPORT,
+            0,
+            false,
+            "Поиск завершён: все кандидаты отклонены, повторный замер не назначен.",
+        );
+        snapshot(&state, "no_bypass_long_reason");
+
         if let Ok(path) = std::env::var("R2O_DNS_STATE_DIFF_OUTPUT") {
             std::fs::write(path, serde_json::to_string(&scenarios).unwrap()).unwrap();
         }
@@ -31245,6 +31384,500 @@ mod tests {
         assert_eq!(
             scenarios[3]["dns_services"][0]["resolved_ip"],
             "198.51.100.81"
+        );
+    }
+
+    /// C/Rust differential production-переходов `dns_health_start_due`/
+    /// `dns_health_finish` (current main 7a5fab9). C-оракул:
+    /// `d2o_dns_health_state_differential.c`; сеть нужна только ветке
+    /// start_due (закрытый порт 1), результаты finish подаются напрямую.
+    #[cfg(unix)]
+    #[test]
+    fn dns_health_state_differential_matches_current_d2o() {
+        use r2k_core::dns_config::DnsService;
+        use r2o_controller::dns_health::DnsHealthResult;
+        use r2o_controller::live::{DnsServiceLive, DnsTask, DnsTaskState, DnsTaskVerify};
+        use serde_json::json;
+
+        fn service(
+            protocol: &str,
+            host: &str,
+            sni: &str,
+            path: &str,
+            bootstrap: &str,
+            port: u16,
+        ) -> DnsService {
+            DnsService {
+                protocol: protocol.into(),
+                host: host.into(),
+                sni: sni.into(),
+                path: path.into(),
+                bootstrap_dns: bootstrap.into(),
+                source: "test".into(),
+                port,
+            }
+        }
+
+        fn make_state(service: DnsService) -> super::R2oDnsServices {
+            make_state_many(vec![service])
+        }
+
+        fn make_state_many(services: Vec<DnsService>) -> super::R2oDnsServices {
+            let mut state = super::R2oDnsServices {
+                services: Vec::new(),
+                live: Vec::new(),
+                tasks: dns_tasks(),
+                generation: 0,
+            };
+            state.set_services(services);
+            state
+        }
+
+        fn task_state_name(state: DnsTaskState) -> &'static str {
+            match state {
+                DnsTaskState::Free => "free",
+                DnsTaskState::Queued => "queued",
+                DnsTaskState::Asking => "asking",
+                DnsTaskState::ShapeWait => "shape_wait",
+                DnsTaskState::PropsContact => "props_contact",
+                DnsTaskState::PropsWait => "props_wait",
+                DnsTaskState::Planning => "planning",
+                DnsTaskState::TrialSettle => "trial_settle",
+                DnsTaskState::Verify => "verify",
+                DnsTaskState::VerifyWait => "verify_wait",
+                DnsTaskState::Watching => "watching",
+                DnsTaskState::Resting => "resting",
+                DnsTaskState::VoiceMeasure => "voice_measure",
+                DnsTaskState::VoiceTrial => "voice_trial",
+                DnsTaskState::VoiceWatch => "voice_watch",
+                DnsTaskState::DnsHealth => "dns_health",
+            }
+        }
+
+        fn task_value(tasks: &[DnsTask]) -> serde_json::Value {
+            let Some(task) = tasks.iter().find(|task| task.state != DnsTaskState::Free) else {
+                return serde_json::Value::Null;
+            };
+            json!({
+                "state": task_state_name(task.state),
+                "generation": task.dns_service_generation,
+                "ip": task.ip,
+                "name": task.name,
+                "protocol": task.dns_protocol,
+                "host": task.dns_host,
+                "path": task.doh_path,
+                "bootstrap": task.dns_bootstrap,
+                "transport": task.transport,
+                "family": task.family,
+                "port": task.port,
+            })
+        }
+
+        fn snapshot(state: &super::R2oDnsServices, name: &str) -> serde_json::Value {
+            let live = r2o_controller::live::snapshot_with_areas_and_dns(
+                &Catalog::default(),
+                std::path::Path::new("/state/catalog.json"),
+                &std::collections::HashSet::new(),
+                Vec::new(),
+                json!({}),
+                r2o_controller::live::DiscoveryStatus::default(),
+                &[],
+                &state.services,
+                &state.live,
+                &state.tasks,
+            )
+            .unwrap();
+            json!({
+                "scenario": name,
+                "dns_services": live["dns_services"],
+                "task": task_value(&state.tasks),
+            })
+        }
+
+        fn wait_health(health: &mut super::R2oDnsHealth, state: &mut super::R2oDnsServices) {
+            for _ in 0..240 {
+                health.poll(state, 5001);
+                if health.task_slot.is_none()
+                    && !state
+                        .tasks
+                        .iter()
+                        .any(|task| task.state == DnsTaskState::DnsHealth)
+                {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+        }
+
+        /* Подать результат worker'а прямо в поля задачи, как C fill_health. */
+        fn fill_health(
+            state: &mut super::R2oDnsServices,
+            generation: u64,
+            ip: &str,
+            bootstrap: &str,
+            tcp_reachable: bool,
+            tls_handshake: bool,
+            status: i32,
+            dns_reply: bool,
+            reason: &str,
+        ) {
+            state.tasks[0] = DnsTask {
+                state: DnsTaskState::DnsHealth,
+                dns_health_probe: true,
+                dns_service_generation: generation,
+                transport: 6,
+                family: 4,
+                port: 443,
+                ip: ip.into(),
+                name: "dns.example".into(),
+                dns_protocol: "doh".into(),
+                dns_host: "dns.example".into(),
+                doh_path: "/dns-query".into(),
+                dns_bootstrap: bootstrap.into(),
+                tcp_reachable,
+                tls_handshake,
+                http_status: status,
+                dns_answer: dns_reply,
+                ver: DnsTaskVerify {
+                    level: if dns_reply {
+                        r2o_controller::live::D2K_VER_APPLICATION
+                    } else if tls_handshake {
+                        r2o_controller::live::D2K_VER_HANDSHAKE
+                    } else if tcp_reachable {
+                        r2o_controller::live::D2K_VER_TRANSPORT
+                    } else {
+                        r2o_controller::live::D2K_VER_NOT_MEASURED
+                    },
+                    status,
+                    dns_reply,
+                    reason: reason.into(),
+                },
+                ..Default::default()
+            };
+        }
+
+        let mut scenarios = Vec::new();
+
+        // 1. DoH: старт пробы по закрытому порту → checking, задача занята.
+        {
+            let mut state = make_state(service(
+                "doh",
+                "127.0.0.1",
+                "dns.example",
+                "/dns-query?x=1",
+                "",
+                1,
+            ));
+            let mut health = super::R2oDnsHealth::new();
+            health.start_due(&mut state, None);
+            scenarios.push(snapshot(&state, "start_due_doh"));
+            wait_health(&mut health, &mut state);
+        }
+
+        // 2. Bootstrap настроен и IP уже известен: C всё равно печатает
+        //    bootstrap-причину.
+        {
+            let mut state = make_state(service(
+                "doh",
+                "dns.example",
+                "dns.example",
+                "/dns-query",
+                "127.0.0.1:1",
+                1,
+            ));
+            state.live[0].ip = "127.0.0.1".into();
+            let mut health = super::R2oDnsHealth::new();
+            health.start_due(&mut state, None);
+            scenarios.push(snapshot(&state, "start_due_bootstrap_known_ip"));
+            wait_health(&mut health, &mut state);
+        }
+
+        // 3. DoT: транспорт 6, sni пуст → имя — host.
+        {
+            let mut state = make_state(service("dot", "127.0.0.1", "", "", "", 1));
+            let mut health = super::R2oDnsHealth::new();
+            health.start_due(&mut state, None);
+            scenarios.push(snapshot(&state, "start_due_dot"));
+            wait_health(&mut health, &mut state);
+        }
+
+        // 4. DoQ: транспорт 17 (IPv4-стенд без зависимости от IPv6).
+        {
+            let mut state = make_state(service("doq", "127.0.0.1", "", "", "", 1));
+            let mut health = super::R2oDnsHealth::new();
+            health.start_due(&mut state, None);
+            scenarios.push(snapshot(&state, "start_due_doq"));
+            wait_health(&mut health, &mut state);
+        }
+
+        // 5. Уже checking — новой пробы нет.
+        {
+            let mut state = make_state(service(
+                "doh",
+                "127.0.0.1",
+                "dns.example",
+                "/dns-query",
+                "",
+                1,
+            ));
+            state.live[0].state = r2o_controller::live::DnsServiceState::Checking;
+            let mut health = super::R2oDnsHealth::new();
+            health.start_due(&mut state, None);
+            scenarios.push(snapshot(&state, "start_due_skip_checking"));
+        }
+
+        // 6. next_check_ms в будущем — пробы нет.
+        {
+            let mut state = make_state(service(
+                "doh",
+                "127.0.0.1",
+                "dns.example",
+                "/dns-query",
+                "",
+                1,
+            ));
+            state.live[0].next_check_ms = r2o_controller::now_ms::d2k_now_ms() + 60_000;
+            let mut health = super::R2oDnsHealth::new();
+            health.start_due(&mut state, None);
+            scenarios.push(snapshot(&state, "start_due_skip_future"));
+        }
+
+        // 7. Ни IP, ни bootstrap — пробы нет.
+        {
+            let mut state = make_state(service(
+                "doh",
+                "dns.example",
+                "dns.example",
+                "/dns-query",
+                "",
+                1,
+            ));
+            let mut health = super::R2oDnsHealth::new();
+            health.start_due(&mut state, None);
+            scenarios.push(snapshot(&state, "start_due_skip_no_ip"));
+        }
+
+        // 8. Две готовые службы — start_due занимает только одну T_DNS_HEALTH.
+        {
+            let mut state = make_state_many(vec![
+                service("doh", "127.0.0.1", "dns.example", "/dns-query", "", 1),
+                service("doh", "127.0.0.1", "dns2.example", "/dns-query", "", 1),
+            ]);
+            let mut health = super::R2oDnsHealth::new();
+            health.start_due(&mut state, None);
+            scenarios.push(snapshot(&state, "start_due_one_at_a_time"));
+            wait_health(&mut health, &mut state);
+        }
+
+        // 9. Finish: успешный ответ поднимает DirectOk и ставит 5 минут.
+        {
+            let mut state = make_state(service(
+                "doh",
+                "127.0.0.1",
+                "dns.example",
+                "/dns-query",
+                "",
+                443,
+            ));
+            let generation = state.live[0].generation;
+            fill_health(
+                &mut state,
+                generation,
+                "127.0.0.1",
+                "",
+                true,
+                true,
+                200,
+                true,
+                "DoH: корректный RFC 8484 DNS-ответ",
+            );
+            state.finish_health_task(
+                0,
+                generation,
+                None,
+                DnsHealthResult {
+                    tcp_reachable: true,
+                    tls_handshake: true,
+                    http_status: 200,
+                    dns_reply: true,
+                    reason: "DoH: корректный RFC 8484 DNS-ответ".into(),
+                },
+                2005,
+                5100,
+            );
+            scenarios.push(snapshot(&state, "finish_direct_ok"));
+        }
+
+        // 9. Finish: HTTP 413 — failed с отдельным текстом и минутным сроком.
+        {
+            let mut state = make_state(service(
+                "doh",
+                "127.0.0.1",
+                "dns.example",
+                "/dns-query",
+                "",
+                443,
+            ));
+            let generation = state.live[0].generation;
+            fill_health(
+                &mut state,
+                generation,
+                "127.0.0.1",
+                "",
+                true,
+                false,
+                413,
+                false,
+                "HTTP 413",
+            );
+            state.finish_health_task(
+                0,
+                generation,
+                None,
+                DnsHealthResult {
+                    tcp_reachable: true,
+                    http_status: 413,
+                    reason: "HTTP 413".into(),
+                    ..Default::default()
+                },
+                2005,
+                5100,
+            );
+            scenarios.push(snapshot(&state, "finish_failed_413"));
+        }
+
+        // 10. Bootstrap получает IP: live.ip заполняется, план сброшен.
+        {
+            let mut state = make_state(service(
+                "doh",
+                "dns.example",
+                "dns.example",
+                "/dns-query",
+                "10.0.0.1",
+                443,
+            ));
+            state.live[0].plan_applied = true;
+            state.live[0].applied_plan_id = "ab".repeat(16);
+            state.live[0].plan_applied_at = Some(5000);
+            let generation = state.live[0].generation;
+            fill_health(
+                &mut state,
+                generation,
+                "203.0.113.9",
+                "10.0.0.1",
+                true,
+                true,
+                200,
+                true,
+                "DoH: корректный RFC 8484 DNS-ответ",
+            );
+            state.finish_health_task(
+                0,
+                generation,
+                None,
+                DnsHealthResult {
+                    tcp_reachable: true,
+                    tls_handshake: true,
+                    http_status: 200,
+                    dns_reply: true,
+                    reason: "DoH: корректный RFC 8484 DNS-ответ".into(),
+                },
+                2005,
+                5100,
+            );
+            scenarios.push(snapshot(&state, "finish_ip_change_bootstrap"));
+        }
+
+        // 11. IP не совпал — результат чужой, live не меняется.
+        {
+            let mut state = make_state(service(
+                "doh",
+                "198.51.100.80",
+                "dns.example",
+                "/dns-query",
+                "",
+                443,
+            ));
+            let generation = state.live[0].generation;
+            fill_health(
+                &mut state,
+                generation,
+                "198.51.100.81",
+                "",
+                true,
+                true,
+                200,
+                true,
+                "DoH: корректный RFC 8484 DNS-ответ",
+            );
+            state.finish_health_task(
+                0,
+                generation,
+                None,
+                DnsHealthResult {
+                    tcp_reachable: true,
+                    tls_handshake: true,
+                    http_status: 200,
+                    dns_reply: true,
+                    reason: "DoH: корректный RFC 8484 DNS-ответ".into(),
+                },
+                2005,
+                5100,
+            );
+            scenarios.push(snapshot(&state, "finish_ip_mismatch"));
+        }
+
+        // 12. Старая generation: live не найден, ячейка освобождена.
+        {
+            let mut state = make_state(service(
+                "doh",
+                "198.51.100.80",
+                "dns.example",
+                "/dns-query",
+                "",
+                443,
+            ));
+            let generation = state.live[0].generation + 7;
+            fill_health(
+                &mut state,
+                generation,
+                "198.51.100.80",
+                "",
+                true,
+                true,
+                200,
+                true,
+                "DoH: корректный RFC 8484 DNS-ответ",
+            );
+            state.finish_health_task(
+                0,
+                generation,
+                None,
+                DnsHealthResult {
+                    tcp_reachable: true,
+                    tls_handshake: true,
+                    http_status: 200,
+                    dns_reply: true,
+                    reason: "DoH: корректный RFC 8484 DNS-ответ".into(),
+                },
+                2005,
+                5100,
+            );
+            scenarios.push(snapshot(&state, "finish_stale_generation"));
+        }
+
+        if let Ok(path) = std::env::var("R2O_DNS_HEALTH_STATE_DIFF_OUTPUT") {
+            std::fs::write(path, serde_json::to_string(&scenarios).unwrap()).unwrap();
+        }
+        assert_eq!(
+            scenarios[2]["dns_services"][0]["state"], "checking",
+            "DoT-проба занимает задачу"
+        );
+        assert_eq!(scenarios[8]["dns_services"][0]["state"], "direct_ok");
+        assert_eq!(scenarios[9]["dns_services"][0]["http_status"], 413);
+        assert_eq!(
+            scenarios[10]["dns_services"][0]["resolved_ip"],
+            "203.0.113.9"
         );
     }
 
@@ -33601,11 +34234,11 @@ mod tests {
             "локальная ошибка: не удалось создать сокет проверки"
         );
         assert_eq!(state.live[0].attempts, 0);
-        assert!(state.live[0].next_check.is_some());
+        assert!(state.live[0].next_check_ms > 0);
 
         super::R2O_DNS_PREFLIGHT_FORCE.with(|force| force.set(2));
         state.live[0].state = r2o_controller::live::DnsServiceState::Detected;
-        state.live[0].next_check = None;
+        state.live[0].next_check_ms = 0;
         health.start_due(&mut state, None);
         assert!(health.task_slot.is_none());
         assert_eq!(
@@ -33687,7 +34320,7 @@ mod tests {
         assert!(live.tcp_reachable && live.tls_handshake);
         assert_eq!(live.http_status, 200);
         assert_eq!(live.checked_at, Some(2005));
-        assert!(live.next_check.is_some());
+        assert!(live.next_check_ms > 0);
         assert_eq!(live.reason, "DoH: получен корректный DNS-ответ");
         assert!(!live.plan_applied);
         assert!(live.applied_plan_id.is_empty());
@@ -33726,7 +34359,7 @@ mod tests {
         let live = &state.live[0];
         assert_eq!(live.state, DnsServiceState::Failed);
         assert!(live.reason.contains("HTTP 413"));
-        assert!(live.next_check.is_some());
+        assert!(live.next_check_ms > 0);
     }
 
     #[cfg(unix)]
@@ -33821,8 +34454,8 @@ mod tests {
                 .any(|task| { task.state == r2o_controller::live::DnsTaskState::DnsHealth })
         );
         state.live[0].state = DnsServiceState::Detected;
-        state.live[0].next_check =
-            Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        state.live[0].next_check_ms =
+            r2o_controller::now_ms::d2k_now_ms().saturating_add(60 * 1000);
         health.start_due(&mut state, None);
         assert!(health.task_slot.is_none());
     }

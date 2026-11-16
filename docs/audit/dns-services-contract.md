@@ -165,19 +165,26 @@ candidate_plan_applied, dns_answer_via_plan, dns_answer_confirmed
 3. **Реализовано:** controller `dns_service_live`, states
    `Detected/Checking/DirectOk/Failed`, `dns_service_observe`,
    `dns_service_note_applied`, `d2k_sched_set_dns_services`;
-   **4-case** state differential.
-4. **Реализовано:** live-секция `dns_services` для `detected` и
-   state-полей; **3-case** `test-dns-live-differential.sh`.
+   `test-dns-state-differential.sh` **27 сценариев** (observe/applied/
+   ip_changed/router-source/trial, candidate-without-answer, no_bypass).
+4. **Реализовано:** live-секция `dns_services` для `detected`, health-
+   состояний и task-ячеек; **7 сценариев** `test-dns-live-differential.sh`
+   (DoH/DoT/DoQ, direct_ok/failed, candidate-without-answer, plan_applied).
 5. **Реализовано:** `dns_health.rs` DoH/DoT/DoQ (`probe_dns_health`,
    DNS wire/parse, DoH framing); **15-case** differential + loopback
    DoH/DoT/DoQ.
-6. **Осталось:** проводка health в тик `dns_services`/`T_DNS_HEALTH`,
+6. **Реализовано:** проводка health в тик `dns_services`/`T_DNS_HEALTH`
+   (`dns_service_live.next_check_ms` — C-поле, монотонные мс),
    состояния `bypass_ok`/`no_bypass`/`candidate_plan_applied`/
-   `dns_answer_via_plan`; полный state machine live-секции.
+   `dns_answer_via_plan`; **13 сценариев** `dns_health_start_due`/`finish`
+   внутри `test-dns-state-differential.sh`. Ограничение: успешный
+   `finish` подан mock-полями worker'а, реальная сеть start_due — закрытый
+   порт; end-to-end DoH/DoT/DoQ на роутере не прогонялся.
 
 `d2k_sched_write_live` — **E\***: 12-state full live differential против
 current main PASS, включая `dns_services` (detected/checking/direct_ok/
 plan_applied/bypass_ok/no_bypass/failed, candidate-without-answer, DoQ);
-production `r2o_live_searches_from_state` отдельно сверен с C `write_live`.
+DNS state/live/health — **27/7/13** PASS; production
+`r2o_live_searches_from_state` отдельно сверен с C `write_live`.
 Единственное внешнее ограничение — end-to-end планового DoQ через реальный
 C datapath в CI не прогнан.

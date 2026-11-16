@@ -81,12 +81,13 @@ Pinned C/Rust differential-донор остаётся `a378e230...`; это о�
   Ограничение: production HTTP/TLS остаётся rustls; P-384 C отвергает.
 - **`dns_services` state 2026-11-14:** реализованы `dns_service_live`
   (`generation/ip/applied_plan_id/health-флаги/dns_answer/plan_applied/
-  attempts/checked_at/next_check/plan_applied_at/reason`), состояния
+  attempts/checked_at/next_check_ms/plan_applied_at/reason`), состояния
   `Detected/Checking/DirectOk/Failed`, production `dns_service_observe`
   из `EVENT_HELLO` (router-source, `server_is_low`, sni/host/ip matching,
   generation++) и `dns_service_note_applied` из non-trial `EVENT_APPLIED`;
   `d2k_sched_set_dns_services` сохраняет live при неизменной конфигурации.
-  C/Rust differential `test-dns-state-differential.sh` PASS (4 кейса).
+  C/Rust differential `test-dns-state-differential.sh` PASS **27 сценариев**.
+
 - **Bootstrap/health 2026-11-14:** `dns_resolve_bootstrap` в
   `r2k-core::dns_config` (UDP A→AAAA, 2 сервера, 400 мс, SO_MARK;
   differential 18 vectors + loopback PASS) и `dns_health.rs` DoH/DoT/DoQ
@@ -94,24 +95,36 @@ Pinned C/Rust differential-донор остаётся `a378e230...`; это о�
   loopback DoH/DoT/DoQ).
 - **Health wiring 2026-11-14:** `dns_health` подключён в main loop
   неблокирующим worker'ом (одна проба, `state!=Checking`,
-  `now>=next_check`), `probe.host=live.ip`/bootstrap, 4000 мс; состояния
+  `now>=next_check_ms`), `probe.host=live.ip`/bootstrap, 4000 мс; состояния
   `direct_ok/failed/plan_applied/bypass_ok` и `candidate_plan_applied`
-  покрыты `test-dns-state-differential.sh` **8 сценариев**.
+  покрыты `test-dns-state-differential.sh` **27 сценариев**.
 - **Task cells 2026-11-14:** реальные `DnsTask/DnsTaskState/DnsTaskVerify`
   (64 ячейки), `T_DNS_HEALTH` start_due/finish, переходы `Queued/Asking/
   Planning/Verify`, `T_TRIAL_SETTLE`, `T_VERIFY_WAIT`, `T_WATCHING`,
   `T_RESTING` (120 с); live.rs берёт task по C-правилам, task-over-health,
   `candidate_plan_applied=t.ver_ok`, `dns_answer_via_plan=ver_ok&&answered`,
-  custom `no_bypass`. `test-dns-state-differential.sh` PASS **17 сценариев**.
+  custom `no_bypass`. `test-dns-state-differential.sh` PASS **27 сценариев**.
 - **DoQ/WATCHING/CLI 2026-11-14:** DoQ endpoint синхронизирован с task-ячейкой
   (`probe_doq_on`, ALPN doq/stream 0/zero ID, plan-bound DNS), 4-case
   differential PASS; T_WATCHING переживает >10 мин (cap 64/вытеснение);
   локальные start_due — точные C-тексты; `--measure-mark` split через v22
   ctlprobe PASS.
+- **DNS task-layer 2026-11-16:** `next_check` заменён на C-поле
+  `dns_service_live.next_check_ms` (монотонные мс, 0 — не задан), bootstrap-
+  причина `start_due` печатается всегда при непустом bootstrap (а не только
+  при пустом `live.ip`). C/Rust differential
+  `test-dns-health-state-differential` (внутри `test-dns-state-differential.sh`)
+  PASS **13 сценариев**: start_due DoH/DoT/DoQ, bootstrap с известным IP,
+  skip checking/future/no-IP, finish DirectOk/413/bootstrap-IP/чужой IP/
+  старая generation. `test-dns-live-differential.sh` расширен до
+  **7 сценариев** (DoH/DoT/DoQ, direct_ok/failed, candidate-without-answer,
+  plan_applied+Resting). Ограничение: успешный finish подан mock-полями
+  worker'а; реальная сеть start_due — закрытый порт, end-to-end DoH/DoT/DoQ
+  на роутере не прогонялся.
 - `d2k_sched_write_live` — **E\***: 12-state full live differential PASS,
   production `r2o_live_searches_from_state` сверен с C `write_live`
   (T_QUEUED/T_ASKING/T_PLANNING/T_VERIFY; T_WATCHING/T_RESTING исключены)
-  PASS, `write_live_groups` 10 и DNS 17/4/3 PASS. Остаётся только
+  PASS, `write_live_groups` 10 и DNS 27/7/13 PASS. Остаётся только
   end-to-end планового DoQ через реальный C datapath в CI.
 
 ## Команды проверки

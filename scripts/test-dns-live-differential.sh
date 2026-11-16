@@ -43,12 +43,16 @@ import sys
 
 c = json.load(open(sys.argv[1], encoding="utf-8"))
 r = json.load(open(sys.argv[2], encoding="utf-8"))
-c.pop("end", None)
+for item in c:
+    item.pop("end", None)
 if c != r:
-    print("C:", json.dumps(c, ensure_ascii=False, sort_keys=True, indent=2))
-    print("R:", json.dumps(r, ensure_ascii=False, sort_keys=True, indent=2))
+    for left, right in zip(c, r):
+        if left != right:
+            print("C:", json.dumps(left, ensure_ascii=False, sort_keys=True))
+            print("R:", json.dumps(right, ensure_ascii=False, sort_keys=True))
+            break
     raise SystemExit(1)
 print("PASS: dns_services live section C/Rust match (D2O current main)")
 PY
 
-printf 'cases=%s\n' "$(grep -o '"protocol"' "$TEMP/c.json" | wc -l)"
+printf 'cases=%s\n' "$(grep -o '"scenario"' "$TEMP/c.json" | wc -l)"

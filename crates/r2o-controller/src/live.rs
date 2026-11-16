@@ -152,8 +152,9 @@ pub struct DnsServiceLive {
     pub attempts: u32,
     /// Стенные секунды для live.json; None — проверки ещё не было.
     pub checked_at: Option<i64>,
-    /// Монотонный срок следующей health-проверки.
-    pub next_check: Option<std::time::Instant>,
+    /// C `dns_service_live.next_check_ms`: монотонные миллисекунды
+    /// планировщика; 0 — срок не задан.
+    pub next_check_ms: i64,
     pub plan_applied_at: Option<i64>,
     pub reason: String,
     /// Внутренний признак: поток с адреса роутера уже наблюдался. C держит
@@ -176,7 +177,7 @@ impl Default for DnsServiceLive {
             plan_applied: false,
             attempts: 0,
             checked_at: None,
-            next_check: None,
+            next_check_ms: 0,
             plan_applied_at: None,
             reason: String::new(),
             router_seen: false,
@@ -1614,30 +1615,38 @@ mod tests {
     #[test]
     fn dns_live_differential_matches_current_d2o() {
         use crate::catalog::{Binding, BoxRecord, Plan};
+        use crate::live::{DnsServiceState, DnsTask, DnsTaskState, DnsTaskVerify};
         use r2k_core::dns_config::DnsService;
 
+        let plan_text = "r2o-plan 1 11\nproto tcp tls\nsplit sni_middle +0\n";
+        let plan = |id: &str| Plan {
+            id: id.into(),
+            proto: "tls".into(),
+            text: plan_text.into(),
+            enabled: true,
+            successes: 1,
+            ..Plan::default()
+        };
+        let binding = |target: &str, plan_id: &str, transport: u8, family: u8| Binding {
+            kind: "name".into(),
+            target: target.into(),
+            plan_id: plan_id.into(),
+            level: 3,
+            enabled: true,
+            transport,
+            family,
+            shape: 1,
+            ..Binding::default()
+        };
         let catalog = Catalog {
             boxes: vec![BoxRecord {
                 id: "box-dns".into(),
-                plans: vec![Plan {
-                    id: "plan-dns".into(),
-                    proto: "tls".into(),
-                    text: "r2o-plan 1 11\nproto tcp tls\nsplit sni_middle +0\n".into(),
-                    enabled: true,
-                    successes: 1,
-                    ..Plan::default()
-                }],
-                bindings: vec![Binding {
-                    kind: "name".into(),
-                    target: "dns.example".into(),
-                    plan_id: "plan-dns".into(),
-                    level: 3,
-                    enabled: true,
-                    transport: 6,
-                    family: 4,
-                    shape: 1,
-                    ..Binding::default()
-                }],
+                plans: vec![plan("plan-dns"), plan("plan-dot"), plan("plan-doq")],
+                bindings: vec![
+                    binding("dns.example", "plan-dns", 6, 4),
+                    binding("1.1.1.1", "plan-dot", 6, 4),
+                    binding("2001:db8::1", "plan-doq", 17, 6),
+                ],
                 ..BoxRecord::default()
             }],
             ..Catalog::default()
@@ -1671,30 +1680,171 @@ mod tests {
                 port: 853,
             },
         ];
-        let live = snapshot_with_areas_and_dns(
-            &catalog,
-            Path::new("/state/catalog.json"),
-            &HashSet::new(),
-            Vec::new(),
-            json!({}),
-            DiscoveryStatus::default(),
-            &[],
-            &services,
-            &[],
-            &[],
-        )
-        .unwrap();
-        if let Ok(path) = std::env::var("R2O_DNS_LIVE_DIFF_OUTPUT") {
-            std::fs::write(
-                path,
-                serde_json::to_string(&json!({"dns_services": live["dns_services"]})).unwrap(),
+        let mut live = vec![DnsServiceLive::default(); 3];
+        for (index, state) in live.iter_mut().enumerate() {
+            state.generation = index as u64 + 1;
+            if services[index].host.parse::<std::net::IpAddr>().is_ok() {
+                state.ip = services[index].host.clone();
+            }
+        }
+        let mut tasks = vec![DnsTask::default(); 64];
+        let mut scenarios = Vec::new();
+        let mut snapshot = |live: &[DnsServiceLive], tasks: &[DnsTask], name: &str| {
+            let snapshot = snapshot_with_areas_and_dns(
+                &catalog,
+                Path::new("/state/catalog.json"),
+                &HashSet::new(),
+                Vec::new(),
+                json!({}),
+                DiscoveryStatus::default(),
+                &[],
+                &services,
+                live,
+                tasks,
             )
             .unwrap();
+            scenarios.push(json!({
+                "scenario": name,
+                "dns_services": snapshot["dns_services"],
+            }));
+        };
+        snapshot(&live, &tasks, "configured");
+
+        // DoT: health-проба прямого потока получила ответ.
+        live[1].state = DnsServiceState::DirectOk;
+        live[1].checked_at = Some(2005);
+        live[1].tcp_reachable = true;
+        live[1].tls_handshake = true;
+        live[1].http_status = 200;
+        live[1].dns_answer = true;
+        live[1].attempts = 2;
+        live[1].reason = "DoT: получен корректный DNS-ответ".into();
+        snapshot(&live, &tasks, "dot_health_success");
+
+        // DoQ IPv6: 413, binding transport 17/family 6.
+        live[2].state = DnsServiceState::Failed;
+        live[2].checked_at = Some(2005);
+        live[2].tcp_reachable = true;
+        live[2].tls_handshake = false;
+        live[2].http_status = 413;
+        live[2].dns_answer = false;
+        live[2].attempts = 3;
+        live[2].reason =
+            "HTTP 413: это ошибка endpoint, а не доказательство DPI; подбор не запускается.".into();
+        snapshot(&live, &tasks, "doq_health_failed");
+
+        // DoH-кандидат применён без DNS-ответа.
+        fn reset_live(live: &mut [DnsServiceLive], index: usize) {
+            let state = &mut live[index];
+            state.state = DnsServiceState::Detected;
+            state.tcp_reachable = false;
+            state.tls_handshake = false;
+            state.http_status = 0;
+            state.dns_answer = false;
+            state.plan_applied = false;
+            state.applied_plan_id.clear();
+            state.plan_applied_at = None;
+            state.checked_at = None;
+            state.attempts = 0;
+            state.reason.clear();
         }
-        assert_eq!(live["dns_services"][0]["known_plan_id"], "plan-dns");
-        assert_eq!(live["dns_services"][0]["path"], "/dns-query");
-        assert_eq!(live["dns_services"][1]["resolved_ip"], "1.1.1.1");
-        assert_eq!(live["dns_services"][2]["resolved_ip"], "2001:db8::1");
+        fn set_task(
+            task: &mut DnsTask,
+            protocol: &str,
+            name: &str,
+            port: u16,
+            ver_ok: bool,
+            level: i32,
+            status: i32,
+            dns_reply: bool,
+            reason: &str,
+        ) {
+            *task = DnsTask {
+                state: DnsTaskState::Verify,
+                dns_protocol: protocol.into(),
+                name: name.into(),
+                port,
+                ver_ok,
+                ver: DnsTaskVerify {
+                    level,
+                    status,
+                    dns_reply,
+                    reason: reason.into(),
+                },
+                ..Default::default()
+            };
+        }
+        reset_live(&mut live, 0);
+        set_task(
+            &mut tasks[0],
+            "doh",
+            "dns.example",
+            443,
+            true,
+            crate::live::D2K_VER_APPLICATION,
+            200,
+            false,
+            "Кандидат применён, но DNS-ответ не получен.",
+        );
+        snapshot(&live, &tasks, "doh_candidate_without_answer");
+
+        // Тот же кандидат с DNS-ответом.
+        tasks[0].ver.dns_reply = true;
+        snapshot(&live, &tasks, "doh_candidate_bypass");
+
+        // DoQ-кандидат применён без ответа.
+        tasks[0] = DnsTask::default();
+        set_task(
+            &mut tasks[1],
+            "doq",
+            "2001:db8::1",
+            853,
+            true,
+            crate::live::D2K_VER_APPLICATION,
+            200,
+            false,
+            "DoQ: кандидат применён, DNS-ответ не получен.",
+        );
+        snapshot(&live, &tasks, "doq_candidate_without_answer");
+
+        // Live plan_applied + T_RESTING candidate без ответа.
+        tasks[1] = DnsTask::default();
+        reset_live(&mut live, 0);
+        live[0].plan_applied = true;
+        live[0].plan_applied_at = Some(2005);
+        live[0].applied_plan_id = "ab".repeat(16);
+        set_task(
+            &mut tasks[0],
+            "doh",
+            "dns.example",
+            443,
+            true,
+            crate::live::D2K_VER_APPLICATION,
+            200,
+            false,
+            "Кандидат применён, но DNS-ответ не получен.",
+        );
+        tasks[0].state = DnsTaskState::Resting;
+        snapshot(&live, &tasks, "doh_plan_applied_task_resting");
+
+        if let Ok(path) = std::env::var("R2O_DNS_LIVE_DIFF_OUTPUT") {
+            std::fs::write(path, serde_json::to_string(&scenarios).unwrap()).unwrap();
+        }
+        assert_eq!(scenarios[0]["dns_services"][0]["known_plan_id"], "plan-dns");
+        assert_eq!(scenarios[0]["dns_services"][0]["path"], "/dns-query");
+        assert_eq!(scenarios[0]["dns_services"][1]["known_plan_id"], "plan-dot");
+        assert_eq!(scenarios[0]["dns_services"][2]["known_plan_id"], "plan-doq");
+        assert_eq!(scenarios[1]["dns_services"][1]["state"], "direct_ok");
+        assert_eq!(scenarios[2]["dns_services"][2]["state"], "failed");
+        assert_eq!(
+            scenarios[3]["dns_services"][0]["candidate_plan_applied"],
+            true
+        );
+        assert_eq!(
+            scenarios[5]["dns_services"][2]["candidate_plan_applied"],
+            true
+        );
+        assert_eq!(scenarios[6]["dns_services"][0]["state"], "plan_applied");
     }
 
     #[test]
