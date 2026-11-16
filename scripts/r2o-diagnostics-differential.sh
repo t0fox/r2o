@@ -49,7 +49,12 @@ R2O_DIAGNOSTICS_SNAPSHOT_DIFF_OUTPUT="$tmp_dir/rust-snapshots.out" \
 diff -u "$tmp_dir/c-snapshots.out" "$tmp_dir/rust-snapshots.out"
 printf 'C/Rust discovery snapshot count matches d2o %s.\n' "$donor_sha"
 
-make -s -C "$donor_core" test_httpsearch CC=clang-18
+# Нужны только объекты чтения HTTP: сам test_httpsearch линкует
+# ../datapath/plan_parse.c/plan_apply.c вместе с libd2k_udp.a, где те же
+# символы уже лежат, и падает duplicate symbol при живом архиве донора.
+make -s -C "$donor_core" CC=clang-18 \
+    plantlv.o quic.o quicwire.o crypto.o verify.o quicconn.o h3.o tls12.o \
+    p256.o compose.o measured.o hello.o meas.o link.o tls13.o tls13core.o x25519.o
 clang-18 -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \
     -DD2K_RELEASE_ID='"dev"' -I"$donor_core/include" -I"$donor_root/datapath/include" \
     "$repo_root/crates/r2o-controller/tests/d2o_http_diagnostic_differential.c" \
