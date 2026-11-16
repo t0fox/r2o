@@ -222,7 +222,14 @@ run_install() {
 }
 
 new_case damaged-signature
-printf x | dd of="$CASE/fixtures/latest.json.sig" bs=1 seek=0 conv=notrunc 2>/dev/null
+# Детерминированно портим подпись: 64 нулевых байта вместо валидной
+# Ed25519. Замена одного байта на 'x' иногда не меняла файл (если первый
+# байт подписи уже был 0x78), и CI падал с «damaged signature was accepted».
+dd if=/dev/zero of="$CASE/fixtures/latest.json.sig" bs=64 count=1 2>/dev/null
+[ "$(wc -c < "$CASE/fixtures/latest.json.sig" | tr -d ' ')" = 64 ] ||
+    fail 'damaged signature fixture is not 64 bytes'
+cmp -s "$CASE/fixtures/latest.json.sig" "$FIXTURE/latest.json.sig" &&
+    fail 'signature fixture was not actually damaged'
 if run_install > "$CASE/out" 2>&1; then fail 'damaged Ed25519 signature was accepted'; fi
 grep -q 'подпись' "$CASE/out" || fail 'bad signature was not rejected at signature verification'
 grep -q 'r2o-mipsel-openwrt-musl.tar.gz' "$CASE/fetch.log" && fail 'archive downloaded before signature verification'
@@ -230,6 +237,8 @@ grep -q 'r2o-mipsel-openwrt-musl.tar.gz' "$CASE/fetch.log" && fail 'archive down
 
 new_case damaged-archive
 printf x | dd of="$CASE/fixtures/r2o-mipsel-openwrt-musl.tar.gz" bs=1 seek=0 conv=notrunc 2>/dev/null
+cmp -s "$CASE/fixtures/r2o-mipsel-openwrt-musl.tar.gz" "$FIXTURE/r2o-mipsel-openwrt-musl.tar.gz" &&
+    fail 'archive fixture was not actually damaged'
 if run_install > "$CASE/out" 2>&1; then fail 'archive with a hash mismatch was accepted'; fi
 grep -q 'SHA-256' "$CASE/out" || { cat "$CASE/out" >&2; cat "$CASE/fetch.log" >&2; fail 'archive hash mismatch was not rejected'; }
 [ ! -s "$CASE/manager.log" ] || fail 'archive code ran before its SHA-256 was verified'
