@@ -95,13 +95,13 @@ production-путь не ставится. Формулировки «теста
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 363 | 185 | 0 | 0 |
-| core-state | 692 | 503 | 189 | 0 | 0 |
+| core-state | 692 | 504 | 188 | 0 | 0 |
 | datapath-core | 400 | 394 | 6 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1590** | **392** | **0** | **0** |
+| **Итого** | **1982** | **1591** | **391** | **0** | **0** |
 
-Это не оценка паритета: 392 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 391 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -120,7 +120,7 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1590 / P 392**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1591 / P 391**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
@@ -192,7 +192,7 @@ P означает неполное доказательство ветвей, N
 - core-state — CLI-флаги/вывод, PSL/catalog-парсер, crypto HKDF-границы,
   voice-blob, volume resource-retry.
 - `?` (0): не осталось; все строки реестра разобраны и имеют E/P/N.
-- Поведенческая группировка 392 P (28 контрактов, 0 без контракта):
+- Поведенческая группировка 391 P (27 контрактов, 0 без контракта):
   `docs/behavior-contracts/inventory.md` и
   `docs/behavior-contracts/p-contract-map.tsv`. Это не меняет статусы
   реестра и не является заявлением паритета.
@@ -385,11 +385,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 363 | 185 | 0 | 0 |
-| core-state | 692 | 503 | 189 | 0 | 0 |
+| core-state | 692 | 504 | 188 | 0 | 0 |
 | datapath-core | 400 | 394 | 6 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1590** | **392** | **0** | **0** |
+| **Итого** | **1982** | **1591** | **391** | **0** | **0** |
 
 
 ---
@@ -2770,7 +2770,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `stop_requested` | 92-94 | 3 | запрошена ли остановка | `classify.rs` `stopped(options)` | E | C `stop && *stop`. Rust `stopped` проверяет atomic-флаг отмены (`options.cancel`); флаг взводится тем же путём, что C `task_stop` для sched-прогона; CLI передаёт `None`/ложный, как C `stop=NULL`. Используется в 5 точках дерева classify. |
 | `classify_cancelled` | 96–102 | 7 | INCONCLUSIVE, reason про снимок клиента, `marked=(mark!=0)&&all_marked` | `classify.rs` `R2O_CLASSIFY_CANCELLED_REASON`, `finish_cancelled` | **E*** | C ставит `INCONCLUSIVE`, причину «профильный замер отменён: пришёл снимок приветствия клиента» и `marked`. Rust `finish_cancelled` ставит тот же вердикт и дословную причину (`R2O_CLASSIFY_CANCELLED_REASON`), тест `classify_cancelled_reason_matches_c`. **Ограничение:** поле `marked` в `ClassifyResult` не заведено — у него нет потребителя в R2O (C `d2k_vres.marked` не читается sched/`print_json`). |
 | `d2k_classify_cancelable` | 104–334 | 231 | дерево base→confirm→split1→control, CLEAR_CONFIRM_REPEATS=2, UNREACHABLE/FLAKY/CLEAR/PREFIX/OPAQUE/INCONCLUSIVE и AND-метка | `classify.rs` `run_with_backend_progress` | **E*** | C/Rust differential `scripts/test-classifier-clear-confirm-differential.sh` на пине `a378e230` PASS: clear/base/control repeats, mark, unproven-ответы и отмена совпадают по вердикту/причине. Плюс unit-тесты classify. **Ограничение:** differential не покрывает split1/long-gap/binary-search (`PREFIX`/`WHOLE`), raw-sweep (`Poisonable`) и `neutral_ack` (`Address`); CLI `--classify` включает `full_detect_semantics` без удвоенного CLEAR и с `probe_response`. |
-| `d2k_classify` | 336-342 | 7 | обёртка `d2k_classify_cancelable(...,NULL)` | `classify.rs:1298 run`/`run_with_backend` | **P** | C-обёртка без отмены. Rust `run` → `run_with_backend(TcpProbeBackend)`; C-путь production заменён discovery-путём, отдельного differential этой обёртки нет. |
+| `d2k_classify` | 336-342 | 7 | обёртка `d2k_classify_cancelable(...,NULL)` | `classify.rs:1298 run`/`run_with_backend` | **E*** | **2026-11-17:** C-обёртка — один вызов `d2k_classify_cancelable(..., NULL)`; в текущем D2O production-вызова нет (`d2kc` идёт через `detect/`, не `verdict.c`). Rust `run` → `run_with_backend` без отмены, а дерево `d2k_classify_cancelable` уже E* (`test-classifier-clear-confirm-differential.sh` + unit). **Ограничение:** отдельного end-to-end differential именно обёртки нет; форма API отличается (`TcpProbeBackend` вместо C-сигнатуры). |
 
 ### `core/x25519.c`
 
@@ -2846,7 +2846,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `stop_requested` (static) | 92–94 | `classify.rs` `stopped(options)` | **P** | Проверка atomic-флага отмены эквивалентна. |
 | `classify_cancelled` (static) | 96–102 | `classify.rs` cancel-ветка | **P** | VERDICT=INCONCLUSIVE, marked=(mark!=0)&&all_marked, reason про снимок клиента — перенесено. |
 | `d2k_classify_cancelable` | 104–334 | `classify.rs:1298-1959` | **P** | Дерево base→confirm→split1→control, CLEAR_CONFIRM_REPEATS=2, UNREACHABLE/FLAKY/CLEAR/PREFIX/OPAQUE/INCONCLUSIVE и AND-метка перенесены; тесты `classify.rs:2096-2444`. **Подтверждённые отличия:** CLI `--classify` ставит `full_detect_semantics=true, confirm_clear=false` (`main.rs:1177-1178`) — удвоенное подтверждение CLEAR пропускается, добавляется dial-timeout-retry; CLEAR с SNI делает `probe_response` и может вернуть `Response`; после разреза 1 Rust ищет long-gap/last/binary → `WholePacket`/`Prefix` с boundary; при прошедшем контроле добавляются raw-sweep (`Poisonable`) и `neutral_ack` (`Address`). Полного C/Rust differential дерева нет. |
-| `d2k_classify` | 336–342 | `classify.rs` публичный `classify` | **P** | Обёртка с `stop=NULL`; эквивалентна. |
+| `d2k_classify` | 336–342 | `classify.rs` публичный `classify` | **E*** | C-обёртка с `stop=NULL`; production-путь мёртв, дерево cancelable E*, Rust run без отмены. Ограничение — отдельного differential обёртки нет. |
 | `original_probe` (static) | 35–44 | `quic_replay.rs`/`r2o_quic_http3.rs` | **P** | **Прямого hook-аналога нет:** Rust строит кандидатов (`r2o_quic_discovery_candidates`, `r2o_quic_original_fallback_candidates`) и вызывает `r2o_quic_http3_*` с `server_name`; пары probe/data-hook с `control ? NULL : target_sni` нет. Отдельного differential нет. |
 | `original_data` (static) | 47–50 | `quic_replay.rs` data-stage | **P** | C передаёт target_sni/path/port/wait/mark одной структурой; Rust принимает path/server_name параметрами в `r2o_quic_http3_get_with_wire_len`; эквивалентность полей не доказана. |
 | `wire_measure` (static) | 52–78 | `quic_replay.rs`/`r2o_quic_http3.rs` | **P** | **Подтверждённый пробел:** в Rust grep `target_sni`/`pool[0]` по QUIC-модулям пуст — fallback «литеральный IP без SNI → pool[0]» не найден; `probe_path` копируется в `r2o_quic_discovery_probe_path`, `next/marked` живут в `R2oQuicRawAskResult`/trial. Одноимённой обёртки нет. |
