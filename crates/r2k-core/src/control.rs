@@ -3590,6 +3590,96 @@ mod arm_shape_command_tests {
     }
 }
 
+/// C `say` (`core/link.c:56-64`): текст пишется в буфер `cap` байт через
+/// `vsnprintf`, поэтому помещается не более `cap-1` байт и ставится NUL.
+/// При `cap == 0` записи нет. Rust возвращает строку, а не буфер; граница
+/// обрезки — байтовая, как у C, но по границе UTF-8, чтобы `String`
+/// оставалась валидной.
+#[cfg(unix)]
+pub fn r2o_say(cap: usize, text: &str) -> String {
+    if cap == 0 {
+        return String::new();
+    }
+    let length = text.len().min(cap - 1);
+    let mut end = length;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
+}
+
+/// Причина ошибки `connect` в тексте C: `strerror(errno)` без суффикса
+/// `(os error N)`, который добавляет `std::io::Error`.
+#[cfg(unix)]
+fn r2o_link_errno_text(error: &std::io::Error) -> String {
+    if let Some(errno) = error.raw_os_error() {
+        let text = unsafe { libc::strerror(errno) };
+        if !text.is_null() {
+            return unsafe { std::ffi::CStr::from_ptr(text) }
+                .to_string_lossy()
+                .into_owned();
+        }
+    }
+    error.to_string()
+}
+
+/// C `d2k_link_open` (`core/link.c:161-189`): пустой путь и путь длиной
+/// `>= sun_path` отвергаются до `connect`; ошибка `connect` содержит путь и
+/// `strerror`. Возвращает уже подключённый AF_UNIX SOCK_STREAM.
+#[cfg(unix)]
+pub fn r2o_link_open(path: &Path) -> Result<std::os::unix::net::UnixStream, String> {
+    let text = path.to_string_lossy();
+    if text.is_empty() {
+        return Err(r2o_say(256, "путь управляющего сокета пуст"));
+    }
+    if text.len() >= 108 {
+        return Err(r2o_say(256, "путь сокета длиннее 107 байт"));
+    }
+    std::os::unix::net::UnixStream::connect(path).map_err(|error| {
+        r2o_say(
+            256,
+            &format!("connect {text}: {}", r2o_link_errno_text(&error)),
+        )
+    })
+}
+
+#[cfg(all(test, unix))]
+mod link_say_tests {
+    use super::{r2o_link_open, r2o_say};
+    use std::path::Path;
+
+    fn link_error(label: &str, path: &Path, output: &mut String) {
+        match r2o_link_open(path) {
+            Ok(_) => output.push_str(&format!("{label} rc=0 err=\n")),
+            Err(error) => output.push_str(&format!("{label} rc=-1 err={error}\n")),
+        }
+    }
+
+    #[test]
+    fn link_say_matches_c() {
+        let mut output = String::new();
+        output.push_str(&format!(
+            "say_cap0={}\n",
+            u8::from(r2o_say(0, "abc").is_empty())
+        ));
+        output.push_str(&format!("say_cap1={}\n", r2o_say(1, "abc").len()));
+        output.push_str(&format!("say_cap8={}\n", r2o_say(8, "abcdefghij")));
+        output.push_str(&format!("say_ru={}\n", r2o_say(64, "путь")));
+
+        link_error("empty", Path::new(""), &mut output);
+        let long = "x".repeat(108);
+        link_error("long", Path::new(&long), &mut output);
+        let missing = "/tmp/r2o-link-say-differential.sock";
+        let _ = std::fs::remove_file(missing);
+        link_error("missing", Path::new(missing), &mut output);
+
+        if let Ok(path) = std::env::var("R2O_LINK_SAY_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        print!("{output}");
+    }
+}
+
 #[cfg(test)]
 mod tcp_shape_context_tests {
     use super::{

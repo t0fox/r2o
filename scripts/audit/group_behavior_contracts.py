@@ -188,11 +188,6 @@ CONTRACTS = {
         "Флаги, stdout/exit, snapshot wire, usage.",
         "d2kc/d2kask/d2kfetch/d2kvoice: 3 P; d2kvoice main/usage PASS; snapshot_wire C-путь недостижим; diagnostic_limit/event/tick и http_search_portal — C/Rust differential PASS; остальные CLI.",
     ),
-    "CS-LINK-IO": (
-        "Link/control I/O helpers",
-        "readable wait, hex decode, area key, error text.",
-        "link: 1 P; send_area_key 11 + wait_readable 8 + hex_decode 6 кейсов C/Rust PASS; остаётся say.",
-    ),
     "CS-PROPS": (
         "QUIC properties text",
         "original/strategy measure and wire properties.",
@@ -402,8 +397,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 398:
-        raise SystemExit(f"expected 398 P rows, got {len(rows)}")
+    if len(rows) != 397:
+        raise SystemExit(f"expected 397 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")
@@ -468,14 +463,14 @@ def main() -> int:
         "| `DT-CLI-OUTPUT` | Detect CLI JSON/human/usage/exit | 2026-11-16: `r2o-detect` добавлен в `package-release.sh` и release-артефакт; `r2o-manager` активирует его как необязательный компонент; `test-detect-release-artifact.sh` распаковывает архив и даёт `6 triggers / 19 exits / json=equal / human=equal` на packaged binary. `r2o-controller --classify` остаётся отдельным CLI-путём. |",
         "| `CS-MEASUREMENT` | Measurement transport helpers | 2026-11-16: `connect_bounded` success/refused/badfd, `send_all` send-timeout/EINTR/10 ветвей, `d2k_arm_plan_measured` 28 кейсов, `nap_us` 20 мс/EINTR — все C/Rust differential PASS; production nap переведён на `libc::nanosleep` с C-семантикой. |",
         "| `CS-CATALOG-TLV` | Catalog TLV plan encoding | 2026-11-16: `r2o-compose-tlv-differential.sh` — overlap/reorder/badsum/badsum_gap/checksum и `plan_tlv_stamp_ident` (id + stamped D2KP, guard'ы layout'а) совпали с C; оба ask-пути удостоверяют план по TLV. |",
+        "| `CS-LINK-IO` | Link/control I/O helpers | 2026-11-16: send_area_key 11, wait_readable 8, hex_decode 6, say 4+3 — все C/Rust differential PASS; `r2o_link_open` даёт те же тексты пустого/длинного/отсутствующего сокета. |",
         "",
         "## Следующий шаг",
         "",
-        "`CS-LINK-IO` сокращён до 1 P: `send_area_key` (11), `wait_readable`",
-        "(8) и `hex_decode` (6) сверены C/Rust differential. Остаётся `say`.",
-        "`CS-MEASUREMENT` и `CS-CATALOG-TLV` закрыты; следующий кандидат —",
-        "`CS-CLI-TOOLS` (`d2kask`/`d2kfetch`) и `say`, отдельный",
-        "пользовательский/лог-контракт.",
+        "`CS-LINK-IO`, `CS-MEASUREMENT` и `CS-CATALOG-TLV` закрыты;",
+        "`send_area_key` (11), `wait_readable` (8), `hex_decode` (6) и",
+        "`say` (4+3) сверены C/Rust differential. Следующий кандидат —",
+        "`CS-CLI-TOOLS` (`d2kask`/`d2kfetch`), отдельный CLI-контракт.",
         "",
         "## Ограничение TTL-контракта",
         "",

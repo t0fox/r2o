@@ -21810,7 +21810,12 @@ fn r2o_update_recheck_catalog(
 #[cfg(unix)]
 impl ControlClient {
     fn connect(path: PathBuf) -> Result<Self, Box<dyn Error>> {
-        let mut socket = std::os::unix::net::UnixStream::connect(path)?;
+        // C `d2k_link_open`: пустой/слишком длинный путь и connect-ошибка
+        // имеют те же тексты, что у C (`say`).
+        let mut socket = match r2k_core::control::r2o_link_open(&path) {
+            Ok(socket) => socket,
+            Err(error) => return Err(error.into()),
+        };
         socket.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
         socket.set_write_timeout(Some(std::time::Duration::from_secs(2)))?;
         let greeting = decode_greeting(&read_frame(&mut socket)?)
