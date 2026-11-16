@@ -95,13 +95,13 @@ production-путь не ставится. Формулировки «теста
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 360 | 188 | 0 | 0 |
-| core-state | 692 | 490 | 202 | 0 | 0 |
+| core-state | 692 | 491 | 201 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1573** | **409** | **0** | **0** |
+| **Итого** | **1982** | **1574** | **408** | **0** | **0** |
 
-Это не оценка паритета: 409 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 408 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -120,7 +120,7 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1573 / P 409**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1574 / P 408**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
@@ -139,7 +139,7 @@ B — нужен только тест/differential **190**; C — архите�
 
 ## Итог и подтверждённые расхождения (2026-11-15)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1573 / P 409 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1574 / P 408 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -192,7 +192,7 @@ P означает неполное доказательство ветвей, N
 - core-state — CLI-флаги/вывод, PSL/catalog-парсер, crypto HKDF-границы,
   voice-blob, volume resource-retry.
 - `?` (0): не осталось; все строки реестра разобраны и имеют E/P/N.
-- Поведенческая группировка 409 P (32 контракта, 0 без контракта):
+- Поведенческая группировка 408 P (32 контракта, 0 без контракта):
   `docs/behavior-contracts/inventory.md` и
   `docs/behavior-contracts/p-contract-map.tsv`. Это не меняет статусы
   реестра и не является заявлением паритета.
@@ -385,11 +385,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 360 | 188 | 0 | 0 |
-| core-state | 692 | 490 | 202 | 0 | 0 |
+| core-state | 692 | 491 | 201 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1573** | **409** | **0** | **0** |
+| **Итого** | **1982** | **1574** | **408** | **0** | **0** |
 
 
 ---
@@ -2202,7 +2202,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `vol_verdict_code` | 64-72 | 9 | UNREACHABLE/CUT/PASSED/SHORT → unreachable/cut/passed/short, иначе unknown | `bin/r2o-fetch.rs` `r2o_vol_verdict_code` | E | Четыре состояния отображаются дословно; Rust-перечисление `R2oFetchVolumeTxVerdict` закрыто, поэтому C-default «unknown» недостижим (неизвестные числовые коды не декодируются). Тест `volume_verdict_codes_match_c_d2kfetch`. |
 | `usage` | 74-102 | 29 | флаги `--name/--ip/--port/--path/--wire/`--snapshot[=ms]/--ladder/--quic/--tls12/--deadline/--mark/--json/--version` | `bin/r2o-fetch.rs` `print_help` | **E*** | C/Rust differential `scripts/r2o-fetch-cli-differential.sh` PASS: общие флаги и exit-коды совпадают на snapshots `baseline`/QUIC/mark. **Ограничение:** Rust добавляет `--help/-h/-V`, тексты справки иные; differential не сверяет каждый текст. |
 | `resolve_first` | 104–114 | 11 | `getaddrinfo(AF_UNSPEC,SOCK_STREAM)`, первый адрес, `getnameinfo(NI_NUMERICHOST)` | `bin/r2o-fetch.rs` `ToSocketAddrs::next` | **E*** | C/Rust differential `scripts/r2o-fetch-cli-differential.sh` PASS: `--name localhost` без `--ip` и пустой `--ip` дают тот же выбор/`dns_failed`, что C. **Ограничение:** порядок адресов задаёт libc; differential фиксирует его на текущем стенде. |
-| `snapshot_wire` | 117–155 | 39 | link open (NULL sock), ARM_SHAPE transport 6, ожидание `D2K_EV_SHAPE` transport 6 до `wait_ms`, `shape_len` | `fetch::r2o_fetch_snapshot_wire_len`, CLI snapshot tests | **P** | C ARM_SHAPE передаёт transport 6; Rust-снимок использует ARM_SHAPE/ожидание SHAPE, но C/Rust differential снимка не заявлен; известное расхождение ARM_SHAPE transport 17 (header, п. 2) сюда не входит (C тоже 6). |
+| `snapshot_wire` | 117–155 | 39 | link open (NULL sock), ARM_SHAPE transport 6, ожидание `D2K_EV_SHAPE` transport 6 до `wait_ms`, `shape_len` | `fetch::r2o_fetch_snapshot_wire_len`, CLI snapshot tests | **E*** | **2026-11-16:** C `snapshot_wire` вызывает `d2k_link_open(NULL)`, а `link.c:161-164` отвергает NULL/пустой путь — C-путь снимка недостижим (`путь управляющего сокета пуст`). Rust `r2o_fetch_snapshot_wire_len` реализует заявленный контракт через snapshot-сокет; тест `r2o_fetch_snapshot_берёт_длину_именно_для_запрошенного_sni` PASS: чужие имя/shape игнорируются, для example.test/MODERN возвращена 1275. **Ограничение:** C/Rust differential невозможен (C-оракул всегда -1); timeout и чужое событие отдельным Rust-тестом не покрыты. |
 | `main` | 157–356 | 200 | CLI: name/ip/port/path/wire/snapshot/ladder/quic/tls12/deadline/mark/json, exit-коды | `bin/r2o-fetch.rs` `run` | **E*** | C/Rust differential `scripts/r2o-fetch-cli-differential.sh` PASS: GET/QUIC, `--ip ""`, `--mark`, JSON-поля и exit-коды совпадают на покрытых snapshots. **Ограничение:** differential не запускает `--snapshot`, `--ladder`, `--tls12` и не сверяет все тексты. |
 
 ### `core/d2kvoice.c`
