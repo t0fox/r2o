@@ -14069,11 +14069,19 @@ fn r2o_handle_client_shape_event(
 }
 
 #[cfg(unix)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum R2oSuspectQueueMode {
     Normal,
     Fresh,
     ConfirmedFailure,
+}
+
+/// C `on_suspect`: порядок ранних гейтов — мёртвый адрес, затем отсрочка.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum R2oSuspectAdmissionBlock {
+    DeadAddress,
+    Cooldown,
 }
 
 #[cfg(unix)]
@@ -17555,6 +17563,66 @@ group_block_proven: false,
                     .unwrap_or(R2O_DISCOVERY_FAILURE_RETRY),
             ) && !self.clear_streaks.contains_key(&failure_key)
         })
+    }
+
+    /// C `on_suspect`: мёртвый адрес и действующая отсрочка проверяются ДО
+    /// задачи, ARM_SHAPE, hot_event и covering. Раньше Rust сначала снимал
+    /// снимок формы у T_WATCHING и только очередь проверяла адрес/отдых —
+    /// подозрение к мёртвому адресу всё равно слало ARM_SHAPE.
+    fn r2o_suspect_admission_block(
+        &mut self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        trigger_code: Option<u8>,
+    ) -> Option<R2oSuspectAdmissionBlock> {
+        let now = std::time::Instant::now();
+        if r2o_discovery_transport(target) == 6
+            && self
+                .dead_addresses
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_blocked(target, now)
+        {
+            return Some(R2oSuspectAdmissionBlock::DeadAddress);
+        }
+        if self.r2o_discovery_challenge_active(target, now) {
+            return Some(R2oSuspectAdmissionBlock::Cooldown);
+        }
+        let failure_key = r2o_discovery_failure_key(target);
+        let late_trigger = r2o_discovery_late_trigger(trigger_code);
+        if late_trigger && self.r2o_late_trigger_blocked(target, now) {
+            return Some(R2oSuspectAdmissionBlock::Cooldown);
+        }
+        // C `cooldown_blocks`: истёкшая запись не блокирует, поздний RST
+        // пропускает только поздние сигналы, прямой CLEAR — только свой код.
+        let late_rst_only = self
+            .cooldown_ring
+            .endpoint_state(&failure_key, now)
+            .is_some_and(|(_, late_rst_only)| late_rst_only);
+        let bypass_late = late_rst_only && !late_trigger;
+        let bypass_direct = trigger_code.is_some_and(|signal_code| {
+            self.clear_streaks.contains_key(&failure_key)
+                && self.clear_signal_codes.get(&failure_key) != Some(&signal_code)
+        });
+        if !bypass_late && !bypass_direct {
+            if self
+                .cooldown_ring
+                .endpoint_state(&failure_key, now)
+                .is_some()
+            {
+                return Some(R2oSuspectAdmissionBlock::Cooldown);
+            }
+            let retry_after = self
+                .failed_retry_after
+                .get(&failure_key)
+                .copied()
+                .unwrap_or(R2O_DISCOVERY_FAILURE_RETRY);
+            if self.failed_at.get(&failure_key).is_some_and(|failed_at| {
+                !r2o_discovery_failure_retry_due_after(*failed_at, now, retry_after)
+            }) {
+                return Some(R2oSuspectAdmissionBlock::Cooldown);
+            }
+        }
+        None
     }
 
     fn r2o_record_discovery_challenge(
@@ -26102,36 +26170,84 @@ impl ControlClient {
             );
             return;
         };
+        // C `on_suspect`: мёртвый адрес и отсрочка стоят ДО задачи, ARM_SHAPE
+        // и covering. Иначе подозрение к мёртвому адресу слало бы снимок
+        // формы наблюдаемой цели.
+        if let Some(block) = worker.r2o_suspect_admission_block(&target, Some(event.code)) {
+            let reason = match block {
+                R2oSuspectAdmissionBlock::DeadAddress => "замер отложен: мёртвый адрес ещё не ожил",
+                R2oSuspectAdmissionBlock::Cooldown => "замер отложен: действует отсрочка цели",
+            };
+            println!("v22 SUSPECT {}: {reason}", target.host);
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            return;
+        }
         // C `on_suspect` T_WATCHING + planned=NO: цель уже подтверждена и
         // только наблюдается. Новое подозрение без плана не запускает поиск,
         // но просит снимок формы — вдруг клиент говорит другим приветствием.
         let watching = worker.r2o_is_watching(&target);
-        if !planned && watching {
-            // C `watch_shape_pending` + `remeasure_snapped`: подтверждённая
-            // profile-привязка перемеряется снимком, а не ждёт следующего
-            // подозрения. Заявка ждёт SHAPE и снимок кладёт on_shape.
-            if r2o_controller::discovery::has_usable_profile_binding(catalog, &target) {
-                worker.pending_rechecks.insert(
-                    r2o_discovery_task_key(&target),
-                    (target.clone(), None, false),
-                );
-            }
-            if let Err(error) = self.arm_client_shape(&target.host, target.family) {
+        if watching {
+            // C `on_suspect`: planned=YES у наблюдаемой цели — `task_done` и
+            // новый замер; planned=UNKNOWN — снять наблюдение (поздние коды
+            // 5/6/8 после task_done идут общим путём нового замера);
+            // planned=NO — только снимок формы, поиск не начинается.
+            if planned {
+                worker.r2o_forget_completed_task(&r2o_discovery_task_key(&target), true);
+            } else if event.planned == r2k_core::control::LEGACY_PLANNED_UNKNOWN {
+                worker.r2o_forget_completed_task(&r2o_discovery_task_key(&target), true);
                 println!(
-                    "v22 SUSPECT {}: подтверждённая цель подозревается без плана, снимок формы не запрошен: {error}",
+                    "v22 SUSPECT {}: подозрение без подтверждения исполнения плана — наблюдение прекращаю",
                     target.host
                 );
+                if !matches!(event.code, 5 | 6 | 8) {
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                    return;
+                }
             } else {
-                println!(
-                    "v22 SUSPECT {}: подтверждённая цель подозревается без плана — запрашиваю снимок формы, наблюдение продолжаю",
-                    target.host
-                );
+                // C `watch_shape_pending` + `remeasure_snapped`: подтверждённая
+                // profile-привязка перемеряется снимком, а не ждёт следующего
+                // подозрения. Заявка ждёт SHAPE и снимок кладёт on_shape.
+                if r2o_controller::discovery::has_usable_profile_binding(catalog, &target) {
+                    worker.pending_rechecks.insert(
+                        r2o_discovery_task_key(&target),
+                        (target.clone(), None, false),
+                    );
+                }
+                if let Err(error) = self.arm_client_shape(&target.host, target.family) {
+                    println!(
+                        "v22 SUSPECT {}: подтверждённая цель подозревается без плана, снимок формы не запрошен: {error}",
+                        target.host
+                    );
+                } else {
+                    println!(
+                        "v22 SUSPECT {}: подтверждённая цель подозревается без плана — запрашиваю снимок формы, наблюдение продолжаю",
+                        target.host
+                    );
+                }
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+                return;
             }
+        }
+        // C `binding_covering`: поток без плана, к которому датапат не
+        // применил уже подтверждённую привязку, не улика. Только TCP и только
+        // когда задачи ещё нет: у ждущей/наблюдаемой цели C идёт своим путём
+        // (hot_event), а не отбрасывает подозрение.
+        let has_covering = r2o_controller::discovery::has_covering_binding(catalog, &target);
+        if !planned
+            && !watching
+            && !worker.is_active(&target)
+            && r2o_discovery_transport(&target) == 6
+            && has_covering
+        {
+            println!(
+                "v22 SUSPECT {}: план уже подтверждён, а к этому потоку датапат его не применял — поиск не начинаю",
+                target.host
+            );
             let _ = std::io::Write::flush(&mut std::io::stdout());
             return;
         }
-        let has_solution = r2o_controller::discovery::has_usable_binding(catalog, &target)
-            || r2o_controller::discovery::has_covering_binding(catalog, &target);
+        let has_solution =
+            r2o_controller::discovery::has_usable_binding(catalog, &target) || has_covering;
         let signal = r2o_discovery_suspect_signal(
             event.code,
             event.ttl,
@@ -26151,12 +26267,6 @@ impl ControlClient {
                         true,
                         "подтверждённый отказ плана",
                     )
-                } else if has_solution {
-                    println!(
-                        "v22 SUSPECT {}: каталог уже содержит применимое решение",
-                        target.host
-                    );
-                    return;
                 } else {
                     (R2oSuspectQueueMode::Normal, false, "подозрение без плана")
                 }
@@ -26168,19 +26278,13 @@ impl ControlClient {
                         true,
                         "молчание под планом",
                     )
-                } else if has_solution {
-                    println!(
-                        "v22 SUSPECT {}: каталог уже содержит применимое решение",
-                        target.host
-                    );
-                    return;
                 } else {
                     (R2oSuspectQueueMode::Normal, false, "молчание без плана")
                 }
             }
             4 => (
                 R2oSuspectQueueMode::Fresh,
-                false,
+                planned,
                 "снятый защитой чужой RST",
             ),
             _ => {
@@ -37937,6 +38041,523 @@ mod tests {
         assert!(!worker.is_active(&target));
         if let Ok(path) = std::env::var("R2O_ON_SUSPECT_WATCH_DIFF_OUTPUT") {
             std::fs::write(path, "watch_pending=1 arm_sent=1 queued=0\n").unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn on_suspect_codes_matrix_matches_c() {
+        use super::{
+            Catalog, ControlClient, DiscoveryWorker, R2oCleanHandshakeCache,
+            R2oDiscoveryCooldownKey, R2oTcpHelloCache, SHAPE_MODERN, r2o_discovery_failure_key,
+            r2o_discovery_task_key,
+        };
+        use r2k_core::control::{
+            ACK_OK, COMMAND_ARM_SHAPE, HelloEvent, KEY_LEN, LEGACY_PLANNED_NO, LEGACY_PLANNED_YES,
+            LegacySuspectEvent, encode_ack, read_frame,
+        };
+        use r2o_controller::catalog::{Binding, BoxRecord, Plan};
+        use r2o_controller::discovery::DiscoveryTarget;
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+        use std::time::{Duration, Instant};
+
+        type DiscoveryState = Option<(DiscoveryWorker, Catalog, std::path::PathBuf, Option<u32>)>;
+
+        fn client_hello(host: &str) -> Vec<u8> {
+            let host = host.as_bytes();
+            let mut server_name = Vec::with_capacity(host.len() + 5);
+            server_name.extend_from_slice(&((host.len() + 3) as u16).to_be_bytes());
+            server_name.push(0);
+            server_name.extend_from_slice(&(host.len() as u16).to_be_bytes());
+            server_name.extend_from_slice(host);
+            let mut extensions = vec![0x00, 0x00];
+            extensions.extend_from_slice(&(server_name.len() as u16).to_be_bytes());
+            extensions.extend_from_slice(&server_name);
+            extensions.extend_from_slice(&[0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04]);
+            let mut hello = vec![0x03, 0x03];
+            hello.extend_from_slice(&[0x42; 32]);
+            hello.extend_from_slice(&[0x00, 0x00, 0x02, 0x13, 0x01, 0x01, 0x00]);
+            hello.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+            hello.extend_from_slice(&extensions);
+            let mut handshake = vec![0x01];
+            handshake.extend_from_slice(&[
+                ((hello.len() >> 16) & 0xff) as u8,
+                ((hello.len() >> 8) & 0xff) as u8,
+                (hello.len() & 0xff) as u8,
+            ]);
+            handshake.extend_from_slice(&hello);
+            let mut record = vec![0x16, 0x03, 0x01];
+            record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+            record.extend_from_slice(&handshake);
+            record
+        }
+
+        fn flow_key() -> [u8; KEY_LEN] {
+            let mut key = [0_u8; KEY_LEN];
+            key[0] = 4;
+            key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+            key[17..21].copy_from_slice(&[198, 51, 100, 20]);
+            key[33..35].copy_from_slice(&40_000_u16.to_be_bytes());
+            key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+            key[37] = 6;
+            key
+        }
+
+        fn event(key: [u8; KEY_LEN], code: u8, planned: u8) -> LegacySuspectEvent {
+            LegacySuspectEvent {
+                key,
+                code,
+                ttl: 64,
+                reference_ttl: 0,
+                traffic_class: 0,
+                ip_id: 0,
+                planned,
+                client_shape: SHAPE_MODERN,
+                num: 0,
+            }
+        }
+
+        fn catalog() -> Catalog {
+            Catalog {
+                boxes: vec![BoxRecord {
+                    plans: vec![Plan {
+                        id: "plan-suspect".into(),
+                        proto: "tls".into(),
+                        text: "r2o-plan 1 11\nproto tcp tls\nsplit sni_middle +0\n".into(),
+                        enabled: true,
+                        ..Plan::default()
+                    }],
+                    bindings: vec![Binding {
+                        kind: "name".into(),
+                        target: "suspect.example.com".into(),
+                        plan_id: "plan-suspect".into(),
+                        level: 3,
+                        enabled: true,
+                        transport: 6,
+                        family: 4,
+                        shape: 1,
+                        input: 2,
+                        ..Binding::default()
+                    }],
+                    ..BoxRecord::default()
+                }],
+                ..Catalog::default()
+            }
+        }
+
+        fn queue_entry(worker: &DiscoveryWorker, target: &DiscoveryTarget) -> Option<(u64, bool)> {
+            let queue = worker
+                .jobs
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            queue
+                .entries
+                .iter()
+                .find(|entry| {
+                    r2o_discovery_task_key(&entry.target) == r2o_discovery_task_key(target)
+                })
+                .map(|entry| (entry.hot_event, entry.trigger_planned))
+        }
+
+        fn dispatch(
+            event: &LegacySuspectEvent,
+            discovery: &mut DiscoveryState,
+            hellos: &R2oTcpHelloCache,
+            clean: &R2oCleanHandshakeCache,
+            wait_for_arm: bool,
+        ) -> bool {
+            let (socket, mut peer) = UnixStream::pair().unwrap();
+            peer.set_read_timeout(Some(if wait_for_arm {
+                Duration::from_secs(2)
+            } else {
+                Duration::from_millis(50)
+            }))
+            .unwrap();
+            let peer_thread = std::thread::spawn(move || match read_frame(&mut peer) {
+                Ok(frame) => {
+                    let command = frame.kind;
+                    peer.write_all(&encode_ack(command, true, ACK_OK).unwrap())
+                        .unwrap();
+                    Some(command)
+                }
+                Err(_) => None,
+            });
+            let mut client = ControlClient {
+                socket,
+                send_maxlen: 1500,
+                send_cap: Arc::new(AtomicUsize::new(1500)),
+                pending_events: Default::default(),
+                pending_applied_events: Default::default(),
+                dropped_events: Arc::new(AtomicUsize::new(0)),
+                http_search_started: Default::default(),
+                http_acknowledged_bindings: Default::default(),
+            };
+            client.r2o_handle_legacy_suspect(event, discovery, hellos, clean);
+            let command = peer_thread.join().unwrap();
+            command == Some(COMMAND_ARM_SHAPE)
+        }
+
+        struct Spec {
+            label: String,
+            code: u8,
+            planned: u8,
+            prequeue: bool,
+            prequeue_planned: u8,
+            watching: bool,
+            catalog: bool,
+            dead: bool,
+            cooldown: bool,
+        }
+
+        fn run_spec(spec: &Spec, output: &mut String) {
+            let key = flow_key();
+            let now = Instant::now();
+            let mut hellos = R2oTcpHelloCache::default();
+            hellos.note(
+                HelloEvent {
+                    key,
+                    host: Some(b"suspect.example.com".to_vec()),
+                    shape: Some(SHAPE_MODERN),
+                    r2o_wire_len: Some(512),
+                    quic_snapshot: None,
+                    tcp_has_timestamp: Some(true),
+                },
+                now,
+            );
+            let target = hellos.target_for_tcp_flow(&key, now).unwrap();
+            let mut worker = r2o_test_discovery_worker_without_threads();
+            // Снимок уже получен отдельным SHAPE: SUSPECT не обязан заново
+            // слать ARM_SHAPE перед постановкой в очередь (C launch_task
+            // делает это только при реальном запуске).
+            let hello = client_hello(&target.host);
+            assert!(worker.remember_client_snapshot(&target, &hello, Some(true)));
+            if spec.watching {
+                worker.completed.insert(r2o_discovery_task_key(&target));
+            }
+            let initial_catalog = if spec.prequeue || !spec.catalog {
+                Catalog::default()
+            } else {
+                catalog()
+            };
+            let mut discovery: DiscoveryState = Some((
+                worker,
+                initial_catalog,
+                std::path::PathBuf::from("/tmp/catalog.json"),
+                None,
+            ));
+            let clean = R2oCleanHandshakeCache::default();
+            let wait_for_arm =
+                spec.watching && !spec.dead && !spec.cooldown && spec.planned == LEGACY_PLANNED_NO;
+            if spec.prequeue {
+                let first = event(key, spec.code, spec.prequeue_planned);
+                let _ = dispatch(&first, &mut discovery, &hellos, &clean, false);
+            }
+            discovery.as_mut().unwrap().1 = if spec.catalog {
+                catalog()
+            } else {
+                Catalog::default()
+            };
+            {
+                let worker = &mut discovery.as_mut().unwrap().0;
+                let now = Instant::now();
+                if spec.dead {
+                    worker
+                        .dead_addresses
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .step(&target, now);
+                }
+                if spec.cooldown {
+                    worker.r2o_record_discovery_cooldown(
+                        R2oDiscoveryCooldownKey::Endpoint(r2o_discovery_failure_key(&target)),
+                        now + Duration::from_secs(600),
+                        now,
+                    );
+                }
+            }
+            let block = {
+                let worker = &mut discovery.as_mut().unwrap().0;
+                match worker.r2o_suspect_admission_block(&target, Some(spec.code)) {
+                    Some(super::R2oSuspectAdmissionBlock::DeadAddress) => "dead",
+                    Some(super::R2oSuspectAdmissionBlock::Cooldown) => "cooldown",
+                    None => "none",
+                }
+            };
+            let hot_before =
+                queue_entry(&discovery.as_ref().unwrap().0, &target).map(|entry| entry.0);
+            let current = event(key, spec.code, spec.planned);
+            let arm = dispatch(&current, &mut discovery, &hellos, &clean, wait_for_arm);
+            let (worker, _, _, _) = discovery.as_ref().unwrap();
+            let entry = queue_entry(worker, &target);
+            let queued = entry.is_some();
+            let now = Instant::now();
+            let hot = match (hot_before, entry.map(|entry| entry.0)) {
+                (Some(before), Some(after)) if after > before => 1,
+                _ => 0,
+            };
+            let admitted = worker.is_active(&target)
+                || worker.r2o_is_watching(&target)
+                || worker
+                    .dns_watching
+                    .contains_key(&r2o_discovery_task_key(&target));
+            let watching = worker.r2o_is_watching(&target);
+            let trigger = entry.is_some_and(|entry| entry.1);
+            let report = worker
+                .searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entries
+                .get(&r2o_discovery_task_key(&target))
+                .is_some_and(|search| search.report_id.is_some());
+            let pending = worker
+                .pending_rechecks
+                .contains_key(&r2o_discovery_task_key(&target));
+            let _ = now;
+            output.push_str(&format!(
+                "{} code={} block={} queued={} admitted={} watching={} hot={} trigger={} report={} arm={} pending={}\n",
+                spec.label,
+                spec.code,
+                block,
+                queued as u8,
+                admitted as u8,
+                watching as u8,
+                hot,
+                trigger as u8,
+                report as u8,
+                arm as u8,
+                pending as u8,
+            ));
+        }
+
+        let mut specs = Vec::new();
+        for code in 1_u8..=8 {
+            specs.push(Spec {
+                label: format!("code{code}_fresh_noplan"),
+                code,
+                planned: LEGACY_PLANNED_NO,
+                prequeue: false,
+                prequeue_planned: LEGACY_PLANNED_NO,
+                watching: false,
+                catalog: false,
+                dead: false,
+                cooldown: false,
+            });
+            specs.push(Spec {
+                label: format!("code{code}_planned_solution"),
+                code,
+                planned: LEGACY_PLANNED_YES,
+                prequeue: false,
+                prequeue_planned: LEGACY_PLANNED_NO,
+                watching: false,
+                catalog: true,
+                dead: false,
+                cooldown: false,
+            });
+            specs.push(Spec {
+                label: format!("code{code}_unplanned_covering"),
+                code,
+                planned: LEGACY_PLANNED_NO,
+                prequeue: false,
+                prequeue_planned: LEGACY_PLANNED_NO,
+                watching: false,
+                catalog: true,
+                dead: false,
+                cooldown: false,
+            });
+            specs.push(Spec {
+                label: format!("code{code}_repeat"),
+                code,
+                planned: LEGACY_PLANNED_NO,
+                prequeue: true,
+                prequeue_planned: LEGACY_PLANNED_NO,
+                watching: false,
+                catalog: false,
+                dead: false,
+                cooldown: false,
+            });
+        }
+        for (label, code, planned, prequeue, prequeue_planned, watching, catalog, dead, cooldown) in [
+            (
+                "order_dead_before_covering",
+                1,
+                LEGACY_PLANNED_NO,
+                false,
+                LEGACY_PLANNED_NO,
+                false,
+                true,
+                true,
+                false,
+            ),
+            (
+                "order_cooldown_before_covering",
+                1,
+                LEGACY_PLANNED_NO,
+                false,
+                LEGACY_PLANNED_NO,
+                false,
+                true,
+                false,
+                true,
+            ),
+            (
+                "order_dead_before_cooldown",
+                1,
+                LEGACY_PLANNED_NO,
+                false,
+                LEGACY_PLANNED_NO,
+                false,
+                false,
+                true,
+                true,
+            ),
+            (
+                "order_hot_event_before_covering",
+                1,
+                LEGACY_PLANNED_NO,
+                true,
+                LEGACY_PLANNED_NO,
+                false,
+                true,
+                false,
+                false,
+            ),
+            (
+                "order_dead_before_hot_event",
+                1,
+                LEGACY_PLANNED_NO,
+                true,
+                LEGACY_PLANNED_NO,
+                false,
+                false,
+                true,
+                false,
+            ),
+            (
+                "order_cooldown_before_hot_event",
+                1,
+                LEGACY_PLANNED_NO,
+                true,
+                LEGACY_PLANNED_NO,
+                false,
+                false,
+                false,
+                true,
+            ),
+            (
+                "repeat_planned_promotion",
+                1,
+                LEGACY_PLANNED_YES,
+                true,
+                LEGACY_PLANNED_NO,
+                false,
+                false,
+                false,
+                false,
+            ),
+            (
+                "watch_dead_before_arm",
+                1,
+                LEGACY_PLANNED_NO,
+                false,
+                LEGACY_PLANNED_NO,
+                true,
+                false,
+                true,
+                false,
+            ),
+            (
+                "watch_cooldown_before_arm",
+                1,
+                LEGACY_PLANNED_NO,
+                false,
+                LEGACY_PLANNED_NO,
+                true,
+                false,
+                false,
+                true,
+            ),
+            (
+                "watch_arm_with_covering",
+                1,
+                LEGACY_PLANNED_NO,
+                false,
+                LEGACY_PLANNED_NO,
+                true,
+                true,
+                false,
+                false,
+            ),
+            (
+                "watch_planned_yes_new_search",
+                1,
+                LEGACY_PLANNED_YES,
+                false,
+                LEGACY_PLANNED_NO,
+                true,
+                false,
+                false,
+                false,
+            ),
+            (
+                "watch_planned_unknown_stop",
+                1,
+                r2k_core::control::LEGACY_PLANNED_UNKNOWN,
+                false,
+                LEGACY_PLANNED_NO,
+                true,
+                false,
+                false,
+                false,
+            ),
+            (
+                "watch_planned_unknown_late_recheck",
+                5,
+                r2k_core::control::LEGACY_PLANNED_UNKNOWN,
+                false,
+                LEGACY_PLANNED_NO,
+                true,
+                false,
+                false,
+                false,
+            ),
+            (
+                "planned_unknown_fresh_queue",
+                1,
+                r2k_core::control::LEGACY_PLANNED_UNKNOWN,
+                false,
+                LEGACY_PLANNED_NO,
+                false,
+                false,
+                false,
+                false,
+            ),
+        ] {
+            specs.push(Spec {
+                label: label.into(),
+                code,
+                planned,
+                prequeue,
+                prequeue_planned,
+                watching,
+                catalog,
+                dead,
+                cooldown,
+            });
+        }
+
+        let mut output = String::new();
+        for spec in &specs {
+            if spec.code == 7 {
+                // C code 7 — QUIC transport 17; legacy Rust строит цель только
+                // по TCP HELLO и остаётся P* (см. evidence on_suspect).
+                continue;
+            }
+            run_spec(spec, &mut output);
+        }
+        if let Ok(path) = std::env::var("R2O_ON_SUSPECT_CODES_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
         }
     }
 
