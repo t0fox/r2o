@@ -57,6 +57,8 @@ use r2o_controller::r2o_late_rx::{R2oLateRxCache, R2oLateRxInput};
 use r2o_controller::r2o_quic_deny::R2oQuicDenyCache;
 use r2o_controller::response::{HttpsProbeState, ResponseOptions, ResponseVerdict, probe_response};
 #[cfg(unix)]
+use r2o_controller::sched_log::r2o_sched_say;
+#[cfg(unix)]
 use r2o_controller::voice_measure::{
     R2oVoiceMeasurement, R2oVoiceOptions, R2oVoiceVerdict, r2o_measure_voice_for_flow,
 };
@@ -11164,7 +11166,9 @@ fn r2o_say_quiet(key: &str, line: String) {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .allow(key, std::time::Instant::now());
     if allowed {
-        println!("{line}");
+        // В d2kc `say_fn` — это `sched_say`, поэтому подтверждённая строка
+        // получает локальный префикс времени и flush, как в C.
+        r2o_sched_say(&line);
     }
 }
 
@@ -22996,11 +23000,13 @@ impl ControlClient {
                             .map_err(|error| format!("команда проверки HTTPS: {error}"))?;
                         self.send_command(&command, COMMAND_SET_HTTPS)?;
                     }
-                    println!(
+                    // C печатает результат зонда HTTPS через `sched_say`
+                    // (локальное время + flush), а не голым println.
+                    r2o_sched_say(&format!(
                         "проверка HTTPS {}: {}",
                         result.host,
                         result.state.description()
-                    );
+                    ));
                     if let Some(pending) = pending_http_searches.remove(&result.host) {
                         if r2o_http_search_https_action(3, false, Some(result.state), false)
                             == HttpSearchHttpsAction::Queue
@@ -23018,18 +23024,18 @@ impl ControlClient {
                                     pending.live_bound_cut,
                                 );
                                 if !queued {
-                                    println!(
+                                    r2o_sched_say(&format!(
                                         "HTTP {}: цель уже проверялась или очередь занята",
                                         pending.target.host
-                                    );
+                                    ));
                                 }
                             }
                         } else {
-                            println!(
+                            r2o_sched_say(&format!(
                                 "HTTP {}: поиск обхода не запущен — HTTPS: {}",
                                 pending.target.host,
                                 result.state.description()
-                            );
+                            ));
                         }
                     }
                     https_cache_changed = true;

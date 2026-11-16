@@ -95,13 +95,13 @@ production-путь не ставится. Формулировки «теста
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 361 | 187 | 0 | 0 |
-| core-state | 692 | 501 | 191 | 0 | 0 |
+| core-state | 692 | 502 | 190 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1585** | **397** | **0** | **0** |
+| **Итого** | **1982** | **1586** | **396** | **0** | **0** |
 
-Это не оценка паритета: 397 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 396 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -120,7 +120,7 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1585 / P 397**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1586 / P 396**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
@@ -192,7 +192,7 @@ P означает неполное доказательство ветвей, N
 - core-state — CLI-флаги/вывод, PSL/catalog-парсер, crypto HKDF-границы,
   voice-blob, volume resource-retry.
 - `?` (0): не осталось; все строки реестра разобраны и имеют E/P/N.
-- Поведенческая группировка 397 P (30 контрактов, 0 без контракта):
+- Поведенческая группировка 396 P (30 контрактов, 0 без контракта):
   `docs/behavior-contracts/inventory.md` и
   `docs/behavior-contracts/p-contract-map.tsv`. Это не меняет статусы
   реестра и не является заявлением паритета.
@@ -385,11 +385,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 361 | 187 | 0 | 0 |
-| core-state | 692 | 501 | 191 | 0 | 0 |
+| core-state | 692 | 502 | 190 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1585** | **397** | **0** | **0** |
+| **Итого** | **1982** | **1586** | **396** | **0** | **0** |
 
 
 ---
@@ -2169,7 +2169,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `now_ms` | 113-117 | 5 | монотонное время в мс | `now_ms.rs` `d2k_now_ms` | **E*** | C `clock_gettime(CLOCK_MONOTONIC)` + сдвиг. Rust `d2k_now_ms` — тот же CLOCK_MONOTONIC, fallback `gettimeofday`, `clock_offset_ms`; тесты `now_ms.rs`. **Ограничение:** d2kc-цикл в Rust ведёт сроки через `Instant`, а не через абсолютные мс; для интервалов эквивалентно. |
 | `save_atomic` | 122-125 | 4 | атомарное сохранение каталога | `catalog::Catalog::save_atomic` | **E** | C-обёртка `d2k_catalog_save_atomic`; Rust `Catalog::save_atomic` пишет temp+fsync+rename. `scripts/r2o-catalog-persist-differential.sh` + unit. |
 | `self_mem` | 136-148 | 13 | VmRSS/VmHWM/VmData/Threads из `/proc/self/status` | `diagnostics.rs` `process_memory`/`proc_field` | **E*** | C читает поля `/proc/self/status`. Rust `process_memory`/`proc_field` разбирает те же VmRSS/VmHWM/VmData/Threads для процессов; тесты `proc_field`, `process_memory` (RSS/HWM/Threads/границы). **Ограничение:** Rust собирает список процессов диагностики, а не только self; поля и парсер те же. |
-| `sched_say` | 150-157 | 8 | журнал планировщика с локальным временем | `main.rs` log callback | **P*** | C `localtime_r` + `printf("%02d:%02d:%02d %s\n")` + `fflush`. Rust пишет через свой logger с иным форматом; отдельной функции нет. |
+| `sched_say` | 150-157 | 8 | журнал планировщика с локальным временем | `sched_log::r2o_sched_say(_at)`; вызовы в `r2o_say_quiet` и HTTPS/HTTP-логах | **E*** | **2026-11-17:** production-хелпер `r2o_sched_say_at` использует `localtime_r` и печатает `%02d:%02d:%02d %s` + `fflush`, как C. C/Rust differential `scripts/r2o-sched-say-differential.sh` PASS: C-оракул — production `sched_say` из d2kc.c, epoch выбран без пересечения границы секунды. `r2o_say_quiet` и строки результата HTTPS-зонда/HTTP-очереди теперь идут через этот хелпер. **Ограничение:** периодический отчёт d2kc (`событий …`) в Rust не печатается вовсе — это часть строки `main`; при сбое `localtime_r` Rust даёт `00:00:00`, а C оставил бы `tm` неинициализированным. |
 | `http_search_portal` | 168-174 | 7 | класс 3 (портал) → `d2k_httpsearch_portal` | `main.rs:4729-4750 r2o_http_search_https_action` | **E*** | **2026-11-16:** C/Rust differential `scripts/r2o-http-search-portal-differential.sh` PASS **7 состояний**: C-оракул — production `http_search_portal` из d2kc.c, подменён только приёмник `d2k_httpsearch_portal` (счётчик вызовов). `served`/`tls-blocked` → 0, `closed`/`other-name`/`unconfirmed` → 1, `unknown`/`probing` → 0; Rust Queue/Suppress/Wait даёт те же решения. **Ограничение:** гейты `family=0` и `g_hs=NULL` остаются на стороне вызывающего и в Rust-helper не входят; response_code/live-bound покрыты `http_search_https_caller_gate_matches_d2o_states`. |
 | `hs_open_port` | 176-208 | 33 | socket family, `SO_MARK` только при `g_probe_mark`, bind wildcard, getsockname, big-endian порт | `main.rs` `r2o_props_bind_socket`, `BoundTcpProbe::open` | **E*** | C: socket family 4/6, SO_MARK только при ненулевой метке, wildcard bind, getsockname. Rust production `BoundTcpProbe::open` использует общий `r2o_props_bind_socket` (IPv6 V6ONLY) и ставит метку `mark.unwrap_or(0x2d)`; тесты `props_bind_wrappers_match_c_families_and_socket_types`, C/Rust differential `scripts/test-props-bind-differential.sh` (5 кейсов). **Ограничение:** Rust добавляет `SOCK_CLOEXEC`/`O_NONBLOCK`. |
 | `hs_close_port` | 210-210 | 1 | закрыть порт поиска | `OwnedFd`/`Drop` (`BoundTcpProbe`) | E | C `if (fd>=0) close(fd)`. Rust `BoundTcpProbe` владеет `OwnedFd`, закрытие в `Drop`; тест `hs_close_port_drops_fd_like_c` проверяет `fcntl(F_GETFD) == -1` после drop. |
@@ -3235,8 +3235,8 @@ memory_bytes, load с проверкой хвоста, все writer'ы, `d2k_ca
   `save_atomic` — E (`r2o-catalog-persist-differential.sh`).
 - **Память/журнал:** `self_mem` читает `/proc/self/status` (RSS/HWM/VmData/
   Threads); Rust `diagnostics::process_memory` читает те же поля, но набор
-  точек и формат различаются, C/Rust differential нет — P. `sched_say`/`hs_say`
-  — P* (лог-колбэки).
+  точек и формат различаются, C/Rust differential нет — P. `sched_say` —
+  E* (`r2o-sched-say-differential.sh`); `hs_say` — P* (лог HTTP-поиска).
 - **HTTP-поиск:** `http_search_portal` ↔ `r2o_http_search_https_action`
   (E*, 7 состояний C/Rust differential); `http_portal` (E*) ↔
   `encode_set_https`; C различает rc 0/1/2 (портал/лог/SET_HTTPS),
@@ -3285,7 +3285,7 @@ memory_bytes, load с проверкой хвоста, все writer'ы, `d2k_ca
 | `now_ms` | 113–117 | `Instant`/`SystemTime` | **P*** | C `CLOCK_MONOTONIC` в мс; Rust `Instant` для интервалов и wall-clock для логов. |
 | `save_atomic` | 122–125 | `save_atomic` (`catalog.rs`) | **E** | `r2o-catalog-persist-differential.sh`: tmp+fsync+rename, включая конкурентное обновление. |
 | `self_mem` | 136–148 | `diagnostics::process_memory` | **P** | C читает VmRSS/VmHWM/VmData/Threads из `/proc/self/status`; Rust читает те же поля, но набор точек/формат иные. C/Rust differential нет. |
-| `sched_say` | 150–157 | лог-колбэк `main.rs`/`Recorder` | **P*** | C печатает локальное время и `flush`; Rust пишет через журнал/`eprintln`. |
+| `sched_say` | 150–157 | `sched_log::r2o_sched_say` | **E*** | `r2o-sched-say-differential.sh`: timestamp совпал с production C; используется в `r2o_say_quiet` и HTTPS/HTTP-логах. Ограничение — периодический отчёт `main` не портирован. |
 | `http_search_portal` | 168–174 | `r2o_http_search_https_action` | **E*** | `r2o-http-search-portal-differential.sh`: 7 состояний совпали с production C; ограничение — `family=0`/`g_hs=NULL` гейты caller-side. |
 | `hs_open_port` | 176–208 | `BoundTcpProbe::open` | **P** | C ставит `SO_MARK` только при `g_probe_mark!=0`, bind/getsockname в блокирующем сокете; Rust `unwrap_or(0x2d)`, nonblock+CLOEXEC. |
 | `hs_close_port` | 210–210 | `Drop`/`close` | **P*** | C `close(fd)`; Rust владеет `OwnedFd`. |

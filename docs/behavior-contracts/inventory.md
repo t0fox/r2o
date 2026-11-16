@@ -5,12 +5,12 @@
 поведенческие контракты. Источник — канонические таблицы
 `docs/audit/{core-net,core-state,datapath-core,datapath-plan,detect}.md`.
 
-Строк P: **397**; контрактов: **30**; без контракта: **0**.
+Строк P: **396**; контрактов: **30**; без контракта: **0**.
 
 | Группа | P |
 |---|---:|
 | core-net | 187 |
-| core-state | 191 |
+| core-state | 190 |
 | datapath-core | 7 |
 | datapath-plan | 0 |
 | detect | 12 |
@@ -41,7 +41,7 @@
 | `CS-SCHED-ECH-QUIC` | Scheduler ECH witness and QUIC initial/address control | ECH witness, quic own initial/address/multi. | 9 | sched.c: ECH/QUIC; Rust ech/quic initial; e2e DoQ и полный порядок не доказаны. |
 | `CS-SCHED-DIAGNOSTICS` | Scheduler diagnostics/live output | progress/diagnostics/counts, live binding/phase, say/level/time/hex. | 12 | sched.c: diagnostics/helpers; live 12 states PASS, редкие counters/поля P. |
 | `CS-CRYPTO-ECC` | ECC primitives P-256/X25519 | Полевая арифметика, point/scalar, public/keypair/ecdh. | 33 | p256/x25519: 33 P; ring/hpke/dalek; прямых C/Rust векторов нет. |
-| `CS-CLI-TOOLS` | CLI tools d2kc/d2kask/d2kfetch/d2kvoice | Флаги, stdout/exit, snapshot wire, usage. | 3 | d2kc/d2kask/d2kfetch/d2kvoice: 3 P; d2kvoice main/usage PASS; snapshot_wire C-путь недостижим; diagnostic_limit/event/tick и http_search_portal — C/Rust differential PASS; остальные CLI. |
+| `CS-CLI-TOOLS` | CLI tools d2kc/d2kask/d2kfetch/d2kvoice | Флаги, stdout/exit, snapshot wire, usage. | 2 | d2kc/d2kask/d2kfetch/d2kvoice: 2 P; d2kvoice main/usage PASS; snapshot_wire C-путь недостижим; diagnostic_limit/event/tick, http_search_portal и sched_say — C/Rust differential PASS; остальные CLI. |
 | `CS-PROPS` | QUIC properties text | original/strategy measure and wire properties. | 5 | props: 5 P; quic props findings текстовый контракт не полный. |
 | `CS-VERDICT` | Classify verdict | C d2k_classify verdict mapping. | 1 | verdict: 1 P; C-путь в d2kc мёртв, Rust classify иной API. |
 | `DP-SESSION-LIFECYCLE` | Datapath session lifecycle | d2kd main/usage, session_new, UDP handle, session_packet. | 5 | session/d2kd: 5 P; session_packet/handle_udp live не сверены. |
