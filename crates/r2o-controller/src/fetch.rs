@@ -226,6 +226,11 @@ pub struct FetchResult {
     pub complete: bool,
     pub application_verified: bool,
     pub handshake_verified: bool,
+    /// C `d2k_ver_result.conn_close`: сервер закроет соединение после ответа
+    /// (HTTP/1.0, `Connection: close` или EOF). `verify_confirm` использует
+    /// этот признак в гейте объёмной лестницы: без закрытия соединения
+    /// непроверенный бюджет не считается обрывом.
+    pub connection_close: bool,
     /// Проба шла как DoH POST `application/dns-message`.
     pub doh_probe: bool,
     /// Тело DoH-ответа прошло `d2k_verify_doh_response_parse`/`dns_probe_reply`.
@@ -605,6 +610,7 @@ pub fn r2o_verify_tls_connected_stream_with_alpn(
         complete: false,
         application_verified: false,
         handshake_verified: true,
+        connection_close: false,
         doh_probe: false,
         dns_reply: false,
         elapsed: started.elapsed(),
@@ -653,6 +659,7 @@ pub fn r2o_verify_tls_replayed_client_hello(
         complete: false,
         application_verified: false,
         handshake_verified: proof,
+        connection_close: false,
         doh_probe: false,
         dns_reply: false,
         elapsed: started.elapsed(),
@@ -1892,6 +1899,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
             complete: dns_reply,
             application_verified: dns_reply && peer_name_ok != Some(false),
             handshake_verified: false,
+            connection_close: false,
             doh_probe: false,
             dns_reply,
             elapsed: started.elapsed(),
@@ -1956,6 +1964,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
             complete: r2o_gateway.complete,
             application_verified: r2o_gateway.complete,
             handshake_verified: false,
+            connection_close: false,
             doh_probe: false,
             dns_reply: false,
             elapsed: started.elapsed(),
@@ -2380,6 +2389,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
             complete,
             application_verified,
             handshake_verified: false,
+            connection_close: r2o_http_connection_closes(parser.headers()),
             doh_probe,
             dns_reply,
             elapsed: started.elapsed(),
@@ -4681,6 +4691,7 @@ mod tests {
             complete,
             application_verified,
             handshake_verified: false,
+            connection_close: false,
             doh_probe: false,
             dns_reply: false,
             elapsed: Duration::ZERO,

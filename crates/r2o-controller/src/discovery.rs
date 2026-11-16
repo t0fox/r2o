@@ -1379,6 +1379,12 @@ pub fn add_measured_binding_with_fingerprint_in_box_without_group(
     )
 }
 
+/// C `D2K_INPUT_CLIENT/PROFILE/TRANSFER` (`core/include/d2k_catalog.h:250-256`):
+/// полнота входа, которой добыта привязка.
+pub const R2O_D2K_INPUT_CLIENT: u8 = 1;
+pub const R2O_D2K_INPUT_PROFILE: u8 = 2;
+pub const R2O_D2K_INPUT_TRANSFER: u8 = 3;
+
 fn add_measured_binding_with_fingerprint_in_box_learn(
     catalog: &mut Catalog,
     target: &DiscoveryTarget,
@@ -1394,7 +1400,10 @@ fn add_measured_binding_with_fingerprint_in_box_learn(
             target.shape,
             SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP | SHAPE_HTTP
         ) || r2k_core::control::is_tcp_context_shape(target.shape))
-        || !matches!(input, 1 | 2)
+        || !matches!(
+            input,
+            R2O_D2K_INPUT_CLIENT | R2O_D2K_INPUT_PROFILE | R2O_D2K_INPUT_TRANSFER
+        )
     {
         return Err("discovery target or input source is unsupported".into());
     }

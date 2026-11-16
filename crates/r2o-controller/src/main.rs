@@ -5000,15 +5000,28 @@ fn r2o_discovery_volume_ladder_decision(
     applied: bool,
     packet_budget_required: bool,
 ) -> R2oFamilyRecoveryDecision {
-    if packet_budget_required
-        && !result.as_ref().is_ok_and(|fetch| {
-            fetch.r2o_volume_observation.packet_budget
-                == r2o_controller::r2o_volume::R2oVolumePacketBudget::Passed
-        })
-    {
+    if r2o_family_recovery_decision(result, applied) != R2oFamilyRecoveryDecision::Verified {
         return R2oFamilyRecoveryDecision::Reclassify;
     }
-    r2o_family_recovery_decision(result, applied)
+    if !packet_budget_required {
+        return R2oFamilyRecoveryDecision::Verified;
+    }
+    // C `verify_confirm` не требует пройденного бюджета слепо: отказ идёт по
+    // гейту объёмной лестницы, где «не проверено» при незакрытом соединении
+    // не считается обрывом (`sched.c:9593-9605`).
+    let gates = R2oConfirmVolumeLadder {
+        volume_cut: true,
+        ladder_candidate: true,
+        conn_close: result.as_ref().is_ok_and(|fetch| fetch.connection_close),
+        ..Default::default()
+    };
+    match r2o_confirm_volume_ladder_gate(
+        &gates,
+        r2o_confirm_budget_from_mark(r2o_budget_mark_from_result(result)),
+    ) {
+        Some(_) => R2oFamilyRecoveryDecision::Reclassify,
+        None => R2oFamilyRecoveryDecision::Verified,
+    }
 }
 
 #[cfg(unix)]
@@ -7035,6 +7048,17 @@ struct R2oQuicDiscoveryTask {
     stall_cut: bool,
 }
 
+/// Чем именно подтверждён QUIC-кандидат. C `t->ver.replay_proof` и
+/// `t->ver.level == D2K_VER_HANDSHAKE` для QUIC+ECH; R2O ведёт QUIC
+/// зондом-повтором (`QuicReplayProbe`), поэтому повтор — свойство зонда, а
+/// уровень рукопожатия приходит из принятого `r2o_quic_data_proof_confirmed`.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct R2oQuicConfirmProof {
+    replay_proof: bool,
+    handshake_level: bool,
+}
+
 #[cfg(unix)]
 struct R2oQuicDiscoveryOutcome {
     server: std::net::SocketAddr,
@@ -7043,7 +7067,7 @@ struct R2oQuicDiscoveryOutcome {
     probe_path: String,
     deny_recheck: bool,
     stall_cut: bool,
-    result: Result<Option<(String, String)>, String>,
+    result: Result<Option<(String, String, R2oQuicConfirmProof)>, String>,
 }
 
 #[cfg(unix)]
@@ -7320,7 +7344,7 @@ fn r2o_quic_snapshot_has_ech(snapshot: &[u8]) -> bool {
 
 #[cfg(unix)]
 fn r2o_quic_discovery_cooldown(
-    result: &Result<Option<(String, String)>, String>,
+    result: &Result<Option<(String, String, R2oQuicConfirmProof)>, String>,
 ) -> std::time::Duration {
     match result {
         Ok(Some(_)) => R2O_QUIC_DISCOVERY_FOUND_COOLDOWN,
@@ -7737,6 +7761,79 @@ fn r2o_budget_mark_from_result(result: &Result<r2o_controller::fetch::FetchResul
         R2oVolumePacketBudget::Cut => R2O_D2K_CAT_BUDGET_CUT,
         _ => 0,
     }
+}
+
+/// C `t->ver.budget` (`core/include/d2k_verify.h:197-200`). Нумерация
+/// донорская: каталожная отметка (`R2O_D2K_CAT_BUDGET_*`) — другое поле.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum R2oConfirmBudget {
+    NotChecked,
+    Passed,
+    Cut,
+    NotApplicable,
+}
+
+#[cfg(unix)]
+fn r2o_confirm_budget_from_mark(mark: u8) -> R2oConfirmBudget {
+    match mark {
+        R2O_D2K_CAT_BUDGET_PASSED => R2oConfirmBudget::Passed,
+        R2O_D2K_CAT_BUDGET_CUT => R2oConfirmBudget::Cut,
+        R2O_D2K_CAT_BUDGET_UNCHECKED => R2oConfirmBudget::NotApplicable,
+        _ => R2oConfirmBudget::NotChecked,
+    }
+}
+
+/// Признаки C-ячейки, которые `verify_confirm` читает из `t`/`t->vol`.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct R2oConfirmVolumeLadder {
+    /// C `t->vol.verdict == D2K_VOL_CUT` — измерен обрыв исходящей лестницы.
+    volume_cut: bool,
+    /// C `t->vol.rx_cut` — обрыв входящего тела уже доказан.
+    rx_cut: bool,
+    /// C `ladder_candidate(t)`: план пришёл из лестницы белого имени.
+    ladder_candidate: bool,
+    /// C `t->ver.conn_close` — сервер закроет соединение после ответа.
+    conn_close: bool,
+    /// C `t->partial_finishing` — подтверждение частичного обхода.
+    partial_finishing: bool,
+}
+
+/// C `verify_confirm` (`core/sched.c:9593-9605`): план объёмной лестницы не
+/// подтверждается, если измерен обрыв исходящей лестницы, а бюджет потока не
+/// пройден. `Some(ladder_unmeasurable)` — C объявляет лестницу неизмеримой
+/// только при бюджете, отличном от `CUT`; при `CUT` кандидат просто
+/// откладывается до следующего.
+#[cfg(unix)]
+fn r2o_confirm_volume_ladder_gate(
+    input: &R2oConfirmVolumeLadder,
+    budget: R2oConfirmBudget,
+) -> Option<bool> {
+    if input.partial_finishing || !input.volume_cut || input.rx_cut || !input.ladder_candidate {
+        return None;
+    }
+    let rejected = matches!(
+        budget,
+        R2oConfirmBudget::NotApplicable | R2oConfirmBudget::Cut
+    ) || (budget != R2oConfirmBudget::Passed && input.conn_close);
+    rejected.then_some(budget != R2oConfirmBudget::Cut)
+}
+
+/// C `quic_text_is_split` (`core/sched.c:3446-3448`).
+#[cfg(unix)]
+fn r2o_quic_text_is_split(text: &str) -> bool {
+    text.contains("\nquicsplit ")
+}
+
+/// C `verify_confirm` (`core/sched.c:9621-9627`): QUIC-план с ECH
+/// подтверждается только повтором пачки клиента на уровне рукопожатия.
+/// R2O ведёт QUIC через `QuicReplayProbe` (повтор Initial клиента), поэтому
+/// `replay_proof` — свойство самого зонда, а `handshake_level` — принятое
+/// доказательство `r2o_quic_data_proof_confirmed`.
+#[cfg(unix)]
+fn r2o_quic_ech_confirm_allowed(quic_ech: bool, replay_proof: bool, handshake_level: bool) -> bool {
+    !quic_ech || (replay_proof && handshake_level)
 }
 
 #[cfg(unix)]
@@ -9741,7 +9838,7 @@ type R2oQuicDiscoveryRunner = dyn Fn(
         &mut R2oQuicDiscoveryTask,
         SyncSender<HttpSearchCommand>,
         Arc<AtomicBool>,
-    ) -> Result<Option<(String, String)>, String>
+    ) -> Result<Option<(String, String, R2oQuicConfirmProof)>, String>
     + Send
     + Sync;
 
@@ -20460,11 +20557,30 @@ fn r2o_discovery_volume_recovery(
             candidate_request_encoding,
         );
         probe_counts.candidates = probe_counts.candidates.saturating_add(attempts);
+        // C `verify_confirm` (`sched.c:9593-9605`). Гейт объёмной лестницы
+        // решает судьбу кандидата ДО отчёта о входе: неизмеримый бюджет
+        // прекращает подбор белого имени, оборванный — только откладывает
+        // этого кандидата.
+        let ladder_gate: Option<bool> = if tx_ladder_requires_packet_budget {
+            r2o_confirm_volume_ladder_gate(
+                &R2oConfirmVolumeLadder {
+                    volume_cut: true,
+                    rx_cut: search.rx.evidence.is_some(),
+                    ladder_candidate: true,
+                    conn_close: result.as_ref().is_ok_and(|fetch| fetch.connection_close),
+                    partial_finishing: false,
+                },
+                r2o_confirm_budget_from_mark(r2o_budget_mark_from_result(&result)),
+            )
+        } else {
+            None
+        };
         let verified = r2o_discovery_volume_ladder_decision(
             &result,
             applied,
             tx_ladder_requires_packet_budget,
-        ) == R2oFamilyRecoveryDecision::Verified;
+        ) == R2oFamilyRecoveryDecision::Verified
+            && ladder_gate.is_none();
         live_searches
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -20506,6 +20622,20 @@ fn r2o_discovery_volume_recovery(
             ));
             return true;
         }
+        if ladder_gate == Some(true) {
+            // C `verify_confirm`: бюджет на этой цели не измерить — лестницу
+            // белого имени прекращаем, дальше обычные кандидаты.
+            searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(target);
+            outcome.plan_text = None;
+            outcome.retry_after = Some(R2O_DISCOVERY_INCOMPLETE_RETRY);
+            outcome.detail.push_str(
+                "; бюджет потока на этой цели не измерить — лестницу белого имени прекращаю, дальше обычные кандидаты",
+            );
+            return true;
+        }
         let Some(fetch) = result.as_ref().ok() else {
             outcome.detail.push_str(&format!(
                 "; проба объёмного плана {index} не завершилась и будет повторена"
@@ -20521,24 +20651,6 @@ fn r2o_discovery_volume_recovery(
                 "; проба объёмного плана {index} не получила точное применение; повторю её"
             ));
             break;
-        }
-        if tx_ladder_requires_packet_budget
-            && matches!(
-                fetch.r2o_volume_observation.packet_budget,
-                r2o_controller::r2o_volume::R2oVolumePacketBudget::NotMeasured
-                    | r2o_controller::r2o_volume::R2oVolumePacketBudget::NotApplicable
-            )
-        {
-            searches
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(target);
-            outcome.plan_text = None;
-            outcome.retry_after = Some(R2O_DISCOVERY_INCOMPLETE_RETRY);
-            outcome.detail.push_str(
-                "; TCP_INFO не подтвердил бюджет потока для исходящей лестницы — белое имя не сохраняю",
-            );
-            return true;
         }
         next_candidate = index + 1;
     }
@@ -23463,7 +23575,7 @@ impl ControlClient {
                         }
                     } else {
                         match outcome.result {
-                            Ok(Some((plan_text, candidate_name))) => {
+                            Ok(Some((plan_text, candidate_name, proof))) => {
                                 if let Some((_, catalog, path, _)) = &mut discovery {
                                     self.r2o_install_quic_candidate(
                                         outcome.server,
@@ -23472,6 +23584,7 @@ impl ControlClient {
                                         &outcome.probe_path,
                                         &plan_text,
                                         &candidate_name,
+                                        proof,
                                         catalog,
                                         path,
                                         catalog_persistence.as_mut(),
@@ -26831,7 +26944,7 @@ impl ControlClient {
         r2o_mark: Option<u32>,
         deny_recheck: bool,
         stall_cut: &mut bool,
-    ) -> Result<Option<(String, String)>, Box<dyn Error>> {
+    ) -> Result<Option<(String, String, R2oQuicConfirmProof)>, Box<dyn Error>> {
         use r2o_controller::quic_replay::{QuicReplayProbe, r2o_quic_address_is_local};
 
         // d2o's test harness explicitly enables local targets for loopback
@@ -27176,7 +27289,16 @@ impl ControlClient {
                         "DoQ {server}: кандидат «{}» подтверждён DNS-ответом и точным APPLIED",
                         candidate.name
                     );
-                    return Ok(Some((outcome.plan_text, candidate.name)));
+                    return Ok(Some((
+                        outcome.plan_text,
+                        candidate.name,
+                        R2oQuicConfirmProof {
+                            // DoQ подтверждается DNS-ответом и точным APPLIED;
+                            // ECH в DoQ-снимке не участвует.
+                            replay_proof: outcome.dns_reply,
+                            handshake_level: outcome.dns_reply,
+                        },
+                    )));
                 }
             }
             r2o_quic_dns_live_set(
@@ -27533,7 +27655,7 @@ impl ControlClient {
                 snapshot.len(),
                 false,
             );
-        let mut selected_plan = None;
+        let mut selected_plan: Option<(String, String, R2oQuicConfirmProof)> = None;
         let mut fragment_control_passed = false;
         let mut benign_asked = false;
         let mut ttl_three_answered_no = false;
@@ -27662,7 +27784,15 @@ impl ControlClient {
                 );
                 continue;
             }
-            selected_plan = Some((outcome.plan_text, candidate.name));
+            selected_plan = Some((
+                outcome.plan_text,
+                candidate.name,
+                R2oQuicConfirmProof {
+                    // `QuicReplayProbe` всегда повторяет Initial клиента.
+                    replay_proof: true,
+                    handshake_level: data.handshake_confirmed,
+                },
+            ));
             break;
         }
 
@@ -27779,7 +27909,15 @@ impl ControlClient {
                         data_verdict,
                     )
                 {
-                    selected_plan = Some((outcome.plan_text, candidate.name));
+                    selected_plan = Some((
+                        outcome.plan_text,
+                        candidate.name,
+                        R2oQuicConfirmProof {
+                            // `QuicReplayProbe` всегда повторяет Initial клиента.
+                            replay_proof: true,
+                            handshake_level: data.handshake_confirmed,
+                        },
+                    ));
                     break;
                 }
             }
@@ -27921,7 +28059,15 @@ impl ControlClient {
                         data_verdict,
                     )
                 {
-                    selected_plan = Some((outcome.plan_text, candidate.name));
+                    selected_plan = Some((
+                        outcome.plan_text,
+                        candidate.name,
+                        R2oQuicConfirmProof {
+                            // `QuicReplayProbe` всегда повторяет Initial клиента.
+                            replay_proof: true,
+                            handshake_level: data.handshake_confirmed,
+                        },
+                    ));
                     break;
                 }
                 println!(
@@ -27930,11 +28076,11 @@ impl ControlClient {
                 );
             }
         }
-        let Some((plan_text, candidate_name)) = selected_plan else {
+        let Some((plan_text, candidate_name, proof)) = selected_plan else {
             println!("QUIC-подбор исчерпал доступные кандидаты без двух подтверждений");
             return Ok(None);
         };
-        Ok(Some((plan_text, candidate_name)))
+        Ok(Some((plan_text, candidate_name, proof)))
     }
 
     fn r2o_install_quic_deny(
@@ -28059,12 +28205,44 @@ impl ControlClient {
         probe_path: &str,
         plan_text: &str,
         candidate_name: &str,
+        proof: R2oQuicConfirmProof,
         catalog: &mut Catalog,
         catalog_path: &std::path::Path,
         mut persistence: Option<&mut R2oCatalogPersistence>,
     ) -> Result<(), Box<dyn Error>> {
-        let address_binding = r2o_controller::quic_replay::r2o_qp_addr_parse(&host).is_some()
-            || r2o_quic_snapshot_has_ech(snapshot);
+        let family = if server.is_ipv4() { 4 } else { 6 };
+        // C `verify_confirm` (`sched.c:9621-9627`): QUIC-план с ECH
+        // подтверждается только повтором пачки клиента на уровне
+        // рукопожатия. R2O ставит QUIC-план из этого пути, поэтому гейт
+        // стоит здесь, до записи каталога.
+        let quic_ech = r2o_quic_snapshot_has_ech(snapshot);
+        if !r2o_quic_ech_confirm_allowed(quic_ech, proof.replay_proof, proof.handshake_level) {
+            println!(
+                "QUIC-план {plan_text:.60}… для {host} не подтверждён: ECH требует повтора пачки клиента на уровне рукопожатия"
+            );
+            return Ok(());
+        }
+        // C `verify_confirm` (`sched.c:9650-9660`): разрез CRYPTO, который
+        // клиент этой цели исполнить не может (ClientHello шире датаграммы),
+        // не подтверждается. Вход у нас — снятая пачка клиента, поэтому
+        // `snapped=1`: неприменимость решает только `quic_multi`.
+        if r2o_quic_text_is_split(plan_text)
+            && r2o_quic_split_unfit(
+                host,
+                family,
+                host.parse::<std::net::IpAddr>().is_ok(),
+                true,
+                snapshot.len(),
+                false,
+            )
+        {
+            println!(
+                "QUIC-план {plan_text:.60}… для {host} не подтверждён: разрез CRYPTO клиенту этой цели не исполняется (ClientHello шире датаграммы)"
+            );
+            return Ok(());
+        }
+        let address_binding =
+            r2o_controller::quic_replay::r2o_qp_addr_parse(&host).is_some() || quic_ech;
         let (_lock, previous) =
             locked_catalog_for_persistence(catalog_path, catalog, persistence.as_deref())?;
         if address_binding
@@ -28078,7 +28256,6 @@ impl ControlClient {
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs() as i64;
         let mut updated = previous.clone();
-        let family = if server.is_ipv4() { 4 } else { 6 };
         let saved_probe_path = if probe_path == "/" { "" } else { probe_path };
         let saved_plan_id = if address_binding {
             r2o_controller::discovery::add_confirmed_quic_address_binding(
@@ -28590,7 +28767,14 @@ impl ControlClient {
                 &binding_target,
                 &source_text,
                 now,
-                input,
+                // C `verify_confirm` (`sched.c:9712-9717`): план своего
+                // потока подозрения, подтверждённый здесь, выведен НЕ
+                // замером этой цели — вход привязки TRANSFER.
+                if transferred_own_plan {
+                    r2o_controller::discovery::R2O_D2K_INPUT_TRANSFER
+                } else {
+                    input
+                },
                 outcome.volume_fingerprint.as_ref(),
                 outcome.volume_box_id.as_deref(),
             )
@@ -44799,6 +44983,7 @@ mod tests {
             complete: true,
             application_verified: true,
             handshake_verified: false,
+            connection_close: false,
             doh_probe: false,
             dns_reply: false,
             elapsed: std::time::Duration::from_millis(30),
@@ -45861,6 +46046,248 @@ mod tests {
             ),
         ));
 
+        // 15. Несовпадение имени сертификата без ECH — диагностика, не отказ.
+        let t = target("name-mismatch.example.com", SHAPE_MODERN);
+        let mut fetch = https_full();
+        fetch.peer_name_ok = Some(false);
+        fetch.r2o_volume_observation.packet_budget =
+            r2o_controller::r2o_volume::R2oVolumePacketBudget::Passed;
+        scenarios.push(snapshot(
+            "name_ok_diagnostic_only",
+            &apply(&t, outcome(&t, plan_text()), Ok(fetch), true, 2, None, None),
+        ));
+
+        // 16-18. Гейт объёмной лестницы: неизмеримый бюджет прекращает
+        // подбор белого имени, CUT и закрытие соединения — нет.
+        let ladder = |budget, conn_close, partial_finishing| {
+            super::r2o_confirm_volume_ladder_gate(
+                &super::R2oConfirmVolumeLadder {
+                    volume_cut: true,
+                    rx_cut: false,
+                    ladder_candidate: true,
+                    conn_close,
+                    partial_finishing,
+                },
+                budget,
+            )
+        };
+        for (scenario, name, budget, conn_close, expect) in [
+            (
+                "ladder_pre_gate_unchecked",
+                "ladder.example.com",
+                super::R2oConfirmBudget::NotApplicable,
+                false,
+                Some(true),
+            ),
+            (
+                "ladder_pre_gate_cut",
+                "ladder-cut.example.com",
+                super::R2oConfirmBudget::Cut,
+                false,
+                Some(false),
+            ),
+            (
+                "ladder_pre_gate_conn_close",
+                "ladder-close.example.com",
+                super::R2oConfirmBudget::NotChecked,
+                true,
+                Some(true),
+            ),
+        ] {
+            assert_eq!(ladder(budget, conn_close, false), expect, "{scenario}");
+            let t = target(name, SHAPE_MODERN);
+            let mut rejected = outcome(&t, plan_text());
+            rejected.plan_text = None;
+            scenarios.push(snapshot(
+                scenario,
+                &apply(&t, rejected, Ok(https_full()), true, 2, None, None),
+            ));
+        }
+        // Частичный обход гейт не применяет (C `partial_finishing`).
+        assert_eq!(
+            ladder(super::R2oConfirmBudget::NotApplicable, false, true),
+            None
+        );
+
+        // 19. «Бюджет не проверялся» при открытом соединении — не обрыв.
+        assert_eq!(
+            ladder(super::R2oConfirmBudget::NotChecked, false, false),
+            None
+        );
+        let t = target("ladder-open.example.com", SHAPE_MODERN);
+        scenarios.push(snapshot(
+            "ladder_pre_gate_unproven",
+            &apply(
+                &t,
+                outcome(&t, plan_text()),
+                Ok(https_full()),
+                true,
+                2,
+                None,
+                None,
+            ),
+        ));
+
+        // 20. Бюджет пройден — подтверждение и отметка PASSED.
+        assert_eq!(ladder(super::R2oConfirmBudget::Passed, false, false), None);
+        let t = target("ladder-passed.example.com", SHAPE_MODERN);
+        let mut fetch = https_full();
+        fetch.r2o_volume_observation.packet_budget =
+            r2o_controller::r2o_volume::R2oVolumePacketBudget::Passed;
+        scenarios.push(snapshot(
+            "ladder_pre_gate_passed",
+            &apply(&t, outcome(&t, plan_text()), Ok(fetch), true, 2, None, None),
+        ));
+
+        // 21. `partial_finish`: объёмный блок ставит лучший частичный обход
+        // единственным планом с бюджетом «оборван».
+        let partial_text =
+            "d2k-plan 1 1\nid 11111111111111111111111111111111\nproto tcp tls\norder forward\n";
+        let t = target("partial.example.com", SHAPE_MODERN);
+        let _ = super::r2o_budget_partial_take(&t);
+        super::r2o_budget_cut_pending_set(
+            &t,
+            super::R2oBudgetCutPending {
+                plan_id: "11111111111111111111111111111111".into(),
+                plan_text: partial_text.into(),
+                box_id: "box-partial".into(),
+                budget_packets: 100,
+                volume_block: true,
+                search_owned: true,
+                own_first_two: false,
+                ver_status: 200,
+                ver_budget: super::R2O_D2K_CAT_BUDGET_CUT,
+            },
+        );
+        let mut partial_outcome = outcome(&t, partial_text);
+        partial_outcome.plan_text = None;
+        partial_outcome.volume_recovery = true;
+        scenarios.push(snapshot(
+            "partial_finish_budget_cut",
+            &apply(&t, partial_outcome, Ok(https_full()), true, 2, None, None),
+        ));
+
+        // 22. QUIC с ECH без повтора пачки клиента не подтверждается.
+        assert!(!super::r2o_quic_ech_confirm_allowed(true, false, true));
+        assert!(super::r2o_quic_ech_confirm_allowed(true, true, true));
+        assert!(super::r2o_quic_ech_confirm_allowed(false, false, false));
+        scenarios.push(snapshot("quic_ech_without_replay", &Catalog::default()));
+
+        // 23. Разрез CRYPTO клиенту с широким ClientHello не ставится.
+        super::r2o_quic_note_multi("split.example.com", 4);
+        let quic_split =
+            "r2o-plan 1 10\nid 00000000000000000000000000000000\nproto udp quic\nquicsplit 1\n";
+        assert!(super::r2o_quic_text_is_split(quic_split));
+        assert!(super::r2o_quic_split_unfit(
+            "split.example.com",
+            4,
+            false,
+            true,
+            1200,
+            false
+        ));
+        scenarios.push(snapshot("quic_split_unfit", &Catalog::default()));
+
+        // 24-27. Гейты диспетчера `T_VERIFY` до подтверждения: CF challenge
+        // (уровень и заголовок), HTTP 451, страница блокировки.
+        for (scenario, name, configure) in [
+            (
+                "cf_challenge_dispatcher",
+                "cf.example.com",
+                (|fetch: &mut FetchResult| {
+                    fetch.status = 403;
+                    fetch.cloudflare_challenge = true;
+                    fetch.complete = false;
+                    fetch.application_verified = false;
+                }) as fn(&mut FetchResult),
+            ),
+            (
+                "cf_header_dispatcher",
+                "cf-header.example.com",
+                |fetch: &mut FetchResult| {
+                    fetch.status = 403;
+                    fetch.cloudflare_challenge = true;
+                    fetch.complete = false;
+                    fetch.application_verified = false;
+                },
+            ),
+            (
+                "legal_denial_dispatcher",
+                "legal.example.com",
+                |fetch: &mut FetchResult| {
+                    fetch.status = 451;
+                    fetch.http_outcome = r2o_controller::fetch::R2oFetchHttpOutcome::LegalDenial;
+                    fetch.complete = false;
+                    fetch.application_verified = false;
+                },
+            ),
+            (
+                "blocked_page_dispatcher",
+                "blocked.example.com",
+                |fetch: &mut FetchResult| {
+                    fetch.status = 403;
+                    fetch.http_outcome = r2o_controller::fetch::R2oFetchHttpOutcome::Blocked;
+                    fetch.complete = false;
+                    fetch.application_verified = false;
+                },
+            ),
+        ] {
+            let t = target(name, SHAPE_MODERN);
+            let mut fetch = https_full();
+            configure(&mut fetch);
+            scenarios.push(snapshot(
+                scenario,
+                &apply(&t, outcome(&t, plan_text()), Ok(fetch), true, 2, None, None),
+            ));
+        }
+
+        // 28. `PLAN_FAILED`/`family_fast`: отказ записывается в семейство как
+        // неудача плана, а не коробки.
+        let t = target("plan-failed.example.com", SHAPE_MODERN);
+        let mut catalog = Catalog::default();
+        super::r2o_group_record_plan_failed(
+            &mut catalog,
+            &t,
+            "plan-failed",
+            SHAPE_MODERN,
+            6,
+            "",
+            "",
+            false,
+            2099,
+        )
+        .unwrap();
+        scenarios.push(snapshot("plan_failed_group", &catalog));
+
+        // 29. Снимок клиента пришёл, пока шло испытание: подтверждение
+        // запускает перемер (в C-стенде — T_QUEUED). Каталог тот же, что у
+        // обычного подтверждения: привязка не остаётся заготовкой.
+        let t = target("remeasure.example.com", SHAPE_MODERN);
+        let mut fetch = https_full();
+        fetch.r2o_volume_observation.packet_budget =
+            r2o_controller::r2o_volume::R2oVolumePacketBudget::Passed;
+        scenarios.push(snapshot(
+            "remeasure_after_confirm",
+            &apply(&t, outcome(&t, plan_text()), Ok(fetch), true, 2, None, None),
+        ));
+
+        // 30. План потока подозрения переподтверждён пройденным бюджетом:
+        // вход привязки — TRANSFER, подозрение снято.
+        let t = target("own-passed.example.com", SHAPE_MODERN);
+        let mut fetch = https_full();
+        fetch.r2o_volume_observation.packet_budget =
+            r2o_controller::r2o_volume::R2oVolumePacketBudget::Passed;
+        let mut transferred = outcome(&t, plan_text());
+        transferred.transferred_own_plan = true;
+        transferred.bound_plan_id = super::r2o_catalog_plan_id(plan_text());
+        // Вход приходит от классификатора как PROFILE (2): сам по себе он
+        // не знает, что план принадлежит потоку подозрения. Подтверждение
+        // обязано записать TRANSFER (3), иначе C-каталог разойдётся.
+        scenarios.push(snapshot(
+            "own_plan_budget_passed",
+            &apply(&t, transferred, Ok(fetch), true, 2, None, None),
+        ));
+
         if let Ok(path) = std::env::var("R2O_VERIFY_CONFIRM_PRODUCTION_DIFF_OUTPUT") {
             let output = serde_json::to_string(&Value::Array(scenarios)).unwrap();
             std::fs::write(path, format!("{output}\n")).unwrap();
@@ -46132,6 +46559,7 @@ mod tests {
             complete: true,
             application_verified: true,
             handshake_verified: false,
+            connection_close: false,
             doh_probe: false,
             dns_reply: false,
             elapsed: std::time::Duration::from_millis(30),
@@ -47712,13 +48140,23 @@ group_block_proven: false,
 
     #[cfg(unix)]
     #[test]
-    fn исходящая_fake_sni_лестница_требует_полного_бюджета_потока() {
+    fn исходящая_fake_sni_лестница_идёт_по_гейту_verify_confirm() {
         let mut response = r2o_test_fetch_result();
         response.status = 403;
         response.http_outcome = r2o_controller::fetch::R2oFetchHttpOutcome::Neutral;
+        // C `verify_confirm` (`sched.c:9593-9605`): «бюджет не проверялся» при
+        // незакрытом соединении — не обрыв, кандидат подтверждается. Отказ
+        // требует NOT_APPLICABLE/CUT либо закрытия соединения.
         let without_budget = Ok(response.clone());
         assert_eq!(
             super::r2o_discovery_volume_ladder_decision(&without_budget, true, true),
+            super::R2oFamilyRecoveryDecision::Verified
+        );
+
+        let mut closed = response.clone();
+        closed.connection_close = true;
+        assert_eq!(
+            super::r2o_discovery_volume_ladder_decision(&Ok(closed), true, true),
             super::R2oFamilyRecoveryDecision::Reclassify
         );
 
@@ -47737,6 +48175,167 @@ group_block_proven: false,
             super::r2o_discovery_volume_ladder_decision(&without_budget, true, false),
             super::R2oFamilyRecoveryDecision::Verified
         );
+        let mut not_applicable = without_budget.clone();
+        if let Ok(fetch) = not_applicable.as_mut() {
+            fetch.r2o_volume_observation.packet_budget =
+                r2o_controller::r2o_volume::R2oVolumePacketBudget::NotApplicable;
+        }
+        assert_eq!(
+            super::r2o_discovery_volume_ladder_decision(&not_applicable, true, true),
+            super::R2oFamilyRecoveryDecision::Reclassify
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn гейт_объёмной_лестницы_verify_confirm_повторяет_c() {
+        use super::{R2oConfirmBudget, R2oConfirmVolumeLadder, r2o_confirm_volume_ladder_gate};
+
+        let gate = |volume_cut, rx_cut, ladder, conn_close, partial, budget| {
+            r2o_confirm_volume_ladder_gate(
+                &R2oConfirmVolumeLadder {
+                    volume_cut,
+                    rx_cut,
+                    ladder_candidate: ladder,
+                    conn_close,
+                    partial_finishing: partial,
+                },
+                budget,
+            )
+        };
+        // Условие C: transport 6 (проверяется вызывающим), CUT, !rx_cut,
+        // ladder_candidate, !partial_finishing.
+        for budget in [
+            R2oConfirmBudget::NotChecked,
+            R2oConfirmBudget::Passed,
+            R2oConfirmBudget::Cut,
+            R2oConfirmBudget::NotApplicable,
+        ] {
+            assert_eq!(gate(false, false, true, false, false, budget), None);
+            assert_eq!(gate(true, true, true, false, false, budget), None);
+            assert_eq!(gate(true, false, false, false, false, budget), None);
+            assert_eq!(gate(true, false, true, false, true, budget), None);
+        }
+        assert_eq!(
+            gate(
+                true,
+                false,
+                true,
+                false,
+                false,
+                R2oConfirmBudget::NotApplicable
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            gate(true, false, true, false, false, R2oConfirmBudget::Cut),
+            Some(false)
+        );
+        assert_eq!(
+            gate(true, false, true, true, false, R2oConfirmBudget::NotChecked),
+            Some(true)
+        );
+        assert_eq!(
+            gate(
+                true,
+                false,
+                true,
+                false,
+                false,
+                R2oConfirmBudget::NotChecked
+            ),
+            None
+        );
+        assert_eq!(
+            gate(true, false, true, false, false, R2oConfirmBudget::Passed),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quic_ech_и_разрез_crypto_повторяют_гейты_verify_confirm() {
+        assert!(super::r2o_quic_text_is_split(
+            "r2o-plan 1 10\nproto udp quic\nquicsplit 1\n"
+        ));
+        assert!(!super::r2o_quic_text_is_split(
+            "r2o-plan 1 9\nproto udp quic\n"
+        ));
+        assert!(!super::r2o_quic_ech_confirm_allowed(true, false, true));
+        assert!(!super::r2o_quic_ech_confirm_allowed(true, true, false));
+        assert!(super::r2o_quic_ech_confirm_allowed(true, true, true));
+        assert!(super::r2o_quic_ech_confirm_allowed(false, false, false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_install_quic_candidate_отказывает_ech_без_повтора_и_широкому_клиенту() {
+        use super::R2oQuicConfirmProof;
+        let work = std::env::temp_dir().join(format!(
+            "r2o-quic-confirm-gates-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&work).unwrap();
+        let path = work.join("catalog.json");
+        let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut client = ControlClient {
+            socket,
+            send_maxlen: 0,
+            send_cap: Arc::new(AtomicUsize::new(0)),
+            pending_events: VecDeque::new(),
+            pending_applied_events: VecDeque::new(),
+            dropped_events: Default::default(),
+            http_search_started: Default::default(),
+            http_acknowledged_bindings: Default::default(),
+        };
+        let mut catalog = Catalog::default();
+        // ECH-снимок без повтора пачки клиента — ECH-гейт не пускает.
+        client
+            .r2o_install_quic_candidate(
+                "198.51.100.91:443".parse().unwrap(),
+                "media.example.net",
+                &r2o_test_quic_ech_snapshot(),
+                "/",
+                "r2o-plan 1 9\nid 00000000000000000000000000000000\nproto udp quic\nudplen 100\n",
+                "обычный план",
+                R2oQuicConfirmProof {
+                    replay_proof: false,
+                    handshake_level: true,
+                },
+                &mut catalog,
+                &path,
+                None,
+            )
+            .unwrap();
+        assert!(catalog.boxes.is_empty(), "ECH без повтора записал план");
+        // Разрез CRYPTO имени, чей ClientHello шире датаграммы, не ставится.
+        super::r2o_quic_note_multi("wide.example", 4);
+        client
+            .r2o_install_quic_candidate(
+                "198.51.100.92:443".parse().unwrap(),
+                "wide.example",
+                &r2o_test_quic_ech_snapshot(),
+                "/",
+                "r2o-plan 1 10\nid 00000000000000000000000000000000\nproto udp quic\nquicsplit 1\n",
+                "разрез CRYPTO",
+                R2oQuicConfirmProof {
+                    replay_proof: true,
+                    handshake_level: true,
+                },
+                &mut catalog,
+                &path,
+                None,
+            )
+            .unwrap();
+        assert!(
+            catalog.boxes.is_empty(),
+            "разрез широкому клиенту записал план"
+        );
+        std::fs::remove_dir_all(work).unwrap();
     }
 
     #[cfg(unix)]
@@ -48438,6 +49037,7 @@ group_block_proven: false,
             super::r2o_quic_discovery_cooldown(&Ok(Some((
                 "план".to_owned(),
                 "кандидат".to_owned(),
+                super::R2oQuicConfirmProof::default(),
             )))),
             std::time::Duration::from_secs(60 * 60)
         );
@@ -49525,7 +50125,14 @@ group_block_proven: false,
                 } else {
                     "устаревший"
                 };
-                Ok(Some((name.to_owned(), name.to_owned())))
+                Ok(Some((
+                    name.to_owned(),
+                    name.to_owned(),
+                    super::R2oQuicConfirmProof {
+                        replay_proof: true,
+                        handshake_level: true,
+                    },
+                )))
             }));
         let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
         let permit = gate
@@ -49622,7 +50229,14 @@ group_block_proven: false,
         };
         assert_eq!(
             outcome.result.unwrap(),
-            Some(("свежий".into(), "свежий".into()))
+            Some((
+                "свежий".into(),
+                "свежий".into(),
+                super::R2oQuicConfirmProof {
+                    replay_proof: true,
+                    handshake_level: true,
+                }
+            ))
         );
         assert_eq!(observed.lock().unwrap().len(), 2);
     }
@@ -50104,6 +50718,10 @@ group_block_proven: false,
                 "/static/app.css",
                 "r2o-plan 1 10\nid 00000000000000000000000000000000\nproto udp quic\nquicsplit 1\n",
                 "разрез ClientHello по CRYPTO",
+                super::R2oQuicConfirmProof {
+                    replay_proof: true,
+                    handshake_level: true,
+                },
                 &mut catalog,
                 &path,
                 None,

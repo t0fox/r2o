@@ -43,6 +43,18 @@ static const char *QUIC_TEXT =
     "id 00000000000000000000000000000000\n"
     "proto udp quic\n"
     "udplen 100\n";
+/* План разреза CRYPTO: C `quic_text_is_split` ищет ровно "\nquicsplit ". */
+static const char *QUIC_SPLIT_TEXT =
+    "r2o-plan 1 10\n"
+    "id 00000000000000000000000000000000\n"
+    "proto udp quic\n"
+    "quicsplit 1\n";
+/* Лучший частичный обход, который берёт `partial_finish`. */
+static const char *PARTIAL_TEXT =
+    "d2k-plan 1 1\n"
+    "id 11111111111111111111111111111111\n"
+    "proto tcp tls\n"
+    "order forward\n";
 
 #define CHECK(cond, what)                                                       \
     do {                                                                        \
@@ -296,6 +308,63 @@ static void run_confirm(const char *scenario, int expect_confirmed,
     dump_decision(scenario, confirmed);
 }
 
+/* Общая сверка исхода для ветвей, которые не подтверждают кандидата, но
+   закрывают отчёт (`task_fail` диспетчера). `expect_sync` = -1 — вывести из
+   `expect_confirmed`; `expect_ladder` = -1 — не сверять. */
+static void check_decision(const char *scenario, int expect_confirmed,
+                           const char *expect_report, const char *expect_path,
+                           int expect_state, int expect_sync,
+                           int expect_ladder) {
+    g_scenario = scenario;
+    int confirmed = cat.n_boxes > 0 && cat.boxes[0].n_binds > 0;
+    CHECK(confirmed == expect_confirmed, "решение не совпало");
+    CHECK((int)t->state == expect_state, "состояние задачи не совпало");
+    CHECK((s.confirms > 0) == expect_confirmed, "счётчик подтверждений не совпал");
+    if (expect_sync < 0) expect_sync = expect_confirmed;
+    CHECK((s.sync_pending > 0) == expect_sync,
+          "запрос синхронизации каталога не совпал");
+    if (expect_report) {
+        CHECK(report_seen && strcmp(observed.outcome, expect_report) == 0,
+              "итоговый отчёт поиска не совпал");
+    } else {
+        CHECK(!report_seen, "исход не должен был закрывать отчёт поиска");
+    }
+    if (expect_report && expect_path)
+        CHECK(strcmp(observed.path, expect_path) == 0, "путь отчёта поиска не совпал");
+    if (expect_confirmed) {
+        CHECK(t->box_id[0] != '\0', "владелец подтверждённого плана не записан");
+        CHECK(t->partial_valid == 0, "полный обход не сбросил частичный признак");
+    } else {
+        CHECK(t->box_id[0] == '\0', "отклонённый кандидат записал владельца плана");
+        CHECK(t->trial_installed == 0, "отклонённый кандидат оставил пробную установку");
+        CHECK(t->ver.fd == -1, "отклонённый кандидат оставил сокет зонда");
+    }
+    if (expect_ladder >= 0)
+        CHECK(t->ladder_unmeasurable == expect_ladder,
+              "признак неизмеримой лестницы не совпал");
+    dump_decision(scenario, confirmed);
+}
+
+/* Диспетчер `T_VERIFY` без рабочего потока: `res_ready=1`, `th_live=0`,
+   `join_worker` возвращает 0 — дальше идут настоящие гейты `d2k_sched_tick`. */
+static void run_tick(const char *scenario, int expect_confirmed,
+                     const char *expect_report, const char *expect_path,
+                     int expect_state, int expect_sync) {
+    memset(&observed, 0, sizeof observed);
+    report_seen = 0;
+    t->state = T_VERIFY;
+    t->th_live = 0;
+    t->res_ready = 1;
+    t->trial_installed = 0;
+    /* Гейт `T_PLANNING` того же тика (`sched.c:12518`) не должен запускать
+       установку следующего кандидата: сверяем исход гейтов `T_VERIFY`, а не
+       продолжение планировщика. */
+    t->rx_retry_after_ms = s.now_ms + 60000;
+    d2k_sched_tick(&s, s.now_ms);
+    check_decision(scenario, expect_confirmed, expect_report, expect_path,
+                   expect_state, expect_sync, -1);
+}
+
 int main(void) {
     printf("[");
     t = NULL;
@@ -313,7 +382,24 @@ int main(void) {
     snprintf(t->ver.budget_note, sizeof t->ver.budget_note,
              "50 пакетов с данными из нужных 50 за 3 запроса");
     snprintf(t->measure_path, sizeof t->measure_path, "/main.css");
+    {
+        /* Постусловие `yield_to_own_plan` (`sched.c:10018-10033`): чужой
+           `T_ASKING` без готового замера уступает место подтверждённому
+           плану из каталога. */
+        task *other = &s.tasks[1];
+        memset(other, 0, sizeof *other);
+        snprintf(other->name, sizeof other->name, "yield.example.com");
+        other->transport = 6;
+        other->family = 4;
+        other->state = T_ASKING;
+        other->th_live = 1;
+        other->res_ready = 0;
+        other->own_first = 0;
+    }
     run_confirm("https_full_applied_passed", 1, "probe-confirmed");
+    CHECK(s.tasks[1].yield_to_own_plan == 1,
+          "чужой T_ASKING не уступил подтверждённому плану");
+    CHECK(s.tasks[1].stop == 1, "уступка не остановила чужой замер");
 
     /* 2. Полный HTTPS + APPLIED, бюджет «не применимо» (заготовка, не снимок). */
     reset("https_full_applied_unchecked", "profile.example.com", 6, PLAN_TEXT);
@@ -477,6 +563,285 @@ int main(void) {
     https_ok(200);
     t->ver.budget = D2K_BUDGET_PASSED;
     run_confirm("unfit_here", 0, NULL);
+
+    /* 15. Несовпадение имени сертификата без ECH — диагностический признак,
+       а не отказ (`sched.c:9644-9649`): план подтверждается. */
+    reset("name_ok_diagnostic_only", "name-mismatch.example.com", 6, PLAN_TEXT);
+    snprintf(t->name, sizeof t->name, "name-mismatch.example.com");
+    set_ver_plan_id();
+    https_ok(200);
+    t->ver.name_ok = 0;
+    t->ver.budget = D2K_BUDGET_PASSED;
+    run_confirm("name_ok_diagnostic_only", 1, "probe-confirmed");
+
+    /* 16. Гейт объёмной лестницы (`sched.c:9593-9605`): обрыв исходящей
+       лестницы измерен, RX-обрыва нет, план — ступень лестницы, бюджет
+       «не применимо»; кандидат не подтверждается, лестница объявляется
+       неизмеримой, подбор белого имени прекращается. */
+    reset("ladder_pre_gate_unchecked", "ladder.example.com", 6, PLAN_TEXT);
+    snprintf(t->name, sizeof t->name, "ladder.example.com");
+    set_ver_plan_id();
+    https_ok(200);
+    t->vol.verdict = D2K_VOL_CUT;
+    t->vol.at_kb = 19;
+    t->vol.rx_cut = 0;
+    t->ver.budget = D2K_BUDGET_NOT_APPLICABLE;
+    snprintf(t->net_probe_name[0], sizeof t->net_probe_name[0], "white.example");
+    t->net_probing = 1;
+    t->rx_volume_candidate_pending = 1;
+    memset(&observed, 0, sizeof observed);
+    report_seen = 0;
+    verify_confirm(&s, t, s.now_ms);
+    check_decision("ladder_pre_gate_unchecked", 0, NULL, NULL, T_PLANNING, 0, 1);
+    CHECK(t->net_probing == 0, "неизмеримая лестница оставила подбор белого имени");
+    CHECK(t->rx_volume_candidate_pending == 0,
+          "неизмеримая лестница оставила кандидата объёмного обхода");
+
+    /* 17. Тот же гейт при бюджете «оборван»: кандидат отклоняется, но
+       лестница НЕ объявляется неизмеримой (C сбрасывает флаги только при
+       бюджете, отличном от CUT). */
+    reset("ladder_pre_gate_cut", "ladder-cut.example.com", 6, PLAN_TEXT);
+    snprintf(t->name, sizeof t->name, "ladder-cut.example.com");
+    set_ver_plan_id();
+    https_ok(200);
+    t->vol.verdict = D2K_VOL_CUT;
+    t->vol.at_kb = 19;
+    t->vol.rx_cut = 0;
+    t->ver.budget = D2K_BUDGET_CUT;
+    snprintf(t->net_probe_name[0], sizeof t->net_probe_name[0], "white.example");
+    t->net_probing = 1;
+    t->rx_volume_candidate_pending = 1;
+    memset(&observed, 0, sizeof observed);
+    report_seen = 0;
+    verify_confirm(&s, t, s.now_ms);
+    check_decision("ladder_pre_gate_cut", 0, NULL, NULL, T_PLANNING, 0, 0);
+    CHECK(t->net_probing == 1, "CUT ошибочно прекратил подбор белого имени");
+    CHECK(t->rx_volume_candidate_pending == 1,
+          "CUT ошибочно снял кандидата объёмного обхода");
+
+    /* 18. Бюджет не проверялся, соединение закрывается: обрыв не доказан,
+       но и бюджет не пройден — кандидат не подтверждается. */
+    reset("ladder_pre_gate_conn_close", "ladder-close.example.com", 6, PLAN_TEXT);
+    snprintf(t->name, sizeof t->name, "ladder-close.example.com");
+    set_ver_plan_id();
+    https_ok(200);
+    t->vol.verdict = D2K_VOL_CUT;
+    t->vol.at_kb = 19;
+    t->vol.rx_cut = 0;
+    t->ver.budget = D2K_BUDGET_NOT_CHECKED;
+    t->ver.conn_close = 1;
+    snprintf(t->net_probe_name[0], sizeof t->net_probe_name[0], "white.example");
+    t->net_probing = 1;
+    t->rx_volume_candidate_pending = 1;
+    memset(&observed, 0, sizeof observed);
+    report_seen = 0;
+    verify_confirm(&s, t, s.now_ms);
+    check_decision("ladder_pre_gate_conn_close", 0, NULL, NULL, T_PLANNING, 0, 1);
+    CHECK(t->net_probing == 0, "закрытие соединения оставило подбор белого имени");
+
+    /* 19. Бюджет не проверялся, соединение остаётся открытым: это не обрыв,
+       кандидат подтверждается без отметки бюджета. */
+    reset("ladder_pre_gate_unproven", "ladder-open.example.com", 6, PLAN_TEXT);
+    snprintf(t->name, sizeof t->name, "ladder-open.example.com");
+    set_ver_plan_id();
+    https_ok(200);
+    t->vol.verdict = D2K_VOL_CUT;
+    t->vol.at_kb = 19;
+    t->vol.rx_cut = 0;
+    t->ver.budget = D2K_BUDGET_NOT_CHECKED;
+    t->ver.conn_close = 0;
+    snprintf(t->net_probe_name[0], sizeof t->net_probe_name[0], "white.example");
+    t->rx_volume_candidate_pending = 1;
+    run_confirm("ladder_pre_gate_unproven", 1, "probe-confirmed");
+    CHECK(cat.boxes[0].binds[0].budget == 0,
+          "непроверенный бюджет записался отметкой");
+
+    /* 20. Тот же гейт при пройденном бюджете: подтверждение и отметка PASSED. */
+    reset("ladder_pre_gate_passed", "ladder-passed.example.com", 6, PLAN_TEXT);
+    snprintf(t->name, sizeof t->name, "ladder-passed.example.com");
+    set_ver_plan_id();
+    https_ok(200);
+    t->vol.verdict = D2K_VOL_CUT;
+    t->vol.at_kb = 19;
+    t->vol.rx_cut = 0;
+    t->ver.budget = D2K_BUDGET_PASSED;
+    t->ver.budget_packets = 50;
+    t->ver.budget_need = 50;
+    t->ver.budget_requests = 3;
+    snprintf(t->net_probe_name[0], sizeof t->net_probe_name[0], "white.example");
+    run_confirm("ladder_pre_gate_passed", 1, "probe-confirmed");
+    CHECK(cat.boxes[0].binds[0].budget == D2K_CAT_BUDGET_PASSED,
+          "пройденный бюджет не записался отметкой");
+
+    /* 21. `partial_finish` (`sched.c:9668-9689`): объёмный блок берёт лучший
+       частичный обход, ставит `partial_finishing=1` и подтверждает его через
+       общий `verify_confirm`. Гейт объёмной лестницы пропускается, бюджет
+       остаётся «оборван», отчёт — `probe-partial`. */
+    reset("partial_finish_budget_cut", "partial.example.com", 6, PLAN_TEXT);
+    snprintf(t->name, sizeof t->name, "partial.example.com");
+    snprintf(t->partial_text, sizeof t->partial_text, "%s", PARTIAL_TEXT);
+    snprintf(t->partial_box, sizeof t->partial_box, "box-partial");
+    t->partial_valid = 1;
+    t->partial_pk = 100;
+    t->partial_ver.level = D2K_VER_APPLICATION;
+    t->partial_ver.status = 200;
+    t->partial_ver.name_ok = 1;
+    t->partial_ver.body_complete = 1;
+    t->partial_ver.body_expected = 512;
+    t->partial_ver.body_bytes = 512;
+    t->partial_ver.budget = D2K_BUDGET_CUT;
+    t->partial_ver.budget_packets = 100;
+    t->partial_ver.budget_need = 250;
+    snprintf(t->partial_ver.budget_note, sizeof t->partial_ver.budget_note,
+             "поток режется после 100 пакетов из нужных 250");
+    t->vol.verdict = D2K_VOL_CUT;
+    t->vol.at_kb = 19;
+    /* Путь находки берётся из `rx_hashes` (`candidate_path`): план пришёл из
+       RX-лестницы, поэтому отчёт называет путь `ladder`. */
+    t->rx_hashes[0] = fnv1a(PARTIAL_TEXT);
+    t->n_rx_hashes = 1;
+    memset(&observed, 0, sizeof observed);
+    report_seen = 0;
+    CHECK(partial_finish(&s, t, s.now_ms) == 1,
+          "partial_finish не взял лучший частичный обход");
+    check_decision("partial_finish_budget_cut", 1, "probe-partial", "ladder",
+                   T_WATCHING, 1, -1);
+    CHECK(cat.boxes[0].binds[0].budget == D2K_CAT_BUDGET_CUT,
+          "частичный обход не помечен бюджетом «оборван»");
+    CHECK(strcmp(cat.boxes[0].plans[0].text, PARTIAL_TEXT) == 0,
+          "частичный обход не стал единственным планом");
+
+    /* 22. QUIC с ECH: нет ответа на повтор пачки клиента — подтверждения нет
+       (`sched.c:9621-9627`). */
+    reset("quic_ech_without_replay", "quic-ech.example.com", 17, QUIC_TEXT);
+    snprintf(t->name, sizeof t->name, "quic-ech.example.com");
+    t->quic_ech = 1;
+    t->ver.level = D2K_VER_APPLICATION;
+    t->ver.status = 200;
+    t->ver.body_complete = 1;
+    t->ver.replay_proof = 0;
+    t->ver.budget = D2K_BUDGET_PASSED;
+    run_confirm("quic_ech_without_replay", 0, NULL);
+
+    /* 23. Разрез CRYPTO, который клиент этой цели исполнить не может:
+       ClientHello шире датаграммы (`quic_split_unfit`, `sched.c:9650-9660`). */
+    reset("quic_split_unfit", "split.example.com", 17, QUIC_SPLIT_TEXT);
+    snprintf(t->name, sizeof t->name, "split.example.com");
+    t->ver.level = D2K_VER_APPLICATION;
+    t->ver.status = 200;
+    t->ver.body_complete = 1;
+    t->ver.budget = D2K_BUDGET_PASSED;
+    snprintf(s.quic_multi[0].name, sizeof s.quic_multi[0].name, "split.example.com");
+    s.quic_multi[0].family = 4;
+    run_confirm("quic_split_unfit", 0, NULL);
+
+    /* 24. Cloudflare challenge по уровню зонда: гейт диспетчера `T_VERIFY`
+       (`sched.c:12209-12237`) до `verify_confirm` не доходит — поиск
+       закрывается `failed`, каталог не трогается. */
+    reset("cf_challenge_dispatcher", "cf.example.com", 6, PLAN_TEXT);
+    snprintf(t->name, sizeof t->name, "cf.example.com");
+    t->ver.level = D2K_VER_CHALLENGE;
+    t->ver.status = 403;
+    t->ver.cloudflare_challenge = 1;
+    snprintf(t->ver.reason, sizeof t->ver.reason, "cf-mitigated: challenge");
+    run_tick("cf_challenge_dispatcher", 0, "failed", "property", T_RESTING, 1);
+
+    /* 25. Cloudflare challenge, распознанный по заголовку при полном
+       прикладном уровне: тот же гейт диспетчера. */
+    reset("cf_header_dispatcher", "cf-header.example.com", 6, PLAN_TEXT);
+    snprintf(t->name, sizeof t->name, "cf-header.example.com");
+    t->ver.level = D2K_VER_APPLICATION;
+    t->ver.status = 403;
+    t->ver.cloudflare_challenge = 1;
+    run_tick("cf_header_dispatcher", 0, "failed", "property", T_RESTING, 1);
+
+    /* 26. HTTP 451: юридический отказ, гейт диспетчера `D2K_VER_DENIED`. */
+    reset("legal_denial_dispatcher", "legal.example.com", 6, PLAN_TEXT);
+    snprintf(t->name, sizeof t->name, "legal.example.com");
+    t->ver.level = D2K_VER_DENIED;
+    t->ver.status = 451;
+    t->ver.http_outcome = D2K_HTTP_LEGAL_DENIAL;
+    run_tick("legal_denial_dispatcher", 0, "failed", "property", T_RESTING, 1);
+
+    /* 27. Явная страница блокировки: `wire_proof` диспетчера не признаёт
+       `D2K_VER_BLOCKPAGE` доказательством — следующий кандидат, без отчёта. */
+    reset("blocked_page_dispatcher", "blocked.example.com", 6, PLAN_TEXT);
+    snprintf(t->name, sizeof t->name, "blocked.example.com");
+    t->ver.level = D2K_VER_BLOCKPAGE;
+    t->ver.status = 403;
+    t->ver.http_outcome = D2K_HTTP_BLOCKED;
+    run_tick("blocked_page_dispatcher", 0, NULL, NULL, T_PLANNING, 0);
+
+    /* 28. `PLAN_FAILED`/`family_fast` (`sched.c:12506-12512`): применённый
+       поток зонда не дошёл до приложения по нашей ошибке чтения, и отказ
+       записывается в семейство как неудача ПЛАНА, а не коробки. */
+    reset("plan_failed_group", "plan-failed.example.com", 6, PLAN_TEXT);
+    snprintf(t->name, sizeof t->name, "plan-failed.example.com");
+    t->ver.level = D2K_VER_TRANSPORT;
+    t->ver.status = 0;
+    t->ver.local_ip4[0] = 198;
+    t->ver.local_ip4[1] = 51;
+    t->ver.local_ip4[2] = 100;
+    t->ver.local_ip4[3] = 9;
+    t->ver.local_port = 41000;
+    memset(&t->ver_early[0], 0, sizeof t->ver_early[0]);
+    memcpy(t->ver_early[0].a_ip, t->ver.local_ip4, 4);
+    t->ver_early[0].a_port = t->ver.local_port;
+    inet_pton(AF_INET, t->ip, t->ver_early[0].b_ip);
+    t->ver_early[0].b_port = t->port;
+    t->ver_early[0].transport = 6;
+    t->ver_early[0].family = 4;
+    t->ver_seen = 1;
+    t->family_fast = 1;
+    t->asked_shape = (uint8_t)D2K_SHAPE_MODERN;
+    run_tick("plan_failed_group", 0, NULL, NULL, T_PLANNING, 1);
+    CHECK(cat.groups && cat.groups->n_observations == 1,
+          "PLAN_FAILED не записал наблюдение семейства");
+    CHECK(cat.groups && cat.groups->observations[0].evidence == D2K_GROUP_PLAN_FAILED,
+          "наблюдение семейства записано не как PLAN_FAILED");
+
+    /* 29. Снимок клиента пришёл, пока шло испытание: подтверждение не оставляет
+       привязку заготовкой — хвост `verify_confirm` (`sched.c:10035-10042`)
+       запускает перемер снятыми байтами. В стенде `s.meas_limit=0`, поэтому
+       `launch_or_queue` ставит задачу в ограниченную очередь (T_QUEUED). */
+    reset("remeasure_after_confirm", "remeasure.example.com", 6, PLAN_TEXT);
+    snprintf(t->name, sizeof t->name, "remeasure.example.com");
+    set_ver_plan_id();
+    https_ok(200);
+    t->ver.budget = D2K_BUDGET_PASSED;
+    snprintf(s.tcp_shape_name[0], sizeof s.tcp_shape_name[0], "remeasure.example.com");
+    s.tcp_shape_len[0] = 16;
+    memset(s.tcp_shape[0], 0x16, s.tcp_shape_len[0]);
+    memset(&observed, 0, sizeof observed);
+    report_seen = 0;
+    verify_confirm(&s, t, s.now_ms);
+    check_decision("remeasure_after_confirm", 1, "probe-confirmed", "property",
+                   T_QUEUED, 1, -1);
+    CHECK(t->reasked == 1, "хвост подтверждения не заказал перемер снимком");
+    CHECK(t->trig_snapped == 1, "перемер не перешёл на байты снимка");
+    CHECK(t->trig_len == s.tcp_shape_len[0], "перемер взял не тот снимок");
+
+    /* 30. План потока подозрения переподтверждён ПРОЙДЕННЫМ бюджетом:
+       подозрение было ложным, вход привязки — TRANSFER, `own_first=3`. */
+    reset("own_plan_budget_passed", "own-passed.example.com", 6, PLAN_TEXT);
+    snprintf(t->name, sizeof t->name, "own-passed.example.com");
+    {
+        char plan_id[40];
+        uint8_t wire[D2K_PLAN_ID_LEN];
+        plan_ident(PLAN_TEXT, plan_id, sizeof plan_id, wire);
+        snprintf(t->bound_plan_id, sizeof t->bound_plan_id, "%s", plan_id);
+        memcpy(t->ver_plan_id, wire, sizeof t->ver_plan_id);
+    }
+    https_ok(200);
+    t->own_first = 2;
+    t->ver.budget = D2K_BUDGET_PASSED;
+    t->ver.budget_packets = 50;
+    t->ver.budget_need = 50;
+    t->ver.budget_requests = 2;
+    run_confirm("own_plan_budget_passed", 1, "probe-confirmed");
+    CHECK(t->own_first == 3, "переподтверждённый свой план не закрыл классификацию");
+    CHECK(cat.boxes[0].binds[0].input == D2K_INPUT_TRANSFER,
+          "вход переподтверждённого своего плана записан не как TRANSFER");
 
     printf("]\n");
     d2k_catalog_free(&cat);

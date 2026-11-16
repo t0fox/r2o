@@ -1450,14 +1450,18 @@ quicdeny/recheck, каталог/области/исключения, `stall_bud
   `test-telegram-domain-differential.sh` (16 имён). Остаются прочие
   ветви on_suspect (dead/cooldown/voice/binding).
 - **`verify_confirm` (9262–9653):** P* — production-fixture
-  `d2o_verify_confirm_production_differential.c` (14 сценариев, PASS)
+  `d2o_verify_confirm_production_differential.c` (**30 сценариев**, PASS)
   сверяет решение, привязку, `verified_by`/input/budget/probe_path/ech_origin,
   область и сетевое белое имя через `r2o_confirm_discovery_outcome`/
   `apply_discovery_outcome`/`add_confirmed_quic_address_binding`/
-  `r2o_update_network_whitelist`. Остаются volume-ladder pre-gate, budget CUT,
-  `partial_finish`, `PLAN_FAILED`, QUIC split-unfit, CF/Blocked/LegalDenial
-  (диспетчер `T_VERIFY`, не `verify_confirm`) и C-постусловия
-  `T_WATCHING`/yield/sync/report/remeasure.
+  `r2o_update_network_whitelist`. Закрыты также volume-ladder pre-gate,
+  budget CUT в `partial_finish`, QUIC split-unfit, QUIC ECH без повтора,
+  `PLAN_FAILED`-группа и гейты диспетчера CF/Blocked/LegalDenial (настоящий
+  `d2k_sched_tick`). Остаются C-постусловия task-ячейки
+  (`T_WATCHING`/`confirms`/`sync_pending`), `sync_pending`-проводка Rust,
+  remeasure-хвост у подтверждения и проталкивание адреса в постоянную
+  таблицу (`link_fd` закрыт). Статус P* с точным списком в
+  `function-parity-audit.md`.
 - **`worker_run_body` (2741–3253, 513 строк):** P — VOICE/VERIFY/CONTACT/
   addr-recheck/ECH/baseline/volume/classify и фиксация результата;
   ветви покрыты differentials, но не все комбинации ECH/volume/addr.
@@ -1620,23 +1624,23 @@ volume-recovery (`:14628`) и каталог.
 
 | C-гейт | строки | Rust | статус/пробел |
 |---|---:|---|---|
-| volume ladder budget | 9268–9285 | `r2o_discovery_volume_recovery` (`:14628`), `r2o_discovery_volume_ladder_decision` (`:3282`) | P: разные слои, полного differential нет |
+| volume ladder budget | 9268–9285 | `r2o_confirm_volume_ladder_gate` (`main.rs`), `r2o_discovery_volume_recovery`/`r2o_discovery_volume_ladder_decision` | **закрыто 2026-11-16:** гейт перенесён дословно (CUT, `!rx_cut`, ladder candidate, `budget` NOT_APPLICABLE/CUT/`!PASSED&&conn_close`, обход при `partial_finishing`), вызывается из объёмной лестницы; `FetchResult.connection_close` переносит `t->ver.conn_close`. Fixture: `ladder_pre_gate_unchecked`/`_cut`/`_conn_close`/`_unproven`/`_passed` PASS. |
 | bound plan без PASSED-бюджета | 9286–9298 | `apply_discovery_outcome_with_input_and_persistence` (`main.rs:28146-28160`) | **закрыто 2026-11-16:** гейт `transferred_own_plan && bound_plan_id==plan_id && budget_mark!=PASSED` возвращает `Ok(None)` без привязки; C/Rust fixture — сценарий `own_plan_budget_unchecked` PASS. |
-| QUIC ECH replay | 9299–9304 | `r2o_discovery_ech_replay_required` (`:15322`), `r2o_quic_data_proof_confirmed` | P: replay/APPLIED есть, уровня HANDSHAKE как отдельного условия нет |
-| ECH accepted/name_ok/application | 9305–9318 | `r2o_family_recovery_decision` (`:5321-5341`) | P: `ech_accepted`/`peer_name_ok`/`complete`/`application_verified`; C-ветка `ech_replay` выражена иначе |
-| name_ok=0 — только диагностика | 9330–9334 | не блокирует для не-ECH (`ech_accepted=None`) | эквивалентно |
-| QUIC split unfit | 9335–9345 | `split_applicable`/`valid_quic_plan` при генерации кандидатов | P |
+| QUIC ECH replay | 9299–9304 | `r2o_quic_ech_confirm_allowed` + `r2o_install_quic_candidate`, `r2o_quic_data_proof_confirmed` | **закрыто 2026-11-16:** QUIC-план с ECH ставится только с `replay_proof && handshake_level` (повтор Initial клиента + принятое рукопожатие); fixture `quic_ech_without_replay` PASS, unit — `quic_ech_и_разрез_crypto_повторяют_гейты_verify_confirm`, install-гейт — `r2o_install_quic_candidate_отказывает_ech_без_повтора...`. |
+| ECH accepted/name_ok/application | 9305–9318 | `r2o_family_recovery_decision` | **закрыто 2026-11-16:** fixture `ech_accepted_application`, `ech_negative_outer_name`, `ech_negative_incomplete`, `ech_replay_handshake_proof`, `ech_replay_without_proof` PASS. |
+| name_ok=0 — только диагностика | 9330–9334 | не блокирует для не-ECH (`ech_accepted=None`) | **закрыто 2026-11-16:** fixture `name_ok_diagnostic_only` PASS — план подтверждается, пишется только строка. |
+| QUIC split unfit | 9335–9345 | `r2o_quic_text_is_split` + `r2o_quic_split_unfit` в `r2o_install_quic_candidate` | **закрыто 2026-11-16:** гейт стоит до записи каталога; fixture `quic_split_unfit` PASS (ClientHello шире датаграммы), install-гейт покрыт unit-тестом. |
 | `unfit_here` по plan_id | 9346–9365 | `r2o_confirm_discovery_outcome_checked` + `R2oDiscoverySearches::note_unfit_plan/plan_unfit` (`main.rs:11668/11680`) | **закрыто 2026-11-16:** pre-confirm гейт по wire plan_id (`r2o_plan_wire_id`); C/Rust fixture — `unfit_here` PASS. |
-| bind_confirmed: shape/input/verified_by/probe_path/tcp_profile | 9366–9427 | `add_measured_binding_with_fingerprint_in_box`, `add_confirmed_quic_address_binding`, `r2o_store_confirmed_verified_by` (`main.rs:4627`) | **2026-11-16:** `input`/`tcp_profile`/`shape` пишутся как в C; `verified_by` теперь переносится из `t->ver.replay_proof`/`handshake_proof` (PROBE/5/6); fixture сверяет PROBE, PROBE_HANDSHAKE, REPLAY_HANDSHAKE. `probe_path` для name-binding пишется. |
+| bind_confirmed: shape/input/verified_by/probe_path/tcp_profile | 9366–9427 | `add_measured_binding_with_fingerprint_in_box`, `add_confirmed_quic_address_binding`, `r2o_store_confirmed_verified_by` (`main.rs:4627`) | **2026-11-16:** `input`/`tcp_profile`/`shape` пишутся как в C; `verified_by` теперь переносится из `t->ver.replay_proof`/`handshake_proof` (PROBE/5/6); fixture сверяет PROBE, PROBE_HANDSHAKE, REPLAY_HANDSHAKE. `probe_path` для name-binding пишется. **Исправлено 2026-11-16:** вход `TRANSFER` (3) для переподтверждённого своего плана — `add_measured_binding...` принимает 3, `apply_discovery_outcome` ставит его при `transferred_own_plan` (fixture `own_plan_budget_passed`, C `input=3`). |
 | group_record BLOCKED_CONFIRMED | 9431–9432 | `r2o_group_record_confirmed` (`main.rs:4745`), вызов из `apply_discovery_outcome` | **закрыто 2026-11-16:** fixture `https_full_group_proven` PASS — observation name/plan/key/path/evidence/at совпала с C. |
 | budget mark PASSED/UNCHECKED/CUT | 9449–9474 | `Binding.budget` (`catalog.rs:195`), merge (`:931`), константы `R2O_D2K_CAT_BUDGET_*` (`main.rs:2440-2442`) | **закрыто 2026-11-14:** production-путь `r2o_store_confirmed_budget` выставляет PASSED/UNCHECKED/CUT и сбрасывает при смене плана; differential `test-verify-confirm-differential.sh` PASS. |
 | measure_path | 9475–9488 | `r2o_store_confirmed_probe_path` (`main.rs:4514`), вызов из `apply_discovery_outcome` | **закрыто 2026-11-16:** fixture `https_full_applied_passed`/`group_proven` PASS; путь пишется в привязку плана. |
-| by_addr permanent plan | 9489–9506 | `r2o_install_quic_candidate`/`add_confirmed_quic_address_binding` | **2026-11-16:** каталоговая часть сверена fixture `quic_addr_replay` PASS (kind=addr, target=ip, transport 17, shape QUIC, verified_by 6, input 1, budget UNCHECKED); проталкивание в постоянную таблицу (`d2k_link_set_addr_family`) не проверялось — fixture закрывает `link_fd`. |
-| net whitelist tx_only/searched | 9514–9536 | `r2o_update_network_whitelist` (`main.rs:2724`) | **2026-11-16:** функция сверена fixture `net_whitelist_rx`/`net_whitelist_tx` PASS (name/tx_only/searched/confirmed_at); проводка обновления из `apply_discovery_outcome` не добавлена — обновление ставится объёмной лестницей. |
-| T_WATCHING | 9621 | live-группы/`live.rs`; фазы «смотрим живой трафик» нет | P |
-| yield других T_ASKING | 9622–9636 | `yield_to_own_plan` в Rust не найден | **подтверждённый пробел:** grep `yield_to_own_plan`/`yield.*own` по `crates/` пуст; C прерывает чужие `T_ASKING` при появлении подтверждённого плана (`ot->stop=1`). |
-| sync_pending | 9643 | очередь синхронизации каталога | P |
-| remeasure snapshot после trial | 9648–9652 | `r2o_discovery_client_shape_trial`/`r2o_capture_client_shape` | P |
+| by_addr permanent plan | 9489–9506 | `r2o_install_quic_candidate`/`add_confirmed_quic_address_binding` | **2026-11-16:** каталоговая часть сверена fixture `quic_addr_replay` PASS (kind=addr, target=ip, transport 17, shape QUIC, verified_by 6, input 1, budget UNCHECKED); проталкивание в постоянную таблицу (`d2k_link_set_addr_family`) в fixture не проверялось — `link_fd` закрыт. Отдельный тест `r2o_quic_ech_подтверждение_сохраняет_адресную_привязку` проверяет SET_ADDR-кадр Rust, но не байты C. **Остаток P\*.** |
+| net whitelist tx_only/searched | 9514–9536 | `r2o_update_network_whitelist` (`main.rs:2726`) | **2026-11-16:** функция сверена fixture `net_whitelist_rx`/`net_whitelist_tx` PASS (name/tx_only/searched/confirmed_at); `partial_finish` с `net_probing=0` не пишет имя (fixture `partial_finish_budget_cut` PASS). |
+| T_WATCHING | 9621 | `record_confirmation`/live-группы; отдельной task-фазы нет | **P\*:** C-fixture проверяет `T_WATCHING` на каждом подтверждении (кроме `remeasure_after_confirm` → `T_QUEUED`), но у Rust нет task-ячейки, поэтому в JSON-differential это не входит. |
+| yield других T_ASKING | 9622–9636 | `R2oDiscoveryWorker::r2o_yield_asking_to_own_plan` (`main.rs`), вызов из main-loop | **закрыто 2026-11-16:** production-функция останавливает `active_cancels` задач в фазе «распознаём поведение» при появлении своего плана; unit-тест `...yield_asking...`; C-fixture сценарий `https_full_applied_passed` проверяет `other->yield_to_own_plan=1`/`stop=1`. |
+| sync_pending | 9643 | `catalog_sync_dirty`/`record_confirmation` в main-loop | **P\*:** C-fixture проверяет `s.sync_pending` на подтверждении и на `task_fail`; Rust ставит синхронизацию каталога из main-loop (`catalog_changed`), отдельного differential нет. |
+| remeasure snapshot после trial | 9648–9652 | очередь снимков `queue_client_snapshot*`, `reset_for_remeasure` | **частично 2026-11-16:** C-fixture `remeasure_after_confirm` проверяет хвост (`reasked=1`, `trig_snapped=1`, `T_QUEUED`); Rust-перемер живёт в очереди снимков (`...superseded...` unit-тест), привязка к подтверждению не сверена — P\*. |
 
 **Итог (до production fixture):** `bound plan`, `unfit_here`, `budget mark`
 и `yield` не имели прямого аналога; остальное — P из-за разного слоя или
@@ -1650,12 +1654,39 @@ volume-recovery (`:14628`) и каталог.
 budget PASSED/UNCHECKED, `group_record(BLOCKED_CONFIRMED)`, `measure_path`,
 `verified_by` 1/5/6, ECH accepted/negative outer_name/!complete, ECH replay
 с/без ServerHello, ALPN handshake, QUIC addr replay, net-whitelist RX/TX.
-Остаются: volume-ladder pre-gate, budget CUT (отдельный
-`budget_cut_reject`), `partial_finish`, `PLAN_FAILED`, QUIC split-unfit,
-CF/Blocked/LegalDenial (гейты `T_VERIFY` до `verify_confirm`), C-постусловия
-`T_WATCHING`/yield/`sync_pending`/`search_report`/`remeasure_snapped`
-(проверены в C-fixture, но Rust task-slot не моделирует) и проталкивание
-адреса в постоянную таблицу. Статус **P***.
+
+**2026-11-16 (расширение до 30 PASS):** fixture расширена реальными ветвями
+`verify_confirm` и диспетчера `T_VERIFY`: `name_ok_diagnostic_only`;
+volume-ladder pre-gate (`ladder_pre_gate_unchecked`/`_cut`/`_conn_close`/
+`_unproven`/`_passed`); `partial_finish` с `partial_finishing=1` и бюджетом
+CUT (`partial_finish_budget_cut`, отчёт `probe-partial`, путь `ladder`);
+QUIC ECH без повтора (`quic_ech_without_replay`); QUIC split-unfit
+(`quic_split_unfit`); гейты диспетчера до `verify_confirm` через настоящий
+`d2k_sched_tick` — CF challenge по уровню и по заголовку, HTTP 451, страница
+блокировки; `PLAN_FAILED`/`family_fast` (`plan_failed_group`, C-диспетчер +
+production `r2o_group_record_plan_failed`); хвост `remeasure_snapped`
+(`remeasure_after_confirm`). Production Rust: добавлен
+`r2o_confirm_volume_ladder_gate` + `R2oConfirmBudget`/`R2oConfirmVolumeLadder`,
+`r2o_quic_text_is_split`/`r2o_quic_ech_confirm_allowed` и гейты в
+`r2o_install_quic_candidate`; `FetchResult.connection_close` переносит
+C `t->ver.conn_close`; `r2o_discovery_volume_ladder_decision` больше не требует
+пройденного бюджета слепо — решает C-гейт. `cargo test -p r2o-controller`:
+551 lib + 410 bin PASS; `cargo check --workspace --all-targets`, `cargo fmt
+--check` PASS; защищённые differentials on_suspect 42, install_next 9,
+budget volume/partial/cut-reject, ECH 15, quic plan PASS.
+
+**Остаток P\* (точный список):** (1) проталкивание адресного плана в
+постоянную таблицу (`d2k_link_set_addr_family`, `sched.c:9797-9810`) —
+fixture закрывает `link_fd`; Rust SET_ADDR-кадр проверен отдельным тестом, но
+байты C/Rust не сверены; (2) task-ячейка C (`T_WATCHING`, `confirms`,
+`sync_pending`) — проверяется в C-fixture, но у Rust нет task-slot, в
+JSON-differential не входит; (3) `sync_pending`-проводка Rust (main-loop
+`catalog_changed` vs C `s->sync_pending` в самой `verify_confirm`) без
+отдельного differential; (4) `remeasure_snapped`, привязанный именно к
+подтверждению, — хвост проверен в C, Rust-перемер живёт в очереди снимков;
+(5) `PLAN_FAILED`-группа сверена, но C-триггер `family_fast` в Rust
+scheduler-цикле отсутствует как поле (production-путь не заявляется).
+Статус **P\***, не E*.
 
 ## Углублённая сверка sched.c: verdict_to_plans
 
