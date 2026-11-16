@@ -49418,6 +49418,36 @@ group_block_proven: false,
 
     #[cfg(unix)]
     #[test]
+    fn http_search_portal_state_matches_c() {
+        use r2o_controller::response::HttpsProbeState;
+
+        // C-оракул — production `http_search_portal` (d2kc.c); C-стенд
+        // подменяет только приёмник `d2k_httpsearch_portal` и считает
+        // факт вызова. Rust-действие Queue означает тот же вызов.
+        let Some(path) = std::env::var_os("R2O_HTTP_PORTAL_DIFF_OUTPUT") else {
+            return;
+        };
+        let cases: [(&str, Option<HttpsProbeState>, bool); 7] = [
+            ("served", Some(HttpsProbeState::Served), false),
+            ("tls-blocked", Some(HttpsProbeState::TlsBlocked), false),
+            ("closed", Some(HttpsProbeState::Closed), false),
+            ("other-name", Some(HttpsProbeState::OtherName), false),
+            ("unconfirmed", Some(HttpsProbeState::Unconfirmed), false),
+            ("unknown", None, false),
+            ("probing", None, true),
+        ];
+        let mut output = String::new();
+        for (name, state, pending) in cases {
+            let action = super::r2o_http_search_https_action(3, false, state, pending);
+            let called = matches!(action, super::HttpSearchHttpsAction::Queue);
+            output.push_str(&format!("{name}={}\n", u8::from(called)));
+        }
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn http_candidate_retries_one_cut_after_a_complete_server_trial() {
         use r2o_controller::http_search::Answer;
 

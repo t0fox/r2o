@@ -266,7 +266,7 @@
 | `save_atomic` | 122-125 | 4 | атомарное сохранение каталога | `catalog::Catalog::save_atomic` | **E** | C-обёртка `d2k_catalog_save_atomic`; Rust `Catalog::save_atomic` пишет temp+fsync+rename. `scripts/r2o-catalog-persist-differential.sh` + unit. |
 | `self_mem` | 136-148 | 13 | VmRSS/VmHWM/VmData/Threads из `/proc/self/status` | `diagnostics.rs` `process_memory`/`proc_field` | **E*** | C читает поля `/proc/self/status`. Rust `process_memory`/`proc_field` разбирает те же VmRSS/VmHWM/VmData/Threads для процессов; тесты `proc_field`, `process_memory` (RSS/HWM/Threads/границы). **Ограничение:** Rust собирает список процессов диагностики, а не только self; поля и парсер те же. |
 | `sched_say` | 150-157 | 8 | журнал планировщика с локальным временем | `main.rs` log callback | **P*** | C `localtime_r` + `printf("%02d:%02d:%02d %s\n")` + `fflush`. Rust пишет через свой logger с иным форматом; отдельной функции нет. |
-| `http_search_portal` | 168-174 | 7 | класс 3 (портал) → `d2k_httpsearch_portal` | `main.rs:4729-4750 r2o_http_search_https_action` | **P** | **Ветви сверены:** C `!g_hs \|\| !family \|\| state UNKNOWN/PROBING \|\| d2k_https_upgrade(st)` → return; иначе `d2k_httpsearch_portal(host,family,addr,now)`. Rust классифицирует `Served/TlsBlocked` → Suppress, иное известное → Queue, неизвестное с pending → Wait, иначе Suppress; live-bound failure отдельно. Набор состояний тот же, pending/unknown различаются. |
+| `http_search_portal` | 168-174 | 7 | класс 3 (портал) → `d2k_httpsearch_portal` | `main.rs:4729-4750 r2o_http_search_https_action` | **E*** | **2026-11-16:** C/Rust differential `scripts/r2o-http-search-portal-differential.sh` PASS **7 состояний**: C-оракул — production `http_search_portal` из d2kc.c, подменён только приёмник `d2k_httpsearch_portal` (счётчик вызовов). `served`/`tls-blocked` → 0, `closed`/`other-name`/`unconfirmed` → 1, `unknown`/`probing` → 0; Rust Queue/Suppress/Wait даёт те же решения. **Ограничение:** гейты `family=0` и `g_hs=NULL` остаются на стороне вызывающего и в Rust-helper не входят; response_code/live-bound покрыты `http_search_https_caller_gate_matches_d2o_states`. |
 | `hs_open_port` | 176-208 | 33 | socket family, `SO_MARK` только при `g_probe_mark`, bind wildcard, getsockname, big-endian порт | `main.rs` `r2o_props_bind_socket`, `BoundTcpProbe::open` | **E*** | C: socket family 4/6, SO_MARK только при ненулевой метке, wildcard bind, getsockname. Rust production `BoundTcpProbe::open` использует общий `r2o_props_bind_socket` (IPv6 V6ONLY) и ставит метку `mark.unwrap_or(0x2d)`; тесты `props_bind_wrappers_match_c_families_and_socket_types`, C/Rust differential `scripts/test-props-bind-differential.sh` (5 кейсов). **Ограничение:** Rust добавляет `SOCK_CLOEXEC`/`O_NONBLOCK`. |
 | `hs_close_port` | 210-210 | 1 | закрыть порт поиска | `OwnedFd`/`Drop` (`BoundTcpProbe`) | E | C `if (fd>=0) close(fd)`. Rust `BoundTcpProbe` владеет `OwnedFd`, закрытие в `Drop`; тест `hs_close_port_drops_fd_like_c` проверяет `fcntl(F_GETFD) == -1` после drop. |
 | `hs_hex` | 212-219 | 8 | `d2k_plan_text_to_hex` в буфер 8192, ошибка в stderr | `compile_text` + `r2o_plan_records_for_wire` | **E*** | C переводит текст плана в hex (8192) и печатает ошибку. Rust production HTTP-search компилирует `candidate.plan_text` через `compile_text`, проверяет runtime и передаёт бинарные `r2o_plan_records_for_wire` в SET_NAME_PROBE; plan_text покрыт differential/тестами. **Ограничение:** Rust не формирует hex-строку и не печатает `d2kc:`-префикс; ошибки возвращаются наверх. |
@@ -1330,9 +1330,10 @@ memory_bytes, load с проверкой хвоста, все writer'ы, `d2k_ca
   Threads); Rust `diagnostics::process_memory` читает те же поля, но набор
   точек и формат различаются, C/Rust differential нет — P. `sched_say`/`hs_say`
   — P* (лог-колбэки).
-- **HTTP-поиск:** `http_search_portal`/`http_portal` ↔
-  `r2o_http_search_https_action` + `encode_set_https`; C различает
-  rc 0/1/2 (портал/лог/SET_HTTPS), Rust — `Queue/Suppress/Wait`.
+- **HTTP-поиск:** `http_search_portal` ↔ `r2o_http_search_https_action`
+  (E*, 7 состояний C/Rust differential); `http_portal` (E*) ↔
+  `encode_set_https`; C различает rc 0/1/2 (портал/лог/SET_HTTPS),
+  Rust — `Queue/Suppress/Wait`.
   `hs_open_port` ↔ `BoundTcpProbe::open`: C ставит `SO_MARK` только
   при `g_probe_mark!=0`, Rust — `unwrap_or(0x2d)` и nonblock+CLOEXEC.
   `hs_set_probe`/`hs_del_probe`/`hs_set_plan` кодируют те же кадры;
@@ -1378,7 +1379,7 @@ memory_bytes, load с проверкой хвоста, все writer'ы, `d2k_ca
 | `save_atomic` | 122–125 | `save_atomic` (`catalog.rs`) | **E** | `r2o-catalog-persist-differential.sh`: tmp+fsync+rename, включая конкурентное обновление. |
 | `self_mem` | 136–148 | `diagnostics::process_memory` | **P** | C читает VmRSS/VmHWM/VmData/Threads из `/proc/self/status`; Rust читает те же поля, но набор точек/формат иные. C/Rust differential нет. |
 | `sched_say` | 150–157 | лог-колбэк `main.rs`/`Recorder` | **P*** | C печатает локальное время и `flush`; Rust пишет через журнал/`eprintln`. |
-| `http_search_portal` | 168–174 | `r2o_http_search_https_action` | **P** | C отбирает класс 3 (не UNKNOWN/PROBING/upgrade) и зовёт `d2k_httpsearch_portal`; Rust действие Queue/Suppress/Wait. |
+| `http_search_portal` | 168–174 | `r2o_http_search_https_action` | **E*** | `r2o-http-search-portal-differential.sh`: 7 состояний совпали с production C; ограничение — `family=0`/`g_hs=NULL` гейты caller-side. |
 | `hs_open_port` | 176–208 | `BoundTcpProbe::open` | **P** | C ставит `SO_MARK` только при `g_probe_mark!=0`, bind/getsockname в блокирующем сокете; Rust `unwrap_or(0x2d)`, nonblock+CLOEXEC. |
 | `hs_close_port` | 210–210 | `Drop`/`close` | **P*** | C `close(fd)`; Rust владеет `OwnedFd`. |
 | `hs_hex` | 212–219 | `compile_text`/hex | **P** | C переводит текст плана в hex через `d2k_plan_text_to_hex`; Rust передаёт TLV-байты. Для валидных планов тот же план, стадия/формат различаются. |
