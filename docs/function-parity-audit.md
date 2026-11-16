@@ -95,13 +95,13 @@ production-путь не ставится. Формулировки «теста
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 363 | 185 | 0 | 0 |
-| core-state | 692 | 505 | 187 | 0 | 0 |
+| core-state | 692 | 508 | 184 | 0 | 0 |
 | datapath-core | 400 | 394 | 6 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1592** | **390** | **0** | **0** |
+| **Итого** | **1982** | **1595** | **387** | **0** | **0** |
 
-Это не оценка паритета: 390 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 387 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -120,7 +120,7 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1592 / P 390**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1595 / P 387**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
@@ -192,7 +192,7 @@ P означает неполное доказательство ветвей, N
 - core-state — CLI-флаги/вывод, PSL/catalog-парсер, crypto HKDF-границы,
   voice-blob, volume resource-retry.
 - `?` (0): не осталось; все строки реестра разобраны и имеют E/P/N.
-- Поведенческая группировка 390 P (27 контрактов, 0 без контракта):
+- Поведенческая группировка 387 P (27 контрактов, 0 без контракта):
   `docs/behavior-contracts/inventory.md` и
   `docs/behavior-contracts/p-contract-map.tsv`. Это не меняет статусы
   реестра и не является заявлением паритета.
@@ -385,11 +385,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 363 | 185 | 0 | 0 |
-| core-state | 692 | 505 | 187 | 0 | 0 |
+| core-state | 692 | 508 | 184 | 0 | 0 |
 | datapath-core | 400 | 394 | 6 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1592** | **390** | **0** | **0** |
+| **Итого** | **1982** | **1595** | **387** | **0** | **0** |
 
 
 ---
@@ -2630,9 +2630,9 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `json_time` | 5634-5645 | 12 | unix-время → RFC3339, `<=0` → `0001-01-01T00:00:00Z` | `main.rs` `r2o_json_time` | E | C: `unix_s<=0` → нулевое время Go; иначе `floor_div`/`civil_from_days` + `%Y-%m-%dT%H:%M:%SZ`. Rust `r2o_json_time` использует `r2o_floor_div`/`r2o_civil_from_days`; используется `r2o_live_timestamp`; тест `json_time_and_string_escaping_match_c` (0/-1, epoch+1, 1700000000). |
 | `level_name` | 5650-5659 | 10 | уровень доказательства 1..5 словами, default «не измерено» | `main.rs` level text | **P*** | C пять строк: транспорт/сервер ответил/обмен/прикладной объём/подтверждён; default. Rust тексты уровней есть, дословное совпадение не сверялось. |
 | `signal_human` | 5663-5680 | 18 | примета словами: rst/volume/rx-volume/rx-volume-wire/silent/repeat, иначе kind | `live.rs:914 signal_human` | **E*** | **2026-11-17:** C/Rust differential `scripts/r2o-signal-human-differential.sh` PASS **9 кейсов**: C-оракул — production `signal_human` из sched.c, Rust — production `live::signal_human`. Совпали rst (TTL/delta/ToS/ipid), volume/rx-volume/rx-volume-wire, silent, repeat, неизвестный kind и крайние `i32::MIN`/`i32::MAX`, TTL 0/255, ipid 65535, volume -1. |
-| `task_phase` | 5685-5705 | 21 | фаза задачи словами по T_* | `main.rs` phase text | **P*** | C `T_QUEUED/T_SHAPE_WAIT/T_ASKING/T_PROPS_*/T_PLANNING/T_TRIAL_SETTLE/T_VERIFY*/T_WATCHING/T_RESTING/T_VOICE_*` → строки; T_WATCHING «подтверждено, смотрим живой трафик». Rust-строки фаз не сопоставлены дословно, T_WATCHING-фазы нет. |
-| `live_binding_for` | 5707-5721 | 15 | активная name-привязка: enabled, !recheck, transport(default 6), family(default 4), target | `main.rs` live binding | **P*** | C перебирает boxes/binds: `enabled && !recheck_since && (transport?:6)==transport && (family?:4)==family && target==name`. Rust ищет активную привязку для live-снимка, отдельной функции нет. |
-| `live_autopick_status` | 5723–5807 | 85 | причина autopick: нет событий/подозрений/имени, local error, cooldown, T_QUEUED/WATCHING/RESTING/VOICE, иначе phase + binding | `main.rs` r2o_live_status/autopick, `live.rs` | **P** | **Совпадает:** основные причины и cooldown_seconds. **Отличия:** C-состояния T_* и Rust-фазы/очередь различны; panel live tests, C/Rust diff нет. |
+| `task_phase` | 5685-5705 | 21 | фаза задачи словами по T_* | `main.rs` phase text, `live.rs` | **E*** | **2026-11-17:** `scripts/test-live-snapshot-full-differential.sh` PASS: полный `live.json` C `d2k_sched_write_live` против Rust в 12 состояниях, включая tasks (T_QUEUED/T_SHAPE_WAIT/T_ASKING/T_PROPS_*/T_PLANNING/T_TRIAL_SETTLE/T_VERIFY/T_VERIFY_WAIT/T_VOICE*/T_DNS_HEALTH), watch (T_WATCHING planned NO/YES) и rest (T_RESTING). Строки фаз совпали. **Ограничение:** фикстуры перечисляют 12 состояний, а не все комбинации T_*. |
+| `live_binding_for` | 5707-5721 | 15 | активная name-привязка: enabled, !recheck, transport(default 6), family(default 4), target | `main.rs` live binding, `live.rs` snapshot | **E*** | **2026-11-17:** `test-live-snapshot-full-differential.sh` PASS: `live.json` в состояниях rich/bindings/tasks содержит те же активные name-привязки (target, transport, family, enabled/!recheck), что C `d2k_sched_write_live`. **Ограничение:** отдельной функции в Rust нет — выборка встроена в snapshot; проверены фикстурные наборы. |
+| `live_autopick_status` | 5723–5807 | 85 | причина autopick: нет событий/подозрений/имени, local error, cooldown, T_QUEUED/WATCHING/RESTING/VOICE, иначе phase + binding | `main.rs` r2o_live_status/autopick, `live.rs` | **E*** | **2026-11-17:** `test-live-snapshot-full-differential.sh` PASS: полный `live.json` в 12 состояниях, включая empty/rich/tasks/dns/watch/rest; поля `autopick.reason`, `target`, `plan_id`, `datapath_events`, `suspect_events`, `transport`, `family`, `cooldown_seconds_left` совпали с C. **Ограничение:** покрыты фикстурные состояния, не все возможные комбинации очереди/фаз. |
 | `d2k_sched_diagnostics` | 5811-5813 | 3 | подключить observer диагностики | `diagnostics.rs Recorder` | **P*** | C `void d2k_sched_diagnostics(d2k_sched *s,d2k_diag_observer fn,void *ctx){if(s){s->diagnostic=fn;s->diagnostic_ctx=ctx;}}`. Rust рекордер подключается в controller-цикле; отдельного сеттера API нет. |
 | `d2k_sched_limit_diagnostics` | 5814-5816 | 3 | подключить observer смены лимита | `diagnostics.rs` recorder | **P*** | C `if(s){s->limit_diagnostic=fn;s->limit_diagnostic_ctx=ctx;}`. Отдельного hook-сеттера в Rust нет; смена лимита пишется рекордером. |
 | `worker_type` | 5817-5825 | 9 | тип worker: QUIC/TCP/VERIFY/CONTACT/VOICE/UNKNOWN | `main.rs` worker type | **P*** | C `JOB_CLASSIFY` → transport 17 ? QUIC : TCP; остальные по job; default UNKNOWN. Rust-тип worker выводится из job; строки совпадают не дословно. |

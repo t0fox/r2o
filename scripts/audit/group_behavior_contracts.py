@@ -156,7 +156,7 @@ CONTRACTS = {
     "CS-SCHED-PLAN-GENERATION": (
         "Scheduler plan generation",
         "verdict_to_plans, own_first, area/resource path, plan identity, RX bootstrap.",
-        "sched.c: plans/area/resources/identity; signal_human — 9 кейсов C/Rust PASS; Rust candidates/compose; порядок и поля не сверены.",
+        "sched.c: plans/area/resources/identity; signal_human, task_phase, live_binding, live_autopick — full live.json 12 состояний PASS; Rust candidates/compose; порядок и поля не сверены.",
     ),
     "CS-SCHED-VOLUME-VOICE": (
         "Scheduler volume ladder and voice trials",
@@ -382,8 +382,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 390:
-        raise SystemExit(f"expected 390 P rows, got {len(rows)}")
+    if len(rows) != 387:
+        raise SystemExit(f"expected 387 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")
