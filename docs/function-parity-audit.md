@@ -95,13 +95,13 @@ production-путь не ставится. Формулировки «теста
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 360 | 188 | 0 | 0 |
-| core-state | 692 | 488 | 204 | 0 | 0 |
+| core-state | 692 | 489 | 203 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1571** | **411** | **0** | **0** |
+| **Итого** | **1982** | **1572** | **410** | **0** | **0** |
 
-Это не оценка паритета: 411 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 410 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -120,7 +120,7 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1571 / P 411**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1572 / P 410**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
@@ -139,7 +139,7 @@ B — нужен только тест/differential **190**; C — архите�
 
 ## Итог и подтверждённые расхождения (2026-11-15)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1571 / P 411 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1572 / P 410 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -192,7 +192,7 @@ P означает неполное доказательство ветвей, N
 - core-state — CLI-флаги/вывод, PSL/catalog-парсер, crypto HKDF-границы,
   voice-blob, volume resource-retry.
 - `?` (0): не осталось; все строки реестра разобраны и имеют E/P/N.
-- Поведенческая группировка 411 P (32 контракта, 0 без контракта):
+- Поведенческая группировка 410 P (32 контракта, 0 без контракта):
   `docs/behavior-contracts/inventory.md` и
   `docs/behavior-contracts/p-contract-map.tsv`. Это не меняет статусы
   реестра и не является заявлением паритета.
@@ -385,11 +385,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 360 | 188 | 0 | 0 |
-| core-state | 692 | 488 | 204 | 0 | 0 |
+| core-state | 692 | 489 | 203 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1571** | **411** | **0** | **0** |
+| **Итого** | **1982** | **1572** | **410** | **0** | **0** |
 
 
 ---
@@ -2212,7 +2212,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `usage` | 22-37 | 16 | флаги `--addr/--control/--conntrack/--wait/--mark/--list/--discovery` | `main.rs` `r2o_voice_check_command` help | **P** | C текст перечисляет эти флаги и умолчания (3000 мс, `/proc/net/nf_conntrack`, `D2K_VOICE_CONTROL_DEFAULT`). Rust-набор тот же, текст/форма командной строки отличается; CLI-дифференциала нет. |
 | `split_hostport` | 39-48 | 10 | последний `:`, непустой host, порт `strtoul(...,10)`, 1..65535 | `voice_measure.rs` `r2o_split_voice_hostport`, `r2o_parse_voice_address` | E | C `strrchr(':')`, reject `colon==s`, host < cap, `strtoul` (хвост после цифр игнорируется, ведущие пробелы/знак допустимы), затем 1..65535. Rust `r2o_split_voice_hostport` повторяет strtoul-семантику, а `r2o_parse_voice_address` использует `parse_ipv4_legacy` (C `d2k_ip4_parse` принимает ведущие нули). Тест `voice_split_hostport_matches_c_d2kvoice` (443junk, +443, пробел, пустой host/port, 0, 65536, -1, 010.0.0.1). |
 | `verdict_word` | 50-61 | 12 | русские тексты CLEAR/BLOCKED/NO_UDP/NO_CALL/FLAKY/NO_ORACLE/UNMEASURED | `voice_measure.rs` `r2o_voice_verdict_word`, `r2o_format_voice_measurement` | E | Все семь текстов C `verdict_word` совпадают дословно: «резать нечего», «режут этот поток», «UDP не ходит вовсе», «мерить нечего», «не воспроизводится», «мерить этим зондом нечем», «измерение не закончено». Функция используется production-форматтером; тест `voice_verdict_words_match_c_d2kvoice`. |
-| `main` | 63–135 | 73 | CLI: list-only (targets по conntrack), voice_run, печать разговора/вердикта/зондов/предупреждения/приёма, exit 0 для CLEAR иначе 1 | `main.rs` `r2o_voice_check_command`/`r2o_voice_list_command` + `voice_measure`/`voice_targets` | **P** | **Подтверждённые отличия:** C `--wait 0` передаёт 0, `d2k_voice_run` подставляет default 3000; Rust `0` остаётся 0. C `--list` принимает любые флаги, Rust `--voice-list` — только `--conntrack`. C `atoi/strtoul` без проверки; Rust строгий parse. Блок «Приём» зависит от `discovery_verified`/BLOCKED. |
+| `main` | 63–135 | 73 | CLI: list-only (targets по conntrack), voice_run, печать разговора/вердикта/зондов/предупреждения/приёма, exit 0 для CLEAR иначе 1 | `main.rs` `r2o_voice_check_command`/`r2o_voice_list_command` + `voice_measure`/`voice_targets` | **E*** | **2026-11-16:** C/Rust CLI differentials PASS: `test-voice-cli-differential.sh` — 11 сценариев direct STUN (`reply_wait0`, `reply_wait100`, `reply_nomark`, `flaky_wait100`, `silent_wait100`, `junk_wait_mark`, `conntrack_young/silent/silent_discovery/blocked/answers`), exit/stdout совпали; `test-voice-list-differential.sh` — 9 сценариев `--list` (fixture/empty/extra flags), stdout/exit совпали. **Ограничение:** точный usage-текст и строгие `strtoul`-края (`--wait -1`, восьмеричный `--mark`, ведущие нули IPv4) не входят в побайтовый differential; `--list` в Rust — отдельная подкоманда. |
 
 ### `core/diagnostics.c`
 
@@ -2869,7 +2869,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `usage` (static) | 22–37 | `main.rs:819-833` usage `--voice-check`, `:843-861` `--voice-list` | **P** | C — отдельный бинарь `d2kvoice` с `--addr/--control/--conntrack/--wait/--mark/--list/--discovery`; Rust — подкоманды `r2o-controller --voice-check …` и `--voice-list [--conntrack ФАЙЛ]`. Набор возможностей совпадает, но `--list` разнесён в отдельную подкоманду, текст помощи другой. |
 | `split_hostport` (static) | 39–48 | `voice_measure.rs:803-816 r2o_parse_voice_address` | **P** | **Совпадает:** последний `:`, непустой host, порт 1..65535. **Отличия:** C делает `strtoul` без проверки хвоста (`1.2.3.4:12abc` → 12) и принимает ведущие нули IPv4 через `d2k_ip4_parse`; Rust `parse::<u16>()` отвергает хвост, а `Ipv4Addr::from_str` — ведущие нули. C host-буфер 64 байта, Rust `String`. |
 | `verdict_word` (static) | 50–61 | `voice_measure.rs` `r2o_voice_verdict_word` | E | Все семь текстов C `verdict_word` совпадают дословно: «резать нечего», «режут этот поток», «UDP не ходит вовсе», «мерить нечего», «не воспроизводится», «мерить этим зондом нечем», «измерение не закончено»; функция используется production-форматтером `r2o_format_voice_measurement`. Тест `voice_verdict_words_match_c_d2kvoice`. |
-| `main` | 63–135 | `voice_measure.rs:93-139` parse, `main.rs:819-867` commands, `voice_measure.rs:141-350` measure/print | **P** | **Совпадает:** `--addr/--control/--conntrack/--wait/--mark/--discovery`, `--list` с кодом 1 при пустом списке и 0 иначе, итоговый код `CLEAR ? 0 : 1`, печать «Разговор/Вердикт/Зондов/ВНИМАНИЕ». **Отличия:** (1) C `--wait/--mark` — `strtoul` без проверки (в т.ч. `--wait -1`, мусорный хвост), Rust строго `u64`/`0x`+decimal; C `--mark` понимает восьмеричную форму (`base 0`), Rust — только hex/десятичную; (2) C `--list` — флаг в том же бинаре, Rust — отдельная подкоманда с строгим набором аргументов; (3) C при `discovery_verified` печатает `fake_arm ×arm_copies`, Rust отдельно печатает `discovery_prefix` как `stun-before-discovery ×1` либо общую строку, а найденную приманку — как `Приманка: кандидат …`; (4) C `--addr` принимает ведущие нули IPv4, Rust отвергает. Печать и коды не сверялись побайтовым differential. |
+| `main` | 63–135 | `voice_measure.rs:93-139` parse, `main.rs:819-867` commands, `voice_measure.rs:141-350` measure/print | **E*** | **2026-11-16:** C/Rust CLI differentials PASS: `test-voice-cli-differential.sh` — 11 сценариев direct STUN (`reply_wait0`, `reply_wait100`, `reply_nomark`, `flaky_wait100`, `silent_wait100`, `junk_wait_mark`, `conntrack_young/silent/silent_discovery/blocked/answers`), exit/stdout совпали; `test-voice-list-differential.sh` — 9 сценариев `--list` (fixture/empty/extra flags), stdout/exit совпали. **Ограничение:** точный usage-текст и строгие `strtoul`-края (`--wait -1`, восьмеричный `--mark`, ведущие нули IPv4) не входят в побайтовый differential; `--list` в Rust — отдельная подкоманда. |
 | `need_value` (static) | 120–128 | `ask.rs:61-70` inline value fetch | **E*** | Тот же контракт `i+1>=argc` → «требует значения»; тест `cli_flag_parsers_match_c_bounds_bases_and_missing_values` покрывает все флаги. **Ограничение:** inline, без отдельной функции. |
 | `parse_flag_u16` (static) | 134–149 | `ask.rs:168-177 parse_positive_port` | **E*** | 1..65535, base 10, отказ на 0/переполнение/хвост; тест `cli_flag_parsers_match_c_bounds_bases_and_missing_values`. **Ограничение:** Rust строже C (пробелы/`+`). |
 | `parse_flag_u32` (static) | 157–172 | `ask.rs:190-207 parse_mark` | **E*** | base 0 (hex/octal/decimal), минус запрещён, u32::MAX ok; тест `cli_flag_parsers_match_c_bounds_bases_and_missing_values`. **Ограничение:** Rust отвергает >u32, C усекает. |
