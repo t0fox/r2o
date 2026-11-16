@@ -44486,6 +44486,54 @@ mod tests {
         assert_eq!(ring.recall(&overflow.key), Some("overflow.example"));
     }
 
+    /// C/Rust differential: C-стенд вызывает production `volume_bucket`
+    /// из sched.c; Rust — production `r2o_discovery_volume_bucket`.
+    #[test]
+    fn volume_bucket_differential_matches_c() {
+        let Some(path) = std::env::var_os("R2O_VOLUME_BUCKET_DIFF_OUTPUT") else {
+            return;
+        };
+        let cases = [
+            i32::MIN,
+            -1,
+            0,
+            1,
+            2,
+            3,
+            4,
+            7,
+            8,
+            15,
+            16,
+            19,
+            23,
+            27,
+            31,
+            32,
+            35,
+            63,
+            64,
+            127,
+            128,
+            255,
+            256,
+            1023,
+            1024,
+            16_383,
+            16_384,
+            i32::MAX,
+        ];
+        let mut output = String::new();
+        for kb in cases {
+            output.push_str(&format!(
+                "{kb} {}\n",
+                super::r2o_discovery_volume_bucket(kb)
+            ));
+        }
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
+    }
+
     #[test]
     fn say_quiet_differential_matches_c() {
         fn emit(

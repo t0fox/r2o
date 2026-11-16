@@ -166,7 +166,7 @@ CONTRACTS = {
     "CS-SCHED-VOLUME-VOICE": (
         "Scheduler volume ladder and voice trials",
         "volume bucket/ladder/room, rx pending, voice trial/observe/fail.",
-        "sched.c: volume/voice; budget/voice differentials частичные, поля plan_boxes/rx queue иные.",
+        "sched.c: volume/voice; volume_bucket — 28 кейсов C/Rust PASS; budget/voice differentials частичные, поля plan_boxes/rx queue иные.",
     ),
     "CS-SCHED-ECH-QUIC": (
         "Scheduler ECH witness and QUIC initial/address control",
@@ -392,8 +392,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 394:
-        raise SystemExit(f"expected 394 P rows, got {len(rows)}")
+    if len(rows) != 393:
+        raise SystemExit(f"expected 393 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")

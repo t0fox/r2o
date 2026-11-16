@@ -5,12 +5,12 @@
 поведенческие контракты. Источник — канонические таблицы
 `docs/audit/{core-net,core-state,datapath-core,datapath-plan,detect}.md`.
 
-Строк P: **394**; контрактов: **29**; без контракта: **0**.
+Строк P: **393**; контрактов: **29**; без контракта: **0**.
 
 | Группа | P |
 |---|---:|
 | core-net | 186 |
-| core-state | 190 |
+| core-state | 189 |
 | datapath-core | 6 |
 | datapath-plan | 0 |
 | detect | 12 |
@@ -37,7 +37,7 @@
 | `CS-SCHED-SUSPECT-ADMISSION` | Scheduler suspect admission and refusal | on_suspect, cooldown, dead/refusal, shape/family, refused outcomes. | 32 | sched.c: admission/refusal; Rust queue/cooldown/family recovery; полный differential кодов/порядка. |
 | `CS-SCHED-CANDIDATE-VERIFY` | Scheduler candidate verification | verify_confirm, partial_finish, ACK/APPLIED, own plan, exchange. | 21 | sched.c: verify/applied/exchange; production verify_confirm 30 cases, остальные ветви P. |
 | `CS-SCHED-PLAN-GENERATION` | Scheduler plan generation | verdict_to_plans, own_first, area/resource path, plan identity, RX bootstrap. | 25 | sched.c: plans/area/resources/identity; Rust candidates/compose; порядок и поля не сверены. |
-| `CS-SCHED-VOLUME-VOICE` | Scheduler volume ladder and voice trials | volume bucket/ladder/room, rx pending, voice trial/observe/fail. | 19 | sched.c: volume/voice; budget/voice differentials частичные, поля plan_boxes/rx queue иные. |
+| `CS-SCHED-VOLUME-VOICE` | Scheduler volume ladder and voice trials | volume bucket/ladder/room, rx pending, voice trial/observe/fail. | 18 | sched.c: volume/voice; volume_bucket — 28 кейсов C/Rust PASS; budget/voice differentials частичные, поля plan_boxes/rx queue иные. |
 | `CS-SCHED-ECH-QUIC` | Scheduler ECH witness and QUIC initial/address control | ECH witness, quic own initial/address/multi. | 9 | sched.c: ECH/QUIC; Rust ech/quic initial; e2e DoQ и полный порядок не доказаны. |
 | `CS-SCHED-DIAGNOSTICS` | Scheduler diagnostics/live output | progress/diagnostics/counts, live binding/phase, say/level/time/hex. | 12 | sched.c: diagnostics/helpers; live 12 states PASS, редкие counters/поля P. |
 | `CS-CRYPTO-ECC` | ECC primitives P-256/X25519 | Полевая арифметика, point/scalar, public/keypair/ecdh. | 33 | p256/x25519: 33 P; ring/hpke/dalek; прямых C/Rust векторов нет. |
