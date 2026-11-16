@@ -24,6 +24,9 @@ pub struct R2oQuicProps {
     pub version2: i8,
     pub clear_fixed_bit: i8,
     pub low_source_port: i8,
+    /// C `d2k_quic_props.server_ttl_in`: TTL или hop limit первого
+    /// аутентифицированного ответа. 0 — не измерено.
+    pub server_ttl_in: u8,
 }
 
 impl R2oQuicProps {

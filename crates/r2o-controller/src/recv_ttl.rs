@@ -47,25 +47,46 @@ pub fn recv_with_ttl(socket: &UdpSocket, buffer: &mut [u8]) -> io::Result<(usize
     if received < 0 {
         return Err(io::Error::last_os_error());
     }
+    // C `qp_recv_ttl` при n <= 0 возвращает n, не читая control-данные:
+    // нулевая датаграмма не несёт «измеренного» TTL.
+    if received == 0 {
+        return Ok((0, None));
+    }
     let mut ttl = None;
+    let header_len = size_of::<libc::cmsghdr>();
     let mut header = unsafe { libc::CMSG_FIRSTHDR(&message) };
     while !header.is_null() {
         let control = unsafe { &*header };
         let family_matches = (control.cmsg_level == libc::IPPROTO_IP
-            && control.cmsg_type == libc::IP_TTL)
+            && (control.cmsg_type == libc::IP_TTL || control.cmsg_type == libc::IP_RECVTTL))
             || (control.cmsg_level == libc::IPPROTO_IPV6
                 && control.cmsg_type == libc::IPV6_HOPLIMIT);
         if family_matches {
-            let data = unsafe { libc::CMSG_DATA(header) };
-            let mut value: libc::c_int = 0;
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    data,
-                    &mut value as *mut libc::c_int as *mut u8,
-                    size_of::<libc::c_int>(),
-                );
+            // C проверяет cmsg_len до чтения CMSG_DATA. Без этой проверки
+            // короткое control-сообщение читало бы за своими границами.
+            let control_len = control.cmsg_len as usize;
+            if control_len >= header_len {
+                let data = unsafe { libc::CMSG_DATA(header) };
+                let data_len = control_len - header_len;
+                if data_len >= size_of::<libc::c_int>() {
+                    let mut value: libc::c_int = 0;
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            data,
+                            &mut value as *mut libc::c_int as *mut u8,
+                            size_of::<libc::c_int>(),
+                        );
+                    }
+                    if value > 0 && value <= libc::c_int::from(u8::MAX) {
+                        ttl = Some(value as u8);
+                    }
+                } else if data_len >= 1 {
+                    ttl = Some(unsafe { *data });
+                }
             }
-            ttl = Some(value.clamp(0, u8::MAX as libc::c_int) as u8);
+            // C останавливается на первом подходящем cmsg, даже если его
+            // длина не дала значения.
+            break;
         }
         header = unsafe { libc::CMSG_NXTHDR(&message, header) };
     }
@@ -93,5 +114,120 @@ mod tests {
         assert_eq!(length, 3);
         assert_eq!(&buffer[..3], b"ttl");
         assert!(ttl.is_some(), "IP_RECVTTL обязан вернуть TTL");
+    }
+
+    #[test]
+    fn recv_with_ttl_without_option_returns_none() {
+        let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender
+            .send_to(b"plain", receiver.local_addr().unwrap())
+            .unwrap();
+        let mut buffer = [0_u8; 8];
+        let (length, ttl) = recv_with_ttl(&receiver, &mut buffer).unwrap();
+        assert_eq!(length, 5);
+        assert_eq!(ttl, None, "без IP_RECVTTL TTL обязан остаться неизмеренным");
+    }
+
+    #[test]
+    fn recv_with_ttl_reports_ipv6_hop_limit() {
+        let Ok(receiver) = UdpSocket::bind("[::1]:0") else {
+            return; // окружение без IPv6 loopback
+        };
+        enable_recv_ttl(&receiver).unwrap();
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let sender = UdpSocket::bind("[::1]:0").unwrap();
+        sender
+            .send_to(b"hop", receiver.local_addr().unwrap())
+            .unwrap();
+        let mut buffer = [0_u8; 8];
+        let (length, ttl) = recv_with_ttl(&receiver, &mut buffer).unwrap();
+        assert_eq!(length, 3);
+        assert_eq!(&buffer[..3], b"hop");
+        assert!(
+            ttl.is_some_and(|ttl| ttl > 0),
+            "IPV6_RECVHOPLIMIT обязан вернуть hop limit"
+        );
+    }
+
+    #[test]
+    fn recv_with_ttl_zero_length_datagram_is_not_measured() {
+        let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        enable_recv_ttl(&receiver).unwrap();
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender.send_to(b"", receiver.local_addr().unwrap()).unwrap();
+        let mut buffer = [0_u8; 8];
+        let (length, ttl) = recv_with_ttl(&receiver, &mut buffer).unwrap();
+        assert_eq!(length, 0);
+        assert_eq!(ttl, None, "нулевая датаграмма не даёт измеренного TTL");
+    }
+
+    /// C-оракул: crates/r2o-controller/tests/d2o_quic_recv_ttl_differential.c.
+    /// Пишет тот же протокол, что и C-фикстура; скрипт сравнивает файлы.
+    #[test]
+    fn quic_recv_ttl_c_differential_harness() {
+        let mut output = String::new();
+
+        let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        enable_recv_ttl(&receiver).unwrap();
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender
+            .send_to(b"xyz", receiver.local_addr().unwrap())
+            .unwrap();
+        let mut buffer = [0_u8; 16];
+        let (length, ttl) = recv_with_ttl(&receiver, &mut buffer).unwrap();
+        output.push_str(&format!("ipv4|n={length}|ttl={}\n", ttl.unwrap_or(0)));
+
+        let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender
+            .send_to(b"xyz", receiver.local_addr().unwrap())
+            .unwrap();
+        let (length, ttl) = recv_with_ttl(&receiver, &mut buffer).unwrap();
+        output.push_str(&format!("ipv4_noopt|n={length}|ttl={}\n", ttl.unwrap_or(0)));
+
+        let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        enable_recv_ttl(&receiver).unwrap();
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender.send_to(b"", receiver.local_addr().unwrap()).unwrap();
+        let (length, ttl) = recv_with_ttl(&receiver, &mut buffer).unwrap();
+        output.push_str(&format!("ipv4_zero|n={length}|ttl={}\n", ttl.unwrap_or(0)));
+
+        match UdpSocket::bind("[::1]:0") {
+            Ok(receiver) => {
+                enable_recv_ttl(&receiver).unwrap();
+                receiver
+                    .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                    .unwrap();
+                let sender = UdpSocket::bind("[::1]:0").unwrap();
+                sender
+                    .send_to(b"xyz", receiver.local_addr().unwrap())
+                    .unwrap();
+                let (length, ttl) = recv_with_ttl(&receiver, &mut buffer).unwrap();
+                output.push_str(&format!("ipv6|n={length}|ttl={}\n", ttl.unwrap_or(0)));
+            }
+            Err(_) => output.push_str("ipv6|skip\n"),
+        }
+
+        if let Ok(path) = std::env::var("R2O_QUIC_RECV_TTL_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
     }
 }

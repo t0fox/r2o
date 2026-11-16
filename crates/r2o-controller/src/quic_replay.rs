@@ -238,6 +238,19 @@ pub struct QuicReplayResult {
     pub sent_datagrams: usize,
     pub foreign_responses: usize,
     pub handshake_confirmed: bool,
+    /// C `ttl_in_out`/`d2k_quic_props.server_ttl_in`: TTL или hop limit
+    /// первого аутентифицированного ответа. 0 — не измерено.
+    pub server_ttl_in: u8,
+}
+
+/// C `qp_ask`: TTL пишется только один раз — с первого подтверждённого
+/// ответа. Ноль и отсутствие control-сообщения означают «не измерено».
+fn r2o_quic_record_server_ttl(result: &mut QuicReplayResult, ttl: Option<u8>) {
+    if result.server_ttl_in == 0
+        && let Some(ttl) = ttl.filter(|ttl| *ttl > 0)
+    {
+        result.server_ttl_in = ttl;
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1118,6 +1131,9 @@ impl QuicReplayProbe {
             .collect();
 
         let local_endpoint = socket.local_addr()?;
+        // C `qp_send_one`: отказ setsockopt не важен. Без опции TTL
+        // остаётся «не измерено», а не выдуманным нулём.
+        let _ = crate::recv_ttl::enable_recv_ttl(&socket);
         Ok(Self {
             socket,
             endpoint,
@@ -1240,11 +1256,17 @@ impl QuicReplayProbe {
                 return Ok(result);
             }
             self.socket.set_read_timeout(Some(remaining))?;
-            match self.socket.recv(&mut response) {
-                Ok(length) => {
+            match crate::recv_ttl::recv_with_ttl(&self.socket, &mut response) {
+                // C `qp_ask` не считает нулевую датаграмму ни ответом, ни
+                // чужим пакетом: она просто не продвигает обмен.
+                Ok((0, _)) => continue,
+                Ok((length, ttl)) => {
                     if r2k_quic_snapshot_verify_bound_response(&self.snapshot, &response[..length])
                     {
                         result.handshake_confirmed = true;
+                        // C пишет TTL только первого подтверждённого ответа;
+                        // 0 у него означает «не измерено».
+                        r2o_quic_record_server_ttl(&mut result, ttl);
                         return Ok(result);
                     }
                     result.foreign_responses = result.foreign_responses.saturating_add(1);
@@ -2314,6 +2336,22 @@ mod tests {
         assert_eq!(
             probe.try_clone_socket().unwrap().read_timeout().unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn server_ttl_records_only_first_measured_authenticated_response() {
+        let mut result = super::QuicReplayResult::default();
+        super::r2o_quic_record_server_ttl(&mut result, None);
+        assert_eq!(result.server_ttl_in, 0, "нет cmsg — не измерено");
+        super::r2o_quic_record_server_ttl(&mut result, Some(0));
+        assert_eq!(result.server_ttl_in, 0, "ноль — не измерено");
+        super::r2o_quic_record_server_ttl(&mut result, Some(64));
+        assert_eq!(result.server_ttl_in, 64);
+        super::r2o_quic_record_server_ttl(&mut result, Some(32));
+        assert_eq!(
+            result.server_ttl_in, 64,
+            "TTL первого ответа не перезаписывается"
         );
     }
 
