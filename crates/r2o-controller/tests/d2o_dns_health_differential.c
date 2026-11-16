@@ -103,8 +103,14 @@ int main(void)
     n = append_answer(msg, n, 28, 1, 16, 0x7f);
     print_dns_case("extra-answers", msg, n, 0x1234);
     build_header(msg, 0x1234, 0x8180, 1);
-    memcpy(msg + 12, "\x03www\x07example\x03com\x00\x00\x01\x00\x01", 21);
-    n = 12 + 21;
+    /* Массив, а не строковый литерал: gcc 15 с FORTIFY видит у литерала
+       границу 20 и ошибочно включает -Werror=array-bounds. Байты те же. */
+    static const uint8_t wrong_question[] = {
+        3, 'w','w','w', 7, 'e','x','a','m','p','l','e',
+        3, 'c','o','m', 0, 0, 1, 0, 1,
+    };
+    memcpy(msg + 12, wrong_question, sizeof wrong_question);
+    n = 12 + sizeof wrong_question;
     n = append_answer(msg, n, 1, 1, 4, 0x7f);
     print_dns_case("wrong-question", msg, n, 0x1234);
 
