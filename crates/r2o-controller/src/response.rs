@@ -2031,3 +2031,49 @@ mod first_flight_tests {
         server.join().unwrap();
     }
 }
+
+#[cfg(test)]
+mod connect_bounded_tests {
+    use super::connect_until;
+    use std::net::TcpListener;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::time::Duration;
+
+    fn socket() -> OwnedFd {
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+        assert!(fd >= 0);
+        unsafe { OwnedFd::from_raw_fd(fd) }
+    }
+
+    #[test]
+    fn connect_bounded_matches_c() {
+        // C `connect_bounded` (`core/meas.c:142-173`): nonblock connect,
+        // success/refused, затем poll+SO_ERROR. C-оракул —
+        // `scripts/r2o-connect-bounded-differential.sh`.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut output = String::new();
+
+        let fd = socket();
+        let success = connect_until(fd.as_raw_fd(), address, Duration::from_millis(1000))
+            .is_ok_and(|connected| connected);
+        output.push_str(&format!("success {}\n", u8::from(success)));
+        drop(fd);
+        drop(listener);
+
+        let refused_fd = socket();
+        let refused = connect_until(refused_fd.as_raw_fd(), address, Duration::from_millis(1000))
+            .is_ok_and(|connected| connected);
+        output.push_str(&format!("refused {}\n", if refused { 1 } else { -1 }));
+        drop(refused_fd);
+
+        let badfd = connect_until(-1, address, Duration::from_millis(1000))
+            .is_ok_and(|connected| connected);
+        output.push_str(&format!("badfd {}\n", if badfd { 1 } else { -1 }));
+
+        if let Ok(path) = std::env::var("R2O_CONNECT_BOUNDED_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        print!("{output}");
+    }
+}

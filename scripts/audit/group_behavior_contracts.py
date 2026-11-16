@@ -201,7 +201,7 @@ CONTRACTS = {
     "CS-MEASUREMENT": (
         "Measurement transport helpers",
         "connect_bounded, send_all, delay, measured arm plan.",
-        "meas/measured: 4 P; send/recv EINTR/timeout частично.",
+        "meas/measured: 3 P; connect_bounded success/refused/badfd PASS; остаются nap_us/send_all/arm_plan_measured.",
     ),
     "CS-PROPS": (
         "QUIC properties text",
@@ -412,8 +412,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 416:
-        raise SystemExit(f"expected 416 P rows, got {len(rows)}")
+    if len(rows) != 415:
+        raise SystemExit(f"expected 415 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")
@@ -480,9 +480,10 @@ def main() -> int:
         "## Следующий шаг",
         "",
         "`CS-LINK-IO` сокращён до 1 P: `send_area_key` (11), `wait_readable`",
-        "(8) и `hex_decode` (6) сверены C/Rust differential. Остаётся `say`;",
-        "затем кандидат — `CS-CLI-TOOLS` (`d2kask`/`d2kfetch`), отдельный",
-        "пользовательский CLI-контракт.",
+        "(8) и `hex_decode` (6) сверены C/Rust differential. Остаётся `say`.",
+        "`CS-MEASUREMENT` сокращён до 3 P: `connect_bounded` success/refused/",
+        "badfd PASS; следующий шаг — `nap_us`/`send_all`/`arm_plan_measured`",
+        "или `CS-CLI-TOOLS` (`d2kask`/`d2kfetch`).",
         "",
         "## Ограничение TTL-контракта",
         "",

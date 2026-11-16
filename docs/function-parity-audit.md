@@ -95,13 +95,13 @@ production-путь не ставится. Формулировки «теста
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 360 | 188 | 0 | 0 |
-| core-state | 692 | 483 | 209 | 0 | 0 |
+| core-state | 692 | 484 | 208 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1566** | **416** | **0** | **0** |
+| **Итого** | **1982** | **1567** | **415** | **0** | **0** |
 
-Это не оценка паритета: 416 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 415 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -120,7 +120,7 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1566 / P 416**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1567 / P 415**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
@@ -139,7 +139,7 @@ B — нужен только тест/differential **190**; C — архите�
 
 ## Итог и подтверждённые расхождения (2026-11-15)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1566 / P 416 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1567 / P 415 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -192,7 +192,7 @@ P означает неполное доказательство ветвей, N
 - core-state — CLI-флаги/вывод, PSL/catalog-парсер, crypto HKDF-границы,
   voice-blob, volume resource-retry.
 - `?` (0): не осталось; все строки реестра разобраны и имеют E/P/N.
-- Поведенческая группировка 416 P (33 контракта, 0 без контракта):
+- Поведенческая группировка 415 P (33 контракта, 0 без контракта):
   `docs/behavior-contracts/inventory.md` и
   `docs/behavior-contracts/p-contract-map.tsv`. Это не меняет статусы
   реестра и не является заявлением паритета.
@@ -385,11 +385,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 360 | 188 | 0 | 0 |
-| core-state | 692 | 483 | 209 | 0 | 0 |
+| core-state | 692 | 484 | 208 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1566** | **416** | **0** | **0** |
+| **Итого** | **1982** | **1567** | **415** | **0** | **0** |
 
 
 ---
@@ -2363,7 +2363,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `d2k_accept_any` | 101–104 | 4 | `len>0` | `classify.rs:557 trigger_accepts(Any)` | **E*** | **Точное совпадение:** C `(void)buf; return len > 0` (`meas.c:101-104`); Rust `Accept::Any => !bytes.is_empty()` (`classify.rs:557`). Покрыто сокетными тестами `response.rs:1480-1528`; предикат тривиален. |
 | `cuts_valid` | 109–116 | 8 | строго возрастающие `0<cut<len`; любой плохой разрез — отказ всего опыта | `classify::split_offsets_checked`, production `response.rs` | E | C `cuts_valid` отвергает весь опыт при `cut<=prev` или `cut>=len`. Rust `split_offsets_checked` возвращает `None` на те же условия и используется production-путём `response.rs` до отправки (ошибка `invalid cut`); тест `split_offsets_checked_matches_c_cuts_valid` (возрастающие, пустой, 0/len/len+1, дубль, убывание). |
 | `send_all` | 124–136 | 13 | доотправка куска до `len`; `send()<=0` → -1 (сбой опыта, не «молчание») | `response.rs:807-847` send-loop в `probe_trigger` | **P*** | partial write обрабатывается циклом в обоих. `MSG_NOSIGNAL` есть. C блокирующий с `SO_SNDTIMEO=8 с`; Rust неблокирующий: `EAGAIN` → `poll(POLLOUT, PROBE_SEND_TIMEOUT)`, `EINTR` → `Transport("write: ...")`, `send==0` → `Local`. `r2o-meas-differential.sh` покрывает send-timeout/EINTR. |
-| `connect_bounded` | 142–173 | 32 | fcntl nonblock; connect; immediate success → restore flags; EINPROGRESS → poll(POLLOUT,timeout) → SO_ERROR; restore flags | `response.rs:254-287 connect_until`, `:289-310 probe_socket` | **P** | Ветви совпадают: `EINPROGRESS/EALREADY/EINTR`, poll по `POLLOUT` до дедлайна, затем `SO_ERROR`. C восстанавливает исходные `fcntl` flags и работает блокирующе; R2O `SOCK_NONBLOCK` оставляет сокет неблокирующим, а send/recv обходят `EAGAIN` через poll. Поведение эквивалентно; differential на все errno-ветви не заявлен. |
+| `connect_bounded` | 142–173 | 32 | fcntl nonblock; connect; immediate success → restore flags; EINPROGRESS → poll(POLLOUT,timeout) → SO_ERROR; restore flags | `response.rs:254-287 connect_until`, `:289-310 probe_socket` | **E*** | **2026-11-16:** C/Rust differential `scripts/r2o-connect-bounded-differential.sh` PASS: успех на loopback, отказ (SO_ERROR/ECONNREFUSED), неверный fd. C восстанавливает исходные `fcntl` flags; Rust оставляет `SOCK_NONBLOCK` и обходит `EAGAIN` в send/recv — для connect результат тот же. **Ограничение:** таймаут и EINTR-ветвь poll не покрыты (таймаут зависит от сети/маршрута), проверены success/refused/error. |
 | `d2k_meas_once` | 175–267 | 93 | literal IPv4/IPv6 (zone-id отвергнут), mark, TCP_NODELAY, SO_RCVTIMEO/SNDTIMEO, connect/send/recv, accept-функция, частичная отправка/приём | `raw_probe`/`response` measurement paths | **E*** |  C/Rust differential `scripts/r2o-meas-differential.sh` на пине `a378e230`: send-timeout → ERROR, recv EINTR → тишина/REJECTED, send EINTR → ERROR, полное совпадение с C. **Ограничение:** differential покрывает тайм-ауты и EINTR, не все ветви literal IPv6/TCP_NODELAY; отдельного differential каждой опции нет. **2026-11-14:** differential расширен response/local-error ветвями: pass-any/serverhello PASS, bad-serverhello/short-response UNPROVEN, closed/rst SILENT, connect-refused/invalid-ip/invalid-cuts/empty-payload ERROR; пустой trigger теперь Local до сокета, как C. Прежние timeout/EINTR PASS. |
 | `d2k_meas` | 269–293 | 25 | серия: `repeats<=0→3`; ERR→err+fail; PASS→pass; UNPROVEN→unproven; mark по AND | measurement wrappers `raw_probe`/`response` | **E*** | C/Rust differential `scripts/r2o-meas-differential.sh` (send-timeout, recv/send EINTR) PASS; счётчики и `marked` по AND совпадают в покрытых сценариях. **Ограничение:** не все комбинации repeats/accept/mark покрыты одним differential. |
 | `udp_now_ms` | 307-311 | 5 | `CLOCK_MONOTONIC` в мс для реестра UDP-портов | `r2o_quic_http3.rs` `r2o_udp_now_ms` | **E*** | Точный порт формулы C: `clock_gettime(CLOCK_MONOTONIC)`, `tv_sec*1000 + tv_nsec/1e6`; тем же временем теперь живёт кольцо недавних портов (`at_ms`, возраст `< 480000`). Тест `udp_now_ms_совпадает_с_clock_monotonic` сверяет с независимым `clock_gettime` и монотонность. **Ограничение:** абсолютное значение не сравнимо между процессами/хостами, как и у C. |
