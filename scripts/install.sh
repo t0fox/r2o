@@ -68,6 +68,13 @@ map_openwrt_arch() {
         mipsel_24kc*|mipsel-24kc* ) ARCH=mipsel-openwrt-musl ;;
         aarch64*|arm64* ) ARCH=aarch64-openwrt-musl ;;
         arm_cortex-a[0-9]* ) ARCH=armv7-openwrt-musl ;;
+        armv7sf* ) ARCH=armv7-musleabi ;;
+        mips_24kc*|mips-24kc* ) ARCH=mips-openwrt-musl ;;
+        mips64el*|mipsel64* ) ARCH=mips64el-musl ;;
+        x86_64*|amd64* ) ARCH=x86_64-musl ;;
+        i686*|i386_pentium4* ) ARCH=i686-musl ;;
+        ppc64|ppc64-* ) ARCH=powerpc64-musl ;;
+        riscv64* ) ARCH=riscv64-musl ;;
         armv5* ) ARCH=armv5-musleabi ;;
         * ) return 1 ;;
     esac
@@ -117,7 +124,7 @@ detect_platform_and_arch() {
         die 'система не распознана как OpenWrt или Keenetic с Entware; на Keenetic сначала установите Entware'
     fi
     case "$ARCH" in
-        mipsel|mipsel-openwrt-musl|aarch64-openwrt-musl|armv5-musleabi|armv7-openwrt-musl) ;;
+        mipsel|mipsel-openwrt-musl|aarch64-openwrt-musl|armv5-musleabi|armv7-openwrt-musl|armv7-musleabi|mips-openwrt-musl|mips64el-musl|x86_64-musl|i686-musl|powerpc64-musl|riscv64-musl) ;;
         *) die "в выпусках R2O нет ABI $ARCH" ;;
     esac
     say "платформа: $PLATFORM; ABI: $distribution_arch -> $ARCH"

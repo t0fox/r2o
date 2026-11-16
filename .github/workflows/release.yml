@@ -78,7 +78,7 @@ jobs:
             target: mipsel-unknown-linux-gnu
             asset_suffix: mipsel
             script: scripts/build-mipsel.sh
-            packages: gcc-mipsel-linux-gnu binutils
+            packages: gcc-mipsel-linux-gnu binutils zstd curl
             sdk_archive: ''
             sdk_sha256: ''
           - abi: mipsel-openwrt-musl
@@ -99,7 +99,7 @@ jobs:
             target: armv5te-unknown-linux-musleabi
             asset_suffix: armv5-musleabi
             script: scripts/r2o-build-armv5-musleabi.sh
-            packages: clang-18 binutils
+            packages: clang-18 binutils zstd curl
             sdk_archive: ''
             sdk_sha256: ''
           - abi: armv7-openwrt-musl
@@ -109,7 +109,57 @@ jobs:
             packages: zstd binutils curl
             sdk_archive: openwrt-armv7-musl-toolchain-25.12.5.tar.zst
             sdk_sha256: 2284afb56cbeef040372b02b721f1657ce1eee8e1c024fb1a0188374b472ae51
+          - abi: armv7-musleabi
+            target: armv7-unknown-linux-musleabi
+            script: scripts/r2o-build-static-musl.sh
+            packages: binutils zstd curl
+            sdk_archive: ''
+            sdk_sha256: ''
+            asset_suffix: armv7-musleabi
+          - abi: mips-openwrt-musl
+            target: mips-unknown-linux-musl
+            script: scripts/r2o-build-static-musl.sh
+            packages: binutils zstd curl
+            sdk_archive: ''
+            sdk_sha256: ''
+            asset_suffix: mips-openwrt-musl
+          - abi: mips64el-musl
+            target: mips64el-unknown-linux-muslabi64
+            script: scripts/r2o-build-static-musl.sh
+            packages: binutils zstd curl
+            sdk_archive: ''
+            sdk_sha256: ''
+            asset_suffix: mips64el-musl
+          - abi: x86_64-musl
+            target: x86_64-unknown-linux-musl
+            script: scripts/r2o-build-static-musl.sh
+            packages: binutils zstd curl
+            sdk_archive: ''
+            sdk_sha256: ''
+            asset_suffix: x86_64-musl
+          - abi: i686-musl
+            target: i686-unknown-linux-musl
+            script: scripts/r2o-build-static-musl.sh
+            packages: binutils zstd curl
+            sdk_archive: ''
+            sdk_sha256: ''
+            asset_suffix: i686-musl
+          - abi: powerpc64-musl
+            target: powerpc64-unknown-linux-musl
+            script: scripts/r2o-build-static-musl.sh
+            packages: binutils zstd curl
+            sdk_archive: ''
+            sdk_sha256: ''
+            asset_suffix: powerpc64-musl
+          - abi: riscv64-musl
+            target: riscv64gc-unknown-linux-musl
+            script: scripts/r2o-build-static-musl.sh
+            packages: binutils zstd curl
+            sdk_archive: ''
+            sdk_sha256: ''
+            asset_suffix: riscv64-musl
     env:
+      CARGO_BUILD_WARNINGS: deny
       ABI: ${{ matrix.abi }}
       TARGET: ${{ matrix.target }}
       ASSET_SUFFIX: ${{ matrix.asset_suffix }}
@@ -143,8 +193,20 @@ jobs:
             -o Dir::Cache::archives::partial=/tmp/r2o-apt-archives-partial \
             "${packages[@]}"
           sh scripts/ci-apt-cache.sh finalize "$RUNNER_TEMP/r2o-apt-archives"
+      - uses: ./.github/actions/setup-zig
+        if: matrix.script == 'scripts/r2o-build-static-musl.sh'
+        with:
+          version: ${{ matrix.abi == 'mips64el-musl' && '0.14.1' || '0.16.0' }}
+          sha256: ${{ matrix.abi == 'mips64el-musl' && '24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c' || '70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00' }}
+      - name: Установить QEMU
+        run: |
+          sh scripts/ci-install-release-qemu.sh "$RUNNER_TEMP/qemu"
+          echo "$RUNNER_TEMP/qemu/bin" >> "$GITHUB_PATH"
       - name: Собрать ABI и проверить ELF-артефакты
-        run: sh "$BUILD_SCRIPT"
+        run: |
+          sh "$BUILD_SCRIPT"
+          sh scripts/check-release-abi.sh "$ABI" "target/$TARGET/release"
+          (cd "target/$TARGET/release" && sha256sum r2o-datapath r2o-controller r2o-panel r2o-telegram r2o-manager r2o-fetch r2o-detect > SHA256SUMS)
       - name: Подготовить бинарники ABI для общей упаковки
         run: |
           set -euo pipefail
@@ -189,7 +251,7 @@ jobs:
         run: |
           set -euo pipefail
           sh scripts/package-release.sh "$RUNNER_TEMP/builds" "$RUNNER_TEMP/release" \
-            'mipsel mipsel-openwrt-musl aarch64-openwrt-musl armv5-musleabi armv7-openwrt-musl'
+            'mipsel mipsel-openwrt-musl aarch64-openwrt-musl armv5-musleabi armv7-openwrt-musl armv7-musleabi mips-openwrt-musl mips64el-musl x86_64-musl i686-musl powerpc64-musl riscv64-musl'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: signed-release-inputs
@@ -255,9 +317,11 @@ jobs:
           printf '%s\n' "$NOTES" > "$notes"
           gh release create "$RELEASE_ID" --draft --target "$SHA" \
             --title "$TITLE" --notes-file "$notes" \
-            "$out/r2o-mipsel.tar.gz" "$out/r2o-mipsel-openwrt-musl.tar.gz" \
-            "$out/r2o-aarch64-openwrt-musl.tar.gz" \
-            "$out/r2o-armv5-musleabi.tar.gz" \
-            "$out/r2o-armv7-openwrt-musl.tar.gz" \
-            "$out/latest.json" "$out/latest.json.sig"
+            "$out"/r2o-*.tar.gz "$out/latest.json" "$out/latest.json.sig"
+          verify="$RUNNER_TEMP/published-release"
+          mkdir -p "$verify"
+          gh release download "$RELEASE_ID" --dir "$verify"
+          sh scripts/verify-release-assets.sh "$verify" "$RELEASE_ID"
           gh release edit "$RELEASE_ID" --draft=false --latest
+          latest=$(gh release view --json tagName --jq .tagName)
+          test "$latest" = "$RELEASE_ID"

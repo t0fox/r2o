@@ -33,7 +33,7 @@ ASSETS="$WORK/assets.tsv"
 
 for ARCH do
     case "$ARCH" in
-        mipsel|mipsel-openwrt-musl|aarch64-openwrt-musl|armv5-musleabi|armv7-openwrt-musl) ;;
+        mipsel|mipsel-openwrt-musl|aarch64-openwrt-musl|armv5-musleabi|armv7-openwrt-musl|armv7-musleabi|mips-openwrt-musl|mips64el-musl|x86_64-musl|i686-musl|powerpc64-musl|riscv64-musl) ;;
         *) echo "неподдерживаемая архитектура выпуска: $ARCH" >&2; exit 1 ;;
     esac
     case "$SEEN_ARCHES" in *" $ARCH "*) echo "архитектура выпуска повторена: $ARCH" >&2; exit 1 ;; esac

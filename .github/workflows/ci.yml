@@ -416,7 +416,7 @@ jobs:
             target: mipsel-unknown-linux-gnu
             script: scripts/build-mipsel.sh
             artifact: r2o-mipsel-linux-gnu
-            packages: gcc-mipsel-linux-gnu binutils
+            packages: gcc-mipsel-linux-gnu binutils zstd curl
             apt_cache_key: r2o-apt-ubuntu-24.04-mipsel-cross-v2
             sdk_archive: ''
             sdk_sha256: ''
@@ -443,7 +443,7 @@ jobs:
             target: armv5te-unknown-linux-musleabi
             script: scripts/r2o-build-armv5-musleabi.sh
             artifact: r2o-armv5-linux-musleabi
-            packages: clang-18 binutils
+            packages: clang-18 binutils zstd curl
             apt_cache_key: ''
             sdk_archive: ''
             sdk_sha256: ''
@@ -457,7 +457,72 @@ jobs:
             sdk_archive: openwrt-armv7-musl-toolchain-25.12.5.tar.zst
             sdk_sha256: 2284afb56cbeef040372b02b721f1657ce1eee8e1c024fb1a0188374b472ae51
             rust_target: armv7-unknown-linux-musleabihf
+          - abi: armv7-musleabi
+            target: armv7-unknown-linux-musleabi
+            script: scripts/r2o-build-static-musl.sh
+            packages: binutils zstd curl
+            sdk_archive: ''
+            sdk_sha256: ''
+            artifact: r2o-armv7-musleabi
+            apt_cache_key: ''
+            rust_target: ''
+          - abi: mips-openwrt-musl
+            target: mips-unknown-linux-musl
+            script: scripts/r2o-build-static-musl.sh
+            packages: binutils zstd curl
+            sdk_archive: ''
+            sdk_sha256: ''
+            artifact: r2o-mips-openwrt-musl
+            apt_cache_key: ''
+            rust_target: ''
+          - abi: mips64el-musl
+            target: mips64el-unknown-linux-muslabi64
+            script: scripts/r2o-build-static-musl.sh
+            packages: binutils zstd curl
+            sdk_archive: ''
+            sdk_sha256: ''
+            artifact: r2o-mips64el-musl
+            apt_cache_key: ''
+            rust_target: ''
+          - abi: x86_64-musl
+            target: x86_64-unknown-linux-musl
+            script: scripts/r2o-build-static-musl.sh
+            packages: binutils zstd curl
+            sdk_archive: ''
+            sdk_sha256: ''
+            artifact: r2o-x86_64-musl
+            apt_cache_key: ''
+            rust_target: ''
+          - abi: i686-musl
+            target: i686-unknown-linux-musl
+            script: scripts/r2o-build-static-musl.sh
+            packages: binutils zstd curl
+            sdk_archive: ''
+            sdk_sha256: ''
+            artifact: r2o-i686-musl
+            apt_cache_key: ''
+            rust_target: ''
+          - abi: powerpc64-musl
+            target: powerpc64-unknown-linux-musl
+            script: scripts/r2o-build-static-musl.sh
+            packages: binutils zstd curl
+            sdk_archive: ''
+            sdk_sha256: ''
+            artifact: r2o-powerpc64-musl
+            apt_cache_key: ''
+            rust_target: ''
+          - abi: riscv64-musl
+            target: riscv64gc-unknown-linux-musl
+            script: scripts/r2o-build-static-musl.sh
+            packages: binutils zstd curl
+            sdk_archive: ''
+            sdk_sha256: ''
+            artifact: r2o-riscv64-musl
+            apt_cache_key: ''
+            rust_target: ''
     env:
+      ABI: ${{ matrix.abi }}
+      TARGET: ${{ matrix.target }}
       BUILD_SCRIPT: ${{ matrix.script }}
       PACKAGES: ${{ matrix.packages }}
       APT_CACHE_KEY: ${{ matrix.apt_cache_key }}
@@ -499,8 +564,20 @@ jobs:
         if: ${{ matrix.rust_target != '' }}
         with:
           target: ${{ matrix.rust_target }}
+      - uses: ./.github/actions/setup-zig
+        if: matrix.script == 'scripts/r2o-build-static-musl.sh'
+        with:
+          version: ${{ matrix.abi == 'mips64el-musl' && '0.14.1' || '0.16.0' }}
+          sha256: ${{ matrix.abi == 'mips64el-musl' && '24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c' || '70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00' }}
+      - name: Установить QEMU
+        run: |
+          sh scripts/ci-install-release-qemu.sh "$RUNNER_TEMP/qemu"
+          echo "$RUNNER_TEMP/qemu/bin" >> "$GITHUB_PATH"
       - name: Собрать ABI и проверить ELF-артефакты
-        run: sh "$BUILD_SCRIPT"
+        run: |
+          sh "$BUILD_SCRIPT"
+          sh scripts/check-release-abi.sh "$ABI" "target/$TARGET/release"
+          (cd "target/$TARGET/release" && sha256sum r2o-datapath r2o-controller r2o-panel r2o-telegram r2o-manager r2o-fetch r2o-detect > SHA256SUMS)
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # версия v7.0.2
         with:
           name: ${{ matrix.artifact }}
@@ -511,6 +588,7 @@ jobs:
             target/${{ matrix.target }}/release/r2o-panel
             target/${{ matrix.target }}/release/r2o-manager
             target/${{ matrix.target }}/release/r2o-fetch
+            target/${{ matrix.target }}/release/r2o-detect
             target/${{ matrix.target }}/release/SHA256SUMS
           retention-days: 7
           if-no-files-found: error

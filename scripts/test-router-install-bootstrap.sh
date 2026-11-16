@@ -259,9 +259,9 @@ grep -q 'проверяю фактический размер' "$CASE/out" || fa
 [ -s "$CASE/manager.log" ] || fail 'manager was not activated after the bounded download fallback'
 
 new_case unsupported-abi
-sed 's/mipsel_24kc/mips_24kc/' "$CASE/openwrt_release" > "$CASE/openwrt_release.new"
+sed 's/mipsel_24kc/mips_4kc/' "$CASE/openwrt_release" > "$CASE/openwrt_release.new"
 mv "$CASE/openwrt_release.new" "$CASE/openwrt_release"
-if run_install > "$CASE/out" 2>&1; then fail 'unsupported big-endian MIPS ABI was accepted'; fi
+if run_install > "$CASE/out" 2>&1; then fail 'unsupported MIPS-I big-endian ABI was accepted'; fi
 grep -q 'неподдерживаем' "$CASE/out" || { cat "$CASE/out" >&2; fail 'unsupported ABI failure was not explained'; }
 [ ! -s "$CASE/fetch.log" ] || fail 'release network was touched for an unsupported ABI'
 
