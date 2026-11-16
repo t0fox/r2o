@@ -19760,6 +19760,8 @@ fn r2o_ech_witness_rx_cut(
         && !config.origin_name.is_empty()
         && config.origin_name != target.host
         && fetch.tls.is_some()
+        // C `ech_witness_rx_cut`: `name_ok == 1` — публичное имя подтверждено.
+        && fetch.peer_name_ok == Some(true)
         && (200..400).contains(&fetch.status)
         && !matches!(
             fetch.http_outcome,
@@ -43988,12 +43990,32 @@ mod tests {
             config_list: Vec::new(),
         };
         let mut fetch = r2o_test_fetch_result();
+        // C `ech_witness_rx_cut` требует `name_ok == 1`.
+        fetch.peer_name_ok = Some(true);
         fetch.status = 200;
         fetch.complete = false;
         fetch.body_bytes = 8192;
         fetch.r2o_volume_observation.body_framing_valid = true;
         assert!(super::r2o_ech_witness_rx_cut(
             &target, &config, true, false, &fetch
+        ));
+        let mut name_unknown = fetch.clone();
+        name_unknown.peer_name_ok = None;
+        assert!(!super::r2o_ech_witness_rx_cut(
+            &target,
+            &config,
+            true,
+            false,
+            &name_unknown
+        ));
+        let mut name_rejected = fetch.clone();
+        name_rejected.peer_name_ok = Some(false);
+        assert!(!super::r2o_ech_witness_rx_cut(
+            &target,
+            &config,
+            true,
+            false,
+            &name_rejected
         ));
 
         assert!(!super::r2o_ech_witness_rx_cut(
