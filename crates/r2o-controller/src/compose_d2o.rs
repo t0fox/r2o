@@ -159,6 +159,31 @@ mod tests {
         assert!(plans[0].contains("seqovl payload=1 poison=0\n"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn compose_texts_compile_to_d2o_tlv() {
+        let mut output = String::new();
+        for (name, text) in [
+            ("overlap", super::overlap_plan_text()),
+            ("reorder", super::reorder_plan_text()),
+            (
+                "badsum",
+                super::badsum_fake_plan_text(&[super::D2K_OVERLAP_FILLER; 64], 1, 0),
+            ),
+            (
+                "badsum_gap",
+                super::badsum_fake_plan_text(b"hello", 2, 20_000),
+            ),
+        ] {
+            let bytes = crate::plan_text::compile_text(&text).unwrap();
+            output.push_str(&format!("{name} {}\n", super::hex(&bytes)));
+        }
+        if let Ok(path) = std::env::var("R2O_COMPOSE_TLV_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        print!("{output}");
+    }
+
     #[test]
     fn empty_vector_requires_decoy_for_fallback() {
         let props = D2oComposeProps::default();

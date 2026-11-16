@@ -186,7 +186,7 @@ CONTRACTS = {
     "CS-CATALOG-TLV": (
         "Catalog TLV plan encoding",
         "plan TLV stamp/overlap/reorder/badsum/checksum.",
-        "compose: 5 P; текст/компилятор покрыты, TLV только C-тест.",
+        "compose: 1 P; overlap/reorder/badsum/checksum TLV C/Rust differential PASS; остаётся plan_tlv_stamp_ident.",
     ),
     "CS-CLI-TOOLS": (
         "CLI tools d2kc/d2kask/d2kfetch/d2kvoice",
@@ -407,8 +407,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 404:
-        raise SystemExit(f"expected 404 P rows, got {len(rows)}")
+    if len(rows) != 400:
+        raise SystemExit(f"expected 400 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")

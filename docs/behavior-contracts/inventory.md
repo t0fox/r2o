@@ -5,12 +5,12 @@
 поведенческие контракты. Источник — канонические таблицы
 `docs/audit/{core-net,core-state,datapath-core,datapath-plan,detect}.md`.
 
-Строк P: **404**; контрактов: **32**; без контракта: **0**.
+Строк P: **400**; контрактов: **32**; без контракта: **0**.
 
 | Группа | P |
 |---|---:|
 | core-net | 188 |
-| core-state | 197 |
+| core-state | 193 |
 | datapath-core | 7 |
 | datapath-plan | 0 |
 | detect | 12 |
@@ -41,7 +41,7 @@
 | `CS-SCHED-ECH-QUIC` | Scheduler ECH witness and QUIC initial/address control | ECH witness, quic own initial/address/multi. | 9 | sched.c: ECH/QUIC; Rust ech/quic initial; e2e DoQ и полный порядок не доказаны. |
 | `CS-SCHED-DIAGNOSTICS` | Scheduler diagnostics/live output | progress/diagnostics/counts, live binding/phase, say/level/time/hex. | 12 | sched.c: diagnostics/helpers; live 12 states PASS, редкие counters/поля P. |
 | `CS-CRYPTO-ECC` | ECC primitives P-256/X25519 | Полевая арифметика, point/scalar, public/keypair/ecdh. | 33 | p256/x25519: 33 P; ring/hpke/dalek; прямых C/Rust векторов нет. |
-| `CS-CATALOG-TLV` | Catalog TLV plan encoding | plan TLV stamp/overlap/reorder/badsum/checksum. | 5 | compose: 5 P; текст/компилятор покрыты, TLV только C-тест. |
+| `CS-CATALOG-TLV` | Catalog TLV plan encoding | plan TLV stamp/overlap/reorder/badsum/checksum. | 1 | compose: 1 P; overlap/reorder/badsum/checksum TLV C/Rust differential PASS; остаётся plan_tlv_stamp_ident. |
 | `CS-CLI-TOOLS` | CLI tools d2kc/d2kask/d2kfetch/d2kvoice | Флаги, stdout/exit, snapshot wire, usage. | 3 | d2kc/d2kask/d2kfetch/d2kvoice: 3 P; d2kvoice main/usage PASS; snapshot_wire C-путь недостижим; diagnostic_limit/event/tick и http_search_portal — C/Rust differential PASS; остальные CLI. |
 | `CS-LINK-IO` | Link/control I/O helpers | readable wait, hex decode, area key, error text. | 1 | link: 1 P; send_area_key 11 + wait_readable 8 + hex_decode 6 кейсов C/Rust PASS; остаётся say. |
 | `CS-PROPS` | QUIC properties text | original/strategy measure and wire properties. | 5 | props: 5 P; quic props findings текстовый контракт не полный. |
