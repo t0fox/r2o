@@ -196,7 +196,7 @@ CONTRACTS = {
     "CS-LINK-IO": (
         "Link/control I/O helpers",
         "readable wait, hex decode, area key, error text.",
-        "link: 4 P; control differential частичный.",
+        "link: 3 P; кадры send_area_key — 11 кейсов C/Rust PASS; остаются say/wait_readable/hex_decode.",
     ),
     "CS-MEASUREMENT": (
         "Measurement transport helpers",
@@ -412,8 +412,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 419:
-        raise SystemExit(f"expected 419 P rows, got {len(rows)}")
+    if len(rows) != 418:
+        raise SystemExit(f"expected 418 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")
@@ -479,10 +479,10 @@ def main() -> int:
         "",
         "## Следующий шаг",
         "",
-        "Новый контракт в этом срезе не начинался. Кандидат — `CS-CLI-TOOLS`",
-        "(`d2kask`/`d2kfetch`/`d2kvoice`): `d2kvoice` list/check уже покрыт",
-        "C/Rust differential, остаются `d2kask` и `d2kfetch`; это отдельный",
-        "пользовательский CLI-контракт, не массовый перенос.",
+        "`CS-LINK-IO` сокращён до 3 P: кадры `send_area_key` сверены",
+        "C/Rust differential (11 кейсов). Остаются `say`, `wait_readable`",
+        "и `hex_decode`; затем кандидат — `CS-CLI-TOOLS`",
+        "(`d2kask`/`d2kfetch`), отдельный пользовательский CLI-контракт.",
         "",
         "## Ограничение TTL-контракта",
         "",

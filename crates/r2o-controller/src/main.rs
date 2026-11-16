@@ -37144,6 +37144,98 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn link_area_key_frame_matches_c() {
+        use super::control_frame_with_area_id;
+
+        // C `send_area_key` (`core/link.c:731-752`): имя + transport/shape/
+        // family + 16 байт identity, даже когда identity не задана (нули).
+        // C-оракул — `scripts/r2o-link-area-key-differential.sh`.
+        let long_name = "b".repeat(253);
+        let too_long_name = "c".repeat(254);
+        let area_id = [0x11_u8; 16];
+        let zero_id = [0_u8; 16];
+
+        let finish = |base: Result<Vec<u8>, &'static str>, id: [u8; 16]| {
+            let base = base.map_err(|_| ())?;
+            control_frame_with_area_id(&base, id).map_err(|_| ())
+        };
+
+        let cases: Vec<(&str, Result<Vec<u8>, &'static str>, [u8; 16])> = vec![
+            (
+                "set_bypass_tcp4",
+                super::encode_set_bypass("a", 6, SHAPE_MODERN, 4),
+                zero_id,
+            ),
+            (
+                "set_bypass_tcp6_253",
+                super::encode_set_bypass(&long_name, 6, SHAPE_LEGACY, 6),
+                zero_id,
+            ),
+            (
+                "del_bypass_quic",
+                r2k_core::control::encode_delete_bypass("quic.example", 17, SHAPE_QUIC, 4),
+                zero_id,
+            ),
+            (
+                "del_suffix_ech",
+                r2k_core::control::encode_delete_suffix("ech.example", 6, SHAPE_ECH_TCP, 4),
+                zero_id,
+            ),
+            (
+                "set_bypass_area_id",
+                super::encode_set_bypass("area.example", 6, SHAPE_MODERN, 4),
+                area_id,
+            ),
+            (
+                "del_bypass_zero_id",
+                r2k_core::control::encode_delete_bypass("zero.example", 17, SHAPE_QUIC, 4),
+                zero_id,
+            ),
+            (
+                "empty_name",
+                super::encode_set_bypass("", 6, SHAPE_MODERN, 4),
+                zero_id,
+            ),
+            (
+                "too_long_name",
+                super::encode_set_bypass(&too_long_name, 6, SHAPE_MODERN, 4),
+                zero_id,
+            ),
+            (
+                "bad_transport",
+                super::encode_set_bypass("bad.example", 5, SHAPE_MODERN, 4),
+                zero_id,
+            ),
+            (
+                "bad_family",
+                super::encode_set_bypass("bad.example", 6, SHAPE_MODERN, 5),
+                zero_id,
+            ),
+            (
+                "bad_shape",
+                super::encode_set_bypass("bad.example", 6, SHAPE_VOICE, 4),
+                zero_id,
+            ),
+        ];
+
+        let mut output = String::new();
+        for (label, base, id) in cases {
+            match finish(base, id) {
+                Ok(frame) => {
+                    let hex: String = frame.iter().map(|byte| format!("{byte:02x}")).collect();
+                    output.push_str(&format!("{label}\trc=0\tlen={}\thex={hex}\n", frame.len()));
+                }
+                Err(()) => output.push_str(&format!("{label}\trc=-1\tlen=0\thex=-\n")),
+            }
+        }
+        if let Ok(path) = std::env::var("R2O_LINK_AREA_KEY_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        print!("{output}");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn v22_plan_records_are_d2kp_and_accepted_by_command_codec() {
         use super::r2o_plan_records_for_profile;
         use r2k_core::control::WireProfile;

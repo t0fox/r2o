@@ -5,12 +5,12 @@
 поведенческие контракты. Источник — канонические таблицы
 `docs/audit/{core-net,core-state,datapath-core,datapath-plan,detect}.md`.
 
-Строк P: **419**; контрактов: **33**; без контракта: **0**.
+Строк P: **418**; контрактов: **33**; без контракта: **0**.
 
 | Группа | P |
 |---|---:|
 | core-net | 188 |
-| core-state | 212 |
+| core-state | 211 |
 | datapath-core | 7 |
 | datapath-plan | 0 |
 | detect | 12 |
@@ -43,7 +43,7 @@
 | `CS-CRYPTO-ECC` | ECC primitives P-256/X25519 | Полевая арифметика, point/scalar, public/keypair/ecdh. | 33 | p256/x25519: 33 P; ring/hpke/dalek; прямых C/Rust векторов нет. |
 | `CS-CATALOG-TLV` | Catalog TLV plan encoding | plan TLV stamp/overlap/reorder/badsum/checksum. | 5 | compose: 5 P; текст/компилятор покрыты, TLV только C-тест. |
 | `CS-CLI-TOOLS` | CLI tools d2kc/d2kask/d2kfetch/d2kvoice | Флаги, stdout/exit, snapshot wire, usage. | 10 | d2kc/d2kask/d2kfetch/d2kvoice: 10 P; CLI differentials частичные. |
-| `CS-LINK-IO` | Link/control I/O helpers | readable wait, hex decode, area key, error text. | 4 | link: 4 P; control differential частичный. |
+| `CS-LINK-IO` | Link/control I/O helpers | readable wait, hex decode, area key, error text. | 3 | link: 3 P; кадры send_area_key — 11 кейсов C/Rust PASS; остаются say/wait_readable/hex_decode. |
 | `CS-MEASUREMENT` | Measurement transport helpers | connect_bounded, send_all, delay, measured arm plan. | 4 | meas/measured: 4 P; send/recv EINTR/timeout частично. |
 | `CS-PROPS` | QUIC properties text | original/strategy measure and wire properties. | 5 | props: 5 P; quic props findings текстовый контракт не полный. |
 | `CS-VERDICT` | Classify verdict | C d2k_classify verdict mapping. | 1 | verdict: 1 P; C-путь в d2kc мёртв, Rust classify иной API. |
@@ -69,10 +69,10 @@
 
 ## Следующий шаг
 
-Новый контракт в этом срезе не начинался. Кандидат — `CS-CLI-TOOLS`
-(`d2kask`/`d2kfetch`/`d2kvoice`): `d2kvoice` list/check уже покрыт
-C/Rust differential, остаются `d2kask` и `d2kfetch`; это отдельный
-пользовательский CLI-контракт, не массовый перенос.
+`CS-LINK-IO` сокращён до 3 P: кадры `send_area_key` сверены
+C/Rust differential (11 кейсов). Остаются `say`, `wait_readable`
+и `hex_decode`; затем кандидат — `CS-CLI-TOOLS`
+(`d2kask`/`d2kfetch`), отдельный пользовательский CLI-контракт.
 
 ## Ограничение TTL-контракта
 
