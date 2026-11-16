@@ -95,13 +95,13 @@ production-путь не ставится. Формулировки «теста
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 360 | 188 | 0 | 0 |
-| core-state | 692 | 481 | 211 | 0 | 0 |
+| core-state | 692 | 483 | 209 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1564** | **418** | **0** | **0** |
+| **Итого** | **1982** | **1566** | **416** | **0** | **0** |
 
-Это не оценка паритета: 418 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 416 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -120,7 +120,7 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1564 / P 418**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1566 / P 416**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
@@ -139,7 +139,7 @@ B — нужен только тест/differential **190**; C — архите�
 
 ## Итог и подтверждённые расхождения (2026-11-15)
 
-Покрытие реестра: **1982/1982** функций. Статусы: **E 1564 / P 418 /
+Покрытие реестра: **1982/1982** функций. Статусы: **E 1566 / P 416 /
 N 0 / ? 0**. Это не 100 % паритет: E требует целевого теста/дифференциала,
 P означает неполное доказательство ветвей, N — отсутствие реализации.
 
@@ -192,7 +192,7 @@ P означает неполное доказательство ветвей, N
 - core-state — CLI-флаги/вывод, PSL/catalog-парсер, crypto HKDF-границы,
   voice-blob, volume resource-retry.
 - `?` (0): не осталось; все строки реестра разобраны и имеют E/P/N.
-- Поведенческая группировка 418 P (33 контракта, 0 без контракта):
+- Поведенческая группировка 416 P (33 контракта, 0 без контракта):
   `docs/behavior-contracts/inventory.md` и
   `docs/behavior-contracts/p-contract-map.tsv`. Это не меняет статусы
   реестра и не является заявлением паритета.
@@ -385,11 +385,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 360 | 188 | 0 | 0 |
-| core-state | 692 | 481 | 211 | 0 | 0 |
+| core-state | 692 | 483 | 209 | 0 | 0 |
 | datapath-core | 400 | 393 | 7 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1564** | **418** | **0** | **0** |
+| **Итого** | **1982** | **1566** | **416** | **0** | **0** |
 
 
 ---
@@ -2298,11 +2298,11 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 |---|---:|---:|---|---|---|---|
 | `execution_context` | 45–51 | 7 | пустой хвост → 0 (id/binding не измерены); иначе ровно **36 байт**: execution_id BE p[0..8], binding p[8..36] (`D2K_CTL_EXECUTION_LEN=36`, `D2K_CTL_BINDING_LEN=28`); ошибка при неверной длине/чтении binding | `control::decode_applied/decode_refused` + `BindingContext` (`EXECUTION_CONTEXT_LEN=36`) | **E*** | **Точное совпадение:** C `n==0` → 0; `n != 36` или `d2k_ctl_binding_read(...,p+8,28)` → -1; execution_id — 8 байт BE (`link.c:45-51`, `d2k_ctl.h:83,85`). Rust `EXECUTION_CONTEXT_LEN=36`, декодеры APPLIED/REFUSED читают те же 8+28 байт (`control.rs:183`, `execution_context`); `d2o_control_differential`. |
 | `say` | 56-64 | 9 | записать причину в `err[cap]` через `vsnprintf` | `format!`/`String` | **P*** | C `if (!err \|\| cap == 0) return; va_start; vsnprintf(err,cap,fmt,ap); va_end`. Rust возвращает `String`/`Result`; отдельной функции с буфером нет, тексты не сверялись. |
-| `wait_readable` | 70–86 | 17 | `poll(POLLIN)` с повтором на EINTR; `ms<0` — бесконечно, `0` — без ожидания; 0/таймаут, >0/данные, -1/ошибка | `wait_for_control_frame`/`poll` (`main.rs:19901-19907`), `wait_for_command_ack` | **P*** | C вызывает `poll` с точным `ms` и повторяет при EINTR, различая таймаут/данные/ошибку (`link.c:70-86`). Rust-ожидание кадра (`wait_for_control_frame`) использует poll/таймаут частями (≤100 мс) и `read_optional_frame`; семантика «данные/таймаут» сохраняется, но бюджет дробится и EINTR обрабатывается стандартной библиотекой. Отдельного differential нет. |
+| `wait_readable` | 70–86 | 17 | `poll(POLLIN)` с повтором на EINTR; `ms<0` — бесконечно, `0` — без ожидания; 0/таймаут, >0/данные, -1/ошибка | `wait_for_control_frame`/`poll` (`main.rs:19901-19907`), `wait_for_command_ack` | **E*** | **2026-11-16:** C/Rust differential `scripts/r2o-link-wait-readable-differential.sh` PASS: 0/данные/таймаут 20 мс/EINTR (сигнал 10 мс, повтор с тем же ms)/HUP. Rust `wait_for_control_frame` использует `poll` с точным ms и повтором на EINTR, бюджет не дробит. **Ограничение:** `r2o_link_peer_closed` дополнительно проверяет HUP/POLLNVAL до poll; текст ошибки `poll` не сверялся. |
 | `read_exact` | 92–106 | 15 | дочитать ровно N байт: `recv` в цикле, EINTR повтор, 0/ошибка → -1 | `Read::read_exact` (`main.rs:15757,15766`) | E | C `recv`-цикл добирает ровно `n`, повторяет EINTR, при 0/ошибке -1. Rust `Read::read_exact` ретраит `Interrupted` и на коротком потоке даёт `UnexpectedEof`; используется в чтении control-фреймов. Тест `read_exact_and_write_all_match_c_link_io` (Interrupted + две части, короткий поток). |
 | `write_all` | 108–131 | 24 | дописать всё: `send` в цикле, `MSG_NOSIGNAL`/`SO_NOSIGPIPE`, EINTR повтор | `Write::write_all` (`main.rs:4341`) | E | C ставит `MSG_NOSIGNAL` и дописывает `send`-циклом с повтором EINTR. Rust `UnixStream::write_all` на Linux использует `MSG_NOSIGNAL` внутри std, ретраит `Interrupted` и дописывает короткие записи; тест `read_exact_and_write_all_match_c_link_io`. |
 | `hex_nibble` | 133–138 | 6 | `0-9` → 0..9, `a-f`/`A-F` → 10..15, иначе -1 | `plan_text::hex_nibble`/`u8::is_ascii_hexdigit` | **E*** | **Точное совпадение:** C возвращает `c-'0'`, `c-'a'+10`, `c-'A'+10`, иначе -1 (`link.c:133-138`); Rust `hex_nibble`/`is_ascii_hexdigit` принимает тот же набор ASCII-цифр. Используется в разборе планов; покрыто plan_text/дифференциалами. |
-| `hex_decode` | 144–159 | 16 | hex-пары в байты, ошибка на недопустимом символе/переполнении `outcap`; нечётную длину проверяет вызывающий | `plan_text::decode_hex`/`compile_text` | **P*** | C идёт парами, проверяет обе цифры и `n < outcap`, возвращает число байт или -1; нечётный хвост молча игнорируется (`hex[1]` == 0) (`link.c:144-159`). Rust `decode_hex`/`compile_text` отвергает не-Hex и нечётную длину; для вызовов, где чётность уже проверена (`send_name_plan`, `set_addr`), результат совпадает. Отдельного differential нет. |
+| `hex_decode` | 144–159 | 16 | hex-пары в байты, ошибка на недопустимом символе/переполнении `outcap`; нечётную длину проверяет вызывающий | `plan_text::decode_hex`/`compile_text` | **E*** | **2026-11-16:** C/Rust differential `scripts/r2o-hex-decode-differential.sh` PASS **6 кейсов**: пусто, `00`, `0aFf`, `g0`, `0g`, `0011` при cap=2. **Ограничения:** C молча игнорирует нечётный хвост (`hex[1]` == 0), Rust `plan_text::hex` отвергает нечётную длину — вызывающий обязан проверить чётность (`send_name_plan`/`set_addr`); C `outcap` — предел буфера вызывающего, Rust аллоцирует динамически, поэтому переполнение буфера как класс отсутствует; для входа в пределах буфера байты совпадают. Текст ошибки не сверялся. |
 | `d2k_link_open` | 161–189 | 29 | AF_UNIX SOCK_STREAM: пустой путь/путь ≥ `sun_path` → ошибка, блокирующий `connect` | `ControlClient::connect`/`UnixStream::connect` | **E*** | C проверяет непустой путь и его длину, затем блокирующий `connect`. Rust `UnixStream::connect` делает AF_UNIX SOCK_STREAM connect; пустой/слишком длинный путь возвращает ошибку. Тест `link_open_path_validation_matches_c` (пустой, >sun_path, валидный pair). **Ограничение:** `ControlClient::connect` дополнительно ставит таймауты и читает приветствие датапата — это слой выше C `d2k_link_open`. |
 | `d2k_link_close` | 191–195 | 5 | закрыть link, если `fd>=0` | `Drop for ControlClient`/`UnixStream` (`OwnedFd`) | **E*** | C закрывает fd только при `fd>=0`; Rust `UnixStream`/`OwnedFd` закрывается `Drop`, отрицательного fd в типе нет. Тест `link_close_drops_fd_like_c`: после drop `fcntl(F_GETFD) == -1`. **Ограничение:** отдельной функции нет — семантика выражена владением. |
 | `d2k_link_peer_closed` | 197–221 | 25 | poll(0); `POLLNVAL`→EBADF/-1; `HUP/ERR`→1; иначе 0; EINTR повтор | `main.rs` `r2o_link_peer_closed`, production `wait_for_control_frame` | E | C проверяет `fd<0`, poll с `POLLIN`, NVAL→EBADF, HUP/ERR→1. Rust `r2o_link_peer_closed` повторяет это; `wait_for_control_frame` вызывает его до блокирующего poll и отдельно отвергает NVAL во втором poll. Тест `link_peer_closed_matches_c` (fd<0, живой peer → false, закрытый peer → true, закрытый fd → EBADF). |

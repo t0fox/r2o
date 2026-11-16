@@ -37236,6 +37236,100 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn link_wait_readable_matches_c() {
+        use std::io::Write as _;
+        use std::os::unix::net::UnixStream;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        // C `wait_readable` (`core/link.c:70-86`): poll(POLLIN) с точным ms,
+        // повтором на EINTR; 0/таймаут, >0/данные или HUP, -1/ошибка.
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        let mut output = String::new();
+        output.push_str(&format!(
+            "zero {}\n",
+            u8::from(super::wait_for_control_frame(&reader, Duration::ZERO).unwrap())
+        ));
+        writer.write_all(&[0x5a]).unwrap();
+        output.push_str(&format!(
+            "data {}\n",
+            u8::from(super::wait_for_control_frame(&reader, Duration::from_millis(1000)).unwrap())
+        ));
+
+        let (reader2, writer2) = UnixStream::pair().unwrap();
+        let started = std::time::Instant::now();
+        let timed_out =
+            !super::wait_for_control_frame(&reader2, Duration::from_millis(20)).unwrap();
+        let elapsed = started.elapsed();
+        output.push_str(&format!("timeout_rc {}\n", u8::from(!timed_out)));
+        output.push_str(&format!(
+            "timeout_ms_ok {}\n",
+            u8::from(elapsed >= Duration::from_millis(15) && elapsed < Duration::from_secs(2))
+        ));
+
+        static ALARM_SEEN: AtomicBool = AtomicBool::new(false);
+        extern "C" fn on_alarm(_: libc::c_int) {
+            ALARM_SEEN.store(true, Ordering::SeqCst);
+        }
+        let previous = unsafe { libc::signal(libc::SIGALRM, on_alarm as libc::sighandler_t) };
+        let timer = libc::itimerval {
+            it_interval: libc::timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+            it_value: libc::timeval {
+                tv_sec: 0,
+                tv_usec: 10_000,
+            },
+        };
+        unsafe {
+            libc::setitimer(libc::ITIMER_REAL, &timer, std::ptr::null_mut());
+        }
+        let eintr_started = std::time::Instant::now();
+        let interrupted =
+            super::wait_for_control_frame(&reader2, Duration::from_millis(100)).unwrap();
+        let eintr_elapsed = eintr_started.elapsed();
+        let stopped = libc::itimerval {
+            it_interval: libc::timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+            it_value: libc::timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+        };
+        unsafe {
+            libc::setitimer(libc::ITIMER_REAL, &stopped, std::ptr::null_mut());
+            libc::signal(libc::SIGALRM, previous);
+        }
+        output.push_str(&format!("eintr_rc {}\n", u8::from(interrupted)));
+        output.push_str(&format!(
+            "eintr_seen {}\n",
+            u8::from(ALARM_SEEN.load(Ordering::SeqCst))
+        ));
+        output.push_str(&format!(
+            "eintr_ms_ok {}\n",
+            u8::from(
+                eintr_elapsed >= Duration::from_millis(90)
+                    && eintr_elapsed < Duration::from_secs(2)
+            )
+        ));
+
+        drop(writer2);
+        output.push_str(&format!(
+            "hup_positive {}\n",
+            u8::from(super::wait_for_control_frame(&reader2, Duration::from_millis(1000)).unwrap())
+        ));
+
+        if let Ok(path) = std::env::var("R2O_LINK_WAIT_READABLE_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        print!("{output}");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn v22_plan_records_are_d2kp_and_accepted_by_command_codec() {
         use super::r2o_plan_records_for_profile;
         use r2k_core::control::WireProfile;

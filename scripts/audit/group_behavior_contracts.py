@@ -196,7 +196,7 @@ CONTRACTS = {
     "CS-LINK-IO": (
         "Link/control I/O helpers",
         "readable wait, hex decode, area key, error text.",
-        "link: 3 P; кадры send_area_key — 11 кейсов C/Rust PASS; остаются say/wait_readable/hex_decode.",
+        "link: 1 P; send_area_key 11 + wait_readable 8 + hex_decode 6 кейсов C/Rust PASS; остаётся say.",
     ),
     "CS-MEASUREMENT": (
         "Measurement transport helpers",
@@ -412,8 +412,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 418:
-        raise SystemExit(f"expected 418 P rows, got {len(rows)}")
+    if len(rows) != 416:
+        raise SystemExit(f"expected 416 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")
@@ -479,10 +479,10 @@ def main() -> int:
         "",
         "## Следующий шаг",
         "",
-        "`CS-LINK-IO` сокращён до 3 P: кадры `send_area_key` сверены",
-        "C/Rust differential (11 кейсов). Остаются `say`, `wait_readable`",
-        "и `hex_decode`; затем кандидат — `CS-CLI-TOOLS`",
-        "(`d2kask`/`d2kfetch`), отдельный пользовательский CLI-контракт.",
+        "`CS-LINK-IO` сокращён до 1 P: `send_area_key` (11), `wait_readable`",
+        "(8) и `hex_decode` (6) сверены C/Rust differential. Остаётся `say`;",
+        "затем кандидат — `CS-CLI-TOOLS` (`d2kask`/`d2kfetch`), отдельный",
+        "пользовательский CLI-контракт.",
         "",
         "## Ограничение TTL-контракта",
         "",

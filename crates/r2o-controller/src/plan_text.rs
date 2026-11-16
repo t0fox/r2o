@@ -741,6 +741,42 @@ fn push_u32(output: &mut Vec<u8>, value: u32) {
 }
 
 #[cfg(test)]
+mod hex_decode_tests {
+    use super::hex;
+
+    fn hex_text(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    fn hex_decode_matches_c_for_even_inputs() {
+        // C `hex_decode` (`core/link.c:144-159`): пары hex-цифр, ошибка на
+        // недопустимом символе/переполнении. C-оракул —
+        // `scripts/r2o-hex-decode-differential.sh`; чётность и предел
+        // буфера там отдельно оговорены.
+        let cases = [
+            ("empty", ""),
+            ("one", "00"),
+            ("mixed", "0aFf"),
+            ("invalid_high", "g0"),
+            ("invalid_low", "0g"),
+            ("cap_exact", "0011"),
+        ];
+        let mut output = String::new();
+        for (label, text) in cases {
+            match hex(text) {
+                Ok(bytes) => output.push_str(&format!("{label}\trc=0\thex={}\n", hex_text(&bytes))),
+                Err(()) => output.push_str(&format!("{label}\trc=-1\thex=-\n")),
+            }
+        }
+        if let Ok(path) = std::env::var("R2O_HEX_DECODE_DIFF_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        print!("{output}");
+    }
+}
+
+#[cfg(test)]
 mod big_endian_tests {
     use super::{push_u16, push_u32};
 
