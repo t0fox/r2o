@@ -8592,6 +8592,25 @@ fn r2o_run_discovery_props_questions(
     None
 }
 
+#[cfg(unix)]
+fn r2o_discovery_candidate_wire_plan(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    source_text: &str,
+) -> Result<(String, [u8; 16]), String> {
+    // C `plan_ident`: id временного/каталожного кандидата — `plan-%08x` от
+    // FNV-1a текста, на провод уходят ASCII-байты, добитые нулями.
+    let (_plan_name, plan_id) = r2o_controller::discovery::plan_ident(source_text)?;
+    let plan_text = r2o_controller::discovery::plan_text_for_trial(source_text, plan_id)?;
+    // C `install_next`: защита добавляется только к проводной копии, каталог
+    // сохраняет исходный текст и его plan_ident.
+    let plan_text = if r2o_discovery_rst_guard_wanted(target) {
+        r2o_plan_arm_rst_guard(&plan_text)
+    } else {
+        plan_text
+    };
+    Ok((plan_text, plan_id))
+}
+
 fn r2o_run_discovery_candidate_trial_with_progress(
     target: &r2o_controller::discovery::DiscoveryTarget,
     source_text: &str,
@@ -8648,23 +8667,12 @@ fn r2o_run_discovery_candidate_trial_with_progress(
             .saturating_sub(proof_probe_reserve + 1)
             .min(u8::MAX as usize) as u8,
     );
-    // C `plan_ident`: id временного/каталожного кандидата — `plan-%08x` от
-    // FNV-1a текста, на провод уходят ASCII-байты, добитые нулями.
-    let (_plan_name, plan_id) = match r2o_controller::discovery::plan_ident(source_text) {
+    // C `install_next`: probe списывается до проверки текста плана, поэтому
+    // негодный кандидат тоже расходует бюджет. Ошибка подготовки возвращает
+    // attempts=1, а не 0.
+    let (plan_text, plan_id) = match r2o_discovery_candidate_wire_plan(target, source_text) {
         Ok(value) => value,
-        Err(error) => return (Err(error), false, 0, Default::default()),
-    };
-    let plan_text = match r2o_controller::discovery::plan_text_for_trial(source_text, plan_id) {
-        Ok(text) => {
-            // C `install_next`: защита добавляется только в проводную копию,
-            // каталог сохраняет исходный текст и его plan_ident.
-            if r2o_discovery_rst_guard_wanted(target) {
-                r2o_plan_arm_rst_guard(&text)
-            } else {
-                text
-            }
-        }
-        Err(error) => return (Err(error), false, 0, Default::default()),
+        Err(error) => return (Err(error), false, 1, Default::default()),
     };
     let destination = match target.endpoint.parse::<std::net::SocketAddr>() {
         Ok(destination) => destination,
@@ -44576,6 +44584,250 @@ mod tests {
             std::fs::write(path, format!("{output}\n")).unwrap();
         }
         std::fs::remove_dir_all(&work).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_next_counts_untranslatable_candidate_against_probe_budget() {
+        let (commands, receiver) = std::sync::mpsc::sync_channel(1);
+        let memory =
+            std::sync::Mutex::new(r2o_controller::r2o_resource::R2oResourceMemory::default());
+        let target = DiscoveryTarget {
+            host: "install.example".into(),
+            endpoint: "127.0.0.1:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let mut progress = |_: usize, _: usize, _: &str, _: &str| {};
+        let (result, applied, attempts, _) = super::r2o_run_discovery_candidate_trial_with_progress(
+            &target,
+            "not a plan\n",
+            "/",
+            None,
+            None,
+            &commands,
+            None,
+            None,
+            false,
+            None,
+            &memory,
+            2,
+            None,
+            r2o_controller::fetch::R2oFetchEncoding::Identity,
+            false,
+            || true,
+            false,
+            None,
+            &mut progress,
+        );
+        assert!(result.is_err());
+        assert!(!applied);
+        // C `install_next` делает probes++ до проверки текста плана.
+        assert_eq!(attempts, 1);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_next_production_matches_c() {
+        use r2k_core::control::{
+            ADDR_PROBE_LEASE_MAX_MS, COMMAND_SET_ADDR_PROBE, COMMAND_SET_NAME_PROBE,
+            encode_set_addr_probe, encode_set_name_probe,
+        };
+        use serde_json::{Value, json};
+
+        fn target(host: &str, family: u8, shape: u8) -> DiscoveryTarget {
+            DiscoveryTarget {
+                host: host.into(),
+                endpoint: "127.0.0.1:443".into(),
+                family,
+                shape,
+            }
+        }
+        const TCP_PLAN: &str = "d2k-plan 1 11\nid 00000000000000000000000000000000\n\
+                                proto tcp tls\nsplit sni_middle +0\n";
+
+        // Нормализация: в C plan/trial id случайны, source port назначает ядро.
+        fn normalize_records(records: &mut [u8]) {
+            if records.len() < 12 {
+                return;
+            }
+            let mut offset = 12;
+            while offset + 4 <= records.len() {
+                let kind = u16::from_be_bytes([records[offset], records[offset + 1]]);
+                let size = u16::from_be_bytes([records[offset + 2], records[offset + 3]]) as usize;
+                offset += 4;
+                if offset + size > records.len() {
+                    return;
+                }
+                if kind == 0x0001 && size == 16 {
+                    records[offset..offset + 16].fill(0);
+                }
+                offset += size;
+            }
+        }
+
+        fn normalize_frame(mut frame: Vec<u8>) -> String {
+            if frame.len() >= 6 {
+                let command = u16::from_be_bytes([frame[4], frame[5]]);
+                let body = &mut frame[6..];
+                match command {
+                    COMMAND_SET_NAME_PROBE if body.len() >= 5 => {
+                        let name_len = body[0] as usize;
+                        let plan_start = 1 + name_len + 4;
+                        let plan_end = body.len().saturating_sub(16);
+                        if plan_start <= plan_end {
+                            body[1 + name_len + 2..1 + name_len + 4].fill(0);
+                            body[plan_end..].fill(0);
+                            normalize_records(&mut body[plan_start..plan_end]);
+                        }
+                    }
+                    COMMAND_SET_ADDR_PROBE if body.len() >= 58 => {
+                        body[33..35].fill(0);
+                        body[38..54].fill(0);
+                        normalize_records(&mut body[58..]);
+                    }
+                    _ => {}
+                }
+            }
+            frame.iter().map(|byte| format!("{byte:02x}")).collect()
+        }
+
+        fn tcp_frame(
+            target: &DiscoveryTarget,
+            source_text: &str,
+            mark: u32,
+        ) -> (String, bool, bool, u32) {
+            let (wire_text, plan_id) =
+                super::r2o_discovery_candidate_wire_plan(target, source_text).unwrap();
+            let records = compile_text(&wire_text).unwrap();
+            // C install_next всегда конвертирует текст в D2KP; профиль V22
+            // выбирает тот же провод, что у C-оракула.
+            let wire_records =
+                super::r2o_plan_records_for_profile(r2k_core::control::WireProfile::V22, &records)
+                    .unwrap();
+            // SO_MARK в непривилегированном differential-окружении недоступен;
+            // значение метки проверяется через production-хелпер, кадр и bind
+            // проверяются реальным сокетом. C-оракул применяет метку заглушкой.
+            let bound = super::BoundTcpProbe::open(target.family, Some(0)).unwrap();
+            assert_ne!(bound.local_port, 0);
+            let trial_id = super::random_id().unwrap();
+            let wire_shape = super::r2o_plan_wire_shape(target.shape, None);
+            let frame = encode_set_name_probe(
+                &target.host,
+                wire_shape,
+                target.family,
+                bound.local_port,
+                &wire_records,
+                trial_id,
+            )
+            .unwrap();
+            let mark_value = super::r2o_candidate_confirmation_mark(Some(mark)).unwrap_or(0x2d);
+            (
+                normalize_frame(frame),
+                trial_id.iter().any(|byte| *byte != 0),
+                plan_id.iter().any(|byte| *byte != 0),
+                mark_value,
+            )
+        }
+
+        fn quic_addr_frame(target: &DiscoveryTarget, mark: u32) -> (String, bool, bool, u32) {
+            let text = "d2k-plan 1 9\nid 00000000000000000000000000000000\n\
+                        proto udp quic\nudplen 100\n";
+            let (wire_text, plan_id) =
+                super::r2o_discovery_candidate_wire_plan(target, text).unwrap();
+            let records = compile_text(&wire_text).unwrap();
+            let wire_records =
+                super::r2o_plan_records_for_profile(r2k_core::control::WireProfile::V22, &records)
+                    .unwrap();
+            let (fd, _sport) = super::r2o_props_bind_udp_family(target.family).unwrap();
+            let socket = std::net::UdpSocket::from(fd);
+            let destination: std::net::SocketAddr = target.endpoint.parse().unwrap();
+            socket.connect(destination).unwrap();
+            let local = socket.local_addr().unwrap();
+            let trial_id = super::random_id().unwrap();
+            let frame = encode_set_addr_probe(
+                local,
+                destination,
+                ADDR_PROBE_LEASE_MAX_MS,
+                &wire_records,
+                trial_id,
+            )
+            .unwrap();
+            let mark_value = super::r2o_candidate_confirmation_mark(Some(mark)).unwrap_or(0x2d);
+            (
+                normalize_frame(frame),
+                trial_id.iter().any(|byte| *byte != 0),
+                plan_id.iter().any(|byte| *byte != 0),
+                mark_value,
+            )
+        }
+
+        // В обычном прогоне без C-фикстуры проверять нечего.
+        let Ok(path) = std::env::var("R2O_INSTALL_NEXT_PRODUCTION_DIFF_OUTPUT") else {
+            return;
+        };
+        let cases: Vec<Value> =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let mut rust = Vec::new();
+        for case in &cases {
+            let scenario = case["scenario"].as_str().unwrap();
+            let (rc, installed, wire, trial_nonzero, plan_nonzero, mark_value) = match scenario {
+                "tcp_first" | "mark_zero" | "mark_value" | "tcp_ipv6" | "tcp_legacy_shape" => {
+                    let (family, shape, mark) = match scenario {
+                        "tcp_ipv6" => (6, SHAPE_MODERN, 0x2d),
+                        "tcp_legacy_shape" => (4, SHAPE_LEGACY, 0x2d),
+                        "mark_zero" => (4, SHAPE_MODERN, 0),
+                        "mark_value" => (4, SHAPE_MODERN, 0x99),
+                        _ => (4, SHAPE_MODERN, 0x2d),
+                    };
+                    let t = target("install.example", family, shape);
+                    let (wire, trial_nonzero, plan_nonzero, mark_value) =
+                        tcp_frame(&t, TCP_PLAN, mark);
+                    (0, true, Some(wire), trial_nonzero, plan_nonzero, mark_value)
+                }
+                "cap_exhausted" => {
+                    assert!(super::r2o_discovery_candidate_retry_count(0).is_none());
+                    (-1, false, None, false, true, 0)
+                }
+                "bind_invalid_family" => {
+                    assert!(super::BoundTcpProbe::open(5, Some(0)).is_err());
+                    (-2, false, None, false, true, 0)
+                }
+                "quic_by_addr" => {
+                    let t = target("install.example", 4, SHAPE_MODERN);
+                    let (wire, trial_nonzero, plan_nonzero, mark_value) = quic_addr_frame(&t, 0x2d);
+                    (0, true, Some(wire), trial_nonzero, plan_nonzero, mark_value)
+                }
+                "fallback_refill" => {
+                    let mut queue =
+                        r2o_controller::r2o_fallback::FallbackQueue::new_owned_search_with_tried(
+                            &[],
+                        );
+                    let plan = queue.next(SHAPE_MODERN, 0).unwrap();
+                    let t = target("install.example", 4, SHAPE_MODERN);
+                    let (wire, trial_nonzero, plan_nonzero, mark_value) =
+                        tcp_frame(&t, &plan, 0x2d);
+                    (0, true, Some(wire), trial_nonzero, plan_nonzero, mark_value)
+                }
+                // C_ONLY: у этих ветвей нет production-эквивалента в Rust.
+                _ => continue,
+            };
+            rust.push(json!({
+                "scenario": scenario,
+                "rc": rc,
+                "cap": super::R2O_DISCOVERY_PROBE_CAP,
+                "installed": installed,
+                "trial_nonzero": trial_nonzero,
+                "plan_id_nonzero": plan_nonzero,
+                "mark_value": mark_value,
+                "wire": wire,
+            }));
+        }
+        let output = serde_json::to_string(&Value::Array(rust)).unwrap();
+        if let Ok(out_path) = std::env::var("R2O_INSTALL_NEXT_RUST_OUTPUT") {
+            std::fs::write(out_path, format!("{output}\n")).unwrap();
+        }
     }
 
     #[cfg(unix)]
