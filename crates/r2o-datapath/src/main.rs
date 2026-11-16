@@ -2240,8 +2240,11 @@ mod app {
                                 now,
                             ) {
                                 r2o_datapath::r2o_udp_hold::R2oUdpHoldFeed::Held => {
-                                    prefetched_quic_hello =
-                                        quic_sessions.capture_hello_at_hook(bytes, queue_hook);
+                                    // Только имя для решения «удерживать или
+                                    // replay»: C до replay головы снимок не
+                                    // снимает и кольцо не чистит.
+                                    prefetched_quic_hello = quic_sessions
+                                        .r2o_capture_hello_prefetch_at_hook(bytes, queue_hook);
                                     // C `handle_udp`: пока ClientHello не
                                     // собран в имя, `udp_hold_wait` — пачка
                                     // остаётся удержанной. Пустое имя — не
@@ -2257,6 +2260,13 @@ mod app {
                                     let Some(head) = batch.packets.first() else {
                                         continue;
                                     };
+                                    // C replay головы проходит обычный
+                                    // `handle_udp`: именно здесь ставится
+                                    // `qsnap_done`, собирается пачка всего
+                                    // полёта и очищается кольцо.
+                                    prefetched_quic_hello = quic_sessions
+                                        .capture_hello_at_hook(&head.packet, queue_hook)
+                                        .or(prefetched_quic_hello);
                                     packet_id = head.id;
                                     replay_packet = Some(head.packet.clone());
                                     udp_replay = Some(batch);
@@ -9334,15 +9344,26 @@ mod app {
                 r2o_datapath::engine::PacketDecision::Replace(_) => 1,
                 _ => 0,
             };
+            // C `out->verdict`: Replace всегда снимает оригинал (его байты
+            // ушли нашей посылкой), Transmit — по судьбе плана.
+            let first_verdict = match &decision {
+                r2o_datapath::engine::PacketDecision::Transmit { fate, .. } => {
+                    u8::from(*fate == r2k_core::plan::OriginalFate::Drop)
+                }
+                r2o_datapath::engine::PacketDecision::Replace(_) => 1,
+                _ => 0,
+            };
             let mut output = format!(
-                "Q1 planned-named first applied=1 skip=0 skipped=\"\" n={n1} plan_done=1 sends_left={first_sends_left} ring={} qsnap={} quic_name=\"example.com\" shape_miss={}\n",
+                "Q1 planned-named first applied=1 skip=0 skipped=\"\" n={n1} plan_done=1 sends_left={first_sends_left} ring={} ring_live={} qsnap={} quic_name=\"example.com\" shape_miss={} verdict={first_verdict}\n",
                 quic.r2o_init_ring_done(),
+                quic.r2o_init_ring_len(),
                 quic.r2o_qsnap_done(),
                 u8::from(quic.r2o_last_quic_shape_miss())
             );
             output.push_str(&format!(
-                "Q1 planned-named second applied=0 skip=1 skipped=\"поток уже показывал приветствие\" n=0 plan_done=1 sends_left={second_sends_left} ring={} qsnap={} quic_name=\"\" shape_miss={}\n",
+                "Q1 planned-named second applied=0 skip=1 skipped=\"поток уже показывал приветствие\" n=0 plan_done=1 sends_left={second_sends_left} ring={} ring_live={} qsnap={} quic_name=\"\" shape_miss={} verdict=0\n",
                 quic.r2o_init_ring_done(),
+                quic.r2o_init_ring_len(),
                 quic.r2o_qsnap_done(),
                 u8::from(quic.r2o_last_quic_shape_miss())
             ));
@@ -9367,8 +9388,9 @@ mod app {
             for index in 0..2 {
                 let suffix = if index == 0 { "first" } else { "second" };
                 output.push_str(&format!(
-                    "Q2 empty-name {suffix} applied=0 skip=1 skipped=\"плана для этой цели нет\" n=0 plan_done=0 sends_left=0 ring={} qsnap={} quic_name=\"{}\" shape_miss={}\n",
+                    "Q2 empty-name {suffix} applied=0 skip=1 skipped=\"плана для этой цели нет\" n=0 plan_done=0 sends_left=0 ring={} ring_live={} qsnap={} quic_name=\"{}\" shape_miss={} verdict=0\n",
                     empty_quic.r2o_init_ring_done(),
+                    empty_quic.r2o_init_ring_len(),
                     empty_quic.r2o_qsnap_done(),
                     String::from_utf8_lossy(empty_quic.r2o_last_quic_name()),
                     u8::from(empty_quic.r2o_last_quic_shape_miss())
@@ -9392,8 +9414,9 @@ mod app {
             for index in 0..2 {
                 let suffix = if index == 0 { "first" } else { "second" };
                 output.push_str(&format!(
-                    "Q3 named-no-plan {suffix} applied=0 skip=1 skipped=\"плана для этой цели нет\" n=0 plan_done=0 sends_left=0 ring={} qsnap={} quic_name=\"{}\" shape_miss={}\n",
+                    "Q3 named-no-plan {suffix} applied=0 skip=1 skipped=\"плана для этой цели нет\" n=0 plan_done=0 sends_left=0 ring={} ring_live={} qsnap={} quic_name=\"{}\" shape_miss={} verdict=0\n",
                     named_quic.r2o_init_ring_done(),
+                    named_quic.r2o_init_ring_len(),
                     named_quic.r2o_qsnap_done(),
                     String::from_utf8_lossy(named_quic.r2o_last_quic_name()),
                     u8::from(named_quic.r2o_last_quic_shape_miss())

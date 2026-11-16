@@ -1,5 +1,7 @@
 #!/bin/sh
-# C/Rust differential: stateful handle_udp skip/name/shape/ring.
+# C/Rust differential: stateful handle_udp skip/name/shape/ring, кольцо до
+# qsnap_done (включая UDP hold), пустое имя, Retry/неполный Initial,
+# разрез payload на две посылки и защитная судьба HOLD.
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -12,6 +14,8 @@ TMPDIR=${TMPDIR:-"${ROOT%/r2o}/r2o-tooling/tmp"}
 DENY="$D2O_ROOT/datapath"
 FIXTURE="$ROOT/crates/r2k-core/tests/fixtures/quic_v1_initial.bin"
 FIXTURE_NO_SNI="$ROOT/crates/r2k-core/tests/fixtures/quic_v1_initial_no_sni.bin"
+FIXTURE_FIRST="$ROOT/crates/r2o-datapath/tests/fixtures/quic_v1_initial_first.bin"
+FIXTURE_SECOND="$ROOT/crates/r2o-datapath/tests/fixtures/quic_v1_initial_second.bin"
 
 if [ "$ACTUAL_D2O_SHA" != "$EXPECTED_D2O_SHA" ]; then
     printf 'Expected D2O %s, got %s\n' "$EXPECTED_D2O_SHA" "$ACTUAL_D2O_SHA" >&2
@@ -35,17 +39,25 @@ trap 'rm -rf -- "$TEMP"' EXIT HUP INT TERM
     "$DENY/core_quicwire.o" "$DENY/core_quicsnap.o" "$DENY/core_crypto.o" \
     "$DENY/core_ipfrag.o" "$DENY/core_httpup_logic.o" \
     -Wl,--gc-sections -pthread -lm
-"$TEMP/d2o-quic-stateful" "$FIXTURE" "$FIXTURE_NO_SNI" >"$TEMP/c.out"
+"$TEMP/d2o-quic-stateful" "$FIXTURE" "$FIXTURE_NO_SNI" \
+    "$FIXTURE_FIRST" "$FIXTURE_SECOND" >"$TEMP/c.out"
 
 R2O_QUIC_STATEFUL_DIFF_OUTPUT="$TEMP/rust.out" \
     "$CARGO" test --manifest-path "$ROOT/Cargo.toml" --locked --offline \
     -p r2o-datapath --bin r2o-datapath \
     app::tests::udp_plan_already_applied_skips_second_initial_and_quic_accessors_match \
-    -- --exact >"$TEMP/cargo.log" 2>&1
+    -- --exact >"$TEMP/cargo-bin.log" 2>&1
 
-if ! diff -u "$TEMP/c.out" "$TEMP/rust.out"; then
+R2O_QUIC_STATEFUL_EDGES_OUTPUT="$TEMP/rust.edges" \
+    "$CARGO" test --manifest-path "$ROOT/Cargo.toml" --locked --offline \
+    -p r2o-datapath --lib \
+    r2o_quic::tests::stateful_ring_plan_edges_differential \
+    -- --exact >"$TEMP/cargo-lib.log" 2>&1
+
+cat "$TEMP/rust.out" "$TEMP/rust.edges" >"$TEMP/rust.all"
+if ! diff -u "$TEMP/c.out" "$TEMP/rust.all"; then
     printf 'FAIL: QUIC stateful handle_udp differential\n' >&2
     exit 1
 fi
 printf 'cases=%s\n' "$(wc -l <"$TEMP/c.out")"
-printf 'PASS: stateful handle_udp skip/name/shape/ring C/Rust match (D2O %s)\n' "$ACTUAL_D2O_SHA"
+printf 'PASS: stateful handle_udp skip/name/shape/ring/plan-edges C/Rust match (D2O %s)\n' "$ACTUAL_D2O_SHA"

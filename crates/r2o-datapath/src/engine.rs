@@ -2195,18 +2195,21 @@ fn decide_packet_with_segment_cap(
     let length_probe = plan.r2k_is_quic_udp_length_probe();
     let fragment_probe = plan.r2k_is_quic_ipfrag_plan();
     let fake_probe = plan.r2k_is_quic_fake_probe();
-    if plan.qsplit == 0
-        && !length_probe
-        && !clearance
-        && !ttl_probe
-        && !fragment_probe
-        && !fake_probe
-    {
+    // C `handle_udp` исполняет ЛЮБОЙ подходящий по транспорту план, включая
+    // разрез payload. Без этого признака план с `REC_SPLIT` молча проходил
+    // как Accept, и проверка «больше одной payload-посылки» для UDP была
+    // недостижима: C такую датаграмму отвергает целиком.
+    let split_probe = !plan.splits.is_empty();
+    let quic_probe =
+        plan.qsplit != 0 || length_probe || clearance || ttl_probe || fragment_probe || fake_probe;
+    if !quic_probe && !split_probe {
         return PacketDecision::Accept;
     }
-    if (plan.qsplit != 0 || length_probe || clearance || ttl_probe || fragment_probe || fake_probe)
-        && (payload.len() > D2O_QUIC_MAX_DGRAM || !r2k_quic_is_initial(payload))
-    {
+    // Ограничение «Initial до 1500» относится к QUIC-воздействиям. Разрез
+    // payload C исполняет на любой датаграмме выбранного плана, поэтому
+    // split-план нельзя молча пропускать вне Initial: именно там
+    // `payload_emits>1` и обязан дать отказ.
+    if quic_probe && (payload.len() > D2O_QUIC_MAX_DGRAM || !r2k_quic_is_initial(payload)) {
         return PacketDecision::Accept;
     }
 
@@ -2217,6 +2220,36 @@ fn decide_packet_with_segment_cap(
     let Ok(actions) = plan.apply(&input) else {
         return PacketDecision::Refused { plan_id: plan.id };
     };
+    decide_udp_after_apply(
+        plan,
+        packet,
+        &view,
+        &payload_range,
+        actions,
+        clearance,
+        ttl_probe,
+        fake_probe,
+        fragment_probe,
+    )
+}
+
+/// C `handle_udp` после `d2k_plan_apply`: проверка атомарности датаграммы,
+/// судьбы оригинала, сборка посылок. Вынесено отдельной функцией, чтобы
+/// защитные ветки (`HOLD`, несколько payload-посылок) проверялись тем же
+/// кодом, который работает в production.
+#[allow(clippy::too_many_arguments)]
+fn decide_udp_after_apply(
+    plan: &Plan,
+    packet: &[u8],
+    view: &PacketView,
+    payload_range: &std::ops::Range<usize>,
+    actions: r2k_core::plan::Actions,
+    clearance: bool,
+    ttl_probe: bool,
+    fake_probe: bool,
+    fragment_probe: bool,
+) -> PacketDecision {
+    let payload = &packet[payload_range.clone()];
     // C `handle_udp` (`session.c:1372-1386`): датаграмма атомарна, разрез
     // payload на несколько посылок — порча, а не разрез TCP-потока. C
     // отказывает целиком и не отправляет ни одной посылки.
@@ -2229,6 +2262,14 @@ fn decide_packet_with_segment_cap(
     {
         return PacketDecision::RefusedUdp {
             note: "план режет датаграмму на части — для UDP это порча, не разрез",
+        };
+    }
+    // C `handle_udp` (`session.c:1540-1547`): удержание оригинала датапат не
+    // умеет вовсе — отказ без единой посылки, оригинал проходит (ACCEPT).
+    // Проверка стоит после запрета разреза, как в C.
+    if actions.fate == OriginalFate::Hold {
+        return PacketDecision::RefusedUdp {
+            note: "удержание оригинала не поддержано",
         };
     }
     if fragment_probe {
@@ -2261,7 +2302,7 @@ fn decide_packet_with_segment_cap(
         && (plan.udplen != 0 || actions.emits[0].bytes.len() == payload.len())
     {
         let Some(replacement) =
-            replace_udp_payload(packet, &view, &payload_range, &actions.emits[0].bytes)
+            replace_udp_payload(packet, view, payload_range, &actions.emits[0].bytes)
         else {
             return PacketDecision::Accept;
         };
@@ -2289,6 +2330,34 @@ fn decide_packet_with_segment_cap(
         packets,
         fate: actions.fate,
     }
+}
+
+/// Тестовый шов: прогнать `decide_udp_after_apply` с заданными действиями.
+/// Нужен защитной ветке `HOLD`: сериализованный план её не порождает, но C
+/// `handle_udp` обязан отказать, если исполнитель её вернул.
+#[cfg(test)]
+pub(crate) fn r2o_decide_udp_actions(
+    plan: &Plan,
+    packet: &[u8],
+    actions: r2k_core::plan::Actions,
+) -> PacketDecision {
+    let Some(view) = PacketView::parse(packet).filter(|view| view.protocol == 17) else {
+        return PacketDecision::Accept;
+    };
+    let Some(payload_range) = view.udp_payload_range(packet) else {
+        return PacketDecision::Accept;
+    };
+    decide_udp_after_apply(
+        plan,
+        packet,
+        &view,
+        &payload_range,
+        actions,
+        plan.r2k_is_quic_clearance_probe(),
+        plan.r2k_is_quic_ttl_probe() || plan.r2k_is_quic_fallback_ttl_probe(),
+        plan.r2k_is_quic_fake_probe(),
+        plan.r2k_is_quic_ipfrag_plan(),
+    )
 }
 
 fn decide_voice(plan: &Plan, packet: &[u8], view: &PacketView, payload: &[u8]) -> PacketDecision {
@@ -2322,6 +2391,13 @@ fn decide_voice(plan: &Plan, packet: &[u8], view: &PacketView, payload: &[u8]) -
     {
         return PacketDecision::RefusedUdp {
             note: "план режет датаграмму на части — для UDP это порча, не разрез",
+        };
+    }
+    // C `handle_udp` (`session.c:1540-1547`): голосовой путь отвергает
+    // удержание оригинала так же, как QUIC.
+    if actions.fate == OriginalFate::Hold {
+        return PacketDecision::RefusedUdp {
+            note: "удержание оригинала не поддержано",
         };
     }
     if actions.emits.is_empty() {
