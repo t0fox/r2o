@@ -39,7 +39,7 @@ case "$abi" in
     mips64el-musl)
         cpu=mips64el; class=64; endian=little; machine='MIPS R3000'; flags=mips64r2 ;;
     x86_64-musl) cpu=x86_64; class=64; endian=little; machine='Advanced Micro Devices X86-64' ;;
-    i686-musl) cpu=i386; class=32; endian=little; machine='Intel 80386'; model=pentium4 ;;
+    i686-musl) cpu=i386; class=32; endian=little; machine='Intel 80386'; model=pentium3,+sse2 ;;
     powerpc64-musl) cpu=ppc64; class=64; endian=big; machine=PowerPC64; flags=abiv2 ;;
     riscv64-musl) cpu=riscv64; class=64; endian=little; machine=RISC-V; flags='double-float ABI' ;;
     *) echo "неизвестный ABI: $abi" >&2; exit 2 ;;
