@@ -3869,6 +3869,14 @@ const R2O_D2K_VERBY_PROBE: u8 = 1;
 const R2O_D2K_VERBY_STUN: u8 = 3;
 #[cfg(unix)]
 const R2O_D2K_VERBY_VOICE_DISCOVERY: u8 = 4;
+/// C `D2K_VERBY_PROBE_HANDSHAKE`: доказано завершённое рукопожатие TLS с ALPN
+/// клиента, прикладной уровень не измерялся.
+#[cfg(unix)]
+const R2O_D2K_VERBY_PROBE_HANDSHAKE: u8 = 5;
+/// C `D2K_VERBY_REPLAY_HANDSHAKE`: ServerHello на повтор байт клиента под
+/// планом; ключей клиента нет, приложение не измерялось.
+#[cfg(unix)]
+const R2O_D2K_VERBY_REPLAY_HANDSHAKE: u8 = 6;
 
 #[cfg(unix)]
 fn r2o_catalog_budget_rank(budget: u8) -> u8 {
@@ -4607,6 +4615,46 @@ fn r2o_store_confirmed_budget(
             if allowed && binding.budget != mark {
                 binding.budget = mark;
             }
+        }
+    }
+}
+
+/// C `bind_confirmed` пишет `verified_by` из `t->ver.replay_proof`/
+/// `handshake_proof` (`sched.c:9736-9739`). Rust строит привязку общим
+/// `bind_confirmed` с `PROBE`; признак доказательства переносится после
+/// записи, как отметка бюджета, и только на привязку этого плана.
+#[cfg(unix)]
+fn r2o_store_confirmed_verified_by(
+    catalog: &mut Catalog,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    plan_id: &str,
+    verified_by: u8,
+) {
+    if verified_by == 0 {
+        return;
+    }
+    let transport = if target.shape == SHAPE_QUIC { 17 } else { 6 };
+    let kind = if target.shape == SHAPE_QUIC {
+        "addr"
+    } else {
+        "name"
+    };
+    for box_record in &mut catalog.boxes {
+        for binding in &mut box_record.bindings {
+            if binding.target != target.host
+                || binding.plan_id != plan_id
+                || binding.kind != kind
+                || (if binding.family == 0 {
+                    4
+                } else {
+                    binding.family
+                }) != target.family
+                || binding.shape != target.shape
+                || binding.transport != transport
+            {
+                continue;
+            }
+            binding.verified_by = verified_by;
         }
     }
 }
@@ -7709,6 +7757,51 @@ fn r2o_catalog_plan_id(text: &str) -> Option<String> {
         .map(str::to_ascii_lowercase)
 }
 
+/// C `t->ver.replay_proof` / `handshake_proof`: чем именно подтверждён
+/// кандидат. Эти признаки живут в результате зонда рабочего потока, а запись
+/// привязки идёт в главном; переносим их по цели тем же приёмом, что
+/// `R2oDiscoveryMeta`.
+#[cfg(unix)]
+fn r2o_confirmed_proof_map()
+-> &'static std::sync::Mutex<HashMap<r2o_controller::discovery::DiscoveryTarget, u8>> {
+    static PROOF: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<r2o_controller::discovery::DiscoveryTarget, u8>>,
+    > = std::sync::OnceLock::new();
+    PROOF.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+#[cfg(unix)]
+fn r2o_confirmed_proof_set(target: &r2o_controller::discovery::DiscoveryTarget, verified_by: u8) {
+    r2o_confirmed_proof_map()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(target.clone(), verified_by);
+}
+
+#[cfg(unix)]
+fn r2o_confirmed_proof_take(target: &r2o_controller::discovery::DiscoveryTarget) -> Option<u8> {
+    r2o_confirmed_proof_map()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(target)
+}
+
+#[cfg(unix)]
+fn r2o_confirmed_proof_forget(target: &r2o_controller::discovery::DiscoveryTarget) {
+    let _ = r2o_confirmed_proof_take(target);
+}
+
+/// C `verify_confirm`: `replay_proof` → REPLAY_HANDSHAKE,
+/// `handshake_proof` → PROBE_HANDSHAKE, иначе обычный зонд.
+#[cfg(unix)]
+fn r2o_confirmed_verified_by(result: &Result<r2o_controller::fetch::FetchResult, String>) -> u8 {
+    match result {
+        Ok(fetch) if fetch.r2o_volume_observation.replay_proof => R2O_D2K_VERBY_REPLAY_HANDSHAKE,
+        Ok(fetch) if fetch.handshake_verified => R2O_D2K_VERBY_PROBE_HANDSHAKE,
+        _ => R2O_D2K_VERBY_PROBE,
+    }
+}
+
 #[cfg(unix)]
 fn r2o_confirm_discovery_outcome(
     mut outcome: DiscoveryOutcome,
@@ -7716,6 +7809,7 @@ fn r2o_confirm_discovery_outcome(
     applied: bool,
 ) -> DiscoveryOutcome {
     outcome.budget_mark = r2o_budget_mark_from_result(&result);
+    let verified_by = r2o_confirmed_verified_by(&result);
     // C `T_VERIFY_WAIT`: `ver.level == APPLICATION && ver.budget == CUT` —
     // поток оборван посреди повторов при полном ответе приложения. Это не
     // подтверждение плана, а частичный обход: кандидат отклоняется, привязка
@@ -7752,6 +7846,7 @@ fn r2o_confirm_discovery_outcome(
         }
         outcome.plan_text = None;
         outcome.retry_after = None;
+        r2o_confirmed_proof_forget(&outcome.target);
         outcome.detail.push_str(
             "; поток оборван посреди повторов при полном ответе приложения — бюджет не пройден, кандидат не подтверждён, отметка привязки «оборван»",
         );
@@ -7760,10 +7855,19 @@ fn r2o_confirm_discovery_outcome(
     if outcome.plan_text.is_none()
         || r2o_family_recovery_decision(&result, applied) == R2oFamilyRecoveryDecision::Verified
     {
+        // C `verify_confirm` пишет `D2K_VERBY_REPLAY_HANDSHAKE`/`PROBE_HANDSHAKE`
+        // по `t->ver.replay_proof`/`handshake_proof`. Признак остаётся в
+        // результате зонда, поэтому передаётся записи привязки по цели.
+        if outcome.plan_text.is_some() {
+            r2o_confirmed_proof_set(&outcome.target, verified_by);
+        } else {
+            r2o_confirmed_proof_forget(&outcome.target);
+        }
         return outcome;
     }
     outcome.plan_text = None;
     outcome.retry_after = Some(R2O_DISCOVERY_FAILURE_RETRY);
+    r2o_confirmed_proof_forget(&outcome.target);
     if result
         .as_ref()
         .is_ok_and(|fetch| fetch.cloudflare_challenge)
@@ -7803,6 +7907,7 @@ fn r2o_confirm_discovery_outcome_checked(
     if unfit {
         outcome.plan_text = None;
         outcome.retry_after = Some(R2O_DISCOVERY_FAILURE_RETRY);
+        r2o_confirmed_proof_forget(&outcome.target);
         outcome.detail.push_str(
             "; этот план уже не подошёл потоку клиента (FLOW_UNFIT): подтверждение отменено, беру следующий кандидат",
         );
@@ -28067,6 +28172,9 @@ impl ControlClient {
         confirmed: &mut bool,
         mut persistence: Option<&mut R2oCatalogPersistence>,
     ) -> Result<Option<Vec<r2o_controller::live::LiveGroupKey>>, Box<dyn Error>> {
+        // C `t->ver` живёт в ячейке задачи до записи привязки; здесь признак
+        // доказательства переносится рядом с исходом (см. `r2o_confirmed_proof_map`).
+        let verified_by = r2o_confirmed_proof_take(&outcome.target);
         if outcome.direct_clear {
             self.apply_discovery_direct_clear(&outcome.target, catalog, catalog_path, persistence)?;
             return Ok(None);
@@ -28218,6 +28326,9 @@ impl ControlClient {
             r2o_store_confirmed_ech_origin(&mut updated, &binding_target, &plan_id, origin);
         }
         r2o_store_confirmed_budget(&mut updated, &binding_target, &plan_id, budget_mark);
+        if let Some(verified_by) = verified_by {
+            r2o_store_confirmed_verified_by(&mut updated, &binding_target, &plan_id, verified_by);
+        }
         if group_block_proven
             && let Err(error) = r2o_group_record_confirmed(
                 &mut updated,
@@ -43368,6 +43479,468 @@ mod tests {
         assert_eq!(result, "clear");
         assert_eq!(challenged, ["romfea.gr"]);
         assert_eq!(attempts, [("kinozal.me".into(), plan.into())]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_confirm_production_matches_c() {
+        use serde_json::{Map, Value, json};
+        use std::sync::atomic::AtomicUsize;
+
+        fn plan_text() -> &'static str {
+            "r2o-plan 1 11\nid 00000000000000000000000000000000\nproto tcp tls\nsplit sni_middle +0\n"
+        }
+        fn quic_text() -> &'static str {
+            "r2o-plan 1 9\nid 00000000000000000000000000000000\nproto udp quic\nudplen 100\n"
+        }
+        fn target(host: &str, shape: u8) -> DiscoveryTarget {
+            DiscoveryTarget {
+                host: host.into(),
+                endpoint: "198.51.100.8:443".into(),
+                family: 4,
+                shape,
+            }
+        }
+        fn outcome(target: &DiscoveryTarget, text: &str) -> DiscoveryOutcome {
+            DiscoveryOutcome {
+                target: target.clone(),
+                plan_text: Some(text.into()),
+                detail: String::new(),
+                queue_expired: false,
+                address_failure: false,
+                address_recheck_acknowledged: false,
+                address_recheck_probes: 0,
+                direct_clear: false,
+                volume_recovery: false,
+                budget_mark: 0,
+                group_block_proven: false,
+                transferred_own_plan: false,
+                bound_plan_id: None,
+                ech_origin: None,
+                volume_fingerprint: None,
+                volume_box_id: None,
+                retry_after: None,
+            }
+        }
+        fn https_full() -> FetchResult {
+            r2o_test_fetch_result()
+        }
+        fn normalize_text(text: &str) -> String {
+            let mut normalized = text
+                .lines()
+                .map(|line| {
+                    if line.starts_with("id ") {
+                        "id ID".to_owned()
+                    } else {
+                        line.to_owned()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if text.ends_with('\n') {
+                normalized.push('\n');
+            }
+            normalized
+        }
+        // C-стенд живёт в своей эпохе (`wall_base_s=2000`), производство
+        // Rust пишет системное время. Сверяем наличие отметки, не эпоху.
+        fn stamp(value: i64) -> i64 {
+            if value > 0 { 2099 } else { 0 }
+        }
+        fn snapshot(scenario: &str, catalog: &Catalog) -> Value {
+            let bindings = catalog
+                .boxes
+                .iter()
+                .flat_map(|record| &record.bindings)
+                .map(|binding| {
+                    json!({
+                        "kind": binding.kind,
+                        "target": binding.target,
+                        "plan": "PLAN",
+                        "transport": binding.transport,
+                        "family": if binding.family == 0 { 4 } else { binding.family },
+                        "shape": binding.shape,
+                        "tcp_profile": binding.tcp_profile,
+                        "verified_by": binding.verified_by,
+                        "input": binding.input,
+                        "budget": binding.budget,
+                        "probe_path": binding.probe_path,
+                        "ech_origin": binding.ech_origin,
+                        "level": binding.level,
+                        "successes": binding.successes,
+                        "enabled": binding.enabled,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let state = catalog.domain_state.clone().unwrap_or_default();
+            let observations = state
+                .observations
+                .iter()
+                .map(|observation| {
+                    json!({
+                        "name": observation.name,
+                        "plan": "PLAN",
+                        "transport": observation.key.transport,
+                        "family": observation.key.family,
+                        "shape": observation.key.shape,
+                        "probe_path": observation.key.probe_path,
+                        "ech_origin": observation.key.ech_origin,
+                        "evidence": observation.evidence,
+                        "at": stamp(observation.at),
+                    })
+                })
+                .collect::<Vec<_>>();
+            let groups = state
+                .groups
+                .iter()
+                .map(|group| {
+                    json!({
+                        "suffix": group.suffix,
+                        "plan": "PLAN",
+                        "transport": group.key.transport,
+                        "family": group.key.family,
+                        "shape": group.key.shape,
+                        "probe_path": group.key.probe_path,
+                        "ech_origin": group.key.ech_origin,
+                        "evidence_count": group.evidence_count,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let network = catalog.network_whitelist.clone().unwrap_or_default();
+            let mut value = Map::new();
+            value.insert("scenario".into(), json!(scenario));
+            value.insert("confirmed".into(), json!(!bindings.is_empty()));
+            value.insert("bindings".into(), json!(bindings));
+            if let Some(record) = catalog.boxes.first()
+                && let Some(plan) = record.plans.first()
+            {
+                value.insert(
+                    "plan".into(),
+                    json!({
+                        "proto": plan.proto,
+                        "text": normalize_text(&plan.text),
+                        "added": stamp(plan.added),
+                        "successes": plan.successes,
+                        "enabled": plan.enabled,
+                    }),
+                );
+                value.insert(
+                    "box".into(),
+                    json!({
+                        "created": stamp(record.created),
+                        "updated": stamp(record.updated),
+                        "plans": record.plans.len(),
+                    }),
+                );
+            } else {
+                value.insert("plan".into(), Value::Null);
+            }
+            value.insert("observations".into(), json!(observations));
+            value.insert("groups".into(), json!(groups));
+            value.insert(
+                "network".into(),
+                json!({
+                    "name": network.name,
+                    "tx_only": network.tx_only,
+                    "searched": network.searched,
+                    "confirmed_at": network.confirmed_at.unwrap_or(0),
+                }),
+            );
+            Value::Object(value)
+        }
+
+        let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut client = ControlClient {
+            socket,
+            send_maxlen: 0,
+            send_cap: std::sync::Arc::new(AtomicUsize::new(0)),
+            pending_events: std::collections::VecDeque::new(),
+            pending_applied_events: std::collections::VecDeque::new(),
+            dropped_events: Default::default(),
+            http_search_started: Default::default(),
+            http_acknowledged_bindings: Default::default(),
+        };
+        let work = std::env::temp_dir().join(format!(
+            "r2o-verify-confirm-production-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&work).unwrap();
+        let mut applied_count = 0_usize;
+        let mut apply = |target: &DiscoveryTarget,
+                         outcome: DiscoveryOutcome,
+                         result: Result<FetchResult, String>,
+                         applied: bool,
+                         input: u8,
+                         measured_path: Option<&str>,
+                         searches: Option<&std::sync::Mutex<super::R2oDiscoverySearches>>|
+         -> Catalog {
+            let outcome = match searches {
+                Some(searches) => {
+                    super::r2o_confirm_discovery_outcome_checked(outcome, result, applied, searches)
+                }
+                None => super::r2o_confirm_discovery_outcome(outcome, result, applied),
+            };
+            let _ = target;
+            let path = work.join(format!("catalog-{applied_count}.json"));
+            applied_count += 1;
+            let mut catalog = Catalog::default();
+            let mut confirmed = false;
+            client
+                .apply_discovery_outcome_with_input_and_persistence(
+                    outcome,
+                    &mut catalog,
+                    &path,
+                    input,
+                    None,
+                    measured_path,
+                    &mut confirmed,
+                    None,
+                )
+                .unwrap();
+            catalog
+        };
+
+        let mut scenarios = Vec::new();
+
+        // C `t->ver.replay_proof`/`handshake_proof` → `Binding.verified_by`.
+        assert_eq!(
+            super::r2o_confirmed_verified_by(&Ok(https_full())),
+            super::R2O_D2K_VERBY_PROBE
+        );
+        let mut handshake = https_full();
+        handshake.handshake_verified = true;
+        assert_eq!(
+            super::r2o_confirmed_verified_by(&Ok(handshake.clone())),
+            super::R2O_D2K_VERBY_PROBE_HANDSHAKE
+        );
+        handshake.r2o_volume_observation.replay_proof = true;
+        assert_eq!(
+            super::r2o_confirmed_verified_by(&Ok(handshake)),
+            super::R2O_D2K_VERBY_REPLAY_HANDSHAKE
+        );
+
+        // 1. Полный HTTPS + APPLIED, бюджет пройден, вход — байты клиента.
+        let t = target("media.example.com", SHAPE_MODERN);
+        let mut fetch = https_full();
+        fetch.r2o_volume_observation.packet_budget =
+            r2o_controller::r2o_volume::R2oVolumePacketBudget::Passed;
+        scenarios.push(snapshot(
+            "https_full_applied_passed",
+            &apply(
+                &t,
+                outcome(&t, plan_text()),
+                Ok(fetch),
+                true,
+                1,
+                Some("/main.css"),
+                None,
+            ),
+        ));
+
+        // 2. Полный HTTPS + APPLIED, бюджет «не применимо».
+        let t = target("profile.example.com", SHAPE_MODERN);
+        let mut fetch = https_full();
+        fetch.r2o_volume_observation.packet_budget =
+            r2o_controller::r2o_volume::R2oVolumePacketBudget::NotApplicable;
+        scenarios.push(snapshot(
+            "https_full_applied_unchecked",
+            &apply(&t, outcome(&t, plan_text()), Ok(fetch), true, 2, None, None),
+        ));
+
+        // 3. Полный HTTPS + APPLIED, доказанный блок → обучение области.
+        let t = target("media.example.com", SHAPE_MODERN);
+        let mut fetch = https_full();
+        fetch.r2o_volume_observation.packet_budget =
+            r2o_controller::r2o_volume::R2oVolumePacketBudget::Passed;
+        let mut confirmed_outcome = outcome(&t, plan_text());
+        confirmed_outcome.group_block_proven = true;
+        scenarios.push(snapshot(
+            "https_full_group_proven",
+            &apply(
+                &t,
+                confirmed_outcome,
+                Ok(fetch),
+                true,
+                2,
+                Some("/main.css"),
+                None,
+            ),
+        ));
+
+        // 4. ECH принят, имя origin совпало, ответ приложения полный.
+        let t = target("ech.example.com", SHAPE_ECH_TCP);
+        let mut fetch = https_full();
+        fetch.ech_accepted = Some(true);
+        fetch.peer_name_ok = Some(true);
+        fetch.r2o_volume_observation.packet_budget =
+            r2o_controller::r2o_volume::R2oVolumePacketBudget::Passed;
+        let mut confirmed_outcome = outcome(&t, plan_text());
+        confirmed_outcome.ech_origin = Some("origin.example".into());
+        scenarios.push(snapshot(
+            "ech_accepted_application",
+            &apply(&t, confirmed_outcome, Ok(fetch), true, 2, None, None),
+        ));
+
+        // 5. ECH принят, но внешнее имя не совпало.
+        let t = target("ech-wrong.example.com", SHAPE_ECH_TCP);
+        let mut fetch = https_full();
+        fetch.ech_accepted = Some(true);
+        fetch.peer_name_ok = Some(false);
+        let mut confirmed_outcome = outcome(&t, plan_text());
+        confirmed_outcome.ech_origin = Some("origin.example".into());
+        scenarios.push(snapshot(
+            "ech_negative_outer_name",
+            &apply(&t, confirmed_outcome, Ok(fetch), true, 2, None, None),
+        ));
+
+        // 6. ECH принят, имя совпало, тело не дочитано.
+        let t = target("ech-cut.example.com", SHAPE_ECH_TCP);
+        let mut fetch = https_full();
+        fetch.ech_accepted = Some(true);
+        fetch.peer_name_ok = Some(true);
+        fetch.complete = false;
+        fetch.application_verified = false;
+        let mut confirmed_outcome = outcome(&t, plan_text());
+        confirmed_outcome.ech_origin = Some("origin.example".into());
+        scenarios.push(snapshot(
+            "ech_negative_incomplete",
+            &apply(&t, confirmed_outcome, Ok(fetch), true, 2, None, None),
+        ));
+
+        // 7. Повтор ECH-приветствия: ServerHello под планом, бюджет не применим.
+        let t = target("ech-replay.example.com", SHAPE_ECH_TCP);
+        let mut fetch = https_full();
+        fetch.tls = None;
+        fetch.status = 0;
+        fetch.complete = false;
+        fetch.application_verified = false;
+        fetch.handshake_verified = true;
+        fetch.r2o_volume_observation.replay_proof = true;
+        fetch.r2o_volume_observation.packet_budget =
+            r2o_controller::r2o_volume::R2oVolumePacketBudget::NotApplicable;
+        let mut confirmed_outcome = outcome(&t, plan_text());
+        confirmed_outcome.ech_origin = Some("origin.example".into());
+        scenarios.push(snapshot(
+            "ech_replay_handshake_proof",
+            &apply(&t, confirmed_outcome, Ok(fetch), true, 1, None, None),
+        ));
+
+        // 8. Повтор ECH без ServerHello на байты клиента.
+        let t = target("ech-noreplay.example.com", SHAPE_ECH_TCP);
+        let mut fetch = https_full();
+        fetch.tls = None;
+        fetch.status = 0;
+        fetch.complete = false;
+        fetch.application_verified = false;
+        fetch.handshake_verified = false;
+        let mut confirmed_outcome = outcome(&t, plan_text());
+        confirmed_outcome.ech_origin = Some("origin.example".into());
+        scenarios.push(snapshot(
+            "ech_replay_without_proof",
+            &apply(&t, confirmed_outcome, Ok(fetch), true, 1, None, None),
+        ));
+
+        // 9. План подозрения: бюджет не проверен — подозрение не снято.
+        let t = target("suspicion.example.com", SHAPE_MODERN);
+        let mut fetch = https_full();
+        fetch.r2o_volume_observation.packet_budget =
+            r2o_controller::r2o_volume::R2oVolumePacketBudget::NotApplicable;
+        let mut confirmed_outcome = outcome(&t, plan_text());
+        confirmed_outcome.transferred_own_plan = true;
+        confirmed_outcome.bound_plan_id = Some("00000000000000000000000000000000".into());
+        scenarios.push(snapshot(
+            "own_plan_budget_unchecked",
+            &apply(&t, confirmed_outcome, Ok(fetch), true, 2, None, None),
+        ));
+
+        // 10. Рукопожатие с ALPN клиента завершено: приложения нет.
+        let t = target("alpn.example.com", SHAPE_MODERN);
+        let mut fetch = https_full();
+        fetch.tls = None;
+        fetch.status = 0;
+        fetch.complete = false;
+        fetch.application_verified = false;
+        fetch.handshake_verified = true;
+        fetch.r2o_volume_observation.packet_budget =
+            r2o_controller::r2o_volume::R2oVolumePacketBudget::NotMeasured;
+        scenarios.push(snapshot(
+            "tcp_handshake_proof",
+            &apply(&t, outcome(&t, plan_text()), Ok(fetch), true, 2, None, None),
+        ));
+
+        // 11. QUIC по адресу: повтор пачки клиента доказал применение.
+        let mut catalog = Catalog::default();
+        r2o_controller::discovery::add_confirmed_quic_address_binding(
+            &mut catalog,
+            "203.0.113.8".parse().unwrap(),
+            quic_text(),
+            2099,
+        )
+        .unwrap();
+        scenarios.push(snapshot("quic_addr_replay", &catalog));
+
+        // 12. Подбор белого имени: план снял RX-обрыв.
+        let t = target("hcaptcha.example.com", SHAPE_MODERN);
+        let mut fetch = https_full();
+        fetch.r2o_volume_observation.packet_budget =
+            r2o_controller::r2o_volume::R2oVolumePacketBudget::Passed;
+        let mut catalog = apply(&t, outcome(&t, plan_text()), Ok(fetch), true, 2, None, None);
+        super::r2o_update_network_whitelist(
+            catalog
+                .network_whitelist
+                .get_or_insert_with(r2o_controller::catalog::NetworkWhitelist::default),
+            &super::R2oNetworkWhitelistUpdate {
+                name: Some("white.example".into()),
+                rx_cut: true,
+            },
+            2099,
+        );
+        scenarios.push(snapshot("net_whitelist_rx", &catalog));
+
+        // 13. Подбор белого имени: пройден только исходящий обрыв.
+        let t = target("hcaptcha2.example.com", SHAPE_MODERN);
+        let mut fetch = https_full();
+        fetch.r2o_volume_observation.packet_budget =
+            r2o_controller::r2o_volume::R2oVolumePacketBudget::Passed;
+        let mut catalog = apply(&t, outcome(&t, plan_text()), Ok(fetch), true, 2, None, None);
+        super::r2o_update_network_whitelist(
+            catalog
+                .network_whitelist
+                .get_or_insert_with(r2o_controller::catalog::NetworkWhitelist::default),
+            &super::R2oNetworkWhitelistUpdate {
+                name: Some("white.example".into()),
+                rx_cut: false,
+            },
+            2099,
+        );
+        scenarios.push(snapshot("net_whitelist_tx", &catalog));
+
+        // 14. Тот же план уже не подошёл потоку клиента.
+        let t = target("unfit.example.com", SHAPE_MODERN);
+        let searches = std::sync::Mutex::new(super::R2oDiscoverySearches::default());
+        let wire = super::r2o_plan_wire_id(plan_text()).unwrap();
+        searches.lock().unwrap().note_unfit_plan(&t, wire);
+        let mut fetch = https_full();
+        fetch.r2o_volume_observation.packet_budget =
+            r2o_controller::r2o_volume::R2oVolumePacketBudget::Passed;
+        scenarios.push(snapshot(
+            "unfit_here",
+            &apply(
+                &t,
+                outcome(&t, plan_text()),
+                Ok(fetch),
+                true,
+                2,
+                None,
+                Some(&searches),
+            ),
+        ));
+
+        if let Ok(path) = std::env::var("R2O_VERIFY_CONFIRM_PRODUCTION_DIFF_OUTPUT") {
+            let output = serde_json::to_string(&Value::Array(scenarios)).unwrap();
+            std::fs::write(path, format!("{output}\n")).unwrap();
+        }
+        std::fs::remove_dir_all(&work).unwrap();
     }
 
     #[cfg(unix)]
