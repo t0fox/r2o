@@ -838,21 +838,34 @@ impl ManagerLock {
             .truncate(false)
             .open(root.join(".manager.lock"))?;
         // `flock` удерживает блокировку установки, пока открыт этот файл.
-        if unsafe {
-            libc::flock(
-                std::os::fd::AsRawFd::as_raw_fd(&file),
-                libc::LOCK_EX | libc::LOCK_NB,
-            )
-        } < 0
-        {
+        // На некоторых ФС (и под высокой параллельностью тестов) ядро
+        // отдаёт EAGAIN ещё короткое время после close предыдущего
+        // владельца. Ждём до 100 мс: настоящий параллельный менеджер всё
+        // равно получит Busy, а ложный отказ установки исчезает.
+        let mut attempts = 0;
+        loop {
+            if unsafe {
+                libc::flock(
+                    std::os::fd::AsRawFd::as_raw_fd(&file),
+                    libc::LOCK_EX | libc::LOCK_NB,
+                )
+            } == 0
+            {
+                break;
+            }
             let error = io::Error::last_os_error();
             if error
                 .raw_os_error()
                 .is_some_and(|code| code == libc::EWOULDBLOCK || code == libc::EAGAIN)
             {
-                #[cfg(test)]
-                log_test_manager_lock("busy", root, &file);
-                return Err(InstallError::Busy);
+                attempts += 1;
+                if attempts >= 50 {
+                    #[cfg(test)]
+                    log_test_manager_lock("busy", root, &file);
+                    return Err(InstallError::Busy);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                continue;
             }
             return Err(error.into());
         }
@@ -1116,6 +1129,22 @@ mod tests {
             active_component_path(&root, "r2o-detect"),
             Err(InstallError::MissingComponent(name)) if name == "r2o-detect"
         ));
+    }
+
+    #[test]
+    fn concurrent_manager_lock_still_returns_busy_after_retry_window() {
+        let temp = TestDir::new();
+        let root = temp.0.join("install");
+        fs::create_dir_all(&root).unwrap();
+        let _held = ManagerLock::acquire(&root).unwrap();
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            ManagerLock::acquire(&root),
+            Err(InstallError::Busy)
+        ));
+        // 50 попыток с паузой 2 мс: ложный EAGAIN успевает исчезнуть, а
+        // настоящий параллельный владелец всё равно получает Busy.
+        assert!(started.elapsed() >= std::time::Duration::from_millis(90));
     }
 
     #[test]
