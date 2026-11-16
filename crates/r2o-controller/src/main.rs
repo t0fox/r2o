@@ -11599,37 +11599,78 @@ impl R2oDiscoverySearches {
         if search.report_closed || search.report_id.is_none() {
             return false;
         }
-        let source = if search.source.is_empty() {
-            "none".to_owned()
-        } else {
-            search.source.clone()
-        };
         let verify_reason = search.verify.reason.clone();
         let mut event = r2o_discovery_diagnostic_event(self, target, now);
         if let Some(search) = self.entries.get_mut(&key) {
             search.report_closed = true;
         }
+        // Path уже переведён builder'ом в контрактный токен C.
+        let resolved_path = path
+            .map(str::to_owned)
+            .unwrap_or_else(|| event["path"].as_str().unwrap_or("none").to_owned());
         event["outcome"] = serde_json::json!(outcome);
-        event["path"] = serde_json::json!(path.unwrap_or(&source));
+        event["path"] = serde_json::json!(resolved_path);
         event["reason"] = serde_json::json!(reason.unwrap_or(&verify_reason));
         event["reason_source"] = serde_json::json!("last-classifier-context");
         self.pending_reports.push_back(event);
         true
     }
 
+    /// C `task_done`: `search_report("cancelled")`, затем `task_reset` —
+    /// задача обнуляется, report_id больше не выдаёт событий. Запись поиска
+    /// остаётся закрытой до нового `record_admission`.
+    fn report_cancelled(
+        &mut self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        now: std::time::Instant,
+    ) -> bool {
+        let key = r2o_discovery_task_key(target);
+        let reported = self.report_terminal(target, "cancelled", None, None, now);
+        if let Some(search) = self.entries.get_mut(&key) {
+            search.report_id = None;
+            search.report_closed = true;
+        }
+        reported
+    }
+
     /// C `d2k_sched_free`: по одному `shutdown` на каждый незакрытый поиск,
-    /// включая активные и ждущие в очереди.
-    fn report_shutdown(&mut self, now: std::time::Instant) -> usize {
-        let mut targets = self
+    /// включая активные и ждущие в очереди. Порядок — по слотам задач, как
+    /// C проходит `s->tasks[0..64]`; report_id для этого не годится: слот
+    /// переиспользуется, и новый поиск может получить меньший номер слота.
+    fn report_shutdown(
+        &mut self,
+        task_slots: &[Option<R2oDiscoveryTaskKey>],
+        now: std::time::Instant,
+    ) -> usize {
+        let mut seen = HashSet::new();
+        let mut ordered = Vec::new();
+        for key in task_slots.iter().flatten() {
+            if seen.insert(key.clone()) {
+                ordered.push(key.clone());
+            }
+        }
+        // Записи без слота (очередь, отказ по ёмкости) — после слотов, по
+        // возрастанию report_id: C для них задачу уже сбросил бы.
+        let mut rest = self
             .entries
-            .values()
-            .filter(|search| search.report_id.is_some() && !search.report_closed)
-            .map(|search| (search.report_id.unwrap_or(0), search.target.clone()))
+            .iter()
+            .filter(|(key, search)| {
+                !seen.contains(*key) && search.report_id.is_some() && !search.report_closed
+            })
+            .map(|(key, search)| (search.report_id.unwrap_or(0), key.clone()))
             .collect::<Vec<_>>();
-        // C `d2k_sched_free` идёт по слотам задач, т.е. по порядку report_id.
-        targets.sort_by_key(|(report_id, _)| *report_id);
+        rest.sort_by_key(|(report_id, _)| *report_id);
+        ordered.extend(rest.into_iter().map(|(_, key)| key));
         let mut emitted = 0;
-        for (_, target) in targets {
+        for key in ordered {
+            let Some(target) = self
+                .entries
+                .get(&key)
+                .filter(|search| search.report_id.is_some() && !search.report_closed)
+                .map(|search| search.target.clone())
+            else {
+                continue;
+            };
             emitted += usize::from(self.report_terminal(&target, "shutdown", None, None, now));
         }
         emitted
@@ -12725,6 +12766,11 @@ fn r2o_discovery_diagnostic_event(
         SHAPE_VOICE => "udp",
         _ => "tcp",
     };
+    // C `search_report`: path — токен `candidate_path`, а не подпись источника.
+    // До этого production-отчёт отдавал русскую подпись («свой план каталога»),
+    // тогда как C печатает `own-plan`; differential ловил это только при
+    // явно заданном path.
+    let report_path = r2o_discovery_report_path(&source);
     serde_json::json!({
         "id": report_id,
         "family": target.family,
@@ -12734,12 +12780,66 @@ fn r2o_discovery_diagnostic_event(
         "probe_units": probes,
         "target": target.host,
         "ip": endpoint.map(|address| address.ip().to_string()),
-        "path": source,
+        "path": report_path,
         "kind": if target.host.parse::<std::net::IpAddr>().is_ok() { "addr" } else { "name" },
         "shape": target.shape,
         "protocol": protocol,
         "reason_source": "last-classifier-context"
     })
+}
+
+/// C `search_report`/`candidate_path` (`core/sched.c:9520-9535,9557-9565`):
+/// `path` отчёта — короткий токен. C выбирает его по состоянию задачи
+/// (`own_first==2` → own-plan, RX-лестница → ladder, перебор → fallback,
+/// иначе property), Rust хранит подпись источника последнего кандидата.
+/// Переводим её в тот же токен, чтобы production-отчёты не выдавали русскую
+/// подпись вместо контрактного значения.
+#[cfg(unix)]
+fn r2o_discovery_report_path(source: &str) -> &'static str {
+    match source {
+        "" | "none" => "none",
+        "own-plan"
+        | "свой план каталога"
+        | "готовый план узнанной коробки"
+        | "план узнанной коробки" => "own-plan",
+        "ladder" | "ECH RX-лестница" | "объёмная лестница" => "ladder",
+        "fallback" | "запасной перебор d2o" => "fallback",
+        "property" | "выведен из замера" | "свойства коробки" => {
+            "property"
+        }
+        // C `candidate_path`: всё, что не own-plan/ladder/fallback, — property.
+        _ => "property",
+    }
+}
+
+#[cfg(all(unix, test))]
+#[test]
+fn discovery_report_path_matches_c_candidate_path() {
+    assert_eq!(r2o_discovery_report_path(""), "none");
+    assert_eq!(r2o_discovery_report_path("none"), "none");
+    for source in [
+        "own-plan",
+        "свой план каталога",
+        "готовый план узнанной коробки",
+        "план узнанной коробки",
+    ] {
+        assert_eq!(r2o_discovery_report_path(source), "own-plan", "{source}");
+    }
+    for source in ["ladder", "ECH RX-лестница", "объёмная лестница"] {
+        assert_eq!(r2o_discovery_report_path(source), "ladder", "{source}");
+    }
+    for source in ["fallback", "запасной перебор d2o"] {
+        assert_eq!(r2o_discovery_report_path(source), "fallback", "{source}");
+    }
+    for source in ["property", "выведен из замера", "свойства коробки"]
+    {
+        assert_eq!(r2o_discovery_report_path(source), "property", "{source}");
+    }
+    // C `candidate_path`: незнакомый источник — property, не сырая подпись.
+    assert_eq!(
+        r2o_discovery_report_path("неизвестный источник"),
+        "property"
+    );
 }
 
 #[cfg(unix)]
@@ -17724,7 +17824,7 @@ group_block_proven: false,
         self.searches
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .report_terminal(&target, "cancelled", None, None, now);
+            .report_cancelled(&target, now);
         self.r2o_forget_completed_task(task_key, true);
         self.r2o_reconcile_task_slots(now);
         true
@@ -17848,7 +17948,7 @@ group_block_proven: false,
             self.searches
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .report_terminal(&target, "cancelled", None, None, now);
+                .report_cancelled(&target, now);
             self.seen.remove(&target);
             self.seen_order.retain(|seen| seen != &target);
             self.suspect_fingerprints
@@ -18729,7 +18829,7 @@ group_block_proven: false,
             self.searches
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .report_terminal(target, "cancelled", None, None, std::time::Instant::now());
+                .report_cancelled(target, std::time::Instant::now());
             self.active_cancels
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -18840,7 +18940,7 @@ group_block_proven: false,
             self.searches
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .report_terminal(&target, "cancelled", None, None, std::time::Instant::now());
+                .report_cancelled(&target, std::time::Instant::now());
             self.active_cancels
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -19468,12 +19568,10 @@ group_block_proven: false,
 #[cfg(unix)]
 impl Drop for DiscoveryWorker {
     fn drop(&mut self) {
-        // C `d2k_sched_free`: каждому незакрытому поиску — один `shutdown`
-        // (активные, ждущие очередь и ещё не закрытые watcher-записи).
-        self.searches
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .report_shutdown(std::time::Instant::now());
+        // C `d2k_sched_free`: сначала `join_worker` (просьба остановиться и
+        // ожидание), только потом `search_report("shutdown")` и закрытие
+        // сокетов. Прежний порядок отчёта до остановки давал событие о
+        // задаче, чей worker ещё мог работать.
         self.cancel.store(true, Ordering::Relaxed);
         for cancel in self
             .active_cancels
@@ -19492,6 +19590,12 @@ impl Drop for DiscoveryWorker {
             while self.outcomes.try_recv().is_ok() {}
             let _ = thread.join();
         }
+        // Каждому незакрытому поиску — один `shutdown` (активные, ждущие
+        // очередь и ещё не закрытые watcher-записи), в порядке слотов задач.
+        self.searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .report_shutdown(&self.task_slots, std::time::Instant::now());
     }
 }
 
@@ -33473,7 +33577,7 @@ mod tests {
             .searches
             .lock()
             .unwrap()
-            .report_terminal(&cancelled, "cancelled", None, None, now);
+            .report_cancelled(&cancelled, now);
         let event = worker.try_diagnostic_report().unwrap();
         write_event(&mut output, &event, 3000, 400);
         worker.searches.lock().unwrap().entries.clear();
@@ -33527,7 +33631,11 @@ mod tests {
                 "остановка B",
                 now,
             );
-            searches.report_shutdown(now);
+            let slots = vec![
+                Some(r2o_discovery_task_key(&shutdown_a)),
+                Some(r2o_discovery_task_key(&shutdown_b)),
+            ];
+            searches.report_shutdown(&slots, now);
         }
         let event = worker.try_diagnostic_report().unwrap();
         write_event(&mut output, &event, 5000, 600);
@@ -33539,6 +33647,487 @@ mod tests {
         }
         while let Some(extra) = worker.try_diagnostic_report() {
             eprintln!("unexpected scheduler report: {extra}");
+        }
+    }
+
+    /// C/Rust differential порядка терминальной жизни задачи: task_reset,
+    /// task_done, task_fail и d2k_sched_free. Сверяются событие, его
+    /// однократность, освобождение слота, состояние отдыха и shutdown в
+    /// порядке слотов. C-ресурсы (fd, join, madvise) пишутся отдельным
+    /// файлом: в Rust задачи не держат fd, а madvise отсутствует.
+    #[cfg(unix)]
+    #[test]
+    fn scheduler_task_lifecycle_order_matches_c() {
+        use super::{
+            DiscoveryOutcome, R2oDiscoverySearch, R2oDiscoverySearches, R2oDiscoveryVerify,
+            r2o_discovery_failure_key, r2o_discovery_task_key,
+        };
+        use std::fmt::Write as _;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        fn target(host: &str, ip: &str, shape: u8) -> r2o_controller::discovery::DiscoveryTarget {
+            r2o_controller::discovery::DiscoveryTarget {
+                host: host.into(),
+                endpoint: format!("{ip}:443"),
+                family: 4,
+                shape,
+            }
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn insert(
+            searches: &mut R2oDiscoverySearches,
+            target: &r2o_controller::discovery::DiscoveryTarget,
+            id: u64,
+            trigger: u8,
+            probes: usize,
+            elapsed_ms: u64,
+            queue_ms: u64,
+            source: &str,
+            reason: &str,
+            now: Instant,
+        ) {
+            searches.entries.insert(
+                r2o_discovery_task_key(target),
+                R2oDiscoverySearch {
+                    target: target.clone(),
+                    queued_at: now - Duration::from_millis(elapsed_ms),
+                    started_at: Some(
+                        now - Duration::from_millis(elapsed_ms.saturating_sub(queue_ms)),
+                    ),
+                    report_id: Some(id),
+                    trigger_code: trigger,
+                    phase: "распознаём поведение",
+                    attempts: 0,
+                    probes,
+                    question: String::new(),
+                    candidate: String::new(),
+                    source: source.into(),
+                    plan: String::new(),
+                    application: String::new(),
+                    last_result: String::new(),
+                    verify: R2oDiscoveryVerify {
+                        reason: reason.into(),
+                        ..R2oDiscoveryVerify::default()
+                    },
+                    report_closed: false,
+                    props: crate::R2oPropsState::default(),
+                },
+            );
+        }
+
+        fn write_event(output: &mut String, event: &serde_json::Value) {
+            // C-сценарии задают целые секунды модельного времени; Rust живёт
+            // на Instant, поэтому сравниваем секундную сетку (как
+            // discovery_diagnostic_elapsed_includes_queue_time_like_d2o).
+            let elapsed_ms = event["elapsed_ms"].as_u64().unwrap_or(0) / 1000 * 1000;
+            writeln!(
+                output,
+                "event case={} seq={} id={} target={} protocol={} family={} trigger={} outcome={} path={} probe_units={} elapsed_ms={} queue_ms={} ip={} kind={} shape={} reason={}",
+                event["_case"].as_str().unwrap_or(""),
+                event["_seq"],
+                event["id"],
+                event["target"].as_str().unwrap_or(""),
+                event["protocol"].as_str().unwrap_or(""),
+                event["family"],
+                event["trigger"],
+                event["outcome"].as_str().unwrap_or(""),
+                event["path"].as_str().unwrap_or(""),
+                event["probe_units"],
+                elapsed_ms,
+                event["queue_ms"],
+                event["ip"].as_str().unwrap_or(""),
+                event["kind"].as_str().unwrap_or(""),
+                event["shape"],
+                event["reason"].as_str().unwrap_or(""),
+            )
+            .unwrap();
+        }
+
+        fn take_event(
+            worker: &super::DiscoveryWorker,
+            case: &str,
+            seq: usize,
+        ) -> serde_json::Value {
+            let mut event = worker.try_diagnostic_report().expect("терминальный отчёт");
+            event["_case"] = serde_json::json!(case);
+            event["_seq"] = serde_json::json!(seq);
+            event
+        }
+
+        let now = Instant::now();
+        let mut output = String::new();
+        let mut resources = String::new();
+
+        // 1. task_reset: local-abort, report_id обнулён, слот свободен.
+        let abort = target("abort.example", "198.51.100.60", 1);
+        let abort_key = r2o_discovery_task_key(&abort);
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        insert(
+            &mut worker.searches.lock().unwrap(),
+            &abort,
+            1,
+            1,
+            8,
+            1000,
+            200,
+            "none",
+            "локальный сброс",
+            now,
+        );
+        worker.task_slots[0] = Some(abort_key.clone());
+        // production task_reset: новый запуск закрывает прежний поиск.
+        worker
+            .searches
+            .lock()
+            .unwrap()
+            .update(&abort, "распознаём поведение", 0, 0, "", "");
+        let event = take_event(&worker, "reset", 1);
+        write_event(&mut output, &event);
+        assert!(
+            worker.try_diagnostic_report().is_none(),
+            "повторный local-abort"
+        );
+        worker.r2o_reconcile_task_slots(now);
+        let reset_slot_free = !worker
+            .task_slots
+            .iter()
+            .flatten()
+            .any(|key| key == &abort_key);
+        let reset_open_report = worker
+            .searches
+            .lock()
+            .unwrap()
+            .entries
+            .get(&abort_key)
+            .is_some_and(|search| search.report_id.is_some() && !search.report_closed);
+        writeln!(
+            output,
+            "state case=reset reports=1 state=FREE worker_live=0 active={} slot_free={} open_report={} rest_ms=0",
+            u8::from(!worker.active.is_empty()),
+            u8::from(reset_slot_free),
+            u8::from(reset_open_report),
+        )
+        .unwrap();
+        writeln!(
+            resources,
+            "R_RESET pending_fds=none state_free={} slot_freed={} report_id_cleared={} report_once=1",
+            u8::from(reset_slot_free),
+            u8::from(reset_slot_free),
+            u8::from(!reset_open_report),
+        )
+        .unwrap();
+
+        // 2. task_done: cancelled один раз, наблюдение и слот сняты, report_id
+        //    обнулён как в C task_reset.
+        let cancelled = target("cancelled.example", "198.51.100.61", 1);
+        let cancelled_key = r2o_discovery_task_key(&cancelled);
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        insert(
+            &mut worker.searches.lock().unwrap(),
+            &cancelled,
+            2,
+            2,
+            4,
+            2000,
+            300,
+            "none",
+            "поиск отменён",
+            now,
+        );
+        worker.task_slots[1] = Some(cancelled_key.clone());
+        worker.completed.insert(cancelled_key.clone());
+        worker
+            .completed_started_at
+            .insert(cancelled_key.clone(), now);
+        worker
+            .dns_watching
+            .insert(cancelled_key.clone(), (cancelled.clone(), now));
+        worker
+            .watching_flow
+            .insert(cancelled_key.clone(), [0_u8; r2k_core::control::KEY_LEN]);
+        assert!(worker.r2o_finish_watching_task(&cancelled_key, now));
+        let event = take_event(&worker, "done", 1);
+        write_event(&mut output, &event);
+        assert!(
+            !worker.r2o_finish_watching_task(&cancelled_key, now),
+            "повторное task_done"
+        );
+        assert!(
+            worker.try_diagnostic_report().is_none(),
+            "повторный cancelled"
+        );
+        let done_slot_free = !worker
+            .task_slots
+            .iter()
+            .flatten()
+            .any(|key| key == &cancelled_key);
+        let done_open_report = worker
+            .searches
+            .lock()
+            .unwrap()
+            .entries
+            .get(&cancelled_key)
+            .is_some_and(|search| search.report_id.is_some() && !search.report_closed);
+        assert!(!worker.r2o_is_watching_task(&cancelled_key));
+        assert!(!worker.completed.contains(&cancelled_key));
+        assert!(!worker.dns_watching.contains_key(&cancelled_key));
+        assert!(!worker.watching_flow.contains_key(&cancelled_key));
+        writeln!(
+            output,
+            "state case=done reports=1 state=FREE worker_live=0 active={} slot_free={} open_report={} rest_ms=0",
+            u8::from(!worker.active.is_empty()),
+            u8::from(done_slot_free),
+            u8::from(done_open_report),
+        )
+        .unwrap();
+        writeln!(
+            resources,
+            "R_DONE pending_fds=none state_free={} slot_freed={} report_id_cleared={} report_once=1 worker_live=0",
+            u8::from(done_slot_free),
+            u8::from(done_slot_free),
+            u8::from(!done_open_report),
+        )
+        .unwrap();
+
+        // 3. task_fail: failed один раз, слот удерживается на отдыхе, путь
+        //    кандидата переведён в контрактный `fallback`, как C candidate_path.
+        let failed = target("failed.example", "198.51.100.62", 1);
+        let failed_key = r2o_discovery_task_key(&failed);
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        insert(
+            &mut worker.searches.lock().unwrap(),
+            &failed,
+            3,
+            3,
+            6,
+            3000,
+            400,
+            "запасной перебор d2o",
+            "измерение без классификации",
+            now,
+        );
+        worker.task_slots[2] = Some(failed_key.clone());
+        worker.seen.insert(failed.clone());
+        worker.seen_order.push_back(failed.clone());
+        worker.active.insert(failed_key.clone(), failed.clone());
+        worker.r2o_complete_outcome(DiscoveryOutcome {
+            target: failed.clone(),
+            plan_text: None,
+            detail: "измерение без классификации".into(),
+            queue_expired: false,
+            address_failure: false,
+            address_recheck_acknowledged: false,
+            address_recheck_probes: 0,
+            direct_clear: false,
+            volume_recovery: false,
+            budget_mark: 0,
+            group_block_proven: false,
+            transferred_own_plan: false,
+            bound_plan_id: None,
+            ech_origin: None,
+            volume_fingerprint: None,
+            volume_box_id: None,
+            retry_after: None,
+        });
+        let event = take_event(&worker, "fail", 1);
+        write_event(&mut output, &event);
+        assert!(worker.try_diagnostic_report().is_none(), "повторный failed");
+        worker.r2o_reconcile_task_slots(Instant::now());
+        let failure_key = r2o_discovery_failure_key(&failed);
+        assert!(worker.failed_at.contains_key(&failure_key));
+        let fail_slot_held = worker
+            .task_slots
+            .iter()
+            .flatten()
+            .any(|key| key == &failed_key);
+        let fail_open_report = worker
+            .searches
+            .lock()
+            .unwrap()
+            .entries
+            .get(&failed_key)
+            .is_some_and(|search| search.report_id.is_some() && !search.report_closed);
+        let rest_ms = worker
+            .failed_retry_after
+            .get(&failure_key)
+            .map(|retry| retry.as_millis())
+            .unwrap_or(0);
+        writeln!(
+            output,
+            "state case=fail reports=1 state=RESTING worker_live=0 active={} slot_free={} open_report={} rest_ms={rest_ms}",
+            u8::from(!worker.active.is_empty()),
+            u8::from(!fail_slot_held),
+            u8::from(fail_open_report),
+        )
+        .unwrap();
+        writeln!(
+            resources,
+            "R_FAIL pending_fds=none state_resting=1 slot_held={} rest_ms={rest_ms} report_once=1",
+            u8::from(fail_slot_held),
+        )
+        .unwrap();
+
+        // 4. d2k_sched_free: shutdown по слотам, даже когда report_id идёт
+        //    против порядка слотов (9 в слоте 0, 2 в слоте 1).
+        let shutdown_a = target("shutdown-a.example", "198.51.100.63", 1);
+        let shutdown_b = target("shutdown-b.example", "198.51.100.64", 3);
+        let shutdown_a_key = r2o_discovery_task_key(&shutdown_a);
+        let shutdown_b_key = r2o_discovery_task_key(&shutdown_b);
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        {
+            let mut searches = worker.searches.lock().unwrap();
+            insert(
+                &mut searches,
+                &shutdown_a,
+                9,
+                9,
+                3,
+                5000,
+                600,
+                "none",
+                "остановка A",
+                now,
+            );
+            insert(
+                &mut searches,
+                &shutdown_b,
+                2,
+                2,
+                4,
+                6000,
+                700,
+                "none",
+                "остановка B",
+                now,
+            );
+        }
+        worker.task_slots[0] = Some(shutdown_a_key);
+        worker.task_slots[1] = Some(shutdown_b_key);
+        // Активная задача и задача в ограниченной очереди — обе должны
+        // получить ровно один `shutdown`, как слоты C.
+        worker
+            .active
+            .insert(r2o_discovery_task_key(&shutdown_a), shutdown_a.clone());
+        assert!(
+            worker
+                .jobs
+                .0
+                .lock()
+                .unwrap()
+                .enqueue_with_planned(shutdown_b.clone(), now, false)
+        );
+        let slots = vec![
+            Some(r2o_discovery_task_key(&shutdown_a)),
+            Some(r2o_discovery_task_key(&shutdown_b)),
+        ];
+        assert_eq!(
+            worker.searches.lock().unwrap().report_shutdown(&slots, now),
+            2
+        );
+        let event = take_event(&worker, "free", 1);
+        write_event(&mut output, &event);
+        let event = take_event(&worker, "free", 2);
+        write_event(&mut output, &event);
+        let free_reports = Arc::clone(&worker.searches);
+        drop(worker);
+        assert_eq!(
+            free_reports.lock().unwrap().pending_reports.len(),
+            0,
+            "Drop не должен повторять закрытые отчёты"
+        );
+        writeln!(output, "state case=free reports=2 freed=1").unwrap();
+        writeln!(
+            resources,
+            "R_FREE reports=2 slot_order=9,2 active=1 queued=1 closed_once=1 wake_pipe=na"
+        )
+        .unwrap();
+
+        // 5. join-before-report в Drop: worker живёт до остановки, отчёт
+        //    shutdown не должен появиться раньше его завершения.
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        {
+            let mut searches = worker.searches.lock().unwrap();
+            insert(
+                &mut searches,
+                &target("drop-a.example", "198.51.100.65", 1),
+                11,
+                1,
+                2,
+                1000,
+                100,
+                "none",
+                "остановка Drop A",
+                now,
+            );
+            insert(
+                &mut searches,
+                &target("drop-b.example", "198.51.100.66", 1),
+                10,
+                1,
+                2,
+                1000,
+                100,
+                "none",
+                "остановка Drop B",
+                now,
+            );
+        }
+        worker.task_slots[0] = Some(("drop-a.example".to_string(), 6, 4));
+        worker.task_slots[1] = Some(("drop-b.example".to_string(), 6, 4));
+        let finished = Arc::new(AtomicBool::new(false));
+        let violation = Arc::new(AtomicBool::new(false));
+        let thread_cancel = Arc::clone(&worker.cancel);
+        let thread_finished = Arc::clone(&finished);
+        worker.threads.push(std::thread::spawn(move || {
+            while !thread_cancel.load(Ordering::Relaxed) {
+                std::thread::yield_now();
+            }
+            // Окно, в котором прежний порядок успевал отчитаться до join.
+            std::thread::sleep(Duration::from_millis(30));
+            thread_finished.store(true, Ordering::Relaxed);
+        }));
+        let monitor_reports = Arc::clone(&worker.searches);
+        let thread_reports = Arc::clone(&worker.searches);
+        let monitor_finished = Arc::clone(&finished);
+        let monitor_violation = Arc::clone(&violation);
+        let monitor = std::thread::spawn(move || {
+            while !monitor_finished.load(Ordering::Relaxed) {
+                if !thread_reports.lock().unwrap().pending_reports.is_empty() {
+                    monitor_violation.store(true, Ordering::Relaxed);
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        });
+        drop(worker);
+        let _ = monitor.join();
+        assert!(
+            !violation.load(Ordering::Relaxed),
+            "shutdown-отчёт появился до завершения worker'а"
+        );
+        let joined_reports = monitor_reports.lock().unwrap();
+        let ids = joined_reports
+            .pending_reports
+            .iter()
+            .map(|event| event["id"].as_u64().unwrap_or(0))
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![11, 10], "shutdown не в порядке слотов");
+        drop(joined_reports);
+        writeln!(resources, "R_JOIN joined_before_report=1").unwrap();
+        writeln!(
+            resources,
+            "R_MADV absent=1 (task в Rust — запись HashMap, страницы не возвращаются)"
+        )
+        .unwrap();
+
+        if let Ok(path) = std::env::var("R2O_SCHED_LIFECYCLE_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+        if let Ok(path) = std::env::var("R2O_SCHED_LIFECYCLE_RESOURCES_OUTPUT") {
+            std::fs::write(path, resources).unwrap();
         }
     }
 
