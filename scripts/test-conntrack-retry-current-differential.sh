@@ -109,9 +109,9 @@ if ! wait_for "$r2o_tmp/d2o.trace" 'attempt 2' || ! wait_for "$r2o_tmp/r2o.trace
     show_logs
     exit 1
 fi
-if ! wait_for "$r2o_tmp/d2o.log" 'режим observe' || \
-    ! wait_for "$r2o_tmp/r2o.log" 'режим observe'; then
-    echo 'datapaths did not finish startup' >&2
+if ! wait_for "$r2o_tmp/d2o.log" 'выключены: нет ctnetlink' || \
+    ! wait_for "$r2o_tmp/r2o.log" 'выключены: нет ctnetlink'; then
+    echo 'datapaths did not observe the injected startup failure' >&2
     show_logs
     exit 1
 fi
@@ -124,7 +124,7 @@ for priority in 1000 1001 1002; do
 done
 
 if ! wait_for "$r2o_tmp/d2o.log" 'ctnetlink появился' || \
-    ! wait_for "$r2o_tmp/r2o.log" 'ctnetlink восстановлен'; then
+    ! wait_for "$r2o_tmp/r2o.log" 'ctnetlink появился'; then
     echo 'C/Rust conntrack recovery differed after route refresh' >&2
     show_logs
     exit 1

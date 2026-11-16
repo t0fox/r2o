@@ -202,17 +202,19 @@ pub struct Frame {
     pub body: Vec<u8>,
 }
 
-/// Counters accepted by core/link.c::d2k_link_next, including legacy short STATS.
+/// Счётчики STATS. Датапат отправляет их с нулевым ключом вне потока.
 pub fn decode_stats(frame: &Frame) -> Result<(u32, u32), &'static str> {
     if frame.kind != EVENT_STATS || frame.body.len() < KEY_LEN {
         return Err("кадр STATS короче ключа или имеет другой тип");
     }
     let key = &frame.body[..KEY_LEN];
-    if !matches!(key[0], 4 | 6)
-        || key[0] == 4
-            && (key[5..17].iter().any(|byte| *byte != 0)
-                || key[21..33].iter().any(|byte| *byte != 0))
-    {
+    let valid_key = match key[0] {
+        0 => key.iter().all(|byte| *byte == 0),
+        4 => key[5..17].iter().chain(&key[21..33]).all(|byte| *byte == 0),
+        6 => true,
+        _ => false,
+    };
+    if !valid_key {
         return Err("недопустимое семейство или хвост IPv4 ключа STATS");
     }
     let rest = &frame.body[KEY_LEN..];
@@ -235,6 +237,9 @@ mod stats_tests {
         for family in [0, 4, 6] {
             let mut body = vec![0; KEY_LEN + 8];
             body[0] = family;
+            if family == 0 {
+                body[1] = 1;
+            }
             body[KEY_LEN + 3] = 7;
             body[KEY_LEN + 7] = 19;
             let frame = Frame {
@@ -256,6 +261,14 @@ mod stats_tests {
                 assert_eq!(decode_stats(&short).ok(), (family != 0).then_some((0, 0)));
             }
         }
+        // Служебный STATS датапата целиком обнуляет ключ.
+        let mut stats = Frame {
+            kind: EVENT_STATS,
+            body: vec![0; KEY_LEN],
+        };
+        assert_eq!(decode_stats(&stats), Ok((0, 0)));
+        stats.body.extend_from_slice(&[0, 0, 0, 7, 0, 0, 0, 19]);
+        assert_eq!(decode_stats(&stats), Ok((7, 19)));
         assert!(
             decode_stats(&Frame {
                 kind: EVENT_STATS,

@@ -1595,7 +1595,7 @@ mod app {
         let mut pending_udp_releases = HashMap::<FlowTicket, PendingUdpRelease>::new();
         let mut holding = HoldTable::default();
         let mut tcp_sessions = TcpSessions::try_with_capacity(options.flow_capacity)?;
-        let mut conntrack = R2oConntrackClient::open_unprobed();
+        let mut conntrack = None;
         let mut ct_up = false;
         let mut ct_told_off = false;
         r2o_ct_probe(&mut conntrack, &mut ct_up, &mut ct_told_off, true);

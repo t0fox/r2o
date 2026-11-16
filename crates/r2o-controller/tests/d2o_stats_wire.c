@@ -8,7 +8,7 @@
 #include "d2k_link.h"
 #include "d2k_ctlsrv.h"
 
-/* Exercise the actual sender and parser, including d2kd.c's zero-key body. */
+/* Проверить корректные ключи и некорректное семейство 0 с ненулевым адресом. */
 int main(void) {
     char directory[] = "/tmp/r2o-stats-wire.XXXXXX";
     if (!mkdtemp(directory)) return 2;
@@ -27,6 +27,7 @@ int main(void) {
     for (unsigned i = 0; i < sizeof families / sizeof families[0]; i++) {
         uint8_t body[D2K_KEY_WIRE_LEN + 8] = {0};
         body[0] = (uint8_t)families[i];
+        if (!families[i]) body[1] = 1;
         body[D2K_KEY_WIRE_LEN + 3] = 7;
         body[D2K_KEY_WIRE_LEN + 7] = 19;
         d2k_ctl_event(sender, D2K_EV_STATS, body, sizeof body);
