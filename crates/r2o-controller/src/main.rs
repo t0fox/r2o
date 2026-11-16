@@ -40,6 +40,8 @@ use r2o_controller::classify::{
     run_with_backend_progress as classify_run_with_progress,
 };
 use r2o_controller::classify_json::result_json_value as classify_result_json_value;
+#[cfg(unix)]
+use r2o_controller::compose_d2o::r2o_plan_tlv_stamp_ident;
 use r2o_controller::domain::normalize;
 use r2o_controller::http_search::{
     R2oHttpPlanRecord, add_candidate, candidate_key_from_plan_text, candidate_keys,
@@ -50,7 +52,6 @@ use r2o_controller::https_probe::{
     HttpsPortalOutcome, HttpsProbeWorker, target_from_http_response, target_from_portal,
 };
 use r2o_controller::plan_text::compile_text;
-#[cfg(unix)]
 use r2o_controller::r2o_late_rx::{R2oLateRxCache, R2oLateRxInput};
 #[cfg(unix)]
 use r2o_controller::r2o_quic_deny::R2oQuicDenyCache;
@@ -542,15 +543,14 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
             );
             continue;
         }
-        let plan_id = random_id()?;
         let trial_id = random_id()?;
-        let (plan_text, plan) = match question_plan(
+        let (plan_text, _plan) = match question_plan(
             question,
             &trigger,
             control_trigger
                 .as_ref()
                 .map(|value| value.payload.as_slice()),
-            plan_id,
+            [0; 16],
         ) {
             Ok(plan) => plan,
             Err(error) => {
@@ -563,11 +563,12 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
             }
         };
         let plan_records = compile_text(&plan_text)?;
-        let plan_len = plan_records.len();
-        let wire_records = r2o_plan_records_for_wire(&plan_records)?;
-        if plan.id != plan_id {
-            return Err("план вопроса потерял случайный идентификатор".into());
-        }
+        let mut wire_records = r2o_plan_records_for_wire(&plan_records)?;
+        // C `plan_tlv_stamp_ident`: идентификатор вопроса считается по
+        // D2KP-TLV, а не по тексту и не случайным значением.
+        let plan_id = r2o_plan_tlv_stamp_ident(&mut wire_records)
+            .map_err(|error| format!("план вопроса не удостоверен: {error}"))?;
+        let plan_len = wire_records.len();
         let bound = match BoundTcpProbe::open(family, Some(0)) {
             Ok(bound) => bound,
             Err(error) => {
@@ -8551,22 +8552,20 @@ fn r2o_run_discovery_props_questions(
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        let Ok(plan_id) = random_id() else {
-            continue;
-        };
         let Ok(trial_id) = random_id() else {
             continue;
         };
-        let Ok((plan_text, plan)) = question_plan(question, trigger, Some(control), plan_id) else {
+        let Ok((plan_text, _plan)) = question_plan(question, trigger, Some(control), [0; 16])
+        else {
             continue;
         };
-        if plan.id != plan_id {
-            continue;
-        }
         let Ok(records) = compile_text(&plan_text) else {
             continue;
         };
-        let Ok(wire_records) = r2o_plan_records_for_wire(&records) else {
+        let Ok(mut wire_records) = r2o_plan_records_for_wire(&records) else {
+            continue;
+        };
+        let Ok(plan_id) = r2o_plan_tlv_stamp_ident(&mut wire_records) else {
             continue;
         };
         let Ok(bound) = BoundTcpProbe::open(target.family, mark) else {

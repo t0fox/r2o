@@ -148,7 +148,7 @@
 | `wr32be` | 152-155 | 4 | запись big-endian u32 | `plan_text::push_u32` | E | C `wr32be`: `p[0]=v>>24 … p[3]=v`. Rust `push_u32` пишет `to_be_bytes`; тест `push_u16_and_push_u32_match_c_wr16be_wr32be` сверяет 0, 1, 0x12345678, 0xffffffff. |
 | `tlv_rec` | 162-174 | 13 | TLV-запись из двух частей (a+b): `vlen<=0xffff`, `pos+4<=cap`, `cap-(pos+4)>=vlen`, type/len BE, копии | `plan_text::compile_text` | E | C `tlv_rec`: `vlen=alen+blen`, type/len BE, затем `a` и `b`; отказ при `vlen>0xffff` или нехватке места. Rust `compile_text` пишет те же записи `kind/len/value` BE и проверяет `u16::try_from`/`MAX_PLAN_BYTES`; тест `d2kp_header_matches_c_tlv_header_for_question_plan` проверяет границы всех записей и declared count, точные hex-тесты фиксируют байты. Двухчастная форма C — API-деталь, на проводе байты те же. |
 | `tlv_header` | 186-198 | 13 | шапка TLV: `D2KP`, schema 1, minexec 1, flags 0, n_records, REC_ID (16 нулей), REC_PROTO (6,1) | `plan_text::compile_text` + `Plan::to_wire(..., true)` | E | C `tlv_header`: 12 байт `D2KP`+schema+minexec+flags+n_records BE, затем REC_ID `0x0001` len 16 с нулями и REC_PROTO `0x0002` len 2 `[6,1]`. Rust `compile_text` собирает ту же шапку в R2OP, `Plan::to_wire(..., true)` меняет magic на D2KP; тест `d2kp_header_matches_c_tlv_header_for_question_plan` сверяет байты шапки, REC_ID/REC_PROTO и границы всех записей. |
-| `plan_tlv_stamp_ident` | 218-240 | 23 | проверяет REC_ID на offset 12 (len 16), FNV-1a по TLV с нулевым id, пишет `plan-%08x` | `discovery.rs:1450 plan_text_for_trial`, `:1459 stable_plan_id`, `:1434 text_with_id` | **P** | **Ветви C:** `rec=12`, `val=16`; `!tlv \|\| len<32` → -1; `rd16(tlv+rec)==REC_ID && rd16(tlv+rec+2)==16`, иначе -1; `h=2166136261`; для каждого байта `h^=tlv[i]; h*=16777619`; `snprintf("plan-%08x")`; `memset(out_id,0,16)`, копия `min(strlen,16)`; запись в `tlv+val`. **Расхождение:** Rust `plan_text_for_trial` подставляет переданный 16-байтный id через `text_with_id`, FNV над TLV не считает; `stable_plan_id` — другой хэш (два FNV-1a 64-бит по family/shape/тексту), не `plan-%08x`. C/Rust differential штампа нет. |
+| `plan_tlv_stamp_ident` | 218-240 | 23 | проверяет REC_ID на offset 12 (len 16), FNV-1a по TLV с нулевым id, пишет `plan-%08x` | `compose_d2o::r2o_plan_tlv_stamp_ident`, ask/props пути в `main.rs` | **E*** | **2026-11-16:** добавлен production `r2o_plan_tlv_stamp_ident` (FNV-1a 32 по D2KP-TLV, `plan-%08x`, 16 байт с нулями) и использован в обоих ask-путях: план собирается с нулевым id, переводится в D2KP, удостоверяется, и тот же id идёт в `props_begin`. C/Rust differential `scripts/r2o-compose-tlv-differential.sh` PASS: id и stamped TLV совпали для overlap/reorder/badsum/badsum_gap/checksum, guard'ы `short`/`wrong_type`/`wrong_len` дают -1. **Ограничение:** discovery-кандидаты по-прежнему используют C `sched.c plan_ident` по тексту (`plan-%08x` от текста), а не этот TLV-штамп — это другая C-функция; живой `d2k_props_question_plan` на произвольном триггере побайтно не сверялся. |
 | `overlap_plan_tlv` | 258-270 | 13 | TLV-план перекрытия: 5 записей, payload 1 (`0f`), seqovl 1/0, order forward | `compose_d2o::overlap_plan_text` + `plan_text::compile_text` | **E*** | **2026-11-16:** C/Rust differential `scripts/r2o-compose-tlv-differential.sh` PASS: C `overlap_plan_tlv` против Rust `overlap_plan_text` → production `compile_text`; TLV совпал побайтно после нормализации 4-байтного magic (C `D2KP`, Rust `R2OP`). **Ограничение:** `plan_tlv_stamp_ident` и точный текст builder'а отдельно не сверялись. |
 | `reorder_plan_tlv` | 277-290 | 14 | TLV-план обратного порядка: 6 записей, два split, order reverse, pace | `compose_d2o::reorder_plan_text` + `compile_text` | **E*** | **2026-11-16:** `r2o-compose-tlv-differential.sh` PASS: C `reorder_plan_tlv` против Rust `reorder_plan_text` → `compile_text`; TLV совпал побайтно после нормализации magic. **Ограничение:** якоря split проверены через компилятор, точный текст builder'а отдельно не сверялся. |
 | `badsum_fake_plan_tlv` | 296-316 | 21 | TLV badsum+fake: 7 записей, payload, poison badsum, fake repeats/gap place=before, order forward, pace | `compose_d2o::badsum_fake_plan_text` + `compile_text` | **E*** | **2026-11-16:** `r2o-compose-tlv-differential.sh` PASS на двух входах: filler 64×`0f` (repeats=1,gap=0) и `hello` (repeats=2,gap=20000); TLV совпал с C после нормализации magic. **Ограничение:** проверены два набора repeats/gap; `plan_tlv_stamp_ident` не покрыт. |
@@ -1218,18 +1218,19 @@ memory_bytes, load с проверкой хвоста, все writer'ы, `d2k_ca
   `r2o_rx_volume`/`plan_text`; список 266 имён и порядок покрыты unit
   `r2o_rx_volume`, TLV-билдеры используются в C-тестах и прямого
   C/Rust differential не имеют (P/P*).
-- **`plan_tlv_stamp_ident`:** C считает FNV-1a по байтам TLV с нулевым
-  `REC_ID` и вписывает `plan-%08x` (12 байт + NUL) в запись ID. Rust
-  `discovery.rs:1450 plan_text_for_trial` подставляет в текст переданный
-  вызывающим 16-байтный trial-id; функции, повторяющей FNV-1a-штамп именно
-  в TLV, нет. Это реальное различие идентичности плана/атрибуции APPLIED:
-  статус P, нужен differential `plan_tlv_stamp_ident` ↔ R2O trial-id.
+- **`plan_tlv_stamp_ident`:** E*. C считает FNV-1a по байтам TLV с
+  нулевым `REC_ID` и вписывает `plan-%08x` в запись ID; Rust
+  `compose_d2o::r2o_plan_tlv_stamp_ident` делает то же, и оба
+  ask-пути (`run_r2o_ask`, `r2o_run_discovery_props_questions`) теперь
+  собирают план с нулевым id, переводят в D2KP и удостоверяют его перед
+  отправкой. `r2o-compose-tlv-differential.sh` сверил id/stamped TLV и
+  guard'ы layout'а. Discovery-кандидаты по-прежнему используют C
+  `sched.c plan_ident` по тексту — это отдельная функция, не штамп TLV.
 - **Сборка TLV-планов:** `overlap_plan_tlv`, `reorder_plan_tlv`,
   `badsum_fake_plan_tlv`, `checksum_plan_tlv` — E*:
   `r2o-compose-tlv-differential.sh` сравнил C TLV с Rust-текстом через
-  production `plan_text::compile_text`; отличается только magic
-  `D2KP`/`R2OP` (нормализуется). `plan_tlv_stamp_ident` остаётся P:
-  Rust ставит идентификатор по тексту (`plan_ident`), а не по TLV.
+  production `plan_text::compile_text`, затем удостоверил тем же
+  FNV-1a; id и stamped TLV совпали побайтно.
 - **События/contact:** `ev_matches_flow`, `wait_for_event3`,
   `wait_for_event` — C-цикл по времени с фильтром типа/кода/ключа; Rust
   `wait_for_ask_proof(trial_id, plan_id, expected_key)` и
@@ -1275,7 +1276,7 @@ memory_bytes, load с проверкой хвоста, все writer'ы, `d2k_ca
 | `wr32be` | 152–155 | `push_u32`/`to_be_bytes` | **P*** | Big-endian u32; static-хелпер. |
 | `tlv_rec` | 162–174 | `plan_text.rs:598-604` | **P*** | type/len/value, `len<=0xFFFF`, проверка cap; Rust проверяет `u16::try_from`. |
 | `tlv_header` | 186–198 | `plan_text.rs:67-610` | **P** | D2KP/schema 1/minexec 1/flags 0/count + ID(нули)+PROTO(6,1); Rust `r2o-plan` и `minexec` вычисляется, не всегда 1. |
-| `plan_tlv_stamp_ident` | 218–240 | `main.rs` random plan/trial id | **P** | C FNV-1a по TLV с нулевым ID → `plan-%08x`; Rust подставляет случайный 16-байтный id. Разная идентичность/атрибуция APPLIED. |
+| `plan_tlv_stamp_ident` | 218–240 | `compose_d2o::r2o_plan_tlv_stamp_ident` + ask/props | **E*** | `r2o-compose-tlv-differential.sh`: id/stamped TLV совпали с C, guard'ы layout'а проверены. Ограничение — discovery использует C sched `plan_ident` по тексту. |
 | `overlap_plan_tlv` | 258–270 | `compose_d2o::overlap_plan_text` + `plan_text` | **E*** | `r2o-compose-tlv-differential.sh`: TLV совпал с C после нормализации magic. |
 | `reorder_plan_tlv` | 277–290 | `compose_d2o::reorder_plan_text` + `plan_text` | **E*** | `r2o-compose-tlv-differential.sh`: TLV совпал с C после нормализации magic. |
 | `badsum_fake_plan_tlv` | 296–316 | `compose_d2o::badsum_fake_plan_text` + `plan_text` | **E*** | `r2o-compose-tlv-differential.sh`: два входа repeats/gap, TLV совпал с C. |

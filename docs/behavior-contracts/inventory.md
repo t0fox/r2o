@@ -5,12 +5,12 @@
 поведенческие контракты. Источник — канонические таблицы
 `docs/audit/{core-net,core-state,datapath-core,datapath-plan,detect}.md`.
 
-Строк P: **400**; контрактов: **32**; без контракта: **0**.
+Строк P: **399**; контрактов: **31**; без контракта: **0**.
 
 | Группа | P |
 |---|---:|
 | core-net | 188 |
-| core-state | 193 |
+| core-state | 192 |
 | datapath-core | 7 |
 | datapath-plan | 0 |
 | detect | 12 |
@@ -41,7 +41,6 @@
 | `CS-SCHED-ECH-QUIC` | Scheduler ECH witness and QUIC initial/address control | ECH witness, quic own initial/address/multi. | 9 | sched.c: ECH/QUIC; Rust ech/quic initial; e2e DoQ и полный порядок не доказаны. |
 | `CS-SCHED-DIAGNOSTICS` | Scheduler diagnostics/live output | progress/diagnostics/counts, live binding/phase, say/level/time/hex. | 12 | sched.c: diagnostics/helpers; live 12 states PASS, редкие counters/поля P. |
 | `CS-CRYPTO-ECC` | ECC primitives P-256/X25519 | Полевая арифметика, point/scalar, public/keypair/ecdh. | 33 | p256/x25519: 33 P; ring/hpke/dalek; прямых C/Rust векторов нет. |
-| `CS-CATALOG-TLV` | Catalog TLV plan encoding | plan TLV stamp/overlap/reorder/badsum/checksum. | 1 | compose: 1 P; overlap/reorder/badsum/checksum TLV C/Rust differential PASS; остаётся plan_tlv_stamp_ident. |
 | `CS-CLI-TOOLS` | CLI tools d2kc/d2kask/d2kfetch/d2kvoice | Флаги, stdout/exit, snapshot wire, usage. | 3 | d2kc/d2kask/d2kfetch/d2kvoice: 3 P; d2kvoice main/usage PASS; snapshot_wire C-путь недостижим; diagnostic_limit/event/tick и http_search_portal — C/Rust differential PASS; остальные CLI. |
 | `CS-LINK-IO` | Link/control I/O helpers | readable wait, hex decode, area key, error text. | 1 | link: 1 P; send_area_key 11 + wait_readable 8 + hex_decode 6 кейсов C/Rust PASS; остаётся say. |
 | `CS-PROPS` | QUIC properties text | original/strategy measure and wire properties. | 5 | props: 5 P; quic props findings текстовый контракт не полный. |
@@ -66,13 +65,15 @@
 |---|---|---|
 | `DT-CLI-OUTPUT` | Detect CLI JSON/human/usage/exit | 2026-11-16: `r2o-detect` добавлен в `package-release.sh` и release-артефакт; `r2o-manager` активирует его как необязательный компонент; `test-detect-release-artifact.sh` распаковывает архив и даёт `6 triggers / 19 exits / json=equal / human=equal` на packaged binary. `r2o-controller --classify` остаётся отдельным CLI-путём. |
 | `CS-MEASUREMENT` | Measurement transport helpers | 2026-11-16: `connect_bounded` success/refused/badfd, `send_all` send-timeout/EINTR/10 ветвей, `d2k_arm_plan_measured` 28 кейсов, `nap_us` 20 мс/EINTR — все C/Rust differential PASS; production nap переведён на `libc::nanosleep` с C-семантикой. |
+| `CS-CATALOG-TLV` | Catalog TLV plan encoding | 2026-11-16: `r2o-compose-tlv-differential.sh` — overlap/reorder/badsum/badsum_gap/checksum и `plan_tlv_stamp_ident` (id + stamped D2KP, guard'ы layout'а) совпали с C; оба ask-пути удостоверяют план по TLV. |
 
 ## Следующий шаг
 
 `CS-LINK-IO` сокращён до 1 P: `send_area_key` (11), `wait_readable`
 (8) и `hex_decode` (6) сверены C/Rust differential. Остаётся `say`.
-`CS-MEASUREMENT` закрыт; следующий кандидат — `CS-CLI-TOOLS`
-(`d2kask`/`d2kfetch`), отдельный пользовательский CLI-контракт.
+`CS-MEASUREMENT` и `CS-CATALOG-TLV` закрыты; следующий кандидат —
+`CS-CLI-TOOLS` (`d2kask`/`d2kfetch`) и `say`, отдельный
+пользовательский/лог-контракт.
 
 ## Ограничение TTL-контракта
 

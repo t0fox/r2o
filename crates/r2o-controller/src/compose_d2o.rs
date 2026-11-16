@@ -37,6 +37,33 @@ fn header() -> String {
     format!("d2k-plan 1 1\nid {}\nproto tcp tls\n", "0".repeat(32))
 }
 
+/// C `plan_tlv_stamp_ident` (`core/compose.c:218-244`): FNV-1a 32 по
+/// D2KP-TLV с ещё нулевым REC_ID, затем `plan-%08x` ASCII + нули до 16.
+/// Раскладка проверяется, а не предполагается: REC_ID должен стоять
+/// сразу после 12-байтного заголовка и иметь длину 16.
+pub fn r2o_plan_tlv_stamp_ident(tlv: &mut [u8]) -> Result<[u8; 16], String> {
+    const REC_ID: u16 = 0x0001;
+    if tlv.len() < 32 {
+        return Err("план короче записи идентификатора".into());
+    }
+    if u16::from_be_bytes([tlv[12], tlv[13]]) != REC_ID
+        || u16::from_be_bytes([tlv[14], tlv[15]]) != 16
+    {
+        return Err("запись идентификатора плана не на месте".into());
+    }
+    let mut hash: u32 = 2_166_136_261;
+    for byte in tlv.iter() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(16_777_619);
+    }
+    let text = format!("plan-{hash:08x}");
+    let mut id = [0_u8; 16];
+    let length = text.len().min(id.len());
+    id[..length].copy_from_slice(&text.as_bytes()[..length]);
+    tlv[16..32].copy_from_slice(&id);
+    Ok(id)
+}
+
 fn overlap_plan_text() -> String {
     format!(
         "{}payload 1 {D2K_OVERLAP_FILLER:02x}\nseqovl payload=1 poison=0\norder forward\n",
@@ -162,6 +189,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn compose_texts_compile_to_d2o_tlv() {
+        use r2k_core::plan::Plan;
+
         let mut output = String::new();
         for (name, text) in [
             ("overlap", super::overlap_plan_text()),
@@ -175,8 +204,30 @@ mod tests {
                 super::badsum_fake_plan_text(b"hello", 2, 20_000),
             ),
         ] {
-            let bytes = crate::plan_text::compile_text(&text).unwrap();
-            output.push_str(&format!("{name} {}\n", super::hex(&bytes)));
+            let records = crate::plan_text::compile_text(&text).unwrap();
+            let mut wire = Plan::to_wire(&records, true).unwrap();
+            let id = super::r2o_plan_tlv_stamp_ident(&mut wire).unwrap();
+            output.push_str(&format!(
+                "{name} id={} tlv={}\n",
+                super::hex(&id),
+                super::hex(&wire)
+            ));
+        }
+        for (name, mut tlv) in [
+            ("short", vec![0_u8; 31]),
+            ("wrong_type", vec![0_u8; 32]),
+            ("wrong_len", vec![0_u8; 32]),
+        ] {
+            if name == "wrong_len" {
+                tlv[13] = 1;
+                tlv[15] = 15;
+            }
+            let rc = if super::r2o_plan_tlv_stamp_ident(&mut tlv).is_err() {
+                -1
+            } else {
+                0
+            };
+            output.push_str(&format!("{name} rc={rc}\n"));
         }
         if let Ok(path) = std::env::var("R2O_COMPOSE_TLV_DIFF_OUTPUT") {
             std::fs::write(path, &output).unwrap();

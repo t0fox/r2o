@@ -3,7 +3,8 @@
 # C-оракул — production overlap_plan_tlv/reorder_plan_tlv/
 # badsum_fake_plan_tlv/checksum_plan_tlv; Rust — соответствующий текст
 # compose_d2o, скомпилированный production plan_text::compile_text.
-# Отличается только 4-байтный magic (D2KP у C, R2OP у Rust).
+# Rust-текст сначала компилируется и переводится в D2KP, затем
+# удостоверяется тем же FNV-1a, что C `plan_tlv_stamp_ident`.
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
@@ -38,24 +39,25 @@ R2O_COMPOSE_TLV_DIFF_OUTPUT="$TEMP/rust.out" \
 python3 - "$TEMP/c.out" "$TEMP/rust.out" <<'PY'
 import sys
 
-def load(path, magic):
+def load(path):
     out = {}
     with open(path, encoding="utf-8") as handle:
         for line in handle:
-            name, hex_text = line.split()
-            if not hex_text.startswith(magic):
-                raise SystemExit(f"unexpected magic in {name}: {hex_text[:8]}")
-            out[name] = "00000000" + hex_text[8:]
+            name, rest = line.split(maxsplit=1)
+            out[name] = rest.strip()
     return out
 
-c = load(sys.argv[1], "44324b50")
-r = load(sys.argv[2], "52324f50")
+c = load(sys.argv[1])
+r = load(sys.argv[2])
 for name in ("overlap", "reorder", "badsum", "badsum_gap"):
     if c[name] != r[name]:
-        raise SystemExit(f"FAIL: {name} TLV differs")
+        raise SystemExit(f"FAIL: {name} stamped TLV differs")
 if c["checksum"] != r["badsum"]:
-    raise SystemExit("FAIL: checksum TLV differs from Rust badsum")
-print("compose TLV: 4 builders + checksum match (magic normalized)")
+    raise SystemExit("FAIL: checksum stamped TLV differs from Rust badsum")
+for name in ("short", "wrong_type", "wrong_len"):
+    if c[name] != r[name] or c[name] != "rc=-1":
+        raise SystemExit(f"FAIL: {name} layout guard differs")
+print("compose TLV: 4 builders + checksum + layout guards match")
 PY
 
 printf 'PASS: compose TLV builders match C (%s)\n' "$ACTUAL_SHA"
