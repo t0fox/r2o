@@ -844,9 +844,11 @@ pub(crate) fn r2o_nap_us(microseconds: u32) {
     if microseconds == 0 {
         return;
     }
+    // `as _`: на 32-bit musl `libc::time_t` — deprecated alias (musl 1.2
+    // переходит на 64-bit); тип поля выводится из `libc::timespec`.
     let request = libc::timespec {
-        tv_sec: (microseconds / 1_000_000) as libc::time_t,
-        tv_nsec: ((microseconds % 1_000_000) * 1_000) as libc::c_long,
+        tv_sec: (microseconds / 1_000_000) as _,
+        tv_nsec: ((microseconds % 1_000_000) * 1_000) as _,
     };
     unsafe {
         libc::nanosleep(&request, std::ptr::null_mut());
