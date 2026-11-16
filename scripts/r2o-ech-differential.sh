@@ -49,7 +49,12 @@ make -s -C "$D2O_ROOT/core" test_ech CC="$CC" >/dev/null
 
 printf 'nameserver 127.0.0.1\n' >"$TEMP/resolv.conf"
 chmod 644 "$TEMP/resolv.conf"
-unshare -rmn sh -c '
+if [ "${R2O_ECH_PRIVILEGED_NETNS:-0}" = 1 ]; then
+    set -- sudo unshare --mount --net --propagation private
+else
+    set -- unshare -rmn
+fi
+"$@" sh -c '
     ip link set lo up || exit 1
     mount --bind "$1" /etc/resolv.conf || exit 1
     "$2"

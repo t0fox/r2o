@@ -722,6 +722,7 @@ jobs:
           cargo +1.98.0 fetch --locked
       - name: C/Rust сценарии
         env:
+          R2O_ECH_PRIVILEGED_NETNS: '1'
           DONOR_SNAPSHOT: ${{ matrix.snapshot }}
           DIFFERENTIAL_SHARD: ${{ matrix.shard }}
           R2O_EXPECTED_DONOR_SHA: ${{ matrix.donor_sha }}

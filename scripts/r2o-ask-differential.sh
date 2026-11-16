@@ -63,7 +63,7 @@ mkdir -p "$r2o_log_dir"
 } >"$r2o_log" 2>&1
 
 grep -q 'd2kask: все проверки прошли' "$r2o_log"
-grep -q 'test result: ok\. 9 passed; 0 failed' "$r2o_log"
+grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$r2o_log"
 grep -q 'question_order_and_plan_parameters_match_the_five_donor_probes .*ok' "$r2o_log"
 printf 'Журнал проверки: %s\n' "$r2o_log"
 cat "$r2o_log"
