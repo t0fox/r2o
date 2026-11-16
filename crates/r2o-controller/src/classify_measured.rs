@@ -32,6 +32,7 @@ fn arm_segment(send_cap: usize) -> usize {
 static SEGMENT_MAX: AtomicUsize = AtomicUsize::new(DEFAULT_SEGMENT_MAX);
 
 /// C `d2k_raw_set_segment_max`: `seg ? seg : D2K_ARM_SEGMENT_MAX`.
+#[cfg(test)]
 pub fn set_segment_max(segment: usize) {
     #[cfg(target_os = "linux")]
     {

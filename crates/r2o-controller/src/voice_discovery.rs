@@ -534,7 +534,7 @@ pub fn r2o_probe_discovery_endpoint(
         r2o_socket
             .connect(SocketAddr::V4(r2o_server))
             .map_err(|error| format!("не подключить UDP-сокет Discovery: {error}"))?;
-        let r2o_local = match r2o_socket
+        match r2o_socket
             .local_addr()
             .map_err(|error| format!("не прочитать локальный UDP-адрес: {error}"))?
         {

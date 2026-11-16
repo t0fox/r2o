@@ -89,7 +89,7 @@ fn output_line(case: &Case<'_>) -> String {
     let trigger = build_variant(case.trigger_variant, false);
     let control = build_variant(case.control_variant, true);
     let white = build_variant(case.white_variant, false);
-    let mut options = if case.tcp_known {
+    let options = if case.tcp_known {
         if case.tcp_large {
             vec![0_u8; 41]
         } else {

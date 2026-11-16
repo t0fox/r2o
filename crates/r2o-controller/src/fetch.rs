@@ -2464,6 +2464,7 @@ impl Drop for R2oHttpResponseBufferTracking {
 }
 
 /// rustls `EchStatus::Accepted` означает проверенный accept_confirmation.
+#[cfg(test)]
 fn r2o_ech_accepted(status: rustls::client::EchStatus) -> bool {
     crate::r2o_tls::r2o_tls_ech_accepted(Some(status))
 }
@@ -3957,7 +3958,7 @@ fn r2o_budget_say(
 
 fn r2o_measure_http_packet_budget(
     stream: &mut StreamOwned<rustls::ClientConnection, R2oTlsTcpStream>,
-    options: &FetchOptions,
+    _options: &FetchOptions,
     _encoding: R2oFetchEncoding,
     request: &[u8],
     read_timeout: Duration,
@@ -4299,6 +4300,7 @@ pub(crate) fn r2o_http_reply_classify(
     R2O_HTTP_REPLY_NEUTRAL
 }
 
+#[cfg(test)]
 fn r2o_fetch_http_outcome(
     status: u16,
     location: &[u8],
@@ -4376,10 +4378,6 @@ fn r2o_fetch_body_portal(body: &[u8], total: u64) -> Option<&'static str> {
             })
             .then_some(*name)
     })
-}
-
-fn r2o_fetch_body_has_portal(body: &[u8], total: u64) -> bool {
-    r2o_fetch_body_portal(body, total).is_some()
 }
 
 fn r2o_fetch_http_host_char(byte: u8) -> bool {
@@ -5658,20 +5656,19 @@ mod tests {
             };
             let connection = ServerConnection::new(config).unwrap();
             let mut stream = rustls::StreamOwned::new(connection, socket);
-            let mut read_request =
-                |stream: &mut rustls::StreamOwned<ServerConnection, TcpStream>| {
-                    let mut request = Vec::new();
-                    let mut byte = [0_u8; 1];
-                    loop {
-                        if stream.read_exact(&mut byte).is_err() {
-                            return false;
-                        }
-                        request.push(byte[0]);
-                        if request.ends_with(b"\r\n\r\n") {
-                            return true;
-                        }
+            let read_request = |stream: &mut rustls::StreamOwned<ServerConnection, TcpStream>| {
+                let mut request = Vec::new();
+                let mut byte = [0_u8; 1];
+                loop {
+                    if stream.read_exact(&mut byte).is_err() {
+                        return false;
                     }
-                };
+                    request.push(byte[0]);
+                    if request.ends_with(b"\r\n\r\n") {
+                        return true;
+                    }
+                }
+            };
             let full = |stream: &mut rustls::StreamOwned<ServerConnection, TcpStream>,
                         close: bool| {
                 let connection = if close { "close" } else { "keep-alive" };

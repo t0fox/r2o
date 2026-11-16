@@ -1487,15 +1487,6 @@ fn valid_addr_shape(shape: u8) -> bool {
     ) || is_tcp_context_shape(shape)
 }
 
-fn valid_addr_plan_records(shape: u8, records: &[u8]) -> bool {
-    Plan::parse_wire(records).is_ok_and(|plan| match shape {
-        SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP => plan.transport == 6 && plan.proto == 1,
-        SHAPE_QUIC => plan.r2k_is_quic_address_plan(),
-        SHAPE_VOICE => plan.transport == 17 && plan.proto == PROTO_VOICE,
-        _ => false,
-    })
-}
-
 pub fn encode_set_suffix(
     suffix: &str,
     shape: u8,

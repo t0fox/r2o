@@ -2313,17 +2313,6 @@ mod tests {
             }
         }
         let empty_status = || status("нет событий от datapath", "", 0, 0, 0, 0, 0);
-        let base_status = || {
-            status(
-                "поиск не активен; ожидается новый сигнал datapath",
-                "target.example",
-                10,
-                5,
-                7,
-                42,
-                3,
-            )
-        };
         let tasks_status = || {
             status(
                 "поиск не активен; ожидается новый сигнал datapath",

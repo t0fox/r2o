@@ -628,8 +628,10 @@ fn r2o_resolve_voice_control(r2o_control: &str) -> Option<SocketAddrV4> {
         })
 }
 
-pub(crate) type R2oVoiceAskFn = fn(SocketAddrV4, Duration, Option<u32>) -> R2oVoiceTally;
+#[cfg(test)]
+type R2oVoiceAskFn = fn(SocketAddrV4, Duration, Option<u32>) -> R2oVoiceTally;
 
+#[cfg(test)]
 fn r2o_voice_ask_real(
     r2o_server: SocketAddrV4,
     r2o_wait: Duration,
@@ -639,8 +641,8 @@ fn r2o_voice_ask_real(
 }
 
 /// C `voice_ask_real`: указатель на production-функцию голосового зонда.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn voice_ask_real() -> R2oVoiceAskFn {
+#[cfg(test)]
+fn voice_ask_real() -> R2oVoiceAskFn {
     r2o_voice_ask_real
 }
 

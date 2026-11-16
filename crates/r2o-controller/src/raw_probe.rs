@@ -984,6 +984,7 @@ fn tri_yes(value: TriState) -> bool {
 }
 
 /// C `tri_no` (`detect/props.c:418`): свойство опровергнуто.
+#[cfg(test)]
 fn tri_no(value: TriState) -> bool {
     value == TriState::False
 }
@@ -1196,14 +1197,13 @@ pub(crate) fn probe_tcp_split(
 
 #[cfg(test)]
 mod test_script {
-    use std::cell::{Cell, RefCell};
+    use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     #[derive(Clone, Copy, Debug)]
     pub(super) enum Outcome {
-        Pass,
         Fail,
         Error,
     }
@@ -1289,7 +1289,6 @@ fn raw_probe_once(
     #[cfg(test)]
     if let Some(outcome) = test_script::take(&poison.name) {
         return match outcome {
-            test_script::Outcome::Pass => Ok(true),
             test_script::Outcome::Fail => Ok(false),
             test_script::Outcome::Error => Err(ProbeError::Local("scripted local error".into())),
         };
@@ -1825,14 +1824,6 @@ fn rst_delete_once_locked(rule: &RstRule) -> bool {
             .is_ok_and(|status| rc_exit1(&status))
 }
 
-fn rst_delete_once(rule: &RstRule) -> bool {
-    let _lock = IPTABLES_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    rst_delete_once_locked(rule)
-}
-
 fn r2o_rst_abandon_message(rule: &RstRule) -> String {
     format!(
         "r2o: правило подавления RST ({}, порт {}) не снято за 5 попыток — больше не повторяю \
@@ -1916,6 +1907,7 @@ fn retry_pending_rst_releases(final_attempt: bool) {
 
 /// C `d2k_raw_pending_count` (`detect/raw.c:488-495`): число отложенных
 /// снятий RST-правил под mutex.
+#[cfg(test)]
 pub(crate) fn rst_pending_count() -> usize {
     RST_PENDING.get().map_or(0, |pending| {
         pending
@@ -1995,6 +1987,7 @@ fn parse_rst_rule(line: &str) -> Option<(u16, Option<i64>)> {
 }
 
 /// C `d2k_parse_stale_rst_rule`: порт нашего правила любого формата.
+#[cfg(test)]
 fn parse_stale_rst_rule(line: &str) -> Option<u16> {
     parse_rst_rule(line).map(|(port, _)| port)
 }
@@ -2173,13 +2166,10 @@ mod test_io {
 
     pub(super) enum PollReply {
         Ready(i16),
-        Timeout,
-        Err(i32),
     }
 
     pub(super) enum CloseReply {
         Ok,
-        Err(i32),
     }
 
     #[derive(Default)]
@@ -2254,8 +2244,6 @@ mod test_io {
                     .pop_front()
                     .map_or(Ok((0, 0)), |reply| match reply {
                         PollReply::Ready(revents) => Ok((1, revents)),
-                        PollReply::Timeout => Ok((0, 0)),
-                        PollReply::Err(errno) => Err(io::Error::from_raw_os_error(errno)),
                     }),
             )
         })
@@ -2273,7 +2261,6 @@ mod test_io {
                     .pop_front()
                     .map_or(Ok(()), |reply| match reply {
                         CloseReply::Ok => Ok(()),
-                        CloseReply::Err(errno) => Err(io::Error::from_raw_os_error(errno)),
                     }),
             )
         })
@@ -4098,7 +4085,6 @@ mod tests {
             accept: crate::classify::Accept::Any,
             ..Trigger::tls13("probe.example").expect("modern hello")
         };
-        let offer_ts = raw_offer_timestamps(None);
         let mut poison = Poison {
             name: name.clone(),
             ..Poison::default()

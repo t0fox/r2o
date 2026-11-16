@@ -1431,7 +1431,7 @@ server-https:
             let ok = super::dns_skip_name(&packet[..*len], &mut offset);
             out.push_str(&format!("S|{case}|{}|{offset}\n", if ok { 1 } else { 0 }));
         }
-        let (packet, qname) = a_response(0x1234, false, 0, 1);
+        let (_, qname) = a_response(0x1234, false, 0, 1);
         let cases: [(&str, u16, bool, u8, u16, bool); 6] = [
             ("a", 1, false, 0, 1, false),
             ("aaaa", 28, false, 0, 1, false),

@@ -180,11 +180,15 @@ enum DohState {
 #[derive(Clone, Debug)]
 struct DohResponse {
     state: DohState,
+    #[cfg(test)]
     rc: i32,
     status: i32,
+    #[cfg(test)]
     body_bytes: usize,
     body_expected: usize,
+    #[cfg(test)]
     has_length: bool,
+    #[cfg(test)]
     chunked: bool,
     dns_reply: bool,
     reason: String,
@@ -365,15 +369,19 @@ fn doh_response_parse(response: &[u8], dns_id: u16) -> DohResponse {
             } else {
                 DohState::NeedMore
             },
+            #[cfg(test)]
             rc: if response.len() >= DOH_HEADER_MAX {
                 -1
             } else {
                 0
             },
             status: 0,
+            #[cfg(test)]
             body_bytes: 0,
             body_expected: 0,
+            #[cfg(test)]
             has_length: false,
+            #[cfg(test)]
             chunked: false,
             dns_reply: false,
             reason: "DoH: некорректные HTTP заголовки".into(),
@@ -388,11 +396,15 @@ fn doh_response_parse(response: &[u8], dns_id: u16) -> DohResponse {
     if headers.status != 200 {
         return DohResponse {
             state: DohState::Invalid,
+            #[cfg(test)]
             rc: 0,
             status: headers.status,
+            #[cfg(test)]
             body_bytes: 0,
             body_expected: 0,
+            #[cfg(test)]
             has_length: false,
+            #[cfg(test)]
             chunked: false,
             dns_reply: false,
             reason: format!("DoH: HTTP {}", headers.status),
@@ -409,11 +421,15 @@ fn doh_response_parse(response: &[u8], dns_id: u16) -> DohResponse {
         if response.len().saturating_sub(body_offset) < headers.body_len {
             return DohResponse {
                 state: DohState::Invalid,
+                #[cfg(test)]
                 rc: -1,
                 status: headers.status,
+                #[cfg(test)]
                 body_bytes: 0,
                 body_expected: headers.body_len,
+                #[cfg(test)]
                 has_length: false,
+                #[cfg(test)]
                 chunked: false,
                 dns_reply: false,
                 reason: "DoH: неполный или слишком большой DNS body".into(),
@@ -427,11 +443,15 @@ fn doh_response_parse(response: &[u8], dns_id: u16) -> DohResponse {
         Ok(Some(length)) => finish_doh(&body[..length], headers, dns_id),
         Ok(None) => DohResponse {
             state: DohState::NeedMore,
+            #[cfg(test)]
             rc: 0,
             status: headers.status,
+            #[cfg(test)]
             body_bytes: 0,
             body_expected: 0,
+            #[cfg(test)]
             has_length: false,
+            #[cfg(test)]
             chunked: false,
             dns_reply: false,
             reason: "DoH: DNS body не завершён".into(),
@@ -443,11 +463,15 @@ fn doh_response_parse(response: &[u8], dns_id: u16) -> DohResponse {
 fn invalid_doh(reason: &str) -> DohResponse {
     DohResponse {
         state: DohState::Invalid,
+        #[cfg(test)]
         rc: -1,
         status: 0,
+        #[cfg(test)]
         body_bytes: 0,
         body_expected: 0,
+        #[cfg(test)]
         has_length: false,
+        #[cfg(test)]
         chunked: false,
         dns_reply: false,
         reason: reason.into(),
@@ -458,11 +482,15 @@ fn finish_doh(body: &[u8], headers: DohHeaders, dns_id: u16) -> DohResponse {
     if !dns_probe_reply(body, dns_id) {
         return DohResponse {
             state: DohState::Invalid,
+            #[cfg(test)]
             rc: 0,
             status: headers.status,
+            #[cfg(test)]
             body_bytes: body.len(),
             body_expected: headers.body_len,
+            #[cfg(test)]
             has_length: headers.has_length,
+            #[cfg(test)]
             chunked: headers.chunked,
             dns_reply: false,
             reason: "DoH: HTTP завершён, DNS-ответ некорректен".into(),
@@ -470,15 +498,19 @@ fn finish_doh(body: &[u8], headers: DohHeaders, dns_id: u16) -> DohResponse {
     }
     DohResponse {
         state: DohState::Complete,
+        #[cfg(test)]
         rc: 1,
         status: headers.status,
+        #[cfg(test)]
         body_bytes: body.len(),
         body_expected: if headers.has_length {
             headers.body_len
         } else {
             body.len()
         },
+        #[cfg(test)]
         has_length: headers.has_length,
+        #[cfg(test)]
         chunked: headers.chunked,
         dns_reply: true,
         reason: "DoH: корректный RFC 8484 DNS-ответ".into(),
@@ -535,7 +567,7 @@ fn set_tcp_timeout(stream: &TcpStream, deadline: Instant) -> Result<(), String> 
         .map_err(|error| format!("DNS: timeout: {error}"))
 }
 
-fn read_dns_frame(stream: &mut impl Read, id: u16, deadline: Instant) -> Result<Vec<u8>, String> {
+fn read_dns_frame(stream: &mut impl Read, _id: u16, deadline: Instant) -> Result<Vec<u8>, String> {
     let mut header = [0u8; 2];
     stream
         .read_exact(&mut header)

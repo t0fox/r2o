@@ -242,29 +242,6 @@ fn read_record_header_until(
     Ok((header, length))
 }
 
-fn read_record_header(reader: &mut impl Read) -> Result<([u8; 5], usize), String> {
-    let mut header = [0_u8; 5];
-    reader
-        .read_exact(&mut header)
-        .map_err(|error| format!("не прочитан TLS-заголовок: {error}"))?;
-    // Сетевой узел на TLS/443 иногда отвечает открытым HTTP; нельзя читать
-    // «P/» как старший байт длины записи.
-    if &header == b"HTTP/" {
-        return Err(format!(
-            "не TLS: открытый HTTP-ответ вместо TLS (заголовок {:02x} {:02x} {:02x} {:02x} {:02x})",
-            header[0], header[1], header[2], header[3], header[4]
-        ));
-    }
-    let length = usize::from(u16::from_be_bytes([header[3], header[4]]));
-    if length == 0 || length > TLS_RECORD_MAX {
-        return Err(format!(
-            "не TLS-заголовок {:02x} {:02x} {:02x} {:02x} {:02x}: длина {length} вне предела",
-            header[0], header[1], header[2], header[3], header[4]
-        ));
-    }
-    Ok((header, length))
-}
-
 fn cipher(key: &[u8; 16]) -> Result<Aes128Gcm, String> {
     Aes128Gcm::new_from_slice(key).map_err(|_| "недопустимый ключ AES-128-GCM".to_owned())
 }

@@ -20,12 +20,11 @@ use r2k_core::control::{
     decode_r2o_tcp_fin_retry, decode_r2o_tcp_repeat, decode_r2o_tcp_rst_after_app,
     decode_r2o_tcp_rst_cut_signal, decode_r2o_tcp_silence, decode_r2o_tcp_stall,
     decode_r2o_voice_proof, decode_r2o_voice_suspect, decode_refused, encode_arm_shape,
-    encode_delete_addr, encode_delete_addr_probe, encode_delete_bypass, encode_delete_name,
-    encode_delete_name_bound, encode_delete_name_probe, encode_delete_suffix,
-    encode_delete_voice_addr_probe, encode_set_addr, encode_set_addr_probe, encode_set_bypass,
-    encode_set_https, encode_set_name, encode_set_name_bound, encode_set_name_family,
-    encode_set_name_probe, encode_set_suffix, encode_set_tcp_stall_budgets, encode_set_voice_addr,
-    encode_set_voice_addr_probe, read_frame,
+    encode_delete_addr, encode_delete_addr_probe, encode_delete_name, encode_delete_name_bound,
+    encode_delete_name_probe, encode_delete_voice_addr_probe, encode_set_addr,
+    encode_set_addr_probe, encode_set_bypass, encode_set_https, encode_set_name,
+    encode_set_name_bound, encode_set_name_family, encode_set_name_probe, encode_set_suffix,
+    encode_set_tcp_stall_budgets, encode_set_voice_addr, encode_set_voice_addr_probe, read_frame,
 };
 use r2k_core::plan::{PROTO_HTTP, PROTO_VOICE, Plan};
 use r2o_controller::ask::{
@@ -371,8 +370,6 @@ fn r2o_ask_command(arguments: &[std::ffi::OsString]) -> Option<i32> {
 
 #[cfg(unix)]
 fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
-    use std::io::Write;
-
     let mut trigger_bytes = match &options.trigger {
         AskSnapshotInput::File(path) => Some(
             read_hex_file(path)
@@ -4792,6 +4789,7 @@ fn r2o_group_record_direct_clear(
 /// C `group_record(PLAN_FAILED)` для конкретного провалившегося плана.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn r2o_group_record_plan_failed(
     catalog: &mut Catalog,
     target: &r2o_controller::discovery::DiscoveryTarget,
@@ -7098,6 +7096,7 @@ impl R2oQuicNamedCache {
             .push_back((name.to_owned(), family, ech, snapshot.to_vec(), now));
     }
 
+    #[cfg(test)]
     fn find(
         &self,
         name: &str,
@@ -8064,7 +8063,7 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
     target: &r2o_controller::discovery::DiscoveryTarget,
     destination: std::net::SocketAddr,
     candidate: &R2oFamilyRecoveryCandidate,
-    mark: Option<u32>,
+    _mark: Option<u32>,
     confirm_mark: Option<u32>,
     commands: &SyncSender<HttpSearchCommand>,
     ech: Option<&r2o_controller::ech::R2oEchConfig>,
@@ -10487,24 +10486,6 @@ fn r2o_budget_partial_finish(
 }
 
 #[cfg(unix)]
-fn r2o_budget_volume_cut(target: &r2o_controller::discovery::DiscoveryTarget) -> bool {
-    r2o_budget_partial_map()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(target)
-        .is_some_and(|state| state.volume_cut)
-}
-
-#[cfg(unix)]
-fn r2o_budget_owned_fallback(target: &r2o_controller::discovery::DiscoveryTarget) -> bool {
-    r2o_budget_partial_map()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(target)
-        .is_some_and(|state| state.owned_fallback)
-}
-
-#[cfg(unix)]
 struct R2oDiscoveryWorkOutcome {
     requested_target: r2o_controller::discovery::DiscoveryTarget,
     outcome: DiscoveryOutcome,
@@ -11195,6 +11176,7 @@ impl R2oTcpHelloCache {
         self.entries.insert(hello.key, (hello, now));
     }
 
+    #[cfg(test)]
     fn clean_handshake_name(
         &self,
         key: &[u8; r2k_core::control::KEY_LEN],
@@ -12963,7 +12945,7 @@ fn r2o_floor_div(a: i64, b: i64) -> i64 {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn r2o_days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let year = year - i64::from(month <= 2);
     let era = (if year >= 0 { year } else { year - 399 }) / 400;
@@ -17837,6 +17819,7 @@ group_block_proven: false,
     /// C `on_exchange` (`sched.c:10626-10649`): последующий TLS-ответ по
     /// подтверждённому имени — только наблюдение. Задача наблюдения
     /// освобождается (`task_done`), подтверждённый план остаётся стоять.
+    #[cfg(test)]
     fn r2o_note_followup_tls_observation(&mut self, task_key: &R2oDiscoveryTaskKey) -> bool {
         if !self.completed.contains(task_key) {
             return false;
@@ -21358,7 +21341,7 @@ fn r2o_ask_print_seen_types(mask: u8) -> String {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn r2o_ask_step_rc_str(rc: u8) -> &'static str {
     match rc {
         0 => "вопрос не собран",
@@ -21376,7 +21359,7 @@ fn r2o_ask_step_rc_str(rc: u8) -> &'static str {
 }
 
 /// C `ack_code_str` (не путать с `ack_reason_text` из sched.c).
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn r2o_ask_ack_code_str(code: u8) -> &'static str {
     match code {
         control::ACK_OK => "принято",
@@ -21388,7 +21371,7 @@ fn r2o_ask_ack_code_str(code: u8) -> &'static str {
 }
 
 /// C `pos_decided`.
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn r2o_ask_pos_decided(properties: &r2o_controller::classify::DpiProps, pos: usize) -> bool {
     use r2o_controller::classify::TriState;
     match pos {
@@ -21405,7 +21388,7 @@ fn r2o_ask_pos_decided(properties: &r2o_controller::classify::DpiProps, pos: usi
 }
 
 /// Поля C `d2k_props_step`, нужные `print_step`.
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 struct R2oAskStep<'a> {
     plan_len: usize,
     ack_ok: bool,
@@ -21419,7 +21402,7 @@ struct R2oAskStep<'a> {
 }
 
 /// C `print_step`.
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn r2o_ask_print_step(step: &R2oAskStep<'_>) -> String {
     let mut out = String::new();
     if step.plan_len == 0 {
@@ -21466,7 +21449,7 @@ fn r2o_ask_print_step(step: &R2oAskStep<'_>) -> String {
 }
 
 /// C `print_question`: заголовок вопроса и одна из веток ответа.
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn r2o_ask_print_question(
     idx1: usize,
     pos: usize,
@@ -22899,7 +22882,7 @@ impl ControlClient {
                         if r2o_http_search_https_action(3, false, Some(result.state), false)
                             == HttpSearchHttpsAction::Queue
                         {
-                            if let (Some(search_worker), Some((_, catalog, _, mark))) =
+                            if let (Some(search_worker), Some((_, catalog, _, _))) =
                                 (http_search.as_ref(), discovery.as_ref())
                             {
                                 let queued = self.enqueue_http_search(
@@ -24928,7 +24911,7 @@ impl ControlClient {
                             HttpsPortalOutcome::Busy => {}
                         }
                     }
-                    if let Some((_, catalog, path, mark)) = &mut discovery {
+                    if let Some((_, catalog, path, _)) = &mut discovery {
                         let live = response.binding.is_known()
                             && !response.binding.temporary
                             && response.binding.kind == 1
@@ -29409,7 +29392,7 @@ fn r2o_props_bind_socket(
 }
 
 /// C `props_bind_any`: блокирующий wildcard-bind без метки.
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn r2o_props_bind_any(
     socket_type: libc::c_int,
     family: u8,
@@ -29418,25 +29401,25 @@ fn r2o_props_bind_any(
 }
 
 /// C `d2k_props_bind_family`: IPv4/IPv6 TCP wildcard.
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn r2o_props_bind_family(family: u8) -> std::io::Result<(std::os::fd::OwnedFd, u16)> {
     r2o_props_bind_any(libc::SOCK_STREAM, family)
 }
 
 /// C `d2k_props_bind`: IPv4 TCP.
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn r2o_props_bind() -> std::io::Result<(std::os::fd::OwnedFd, u16)> {
     r2o_props_bind_family(4)
 }
 
 /// C `d2k_props_bind_udp_family`: IPv4/IPv6 UDP wildcard.
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn r2o_props_bind_udp_family(family: u8) -> std::io::Result<(std::os::fd::OwnedFd, u16)> {
     r2o_props_bind_any(libc::SOCK_DGRAM, family)
 }
 
 /// C `d2k_props_bind_udp`: IPv4 UDP.
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn r2o_props_bind_udp() -> std::io::Result<(std::os::fd::OwnedFd, u16)> {
     r2o_props_bind_udp_family(4)
 }
@@ -29514,7 +29497,7 @@ fn r2o_props_contact_error_text(code: i32) -> String {
 }
 
 /// C `d2k_props_contact_on_family_tcp_profile`: connect + отправка приветствия.
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn r2o_props_contact_on_family_tcp_profile(
     family: u8,
     destination: std::net::SocketAddr,
@@ -29530,7 +29513,7 @@ fn r2o_props_contact_on_family_tcp_profile(
 }
 
 /// C `d2k_props_contact_on_family`: TCP family 4/6, профиль -1.
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn r2o_props_contact_on_family(
     family: u8,
     destination: std::net::SocketAddr,
@@ -31191,7 +31174,7 @@ mod tests {
             r2o_controller::live::DnsServiceState::Detected
         );
 
-        let mut current = key([127, 0, 0, 1], [198, 51, 100, 80], 40_000, 443, 6);
+        let current = key([127, 0, 0, 1], [198, 51, 100, 80], 40_000, 443, 6);
         let now_ms = r2o_controller::now_ms::d2k_now_ms();
         state.observe(&current, "dns.example", 6, now_ms);
         assert_eq!(state.live[0].ip, "198.51.100.80");
@@ -31697,7 +31680,7 @@ mod tests {
     fn dns_health_state_differential_matches_current_d2o() {
         use r2k_core::dns_config::DnsService;
         use r2o_controller::dns_health::DnsHealthResult;
-        use r2o_controller::live::{DnsServiceLive, DnsTask, DnsTaskState, DnsTaskVerify};
+        use r2o_controller::live::{DnsTask, DnsTaskState, DnsTaskVerify};
         use serde_json::json;
 
         fn service(
@@ -36727,8 +36710,8 @@ mod tests {
         http_search_candidates, http_search_key, matching_domain_group,
         matching_domain_recovery_candidates, matching_sibling_recovery_candidates,
         measured_http_candidate_keys, normalize_plan_target, parse_classify_options,
-        parse_serve_options, print_flow_journal, r2o_candidate_confirmation_mark,
-        r2o_catalog_mark_flow_unfit, r2o_discovery_failure_retry_due, r2o_ech_direct_config_usable,
+        parse_serve_options, print_flow_journal, r2o_catalog_mark_flow_unfit,
+        r2o_discovery_failure_retry_due, r2o_ech_direct_config_usable,
         r2o_family_applied_flow_matches, r2o_family_recovery_decision,
         r2o_handle_client_shape_event, r2o_http_failed_disposition, r2o_http_live_cut_recheck,
         r2o_plan_wire_shape, r2o_quic_binding_blocks_retry, r2o_tcp_stall_budgets,
@@ -36959,9 +36942,11 @@ mod tests {
         assert_eq!(&zeros[zeros.len() - 16..], &[0; 16]);
 
         for command in [
-            super::encode_delete_suffix("example.test", 6, super::SHAPE_MODERN, 4).unwrap(),
+            r2k_core::control::encode_delete_suffix("example.test", 6, super::SHAPE_MODERN, 4)
+                .unwrap(),
             super::encode_set_bypass("example.test", 6, super::SHAPE_MODERN, 4).unwrap(),
-            super::encode_delete_bypass("example.test", 6, super::SHAPE_MODERN, 4).unwrap(),
+            r2k_core::control::encode_delete_bypass("example.test", 6, super::SHAPE_MODERN, 4)
+                .unwrap(),
         ] {
             let identified = control_frame_with_area_id(&command, id).unwrap();
             assert_eq!(

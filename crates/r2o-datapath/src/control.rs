@@ -20,7 +20,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown};
-use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -1988,6 +1988,7 @@ impl NamePlans {
     }
 
     /// C `scan_name.h.any`: первая не-HTTP запись имени любой формы.
+    #[cfg(test)]
     fn find_any_name(&self, bytes: &[u8], family: u8) -> Option<&Plan> {
         let host = canonical_name(bytes)?;
         self.plans
@@ -2460,6 +2461,7 @@ fn r2o_read_probe_flow(bytes: &[u8]) -> Option<[u8; control::KEY_LEN]> {
 
 /// C `probe_flow_valid` (`plans.c:860-874`): UDP-транспорт, ненулевой
 /// dst_port, family 0/4/6, ненулевые адреса; src_port=0 — голосовой wildcard.
+#[cfg(test)]
 fn r2o_probe_flow_valid(flow: &[u8; control::KEY_LEN]) -> bool {
     if flow[37] != 17 || u16::from_be_bytes([flow[35], flow[36]]) == 0 {
         return false;
@@ -2474,6 +2476,7 @@ fn r2o_probe_flow_valid(flow: &[u8; control::KEY_LEN]) -> bool {
 }
 
 /// C `probe_flow_equal`: равенство family/transport/портов/адресов.
+#[cfg(test)]
 fn r2o_probe_flow_equal(a: &[u8; control::KEY_LEN], b: &[u8; control::KEY_LEN]) -> bool {
     a == b
 }

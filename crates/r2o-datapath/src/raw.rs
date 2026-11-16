@@ -961,7 +961,7 @@ fn r2o_open_route_netlink() -> io::Result<OwnedFd> {
     let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
     let timeout = libc::timeval {
         tv_sec: 0,
-        tv_usec: R2O_F6_QUERY_TIMEOUT.as_micros() as libc::suseconds_t,
+        tv_usec: R2O_F6_QUERY_TIMEOUT.as_micros() as _,
     };
     let result = unsafe {
         libc::setsockopt(

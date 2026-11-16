@@ -1,5 +1,3 @@
-use std::io::Write;
-
 const R2O_TLS13_CLIENT_HELLO_MAX: usize = 4096;
 
 /// d2o records the peer name separately and does not gate the TLS result on
@@ -215,8 +213,6 @@ pub fn r2o_tls_replay_client_hello(
     client_hello: &[u8],
     timeout: std::time::Duration,
 ) -> std::io::Result<bool> {
-    use std::io::Write;
-
     if client_hello.len() < 6 {
         return Ok(false);
     }
@@ -264,6 +260,7 @@ pub fn r2o_tls_replay_client_hello(
     Ok(have >= 6 && buf[0] == 22 && buf[1] == 3 && buf[5] == 2)
 }
 
+#[cfg(test)]
 fn r2o_tls_be16(bytes: &[u8], offset: usize) -> Option<u16> {
     Some(u16::from_be_bytes([
         *bytes.get(offset)?,
@@ -272,6 +269,7 @@ fn r2o_tls_be16(bytes: &[u8], offset: usize) -> Option<u16> {
 }
 
 /// C `d2k_t13_sh_version`: версия ServerHello из supported_versions.
+#[cfg(test)]
 fn r2o_t13_sh_version(server_hello: &[u8]) -> u16 {
     let mut cursor = 4 + 2 + 32;
     let Some(&session_len) = server_hello.get(cursor) else {
@@ -314,6 +312,7 @@ fn r2o_t13_sh_version(server_hello: &[u8]) -> u16 {
 }
 
 /// C `d2k_t13_sh_parse`: cipher 0x1301 и X25519 key_share.
+#[cfg(test)]
 fn r2o_t13_sh_parse(server_hello: &[u8]) -> Result<[u8; 32], String> {
     if server_hello.len() < 4 {
         return Err("ServerHello обрезан".into());
@@ -369,6 +368,7 @@ fn r2o_t13_sh_parse(server_hello: &[u8]) -> Result<[u8; 32], String> {
 }
 
 /// C `d2k_t13_flight_next`: следующее handshake-сообщение флайта.
+#[cfg(test)]
 fn r2o_t13_flight_next<'a>(buffer: &'a [u8], offset: &mut usize) -> Option<(u8, &'a [u8])> {
     let start = *offset;
     let header = buffer.get(start..start.checked_add(4)?)?;

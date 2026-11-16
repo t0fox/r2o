@@ -5,7 +5,7 @@ use crate::response::{HttpsProbeState, probe_https_state};
 use r2k_core::control::{HttpPortalEvent, HttpResponseEvent, KEY_LEN};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
@@ -248,7 +248,7 @@ impl HttpsProbeWorker {
         }
         let (jobs, job_queue) = mpsc::sync_channel::<Job>(QUEUE_CAPACITY);
         let result_sender = self.result_sender.clone();
-        let mut wake_write = self
+        let wake_write = self
             .wake_write
             .as_ref()
             .and_then(|stream| stream.try_clone().ok());

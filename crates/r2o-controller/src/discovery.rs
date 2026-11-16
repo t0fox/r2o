@@ -534,7 +534,7 @@ where
 /// Production-резолвер: host → адреса нужного семейства через системный
 /// `getaddrinfo`. Ошибка формулируется как C `dial tcp: ...`.
 pub fn resolve_unspecified_endpoint(target: &DiscoveryTarget) -> Result<DiscoveryTarget, String> {
-    resolve_unspecified_endpoint_with(target, |host, port, family| {
+    resolve_unspecified_endpoint_with(target, |host, port, _| {
         use std::net::ToSocketAddrs;
         let addresses = (host, port)
             .to_socket_addrs()
@@ -1708,6 +1708,7 @@ fn quic_binding_key(binding: &Binding, target: &str, family: u8) -> bool {
         && binding.shape == SHAPE_QUIC
 }
 
+#[cfg(test)]
 fn exact_key(binding: &Binding, target: &DiscoveryTarget) -> bool {
     binding.kind == "name"
         && binding.target == target.host
@@ -2037,29 +2038,29 @@ mod tests {
     }
 
     #[test]
-    fn production_resolver_uses_real_a_and_aaaa_for_example_com() {
+    fn production_resolver_selects_ipv4_and_ipv6_from_system_lookup() {
         use super::{DiscoveryTarget, resolve_unspecified_endpoint};
 
         let target = DiscoveryTarget {
-            host: "example.com".into(),
+            host: "localhost".into(),
             endpoint: "0.0.0.0:443".into(),
             family: 4,
             shape: SHAPE_MODERN,
         };
         let resolved = resolve_unspecified_endpoint(&target).unwrap();
         let address: std::net::SocketAddr = resolved.endpoint.parse().unwrap();
-        assert!(address.ip().is_ipv4() && !address.ip().is_unspecified());
+        assert_eq!(address.ip(), std::net::Ipv4Addr::LOCALHOST);
         assert_eq!(address.port(), 443);
 
         let target = DiscoveryTarget {
-            host: "example.com".into(),
+            host: "localhost".into(),
             endpoint: "[::]:443".into(),
             family: 6,
             shape: SHAPE_MODERN,
         };
         let resolved = resolve_unspecified_endpoint(&target).unwrap();
         let address: std::net::SocketAddr = resolved.endpoint.parse().unwrap();
-        assert!(address.ip().is_ipv6() && !address.ip().is_unspecified());
+        assert_eq!(address.ip(), std::net::Ipv6Addr::LOCALHOST);
         assert_eq!(address.port(), 443);
     }
 

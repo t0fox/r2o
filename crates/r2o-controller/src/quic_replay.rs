@@ -3266,7 +3266,7 @@ mod tests {
             }
 
             {
-                let mut probe =
+                let probe =
                     QuicReplayProbe::prepare(receiver.local_addr().unwrap(), &one, None).unwrap();
                 set_ttl(&probe.socket, 47);
                 let mut sink = CaptureSink::default();
@@ -3302,7 +3302,7 @@ mod tests {
                 .unwrap();
                 let frag_plan = compile(&frag_text);
                 let name = format!("frag{shape}");
-                let mut probe =
+                let probe =
                     QuicReplayProbe::prepare(receiver.local_addr().unwrap(), &one, None).unwrap();
                 set_ttl(&probe.socket, 47);
                 let mut sink = CaptureSink::default();

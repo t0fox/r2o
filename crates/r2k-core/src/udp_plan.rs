@@ -508,8 +508,8 @@ fn r2o_sleep_us(delay_us: u32) -> Result<(), i32> {
     }
     {
         let mut wait = libc::timespec {
-            tv_sec: (delay_us / 1_000_000) as libc::time_t,
-            tv_nsec: ((delay_us % 1_000_000) * 1_000) as libc::c_long,
+            tv_sec: (delay_us / 1_000_000) as _,
+            tv_nsec: ((delay_us % 1_000_000) * 1_000) as _,
         };
         loop {
             let slept = unsafe { libc::nanosleep(&wait, &mut wait) };

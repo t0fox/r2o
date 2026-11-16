@@ -6,6 +6,7 @@
 //! семантикой. Ordering на Mutex-ветке не имеет аппаратного смысла, но
 //! принимается и игнорируется, чтобы call-site не менялись.
 
+#[cfg(not(target_has_atomic = "64"))]
 use std::sync::atomic::Ordering;
 
 #[cfg(target_has_atomic = "64")]

@@ -1,6 +1,5 @@
 /// C `head[8192]`: максимум сохранённого заголовка — 8191 байт (плюс NUL).
 pub const MAX_HTTP_RESPONSE_HEADER_BYTES: usize = 8191;
-const HEADER_CAPACITY: usize = MAX_HTTP_RESPONSE_HEADER_BYTES + 1;
 const LINE_CAPACITY: usize = 512; // C `char line[512]`.
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

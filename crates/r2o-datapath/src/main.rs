@@ -4434,6 +4434,7 @@ mod app {
         let _ = r2o_write_journal(&mut std::io::stdout().lock(), journal, start_ns);
     }
 
+    #[cfg(test)]
     fn format_journal_key(key: &[u8; r2k_core::control::KEY_LEN]) -> String {
         use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -4471,6 +4472,7 @@ mod app {
         r2o_now_ns()
     }
 
+    #[cfg(test)]
     fn format_journal_details(entry: &R2oFlowJournalEntry) -> String {
         use r2o_datapath::flow_journal::R2oFlowJournalKind;
         use std::net::Ipv4Addr;
@@ -5118,6 +5120,7 @@ mod app {
         hello.is_some_and(|hello| !hello.host.is_empty())
     }
 
+    #[cfg(test)]
     fn r2o_udp_decide_once(
         sessions: &mut R2oUdpSessions,
         quic_sessions: &mut R2oQuicSessions,
@@ -7176,7 +7179,7 @@ mod app {
             let server = [198, 51, 100, 2];
             let multicast = [239, 1, 1, 1];
 
-            let mut first = udp_packet(client, server, 40_000, 443);
+            let first = udp_packet(client, server, 40_000, 443);
             let mut sessions = R2oUdpSessions::new().unwrap();
             let mut follow = R2oUdpFollowTable::new();
             let route_gate = R2oRouteGate::default();
@@ -7427,7 +7430,7 @@ mod app {
             )
             .unwrap();
 
-            let mut sessions = R2oUdpSessions::new().unwrap();
+            let sessions = R2oUdpSessions::new().unwrap();
             let mut follow = R2oUdpFollowTable::new();
             writeln!(
                 output,
