@@ -122,6 +122,9 @@ fn r2o_controller_signal_stop(stop: &AtomicBool) {
 #[cfg(unix)]
 extern "C" fn r2o_controller_request_stop(_signal: libc::c_int) {
     r2o_controller_signal_stop(&R2O_CONTROLLER_STOP);
+    // C `d2kc.c:933`: перед ожиданием потоков сказать измерителю бросить все
+    // замеры. Флаг липкий и читается циклами классификатора.
+    r2o_controller::classify::r2o_detect_stop_all();
 }
 
 #[cfg(unix)]
@@ -12436,27 +12439,40 @@ fn r2o_saved_address_recheck(
             };
         }
     }
-    for _ in 0..3 {
-        let result = neutral_ack();
-        if !matches!(
-            result,
-            Err(R2oSavedAddressAckError::Unsupported | R2oSavedAddressAckError::NotAttempted)
-        ) {
-            *probes = (*probes).saturating_add(1);
+    // C `d2k_detect_sched_tcp_ack` (`detect/bridge.c:548-573`): до трёх
+    // соединений, `probes` считает заданные, `-2`/отмена не считаются.
+    let result = r2o_controller::classify::r2o_detect_sched_tcp_ack_with(
+        "saved-address",
+        1,
+        None,
+        std::time::Duration::from_millis(6000),
+        3,
+        None,
+        |_target, _timeout, _mark, _stop| {
+            neutral_ack().map_err(|error| match error {
+                R2oSavedAddressAckError::Unsupported | R2oSavedAddressAckError::NotAttempted => {
+                    r2o_controller::classify::ProbeError::Unsupported(
+                        "нейтральный ACK не задавался".into(),
+                    )
+                }
+                R2oSavedAddressAckError::Failed => r2o_controller::classify::ProbeError::Local(
+                    "нейтральный ACK не состоялся".into(),
+                ),
+            })
+        },
+    );
+    *probes = (*probes).saturating_add(result.probes);
+    match result.code {
+        1 => {
+            cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear(target);
+            R2oSavedAddressRecheck::Accepted
         }
-        match result {
-            Ok(true) => {
-                cache
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clear(target);
-                return R2oSavedAddressRecheck::Accepted;
-            }
-            Ok(false) => {}
-            Err(_) => return R2oSavedAddressRecheck::Unmeasured,
-        }
+        0 => R2oSavedAddressRecheck::Silent,
+        _ => R2oSavedAddressRecheck::Unmeasured,
     }
-    R2oSavedAddressRecheck::Silent
 }
 
 #[cfg(unix)]
@@ -20713,21 +20729,86 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
         }
     };
     let white = r2o_discovery_white_trigger(white_name);
-    let (mut result, timed_out) =
-        r2o_run_with_deadline(cancel, R2O_DISCOVERY_TASK_LIFETIME, |task_cancel| {
-            let mut options = r2o_discovery_classify_options(
-                mark,
+    // C `d2k_detect_sched_tcp` получает ip/port, а не строку endpoint:
+    // разбираем проверенный SocketAddr, чтобы IPv6 получил ровно `[ip]:port`.
+    let (bridge_ip, bridge_port) = match target.endpoint.parse::<std::net::SocketAddr>() {
+        Ok(address) => (address.ip().to_string(), address.port()),
+        Err(_) => {
+            let (host, port) = target
+                .endpoint
+                .rsplit_once(':')
+                .unwrap_or((target.endpoint.as_str(), "443"));
+            (
+                host.trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .to_owned(),
+                port.parse().unwrap_or(443),
+            )
+        }
+    };
+    let bridge =
+        r2o_controller::classify::r2o_bridge_input(r2o_controller::classify::R2oBridgeInput {
+            ip: &bridge_ip,
+            port: bridge_port,
+            trigger: r2o_controller::classify::R2oBridgeHello {
+                bytes: Some(&trigger.payload),
+                tcp_known: false,
+                tcp_options: &[],
+                snapped: client_hello.is_some(),
+            },
+            trigger_name: Some(&trigger.name),
+            control: Some(control.payload.as_slice()),
+            white: white.as_ref().map(|white| white.payload.as_slice()),
+            mark,
+            repeats: 3,
+            gap_us: 60_000,
+            wait_ms: 6_000,
+            stop: None,
+            client_tcp_has_timestamps: Some(r2o_controller::classify::client_offers_ts(
                 client_tcp_has_timestamps,
                 target.tcp_profile(),
-                task_cancel,
-                seed_whole,
-            );
-            options.trigger_snapped = client_hello.is_some();
-            options.control = Some(control);
-            options.white = white;
+            )),
+        });
+    if let Some(error) = bridge.error {
+        return (
+            DiscoveryOutcome {
+                target,
+                plan_text: None,
+                detail: error,
+                queue_expired: false,
+                address_failure: false,
+                address_recheck_acknowledged: false,
+                address_recheck_probes: 0,
+                direct_clear: false,
+                volume_recovery: false,
+                budget_mark: 0,
+                group_block_proven: false,
+                transferred_own_plan: false,
+                bound_plan_id: None,
+                ech_origin: None,
+                volume_fingerprint: None,
+                volume_box_id: None,
+                retry_after: None,
+            },
+            0,
+            false,
+            false,
+            false,
+            false,
+            false,
+        );
+    }
+    let bridge_trigger = bridge.trigger.expect("bridge_input успешен без trigger");
+    let bridge_addr = bridge.addr;
+    let bridge_options = bridge.options;
+    let (mut result, timed_out) =
+        r2o_run_with_deadline(cancel, R2O_DISCOVERY_TASK_LIFETIME, |task_cancel| {
+            let mut options = bridge_options;
+            options.cancel = Some(task_cancel);
+            options.seed_whole = seed_whole;
             classify_run_with_progress(
-                &target.endpoint,
-                &trigger,
+                &bridge_addr,
+                &bridge_trigger,
                 options,
                 &mut r2o_controller::classify::TcpProbeBackend,
                 progress,
@@ -25304,6 +25385,10 @@ impl ControlClient {
         } else {
             Ok(())
         };
+        // C `d2kc.c:933`: остановка службы сначала взводит общий флаг
+        // измерителя, и только потом ждёт потоки. Иначе Drop досиживает
+        // текущий замер до конца.
+        r2o_controller::classify::r2o_detect_stop_all();
         if let Some((worker, mut catalog, path, _)) = discovery.take() {
             drop(worker);
             while let Some(update) = network_whitelist_updates

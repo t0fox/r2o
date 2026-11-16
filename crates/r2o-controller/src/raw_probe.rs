@@ -11,7 +11,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::classify::{
     ClassifyOptions, ClassifyResult, DpiProps, Observation, Poison, PoisonHit, ProbeError,
     ProbeTarget, TriState, Trigger, UnplannablePoison, note_props_hit, note_props_miss,
-    poison_selected, poison_supports_family, poisons, strategy_for_poison, trigger_accepts,
+    poison_selected, poison_supports_family, poisons, select_bridge_decoy, strategy_for_poison,
+    trigger_accepts,
 };
 use r2k_core::plan::{OriginalFate, Plan};
 use r2o_datapath::engine::{PacketDecision, decide};
@@ -88,7 +89,8 @@ pub fn sweep_poisons(
     let remote = resolve_target(target)?;
     let family = if remote.is_ipv4() { 4 } else { 6 };
     let offer_ts = raw_offer_timestamps(options.client_tcp_has_timestamps);
-    let (selected_decoy, cloned_decoy) = select_bridge_decoy(
+    // C `d2k_opts_decoy`: приманка — клон, если он собрался, иначе control.
+    let (decoy, cloned_decoy) = select_bridge_decoy(
         &trigger.payload,
         options
             .control
@@ -96,6 +98,13 @@ pub fn sweep_poisons(
             .map(|control| control.payload.as_slice()),
         options.trigger_snapped,
     );
+    let selected_decoy = decoy.or_else(|| {
+        options
+            .control
+            .as_ref()
+            .filter(|control| control.payload.len() >= 2)
+            .map(|control| control.payload.clone())
+    });
     let props0 = result.props.clone();
     let mut props = props0.clone();
     let mut answered = Vec::new();
@@ -611,35 +620,6 @@ pub fn sweep_poisons(
     Ok(None)
 }
 
-fn select_bridge_decoy(
-    trigger: &[u8],
-    control: Option<&[u8]>,
-    trigger_snapped: bool,
-) -> (Option<Vec<u8>>, bool) {
-    let fallback = control
-        .filter(|control| control.len() >= 2)
-        .map(<[u8]>::to_vec);
-    if !trigger_snapped || trigger.len() <= 5 || trigger[0] != 0x16 {
-        return (fallback, false);
-    }
-    let Some(control) = control.filter(|control| control.len() >= 2) else {
-        return (fallback, false);
-    };
-    let Some((offset, length)) = crate::hello::sni_bounds(control) else {
-        return (fallback, false);
-    };
-    let Some(name) = control.get(offset..offset.saturating_add(length)) else {
-        return (fallback, false);
-    };
-    if name.is_empty() || name.len() >= 256 || name.contains(&0) {
-        return (fallback, false);
-    }
-    let Some(clone) = crate::hello::rename_sni(trigger, name) else {
-        return (fallback, false);
-    };
-    (Some(clone), true)
-}
-
 fn add_observation(result: &mut ClassifyResult, observation: Observation) {
     if result.trace.len() < MAX_TRACE {
         result.trace.push(observation);
@@ -650,11 +630,14 @@ fn effective_mark(mark: Option<u32>) -> u32 {
     mark.unwrap_or(BYPASS_MARK)
 }
 
+/// C `d2k_detect_stopped`/`stop_asked`: липкий общий флаг службы или флаг
+/// этой задачи.
 fn is_cancelled(options: &ClassifyOptions) -> bool {
-    options
-        .cancel
-        .as_ref()
-        .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+    crate::classify::r2o_detect_stop_all_requested()
+        || options
+            .cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
 }
 
 fn resolve_target(target: &ProbeTarget) -> Result<SocketAddr, ProbeError> {
@@ -3223,11 +3206,12 @@ mod tests {
             let snapped = fields[1] == "1";
             let trigger = build_variant(fields[2], false);
             let control = build_variant(fields[3], true);
-            let (selected, cloned) = select_bridge_decoy(
+            let (decoy, cloned) = select_bridge_decoy(
                 &trigger,
                 (!control.is_empty()).then_some(control.as_slice()),
                 snapped,
             );
+            let selected = decoy.or_else(|| (control.len() >= 2).then(|| control.clone()));
             let property = Poison {
                 decoy_hello: true,
                 ..Poison::default()

@@ -16,6 +16,23 @@ const TRACE_MAX: usize = 512;
 const QTRACE_MAX: usize = 16;
 const CLEAR_CONFIRM_REPEATS: usize = 2;
 
+/// C `g_stop_all` (`detect/bridge.c:43-45`): липкий общий флаг остановки
+/// службы. Взводится один раз и не снимается; `stop_asked` проверяет его
+/// раньше флага задачи, поэтому «остановить всё» действует и на замер без
+/// собственного флага.
+static R2O_DETECT_STOP_ALL: AtomicBool = AtomicBool::new(false);
+
+/// C `d2k_detect_stop_all` (`detect/bridge.c:45`).
+pub fn r2o_detect_stop_all() {
+    R2O_DETECT_STOP_ALL.store(true, Ordering::Relaxed);
+}
+
+/// Прочитать общий флаг остановки. C `g_stop_all` доступен только из
+/// `bridge.c`; здесь он нужен и `stop_asked`, и проверкам циклов.
+pub fn r2o_detect_stop_all_requested() -> bool {
+    R2O_DETECT_STOP_ALL.load(Ordering::Relaxed)
+}
+
 /// Один непрерывный диапазон данных триггера, отправляемый пробой с разрезанием.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Span {
@@ -164,6 +181,223 @@ impl Trigger {
             accept: Accept::ServerHello,
         })
     }
+}
+
+/// Снимок аргумента `d2k_hello` крючка `d2k_detect_sched_tcp*`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct R2oBridgeHello<'a> {
+    pub bytes: Option<&'a [u8]>,
+    pub tcp_known: bool,
+    pub tcp_options: &'a [u8],
+    pub snapped: bool,
+}
+
+/// Вход production-моста C `bridge_input` (`detect/bridge.c:116-255`).
+#[derive(Clone, Debug)]
+pub struct R2oBridgeInput<'a> {
+    pub ip: &'a str,
+    pub port: u16,
+    pub trigger: R2oBridgeHello<'a>,
+    /// C выводит имя триггера из SNI нагрузки. Discovery уже проверил
+    /// совпадение снятого ClientHello с целью (и ECH-именем), поэтому
+    /// передаёт это имя явно; `None` оставляет донорский вывод из SNI.
+    pub trigger_name: Option<&'a str>,
+    pub control: Option<&'a [u8]>,
+    pub white: Option<&'a [u8]>,
+    pub mark: Option<u32>,
+    pub repeats: usize,
+    pub gap_us: u32,
+    pub wait_ms: u32,
+    pub stop: Option<Arc<AtomicBool>>,
+    /// C `d2k_trigger_offers_ts`: снятый профиль клиента, если байты TCP-опций
+    /// недоступны. При `tcp_known` Rust разбирает сами байты, как C.
+    pub client_tcp_has_timestamps: Option<bool>,
+}
+
+/// Результат `bridge_input`: заполненные `d2k_trigger`/`d2k_opts`/адрес.
+#[derive(Clone, Debug)]
+pub struct R2oBridgeProducts {
+    pub trigger: Option<Trigger>,
+    pub options: ClassifyOptions,
+    pub decoy: Option<Vec<u8>>,
+    pub decoy_cloned: bool,
+    pub addr: String,
+    pub owns_search: bool,
+    pub error: Option<String>,
+    pub client_tcp_known: bool,
+    pub client_tcp_options: Vec<u8>,
+    pub client_tcp_has_timestamps: Option<bool>,
+    pub snapped: bool,
+}
+
+/// C `d2k_trigger_offers_ts` (`detect/trigger.c:182-201`): разобрать набор
+/// TCP-опций клиента и ответить, предлагает ли он метку времени (вид 8).
+pub fn r2o_trigger_offers_ts(options: &[u8]) -> bool {
+    let mut offset = 0;
+    while offset < options.len() {
+        let kind = options[offset];
+        if kind == 0 {
+            break;
+        }
+        if kind == 1 {
+            offset += 1;
+            continue;
+        }
+        if offset + 2 > options.len() {
+            return false;
+        }
+        let length = usize::from(options[offset + 1]);
+        if length < 2 || length > options.len() - offset {
+            return false;
+        }
+        if kind == 8 && length == 10 {
+            return true;
+        }
+        offset += length;
+    }
+    false
+}
+
+/// C `bridge_input`'s clone of a snapped ClientHello with the control SNI
+/// (`detect/bridge.c:215-235`). Возвращает (байты приманки, признак клона);
+/// `None` — приманка-клон не собралась, и `d2k_opts_decoy` берёт control.
+pub(crate) fn select_bridge_decoy(
+    trigger: &[u8],
+    control: Option<&[u8]>,
+    trigger_snapped: bool,
+) -> (Option<Vec<u8>>, bool) {
+    if !trigger_snapped || trigger.len() <= 5 || trigger[0] != 0x16 {
+        return (None, false);
+    }
+    let Some(control) = control.filter(|control| control.len() >= 2) else {
+        return (None, false);
+    };
+    let Some((offset, length)) = crate::hello::sni_bounds(control) else {
+        return (None, false);
+    };
+    let Some(name) = control.get(offset..offset.saturating_add(length)) else {
+        return (None, false);
+    };
+    if name.is_empty() || name.len() >= 256 || name.contains(&0) {
+        return (None, false);
+    }
+    let Some(clone) = crate::hello::rename_sni(trigger, name) else {
+        return (None, false);
+    };
+    (Some(clone), true)
+}
+
+/// Production-эквивалент C `bridge_input` (`detect/bridge.c:116-255`):
+/// собрать `d2k_trigger`/`d2k_opts` из аргументов крючка планировщика.
+pub fn r2o_bridge_input(input: R2oBridgeInput<'_>) -> R2oBridgeProducts {
+    // C `memset(optp, 0, ...)`: мост не подставляет умолчания сам, это
+    // делает `d2k_opts_defaults` в начале прогона.
+    let mut options = ClassifyOptions::default();
+    options.repeats = 0;
+    options.timeout = Duration::ZERO;
+    options.write_gap = Duration::ZERO;
+    options.long_gap = Duration::ZERO;
+    options.mark = None;
+    options.control = None;
+    options.white = None;
+    options.cancel = None;
+    options.client_tcp_has_timestamps = None;
+    let mut products = R2oBridgeProducts {
+        trigger: None,
+        options,
+        decoy: None,
+        decoy_cloned: false,
+        addr: String::new(),
+        // C ставит owns_search до любых проверок: сбой старта исходного
+        // инструмента не передаёт поиск другой реализации.
+        owns_search: true,
+        error: None,
+        client_tcp_known: false,
+        client_tcp_options: Vec::new(),
+        client_tcp_has_timestamps: input.client_tcp_has_timestamps,
+        snapped: input.trigger.snapped,
+    };
+
+    let Some(bytes) = input.trigger.bytes else {
+        products.error = Some("мерить нечем: снятого приветствия нет или оно не по размеру".into());
+        return products;
+    };
+    if bytes.len() < 2 || bytes.len() > 16_384 {
+        products.error = Some("мерить нечем: снятого приветствия нет или оно не по размеру".into());
+        return products;
+    }
+
+    let mut trigger = Trigger {
+        name: String::new(),
+        payload: bytes.to_vec(),
+        accept: Accept::ServerHello,
+    };
+    if let Some(name) = input.trigger_name {
+        trigger.name = name.to_owned();
+    } else if let Some((offset, length)) = crate::hello::sni_bounds(bytes)
+        && length > 0
+        && length <= 253
+        && let Some(sni) = bytes.get(offset..offset.saturating_add(length))
+        && !sni.contains(&0)
+        && let Ok(sni) = std::str::from_utf8(sni)
+    {
+        trigger.name = format!("tls:{sni}");
+    }
+
+    if input.trigger.tcp_known && input.trigger.tcp_options.len() <= 40 {
+        products.client_tcp_known = true;
+        products.client_tcp_options = input.trigger.tcp_options.to_vec();
+        products.client_tcp_has_timestamps =
+            Some(r2o_trigger_offers_ts(&products.client_tcp_options));
+    }
+
+    let mut control = None;
+    if let Some(bytes) = input
+        .control
+        .filter(|bytes| (2..=16_384).contains(&bytes.len()))
+    {
+        control = Some(Trigger {
+            name: "control".into(),
+            payload: bytes.to_vec(),
+            accept: Accept::TlsRecord,
+        });
+        products.options.control = control.clone();
+        products.options.control_vouched = false;
+    }
+
+    let (decoy, cloned) = select_bridge_decoy(
+        &trigger.payload,
+        control.as_ref().map(|control| control.payload.as_slice()),
+        input.trigger.snapped,
+    );
+    products.decoy = decoy;
+    products.decoy_cloned = cloned;
+
+    if let Some(bytes) = input
+        .white
+        .filter(|bytes| (2..=16_384).contains(&bytes.len()))
+    {
+        products.options.white = Some(Trigger {
+            name: "white".into(),
+            payload: bytes.to_vec(),
+            accept: Accept::TlsRecord,
+        });
+    }
+
+    products.options.repeats = input.repeats;
+    products.options.write_gap = Duration::from_millis(u64::from(input.gap_us / 1000));
+    products.options.timeout = Duration::from_millis(u64::from(input.wait_ms));
+    products.options.mark = input.mark;
+    products.options.cancel = input.stop;
+    products.options.trigger_snapped = input.trigger.snapped;
+    products.options.client_tcp_has_timestamps = products.client_tcp_has_timestamps;
+    products.addr = if input.ip.contains(':') {
+        format!("[{}]:{}", input.ip, input.port)
+    } else {
+        format!("{}:{}", input.ip, input.port)
+    };
+    products.trigger = Some(trigger);
+    products
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1255,11 +1489,98 @@ fn parse_target(target: &str) -> Result<ProbeTarget, &'static str> {
     })
 }
 
+/// C `stop_asked` (`detect/bridge.c:50-55`): общий флаг службы и флаг этой
+/// задачи; проверяются оба, общий — первым.
 fn stopped(options: &ClassifyOptions) -> bool {
-    options
-        .cancel
-        .as_ref()
-        .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+    r2o_detect_stop_all_requested()
+        || options
+            .cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+}
+
+/// Результат C `d2k_detect_sched_tcp_ack` (`detect/bridge.c:548-573`):
+/// код `-1/0/1` и число реально заданных соединений.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct R2oDetectAckResult {
+    pub code: i32,
+    pub probes: usize,
+}
+
+/// Ядро C `d2k_detect_sched_tcp_ack`: до `repeats` вызовов пробы, `-1` на
+/// отмене/локальной ошибке, `1` на первом подтверждении, `0` на тишине.
+/// Ошибка `Unsupported` не увеличивает `probes`, как C `-2`.
+pub fn r2o_detect_sched_tcp_ack_with<F>(
+    ip: &str,
+    port: u16,
+    mark: Option<u32>,
+    timeout: Duration,
+    repeats: usize,
+    stop: Option<&AtomicBool>,
+    mut probe: F,
+) -> R2oDetectAckResult
+where
+    F: FnMut(&ProbeTarget, Duration, Option<u32>, Option<&AtomicBool>) -> Result<bool, ProbeError>,
+{
+    if ip.is_empty() || port == 0 {
+        return R2oDetectAckResult {
+            code: -1,
+            probes: 0,
+        };
+    }
+    let target = ProbeTarget {
+        host: ip.to_owned(),
+        port,
+    };
+    let repeats = if repeats == 0 { 3 } else { repeats };
+    let mut result = R2oDetectAckResult::default();
+    for _ in 0..repeats {
+        if r2o_detect_stop_all_requested() || stop.is_some_and(|stop| stop.load(Ordering::Relaxed))
+        {
+            result.code = -1;
+            return result;
+        }
+        match probe(&target, timeout, mark, stop) {
+            Ok(true) => {
+                result.probes += 1;
+                result.code = 1;
+                return result;
+            }
+            Ok(false) => result.probes += 1,
+            Err(error) if error.is_unsupported() => {
+                result.code = -1;
+                return result;
+            }
+            Err(_) => {
+                result.probes += 1;
+                result.code = -1;
+                return result;
+            }
+        }
+    }
+    result.code = 0;
+    result
+}
+
+/// Production-обёртка C `d2k_detect_sched_tcp_ack` над
+/// `probe_neutral_ack`: те же коды и счётчик соединений.
+pub fn r2o_detect_sched_tcp_ack(
+    ip: &str,
+    port: u16,
+    mark: Option<u32>,
+    stop: Option<&AtomicBool>,
+) -> R2oDetectAckResult {
+    r2o_detect_sched_tcp_ack_with(
+        ip,
+        port,
+        mark,
+        Duration::from_millis(6000),
+        3,
+        stop,
+        |target, timeout, mark, stop| {
+            crate::response::probe_neutral_ack(target, timeout, mark, stop)
+        },
+    )
 }
 
 fn add_observation(
