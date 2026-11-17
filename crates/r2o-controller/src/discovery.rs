@@ -1,8 +1,8 @@
 //! Разбор событий и постоянное хранение измеренных результатов TCP-поиска.
 
 use r2k_core::control::{
-    HelloEvent, HttpPortalEvent, HttpResponseEvent, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_LEGACY,
-    SHAPE_MODERN, SHAPE_QUIC,
+    HelloEvent, HttpPortalEvent, HttpResponseEvent, SHAPE_ECH_TCP, SHAPE_GRANDFATHER, SHAPE_HTTP,
+    SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC,
 };
 use r2k_core::plan::Plan as RuntimePlan;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -34,6 +34,16 @@ pub struct DirectClearBindingUpdate {
     pub removed: usize,
     pub waiting: usize,
     pub delete_runtime: bool,
+    /// Битовая маска wire-shape привязок, снятых с runtime (C
+    /// `binding_wire_shape`), чтобы DEL_NAME шёл точной формой привязки.
+    pub delete_shape_mask: u32,
+}
+
+impl DirectClearBindingUpdate {
+    /// Wire-shape привязок, которые нужно снять с runtime.
+    pub fn delete_shapes(&self) -> impl Iterator<Item = u8> + '_ {
+        (0_u8..=31).filter(move |shape| self.delete_shape_mask & (1_u32 << shape) != 0)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1066,6 +1076,64 @@ fn has_usable_binding_with_input(
     })
 }
 
+/// C `clear_binding_matches` (`core/sched.c:5253-5260`): привязка относится к
+/// прямому проходу этой цели. Ноль в транспорте/семействе — старое значение
+/// по умолчанию; форма сравнивается через `d2k_cat_shape_fits` (ноль с любой
+/// стороны — «не измерено»); MODERN не покрывает ECH в этой проверке.
+pub(crate) fn r2o_clear_binding_matches(
+    kind: &str,
+    binding_target: &str,
+    binding_transport: u8,
+    binding_family: u8,
+    binding_tcp_profile: u8,
+    binding_shape: u8,
+    target_host: &str,
+    transport: u8,
+    family: u8,
+    target_tcp_profile: u8,
+    measured_shape: u8,
+) -> bool {
+    let tr = if binding_transport == 0 {
+        6
+    } else {
+        binding_transport
+    };
+    kind == "name"
+        && binding_target == target_host
+        && tr == transport
+        && (if binding_family == 0 {
+            4
+        } else {
+            binding_family
+        }) == family
+        && (tr != 6 || binding_tcp_profile == target_tcp_profile)
+        && (binding_shape == 0 || measured_shape == 0 || binding_shape == measured_shape)
+}
+
+/// C `binding_wire_shape` (`core/sched.c:3849-3854`): форма привязки для
+/// провода. Ноль — GRANDFATHER; TCP добавляет TCP-профиль контекстом 8–13.
+pub fn r2o_binding_wire_shape(
+    binding_shape: u8,
+    binding_transport: u8,
+    binding_tcp_profile: u8,
+) -> u8 {
+    let shape = if binding_shape == 0 {
+        SHAPE_GRANDFATHER
+    } else {
+        binding_shape
+    };
+    let transport = if binding_transport == 0 {
+        6
+    } else {
+        binding_transport
+    };
+    if transport == 6 {
+        r2k_core::control::r2k_link_shape_tcp_context(shape, binding_tcp_profile)
+    } else {
+        shape
+    }
+}
+
 /// Сохранить прямой проход для точной TLS-привязки, не затрагивая другие формы.
 pub fn update_direct_clear_bindings(
     catalog: &mut Catalog,
@@ -1092,26 +1160,22 @@ pub fn update_direct_clear_bindings(
         let mut index = 0;
         while index < box_record.bindings.len() {
             let binding = &mut box_record.bindings[index];
-            let transport = if binding.transport == 0 {
-                6
-            } else {
-                binding.transport
-            };
-            let family = if binding.family == 0 {
-                4
-            } else {
-                binding.family
-            };
-            // MODERN-привязка покрывает ECH/TLS 1.3 так же, как в
-            // has_covering_binding и в C binding_covering. Без этого
-            // direct-clear ECH-потока не снимал бы устаревшую MODERN-привязку.
-            let modern_covers_ech = binding.shape == SHAPE_MODERN && target.shape == SHAPE_ECH_TCP;
-            let matches_target = binding.kind == "name"
-                && binding.target == target.host
-                && transport == target_transport
-                && family == target.family
-                && (transport != 6 || binding.tcp_profile == target.tcp_profile())
-                && (binding.shape == 0 || binding.shape == target.shape || modern_covers_ech);
+            // MODERN-привязка покрывает ECH/TLS 1.3 только в
+            // has_covering_binding; clear_binding_matches сравнивает форму
+            // строго, как C.
+            let matches_target = r2o_clear_binding_matches(
+                &binding.kind,
+                &binding.target,
+                binding.transport,
+                binding.family,
+                binding.tcp_profile,
+                binding.shape,
+                &target.host,
+                target_transport,
+                target.family,
+                target.tcp_profile(),
+                target.shape,
+            );
             if !matches_target {
                 index += 1;
                 continue;
@@ -1136,9 +1200,12 @@ pub fn update_direct_clear_bindings(
             binding.recheck_mono = Some(monotonic_now);
             update.marked += 1;
             changed = true;
-            update.delete_runtime |= transport == target_transport
-                && family == target.family
-                && (binding.shape == target.shape || modern_covers_ech);
+            // C снимает с провода ровно форму привязки, а не форму цели:
+            // `binding_wire_shape(bd)`.
+            let wire_shape =
+                r2o_binding_wire_shape(binding.shape, binding.transport, binding.tcp_profile);
+            update.delete_runtime = true;
+            update.delete_shape_mask |= 1_u32 << wire_shape.min(31);
             index += 1;
         }
         if changed {
@@ -2467,7 +2534,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_clear_помечает_modern_привязку_для_ech() {
+    fn direct_clear_ech_не_трогает_modern_привязку() {
         use crate::catalog::{Binding, BoxRecord, Catalog};
 
         let target = DiscoveryTarget {
@@ -2492,15 +2559,17 @@ mod tests {
             }],
             ..Catalog::default()
         };
+        // C `clear_binding_matches`: измеренная форма ECH (6) не подходит к
+        // MODERN (1), поэтому прямой проход ECH эту привязку не помечает.
         let update = super::update_direct_clear_bindings(
             &mut catalog,
             &target,
             100,
             std::time::Instant::now(),
         );
-        assert_eq!(update.marked, 1);
-        assert!(update.delete_runtime);
-        assert_eq!(catalog.boxes[0].bindings[0].recheck_since, Some(100));
+        assert_eq!(update.marked, 0);
+        assert!(!update.delete_runtime);
+        assert_eq!(catalog.boxes[0].bindings[0].recheck_since, None);
     }
 
     #[test]
@@ -4092,5 +4161,88 @@ mod tests {
         if let Ok(path) = std::env::var("R2O_BOX_ID_FOR_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
         }
+    }
+
+    /// C/Rust differential: C-стенд вызывает production
+    /// `binding_wire_shape` из sched.c; Rust — production
+    /// `r2o_binding_wire_shape`.
+    #[test]
+    fn binding_wire_shape_matches_c() {
+        let Some(path) = std::env::var_os("R2O_BINDING_WIRE_SHAPE_DIFF_OUTPUT") else {
+            return;
+        };
+        let mut output = String::new();
+        for shape in 0_u8..=13 {
+            for transport in [0_u8, 6, 17] {
+                for profile in 0_u8..=2 {
+                    output.push_str(&format!(
+                        "{shape},{transport},{profile},{}\n",
+                        super::r2o_binding_wire_shape(shape, transport, profile)
+                    ));
+                }
+            }
+        }
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
+    }
+
+    /// C/Rust differential: C-стенд вызывает production
+    /// `clear_binding_matches` из sched.c; Rust — production
+    /// `r2o_clear_binding_matches`.
+    #[test]
+    fn clear_binding_matches_matches_c() {
+        let Some(path) = std::env::var_os("R2O_CLEAR_BINDING_MATCHES_DIFF_OUTPUT") else {
+            return;
+        };
+        let kinds = ["name", "addr"];
+        let transports = [0_u8, 6, 17];
+        let families = [0_u8, 4, 6];
+        let profiles = [0_u8, 1];
+        let shapes = [0_u8, 1, 2, 6];
+        let measured_shapes = [0_u8, 1, 2, 6];
+        let mut output = String::new();
+        for kind in kinds {
+            for target_eq in 0..=1 {
+                for binding_transport in transports {
+                    for binding_family in families {
+                        for binding_profile in profiles {
+                            for binding_shape in shapes {
+                                for measured_shape in measured_shapes {
+                                    for target_transport in [6_u8, 17] {
+                                        for target_family in [4_u8, 6] {
+                                            for target_profile in [0_u8, 1] {
+                                                let result = super::r2o_clear_binding_matches(
+                                                    kind,
+                                                    if target_eq == 1 {
+                                                        "example.com"
+                                                    } else {
+                                                        "other.com"
+                                                    },
+                                                    binding_transport,
+                                                    binding_family,
+                                                    binding_profile,
+                                                    binding_shape,
+                                                    "example.com",
+                                                    target_transport,
+                                                    target_family,
+                                                    target_profile,
+                                                    measured_shape,
+                                                );
+                                                output.push_str(&format!(
+                                                    "{kind},{target_eq},{binding_transport},{binding_family},{binding_profile},{binding_shape},{target_transport},{target_family},{target_profile},{measured_shape},{}\n",
+                                                    u8::from(result)
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
     }
 }

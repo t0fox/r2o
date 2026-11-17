@@ -4083,16 +4083,23 @@ fn catalog_commands_with_send_cap(
                     continue;
                 }
             };
-            let shape = if binding.shape == 0 {
+            let stored_shape = if binding.shape == 0 {
                 SHAPE_GRANDFATHER
             } else {
                 binding.shape
             };
-            if !binding_shape_transport(shape, r2o_catalog_binding_transport(binding)) {
+            if !binding_shape_transport(stored_shape, r2o_catalog_binding_transport(binding)) {
                 skipped += 1;
                 continue;
             }
-            let Ok(host) = normalize_plan_target(&binding.target, shape) else {
+            // C `binding_wire_shape`: на провод едет форма привязки с её
+            // TCP-профилем (контекст 8–13), а не базовая форма цели.
+            let shape = r2o_controller::discovery::r2o_binding_wire_shape(
+                binding.shape,
+                binding.transport,
+                binding.tcp_profile,
+            );
+            let Ok(host) = normalize_plan_target(&binding.target, stored_shape) else {
                 skipped += 1;
                 continue;
             };
@@ -4125,11 +4132,11 @@ fn catalog_commands_with_send_cap(
                 if let Ok(delete) = encode_delete_name(
                     &binding.target,
                     r2o_catalog_binding_transport(binding),
-                    if binding.shape == 0 {
-                        SHAPE_GRANDFATHER
-                    } else {
-                        binding.shape
-                    },
+                    r2o_controller::discovery::r2o_binding_wire_shape(
+                        binding.shape,
+                        binding.transport,
+                        binding.tcp_profile,
+                    ),
                     r2o_catalog_binding_family(binding),
                 ) {
                     install_order.push(CatalogInstallOp::CleanupName {
@@ -29180,10 +29187,12 @@ impl ControlClient {
         }
         *catalog = updated;
         if result.delete_runtime {
-            let mut shapes = vec![target.shape];
-            if target.shape == SHAPE_ECH_TCP {
-                shapes.push(SHAPE_MODERN);
-            }
+            let shapes: Vec<u8> = result.delete_shapes().collect();
+            let shapes = if shapes.is_empty() {
+                vec![target.shape]
+            } else {
+                shapes
+            };
             for shape in shapes {
                 let command = match encode_delete_name(&target.host, 6, shape, target.family) {
                     Ok(command) => command,
@@ -29326,14 +29335,22 @@ impl ControlClient {
         persist_catalog_update(&updated, catalog_path, now, persistence)?;
         if result.delete_runtime {
             let transport = if target.shape == SHAPE_QUIC { 17 } else { 6 };
-            let command = encode_delete_name(&target.host, transport, target.shape, target.family)?;
-            if let Err(delete_error) = self.send_command(&command, control::COMMAND_DEL_NAME) {
-                *catalog = updated;
-                return Err(format!(
-                    "прямая проверка {} сохранила пометку перепроверки, но runtime не подтвердил снятие привязки; каталог не восстановлен, чтобы не установить эту привязку повторно: {delete_error}",
-                    target.host
-                )
-                .into());
+            let shapes: Vec<u8> = result.delete_shapes().collect();
+            let shapes = if shapes.is_empty() {
+                vec![target.shape]
+            } else {
+                shapes
+            };
+            for shape in shapes {
+                let command = encode_delete_name(&target.host, transport, shape, target.family)?;
+                if let Err(delete_error) = self.send_command(&command, control::COMMAND_DEL_NAME) {
+                    *catalog = updated;
+                    return Err(format!(
+                        "прямая проверка {} сохранила пометку перепроверки, но runtime не подтвердил снятие привязки; каталог не восстановлен, чтобы не установить эту привязку повторно: {delete_error}",
+                        target.host
+                    )
+                    .into());
+                }
             }
         }
         *catalog = updated;
