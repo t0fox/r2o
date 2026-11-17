@@ -886,7 +886,7 @@ Discord IP Discovery обход: разбор/сборка 20-байтового
 | C-функция | строки | размер | назначение | R2O-аналог (file:line, символ) или "нет" | статус | доказательство/пробел |
 |---|---|---:|---|---|---|---|
 | `append_fmt` | 10-20 | 11 | безопасное дописывание `vsnprintf` в `buf+pos`; ошибка при `n<0` или `n>=cap-pos` | `String::push_str`/`format!` | **P** | C `va_start`, `vsnprintf(buf+*pos, cap-*pos)`, `n<0 \|\| (size_t)n>=cap-*pos` → -1, иначе `*pos+=n`. Rust строки собирает `String`/`format!`, предела `cap` нет; отдельной функции нет. |
-| `emit_header_proto` | 28-34 | 7 | шапка `d2k-plan 1 1\nid <32 нуля>\nproto <proto>\n` | `compose_d2o.rs:37` (только TCP/TLS) | **P** | C три `append_fmt`: `d2k-plan 1 1`, id из 32 нулей, `proto %s`. Rust для QUIC шапку собирают `r2o-plan`/`Plan`-структура/кандидаты; общего эмиттера с C-текстом нет. |
+| `emit_header_proto` | 28-34 | 7 | шапка `d2k-plan 1 1\nid <32 нуля>\nproto <proto>\n` | `quic_replay.rs:r2o_plan_header`; используется `r2o_quic_plan_text_from_state` | **E*** | **2026-11-17:** C/Rust differential `scripts/r2o-udpplan-header-differential.sh` PASS **4 кейса** (proto `udp quic`, `tcp tls`, пустой, длинный): C production `emit_header_proto` против Rust production `r2o_plan_header(1, zero_id, proto)`. Совпали точные байты, длина и rc. **Ограничение:** Rust возвращает owned-строку без cap; C `%.32s` обрезает id — Rust тоже берёт первые 32 байта. |
 | `append_hex` | 36-42 | 7 | дописать hex каждого байта через `%02x` | `http_search.rs:841-847 append_hex` | **E** | C цикл `append_fmt(buf,cap,pos,"%02x",b[i])`, при переполнении -1. Rust `append_hex(&mut String,&[u8])`: таблица `0123456789abcdef`, два символа на байт (`byte>>4`, `byte&0x0f`), нижний регистр; те же байты, предел задаёт `String`. Владелец candidate/plan text; unit/differential. |
 | `quic_arm_found` | 50-54 | 5 | годен ли arm: kind BLOB/COPIES/TTL/FRAG/SPLIT/UDPLEN | `quic_replay.rs:193 R2oQuicCandidateKind` | **P** | C `a && kind in {BLOB,COPIES,TTL,FRAG,SPLIT,UDPLEN}`; Rust виды кандидатов перечислены, но отдельного предиката с тем же набором нет. |
 | `quic_split_plan_text` | 59-64 | 6 | текст `d2k-plan 1 10\nid 0…\nproto udp quic\nquicsplit 1\norder forward\n` | `quic_replay.rs:449` (`directives: "quicsplit 1\n"`) | **P*** | **2026-11-15:** production `r2o_quic_split_plan_text`; C fixture `split-wrapper` и общий 32-строчный C/Rust diff PASS (точный текст schema 10/zero id/quicsplit 1/order forward). **Остаётся P*:** production split-кандидат использует trial-specific `plan_id`, а не zero-id wrapper; отдельного production call-site wrapper нет. |
@@ -1026,8 +1026,8 @@ Inline-решения QUIC-зонда: суд этапа данных, stall-д�
 
 **Прочитано построчно: 20/20 функций, 456 строк C (`udpplan.c` 1–266, `udpruntime.c` 1–190).** Сверены: сборщики quicsplit/ipfrag/udplen/fake/ttl/copies/voice/«нет воздействия», проверки arm/props, `d2k_udp_plan_build` (TLV → apply → >1 payload/IPID_ZERO/фрагменты/ORIG_PASS), raw-sink `AF_INET/SOCK_RAW/IPPROTO_RAW` + `IP_HDRINCL`/`IP_NODEFRAG`/`SO_MARK`, IPv6-frag sender, TTL/hoplimit get/set/restore, `ECONNREFUSED → -2`.
 
-- **Текстовые сборщики `udpplan.c`:** `append_fmt`, `emit_header_proto`,
-  `append_hex`, `quic_arm_found`, `quic_split_plan_text`, `quic_plan_text`,
+- **Текстовые сборщики `udpplan.c`:** `append_fmt`, **E\*** `emit_header_proto`
+  (4 кейса C/Rust), `append_hex`, `quic_arm_found`, `quic_split_plan_text`, `quic_plan_text`,
   `d2k_quic_arm_plan`, `d2k_quic_compose_plan`, `d2k_quic_delay_plan`,
   `d2k_voice_arm_plan`, `d2k_voice_plan`, `d2k_quic_question_plan` сверены с
   `r2o_fallback`/`classify_measured`/`r2o_quic_http3`. Формы quicsplit 1,

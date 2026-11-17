@@ -538,6 +538,14 @@ fn r2o_quic_plan_id<'a>(state: &'a R2oQuicPlanState<'a>) -> &'a str {
         .unwrap_or("00000000000000000000000000000000")
 }
 
+/// C `emit_header_proto` (`core/udpplan.c:28-34`): шапка
+/// `d2k-plan 1 <schema>`, id ровно 32 символа, `proto <proto>`.
+/// C `%.32s` обрезает id; Rust делает то же по ASCII-границе.
+pub fn r2o_plan_header(schema: u8, plan_id: &str, proto: &str) -> String {
+    let plan_id = plan_id.get(..32).unwrap_or(plan_id);
+    format!("d2k-plan 1 {schema}\nid {plan_id}\nproto {proto}\n")
+}
+
 /// C `quic_split_plan_text` (`core/udpplan.c:59-64`): фиксированный план
 /// разреза CRYPTO, schema 10.
 pub fn r2o_quic_split_plan_text() -> String {
@@ -575,21 +583,18 @@ pub fn r2o_quic_plan_text_from_state(state: &R2oQuicPlanState<'_>) -> Result<Str
 
     let mut text = String::new();
     if split {
-        text.push_str(&format!(
-            "d2k-plan 1 10\nid {plan_id}\nproto udp quic\nquicsplit 1\n"
-        ));
+        text.push_str(&r2o_plan_header(10, &plan_id, "udp quic"));
+        text.push_str("quicsplit 1\n");
     } else if let Some(R2oQuicCandidateKind::FragmentShape(shape)) = state.kind {
-        text.push_str(&format!(
-            "d2k-plan 1 7\nid {plan_id}\nproto udp quic\nipfrag {shape}\n"
-        ));
+        text.push_str(&r2o_plan_header(7, &plan_id, "udp quic"));
+        text.push_str(&format!("ipfrag {shape}\n"));
     } else if let Some(R2oQuicCandidateKind::FragmentControl) = state.kind {
-        text.push_str(&format!(
-            "d2k-plan 1 7\nid {plan_id}\nproto udp quic\nipfrag 1\n"
-        ));
+        text.push_str(&r2o_plan_header(7, &plan_id, "udp quic"));
+        text.push_str("ipfrag 1\n");
     } else if udplen != 0 {
-        text.push_str(&format!("d2k-plan 1 9\nid {plan_id}\nproto udp quic\n"));
+        text.push_str(&r2o_plan_header(9, &plan_id, "udp quic"));
     } else {
-        text.push_str(&format!("d2k-plan 1 1\nid {plan_id}\nproto udp quic\n"));
+        text.push_str(&r2o_plan_header(1, &plan_id, "udp quic"));
     }
 
     // Мусорная приманка C подставляется только когда фальшивки плеча нет.
@@ -1524,6 +1529,28 @@ pub async fn r2o_quic_ask_donor_version_negotiation(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn plan_header_matches_c() {
+        let Some(path) = std::env::var_os("R2O_UDDPLAN_HEADER_DIFF_OUTPUT") else {
+            return;
+        };
+        let zero_id = "0".repeat(32);
+        let cases = [
+            ("udp_quic", "udp quic"),
+            ("tcp_tls", "tcp tls"),
+            ("empty", ""),
+            ("long", "udp quic extra words"),
+        ];
+        let mut output = String::new();
+        for (label, proto) in cases {
+            let text = super::r2o_plan_header(1, &zero_id, proto);
+            let hex: String = text.bytes().map(|byte| format!("{byte:02x}")).collect();
+            output.push_str(&format!("{label} 0 {} {hex}\n", text.len()));
+        }
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
+    }
+
     #[test]
     fn replay_now_ms_is_monotonic_like_c() {
         let first = super::replay_now_ms();
