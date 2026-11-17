@@ -14060,6 +14060,32 @@ impl Drop for R2oDiscoveryWorkerLife {
 }
 
 #[cfg(unix)]
+/// C `drop_client_opts` (`core/sched.c:2452-2455`): забыть TCP-опции задачи.
+/// Rust хранит только tri-state профиль, поэтому drop — удаление записи.
+fn r2o_drop_client_tcp_profile(
+    timestamps: &mut HashMap<R2oDiscoveryTaskKey, bool>,
+    key: &R2oDiscoveryTaskKey,
+) {
+    timestamps.remove(key);
+}
+
+#[cfg(unix)]
+/// C `take_shape_opts`: новый снимок заменяет прежний профиль; неизвестный
+/// профиль очищает запись, а не оставляет старую (drop_client_opts).
+fn r2o_take_client_tcp_profile(
+    timestamps: &mut HashMap<R2oDiscoveryTaskKey, bool>,
+    key: &R2oDiscoveryTaskKey,
+    timestamp: Option<bool>,
+) {
+    match timestamp {
+        Some(has_timestamp) => {
+            timestamps.insert(key.clone(), has_timestamp);
+        }
+        None => r2o_drop_client_tcp_profile(timestamps, key),
+    }
+}
+
+#[cfg(unix)]
 struct DiscoveryWorker {
     jobs: Arc<(std::sync::Mutex<R2oDiscoveryQueue>, std::sync::Condvar)>,
     measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
@@ -14270,12 +14296,12 @@ fn r2o_handle_client_shape_event(
         entry.0 = target.clone();
         entry.1 = Some(shape.client_hello.clone());
         entry.2 |= false;
-        if let Some(timestamp) = shape.tcp_has_timestamp {
-            worker
+        {
+            let mut timestamps = worker
                 .client_tcp_timestamps
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(key.clone(), timestamp);
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            r2o_take_client_tcp_profile(&mut timestamps, &key, shape.tcp_has_timestamp);
         }
         worker.r2o_schedule_pending_rechecks();
         return Some(target);
@@ -14337,11 +14363,7 @@ fn r2o_handle_client_shape_event(
                     .client_tcp_timestamps
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(timestamp) = shape.tcp_has_timestamp {
-                    timestamps.insert(key.clone(), timestamp);
-                } else {
-                    timestamps.remove(&key);
-                }
+                r2o_take_client_tcp_profile(&mut timestamps, &key, shape.tcp_has_timestamp);
                 cancel.store(true, Ordering::Relaxed);
             }
         }
@@ -18424,10 +18446,13 @@ group_block_proven: false,
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(task_key);
-        self.client_tcp_timestamps
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(task_key);
+        {
+            let mut timestamps = self
+                .client_tcp_timestamps
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            r2o_drop_client_tcp_profile(&mut timestamps, task_key);
+        }
         self.failed_at.retain(|failure_key, _| {
             (failure_key.0.clone(), failure_key.1, failure_key.2) != *task_key
         });
@@ -18588,11 +18613,7 @@ group_block_proven: false,
                         .as_ref()
                         .and_then(|(_, _, timestamp)| *timestamp)
                 });
-            if let Some(has_timestamp) = timestamp {
-                client_tcp_timestamps.insert(task_key.clone(), has_timestamp);
-            } else {
-                client_tcp_timestamps.remove(&task_key);
-            }
+            r2o_take_client_tcp_profile(&mut client_tcp_timestamps, &task_key, timestamp);
         }
         let enqueued = queue.enqueue_with_planned(target.clone(), now, trigger_planned);
         let queue_full = !enqueued && queue.entries.len() >= R2O_DISCOVERY_TASK_CAPACITY;
@@ -18796,11 +18817,7 @@ group_block_proven: false,
                 .client_tcp_timestamps
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(has_timestamp) = has_timestamp {
-                client_tcp_timestamps.insert(key.clone(), has_timestamp);
-            } else {
-                client_tcp_timestamps.remove(&key);
-            }
+            r2o_take_client_tcp_profile(&mut client_tcp_timestamps, &key, has_timestamp);
         }
         let queued = self.queue_with_planned_and_trigger(target, trigger_planned, trigger_code);
         if !queued && !self.active.contains_key(&key) {
@@ -60198,5 +60215,52 @@ mod tcp_profile_tests {
             &same_profile,
             &same_profile.boxes[0].bindings[0]
         ));
+    }
+
+    /// C/Rust differential: `drop_client_opts` очищает TCP-профиль задачи;
+    /// неизвестный/битый снимок тоже не оставляет старую запись.
+    #[cfg(unix)]
+    #[test]
+    fn drop_client_opts_matches_c() {
+        let Some(path) = std::env::var_os("R2O_DROP_CLIENT_OPTS_OUTPUT") else {
+            return;
+        };
+        let key: super::R2oDiscoveryTaskKey = ("example.com".to_owned(), 4, 6);
+        let cases: [(&str, Option<&[u8]>); 6] = [
+            ("ts", Some(&[8, 10, 0, 0, 0, 0, 0, 0, 0, 0])),
+            ("no_ts", Some(&[2, 4, 1, 1])),
+            ("empty", Some(&[])),
+            ("malformed", Some(&[8, 10])),
+            ("end", Some(&[0])),
+            ("unknown", None),
+        ];
+        let mut output = String::new();
+        for (label, options) in cases {
+            let timestamp = options.and_then(r2k_core::packet::tcp_timestamp_metadata);
+            let mut timestamps = std::collections::HashMap::new();
+            super::r2o_take_client_tcp_profile(&mut timestamps, &key, timestamp);
+            let before = match timestamps.get(&key) {
+                Some(true) => 2,
+                Some(false) => 1,
+                None => 0,
+            };
+            super::r2o_drop_client_tcp_profile(&mut timestamps, &key);
+            let after = match timestamps.get(&key) {
+                Some(true) => 2,
+                Some(false) => 1,
+                None => 0,
+            };
+            output.push_str(&format!(
+                "{label},{before},{after},{},{}\n",
+                u8::from(timestamps.contains_key(&key)),
+                if timestamps.contains_key(&key) {
+                    options.map_or(0, |options| options.len())
+                } else {
+                    0
+                }
+            ));
+        }
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
     }
 }
