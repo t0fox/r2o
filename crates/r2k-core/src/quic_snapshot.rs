@@ -19,6 +19,11 @@ impl<'a> R2kQuicSnapshot<'a> {
     }
 }
 
+/// C `d2k_qsnap_is`: только сигнатура пачки, без разбора содержимого.
+pub fn r2k_quic_snapshot_is(input: &[u8]) -> bool {
+    input.len() >= R2K_QUIC_SNAPSHOT_HEADER_BYTES && input.get(..3) == Some(b"QSN")
+}
+
 /// Упаковать от одной до четырёх датаграмм в формат `QSN`.
 pub fn r2k_quic_snapshot_pack(datagrams: &[&[u8]]) -> Option<Vec<u8>> {
     if datagrams.is_empty() || datagrams.len() > R2K_QUIC_SNAPSHOT_MAX_DATAGRAMS {

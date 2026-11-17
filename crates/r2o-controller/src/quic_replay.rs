@@ -194,6 +194,28 @@ pub fn r2o_quic_profile_snapshot(server_name: Option<&str>) -> Option<Vec<u8>> {
     r2k_core::quic_snapshot::r2k_quic_snapshot_pack(&[&initial])
 }
 
+/// C `d2k_quic_prepare_target` (`core/quichello.c:287-310`): пачка `QSN` не
+/// пересобирается — отказ; переименовываемый одиночный Initial даёт
+/// `used_sample=1`; иначе свежий донорский профиль (`used_sample=0`).
+/// Результат — упакованный снимок R2O (одна датаграмма).
+pub fn r2o_quic_prepare_target(
+    sample: Option<&[u8]>,
+    sni: Option<&str>,
+) -> Option<(Vec<u8>, bool)> {
+    let sni = sni.filter(|name| !name.is_empty())?;
+    if let Some(sample) = sample.filter(|bytes| !bytes.is_empty()) {
+        if r2k_core::quic_snapshot::r2k_quic_snapshot_is(sample) {
+            return None;
+        }
+        if let Some(initial) = r2k_core::quic::r2k_quic_initial_rename_sni(sample, sni)
+            && let Some(packed) = r2k_core::quic_snapshot::r2k_quic_snapshot_pack(&[&initial])
+        {
+            return Some((packed, true));
+        }
+    }
+    r2o_quic_profile_snapshot(Some(sni)).map(|snapshot| (snapshot, false))
+}
+
 /// Сформировать три свежих нейтральных SNI, как `neutralName()` в d2o.
 pub fn r2o_quic_neutral_control_snapshots() -> Option<Vec<Vec<u8>>> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -2065,6 +2087,65 @@ mod tests {
         if let Ok(path) = std::env::var("R2O_QUIC_PROFILE_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
         }
+    }
+
+    #[test]
+    fn quic_prepare_target_matches_c() {
+        let Some(output_path) = std::env::var_os("R2O_QUIC_PREPARE_DIFF_OUTPUT") else {
+            return;
+        };
+        let sample_hex =
+            std::fs::read_to_string(std::env::var("R2O_QUIC_PREPARE_SAMPLE").expect("sample path"))
+                .unwrap();
+        let sample: Vec<u8> = (0..sample_hex.trim().len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(&sample_hex.trim()[index..index + 2], 16).unwrap())
+            .collect();
+        let mut output = String::new();
+        let mut run = |label: &str, sample: Option<&[u8]>, sni: &str, print_hello: bool| {
+            match super::r2o_quic_prepare_target(sample, Some(sni)) {
+                None => output.push_str(&format!("{label},-1,0,-\n")),
+                Some((packed, used)) => {
+                    let parsed = r2k_core::quic_snapshot::r2k_quic_snapshot_parse(&packed).unwrap();
+                    assert_eq!(parsed.datagrams().len(), 1);
+                    let datagram = parsed.datagrams()[0];
+                    let client_hello =
+                        r2k_core::quic::r2k_quic_initial_client_hello_from_datagrams(&[datagram])
+                            .unwrap();
+                    let name =
+                        r2k_core::quic::r2k_quic_initial_sni_result_from_datagrams(&[datagram])
+                            .unwrap()
+                            .and_then(|name| String::from_utf8(name).ok())
+                            .unwrap_or_else(|| "-".to_owned());
+                    output.push_str(&format!(
+                        "{label},0,{},{name},{},{}\n",
+                        u8::from(used),
+                        client_hello.len(),
+                        if print_hello {
+                            client_hello
+                                .iter()
+                                .map(|byte| format!("{byte:02x}"))
+                                .collect::<String>()
+                        } else {
+                            "-".to_owned()
+                        }
+                    ));
+                }
+            }
+        };
+
+        run("sample-name", Some(&sample), "target.example", true);
+        run("sample-same", Some(&sample), "example.com", true);
+        run("sample-ip", Some(&sample), "203.0.113.7", true);
+        let qsn = [b'Q', b'S', b'N', 1];
+        run("qsn", Some(&qsn), "target.example", false);
+        run("truncated", Some(&sample[..100]), "target.example", false);
+        run("garbage", Some(&[0xaa; 20]), "target.example", false);
+        run("null", None, "target.example", false);
+        run("empty-sni", Some(&sample), "", false);
+
+        std::fs::write(output_path, &output).unwrap();
+        print!("{output}");
     }
 
     #[test]

@@ -7113,6 +7113,9 @@ fn r2o_quic_snapshot_server_name(snapshot: &[u8], server: std::net::SocketAddr) 
 struct R2oQuicNamedCache {
     named: VecDeque<(String, u8, bool, Vec<u8>, std::time::Instant)>,
     multi: VecDeque<(String, u8)>,
+    /// C `quic_shape[2]`/`quic_shape_name[2]`: последняя снятая форма QUIC
+    /// по семейству (индекс 0 — IPv4, 1 — IPv6).
+    shape: [Option<(String, Vec<u8>, std::time::Instant)>; 2],
 }
 
 #[cfg(unix)]
@@ -7156,6 +7159,29 @@ impl R2oQuicNamedCache {
                 && *fam == family
                 && now.saturating_duration_since(*seen) <= R2O_QUIC_NAMED_TTL
         })
+    }
+
+    /// C `quic_named_find`: точное имя и семейство за последние 10 минут.
+    fn find_named(&self, name: &str, family: u8, now: std::time::Instant) -> Option<Vec<u8>> {
+        self.named
+            .iter()
+            .find(|(saved, fam, _, _, seen)| {
+                saved == name
+                    && *fam == family
+                    && now.saturating_duration_since(*seen) <= R2O_QUIC_NAMED_TTL
+            })
+            .map(|(_, _, _, snapshot, _)| snapshot.clone())
+    }
+
+    fn note_shape(&mut self, name: &str, family: u8, snapshot: &[u8], now: std::time::Instant) {
+        self.shape[usize::from(family == 6)] = Some((name.to_owned(), snapshot.to_vec(), now));
+    }
+
+    /// C `s->quic_shape[family]` + `quic_shape_name[family]`.
+    fn last_shape(&self, family: u8) -> Option<(String, Vec<u8>)> {
+        self.shape[usize::from(family == 6)]
+            .as_ref()
+            .map(|(name, snapshot, _)| (name.clone(), snapshot.clone()))
     }
 
     fn note_multi(&mut self, name: &str, family: u8) {
@@ -7234,6 +7260,30 @@ fn r2o_quic_note_multi(name: &str, family: u8) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .note_multi(name, family);
+}
+
+#[cfg(unix)]
+fn r2o_quic_named_find(name: &str, family: u8, now: std::time::Instant) -> Option<Vec<u8>> {
+    r2o_quic_named_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .find_named(name, family, now)
+}
+
+#[cfg(unix)]
+fn r2o_quic_note_shape(name: &str, family: u8, snapshot: &[u8], now: std::time::Instant) {
+    r2o_quic_named_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .note_shape(name, family, snapshot, now);
+}
+
+#[cfg(unix)]
+fn r2o_quic_last_shape(family: u8) -> Option<(String, Vec<u8>)> {
+    r2o_quic_named_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .last_shape(family)
 }
 
 #[cfg(unix)]
@@ -24595,9 +24645,64 @@ impl ControlClient {
                                         <= std::time::Duration::from_secs(60)
                                 })
                                 .and_then(|(name, _)| name.as_deref());
-                            let Some(snapshot) =
+                            let family = if server.is_ipv4() { 4 } else { 6 };
+                            // C `start_search`: своё имя (quic_named, 10 мин),
+                            // затем последняя снятая форма семейства. Чужую
+                            // пачку не пересобираем — честный PROFILE.
+                            let mut shape_refused_qsn = false;
+                            let mut chosen = None;
+                            if let Some(name) = server_name {
+                                if let Some(snapshot) = r2o_quic_named_find(name, family, now) {
+                                    println!(
+                                        "по {} мерю снятой пачкой этого имени ({} байт)",
+                                        name,
+                                        snapshot.len()
+                                    );
+                                    chosen = Some(snapshot);
+                                } else if let Some((shape_name, sample)) =
+                                    r2o_quic_last_shape(family)
+                                {
+                                    if shape_name == name {
+                                        println!(
+                                            "по {} мерю последней снятой формой QUIC ({} байт)",
+                                            name,
+                                            sample.len()
+                                        );
+                                        chosen = Some(sample);
+                                    } else {
+                                        match r2o_controller::quic_replay::r2o_quic_prepare_target(
+                                            Some(&sample),
+                                            Some(name),
+                                        ) {
+                                            Some((snapshot, true)) => {
+                                                println!(
+                                                    "по {} переименовал последний QUIC-снимок ({} байт)",
+                                                    name,
+                                                    snapshot.len()
+                                                );
+                                                chosen = Some(snapshot);
+                                            }
+                                            Some((snapshot, false)) => {
+                                                println!(
+                                                    "по {} последний QUIC-снимок нельзя безопасно переименовать; использую измерительный PROFILE",
+                                                    name
+                                                );
+                                                chosen = Some(snapshot);
+                                            }
+                                            None => shape_refused_qsn = true,
+                                        }
+                                    }
+                                }
+                            }
+                            let Some(snapshot) = chosen.or_else(|| {
+                                if shape_refused_qsn {
+                                    println!(
+                                        "по {} последний QUIC-снимок — пачка чужого имени, её не переименовать; мерю собственным Initial (PROFILE)",
+                                        server_name.unwrap_or("")
+                                    );
+                                }
                                 r2o_controller::quic_replay::r2o_quic_profile_snapshot(server_name)
-                            else {
+                            }) else {
                                 // C `start_search`: fill_hellos не собрал
                                 // QUIC-вход, но задача уже есть — ждём
                                 // снимок имени вместо потери подозрения.
@@ -24608,7 +24713,6 @@ impl ControlClient {
                                     std::io::stdout().flush()?;
                                     continue;
                                 };
-                                let family = if server.is_ipv4() { 4 } else { 6 };
                                 let target = r2o_controller::discovery::DiscoveryTarget {
                                     tcp_profile: 0,
                                     host: host.clone(),
@@ -24638,10 +24742,12 @@ impl ControlClient {
                                 std::io::stdout().flush()?;
                                 continue;
                             };
-                            println!(
-                                "QUIC Discovery использует свежий профиль {}",
-                                server_name.unwrap_or("без SNI")
-                            );
+                            if !shape_refused_qsn {
+                                println!(
+                                    "QUIC Discovery использует свежий профиль {}",
+                                    server_name.unwrap_or("без SNI")
+                                );
+                            }
                             (snapshot, now)
                         }
                     };
@@ -25787,7 +25893,16 @@ impl ControlClient {
                     // (reuse 10 мин); обрывок с известным именем — в
                     // quic_multi, чтобы разрез CRYPTO не ставился клиенту.
                     let family = hello.key[0];
-                    match r2o_quic_snapshot_client_name(snapshot) {
+                    let client_name = r2o_quic_snapshot_client_name(snapshot);
+                    // C `on_shape`: последняя форма по семейству — вход для
+                    // цели без собственного снимка (quic_shape[family]).
+                    r2o_quic_note_shape(
+                        client_name.as_deref().unwrap_or(""),
+                        family,
+                        snapshot,
+                        now,
+                    );
+                    match client_name {
                         Some(name) => r2o_quic_named_note(
                             &name,
                             family,

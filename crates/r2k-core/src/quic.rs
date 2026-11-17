@@ -531,7 +531,36 @@ pub fn r2k_quic_initial_build(
     source_connection_id: &[u8],
     target_len: usize,
 ) -> Option<Vec<u8>> {
-    if !(8..=MAX_CID).contains(&source_connection_id.len())
+    if !(8..=MAX_CID).contains(&source_connection_id.len()) {
+        return None;
+    }
+    find_client_hello_sni_result(client_hello).ok()?;
+    // C `probe_initial_sized`: PN=0, PNLen=4 — донорский Go-профиль.
+    r2k_quic_initial_build_with(
+        QUIC_V1,
+        8,
+        source_connection_id,
+        client_hello,
+        target_len,
+        4,
+    )
+}
+
+/// C `seal_one`: версия, длина свежего DCID, SCID снимка и длина PN задаются
+/// вызывающим. DCID всегда новый — из него выводятся ключи, и повторять чужой
+/// значило бы послать Initial чужого соединения.
+fn r2k_quic_initial_build_with(
+    version: u32,
+    dcid_len: usize,
+    source_connection_id: &[u8],
+    client_hello: &[u8],
+    target_len: usize,
+    pn_len: usize,
+) -> Option<Vec<u8>> {
+    if !matches!(version, QUIC_V1 | QUIC_V2)
+        || !(8..=MAX_CID).contains(&dcid_len)
+        || source_connection_id.len() > MAX_CID
+        || !(1..=4).contains(&pn_len)
         || !(1200..=MAX_PACKET).contains(&target_len)
         || client_hello.len() < 4
         || client_hello.len() > MAX_CLIENT_HELLO
@@ -543,9 +572,8 @@ pub fn r2k_quic_initial_build(
     {
         return None;
     }
-    find_client_hello_sni_result(client_hello).ok()?;
 
-    let mut dcid = [0; 8];
+    let mut dcid = vec![0; dcid_len];
     let mut unique = false;
     for _ in 0..4 {
         getrandom::getrandom(&mut dcid).ok()?;
@@ -564,9 +592,8 @@ pub fn r2k_quic_initial_build(
     write_varint(client_hello.len() as u64, &mut plain).ok()?;
     plain.extend_from_slice(client_hello);
 
-    // Первый номер пакета — 0, подтверждённых нет; C `seal_one` с
-    // pn_len=0 вызывает `d2k_qw_pn_len(0,-1)` и получает один байт.
-    let pn_len = r2k_quic_packet_number_len(0, None);
+    // Номер пакета — 0; длину задал вызывающий (C `seal_one`: 4 для
+    // донорского профиля, минимальная для пересборки снимка).
     let overhead = pn_len.checked_add(16)?;
     // 1 форма/тип + 4 version + 1 dcid_len + dcid + 1 scid_len + scid +
     // 1 varint длины пустого токена.
@@ -593,7 +620,7 @@ pub fn r2k_quic_initial_build(
             return None;
         }
         let header = r2k_quic_long_header(
-            QUIC_V1,
+            version,
             R2K_QUIC_LONG_INITIAL,
             &dcid,
             source_connection_id,
@@ -608,9 +635,48 @@ pub fn r2k_quic_initial_build(
     })?;
     plain.resize(body_len, 0);
 
-    let keys = derive_initial_keys(QUIC_V1, &dcid).ok()?;
+    let keys = derive_initial_keys(version, &dcid).ok()?;
     let packet = seal_initial(&clear_header, &plain, 0, pn_len, keys).ok()?;
     (packet.len() == target_len && is_authenticated_initial(&packet)).then_some(packet)
+}
+
+/// C `d2k_quic_hello_rename` (`core/quichello.c:312-321`) для одного Initial:
+/// QSN не пересобирается; иначе ClientHello переименовывается (IPv4-литерал
+/// снимает SNI) и запечатывается новый Initial той же версии: SCID — из
+/// снимка, DCID — свежий, длина — max(снимок, 1200).
+pub fn r2k_quic_initial_rename_sni(input: &[u8], sni: &str) -> Option<Vec<u8>> {
+    if input.len() < 4 || input.get(..3)? == b"QSN" || sni.is_empty() {
+        return None;
+    }
+    let header = r2o_qw_hdr_parse(input, 0)?;
+    if !header.long_header || header.kind != 0 {
+        return None;
+    }
+    let client_hello = r2k_quic_initial_client_hello_from_datagrams(&[input])?;
+    let renamed = if sni.parse::<std::net::Ipv4Addr>().is_ok() {
+        // C `prepare` проверяет наличие SNI через `d2k_hello_sni`, а тот ждёт
+        // TLS-запись; на входе сырой ClientHello, поэтому проверка всегда
+        // отрицательна и C копирует приветствие без изменений. Повторяем
+        // наблюдаемое поведение донора, а не замысел комментария.
+        client_hello
+    } else {
+        r2k_quic_client_hello_rename_sni(&client_hello, Some(sni))?
+    };
+    let dcid_len = if (8..=MAX_CID).contains(&header.dcid_len) {
+        header.dcid_len
+    } else {
+        8
+    };
+    let scid_end = header.scid_offset.checked_add(header.scid_len)?;
+    let scid = input.get(header.scid_offset..scid_end)?;
+    r2k_quic_initial_build_with(
+        header.version,
+        dcid_len,
+        scid,
+        &renamed,
+        input.len().max(1200),
+        r2k_quic_packet_number_len(0, None),
+    )
 }
 
 /// Повторно зашифровать клиентский Initial с новым DCID, сохранив его форму.
@@ -2180,6 +2246,32 @@ mod tests {
     }
 
     #[test]
+    fn переименование_initial_сохраняет_приветствие_и_отвергает_qsn() {
+        let original_hello =
+            super::r2k_quic_initial_client_hello_from_datagrams(&[RFC_9001_INITIAL]).unwrap();
+        let renamed =
+            super::r2k_quic_initial_rename_sni(RFC_9001_INITIAL, "target.example").unwrap();
+        assert_eq!(
+            super::initial_client_hello_sni(&renamed).as_deref(),
+            Some(b"target.example".as_slice())
+        );
+        let same = super::r2k_quic_initial_rename_sni(RFC_9001_INITIAL, "example.com").unwrap();
+        assert_eq!(
+            super::r2k_quic_initial_client_hello_from_datagrams(&[same.as_slice()]).unwrap(),
+            original_hello
+        );
+        // C `prepare` для IPv4-литерала копирует сырой ClientHello без правок:
+        // `d2k_hello_sni` ждёт TLS-запись и на сыром приветствии не находит имя.
+        let ip = super::r2k_quic_initial_rename_sni(RFC_9001_INITIAL, "203.0.113.7").unwrap();
+        assert_eq!(
+            super::r2k_quic_initial_client_hello_from_datagrams(&[ip.as_slice()]).unwrap(),
+            original_hello
+        );
+        assert!(super::r2k_quic_initial_rename_sni(b"QSN\x01", "x").is_none());
+        assert!(super::r2k_quic_initial_rename_sni(RFC_9001_INITIAL, "").is_none());
+    }
+
+    #[test]
     fn создаёт_аутентифицированный_quic_initial_из_clienthello() {
         let client_hello = crypto_stream(&opened_frames(RFC_9001_INITIAL).frames);
         let initial =
@@ -2190,6 +2282,18 @@ mod tests {
         assert_eq!(
             super::initial_client_hello_sni(&initial).as_deref(),
             Some(b"example.com".as_slice())
+        );
+        let header = super::parse_initial_header(&initial).unwrap();
+        let keys = super::derive_initial_keys(
+            header.version,
+            &initial[header.dcid_offset..header.dcid_offset + header.dcid_len],
+        )
+        .unwrap();
+        let (_, packet_number, pn_len) = super::open_initial(&initial, header, keys).unwrap();
+        assert_eq!(packet_number, 0);
+        assert_eq!(
+            pn_len, 4,
+            "донорский профиль: C `probe_initial_sized` seal_one PNLen=4"
         );
         assert!(super::r2k_quic_initial_build(&client_hello, &[1, 2, 3], 1200).is_none());
         assert!(super::r2k_quic_initial_build(&client_hello, &[1; 8], 1199).is_none());
