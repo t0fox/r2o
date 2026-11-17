@@ -367,7 +367,7 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `d2k_httpsearch_install_ack` | 818-841 | 24 | ACK установки: токен, known binding kind=NAME/temporary=0/family/shape=HTTP | `main.rs:16099-16169 record_http_bound_binding_acknowledgement` | **E** | C по токену находит запись, при ok принимает только известную нетемпорарную NAME-привязку family/HTTP и запоминает `installed_plan_id`; иначе снимает. Rust `record_http_bound_binding_acknowledgement` те же условия (`main.rs:16128-16143`). Тест `http_owned_plan_rollback_matches_d2o`. |
 | `confirmed` | 843-889 | 47 | подтверждённый кандидат: conflict/evidence_lost, install, запись rec | `http_search.rs:36 confirmed_applied`, `main.rs` | **P** | C проверяет `failed_live`/`evidence_lost`, при конфликте увеличивает `conflicts`, снимает кандидата и переходит дальше; иначе `candidate_text`+`install`, пишет key/seq/wall/no_before. Rust разделяет это между `advance_http_candidate`, `confirmed_applied` и записью каталога; полного differential на конфликты/seq нет. |
 | `trial_executed` | 894-900 | 7 | APPLIED покрывает все отправленные запросы, порт/адрес совпали | `main.rs` `http_applied_collection...`, `http_search.rs:36-97 confirmed_applied` | **E** | C: `requests_sent>0 && <=2`, `complete_responses<=requests_sent`, `applied>=requests_sent`, `local_port==proof_sport`, `local_ip==proof_client`. Rust `confirmed_applied` требует те же поля (family/key/plan/trial/execution/binding/shape/temporary), тест `http_applied_collection_requires_each_unique_execution_within_donor_window` (`main.rs:33161`). |
-| `judge_trial` | 902-953 | 52 | суд кандидата по REAL/CUT/INJECTED | `http_search.rs:850 judge` + `main.rs` worker | **P** | C: `trial_executed` → `!executed` пропуск; `REAL+2`/`INJECTED`/`CUT` → judged; REAL+2 → ok++, при `HS_CONFIRM` confirmed; CUT после Real — один диагностический повтор; иначе переход. Rust `advance_http_candidate` повторяет правила (тесты `main.rs:31287,31311,31327`), но решение/логика распределены по worker; полного differential на все переходы нет. |
+| `judge_trial` | 902-953 | 52 | суд кандидата по REAL/CUT/INJECTED | `main.rs:advance_http_candidate` | **E*** | **2026-11-17:** C/Rust differential `scripts/r2o-http-judge-trial-differential.sh` PASS **13 переходов**. C-оракул — production `judge_trial` из `httpsearch.c` (побочные `next_candidate`/`confirmed` заменены заглушками, `trial_executed`/`say`/`d2k_hs_answer_name` production), Rust — production `advance_http_candidate`. Совпали: `!trial_executed` → next; REAL+2 первый → repeat, второй → confirmed; одиночный REAL → next; INJECTED/EARLY/GARBAGE/DECOY → next; CUT без `had_real` → next; CUT после REAL → repeat; CUT после повтора → next; NONE/CONNECT_FAIL → next; состояния `ok`/`had`/`retried`. **Ограничение:** `split_no`/`checksum_no`/`next_question`/`judged` — C-side evidence, не сравнивались: Rust идёт по плоскому списку кандидатов, а не по вопросной машине. |
 | `next_candidate` | 955-1003 | 49 | переход к следующему кандидату/вопросу, запуск зонда | `main.rs:22901 run_http_search_task` | **P** | C обходит вопросы OWN→SPLIT→CHECKSUM→PRODUCT→FALLBACK, сбрасывает состояние кандидата, создаёт plan/trial ID, ставит пробный план и ждёт ACK. Rust worker перебирает `candidates` и ставит пробу через команды; порядок вопросов покрыт unit, переходы/дедлайны — нет. |
 | `add_cand` | 1005-1010 | 6 | добавить кандидата без дублей, предел массива | `http_search.rs` `add_candidate`/`D2K_HS_CANDS_MAX` | E | C `cands[24]` (`N_CANDS*4+8`), дедуп, молчаливый отказ при пределе. Rust `add_candidate` — те же правила, `D2K_HS_CANDS_MAX=24`; используется в `http_search_candidates` для own/saved/canonical/measured. Тест `add_candidate_dedups_and_caps_like_c` (дубль, 30 уникальных → 24, порядок). |
 | `build_cands` | 1012-1039 | 28 | свои подтверждённые планы: свой ключ, затем другие по убыванию seq | `main.rs:4394-4433 saved_http_candidate_keys` | **P** | C сначала добавляет ключ своей записи, затем лучшие (`seq` максимален) подтверждённые ключи других записей (`httpsearch.c:1024-1038`). Rust `saved_http_candidate_keys` сортирует по `same_context`, затем `confirmed` (`main.rs:4423-4426`), а не по seq; набор/приоритет могут отличаться. |
@@ -1168,13 +1168,17 @@ Inline-решения QUIC-зонда: суд этапа данных, stall-д�
   `tests/http_search.rs` и C-фикстурами (judge/baseline/no-executed/
   applied/rollback/queue). Список кандидатов, точные тексты и
   FNV-id совпадают.
+- **`httpsearch.c`, E*:** `judge_trial` — `r2o-http-judge-trial-differential.sh`
+  PASS 13 переходов (next/repeat/confirmed, `ok`/`had`/`retried`);
+  вопросная машина `split_no/checksum_no/next_question` остаётся
+  C-side evidence.
 - **`httpsearch.c`, P:** `mono_ms`, `d2k_hs_answer_name`, `hs_read`
   (тайминги/первый байт/префикс не сопоставлены побайтово), `fresh_id`
   (нет fallback-ветки), `say`, `host_ok`, `rec_find/get` (HashMap вместо
   C-массива, лимиты `D2K_HS_RECORD_MAX_BYTES` не сопоставлены),
   `same_program` (TLV-сравнение иное), `d2k_httpsearch_new/free/busy/
   plan_of`, `d2k_httpsearch_diagnostic_counts/diagnostics`,
-  `diagnostic_end/finish/open_job`, `confirmed`, `judge_trial`,
+  `diagnostic_end/finish/open_job`, `confirmed`,
   `next_candidate`, `add_cand/build_cands/build_fallback`, `start/
   start_next`, `live_owner`, `d2k_httpsearch_bound_failure/control/tick/
   push_all/load`, `runner_*`. Причины: состояние переписано на задачи,

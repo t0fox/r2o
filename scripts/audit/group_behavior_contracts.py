@@ -126,7 +126,7 @@ CONTRACTS = {
     "CN-HTTP-SEARCH": (
         "HTTP search lifecycle and candidates",
         "Задачи, кандидаты, judge, fallback, runner, diagnostics, persist.",
-        "httpsearch: 26 P; test-http-search-response PASS 13; diagnostic_end — event JSON differential PASS; переходы/таймеры/live — нет.",
+        "httpsearch: 25 P; test-http-search-response PASS 13; diagnostic_end — event JSON differential PASS; judge_trial — 13 переходов C/Rust PASS; переходы/таймеры/live — нет.",
     ),
     "CN-VOLUME": (
         "Response volume probe",
@@ -382,8 +382,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 387:
-        raise SystemExit(f"expected 387 P rows, got {len(rows)}")
+    if len(rows) != 386:
+        raise SystemExit(f"expected 386 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")

@@ -49506,6 +49506,84 @@ group_block_proven: false,
 
     #[cfg(unix)]
     #[test]
+    fn judge_trial_decisions_match_c() {
+        use r2o_controller::http_search::Answer;
+
+        let Some(path) = std::env::var_os("R2O_HTTP_JUDGE_TRIAL_DIFF_OUTPUT") else {
+            return;
+        };
+        let default = || HttpCandidateHistory {
+            confirmations: 0,
+            had_complete_server_trial: false,
+            retried_cut: false,
+        };
+        let cases = [
+            ("not_executed", Some(Answer::Real), 2, false, default()),
+            ("real_first", Some(Answer::Real), 2, true, default()),
+            (
+                "real_second",
+                Some(Answer::Real),
+                2,
+                true,
+                HttpCandidateHistory {
+                    confirmations: 1,
+                    had_complete_server_trial: true,
+                    retried_cut: false,
+                },
+            ),
+            ("real_once", Some(Answer::Real), 1, true, default()),
+            ("injected", Some(Answer::Injected), 2, true, default()),
+            ("early", Some(Answer::Early), 1, true, default()),
+            ("garbage", Some(Answer::Garbage), 1, true, default()),
+            ("decoy", Some(Answer::Decoy), 1, true, default()),
+            ("cut_first", Some(Answer::Cut), 1, true, default()),
+            (
+                "cut_retry",
+                Some(Answer::Cut),
+                1,
+                true,
+                HttpCandidateHistory {
+                    confirmations: 1,
+                    had_complete_server_trial: true,
+                    retried_cut: false,
+                },
+            ),
+            (
+                "cut_after_retry",
+                Some(Answer::Cut),
+                1,
+                true,
+                HttpCandidateHistory {
+                    confirmations: 0,
+                    had_complete_server_trial: true,
+                    retried_cut: true,
+                },
+            ),
+            ("none", None, 0, true, default()),
+            ("connect_fail", None, 0, true, default()),
+        ];
+        let mut output = String::new();
+        for (name, answer, complete, execution_confirmed, mut history) in cases {
+            let progress =
+                advance_http_candidate(&mut history, answer, complete, execution_confirmed);
+            let action = match progress {
+                HttpCandidateProgress::Confirmed => "confirmed",
+                HttpCandidateProgress::Repeat => "repeat",
+                HttpCandidateProgress::Next => "next",
+            };
+            output.push_str(&format!(
+                "{name} action={action} ok={} had={} retried={}\n",
+                history.confirmations,
+                u8::from(history.had_complete_server_trial),
+                u8::from(history.retried_cut),
+            ));
+        }
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn http_candidate_retries_one_cut_after_a_complete_server_trial() {
         use r2o_controller::http_search::Answer;
 

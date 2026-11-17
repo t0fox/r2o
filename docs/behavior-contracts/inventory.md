@@ -5,11 +5,11 @@
 поведенческие контракты. Источник — канонические таблицы
 `docs/audit/{core-net,core-state,datapath-core,datapath-plan,detect}.md`.
 
-Строк P: **387**; контрактов: **27**; без контракта: **0**.
+Строк P: **386**; контрактов: **27**; без контракта: **0**.
 
 | Группа | P |
 |---|---:|
-| core-net | 185 |
+| core-net | 184 |
 | core-state | 184 |
 | datapath-core | 6 |
 | datapath-plan | 0 |
@@ -29,7 +29,7 @@
 | `CN-TLS13-HANDSHAKE` | TLS 1.3 handshake and keys | CH/SH, HKDF traffic keys, Finished, ECH, downgrade. | 7 | tls13/tls13core: 7 P; rustls; C/Rust побайтового handshake/ECH нет. |
 | `CN-TLS-VERIFY` | TLS/HTTP verify and contact | Проверка TLS1.2/1.3/ECH, тела ответа, контакта по family. | 8 | verify.c TLS-часть: 8 P; verify-* differentials частичные. |
 | `CN-QUIC-VERIFY` | QUIC/HTTP3 verify and replay | QUIC probe on/path/mark, replay, H3 headers/chunks, qb request/recv. | 10 | verify.c QUIC-часть + replay: 10 P; нужен e2e DoQ/HTTP3 differential. |
-| `CN-HTTP-SEARCH` | HTTP search lifecycle and candidates | Задачи, кандидаты, judge, fallback, runner, diagnostics, persist. | 26 | httpsearch: 26 P; test-http-search-response PASS 13; diagnostic_end — event JSON differential PASS; переходы/таймеры/live — нет. |
+| `CN-HTTP-SEARCH` | HTTP search lifecycle and candidates | Задачи, кандидаты, judge, fallback, runner, diagnostics, persist. | 25 | httpsearch: 25 P; test-http-search-response PASS 13; diagnostic_end — event JSON differential PASS; judge_trial — 13 переходов C/Rust PASS; переходы/таймеры/live — нет. |
 | `CN-VOLUME` | Response volume probe | TLS/plain drain, rx volume, bounded connect, path probe. | 8 | volume: 8 P; budget volume differentials частичные, полный path — нет. |
 | `CN-VOICE` | Voice/STUN discovery | STUN request, DNS/voice blob, prefix, local failure. | 10 | voice/voice_discovery/stun: 10 P; voice differentials частичные. |
 | `CS-SCHED-TASK-LIFECYCLE` | Scheduler task/worker lifecycle | Слоты, worker permits, reset/done/fail/join, retire, queue wake, guards. | 31 | sched.c: worker/task/queue/guard; Rust R2oDiscoverySearches/Queue/Life; полная матрица T_* не доказана. |
