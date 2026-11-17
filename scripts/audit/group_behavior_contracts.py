@@ -101,7 +101,7 @@ CONTRACTS = {
     "CN-QUIC-CONNECTION": (
         "QUIC connection/data stage",
         "TLS-over-QUIC, transport params, ACK/frames, streams, RTT/close.",
-        "quicconn: 31 P; r2o_quic_http3/quinn; полный побайтовый differential не заявлен.",
+        "quicconn: 30 P; r2o_quic_http3/quinn; app_progress — 6 потоков C/Rust PASS; полный побайтовый differential не заявлен.",
     ),
     "CN-TLS-RECORD-IO": (
         "TLS record I/O and helpers",
@@ -382,8 +382,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 352:
-        raise SystemExit(f"expected 352 P rows, got {len(rows)}")
+    if len(rows) != 351:
+        raise SystemExit(f"expected 351 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")

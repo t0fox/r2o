@@ -494,7 +494,7 @@ pub fn r2o_quic_trial_data_verdict(
     r2k_quic_data_judge(
         result.handshake_confirmed,
         result.status,
-        result.app_bytes,
+        result.current_app_bytes,
         result.complete,
         result.r2o_quic_stalled,
         result.budget_required,
@@ -510,7 +510,7 @@ pub fn r2o_quic_short_control_data_verdict(
     r2k_quic_data_judge(
         result.handshake_confirmed,
         result.status,
-        result.app_bytes,
+        result.current_app_bytes,
         result.complete,
         result.r2o_quic_stalled,
         true,
@@ -2505,6 +2505,7 @@ mod tests {
             handshake_confirmed: true,
             status: 200,
             app_bytes: 32_768,
+            current_app_bytes: 32_768,
             ..Default::default()
         };
         assert_eq!(
@@ -2528,6 +2529,7 @@ mod tests {
             handshake_confirmed: true,
             status: 200,
             app_bytes: 32 * 1024,
+            current_app_bytes: 32 * 1024,
             budget_required: false,
             ..Default::default()
         };

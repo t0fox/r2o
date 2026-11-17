@@ -543,7 +543,7 @@ fn r2o_quic_json(
         "path": options.path,
         "protocol": "quic",
         "body_bytes": null,
-        "quic_stream_bytes": result.data.app_bytes,
+        "quic_stream_bytes": result.data.current_app_bytes,
         "body_expected": null,
         "body_has_length": null,
         "headers_inspected": false,

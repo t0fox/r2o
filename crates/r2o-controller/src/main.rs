@@ -27915,18 +27915,20 @@ impl ControlClient {
                             );
                         match control_verdict {
                             r2k_core::quic::R2kQuicDataVerdict::Pass => {
-                                let byte_low =
-                                    baseline_result.app_bytes.min(repeated_result.app_bytes);
-                                let byte_high =
-                                    baseline_result.app_bytes.max(repeated_result.app_bytes);
+                                let byte_low = baseline_result
+                                    .current_app_bytes
+                                    .min(repeated_result.current_app_bytes);
+                                let byte_high = baseline_result
+                                    .current_app_bytes
+                                    .max(repeated_result.current_app_bytes);
                                 let packet_low =
                                     baseline_result.datagrams.min(repeated_result.datagrams);
                                 let packet_high =
                                     baseline_result.datagrams.max(repeated_result.datagrams);
                                 println!(
                                     "короткий HTTP/3-контроль прошёл; прямой обрыв: {} и {} байт потока, {} и {} датаграмм; сошлись байты={}, пакеты={}; one-way={}",
-                                    baseline_result.app_bytes,
-                                    repeated_result.app_bytes,
+                                    baseline_result.current_app_bytes,
+                                    repeated_result.current_app_bytes,
                                     baseline_result.datagrams,
                                     repeated_result.datagrams,
                                     byte_high - byte_low <= 4 * 1024,
@@ -28085,7 +28087,7 @@ impl ControlClient {
                     candidate.name,
                     data.handshake_confirmed,
                     data.status,
-                    data.app_bytes,
+                    data.current_app_bytes,
                     data.r2o_quic_stalled,
                     outcome.applied,
                 );

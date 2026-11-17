@@ -90,6 +90,13 @@ fn r2o_quic_http3_app_complete(app: &R2oQuicHttp3AppCounter) -> bool {
         .complete()
 }
 
+fn r2o_quic_http3_app_current_bytes(app: &R2oQuicHttp3AppCounter) -> u64 {
+    app.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .ranges
+        .bytes()
+}
+
 fn r2o_quic_http3_bounded_timeout_at(
     timeout: Duration,
     deadline: Option<tokio::time::Instant>,
@@ -321,6 +328,8 @@ pub struct R2oQuicHttp3Result {
     pub body_bytes: u64,
     /// Уникальные байты целевого HTTP/3 bidi-потока, включая HEADERS и framing.
     pub app_bytes: u64,
+    /// C `d2k_qc_app_progress`: уникальные байты ТЕКУЩЕГО потока.
+    pub current_app_bytes: u64,
     pub complete: bool,
     pub requests: u32,
     pub datagrams: u64,
@@ -344,6 +353,7 @@ impl Default for R2oQuicHttp3Result {
             status: 0,
             body_bytes: 0,
             app_bytes: 0,
+            current_app_bytes: 0,
             complete: false,
             requests: 0,
             datagrams: 0,
@@ -1694,6 +1704,8 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                                     let mut state = result.lock().unwrap();
                                     state.body_bytes = total_body_bytes;
                                     state.app_bytes = app_progress;
+                                    state.current_app_bytes =
+                                        r2o_quic_http3_app_current_bytes(&app_bytes);
                                     state.datagrams = packets;
                                     return Ok(false);
                                 }
@@ -1712,6 +1724,7 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                         let mut state = result.lock().unwrap();
                         state.body_bytes = total_body_bytes;
                         state.app_bytes = app_progress;
+                        state.current_app_bytes = r2o_quic_http3_app_current_bytes(&app_bytes);
                         state.datagrams = packets;
                         state.budget_passed =
                             budget_driver.r2o_result().budget == R2oQuicBudgetOutcome::Passed;
@@ -1749,6 +1762,8 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
                                     let mut state = result.lock().unwrap();
                                     state.body_bytes = total_body_bytes;
                                     state.app_bytes = app_progress;
+                                    state.current_app_bytes =
+                                        r2o_quic_http3_app_current_bytes(&app_bytes);
                                     state.datagrams = packets;
                                     return Ok(false);
                                 }
@@ -1869,6 +1884,7 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
         state.requests = requests;
         state.app_bytes =
             r2o_quic_http3_app_bytes_load(&app_bytes).saturating_add(failed_repeat_app_bytes);
+        state.current_app_bytes = r2o_quic_http3_app_current_bytes(&app_bytes);
         state.datagrams = datagrams;
         state.budget_passed = budget_passed;
         state.budget = budget_result.budget;
@@ -1974,13 +1990,63 @@ mod tests {
         R2O_QUIC_TP_STREAM_WINDOW, R2O_QUIC_TP_STREAMS, R2oQuicHttp3AppState, R2oQuicHttp3Budget,
         R2oQuicHttp3Stall, R2oQuicHttp3StallAction as Action, r2o_quic_endpoint_config,
         r2o_quic_http3_app_add, r2o_quic_http3_app_bytes_load, r2o_quic_http3_app_complete,
-        r2o_quic_http3_app_reset, r2o_quic_http3_authority, r2o_quic_http3_bounded_timeout_at,
-        r2o_quic_http3_udp_socket_with_mark_setter, r2o_quic_transport_config,
+        r2o_quic_http3_app_current_bytes, r2o_quic_http3_app_reset, r2o_quic_http3_authority,
+        r2o_quic_http3_bounded_timeout_at, r2o_quic_http3_udp_socket_with_mark_setter,
+        r2o_quic_transport_config,
     };
     use std::net::SocketAddr;
     use std::sync::Mutex;
     use std::time::Duration;
     use tokio::time::Instant;
+
+    /// C/Rust differential: `d2k_qc_app_progress` — байты и complete
+    /// ТЕКУЩЕГО потока после reset, при сохранении кумулятивного total.
+    #[test]
+    fn qc_app_progress_matches_c() {
+        let Some(path) = std::env::var_os("R2O_QC_APP_PROGRESS_OUTPUT") else {
+            return;
+        };
+        let app = Mutex::new(R2oQuicHttp3AppState::default());
+        let mut output = String::new();
+        let mut report = |label: &str| {
+            output.push_str(&format!(
+                "{label},{},{}\n",
+                r2o_quic_http3_app_current_bytes(&app),
+                u8::from(r2o_quic_http3_app_complete(&app))
+            ));
+        };
+
+        r2o_quic_http3_app_add(&app, 0, 4, false);
+        r2o_quic_http3_app_add(&app, 2, 8, false);
+        r2o_quic_http3_app_add(&app, 0, 10, true);
+        report("stream1");
+
+        r2o_quic_http3_app_reset(&app);
+        r2o_quic_http3_app_add(&app, 1000, 2000, true);
+        r2o_quic_http3_app_add(&app, 0, 1000, false);
+        report("stream2");
+
+        r2o_quic_http3_app_reset(&app);
+        r2o_quic_http3_app_add(&app, 0, 1000, false);
+        r2o_quic_http3_app_add(&app, 2000, 1000, true);
+        report("stream3");
+
+        r2o_quic_http3_app_reset(&app);
+        r2o_quic_http3_app_add(&app, 0, 0, true);
+        report("stream4");
+
+        r2o_quic_http3_app_reset(&app);
+        r2o_quic_http3_app_add(&app, 0, 100, false);
+        r2o_quic_http3_app_add(&app, 100, 0, true);
+        report("stream5");
+
+        r2o_quic_http3_app_reset(&app);
+        report("stream6");
+
+        assert_eq!(r2o_quic_http3_app_bytes_load(&app), 5110);
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
+    }
 
     #[test]
     fn udp_now_ms_совпадает_с_clock_monotonic() {
