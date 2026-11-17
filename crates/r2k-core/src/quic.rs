@@ -169,6 +169,137 @@ struct InitialHeader {
     packet_len: usize,
 }
 
+/// C `d2k_qw_hdr` (`core/include/d2k_quicwire.h`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct R2oQuicHeader {
+    pub long_header: bool,
+    pub version: u32,
+    pub kind: u8,
+    pub dcid_offset: usize,
+    pub dcid_len: usize,
+    pub scid_offset: usize,
+    pub scid_len: usize,
+    pub token_offset: usize,
+    pub token_len: usize,
+    pub pn_offset: usize,
+    pub length_claimed: usize,
+    pub length_width: usize,
+    pub packet_len: usize,
+}
+
+/// C `long_type_v1` (`core/quicwire.c`): у v2 типы перенумерованы, наружу
+/// отдаются номера v1.
+fn r2o_long_type_v1(version: u32, raw: u8) -> u8 {
+    if version != QUIC_V2 {
+        return raw;
+    }
+    match raw {
+        1 => 0,
+        2 => 1,
+        3 => 2,
+        _ => 3,
+    }
+}
+
+/// C `d2k_qw_hdr_parse` (`core/quicwire.c:204-273`): полный разбор длинного и
+/// короткого заголовка. `dcid_len_short` — длина DCID у короткого заголовка;
+/// ноль означает «неизвестна, не разбирать».
+pub(crate) fn r2o_qw_hdr_parse(input: &[u8], dcid_len_short: usize) -> Option<R2oQuicHeader> {
+    let first = *input.first()?;
+    if first & 0x80 == 0 {
+        if dcid_len_short == 0 || dcid_len_short > MAX_CID {
+            return None;
+        }
+        if input.len() < 1 + dcid_len_short + 1 {
+            return None;
+        }
+        return Some(R2oQuicHeader {
+            long_header: false,
+            version: 0,
+            kind: 0,
+            dcid_offset: 1,
+            dcid_len: dcid_len_short,
+            scid_offset: 0,
+            scid_len: 0,
+            token_offset: 0,
+            token_len: 0,
+            pn_offset: 1 + dcid_len_short,
+            length_claimed: 0,
+            length_width: 0,
+            packet_len: input.len(),
+        });
+    }
+    if input.len() < 7 {
+        return None;
+    }
+    let version = u32::from_be_bytes(input.get(1..5)?.try_into().ok()?);
+    if version == 0 {
+        return None;
+    }
+    let kind = r2o_long_type_v1(version, (first >> 4) & 0x03);
+    let mut cursor = 5usize;
+    let dcid_len = usize::from(*input.get(cursor)?);
+    cursor += 1;
+    if dcid_len > MAX_CID || cursor.checked_add(dcid_len)? >= input.len() {
+        return None;
+    }
+    let dcid_offset = cursor;
+    cursor += dcid_len;
+    let scid_len = usize::from(*input.get(cursor)?);
+    cursor += 1;
+    if scid_len > MAX_CID || cursor.checked_add(scid_len)? > input.len() {
+        return None;
+    }
+    let scid_offset = cursor;
+    cursor += scid_len;
+    let mut header = R2oQuicHeader {
+        long_header: true,
+        version,
+        kind,
+        dcid_offset,
+        dcid_len,
+        scid_offset,
+        scid_len,
+        token_offset: 0,
+        token_len: 0,
+        pn_offset: 0,
+        length_claimed: 0,
+        length_width: 0,
+        packet_len: input.len(),
+    };
+    if kind == 3 {
+        if input.len() - cursor < 16 {
+            return None;
+        }
+        header.token_offset = cursor;
+        header.token_len = input.len() - cursor - 16;
+        return Some(header);
+    }
+    if kind == 0 {
+        let token_len = usize::try_from(read_varint(input, &mut cursor)?).ok()?;
+        header.token_offset = cursor;
+        header.token_len = token_len;
+        if token_len > input.len() - cursor {
+            return None;
+        }
+        cursor += token_len;
+    }
+    let length_start = cursor;
+    let length_claimed = usize::try_from(read_varint(input, &mut cursor)?).ok()?;
+    let length_width = cursor.checked_sub(length_start)?;
+    if length_claimed < 17 || length_claimed > input.len().checked_sub(cursor)? {
+        return None;
+    }
+    header.pn_offset = cursor;
+    header.length_claimed = length_claimed;
+    header.length_width = length_width;
+    header.packet_len = cursor.checked_add(length_claimed)?;
+    if header.pn_offset.checked_add(20)? > input.len() {
+        return None;
+    }
+    Some(header)
+}
+
 #[derive(Clone, Copy, Debug)]
 struct CryptoFrame {
     offset: u64,
@@ -1138,55 +1269,18 @@ fn open_initial_crypto(input: &[u8]) -> Result<OpenedInitial, QuicSplitError> {
 }
 
 fn parse_initial_header(input: &[u8]) -> Option<InitialHeader> {
-    if input.len() < 7 || input[0] & 0x80 == 0 {
-        return None;
-    }
-    let version = u32::from_be_bytes(input.get(1..5)?.try_into().ok()?);
-    let raw_type = (input[0] >> 4) & 0x03;
-    let expected_type = match version {
-        QUIC_V1 => 0,
-        QUIC_V2 => 1,
-        _ => return None,
-    };
-    if raw_type != expected_type {
-        return None;
-    }
-
-    let mut cursor = 5usize;
-    let dcid_len = usize::from(*input.get(cursor)?);
-    cursor += 1;
-    if dcid_len > MAX_CID || cursor.checked_add(dcid_len)? >= input.len() {
-        return None;
-    }
-    let dcid_offset = cursor;
-    cursor += dcid_len;
-    let scid_len = usize::from(*input.get(cursor)?);
-    cursor += 1;
-    if scid_len > MAX_CID || cursor.checked_add(scid_len)? > input.len() {
-        return None;
-    }
-    cursor += scid_len;
-    let token_len = usize::try_from(read_varint(input, &mut cursor)?).ok()?;
-    cursor = cursor.checked_add(token_len)?;
-    if cursor > input.len() {
-        return None;
-    }
-    let length_width = 1usize.checked_shl(u32::from(*input.get(cursor)? >> 6))?;
-    let length_claimed = usize::try_from(read_varint(input, &mut cursor)?).ok()?;
-    if length_claimed < 17 || length_claimed > input.len().checked_sub(cursor)? {
-        return None;
-    }
-    if cursor.checked_add(20)? > input.len() {
+    let header = r2o_qw_hdr_parse(input, 0)?;
+    if !header.long_header || header.kind != 0 || !matches!(header.version, QUIC_V1 | QUIC_V2) {
         return None;
     }
     Some(InitialHeader {
-        version,
-        dcid_offset,
-        dcid_len,
-        pn_offset: cursor,
-        length_claimed,
-        length_width,
-        packet_len: cursor + length_claimed,
+        version: header.version,
+        dcid_offset: header.dcid_offset,
+        dcid_len: header.dcid_len,
+        pn_offset: header.pn_offset,
+        length_claimed: header.length_claimed,
+        length_width: header.length_width,
+        packet_len: header.packet_len,
     })
 }
 
@@ -2658,5 +2752,48 @@ mod tests {
         let mut sealed = seal_initial(&clear_header, &plain, packet_number, pn_len, keys).unwrap();
         sealed.extend_from_slice(&input[header.packet_len..]);
         sealed
+    }
+
+    /// C/Rust differential: C-стенд `d2k_qw_hdr_parse` генерирует длинные и
+    /// короткие заголовки и передаёт точные байты через файл; Rust разбирает
+    /// те же байты production `r2o_qw_hdr_parse`.
+    #[test]
+    fn quic_hdr_parse_matches_c() {
+        let Some(path) = std::env::var_os("R2O_QUIC_HDR_PARSE_INPUT") else {
+            return;
+        };
+        let input = std::fs::read_to_string(path).unwrap();
+        let mut output = String::new();
+        for line in input.lines() {
+            let fields: Vec<&str> = line.splitn(4, ',').collect();
+            let label = fields[0];
+            let hex = fields[1];
+            let short_len: usize = fields[2].parse().unwrap();
+            let bytes: Vec<u8> = (0..hex.len())
+                .step_by(2)
+                .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).unwrap())
+                .collect();
+            output.push_str(&format!("{label},{hex},{short_len},"));
+            match super::r2o_qw_hdr_parse(&bytes, short_len) {
+                None => output.push_str("-1\n"),
+                Some(header) => output.push_str(&format!(
+                    "{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                    u8::from(header.long_header),
+                    header.version,
+                    header.kind,
+                    header.dcid_offset,
+                    header.dcid_len,
+                    header.scid_offset,
+                    header.scid_len,
+                    header.token_offset,
+                    header.token_len,
+                    header.pn_offset,
+                    header.length_claimed,
+                    header.length_width,
+                    header.packet_len
+                )),
+            }
+        }
+        print!("{output}");
     }
 }

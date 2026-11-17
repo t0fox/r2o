@@ -5,11 +5,11 @@
 поведенческие контракты. Источник — канонические таблицы
 `docs/audit/{core-net,core-state,datapath-core,datapath-plan,detect}.md`.
 
-Строк P: **355**; контрактов: **27**; без контракта: **0**.
+Строк P: **354**; контрактов: **27**; без контракта: **0**.
 
 | Группа | P |
 |---|---:|
-| core-net | 172 |
+| core-net | 171 |
 | core-state | 167 |
 | datapath-core | 5 |
 | datapath-plan | 0 |
@@ -19,7 +19,7 @@
 
 | ID | Контракт | Наблюдаемое поведение | P | Текущее доказательство / следующий шаг |
 |---|---|---|---:|---|
-| `CN-QUIC-WIRE` | QUIC wire: long header, PN length, seal/open, packet ranges | Побайтовые операции над QUIC long-header/PN/AEAD/ranges. | 3 | quicwire: 3 P; pn_len — 14 значений, long header — 27 кейсов, ranges — 24 кейса C/Rust PASS; нужны vectors на seal/open. |
+| `CN-QUIC-WIRE` | QUIC wire: long header, PN length, seal/open, packet ranges | Побайтовые операции над QUIC long-header/PN/AEAD/ranges. | 2 | quicwire: 2 P; pn_len — 14 значений, long header — 27, hdr_parse — 120, ranges — 24 кейса C/Rust PASS; нужны vectors на seal/open. |
 | `CN-QUIC-INITIAL` | QUIC Initial: snapshot, reseal, rename, split, assembly | Подготовка/перезапечатывание Initial, SNI/split, сборка датаграмм. | 14 | quichello/quicsnap/quicsnap_reseal/quic: 14 P; r2o-quic-hello и quic-* differential частичные. |
 | `CN-QUIC-PROBE-SEND` | QUIC probe send: socket, prefix TTL, copies, fragments, refused | Открытие/маркировка сокета, приманка/хвост, TTL/copies/split/frag, ECONNREFUSED. | 21 | quicprobe send-функции: 21 P; r2o-quic-send-one PASS 10 кейсов, остаются longer/IPv6/real handshake. |
 | `CN-QUIC-PROBE-RUN` | QUIC probe run: question ladder, budget, classify | Вопросы junk/frames/datagrams/bit/lowport/length, бюджет и итоговый verdict. | 12 | quicprobe run-функции: 12 P; нужны C/Rust differential полного вопроса и бюджета. |
