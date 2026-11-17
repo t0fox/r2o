@@ -5,11 +5,11 @@
 поведенческие контракты. Источник — канонические таблицы
 `docs/audit/{core-net,core-state,datapath-core,datapath-plan,detect}.md`.
 
-Строк P: **338**; контрактов: **26**; без контракта: **0**.
+Строк P: **337**; контрактов: **26**; без контракта: **0**.
 
 | Группа | P |
 |---|---:|
-| core-net | 159 |
+| core-net | 158 |
 | core-state | 163 |
 | datapath-core | 5 |
 | datapath-plan | 0 |
@@ -20,7 +20,7 @@
 | ID | Контракт | Наблюдаемое поведение | P | Текущее доказательство / следующий шаг |
 |---|---|---|---:|---|
 | `CN-QUIC-WIRE` | QUIC wire: long header, PN length, seal/open, packet ranges | Побайтовые операции над QUIC long-header/PN/AEAD/ranges. | 0 | quicwire: 0 P; pn_len — 14 значений, long header — 27, hdr_parse — 120, ranges — 24, seal/open — 96 кейсов C/Rust PASS. |
-| `CN-QUIC-INITIAL` | QUIC Initial: snapshot, reseal, rename, split, assembly | Подготовка/перезапечатывание Initial, SNI/split, сборка датаграмм. | 5 | quichello/quicsnap/quicsnap_reseal/quic: 5 P; prepare_target/rename — 8, hello_ask/split — 16, hello_incomplete — 10, profile/longer — 4 кейса C/Rust PASS; остались quicsnap form/recid и quic assembly. |
+| `CN-QUIC-INITIAL` | QUIC Initial: snapshot, reseal, rename, split, assembly | Подготовка/перезапечатывание Initial, SNI/split, сборка датаграмм. | 4 | quichello/quicsnap/quicsnap_reseal/quic: 4 P; prepare_target/rename — 8, hello_ask/split — 16, hello_incomplete — 10, profile/longer — 4, qsnap_recid — 9 строк C/Rust PASS; остались quicsnap form и quic assembly. |
 | `CN-QUIC-PROBE-SEND` | QUIC probe send: socket, prefix TTL, copies, fragments, refused | Открытие/маркировка сокета, приманка/хвост, TTL/copies/split/frag, ECONNREFUSED. | 21 | quicprobe send-функции: 21 P; r2o-quic-send-one PASS 10 кейсов, остаются longer/IPv6/real handshake. |
 | `CN-QUIC-PROBE-RUN` | QUIC probe run: question ladder, budget, classify | Вопросы junk/frames/datagrams/bit/lowport/length, бюджет и итоговый verdict. | 12 | quicprobe run-функции: 12 P; нужны C/Rust differential полного вопроса и бюджета. |
 | `CN-QUIC-ARM-STRATEGY` | QUIC arm strategy and plan text | Лестница TTL/clearance/split/udplen/frag/fallback и текст arm-плана. | 13 | quicarms + udpplan: 13 P; emit_header_proto — 4 кейса C/Rust PASS; quic_arm_found — 9 кейсов, но wrappers не в production; adaptive/порядок не сверены. |

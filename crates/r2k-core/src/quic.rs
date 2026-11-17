@@ -2565,6 +2565,86 @@ mod tests {
     }
 
     #[test]
+    fn qsnap_recid_matches_c() {
+        let Some(input_path) = std::env::var_os("R2O_QSN_RECID_INPUT") else {
+            return;
+        };
+        let Some(output_path) = std::env::var_os("R2O_QSN_RECID_OUTPUT") else {
+            return;
+        };
+        let input = std::fs::read_to_string(input_path).unwrap();
+        let hex_bytes =
+            |bytes: &[u8]| -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() };
+        let describe = |label: &str, qsn: &[u8]| -> String {
+            let Some(snapshot) = crate::quic_snapshot::r2k_quic_snapshot_parse(qsn) else {
+                return format!("{label},-1\n");
+            };
+            let datagrams = snapshot.datagrams();
+            let Some(first) = datagrams
+                .first()
+                .and_then(|dg| super::r2o_qw_hdr_parse(dg, 0))
+            else {
+                return format!("{label},-1\n");
+            };
+            let first_dcid = datagrams
+                .first()
+                .and_then(|dg| dg.get(first.dcid_offset..first.dcid_offset + first.dcid_len))
+                .unwrap_or_default();
+            let same = datagrams.iter().skip(1).all(|datagram| {
+                super::r2o_qw_hdr_parse(datagram, 0).is_some_and(|header| {
+                    header.dcid_len == first.dcid_len
+                        && datagram.get(header.dcid_offset..header.dcid_offset + header.dcid_len)
+                            == Some(first_dcid)
+                })
+            });
+            let mut output = format!("{label},0,{},", datagrams.len());
+            output.push_str(if same { "1\n" } else { "0\n" });
+            for (index, datagram) in datagrams.iter().enumerate() {
+                let Some(header) = super::r2o_qw_hdr_parse(datagram, 0) else {
+                    output.push_str(&format!("{label}-dg{index},-1\n"));
+                    continue;
+                };
+                let keys = super::derive_initial_keys(
+                    header.version,
+                    &datagram[header.dcid_offset..header.dcid_offset + header.dcid_len],
+                );
+                let opened = keys
+                    .ok()
+                    .and_then(|keys| super::r2o_qw_open(&keys, &header, datagram, 0));
+                let (pn, opens, plain) = match opened {
+                    Some((plain, pn, _)) => (pn, 1, hex_bytes(&plain)),
+                    None => (0, 0, "-".to_owned()),
+                };
+                let scid = datagram
+                    .get(header.scid_offset..header.scid_offset + header.scid_len)
+                    .unwrap_or_default();
+                output.push_str(&format!(
+                    "{label}-dg{index},{},{},{},{pn},{opens},{plain}\n",
+                    header.version,
+                    header.dcid_len,
+                    hex_bytes(scid)
+                ));
+            }
+            output
+        };
+
+        let mut output = String::new();
+        for line in input.lines() {
+            let (label, hex) = line.split_once(',').unwrap();
+            let qsn: Vec<u8> = (0..hex.len())
+                .step_by(2)
+                .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).unwrap())
+                .collect();
+            match crate::quic_snapshot::r2k_quic_snapshot_reseal(&qsn) {
+                Some(resealed) => output.push_str(&describe(label, &resealed)),
+                None => output.push_str(&format!("{label},-1\n")),
+            }
+        }
+        std::fs::write(output_path, &output).unwrap();
+        print!("{output}");
+    }
+
+    #[test]
     fn hello_incomplete_matches_c() {
         let Some(input_path) = std::env::var_os("R2O_QUIC_INCOMPLETE_INPUT") else {
             return;

@@ -90,17 +90,7 @@ pub fn r2k_quic_snapshot_reseal(input: &[u8]) -> Option<Vec<u8>> {
     }
 
     let mut new_dcid = vec![0; old_dcid.len()];
-    let mut unique = false;
-    for _ in 0..4 {
-        getrandom::getrandom(&mut new_dcid).ok()?;
-        if new_dcid != old_dcid {
-            unique = true;
-            break;
-        }
-    }
-    if !unique {
-        return None;
-    }
+    getrandom::getrandom(&mut new_dcid).ok()?;
 
     let mut resealed = Vec::with_capacity(datagrams.len());
     for datagram in datagrams {
