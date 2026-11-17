@@ -24,6 +24,7 @@ clang-18 -std=gnu11 -O2 -Wall -Wextra -Werror \
     "$ROOT/crates/r2o-controller/tests/d2o_quicprobe_helpers_differential.c" \
     "$CORE/quicwire.c" "$CORE/crypto.c" "$CORE/hello.c" "$CORE/tls13core.c" \
     "$CORE/x25519.c" "$CORE/catalog.c" "$CORE/groups.c" "$CORE/domain.c" \
+    "$CORE/quicarms.c" \
     -Wl,--gc-sections -lpthread -lm -o "$TEMP/c"
 
 "$TEMP/c" >"$TEMP/c.out"

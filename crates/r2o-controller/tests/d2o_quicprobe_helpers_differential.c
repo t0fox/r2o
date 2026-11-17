@@ -19,6 +19,17 @@ static void dump_reason(const char *label, const d2k_vres *r)
     printf("\n");
 }
 
+static int hook_calls;
+static char hook_q[64];
+static int hook_sent;
+
+static void progress_hook(const char *question, int sent)
+{
+    hook_calls++;
+    snprintf(hook_q, sizeof hook_q, "%s", question ? question : "");
+    hook_sent = sent;
+}
+
 int main(void)
 {
     d2k_vres r;
@@ -84,5 +95,26 @@ int main(void)
         t.err = tallies[i].err;
         printf("outcome-%d-%d,%d\n", tallies[i].pass, tallies[i].err, qp_outcome(t));
     }
+
+    static const uint32_t rtts[] = {0, 1, 500, 1000, 2000, 3000, 10000};
+    for (size_t i = 0; i < sizeof rtts / sizeof rtts[0]; i++) {
+        printf("budget-ms-%u,%u\n", rtts[i], d2k_quic_budget_ms(rtts[i]));
+    }
+    d2k_quic_budget_s = 1;
+    printf("budget-ms-s1,%u\n", d2k_quic_budget_ms(1000));
+    d2k_quic_budget_s = 5;
+    printf("budget-ms-s5,%u\n", d2k_quic_budget_ms(1000));
+    d2k_quic_budget_s = 5000000;
+    printf("budget-ms-sat,%u\n", d2k_quic_budget_ms(1000));
+    d2k_quic_budget_s = D2K_QUIC_BUDGET_DERIVED;
+
+    d2k_quic_progress_hook = progress_hook;
+    qp_progress("q0", 0);
+    printf("progress-0,%d,%s,%d\n", hook_calls, hook_q[0] ? hook_q : "-", hook_sent);
+    qp_progress("q1", 1);
+    printf("progress-1,%d,%s,%d\n", hook_calls, hook_q[0] ? hook_q : "-", hook_sent);
+    qp_progress("q3", 3);
+    printf("progress-3,%d,%s,%d\n", hook_calls, hook_q[0] ? hook_q : "-", hook_sent);
+    d2k_quic_progress_hook = NULL;
     return 0;
 }

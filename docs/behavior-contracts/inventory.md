@@ -5,11 +5,11 @@
 поведенческие контракты. Источник — канонические таблицы
 `docs/audit/{core-net,core-state,datapath-core,datapath-plan,detect}.md`.
 
-Строк P: **325**; контрактов: **25**; без контракта: **0**.
+Строк P: **323**; контрактов: **25**; без контракта: **0**.
 
 | Группа | P |
 |---|---:|
-| core-net | 146 |
+| core-net | 144 |
 | core-state | 163 |
 | datapath-core | 5 |
 | datapath-plan | 0 |
@@ -21,8 +21,8 @@
 |---|---|---|---:|---|
 | `CN-QUIC-WIRE` | QUIC wire: long header, PN length, seal/open, packet ranges | Побайтовые операции над QUIC long-header/PN/AEAD/ranges. | 0 | quicwire: 0 P; pn_len — 14 значений, long header — 27, hdr_parse — 120, ranges — 24, seal/open — 96 кейсов C/Rust PASS. |
 | `CN-QUIC-INITIAL` | QUIC Initial: snapshot, reseal, rename, split, assembly | Подготовка/перезапечатывание Initial, SNI/split, сборка датаграмм. | 0 | quichello/quicsnap/quicsnap_reseal/quic: 0 P; prepare_target/rename — 8, hello_ask/split — 16, hello_incomplete — 10, profile/longer — 4, qsnap_recid+form — 15 строк, assembly — 17 шагов C/Rust PASS. |
-| `CN-QUIC-PROBE-SEND` | QUIC probe send: socket, prefix TTL, copies, fragments, refused | Открытие/маркировка сокета, приманка/хвост, TTL/copies/split/frag, ECONNREFUSED. | 21 | quicprobe send-функции: 21 P; r2o-quic-send-one PASS 10 кейсов, остаются longer/IPv6/real handshake. |
-| `CN-QUIC-PROBE-RUN` | QUIC probe run: question ladder, budget, classify | Вопросы junk/frames/datagrams/bit/lowport/length, бюджет и итоговый verdict. | 8 | quicprobe run-функции: 8 P; reason_set/append, budget_left, qp_outcome — 17 строк C/Rust PASS и проводка base-result/таймаута; нужен differential полного вопроса. |
+| `CN-QUIC-PROBE-SEND` | QUIC probe send: socket, prefix TTL, copies, fragments, refused | Открытие/маркировка сокета, приманка/хвост, TTL/copies/split/frag, ECONNREFUSED. | 20 | quicprobe send-функции: 21 P; r2o-quic-send-one PASS 10 кейсов, остаются longer/IPv6/real handshake. |
+| `CN-QUIC-PROBE-RUN` | QUIC probe run: question ladder, budget, classify | Вопросы junk/frames/datagrams/bit/lowport/length, бюджет и итоговый verdict. | 7 | quicprobe run-функции: 6 P; reason_set/append, budget_left, qp_outcome, qp_progress, budget_ms — 30 строк C/Rust PASS и проводка base-result/таймаута/прогресса/бюджета; нужен differential полного вопроса. |
 | `CN-QUIC-ARM-STRATEGY` | QUIC arm strategy and plan text | Лестница TTL/clearance/split/udplen/frag/fallback и текст arm-плана. | 9 | quicarms + udpplan: 9 P; emit_header_proto — 4 кейса, arm_plan/compose_plan/split_plan_text — 32 строки C/Rust PASS и production-выбор TTL/split/udplen; adaptive/порядок не сверены. |
 | `CN-QUIC-CONNECTION` | QUIC connection/data stage | TLS-over-QUIC, transport params, ACK/frames, streams, RTT/close. | 30 | quicconn: 30 P; r2o_quic_http3/quinn; app_progress — 6 потоков C/Rust PASS; полный побайтовый differential не заявлен. |
 | `CN-TLS-RECORD-IO` | TLS record I/O and helpers | Чтение/запись записей, EINTR/EAGAIN, nonce/AAD, dispose/free. | 10 | tls12/tls13 record-хелперы: 10 P; r2o-tls12-io PASS 13 кейсов; tls13 put16/get16 — 65536 значений C/Rust PASS; tls13 record layer — нет. |

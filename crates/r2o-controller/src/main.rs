@@ -9975,6 +9975,12 @@ impl R2oQuicDiscoveryWorker {
                 task.deny_recheck,
                 &mut task.stall_cut,
                 &|question, sent| {
+                    // C `qp_progress`: sent==0 не двигает live-вопрос.
+                    let Some((question, sent)) =
+                        r2o_controller::quic_replay::r2o_quic_qp_progress(sent, question)
+                    else {
+                        return;
+                    };
                     if let Some(progress) = progress {
                         progress(server, &snapshot, question, sent);
                     }
@@ -27855,6 +27861,18 @@ impl ControlClient {
             return Ok(None);
         }
         let trigger_snapshots = vec![snapshot.to_vec(); 3];
+        // C `d2k_quic_budget_ms`: бюджет прогона считается от измеренного RTT;
+        // истёк — новые вопросы не задаются.
+        let quic_budget = std::time::Duration::from_millis(u64::from(
+            r2o_controller::quic_replay::r2o_quic_budget_ms(control.rtt_ms),
+        ));
+        if started_at.elapsed() > quic_budget {
+            println!(
+                "QUIC {server}: бюджет прогона исчерпан ({} мс) — вопросы прекращены",
+                quic_budget.as_millis()
+            );
+            return Ok(None);
+        }
         let trigger_timeout = std::time::Duration::from_millis(u64::from(
             r2k_core::quic::r2k_quic_dynamic_wait_ms(control.rtt_ms),
         ));
@@ -28143,6 +28161,13 @@ impl ControlClient {
         for candidate in strategy_candidates.drain(..) {
             if cancel.load(Ordering::Relaxed) {
                 return Err("QUIC-испытание отменено".into());
+            }
+            if started_at.elapsed() > quic_budget {
+                println!(
+                    "QUIC {server}: бюджет прогона исчерпан ({} мс) — оставшиеся кандидаты пропущены",
+                    quic_budget.as_millis()
+                );
+                return Ok(None);
             }
             if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
                 println!("истёк срок QUIC-испытания; оставшиеся кандидаты пропущены");

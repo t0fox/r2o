@@ -410,6 +410,31 @@ pub fn r2o_quic_budget_left(
     r2o_quic_budget_left_elapsed(now.saturating_duration_since(start), limit)
 }
 
+/// C `qp_progress` (`core/quicprobe.c:1432-1435`): ход вопроса отдаётся только
+/// при `sent > 0`; нулевая отправка не двигает live-вопрос.
+pub fn r2o_quic_qp_progress<'a>(sent: usize, question: &'a str) -> Option<(&'a str, usize)> {
+    (sent > 0).then_some((question, sent))
+}
+
+/// C `d2k_quic_budget_ms` (`core/quicprobe.c:2096-2105`).
+pub const R2O_QUIC_WAIT_MS_DEFAULT: u32 = 3000;
+pub const R2O_QUIC_GAP_MS: u32 = 60;
+/// `2 + D2K_QUIC_STRATEGY_ASKS_MAX(9) + D2K_QUIC_ARM_QUESTIONS_MAX(18) +
+/// QP_N_QUESTIONS(6)`.
+pub const R2O_QUIC_RUN_DYN_POLLS: u32 = 35;
+
+pub fn r2o_quic_budget_ms_with(rtt_ms: u32, wait_ms: u32, budget_s: Option<u32>) -> u32 {
+    if let Some(budget_s) = budget_s {
+        return budget_s.saturating_mul(1000);
+    }
+    let per_poll = r2k_core::quic::r2k_quic_dynamic_wait_ms(rtt_ms).saturating_add(R2O_QUIC_GAP_MS);
+    wait_ms.saturating_add(R2O_QUIC_RUN_DYN_POLLS.saturating_mul(per_poll))
+}
+
+pub fn r2o_quic_budget_ms(rtt_ms: u32) -> u32 {
+    r2o_quic_budget_ms_with(rtt_ms, R2O_QUIC_WAIT_MS_DEFAULT, None)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct R2oQuicBaseResult {
     pub clear: bool,
@@ -3784,6 +3809,48 @@ mod tests {
                 R2oQuicPropOutcome::Yes => 2,
             };
             output.push_str(&format!("outcome-{pass}-{err},{outcome}\n"));
+        }
+        for rtt in [0_u32, 1, 500, 1000, 2000, 3000, 10000] {
+            output.push_str(&format!(
+                "budget-ms-{rtt},{}\n",
+                super::r2o_quic_budget_ms(rtt)
+            ));
+        }
+        for (label, budget_s) in [
+            ("budget-ms-s1", 1_u32),
+            ("budget-ms-s5", 5),
+            ("budget-ms-sat", 5_000_000),
+        ] {
+            output.push_str(&format!(
+                "{label},{}\n",
+                super::r2o_quic_budget_ms_with(
+                    1000,
+                    super::R2O_QUIC_WAIT_MS_DEFAULT,
+                    Some(budget_s)
+                )
+            ));
+        }
+        let mut hook_calls = 0_usize;
+        let mut hook_q = String::new();
+        let mut hook_sent = 0_i64;
+        for (label, sent, question) in [
+            ("progress-0", 0_usize, "q0"),
+            ("progress-1", 1, "q1"),
+            ("progress-3", 3, "q3"),
+        ] {
+            if let Some((question, sent)) = super::r2o_quic_qp_progress(sent, question) {
+                hook_calls += 1;
+                hook_q = question.to_owned();
+                hook_sent = sent as i64;
+            }
+            output.push_str(&format!(
+                "{label},{hook_calls},{},{hook_sent}\n",
+                if hook_q.is_empty() {
+                    "-"
+                } else {
+                    hook_q.as_str()
+                }
+            ));
         }
         if let Some(path) = std::env::var_os("R2O_QUICPROBE_HELPERS_OUTPUT") {
             std::fs::write(path, &output).unwrap();
