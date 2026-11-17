@@ -9858,6 +9858,10 @@ type R2oQuicDiscoveryRunner = dyn Fn(
     + Send
     + Sync;
 
+/// C `sched_quic_progress`: вопрос и число реально отправленных датаграмм.
+#[cfg(unix)]
+type R2oQuicDiscoveryProgress = dyn Fn(std::net::SocketAddr, &[u8], &str, usize) + Send + Sync;
+
 #[cfg(unix)]
 struct R2oQuicDiscoveryJob {
     task: R2oQuicDiscoveryTask,
@@ -9883,8 +9887,17 @@ struct R2oQuicDiscoveryWorker {
 
 #[cfg(unix)]
 impl R2oQuicDiscoveryWorker {
+    #[cfg(test)]
     fn new() -> Self {
-        Self::r2o_new_with_runner(Arc::new(|task, commands, cancel| {
+        Self::r2o_new_with_progress(None)
+    }
+
+    fn r2o_new_with_progress(progress: Option<Arc<R2oQuicDiscoveryProgress>>) -> Self {
+        Self::r2o_new_with_runner(Arc::new(move |task, commands, cancel| {
+            let progress = progress.clone();
+            let server = task.server;
+            let snapshot = task.snapshot.clone();
+            let progress = progress.as_deref();
             ControlClient::r2o_run_quic_discovery_trial(
                 task.server,
                 &task.snapshot,
@@ -9896,6 +9909,11 @@ impl R2oQuicDiscoveryWorker {
                 task.r2o_mark,
                 task.deny_recheck,
                 &mut task.stall_cut,
+                &|question, sent| {
+                    if let Some(progress) = progress {
+                        progress(server, &snapshot, question, sent);
+                    }
+                },
             )
             .map_err(|error| error.to_string())
         }))
@@ -12061,6 +12079,24 @@ impl R2oDiscoverySearches {
             "{probe} · проверок: {}, прошло: {passed}, отказов: {failed}",
             passed + failed
         );
+    }
+
+    /// C `sched_quic_progress` (`core/sched.c:2841-2843`): QUIC-вопрос и
+    /// фактически отправленные датаграммы идут в ask-поля live.
+    fn update_quic_progress(
+        &mut self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        question: &str,
+        sent: usize,
+    ) {
+        let key = r2o_discovery_task_key(target);
+        let Some(search) = self.entries.get_mut(&key) else {
+            return;
+        };
+        search.phase = "распознаём поведение";
+        search.ask_probes = search.ask_probes.saturating_add(sent);
+        search.ask_question = r2o_ask_question_text(question);
+        search.question = format!("{question} · отправлено: {sent}");
     }
 
     fn update_plan_progress(
@@ -22571,7 +22607,30 @@ impl ControlClient {
                     .command_sender(),
             )
         });
-        let mut quic_discovery = discovery.as_ref().map(|_| R2oQuicDiscoveryWorker::new());
+        let mut quic_discovery = discovery.as_ref().map(|(worker, _, _, _)| {
+            let searches = Arc::clone(&worker.searches);
+            let progress: Arc<R2oQuicDiscoveryProgress> = Arc::new(
+                move |server: std::net::SocketAddr,
+                      snapshot: &[u8],
+                      question: &str,
+                      sent: usize| {
+                    let Some(host) = r2o_quic_snapshot_server_name(snapshot, server) else {
+                        return;
+                    };
+                    let target = r2o_controller::discovery::DiscoveryTarget {
+                        host,
+                        endpoint: server.to_string(),
+                        family: if server.is_ipv4() { 4 } else { 6 },
+                        shape: SHAPE_QUIC,
+                    };
+                    searches
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .update_quic_progress(&target, question, sent);
+                },
+            );
+            R2oQuicDiscoveryWorker::r2o_new_with_progress(Some(progress))
+        });
         let mut r2o_late_rx = discovery
             .as_ref()
             .map(|_| R2oLateRxWorker::new(measurement_gate.clone()));
@@ -26865,6 +26924,7 @@ impl ControlClient {
         started_at: std::time::Instant,
         measurement_permit: &mut r2o_controller::r2o_resource_limit::R2oMeasurementPermit,
         doq: Option<&r2k_core::dns_config::DnsService>,
+        progress: &dyn Fn(&str, usize),
     ) -> Result<Option<QuicDiscoveryTrialOutcome>, Box<dyn Error>> {
         use r2o_controller::quic_replay::{
             R2oQuicCandidateKind, R2oQuicFilterDecision, R2oQuicFilterResult, R2oQuicPlanState,
@@ -26934,6 +26994,7 @@ impl ControlClient {
                     decision: R2oQuicFilterDecision::Unknown,
                     answered: 0,
                     measured: 0,
+                    sent: 0,
                 },
                 decision: R2oQuicFilterDecision::Unknown,
                 applied: false,
@@ -26954,6 +27015,9 @@ impl ControlClient {
                     return Err("истёк срок QUIC-испытания".into());
                 }
                 let filter = probe.r2o_quic_probe_filter_with_plan(&plan, request_timeout, attempt);
+                // C `sched_quic_progress`: после вопроса в live уходят
+                // вопрос и число фактически отправленных датаграмм.
+                progress(&candidate.name, filter.sent);
                 let events = r2o_collect_controller_applied_events_until(
                     commands,
                     trial_id,
@@ -27119,6 +27183,7 @@ impl ControlClient {
         r2o_mark: Option<u32>,
         deny_recheck: bool,
         stall_cut: &mut bool,
+        progress: &dyn Fn(&str, usize),
     ) -> Result<Option<(String, String, R2oQuicConfirmProof)>, Box<dyn Error>> {
         use r2o_controller::quic_replay::{QuicReplayProbe, r2o_quic_address_is_local};
 
@@ -27431,6 +27496,7 @@ impl ControlClient {
                     started_at,
                     measurement_permit,
                     Some(service),
+                    progress,
                 ) {
                     Ok(Some(outcome)) => outcome,
                     Ok(None) => continue,
@@ -27892,6 +27958,7 @@ impl ControlClient {
                 started_at,
                 measurement_permit,
                 doq_service.as_ref(),
+                progress,
             ) {
                 Ok(Some(outcome)) => outcome,
                 Ok(None) => continue,
@@ -28036,6 +28103,7 @@ impl ControlClient {
                     started_at,
                     measurement_permit,
                     doq_service.as_ref(),
+                    progress,
                 ) {
                     Ok(Some(outcome)) => outcome,
                     Ok(None) => continue,
@@ -28166,6 +28234,7 @@ impl ControlClient {
                     started_at,
                     measurement_permit,
                     doq_service.as_ref(),
+                    progress,
                 ) {
                     Ok(Some(outcome)) => outcome,
                     Ok(None) => continue,
@@ -43615,6 +43684,77 @@ mod tests {
             cache.note(&format!("other-{index}.example"), 4, client_b, now);
         }
         assert!(!cache.r2o_recent("clean.example", 4, client_a, now));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quic_progress_reaches_live_question_and_probes() {
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "quic-live.example".into(),
+            endpoint: "192.0.2.46:443".into(),
+            family: 4,
+            shape: SHAPE_QUIC,
+        };
+        let mut searches = super::R2oDiscoverySearches::default();
+        searches.update(&target, "ждём форму приветствия", 0, 0, "", "");
+        searches.update_quic_progress(&target, "контроль живости", 3);
+        let key = super::r2o_discovery_task_key(&target);
+        let active = std::collections::HashMap::from([(key, target.clone())]);
+        let live = super::r2o_live_searches_from_state(
+            &searches,
+            &active,
+            std::time::Instant::now(),
+            Some(2_003),
+        );
+        assert_eq!(live[0]["phase"], "распознаём поведение");
+        assert_eq!(live[0]["question"], "контроль живости");
+        assert_eq!(live[0]["probes"], 3);
+    }
+
+    /// C/Rust differential: C-стенд вызывает production
+    /// `sched_quic_progress` из sched.c; Rust — production
+    /// `R2oDiscoverySearches::update_quic_progress`.
+    #[cfg(unix)]
+    #[test]
+    fn sched_quic_progress_matches_c() {
+        let Some(path) = std::env::var_os("R2O_SCHED_QUIC_PROGRESS_DIFF_OUTPUT") else {
+            return;
+        };
+        let cases = [
+            ("control", "контроль живости".to_owned(), 3_usize),
+            ("direct", "прямой зонд".to_owned(), 1),
+            ("h3", "прямой запрос HTTP/3".to_owned(), 3),
+            ("empty", String::new(), 2),
+            ("zero_sent", "согласование версии".to_owned(), 0),
+            ("cyrillic", "я".repeat(60), 4),
+            ("ascii200", "c".repeat(200), 5),
+        ];
+        let mut output = String::new();
+        for (label, question, sent) in cases {
+            let target = r2o_controller::discovery::DiscoveryTarget {
+                host: "quic-progress.example".into(),
+                endpoint: "192.0.2.45:443".into(),
+                family: 4,
+                shape: SHAPE_QUIC,
+            };
+            let mut searches = super::R2oDiscoverySearches::default();
+            searches.update(&target, "распознаём поведение", 0, 0, "", "");
+            searches.update_quic_progress(&target, &question, sent);
+            let search = &searches.entries[&super::r2o_discovery_task_key(&target)];
+            let hex = if search.ask_question.is_empty() {
+                "-".to_owned()
+            } else {
+                search
+                    .ask_question
+                    .as_bytes()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect()
+            };
+            output.push_str(&format!("{label} {} {hex}\n", search.ask_probes));
+        }
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
     }
 
     /// C/Rust differential: C-стенд вызывает production

@@ -287,6 +287,8 @@ pub struct R2oQuicFilterResult {
     pub decision: R2oQuicFilterDecision,
     pub answered: usize,
     pub measured: usize,
+    /// Сколько датаграмм реально ушло в провод за все повторы вопроса.
+    pub sent: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1318,6 +1320,7 @@ impl QuicReplayProbe {
         const REPEATS: usize = 3;
         let mut answered = 0;
         let mut measured = 0;
+        let mut sent = 0;
         for _ in 0..REPEATS {
             let result = match plan {
                 Some(plan) => self.run_with_plan(plan, timeout),
@@ -1326,6 +1329,7 @@ impl QuicReplayProbe {
             match result {
                 Ok(result) if result.sent_datagrams > 0 => {
                     measured += 1;
+                    sent += result.sent_datagrams;
                     answered += usize::from(result.handshake_confirmed);
                 }
                 Ok(_) | Err(_) => {}
@@ -1335,6 +1339,7 @@ impl QuicReplayProbe {
             decision: r2o_quic_filter_round_decision(answered, measured, attempt, REPEATS),
             answered,
             measured,
+            sent,
         }
     }
 
@@ -2383,6 +2388,7 @@ mod tests {
                 decision: R2oQuicFilterDecision::No,
                 answered: 0,
                 measured: 3,
+                sent: 3,
             }
         );
         let received = receiver.join().unwrap();
