@@ -5,12 +5,12 @@
 поведенческие контракты. Источник — канонические таблицы
 `docs/audit/{core-net,core-state,datapath-core,datapath-plan,detect}.md`.
 
-Строк P: **373**; контрактов: **27**; без контракта: **0**.
+Строк P: **372**; контрактов: **27**; без контракта: **0**.
 
 | Группа | P |
 |---|---:|
 | core-net | 177 |
-| core-state | 179 |
+| core-state | 178 |
 | datapath-core | 5 |
 | datapath-plan | 0 |
 | detect | 12 |
@@ -33,7 +33,7 @@
 | `CN-VOLUME` | Response volume probe | TLS/plain drain, rx volume, bounded connect, path probe. | 8 | volume: 8 P; budget volume differentials частичные, полный path — нет. |
 | `CN-VOICE` | Voice/STUN discovery | STUN request, DNS/voice blob, prefix, local failure. | 10 | voice/voice_discovery/stun: 10 P; voice differentials частичные. |
 | `CS-SCHED-TASK-LIFECYCLE` | Scheduler task/worker lifecycle | Слоты, worker permits, reset/done/fail/join, retire, queue wake, guards. | 28 | sched.c: worker/task/queue/guard; Rust R2oDiscoverySearches/Queue/Life; box_injects_rst/rst_guard_wanted/plan_arm_rst_guard — 32 кейса C/Rust PASS и проводка в candidate+sync; полная матрица T_* не доказана. |
-| `CS-SCHED-SUSPECT-ADMISSION` | Scheduler suspect admission and refusal | on_suspect, cooldown, dead/refusal, shape/family, refused outcomes. | 32 | sched.c: admission/refusal; Rust queue/cooldown/family recovery; полный differential кодов/порядка. |
+| `CS-SCHED-SUSPECT-ADMISSION` | Scheduler suspect admission and refusal | on_suspect, cooldown, dead/refusal, shape/family, refused outcomes. | 31 | sched.c: admission/refusal; Rust queue/cooldown/family recovery; refuse_is_damage — 256 кодов C/Rust PASS и ветка DAMAGED в REFUSED; полный differential кодов/порядка. |
 | `CS-SCHED-CANDIDATE-VERIFY` | Scheduler candidate verification | verify_confirm, partial_finish, ACK/APPLIED, own plan, exchange. | 21 | sched.c: verify/applied/exchange; production verify_confirm 30 cases, остальные ветви P. |
 | `CS-SCHED-PLAN-GENERATION` | Scheduler plan generation | verdict_to_plans, own_first, area/resource path, plan identity, RX bootstrap. | 21 | sched.c: plans/area/resources/identity; signal_human, task_phase, live_binding, live_autopick — full live.json 12 состояний PASS; Rust candidates/compose; порядок и поля не сверены. |
 | `CS-SCHED-VOLUME-VOICE` | Scheduler volume ladder and voice trials | volume bucket/ladder/room, rx pending, voice trial/observe/fail. | 18 | sched.c: volume/voice; volume_bucket — 28 кейсов C/Rust PASS; budget/voice differentials частичные, поля plan_boxes/rx queue иные. |

@@ -10418,6 +10418,25 @@ fn r2o_discovery_rst_guard_wanted(target: &r2o_controller::discovery::DiscoveryT
     )
 }
 
+/// C `refuse_is_permanent` (`core/sched.c:301-312`): отказ, который
+/// повтором не лечится — `TOO_LONG`, `NOT_APPLIED`, `FLOW_UNFIT`.
+#[cfg(unix)]
+fn r2o_refuse_is_permanent(code: u8) -> bool {
+    matches!(
+        code,
+        r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_TOO_LONG
+            | r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_NOT_APPLIED
+            | r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_FLOW_UNFIT
+    )
+}
+
+/// C `refuse_is_damage` (`core/sched.c:320-322`): поток испорчен
+/// недоисполнением плана — часть ушла, остаток нет.
+#[cfg(unix)]
+fn r2o_refuse_is_damage(code: u8) -> bool {
+    code == r2o_datapath::flow_journal::R2O_JOURNAL_REFUSE_DAMAGED
+}
+
 /// C `plan_arm_rst_guard`: `guard rst_alien` один раз, в конец текста,
 /// если хватает места `cap` (включая завершающий NUL, как C).
 #[cfg(unix)]
@@ -25343,10 +25362,25 @@ impl ControlClient {
                             );
                         }
                     }
-                    println!(
-                        "датапат отказал в применении плана: код={}, execution={:?}",
-                        refused.code, refused.execution_id
-                    );
+                    if r2o_refuse_is_damage(refused.code) {
+                        // C `local_refusal_verdict`: испорченный поток
+                        // называется своим именем, а не «посылка не ушла».
+                        println!(
+                            "поток испорчен недоисполнением плана (часть плана ушла, остаток нет): код={}, execution={:?}",
+                            refused.code, refused.execution_id
+                        );
+                    } else {
+                        if r2o_refuse_is_permanent(refused.code) {
+                            println!(
+                                "отказ {} постоянен: тот же план на том же приветствии будет отвергнут снова — опыт невозможен, кандидат не виноват",
+                                refused.code
+                            );
+                        }
+                        println!(
+                            "датапат отказал в применении плана: код={}, execution={:?}",
+                            refused.code, refused.execution_id
+                        );
+                    }
                     std::io::stdout().flush()?;
                     continue;
                 }
@@ -43475,6 +43509,28 @@ mod tests {
             cache.note(&format!("other-{index}.example"), 4, client_b, now);
         }
         assert!(!cache.r2o_recent("clean.example", 4, client_a, now));
+    }
+
+    /// C/Rust differential: C-стенд вызывает production
+    /// `refuse_is_permanent`/`refuse_is_damage` из sched.c; Rust — те же
+    /// production-предикаты.
+    #[cfg(unix)]
+    #[test]
+    fn refuse_kind_matches_c() {
+        let Some(path) = std::env::var_os("R2O_REFUSE_KIND_DIFF_OUTPUT") else {
+            return;
+        };
+        let mut output = String::new();
+        for code in 0_u16..=255 {
+            let code = code as u8;
+            output.push_str(&format!(
+                "{code} {} {}\n",
+                u8::from(super::r2o_refuse_is_permanent(code)),
+                u8::from(super::r2o_refuse_is_damage(code))
+            ));
+        }
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
     }
 
     /// C/Rust differential: C-стенд вызывает production

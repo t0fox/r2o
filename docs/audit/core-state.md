@@ -569,8 +569,8 @@
 
 | C-функция | строки | размер | назначение | R2O (file:line/символ) | статус | доказательство/пробел |
 |---|---:|---:|---|---|---|---|
-| `refuse_is_permanent` | 301–312 | 12 | отказ, который не лечится повтором: `TOO_LONG`(3), `NOT_APPLIED`(5), `FLOW_UNFIT`(6) | `main.rs:19088-19099` + `flow_journal.rs:20-23` | **P** | **Подтверждённое расщепление:** C-хелпер вызывается в трёх местах — `local_refusal_verdict` (`sched.c:4487`), `on_refused_foreign` (`:9901`), провал группы (`:10113`). Rust обрабатывает 3/5 как `worker.record_client_unfit()` (`main.rs:19091-19095`), а 6 — отдельно: `r2o_catalog_mark_flow_unfit` + повторная постановка (`:19097-19170`). Единой функции/таблицы нет; группа-провал по коду отказа не сопоставлена. |
-| `refuse_is_damage` | 320–322 | 3 | `DAMAGED`(4) — поток испорчен недоисполнением | `flow_journal.rs:21,724-758,95,111` | **P*** | C-предикат только выбирает текст журнала (`sched.c:4522`). Rust `record_execution_failure(..., damaged)` пишет `PlanDamaged` с кодом 4, тексты «поток испорчен»/«поток повреждён»; тест `flow_journal.rs:352`. Контроллерный REFUSED-обработчик вид события отдельно не разбирает. |
+| `refuse_is_permanent` | 301–312 | 12 | отказ, который не лечится повтором: `TOO_LONG`(3), `NOT_APPLIED`(5), `FLOW_UNFIT`(6) | `main.rs:r2o_refuse_is_permanent` + `flow_journal.rs:20-23` | **P*** | **2026-11-17:** C/Rust differential `scripts/r2o-refuse-kind-differential.sh` PASS на всех 256 кодах: `r2o_refuse_is_permanent` истинна ровно для 3/5/6. Предикат используется в REFUSED-обработчике для классификации «опыт невозможен, кандидат не виноват». **Остаётся P*:** C вызывает предикат в трёх местах — `local_refusal_verdict`, `on_refused_foreign`, провал группы; Rust по-прежнему разводит 3/5 (`record_client_unfit`) и 6 (`r2o_catalog_mark_flow_unfit` + повторный замер) отдельными ветками, группа-провал по коду отказа не сопоставлена. |
+| `refuse_is_damage` | 320–322 | 3 | `DAMAGED`(4) — поток испорчен недоисполнением | `main.rs:r2o_refuse_is_damage` + `flow_journal.rs:21,95,111` | **E*** | **2026-11-17:** C/Rust differential `scripts/r2o-refuse-kind-differential.sh` PASS на всех **256 кодах**: C production `refuse_is_damage` против Rust `r2o_refuse_is_damage` (истина только для `DAMAGED=4`). Предикат подключён в главном REFUSED-обработчике: для `DAMAGED` печатается «поток испорчен недоисполнением плана (часть плана ушла, остаток нет)», как C `local_refusal_verdict`, вместо общего «датапат отказал». `record_execution_failure(..., damaged)` по-прежнему пишет `PlanDamaged`. **Ограничение:** C использует предикат ещё для выбора текста в `local_refusal_verdict`; Rust-ветка retry в Discovery не переписана на C-структуру, но наблюдаемое объяснение совпадает. |
 | `verify_default` | 388–413 | 26 | transport 17 → QUIC-зонд; не 6 → `unsupported`; LEGACY → TLS1.2; иначе TLS1.3 | `main.rs:5500-5660` (`r2o_family_recovery_sibling_trial_with_ech_state`, `tls12 = shape == SHAPE_LEGACY`), `:20496 r2o_run_quic_discovery_trial`, `fetch.rs:844` | **P** | **Совпадает:** LEGACY→TLS1.2, MODERN/ECH→TLS1.3, QUIC→QUIC-путь. **Отличия:** Rust не имеет ветви «unsupported transport» — цели создаются только для 6/17; QUIC подтверждение идёт через `r2o_quic_http3`/replay, а TCP — через `FetchOptions.tls12`; единого диспетчера нет. |
 | `bind_default` | 415-418 | 4 | TCP/UDP bind по транспорту: 17 → UDP, иначе TCP | `BoundTcpProbe::open` (`main.rs:22501`); UDP-bind в QUIC/voice/raw | **P*** | C `transport==17 ? d2k_props_bind_udp_family(family) : d2k_props_bind_family(family)`. Rust TCP-путь единый `BoundTcpProbe::open`; UDP-bind разнесён по QUIC/voice/raw, общего `bind_default` нет. Family 4/6 и wildcard-порт те же. |
 | `verify_rx_default` | 420–427 | 8 | TCP → identity-зонд; иначе обычный verify | `fetch.rs:434-446 r2o_d2o_verification_encoding` (`Identity`), `main.rs:3172-3195` RX volume options | **P** | Identity-кодировка выбирается по пути; RX-лестница использует её в `r2o_discovery_volume_fetch_options`. C-ветка «не TCP → verify_default» в Rust выражена выбором QUIC/volume-пути. C/Rust differential identity-RX частичный. |
@@ -1432,16 +1432,12 @@ quicdeny/recheck, каталог/области/исключения, `stall_bud
   `4487`, `9901`, `10113`. Rust разложил предикат на две ветки:
   `TOO_LONG|NOT_APPLIED → record_client_unfit` (`main.rs:19089-19096`) и
   `FLOW_UNFIT → каталог/повторный замер` (`19097-19172`). Набор кодов
-  совпадает, порядок обработки `FLOW_UNFIT` отдельный. Единой функции нет —
-  **P**, поведение по кодам подтверждено, полного differential нет.
-- **`refuse_is_damage` (320–322):** C распознаёт только `DAMAGED` и
-  использует его в `local_refusal_verdict` (`4522`), чтобы напечатать
-  «поток испорчен недоисполнением плана» вместо «посылка не ушла». В Rust
-  есть `R2O_JOURNAL_REFUSE_DAMAGED=4`, `PlanDamaged` и тексты
-  (`flow_journal.rs:21,70,95,111`), но в `EVENT_REFUSED` главного цикла
-  (`main.rs:19086-19178`) отдельной ветки `DAMAGED` нет: код только
-  печатается и не меняет формулировку/журнал. **P**, подтверждённый пробел
-  именно в объяснении недосланного.
+  совпадает, порядок обработки `FLOW_UNFIT` отдельный. Предикат вынесен в
+  `r2o_refuse_is_permanent` и сверен на 256 кодах; три C call-site всё ещё
+  не сопоставлены целиком — **P***.
+- **`refuse_is_damage` (320–322):** **E\*** — differential на 256 кодах;
+  REFUSED-обработчик печатает «поток испорчен недоисполнением плана» для
+  `DAMAGED=4`, как C `local_refusal_verdict`, вместо общего отказа.
 - **`verdict_to_plans` (5209–5551, 343 строки):** C собирает ECH trial,
   QUIC arm, known plans, measured arm, RX-лестницу, split, fallback и
   compose. Rust не имеет одной функции: это `discovery.rs::known_plans/
