@@ -5,11 +5,11 @@
 поведенческие контракты. Источник — канонические таблицы
 `docs/audit/{core-net,core-state,datapath-core,datapath-plan,detect}.md`.
 
-Строк P: **333**; контрактов: **25**; без контракта: **0**.
+Строк P: **329**; контрактов: **25**; без контракта: **0**.
 
 | Группа | P |
 |---|---:|
-| core-net | 154 |
+| core-net | 150 |
 | core-state | 163 |
 | datapath-core | 5 |
 | datapath-plan | 0 |
@@ -23,7 +23,7 @@
 | `CN-QUIC-INITIAL` | QUIC Initial: snapshot, reseal, rename, split, assembly | Подготовка/перезапечатывание Initial, SNI/split, сборка датаграмм. | 0 | quichello/quicsnap/quicsnap_reseal/quic: 0 P; prepare_target/rename — 8, hello_ask/split — 16, hello_incomplete — 10, profile/longer — 4, qsnap_recid+form — 15 строк, assembly — 17 шагов C/Rust PASS. |
 | `CN-QUIC-PROBE-SEND` | QUIC probe send: socket, prefix TTL, copies, fragments, refused | Открытие/маркировка сокета, приманка/хвост, TTL/copies/split/frag, ECONNREFUSED. | 21 | quicprobe send-функции: 21 P; r2o-quic-send-one PASS 10 кейсов, остаются longer/IPv6/real handshake. |
 | `CN-QUIC-PROBE-RUN` | QUIC probe run: question ladder, budget, classify | Вопросы junk/frames/datagrams/bit/lowport/length, бюджет и итоговый verdict. | 12 | quicprobe run-функции: 12 P; нужны C/Rust differential полного вопроса и бюджета. |
-| `CN-QUIC-ARM-STRATEGY` | QUIC arm strategy and plan text | Лестница TTL/clearance/split/udplen/frag/fallback и текст arm-плана. | 13 | quicarms + udpplan: 13 P; emit_header_proto — 4 кейса C/Rust PASS; quic_arm_found — 9 кейсов, но wrappers не в production; adaptive/порядок не сверены. |
+| `CN-QUIC-ARM-STRATEGY` | QUIC arm strategy and plan text | Лестница TTL/clearance/split/udplen/frag/fallback и текст arm-плана. | 9 | quicarms + udpplan: 9 P; emit_header_proto — 4 кейса, arm_plan/compose_plan/split_plan_text — 32 строки C/Rust PASS и production-выбор TTL/split/udplen; adaptive/порядок не сверены. |
 | `CN-QUIC-CONNECTION` | QUIC connection/data stage | TLS-over-QUIC, transport params, ACK/frames, streams, RTT/close. | 30 | quicconn: 30 P; r2o_quic_http3/quinn; app_progress — 6 потоков C/Rust PASS; полный побайтовый differential не заявлен. |
 | `CN-TLS-RECORD-IO` | TLS record I/O and helpers | Чтение/запись записей, EINTR/EAGAIN, nonce/AAD, dispose/free. | 10 | tls12/tls13 record-хелперы: 10 P; r2o-tls12-io PASS 13 кейсов; tls13 put16/get16 — 65536 значений C/Rust PASS; tls13 record layer — нет. |
 | `CN-TLS13-HANDSHAKE` | TLS 1.3 handshake and keys | CH/SH, HKDF traffic keys, Finished, ECH, downgrade. | 7 | tls13/tls13core: 7 P; rustls; C/Rust побайтового handshake/ECH нет. |

@@ -315,6 +315,9 @@ pub struct R2oQuicDiscoveryCandidate {
     pub kind: R2oQuicCandidateKind,
     pub name: String,
     pub directives: String,
+    /// Полный текст плана из production `r2o_quic_compose_plan` (C
+    /// `d2k_quic_compose_plan`); `None` — собрать из kind/directives.
+    pub plan_text: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -911,12 +914,14 @@ pub fn r2o_quic_discovery_candidates(
             kind: R2oQuicCandidateKind::SplitCrypto,
             name: "разрез ClientHello по CRYPTO".to_owned(),
             directives: "quicsplit 1\n".to_owned(),
+            plan_text: r2o_quic_composed_split_plan(),
         });
     }
     candidates.push(R2oQuicDiscoveryCandidate {
         kind: R2oQuicCandidateKind::UdpLength,
         name: "удлинение UDP на 100 байт".to_owned(),
         directives: "udplen 100\n".to_owned(),
+        plan_text: r2o_quic_composed_longer_plan(),
     });
     candidates
 }
@@ -928,11 +933,13 @@ pub fn r2o_quic_fragment_candidates() -> Vec<R2oQuicDiscoveryCandidate> {
         kind: R2oQuicCandidateKind::FragmentControl,
         name: R2O_QUIC_FRAGMENT_CONTROL_NAME.to_owned(),
         directives: "ipfrag 1\n".to_owned(),
+        plan_text: None,
     });
     candidates.extend((1..=4).map(|shape| R2oQuicDiscoveryCandidate {
         kind: R2oQuicCandidateKind::FragmentShape(shape),
         name: format!("IP-фрагментация, форма {shape}"),
         directives: format!("ipfrag {shape}\n"),
+        plan_text: None,
     }));
     candidates
 }
@@ -1018,6 +1025,59 @@ pub fn r2o_quic_adaptive_split_eligible(
             ))
 }
 
+fn r2o_quic_composed_blob_plan(
+    kind: R2oQuicCandidateKind,
+    blob: u8,
+    copies: u8,
+    ttl: Option<u8>,
+) -> Option<String> {
+    if blob == 4
+        || !matches!(
+            kind,
+            R2oQuicCandidateKind::TtlStrategy | R2oQuicCandidateKind::OriginalTtl(_)
+        )
+    {
+        return None;
+    }
+    let arm_kind = R2oQuicArmKind::Ttl;
+    let arm = R2oQuicArm {
+        kind: arm_kind,
+        bytes: R2O_QUIC_ORIGINAL_BLOBS[usize::from(blob)],
+        original: true,
+        frag_kind: 0,
+        ttl: i32::from(ttl.unwrap_or(0)),
+        copies: i32::from(copies),
+        udplen: 0,
+        frag_survives: false,
+    };
+    r2o_quic_compose_plan(Some(&arm), &R2oQuicPlanProps::default()).ok()
+}
+
+fn r2o_quic_composed_split_plan() -> Option<String> {
+    let arm = R2oQuicArm {
+        kind: R2oQuicArmKind::Split,
+        bytes: &[],
+        original: true,
+        frag_kind: 0,
+        ttl: 0,
+        copies: 0,
+        udplen: 0,
+        frag_survives: false,
+    };
+    r2o_quic_compose_plan(Some(&arm), &R2oQuicPlanProps::default()).ok()
+}
+
+fn r2o_quic_composed_longer_plan() -> Option<String> {
+    r2o_quic_compose_plan(
+        None,
+        &R2oQuicPlanProps {
+            junk_ahead: false,
+            longer: true,
+        },
+    )
+    .ok()
+}
+
 fn r2o_quic_blob_candidate(
     kind: R2oQuicCandidateKind,
     name: impl Into<String>,
@@ -1057,6 +1117,11 @@ fn r2o_quic_blob_candidate(
         kind,
         name: name.into(),
         directives,
+        plan_text: if split {
+            None
+        } else {
+            r2o_quic_composed_blob_plan(kind, blob, copies, ttl)
+        },
     }
 }
 
@@ -3580,5 +3645,38 @@ mod tests {
             );
             assert_eq!(refused_code, -2, "ECONNREFUSED не воспроизведён");
         }
+    }
+
+    #[test]
+    fn composed_candidates_match_directive_text() {
+        let mut candidates = super::r2o_quic_discovery_candidates(None, true);
+        candidates.extend(super::r2o_quic_original_fallback_candidates(
+            false, false, false,
+        ));
+        let mut checked = 0;
+        for candidate in candidates {
+            let Some(text) = candidate.plan_text.as_deref() else {
+                continue;
+            };
+            let udplen = candidate
+                .directives
+                .lines()
+                .find_map(|line| line.strip_prefix("udplen "))
+                .and_then(|value| value.trim().parse::<u32>().ok())
+                .unwrap_or(0);
+            let old = super::r2o_quic_plan_text_from_state(&super::R2oQuicPlanState {
+                kind: Some(candidate.kind),
+                directives: &candidate.directives,
+                plan_id: None,
+                udplen,
+                junk: false,
+                non_original: matches!(candidate.kind, super::R2oQuicCandidateKind::AdaptiveSplit),
+                frag_survives: true,
+            })
+            .unwrap();
+            assert_eq!(text, old, "{}", candidate.name);
+            checked += 1;
+        }
+        assert!(checked >= 6, "проверено только {checked} кандидатов");
     }
 }

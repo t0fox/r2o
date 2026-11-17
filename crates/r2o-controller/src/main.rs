@@ -27149,15 +27149,21 @@ impl ControlClient {
             .find_map(|line| line.strip_prefix("udplen "))
             .and_then(|value| value.trim().parse::<u32>().ok())
             .unwrap_or(0);
-        let plan_text = r2o_quic_plan_text_from_state(&R2oQuicPlanState {
-            kind: Some(candidate.kind),
-            directives: &candidate.directives,
-            plan_id: Some(&plan_id_text),
-            udplen,
-            junk: false,
-            non_original: matches!(candidate.kind, R2oQuicCandidateKind::AdaptiveSplit),
-            frag_survives: true,
-        })?;
+        let plan_text = if let Some(text) = candidate.plan_text.as_deref() {
+            // Полный текст собран production `r2o_quic_compose_plan`
+            // (C `d2k_quic_compose_plan`/`arm_plan/split_plan_text`).
+            r2o_controller::discovery::plan_text_for_trial(text, plan_id)?
+        } else {
+            r2o_quic_plan_text_from_state(&R2oQuicPlanState {
+                kind: Some(candidate.kind),
+                directives: &candidate.directives,
+                plan_id: Some(&plan_id_text),
+                udplen,
+                junk: false,
+                non_original: matches!(candidate.kind, R2oQuicCandidateKind::AdaptiveSplit),
+                frag_survives: true,
+            })?
+        };
         let plan_records = compile_text(&plan_text)?;
         let wire_records = r2o_plan_records_for_wire(&plan_records)?;
         let plan = Plan::parse(&plan_records)?;
