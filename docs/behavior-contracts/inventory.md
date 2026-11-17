@@ -5,13 +5,13 @@
 поведенческие контракты. Источник — канонические таблицы
 `docs/audit/{core-net,core-state,datapath-core,datapath-plan,detect}.md`.
 
-Строк P: **385**; контрактов: **27**; без контракта: **0**.
+Строк P: **384**; контрактов: **27**; без контракта: **0**.
 
 | Группа | P |
 |---|---:|
 | core-net | 184 |
 | core-state | 183 |
-| datapath-core | 6 |
+| datapath-core | 5 |
 | datapath-plan | 0 |
 | detect | 12 |
 
@@ -42,7 +42,7 @@
 | `CS-CRYPTO-ECC` | ECC primitives P-256/X25519 | Полевая арифметика, point/scalar, public/keypair/ecdh. | 33 | p256/x25519: 33 P; ring/hpke/dalek; прямых C/Rust векторов нет. |
 | `CS-CLI-TOOLS` | CLI tools d2kc/d2kask/d2kfetch/d2kvoice | Флаги, stdout/exit, snapshot wire, usage. | 2 | d2kc/d2kask/d2kfetch/d2kvoice: 2 P; d2kvoice main/usage PASS; snapshot_wire C-путь недостижим; diagnostic_limit/event/tick, http_search_portal и sched_say — C/Rust differential PASS; остальные CLI. |
 | `CS-PROPS` | QUIC properties text | original/strategy measure and wire properties. | 5 | props: 5 P; quic props findings текстовый контракт не полный. |
-| `DP-SESSION-LIFECYCLE` | Datapath session lifecycle | d2kd main/usage, session_new, UDP handle, session_packet. | 5 | session/d2kd: 5 P; session_packet/handle_udp live не сверены. |
+| `DP-SESSION-LIFECYCLE` | Datapath session lifecycle | d2kd main/usage, session_new, UDP handle, session_packet. | 4 | session/d2kd: 4 P; usage — d2kd help-блок C/Rust PASS; session_packet/handle_udp live не сверены. |
 | `DP-NFQ` | Datapath NFQUEUE error text | nfq say static helper. | 1 | nfq: 1 P; error text/ветви NFQUEUE. |
 | `DT-BRIDGE` | Detect bridge scheduler | base/tcp/white/seeded/progress/stop bridge. | 9 | bridge: 9 P; bridge differential 8 cases, seeded/white ветви P. |
 | `DT-RAW-HANDSHAKE` | Detect raw handshake/probe | flush pending, poison family, handshake_as. | 3 | raw: 3 P; raw probe live/ветви. |

@@ -191,7 +191,7 @@ CONTRACTS = {
     "DP-SESSION-LIFECYCLE": (
         "Datapath session lifecycle",
         "d2kd main/usage, session_new, UDP handle, session_packet.",
-        "session/d2kd: 5 P; session_packet/handle_udp live не сверены.",
+        "session/d2kd: 4 P; usage — d2kd help-блок C/Rust PASS; session_packet/handle_udp live не сверены.",
     ),
     "DP-NFQ": (
         "Datapath NFQUEUE error text",
@@ -382,8 +382,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 385:
-        raise SystemExit(f"expected 385 P rows, got {len(rows)}")
+    if len(rows) != 384:
+        raise SystemExit(f"expected 384 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")

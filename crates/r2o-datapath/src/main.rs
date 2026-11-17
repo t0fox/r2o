@@ -4283,40 +4283,51 @@ mod app {
     }
 
     fn print_help() {
+        // Общие с C флаги и их умолчания печатаются дословно как в
+        // `usage()` (`datapath/d2kd.c:834-861`): C/Rust differential
+        // `test-datapath-usage-differential.sh` сверяет этот блок.
+        // Дополнительные флаги R2O идут отдельной секцией.
         println!(
-            r#"r2o-datapath — Linux NFQUEUE datapath
+            r#"r2o-datapath — служба датапата d2k
 
-Использование: r2o-datapath --queue N [--plan FILE | --controller-only --control PATH] [параметры]
+  --queue N          номер очереди NFQUEUE (обязательно)
+  --plan FILE        план в канонической форме TLV
+  --mode observe|apply   умолчание observe: ничего не менять
+  --mark M           SO_MARK на собственных пакетах (умолчание 0)
+  --probe-mark M     SO_MARK контроллера; его зонды не становятся новыми целями
+  --only-mark M[/K]|none  только клиенты политики Keenetic с этой меткой;
+                     none — политика не найдена, клиентов не обслуживать
+  --udp-reverse-hook обратное UDP-направление гарантированно стоит в NFQUEUE
+  --iface NAME       чей MTU берётся пределом длины посылки
+  --flows N          предел числа потоков — отдельно на TCP и на
+                     UDP/QUIC, не общий бюджет датапата (2048)
+  --queue-len N      глубина очереди ядра в пакетах (1024)
+  --copy-range N     сколько байт пакета брать у ядра (1600)
+  --sched-slots N    сколько отложенных пакетов держать (128)
+  --journal N        глубина диагностического журнала, 0 — без него (256)
+  --control PATH     управляющий сокет для контроллера
+  --idle SEC         молчащий поток забывается через (120)
+  --log FILE         писать вывод сюда вместо stdout
+  --stats SEC        период печати сводки, 0 — не печатать (10)
+  --duration SEC     остановиться через N секунд, 0 — бесконечно
+  --no-fail-open     НЕ пропускать при переполнении очереди
 
-Параметры:
-  --plan FILE        статический план R2OP (по умолчанию /etc/r2o/plans/current.r2op)
+Без --mode apply служба ничего не меняет в трафике.
+
+Дополнительные параметры R2O:
   --controller-only  запуск без статического плана; планы поступают через control socket
-  --r2o-udp-reverse-visible | --udp-reverse-hook  обратные UDP-пакеты проходят через ту же NFQUEUE
-  --queue N          номер очереди NFQUEUE
-  --idle SEC         срок удаления молчащего состояния потока (по умолчанию 120; 0 — без ожидания)
-  --r2o-flow-capacity N | --flows N число слотов TCP/UDP (по умолчанию 2048)
-  --stats SEC        период печати сводки (по умолчанию 10; 0 — отключить периодическую сводку)
+  --r2o-flow-capacity N  синоним --flows
+  --r2o-udp-reverse-visible  синоним --udp-reverse-hook
   --family ipv4|ipv6 протокол очереди (по умолчанию ipv4)
-  --mode observe|apply пропускать пакеты или исполнять планы (по умолчанию observe)
-  --mark N           ненулевая метка для raw-send и защиты от повторной обработки
-  --iface NAME       интерфейс, чей MTU ограничивает длину посылки
-  --probe-mark N     метка зондов контроллера, исключаемая из route-gate
-  --only-mark M[/K]|none  обслуживать только потоки с меткой выбранной политики
-  --copy-range N     размер копии пакета (64..1600)
-  --queue-len N      глубина очереди (по умолчанию 1024)
-  --journal N        глубина журнала потоков (256; 0 — выключить)
-  --sched-slots N    число слотов очереди отложенной отправки (по умолчанию 128)
-  --duration SEC     остановиться через SEC секунд (0 — без ограничения)
-  --log FILE         писать stdout/stderr в FILE (append)
   --health-file FILE heartbeat D2KH1 раз в секунду
   --rcvbuf N         размер приёмного буфера сокета
-  --control PATH     Unix-сокет r2o-controller; также открывает PATH.snapshot для снимков
   --control-wire v22|v48  профиль управляющего провода (по умолчанию v48)
   --control-release-id ID release ID в приветствии v22 (по умолчанию сборочный)
-  --no-fail-open     не пропускать пакеты при переполнении очереди
   --check            проверить формат и поддерживаемый режим плана
   --version          версия
-  --help             эта справка"#
+  --help             эта справка
+
+Использование: r2o-datapath --queue N [--plan FILE | --controller-only --control PATH] [параметры]"#
         );
     }
 
