@@ -1529,6 +1529,36 @@ pub async fn r2o_quic_ask_donor_version_negotiation(
 
 #[cfg(test)]
 mod tests {
+    /// C/Rust differential: C-стенд вызывает production `quic_arm_found`
+    /// из udpplan.c; Rust — production-метод `r2o_quic_arm_found`.
+    #[test]
+    fn quic_arm_found_matches_c() {
+        let Some(path) = std::env::var_os("R2O_QUIC_ARM_FOUND_DIFF_OUTPUT") else {
+            return;
+        };
+        use super::R2oQuicArmKind::{Blob, Copies, Flaky, Frag, NotFound, Split, Ttl, Udplen};
+        let cases = [
+            ("blob", Blob),
+            ("copies", Copies),
+            ("ttl", Ttl),
+            ("frag", Frag),
+            ("not_found", NotFound),
+            ("flaky", Flaky),
+            ("split", Split),
+            ("udplen", Udplen),
+        ];
+        let mut output = String::new();
+        for (label, kind) in cases {
+            output.push_str(&format!(
+                "{label} {}\n",
+                u8::from(kind.r2o_quic_arm_found())
+            ));
+        }
+        output.push_str("null 0\n");
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
+    }
+
     #[test]
     fn plan_header_matches_c() {
         let Some(path) = std::env::var_os("R2O_UDDPLAN_HEADER_DIFF_OUTPUT") else {
