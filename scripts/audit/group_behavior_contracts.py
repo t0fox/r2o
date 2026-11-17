@@ -171,7 +171,7 @@ CONTRACTS = {
     "CS-SCHED-DIAGNOSTICS": (
         "Scheduler diagnostics/live output",
         "progress/diagnostics/counts, live binding/phase, say/level/time/hex.",
-        "sched.c: diagnostics/helpers; live 12 states PASS, level_name — 10 значений C/Rust PASS, is_hex_digit — 256 байт C/Rust PASS; редкие counters/поля P.",
+        "sched.c: diagnostics/helpers; live 12 states PASS, level_name — 10 значений, is_hex_digit — 256 байт, progress_note — 11 кейсов C/Rust PASS; редкие counters/поля P.",
     ),
     "CS-CRYPTO-ECC": (
         "ECC primitives P-256/X25519",
@@ -382,8 +382,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 367:
-        raise SystemExit(f"expected 367 P rows, got {len(rows)}")
+    if len(rows) != 366:
+        raise SystemExit(f"expected 366 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")

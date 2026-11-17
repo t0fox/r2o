@@ -11616,7 +11616,14 @@ struct R2oDiscoverySearch {
     trigger_code: u8,
     phase: &'static str,
     attempts: usize,
+    /// C `t->probes`: кандидаты и прочие зонды задачи, без хода измерителя.
     probes: usize,
+    /// C `t->probes` в live-схеме: кандидаты без ask-прогонов.
+    candidate_probes: usize,
+    /// C `t->ask_probes`: накопленные pass+fail прогона измерителя.
+    ask_probes: usize,
+    /// C `t->ask_question[96]`: сырой вопрос, обрезанный по UTF-8.
+    ask_question: String,
     question: String,
     candidate: String,
     source: String,
@@ -11628,6 +11635,21 @@ struct R2oDiscoverySearch {
     report_closed: bool,
     /// C `t->props`/`prop_*`: текущий вопрос о свойствах.
     props: R2oPropsState,
+}
+
+/// C `d2k_sched_progress_note` (`core/sched.c:2790-2805`): вопрос хранится
+/// сырым, при длине ≥ 96 байт обрезается до 95 по границе UTF-8.
+#[cfg(unix)]
+fn r2o_ask_question_text(question: &str) -> String {
+    const ASK_QUESTION_BYTES: usize = 96;
+    if question.len() < ASK_QUESTION_BYTES {
+        return question.to_owned();
+    }
+    let mut end = ASK_QUESTION_BYTES - 1;
+    while end > 0 && !question.is_char_boundary(end) {
+        end -= 1;
+    }
+    question[..end].to_owned()
 }
 
 #[cfg(unix)]
@@ -11690,6 +11712,9 @@ impl R2oDiscoverySearches {
                 phase,
                 attempts: 0,
                 probes: 0,
+                candidate_probes: 0,
+                ask_probes: 0,
+                ask_question: String::new(),
                 question: String::new(),
                 candidate: String::new(),
                 source: String::new(),
@@ -11706,6 +11731,9 @@ impl R2oDiscoverySearches {
             search.started_at = None;
             search.attempts = 0;
             search.probes = 0;
+            search.candidate_probes = 0;
+            search.ask_probes = 0;
+            search.ask_question.clear();
             search.question.clear();
             search.candidate.clear();
             search.source.clear();
@@ -11728,12 +11756,15 @@ impl R2oDiscoverySearches {
         search.phase = phase;
         search.attempts = attempts;
         search.probes = search.probes.max(probes);
+        // C `t->probes` растёт в install_next по кандидатам; фазовый update
+        // может нести счёт измерителя и не должен попадать в candidate_probes.
         search.candidate = candidate.to_owned();
         search.source = source.to_owned();
         if !matches!(
             phase,
             "распознаём поведение" | "спрашиваем коробку о свойствах"
         ) {
+            search.ask_question.clear();
             search.question.clear();
         }
     }
@@ -11846,6 +11877,9 @@ impl R2oDiscoverySearches {
         search.trigger_code = 0;
         search.attempts = 0;
         search.probes = 0;
+        search.candidate_probes = 0;
+        search.ask_probes = 0;
+        search.ask_question.clear();
         search.question.clear();
         search.candidate.clear();
         search.source.clear();
@@ -12015,6 +12049,14 @@ impl R2oDiscoverySearches {
         } else {
             "распознаём поведение"
         };
+        // C `d2k_sched_progress_note`: сырой вопрос в ask_question (96 байт)
+        // и pass+fail в ask_probes. Панельный формат counters остаётся
+        // отдельным полем и в live.json не уходит.
+        search.ask_probes = search
+            .ask_probes
+            .saturating_add(passed)
+            .saturating_add(failed);
+        search.ask_question = r2o_ask_question_text(probe);
         search.question = format!(
             "{probe} · проверок: {}, прошло: {passed}, отказов: {failed}",
             passed + failed
@@ -12056,6 +12098,7 @@ impl R2oDiscoverySearches {
         let added_probes = probes.saturating_sub(search.probes);
         self.probes_used = self.probes_used.saturating_add(added_probes as u64);
         search.probes = search.probes.max(probes);
+        search.candidate_probes = search.candidate_probes.max(probes);
         search.application = application.to_owned();
         search.last_result = last_result.to_owned();
     }
@@ -13203,6 +13246,10 @@ fn r2o_live_searches_from_state(
                 .unwrap_or_default();
             // Точный набор C `write_live` searches: shape/plan/
             // application/last_result панель не получает.
+            // C `write_live`: probes = t->probes + ask_probes, question —
+            // сырой ask_question и только в состоянии T_ASKING
+            // («распознаём поведение»); у T_PROPS_* вопрос в live пуст.
+            let asking = entry.phase == "распознаём поведение";
             let mut search = serde_json::json!({
                 "target": target.host,
                 "family": target.family,
@@ -13211,8 +13258,8 @@ fn r2o_live_searches_from_state(
                 "port": port,
                 "phase": entry.phase,
                 "attempts": entry.attempts,
-                "probes": entry.probes,
-                "question": entry.question,
+                "probes": entry.candidate_probes.saturating_add(entry.ask_probes),
+                "question": if asking { entry.ask_question.clone() } else { String::new() },
                 "candidate": entry.candidate,
                 "source": entry.source,
             });
@@ -33322,10 +33369,9 @@ mod tests {
     #[test]
     fn search_report_events_match_c() {
         use super::{
-            R2oDiscoverySearch, R2oDiscoverySearches, R2oDiscoveryVerify,
-            R2oVoiceDiagnosticContext, r2o_discovery_diagnostic_event, r2o_discovery_task_key,
-            r2o_voice_diagnostic_target, r2o_voice_search_diagnostic_event,
-            r2o_voice_terminal_diagnostic_event,
+            R2oDiscoverySearch, R2oDiscoveryVerify, R2oVoiceDiagnosticContext,
+            r2o_discovery_diagnostic_event, r2o_voice_diagnostic_target,
+            r2o_voice_search_diagnostic_event, r2o_voice_terminal_diagnostic_event,
         };
         use r2o_controller::voice_discovery::{R2oDiscoveryVerdict, R2oVoiceTarget};
         use std::fmt::Write as _;
@@ -33713,9 +33759,9 @@ mod tests {
                 Some(now - Duration::from_millis(scenario.elapsed_ms - scenario.queue_ms))
             };
             let probes = scenario.probes + scenario.ask_probes;
-            let mut searches = R2oDiscoverySearches::default();
+            let mut searches = super::R2oDiscoverySearches::default();
             searches.entries.insert(
-                r2o_discovery_task_key(&diagnostic_target),
+                super::r2o_discovery_task_key(&diagnostic_target),
                 R2oDiscoverySearch {
                     target: diagnostic_target.clone(),
                     queued_at,
@@ -33729,6 +33775,9 @@ mod tests {
                     phase: "распознаём поведение",
                     attempts: 0,
                     probes,
+                    candidate_probes: probes,
+                    ask_probes: 0,
+                    ask_question: String::new(),
                     question: String::new(),
                     candidate: String::new(),
                     source: scenario.path.into(),
@@ -33816,7 +33865,6 @@ mod tests {
     fn scheduler_terminal_reports_match_c() {
         use super::{
             DiscoveryOutcome, R2oDiscoverySearch, R2oDiscoverySearches, R2oDiscoveryVerify,
-            r2o_discovery_task_key,
         };
         use std::fmt::Write as _;
         use std::time::{Duration, Instant};
@@ -33833,7 +33881,7 @@ mod tests {
             now: Instant,
         ) {
             searches.entries.insert(
-                r2o_discovery_task_key(target),
+                super::r2o_discovery_task_key(target),
                 R2oDiscoverySearch {
                     target: target.clone(),
                     queued_at: now - Duration::from_millis(elapsed_ms),
@@ -33845,6 +33893,9 @@ mod tests {
                     phase: "распознаём поведение",
                     attempts: 0,
                     probes,
+                    candidate_probes: probes,
+                    ask_probes: 0,
+                    ask_question: String::new(),
                     question: String::new(),
                     candidate: String::new(),
                     source: "none".into(),
@@ -34034,8 +34085,8 @@ mod tests {
                 now,
             );
             let slots = vec![
-                Some(r2o_discovery_task_key(&shutdown_a)),
-                Some(r2o_discovery_task_key(&shutdown_b)),
+                Some(super::r2o_discovery_task_key(&shutdown_a)),
+                Some(super::r2o_discovery_task_key(&shutdown_b)),
             ];
             searches.report_shutdown(&slots, now);
         }
@@ -34062,7 +34113,7 @@ mod tests {
     fn scheduler_task_lifecycle_order_matches_c() {
         use super::{
             DiscoveryOutcome, R2oDiscoverySearch, R2oDiscoverySearches, R2oDiscoveryVerify,
-            r2o_discovery_failure_key, r2o_discovery_task_key,
+            r2o_discovery_failure_key,
         };
         use std::fmt::Write as _;
         use std::sync::Arc;
@@ -34092,7 +34143,7 @@ mod tests {
             now: Instant,
         ) {
             searches.entries.insert(
-                r2o_discovery_task_key(target),
+                super::r2o_discovery_task_key(target),
                 R2oDiscoverySearch {
                     target: target.clone(),
                     queued_at: now - Duration::from_millis(elapsed_ms),
@@ -34104,6 +34155,9 @@ mod tests {
                     phase: "распознаём поведение",
                     attempts: 0,
                     probes,
+                    candidate_probes: probes,
+                    ask_probes: 0,
+                    ask_question: String::new(),
                     question: String::new(),
                     candidate: String::new(),
                     source: source.into(),
@@ -34165,7 +34219,7 @@ mod tests {
 
         // 1. task_reset: local-abort, report_id обнулён, слот свободен.
         let abort = target("abort.example", "198.51.100.60", 1);
-        let abort_key = r2o_discovery_task_key(&abort);
+        let abort_key = super::r2o_discovery_task_key(&abort);
         let mut worker = r2o_test_discovery_worker_without_threads();
         insert(
             &mut worker.searches.lock().unwrap(),
@@ -34225,7 +34279,7 @@ mod tests {
         // 2. task_done: cancelled один раз, наблюдение и слот сняты, report_id
         //    обнулён как в C task_reset.
         let cancelled = target("cancelled.example", "198.51.100.61", 1);
-        let cancelled_key = r2o_discovery_task_key(&cancelled);
+        let cancelled_key = super::r2o_discovery_task_key(&cancelled);
         let mut worker = r2o_test_discovery_worker_without_threads();
         insert(
             &mut worker.searches.lock().unwrap(),
@@ -34297,7 +34351,7 @@ mod tests {
         // 3. task_fail: failed один раз, слот удерживается на отдыхе, путь
         //    кандидата переведён в контрактный `fallback`, как C candidate_path.
         let failed = target("failed.example", "198.51.100.62", 1);
-        let failed_key = r2o_discovery_task_key(&failed);
+        let failed_key = super::r2o_discovery_task_key(&failed);
         let mut worker = r2o_test_discovery_worker_without_threads();
         insert(
             &mut worker.searches.lock().unwrap(),
@@ -34376,8 +34430,8 @@ mod tests {
         //    против порядка слотов (9 в слоте 0, 2 в слоте 1).
         let shutdown_a = target("shutdown-a.example", "198.51.100.63", 1);
         let shutdown_b = target("shutdown-b.example", "198.51.100.64", 3);
-        let shutdown_a_key = r2o_discovery_task_key(&shutdown_a);
-        let shutdown_b_key = r2o_discovery_task_key(&shutdown_b);
+        let shutdown_a_key = super::r2o_discovery_task_key(&shutdown_a);
+        let shutdown_b_key = super::r2o_discovery_task_key(&shutdown_b);
         let mut worker = r2o_test_discovery_worker_without_threads();
         {
             let mut searches = worker.searches.lock().unwrap();
@@ -34410,9 +34464,10 @@ mod tests {
         worker.task_slots[1] = Some(shutdown_b_key);
         // Активная задача и задача в ограниченной очереди — обе должны
         // получить ровно один `shutdown`, как слоты C.
-        worker
-            .active
-            .insert(r2o_discovery_task_key(&shutdown_a), shutdown_a.clone());
+        worker.active.insert(
+            super::r2o_discovery_task_key(&shutdown_a),
+            shutdown_a.clone(),
+        );
         assert!(
             worker
                 .jobs
@@ -34422,8 +34477,8 @@ mod tests {
                 .enqueue_with_planned(shutdown_b.clone(), now, false)
         );
         let slots = vec![
-            Some(r2o_discovery_task_key(&shutdown_a)),
-            Some(r2o_discovery_task_key(&shutdown_b)),
+            Some(super::r2o_discovery_task_key(&shutdown_a)),
+            Some(super::r2o_discovery_task_key(&shutdown_b)),
         ];
         assert_eq!(
             worker.searches.lock().unwrap().report_shutdown(&slots, now),
@@ -34882,6 +34937,9 @@ mod tests {
             phase: "ожидает безопасного слота замера",
             attempts: 0,
             probes: 0,
+            candidate_probes: 0,
+            ask_probes: 0,
+            ask_question: String::new(),
             question: String::new(),
             candidate: String::new(),
             source: String::new(),
@@ -38338,14 +38396,22 @@ mod tests {
         let mut searches = super::R2oDiscoverySearches::default();
         searches.update(&target, "распознаём поведение", 0, 0, "", "");
         searches.update_probe_progress(&target, "whole", 67, 0, 3);
+        let key = super::r2o_discovery_task_key(&target);
+        assert_eq!(searches.entries[&key].ask_question, "whole");
+        assert_eq!(searches.entries[&key].ask_probes, 3);
         searches.update_candidate_progress(&target, 68, "APPLIED", "проба завершилась");
         searches.update(&target, "проверяем выведенный план", 1, 67, "", "");
-        let key = super::r2o_discovery_task_key(&target);
         assert_eq!(searches.entries[&key].probes, 68);
+        assert_eq!(searches.entries[&key].candidate_probes, 68);
+        assert_eq!(searches.entries[&key].ask_probes, 3);
+        assert!(searches.entries[&key].ask_question.is_empty());
         searches.update_candidate_progress(&target, 69, "APPLIED", "следующая проба");
         assert_eq!(searches.probes_used, 69);
         searches.update(&target, "ожидает безопасного слота замера", 0, 0, "", "");
         assert_eq!(searches.entries[&key].probes, 0);
+        assert_eq!(searches.entries[&key].candidate_probes, 0);
+        assert_eq!(searches.entries[&key].ask_probes, 0);
+        assert!(searches.entries[&key].ask_question.is_empty());
     }
 
     #[cfg(unix)]
@@ -38423,10 +38489,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn on_suspect_watching_planned_no_arms_shape_like_c() {
-        use super::{
-            Catalog, ControlClient, R2oCleanHandshakeCache, R2oTcpHelloCache,
-            r2o_discovery_task_key,
-        };
+        use super::{Catalog, ControlClient, R2oCleanHandshakeCache, R2oTcpHelloCache};
         use r2k_core::control::{
             ACK_OK, COMMAND_ARM_SHAPE, HelloEvent, KEY_LEN, LEGACY_PLANNED_NO, LegacySuspectEvent,
             encode_ack, read_frame,
@@ -38500,7 +38563,9 @@ mod tests {
             ..Catalog::default()
         };
         let mut worker = r2o_test_discovery_worker_without_threads();
-        worker.completed.insert(r2o_discovery_task_key(&target));
+        worker
+            .completed
+            .insert(super::r2o_discovery_task_key(&target));
         let mut discovery = Some((
             worker,
             catalog,
@@ -38522,7 +38587,7 @@ mod tests {
         client.r2o_handle_legacy_suspect(&event, &mut discovery, &hellos, &clean);
         let command = peer_thread.join().unwrap();
         let (worker, _, _, _) = discovery.unwrap();
-        let task_key = r2o_discovery_task_key(&target);
+        let task_key = super::r2o_discovery_task_key(&target);
         assert_eq!(command, COMMAND_ARM_SHAPE);
         assert!(worker.pending_rechecks.contains_key(&task_key));
         assert!(!worker.is_active(&target));
@@ -38537,7 +38602,6 @@ mod tests {
         use super::{
             Catalog, ControlClient, DiscoveryWorker, R2oCleanHandshakeCache,
             R2oDiscoveryCooldownKey, R2oTcpHelloCache, SHAPE_MODERN, r2o_discovery_failure_key,
-            r2o_discovery_task_key,
         };
         use r2k_core::control::{
             ACK_OK, COMMAND_ARM_SHAPE, HelloEvent, KEY_LEN, LEGACY_PLANNED_NO, LEGACY_PLANNED_YES,
@@ -38643,7 +38707,8 @@ mod tests {
                 .entries
                 .iter()
                 .find(|entry| {
-                    r2o_discovery_task_key(&entry.target) == r2o_discovery_task_key(target)
+                    super::r2o_discovery_task_key(&entry.target)
+                        == super::r2o_discovery_task_key(target)
                 })
                 .map(|entry| (entry.hot_event, entry.trigger_planned))
         }
@@ -38721,7 +38786,9 @@ mod tests {
             let hello = client_hello(&target.host);
             assert!(worker.remember_client_snapshot(&target, &hello, Some(true)));
             if spec.watching {
-                worker.completed.insert(r2o_discovery_task_key(&target));
+                worker
+                    .completed
+                    .insert(super::r2o_discovery_task_key(&target));
             }
             let initial_catalog = if spec.prequeue || !spec.catalog {
                 Catalog::default()
@@ -38788,7 +38855,7 @@ mod tests {
                 || worker.r2o_is_watching(&target)
                 || worker
                     .dns_watching
-                    .contains_key(&r2o_discovery_task_key(&target));
+                    .contains_key(&super::r2o_discovery_task_key(&target));
             let watching = worker.r2o_is_watching(&target);
             let trigger = entry.is_some_and(|entry| entry.1);
             let report = worker
@@ -38796,11 +38863,11 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .entries
-                .get(&r2o_discovery_task_key(&target))
+                .get(&super::r2o_discovery_task_key(&target))
                 .is_some_and(|search| search.report_id.is_some());
             let pending = worker
                 .pending_rechecks
-                .contains_key(&r2o_discovery_task_key(&target));
+                .contains_key(&super::r2o_discovery_task_key(&target));
             let _ = now;
             output.push_str(&format!(
                 "{} code={} block={} queued={} admitted={} watching={} hot={} trigger={} report={} arm={} pending={}\n",
@@ -39052,8 +39119,7 @@ mod tests {
     #[test]
     fn live_searches_production_builder_matches_c_task_states() {
         use super::{
-            R2oDiscoverySearch, R2oDiscoverySearches, R2oDiscoveryVerify, SHAPE_MODERN,
-            r2o_discovery_task_key, r2o_live_searches_from_state,
+            R2oDiscoverySearch, R2oDiscoveryVerify, SHAPE_MODERN, r2o_live_searches_from_state,
         };
         use r2o_controller::discovery::DiscoveryTarget;
         use std::collections::HashMap;
@@ -39072,9 +39138,9 @@ mod tests {
         let planning = target("planning.example", 13);
         let watching = target("watching.example", 14);
         let resting = target("resting.example", 15);
-        let key = |target: &DiscoveryTarget| r2o_discovery_task_key(target);
+        let key = |target: &DiscoveryTarget| super::r2o_discovery_task_key(target);
 
-        let mut searches = R2oDiscoverySearches::default();
+        let mut searches = super::R2oDiscoverySearches::default();
         let mut entry = |target: &DiscoveryTarget,
                          queued_at: Instant,
                          started_at: Option<Instant>,
@@ -39096,6 +39162,9 @@ mod tests {
                     phase,
                     attempts,
                     probes,
+                    candidate_probes: probes,
+                    ask_probes: 0,
+                    ask_question: question.into(),
                     question: question.into(),
                     candidate: candidate.into(),
                     source: source.into(),
@@ -39232,6 +39301,9 @@ mod tests {
                 "свойство:порядок сегментов · проверок: 1, прошло: 1, отказов: 0"
             );
             assert_eq!(search.probes, 2);
+            assert_eq!(search.ask_question, "свойство:порядок сегментов");
+            assert_eq!(search.ask_probes, 2);
+            assert_eq!(search.candidate_probes, 0);
         }
         let task_key = super::r2o_discovery_task_key(&target);
         worker.active.insert(task_key.clone(), target.clone());
@@ -39267,10 +39339,18 @@ mod tests {
         assert_eq!(keys, expected);
         assert_eq!(live[0]["phase"], "спрашиваем коробку о свойствах");
         assert_eq!(live[0]["probes"], 2);
-        assert_eq!(
-            live[0]["question"],
-            "свойство:порядок сегментов · проверок: 1, прошло: 1, отказов: 0"
-        );
+        // C `write_live`: у T_PROPS_* вопрос пуст, хотя ask_question хранится.
+        assert_eq!(live[0]["question"], "");
+        {
+            let mut searches = worker
+                .searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            searches.update_probe_progress(&target, "whole", 2, 1, 0);
+        }
+        let live = worker.r2o_live_searches(now);
+        assert_eq!(live[0]["phase"], "распознаём поведение");
+        assert_eq!(live[0]["question"], "whole");
         worker.active.remove(&task_key);
         assert!(worker.r2o_live_searches(now).is_empty());
     }
@@ -43234,10 +43314,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn outer_appdata_followup_matches_c() {
-        use super::{
-            R2oRecentTcpNameCache, SHAPE_MODERN, r2o_discovery_task_key,
-            r2o_handle_outer_appdata_followup,
-        };
+        use super::{R2oRecentTcpNameCache, SHAPE_MODERN, r2o_handle_outer_appdata_followup};
         use r2k_core::control::{
             HelloEvent, KEY_LEN, LEGACY_PLANNED_NO, LEGACY_PLANNED_YES, LegacyExchangeEvent,
         };
@@ -43381,7 +43458,7 @@ mod tests {
                 family: scenario.family,
                 shape: SHAPE_MODERN,
             };
-            let task_key = r2o_discovery_task_key(&target);
+            let task_key = super::r2o_discovery_task_key(&target);
             let mut worker = r2o_test_discovery_worker_without_threads();
             {
                 let mut searches = worker
@@ -43538,6 +43615,60 @@ mod tests {
             cache.note(&format!("other-{index}.example"), 4, client_b, now);
         }
         assert!(!cache.r2o_recent("clean.example", 4, client_a, now));
+    }
+
+    /// C/Rust differential: C-стенд вызывает production
+    /// `d2k_sched_progress_note` из sched.c; Rust — production
+    /// `R2oDiscoverySearches::update_probe_progress`.
+    #[cfg(unix)]
+    #[test]
+    fn progress_note_matches_c() {
+        let Some(path) = std::env::var_os("R2O_PROGRESS_NOTE_DIFF_OUTPUT") else {
+            return;
+        };
+        let ascii = |length: usize, byte: u8| String::from_utf8(vec![byte; length]).unwrap();
+        let cyrillic = "я".repeat(50);
+        let mixed = format!("abc{cyrillic}");
+        let emoji = "😀".repeat(30);
+        let cases = [
+            ("empty", String::new(), 0, 0),
+            ("whole", "whole".to_owned(), 3, 4),
+            ("fail_only", "poison:seqovl".to_owned(), 0, 5),
+            ("pass_only", "property:order".to_owned(), 7, 0),
+            ("exact95", ascii(95, b'a'), 0, 1),
+            ("ascii96", ascii(96, b'a'), 0, 0),
+            ("ascii200", ascii(200, b'b'), 2, 3),
+            ("cyrillic50", cyrillic, 1, 1),
+            ("mixed", mixed, 0, 0),
+            ("emoji30", emoji, 4, 0),
+            ("spaces", "   ".to_owned(), 0, 1),
+        ];
+        let mut output = String::new();
+        for (label, question, pass, fail) in cases {
+            let target = r2o_controller::discovery::DiscoveryTarget {
+                host: "progress.example".into(),
+                endpoint: "192.0.2.44:443".into(),
+                family: 4,
+                shape: SHAPE_MODERN,
+            };
+            let mut searches = super::R2oDiscoverySearches::default();
+            searches.update(&target, "распознаём поведение", 0, 0, "", "");
+            searches.update_probe_progress(&target, &question, 0, pass, fail);
+            let search = &searches.entries[&super::r2o_discovery_task_key(&target)];
+            let hex = if search.ask_question.is_empty() {
+                "-".to_owned()
+            } else {
+                search
+                    .ask_question
+                    .as_bytes()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect()
+            };
+            output.push_str(&format!("{label} {} {hex}\n", search.ask_probes));
+        }
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
     }
 
     /// C/Rust differential: C-стенд вызывает production

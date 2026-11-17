@@ -201,7 +201,7 @@ async function main() {
       since: new Date().toISOString(),
       attempts: 0,
       probes: 1,
-      question: "whole · проверок: 1, прошло: 0, отказов: 1",
+      question: "whole",
       candidate: "",
       source: "",
       plan: "",
@@ -387,7 +387,7 @@ async function main() {
   await waitFor(() => evaluate("document.querySelector('.bindings tr[data-enabled] .t')?.textContent === 'Голос Discord'"), "голосовая привязка в коробке");
   assert.equal(await evaluate("document.querySelectorAll('.bindings .proof-note').length"), 0, "голосовая привязка не добавляет заметку о RTP, которой нет в d2o");
   assert.equal(await evaluate("document.querySelector('.search-plan') === null && document.querySelector('.search-plan-result') === null"), true, "карточка Discovery показывает тот же набор статусов, что и d2o");
-  await waitFor(() => evaluate("[...document.querySelectorAll('.search-question')].some((row) => !row.hidden && row.textContent.includes('whole · проверок: 1'))"), "текущий вопрос классификатора в карточке Discovery");
+  await waitFor(() => evaluate("[...document.querySelectorAll('.search-question')].some((row) => !row.hidden && row.textContent.includes('Вопрос коробке: whole'))"), "текущий вопрос классификатора в карточке Discovery");
   assert.equal(await evaluate("document.querySelectorAll('#searches .search').length"), 4, "активные стадии представлены карточками, очередь выделена отдельно");
   assert.equal(await evaluate("document.querySelectorAll('#searches .search-visual').length"), 4, "у каждой карточки поиска есть сцена текущего этапа");
   assert.equal(await evaluate("[...document.querySelectorAll('#searches .search')].every((row) => row.dataset.stage !== undefined && row.dataset.stage !== 'idle')"), true, "сцена поиска получает этап подбора для анимации");
@@ -397,9 +397,9 @@ async function main() {
   assert.equal(await evaluate("[...document.querySelectorAll('.search .track')].every((track) => track.querySelectorAll('.track-step').length === 7 && track.querySelector('.track-step:last-child').textContent === 'Подтверждено')"), true, "карточка использует исходные семь этапов d2o");
   const liveSearch = liveState.searches.find((search) => search.target === "classifying.example");
   liveSearch.probes = 2;
-  liveSearch.question = "split · проверок: 2, прошло: 1, отказов: 1";
+  liveSearch.question = "split";
   fs.writeFileSync(livePath, JSON.stringify(liveState));
-  await waitFor(() => evaluate("[...document.querySelectorAll('.search-question')].some((row) => !row.hidden && row.textContent.includes('split · проверок: 2'))"), "автоматическое обновление вопроса и числа зондов");
+  await waitFor(() => evaluate("[...document.querySelectorAll('.search-question')].some((row) => !row.hidden && row.textContent.includes('Вопрос коробке: split'))"), "автоматическое обновление вопроса и числа зондов");
   for (const [name, width, height] of [
     ["телефон", 320, 740],
     ["широкий телефон", 390, 844],
