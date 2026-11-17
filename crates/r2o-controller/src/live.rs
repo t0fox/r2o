@@ -932,6 +932,21 @@ mod tests {
     use super::*;
     use crate::catalog::{Binding, BoxRecord, DomainState, Fingerprint, Plan, Signal};
 
+    /// C/Rust differential: C-стенд вызывает production `level_name`
+    /// из sched.c; Rust — production `live::level_name`.
+    #[test]
+    fn level_name_differential_matches_c() {
+        let Some(path) = std::env::var_os("R2O_LEVEL_NAME_DIFF_OUTPUT") else {
+            return;
+        };
+        let mut output = String::new();
+        for level in -2..=7 {
+            output.push_str(&format!("{level} {}\n", super::level_name(level)));
+        }
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
+    }
+
     /// C/Rust differential: C-стенд вызывает production `signal_human`
     /// из sched.c; Rust — production `live::signal_human`.
     #[test]

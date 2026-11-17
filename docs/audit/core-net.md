@@ -839,8 +839,9 @@ Discord IP Discovery обход: разбор/сборка 20-байтового
   `d2k_qw_seal/open`, `d2k_qw_retry_verify`: RFC 9001/9369, corrupted
   Initial/Retry, split-тесты. **E\*:** `d2k_qw_pn_len` — 14 значений
   C/Rust differential, production Initial теперь seal'ится с pn_len=1.
-  **P:** `d2k_qw_varint_write_w` (Rust не поддерживает принудительную
-  ширину), `d2k_qw_long_hdr_token(_w)` (0-RTT/Retry-сборка не
+  **E\*:** `d2k_qw_varint_write_w` поддерживает принудительную ширину
+  через `write_varint_w` и покрыт unit-тестом.
+  **P:** `d2k_qw_long_hdr_token(_w)` (0-RTT/Retry-сборка не
   портирована), `d2k_qw_ranges_*` (пересборка делегирована quinn).
   **N:** `d2k_qw_retry_build` — серверный Retry, клиенту не нужен.
 - **`quic.c` (21):** E — `rd16`, `read_varint`, `parse_initial_header`,
@@ -1172,7 +1173,7 @@ Inline-решения QUIC-зонда: суд этапа данных, stall-д�
   PASS 13 переходов (next/repeat/confirmed, `ok`/`had`/`retried`);
   вопросная машина `split_no/checksum_no/next_question` остаётся
   C-side evidence.
-- **`httpsearch.c`, P:** `mono_ms`, `d2k_hs_answer_name`, `hs_read`
+- **`httpsearch.c`, P:** `mono_ms`, `hs_read`
   (тайминги/первый байт/префикс не сопоставлены побайтово), `fresh_id`
   (нет fallback-ветки), `say`, `host_ok`, `rec_find/get` (HashMap вместо
   C-массива, лимиты `D2K_HS_RECORD_MAX_BYTES` не сопоставлены),
