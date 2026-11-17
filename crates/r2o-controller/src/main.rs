@@ -3997,6 +3997,8 @@ fn catalog_commands_with_send_cap(
     let mut skipped = 0_usize;
     let mut selection_catalog = catalog.clone();
     for (box_index, box_record) in catalog.boxes.iter_mut().enumerate() {
+        // C `box_injects_rst(b)`: примета коробки, не привязки.
+        let box_injects_rst = r2o_box_injects_rst(box_record);
         for (binding_index, binding) in box_record.bindings.iter_mut().enumerate() {
             let selection_binding = &selection_catalog.boxes[box_index].bindings[binding_index];
             if !binding.enabled
@@ -4038,8 +4040,15 @@ fn catalog_commands_with_send_cap(
                     skipped += 1;
                     continue;
                 };
-                let Some((bytes, plan)) =
-                    r2o_catalog_compile_plan(&saved_plan.text, &saved_plan.id)
+                // C `sync`: защита от вброшенного сброса дописывается в
+                // проводную копию плана известной коробки с приметой `rst`.
+                let guarded_text = if r2o_catalog_binding_transport(binding) == 6 && box_injects_rst
+                {
+                    r2o_plan_arm_rst_guard(&saved_plan.text)
+                } else {
+                    saved_plan.text.clone()
+                };
+                let Some((bytes, plan)) = r2o_catalog_compile_plan(&guarded_text, &saved_plan.id)
                 else {
                     skipped += 1;
                     continue;
@@ -4095,7 +4104,13 @@ fn catalog_commands_with_send_cap(
                 skipped += 1;
                 continue;
             };
-            let Some((bytes, plan)) = r2o_catalog_compile_plan(&saved_plan.text, &saved_plan.id)
+            // C `sync`: та же защита для name-привязки известной коробки.
+            let guarded_text = if r2o_catalog_binding_transport(binding) == 6 && box_injects_rst {
+                r2o_plan_arm_rst_guard(&saved_plan.text)
+            } else {
+                saved_plan.text.clone()
+            };
+            let Some((bytes, plan)) = r2o_catalog_compile_plan(&guarded_text, &saved_plan.id)
             else {
                 skipped += 1;
                 continue;
@@ -10391,20 +10406,53 @@ fn r2o_discovery_trigger_code(target: &r2o_controller::discovery::DiscoveryTarge
 
 /// C `rst_guard_wanted`: защита нужна TCP-кандидату, пришедшему из RST.
 #[cfg(unix)]
-fn r2o_discovery_rst_guard_wanted(target: &r2o_controller::discovery::DiscoveryTarget) -> bool {
-    r2o_discovery_transport(target) == 6
-        && matches!(r2o_discovery_trigger_code(target), Some(1 | 4 | 5))
+fn r2o_rst_guard_wanted(transport: u8, trigger_code: Option<u8>) -> bool {
+    transport == 6 && matches!(trigger_code, Some(1 | 4 | 5))
 }
 
-/// C `plan_arm_rst_guard`: `guard rst_alien` один раз, в конец текста.
 #[cfg(unix)]
-fn r2o_plan_arm_rst_guard(text: &str) -> String {
-    if text.contains("guard ") || text.len() + "guard rst_alien\n".len() >= 4096 {
-        return text.to_owned();
+fn r2o_discovery_rst_guard_wanted(target: &r2o_controller::discovery::DiscoveryTarget) -> bool {
+    r2o_rst_guard_wanted(
+        r2o_discovery_transport(target),
+        r2o_discovery_trigger_code(target),
+    )
+}
+
+/// C `plan_arm_rst_guard`: `guard rst_alien` один раз, в конец текста,
+/// если хватает места `cap` (включая завершающий NUL, как C).
+#[cfg(unix)]
+fn r2o_plan_arm_rst_guard_cap(text: &str, cap: usize) -> Option<String> {
+    if text.contains("guard ")
+        || text
+            .len()
+            .saturating_add("guard rst_alien\n".len())
+            .saturating_add(1)
+            > cap
+    {
+        return None;
     }
     let mut armed = text.to_owned();
     armed.push_str("guard rst_alien\n");
-    armed
+    Some(armed)
+}
+
+#[cfg(unix)]
+fn r2o_plan_arm_rst_guard(text: &str) -> String {
+    r2o_plan_arm_rst_guard_cap(text, 4096).unwrap_or_else(|| text.to_owned())
+}
+
+/// C `box_injects_rst`: в отпечатке коробки есть примета kind `rst`.
+#[cfg(unix)]
+fn r2o_fingerprint_injects_rst(fingerprint: &r2o_controller::catalog::Fingerprint) -> bool {
+    fingerprint
+        .signals
+        .iter()
+        .any(|signal| signal.kind == "rst")
+}
+
+#[cfg(unix)]
+fn r2o_box_injects_rst(box_record: &r2o_controller::catalog::BoxRecord) -> bool {
+    r2o_fingerprint_injects_rst(&box_record.fingerprint)
 }
 
 /// План, отклонённый C `budget_cut_reject`: worker выясняет это на стадии
@@ -43427,6 +43475,80 @@ mod tests {
             cache.note(&format!("other-{index}.example"), 4, client_b, now);
         }
         assert!(!cache.r2o_recent("clean.example", 4, client_a, now));
+    }
+
+    /// C/Rust differential: C-стенд вызывает production
+    /// `box_injects_rst`/`rst_guard_wanted`/`plan_arm_rst_guard`
+    /// из sched.c; Rust — те же production-хелперы.
+    #[cfg(unix)]
+    #[test]
+    fn rst_guard_helpers_match_c() {
+        use r2o_controller::catalog::{Fingerprint, Signal};
+        let Some(path) = std::env::var_os("R2O_RST_GUARD_DIFF_OUTPUT") else {
+            return;
+        };
+        let signal = |kind: &str| Signal {
+            kind: kind.to_owned(),
+            ttl: 0,
+            ttl_delta: 0,
+            tos: 0,
+            ipid: 0,
+            volume: 0,
+            seen: 0,
+            packets: 0,
+        };
+        let fingerprint = |kinds: &[&str]| Fingerprint {
+            method: 0,
+            signals: kinds.iter().map(|kind| signal(kind)).collect(),
+        };
+        let mut output = String::new();
+        for (label, kinds) in [
+            ("empty", &[][..]),
+            ("volume", &["volume"][..]),
+            ("rst", &["rst"][..]),
+            ("both", &["volume", "rst"][..]),
+            ("upper", &["RST"][..]),
+        ] {
+            output.push_str(&format!(
+                "box {label}={}\n",
+                u8::from(super::r2o_fingerprint_injects_rst(&fingerprint(kinds)))
+            ));
+        }
+        for code in 0_u8..=8 {
+            for transport in [6_u8, 17] {
+                output.push_str(&format!(
+                    "guard t={transport} c={code}={}\n",
+                    u8::from(super::r2o_rst_guard_wanted(transport, Some(code)))
+                ));
+            }
+        }
+        fn arm(output: &mut String, label: &str, text: &str, cap: usize) {
+            let armed = super::r2o_plan_arm_rst_guard_cap(text, cap);
+            let rc = u8::from(armed.is_some());
+            let result = armed.as_deref().unwrap_or(text);
+            output.push_str(&format!(
+                "arm {label} cap={cap} rc={rc} text={}\n",
+                result.replace('\n', "\\n")
+            ));
+        }
+        let base = "r2o-plan 1 8\nid 00000000000000000000000000000000\nproto tcp tls\n";
+        let length = base.len();
+        arm(&mut output, "base", base, length + 16);
+        arm(&mut output, "base", base, length + 17);
+        arm(&mut output, "base", base, 64);
+        arm(&mut output, "base", base, 4096);
+        arm(
+            &mut output,
+            "existing",
+            "r2o-plan 1 8\nid 00000000000000000000000000000000\nguard rst_alien\n",
+            4096,
+        );
+        arm(&mut output, "guard_word", "proto tcp tls\nguard\n", 4096);
+        arm(&mut output, "empty", "", 16);
+        arm(&mut output, "empty", "", 17);
+        arm(&mut output, "utf8", "план", 4096);
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
     }
 
     #[cfg(unix)]
