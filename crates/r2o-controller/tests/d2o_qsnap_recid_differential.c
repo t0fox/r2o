@@ -106,7 +106,14 @@ static void report(const char *label, const uint8_t *qsn, size_t qsn_len,
     uint8_t out[6144];
     size_t out_len = 0;
     d2k_qsnap s;
-    if (d2k_qsnap_parse(qsn, qsn_len, &s) != 0) {
+    memset(&s, 0, sizeof s);
+    d2k_quic_form form;
+    memset(&form, 0, sizeof form);
+    int parsed = d2k_qsnap_parse(qsn, qsn_len, &s) == 0;
+    int form_rc = parsed ? d2k_qsnap_form(&s, &form) : -1;
+    printf("%s-form,%d,%u,%u,%u\n", label, form_rc == 0 ? 0 : -1,
+           (unsigned)form.n, (unsigned)form.dgram_len, (unsigned)form.ch_len);
+    if (!parsed) {
         printf("%s,-1\n", label);
         return;
     }

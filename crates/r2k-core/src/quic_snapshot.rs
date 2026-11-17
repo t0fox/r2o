@@ -24,6 +24,31 @@ pub fn r2k_quic_snapshot_is(input: &[u8]) -> bool {
     input.len() >= R2K_QUIC_SNAPSHOT_HEADER_BYTES && input.get(..3) == Some(b"QSN")
 }
 
+/// C `d2k_quic_form` (`core/include/d2k_quicsnap.h:45-49`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct R2oQuicForm {
+    pub n: u8,
+    pub dgram_len: u16,
+    pub ch_len: u16,
+}
+
+/// C `d2k_qsnap_form` (`core/quicsnap.c:91-104`): число датаграмм, длина
+/// первой и длина собранного ClientHello; больше 0xffff — отказ.
+pub fn r2k_quic_snapshot_form(input: &[u8]) -> Option<R2oQuicForm> {
+    let snapshot = r2k_quic_snapshot_parse(input)?;
+    let datagrams = snapshot.datagrams();
+    let first = *datagrams.first()?;
+    if first.len() > usize::from(u16::MAX) {
+        return None;
+    }
+    let client_hello = crate::quic::r2k_quic_initial_client_hello_from_datagrams(datagrams)?;
+    Some(R2oQuicForm {
+        n: u8::try_from(datagrams.len()).ok()?,
+        dgram_len: u16::try_from(first.len()).ok()?,
+        ch_len: u16::try_from(client_hello.len()).ok()?,
+    })
+}
+
 /// Упаковать от одной до четырёх датаграмм в формат `QSN`.
 pub fn r2k_quic_snapshot_pack(datagrams: &[&[u8]]) -> Option<Vec<u8>> {
     if datagrams.is_empty() || datagrams.len() > R2K_QUIC_SNAPSHOT_MAX_DATAGRAMS {

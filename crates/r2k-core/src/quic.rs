@@ -953,6 +953,228 @@ fn r2k_quic_initial_crypto_stream(
     Some(())
 }
 
+/// C `D2K_QUIC_ASSEMBLY_MAX` (`core/include/d2k_quic.h:47`).
+pub const R2K_QUIC_ASSEMBLY_MAX: usize = 2048;
+
+/// C `d2k_quic_assembly` (`core/include/d2k_quic.h:49-63`): поточная сборка
+/// ClientHello из Initial-датаграмм одного полёта.
+pub struct R2kQuicAssembly {
+    active: bool,
+    version: u32,
+    dcid: Vec<u8>,
+    keys: InitialKeys,
+    largest_pn: u64,
+    have_pn: bool,
+    stream: [u8; R2K_QUIC_ASSEMBLY_MAX],
+    seen: [bool; R2K_QUIC_ASSEMBLY_MAX],
+    crypto_end: u64,
+}
+
+impl Default for R2kQuicAssembly {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl R2kQuicAssembly {
+    pub fn new() -> Self {
+        Self {
+            active: false,
+            version: 0,
+            dcid: Vec::new(),
+            keys: InitialKeys {
+                key: [0; 16],
+                iv: [0; 12],
+                hp: [0; 16],
+            },
+            largest_pn: 0,
+            have_pn: false,
+            stream: [0; R2K_QUIC_ASSEMBLY_MAX],
+            seen: [false; R2K_QUIC_ASSEMBLY_MAX],
+            crypto_end: 0,
+        }
+    }
+
+    /// C `d2k_quic_assembly_init`.
+    pub fn init(&mut self) {
+        *self = Self::new();
+    }
+
+    /// C `d2k_quic_assembly_feed`: `None` — битый/не тот пакет (C -1),
+    /// `Some(None)` — принят без имени (C 0), `Some(Some(name))` — имя (C 1).
+    pub fn feed(&mut self, packet: &[u8]) -> Option<Option<Vec<u8>>> {
+        let header = r2o_qw_hdr_parse(packet, 0)?;
+        if !header.long_header
+            || header.kind != 0
+            || header.dcid_len > MAX_CID
+            || header.packet_len > packet.len()
+        {
+            return None;
+        }
+        let dcid = packet
+            .get(header.dcid_offset..header.dcid_offset + header.dcid_len)?
+            .to_vec();
+        let fresh = !self.active || self.version != header.version || self.dcid != dcid;
+        let mut next = if fresh {
+            let keys = derive_initial_keys(header.version, &dcid).ok()?;
+            Self {
+                active: true,
+                version: header.version,
+                dcid,
+                keys,
+                ..Self::new()
+            }
+        } else {
+            Self {
+                active: self.active,
+                version: self.version,
+                dcid: self.dcid.clone(),
+                keys: self.keys,
+                largest_pn: self.largest_pn,
+                have_pn: self.have_pn,
+                stream: self.stream,
+                seen: self.seen,
+                crypto_end: self.crypto_end,
+            }
+        };
+        let (plain, pn, _) = r2o_qw_open(
+            &next.keys,
+            &header,
+            packet,
+            if next.have_pn { next.largest_pn } else { 0 },
+        )?;
+        if !next.have_pn || pn > next.largest_pn {
+            next.largest_pn = pn;
+            next.have_pn = true;
+        }
+        r2k_quic_collect_crypto_frames_into(
+            &plain,
+            &mut next.stream,
+            &mut next.seen,
+            &mut next.crypto_end,
+        );
+        *self = next;
+
+        let filled = self.seen.iter().take_while(|present| **present).count();
+        match find_client_hello_sni_prefix(&self.stream[..filled]) {
+            Ok(Some((offset, length))) => self
+                .stream
+                .get(offset..offset + length)
+                .map(|name| Some(name.to_vec())),
+            // C `find_client_hello_sni != 0` → 0: мало данных, не ClientHello
+            // или имя ещё не собралось — это не ошибка пакета.
+            Ok(None) | Err(_) => Some(None),
+        }
+    }
+
+    /// C `d2k_quic_assembly_complete`.
+    pub fn complete(&self) -> bool {
+        if !self.active || self.seen.iter().take(4).any(|seen| !*seen) {
+            return false;
+        }
+        if self.stream[0] != 0x01 {
+            return false;
+        }
+        let claimed = (u64::from(self.stream[1]) << 16)
+            | (u64::from(self.stream[2]) << 8)
+            | u64::from(self.stream[3]);
+        let total = 4_u64.saturating_add(claimed);
+        if self.crypto_end < total {
+            return false;
+        }
+        let need = usize::try_from(total.min(R2K_QUIC_ASSEMBLY_MAX as u64)).unwrap_or(0);
+        self.seen.iter().take(need).all(|seen| *seen)
+    }
+
+    pub fn filled(&self) -> usize {
+        self.seen.iter().take_while(|present| **present).count()
+    }
+
+    pub fn crypto_end(&self) -> u64 {
+        self.crypto_end
+    }
+}
+
+/// C `collect_crypto_frames` в буфер сборки: пишет занятые байты и двигает
+/// `crypto_end` даже за пределы буфера.
+fn r2k_quic_collect_crypto_frames_into(
+    plain: &[u8],
+    stream: &mut [u8],
+    seen: &mut [bool],
+    crypto_end: &mut u64,
+) {
+    let mut cursor = 0;
+    while cursor < plain.len() {
+        match plain[cursor] {
+            0x00 => {
+                while cursor < plain.len() && plain[cursor] == 0 {
+                    cursor += 1;
+                }
+            }
+            0x01 => cursor += 1,
+            0x02 | 0x03 => {
+                let ecn = plain[cursor] == 0x03;
+                cursor += 1;
+                if skip_initial_ack(plain, &mut cursor, ecn).is_none() {
+                    break;
+                }
+            }
+            0x06 => {
+                cursor += 1;
+                let Some(offset) = read_varint(plain, &mut cursor) else {
+                    break;
+                };
+                let Some(length) =
+                    read_varint(plain, &mut cursor).and_then(|n| usize::try_from(n).ok())
+                else {
+                    break;
+                };
+                let Some(end) = cursor.checked_add(length).filter(|end| *end <= plain.len()) else {
+                    break;
+                };
+                *crypto_end = (*crypto_end).max(offset.saturating_add(length as u64));
+                let Ok(start) = usize::try_from(offset) else {
+                    cursor = end;
+                    continue;
+                };
+                if start < stream.len() {
+                    let take = length.min(stream.len() - start);
+                    for index in 0..take {
+                        let position = start + index;
+                        if !seen[position] {
+                            stream[position] = plain[cursor + index];
+                            seen[position] = true;
+                        }
+                    }
+                }
+                cursor = end;
+            }
+            0x1c => {
+                cursor += 1;
+                let Some(_) = read_varint(plain, &mut cursor) else {
+                    break;
+                };
+                let Some(_) = read_varint(plain, &mut cursor) else {
+                    break;
+                };
+                let Some(reason_length) =
+                    read_varint(plain, &mut cursor).and_then(|length| usize::try_from(length).ok())
+                else {
+                    break;
+                };
+                let Some(end) = cursor
+                    .checked_add(reason_length)
+                    .filter(|end| *end <= plain.len())
+                else {
+                    break;
+                };
+                cursor = end;
+            }
+            _ => break,
+        }
+    }
+}
+
 /// C `d2k_quic_hello_incomplete` (`core/quic.c:672-685`): в CRYPTO-потоке
 /// есть заголовок ClientHello, но заявленная длина больше собранного. Любая
 /// ошибка разбора — «не обрезан» (0), как у C.
@@ -2565,6 +2787,88 @@ mod tests {
     }
 
     #[test]
+    fn quic_assembly_matches_c() {
+        let Some(input_path) = std::env::var_os("R2O_QUIC_ASSEMBLY_INPUT") else {
+            return;
+        };
+        let Some(output_path) = std::env::var_os("R2O_QUIC_ASSEMBLY_OUTPUT") else {
+            return;
+        };
+        let input = std::fs::read_to_string(input_path).unwrap();
+        let mut packets = std::collections::HashMap::new();
+        for line in input.lines() {
+            let (label, hex) = line.split_once(',').unwrap();
+            let bytes: Vec<u8> = (0..hex.len())
+                .step_by(2)
+                .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).unwrap())
+                .collect();
+            packets.insert(label.to_owned(), bytes);
+        }
+        let mut output = String::new();
+        let mut assembly = super::R2kQuicAssembly::new();
+        let mut feed =
+            |assembly: &mut super::R2kQuicAssembly, case_name: &str, step: usize, packet: &[u8]| {
+                let result = assembly.feed(packet);
+                let (rc, sni) = match result {
+                    None => (-1, "-".to_owned()),
+                    Some(None) => (0, "-".to_owned()),
+                    Some(Some(name)) => (
+                        1,
+                        String::from_utf8(name).unwrap_or_else(|_| "-".to_owned()),
+                    ),
+                };
+                output.push_str(&format!(
+                    "{case_name},{step},{rc},{sni},{},{},{}\n",
+                    u8::from(assembly.complete()),
+                    assembly.filled(),
+                    assembly.crypto_end()
+                ));
+            };
+        let get = |name: &str| packets.get(name).unwrap().as_slice();
+
+        assembly.init();
+        feed(&mut assembly, "normal", 1, get("d1"));
+        feed(&mut assembly, "normal", 2, get("d2"));
+
+        assembly.init();
+        feed(&mut assembly, "reverse", 1, get("d2"));
+        feed(&mut assembly, "reverse", 2, get("d1"));
+
+        assembly.init();
+        feed(&mut assembly, "sni-first", 1, get("d1s"));
+        feed(&mut assembly, "sni-first", 2, get("d2s"));
+
+        assembly.init();
+        feed(&mut assembly, "duplicate", 1, get("d1"));
+        feed(&mut assembly, "duplicate", 2, get("d1"));
+        feed(&mut assembly, "duplicate", 3, get("d2"));
+
+        assembly.init();
+        feed(&mut assembly, "bad-keeps-state", 1, get("d1"));
+        feed(&mut assembly, "bad-keeps-state", 2, &[0xaa; 20]);
+        feed(&mut assembly, "bad-keeps-state", 3, get("d2"));
+
+        assembly.init();
+        feed(&mut assembly, "new-flight", 1, get("d1"));
+        feed(&mut assembly, "new-flight", 2, get("o1"));
+        feed(&mut assembly, "new-flight", 3, get("o2"));
+
+        assembly.init();
+        feed(&mut assembly, "qsn", 1, b"QSN\x01");
+
+        assembly.init();
+        output.push_str(&format!(
+            "empty,0,0,-,{},{},{}\n",
+            u8::from(assembly.complete()),
+            assembly.filled(),
+            assembly.crypto_end()
+        ));
+
+        std::fs::write(output_path, &output).unwrap();
+        print!("{output}");
+    }
+
+    #[test]
     fn qsnap_recid_matches_c() {
         let Some(input_path) = std::env::var_os("R2O_QSN_RECID_INPUT") else {
             return;
@@ -2635,6 +2939,13 @@ mod tests {
                 .step_by(2)
                 .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).unwrap())
                 .collect();
+            match crate::quic_snapshot::r2k_quic_snapshot_form(&qsn) {
+                Some(form) => output.push_str(&format!(
+                    "{label}-form,0,{},{},{}\n",
+                    form.n, form.dgram_len, form.ch_len
+                )),
+                None => output.push_str(&format!("{label}-form,-1,0,0,0\n")),
+            }
             match crate::quic_snapshot::r2k_quic_snapshot_reseal(&qsn) {
                 Some(resealed) => output.push_str(&describe(label, &resealed)),
                 None => output.push_str(&format!("{label},-1\n")),
