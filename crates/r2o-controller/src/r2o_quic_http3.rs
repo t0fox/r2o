@@ -3,8 +3,6 @@
 use std::collections::VecDeque;
 use std::future::{Future, poll_fn};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
-#[cfg(target_has_atomic = "64")]
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -58,10 +56,39 @@ pub(crate) fn r2o_quic_endpoint_config() -> Result<quinn::EndpointConfig, String
 static R2O_QUIC_RECENT_PORTS_STATE: OnceLock<Mutex<(VecDeque<(u16, i64)>, usize)>> =
     OnceLock::new();
 
-#[cfg(target_has_atomic = "64")]
-type R2oQuicHttp3AppByteCounter = AtomicU64;
-#[cfg(not(target_has_atomic = "64"))]
-type R2oQuicHttp3AppByteCounter = Mutex<u64>;
+#[derive(Debug, Default)]
+struct R2oQuicHttp3AppState {
+    ranges: r2k_core::quic_ranges::R2oQuicRanges,
+    total: u64,
+}
+
+/// Учёт app-байт ответа: текущий поток — C `d2k_qw_ranges`, сумма — как
+/// раньше (уникальные байты всех запросов).
+type R2oQuicHttp3AppCounter = Mutex<R2oQuicHttp3AppState>;
+
+fn r2o_quic_http3_app_reset(app: &R2oQuicHttp3AppCounter) {
+    let mut state = app
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    state.ranges.reset();
+}
+
+fn r2o_quic_http3_app_add(app: &R2oQuicHttp3AppCounter, offset: u64, length: u64, fin: bool) {
+    let mut state = app
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let before = state.ranges.bytes();
+    state.ranges.add(offset, length, fin);
+    let after = state.ranges.bytes();
+    state.total = state.total.saturating_add(after.saturating_sub(before));
+}
+
+fn r2o_quic_http3_app_complete(app: &R2oQuicHttp3AppCounter) -> bool {
+    app.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .ranges
+        .complete()
+}
 
 fn r2o_quic_http3_bounded_timeout_at(
     timeout: Duration,
@@ -413,18 +440,18 @@ impl rustls::client::danger::ServerCertVerifier for R2oQuicNameRecordingVerifier
 struct R2oQuicHttp3CountedConnection {
     inner: h3_quinn::Connection,
     connection: quinn::Connection,
-    app_bytes: Arc<R2oQuicHttp3AppByteCounter>,
+    app_bytes: Arc<R2oQuicHttp3AppCounter>,
 }
 
 struct R2oQuicHttp3CountedOpenStreams {
     inner: h3_quinn::OpenStreams,
     connection: quinn::Connection,
-    app_bytes: Arc<R2oQuicHttp3AppByteCounter>,
+    app_bytes: Arc<R2oQuicHttp3AppCounter>,
 }
 
 struct R2oQuicHttp3CountedRecvStream {
     inner: h3_quinn::RecvStream,
-    app_bytes: Arc<R2oQuicHttp3AppByteCounter>,
+    app_bytes: Arc<R2oQuicHttp3AppCounter>,
     connection: Option<quinn::Connection>,
     stream_id: Option<quinn::StreamId>,
     last_seen: u64,
@@ -436,33 +463,11 @@ struct R2oQuicHttp3CountedBidiStream {
     recv: R2oQuicHttp3CountedRecvStream,
 }
 
-fn r2o_quic_http3_count_app_bytes(app_bytes: &R2oQuicHttp3AppByteCounter, count: u64) {
-    #[cfg(target_has_atomic = "64")]
-    {
-        let _ = app_bytes.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-            Some(current.saturating_add(count))
-        });
-    }
-    #[cfg(not(target_has_atomic = "64"))]
-    {
-        let mut current = app_bytes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *current = current.saturating_add(count);
-    }
-}
-
-fn r2o_quic_http3_app_bytes_load(app_bytes: &R2oQuicHttp3AppByteCounter) -> u64 {
-    #[cfg(target_has_atomic = "64")]
-    {
-        app_bytes.load(Ordering::Relaxed)
-    }
-    #[cfg(not(target_has_atomic = "64"))]
-    {
-        *app_bytes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
+fn r2o_quic_http3_app_bytes_load(app_bytes: &R2oQuicHttp3AppCounter) -> u64 {
+    app_bytes
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .total
 }
 
 impl h3::quic::RecvStream for R2oQuicHttp3CountedRecvStream {
@@ -480,18 +485,32 @@ impl h3::quic::RecvStream for R2oQuicHttp3CountedRecvStream {
                 .zip(self.stream_id)
                 .and_then(|(connection, stream_id)| connection.r2o_recv_stream_bytes(stream_id));
             if let Some(received) = received {
-                r2o_quic_http3_count_app_bytes(
-                    &self.app_bytes,
-                    received.saturating_sub(self.last_seen),
-                );
-                self.last_seen = self.last_seen.max(received);
+                let received = received.max(self.last_seen);
+                if received > self.last_seen {
+                    r2o_quic_http3_app_add(
+                        &self.app_bytes,
+                        self.last_seen,
+                        received - self.last_seen,
+                        false,
+                    );
+                    self.last_seen = received;
+                }
             } else if let Poll::Ready(Ok(Some(bytes))) = &result {
                 let received = self.last_seen.saturating_add(bytes.remaining() as u64);
-                r2o_quic_http3_count_app_bytes(
-                    &self.app_bytes,
-                    received.saturating_sub(self.last_seen),
-                );
-                self.last_seen = received;
+                if received > self.last_seen {
+                    r2o_quic_http3_app_add(
+                        &self.app_bytes,
+                        self.last_seen,
+                        received - self.last_seen,
+                        false,
+                    );
+                    self.last_seen = received;
+                }
+            }
+            // Конец тела — это FIN потока: C `d2k_qw_ranges_add(off,0,fin)`
+            // запоминает fin_off, не добавляя байт.
+            if let Poll::Ready(Ok(None)) = &result {
+                r2o_quic_http3_app_add(&self.app_bytes, self.last_seen, 0, true);
             }
         }
         result
@@ -509,7 +528,7 @@ impl h3::quic::RecvStream for R2oQuicHttp3CountedRecvStream {
 impl R2oQuicHttp3CountedBidiStream {
     fn new(
         inner: h3_quinn::BidiStream<Bytes>,
-        app_bytes: Arc<R2oQuicHttp3AppByteCounter>,
+        app_bytes: Arc<R2oQuicHttp3AppCounter>,
         count: bool,
         connection: quinn::Connection,
     ) -> Self {
@@ -519,6 +538,10 @@ impl R2oQuicHttp3CountedBidiStream {
         );
         let tracked = !count || connection.r2o_track_recv_stream_bytes(stream_id);
         debug_assert!(tracked, "opened HTTP/3 request stream must be tracked");
+        if count && tracked {
+            // C `d2k_qw_ranges_reset(&c->app_rx)` при новом клиентском потоке.
+            r2o_quic_http3_app_reset(&app_bytes);
+        }
         let (send, recv) = h3::quic::BidiStream::<Bytes>::split(inner);
         Self {
             send,
@@ -1393,7 +1416,7 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
     };
     result.lock().unwrap().handshake_confirmed = true;
 
-    let app_bytes = Arc::new(R2oQuicHttp3AppByteCounter::new(0));
+    let app_bytes = Arc::new(Mutex::new(R2oQuicHttp3AppState::default()));
     let h3_connection = R2oQuicHttp3CountedConnection {
         inner: h3_quinn::Connection::new(connection.clone()),
         connection: connection.clone(),
@@ -1840,6 +1863,7 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
     stall.r2o_capture_ack(connection.r2o_largest_acked_packet_number());
     let budget_result = budget_driver.r2o_result();
     let budget_passed = budget_result.budget == R2oQuicBudgetOutcome::Passed;
+    let app_complete = r2o_quic_http3_app_complete(&app_bytes);
     {
         let mut state = result.lock().unwrap();
         state.requests = requests;
@@ -1848,7 +1872,8 @@ async fn r2o_quic_http3_measure_with_wire_len_and_max_duration(
         state.datagrams = datagrams;
         state.budget_passed = budget_passed;
         state.budget = budget_result.budget;
-        state.complete = !repeated && last_response_complete && !state.r2o_quic_stalled;
+        state.complete =
+            !repeated && last_response_complete && app_complete && !state.r2o_quic_stalled;
         state.r2o_ping_probes = stall.probes_sent;
         state.r2o_ping_acks = stall.probes_acked;
     }
@@ -1904,7 +1929,7 @@ fn r2o_quic_http3_wire_bytes(connection: &quinn::Connection) -> u64 {
 async fn r2o_quic_http3_wait_with_stall<F: Future>(
     connection: &quinn::Connection,
     stall: &mut R2oQuicHttp3Stall,
-    app_bytes: &R2oQuicHttp3AppByteCounter,
+    app_bytes: &R2oQuicHttp3AppCounter,
     future: F,
 ) -> Result<F::Output, R2oQuicHttp3StallEnd> {
     tokio::pin!(future);
@@ -1946,13 +1971,14 @@ async fn r2o_quic_http3_wait_with_stall<F: Future>(
 mod tests {
     use super::{
         R2O_QUIC_TP_IDLE_MS, R2O_QUIC_TP_INITIAL_MAX_DATA, R2O_QUIC_TP_MAX_UDP_PAYLOAD,
-        R2O_QUIC_TP_STREAM_WINDOW, R2O_QUIC_TP_STREAMS, R2oQuicHttp3AppByteCounter,
-        R2oQuicHttp3Budget, R2oQuicHttp3Stall, R2oQuicHttp3StallAction as Action,
-        r2o_quic_endpoint_config, r2o_quic_http3_app_bytes_load, r2o_quic_http3_authority,
-        r2o_quic_http3_bounded_timeout_at, r2o_quic_http3_count_app_bytes,
+        R2O_QUIC_TP_STREAM_WINDOW, R2O_QUIC_TP_STREAMS, R2oQuicHttp3AppState, R2oQuicHttp3Budget,
+        R2oQuicHttp3Stall, R2oQuicHttp3StallAction as Action, r2o_quic_endpoint_config,
+        r2o_quic_http3_app_add, r2o_quic_http3_app_bytes_load, r2o_quic_http3_app_complete,
+        r2o_quic_http3_app_reset, r2o_quic_http3_authority, r2o_quic_http3_bounded_timeout_at,
         r2o_quic_http3_udp_socket_with_mark_setter, r2o_quic_transport_config,
     };
     use std::net::SocketAddr;
+    use std::sync::Mutex;
     use std::time::Duration;
     use tokio::time::Instant;
 
@@ -2000,24 +2026,35 @@ mod tests {
     }
 
     #[test]
-    fn http3_app_byte_counter_matches_d2o_unique_range_totals() {
-        let app_bytes = R2oQuicHttp3AppByteCounter::new(0);
-        for (delta, expected) in [
-            (4, 4),
-            (6, 10),
-            (1_u64 << 32, (1_u64 << 32) + 10),
-            (1_u64 << 32, (2_u64 << 32) + 10),
-            (0, (2_u64 << 32) + 10),
-        ] {
-            r2o_quic_http3_count_app_bytes(&app_bytes, delta);
-            assert_eq!(r2o_quic_http3_app_bytes_load(&app_bytes), expected);
-        }
+    fn http3_app_ranges_match_d2o_unique_range_totals() {
+        let app_bytes = Mutex::new(R2oQuicHttp3AppState::default());
+        r2o_quic_http3_app_add(&app_bytes, 0, 4, false);
+        assert_eq!(r2o_quic_http3_app_bytes_load(&app_bytes), 4);
+        assert!(!r2o_quic_http3_app_complete(&app_bytes));
+        r2o_quic_http3_app_add(&app_bytes, 2, 8, false);
+        assert_eq!(r2o_quic_http3_app_bytes_load(&app_bytes), 10);
+        r2o_quic_http3_app_add(&app_bytes, 0, 10, true);
+        assert_eq!(r2o_quic_http3_app_bytes_load(&app_bytes), 10);
+        assert!(r2o_quic_http3_app_complete(&app_bytes));
+        r2o_quic_http3_app_add(&app_bytes, 10, 5, true);
+        assert_eq!(r2o_quic_http3_app_bytes_load(&app_bytes), 15);
+        assert!(r2o_quic_http3_app_complete(&app_bytes));
+        // Новый клиентский поток: C `d2k_qw_ranges_reset`, сумма прежних
+        // потоков остаётся в total.
+        r2o_quic_http3_app_reset(&app_bytes);
+        assert_eq!(r2o_quic_http3_app_bytes_load(&app_bytes), 15);
+        assert!(!r2o_quic_http3_app_complete(&app_bytes));
+        r2o_quic_http3_app_add(&app_bytes, 0, 3, true);
+        assert_eq!(r2o_quic_http3_app_bytes_load(&app_bytes), 18);
+        assert!(r2o_quic_http3_app_complete(&app_bytes));
     }
 
     #[test]
-    fn http3_app_byte_counter_saturates_at_u64_max() {
-        let app_bytes = R2oQuicHttp3AppByteCounter::new(u64::MAX - 1);
-        r2o_quic_http3_count_app_bytes(&app_bytes, 3);
+    fn http3_app_byte_total_saturates_at_u64_max() {
+        let mut state = R2oQuicHttp3AppState::default();
+        state.total = u64::MAX - 1;
+        let app_bytes = Mutex::new(state);
+        r2o_quic_http3_app_add(&app_bytes, 0, 3, false);
         assert_eq!(r2o_quic_http3_app_bytes_load(&app_bytes), u64::MAX);
     }
 

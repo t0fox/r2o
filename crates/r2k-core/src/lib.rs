@@ -9,6 +9,7 @@ pub mod httpup;
 pub mod packet;
 pub mod plan;
 pub mod quic;
+pub mod quic_ranges;
 pub mod quic_snapshot;
 pub mod stun;
 pub mod tls;
