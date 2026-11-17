@@ -155,6 +155,19 @@ pub fn r2o_quic_residual_detected(pass: usize, err: usize) -> Option<bool> {
 
 /// Сформировать донорский Go crypto/tls ClientHello и QUIC v1 Initial.
 pub fn r2o_quic_profile_snapshot(server_name: Option<&str>) -> Option<Vec<u8>> {
+    r2o_quic_profile_snapshot_sized(server_name, 1200)
+}
+
+/// C `d2k_quic_probe_initial_longer` (`core/quichello.c:281-285`): тот же
+/// донорский профиль, но датаграмма ровно 1300 байт.
+pub fn r2o_quic_profile_snapshot_longer(server_name: Option<&str>) -> Option<Vec<u8>> {
+    r2o_quic_profile_snapshot_sized(server_name, 1300)
+}
+
+fn r2o_quic_profile_snapshot_sized(
+    server_name: Option<&str>,
+    target_len: usize,
+) -> Option<Vec<u8>> {
     if server_name.is_some_and(str::is_empty) {
         return None;
     }
@@ -190,7 +203,7 @@ pub fn r2o_quic_profile_snapshot(server_name: Option<&str>) -> Option<Vec<u8>> {
     let client_hello =
         r2k_core::quic::r2k_quic_client_hello_rename_sni(&client_hello, server_name)?;
     let initial =
-        r2k_core::quic::r2k_quic_initial_build(&client_hello, &source_connection_id, 1200)?;
+        r2k_core::quic::r2k_quic_initial_build(&client_hello, &source_connection_id, target_len)?;
     r2k_core::quic_snapshot::r2k_quic_snapshot_pack(&[&initial])
 }
 
@@ -2087,6 +2100,53 @@ mod tests {
         if let Ok(path) = std::env::var("R2O_QUIC_PROFILE_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
         }
+    }
+
+    #[test]
+    fn quic_profile_longer_matches_c() {
+        let Some(path) = std::env::var_os("R2O_QUIC_PROFILE_OUTPUT") else {
+            return;
+        };
+        let mut output = String::new();
+        let mut run = |label: &str, snapshot: Option<Vec<u8>>| {
+            let Some(snapshot) = snapshot else {
+                output.push_str(&format!("{label},-1\n"));
+                return;
+            };
+            let parsed = r2k_core::quic_snapshot::r2k_quic_snapshot_parse(&snapshot).unwrap();
+            assert_eq!(parsed.datagrams().len(), 1);
+            let datagram = parsed.datagrams()[0];
+            let client_hello =
+                r2k_core::quic::r2k_quic_initial_client_hello_from_datagrams(&[datagram]);
+            let name = r2k_core::quic::r2k_quic_initial_sni_result_from_datagrams(&[datagram])
+                .ok()
+                .flatten()
+                .and_then(|name| String::from_utf8(name).ok())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "-".to_owned());
+            output.push_str(&format!(
+                "{label},0,{},{name},{},{},{}\n",
+                datagram.len(),
+                u8::from(client_hello.is_some()),
+                client_hello.as_ref().map_or(0, Vec::len),
+                u8::from(r2k_core::quic::r2k_quic_hello_incomplete(datagram))
+            ));
+        };
+        run(
+            "profile-1200",
+            super::r2o_quic_profile_snapshot(Some("target.example")),
+        );
+        run(
+            "profile-1300",
+            super::r2o_quic_profile_snapshot_longer(Some("target.example")),
+        );
+        run(
+            "profile-ip",
+            super::r2o_quic_profile_snapshot(Some("203.0.113.7")),
+        );
+        run("profile-empty", super::r2o_quic_profile_snapshot(Some("")));
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
     }
 
     #[test]

@@ -81,7 +81,7 @@ CONTRACTS = {
     "CN-QUIC-INITIAL": (
         "QUIC Initial: snapshot, reseal, rename, split, assembly",
         "Подготовка/перезапечатывание Initial, SNI/split, сборка датаграмм.",
-        "quichello/quicsnap/quicsnap_reseal/quic: 6 P; prepare_target/hello_rename — 8 кейсов, hello_ask/split — 16 кейсов, hello_incomplete — 10 кейсов C/Rust PASS и проводка; r2o-quic-hello и quic-* differential частичные.",
+        "quichello/quicsnap/quicsnap_reseal/quic: 5 P; prepare_target/rename — 8, hello_ask/split — 16, hello_incomplete — 10, profile/longer — 4 кейса C/Rust PASS; остались quicsnap form/recid и quic assembly.",
     ),
     "CN-QUIC-PROBE-SEND": (
         "QUIC probe send: socket, prefix TTL, copies, fragments, refused",
@@ -382,8 +382,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 339:
-        raise SystemExit(f"expected 339 P rows, got {len(rows)}")
+    if len(rows) != 338:
+        raise SystemExit(f"expected 338 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")
