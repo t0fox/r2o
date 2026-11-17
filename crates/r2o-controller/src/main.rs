@@ -27392,7 +27392,10 @@ impl ControlClient {
         // fixtures; production keeps its default `allow_local = false`.
         if !cfg!(test) && r2o_quic_address_is_local(server) {
             eprintln!(
-                "QUIC HTTP/3-проба пропущена: адрес {} локальный или не является публичной целью",
+                "вердикт: {} — QUIC HTTP/3-проба пропущена: адрес {} локальный или не является публичной целью",
+                r2o_controller::classify::r2o_sched_verdict_name_for(
+                    r2o_controller::classify::Verdict::LocalAddress
+                ),
                 server.ip()
             );
             return Ok(None);
@@ -27782,7 +27785,10 @@ impl ControlClient {
         if control.pass == 0 {
             if control.refused > 0 {
                 println!(
-                    "QUIC {server}: контрольный путь ответил сетевым отказом; исход d2o no_quic"
+                    "вердикт: {} — QUIC {server}: контрольный путь ответил сетевым отказом; исход d2o no_quic",
+                    r2o_controller::classify::r2o_sched_verdict_name_for(
+                        r2o_controller::classify::Verdict::NoQuic
+                    )
                 );
                 return Ok(None);
             }
@@ -27810,12 +27816,18 @@ impl ControlClient {
                 );
             } else if version_negotiation.pass > 0 {
                 println!(
-                    "QUIC {server}: контроль молчит (0/3), путь жив по Version Negotiation ({}/3); исход d2o no_quic",
+                    "вердикт: {} — QUIC {server}: контроль молчит (0/3), путь жив по Version Negotiation ({}/3); исход d2o no_quic",
+                    r2o_controller::classify::r2o_sched_verdict_name_for(
+                        r2o_controller::classify::Verdict::NoQuic
+                    ),
                     version_negotiation.pass
                 );
             } else {
                 println!(
-                    "QUIC {server}: молчит всё, включая Version Negotiation (0/3); исход d2o address"
+                    "вердикт: {} — QUIC {server}: молчит всё, включая Version Negotiation (0/3); исход d2o address",
+                    r2o_controller::classify::r2o_sched_verdict_name_for(
+                        r2o_controller::classify::Verdict::Address
+                    )
                 );
             }
             return Ok(None);

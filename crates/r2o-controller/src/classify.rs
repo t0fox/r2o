@@ -1343,6 +1343,12 @@ pub enum Verdict {
     Flaky,
     Unreachable,
     Response,
+    /// C `D2K_V_NO_QUIC`: путь жив, но Initial не отвечает ни цели, ни
+    /// нейтральному имени — хост не обслуживает HTTP/3. Планов не предлагать.
+    NoQuic,
+    /// C `D2K_V_LOCAL_ADDRESS`: имя разрешается в приватный адрес, замер
+    /// провайдерской блокировки не проводился. Планов не предлагать.
+    LocalAddress,
 }
 
 /// C `map_verdict` (`detect/classify.c:95-112`): коды `D2K_DV_*` →
@@ -1377,8 +1383,53 @@ impl Verdict {
             Self::Flaky => "flaky",
             Self::Unreachable => "unreachable",
             Self::Response => "response",
+            Self::NoQuic => "no_quic",
+            Self::LocalAddress => "local_address",
         }
     }
+
+    /// Код C `d2k_verdict` (`core/include/d2k_verdict.h:62-95`). У
+    /// `Poisonable` своего кода нет: detect-код 7 в планировщик не едет.
+    pub const fn sched_code(self) -> u8 {
+        match self {
+            Self::Clear => 0,
+            Self::Prefix => 1,
+            Self::WholePacket => 2,
+            Self::Opaque => 3,
+            Self::Inconclusive => 4,
+            Self::Flaky => 5,
+            Self::Unreachable => 6,
+            Self::Address => 7,
+            Self::Response => 8,
+            Self::NoQuic => 9,
+            Self::LocalAddress => 10,
+            Self::Poisonable => 3,
+        }
+    }
+}
+
+/// C `verdict_name` (`core/sched.c:1681-1694`): русские строки планировщика.
+/// Принимает код, чтобы неизвестное значение давало C-текст по умолчанию.
+pub const fn r2o_sched_verdict_name(code: u8) -> &'static str {
+    match code {
+        0 => "проходит как есть",
+        1 => "помогает разрез",
+        2 => "нужен пакет целиком",
+        3 => "решает содержимое",
+        4 => "вердикта нет",
+        5 => "измерению верить нельзя",
+        6 => "до цели нет транспорта",
+        7 => "режут адрес, а не содержимое",
+        8 => "режут ответ сервера",
+        9 => "хост не обслуживает HTTP/3",
+        10 => "имя разрешается в приватный адрес",
+        _ => "неизвестный вердикт",
+    }
+}
+
+/// C-имя вердикта для конкретного класса.
+pub const fn r2o_sched_verdict_name_for(verdict: Verdict) -> &'static str {
+    r2o_sched_verdict_name(verdict.sched_code())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3934,6 +3985,44 @@ mod probes_word_tests {
         }
         assert!(output.contains("arm|ttl|0||0|0|0|1|"));
         assert!(output.contains("arm|syn-data|-1|данные в SYN"));
+    }
+}
+
+#[cfg(test)]
+mod verdict_name_tests {
+    /// C/Rust differential: `verdict_name` (`core/sched.c:1681-1694`) на всех
+    /// 11 кодах `d2k_verdict` и трёх неизвестных значениях.
+    #[test]
+    fn verdict_name_matches_c() {
+        let Some(path) = std::env::var_os("R2O_VERDICT_NAME_DIFF_OUTPUT") else {
+            return;
+        };
+        let mut output = String::new();
+        for code in [0_u8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 255] {
+            output.push_str(&format!(
+                "{code}\t{}\n",
+                super::r2o_sched_verdict_name(code)
+            ));
+        }
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
+    }
+
+    #[test]
+    fn new_verdict_classes_carry_c_codes_and_names() {
+        use super::{Verdict, r2o_sched_verdict_name_for};
+        assert_eq!(Verdict::NoQuic.sched_code(), 9);
+        assert_eq!(Verdict::LocalAddress.sched_code(), 10);
+        assert_eq!(
+            r2o_sched_verdict_name_for(Verdict::NoQuic),
+            "хост не обслуживает HTTP/3"
+        );
+        assert_eq!(
+            r2o_sched_verdict_name_for(Verdict::LocalAddress),
+            "имя разрешается в приватный адрес"
+        );
+        assert_eq!(Verdict::NoQuic.as_str(), "no_quic");
+        assert_eq!(Verdict::LocalAddress.as_str(), "local_address");
     }
 }
 
