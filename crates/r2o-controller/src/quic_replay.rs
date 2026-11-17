@@ -329,6 +329,87 @@ pub struct R2oQuicFilterResult {
     pub sent: usize,
 }
 
+/// C `D2K_REASON_MAX` (`core/include/d2k_verdict.h:114`).
+pub const R2O_QUIC_REASON_MAX: usize = 384;
+
+/// C `reason_set`/`reason_append` (`core/quicprobe.c:1957-1973`): фиксированный
+/// буфер причины, побайтовое усечение без NUL.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct R2oQuicReason {
+    bytes: Vec<u8>,
+}
+
+impl R2oQuicReason {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set(&mut self, text: &str) {
+        self.bytes.clear();
+        self.bytes.extend(
+            text.as_bytes()
+                .iter()
+                .take(R2O_QUIC_REASON_MAX.saturating_sub(1))
+                .copied(),
+        );
+    }
+
+    pub fn append(&mut self, text: &str) {
+        if self.bytes.len() >= R2O_QUIC_REASON_MAX.saturating_sub(1) {
+            return;
+        }
+        let remaining = R2O_QUIC_REASON_MAX
+            .saturating_sub(1)
+            .saturating_sub(self.bytes.len());
+        self.bytes
+            .extend(text.as_bytes().iter().take(remaining).copied());
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn as_str(&self) -> String {
+        String::from_utf8_lossy(&self.bytes).into_owned()
+    }
+}
+
+/// C `qp_outcome` (`core/quicprobe.c:2111-2116`): единогласие 3/3 → YES,
+/// ошибка или частичный проход → UNKNOWN, иначе NO.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum R2oQuicPropOutcome {
+    Unknown = 0,
+    No = 1,
+    Yes = 2,
+}
+
+pub fn r2o_quic_qp_outcome(pass: usize, err: usize, repeats: usize) -> R2oQuicPropOutcome {
+    if err > 0 || (pass > 0 && pass < repeats) {
+        R2oQuicPropOutcome::Unknown
+    } else if pass == repeats {
+        R2oQuicPropOutcome::Yes
+    } else {
+        R2oQuicPropOutcome::No
+    }
+}
+
+/// C `budget_left` (`core/quicprobe.c:1984-1999`): limit=0 — сразу исчерпан;
+/// иначе истёкшим считается только `elapsed > limit`.
+pub fn r2o_quic_budget_left_elapsed(
+    elapsed: std::time::Duration,
+    limit: std::time::Duration,
+) -> bool {
+    !limit.is_zero() && elapsed.as_millis() <= limit.as_millis()
+}
+
+pub fn r2o_quic_budget_left(
+    start: std::time::Instant,
+    limit: std::time::Duration,
+    now: std::time::Instant,
+) -> bool {
+    r2o_quic_budget_left_elapsed(now.saturating_duration_since(start), limit)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct R2oQuicBaseResult {
     pub clear: bool,
@@ -405,31 +486,36 @@ pub fn r2o_quic_base_result(
     repeats: usize,
 ) -> Option<R2oQuicBaseResult> {
     if control_pass == 0 {
+        let mut reason = R2oQuicReason::new();
+        reason.set("базовый вопрос: ");
+        reason.append(&format!(
+            "контроль молчит (0/{repeats}) — блокировка имени не доказана"
+        ));
         return Some(R2oQuicBaseResult {
             clear: false,
             base_blocked: false,
             probes: control_sent,
-            reason: format!(
-                "базовый вопрос: контроль молчит (0/{repeats}) — блокировка имени не доказана"
-            ),
+            reason: reason.as_str(),
         });
     }
     let (trigger_pass, trigger_err, trigger_sent) = trigger?;
     let base_blocked = trigger_pass == 0 && trigger_err == 0;
-    let reason = if base_blocked {
-        format!(
-            "базовый вопрос: контроль отвечает ({control_pass}/{repeats}), наш Initial молчит (0/{repeats})"
-        )
+    let mut reason = R2oQuicReason::new();
+    reason.set("базовый вопрос: ");
+    if base_blocked {
+        reason.append(&format!(
+            "контроль отвечает ({control_pass}/{repeats}), наш Initial молчит (0/{repeats})"
+        ));
     } else {
-        format!(
-            "базовый вопрос: контроль {control_pass}/{repeats}, наш Initial {trigger_pass}/{repeats} — блокировки рукопожатия нет"
-        )
-    };
+        reason.append(&format!(
+            "контроль {control_pass}/{repeats}, наш Initial {trigger_pass}/{repeats} — блокировки рукопожатия нет"
+        ));
+    }
     Some(R2oQuicBaseResult {
         clear: trigger_pass == repeats,
         base_blocked,
         probes: control_sent.saturating_add(trigger_sent),
-        reason,
+        reason: reason.as_str(),
     })
 }
 
@@ -3645,6 +3731,64 @@ mod tests {
             );
             assert_eq!(refused_code, -2, "ECONNREFUSED не воспроизведён");
         }
+    }
+
+    #[test]
+    fn quicprobe_helpers_match_c() {
+        use super::{
+            R2oQuicPropOutcome, R2oQuicReason, r2o_quic_budget_left_elapsed, r2o_quic_qp_outcome,
+        };
+        let mut output = String::new();
+        let mut dump = |label: &str, reason: &R2oQuicReason| {
+            let hex: String = reason
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            output.push_str(&format!("{label},{},{hex}\n", reason.as_bytes().len()));
+        };
+        let mut reason = R2oQuicReason::new();
+        reason.set("abc");
+        dump("set-abc", &reason);
+        reason.append("-def");
+        dump("append-abc-def", &reason);
+        reason.set(&"a".repeat(400));
+        dump("set-long-400", &reason);
+        reason.set(&"я".repeat(300));
+        dump("set-utf8-300", &reason);
+        reason.set(&"x".repeat(400));
+        reason.append("tail");
+        dump("append-full", &reason);
+        reason.set(&"y".repeat(380));
+        reason.append("0123456789");
+        dump("append-partial", &reason);
+
+        for (label, elapsed, limit) in [
+            ("budget-zero", 0_u64, 0_u64),
+            ("budget-now", 0, 100),
+            ("budget-expired", 200, 100),
+            ("budget-99ms", 99, 100),
+        ] {
+            output.push_str(&format!(
+                "{label},{}\n",
+                u8::from(r2o_quic_budget_left_elapsed(
+                    std::time::Duration::from_millis(elapsed),
+                    std::time::Duration::from_millis(limit),
+                ))
+            ));
+        }
+        for (pass, err) in [(3, 0), (0, 0), (1, 0), (2, 0), (0, 1), (2, 1), (4, 0)] {
+            let outcome = match r2o_quic_qp_outcome(pass, err, 3) {
+                R2oQuicPropOutcome::Unknown => 0,
+                R2oQuicPropOutcome::No => 1,
+                R2oQuicPropOutcome::Yes => 2,
+            };
+            output.push_str(&format!("outcome-{pass}-{err},{outcome}\n"));
+        }
+        if let Some(path) = std::env::var_os("R2O_QUICPROBE_HELPERS_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        print!("{output}");
     }
 
     #[test]

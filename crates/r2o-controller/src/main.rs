@@ -10773,7 +10773,7 @@ const R2O_DISCOVERY_TASK_REST: std::time::Duration = std::time::Duration::from_s
 const R2O_DISCOVERY_TASK_LIFETIME: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 #[cfg(unix)]
 fn r2o_discovery_trial_time_available(elapsed: std::time::Duration) -> bool {
-    elapsed.as_millis() <= R2O_DISCOVERY_TASK_LIFETIME.as_millis()
+    r2o_controller::quic_replay::r2o_quic_budget_left_elapsed(elapsed, R2O_DISCOVERY_TASK_LIFETIME)
 }
 #[cfg(unix)]
 fn r2o_quic_trial_remaining_at(

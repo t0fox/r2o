@@ -91,7 +91,7 @@ CONTRACTS = {
     "CN-QUIC-PROBE-RUN": (
         "QUIC probe run: question ladder, budget, classify",
         "Вопросы junk/frames/datagrams/bit/lowport/length, бюджет и итоговый verdict.",
-        "quicprobe run-функции: 12 P; нужны C/Rust differential полного вопроса и бюджета.",
+        "quicprobe run-функции: 8 P; reason_set/append, budget_left, qp_outcome — 17 строк C/Rust PASS и проводка base-result/таймаута; нужен differential полного вопроса.",
     ),
     "CN-QUIC-ARM-STRATEGY": (
         "QUIC arm strategy and plan text",
@@ -382,8 +382,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 329:
-        raise SystemExit(f"expected 329 P rows, got {len(rows)}")
+    if len(rows) != 325:
+        raise SystemExit(f"expected 325 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")
