@@ -96,7 +96,7 @@ CONTRACTS = {
     "CN-QUIC-ARM-STRATEGY": (
         "QUIC arm strategy and plan text",
         "Лестница TTL/clearance/split/udplen/frag/fallback и текст arm-плана.",
-        "quicarms + udpplan: 11 P; emit_header_proto, quic_arm_found и quic_split_plan_text — C/Rust PASS; r2o-quic-plan-text частично, adaptive/порядок не сверены.",
+        "quicarms + udpplan: 13 P; emit_header_proto — 4 кейса C/Rust PASS; quic_arm_found — 9 кейсов, но wrappers не в production; adaptive/порядок не сверены.",
     ),
     "CN-QUIC-CONNECTION": (
         "QUIC connection/data stage",
@@ -382,8 +382,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 363:
-        raise SystemExit(f"expected 363 P rows, got {len(rows)}")
+    if len(rows) != 365:
+        raise SystemExit(f"expected 365 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")
