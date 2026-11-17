@@ -14230,13 +14230,10 @@ fn r2o_client_shape_from_legacy(
         SHAPE_LEGACY
     };
     // C `take_shape_opts` хранит до 40 байт TCP options, но единственный
-    // потребитель в планировщике — `client_tcp_profile`/`d2k_trigger_offers_ts`:
-    // он ищет kind 8 len 10. Rust хранит результат того же разбора (bool), а
-    // `raw_send_syn` в C и R2O использует те же два фиксированных профиля.
-    let tcp_has_timestamp = tcp_options.map(|options| {
-        r2k_core::packet::PacketView::tcp_options_timestamp_profile(options)
-            == r2k_core::control::TCP_PROFILE_TS
-    });
+    // потребитель в планировщике — `client_tcp_profile`: UNKNOWN (битый или
+    // неизвестный набор) не превращается в NO_TS, а едет как отсутствие
+    // metadata; NO_TS/TS — как Some(false)/Some(true).
+    let tcp_has_timestamp = tcp_options.and_then(r2k_core::packet::tcp_timestamp_metadata);
     Some(r2k_core::control::ClientShapeEvent {
         key: shape.key,
         host,
@@ -37370,8 +37367,8 @@ mod tests {
         let with_ts = r2o_client_shape_from_legacy(&event, Some(&with_ts)).unwrap();
         assert_eq!(with_ts.tcp_has_timestamp, Some(true));
 
-        // C `d2k_trigger_offers_ts`: TS ищется по kind/len с шагом опции,
-        // kind 0 завершает список, битая длина — «не предлагает».
+        // C `client_tcp_profile`: TS ищется по kind/len с шагом опции,
+        // kind 0 завершает список, битая длина — UNKNOWN (None), а не NO_TS.
         for (options, expected) in [
             (
                 &[2, 4, 0x05, 0xac, 1, 8, 10, 0, 0, 0, 1, 0, 0, 0, 0][..],
@@ -37382,8 +37379,10 @@ mod tests {
                 Some(false),
             ),
             (&[8, 9, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0][..], Some(false)),
-            (&[8, 1][..], Some(false)),
-            (&[8][..], Some(false)),
+            (&[8, 1][..], None),
+            (&[8][..], None),
+            (&[2, 0][..], None),
+            (&[2, 4, 1][..], None),
         ] {
             let shape = r2o_client_shape_from_legacy(&event, Some(options)).unwrap();
             assert_eq!(shape.tcp_has_timestamp, expected, "options {options:?}");

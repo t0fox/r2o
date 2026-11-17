@@ -2,7 +2,7 @@
 
 use crate::capture::{
     CaptureResult, CaptureStats, CaptureTable, TcpFlowKey, TcpHello, tcp_hello_from_bytes,
-    tcp_http_hello_from_bytes, tcp_timestamp_option_present,
+    tcp_http_hello_from_bytes,
 };
 use r2k_core::addr::Address;
 use r2k_core::control::{AppliedEvent, BindingContext, HttpPortalEvent, HttpResponseEvent};
@@ -749,9 +749,9 @@ impl HoldTable {
                     self.syns[anchor_index].saw_hello = true;
                     self.capture.forget(&key);
                     if let Some(mut hello) = tcp_hello_from_bytes(key, &bytes) {
-                        hello.tcp_has_timestamp = Some(tcp_timestamp_option_present(
+                        hello.tcp_has_timestamp = r2k_core::packet::tcp_timestamp_metadata(
                             packet.get(tcp.options.clone()).unwrap_or_default(),
-                        ));
+                        );
                         return FeedResult {
                             released,
                             outcome: HoldOutcome::Observed { hello },

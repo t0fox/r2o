@@ -32,6 +32,28 @@ pub struct TcpSegmentView {
     pub payload: Range<usize>,
 }
 
+/// C `sizeof t->client_opts`: больше 40 байт опций в планировщике не хранят.
+pub const R2K_TCP_OPTIONS_MAX: usize = 40;
+
+/// C `client_tcp_profile` (`core/sched.c:2413-2431`): неизвестный набор или
+/// переполнение → UNKNOWN; корректный список → NO_TS/TS.
+pub fn client_tcp_profile(known: bool, options: &[u8]) -> u8 {
+    if !known || options.len() > R2K_TCP_OPTIONS_MAX {
+        return crate::control::TCP_PROFILE_UNKNOWN;
+    }
+    PacketView::tcp_options_timestamp_profile(options)
+}
+
+/// Профиль TCP-опций в виде metadata события: UNKNOWN → None (поле не едет),
+/// NO_TS/TS → Some(false)/Some(true). Так C-UNKNOWN не превращается в NO_TS.
+pub fn tcp_timestamp_metadata(options: &[u8]) -> Option<bool> {
+    match client_tcp_profile(true, options) {
+        crate::control::TCP_PROFILE_TS => Some(true),
+        crate::control::TCP_PROFILE_NO_TS => Some(false),
+        _ => None,
+    }
+}
+
 impl PacketView {
     /// TCP-профиль по списку опций: UNKNOWN при повреждённом списке,
     /// TS при корректной option kind 8 length 10, иначе NO_TS.

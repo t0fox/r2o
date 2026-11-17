@@ -180,7 +180,7 @@ pub fn tcp_hello_from_packet(packet: &[u8]) -> Option<TcpHello> {
     let key = TcpFlowKey::from_packet(packet)?;
     let mut hello = tcp_hello_from_bytes(key, packet.get(tcp.payload)?)?;
     let options = packet.get(tcp.options)?;
-    hello.tcp_has_timestamp = Some(tcp_timestamp_option_present(options));
+    hello.tcp_has_timestamp = r2k_core::packet::tcp_timestamp_metadata(options);
     // C `shape_opts[4][40]`: набор опций ограничен 40 байтами.
     hello.tcp_options = Some(options[..options.len().min(40)].to_vec());
     Some(hello)
