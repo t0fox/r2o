@@ -456,6 +456,28 @@ pub struct DpiProps {
     pub hop_ttl: Option<i32>,
 }
 
+/// C `props_text` (`core/sched.c:5349-5357`): тройственное значение словами.
+pub const fn r2o_props_value_text(value: TriState) -> &'static str {
+    match value {
+        TriState::Unset => "не измерено",
+        TriState::False => "нет",
+        TriState::True => "да",
+    }
+}
+
+/// C `props_text`: вектор свойств словами в порядке C
+/// (перекрытие слева, дубликаты, порядок, контрольная сумма, разбор).
+pub fn r2o_props_text(properties: &DpiProps) -> String {
+    format!(
+        "перекрытие слева={}, счёт дубликатов={}, порядок сегментов={}, контрольная сумма={}, разбор протокола={}",
+        r2o_props_value_text(properties.tolerates_left_overlap),
+        r2o_props_value_text(properties.counts_duplicates),
+        r2o_props_value_text(properties.tolerates_reorder),
+        r2o_props_value_text(properties.validates_checksum),
+        r2o_props_value_text(properties.parses_l7),
+    )
+}
+
 /// Записать только свойства, подтверждённые всеми успешными пробами искажения.
 pub fn note_props_hit(properties: &mut DpiProps, poison: &Poison) {
     if poison.badsum {
@@ -3912,6 +3934,47 @@ mod probes_word_tests {
         }
         assert!(output.contains("arm|ttl|0||0|0|0|1|"));
         assert!(output.contains("arm|syn-data|-1|данные в SYN"));
+    }
+}
+
+#[cfg(test)]
+mod props_text_tests {
+    use super::{DpiProps, TriState};
+
+    /// C/Rust differential: C-стенд `props_text` перебирает все 3^5 векторов
+    /// и передаёт текст через файл; Rust строит тот же текст production
+    /// `r2o_props_text`.
+    #[test]
+    fn props_text_matches_c() {
+        let Some(path) = std::env::var_os("R2O_PROPS_TEXT_DIFF_OUTPUT") else {
+            return;
+        };
+        let values = [TriState::Unset, TriState::True, TriState::False];
+        let mut output = String::new();
+        for (a, left_overlap) in values.iter().enumerate() {
+            for (b, duplicates) in values.iter().enumerate() {
+                for (c, reorder) in values.iter().enumerate() {
+                    for (d, checksum) in values.iter().enumerate() {
+                        for (e, parse) in values.iter().enumerate() {
+                            let props = DpiProps {
+                                tolerates_left_overlap: *left_overlap,
+                                counts_duplicates: *duplicates,
+                                tolerates_reorder: *reorder,
+                                validates_checksum: *checksum,
+                                parses_l7: *parse,
+                                ..DpiProps::default()
+                            };
+                            output.push_str(&format!(
+                                "{a}{b}{c}{d}{e}|{}\n",
+                                super::r2o_props_text(&props)
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
     }
 }
 

@@ -907,11 +907,7 @@ fn save_ask_snapshot(path: &std::path::Path, kind: &str, sni: &str, bytes: &[u8]
 
 #[cfg(unix)]
 fn r2o_tri_state(value: r2o_controller::classify::TriState) -> &'static str {
-    match value {
-        r2o_controller::classify::TriState::Unset => "не измерено",
-        r2o_controller::classify::TriState::False => "нет",
-        r2o_controller::classify::TriState::True => "да",
-    }
+    r2o_controller::classify::r2o_props_value_text(value)
 }
 
 /// C `pos_value`: поле свойств по фиксированной позиции опроса.
@@ -8575,7 +8571,7 @@ fn r2o_run_discovery_props_questions(
 
     let destination = target.endpoint.parse::<std::net::SocketAddr>().ok()?;
     let wire_shape = r2o_plan_wire_shape(target.shape, has_timestamp);
-    for question in AskQuestion::ALL {
+    for (question_index, question) in AskQuestion::ALL.into_iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
@@ -8688,6 +8684,15 @@ fn r2o_run_discovery_props_questions(
             if let Some(state) = snapshot {
                 passed = state.passed;
                 refused = state.refused_code.is_some();
+                if passed {
+                    // C `say`: «по %s вопрос %d прошёл, вектор: %s».
+                    println!(
+                        "по {} вопрос {} прошёл, вектор: {}",
+                        target.host,
+                        question_index + 1,
+                        r2o_controller::classify::r2o_props_text(&state.props)
+                    );
+                }
                 if passed || refused {
                     break;
                 }
