@@ -640,43 +640,248 @@ fn r2k_quic_initial_build_with(
     (packet.len() == target_len && is_authenticated_initial(&packet)).then_some(packet)
 }
 
-/// C `d2k_quic_hello_rename` (`core/quichello.c:312-321`) для одного Initial:
-/// QSN не пересобирается; иначе ClientHello переименовывается (IPv4-литерал
-/// снимает SNI) и запечатывается новый Initial той же версии: SCID — из
-/// снимка, DCID — свежий, длина — max(снимок, 1200).
-pub fn r2k_quic_initial_rename_sni(input: &[u8], sni: &str) -> Option<Vec<u8>> {
+/// C `d2k_quic_ask` (`core/include/d2k_quichello.h`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum R2kQuicAsk {
+    Plain,
+    Version2,
+    SplitCrypto,
+    Longer,
+    ClearFixedBit,
+}
+
+struct R2kQuicAskInput {
+    client_hello: Vec<u8>,
+    dcid: Vec<u8>,
+    scid: Vec<u8>,
+    version: u32,
+    keys: InitialKeys,
+}
+
+/// C `prepare` (`core/quichello.c:123-180`): CH с именем цели, свежий DCID,
+/// SCID снимка, версия и ключи. IPv4-литерал копирует CH без правок, как C.
+fn r2k_quic_prepare_ask(input: &[u8], sni: &str, want_v2: bool) -> Option<R2kQuicAskInput> {
     if input.len() < 4 || input.get(..3)? == b"QSN" || sni.is_empty() {
         return None;
     }
     let header = r2o_qw_hdr_parse(input, 0)?;
-    if !header.long_header || header.kind != 0 {
+    if !header.long_header || header.kind != 0 || !matches!(header.version, QUIC_V1 | QUIC_V2) {
         return None;
     }
     let client_hello = r2k_quic_initial_client_hello_from_datagrams(&[input])?;
-    let renamed = if sni.parse::<std::net::Ipv4Addr>().is_ok() {
-        // C `prepare` проверяет наличие SNI через `d2k_hello_sni`, а тот ждёт
-        // TLS-запись; на входе сырой ClientHello, поэтому проверка всегда
-        // отрицательна и C копирует приветствие без изменений. Повторяем
-        // наблюдаемое поведение донора, а не замысел комментария.
+    let client_hello = if sni.parse::<std::net::Ipv4Addr>().is_ok() {
         client_hello
     } else {
         r2k_quic_client_hello_rename_sni(&client_hello, Some(sni))?
     };
+
+    let scid_end = header.scid_offset.checked_add(header.scid_len)?;
+    let scid = input.get(header.scid_offset..scid_end)?.to_vec();
+    if scid.len() > MAX_CID {
+        return None;
+    }
     let dcid_len = if (8..=MAX_CID).contains(&header.dcid_len) {
         header.dcid_len
     } else {
         8
     };
-    let scid_end = header.scid_offset.checked_add(header.scid_len)?;
-    let scid = input.get(header.scid_offset..scid_end)?;
-    r2k_quic_initial_build_with(
-        header.version,
-        dcid_len,
+    let mut dcid = vec![0; dcid_len];
+    let mut unique = false;
+    for _ in 0..4 {
+        getrandom::getrandom(&mut dcid).ok()?;
+        if dcid != scid {
+            unique = true;
+            break;
+        }
+    }
+    if !unique {
+        return None;
+    }
+    let version = if want_v2 { QUIC_V2 } else { header.version };
+    let keys = derive_initial_keys(version, &dcid).ok()?;
+    Some(R2kQuicAskInput {
+        client_hello,
+        dcid,
         scid,
-        &renamed,
-        input.len().max(1200),
-        r2k_quic_packet_number_len(0, None),
-    )
+        version,
+        keys,
+    })
+}
+
+/// C `put_crypto`: один кадр CRYPTO в теле Initial.
+fn r2k_quic_crypto_frame(body: &mut Vec<u8>, offset: u64, data: &[u8]) -> Option<()> {
+    body.push(0x06);
+    write_varint(offset, body).ok()?;
+    write_varint(u64::try_from(data.len()).ok()?, body).ok()?;
+    body.extend_from_slice(data);
+    Some(())
+}
+
+/// C `split_point`: середина первого вхождения имени, иначе половина CH.
+fn r2k_quic_split_point(client_hello: &[u8], sni: &str) -> Option<usize> {
+    let needle = sni.as_bytes();
+    let mut cut = client_hello.len() / 2;
+    if !needle.is_empty() && client_hello.len() >= needle.len() {
+        for index in 1..=(client_hello.len() - needle.len()) {
+            if client_hello.get(index..index + needle.len())? == needle {
+                cut = index + needle.len() / 2;
+                break;
+            }
+        }
+    }
+    (cut > 0 && cut < client_hello.len()).then_some(cut)
+}
+
+/// C `seal_one` (`core/quichello.c:183-228`): добрать PADDING до `want`,
+/// собрать заголовок, погасить fixed-бит при необходимости и запечатать.
+#[allow(clippy::too_many_arguments)]
+fn r2k_quic_seal_one(
+    version: u32,
+    dcid: &[u8],
+    scid: &[u8],
+    keys: InitialKeys,
+    packet_number: u64,
+    pn_len: usize,
+    body: &[u8],
+    want: usize,
+    clear_fixed: bool,
+) -> Option<Vec<u8>> {
+    if want > MAX_PACKET {
+        return None;
+    }
+    let pn_len = if pn_len == 0 {
+        r2k_quic_packet_number_len(packet_number, None)
+    } else {
+        pn_len
+    };
+    if !(1..=4).contains(&pn_len) {
+        return None;
+    }
+    let mut body = body.to_vec();
+    for _ in 0..4 {
+        let header = r2k_quic_long_header(
+            version,
+            R2K_QUIC_LONG_INITIAL,
+            dcid,
+            scid,
+            &[],
+            pn_len,
+            body.len(),
+            0,
+            want,
+        )?;
+        let total = header
+            .len()
+            .checked_add(pn_len)?
+            .checked_add(body.len())?
+            .checked_add(16)?;
+        if total >= want {
+            break;
+        }
+        let add = want.checked_sub(total)?;
+        if body.len().checked_add(add)? > MAX_PACKET {
+            return None;
+        }
+        body.resize(body.len() + add, 0);
+    }
+    let mut header = r2k_quic_long_header(
+        version,
+        R2K_QUIC_LONG_INITIAL,
+        dcid,
+        scid,
+        &[],
+        pn_len,
+        body.len(),
+        0,
+        want,
+    )?;
+    if clear_fixed {
+        // Гасим ДО запечатывания: первый байт входит в AAD.
+        header[0] &= !0x40;
+    }
+    let packet = seal_initial(&header, &body, packet_number, pn_len, keys).ok()?;
+    (packet.len() <= MAX_PACKET).then_some(packet)
+}
+
+/// C `d2k_quic_hello_ask` (`core/quichello.c:330-391`): один Initial с
+/// ClientHello, переименованным в `sni`. QSN не пересобирается.
+pub fn r2k_quic_hello_ask(input: &[u8], ask: R2kQuicAsk, sni: &str) -> Option<Vec<u8>> {
+    let prepared = r2k_quic_prepare_ask(input, sni, ask == R2kQuicAsk::Version2)?;
+    let client_hello = &prepared.client_hello;
+    let mut body = Vec::with_capacity(client_hello.len().saturating_add(32));
+    if ask == R2kQuicAsk::SplitCrypto {
+        let cut = r2k_quic_split_point(client_hello, sni)?;
+        r2k_quic_crypto_frame(&mut body, u64::try_from(cut).ok()?, &client_hello[cut..])?;
+        r2k_quic_crypto_frame(&mut body, 0, &client_hello[..cut])?;
+    } else {
+        r2k_quic_crypto_frame(&mut body, 0, client_hello)?;
+    }
+    let want = if ask == R2kQuicAsk::Longer {
+        1300
+    } else {
+        input.len().max(1200)
+    };
+    let packet = r2k_quic_seal_one(
+        prepared.version,
+        &prepared.dcid,
+        &prepared.scid,
+        prepared.keys,
+        0,
+        0,
+        &body,
+        want,
+        ask == R2kQuicAsk::ClearFixedBit,
+    )?;
+    if ask == R2kQuicAsk::Longer && packet.len() != 1300 {
+        return None;
+    }
+    Some(packet)
+}
+
+/// C `d2k_quic_hello_split` (`core/quichello.c:394-437`): две датаграммы по
+/// 1200 байт, хвост CRYPTO с PN=1, голова с PN=0. Возвращает (head, tail).
+pub fn r2k_quic_hello_split(input: &[u8], sni: &str) -> Option<(Vec<u8>, Vec<u8>)> {
+    let prepared = r2k_quic_prepare_ask(input, sni, false)?;
+    let cut = r2k_quic_split_point(&prepared.client_hello, sni)?;
+    let mut tail_body = Vec::new();
+    r2k_quic_crypto_frame(
+        &mut tail_body,
+        u64::try_from(cut).ok()?,
+        &prepared.client_hello[cut..],
+    )?;
+    let tail = r2k_quic_seal_one(
+        prepared.version,
+        &prepared.dcid,
+        &prepared.scid,
+        prepared.keys,
+        1,
+        0,
+        &tail_body,
+        1200,
+        false,
+    )?;
+    let mut head_body = Vec::new();
+    r2k_quic_crypto_frame(&mut head_body, 0, &prepared.client_hello[..cut])?;
+    let head = r2k_quic_seal_one(
+        prepared.version,
+        &prepared.dcid,
+        &prepared.scid,
+        prepared.keys,
+        0,
+        0,
+        &head_body,
+        1200,
+        false,
+    )?;
+    Some((head, tail))
+}
+
+/// C `d2k_quic_hello_rename` (`core/quichello.c:312-321`) для одного Initial:
+/// QSN не пересобирается; иначе ClientHello переименовывается (IPv4-литерал
+/// снимает SNI) и запечатывается новый Initial той же версии: SCID — из
+/// снимка, DCID — свежий, длина — max(снимок, 1200).
+pub fn r2k_quic_initial_rename_sni(input: &[u8], sni: &str) -> Option<Vec<u8>> {
+    r2k_quic_hello_ask(input, R2kQuicAsk::Plain, sni)
 }
 
 /// Повторно зашифровать клиентский Initial с новым DCID, сохранив его форму.
@@ -2260,6 +2465,102 @@ mod tests {
             }
         }
         std::fs::write(path, &output).unwrap();
+        print!("{output}");
+    }
+
+    #[test]
+    fn quic_hello_ask_matches_c() {
+        use super::{R2kQuicAsk, r2k_quic_hello_ask, r2k_quic_hello_split};
+
+        let Some(sample_path) = std::env::var_os("R2O_QUIC_ASK_SAMPLE") else {
+            return;
+        };
+        let Some(output_path) = std::env::var_os("R2O_QUIC_ASK_OUTPUT") else {
+            return;
+        };
+        let sample_hex = std::fs::read_to_string(sample_path).unwrap();
+        let sample: Vec<u8> = (0..sample_hex.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(&sample_hex[index..index + 2], 16).unwrap())
+            .collect();
+        let hex_bytes =
+            |bytes: &[u8]| -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() };
+        let describe = |label: &str, packet: &[u8]| -> String {
+            let Some(header) = super::r2o_qw_hdr_parse(packet, 0) else {
+                return format!("{label},-1\n");
+            };
+            let keys = super::derive_initial_keys(
+                header.version,
+                &packet[header.dcid_offset..header.dcid_offset + header.dcid_len],
+            );
+            let opened = keys
+                .ok()
+                .and_then(|keys| super::r2o_qw_open(&keys, &header, packet, 0));
+            let (opens, plain, pn) = match opened {
+                Some((plain, pn, _)) => (1, hex_bytes(&plain), pn),
+                None => (0, "-".to_owned(), 0),
+            };
+            let client_hello = super::r2k_quic_initial_client_hello_from_datagrams(&[packet]);
+            let sni = super::r2k_quic_initial_sni_prefix_result_from_datagrams(&[packet])
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    super::r2k_quic_initial_sni_result_from_datagrams(&[packet])
+                        .ok()
+                        .flatten()
+                })
+                .and_then(|name| String::from_utf8(name).ok())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "-".to_owned());
+            let (has_ch, ch_len, ch_hex) = match client_hello {
+                Some(ch) => (1, ch.len(), hex_bytes(&ch)),
+                None => (0, 0, "-".to_owned()),
+            };
+            format!(
+                "{label},{opens},{},{},{pn},{sni},{has_ch},{ch_len},{ch_hex},{plain}\n",
+                header.version,
+                packet.len()
+            )
+        };
+        let mut output = String::new();
+        let mut ask =
+            |label: &str, kind: R2kQuicAsk, sni: &str| match r2k_quic_hello_ask(&sample, kind, sni)
+            {
+                Some(packet) => output.push_str(&describe(label, &packet)),
+                None => output.push_str(&format!("{label},-1\n")),
+            };
+        ask("plain-same", R2kQuicAsk::Plain, "example.com");
+        ask("plain-rename", R2kQuicAsk::Plain, "target.example");
+        ask("plain-ip", R2kQuicAsk::Plain, "203.0.113.7");
+        ask("v2", R2kQuicAsk::Version2, "target.example");
+        ask("split-crypto", R2kQuicAsk::SplitCrypto, "example.com");
+        ask("split-crypto-ip", R2kQuicAsk::SplitCrypto, "203.0.113.7");
+        ask("longer", R2kQuicAsk::Longer, "target.example");
+        ask("clear-fixed", R2kQuicAsk::ClearFixedBit, "target.example");
+        for (label, sni) in [
+            ("split-dgrams-same", "example.com"),
+            ("split-dgrams-rename", "target.example"),
+            ("split-dgrams-ip", "203.0.113.7"),
+        ] {
+            match r2k_quic_hello_split(&sample, sni) {
+                Some((head, tail)) => {
+                    output.push_str(&describe(&format!("{label}-head"), &head));
+                    output.push_str(&describe(&format!("{label}-tail"), &tail));
+                }
+                None => output.push_str(&format!("{label}-head,-1\n{label}-tail,-1\n")),
+            }
+        }
+        let qsn = [b'Q', b'S', b'N', 1];
+        output.push_str(&format!(
+            "qsn,{}\n",
+            u8::from(r2k_quic_hello_ask(&qsn, R2kQuicAsk::Plain, "target.example").is_some())
+        ));
+        output.push_str(&format!(
+            "empty-sni,{}\n",
+            u8::from(r2k_quic_hello_ask(&sample, R2kQuicAsk::Plain, "").is_some())
+        ));
+
+        std::fs::write(output_path, &output).unwrap();
         print!("{output}");
     }
 
