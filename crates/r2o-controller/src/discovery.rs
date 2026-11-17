@@ -17,6 +17,10 @@ pub struct DiscoveryTarget {
     pub endpoint: String,
     pub family: u8,
     pub shape: u8,
+    /// C `t->trigger_tcp_profile`: измеренный профиль TCP-опций (0 — не
+    /// измерено, 1 — без метки, 2 — с меткой). Ноль при shape 8–13 означает
+    /// «взять профиль из контекстной формы», как раньше.
+    pub tcp_profile: u8,
 }
 
 /// Перевести неподтверждённый ECH offer на обычный TLS-путь GREASE.
@@ -554,10 +558,14 @@ pub fn resolve_unspecified_endpoint(target: &DiscoveryTarget) -> Result<Discover
 }
 
 impl DiscoveryTarget {
-    /// TCP-профиль цели: контекстные формы 8–13 несут NO_TS/TS, базовые
-    /// 1/2/6 — «не измерено» (0), как C `task_wire_shape`/`trigger_tcp_profile`.
+    /// TCP-профиль цели: измеренный `trigger_tcp_profile`, иначе контекст
+    /// формы 8–13, иначе UNKNOWN (0), как C.
     pub const fn tcp_profile(&self) -> u8 {
-        r2k_core::control::r2k_link_shape_tcp_profile(self.shape)
+        if self.tcp_profile != 0 {
+            self.tcp_profile
+        } else {
+            r2k_core::control::r2k_link_shape_tcp_profile(self.shape)
+        }
     }
 
     /// Выбирать только именованные потоки TLS на стандартном порту HTTPS.
@@ -590,6 +598,7 @@ impl DiscoveryTarget {
             endpoint,
             family,
             shape,
+            tcp_profile: r2k_core::control::tcp_profile_from_has_timestamp(event.tcp_has_timestamp),
         })
     }
 
@@ -638,6 +647,7 @@ impl DiscoveryTarget {
             endpoint,
             family: event.key[0],
             shape: SHAPE_HTTP,
+            tcp_profile: 0,
         })
     }
 
@@ -677,6 +687,7 @@ impl DiscoveryTarget {
             endpoint,
             family: event.key[0],
             shape: SHAPE_HTTP,
+            tcp_profile: 0,
         })
     }
 }
@@ -2075,6 +2086,7 @@ mod tests {
         use std::time::{Duration, Instant};
 
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "doq.example".into(),
             endpoint: "198.51.100.90:853".into(),
             family: 4,
@@ -2127,6 +2139,7 @@ mod tests {
         };
 
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "localhost".into(),
             endpoint: "0.0.0.0:443".into(),
             family: 4,
@@ -2138,6 +2151,7 @@ mod tests {
         assert_eq!(address.port(), 443);
 
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "localhost".into(),
             endpoint: "[::]:443".into(),
             family: 6,
@@ -2203,6 +2217,7 @@ mod tests {
             }
         }
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "other.example".into(),
             endpoint: "192.0.2.1:443".into(),
             family: 4,
@@ -2418,6 +2433,7 @@ mod tests {
         let mut output = String::new();
         for case in cases {
             let target = DiscoveryTarget {
+                tcp_profile: 0,
                 host: case.id.clone(),
                 endpoint: "192.0.2.1:443".into(),
                 family: 4,
@@ -2461,6 +2477,7 @@ mod tests {
         }
 
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "cloudflare-ech.com".into(),
             endpoint: "198.51.100.80:443".into(),
             family: 4,
@@ -2497,6 +2514,7 @@ mod tests {
         use crate::catalog::{Binding, BoxRecord, Catalog};
 
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             endpoint: "198.51.100.80:443".into(),
             family: 4,
@@ -2538,6 +2556,7 @@ mod tests {
         use crate::catalog::{Binding, BoxRecord, Catalog};
 
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "discord.com".into(),
             endpoint: "198.51.100.81:443".into(),
             family: 4,
@@ -2575,6 +2594,7 @@ mod tests {
     #[test]
     fn неподтверждённый_ech_offer_переходит_на_обычную_форму_tls13() {
         let mut target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             endpoint: "198.51.100.80:443".into(),
             family: 4,
@@ -2590,6 +2610,7 @@ mod tests {
         use crate::catalog::{Binding, BoxRecord, Catalog};
 
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "cloudflare-ech.com".into(),
             endpoint: "198.51.100.80:443".into(),
             family: 4,
@@ -2678,6 +2699,7 @@ mod tests {
     #[test]
     fn профильная_привязка_отличается_от_проверенной_живыми_байтами() {
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             endpoint: "198.51.100.80:443".into(),
             family: 4,
@@ -2704,6 +2726,7 @@ mod tests {
         // bind_confirmed пишет привязку этой формой. Сохранение не должно
         // отвергать цель только за то, что клиент предложил ECH.
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "gateway.discord.gg".into(),
             endpoint: "198.51.100.80:443".into(),
             family: 4,
@@ -2734,6 +2757,7 @@ mod tests {
         use crate::catalog::{BoxRecord, Catalog, Fingerprint, Signal};
 
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "updates.discord.com".into(),
             endpoint: "198.51.100.80:443".into(),
             family: 4,
@@ -2821,6 +2845,7 @@ mod tests {
         use crate::catalog::{Binding, BoxRecord, Catalog};
 
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "gateway.discord.gg".into(),
             endpoint: "198.51.100.80:443".into(),
             family: 4,
@@ -2856,6 +2881,7 @@ mod tests {
         use crate::catalog::{BoxRecord, Fingerprint, Signal};
 
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             endpoint: "198.51.100.80:443".into(),
             family: 4,
@@ -2925,6 +2951,7 @@ mod tests {
             ..BoxRecord::default()
         });
         let another_target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "other.example.com".into(),
             ..target
         };
@@ -2949,6 +2976,7 @@ mod tests {
         use crate::catalog::{BoxRecord, Fingerprint, Plan, Signal};
 
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             endpoint: "198.51.100.80:443".into(),
             family: 4,
@@ -3738,6 +3766,7 @@ mod tests {
         use std::time::{Duration, Instant};
 
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             endpoint: "198.51.100.80:443".into(),
             family: 4,
@@ -3823,6 +3852,7 @@ mod tests {
         use r2k_core::control::SHAPE_MODERN;
 
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "restart.example".into(),
             endpoint: "198.51.100.81:443".into(),
             family: 4,
@@ -3854,10 +3884,62 @@ mod tests {
     }
 
     #[test]
+    fn direct_clear_uses_measured_trigger_tcp_profile() {
+        use crate::catalog::{Binding, BoxRecord, Catalog};
+        use r2k_core::control::{SHAPE_MODERN_TS, TCP_PROFILE_TS};
+
+        let client = std::net::Ipv4Addr::new(192, 0, 2, 10);
+        let server = std::net::Ipv4Addr::new(198, 51, 100, 20);
+        let mut key = [0_u8; r2k_core::control::KEY_LEN];
+        key[0] = 4;
+        key[1..5].copy_from_slice(&client.octets());
+        key[17..21].copy_from_slice(&server.octets());
+        key[33..35].copy_from_slice(&40_000_u16.to_be_bytes());
+        key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+        key[37] = 6;
+        let event = r2k_core::control::HelloEvent {
+            key,
+            host: Some(b"example.com".to_vec()),
+            shape: Some(SHAPE_MODERN),
+            r2o_wire_len: None,
+            quic_snapshot: None,
+            tcp_has_timestamp: Some(true),
+        };
+        let target = DiscoveryTarget::from_event(&event).unwrap();
+        assert_eq!(target.tcp_profile(), TCP_PROFILE_TS);
+        let mut catalog = Catalog {
+            boxes: vec![BoxRecord {
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: target.host.clone(),
+                    level: 3,
+                    enabled: true,
+                    transport: 6,
+                    family: 4,
+                    shape: SHAPE_MODERN,
+                    tcp_profile: TCP_PROFILE_TS,
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        let update =
+            update_direct_clear_bindings(&mut catalog, &target, 100, std::time::Instant::now());
+        assert_eq!(update.marked, 1);
+        assert!(update.delete_runtime);
+        assert_eq!(
+            update.delete_shapes().collect::<Vec<_>>(),
+            vec![SHAPE_MODERN_TS]
+        );
+    }
+
+    #[test]
     fn direct_clear_requires_the_target_tcp_profile() {
         use crate::catalog::{Binding, BoxRecord, Catalog};
 
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "profile.example".into(),
             endpoint: String::new(),
             family: 4,
@@ -3894,6 +3976,7 @@ mod tests {
         use crate::catalog::{Binding, BoxRecord, Catalog};
 
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "profile.example".into(),
             endpoint: String::new(),
             family: 4,
@@ -3984,6 +4067,7 @@ mod tests {
         use crate::catalog::{Binding, BoxRecord, Catalog, Plan};
 
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "profile.example".into(),
             endpoint: String::new(),
             family: 4,
@@ -4024,6 +4108,7 @@ mod tests {
 
         // Базовой форме 1 соответствует «профиль не измерен» (0).
         let base_target = DiscoveryTarget {
+            tcp_profile: 0,
             shape: SHAPE_MODERN,
             ..target
         };

@@ -1202,6 +1202,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
             )
             .map_err(|_| "--mark-recheck: неверное имя".to_string())?;
             let target = r2o_controller::discovery::DiscoveryTarget {
+                tcp_profile: 0,
                 host,
                 endpoint: String::new(),
                 family,
@@ -1260,6 +1261,7 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
             )
             .map_err(|_| "--recheck-name: неверное имя".to_string())?;
             let target = r2o_controller::discovery::DiscoveryTarget {
+                tcp_profile: 0,
                 host,
                 endpoint: String::new(),
                 family,
@@ -4883,6 +4885,7 @@ fn r2o_quic_discovery_probe_path(
     let host =
         r2o_quic_snapshot_server_name(snapshot, server).unwrap_or_else(|| server.ip().to_string());
     let target = r2o_controller::discovery::DiscoveryTarget {
+        tcp_profile: 0,
         host,
         endpoint: server.to_string(),
         family: if server.is_ipv4() { 4 } else { 6 },
@@ -13008,6 +13011,7 @@ fn r2o_voice_diagnostic_target(
         endpoint: target.server.to_string(),
         family: 4,
         shape: SHAPE_VOICE,
+        tcp_profile: 0,
     }
 }
 
@@ -20025,6 +20029,7 @@ fn r2o_discovery_failure_backoff(
 #[test]
 fn failure_backoff_covers_ech_canary_and_full_rx_cut() {
     let canary = r2o_controller::discovery::DiscoveryTarget {
+        tcp_profile: 0,
         host: "cloudflare-ech.com".into(),
         endpoint: "203.0.113.10:443".into(),
         family: 4,
@@ -20035,6 +20040,7 @@ fn failure_backoff_covers_ech_canary_and_full_rx_cut() {
         R2O_DISCOVERY_ECH_CANARY_RETRY
     );
     let rx_cut = r2o_controller::discovery::DiscoveryTarget {
+        tcp_profile: 0,
         host: "v58.tiktokcdn.com".into(),
         endpoint: "203.0.113.11:443".into(),
         family: 4,
@@ -22677,6 +22683,7 @@ impl ControlClient {
                         return;
                     };
                     let target = r2o_controller::discovery::DiscoveryTarget {
+                        tcp_profile: 0,
                         host,
                         endpoint: server.to_string(),
                         family: if server.is_ipv4() { 4 } else { 6 },
@@ -24584,6 +24591,7 @@ impl ControlClient {
                                 };
                                 let family = if server.is_ipv4() { 4 } else { 6 };
                                 let target = r2o_controller::discovery::DiscoveryTarget {
+                                    tcp_profile: 0,
                                     host: host.clone(),
                                     endpoint: server.to_string(),
                                     family,
@@ -27434,6 +27442,7 @@ impl ControlClient {
                         r2o_controller::domain::normalize(host).unwrap_or_else(|_| host.to_owned());
                     let family = if server.is_ipv6() { 6 } else { 4 };
                     let target = r2o_controller::discovery::DiscoveryTarget {
+                        tcp_profile: 0,
                         host,
                         endpoint: server.to_string(),
                         family,
@@ -32795,6 +32804,7 @@ mod tests {
         let catalog_path = work.join("catalog.json");
         Catalog::default().save_atomic(&catalog_path, 1).unwrap();
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "bound.example.com".into(),
             endpoint: "198.51.100.80:443".into(),
             family: 4,
@@ -33415,6 +33425,7 @@ mod tests {
     #[test]
     fn confirmed_probe_path_is_written_only_to_the_exact_binding() {
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "resource.example".into(),
             endpoint: "198.51.100.80:443".into(),
             family: 4,
@@ -33489,6 +33500,7 @@ mod tests {
         worker.spawn_worker =
             std::sync::Arc::new(|| Err(std::io::Error::other("тестовый отказ spawn")));
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "spawn-failure.example".into(),
             endpoint: "198.51.100.90:443".into(),
             family: 4,
@@ -33875,6 +33887,7 @@ mod tests {
         let mut output = String::new();
         for (index, scenario) in scenarios.iter().enumerate() {
             let target = r2o_controller::discovery::DiscoveryTarget {
+                tcp_profile: 0,
                 host: scenario.host.into(),
                 endpoint: format!("{}:443", scenario.ip),
                 family: scenario.family,
@@ -34054,6 +34067,7 @@ mod tests {
 
         fn target(host: &str, ip: &str, shape: u8) -> r2o_controller::discovery::DiscoveryTarget {
             r2o_controller::discovery::DiscoveryTarget {
+                tcp_profile: 0,
                 host: host.into(),
                 endpoint: format!("{ip}:443"),
                 family: 4,
@@ -34262,6 +34276,7 @@ mod tests {
 
         fn target(host: &str, ip: &str, shape: u8) -> r2o_controller::discovery::DiscoveryTarget {
             r2o_controller::discovery::DiscoveryTarget {
+                tcp_profile: 0,
                 host: host.into(),
                 endpoint: format!("{ip}:443"),
                 family: 4,
@@ -34737,6 +34752,7 @@ mod tests {
 
         let now = std::time::Instant::now();
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "counts.example".into(),
             endpoint: "198.51.100.91:443".into(),
             family: 4,
@@ -35018,6 +35034,7 @@ mod tests {
             port: 443,
         }];
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "dns.example".into(),
             endpoint: "198.51.100.80:443".into(),
             family: 4,
@@ -35033,6 +35050,7 @@ mod tests {
         );
         // Не-DoH endpoint обычный GET.
         let dot = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             endpoint: "198.51.100.80:853".into(),
             ..target
         };
@@ -35047,6 +35065,7 @@ mod tests {
             port: 853,
         }];
         let dot_target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "1.1.1.1".into(),
             endpoint: "1.1.1.1:853".into(),
             family: 4,
@@ -35066,6 +35085,7 @@ mod tests {
 
         let mut search = super::R2oDiscoverySearch {
             target: r2o_controller::discovery::DiscoveryTarget {
+                tcp_profile: 0,
                 host: "dns.example".into(),
                 endpoint: "198.51.100.80:443".into(),
                 family: 4,
@@ -35313,6 +35333,7 @@ mod tests {
             worker.r2o_remember_dns_watching(
                 (format!("dns-{index}.example"), 6, 4),
                 r2o_controller::discovery::DiscoveryTarget {
+                    tcp_profile: 0,
                     host: format!("dns-{index}.example"),
                     endpoint: "198.51.100.80:443".into(),
                     family: 4,
@@ -35337,6 +35358,7 @@ mod tests {
     #[test]
     fn dns_trial_settle_guard_marks_real_window() {
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "dns.example".into(),
             endpoint: "198.51.100.80:443".into(),
             family: 4,
@@ -35361,6 +35383,7 @@ mod tests {
         let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
         let mut worker = super::DiscoveryWorker::new(None, gate);
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "dns.example".into(),
             endpoint: "198.51.100.80:443".into(),
             family: 4,
@@ -35759,6 +35782,7 @@ mod tests {
         let catalog_path = work.join("catalog.json");
         Catalog::default().save_atomic(&catalog_path, 1).unwrap();
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "apply.example.com".into(),
             endpoint: "198.51.100.80:443".into(),
             family: 4,
@@ -35893,6 +35917,7 @@ mod tests {
         let catalog_path = work.join("catalog.json");
         Catalog::default().save_atomic(&catalog_path, 1).unwrap();
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "direct.example.com".into(),
             endpoint: "198.51.100.81:443".into(),
             family: 4,
@@ -36001,6 +36026,7 @@ mod tests {
 
         fn group_target(host: &str, shape: u8) -> r2o_controller::discovery::DiscoveryTarget {
             r2o_controller::discovery::DiscoveryTarget {
+                tcp_profile: 0,
                 host: host.into(),
                 endpoint: "198.51.100.80:443".into(),
                 family: 4,
@@ -36085,6 +36111,7 @@ mod tests {
         scenarios.push(group_snapshot(catalog, "group_quic"));
 
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "budget.example".into(),
             endpoint: "198.51.100.80:443".into(),
             family: 4,
@@ -36148,6 +36175,7 @@ mod tests {
             id
         };
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "unfit.example".into(),
             endpoint: "198.51.100.80:443".into(),
             family: 4,
@@ -36200,6 +36228,7 @@ mod tests {
     #[test]
     fn confirmed_budget_marks_follow_c_precedence() {
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "budget.example".into(),
             endpoint: "198.51.100.80:443".into(),
             family: 4,
@@ -36295,6 +36324,7 @@ mod tests {
         use std::fmt::Write as _;
 
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "partial.example".into(),
             endpoint: "198.51.100.90:443".into(),
             family: 4,
@@ -36404,6 +36434,7 @@ mod tests {
         let mut output = String::new();
         for (label, preset_pk, preset_succ) in cases {
             let target = r2o_controller::discovery::DiscoveryTarget {
+                tcp_profile: 0,
                 host: "volume.example".into(),
                 endpoint: "198.51.100.91:443".into(),
                 family: 4,
@@ -36479,6 +36510,7 @@ mod tests {
         let catalog_path = work.join("catalog.json");
         Catalog::default().save_atomic(&catalog_path, 1).unwrap();
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "volume-e2e.example.com".into(),
             endpoint: "198.51.100.92:443".into(),
             family: 4,
@@ -36575,6 +36607,7 @@ mod tests {
         use std::fmt::Write as _;
 
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "cut.example".into(),
             endpoint: "198.51.100.82:443".into(),
             family: 4,
@@ -36628,6 +36661,7 @@ mod tests {
     #[test]
     fn budget_cut_reject_marks_binding_and_refuses_candidate() {
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "cut.example".into(),
             endpoint: "198.51.100.82:443".into(),
             family: 4,
@@ -36721,6 +36755,7 @@ mod tests {
     #[test]
     fn group_record_confirmed_uses_probe_path_and_registrable_suffix() {
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "media.example.com".into(),
             endpoint: "198.51.100.80:443".into(),
             family: 4,
@@ -36790,6 +36825,7 @@ mod tests {
     #[test]
     fn unfit_plan_rejects_confirmation_like_c() {
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "unfit.example".into(),
             endpoint: "198.51.100.80:443".into(),
             family: 4,
@@ -36871,12 +36907,14 @@ mod tests {
 
         let mut worker = r2o_test_discovery_worker_without_threads();
         let tcp = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "yield-tcp.example".into(),
             endpoint: "198.51.100.80:443".into(),
             family: 4,
             shape: SHAPE_MODERN,
         };
         let quic = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "yield-quic.example".into(),
             endpoint: "198.51.100.81:443".into(),
             family: 4,
@@ -37818,6 +37856,7 @@ mod tests {
     #[test]
     fn flow_unfit_rechecks_only_enabled_exact_plan_bindings_and_keeps_them() {
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "discord.com".to_owned(),
             endpoint: "203.0.113.8:443".to_owned(),
             family: 4,
@@ -37876,6 +37915,7 @@ mod tests {
     #[test]
     fn flow_unfit_deduplication_uses_the_d2o_eight_entry_ring() {
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "discord.com".to_owned(),
             endpoint: "203.0.113.8:443".to_owned(),
             family: 4,
@@ -37989,6 +38029,7 @@ mod tests {
         Catalog::default().save_atomic(&catalog_path, 1).unwrap();
         let mut catalog = Catalog::load(&catalog_path).unwrap();
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             endpoint: "127.0.0.1:80".into(),
             family: 4,
@@ -38090,6 +38131,7 @@ mod tests {
             let snapshot = Arc::new(std::sync::Mutex::new(catalog.clone()));
             let mut persistence = super::R2oCatalogPersistence::new(Instant::now(), snapshot);
             let target = DiscoveryTarget {
+                tcp_profile: 0,
                 host: "rutracker.org".into(),
                 endpoint: "37.221.67.160:80".into(),
                 family: 4,
@@ -38530,6 +38572,7 @@ mod tests {
     #[test]
     fn discovery_plan_phase_keeps_total_raw_and_candidate_probes() {
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "media.example".into(),
             endpoint: "192.0.2.31:443".into(),
             family: 4,
@@ -38560,6 +38603,7 @@ mod tests {
     #[test]
     fn discovery_diagnostic_snapshot_count_matches_d2o_queued_quic_snapshot_rule() {
         let target = |name: &str, shape| DiscoveryTarget {
+            tcp_profile: 0,
             host: name.into(),
             endpoint: "192.0.2.10:443".into(),
             family: 4,
@@ -38599,6 +38643,7 @@ mod tests {
     #[test]
     fn discovery_search_reports_strategy_application_and_last_result() {
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             endpoint: "192.0.2.1:443".into(),
             family: 4,
@@ -39269,6 +39314,7 @@ mod tests {
 
         let now = Instant::now();
         let target = |host: &str, last: u8| DiscoveryTarget {
+            tcp_profile: 0,
             host: host.into(),
             endpoint: format!("198.51.100.{last}:443"),
             family: 4,
@@ -39418,6 +39464,7 @@ mod tests {
     #[test]
     fn discovery_live_status_tracks_each_probe_while_search_is_active() {
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             endpoint: "192.0.2.1:443".into(),
             family: 4,
@@ -39503,6 +39550,7 @@ mod tests {
     fn completed_outcome_keeps_client_tcp_timestamp_for_wire_shape() {
         let mut worker = r2o_test_discovery_worker_without_threads();
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "timestamp.example".into(),
             endpoint: "198.51.100.80:443".into(),
             family: 4,
@@ -39575,6 +39623,7 @@ mod tests {
         use std::time::Duration;
 
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "rest.example".into(),
             endpoint: "198.51.100.41:443".into(),
             family: 4,
@@ -39797,6 +39846,7 @@ mod tests {
             ..Default::default()
         });
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "gateway-us-east1-c.discord.gg".into(),
             endpoint: "162.159.133.234:443".into(),
             family: 4,
@@ -39873,6 +39923,7 @@ mod tests {
         let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
         let mut worker = super::DiscoveryWorker::r2o_new_with_runner(gate, runner);
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "retry.example".into(),
             endpoint: "192.0.2.30:443".into(),
             family: 4,
@@ -39919,6 +39970,7 @@ mod tests {
         let (created_before, destroyed_before) = counters();
         let mut queue = super::R2oDiscoveryQueue::default();
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "memory-worker.example".into(),
             endpoint: "192.0.2.20:443".into(),
             family: 4,
@@ -40072,6 +40124,7 @@ mod tests {
             ..Catalog::default()
         };
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "media.discordapp.net".into(),
             endpoint: "162.159.134.233:443".into(),
             family: 4,
@@ -40133,6 +40186,7 @@ mod tests {
             ..Catalog::default()
         };
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "gateway.discord.gg".into(),
             endpoint: "162.159.134.234:443".into(),
             family: 4,
@@ -41453,6 +41507,7 @@ mod tests {
     #[test]
     fn captured_ech_without_configuration_uses_clienthello_replay() {
         let mut captured = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "ech.example".into(),
             endpoint: "198.51.100.20:443".into(),
             family: 4,
@@ -41486,6 +41541,7 @@ mod tests {
     #[test]
     fn captured_non_http_alpn_requires_handshake_block_and_no_volume_cut() {
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "mqtt.example".into(),
             endpoint: "198.51.100.20:443".into(),
             family: 4,
@@ -41596,6 +41652,7 @@ mod tests {
             hellos.insert(name.to_owned(), bytes);
         }
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.test".into(),
             endpoint: "198.51.100.20:443".into(),
             family: 4,
@@ -41666,6 +41723,7 @@ mod tests {
         let now = Instant::now();
         let name = "shape-wait.example.com".to_string();
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: name.clone(),
             endpoint: "198.51.100.20:443".into(),
             family: 4,
@@ -42033,6 +42091,7 @@ mod tests {
     fn новый_ech_clienthello_снимает_один_старый_профильный_отказ() {
         let mut worker = r2o_test_discovery_worker_without_threads();
         let profile = DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             endpoint: "198.51.100.10:443".into(),
             family: 4,
@@ -42047,6 +42106,7 @@ mod tests {
         );
 
         let mut ech_target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             endpoint: "198.51.100.10:443".into(),
             family: 4,
@@ -42071,6 +42131,7 @@ mod tests {
         );
 
         let ech_target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             endpoint: "198.51.100.10:443".into(),
             family: 4,
@@ -42107,6 +42168,7 @@ mod tests {
         for (shape, retry_after, direct_clear, reason) in cases {
             let mut worker = r2o_test_discovery_worker_without_threads();
             let failed = DiscoveryTarget {
+                tcp_profile: 0,
                 host: "example.com".into(),
                 endpoint: "198.51.100.10:443".into(),
                 family: 4,
@@ -42116,6 +42178,7 @@ mod tests {
             r2o_test_record_failed_discovery(&mut worker, failed, retry_after, direct_clear);
 
             let ech_target = DiscoveryTarget {
+                tcp_profile: 0,
                 host: "example.com".into(),
                 endpoint: "198.51.100.10:443".into(),
                 family: 4,
@@ -42135,6 +42198,7 @@ mod tests {
         let mut worker = r2o_test_discovery_worker_without_threads();
         let now = std::time::Instant::now();
         let tcp4 = DiscoveryTarget {
+            tcp_profile: 0,
             host: "challenge.example".into(),
             endpoint: "198.51.100.10:443".into(),
             family: 4,
@@ -42193,6 +42257,7 @@ mod tests {
             u8::from(ech_ring_expires_at_deadline),
         );
         let clear_target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "clear.example".into(),
             endpoint: "192.0.2.20:443".into(),
             family: 4,
@@ -42237,6 +42302,7 @@ mod tests {
             for index in 0..super::R2O_DISCOVERY_TASK_CAPACITY {
                 assert!(queue.enqueue_with_planned(
                     DiscoveryTarget {
+                        tcp_profile: 0,
                         host: format!("cooldown-full-{index}.example"),
                         endpoint: format!("192.0.2.{}:443", index + 1),
                         family: 4,
@@ -42308,6 +42374,7 @@ mod tests {
         let mut late_other_endpoint_worker = r2o_test_discovery_worker_without_threads();
         late_other_endpoint_worker.r2o_record_late_rst_only_cooldown(&clear_target);
         let other_endpoint_target = DiscoveryTarget {
+            tcp_profile: 0,
             host: clear_target.host.clone(),
             endpoint: "192.0.2.22:443".into(),
             family: 4,
@@ -42319,6 +42386,7 @@ mod tests {
 
         let mut ech_exhausted_worker = r2o_test_discovery_worker_without_threads();
         let ech_exhausted_target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "ech-exhausted.example".into(),
             endpoint: "192.0.2.23:443".into(),
             family: 4,
@@ -42369,6 +42437,7 @@ mod tests {
             Some(5),
         );
         let ech_exhausted_other_endpoint = DiscoveryTarget {
+            tcp_profile: 0,
             endpoint: "192.0.2.24:443".into(),
             ..ech_exhausted_target.clone()
         };
@@ -42460,6 +42529,7 @@ mod tests {
 
         let mut exhausted_worker = r2o_test_discovery_worker_without_threads();
         let exhausted_target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "exhausted.example".into(),
             endpoint: "192.0.2.21:443".into(),
             family: 4,
@@ -42506,6 +42576,7 @@ mod tests {
         let mut ring_targets = Vec::with_capacity(128);
         for index in 0..128 {
             let target = DiscoveryTarget {
+                tcp_profile: 0,
                 host: format!("ring-{index:03}.example"),
                 endpoint: format!("192.0.2.{}:443", index + 1),
                 family: 4,
@@ -42529,6 +42600,7 @@ mod tests {
             ring_targets.push(target);
         }
         let ring_challenge = DiscoveryTarget {
+            tcp_profile: 0,
             host: "ring-challenge.example".into(),
             endpoint: "192.0.2.200:443".into(),
             family: 4,
@@ -42556,6 +42628,7 @@ mod tests {
         );
         let mut expired_ring_worker = r2o_test_discovery_worker_without_threads();
         let expired_target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "ring-expired.example".into(),
             endpoint: "192.0.2.150:443".into(),
             family: 4,
@@ -42578,6 +42651,7 @@ mod tests {
         );
         for index in 0..127 {
             let target = DiscoveryTarget {
+                tcp_profile: 0,
                 host: format!("ring-live-challenge-{index:03}.example"),
                 endpoint: "192.0.2.160:443".into(),
                 family: 4,
@@ -42586,6 +42660,7 @@ mod tests {
             expired_ring_worker.r2o_record_discovery_challenge(&target, now);
         }
         let replacement = DiscoveryTarget {
+            tcp_profile: 0,
             host: "ring-replacement.example".into(),
             endpoint: "192.0.2.151:443".into(),
             family: 4,
@@ -42599,6 +42674,7 @@ mod tests {
         );
         let ring_prefers_expired = !expired_ring_worker.failed_at.contains_key(&expired_key);
         let first_live_challenge = DiscoveryTarget {
+            tcp_profile: 0,
             host: "ring-live-challenge-000.example".into(),
             endpoint: "192.0.2.160:443".into(),
             family: 4,
@@ -42617,6 +42693,7 @@ mod tests {
         let mut challenge_ring_worker = r2o_test_discovery_worker_without_threads();
         for index in 0..128 {
             let target = DiscoveryTarget {
+                tcp_profile: 0,
                 host: format!("ring-challenge-only-{index:03}.example"),
                 endpoint: "192.0.2.170:443".into(),
                 family: 4,
@@ -42628,6 +42705,7 @@ mod tests {
             );
         }
         let challenge_added = DiscoveryTarget {
+            tcp_profile: 0,
             host: "ring-challenge-only-new.example".into(),
             endpoint: "192.0.2.171:443".into(),
             family: 4,
@@ -42654,6 +42732,7 @@ mod tests {
         );
         let mut challenge_wins_worker = r2o_test_discovery_worker_without_threads();
         let challenge_wins_target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "challenge-wins.example".into(),
             endpoint: "192.0.2.180:443".into(),
             family: 4,
@@ -42706,6 +42785,7 @@ mod tests {
     fn d2o_scheduler_dead_address_matches_donor() {
         let now = std::time::Instant::now();
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "dead.example".into(),
             endpoint: "192.0.2.10:443".into(),
             family: 4,
@@ -42726,22 +42806,27 @@ mod tests {
         assert!(recheck_retains_expired_record);
 
         let same_address_other_port = DiscoveryTarget {
+            tcp_profile: 0,
             endpoint: "192.0.2.10:8443".into(),
             ..target.clone()
         };
         let other_address = DiscoveryTarget {
+            tcp_profile: 0,
             endpoint: "192.0.2.11:443".into(),
             ..target.clone()
         };
         let other_name = DiscoveryTarget {
+            tcp_profile: 0,
             host: "other.example".into(),
             ..target.clone()
         };
         let other_transport = DiscoveryTarget {
+            tcp_profile: 0,
             shape: SHAPE_QUIC,
             ..target.clone()
         };
         let other_family = DiscoveryTarget {
+            tcp_profile: 0,
             family: 6,
             endpoint: "[2001:db8::10]:443".into(),
             ..target.clone()
@@ -42765,6 +42850,7 @@ mod tests {
         for index in 0..super::R2O_DISCOVERY_COOLDOWN_CAPACITY {
             ring.step(
                 &DiscoveryTarget {
+                    tcp_profile: 0,
                     host: format!("ring-{index:03}.example"),
                     endpoint: format!("192.0.2.{}:443", index + 1),
                     family: 4,
@@ -42774,6 +42860,7 @@ mod tests {
             );
         }
         let replacement = DiscoveryTarget {
+            tcp_profile: 0,
             host: "ring-new.example".into(),
             endpoint: "198.51.100.1:443".into(),
             family: 4,
@@ -42782,6 +42869,7 @@ mod tests {
         ring.step(&replacement, now + std::time::Duration::from_secs(1000));
         let ring_evicts_earliest = !ring.is_blocked(
             &DiscoveryTarget {
+                tcp_profile: 0,
                 host: "ring-000.example".into(),
                 endpoint: "192.0.2.1:443".into(),
                 family: 4,
@@ -42791,6 +42879,7 @@ mod tests {
         );
         let ring_keeps_next = ring.is_blocked(
             &DiscoveryTarget {
+                tcp_profile: 0,
                 host: "ring-001.example".into(),
                 endpoint: "192.0.2.2:443".into(),
                 family: 4,
@@ -42820,6 +42909,7 @@ mod tests {
             u8::from(ring_keeps_new),
         );
         let recheck_target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "recheck.example".into(),
             endpoint: "192.0.2.40:443".into(),
             family: 4,
@@ -42855,6 +42945,7 @@ mod tests {
         assert_eq!(silent_retry, std::time::Duration::from_secs(1800));
 
         let accepted_target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "accepted-recheck.example".into(),
             endpoint: "192.0.2.41:443".into(),
             ..recheck_target.clone()
@@ -42904,6 +42995,7 @@ mod tests {
                 | super::R2oSavedAddressRecheck::Unmeasured
         ));
         let adapter_target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "adapter-recheck.example".into(),
             endpoint: "192.0.2.42:443".into(),
             ..recheck_target.clone()
@@ -42943,6 +43035,7 @@ mod tests {
         );
         assert_eq!(adapter_accepted_probes, 2);
         let error_target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "error-recheck.example".into(),
             endpoint: "192.0.2.43:443".into(),
             ..recheck_target.clone()
@@ -43018,6 +43111,7 @@ mod tests {
     #[test]
     fn перепроверка_мёртвого_адреса_повторяет_ack_до_успеха_и_сохраняет_неизмеренное() {
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "ack-dead.example".into(),
             endpoint: "192.0.2.20:443".into(),
             family: 4,
@@ -43097,6 +43191,7 @@ mod tests {
         );
 
         let unmeasured = DiscoveryTarget {
+            tcp_profile: 0,
             host: "ack-unmeasured.example".into(),
             endpoint: "192.0.2.21:443".into(),
             ..target
@@ -43152,6 +43247,7 @@ mod tests {
     fn scheduler_address_failure_scopes_queue_and_post_ack_retry() {
         let mut worker = r2o_test_discovery_worker_without_threads();
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "dead-outcome.example".into(),
             endpoint: "192.0.2.30:443".into(),
             family: 4,
@@ -43220,6 +43316,7 @@ mod tests {
 
         assert!(!worker.queue(target.clone()));
         let other_address = DiscoveryTarget {
+            tcp_profile: 0,
             endpoint: "192.0.2.31:443".into(),
             ..target.clone()
         };
@@ -43592,6 +43689,7 @@ mod tests {
         let mut output = String::new();
         for scenario in scenarios {
             let target = DiscoveryTarget {
+                tcp_profile: 0,
                 host: "watch.example".into(),
                 endpoint: if scenario.family == 6 {
                     "[2001:db8::20]:443".into()
@@ -43764,6 +43862,7 @@ mod tests {
     #[test]
     fn quic_progress_reaches_live_question_and_probes() {
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "quic-live.example".into(),
             endpoint: "192.0.2.46:443".into(),
             family: 4,
@@ -43806,6 +43905,7 @@ mod tests {
         let mut output = String::new();
         for (label, question, sent) in cases {
             let target = r2o_controller::discovery::DiscoveryTarget {
+                tcp_profile: 0,
                 host: "quic-progress.example".into(),
                 endpoint: "192.0.2.45:443".into(),
                 family: 4,
@@ -43865,6 +43965,7 @@ mod tests {
     #[test]
     fn settle_ask_uses_run_total_when_progress_undercounts() {
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "settle.example".into(),
             endpoint: "192.0.2.47:443".into(),
             family: 4,
@@ -43914,6 +44015,7 @@ mod tests {
         let mut output = String::new();
         for (label, question, pass, fail) in cases {
             let target = r2o_controller::discovery::DiscoveryTarget {
+                tcp_profile: 0,
                 host: "progress.example".into(),
                 endpoint: "192.0.2.44:443".into(),
                 family: 4,
@@ -44223,6 +44325,7 @@ mod tests {
     #[test]
     fn install_next_rst_guard_is_added_to_wire_text_once_for_rst_triggers() {
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "guard.example".into(),
             endpoint: "198.51.100.83:443".into(),
             family: 4,
@@ -44272,6 +44375,7 @@ mod tests {
     fn watch_shape_snapshot_triggers_pending_remeasure() {
         let mut worker = r2o_test_discovery_worker_without_threads();
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "watch-remeasure.example.com".into(),
             endpoint: "198.51.100.95:443".into(),
             family: 4,
@@ -44279,6 +44383,7 @@ mod tests {
         };
         let key = super::r2o_discovery_task_key(&target);
         let old_target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             shape: SHAPE_ECH_TCP,
             ..target.clone()
         };
@@ -44425,6 +44530,7 @@ mod tests {
     fn tcp_queue_adopts_ech_input_cache_like_fill_hellos() {
         let mut worker = r2o_test_discovery_worker_without_threads();
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "ech-adopt.example.com".into(),
             endpoint: "198.51.100.93:443".into(),
             family: 4,
@@ -44459,6 +44565,7 @@ mod tests {
     fn d2o_ech_input_ring_matches_c() {
         let mut worker = r2o_test_discovery_worker_without_threads();
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "ech-ring.example.com".into(),
             endpoint: "198.51.100.94:443".into(),
             family: 4,
@@ -44505,6 +44612,7 @@ mod tests {
     fn d2o_doq_direct_clear_state_matches_c() {
         use r2o_controller::catalog::{Binding, BoxRecord, Catalog};
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "doq.example".into(),
             endpoint: "198.51.100.90:853".into(),
             family: 4,
@@ -44586,6 +44694,7 @@ mod tests {
         let catalog_path = work.join("catalog.json");
         Catalog::default().save_atomic(&catalog_path, 1).unwrap();
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "doq-drain.example.com".into(),
             endpoint: "198.51.100.92:853".into(),
             family: 4,
@@ -44632,6 +44741,7 @@ mod tests {
     #[test]
     fn quic_direct_clear_uses_donor_backoff_streak() {
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "backoff-doq.example".into(),
             endpoint: "198.51.100.91:853".into(),
             family: 4,
@@ -44666,6 +44776,7 @@ mod tests {
     fn watching_target_is_visible_to_t_watching_suspect_branch() {
         let mut worker = r2o_test_discovery_worker_without_threads();
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "watching.example".into(),
             endpoint: "198.51.100.84:443".into(),
             family: 4,
@@ -45183,6 +45294,7 @@ mod tests {
     fn кэш_недавних_tcp_имён_даёт_свидетелей_с_адресом_и_сроком_жизни() {
         let now = std::time::Instant::now();
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "cloudflare-ech.com".into(),
             endpoint: "198.51.100.80:443".into(),
             family: 4,
@@ -45599,6 +45711,7 @@ mod tests {
     #[test]
     fn ech_probe_refreshes_config_for_each_candidate_attempt() {
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "public.example".into(),
             endpoint: "198.51.100.20:443".into(),
             family: 4,
@@ -45911,6 +46024,7 @@ mod tests {
     #[test]
     fn r2o_http_cut_context_survives_a_later_portal() {
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             endpoint: "192.0.2.10:80".into(),
             family: 4,
@@ -45957,6 +46071,7 @@ mod tests {
     #[test]
     fn семейный_план_требует_https_и_applied_точного_потока_и_trial() {
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "media.example.com".into(),
             endpoint: "198.51.100.20:443".into(),
             family: 4,
@@ -46030,6 +46145,7 @@ mod tests {
         ));
 
         let target6 = DiscoveryTarget {
+            tcp_profile: 0,
             host: "media6.example.com".into(),
             endpoint: "[2001:db8::20]:443".into(),
             family: 6,
@@ -46070,6 +46186,7 @@ mod tests {
             &reverse6, &target6, 41_000, plan_id, [0; 16]
         ));
         let wrong_endpoint6 = DiscoveryTarget {
+            tcp_profile: 0,
             endpoint: "[2001:db8::21]:443".into(),
             ..target6.clone()
         };
@@ -46202,6 +46319,7 @@ mod tests {
         let frame = read_frame(&mut std::io::Cursor::new(wire)).unwrap();
         let event = r2k_core::control::decode_applied(&frame).unwrap();
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "legacy.example".into(),
             endpoint: "198.51.100.2:443".into(),
             family: 4,
@@ -46622,6 +46740,7 @@ mod tests {
     fn автоклассификатор_не_сохраняет_кандидат_без_полного_https_и_applied() {
         let outcome = || DiscoveryOutcome {
             target: DiscoveryTarget {
+                tcp_profile: 0,
                 host: "example.com".into(),
                 endpoint: "198.51.100.20:443".into(),
                 family: 4,
@@ -46720,6 +46839,7 @@ mod tests {
         }
         fn target(host: &str, shape: u8) -> DiscoveryTarget {
             DiscoveryTarget {
+                tcp_profile: 0,
                 host: host.into(),
                 endpoint: "198.51.100.8:443".into(),
                 family: 4,
@@ -47417,6 +47537,7 @@ mod tests {
         let memory =
             std::sync::Mutex::new(r2o_controller::r2o_resource::R2oResourceMemory::default());
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "install.example".into(),
             endpoint: "127.0.0.1:443".into(),
             family: 4,
@@ -47462,6 +47583,7 @@ mod tests {
 
         fn target(host: &str, family: u8, shape: u8) -> DiscoveryTarget {
             DiscoveryTarget {
+                tcp_profile: 0,
                 host: host.into(),
                 endpoint: "127.0.0.1:443".into(),
                 family,
@@ -47689,6 +47811,7 @@ mod tests {
     #[test]
     fn ech_rx_обрыв_требует_всех_подтверждённых_признаков() {
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "cloudflare-ech.com".into(),
             endpoint: "198.51.100.20:443".into(),
             family: 4,
@@ -47934,6 +48057,7 @@ mod tests {
 
         for raw in [0, 5, 67, 100] {
             let target = DiscoveryTarget {
+                tcp_profile: 0,
                 host: "media.example".into(),
                 endpoint: "192.0.2.31:443".into(),
                 family: 4,
@@ -48037,6 +48161,7 @@ mod tests {
         use r2o_controller::fetch::{R2oFetchVolumeTxResult, R2oFetchVolumeTxVerdict};
 
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "media.example".into(),
             endpoint: "192.0.2.31:443".into(),
             family: 4,
@@ -48123,12 +48248,14 @@ mod tests {
 
         let mut worker = r2o_test_discovery_worker_without_threads();
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "remeasure.example".into(),
             endpoint: "198.51.100.77:443".into(),
             family: 4,
             shape: SHAPE_MODERN,
         };
         let other = DiscoveryTarget {
+            tcp_profile: 0,
             host: "other.example".into(),
             endpoint: "198.51.100.78:443".into(),
             family: 4,
@@ -48272,6 +48399,7 @@ mod tests {
         use std::sync::Mutex;
 
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "mqtt.example".into(),
             endpoint: "192.0.2.31:443".into(),
             family: 4,
@@ -48342,6 +48470,7 @@ mod tests {
         use std::sync::Mutex;
 
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "mqtt.example".into(),
             endpoint: "192.0.2.31:443".into(),
             family: 4,
@@ -48398,6 +48527,7 @@ mod tests {
     #[test]
     fn candidate_probe_keeps_the_d2o_client_hello_wire_length() {
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "media.example".into(),
             endpoint: "192.0.2.31:443".into(),
             family: 4,
@@ -48425,6 +48555,7 @@ mod tests {
         use r2o_controller::r2o_volume::{R2oVolumeRxDomain, R2oVolumeRxEvidence};
 
         let mut target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "media.example".into(),
             endpoint: "[2001:db8::31]:443".into(),
             family: 6,
@@ -48567,6 +48698,7 @@ mod tests {
     #[test]
     fn discovery_diagnostic_report_id_and_trigger_match_d2o() {
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "diagnostic.example".into(),
             endpoint: "192.0.2.31:443".into(),
             family: 4,
@@ -48869,6 +49001,7 @@ mod tests {
             ("second.example", "192.0.2.32:443"),
         ] {
             let target = DiscoveryTarget {
+                tcp_profile: 0,
                 host: host.into(),
                 endpoint: endpoint.into(),
                 family: 4,
@@ -48878,6 +49011,7 @@ mod tests {
         }
 
         let event = worker.r2o_diagnostic_event(&DiscoveryTarget {
+            tcp_profile: 0,
             host: "second.example".into(),
             endpoint: "192.0.2.32:443".into(),
             family: 4,
@@ -48890,6 +49024,7 @@ mod tests {
     #[test]
     fn discovery_diagnostic_elapsed_includes_queue_time_like_d2o() {
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "timing.example".into(),
             endpoint: "192.0.2.31:443".into(),
             family: 4,
@@ -48942,6 +49077,7 @@ mod tests {
         for index in 0..super::R2O_DISCOVERY_TASK_CAPACITY {
             assert!(queue.enqueue_with_planned(
                 DiscoveryTarget {
+                    tcp_profile: 0,
                     host: format!("queued-{index}.example"),
                     endpoint: format!("192.0.2.{}:443", index + 1),
                     family: 4,
@@ -48954,6 +49090,7 @@ mod tests {
         drop(queue);
 
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "queue-full.example".into(),
             endpoint: "198.51.100.1:443".into(),
             family: 4,
@@ -49017,6 +49154,7 @@ mod tests {
     #[test]
     fn successful_discovery_persists_the_original_tcp_suspect_signature() {
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             endpoint: "192.0.2.31:443".into(),
             family: 4,
@@ -49080,6 +49218,7 @@ group_block_proven: false,
     #[test]
     fn volume_recovery_runs_only_after_clear_classification() {
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "media.example".into(),
             endpoint: "192.0.2.31:443".into(),
             family: 4,
@@ -49129,6 +49268,7 @@ group_block_proven: false,
         };
 
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "media.example".into(),
             endpoint: "192.0.2.31:443".into(),
             family: 4,
@@ -49457,6 +49597,7 @@ group_block_proven: false,
     #[test]
     fn volume_cloudflare_challenge_stops_search_and_cools_down_the_name() {
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "media.example".into(),
             endpoint: "192.0.2.31:443".into(),
             family: 4,
@@ -49517,6 +49658,7 @@ group_block_proven: false,
         let mut worker = r2o_test_discovery_worker_without_threads();
         worker.r2o_complete_outcome(outcome);
         let other_address = DiscoveryTarget {
+            tcp_profile: 0,
             endpoint: "192.0.2.32:443".into(),
             ..target.clone()
         };
@@ -49580,6 +49722,7 @@ group_block_proven: false,
             ..Catalog::default()
         };
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "media.example".into(),
             endpoint: "192.0.2.31:443".into(),
             family: 4,
@@ -49608,6 +49751,7 @@ group_block_proven: false,
     #[test]
     fn подтверждённый_volume_план_заменяет_уже_пригодную_привязку() {
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "media.example".into(),
             endpoint: "192.0.2.31:443".into(),
             family: 4,
@@ -49756,6 +49900,7 @@ group_block_proven: false,
         };
         catalog.domain_state.as_mut().unwrap().restore().unwrap();
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "media.example.net".into(),
             endpoint: "198.51.100.20:443".into(),
             family: 4,
@@ -49856,6 +50001,7 @@ group_block_proven: false,
             ..Catalog::default()
         };
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "q.example.net".into(),
             endpoint: "198.51.100.10:443".into(),
             family: 4,
@@ -49887,6 +50033,7 @@ group_block_proven: false,
         assert_eq!(
             super::r2o_discovery_resource_probe_paths(
                 &DiscoveryTarget {
+                    tcp_profile: 0,
                     host: "media.example.net".into(),
                     endpoint: "198.51.100.20:443".into(),
                     family: 4,
@@ -49904,6 +50051,7 @@ group_block_proven: false,
             now + std::time::Duration::from_secs(1),
         );
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "media.example.net".into(),
             endpoint: "198.51.100.20:443".into(),
             family: 4,
@@ -49939,6 +50087,7 @@ group_block_proven: false,
         assert_eq!(
             super::r2o_discovery_resource_probe_paths(
                 &DiscoveryTarget {
+                    tcp_profile: 0,
                     shape: SHAPE_ECH_TCP,
                     ..target.clone()
                 },
@@ -49968,6 +50117,7 @@ group_block_proven: false,
         assert_eq!(
             super::r2o_discovery_resource_probe_paths(
                 &DiscoveryTarget {
+                    tcp_profile: 0,
                     shape: SHAPE_QUIC,
                     ..target.clone()
                 },
@@ -49979,6 +50129,7 @@ group_block_proven: false,
         assert_eq!(
             super::r2o_discovery_resource_probe_paths(
                 &DiscoveryTarget {
+                    tcp_profile: 0,
                     endpoint: "10.0.0.20:443".into(),
                     ..target
                 },
@@ -50021,6 +50172,7 @@ group_block_proven: false,
             ..Catalog::default()
         };
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "media.example.net".into(),
             endpoint: "198.51.100.20:443".into(),
             family: 4,
@@ -50064,6 +50216,7 @@ group_block_proven: false,
             "/static/app.css"
         );
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "media.example.net".into(),
             endpoint: "198.51.100.20:443".into(),
             family: 4,
@@ -50465,6 +50618,7 @@ group_block_proven: false,
     #[test]
     fn http_search_diagnostic_event_matches_d2o_http_defaults() {
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "http-diagnostic.example".to_owned(),
             endpoint: "192.0.2.10:80".to_owned(),
             family: 4,
@@ -50572,6 +50726,7 @@ group_block_proven: false,
             http_acknowledged_bindings: std::collections::HashMap::new(),
         };
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             endpoint: "192.0.2.1:80".into(),
             family: 4,
@@ -50635,6 +50790,7 @@ group_block_proven: false,
             http_acknowledged_bindings: std::collections::HashMap::new(),
         };
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             endpoint: "192.0.2.1:80".into(),
             family: 4,
@@ -52754,6 +52910,7 @@ group_block_proven: false,
         use r2o_controller::discovery::DiscoveryTarget;
 
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             endpoint: "198.51.100.20:80".into(),
             family: 4,
@@ -52856,6 +53013,7 @@ group_block_proven: false,
         use r2o_controller::discovery::DiscoveryTarget;
 
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             endpoint: "198.51.100.20:80".into(),
             family: 4,
@@ -52891,6 +53049,7 @@ group_block_proven: false,
         use r2o_controller::http_search::candidate_program;
 
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             endpoint: "198.51.100.20:80".into(),
             family: 4,
@@ -52967,6 +53126,7 @@ group_block_proven: false,
             r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(4),
         );
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             endpoint: "invalid-endpoint".into(),
             family: 4,
@@ -53010,6 +53170,7 @@ group_block_proven: false,
                 .parse::<usize>()
                 .unwrap();
             let target = r2o_controller::discovery::DiscoveryTarget {
+                tcp_profile: 0,
                 host: format!("queue-{index:03}.example"),
                 endpoint: "192.0.2.1:80".into(),
                 family: 4,
@@ -53356,6 +53517,7 @@ group_block_proven: false,
     fn r2o_discovery_queue_promotes_repeated_suspicions_and_keeps_fifo() {
         fn target(host: &str) -> r2o_controller::discovery::DiscoveryTarget {
             r2o_controller::discovery::DiscoveryTarget {
+                tcp_profile: 0,
                 host: host.into(),
                 endpoint: format!(
                     "127.0.0.1:{}",
@@ -53394,12 +53556,14 @@ group_block_proven: false,
     fn r2o_discovery_keeps_tcp_and_quic_tasks_for_the_same_name_separate() {
         let mut worker = r2o_test_discovery_worker_without_threads();
         let tcp = DiscoveryTarget {
+            tcp_profile: 0,
             host: "same.example".into(),
             endpoint: "198.51.100.10:443".into(),
             family: 4,
             shape: SHAPE_MODERN,
         };
         let quic = DiscoveryTarget {
+            tcp_profile: 0,
             host: tcp.host.clone(),
             endpoint: tcp.endpoint.clone(),
             family: tcp.family,
@@ -53417,12 +53581,14 @@ group_block_proven: false,
     fn r2o_discovery_success_suppresses_other_endpoints_for_same_name_and_transport() {
         let mut worker = r2o_test_discovery_worker_without_threads();
         let first = DiscoveryTarget {
+            tcp_profile: 0,
             host: "same.example".into(),
             endpoint: "198.51.100.10:443".into(),
             family: 4,
             shape: SHAPE_MODERN,
         };
         let second = DiscoveryTarget {
+            tcp_profile: 0,
             endpoint: "198.51.100.11:443".into(),
             shape: r2k_core::control::SHAPE_LEGACY,
             ..first.clone()
@@ -53479,6 +53645,7 @@ group_block_proven: false,
         }
 
         let retry = DiscoveryTarget {
+            tcp_profile: 0,
             host: "resting-0.example".into(),
             endpoint: "198.51.100.200:443".into(),
             family: 4,
@@ -53502,6 +53669,7 @@ group_block_proven: false,
         let mut worker = r2o_test_discovery_worker_without_threads();
         let now = std::time::Instant::now();
         let watching_first = DiscoveryTarget {
+            tcp_profile: 0,
             host: "first-watching.example".into(),
             endpoint: "198.51.100.200:443".into(),
             family: 4,
@@ -53543,6 +53711,7 @@ group_block_proven: false,
         }
         worker.r2o_reconcile_task_slots(now);
         let watching_last = DiscoveryTarget {
+            tcp_profile: 0,
             host: "last-watching.example".into(),
             endpoint: "198.51.100.201:443".into(),
             family: 4,
@@ -53575,6 +53744,7 @@ group_block_proven: false,
         );
 
         let fresh = DiscoveryTarget {
+            tcp_profile: 0,
             host: "fresh.example".into(),
             endpoint: "198.51.100.202:443".into(),
             family: 4,
@@ -53596,6 +53766,7 @@ group_block_proven: false,
         let mut worker = r2o_test_discovery_worker_without_threads();
         let now = std::time::Instant::now();
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "expired-watching.example".into(),
             endpoint: "198.51.100.203:443".into(),
             family: 4,
@@ -53648,6 +53819,7 @@ group_block_proven: false,
         assert!(!worker.completed.contains(&task_key));
         assert_eq!(worker.r2o_outstanding_task_count(now), 0);
         assert!(worker.queue(DiscoveryTarget {
+            tcp_profile: 0,
             host: "replacement.example".into(),
             endpoint: "198.51.100.204:443".into(),
             family: 4,
@@ -53662,6 +53834,7 @@ group_block_proven: false,
         let now = std::time::Instant::now();
         for index in 0..super::R2O_DISCOVERY_TASK_CAPACITY {
             let target = r2o_controller::discovery::DiscoveryTarget {
+                tcp_profile: 0,
                 host: format!("target-{index}.example"),
                 endpoint: "127.0.0.1:443".into(),
                 family: 4,
@@ -53670,6 +53843,7 @@ group_block_proven: false,
             assert!(queue.enqueue(target, now));
         }
         let extra = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "overflow.example".into(),
             endpoint: "127.0.0.1:443".into(),
             family: 4,
@@ -53685,6 +53859,7 @@ group_block_proven: false,
     fn r2o_discovery_capacity_includes_running_and_queued_tasks() {
         fn target(host: String) -> DiscoveryTarget {
             DiscoveryTarget {
+                tcp_profile: 0,
                 host,
                 endpoint: "127.0.0.1:443".into(),
                 family: 4,
@@ -53729,6 +53904,7 @@ group_block_proven: false,
                 r2k_core::control::SHAPE_LEGACY
             };
             let active_target = DiscoveryTarget {
+                tcp_profile: 0,
                 host: "owner.example.com".into(),
                 endpoint: "198.51.100.2:443".into(),
                 family: 4,
@@ -53810,6 +53986,7 @@ group_block_proven: false,
                 r2k_core::control::SHAPE_LEGACY
             };
             let target = DiscoveryTarget {
+                tcp_profile: 0,
                 host: "owner.example.com".into(),
                 endpoint: "198.51.100.2:443".into(),
                 family: 4,
@@ -53877,6 +54054,7 @@ group_block_proven: false,
         let mut output = String::new();
         for mode in 0..4 {
             let target = DiscoveryTarget {
+                tcp_profile: 0,
                 host: "owner.example.com".into(),
                 endpoint: "198.51.100.2:443".into(),
                 family: 4,
@@ -53998,6 +54176,7 @@ group_block_proven: false,
         let mut output = String::new();
         for proven in [false, true] {
             let target = DiscoveryTarget {
+                tcp_profile: 0,
                 host: "owner.example.com".into(),
                 endpoint: "198.51.100.2:443".into(),
                 family: 4,
@@ -54147,6 +54326,7 @@ group_block_proven: false,
         let mut output = String::new();
         for mode in [0, 1, 2, 3, 8, 9, 10, 11] {
             let mut target = DiscoveryTarget {
+                tcp_profile: 0,
                 host: "owner.example.com".into(),
                 endpoint: "198.51.100.2:443".into(),
                 family: 4,
@@ -54250,6 +54430,7 @@ group_block_proven: false,
     #[test]
     fn active_discovery_rechecks_one_different_client_shape_after_the_run() {
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "owner.example".into(),
             endpoint: "198.51.100.2:443".into(),
             family: 4,
@@ -54305,6 +54486,7 @@ group_block_proven: false,
         assert!(!worker.r2o_recheck_changed_client_shape(&work));
 
         let strict_target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "strict.example".into(),
             endpoint: "198.51.100.3:443".into(),
             family: 4,
@@ -54359,6 +54541,7 @@ group_block_proven: false,
     fn tcp_timestamp_metadata_is_scoped_to_admitted_discovery_tasks() {
         let mut worker = r2o_test_discovery_worker_without_threads();
         let active = DiscoveryTarget {
+            tcp_profile: 0,
             host: "timestamp.example".into(),
             endpoint: "198.51.100.1:443".into(),
             family: 4,
@@ -54385,6 +54568,7 @@ group_block_proven: false,
 
         for index in 0..super::R2O_DISCOVERY_TASK_CAPACITY - 1 {
             assert!(worker.queue(DiscoveryTarget {
+                tcp_profile: 0,
                 host: format!("queued-{index}.example"),
                 endpoint: "198.51.100.2:443".into(),
                 family: 4,
@@ -54392,6 +54576,7 @@ group_block_proven: false,
             }));
         }
         let overflow = DiscoveryTarget {
+            tcp_profile: 0,
             host: "overflow.example".into(),
             endpoint: "198.51.100.3:443".into(),
             family: 4,
@@ -54413,6 +54598,7 @@ group_block_proven: false,
     fn r2o_discovery_capacity_includes_deferred_rechecks() {
         fn target(host: String) -> DiscoveryTarget {
             DiscoveryTarget {
+                tcp_profile: 0,
                 host,
                 endpoint: "127.0.0.1:443".into(),
                 family: 4,
@@ -54443,6 +54629,7 @@ group_block_proven: false,
     fn r2o_discovery_capacity_respects_two_minute_task_rest() {
         fn target(host: String) -> DiscoveryTarget {
             DiscoveryTarget {
+                tcp_profile: 0,
                 host,
                 endpoint: "127.0.0.1:443".into(),
                 family: 4,
@@ -54480,6 +54667,7 @@ group_block_proven: false,
     #[test]
     fn r2o_discovery_queued_target_expires_only_after_ten_minutes() {
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "expired.example".into(),
             endpoint: "127.0.0.1:443".into(),
             family: 4,
@@ -54509,6 +54697,7 @@ group_block_proven: false,
     #[test]
     fn r2o_discovery_queue_preserves_planned_trigger_when_promoted() {
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "planned.example".into(),
             endpoint: "192.0.2.44:443".into(),
             family: 4,
@@ -54530,6 +54719,7 @@ group_block_proven: false,
     fn r2o_discovery_queue_runs_the_freshest_suspicion_first() {
         let now = std::time::Instant::now();
         let target = |host: &str| r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: host.into(),
             endpoint: format!(
                 "198.51.100.{}:443",
@@ -54587,6 +54777,7 @@ group_block_proven: false,
                 let hot_event = hot_event.parse::<u64>().unwrap();
                 let queued_age_ms = queued_age_ms.parse::<u64>().unwrap();
                 let target = r2o_controller::discovery::DiscoveryTarget {
+                    tcp_profile: 0,
                     host: (**host).to_owned(),
                     endpoint: format!("{host}:443"),
                     family: 4,
@@ -54653,6 +54844,7 @@ group_block_proven: false,
             let transport = transport.parse::<u8>().unwrap();
             queue.entries.push(R2oDiscoveryQueueEntry::new(
                 r2o_controller::discovery::DiscoveryTarget {
+                    tcp_profile: 0,
                     host: (*host).to_owned(),
                     endpoint: format!("{host}:443"),
                     family: 4,
@@ -54941,6 +55133,7 @@ group_block_proven: false,
             r2o_family_applied_flow_matches(
                 event,
                 &DiscoveryTarget {
+                    tcp_profile: 0,
                     host: host.clone(),
                     endpoint: endpoint.to_string(),
                     family: 4,
@@ -54952,6 +55145,7 @@ group_block_proven: false,
             )
         });
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: host.clone(),
             endpoint: endpoint.to_string(),
             family: 4,
@@ -55163,6 +55357,7 @@ group_block_proven: false,
             let queued_age_ms = queued_age_ms.parse::<u64>().unwrap();
             let now = Instant::now();
             let target = r2o_controller::discovery::DiscoveryTarget {
+                tcp_profile: 0,
                 host: (*host).to_owned(),
                 endpoint: format!("{host}:443"),
                 family: 4,
@@ -55225,6 +55420,7 @@ group_block_proven: false,
             assert!(matches!(*exact_binding, "yes" | "no"));
             let now = Instant::now();
             let target = r2o_controller::discovery::DiscoveryTarget {
+                tcp_profile: 0,
                 host: "video.googlevideo.com".into(),
                 endpoint: "203.0.113.1:443".into(),
                 family: 4,
@@ -55343,6 +55539,7 @@ group_block_proven: false,
         let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(2);
         let mut worker = super::DiscoveryWorker::r2o_new_with_runner(gate.clone(), runner);
         let target = |host: &str| r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: host.into(),
             endpoint: "127.0.0.1:443".into(),
             family: 4,
@@ -55411,6 +55608,7 @@ group_block_proven: false,
         let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
         let mut worker = super::DiscoveryWorker::r2o_new_with_runner(gate.clone(), runner);
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "grease.example".into(),
             endpoint: "192.0.2.1:443".into(),
             family: 4,
@@ -55478,6 +55676,7 @@ group_block_proven: false,
         let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
         let mut worker = super::DiscoveryWorker::r2o_new_with_runner(gate.clone(), runner);
         let target = |host: &str, port| r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: host.into(),
             endpoint: format!("127.0.0.1:{port}"),
             family: 4,
@@ -55543,6 +55742,7 @@ group_block_proven: false,
             "старт не должен создавать постоянный пул Discovery"
         );
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "lazy.example".into(),
             endpoint: "192.0.2.10:443".into(),
             family: 4,
@@ -55597,6 +55797,7 @@ group_block_proven: false,
         let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
         let mut worker = super::DiscoveryWorker::r2o_new_with_runner(gate, runner);
         let target = |host: &str| r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: host.into(),
             endpoint: "192.0.2.11:443".into(),
             family: 4,
@@ -55643,6 +55844,7 @@ group_block_proven: false,
         let permit = gate.r2o_try_acquire().unwrap();
         let mut worker = super::DiscoveryWorker::new(None, gate);
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "expired.example".into(),
             endpoint: "invalid-endpoint".into(),
             family: 4,
@@ -55701,6 +55903,7 @@ group_block_proven: false,
     #[test]
     fn discovery_worker_tracks_accepted_target_as_active() {
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             endpoint: "127.0.0.1:443".into(),
             family: 4,
@@ -55785,12 +55988,14 @@ group_block_proven: false,
             Arc::new(std::sync::Mutex::new(VecDeque::new())),
         );
         let first_target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             endpoint: "198.51.100.2:443".into(),
             family: 4,
             shape: SHAPE_MODERN,
         };
         let latest_target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             endpoint: "198.51.100.3:443".into(),
             ..first_target.clone()
         };
@@ -55841,6 +56046,7 @@ group_block_proven: false,
         use std::time::{Duration, Instant};
 
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             endpoint: "198.51.100.2:443".into(),
             family: 4,
@@ -55971,6 +56177,7 @@ group_block_proven: false,
         );
         let mut worker = super::DiscoveryWorker::r2o_new_with_runner(gate, runner);
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             endpoint: "198.51.100.2:443".into(),
             family: 4,
@@ -56035,6 +56242,7 @@ group_block_proven: false,
             Arc::new(std::sync::Mutex::new(VecDeque::new())),
         );
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             endpoint: "198.51.100.2:443".into(),
             family: 4,
@@ -56089,6 +56297,7 @@ group_block_proven: false,
         );
         let mut worker = super::DiscoveryWorker::r2o_new_with_runner(gate, runner);
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             endpoint: "198.51.100.2:443".into(),
             family: 4,
@@ -56158,18 +56367,21 @@ group_block_proven: false,
         let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(2);
         let mut worker = super::DiscoveryWorker::r2o_new_with_runner(gate, runner);
         let first = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "first.example".into(),
             endpoint: "127.0.0.1:443".into(),
             family: 4,
             shape: SHAPE_MODERN,
         };
         let second = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "second.example".into(),
             endpoint: "127.0.0.1:444".into(),
             family: 4,
             shape: SHAPE_MODERN,
         };
         let third = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "third.example".into(),
             endpoint: "127.0.0.1:445".into(),
             family: 4,
@@ -56286,6 +56498,7 @@ group_block_proven: false,
         let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::r2o_with_start_gap(2);
         let mut worker = super::DiscoveryWorker::r2o_new_with_runner(gate.clone(), runner);
         let target = |host: &str, port| r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: host.into(),
             endpoint: format!("127.0.0.1:{port}"),
             family: 4,
@@ -56405,6 +56618,7 @@ group_block_proven: false,
         gate.r2o_scheduler_tick();
         let mut worker = super::DiscoveryWorker::r2o_new_with_runner(gate, runner);
         let target = |host: &str, port| r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: host.into(),
             endpoint: format!("127.0.0.1:{port}"),
             family: 4,
@@ -56442,6 +56656,7 @@ group_block_proven: false,
 
         fn target(host: &str) -> r2o_controller::discovery::DiscoveryTarget {
             r2o_controller::discovery::DiscoveryTarget {
+                tcp_profile: 0,
                 host: host.into(),
                 endpoint: "invalid-endpoint".into(),
                 family: 4,
@@ -56568,6 +56783,7 @@ group_block_proven: false,
         let permit = gate.r2o_try_acquire().unwrap();
         let mut worker = super::DiscoveryWorker::new(None, gate);
         let first = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "same.example".into(),
             endpoint: "198.51.100.10:443".into(),
             family: 4,
@@ -56675,6 +56891,7 @@ group_block_proven: false,
         let permit = gate.r2o_try_acquire().unwrap();
         let mut worker = super::DiscoveryWorker::new(None, gate);
         let first = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "same.example".into(),
             endpoint: "198.51.100.10:443".into(),
             family: 4,
@@ -56727,6 +56944,7 @@ group_block_proven: false,
         let permit = gate.r2o_try_acquire().unwrap();
         let mut worker = super::DiscoveryWorker::new(None, gate);
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "rst-cut.example".into(),
             endpoint: "198.51.100.10:443".into(),
             family: 4,
@@ -56824,6 +57042,7 @@ group_block_proven: false,
         let permit = gate.r2o_try_acquire().unwrap();
         let mut worker = super::DiscoveryWorker::new(None, gate);
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "inconclusive.example".into(),
             endpoint: "198.51.100.10:443".into(),
             family: 4,
@@ -56882,6 +57101,7 @@ group_block_proven: false,
         let permit = gate.r2o_try_acquire().unwrap();
         let mut worker = super::DiscoveryWorker::new(None, gate);
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "clear-backoff.example".into(),
             endpoint: "198.51.100.10:443".into(),
             family: 4,
@@ -56934,6 +57154,7 @@ group_block_proven: false,
     #[test]
     fn r2o_таймаут_активного_поиска_освобождает_цель_для_нового_поколения() {
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "retry.example".into(),
             endpoint: "invalid-endpoint".into(),
             family: 4,
@@ -57062,6 +57283,7 @@ group_block_proven: false,
         std::fs::create_dir(&work).unwrap();
         let catalog_path = work.join("catalog.json");
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "clear.example".into(),
             endpoint: "198.51.100.80:443".into(),
             family: 4,
@@ -57172,6 +57394,7 @@ group_block_proven: false,
         std::fs::create_dir(&work).unwrap();
         let catalog_path = work.join("catalog.json");
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "clear-rejected.example".into(),
             endpoint: "198.51.100.81:443".into(),
             family: 4,
@@ -57278,6 +57501,7 @@ group_block_proven: false,
 
             let mut client = super::ControlClient::connect(socket_path).unwrap();
             let target = r2o_controller::discovery::DiscoveryTarget {
+                tcp_profile: 0,
                 host: "example.com".into(),
                 endpoint: "127.0.0.1:443".into(),
                 family: 4,
@@ -57388,6 +57612,7 @@ group_block_proven: false,
         assert!(r2o_controller::discovery::has_usable_binding(
             &saved,
             &r2o_controller::discovery::DiscoveryTarget {
+                tcp_profile: 0,
                 host: "example.com".into(),
                 endpoint: "127.0.0.1:443".into(),
                 family: 4,
@@ -58047,6 +58272,7 @@ group_block_proven: false,
         )
         .unwrap();
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "new.googlevideo.com".into(),
             endpoint: "203.0.113.1:443".into(),
             family: 4,
@@ -58060,6 +58286,7 @@ group_block_proven: false,
             matching_domain_group(
                 &catalog,
                 &r2o_controller::discovery::DiscoveryTarget {
+                    tcp_profile: 0,
                     host: "evilgooglevideo.com".into(),
                     ..target
                 }
@@ -58072,6 +58299,7 @@ group_block_proven: false,
     #[test]
     fn ech_public_name_equal_to_host_uses_snapshot_replay() {
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "cloudflare-ech.com".into(),
             endpoint: "203.0.113.1:443".into(),
             family: 4,
@@ -58085,6 +58313,7 @@ group_block_proven: false,
         assert!(!r2o_ech_direct_config_usable(&target, &outer));
 
         let origin = DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             ..target
         };
@@ -58104,6 +58333,7 @@ group_block_proven: false,
         )
         .unwrap();
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "finland14105.discord.media".into(),
             endpoint: "203.0.113.1:443".into(),
             family: 4,
@@ -58121,6 +58351,7 @@ group_block_proven: false,
             matching_sibling_recovery_candidates(
                 &catalog,
                 &r2o_controller::discovery::DiscoveryTarget {
+                    tcp_profile: 0,
                     host: "finland14105.discordapp.com".into(),
                     ..target.clone()
                 }
@@ -58131,6 +58362,7 @@ group_block_proven: false,
             matching_sibling_recovery_candidates(
                 &catalog,
                 &r2o_controller::discovery::DiscoveryTarget {
+                    tcp_profile: 0,
                     host: "finland14104.discord.media".into(),
                     ..target.clone()
                 }
@@ -58141,6 +58373,7 @@ group_block_proven: false,
         // Тот же хост, другая форма ClientHello: подтверждённый ECH-план
         // пробуется на обычном TLS 1.3, чтобы не запускать классификацию.
         let cross_shape = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "www.youtube.com".into(),
             endpoint: "203.0.113.2:443".into(),
             family: 4,
@@ -59713,6 +59946,7 @@ group_block_proven: false,
         use std::sync::{Arc, Condvar, Mutex, atomic::AtomicBool, mpsc};
 
         let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
             host: "example.com".into(),
             endpoint: "198.51.100.9:443".into(),
             family: 4,
@@ -59824,6 +60058,7 @@ mod tcp_profile_tests {
     #[test]
     fn flow_unfit_marks_only_the_target_tcp_profile() {
         let target = DiscoveryTarget {
+            tcp_profile: 0,
             host: "profile.example".into(),
             endpoint: String::new(),
             family: 4,
