@@ -367,6 +367,8 @@ struct R2oGateState {
     initial_starts: usize,
     waiters: VecDeque<R2oMeasurementWaiter>,
     next_waiter: u64,
+    live_workers: Vec<R2oLiveWorker>,
+    next_worker: u64,
     last_sample: Option<Instant>,
     last_started: Option<Instant>,
     scheduler_tick_seen: bool,
@@ -381,24 +383,101 @@ enum R2oMeasurementWaiterKind {
     QuicYield,
 }
 
+/// C `task_job` + транспорт для `worker_type` (`core/sched.c:6026-6034`).
+/// R2O не заводит отдельный поток на CONTACT/DNS_HEALTH, но тип существует:
+/// `worker_type` — чистое отображение job/transport, а не список потоков.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum R2oWorkerType {
+    Unknown,
+    ClassifyTcp,
+    ClassifyQuic,
+    Contact,
+    Verify,
+    Voice,
+    DnsHealth,
+}
+
+/// C `worker_type`: тип worker'а для диагностики (`worker_oldest_type`).
+pub const fn r2o_worker_type(worker: R2oWorkerType) -> &'static str {
+    match worker {
+        R2oWorkerType::ClassifyTcp => "TCP",
+        R2oWorkerType::ClassifyQuic => "QUIC",
+        R2oWorkerType::Verify => "VERIFY",
+        R2oWorkerType::Contact => "CONTACT",
+        R2oWorkerType::Voice => "VOICE",
+        R2oWorkerType::DnsHealth => "DNS_HEALTH",
+        R2oWorkerType::Unknown => "UNKNOWN",
+    }
+}
+
+/// C-коды `task_job` (`JOB_NONE=0`, `JOB_CLASSIFY=1`, `JOB_CONTACT=2`,
+/// `JOB_VERIFY=3`, `JOB_VOICE=4`, `JOB_DNS_HEALTH=5`) для differential.
+pub const fn r2o_worker_type_for_c(job: u8, transport: u8) -> &'static str {
+    match job {
+        1 => {
+            if transport == 17 {
+                "QUIC"
+            } else {
+                "TCP"
+            }
+        }
+        2 => "CONTACT",
+        3 => "VERIFY",
+        4 => "VOICE",
+        5 => "DNS_HEALTH",
+        _ => "UNKNOWN",
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct R2oLiveWorker {
+    id: u64,
+    worker_type: R2oWorkerType,
+    started: Instant,
+}
+
+fn r2o_register_live_worker(
+    state: &mut R2oGateState,
+    worker_type: R2oWorkerType,
+    now: Instant,
+) -> u64 {
+    let id = state.next_worker;
+    state.next_worker = state.next_worker.wrapping_add(1);
+    state.live_workers.push(R2oLiveWorker {
+        id,
+        worker_type,
+        started: now,
+    });
+    id
+}
+
+fn r2o_forget_live_worker(state: &mut R2oGateState, id: u64) {
+    state.live_workers.retain(|worker| worker.id != id);
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct R2oMeasurementWaiter {
     id: u64,
     kind: R2oMeasurementWaiterKind,
     tcp_target: bool,
     quic_tcp_turn: u64,
+    /// `Some` — при выдаче слота зарегистрировать живого worker'а этого типа.
+    /// `None` — замена после yield: запись уже существует и переживает паузу.
+    worker_type: Option<R2oWorkerType>,
 }
 
 fn r2o_queue_measurement_waiter(
     state: &mut R2oGateState,
     kind: R2oMeasurementWaiterKind,
     tcp_target: bool,
+    worker_type: Option<R2oWorkerType>,
 ) -> u64 {
     let waiter = R2oMeasurementWaiter {
         id: state.next_waiter,
         kind,
         tcp_target: tcp_target || kind == R2oMeasurementWaiterKind::Tcp,
         quic_tcp_turn: state.tcp_admission_sequence,
+        worker_type,
     };
     state.next_waiter = state.next_waiter.wrapping_add(1);
     state.waiters.push_back(waiter);
@@ -466,12 +545,17 @@ pub struct R2oMeasurementSnapshot {
     pub grow_pending: bool,
     pub resource_sequence: u64,
     pub limit_sequence: u64,
+    /// C `worker_oldest_age_ms`: возраст самого старого живого worker'а.
+    pub worker_oldest_age_ms: Option<u64>,
+    /// C `worker_oldest_type`: его тип (`TCP`/`QUIC`/…), пусто — живых нет.
+    pub worker_oldest_type: &'static str,
 }
 
 pub struct R2oMeasurementPermit {
     shared: Arc<R2oGateShared>,
     active: bool,
     yielded_duration: Duration,
+    worker_id: Option<u64>,
 }
 
 impl R2oMeasurementGate {
@@ -513,6 +597,17 @@ impl R2oMeasurementGate {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let memory = state.adaptive.memory;
         let limited_by = r2o_limiter_text(state.adaptive.limiter);
+        let now = Instant::now();
+        let oldest = state
+            .live_workers
+            .iter()
+            .min_by_key(|worker| worker.started);
+        let (worker_oldest_age_ms, worker_oldest_type) = oldest.map_or((None, ""), |worker| {
+            (
+                Some(now.saturating_duration_since(worker.started).as_millis() as u64),
+                r2o_worker_type(worker.worker_type),
+            )
+        });
         R2oMeasurementSnapshot {
             active: state.active,
             limit: state.adaptive.limit,
@@ -531,6 +626,8 @@ impl R2oMeasurementGate {
             grow_pending: state.adaptive.grow_pending,
             resource_sequence: state.adaptive.res_seq,
             limit_sequence: state.adaptive.limit_seq,
+            worker_oldest_age_ms,
+            worker_oldest_type,
         }
     }
 
@@ -555,6 +652,8 @@ impl R2oMeasurementGate {
                     initial_starts: 0,
                     waiters: VecDeque::new(),
                     next_waiter: 1,
+                    live_workers: Vec::new(),
+                    next_worker: 1,
                     last_sample: None,
                     last_started: None,
                     scheduler_tick_seen: false,
@@ -567,6 +666,10 @@ impl R2oMeasurementGate {
     }
 
     pub fn r2o_try_acquire(&self) -> Option<R2oMeasurementPermit> {
+        self.r2o_try_acquire_worker(R2oWorkerType::ClassifyQuic)
+    }
+
+    fn r2o_try_acquire_worker(&self, worker_type: R2oWorkerType) -> Option<R2oMeasurementPermit> {
         self.r2o_refresh_if_due();
         let mut state = self
             .shared
@@ -588,11 +691,13 @@ impl R2oMeasurementGate {
         state.last_started = Some(now);
         let active = state.active;
         state.adaptive.r2o_mark_started(active);
+        let worker_id = r2o_register_live_worker(&mut state, worker_type, now);
         self.shared.changed.notify_all();
         Some(R2oMeasurementPermit {
             shared: Arc::clone(&self.shared),
             active: true,
             yielded_duration: Duration::ZERO,
+            worker_id: Some(worker_id),
         })
     }
 
@@ -621,16 +726,23 @@ impl R2oMeasurementGate {
         state.last_started = Some(now);
         let active = state.active;
         state.adaptive.r2o_mark_started(active);
+        let worker_id = r2o_register_live_worker(&mut state, R2oWorkerType::ClassifyQuic, now);
         self.shared.changed.notify_all();
         Some(R2oMeasurementPermit {
             shared: Arc::clone(&self.shared),
             active: true,
             yielded_duration: Duration::ZERO,
+            worker_id: Some(worker_id),
         })
     }
 
     pub fn r2o_acquire(&self, cancel: &AtomicBool) -> Option<R2oMeasurementPermit> {
-        self.r2o_acquire_with_kind(cancel, R2oMeasurementWaiterKind::Other, false)
+        self.r2o_acquire_with_kind(
+            cancel,
+            R2oMeasurementWaiterKind::Other,
+            false,
+            R2oWorkerType::Unknown,
+        )
     }
 
     pub fn r2o_acquire_until(
@@ -642,12 +754,33 @@ impl R2oMeasurementGate {
             cancel,
             R2oMeasurementWaiterKind::Other,
             false,
+            R2oWorkerType::Unknown,
+            Some(deadline),
+        )
+    }
+
+    /// Voice Discovery: C `JOB_VOICE`, отдельный тип живого worker'а.
+    pub fn r2o_acquire_voice_until(
+        &self,
+        cancel: &AtomicBool,
+        deadline: Instant,
+    ) -> Option<R2oMeasurementPermit> {
+        self.r2o_acquire_with_kind_until(
+            cancel,
+            R2oMeasurementWaiterKind::Other,
+            false,
+            R2oWorkerType::Voice,
             Some(deadline),
         )
     }
 
     pub fn r2o_acquire_tcp(&self, cancel: &AtomicBool) -> Option<R2oMeasurementPermit> {
-        self.r2o_acquire_with_kind(cancel, R2oMeasurementWaiterKind::Tcp, true)
+        self.r2o_acquire_with_kind(
+            cancel,
+            R2oMeasurementWaiterKind::Tcp,
+            true,
+            R2oWorkerType::Verify,
+        )
     }
 
     pub fn r2o_acquire_family_recovery(
@@ -655,11 +788,21 @@ impl R2oMeasurementGate {
         cancel: &AtomicBool,
         tcp_target: bool,
     ) -> Option<R2oMeasurementPermit> {
-        self.r2o_acquire_with_kind(cancel, R2oMeasurementWaiterKind::FamilyRecovery, tcp_target)
+        self.r2o_acquire_with_kind(
+            cancel,
+            R2oMeasurementWaiterKind::FamilyRecovery,
+            tcp_target,
+            R2oWorkerType::Verify,
+        )
     }
 
     pub fn r2o_acquire_discovery(&self, cancel: &AtomicBool) -> Option<R2oMeasurementPermit> {
-        self.r2o_acquire_with_kind(cancel, R2oMeasurementWaiterKind::Discovery, false)
+        self.r2o_acquire_with_kind(
+            cancel,
+            R2oMeasurementWaiterKind::Discovery,
+            false,
+            R2oWorkerType::Unknown,
+        )
     }
 
     pub fn r2o_set_pending_tcp_discovery(&self, count: usize) {
@@ -702,8 +845,9 @@ impl R2oMeasurementGate {
         cancel: &AtomicBool,
         kind: R2oMeasurementWaiterKind,
         tcp_target: bool,
+        worker_type: R2oWorkerType,
     ) -> Option<R2oMeasurementPermit> {
-        self.r2o_acquire_with_kind_until(cancel, kind, tcp_target, None)
+        self.r2o_acquire_with_kind_until(cancel, kind, tcp_target, worker_type, None)
     }
 
     fn r2o_acquire_with_kind_until(
@@ -711,6 +855,7 @@ impl R2oMeasurementGate {
         cancel: &AtomicBool,
         kind: R2oMeasurementWaiterKind,
         tcp_target: bool,
+        worker_type: R2oWorkerType,
         deadline: Option<Instant>,
     ) -> Option<R2oMeasurementPermit> {
         let waiter = {
@@ -719,7 +864,7 @@ impl R2oMeasurementGate {
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            r2o_queue_measurement_waiter(&mut state, kind, tcp_target)
+            r2o_queue_measurement_waiter(&mut state, kind, tcp_target, Some(worker_type))
         };
 
         self.r2o_wait_for_measurement_turn(waiter, cancel, deadline)
@@ -812,11 +957,15 @@ impl R2oMeasurementGate {
                 state.last_started = Some(now);
                 let active = state.active;
                 state.adaptive.r2o_mark_started(active);
+                let worker_id = selected
+                    .worker_type
+                    .map(|worker_type| r2o_register_live_worker(&mut state, worker_type, now));
                 self.shared.changed.notify_all();
                 return Some(R2oMeasurementPermit {
                     shared: Arc::clone(&self.shared),
                     active: true,
                     yielded_duration: Duration::ZERO,
+                    worker_id,
                 });
             }
             let (state, _) = self
@@ -897,6 +1046,9 @@ impl R2oMeasurementPermit {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if cancel.load(Ordering::Relaxed) {
             self.active = false;
+            if let Some(id) = self.worker_id.take() {
+                r2o_forget_live_worker(&mut state, id);
+            }
             state.active = state.active.saturating_sub(1);
             drop(state);
             shared.changed.notify_all();
@@ -912,13 +1064,18 @@ impl R2oMeasurementPermit {
         let gate = R2oMeasurementGate {
             shared: Arc::clone(&shared),
         };
-        let waiter =
-            r2o_queue_measurement_waiter(&mut state, R2oMeasurementWaiterKind::QuicYield, false);
+        let waiter = r2o_queue_measurement_waiter(
+            &mut state,
+            R2oMeasurementWaiterKind::QuicYield,
+            false,
+            None,
+        );
         state.active = state.active.saturating_sub(1);
         drop(state);
         shared.changed.notify_all();
 
         let Some(mut replacement) = gate.r2o_wait_for_measurement_turn(waiter, cancel, None) else {
+            self.r2o_forget_worker();
             return false;
         };
         self.yielded_duration = self
@@ -926,6 +1083,33 @@ impl R2oMeasurementPermit {
             .saturating_add(r2o_yield_started.elapsed());
         std::mem::swap(&mut self.active, &mut replacement.active);
         true
+    }
+
+    /// Записать настоящий тип worker'а после выбора задачи из очереди.
+    pub fn r2o_set_worker_type(&mut self, worker_type: R2oWorkerType) {
+        let Some(id) = self.worker_id else {
+            return;
+        };
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(worker) = state.live_workers.iter_mut().find(|worker| worker.id == id) {
+            worker.worker_type = worker_type;
+        }
+    }
+
+    fn r2o_forget_worker(&mut self) {
+        let Some(id) = self.worker_id.take() else {
+            return;
+        };
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        r2o_forget_live_worker(&mut state, id);
     }
 }
 
@@ -954,6 +1138,9 @@ impl Drop for R2oMeasurementPermit {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(id) = self.worker_id.take() {
+            r2o_forget_live_worker(&mut state, id);
+        }
         state.active = state.active.saturating_sub(1);
         self.shared.changed.notify_all();
     }
@@ -1683,17 +1870,23 @@ mod tests {
         let gate = R2oMeasurementGate::new(1);
         let mut state = gate.shared.state.lock().unwrap();
         let other =
-            r2o_queue_measurement_waiter(&mut state, R2oMeasurementWaiterKind::Other, false);
+            r2o_queue_measurement_waiter(&mut state, R2oMeasurementWaiterKind::Other, false, None);
         let recovery = r2o_queue_measurement_waiter(
             &mut state,
             R2oMeasurementWaiterKind::FamilyRecovery,
             true,
+            None,
         );
         assert_eq!(r2o_next_measurement_waiter(&state), Some(recovery));
 
-        let quic =
-            r2o_queue_measurement_waiter(&mut state, R2oMeasurementWaiterKind::QuicYield, false);
-        let tcp = r2o_queue_measurement_waiter(&mut state, R2oMeasurementWaiterKind::Tcp, true);
+        let quic = r2o_queue_measurement_waiter(
+            &mut state,
+            R2oMeasurementWaiterKind::QuicYield,
+            false,
+            None,
+        );
+        let tcp =
+            r2o_queue_measurement_waiter(&mut state, R2oMeasurementWaiterKind::Tcp, true, None);
         assert_eq!(r2o_next_measurement_waiter(&state), Some(recovery));
         state.waiters.retain(|waiter| waiter.id != recovery);
         assert_eq!(r2o_next_measurement_waiter(&state), Some(tcp));
@@ -1728,6 +1921,8 @@ mod tests {
                 initial_starts: 2,
                 waiters: std::collections::VecDeque::new(),
                 next_waiter: 1,
+                live_workers: Vec::new(),
+                next_worker: 1,
                 last_sample: None,
                 last_started: None,
                 scheduler_tick_seen: true,
@@ -1756,11 +1951,12 @@ mod tests {
                     &mut state,
                     kind,
                     kind == R2oMeasurementWaiterKind::Tcp,
+                    None,
                 );
                 waiter_names.push((waiter, *name));
             }
             for (name, kind) in parked_names {
-                let waiter = r2o_queue_measurement_waiter(&mut state, kind, false);
+                let waiter = r2o_queue_measurement_waiter(&mut state, kind, false, None);
                 waiter_names.push((waiter, name));
             }
             let selected = r2o_next_measurement_waiter(&state).unwrap();
@@ -2051,5 +2247,56 @@ mod tests {
         if let Ok(path) = std::env::var("R2O_AIMD_DIFF_OUTPUT") {
             std::fs::write(path, format!("{}\n", output.join("\n"))).unwrap();
         }
+    }
+
+    /// C/Rust differential: `worker_type` (core/sched.c:6026-6034) для
+    /// JOB_NONE/CLASSIFY/CONTACT/VERIFY/VOICE/DNS_HEALTH и неизвестных кодов.
+    #[test]
+    fn worker_type_matches_c() {
+        let Some(path) = std::env::var_os("R2O_WORKER_TYPE_DIFF_OUTPUT") else {
+            return;
+        };
+        let mut output = String::new();
+        for job in [0_u8, 1, 2, 3, 4, 5, 6, 255] {
+            for transport in [6_u8, 17] {
+                output.push_str(&format!(
+                    "{job},{transport},{}\n",
+                    super::r2o_worker_type_for_c(job, transport)
+                ));
+            }
+        }
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
+    }
+
+    #[test]
+    fn worker_oldest_reports_real_worker_types() {
+        use super::{R2oWorkerType, r2o_worker_type};
+        let gate = super::R2oMeasurementGate::new(4);
+        let cancel = AtomicBool::new(false);
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        let voice = gate
+            .r2o_acquire_voice_until(&cancel, deadline)
+            .expect("voice permit");
+        let snapshot = gate.r2o_live_snapshot();
+        assert_eq!(snapshot.worker_oldest_type, "VOICE");
+        assert!(snapshot.worker_oldest_age_ms.is_some());
+        drop(voice);
+        assert_eq!(gate.r2o_live_snapshot().worker_oldest_type, "");
+
+        let mut discovery = gate
+            .r2o_acquire_discovery(&cancel)
+            .expect("discovery permit");
+        assert_eq!(gate.r2o_live_snapshot().worker_oldest_type, "UNKNOWN");
+        discovery.r2o_set_worker_type(R2oWorkerType::ClassifyQuic);
+        assert_eq!(
+            gate.r2o_live_snapshot().worker_oldest_type,
+            r2o_worker_type(R2oWorkerType::ClassifyQuic)
+        );
+        drop(discovery);
+        let snapshot = gate.r2o_live_snapshot();
+        assert_eq!(snapshot.worker_oldest_type, "");
+        assert_eq!(snapshot.worker_oldest_age_ms, None);
     }
 }

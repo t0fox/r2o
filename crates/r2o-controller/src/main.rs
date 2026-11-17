@@ -14795,8 +14795,8 @@ impl R2oVoiceDiscoveryWorker {
                 let r2o_diagnostic_target = r2o_voice_diagnostic_target(&r2o_job.target);
                 let (r2o_result, r2o_fallback, r2o_measure_started_at) = {
                     let r2o_queue_deadline = r2o_job.queued_at + R2O_VOICE_TRIAL_TASK_LIFETIME;
-                    let Some(_permit) =
-                        r2o_worker_gate.r2o_acquire_until(&r2o_worker_cancel, r2o_queue_deadline)
+                    let Some(_permit) = r2o_worker_gate
+                        .r2o_acquire_voice_until(&r2o_worker_cancel, r2o_queue_deadline)
                     else {
                         if r2o_worker_cancel.load(Ordering::Relaxed) {
                             break;
@@ -17433,7 +17433,7 @@ group_block_proven: false,
                                     (expired, target, queue.catalog_generation)
                                 }
                             };
-                            let Some(_permit) = permit else {
+                            let Some(mut permit) = permit else {
                                 break;
                             };
                             R2O_DISCOVERY_WORKERS_STARTED.fetch_add(1, Ordering::Relaxed);
@@ -17471,6 +17471,13 @@ group_block_proven: false,
                             let Some((target, trigger_planned)) = target else {
                                 continue;
                             };
+                            // C `worker_type(t)`: тип worker'а известен после
+                            // выбора задачи; до этого слот числился UNKNOWN.
+                            permit.r2o_set_worker_type(if r2o_discovery_transport(&target) == 17 {
+                                r2o_controller::r2o_resource_limit::R2oWorkerType::ClassifyQuic
+                            } else {
+                                r2o_controller::r2o_resource_limit::R2oWorkerType::ClassifyTcp
+                            });
                             {
                                 let mut searches = worker_searches
                                     .lock()
@@ -18062,9 +18069,9 @@ group_block_proven: false,
         R2O_DISCOVERY_WORKERS_JOIN_FAILURES.load(Ordering::Relaxed) as u64
     }
 
-    /// C `worker_oldest_age_ms`: возраст самого старого живого worker'а.
-    /// В R2O worker общий для активной задачи; возраст берётся из
-    /// `R2oDiscoverySearch.started_at` активных целей.
+    /// C `worker_oldest_age_ms` для C-фикстуры без живого gate-слота:
+    /// production-диагностика берёт oldest из `R2oMeasurementSnapshot`.
+    #[cfg(test)]
     fn r2o_worker_oldest(&self, now: std::time::Instant) -> (Option<u64>, &'static str) {
         let searches = self
             .searches
@@ -22926,10 +22933,8 @@ impl ControlClient {
                         let worker_join_failures = discovery
                             .as_ref()
                             .map_or(0, |(worker, _, _, _)| worker.r2o_worker_join_failures());
-                        let (worker_oldest_age_ms, worker_oldest_type) =
-                            discovery.as_ref().map_or((None, ""), |(worker, _, _, _)| {
-                                worker.r2o_worker_oldest(now)
-                            });
+                        let worker_oldest_age_ms = measurements.worker_oldest_age_ms;
+                        let worker_oldest_type = measurements.worker_oldest_type;
                         let last_measurement_age_ms = discovery
                             .as_ref()
                             .and_then(|(worker, _, _, _)| worker.r2o_last_measurement_age(now));
