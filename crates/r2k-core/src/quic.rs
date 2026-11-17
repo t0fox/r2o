@@ -1376,51 +1376,100 @@ fn expand_label_ctx(
         .map_err(|_| QuicSplitError::Invalid)
 }
 
-fn open_initial(
-    input: &[u8],
-    header: InitialHeader,
-    keys: InitialKeys,
-) -> Result<(Vec<u8>, u64, usize), QuicSplitError> {
-    if header.packet_len > MAX_PACKET || header.length_claimed < 17 {
-        return Err(QuicSplitError::Invalid);
+/// C `d2k_qw_seal` (`core/quicwire.c:351-394`): AEAD + header protection для
+/// длинного или короткого заголовка. `clear_header` — байты до PN.
+fn r2o_qw_seal(
+    keys: &InitialKeys,
+    long_header: bool,
+    clear_header: &[u8],
+    packet_number: u64,
+    pn_len: usize,
+    payload: &[u8],
+    cap: usize,
+) -> Option<Vec<u8>> {
+    if !(1..=4).contains(&pn_len) {
+        return None;
     }
-    let sample_start = header
-        .pn_offset
-        .checked_add(4)
-        .ok_or(QuicSplitError::Invalid)?;
-    let sample = input
-        .get(sample_start..sample_start + 16)
-        .ok_or(QuicSplitError::Invalid)?;
-    let mask = header_mask(&keys.hp, sample)?;
-    let first = input[0] ^ (mask[0] & 0x0f);
+    let aad_len = clear_header.len().checked_add(pn_len)?;
+    let total = aad_len.checked_add(payload.len())?.checked_add(16)?;
+    if total > cap || pn_len.checked_add(payload.len())?.checked_add(16)? < 20 {
+        return None;
+    }
+    let mut output = vec![0; total];
+    output[..clear_header.len()].copy_from_slice(clear_header);
+    output[0] = (output[0] & 0xfc) | (pn_len as u8 - 1);
+    for index in 0..pn_len {
+        output[clear_header.len() + index] = (packet_number >> (8 * (pn_len - 1 - index))) as u8;
+    }
+    let nonce = packet_nonce(&keys.iv, packet_number);
+    let cipher = Aes128Gcm::new_from_slice(&keys.key).ok()?;
+    let sealed = cipher
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: payload,
+                aad: &output[..aad_len],
+            },
+        )
+        .ok()?;
+    if sealed.len() != total - aad_len {
+        return None;
+    }
+    output[aad_len..].copy_from_slice(&sealed);
+    let sample_start = clear_header.len().checked_add(4)?;
+    let sample = output.get(sample_start..sample_start + 16)?;
+    let mask = header_mask(&keys.hp, sample).ok()?;
+    output[0] ^= mask[0] & (if long_header { 0x0f } else { 0x1f });
+    for index in 0..pn_len {
+        output[clear_header.len() + index] ^= mask[index + 1];
+    }
+    Some(output)
+}
+
+/// C `d2k_qw_open` (`core/quicwire.c:396-450`): снять HP и AEAD, проверить
+/// резервные биты только после обеих защит. Retry не открывается.
+fn r2o_qw_open(
+    keys: &InitialKeys,
+    header: &R2oQuicHeader,
+    packet: &[u8],
+    largest_pn: u64,
+) -> Option<(Vec<u8>, u64, usize)> {
+    if header.long_header && header.kind == 3 {
+        return None;
+    }
+    let sample_start = header.pn_offset.checked_add(4)?;
+    let sample = packet.get(sample_start..sample_start + 16)?;
+    let mask = header_mask(&keys.hp, sample).ok()?;
+    let first = packet.first()? ^ (mask[0] & if header.long_header { 0x0f } else { 0x1f });
     let pn_len = usize::from(first & 0x03) + 1;
-    let pn_end = header
-        .pn_offset
-        .checked_add(pn_len)
-        .ok_or(QuicSplitError::Invalid)?;
-    let protected_pn = input
-        .get(header.pn_offset..pn_end)
-        .ok_or(QuicSplitError::Invalid)?;
-    let mut pn_bytes = [0; 4];
+    let pn_end = header.pn_offset.checked_add(pn_len)?;
+    let protected_pn = packet.get(header.pn_offset..pn_end)?;
+    let mut pn_bytes = [0u8; 4];
     for (index, byte) in protected_pn.iter().enumerate() {
         pn_bytes[index] = *byte ^ mask[index + 1];
     }
-    if header.length_claimed < pn_len + 16 {
-        return Err(QuicSplitError::Invalid);
+    let ct_len = if header.long_header {
+        if header.length_claimed < pn_len {
+            return None;
+        }
+        header.length_claimed - pn_len
+    } else {
+        header.packet_len.checked_sub(header.pn_offset + pn_len)?
+    };
+    if ct_len < 16 {
+        return None;
     }
     let mut truncated = 0u64;
     for byte in &pn_bytes[..pn_len] {
         truncated = (truncated << 8) | u64::from(*byte);
     }
-    let packet_number = decode_packet_number(0, truncated, pn_len);
-    let mut aad = input[..pn_end].to_vec();
+    let packet_number = decode_packet_number(largest_pn, truncated, pn_len);
+    let mut aad = packet.get(..pn_end)?.to_vec();
     aad[0] = first;
     aad[header.pn_offset..pn_end].copy_from_slice(&pn_bytes[..pn_len]);
     let nonce = packet_nonce(&keys.iv, packet_number);
-    let cipher = Aes128Gcm::new_from_slice(&keys.key).map_err(|_| QuicSplitError::Invalid)?;
-    let ciphertext = input
-        .get(pn_end..header.packet_len)
-        .ok_or(QuicSplitError::Invalid)?;
+    let cipher = Aes128Gcm::new_from_slice(&keys.key).ok()?;
+    let ciphertext = packet.get(pn_end..pn_end.checked_add(ct_len)?)?;
     let plain = cipher
         .decrypt(
             Nonce::from_slice(&nonce),
@@ -1429,11 +1478,23 @@ fn open_initial(
                 aad: &aad,
             },
         )
-        .map_err(|_| QuicSplitError::Invalid)?;
-    if first & 0x0c != 0 {
-        return Err(QuicSplitError::Invalid);
+        .ok()?;
+    if plain.len() != ct_len - 16 {
+        return None;
     }
-    Ok((plain, packet_number, pn_len))
+    if first & (if header.long_header { 0x0c } else { 0x18 }) != 0 {
+        return None;
+    }
+    Some((plain, packet_number, pn_len))
+}
+
+fn open_initial(
+    input: &[u8],
+    _header: InitialHeader,
+    keys: InitialKeys,
+) -> Result<(Vec<u8>, u64, usize), QuicSplitError> {
+    let header = r2o_qw_hdr_parse(input, 0).ok_or(QuicSplitError::Invalid)?;
+    r2o_qw_open(&keys, &header, input, 0).ok_or(QuicSplitError::Invalid)
 }
 
 fn seal_initial(
@@ -1443,51 +1504,16 @@ fn seal_initial(
     pn_len: usize,
     keys: InitialKeys,
 ) -> Result<Vec<u8>, QuicSplitError> {
-    if !(1..=4).contains(&pn_len) {
-        return Err(QuicSplitError::Invalid);
-    }
-    let aad_len = clear_header
-        .len()
-        .checked_add(pn_len)
-        .ok_or(QuicSplitError::Invalid)?;
-    let packet_len = aad_len
-        .checked_add(plain.len())
-        .and_then(|len| len.checked_add(16))
-        .ok_or(QuicSplitError::Invalid)?;
-    if packet_len > MAX_PACKET || pn_len + plain.len() + 16 < 20 {
-        return Err(QuicSplitError::Invalid);
-    }
-    let mut output = vec![0; packet_len];
-    output[..clear_header.len()].copy_from_slice(clear_header);
-    output[0] = (output[0] & 0xfc) | (pn_len as u8 - 1);
-    for index in 0..pn_len {
-        output[clear_header.len() + index] = (packet_number >> (8 * (pn_len - 1 - index))) as u8;
-    }
-    let nonce = packet_nonce(&keys.iv, packet_number);
-    let cipher = Aes128Gcm::new_from_slice(&keys.key).map_err(|_| QuicSplitError::Invalid)?;
-    let sealed = cipher
-        .encrypt(
-            Nonce::from_slice(&nonce),
-            Payload {
-                msg: plain,
-                aad: &output[..aad_len],
-            },
-        )
-        .map_err(|_| QuicSplitError::Invalid)?;
-    if sealed.len() != packet_len - aad_len {
-        return Err(QuicSplitError::Invalid);
-    }
-    output[aad_len..].copy_from_slice(&sealed);
-    let sample_start = clear_header
-        .len()
-        .checked_add(4)
-        .ok_or(QuicSplitError::Invalid)?;
-    let mask = header_mask(&keys.hp, &output[sample_start..sample_start + 16])?;
-    output[0] ^= mask[0] & 0x0f;
-    for index in 0..pn_len {
-        output[clear_header.len() + index] ^= mask[index + 1];
-    }
-    Ok(output)
+    r2o_qw_seal(
+        &keys,
+        true,
+        clear_header,
+        packet_number,
+        pn_len,
+        plain,
+        MAX_PACKET,
+    )
+    .ok_or(QuicSplitError::Invalid)
 }
 
 fn header_mask(key: &[u8; 16], sample: &[u8]) -> Result<[u8; 16], QuicSplitError> {
@@ -2793,6 +2819,88 @@ mod tests {
                     header.packet_len
                 )),
             }
+        }
+        print!("{output}");
+    }
+
+    /// C/Rust differential: C-стенд seal/open (long/short) передаёт точные
+    /// входы через файл; Rust делает то же production `r2o_qw_seal`/
+    /// `r2o_qw_open`.
+    #[test]
+    fn quic_seal_open_matches_c() {
+        let Some(path) = std::env::var_os("R2O_QUIC_SEAL_INPUT") else {
+            return;
+        };
+        let keys = super::InitialKeys {
+            key: [
+                0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+                0x0e, 0x0f,
+            ],
+            iv: [
+                0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab,
+            ],
+            hp: [
+                0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5a, 0x5b, 0x5c, 0x5d,
+                0x5e, 0x5f,
+            ],
+        };
+        let decode = |hex: &str| -> Vec<u8> {
+            if hex == "-" {
+                return Vec::new();
+            }
+            (0..hex.len())
+                .step_by(2)
+                .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).unwrap())
+                .collect()
+        };
+        let encode = |bytes: &[u8]| -> String {
+            if bytes.is_empty() {
+                "-".to_owned()
+            } else {
+                bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+            }
+        };
+        let input = std::fs::read_to_string(path).unwrap();
+        let mut output = String::new();
+        for line in input.lines() {
+            let fields: Vec<&str> = line.split(',').collect();
+            let label = fields[0];
+            let short_len: usize = fields[1].parse().unwrap();
+            let clear = decode(fields[2]);
+            let pn: u64 = fields[3].parse().unwrap();
+            let pn_len: usize = fields[4].parse().unwrap();
+            let payload = decode(fields[5]);
+            let largest: u64 = fields[6].parse().unwrap();
+            let long_header = !label.starts_with("short");
+            let sealed = super::r2o_qw_seal(
+                &keys,
+                long_header,
+                &clear,
+                pn,
+                pn_len,
+                &payload,
+                super::MAX_PACKET,
+            );
+            let (status, plain, opened_pn) = match sealed.as_deref() {
+                None => (-1, Vec::new(), 0),
+                Some(sealed) => match super::r2o_qw_hdr_parse(sealed, short_len) {
+                    None => (-1, Vec::new(), 0),
+                    Some(header) => match super::r2o_qw_open(&keys, &header, sealed, largest) {
+                        None => (-1, Vec::new(), 0),
+                        Some((plain, pn, _)) => (0, plain, pn),
+                    },
+                },
+            };
+            output.push_str(&format!(
+                "{label},{short_len},{},{pn},{pn_len},{},{largest},{},{status},{},{opened_pn}\n",
+                encode(&clear),
+                encode(&payload),
+                sealed
+                    .as_deref()
+                    .map(encode)
+                    .unwrap_or_else(|| "-".to_owned()),
+                encode(&plain)
+            ));
         }
         print!("{output}");
     }
