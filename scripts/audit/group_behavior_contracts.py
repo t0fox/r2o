@@ -141,7 +141,7 @@ CONTRACTS = {
     "CS-SCHED-TASK-LIFECYCLE": (
         "Scheduler task/worker lifecycle",
         "Слоты, worker permits, reset/done/fail/join, retire, queue wake, guards.",
-        "sched.c: worker/task/queue/guard; Rust R2oDiscoverySearches/Queue/Life; box_injects_rst/rst_guard_wanted/plan_arm_rst_guard — 32 кейса C/Rust PASS и проводка в candidate+sync; sched_quic_progress — 7 кейсов и проводка в QUIC worker; полная матрица T_* не доказана.",
+        "sched.c: worker/task/queue/guard; Rust R2oDiscoverySearches/Queue/Life; box_injects_rst/rst_guard_wanted/plan_arm_rst_guard — 32 кейса C/Rust PASS и проводка в candidate+sync; sched_quic_progress — 7 кейсов и проводка в QUIC worker; ask_settle — 9 кейсов и проводка в base/full; полная матрица T_* не доказана.",
     ),
     "CS-SCHED-SUSPECT-ADMISSION": (
         "Scheduler suspect admission and refusal",
@@ -382,8 +382,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 363:
-        raise SystemExit(f"expected 363 P rows, got {len(rows)}")
+    if len(rows) != 362:
+        raise SystemExit(f"expected 362 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")

@@ -11640,6 +11640,8 @@ struct R2oDiscoverySearch {
     candidate_probes: usize,
     /// C `t->ask_probes`: накопленные pass+fail прогона измерителя.
     ask_probes: usize,
+    /// C `t->ask_base`: счёт `ask_probes` на старте текущего прогона.
+    ask_base: usize,
     /// C `t->ask_question[96]`: сырой вопрос, обрезанный по UTF-8.
     ask_question: String,
     question: String,
@@ -11653,6 +11655,14 @@ struct R2oDiscoverySearch {
     report_closed: bool,
     /// C `t->props`/`prop_*`: текущий вопрос о свойствах.
     props: R2oPropsState,
+}
+
+/// C `ask_settle` (`core/sched.c:2810-2813`): поднять `ask_probes` до
+/// `ask_base + max(run_probes, 0)` — защита от недосчёта хода измерителя.
+#[cfg(unix)]
+fn r2o_ask_settle(ask_base: usize, ask_probes: usize, run_probes: i64) -> usize {
+    let run = usize::try_from(run_probes.max(0)).unwrap_or(usize::MAX);
+    ask_probes.max(ask_base.saturating_add(run))
 }
 
 /// C `d2k_sched_progress_note` (`core/sched.c:2790-2805`): вопрос хранится
@@ -11732,6 +11742,7 @@ impl R2oDiscoverySearches {
                 probes: 0,
                 candidate_probes: 0,
                 ask_probes: 0,
+                ask_base: 0,
                 ask_question: String::new(),
                 question: String::new(),
                 candidate: String::new(),
@@ -12079,6 +12090,29 @@ impl R2oDiscoverySearches {
             "{probe} · проверок: {}, прошло: {passed}, отказов: {failed}",
             passed + failed
         );
+    }
+
+    /// C `ask_settle`-начало: `t->ask_base = t->ask_probes` на старте нового
+    /// прогона измерителя; прежние зонды задачи остаются на счету.
+    fn begin_ask_run(&mut self, target: &r2o_controller::discovery::DiscoveryTarget) {
+        let key = r2o_discovery_task_key(target);
+        if let Some(search) = self.entries.get_mut(&key) {
+            search.ask_base = search.ask_probes;
+        }
+    }
+
+    /// C `ask_settle`: после прогона поднять `ask_probes` до
+    /// `ask_base + max(run_probes, 0)`, не теряя уже накопленный ход.
+    fn settle_ask(
+        &mut self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        run_probes: usize,
+    ) {
+        let key = r2o_discovery_task_key(target);
+        if let Some(search) = self.entries.get_mut(&key) {
+            search.ask_probes =
+                r2o_ask_settle(search.ask_base, search.ask_probes, run_probes as i64);
+        }
     }
 
     /// C `sched_quic_progress` (`core/sched.c:2841-2843`): QUIC-вопрос и
@@ -15532,6 +15566,11 @@ impl DiscoveryWorker {
                     Arc::clone(&cancel),
                     None,
                 );
+                // C `ask_settle`: старт отдельного базового прогона.
+                runner_searches
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .begin_ask_run(&target);
                 let (base, _) = r2o_run_with_deadline(
                     Arc::clone(&cancel),
                     R2O_DISCOVERY_TASK_LIFETIME,
@@ -15548,6 +15587,10 @@ impl DiscoveryWorker {
                     },
                 );
                 base_probes = base.probes;
+                runner_searches
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .settle_ask(&target, base.probes);
                 seed_whole = base.seed_whole;
                 if base.blocked {
                     let own_cached_volume_cut = r2o_discovery_cached_volume_cut(
@@ -15830,6 +15873,11 @@ group_block_proven: false,
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .update_probe_progress(&progress_target, probe, probes, passed, failed);
             };
+            // C `ask_settle`: старт полного прогона измерителя.
+            runner_searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .begin_ask_run(&target);
             let (
                 outcome,
                 classifier_probes,
@@ -15850,6 +15898,10 @@ group_block_proven: false,
                 runner_send_cap.load(Ordering::Relaxed),
                 &mut progress,
             );
+            runner_searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .settle_ask(&target, classifier_probes);
             let full_counts =
                 r2o_full_search_probe_counts(base_probes, classifier_probes, own_probes);
             let classify_probes = full_counts.raw;
@@ -33846,6 +33898,7 @@ mod tests {
                     probes,
                     candidate_probes: probes,
                     ask_probes: 0,
+                    ask_base: 0,
                     ask_question: String::new(),
                     question: String::new(),
                     candidate: String::new(),
@@ -33964,6 +34017,7 @@ mod tests {
                     probes,
                     candidate_probes: probes,
                     ask_probes: 0,
+                    ask_base: 0,
                     ask_question: String::new(),
                     question: String::new(),
                     candidate: String::new(),
@@ -34226,6 +34280,7 @@ mod tests {
                     probes,
                     candidate_probes: probes,
                     ask_probes: 0,
+                    ask_base: 0,
                     ask_question: String::new(),
                     question: String::new(),
                     candidate: String::new(),
@@ -35008,6 +35063,7 @@ mod tests {
             probes: 0,
             candidate_probes: 0,
             ask_probes: 0,
+            ask_base: 0,
             ask_question: String::new(),
             question: String::new(),
             candidate: String::new(),
@@ -39233,6 +39289,7 @@ mod tests {
                     probes,
                     candidate_probes: probes,
                     ask_probes: 0,
+                    ask_base: 0,
                     ask_question: question.into(),
                     question: question.into(),
                     candidate: candidate.into(),
@@ -43755,6 +43812,60 @@ mod tests {
         }
         std::fs::write(path, &output).unwrap();
         print!("{output}");
+    }
+
+    /// C/Rust differential: C-стенд вызывает production `ask_settle`
+    /// из sched.c; Rust — production `r2o_ask_settle` и методы поиска.
+    #[cfg(unix)]
+    #[test]
+    fn ask_settle_matches_c() {
+        let Some(path) = std::env::var_os("R2O_ASK_SETTLE_DIFF_OUTPUT") else {
+            return;
+        };
+        let cases = [
+            ("empty", 0_usize, 0_usize, 0_i64),
+            ("first_run", 0, 0, 3),
+            ("progress_undercount", 0, 1, 3),
+            ("carry_base", 5, 5, 3),
+            ("already_settled", 5, 8, 3),
+            ("run_zero", 5, 9, 0),
+            ("negative_run", 7, 7, -3),
+            ("negative_undercount", 7, 6, -1),
+            ("progress_over_run", 1, 100, 50),
+        ];
+        let mut output = String::new();
+        for (label, ask_base, ask_probes, run_probes) in cases {
+            output.push_str(&format!(
+                "{label} {}\n",
+                super::r2o_ask_settle(ask_base, ask_probes, run_probes)
+            ));
+        }
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn settle_ask_uses_run_total_when_progress_undercounts() {
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "settle.example".into(),
+            endpoint: "192.0.2.47:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let mut searches = super::R2oDiscoverySearches::default();
+        searches.update(&target, "распознаём поведение", 0, 0, "", "");
+        searches.begin_ask_run(&target);
+        searches.update_probe_progress(&target, "whole", 1, 0, 1);
+        searches.settle_ask(&target, 3);
+        let key = super::r2o_discovery_task_key(&target);
+        assert_eq!(searches.entries[&key].ask_probes, 3);
+        searches.begin_ask_run(&target);
+        searches.update_probe_progress(&target, "split", 2, 1, 0);
+        searches.settle_ask(&target, 1);
+        assert_eq!(searches.entries[&key].ask_probes, 4);
+        searches.settle_ask(&target, 0);
+        assert_eq!(searches.entries[&key].ask_probes, 4);
     }
 
     /// C/Rust differential: C-стенд вызывает production
