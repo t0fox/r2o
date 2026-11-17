@@ -95,13 +95,13 @@ production-путь не ставится. Формулировки «теста
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 364 | 184 | 0 | 0 |
-| core-state | 692 | 509 | 183 | 0 | 0 |
+| core-state | 692 | 510 | 182 | 0 | 0 |
 | datapath-core | 400 | 395 | 5 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1598** | **384** | **0** | **0** |
+| **Итого** | **1982** | **1599** | **383** | **0** | **0** |
 
-Это не оценка паритета: 384 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 383 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -120,7 +120,7 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1598 / P 384**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1599 / P 383**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
@@ -192,7 +192,7 @@ P означает неполное доказательство ветвей, N
 - core-state — CLI-флаги/вывод, PSL/catalog-парсер, crypto HKDF-границы,
   voice-blob, volume resource-retry.
 - `?` (0): не осталось; все строки реестра разобраны и имеют E/P/N.
-- Поведенческая группировка 384 P (27 контрактов, 0 без контракта):
+- Поведенческая группировка 383 P (27 контрактов, 0 без контракта):
   `docs/behavior-contracts/inventory.md` и
   `docs/behavior-contracts/p-contract-map.tsv`. Это не меняет статусы
   реестра и не является заявлением паритета.
@@ -385,11 +385,11 @@ P означает неполное доказательство ветвей, N
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
 | core-net | 548 | 364 | 184 | 0 | 0 |
-| core-state | 692 | 509 | 183 | 0 | 0 |
+| core-state | 692 | 510 | 182 | 0 | 0 |
 | datapath-core | 400 | 395 | 5 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1598** | **384** | **0** | **0** |
+| **Итого** | **1982** | **1599** | **383** | **0** | **0** |
 
 
 ---
@@ -2576,7 +2576,7 @@ P: end-to-end исходы сверяются, record-layer и коды ошиб
 | `fnv1a` | 3574–3581 | 8 | FNV-1a 64 по сырому тексту (offset `1469598103934665603`, prime `1099511628211`) | `r2o_fallback.rs` `tried_key` | E | C считает FNV-1a 64 по байтам текста и хранит u64. Rust `tried_key` теперь возвращает полный u64 (offset/prime те же), `FallbackQueue.tried`/`tried_hashes` — u64; тест `fnv1a_key_matches_c_full_u64`. Для R2O-брендированного текста ключ нормализует `r2o-plan`→`d2k-plan` (C такой текст не производит). |
 | `tried_add` | 3593–3596 | 4 | добавить FNV-хэш испробованного плана | `r2o_fallback.rs` `FallbackQueue.tried` | **E*** | C/Rust differential `scripts/r2o-ack-applied-persist-differential.sh` (`fallback-queue`) PASS: дедуп по FNV-хэшу, порядок/порции fallback-очереди и tried-хэши при меняющихся send cap. **Ограничение:** предел 256 записей/`tried_full` не покрыт; Rust хранит `Vec` без жёсткого предела. |
 | `plan_ident` | 3598–3605 | 8 | `plan-%08x` (FNV low32) + wire id 16 байт ASCII | `discovery.rs` `plan_ident`, `plan_text_for_trial`, trial-кандидат | **E*** | Rust `plan_ident` повторяет C: FNV-1a канонического текста (id из нулей), `plan-%08x`, ASCII в 16 байт с нулями; trial-кандидат discovery использует этот id и для текста, и для APPLIED-сверки. C-вектор: `r2o-plan … split sni_middle +0` → `plan-6dcd9d91`, wire `706c616e2d3664636439643931000000`; тест `plan_ident_matches_c_fnv_and_ascii_wire_id`. **Ограничение:** сохранённый в каталоге план по-прежнему получает 32-hex `stable_plan_id` (двойной FNV), а не `plan-%08x`: Rust `Plan.id` одновременно служит ключом каталога и hex-id текста, поэтому переход требует разделения этих полей и миграции существующих каталогов. |
-| `is_hex_digit` | 3607–3609 | 3 | `0-9a-fA-F` | `plan_text.rs`/`discovery.rs` (`is_ascii_hexdigit` в `canonical_plan_text`) | **P*** | C-хелпер и Rust `u8::is_ascii_hexdigit` принимают ровно `0-9a-fA-F`; отдельной функции нет. Покрыто разбором планов и `plan_text` тестами. |
+| `is_hex_digit` | 3778–3780 | 3 | `0-9a-fA-F` | `plan_text.rs`/`discovery.rs` (`is_ascii_hexdigit` в `canonical_plan_text`) | **E*** | **2026-11-17:** C/Rust differential `scripts/r2o-is-hex-digit-differential.sh` PASS на всех 256 байтах: C-оракул — production `is_hex_digit` из sched.c, Rust — `u8::is_ascii_hexdigit`, которым `plan_text.rs` и `discovery.rs` проверяют hex-идентификаторы. Принимаются ровно 22 символа `0-9a-fA-F`, остальные 234 — нет. **Ограничение:** отдельной функции в Rust нет, используется std-предикат. |
 | `question_shape` | 3635–3640 | 6 | QUIC→QUIC; иначе форма hello, UNKNOWN→GRANDFATHER | `main.rs` `r2o_discovery_plan_shape` | E | C: QUIC остаётся QUIC; ECH-приветствие даёт MODERN; UNKNOWN (0) → GRANDFATHER; иначе форма как есть. Rust `r2o_discovery_plan_shape` теперь явно отображает ECH_TCP→MODERN и 0→GRANDFATHER; тест `discovery_plan_shape_and_cached_shape_match_c` (QUIC/ECH/0/LEGACY). В штатном discovery форма всегда разобрана, поэтому ветвь UNKNOWN — защитная. |
 | `probe_shape` | 3642–3672 | 31 | ECH_TCP при ech_offer; QUIC→QUIC; LEGACY при legacy hello; иначе MODERN | `main.rs:5537,5545-5548` (`r2o_plan_wire_shape`), `:6381-6384` (`target.shape`), `control.rs:120-148` | **P*** | **Совпадает для штатных целей:** C `probe_shape` выбирает базовую форму зонда: ECH→ECH_TCP, QUIC→QUIC, LEGACY→LEGACY, иначе MODERN; Rust в family-recovery берёт `target.shape` (ECH_TCP/QUIC/LEGACY/MODERN) и применяет `r2o_plan_wire_shape(target.shape, has_timestamp)` для SET_NAME_PROBE, в snapshot-пробе передаёт `target.shape` напрямую. Отдельной функции нет. **Отличие:** C дополнительно разбирает `t->trig` и при неизвестной форме возвращает MODERN; Rust использует форму target без такого fallback. Полного differential на все формы нет. |
 | `task_wire_shape` | 3674–3676 | 3 | TCP → `d2k_link_shape_tcp_context(shape, trigger_tcp_profile)`, иначе shape | `main.rs:6339-6344 r2o_plan_wire_shape`, `control.rs:120-148,172-178` | **E*** | **Точное соответствие:** C `trigger_tcp_profile` — три состояния (UNKNOWN/NO_TS/TS); Rust `Option<bool>` отображается `None→TCP_PROFILE_UNKNOWN`, `Some(false)→NO_TS`, `Some(true)→TS` (`control.rs:172-178`) и передаётся в ту же `r2k_link_shape_tcp_context` (`120-148`). Unit `plan_wire_shape_uses_tcp_timestamp_profile` (`main.rs:23589-23611`) проверяет MODERN/LEGACY/ECH/HTTP/QUIC и оба профиля; C-таблица покрыта `tcp_shape_context_table_matches_d2o`. |

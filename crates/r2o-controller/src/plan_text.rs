@@ -803,3 +803,23 @@ mod big_endian_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod hex_digit_tests {
+    /// C/Rust differential: C-стенд вызывает production `is_hex_digit`
+    /// из sched.c; Rust — тот же `u8::is_ascii_hexdigit`, которым
+    /// `plan_text`/`discovery` проверяют hex-идентификаторы.
+    #[test]
+    fn is_hex_digit_matches_c() {
+        let Some(path) = std::env::var_os("R2O_IS_HEX_DIGIT_DIFF_OUTPUT") else {
+            return;
+        };
+        let mut output = String::new();
+        for value in 0_u16..=255 {
+            let byte = value as u8;
+            output.push_str(&format!("{value} {}\n", u8::from(byte.is_ascii_hexdigit())));
+        }
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
+    }
+}
