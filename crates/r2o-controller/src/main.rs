@@ -14937,17 +14937,46 @@ fn r2o_voice_applied_flow_matches(
         return false;
     }
 
-    let first = std::net::SocketAddrV4::new(
-        std::net::Ipv4Addr::new(key[1], key[2], key[3], key[4]),
-        u16::from_be_bytes([key[33], key[34]]),
-    );
-    let second = std::net::SocketAddrV4::new(
-        std::net::Ipv4Addr::new(key[17], key[18], key[19], key[20]),
-        u16::from_be_bytes([key[35], key[36]]),
-    );
-    let server = trial.target.server;
-    (first.ip() == &trial.target.client && second == server && first.port() != 0)
-        || (second.ip() == &trial.target.client && first == server && second.port() != 0)
+    let low_ip = std::net::Ipv4Addr::new(key[1], key[2], key[3], key[4]);
+    let high_ip = std::net::Ipv4Addr::new(key[17], key[18], key[19], key[20]);
+    let low_port = u16::from_be_bytes([key[33], key[34]]);
+    let high_port = u16::from_be_bytes([key[35], key[36]]);
+    r2o_voice_flow_same_context(
+        key[0],
+        low_ip,
+        low_port,
+        high_ip,
+        high_port,
+        trial.target.client,
+        trial.target.server,
+    )
+}
+
+/// C `voice_trial_same_context` (`core/sched.c:7469-7479`): семейство 4,
+/// сервер `IP:порт` с любой стороны, клиентский IP — с другой;
+/// клиентский порт не сравнивается.
+#[cfg(unix)]
+fn r2o_voice_flow_same_context(
+    family: u8,
+    low_ip: std::net::Ipv4Addr,
+    low_port: u16,
+    high_ip: std::net::Ipv4Addr,
+    high_port: u16,
+    client: std::net::Ipv4Addr,
+    server: std::net::SocketAddrV4,
+) -> bool {
+    // C `(ev->family ? ev->family : 4) != 4` → 0 трактуется как IPv4.
+    if family != 0 && family != 4 {
+        return false;
+    }
+    let server_port = server.port();
+    if low_ip == *server.ip() && low_port == server_port {
+        return high_ip == client;
+    }
+    if high_ip == *server.ip() && high_port == server_port {
+        return low_ip == client;
+    }
+    false
 }
 
 #[cfg(unix)]
@@ -43509,6 +43538,125 @@ mod tests {
             cache.note(&format!("other-{index}.example"), 4, client_b, now);
         }
         assert!(!cache.r2o_recent("clean.example", 4, client_a, now));
+    }
+
+    /// C/Rust differential: C-стенд вызывает production
+    /// `voice_trial_same_context` из sched.c; Rust — production
+    /// `r2o_voice_flow_same_context`.
+    #[cfg(unix)]
+    #[test]
+    fn voice_same_context_matches_c() {
+        use std::net::{Ipv4Addr, SocketAddrV4};
+        let Some(path) = std::env::var_os("R2O_VOICE_SAME_CONTEXT_DIFF_OUTPUT") else {
+            return;
+        };
+        let srv = Ipv4Addr::new(203, 0, 113, 9);
+        let cli = Ipv4Addr::new(192, 0, 2, 7);
+        let other = Ipv4Addr::new(198, 51, 100, 4);
+        let cases = [
+            (
+                "forward_match",
+                4_u8,
+                srv,
+                50_000_u16,
+                cli,
+                srv,
+                50_000,
+                cli,
+                1234,
+            ),
+            ("reverse_match", 4, srv, 50_000, cli, cli, 1234, srv, 50_000),
+            (
+                "wrong_client",
+                4,
+                srv,
+                50_000,
+                cli,
+                srv,
+                50_000,
+                other,
+                1234,
+            ),
+            ("wrong_port", 4, srv, 50_000, cli, srv, 50_001, cli, 1234),
+            ("family6", 6, srv, 50_000, cli, srv, 50_000, cli, 1234),
+            ("family0_as4", 0, srv, 50_000, cli, srv, 50_000, cli, 1234),
+            ("neither", 4, srv, 50_000, cli, other, 1, other, 2),
+            (
+                "low_server_wrong_client",
+                4,
+                srv,
+                50_000,
+                cli,
+                srv,
+                50_000,
+                other,
+                1,
+            ),
+            (
+                "high_server_wrong_client",
+                4,
+                srv,
+                50_000,
+                cli,
+                other,
+                1,
+                srv,
+                50_000,
+            ),
+            (
+                "client_port_ignored",
+                4,
+                srv,
+                50_000,
+                cli,
+                cli,
+                0,
+                srv,
+                50_000,
+            ),
+            (
+                "client_same_ip",
+                4,
+                srv,
+                50_000,
+                srv,
+                srv,
+                50_000,
+                srv,
+                1234,
+            ),
+            ("server_port_zero", 4, srv, 0, cli, srv, 0, cli, 1234),
+            (
+                "reverse_client_port_ignored",
+                4,
+                srv,
+                50_000,
+                cli,
+                cli,
+                65_535,
+                srv,
+                50_000,
+            ),
+        ];
+        let mut output = String::new();
+        for (label, family, server, server_port, client, low_ip, low_port, high_ip, high_port) in
+            cases
+        {
+            output.push_str(&format!(
+                "{label} {}\n",
+                u8::from(super::r2o_voice_flow_same_context(
+                    family,
+                    low_ip,
+                    low_port,
+                    high_ip,
+                    high_port,
+                    client,
+                    SocketAddrV4::new(server, server_port),
+                ))
+            ));
+        }
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
     }
 
     /// C/Rust differential: C-стенд вызывает production
