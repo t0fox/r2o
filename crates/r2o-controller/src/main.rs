@@ -43512,6 +43512,35 @@ mod tests {
     }
 
     /// C/Rust differential: C-стенд вызывает production
+    /// `voice_ip_fmt`/`voice_ip_text`/`voice_ip_text2` из sched.c; Rust —
+    /// `Ipv4Addr` Display, которым печатаются те же адреса.
+    #[cfg(unix)]
+    #[test]
+    fn voice_ip_matches_c() {
+        let Some(path) = std::env::var_os("R2O_VOICE_IP_DIFF_OUTPUT") else {
+            return;
+        };
+        let cases = [
+            ("any", [0, 0, 0, 0]),
+            ("loopback", [127, 0, 0, 1]),
+            ("broadcast", [255, 255, 255, 255]),
+            ("docnet", [192, 0, 2, 1]),
+            ("private", [10, 1, 2, 3]),
+            ("docnet2", [203, 0, 113, 9]),
+            ("mixed", [1, 2, 3, 4]),
+            ("high", [200, 100, 50, 25]),
+            ("utf8ish", [208, 159, 208, 191]),
+        ];
+        let mut output = String::new();
+        for (label, octets) in cases {
+            let text = std::net::Ipv4Addr::from(octets).to_string();
+            output.push_str(&format!("{label} fmt={text} text={text} text2={text}\n"));
+        }
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
+    }
+
+    /// C/Rust differential: C-стенд вызывает production
     /// `refuse_is_permanent`/`refuse_is_damage` из sched.c; Rust — те же
     /// production-предикаты.
     #[cfg(unix)]
