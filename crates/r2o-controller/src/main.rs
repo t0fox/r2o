@@ -43512,6 +43512,42 @@ mod tests {
     }
 
     /// C/Rust differential: C-стенд вызывает production
+    /// `quic_text_is_split` из sched.c; Rust — production
+    /// `r2o_quic_text_is_split`.
+    #[cfg(unix)]
+    #[test]
+    fn quic_text_is_split_matches_c() {
+        let Some(path) = std::env::var_os("R2O_QUIC_TEXT_SPLIT_DIFF_OUTPUT") else {
+            return;
+        };
+        let cases = [
+            (
+                "split",
+                "r2o-plan 1 10\nid 0\nproto udp quic\nquicsplit 1\n",
+            ),
+            ("no_newline", "quicsplit 1\n"),
+            ("leading_newline_only", "\nquicsplit"),
+            ("no_space", "\nquicsplit1\n"),
+            ("upper", "\nQUICSPLIT 1\n"),
+            ("two_spaces", "\nquicsplit  1\n"),
+            ("tab", "\nquicsplit\t1\n"),
+            ("empty", ""),
+            ("plain", "r2o-plan 1 10\nproto udp quic\n"),
+            ("middle", "a\nquicsplit b\nquicdeny\n"),
+            ("crlf", "\r\nquicsplit 1\r\n"),
+        ];
+        let mut output = String::new();
+        for (label, text) in cases {
+            output.push_str(&format!(
+                "{label} {}\n",
+                u8::from(super::r2o_quic_text_is_split(text))
+            ));
+        }
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
+    }
+
+    /// C/Rust differential: C-стенд вызывает production
     /// `voice_ip_fmt`/`voice_ip_text`/`voice_ip_text2` из sched.c; Rust —
     /// `Ipv4Addr` Display, которым печатаются те же адреса.
     #[cfg(unix)]

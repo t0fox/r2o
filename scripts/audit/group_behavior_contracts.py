@@ -166,7 +166,7 @@ CONTRACTS = {
     "CS-SCHED-ECH-QUIC": (
         "Scheduler ECH witness and QUIC initial/address control",
         "ECH witness, quic own initial/address/multi.",
-        "sched.c: ECH/QUIC; Rust ech/quic initial; e2e DoQ и полный порядок не доказаны.",
+        "sched.c: ECH/QUIC; Rust ech/quic initial; quic_text_is_split — 11 текстов C/Rust PASS; e2e DoQ и полный порядок не доказаны.",
     ),
     "CS-SCHED-DIAGNOSTICS": (
         "Scheduler diagnostics/live output",
@@ -382,8 +382,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 369:
-        raise SystemExit(f"expected 369 P rows, got {len(rows)}")
+    if len(rows) != 368:
+        raise SystemExit(f"expected 368 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")
