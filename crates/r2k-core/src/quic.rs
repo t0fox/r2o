@@ -305,6 +305,95 @@ pub fn r2k_quic_packet_number_len(pn: u64, largest_acked: Option<u64>) -> usize 
     ((bits + 8) / 8).clamp(1, 4)
 }
 
+/// C `D2K_QW_LT_*`: номер длинного типа в нумерации v1.
+pub const R2K_QUIC_LONG_INITIAL: u8 = 0;
+pub const R2K_QUIC_LONG_0RTT: u8 = 1;
+pub const R2K_QUIC_LONG_HANDSHAKE: u8 = 2;
+pub const R2K_QUIC_LONG_RETRY: u8 = 3;
+
+/// C `long_type_wire` (`core/quicwire.c:132-140`): тип на проводе.
+fn r2k_quic_long_type_wire(version: u32, packet_type: u8) -> u8 {
+    if version != QUIC_V2 {
+        return packet_type;
+    }
+    match packet_type {
+        R2K_QUIC_LONG_INITIAL => 1,
+        R2K_QUIC_LONG_0RTT => 2,
+        R2K_QUIC_LONG_HANDSHAKE => 3,
+        _ => 0,
+    }
+}
+
+/// C `d2k_qw_long_hdr_token_w` (`core/quicwire.c:142-174`): длинный
+/// заголовок v1/v2. `length_width=0` — авто по значению; для
+/// `R2K_QUIC_LONG_INITIAL` пишется varint длины токена, для остальных
+/// типов токен обязан быть пустым. Возвращает только заголовок, без
+/// packet number и payload.
+#[allow(clippy::too_many_arguments)]
+pub fn r2k_quic_long_header(
+    version: u32,
+    packet_type: u8,
+    dcid: &[u8],
+    scid: &[u8],
+    token: &[u8],
+    pn_len: usize,
+    payload_len: usize,
+    length_width: usize,
+    cap: usize,
+) -> Option<Vec<u8>> {
+    if dcid.len() > MAX_CID || scid.len() > MAX_CID {
+        return None;
+    }
+    if packet_type != R2K_QUIC_LONG_INITIAL && !token.is_empty() {
+        return None;
+    }
+    let token_length_width = if packet_type == R2K_QUIC_LONG_INITIAL {
+        let width = match token.len() {
+            0..=63 => 1,
+            64..=16_383 => 2,
+            16_384..=1_073_741_823 => 4,
+            _ => 8,
+        };
+        if token.len() > MAX_DATAGRAM {
+            return None;
+        }
+        width
+    } else {
+        0
+    };
+    // C `need`: при length_width=0 резервируются 8 байт, хотя
+    // `write_varint_w` потом выбирает минимальную ширину.
+    let reserved_length_width = if length_width == 0 { 8 } else { length_width };
+    let need = 1usize
+        .checked_add(4)?
+        .checked_add(1)?
+        .checked_add(dcid.len())?
+        .checked_add(1)?
+        .checked_add(scid.len())?
+        .checked_add(token_length_width)?
+        .checked_add(token.len())?
+        .checked_add(reserved_length_width)?;
+    if cap < need {
+        return None;
+    }
+
+    let mut out = Vec::with_capacity(need);
+    let wire_type = r2k_quic_long_type_wire(version, packet_type);
+    out.push(0xc0 | (wire_type << 4));
+    out.extend_from_slice(&version.to_be_bytes());
+    out.push(dcid.len() as u8);
+    out.extend_from_slice(dcid);
+    out.push(scid.len() as u8);
+    out.extend_from_slice(scid);
+    if packet_type == R2K_QUIC_LONG_INITIAL {
+        write_varint(token.len() as u64, &mut out).ok()?;
+        out.extend_from_slice(token);
+    }
+    let length = u64::try_from(pn_len.checked_add(payload_len)?.checked_add(16)?).ok()?;
+    write_varint_w(length, length_width, &mut out).ok()?;
+    Some(out)
+}
+
 /// Собрать свежий QUIC v1 Initial с одним полным TLS ClientHello.
 pub fn r2k_quic_initial_build(
     client_hello: &[u8],
@@ -338,15 +427,6 @@ pub fn r2k_quic_initial_build(
         return None;
     }
 
-    let mut clear_header = Vec::with_capacity(64);
-    clear_header.push(0xc0);
-    clear_header.extend_from_slice(&QUIC_V1.to_be_bytes());
-    clear_header.push(dcid.len() as u8);
-    clear_header.extend_from_slice(&dcid);
-    clear_header.push(source_connection_id.len() as u8);
-    clear_header.extend_from_slice(source_connection_id);
-    write_varint(0, &mut clear_header).ok()?;
-
     let mut plain = Vec::with_capacity(target_len);
     plain.push(0x06);
     write_varint(0, &mut plain).ok()?;
@@ -357,8 +437,17 @@ pub fn r2k_quic_initial_build(
     // pn_len=0 вызывает `d2k_qw_pn_len(0,-1)` и получает один байт.
     let pn_len = r2k_quic_packet_number_len(0, None);
     let overhead = pn_len.checked_add(16)?;
-    let (length_width, body_len) = [1usize, 2, 4, 8].into_iter().find_map(|width| {
-        let length = target_len.checked_sub(clear_header.len().checked_add(width)?)?;
+    // 1 форма/тип + 4 version + 1 dcid_len + dcid + 1 scid_len + scid +
+    // 1 varint длины пустого токена.
+    let base_len = 1usize
+        .checked_add(4)?
+        .checked_add(1)?
+        .checked_add(dcid.len())?
+        .checked_add(1)?
+        .checked_add(source_connection_id.len())?
+        .checked_add(1)?;
+    let (clear_header, body_len) = [1usize, 2, 4, 8].into_iter().find_map(|width| {
+        let length = target_len.checked_sub(base_len.checked_add(width)?)?;
         let varint_width = match length {
             0..=63 => 1,
             64..=16_383 => 2,
@@ -369,17 +458,24 @@ pub fn r2k_quic_initial_build(
             return None;
         }
         let body_len = usize::try_from(length).ok()?.checked_sub(overhead)?;
-        (body_len >= plain.len()).then_some((width, body_len))
+        if body_len < plain.len() {
+            return None;
+        }
+        let header = r2k_quic_long_header(
+            QUIC_V1,
+            R2K_QUIC_LONG_INITIAL,
+            &dcid,
+            source_connection_id,
+            &[],
+            pn_len,
+            body_len,
+            width,
+            target_len,
+        )?;
+        (header.len().checked_add(body_len)?.checked_add(overhead)? == target_len)
+            .then_some((header, body_len))
     })?;
     plain.resize(body_len, 0);
-    let length = u64::try_from(body_len.checked_add(overhead)?).ok()?;
-    let header_len = clear_header.len();
-    write_varint(length, &mut clear_header).ok()?;
-    if clear_header.len() - header_len != length_width
-        || clear_header.len() + body_len + overhead != target_len
-    {
-        return None;
-    }
 
     let keys = derive_initial_keys(QUIC_V1, &dcid).ok()?;
     let packet = seal_initial(&clear_header, &plain, 0, pn_len, keys).ok()?;
@@ -1853,6 +1949,111 @@ mod tests {
                 "{pn} {largest_text} {}\n",
                 super::r2k_quic_packet_number_len(pn, largest)
             ));
+        }
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
+    }
+
+    /// C/Rust differential: C-стенд вызывает production
+    /// `d2k_qw_long_hdr_token_w`; Rust — production
+    /// `r2k_quic_long_header`.
+    #[test]
+    fn long_header_matches_c() {
+        let Some(path) = std::env::var_os("R2O_QUIC_LONG_HDR_DIFF_OUTPUT") else {
+            return;
+        };
+        let cases: [(
+            &str,
+            u32,
+            u8,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+        ); 27] = [
+            ("v1_initial", 1, 0, 8, 8, 0, 1, 100, 0, 1500),
+            ("v1_initial_token", 1, 0, 8, 0, 16, 2, 1200, 0, 4096),
+            ("v1_initial_cid0_20", 1, 0, 0, 20, 0, 4, 0, 1, 1500),
+            ("v1_initial_cid20_20", 1, 0, 20, 20, 0, 1, 0, 0, 1500),
+            ("v2_initial", 0x6b33_43cf, 0, 8, 8, 0, 1, 100, 0, 1500),
+            ("v2_0rtt", 0x6b33_43cf, 1, 8, 8, 0, 1, 50, 0, 1500),
+            ("v1_handshake", 1, 2, 8, 8, 0, 2, 200, 0, 1500),
+            ("v2_handshake", 0x6b33_43cf, 2, 8, 8, 0, 2, 200, 0, 1500),
+            ("v1_retry_type", 1, 3, 8, 8, 0, 0, 0, 0, 1500),
+            ("v2_retry_type", 0x6b33_43cf, 3, 8, 8, 0, 0, 0, 0, 1500),
+            ("v1_0rtt_token", 1, 1, 8, 8, 4, 1, 50, 0, 1500),
+            ("v1_initial_dcid21", 1, 0, 21, 8, 0, 1, 100, 0, 1500),
+            ("v1_initial_scid21", 1, 0, 8, 21, 0, 1, 100, 0, 1500),
+            ("v1_initial_token1", 1, 0, 8, 8, 1, 1, 100, 0, 1500),
+            ("v1_width3", 1, 0, 8, 8, 0, 1, 100, 3, 1500),
+            ("v1_width1_small", 1, 0, 8, 8, 0, 1, 100, 1, 1500),
+            ("v1_width2_1000", 1, 0, 8, 8, 0, 1, 1000, 2, 1500),
+            ("v1_cap10", 1, 0, 8, 8, 0, 1, 100, 0, 10),
+            ("v1_cap0", 1, 0, 8, 8, 0, 1, 100, 0, 0),
+            ("v1_pn1", 1, 0, 8, 8, 0, 1, 1200, 0, 1500),
+            ("v1_pn2", 1, 0, 8, 8, 0, 2, 1200, 0, 1500),
+            ("v1_pn3", 1, 0, 8, 8, 0, 3, 1200, 0, 1500),
+            ("v1_pn4", 1, 0, 8, 8, 0, 4, 1200, 0, 1500),
+            (
+                "v1_unknown_version",
+                0xdead_beef,
+                0,
+                8,
+                8,
+                0,
+                1,
+                100,
+                0,
+                1500,
+            ),
+            ("v1_unknown_type4", 1, 4, 8, 8, 0, 1, 100, 0, 1500),
+            ("v2_unknown_type4", 0x6b33_43cf, 4, 8, 8, 0, 1, 100, 0, 1500),
+            ("v1_auto_reserve_cap9", 1, 0, 8, 8, 0, 1, 100, 0, 9),
+        ];
+        fn fill(length: usize, base: u8) -> Vec<u8> {
+            (0..length)
+                .map(|index| base.wrapping_add(index as u8))
+                .collect()
+        }
+        fn hex(bytes: &[u8]) -> String {
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+        }
+        let mut output = String::new();
+        for (
+            label,
+            version,
+            packet_type,
+            dcid_len,
+            scid_len,
+            token_len,
+            pn_len,
+            payload_len,
+            length_width,
+            cap,
+        ) in cases
+        {
+            let dcid = fill(dcid_len, 0xa0);
+            let scid = fill(scid_len, 0xb0);
+            let token = fill(token_len, 0xc0);
+            match super::r2k_quic_long_header(
+                version,
+                packet_type,
+                &dcid,
+                &scid,
+                &token,
+                pn_len,
+                payload_len,
+                length_width,
+                cap,
+            ) {
+                Some(header) => {
+                    output.push_str(&format!("{label} {} {}\n", header.len(), hex(&header)))
+                }
+                None => output.push_str(&format!("{label} 0 -\n")),
+            }
         }
         std::fs::write(path, &output).unwrap();
         print!("{output}");

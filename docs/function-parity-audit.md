@@ -94,14 +94,14 @@ production-путь не ставится. Формулировки «теста
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 368 | 180 | 0 | 0 |
+| core-net | 548 | 371 | 177 | 0 | 0 |
 | core-state | 692 | 513 | 179 | 0 | 0 |
 | datapath-core | 400 | 395 | 5 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1606** | **376** | **0** | **0** |
+| **Итого** | **1982** | **1609** | **373** | **0** | **0** |
 
-Это не оценка паритета: 376 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 373 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -120,7 +120,7 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1606 / P 376**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1609 / P 373**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
@@ -192,7 +192,7 @@ P означает неполное доказательство ветвей, N
 - core-state — CLI-флаги/вывод, PSL/catalog-парсер, crypto HKDF-границы,
   voice-blob, volume resource-retry.
 - `?` (0): не осталось; все строки реестра разобраны и имеют E/P/N.
-- Поведенческая группировка 376 P (27 контрактов, 0 без контракта):
+- Поведенческая группировка 373 P (27 контрактов, 0 без контракта):
   `docs/behavior-contracts/inventory.md` и
   `docs/behavior-contracts/p-contract-map.tsv`. Это не меняет статусы
   реестра и не является заявлением паритета.
@@ -384,12 +384,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 368 | 180 | 0 | 0 |
+| core-net | 548 | 371 | 177 | 0 | 0 |
 | core-state | 692 | 513 | 179 | 0 | 0 |
 | datapath-core | 400 | 395 | 5 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 147 | 12 | 0 | 0 |
-| **Итого** | **1982** | **1606** | **376** | **0** | **0** |
+| **Итого** | **1982** | **1609** | **373** | **0** | **0** |
 
 
 ---
@@ -891,10 +891,10 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 | `d2k_qw_varint_write` | 107-109 | 3 | varint с автошириной | `quic.rs:1070-1083 write_varint` | **E** | C-обёртка `write_w(...,0)`: ширина по `varint_len`. Rust `write_varint` те же пороги 63/16383/1073741823/2^62−1 и те же байты (1/2/4/8), значение больше — `Invalid`. RFC-тесты Initial. |
 | `long_type_v1` | 119-127 | 9 | wire-тип long header → v1: v2 raw 1→INITIAL, 2→0RTT, 3→HANDSHAKE, default→RETRY | `quic.rs:796-809 parse_initial_header` (Initial v1/v2) | **E** | C явно переводит все четыре типа v2 в v1-нумерацию; Rust `parse_initial_header` проверяет только Initial: v1 raw 0, v2 raw 1, иначе `None`. Для Initial v1/v2 результат совпадает; тест `splits_rfc_9369_initial_with_v2_keys_and_labels`. Остальные типы в Rust разбирает quinn. |
 | `long_type_wire` | 132-140 | 9 | v1-тип → wire для v1/v2 (Retry v2 → 0) | `quic.rs:261-335 r2k_quic_initial_build` (Initial v1) | **E** | C переводит INITIAL/0RTT/HANDSHAKE/RETRY в wire-номер версии; Rust строит только Initial: фиксированный `0xc0` = v1 Initial. Для Initial v1 байт совпадает; v2/0RTT/Retry-сборка не вынесена (см. long-header строки). |
-| `d2k_qw_long_hdr_token_w` | 142-174 | 33 | long header v1/v2: форма/фикс.бит/тип, version, DCID/SCID, token только Initial, length = pn+payload+16, заданная ширина length | `quic.rs:261-335 r2k_quic_initial_build` (inline) | **P** | **C-ветви проверены:** DCID/SCID ≤20, token только Initial, `len(token)` varint, `length_width` 0→8, `need=1+4+1+dcid+1+scid+tokenlen+lenwidth`, запись wire-типа, версии, CID, token, length `pn_len+payload_len+16`. **Rust:** только Initial v1 (`0xc0`), token всегда 0, `pn_len` вычисляется `r2k_quic_packet_number_len` (1 для pn=0, как C), ширина length подбирается перебором под `target_len`; v2/token/принудительная ширина не портированы. Для штатного Initial v1 без token байты совпадают (RFC-тест). |
-| `d2k_qw_long_hdr_w` | 176-184 | 9 | обёртка long header без token, автоширина | `quic.rs:261-335 r2k_quic_initial_build` | **P** | C `long_hdr_token_w(..., NULL,0,...,0)` — любой long-тип, token 0; Rust строит ровно Initial v1 (`0xc0`), token 0, `pn_len` считает по RFC 9000 A.2 (1 для pn=0), ширину Length подбирает под `target_len` (1/2/4/8). Для штатного Initial v1 без token байты совпадают (RFC-тест); v2/Handshake/0RTT не портированы. |
+| `d2k_qw_long_hdr_token_w` | 142-174 | 33 | long header v1/v2: форма/фикс.бит/тип, version, DCID/SCID, token только Initial, length = pn+payload+16, заданная ширина length | `quic.rs:r2k_quic_long_header`; `r2k_quic_initial_build` использует его | **E*** | **2026-11-17:** C/Rust differential `scripts/r2o-quic-long-header-differential.sh` PASS **27 кейсов**: C production `d2k_qw_long_hdr_token_w` против Rust production `r2k_quic_long_header`. Покрыты v1/v2/unknown version, типы Initial/0-RTT/Handshake/Retry/unknown, DCID/SCID 0/8/20 и 21 (reject), token 0/1/16 (только Initial), `pn_len` 1..4, `payload_len` 0..1200, `length_width` 0/1/2/3(reject)/8, cap 0/9/10/1500/4096, v2 wire-типы 1/2/3/0 и резерв 8 байт при `length_width=0`. Production `r2k_quic_initial_build` собирает заголовок через builder. **Ограничение:** production отправляет только Initial v1; 0-RTT/Handshake/Retry-заголовки покрыты builder-векторами, но клиентом не отправляются. |
+| `d2k_qw_long_hdr_w` | 176-184 | 9 | обёртка long header без token, автоширина | `quic.rs:r2k_quic_long_header` с пустым token | **E*** | **2026-11-17:** тот же `r2o-quic-long-header-differential.sh` PASS 27 кейсов; обёртка C `long_hdr_token_w(..., NULL,0,...,0)` представлена вызовом builder с пустым token. Проверены Initial/0-RTT/Handshake/Retry v1/v2, автоширина и границы cap. Production Initial использует этот путь. **Ограничение:** клиент отправляет только Initial v1. |
 | `d2k_qw_long_hdr_token` | 186-194 | 9 | long header с token, автоширина | `quic.rs` `r2k_quic_initial_build` + `build_retry` | E | C `long_hdr_token_w` пишет type/version/DCID/SCID, token только для Initial, автоширину Length. Rust `r2k_quic_initial_build` собирает клиентский Initial (token length 0, как в RFC 9001), `build_retry` — Retry с token между SCID и integrity tag; вместе покрывают все пакеты, которые формирует клиент. Тесты `d2k_qw_retry_build_собирает_ровно_как_c` и RFC 9001/9369 Initial. |
-| `d2k_qw_long_hdr` | 196-202 | 7 | long header без token, автоширина | `quic.rs:261` | **P** | C `long_hdr_token(..., NULL,0,...)` — Initial/0RTT/Handshake/Retry; Rust только Initial v1. Байтовый паритет доказан RFC-тестом для Initial v1; остальные типы/версии отсутствуют. |
+| `d2k_qw_long_hdr` | 196-202 | 7 | long header без token, автоширина | `quic.rs:r2k_quic_long_header` с пустым token и `length_width=0` | **E*** | **2026-11-17:** `r2o-quic-long-header-differential.sh` PASS 27 кейсов; C `long_hdr_token(..., NULL,0,...)` == Rust builder с пустым token и автошириной. Покрыты Initial/0-RTT/Handshake/Retry v1/v2, unknown version/type, отказы по token/CID/cap/ширине. **Ограничение:** production-клиент отправляет только Initial v1. |
 | `d2k_qw_hdr_parse` | 204-273 | 70 | generic long/short/Retry/Initial/0-RTT/Handshake: version, DCID/SCID, token, length, PN offset, sample | `quic.rs:796-847 parse_initial_header` (+ short/другие типы у quinn) | **P** | **С-ветви проверены:** short header требует `dcid_len_short` 1..20, `n>=1+dcid+1`, `packet_len=n`; long header `n>=7`, version≠0, `long_type_v1`, DCID≤20/`o+dl>=n`, SCID≤20/`o+sl>n`; Retry — остаток ≥16, token_len=остаток-16, packet_len=n; Initial — token varint, length varint, `plen>=17 && <=n-o`, `pn_offset+20<=n`; 0-RTT/Handshake — length/pn; `length_width`. **Rust `parse_initial_header` — только Initial v1/v2** (`len>=7`, long, version V1/V2, raw type 0/1, token varint, `length_claimed>=17 && <= len-cursor`, `pn_offset+20<=len`); short header/Retry/0RTT/Handshake разбирает quinn/`parse_long_header_ids`. Для клиентского Initial v1/v2 эквивалентно; RFC-тесты Initial. |
 | `d2k_qw_pn_len` | 277-293 | 17 | RFC 9000 A.2: unacked по largest_acked, bits+1, 1..4 байта | `quic.rs:r2k_quic_packet_number_len`; `r2k_quic_initial_build` использует его для pn=0 | **E*** | **2026-11-17:** C/Rust differential `scripts/r2o-quic-pn-len-differential.sh` PASS на 14 значениях, включая RFC-векторы `0xac5c02/0xabe8b3 -> 2` и `0xace8fe/0xabe8b3 -> 3`, `pn=0/largest=-1 -> 1`, границы 127/128, 16383/16384, 65535/65536 и `pn<largest` (беззнаковое вычитание C). Production `r2k_quic_initial_build` теперь seal'ит первый Initial с `pn_len=1`, как C `seal_one`/`quichello`, а не фиксирует 4. **Ограничение:** другие pn (не 0) при сборке Initial не используются; `reseal` по-прежнему сохраняет исходную ширину, как C. |
 | `d2k_qw_pn_decode` | 295-313 | 19 | RFC 9000 A.3: window/half/mask, expected=largest+1, ±window | `quic.rs:1041-1055 decode_packet_number` | **E** | **Точное совпадение:** `pn_len 1..4`, `window=1<<(8*pn_len)`, `half=window/2`, `mask=window-1`, `candidate=(expected&!mask)\|truncated`; `candidate+half<=expected && candidate+window<2^62` → +window; `candidate>expected+half && candidate>=window` → -window; иначе candidate. Rust `decode_packet_number` тот же алгоритм; `open_initial` вызывает с `largest=0` (первый полёт), RFC-тест split Initial. |
