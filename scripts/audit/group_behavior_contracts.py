@@ -201,7 +201,7 @@ CONTRACTS = {
     "DT-BRIDGE": (
         "Detect bridge scheduler",
         "base/tcp/white/seeded/progress/stop bridge.",
-        "bridge: 9 P; bridge differential 8 cases, seeded/white ветви P.",
+        "bridge: 8 P; bridge differential 8 cases, progress_seen — 6 кейсов C/Rust PASS; seeded/white ветви P.",
     ),
     "DT-RAW-HANDSHAKE": (
         "Detect raw handshake/probe",
@@ -382,8 +382,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 365:
-        raise SystemExit(f"expected 365 P rows, got {len(rows)}")
+    if len(rows) != 364:
+        raise SystemExit(f"expected 364 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")

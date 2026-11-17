@@ -1618,6 +1618,22 @@ fn seed_input(trigger: &Trigger, target: &ProbeTarget) -> u64 {
     hash ^ trigger.payload.len() as u64
 }
 
+/// C `progress_seen` (`detect/bridge.c:261-273`): seeded-«whole» несёт счёт
+/// ПРОШЛОГО прогона, зондов в этом не было — в прогресс уходят нули.
+pub(crate) fn r2o_progress_seen_args(
+    seeded_whole: bool,
+    probe: &str,
+    probes: usize,
+    pass: usize,
+    fail: usize,
+) -> (usize, usize, usize) {
+    if seeded_whole && probe == "whole" {
+        (0, 0, 0)
+    } else {
+        (probes, pass, fail)
+    }
+}
+
 fn measure<B: ProbeBackend>(
     backend: &mut B,
     target: &ProbeTarget,
@@ -1647,12 +1663,16 @@ fn measure<B: ProbeBackend>(
         observation.pass = tally.pass;
         observation.fail = tally.fail;
         observation.error = seed.error.clone();
-        progress(spec.name, result.probes, tally.pass, tally.fail);
+        let (note_probes, note_pass, note_fail) =
+            r2o_progress_seen_args(true, spec.name, result.probes, tally.pass, tally.fail);
+        progress(spec.name, note_probes, note_pass, note_fail);
         return tally;
     }
 
     let mut tally = Tally::default();
-    progress(spec.name, result.probes, tally.pass, tally.fail);
+    let (note_probes, note_pass, note_fail) =
+        r2o_progress_seen_args(false, spec.name, result.probes, tally.pass, tally.fail);
+    progress(spec.name, note_probes, note_pass, note_fail);
     for _ in 0..options.repeats {
         if stopped(options) {
             break;
@@ -3892,5 +3912,80 @@ mod probes_word_tests {
         }
         assert!(output.contains("arm|ttl|0||0|0|0|1|"));
         assert!(output.contains("arm|syn-data|-1|данные в SYN"));
+    }
+}
+
+#[cfg(test)]
+mod progress_seen_tests {
+    #[test]
+    fn seeded_whole_measure_reports_zero_probes() {
+        let target = super::ProbeTarget {
+            host: "seed.example".into(),
+            port: 443,
+        };
+        let trigger = super::Trigger {
+            name: "fixture".into(),
+            payload: b"ABCD".to_vec(),
+            accept: super::Accept::Any,
+        };
+        let options = super::ClassifyOptions {
+            repeats: 1,
+            seed_whole: Some(super::SeedWhole {
+                input: super::seed_input(&trigger, &target),
+                repeats: 1,
+                pass: 1,
+                fail: 0,
+                errors: 0,
+                unproven: 0,
+                marked: true,
+                error: None,
+            }),
+            ..super::ClassifyOptions::default()
+        };
+        let mut result = super::ClassifyResult::new("seed.example:443", 1);
+        let mut notes = Vec::new();
+        let tally = super::measure(
+            &mut super::TcpProbeBackend,
+            &target,
+            &trigger,
+            &options,
+            &mut result,
+            super::MeasureSpec {
+                name: "whole",
+                cuts: &[],
+                gap: std::time::Duration::ZERO,
+                until_pass: false,
+            },
+            &mut |probe, probes, pass, fail| {
+                notes.push((probe.to_owned(), probes, pass, fail));
+            },
+        );
+        assert_eq!(notes, vec![("whole".to_owned(), 0, 0, 0)]);
+        assert_eq!(tally.pass, 1);
+    }
+
+    /// C/Rust differential: C-стенд вызывает production `progress_seen`
+    /// из detect/bridge.c; Rust — production `r2o_progress_seen_args`.
+    #[test]
+    fn progress_seen_matches_c() {
+        let Some(path) = std::env::var_os("R2O_PROGRESS_SEEN_DIFF_OUTPUT") else {
+            return;
+        };
+        let cases = [
+            ("seeded_whole", true, "whole", 5_usize, 0_usize),
+            ("seeded_split", true, "split", 3, 2),
+            ("unseeded_whole", false, "whole", 1, 1),
+            ("null_whole", false, "whole", 1, 1),
+            ("empty_probe", true, "", 4, 0),
+            ("seeded_property", true, "свойство:порядок", 0, 3),
+        ];
+        let mut output = String::new();
+        for (label, seeded, probe, pass, fail) in cases {
+            let (_, note_pass, note_fail) =
+                super::r2o_progress_seen_args(seeded, probe, 0, pass, fail);
+            output.push_str(&format!("{label} 1 {probe} {note_pass} {note_fail}\n"));
+        }
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
     }
 }

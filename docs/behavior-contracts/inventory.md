@@ -5,7 +5,7 @@
 поведенческие контракты. Источник — канонические таблицы
 `docs/audit/{core-net,core-state,datapath-core,datapath-plan,detect}.md`.
 
-Строк P: **365**; контрактов: **27**; без контракта: **0**.
+Строк P: **364**; контрактов: **27**; без контракта: **0**.
 
 | Группа | P |
 |---|---:|
@@ -13,7 +13,7 @@
 | core-state | 172 |
 | datapath-core | 5 |
 | datapath-plan | 0 |
-| detect | 12 |
+| detect | 11 |
 
 ## Контракты
 
@@ -44,7 +44,7 @@
 | `CS-PROPS` | QUIC properties text | original/strategy measure and wire properties. | 5 | props: 5 P; quic props findings текстовый контракт не полный. |
 | `DP-SESSION-LIFECYCLE` | Datapath session lifecycle | d2kd main/usage, session_new, UDP handle, session_packet. | 4 | session/d2kd: 4 P; usage — d2kd help-блок C/Rust PASS; session_packet/handle_udp live не сверены. |
 | `DP-NFQ` | Datapath NFQUEUE error text | nfq say static helper. | 1 | nfq: 1 P; error text/ветви NFQUEUE. |
-| `DT-BRIDGE` | Detect bridge scheduler | base/tcp/white/seeded/progress/stop bridge. | 9 | bridge: 9 P; bridge differential 8 cases, seeded/white ветви P. |
+| `DT-BRIDGE` | Detect bridge scheduler | base/tcp/white/seeded/progress/stop bridge. | 8 | bridge: 8 P; bridge differential 8 cases, progress_seen — 6 кейсов C/Rust PASS; seeded/white ветви P. |
 | `DT-RAW-HANDSHAKE` | Detect raw handshake/probe | flush pending, poison family, handshake_as. | 3 | raw: 3 P; raw probe live/ветви. |
 
 ## Правила
