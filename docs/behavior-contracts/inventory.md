@@ -5,11 +5,11 @@
 поведенческие контракты. Источник — канонические таблицы
 `docs/audit/{core-net,core-state,datapath-core,datapath-plan,detect}.md`.
 
-Строк P: **383**; контрактов: **27**; без контракта: **0**.
+Строк P: **379**; контрактов: **27**; без контракта: **0**.
 
 | Группа | P |
 |---|---:|
-| core-net | 184 |
+| core-net | 180 |
 | core-state | 182 |
 | datapath-core | 5 |
 | datapath-plan | 0 |
@@ -25,7 +25,7 @@
 | `CN-QUIC-PROBE-RUN` | QUIC probe run: question ladder, budget, classify | Вопросы junk/frames/datagrams/bit/lowport/length, бюджет и итоговый verdict. | 12 | quicprobe run-функции: 12 P; нужны C/Rust differential полного вопроса и бюджета. |
 | `CN-QUIC-ARM-STRATEGY` | QUIC arm strategy and plan text | Лестница TTL/clearance/split/udplen/frag/fallback и текст arm-плана. | 14 | quicarms + udpplan: 14 P; r2o-quic-plan-text частично, adaptive/порядок не сверены. |
 | `CN-QUIC-CONNECTION` | QUIC connection/data stage | TLS-over-QUIC, transport params, ACK/frames, streams, RTT/close. | 31 | quicconn: 31 P; r2o_quic_http3/quinn; полный побайтовый differential не заявлен. |
-| `CN-TLS-RECORD-IO` | TLS record I/O and helpers | Чтение/запись записей, EINTR/EAGAIN, nonce/AAD, dispose/free. | 14 | tls12/tls13 record-хелперы: 14 P; r2o-tls12-io PASS 13 кейсов, tls13 record layer — нет. |
+| `CN-TLS-RECORD-IO` | TLS record I/O and helpers | Чтение/запись записей, EINTR/EAGAIN, nonce/AAD, dispose/free. | 10 | tls12/tls13 record-хелперы: 10 P; r2o-tls12-io PASS 13 кейсов; tls13 put16/get16 — 65536 значений C/Rust PASS; tls13 record layer — нет. |
 | `CN-TLS13-HANDSHAKE` | TLS 1.3 handshake and keys | CH/SH, HKDF traffic keys, Finished, ECH, downgrade. | 7 | tls13/tls13core: 7 P; rustls; C/Rust побайтового handshake/ECH нет. |
 | `CN-TLS-VERIFY` | TLS/HTTP verify and contact | Проверка TLS1.2/1.3/ECH, тела ответа, контакта по family. | 8 | verify.c TLS-часть: 8 P; verify-* differentials частичные. |
 | `CN-QUIC-VERIFY` | QUIC/HTTP3 verify and replay | QUIC probe on/path/mark, replay, H3 headers/chunks, qb request/recv. | 10 | verify.c QUIC-часть + replay: 10 P; нужен e2e DoQ/HTTP3 differential. |

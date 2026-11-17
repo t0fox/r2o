@@ -1217,3 +1217,29 @@ mod tests {
         std::fs::write(path, output).unwrap();
     }
 }
+
+#[cfg(test)]
+mod tls13_put16_get16_tests {
+    /// C/Rust differential: C-стенд вызывает production `put16`/`get16`
+    /// из tls13.c и tls13core.c; Rust — те же `to_be_bytes`/
+    /// `from_be_bytes`, которыми кодируются заголовки записей.
+    #[test]
+    fn tls13_put16_get16_match_c() {
+        let Some(path) = std::env::var_os("R2O_TLS13_PUT16_DIFF_OUTPUT") else {
+            return;
+        };
+        let mut output = String::new();
+        for value in 0_u32..=65_535 {
+            let number = value as u16;
+            let bytes = number.to_be_bytes();
+            output.push_str(&format!(
+                "{value} {} {} {}\n",
+                bytes[0],
+                bytes[1],
+                u16::from_be_bytes(bytes)
+            ));
+        }
+        std::fs::write(path, &output).unwrap();
+        print!("{output}");
+    }
+}

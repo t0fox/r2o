@@ -106,7 +106,7 @@ CONTRACTS = {
     "CN-TLS-RECORD-IO": (
         "TLS record I/O and helpers",
         "Чтение/запись записей, EINTR/EAGAIN, nonce/AAD, dispose/free.",
-        "tls12/tls13 record-хелперы: 14 P; r2o-tls12-io PASS 13 кейсов, tls13 record layer — нет.",
+        "tls12/tls13 record-хелперы: 10 P; r2o-tls12-io PASS 13 кейсов; tls13 put16/get16 — 65536 значений C/Rust PASS; tls13 record layer — нет.",
     ),
     "CN-TLS13-HANDSHAKE": (
         "TLS 1.3 handshake and keys",
@@ -382,8 +382,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 383:
-        raise SystemExit(f"expected 383 P rows, got {len(rows)}")
+    if len(rows) != 379:
+        raise SystemExit(f"expected 379 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")
