@@ -748,6 +748,24 @@ fn r2k_quic_initial_crypto_stream(
     Some(())
 }
 
+/// C `d2k_quic_hello_incomplete` (`core/quic.c:672-685`): в CRYPTO-потоке
+/// есть заголовок ClientHello, но заявленная длина больше собранного. Любая
+/// ошибка разбора — «не обрезан» (0), как у C.
+pub fn r2k_quic_hello_incomplete(input: &[u8]) -> bool {
+    let mut stream = [0u8; MAX_CLIENT_HELLO];
+    let mut seen = [false; MAX_CLIENT_HELLO];
+    if r2k_quic_initial_crypto_stream(&[input], &mut stream, &mut seen).is_none() {
+        return false;
+    }
+    let filled = seen.iter().take_while(|present| **present).count();
+    if filled < 4 || stream[0] != 0x01 {
+        return false;
+    }
+    let claimed =
+        (usize::from(stream[1]) << 16) | (usize::from(stream[2]) << 8) | usize::from(stream[3]);
+    4usize.saturating_add(claimed) > filled
+}
+
 /// Собрать ClientHello из Initial-датаграмм одного QUIC-полёта.
 pub fn r2k_quic_initial_client_hello_from_datagrams(datagrams: &[&[u8]]) -> Option<Vec<u8>> {
     let mut stream = [0; MAX_CLIENT_HELLO];
@@ -2242,6 +2260,31 @@ mod tests {
             }
         }
         std::fs::write(path, &output).unwrap();
+        print!("{output}");
+    }
+
+    #[test]
+    fn hello_incomplete_matches_c() {
+        let Some(input_path) = std::env::var_os("R2O_QUIC_INCOMPLETE_INPUT") else {
+            return;
+        };
+        let Some(output_path) = std::env::var_os("R2O_QUIC_INCOMPLETE_OUTPUT") else {
+            return;
+        };
+        let input = std::fs::read_to_string(input_path).unwrap();
+        let mut output = String::new();
+        for line in input.lines() {
+            let (label, hex) = line.split_once(',').unwrap();
+            let bytes: Vec<u8> = (0..hex.len())
+                .step_by(2)
+                .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).unwrap())
+                .collect();
+            output.push_str(&format!(
+                "{label},{}\n",
+                u8::from(super::r2k_quic_hello_incomplete(&bytes))
+            ));
+        }
+        std::fs::write(output_path, &output).unwrap();
         print!("{output}");
     }
 

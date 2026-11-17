@@ -28105,6 +28105,12 @@ impl ControlClient {
         // Raw baseline probes bypass NFQUEUE. Candidate confirmation uses a
         // fresh unmarked socket so the temporary plan can emit exact APPLIED.
         let mut candidate_probes = Vec::new();
+        // C `d2k_quic_hello_incomplete`: первый Initial обрезан по CRYPTO —
+        // разрез такому клиенту не предлагаем (плюс quic_multi ниже).
+        let split_incomplete = parsed_snapshot
+            .datagrams()
+            .first()
+            .is_some_and(|datagram| r2k_core::quic::r2k_quic_hello_incomplete(datagram));
         let split_applicable = parsed_snapshot
             .datagrams()
             .iter()
@@ -28115,7 +28121,7 @@ impl ControlClient {
                 false,
                 true,
                 snapshot.len(),
-                false,
+                split_incomplete,
             );
         let mut selected_plan: Option<(String, String, R2oQuicConfirmProof)> = None;
         let mut fragment_control_passed = false;
@@ -28691,6 +28697,13 @@ impl ControlClient {
         // клиент этой цели исполнить не может (ClientHello шире датаграммы),
         // не подтверждается. Вход у нас — снятая пачка клиента, поэтому
         // `snapped=1`: неприменимость решает только `quic_multi`.
+        let trig_incomplete = r2k_core::quic_snapshot::r2k_quic_snapshot_parse(snapshot)
+            .is_some_and(|parsed| {
+                parsed
+                    .datagrams()
+                    .first()
+                    .is_some_and(|datagram| r2k_core::quic::r2k_quic_hello_incomplete(datagram))
+            });
         if r2o_quic_text_is_split(plan_text)
             && r2o_quic_split_unfit(
                 host,
@@ -28698,7 +28711,7 @@ impl ControlClient {
                 host.parse::<std::net::IpAddr>().is_ok(),
                 true,
                 snapshot.len(),
-                false,
+                trig_incomplete,
             )
         {
             println!(
