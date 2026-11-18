@@ -14457,8 +14457,18 @@ fn r2o_client_shape_from_legacy(
     })
 }
 
+#[cfg(test)]
 fn r2o_handle_client_shape_event(
     worker: &mut DiscoveryWorker,
+    shape: &r2k_core::control::ClientShapeEvent,
+) -> Option<r2o_controller::discovery::DiscoveryTarget> {
+    r2o_handle_client_shape_event_with_catalog(worker, &Catalog::default(), shape)
+}
+
+#[cfg(unix)]
+fn r2o_handle_client_shape_event_with_catalog(
+    worker: &mut DiscoveryWorker,
+    catalog: &Catalog,
     shape: &r2k_core::control::ClientShapeEvent,
 ) -> Option<r2o_controller::discovery::DiscoveryTarget> {
     let target = r2o_controller::discovery::DiscoveryTarget::from_client_shape(shape)?;
@@ -14475,6 +14485,26 @@ fn r2o_handle_client_shape_event(
         );
     }
     let key = r2o_discovery_task_key(&target);
+    // C `on_shape` / T_WATCHING: если подтверждённая привязка добыта
+    // профилем (`input == PROFILE`), пришедшие байты клиента сильнее
+    // заготовки — перемеряем задачу ими.
+    if worker.r2o_is_watching_task(&key)
+        && r2o_controller::discovery::r2o_binding_for(
+            catalog,
+            &target.host,
+            r2o_discovery_transport(&target),
+            target.family,
+        )
+        .is_some_and(|binding| binding.input == 2)
+    {
+        worker.r2o_reset_recheck_state(&target);
+        worker.pending_rechecks.insert(
+            key.clone(),
+            (target.clone(), Some(shape.client_hello.clone()), false),
+        );
+        worker.r2o_schedule_pending_rechecks();
+        return Some(target);
+    }
     if worker
         .active
         .get(&key)
@@ -25936,7 +25966,8 @@ impl ControlClient {
                     let shape = r2o_client_shape_from_legacy(&event, options.as_deref())
                         .ok_or("SHAPE v22 не содержит разбираемого ClientHello")?;
                     if let Some((worker, catalog, _, _)) = &mut discovery
-                        && let Some(target) = r2o_handle_client_shape_event(worker, &shape)
+                        && let Some(target) =
+                            r2o_handle_client_shape_event_with_catalog(worker, catalog, &shape)
                     {
                         let reason = if r2o_controller::discovery::has_usable_profile_binding(
                             catalog, &target,
@@ -25979,7 +26010,8 @@ impl ControlClient {
                     let shape = decode_client_shape(&frame)
                         .map_err(|error| format!("снимок ClientHello: {error}"))?;
                     if let Some((worker, catalog, _, _)) = &mut discovery
-                        && let Some(target) = r2o_handle_client_shape_event(worker, &shape)
+                        && let Some(target) =
+                            r2o_handle_client_shape_event_with_catalog(worker, catalog, &shape)
                     {
                         let reason = if r2o_controller::discovery::has_usable_profile_binding(
                             catalog, &target,
@@ -37707,7 +37739,8 @@ mod tests {
         parse_serve_options, print_flow_journal, r2o_catalog_mark_flow_unfit,
         r2o_discovery_failure_retry_due, r2o_ech_direct_config_usable,
         r2o_family_applied_flow_matches, r2o_family_recovery_decision,
-        r2o_handle_client_shape_event, r2o_http_failed_disposition, r2o_http_live_cut_recheck,
+        r2o_handle_client_shape_event, r2o_handle_client_shape_event_with_catalog,
+        r2o_http_failed_disposition, r2o_http_live_cut_recheck,
         r2o_plan_wire_shape, r2o_quic_binding_blocks_retry, r2o_stall_budgets_changed,
         r2o_tcp_stall_budgets, r2o_tcp_stall_budgets_for_name, r2o_tcp_stall_in_name_band,
         r2o_voice_proof_matches_target, r2o_voice_suspect_frame_is_udp, save_plan_file,
@@ -55020,6 +55053,73 @@ group_block_proven: false,
             std::fs::write(path, &output).unwrap();
         }
         assert_eq!(output, "0 1\n1 0\n2 0\n3 0\n4 0\n5 0\n6 0\n7 0\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_binding_shape_event_remeasures_watching_task_like_c() {
+        let target = DiscoveryTarget {
+            tcp_profile: 0,
+            host: "owner.example.com".into(),
+            endpoint: "198.51.100.2:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let task_key = super::r2o_discovery_task_key(&target);
+        let shape = r2k_core::control::ClientShapeEvent {
+            key: {
+                let mut key = [0; KEY_LEN];
+                key[0] = 4;
+                key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+                key[17..21].copy_from_slice(&[198, 51, 100, 2]);
+                key[33..35].copy_from_slice(&40_000_u16.to_be_bytes());
+                key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+                key[37] = 6;
+                key
+            },
+            host: target.host.as_bytes().to_vec(),
+            shape: SHAPE_MODERN,
+            client_hello: super::Trigger::tls13(&target.host).unwrap().payload,
+            tcp_has_timestamp: Some(true),
+        };
+        let catalog = |input: u8| Catalog {
+            boxes: vec![BoxRecord {
+                id: "box".into(),
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: target.host.clone(),
+                    plan_id: "plan".into(),
+                    level: 3,
+                    enabled: true,
+                    transport: 6,
+                    family: 4,
+                    shape: SHAPE_MODERN,
+                    input,
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        worker.completed.insert(task_key.clone());
+        assert!(
+            r2o_handle_client_shape_event_with_catalog(&mut worker, &catalog(2), &shape).is_some()
+        );
+        assert!(
+            !worker.completed.contains(&task_key),
+            "профильная привязка должна снять watching и поставить перемер"
+        );
+
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        worker.completed.insert(task_key.clone());
+        assert!(
+            r2o_handle_client_shape_event_with_catalog(&mut worker, &catalog(1), &shape).is_some()
+        );
+        assert!(
+            worker.completed.contains(&task_key),
+            "не-профильная привязка не запускает перемер"
+        );
     }
 
     #[cfg(unix)]

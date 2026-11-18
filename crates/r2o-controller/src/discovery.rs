@@ -306,7 +306,39 @@ pub fn own_first_plans(
         .collect()
 }
 
-/// Select the same first batch as `core/sched.c::known_plans`.
+/// C `binding_for` (`core/sched.c:4931-4946`): первая name-привязка с
+/// указанными транспортом/семейством, без фильтров enabled/level/shape.
+pub fn r2o_binding_for<'a>(
+    catalog: &'a Catalog,
+    name: &str,
+    transport: u8,
+    family: u8,
+) -> Option<&'a crate::catalog::Binding> {
+    for box_record in &catalog.boxes {
+        for binding in &box_record.bindings {
+            let binding_transport = if binding.transport == 0 {
+                6
+            } else {
+                binding.transport
+            };
+            let binding_family = if binding.family == 0 {
+                4
+            } else {
+                binding.family
+            };
+            if binding_transport == transport
+                && binding_family == family
+                && binding.kind == "name"
+                && binding.target == name
+            {
+                return Some(binding);
+            }
+        }
+    }
+    None
+}
+
+/// C `known_plans` (`core/sched.c`): выбрать планы коробки по отпечатку.
 pub fn known_plans(
     catalog: &Catalog,
     target: &DiscoveryTarget,
@@ -4076,6 +4108,55 @@ mod tests {
             &same_profile,
             &same_profile.boxes[0].bindings[0]
         ));
+    }
+
+    #[test]
+    fn binding_for_matches_c() {
+        use crate::catalog::{Binding, BoxRecord, Catalog};
+
+        let binding = |plan: &str, transport: u8, family: u8, input: u8, shape: u8| Binding {
+            kind: "name".into(),
+            target: "alpha.example".into(),
+            plan_id: plan.into(),
+            transport,
+            family,
+            input,
+            shape,
+            ..Binding::default()
+        };
+        let catalog = Catalog {
+            boxes: vec![
+                BoxRecord {
+                    id: "box-a".into(),
+                    bindings: vec![binding("plan-a", 0, 0, 2, 8)],
+                    ..BoxRecord::default()
+                },
+                BoxRecord {
+                    id: "box-b".into(),
+                    bindings: vec![binding("plan-b", 6, 4, 1, 1)],
+                    ..BoxRecord::default()
+                },
+            ],
+            ..Catalog::default()
+        };
+        let mut output = String::new();
+        let mut emit =
+            |label: &str, name: &str, transport: u8, family: u8| match super::r2o_binding_for(
+                &catalog, name, transport, family,
+            ) {
+                Some(binding) => output.push_str(&format!(
+                    "{label}={}:{}:{}:{}\n",
+                    binding.target, binding.plan_id, binding.input, binding.shape
+                )),
+                None => output.push_str(&format!("{label}=none\n")),
+            };
+        emit("tcp4", "alpha.example", 6, 4);
+        emit("quic4", "alpha.example", 17, 4);
+        emit("tcp6", "alpha.example", 6, 6);
+        emit("other", "beta.example", 6, 4);
+        if let Ok(path) = std::env::var("R2O_BINDING_FOR_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
     }
 
     #[test]

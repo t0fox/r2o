@@ -151,7 +151,7 @@ CONTRACTS = {
     "CS-SCHED-CANDIDATE-VERIFY": (
         "Scheduler candidate verification",
         "verify_confirm, partial_finish, ACK/APPLIED, own plan, exchange.",
-        "sched.c: verify/applied/exchange; production verify_confirm 30 cases, props_text — 243 кейса C/Rust PASS; own_first_plans QUIC — 3 случая C/Rust PASS; own_rank_before — 8 случаев PASS; остальные ветви P.",
+        "sched.c: verify/applied/exchange; production verify_confirm 30 cases, props_text — 243 кейса C/Rust PASS; own_first_plans QUIC — 3 случая C/Rust PASS; own_rank_before — 8 случаев PASS; binding_for — 4 случая PASS и on_shape-перемер; остальные ветви P.",
     ),
     "CS-SCHED-PLAN-GENERATION": (
         "Scheduler plan generation",
@@ -382,8 +382,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 192:
-        raise SystemExit(f"expected 192 P rows, got {len(rows)}")
+    if len(rows) != 191:
+        raise SystemExit(f"expected 191 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")
