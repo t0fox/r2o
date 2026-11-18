@@ -116,7 +116,7 @@ CONTRACTS = {
     "CN-TLS-VERIFY": (
         "TLS/HTTP verify and contact",
         "Проверка TLS1.2/1.3/ECH, тела ответа, контакта по family.",
-        "verify.c TLS-часть: 6 P; request_complete_page — 13 кейсов, props_contact — 11 кейсов C/Rust PASS; остальные verify-* частичные.",
+        "verify.c TLS-часть: 6 P; request_complete_page — 13, props_contact — 11 кейсов PASS; body_byte differential воспроизведён: 9/16 расхождений в HttpResponseParser (chunk extension/control/trailer/over-limit) — блокер на выравнивание парсера.",
     ),
     "CN-QUIC-VERIFY": (
         "QUIC/HTTP3 verify and replay",
