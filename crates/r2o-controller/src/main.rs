@@ -2144,8 +2144,12 @@ fn apply_catalog(socket_path: PathBuf, catalog_path: PathBuf) -> Result<(), Box<
     )?;
     let mut area_sequence = 0;
     let mut installed_areas = Vec::new();
-    let mut cursor =
-        CatalogSyncCursor::from_compiled(compiled, &mut area_sequence, &mut installed_areas)?;
+    let mut cursor = CatalogSyncCursor::from_compiled_after(
+        compiled,
+        &mut area_sequence,
+        &mut installed_areas,
+        &[],
+    )?;
     let mut active_groups = HashSet::new();
     loop {
         if !cursor.send_step(&mut client, &mut active_groups, &mut installed_areas)? {
@@ -3783,11 +3787,10 @@ fn r2o_box_tcp_stall_budget(box_record: &r2o_controller::catalog::BoxRecord) -> 
 
 #[cfg(unix)]
 fn r2o_tcp_stall_budgets(catalog: &Catalog) -> Vec<u16> {
-    let mut budgets = Vec::new();
+    // C `stall_budgets_push`: базовое поле 25 идёт первым всегда, даже если
+    // в каталоге ещё нет ни одной RX-volume коробки.
+    let mut budgets = vec![R2O_TCP_STALL_FIELD_BUDGET];
     for budget in catalog.boxes.iter().filter_map(r2o_box_tcp_stall_budget) {
-        if budgets.is_empty() {
-            budgets.push(R2O_TCP_STALL_FIELD_BUDGET);
-        }
         if budgets.len() >= R2O_TCP_STALL_BUDGETS_MAX {
             break;
         }
@@ -3796,6 +3799,11 @@ fn r2o_tcp_stall_budgets(catalog: &Catalog) -> Vec<u16> {
         }
     }
     budgets
+}
+
+#[cfg(unix)]
+fn r2o_stall_budgets_changed(new: &[u16], sent: &[u16]) -> bool {
+    !new.is_empty() && new != sent
 }
 
 #[cfg(unix)]
@@ -5587,6 +5595,9 @@ struct PendingCatalogSyncCommand {
     expected_ack: Option<u16>,
     expected_area_id: Option<[u8; 16]>,
     counts_toward_chunk: bool,
+    /// C `stall_sent`: список бюджетов, который эта команда несёт. Поле
+    /// обновляется только после успешной записи команды в control-сокет.
+    stall_budgets: Option<Vec<u16>>,
 }
 
 #[cfg(unix)]
@@ -5724,6 +5735,7 @@ struct CatalogSyncCursor {
     sent: usize,
     skipped: usize,
     areas_failed: bool,
+    stall_budgets_sent: Vec<u16>,
 }
 
 #[cfg(unix)]
@@ -5908,6 +5920,7 @@ fn catalog_area_queue_stale_deletes(
             }),
             expected_area_id: Some(area_id),
             counts_toward_chunk: false,
+            stall_budgets: None,
         });
     }
     Ok(())
@@ -5936,10 +5949,27 @@ fn control_frame_with_area_id(
 
 #[cfg(unix)]
 impl CatalogSyncCursor {
+    #[cfg(test)]
     fn from_compiled(
         compiled: CompiledCatalog,
         area_sequence: &mut u64,
         installed_areas: &mut [InstalledCatalogArea],
+    ) -> Result<Self, Box<dyn Error>> {
+        // Тестам и одиночным сборкам базовый [25] не нужен как отдельная
+        // команда: production-путь передаёт реальный последний список.
+        Self::from_compiled_after(
+            compiled,
+            area_sequence,
+            installed_areas,
+            &[R2O_TCP_STALL_FIELD_BUDGET],
+        )
+    }
+
+    fn from_compiled_after(
+        compiled: CompiledCatalog,
+        area_sequence: &mut u64,
+        installed_areas: &mut [InstalledCatalogArea],
+        stall_budgets_sent: &[u16],
     ) -> Result<Self, Box<dyn Error>> {
         let groups = compiled
             .group_commands
@@ -6010,6 +6040,7 @@ impl CatalogSyncCursor {
                             kind,
                             Some(COMMAND_SET_NAME | COMMAND_SET_ADDR)
                         ),
+                        stall_budgets: None,
                     });
                 }
                 CatalogInstallOp::CleanupName { host, command } => {
@@ -6021,6 +6052,7 @@ impl CatalogSyncCursor {
                         expected_ack: None,
                         expected_area_id: None,
                         counts_toward_chunk: false,
+                        stall_budgets: None,
                     });
                 }
             }
@@ -6033,7 +6065,7 @@ impl CatalogSyncCursor {
                 area_sequence,
             )?;
         }
-        if !compiled.tcp_stall_budgets.is_empty() {
+        if r2o_stall_budgets_changed(&compiled.tcp_stall_budgets, stall_budgets_sent) {
             pending.push_back(PendingCatalogSyncCommand {
                 host: "бюджеты потока TCP".into(),
                 command: encode_set_tcp_stall_budgets(&compiled.tcp_stall_budgets)
@@ -6043,6 +6075,7 @@ impl CatalogSyncCursor {
                 expected_ack: None,
                 expected_area_id: None,
                 counts_toward_chunk: false,
+                stall_budgets: Some(compiled.tcp_stall_budgets.clone()),
             });
         }
         Ok(Self {
@@ -6051,6 +6084,7 @@ impl CatalogSyncCursor {
             sent: 0,
             skipped: compiled.skipped,
             areas_failed: false,
+            stall_budgets_sent: stall_budgets_sent.to_vec(),
         })
     }
 
@@ -6114,6 +6148,10 @@ impl CatalogSyncCursor {
                 continue;
             }
             self.sent += 1;
+            if let Some(stall_budgets) = operation.stall_budgets {
+                // C `stall_sent` обновляется только после успешной отправки.
+                self.stall_budgets_sent = stall_budgets;
+            }
             if operation.counts_toward_chunk {
                 sent_now += 1;
             }
@@ -22867,12 +22905,14 @@ impl ControlClient {
         let mut r2o_quic_command_first = false;
         let mut catalog_area_sequence = 0;
         let mut installed_areas = Vec::new();
+        let mut stall_budgets_sent = Vec::new();
         let mut catalog_sync = initial_catalog_sync
             .map(|compiled| {
-                CatalogSyncCursor::from_compiled(
+                CatalogSyncCursor::from_compiled_after(
                     compiled,
                     &mut catalog_area_sequence,
                     &mut installed_areas,
+                    &[],
                 )
             })
             .transpose()?;
@@ -23169,10 +23209,11 @@ impl ControlClient {
                     };
                     catalog_sync = compiled
                         .map(|compiled| {
-                            CatalogSyncCursor::from_compiled(
+                            CatalogSyncCursor::from_compiled_after(
                                 compiled,
                                 &mut catalog_area_sequence,
                                 &mut installed_areas,
+                                &stall_budgets_sent,
                             )
                         })
                         .transpose()?;
@@ -23195,6 +23236,7 @@ impl ControlClient {
                             catalog_sync_refusals = 0;
                             catalog_sync_refusal_reason = control::ACK_OK;
                         }
+                        stall_budgets_sent = cursor.stall_budgets_sent.clone();
                         catalog_sync = None;
                     }
                 }
@@ -37559,9 +37601,10 @@ mod tests {
         r2o_discovery_failure_retry_due, r2o_ech_direct_config_usable,
         r2o_family_applied_flow_matches, r2o_family_recovery_decision,
         r2o_handle_client_shape_event, r2o_http_failed_disposition, r2o_http_live_cut_recheck,
-        r2o_plan_wire_shape, r2o_quic_binding_blocks_retry, r2o_tcp_stall_budgets,
-        r2o_tcp_stall_budgets_for_name, r2o_tcp_stall_in_name_band, r2o_voice_proof_matches_target,
-        r2o_voice_suspect_frame_is_udp, save_plan_file, shape_matches_plan,
+        r2o_plan_wire_shape, r2o_quic_binding_blocks_retry, r2o_stall_budgets_changed,
+        r2o_tcp_stall_budgets, r2o_tcp_stall_budgets_for_name, r2o_tcp_stall_in_name_band,
+        r2o_voice_proof_matches_target, r2o_voice_suspect_frame_is_udp, save_plan_file,
+        shape_matches_plan,
     };
     use r2k_core::control::{
         Ack, BindingContext, COMMAND_DEL_NAME_PROBE, COMMAND_DEL_VOICE_ADDR_PROBE,
@@ -46416,7 +46459,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn ech_rr_кэш_ограничен_256_именами_и_обновление_двигает_кольцо_как_c() {
+    fn ech_rr_кэш_ограничен_256_именами_как_c() {
         let now = std::time::Instant::now();
         let mut cache = super::R2oEchWitnessResolutionCache::default();
         let config = || r2o_controller::ech::R2oEchConfig {
@@ -46433,10 +46476,10 @@ mod tests {
         cache.store("witness-new.example", Some(config()), now);
 
         assert!(cache.lookup("witness-0.example", now).is_none());
-        // C `ech_rr_store` двигает курсор при повторной записи слота
-        // `ech_rr_next`, поэтому вытесняется witness-2, а не witness-1.
-        assert!(cache.lookup("witness-1.example", now).is_some());
-        assert!(cache.lookup("witness-2.example", now).is_none());
+        // Обновление существующего имени в слоте 0 при next=1 не двигает
+        // курсор: следующее новое имя вытесняет witness-1, как в C.
+        assert!(cache.lookup("witness-1.example", now).is_none());
+        assert!(cache.lookup("witness-2.example", now).is_some());
         assert_eq!(cache.lookup("witness-256.example", now), Some(None));
         assert!(cache.lookup("witness-new.example", now).is_some());
     }
@@ -52780,7 +52823,11 @@ group_block_proven: false,
         };
 
         assert_eq!(r2o_tcp_stall_budgets(&catalog), [25, 32, 64, 48]);
-        assert!(r2o_tcp_stall_budgets(&Catalog::default()).is_empty());
+        // C `stall_budgets_push` всегда ставит базовое поле 25 первым.
+        assert_eq!(r2o_tcp_stall_budgets(&Catalog::default()), [25]);
+        assert!(r2o_stall_budgets_changed(&[25, 32], &[]));
+        assert!(!r2o_stall_budgets_changed(&[25, 32], &[25, 32]));
+        assert!(!r2o_stall_budgets_changed(&[], &[25]));
         assert_eq!(
             r2o_tcp_stall_budgets_for_name(&catalog, "example.com"),
             [32]
@@ -52788,6 +52835,48 @@ group_block_proven: false,
         assert!(r2o_tcp_stall_in_name_band(&catalog, "example.com", 29));
         assert!(!r2o_tcp_stall_in_name_band(&catalog, "example.com", 28));
         assert!(r2o_tcp_stall_in_name_band(&catalog, "other.example", 7));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stall_budgets_push_only_when_changed_like_c() {
+        let compiled = || super::CompiledCatalog {
+            commands: Vec::new(),
+            install_order: Vec::new(),
+            group_commands: Vec::new(),
+            skipped: 0,
+            tcp_stall_budgets: vec![25, 32],
+        };
+        let mut area_sequence = 0;
+        let mut installed_areas = Vec::new();
+        let same = super::CatalogSyncCursor::from_compiled_after(
+            compiled(),
+            &mut area_sequence,
+            &mut installed_areas,
+            &[25, 32],
+        )
+        .unwrap();
+        assert!(
+            !same
+                .pending
+                .iter()
+                .any(|command| command.stall_budgets.is_some()),
+            "при совпадении с отправленным списком команда не ставится"
+        );
+        let changed = super::CatalogSyncCursor::from_compiled_after(
+            compiled(),
+            &mut area_sequence,
+            &mut installed_areas,
+            &[25],
+        )
+        .unwrap();
+        assert!(
+            changed
+                .pending
+                .iter()
+                .any(|command| command.stall_budgets.as_deref() == Some(&[25, 32])),
+            "изменённый список обязан поехать в датапат"
+        );
     }
 
     #[cfg(unix)]
