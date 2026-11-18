@@ -6415,6 +6415,9 @@ struct HttpLiveFailure {
 #[cfg(unix)]
 #[derive(Default)]
 struct HttpSearchRecord {
+    /// C `rec.key`: последний подтверждённый ключ имени (живёт и после
+    /// отзыва — C `build_cands` перепроверяет его первым).
+    key: String,
     cut: bool,
     repeat_path: Vec<u8>,
     repro_gap: bool,
@@ -6611,6 +6614,24 @@ impl HttpSearchRecordCache {
         }
     }
 
+    /// C `confirmed`: запомнить последний подтверждённый ключ имени.
+    fn record_key_name(&mut self, host: &str, family: u8, key: &str) {
+        let map_key = (host.to_ascii_lowercase(), family);
+        if self.has_room_for(&map_key) {
+            self.0.entry(map_key).or_default().key = key.to_owned();
+        }
+    }
+
+    fn record_key(&mut self, target: &r2o_controller::discovery::DiscoveryTarget, key: &str) {
+        self.record_key_name(&target.host, target.family, key);
+    }
+
+    /// C `build_cands`: свой ключ записи, даже если привязка отозвана.
+    fn own_key(&self, target: &r2o_controller::discovery::DiscoveryTarget) -> Option<String> {
+        let record = self.0.get(&Self::key(target))?;
+        (!record.key.is_empty()).then(|| record.key.clone())
+    }
+
     fn count(&self) -> usize {
         self.0.len()
     }
@@ -6797,13 +6818,17 @@ fn http_live_failure_key(
 fn http_search_candidates(
     catalog: &Catalog,
     target: &r2o_controller::discovery::DiscoveryTarget,
+    cache_own: Option<&str>,
 ) -> Vec<String> {
     use r2o_controller::http_search::candidate_ladder;
 
     let measured = measured_http_candidate_keys(catalog);
-    // C `build_cands`: ключ своей подтверждённой записи, затем подтверждённые
-    // планы других имён; далее вопросы SPLIT/CHECKSUM/PRODUCT и fallback.
-    let own = http_plan_of(catalog, &target.host, target.family);
+    // C `build_cands`: свой ключ записи (переживает отзыв — перепроверка),
+    // затем подтверждённые планы других имён; далее вопросы
+    // SPLIT/CHECKSUM/PRODUCT и fallback.
+    let own = cache_own
+        .map(str::to_owned)
+        .or_else(|| http_plan_of(catalog, &target.host, target.family));
     let saved = saved_http_candidate_keys(catalog, target);
     candidate_ladder(own.as_deref(), &saved, &measured)
 }
@@ -9634,7 +9659,12 @@ impl HttpSearchWorker {
                 diagnostic_seq = diagnostic_seq.wrapping_add(1);
                 let diagnostic_started = std::time::Instant::now();
                 let (result, disposition, terminal, creates_record, revoke_owned_binding) = {
-                    match run_http_search_task(task, &worker_command_sender, &worker_cancel) {
+                    match run_http_search_task(
+                        task,
+                        &worker_command_sender,
+                        &worker_cancel,
+                        &worker_records,
+                    ) {
                         Ok(completion) => (
                             Ok(()),
                             completion.disposition,
@@ -9796,6 +9826,14 @@ impl HttpSearchWorker {
             .record_repeat_path(target, path);
     }
 
+    /// C `build_cands`: свой ключ записи (может быть отозван — перепроверка).
+    fn own_key(&self, target: &r2o_controller::discovery::DiscoveryTarget) -> Option<String> {
+        self.records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .own_key(target)
+    }
+
     /// C `remember_live_failure`: зафиксировать живой отказ под планом.
     fn remember_live_failure(
         &self,
@@ -9869,8 +9907,9 @@ impl HttpSearchWorker {
                 }) else {
                     continue;
                 };
-                if candidate_key_from_plan_text(&plan.text).is_some() {
+                if let Some(key) = candidate_key_from_plan_text(&plan.text) {
                     records.record_name(&binding.target, binding.family);
+                    records.record_key_name(&binding.target, binding.family, &key);
                 }
             }
         }
@@ -26279,7 +26318,7 @@ impl ControlClient {
         if !self.begin_http_search(target, live_bound_cut) {
             return false;
         }
-        let candidates = http_search_candidates(catalog, target);
+        let candidates = http_search_candidates(catalog, target, worker.own_key(target).as_deref());
         let live_failures = failed_http_programs(catalog, target);
         if worker.queue(HttpSearchTask {
             target: target.clone(),
@@ -30534,6 +30573,7 @@ fn run_http_search_task(
     task: HttpSearchTask,
     commands: &SyncSender<HttpSearchCommand>,
     cancel: &AtomicBool,
+    records: &std::sync::Mutex<HttpSearchRecordCache>,
 ) -> Result<HttpSearchCompletion, HttpSearchFailure> {
     if cancel.load(Ordering::Relaxed) {
         return Ok(HttpSearchCompletion::quiet(
@@ -30713,6 +30753,13 @@ fn run_http_search_task(
                     .map_err(|error| {
                         HttpSearchFailure::local_abort("plan-install-failed", error)
                     })?;
+                    // C `confirmed`: r->key пишется только после успешной
+                    // установки; запись переживает отзыв — build_cands
+                    // перепроверяет её первой.
+                    records
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .record_key(&target, &key);
                     return Ok(HttpSearchCompletion::terminal(
                         HttpSearchDisposition::Recheck,
                         "probe-confirmed",
@@ -53234,6 +53281,37 @@ group_block_proven: false,
 
     #[cfg(unix)]
     #[test]
+    fn own_http_key_survives_revocation_and_is_tried_first() {
+        use r2k_core::control::SHAPE_HTTP;
+        use r2o_controller::discovery::DiscoveryTarget;
+
+        let target = DiscoveryTarget {
+            tcp_profile: 0,
+            host: "revoked.example".into(),
+            endpoint: "198.51.100.90:80".into(),
+            family: 4,
+            shape: SHAPE_HTTP,
+        };
+        let mut cache = super::HttpSearchRecordCache::default();
+        cache.record_key(&target, "fake:ttl=5+badsum");
+        // Повторное создание записи (C `rec_get`) не стирает ключ.
+        cache.record(&target);
+        assert_eq!(cache.own_key(&target).as_deref(), Some("fake:ttl=5+badsum"));
+
+        // Привязка отозвана и удалена из каталога: ключ остаётся в записи,
+        // как C `rec.key` после revoke, и идёт первым в build_cands.
+        let catalog = Catalog::default();
+        let candidates =
+            http_search_candidates(&catalog, &target, cache.own_key(&target).as_deref());
+        assert_eq!(
+            candidates.first().map(String::as_str),
+            Some("fake:ttl=5+badsum")
+        );
+        assert_eq!(cache.own_key(&target).as_deref(), Some("fake:ttl=5+badsum"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn measured_http_candidates_replace_only_the_generic_sequence_fallback() {
         use r2k_core::control::SHAPE_HTTP;
         use r2o_controller::catalog::Plan as SavedPlan;
@@ -53260,7 +53338,7 @@ group_block_proven: false,
             ..Catalog::default()
         };
 
-        let candidates = http_search_candidates(&catalog, &target);
+        let candidates = http_search_candidates(&catalog, &target, None);
 
         assert!(candidates.contains(&"fake:ttl=64+badsum".to_owned()));
         assert!(!candidates.contains(&"fake-seqshift".to_owned()));

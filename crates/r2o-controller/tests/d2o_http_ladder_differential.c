@@ -77,6 +77,28 @@ int main(void)
 
     hs = d2k_httpsearch_new(NULL);
     if (!hs) { return 2; }
+    put_rec(hs, "own.example", "fake:ttl=5+badsum", 1, 1);
+    put_rec(hs, "newer.example", "disorder", 3, 0);
+    put_rec(hs, "older.example", "split", 2, 0);
+    set_own(hs, "own.example");
+    build_cands(hs);
+    finish_ladder(hs);
+    dump("own-revoked", hs);
+    d2k_httpsearch_free(hs);
+
+    hs = d2k_httpsearch_new(NULL);
+    if (!hs) { return 2; }
+    put_rec(hs, "own.example", "split", 1, 0);
+    put_rec(hs, "other-a.example", "split", 3, 0);
+    put_rec(hs, "other-b.example", "disorder", 2, 0);
+    set_own(hs, "own.example");
+    build_cands(hs);
+    finish_ladder(hs);
+    dump("build-dedupe", hs);
+    d2k_httpsearch_free(hs);
+
+    hs = d2k_httpsearch_new(NULL);
+    if (!hs) { return 2; }
     set_own(hs, "none.example");
     if (d2k_httpsearch_measured_poison(hs, "ttl=9 badsum") != 0 ||
         d2k_httpsearch_measured_poison(hs, "seqshift=-66000") != 0) {

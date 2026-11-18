@@ -1055,6 +1055,20 @@ pub fn build_fallback(measured: &[String]) -> Vec<String> {
     keys
 }
 
+/// C `build_cands` (`core/httpsearch.c:1012-1039`): свой ключ первым (даже
+/// отозванный — это перепроверка), затем ключи других записей в порядке
+/// свежести, который подготовил вызывающий.
+pub fn build_cands(own: Option<&str>, others: &[String]) -> Vec<String> {
+    let mut keys = Vec::new();
+    if let Some(key) = own {
+        add_candidate(&mut keys, key);
+    }
+    for key in others {
+        add_candidate(&mut keys, key);
+    }
+    keys
+}
+
 /// Полная последовательность C `next_candidate`: OWN/SAVED → HQ_SPLIT →
 /// HQ_CHECKSUM → HQ_PRODUCT → HQ_FALLBACK.
 ///
@@ -1063,14 +1077,7 @@ pub fn build_fallback(measured: &[String]) -> Vec<String> {
 /// порядок оставшихся, поэтому на старте поиска (флаги нулевые) полный
 /// список — это ровно будущая последовательность зондов.
 pub fn candidate_ladder(own: Option<&str>, saved: &[String], measured: &[String]) -> Vec<String> {
-    let mut candidates = Vec::new();
-    // C `build_cands`: свой ключ первым, затем ключи других записей.
-    if let Some(key) = own {
-        add_candidate(&mut candidates, key);
-    }
-    for key in saved {
-        add_candidate(&mut candidates, key);
-    }
+    let mut candidates = build_cands(own, saved);
     // C `next_candidate`: HQ_SPLIT, HQ_CHECKSUM, HQ_PRODUCT.
     for key in ["split", "fake-badsum-whole", "fake-badsum"] {
         add_candidate(&mut candidates, key);
@@ -2047,6 +2054,17 @@ mod ladder_tests {
             &mut output,
             "own-saved-revoked",
             &candidate_ladder(Some("fake:ttl=5+badsum"), &saved, &[]),
+        );
+        dump(
+            &mut output,
+            "own-revoked",
+            &candidate_ladder(Some("fake:ttl=5+badsum"), &saved, &[]),
+        );
+        let saved_dedupe = ["split".to_owned(), "disorder".to_owned()];
+        dump(
+            &mut output,
+            "build-dedupe",
+            &candidate_ladder(Some("split"), &saved_dedupe, &[]),
         );
         let measured = ["fake:ttl=9+badsum".to_owned(), "fake-seqshift".to_owned()];
         dump(
