@@ -11196,10 +11196,15 @@ impl R2oEchWitnessResolutionCache {
         {
             slot
         } else {
-            let slot = self.next;
-            self.next = (self.next + 1) % R2O_DISCOVERY_ECH_RR_CAPACITY;
-            slot
+            self.next
         };
+        // C `ech_rr_store`: курсор двигается всегда, когда выбранный слот
+        // совпал с `ech_rr_next`, включая повторную запись существующего
+        // имени в этом слоте. Иначе следующее новое имя вытесняет не тот
+        // слот, что в D2O.
+        if slot == self.next {
+            self.next = (self.next + 1) % R2O_DISCOVERY_ECH_RR_CAPACITY;
+        }
         self.entries[slot] = Some(R2oEchWitnessResolution {
             name: name.to_owned(),
             config,
@@ -46051,6 +46056,126 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn d2o_ech_rr_cache_matches_c() {
+        let now = std::time::Instant::now();
+        let config = r2o_controller::ech::R2oEchConfig {
+            public_name: "public.example".into(),
+            origin_name: "witness.example".into(),
+            config_list: vec![1, 2, 3],
+        };
+        let known = |cache: &super::R2oEchWitnessResolutionCache,
+                     name: &str,
+                     public_name: &str,
+                     at: std::time::Instant| {
+            match cache.lookup(name, at) {
+                None => -1,
+                Some(Some(config)) if config.public_name == public_name => 1,
+                Some(_) => 0,
+            }
+        };
+        let mut cache = super::R2oEchWitnessResolutionCache::default();
+        let mut output = String::new();
+        output.push_str(&format!(
+            "before={}\n",
+            known(&cache, "positive.example", "public.example", now)
+        ));
+        cache.store("positive.example", Some(config), now);
+        output.push_str(&format!(
+            "positive_match={}\n",
+            known(&cache, "positive.example", "public.example", now)
+        ));
+        output.push_str(&format!(
+            "positive_other={}\n",
+            known(&cache, "positive.example", "other.example", now)
+        ));
+        cache.store("negative.example", None, now);
+        output.push_str(&format!(
+            "negative_empty={}\n",
+            known(&cache, "negative.example", "", now)
+        ));
+        output.push_str(&format!(
+            "negative_other={}\n",
+            known(&cache, "negative.example", "public.example", now)
+        ));
+
+        let positive_ttl = now + std::time::Duration::from_secs(6 * 60 * 60);
+        output.push_str(&format!(
+            "positive_at_ttl={}\n",
+            known(&cache, "positive.example", "public.example", positive_ttl)
+        ));
+        output.push_str(&format!(
+            "positive_after_ttl={}\n",
+            known(
+                &cache,
+                "positive.example",
+                "public.example",
+                positive_ttl + std::time::Duration::from_millis(1),
+            )
+        ));
+        let negative_ttl = now + std::time::Duration::from_secs(30 * 60);
+        output.push_str(&format!(
+            "negative_at_ttl={}\n",
+            known(&cache, "negative.example", "", negative_ttl)
+        ));
+        output.push_str(&format!(
+            "negative_after_ttl={}\n",
+            known(
+                &cache,
+                "negative.example",
+                "",
+                negative_ttl + std::time::Duration::from_millis(1),
+            )
+        ));
+
+        let mut ring = super::R2oEchWitnessResolutionCache::default();
+        for index in 0..super::R2O_DISCOVERY_ECH_RR_CAPACITY {
+            ring.store(
+                &format!("rr-{index:03}.example"),
+                Some(r2o_controller::ech::R2oEchConfig {
+                    public_name: "public.example".into(),
+                    origin_name: "witness.example".into(),
+                    config_list: vec![1],
+                }),
+                now,
+            );
+        }
+        ring.store(
+            "rr-000.example",
+            Some(r2o_controller::ech::R2oEchConfig {
+                public_name: "public.example".into(),
+                origin_name: "witness.example".into(),
+                config_list: vec![1],
+            }),
+            now,
+        );
+        ring.store(
+            "new.example",
+            Some(r2o_controller::ech::R2oEchConfig {
+                public_name: "public.example".into(),
+                origin_name: "witness.example".into(),
+                config_list: vec![1],
+            }),
+            now,
+        );
+        output.push_str(&format!(
+            "ring_update_keeps_000={}\n",
+            known(&ring, "rr-000.example", "public.example", now)
+        ));
+        output.push_str(&format!(
+            "ring_new_present={}\n",
+            known(&ring, "new.example", "public.example", now)
+        ));
+        output.push_str(&format!(
+            "ring_next_present={}\n",
+            known(&ring, "rr-001.example", "public.example", now)
+        ));
+        if let Ok(path) = std::env::var("R2O_ECH_RR_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn ech_rr_сохраняет_положительный_и_отрицательный_ответ_до_срока() {
         let now = std::time::Instant::now();
         let mut cache = super::R2oEchWitnessResolutionCache::default();
@@ -46291,7 +46416,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn ech_rr_кэш_ограничен_256_именами_и_обновление_не_двигает_кольцо() {
+    fn ech_rr_кэш_ограничен_256_именами_и_обновление_двигает_кольцо_как_c() {
         let now = std::time::Instant::now();
         let mut cache = super::R2oEchWitnessResolutionCache::default();
         let config = || r2o_controller::ech::R2oEchConfig {
@@ -46308,7 +46433,10 @@ mod tests {
         cache.store("witness-new.example", Some(config()), now);
 
         assert!(cache.lookup("witness-0.example", now).is_none());
-        assert!(cache.lookup("witness-1.example", now).is_none());
+        // C `ech_rr_store` двигает курсор при повторной записи слота
+        // `ech_rr_next`, поэтому вытесняется witness-2, а не witness-1.
+        assert!(cache.lookup("witness-1.example", now).is_some());
+        assert!(cache.lookup("witness-2.example", now).is_none());
         assert_eq!(cache.lookup("witness-256.example", now), Some(None));
         assert!(cache.lookup("witness-new.example", now).is_some());
     }
