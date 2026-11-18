@@ -5,12 +5,12 @@
 поведенческие контракты. Источник — канонические таблицы
 `docs/audit/{core-net,core-state,datapath-core,datapath-plan,detect}.md`.
 
-Строк P: **303**; контрактов: **24**; без контракта: **0**.
+Строк P: **302**; контрактов: **23**; без контракта: **0**.
 
 | Группа | P |
 |---|---:|
 | core-net | 125 |
-| core-state | 162 |
+| core-state | 161 |
 | datapath-core | 5 |
 | datapath-plan | 0 |
 | detect | 11 |
@@ -40,7 +40,7 @@
 | `CS-SCHED-ECH-QUIC` | Scheduler ECH witness and QUIC initial/address control | ECH witness, quic own initial/address/multi. | 9 | sched.c: ECH/QUIC; Rust ech/quic initial; quic_text_is_split — 11 текстов C/Rust PASS; e2e DoQ и полный порядок не доказаны. |
 | `CS-SCHED-DIAGNOSTICS` | Scheduler diagnostics/live output | progress/diagnostics/counts, live binding/phase, say/level/time/hex. | 9 | sched.c: diagnostics/helpers; live 12 states PASS, level_name — 10 значений, is_hex_digit — 256 байт, progress_note — 11 кейсов C/Rust PASS; редкие counters/поля P. |
 | `CS-CRYPTO-ECC` | ECC primitives P-256/X25519 | Полевая арифметика, point/scalar, public/keypair/ecdh. | 33 | p256/x25519: 33 P; ring/hpke/dalek; прямых C/Rust векторов нет. |
-| `CS-CLI-TOOLS` | CLI tools d2kc/d2kask/d2kfetch/d2kvoice | Флаги, stdout/exit, snapshot wire, usage. | 1 | d2kc/d2kask/d2kfetch/d2kvoice: pval_str — 42-строчный C/Rust PASS; step/ack/seen — тексты сверены, production CLI не переведён; d2kvoice main/usage PASS; snapshot_wire C-путь недостижим; diagnostic_limit/event/tick, http_search_portal и sched_say — PASS; остальные CLI. |
+| `CS-CLI-TOOLS` | CLI tools d2kc/d2kask/d2kfetch/d2kvoice | Флаги, stdout/exit, snapshot wire, usage. | 0 | d2kc/d2kask/d2kfetch/d2kvoice: pval_str — 42-строчный C/Rust PASS; step/ack/seen — тексты сверены, production CLI не переведён; d2kvoice main/usage PASS; snapshot_wire C-путь недостижим; diagnostic_limit/event/tick, http_search_portal и sched_say — PASS; остальные CLI. |
 | `CS-PROPS` | QUIC properties text | original/strategy measure and wire properties. | 5 | props: 5 P; quic props findings текстовый контракт не полный. |
 | `DP-SESSION-LIFECYCLE` | Datapath session lifecycle | d2kd main/usage, session_new, UDP handle, session_packet. | 4 | session/d2kd: 4 P; usage — d2kd help-блок C/Rust PASS; session_packet/handle_udp live не сверены. |
 | `DP-NFQ` | Datapath NFQUEUE error text | nfq say static helper. | 1 | nfq: 1 P; error text/ветви NFQUEUE. |

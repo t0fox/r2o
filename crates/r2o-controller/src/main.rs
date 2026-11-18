@@ -1239,10 +1239,18 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
         #[cfg(not(unix))]
         return Err("управляющий AF_UNIX сокет поддерживается только на Unix".into());
     }
+    if arguments.len() < 3
+        && arguments
+            .first()
+            .is_some_and(|argument| argument == "--serve")
+    {
+        return Err(r2o_usage_error(serve_usage()));
+    }
     if (3..=13).contains(&arguments.len()) && arguments[0] == "--serve" {
         #[cfg(unix)]
         {
-            let options = parse_serve_options(&arguments[3..])?;
+            let options = parse_serve_options(&arguments[3..])
+                .map_err(|error| r2o_usage_error(format!("{error}\n{}", serve_usage())))?;
             return serve_catalog(
                 PathBuf::from(&arguments[1]),
                 PathBuf::from(&arguments[2]),
@@ -1938,6 +1946,16 @@ fn save_plan_file(path: &std::path::Path, plan: &[u8]) -> std::io::Result<()> {
     file.write_all(plan)
 }
 
+fn serve_usage() -> &'static str {
+    "использование: r2o-controller --serve <сокет> <каталог.json> [--discover] [--mark 0x2e] [--measure-mark 0x2f] [--live <файл>] [--no-diagnostics]\n\
+     \x20 --serve          управляющий сокет датапата и файл каталога (обязательны)\n\
+     \x20 --discover       включить автопоиск новых TCP SNI и HTTP-портала\n\
+     \x20 --mark           метка зондов контроллера (по умолчанию 0x2d)\n\
+     \x20 --measure-mark   метка измерений (по умолчанию --mark)\n\
+     \x20 --live           куда писать live.json для панели\n\
+     \x20 --no-diagnostics отключить локальную диагностику"
+}
+
 fn print_help() {
     println!(
         "r2o-controller — каталог и контроллер r2o\n\nИспользование:\n  r2o-controller --check-catalog ФАЙЛ\n  r2o-controller --clear-catalog ФАЙЛ\n  r2o-controller --classify HOST PORT SNI [REPEATS] [--modern] [--allow-loopback] [--mark N] [--only ИМЯ] [--skip ИМЯ ...] [--save-plan ФАЙЛ] [--arm СОКЕТ]\n  r2o-controller --probe-response HOST PORT SNI [REPEATS]\n  r2o-controller --set-name СОКЕТ HOST FAMILY SHAPE ПЛАН.r2op\n  r2o-controller --set-addr СОКЕТ IP SHAPE ПЛАН.r2op\n  r2o-controller --del-addr СОКЕТ IP SHAPE\n  r2o-controller --apply-catalog СОКЕТ КАТАЛОГ.json\n  r2o-controller --recheck-name СОКЕТ HOST FAMILY SHAPE КАТАЛОГ.json\n  r2o-controller --mark-recheck HOST FAMILY SHAPE КАТАЛОГ.json\n  r2o-controller --serve СОКЕТ КАТАЛОГ.json [--discover] [--mark N] [--measure-mark N]\n  r2o-controller --watch СОКЕТ\n  r2o-controller --journal СОКЕТ\n  r2o-controller --http-candidates\n  r2o-controller --self-check\n  r2o-controller --version\n  r2o-controller --help\n\nFAMILY: ipv4 или ipv6. SHAPE: modern, legacy, ech, http, quic или voice; voice использует HOST @discord-voice. Адресная привязка принимает modern, legacy, ech, quic или voice. QUIC поддерживает планы quicsplit, quicdeny, четыре формы IP-фрагментации после контрольной пробы, удлинение UDP, нулевую 16-байтовую фальшивку и пару фальшивых quic5 с TTL 3 после подтверждённого рукопожатия и зависания; --modern использует сохранённый TLS 1.3 ClientHello; --discover ставит новые TCP SNI в ограниченную очередь классификации и ищет обход HTTP-портала, а для Discord voice запускает ограниченный IP Discovery поиск, требующий --mark; --mark задаёт SO_MARK управляющим зондам и raw-пакетам; --measure-mark задаёт отдельную метку измерений (без неё измерения идут меткой --mark); --save-plan создаёт новый файл и не перезаписывает существующий; --arm передаёт найденный план работающему r2o-datapath для соответствующей формы."
@@ -2192,8 +2210,24 @@ fn serve_catalog(
 
     install_r2o_controller_signal_handlers()?;
     let (mark, measure_mark) = r2o_serve_probe_marks(mark, measure_mark);
-    let catalog = Catalog::load(&catalog_path)?;
-    let mut client = ControlClient::connect(socket_path)?;
+    // C `d2kc main`: отсутствие каталога — первый запуск, а не отказ;
+    // битый существующий файл — отказ с причиной.
+    let catalog = match Catalog::load(&catalog_path) {
+        Ok(catalog) => catalog,
+        Err(_error) if !catalog_path.exists() => {
+            println!(
+                "r2o-controller: каталога {} нет — начинаю с пустого",
+                catalog_path.display()
+            );
+            Catalog::default()
+        }
+        Err(error) => {
+            return Err(
+                format!("каталог {} не разобрался: {error}", catalog_path.display()).into(),
+            );
+        }
+    };
+    let mut client = ControlClient::connect_serve(socket_path.clone())?;
     let (catalog, compiled) = catalog_commands_for_runtime(
         &catalog_path,
         &catalog,
@@ -2215,7 +2249,17 @@ fn serve_catalog(
     let https_cache_path = catalog_path.with_file_name("https-cache.json");
     let active_groups = HashSet::new();
     let live_catalog = Some((catalog.clone(), catalog_path.clone()));
-    client.watch_events(
+    // C `d2kc main`: строка запуска печатается после загрузки каталога,
+    // приветствия и установки сохранённых планов — перед циклом.
+    println!(
+        "r2o-controller: запущен, сокет {}, каталог {} ({} коробок), метка 0x{:x}",
+        socket_path.display(),
+        catalog_path.display(),
+        catalog.boxes.len(),
+        mark.unwrap_or(0x2d)
+    );
+    std::io::stdout().flush()?;
+    let result = client.watch_events(
         discover.then_some((catalog, catalog_path.clone(), measure_mark)),
         Some(https_cache_path),
         measure_mark,
@@ -2225,7 +2269,9 @@ fn serve_catalog(
         active_groups,
         Some(compiled),
         no_diagnostics,
-    )
+    );
+    println!("r2o-controller: останавливаюсь");
+    result
 }
 
 #[cfg(unix)]
@@ -22085,10 +22131,33 @@ impl ControlClient {
     fn connect(path: PathBuf) -> Result<Self, Box<dyn Error>> {
         // C `d2k_link_open`: пустой/слишком длинный путь и connect-ошибка
         // имеют те же тексты, что у C (`say`).
-        let mut socket = match r2k_core::control::r2o_link_open(&path) {
+        let socket = match r2k_core::control::r2o_link_open(&path) {
             Ok(socket) => socket,
             Err(error) => return Err(error.into()),
         };
+        Self::handshake(socket)
+    }
+
+    /// Подключение демона `--serve`: C `d2kc main` разделяет отказ канала и
+    /// отказ приветствия, поэтому и тексты разные.
+    fn connect_serve(path: PathBuf) -> Result<Self, Box<dyn Error>> {
+        let socket = r2k_core::control::r2o_link_open(&path)
+            .map_err(|error| format!("связь с датапатом {}: {error}", path.display()))?;
+        Self::handshake(socket).map_err(|error| {
+            let text = error.to_string();
+            if text.starts_with("несовместимый r2o-datapath") {
+                let version = match r2o_control_wire() {
+                    r2k_core::control::WireProfile::V22 => r2k_core::control::PROTOCOL_VERSION_V22,
+                    r2k_core::control::WireProfile::V48 => PROTOCOL_VERSION,
+                };
+                format!("несовместимое приветствие датапата, нужна версия {version}").into()
+            } else {
+                format!("нет корректного приветствия датапата: {text}").into()
+            }
+        })
+    }
+
+    fn handshake(mut socket: std::os::unix::net::UnixStream) -> Result<Self, Box<dyn Error>> {
         socket.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
         socket.set_write_timeout(Some(std::time::Duration::from_secs(2)))?;
         let greeting = decode_greeting(&read_frame(&mut socket)?)
