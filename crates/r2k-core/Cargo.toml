@@ -16,7 +16,9 @@ libc = "0.2"
 
 [dev-dependencies]
 hmac = "0.12.1"
+p256 = { version = "0.13", features = ["ecdh"] }
 tls-parser = "0.12.2"
+x25519-dalek = "3"
 
 [lib]
 name = "r2k_core"

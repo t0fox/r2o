@@ -176,7 +176,7 @@ CONTRACTS = {
     "CS-CRYPTO-ECC": (
         "ECC primitives P-256/X25519",
         "Полевая арифметика, point/scalar, public/keypair/ecdh.",
-        "p256/x25519: 33 P; ring/hpke/dalek; прямых C/Rust векторов нет.",
+        "2026-11-18: C/Rust vector differential PASS 72 (X25519) + 42 (P-256) строки; production TLS — rustls/ring.",
     ),
     "CS-CLI-TOOLS": (
         "CLI tools d2kc/d2kask/d2kfetch/d2kvoice",
@@ -457,7 +457,7 @@ def main() -> int:
         "| `DT-RAW-HANDSHAKE` | Detect raw handshake/probe non-Linux stubs | 2026-11-18: три не-Linux заглушки (`flush_pending`, `poison_family`, `handshake_as`) закрыты как E*: R2O выпускается только для Linux/OpenWrt, raw-слой вне Linux не компилируется, а Linux-путь покрыт production differential 5 cases. |",
         "| `CN-TLS-RECORD-IO` | TLS record I/O and helpers | 2026-11-18: record/handshake-слой заменён rustls; dispose/free — RAII, `say` — внутренний форматтер. Байты ClientHello TLS1.2 сверены `test-tls12-ch12-differential.sh`, поля ServerHello — `d2o_verify_differential`, ключи/IV — `hkdf-*`. **Ограничение:** побайтового differential record-слоя нет. |",
         "| `CN-TLS13-HANDSHAKE` | TLS 1.3 handshake and keys | 2026-11-18: TLS1.3-стек заменён rustls; ClientHello/ECH и поля ServerHello сверены `d2o_verify_differential`/`r2o-ech-*`, app-data — живыми TLS-проверками. **Ограничение:** побайтового differential handshake/record-слоя нет. |",
-        "| `CS-CRYPTO-ECC` | ECC primitives P-256/X25519 | 2026-11-18: внутренние поле/точка/scalar C не переносятся построчно; TLS/ECH используют rustls/ring (X25519 + SECP256R1), ClientHello/рукопожатия и crypto-примитивы покрыты differential'ами. **Ограничение:** прямого scalar/point differential нет. |",
+        "| `CS-CRYPTO-ECC` | ECC primitives P-256/X25519 | 2026-11-18: C/Rust vector differential — `test-x25519-differential.sh` PASS 72 строки, `test-p256-differential.sh` PASS 42 строки (production C против x25519-dalek/p256, все скаляры и пары). TLS/ECH используют rustls/ring с теми же RFC; ClientHello/рукопожатия покрыты отдельными differential'ами. **Ограничение:** прямого scalar-API у ring нет; production проверяется завершёнными TLS-сессиями. |",
         "",
         "## Следующий шаг",
         "",
