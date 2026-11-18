@@ -179,9 +179,14 @@ impl R2oConntrackGate {
     pub fn r2o_preflight(
         &mut self,
         packet: &[u8],
+        has_plan: bool,
         first_packet: bool,
         tcp_syn_ack_seen: bool,
     ) -> bool {
+        // D2O проверяет conntrack только для пакета с выбранным планом.
+        if !has_plan {
+            return true;
+        }
         self.r2o_preflight_with_lookup(packet, first_packet, tcp_syn_ack_seen, |tuple| {
             crate::proc_nat::lookup(Path::new(D2O_CONNTRACK_PATH), tuple)
         })
@@ -932,6 +937,15 @@ mod tests {
         assert!(
             !gate.r2o_preflight_with_lookup(&tcp, true, false, |_| { R2oProcNatLookup::Missing })
         );
+    }
+
+    #[test]
+    fn preflight_без_плана_не_читает_conntrack() {
+        let mut gate = R2oConntrackGate::with_capacity(4);
+        let packet = ipv4_udp_packet();
+        assert!(crate::conntrack::tuple_from_packet(&packet).is_some());
+        assert!(gate.r2o_preflight(&packet, false, false, false));
+        assert_eq!(gate.nat_stats(), (0, 0, 0, 0));
     }
 
     #[test]
