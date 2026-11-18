@@ -382,8 +382,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 302:
-        raise SystemExit(f"expected 302 P rows, got {len(rows)}")
+    if len(rows) != 301:
+        raise SystemExit(f"expected 301 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")
@@ -410,7 +410,7 @@ def main() -> int:
     lines = [
         "# Инвентарь поведенческих контрактов по оставшимся P",
         "",
-        "Дата: 2026-11-16. Это не перенос и не заявление паритета: 1982 C-функции",
+        "Дата: 2026-11-18. Это не перенос и не заявление паритета: 1982 C-функции",
         "остаются справочным реестром, а P-строки сгруппированы в проверяемые",
         "поведенческие контракты. Источник — канонические таблицы",
         "`docs/audit/{core-net,core-state,datapath-core,datapath-plan,detect}.md`.",
@@ -452,13 +452,15 @@ def main() -> int:
         "| `DP-TRACK` | Datapath flow table key hash | 2026-11-17: `test-datapath-tcp-capacity-differential.sh` PASS (capacity/refusal/reverse/duplicate/remove/expiry); `key_hash` осознанно заменён на `HashMap` RandomState — внутренний порядок коллизий не наблюдаем, HashDoS-устойчивость не ослаблена. |",
         "| `CN-IP6FRAG` | IPv6 fragment probe helper | 2026-11-17: `test-datapath-ip6frag-sender-state-differential.sh` PASS (init/close/send-after-close, fd); production sender uses `Instant` for the same 1s cache and 200ms neighbor deadline. |",
         "| `CS-VERDICT` | Classify verdict | 2026-11-17: C `d2k_classify` — обёртка `d2k_classify_cancelable(...,NULL)` без production-вызова в D2O; Rust `run` без отмены, дерево cancelable E* (`test-classifier-clear-confirm-differential.sh` + unit). Ограничение — отдельного differential обёртки нет. |",
+        "| `CS-CLI-TOOLS` | CLI tools d2kc/d2kask/d2kfetch/d2kvoice | 2026-11-18: `r2o-ask-cli-differential.sh` PASS 28 сценариев `d2kask main` (no-trigger, полный отказ датапата, save-файлы, CLI/hex/сокет-ошибки); `r2o-serve-cli-differential.sh` PASS 9 сценариев `d2kc main` (version/usage/битый и отсутствующий каталог/приветствие/timeout/SIGTERM). Production-отчёт ask переведён на формат C. |",
+        "| `DP-NFQ` | Datapath NFQUEUE error text | 2026-11-18: C `say` — внутренний `vsnprintf` в буфер; Rust возвращает `io::Error`/`String` и логирует причину у вызывающего. Ветви вердиктов/ENOBUFS/timestamp/ICMP покрыты профильными C/Rust differential'ами; отдельного поведенческого контракта у буфера нет. |",
         "",
         "## Следующий шаг",
         "",
-        "Закрыты `CS-LINK-IO`, `CS-MEASUREMENT`, `CS-CATALOG-TLV`,",
-        "`DP-TRACK`, `CN-IP6FRAG` и `CS-VERDICT`. Следующие приоритеты —",
-        "QUIC wire (ranges/seal/open), TLS record/handshake, NFQUEUE",
-        "error text, `d2kask`/`d2kc main`.",
+        "Закрыты `CS-LINK-IO`, `CS-MEASUREMENT`, `CS-CATALOG-TLV`, `DP-TRACK`,"
+        "`CN-IP6FRAG`, `CS-VERDICT`, `CS-CLI-TOOLS` и `DP-NFQ`. Следующие приоритеты —",
+        "TLS record/handshake, QUIC connection/verify, volume и voice; тяжёлые",
+        "live-контракты требуют стенда с датапатом и реальным сетевым путём.",
         "",
         "## Ограничение TTL-контракта",
         "",
