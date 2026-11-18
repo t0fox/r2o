@@ -4346,4 +4346,180 @@ mod tests {
         }
         print!("{output}");
     }
+
+    #[test]
+    fn quic_strategy_arms_matches_c() {
+        use crate::r2o_quic_http3::R2oQuicHttp3Result;
+        use r2k_core::quic::R2kQuicDataVerdict;
+        use std::collections::VecDeque;
+
+        #[derive(Clone, Copy, Eq, PartialEq)]
+        enum Scenario {
+            TtlYes,
+            ClearanceYes,
+            SplitYes,
+            UdplenYes,
+            FragYes,
+            Fallback,
+            NoSplit,
+        }
+
+        fn blob_len(blob: u8) -> usize {
+            if blob == 4 {
+                16
+            } else {
+                super::R2O_QUIC_ORIGINAL_BLOBS[usize::from(blob)].len()
+            }
+        }
+
+        fn probe_pass(scenario: Scenario, kind: super::R2oQuicCandidateKind) -> usize {
+            match (scenario, kind) {
+                (Scenario::TtlYes, super::R2oQuicCandidateKind::TtlStrategy) => 3,
+                (Scenario::ClearanceYes, super::R2oQuicCandidateKind::Clearance) => 3,
+                (Scenario::SplitYes, super::R2oQuicCandidateKind::SplitCrypto) => 3,
+                (Scenario::UdplenYes, super::R2oQuicCandidateKind::UdpLength) => 3,
+                (Scenario::FragYes, super::R2oQuicCandidateKind::FragmentControl) => 3,
+                (Scenario::FragYes, super::R2oQuicCandidateKind::FragmentShape(2)) => 3,
+                _ => 0,
+            }
+        }
+
+        #[allow(clippy::type_complexity)]
+        fn ask_fields(kind: super::R2oQuicCandidateKind) -> (u8, u8, i32, u8, u8, u8, u32, usize) {
+            match kind {
+                super::R2oQuicCandidateKind::TtlStrategy => (0, 0, 3, 2, 0, 0, 0, blob_len(0)),
+                super::R2oQuicCandidateKind::Clearance => (0, 0, 0, 1, 0, 1, 0, 16),
+                super::R2oQuicCandidateKind::SplitCrypto => (0, 0, 0, 0, 1, 0, 0, 0),
+                super::R2oQuicCandidateKind::UdpLength => (0, 0, 0, 0, 0, 0, 100, 0),
+                super::R2oQuicCandidateKind::FragmentControl => (1, 1, 0, 0, 0, 0, 0, 0),
+                super::R2oQuicCandidateKind::FragmentShape(shape) => (0, shape, 0, 0, 0, 0, 0, 0),
+                super::R2oQuicCandidateKind::OriginalSingle(blob) => {
+                    (0, 0, 0, 1, 0, 0, 0, blob_len(blob))
+                }
+                super::R2oQuicCandidateKind::OriginalRepeats { blob, copies } => {
+                    (0, 0, 0, copies, 0, 0, 0, blob_len(blob))
+                }
+                super::R2oQuicCandidateKind::OriginalTtl(ttl) => {
+                    (0, 0, i32::from(ttl), 2, 0, 0, 0, blob_len(0))
+                }
+                _ => (0, 0, 0, 0, 0, 0, 0, 0),
+            }
+        }
+
+        #[allow(clippy::type_complexity)]
+        fn selected_fields(
+            kind: super::R2oQuicCandidateKind,
+        ) -> (&'static str, &'static str, i32, i32, i32, u32, usize) {
+            match kind {
+                super::R2oQuicCandidateKind::TtlStrategy => {
+                    ("ttl-lifetime", "ttl", 2, 3, 0, 0, blob_len(0))
+                }
+                super::R2oQuicCandidateKind::Clearance => ("clearance", "blob", 1, 0, 0, 0, 16),
+                super::R2oQuicCandidateKind::SplitCrypto => ("split", "split", 0, 0, 0, 0, 0),
+                super::R2oQuicCandidateKind::UdpLength => ("length", "udplen", 0, 0, 0, 100, 0),
+                super::R2oQuicCandidateKind::FragmentShape(shape) => {
+                    ("frag", "frag", 0, 0, i32::from(shape), 0, 0)
+                }
+                _ => ("none", "none", 0, 0, 0, 0, 0),
+            }
+        }
+
+        let mut output = String::new();
+        for (label, scenario, need_complete, no_split) in [
+            ("ttl-yes", Scenario::TtlYes, true, false),
+            ("clearance-yes", Scenario::ClearanceYes, false, false),
+            ("split-yes", Scenario::SplitYes, false, false),
+            ("udplen-yes", Scenario::UdplenYes, false, false),
+            ("frag-yes", Scenario::FragYes, false, false),
+            ("fallback", Scenario::Fallback, false, false),
+            ("no-split", Scenario::NoSplit, false, true),
+        ] {
+            output.push_str(&format!("scenario {label}\n"));
+            let baseline = need_complete.then(|| R2oQuicHttp3Result {
+                handshake_confirmed: true,
+                r2o_quic_stalled: true,
+                ..R2oQuicHttp3Result::default()
+            });
+            let mut asked = 0_usize;
+            let mut selected = None;
+            let mut ran_fallback = false;
+
+            for candidate in super::r2o_quic_discovery_candidates(baseline.as_ref(), !no_split) {
+                let (control, frag, ttl, copies, split, benign, udplen, length) =
+                    ask_fields(candidate.kind);
+                output.push_str(&format!(
+                    "ask control={control} frag={frag} ttl={ttl} copies={copies} split={split} benign={benign} udplen={udplen} blob_len={length}\n"
+                ));
+                asked += 1;
+                if probe_pass(scenario, candidate.kind) == 3
+                    && super::r2o_quic_candidate_proves_selection(
+                        super::R2oQuicFilterDecision::Pass,
+                        true,
+                        false,
+                        true,
+                        R2kQuicDataVerdict::Pass,
+                    )
+                {
+                    selected = Some(candidate.kind);
+                    break;
+                }
+            }
+
+            if selected.is_none() {
+                let mut fragment: VecDeque<_> = super::r2o_quic_fragment_candidates().into();
+                let mut control_passed = false;
+                while let Some(candidate) = fragment.pop_front() {
+                    if matches!(
+                        candidate.kind,
+                        super::R2oQuicCandidateKind::FragmentShape(_)
+                    ) && !control_passed
+                    {
+                        continue;
+                    }
+                    let (control, frag, ttl, copies, split, benign, udplen, length) =
+                        ask_fields(candidate.kind);
+                    output.push_str(&format!(
+                        "ask control={control} frag={frag} ttl={ttl} copies={copies} split={split} benign={benign} udplen={udplen} blob_len={length}\n"
+                    ));
+                    asked += 1;
+                    let pass = probe_pass(scenario, candidate.kind);
+                    if matches!(candidate.kind, super::R2oQuicCandidateKind::FragmentControl) {
+                        control_passed = pass == 3;
+                        continue;
+                    }
+                    if pass == 3 {
+                        selected = Some(candidate.kind);
+                        break;
+                    }
+                }
+            }
+
+            if selected.is_none() {
+                ran_fallback = true;
+                for candidate in super::r2o_quic_original_fallback_candidates(true, false, true) {
+                    let (control, frag, ttl, copies, split, benign, udplen, length) =
+                        ask_fields(candidate.kind);
+                    output.push_str(&format!(
+                        "ask control={control} frag={frag} ttl={ttl} copies={copies} split={split} benign={benign} udplen={udplen} blob_len={length}\n"
+                    ));
+                    asked += 1;
+                }
+            }
+
+            let (strategy, kind, copies, ttl, frag, udplen, length) = match selected {
+                Some(kind) => selected_fields(kind),
+                None if ran_fallback => ("ladder", "none", 0, 0, 0, 0, 0),
+                None => ("none", "none", 0, 0, 0, 0, 0),
+            };
+            output.push_str(&format!(
+                "selected {label} strategy={strategy} kind={kind} copies={copies} ttl={ttl} frag={frag} udplen={udplen} blob_len={length} trace={asked} probes={}\n",
+                asked * 3
+            ));
+        }
+
+        if let Some(path) = std::env::var_os("R2O_QUIC_STRATEGY_ARMS_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        print!("{output}");
+    }
 }

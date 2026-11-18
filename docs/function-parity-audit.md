@@ -94,14 +94,14 @@ production-путь не ставится. Формулировки «теста
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 415 | 133 | 0 | 0 |
+| core-net | 548 | 416 | 132 | 0 | 0 |
 | core-state | 692 | 529 | 163 | 0 | 0 |
 | datapath-core | 400 | 395 | 5 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 148 | 11 | 0 | 0 |
-| **Итого** | **1982** | **1670** | **312** | **0** | **0** |
+| **Итого** | **1982** | **1671** | **311** | **0** | **0** |
 
-Это не оценка паритета: 312 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 311 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -120,7 +120,7 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1670 / P 312**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1671 / P 311**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
@@ -192,7 +192,7 @@ P означает неполное доказательство ветвей, N
 - core-state — CLI-флаги/вывод, PSL/catalog-парсер, crypto HKDF-границы,
   voice-blob, volume resource-retry.
 - `?` (0): не осталось; все строки реестра разобраны и имеют E/P/N.
-- Поведенческая группировка 312 P (25 контрактов, 0 без контракта):
+- Поведенческая группировка 311 P (25 контрактов, 0 без контракта):
   `docs/behavior-contracts/inventory.md` и
   `docs/behavior-contracts/p-contract-map.tsv`. Это не меняет статусы
   реестра и не является заявлением паритета.
@@ -384,12 +384,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 415 | 133 | 0 | 0 |
+| core-net | 548 | 416 | 132 | 0 | 0 |
 | core-state | 692 | 529 | 163 | 0 | 0 |
 | datapath-core | 400 | 395 | 5 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 148 | 11 | 0 | 0 |
-| **Итого** | **1982** | **1670** | **312** | **0** | **0** |
+| **Итого** | **1982** | **1671** | **311** | **0** | **0** |
 
 
 ---
@@ -1068,7 +1068,7 @@ QUIC-каркас: varint, long header, packet number, Initial keys, AEAD seal/o
 | `d2k_quic_original_arms` | 142-219 | 78 | 5 singles → пары quic5/fake_default ×6/11 → adaptive fake_default×11+split → TTL 3/5/8/12 → frag | `quic_replay.rs:r2o_quic_original_fallback_candidates/_adaptive_split_candidate/_eligible/_candidate_proves_selection`; runner | **E*** | **2026-11-18:** два C/Rust differential'а: `r2o-quic-original-arms-differential.sh` PASS **69 строк** (порядок/параметры 61 вопроса, пропуски benign/TTL/frag, гейт форм) и `r2o-quic-arms-selection-differential.sh` PASS **56 строк**: первый прошедший single/pair останавливает перебор (trace 1/6), adaptive вставляется сразу после частичного fake_default×11 (trace 10, kind=split copies=11 blob_len=620), без `split_failed` не вставляется (14), после провала adaptive перебор идёт дальше (TTL+frag control, 15). Production: runner делает `fallback.push_front` после ×11 и останавливается на `r2o_quic_candidate_proves_selection`. **Ограничение:** цикл runner'а не вынесен в отдельную функцию — differential повторяет его вставку/гейт теми же production-предикатами. |
 | `strategy_ask` | 227-242 | 16 | до 2 попыток, `asked` по not_measured 1/2, YES/NO/UNKNOWN | `quic_replay.rs:r2o_quic_filter_round_decision`, `r2o_quic_strategy_attempt_decision` | **E*** | **2026-11-18:** differential `scripts/r2o-quic-strategy-ask-differential.sh` PASS **9 строк**: pass+data → YES; 0/3 → NO; частичный 1/3 → повтор, затем YES/UNKNOWN; unsent и err → повтор; data NoHandshake → NO; NotRun → повтор; бюджет → UNKNOWN при asked=0; две частичные попытки → UNKNOWN. Совпали `rc/asked/probes/trace`. **Ограничение:** C-цикл вызывает `ask_q` до двух раз, Rust применяет те же предикаты в worker; тексты/трасса различаются. |
 | `prop_word` | 244-246 | 3 | слово причины свойства (текст) | `quic_props.rs` `prop_word` | E | C `prop_word`: YES→«прошло», NO→«не прошло», иначе «ответа нет». Rust `prop_word(value)` возвращает те же строки; тест `prop_word_matches_donor_tri_state` (2/1/0/-1). |
-| `d2k_quic_strategy_arms` | 248-396 | 149 | TTL-lifetime (quic5×2 TTL3) → clearance benign → split CRYPTO → longer 100 → frag → original fallback; слияние trace | `quic_replay.rs:449-487 r2o_quic_discovery_candidates`, `:490-554` fragment/fallback/adaptive, `:368-405` decision | **P** | **C-ветви проверены:** TTL-вопрос только при `need_complete && budget_pk` (blob0/copies2/ttl3); YES → `TTL_LIFETIME`; иначе benign (16 нулей/copies1) → YES `CLEARANCE`; иначе split (если `!no_split`) → YES `SPLIT`; иначе `udplen=100` → YES `LENGTH`; если `clearance==NO && (split==NO \|\| no_split)` → `ask_frag`, форма → `FRAG`; иначе `d2k_quic_original_arms` с `benign_answered/frag_answered/ttl_pair_answered/split_failed`, слияние trace и `strategy=LADDER/FAKE_SPLIT`; `!marked`→FLAKY. **R2O:** `r2o_quic_discovery_candidates` даёт плоский список TTL→Clearance→Split→UdpLength, `fragment_candidates` и `original_fallback_candidates` отдельно, решение — `strategy_attempt_decision`; полная лестница (frag после двух «нет», слияние trace, adaptive split) differential не покрыта. |
+| `d2k_quic_strategy_arms` | 248-396 | 149 | TTL-lifetime (quic5×2 TTL3) → clearance benign → split CRYPTO → longer 100 → frag → original fallback; слияние trace | `quic_replay.rs:r2o_quic_discovery_candidates`, fragment/fallback/adaptive, `strategy_attempt_decision`; runner | **E*** | **2026-11-18:** differential `scripts/r2o-quic-strategy-arms-differential.sh` PASS **58 строк**: TTL-lifetime при post-handshake stall (trace 1, copies2/ttl3/1200), clearance (1, benign16), split (2), udplen (3, 100), оба «нет» → frag control + форма 2 (6, probes18), иначе fallback original arms (16/48) и no_split без вопроса разреза (15/45). Совпали strategy/kind/copies/ttl/frag/udplen/blob_len/trace/probes. TTL-триггер C `need_complete && budget_pk` соответствует `baseline.stalled` (handshake_confirmed && stalled). Слияние trace/probes — композиция уже закрытых `ask`, `ask_frag`, `original_arms`. **Ограничение:** merge-цикл runner'а не вынесен в функцию; differential повторяет его порядок теми же production-кандидатами/предикатами. |
 
 ## Углублённая сверка: verify/volume/voice (114)
 
