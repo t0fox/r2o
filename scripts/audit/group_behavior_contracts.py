@@ -86,7 +86,7 @@ CONTRACTS = {
     "CN-QUIC-PROBE-SEND": (
         "QUIC probe send: socket, prefix TTL, copies, fragments, refused",
         "Открытие/маркировка сокета, приманка/хвост, TTL/copies/split/frag, ECONNREFUSED.",
-        "quicprobe send-функции: 21 P; r2o-quic-send-one PASS 10 кейсов, остаются longer/IPv6/real handshake.",
+        "quicprobe send-функции: 20 P; qp_now_ms — 31-line C/Rust PASS и бюджет trial; r2o-quic-send-one PASS 10 кейсов, остаются longer/IPv6/real handshake.",
     ),
     "CN-QUIC-PROBE-RUN": (
         "QUIC probe run: question ladder, budget, classify",
@@ -382,8 +382,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 323:
-        raise SystemExit(f"expected 323 P rows, got {len(rows)}")
+    if len(rows) != 322:
+        raise SystemExit(f"expected 322 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")

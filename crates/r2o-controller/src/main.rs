@@ -27418,6 +27418,10 @@ impl ControlClient {
             return Ok(None);
         }
 
+        // C `qp_now_ms`: бюджет прогона считается по монотонным мс от старта
+        // classify_run, а не по Instant-дедлайну задачи.
+        let budget_start_ms = r2o_controller::quic_replay::r2o_quic_qp_now_ms();
+
         if deny_recheck {
             if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
                 return Ok(None);
@@ -27863,13 +27867,14 @@ impl ControlClient {
         let trigger_snapshots = vec![snapshot.to_vec(); 3];
         // C `d2k_quic_budget_ms`: бюджет прогона считается от измеренного RTT;
         // истёк — новые вопросы не задаются.
-        let quic_budget = std::time::Duration::from_millis(u64::from(
-            r2o_controller::quic_replay::r2o_quic_budget_ms(control.rtt_ms),
-        ));
-        if started_at.elapsed() > quic_budget {
+        let budget_ms = r2o_controller::quic_replay::r2o_quic_budget_ms(control.rtt_ms);
+        if !r2o_controller::quic_replay::r2o_quic_budget_left_ms(
+            budget_start_ms,
+            budget_ms,
+            r2o_controller::quic_replay::r2o_quic_qp_now_ms(),
+        ) {
             println!(
-                "QUIC {server}: бюджет прогона исчерпан ({} мс) — вопросы прекращены",
-                quic_budget.as_millis()
+                "QUIC {server}: бюджет прогона исчерпан ({budget_ms} мс) — вопросы прекращены"
             );
             return Ok(None);
         }
@@ -28162,10 +28167,13 @@ impl ControlClient {
             if cancel.load(Ordering::Relaxed) {
                 return Err("QUIC-испытание отменено".into());
             }
-            if started_at.elapsed() > quic_budget {
+            if !r2o_controller::quic_replay::r2o_quic_budget_left_ms(
+                budget_start_ms,
+                budget_ms,
+                r2o_controller::quic_replay::r2o_quic_qp_now_ms(),
+            ) {
                 println!(
-                    "QUIC {server}: бюджет прогона исчерпан ({} мс) — оставшиеся кандидаты пропущены",
-                    quic_budget.as_millis()
+                    "QUIC {server}: бюджет прогона исчерпан ({budget_ms} мс) — оставшиеся кандидаты пропущены"
                 );
                 return Ok(None);
             }

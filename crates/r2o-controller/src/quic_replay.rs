@@ -435,6 +435,16 @@ pub fn r2o_quic_budget_ms(rtt_ms: u32) -> u32 {
     r2o_quic_budget_ms_with(rtt_ms, R2O_QUIC_WAIT_MS_DEFAULT, None)
 }
 
+/// C `qp_now_ms` (`core/quicprobe.c:1510-1514`): монотонные миллисекунды.
+pub fn r2o_quic_qp_now_ms() -> i64 {
+    replay_now_ms().max(1)
+}
+
+/// C `budget_left` в миллисекундах: `limit=0` — исчерпан.
+pub fn r2o_quic_budget_left_ms(start_ms: i64, limit_ms: u32, now_ms: i64) -> bool {
+    limit_ms != 0 && now_ms.saturating_sub(start_ms) <= i64::from(limit_ms)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct R2oQuicBaseResult {
     pub clear: bool,
@@ -3852,6 +3862,15 @@ mod tests {
                 }
             ));
         }
+        let now1 = super::r2o_quic_qp_now_ms();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let now2 = super::r2o_quic_qp_now_ms();
+        output.push_str(&format!(
+            "qp-now,{},{},{}\n",
+            u8::from(now1 > 0),
+            u8::from(now2 >= now1),
+            u8::from(now2 - now1 < 1000)
+        ));
         if let Some(path) = std::env::var_os("R2O_QUICPROBE_HELPERS_OUTPUT") {
             std::fs::write(path, &output).unwrap();
         }

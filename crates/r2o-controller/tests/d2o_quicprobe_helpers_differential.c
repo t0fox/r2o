@@ -116,5 +116,10 @@ int main(void)
     qp_progress("q3", 3);
     printf("progress-3,%d,%s,%d\n", hook_calls, hook_q[0] ? hook_q : "-", hook_sent);
     d2k_quic_progress_hook = NULL;
+
+    int64_t now1 = qp_now_ms();
+    usleep(5000);
+    int64_t now2 = qp_now_ms();
+    printf("qp-now,%d,%d,%d\n", now1 > 0, now2 >= now1, (now2 - now1) < 1000);
     return 0;
 }
