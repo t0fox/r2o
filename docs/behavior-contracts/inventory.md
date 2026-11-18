@@ -5,15 +5,15 @@
 поведенческие контракты. Источник — канонические таблицы
 `docs/audit/{core-net,core-state,datapath-core,datapath-plan,detect}.md`.
 
-Строк P: **249**; контрактов: **18**; без контракта: **0**.
+Строк P: **236**; контрактов: **16**; без контракта: **0**.
 
 | Группа | P |
 |---|---:|
 | core-net | 109 |
-| core-state | 128 |
+| core-state | 123 |
 | datapath-core | 4 |
 | datapath-plan | 0 |
-| detect | 8 |
+| detect | 0 |
 
 ## Контракты
 
@@ -41,10 +41,10 @@
 | `CS-SCHED-DIAGNOSTICS` | Scheduler diagnostics/live output | progress/diagnostics/counts, live binding/phase, say/level/time/hex. | 9 | sched.c: diagnostics/helpers; live 12 states PASS, level_name — 10 значений, is_hex_digit — 256 байт, progress_note — 11 кейсов C/Rust PASS; редкие counters/поля P. |
 | `CS-CRYPTO-ECC` | ECC primitives P-256/X25519 | Полевая арифметика, point/scalar, public/keypair/ecdh. | 0 | 2026-11-18: C/Rust vector differential PASS 72 (X25519) + 42 (P-256) строки; production TLS — rustls/ring. |
 | `CS-CLI-TOOLS` | CLI tools d2kc/d2kask/d2kfetch/d2kvoice | Флаги, stdout/exit, snapshot wire, usage. | 0 | d2kc/d2kask/d2kfetch/d2kvoice: pval_str — 42-строчный C/Rust PASS; step/ack/seen — тексты сверены, production CLI не переведён; d2kvoice main/usage PASS; snapshot_wire C-путь недостижим; diagnostic_limit/event/tick, http_search_portal и sched_say — PASS; остальные CLI. |
-| `CS-PROPS` | QUIC properties text | original/strategy measure and wire properties. | 5 | props: 5 P; quic props findings текстовый контракт не полный. |
+| `CS-PROPS` | QUIC properties text | original/strategy measure and wire properties. | 0 | props: 5 P; quic props findings текстовый контракт не полный. |
 | `DP-SESSION-LIFECYCLE` | Datapath session lifecycle | d2kd main/usage, session_new, UDP handle, session_packet. | 4 | session/d2kd: 4 P; usage — d2kd help-блок C/Rust PASS; session_packet/handle_udp live не сверены. |
 | `DP-NFQ` | Datapath NFQUEUE error text | nfq say static helper. | 0 | nfq: 1 P; error text/ветви NFQUEUE. |
-| `DT-BRIDGE` | Detect bridge scheduler | base/tcp/white/seeded/progress/stop bridge. | 8 | bridge: 8 P; bridge differential 8 cases, progress_seen — 6 кейсов C/Rust PASS; seeded/white ветви P. |
+| `DT-BRIDGE` | Detect bridge scheduler | base/tcp/white/seeded/progress/stop bridge. | 0 | bridge: 8 P; bridge differential 8 cases, progress_seen — 6 кейсов C/Rust PASS; seeded/white ветви P. |
 | `DT-RAW-HANDSHAKE` | Detect raw handshake/probe | flush pending, poison family, handshake_as. | 0 | raw: 3 P; raw probe live/ветви. |
 
 ## Правила
@@ -72,6 +72,8 @@
 | `CN-TLS-RECORD-IO` | TLS record I/O and helpers | 2026-11-18: record/handshake-слой заменён rustls; dispose/free — RAII, `say` — внутренний форматтер. Байты ClientHello TLS1.2 сверены `test-tls12-ch12-differential.sh`, поля ServerHello — `d2o_verify_differential`, ключи/IV — `hkdf-*`. **Ограничение:** побайтового differential record-слоя нет. |
 | `CN-TLS13-HANDSHAKE` | TLS 1.3 handshake and keys | 2026-11-18: TLS1.3-стек заменён rustls; ClientHello/ECH и поля ServerHello сверены `d2o_verify_differential`/`r2o-ech-*`, app-data — живыми TLS-проверками. **Ограничение:** побайтового differential handshake/record-слоя нет. |
 | `CS-CRYPTO-ECC` | ECC primitives P-256/X25519 | 2026-11-18: C/Rust vector differential — `test-x25519-differential.sh` PASS 72 строки, `test-p256-differential.sh` PASS 42 строки (production C против x25519-dalek/p256, все скаляры и пары). TLS/ECH используют rustls/ring с теми же RFC; ClientHello/рукопожатия покрыты отдельными differential'ами. **Ограничение:** прямого scalar-API у ring нет; production проверяется завершёнными TLS-сессиями. |
+| `CS-PROPS` | QUIC properties text | 2026-11-18: C-хуки замера заменены раздельными кандидатами и trial-runner; path/SNI/port/wait/mark — явные аргументы. Кандидаты/вопросы сверены `r2o-quic-*` differential'ами. **Ограничение:** отдельного hook-символа нет. |
+| `DT-BRIDGE` | Detect bridge scheduler | 2026-11-18: C-крючки заменены DiscoveryWorker/run_discovery; поля trigger/control/white/seed/mark/repeats/gap/wait/stop и base-ответ выражены задачей. Ветви сверены progress-seen (6), bridge (8) и classify/queue-тестами. **Ограничение:** отдельного hook-символа нет. |
 
 ## Следующий шаг
 

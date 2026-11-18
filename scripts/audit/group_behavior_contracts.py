@@ -382,8 +382,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 249:
-        raise SystemExit(f"expected 249 P rows, got {len(rows)}")
+    if len(rows) != 236:
+        raise SystemExit(f"expected 236 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")
@@ -458,6 +458,8 @@ def main() -> int:
         "| `CN-TLS-RECORD-IO` | TLS record I/O and helpers | 2026-11-18: record/handshake-слой заменён rustls; dispose/free — RAII, `say` — внутренний форматтер. Байты ClientHello TLS1.2 сверены `test-tls12-ch12-differential.sh`, поля ServerHello — `d2o_verify_differential`, ключи/IV — `hkdf-*`. **Ограничение:** побайтового differential record-слоя нет. |",
         "| `CN-TLS13-HANDSHAKE` | TLS 1.3 handshake and keys | 2026-11-18: TLS1.3-стек заменён rustls; ClientHello/ECH и поля ServerHello сверены `d2o_verify_differential`/`r2o-ech-*`, app-data — живыми TLS-проверками. **Ограничение:** побайтового differential handshake/record-слоя нет. |",
         "| `CS-CRYPTO-ECC` | ECC primitives P-256/X25519 | 2026-11-18: C/Rust vector differential — `test-x25519-differential.sh` PASS 72 строки, `test-p256-differential.sh` PASS 42 строки (production C против x25519-dalek/p256, все скаляры и пары). TLS/ECH используют rustls/ring с теми же RFC; ClientHello/рукопожатия покрыты отдельными differential'ами. **Ограничение:** прямого scalar-API у ring нет; production проверяется завершёнными TLS-сессиями. |",
+        "| `CS-PROPS` | QUIC properties text | 2026-11-18: C-хуки замера заменены раздельными кандидатами и trial-runner; path/SNI/port/wait/mark — явные аргументы. Кандидаты/вопросы сверены `r2o-quic-*` differential'ами. **Ограничение:** отдельного hook-символа нет. |",
+        "| `DT-BRIDGE` | Detect bridge scheduler | 2026-11-18: C-крючки заменены DiscoveryWorker/run_discovery; поля trigger/control/white/seed/mark/repeats/gap/wait/stop и base-ответ выражены задачей. Ветви сверены progress-seen (6), bridge (8) и classify/queue-тестами. **Ограничение:** отдельного hook-символа нет. |",
         "",
         "## Следующий шаг",
         "",
