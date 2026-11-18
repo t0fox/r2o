@@ -32,8 +32,9 @@ done
 printf '#!/bin/sh\nexit 0\n' > "$TEMP/bin/conntrack"
 chmod 0755 "$TEMP/bin/conntrack"
 
+printf 'CONNBYTES=auto\nPORTS=443\n' > "$TEMP/config"
 R2O_DIR="$TEMP/root" \
-R2O_CONFIG=/dev/null \
+R2O_CONFIG="$TEMP/config" \
 R2O_RUN_DIR="$TEMP/root/run" \
 R2O_PROC_DIR="$TEMP/proc" R2O_SYS_MODULE_DIR="$TEMP/sys" R2O_MODULES_DIR="$TEMP/modules" \
 R2O_TEST_RULES="$TEMP/main.nft" \
@@ -42,6 +43,10 @@ QUEUE_NUM=34000 \
 QUEUE_NUM6=34001 \
 PATH="$TEMP/bin:$PATH" \
     sh "$ROOT/router/r2o-firewall.sh" up
+grep -qF 'th dport { 443 } ct direction original ct original packets 1-8 queue num 34000 bypass' "$TEMP/main.nft"
+grep -qF 'th sport { 443 } ct direction reply ct reply packets 1-8 queue num 34001 bypass' "$TEMP/main.nft"
+grep -qF 'th dport { 443 } ct direction original ct original packets 9-18446744073709551615 tcp flags & rst == rst queue num 34000 bypass' "$TEMP/main.nft"
+grep -qF 'th sport { 443 } ct direction reply ct reply packets 9-18446744073709551615 tcp flags & fin == fin queue num 34001 bypass' "$TEMP/main.nft"
 grep -qF 'meta mark 0x2f return' "$TEMP/main.nft"
 if grep -qF 'meta mark 0x31 return' "$TEMP/main.nft"; then
     echo "main firewall must queue Telegram-marked packets like D2O" >&2

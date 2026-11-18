@@ -279,7 +279,7 @@ impl QueueSocket {
     /// Возвращает `true`, если прочитана дейтаграмма NFQUEUE. `extra_revents`
     /// заполняется `poll(2)`-маской каждого extra fd (POLLIN/POLLHUP/POLLERR),
     /// чтобы вызывающий мог обработать control/route без второго poll.
-    /// Таймаут и EINTR — `Ok(false)` с нулевыми масками; ошибки poll — `Io`.
+    /// Таймаут и EINTR — `Ok(false)` с нулевыми масками; ошибки poll — `Wait`.
     pub fn receive_timeout_with_fds(
         &self,
         bytes: &mut Vec<u8>,
@@ -332,13 +332,14 @@ impl QueueSocket {
             if error.raw_os_error() == Some(libc::EINTR) {
                 return Ok(false);
             }
-            return Err(ReceiveError::Io(error));
+            return Err(ReceiveError::Wait(error));
         }
         for (index, revents) in extra_revents.iter_mut().enumerate() {
             *revents = descriptors[index + 1].revents;
         }
-        if descriptors[0].revents & libc::POLLIN == 0 {
-            if descriptors[0].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) == 0 {
+        // Как в D2O, recv снимает pending ENOBUFS даже без POLLIN.
+        if descriptors[0].revents & (libc::POLLIN | libc::POLLERR) == 0 {
+            if descriptors[0].revents & (libc::POLLHUP | libc::POLLNVAL) == 0 {
                 return Ok(false);
             }
             return Err(ReceiveError::Io(io::Error::other(
@@ -350,7 +351,7 @@ impl QueueSocket {
                 self.fd.as_raw_fd(),
                 bytes.as_mut_ptr() as *mut libc::c_void,
                 bytes.len(),
-                0,
+                libc::MSG_DONTWAIT,
             )
         };
         if received >= 0 {
@@ -652,6 +653,33 @@ mod tests {
     fn send_byte(fd: &OwnedFd, byte: u8) {
         let sent = unsafe { libc::send(fd.as_raw_fd(), (&byte as *const u8).cast(), 1, 0) };
         assert_eq!(sent, 1, "{}", io::Error::last_os_error());
+    }
+
+    #[test]
+    fn receive_timeout_consumes_pollerr_without_packet() {
+        use std::net::UdpSocket;
+
+        let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let local = UdpSocket::bind("127.0.0.1:0").unwrap();
+        local.connect(peer.local_addr().unwrap()).unwrap();
+        drop(peer);
+        local.send(b"x").unwrap();
+
+        // Как и у netlink при ENOBUFS, ошибка будит poll без входного пакета.
+        let mut poll = libc::pollfd {
+            fd: local.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(unsafe { libc::poll(&mut poll, 1, 1000) }, 1);
+        assert_eq!(poll.revents, libc::POLLERR);
+
+        let socket = test_socket_with_fd(local.into());
+        let mut bytes = Vec::new();
+        let error = socket.receive_timeout(&mut bytes, 0).unwrap_err();
+        assert!(matches!(error, super::ReceiveError::Io(ref error)
+            if error.raw_os_error() == Some(libc::ECONNREFUSED)));
+        assert!(!socket.receive_timeout(&mut bytes, 0).unwrap());
     }
 
     #[test]

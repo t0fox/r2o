@@ -1929,6 +1929,10 @@ mod app {
                 &mut extra_revents,
             ) {
                 Ok(ready) => ready,
+                Err(ReceiveError::Wait(_)) => {
+                    socket.record_receive_error();
+                    false
+                }
                 Err(error) if !receive_error_requires_flush(&error) => false,
                 Err(error) => {
                     socket.record_receive_error();
@@ -2604,8 +2608,16 @@ mod app {
                                 } else {
                                     let first_udp_packet =
                                         udp_sessions.r2o_is_first_client_packet(bytes);
-                                    if !conntrack_gate.r2o_preflight(bytes, first_udp_packet, false)
-                                    {
+                                    let tcp_syn_ack_seen =
+                                        tcp_sessions.r2o_syn_ack_seen_for_packet(bytes);
+                                    if !conntrack_gate.r2o_preflight(
+                                        bytes,
+                                        (selected.is_some() || global_plan_present)
+                                            && quic_plan_skip_note.is_none()
+                                            && !quic_deny_skip,
+                                        first_udp_packet,
+                                        tcp_syn_ack_seen,
+                                    ) {
                                         r2o_note_conntrack_refusal(
                                             &mut tcp_sessions,
                                             &name_plans,
@@ -2690,17 +2702,17 @@ mod app {
                                 let decision = if options.mode == RuntimeMode::Observe {
                                     PacketDecision::Accept
                                 } else {
-                                    let selected = name_plans
-                                        .select_with_quic_host_probe(
-                                            &packet,
-                                            None,
-                                            controller_probe,
-                                        )
-                                        .unwrap_or(&plan);
+                                    let selected = name_plans.select_with_quic_host_probe(
+                                        &packet,
+                                        None,
+                                        controller_probe,
+                                    );
+                                    let selected_plan = selected.unwrap_or(&plan);
                                     let tcp_syn_ack_seen =
                                         tcp_sessions.r2o_syn_ack_seen_for_packet(&packet);
                                     if !conntrack_gate.r2o_preflight(
                                         &packet,
+                                        selected.is_some() || global_plan_present,
                                         false,
                                         tcp_syn_ack_seen,
                                     ) {
@@ -2718,7 +2730,7 @@ mod app {
                                     } else {
                                         let decision = decide_with_tcp_session_mode(
                                             &mut tcp_sessions,
-                                            selected,
+                                            selected_plan,
                                             &packet,
                                             &mut control,
                                             &mut flow_journal,
@@ -2732,7 +2744,7 @@ mod app {
                                             &mut conntrack_gate,
                                             &packet,
                                             decision,
-                                            selected.id,
+                                            selected_plan.id,
                                             false,
                                             tcp_syn_ack_seen,
                                         )
@@ -2788,17 +2800,17 @@ mod app {
                                 let decision = if options.mode == RuntimeMode::Observe {
                                     PacketDecision::Accept
                                 } else {
-                                    let selected = name_plans
-                                        .select_with_quic_host_probe(
-                                            &packet,
-                                            None,
-                                            controller_probe,
-                                        )
-                                        .unwrap_or(&plan);
+                                    let selected = name_plans.select_with_quic_host_probe(
+                                        &packet,
+                                        None,
+                                        controller_probe,
+                                    );
+                                    let selected_plan = selected.unwrap_or(&plan);
                                     let tcp_syn_ack_seen =
                                         tcp_sessions.r2o_syn_ack_seen_for_packet(&packet);
                                     if !conntrack_gate.r2o_preflight(
                                         &packet,
+                                        selected.is_some() || global_plan_present,
                                         false,
                                         tcp_syn_ack_seen,
                                     ) {
@@ -2816,7 +2828,7 @@ mod app {
                                     } else {
                                         let decision = decide_with_tcp_session_mode(
                                             &mut tcp_sessions,
-                                            selected,
+                                            selected_plan,
                                             &packet,
                                             &mut control,
                                             &mut flow_journal,
@@ -2830,7 +2842,7 @@ mod app {
                                             &mut conntrack_gate,
                                             &packet,
                                             decision,
-                                            selected.id,
+                                            selected_plan.id,
                                             false,
                                             tcp_syn_ack_seen,
                                         )
@@ -2871,8 +2883,12 @@ mod app {
                                 } else {
                                     let tcp_syn_ack_seen =
                                         tcp_sessions.r2o_syn_ack_seen_for_packet(bytes);
-                                    if !conntrack_gate.r2o_preflight(bytes, false, tcp_syn_ack_seen)
-                                    {
+                                    if !conntrack_gate.r2o_preflight(
+                                        bytes,
+                                        selected.is_some() || global_plan_present,
+                                        false,
+                                        tcp_syn_ack_seen,
+                                    ) {
                                         r2o_note_conntrack_refusal(
                                             &mut tcp_sessions,
                                             &name_plans,

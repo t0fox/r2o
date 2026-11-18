@@ -18,6 +18,8 @@ IPV6_ENABLED=$IPV6_ENABLED_CONFIG
 IPV6_ENABLED=${R2O_IPV6_ENABLED_RUNTIME:-$IPV6_ENABLED}
 PORTS=${PORTS:-0:65535}
 CONNBYTES=${CONNBYTES:-0:8}
+# Сохранённое «auto» использует окно D2O, чтобы после SYN увидеть ClientHello.
+[ "$CONNBYTES" != auto ] || CONNBYTES=0:8
 VOICE_PORTS=${VOICE_PORTS:-50000:50099,1400,3478:3481,5349,19294:19344}
 VOICE_CONNBYTES=${VOICE_CONNBYTES:-0:4}
 HTTP_KEEPALIVE_PORTS=${HTTP_KEEPALIVE_PORTS:-80}
@@ -233,11 +235,11 @@ table inet r2o {
         meta nfproto ipv6 meta l4proto udp th dport { $nft_ports } ct direction original ct original packets $nft_window queue num $QUEUE6 bypass
         meta nfproto ipv4 meta l4proto udp th dport { $nft_voice } ct direction original ct original packets $nft_voice_window queue num $QUEUE4 bypass
         meta nfproto ipv6 meta l4proto udp th dport { $nft_voice } ct direction original ct original packets $nft_voice_window queue num $QUEUE6 bypass
-        meta nfproto ipv4 meta l4proto tcp ct direction original ct original packets $nft_late_window tcp flags & rst == rst queue num $QUEUE4 bypass
-        meta nfproto ipv4 meta l4proto tcp ct direction original ct original packets $nft_late_window tcp flags & fin == fin queue num $QUEUE4 bypass
+        meta nfproto ipv4 meta l4proto tcp th dport { $nft_ports } ct direction original ct original packets $nft_late_window tcp flags & rst == rst queue num $QUEUE4 bypass
+        meta nfproto ipv4 meta l4proto tcp th dport { $nft_ports } ct direction original ct original packets $nft_late_window tcp flags & fin == fin queue num $QUEUE4 bypass
         meta nfproto ipv4 meta l4proto tcp th dport { $nft_keepalive } ct direction original ct original packets $nft_late_window queue num $QUEUE4 bypass
-        meta nfproto ipv6 meta l4proto tcp ct direction original ct original packets $nft_late_window tcp flags & rst == rst queue num $QUEUE6 bypass
-        meta nfproto ipv6 meta l4proto tcp ct direction original ct original packets $nft_late_window tcp flags & fin == fin queue num $QUEUE6 bypass
+        meta nfproto ipv6 meta l4proto tcp th dport { $nft_ports } ct direction original ct original packets $nft_late_window tcp flags & rst == rst queue num $QUEUE6 bypass
+        meta nfproto ipv6 meta l4proto tcp th dport { $nft_ports } ct direction original ct original packets $nft_late_window tcp flags & fin == fin queue num $QUEUE6 bypass
         meta nfproto ipv6 meta l4proto tcp th dport { $nft_keepalive } ct direction original ct original packets $nft_late_window queue num $QUEUE6 bypass
     }
     chain in_rules {
@@ -254,11 +256,11 @@ table inet r2o {
         meta nfproto ipv6 meta l4proto udp th sport { $nft_ports } ct direction reply ct reply packets $nft_window queue num $QUEUE6 bypass
         meta nfproto ipv4 meta l4proto udp th sport { $nft_voice } ct direction reply ct reply packets $nft_voice_window queue num $QUEUE4 bypass
         meta nfproto ipv6 meta l4proto udp th sport { $nft_voice } ct direction reply ct reply packets $nft_voice_window queue num $QUEUE6 bypass
-        meta nfproto ipv4 meta l4proto tcp ct direction reply ct reply packets $nft_late_window tcp flags & rst == rst queue num $QUEUE4 bypass
-        meta nfproto ipv4 meta l4proto tcp ct direction reply ct reply packets $nft_late_window tcp flags & fin == fin queue num $QUEUE4 bypass
+        meta nfproto ipv4 meta l4proto tcp th sport { $nft_ports } ct direction reply ct reply packets $nft_late_window tcp flags & rst == rst queue num $QUEUE4 bypass
+        meta nfproto ipv4 meta l4proto tcp th sport { $nft_ports } ct direction reply ct reply packets $nft_late_window tcp flags & fin == fin queue num $QUEUE4 bypass
         meta nfproto ipv4 meta l4proto tcp th sport { $nft_keepalive } ct direction reply ct reply packets $nft_late_window queue num $QUEUE4 bypass
-        meta nfproto ipv6 meta l4proto tcp ct direction reply ct reply packets $nft_late_window tcp flags & rst == rst queue num $QUEUE6 bypass
-        meta nfproto ipv6 meta l4proto tcp ct direction reply ct reply packets $nft_late_window tcp flags & fin == fin queue num $QUEUE6 bypass
+        meta nfproto ipv6 meta l4proto tcp th sport { $nft_ports } ct direction reply ct reply packets $nft_late_window tcp flags & rst == rst queue num $QUEUE6 bypass
+        meta nfproto ipv6 meta l4proto tcp th sport { $nft_ports } ct direction reply ct reply packets $nft_late_window tcp flags & fin == fin queue num $QUEUE6 bypass
         meta nfproto ipv6 meta l4proto tcp th sport { $nft_keepalive } ct direction reply ct reply packets $nft_late_window queue num $QUEUE6 bypass
         icmp type time-exceeded icmp code 0 queue num $QUEUE4 bypass
         icmpv6 type time-exceeded icmpv6 code 0 queue num $QUEUE6 bypass
