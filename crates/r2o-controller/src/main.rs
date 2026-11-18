@@ -3803,7 +3803,13 @@ fn r2o_tcp_stall_budgets(catalog: &Catalog) -> Vec<u16> {
 
 #[cfg(unix)]
 fn r2o_stall_budgets_changed(new: &[u16], sent: &[u16]) -> bool {
-    !new.is_empty() && new != sent
+    if new.is_empty() || new == sent {
+        return false;
+    }
+    // Датапат по умолчанию уже работает с полем 25; не шлём пустой
+    // дефолтный список до первой измеренной коробки. После непустого
+    // списка возврат к [25] обязателен, иначе старые бюджеты останутся.
+    !(new == [R2O_TCP_STALL_FIELD_BUDGET] && sent.is_empty())
 }
 
 #[cfg(unix)]
@@ -52929,6 +52935,8 @@ group_block_proven: false,
         assert_eq!(r2o_tcp_stall_budgets(&Catalog::default()), [25]);
         assert!(r2o_stall_budgets_changed(&[25, 32], &[]));
         assert!(!r2o_stall_budgets_changed(&[25, 32], &[25, 32]));
+        assert!(!r2o_stall_budgets_changed(&[25], &[]));
+        assert!(r2o_stall_budgets_changed(&[25], &[25, 32]));
         assert!(!r2o_stall_budgets_changed(&[], &[25]));
         assert_eq!(
             r2o_tcp_stall_budgets_for_name(&catalog, "example.com"),
