@@ -5,12 +5,12 @@
 поведенческие контракты. Источник — канонические таблицы
 `docs/audit/{core-net,core-state,datapath-core,datapath-plan,detect}.md`.
 
-Строк P: **193**; контрактов: **14**; без контракта: **0**.
+Строк P: **192**; контрактов: **14**; без контракта: **0**.
 
 | Группа | P |
 |---|---:|
 | core-net | 104 |
-| core-state | 89 |
+| core-state | 88 |
 | datapath-core | 0 |
 | datapath-plan | 0 |
 | detect | 0 |
@@ -34,7 +34,7 @@
 | `CN-VOICE` | Voice/STUN discovery | STUN request, DNS/voice blob, prefix, local failure. | 8 | voice/voice_discovery/stun: 8 P; d2k_stun_request/t13_random — 10 строк C/Rust PASS и production STUN-префикс; voice_resolve-порт теперь как C strtoul; voice differentials частичные. |
 | `CS-SCHED-TASK-LIFECYCLE` | Scheduler task/worker lifecycle | Слоты, worker permits, reset/done/fail/join, retire, queue wake, guards. | 11 | sched.c: worker/task/queue/guard; Rust R2oDiscoverySearches/Queue/Life; box_injects_rst/rst_guard_wanted/plan_arm_rst_guard — 32 кейса C/Rust PASS и проводка в candidate+sync; sched_quic_progress — 7 кейсов и проводка в QUIC worker; ask_settle — 9 кейсов и проводка в base/full; worker_type — 16 кейсов C/Rust PASS и живой worker_oldest_type из gate; worker_run — live last_measurement_age_s=2; task_budget — 7 кейсов C/Rust PASS и TX-лестница; join_worker — Drop/reap join до отчёта; prop/contact/ver close — RAII Drop до отчёта; note_worker_start_failure — счётчик/цель/live-reason; box_ensure — 4 строки C/Rust PASS; quic_deny install/recheck/tick — 5 unit-тестов; worker args/wake/active/queued — RAII+queue/live-тесты; stall_budgets_push — dedup и базовое поле 25 как C; полная матрица T_* не доказана. |
 | `CS-SCHED-SUSPECT-ADMISSION` | Scheduler suspect admission and refusal | on_suspect, cooldown, dead/refusal, shape/family, refused outcomes. | 24 | sched.c: admission/refusal; Rust queue/cooldown/family recovery; refuse_is_damage — 256 кодов C/Rust PASS и ветка DAMAGED в REFUSED; clear_binding_matches — 9216 кейсов, binding_wire_shape — 126 кейсов, measured trigger profile, client_tcp_profile — 4112 кейсов и drop_client_opts — 6 кейсов C/Rust PASS; cooldown_victim — 4 состояния кольца 128 C/Rust PASS; clean-handshake differential — коды/IP/family/name/TTL PASS; полный differential кодов/порядка. |
-| `CS-SCHED-CANDIDATE-VERIFY` | Scheduler candidate verification | verify_confirm, partial_finish, ACK/APPLIED, own plan, exchange. | 17 | sched.c: verify/applied/exchange; production verify_confirm 30 cases, props_text — 243 кейса C/Rust PASS; own_first_plans QUIC — 3 случая C/Rust PASS; остальные ветви P. |
+| `CS-SCHED-CANDIDATE-VERIFY` | Scheduler candidate verification | verify_confirm, partial_finish, ACK/APPLIED, own plan, exchange. | 16 | sched.c: verify/applied/exchange; production verify_confirm 30 cases, props_text — 243 кейса C/Rust PASS; own_first_plans QUIC — 3 случая C/Rust PASS; own_rank_before — 8 случаев PASS; остальные ветви P. |
 | `CS-SCHED-PLAN-GENERATION` | Scheduler plan generation | verdict_to_plans, own_first, area/resource path, plan identity, RX bootstrap. | 16 | sched.c: plans/area/resources/identity; signal_human, task_phase, live_binding, live_autopick — full live.json 12 состояний PASS; verdict_name — 14 кодов C/Rust PASS и NO_QUIC/LOCAL_ADDRESS в QUIC-логах; group_exception_status — live-тест active/pending/retrying/rejected/removing; Rust candidates/compose; порядок и поля не сверены. |
 | `CS-SCHED-VOLUME-VOICE` | Scheduler volume ladder and voice trials | volume bucket/ladder/room, rx pending, voice trial/observe/fail. | 14 | sched.c: volume/voice; volume_bucket — 28 кейсов, voice_ip_fmt/text/text2 — 9 адресов, voice_trial_same_context — 13 кейсов C/Rust PASS; budget/voice differentials частичные, поля plan_boxes/rx queue иные. |
 | `CS-SCHED-ECH-QUIC` | Scheduler ECH witness and QUIC initial/address control | ECH witness, quic own initial/address/multi. | 7 | sched.c: ECH/QUIC; Rust ech/quic initial; quic_text_is_split — 11 текстов C/Rust PASS; local-address policy — differential PASS; ECH RR cache — 12 строк C/Rust PASS (TTL/ring); e2e DoQ и полный порядок не доказаны. |

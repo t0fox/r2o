@@ -4079,6 +4079,49 @@ mod tests {
     }
 
     #[test]
+    fn own_rank_before_matches_c() {
+        let ranked = |lead: bool, tier: u8, successes: i32, confirmed: i64| super::RankedOwnPlan {
+            candidate: super::OwnPlanCandidate {
+                box_id: "box".into(),
+                plan_id: "plan".into(),
+                text: "plan".into(),
+            },
+            lead,
+            tier,
+            successes,
+            confirmed,
+        };
+        let mut output = String::new();
+        let mut emit = |label: &str,
+                        lead_a: bool,
+                        tier_a: u8,
+                        successes_a: i32,
+                        fresh_a: i64,
+                        lead_b: bool,
+                        tier_b: u8,
+                        successes_b: i32,
+                        fresh_b: i64| {
+            let left = ranked(lead_a, tier_a, successes_a, fresh_a);
+            let right = ranked(lead_b, tier_b, successes_b, fresh_b);
+            output.push_str(&format!(
+                "{label}={}\n",
+                u8::from(super::own_rank_before(&left, &right))
+            ));
+        };
+        emit("lead", true, 5, 0, 0, false, 5, 0, 0);
+        emit("tier", false, 1, 0, 0, false, 2, 0, 0);
+        emit("tier_reverse", false, 2, 0, 0, false, 1, 0, 0);
+        emit("successes", false, 1, 5, 0, false, 1, 3, 0);
+        emit("successes_reverse", false, 1, 3, 0, false, 1, 5, 0);
+        emit("fresh", false, 1, 5, 10, false, 1, 5, 5);
+        emit("fresh_reverse", false, 1, 5, 5, false, 1, 5, 10);
+        emit("equal", false, 1, 5, 5, false, 1, 5, 5);
+        if let Ok(path) = std::env::var("R2O_OWN_RANK_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
+
+    #[test]
     fn own_first_plans_reuse_confirmed_quic_plans_like_c() {
         use crate::catalog::{Binding, BoxRecord, Catalog, Plan};
 
