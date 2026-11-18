@@ -382,8 +382,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 301:
-        raise SystemExit(f"expected 301 P rows, got {len(rows)}")
+    if len(rows) != 286:
+        raise SystemExit(f"expected 286 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")
@@ -454,6 +454,8 @@ def main() -> int:
         "| `CS-VERDICT` | Classify verdict | 2026-11-17: C `d2k_classify` — обёртка `d2k_classify_cancelable(...,NULL)` без production-вызова в D2O; Rust `run` без отмены, дерево cancelable E* (`test-classifier-clear-confirm-differential.sh` + unit). Ограничение — отдельного differential обёртки нет. |",
         "| `CS-CLI-TOOLS` | CLI tools d2kc/d2kask/d2kfetch/d2kvoice | 2026-11-18: `r2o-ask-cli-differential.sh` PASS 28 сценариев `d2kask main` (no-trigger, полный отказ датапата, save-файлы, CLI/hex/сокет-ошибки); `r2o-serve-cli-differential.sh` PASS 9 сценариев `d2kc main` (version/usage/битый и отсутствующий каталог/приветствие/timeout/SIGTERM). Production-отчёт ask переведён на формат C. |",
         "| `DP-NFQ` | Datapath NFQUEUE error text | 2026-11-18: C `say` — внутренний `vsnprintf` в буфер; Rust возвращает `io::Error`/`String` и логирует причину у вызывающего. Ветви вердиктов/ENOBUFS/timestamp/ICMP покрыты профильными C/Rust differential'ами; отдельного поведенческого контракта у буфера нет. |",
+        "| `DT-RAW-HANDSHAKE` | Detect raw handshake/probe non-Linux stubs | 2026-11-18: три не-Linux заглушки (`flush_pending`, `poison_family`, `handshake_as`) закрыты как E*: R2O выпускается только для Linux/OpenWrt, raw-слой вне Linux не компилируется, а Linux-путь покрыт production differential 5 cases. |",
+        "| `CN-TLS-RECORD-IO` | TLS record I/O and helpers | 2026-11-18: record/handshake-слой заменён rustls; dispose/free — RAII, `say` — внутренний форматтер. Байты ClientHello TLS1.2 сверены `test-tls12-ch12-differential.sh`, поля ServerHello — `d2o_verify_differential`, ключи/IV — `hkdf-*`. **Ограничение:** побайтового differential record-слоя нет. |",
         "",
         "## Следующий шаг",
         "",

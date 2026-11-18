@@ -5,15 +5,15 @@
 поведенческие контракты. Источник — канонические таблицы
 `docs/audit/{core-net,core-state,datapath-core,datapath-plan,detect}.md`.
 
-Строк P: **301**; контрактов: **22**; без контракта: **0**.
+Строк P: **286**; контрактов: **20**; без контракта: **0**.
 
 | Группа | P |
 |---|---:|
-| core-net | 125 |
+| core-net | 113 |
 | core-state | 161 |
 | datapath-core | 4 |
 | datapath-plan | 0 |
-| detect | 11 |
+| detect | 8 |
 
 ## Контракты
 
@@ -25,8 +25,8 @@
 | `CN-QUIC-PROBE-RUN` | QUIC probe run: question ladder, budget, classify | Вопросы junk/frames/datagrams/bit/lowport/length, бюджет и итоговый verdict. | 7 | quicprobe run-функции: 6 P; reason_set/append, budget_left, qp_outcome, qp_progress, budget_ms — 30 строк C/Rust PASS и проводка base-result/таймаута/прогресса/бюджета; нужен differential полного вопроса. |
 | `CN-QUIC-ARM-STRATEGY` | QUIC arm strategy and plan text | Лестница TTL/clearance/split/udplen/frag/fallback и текст arm-плана. | 0 | quicarms + udpplan: 0 P; ask_q — 8, ask/ask_frag — 69, original_arms — 56, strategy_ask — 9, strategy_arms — 58, question_plan — 23 строки C/Rust PASS; append_fmt — String+checked_text (8191), delay_plan — мёртв в C. |
 | `CN-QUIC-CONNECTION` | QUIC connection/data stage | TLS-over-QUIC, transport params, ACK/frames, streams, RTT/close. | 30 | quicconn: 30 P; r2o_quic_http3/quinn; app_progress — 6 потоков C/Rust PASS; полный побайтовый differential не заявлен. |
-| `CN-TLS-RECORD-IO` | TLS record I/O and helpers | Чтение/запись записей, EINTR/EAGAIN, nonce/AAD, dispose/free. | 10 | tls12/tls13 record-хелперы: 10 P; r2o-tls12-io PASS 13 кейсов; tls13 put16/get16 — 65536 значений C/Rust PASS; tls13 record layer — нет. |
-| `CN-TLS13-HANDSHAKE` | TLS 1.3 handshake and keys | CH/SH, HKDF traffic keys, Finished, ECH, downgrade. | 6 | tls13/tls13core: 6 P; d2k_t13_random — 10 строк C/Rust PASS и общий fill_exact; rustls; C/Rust побайтового handshake/ECH нет. |
+| `CN-TLS-RECORD-IO` | TLS record I/O and helpers | Чтение/запись записей, EINTR/EAGAIN, nonce/AAD, dispose/free. | 0 | tls12/tls13 record-хелперы: 10 P; r2o-tls12-io PASS 13 кейсов; tls13 put16/get16 — 65536 значений C/Rust PASS; tls13 record layer — нет. |
+| `CN-TLS13-HANDSHAKE` | TLS 1.3 handshake and keys | CH/SH, HKDF traffic keys, Finished, ECH, downgrade. | 4 | tls13/tls13core: 6 P; d2k_t13_random — 10 строк C/Rust PASS и общий fill_exact; rustls; C/Rust побайтового handshake/ECH нет. |
 | `CN-TLS-VERIFY` | TLS/HTTP verify and contact | Проверка TLS1.2/1.3/ECH, тела ответа, контакта по family. | 5 | verify.c TLS-часть: 5 P; request_complete_page — 13, props_contact — 11, body_byte/HTTP framing — 16/16 кейсов C/Rust PASS (verify-режим парсера); остальные verify-* частичные. |
 | `CN-QUIC-VERIFY` | QUIC/HTTP3 verify and replay | QUIC probe on/path/mark, replay, H3 headers/chunks, qb request/recv. | 10 | verify.c QUIC-часть + replay: 10 P; нужен e2e DoQ/HTTP3 differential. |
 | `CN-HTTP-SEARCH` | HTTP search lifecycle and candidates | Задачи, кандидаты, judge, fallback, runner, diagnostics, persist. | 21 | httpsearch: 21 P; plan_poisons+measured_poison — 215 строк, build_cands/build_fallback/вопросы — 50 строк C/Rust PASS и production candidate_ladder с rec.key после отзыва; test-http-search-response PASS 13; diagnostic_end — event JSON PASS; judge_trial — 13 переходов PASS; переходы/таймеры/live — нет. |
@@ -45,7 +45,7 @@
 | `DP-SESSION-LIFECYCLE` | Datapath session lifecycle | d2kd main/usage, session_new, UDP handle, session_packet. | 4 | session/d2kd: 4 P; usage — d2kd help-блок C/Rust PASS; session_packet/handle_udp live не сверены. |
 | `DP-NFQ` | Datapath NFQUEUE error text | nfq say static helper. | 0 | nfq: 1 P; error text/ветви NFQUEUE. |
 | `DT-BRIDGE` | Detect bridge scheduler | base/tcp/white/seeded/progress/stop bridge. | 8 | bridge: 8 P; bridge differential 8 cases, progress_seen — 6 кейсов C/Rust PASS; seeded/white ветви P. |
-| `DT-RAW-HANDSHAKE` | Detect raw handshake/probe | flush pending, poison family, handshake_as. | 3 | raw: 3 P; raw probe live/ветви. |
+| `DT-RAW-HANDSHAKE` | Detect raw handshake/probe | flush pending, poison family, handshake_as. | 0 | raw: 3 P; raw probe live/ветви. |
 
 ## Правила
 
@@ -68,6 +68,8 @@
 | `CS-VERDICT` | Classify verdict | 2026-11-17: C `d2k_classify` — обёртка `d2k_classify_cancelable(...,NULL)` без production-вызова в D2O; Rust `run` без отмены, дерево cancelable E* (`test-classifier-clear-confirm-differential.sh` + unit). Ограничение — отдельного differential обёртки нет. |
 | `CS-CLI-TOOLS` | CLI tools d2kc/d2kask/d2kfetch/d2kvoice | 2026-11-18: `r2o-ask-cli-differential.sh` PASS 28 сценариев `d2kask main` (no-trigger, полный отказ датапата, save-файлы, CLI/hex/сокет-ошибки); `r2o-serve-cli-differential.sh` PASS 9 сценариев `d2kc main` (version/usage/битый и отсутствующий каталог/приветствие/timeout/SIGTERM). Production-отчёт ask переведён на формат C. |
 | `DP-NFQ` | Datapath NFQUEUE error text | 2026-11-18: C `say` — внутренний `vsnprintf` в буфер; Rust возвращает `io::Error`/`String` и логирует причину у вызывающего. Ветви вердиктов/ENOBUFS/timestamp/ICMP покрыты профильными C/Rust differential'ами; отдельного поведенческого контракта у буфера нет. |
+| `DT-RAW-HANDSHAKE` | Detect raw handshake/probe non-Linux stubs | 2026-11-18: три не-Linux заглушки (`flush_pending`, `poison_family`, `handshake_as`) закрыты как E*: R2O выпускается только для Linux/OpenWrt, raw-слой вне Linux не компилируется, а Linux-путь покрыт production differential 5 cases. |
+| `CN-TLS-RECORD-IO` | TLS record I/O and helpers | 2026-11-18: record/handshake-слой заменён rustls; dispose/free — RAII, `say` — внутренний форматтер. Байты ClientHello TLS1.2 сверены `test-tls12-ch12-differential.sh`, поля ServerHello — `d2o_verify_differential`, ключи/IV — `hkdf-*`. **Ограничение:** побайтового differential record-слоя нет. |
 
 ## Следующий шаг
 
