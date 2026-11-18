@@ -37287,6 +37287,44 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn ask_cli_texts_match_c() {
+        use r2o_controller::classify::TriState;
+
+        let mut output = String::new();
+        for value in 0..=12_u8 {
+            output.push_str(&format!(
+                "step {value} {}\n",
+                super::r2o_ask_step_rc_str(value)
+            ));
+        }
+        for value in 0..=8_u8 {
+            output.push_str(&format!(
+                "ack {value} {}\n",
+                super::r2o_ask_ack_code_str(value)
+            ));
+        }
+        for (value, state) in [
+            (0_u8, TriState::Unset),
+            (1, TriState::True),
+            (2, TriState::False),
+            (3, TriState::Unset),
+        ] {
+            output.push_str(&format!("pval {value} {}\n", super::r2o_tri_state(state)));
+        }
+        for mask in 0..16_u8 {
+            output.push_str(&format!(
+                "seen {mask} {}\n",
+                super::r2o_ask_print_seen_types(mask)
+            ));
+        }
+        if let Some(path) = std::env::var_os("R2O_ASK_CLI_TEXT_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        print!("{output}");
+    }
+
     #[test]
     fn ack_reason_text_matches_c() {
         use r2k_core::control::{ACK_BAD_ARGS, ACK_BAD_PLAN, ACK_NO_ROOM};
