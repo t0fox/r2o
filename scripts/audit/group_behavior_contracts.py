@@ -111,7 +111,7 @@ CONTRACTS = {
     "CN-TLS13-HANDSHAKE": (
         "TLS 1.3 handshake and keys",
         "CH/SH, HKDF traffic keys, Finished, ECH, downgrade.",
-        "tls13/tls13core: 7 P; rustls; C/Rust побайтового handshake/ECH нет.",
+        "tls13/tls13core: 6 P; d2k_t13_random — 10 строк C/Rust PASS и общий fill_exact; rustls; C/Rust побайтового handshake/ECH нет.",
     ),
     "CN-TLS-VERIFY": (
         "TLS/HTTP verify and contact",
@@ -136,7 +136,7 @@ CONTRACTS = {
     "CN-VOICE": (
         "Voice/STUN discovery",
         "STUN request, DNS/voice blob, prefix, local failure.",
-        "voice/voice_discovery/stun: 10 P; voice differentials частичные.",
+        "voice/voice_discovery/stun: 9 P; d2k_stun_request/t13_random — 10 строк C/Rust PASS и production STUN-префикс; voice differentials частичные.",
     ),
     "CS-SCHED-TASK-LIFECYCLE": (
         "Scheduler task/worker lifecycle",
@@ -382,8 +382,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 319:
-        raise SystemExit(f"expected 319 P rows, got {len(rows)}")
+    if len(rows) != 317:
+        raise SystemExit(f"expected 317 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")

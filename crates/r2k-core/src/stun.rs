@@ -23,6 +23,17 @@ pub fn binding_request(txid: [u8; TXID_LEN]) -> [u8; HEADER_LEN] {
     request
 }
 
+/// C `d2k_stun_request` (`core/stun.c:27-45`): Binding Request без атрибутов
+/// со своим случайным txid на каждый вызов. `None` — источник случайности
+/// отказал (C возвращает 0).
+pub fn random_binding_request() -> Option<[u8; HEADER_LEN]> {
+    let mut txid = [0; TXID_LEN];
+    if !crate::random::fill_exact(&mut txid) {
+        return None;
+    }
+    Some(binding_request(txid))
+}
+
 /// Разобрать Binding Response для этой транзакции. Для корректного ответа без
 /// XOR-MAPPED-ADDRESS вернуть `Ok(None)` согласно контракту эталона на C.
 pub fn parse_binding_response(
@@ -173,4 +184,67 @@ fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, &'static str> {
         .get(offset..offset + 4)
         .ok_or("обрезанное поле STUN")?;
     Ok(u32::from_be_bytes(value.try_into().expect("fixed width")))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::random::fill_exact;
+
+    /// C/Rust differential `d2k_stun_request` + `d2k_t13_random`
+    /// (`scripts/r2o-stun-request-differential.sh`).
+    #[test]
+    fn stun_request_matches_c() {
+        let first = super::random_binding_request().expect("OS entropy");
+        let header: String = first[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+
+        let mut output = String::new();
+        output.push_str(&format!("request={}\n", first.len()));
+        output.push_str(&format!("header={header}\n"));
+        output.push_str("txid_len=12\n");
+        output.push_str(&format!(
+            "txid_nonzero={}\n",
+            u8::from(first[8..].iter().any(|byte| *byte != 0))
+        ));
+        let second = super::random_binding_request().expect("OS entropy");
+        output.push_str(&format!(
+            "fresh_requests={}\n",
+            u8::from(first[8..] != second[8..])
+        ));
+
+        let untouched = 0x5a_u8;
+        let mut empty: [u8; 0] = [];
+        let zero_rc = if fill_exact(&mut empty) { 0 } else { -1 };
+        output.push_str(&format!("zero_rc={zero_rc}\n"));
+        output.push_str(&format!("zero_unchanged={}\n", u8::from(untouched == 0x5a)));
+
+        let mut first_random = [0_u8; 32];
+        let fill_rc = if fill_exact(&mut first_random) { 0 } else { -1 };
+        output.push_str(&format!("fill_rc={fill_rc}\n"));
+        output.push_str(&format!(
+            "fill_nonzero={}\n",
+            u8::from(first_random.iter().any(|byte| *byte != 0))
+        ));
+        let mut second_random = [0_u8; 32];
+        let second_rc = if fill_exact(&mut second_random) {
+            0
+        } else {
+            -1
+        };
+        output.push_str(&format!(
+            "fresh_random={}\n",
+            u8::from(fill_rc == 0 && second_rc == 0 && first_random != second_random)
+        ));
+
+        // Запрос разбирается тем же кодом, что и ответы.
+        assert!(super::is_binding_request(&first));
+        assert!(super::is_binding_request(&second));
+
+        if let Some(path) = std::env::var_os("R2O_STUN_REQUEST_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        print!("{output}");
+    }
 }

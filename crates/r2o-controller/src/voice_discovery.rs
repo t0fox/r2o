@@ -490,12 +490,9 @@ pub fn r2o_search_discovery_endpoint(
     r2o_search_discovery_with(
         r2o_known_prefix,
         || {
-            use std::io::Read;
-            let mut r2o_txid = [0; 12];
-            std::fs::File::open("/dev/urandom")
-                .and_then(|mut r2o_random| r2o_random.read_exact(&mut r2o_txid))
-                .map_err(|error| format!("не получить случайный STUN ID: {error}"))?;
-            Ok(r2k_core::stun::binding_request(r2o_txid))
+            // C `d2k_stun_request`: txid рождается внутри сборщика запроса.
+            r2k_core::stun::random_binding_request()
+                .ok_or_else(|| "не получить случайный STUN ID: OS entropy".to_owned())
         },
         |r2o_prefix| r2o_probe_discovery_endpoint(r2o_server, r2o_prefix, r2o_wait, r2o_mark),
     )

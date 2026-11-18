@@ -5,11 +5,11 @@
 поведенческие контракты. Источник — канонические таблицы
 `docs/audit/{core-net,core-state,datapath-core,datapath-plan,detect}.md`.
 
-Строк P: **319**; контрактов: **25**; без контракта: **0**.
+Строк P: **317**; контрактов: **25**; без контракта: **0**.
 
 | Группа | P |
 |---|---:|
-| core-net | 140 |
+| core-net | 138 |
 | core-state | 163 |
 | datapath-core | 5 |
 | datapath-plan | 0 |
@@ -26,12 +26,12 @@
 | `CN-QUIC-ARM-STRATEGY` | QUIC arm strategy and plan text | Лестница TTL/clearance/split/udplen/frag/fallback и текст arm-плана. | 9 | quicarms + udpplan: 9 P; emit_header_proto — 4 кейса, arm_plan/compose_plan/split_plan_text — 32 строки C/Rust PASS и production-выбор TTL/split/udplen; adaptive/порядок не сверены. |
 | `CN-QUIC-CONNECTION` | QUIC connection/data stage | TLS-over-QUIC, transport params, ACK/frames, streams, RTT/close. | 30 | quicconn: 30 P; r2o_quic_http3/quinn; app_progress — 6 потоков C/Rust PASS; полный побайтовый differential не заявлен. |
 | `CN-TLS-RECORD-IO` | TLS record I/O and helpers | Чтение/запись записей, EINTR/EAGAIN, nonce/AAD, dispose/free. | 10 | tls12/tls13 record-хелперы: 10 P; r2o-tls12-io PASS 13 кейсов; tls13 put16/get16 — 65536 значений C/Rust PASS; tls13 record layer — нет. |
-| `CN-TLS13-HANDSHAKE` | TLS 1.3 handshake and keys | CH/SH, HKDF traffic keys, Finished, ECH, downgrade. | 7 | tls13/tls13core: 7 P; rustls; C/Rust побайтового handshake/ECH нет. |
+| `CN-TLS13-HANDSHAKE` | TLS 1.3 handshake and keys | CH/SH, HKDF traffic keys, Finished, ECH, downgrade. | 6 | tls13/tls13core: 6 P; d2k_t13_random — 10 строк C/Rust PASS и общий fill_exact; rustls; C/Rust побайтового handshake/ECH нет. |
 | `CN-TLS-VERIFY` | TLS/HTTP verify and contact | Проверка TLS1.2/1.3/ECH, тела ответа, контакта по family. | 8 | verify.c TLS-часть: 8 P; verify-* differentials частичные. |
 | `CN-QUIC-VERIFY` | QUIC/HTTP3 verify and replay | QUIC probe on/path/mark, replay, H3 headers/chunks, qb request/recv. | 10 | verify.c QUIC-часть + replay: 10 P; нужен e2e DoQ/HTTP3 differential. |
 | `CN-HTTP-SEARCH` | HTTP search lifecycle and candidates | Задачи, кандидаты, judge, fallback, runner, diagnostics, persist. | 22 | httpsearch: 22 P; plan_poisons+measured_poison — 215 строк, лестница build_fallback/вопросов — 37 строк C/Rust PASS и production candidate_ladder; test-http-search-response PASS 13; diagnostic_end — event JSON PASS; judge_trial — 13 переходов PASS; переходы/таймеры/live — нет. |
 | `CN-VOLUME` | Response volume probe | TLS/plain drain, rx volume, bounded connect, path probe. | 8 | volume: 8 P; budget volume differentials частичные, полный path — нет. |
-| `CN-VOICE` | Voice/STUN discovery | STUN request, DNS/voice blob, prefix, local failure. | 10 | voice/voice_discovery/stun: 10 P; voice differentials частичные. |
+| `CN-VOICE` | Voice/STUN discovery | STUN request, DNS/voice blob, prefix, local failure. | 9 | voice/voice_discovery/stun: 9 P; d2k_stun_request/t13_random — 10 строк C/Rust PASS и production STUN-префикс; voice differentials частичные. |
 | `CS-SCHED-TASK-LIFECYCLE` | Scheduler task/worker lifecycle | Слоты, worker permits, reset/done/fail/join, retire, queue wake, guards. | 26 | sched.c: worker/task/queue/guard; Rust R2oDiscoverySearches/Queue/Life; box_injects_rst/rst_guard_wanted/plan_arm_rst_guard — 32 кейса C/Rust PASS и проводка в candidate+sync; sched_quic_progress — 7 кейсов и проводка в QUIC worker; ask_settle — 9 кейсов и проводка в base/full; worker_type — 16 кейсов C/Rust PASS и живой worker_oldest_type из gate; полная матрица T_* не доказана. |
 | `CS-SCHED-SUSPECT-ADMISSION` | Scheduler suspect admission and refusal | on_suspect, cooldown, dead/refusal, shape/family, refused outcomes. | 27 | sched.c: admission/refusal; Rust queue/cooldown/family recovery; refuse_is_damage — 256 кодов C/Rust PASS и ветка DAMAGED в REFUSED; clear_binding_matches — 9216 кейсов, binding_wire_shape — 126 кейсов, measured trigger profile, client_tcp_profile — 4112 кейсов и drop_client_opts — 6 кейсов C/Rust PASS; полный differential кодов/порядка. |
 | `CS-SCHED-CANDIDATE-VERIFY` | Scheduler candidate verification | verify_confirm, partial_finish, ACK/APPLIED, own plan, exchange. | 18 | sched.c: verify/applied/exchange; production verify_confirm 30 cases, props_text — 243 кейса C/Rust PASS, остальные ветви P. |

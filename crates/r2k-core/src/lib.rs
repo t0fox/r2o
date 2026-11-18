@@ -11,6 +11,7 @@ pub mod plan;
 pub mod quic;
 pub mod quic_ranges;
 pub mod quic_snapshot;
+pub mod random;
 pub mod stun;
 pub mod tls;
 pub mod udp_plan;
