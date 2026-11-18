@@ -25841,7 +25841,6 @@ impl ControlClient {
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .props_observe_exchange(&event);
                     }
-                    self.queue_async_frame(frame)?;
                     continue;
                 }
                 if frame.kind != EVENT_HELLO {

@@ -1588,6 +1588,10 @@ fn config_parser_accepts_all_shipped_and_donor_known_keys() {
     let mut config = Config::default();
     parse_config(&path, &mut config, &[]).unwrap();
     assert!(config.unknown_keys.is_empty(), "{:?}", config.unknown_keys);
+    fs::write(&path, "CONNBYTES=auto\n").unwrap();
+    config.connbytes = "0:1".into();
+    parse_config(&path, &mut config, &[]).unwrap();
+    assert_eq!(config.connbytes, "0:8");
 }
 
 #[test]

@@ -3393,6 +3393,7 @@ pub fn parse_config(
                 config.ports = value.into();
             }
             "CONNBYTES" => {
+                let value = if value == "auto" { "0:8" } else { value };
                 if !valid_connbytes_window(value) {
                     return Err(r2o_invalid_config(key));
                 }
