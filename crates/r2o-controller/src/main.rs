@@ -28440,14 +28440,13 @@ impl ControlClient {
                     continue;
                 };
                 let data_verdict = r2o_controller::quic_replay::r2o_quic_trial_data_verdict(data);
-                if decision == r2o_controller::quic_replay::R2oQuicFilterDecision::Pass
-                    && !data.r2o_quic_stalled
-                    && r2o_controller::quic_replay::r2o_quic_data_proof_confirmed(
-                        data.handshake_confirmed,
-                        outcome.applied,
-                        data_verdict,
-                    )
-                {
+                if r2o_controller::quic_replay::r2o_quic_candidate_proves_selection(
+                    decision,
+                    outcome.applied,
+                    data.r2o_quic_stalled,
+                    data.handshake_confirmed,
+                    data_verdict,
+                ) {
                     selected_plan = Some((
                         outcome.plan_text,
                         candidate.name,
@@ -28591,14 +28590,13 @@ impl ControlClient {
                     continue;
                 };
                 let data_verdict = r2o_controller::quic_replay::r2o_quic_trial_data_verdict(data);
-                if decision == r2o_controller::quic_replay::R2oQuicFilterDecision::Pass
-                    && !data.r2o_quic_stalled
-                    && r2o_controller::quic_replay::r2o_quic_data_proof_confirmed(
-                        data.handshake_confirmed,
-                        outcome.applied,
-                        data_verdict,
-                    )
-                {
+                if r2o_controller::quic_replay::r2o_quic_candidate_proves_selection(
+                    decision,
+                    outcome.applied,
+                    data.r2o_quic_stalled,
+                    data.handshake_confirmed,
+                    data_verdict,
+                ) {
                     selected_plan = Some((
                         outcome.plan_text,
                         candidate.name,

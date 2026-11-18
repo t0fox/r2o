@@ -646,6 +646,20 @@ pub fn r2o_quic_data_proof_confirmed(
     handshake_confirmed && applied && matches!(data_verdict, R2kQuicDataVerdict::Pass)
 }
 
+/// C `d2k_quic_original_arms`: первый кандидат с фильтром 3/3, живым
+/// рукопожатием, HTTP/3-данными и точным APPLIED останавливает перебор.
+pub fn r2o_quic_candidate_proves_selection(
+    decision: R2oQuicFilterDecision,
+    applied: bool,
+    stalled: bool,
+    handshake_confirmed: bool,
+    data_verdict: R2kQuicDataVerdict,
+) -> bool {
+    decision == R2oQuicFilterDecision::Pass
+        && !stalled
+        && r2o_quic_data_proof_confirmed(handshake_confirmed, applied, data_verdict)
+}
+
 /// Применить вердикт HTTP/3 с ограничением полноты для повторного бюджета.
 pub fn r2o_quic_trial_data_verdict(
     result: &crate::r2o_quic_http3::R2oQuicHttp3Result,
@@ -3967,6 +3981,169 @@ mod tests {
         }
 
         if let Some(path) = std::env::var_os("R2O_QUIC_ORIGINAL_ARMS_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        print!("{output}");
+    }
+
+    #[test]
+    fn quic_original_arms_selection_matches_c() {
+        use r2k_core::quic::R2kQuicDataVerdict;
+        use std::collections::VecDeque;
+
+        #[derive(Clone, Copy, Eq, PartialEq)]
+        enum Scenario {
+            FirstSingle,
+            Pair0x6,
+            AdaptivePass,
+            AdaptiveFail,
+            NoAdaptive,
+        }
+
+        fn probe_pass(scenario: Scenario, kind: super::R2oQuicCandidateKind) -> usize {
+            match (scenario, kind) {
+                (Scenario::FirstSingle, super::R2oQuicCandidateKind::OriginalSingle(0)) => 3,
+                (
+                    Scenario::Pair0x6,
+                    super::R2oQuicCandidateKind::OriginalRepeats { blob: 0, copies: 6 },
+                ) => 3,
+                (
+                    Scenario::AdaptivePass | Scenario::AdaptiveFail | Scenario::NoAdaptive,
+                    super::R2oQuicCandidateKind::OriginalRepeats {
+                        blob: 3,
+                        copies: 11,
+                    },
+                ) => 1,
+                (Scenario::AdaptivePass, super::R2oQuicCandidateKind::AdaptiveSplit) => 3,
+                _ => 0,
+            }
+        }
+
+        fn blob_len(blob: u8) -> usize {
+            if blob == 4 {
+                16
+            } else {
+                super::R2O_QUIC_ORIGINAL_BLOBS[usize::from(blob)].len()
+            }
+        }
+
+        #[allow(clippy::type_complexity)]
+        fn ask_fields(kind: super::R2oQuicCandidateKind) -> (u8, u8, i32, u8, u8, u8, u32, usize) {
+            match kind {
+                super::R2oQuicCandidateKind::OriginalSingle(blob) => {
+                    (0, 0, 0, 1, 0, 0, 0, blob_len(blob))
+                }
+                super::R2oQuicCandidateKind::OriginalRepeats { blob, copies } => {
+                    (0, 0, 0, copies, 0, 0, 0, blob_len(blob))
+                }
+                super::R2oQuicCandidateKind::OriginalTtl(ttl) => {
+                    (0, 0, i32::from(ttl), 2, 0, 0, 0, blob_len(0))
+                }
+                super::R2oQuicCandidateKind::FragmentControl => (1, 1, 0, 0, 0, 0, 0, 0),
+                super::R2oQuicCandidateKind::FragmentShape(shape) => (0, shape, 0, 0, 0, 0, 0, 0),
+                super::R2oQuicCandidateKind::AdaptiveSplit => (0, 0, 0, 11, 1, 0, 0, blob_len(3)),
+                _ => (0, 0, 0, 0, 0, 0, 0, 0),
+            }
+        }
+
+        fn selected_fields(
+            kind: super::R2oQuicCandidateKind,
+        ) -> (&'static str, i32, i32, i32, usize) {
+            match kind {
+                super::R2oQuicCandidateKind::OriginalSingle(blob) => {
+                    ("copies", 1, 0, 0, blob_len(blob))
+                }
+                super::R2oQuicCandidateKind::OriginalRepeats { blob, copies } => {
+                    ("copies", i32::from(copies), 0, 0, blob_len(blob))
+                }
+                super::R2oQuicCandidateKind::OriginalTtl(ttl) => {
+                    ("ttl", 2, i32::from(ttl), 0, blob_len(0))
+                }
+                super::R2oQuicCandidateKind::AdaptiveSplit => ("split", 11, 0, 0, blob_len(3)),
+                super::R2oQuicCandidateKind::FragmentShape(shape) => {
+                    ("frag", 0, 0, i32::from(shape), 0)
+                }
+                _ => ("none", 0, 0, 0, 0),
+            }
+        }
+
+        let mut output = String::new();
+        for (label, scenario) in [
+            ("first-single", Scenario::FirstSingle),
+            ("pair-0x6", Scenario::Pair0x6),
+            ("adaptive-pass", Scenario::AdaptivePass),
+            ("adaptive-fail", Scenario::AdaptiveFail),
+            ("no-adaptive", Scenario::NoAdaptive),
+        ] {
+            output.push_str(&format!("scenario {label}\n"));
+            let mut fallback: VecDeque<_> =
+                super::r2o_quic_original_fallback_candidates(false, false, false).into();
+            let mut asked = 0_usize;
+            let mut control_passed = false;
+            let mut selected = None;
+            while let Some(candidate) = fallback.pop_front() {
+                // Гейт runner'а: формы фрагментации — только после контроля.
+                if matches!(
+                    candidate.kind,
+                    super::R2oQuicCandidateKind::FragmentShape(_)
+                ) && !control_passed
+                {
+                    continue;
+                }
+                let (control, frag, ttl, copies, split, benign, udplen, length) =
+                    ask_fields(candidate.kind);
+                output.push_str(&format!(
+                    "ask {asked} control={control} frag={frag} ttl={ttl} copies={copies} split={split} benign={benign} udplen={udplen} blob_len={length}\n"
+                ));
+                asked += 1;
+                let pass = probe_pass(scenario, candidate.kind);
+                if matches!(candidate.kind, super::R2oQuicCandidateKind::FragmentControl) {
+                    control_passed = pass == 3;
+                    continue;
+                }
+                // C встраивает adaptive сразу после частичного ответа на
+                // fake_default ×11; runner делает fallback.push_front.
+                if matches!(
+                    candidate.kind,
+                    super::R2oQuicCandidateKind::OriginalRepeats {
+                        blob: 3,
+                        copies: 11
+                    }
+                ) {
+                    let split_decision = if scenario == Scenario::NoAdaptive {
+                        super::R2oQuicFilterDecision::Unknown
+                    } else {
+                        super::R2oQuicFilterDecision::No
+                    };
+                    if super::r2o_quic_adaptive_split_eligible(split_decision, true, pass, 3, None)
+                    {
+                        fallback.push_front(super::r2o_quic_adaptive_split_candidate());
+                    }
+                    continue;
+                }
+                if pass == 3
+                    && super::r2o_quic_candidate_proves_selection(
+                        super::R2oQuicFilterDecision::Pass,
+                        true,
+                        false,
+                        true,
+                        R2kQuicDataVerdict::Pass,
+                    )
+                {
+                    selected = Some(candidate.kind);
+                    break;
+                }
+            }
+            let (kind, copies, ttl, frag, length) = match selected {
+                Some(kind) => selected_fields(kind),
+                None => ("none", 0, 0, 0, 0),
+            };
+            output.push_str(&format!(
+                "selected {label} kind={kind} copies={copies} ttl={ttl} frag={frag} blob_len={length} trace={asked}\n"
+            ));
+        }
+
+        if let Some(path) = std::env::var_os("R2O_QUIC_ARMS_SELECTION_OUTPUT") {
             std::fs::write(path, &output).unwrap();
         }
         print!("{output}");
