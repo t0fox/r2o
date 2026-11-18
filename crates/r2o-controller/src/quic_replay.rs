@@ -4148,4 +4148,202 @@ mod tests {
         }
         print!("{output}");
     }
+
+    #[test]
+    fn quic_strategy_ask_matches_c() {
+        use r2k_core::quic::R2kQuicDataVerdict;
+
+        #[derive(Clone, Copy)]
+        struct Step {
+            pass: usize,
+            sent: usize,
+            err: usize,
+            data: R2kQuicDataVerdict,
+        }
+
+        fn run(label: &str, steps: &[Step], can_ask: bool) -> String {
+            let mut asked = false;
+            let mut probes = 0_usize;
+            let mut trace = 0_usize;
+            let mut final_decision = super::R2oQuicFilterDecision::Unknown;
+            for attempt in 0..2 {
+                trace += 1;
+                if !can_ask {
+                    break;
+                }
+                asked = true;
+                let step = steps[attempt.min(steps.len() - 1)];
+                probes = probes.saturating_add(step.sent);
+                let measured = if step.sent == 3 && step.err == 0 {
+                    3
+                } else {
+                    0
+                };
+                let filter = super::r2o_quic_filter_round_decision(step.pass, measured, attempt, 3);
+                let verdict = (filter == super::R2oQuicFilterDecision::Pass).then_some(step.data);
+                let decision = super::r2o_quic_strategy_attempt_decision(filter, verdict, attempt);
+                match decision {
+                    super::R2oQuicFilterDecision::Pass => {
+                        final_decision = decision;
+                        break;
+                    }
+                    super::R2oQuicFilterDecision::No => {
+                        final_decision = decision;
+                        break;
+                    }
+                    super::R2oQuicFilterDecision::Retry if attempt == 0 => continue,
+                    _ => {
+                        final_decision = super::R2oQuicFilterDecision::Unknown;
+                        break;
+                    }
+                }
+            }
+            let name = match final_decision {
+                super::R2oQuicFilterDecision::Pass => "YES",
+                super::R2oQuicFilterDecision::No => "NO",
+                _ => "UNKNOWN",
+            };
+            format!(
+                "strategy {label} rc={name} asked={} probes={probes} trace={trace}\n",
+                u8::from(asked)
+            )
+        }
+
+        use R2kQuicDataVerdict::{NoHandshake, NotRun, Pass};
+        let mut output = String::new();
+        output.push_str(&run(
+            "pass-data",
+            &[Step {
+                pass: 3,
+                sent: 3,
+                err: 0,
+                data: Pass,
+            }],
+            true,
+        ));
+        output.push_str(&run(
+            "no",
+            &[Step {
+                pass: 0,
+                sent: 3,
+                err: 0,
+                data: NotRun,
+            }],
+            true,
+        ));
+        output.push_str(&run(
+            "partial-pass",
+            &[
+                Step {
+                    pass: 1,
+                    sent: 3,
+                    err: 0,
+                    data: NotRun,
+                },
+                Step {
+                    pass: 3,
+                    sent: 3,
+                    err: 0,
+                    data: Pass,
+                },
+            ],
+            true,
+        ));
+        output.push_str(&run(
+            "unsent-no",
+            &[
+                Step {
+                    pass: 0,
+                    sent: 2,
+                    err: 0,
+                    data: NotRun,
+                },
+                Step {
+                    pass: 0,
+                    sent: 3,
+                    err: 0,
+                    data: NotRun,
+                },
+            ],
+            true,
+        ));
+        output.push_str(&run(
+            "partial-twice",
+            &[
+                Step {
+                    pass: 1,
+                    sent: 3,
+                    err: 0,
+                    data: NotRun,
+                },
+                Step {
+                    pass: 1,
+                    sent: 3,
+                    err: 0,
+                    data: NotRun,
+                },
+            ],
+            true,
+        ));
+        output.push_str(&run(
+            "data-nohandshake",
+            &[Step {
+                pass: 3,
+                sent: 3,
+                err: 0,
+                data: NoHandshake,
+            }],
+            true,
+        ));
+        output.push_str(&run(
+            "notrun-pass",
+            &[
+                Step {
+                    pass: 3,
+                    sent: 3,
+                    err: 0,
+                    data: NotRun,
+                },
+                Step {
+                    pass: 3,
+                    sent: 3,
+                    err: 0,
+                    data: Pass,
+                },
+            ],
+            true,
+        ));
+        output.push_str(&run(
+            "budget",
+            &[Step {
+                pass: 3,
+                sent: 3,
+                err: 0,
+                data: Pass,
+            }],
+            false,
+        ));
+        output.push_str(&run(
+            "err-pass",
+            &[
+                Step {
+                    pass: 0,
+                    sent: 3,
+                    err: 1,
+                    data: NotRun,
+                },
+                Step {
+                    pass: 3,
+                    sent: 3,
+                    err: 0,
+                    data: Pass,
+                },
+            ],
+            true,
+        ));
+        if let Some(path) = std::env::var_os("R2O_QUIC_STRATEGY_ASK_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        print!("{output}");
+    }
 }
