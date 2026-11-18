@@ -146,7 +146,7 @@ CONTRACTS = {
     "CS-SCHED-SUSPECT-ADMISSION": (
         "Scheduler suspect admission and refusal",
         "on_suspect, cooldown, dead/refusal, shape/family, refused outcomes.",
-        "sched.c: admission/refusal; Rust queue/cooldown/family recovery; refuse_is_damage — 256 кодов C/Rust PASS и ветка DAMAGED в REFUSED; clear_binding_matches — 9216 кейсов, binding_wire_shape — 126 кейсов, measured trigger profile, client_tcp_profile — 4112 кейсов и drop_client_opts — 6 кейсов C/Rust PASS; cooldown_victim — 4 состояния кольца 128 C/Rust PASS; полный differential кодов/порядка.",
+        "sched.c: admission/refusal; Rust queue/cooldown/family recovery; refuse_is_damage — 256 кодов C/Rust PASS и ветка DAMAGED в REFUSED; clear_binding_matches — 9216 кейсов, binding_wire_shape — 126 кейсов, measured trigger profile, client_tcp_profile — 4112 кейсов и drop_client_opts — 6 кейсов C/Rust PASS; cooldown_victim — 4 состояния кольца 128 C/Rust PASS; clean-handshake differential — коды/IP/family/name/TTL PASS; полный differential кодов/порядка.",
     ),
     "CS-SCHED-CANDIDATE-VERIFY": (
         "Scheduler candidate verification",
@@ -382,8 +382,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 222:
-        raise SystemExit(f"expected 222 P rows, got {len(rows)}")
+    if len(rows) != 220:
+        raise SystemExit(f"expected 220 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")

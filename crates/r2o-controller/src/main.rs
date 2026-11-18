@@ -11365,22 +11365,30 @@ fn r2o_clean_handshake_client_ip(key: &[u8; r2k_core::control::KEY_LEN]) -> [u8;
 #[cfg(unix)]
 #[derive(Default)]
 struct R2oCleanHandshakeCache {
-    entries: VecDeque<(String, u8, [u8; 16], std::time::Instant)>,
+    entries: VecDeque<(String, u8, u8, [u8; 16], std::time::Instant)>,
 }
 
 #[cfg(unix)]
 impl R2oCleanHandshakeCache {
-    fn note(&mut self, name: &str, family: u8, client_ip: [u8; 16], now: std::time::Instant) {
-        self.entries.retain(|(_, _, _, seen)| {
+    fn note(
+        &mut self,
+        name: &str,
+        transport: u8,
+        family: u8,
+        client_ip: [u8; 16],
+        now: std::time::Instant,
+    ) {
+        self.entries.retain(|(_, _, _, _, seen)| {
             now.saturating_duration_since(*seen) <= R2O_CLEAN_HANDSHAKE_TTL
         });
-        if let Some((_, _, _, seen)) =
-            self.entries
-                .iter_mut()
-                .find(|(entry_name, entry_family, entry_ip, _)| {
-                    entry_name == name && *entry_family == family && *entry_ip == client_ip
-                })
-        {
+        if let Some((_, _, _, _, seen)) = self.entries.iter_mut().find(
+            |(entry_name, entry_transport, entry_family, entry_ip, _)| {
+                entry_name == name
+                    && *entry_transport == transport
+                    && *entry_family == family
+                    && *entry_ip == client_ip
+            },
+        ) {
             *seen = now;
             return;
         }
@@ -11388,35 +11396,38 @@ impl R2oCleanHandshakeCache {
             self.entries.pop_front();
         }
         self.entries
-            .push_back((name.to_owned(), family, client_ip, now));
+            .push_back((name.to_owned(), transport, family, client_ip, now));
     }
 
     fn r2o_recent(
         &self,
         name: &str,
+        transport: u8,
         family: u8,
         client_ip: [u8; 16],
         now: std::time::Instant,
     ) -> bool {
-        self.entries
-            .iter()
-            .any(|(entry_name, entry_family, entry_ip, seen)| {
+        self.entries.iter().any(
+            |(entry_name, entry_transport, entry_family, entry_ip, seen)| {
                 entry_name == name
+                    && *entry_transport == transport
                     && *entry_family == family
                     && *entry_ip == client_ip
                     && now.saturating_duration_since(*seen) <= R2O_CLEAN_HANDSHAKE_TTL
-            })
+            },
+        )
     }
 
     fn suppresses_unplanned_tcp_suspicion(
         &self,
         name: &str,
+        transport: u8,
         family: u8,
         client_ip: [u8; 16],
         planned: bool,
         now: std::time::Instant,
     ) -> bool {
-        !planned && self.r2o_recent(name, family, client_ip, now)
+        !planned && self.r2o_recent(name, transport, family, client_ip, now)
     }
 }
 
@@ -11434,7 +11445,7 @@ fn r2o_suspect_clean_handshake_suppressed(
     now: std::time::Instant,
 ) -> bool {
     matches!(code, 1 | 2 | 3)
-        && cache.suppresses_unplanned_tcp_suspicion(name, family, client_ip, planned, now)
+        && cache.suppresses_unplanned_tcp_suspicion(name, 6, family, client_ip, planned, now)
 }
 
 #[cfg(unix)]
@@ -24876,6 +24887,7 @@ impl ControlClient {
                         if let Some(target) = target {
                             if clean_handshakes.suppresses_unplanned_tcp_suspicion(
                                 &target.host,
+                                6,
                                 target.family,
                                 r2o_clean_handshake_client_ip(&event.key),
                                 event.planned,
@@ -24989,6 +25001,7 @@ impl ControlClient {
                     if let Some(target) = tcp_hello_names.target_for_tcp_flow(&event.key, now) {
                         if clean_handshakes.suppresses_unplanned_tcp_suspicion(
                             &target.host,
+                            6,
                             target.family,
                             r2o_clean_handshake_client_ip(&event.key),
                             event.planned,
@@ -25080,6 +25093,7 @@ impl ControlClient {
                     if let Some(target) = tcp_hello_names.target_for_tcp_flow(&event.key, now) {
                         if clean_handshakes.suppresses_unplanned_tcp_suspicion(
                             &target.host,
+                            6,
                             target.family,
                             r2o_clean_handshake_client_ip(&event.key),
                             event.planned,
@@ -25748,6 +25762,7 @@ impl ControlClient {
                     if let Some(name) = recalled {
                         clean_handshakes.note(
                             &name,
+                            6,
                             event.key[0],
                             r2o_clean_handshake_client_ip(&event.key),
                             now,
@@ -26888,6 +26903,7 @@ impl ControlClient {
                 let name = name.to_owned();
                 clean_handshakes.note(
                     &name,
+                    6,
                     event.key[0],
                     r2o_clean_handshake_client_ip(&event.key),
                     now,
@@ -44229,32 +44245,50 @@ mod tests {
             "C client_ip_of: клиент — противоположный серверу конец"
         );
         let mut cache = super::R2oCleanHandshakeCache::default();
-        cache.note("clean.example", 4, client_a, now);
+        cache.note("clean.example", 6, 4, client_a, now);
 
-        assert!(cache.r2o_recent("clean.example", 4, client_a, now));
-        assert!(cache.suppresses_unplanned_tcp_suspicion("clean.example", 4, client_a, false, now));
-        assert!(!cache.suppresses_unplanned_tcp_suspicion("clean.example", 4, client_a, true, now));
+        assert!(cache.r2o_recent("clean.example", 6, 4, client_a, now));
+        assert!(cache.suppresses_unplanned_tcp_suspicion(
+            "clean.example",
+            6,
+            4,
+            client_a,
+            false,
+            now
+        ));
+        assert!(!cache.suppresses_unplanned_tcp_suspicion(
+            "clean.example",
+            6,
+            4,
+            client_a,
+            true,
+            now
+        ));
         // C `clean_handshake_recent`: чужой IP клиента не гасится.
-        assert!(!cache.r2o_recent("clean.example", 4, client_b, now));
-        assert!(!cache.r2o_recent("other.example", 4, client_a, now));
-        assert!(!cache.r2o_recent("clean.example", 6, client_a, now));
+        assert!(!cache.r2o_recent("clean.example", 6, 4, client_b, now));
+        assert!(!cache.r2o_recent("other.example", 6, 4, client_a, now));
+        assert!(!cache.r2o_recent("clean.example", 6, 6, client_a, now));
+        // C сравнивает и transport: UDP-запись не гасит TCP-подозрение.
+        assert!(!cache.r2o_recent("clean.example", 17, 4, client_a, now));
         assert!(cache.r2o_recent(
             "clean.example",
+            6,
             4,
             client_a,
             now + std::time::Duration::from_secs(60),
         ));
         assert!(!cache.r2o_recent(
             "clean.example",
+            6,
             4,
             client_a,
             now + std::time::Duration::from_secs(61),
         ));
 
         for index in 0..16 {
-            cache.note(&format!("other-{index}.example"), 4, client_b, now);
+            cache.note(&format!("other-{index}.example"), 6, 4, client_b, now);
         }
-        assert!(!cache.r2o_recent("clean.example", 4, client_a, now));
+        assert!(!cache.r2o_recent("clean.example", 6, 4, client_a, now));
     }
 
     #[cfg(unix)]
@@ -45512,7 +45546,7 @@ mod tests {
             0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
         ]);
         let mut cache = super::R2oCleanHandshakeCache::default();
-        cache.note("clean.example", 4, client_a, now);
+        cache.note("clean.example", 6, 4, client_a, now);
 
         let mut output = String::new();
         let mut scenario = |label: &str,
