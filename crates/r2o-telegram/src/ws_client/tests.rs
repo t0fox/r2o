@@ -542,3 +542,92 @@ fn cf_proxy_повторяет_транспортные_сбои_но_не_http_
         "NXDOMAIN".into()
     )));
 }
+
+#[test]
+fn cf_pool_tls_name_strips_only_the_kws_label() {
+    assert_eq!(cf_pool_tls_name("kws2.pool.example"), Some("pool.example"));
+    assert_eq!(
+        cf_pool_tls_name("kws4-1.pool.example"),
+        Some("pool.example")
+    );
+    assert_eq!(
+        cf_pool_tls_name("kws2.web.telegram.org"),
+        Some("web.telegram.org")
+    );
+    assert_eq!(cf_pool_tls_name("worker.example"), None);
+    assert_eq!(cf_pool_tls_name("pool.example"), None);
+    assert_eq!(cf_pool_tls_name("kws2"), None);
+    assert_eq!(cf_pool_tls_name("kws2."), None);
+}
+
+/// CF-прокси: TLS SNI — базовый домен зоны, HTTP Host — полный `kwsN.<zone>`.
+#[tokio::test]
+async fn cf_proxy_splits_tls_sni_from_http_host() {
+    install_rustls_provider();
+    let (cert, key) = test_certificate("pool.example");
+    let server_config = Arc::new(
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.clone()], key)
+            .unwrap(),
+    );
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert).unwrap();
+    let client_config = Arc::new(
+        rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let tls = tokio_rustls::TlsAcceptor::from(server_config)
+            .accept(tcp)
+            .await
+            .unwrap();
+        let sni = tls.get_ref().1.server_name().map(str::to_owned);
+        let _ws = tokio_tungstenite::accept_hdr_async(
+            tls,
+            move |request: &tungstenite::handshake::server::Request,
+                  mut response: tungstenite::handshake::server::Response| {
+                let host = request
+                    .headers()
+                    .get("Host")
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned);
+                if request.headers().get("Sec-WebSocket-Protocol").is_some() {
+                    response
+                        .headers_mut()
+                        .insert("Sec-WebSocket-Protocol", "binary".parse().unwrap());
+                }
+                let _ = sender.send((sni.clone(), host));
+                Ok(response)
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    let tcp = TcpStream::connect(address).await.unwrap();
+    let request = websocket_request("kws2.pool.example", "/apiws", true).unwrap();
+    let (_ws, response) =
+        tls_handshake_and_upgrade_with_name_and_config(tcp, request, "pool.example", client_config)
+            .await
+            .unwrap();
+    assert_eq!(response.status().as_u16(), 101);
+
+    let (sni, host) = receiver.await.unwrap();
+    assert_eq!(
+        sni.as_deref(),
+        Some("pool.example"),
+        "TLS SNI должен быть базовым доменом зоны"
+    );
+    assert_eq!(
+        host.as_deref(),
+        Some("kws2.pool.example"),
+        "HTTP Host должен остаться полным именем DC"
+    );
+    server.await.unwrap();
+}

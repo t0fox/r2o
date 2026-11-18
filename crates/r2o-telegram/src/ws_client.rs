@@ -4,6 +4,11 @@
 //! где N — номер DC. Прокси устанавливает TCP-соединение с заданным **IP**,
 //! а в TLS SNI и HTTP Host указывает **домен**, как в эталонной реализации на Python.
 //!
+//! Для пула CF-прокси (`kwsN.<zone>`, `kwsN-1.<zone>`) TLS SNI — базовый домен
+//! зоны `<zone>`, а HTTP Host остаётся полным `kwsN.<zone>`: с 16.11.2026 сети
+//! массово фильтруют `kwsN` в открытом ClientHello. Прямой Telegram и CF Worker
+//! сохраняют полное имя в SNI.
+//!
 //! Номера DC без собственного имени WebSocket (например, тестовый DC 203)
 //! перед построением домена преобразуются в соответствующий стандартный номер
 //! через `config::websocket_dc()`. Так сертификат TLS сервера Telegram остаётся
@@ -430,10 +435,21 @@ impl WsAttempt {
     }
 }
 
+/// CF принимает TLS-имя зоны, а HTTP Host выбирает DC Telegram.
+///
+/// `kws{dc}.<zone>` и `kws{dc}-1.<zone>` (пул CF-прокси) дают SNI `<zone>`;
+/// прочие имена (CF Worker, прямой Telegram) не меняются. Именно `kwsN`
+/// массово фильтруется в открытом TLS ClientHello с 16.11.2026.
+pub(crate) fn cf_pool_tls_name(host: &str) -> Option<&str> {
+    let (label, zone) = host.split_once('.')?;
+    (label.starts_with("kws") && !zone.is_empty()).then_some(zone)
+}
+
 /// Открыть TLS/WSS-соединение к заданному DC IP и домену.
 async fn connect_ws_with_path(
     ip: &str,
     domain: &str,
+    tls_server_name: Option<&str>,
     path: &str,
     request_binary_subprotocol: bool,
     timeout: Duration,
@@ -461,7 +477,17 @@ async fn connect_ws_with_path(
         Err(error) => return WsConnectResult::Failed(error),
     };
 
-    match tokio::time::timeout(timeout, tls_handshake_and_upgrade(tcp, request)).await {
+    let attempt = async {
+        match tls_server_name {
+            Some(server_name) => {
+                tls_handshake_and_upgrade_with_name(tcp, request, server_name).await
+            }
+            None => tls_handshake_and_upgrade(tcp, request)
+                .await
+                .map_err(WsUpgradeError::from),
+        }
+    };
+    match tokio::time::timeout(timeout, attempt).await {
         Ok(Ok((ws, response))) if response.status().as_u16() == 101 => {
             crate::stats::global().record_wss_established();
             WsConnectResult::Connected(ws)
@@ -475,20 +501,20 @@ async fn connect_ws_with_path(
             record_http_failure(response.status().as_u16());
             WsConnectResult::HttpStatus(response.status().as_u16())
         }
-        Ok(Err(WsError::Http(response)))
+        Ok(Err(WsUpgradeError::Http(response)))
             if matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) =>
         {
             WsConnectResult::Redirect(response.status().as_u16())
         }
-        Ok(Err(WsError::Http(response))) => {
+        Ok(Err(WsUpgradeError::Http(response))) => {
             record_http_failure(response.status().as_u16());
             WsConnectResult::HttpStatus(response.status().as_u16())
         }
-        Ok(Err(WsError::Tls(_))) => {
+        Ok(Err(WsUpgradeError::Tls)) => {
             crate::stats::global().record_failure("tls");
             WsConnectResult::Failed("ошибка TLS handshake".to_string())
         }
-        Ok(Err(error)) => {
+        Ok(Err(WsUpgradeError::Other(error))) => {
             crate::stats::global().record_failure("websocket");
             WsConnectResult::Failed(error.to_string())
         }
@@ -590,12 +616,14 @@ async fn connect_probe_ws_with_config(
     timing.tcp_ms = Some(elapsed_ms(started));
     let _ = tcp.set_nodelay(true);
 
-    let server_name = ServerName::try_from(domain.to_string()).map_err(|error| WsProbeError {
-        phase: "tls",
-        reason: format!("неверное имя TLS-сервера: {error}"),
-        http_status: None,
-        timing: timing.clone(),
-    })?;
+    let server_name = cf_pool_tls_name(domain).unwrap_or(domain);
+    let server_name =
+        ServerName::try_from(server_name.to_string()).map_err(|error| WsProbeError {
+            phase: "tls",
+            reason: format!("неверное имя TLS-сервера: {error}"),
+            http_status: None,
+            timing: timing.clone(),
+        })?;
     let started = Instant::now();
     let tls_stream = match tokio::time::timeout(
         timeout,
@@ -727,17 +755,20 @@ async fn connect_cf_with_path(
     let domain_owned = domain.to_string();
     let path_owned = path.to_string();
     let route_scope_owned = route_scope.to_string();
+    let tls_server_name = cf_pool_tls_name(domain).map(str::to_owned);
     let (winner, failures) = race_ws_candidates(
         candidates,
         CF_EDGE_HEDGE_DELAY,
         move |target| {
             let domain = domain_owned.clone();
             let path = path_owned.clone();
+            let tls_server_name = tls_server_name.clone();
             let outbound = outbound;
             async move {
                 match connect_ws_with_path(
                     &target,
                     &domain,
+                    tls_server_name.as_deref(),
                     &path,
                     request_binary_subprotocol,
                     timeout,
@@ -824,6 +855,63 @@ where
     let connector = Connector::Rustls(verifying_rustls_config());
     client_async_tls_with_config(request, tcp, Some(ws_config()), Some(connector)).await
 }
+
+/// Ошибка TLS/WebSocket-upgrade: слой TLS отделён от HTTP-ответа и прочих сбоев.
+#[derive(Debug)]
+enum WsUpgradeError {
+    Http(tungstenite::handshake::client::Response),
+    Tls,
+    Other(WsError),
+}
+
+impl From<WsError> for WsUpgradeError {
+    fn from(error: WsError) -> Self {
+        match error {
+            WsError::Http(response) => Self::Http(response),
+            WsError::Tls(_) => Self::Tls,
+            other => Self::Other(other),
+        }
+    }
+}
+
+/// TLS с явным именем зоны (SNI и проверка сертификата), тогда как HTTP
+/// Host/URI берутся из запроса — полный `kwsN.<zone>`.
+async fn tls_handshake_and_upgrade_with_name(
+    tcp: TcpStream,
+    request: tungstenite::http::Request<()>,
+    server_name: &str,
+) -> Result<(TgWsStream, tungstenite::handshake::client::Response), WsUpgradeError> {
+    tls_handshake_and_upgrade_with_name_and_config(
+        tcp,
+        request,
+        server_name,
+        verifying_rustls_config(),
+    )
+    .await
+}
+
+async fn tls_handshake_and_upgrade_with_name_and_config(
+    tcp: TcpStream,
+    request: tungstenite::http::Request<()>,
+    server_name: &str,
+    config: Arc<rustls::ClientConfig>,
+) -> Result<(TgWsStream, tungstenite::handshake::client::Response), WsUpgradeError> {
+    let server_name =
+        ServerName::try_from(server_name.to_string()).map_err(|_| WsUpgradeError::Tls)?;
+    let connector = tokio_rustls::TlsConnector::from(config);
+    let tls = connector
+        .connect(server_name, tcp)
+        .await
+        .map_err(|_| WsUpgradeError::Tls)?;
+    tokio_tungstenite::client_async_with_config(
+        request,
+        MaybeTlsStream::Rustls(tls),
+        Some(ws_config()),
+    )
+    .await
+    .map_err(WsUpgradeError::from)
+}
+
 /// Верхний размер входного WebSocket-кадра и собранного сообщения.
 ///
 /// По умолчанию Tungstenite допускает кадры до 16 МиБ и сообщения до 64 МиБ;
@@ -884,7 +972,8 @@ pub(crate) async fn connect_ws_for_dc_with_outbound(
                 .acquire()
                 .await
                 .expect("семафор direct WSS неожиданно закрыт");
-            match connect_ws_with_path(&ip, &domain, "/apiws", true, timeout, outbound).await {
+            match connect_ws_with_path(&ip, &domain, None, "/apiws", true, timeout, outbound).await
+            {
                 WsConnectResult::Connected(ws) => Ok(ws),
                 result => {
                     log_ws_domain_failure(dc, is_media, &domain, &result);
