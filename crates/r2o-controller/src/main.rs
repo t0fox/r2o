@@ -10785,11 +10785,6 @@ type R2oDiscoveryRunner = dyn Fn(r2o_controller::discovery::DiscoveryTarget, boo
 
 #[cfg(unix)]
 const R2O_DISCOVERY_TASK_CAPACITY: usize = 64;
-/// D2O создаёт поток на задачу и присоединяет его после замера. R2O держит
-/// постоянный пул; 64 потока на семейство почти всегда простаивали и давали
-/// 145 потоков в merged-процессе. Восьми потоков достаточно для текущего
-/// adaptive limit, а очередь и permits по-прежнему допускают до max_slots.
-const R2O_DISCOVERY_WORKER_THREADS: usize = 8;
 /// Сколько ждать новую задачу, прежде чем on-demand worker завершится.
 const R2O_DISCOVERY_WORKER_IDLE: std::time::Duration = std::time::Duration::from_secs(10);
 /// Общий idle-таймаут простаивающих on-demand worker'ов.
@@ -14370,6 +14365,13 @@ fn r2o_handle_client_shape_event(
         );
     }
     let key = r2o_discovery_task_key(&target);
+    if worker
+        .active
+        .get(&key)
+        .is_some_and(|active| active.endpoint != target.endpoint)
+    {
+        return Some(target);
+    }
     // C `T_WATCHING` + `watch_shape_pending`: снимок пришёл на заявку
     // remeasure — кладём его в pending и сразу запускаем новый поиск.
     if let Some(entry) = worker.pending_rechecks.get_mut(&key) {
@@ -17367,9 +17369,7 @@ group_block_proven: false,
         let cancel = Arc::new(AtomicBool::new(false));
         let active_cancels = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let catalog_refreshes = Arc::new(std::sync::Mutex::new(HashSet::new()));
-        let worker_target = measurement_gate
-            .r2o_max_slots()
-            .min(R2O_DISCOVERY_WORKER_THREADS);
+        let worker_target = measurement_gate.r2o_max_slots();
         let worker_live = Arc::new(AtomicUsize::new(0));
         let spawn_worker: Arc<
             dyn Fn() -> std::io::Result<std::thread::JoinHandle<()>> + Send + Sync,
@@ -17726,7 +17726,11 @@ group_block_proven: false,
         // `active` включает и уже выполняемые, и ожидающие задачи. `worker_live`
         // уменьшается завершающимся worker'ом ещё под блокировкой очереди,
         // поэтому новая задача не примет выходящий поток за свободный.
-        let desired = self.active.len().min(self.worker_target);
+        let desired = self
+            .active
+            .len()
+            .min(self.worker_target)
+            .min(self.measurement_gate.r2o_discovery_thread_budget());
         while self.worker_live.load(Ordering::Acquire) < desired {
             match (self.spawn_worker)() {
                 Ok(thread) => self.threads.push(thread),
@@ -18978,12 +18982,13 @@ group_block_proven: false,
             self.r2o_clear_ech_profile_failures(&target.host, target.family);
         }
         let task_key = r2o_discovery_task_key(&target);
-        // C on_shape keeps an experiment's owned ClientHello immutable.
+        // C сохраняет параметры текущего опыта при новом наблюдении.
         if self.active.get(&task_key).is_some_and(|active_target| {
-            matches!(
-                active_target.shape,
-                SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP
-            ) && active_target.shape != target.shape
+            active_target.endpoint != target.endpoint
+                || (matches!(
+                    active_target.shape,
+                    SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP
+                ) && active_target.shape != target.shape)
         }) {
             return false;
         }
@@ -23112,6 +23117,9 @@ impl ControlClient {
                         )?);
                     } else {
                         measurement_gate.r2o_scheduler_tick();
+                        if let Some((worker, _, _, _)) = discovery.as_mut() {
+                            worker.r2o_ensure_workers();
+                        }
                         r2o_scheduler_tick_pending = false;
                     }
                 }
@@ -24209,6 +24217,9 @@ impl ControlClient {
                     };
                     if !wait_for_control_frame(&self.socket, wait)? {
                         measurement_gate.r2o_scheduler_tick();
+                        if let Some((worker, _, _, _)) = discovery.as_mut() {
+                            worker.r2o_ensure_workers();
+                        }
                         if wait.is_zero()
                             && let Some(cursor) = catalog_sync.as_mut()
                         {
@@ -24904,7 +24915,7 @@ impl ControlClient {
                                         });
                                     if family_queued {
                                         println!(
-                                            "молчание TCP: для {} сначала проверяется план соседнего голосового узла *.discord.media",
+                                            "молчание TCP: для {} сначала проверяется план совместимого узла семейства",
                                             target.host
                                         );
                                     } else if self.r2o_queue_tcp_suspect(
@@ -54219,7 +54230,7 @@ group_block_proven: false,
     #[test]
     fn active_discovery_keeps_its_owned_client_snapshot_like_donor() {
         let mut output = String::new();
-        for mode in 0..8 {
+        for mode in 0..16 {
             let input_shape = if mode & 4 == 0 {
                 SHAPE_MODERN
             } else {
@@ -54234,6 +54245,9 @@ group_block_proven: false,
             };
             let mut input_target = active_target.clone();
             input_target.shape = input_shape;
+            if mode & 8 != 0 {
+                input_target.endpoint = "198.51.100.3:443".into();
+            }
             let key = super::r2o_discovery_task_key(&active_target);
             let old = r2o_controller::classify::Trigger::tls13(&active_target.host)
                 .unwrap()
@@ -54287,10 +54301,12 @@ group_block_proven: false,
                     .get(&input_target)
                     .is_some()
             );
-            output.push_str(&format!(
-                "{mode} {}\n",
-                u8::from(cancel.load(Ordering::Relaxed))
-            ));
+            if mode < 8 {
+                output.push_str(&format!(
+                    "{mode} {}\n",
+                    u8::from(cancel.load(Ordering::Relaxed))
+                ));
+            }
         }
         if let Ok(path) = std::env::var("R2O_SNAPSHOT_OWNER_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
@@ -54301,7 +54317,7 @@ group_block_proven: false,
     #[test]
     fn active_client_shape_event_matches_d2o_on_shape() {
         let mut output = String::new();
-        for mode in 0..8 {
+        for mode in 0..16 {
             let input_shape = if mode & 4 == 0 {
                 SHAPE_MODERN
             } else {
@@ -54340,7 +54356,7 @@ group_block_proven: false,
             let mut flow = [0; KEY_LEN];
             flow[0] = 4;
             flow[1..5].copy_from_slice(&[192, 0, 2, 10]);
-            flow[17..21].copy_from_slice(&[198, 51, 100, 2]);
+            flow[17..21].copy_from_slice(&[198, 51, 100, if mode & 8 == 0 { 2 } else { 3 }]);
             flow[33..35].copy_from_slice(&40_000_u16.to_be_bytes());
             flow[35..37].copy_from_slice(&443_u16.to_be_bytes());
             flow[37] = 6;
@@ -54359,10 +54375,13 @@ group_block_proven: false,
                 r2o_handle_client_shape_event(&mut worker, &shape).is_some(),
                 "mode={mode}"
             );
-            output.push_str(&format!(
-                "{mode} {}\n",
-                u8::from(cancel.load(Ordering::Relaxed))
-            ));
+            assert_eq!(cancel.load(Ordering::Relaxed), mode == 0, "mode={mode}");
+            if mode < 8 {
+                output.push_str(&format!(
+                    "{mode} {}\n",
+                    u8::from(cancel.load(Ordering::Relaxed))
+                ));
+            }
         }
         if let Ok(path) = std::env::var("R2O_SNAPSHOT_EVENT_DIFF_OUTPUT") {
             std::fs::write(path, &output).unwrap();
