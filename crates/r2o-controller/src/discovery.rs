@@ -186,25 +186,38 @@ pub fn own_first_plans(
     const SEEN_CAP: usize = 256;
 
     if target.shape == SHAPE_ECH_TCP && !ech_replay
-        || !matches!(target.shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP)
+        || !matches!(
+            target.shape,
+            SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP | SHAPE_QUIC
+        )
         || seen.len() >= SEEN_CAP
     {
         return Vec::new();
     }
-    let want = if target.shape == SHAPE_LEGACY {
+    // C `own_first_plans`: для QUIC — форма/протокол QUIC и подтверждение
+    // только собственным зондом (`verified_by == PROBE`); TCP-профиль и
+    // cross-форма к QUIC не применяются.
+    let quic = target.shape == SHAPE_QUIC;
+    let want = if quic {
+        SHAPE_QUIC
+    } else if target.shape == SHAPE_LEGACY {
         SHAPE_LEGACY
     } else {
         SHAPE_MODERN
     };
-    let cross = if want == SHAPE_LEGACY {
+    let cross = if quic {
+        None
+    } else if want == SHAPE_LEGACY {
         Some(SHAPE_MODERN)
     } else {
         Some(SHAPE_LEGACY)
     };
+    let plan_proto = if quic { "quic" } else { "tls" };
+    let target_transport = if quic { 17 } else { 6 };
     let mut ranked = Vec::<RankedOwnPlan>::new();
     for box_record in &catalog.boxes {
         for plan in &box_record.plans {
-            if !plan.enabled || plan.proto != "tls" || plan.text.len() >= 4096 {
+            if !plan.enabled || plan.proto != plan_proto || plan.text.len() >= 4096 {
                 continue;
             }
             let mut best_binding: Option<(u8, i64)> = None;
@@ -219,7 +232,9 @@ pub fn own_first_plans(
                 } else {
                     binding.family
                 };
-                let shape_matches = if ech_replay {
+                let shape_matches = if quic {
+                    binding.shape == SHAPE_QUIC && binding.ech_origin.is_empty()
+                } else if ech_replay {
                     binding.shape == want && binding.ech_origin.is_empty()
                         || binding.shape == SHAPE_ECH_TCP
                 } else {
@@ -231,9 +246,10 @@ pub fn own_first_plans(
                     || binding.level < 3
                     || binding.recheck_since.is_some()
                     || binding.kind != "name"
-                    || transport != 6
+                    || transport != target_transport
                     || family != target.family
-                    || binding.tcp_profile != target.tcp_profile()
+                    || (!quic && binding.tcp_profile != target.tcp_profile())
+                    || (quic && binding.verified_by != 1)
                     || !shape_matches
                 {
                     continue;
@@ -1899,9 +1915,10 @@ fn stable_plan_id(family: u8, shape: u8, text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        DiscoveryTarget, OwnFirstResultAction, exact_key, has_covering_binding, known_plans,
-        newer_name_binding, own_first_bound_plan_id, own_first_plans, own_first_result_action,
-        r2o_ech_witness_candidates, r2o_ech_witness_challenge_order, update_direct_clear_bindings,
+        DiscoveryTarget, OwnFirstResultAction, SHAPE_QUIC, exact_key, has_covering_binding,
+        known_plans, newer_name_binding, own_first_bound_plan_id, own_first_plans,
+        own_first_result_action, r2o_ech_witness_candidates, r2o_ech_witness_challenge_order,
+        update_direct_clear_bindings,
     };
     use r2k_core::control::{
         BindingContext, HttpResponseEvent, KEY_LEN, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_MODERN,
@@ -4059,6 +4076,62 @@ mod tests {
             &same_profile,
             &same_profile.boxes[0].bindings[0]
         ));
+    }
+
+    #[test]
+    fn own_first_plans_reuse_confirmed_quic_plans_like_c() {
+        use crate::catalog::{Binding, BoxRecord, Catalog, Plan};
+
+        let target = DiscoveryTarget {
+            tcp_profile: 0,
+            host: "quic.example".into(),
+            endpoint: "198.51.100.10:443".into(),
+            family: 4,
+            shape: SHAPE_QUIC,
+        };
+        let mut catalog = Catalog {
+            boxes: vec![BoxRecord {
+                id: "box-quic".into(),
+                plans: vec![Plan {
+                    id: "plan-quic".into(),
+                    proto: "quic".into(),
+                    text: "r2o-plan 1 10 proto udp quic".into(),
+                    enabled: true,
+                    ..Plan::default()
+                }],
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: target.host.clone(),
+                    plan_id: "plan-quic".into(),
+                    level: 3,
+                    enabled: true,
+                    transport: 17,
+                    family: 4,
+                    shape: SHAPE_QUIC,
+                    verified_by: 1,
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        let plans = own_first_plans(&catalog, &target, false, None, &[], &[]);
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].plan_id, "plan-quic");
+        catalog.boxes[0].bindings[0].verified_by = 2;
+        let client_verified = own_first_plans(&catalog, &target, false, None, &[], &[]);
+        assert!(client_verified.is_empty());
+        catalog.boxes[0].bindings[0].verified_by = 1;
+        catalog.boxes[0].bindings[0].transport = 6;
+        let tcp_transport = own_first_plans(&catalog, &target, false, None, &[], &[]);
+        assert!(tcp_transport.is_empty());
+        let output = format!(
+            "confirmed=1:{}:{}\nclient_verified=0\ntcp_transport=0\n",
+            plans[0].text, plans[0].box_id
+        );
+        if let Ok(path) = std::env::var("R2O_OWN_FIRST_QUIC_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
     }
 
     #[test]
