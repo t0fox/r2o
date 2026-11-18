@@ -70,6 +70,7 @@ pub fn own_first_bound_plan_id(
     target: &DiscoveryTarget,
     shape: u8,
 ) -> Option<String> {
+    let target_transport = if target.shape == SHAPE_QUIC { 17 } else { 6 };
     for box_record in &catalog.boxes {
         for binding in &box_record.bindings {
             if !binding.enabled
@@ -77,10 +78,11 @@ pub fn own_first_bound_plan_id(
                 || binding.level > 0 && binding.level < 3
                 || binding.kind != "name"
                 || binding.target != target.host
-                || normalized_transport(binding.transport) != 6
+                || normalized_transport(binding.transport) != target_transport
                 || normalized_family(binding.family) != target.family
                 || binding.shape != shape
-                || binding.tcp_profile != target.tcp_profile()
+                || (target_transport == 6 && binding.tcp_profile != target.tcp_profile())
+                || (target_transport == 17 && binding.verified_by == 2)
                 || newer_name_binding(catalog, binding)
                 || !box_record
                     .plans
@@ -4108,6 +4110,55 @@ mod tests {
             &same_profile,
             &same_profile.boxes[0].bindings[0]
         ));
+    }
+
+    #[test]
+    fn own_first_bound_plan_id_accepts_quic_probe_only_like_c() {
+        use crate::catalog::{Binding, BoxRecord, Catalog, Plan};
+
+        let target = DiscoveryTarget {
+            tcp_profile: 0,
+            host: "quic-bound.example".into(),
+            endpoint: "198.51.100.11:443".into(),
+            family: 4,
+            shape: SHAPE_QUIC,
+        };
+        let mut catalog = Catalog {
+            boxes: vec![BoxRecord {
+                id: "box".into(),
+                plans: vec![Plan {
+                    id: "plan".into(),
+                    proto: "quic".into(),
+                    text: "r2o-plan 1 10 proto udp quic".into(),
+                    enabled: true,
+                    ..Plan::default()
+                }],
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: target.host.clone(),
+                    plan_id: "plan".into(),
+                    level: 3,
+                    enabled: true,
+                    transport: 17,
+                    family: 4,
+                    shape: SHAPE_QUIC,
+                    verified_by: 1,
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        assert_eq!(
+            own_first_bound_plan_id(&catalog, &target, SHAPE_QUIC).as_deref(),
+            Some("plan")
+        );
+        catalog.boxes[0].bindings[0].verified_by = 2;
+        assert!(own_first_bound_plan_id(&catalog, &target, SHAPE_QUIC).is_none());
+        let output = "probe=plan\nclient_verified=none\n";
+        if let Ok(path) = std::env::var("R2O_BOUND_PLAN_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
     }
 
     #[test]
