@@ -4522,4 +4522,129 @@ mod tests {
         }
         print!("{output}");
     }
+
+    #[test]
+    fn quic_ask_q_decisions_match_c() {
+        use r2k_core::quic::R2kQuicDataVerdict;
+        use r2k_core::quic::R2kQuicDataVerdict::{NoHandshake, NotRun, Pass};
+
+        #[derive(Clone, Copy)]
+        struct Case {
+            label: &'static str,
+            pass: usize,
+            sent: usize,
+            err: usize,
+            data: R2kQuicDataVerdict,
+            budget: bool,
+        }
+
+        let mut output = String::new();
+        for case in [
+            Case {
+                label: "budget",
+                pass: 3,
+                sent: 3,
+                err: 0,
+                data: Pass,
+                budget: true,
+            },
+            Case {
+                label: "unsent",
+                pass: 0,
+                sent: 2,
+                err: 0,
+                data: NotRun,
+                budget: false,
+            },
+            Case {
+                label: "err",
+                pass: 0,
+                sent: 3,
+                err: 1,
+                data: NotRun,
+                budget: false,
+            },
+            Case {
+                label: "no",
+                pass: 0,
+                sent: 3,
+                err: 0,
+                data: NotRun,
+                budget: false,
+            },
+            Case {
+                label: "partial",
+                pass: 1,
+                sent: 3,
+                err: 0,
+                data: NotRun,
+                budget: false,
+            },
+            Case {
+                label: "yes",
+                pass: 3,
+                sent: 3,
+                err: 0,
+                data: Pass,
+                budget: false,
+            },
+            Case {
+                label: "nohandshake",
+                pass: 3,
+                sent: 3,
+                err: 0,
+                data: NoHandshake,
+                budget: false,
+            },
+            Case {
+                label: "notrun",
+                pass: 3,
+                sent: 3,
+                err: 0,
+                data: NotRun,
+                budget: false,
+            },
+        ] {
+            let mut measured = usize::from(case.sent == 3 && case.err == 0);
+            let mut retry = 0_usize;
+            let mut nm = 0_u8;
+            let mut probes = case.sent;
+            let mut progress = case.sent;
+            let mut ok = false;
+            if case.budget {
+                measured = 0;
+                nm = 2;
+                probes = 0;
+                progress = 0;
+            } else {
+                let filter = super::r2o_quic_filter_round_decision(
+                    case.pass,
+                    if measured == 1 { 3 } else { 0 },
+                    0,
+                    3,
+                );
+                let verdict = (filter == super::R2oQuicFilterDecision::Pass).then_some(case.data);
+                let decision = super::r2o_quic_strategy_attempt_decision(filter, verdict, 0);
+                ok = decision == super::R2oQuicFilterDecision::Pass;
+                retry = usize::from(decision == super::R2oQuicFilterDecision::Retry);
+                if measured == 0 {
+                    nm = 3;
+                }
+                if filter == super::R2oQuicFilterDecision::Pass && case.data == NotRun {
+                    measured = 0;
+                    retry = 1;
+                    nm = 3;
+                }
+            }
+            output.push_str(&format!(
+                "askq {} ok={} measured={measured} retry={retry} nm={nm} probes={probes} trace=1 spent=0 progress={progress}\n",
+                case.label,
+                u8::from(ok)
+            ));
+        }
+        if let Some(path) = std::env::var_os("R2O_QUIC_ASKQ_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        print!("{output}");
+    }
 }
