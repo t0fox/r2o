@@ -2375,7 +2375,12 @@ mod app {
                             .unwrap_or(0);
                         let tls_host = tcp_hello_from_packet(bytes).and_then(|hello| hello.host);
                         let tls_address = packet_view.as_ref().map(|view| view.dst);
+                        // Пробы контроллера (mark=probe_mark) уже несут
+                        // временный план: удерживать их в ожидании другого
+                        // плана нельзя — иначе собственный замер ждёт
+                        // собственный пакет и база перестаёт воспроизводиться.
                         let allow_tls = options.mode == RuntimeMode::Apply
+                            && !controller_probe
                             && (is_tls_plan(&plan)
                                 || family.is_some_and(|family| match tls_host.as_deref() {
                                     Some(host) => name_plans.has_tls_candidate_target(
@@ -2396,6 +2401,7 @@ mod app {
                             0
                         };
                         let allow_http = options.mode == RuntimeMode::Apply
+                            && !controller_probe
                             && family.is_some_and(|family| {
                                 name_plans.has_http_candidate(family, http_source_port)
                             });
