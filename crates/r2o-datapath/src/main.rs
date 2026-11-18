@@ -377,6 +377,54 @@ mod app {
         }
     }
 
+    /// C `d2k_udp_release_flush` + `d2k_udp_hold_flush`: выдать созревшие
+    /// отложенные вердикты и повторно отправить созревшие UDP-хвосты.
+    fn r2o_flush_deferred_udp(
+        socket: &mut QueueSocket,
+        raw: Option<&RawSocket>,
+        follow: &mut R2oUdpFollowTable,
+        deferred_verdicts: &mut R2oUdpDeferredVerdicts,
+        deferred_resends: &mut R2oUdpDeferredResends,
+        now: Instant,
+    ) {
+        let stats = deferred_resends.r2o_flush(
+            now,
+            |_id, packet| {
+                let result = raw
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::NotConnected, "raw-сокет недоступен")
+                    })?
+                    .send_packet(packet);
+                if let Err(error) = &result
+                    && !r2o_udp_send_busy(error)
+                {
+                    follow.r2o_mark_failed(packet);
+                }
+                result
+            },
+            |id, verdict| socket.send_verdict(id, verdict),
+        );
+        r2o_note_counter(&R2O_EMITTED_LATE, stats.resent as u64);
+        follow.r2o_note_busy(stats.resend_busy);
+        if stats.resend_failed != 0 {
+            eprintln!(
+                "r2o-datapath: {} отложенных UDP-хвостов не отправлены raw и приняты ядром",
+                stats.resend_failed
+            );
+        }
+        if stats.verdict_failed != 0 {
+            eprintln!(
+                "r2o-datapath: {} вердиктов отложенных UDP-хвостов не выданы",
+                stats.verdict_failed
+            );
+        }
+        if let Err(error) =
+            deferred_verdicts.r2o_flush(now, |id, verdict| socket.send_verdict(id, verdict))
+        {
+            eprintln!("r2o-datapath: ошибка выдачи отложенных UDP-вердиктов: {error}");
+        }
+    }
+
     fn r2o_udp_handle_late_tail(
         queue: &mut QueueSocket,
         raw: Option<&RawSocket>,
@@ -2104,6 +2152,21 @@ mod app {
             );
             r2o_flush_owned_hold_releases(&mut holding, &mut tcp_sessions, raw.as_ref());
             release_accepting(&mut socket, &released);
+            // C `d2k_udp_release_flush`: если нового пакета не было, созревшие
+            // отложенные UDP-вердикты и хвосты всё равно надо снять. Иначе
+            // `timeout_ms == 0` заставляет `poll` крутиться вхолостую и
+            // вытесняет TCP/control. При наличии пакета их снимает обычный
+            // путь после обработки, чтобы поздний хвост мог быть отменён.
+            if !received {
+                r2o_flush_deferred_udp(
+                    &mut socket,
+                    raw.as_ref(),
+                    &mut udp_follow,
+                    &mut udp_deferred_verdicts,
+                    &mut udp_deferred_resends,
+                    release_now,
+                );
+            }
             r2o_release_udp_batches(
                 &mut socket,
                 raw.as_ref(),
@@ -3712,43 +3775,14 @@ mod app {
                 &mut flow_journal,
                 &journal_origin,
             );
-            let deferred_resend_stats = udp_deferred_resends.r2o_flush(
+            r2o_flush_deferred_udp(
+                &mut socket,
+                raw.as_ref(),
+                &mut udp_follow,
+                &mut udp_deferred_verdicts,
+                &mut udp_deferred_resends,
                 Instant::now(),
-                |_id, packet| {
-                    let result = raw
-                        .as_ref()
-                        .ok_or_else(|| {
-                            io::Error::new(io::ErrorKind::NotConnected, "raw-сокет недоступен")
-                        })?
-                        .send_packet(packet);
-                    if let Err(error) = &result
-                        && !r2o_udp_send_busy(error)
-                    {
-                        udp_follow.r2o_mark_failed(packet);
-                    }
-                    result
-                },
-                |id, verdict| socket.send_verdict(id, verdict),
             );
-            r2o_note_counter(&R2O_EMITTED_LATE, deferred_resend_stats.resent as u64);
-            udp_follow.r2o_note_busy(deferred_resend_stats.resend_busy);
-            if deferred_resend_stats.resend_failed != 0 {
-                eprintln!(
-                    "r2o-datapath: {} отложенных UDP-хвостов не отправлены raw и приняты ядром",
-                    deferred_resend_stats.resend_failed
-                );
-            }
-            if deferred_resend_stats.verdict_failed != 0 {
-                eprintln!(
-                    "r2o-datapath: {} вердиктов отложенных UDP-хвостов не выданы",
-                    deferred_resend_stats.verdict_failed
-                );
-            }
-            if let Err(error) = udp_deferred_verdicts.r2o_flush(Instant::now(), |id, verdict| {
-                socket.send_verdict(id, verdict)
-            }) {
-                eprintln!("r2o-datapath: ошибка выдачи отложенных UDP-вердиктов: {error}");
-            }
             if let Some(control) = control.as_mut() {
                 if control.is_connected() {
                     send_journal_updates(control, &flow_journal, &mut journal_seen)?;

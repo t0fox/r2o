@@ -43039,8 +43039,144 @@ mod tests {
             u8::from(active_challenge_suppresses_endpoint_cooldown),
             u8::from(active_challenge_stays_recorded),
         );
+
+        // cooldown_victim: expired → не-challenge → challenge, при равенстве
+        // ранга — ближайший expires_at, при полном равенстве — первый слот.
+        fn fill_victim_ring(
+            ring: &mut super::R2oDiscoveryCooldownRing,
+            now: std::time::Instant,
+            challenge_from: usize,
+            default_ms: i64,
+            special: &[(usize, i64)],
+        ) {
+            for (index, slot) in ring.slots.iter_mut().enumerate() {
+                let offset = special
+                    .iter()
+                    .find(|(special_index, _)| *special_index == index)
+                    .map_or(default_ms, |(_, milliseconds)| *milliseconds);
+                let expires_at = if offset >= 0 {
+                    now + std::time::Duration::from_millis(offset as u64)
+                } else {
+                    now - std::time::Duration::from_millis((-offset) as u64)
+                };
+                let name = format!("victim-{index:03}.example");
+                let key = if index >= challenge_from {
+                    super::R2oDiscoveryCooldownKey::Challenge((name, 6, 4))
+                } else {
+                    super::R2oDiscoveryCooldownKey::Endpoint((
+                        name,
+                        6,
+                        4,
+                        format!("192.0.2.{}:443", index % 250 + 1),
+                    ))
+                };
+                *slot = Some(super::R2oDiscoveryCooldownEntry {
+                    key,
+                    expires_at,
+                    late_rst_only: false,
+                });
+            }
+        }
+        let cooldown_label = |key: &super::R2oDiscoveryCooldownKey| match key {
+            super::R2oDiscoveryCooldownKey::Endpoint((name, transport, family, endpoint)) => {
+                let (ip, port) = endpoint
+                    .rsplit_once(':')
+                    .unwrap_or((endpoint.as_str(), "0"));
+                format!(
+                    "{name} transport={transport} family={family} ip={ip} port={port} challenge=0"
+                )
+            }
+            super::R2oDiscoveryCooldownKey::Challenge((name, transport, family)) => {
+                format!("{name} transport={transport} family={family} ip= port=0 challenge=1")
+            }
+        };
+        let new_victim_key = || {
+            super::R2oDiscoveryCooldownKey::Endpoint((
+                "evict-new.example".to_owned(),
+                6,
+                4,
+                "203.0.113.1:443".to_owned(),
+            ))
+        };
+        let mut victim_ring = super::R2oDiscoveryCooldownRing::default();
+        let victim_now = std::time::Instant::now();
+        fill_victim_ring(
+            &mut victim_ring,
+            victim_now,
+            64,
+            2_000,
+            &[(11, -900), (70, -1_200)],
+        );
+        let victim_expired = victim_ring
+            .record(
+                new_victim_key(),
+                victim_now + std::time::Duration::from_secs(60),
+                victim_now,
+            )
+            .expect("полное кольцо вытесняет запись");
+        let victim_output = format!(
+            "victim_expired victim={}\n",
+            cooldown_label(&victim_expired)
+        );
+        let mut victim_ring = super::R2oDiscoveryCooldownRing::default();
+        fill_victim_ring(
+            &mut victim_ring,
+            victim_now,
+            64,
+            2_000,
+            &[(2, 500), (9, 900)],
+        );
+        let victim_nonchallenge = victim_ring
+            .record(
+                new_victim_key(),
+                victim_now + std::time::Duration::from_secs(60),
+                victim_now,
+            )
+            .expect("полное кольцо вытесняет запись");
+        let victim_output = format!(
+            "{victim_output}victim_nonchallenge victim={}\n",
+            cooldown_label(&victim_nonchallenge)
+        );
+        let mut victim_ring = super::R2oDiscoveryCooldownRing::default();
+        fill_victim_ring(
+            &mut victim_ring,
+            victim_now,
+            0,
+            2_000,
+            &[(7, 500), (8, 400)],
+        );
+        let victim_all_challenge = victim_ring
+            .record(
+                new_victim_key(),
+                victim_now + std::time::Duration::from_secs(60),
+                victim_now,
+            )
+            .expect("полное кольцо вытесняет запись");
+        let victim_output = format!(
+            "{victim_output}victim_all_challenge victim={}\n",
+            cooldown_label(&victim_all_challenge)
+        );
+        let mut victim_ring = super::R2oDiscoveryCooldownRing::default();
+        fill_victim_ring(
+            &mut victim_ring,
+            victim_now,
+            super::R2O_DISCOVERY_COOLDOWN_CAPACITY,
+            1_000,
+            &[],
+        );
+        let victim_tie = victim_ring
+            .record(
+                new_victim_key(),
+                victim_now + std::time::Duration::from_secs(60),
+                victim_now,
+            )
+            .expect("полное кольцо вытесняет запись");
+        let victim_output = format!(
+            "{victim_output}victim_tie victim={}\n",
+            cooldown_label(&victim_tie)
+        );
         if let Ok(path) = std::env::var("R2O_SCHED_COOLDOWN_DIFF_OUTPUT") {
-            std::fs::write(path, format!("{output}{ech_output}")).unwrap();
+            std::fs::write(path, format!("{output}{ech_output}{victim_output}")).unwrap();
         }
     }
 

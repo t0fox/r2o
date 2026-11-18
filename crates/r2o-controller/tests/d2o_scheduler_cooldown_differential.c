@@ -48,6 +48,18 @@ static int ech_witness_proof(int status, d2k_ver_level level,
     return ech_witness_transport_proof(&candidate);
 }
 
+static void print_cooldown_victim(const char *label, d2k_sched *scheduler)
+{
+    target_cooldown *victim = cooldown_victim(scheduler);
+    if (!victim) {
+        printf("%s victim=- transport=0 family=0 ip=- port=0 challenge=0\n", label);
+        return;
+    }
+    printf("%s victim=%s transport=%u family=%u ip=%s port=%u challenge=%d\n",
+           label, victim->name, victim->transport, victim->family,
+           victim->ip, victim->port, victim->challenge);
+}
+
 int main(void)
 {
     d2k_sched *scheduler = calloc(1, sizeof *scheduler);
@@ -279,5 +291,80 @@ int main(void)
     printf("ech_ring_expires_at_deadline %d\n",
            ech_chal_has(ech_challenges, "ech-witness-new.example"));
     free(ech_challenges);
+
+    /* cooldown_victim: expired → не-challenge → challenge, при равенстве
+       ранга — ближайший until_ms, при полном равенстве — первый слот. */
+    d2k_sched *victims = calloc(1, sizeof *victims);
+    if (!victims) return 12;
+    victims->now_ms = 100000;
+
+    /* 1. Истёкшие записи важнее challenge: побеждает самый ранний until. */
+    memset(victims->cooldowns, 0, sizeof victims->cooldowns);
+    for (size_t i = 0; i < SCHED_COOLDOWN_SLOTS; i++) {
+        target_cooldown *c = &victims->cooldowns[i];
+        snprintf(c->name, sizeof c->name, "victim-%03zu.example", i);
+        c->transport = 6;
+        c->family = 4;
+        c->used = 1;
+        c->challenge = i >= 64;
+        if (!c->challenge) {
+            snprintf(c->ip, sizeof c->ip, "192.0.2.%zu", i % 250 + 1);
+            c->port = 443;
+        }
+        c->until_ms = victims->now_ms + 2000;
+    }
+    victims->cooldowns[11].until_ms = victims->now_ms - 900;
+    victims->cooldowns[70].until_ms = victims->now_ms - 1200;
+    print_cooldown_victim("victim_expired", victims);
+
+    /* 2. Без истёкших challenge с более ранним сроком всё равно проигрывает
+       не-challenge. */
+    memset(victims->cooldowns, 0, sizeof victims->cooldowns);
+    for (size_t i = 0; i < SCHED_COOLDOWN_SLOTS; i++) {
+        target_cooldown *c = &victims->cooldowns[i];
+        snprintf(c->name, sizeof c->name, "victim-%03zu.example", i);
+        c->transport = 6;
+        c->family = 4;
+        c->used = 1;
+        c->challenge = i >= 64;
+        if (!c->challenge) {
+            snprintf(c->ip, sizeof c->ip, "192.0.2.%zu", i % 250 + 1);
+            c->port = 443;
+        }
+        c->until_ms = victims->now_ms + 2000;
+    }
+    victims->cooldowns[2].until_ms = victims->now_ms + 500;
+    victims->cooldowns[9].until_ms = victims->now_ms + 900;
+    print_cooldown_victim("victim_nonchallenge", victims);
+
+    /* 3. Только challenge: побеждает ближайший until. */
+    memset(victims->cooldowns, 0, sizeof victims->cooldowns);
+    for (size_t i = 0; i < SCHED_COOLDOWN_SLOTS; i++) {
+        target_cooldown *c = &victims->cooldowns[i];
+        snprintf(c->name, sizeof c->name, "victim-%03zu.example", i);
+        c->transport = 6;
+        c->family = 4;
+        c->used = 1;
+        c->challenge = 1;
+        c->until_ms = victims->now_ms + 2000;
+    }
+    victims->cooldowns[7].until_ms = victims->now_ms + 500;
+    victims->cooldowns[8].until_ms = victims->now_ms + 400;
+    print_cooldown_victim("victim_all_challenge", victims);
+
+    /* 4. Полное равенство ранга и срока: остаётся первый слот. */
+    memset(victims->cooldowns, 0, sizeof victims->cooldowns);
+    for (size_t i = 0; i < SCHED_COOLDOWN_SLOTS; i++) {
+        target_cooldown *c = &victims->cooldowns[i];
+        snprintf(c->name, sizeof c->name, "victim-%03zu.example", i);
+        snprintf(c->ip, sizeof c->ip, "192.0.2.%zu", i % 250 + 1);
+        c->port = 443;
+        c->transport = 6;
+        c->family = 4;
+        c->used = 1;
+        c->until_ms = victims->now_ms + 1000;
+    }
+    print_cooldown_victim("victim_tie", victims);
+    free(victims);
     return 0;
 }

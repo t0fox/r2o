@@ -21,7 +21,13 @@ fn bytes(text: &str) -> Vec<u8> {
 
 fn public(scalar: &str) -> Option<Vec<u8>> {
     let secret = SecretKey::from_slice(&bytes(scalar)).ok()?;
-    Some(secret.public_key().to_encoded_point(false).as_bytes().to_vec())
+    Some(
+        secret
+            .public_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec(),
+    )
 }
 
 fn ecdh(scalar: &str, peer_public: &[u8]) -> Option<Vec<u8>> {

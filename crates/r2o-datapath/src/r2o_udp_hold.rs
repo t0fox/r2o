@@ -1146,6 +1146,47 @@ mod tests {
     }
 
     #[test]
+    fn deferred_queues_держат_poll_в_нуле_до_сброса_как_c() {
+        let now = Instant::now();
+        let packet = udp_packet();
+        let mut verdicts = R2oUdpDeferredVerdicts::new();
+        assert!(verdicts.r2o_enqueue(now + Duration::from_millis(5), &[1], &[0], Some(&packet),));
+        assert_eq!(verdicts.timeout_ms(now, 200), 5);
+        assert_eq!(
+            verdicts.timeout_ms(now + Duration::from_millis(5), 200),
+            0,
+            "созревшая пачка обязана будить poll немедленно"
+        );
+        assert_eq!(
+            verdicts.r2o_take_due_accept(now + Duration::from_millis(5)),
+            [1]
+        );
+        assert_eq!(
+            verdicts.timeout_ms(now + Duration::from_millis(5), 200),
+            200,
+            "после сброса очередь не должна крутить poll в нуле"
+        );
+
+        let mut resends = R2oUdpDeferredResends::new();
+        assert!(resends.r2o_enqueue(now + Duration::from_millis(5), 2, &packet));
+        assert_eq!(resends.timeout_ms(now, 200), 5);
+        assert_eq!(
+            resends.timeout_ms(now + Duration::from_millis(5), 200),
+            0,
+            "созревший хвост обязан будить poll немедленно"
+        );
+        assert_eq!(
+            resends.r2o_take_due_accept(now + Duration::from_millis(5)),
+            [2]
+        );
+        assert_eq!(
+            resends.timeout_ms(now + Duration::from_millis(5), 200),
+            200,
+            "после сброса хвостов очередь не должна крутить poll в нуле"
+        );
+    }
+
+    #[test]
     fn deferred_verdicts_enqueue_flush_and_full_match_c() {
         use crate::netlink::NF_ACCEPT;
         use std::time::Duration;
