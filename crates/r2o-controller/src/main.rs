@@ -345,10 +345,7 @@ fn r2o_ask_command(arguments: &[std::ffi::OsString]) -> Option<i32> {
     let options = match parse_ask_options(&arguments[1..]) {
         Ok(options) => options,
         Err(error) => {
-            eprintln!(
-                "r2o-controller: {error}\n{}",
-                r2o_controller::ask::ask_help()
-            );
+            eprintln!("r2o-controller: {error}");
             return Some(2);
         }
     };
@@ -358,7 +355,13 @@ fn r2o_ask_command(arguments: &[std::ffi::OsString]) -> Option<i32> {
             Ok(code) => Some(code),
             Err(error) => {
                 eprintln!("r2o-controller --ask: {error}");
-                Some(1)
+                // Ошибки входных файлов C `d2kask` завершает кодом 2
+                // (read_hex_file → return 2), отказ выполнения — кодом 1.
+                Some(if error.downcast_ref::<CliUsageError>().is_some() {
+                    2
+                } else {
+                    1
+                })
             }
         }
     }
@@ -373,22 +376,16 @@ fn r2o_ask_command(arguments: &[std::ffi::OsString]) -> Option<i32> {
 #[cfg(unix)]
 fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
     let mut trigger_bytes = match &options.trigger {
-        AskSnapshotInput::File(path) => Some(
-            read_hex_file(path)
-                .map_err(|error| format!("--hello-hex {}: {error}", path.display()))?,
-        ),
+        AskSnapshotInput::File(path) => Some(read_hex_file(path).map_err(|error| {
+            r2o_usage_error(format!("--hello-hex {}: {error}", path.display()))
+        })?),
         AskSnapshotInput::Capture => None,
     };
-    if let Some(bytes) = &trigger_bytes {
-        validate_hello(bytes, &options.sni)
-            .map_err(|error| format!("ClientHello цели: {error}"))?;
-    }
 
     let mut control_bytes = match &options.control {
-        Some(AskControlInput::File(path)) => Some(
-            read_hex_file(path)
-                .map_err(|error| format!("--control-hex {}: {error}", path.display()))?,
-        ),
+        Some(AskControlInput::File(path)) => Some(read_hex_file(path).map_err(|error| {
+            r2o_usage_error(format!("--control-hex {}: {error}", path.display()))
+        })?),
         _ => None,
     };
     if let Some(bytes) = &control_bytes {
@@ -400,7 +397,12 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
 
     let family = if options.target_ip.is_ipv4() { 4 } else { 6 };
     let destination = std::net::SocketAddr::new(options.target_ip, options.port);
-    let mut client = ControlClient::connect(options.control_path.clone())?;
+    let mut client = ControlClient::connect(options.control_path.clone()).map_err(|error| {
+        format!(
+            "не удалось открыть управляющий сокет {}: {error}",
+            options.control_path.display()
+        )
+    })?;
     let mut trigger_timed_out = false;
     if trigger_bytes.is_none() {
         client.arm_client_shape(&options.sni, family)?;
@@ -419,13 +421,6 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
         control_timed_out = control_bytes.is_none();
     }
 
-    if let Some(bytes) = &trigger_bytes {
-        validate_hello(bytes, &options.sni)
-            .map_err(|error| format!("снимок ClientHello цели: {error}"))?;
-        if let Some(path) = &options.save_trigger {
-            save_ask_snapshot(path, "триггера", &options.sni, bytes);
-        }
-    }
     if let Some(bytes) = &control_bytes {
         let control_sni = match &options.control {
             Some(AskControlInput::Capture(name)) => name.clone(),
@@ -433,9 +428,6 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
         };
         validate_hello(bytes, &control_sni)
             .map_err(|error| format!("control ClientHello: {error}"))?;
-        if let Some(path) = &options.save_control {
-            save_ask_snapshot(path, "control", &control_sni, bytes);
-        }
     }
 
     let trigger_how_detail = match &options.trigger {
@@ -471,6 +463,10 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
             trigger_bytes.as_deref(),
         )
     );
+    // C: save_hex идёт сразу после print_snapshot триггера и до control.
+    if let (Some(path), Some(bytes)) = (&options.save_trigger, &trigger_bytes) {
+        save_ask_snapshot(path, "триггера", &options.sni, bytes);
+    }
     match (&options.control, &control_bytes) {
         (None, _) => println!(
             "снимок control: не запрошен (--control-sni/--control-hex не заданы) — вопросы \
@@ -503,6 +499,15 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
             );
         }
     }
+    if let (Some(path), Some(bytes)) = (&options.save_control, &control_bytes) {
+        // C `save_hex(..., a.control_sni, ...)`: имя в шапке файла берётся
+        // только из --control-sni; у снимка из --control-hex имени нет.
+        let save_name = match &options.control {
+            Some(AskControlInput::Capture(name)) => name.as_str(),
+            _ => "",
+        };
+        save_ask_snapshot(path, "control", save_name, bytes);
+    }
 
     let Some(trigger_bytes) = trigger_bytes else {
         print!(
@@ -511,7 +516,9 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
         );
         return Ok(0);
     };
-    if hello_sni(&trigger_bytes).is_err() {
+    // C `trig_sni_ok`: имя должно не только разбираться, но и быть непустым.
+    let trigger_sni_ok = hello_sni(&trigger_bytes).is_ok_and(|sni| !sni.is_empty());
+    if !trigger_sni_ok {
         // C `trig_sni_ok==0`: отчёт без вопросов, код 0.
         print!(
             "{}",
@@ -533,15 +540,25 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
         .transpose()?;
     let shape = hello_shape(&trigger_bytes)?;
     let mut properties = r2o_controller::classify::DpiProps::default();
-    let mut passed_question = None;
+    let mut steps: [R2oAskStep; 5] = std::array::from_fn(|_| R2oAskStep::default());
+
+    // C `d2kask main`: блок предупреждений печатается до опроса и относится
+    // ко всему прогону; текст обязан совпадать с оракулом побайтно.
+    print!(
+        "\nпредупреждения (относятся к этому прогону, см. doc-комментарий d2k_props_ask):\n\
+         \x20 - потолок ожидания 5000 мс общий и для подтверждения плана (AF_UNIX), и для \
+         сетевого обмена — унаследован (WAIT_CEIL_MS), не измерен для этого применения\n\
+         \x20 - метка (--mark=0x{:x}) принята d2k_props_ask по контракту, но НЕ применяется \
+         этим зондом: обращение к цели всегда идёт непомеченным (props_ask_contact, compose.c) \
+         — иначе только что поставленный план-кандидат прошёл бы мимо NFQUEUE нетронутым \
+         (files/S99d2k, правило mangle) — ниже везде \"метка: не ставится\"\n",
+        options.mark
+    );
 
     for (index, question) in AskQuestion::ALL.iter().copied().enumerate() {
         if question == AskQuestion::ProtocolParse && control_trigger.is_none() {
-            println!(
-                "[{}/5] {} — не задан: нет control ClientHello",
-                index + 1,
-                question.label()
-            );
+            // C: d2k_props_question_plan отказывает без control; шаг остаётся
+            // NOT_ASKED, а print_question называет причину.
             continue;
         }
         let trial_id = random_id()?;
@@ -554,12 +571,8 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
             [0; 16],
         ) {
             Ok(plan) => plan,
-            Err(error) => {
-                println!(
-                    "[{}/5] {} — не задан: план не собран ({error})",
-                    index + 1,
-                    question.label()
-                );
+            Err(_error) => {
+                // C: step_rc NOT_ASKED; print_step покажет «план: не собрался».
                 continue;
             }
         };
@@ -572,19 +585,10 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
         let plan_len = wire_records.len();
         let bound = match BoundTcpProbe::open(family, Some(0)) {
             Ok(bound) => bound,
-            Err(error) => {
-                r2o_print_ask_trace(
-                    plan_len,
-                    "не отправлен",
-                    None,
-                    None,
-                    "не удалось занять порт вопроса",
-                );
-                println!(
-                    "[{}/5] {} — не задан: не удалось занять порт вопроса ({error})",
-                    index + 1,
-                    question.label()
-                );
+            Err(_error) => {
+                steps[index].plan_len = plan_len;
+                steps[index].rc = 1; // D2K_STEP_SEND_FAIL
+                steps[index].err = "порт для вопроса не занялся".into();
                 continue;
             }
         };
@@ -614,53 +618,27 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
                     )
                     .into());
                 }
-                r2o_print_ask_trace(
-                    plan_len,
-                    "SET_NAME_PROBE не подтверждён",
-                    None,
-                    None,
-                    "SET_NAME_PROBE не подтверждён",
-                );
-                println!(
-                    "[{}/5] {} — не измерено: нет подтверждения плана ({error}); временный план снят",
-                    index + 1,
-                    question.label()
-                );
+                steps[index].plan_len = plan_len;
+                steps[index].rc = 2; // D2K_STEP_NO_ACK
+                steps[index].err = error.to_string();
                 continue;
             }
         };
         if ack.trial_id != Some(trial_id) {
             client.retire_question(&options.sni, shape, family, source_port);
-            r2o_print_ask_trace(
-                plan_len,
-                "получено чужое подтверждение",
-                None,
-                None,
-                "trial ID подтверждения не совпал",
-            );
-            println!(
-                "[{}/5] {} — не измерено: подтверждение пришло с чужим trial ID; временный план снят",
-                index + 1,
-                question.label()
-            );
+            steps[index].plan_len = plan_len;
+            steps[index].rc = 2; // подтверждения своего опыта нет
+            steps[index].err = "trial ID подтверждения не совпал".into();
             continue;
         }
         if !ack.ok {
-            r2o_print_ask_trace(
-                plan_len,
-                &format!("датапат отверг — {}", r2o_ask_ack_reason(ack.reason)),
-                None,
-                None,
-                "датапат отверг план",
-            );
-            println!(
-                "[{}/5] {} — план не принят датапатом (код {})",
-                index + 1,
-                question.label(),
-                ack.reason
-            );
+            steps[index].plan_len = plan_len;
+            steps[index].ack_code = ack.reason;
+            steps[index].rc = 3; // D2K_STEP_REFUSED
             continue;
         }
+        steps[index].plan_len = plan_len;
+        steps[index].ack_ok = true;
 
         // Production call-site C `d2k_props_contact_on_family`: тот же
         // контракт use_fd/out_fd, что проверяет test-props-contact. Сокет уже
@@ -689,18 +667,8 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
                     .into());
                 }
                 let _ = (local_ip, local_port);
-                r2o_print_ask_trace(
-                    plan_len,
-                    "датапат принял",
-                    None,
-                    None,
-                    "обращение к цели не вернуло сокет",
-                );
-                println!(
-                    "[{}/5] {} — не измерено: обращение не вернуло сокет; временный план снят",
-                    index + 1,
-                    question.label()
-                );
+                steps[index].rc = 4; // D2K_STEP_CONTACT_FAIL
+                steps[index].err = "обращение к цели не вернуло сокет".into();
                 continue;
             }
             Err(code) => {
@@ -713,36 +681,17 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
                     )
                     .into());
                 }
-                r2o_print_ask_trace(
-                    plan_len,
-                    "датапат принял",
-                    None,
-                    None,
-                    "обращение к цели не состоялось",
-                );
-                println!(
-                    "[{}/5] {} — не измерено: соединение не установлено ({error}); временный план снят",
-                    index + 1,
-                    question.label()
-                );
+                steps[index].rc = 4; // D2K_STEP_CONTACT_FAIL
+                steps[index].err = error.to_string();
                 continue;
             }
         };
         if local_port != source_port {
             client.retire_question(&options.sni, shape, family, source_port);
             drop(stream);
-            r2o_print_ask_trace(
-                plan_len,
-                "датапат принял",
-                Some(local_port),
-                None,
-                "локальный порт сокета изменился",
-            );
-            println!(
-                "[{}/5] {} — не измерено: локальный порт изменился; временный план снят",
-                index + 1,
-                question.label()
-            );
+            steps[index].local_port = Some(local_port);
+            steps[index].rc = 4; // D2K_STEP_CONTACT_FAIL
+            steps[index].err = "локальный порт сокета изменился".into();
             continue;
         }
         let expected_key = r2o_ask_flow_key(local_ip, local_port, destination);
@@ -759,18 +708,9 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
                     .into());
                 }
                 drop(stream);
-                r2o_print_ask_trace(
-                    plan_len,
-                    "датапат принял",
-                    Some(local_port),
-                    None,
-                    "сбор события обмена прервался",
-                );
-                println!(
-                    "[{}/5] {} — не измерено: сбор события обмена прервался ({error}); временный план снят",
-                    index + 1,
-                    question.label()
-                );
+                steps[index].local_port = Some(local_port);
+                steps[index].rc = 5; // D2K_STEP_NO_EXCHANGE
+                steps[index].err = error.to_string();
                 continue;
             }
         };
@@ -778,71 +718,39 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
         if proof.applied && proof.exchange_seen && proof.server_hello {
             drop(stream);
             record_question_passed(&mut properties, question);
-            r2o_print_ask_trace(
-                plan_len,
-                "датапат принял",
-                Some(local_port),
-                Some(&proof),
-                "вопрос прошёл",
-            );
-            println!(
-                "[{}/5] {} — пройден: план применён и получен ServerHello",
-                index + 1,
-                question.label()
-            );
-            println!("план вопроса, подтверждённый этим измерением:\n{plan_text}");
-            passed_question = Some(index);
+            steps[index].local_port = Some(local_port);
+            steps[index].rc = 9; // D2K_STEP_PASSED
+            if let Some(exchange) = proof.exchange {
+                steps[index].bytes = exchange.bytes_after_client_hello;
+                steps[index].first_type = exchange.first_record_type;
+                steps[index].seen_types = exchange.record_types;
+            }
             break;
         }
 
         if let Some(code) = proof.unsent_code {
             client.retire_question(&options.sni, shape, family, source_port);
             drop(stream);
-            r2o_print_ask_trace(
-                plan_len,
-                "датапат принял",
-                Some(local_port),
-                Some(&proof),
-                "посылка плана не покинула машину",
-            );
-            println!(
-                "[{}/5] {} — не измерено: план не был полностью отправлен (код отказа {code}); временный план снят",
-                index + 1,
-                question.label()
-            );
+            steps[index].local_port = Some(local_port);
+            steps[index].rc = 8; // D2K_STEP_UNSENT
+            steps[index].err = format!("код отказа отправки {code}");
             continue;
         }
 
         client.retire_question(&options.sni, shape, family, source_port);
         drop(stream);
-        r2o_print_ask_trace(
-            plan_len,
-            "датапат принял",
-            Some(local_port),
-            Some(&proof),
-            "вопрос не получил полного доказательства",
-        );
-        let missing = if !proof.applied {
-            "план к потоку не применён"
+        steps[index].local_port = Some(local_port);
+        steps[index].rc = if !proof.applied {
+            6 // D2K_STEP_NO_APPLIED
         } else if !proof.exchange_seen {
-            "событие TCP-обмена не получено"
+            5 // D2K_STEP_NO_EXCHANGE
         } else {
-            "ServerHello не подтверждён"
+            7 // D2K_STEP_NO_SERVER_HELLO
         };
-        println!(
-            "[{}/5] {} — не измерено: {missing}; временный план снят",
-            index + 1,
-            question.label()
-        );
-    }
-
-    if let Some(passed_index) = passed_question {
-        for (index, question) in AskQuestion::ALL.iter().enumerate().skip(passed_index + 1) {
-            println!(
-                "[{}/5] {} — не задан: предыдущий вопрос уже дал ответ, опрос остановлен",
-                index + 1,
-                question.label()
-            );
+        if let Some(exchange) = proof.exchange {
+            steps[index].bytes = exchange.bytes_after_client_hello;
+            steps[index].first_type = exchange.first_record_type;
+            steps[index].seen_types = exchange.record_types;
         }
     }
 
@@ -854,12 +762,50 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
             options.sni
         );
     }
+
+    // C: секция вопросов печатается ПОСЛЕ опроса, в донорском порядке
+    // (перекрытие, порядок, сумма, разбор, дубликаты); steps[i] принадлежит
+    // вопросу i этого же порядка.
+    print!("\nвопросы (порядок = порядок опроса d2k_props_ask):\n");
+    const QUESTIONS: [(usize, &str, &str); 5] = [
+        (
+            0,
+            "перекрытие слева",
+            "держит ли сегмент, начинающийся левее данных",
+        ),
+        (
+            1,
+            "порядок сегментов",
+            "держит ли сегменты не по порядку прихода",
+        ),
+        (2, "контрольная сумма", "сверяет ли контрольную сумму TCP"),
+        (
+            3,
+            "разбор протокола",
+            "разбирает ли TLS, а не просто смотрит байты",
+        ),
+        (4, "счёт дубликатов", "считает ли разнесённые копии за одно"),
+    ];
+    for (position, (step_index, field, doc_phrase)) in QUESTIONS.into_iter().enumerate() {
+        print!(
+            "{}",
+            r2o_ask_print_question(
+                position + 1,
+                step_index,
+                field,
+                doc_phrase,
+                &properties,
+                control_bytes.is_some(),
+                &steps[step_index],
+            )
+        );
+    }
     print!("{}", r2o_ask_vector(&properties));
     let decoy_sni = control_bytes
         .as_deref()
         .and_then(|bytes| hello_sni(bytes).ok());
     let composed = compose_plan_texts(&properties, &trigger, shape, decoy_sni.as_deref(), 0)?;
-    let no_decoy_reason = if options.control.is_none() {
+    let no_decoy_reason = if control_bytes.is_none() {
         "control-приветствие не задано"
     } else {
         "в control-приветствии не нашлось имени (d2k_hello_sni)"
@@ -21795,12 +21741,6 @@ impl R2oAskProof {
 }
 
 #[cfg(unix)]
-fn r2o_ask_ack_reason(code: u8) -> &'static str {
-    // Тот же C-источник, что и у `ack_reason_text`.
-    ack_reason_text(code)
-}
-
-#[cfg(unix)]
 fn r2o_ask_print_seen_types(mask: u8) -> String {
     let types = [
         (20, "20 смена шифра"),
@@ -21819,7 +21759,8 @@ fn r2o_ask_print_seen_types(mask: u8) -> String {
     }
 }
 
-#[cfg(all(unix, test))]
+/// C `step_rc_str`.
+#[cfg(unix)]
 fn r2o_ask_step_rc_str(rc: u8) -> &'static str {
     match rc {
         0 => "вопрос не собран",
@@ -21837,7 +21778,7 @@ fn r2o_ask_step_rc_str(rc: u8) -> &'static str {
 }
 
 /// C `ack_code_str` (не путать с `ack_reason_text` из sched.c).
-#[cfg(all(unix, test))]
+#[cfg(unix)]
 fn r2o_ask_ack_code_str(code: u8) -> &'static str {
     match code {
         control::ACK_OK => "принято",
@@ -21849,7 +21790,7 @@ fn r2o_ask_ack_code_str(code: u8) -> &'static str {
 }
 
 /// C `pos_decided`.
-#[cfg(all(unix, test))]
+#[cfg(unix)]
 fn r2o_ask_pos_decided(properties: &r2o_controller::classify::DpiProps, pos: usize) -> bool {
     use r2o_controller::classify::TriState;
     match pos {
@@ -21866,8 +21807,9 @@ fn r2o_ask_pos_decided(properties: &r2o_controller::classify::DpiProps, pos: usi
 }
 
 /// Поля C `d2k_props_step`, нужные `print_step`.
-#[cfg(all(unix, test))]
-struct R2oAskStep<'a> {
+#[cfg(unix)]
+#[derive(Default)]
+struct R2oAskStep {
     plan_len: usize,
     ack_ok: bool,
     rc: u8,
@@ -21876,12 +21818,12 @@ struct R2oAskStep<'a> {
     bytes: u32,
     first_type: u8,
     seen_types: u8,
-    err: &'a str,
+    err: String,
 }
 
 /// C `print_step`.
-#[cfg(all(unix, test))]
-fn r2o_ask_print_step(step: &R2oAskStep<'_>) -> String {
+#[cfg(unix)]
+fn r2o_ask_print_step(step: &R2oAskStep) -> String {
     let mut out = String::new();
     if step.plan_len == 0 {
         out.push_str("  план: не собрался\n");
@@ -21927,7 +21869,7 @@ fn r2o_ask_print_step(step: &R2oAskStep<'_>) -> String {
 }
 
 /// C `print_question`: заголовок вопроса и одна из веток ответа.
-#[cfg(all(unix, test))]
+#[cfg(unix)]
 fn r2o_ask_print_question(
     idx1: usize,
     pos: usize,
@@ -21935,7 +21877,7 @@ fn r2o_ask_print_question(
     doc_phrase: &str,
     properties: &r2o_controller::classify::DpiProps,
     have_control: bool,
-    step: &R2oAskStep<'_>,
+    step: &R2oAskStep,
 ) -> String {
     use r2o_controller::classify::TriState;
 
@@ -21986,35 +21928,6 @@ fn r2o_ask_print_question(
         ));
     }
     out
-}
-
-#[cfg(unix)]
-fn r2o_print_ask_trace(
-    plan_len: usize,
-    plan_status: &str,
-    local_port: Option<u16>,
-    proof: Option<&R2oAskProof>,
-    stop_reason: &str,
-) {
-    println!("  план: {plan_len} байт, {plan_status}");
-    match local_port {
-        Some(port) => match proof.and_then(|proof| proof.exchange) {
-            Some(exchange) => println!(
-                "  обмен: с местного порта {port}, {} байт, первая запись типа {}, встречены типы: {}",
-                exchange.bytes_after_client_hello,
-                exchange.first_record_type,
-                r2o_ask_print_seen_types(exchange.record_types)
-            ),
-            None => {
-                println!("  обмен: обращение с местного порта {port}, события обмена не пришло")
-            }
-        },
-        None => println!("  обмен: до обращения к цели дело не дошло"),
-    }
-    if let Some(code) = proof.and_then(|proof| proof.unsent_code) {
-        println!("  отказ отправки плана: код {code}");
-    }
-    println!("  причина остановки: {stop_reason}");
 }
 
 #[cfg(unix)]
@@ -31437,7 +31350,7 @@ mod tests {
             bytes: 0,
             first_type: 0,
             seen_types: 0,
-            err: "",
+            err: String::new(),
         };
         assert_eq!(
             super::r2o_ask_print_step(&not_collected),
@@ -31455,7 +31368,7 @@ mod tests {
             bytes: 120,
             first_type: 22,
             seen_types: 0b1100,
-            err: "ok",
+            err: "ok".to_string(),
         };
         assert_eq!(
             super::r2o_ask_print_step(&passed),
@@ -31474,7 +31387,7 @@ mod tests {
             bytes: 0,
             first_type: 0,
             seen_types: 0,
-            err: "bad",
+            err: "bad".to_string(),
         };
         assert_eq!(
             super::r2o_ask_print_step(&refused),
@@ -31492,7 +31405,7 @@ mod tests {
             bytes: 0,
             first_type: 0,
             seen_types: 0,
-            err: "",
+            err: String::new(),
         };
         assert_eq!(
             super::r2o_ask_print_step(&no_exchange),
@@ -31595,7 +31508,7 @@ mod tests {
             bytes: 0,
             first_type: 0,
             seen_types: 0,
-            err: "",
+            err: String::new(),
         };
         let passed_step = super::R2oAskStep {
             plan_len: 10,
@@ -31606,7 +31519,7 @@ mod tests {
             bytes: 120,
             first_type: 22,
             seen_types: 0b1000,
-            err: "",
+            err: String::new(),
         };
 
         let mut properties = DpiProps::default();

@@ -94,29 +94,45 @@ pub fn parse_ask_options(arguments: &[OsString]) -> Result<AskCliOptions, String
     // C `parse_args` отвергает пустой --control, а не только отсутствующий.
     let control_path = control_path
         .filter(|path| !path.is_empty())
-        .ok_or("обязателен --control <путь к сокету>")?;
+        .ok_or("обязателен --control <путь к управляющему сокету датапата>")?;
     let target_ip = ip
-        .ok_or("обязателен --ip <IPv4 или IPv6>")?
+        .filter(|value| !value.is_empty())
+        .ok_or("обязателен --ip <адрес цели>")?
         .to_str()
         .ok_or("--ip должен быть UTF-8")?
         .parse::<IpAddr>()
         .map_err(|error| format!("неверный IP-адрес цели: {error}"))?;
     let sni = sni
-        .ok_or("обязателен --sni <имя>")?
+        .filter(|value| !value.is_empty())
+        .ok_or("обязателен --sni <имя цели>")?
         .into_string()
         .map_err(|_| "--sni должен быть UTF-8")?;
-    if sni.is_empty() || sni.len() > r2k_core::control::MAX_DNS_NAME_LEN {
+    if sni.len() > r2k_core::control::MAX_DNS_NAME_LEN {
         return Err("--sni должен занимать от 1 до 253 байт".into());
     }
 
-    if hello_hex.is_some() == arm_wait_raw.is_some() {
-        return Err("задайте ровно один из --hello-hex и --arm-wait-ms".into());
+    if hello_hex.is_some() && arm_wait_raw.is_some() {
+        return Err(
+            "--hello-hex и --arm-wait-ms взаимоисключающие: снимок приветствия берётся ОДНИМ способом"
+                .into(),
+        );
+    }
+    if hello_hex.is_none() && arm_wait_raw.is_none() {
+        return Err(
+            "нужен один способ снять приветствие: --hello-hex <файл> или --arm-wait-ms <мс>".into(),
+        );
     }
     if control_hex.is_some() && control_sni.is_some() {
-        return Err("--control-hex и --control-sni взаимоисключающие".into());
+        return Err(
+            "--control-hex и --control-sni взаимоисключающие: control-приветствие берётся ОДНИМ способом"
+                .into(),
+        );
     }
     if control_sni.is_some() && arm_wait_raw.is_none() {
-        return Err("--control-sni требует --arm-wait-ms".into());
+        return Err(
+            "--control-sni требует --arm-wait-ms: армирование ловушки нуждается в потолке ожидания, а в режиме --hello-hex он не задан"
+                .into(),
+        );
     }
 
     let arm_wait = arm_wait_raw
@@ -210,7 +226,14 @@ fn parse_mark(value: &OsString) -> Result<u32, String> {
 }
 
 pub fn read_hex_file(path: &std::path::Path) -> Result<Vec<u8>, String> {
-    let contents = std::fs::read(path).map_err(|error| format!("открыть не удалось: {error}"))?;
+    let contents = std::fs::read(path).map_err(|error| {
+        // C печатает `strerror(errno)` без суффикса `(os error N)`, который
+        // добавляет Display у std::io::Error. Убираем его, чтобы диагностика
+        // CLI совпадала с оракулом побайтно.
+        let text = error.to_string();
+        let text = text.split(" (os error").next().unwrap_or_default();
+        format!("открыть не удалось: {text}")
+    })?;
     decode_hex(&contents)
 }
 

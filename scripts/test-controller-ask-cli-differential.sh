@@ -4,7 +4,7 @@ set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 D2O_ROOT=${R2O_DONOR_ROOT:?set R2O_DONOR_ROOT to the pinned D2O checkout}
-EXPECTED_D2O_SHA=a378e230947ebfd011439e1cac0f1e994d883aae
+EXPECTED_D2O_SHA=7a5fab97a1a7f0f00ebb906dba7ed568cdc0ca05
 ACTUAL_D2O_SHA=$(git -C "$D2O_ROOT" rev-parse HEAD)
 CC=${CC:-cc}
 CARGO=${CARGO:-cargo}
@@ -63,9 +63,9 @@ check_case missing-ip 'обязателен --ip' 'обязателен --ip' \
     --control "$TEMP/ctl"
 check_case missing-sni 'обязателен --sni' 'обязателен --sni' \
     --control "$TEMP/ctl" --ip 127.0.0.1
-check_case missing-hello 'нужен один способ' 'задайте ровно один' \
+check_case missing-hello 'нужен один способ' 'нужен один способ' \
     --control "$TEMP/ctl" --ip 127.0.0.1 --sni example.com
-check_case hello-exclusive 'взаимоисключающие' 'задайте ровно один' \
+check_case hello-exclusive 'взаимоисключающие' 'взаимоисключающие' \
     --control "$TEMP/ctl" --ip 127.0.0.1 --sni example.com \
     --hello-hex "$TEMP/hello.hex" --arm-wait-ms 10
 check_case control-exclusive '--control-hex и --control-sni взаимоисключающие' \
