@@ -610,15 +610,43 @@ fn r2o_voice_observation(
     }
 }
 
-fn r2o_resolve_voice_control(r2o_control: &str) -> Option<SocketAddrV4> {
-    let (r2o_host, r2o_port) = r2o_control.rsplit_once(':')?;
-    if r2o_host.is_empty() {
+/// C `voice_resolve`: `strtoul(colon + 1, NULL, 10)` без `endptr`.
+/// Поэтому C принимает ведущие пробелы, `+`, цифровой префикс (`443abc`)
+/// и молча игнорирует хвост; `0`, значения > 65535 и отрицательные
+/// (через переполнение `unsigned long`) отвергаются.
+fn r2o_voice_port_like_c(r2o_text: &str) -> Option<u16> {
+    let r2o_bytes = r2o_text.as_bytes();
+    let mut r2o_index = 0;
+    while r2o_index < r2o_bytes.len() && r2o_bytes[r2o_index].is_ascii_whitespace() {
+        r2o_index += 1;
+    }
+    let mut r2o_negative = false;
+    if r2o_index < r2o_bytes.len() && matches!(r2o_bytes[r2o_index], b'+' | b'-') {
+        r2o_negative = r2o_bytes[r2o_index] == b'-';
+        r2o_index += 1;
+    }
+    let mut r2o_value = 0_u64;
+    let mut r2o_digits = 0_usize;
+    while r2o_index < r2o_bytes.len() && r2o_bytes[r2o_index].is_ascii_digit() {
+        r2o_digits += 1;
+        r2o_value = r2o_value
+            .saturating_mul(10)
+            .saturating_add(u64::from(r2o_bytes[r2o_index] - b'0'))
+            .min(u64::from(u16::MAX) + 1);
+        r2o_index += 1;
+    }
+    if r2o_digits == 0 || r2o_negative || r2o_value == 0 || r2o_value > u64::from(u16::MAX) {
         return None;
     }
-    let r2o_port = r2o_port
-        .parse::<u16>()
-        .ok()
-        .filter(|r2o_port| *r2o_port != 0)?;
+    Some(r2o_value as u16)
+}
+
+fn r2o_resolve_voice_control(r2o_control: &str) -> Option<SocketAddrV4> {
+    let (r2o_host, r2o_port) = r2o_control.rsplit_once(':')?;
+    if r2o_host.is_empty() || r2o_host.len() >= 256 {
+        return None;
+    }
+    let r2o_port = r2o_voice_port_like_c(r2o_port)?;
     (r2o_host, r2o_port)
         .to_socket_addrs()
         .ok()?
@@ -1710,6 +1738,42 @@ mod tests {
         if let Ok(path) = std::env::var("R2O_VOICE_SEND_OUTPUT") {
             std::fs::write(path, line).unwrap();
         }
+    }
+
+    #[test]
+    fn voice_control_port_parses_like_c_strtoul() {
+        for (text, expected) in [
+            ("443", Some(443)),
+            (" 443", Some(443)),
+            ("\t+443", Some(443)),
+            ("443abc", Some(443)),
+            ("443 99", Some(443)),
+            ("65535", Some(65535)),
+            ("65536", None),
+            ("0", None),
+            ("0x1bb", None),
+            ("-1", None),
+            ("-0", None),
+            ("", None),
+            ("+", None),
+            ("abc", None),
+            ("999999999999999999999999999999", None),
+        ] {
+            assert_eq!(
+                super::r2o_voice_port_like_c(text),
+                expected,
+                "порт {text:?} должен разбираться как C strtoul"
+            );
+        }
+        assert_eq!(
+            super::r2o_resolve_voice_control("192.0.2.10:443abc"),
+            Some(std::net::SocketAddrV4::new(
+                std::net::Ipv4Addr::new(192, 0, 2, 10),
+                443
+            ))
+        );
+        assert!(super::r2o_resolve_voice_control("192.0.2.10:0").is_none());
+        assert!(super::r2o_resolve_voice_control(&format!("{}:443", "a".repeat(256))).is_none());
     }
 
     #[test]

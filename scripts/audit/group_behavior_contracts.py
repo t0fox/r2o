@@ -136,7 +136,7 @@ CONTRACTS = {
     "CN-VOICE": (
         "Voice/STUN discovery",
         "STUN request, DNS/voice blob, prefix, local failure.",
-        "voice/voice_discovery/stun: 9 P; d2k_stun_request/t13_random — 10 строк C/Rust PASS и production STUN-префикс; voice differentials частичные.",
+        "voice/voice_discovery/stun: 8 P; d2k_stun_request/t13_random — 10 строк C/Rust PASS и production STUN-префикс; voice_resolve-порт теперь как C strtoul; voice differentials частичные.",
     ),
     "CS-SCHED-TASK-LIFECYCLE": (
         "Scheduler task/worker lifecycle",
@@ -382,8 +382,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 217:
-        raise SystemExit(f"expected 217 P rows, got {len(rows)}")
+    if len(rows) != 216:
+        raise SystemExit(f"expected 216 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")
