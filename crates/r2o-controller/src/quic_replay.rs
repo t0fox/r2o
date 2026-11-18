@@ -3909,4 +3909,66 @@ mod tests {
         }
         assert!(checked >= 6, "проверено только {checked} кандидатов");
     }
+
+    #[test]
+    fn quic_original_arms_match_c() {
+        fn blob_len(blob: u8) -> usize {
+            if blob == 4 {
+                16
+            } else {
+                super::R2O_QUIC_ORIGINAL_BLOBS[usize::from(blob)].len()
+            }
+        }
+
+        let mut output = String::new();
+        for (label, benign_asked, ttl_three_no, frag_used, control_ok) in [
+            ("base", false, false, false, true),
+            ("benign-ttl", true, true, false, true),
+            ("frag-used", false, false, true, true),
+            ("control-fail", false, false, false, false),
+        ] {
+            output.push_str(&format!("scenario {label}\n"));
+            let candidates =
+                super::r2o_quic_original_fallback_candidates(benign_asked, ttl_three_no, frag_used);
+            let mut asked = 0_usize;
+            for candidate in &candidates {
+                // Гейт runner'а: формы фрагментации исполняются только
+                // после успешного контроля фрагментов.
+                if matches!(
+                    candidate.kind,
+                    super::R2oQuicCandidateKind::FragmentShape(_)
+                ) && !control_ok
+                {
+                    continue;
+                }
+                let (control, frag, ttl, copies, split, benign, udplen, length) =
+                    match candidate.kind {
+                        super::R2oQuicCandidateKind::OriginalSingle(blob) => {
+                            (0, 0, 0, 1, 0, 0, 0, blob_len(blob))
+                        }
+                        super::R2oQuicCandidateKind::OriginalRepeats { blob, copies } => {
+                            (0, 0, 0, i32::from(copies), 0, 0, 0, blob_len(blob))
+                        }
+                        super::R2oQuicCandidateKind::OriginalTtl(ttl) => {
+                            (0, 0, i32::from(ttl), 2, 0, 0, 0, blob_len(0))
+                        }
+                        super::R2oQuicCandidateKind::FragmentControl => (1, 1, 0, 0, 0, 0, 0, 0),
+                        super::R2oQuicCandidateKind::FragmentShape(shape) => {
+                            (0, i32::from(shape), 0, 0, 0, 0, 0, 0)
+                        }
+                        _ => continue,
+                    };
+                output.push_str(&format!(
+                    "ask {asked} control={control} frag={frag} ttl={ttl} copies={copies} split={split} benign={benign} udplen={udplen} blob_len={length}\n"
+                ));
+                asked += 1;
+            }
+            output.push_str(&format!("end {label} asked={asked} trace={asked}\n"));
+        }
+
+        if let Some(path) = std::env::var_os("R2O_QUIC_ORIGINAL_ARMS_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        print!("{output}");
+    }
 }
