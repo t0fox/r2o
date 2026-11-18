@@ -2703,6 +2703,15 @@ fn r2o_fetch_measure_rx_volume_with_roots(
     r2o_fetch_measure_rx_volume_with_roots_and_phase_timeout(options, roots, None, None)
 }
 
+/// C `probe_response_volume`: неудачный повтор не отменяет честный
+/// `rx_short`, если повтор не дал измерения (`rx_tls_unavailable` или
+/// `rx_unmeasured`), но не доказал обрыв и не вернул короткое тело.
+fn r2o_volume_retry_keeps_short(retry: &R2oFetchVolumeRxResult) -> bool {
+    (retry.rx_tls_unavailable || retry.rx_unmeasured)
+        && retry.evidence.is_none()
+        && retry.short_bytes.is_none()
+}
+
 fn r2o_fetch_measure_rx_volume_with_roots_and_phase_timeout(
     options: &FetchOptions,
     roots: RootCertStore,
@@ -2733,17 +2742,14 @@ fn r2o_fetch_measure_rx_volume_with_roots_and_phase_timeout(
     let mut r2o_retry =
         r2o_fetch_measure_rx_volume_once(&r2o_retry_options, roots, connect_timeout, phase_timeout);
     r2o_retry.retry_path = Some(r2o_retry_path.clone());
-    if r2o_retry.rx_tls_unavailable
-        && r2o_retry.evidence.is_none()
-        && r2o_retry.short_bytes.is_none()
-    {
+    if r2o_volume_retry_keeps_short(&r2o_retry) {
         r2o_retry.short_bytes = Some(r2o_short_bytes);
         r2o_retry.direct_complete = r2o_direct_complete;
         if r2o_retry.first.is_none() {
             r2o_retry.first = r2o_original_first;
         }
         r2o_retry.reason = format!(
-            "повтор по {r2o_retry_path} не установил TLS; исходный ответ завершился на {r2o_short_bytes} байтах, измерить обрыв нельзя: {}",
+            "повтор по {r2o_retry_path} (было {r2o_short_bytes} байт) не дал измерения; исходный ответ завершился на {r2o_short_bytes} байтах: {}",
             r2o_retry.reason
         );
     } else {
@@ -4713,6 +4719,45 @@ mod tests {
         assert!(r2o_volume_error_is_tls_unavailable(
             "TLS-рукопожатие не завершилось: unexpected eof"
         ));
+    }
+
+    #[test]
+    fn rx_short_восстанавливается_при_tls_или_unmeasured_повторе_как_c() {
+        let retry = |tls_unavailable: bool,
+                     unmeasured: bool,
+                     evidence: bool,
+                     short_bytes: Option<u64>| R2oFetchVolumeRxResult {
+            rx_tls_unavailable: tls_unavailable,
+            rx_unmeasured: unmeasured,
+            evidence: evidence.then(|| crate::r2o_volume::R2oVolumeRxEvidence {
+                domain: crate::r2o_volume::R2oVolumeRxDomain::HttpBody,
+                cut_kb: 16,
+                expected_kb: 20,
+                cut_packets: 0,
+                compressed_complete: true,
+                reason: "обрыв доказан".into(),
+            }),
+            short_bytes,
+            ..Default::default()
+        };
+        assert!(r2o_volume_retry_keeps_short(&retry(
+            true, false, false, None
+        )));
+        assert!(r2o_volume_retry_keeps_short(&retry(
+            false, true, false, None
+        )));
+        assert!(!r2o_volume_retry_keeps_short(&retry(
+            true, false, true, None
+        )));
+        assert!(!r2o_volume_retry_keeps_short(&retry(
+            false,
+            true,
+            false,
+            Some(128)
+        )));
+        assert!(!r2o_volume_retry_keeps_short(&retry(
+            false, false, false, None
+        )));
     }
 
     #[test]
