@@ -116,7 +116,7 @@ CONTRACTS = {
     "CN-TLS-VERIFY": (
         "TLS/HTTP verify and contact",
         "Проверка TLS1.2/1.3/ECH, тела ответа, контакта по family.",
-        "verify.c TLS-часть: 6 P; request_complete_page — 13, props_contact — 11 кейсов PASS; body_byte differential воспроизведён: 9/16 расхождений в HttpResponseParser (chunk extension/control/trailer/over-limit) — блокер на выравнивание парсера.",
+        "verify.c TLS-часть: 5 P; request_complete_page — 13, props_contact — 11, body_byte/HTTP framing — 16/16 кейсов C/Rust PASS (verify-режим парсера); остальные verify-* частичные.",
     ),
     "CN-QUIC-VERIFY": (
         "QUIC/HTTP3 verify and replay",
@@ -382,8 +382,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 305:
-        raise SystemExit(f"expected 305 P rows, got {len(rows)}")
+    if len(rows) != 304:
+        raise SystemExit(f"expected 304 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")

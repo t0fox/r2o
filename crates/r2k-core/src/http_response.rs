@@ -32,6 +32,11 @@ pub struct HttpResponseParser {
     line_overflow: bool,
     body_error: Option<&'static str>,
     interim: bool,
+    /// Режим `verify.c`/`fetch.rs`: заголовки и chunked-строки без строгой
+    /// валидации полей, chunk-строка 127 байт, trailers игнорируются.
+    verify: bool,
+    /// Разбор остановлен без `invalid` (C `local_limit`/`body_say` в verify).
+    halted: bool,
 }
 
 impl HttpResponseParser {
@@ -43,6 +48,16 @@ impl HttpResponseParser {
     /// (`core/verify.c:699-728`) выделяет `D2K_VERIFY_HEADER_LIMIT + 1`
     /// (65537) на кучу: заголовки Meta/YouTube не влезают в 8 КиБ.
     pub fn with_header_capacity(head_only: bool, header_capacity: usize) -> Self {
+        Self::with_mode(head_only, header_capacity, false)
+    }
+
+    /// C `verify.c:read_status_buf`/`read_http_body` (fetch-путь): заголовки
+    /// без валидации полей, chunk-строка 127 байт, trailers не проверяются.
+    pub fn with_verify_header_capacity(head_only: bool, header_capacity: usize) -> Self {
+        Self::with_mode(head_only, header_capacity, true)
+    }
+
+    fn with_mode(head_only: bool, header_capacity: usize, verify: bool) -> Self {
         Self {
             header: vec![0; header_capacity.saturating_add(1)],
             line: [0; LINE_CAPACITY],
@@ -60,6 +75,8 @@ impl HttpResponseParser {
             line_overflow: false,
             body_error: None,
             interim: false,
+            verify,
+            halted: false,
         }
     }
 
@@ -75,13 +92,22 @@ impl HttpResponseParser {
             return;
         }
         for &byte in bytes {
+            if self.halted {
+                break;
+            }
             if self.complete {
                 self.invalid = true;
                 self.complete = false;
                 break;
             }
             match self.state {
-                State::Header => self.feed_header_byte(byte),
+                State::Header => {
+                    if self.verify {
+                        self.feed_header_byte_verify(byte);
+                    } else {
+                        self.feed_header_byte(byte);
+                    }
+                }
                 State::FixedBody | State::ChunkBody | State::CloseBody => {
                     if self.body_bytes == u64::MAX {
                         self.invalid = true;
@@ -114,12 +140,18 @@ impl HttpResponseParser {
                     self.state = State::ChunkSize;
                 }
                 State::ChunkSize | State::Trailers => {
-                    self.feed_line_byte(byte);
-                    if self.invalid || byte != b'\n' {
+                    if self.verify {
+                        self.feed_line_byte_verify(byte);
+                    } else {
+                        self.feed_line_byte(byte);
+                    }
+                    if self.invalid || self.halted || byte != b'\n' {
                         continue;
                     }
                     if !self.finish_line() {
-                        self.invalid = true;
+                        if !self.halted {
+                            self.invalid = true;
+                        }
                         break;
                     }
                 }
@@ -129,10 +161,10 @@ impl HttpResponseParser {
             }
         }
 
-        if fin && !self.invalid {
+        if fin && !self.invalid && !self.halted {
             if self.state == State::CloseBody && self.headers_complete {
                 self.complete = true;
-            } else if !self.complete {
+            } else if !self.complete && !self.verify {
                 self.invalid = true;
             }
         }
@@ -151,6 +183,11 @@ impl HttpResponseParser {
 
     pub const fn is_invalid(&self) -> bool {
         self.invalid
+    }
+
+    /// Разбор остановлен без `invalid`: C verify `local_limit`/`body_say`.
+    pub const fn is_halted(&self) -> bool {
+        self.halted
     }
 
     /// C `body_line`: переполнение строки, а не иной сбой обрамления.
@@ -249,6 +286,97 @@ impl HttpResponseParser {
         }
     }
 
+    fn feed_header_byte_verify(&mut self, byte: u8) {
+        if byte == 0 || self.header_len + 1 >= self.header.len() {
+            self.halted = true;
+            return;
+        }
+        self.header[self.header_len] = byte;
+        self.header_len += 1;
+        if self.header_len >= 4 && self.header[self.header_len - 4..self.header_len] == *b"\r\n\r\n"
+        {
+            self.finish_headers_verify();
+        }
+    }
+
+    fn finish_headers_verify(&mut self) {
+        let Some((status_end, status)) = parse_status_line(&self.header[..self.header_len]) else {
+            self.halted = true;
+            return;
+        };
+        // C `read_status_buf`: управляющие байты в строке статуса (кроме TAB)
+        // отвергаются; в значениях полей — нет.
+        if self.header[13..status_end]
+            .iter()
+            .any(|byte| (*byte < 32 && *byte != b'\t') || *byte == 127)
+        {
+            self.halted = true;
+            return;
+        }
+        let mut content_length = None;
+        let mut transfer_encoding = false;
+        let mut framing_invalid = false;
+        let header_end = self.header_len - 2;
+        let mut cursor = status_end + 2;
+        while cursor < header_end {
+            let Some(relative_end) = find_crlf(&self.header[cursor..header_end]) else {
+                self.halted = true;
+                return;
+            };
+            let line_end = cursor + relative_end;
+            let line = &self.header[cursor..line_end];
+            if let Some(colon) = line.iter().position(|byte| *byte == b':') {
+                let name = &line[..colon];
+                let value = trim_ascii_whitespace(&line[colon + 1..]);
+                if span_eq_ascii_ci(name, b"content-length") {
+                    let Some(value) = parse_decimal(value) else {
+                        self.halted = true;
+                        return;
+                    };
+                    if content_length.is_some_and(|old| old != value) {
+                        self.halted = true;
+                        return;
+                    }
+                    content_length = Some(value);
+                } else if span_eq_ascii_ci(name, b"transfer-encoding") {
+                    if transfer_encoding || !span_eq_ascii_ci(value, b"chunked") {
+                        framing_invalid = true;
+                    }
+                    transfer_encoding = true;
+                }
+            }
+            cursor = line_end + 2;
+        }
+        self.status = status;
+        if status < 200 {
+            if status == 101 || content_length.is_some() || transfer_encoding {
+                self.halted = true;
+                return;
+            }
+            self.interim = true;
+            self.header_len = 0;
+            self.header[0] = 0;
+            self.status_line_complete = false;
+            return;
+        }
+        self.headers_complete = true;
+        if framing_invalid || content_length.is_some() && transfer_encoding {
+            self.halted = true;
+            return;
+        }
+        if self.head_only || matches!(status, 204 | 304) {
+            self.complete = true;
+        } else if transfer_encoding {
+            self.state = State::ChunkSize;
+        } else if let Some(length) = content_length {
+            self.state = State::FixedBody;
+            self.remaining = length;
+            self.complete = length == 0;
+        } else {
+            self.state = State::CloseBody;
+        }
+    }
+
     fn feed_line_byte(&mut self, byte: u8) {
         if invalid_line_byte(byte) {
             self.invalid = true;
@@ -275,7 +403,38 @@ impl HttpResponseParser {
         self.line_len += 1;
     }
 
+    fn feed_line_byte_verify(&mut self, byte: u8) {
+        // C `body_line`: буфер `char line[128]`, но CR/LF в него не пишутся;
+        // предел — 127 содержательных байт.
+        let content_len = if self.line_len > 0 && self.line[self.line_len - 1] == b'\r' {
+            self.line_len - 1
+        } else {
+            self.line_len
+        };
+        if !matches!(byte, b'\r' | b'\n') && content_len >= 127 {
+            self.line_overflow = true;
+            self.body_error = Some("chunked: строка длиннее 127 байт (предел C)");
+            self.halted = true;
+            return;
+        }
+        if byte == b'\n' && (self.line_len == 0 || self.line[self.line_len - 1] != b'\r') {
+            self.body_error = Some("chunked: строка оканчивается LF без CR");
+            self.halted = true;
+            return;
+        }
+        if self.line_len != 0 && self.line[self.line_len - 1] == b'\r' && byte != b'\n' {
+            self.body_error = Some("chunked: после CR нет LF");
+            self.halted = true;
+            return;
+        }
+        self.line[self.line_len] = byte;
+        self.line_len += 1;
+    }
+
     fn finish_line(&mut self) -> bool {
+        if self.verify {
+            return self.finish_line_verify();
+        }
         if self.line_len < 2 || self.line[self.line_len - 2..self.line_len] != *b"\r\n" {
             return false;
         }
@@ -295,6 +454,64 @@ impl HttpResponseParser {
             };
             self.remaining = size;
             self.state = if size == 0 {
+                State::Trailers
+            } else {
+                State::ChunkBody
+            };
+        }
+        self.line_len = 0;
+        true
+    }
+
+    fn finish_line_verify(&mut self) -> bool {
+        if self.line_len < 2 || self.line[self.line_len - 2..self.line_len] != *b"\r\n" {
+            return false;
+        }
+        let len = self.line_len - 2;
+        if self.state == State::Trailers {
+            // C `read_http_body`: `do { body_line } while (line[0])` —
+            // содержимое trailers не проверяется; NUL первым байтом
+            // завершает, как пустая строка.
+            if len == 0 || self.line[0] == 0 {
+                self.complete = true;
+            }
+        } else {
+            let end = self.line[..len]
+                .iter()
+                .position(|byte| *byte == b';')
+                .unwrap_or(len);
+            if end == 0 {
+                self.body_error = Some("chunked: пустой размер чанка");
+                self.halted = true;
+                self.line_len = 0;
+                return false;
+            }
+            let mut value = 0_u64;
+            for &byte in &self.line[..end] {
+                let digit = match byte {
+                    b'0'..=b'9' => byte - b'0',
+                    b'a'..=b'f' => byte - b'a' + 10,
+                    b'A'..=b'F' => byte - b'A' + 10,
+                    _ => {
+                        self.body_error = Some("chunked: размер не шестнадцатеричный");
+                        self.halted = true;
+                        self.line_len = 0;
+                        return false;
+                    }
+                };
+                let Some(next) = value
+                    .checked_mul(16)
+                    .and_then(|value| value.checked_add(u64::from(digit)))
+                else {
+                    self.body_error = Some("chunked: размер вне диапазона");
+                    self.halted = true;
+                    self.line_len = 0;
+                    return false;
+                };
+                value = next;
+            }
+            self.remaining = value;
+            self.state = if value == 0 {
                 State::Trailers
             } else {
                 State::ChunkBody

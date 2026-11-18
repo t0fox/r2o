@@ -1542,11 +1542,11 @@ fn r2o_fetch_with_roots_and_encoding_detailed(
 
 /// C `d2k_http_read_response`: разобрать один HTTP-ответ.
 pub fn r2o_http_read_response(reader: &mut impl Read) -> std::io::Result<R2oHttpReadResponse> {
-    let mut parser = HttpResponseParser::with_header_capacity(false, 65_536);
+    let mut parser = HttpResponseParser::with_verify_header_capacity(false, 65_536);
     let mut buffer = [0_u8; 16 * 1024];
     let mut raw = Vec::new();
     loop {
-        if parser.is_complete() || parser.is_invalid() {
+        if parser.is_complete() || parser.is_invalid() || parser.is_halted() {
             break;
         }
         match reader.read(&mut buffer) {
@@ -2001,7 +2001,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
             .and_then(|()| stream.flush())
             .map_err(|error| format!("не удалось отправить HTTP-запрос: {error}"))?;
 
-        let mut parser = HttpResponseParser::with_header_capacity(false, 65_536);
+        let mut parser = HttpResponseParser::with_verify_header_capacity(false, 65_536);
         let _r2o_http_buffer = R2oHttpResponseBufferTracking::new();
         let mut buffer = [0_u8; 16 * 1024];
         let mut reason = None;
@@ -2016,7 +2016,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
         let mut r2o_reply_body_tap: Option<crate::r2o_resource::R2oResourceBodyTap> = None;
         let mut r2o_doh_body_tap: Option<crate::r2o_resource::R2oResourceBodyTap> = None;
         loop {
-            if parser.is_complete() || parser.is_invalid() {
+            if parser.is_complete() || parser.is_invalid() || parser.is_halted() {
                 break;
             }
             if let Err(error) = set_deadline(&stream.sock.socket, response_deadline) {
@@ -3745,7 +3745,7 @@ fn r2o_drain_head_response(stream: &mut R2oFetchVolumeStream, timeout: Duration)
     let deadline = Instant::now()
         .checked_add(timeout)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "слишком долгий срок ответа"))?;
-    let mut parser = HttpResponseParser::with_header_capacity(true, 65_536);
+    let mut parser = HttpResponseParser::with_verify_header_capacity(true, 65_536);
     let _r2o_http_buffer = R2oHttpResponseBufferTracking::new();
     let mut buffer = [0_u8; 4096];
     loop {
@@ -4046,11 +4046,11 @@ fn r2o_measure_http_packet_budget(
                 r2o_budget_closed_note(state.requests, packets, need, "запись запроса не прошла"),
             );
         }
-        let mut parser = HttpResponseParser::with_header_capacity(false, 65_536);
+        let mut parser = HttpResponseParser::with_verify_header_capacity(false, 65_536);
         let _r2o_http_buffer = R2oHttpResponseBufferTracking::new();
         let mut buffer = [0_u8; 16 * 1024];
         let mut eof = false;
-        while !parser.is_complete() && !parser.is_invalid() {
+        while !parser.is_complete() && !parser.is_invalid() && !parser.is_halted() {
             let remaining = repeat_deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return r2o_budget_say(

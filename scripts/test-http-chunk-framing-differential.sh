@@ -4,10 +4,9 @@ set -eu
 r2o_script_dir=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
 r2o_donor_root=${R2O_DONOR_ROOT:-$(dirname "$r2o_script_dir")/r2o-tooling/d2o-current-main}
 r2o_donor_core="$r2o_donor_root/core"
-r2o_clang=/mnt/e/r2o-tooling/clang18-root/usr/bin/clang-18
-r2o_cargo=/mnt/e/r2o-tooling/linux-rustup/toolchains/1.98.0-x86_64-unknown-linux-gnu/bin/cargo
-r2o_rustc=/mnt/e/r2o-tooling/linux-rustup/toolchains/1.98.0-x86_64-unknown-linux-gnu/bin/rustc
-r2o_expected_donor_sha=a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe
+r2o_clang=clang-18
+r2o_cargo=cargo
+r2o_expected_donor_sha=7a5fab97a1a7f0f00ebb906dba7ed568cdc0ca05
 r2o_artifacts="$r2o_script_dir/.rea/http-chunk-framing-$$"
 r2o_binary="$r2o_artifacts-c"
 r2o_c_output="$r2o_artifacts-c.txt"
@@ -44,6 +43,7 @@ LD_LIBRARY_PATH=/mnt/e/r2o-tooling/clang18-root/usr/lib/x86_64-linux-gnu:/mnt/e/
     "$r2o_donor_root/datapath/plan_apply.c" \
     "$r2o_donor_root/datapath/wire.c" \
     "$r2o_donor_core/verify.o" \
+    "$r2o_donor_core/diagnostics.o" \
     "$r2o_donor_core/quicconn.o" \
     "$r2o_donor_core/h3.o" \
     "$r2o_donor_core/tls12.o" \
@@ -59,12 +59,8 @@ LD_LIBRARY_PATH=/mnt/e/r2o-tooling/clang18-root/usr/lib/x86_64-linux-gnu:/mnt/e/
     -lpthread
 "$r2o_binary" >"$r2o_c_output"
 
-CARGO_HOME=/mnt/e/r2o-tooling/linux-cargo \
-RUSTUP_HOME=/mnt/e/r2o-tooling/linux-rustup \
-RUSTC="$r2o_rustc" \
-CARGO_TARGET_DIR="$r2o_script_dir/target" \
 R2O_HTTP_CHUNK_DIFF_OUTPUT="$r2o_rust_output" \
-"$r2o_cargo" test --locked --offline \
+"$r2o_cargo" test --locked \
     -p r2k-core --test http_response \
     matches_d2o_http_header_and_chunk_framing
 

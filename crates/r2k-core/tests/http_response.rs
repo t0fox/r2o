@@ -197,3 +197,58 @@ fn head_and_bodyless_statuses_complete_at_the_header_boundary() {
     assert!(no_content.is_complete());
     assert_eq!(no_content.body_bytes(), 0);
 }
+
+#[test]
+fn matches_d2o_http_header_and_chunk_framing_differential() {
+    let prefix = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;";
+    let suffix = b"\r\nx\r\n0\r\n\r\n";
+    let mut line_at_limit = prefix.to_vec();
+    line_at_limit.extend_from_slice(&[b'a'; 125]);
+    line_at_limit.extend_from_slice(suffix);
+    let mut line_over_limit = prefix.to_vec();
+    line_over_limit.extend_from_slice(&[b'a'; 126]);
+    line_over_limit.extend_from_slice(suffix);
+
+    let cases: [(&str, Vec<u8>); 16] = [
+        ("extension_suffix", b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;foo=\"unterminated\r\nx\r\n0\r\n\r\n".to_vec()),
+        ("trailer_without_colon", b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nnot-a-field\r\n\r\n".to_vec()),
+        ("colonless_header", b"HTTP/1.1 200 OK\r\nMalformed Header\r\nContent-Length: 1\r\n\r\nx".to_vec()),
+        ("control_extension", b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1;foo=\x01\r\nx\r\n0\r\n\r\n".to_vec()),
+        ("control_chunk_size", b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\x01\r\nx\r\n0\r\n\r\n".to_vec()),
+        ("buffered_bytes_after_frame", b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\nextra".to_vec()),
+        ("control_header_value", b"HTTP/1.1 200 OK\r\nX: foo\x01bar\r\nContent-Length: 0\r\n\r\n".to_vec()),
+        ("bare_lf_header_value", b"HTTP/1.1 200 OK\r\nX: foo\nbar\r\nContent-Length: 0\r\n\r\n".to_vec()),
+        ("bare_cr_header_value", b"HTTP/1.1 200 OK\r\nX: foo\rbar\r\nContent-Length: 0\r\n\r\n".to_vec()),
+        ("bare_lf_swallows_next_header", b"HTTP/1.1 200 OK\r\nX: x\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n".to_vec()),
+        ("control_trailer", b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\nX: foo\x01bar\r\n\r\n".to_vec()),
+        ("nul_first_trailer", b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\0ignored\r\n".to_vec()),
+        ("bodyless_204_buffered", b"HTTP/1.1 204 No Content\r\nContent-Length: 4\r\n\r\nbody".to_vec()),
+        ("bodyless_304_buffered", b"HTTP/1.1 304 Not Modified\r\nTransfer-Encoding: chunked\r\n\r\nnot-a-chunk".to_vec()),
+        ("chunk_line_at_limit", line_at_limit),
+        ("chunk_line_over_limit", line_over_limit),
+    ];
+
+    let mut output = String::new();
+    for (name, bytes) in cases {
+        let mut parser = HttpResponseParser::with_verify_header_capacity(false, 65_536);
+        for byte in &bytes {
+            parser.feed(std::slice::from_ref(byte), false);
+            if parser.is_complete() || parser.is_invalid() || parser.is_halted() {
+                break;
+            }
+        }
+        if !parser.is_complete() && !parser.is_invalid() && !parser.is_halted() {
+            parser.feed(&[], true);
+        }
+        output.push_str(&format!(
+            "{name} status={} complete={} body_bytes={}\n",
+            parser.status(),
+            u8::from(parser.is_complete()),
+            parser.body_bytes()
+        ));
+    }
+    if let Ok(path) = std::env::var("R2O_HTTP_CHUNK_DIFF_OUTPUT") {
+        std::fs::write(path, &output).unwrap();
+    }
+    print!("{output}");
+}
