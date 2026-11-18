@@ -3807,6 +3807,54 @@ fn r2o_stall_budgets_changed(new: &[u16], sent: &[u16]) -> bool {
 }
 
 #[cfg(unix)]
+const R2O_TASK_BUDGET_FIELD_PACKETS: u32 = 25;
+
+/// C `task_budget` (`core/sched.c`): приоритет «своя цель → свой RX-cut →
+/// коробка по `box_id` → поле 25». Возвращает пакеты и C-текст источника.
+#[cfg(unix)]
+fn r2o_task_budget_packets(
+    fingerprint: &r2o_controller::catalog::Fingerprint,
+    rx_cut_packets: u32,
+    transport: u8,
+    catalog: Option<&Catalog>,
+    box_id: Option<&str>,
+) -> (u32, String) {
+    for signal in &fingerprint.signals {
+        if r2o_is_rx_volume_kind(&signal.kind) && signal.packets > 0 {
+            return (
+                u32::try_from(signal.packets).unwrap_or(u32::MAX),
+                "замер этой цели (обрыв identity)".to_owned(),
+            );
+        }
+    }
+    if transport == 6 && rx_cut_packets > 0 {
+        return (
+            rx_cut_packets,
+            "замер этой цели (обрыв identity)".to_owned(),
+        );
+    }
+    if let (Some(box_id), Some(catalog)) = (box_id.filter(|id| !id.is_empty()), catalog) {
+        for box_record in &catalog.boxes {
+            if box_record.id != box_id {
+                continue;
+            }
+            for signal in &box_record.fingerprint.signals {
+                if r2o_is_rx_volume_kind(&signal.kind) && signal.packets > 0 {
+                    return (
+                        u32::try_from(signal.packets).unwrap_or(u32::MAX),
+                        format!("замер коробки {box_id}"),
+                    );
+                }
+            }
+        }
+    }
+    (
+        R2O_TASK_BUDGET_FIELD_PACKETS,
+        "поле 04.10, коробка не измерена".to_owned(),
+    )
+}
+
+#[cfg(unix)]
 fn r2o_tcp_stall_budgets_for_name(catalog: &Catalog, host: &str) -> Vec<u16> {
     let mut budgets = Vec::new();
     for box_record in &catalog.boxes {
@@ -10877,7 +10925,6 @@ const R2O_DISCOVERY_FAILURE_RETRY: std::time::Duration = std::time::Duration::fr
 const R2O_DISCOVERY_CHALLENGE_RETRY: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 #[cfg(unix)]
 const R2O_VOLUME_LADDER_BATCH: usize = R2O_DISCOVERY_RX_LADDER_BATCH;
-const R2O_VOLUME_TX_LADDER_PACKET_BUDGET: u32 = 50;
 #[cfg(unix)]
 const R2O_VOLUME_SEARCH_CACHE_CAPACITY: usize = 256;
 #[cfg(unix)]
@@ -20916,6 +20963,18 @@ fn r2o_discovery_volume_recovery(
         && search.tx.as_ref().is_ok_and(|result| {
             result.verdict == r2o_controller::fetch::R2oFetchVolumeTxVerdict::Cut
         });
+    let task_budget = r2o_task_budget_packets(
+        suspect_fingerprint,
+        search
+            .rx
+            .evidence
+            .as_ref()
+            .map_or(0, |evidence| evidence.cut_packets),
+        r2o_discovery_transport(target),
+        candidate_catalog,
+        outcome.volume_box_id.as_deref(),
+    )
+    .0;
     let mut next_candidate = search.next_candidate;
     let first_candidate = next_candidate;
     let mut attempted = 0_usize;
@@ -20970,7 +21029,7 @@ fn r2o_discovery_volume_recovery(
             Some(client_has_tcp_timestamps),
             None,
             resource_memory,
-            tx_ladder_requires_packet_budget.then_some(R2O_VOLUME_TX_LADDER_PACKET_BUDGET),
+            tx_ladder_requires_packet_budget.then_some(task_budget),
             candidate_request_encoding,
         );
         probe_counts.candidates = probe_counts.candidates.saturating_add(attempts);
@@ -52835,6 +52894,79 @@ group_block_proven: false,
         assert!(r2o_tcp_stall_in_name_band(&catalog, "example.com", 29));
         assert!(!r2o_tcp_stall_in_name_band(&catalog, "example.com", 28));
         assert!(r2o_tcp_stall_in_name_band(&catalog, "other.example", 7));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn d2o_task_budget_matches_c() {
+        let signal = |kind: &str, packets: i32| Signal {
+            kind: kind.to_owned(),
+            packets,
+            ..Signal::default()
+        };
+        let catalog = Catalog {
+            boxes: vec![BoxRecord {
+                id: "box-1".into(),
+                fingerprint: Fingerprint {
+                    signals: vec![signal("rx-volume", 64)],
+                    ..Fingerprint::default()
+                },
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        let mut output = String::new();
+        let mut emit = |label: &str,
+                        fingerprint: Fingerprint,
+                        rx_cut_packets: u32,
+                        transport: u8,
+                        box_id: Option<&str>| {
+            let (budget, source) = super::r2o_task_budget_packets(
+                &fingerprint,
+                rx_cut_packets,
+                transport,
+                Some(&catalog),
+                box_id,
+            );
+            output.push_str(&format!("{label}|{budget}|{source}\n"));
+        };
+        emit(
+            "own_signal",
+            Fingerprint {
+                signals: vec![signal("rx-volume", 120)],
+                ..Fingerprint::default()
+            },
+            0,
+            6,
+            None,
+        );
+        emit("own_cut", Fingerprint::default(), 80, 6, None);
+        emit("box_signal", Fingerprint::default(), 0, 6, Some("box-1"));
+        emit("field", Fingerprint::default(), 0, 6, None);
+        emit("udp_cut", Fingerprint::default(), 80, 17, None);
+        emit(
+            "zero_signal_box",
+            Fingerprint {
+                signals: vec![signal("rx-volume", 0)],
+                ..Fingerprint::default()
+            },
+            0,
+            6,
+            Some("box-1"),
+        );
+        emit(
+            "non_rx_kind",
+            Fingerprint {
+                signals: vec![signal("volume", 120)],
+                ..Fingerprint::default()
+            },
+            0,
+            6,
+            None,
+        );
+        if let Ok(path) = std::env::var("R2O_TASK_BUDGET_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
     }
 
     #[cfg(unix)]
