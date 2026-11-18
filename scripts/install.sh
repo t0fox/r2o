@@ -182,6 +182,7 @@ install_dependencies() {
     done
     [ "$have_ca" -eq 1 ] || missing="$missing ca-bundle"
     nfqueue_module=
+    conntrack_module=
     if [ "$PLATFORM" = openwrt ]; then
         if { [ "$backend" = nft ] || { [ "$backend" = auto ] && command -v nft >/dev/null 2>&1; }; }; then
             nfqueue_package='kmod-nfnetlink-queue kmod-nft-queue'
@@ -194,6 +195,12 @@ install_dependencies() {
             || [ ! -d "$MODULE_DIR/$nfqueue_module" ] \
             || [ ! -e "$NFQUEUE_STATUS_FILE" ]; then
             missing="$missing $nfqueue_package"
+        fi
+        # Без ctnetlink датапат не видит молчание TCP/QUIC: подозрений нет,
+        # панель остаётся пустой. Это обязательная зависимость наблюдения.
+        if [ ! -d "$MODULE_DIR/nf_conntrack_netlink" ]; then
+            missing="$missing kmod-nf-conntrack-netlink"
+            conntrack_module=nf_conntrack_netlink
         fi
     fi
     [ -n "$missing" ] || return 0
@@ -216,6 +223,12 @@ install_dependencies() {
         modprobe nfnetlink_queue || die 'не удалось загрузить модуль nfnetlink_queue после установки kmod-пакета'
         modprobe "$nfqueue_module" || die "не удалось загрузить модуль $nfqueue_module после установки kmod-пакета"
         [ -e "$NFQUEUE_STATUS_FILE" ] || die "после загрузки модулей NFQUEUE отсутствует $NFQUEUE_STATUS_FILE"
+    fi
+    if [ -n "$conntrack_module" ]; then
+        command -v modprobe >/dev/null 2>&1 || die 'для ctnetlink нужна команда modprobe'
+        modprobe "$conntrack_module" || die "не удалось загрузить модуль $conntrack_module после установки kmod-пакета"
+        [ -d "$MODULE_DIR/$conntrack_module" ] ||
+            die "после загрузки отсутствует модуль $conntrack_module — наблюдение молчания не заработает"
     fi
 }
 
