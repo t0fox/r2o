@@ -141,7 +141,7 @@ CONTRACTS = {
     "CS-SCHED-TASK-LIFECYCLE": (
         "Scheduler task/worker lifecycle",
         "Слоты, worker permits, reset/done/fail/join, retire, queue wake, guards.",
-        "sched.c: worker/task/queue/guard; Rust R2oDiscoverySearches/Queue/Life; box_injects_rst/rst_guard_wanted/plan_arm_rst_guard — 32 кейса C/Rust PASS и проводка в candidate+sync; sched_quic_progress — 7 кейсов и проводка в QUIC worker; ask_settle — 9 кейсов и проводка в base/full; worker_type — 16 кейсов C/Rust PASS и живой worker_oldest_type из gate; worker_run — live last_measurement_age_s=2; task_budget — 7 кейсов C/Rust PASS и TX-лестница; join_worker — Drop/reap join до отчёта; note_worker_start_failure — счётчик/цель/live-reason; stall_budgets_push — dedup и базовое поле 25 как C; полная матрица T_* не доказана.",
+        "sched.c: worker/task/queue/guard; Rust R2oDiscoverySearches/Queue/Life; box_injects_rst/rst_guard_wanted/plan_arm_rst_guard — 32 кейса C/Rust PASS и проводка в candidate+sync; sched_quic_progress — 7 кейсов и проводка в QUIC worker; ask_settle — 9 кейсов и проводка в base/full; worker_type — 16 кейсов C/Rust PASS и живой worker_oldest_type из gate; worker_run — live last_measurement_age_s=2; task_budget — 7 кейсов C/Rust PASS и TX-лестница; join_worker — Drop/reap join до отчёта; note_worker_start_failure — счётчик/цель/live-reason; box_ensure — 4 строки C/Rust PASS; stall_budgets_push — dedup и базовое поле 25 как C; полная матрица T_* не доказана.",
     ),
     "CS-SCHED-SUSPECT-ADMISSION": (
         "Scheduler suspect admission and refusal",
@@ -382,8 +382,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 209:
-        raise SystemExit(f"expected 209 P rows, got {len(rows)}")
+    if len(rows) != 208:
+        raise SystemExit(f"expected 208 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")

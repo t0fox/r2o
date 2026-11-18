@@ -315,6 +315,20 @@ impl DomainState {
 }
 
 impl Catalog {
+    /// C `box_ensure` (`core/sched.c`): найти коробку по id или создать
+    /// пустую запись с этим id. Новые поля — нули, как `memset` в C;
+    /// вызывающий заполняет created/updated.
+    pub fn r2o_box_ensure(&mut self, id: &str) -> usize {
+        if let Some(index) = self.boxes.iter().position(|record| record.id == id) {
+            return index;
+        }
+        self.boxes.push(BoxRecord {
+            id: id.to_owned(),
+            ..BoxRecord::default()
+        });
+        self.boxes.len() - 1
+    }
+
     /// Combine the local changes made since `base` with a newer persisted snapshot.
     ///
     /// Catalog persistence is intentionally delayed. Family-specific controllers

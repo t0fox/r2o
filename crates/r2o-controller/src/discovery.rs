@@ -1709,13 +1709,12 @@ fn add_confirmed_quic_binding(
     {
         index
     } else {
-        catalog.boxes.push(BoxRecord {
-            id: format!("auto-{plan_id}"),
-            created: now,
-            updated: now,
-            ..BoxRecord::default()
-        });
-        catalog.boxes.len() - 1
+        let index = catalog.r2o_box_ensure(&format!("auto-{plan_id}"));
+        if catalog.boxes[index].created == 0 {
+            catalog.boxes[index].created = now;
+        }
+        catalog.boxes[index].updated = now;
+        index
     };
 
     let box_id = catalog.boxes[box_index].id.clone();

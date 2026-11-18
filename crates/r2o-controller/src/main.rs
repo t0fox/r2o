@@ -52941,6 +52941,31 @@ group_block_proven: false,
 
     #[cfg(unix)]
     #[test]
+    fn d2o_box_ensure_matches_c() {
+        let mut catalog = Catalog::default();
+        let first = catalog.r2o_box_ensure("box-a");
+        let same = catalog.r2o_box_ensure("box-a");
+        let second = catalog.r2o_box_ensure("box-b");
+        let fresh_zero = catalog.boxes[second].created == 0
+            && catalog.boxes[second].updated == 0
+            && catalog.boxes[second].fingerprint.signals.is_empty()
+            && catalog.boxes[second].plans.is_empty()
+            && catalog.boxes[second].bindings.is_empty();
+        let output = format!(
+            "count={}\nsame={}\nids={},{}\nfresh_zero={}\n",
+            catalog.boxes.len(),
+            u8::from(first == same),
+            catalog.boxes[0].id,
+            catalog.boxes[1].id,
+            u8::from(fresh_zero),
+        );
+        if let Ok(path) = std::env::var("R2O_BOX_ENSURE_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn d2o_task_budget_matches_c() {
         let signal = |kind: &str, packets: i32| Signal {
             kind: kind.to_owned(),
