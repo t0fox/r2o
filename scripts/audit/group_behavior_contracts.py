@@ -131,7 +131,7 @@ CONTRACTS = {
     "CN-VOLUME": (
         "Response volume probe",
         "TLS/plain drain, rx volume, bounded connect, path probe.",
-        "volume: 7 P; RX differential 13 кейсов PASS, retry-условие rx_short теперь как C; полный path — нет.",
+        "volume: 6 P; RX differential 13 кейсов PASS, rx_short retry и rx_probe handshake-гейт как C; полный path — нет.",
     ),
     "CN-VOICE": (
         "Voice/STUN discovery",
@@ -382,8 +382,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 214:
-        raise SystemExit(f"expected 214 P rows, got {len(rows)}")
+    if len(rows) != 213:
+        raise SystemExit(f"expected 213 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")

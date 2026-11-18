@@ -2604,6 +2604,10 @@ fn r2o_fetch_rx_probe_needs_repeat(result: &FetchResult) -> bool {
         && !result.complete
         && result.body_bytes < crate::r2o_volume::R2O_VOLUME_MIN_BYTES;
     (result.status == 0 || early_success)
+        // C `rx_probe`: при status==0 повторяем только если TLS-рукопожатие
+        // дошло до уровня HANDSHAKE. `application_verified` здесь не годится:
+        // ранний неполный ответ ещё не application, но рукопожатие уже было.
+        && (result.status != 0 || result.handshake_verified)
         && observation.name_valid
         && matches!(observation.negotiated_tls, Some(0x0303 | 0x0304))
         && !observation.local_limit
@@ -4706,6 +4710,34 @@ mod tests {
             budget_note: None,
             r2o_resources: Vec::new(),
         }
+    }
+
+    #[test]
+    fn rx_probe_повторяет_только_рукопожатие_как_c() {
+        let mut result = response_for_classification(0, R2oFetchHttpOutcome::Neutral, false, false);
+        result.handshake_verified = false;
+        result.r2o_volume_observation.name_valid = true;
+        result.r2o_volume_observation.negotiated_tls = Some(0x0304);
+        assert!(
+            !r2o_fetch_rx_probe_needs_repeat(&result),
+            "status 0 без рукопожатия — transport, C не повторяет"
+        );
+        result.handshake_verified = true;
+        assert!(
+            r2o_fetch_rx_probe_needs_repeat(&result),
+            "status 0 с рукопожатием — C повторяет"
+        );
+
+        let mut early =
+            response_for_classification(200, R2oFetchHttpOutcome::Neutral, false, false);
+        early.body_bytes = 128;
+        early.body_expected = Some(20 * 1024);
+        early.r2o_volume_observation.name_valid = true;
+        early.r2o_volume_observation.negotiated_tls = Some(0x0303);
+        assert!(
+            r2o_fetch_rx_probe_needs_repeat(&early),
+            "ранний неполный 2xx повторяется"
+        );
     }
 
     #[test]
