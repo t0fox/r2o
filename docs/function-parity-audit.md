@@ -94,14 +94,14 @@ production-путь не ставится. Формулировки «теста
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 417 | 131 | 0 | 0 |
+| core-net | 548 | 418 | 130 | 0 | 0 |
 | core-state | 692 | 529 | 163 | 0 | 0 |
 | datapath-core | 400 | 395 | 5 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 148 | 11 | 0 | 0 |
-| **Итого** | **1982** | **1672** | **310** | **0** | **0** |
+| **Итого** | **1982** | **1673** | **309** | **0** | **0** |
 
-Это не оценка паритета: 310 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 309 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -120,7 +120,7 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1672 / P 310**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1673 / P 309**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
@@ -192,7 +192,7 @@ P означает неполное доказательство ветвей, N
 - core-state — CLI-флаги/вывод, PSL/catalog-парсер, crypto HKDF-границы,
   voice-blob, volume resource-retry.
 - `?` (0): не осталось; все строки реестра разобраны и имеют E/P/N.
-- Поведенческая группировка 310 P (25 контрактов, 0 без контракта):
+- Поведенческая группировка 309 P (25 контрактов, 0 без контракта):
   `docs/behavior-contracts/inventory.md` и
   `docs/behavior-contracts/p-contract-map.tsv`. Это не меняет статусы
   реестра и не является заявлением паритета.
@@ -384,12 +384,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 417 | 131 | 0 | 0 |
+| core-net | 548 | 418 | 130 | 0 | 0 |
 | core-state | 692 | 529 | 163 | 0 | 0 |
 | datapath-core | 400 | 395 | 5 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 148 | 11 | 0 | 0 |
-| **Итого** | **1982** | **1672** | **310** | **0** | **0** |
+| **Итого** | **1982** | **1673** | **309** | **0** | **0** |
 
 
 ---
@@ -1355,7 +1355,7 @@ Discord IP Discovery обход: разбор/сборка 20-байтового
 | `d2k_quic_delay_plan` | 205-217 | 13 | план `d2k-plan 1 6\nid 0…\nproto udp quic\ndelay <D2K_QUIC_DELAY_US>\n` | разбор `plan_text.rs:444`, `r2k-core/plan.rs:47/286 REC_DELAY`, `main.rs:3604`, фикстура `main.rs:26066` | **P** | C печатает schema 6/zero id/proto udp quic/`delay %u` (`D2K_QUIC_DELAY_US`, = PACE_SETTLE 15000). В R2O есть разбор/применение `delay` и тестовая фикстура `r2o-plan 1 11 … delay 15000`, но **нет продюсера** delay-плана; ссылка на `r2o_quic_deny.rs:203 r2o_delay` ложная (backoff deny). |
 | `d2k_voice_arm_plan` | 219-239 | 21 | voice-план: header udp voice, payload, poison 1, fake copies, order forward, pace SETTLE_US; decoy/dlen/copies 1..32 | `voice_measure.rs:269 r2o_measured_voice_arm_plan_text` | **E** | **Совпадает:** C проверяет decoy/dlen/copies 1..32; `emit_header_proto("udp voice")`, `payload 1 <hex>`, `poison 1`, `fake payload=1 poison=1 repeats=%u gap_us=0 place=before`, `order forward`, `pace %u`. Rust тот же текст/поля; unit `measured_voice_arm_plan_preserves_payload_copy_count_and_voice_shape`. |
 | `d2k_voice_plan` | 241-243 | 3 | voice-план с `D2K_VOICE_DECOY_REPEATS` (10) | `voice_measure.rs:269`; `voice_discovery.rs:8` (copies=1) | **E** | C-обёртка `d2k_voice_arm_plan(decoy,dlen,10,...)`; Rust `measured_voice_arm_plan_text` принимает copies; `test-controller-udpplan-differential.sh` сравнивает C copies=10 с Rust-текстом (шапка/id нормализуются); unit. |
-| `d2k_quic_question_plan` | 247-266 | 20 | текст плана по вопросу: UDPLEN только increment; пустой вопрос → schema 1/order forward; иначе arm FRAG/SPLIT/TTL/BLOB + arm_plan | `quic_replay.rs` candidates + `r2k-core/src/plan.rs` | **P** | **C-ветви проверены:** q/text/cap; blob_len≤bytes, blob при len, copies 0..255, ttl 0..255, `frag && (split\|\|blob_len)` → -1; UDPLEN требует increment и отсутствие blob/split/ttl/frag/control/benign/copies>1; пустой вопрос → `d2k-plan 1 1 … order forward`; иначе arm original, kind FRAG/SPLIT/TTL/BLOB, frag_kind/survives, ttl/copies/blob, `d2k_quic_arm_plan`. Rust разбор вопроса/кандидаты есть, эмиттер текста отсутствует. |
+| `d2k_quic_question_plan` | 247-266 | 20 | текст плана по вопросу: UDPLEN только increment; пустой вопрос → schema 1/order | `quic_replay.rs:r2o_quic_plan_text_from_state`, candidate plan_text | **E*** | **2026-11-18:** differential `scripts/r2o-quic-question-plan-differential.sh` PASS **23 строки**: тела udplen 100, quicsplit 1, ipfrag 1..4 и quic5×2 TTL3 совпали с C после отбрасывания заголовка/ID. Найдена и исправлена реальная ошибка: directive `ipfrag N` дублировал строку, уже выведенную из kind (парсер мог отвергнуть повторную запись ipfrag). **Ограничение:** пустой вопрос (schema 1/order) в R2O не является планом — базовый вопрос идёт прямым Initial; заголовок схемы (`d2k-plan` 1 X vs `r2o-plan` 1 X) сравнивается без первой строки. |
 
 ## core/udpruntime.c (8 функций)
 

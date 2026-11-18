@@ -784,6 +784,7 @@ pub fn r2o_quic_plan_text_from_state(state: &R2oQuicPlanState<'_>) -> Result<Str
             if line.is_empty()
                 || line == "quicsplit 1"
                 || line.starts_with("udplen ")
+                || (fragment && line.starts_with("ipfrag "))
                 || line.starts_with("order ")
                 || line.starts_with("pace ")
             {
@@ -4643,6 +4644,61 @@ mod tests {
             ));
         }
         if let Some(path) = std::env::var_os("R2O_QUIC_ASKQ_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        print!("{output}");
+    }
+
+    #[test]
+    fn quic_question_plan_matches_c() {
+        fn body(text: &str) -> &str {
+            text.split_once("\nproto udp quic\n")
+                .map(|(_, body)| body)
+                .unwrap_or("")
+        }
+        fn dump(output: &mut String, label: &str, text: Option<&str>) {
+            match text {
+                Some(text) => {
+                    output.push_str(&format!("--{label} rc=0--\n{}", body(text)));
+                }
+                None => output.push_str(&format!("--{label} rc=-1--\n")),
+            }
+        }
+
+        let mut output = String::new();
+        let candidates = super::r2o_quic_discovery_candidates(None, true);
+        let udplen = candidates
+            .iter()
+            .find(|candidate| candidate.kind == super::R2oQuicCandidateKind::UdpLength)
+            .and_then(|candidate| candidate.plan_text.as_deref());
+        let split = candidates
+            .iter()
+            .find(|candidate| candidate.kind == super::R2oQuicCandidateKind::SplitCrypto)
+            .and_then(|candidate| candidate.plan_text.as_deref());
+        dump(&mut output, "udplen", udplen);
+        dump(&mut output, "split", split);
+        for shape in 1..=4_u8 {
+            let directives = format!("ipfrag {shape}\n");
+            let text = super::r2o_quic_plan_text_from_state(&super::R2oQuicPlanState {
+                kind: Some(super::R2oQuicCandidateKind::FragmentShape(shape)),
+                directives: &directives,
+                plan_id: None,
+                udplen: 0,
+                junk: false,
+                non_original: false,
+                frag_survives: true,
+            })
+            .ok();
+            dump(&mut output, &format!("frag{shape}"), text.as_deref());
+        }
+        let fallback = super::r2o_quic_original_fallback_candidates(false, false, false);
+        let ttl = fallback
+            .iter()
+            .find(|candidate| candidate.kind == super::R2oQuicCandidateKind::OriginalTtl(3))
+            .and_then(|candidate| candidate.plan_text.as_deref());
+        dump(&mut output, "ttl3", ttl);
+
+        if let Some(path) = std::env::var_os("R2O_QUIC_QUESTION_PLAN_OUTPUT") {
             std::fs::write(path, &output).unwrap();
         }
         print!("{output}");
