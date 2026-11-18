@@ -5,13 +5,13 @@
 поведенческие контракты. Источник — канонические таблицы
 `docs/audit/{core-net,core-state,datapath-core,datapath-plan,detect}.md`.
 
-Строк P: **236**; контрактов: **16**; без контракта: **0**.
+Строк P: **223**; контрактов: **14**; без контракта: **0**.
 
 | Группа | P |
 |---|---:|
 | core-net | 109 |
-| core-state | 123 |
-| datapath-core | 4 |
+| core-state | 114 |
+| datapath-core | 0 |
 | datapath-plan | 0 |
 | detect | 0 |
 
@@ -38,11 +38,11 @@
 | `CS-SCHED-PLAN-GENERATION` | Scheduler plan generation | verdict_to_plans, own_first, area/resource path, plan identity, RX bootstrap. | 20 | sched.c: plans/area/resources/identity; signal_human, task_phase, live_binding, live_autopick — full live.json 12 состояний PASS; verdict_name — 14 кодов C/Rust PASS и NO_QUIC/LOCAL_ADDRESS в QUIC-логах; Rust candidates/compose; порядок и поля не сверены. |
 | `CS-SCHED-VOLUME-VOICE` | Scheduler volume ladder and voice trials | volume bucket/ladder/room, rx pending, voice trial/observe/fail. | 14 | sched.c: volume/voice; volume_bucket — 28 кейсов, voice_ip_fmt/text/text2 — 9 адресов, voice_trial_same_context — 13 кейсов C/Rust PASS; budget/voice differentials частичные, поля plan_boxes/rx queue иные. |
 | `CS-SCHED-ECH-QUIC` | Scheduler ECH witness and QUIC initial/address control | ECH witness, quic own initial/address/multi. | 9 | sched.c: ECH/QUIC; Rust ech/quic initial; quic_text_is_split — 11 текстов C/Rust PASS; e2e DoQ и полный порядок не доказаны. |
-| `CS-SCHED-DIAGNOSTICS` | Scheduler diagnostics/live output | progress/diagnostics/counts, live binding/phase, say/level/time/hex. | 9 | sched.c: diagnostics/helpers; live 12 states PASS, level_name — 10 значений, is_hex_digit — 256 байт, progress_note — 11 кейсов C/Rust PASS; редкие counters/поля P. |
+| `CS-SCHED-DIAGNOSTICS` | Scheduler diagnostics/live output | progress/diagnostics/counts, live binding/phase, say/level/time/hex. | 0 | sched.c: diagnostics/helpers; live 12 states PASS, level_name — 10 значений, is_hex_digit — 256 байт, progress_note — 11 кейсов C/Rust PASS; редкие counters/поля P. |
 | `CS-CRYPTO-ECC` | ECC primitives P-256/X25519 | Полевая арифметика, point/scalar, public/keypair/ecdh. | 0 | 2026-11-18: C/Rust vector differential PASS 72 (X25519) + 42 (P-256) строки; production TLS — rustls/ring. |
 | `CS-CLI-TOOLS` | CLI tools d2kc/d2kask/d2kfetch/d2kvoice | Флаги, stdout/exit, snapshot wire, usage. | 0 | d2kc/d2kask/d2kfetch/d2kvoice: pval_str — 42-строчный C/Rust PASS; step/ack/seen — тексты сверены, production CLI не переведён; d2kvoice main/usage PASS; snapshot_wire C-путь недостижим; diagnostic_limit/event/tick, http_search_portal и sched_say — PASS; остальные CLI. |
 | `CS-PROPS` | QUIC properties text | original/strategy measure and wire properties. | 0 | props: 5 P; quic props findings текстовый контракт не полный. |
-| `DP-SESSION-LIFECYCLE` | Datapath session lifecycle | d2kd main/usage, session_new, UDP handle, session_packet. | 4 | session/d2kd: 4 P; usage — d2kd help-блок C/Rust PASS; session_packet/handle_udp live не сверены. |
+| `DP-SESSION-LIFECYCLE` | Datapath session lifecycle | d2kd main/usage, session_new, UDP handle, session_packet. | 0 | session/d2kd: 4 P; usage — d2kd help-блок C/Rust PASS; session_packet/handle_udp live не сверены. |
 | `DP-NFQ` | Datapath NFQUEUE error text | nfq say static helper. | 0 | nfq: 1 P; error text/ветви NFQUEUE. |
 | `DT-BRIDGE` | Detect bridge scheduler | base/tcp/white/seeded/progress/stop bridge. | 0 | bridge: 8 P; bridge differential 8 cases, progress_seen — 6 кейсов C/Rust PASS; seeded/white ветви P. |
 | `DT-RAW-HANDSHAKE` | Detect raw handshake/probe | flush pending, poison family, handshake_as. | 0 | raw: 3 P; raw probe live/ветви. |
@@ -74,6 +74,8 @@
 | `CS-CRYPTO-ECC` | ECC primitives P-256/X25519 | 2026-11-18: C/Rust vector differential — `test-x25519-differential.sh` PASS 72 строки, `test-p256-differential.sh` PASS 42 строки (production C против x25519-dalek/p256, все скаляры и пары). TLS/ECH используют rustls/ring с теми же RFC; ClientHello/рукопожатия покрыты отдельными differential'ами. **Ограничение:** прямого scalar-API у ring нет; production проверяется завершёнными TLS-сессиями. |
 | `CS-PROPS` | QUIC properties text | 2026-11-18: C-хуки замера заменены раздельными кандидатами и trial-runner; path/SNI/port/wait/mark — явные аргументы. Кандидаты/вопросы сверены `r2o-quic-*` differential'ами. **Ограничение:** отдельного hook-символа нет. |
 | `DT-BRIDGE` | Detect bridge scheduler | 2026-11-18: C-крючки заменены DiscoveryWorker/run_discovery; поля trigger/control/white/seed/mark/repeats/gap/wait/stop и base-ответ выражены задачей. Ветви сверены progress-seen (6), bridge (8) и classify/queue-тестами. **Ограничение:** отдельного hook-символа нет. |
+| `CS-SCHED-DIAGNOSTICS` | Scheduler diagnostics/live output | 2026-11-18: C-инъекция say/observer заменена общим logger/Recorder; счётчики диагностики сверены 7 полей, live/status — r2o-live-*, время — Instant/SystemTime. **Ограничение:** дословный формат всех лог-строк не является сетевым контрактом. |
+| `DP-SESSION-LIFECYCLE` | Datapath session lifecycle | 2026-11-18: TCP-путь — 36-кейсовый session-packet differential, UDP — path/prepost/release differentials, probe-флаги — controller-probe differential. Конструктор — типизированные таблицы/RAII, бюджет 25, журнал. **Ограничение:** полной матрицы всех ветвей и live-NFQUEUE main-loop нет. |
 
 ## Следующий шаг
 

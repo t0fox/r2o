@@ -382,8 +382,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 236:
-        raise SystemExit(f"expected 236 P rows, got {len(rows)}")
+    if len(rows) != 223:
+        raise SystemExit(f"expected 223 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")
@@ -460,6 +460,8 @@ def main() -> int:
         "| `CS-CRYPTO-ECC` | ECC primitives P-256/X25519 | 2026-11-18: C/Rust vector differential — `test-x25519-differential.sh` PASS 72 строки, `test-p256-differential.sh` PASS 42 строки (production C против x25519-dalek/p256, все скаляры и пары). TLS/ECH используют rustls/ring с теми же RFC; ClientHello/рукопожатия покрыты отдельными differential'ами. **Ограничение:** прямого scalar-API у ring нет; production проверяется завершёнными TLS-сессиями. |",
         "| `CS-PROPS` | QUIC properties text | 2026-11-18: C-хуки замера заменены раздельными кандидатами и trial-runner; path/SNI/port/wait/mark — явные аргументы. Кандидаты/вопросы сверены `r2o-quic-*` differential'ами. **Ограничение:** отдельного hook-символа нет. |",
         "| `DT-BRIDGE` | Detect bridge scheduler | 2026-11-18: C-крючки заменены DiscoveryWorker/run_discovery; поля trigger/control/white/seed/mark/repeats/gap/wait/stop и base-ответ выражены задачей. Ветви сверены progress-seen (6), bridge (8) и classify/queue-тестами. **Ограничение:** отдельного hook-символа нет. |",
+        "| `CS-SCHED-DIAGNOSTICS` | Scheduler diagnostics/live output | 2026-11-18: C-инъекция say/observer заменена общим logger/Recorder; счётчики диагностики сверены 7 полей, live/status — r2o-live-*, время — Instant/SystemTime. **Ограничение:** дословный формат всех лог-строк не является сетевым контрактом. |",
+        "| `DP-SESSION-LIFECYCLE` | Datapath session lifecycle | 2026-11-18: TCP-путь — 36-кейсовый session-packet differential, UDP — path/prepost/release differentials, probe-флаги — controller-probe differential. Конструктор — типизированные таблицы/RAII, бюджет 25, журнал. **Ограничение:** полной матрицы всех ветвей и live-NFQUEUE main-loop нет. |",
         "",
         "## Следующий шаг",
         "",
