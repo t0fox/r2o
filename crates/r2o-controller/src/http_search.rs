@@ -1113,60 +1113,234 @@ pub fn candidate_text(key: &str, id: Option<&[u8; 16]>) -> Option<String> {
     Some(text)
 }
 
-/// Извлечь измеренные варианты только из приманок подтверждённого TLS-плана.
-pub fn measured_poison_keys(text: &str) -> Vec<String> {
-    if !text.lines().any(|line| line == "proto tcp tls") {
-        return Vec::new();
-    }
+/// Сколько спек порчи C принимает с одного плана (`specs[8][64]`).
+pub const D2K_HS_PLAN_POISONS_MAX: usize = 8;
+/// Ёмкость ключа `fake:` в C (`char key[48]`).
+const D2K_HS_POISON_KEY_CAP: usize = 48;
+/// C `poison_seen v[64]` в `hs_measured_poisons`.
+pub const D2K_HS_MEASURED_SEEN_MAX: usize = 64;
 
-    let mut poisons = Vec::new();
-    for line in text.lines() {
-        let Some(rest) = line.strip_prefix("poison ") else {
-            continue;
-        };
-        let Some((id, spec)) = rest.split_once(' ') else {
-            continue;
-        };
-        let Ok(id) = id.parse::<u32>() else {
-            continue;
-        };
-        let spec = spec.trim();
-        if id != 0 && !spec.is_empty() && !poisons.iter().any(|(known, _)| *known == id) {
-            poisons.push((id, spec.to_owned()));
-        }
-    }
+fn c_isspace(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+}
 
-    let mut used = Vec::new();
-    for line in text.lines().filter(|line| line.starts_with("fake ")) {
-        for field in line.split_ascii_whitespace() {
-            let Some(id) = field.strip_prefix("poison=") else {
-                continue;
-            };
-            if let Ok(id) = id.parse::<u32>()
-                && id != 0
-                && !used.contains(&id)
-            {
-                used.push(id);
+/// `sscanf(text, "poison %u %n", &id, &used) == 1 && used != 0`.
+///
+/// Повторяет директивы scanf: ведущие пробелы, литерал `poison`, пробел в
+/// формате (ноль и более), `%u` со знаком, затем пробел перед `%n`, который
+/// съедает и переводы строк — `used` может указывать на следующую строку.
+fn scan_poison_prefix(text: &[u8], start: usize) -> Option<(u32, usize)> {
+    // Литерал `poison` в scanf не пропускает ведущие пробелы: строка с
+    // отступом не совпадает (проверено C-оракулом).
+    let mut cursor = start;
+    if text.get(cursor..)?.starts_with(b"poison") {
+        cursor += "poison".len();
+    } else {
+        return None;
+    }
+    while cursor < text.len() && c_isspace(text[cursor]) {
+        cursor += 1;
+    }
+    let mut negative = false;
+    if cursor < text.len() && (text[cursor] == b'+' || text[cursor] == b'-') {
+        negative = text[cursor] == b'-';
+        cursor += 1;
+    }
+    let digits = cursor;
+    let mut value: u64 = 0;
+    let mut overflow = false;
+    while cursor < text.len() && text[cursor].is_ascii_digit() {
+        let digit = u64::from(text[cursor] - b'0');
+        match value
+            .checked_mul(10)
+            .and_then(|value| value.checked_add(digit))
+        {
+            Some(next) => value = next,
+            None => {
+                overflow = true;
+                value = u64::MAX;
             }
         }
+        cursor += 1;
+    }
+    if cursor == digits {
+        return None;
+    }
+    // glibc: переполнение `%u` даёт ULONG_MAX и всё равно успешную конверсию.
+    let value = if overflow { u64::MAX } else { value };
+    let id = if negative {
+        (0_u64.wrapping_sub(value)) as u32
+    } else {
+        value as u32
+    };
+    while cursor < text.len() && c_isspace(text[cursor]) {
+        cursor += 1;
+    }
+    Some((id, cursor))
+}
+
+/// C `d2k_hs_plan_poisons` (`core/httpsearch.c:608-642`): спеки порчи, на
+/// которые ссылается строка `fake … poison=N`. Побайтовый порт sscanf-цикла,
+/// включая quirk `%n` через перевод строки и `strstr(text, "\nfake ")`.
+pub fn plan_poison_specs(text: &str) -> Vec<String> {
+    const MAX_SPEC: usize = 64;
+    const MAX_FAKE_LINE: usize = 256;
+
+    let bytes = text.as_bytes();
+    let mut specs = Vec::new();
+    if !text.contains("\nproto tcp tls\n") {
+        return specs;
     }
 
-    let mut keys = Vec::new();
-    for (id, spec) in poisons {
-        if !used.contains(&id) {
-            continue;
+    let mut line_start = 0;
+    while line_start < bytes.len() && specs.len() < D2K_HS_PLAN_POISONS_MAX {
+        if let Some((id, used)) = scan_poison_prefix(bytes, line_start) {
+            let spec_start = used;
+            let spec_end = bytes[spec_start..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(bytes.len(), |offset| spec_start + offset);
+            let length = spec_end.saturating_sub(spec_start);
+
+            let reference = format!(" poison={id} ");
+            let mut is_fake = false;
+            let mut search = 0;
+            while let Some(offset) = text
+                .get(search..)
+                .and_then(|rest| rest.find("\nfake ").map(|found| search + found))
+            {
+                let fake_start = offset;
+                let fake_end = bytes[fake_start + 1..]
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .map_or(bytes.len(), |line| fake_start + 1 + line);
+                let line_length = fake_end - fake_start;
+                if line_length < MAX_FAKE_LINE {
+                    let mut line = bytes[fake_start..fake_end].to_vec();
+                    // C: line[fl]=' '; line[fl+1<sizeof line ? fl+1 : fl]='\0'.
+                    if line_length + 1 < MAX_FAKE_LINE {
+                        line.push(b' ');
+                    }
+                    if line
+                        .windows(reference.len())
+                        .any(|window| window == reference.as_bytes())
+                    {
+                        is_fake = true;
+                        break;
+                    }
+                }
+                search = fake_start + 1;
+            }
+
+            if is_fake && length > 0 && length < MAX_SPEC {
+                // C работает с байтами; планы — ASCII/UTF-8 без NUL.
+                specs.push(String::from_utf8_lossy(&bytes[spec_start..spec_end]).into_owned());
+            }
         }
-        let spec = spec.split_ascii_whitespace().collect::<Vec<_>>().join("+");
-        let key = match spec.as_str() {
-            "badsum" => "fake-badsum".to_owned(),
-            "seqshift=-66000" => "fake-seqshift".to_owned(),
-            _ => format!("fake:{spec}"),
-        };
-        if candidate_text(&key, None).is_some() && !keys.contains(&key) {
-            keys.push(key);
+        match bytes[line_start..].iter().position(|byte| *byte == b'\n') {
+            Some(offset) => line_start += offset + 1,
+            None => break,
         }
     }
-    keys
+    specs
+}
+
+/// Состояние C `hs->measured[8][40]` и `d2k_httpsearch_measured_poison`
+/// (`core/httpsearch.c:579-606`): спека → канонический ключ, алиасы, дедуп,
+/// не больше восьми.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct R2oHttpMeasuredPoisons {
+    keys: Vec<String>,
+}
+
+impl R2oHttpMeasuredPoisons {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `true` — C вернул 0 (ключ уже был или добавлен), `false` — отказ.
+    pub fn add(&mut self, spec: &str) -> bool {
+        // C: snprintf(buf, sizeof buf, "%s", spec) — буфер 64 байта.
+        let bytes = spec.as_bytes();
+        let buf = &bytes[..bytes.len().min(63)];
+
+        let mut ttl: Option<&[u8]> = None;
+        let mut seq: Option<&[u8]> = None;
+        let mut bad = false;
+        for token in buf
+            .split(|byte| *byte == b' ' || *byte == b'\t')
+            .filter(|token| !token.is_empty())
+        {
+            if token == b"badsum" {
+                bad = true;
+            } else if token.starts_with(b"ttl=") && token.len() < 16 {
+                ttl = Some(token);
+            } else if token.starts_with(b"seqshift=") && token.len() < 24 {
+                seq = Some(token);
+            } else {
+                return false;
+            }
+        }
+
+        let mut key = b"fake:".to_vec();
+        if let Some(ttl) = ttl {
+            key.extend_from_slice(ttl);
+        }
+        if bad {
+            if key.len() > 5 {
+                key.push(b'+');
+            }
+            key.extend_from_slice(b"badsum");
+        }
+        if let Some(seq) = seq {
+            if key.len() > 5 {
+                key.push(b'+');
+            }
+            key.extend_from_slice(seq);
+        }
+        if key.len() == 5 || key.len() >= D2K_HS_POISON_KEY_CAP {
+            return false;
+        }
+        let Ok(key) = String::from_utf8(key) else {
+            return false;
+        };
+
+        let use_key = match key.as_str() {
+            "fake:badsum" => "fake-badsum".to_owned(),
+            "fake:seqshift=-66000" => "fake-seqshift".to_owned(),
+            _ if known_key(&key) => key,
+            _ => return false,
+        };
+        if self.keys.contains(&use_key) {
+            return true;
+        }
+        if self.keys.len() >= D2K_HS_PLAN_POISONS_MAX {
+            return false;
+        }
+        self.keys.push(use_key);
+        true
+    }
+
+    pub fn keys(&self) -> &[String] {
+        &self.keys
+    }
+
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+}
+
+/// Извлечь измеренные варианты только из приманок подтверждённого TLS-плана.
+pub fn measured_poison_keys(text: &str) -> Vec<String> {
+    let mut measured = R2oHttpMeasuredPoisons::new();
+    for spec in plan_poison_specs(text) {
+        measured.add(&spec);
+    }
+    measured.keys().to_vec()
 }
 
 /// Скомпилировать HTTP-кандидата в точное представление программы плана.
@@ -1612,5 +1786,196 @@ mod candidate_tests {
             candidate_program("fake-badsum"),
             candidate_program("fake:badsum")
         );
+    }
+}
+
+#[cfg(test)]
+mod poison_plan_tests {
+    use super::{R2oHttpMeasuredPoisons, plan_poison_specs};
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    /// C/Rust differential `d2k_hs_plan_poisons` + `measured_poison`
+    /// (`scripts/r2o-http-plan-poisons-differential.sh`).
+    #[test]
+    fn http_plan_poisons_match_c() {
+        let mut output = String::new();
+        fn dump_plan(output: &mut String, label: &str, text: &str) {
+            let specs = plan_poison_specs(text);
+            output.push_str(&format!("plan {label} n={}\n", specs.len()));
+            for spec in &specs {
+                output.push_str(&format!("spec {label} {}\n", hex(spec.as_bytes())));
+            }
+        }
+        fn dump_measured(
+            output: &mut String,
+            label: &str,
+            measured: &R2oHttpMeasuredPoisons,
+            rc: bool,
+        ) {
+            output.push_str(&format!(
+                "add {label} rc={} count={}\n",
+                if rc { 0 } else { -1 },
+                measured.len()
+            ));
+            for key in measured.keys() {
+                output.push_str(&format!("key {label} {}\n", hex(key.as_bytes())));
+            }
+        }
+
+        dump_plan(
+            &mut output,
+            "canonical",
+            "d2k-plan 1 11\nid 00\nproto tcp tls\npoison 1 ttl=64 badsum\npoison 2 seqshift=-66000\nfake payload=1 poison=1 repeats=1 gap_us=0 place=before\n",
+        );
+        dump_plan(
+            &mut output,
+            "both",
+            "d2k-plan 1 11\nid 00\nproto tcp tls\npoison 1 ttl=64 badsum\npoison 2 seqshift=-66000\nfake payload=1 poison=1 poison=2 repeats=1 gap_us=0 place=before\n",
+        );
+        dump_plan(
+            &mut output,
+            "http",
+            "d2k-plan 1 11\nid 00\nproto tcp http\npoison 1 ttl=64 badsum\nfake payload=1 poison=1 repeats=1 gap_us=0 place=before\n",
+        );
+        dump_plan(
+            &mut output,
+            "no-header",
+            "d2k-plan 1 11\nid 00\npoison 1 badsum\nfake payload=1 poison=1 repeats=1 gap_us=0 place=before\n",
+        );
+        dump_plan(
+            &mut output,
+            "no-fake",
+            "d2k-plan 1 11\nid 00\nproto tcp tls\npoison 1 badsum\n",
+        );
+        dump_plan(
+            &mut output,
+            "id-zero",
+            "d2k-plan 1 11\nid 00\nproto tcp tls\npoison 0 badsum\nfake payload=1 poison=0 repeats=1 gap_us=0 place=before\n",
+        );
+        dump_plan(
+            &mut output,
+            "fake-at-start",
+            "fake payload=1 poison=1 repeats=1 gap_us=0 place=before\nd2k-plan 1 11\nid 00\nproto tcp tls\npoison 1 badsum\n",
+        );
+        dump_plan(
+            &mut output,
+            "indented",
+            "d2k-plan 1 11\nid 00\nproto tcp tls\n  poison 1 badsum\nfake payload=1 poison=1 repeats=1 gap_us=0 place=before\n",
+        );
+        dump_plan(
+            &mut output,
+            "poison1",
+            "d2k-plan 1 11\nid 00\nproto tcp tls\npoison1 badsum\nfake payload=1 poison=1 repeats=1 gap_us=0 place=before\n",
+        );
+        dump_plan(
+            &mut output,
+            "no-spec",
+            "d2k-plan 1 11\nid 00\nproto tcp tls\npoison 1\nfake payload=1 poison=1 repeats=1 gap_us=0 place=before\n",
+        );
+        dump_plan(
+            &mut output,
+            "eof-spec",
+            "d2k-plan 1 11\nid 00\nproto tcp tls\nfake payload=1 poison=1 repeats=1 gap_us=0 place=before\npoison 1 badsum",
+        );
+        dump_plan(
+            &mut output,
+            "crlf",
+            "d2k-plan 1 11\r\nid 00\r\nproto tcp tls\r\npoison 1 badsum\r\nfake payload=1 poison=1 repeats=1 gap_us=0 place=before\r\n",
+        );
+        dump_plan(
+            &mut output,
+            "dup-id",
+            "d2k-plan 1 11\nid 00\nproto tcp tls\npoison 1 badsum\npoison 1 seqshift=5\nfake payload=1 poison=1 repeats=1 gap_us=0 place=before\n",
+        );
+        dump_plan(
+            &mut output,
+            "fake-poison11",
+            "d2k-plan 1 11\nid 00\nproto tcp tls\npoison 1 badsum\nfake payload=1 poison=11 repeats=1 gap_us=0 place=before\n",
+        );
+        for (label, length) in [("spec63", 63_usize), ("spec64", 64)] {
+            let spec = "a".repeat(length);
+            dump_plan(
+                &mut output,
+                label,
+                &format!(
+                    "d2k-plan 1 11\nid 00\nproto tcp tls\npoison 1 {spec}\nfake payload=1 poison=1 repeats=1 gap_us=0 place=before\n"
+                ),
+            );
+        }
+        for (label, pad) in [("fake-253", 239_usize), ("fake-254", 240)] {
+            let edge = format!("fake {} poison=1", "a".repeat(pad));
+            dump_plan(
+                &mut output,
+                label,
+                &format!("d2k-plan 1 11\nid 00\nproto tcp tls\npoison 1 badsum\n{edge}\n"),
+            );
+        }
+
+        let specs = [
+            "badsum",
+            "seqshift=-66000",
+            "badsum",
+            "ttl=64 badsum",
+            "badsum ttl=64",
+            "badsum ttl=9",
+            "ttl=64",
+            "ttl=256 badsum",
+            "ttl=0 badsum",
+            "seqshift=0",
+            "seqshift=1",
+            "ttl=5 seqshift=1",
+            "ttl=5 badsum seqshift=1",
+            "seqshift=1 badsum",
+            "tcpts",
+            "badsum badsum",
+            "ttl=1+badsum",
+            "ttl=16+badsum",
+            "ttl=6 badsum",
+            "ttl=7 badsum",
+            "ttl=64 badsum",
+            "ttl=123456789012345 badsum",
+            "",
+            " \t ",
+            "ttl=5\tbadsum",
+            "ttl=5 badsum",
+        ];
+        let mut trunc = b"badsum".to_vec();
+        trunc.resize(66, b' ');
+        trunc.extend_from_slice(b"ttl=9");
+        let trunc = String::from_utf8(trunc).unwrap();
+        let mut measured = R2oHttpMeasuredPoisons::new();
+        for (index, spec) in specs.iter().enumerate() {
+            let rc = measured.add(spec);
+            dump_measured(&mut output, &index.to_string(), &measured, rc);
+            if index == 2 {
+                // 71 байт: C обрезает спеку до 63 и теряет ttl=9.
+                let rc = measured.add(&trunc);
+                dump_measured(&mut output, "trunc63", &measured, rc);
+            }
+        }
+
+        let collected = [
+            (5, "ttl=9 badsum"),
+            (9, "seqshift=-66000"),
+            (7, "badsum"),
+            (3, "tcpts"),
+            (2, "ttl=3"),
+            (1, "ttl=9 badsum"),
+        ];
+        let mut sorted = collected;
+        sorted.sort_by_key(|entry| std::cmp::Reverse(entry.0));
+        let mut sequence = R2oHttpMeasuredPoisons::new();
+        for (_, spec) in sorted {
+            sequence.add(spec);
+        }
+        dump_measured(&mut output, "d2kc", &sequence, true);
+
+        if let Some(path) = std::env::var_os("R2O_HTTP_POISONS_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        print!("{output}");
     }
 }

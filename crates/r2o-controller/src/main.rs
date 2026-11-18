@@ -45,8 +45,7 @@ use r2o_controller::compose_d2o::r2o_plan_tlv_stamp_ident;
 use r2o_controller::domain::normalize;
 use r2o_controller::http_search::{
     R2oHttpPlanRecord, add_candidate, candidate_key_from_plan_text, candidate_keys,
-    candidate_program, candidate_text, http_plan_of, load_http_plans, measured_poison_keys,
-    save_http_plans, stable_id,
+    candidate_program, candidate_text, http_plan_of, load_http_plans, save_http_plans, stable_id,
 };
 use r2o_controller::https_probe::{
     HttpsPortalOutcome, HttpsProbeWorker, target_from_http_response, target_from_portal,
@@ -6702,31 +6701,34 @@ impl HttpSearchRecordCache {
 
 #[cfg(unix)]
 fn measured_http_candidate_keys(catalog: &Catalog) -> Vec<String> {
-    const MAX_MEASURED_CANDIDATES: usize = 8;
+    use r2o_controller::http_search::{
+        D2K_HS_MEASURED_SEEN_MAX, R2oHttpMeasuredPoisons, plan_poison_specs,
+    };
 
-    let mut measured = Vec::new();
-    for box_record in &catalog.boxes {
+    // C `hs_measured_poisons` (`d2kc.c`): собрать спеки подтверждённых
+    // TLS-планов (не больше 64), самые успешные первыми, затем регистрировать
+    // их через `d2k_httpsearch_measured_poison`.
+    let mut seen = Vec::new();
+    'boxes: for box_record in &catalog.boxes {
         for plan in &box_record.plans {
             if plan.proto != "tls" || !plan.enabled || plan.successes <= 0 {
                 continue;
             }
-            for key in measured_poison_keys(&plan.text) {
-                measured.push((plan.successes, key));
+            for spec in plan_poison_specs(&plan.text) {
+                seen.push((plan.successes, spec));
+                if seen.len() == D2K_HS_MEASURED_SEEN_MAX {
+                    break 'boxes;
+                }
             }
         }
     }
-    measured.sort_by_key(|entry| std::cmp::Reverse(entry.0));
+    seen.sort_by_key(|entry| std::cmp::Reverse(entry.0));
 
-    let mut keys = Vec::new();
-    for (_, key) in measured {
-        if !keys.contains(&key) {
-            keys.push(key);
-            if keys.len() == MAX_MEASURED_CANDIDATES {
-                break;
-            }
-        }
+    let mut measured = R2oHttpMeasuredPoisons::new();
+    for (_, spec) in seen {
+        measured.add(&spec);
     }
-    keys
+    measured.keys().to_vec()
 }
 
 #[cfg(unix)]
@@ -53210,6 +53212,35 @@ group_block_proven: false,
         assert_eq!(candidates.len(), 8);
         assert_eq!(candidates[0], "fake:ttl=1+badsum");
         assert!(!candidates.contains(&"fake:ttl=9+badsum".to_owned()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn measured_http_candidates_canonicalize_out_of_order_specs() {
+        use r2o_controller::catalog::Plan as SavedPlan;
+
+        // C `d2k_httpsearch_measured_poison` переставляет признаки в
+        // канонический порядок ttl, badsum, seqshift, поэтому спека из
+        // плана `badsum ttl=64` даёт ключ `fake:ttl=64+badsum`, а не
+        // невалидный `fake:badsum+ttl=64`.
+        let catalog = Catalog {
+            boxes: vec![BoxRecord {
+                plans: vec![SavedPlan {
+                    proto: "tls".into(),
+                    text: "r2o-plan 1 11\nid 01010101010101010101010101010101\nproto tcp tls\npoison 1 badsum ttl=64\nfake payload=1 poison=1 repeats=1 gap_us=0 place=before\n".into(),
+                    enabled: true,
+                    successes: 2,
+                    ..SavedPlan::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+
+        assert_eq!(
+            measured_http_candidate_keys(&catalog),
+            ["fake:ttl=64+badsum"]
+        );
     }
 
     #[cfg(unix)]
