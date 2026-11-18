@@ -4075,7 +4075,7 @@ fn catalog_commands_with_send_cap(
             let stored_shape = if binding.shape == 0 {
                 SHAPE_GRANDFATHER
             } else {
-                binding.shape
+                control::r2k_link_shape_tcp_base(binding.shape)
             };
             if !binding_shape_transport(stored_shape, r2o_catalog_binding_transport(binding)) {
                 skipped += 1;
@@ -41527,6 +41527,44 @@ mod tests {
         }
         assert!(saw_addr);
         assert!(saw_grandfather_name);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_sync_installs_already_stored_tcp_context_shapes() {
+        let catalog = Catalog {
+            boxes: vec![BoxRecord {
+                plans: vec![r2o_controller::catalog::Plan {
+                    id: "plan-test".into(),
+                    text: "r2o-plan 1 11\nproto tcp tls\nsplit sni_middle +0\n".into(),
+                    enabled: true,
+                    ..Default::default()
+                }],
+                bindings: (r2k_core::control::SHAPE_MODERN_NO_TS..=r2k_core::control::SHAPE_ECH_TS)
+                    .map(|shape| Binding {
+                        kind: "name".into(),
+                        target: format!("profile-{shape}.example"),
+                        plan_id: "plan-test".into(),
+                        level: 3,
+                        enabled: true,
+                        transport: 6,
+                        family: 4,
+                        shape,
+                        ..Binding::default()
+                    })
+                    .collect(),
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        let compiled = catalog_commands(&catalog).unwrap();
+        assert_eq!(compiled.skipped, 0);
+        assert_eq!(compiled.commands.len(), 6);
+        for ((_, bytes), binding) in compiled.commands.iter().zip(&catalog.boxes[0].bindings) {
+            let frame = read_frame(&mut std::io::Cursor::new(bytes)).unwrap();
+            assert_eq!(frame.kind, COMMAND_SET_NAME);
+            assert_eq!(frame.body[1 + usize::from(frame.body[0])], binding.shape);
+        }
     }
 
     #[cfg(unix)]
