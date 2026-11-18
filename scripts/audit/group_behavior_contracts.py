@@ -126,7 +126,7 @@ CONTRACTS = {
     "CN-HTTP-SEARCH": (
         "HTTP search lifecycle and candidates",
         "Задачи, кандидаты, judge, fallback, runner, diagnostics, persist.",
-        "httpsearch: 23 P; plan_poisons+measured_poison — 215 строк C/Rust PASS и production-выбор измеренных порч; test-http-search-response PASS 13; diagnostic_end — event JSON PASS; judge_trial — 13 переходов PASS; переходы/таймеры/live — нет.",
+        "httpsearch: 22 P; plan_poisons+measured_poison — 215 строк, лестница build_fallback/вопросов — 37 строк C/Rust PASS и production candidate_ladder; test-http-search-response PASS 13; diagnostic_end — event JSON PASS; judge_trial — 13 переходов PASS; переходы/таймеры/live — нет.",
     ),
     "CN-VOLUME": (
         "Response volume probe",
@@ -382,8 +382,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 320:
-        raise SystemExit(f"expected 320 P rows, got {len(rows)}")
+    if len(rows) != 319:
+        raise SystemExit(f"expected 319 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")

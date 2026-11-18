@@ -5,11 +5,11 @@
 поведенческие контракты. Источник — канонические таблицы
 `docs/audit/{core-net,core-state,datapath-core,datapath-plan,detect}.md`.
 
-Строк P: **320**; контрактов: **25**; без контракта: **0**.
+Строк P: **319**; контрактов: **25**; без контракта: **0**.
 
 | Группа | P |
 |---|---:|
-| core-net | 141 |
+| core-net | 140 |
 | core-state | 163 |
 | datapath-core | 5 |
 | datapath-plan | 0 |
@@ -29,7 +29,7 @@
 | `CN-TLS13-HANDSHAKE` | TLS 1.3 handshake and keys | CH/SH, HKDF traffic keys, Finished, ECH, downgrade. | 7 | tls13/tls13core: 7 P; rustls; C/Rust побайтового handshake/ECH нет. |
 | `CN-TLS-VERIFY` | TLS/HTTP verify and contact | Проверка TLS1.2/1.3/ECH, тела ответа, контакта по family. | 8 | verify.c TLS-часть: 8 P; verify-* differentials частичные. |
 | `CN-QUIC-VERIFY` | QUIC/HTTP3 verify and replay | QUIC probe on/path/mark, replay, H3 headers/chunks, qb request/recv. | 10 | verify.c QUIC-часть + replay: 10 P; нужен e2e DoQ/HTTP3 differential. |
-| `CN-HTTP-SEARCH` | HTTP search lifecycle and candidates | Задачи, кандидаты, judge, fallback, runner, diagnostics, persist. | 23 | httpsearch: 23 P; plan_poisons+measured_poison — 215 строк C/Rust PASS и production-выбор измеренных порч; test-http-search-response PASS 13; diagnostic_end — event JSON PASS; judge_trial — 13 переходов PASS; переходы/таймеры/live — нет. |
+| `CN-HTTP-SEARCH` | HTTP search lifecycle and candidates | Задачи, кандидаты, judge, fallback, runner, diagnostics, persist. | 22 | httpsearch: 22 P; plan_poisons+measured_poison — 215 строк, лестница build_fallback/вопросов — 37 строк C/Rust PASS и production candidate_ladder; test-http-search-response PASS 13; diagnostic_end — event JSON PASS; judge_trial — 13 переходов PASS; переходы/таймеры/live — нет. |
 | `CN-VOLUME` | Response volume probe | TLS/plain drain, rx volume, bounded connect, path probe. | 8 | volume: 8 P; budget volume differentials частичные, полный path — нет. |
 | `CN-VOICE` | Voice/STUN discovery | STUN request, DNS/voice blob, prefix, local failure. | 10 | voice/voice_discovery/stun: 10 P; voice differentials частичные. |
 | `CS-SCHED-TASK-LIFECYCLE` | Scheduler task/worker lifecycle | Слоты, worker permits, reset/done/fail/join, retire, queue wake, guards. | 26 | sched.c: worker/task/queue/guard; Rust R2oDiscoverySearches/Queue/Life; box_injects_rst/rst_guard_wanted/plan_arm_rst_guard — 32 кейса C/Rust PASS и проводка в candidate+sync; sched_quic_progress — 7 кейсов и проводка в QUIC worker; ask_settle — 9 кейсов и проводка в base/full; worker_type — 16 кейсов C/Rust PASS и живой worker_oldest_type из gate; полная матрица T_* не доказана. |

@@ -44,8 +44,8 @@ use r2o_controller::classify_json::result_json_value as classify_result_json_val
 use r2o_controller::compose_d2o::r2o_plan_tlv_stamp_ident;
 use r2o_controller::domain::normalize;
 use r2o_controller::http_search::{
-    R2oHttpPlanRecord, add_candidate, candidate_key_from_plan_text, candidate_keys,
-    candidate_program, candidate_text, http_plan_of, load_http_plans, save_http_plans, stable_id,
+    R2oHttpPlanRecord, candidate_key_from_plan_text, candidate_keys, candidate_program,
+    candidate_text, http_plan_of, load_http_plans, save_http_plans, stable_id,
 };
 use r2o_controller::https_probe::{
     HttpsPortalOutcome, HttpsProbeWorker, target_from_http_response, target_from_portal,
@@ -6798,25 +6798,14 @@ fn http_search_candidates(
     catalog: &Catalog,
     target: &r2o_controller::discovery::DiscoveryTarget,
 ) -> Vec<String> {
+    use r2o_controller::http_search::candidate_ladder;
+
     let measured = measured_http_candidate_keys(catalog);
-    let mut candidates = Vec::new();
-    // C `build_cands`: сначала ключ своей подтверждённой записи.
-    if let Some(key) = http_plan_of(catalog, &target.host, target.family) {
-        add_candidate(&mut candidates, &key);
-    }
-    for key in saved_http_candidate_keys(catalog, target) {
-        add_candidate(&mut candidates, &key);
-    }
-    for key in candidate_keys() {
-        if !measured.is_empty() && *key == "fake-seqshift" {
-            continue;
-        }
-        add_candidate(&mut candidates, key);
-    }
-    for key in measured {
-        add_candidate(&mut candidates, &key);
-    }
-    candidates
+    // C `build_cands`: ключ своей подтверждённой записи, затем подтверждённые
+    // планы других имён; далее вопросы SPLIT/CHECKSUM/PRODUCT и fallback.
+    let own = http_plan_of(catalog, &target.host, target.family);
+    let saved = saved_http_candidate_keys(catalog, target);
+    candidate_ladder(own.as_deref(), &saved, &measured)
 }
 
 #[cfg(unix)]

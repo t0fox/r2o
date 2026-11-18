@@ -1041,6 +1041,46 @@ pub fn add_candidate(candidates: &mut Vec<String>, key: &str) {
     candidates.push(key.to_owned());
 }
 
+/// C `build_fallback` (`core/httpsearch.c:1041-1052`): `split`, `disorder`,
+/// затем измеренные ключи, а без них — заготовки `fake-badsum` и
+/// `fake-seqshift`.
+pub fn build_fallback(measured: &[String]) -> Vec<String> {
+    let mut keys = vec!["split".to_owned(), "disorder".to_owned()];
+    if measured.is_empty() {
+        keys.push("fake-badsum".to_owned());
+        keys.push("fake-seqshift".to_owned());
+    } else {
+        keys.extend(measured.iter().cloned());
+    }
+    keys
+}
+
+/// Полная последовательность C `next_candidate`: OWN/SAVED → HQ_SPLIT →
+/// HQ_CHECKSUM → HQ_PRODUCT → HQ_FALLBACK.
+///
+/// Список плоский, но порядок и дедуп совпадают с обходом вопросов C:
+/// пропуск уже заданного вопроса (`split_no`/`checksum_no`) не меняет
+/// порядок оставшихся, поэтому на старте поиска (флаги нулевые) полный
+/// список — это ровно будущая последовательность зондов.
+pub fn candidate_ladder(own: Option<&str>, saved: &[String], measured: &[String]) -> Vec<String> {
+    let mut candidates = Vec::new();
+    // C `build_cands`: свой ключ первым, затем ключи других записей.
+    if let Some(key) = own {
+        add_candidate(&mut candidates, key);
+    }
+    for key in saved {
+        add_candidate(&mut candidates, key);
+    }
+    // C `next_candidate`: HQ_SPLIT, HQ_CHECKSUM, HQ_PRODUCT.
+    for key in ["split", "fake-badsum-whole", "fake-badsum"] {
+        add_candidate(&mut candidates, key);
+    }
+    for key in build_fallback(measured) {
+        add_candidate(&mut candidates, &key);
+    }
+    candidates
+}
+
 /// C `d2k_httpsearch_plan_of`: подтверждённый HTTP-план host+family.
 pub fn http_plan_of(catalog: &crate::catalog::Catalog, host: &str, family: u8) -> Option<String> {
     for box_record in &catalog.boxes {
@@ -1974,6 +2014,60 @@ mod poison_plan_tests {
         dump_measured(&mut output, "d2kc", &sequence, true);
 
         if let Some(path) = std::env::var_os("R2O_HTTP_POISONS_OUTPUT") {
+            std::fs::write(path, &output).unwrap();
+        }
+        print!("{output}");
+    }
+}
+
+#[cfg(test)]
+mod ladder_tests {
+    use super::candidate_ladder;
+
+    /// C/Rust differential `build_cands`/`build_fallback`/порядок вопросов
+    /// (`scripts/r2o-http-ladder-differential.sh`).
+    #[test]
+    fn http_candidate_ladder_matches_c() {
+        fn dump(output: &mut String, label: &str, candidates: &[String]) {
+            output.push_str(&format!("ladder {label} n={}\n", candidates.len()));
+            for candidate in candidates {
+                output.push_str(&format!("cand {label} {candidate}\n"));
+            }
+        }
+
+        let mut output = String::new();
+        dump(&mut output, "empty", &candidate_ladder(None, &[], &[]));
+        dump(
+            &mut output,
+            "own-only",
+            &candidate_ladder(Some("disorder"), &[], &[]),
+        );
+        let saved = ["disorder".to_owned(), "split".to_owned()];
+        dump(
+            &mut output,
+            "own-saved-revoked",
+            &candidate_ladder(Some("fake:ttl=5+badsum"), &saved, &[]),
+        );
+        let measured = ["fake:ttl=9+badsum".to_owned(), "fake-seqshift".to_owned()];
+        dump(
+            &mut output,
+            "measured",
+            &candidate_ladder(None, &[], &measured),
+        );
+        let alias = ["fake-badsum".to_owned()];
+        dump(
+            &mut output,
+            "measured-alias",
+            &candidate_ladder(None, &[], &alias),
+        );
+        let dedupe = ["disorder".to_owned(), "fake-badsum-whole".to_owned()];
+        dump(
+            &mut output,
+            "own-saved-dedupe",
+            &candidate_ladder(Some("split"), &dedupe, &[]),
+        );
+
+        if let Some(path) = std::env::var_os("R2O_HTTP_LADDER_OUTPUT") {
             std::fs::write(path, &output).unwrap();
         }
         print!("{output}");
