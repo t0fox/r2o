@@ -94,14 +94,14 @@ production-путь не ставится. Формулировки «теста
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 420 | 128 | 0 | 0 |
+| core-net | 548 | 421 | 127 | 0 | 0 |
 | core-state | 692 | 529 | 163 | 0 | 0 |
 | datapath-core | 400 | 395 | 5 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 148 | 11 | 0 | 0 |
-| **Итого** | **1982** | **1675** | **307** | **0** | **0** |
+| **Итого** | **1982** | **1676** | **306** | **0** | **0** |
 
-Это не оценка паритета: 307 P означают «код есть, доказательство ветвей
+Это не оценка паритета: 306 P означают «код есть, доказательство ветвей
 неполное»; N больше нет. `SET_HTTPS` TTL закрыт 2026-11-12 и в список
 открытых расхождений больше не входит.
 
@@ -120,7 +120,7 @@ differential/writer-тестом, `d2k_httpsearch_diagnostic_counts` пониж�
 (`AGENT_REPORT-qa-final7.md`) на срезе `5193fa9` подтвердил **E 1501 / P 481**
 (948 обычных E, 553 E\*). После устранения замечаний QA (arm production,
 measure-mark, понижение `sweep_poisons`, `d2k_run_properties_family`,
-`d2k_f6_*`) текущий счёт — **E 1675 / P 307**; 4 обычных E и часть E\*
+`d2k_f6_*`) текущий счёт — **E 1676 / P 306**; 4 обычных E и часть E\*
 имеют явные ограничения. `ct_probe` live-differential после prebuild/окна
 conntrack проходит дважды подряд (6/6).
 
@@ -192,7 +192,7 @@ P означает неполное доказательство ветвей, N
 - core-state — CLI-флаги/вывод, PSL/catalog-парсер, crypto HKDF-границы,
   voice-blob, volume resource-retry.
 - `?` (0): не осталось; все строки реестра разобраны и имеют E/P/N.
-- Поведенческая группировка 307 P (24 контракта, 0 без контракта):
+- Поведенческая группировка 306 P (24 контракта, 0 без контракта):
   `docs/behavior-contracts/inventory.md` и
   `docs/behavior-contracts/p-contract-map.tsv`. Это не меняет статусы
   реестра и не является заявлением паритета.
@@ -384,12 +384,12 @@ P означает неполное доказательство ветвей, N
 
 | Группа | Функций | E | P | N | ? |
 |---|---:|---:|---:|---:|---:|
-| core-net | 548 | 420 | 128 | 0 | 0 |
+| core-net | 548 | 421 | 127 | 0 | 0 |
 | core-state | 692 | 529 | 163 | 0 | 0 |
 | datapath-core | 400 | 395 | 5 | 0 | 0 |
 | datapath-plan | 183 | 183 | 0 | 0 | 0 |
 | detect | 159 | 148 | 11 | 0 | 0 |
-| **Итого** | **1982** | **1675** | **307** | **0** | **0** |
+| **Итого** | **1982** | **1676** | **306** | **0** | **0** |
 
 
 ---
@@ -682,7 +682,7 @@ C-реализация TLS 1.3 клиента (X25519, HKDF-SHA256, AES-128-GCM)
 | `budget_tcp` | 1146-1213 | 68 | бюджет TCP: `need=budget*2`; PASSED при pk≥need; NOT_APPLICABLE при счётчике<0, conn_close, pk не растёт; повтор GET; CUT при молчании; иначе NOT_APPLICABLE | `fetch.rs` `r2o_measure_http_packet_budget` | **E*** | C: need=budget*2 (25→50), pk<0/conn_close/не растёт → NotApplicable, pk≥need → Passed, повтор запроса с `read_status_rd`; ошибка чтения: eof/peer_spoke → поток закрыт, local_limit/не-молчание → не измерен, молчание по сроку → Cut; тексты `budget_say`. Rust те же ветви/порядок, `need` = `R2O_VOLUME_TX_LADDER_PACKET_BUDGET=50` = 2×25; заметки `r2o_budget_*_note`; тесты `budget_say_notes_match_c`, `tx_packet_budget_repeats_complete_gets_on_the_same_tls_connection`. **Ограничение:** C poll/peer_spoke и допуск ±20 мс не воспроизведены — Rust отличает EOF/тайм-аут по read. |
 | `fd_peer_spoke` | 1217-1222 | 6 | сервер закрыл/сбросил поток после неудачи чтения | `fetch.rs` `r2o_fd_peer_spoke` | **E*** | C: `poll(fd,POLLIN,0)>0 && revents&(POLLIN|POLLHUP|POLLERR)`. Rust `r2o_fd_peer_spoke` тот же poll; тесты `fd_peer_spoke_and_packets_match_c` (пустой/с данными UnixStream) и `счётчики_tcp_info_содержат_принятые_байты_и_пакеты` (после FIN true). **Ограничение:** production-цикл различает EOF/тайм-аут без poll. |
 | `fd_packets` | 1223-1223 | 1 | пакеты с данными обеих сторон через hook | `fetch.rs` `r2o_fd_packets` | E | C `d2k_verify_packets_hook(fd)`, -1 если TCP_INFO недоступен. Rust `r2o_fd_packets(fd)` читает `libc::tcp_info` через общий `r2o_tcp_info_data_packets` (in+out) и отдаёт -1 при ошибке; тесты `fd_peer_spoke_and_packets_match_c` (не-TCP → -1), `счётчики_tcp_info_содержат_принятые_байты_и_пакеты` (TCP ≥2). |
-| `request_complete_page` | 1238-1245 | 8 | прочитать страницу без проверки бюджета | `fetch.rs` (страница с бюджетом/без) | **P** | C-обёртка `request_page_budget(...,NULL,0,...)`: тот же разбор, но без `budget_io`/`budget`. Rust fetch читает страницу с бюджетом и без через параметры запроса; отдельной обёртки нет. |
+| `request_complete_page` | 1238-1245 | 8 | прочитать страницу без проверки бюджета | `fetch.rs:r2o_request_page_budget_from_state` с `budget: None` | **E*** | **2026-11-18:** обёртка C делегирует `request_page_budget(..., NULL, 0, ...)`; Rust та же production-функция с `budget: None`. Differential `test-request-page-budget-oracle.sh` расширен 4 no-budget кейсами (complete-2xx/short-body/challenge/denied-451) — PASS **13 кейсов**, поля level/status/complete/budget/location/reason совпали. **Ограничение:** отдельной Rust-обёртки нет — режим задаётся `None`. |
 | `request_page_budget` | 1247-1343 | 97 | Gateway shortcut; GET с Host/UA/Accept/Encoding/keep-alive; до 3 same-origin redirect; challenge/blocked/denied; 3xx same-origin/external complete; 2xx complete body; budget_tcp | `fetch.rs` page request/budget | **E*** | **2026-11-15 production builder:** `fetch.rs::r2o_request_page_budget_from_state` (чистый builder) и `R2oBudgetTcpState::r2o_step` используются в production `r2o_measure_http_packet_budget`. C oracle `test-request-page-budget-oracle.sh` PASS **9/9** против current `7a5fab9`: same-origin/external redirect, challenge, denied-451, complete-2xx, short-body, keepalive-pass, conn-close, silence — level/status/complete/budget/location/reason байт-в-байт. Ограничение: живой HTTP-портал/DPI не проверялся. |
 | `verify_contact` | 1349-1363 | 15 | при mark: bind (если fd<0), SO_MARK, иначе -2; затем `d2k_props_contact_on_family_tcp_profile` с пустым hello, family, TCPTS, local addr/port | `d2k_props_contact_on_family_tcp_profile` | **P** | C: `mark` → bind family/`mark_hook`; `d2k_props_contact...`; ошибки -2/-1. Rust `r2o_props_contact`/fetch connection с mark; отдельной функции с теми же кодами нет. |
 | `d2k_props_contact_on_family_tcp_profile` | 1360-1361 | 2 | TCP-contact с `g_verify_tcp_timestamps` | fetch connect (mark/TCP options) | **P*** | C вызывает contact с `g_verify_tcp_timestamps` (thread-local). Rust connect с mark/TCP-опциями выполняет fetch; параметр `tcp_timestamps` и sysctl-переключение не портированы. |

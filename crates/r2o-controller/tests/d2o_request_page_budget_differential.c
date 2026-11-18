@@ -89,6 +89,30 @@ static void run_case(const char *name, const char **parts, const size_t *lengths
            (int)result.budget, result.location, result.reason);
 }
 
+static void run_case_no_budget(const char *name, const char **parts,
+                               const size_t *lengths, int count, int timeout,
+                               int eof, int peer_spoke)
+{
+    (void)peer_spoke;
+    mock_stream stream;
+    memset(&stream, 0, sizeof stream);
+    stream.count = count;
+    for (int i = 0; i < count; i++) {
+        stream.parts[i] = parts[i];
+        stream.lengths[i] = lengths[i];
+    }
+    stream.timeout = timeout;
+    stream.eof = eof;
+    d2k_ver_result result;
+    char err[160] = "";
+    memset(&result, 0, sizeof result);
+    request_complete_page(mock_read, mock_write, &stream, "budget.example", 0, "/",
+                          80, 0, &result, err, sizeof err);
+    printf("request|%s|level=%d|status=%d|complete=%d|budget=%d|location=%s|reason=%s\n",
+           name, (int)result.level, result.status, result.body_complete,
+           (int)result.budget, result.location, result.reason);
+}
+
 int main(void)
 {
     static const char ok[] =
@@ -149,6 +173,26 @@ int main(void)
         const char *parts[] = {short_body};
         size_t lengths[] = {sizeof short_body - 1};
         run_case("silence", parts, lengths, 1, 3, 2, 2, 1, 0, 0);
+    }
+    {
+        const char *parts[] = {ok};
+        size_t lengths[] = {sizeof ok - 1};
+        run_case_no_budget("no-budget-complete-2xx", parts, lengths, 1, 0, 0, 0);
+    }
+    {
+        const char *parts[] = {short_body};
+        size_t lengths[] = {sizeof short_body - 1};
+        run_case_no_budget("no-budget-short-body", parts, lengths, 1, 0, 1, 0);
+    }
+    {
+        const char *parts[] = {challenge};
+        size_t lengths[] = {sizeof challenge - 1};
+        run_case_no_budget("no-budget-challenge", parts, lengths, 1, 0, 0, 0);
+    }
+    {
+        const char *parts[] = {denied};
+        size_t lengths[] = {sizeof denied - 1};
+        run_case_no_budget("no-budget-denied-451", parts, lengths, 1, 0, 0, 0);
     }
     return 0;
 }

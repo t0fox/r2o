@@ -7518,6 +7518,22 @@ mod tests {
             "HTTP read timeout",
         );
         emit("silence", &silence, Some("/"), None, &mut output);
+        emit("no-budget-complete-2xx", &ok, Some("/"), None, &mut output);
+        emit("no-budget-short-body", &short, Some("/"), None, &mut output);
+        emit(
+            "no-budget-challenge",
+            &challenge,
+            Some("/"),
+            None,
+            &mut output,
+        );
+        emit(
+            "no-budget-denied-451",
+            &denied,
+            Some("/"),
+            None,
+            &mut output,
+        );
         assert_eq!(R2oRequestPageLevel::Application as u8, 3);
         if let Ok(path) = std::env::var("R2O_REQUEST_PAGE_BUDGET_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();

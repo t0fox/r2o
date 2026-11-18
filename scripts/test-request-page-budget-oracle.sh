@@ -55,5 +55,5 @@ diff -u "$TEMP/c.out" "$TEMP/rust.out"
     -p r2o-controller --lib budget_repeats_reuse_the_actual_redirected_request_like_c \
     -- --exact >"$TEMP/rust-keepalive.log" 2>&1
 
-printf 'PASS: C request_page_budget oracle and Rust production builder match (9 cases, D2O %s)\n' \
+printf 'PASS: C request_page_budget oracle and Rust production builder match (13 cases, D2O %s)\n' \
     "$ACTUAL_D2O_SHA"
