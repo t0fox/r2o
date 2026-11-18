@@ -37740,11 +37740,10 @@ mod tests {
         r2o_discovery_failure_retry_due, r2o_ech_direct_config_usable,
         r2o_family_applied_flow_matches, r2o_family_recovery_decision,
         r2o_handle_client_shape_event, r2o_handle_client_shape_event_with_catalog,
-        r2o_http_failed_disposition, r2o_http_live_cut_recheck,
-        r2o_plan_wire_shape, r2o_quic_binding_blocks_retry, r2o_stall_budgets_changed,
-        r2o_tcp_stall_budgets, r2o_tcp_stall_budgets_for_name, r2o_tcp_stall_in_name_band,
-        r2o_voice_proof_matches_target, r2o_voice_suspect_frame_is_udp, save_plan_file,
-        shape_matches_plan,
+        r2o_http_failed_disposition, r2o_http_live_cut_recheck, r2o_plan_wire_shape,
+        r2o_quic_binding_blocks_retry, r2o_stall_budgets_changed, r2o_tcp_stall_budgets,
+        r2o_tcp_stall_budgets_for_name, r2o_tcp_stall_in_name_band, r2o_voice_proof_matches_target,
+        r2o_voice_suspect_frame_is_udp, save_plan_file, shape_matches_plan,
     };
     use r2k_core::control::{
         Ack, BindingContext, COMMAND_DEL_NAME_PROBE, COMMAND_DEL_VOICE_ADDR_PROBE,
