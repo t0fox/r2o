@@ -2379,8 +2379,7 @@ mod app {
                         // временный план: удерживать их в ожидании другого
                         // плана нельзя — иначе собственный замер ждёт
                         // собственный пакет и база перестаёт воспроизводиться.
-                        let allow_tls = options.mode == RuntimeMode::Apply
-                            && !controller_probe
+                        let allow_tls = r2o_inline_hold_allowed(options.mode, controller_probe)
                             && (is_tls_plan(&plan)
                                 || family.is_some_and(|family| match tls_host.as_deref() {
                                     Some(host) => name_plans.has_tls_candidate_target(
@@ -2400,8 +2399,7 @@ mod app {
                         } else {
                             0
                         };
-                        let allow_http = options.mode == RuntimeMode::Apply
-                            && !controller_probe
+                        let allow_http = r2o_inline_hold_allowed(options.mode, controller_probe)
                             && family.is_some_and(|family| {
                                 name_plans.has_http_candidate(family, http_source_port)
                             });
@@ -5225,6 +5223,12 @@ mod app {
         probe_mark != 0 && mark == Some(probe_mark)
     }
 
+    /// Удерживать ли пакет в ожидании плана. Пробы контроллера уже несут
+    /// временный план: удержание заставило бы замер ждать собственный пакет.
+    fn r2o_inline_hold_allowed(mode: RuntimeMode, controller_probe: bool) -> bool {
+        mode == RuntimeMode::Apply && !controller_probe
+    }
+
     fn r2o_packet_route_skip(
         gate: &mut R2oRouteGate,
         flows: &mut R2oRoutedFlows,
@@ -8036,6 +8040,22 @@ mod app {
             packet[42..44].copy_from_slice(&destination_port.to_be_bytes());
             packet[44..46].copy_from_slice(&8_u16.to_be_bytes());
             packet
+        }
+
+        #[test]
+        fn controller_probes_are_never_held_waiting_for_a_plan() {
+            assert!(!super::r2o_inline_hold_allowed(
+                super::RuntimeMode::Apply,
+                true
+            ));
+            assert!(super::r2o_inline_hold_allowed(
+                super::RuntimeMode::Apply,
+                false
+            ));
+            assert!(!super::r2o_inline_hold_allowed(
+                super::RuntimeMode::Observe,
+                false
+            ));
         }
 
         #[test]

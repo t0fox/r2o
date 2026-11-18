@@ -138,7 +138,15 @@ pub fn r2o_measurement_worker_cap(_cores: Option<usize>, _total_memory_kb: Optio
 }
 
 pub fn r2o_system_measurement_worker_cap() -> usize {
-    r2o_measurement_worker_cap(None, None)
+    // D2O допускает до 64 одновременных замеров, но на 2-ядерном роутере
+    // каждый замер — это TLS/HTTP-клиент, discovery и события датапата.
+    // Ограничиваем предел числом ядер: AIMD всё равно начинает с двух и
+    // растёт только при запасе CPU, а этот потолок не даёт ему уйти в
+    // перегрузку на слабых устройствах.
+    let cores = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1);
+    cores.clamp(1, R2O_MAX_MEASUREMENT_WORKERS)
 }
 
 struct R2oAdaptiveLimit {
