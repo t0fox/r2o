@@ -2374,7 +2374,8 @@
         tag(doc, str(p.proto).toUpperCase() || "—"),
         el(doc, "span", "plan-gist", str(p.human) || planGist(p.text) || str(p.id)),
         el(doc, "span", "plan-wins", count(num(p.successes) || 0, "успех", "успеха", "успехов")));
-      var pre = el(doc, "pre", "", (p.id ? "# " + p.id + (p.enabled === false ? " (выключен)" : "") + "\n" : "") + str(p.text));
+      var planText = str(p.text).replace(/d2k-plan/g, "r2o-plan");
+      var pre = el(doc, "pre", "", (p.id ? "# " + p.id + (p.enabled === false ? " (выключен)" : "") + "\n" : "") + planText);
       pre.tabIndex = 0;
       pre.setAttribute("aria-label", "Текст плана " + (str(p.id) || String(pi + 1)));
       add(d, sum, pre);

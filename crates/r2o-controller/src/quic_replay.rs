@@ -714,17 +714,19 @@ fn r2o_quic_plan_id<'a>(state: &'a R2oQuicPlanState<'a>) -> &'a str {
 }
 
 /// C `emit_header_proto` (`core/udpplan.c:28-34`): шапка
-/// `d2k-plan 1 <schema>`, id ровно 32 символа, `proto <proto>`.
+/// `r2o-plan 1 <schema>`, id ровно 32 символа, `proto <proto>`.
+/// Бренд R2O — осознанное отличие от C; парсер `plan_text` принимает оба
+/// заголовка, а C/Rust differential нормализует бренд перед сравнением.
 /// C `%.32s` обрезает id; Rust делает то же по ASCII-границе.
 pub fn r2o_plan_header(schema: u8, plan_id: &str, proto: &str) -> String {
     let plan_id = plan_id.get(..32).unwrap_or(plan_id);
-    format!("d2k-plan 1 {schema}\nid {plan_id}\nproto {proto}\n")
+    format!("r2o-plan 1 {schema}\nid {plan_id}\nproto {proto}\n")
 }
 
 /// C `quic_split_plan_text` (`core/udpplan.c:59-64`): фиксированный план
 /// разреза CRYPTO, schema 10.
 pub fn r2o_quic_split_plan_text() -> String {
-    "d2k-plan 1 10\nid 00000000000000000000000000000000\nproto udp quic\nquicsplit 1\norder forward\n"
+    "r2o-plan 1 10\nid 00000000000000000000000000000000\nproto udp quic\nquicsplit 1\norder forward\n"
         .to_string()
 }
 
@@ -1815,6 +1817,13 @@ mod tests {
         let mut output = String::new();
         for (label, proto) in cases {
             let text = super::r2o_plan_header(1, &zero_id, proto);
+            assert!(
+                text.starts_with("r2o-plan 1 "),
+                "production-заголовок должен быть бренда R2O"
+            );
+            // C-оракул печатает `d2k-plan`; сравниваем структуру после
+            // нормализации бренда, как в остальных differential'ах.
+            let text = text.replacen("r2o-plan", "d2k-plan", 1);
             let hex: String = text.bytes().map(|byte| format!("{byte:02x}")).collect();
             output.push_str(&format!("{label} 0 {} {hex}\n", text.len()));
         }
@@ -3277,7 +3286,7 @@ mod tests {
             frag_survives: true,
         })
         .unwrap();
-        assert!(text.starts_with("d2k-plan 1 10\n"));
+        assert!(text.starts_with("r2o-plan 1 10\n"));
         assert_eq!(text.matches("quicsplit 1").count(), 1);
         let plan = Plan::parse(&crate::plan_text::compile_text(&text).unwrap()).unwrap();
         assert_eq!(plan.minexec, 10);
