@@ -987,7 +987,7 @@
       metrics.__r2oKey = metricKey;
       metrics.replaceChildren();
       var measureValue = activeMeasures !== null && limitMeasures !== null ? activeMeasures + " / " + limitMeasures : "—";
-      var measureNote = freePct !== null ? "свободно CPU " + freePct + "%" : "лимит не указан";
+      var measureNote = freePct !== null ? "CPU роутера свободен на " + freePct + "%" : "CPU роутера не измерен";
       var items = [
         { route: "now", label: "Поиски", value: String(m.hunting), note: m.queued.length ? "в очереди " + m.queued.length : "очередь пуста", tone: m.hunting ? "live" : "" },
         { route: "now", label: "Замеры", value: measureValue, note: measureNote, tone: "" },

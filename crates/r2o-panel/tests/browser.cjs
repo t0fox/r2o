@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { once } = require("node:events");
 const fs = require("node:fs");
 const net = require("node:net");
 const os = require("node:os");
@@ -384,6 +385,7 @@ async function main() {
   assert.equal(await evaluate("document.fonts.check('400 16px \\\"IBM Plex Mono\\\"')"), true, "локальный IBM Plex Mono загружен");
   assert.equal(await evaluate("document.querySelectorAll('script:not([src])').length"), 0, "встроенные скрипты макета не исполняются");
   await waitFor(() => evaluate("document.querySelector('#now-title').textContent !== 'Получаем состояние…'"), "состояние из /api/status");
+  assert.equal(await evaluate("document.querySelector('#overview-metrics').textContent.includes('CPU роутера свободен на 96%')"), true, "сводка показывает свободный CPU всего роутера");
   await waitFor(() => evaluate("document.querySelector('.bindings tr[data-enabled] .t')?.textContent === 'Голос Discord'"), "голосовая привязка в коробке");
   assert.equal(await evaluate("document.querySelectorAll('.bindings .proof-note').length"), 0, "голосовая привязка не добавляет заметку о RTP, которой нет в d2o");
   assert.equal(await evaluate("document.querySelector('.search-plan') === null && document.querySelector('.search-plan-result') === null"), true, "карточка Discovery показывает тот же набор статусов, что и d2o");
@@ -467,9 +469,13 @@ main()
     console.error(error.stack || error);
     process.exitCode = 1;
   })
-  .finally(() => {
+  .finally(async () => {
     socket?.close();
-    chrome?.kill("SIGTERM");
-    panel?.kill("SIGTERM");
+    for (const child of [chrome, panel]) {
+      if (!child?.pid || child.exitCode !== null || child.signalCode !== null) continue;
+      const exited = once(child, "exit");
+      child.kill("SIGTERM");
+      await exited;
+    }
     fs.rmSync(work, { recursive: true, force: true });
   });

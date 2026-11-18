@@ -582,6 +582,7 @@ impl R2oMeasurementGate {
         if self.shared.minimum_start_gap.is_none() {
             return;
         }
+        self.r2o_refresh_if_due();
         let mut state = self
             .shared
             .state
@@ -1211,6 +1212,17 @@ mod tests {
             gate.shared.minimum_start_gap,
             Some(Duration::from_millis(250))
         );
+    }
+
+    #[test]
+    fn scheduler_tick_samples_resources_without_measurement_jobs() {
+        let gate = R2oMeasurementGate::r2o_with_start_gap(2);
+        let before = gate.r2o_live_snapshot();
+        assert_eq!(before.resource_sequence, 0);
+        gate.r2o_scheduler_tick();
+        let after = gate.r2o_live_snapshot();
+        assert_eq!(after.resource_sequence, 1);
+        assert_eq!((after.active, after.queued), (0, 0));
     }
 
     #[test]

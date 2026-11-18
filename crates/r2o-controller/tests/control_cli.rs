@@ -195,7 +195,9 @@ fn version_reports_control_protocol_and_release_id() {
 }
 
 #[test]
-fn watch_reports_a_tls_hello_event_and_exits_cleanly_when_datapath_closes() {
+fn watch_reports_a_tls_hello_and_consumes_tcp_exchange_before_datapath_closes() {
+    use r2k_core::control::{EVENT_R2O_TCP_EXCHANGE, R2oTcpExchangeEvent};
+
     let work = temporary_directory();
     fs::create_dir(&work).unwrap();
     let socket_path = work.join("control.sock");
@@ -233,14 +235,40 @@ fn watch_reports_a_tls_hello_event_and_exits_cleanly_when_datapath_closes() {
         hello.extend_from_slice(b"example.test");
         hello.push(1);
         stream.write_all(&frame(0x0001, &hello)).unwrap();
+        let exchange = R2oTcpExchangeEvent {
+            key: hello[..KEY_LEN].try_into().unwrap(),
+            first_record_type: 22,
+            bytes_after_client_hello: 256,
+            record_types: 4,
+            server_hello: true,
+            planned: false,
+        };
+        stream
+            .write_all(&frame(
+                EVENT_R2O_TCP_EXCHANGE,
+                &exchange.event_body().unwrap(),
+            ))
+            .unwrap();
         Ok(())
     });
 
-    let output = Command::new(env!("CARGO_BIN_EXE_r2o-controller"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_r2o-controller"))
         .args(["--watch", socket_path.to_str().unwrap()])
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .unwrap();
     let server_result = server.join().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("контроллер не завершился после TCP-обмена и закрытия датапата");
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    let output = child.wait_with_output().unwrap();
     assert!(
         output.status.success(),
         "r2o-controller watch failed: {}",
