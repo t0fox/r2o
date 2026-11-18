@@ -14327,6 +14327,9 @@ struct DiscoveryWorker {
     worker_live: Arc<AtomicUsize>,
     /// C `s->last_measurement_done_ms`: срок последнего завершённого замера.
     last_measurement_done_at: Option<std::time::Instant>,
+    /// C `last_local_error_target`/`last_local_error_suspect`: последняя
+    /// неудача запуска worker'а для цели и номер события подозрения.
+    local_error: Option<(String, u64)>,
     active: HashMap<R2oDiscoveryTaskKey, r2o_controller::discovery::DiscoveryTarget>,
     completed: HashSet<R2oDiscoveryTaskKey>,
     completed_started_at: HashMap<R2oDiscoveryTaskKey, std::time::Instant>,
@@ -17777,6 +17780,7 @@ group_block_proven: false,
             worker_target,
             worker_live,
             last_measurement_done_at: None,
+            local_error: None,
             active: HashMap::new(),
             completed: HashSet::new(),
             completed_started_at: HashMap::new(),
@@ -17834,9 +17838,25 @@ group_block_proven: false,
             .min(self.measurement_gate.r2o_discovery_thread_budget());
         while self.worker_live.load(Ordering::Acquire) < desired {
             match (self.spawn_worker)() {
-                Ok(thread) => self.threads.push(thread),
+                Ok(thread) => {
+                    self.local_error = None;
+                    self.threads.push(thread);
+                }
                 Err(error) => {
                     R2O_DISCOVERY_WORKERS_START_FAILURES.fetch_add(1, Ordering::Relaxed);
+                    let local_error = {
+                        let searches = self
+                            .searches
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        searches
+                            .last_suspect
+                            .as_ref()
+                            .map(|target| (target.host.clone(), searches.suspect_events))
+                    };
+                    if local_error.is_some() {
+                        self.local_error = local_error;
+                    }
                     eprintln!("Discovery worker не запустился: {error}");
                     break;
                 }
@@ -17891,6 +17911,10 @@ group_block_proven: false,
             reason = "нет событий отказа от datapath";
         } else if target.is_none() {
             reason = "нет имени цели для нового замера";
+        } else if self.local_error.as_ref().is_some_and(|(host, events)| {
+            *events == searches.suspect_events && target.is_some_and(|target| target.host == *host)
+        }) {
+            reason = "локальная ошибка: рабочий поток не запустился";
         } else if let Some(target) = target {
             let task_key = r2o_discovery_task_key(target);
             if self.active.contains_key(&task_key) {
@@ -33861,12 +33885,30 @@ mod tests {
             family: 4,
             shape: SHAPE_MODERN,
         };
+        {
+            let mut searches = worker
+                .searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            searches.datapath_events = 1;
+            searches.suspect_events = 1;
+        }
         let _ = worker.queue_with_planned(target, false);
         let after =
             super::R2O_DISCOVERY_WORKERS_START_FAILURES.load(std::sync::atomic::Ordering::Relaxed);
         assert!(
             after > before,
             "неудачный spawn обязан попасть в worker_start_failures"
+        );
+        assert_eq!(
+            worker.local_error.as_ref().map(|(host, _)| host.as_str()),
+            Some("spawn-failure.example"),
+            "C note_worker_start_failure запоминает имя цели"
+        );
+        let status = worker.r2o_live_status(&Catalog::default(), std::time::Instant::now(), false);
+        assert_eq!(
+            status.autopick["reason"],
+            "локальная ошибка: рабочий поток не запустился"
         );
     }
 
@@ -42477,6 +42519,7 @@ mod tests {
             worker_target: 0,
             worker_live: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             last_measurement_done_at: None,
+            local_error: None,
             active: std::collections::HashMap::new(),
             completed: std::collections::HashSet::new(),
             completed_started_at: std::collections::HashMap::new(),
@@ -60884,6 +60927,7 @@ group_block_proven: false,
             worker_target: 0,
             worker_live: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             last_measurement_done_at: None,
+            local_error: None,
             outcomes,
             network_whitelist_updates: Arc::new(Mutex::new(VecDeque::new())),
             cancel: Arc::new(AtomicBool::new(false)),
