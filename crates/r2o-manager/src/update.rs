@@ -621,7 +621,32 @@ impl UpdateLock {
                 return Err(error.into());
             }
         }
+        cleanup_stale_update_work_dirs(root);
         Ok(Self(file))
+    }
+}
+
+/// Убрать рабочие каталоги `.update-*`, оставшиеся после SIGKILL/сбоя
+/// питания. Вызывается только под UpdateLock.
+fn cleanup_stale_update_work_dirs(root: &Path) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(".update-") {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !metadata.file_type().is_symlink() && metadata.is_dir() {
+            let _ = fs::remove_dir_all(&path);
+        }
     }
 }
 
@@ -1586,6 +1611,22 @@ mod tests {
         .unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
         script
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_update_work_dirs_are_removed_under_lock() {
+        let temp = TestDir::new();
+        let root = temp.0.join("root");
+        fs::create_dir_all(root.join(".update-999-0")).unwrap();
+        fs::create_dir_all(root.join(".update-999-1")).unwrap();
+        fs::write(root.join(".update-file"), "not a directory").unwrap();
+
+        let lock = UpdateLock::acquire(&root).unwrap();
+        assert!(!root.join(".update-999-0").exists());
+        assert!(!root.join(".update-999-1").exists());
+        assert!(root.join(".update-file").exists());
+        drop(lock);
     }
 
     #[cfg(unix)]

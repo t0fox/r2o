@@ -24,6 +24,9 @@ MAX_ARCHIVE_BYTES=67108864
 MAX_EXPANDED_KB=24576
 RAM_RESERVE_KB=16384
 DEPENDENCY_RESERVE_KB=2048
+LOCAL_MANIFEST=${R2O_LOCAL_MANIFEST:-}
+LOCAL_SIGNATURE=${R2O_LOCAL_SIGNATURE:-}
+LOCAL_ARCHIVE=${R2O_LOCAL_ARCHIVE:-}
 PLATFORM=
 ARCH=
 CURRENT_RELEASE=
@@ -460,6 +463,10 @@ case "$ROOT" in
 esac
 case "$ROOT" in *'/../'*|*/..|*'/./'*|*/.) die "небезопасный каталог установки: $ROOT" ;; esac
 storage_anchor
+# Оставшийся после SIGKILL staging на flash убираем, но только старый:
+# свежий каталог может принадлежать параллельному установщику.
+find "$STORAGE_PATH" -maxdepth 1 -type d -name '.r2o-install.*' -mmin +60 \
+    -exec rm -rf {} + 2>/dev/null || true
 detect_platform_and_arch
 release_from_slots
 if [ -e "$ROOT" ] || [ -L "$ROOT" ]; then ROOT_PREEXISTED=1; fi
@@ -478,8 +485,19 @@ command -v sha256sum >/dev/null 2>&1 || command -v openssl >/dev/null 2>&1 || di
 command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || die 'нужен curl или wget'
 
 say 'загружаю подписанный манифест'
-fetch_url "$LATEST/latest.json" "$TMP/latest.json" 65536
-fetch_url "$LATEST/latest.json.sig" "$TMP/latest.json.sig" 64
+if [ -n "$LOCAL_MANIFEST" ]; then
+    [ -f "$LOCAL_MANIFEST" ] && [ ! -L "$LOCAL_MANIFEST" ] ||
+        die "локальный манифест не найден или является ссылкой: $LOCAL_MANIFEST"
+    LOCAL_SIGNATURE=${LOCAL_SIGNATURE:-$LOCAL_MANIFEST.sig}
+    [ -f "$LOCAL_SIGNATURE" ] && [ ! -L "$LOCAL_SIGNATURE" ] ||
+        die "локальная подпись не найдена или является ссылкой: $LOCAL_SIGNATURE"
+    cp "$LOCAL_MANIFEST" "$TMP/latest.json" || die 'не удалось скопировать локальный манифест'
+    cp "$LOCAL_SIGNATURE" "$TMP/latest.json.sig" || die 'не удалось скопировать локальную подпись'
+    say "использую локальный подписанный манифест: $LOCAL_MANIFEST"
+else
+    fetch_url "$LATEST/latest.json" "$TMP/latest.json" 65536 60
+    fetch_url "$LATEST/latest.json.sig" "$TMP/latest.json.sig" 64 60
+fi
 [ "$(wc -c < "$TMP/latest.json.sig" | tr -d ' ')" = 64 ] || die 'подпись манифеста имеет неверный размер'
 printf '%s\n' '-----BEGIN PUBLIC KEY-----' "$PUBLIC_KEY_B64" '-----END PUBLIC KEY-----' > "$TMP/release-public.pem"
 openssl pkeyutl -verify -pubin -inkey "$TMP/release-public.pem" -rawin \
@@ -528,19 +546,33 @@ if [ "$CURRENT_RELEASE" = "$TARGET_RELEASE" ]; then
 fi
 
 archive_bytes=
-if try_fetch_url "$RELEASE_API/$TARGET_RELEASE" "$TMP/release-api.json" 1048576 60; then
-    archive_bytes=$(asset_size_from_api "$ASSET" "$TMP/release-api.json")
-fi
-case "$archive_bytes" in ''|*[!0-9]*) archive_bytes= ;; esac
-if [ -z "$archive_bytes" ] ||
-    [ "$archive_bytes" -le 0 ] || [ "$archive_bytes" -gt "$MAX_ARCHIVE_BYTES" ]; then
-    say 'GitHub API не сообщил размер актива; определяю размер по заголовкам загрузки'
-    archive_bytes=$(asset_size_from_headers "$LATEST/$ASSET" || true)
+if [ -n "$LOCAL_ARCHIVE" ]; then
+    [ -f "$LOCAL_ARCHIVE" ] && [ ! -L "$LOCAL_ARCHIVE" ] ||
+        die "локальный архив не найден или является ссылкой: $LOCAL_ARCHIVE"
+    archive_bytes=$(wc -c < "$LOCAL_ARCHIVE" | tr -d ' ')
+else
+    if try_fetch_url "$RELEASE_API/$TARGET_RELEASE" "$TMP/release-api.json" 1048576 60; then
+        archive_bytes=$(asset_size_from_api "$ASSET" "$TMP/release-api.json")
+    fi
+    case "$archive_bytes" in ''|*[!0-9]*) archive_bytes= ;; esac
+    if [ -z "$archive_bytes" ] ||
+        [ "$archive_bytes" -le 0 ] || [ "$archive_bytes" -gt "$MAX_ARCHIVE_BYTES" ]; then
+        say 'GitHub API не сообщил размер актива; определяю размер по заголовкам загрузки'
+        archive_bytes=$(asset_size_from_headers "$LATEST/$ASSET" || true)
+    fi
 fi
 case "$archive_bytes" in ''|*[!0-9]*) archive_bytes= ;; esac
 
 archive_downloaded=0
-if [ -z "$archive_bytes" ]; then
+if [ -n "$LOCAL_ARCHIVE" ]; then
+    [ -f "$LOCAL_ARCHIVE" ] && [ ! -L "$LOCAL_ARCHIVE" ] ||
+        die "локальный архив не найден или является ссылкой: $LOCAL_ARCHIVE"
+    ARCHIVE=$LOCAL_ARCHIVE
+    archive_bytes=$(wc -c < "$ARCHIVE" | tr -d ' ')
+    case "$archive_bytes" in ''|*[!0-9]*) die "не удалось проверить размер локального архива $LOCAL_ARCHIVE" ;; esac
+    archive_downloaded=1
+    say "использую локальный архив: $LOCAL_ARCHIVE"
+elif [ -z "$archive_bytes" ]; then
     # Ни API, ни заголовки не дали размер (wget без вывода заголовков, прокси,
     # ограничение площадки). Скачиваем в staging на flash с верхним лимитом и
     # измеряем фактический файл до выбора схемы размещения.
@@ -579,7 +611,11 @@ else
 fi
 if [ "$ARCHIVE_IN_RAM" -eq 1 ]; then
     if [ "$archive_downloaded" -eq 1 ]; then
-        mv "$ARCHIVE" "$TMP/$ASSET" || die 'не удалось перенести скачанный архив в RAM'
+        if [ -n "$LOCAL_ARCHIVE" ]; then
+            cp "$ARCHIVE" "$TMP/$ASSET" || die 'не удалось скопировать локальный архив в RAM'
+        else
+            mv "$ARCHIVE" "$TMP/$ASSET" || die 'не удалось перенести скачанный архив в RAM'
+        fi
     fi
     ARCHIVE=$TMP/$ASSET
 fi

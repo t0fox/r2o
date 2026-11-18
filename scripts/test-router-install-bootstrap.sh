@@ -400,6 +400,25 @@ if wait "$installer_pid"; then fail 'terminated install unexpectedly succeeded';
 grep -q '^rollback r2o-bootstrap-test -> r2o-old$' "$CASE/manager.log" || fail 'interruption did not invoke manager rollback'
 grep -qx 'owner=kept' "$CASE/opt/r2o/config" || fail 'interrupted rollback damaged existing configuration'
 
+new_case local-signed-install
+# Локальный подписанный манифест/архив: установка не должна обращаться к сети.
+mkdir -p "$CASE/opt/.r2o-install.stale"
+touch -d '2 hours ago' "$CASE/opt/.r2o-install.stale"
+R2O_LOCAL_MANIFEST="$CASE/fixtures/latest.json" \
+R2O_LOCAL_SIGNATURE="$CASE/fixtures/latest.json.sig" \
+R2O_LOCAL_ARCHIVE="$CASE/fixtures/r2o-mipsel-openwrt-musl.tar.gz" \
+    run_install > "$CASE/out" 2>&1 ||
+    { cat "$CASE/out" >&2; fail 'local signed install failed'; }
+grep -q 'использую локальный подписанный манифест' "$CASE/out" ||
+    fail 'local manifest mode was not reported'
+grep -q 'использую локальный архив' "$CASE/out" ||
+    fail 'local archive mode was not reported'
+[ ! -s "$CASE/fetch.log" ] || fail 'local install still contacted the network'
+[ "$(sed -n '2p' "$CASE/opt/r2o/release-slots")" = r2o-bootstrap-test ] ||
+    fail 'local signed release was not activated'
+[ ! -e "$CASE/opt/.r2o-install.stale" ] ||
+    fail 'stale bootstrap staging was not removed'
+
 new_case install-repeat
 run_install > "$CASE/out" 2>&1 || { cat "$CASE/out" >&2; fail 'valid signed release did not install'; }
 [ "$(sed -n '2p' "$CASE/opt/r2o/release-slots")" = r2o-bootstrap-test ] || fail 'release manager did not activate the signed release'

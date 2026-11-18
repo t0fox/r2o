@@ -117,6 +117,7 @@ pub fn activate_bundle(
 ) -> Result<InstallSlots, InstallError> {
     fs::create_dir_all(root)?;
     let _lock = ManagerLock::acquire(root)?;
+    cleanup_stale_install_artifacts(root);
     activate_bundle_locked(root, bundle, release_id, architecture)
 }
 
@@ -173,6 +174,7 @@ fn prepare_archive_locked(
     public_key: &[u8],
     architecture: &str,
 ) -> Result<PreparedRelease, InstallError> {
+    cleanup_stale_install_artifacts(root);
     let work = create_work_dir(root)?;
     let result = (|| {
         let local_archive = work.join("release.tar.gz");
@@ -303,7 +305,96 @@ fn activate_bundle_locked(
         },
     };
     write_slots_atomically(root, &slots)?;
+    prune_obsolete_releases(root, &slots);
     Ok(slots)
+}
+
+/// Удалить выпуски, на которые больше не ссылаются слоты current/previous.
+/// Каталог `releases` принадлежит установщику; чужие или недописанные
+/// каталоги без совпадающего `release-id` не трогаем.
+fn prune_obsolete_releases(root: &Path, slots: &InstallSlots) {
+    let releases = root.join("releases");
+    let Ok(entries) = fs::read_dir(&releases) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !valid_release_id(name)
+            || name == slots.current
+            || slots.previous.as_deref() == Some(name)
+        {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            continue;
+        }
+        let marker = fs::read(path.join("release-id")).ok();
+        if marker.as_deref() != Some(name.as_bytes()) {
+            continue;
+        }
+        // Уборка не должна отменять уже состоявшуюся активацию: если старый
+        // выпуск занят или права не позволяют, установка всё равно успешна.
+        let _ = fs::remove_dir_all(&path);
+    }
+}
+
+/// Убрать оставшиеся после SIGKILL/сбоя питания временные каталоги и
+/// недописанные слоты. Вызывается только под ManagerLock.
+fn cleanup_stale_install_artifacts(root: &Path) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let stale_directory = name.starts_with(".install-");
+        let stale_slot = name.starts_with(".release-slots.");
+        if !stale_directory && !stale_slot {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if stale_directory && metadata.is_dir() {
+            let _ = fs::remove_dir_all(&path);
+        } else if stale_slot && metadata.is_file() {
+            let _ = fs::remove_file(&path);
+        }
+    }
+
+    let releases = root.join("releases");
+    let Ok(entries) = fs::read_dir(&releases) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(".staging-") {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !metadata.file_type().is_symlink() && metadata.is_dir() {
+            let _ = fs::remove_dir_all(&path);
+        }
+    }
 }
 
 fn create_work_dir(root: &Path) -> Result<PathBuf, InstallError> {
@@ -483,6 +574,7 @@ pub(crate) fn activate_previous_release(
 ) -> Result<Option<InstallSlots>, InstallError> {
     fs::create_dir_all(root)?;
     let _lock = ManagerLock::acquire(root)?;
+    cleanup_stale_install_artifacts(root);
     let Some(current) = read_install_slots(root)? else {
         return Ok(None);
     };
@@ -497,6 +589,7 @@ pub(crate) fn activate_previous_release(
         previous: Some(current.current),
     };
     write_slots_atomically(root, &slots)?;
+    prune_obsolete_releases(root, &slots);
     Ok(Some(slots))
 }
 
@@ -1005,6 +1098,43 @@ mod tests {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(&tar_bytes).unwrap();
         encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn activation_prunes_old_releases_and_stale_install_artifacts() {
+        let temp = TestDir::new();
+        let root = temp.0.join("install");
+        fs::create_dir_all(root.join("releases")).unwrap();
+        fs::create_dir_all(root.join(".install-999-0")).unwrap();
+        fs::create_dir_all(root.join("releases/.staging-dead-999-0")).unwrap();
+        fs::write(root.join(".release-slots.999-0"), "junk").unwrap();
+        // Чужой каталог без release-id не принадлежит установщику.
+        fs::create_dir_all(root.join("releases/foreign")).unwrap();
+        // Старый выпуск с корректной меткой обязан быть вычищен.
+        fs::create_dir_all(root.join("releases/r2o-old")).unwrap();
+        fs::write(root.join("releases/r2o-old/release-id"), "r2o-old").unwrap();
+
+        let one = bundle(&temp.0, "one", "mipsel");
+        let two = bundle(&temp.0, "two", "mipsel");
+        let three = bundle(&temp.0, "three", "mipsel");
+        activate_bundle(&root, &one, "r2o-1", "mipsel").unwrap();
+        assert!(!root.join(".install-999-0").exists());
+        assert!(!root.join("releases/.staging-dead-999-0").exists());
+        assert!(!root.join(".release-slots.999-0").exists());
+        assert!(!root.join("releases/r2o-old").exists());
+        assert!(root.join("releases/foreign").exists());
+
+        activate_bundle(&root, &two, "r2o-2", "mipsel").unwrap();
+        activate_bundle(&root, &three, "r2o-3", "mipsel").unwrap();
+        assert!(!root.join("releases/r2o-1").exists());
+        assert!(root.join("releases/r2o-2").exists());
+        assert!(root.join("releases/r2o-3").exists());
+
+        let rolled = rollback(&root).unwrap();
+        assert_eq!(rolled.current, "r2o-2");
+        assert_eq!(rolled.previous.as_deref(), Some("r2o-3"));
+        assert!(root.join("releases/r2o-3").exists());
+        assert!(root.join("releases/foreign").exists());
     }
 
     #[test]
