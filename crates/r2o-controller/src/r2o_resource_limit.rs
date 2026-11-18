@@ -138,15 +138,7 @@ pub fn r2o_measurement_worker_cap(_cores: Option<usize>, _total_memory_kb: Optio
 }
 
 pub fn r2o_system_measurement_worker_cap() -> usize {
-    // D2O допускает до 64 одновременных замеров, но на 2-ядерном роутере
-    // каждый замер — это TLS/HTTP-клиент, discovery и события датапата.
-    // Ограничиваем предел числом ядер: AIMD всё равно начинает с двух и
-    // растёт только при запасе CPU, а этот потолок не даёт ему уйти в
-    // перегрузку на слабых устройствах.
-    let cores = std::thread::available_parallelism()
-        .map(|value| value.get())
-        .unwrap_or(1);
-    cores.clamp(1, R2O_MAX_MEASUREMENT_WORKERS)
+    r2o_measurement_worker_cap(None, None)
 }
 
 struct R2oAdaptiveLimit {
@@ -647,6 +639,22 @@ impl R2oMeasurementGate {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .adaptive
             .max_slots
+    }
+
+    pub fn r2o_discovery_thread_budget(&self) -> usize {
+        let state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Приостановленный QUIC удерживает поток, пока ждёт допуска TCP.
+        let parked = state
+            .waiters
+            .iter()
+            .filter(|waiter| waiter.kind == R2oMeasurementWaiterKind::QuicYield)
+            .count();
+        // Один ожидающий worker сообщает AIMD о спросе, пока все слоты заняты.
+        (state.adaptive.limit() + parked + 1).min(state.adaptive.max_slots)
     }
 
     fn r2o_new(max_slots: usize, minimum_start_gap: Option<Duration>) -> Self {
@@ -1212,6 +1220,25 @@ mod tests {
             gate.shared.minimum_start_gap,
             Some(Duration::from_millis(250))
         );
+    }
+
+    #[test]
+    fn discovery_threads_follow_adaptive_slots_and_allow_parked_quic() {
+        let gate =
+            R2oMeasurementGate::r2o_with_start_gap(super::r2o_system_measurement_worker_cap());
+        assert_eq!(gate.r2o_max_slots(), 64);
+        assert_eq!(gate.r2o_discovery_thread_budget(), 3);
+        {
+            let mut state = gate.shared.state.lock().unwrap();
+            state.adaptive.limit = 9;
+            r2o_queue_measurement_waiter(
+                &mut state,
+                R2oMeasurementWaiterKind::QuicYield,
+                false,
+                None,
+            );
+        }
+        assert_eq!(gate.r2o_discovery_thread_budget(), 11);
     }
 
     #[test]

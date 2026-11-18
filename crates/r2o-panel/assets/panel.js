@@ -1095,7 +1095,7 @@
 
     var workload = this.$("workload-meta");
     if (workload) {
-      var text = m.hunting ? m.hunting + " в работе" + (m.queued.length ? " · " + m.queued.length + " ждут" : "") : "очередь пуста";
+      var text = m.hunting ? (m.hunting - m.queued.length) + " в работе" + (m.queued.length ? " · " + m.queued.length + " ждут" : "") : "очередь пуста";
       if (workload.textContent !== text) workload.textContent = text;
     }
     var tm = this.$("telegram-meta");
