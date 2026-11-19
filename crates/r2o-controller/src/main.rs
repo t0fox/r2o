@@ -11711,8 +11711,10 @@ fn r2o_suspect_clean_handshake_suppressed(
     code: u8,
     now: std::time::Instant,
 ) -> bool {
-    matches!(code, 1 | 2 | 3)
-        && cache.suppresses_unplanned_tcp_suspicion(name, 6, family, client_ip, planned, now)
+    // Чистое TLS-рукопожатие доказывает лишь то, что имя не рвётся
+    // поддельным RST. Молчание и повтор ClientHello оно не опровергает:
+    // коробка может пропустить часть потоков и задержать остальные.
+    code == 1 && cache.suppresses_unplanned_tcp_suspicion(name, 6, family, client_ip, planned, now)
 }
 
 #[cfg(unix)]
@@ -25406,6 +25408,22 @@ impl ControlClient {
                     );
                     let now = std::time::Instant::now();
                     if let Some(target) = tcp_hello_names.target_for_tcp_flow(&event.key, now) {
+                        if r2o_suspect_clean_handshake_suppressed(
+                            &clean_handshakes,
+                            &target.host,
+                            target.family,
+                            r2o_event_client_ip(&event.key, event.client_is_low),
+                            event.planned,
+                            1,
+                            now,
+                        ) {
+                            println!(
+                                "ранний TCP RST для {}: недавнее чистое рукопожатие без плана подавляет подозрение",
+                                target.host
+                            );
+                            std::io::stdout().flush()?;
+                            continue;
+                        }
                         if let Some((worker, catalog, _, _)) = &mut discovery {
                             let has_solution =
                                 r2o_controller::discovery::has_usable_binding(catalog, &target)
@@ -25486,6 +25504,22 @@ impl ControlClient {
                     );
                     let now = std::time::Instant::now();
                     if let Some(target) = tcp_hello_names.target_for_tcp_flow(&event.key, now) {
+                        if r2o_suspect_clean_handshake_suppressed(
+                            &clean_handshakes,
+                            &target.host,
+                            target.family,
+                            r2o_event_client_ip(&event.key, event.client_is_low),
+                            event.planned,
+                            2,
+                            now,
+                        ) {
+                            println!(
+                                "повтор ClientHello для {}: недавнее чистое рукопожатие без плана подавляет подозрение",
+                                target.host
+                            );
+                            std::io::stdout().flush()?;
+                            continue;
+                        }
                         if let Some((worker, catalog, _, _)) = &mut discovery {
                             let has_solution =
                                 r2o_controller::discovery::has_usable_binding(catalog, &target)
@@ -46292,8 +46326,9 @@ mod tests {
             1,
             now
         ));
-        // Молчание и повтор ClientHello — самостоятельные улики: успешное
-        // рукопожатие на другом потоке того же имени их не опровергает.
+        // Чистое рукопожатие гасит только RST-подозрение. Молчание и повтор
+        // ClientHello остаются уликами: коробка может пропустить часть
+        // потоков и задержать остальные.
         assert!(!scenario(
             "client_a_repeat",
             &cache,
@@ -46396,6 +46431,25 @@ mod tests {
         if let Ok(path) = std::env::var("R2O_CLEAN_HANDSHAKE_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r2o_event_client_ip_uses_client_is_low_direction() {
+        let mut key = [0; KEY_LEN];
+        key[0] = 4;
+        key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+        key[17..21].copy_from_slice(&[198, 51, 100, 80]);
+        key[33..35].copy_from_slice(&45_000_u16.to_be_bytes());
+        key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+        key[37] = 6;
+
+        let mut expected_client = [0_u8; 16];
+        expected_client[..4].copy_from_slice(&[192, 0, 2, 10]);
+        let mut expected_server = [0_u8; 16];
+        expected_server[..4].copy_from_slice(&[198, 51, 100, 80]);
+        assert_eq!(super::r2o_event_client_ip(&key, true), expected_client);
+        assert_eq!(super::r2o_event_client_ip(&key, false), expected_server);
     }
 
     #[test]
