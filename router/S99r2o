@@ -963,25 +963,43 @@ firewall_watchdog_stop() {
     rm -f "$FW_WD_PID"
 }
 
+telegram_watchdog_pids() {
+    for link in "$PROC"/[0-9]*/cmdline; do
+        [ -r "$link" ] || continue
+        cmdline=$(tr '\000' ' ' < "$link" 2>/dev/null) || continue
+        case "$cmdline" in *r2o-telegram-watchdog.sh*) ;; *) continue ;; esac
+        pid=${link#"$PROC"/}
+        pid=${pid%/cmdline}
+        printf '%s\n' "$pid"
+    done
+}
+
 telegram_watchdog_running() {
-    [ -s "$TG_WD_PID" ] || return 1
-    tg_wd_pid=$(cat "$TG_WD_PID" 2>/dev/null) || return 1
-    case "$tg_wd_pid" in ''|*[!0-9]*) return 1 ;; esac
-    kill -0 "$tg_wd_pid" 2>/dev/null || return 1
-    tg_wd_cmdline=$(tr '\000' ' ' < "$PROC/$tg_wd_pid/cmdline" 2>/dev/null) || return 1
-    case "$tg_wd_cmdline" in *r2o-telegram-watchdog.sh*) return 0 ;; *) return 1 ;; esac
+    for pid in $(telegram_watchdog_pids); do
+        return 0
+    done
+    return 1
+}
+
+telegram_watchdog_current_running() {
+    for pid in $(telegram_watchdog_pids); do
+        cmdline=$(tr '\000' ' ' < "$PROC/$pid/cmdline" 2>/dev/null) || continue
+        case "$cmdline" in *"$TG_WATCHDOG"*) return 0 ;; esac
+    done
+    return 1
 }
 
 telegram_watchdog_start() {
     [ -x "$TG_WATCHDOG" ] || return 0
-    telegram_watchdog_running && return 0
+    telegram_watchdog_current_running && return 0
+    telegram_watchdog_stop
     prepare_dirs || return 1
     command -v start-stop-daemon >/dev/null 2>&1 || return 1
     rm -f "$TG_WD_PID"
     start-stop-daemon -S -b -m -p "$TG_WD_PID" -x "$TG_WATCHDOG" -- run || return 1
     attempt=0
-    while [ "$attempt" -lt 20 ]; do
-        telegram_watchdog_running && return 0
+    while [ "$attempt" -lt 50 ]; do
+        telegram_watchdog_current_running && return 0
         attempt=$((attempt + 1))
         sleep 0.1 2>/dev/null || sleep 1
     done
@@ -989,15 +1007,22 @@ telegram_watchdog_start() {
 }
 
 telegram_watchdog_stop() {
-    if telegram_watchdog_running; then
-        tg_wd_pid=$(cat "$TG_WD_PID")
-        kill -TERM "$tg_wd_pid" 2>/dev/null || true
+    pids=$(telegram_watchdog_pids)
+    if [ -n "$pids" ]; then
+        for pid in $pids; do kill -TERM "$pid" 2>/dev/null || true; done
         attempt=0
-        while kill -0 "$tg_wd_pid" 2>/dev/null && [ "$attempt" -lt 50 ]; do
+        while [ "$attempt" -lt 50 ]; do
+            alive=0
+            for pid in $pids; do
+                kill -0 "$pid" 2>/dev/null && alive=1
+            done
+            [ "$alive" -eq 0 ] && break
             attempt=$((attempt + 1))
             sleep 0.1 2>/dev/null || sleep 1
         done
-        if kill -0 "$tg_wd_pid" 2>/dev/null; then kill -KILL "$tg_wd_pid" 2>/dev/null || true; fi
+        for pid in $pids; do
+            kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+        done
     fi
     rm -f "$TG_WD_PID"
 }
@@ -1052,7 +1077,7 @@ telegram_ready() {
 export_telegram_config() {
     for variable in TG_CA_BUNDLE TG_DC_MAP_REFRESH_SECS TG_HOST TG_MAX_CONNECTIONS \
         TG_VERBOSE TG_QUIET TG_LOG_FILE TG_CF_DOMAIN TG_CF_WORKER_DOMAIN TG_CF_BALANCE \
-        TG_CF_IP TG_WS_ROUTING TG_WS_HEDGE_DELAY_MS TG_WS_HEDGE_LIMIT \
+        TG_CF_TRANSPORT TG_CF_IP TG_WS_ROUTING TG_WS_HEDGE_DELAY_MS TG_WS_HEDGE_LIMIT \
         TG_WS_CONNECT_TIMEOUT TG_WS_FAIL_PROBE_TIMEOUT TG_WS_FAIL_COOLDOWN \
         TG_WS_REDIRECT_COOLDOWN TG_IP_FAIL_COOLDOWN TG_HANDSHAKE_TIMEOUT \
         TG_TCP_FALLBACK_TIMEOUT TG_CF_CONNECT_TIMEOUT TG_CF_FAIL_COOLDOWN \
@@ -1066,7 +1091,39 @@ export_telegram_config() {
     done
 }
 
-telegram_stop() {
+telegram_lock() {
+    lock=$RUN/telegram.lock
+    mkdir -p "$RUN" 2>/dev/null || return 1
+    attempt=0
+    while ! mkdir "$lock" 2>/dev/null; do
+        owner=$(cat "$lock/pid" 2>/dev/null || true)
+        if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
+            rm -f "$lock/pid"
+            rmdir "$lock" 2>/dev/null || true
+            continue
+        fi
+        now=$(date +%s 2>/dev/null || echo 0)
+        mtime=$(date -r "$lock" +%s 2>/dev/null || echo "$now")
+        age=$((now - mtime))
+        if [ "$age" -gt 300 ]; then
+            rm -f "$lock/pid"
+            rmdir "$lock" 2>/dev/null || true
+            continue
+        fi
+        attempt=$((attempt + 1))
+        [ "$attempt" -lt 600 ] || return 1
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    (umask 077; printf '%s\n' "$$" > "$lock/pid") 2>/dev/null || true
+    return 0
+}
+
+telegram_unlock() {
+    rm -f "$RUN/telegram.lock/pid" 2>/dev/null || true
+    rmdir "$RUN/telegram.lock" 2>/dev/null || true
+}
+
+telegram_stop_locked() {
     telegram_watchdog_stop
     stop_component r2o-telegram "$TG_PID" || return 1
     if [ -x "$TG_FIREWALL" ]; then
@@ -1076,9 +1133,9 @@ telegram_stop() {
     write_telegram_status stopped
 }
 
-telegram_start() {
+telegram_start_locked() {
     if [ "$TG_ENABLED" != 1 ]; then
-        telegram_stop || return 1
+        telegram_stop_locked || return 1
         return 0
     fi
     if [ "$TG_MODE" != local ]; then
@@ -1118,7 +1175,7 @@ telegram_start() {
         return 1
     }
     attempt=0
-    while [ "$attempt" -lt 50 ]; do
+    while [ "$attempt" -lt 300 ]; do
         if telegram_ready; then break; fi
         attempt=$((attempt + 1))
         sleep 0.1 2>/dev/null || sleep 1
@@ -1141,6 +1198,22 @@ telegram_start() {
     write_telegram_status local
     telegram_watchdog_start || say "сторож Telegram не запустился"
     say "локальный Telegram прокси готов на :$TG_PORT"
+}
+
+telegram_stop() {
+    telegram_lock || return 1
+    telegram_stop_locked
+    result=$?
+    telegram_unlock
+    return "$result"
+}
+
+telegram_start() {
+    telegram_lock || return 1
+    telegram_start_locked
+    result=$?
+    telegram_unlock
+    return "$result"
 }
 
 set_config_key() {
@@ -1180,8 +1253,12 @@ telegram_disable() {
 }
 
 telegram_restart() {
-    telegram_stop || return 1
-    telegram_start
+    telegram_lock || return 1
+    telegram_stop_locked
+    telegram_start_locked
+    result=$?
+    telegram_unlock
+    return "$result"
 }
 
 telegram_check() {

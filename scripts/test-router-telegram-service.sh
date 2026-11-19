@@ -203,4 +203,20 @@ grep -q '^stopped$' "$TEMP/root/state/telegram.status"
 [ ! -e "$TEMP/root/state/telegram.stats.sock" ]
 grep -q '^stop$' "$TEMP/firewall-calls"
 
+# Сторож без pid-файла не должен переживать остановку службы: иначе старый
+# watchdog перезапускает Telegram параллельно с установкой обновления.
+run_service telegram-enable
+fake_watchdog="$TEMP/root/releases/test/router/r2o-telegram-watchdog.sh"
+mkdir -p "$(dirname "$fake_watchdog")"
+printf '#!/bin/sh\nwhile :; do sleep 1; done\n' > "$fake_watchdog"
+chmod 0755 "$fake_watchdog"
+sh "$fake_watchdog" >/dev/null 2>&1 &
+fake_pid=$!
+sleep 0.1
+rm -f "$TEMP/root/run/r2o-telegram-watchdog.pid"
+run_service telegram-disable
+wait "$fake_pid" 2>/dev/null || true
+kill -0 "$fake_pid" 2>/dev/null && fail "сторож без pid-файла пережил остановку Telegram"
+[ ! -e "$TEMP/root/run/r2o-telegram-watchdog.pid" ] || fail "остановка оставила pid-файл сторожа"
+
 echo "Проверка запуска и готовности службы Telegram прошла"
