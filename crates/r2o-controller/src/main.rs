@@ -49157,6 +49157,27 @@ mod tests {
                 }
             ));
         }
+        for (label, source, destination, trial) in [
+            ("addr4", "192.0.2.10:40000", "198.51.100.20:443", [8_u8; 16]),
+            (
+                "addr6",
+                "[2001:db8::10]:40001",
+                "[2001:db8::20]:443",
+                [9_u8; 16],
+            ),
+        ] {
+            let frame = r2k_core::control::encode_delete_addr_probe(
+                source.parse().unwrap(),
+                destination.parse().unwrap(),
+                trial,
+            )
+            .unwrap();
+            let hex = frame
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            output.push_str(&format!("case={label} frames={hex}\n"));
+        }
         if let Ok(path) = std::env::var("R2O_TRIAL_RETIRE_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
         }
