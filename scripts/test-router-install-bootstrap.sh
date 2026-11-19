@@ -21,12 +21,13 @@ url=
 head=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        -o|--max-filesize|--connect-timeout|--max-time|--proto|--proto-redir)
+        -o|--max-filesize|--connect-timeout|--max-time|--proto|--proto-redir|--retry|--retry-delay)
             [ "$#" -ge 2 ] || exit 2
             if [ "$1" = -o ]; then output=$2; fi
             shift 2
             ;;
         -I|--head) head=1; shift ;;
+        --progress-bar) shift ;;
         -* ) shift ;;
         * ) url=$1; shift ;;
     esac

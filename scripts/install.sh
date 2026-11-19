@@ -176,6 +176,9 @@ memory_available_kb() {
 install_dependencies() {
     missing=
     command -v openssl >/dev/null 2>&1 || missing="$missing openssl-util"
+    # curl нужен не только для удобства: BusyBox wget на OpenWrt часто не
+    # умеет HTTPS-редирект GitHub latest и падает на latest.json.
+    command -v curl >/dev/null 2>&1 || missing="$missing curl"
     have_ca=0
     for ca_file in /etc/ssl/cert.pem /etc/ssl/certs/ca-certificates.crt /opt/etc/ssl/certs/ca-certificates.crt; do
         [ ! -s "$ca_file" ] || have_ca=1
@@ -281,16 +284,29 @@ fetch_url_impl() {
     fetch_limit=$3
     fetch_timeout=${4:-600}
     fetch_error=
+    fetch_ok=0
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 15 \
+        # В интерактивном терминале показываем полосу прогресса, в
+        # неинтерактивном — только ошибки. -L обязателен: latest/download
+        # на GitHub отвечает 302 на objects.githubusercontent.com.
+        curl_progress=-sS
+        [ ! -t 1 ] || curl_progress=--progress-bar
+        if curl -fL $curl_progress --retry 3 --retry-delay 1 \
+            --proto '=https' --proto-redir '=https' --connect-timeout 15 \
             --max-time "$fetch_timeout" --max-filesize "$fetch_limit" \
-            -o "$fetch_output" "$fetch_url_value" ||
-            { fetch_error="не удалось скачать $fetch_url_value"; return 1; }
-    elif command -v wget >/dev/null 2>&1; then
-        wget -q -T "$fetch_timeout" -O "$fetch_output" "$fetch_url_value" ||
-            { fetch_error="не удалось скачать $fetch_url_value"; return 1; }
-    else
-        fetch_error='нужен curl или wget для загрузки выпуска'
+            -o "$fetch_output" "$fetch_url_value"; then
+            fetch_ok=1
+        fi
+    fi
+    if [ "$fetch_ok" -eq 0 ] && command -v wget >/dev/null 2>&1; then
+        wget_quiet=-q
+        [ ! -t 1 ] || wget_quiet=
+        if wget $wget_quiet -T "$fetch_timeout" -O "$fetch_output" "$fetch_url_value"; then
+            fetch_ok=1
+        fi
+    fi
+    if [ "$fetch_ok" -eq 0 ]; then
+        fetch_error="не удалось скачать $fetch_url_value"
         return 1
     fi
     [ -f "$fetch_output" ] ||
@@ -642,6 +658,7 @@ if [ "$BUNDLE_IN_RAM" -eq 1 ]; then BUNDLE=$TMP/bundle; else BUNDLE=$DISK_TMP/bu
 say "ресурсы проверены: свободно ${memory_kb} КиБ RAM и ${flash_kb} КиБ flash; архив и распаковка размещены безопасно"
 
 if [ "$archive_downloaded" -eq 0 ]; then
+    say "скачиваю $ASSET (${archive_kb} КиБ)"
     fetch_url "$LATEST/$ASSET" "$ARCHIVE" "$archive_bytes"
 fi
 [ "$(wc -c < "$ARCHIVE" | tr -d ' ')" = "$archive_bytes" ] || die "размер актива $ASSET не совпал с GitHub"
