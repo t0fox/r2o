@@ -93,7 +93,7 @@ impl FallbackQueue {
     pub fn next(&mut self, shape: u8, send_cap: usize) -> Option<String> {
         // refill_from_fallback snapshots send_cap for each SCHED_MAX_PLANS batch.
         if self.pending.is_empty() {
-            while self.pending.len() < 8 && self.next < 49 {
+            while self.pending.len() < 8 && self.next < 53 {
                 let index = self.next;
                 self.next += 1;
                 let Some(text) = plan(index, shape, send_cap) else {
@@ -112,6 +112,16 @@ impl FallbackQueue {
 }
 
 fn arm(index: usize) -> Option<Poison> {
+    // Кусочная отправка идёт первой: она не портит поток для сервера и
+    // решает самый частый случай — DPI, который не собирает короткие
+    // сегменты. Остальные плечи сохраняют прежний порядок.
+    if index < 4 {
+        return Some(Poison {
+            chunk: [8, 16, 32, 64][index],
+            ..Poison::default()
+        });
+    }
+    let index = index - 4;
     let mut a = Poison::default();
     match index {
         0 => a.seqovl = 1,
@@ -188,6 +198,47 @@ pub fn plan_from_arm(a: &Poison, shape: u8, send_cap: usize) -> Option<String> {
     let header = |version| {
         format!("r2o-plan 1 {version}\nid 00000000000000000000000000000000\nproto tcp tls\n")
     };
+    // Кусочная отправка приветствия: статический список разрезов каждые
+    // N байт. Точки за концом реального приветствия исполнитель игнорирует.
+    if a.chunk != 0 {
+        if a.chunk < 2
+            || a.chunk > 1400
+            || a.badsum
+            || a.md5
+            || a.repeats != 0
+            || a.gap_ms != 0
+            || a.disorder
+            || a.disorder_pos != 0
+            || a.fake_between
+            || a.ttl != 0
+            || a.autottl
+            || a.seq_shift != 0
+            || a.decoy_hello
+            || a.tcp_ts
+            || a.ip_id_zero
+            || a.oob
+            || a.seqovl != 0
+            || a.seqovl_exact
+            || a.split_pos != 0
+        {
+            return None;
+        }
+        let chunk = a.chunk as usize;
+        // Не больше восьми разрезов: девять сегментов достаточно, чтобы
+        // разорвать сборку DPI, и это укладывается в язык планов.
+        let stride = chunk.max(178);
+        let mut text = format!(
+            "{}wire detect-tcp-v1\ninput tls-sni\nsegment {segment}\n",
+            header(5)
+        );
+        let mut position = stride;
+        while position < 1600 {
+            text.push_str(&format!("split payload_start +{position}\n"));
+            position = position.saturating_add(stride);
+        }
+        text.push_str("order forward\n");
+        return Some(text);
+    }
     if a.disorder_pos != 0 {
         if a.disorder_pos < 0
             || a.disorder_pos as usize > 2048

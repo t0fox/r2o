@@ -3112,7 +3112,10 @@ mod tests {
         if let Ok(path) = std::env::var("R2O_COMPOSE_PROPS_OUTPUT") {
             std::fs::write(path, &output).expect("write compose/props output");
         }
-        assert!(output.starts_with("props|12\n"));
+        assert!(
+            output.starts_with("props|13\n"),
+            "набор вопросов коробки: перекрытие до конца имени и срочный байт идут первыми"
+        );
         assert!(output.contains("compose|empty-none|1|СОБРАНО: всё сразу|"));
     }
 
@@ -5070,8 +5073,10 @@ mod tests {
     #[test]
     fn prop_probes_order_names_and_apply_set_match_c() {
         let probes = property_probes();
-        assert_eq!(probes.len(), 12);
+        assert_eq!(probes.len(), 13);
         let expected = [
+            ("перекрытие до конца имени", "seqovl-sni"),
+            ("срочный байт в середине имени", "oob-sni-middle"),
             ("перекрытие слева", "seqovl-1"),
             ("порядок сегментов", "disorder"),
             ("контрольная сумма", "badsum"),
@@ -5080,7 +5085,6 @@ mod tests {
             ("сверка MD5", "md5"),
             ("окно seq", "seq-out-of-window"),
             ("метка времени", "ts"),
-            ("перекрытие до конца имени", "seqovl-sni"),
             ("плотная серия", "badsum-x7"),
             ("ECH-приветствие под меткой", "white-hello-ts"),
             ("данные в SYN", "syndata"),
@@ -5089,38 +5093,39 @@ mod tests {
             assert_eq!(probes[index].label, *label);
             assert_eq!(probes[index].poison.name, *name);
         }
-        assert_eq!(probes[0].poison.seqovl, 1);
-        assert!(probes[1].poison.disorder);
-        assert!(probes[2].poison.badsum);
-        assert!(probes[3].poison.decoy_hello);
-        assert_eq!(probes[4].poison.repeats, 2);
-        assert_eq!(probes[4].poison.gap_ms, 20);
-        assert!(probes[5].poison.md5);
-        assert_eq!(probes[6].poison.seq_shift, -66_000);
-        assert!(probes[7].poison.tcp_ts);
-        assert_eq!(probes[8].poison.seqovl, 0);
-        assert_eq!(probes[9].poison.repeats, 7);
-        assert_eq!(probes[10].poison.repeats, 8);
-        assert_eq!(probes[10].poison.split_pos, 2);
-        assert!(probes[11].poison.syn_data);
+        assert_eq!(probes[0].poison.seqovl, 0);
+        assert!(probes[1].poison.oob);
+        assert_eq!(probes[2].poison.seqovl, 1);
+        assert!(probes[3].poison.disorder);
+        assert!(probes[4].poison.badsum);
+        assert!(probes[5].poison.decoy_hello);
+        assert_eq!(probes[6].poison.repeats, 2);
+        assert_eq!(probes[6].poison.gap_ms, 20);
+        assert!(probes[7].poison.md5);
+        assert_eq!(probes[8].poison.seq_shift, -66_000);
+        assert!(probes[9].poison.tcp_ts);
+        assert_eq!(probes[10].poison.repeats, 7);
+        assert_eq!(probes[11].poison.repeats, 8);
+        assert_eq!(probes[11].poison.split_pos, 2);
+        assert!(probes[12].poison.syn_data);
 
         let mut props = DpiProps::default();
-        apply_property(&mut props, Property::LeftOverlap, false, &probes[0].poison);
+        apply_property(&mut props, Property::LeftOverlap, false, &probes[2].poison);
         assert_eq!(props.tolerates_left_overlap, TriState::True);
-        apply_property(&mut props, Property::LeftOverlap, true, &probes[0].poison);
+        apply_property(&mut props, Property::LeftOverlap, true, &probes[2].poison);
         assert_eq!(props.tolerates_left_overlap, TriState::False);
         apply_property(&mut props, Property::Checksum, false, &probes[2].poison);
         assert_eq!(props.validates_checksum, TriState::Unset);
-        apply_property(&mut props, Property::ParsesL7, true, &probes[3].poison);
+        apply_property(&mut props, Property::ParsesL7, true, &probes[5].poison);
         assert_eq!(props.parses_l7, TriState::True);
         assert_eq!(props.validates_checksum, TriState::False);
-        apply_property(&mut props, Property::Syn, true, &probes[11].poison);
+        apply_property(&mut props, Property::Syn, true, &probes[12].poison);
         assert_eq!(props.inspects_syn, TriState::False);
         apply_property(
             &mut props,
             Property::WhiteTimestamp,
             true,
-            &probes[10].poison,
+            &probes[11].poison,
         );
         assert_eq!(props.validates_timestamps, TriState::False);
         assert_eq!(props.validates_checksum, TriState::False);

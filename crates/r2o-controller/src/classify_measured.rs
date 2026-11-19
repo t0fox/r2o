@@ -150,6 +150,47 @@ fn measured_plan_text(
     let disorder_pos = arm.disorder_pos as usize;
     let split_pos = arm.split_pos as usize;
 
+    // Кусочная отправка: приветствие уходит короткими TCP-сегментами.
+    // Поток для сервера не меняется, а сборка DPI рвётся на границах кусков.
+    if poison.chunk != 0 {
+        if poison.chunk < 2
+            || poison.badsum
+            || poison.md5
+            || repeats != 0
+            || !between && arm.gap_ms != 0
+            || arm.disorder
+            || disorder_pos != 0
+            || between
+            || ttl != 0
+            || arm.autottl
+            || arm.seq_out
+            || arm.decoy_hello
+            || arm.tcpts
+            || arm.ipidzero
+            || arm.oob
+            || overlap != 0
+            || arm.seqovl_hello
+            || split_pos != 0
+            || poison.syn_data
+        {
+            return Err("кусочная отправка несовместима с другими воздействиями".into());
+        }
+        let chunk = poison.chunk as usize;
+        // Язык планов допускает не больше восьми разрезов: девять сегментов
+        // уже рвут разбор DPI, а больше — лишние посылки на слабом роутере.
+        let stride = chunk.max(n.div_ceil(9)).max(2);
+        let mut text = format!(
+            "r2o-plan 1 5\nid 00000000000000000000000000000000\nproto tcp tls\nwire detect-tcp-v1\ninput tls-sni\nsegment {segment_size}\n"
+        );
+        let mut position = stride;
+        while position < n {
+            writeln!(text, "split payload_start +{position}").expect("writing to String");
+            position = position.saturating_add(stride);
+        }
+        text.push_str("order forward\n");
+        return checked_text(text);
+    }
+
     if split_pos != 0
         && !arm.badsum
         && !arm.md5

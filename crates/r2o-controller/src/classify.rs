@@ -430,6 +430,9 @@ pub struct Poison {
     pub seqovl_exact: bool,
     pub seqovl: i32,
     pub split_pos: i32,
+    /// Размер куска TCP-потока: приветствие уходит несколькими короткими
+    /// сегментами. Сервер собирает поток как обычно, а разбор DPI рвётся.
+    pub chunk: i32,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

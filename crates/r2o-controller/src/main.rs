@@ -11059,7 +11059,7 @@ const R2O_DISCOVERY_TASK_REST: std::time::Duration = std::time::Duration::from_s
 // Бюджет одной задачи. Одна цель не должна держать общую очередь десять
 // минут: приоритетные пробы дают результат меньше чем за минуту, а
 // остаток лучше повторить отдельной задачей.
-const R2O_DISCOVERY_TASK_LIFETIME: std::time::Duration = std::time::Duration::from_secs(150);
+const R2O_DISCOVERY_TASK_LIFETIME: std::time::Duration = std::time::Duration::from_secs(240);
 #[cfg(unix)]
 fn r2o_discovery_trial_time_available(elapsed: std::time::Duration) -> bool {
     r2o_controller::quic_replay::r2o_quic_budget_left_elapsed(elapsed, R2O_DISCOVERY_TASK_LIFETIME)
@@ -16667,8 +16667,7 @@ group_block_proven: false,
             let mut owned_fallback_queue = None;
             let mut primary_from_owned_fallback = false;
             if outcome.plan_text.is_none()
-                && (r2o_install_next_fallback_allowed(owned_opaque_fallback, known_plans_present)
-                    || ladder_unmeasurable)
+                && r2o_discovery_trial_time_available(runner_started.elapsed())
             {
                 let mut queue =
                     r2o_controller::r2o_fallback::FallbackQueue::new_owned_search_with_tried(
