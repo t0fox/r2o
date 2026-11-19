@@ -11712,8 +11712,7 @@ fn r2o_suspect_clean_handshake_suppressed(
     // Чистое TLS-рукопожатие доказывает лишь то, что имя не рвётся
     // поддельным RST. Молчание и повтор ClientHello оно не опровергает:
     // коробка может пропустить часть потоков и задержать остальные.
-    code == 1
-        && cache.suppresses_unplanned_tcp_suspicion(name, 6, family, client_ip, planned, now)
+    code == 1 && cache.suppresses_unplanned_tcp_suspicion(name, 6, family, client_ip, planned, now)
 }
 
 #[cfg(unix)]

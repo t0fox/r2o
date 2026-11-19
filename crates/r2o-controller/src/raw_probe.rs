@@ -2962,7 +2962,8 @@ mod tests {
         }
     }
 
-    fn set_name(property: Property) -> &'static str {        match property {
+    fn set_name(property: Property) -> &'static str {
+        match property {
             Property::LeftOverlap => "LEFT_OVERLAP",
             Property::Reorder => "REORDER",
             Property::Checksum => "CHECKSUM",
