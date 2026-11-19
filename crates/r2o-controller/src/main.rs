@@ -3510,12 +3510,7 @@ fn r2o_dns_health_preflight(transport: u8, family: u8, mark: Option<u32>) -> R2o
     }
     use std::os::fd::AsRawFd;
 
-    let socket_type = if transport == 17 {
-        libc::SOCK_DGRAM
-    } else {
-        libc::SOCK_STREAM
-    };
-    let socket = match r2o_props_bind_socket(socket_type, family, None, false) {
+    let socket = match r2o_bind_default(transport, family) {
         Ok((socket, _)) => socket,
         Err(_) => return R2oDnsHealthPreflight::Bind,
     };
@@ -30580,6 +30575,21 @@ fn r2o_props_bind_udp_family(family: u8) -> std::io::Result<(std::os::fd::OwnedF
     r2o_props_bind_any(libc::SOCK_DGRAM, family)
 }
 
+#[cfg(unix)]
+fn r2o_bind_default_socket_type(transport: u8) -> libc::c_int {
+    // C `bind_default` (`sched.c:415-418`): 17 → UDP, иначе TCP.
+    if transport == 17 {
+        libc::SOCK_DGRAM
+    } else {
+        libc::SOCK_STREAM
+    }
+}
+
+#[cfg(unix)]
+fn r2o_bind_default(transport: u8, family: u8) -> std::io::Result<(std::os::fd::OwnedFd, u16)> {
+    r2o_props_bind_socket(r2o_bind_default_socket_type(transport), family, None, false)
+}
+
 /// C `d2k_props_bind_udp`: IPv4 UDP.
 #[cfg(all(unix, test))]
 fn r2o_props_bind_udp() -> std::io::Result<(std::os::fd::OwnedFd, u16)> {
@@ -48632,6 +48642,65 @@ mod tests {
         // C `install_next` делает probes++ до проверки текста плана.
         assert_eq!(attempts, 1);
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bind_default_matches_c_socket_type_and_wildcard() {
+        use std::os::fd::AsRawFd;
+
+        let mut output = String::new();
+        for (transport, family) in [(6_u8, 4_u8), (6, 6), (17, 4), (17, 6)] {
+            let (socket, port) = super::r2o_bind_default(transport, family).unwrap();
+            let fd = socket.as_raw_fd();
+            let mut socket_type: libc::c_int = 0;
+            let mut length = std::mem::size_of_val(&socket_type) as libc::socklen_t;
+            assert_eq!(
+                unsafe {
+                    libc::getsockopt(
+                        fd,
+                        libc::SOL_SOCKET,
+                        libc::SO_TYPE,
+                        (&mut socket_type as *mut libc::c_int).cast(),
+                        &mut length,
+                    )
+                },
+                0
+            );
+            let mut address: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+            length = std::mem::size_of_val(&address) as libc::socklen_t;
+            assert_eq!(
+                unsafe {
+                    libc::getsockname(
+                        fd,
+                        (&mut address as *mut libc::sockaddr_storage).cast(),
+                        &mut length,
+                    )
+                },
+                0
+            );
+            let socket_family = address.ss_family as i32;
+            let wildcard = if socket_family == libc::AF_INET {
+                let address =
+                    unsafe { &*(std::ptr::addr_of!(address).cast::<libc::sockaddr_in>()) };
+                address.sin_addr.s_addr == 0
+            } else if socket_family == libc::AF_INET6 {
+                let address =
+                    unsafe { &*(std::ptr::addr_of!(address).cast::<libc::sockaddr_in6>()) };
+                address.sin6_addr.s6_addr == [0; 16]
+            } else {
+                false
+            };
+            output.push_str(&format!(
+                "transport={transport} family={family} rc=0 type={socket_type} \
+                 socket_family={socket_family} port_nonzero={} wildcard={}\n",
+                u8::from(port != 0),
+                u8::from(wildcard),
+            ));
+        }
+        if let Ok(path) = std::env::var("R2O_BIND_DEFAULT_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
     }
 
     #[cfg(unix)]

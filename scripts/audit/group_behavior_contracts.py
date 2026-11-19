@@ -151,7 +151,7 @@ CONTRACTS = {
     "CS-SCHED-CANDIDATE-VERIFY": (
         "Scheduler candidate verification",
         "verify_confirm, partial_finish, ACK/APPLIED, own plan, exchange.",
-        "sched.c: verify/applied/exchange; production verify_confirm 30 cases, props_text — 243 кейса C/Rust PASS; own_first_plans QUIC — 3 случая C/Rust PASS; own_rank_before — 8 случаев PASS; binding_for — 4 случая PASS и on_shape-перемер; bound_plan_here QUIC — 2 случая PASS; candidate_trial_matches — command/trial mapping; applied_of_candidate — 6 случаев PASS и ранние REFUSED; d2k_sched_free — Drop + shutdown drain; install_next own_first==2 — stop без refill, family_fast — cooldown вместо полной классификации, cached_measure_valid — gate fallback (matched=12); остальные ветви P.",
+        "sched.c: verify/applied/exchange; production verify_confirm 30 cases, props_text — 243 кейса C/Rust PASS; own_first_plans QUIC — 3 случая C/Rust PASS; own_rank_before — 8 случаев PASS; binding_for — 4 случая PASS и on_shape-перемер; bound_plan_here QUIC — 2 случая PASS; candidate_trial_matches — command/trial mapping; applied_of_candidate — 6 случаев PASS и ранние REFUSED; d2k_sched_free — Drop + shutdown drain; install_next own_first==2 — stop без refill, family_fast — cooldown вместо полной классификации, cached_measure_valid — gate fallback (matched=12); bind_default — 4 случая PASS; остальные ветви P.",
     ),
     "CS-SCHED-PLAN-GENERATION": (
         "Scheduler plan generation",
@@ -382,8 +382,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 187:
-        raise SystemExit(f"expected 187 P rows, got {len(rows)}")
+    if len(rows) != 186:
+        raise SystemExit(f"expected 186 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")
