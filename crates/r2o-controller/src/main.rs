@@ -8977,14 +8977,29 @@ fn r2o_run_discovery_props_questions(
 }
 
 #[cfg(unix)]
+#[cfg(unix)]
+const R2O_PLAN_UNTRANSLATABLE: &str = "кандидат не переводится в проводной план";
+
+#[cfg(unix)]
+fn r2o_discovery_plan_untranslatable(
+    result: &Result<r2o_controller::fetch::FetchResult, String>,
+) -> bool {
+    result
+        .as_ref()
+        .err()
+        .is_some_and(|error| error.starts_with(R2O_PLAN_UNTRANSLATABLE))
+}
+
 fn r2o_discovery_candidate_wire_plan(
     target: &r2o_controller::discovery::DiscoveryTarget,
     source_text: &str,
 ) -> Result<(String, [u8; 16]), String> {
     // C `plan_ident`: id временного/каталожного кандидата — `plan-%08x` от
     // FNV-1a текста, на провод уходят ASCII-байты, добитые нулями.
-    let (_plan_name, plan_id) = r2o_controller::discovery::plan_ident(source_text)?;
-    let plan_text = r2o_controller::discovery::plan_text_for_trial(source_text, plan_id)?;
+    let (_plan_name, plan_id) = r2o_controller::discovery::plan_ident(source_text)
+        .map_err(|error| format!("{R2O_PLAN_UNTRANSLATABLE}: {error}"))?;
+    let plan_text = r2o_controller::discovery::plan_text_for_trial(source_text, plan_id)
+        .map_err(|error| format!("{R2O_PLAN_UNTRANSLATABLE}: {error}"))?;
     // C `install_next`: защита добавляется только к проводной копии, каталог
     // сохраняет исходный текст и его plan_ident.
     let plan_text = if r2o_discovery_rst_guard_wanted(target) {
@@ -8992,6 +9007,12 @@ fn r2o_discovery_candidate_wire_plan(
     } else {
         plan_text
     };
+    // C `install_next`: непереводимый текст отвергается до bind и trial,
+    // чтобы можно было перейти к следующему плану.
+    let bytes =
+        compile_text(&plan_text).map_err(|error| format!("{R2O_PLAN_UNTRANSLATABLE}: {error}"))?;
+    r2o_plan_records_for_wire(&bytes)
+        .map_err(|error| format!("{R2O_PLAN_UNTRANSLATABLE}: {error}"))?;
     Ok((plan_text, plan_id))
 }
 
@@ -16788,8 +16809,10 @@ group_block_proven: false,
                     outcome.retry_after = Some(R2O_DISCOVERY_CHALLENGE_RETRY);
                     return outcome;
                 }
+                let primary_untranslatable = r2o_discovery_plan_untranslatable(&result);
                 if primary_verified
                     || (!primary_from_owned_fallback
+                        && !primary_untranslatable
                         && !r2o_discovery_measured_fallback_allowed(
                             measured_arm_candidate,
                             &result,
@@ -49163,6 +49186,23 @@ mod tests {
                     let t = target("install.example", 4, SHAPE_MODERN);
                     let (wire, trial_nonzero, plan_nonzero, mark_value) =
                         tcp_frame(&t, &plan, 0x2d);
+                    (0, true, Some(wire), trial_nonzero, plan_nonzero, mark_value)
+                }
+                // C `install_next`: непереводимый план пропускается, ставится
+                // следующий; Rust продолжает запасной перебор.
+                "bad_plan_skip" => {
+                    let t = target("install.example", 4, SHAPE_MODERN);
+                    let bad = "d2k-plan 1 3\nid 00000000000000000000000000000000\n\
+                               proto tcp tls\nunknown 1\n";
+                    let error = super::r2o_discovery_candidate_wire_plan(&t, bad).unwrap_err();
+                    assert!(super::r2o_discovery_plan_untranslatable(&Err::<
+                        r2o_controller::fetch::FetchResult,
+                        String,
+                    >(
+                        error
+                    )));
+                    let (wire, trial_nonzero, plan_nonzero, mark_value) =
+                        tcp_frame(&t, TCP_PLAN, 0x2d);
                     (0, true, Some(wire), trial_nonzero, plan_nonzero, mark_value)
                 }
                 // C `install_next`: family_fast == 1 — stop без полного поиска.

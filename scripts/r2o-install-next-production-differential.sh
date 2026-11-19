@@ -48,13 +48,13 @@ import json
 import sys
 
 # C_ONLY: ветви, у которых в Rust нет одноимённого production-эквивалента:
-# ladder_unmeasurable, rx_bootstrap_only и продолжение перебора после
-# непереводимого плана. own_first==2 закрыт r2o_own_first_exhausted_outcome,
-# family_fast — записью cooldown вместо немедленной полной классификации,
-# cached_measure_valid — gate r2o_install_next_fallback_allowed.
+# ladder_unmeasurable и rx_bootstrap_only. own_first==2 закрыт
+# r2o_own_first_exhausted_outcome, family_fast — записью cooldown вместо
+# немедленной полной классификации, cached_measure_valid — gate
+# r2o_install_next_fallback_allowed, bad_plan_skip — маркером
+# R2O_PLAN_UNTRANSLATABLE и продолжением запасного перебора.
 C_ONLY = {
     "ladder_unmeasurable_skip",
-    "bad_plan_skip",
     "rx_bootstrap_stop",
 }
 KEYS = (
