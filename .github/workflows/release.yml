@@ -346,6 +346,6 @@ jobs:
             done
           sh scripts/verify-release-assets.sh "$verify" "$RELEASE_ID"
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" \
-            -F draft=false -F make_latest=true >/dev/null
+            -F draft=false -f make_latest=true >/dev/null
           latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
           test "$latest" = "$RELEASE_ID"
