@@ -7380,10 +7380,9 @@ impl R2oQuicNamedCache {
         trig_len: usize,
         trig_incomplete: bool,
     ) -> bool {
-        if by_addr {
-            return false;
-        }
-        if self.is_multi(name, family) {
+        // C `quic_split_unfit` (`sched.c:3463`): by_addr отключает только
+        // проверку quic_multi, но не проверку формы/полноты Initial.
+        if !by_addr && self.is_multi(name, family) {
             return true;
         }
         if snapped {
@@ -45995,6 +45994,11 @@ mod tests {
             u8::from(cache.split_unfit("clean.example", 4, true, true, 100, false))
         ));
         assert!(!cache.split_unfit("clean.example", 4, true, true, 100, false));
+        output.push_str(&format!(
+            "split_by_addr_no_snapshot={}\n",
+            u8::from(cache.split_unfit("clean.example", 4, true, false, 0, false))
+        ));
+        assert!(cache.split_unfit("clean.example", 4, true, false, 0, false));
 
         if let Ok(path) = std::env::var("R2O_QUIC_NAMED_MULTI_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();

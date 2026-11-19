@@ -47,6 +47,9 @@ int main(void)
     t.trig_len = 100;
     t.trig_snapped = 1;
     printf("split_by_addr=%d\n", quic_split_unfit(s, &t));
+    t.trig_snapped = 0;
+    t.trig_len = 0;
+    printf("split_by_addr_no_snapshot=%d\n", quic_split_unfit(s, &t));
     free(s);
     return 0;
 }
