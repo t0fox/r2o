@@ -120,6 +120,32 @@ Rust: boxes=1 bindings=1 tcp_profile=2 (TS)
 Тайминги: C `elapsed_ms=2940`; Rust от RST до подтверждения исполнения
 примерно 4.28 с по журналу.
 
+## Production deploy 2026-11-19
+
+На роутер выкачены бинарники с исправлениями:
+
+```text
+controller sha256 68b77b80c29363f50e0e3407373781434719ae9cf2d6d09afabaa75d57dc4a9d
+datapath   sha256 9ad749aaca68c9567d020304a815e12b432f71ca6a3953a0faffb16803d489cc
+```
+
+Старые бинарники сохранены в `/opt/r2o/state/r2o-*-backup-20261119-155700`.
+Первый `engine-restart` оставил старый datapath (PID 9890) и controller
+не подключился к отсутствующим сокетам. После ручной остановки старого
+datapath и повторного `engine-start` поднялись PID 12155 (datapath) и
+12227 (controller).
+
+Soak:
+
+```text
+NFQUEUE: 30/30 q4=0 q6=0
+HTTPS: 12/12 успешных
+  ya.ru 200 — 329, 227, 226, 218, 212, 238 мс
+  gstatic 204 — 134, 120, 128, 111, 137, 103 мс
+панель: boxes=12 targets=114 active=0 queued=0 — стабильно
+load average: 0.00–0.19
+```
+
 ## Ограничения
 
 - Box синтетический: TLS/HTTP и обрыв эмулируются локально, но режим один
