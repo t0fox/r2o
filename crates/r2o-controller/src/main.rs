@@ -5530,6 +5530,78 @@ fn matching_domain_recovery_candidates(
     candidates
 }
 
+/// C `rx_saved_bootstrap` (`sched.c:10859`): подтверждённый план этой цели
+/// для той же формы ClientHello. `allow_other_family` повторяет вызов C для
+/// ветки family_reuse; в обычном RX-пути false.
+#[cfg(unix)]
+fn matching_saved_bootstrap_candidates(
+    catalog: &Catalog,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    allow_other_family: bool,
+) -> Vec<R2oFamilyRecoveryCandidate> {
+    if target.shape != SHAPE_MODERN {
+        return Vec::new();
+    }
+    let mut best: Option<(&Binding, &r2o_controller::catalog::Plan, [u8; 16])> = None;
+    for box_record in &catalog.boxes {
+        for binding in &box_record.bindings {
+            let family = r2o_catalog_binding_family(binding);
+            if !binding.enabled
+                || binding.kind != "name"
+                || binding.target != target.host
+                || r2o_catalog_binding_transport(binding) != 6
+                || !matches!(family, 4 | 6)
+                || binding.shape != SHAPE_MODERN
+                || r2o_catalog_binding_is_weak(binding)
+                || (family != target.family && (!allow_other_family || binding.level < 3))
+            {
+                continue;
+            }
+            let Some(saved_plan) = box_record
+                .plans
+                .iter()
+                .find(|plan| plan.id == binding.plan_id && plan.enabled)
+            else {
+                continue;
+            };
+            if saved_plan.proto != "tls" || saved_plan.text.len() >= 4096 {
+                continue;
+            }
+            let Ok(bytes) = compile_text(&saved_plan.text) else {
+                continue;
+            };
+            let Ok(plan) = Plan::parse(&bytes) else {
+                continue;
+            };
+            if !shape_matches_plan(target.shape, &plan)
+                || r2o_datapath::engine::validate_runtime_plan(&plan).is_err()
+            {
+                continue;
+            }
+            let exact = family == target.family;
+            let best_exact = best.is_some_and(|(binding, _, _)| {
+                r2o_catalog_binding_family(binding) == target.family
+            });
+            if best.is_none()
+                || exact && !best_exact
+                || exact == best_exact
+                    && best
+                        .is_some_and(|(current, _, _)| r2o_catalog_binding_beats(binding, current))
+            {
+                best = Some((binding, saved_plan, plan.id));
+            }
+        }
+    }
+    best.map(|(_, plan, plan_id)| R2oFamilyRecoveryCandidate {
+        plan_id,
+        plan_text: plan.text.clone(),
+        group_plan: false,
+        probe_path: "/".into(),
+    })
+    .into_iter()
+    .collect()
+}
+
 /// Быстрый кандидат для эфемерного голосового узла `*.discord.media`:
 /// план, уже подтверждённый на соседнем узле того же суффикса. Возвращается
 /// только для голосового суффикса и только после сигнала молчания TCP, чтобы
@@ -7707,6 +7779,9 @@ struct R2oFamilyRecoveryTask {
     target: r2o_controller::discovery::DiscoveryTarget,
     candidates: Vec<R2oFamilyRecoveryCandidate>,
     mark: Option<u32>,
+    /// C `rx_saved_bootstrap`: после провала нужен полный classifier, а не
+    /// семейный cooldown.
+    bootstrap: bool,
 }
 
 #[cfg(unix)]
@@ -7724,6 +7799,7 @@ struct R2oFamilyRecoveryOutcome {
     plan_id: [u8; 16],
     result: Result<r2o_controller::fetch::FetchResult, String>,
     applied: bool,
+    bootstrap: bool,
 }
 
 #[cfg(unix)]
@@ -7808,6 +7884,7 @@ impl R2oFamilyRecoveryWorker {
         target: r2o_controller::discovery::DiscoveryTarget,
         candidates: Vec<R2oFamilyRecoveryCandidate>,
         mark: Option<u32>,
+        bootstrap: bool,
     ) -> bool {
         if candidates.is_empty() || !self.active.insert(target.clone()) {
             return false;
@@ -7821,6 +7898,7 @@ impl R2oFamilyRecoveryWorker {
             target: target.clone(),
             candidates,
             mark,
+            bootstrap,
         };
         match jobs.try_send(task) {
             Ok(()) => true,
@@ -7883,6 +7961,26 @@ impl Drop for R2oFamilyRecoveryWorker {
 enum R2oFamilyRecoveryDecision {
     Verified,
     Reclassify,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum R2oFamilyRecoveryFailureAction {
+    /// C `rx_bootstrap_only`: после провала bootstrap — полный classifier,
+    /// без fallback в той же фазе.
+    FullClassifier,
+    /// C `install_next`: family_fast после исчерпания семейных планов —
+    /// task_fail с отдыхом.
+    Cooldown,
+}
+
+#[cfg(unix)]
+fn r2o_family_recovery_failure_action(bootstrap: bool) -> R2oFamilyRecoveryFailureAction {
+    if bootstrap {
+        R2oFamilyRecoveryFailureAction::FullClassifier
+    } else {
+        R2oFamilyRecoveryFailureAction::Cooldown
+    }
 }
 
 #[cfg(unix)]
@@ -8215,6 +8313,7 @@ fn r2o_family_recovery_run(
         plan_id: task.candidates[0].plan_id,
         result: Err("не найден подходящий план семейного восстановления".to_owned()),
         applied: false,
+        bootstrap: task.bootstrap,
     };
     let destination = match task.target.endpoint.parse::<std::net::SocketAddr>() {
         Ok(destination) => destination,
@@ -23741,16 +23840,28 @@ impl ControlClient {
                             if let Some(worker) = &mut family_recovery {
                                 worker.complete(&outcome.target);
                             }
-                            // C `install_next` (`sched.c:4905`): `family_fast==1`
-                            // после исчерпания своих семейных планов возвращает
-                            // -1 и уходит в task_fail с отдыхом, а не в полный
-                            // поиск. Держим тот же cooldown; следующий suspect
-                            // снова попробует семейные планы, если они есть.
-                            if let Some((worker, _, _, _)) = &mut discovery {
-                                worker.record_install_failure(&outcome.target);
-                            }
+                            let bootstrap = outcome.bootstrap;
+                            let action = r2o_family_recovery_failure_action(bootstrap);
+                            let queued = match action {
+                                R2oFamilyRecoveryFailureAction::FullClassifier => {
+                                    discovery.as_mut().is_some_and(|(worker, _, _, _)| {
+                                        worker.queue_after_confirmed_failure(outcome.target.clone())
+                                    })
+                                }
+                                R2oFamilyRecoveryFailureAction::Cooldown => {
+                                    if let Some((worker, _, _, _)) = &mut discovery {
+                                        worker.record_install_failure(&outcome.target);
+                                    }
+                                    false
+                                }
+                            };
                             println!(
-                                "сохранённые планы семейного восстановления не подтвердились для {}: {}; повтор через {} с, полную классификацию сразу не запускаю",
+                                "сохранённые планы {} не подтвердились для {}: {}; {}",
+                                if bootstrap {
+                                    "bootstrap"
+                                } else {
+                                    "семейного восстановления"
+                                },
                                 outcome.target.host,
                                 outcome
                                     .result
@@ -23758,7 +23869,15 @@ impl ControlClient {
                                     .err()
                                     .map(String::as_str)
                                     .unwrap_or("HTTPS/APPLIED не прошли проверку"),
-                                R2O_DISCOVERY_FAILURE_RETRY.as_secs()
+                                if bootstrap {
+                                    if queued {
+                                        "запускаю полный classifier"
+                                    } else {
+                                        "полный classifier уже выполняется или очередь занята"
+                                    }
+                                } else {
+                                    "повтор через 120 с, полную классификацию сразу не запускаю"
+                                }
                             );
                             std::io::stdout().flush()?;
                             continue;
@@ -24246,15 +24365,37 @@ impl ControlClient {
                             }
                         }
                     } else {
-                        if let Some(target) = discovery_target.as_ref()
-                            && let Some((worker, _, _, _)) = &mut discovery
+                        // C `rx_saved_bootstrap`: TLS под TCP не поднялся —
+                        // сначала проверяем подтверждённый план этой цели,
+                        // а не ставим полный поиск и не отдыхаем.
+                        let mut bootstrap_queued = false;
+                        if outcome.result.rx_tls_unavailable
+                            && let Some(target) = discovery_target.as_ref()
+                            && let Some((_, catalog, _, mark)) = discovery.as_ref()
+                            && let Some(worker) = family_recovery.as_mut()
                         {
-                            worker.r2o_record_late_rst_only_cooldown(target);
+                            let candidates =
+                                matching_saved_bootstrap_candidates(catalog, target, false);
+                            if !candidates.is_empty() {
+                                bootstrap_queued =
+                                    worker.queue(target.clone(), candidates, *mark, true);
+                            }
                         }
-                        println!(
-                            "парная RX-проверка {host}: обрыв не подтверждён — {}",
-                            outcome.result.reason
-                        );
+                        if bootstrap_queued {
+                            println!(
+                                "парная RX-проверка {host}: TLS не поднялся — сначала проверяю сохранённый план bootstrap"
+                            );
+                        } else {
+                            if let Some(target) = discovery_target.as_ref()
+                                && let Some((worker, _, _, _)) = &mut discovery
+                            {
+                                worker.r2o_record_late_rst_only_cooldown(target);
+                            }
+                            println!(
+                                "парная RX-проверка {host}: обрыв не подтверждён — {}",
+                                outcome.result.reason
+                            );
+                        }
                     }
                     std::io::stdout().flush()?;
                     continue;
@@ -25040,7 +25181,7 @@ impl ControlClient {
                             let family_queued = has_family_candidates && {
                                 let mark = discovery.as_ref().and_then(|(_, _, _, mark)| *mark);
                                 family_recovery.as_mut().is_some_and(|worker| {
-                                    worker.queue(target.clone(), family_candidates, mark)
+                                    worker.queue(target.clone(), family_candidates, mark, false)
                                 })
                             };
                             if family_queued {
@@ -25120,7 +25261,7 @@ impl ControlClient {
                                         matching_sibling_recovery_candidates(catalog, &target);
                                     let family_queued = !candidates.is_empty()
                                         && family_recovery.as_mut().is_some_and(|worker| {
-                                            worker.queue(target.clone(), candidates, *mark)
+                                            worker.queue(target.clone(), candidates, *mark, false)
                                         });
                                     if family_queued {
                                         println!(
@@ -48701,6 +48842,143 @@ mod tests {
         if let Ok(path) = std::env::var("R2O_BIND_DEFAULT_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rx_saved_bootstrap_candidates_match_c_selection() {
+        use r2o_controller::catalog::{Binding, BoxRecord, Catalog, Plan as CatalogPlan};
+
+        fn plan_text(index: usize) -> String {
+            format!(
+                "d2k-plan 1 11\nid 00000000000000000000000000000000\n\
+                 proto tcp tls\nsplit sni_middle +{index}\n"
+            )
+        }
+
+        fn box_record(
+            id: &str,
+            plan_id: &str,
+            family: u8,
+            level: i32,
+            recheck: bool,
+            transport: u8,
+            plan_enabled: bool,
+        ) -> BoxRecord {
+            BoxRecord {
+                id: id.into(),
+                plans: vec![CatalogPlan {
+                    id: plan_id.into(),
+                    proto: "tls".into(),
+                    text: plan_text(id.as_bytes()[4] as usize - b'a' as usize),
+                    added: 0,
+                    successes: 0,
+                    enabled: plan_enabled,
+                }],
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: "boot.example".into(),
+                    plan_id: plan_id.into(),
+                    level,
+                    confirmed: id.as_bytes()[4] as i64 - b'a' as i64 + 1,
+                    successes: 0,
+                    enabled: true,
+                    transport,
+                    family,
+                    shape: SHAPE_MODERN,
+                    recheck_since: recheck.then_some(1),
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }
+        }
+
+        fn run_case(
+            label: &str,
+            catalog: &Catalog,
+            family: u8,
+            allow_other_family: bool,
+            output: &mut String,
+        ) {
+            let target = r2o_controller::discovery::DiscoveryTarget {
+                tcp_profile: 0,
+                host: "boot.example".into(),
+                endpoint: "198.51.100.20:443".into(),
+                family,
+                shape: SHAPE_MODERN,
+            };
+            let candidates =
+                super::matching_saved_bootstrap_candidates(catalog, &target, allow_other_family);
+            if let Some(candidate) = candidates.first() {
+                output.push_str(&format!(
+                    "case={label} found=1 plans={} plan={}\n",
+                    candidates.len(),
+                    candidate.plan_text.replace('\n', ";")
+                ));
+            } else {
+                output.push_str(&format!("case={label} found=0 plans=0\n"));
+            }
+        }
+
+        let mut output = String::new();
+        let mut catalog = Catalog {
+            boxes: vec![
+                box_record("box-a", "plan-a", 4, 3, false, 6, true),
+                box_record("box-b", "plan-b", 4, 3, false, 6, true),
+            ],
+            ..Catalog::default()
+        };
+        catalog.boxes[1].bindings[0].confirmed = 20;
+        run_case("same_family_best", &catalog, 4, false, &mut output);
+
+        catalog
+            .boxes
+            .push(box_record("box-c", "plan-c", 6, 3, false, 6, true));
+        catalog.boxes[2].bindings[0].confirmed = 99;
+        run_case("exact_family_wins", &catalog, 4, false, &mut output);
+
+        catalog.boxes.truncate(1);
+        catalog.boxes[0].bindings[0].family = 6;
+        run_case("other_family_denied", &catalog, 4, false, &mut output);
+        run_case("other_family_allowed", &catalog, 4, true, &mut output);
+        catalog.boxes[0].bindings[0].family = 4;
+
+        catalog.boxes[0].bindings[0].level = 2;
+        run_case("weak_level", &catalog, 4, false, &mut output);
+        catalog.boxes[0].bindings[0].level = 3;
+
+        catalog.boxes[0].bindings[0].recheck_since = Some(1);
+        run_case("recheck", &catalog, 4, false, &mut output);
+        catalog.boxes[0].bindings[0].recheck_since = None;
+
+        catalog.boxes[0].bindings[0].shape = SHAPE_LEGACY;
+        run_case("wrong_shape", &catalog, 4, false, &mut output);
+        catalog.boxes[0].bindings[0].shape = SHAPE_MODERN;
+
+        catalog.boxes[0].bindings[0].transport = 17;
+        run_case("quic_transport", &catalog, 4, false, &mut output);
+        catalog.boxes[0].bindings[0].transport = 6;
+
+        catalog.boxes[0].plans[0].enabled = false;
+        run_case("disabled_plan", &catalog, 4, false, &mut output);
+        catalog.boxes[0].plans[0].enabled = true;
+
+        if let Ok(path) = std::env::var("R2O_RX_SAVED_BOOTSTRAP_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bootstrap_failure_requests_full_classifier_like_c() {
+        assert_eq!(
+            super::r2o_family_recovery_failure_action(true),
+            super::R2oFamilyRecoveryFailureAction::FullClassifier
+        );
+        assert_eq!(
+            super::r2o_family_recovery_failure_action(false),
+            super::R2oFamilyRecoveryFailureAction::Cooldown
+        );
     }
 
     #[cfg(unix)]
