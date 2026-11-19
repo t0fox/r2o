@@ -1300,6 +1300,11 @@ fn raw_probe_once(
     offer_ts: bool,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<bool, ProbeError> {
+    // Решение принимается по первому ответу сервера: рабочий обход отвечает
+    // за единицы RTT, а молчание уже наступило. Ждать шесть секунд на каждую
+    // отрицательную гипотезу — это минуты перебора без пользы.
+    const PROBE_TIMEOUT_CAP: Duration = Duration::from_millis(2_500);
+    let timeout = timeout.min(PROBE_TIMEOUT_CAP);
     #[cfg(test)]
     if let Some(outcome) = test_script::take(&poison.name) {
         return match outcome {

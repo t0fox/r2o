@@ -11052,10 +11052,14 @@ const R2O_DISCOVERY_WORKER_IDLE: std::time::Duration = std::time::Duration::from
 /// Общий idle-таймаут простаивающих on-demand worker'ов.
 #[cfg(unix)]
 const R2O_ON_DEMAND_WORKER_IDLE: std::time::Duration = std::time::Duration::from_secs(10);
-// Matches SCHED_REST_MS: failed and direct-clear tasks keep a scheduler slot for two minutes.
-const R2O_DISCOVERY_TASK_REST: std::time::Duration = std::time::Duration::from_secs(120);
+// Отдых после неудачной задачи: короче, чтобы живой клиент не ждал
+// минуты, пока движок повторит замер с новыми кандидатами.
+const R2O_DISCOVERY_TASK_REST: std::time::Duration = std::time::Duration::from_secs(60);
 #[cfg(unix)]
-const R2O_DISCOVERY_TASK_LIFETIME: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+// Бюджет одной задачи. Одна цель не должна держать общую очередь десять
+// минут: приоритетные пробы дают результат меньше чем за минуту, а
+// остаток лучше повторить отдельной задачей.
+const R2O_DISCOVERY_TASK_LIFETIME: std::time::Duration = std::time::Duration::from_secs(150);
 #[cfg(unix)]
 fn r2o_discovery_trial_time_available(elapsed: std::time::Duration) -> bool {
     r2o_controller::quic_replay::r2o_quic_budget_left_elapsed(elapsed, R2O_DISCOVERY_TASK_LIFETIME)
@@ -11096,7 +11100,7 @@ const R2O_DISCOVERY_ECH_RR_NEGATIVE_TTL: std::time::Duration =
 const R2O_DISCOVERY_RX_LADDER_BATCH: usize = 8;
 const R2O_ECH_RX_LADDER_BATCH: usize = R2O_DISCOVERY_RX_LADDER_BATCH;
 #[cfg(unix)]
-const R2O_DISCOVERY_FAILURE_RETRY: std::time::Duration = std::time::Duration::from_secs(120);
+const R2O_DISCOVERY_FAILURE_RETRY: std::time::Duration = std::time::Duration::from_secs(45);
 #[cfg(unix)]
 const R2O_DISCOVERY_CHALLENGE_RETRY: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 #[cfg(unix)]
@@ -16267,12 +16271,18 @@ group_block_proven: false,
                         }
                     }
                 }
-                // C `install_next` (`sched.c:4910`): после своих планов
-                // `own_first == 2` запасной перебор не запускается. Полный
-                // классификатор здесь тоже не повторяем — база уже ответила,
-                // своих подтверждённых планов не хватило, а C уходит в
-                // task_fail с отдыхом, а не в новый замер.
-                return r2o_own_first_exhausted_outcome(target);
+                // Свои подтверждённые планы не подошли — это не повод
+                // возвращать отказ: цель остаётся заблокированной, а движку
+                // нужен настоящий замер. Уходим в полный классификатор.
+                if cancel.load(Ordering::Relaxed)
+                    || !r2o_discovery_trial_time_available(runner_started.elapsed())
+                {
+                    return r2o_own_first_exhausted_outcome(target);
+                }
+                println!(
+                    "свои планы не подошли для {}: запускаю полную классификацию",
+                    target.host
+                );
             }
             drop(progress);
             let progress_searches = Arc::clone(&runner_searches);
@@ -21742,7 +21752,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
             mark,
             repeats: 3,
             gap_us: 60_000,
-            wait_ms: 6_000,
+            wait_ms: 2_500,
             stop: None,
             client_tcp_has_timestamps: Some(r2o_controller::classify::client_offers_ts(
                 client_tcp_has_timestamps,
