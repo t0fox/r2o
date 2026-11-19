@@ -323,6 +323,48 @@ component_running() {
     esac
 }
 
+# Погасить все процессы компонента, даже если pid-файл потерян или
+# перезаписан неудачным запуском. Иначе старый datapath держит NFQUEUE и
+# удалённые control-сокеты, а новый controller не может к ним подключиться.
+stop_component_processes() {
+    component=$1
+    attempt=0
+    while [ "$attempt" -lt 50 ]; do
+        alive=0
+        for link in "$PROC"/[0-9]*/exe; do
+            [ -L "$link" ] || continue
+            exe=$(readlink "$link" 2>/dev/null) || continue
+            case "$exe" in
+                "$ROOT"/releases/*/builds/"$component"-linux-*) ;;
+                *) continue ;;
+            esac
+            pid=${link#"$PROC"/}
+            pid=${pid%/exe}
+            if [ "$attempt" -eq 0 ]; then
+                kill -TERM "$pid" 2>/dev/null || true
+            fi
+            alive=1
+        done
+        [ "$alive" -eq 0 ] && return 0
+        if [ "$attempt" -ge 10 ]; then
+            for link in "$PROC"/[0-9]*/exe; do
+                [ -L "$link" ] || continue
+                exe=$(readlink "$link" 2>/dev/null) || continue
+                case "$exe" in
+                    "$ROOT"/releases/*/builds/"$component"-linux-*) ;;
+                    *) continue ;;
+                esac
+                pid=${link#"$PROC"/}
+                pid=${pid%/exe}
+                kill -KILL "$pid" 2>/dev/null || true
+            done
+        fi
+        attempt=$((attempt + 1))
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    return 0
+}
+
 stop_component() {
     component=$1
     pidfile=$2
@@ -339,6 +381,7 @@ stop_component() {
             case "$exe" in "$ROOT"/releases/*/builds/"$component"-linux-*) kill -KILL "$pid" 2>/dev/null || true ;; esac
         fi
     fi
+    stop_component_processes "$component"
     rm -f "$pidfile"
 }
 
