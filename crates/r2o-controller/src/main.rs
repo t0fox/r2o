@@ -49121,6 +49121,49 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn trial_retire_question_then_candidate_matches_c() {
+        fn frame(port: u16) -> String {
+            r2k_core::control::encode_delete_name_probe(
+                "retire.example",
+                r2k_core::control::SHAPE_MODERN,
+                4,
+                port,
+            )
+            .unwrap()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+        }
+        let mut output = String::new();
+        for (label, question, trial) in [
+            ("both", true, true),
+            ("question", true, false),
+            ("candidate", false, true),
+            ("none", false, false),
+        ] {
+            let mut frames = Vec::new();
+            if question {
+                frames.push(frame(41_000));
+            }
+            if trial {
+                frames.push(frame(40_123));
+            }
+            output.push_str(&format!(
+                "case={label} frames={}\n",
+                if frames.is_empty() {
+                    "none".to_string()
+                } else {
+                    frames.join(",")
+                }
+            ));
+        }
+        if let Ok(path) = std::env::var("R2O_TRIAL_RETIRE_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn install_next_production_matches_c() {
         use r2k_core::control::{
             ADDR_PROBE_LEASE_MAX_MS, COMMAND_SET_ADDR_PROBE, COMMAND_SET_NAME_PROBE,
