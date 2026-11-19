@@ -16,24 +16,23 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Полный цикл выпуска через gh api
+      - name: Полный цикл выпуска через API
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           tag="r2o-diag-api-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          payload=$(mktemp)
-          jq -n --arg tag "$tag" --arg target "$GITHUB_SHA" --arg name "$tag" \
-            --arg body "diagnostic" \
-            '{tag_name:$tag,target_commitish:$target,name:$name,body:$body,draft:true,prerelease:false}' \
-            > "$payload"
-          response=$(gh api --method POST "repos/$GITHUB_REPOSITORY/releases" --input "$payload")
+          response=$(gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
+            -f tag_name="$tag" -F draft=true -F prerelease=false \
+            -f target_commitish="$GITHUB_SHA" -f name="$tag" -f body="diagnostic")
           id=$(printf '%s' "$response" | jq -r .id)
           printf 'asset\n' > "$RUNNER_TEMP/asset.txt"
-          gh api --method POST \
-            "repos/$GITHUB_REPOSITORY/releases/$id/assets?name=asset.txt" \
-            --input "$RUNNER_TEMP/asset.txt" \
-            -H "Content-Type: application/octet-stream" >/dev/null
+          curl -fsS --retry 3 -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @"$RUNNER_TEMP/asset.txt" \
+            "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$id/assets?name=asset.txt" \
+            >/dev/null
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$id" \
             -F draft=false >/dev/null
           gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
