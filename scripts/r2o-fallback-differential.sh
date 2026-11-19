@@ -2,7 +2,7 @@
 set -eu
 root=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
 donor=${R2O_DONOR_ROOT:-"${root%/*}/d2o"}
-test "$(git -C "$donor" rev-parse HEAD)" = a378e230947ebfd011439e1cac0f1e994d883aae
+test "$(git -C "$donor" rev-parse HEAD)" = 7a5fab97a1a7f0f00ebb906dba7ed568cdc0ca05
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 clang-18 -std=gnu11 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections \

@@ -3,7 +3,7 @@ set -eu
 
 root=$(CDPATH='' cd -P "$(dirname "$0")/.." && pwd)
 donor=${R2O_DONOR_ROOT:-"${root%/*}/d2o"}
-expected_donor_sha=a378e230947ebfd011439e1cac0f1e994d883aae
+expected_donor_sha=7a5fab97a1a7f0f00ebb906dba7ed568cdc0ca05
 test "$(git -C "$donor" rev-parse HEAD)" = "$expected_donor_sha"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
