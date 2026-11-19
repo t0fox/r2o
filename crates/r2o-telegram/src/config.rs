@@ -516,8 +516,16 @@ impl Config {
         let mut command = Self::command();
         command.build();
         let matches = command
-            .mut_arg("help", |argument| argument.help("Показать эту справку"))
-            .mut_arg("version", |argument| argument.help("Показать версию"))
+            .mut_arg("help", |argument| {
+                argument
+                    .help("Показать эту справку")
+                    .long_help("Показать эту справку")
+            })
+            .mut_arg("version", |argument| {
+                argument
+                    .help("Показать версию")
+                    .long_help("Показать версию")
+            })
             .get_matches();
         let config = Self::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
         validate_cf_worker_domain_count(config.cf_worker_domains.len()).unwrap_or_else(|error| {
