@@ -487,7 +487,7 @@
     }
     if (Motion.on() && !options.instant) {
       var g = Motion.g;
-      var parts = [].slice.call(screen.querySelectorAll(".screen-head, .status-panel, .overview-metric, .metric-card, .card, .family-card, .box-card, .diag-card, .tg-flow, .release-hero, .diag-history"));
+      var parts = [].slice.call(screen.querySelectorAll(".screen-head, .status-panel, .overview-metric, .metric-card, .card, .family-card, .box-card, .diag-card, .tg-proxy, .release-hero, .diag-history"));
       if (screen.id === "now") parts = [].slice.call(screen.querySelectorAll(".status-panel, .overview-metrics, .workload-card, .overview-side > *"));
       g.killTweensOf(screen);
       g.killTweensOf(parts);
@@ -554,7 +554,7 @@
       { id: "now", title: "Обзор", meta: "Состояние движка и живые поиски", icon: "i-overview" },
       { id: "families", title: "Семейства", meta: "Подтверждённые суффиксы и исключения", icon: "i-families" },
       { id: "boxes", title: "Коробки", meta: "Поведение блокировок, планы и привязки", icon: "i-boxes" },
-      { id: "telegram", title: "Telegram-туннель", meta: "Служба, маршруты DC1–DC5 и Workers", icon: "i-telegram" },
+      { id: "telegram", title: "Telegram-прокси", meta: "Служба, маршруты DC1–DC5 и Workers", icon: "i-telegram" },
       { id: "updates", title: "Обновления", meta: "Выпуски, автообновление и заметки", icon: "i-updates" },
       { id: "diagnostics", title: "Диагностика", meta: "Цепочка движка, память и подборы", icon: "i-diagnostics" }
     ];
@@ -1028,7 +1028,7 @@
         services.__r2oKey = serviceKey;
         services.replaceChildren();
         [
-          { route: "telegram", icon: "i-telegram", title: "Telegram-туннель", note: info.note, state: info.word, tone: st === "connected" || st === "local" ? "live" : info.lamp === "bad" ? "bad" : info.lamp === "warn" ? "warn" : "" },
+          { route: "telegram", icon: "i-telegram", title: "Telegram-прокси", note: info.note, state: info.word, tone: st === "connected" || st === "local" ? "live" : info.lamp === "bad" ? "bad" : info.lamp === "warn" ? "warn" : "" },
           { route: "updates", icon: "i-updates", title: "Обновления", note: updateState, state: newer ? "новая" : "проверка", tone: updateTone },
           { route: "diagnostics", icon: "i-diagnostics", title: "Диагностика", note: broken ? count(broken, "звено", "звена", "звеньев") + " без подтверждения" : "все звенья на месте", state: broken ? "!" + broken : "ок", tone: broken ? "warn" : "ok" }
         ].forEach(function (item) {
@@ -1100,11 +1100,15 @@
     }
     var tm = this.$("telegram-meta");
     if (tm) {
-      var tgKey = JSON.stringify([st, info.word]);
+      var metaWord = st === "local" ? "Работает"
+        : st === "connected" ? "Подключён"
+          : st === "connecting" ? "Подключение"
+            : st === "unavailable" ? "Нет маршрута" : info.word;
+      var tgKey = JSON.stringify([st, metaWord]);
       if (tm.__r2oKey !== tgKey) {
         tm.__r2oKey = tgKey;
         tm.replaceChildren();
-        var chip = el(doc, "span", "meta-chip", info.word);
+        var chip = el(doc, "span", "meta-chip", metaWord);
         chip.setAttribute("data-tone", st === "connected" || st === "local" ? "live" : info.lamp === "bad" ? "bad" : info.lamp === "warn" ? "warn" : "");
         tm.appendChild(chip);
       }
@@ -2450,58 +2454,93 @@
   /* ─── Telegram ─── */
 
   var TG = {
-    connected: { word: "Подключён", lamp: "ok", on: true, note: "Туннель включён. Получен подтверждённый ответ Telegram." },
-    connecting: { word: "Подключается", lamp: "warn", on: true, note: "Туннель включается. Служба проверяет доступные маршруты." },
-    local: { word: "Локальный прокси", lamp: "warn", on: true, note: "Туннель включён. Прокси запущен, подтверждённого ответа Telegram пока нет." },
-    unavailable: { word: "Маршрут недоступен", lamp: "bad", on: true, note: "Туннель включён, но активный маршрут Telegram недоступен." },
-    stopped: { word: "Остановлен", lamp: "idle", on: false, note: "Туннель выключен. Служба не запущена." },
-    not_configured: { word: "Не настроен", lamp: "idle", on: false, note: "Туннель не настроен. Для C11 укажите TG_MODE=local в конфигурации." }
+    connected: { word: "Подключён", lamp: "ok", on: true, note: "Прокси работает. Получен подтверждённый ответ Telegram." },
+    connecting: { word: "Подключается", lamp: "warn", on: true, note: "Прокси запускается и проверяет доступные маршруты." },
+    local: { word: "Локальный прокси", lamp: "warn", on: true, note: "Прокси работает. Подтверждённого ответа Telegram пока нет." },
+    unavailable: { word: "Маршрут недоступен", lamp: "bad", on: true, note: "Прокси работает, но активный маршрут Telegram недоступен." },
+    stopped: { word: "Остановлен", lamp: "idle", on: false, note: "Прокси выключен. Служба не запущена." },
+    not_configured: { word: "Не настроен", lamp: "idle", on: false, note: "Прокси не настроен. Для C11 укажите TG_MODE=local в конфигурации." }
   };
 
-  function tunnelScene(doc) {
-    var root = el(doc, "div", "tg-flow");
-    var top = el(doc, "div", "tg-flow-top");
-    var status = el(doc, "div", "tg-flow-status");
-    var title = el(doc, "h3", "tg-flow-title");
-    var lamp = el(doc, "span", "tg-flow-lamp");
-    lamp.setAttribute("data-tg-state-lamp", "");
-    lamp.setAttribute("aria-hidden", "true");
-    var titleText = el(doc, "span", "", "Локальный прокси");
-    titleText.setAttribute("data-tg-state-title", "");
-    var badge = el(doc, "span", "meta-chip", "Выключен");
+  function proxyScene(doc) {
+    var root = el(doc, "div", "tg-proxy");
+    var hero = el(doc, "section", "tg-hero");
+    var orb = el(doc, "div", "tg-orb");
+    orb.setAttribute("aria-hidden", "true");
+    orb.append(el(doc, "span", "tg-orb-ring"), el(doc, "span", "tg-orb-core"));
+    var copy = el(doc, "div", "tg-hero-copy");
+    var titleRow = el(doc, "div", "tg-title-row");
+    titleRow.append(el(doc, "h3", "tg-title", "Telegram-прокси"));
+    var badge = el(doc, "span", "tg-status", "Остановлен");
     badge.setAttribute("data-tg-state-badge", "");
     badge.setAttribute("data-tone", "idle");
-    title.append(lamp, titleText, badge);
-    var note = el(doc, "p", "tg-state-note", "Служба не запущена.");
+    titleRow.appendChild(badge);
+    var note = el(doc, "p", "tg-note", "Прокси выключен. Служба не запущена.");
     note.setAttribute("data-tg-state-note", "");
-    var actions = el(doc, "div", "tg-flow-actions");
+    var meta = el(doc, "div", "tg-meta");
+    var portChip = el(doc, "span", "tg-chip");
+    portChip.append(el(doc, "span", "", "Порт"), el(doc, "b", "", "1443"));
+    portChip.lastChild.setAttribute("data-tg-port", "");
+    var modeChip = el(doc, "span", "tg-chip");
+    modeChip.append(el(doc, "span", "", "Режим"), el(doc, "b", "", "MTProto → WSS"));
+    var routeChip = el(doc, "span", "tg-chip");
+    routeChip.append(el(doc, "span", "", "Маршрут"), el(doc, "b", "", "—"));
+    routeChip.lastChild.setAttribute("data-tg-route", "");
+    meta.append(portChip, modeChip, routeChip);
+    copy.append(titleRow, note, meta);
+    var actions = el(doc, "div", "tg-actions");
     actions.setAttribute("data-tg-actions", "");
-    status.append(title, note);
-    top.append(status, actions);
+    hero.append(orb, copy, actions);
 
-    var stage = el(doc, "div", "tg-flow-stage");
-    var canvas = el(doc, "canvas", "tg-flow-canvas");
-    canvas.width = 960;
-    canvas.height = 420;
-    canvas.setAttribute("role", "img");
-    canvas.setAttribute("aria-label", "Поток соединений: клиент → r2o → Telegram DC");
-    stage.appendChild(canvas);
-    var caption = el(doc, "p", "tg-flow-caption", "Прокси устанавливает соединение");
-    caption.id = "tg-flow-caption";
-    var metrics = el(doc, "div", "tg-flow-metrics");
+    var stats = el(doc, "section", "tg-stats");
     [
       ["Сессии сейчас", "data-tg-active-count"],
-      ["Всего подключений", "data-tg-accepted-count"],
-      ["Ответы Telegram", "data-tg-confirmed-count"],
-      ["Задержка p50 / p95", "data-tg-latency"],
-      ["WSS отказы / попытки", "data-tg-wss"],
-      ["Трафик ↑ / ↓", "data-tg-traffic"]
-    ].forEach(function (item) {
-      var metric = el(doc, "div", "tg-flow-metric");
-      metric.append(el(doc, "span", "", item[0]), el(doc, "b", "", "0"));
-      metric.lastChild.setAttribute(item[1], "");
-      metrics.appendChild(metric);
+      ["Подключения", "data-tg-accepted-count"],
+      ["MTProto успешно", "data-tg-confirmed-count"],
+      ["Ошибки", "data-tg-failure-count"],
+      ["Трафик ↑ / ↓", "data-tg-traffic"],
+      ["Задержка p50 / p95", "data-tg-latency"]
+    ].forEach(function (item, index) {
+      var card = el(doc, "div", "tg-stat");
+      card.style.setProperty("--tg-delay", (index * 45) + "ms");
+      var value = el(doc, "b", "tg-stat-value", "—");
+      value.setAttribute(item[1], "");
+      card.append(el(doc, "span", "tg-stat-label", item[0]), value);
+      stats.appendChild(card);
     });
+
+    var routes = el(doc, "section", "tg-routes");
+    var routesHead = el(doc, "div", "tg-routes-head");
+    routesHead.append(el(doc, "h4", "", "Маршруты"));
+    routesHead.append(el(doc, "span", "", "Direct WSS · Worker · Cloudflare · TCP"));
+    routes.appendChild(routesHead);
+    var routeGrid = el(doc, "div", "tg-route-grid");
+    [
+      ["direct_wss", "Прямой WSS"],
+      ["cloudflare_worker", "Cloudflare Worker"],
+      ["cloudflare_proxy", "Прокси Cloudflare"],
+      ["tcp_passthrough", "Прямой TCP"]
+    ].forEach(function (item, index) {
+      var card = el(doc, "article", "tg-route");
+      card.setAttribute("data-tg-route-index", String(index));
+      card.setAttribute("data-state", "idle");
+      card.style.setProperty("--tg-delay", (170 + index * 55) + "ms");
+      var head = el(doc, "div", "tg-route-head");
+      head.append(el(doc, "span", "tg-route-dot"), el(doc, "strong", "", item[1]));
+      var status = el(doc, "span", "tg-route-status", "резерв");
+      status.setAttribute("data-tg-route-status", "");
+      head.appendChild(status);
+      var foot = el(doc, "div", "tg-route-foot");
+      var count = el(doc, "span", "", "сессий: 0");
+      count.setAttribute("data-tg-route-count", "");
+      var confirmed = el(doc, "span", "", "ответов: 0");
+      confirmed.setAttribute("data-tg-route-confirmed", "");
+      foot.append(count, confirmed);
+      card.append(head, foot, el(doc, "span", "tg-route-bar"));
+      routeGrid.appendChild(card);
+    });
+    routes.appendChild(routeGrid);
+
     var diagnostics = el(doc, "details", "tg-check-details");
     var diagnosticSummary = el(doc, "summary", "", "Проверка маршрутов DC1–DC5");
     var diagnosticState = el(doc, "p", "tg-check-state", "Активная проверка ещё не запускалась.");
@@ -2513,11 +2552,18 @@
     var diagnosticCenters = el(doc, "div", "tg-check-centers");
     diagnosticCenters.setAttribute("data-tg-check-centers", "");
     diagnostics.append(diagnosticSummary, diagnosticState, diagnosticTime, diagnosticCenters);
-    root.append(top, stage, caption, metrics, diagnostics);
-    if (global.R2oTelegramFlow && global.R2oTelegramFlow.mountTelegramFlow) {
-      root.__flow = global.R2oTelegramFlow.mountTelegramFlow(canvas);
-    }
+
+    root.append(hero, stats, routes, diagnostics);
     return root;
+  }
+
+  function flashTelegramValue(node, value) {
+    if (!node || node.textContent === value) return;
+    node.textContent = value;
+    node.classList.remove("is-updated");
+    void node.offsetWidth;
+    node.classList.add("is-updated");
+    setTimeout(function () { node.classList.remove("is-updated"); }, 600);
   }
 
   function updateTelegramMetrics(ui, stats) {
@@ -2526,23 +2572,7 @@
     var active = stats ? String(Math.max(0, Number(stats.active_connections) || 0)) : "—";
     var total = stats ? String(Math.max(0, Number(stats.accepted_connections) || 0)) : "—";
     var confirmed = stats ? String(Math.max(0, Number(rustStats ? stats.mtproto_success : stats.wss_responses) || 0)) : "—";
-    var activeNode = scene.querySelector("[data-tg-active-count]");
-    var totalNode = scene.querySelector("[data-tg-accepted-count]");
-    var confirmedNode = scene.querySelector("[data-tg-confirmed-count]");
-    var latencyNode = scene.querySelector("[data-tg-latency]");
-    var wssNode = scene.querySelector("[data-tg-wss]");
-    var trafficNode = scene.querySelector("[data-tg-traffic]");
-    var confirmedLabel = confirmedNode && confirmedNode.parentElement.querySelector("span");
-    var wssLabel = wssNode && wssNode.parentElement.querySelector("span");
-    var trafficLabel = trafficNode && trafficNode.parentElement.querySelector("span");
-    if (confirmedLabel) confirmedLabel.textContent = rustStats ? "Успехи MTProto" : "Ответы Telegram";
-    if (wssLabel) wssLabel.textContent = rustStats ? "MTProto отказы / результаты" : "WSS отказы / попытки";
-    if (trafficLabel) trafficLabel.textContent = rustStats &&
-      !(Number.isFinite(Number(stats.bytes_from_clients)) && Number.isFinite(Number(stats.bytes_from_upstreams)))
-      ? "Трафик ↑ / ↓ (нет данных)" : "Трафик ↑ / ↓";
-    if (activeNode && activeNode.textContent !== active) activeNode.textContent = active;
-    if (totalNode && totalNode.textContent !== total) totalNode.textContent = total;
-    if (confirmedNode && confirmedNode.textContent !== confirmed) confirmedNode.textContent = confirmed;
+    var failures = stats ? String(Math.max(0, Number(rustStats ? stats.mtproto_failure : stats.wss_failures) || 0)) : "—";
     var latencySamples = Number(stats && stats.client_response_latency_samples) || 0;
     var p50us = Number(stats && stats.client_response_latency_p50_us);
     var p95us = Number(stats && stats.client_response_latency_p95_us);
@@ -2554,14 +2584,48 @@
       : rustTtfb.length === 1 && Number.isFinite(Number(rustTtfb[0].p50_ms)) && Number.isFinite(Number(rustTtfb[0].p95_ms))
         ? telegramMilliseconds(rustTtfb[0].p50_ms).replace(/ мс$/, "") + " / " + telegramMilliseconds(rustTtfb[0].p95_ms)
         : "—";
-    var wss = rustStats
-      ? (Number(stats.mtproto_failure) || 0) + " / " + ((Number(stats.mtproto_success) || 0) + (Number(stats.mtproto_failure) || 0))
-      : stats ? (Number(stats.wss_failures) || 0) + " / " + (Number(stats.wss_attempts) || 0) : "—";
     var hasTraffic = stats && Number.isFinite(Number(stats.bytes_from_clients)) && Number.isFinite(Number(stats.bytes_from_upstreams));
     var traffic = hasTraffic ? telegramBytes(stats.bytes_from_clients) + " / " + telegramBytes(stats.bytes_from_upstreams) : "—";
-    if (latencyNode && latencyNode.textContent !== latency) latencyNode.textContent = latency;
-    if (wssNode && wssNode.textContent !== wss) wssNode.textContent = wss;
-    if (trafficNode && trafficNode.textContent !== traffic) trafficNode.textContent = traffic;
+    flashTelegramValue(scene.querySelector("[data-tg-active-count]"), active);
+    flashTelegramValue(scene.querySelector("[data-tg-accepted-count]"), total);
+    flashTelegramValue(scene.querySelector("[data-tg-confirmed-count]"), confirmed);
+    flashTelegramValue(scene.querySelector("[data-tg-failure-count]"), failures);
+    flashTelegramValue(scene.querySelector("[data-tg-traffic]"), traffic);
+    flashTelegramValue(scene.querySelector("[data-tg-latency]"), latency);
+  }
+
+  function updateTelegramRoutes(ui, stats) {
+    var flow = global.R2oTelegramFlow && global.R2oTelegramFlow.summarizeTelegramFlow
+      ? global.R2oTelegramFlow.summarizeTelegramFlow(stats) : null;
+    var lanes = flow && Array.isArray(flow.lanes) ? flow.lanes : [];
+    var labels = {
+      idle: "резерв", selected: "активен", connecting: "подключение",
+      connected: "готов", race: "гонка", cooldown: "пауза",
+      failed: "отказ", cancelled: "отменён", skipped: "пропуск"
+    };
+    ui.routeCards.forEach(function (entry, index) {
+      var lane = lanes[index];
+      var status = lane ? lane.status : "idle";
+      var counts = lane && lane.counts ? lane.counts : {};
+      var selected = Number(counts.selected) || 0;
+      var connecting = (Number(counts.connecting) || 0) + (Number(counts.race) || 0);
+      var confirmed = lane && Number(lane.confirmed) || 0;
+      entry.card.setAttribute("data-state", status);
+      entry.card.setAttribute("data-tone",
+        status === "selected" || status === "connected" ? "ok"
+          : status === "failed" ? "bad"
+            : status === "connecting" || status === "race" || status === "cooldown" ? "warn" : "idle");
+      if (entry.status.textContent !== (labels[status] || "резерв")) {
+        entry.status.textContent = labels[status] || "резерв";
+      }
+      flashTelegramValue(entry.count, selected ? "сессий: " + selected
+        : connecting ? "попыток: " + connecting : "сессий: 0");
+      flashTelegramValue(entry.confirmed, "ответов: " + confirmed);
+    });
+    if (ui.route) {
+      var routeText = flow ? flow.transportLabel : "—";
+      if (ui.route.textContent !== routeText) ui.route.textContent = routeText;
+    }
   }
 
   function renderTelegramDiagnostics(root, report) {
@@ -2645,7 +2709,7 @@
     var busy = snap.control_state === "running" || !!this.pending;
     var body = this.$("telegram-body");
     var stale = doc.body.getAttribute("data-stale") === "true";
-    var key = JSON.stringify([st, snap.telegram_enabled, snap.telegram_configured, stats, snap.telegram_diagnostics,
+    var key = JSON.stringify([st, snap.telegram_enabled, snap.telegram_configured, snap.telegram_port, stats, snap.telegram_diagnostics,
       snap.controls_enabled, busy, this.pending, stale]);
     if (!force && body.__r2oKey === key) return;
     var focused = doc.activeElement && body.contains(doc.activeElement)
@@ -2653,34 +2717,47 @@
     body.__r2oKey = key;
     var ui = body.__tgUi;
     if (!ui) {
-      var scene = tunnelScene(doc);
+      var scene = proxyScene(doc);
       ui = body.__tgUi = {
         scene: scene,
-        lamp: scene.querySelector("[data-tg-state-lamp]"),
         badge: scene.querySelector("[data-tg-state-badge]"),
-        word: scene.querySelector("[data-tg-state-title]"),
         note: scene.querySelector("[data-tg-state-note]"),
+        port: scene.querySelector("[data-tg-port]"),
+        route: scene.querySelector("[data-tg-route]"),
         actions: scene.querySelector("[data-tg-actions]"),
+        routeCards: Array.prototype.map.call(
+          scene.querySelectorAll("[data-tg-route-index]"),
+          function (card) {
+            return {
+              card: card,
+              status: card.querySelector("[data-tg-route-status]"),
+              count: card.querySelector("[data-tg-route-count]"),
+              confirmed: card.querySelector("[data-tg-route-confirmed]")
+            };
+          })
       };
       body.replaceChildren(scene);
-      if (ui.scene.__flow) ui.scene.__flow.attach();
     }
-    ui.lamp.setAttribute("data-tone", info.lamp);
-    ui.lamp.setAttribute("aria-label", info.word);
     if (ui.badge) {
-      var badgeText = info.on ? "Включён" : "Выключен";
+      var badgeText = st === "not_configured" ? "Не настроен"
+        : st === "unavailable" ? "Нет маршрута"
+          : st === "connecting" ? "Подключение"
+            : info.on ? "Работает" : "Остановлен";
       if (ui.badge.textContent !== badgeText) ui.badge.textContent = badgeText;
-      var badgeTone = !info.on ? "idle" : (st === "connecting" || st === "unavailable") ? "warn" : "ok";
+      var badgeTone = !info.on ? "idle" : info.lamp === "bad" ? "bad" : info.lamp === "warn" ? "warn" : "ok";
       ui.badge.setAttribute("data-tone", badgeTone);
     }
-    if (ui.word.textContent !== "Локальный прокси") ui.word.textContent = "Локальный прокси";
     if (ui.note && ui.note.textContent !== info.note) ui.note.textContent = info.note;
+    if (ui.port) {
+      var portText = String(snap.telegram_port || 1443);
+      if (ui.port.textContent !== portText) ui.port.textContent = portText;
+    }
     var buttons = [];
     if (snap.controls_enabled) {
       if (info.on) {
-        buttons.push(this.button("telegram-disable", "Выключить туннель", "stop", null, busy));
+        buttons.push(this.button("telegram-disable", "Остановить прокси", "stop", null, busy));
       } else {
-        buttons.push(this.button("telegram-enable", "Включить туннель", "send", "primary", busy || !snap.telegram_configured));
+        buttons.push(this.button("telegram-enable", "Запустить прокси", "send", "primary", busy || !snap.telegram_configured));
       }
       buttons.push(this.button("telegram-check", "Проверить DC1–DC5", null, null, busy || !snap.telegram_configured));
     }
@@ -2688,7 +2765,7 @@
     ui.actions.replaceChildren.apply(ui.actions, buttons);
     body.setAttribute("data-state", st);
     ui.scene.setAttribute("data-state", st);
-    if (ui.scene.__flow) ui.scene.__flow.update(stats, stale);
+    updateTelegramRoutes(ui, stats);
     updateTelegramMetrics(ui, stats);
     renderTelegramDiagnostics(ui.scene.querySelector(".tg-check-details"), snap.telegram_diagnostics);
     if (focused) {

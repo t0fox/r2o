@@ -446,16 +446,18 @@ async function main() {
   assert.equal(await evaluate("document.querySelector('#telegram').hidden === false && document.querySelector('#now').hidden === true"), true, "переход меняет активный экран, а не просто прокручивает страницу");
   assert.equal(await evaluate("document.querySelector('.index a[data-nav=\\\"telegram\\\"]').getAttribute('aria-current')"), "page", "активный пункт навигации отмечен");
   await waitFor(() => evaluate(
-    "(() => { const c = document.querySelector('#telegram-body canvas.tg-flow-canvas'); return !!c && c.width >= 300 && c.height >= 100 && !!c.dataset.state; })()"
-  ), "анимация Telegram смонтирована и обновлена");
+    "(() => { const body = document.querySelector('#telegram-body'); return !!body && !!body.dataset.state && !!document.querySelector('.tg-hero') && document.querySelectorAll('.tg-route').length === 4; })()"
+  ), "новый экран Telegram-прокси смонтирован и обновлён");
+  assert.equal(await evaluate("document.querySelectorAll('.tg-stat').length"), 6, "у прокси шесть ровных карточек состояния");
+  assert.equal(await evaluate("document.querySelector('#telegram').textContent.toLowerCase().includes('туннель')"), false, "в разделе Telegram больше нет слова «туннель»");
   await waitFor(() => evaluate("document.querySelector('.tg-check-details')?.textContent.includes('DC5')"), "диагностика маршрутов Telegram DC1–DC5");
   assert.equal(await evaluate("document.querySelector('.tg-check-details').textContent.includes('Все пять DC')"), false, "частичный resPQ не отображается как успех для всех DC");
   assert.equal(await evaluate("document.querySelector('.tg-check-details').textContent.includes('DC2 · маршруты заблокированы')"), true, "панель показывает заблокированный DC из отчёта");
   assert.equal(await evaluate("document.querySelector('.tg-check-details').textContent.includes('HTTP 0')"), false, "отсутствующий HTTP status не превращается в ноль");
   assert.equal(await evaluate("[...document.querySelectorAll('#telegram-body button')].some(button => button.textContent.includes('Проверить DC1–DC5'))"), true, "в Telegram-секции есть запуск активной проверки");
-  assert.equal(await evaluate("[...document.querySelectorAll('#telegram-body button')].some(button => button.textContent.includes('Включить туннель'))"), true, "остановленный туннель предлагает включение");
-  assert.equal(await evaluate("[...document.querySelectorAll('#telegram-body button')].some(button => button.textContent.includes('Выключить туннель'))"), false, "остановленный туннель не предлагает выключение");
-  assert.equal(await evaluate("document.querySelector('[data-tg-state-badge]').textContent"), "Выключен", "состояние туннеля показано явно");
+  assert.equal(await evaluate("[...document.querySelectorAll('#telegram-body button')].some(button => button.textContent.includes('Запустить прокси'))"), true, "остановленный прокси предлагает запуск");
+  assert.equal(await evaluate("[...document.querySelectorAll('#telegram-body button')].some(button => button.textContent.includes('Остановить прокси'))"), false, "остановленный прокси не предлагает остановку");
+  assert.equal(await evaluate("document.querySelector('[data-tg-state-badge]').textContent"), "Остановлен", "состояние прокси показано явно");
   await evaluate("document.querySelector('#filter').focus(); document.querySelector('#filter').value = 'example'; document.querySelector('#filter').dispatchEvent(new Event('input', { bubbles: true }))");
   assert.equal(await evaluate("document.querySelector('#filter').value"), "example", "поле поиска принимает ввод");
   await delay(100);
