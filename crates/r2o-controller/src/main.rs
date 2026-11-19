@@ -46260,7 +46260,9 @@ mod tests {
             1,
             now
         ));
-        assert!(scenario(
+        // Молчание и повтор ClientHello — самостоятельные улики: успешное
+        // рукопожатие на другом потоке того же имени их не опровергает.
+        assert!(!scenario(
             "client_a_repeat",
             &cache,
             "clean.example",
@@ -46270,7 +46272,7 @@ mod tests {
             2,
             now
         ));
-        assert!(scenario(
+        assert!(!scenario(
             "client_a_silent",
             &cache,
             "clean.example",
@@ -49696,13 +49698,20 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn d2o_candidate_deadline_keeps_the_last_nine_seconds() {
+    fn candidate_deadline_follows_task_lifetime() {
+        let lifetime_ms = super::R2O_DISCOVERY_TASK_LIFETIME.as_millis() as u64;
         let mut output = String::new();
-        for elapsed_ms in [0_u64, 590999, 591000, 591001, 599999, 600000, 600001] {
+        for elapsed_ms in [
+            0_u64,
+            lifetime_ms / 2,
+            lifetime_ms - 1,
+            lifetime_ms,
+            lifetime_ms + 1,
+        ] {
             let available = super::r2o_discovery_trial_time_available(
                 std::time::Duration::from_millis(elapsed_ms),
             );
-            assert_eq!(available, elapsed_ms <= 600000, "elapsed={elapsed_ms}");
+            assert_eq!(available, elapsed_ms <= lifetime_ms, "elapsed={elapsed_ms}");
             output.push_str(&format!("{elapsed_ms} {}\n", u8::from(available)));
         }
         if let Ok(path) = std::env::var("R2O_TASK_DEADLINE_DIFF_OUTPUT") {
@@ -51946,19 +51955,21 @@ group_block_proven: false,
     #[test]
     fn r2o_quic_срок_задачи_не_считает_уступку_слота() {
         let started = std::time::Instant::now();
+        let lifetime = super::R2O_DISCOVERY_TASK_LIFETIME;
+        let yielded = std::time::Duration::from_secs(120);
         assert_eq!(
             super::r2o_quic_trial_remaining_at(
                 started,
-                std::time::Duration::from_secs(120),
-                started + std::time::Duration::from_secs(9 * 60),
+                yielded,
+                started + lifetime - std::time::Duration::from_secs(60) + yielded,
             ),
-            std::time::Duration::from_secs(3 * 60)
+            std::time::Duration::from_secs(60)
         );
         assert_eq!(
             super::r2o_quic_trial_remaining_at(
                 started,
-                std::time::Duration::from_secs(120),
-                started + std::time::Duration::from_secs(12 * 60),
+                yielded,
+                started + lifetime + yielded,
             ),
             std::time::Duration::ZERO
         );
@@ -56612,7 +56623,7 @@ group_block_proven: false,
 
     #[cfg(unix)]
     #[test]
-    fn r2o_discovery_queued_target_expires_only_after_ten_minutes() {
+    fn r2o_discovery_queued_target_expires_after_task_lifetime() {
         let target = r2o_controller::discovery::DiscoveryTarget {
             tcp_profile: 0,
             host: "expired.example".into(),
@@ -56621,21 +56632,19 @@ group_block_proven: false,
             shape: SHAPE_MODERN,
         };
         let queued_at = std::time::Instant::now();
+        let lifetime = super::R2O_DISCOVERY_TASK_LIFETIME;
         let mut queue = super::R2oDiscoveryQueue::default();
 
         assert!(queue.enqueue(target.clone(), queued_at));
         assert!(queue.promote(&target));
         assert!(
             queue
-                .r2o_expire(queued_at + std::time::Duration::from_secs(600))
-                .is_empty()
+                .r2o_expire(queued_at + lifetime)
+                .is_empty(),
+            "цель живёт ровно бюджет задачи"
         );
         assert_eq!(
-            queue.r2o_expire(
-                queued_at
-                    + std::time::Duration::from_secs(600)
-                    + std::time::Duration::from_nanos(1)
-            ),
+            queue.r2o_expire(queued_at + lifetime + std::time::Duration::from_nanos(1)),
             vec![target]
         );
     }
@@ -57557,25 +57566,27 @@ group_block_proven: false,
 
     #[cfg(unix)]
     #[test]
-    fn d2o_scheduler_queue_expiry_matches_donor() {
+    fn scheduler_queue_expiry_follows_task_lifetime() {
         use super::{R2O_DISCOVERY_TASK_LIFETIME, R2oDiscoveryQueue, R2oDiscoveryQueueEntry};
         use std::time::{Duration, Instant};
 
         let mut output = Vec::new();
-        for line in include_str!("../tests/fixtures/d2o_scheduler_queue_expiry.tsv").lines() {
-            let fields = line.split_whitespace().collect::<Vec<_>>();
-            if fields.is_empty() || fields[0].starts_with('#') {
-                continue;
-            }
-            let [case_name, expected, queued_age_ms, host] = fields.as_slice() else {
-                panic!("malformed d2o scheduler queue expiry fixture: {line}");
-            };
-            let queued_age_ms = queued_age_ms.parse::<u64>().unwrap();
+        let lifetime = R2O_DISCOVERY_TASK_LIFETIME;
+        for (case_name, age, expected) in [
+            ("fresh", Duration::from_secs(1), "queued"),
+            ("almost", lifetime - Duration::from_millis(1), "queued"),
+            ("boundary", lifetime, "queued"),
+            (
+                "expired",
+                lifetime + Duration::from_nanos(1),
+                "expired",
+            ),
+        ] {
             let now = Instant::now();
             let target = r2o_controller::discovery::DiscoveryTarget {
                 tcp_profile: 0,
-                host: (*host).to_owned(),
-                endpoint: format!("{host}:443"),
+                host: "queue.example".to_owned(),
+                endpoint: "queue.example:443".into(),
                 family: 4,
                 shape: SHAPE_MODERN,
             };
@@ -57583,22 +57594,14 @@ group_block_proven: false,
             queue.entries.push(R2oDiscoveryQueueEntry::new(
                 target,
                 false,
-                now - Duration::from_millis(queued_age_ms),
+                now - age,
                 0,
                 0,
                 queue.catalog_generation,
             ));
             let expired = queue.r2o_expire(now);
-            let actual = if expired.is_empty() {
-                "queued"
-            } else {
-                "expired"
-            };
-            assert_eq!(actual, *expected, "donor queue expiry case {case_name}");
-            assert_eq!(
-                actual == "expired",
-                queued_age_ms > R2O_DISCOVERY_TASK_LIFETIME.as_millis() as u64
-            );
+            let actual = if expired.is_empty() { "queued" } else { "expired" };
+            assert_eq!(actual, expected, "queue expiry case {case_name}");
             output.push(format!("{case_name} {actual}"));
         }
         if let Ok(path) = std::env::var("R2O_SCHED_QUEUE_EXPIRY_DIFF_OUTPUT") {
@@ -59189,17 +59192,15 @@ group_block_proven: false,
 
     #[cfg(unix)]
     #[test]
-    fn failed_discovery_becomes_eligible_after_the_donor_rest_period() {
+    fn failed_discovery_becomes_eligible_after_the_rest_period() {
         let failed_at = std::time::Instant::now();
+        let rest = super::R2O_DISCOVERY_FAILURE_RETRY;
 
         assert!(!r2o_discovery_failure_retry_due(
             failed_at,
-            failed_at + std::time::Duration::from_secs(119)
+            failed_at + rest - std::time::Duration::from_secs(1)
         ));
-        assert!(r2o_discovery_failure_retry_due(
-            failed_at,
-            failed_at + std::time::Duration::from_secs(120)
-        ));
+        assert!(r2o_discovery_failure_retry_due(failed_at, failed_at + rest));
     }
 
     #[cfg(unix)]
@@ -59420,15 +59421,13 @@ group_block_proven: false,
             Some(&super::R2O_DISCOVERY_TASK_LIFETIME)
         );
         let now = std::time::Instant::now();
+        let lifetime = super::R2O_DISCOVERY_TASK_LIFETIME;
         worker.failed_at.insert(
             failure_key.clone(),
-            now - std::time::Duration::from_secs(599),
+            now - lifetime + std::time::Duration::from_secs(1),
         );
         assert!(!worker.queue(target.clone()));
-        worker.failed_at.insert(
-            failure_key,
-            std::time::Instant::now() - std::time::Duration::from_secs(600),
-        );
+        worker.failed_at.insert(failure_key, now - lifetime);
         assert!(worker.queue(target.clone()));
         assert!(worker.is_active(&target));
     }

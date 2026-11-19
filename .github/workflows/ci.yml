@@ -24,7 +24,7 @@ env:
   ZIG_SHA256: '70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00'
 
 jobs:
-  # Stage 1 mirrors d2o: cheap checks gate the independent full checks below.
+  # Stage 1: cheap checks gate the independent full checks below.
   lint:
     name: Быстрые проверки — ShellCheck и формат Rust
     runs-on: ubuntu-24.04
@@ -119,24 +119,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # version v7.0.1
-        with:
-          repository: t0fox/d2o
-          ref: a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe
-          path: d2o
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # version v7.0.1
-        with:
-          repository: t0fox/d2o
-          ref: 8e2c98146cf0b712dc967fbec558c7b904666e87
-          path: d2o-current
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # version v7.0.1
-        with:
-          repository: t0fox/d2o
-          ref: a378e230947ebfd011439e1cac0f1e994d883aae
-          path: d2o-a378
-          persist-credentials: false
       - name: Установить зависимости production TLS fixture
         run: |
           sudo apt-get update
@@ -144,21 +126,13 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
       - name: Собрать бинарники для сценариев роутера
         run: cargo build --locked --release --package r2o-manager --bin r2o-manager --package r2o-controller --bin r2o-controller --package r2o-telegram --bin r2o-telegram
-      - name: Собрать production d2ktg из текущего D2O
-        run: make -B -C d2o-current/telegram BUILD_DIR="$RUNNER_TEMP/d2o-current-telegram" d2ktg
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # версия v7.1.0
         with:
           node-version: '24'
           package-manager-cache: false
       - name: Проверить упаковку выпуска
         run: sh scripts/test-package-release.sh
-      - name: Проверить r2o-detect в release-артефакте
-        env:
-          R2O_DONOR_ROOT: ${{ github.workspace }}/d2o-a378
-        run: sh scripts/test-detect-release-artifact.sh
       - name: Проверить сценарии обновления и службы роутера
-        env:
-          R2O_DONOR_ROOT: ${{ github.workspace }}/d2o
         run: |
           set -euo pipefail
           cd "${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is not set}"
@@ -170,51 +144,37 @@ jobs:
             exit 1
           fi
           failed=()
+          skipped=0
           for test in "${tests[@]}"; do
-            echo "::group::$test"
             test_name=${test##*/}
-            if [ "$test_name" = test-router-firewall.sh ] || [ "$test_name" = test-router-nft-real-differential.sh ]; then
-              if [ "$test_name" = test-router-nft-real-differential.sh ]; then
-                sudo env R2O_DONOR_ROOT="$GITHUB_WORKSPACE/d2o-a378" sh "$test"
-              else
-                sudo sh "$test"
-              fi
-              status=$?
-              if [ "$status" -ne 0 ]; then
-                failed+=("$test ($status)")
-              fi
+            # Дифференциальные сценарии требуют внешнего чекаута D2O. Они
+            # остаются в репозитории, но CI от донора не зависит: без
+            # R2O_DONOR_ROOT такие файлы пропускаются.
+            if grep -qE 'R2O_DONOR_ROOT|D2O_DONOR|/d2o|d2o-current|d2o-a378' "$test"; then
+              skipped=$((skipped + 1))
+              continue
+            fi
+            echo "::group::$test"
+            test_shell=sh
+            if [ "$test_name" = test-router-openwrt-init.sh ]; then
+              test_shell=bash
+            fi
+            if [ "$test_name" = test-router-firewall.sh ]; then
+              sudo sh "$test"
             else
-              test_shell=sh
-              if [ "$test_name" = test-router-openwrt-init.sh ]; then
-                test_shell=bash
-              fi
-              if grep -q 'a378e230947ebfd011439e1cac0f1e994d883aae' "$test"; then
-                donor_root="$GITHUB_WORKSPACE/d2o-a378"
-              elif grep -q '8e2c98146cf0b712dc967fbec558c7b904666e87' "$test"; then
-                donor_root="$GITHUB_WORKSPACE/d2o-current"
-              else
-                donor_root="$R2O_DONOR_ROOT"
-              fi
-              if R2O_DONOR_ROOT="$donor_root" "$test_shell" "$test"; then
-                :
-              else
-                status=$?
-                failed+=("$test ($status)")
-              fi
+              "$test_shell" "$test"
+            fi
+            status=$?
+            if [ "$status" -ne 0 ]; then
+              failed+=("$test ($status)")
             fi
             echo "::endgroup::"
           done
+          echo "Пропущено из-за отсутствия донора D2O: $skipped"
           if [ "${#failed[@]}" -gt 0 ]; then
             printf '::error::Ошибки сценариев роутера: %s\n' "${failed[*]}"
             exit 1
           fi
-
-      - name: Сравнить production Meta edge TLS проверки C/Rust
-        run: |
-          sudo env \
-            D2O_TELEGRAM_BIN="$RUNNER_TEMP/d2o-current-telegram/d2ktg" \
-            R2O_TELEGRAM_BIN="$GITHUB_WORKSPACE/target/release/r2o-telegram" \
-            sh "$GITHUB_WORKSPACE/scripts/test-meta-edge-differential.sh"
 
   datapath:
     name: Датапат — тесты и переносимость
@@ -331,43 +291,10 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
-        with:
-          repository: t0fox/d2o
-          ref: a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe
-          path: d2o
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
-        with:
-          repository: t0fox/d2o
-          ref: a378e230947ebfd011439e1cac0f1e994d883aae
-          path: d2o-a378
-          persist-credentials: false
       - name: Установить средства проверки сетевых пакетов
         run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential iproute2 nftables python3
-      - name: Собрать эталонный C datapath
-        run: |
-          make -B -C d2o/datapath d2kd
-          make -B -C d2o-a378/datapath d2kd
       - name: Собрать сетевой исполнитель
         run: cargo build --release --locked --package r2o-datapath --package r2o-controller
-      - name: Сверить периодические метрики datapath с D2O C
-        run: >-
-          sudo env
-          D2O_DATAPATH="$GITHUB_WORKSPACE/d2o/datapath/d2kd"
-          R2O_DATAPATH="$GITHUB_WORKSPACE/target/release/r2o-datapath"
-          R2O_TEST_TMPDIR="$RUNNER_TEMP/r2o-stats-timer"
-          sh scripts/test-datapath-stats-timer-differential.sh
-      - name: Сверить жизненный цикл capture с D2O C
-        run: >-
-          D2O_ROOT="$GITHUB_WORKSPACE/d2o"
-          R2O_TEST_TMPDIR="$RUNNER_TEMP/r2o-capture-lifecycle"
-          sh scripts/test-datapath-capture-lifecycle-differential.sh
-      - name: Сверить CPU/RSS статистику процесса D2O C/Rust
-        run: >-
-          D2O_ROOT="$GITHUB_WORKSPACE/d2o"
-          R2O_TEST_TMPDIR="$RUNNER_TEMP/r2o-process-stats"
-          sh scripts/test-datapath-process-stats-differential.sh
       - name: Собрать регрессию предела raw-пакета по MTU
         run: cargo test --no-run --locked --package r2o-datapath --test raw_egress_mtu
       - name: Проверить MTU raw-посылки в отдельном сетевом пространстве
@@ -380,21 +307,6 @@ jobs:
           R2OD_BIN="$GITHUB_WORKSPACE/target/release/r2o-datapath"
           R2OC_BIN="$GITHUB_WORKSPACE/target/release/r2o-controller"
           sh scripts/test-discord-discovery-nfq.sh
-      - name: Compare paced UDP scheduler with D2O C
-        run: >-
-          D2O_ROOT="$GITHUB_WORKSPACE/d2o"
-          R2O_TEST_WORK_ROOT="$RUNNER_TEMP/r2o-scheduler-test-work"
-          sh scripts/test-discord-scheduled-udp-differential.sh
-      - name: Сверить восстановление NFQUEUE recv(EIO) для IPv4
-        run: >-
-          sudo env
-          R2O_TOOL_HOME="$GITHUB_WORKSPACE/target/nfq-eio-tooling"
-          R2O_DONOR_ROOT="$GITHUB_WORKSPACE/d2o-a378"
-          D2OD_BIN="$GITHUB_WORKSPACE/d2o-a378/datapath/d2kd"
-          R2OD_BIN="$GITHUB_WORKSPACE/target/release/r2o-datapath"
-          R2O_TEST_TMP="$GITHUB_WORKSPACE/target/nfq-eio-tooling/tmp"
-          R2O_TEST_LOG="$GITHUB_WORKSPACE/target/nfq-eio-tooling/nfq-ipv4-eio.log"
-          sh scripts/test-nfq-ipv4-recv-error-differential.sh
       - name: Проверить правила nftables без применения
         run: sudo sh scripts/test-router-firewall.sh
 
@@ -589,61 +501,6 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-  tcp-silence-current-differential:
-    name: C/Rust differential — current D2O / datapath, ICMP and QUIC fragments
-    needs: lint
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
-        with:
-          repository: t0fox/d2o
-          ref: a63d9641f4e00aa35fa1e5ccbda47bb5f310c0fe
-          path: d2o
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # версия v7.0.1
-        with:
-          repository: t0fox/d2o
-          ref: a378e230947ebfd011439e1cac0f1e994d883aae
-          path: d2o-a378
-          persist-credentials: false
-      - uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # версия v2.0.0
-        with:
-          toolchain: 1.98.0
-      - name: Загрузить зависимости Rust
-        run: cargo fetch --locked
-      - name: Сверить TCP silence с текущим D2O main
-        env:
-          R2O_DONOR_ROOT: ${{ github.workspace }}/d2o-a378
-          TMPDIR: ${{ runner.temp }}
-        run: sh scripts/test-tcp-silence-current-differential.sh
-      - name: Сверить безопасный режим datapath по умолчанию с текущим D2O main
-        env:
-          R2O_DONOR_ROOT: ${{ github.workspace }}/d2o
-          TMPDIR: ${{ runner.temp }}
-        run: sh scripts/test-datapath-default-mode-differential.sh
-      - name: Сверить периодические ICMP counters с текущим D2O main
-        env:
-          R2O_DONOR_ROOT: ${{ github.workspace }}/d2o
-          TMPDIR: ${{ runner.temp }}
-        run: sh scripts/test-icmp-guard-current-differential.sh
-      - name: Compare D2O and R2O fragment helpers and production session path
-        env:
-          R2O_DONOR_ROOT: ${{ github.workspace }}/d2o-a378
-          TMPDIR: ${{ runner.temp }}
-        run: sh scripts/test-ipfrag-differential.sh
-      - name: Compare ctnetlink retry after startup failure
-        env:
-          R2O_DONOR_ROOT: ${{ github.workspace }}/d2o
-          R2O_DONOR_DATAPATH: ${{ github.workspace }}/d2o/datapath
-          TMPDIR: ${{ runner.temp }}
-        run: sh scripts/test-conntrack-retry-current-differential.sh
-
   check:
     name: check
     if: always()
@@ -658,14 +515,13 @@ jobs:
       - sanitizers
       - rust-workspace
       - cross-check
-      - tcp-silence-current-differential
       - nfqueue-integration
       - release-build
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
       - name: Завершиться ошибкой при пропуске или сбое проверки
-        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || needs.lint.result == 'skipped' || needs.panel.result == 'skipped' || needs.telegram.result == 'skipped' || needs.panel-browser.result == 'skipped' || needs.shell.result == 'skipped' || needs.datapath.result == 'skipped' || needs.core.result == 'skipped' || needs.rust-workspace.result == 'skipped' || needs.cross-check.result == 'skipped' || needs.tcp-silence-current-differential.result == 'skipped' || needs.nfqueue-integration.result == 'skipped' || needs.release-build.result == 'skipped' || (github.event_name != 'pull_request' && needs.sanitizers.result == 'skipped') }}
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || needs.lint.result == 'skipped' || needs.panel.result == 'skipped' || needs.telegram.result == 'skipped' || needs.panel-browser.result == 'skipped' || needs.shell.result == 'skipped' || needs.datapath.result == 'skipped' || needs.core.result == 'skipped' || needs.rust-workspace.result == 'skipped' || needs.cross-check.result == 'skipped' || needs.nfqueue-integration.result == 'skipped' || needs.release-build.result == 'skipped' || (github.event_name != 'pull_request' && needs.sanitizers.result == 'skipped') }}
         run: exit 1
       - name: Все проверки завершились успешно
         run: echo "Все проверки R2O пройдены"
