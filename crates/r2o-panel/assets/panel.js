@@ -2462,6 +2462,11 @@
     not_configured: { word: "Не настроен", lamp: "idle", on: false, note: "Прокси не настроен. Для C11 укажите TG_MODE=local в конфигурации." }
   };
 
+  function releaseLabel(version) {
+    var text = str(version);
+    return /^R2O(\s|$)/i.test(text) ? text : "R2O " + text;
+  }
+
   function proxyScene(doc) {
     var root = el(doc, "div", "tg-proxy");
     var hero = el(doc, "section", "tg-hero");
@@ -2470,7 +2475,7 @@
     orb.append(el(doc, "span", "tg-orb-ring"), el(doc, "span", "tg-orb-core"));
     var copy = el(doc, "div", "tg-hero-copy");
     var titleRow = el(doc, "div", "tg-title-row");
-    titleRow.append(el(doc, "h3", "tg-title", "Telegram-прокси"));
+    titleRow.append(el(doc, "h3", "tg-title", "Локальный прокси"));
     var badge = el(doc, "span", "tg-status", "Остановлен");
     badge.setAttribute("data-tg-state-badge", "");
     badge.setAttribute("data-tone", "idle");
@@ -2502,16 +2507,31 @@
       ["Задержка p50 / p95", "data-tg-latency"]
     ].forEach(function (item, index) {
       var card = el(doc, "div", "tg-stat");
-      card.style.setProperty("--tg-delay", (index * 45) + "ms");
+      card.style.setProperty("--tg-delay", (index * 25) + "ms");
       var value = el(doc, "b", "tg-stat-value", "—");
       value.setAttribute(item[1], "");
       card.append(el(doc, "span", "tg-stat-label", item[0]), value);
       stats.appendChild(card);
     });
 
+    var flowCard = el(doc, "section", "tg-flow-card");
+    var flowHead = el(doc, "div", "tg-flow-head");
+    flowHead.append(el(doc, "h4", "", "Карта маршрутов"));
+    flowHead.append(el(doc, "span", "", "клиент → R2O → Telegram DC"));
+    var flowStage = el(doc, "div", "tg-flow-stage");
+    var canvas = el(doc, "canvas", "tg-flow-canvas");
+    canvas.width = 960;
+    canvas.height = 420;
+    canvas.setAttribute("role", "img");
+    canvas.setAttribute("aria-label", "Поток соединений: клиент → R2O → Telegram DC");
+    flowStage.appendChild(canvas);
+    var flowCaption = el(doc, "p", "tg-flow-caption", "Маршруты обновляются по живому трафику.");
+    flowCaption.setAttribute("data-tg-flow-caption", "");
+    flowCard.append(flowHead, flowStage, flowCaption);
+
     var routes = el(doc, "section", "tg-routes");
     var routesHead = el(doc, "div", "tg-routes-head");
-    routesHead.append(el(doc, "h4", "", "Маршруты"));
+    routesHead.append(el(doc, "h4", "", "Сводка маршрутов"));
     routesHead.append(el(doc, "span", "", "Direct WSS · Worker · Cloudflare · TCP"));
     routes.appendChild(routesHead);
     var routeGrid = el(doc, "div", "tg-route-grid");
@@ -2524,7 +2544,7 @@
       var card = el(doc, "article", "tg-route");
       card.setAttribute("data-tg-route-index", String(index));
       card.setAttribute("data-state", "idle");
-      card.style.setProperty("--tg-delay", (170 + index * 55) + "ms");
+      card.style.setProperty("--tg-delay", (110 + index * 30) + "ms");
       var head = el(doc, "div", "tg-route-head");
       head.append(el(doc, "span", "tg-route-dot"), el(doc, "strong", "", item[1]));
       var status = el(doc, "span", "tg-route-status", "резерв");
@@ -2553,7 +2573,10 @@
     diagnosticCenters.setAttribute("data-tg-check-centers", "");
     diagnostics.append(diagnosticSummary, diagnosticState, diagnosticTime, diagnosticCenters);
 
-    root.append(hero, stats, routes, diagnostics);
+    root.append(hero, flowCard, stats, routes, diagnostics);
+    if (global.R2oTelegramFlow && global.R2oTelegramFlow.mountTelegramFlow) {
+      root.__flow = global.R2oTelegramFlow.mountTelegramFlow(canvas);
+    }
     return root;
   }
 
@@ -2623,8 +2646,12 @@
       flashTelegramValue(entry.confirmed, "ответов: " + confirmed);
     });
     if (ui.route) {
-      var routeText = flow ? flow.transportLabel : "—";
+      var routeText = stats && flow ? flow.transportLabel : "—";
       if (ui.route.textContent !== routeText) ui.route.textContent = routeText;
+    }
+    if (ui.flowCaption) {
+      var caption = flow ? flow.caption : "Маршруты обновляются по живому трафику.";
+      if (ui.flowCaption.textContent !== caption) ui.flowCaption.textContent = caption;
     }
   }
 
@@ -2724,6 +2751,7 @@
         note: scene.querySelector("[data-tg-state-note]"),
         port: scene.querySelector("[data-tg-port]"),
         route: scene.querySelector("[data-tg-route]"),
+        flowCaption: scene.querySelector("[data-tg-flow-caption]"),
         actions: scene.querySelector("[data-tg-actions]"),
         routeCards: Array.prototype.map.call(
           scene.querySelectorAll("[data-tg-route-index]"),
@@ -2737,6 +2765,7 @@
           })
       };
       body.replaceChildren(scene);
+      if (ui.scene.__flow) ui.scene.__flow.attach();
     }
     if (ui.badge) {
       var badgeText = st === "not_configured" ? "Не настроен"
@@ -2765,6 +2794,7 @@
     ui.actions.replaceChildren.apply(ui.actions, buttons);
     body.setAttribute("data-state", st);
     ui.scene.setAttribute("data-state", st);
+    if (ui.scene.__flow) ui.scene.__flow.update(stats, stale);
     updateTelegramRoutes(ui, stats);
     updateTelegramMetrics(ui, stats);
     renderTelegramDiagnostics(ui.scene.querySelector(".tg-check-details"), snap.telegram_diagnostics);
@@ -2857,13 +2887,13 @@
     if (redrawn) this.drawStages();
     col.replaceChildren();
     add(col,
-      el(doc, "span", "", "R2O " + str(snap.version) + (snap.dirty ? " (изменённая сборка)" : "")),
+      el(doc, "span", "", releaseLabel(snap.version) + (snap.dirty ? " (изменённая сборка)" : "")),
       snap.commit ? el(doc, "span", "mono", str(snap.commit).slice(0, 12)) : null,
       parseTime(snap.built) ? el(doc, "span", "", "собран " + localTime(parseTime(snap.built))) : null,
       parseTime(snap.taken) ? el(doc, "span", "", "снимок " + localTime(parseTime(snap.taken))) : null);
     var railVersion = this.$("rail-version");
     if (railVersion) {
-      var version = "R2O " + str(snap.version) + (snap.dirty ? " · изменённая сборка" : "");
+      var version = releaseLabel(snap.version) + (snap.dirty ? " · изменённая сборка" : "");
       if (railVersion.textContent !== version) railVersion.textContent = version;
     }
     var meta = this.$("diagnostics-meta");

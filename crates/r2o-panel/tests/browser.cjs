@@ -446,8 +446,8 @@ async function main() {
   assert.equal(await evaluate("document.querySelector('#telegram').hidden === false && document.querySelector('#now').hidden === true"), true, "переход меняет активный экран, а не просто прокручивает страницу");
   assert.equal(await evaluate("document.querySelector('.index a[data-nav=\\\"telegram\\\"]').getAttribute('aria-current')"), "page", "активный пункт навигации отмечен");
   await waitFor(() => evaluate(
-    "(() => { const body = document.querySelector('#telegram-body'); return !!body && !!body.dataset.state && !!document.querySelector('.tg-hero') && document.querySelectorAll('.tg-route').length === 4; })()"
-  ), "новый экран Telegram-прокси смонтирован и обновлён");
+    "(() => { const body = document.querySelector('#telegram-body'); const c = document.querySelector('#telegram-body canvas.tg-flow-canvas'); return !!body && !!body.dataset.state && !!document.querySelector('.tg-hero') && !!c && c.width >= 300 && document.querySelectorAll('.tg-route').length === 4; })()"
+  ), "новый экран Telegram-прокси и карта маршрутов смонтированы");
   assert.equal(await evaluate("document.querySelectorAll('.tg-stat').length"), 6, "у прокси шесть ровных карточек состояния");
   assert.equal(await evaluate("document.querySelector('#telegram').textContent.toLowerCase().includes('туннель')"), false, "в разделе Telegram больше нет слова «туннель»");
   await waitFor(() => evaluate("document.querySelector('.tg-check-details')?.textContent.includes('DC5')"), "диагностика маршрутов Telegram DC1–DC5");
@@ -458,6 +458,43 @@ async function main() {
   assert.equal(await evaluate("[...document.querySelectorAll('#telegram-body button')].some(button => button.textContent.includes('Запустить прокси'))"), true, "остановленный прокси предлагает запуск");
   assert.equal(await evaluate("[...document.querySelectorAll('#telegram-body button')].some(button => button.textContent.includes('Остановить прокси'))"), false, "остановленный прокси не предлагает остановку");
   assert.equal(await evaluate("document.querySelector('[data-tg-state-badge]').textContent"), "Остановлен", "состояние прокси показано явно");
+
+  await call("Emulation.setDeviceMetricsOverride", {
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 1,
+    mobile: true,
+  });
+  await evaluate("scrollTo(0, 0)");
+  await delay(500);
+  const telegramMobile = await evaluate(`(() => ({
+    overflow: document.documentElement.scrollWidth > innerWidth,
+    stats: getComputedStyle(document.querySelector('.tg-stats')).gridTemplateColumns.split(' ').length,
+    routes: getComputedStyle(document.querySelector('.tg-route-grid')).gridTemplateColumns.split(' ').length,
+    canvas: !!document.querySelector('.tg-flow-canvas'),
+    rects: ['.tg-hero', '.tg-flow-card', '.tg-stats', '.tg-routes', '.tg-flow-canvas'].map(selector => {
+      const node = document.querySelector(selector);
+      if (!node) return [selector, null];
+      const rect = node.getBoundingClientRect();
+      const style = getComputedStyle(node);
+      return [selector, { top: Math.round(rect.top), height: Math.round(rect.height), display: style.display, opacity: style.opacity }];
+    })
+  }))()`);
+  console.log("TELEGRAM_MOBILE_LAYOUT", JSON.stringify(telegramMobile));
+  assert.equal(telegramMobile.overflow, false, "Telegram на телефоне: нет горизонтальной прокрутки");
+  assert.equal(telegramMobile.stats, 2, "Telegram на телефоне: две колонки статистики");
+  assert.equal(telegramMobile.routes, 1, "Telegram на телефоне: маршруты в одну колонку");
+  assert.equal(telegramMobile.canvas, true, "Telegram на телефоне: карта маршрутов остаётся видимой");
+  if (captureDir) {
+    const screenshot = await call("Page.captureScreenshot", { format: "png" });
+    fs.writeFileSync(path.join(captureDir, "r2o-panel-telegram-390.png"), Buffer.from(screenshot.data, "base64"));
+  }
+  await call("Emulation.setDeviceMetricsOverride", {
+    width: 1280,
+    height: 800,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
   await evaluate("document.querySelector('#filter').focus(); document.querySelector('#filter').value = 'example'; document.querySelector('#filter').dispatchEvent(new Event('input', { bubbles: true }))");
   assert.equal(await evaluate("document.querySelector('#filter').value"), "example", "поле поиска принимает ввод");
   await delay(100);

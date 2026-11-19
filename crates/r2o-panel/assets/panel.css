@@ -1316,7 +1316,7 @@ main { min-width: 0; }
     radial-gradient(120% 180% at 0% 0%, rgba(215, 164, 91, .13), transparent 55%),
     linear-gradient(135deg, var(--surface-2), var(--surface));
   box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, .03);
-  animation: tg-rise .42s ease both;
+  animation: tg-rise .3s ease both;
 }
 .tg-hero::after {
   content: ""; position: absolute; inset: -40% -20%; pointer-events: none;
@@ -1387,7 +1387,7 @@ main { min-width: 0; }
   position: relative; overflow: hidden; padding: 12px 13px;
   border: 1px solid var(--line-soft); border-radius: 12px;
   background: linear-gradient(180deg, var(--surface-2), var(--surface));
-  animation: tg-rise .45s ease both; animation-delay: var(--tg-delay, 0ms);
+  animation: tg-rise .3s ease both; animation-delay: var(--tg-delay, 0ms);
   transition: border-color .2s, transform .2s;
 }
 .tg-stat:hover { border-color: var(--bronze-line); transform: translateY(-1px); }
@@ -1399,9 +1399,35 @@ main { min-width: 0; }
 }
 .tg-stat-value.is-updated { animation: tg-value .55s ease; }
 
+.tg-flow-card {
+  padding: 14px; border: 1px solid var(--line-soft); border-radius: 14px;
+  background: var(--surface); animation: tg-rise .34s ease both; animation-delay: .04s;
+}
+.tg-flow-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 10px; margin-bottom: 10px;
+}
+.tg-flow-head h4 { margin: 0; color: var(--ink-2); font-size: .72rem; letter-spacing: .05em; text-transform: uppercase; }
+.tg-flow-head span { color: var(--ink-4); font-size: .6rem; }
+.tg-flow-stage {
+  position: relative; overflow: hidden;
+  border: 1px solid var(--line-soft); border-radius: 11px;
+  background: var(--bg-deep);
+}
+.tg-flow-stage::before {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background-image:
+    linear-gradient(rgba(210, 220, 230, .035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(210, 220, 230, .035) 1px, transparent 1px);
+  background-size: 38px 38px;
+  mask-image: radial-gradient(ellipse 80% 80% at 50% 50%, #000, transparent 85%);
+}
+.tg-flow-canvas { display: block; width: 100%; height: auto; aspect-ratio: 960 / 420; }
+.tg-flow-caption { margin: 8px 0 0; color: var(--ink-3); font-size: .66rem; text-align: center; }
+
 .tg-routes {
   padding: 14px; border: 1px solid var(--line-soft); border-radius: 14px;
-  background: var(--surface); animation: tg-rise .5s ease both; animation-delay: .16s;
+  background: var(--surface); animation: tg-rise .34s ease both; animation-delay: .08s;
 }
 .tg-routes-head {
   display: flex; align-items: baseline; justify-content: space-between;
@@ -1413,7 +1439,7 @@ main { min-width: 0; }
 .tg-route {
   position: relative; overflow: hidden; display: grid; gap: 8px; padding: 12px;
   border: 1px solid var(--line-soft); border-radius: 11px; background: var(--surface-2);
-  animation: tg-rise .45s ease both; animation-delay: var(--tg-delay, 0ms);
+  animation: tg-rise .3s ease both; animation-delay: var(--tg-delay, 0ms);
   transition: border-color .2s, transform .2s;
 }
 .tg-route:hover { transform: translateY(-1px); }
@@ -1482,11 +1508,16 @@ main { min-width: 0; }
   .tg-route-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 760px) {
-  .tg-hero { grid-template-columns: 1fr; gap: 14px; }
+  .tg-proxy { padding-bottom: 88px; }
+  .tg-hero { grid-template-columns: 1fr; gap: 14px; padding: 16px; }
+  .tg-orb { width: 56px; height: 56px; }
+  .tg-title { font-size: 1.25rem; }
   .tg-actions { justify-content: flex-start; }
-  .tg-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tg-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
   .tg-route-grid { grid-template-columns: 1fr; }
-  .tg-routes-head span { display: none; }
+  .tg-routes-head span, .tg-flow-head span { display: none; }
+  .tg-flow-stage { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: thin; }
+  .tg-flow-canvas { width: 640px; max-width: none; aspect-ratio: 960 / 420; }
 }
 @media (prefers-reduced-motion: reduce) {
   .tg-proxy *, .tg-proxy *::before, .tg-proxy *::after {
