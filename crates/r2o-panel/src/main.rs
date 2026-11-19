@@ -9,6 +9,26 @@ const RELEASE: &str = match option_env!("R2O_RELEASE_ID") {
     Some(value) => value,
     None => "dev",
 };
+const RELEASE_TITLE: &str = match option_env!("R2O_RELEASE_TITLE") {
+    Some(value) => value,
+    None => RELEASE,
+};
+const COMMIT: &str = match option_env!("R2O_COMMIT") {
+    Some(value) => value,
+    None => "",
+};
+const BUILT: &str = match option_env!("R2O_BUILT") {
+    Some(value) => value,
+    None => "",
+};
+
+fn build_config() -> Config {
+    let mut config = Config::default();
+    config.version = RELEASE_TITLE.to_owned();
+    config.commit = COMMIT.to_owned();
+    config.built = BUILT.to_owned();
+    config
+}
 
 fn main() {
     if let Err(error) = run() {
@@ -48,7 +68,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         return Err("используйте `r2o-panel serve`".into());
     }
 
-    let mut config = Config::default();
+    let mut config = build_config();
     let mut log_path = None;
     let mut cli_overrides = Vec::new();
     let mut explicit_live = false;
@@ -178,4 +198,17 @@ fn usage() {
     println!(
         "r2o-panel --version | --release-id | --self-check | serve [--config FILE] [--live FILE] [--live-extra FILE] [--assets DIR] [--listen HOST:PORT] [--state-dir DIR] [--mode MODE] [--queue N] [--service FILE] [--manager FILE] [--manager-root DIR] [--engine-pid FILE] [--controller-pid FILE] [--telegram-stats PATH] [--log FILE]"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_config_uses_embedded_release_metadata() {
+        let config = build_config();
+        assert_eq!(config.version, RELEASE_TITLE);
+        assert_eq!(config.commit, COMMIT);
+        assert_eq!(config.built, BUILT);
+    }
 }

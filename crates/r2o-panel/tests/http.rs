@@ -265,6 +265,25 @@ fn status_without_live_file_returns_the_panel_contract() {
 }
 
 #[test]
+fn status_reports_configured_release_metadata() {
+    let mut config = Config::default();
+    config.version = "R2O 19.11.2026 (test)".into();
+    config.commit = "0123456789abcdef".into();
+    config.built = "2026-11-19T17:00:00Z".into();
+    config.live_path =
+        std::env::temp_dir().join(format!("r2o-missing-live-meta-{}", std::process::id()));
+    let (status, _, body) = request(
+        &config,
+        "GET /api/status HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    assert_eq!(status, 200);
+    let value: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(value["snapshot"]["version"], "R2O 19.11.2026 (test)");
+    assert_eq!(value["snapshot"]["commit"], "0123456789abcdef");
+    assert_eq!(value["snapshot"]["built"], "2026-11-19T17:00:00Z");
+}
+
+#[test]
 #[ignore = "run through scripts/test-panel-live-status-size-differential.sh"]
 fn d2o_status_live_file_size_limit_matches_rust_route() {
     let live_path: PathBuf = std::env::var_os("R2O_PANEL_LIVE_SIZE_PATH")
