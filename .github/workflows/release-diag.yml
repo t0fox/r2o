@@ -16,21 +16,26 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Показать права токена
+      - name: Полный цикл выпуска через gh api
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh api rate_limit --jq '.rate'
-      - name: Создать черновик через gh release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_DEBUG: api
-        run: |
-          set -euo pipefail
-          tag="r2o-diag-gh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          gh release create "$tag" --draft \
-            --target d1b33ed1fa2d5fec3599ed0a4a193fc6ad3609f5 \
-            --title "$tag" --notes "diagnostic"
-          gh release delete "$tag" --yes --cleanup-tag
-          echo "GH_RELEASE_CREATE_OK"
+          tag="r2o-diag-api-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          payload=$(mktemp)
+          jq -n --arg tag "$tag" --arg target "$GITHUB_SHA" --arg name "$tag" \
+            --arg body "diagnostic" \
+            '{tag_name:$tag,target_commitish:$target,name:$name,body:$body,draft:true,prerelease:false}' \
+            > "$payload"
+          response=$(gh api --method POST "repos/$GITHUB_REPOSITORY/releases" --input "$payload")
+          id=$(printf '%s' "$response" | jq -r .id)
+          printf 'asset\n' > "$RUNNER_TEMP/asset.txt"
+          gh api --method POST \
+            "repos/$GITHUB_REPOSITORY/releases/$id/assets?name=asset.txt" \
+            --input "$RUNNER_TEMP/asset.txt" \
+            -H "Content-Type: application/octet-stream" >/dev/null
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$id" \
+            -F draft=false >/dev/null
+          gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$id"
+          gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/$tag" || true
+          echo "FULL_CYCLE_OK"
