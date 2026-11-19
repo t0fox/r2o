@@ -63,6 +63,7 @@ static int send_one_close(int fd)
 }
 
 static int send_one_send_errno;
+static int trace_local_port;
 
 static ssize_t send_one_send(int fd, const void *bytes, size_t length, int flags)
 {
@@ -227,7 +228,29 @@ int main(int argc, char **argv)
     const uint8_t prefix[4] = {0xaa, 0xbb, 0xcc, 0xdd};
 
     reset_case();
-    if (strcmp(name, "plain") == 0 || strcmp(name, "tail") == 0 ||
+    trace_local_port = 0;
+    if (strcmp(name, "srcport") == 0) {
+        int fd = qp_send_one("127.0.0.1", 443, NULL, 0, 0, 0, 45000,
+                             (d2k_hello){snapshot, snapshot_len, NULL, 0, 0, 0},
+                             0, &marked, 0, 0);
+        code = fd >= 0 ? 0 : fd;
+        if (fd >= 0) {
+            struct sockaddr_storage local;
+            socklen_t local_len = sizeof local;
+            memset(&local, 0, sizeof local);
+            if (getsockname(fd, (struct sockaddr *)&local, &local_len) == 0 &&
+                local.ss_family == AF_INET) {
+                trace_local_port = ntohs(((struct sockaddr_in *)&local)->sin_port);
+            }
+            close(fd);
+        }
+        trace_count = sent_count;
+        for (unsigned i = 0; i < trace_count; i++) {
+            memcpy(trace[i].bytes, sent[i].bytes, sent[i].len);
+            trace[i].len = sent[i].len;
+            trace[i].ttl = sent[i].ttl;
+        }
+    } else if (strcmp(name, "plain") == 0 || strcmp(name, "tail") == 0 ||
         strcmp(name, "refused") == 0) {
         if (strcmp(name, "refused") == 0) {
             send_one_send_errno = ECONNREFUSED;

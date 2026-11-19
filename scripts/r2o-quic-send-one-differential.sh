@@ -69,7 +69,7 @@ if ! R2O_QUIC_SEND_ONE_DIR="$TEMP" "$CARGO" test \
     exit 1
 fi
 
-CASES='plain tail ttl split arm-ttl refused frag1 frag2 frag3 frag4'
+CASES='plain tail ttl split arm-ttl refused srcport frag1 frag2 frag3 frag4'
 CASES_COUNT=0
 for name in $CASES; do
     if ! R2O_QUIC_SEND_ONE_FRAG_META="$TEMP/$name.meta" \

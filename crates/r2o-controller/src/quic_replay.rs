@@ -154,6 +154,29 @@ pub fn r2o_quic_residual_detected(pass: usize, err: usize) -> Option<bool> {
 }
 
 /// Сформировать донорский Go crypto/tls ClientHello и QUIC v1 Initial.
+/// C `quic_ask_srcport`: вопрос с исходным портом `port - 1`. Ниже 1024
+/// bind может отказать — это локальный отказ, порт не подменяется.
+pub fn r2o_quic_ask_srcport(
+    endpoint: SocketAddr,
+    snapshot: &[u8],
+    mark: Option<u32>,
+    timeout: std::time::Duration,
+) -> io::Result<QuicReplayResult> {
+    let src_port = endpoint
+        .port()
+        .checked_sub(1)
+        .filter(|port| *port != 0)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "исходный порт вопроса должен быть ниже порта назначения",
+            )
+        })?;
+    let (mut probe, _) =
+        QuicReplayProbe::prepare_fresh_src_port(endpoint, snapshot, mark, src_port)?;
+    probe.run(timeout)
+}
+
 pub fn r2o_quic_profile_snapshot(server_name: Option<&str>) -> Option<Vec<u8>> {
     r2o_quic_profile_snapshot_sized(server_name, 1200)
 }
@@ -2384,6 +2407,25 @@ mod tests {
     }
 
     #[test]
+    fn quic_ask_srcport_uses_port_minus_one() {
+        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        receiver
+            .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+            .unwrap();
+        let endpoint = receiver.local_addr().unwrap();
+        let snapshot = super::r2o_quic_profile_snapshot(Some("srcport-ask.example")).unwrap();
+        let _ = super::r2o_quic_ask_srcport(
+            endpoint,
+            &snapshot,
+            None,
+            std::time::Duration::from_millis(30),
+        );
+        let mut buffer = [0_u8; 2048];
+        let (_, peer) = receiver.recv_from(&mut buffer).unwrap();
+        assert_eq!(peer.port(), endpoint.port() - 1);
+    }
+
+    #[test]
     fn quic_prepare_target_matches_c() {
         let Some(output_path) = std::env::var_os("R2O_QUIC_PREPARE_DIFF_OUTPUT") else {
             return;
@@ -3727,6 +3769,25 @@ mod tests {
                     &packets,
                     restored,
                 );
+            }
+
+            {
+                let (mut probe, _) = QuicReplayProbe::prepare_fresh_src_port(
+                    receiver.local_addr().unwrap(),
+                    &one,
+                    None,
+                    45_000,
+                )
+                .unwrap();
+                set_ttl(&probe.socket, 47);
+                let code = run_code(probe.run(Duration::from_millis(30)));
+                let packets = capture(&receiver);
+                let restored = socket_ttl(&probe.socket);
+                let local = probe.local_endpoint().port();
+                write_snapshot(&dir.join("srcport.qsn"), &probe);
+                let trace_path = dir.join("srcport.rust");
+                write_trace(&trace_path, "srcport", code, &packets, restored);
+                assert_eq!(local, 45_000);
             }
 
             for shape in 1_u8..=4 {
