@@ -23731,11 +23731,16 @@ impl ControlClient {
                             if let Some(worker) = &mut family_recovery {
                                 worker.complete(&outcome.target);
                             }
-                            let queued = discovery.as_mut().is_some_and(|(worker, _, _, _)| {
-                                worker.queue_after_confirmed_failure(outcome.target.clone())
-                            });
+                            // C `install_next` (`sched.c:4905`): `family_fast==1`
+                            // после исчерпания своих семейных планов возвращает
+                            // -1 и уходит в task_fail с отдыхом, а не в полный
+                            // поиск. Держим тот же cooldown; следующий suspect
+                            // снова попробует семейные планы, если они есть.
+                            if let Some((worker, _, _, _)) = &mut discovery {
+                                worker.record_install_failure(&outcome.target);
+                            }
                             println!(
-                                "сохранённые планы семейного восстановления не подтвердились для {}: {}; {}",
+                                "сохранённые планы семейного восстановления не подтвердились для {}: {}; повтор через {} с, полную классификацию сразу не запускаю",
                                 outcome.target.host,
                                 outcome
                                     .result
@@ -23743,11 +23748,7 @@ impl ControlClient {
                                     .err()
                                     .map(String::as_str)
                                     .unwrap_or("HTTPS/APPLIED не прошли проверку"),
-                                if queued {
-                                    "запускаю полную классификацию"
-                                } else {
-                                    "полная классификация уже выполняется или очередь занята"
-                                }
+                                R2O_DISCOVERY_FAILURE_RETRY.as_secs()
                             );
                             std::io::stdout().flush()?;
                             continue;
@@ -48801,6 +48802,27 @@ mod tests {
                     let (wire, trial_nonzero, plan_nonzero, mark_value) =
                         tcp_frame(&t, &plan, 0x2d);
                     (0, true, Some(wire), trial_nonzero, plan_nonzero, mark_value)
+                }
+                // C `install_next`: family_fast == 1 — stop без полного поиска.
+                "family_fast_stop" => {
+                    let t = target("install.example", 4, SHAPE_MODERN);
+                    let mut worker = r2o_test_discovery_worker_without_threads();
+                    worker.record_install_failure(&t);
+                    let key = super::r2o_discovery_failure_key(&t);
+                    assert_eq!(
+                        worker.failed_retry_after.get(&key),
+                        Some(&super::R2O_DISCOVERY_FAILURE_RETRY)
+                    );
+                    assert!(worker.active.is_empty());
+                    assert!(
+                        !worker
+                            .jobs
+                            .0
+                            .lock()
+                            .unwrap()
+                            .has_runnable(std::time::Instant::now())
+                    );
+                    (-1, false, None, false, true, 0)
                 }
                 // C `install_next`: own_first == 2 исчерпан — -1 без refill.
                 "own_first_two_stop" => {
