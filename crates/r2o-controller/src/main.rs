@@ -7974,12 +7974,11 @@ enum R2oFamilyRecoveryFailureAction {
 }
 
 #[cfg(unix)]
-fn r2o_family_recovery_failure_action(bootstrap: bool) -> R2oFamilyRecoveryFailureAction {
-    if bootstrap {
-        R2oFamilyRecoveryFailureAction::FullClassifier
-    } else {
-        R2oFamilyRecoveryFailureAction::Cooldown
-    }
+fn r2o_family_recovery_failure_action(_bootstrap: bool) -> R2oFamilyRecoveryFailureAction {
+    // Провал подтверждённого плана — не повод ждать: цель остаётся
+    // заблокированной, а запас знаний оказался неверным. Всегда даём
+    // полному поиску шанс найти другой обход.
+    R2oFamilyRecoveryFailureAction::FullClassifier
 }
 
 #[cfg(unix)]
