@@ -195,6 +195,41 @@ pub fn r2o_quic_http3_udp_socket_fresh(
     )))
 }
 
+/// C `qp_open_fresh` с явным `src_port`: bind на заданный локальный порт,
+/// best-effort SO_MARK, connect. Свежий порт не подменяется — C в этом
+/// режиме тоже уважает запрошенный порт или отказывает.
+pub fn r2o_quic_http3_udp_socket_fresh_src_port(
+    server: SocketAddr,
+    mark: Option<u32>,
+    src_port: u16,
+) -> Result<(UdpSocket, bool), R2oQuicUdpSocketError> {
+    if src_port == 0 {
+        return r2o_quic_http3_udp_socket_fresh(server, mark);
+    }
+    let bind = SocketAddr::new(
+        match server.ip() {
+            IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+        },
+        src_port,
+    );
+    let socket = UdpSocket::bind(bind).map_err(R2oQuicUdpSocketError::ordinary)?;
+    let mut marked = mark.is_none_or(|mark| mark == 0);
+    if let Some(mark) = mark.filter(|mark| *mark != 0) {
+        marked = match r2o_quic_http3_set_socket_mark(&socket, mark) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("QUIC SO_MARK {mark:#x} не установился: {error}");
+                false
+            }
+        };
+    }
+    socket
+        .connect(server)
+        .map_err(R2oQuicUdpSocketError::ordinary)?;
+    Ok((socket, marked))
+}
+
 /// C `d2k_udp_port_forget_all`: сбросить реестр недавних UDP-портов.
 pub fn r2o_quic_port_forget_all() {
     let Some(state) = R2O_QUIC_RECENT_PORTS_STATE.get() else {

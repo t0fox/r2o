@@ -1336,9 +1336,20 @@ impl QuicReplayProbe {
         snapshot: &[u8],
         mark: Option<u32>,
     ) -> io::Result<(Self, bool)> {
-        let (socket, marked) =
-            crate::r2o_quic_http3::r2o_quic_http3_udp_socket_fresh(endpoint, mark)
-                .map_err(|error| error.source)?;
+        Self::prepare_fresh_src_port(endpoint, snapshot, mark, 0)
+    }
+
+    /// C `qp_open_fresh` с явным локальным портом (`quic_ask_srcport`).
+    pub fn prepare_fresh_src_port(
+        endpoint: SocketAddr,
+        snapshot: &[u8],
+        mark: Option<u32>,
+        src_port: u16,
+    ) -> io::Result<(Self, bool)> {
+        let (socket, marked) = crate::r2o_quic_http3::r2o_quic_http3_udp_socket_fresh_src_port(
+            endpoint, mark, src_port,
+        )
+        .map_err(|error| error.source)?;
         Ok((
             Self::from_socket(endpoint, snapshot, socket, mark.unwrap_or(0))?,
             marked,
@@ -2357,6 +2368,19 @@ mod tests {
         run("profile-empty", super::r2o_quic_profile_snapshot(Some("")));
         std::fs::write(path, &output).unwrap();
         print!("{output}");
+    }
+
+    #[test]
+    fn prepare_fresh_src_port_binds_requested_port() {
+        let endpoint: std::net::SocketAddr = "127.0.0.1:443".parse().unwrap();
+        let snapshot = super::r2o_quic_profile_snapshot(Some("srcport.example")).unwrap();
+        let temporary = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = temporary.local_addr().unwrap().port();
+        drop(temporary);
+        let (probe, _) =
+            super::QuicReplayProbe::prepare_fresh_src_port(endpoint, &snapshot, None, port)
+                .unwrap();
+        assert_eq!(probe.local_endpoint().port(), port);
     }
 
     #[test]
