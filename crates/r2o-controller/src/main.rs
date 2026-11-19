@@ -26320,7 +26320,16 @@ impl ControlClient {
         // текущий замер до конца.
         r2o_controller::classify::r2o_detect_stop_all();
         if let Some((worker, mut catalog, path, _)) = discovery.take() {
+            // C `d2k_sched_free` отчитывается о shutdown синхронно. В Rust
+            // отчёты копятся в `pending_reports`, а главный цикл после Drop
+            // уже не крутится: вычитываем их здесь, иначе события теряются.
+            let shutdown_searches = std::sync::Arc::clone(&worker.searches);
             drop(worker);
+            if let Some(diagnostics) = diagnostics.as_mut() {
+                r2o_write_pending_diagnostic_reports(&shutdown_searches, |event| {
+                    diagnostics.record(event)
+                });
+            }
             while let Some(update) = network_whitelist_updates
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -29969,6 +29978,29 @@ impl ControlClient {
 #[cfg(unix)]
 fn r2o_sched_set_send_cap(send_cap: &AtomicUsize, send_maxlen: usize) {
     send_cap.store(send_maxlen, Ordering::Relaxed);
+}
+
+/// Вычитать накопленные диагностические отчёты после Drop воркера.
+/// C `d2k_sched_free` вызывает callback синхронно; в Rust отчёты `shutdown`
+/// лежат в `pending_reports`, и на выходе главный цикл их уже не вычитывает.
+#[cfg(unix)]
+fn r2o_write_pending_diagnostic_reports<F: FnMut(serde_json::Value)>(
+    searches: &std::sync::Mutex<R2oDiscoverySearches>,
+    mut write: F,
+) -> usize {
+    let mut written = 0;
+    loop {
+        let report = searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take_pending_report();
+        let Some(report) = report else {
+            break;
+        };
+        write(report);
+        written += 1;
+    }
+    written
 }
 
 #[cfg(unix)]
@@ -35363,6 +35395,32 @@ mod tests {
         if let Ok(path) = std::env::var("R2O_SCHED_LIFECYCLE_RESOURCES_OUTPUT") {
             std::fs::write(path, resources).unwrap();
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_pending_reports_are_drained_like_c_d2k_sched_free() {
+        let searches = std::sync::Mutex::new(super::R2oDiscoverySearches::default());
+        {
+            let mut searches = searches.lock().unwrap();
+            searches
+                .pending_reports
+                .push_back(serde_json::json!({"id": 9, "outcome": "shutdown"}));
+            searches
+                .pending_reports
+                .push_back(serde_json::json!({"id": 2, "outcome": "shutdown"}));
+        }
+        let mut seen = Vec::new();
+        assert_eq!(
+            super::r2o_write_pending_diagnostic_reports(&searches, |event| seen.push(event)),
+            2
+        );
+        assert_eq!(seen[0]["id"], 9);
+        assert_eq!(seen[1]["id"], 2);
+        assert_eq!(
+            super::r2o_write_pending_diagnostic_reports(&searches, |_| panic!("повторный отчёт")),
+            0
+        );
     }
 
     #[cfg(unix)]
