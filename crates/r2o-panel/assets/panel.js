@@ -2450,12 +2450,12 @@
   /* ─── Telegram ─── */
 
   var TG = {
-    connected: { word: "Подключён", lamp: "ok", note: "Получен подтверждённый ответ Telegram." },
-    connecting: { word: "Подключается", lamp: "warn", note: "Служба запущена и проверяет доступные маршруты." },
-    local: { word: "Локальный прокси", lamp: "warn", note: "Прокси запущен. Ответ Telegram появится после подтверждённого обмена." },
-    unavailable: { word: "Маршрут недоступен", lamp: "bad", note: "Нет активного маршрута Telegram." },
-    stopped: { word: "Остановлен", lamp: "idle", note: "Служба не запущена." },
-    not_configured: { word: "Не настроен", lamp: "idle", note: "Для C11 укажите TG_MODE=local в конфигурации." }
+    connected: { word: "Подключён", lamp: "ok", on: true, note: "Туннель включён. Получен подтверждённый ответ Telegram." },
+    connecting: { word: "Подключается", lamp: "warn", on: true, note: "Туннель включается. Служба проверяет доступные маршруты." },
+    local: { word: "Локальный прокси", lamp: "warn", on: true, note: "Туннель включён. Прокси запущен, подтверждённого ответа Telegram пока нет." },
+    unavailable: { word: "Маршрут недоступен", lamp: "bad", on: true, note: "Туннель включён, но активный маршрут Telegram недоступен." },
+    stopped: { word: "Остановлен", lamp: "idle", on: false, note: "Туннель выключен. Служба не запущена." },
+    not_configured: { word: "Не настроен", lamp: "idle", on: false, note: "Туннель не настроен. Для C11 укажите TG_MODE=local в конфигурации." }
   };
 
   function tunnelScene(doc) {
@@ -2468,7 +2468,10 @@
     lamp.setAttribute("aria-hidden", "true");
     var titleText = el(doc, "span", "", "Локальный прокси");
     titleText.setAttribute("data-tg-state-title", "");
-    title.append(lamp, titleText);
+    var badge = el(doc, "span", "meta-chip", "Выключен");
+    badge.setAttribute("data-tg-state-badge", "");
+    badge.setAttribute("data-tone", "idle");
+    title.append(lamp, titleText, badge);
     var note = el(doc, "p", "tg-state-note", "Служба не запущена.");
     note.setAttribute("data-tg-state-note", "");
     var actions = el(doc, "div", "tg-flow-actions");
@@ -2654,6 +2657,7 @@
       ui = body.__tgUi = {
         scene: scene,
         lamp: scene.querySelector("[data-tg-state-lamp]"),
+        badge: scene.querySelector("[data-tg-state-badge]"),
         word: scene.querySelector("[data-tg-state-title]"),
         note: scene.querySelector("[data-tg-state-note]"),
         actions: scene.querySelector("[data-tg-actions]"),
@@ -2663,11 +2667,17 @@
     }
     ui.lamp.setAttribute("data-tone", info.lamp);
     ui.lamp.setAttribute("aria-label", info.word);
+    if (ui.badge) {
+      var badgeText = info.on ? "Включён" : "Выключен";
+      if (ui.badge.textContent !== badgeText) ui.badge.textContent = badgeText;
+      var badgeTone = !info.on ? "idle" : (st === "connecting" || st === "unavailable") ? "warn" : "ok";
+      ui.badge.setAttribute("data-tone", badgeTone);
+    }
     if (ui.word.textContent !== "Локальный прокси") ui.word.textContent = "Локальный прокси";
     if (ui.note && ui.note.textContent !== info.note) ui.note.textContent = info.note;
     var buttons = [];
     if (snap.controls_enabled) {
-      if (snap.telegram_enabled) {
+      if (info.on) {
         buttons.push(this.button("telegram-disable", "Выключить туннель", "stop", null, busy));
       } else {
         buttons.push(this.button("telegram-enable", "Включить туннель", "send", "primary", busy || !snap.telegram_configured));
