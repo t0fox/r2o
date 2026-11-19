@@ -8514,6 +8514,16 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
         drop(socket_hold);
         let events = events?;
         delete_result?;
+        // C `ver_unsent_early`: REFUSED мог прийти до того, как сетевой зонд
+        // назвал свой ключ; он всё равно отменяет подтверждение кандидата.
+        // Для QUIC/by_addr trial обязателен.
+        let refusal_trial = (target.shape == SHAPE_QUIC).then_some(trial_id);
+        if let Some(code) = r2o_take_early_refusal(target, candidate.plan_id, refusal_trial) {
+            return Err(format!(
+                "план отвергнут исполнителем: {} (код {code})",
+                ack_reason_text(code)
+            ));
+        }
         if std::env::var_os("R2O_DEBUG_APPLIED").is_some() {
             eprintln!(
                 "R2O_DEBUG_APPLIED target={} local_port={} plan={:02x?} trial={:02x?} events={}",
@@ -25793,6 +25803,7 @@ impl ControlClient {
                 if frame.kind == EVENT_REFUSED {
                     let refused = decode_refused(&frame)
                         .map_err(|error| format!("событие REFUSED: {error}"))?;
+                    r2o_note_early_refusal(&refused);
                     if let Some((worker, _, _, _)) = &mut discovery {
                         worker
                             .searches
@@ -29967,6 +29978,108 @@ fn r2o_plan_id_is_ours(plan_id: [u8; 16], event_plan_id: [u8; 16]) -> bool {
     plan_id != [0; 16] && event_plan_id == plan_id
 }
 
+/// C `applied_of_candidate`: REFUSED принадлежит кандидату этой цели.
+/// Семейство 0 в ключе нормализуется в IPv4, как в C. Для by_addr/QUIC
+/// trial обязателен, для name — достаточно family/transport/plan/endpoint.
+#[cfg(unix)]
+fn r2o_applied_of_candidate(
+    event: &r2k_core::control::RefusedEvent,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    plan_id: [u8; 16],
+    trial_id: Option<[u8; 16]>,
+) -> bool {
+    let event_family = if event.key[0] == 0 { 4 } else { event.key[0] };
+    if event_family != target.family
+        || event.key[37] != r2o_discovery_transport(target)
+        || !r2o_plan_id_is_ours(plan_id, event.plan_id)
+    {
+        return false;
+    }
+    if let Some(trial_id) = trial_id
+        && event.trial_id != trial_id
+    {
+        return false;
+    }
+    let Ok(endpoint) = target.endpoint.parse::<std::net::SocketAddr>() else {
+        return false;
+    };
+    let low_ip = if target.family == 4 {
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+            event.key[1],
+            event.key[2],
+            event.key[3],
+            event.key[4],
+        ))
+    } else {
+        std::net::IpAddr::V6(std::net::Ipv6Addr::from(
+            <[u8; 16]>::try_from(&event.key[1..17]).expect("IPv6 key"),
+        ))
+    };
+    let high_ip = if target.family == 4 {
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+            event.key[17],
+            event.key[18],
+            event.key[19],
+            event.key[20],
+        ))
+    } else {
+        std::net::IpAddr::V6(std::net::Ipv6Addr::from(
+            <[u8; 16]>::try_from(&event.key[17..33]).expect("IPv6 key"),
+        ))
+    };
+    let low_port = u16::from_be_bytes([event.key[33], event.key[34]]);
+    let high_port = u16::from_be_bytes([event.key[35], event.key[36]]);
+    (low_ip == endpoint.ip() && low_port == endpoint.port())
+        || (high_ip == endpoint.ip() && high_port == endpoint.port())
+}
+
+#[cfg(unix)]
+type R2oEarlyRefusal = (r2k_core::control::RefusedEvent, std::time::Instant);
+
+#[cfg(unix)]
+fn r2o_early_refusals() -> &'static std::sync::Mutex<std::collections::VecDeque<R2oEarlyRefusal>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::VecDeque<R2oEarlyRefusal>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
+}
+
+/// C `ver_unsent_early`: ранний REFUSED приходит до того, как зонд назовёт
+/// свой ключ. Кольцо ограничено; переполнение теряет улику, но не выдумывает.
+#[cfg(unix)]
+fn r2o_note_early_refusal(event: &r2k_core::control::RefusedEvent) {
+    let now = std::time::Instant::now();
+    let mut cache = r2o_early_refusals()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache
+        .retain(|(_, at)| now.saturating_duration_since(*at) <= std::time::Duration::from_secs(15));
+    if cache.len() >= 32 {
+        cache.pop_front();
+    }
+    cache.push_back((event.clone(), now));
+}
+
+/// C `take_early_refusal`: забрать отказ, относящийся к кандидату, и тем
+/// самым отменить его подтверждение.
+#[cfg(unix)]
+fn r2o_take_early_refusal(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    plan_id: [u8; 16],
+    trial_id: Option<[u8; 16]>,
+) -> Option<u8> {
+    let now = std::time::Instant::now();
+    let mut cache = r2o_early_refusals()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache
+        .retain(|(_, at)| now.saturating_duration_since(*at) <= std::time::Duration::from_secs(15));
+    let index = cache
+        .iter()
+        .position(|(event, _)| r2o_applied_of_candidate(event, target, plan_id, trial_id))?;
+    cache.remove(index).map(|(event, _)| event.code)
+}
+
 fn r2o_ask_applied_matches(
     event: &r2k_core::control::AppliedEvent,
     key: &[u8; r2k_core::control::KEY_LEN],
@@ -30043,6 +30156,79 @@ mod r2o_ask_proof_tests {
         assert_ne!(direct, other_port);
         assert_eq!(direct[37], 6);
         assert_eq!(direct[0], 4);
+    }
+
+    #[test]
+    fn applied_of_candidate_and_early_refusal_match_c() {
+        let key = flow_key();
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 0,
+            host: "refused.example".into(),
+            endpoint: "198.51.100.2:443".into(),
+            family: 4,
+            shape: r2k_core::control::SHAPE_MODERN,
+        };
+        let refused = r2k_core::control::RefusedEvent {
+            key,
+            code: 4,
+            plan_id: [7; 16],
+            trial_id: [8; 16],
+            client_shape: Some(r2k_core::control::SHAPE_MODERN),
+            execution_id: None,
+            binding: None,
+        };
+        let name_match = super::r2o_applied_of_candidate(&refused, &target, [7; 16], None);
+        let wrong_plan = super::r2o_applied_of_candidate(&refused, &target, [9; 16], None);
+        let mut wrong_family = refused.clone();
+        wrong_family.key[0] = 6;
+        let family_match = super::r2o_applied_of_candidate(&wrong_family, &target, [7; 16], None);
+        let mut zero_family = refused.clone();
+        zero_family.key[0] = 0;
+        let zero_family_match =
+            super::r2o_applied_of_candidate(&zero_family, &target, [7; 16], None);
+        let wrong_endpoint = super::r2o_applied_of_candidate(
+            &refused,
+            &r2o_controller::discovery::DiscoveryTarget {
+                host: "other.example".into(),
+                endpoint: "198.51.100.21:443".into(),
+                ..target.clone()
+            },
+            [7; 16],
+            None,
+        );
+        let addr_match = super::r2o_applied_of_candidate(&refused, &target, [7; 16], Some([8; 16]));
+        let mut wrong_trial = refused.clone();
+        wrong_trial.trial_id[0] = 9;
+        let addr_wrong_trial =
+            super::r2o_applied_of_candidate(&wrong_trial, &target, [7; 16], Some([8; 16]));
+        assert!(name_match);
+        assert!(!wrong_plan);
+        assert!(!family_match);
+        assert!(zero_family_match);
+        assert!(!wrong_endpoint);
+        assert!(addr_match);
+        assert!(!addr_wrong_trial);
+        // Вывод строится из фактических результатов Rust-хелперов, чтобы
+        // differential сравнивал поведение, а не совпадение литералов.
+        let output = format!(
+            "name_match={}\nwrong_plan={}\nwrong_family={}\nzero_family={}\nwrong_endpoint={}\naddr_match={}\naddr_wrong_trial={}\n",
+            u8::from(name_match),
+            u8::from(wrong_plan),
+            u8::from(family_match),
+            u8::from(zero_family_match),
+            u8::from(wrong_endpoint),
+            u8::from(addr_match),
+            u8::from(addr_wrong_trial),
+        );
+        if let Ok(path) = std::env::var("R2O_APPLIED_CANDIDATE_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+        super::r2o_note_early_refusal(&refused);
+        assert_eq!(
+            super::r2o_take_early_refusal(&target, [7; 16], None),
+            Some(4)
+        );
+        assert_eq!(super::r2o_take_early_refusal(&target, [7; 16], None), None);
     }
 
     #[test]
