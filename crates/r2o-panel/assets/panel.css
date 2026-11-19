@@ -1422,7 +1422,7 @@ main { min-width: 0; }
   background-size: 38px 38px;
   mask-image: radial-gradient(ellipse 80% 80% at 50% 50%, #000, transparent 85%);
 }
-.tg-flow-canvas { display: block; width: 100%; height: auto; aspect-ratio: 960 / 420; }
+.tg-flow-canvas { display: block; width: 100%; height: auto; aspect-ratio: 960 / 264; }
 .tg-flow-caption { margin: 8px 0 0; color: var(--ink-3); font-size: .66rem; text-align: center; }
 
 .tg-routes {
@@ -1516,8 +1516,8 @@ main { min-width: 0; }
   .tg-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
   .tg-route-grid { grid-template-columns: 1fr; }
   .tg-routes-head span, .tg-flow-head span { display: none; }
-  .tg-flow-stage { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: thin; }
-  .tg-flow-canvas { width: 640px; max-width: none; aspect-ratio: 960 / 420; }
+  .tg-flow-stage { overflow: hidden; }
+  .tg-flow-canvas { width: 100%; aspect-ratio: 420 / 590; }
 }
 @media (prefers-reduced-motion: reduce) {
   .tg-proxy *, .tg-proxy *::before, .tg-proxy *::after {

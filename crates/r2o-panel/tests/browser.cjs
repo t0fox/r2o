@@ -460,6 +460,19 @@ async function main() {
   assert.equal(await evaluate("document.querySelector('[data-tg-state-badge]').textContent"), "Остановлен", "состояние прокси показано явно");
 
   await call("Emulation.setDeviceMetricsOverride", {
+    width: 1280,
+    height: 800,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await evaluate("scrollTo(0, 0)");
+  await delay(500);
+  if (captureDir) {
+    const screenshot = await call("Page.captureScreenshot", { format: "png" });
+    fs.writeFileSync(path.join(captureDir, "r2o-panel-telegram-1280.png"), Buffer.from(screenshot.data, "base64"));
+  }
+
+  await call("Emulation.setDeviceMetricsOverride", {
     width: 390,
     height: 844,
     deviceScaleFactor: 1,
@@ -471,16 +484,8 @@ async function main() {
     overflow: document.documentElement.scrollWidth > innerWidth,
     stats: getComputedStyle(document.querySelector('.tg-stats')).gridTemplateColumns.split(' ').length,
     routes: getComputedStyle(document.querySelector('.tg-route-grid')).gridTemplateColumns.split(' ').length,
-    canvas: !!document.querySelector('.tg-flow-canvas'),
-    rects: ['.tg-hero', '.tg-flow-card', '.tg-stats', '.tg-routes', '.tg-flow-canvas'].map(selector => {
-      const node = document.querySelector(selector);
-      if (!node) return [selector, null];
-      const rect = node.getBoundingClientRect();
-      const style = getComputedStyle(node);
-      return [selector, { top: Math.round(rect.top), height: Math.round(rect.height), display: style.display, opacity: style.opacity }];
-    })
+    canvas: !!document.querySelector('.tg-flow-canvas')
   }))()`);
-  console.log("TELEGRAM_MOBILE_LAYOUT", JSON.stringify(telegramMobile));
   assert.equal(telegramMobile.overflow, false, "Telegram на телефоне: нет горизонтальной прокрутки");
   assert.equal(telegramMobile.stats, 2, "Telegram на телефоне: две колонки статистики");
   assert.equal(telegramMobile.routes, 1, "Telegram на телефоне: маршруты в одну колонку");

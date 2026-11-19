@@ -1,4 +1,4 @@
-/* R2O — схема Telegram-туннеля.
+/* R2O — схема Telegram-прокси.
    Новый приборный холст: клиент, ядро r2o, четыре маршрута и пять DC.
    Показывает не только движение пакетов, но и состояние каждого маршрута,
    подтверждение, паузы, этапы отказа и активность дата-центров. */
@@ -7,8 +7,12 @@
 
   var WIDTH = 960;
   var HEIGHT = 420;
+  var DESKTOP_TOP = 76;
+  var DESKTOP_HEIGHT = 264;
   var MOBILE_WIDTH = 420;
   var MOBILE_HEIGHT = 740;
+  var MOBILE_TOP = 62;
+  var MOBILE_BOTTOM = 652;
 
   var ROUTES = [
     { transport: "direct_wss", label: "Прямой WSS" },
@@ -53,9 +57,9 @@
   var DC_BOARD = { x: 752, y: 76, w: 184, h: 264 };
   var ROW_X = ROUTES_BOARD.x + 14;
   var ROW_W = ROUTES_BOARD.w - 28;
-  var ROW_H = 50;
+  var ROW_H = 52;
   var ROW_GAP = 7;
-  var ROW_TOP = ROUTES_BOARD.y + 30;
+  var ROW_TOP = ROUTES_BOARD.y + 24;
   var DC_X = DC_BOARD.x + 12;
   var DC_W = DC_BOARD.w - 24;
   var DC_H = 40;
@@ -763,14 +767,12 @@
 
     function drawDesktop() {
       drawBackground(WIDTH, HEIGHT);
-      drawStatus(WIDTH);
       drawConnections();
       drawClient();
       drawCore();
       drawRoutes();
       drawDcs();
       drawParticles();
-      drawLegend(WIDTH, HEIGHT);
     }
 
     /* ─── Мобильная схема: та же информация, но вертикально и крупнее. ─── */
@@ -921,19 +923,25 @@
 
     function drawMobile() {
       drawBackground(MOBILE_WIDTH, MOBILE_HEIGHT);
-      drawMobileStatus();
       drawMobileClient();
       drawMobileCore();
       drawMobileRoutes();
       drawMobileDcs();
-      drawMobileLegend();
     }
 
     function draw() {
       if (!paletteReady) refreshPalette();
       var width = layoutMobile ? MOBILE_WIDTH : WIDTH;
-      var height = layoutMobile ? MOBILE_HEIGHT : HEIGHT;
-      context.setTransform(canvas.width / width, 0, 0, canvas.height / height, 0, 0);
+      var height = layoutMobile ? (MOBILE_BOTTOM - MOBILE_TOP) : DESKTOP_HEIGHT;
+      var offset = layoutMobile ? MOBILE_TOP : DESKTOP_TOP;
+      context.setTransform(
+        canvas.width / width,
+        0,
+        0,
+        canvas.height / height,
+        0,
+        -offset * canvas.height / height
+      );
       if (layoutMobile) drawMobile(); else drawDesktop();
     }
 
@@ -1030,7 +1038,7 @@
       }).join("; ");
       var race = view.hedged.length ? " Параллельная гонка: победил " + view.hedged[0].winner + "." : "";
       var truncated = view.truncated ? " Показана ограниченная выборка сессий." : "";
-      canvas.setAttribute("aria-label", "Схема Telegram-туннеля: " + view.caption + ". Маршруты: " + routes + ". " + dcs + "." + race + truncated);
+      canvas.setAttribute("aria-label", "Схема Telegram-прокси: " + view.caption + ". Маршруты: " + routes + ". " + dcs + "." + race + truncated);
       canvas.dataset.state = view.state;
       if (root) root.dataset.state = view.state;
       var caption = root && root.querySelector("#tg-flow-caption");
