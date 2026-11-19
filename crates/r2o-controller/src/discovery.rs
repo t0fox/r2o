@@ -1047,6 +1047,19 @@ pub fn has_usable_profile_binding(catalog: &Catalog, target: &DiscoveryTarget) -
 /// Проверить, покрывает ли активная подтверждённая привязка видимую форму потока.
 /// Мягкие привязки и привязки на повторной проверке не подавляют новое наблюдение.
 pub fn has_covering_binding(catalog: &Catalog, target: &DiscoveryTarget) -> bool {
+    has_covering_binding_for_shape(catalog, target, target.shape, target.tcp_profile())
+}
+
+/// C `binding_covering` (`sched.c:8192-8218`): форма и TCP-профиль берутся
+/// из самого SUSPECT-события, а не из сохранённого HELLO цели. Датапат шлёт
+/// в `client_shape` базовую форму, поэтому профиль метки времени (TS/NO_TS)
+/// не должен скрывать уже подтверждённую привязку.
+pub fn has_covering_binding_for_shape(
+    catalog: &Catalog,
+    target: &DiscoveryTarget,
+    shape: u8,
+    tcp_profile: u8,
+) -> bool {
     catalog.boxes.iter().any(|box_record| {
         box_record.bindings.iter().any(|binding| {
             let family = if binding.family == 0 {
@@ -1066,10 +1079,10 @@ pub fn has_covering_binding(catalog: &Catalog, target: &DiscoveryTarget) -> bool
                 && binding.target == target.host
                 && family == target.family
                 && transport == 6
-                && binding.tcp_profile == target.tcp_profile()
+                && binding.tcp_profile == tcp_profile
                 && (binding.shape == 0
-                    || binding.shape == target.shape
-                    || binding.shape == SHAPE_MODERN && target.shape == SHAPE_ECH_TCP)
+                    || binding.shape == shape
+                    || binding.shape == SHAPE_MODERN && shape == SHAPE_ECH_TCP)
         })
     })
 }
@@ -2599,6 +2612,44 @@ mod tests {
             ..Catalog::default()
         };
         assert!(!super::has_covering_binding(&recheck_catalog, &target));
+    }
+
+    #[test]
+    fn suspect_берёт_профиль_из_события_а_не_из_сохранённого_hello() {
+        use crate::catalog::{Binding, BoxRecord, Catalog};
+
+        // Цель помнит TCP-метку времени из HELLO, а SUSPECT принёс базовую
+        // форму без профиля — как C `binding_covering(ev->client_shape)`.
+        let target = DiscoveryTarget {
+            tcp_profile: r2k_core::control::TCP_PROFILE_TS,
+            host: "example.com".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let catalog = Catalog {
+            boxes: vec![BoxRecord {
+                bindings: vec![Binding {
+                    kind: "name".into(),
+                    target: target.host.clone(),
+                    level: 3,
+                    enabled: true,
+                    transport: 6,
+                    family: 4,
+                    shape: SHAPE_MODERN,
+                    ..Binding::default()
+                }],
+                ..BoxRecord::default()
+            }],
+            ..Catalog::default()
+        };
+        assert!(!super::has_covering_binding(&catalog, &target));
+        assert!(super::has_covering_binding_for_shape(
+            &catalog,
+            &target,
+            SHAPE_MODERN,
+            r2k_core::control::TCP_PROFILE_UNKNOWN
+        ));
     }
 
     #[test]

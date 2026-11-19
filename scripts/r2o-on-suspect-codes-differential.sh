@@ -6,7 +6,7 @@
 set -eu
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 DONOR=${R2O_DONOR_ROOT:-/mnt/e/d2o-a378}
-EXPECTED_SHA=a378e230947ebfd011439e1cac0f1e994d883aae
+EXPECTED_SHA=7a5fab97a1a7f0f00ebb906dba7ed568cdc0ca05
 ACTUAL_SHA=$(git -C "$DONOR" rev-parse HEAD 2>/dev/null ||
     cat /mnt/e/d2o/.git/worktrees/d2o-a378/HEAD 2>/dev/null || true)
 [ "$ACTUAL_SHA" = "$EXPECTED_SHA" ] || {

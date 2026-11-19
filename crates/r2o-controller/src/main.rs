@@ -27208,7 +27208,12 @@ impl ControlClient {
         // применил уже подтверждённую привязку, не улика. Только TCP и только
         // когда задачи ещё нет: у ждущей/наблюдаемой цели C идёт своим путём
         // (hot_event), а не отбрасывает подозрение.
-        let has_covering = r2o_controller::discovery::has_covering_binding(catalog, &target);
+        let has_covering = r2o_controller::discovery::has_covering_binding_for_shape(
+            catalog,
+            &target,
+            r2k_core::control::r2k_link_shape_tcp_base(event.client_shape),
+            r2k_core::control::r2k_link_shape_tcp_profile(event.client_shape),
+        );
         if !planned
             && !watching
             && !worker.is_active(&target)
