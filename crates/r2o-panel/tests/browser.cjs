@@ -453,6 +453,9 @@ async function main() {
   assert.equal(await evaluate("document.querySelector('.tg-check-details').textContent.includes('DC2 · маршруты заблокированы')"), true, "панель показывает заблокированный DC из отчёта");
   assert.equal(await evaluate("document.querySelector('.tg-check-details').textContent.includes('HTTP 0')"), false, "отсутствующий HTTP status не превращается в ноль");
   assert.equal(await evaluate("[...document.querySelectorAll('#telegram-body button')].some(button => button.textContent.includes('Проверить DC1–DC5'))"), true, "в Telegram-секции есть запуск активной проверки");
+  assert.equal(await evaluate("[...document.querySelectorAll('#telegram-body button')].some(button => button.textContent.includes('Включить туннель'))"), true, "остановленный туннель предлагает включение");
+  assert.equal(await evaluate("[...document.querySelectorAll('#telegram-body button')].some(button => button.textContent.includes('Выключить туннель'))"), false, "остановленный туннель не предлагает выключение");
+  assert.equal(await evaluate("document.querySelector('[data-tg-state-badge]').textContent"), "Выключен", "состояние туннеля показано явно");
   await evaluate("document.querySelector('#filter').focus(); document.querySelector('#filter').value = 'example'; document.querySelector('#filter').dispatchEvent(new Event('input', { bubbles: true }))");
   assert.equal(await evaluate("document.querySelector('#filter').value"), "example", "поле поиска принимает ввод");
   await delay(100);
