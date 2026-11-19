@@ -11,7 +11,7 @@ set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 D2O_ROOT=${R2O_DONOR_ROOT:-/mnt/e/d2o-a378w}
-EXPECTED_D2O_SHA=a378e230947ebfd011439e1cac0f1e994d883aae
+EXPECTED_D2O_SHA=7a5fab97a1a7f0f00ebb906dba7ed568cdc0ca05
 ACTUAL_D2O_SHA=$(git -C "$D2O_ROOT" rev-parse HEAD)
 if [ "$ACTUAL_D2O_SHA" != "$EXPECTED_D2O_SHA" ]; then
     printf 'Expected D2O %s, got %s\n' "$EXPECTED_D2O_SHA" "$ACTUAL_D2O_SHA" >&2
