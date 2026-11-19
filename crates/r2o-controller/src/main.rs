@@ -7965,12 +7965,8 @@ enum R2oFamilyRecoveryDecision {
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum R2oFamilyRecoveryFailureAction {
-    /// C `rx_bootstrap_only`: после провала bootstrap — полный classifier,
-    /// без fallback в той же фазе.
+    /// После провала подтверждённого плана всегда запускается полный поиск.
     FullClassifier,
-    /// C `install_next`: family_fast после исчерпания семейных планов —
-    /// task_fail с отдыхом.
-    Cooldown,
 }
 
 #[cfg(unix)]
@@ -9530,17 +9526,6 @@ fn r2o_ladder_unmeasurable_fallback_allowed(search_owned: bool, owned_fallback: 
     // C `refill_from_fallback` (`sched.c:4464`): при
     // `search_owned && !owned_fallback` запасной перебор не доливается.
     !(search_owned && !owned_fallback)
-}
-
-#[cfg(unix)]
-fn r2o_install_next_fallback_allowed(
-    owned_opaque_fallback: bool,
-    cached_measure_with_known: bool,
-) -> bool {
-    // C `install_next` (`sched.c:4918`): после прямого замера с готовыми
-    // планами (`cached_measure_valid && n_known > 0`) запасной перебор не
-    // доливается — сначала испытываются планы коробки.
-    owned_opaque_fallback && !cached_measure_with_known
 }
 
 #[cfg(unix)]
@@ -16452,7 +16437,6 @@ group_block_proven: false,
                 .unwrap_or_default();
             let mut discovery_tried = own_tried.clone();
             let mut discovery_candidate_probes = full_counts.candidates;
-            let mut known_plans_present = false;
             if known_plans_allowed && !suspect_fingerprint.signals.is_empty() {
                 let known = r2o_controller::discovery::known_plans(
                     candidate_catalog
@@ -16462,7 +16446,6 @@ group_block_proven: false,
                     &suspect_fingerprint,
                     &discovery_tried,
                 );
-                known_plans_present = !known.is_empty();
                 discovery_tried.extend(
                     known
                         .iter()
@@ -23904,12 +23887,6 @@ impl ControlClient {
                                     discovery.as_mut().is_some_and(|(worker, _, _, _)| {
                                         worker.queue_after_confirmed_failure(outcome.target.clone())
                                     })
-                                }
-                                R2oFamilyRecoveryFailureAction::Cooldown => {
-                                    if let Some((worker, _, _, _)) = &mut discovery {
-                                        worker.record_install_failure(&outcome.target);
-                                    }
-                                    false
                                 }
                             };
                             println!(
@@ -49047,15 +49024,15 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn bootstrap_failure_requests_full_classifier_like_c() {
-        assert_eq!(
-            super::r2o_family_recovery_failure_action(true),
-            super::R2oFamilyRecoveryFailureAction::FullClassifier
-        );
-        assert_eq!(
-            super::r2o_family_recovery_failure_action(false),
-            super::R2oFamilyRecoveryFailureAction::Cooldown
-        );
+    fn failed_confirmed_plan_requests_full_classifier() {
+        // Любой провал подтверждённого плана ведёт в полный поиск: держать
+        // цель в бесконечном отдыхе нельзя, пока приложение не работает.
+        for bootstrap in [true, false] {
+            assert_eq!(
+                super::r2o_family_recovery_failure_action(bootstrap),
+                super::R2oFamilyRecoveryFailureAction::FullClassifier
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -49426,12 +49403,10 @@ mod tests {
                     );
                     (-1, false, None, false, true, 0)
                 }
-                // C `install_next`: cached_measure_valid && n_known > 0 — stop.
-                "cached_measure_stop" => {
-                    assert!(!super::r2o_install_next_fallback_allowed(true, true));
-                    assert!(super::r2o_install_next_fallback_allowed(true, false));
-                    (-1, false, None, false, true, 0)
-                }
+                // Политика изменилась: запасной перебор разрешён всегда, пока
+                // у задачи остался бюджет времени, поэтому старые проверки
+                // «cached_measure_stop» больше не имеют смысла.
+                "cached_measure_stop" => (-1, false, None, false, true, 0),
                 // C `install_next`: own_first == 2 исчерпан — -1 без refill.
                 "own_first_two_stop" => {
                     let outcome = super::r2o_own_first_exhausted_outcome(target(
