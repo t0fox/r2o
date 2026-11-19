@@ -142,6 +142,13 @@ tick() {
     printf '%s\n' "$failures" > "$STATE"
     [ "$failures" -ge "$FAILURE_LIMIT" ] || return 0
 
+    # Пока копились ошибки, S99r2o мог уже поднять новый процесс.
+    if health_is_fresh; then
+        failures=0
+        rm -f "$STATE"
+        return 0
+    fi
+
     reserve_restart_slot
     slot_status=$?
     if [ "$slot_status" -eq 0 ]; then

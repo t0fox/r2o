@@ -39,6 +39,7 @@ R2O_FLOW_CAPACITY=${R2O_FLOW_CAPACITY:-2048}
 MODE=${MODE:-apply}
 MARK=${MARK:-45}
 PROBE_MARK=${PROBE_MARK:-46}
+MEASURE_MARK=${MEASURE_MARK:-47}
 ONLY_MARK=${ONLY_MARK:-}
 KEENETIC_POLICY=${KEENETIC_POLICY:-}
 IPV6_ENABLED=${IPV6_ENABLED:-1}
@@ -92,6 +93,7 @@ R2O_FLOW_CAPACITY=${R2O_FLOW_CAPACITY:-2048}
 MODE=${MODE:-apply}
 MARK=${MARK:-45}
 PROBE_MARK=${PROBE_MARK:-46}
+MEASURE_MARK=${MEASURE_MARK:-47}
 ONLY_MARK=${ONLY_MARK:-}
 KEENETIC_POLICY=${KEENETIC_POLICY:-}
 IPV6_ENABLED=${IPV6_ENABLED:-1}
@@ -260,6 +262,9 @@ valid_number "$TG_PORT" 65535 && [ "$TG_PORT" -gt 0 ] || die "неверный T
 MARK=$(r2o_normalize_mark "$MARK") || die "неверный MARK"
 PROBE_MARK=$(r2o_normalize_mark "$PROBE_MARK") || die "неверный PROBE_MARK"
 [ "$PROBE_MARK" = 0 ] || [ "$PROBE_MARK" != "$MARK" ] || die "PROBE_MARK и MARK должны различаться"
+MEASURE_MARK=$(r2o_normalize_mark "$MEASURE_MARK") || die "неверный MEASURE_MARK"
+[ "$MEASURE_MARK" = 0 ] || [ "$MEASURE_MARK" != "$MARK" ] || die "MEASURE_MARK и MARK должны различаться"
+[ "$PROBE_MARK" = 0 ] || [ "$MEASURE_MARK" = 0 ] || [ "$MEASURE_MARK" != "$PROBE_MARK" ] || die "MEASURE_MARK и PROBE_MARK должны различаться"
 if [ -z "$ONLY_MARK" ] && [ -n "${KEENETIC_POLICY:-}" ]; then
     keenetic_mark=$(r2o_keenetic_policy_mark "$KEENETIC_POLICY")
     case "$keenetic_mark" in
@@ -440,7 +445,7 @@ start_datapath_both() {
 start_controller_both() {
     r2o_ct_mark=$1
     set -- --serve-both --serve4 "$SOCK4" "$CATALOG" --discover --mark "$r2o_ct_mark" \
-        --live4 "$STATE/live4.json"
+        --measure-mark "$MEASURE_MARK" --live4 "$STATE/live4.json"
     if [ "$IPV6_ENABLED" = 1 ]; then
         set -- "$@" --serve6 "$SOCK6" --live6 "$STATE/live6.json"
     fi
@@ -476,10 +481,10 @@ start_engine_split() {
     fi
     engine_firewall_up || return 1
     spawn_component r2o-controller "$CT4_PID" "$LOG/r2o-controller4.log" \
-        --serve "$SOCK4" "$CATALOG" --discover --mark "$r2o_split_mark" --live "$STATE/live4.json" || return 1
+        --serve "$SOCK4" "$CATALOG" --discover --mark "$r2o_split_mark" --measure-mark "$MEASURE_MARK" --live "$STATE/live4.json" || return 1
     if [ "$IPV6_ENABLED" = 1 ]; then
         spawn_component r2o-controller "$CT6_PID" "$LOG/r2o-controller6.log" \
-            --serve "$SOCK6" "$CATALOG" --discover --mark "$r2o_split_mark" --live "$STATE/live6.json" || return 1
+            --serve "$SOCK6" "$CATALOG" --discover --mark "$r2o_split_mark" --measure-mark "$MEASURE_MARK" --live "$STATE/live6.json" || return 1
     fi
 }
 
@@ -677,8 +682,22 @@ update_scheduler_stop() {
     rm -f "$UPD_PID"
 }
 
+meta_dns_scheduler_pids() {
+    for link in "$PROC"/[0-9]*/cmdline; do
+        [ -r "$link" ] || continue
+        cmdline=$(tr '\000' ' ' < "$link" 2>/dev/null) || continue
+        case "$cmdline" in *--meta-dns-scheduler*) ;; *) continue ;; esac
+        pid=${link#"$PROC"/}
+        pid=${pid%/cmdline}
+        printf '%s\n' "$pid"
+    done
+}
+
 meta_dns_scheduler_running() {
-    component_running r2o-telegram "$META_DNS_PID"
+    for pid in $(meta_dns_scheduler_pids); do
+        return 0
+    done
+    return 1
 }
 
 meta_dns_scheduler_start() {
@@ -701,12 +720,44 @@ meta_dns_scheduler_start() {
         say "нет ndmc/dnsmasq: Meta DNS пропускается, списки обновляются"
     fi
     meta_dns_scheduler_running && return 0
-    spawn_component r2o-telegram "$META_DNS_PID" "$LOG/instagram-dns-scheduler.log" \
-        --meta-dns-scheduler
+    # Это второй процесс того же бинарника, что и прокси. Обычный
+    # stop_component_processes убил бы и рабочий listener, поэтому здесь
+    # останавливаются только процессы с --meta-dns-scheduler.
+    meta_dns_scheduler_stop
+    [ -x "$MANAGER" ] || return 1
+    start-stop-daemon -S -b -m -p "$META_DNS_PID" -x /bin/sh -- \
+        -c 'log=$1; shift; exec "$@" >> "$log" 2>&1' r2o-spawn \
+        "$LOG/instagram-dns-scheduler.log" \
+        "$MANAGER" exec --root "$ROOT" --component r2o-telegram -- --meta-dns-scheduler ||
+        return 1
+    attempt=0
+    while [ "$attempt" -lt 50 ]; do
+        meta_dns_scheduler_running && return 0
+        attempt=$((attempt + 1))
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    return 1
 }
 
 meta_dns_scheduler_stop() {
-    stop_component r2o-telegram "$META_DNS_PID"
+    pids=$(meta_dns_scheduler_pids)
+    if [ -n "$pids" ]; then
+        for pid in $pids; do kill -TERM "$pid" 2>/dev/null || true; done
+        attempt=0
+        while [ "$attempt" -lt 50 ]; do
+            alive=0
+            for pid in $pids; do
+                kill -0 "$pid" 2>/dev/null && alive=1
+            done
+            [ "$alive" -eq 0 ] && break
+            attempt=$((attempt + 1))
+            sleep 0.1 2>/dev/null || sleep 1
+        done
+        for pid in $pids; do
+            kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+        done
+    fi
+    rm -f "$META_DNS_PID"
 }
 
 rt_proxy_running() {
@@ -1254,6 +1305,11 @@ telegram_disable() {
 
 telegram_restart() {
     telegram_lock || return 1
+    if component_running r2o-telegram "$TG_PID" && telegram_ready; then
+        write_telegram_status local
+        telegram_unlock
+        return 0
+    fi
     telegram_stop_locked
     telegram_start_locked
     result=$?
