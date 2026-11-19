@@ -22,6 +22,8 @@ pub struct Runtime {
     cf_ips: Vec<IpAddr>,
     /// Пользовательские Worker общие для маршрутизации и DC discovery.
     cf_worker_domains: Vec<String>,
+    /// Транспорт публичного CF proxy: auto/plain/tls.
+    cf_transport: crate::config::CfTransportMode,
     cf_fail_cooldown: Duration,
     /// `TG_CA_BUNDLE`: доверенные корни для DoH, как C route_dns.
     ca_bundle: Option<std::path::PathBuf>,
@@ -40,6 +42,7 @@ impl Runtime {
             )),
             cf_ips: Vec::new(),
             cf_worker_domains: Vec::new(),
+            cf_transport: crate::config::CfTransportMode::Auto,
             cf_fail_cooldown: Duration::from_secs(60),
             ca_bundle: None,
             stats: crate::stats::global(),
@@ -82,6 +85,15 @@ impl Runtime {
     pub fn with_cf_worker_domains(mut self, domains: Vec<String>) -> Self {
         self.cf_worker_domains = domains;
         self
+    }
+
+    pub fn with_cf_transport(mut self, transport: crate::config::CfTransportMode) -> Self {
+        self.cf_transport = transport;
+        self
+    }
+
+    pub fn cf_transport(&self) -> crate::config::CfTransportMode {
+        self.cf_transport
     }
 
     pub fn with_cf_fail_cooldown(mut self, cooldown: Duration) -> Self {

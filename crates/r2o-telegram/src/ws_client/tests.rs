@@ -30,6 +30,7 @@ fn диагностический_wss_запрос_сохраняет_host_origi
         "worker.example",
         "/apiws?dst=149.154.167.51&dc=2&media=0",
         true,
+        true,
     )
     .unwrap();
 
@@ -37,6 +38,48 @@ fn диагностический_wss_запрос_сохраняет_host_origi
     assert_eq!(request.headers()["Host"], "worker.example");
     assert_eq!(request.headers()["Origin"], "https://web.telegram.org");
     assert_eq!(request.headers()["Sec-WebSocket-Protocol"], "binary");
+}
+
+#[test]
+fn plain_cf_ws_request_uses_ws_scheme_and_keeps_host() {
+    let request = websocket_request("kws2.pool.example", "/apiws", true, false).unwrap();
+
+    assert_eq!(request.uri().scheme_str(), Some("ws"));
+    assert_eq!(request.uri().host(), Some("kws2.pool.example"));
+    assert_eq!(request.headers()["Host"], "kws2.pool.example");
+    assert_eq!(request.headers()["Sec-WebSocket-Protocol"], "binary");
+}
+
+#[tokio::test]
+async fn plain_ws_upgrade_accepts_binary_protocol_without_tls() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let ws = tokio_tungstenite::accept_hdr_async(
+            tcp,
+            |request: &tungstenite::handshake::server::Request,
+             mut response: tungstenite::handshake::server::Response| {
+                assert_eq!(request.uri().path(), "/apiws");
+                assert_eq!(request.headers()["Host"], "kws2.pool.example");
+                response
+                    .headers_mut()
+                    .insert("Sec-WebSocket-Protocol", "binary".parse().unwrap());
+                Ok(response)
+            },
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(ws);
+    });
+
+    let tcp = TcpStream::connect(address).await.unwrap();
+    let request = websocket_request("kws2.pool.example", "/apiws", true, false).unwrap();
+    let (ws, response) = plain_handshake_and_upgrade(tcp, request).await.unwrap();
+    assert_eq!(response.status().as_u16(), 101);
+    drop(ws);
+    server.await.unwrap();
 }
 
 #[test]
@@ -611,7 +654,7 @@ async fn cf_proxy_splits_tls_sni_from_http_host() {
     });
 
     let tcp = TcpStream::connect(address).await.unwrap();
-    let request = websocket_request("kws2.pool.example", "/apiws", true).unwrap();
+    let request = websocket_request("kws2.pool.example", "/apiws", true, true).unwrap();
     let (_ws, response) =
         tls_handshake_and_upgrade_with_name_and_config(tcp, request, "pool.example", client_config)
             .await

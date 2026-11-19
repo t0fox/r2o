@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use crate::config::websocket_dc;
+use crate::config::{CfTransportMode, websocket_dc};
 use crate::outbound::OutboundConnector;
 
 use futures_util::{SinkExt, StreamExt, stream::FuturesUnordered};
@@ -269,6 +269,8 @@ const CF_EDGE_HEDGE_DELAY: Duration = Duration::from_millis(125);
 pub struct CfDialOpts<'a> {
     pub cf_ips: &'a [IpAddr],
     pub fail_cooldown: Duration,
+    /// Транспорт CF proxy: auto/plain/tls. Worker всегда использует TLS.
+    pub transport: CfTransportMode,
     /// `TG_CA_BUNDLE` для проверки сертификатов DoH, как C `tg_tls_client_context`.
     pub ca_bundle: Option<&'a std::path::Path>,
 }
@@ -452,10 +454,12 @@ async fn connect_ws_with_path(
     tls_server_name: Option<&str>,
     path: &str,
     request_binary_subprotocol: bool,
+    use_tls: bool,
     timeout: Duration,
     outbound: &OutboundConnector,
 ) -> WsConnectResult {
-    let tcp = match outbound.connect(ip, 443, timeout).await {
+    let target_port = if use_tls { 443 } else { 80 };
+    let tcp = match outbound.connect(ip, target_port, timeout).await {
         Ok(stream) => stream,
         Err(error) if error.timed_out => {
             crate::stats::global().record_failure("timeout");
@@ -472,12 +476,17 @@ async fn connect_ws_with_path(
     };
     let _ = tcp.set_nodelay(true);
 
-    let request = match websocket_request(domain, path, request_binary_subprotocol) {
+    let request = match websocket_request(domain, path, request_binary_subprotocol, use_tls) {
         Ok(request) => request,
         Err(error) => return WsConnectResult::Failed(error),
     };
 
     let attempt = async {
+        if !use_tls {
+            return plain_handshake_and_upgrade(tcp, request)
+                .await
+                .map_err(WsUpgradeError::from);
+        }
         match tls_server_name {
             Some(server_name) => {
                 tls_handshake_and_upgrade_with_name(tcp, request, server_name).await
@@ -537,8 +546,10 @@ fn websocket_request(
     domain: &str,
     path: &str,
     request_binary_subprotocol: bool,
+    use_tls: bool,
 ) -> Result<tungstenite::http::Request<()>, String> {
-    let url = format!("wss://{domain}{path}");
+    let scheme = if use_tls { "wss" } else { "ws" };
+    let url = format!("{scheme}://{domain}{path}");
     let mut request = url
         .into_client_request()
         .map_err(|error| format!("некорректный URL: {error}"))?;
@@ -651,14 +662,15 @@ async fn connect_probe_ws_with_config(
     };
     timing.tls_ms = Some(elapsed_ms(started));
 
-    let request = websocket_request(domain, path, request_binary_subprotocol).map_err(|error| {
-        WsProbeError {
-            phase: "websocket",
-            reason: error,
-            http_status: None,
-            timing: timing.clone(),
-        }
-    })?;
+    let request =
+        websocket_request(domain, path, request_binary_subprotocol, true).map_err(|error| {
+            WsProbeError {
+                phase: "websocket",
+                reason: error,
+                http_status: None,
+                timing: timing.clone(),
+            }
+        })?;
     let started = Instant::now();
     let stream = MaybeTlsStream::Rustls(tls_stream);
     let (ws, _response) = match tokio::time::timeout(
@@ -721,15 +733,17 @@ fn elapsed_ms(started: Instant) -> u64 {
 /// адреса, начиная с меняющейся позиции. `domain` остаётся TLS SNI и HTTP Host
 /// для каждой попытки.
 #[allow(clippy::too_many_arguments)]
-async fn connect_cf_with_path(
+async fn connect_cf_with_path_mode(
     domain: &str,
     path: &str,
     route_scope: &str,
     request_binary_subprotocol: bool,
+    use_tls: bool,
     timeout: Duration,
     outbound: &OutboundConnector,
     opts: CfDialOpts<'_>,
 ) -> WsConnectResult {
+    let route_scope = format!("{route_scope};tls={}", u8::from(use_tls));
     let ips = if opts.cf_ips.is_empty() {
         match crate::cf_proxy_doh::resolve_cf_ips(domain, outbound, opts.ca_bundle).await {
             Ok(ips) => ips,
@@ -747,7 +761,7 @@ async fn connect_cf_with_path(
 
     let first = cf_ip_start(&ips);
     let cooldowns = &CF_EDGE_TLS_FAIL;
-    let route_ips = cf_ip_attempts(&ips, first, domain, route_scope, cooldowns);
+    let route_ips = cf_ip_attempts(&ips, first, domain, &route_scope, cooldowns);
     let candidates = route_ips
         .iter()
         .map(ToString::to_string)
@@ -755,7 +769,11 @@ async fn connect_cf_with_path(
     let domain_owned = domain.to_string();
     let path_owned = path.to_string();
     let route_scope_owned = route_scope.to_string();
-    let tls_server_name = cf_pool_tls_name(domain).map(str::to_owned);
+    let tls_server_name = if use_tls {
+        cf_pool_tls_name(domain).map(str::to_owned)
+    } else {
+        None
+    };
     let (winner, failures) = race_ws_candidates(
         candidates,
         CF_EDGE_HEDGE_DELAY,
@@ -771,6 +789,7 @@ async fn connect_cf_with_path(
                     tls_server_name.as_deref(),
                     &path,
                     request_binary_subprotocol,
+                    use_tls,
                     timeout,
                     outbound,
                 )
@@ -844,6 +863,90 @@ async fn connect_cf_with_path(
     })
 }
 
+/// Задержка TLS-попытки при auto-режиме: plain WS на порту 80 стартует сразу,
+/// TLS подключается параллельно, если порт 80 не дал рабочий маршрут.
+const CF_PLAIN_TLS_HEDGE_DELAY: Duration = Duration::from_millis(500);
+
+async fn connect_cf_with_path(
+    domain: &str,
+    path: &str,
+    route_scope: &str,
+    request_binary_subprotocol: bool,
+    timeout: Duration,
+    outbound: &OutboundConnector,
+    opts: CfDialOpts<'_>,
+) -> WsConnectResult {
+    match opts.transport {
+        CfTransportMode::Tls => {
+            connect_cf_with_path_mode(
+                domain,
+                path,
+                route_scope,
+                request_binary_subprotocol,
+                true,
+                timeout,
+                outbound,
+                opts,
+            )
+            .await
+        }
+        CfTransportMode::Plain => {
+            connect_cf_with_path_mode(
+                domain,
+                path,
+                route_scope,
+                request_binary_subprotocol,
+                false,
+                timeout,
+                outbound,
+                opts,
+            )
+            .await
+        }
+        CfTransportMode::Auto => {
+            let plain = connect_cf_with_path_mode(
+                domain,
+                path,
+                route_scope,
+                request_binary_subprotocol,
+                false,
+                timeout,
+                outbound,
+                opts,
+            );
+            tokio::pin!(plain);
+            let tls = async {
+                tokio::time::sleep(CF_PLAIN_TLS_HEDGE_DELAY).await;
+                connect_cf_with_path_mode(
+                    domain,
+                    path,
+                    route_scope,
+                    request_binary_subprotocol,
+                    true,
+                    timeout,
+                    outbound,
+                    opts,
+                )
+                .await
+            };
+            tokio::pin!(tls);
+            tokio::select! {
+                result = &mut plain => {
+                    if matches!(
+                        result,
+                        WsConnectResult::Connected(_) | WsConnectResult::HttpStatus(429)
+                    ) {
+                        result
+                    } else {
+                        tls.await
+                    }
+                }
+                result = &mut tls => result,
+            }
+        }
+    }
+}
+
 #[allow(clippy::result_large_err)]
 async fn tls_handshake_and_upgrade<R>(
     tcp: TcpStream,
@@ -854,6 +957,20 @@ where
 {
     let connector = Connector::Rustls(verifying_rustls_config());
     client_async_tls_with_config(request, tcp, Some(ws_config()), Some(connector)).await
+}
+
+/// Plain WebSocket по TCP без TLS: CF proxy на внешнем порту 80.
+///
+/// TLS-проверка не ослабляется: это отдельный транспорт для сетей, где
+/// TLS-рукопожатие с CF-доменами блокируется, а MTProto остаётся зашифрованным.
+async fn plain_handshake_and_upgrade<R>(
+    tcp: TcpStream,
+    request: R,
+) -> Result<(TgWsStream, tungstenite::handshake::client::Response), WsError>
+where
+    R: IntoClientRequest + Unpin,
+{
+    tokio_tungstenite::client_async(request, tokio_tungstenite::MaybeTlsStream::Plain(tcp)).await
 }
 
 /// Ошибка TLS/WebSocket-upgrade: слой TLS отделён от HTTP-ответа и прочих сбоев.
@@ -972,7 +1089,8 @@ pub(crate) async fn connect_ws_for_dc_with_outbound(
                 .acquire()
                 .await
                 .expect("семафор direct WSS неожиданно закрыт");
-            match connect_ws_with_path(&ip, &domain, None, "/apiws", true, timeout, outbound).await
+            match connect_ws_with_path(&ip, &domain, None, "/apiws", true, true, timeout, outbound)
+                .await
             {
                 WsConnectResult::Connected(ws) => Ok(ws),
                 result => {
@@ -1079,7 +1197,9 @@ pub(crate) async fn connect_cf_domain_with_outbound_opts(
         let result =
             connect_cf_with_path(&host, "/apiws", &route_scope, true, timeout, outbound, opts)
                 .await;
-        let result = if should_retry_cf_domain(&result) {
+        // Auto уже проверяет plain и TLS; повтор всего хоста только добавил бы
+        // ещё один полный тайм-аут. Явный транспорт сохраняет прежний повтор.
+        let result = if opts.transport != CfTransportMode::Auto && should_retry_cf_domain(&result) {
             debug!(
                 "DC{}{}: повторная попытка CF-хоста {}",
                 dc,

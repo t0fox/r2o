@@ -199,6 +199,7 @@ pub async fn run_with_listen(
             )
             .with_cf_ips(config.cf_ips.clone())
             .with_cf_worker_domains(config.cf_worker_domains.clone())
+            .with_cf_transport(config.cf_transport)
             .with_cf_fail_cooldown(Duration::from_secs(config.cf_fail_cooldown))
             .with_ca_bundle(config.ca_bundle.clone()),
     );

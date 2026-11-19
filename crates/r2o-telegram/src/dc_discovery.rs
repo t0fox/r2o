@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 use tungstenite::Message;
 
-use crate::config::default_dc_bootstrap_ips;
+use crate::config::{CfTransportMode, default_dc_bootstrap_ips};
 use crate::crypto::ProtoTag;
 use crate::dc_map::{DcEndpoint, DcSnapshot, write_endpoint_manifest};
 use crate::runtime::Runtime;
@@ -206,6 +206,7 @@ async fn fetch_from_cf_dc(
         CfDialOpts {
             cf_ips: runtime.cf_ips(),
             fail_cooldown: runtime.cf_fail_cooldown(),
+            transport: runtime.cf_transport(),
             ca_bundle: runtime.ca_bundle(),
         },
     )
@@ -237,6 +238,7 @@ async fn fetch_from_worker(
         CfDialOpts {
             cf_ips: runtime.cf_ips(),
             fail_cooldown: runtime.cf_fail_cooldown(),
+            transport: CfTransportMode::Tls,
             ca_bundle: runtime.ca_bundle(),
         },
     )

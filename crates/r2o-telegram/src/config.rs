@@ -10,6 +10,17 @@ use crate::outbound::OutboundConnector;
 
 const MAX_CF_WORKER_DOMAINS: usize = 8;
 
+/// Транспорт исходящего соединения с публичным Cloudflare proxy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum CfTransportMode {
+    /// Сначала plain WebSocket на порту 80, затем TLS/WSS на 443.
+    Auto,
+    /// Только plain WebSocket на порту 80.
+    Plain,
+    /// Только TLS/WSS на порту 443.
+    Tls,
+}
+
 fn validate_cf_worker_domain_count(count: usize) -> Result<(), String> {
     if count > MAX_CF_WORKER_DOMAINS {
         Err(format!(
@@ -334,6 +345,15 @@ pub struct Config {
     /// Балансировать подключения между доменами Cloudflare.
     #[arg(long = "cf-balance", env = "TG_CF_BALANCE")]
     pub cf_balance: bool,
+
+    /// Транспорт CF proxy: auto (plain, затем TLS), plain (порт 80) или tls (443).
+    #[arg(
+        long = "cf-transport",
+        env = "TG_CF_TRANSPORT",
+        value_enum,
+        default_value = "auto"
+    )]
+    pub cf_transport: CfTransportMode,
 
     /// Предпочтительные IP адреса Cloudflare edge.
     #[arg(long = "cf-ip", value_delimiter = ',', env = "TG_CF_IP")]

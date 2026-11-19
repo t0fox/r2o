@@ -9,7 +9,7 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::cf_domain_pool::CfDomainPool;
-use crate::config::{Config, WsRoutingPolicy};
+use crate::config::{CfTransportMode, Config, WsRoutingPolicy};
 use crate::runtime::Runtime;
 use crate::stats::{ConnectionTelemetry, RouteAttemptGuard};
 use crate::ws_client::{
@@ -926,6 +926,7 @@ impl Route<'_> {
                 CfDialOpts {
                     cf_ips: self.runtime.cf_ips(),
                     fail_cooldown: self.timeouts.cf_fail_cooldown,
+                    transport: CfTransportMode::Tls,
                     ca_bundle: self.runtime.ca_bundle(),
                 },
             )
@@ -1067,6 +1068,7 @@ impl Route<'_> {
                         CfDialOpts {
                             cf_ips: route.runtime.cf_ips(),
                             fail_cooldown: route.timeouts.cf_fail_cooldown,
+                            transport: route.config.cf_transport,
                             ca_bundle: route.runtime.ca_bundle(),
                         },
                     )
