@@ -9528,6 +9528,14 @@ fn r2o_own_first_exhausted_outcome(
 }
 
 #[cfg(unix)]
+fn r2o_ladder_unmeasurable_fallback_allowed(search_owned: bool) -> bool {
+    // C `refill_from_fallback` (`sched.c:4464`): при `search_owned && !owned_fallback`
+    // запасной перебор не доливается. В ladder-пути Rust `owned_fallback`
+    // не выставлен, поэтому решает только search_owned.
+    !search_owned
+}
+
+#[cfg(unix)]
 fn r2o_install_next_fallback_allowed(
     owned_opaque_fallback: bool,
     cached_measure_with_known: bool,
@@ -16287,6 +16295,7 @@ group_block_proven: false,
                 measured_arm_candidate,
                 client_alpn_handshake_blocked,
                 props_eligible,
+                search_owned,
             ) = r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                 target.clone(),
                 client_hello.as_deref(),
@@ -16599,6 +16608,7 @@ group_block_proven: false,
                     }
                 }
             }
+            let mut ladder_unmeasurable = false;
             let volume_recovered = r2o_discovery_volume_recovery(
                 &mut outcome,
                 &target,
@@ -16619,6 +16629,8 @@ group_block_proven: false,
                 &cancel,
                 runner_started,
                 classify_probes,
+                search_owned,
+                &mut ladder_unmeasurable,
             );
             if volume_recovered {
                 if outcome.plan_text.is_some() {
@@ -16644,7 +16656,8 @@ group_block_proven: false,
             let mut owned_fallback_queue = None;
             let mut primary_from_owned_fallback = false;
             if outcome.plan_text.is_none()
-                && r2o_install_next_fallback_allowed(owned_opaque_fallback, known_plans_present)
+                && (r2o_install_next_fallback_allowed(owned_opaque_fallback, known_plans_present)
+                    || ladder_unmeasurable)
             {
                 let mut queue =
                     r2o_controller::r2o_fallback::FallbackQueue::new_owned_search_with_tried(
@@ -20805,6 +20818,8 @@ fn r2o_discovery_volume_recovery(
     cancel: &AtomicBool,
     started: std::time::Instant,
     classify_probes: usize,
+    search_owned: bool,
+    ladder_unmeasurable: &mut bool,
 ) -> bool {
     if !r2o_discovery_volume_recovery_eligible(outcome) {
         return false;
@@ -21311,18 +21326,22 @@ fn r2o_discovery_volume_recovery(
             return true;
         }
         if ladder_gate == Some(true) {
-            // C `verify_confirm`: бюджет на этой цели не измерить — лестницу
-            // белого имени прекращаем, дальше обычные кандидаты.
+            // C `verify_confirm` + `install_next`: бюджет на этой цели не
+            // измерить — лестницу прекращаем и пропускаем её оставшиеся
+            // ступени. Если поиск не принадлежит замеру, C после этого
+            // доливает запасной перебор; caller делает это по флагу.
             searches
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(target);
             outcome.plan_text = None;
-            outcome.retry_after = Some(R2O_DISCOVERY_INCOMPLETE_RETRY);
+            outcome.direct_clear = false;
+            outcome.retry_after = None;
             outcome.detail.push_str(
                 "; бюджет потока на этой цели не измерить — лестницу белого имени прекращаю, дальше обычные кандидаты",
             );
-            return true;
+            *ladder_unmeasurable = r2o_ladder_unmeasurable_fallback_allowed(search_owned);
+            return false;
         }
         let Some(fetch) = result.as_ref().ok() else {
             outcome.detail.push_str(&format!(
@@ -21484,7 +21503,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech(
     ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
     white_name: &str,
 ) -> (DiscoveryOutcome, usize) {
-    let (outcome, probes, _, _, _, _, _) =
+    let (outcome, probes, _, _, _, _, _, _) =
         r2o_classify_discovery_target_with_client_hello_and_ech_progress(
             target,
             client_hello,
@@ -21618,7 +21637,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
     seed_whole: Option<r2o_controller::classify::SeedWhole>,
     send_cap: usize,
     progress: &mut dyn FnMut(&str, usize, usize, usize),
-) -> (DiscoveryOutcome, usize, bool, bool, bool, bool, bool) {
+) -> (DiscoveryOutcome, usize, bool, bool, bool, bool, bool, bool) {
     let Ok(trigger) = r2o_discovery_trigger(&target, client_hello, ech_config) else {
         return (
             DiscoveryOutcome {
@@ -21641,6 +21660,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                 retry_after: None,
             },
             0,
+            false,
             false,
             false,
             false,
@@ -21675,6 +21695,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                     retry_after: None,
                 },
                 0,
+                false,
                 false,
                 false,
                 false,
@@ -21746,6 +21767,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                 retry_after: None,
             },
             0,
+            false,
             false,
             false,
             false,
@@ -21875,6 +21897,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
         measured_arm,
         client_alpn_handshake_blocked,
         props_eligible,
+        search_owned,
     )
 }
 
@@ -48993,6 +49016,25 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn ladder_unmeasurable_fallback_matches_c_gate() {
+        let mut output = String::new();
+        for search_owned in [0_u8, 1] {
+            let allowed = super::r2o_ladder_unmeasurable_fallback_allowed(search_owned == 1);
+            let mut queue =
+                r2o_controller::r2o_fallback::FallbackQueue::new_owned_search_with_tried(&[]);
+            let added = allowed && queue.next(SHAPE_MODERN, 0).is_some();
+            output.push_str(&format!(
+                "search_owned={search_owned} added_nonzero={}\n",
+                u8::from(added)
+            ));
+        }
+        if let Ok(path) = std::env::var("R2O_LADDER_UNMEASURABLE_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn bootstrap_failure_requests_full_classifier_like_c() {
         assert_eq!(
             super::r2o_family_recovery_failure_action(true),
@@ -49612,6 +49654,7 @@ mod tests {
                 }
                 installed
             });
+            let mut ladder_unmeasurable = false;
             assert!(super::r2o_discovery_volume_recovery(
                 &mut outcome,
                 &target,
@@ -49632,6 +49675,8 @@ mod tests {
                 &cancel,
                 now,
                 raw,
+                false,
+                &mut ladder_unmeasurable,
             ));
             drop(commands);
             assert_eq!(
