@@ -9385,6 +9385,34 @@ fn r2o_discovery_measured_split_plan(
 }
 
 #[cfg(unix)]
+/// C `install_next` (`sched.c:4905-4910`): очередь своих планов исчерпана при
+/// `own_first == 2` — запасной перебор не доливается, полный классификатор не
+/// перезапускается. Исход — failed с обычным task_fail-отдыхом.
+fn r2o_own_first_exhausted_outcome(
+    target: r2o_controller::discovery::DiscoveryTarget,
+) -> DiscoveryOutcome {
+    DiscoveryOutcome {
+        target,
+        plan_text: None,
+        detail: "база не проходит: свои подтверждённые планы коробки не подошли; полный перебор не запускаю".into(),
+        queue_expired: false,
+        address_failure: false,
+        address_recheck_acknowledged: false,
+        address_recheck_probes: 0,
+        direct_clear: false,
+        volume_recovery: false,
+        budget_mark: 0,
+        group_block_proven: false,
+        transferred_own_plan: false,
+        bound_plan_id: None,
+        ech_origin: None,
+        volume_fingerprint: None,
+        volume_box_id: None,
+        retry_after: None,
+    }
+}
+
+#[cfg(unix)]
 fn r2o_discovery_owned_fallback_needed(
     timed_out: bool,
     search_owned: bool,
@@ -13701,6 +13729,7 @@ fn r2o_ech_input_find(
 }
 
 #[cfg(unix)]
+#[allow(dead_code)] // остаётся для теста снимка: own-first-exhausted больше не идёт в полный классификатор
 fn r2o_own_first_client_snapshot(
     cache: &R2oRecentClientShapeCache,
     target: &r2o_controller::discovery::DiscoveryTarget,
@@ -13716,6 +13745,7 @@ fn r2o_own_first_client_snapshot(
 }
 
 #[cfg(unix)]
+#[allow(dead_code)] // см. r2o_own_first_client_snapshot
 fn r2o_adopt_own_first_client_snapshot(
     target: &mut r2o_controller::discovery::DiscoveryTarget,
     client_hello: &mut Option<Vec<u8>>,
@@ -15559,11 +15589,8 @@ impl DiscoveryWorker {
         let runner_client_tcp_timestamps = Arc::clone(&client_tcp_timestamps);
         let recent_client_shapes =
             Arc::new(std::sync::Mutex::new(R2oRecentClientShapeCache::default()));
-        let runner_recent_client_shapes = Arc::clone(&recent_client_shapes);
         let client_snapshot_reasks = Arc::new(std::sync::Mutex::new(HashSet::new()));
-        let runner_client_snapshot_reasks = Arc::clone(&client_snapshot_reasks);
         let client_snapshot_targets = Arc::new(std::sync::Mutex::new(HashSet::new()));
-        let runner_client_snapshot_targets = Arc::clone(&client_snapshot_targets);
         let ech_challenges = Arc::new(std::sync::Mutex::new(R2oEchChallengeCache::default()));
         let runner_ech_challenges = Arc::clone(&ech_challenges);
         let ech_witness_exhaustions = Arc::new(std::sync::Mutex::new(HashSet::new()));
@@ -15625,17 +15652,17 @@ impl DiscoveryWorker {
                     };
                 }
             };
-            let mut runner_started = std::time::Instant::now();
+            let runner_started = std::time::Instant::now();
             runner_searches
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .update(&target, "распознаём поведение", 0, 0, "", "");
-            let mut client_hello = runner_client_hellos
+            let client_hello = runner_client_hellos
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(&r2o_discovery_task_key(&target))
                 .cloned();
-            let mut client_has_tcp_timestamps = runner_client_tcp_timestamps
+            let client_has_tcp_timestamps = runner_client_tcp_timestamps
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(&r2o_discovery_task_key(&target))
@@ -15759,7 +15786,7 @@ impl DiscoveryWorker {
                 );
                 (ech_witness_candidates, next_witness, ech_config, ech_grease)
             };
-            let (mut ech_witness_candidates, mut next_witness, mut ech_config, mut ech_grease) =
+            let (ech_witness_candidates, next_witness, ech_config, ech_grease) =
                 prepare_ech(&mut target, client_hello.is_some());
             let persisted_ech_tried = runner_ech_rx_cursor
                 .lock()
@@ -15806,7 +15833,6 @@ impl DiscoveryWorker {
             let mut own_seen = Vec::new();
             let mut own_tried = persisted_ech_tried;
             let mut own_probes = 0;
-            let mut completed_own_first = false;
             if let Some(catalog) = candidate_catalog.as_ref()
                 && !r2o_controller::discovery::own_first_plans(
                     catalog,
@@ -16106,28 +16132,12 @@ group_block_proven: false,
                         }
                     }
                 }
-                completed_own_first = true;
-                runner_started = std::time::Instant::now();
-            }
-            let mut adopted_own_snapshot = false;
-            if completed_own_first {
-                adopted_own_snapshot = r2o_adopt_own_first_client_snapshot(
-                    &mut target,
-                    &mut client_hello,
-                    &mut client_has_tcp_timestamps,
-                    &runner_recent_client_shapes,
-                    &runner_client_hellos,
-                    &runner_client_tcp_timestamps,
-                    &runner_client_snapshot_reasks,
-                );
-            }
-            if adopted_own_snapshot {
-                (ech_witness_candidates, next_witness, ech_config, ech_grease) =
-                    prepare_ech(&mut target, client_hello.is_some());
-                runner_client_snapshot_targets
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(target.clone());
+                // C `install_next` (`sched.c:4910`): после своих планов
+                // `own_first == 2` запасной перебор не запускается. Полный
+                // классификатор здесь тоже не повторяем — база уже ответила,
+                // своих подтверждённых планов не хватило, а C уходит в
+                // task_fail с отдыхом, а не в новый замер.
+                return r2o_own_first_exhausted_outcome(target);
             }
             drop(progress);
             let progress_searches = Arc::clone(&runner_searches);
@@ -48791,6 +48801,17 @@ mod tests {
                     let (wire, trial_nonzero, plan_nonzero, mark_value) =
                         tcp_frame(&t, &plan, 0x2d);
                     (0, true, Some(wire), trial_nonzero, plan_nonzero, mark_value)
+                }
+                // C `install_next`: own_first == 2 исчерпан — -1 без refill.
+                "own_first_two_stop" => {
+                    let outcome = super::r2o_own_first_exhausted_outcome(target(
+                        "install.example",
+                        4,
+                        SHAPE_MODERN,
+                    ));
+                    assert!(outcome.plan_text.is_none());
+                    assert!(outcome.retry_after.is_none());
+                    (-1, false, None, false, true, 0)
                 }
                 // C_ONLY: у этих ветвей нет production-эквивалента в Rust.
                 _ => continue,

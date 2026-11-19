@@ -48,13 +48,13 @@ import json
 import sys
 
 # C_ONLY: ветви, у которых в Rust нет одноимённого production-эквивалента:
-# ladder_unmeasurable, family_fast, own_first==2, rx_bootstrap_only,
-# cached_measure_valid и продолжение перебора после непереводимого плана.
+# ladder_unmeasurable, family_fast, rx_bootstrap_only, cached_measure_valid и
+# продолжение перебора после непереводимого плана. own_first==2 закрыт
+# production-исходом r2o_own_first_exhausted_outcome.
 C_ONLY = {
     "ladder_unmeasurable_skip",
     "bad_plan_skip",
     "family_fast_stop",
-    "own_first_two_stop",
     "rx_bootstrap_stop",
     "cached_measure_stop",
 }
