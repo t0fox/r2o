@@ -11680,9 +11680,27 @@ impl R2oCleanHandshakeCache {
     }
 }
 
-/// C `on_suspect`: чистое рукопожатие гасит только коды рукопожатия
-/// (RST/повтор/молчание — 1/2/3). Защитно снятый RST (4) и поздние коды
-/// (5/6/8) остаются уликами.
+/// Клиентский адрес R2O-события по ключу потока и признаку `client_is_low`.
+/// Для v48 направление известно из события, а не выводится по портам.
+#[cfg(unix)]
+fn r2o_event_client_ip(key: &[u8; r2k_core::control::KEY_LEN], client_is_low: bool) -> [u8; 16] {
+    let (client, _) = flow_socket_addresses(key, client_is_low);
+    let mut ip = [0_u8; 16];
+    match client.ip() {
+        std::net::IpAddr::V4(address) => ip[..4].copy_from_slice(&address.octets()),
+        std::net::IpAddr::V6(address) => ip.copy_from_slice(&address.octets()),
+    }
+    ip
+}
+
+/// C `on_suspect`: чистое рукопожатие гасит все подозрения уровня
+/// рукопожатия — RST, повтор ClientHello и молчание (коды 1/2/3). Защитно
+/// снятый RST (4) и поздние коды (5/6/8) остаются уликами.
+///
+/// Это ровно условие D2O `sched.c` (`ev->code == RST || REPEAT || SILENT`)
+/// при `ev->planned != PLANNED_YES`. Раньше здесь был только `code == 1`,
+/// поэтому повтор или молчание после чистого рукопожатия запускали полный
+/// перебор по имени, которое уже работало.
 #[cfg(unix)]
 fn r2o_suspect_clean_handshake_suppressed(
     cache: &R2oCleanHandshakeCache,
@@ -11693,10 +11711,8 @@ fn r2o_suspect_clean_handshake_suppressed(
     code: u8,
     now: std::time::Instant,
 ) -> bool {
-    // Чистое TLS-рукопожатие доказывает лишь то, что имя не рвётся
-    // поддельным RST. Молчание и повтор ClientHello оно не опровергает:
-    // коробка может пропустить часть потоков и задержать остальные.
-    code == 1 && cache.suppresses_unplanned_tcp_suspicion(name, 6, family, client_ip, planned, now)
+    matches!(code, 1 | 2 | 3)
+        && cache.suppresses_unplanned_tcp_suspicion(name, 6, family, client_ip, planned, now)
 }
 
 #[cfg(unix)]
@@ -25267,6 +25283,22 @@ impl ControlClient {
                         );
                         let now = std::time::Instant::now();
                         if let Some(target) = tcp_hello_names.target_for_tcp_flow(&event.key, now) {
+                            if r2o_suspect_clean_handshake_suppressed(
+                                &clean_handshakes,
+                                &target.host,
+                                target.family,
+                                r2o_event_client_ip(&event.key, event.client_is_low),
+                                event.planned,
+                                3,
+                                now,
+                            ) {
+                                println!(
+                                    "молчание TCP для {}: недавнее чистое рукопожатие без плана подавляет подозрение",
+                                    target.host
+                                );
+                                std::io::stdout().flush()?;
+                                continue;
+                            }
                             if let Some((worker, catalog, _, mark)) = &mut discovery {
                                 if r2o_controller::discovery::has_usable_binding(catalog, &target)
                                     || r2o_controller::discovery::has_covering_binding(
@@ -51966,11 +51998,7 @@ group_block_proven: false,
             std::time::Duration::from_secs(60)
         );
         assert_eq!(
-            super::r2o_quic_trial_remaining_at(
-                started,
-                yielded,
-                started + lifetime + yielded,
-            ),
+            super::r2o_quic_trial_remaining_at(started, yielded, started + lifetime + yielded,),
             std::time::Duration::ZERO
         );
     }
@@ -56638,9 +56666,7 @@ group_block_proven: false,
         assert!(queue.enqueue(target.clone(), queued_at));
         assert!(queue.promote(&target));
         assert!(
-            queue
-                .r2o_expire(queued_at + lifetime)
-                .is_empty(),
+            queue.r2o_expire(queued_at + lifetime).is_empty(),
             "цель живёт ровно бюджет задачи"
         );
         assert_eq!(
@@ -57576,11 +57602,7 @@ group_block_proven: false,
             ("fresh", Duration::from_secs(1), "queued"),
             ("almost", lifetime - Duration::from_millis(1), "queued"),
             ("boundary", lifetime, "queued"),
-            (
-                "expired",
-                lifetime + Duration::from_nanos(1),
-                "expired",
-            ),
+            ("expired", lifetime + Duration::from_nanos(1), "expired"),
         ] {
             let now = Instant::now();
             let target = r2o_controller::discovery::DiscoveryTarget {
@@ -57600,7 +57622,11 @@ group_block_proven: false,
                 queue.catalog_generation,
             ));
             let expired = queue.r2o_expire(now);
-            let actual = if expired.is_empty() { "queued" } else { "expired" };
+            let actual = if expired.is_empty() {
+                "queued"
+            } else {
+                "expired"
+            };
             assert_eq!(actual, expected, "queue expiry case {case_name}");
             output.push(format!("{case_name} {actual}"));
         }
