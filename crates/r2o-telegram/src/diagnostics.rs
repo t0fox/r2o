@@ -7,11 +7,12 @@ use futures_util::future::join_all;
 use serde::Serialize;
 use tokio::sync::Semaphore;
 
-use crate::config::{Config, default_dc_ips};
+use crate::config::{CfTransportMode, Config, default_dc_ips};
 use crate::dc_discovery::{probe_res_pq, start_ws_byte_stream};
 use crate::runtime::Runtime;
 use crate::ws_client::{
-    WsProbeError, WsProbeTiming, cf_ws_domains, connect_probe_ws, race_ws_candidates, ws_domains,
+    WsProbeError, WsProbeTiming, cf_ws_domains, connect_probe_plain_ws, connect_probe_ws,
+    race_ws_candidates, ws_domains,
 };
 
 const ROUTE_TIMEOUT: Duration = Duration::from_secs(8);
@@ -319,21 +320,29 @@ async fn probe_wss(
     let domain_owned = domain.to_string();
     let path = spec.path.clone();
     let binary_subprotocol = spec.binary_subprotocol;
+    let use_tls = spec.transport != "cf-proxy" || runtime.cf_transport() == CfTransportMode::Tls;
     let outbound = runtime.outbound();
-    let (winner, failures) =
-        race_ws_candidates(
-            candidates,
-            EDGE_HEDGE_DELAY,
-            move |target| {
-                let domain = domain_owned.clone();
-                let path = path.clone();
-                async move {
-                    probe_wss_edge(outbound, &target, &domain, &path, binary_subprotocol).await
-                }
-            },
-            |_| false,
-        )
-        .await;
+    let (winner, failures) = race_ws_candidates(
+        candidates,
+        EDGE_HEDGE_DELAY,
+        move |target| {
+            let domain = domain_owned.clone();
+            let path = path.clone();
+            async move {
+                probe_wss_edge(
+                    outbound,
+                    &target,
+                    &domain,
+                    &path,
+                    binary_subprotocol,
+                    use_tls,
+                )
+                .await
+            }
+        },
+        |_| false,
+    )
+    .await;
     if let Some((selected_ip, (timing, mtproto_ms))) = winner {
         result.selected_ip = selected_ip.parse().ok();
         result.tcp_ms = timing.tcp_ms;
@@ -358,16 +367,29 @@ async fn probe_wss_edge(
     domain: &str,
     path: &str,
     binary_subprotocol: bool,
+    use_tls: bool,
 ) -> Result<(WsProbeTiming, u64), WsProbeError> {
-    let (ws, timing) = connect_probe_ws(
-        ip,
-        domain,
-        path,
-        binary_subprotocol,
-        ROUTE_TIMEOUT,
-        outbound,
-    )
-    .await?;
+    let (ws, timing) = if use_tls {
+        connect_probe_ws(
+            ip,
+            domain,
+            path,
+            binary_subprotocol,
+            ROUTE_TIMEOUT,
+            outbound,
+        )
+        .await?
+    } else {
+        connect_probe_plain_ws(
+            ip,
+            domain,
+            path,
+            binary_subprotocol,
+            ROUTE_TIMEOUT,
+            outbound,
+        )
+        .await?
+    };
     let mut stream = start_ws_byte_stream(ws);
     let started = std::time::Instant::now();
     match tokio::time::timeout(MTPROTO_TIMEOUT, probe_res_pq(&mut stream)).await {

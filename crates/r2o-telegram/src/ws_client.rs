@@ -591,6 +591,99 @@ pub(crate) async fn connect_probe_ws(
     .await
 }
 
+pub(crate) async fn connect_probe_plain_ws(
+    ip: &str,
+    domain: &str,
+    path: &str,
+    request_binary_subprotocol: bool,
+    timeout: Duration,
+    outbound: &OutboundConnector,
+) -> Result<(TgWsStream, WsProbeTiming), WsProbeError> {
+    let mut timing = WsProbeTiming::default();
+    let started = Instant::now();
+    let tcp = match tokio::time::timeout(timeout, outbound.connect(ip, 80, timeout)).await {
+        Ok(Ok(tcp)) => tcp,
+        Ok(Err(error)) => {
+            return Err(WsProbeError {
+                phase: if error.dns_failed { "dns" } else { "tcp" },
+                reason: error.to_string(),
+                http_status: None,
+                timing,
+            });
+        }
+        Err(_) => {
+            return Err(WsProbeError {
+                phase: "tcp",
+                reason: "истёк тайм-аут TCP connect".to_string(),
+                http_status: None,
+                timing,
+            });
+        }
+    };
+    timing.tcp_ms = Some(elapsed_ms(started));
+    let _ = tcp.set_nodelay(true);
+    let request =
+        websocket_request(domain, path, request_binary_subprotocol, false).map_err(|error| {
+            WsProbeError {
+                phase: "websocket",
+                reason: error,
+                http_status: None,
+                timing: timing.clone(),
+            }
+        })?;
+    let started = Instant::now();
+    let stream = MaybeTlsStream::Plain(tcp);
+    match tokio::time::timeout(
+        timeout,
+        tokio_tungstenite::client_async_with_config(request, stream, Some(ws_config())),
+    )
+    .await
+    {
+        Ok(Ok((ws, response))) if response.status().as_u16() == 101 => {
+            timing.websocket_ms = Some(elapsed_ms(started));
+            Ok((ws, timing))
+        }
+        Ok(Ok((_, response))) => {
+            let status = response.status().as_u16();
+            timing.websocket_ms = Some(elapsed_ms(started));
+            Err(WsProbeError {
+                phase: "websocket",
+                reason: format!("сервер ответил HTTP {status}"),
+                http_status: Some(status),
+                timing,
+            })
+        }
+        Ok(Err(WsError::Http(response))) => {
+            let status = response.status().as_u16();
+            timing.websocket_ms = Some(elapsed_ms(started));
+            Err(WsProbeError {
+                phase: "websocket",
+                reason: format!("сервер ответил HTTP {status}"),
+                http_status: Some(status),
+                timing,
+            })
+        }
+        Ok(Err(error)) => {
+            timing.websocket_ms = Some(elapsed_ms(started));
+            Err(WsProbeError {
+                phase: "websocket",
+                reason: error.to_string(),
+                http_status: None,
+                timing,
+            })
+        }
+        Err(_) => {
+            timing.websocket_ms = Some(elapsed_ms(started));
+            Err(WsProbeError {
+                phase: "websocket",
+                reason: "истёк тайм-аут WebSocket upgrade".to_string(),
+                http_status: None,
+                timing,
+            })
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn connect_probe_ws_with_config(
     ip: &str,
