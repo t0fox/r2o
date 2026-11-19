@@ -26,7 +26,7 @@ C (`d2kc`):
 подтверждён повторяемый обрыв входящего ответа около 16 КБ
 ПОДТВЕРЖДЕНО собственным зондом: plan-1bc820bc
 итог поиска: outcome=probe-confirmed path=property probe_units=13
-elapsed_ms=14741 queue_ms=0
+elapsed_ms=14757 queue_ms=0
 ```
 
 Rust (`r2o-controller`):
@@ -48,31 +48,48 @@ Rust (`r2o-controller`):
 Каталог: оба сохранили `1 box / 1 binding` для `live.example.com`,
 `level=3`, `transport=6`, `family=4`, `shape=1`.
 
-## Найденное расхождение
+## Исправленное расхождение профиля TCP
 
-Профиль TCP-метки времени в сохранённой привязке:
+Первый прогон выявил:
 
 ```text
 C:    tcp_profile = 1 (NO_TS)
-Rust: tcp_profile = 0 (UNKNOWN)
+Rust: tcp_profile = 0 (UNKNOWN), target profile = 2 (TS)
 ```
 
-Диагностика Rust на этом же прогоне:
+Причины и исправления:
+
+1. `r2o-datapath` отправлял v22 `CLIENT_TCP` из опций сегмента ClientHello
+   (обычно пустых), а не из SYN. Теперь опции SYN сохраняются в
+   `TcpSession.client_tcp_options` и уходят в `CLIENT_TCP`; v48 `HELLO`
+   получает тот же профиль из сессии.
+2. `r2o-controller` при сохранении привязки брал
+   `r2k_link_shape_tcp_profile(target.shape)` (для базовой формы это
+   UNKNOWN), а не `target.tcp_profile()`. Исправлено в `discovery.rs`.
+
+Адресные тесты:
 
 ```text
-target profile = 2 (TS), has_timestamp = None
+r2o-datapath: autottl... проверяет r2o_client_tcp_options_for_packet
+r2o-controller: measured_binding_берёт_профиль_цели_а_не_базовую_форму
 ```
 
-То есть датапат/контроллер видят разные источники профиля: Rust-target
-считает, что TS есть, а в binding уходит UNKNOWN; C сохраняет NO_TS.
-Это не исправлено. Нужен отдельный адресный разбор `CLIENT_TCP`/`SHAPE` →
-`tcp_profile` в v22/v48 и решение, какой источник является эталонным.
+Повторный live-прогон:
+
+```text
+C:    tcp_profile = 2 (TS)
+Rust: tcp_profile = 2 (TS)
+```
+
+Оба каталога снова дали `1 box / 1 binding`, `level=3`, `transport=6`,
+`family=4`, `shape=1`; полный путь до `PLANNING` подтверждён обоими
+контроллерами.
 
 ## Ограничения
 
 - Box-режимы подобраны под порядок проб каждого контроллера; это не один
   универсальный target, а два прогона с одинаковым типом обрыва.
-- Тайминги отличаются: C `elapsed_ms=14741`, Rust подтверждение плана
+- Тайминги отличаются: C `elapsed_ms=14757`, Rust подтверждение плана
   примерно через 16.3 с по журналу; это не побайтовый timing-дифференциал.
 - Внешний IPv6 не проверялся (только ULA, default route нет).
 - Каталог 11/115 недоступен; восстановлен 9/83.

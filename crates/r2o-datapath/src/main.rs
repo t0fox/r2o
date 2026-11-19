@@ -2740,8 +2740,16 @@ mod app {
                                     && let Some(mut hello) = tcp_hello_from_packet(&packet)
                                         .or_else(|| tcp_http_hello_from_packet(&packet))
                                 {
-                                    hello.tcp_has_timestamp = tcp_sessions
-                                        .r2o_client_offers_tcp_timestamps_for_packet(&packet);
+                                    if let Some(has_timestamp) = tcp_sessions
+                                        .r2o_client_offers_tcp_timestamps_for_packet(&packet)
+                                    {
+                                        hello.tcp_has_timestamp = Some(has_timestamp);
+                                    }
+                                    if let Some(options) =
+                                        tcp_sessions.r2o_client_tcp_options_for_packet(&packet)
+                                    {
+                                        hello.tcp_options = Some(options.to_vec());
+                                    }
                                     record_shape_tcp_options(&mut control, &hello);
                                     send_hello_event(
                                         &mut control,
@@ -2838,8 +2846,16 @@ mod app {
                                     && let Some(mut hello) = tcp_hello_from_packet(&packet)
                                         .or_else(|| tcp_http_hello_from_packet(&packet))
                                 {
-                                    hello.tcp_has_timestamp = tcp_sessions
-                                        .r2o_client_offers_tcp_timestamps_for_packet(&packet);
+                                    if let Some(has_timestamp) = tcp_sessions
+                                        .r2o_client_offers_tcp_timestamps_for_packet(&packet)
+                                    {
+                                        hello.tcp_has_timestamp = Some(has_timestamp);
+                                    }
+                                    if let Some(options) =
+                                        tcp_sessions.r2o_client_tcp_options_for_packet(&packet)
+                                    {
+                                        hello.tcp_options = Some(options.to_vec());
+                                    }
                                     record_shape_tcp_options(&mut control, &hello);
                                     send_hello_event(
                                         &mut control,
@@ -2929,8 +2945,16 @@ mod app {
                             HoldOutcome::Observed { mut hello } => {
                                 tcp_sessions.r2o_note_captured_client_shape(bytes, hello.shape);
                                 if !controller_probe {
-                                    hello.tcp_has_timestamp = tcp_sessions
-                                        .r2o_client_offers_tcp_timestamps_for_packet(bytes);
+                                    if let Some(has_timestamp) = tcp_sessions
+                                        .r2o_client_offers_tcp_timestamps_for_packet(bytes)
+                                    {
+                                        hello.tcp_has_timestamp = Some(has_timestamp);
+                                    }
+                                    if let Some(options) =
+                                        tcp_sessions.r2o_client_tcp_options_for_packet(bytes)
+                                    {
+                                        hello.tcp_options = Some(options.to_vec());
+                                    }
                                     record_shape_tcp_options(&mut control, &hello);
                                     send_hello_event(
                                         &mut control,

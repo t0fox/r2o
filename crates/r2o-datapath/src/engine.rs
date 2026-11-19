@@ -115,6 +115,8 @@ struct TcpSession {
     metrics: R2oTcpFlowMetrics,
     reverse_ttl: Option<u8>,
     client_offered_tcp_timestamps: Option<bool>,
+    /// C `shape_opts`: опции SYN клиента, которые уходят в v22 CLIENT_TCP.
+    client_tcp_options: Option<Vec<u8>>,
     guards: u8,
     execution_id: u64,
     r2o_execution_pending: bool,
@@ -192,6 +194,7 @@ impl TcpSession {
             metrics: R2oTcpFlowMetrics::default(),
             reverse_ttl: None,
             client_offered_tcp_timestamps: None,
+            client_tcp_options: None,
             guards: 0,
             execution_id: 0,
             r2o_execution_pending: false,
@@ -662,6 +665,16 @@ impl TcpSessions {
             .get(&key)
             .filter(|session| !session.controller_probe)
             .and_then(|session| session.client_offered_tcp_timestamps)
+    }
+
+    /// Вернуть опции SYN клиента для v22 `CLIENT_TCP`: C берёт профиль
+    /// TCP-метки времени именно из них, а не из сегмента ClientHello.
+    pub fn r2o_client_tcp_options_for_packet(&self, packet: &[u8]) -> Option<&[u8]> {
+        let key = TcpFlowKey::from_packet(packet)?;
+        self.flows
+            .get(&key)
+            .filter(|session| !session.controller_probe)
+            .and_then(|session| session.client_tcp_options.as_deref())
     }
 
     /// Обновить предварительную форму ClientHello после полной сборки захвата.
@@ -1283,10 +1296,10 @@ impl TcpSessions {
             let mut session = TcpSession::new(source, true, Some(now), now);
             session.capture_anchor = Some(tcp.sequence.wrapping_add(1));
             session.controller_probe = controller_probe;
+            let syn_options = packet.get(tcp.options.clone()).unwrap_or_default();
             session.client_offered_tcp_timestamps =
-                Some(crate::capture::tcp_timestamp_option_present(
-                    packet.get(tcp.options.clone()).unwrap_or_default(),
-                ));
+                Some(crate::capture::tcp_timestamp_option_present(syn_options));
+            session.client_tcp_options = Some(syn_options[..syn_options.len().min(40)].to_vec());
             if destination.port == 80 {
                 session.r2o_http_requests =
                     r2k_core::httpup::R2oHttpRequestSequence::new(tcp.sequence.wrapping_add(1));
@@ -3306,6 +3319,10 @@ mod tests {
         assert_eq!(
             timestamp_sessions.r2o_client_offers_tcp_timestamps_for_packet(&timestamp_probe),
             Some(true),
+        );
+        assert_eq!(
+            timestamp_sessions.r2o_client_tcp_options_for_packet(&timestamp_probe),
+            Some(&[1, 1, 8, 10, 0, 0, 0, 1, 0, 0, 0, 2][..]),
         );
     }
 

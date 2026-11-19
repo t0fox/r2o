@@ -1672,7 +1672,7 @@ fn add_measured_binding_with_fingerprint_in_box_learn(
         6,
         target.family,
         target.shape,
-        r2k_core::control::r2k_link_shape_tcp_profile(target.shape),
+        target.tcp_profile(),
         1,
         input,
         now,
@@ -2650,6 +2650,31 @@ mod tests {
             SHAPE_MODERN,
             r2k_core::control::TCP_PROFILE_UNKNOWN
         ));
+    }
+
+    #[test]
+    fn measured_binding_берёт_профиль_цели_а_не_базовую_форму() {
+        use crate::catalog::Catalog;
+
+        let target = DiscoveryTarget {
+            tcp_profile: r2k_core::control::TCP_PROFILE_TS,
+            host: "profile.example.com".into(),
+            endpoint: "198.51.100.20:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let mut catalog = Catalog::default();
+        super::add_measured_binding_with_fingerprint(
+            &mut catalog,
+            &target,
+            "r2o-plan 1 11\nid 00000000000000000000000000000000\nproto tcp tls\nsplit sni_middle +0\n",
+            100,
+            2,
+            None,
+        )
+        .unwrap();
+        let binding = &catalog.boxes[0].bindings[0];
+        assert_eq!(binding.tcp_profile, r2k_core::control::TCP_PROFILE_TS);
     }
 
     #[test]
