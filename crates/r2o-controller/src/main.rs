@@ -57236,6 +57236,275 @@ group_block_proven: false,
         std::fs::remove_dir_all(work).unwrap();
     }
 
+    /// C/Rust differential перехода T_ASKING -> T_VERIFY -> T_PLANNING:
+    /// имя/адрес, family 4/6, APPLIED с нулевым, чужим и точным trial ID.
+    /// C-оракул — `d2o_sched_tick_trial_matrix.c` (production d2k_sched).
+    #[cfg(unix)]
+    #[test]
+    fn d2o_sched_tick_trial_transitions_match_c() {
+        use r2o_controller::catalog::Catalog;
+        use r2o_controller::discovery::DiscoveryTarget;
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        fn flow_key(family: u8, kind: u8) -> [u8; r2k_core::control::KEY_LEN] {
+            let mut key = [0_u8; r2k_core::control::KEY_LEN];
+            key[0] = family;
+            if family == 4 {
+                key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+                key[17..21].copy_from_slice(&[198, 51, 100, 20]);
+            } else {
+                key[1..17].copy_from_slice(&std::net::Ipv6Addr::LOCALHOST.octets());
+                key[17..33].copy_from_slice(
+                    &std::net::Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 2).octets(),
+                );
+            }
+            key[33..35].copy_from_slice(&40_500_u16.to_be_bytes());
+            key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+            key[37] = if kind == 0 { 6 } else { 17 };
+            key
+        }
+
+        fn addresses(family: u8) -> (std::net::SocketAddr, std::net::SocketAddr, String) {
+            if family == 4 {
+                (
+                    "192.0.2.10:41000".parse().unwrap(),
+                    "198.51.100.20:443".parse().unwrap(),
+                    "198.51.100.20:443".into(),
+                )
+            } else {
+                (
+                    "[::1]:41000".parse().unwrap(),
+                    "[2001:db8::2]:443".parse().unwrap(),
+                    "[2001:db8::2]:443".into(),
+                )
+            }
+        }
+
+        let Some(output_path) = std::env::var_os("R2O_SCHED_TICK_MATRIX_DIFF_OUTPUT") else {
+            return;
+        };
+        let host = "trial.example.com";
+        let mut output = String::new();
+        for family in [4_u8, 6_u8] {
+            for kind in [0_u8, 2_u8] {
+                for proof in 0_u8..3 {
+                    let trial_id = [0x51_u8; 16];
+                    let plan_text = if kind == 0 {
+                        "r2o-plan 1 11\nid 00000000000000000000000000000000\nproto tcp tls\nsplit sni_middle +0\n"
+                    } else {
+                        "r2o-plan 1 9\nid 00000000000000000000000000000000\nproto udp quic\nudplen 100\n"
+                    };
+                    let plan_records = compile_text(plan_text).unwrap();
+                    let (source, destination, endpoint) = addresses(family);
+                    let (command, delete, command_kind) = if kind == 0 {
+                        (
+                            super::encode_set_name_probe(
+                                host,
+                                SHAPE_MODERN,
+                                family,
+                                40_500,
+                                &plan_records,
+                                trial_id,
+                            )
+                            .unwrap(),
+                            None,
+                            r2k_core::control::COMMAND_SET_NAME_PROBE,
+                        )
+                    } else {
+                        (
+                            super::encode_set_addr_probe(
+                                source,
+                                destination,
+                                super::ADDR_PROBE_LEASE_MAX_MS,
+                                &plan_records,
+                                trial_id,
+                            )
+                            .unwrap(),
+                            Some(
+                                super::encode_delete_addr_probe(source, destination, trial_id)
+                                    .unwrap(),
+                            ),
+                            super::COMMAND_SET_ADDR_PROBE,
+                        )
+                    };
+                    let mut event_trial = trial_id;
+                    if proof == 0 {
+                        event_trial = [0; 16];
+                    }
+                    if proof == 1 {
+                        event_trial[0] ^= 1;
+                    }
+                    let applied = r2k_core::control::AppliedEvent {
+                        key: flow_key(family, kind),
+                        plan_id: [0x33; 16],
+                        trial_id: event_trial,
+                        execution_id: 1,
+                        binding: r2k_core::control::BindingContext {
+                            generation: 0,
+                            kind: 0,
+                            family: 0,
+                            shape: 0,
+                            temporary: false,
+                            epoch: [0; 16],
+                        },
+                    };
+                    let applied_wire = encode_frame(
+                        r2k_core::control::EVENT_APPLIED,
+                        &applied.event_body().unwrap(),
+                    )
+                    .unwrap();
+                    let (socket, mut peer) = UnixStream::pair().unwrap();
+                    let peer_thread = std::thread::spawn(move || {
+                        let command = read_frame(&mut peer).unwrap();
+                        assert_eq!(command.kind, command_kind);
+                        peer.write_all(
+                            &r2k_core::control::encode_ack_for_trial(
+                                command_kind,
+                                true,
+                                0,
+                                Some(trial_id),
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap();
+                        peer.write_all(&applied_wire).unwrap();
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    });
+                    let mut client = ControlClient {
+                        socket,
+                        send_maxlen: 0,
+                        send_cap: Arc::new(AtomicUsize::new(0)),
+                        pending_events: Default::default(),
+                        pending_applied_events: Default::default(),
+                        dropped_events: Default::default(),
+                        http_search_started: Default::default(),
+                        http_acknowledged_bindings: Default::default(),
+                    };
+                    let mut catalog = Catalog::default();
+                    let catalog_path = std::env::temp_dir().join(format!(
+                        "r2o-tick-matrix-{}-{family}-{kind}-{proof}.json",
+                        std::process::id()
+                    ));
+                    Catalog::default().save_atomic(&catalog_path, 1).unwrap();
+                    if kind == 0 {
+                        let (reply, response) = std::sync::mpsc::sync_channel(1);
+                        client
+                            .service_http_search_command(
+                                super::HttpSearchCommand::InstallProbe {
+                                    host: host.into(),
+                                    shape: SHAPE_MODERN,
+                                    family,
+                                    port: 40_500,
+                                    command,
+                                    trial_id,
+                                    candidate_settle: false,
+                                    reply,
+                                },
+                                &mut catalog,
+                                &catalog_path,
+                                None,
+                            )
+                            .unwrap();
+                        assert!(response.recv().unwrap().is_ok());
+                    } else {
+                        let (reply, response) = std::sync::mpsc::sync_channel(1);
+                        client
+                            .service_http_search_command(
+                                super::HttpSearchCommand::R2oInstallQuicProbe {
+                                    command,
+                                    delete: delete.unwrap(),
+                                    trial_id,
+                                    reply,
+                                },
+                                &mut catalog,
+                                &catalog_path,
+                                None,
+                            )
+                            .unwrap();
+                        assert!(response.recv().unwrap().is_ok());
+                    }
+                    let (reply, response) = std::sync::mpsc::sync_channel(1);
+                    client
+                        .service_http_search_command(
+                            super::HttpSearchCommand::CollectApplied {
+                                trial_id,
+                                timeout: std::time::Duration::from_millis(50),
+                                reply,
+                            },
+                            &mut catalog,
+                            &catalog_path,
+                            None,
+                        )
+                        .unwrap();
+                    let events = response.recv().unwrap().unwrap();
+                    let exact_applied = events.iter().any(|event| event.trial_id == trial_id);
+                    let binding = if exact_applied && kind == 2 {
+                        r2o_controller::discovery::add_confirmed_quic_address_binding(
+                            &mut catalog,
+                            destination.ip(),
+                            plan_text,
+                            1_800_000_000,
+                        )
+                        .unwrap();
+                        catalog
+                            .boxes
+                            .iter()
+                            .flat_map(|box_record| &box_record.bindings)
+                            .count()
+                    } else if exact_applied {
+                        let outcome = DiscoveryOutcome {
+                            target: DiscoveryTarget {
+                                tcp_profile: 0,
+                                host: host.into(),
+                                endpoint,
+                                family,
+                                shape: if kind == 0 { SHAPE_MODERN } else { SHAPE_QUIC },
+                            },
+                            plan_text: Some(plan_text.into()),
+                            detail: "trial transition matrix".into(),
+                            queue_expired: false,
+                            address_failure: false,
+                            address_recheck_acknowledged: false,
+                            address_recheck_probes: 0,
+                            direct_clear: false,
+                            volume_recovery: false,
+                            budget_mark: 0,
+                            group_block_proven: false,
+                            transferred_own_plan: false,
+                            bound_plan_id: None,
+                            ech_origin: None,
+                            volume_fingerprint: None,
+                            volume_box_id: None,
+                            retry_after: None,
+                        };
+                        client
+                            .apply_discovery_outcome(outcome, &mut catalog, &catalog_path)
+                            .unwrap();
+                        catalog
+                            .boxes
+                            .iter()
+                            .flat_map(|box_record| &box_record.bindings)
+                            .filter(|binding| binding.target == host)
+                            .count()
+                    } else {
+                        0
+                    };
+                    output.push_str(&format!(
+                        "case family={family} kind={kind} proof={proof} binding={}\n",
+                        u8::from(binding > 0)
+                    ));
+                    assert_eq!(exact_applied, proof == 2);
+                    assert_eq!(binding > 0, proof == 2);
+                    peer_thread.join().unwrap();
+                    let _ = std::fs::remove_file(&catalog_path);
+                }
+            }
+        }
+        std::fs::write(output_path, &output).unwrap();
+        print!("{output}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn d2o_missing_candidate_ack_expires_after_settle_window() {
