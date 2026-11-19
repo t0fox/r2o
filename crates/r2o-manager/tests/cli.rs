@@ -327,6 +327,7 @@ fn shipped_openwrt_defaults_initialize_without_rejecting_advanced_mark_options()
     );
     let config = fs::read_to_string(root.join("config")).unwrap();
     assert!(config.contains("PROBE_MARK=46\n"));
+    assert!(config.contains("MEASURE_MARK=47\n"));
     assert!(config.contains("ONLY_MARK=\n"));
     assert!(config.contains("TG_PORT=1443\n"));
     assert!(config.contains("D2K_GATE=\n"));
@@ -404,6 +405,32 @@ fn defaults_reject_invalid_probe_and_only_mark_values() {
         assert!(
             !output.status.success(),
             "accepted PROBE_MARK={probe_mark}, ONLY_MARK={only_mark}"
+        );
+        assert!(!root.join("config").exists());
+    }
+}
+
+#[test]
+fn defaults_reject_invalid_measure_mark_values() {
+    let temp = TestDir::new();
+    let root = temp.0.join("install");
+    let defaults = temp.0.join("config.default");
+    for measure_mark in ["4294967296", "0x", "-1", "mark"] {
+        fs::write(
+            &defaults,
+            format!("MODE=apply\nMARK=45\nPROBE_MARK=46\nMEASURE_MARK={measure_mark}\n"),
+        )
+        .unwrap();
+        let output = invoke(&[
+            "config-init",
+            "--root",
+            root.to_str().unwrap(),
+            "--defaults",
+            defaults.to_str().unwrap(),
+        ]);
+        assert!(
+            !output.status.success(),
+            "accepted MEASURE_MARK={measure_mark}"
         );
         assert!(!root.join("config").exists());
     }

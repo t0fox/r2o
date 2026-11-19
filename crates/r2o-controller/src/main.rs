@@ -11705,7 +11705,10 @@ fn r2o_suspect_clean_handshake_suppressed(
     code: u8,
     now: std::time::Instant,
 ) -> bool {
-    matches!(code, 1 | 2 | 3)
+    // Чистое TLS-рукопожатие доказывает лишь то, что имя не рвётся
+    // поддельным RST. Молчание и повтор ClientHello оно не опровергает:
+    // коробка может пропустить часть потоков и задержать остальные.
+    code == 1
         && cache.suppresses_unplanned_tcp_suspicion(name, 6, family, client_ip, planned, now)
 }
 
@@ -25279,21 +25282,8 @@ impl ControlClient {
                             event.elapsed_ms
                         );
                         let now = std::time::Instant::now();
-                        let target = tcp_hello_names.target_for_tcp_flow(&event.key, now);
-                        if let Some(target) = target {
-                            if clean_handshakes.suppresses_unplanned_tcp_suspicion(
-                                &target.host,
-                                6,
-                                target.family,
-                                r2o_clean_handshake_client_ip(&event.key),
-                                event.planned,
-                                now,
-                            ) {
-                                println!(
-                                    "классификация {} пропущена: IPv{} недавно завершил TCP-рукопожатие без плана",
-                                    target.host, target.family
-                                );
-                            } else if let Some((worker, catalog, _, mark)) = &mut discovery {
+                        if let Some(target) = tcp_hello_names.target_for_tcp_flow(&event.key, now) {
+                            if let Some((worker, catalog, _, mark)) = &mut discovery {
                                 if r2o_controller::discovery::has_usable_binding(catalog, &target)
                                     || r2o_controller::discovery::has_covering_binding(
                                         catalog, &target,
@@ -25333,6 +25323,11 @@ impl ControlClient {
                                         );
                                     }
                                 }
+                            } else {
+                                println!(
+                                    "молчание TCP для {}: Discovery не подключён",
+                                    target.host
+                                );
                             }
                         }
                     }
@@ -25395,19 +25390,7 @@ impl ControlClient {
                     );
                     let now = std::time::Instant::now();
                     if let Some(target) = tcp_hello_names.target_for_tcp_flow(&event.key, now) {
-                        if clean_handshakes.suppresses_unplanned_tcp_suspicion(
-                            &target.host,
-                            6,
-                            target.family,
-                            r2o_clean_handshake_client_ip(&event.key),
-                            event.planned,
-                            now,
-                        ) {
-                            println!(
-                                "классификация {} пропущена: IPv{} недавно завершил TCP-рукопожатие без плана",
-                                target.host, target.family
-                            );
-                        } else if let Some((worker, catalog, _, _)) = &mut discovery {
+                        if let Some((worker, catalog, _, _)) = &mut discovery {
                             let has_solution =
                                 r2o_controller::discovery::has_usable_binding(catalog, &target)
                                     || r2o_controller::discovery::has_covering_binding(
@@ -25487,19 +25470,7 @@ impl ControlClient {
                     );
                     let now = std::time::Instant::now();
                     if let Some(target) = tcp_hello_names.target_for_tcp_flow(&event.key, now) {
-                        if clean_handshakes.suppresses_unplanned_tcp_suspicion(
-                            &target.host,
-                            6,
-                            target.family,
-                            r2o_clean_handshake_client_ip(&event.key),
-                            event.planned,
-                            now,
-                        ) {
-                            println!(
-                                "классификация {} пропущена: IPv{} недавно завершил TCP-рукопожатие без плана",
-                                target.host, target.family
-                            );
-                        } else if let Some((worker, catalog, _, _)) = &mut discovery {
+                        if let Some((worker, catalog, _, _)) = &mut discovery {
                             let has_solution =
                                 r2o_controller::discovery::has_usable_binding(catalog, &target)
                                     || r2o_controller::discovery::has_covering_binding(

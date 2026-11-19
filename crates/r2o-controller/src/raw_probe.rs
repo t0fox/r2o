@@ -840,6 +840,7 @@ enum Property {
     SequenceWindow,
     Timestamps,
     OverlapSni,
+    UrgentByte,
     DenseDuplicates,
     WhiteTimestamp,
     Syn,
@@ -852,7 +853,7 @@ struct PropertyProbe {
 }
 
 fn property_probes() -> Vec<PropertyProbe> {
-    let mut probes = Vec::with_capacity(12);
+    let mut probes = Vec::with_capacity(13);
     let mut add = |label: &'static str, name: &'static str, set: Property, poison: Poison| {
         probes.push(PropertyProbe {
             label,
@@ -863,6 +864,25 @@ fn property_probes() -> Vec<PropertyProbe> {
             set,
         });
     };
+    // Сокрытие имени — первое, что измеряется у коробки, которая уже
+    // отбросила целое приветствие и простой разрез: это самые дешёвые и
+    // самые результативные примитивы против SNI-фильтра. Остальные вопросы
+    // идут после, чтобы успешное плечо возвращалось раньше.
+    add(
+        "перекрытие до конца имени",
+        "seqovl-sni",
+        Property::OverlapSni,
+        Poison::default(),
+    );
+    add(
+        "срочный байт в середине имени",
+        "oob-sni-middle",
+        Property::UrgentByte,
+        Poison {
+            oob: true,
+            ..Poison::default()
+        },
+    );
     add(
         "перекрытие слева",
         "seqovl-1",
@@ -937,12 +957,6 @@ fn property_probes() -> Vec<PropertyProbe> {
             tcp_ts: true,
             ..Poison::default()
         },
-    );
-    add(
-        "перекрытие до конца имени",
-        "seqovl-sni",
-        Property::OverlapSni,
-        Poison::default(),
     );
     add(
         "плотная серия",
@@ -2921,8 +2935,29 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
-    fn set_name(property: Property) -> &'static str {
-        match property {
+    #[test]
+    fn свойства_сокрытия_имени_измеряются_первыми() {
+        let probes = super::property_probes();
+        assert_eq!(probes.len(), 13);
+        assert!(
+            matches!(probes[0].set, Property::OverlapSni),
+            "первым обязан идти вопрос перекрытия до конца имени"
+        );
+        assert!(
+            matches!(probes[1].set, Property::UrgentByte),
+            "вторым идёт срочный байт в середине имени"
+        );
+        assert!(probes.iter().any(|probe| probe.poison.oob));
+        for probe in &probes {
+            let same = probes
+                .iter()
+                .filter(|other| other.poison.name == probe.poison.name)
+                .count();
+            assert_eq!(same, 1, "плечо {} повторяется", probe.poison.name);
+        }
+    }
+
+    fn set_name(property: Property) -> &'static str {        match property {
             Property::LeftOverlap => "LEFT_OVERLAP",
             Property::Reorder => "REORDER",
             Property::Checksum => "CHECKSUM",
@@ -2933,6 +2968,7 @@ mod tests {
             Property::SequenceWindow => "SEQ_WINDOW",
             Property::Timestamps => "TIMESTAMPS",
             Property::OverlapSni => "OVERLAP_SNI",
+            Property::UrgentByte => "URGENT_BYTE",
             Property::DenseDuplicates => "DUP_DENSE",
             Property::WhiteTimestamp => "WHITE_TS",
         }
