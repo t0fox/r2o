@@ -151,7 +151,7 @@ CONTRACTS = {
     "CS-SCHED-CANDIDATE-VERIFY": (
         "Scheduler candidate verification",
         "verify_confirm, partial_finish, ACK/APPLIED, own plan, exchange.",
-        "sched.c: verify/applied/exchange; production verify_confirm 30 cases, props_text — 243 кейса C/Rust PASS; own_first_plans QUIC — 3 случая C/Rust PASS; own_rank_before — 8 случаев PASS; binding_for — 4 случая PASS и on_shape-перемер; bound_plan_here QUIC — 2 случая PASS; candidate_trial_matches — command/trial mapping; applied_of_candidate — 6 случаев PASS и ранние REFUSED; d2k_sched_free — Drop + shutdown drain; install_next own_first==2 — stop без refill, family_fast — cooldown вместо полной классификации, cached_measure_valid — gate fallback, bad_plan_skip — continue fallback (matched=13), ladder_unmeasurable — owned_fallback gate 4 случая PASS; install_next QUIC split-unfit — 5 случаев PASS, mark_failure — 1 случай (matched=14); install_next закрыт архитектурно (trial_retire/task-state); candidate_retire — 3 случая DEL_NAME_PROBE PASS; question_retire/trial_retire name+addr — 6 случаев PASS; partial_finish — budget-volume PASS и 10-мин cooldown; verify_confirm volume-ladder gate — 3 случая PASS и budget CUT PASS; task_done — lifecycle differential PASS 9; bind_default — 4 случая PASS; rx_saved_bootstrap — 9 кейсов PASS и late-RX путь; остальные ветви P.",
+        "sched.c: verify/applied/exchange; production verify_confirm 30 cases, props_text — 243 кейса C/Rust PASS; own_first_plans QUIC — 3 случая C/Rust PASS; own_rank_before — 8 случаев PASS; binding_for — 4 случая PASS и on_shape-перемер; bound_plan_here QUIC — 2 случая PASS; candidate_trial_matches — command/trial mapping; applied_of_candidate — 6 случаев PASS и ранние REFUSED; d2k_sched_free — Drop + shutdown drain; install_next own_first==2 — stop без refill, family_fast — cooldown вместо полной классификации, cached_measure_valid — gate fallback, bad_plan_skip — continue fallback (matched=13), ladder_unmeasurable — owned_fallback gate 4 случая PASS; install_next QUIC split-unfit — 5 случаев PASS, mark_failure — 1 случай (matched=14); install_next закрыт архитектурно (trial_retire/task-state); candidate_retire — 3 случая DEL_NAME_PROBE PASS; question_retire/trial_retire name+addr — 6 случаев PASS; partial_finish — budget-volume PASS и 10-мин cooldown; verify_confirm volume-ladder gate — 3 случая PASS и budget CUT PASS; task_done — lifecycle differential PASS 9; task_fail — lifecycle differential PASS 9; bind_default — 4 случая PASS; rx_saved_bootstrap — 9 кейсов PASS и late-RX путь; остальные ветви P.",
     ),
     "CS-SCHED-PLAN-GENERATION": (
         "Scheduler plan generation",
@@ -382,8 +382,8 @@ def main() -> int:
     for row in rows:
         row["contract"] = contract_for(row)
     counts = Counter(row["contract"] for row in rows)
-    if len(rows) != 178:
-        raise SystemExit(f"expected 178 P rows, got {len(rows)}")
+    if len(rows) != 177:
+        raise SystemExit(f"expected 177 P rows, got {len(rows)}")
     unknown = sorted(set(counts) - set(CONTRACTS))
     if unknown:
         raise SystemExit(f"contracts without metadata: {unknown}")
