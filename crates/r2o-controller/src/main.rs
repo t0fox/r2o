@@ -9413,6 +9413,17 @@ fn r2o_own_first_exhausted_outcome(
 }
 
 #[cfg(unix)]
+fn r2o_install_next_fallback_allowed(
+    owned_opaque_fallback: bool,
+    cached_measure_with_known: bool,
+) -> bool {
+    // C `install_next` (`sched.c:4918`): после прямого замера с готовыми
+    // планами (`cached_measure_valid && n_known > 0`) запасной перебор не
+    // доливается — сначала испытываются планы коробки.
+    owned_opaque_fallback && !cached_measure_with_known
+}
+
+#[cfg(unix)]
 fn r2o_discovery_owned_fallback_needed(
     timed_out: bool,
     search_owned: bool,
@@ -16308,6 +16319,7 @@ group_block_proven: false,
                 .unwrap_or_default();
             let mut discovery_tried = own_tried.clone();
             let mut discovery_candidate_probes = full_counts.candidates;
+            let mut known_plans_present = false;
             if known_plans_allowed && !suspect_fingerprint.signals.is_empty() {
                 let known = r2o_controller::discovery::known_plans(
                     candidate_catalog
@@ -16317,6 +16329,7 @@ group_block_proven: false,
                     &suspect_fingerprint,
                     &discovery_tried,
                 );
+                known_plans_present = !known.is_empty();
                 discovery_tried.extend(
                     known
                         .iter()
@@ -16515,7 +16528,9 @@ group_block_proven: false,
             }
             let mut owned_fallback_queue = None;
             let mut primary_from_owned_fallback = false;
-            if outcome.plan_text.is_none() && owned_opaque_fallback {
+            if outcome.plan_text.is_none()
+                && r2o_install_next_fallback_allowed(owned_opaque_fallback, known_plans_present)
+            {
                 let mut queue =
                     r2o_controller::r2o_fallback::FallbackQueue::new_owned_search_with_tried(
                         &discovery_tried,
@@ -48822,6 +48837,12 @@ mod tests {
                             .unwrap()
                             .has_runnable(std::time::Instant::now())
                     );
+                    (-1, false, None, false, true, 0)
+                }
+                // C `install_next`: cached_measure_valid && n_known > 0 — stop.
+                "cached_measure_stop" => {
+                    assert!(!super::r2o_install_next_fallback_allowed(true, true));
+                    assert!(super::r2o_install_next_fallback_allowed(true, false));
                     (-1, false, None, false, true, 0)
                 }
                 // C `install_next`: own_first == 2 исчерпан — -1 без refill.
