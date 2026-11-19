@@ -339,9 +339,10 @@ jobs:
           verify="$RUNNER_TEMP/published-release"
           mkdir -p "$verify"
           gh api "repos/$GITHUB_REPOSITORY/releases/$release_id/assets" --paginate \
-            --jq '.[] | [.name,.browser_download_url] | @tsv' |
+            --jq '.[] | [.name,.url] | @tsv' |
             while IFS="$(printf '\t')" read -r name url; do
-              curl -fsS --retry 3 -H "Authorization: Bearer $GH_TOKEN" \
+              curl -fsSL --retry 3 -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/octet-stream" \
                 -o "$verify/$name" "$url"
             done
           sh scripts/verify-release-assets.sh "$verify" "$RELEASE_ID"
