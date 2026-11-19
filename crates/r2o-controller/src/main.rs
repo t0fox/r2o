@@ -49185,6 +49185,35 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn verify_confirm_volume_ladder_gate_matches_c() {
+        use super::R2oConfirmBudget;
+        let mut output = String::new();
+        for (label, budget, conn_close) in [
+            ("not_applicable", R2oConfirmBudget::NotApplicable, false),
+            ("cut", R2oConfirmBudget::Cut, false),
+            ("unchecked_closed", R2oConfirmBudget::NotChecked, true),
+        ] {
+            let gate = super::r2o_confirm_volume_ladder_gate(
+                &super::R2oConfirmVolumeLadder {
+                    volume_cut: true,
+                    ladder_candidate: true,
+                    conn_close,
+                    ..Default::default()
+                },
+                budget,
+            );
+            output.push_str(&format!(
+                "case={label} ladder={}\n",
+                u8::from(gate == Some(true))
+            ));
+        }
+        if let Ok(path) = std::env::var("R2O_VERIFY_CONFIRM_LADDER_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn install_next_production_matches_c() {
         use r2k_core::control::{
             ADDR_PROBE_LEASE_MAX_MS, COMMAND_SET_ADDR_PROBE, COMMAND_SET_NAME_PROBE,
