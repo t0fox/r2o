@@ -334,6 +334,20 @@ int main(void) {
         finish();
     }
 
+    /* 10. Отказ SO_MARK: trial не ставится, rc=-2. */
+    {
+        begin("install.example", 6, 4, 0x2d, D2K_SHAPE_MODERN);
+        g_t->n_plans = 1;
+        g_t->next_plan = 0;
+        snprintf(g_t->plans[0], sizeof g_t->plans[0], "%s", PLAN_TEXT);
+        snprintf(g_t->plan_boxes[0], sizeof g_t->plan_boxes[0], "box-1");
+        g_mark_fail = 1;
+        int cap = sched_probe_cap(g_t);
+        int rc = install_next(g_s, g_t);
+        emit("mark_failure", rc, cap, 0);
+        finish();
+    }
+
     /* --- C_ONLY: ветви без одноимённого production-эквивалента в Rust --- */
 
     /* 10. ladder_unmeasurable: ступени лестницы пропускаются. */

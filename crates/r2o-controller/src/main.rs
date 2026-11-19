@@ -30609,6 +30609,17 @@ struct BoundTcpProbe {
 }
 
 #[cfg(unix)]
+#[cfg(test)]
+thread_local! {
+    /// Тестовая инъекция отказа SO_MARK; production этот флаг не читает.
+    static R2O_MARK_FAILURE_FORCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn r2o_force_mark_failure(value: bool) {
+    R2O_MARK_FAILURE_FORCE.with(|flag| flag.set(value));
+}
+
 fn r2o_props_bind_socket(
     socket_type: libc::c_int,
     family: u8,
@@ -30644,6 +30655,13 @@ fn r2o_props_bind_socket(
     if let Some(mark) = mark
         && mark != 0
     {
+        #[cfg(test)]
+        if R2O_MARK_FAILURE_FORCE.with(std::cell::Cell::get) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "тестовая инъекция отказа SO_MARK",
+            ));
+        }
         let result = unsafe {
             libc::setsockopt(
                 fd,
@@ -49240,6 +49258,15 @@ mod tests {
                     let (wire, trial_nonzero, plan_nonzero, mark_value) =
                         tcp_frame(&t, &plan, 0x2d);
                     (0, true, Some(wire), trial_nonzero, plan_nonzero, mark_value)
+                }
+                // C `install_next`: отказ SO_MARK — trial не ставится, rc=-2.
+                "mark_failure" => {
+                    super::r2o_force_mark_failure(true);
+                    let result = super::BoundTcpProbe::open(4, Some(0x2d));
+                    super::r2o_force_mark_failure(false);
+                    let error = result.err().expect("SO_MARK должен отказать");
+                    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+                    (-2, false, None, false, true, 0x2d)
                 }
                 // C `install_next`: непереводимый план пропускается, ставится
                 // следующий; Rust продолжает запасной перебор.
