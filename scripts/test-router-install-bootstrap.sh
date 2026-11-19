@@ -422,13 +422,22 @@ grep -q 'использую локальный архив' "$CASE/out" ||
 
 new_case install-repeat
 run_install > "$CASE/out" 2>&1 || { cat "$CASE/out" >&2; fail 'valid signed release did not install'; }
+[ -z "$(find "$CASE/tmp" -maxdepth 1 -name 'r2o-install.*' -print -quit)" ] ||
+    fail 'installer left its temporary directory'
+[ -z "$(find "$CASE/opt/r2o" -maxdepth 1 -name '.r2o-install.*' -print -quit)" ] ||
+    fail 'installer left staging on flash'
 [ "$(sed -n '2p' "$CASE/opt/r2o/release-slots")" = r2o-bootstrap-test ] || fail 'release manager did not activate the signed release'
 grep -qx 'MODE=apply' "$CASE/opt/r2o/config" || fail 'first install did not initialize configuration'
+mkdir -p "$CASE/opt/r2o/state"
+printf '%s\n' '{"schema":1,"boxes":[{"id":"kept"}]}' > "$CASE/opt/r2o/state/catalog.json"
 install_count=$(grep -c '^install-local ' "$CASE/manager.log")
 printf '#!/bin/sh\nexit 31\n' > "$CASE/opt/r2o/releases/r2o-bootstrap-test/router/install.sh"
 chmod 0755 "$CASE/opt/r2o/releases/r2o-bootstrap-test/router/install.sh"
 run_install > "$CASE/out" 2>&1 || { cat "$CASE/out" >&2; fail 'repeat install did not complete'; }
 [ "$(grep -c '^install-local ' "$CASE/manager.log")" -eq "$install_count" ] || fail 'repeat install reactivated an already current release'
+printf '%s\n' '{"schema":1,"boxes":[{"id":"kept"}]}' > "$CASE/expected-catalog.json"
+cmp -s "$CASE/opt/r2o/state/catalog.json" "$CASE/expected-catalog.json" ||
+    fail 'repeat install changed the state catalog'
 tail -n 2 "$CASE/services.log" | grep -qx enable || fail 'repeat install did not enable the current OpenWrt service'
 tail -n 1 "$CASE/services.log" | grep -qx start || fail 'repeat install did not start the current OpenWrt service'
 R2O_OPENWRT_RELEASE="$CASE/openwrt_release" \

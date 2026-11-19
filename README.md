@@ -1,12 +1,10 @@
 # r2o — адаптивный сетевой обход на Rust
 
-**r2o** — независимая Rust-реализация сетевых механизмов [d2o](https://github.com/t0fox/d2o) для маршрутизаторов на **OpenWrt и Keenetic**. Проект объединяет собственный сетевой datapath, автоматическое обнаружение ограничений, каталог проверенных стратегий, локальный Telegram-прокси, веб-панель Lava и подписанные обновления.
+**r2o** — Rust-реализация сетевого обхода для маршрутизаторов на **OpenWrt и Keenetic**. Проект объединяет собственный сетевой datapath, автоматическое обнаружение ограничений, каталог проверенных стратегий, локальный Telegram-прокси, веб-панель Lava и подписанные обновления для 12 ABI.
 
 **Главная идея:** обнаруживать проблемы на реальных соединениях, проверять подходящие решения и применять их адресно — **без обязательного VPS, удалённого relay или WARP**. r2o не является обвязкой над `nfqws2`: сетевой исполнитель, контроллер и протокол стратегий реализованы на Rust.
 
-> **Независимый проект.** r2o разрабатывается энтузиастом и не является частью команды оригинального [d2k](https://github.com/necronicle/d2k). Авторы d2k не отвечают за изменения, релизы и поддержку r2o. Поведение сверяется с C-донором d2o, но полный функциональный паритет ещё проверяется.
-
-**Быстрые ссылки:** [Возможности](#возможности) · [Установка](#установка-и-релизы) · [Принцип работы](#как-работает-подбор-стратегий) · [Discord](#discord-voice) · [Telegram](#telegram) · [Панель](#веб-панель-lava) · [Архитектура](#архитектура) · [Удаление](#удаление) · [Релизы](https://github.com/t0fox/r2o/releases/latest) · [Прогресс](ПРОГРЕСС.md)
+**Быстрые ссылки:** [Возможности](#возможности) · [Установка](#установка-и-релизы) · [Принцип работы](#как-работает-подбор-стратегий) · [Discord](#discord-voice) · [Telegram](#telegram) · [Панель](#веб-панель-lava) · [Архитектура](#архитектура) · [Удаление](#удаление) · [Релизы](https://github.com/t0fox/r2o/releases/latest)
 
 ## Назначение и границы
 
@@ -14,19 +12,7 @@ r2o — программное обеспечение для **локально�
 
 Основной обход выполняется непосредственно на роутере. Для загрузки релизов нужен HTTPS-доступ к GitHub; некоторые *резервные* маршруты Telegram могут использовать сторонние узлы Cloudflare. Они не являются обязательной инфраструктурой для сетевого движка.
 
-**Статус:** есть опубликованные подписанные выпуски, CI, Rust-тесты, C/Rust differential-проверки, Linux NFQUEUE и QEMU-проверки архитектур. **Зелёный CI не означает полной приёмки на физическом маршрутизаторе** и не доказывает 100% соответствия каждому сценарию d2o. Оставшиеся пункты фиксируются в [ПРОГРЕСС.md](ПРОГРЕСС.md).
-
-## Прогресс переноса D2O → R2O
-
-[![Доказанный паритет](docs/progress/badge-parity.svg)](docs/progress/progress.json) [![Контракты](docs/progress/badge-contracts.svg)](docs/progress/progress.json)
-
-[![Карта функционального паритета D2O → R2O](docs/progress/progress.svg)](docs/progress/index.html)
-
-[HTML-карта (исходник)](docs/progress/index.html) · [История изменений матрицы](https://github.com/t0fox/r2o/commits/main/docs/functional-parity-matrix.md) · [Матрица и доказательства](docs/functional-parity-matrix.md)
-
-<sub>Интерактивный сайт на GitHub Pages станет доступен после слияния PR и включения Pages → GitHub Actions. До публикации ссылки ведут на существующие файлы репозитория, а не на несуществующий сайт.</sub>
-
-<sub>Взвешенный процент **доказанного поведения**, не доля Rust-кода. Частичные контракты не приносят баллов; полевой паритет требует отдельной проверки.</sub>
+**Статус:** есть опубликованные подписанные выпуски для 12 ABI, CI, Rust-тесты, Linux NFQUEUE и QEMU-проверки архитектур. Конкретная работа зависит от прошивки, провайдера и настроек firewall.
 
 ---
 
@@ -41,7 +27,7 @@ r2o — программное обеспечение для **локально�
 | **Telegram** | Локальный прозрачный Rust MTProto/WSS-прокси с выбором DC и резервными маршрутами |
 | **WebPanel Lava** | Текущий подбор и реальные статусы, каталог, Telegram, диагностика и обновления |
 | **OpenWrt / Keenetic** | IPv4/IPv6, собственные firewall-правила, службы, автоматический старт, обновления и откат |
-| **Релизы** | Пять ABI, подпись Ed25519, SHA-256 архивов и транзакционная активация |
+| **Релизы** | 12 ABI, подпись Ed25519, SHA-256 архивов, транзакционная активация и rollback |
 
 ### Технические решения r2o
 
@@ -132,7 +118,7 @@ Discord UDP / STUN
 
 ## Telegram
 
-**r2o-telegram** — локальный прозрачный прокси **MTProto over WebSocket на Rust**, полностью взятый из Rust-донора [z2kOW](https://github.com/t0fox/z2kOW) (`tg-proxy`). C11-реализация Telegram из D2O не переносится и источником не является. Для обычных Telegram-клиентов в LAN ручная настройка MTProxy не требуется, если на роутере включены нужные правила перенаправления.
+**r2o-telegram** — локальный прозрачный прокси **MTProto over WebSocket на Rust**, основанный на [z2kOW](https://github.com/t0fox/z2kOW) (`tg-proxy`). Для обычных Telegram-клиентов в LAN ручная настройка MTProxy не требуется, если на роутере включены нужные правила перенаправления.
 
 ### Как работает Telegram-прокси
 
@@ -150,9 +136,49 @@ Telegram **не требует собственного VPS или WARP**. Го�
 
 ## Установка и релизы
 
-**Требования:** права `root`, совместимая архитектура, поддержка NFQUEUE и подходящего firewall, достаточно места в `/opt` и памяти для нескольких Rust-процессов. Для OpenWrt предусмотрен системный `procd`-адаптер, а непосредственно компонентами управляет `/opt/etc/init.d/S99r2o`.
+**Требования:** права `root`, OpenWrt 24/25 или Keenetic с Entware, поддержка NFQUEUE и подходящего firewall, достаточно места в `/opt` и памяти для нескольких Rust-процессов. Для OpenWrt предусмотрен системный `procd`-адаптер, а компонентами управляет `/opt/etc/init.d/S99r2o`.
 
-В опубликованных [подписанных выпусках](https://github.com/t0fox/r2o/releases/latest) есть:
+### Одна команда
+
+Подключитесь по SSH как `root` и выполните:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/t0fox/r2o/main/scripts/install.sh | sh
+```
+
+Если `curl` ещё нет:
+
+```sh
+wget -qO- https://raw.githubusercontent.com/t0fox/r2o/main/scripts/install.sh | sh
+```
+
+Установщик сам определяет платформу и ABI, **доустанавливает недостающие
+зависимости** (`curl`, `ca-bundle`, `openssl-util`, NFQUEUE/conntrack-модули)
+через `apk`, `opkg` или Entware, показывает прогресс загрузки архива и проверяет
+закреплённую Ed25519-подпись манифеста и SHA-256 архива **до распаковки и
+запуска кода**. Отдельно ставить `curl`, `ca-bundle` или NFQUEUE-пакеты не нужно.
+
+При нехватке flash установщик выбирает безопасный staging в flash или tmpfs с
+резервом RAM; если не помещается слот для отката, он завершится до активации.
+Установка, повторный запуск и откат идут через `router/install.sh` и
+`r2o-manager`.
+
+Если GitHub недоступен с роутера, используйте локальные файлы:
+
+```sh
+R2O_LOCAL_MANIFEST=/tmp/latest.json \
+R2O_LOCAL_SIGNATURE=/tmp/latest.json.sig \
+R2O_LOCAL_ARCHIVE=/tmp/r2o-aarch64-openwrt-musl.tar.gz \
+sh /tmp/install.sh
+```
+
+Перед обновлением рекомендуется сохранить `/opt/r2o/config` и
+`/opt/r2o/state/catalog.json`: конфигурация и найденные стратегии хранятся
+отдельно от файлов выпуска, но ручной backup ускоряет восстановление.
+
+### Поддерживаемые ABI и архивы
+
+В [подписанных выпусках](https://github.com/t0fox/r2o/releases/latest) публикуются:
 
 | Архив | Цель |
 |---|---|
@@ -160,37 +186,18 @@ Telegram **не требует собственного VPS или WARP**. Го�
 | `r2o-armv7-openwrt-musl.tar.gz` | OpenWrt ARMv7 hard-float |
 | `r2o-armv5-musleabi.tar.gz` | ARMv5 soft-float |
 | `r2o-mipsel-openwrt-musl.tar.gz` | OpenWrt MIPS32 LE musl |
+| `r2o-armv7-musleabi.tar.gz` | ARMv7 soft-float musl |
+| `r2o-mips-openwrt-musl.tar.gz` | OpenWrt MIPS32 BE musl |
+| `r2o-mips64el-musl.tar.gz` | MIPS64 LE musl |
+| `r2o-x86_64-musl.tar.gz` | x86_64 musl |
+| `r2o-i686-musl.tar.gz` | i686 musl |
+| `r2o-powerpc64-musl.tar.gz` | PowerPC64 musl |
+| `r2o-riscv64-musl.tar.gz` | RISC-V 64 musl |
 | `r2o-mipsel.tar.gz` | GNU/Linux MIPS32 LE |
 
-Архив содержит **набор исполняемых файлов и роутерные сценарии**, а не один универсальный бинарник. Размер скачанного `tar.gz` не равен размеру установленного выпуска. На роутерах с малым flash сначала проверьте свободное место и совместимость ABI.
-
-### Первая установка
-
-Подключитесь по SSH как `root` и выполните на OpenWrt или Keenetic с Entware:
-
-```sh
-wget -qO- https://raw.githubusercontent.com/t0fox/r2o/main/scripts/install.sh | sh
-```
-
-Если уже установлен `curl`:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/t0fox/r2o/main/scripts/install.sh | sh
-```
-
-Bootstrap определяет платформу и ABI, проверяет закреплённую Ed25519-подпись
-манифеста и SHA-256 архива **до распаковки и запуска кода**, проверяет нужные
-команды и доступные RAM/flash. При нехватке места установщик выбирает безопасное
-staging в flash либо tmpfs с резервом памяти; если не помещается слот для
-отката, он завершится до активации. Установка, повторный запуск и откат идут
-через существующие `router/install.sh` и `r2o-manager`.
-
-Поддерживаемые ABI: OpenWrt `mipsel-openwrt-musl`, `aarch64-openwrt-musl`,
-`armv7-openwrt-musl`, `armv5-musleabi`; Keenetic/Entware `mipsel`, ARMv5 soft
-float и ARMv7 hard float. Неизвестные или несовместимые ABI отклоняются.
-**[Статус, обновление, диагностика и удаление](router/README.md).** Ручной
-`install-local` остаётся только для локального доверенного архива и не заменяет
-проверку подписи bootstrap-установщиком.
+Архив содержит **набор исполняемых файлов и роутерные сценарии**, а не один
+универсальный бинарник. Размер `tar.gz` не равен размеру установленного выпуска.
+На роутерах с малым flash проверьте свободное место и совместимость ABI.
 
 Проверка после установки:
 
@@ -198,11 +205,31 @@ float и ARMv7 hard float. Неизвестные или несовместим�
 /opt/etc/init.d/S99r2o status
 ```
 
+### Если загрузка не начинается
+
+Установщик специально доустанавливает `curl` и `ca-bundle`: BusyBox `wget` на
+OpenWrt часто не тянет HTTPS-редирект GitHub `latest/download`. Проверьте вручную:
+
+```sh
+curl -fL --retry 3 -o /tmp/latest.json \
+  https://github.com/t0fox/r2o/releases/latest/download/latest.json
+wc -c /tmp/latest.json
+```
+
+В интерактивном SSH-терминале архив скачивается с полосой прогресса; в
+неинтерактивном режиме выводятся только ошибки. Если GitHub недоступен,
+используйте `R2O_LOCAL_MANIFEST`/`R2O_LOCAL_SIGNATURE`/`R2O_LOCAL_ARCHIVE` из
+раздела выше. Логи установки и служб: `/opt/r2o/log/`.
+
+**[Статус, обновление, диагностика и удаление](router/README.md).** Ручной
+`install-local` остаётся только для локального доверенного архива и не заменяет
+проверку подписи bootstrap-установщиком.
+
 ### Веб-панель Lava
 
 Lava показывает состояние движка и controller, этапы текущего подбора, каталог, Telegram, параметры запуска и диагностику. Параметры запуска входят в раздел «Диагностика»; отдельного раздела «Настройки» нет.
 
-По умолчанию панель слушает все адреса роутера на порту **8090** и доступна в LAN, например по **http://192.168.1.1:8090**. Доступ с WAN ограничивайте firewall роутера; панель не имеет аутентификации и не должна быть опубликована в интернете.
+По умолчанию bootstrap выбирает LAN IPv4-адрес и ставит `PANEL_LISTEN=<LAN-IP>:8090`, поэтому панель доступна в LAN, например по **http://192.168.1.1:8090**. Если нужен другой адрес или все интерфейсы, задайте `PANEL_LISTEN` в `/opt/r2o/config` вручную (например, `0.0.0.0:8090`). Доступ с WAN ограничивайте firewall роутера; панель не имеет аутентификации и не должна быть опубликована в интернете.
 
 Раздел **Диагностика** показывает сведения о работе движка и может сохранять локальную историю поиска и памяти процессов. История выключена по умолчанию; при включении остаётся на роутере, хранит до 64 исходов поиска и 120 минутных снимков, её можно скачать файлом `r2o-diagnostics.json`. Кнопка выключения удаляет сохранённую историю.
 
@@ -232,12 +259,12 @@ tail -n 100 /opt/r2o/log/panel.log
 
 ## Обновления
 
-**Единственный источник релизов r2o — его собственная подписанная лента GitHub**, а не обновлятор d2o/d2k.
+**Единственный источник релизов r2o — его собственная подписанная лента GitHub.**
 
 ```text
 Коммит r2o
     ↓
-CI: Rust · C/Rust differential · ASan · NFQUEUE · QEMU
+CI: Rust · ASan · NFQUEUE · QEMU
     ↓
 Параллельные сборки ABI
     ↓
@@ -248,7 +275,12 @@ latest.json + Ed25519-подпись + SHA-256 архивов
   Успех                          Ошибка → откат
 ```
 
-Менеджер проверяет подпись метаданных до доверия к архиву. Поддерживаются активный и предыдущий слоты, rollback и повторная активация уже скачанного релиза.
+Менеджер проверяет подпись метаданных до доверия к архиву. Поддерживаются
+активный и предыдущий слоты, rollback и повторная активация уже скачанного
+релиза. `S99r2o engine-restart` дополнительно вычищает все процессы компонента
+по `/proc/*/exe`, даже если pid-файл потерян или перезаписан неудачным запуском;
+это устраняет stale datapath, который иначе держит NFQUEUE и старые
+control-сокеты.
 
 По умолчанию `AUTOUPDATE=1` разрешает автоматическую установку после ночной проверки; `AUTOUPDATE=0` оставляет только проверку. Для ручного обновления используйте сервисную команду `update-install` — она отвечает также за перезапуск и проверку служб.
 
@@ -306,7 +338,8 @@ wget -qO- https://raw.githubusercontent.com/t0fox/r2o/main/scripts/uninstall.sh 
  r2o-telegram ──────── прозрачный MTProto / WSS
  router/ ───────────── OpenWrt procd · S99r2o · firewall
 
- Datapath и controller запускаются отдельными процессами для IPv4/IPv6.
+ Один процесс datapath и один процесс controller обслуживают IPv4/IPv6;
+ внутри работают независимые семейные обработчики и control-сокеты.
  Основной обход не требует VPS, relay или WARP.
 ```
 
@@ -326,12 +359,10 @@ r2o/
 │   ├── r2o-panel/          # Lava WebPanel и HTTP backend
 │   └── r2o-manager/        # подписи, установка, обновления, rollback
 ├── router/                 # OpenWrt/Keenetic-службы, firewall и установка
-├── scripts/                # тесты, differential, QEMU и release-сборки
+├── scripts/                # тесты, QEMU и release-сборки
 ├── vendor/                 # закреплённые Rust-зависимости
 ├── .github/workflows/      # CI и подписанный выпуск
 ├── Cargo.toml
-├── ПРОГРЕСС.md
-├── REA_EVIDENCE.md
 └── THIRD_PARTY_NOTICES.md
 ```
 
@@ -352,36 +383,8 @@ cargo build --workspace --release --locked
 
 Обязательный CI включает Rust-тесты, ShellCheck, санитайзеры, NFQUEUE, проверки wire-протокола и безопасности, Chrome и сборку ABI с проверкой ELF и запуском в QEMU. Подписанный релиз требует успешного CI для того же коммита `main`.
 
-Полная C/Rust-сверка запускается локально. Разместите закреплённые checkout D2O в `$D2O_SNAPSHOTS/<SHA>` и установите Clang 18, libssl-dev, pkg-config, zlib1g-dev и binutils. SHA и имена шардов выводит `sh scripts/ci-differential-shards.sh matrix`.
-
-Скрипт ниже запускает все шарды. Для одного шарда перед запуском задайте, например, `export SNAPSHOT=upstream SHARD=scheduler`.
-
-```bash
-set -euo pipefail
-cargo +1.98.0 fetch --locked
-sh scripts/ci-differential-shards.sh matrix |
-  jq -r --arg snapshot "${SNAPSHOT:-}" --arg shard "${SHARD:-}" '
-    .include[] | select(($snapshot == "" or .snapshot == $snapshot)
-      and ($shard == "" or .shard == $shard)) | [.snapshot, .shard, .donor_sha] | @tsv' |
-  while IFS=$'\t' read -r snapshot shard sha; do
-    export R2O_DONOR_ROOT="${D2O_SNAPSHOTS:?}/$sha" R2O_EXPECTED_DONOR_SHA="$sha"
-    export R2O_DONOR_CORE="$R2O_DONOR_ROOT/core" R2O_DONOR_DATAPATH="$R2O_DONOR_ROOT/datapath"
-    test "$(git -C "$R2O_DONOR_ROOT" rev-parse HEAD)" = "$sha"
-    make -C "$R2O_DONOR_DATAPATH" test_session test_quic_session test_stun_session test_routemark CC=clang-18
-    for obj in diagnostics httpsearch httpup_logic; do
-      if [ -f "$R2O_DONOR_CORE/$obj.c" ]; then
-        make -C "$R2O_DONOR_CORE" "$obj.o" CC=clang-18
-      fi
-    done
-    sh scripts/ci-differential-shards.sh list "$snapshot" "$shard" |
-      while IFS= read -r script; do sh "scripts/$script"; done
-  done
-```
-
 | Документ | Для чего |
 |---|---|
-| [ПРОГРЕСС.md](ПРОГРЕСС.md) | Незакрытые функции, ограничения, выполненные проверки |
-| [REA_EVIDENCE.md](REA_EVIDENCE.md) | Низкоуровневая и поведенческая сверка с C-донором |
 | [router/README.md](router/README.md) | Установка, OpenWrt/Keenetic, службы и удаление |
 | [r2o-manager/README.md](crates/r2o-manager/README.md) | Манифесты, Ed25519, обновления и rollback |
 | [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) | Происхождение стороннего кода и лицензии |
@@ -398,6 +401,6 @@ sh scripts/ci-differential-shards.sh matrix |
 
 ## Лицензии и происхождение
 
-r2o независимо реализует поведение d2o на Rust. Telegram-код и отдельные сторонние компоненты имеют собственные лицензионные уведомления. **Лицензия MIT для Telegram crate не означает автоматически MIT-лицензию всего репозитория.** Сведения о конкретных компонентах приведены в [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) и файлах лицензий.
+Telegram-код и отдельные сторонние компоненты имеют собственные лицензионные уведомления. **Лицензия MIT для Telegram crate не означает автоматически MIT-лицензию всего репозитория.** Сведения о конкретных компонентах приведены в [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) и файлах лицензий.
 
 Проект не гарантирует работу каждого сервиса на любой прошивке и в любой сети. Оператор маршрутизатора отвечает за допустимость выбранной конфигурации и соблюдение применимых правил.
