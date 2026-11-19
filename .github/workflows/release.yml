@@ -161,6 +161,8 @@ jobs:
     env:
       CARGO_BUILD_WARNINGS: deny
       R2O_RELEASE_ID: ${{ needs.plan.outputs.release_id }}
+      R2O_RELEASE_TITLE: ${{ needs.plan.outputs.title }}
+      R2O_COMMIT: ${{ needs.plan.outputs.sha }}
       ABI: ${{ matrix.abi }}
       TARGET: ${{ matrix.target }}
       ASSET_SUFFIX: ${{ matrix.asset_suffix }}
@@ -203,6 +205,8 @@ jobs:
         run: |
           sh scripts/ci-install-release-qemu.sh "$RUNNER_TEMP/qemu"
           echo "$RUNNER_TEMP/qemu/bin" >> "$GITHUB_PATH"
+      - name: Зафиксировать время сборки
+        run: echo "R2O_BUILT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
       - name: Собрать ABI и проверить ELF-артефакты
         run: |
           sh "$BUILD_SCRIPT"
@@ -316,13 +320,32 @@ jobs:
           out="$RUNNER_TEMP/release"
           notes="$RUNNER_TEMP/notes.txt"
           printf '%s\n' "$NOTES" > "$notes"
-          gh release create "$RELEASE_ID" --draft --target "$SHA" \
-            --title "$TITLE" --notes-file "$notes" \
-            "$out"/r2o-*.tar.gz "$out/latest.json" "$out/latest.json.sig"
+          # gh release create/edit шлёт устаревшие preview Accept-заголовки и
+          # получает 403 от GitHub API. Создаём и публикуем выпуск напрямую.
+          response=$(gh api --method POST "repos/$GITHUB_REPOSITORY/releases" \
+            -f tag_name="$RELEASE_ID" -F draft=true -F prerelease=false \
+            -f target_commitish="$SHA" -f name="$TITLE" -f body="$NOTES")
+          release_id=$(printf '%s' "$response" | python3 -c \
+            'import json,sys; print(json.load(sys.stdin)["id"])')
+          for asset in "$out"/r2o-*.tar.gz "$out/latest.json" "$out/latest.json.sig"; do
+            name=$(basename "$asset")
+            curl -fsS --retry 3 -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"$asset" \
+              "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$release_id/assets?name=$name" \
+              >/dev/null
+          done
           verify="$RUNNER_TEMP/published-release"
           mkdir -p "$verify"
-          gh release download "$RELEASE_ID" --dir "$verify"
+          gh api "repos/$GITHUB_REPOSITORY/releases/$release_id/assets" --paginate \
+            --jq '.[] | [.name,.browser_download_url] | @tsv' |
+            while IFS="$(printf '\t')" read -r name url; do
+              curl -fsS --retry 3 -H "Authorization: Bearer $GH_TOKEN" \
+                -o "$verify/$name" "$url"
+            done
           sh scripts/verify-release-assets.sh "$verify" "$RELEASE_ID"
-          gh release edit "$RELEASE_ID" --draft=false --latest
-          latest=$(gh release view --json tagName --jq .tagName)
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+            -F draft=false -F make_latest=true >/dev/null
+          latest=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
           test "$latest" = "$RELEASE_ID"
