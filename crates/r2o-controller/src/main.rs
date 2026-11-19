@@ -49077,6 +49077,50 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn candidate_retire_del_name_probe_matches_c() {
+        let mut output = String::new();
+        for (family, shape, b, sport, installed) in [
+            (
+                4_u8,
+                r2k_core::control::SHAPE_MODERN,
+                "retire.example",
+                40_123_u16,
+                true,
+            ),
+            (
+                6,
+                r2k_core::control::SHAPE_LEGACY,
+                "retire.example",
+                40_200,
+                true,
+            ),
+            (
+                4,
+                r2k_core::control::SHAPE_MODERN,
+                "retire.example",
+                40_123,
+                false,
+            ),
+        ] {
+            if installed {
+                let frame =
+                    r2k_core::control::encode_delete_name_probe(b, shape, family, sport).unwrap();
+                let hex = frame
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                output.push_str(&format!("name={b} installed=1 frame={hex}\n"));
+            } else {
+                output.push_str(&format!("name={b} installed=0 frame=none\n"));
+            }
+        }
+        if let Ok(path) = std::env::var("R2O_CANDIDATE_RETIRE_DIFF_OUTPUT") {
+            std::fs::write(path, output).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn install_next_production_matches_c() {
         use r2k_core::control::{
             ADDR_PROBE_LEASE_MAX_MS, COMMAND_SET_ADDR_PROBE, COMMAND_SET_NAME_PROBE,
