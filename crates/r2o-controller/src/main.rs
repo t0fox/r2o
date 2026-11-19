@@ -9528,11 +9528,10 @@ fn r2o_own_first_exhausted_outcome(
 }
 
 #[cfg(unix)]
-fn r2o_ladder_unmeasurable_fallback_allowed(search_owned: bool) -> bool {
-    // C `refill_from_fallback` (`sched.c:4464`): при `search_owned && !owned_fallback`
-    // запасной перебор не доливается. В ladder-пути Rust `owned_fallback`
-    // не выставлен, поэтому решает только search_owned.
-    !search_owned
+fn r2o_ladder_unmeasurable_fallback_allowed(search_owned: bool, owned_fallback: bool) -> bool {
+    // C `refill_from_fallback` (`sched.c:4464`): при
+    // `search_owned && !owned_fallback` запасной перебор не доливается.
+    !(search_owned && !owned_fallback)
 }
 
 #[cfg(unix)]
@@ -16630,6 +16629,7 @@ group_block_proven: false,
                 runner_started,
                 classify_probes,
                 search_owned,
+                owned_opaque_fallback,
                 &mut ladder_unmeasurable,
             );
             if volume_recovered {
@@ -20819,6 +20819,7 @@ fn r2o_discovery_volume_recovery(
     started: std::time::Instant,
     classify_probes: usize,
     search_owned: bool,
+    owned_fallback: bool,
     ladder_unmeasurable: &mut bool,
 ) -> bool {
     if !r2o_discovery_volume_recovery_eligible(outcome) {
@@ -21340,7 +21341,8 @@ fn r2o_discovery_volume_recovery(
             outcome.detail.push_str(
                 "; бюджет потока на этой цели не измерить — лестницу белого имени прекращаю, дальше обычные кандидаты",
             );
-            *ladder_unmeasurable = r2o_ladder_unmeasurable_fallback_allowed(search_owned);
+            *ladder_unmeasurable =
+                r2o_ladder_unmeasurable_fallback_allowed(search_owned, owned_fallback);
             return false;
         }
         let Some(fetch) = result.as_ref().ok() else {
@@ -49019,14 +49021,19 @@ mod tests {
     fn ladder_unmeasurable_fallback_matches_c_gate() {
         let mut output = String::new();
         for search_owned in [0_u8, 1] {
-            let allowed = super::r2o_ladder_unmeasurable_fallback_allowed(search_owned == 1);
-            let mut queue =
-                r2o_controller::r2o_fallback::FallbackQueue::new_owned_search_with_tried(&[]);
-            let added = allowed && queue.next(SHAPE_MODERN, 0).is_some();
-            output.push_str(&format!(
-                "search_owned={search_owned} added_nonzero={}\n",
-                u8::from(added)
-            ));
+            for owned_fallback in [0_u8, 1] {
+                let allowed = super::r2o_ladder_unmeasurable_fallback_allowed(
+                    search_owned == 1,
+                    owned_fallback == 1,
+                );
+                let mut queue =
+                    r2o_controller::r2o_fallback::FallbackQueue::new_owned_search_with_tried(&[]);
+                let added = allowed && queue.next(SHAPE_MODERN, 0).is_some();
+                output.push_str(&format!(
+                    "search_owned={search_owned} owned_fallback={owned_fallback} added_nonzero={}\n",
+                    u8::from(added)
+                ));
+            }
         }
         if let Ok(path) = std::env::var("R2O_LADDER_UNMEASURABLE_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
@@ -49675,6 +49682,7 @@ mod tests {
                 &cancel,
                 now,
                 raw,
+                false,
                 false,
                 &mut ladder_unmeasurable,
             ));

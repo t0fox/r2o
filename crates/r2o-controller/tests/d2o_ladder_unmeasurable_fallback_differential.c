@@ -9,7 +9,7 @@ static d2k_sched scheduler;
 static d2k_catalog catalog;
 static task probe_task;
 
-static void run_case(int search_owned)
+static void run_case(int search_owned, int owned_fallback)
 {
     memset(&probe_task, 0, sizeof probe_task);
     snprintf(probe_task.name, sizeof probe_task.name, "%s", "ladder.example");
@@ -18,7 +18,7 @@ static void run_case(int search_owned)
     probe_task.family = 4;
     probe_task.port = 443;
     probe_task.search_owned = search_owned;
-    probe_task.owned_fallback = 0;
+    probe_task.owned_fallback = owned_fallback;
     probe_task.ladder_unmeasurable = 1;
     probe_task.rx_volume_candidate_pending = 0;
     probe_task.vol.rx_cut = 0;
@@ -33,7 +33,8 @@ static void run_case(int search_owned)
     }
     probe_task.trig_len = len;
     size_t added = refill_from_fallback(&scheduler, &probe_task);
-    printf("search_owned=%d added_nonzero=%d\n", search_owned, added > 0);
+    printf("search_owned=%d owned_fallback=%d added_nonzero=%d\n",
+           search_owned, owned_fallback, added > 0);
 }
 
 int main(void)
@@ -41,7 +42,9 @@ int main(void)
     memset(&scheduler, 0, sizeof scheduler);
     memset(&catalog, 0, sizeof catalog);
     scheduler.cat = &catalog;
-    run_case(0);
-    run_case(1);
+    run_case(0, 0);
+    run_case(0, 1);
+    run_case(1, 0);
+    run_case(1, 1);
     return 0;
 }
