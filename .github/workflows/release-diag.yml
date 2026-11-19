@@ -1,0 +1,36 @@
+name: Диагностика выпуска
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  diag:
+    runs-on: ubuntu-24.04
+    environment: r2o-signing
+    permissions:
+      contents: write
+    steps:
+      - name: Показать права токена
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api rate_limit --jq '.rate'
+      - name: Проверить создание черновика
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_DEBUG: api
+        run: |
+          set -euo pipefail
+          tag="r2o-diag-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if gh release create "$tag" --draft --target "$GITHUB_SHA" \
+              --title "$tag" --notes "diagnostic"; then
+            gh release delete "$tag" --yes --cleanup-tag
+            echo "CREATE_OK"
+          else
+            echo "CREATE_FAILED"
+            exit 1
+          fi
