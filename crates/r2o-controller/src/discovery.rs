@@ -2,7 +2,8 @@
 
 use r2k_core::control::{
     HelloEvent, HttpPortalEvent, HttpResponseEvent, SHAPE_ECH_NO_TS, SHAPE_ECH_TCP, SHAPE_ECH_TS,
-    SHAPE_GRANDFATHER, SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC,
+    SHAPE_GRANDFATHER, SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC, r2k_link_shape_tcp_base,
+    r2k_link_shape_tcp_profile,
 };
 use r2k_core::plan::Plan as RuntimePlan;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -1072,8 +1073,6 @@ pub fn has_covering_binding_for_shape(
     shape: u8,
     tcp_profile: u8,
 ) -> bool {
-    use r2k_core::control::{r2k_link_shape_tcp_base, r2k_link_shape_tcp_profile};
-
     let shape = r2k_link_shape_tcp_base(shape);
     catalog.boxes.iter().any(|box_record| {
         box_record.bindings.iter().any(|binding| {
@@ -1088,10 +1087,6 @@ pub fn has_covering_binding_for_shape(
                 binding.transport
             };
             let binding_shape = r2k_link_shape_tcp_base(binding.shape);
-            let binding_profile = match r2k_link_shape_tcp_profile(binding.shape) {
-                0 => binding.tcp_profile,
-                profile => profile,
-            };
             binding.enabled
                 && binding.level >= 3
                 && binding.recheck_since.is_none()
@@ -1099,13 +1094,22 @@ pub fn has_covering_binding_for_shape(
                 && binding.target == target.host
                 && family == target.family
                 && transport == 6
-                && binding_profile == tcp_profile
-                && (binding.tcp_profile == 0 || binding.tcp_profile == tcp_profile)
+                && binding_matches_tcp_profile(binding, tcp_profile)
                 && (binding_shape == 0
                     || binding_shape == shape
                     || binding_shape == SHAPE_MODERN && shape == SHAPE_ECH_TCP)
         })
     })
+}
+
+fn binding_matches_tcp_profile(binding: &Binding, tcp_profile: u8) -> bool {
+    match r2k_link_shape_tcp_profile(binding.shape) {
+        0 => binding.tcp_profile == tcp_profile,
+        profile => {
+            profile == tcp_profile
+                && (binding.tcp_profile == 0 || binding.tcp_profile == tcp_profile)
+        }
+    }
 }
 
 /// C `own_exact_confirmed` (`sched.c:6278-6293`): точное имя, транспорт и
@@ -1141,6 +1145,8 @@ fn has_usable_binding_with_input(
     target: &DiscoveryTarget,
     input: Option<u8>,
 ) -> bool {
+    let shape = r2k_link_shape_tcp_base(target.shape);
+    let tcp_profile = target.tcp_profile();
     catalog.boxes.iter().any(|box_record| {
         box_record.bindings.iter().any(|binding| {
             if !binding.enabled
@@ -1150,8 +1156,8 @@ fn has_usable_binding_with_input(
                 || !(binding.family == target.family || binding.family == 0 && target.family == 4)
                 || !(binding.transport == 6 || binding.transport == 0)
                 || !(binding.shape == 0
-                    || binding.shape == target.shape
-                    || is_ech_shape(binding.shape) && is_ech_shape(target.shape))
+                    || r2k_link_shape_tcp_base(binding.shape) == shape
+                        && binding_matches_tcp_profile(binding, tcp_profile))
                 || input.is_some_and(|expected| binding.input != expected)
             {
                 return false;
@@ -2915,6 +2921,34 @@ mod tests {
         assert!(super::has_usable_profile_binding(&catalog, &target));
         catalog.boxes[0].bindings[0].input = 1;
         assert!(!super::has_usable_profile_binding(&catalog, &target));
+    }
+
+    #[test]
+    fn пригодный_план_не_подавляет_поиск_для_другого_tcp_профиля() {
+        use r2k_core::control::{SHAPE_MODERN_TS, TCP_PROFILE_NO_TS, TCP_PROFILE_TS};
+
+        let mut target = DiscoveryTarget {
+            tcp_profile: TCP_PROFILE_TS,
+            host: "example.com".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let mut catalog = crate::catalog::Catalog::default();
+        super::add_measured_binding(
+            &mut catalog,
+            &target,
+            "r2o-plan 1 11\nid 00000000000000000000000000000000\nproto tcp tls\nsplit sni_middle +0\n",
+            100,
+        )
+        .unwrap();
+
+        assert!(super::has_usable_profile_binding(&catalog, &target));
+        target.tcp_profile = TCP_PROFILE_NO_TS;
+        assert!(!super::has_usable_binding(&catalog, &target));
+        catalog.boxes[0].bindings[0].shape = SHAPE_MODERN_TS;
+        target.tcp_profile = TCP_PROFILE_TS;
+        assert!(super::has_usable_profile_binding(&catalog, &target));
     }
 
     #[test]
