@@ -8076,6 +8076,18 @@ fn r2o_family_recovery_decision(
 }
 
 #[cfg(unix)]
+fn r2o_family_applied_grace(
+    result: &Result<r2o_controller::fetch::FetchResult, String>,
+) -> std::time::Duration {
+    // После ошибки запроса APPLIED не сможет подтвердить кандидат.
+    if result.is_ok() {
+        std::time::Duration::from_secs(5)
+    } else {
+        std::time::Duration::ZERO
+    }
+}
+
+#[cfg(unix)]
 fn r2o_budget_mark_from_result(result: &Result<r2o_controller::fetch::FetchResult, String>) -> u8 {
     use r2o_controller::r2o_volume::R2oVolumePacketBudget;
     let Ok(fetch) = result.as_ref() else {
@@ -8398,7 +8410,7 @@ fn r2o_family_recovery_run(
             let applied = r2o_collect_controller_applied_events_until(
                 commands,
                 [0; 16],
-                std::time::Duration::from_secs(5),
+                r2o_family_applied_grace(&result),
                 |event| {
                     result.as_ref().is_ok_and(|fetch| {
                         r2o_family_applied_flow_matches(
@@ -8647,11 +8659,7 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
         let events = r2o_collect_controller_applied_events_until(
             commands,
             trial_id,
-            if transport_established {
-                std::time::Duration::from_secs(5)
-            } else {
-                std::time::Duration::ZERO
-            },
+            r2o_family_applied_grace(&fetch_result),
             |event| {
                 r2o_family_applied_flow_matches(
                     event,
@@ -49622,6 +49630,20 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn r2o_family_recovery_не_ждёт_applied_после_ошибки_запроса() {
+        use std::time::Duration;
+
+        assert_eq!(
+            super::r2o_family_applied_grace(&Err("TCP reset".into())),
+            Duration::ZERO,
+        );
+        assert_eq!(
+            super::r2o_family_applied_grace(&Ok(r2o_test_fetch_result())),
+            Duration::from_secs(5),
+        );
+    }
+
     fn r2o_test_fetch_result() -> FetchResult {
         FetchResult {
             address: "198.51.100.20:443".parse().unwrap(),
