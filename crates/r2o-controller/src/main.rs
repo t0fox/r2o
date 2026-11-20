@@ -60746,7 +60746,8 @@ group_block_proven: false,
                     ..target.clone()
                 }
             )
-            .is_empty()
+            .iter()
+            .all(|candidate| candidate.plan_id != [0x11; 16])
         );
         assert!(
             matching_sibling_recovery_candidates(

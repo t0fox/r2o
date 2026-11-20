@@ -1149,6 +1149,9 @@ fn has_usable_binding_with_input(
     let tcp_profile = target.tcp_profile();
     catalog.boxes.iter().any(|box_record| {
         box_record.bindings.iter().any(|binding| {
+            // Старую профильную привязку можно перемерить по снимку,
+            // если при её сохранении TCP-профиль ещё не записывался.
+            let legacy_remeasure = input == Some(2) && binding_matches_tcp_profile(binding, 0);
             if !binding.enabled
                 || binding.recheck_since.is_some()
                 || binding.kind != "name"
@@ -1157,7 +1160,7 @@ fn has_usable_binding_with_input(
                 || !(binding.transport == 6 || binding.transport == 0)
                 || !(binding.shape == 0
                     || r2k_link_shape_tcp_base(binding.shape) == shape
-                        && binding_matches_tcp_profile(binding, tcp_profile))
+                        && (binding_matches_tcp_profile(binding, tcp_profile) || legacy_remeasure))
                 || input.is_some_and(|expected| binding.input != expected)
             {
                 return false;
@@ -2948,6 +2951,11 @@ mod tests {
         assert!(!super::has_usable_binding(&catalog, &target));
         catalog.boxes[0].bindings[0].shape = SHAPE_MODERN_TS;
         target.tcp_profile = TCP_PROFILE_TS;
+        assert!(super::has_usable_profile_binding(&catalog, &target));
+
+        catalog.boxes[0].bindings[0].shape = SHAPE_MODERN;
+        catalog.boxes[0].bindings[0].tcp_profile = 0;
+        assert!(!super::has_usable_binding(&catalog, &target));
         assert!(super::has_usable_profile_binding(&catalog, &target));
     }
 
