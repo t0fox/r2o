@@ -63,6 +63,8 @@ cat > "$TEMP/rust/src/main.rs" <<EOF
 mod flow_capacity;
 #[path = "$rust_root/crates/r2o-datapath/src/r2o_voice.rs"]
 mod r2o_voice;
+#[path = "$rust_root/crates/r2o-datapath/src/session_stats.rs"]
+mod session_stats;
 #[path = "$rust_root/crates/r2o-datapath/tests/fixtures/r2o_discord_udp_observer_trace.rs"]
 mod trace;
 
