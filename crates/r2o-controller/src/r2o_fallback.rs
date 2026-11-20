@@ -198,6 +198,17 @@ pub fn r2o_pad64_seeds(shape: u8, send_cap: usize) -> Vec<String> {
         .collect()
 }
 
+/// Холодная лестница ECH: длины, подтверждённые на живом Discord
+/// (`discord.com` 391/114, `gateway.discord.gg` 166, WhatsApp 172/77).
+/// Без неё полный классификатор начинал с `seqovl-sni` и не успевал
+/// добраться до рабочего pad64-плана на пустом каталоге.
+pub fn r2o_ech_pad64_seeds(shape: u8, send_cap: usize) -> Vec<String> {
+    [391_usize, 166, 114, 172, 77]
+        .into_iter()
+        .filter_map(|length| r2o_pad64_seed_with_len(shape, send_cap, length))
+        .collect()
+}
+
 fn r2o_pad64_seed_with_len(shape: u8, send_cap: usize, length: usize) -> Option<String> {
     if !matches!(shape, 1 | 2 | 4) {
         return None;

@@ -5653,15 +5653,18 @@ fn matching_sibling_recovery_candidates(
     // pad64+seqovl с разными длинами вставки: измеренный путь выбирает
     // 77/114/172 в зависимости от цели, поэтому ждать полного перебора
     // незачем. Каждый кандидат подтверждается end-to-end.
-    if matches!(target.shape, SHAPE_MODERN | SHAPE_LEGACY)
-        && !voice_suffix
-        && !target.host.contains("discord")
+    if matches!(
+        r2o_discovery_plan_shape(target.shape),
+        SHAPE_MODERN | SHAPE_LEGACY
+    ) && !voice_suffix
     {
-        for (index, text) in
-            r2o_controller::r2o_fallback::r2o_pad64_seeds(r2o_discovery_plan_shape(target.shape), 0)
-                .into_iter()
-                .enumerate()
-        {
+        let plan_shape = r2o_discovery_plan_shape(target.shape);
+        let seeds = if r2o_is_ech_shape(target.shape) {
+            r2o_controller::r2o_fallback::r2o_ech_pad64_seeds(plan_shape, 0)
+        } else {
+            r2o_controller::r2o_fallback::r2o_pad64_seeds(plan_shape, 0)
+        };
+        for (index, text) in seeds.into_iter().enumerate() {
             let plan_id = [0x77_u8.saturating_sub(index as u8); 16];
             if let Ok(text) = r2o_controller::discovery::plan_text_for_trial(&text, plan_id) {
                 candidates.push(R2oFamilyRecoveryCandidate {
@@ -60828,14 +60831,51 @@ group_block_proven: false,
             shape: SHAPE_ECH_TS,
         };
         let candidates = matching_sibling_recovery_candidates(&catalog, &target);
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].plan_id, [0x22; 16]);
+        assert_eq!(candidates.len(), 6, "5 холодных ECH-сидов + план зоны");
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.plan_id == [0x22; 16])
+        );
 
         let other = r2o_controller::discovery::DiscoveryTarget {
             host: "www.example.com".into(),
             ..target
         };
-        assert!(matching_sibling_recovery_candidates(&catalog, &other).is_empty());
+        assert!(
+            !matching_sibling_recovery_candidates(&catalog, &other)
+                .iter()
+                .any(|candidate| candidate.plan_id == [0x22; 16])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn холодный_ech_сначала_перебирает_pad64_лестницу() {
+        let candidates = matching_sibling_recovery_candidates(
+            &Catalog::default(),
+            &r2o_controller::discovery::DiscoveryTarget {
+                tcp_profile: 2,
+                host: "gateway.discord.gg".into(),
+                endpoint: "162.159.133.234:443".into(),
+                family: 4,
+                shape: SHAPE_ECH_TS,
+            },
+        );
+        let lengths: Vec<_> = candidates
+            .iter()
+            .map(|candidate| {
+                ["391", "166", "114", "172", "77"]
+                    .into_iter()
+                    .find(|length| {
+                        candidate
+                            .plan_text
+                            .contains(&format!("payload-pad64 2 {length} 15"))
+                    })
+                    .expect("pad64 length")
+            })
+            .collect();
+        assert_eq!(lengths, ["391", "166", "114", "172", "77"]);
     }
 
     #[cfg(unix)]
@@ -60853,8 +60893,12 @@ group_block_proven: false,
             shape: SHAPE_ECH_TS,
         };
         let candidates = matching_sibling_recovery_candidates(&catalog, &target);
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].plan_id, [0x44; 16]);
+        assert_eq!(candidates.len(), 6, "5 холодных ECH-сидов + план бренда");
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.plan_id == [0x44; 16])
+        );
         assert!(super::r2o_same_service_brand(
             "discord.com",
             "gateway.discord.gg"
@@ -60868,7 +60912,11 @@ group_block_proven: false,
             host: "api.example.com".into(),
             ..target
         };
-        assert!(matching_sibling_recovery_candidates(&catalog, &other).is_empty());
+        assert!(
+            !matching_sibling_recovery_candidates(&catalog, &other)
+                .iter()
+                .any(|candidate| candidate.plan_id == [0x44; 16])
+        );
     }
 
     #[cfg(unix)]
