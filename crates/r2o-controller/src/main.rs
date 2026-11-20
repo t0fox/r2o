@@ -7165,6 +7165,27 @@ enum HttpSearchCommand {
 }
 
 #[cfg(unix)]
+struct PendingTcpCandidateAck {
+    deadline: std::time::Instant,
+    delete: Vec<u8>,
+    reply: SyncSender<Result<Option<r2k_core::control::Ack>, String>>,
+}
+
+#[cfg(unix)]
+impl PendingTcpCandidateAck {
+    fn finish(
+        self,
+        client: &mut ControlClient,
+        ack: Option<r2k_core::control::Ack>,
+    ) -> Result<(), Box<dyn Error>> {
+        if self.reply.send(Ok(ack)).is_err() {
+            client.write_command(&self.delete)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
 struct HttpSearchOutcome {
     target: r2o_controller::discovery::DiscoveryTarget,
     result: Result<(), String>,
@@ -23298,10 +23319,15 @@ impl ControlClient {
                 .ok()
         });
         let mut live_written_at = None;
+        let mut pending_candidate_acks: HashMap<[u8; 16], PendingTcpCandidateAck> = HashMap::new();
         let run_result = (|| -> Result<(), Box<dyn Error>> {
             loop {
                 if R2O_CONTROLLER_STOP.load(Ordering::Relaxed) {
                     break Ok(());
+                }
+                let now = std::time::Instant::now();
+                for (_, pending) in pending_candidate_acks.extract_if(|_, ack| now >= ack.deadline) {
+                    pending.finish(self, None)?;
                 }
                 let dns_wall_now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -24518,12 +24544,16 @@ impl ControlClient {
                     if let Some(command) = command
                         && let Some((_, catalog, path, _)) = &mut discovery
                     {
-                        self.service_http_search_command(
-                            command,
-                            catalog,
-                            path,
-                            catalog_persistence.as_mut(),
-                        )?;
+                        if let Some(command) =
+                            self.start_tcp_candidate_ack(command, &mut pending_candidate_acks)?
+                        {
+                            self.service_http_search_command(
+                                command,
+                                catalog,
+                                path,
+                                catalog_persistence.as_mut(),
+                            )?;
+                        }
                         continue;
                     }
                     let now = std::time::Instant::now();
@@ -24658,6 +24688,11 @@ impl ControlClient {
                     } else {
                         std::time::Duration::from_millis(100)
                     };
+                    let now = std::time::Instant::now();
+                    let wait = pending_candidate_acks
+                        .values()
+                        .map(|ack| ack.deadline.saturating_duration_since(now))
+                        .fold(wait, std::time::Duration::min);
                     if !wait_for_control_frame(&self.socket, wait)? {
                         measurement_gate.r2o_scheduler_tick();
                         if let Some((worker, _, _, _)) = discovery.as_mut() {
@@ -24706,6 +24741,9 @@ impl ControlClient {
                 } else if frame.kind == control::EVENT_ACK {
                     let ack = decode_ack(&frame)
                         .map_err(|error| format!("подтверждение датапата: {error}"))?;
+                    if self.finish_tcp_candidate_ack(ack, &mut pending_candidate_acks)? {
+                        continue;
+                    }
                     if let Some(cursor) = catalog_sync.as_mut() {
                         let previous_groups = active_groups.clone();
                         if cursor.observe_area_ack(ack, &mut active_groups, &mut installed_areas) {
@@ -26570,6 +26608,15 @@ impl ControlClient {
                 std::io::stdout().flush()?;
             }
         })();
+        for (_, pending) in pending_candidate_acks.drain() {
+            let cleanup = self.write_command(&pending.delete);
+            let _ = pending
+                .reply
+                .send(Err("контроллер остановлен до подтверждения TCP-пробы".into()));
+            if let Err(error) = cleanup {
+                eprintln!("не удалось снять временную TCP-пробу при остановке: {error}");
+            }
+        }
         for error in r2o_cleanup_voice_trials_on_shutdown(&mut r2o_voice_trials, |trial| {
             self.retire_r2o_voice_trial(trial)
                 .map_err(|error| error.to_string())
@@ -26813,6 +26860,62 @@ impl ControlClient {
             self.http_search_started.remove(&http_search_key(target));
             false
         }
+    }
+
+    fn start_tcp_candidate_ack(
+        &mut self,
+        command: HttpSearchCommand,
+        pending: &mut HashMap<[u8; 16], PendingTcpCandidateAck>,
+    ) -> Result<Option<HttpSearchCommand>, Box<dyn Error>> {
+        let HttpSearchCommand::InstallProbe {
+            host,
+            shape,
+            family,
+            port,
+            command,
+            trial_id,
+            candidate_settle: true,
+            reply,
+        } = command else {
+            return Ok(Some(command));
+        };
+        if !r2o_trial_present(&trial_id)
+            || control_command_trial_id(&command, control::COMMAND_SET_NAME_PROBE) != Some(trial_id)
+            || pending.contains_key(&trial_id)
+        {
+            let _ = reply.send(Err("недопустимый или повторный trial ID временной TCP-пробы".into()));
+            return Ok(None);
+        }
+        let delete = encode_delete_name_probe(&host, shape, family, port)?;
+        if let Err(error) = self.write_command(&command) {
+            let _ = reply.send(Err(error.to_string()));
+            return Err(error);
+        }
+        pending.insert(
+            trial_id,
+            PendingTcpCandidateAck {
+                deadline: std::time::Instant::now()
+                    + std::time::Duration::from_millis(D2O_TRIAL_SETTLE_MS),
+                delete,
+                reply,
+            },
+        );
+        Ok(None)
+    }
+
+    fn finish_tcp_candidate_ack(
+        &mut self,
+        ack: r2k_core::control::Ack,
+        pending: &mut HashMap<[u8; 16], PendingTcpCandidateAck>,
+    ) -> Result<bool, Box<dyn Error>> {
+        if ack.command != control::COMMAND_SET_NAME_PROBE {
+            return Ok(false);
+        }
+        let Some(pending) = ack.trial_id.and_then(|trial_id| pending.remove(&trial_id)) else {
+            return Ok(false);
+        };
+        pending.finish(self, Some(ack))?;
+        Ok(true)
     }
 
     fn service_http_search_command(
@@ -57681,6 +57784,83 @@ group_block_proven: false,
         }
         std::fs::write(output_path, &output).unwrap();
         print!("{output}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn candidate_ack_wait_leaves_control_events_available() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+        use std::sync::mpsc;
+
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        let mut client = ControlClient {
+            socket,
+            send_maxlen: 0,
+            send_cap: Arc::new(AtomicUsize::new(0)),
+            pending_events: Default::default(),
+            pending_applied_events: Default::default(),
+            dropped_events: Default::default(),
+            http_search_started: Default::default(),
+            http_acknowledged_bindings: Default::default(),
+        };
+        peer.write_all(&encode_frame(super::EVENT_HELLO, &[]).unwrap())
+            .unwrap();
+        let plan = compile_text(
+            &r2o_controller::http_search::candidate_text("split", Some(&[2; 16])).unwrap(),
+        )
+        .unwrap();
+        let trial_id = [1; 16];
+        let command = super::encode_set_name_probe(
+            "example.test", SHAPE_HTTP, 4, 41000, &plan, trial_id,
+        )
+        .unwrap();
+        let (reply, response) = mpsc::sync_channel(1);
+        let mut pending = std::collections::HashMap::new();
+        assert!(client
+            .start_tcp_candidate_ack(
+                HttpSearchCommand::InstallProbe {
+                    host: "example.test".into(),
+                    shape: SHAPE_HTTP,
+                    family: 4,
+                    port: 41000,
+                    command,
+                    trial_id,
+                    candidate_settle: true,
+                    reply,
+                },
+                &mut pending,
+            )
+            .unwrap()
+            .is_none());
+        assert!(matches!(response.try_recv(), Err(mpsc::TryRecvError::Empty)));
+        assert_eq!(read_frame(&mut peer).unwrap().kind, COMMAND_SET_NAME_PROBE);
+        assert_eq!(
+            read_frame(&mut client.socket).unwrap().kind,
+            super::EVENT_HELLO
+        );
+        for (ack_command, ack_trial, matched) in [
+            (COMMAND_SET_NAME_PROBE, Some([3; 16]), false),
+            (super::COMMAND_SET_ADDR_PROBE, Some(trial_id), false),
+            (COMMAND_SET_NAME_PROBE, Some(trial_id), true),
+        ] {
+            let wire = encode_ack_for_trial(ack_command, true, 0, ack_trial).unwrap();
+            let ack = r2k_core::control::decode_ack(
+                &read_frame(&mut std::io::Cursor::new(wire)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                client.finish_tcp_candidate_ack(ack, &mut pending).unwrap(),
+                matched
+            );
+            if !matched {
+                assert!(matches!(response.try_recv(), Err(mpsc::TryRecvError::Empty)));
+            }
+        }
+        assert_eq!(
+            response.try_recv().unwrap().unwrap().unwrap().trial_id,
+            Some(trial_id)
+        );
     }
 
     #[cfg(unix)]
