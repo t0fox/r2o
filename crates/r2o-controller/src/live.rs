@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, mpsc};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -821,11 +822,62 @@ fn r2o_live_optional_time(seconds: Option<i64>) -> Value {
         .unwrap_or(Value::Null)
 }
 
+pub struct SnapshotWriter {
+    pending: Arc<Mutex<Option<Value>>>,
+    wake: Option<mpsc::SyncSender<()>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SnapshotWriter {
+    pub fn new(path: PathBuf) -> std::io::Result<Self> {
+        let (wake, receiver) = mpsc::sync_channel(1);
+        let pending = Arc::new(Mutex::new(None));
+        let queue = Arc::clone(&pending);
+        let worker = std::thread::Builder::new()
+            .name("r2o-live".into())
+            .spawn(move || {
+                while receiver.recv().is_ok() {
+                    let snapshot = queue.lock().unwrap().take();
+                    if let Some(value) = snapshot
+                        && let Err(error) = write_snapshot(&path, &value)
+                    {
+                        eprintln!("живое состояние панели не записано: {error}");
+                    }
+                }
+            })?;
+        Ok(Self {
+            pending,
+            wake: Some(wake),
+            worker: Some(worker),
+        })
+    }
+
+    pub fn publish(&self, value: Value) -> Result<(), CatalogError> {
+        *self.pending.lock().unwrap() = Some(value);
+        match self
+            .wake
+            .as_ref()
+            .expect("запись ещё работает")
+            .try_send(())
+        {
+            Ok(()) | Err(mpsc::TrySendError::Full(())) => Ok(()),
+            Err(mpsc::TrySendError::Disconnected(())) => Err(CatalogError::new(
+                "поток записи состояния панели остановлен",
+            )),
+        }
+    }
+}
+
+impl Drop for SnapshotWriter {
+    fn drop(&mut self) {
+        drop(self.wake.take());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 pub fn write_snapshot(path: &Path, value: &Value) -> Result<(), CatalogError> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
     let file_name = path
         .file_name()
         .ok_or_else(|| CatalogError::new("live path has no file name"))?;
@@ -846,16 +898,9 @@ pub fn write_snapshot(path: &Path, value: &Value) -> Result<(), CatalogError> {
             .map_err(|error| CatalogError::new(format!("{}: {error}", temporary_path.display())))?;
         file.write_all(&bytes)
             .map_err(|error| CatalogError::new(format!("write live snapshot: {error}")))?;
-        file.sync_all()
-            .map_err(|error| CatalogError::new(format!("sync live snapshot: {error}")))?;
         drop(file);
         fs::rename(&temporary_path, path)
             .map_err(|error| CatalogError::new(format!("replace live snapshot: {error}")))?;
-        OpenOptions::new()
-            .read(true)
-            .open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| CatalogError::new(format!("sync live directory: {error}")))?;
         Ok(())
     })();
     if result.is_err() {
@@ -3192,6 +3237,14 @@ mod tests {
         let live: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(live["linked"], true);
         assert!(live["searches"].as_array().unwrap().is_empty());
+        let writer = super::SnapshotWriter::new(path.clone()).unwrap();
+        for sequence in 0..100 {
+            writer.publish(json!({"sequence": sequence})).unwrap();
+        }
+        drop(writer);
+        let latest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(latest["sequence"], 99);
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(directory).unwrap();
     }

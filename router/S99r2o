@@ -132,6 +132,7 @@ R2O_PPE_DEOFFLOAD=${R2O_PPE_DEOFFLOAD:-1}
 CATALOG=$STATE/catalog.json
 export R2O_DIR="$ROOT" R2O_CONFIG="$CONF" R2O_RUN_DIR="$RUN" R2O_PPE_ADAPTER="$PPE_ADAPTER" \
     R2O_RUNTIME_DIR="$RUNTIME" \
+    R2O_MEASUREMENT_LIMIT \
     R2O_META_RANGES R2O_INSTAGRAM_SCHED_ATTEMPT
 
 if [ "${ACTION:-}" = includes ]; then
@@ -445,9 +446,9 @@ start_datapath_both() {
 start_controller_both() {
     r2o_ct_mark=$1
     set -- --serve-both --serve4 "$SOCK4" "$CATALOG" --discover --mark "$r2o_ct_mark" \
-        --measure-mark "$MEASURE_MARK" --live4 "$STATE/live4.json"
+        --measure-mark "$MEASURE_MARK" --live4 "$RUNTIME/live4.json"
     if [ "$IPV6_ENABLED" = 1 ]; then
-        set -- "$@" --serve6 "$SOCK6" --live6 "$STATE/live6.json"
+        set -- "$@" --serve6 "$SOCK6" --live6 "$RUNTIME/live6.json"
     fi
     spawn_component r2o-controller "$CT_PID" "$LOG/r2o-controller.log" "$@"
 }
@@ -481,10 +482,10 @@ start_engine_split() {
     fi
     engine_firewall_up || return 1
     spawn_component r2o-controller "$CT4_PID" "$LOG/r2o-controller4.log" \
-        --serve "$SOCK4" "$CATALOG" --discover --mark "$r2o_split_mark" --measure-mark "$MEASURE_MARK" --live "$STATE/live4.json" || return 1
+        --serve "$SOCK4" "$CATALOG" --discover --mark "$r2o_split_mark" --measure-mark "$MEASURE_MARK" --live "$RUNTIME/live4.json" || return 1
     if [ "$IPV6_ENABLED" = 1 ]; then
         spawn_component r2o-controller "$CT6_PID" "$LOG/r2o-controller6.log" \
-            --serve "$SOCK6" "$CATALOG" --discover --mark "$r2o_split_mark" --measure-mark "$MEASURE_MARK" --live "$STATE/live6.json" || return 1
+            --serve "$SOCK6" "$CATALOG" --discover --mark "$r2o_split_mark" --measure-mark "$MEASURE_MARK" --live "$RUNTIME/live6.json" || return 1
     fi
 }
 
@@ -1423,7 +1424,7 @@ panel_start() {
     component_running r2o-controller "$CT_PID" || panel_controller_pid=$CT4_PID
     spawn_component r2o-panel "$PN_PID" "$LOG/panel.log" serve \
         --health-file "$RUNTIME/r2o-panel.health" --config "$CONF" \
-        --live "$STATE/live4.json" --live-extra "$STATE/live6.json" \
+        --live "$RUNTIME/live4.json" --live-extra "$RUNTIME/live6.json" \
         --assets "$ROOT/panel" --listen "$PANEL_LISTEN" \
         --state-dir "$STATE" --mode "$MODE" --queue "$QUEUE4" \
         --service "$INIT" --manager "$MANAGER" --manager-root "$ROOT" \

@@ -1255,11 +1255,8 @@ fn run(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dyn Error>> {
             return serve_catalog(
                 PathBuf::from(&arguments[1]),
                 PathBuf::from(&arguments[2]),
-                options.discover,
-                options.mark,
-                options.measure_mark,
-                options.live_path,
-                options.no_diagnostics,
+                options,
+                r2o_new_measurement_gate(),
             );
         }
         #[cfg(not(unix))]
@@ -2207,17 +2204,28 @@ fn r2o_serve_probe_marks(
 }
 
 #[cfg(unix)]
+fn r2o_new_measurement_gate() -> r2o_controller::r2o_resource_limit::R2oMeasurementGate {
+    r2o_controller::r2o_resource_limit::R2oMeasurementGate::r2o_with_start_gap(
+        r2o_controller::r2o_resource_limit::r2o_system_measurement_worker_cap(),
+    )
+}
+
+#[cfg(unix)]
 fn serve_catalog(
     socket_path: PathBuf,
     catalog_path: PathBuf,
-    discover: bool,
-    mark: Option<u32>,
-    measure_mark: Option<u32>,
-    live_path: Option<PathBuf>,
-    no_diagnostics: bool,
+    options: ServeCliOptions,
+    measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
 ) -> Result<(), Box<dyn Error>> {
     use std::io::Write;
 
+    let ServeCliOptions {
+        discover,
+        mark,
+        measure_mark,
+        live_path,
+        no_diagnostics,
+    } = options;
     install_r2o_controller_signal_handlers()?;
     let (mark, measure_mark) = r2o_serve_probe_marks(mark, measure_mark);
     // C `d2kc main`: отсутствие каталога — первый запуск, а не отказ;
@@ -2279,6 +2287,7 @@ fn serve_catalog(
         active_groups,
         Some(compiled),
         no_diagnostics,
+        measurement_gate,
     );
     println!("r2o-controller: останавливаюсь");
     result
@@ -2286,79 +2295,35 @@ fn serve_catalog(
 
 #[cfg(unix)]
 fn serve_catalog_both(options: ServeBothOptions) -> Result<(), Box<dyn Error>> {
-    fn family_args(
-        socket: PathBuf,
-        catalog: &std::path::Path,
-        discover: bool,
-        mark: Option<u32>,
-        measure_mark: Option<u32>,
-        live: Option<PathBuf>,
-        no_diagnostics: bool,
-    ) -> Vec<std::ffi::OsString> {
-        let mut args = vec![
-            std::ffi::OsString::from("--serve"),
-            socket.into_os_string(),
-            catalog.as_os_str().to_owned(),
-        ];
-        if discover {
-            args.push("--discover".into());
-        }
-        if let Some(mark) = mark {
-            args.push("--mark".into());
-            args.push(mark.to_string().into());
-        }
-        if let Some(measure_mark) = measure_mark {
-            args.push("--measure-mark".into());
-            args.push(measure_mark.to_string().into());
-        }
-        if let Some(live) = live {
-            args.push("--live".into());
-            args.push(live.into_os_string());
-        }
-        if no_diagnostics {
-            args.push("--no-diagnostics".into());
-        }
-        args
-    }
-
-    let mut jobs: Vec<(&'static str, Vec<std::ffi::OsString>)> = Vec::new();
-    if let Some(socket) = options.serve4 {
-        jobs.push((
-            "IPv4",
-            family_args(
-                socket,
-                &options.catalog,
-                options.discover,
-                options.mark,
-                options.measure_mark,
-                options.live4,
-                false,
-            ),
-        ));
-    }
-    if let Some(socket) = options.serve6 {
-        jobs.push((
-            "IPv6",
-            family_args(
-                socket,
-                &options.catalog,
-                options.discover,
-                options.mark,
-                options.measure_mark,
-                options.live6,
-                !jobs.is_empty(),
-            ),
-        ));
-    }
-    let handles: Vec<_> = jobs
-        .into_iter()
-        .map(|(name, arguments)| {
-            std::thread::spawn(move || {
-                let result = run(arguments).map_err(|error| error.to_string());
-                (name, result)
-            })
-        })
-        .collect();
+    let dual_stack = options.serve4.is_some() && options.serve6.is_some();
+    let gate = r2o_new_measurement_gate();
+    let handles: Vec<_> = [
+        ("IPv4", options.serve4, options.live4, false),
+        ("IPv6", options.serve6, options.live6, dual_stack),
+    ]
+    .into_iter()
+    .filter_map(|(name, socket, live_path, no_diagnostics)| {
+        let socket = socket?;
+        let catalog = options.catalog.clone();
+        let opts = ServeCliOptions {
+            discover: options.discover,
+            mark: options.mark,
+            measure_mark: options.measure_mark,
+            live_path,
+            no_diagnostics,
+        };
+        let gate = if dual_stack {
+            gate.r2o_dual_stack_family(name == "IPv6")
+        } else {
+            gate.clone()
+        };
+        Some(std::thread::spawn(move || {
+            let result =
+                serve_catalog(socket, catalog, opts, gate).map_err(|error| error.to_string());
+            (name, result)
+        }))
+    })
+    .collect();
     let mut succeeded = 0_usize;
     let mut first_error = None;
     for handle in handles {
@@ -10571,6 +10536,7 @@ fn watch(socket_path: PathBuf) -> Result<(), Box<dyn Error>> {
         HashSet::new(),
         None,
         false,
+        r2o_new_measurement_gate(),
     )
 }
 
@@ -20513,6 +20479,7 @@ impl Drop for DiscoveryWorker {
         }
         // Каждому незакрытому поиску — один `shutdown` (активные, ждущие
         // очередь и ещё не закрытые watcher-записи), в порядке слотов задач.
+        self.measurement_gate.r2o_set_pending_tcp_discovery(0);
         self.searches
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -23141,14 +23108,11 @@ impl ControlClient {
         mut active_groups: HashSet<r2o_controller::live::LiveGroupKey>,
         initial_catalog_sync: Option<CompiledCatalog>,
         no_diagnostics: bool,
+        measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
     ) -> Result<(), Box<dyn Error>> {
         use std::io::Write;
 
         self.socket.set_read_timeout(None)?;
-        let measurement_gate =
-            r2o_controller::r2o_resource_limit::R2oMeasurementGate::r2o_with_start_gap(
-                r2o_controller::r2o_resource_limit::r2o_system_measurement_worker_cap(),
-            );
         // C `dns_services_refresh`: чтение конфигурации на старте и не чаще
         // раза в 30 с; ошибка ndmc сохраняет прошлый удачный набор.
         let mut dns_services = R2oDnsServices::from_system();
@@ -23312,9 +23276,10 @@ impl ControlClient {
             // конкурировать за один report.json; отчёт ведёт первый поток.
             None
         } else {
-            live_path
+            live_catalog
                 .as_ref()
-                .and_then(|path| path.parent())
+                .and_then(|(_, path)| path.parent())
+                .or_else(|| live_path.as_deref().and_then(std::path::Path::parent))
                 .map(|state_dir| {
                     let install_root = state_dir.parent().unwrap_or(state_dir);
                     let run_dir = std::env::var_os("R2O_RUN_DIR")
@@ -23326,6 +23291,11 @@ impl ControlClient {
                     )
                 })
         };
+        let live_writer = live_path.and_then(|path| {
+            r2o_controller::live::SnapshotWriter::new(path)
+                .map_err(|error| eprintln!("поток записи состояния панели не запущен: {error}"))
+                .ok()
+        });
         let mut live_written_at = None;
         let run_result = (|| -> Result<(), Box<dyn Error>> {
             loop {
@@ -23667,13 +23637,15 @@ impl ControlClient {
                         .as_ref()
                         .map(|(_, catalog, _, _)| catalog)
                         .or_else(|| live_catalog.as_ref().map(|(catalog, _)| catalog));
-                    if let (Some(catalog), Some(path)) = (catalog_snapshot, live_path.as_deref()) {
+                    if let (Some(catalog), Some(writer)) = (catalog_snapshot, live_writer.as_ref())
+                    {
                         let searches = discovery
                             .as_ref()
                             .map(|(worker, _, _, _)| worker.r2o_live_searches(r2o_now))
                             .unwrap_or_default();
                         let status = measurement_gate.r2o_live_snapshot();
                         let measurements = serde_json::json!({
+                            "shared": measurement_gate.r2o_is_dual_stack(),
                             "active": status.active,
                             "limit": status.limit,
                             "queued": status.queued,
@@ -23717,7 +23689,7 @@ impl ControlClient {
                                     detail: area.detail.clone(),
                                 })
                                 .collect::<Vec<_>>();
-                            match r2o_controller::live::snapshot_with_areas_and_dns(
+                            let result = r2o_controller::live::snapshot_with_areas_and_dns(
                                 catalog,
                                 catalog_path,
                                 &active_groups,
@@ -23729,14 +23701,11 @@ impl ControlClient {
                                 &dns_services.live,
                                 &dns_services.tasks,
                             )
-                            .and_then(|value| r2o_controller::live::write_snapshot(path, &value))
-                            {
-                                Ok(()) => live_written_at = Some(r2o_now),
-                                Err(error) => {
-                                    eprintln!("живое состояние панели не записано: {error}");
-                                    live_written_at = Some(r2o_now);
-                                }
+                            .and_then(|value| writer.publish(value));
+                            if let Err(error) = result {
+                                eprintln!("живое состояние панели не записано: {error}");
                             }
+                            live_written_at = Some(r2o_now);
                         }
                     }
                 }

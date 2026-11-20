@@ -138,7 +138,12 @@ pub fn r2o_measurement_worker_cap(_cores: Option<usize>, _total_memory_kb: Optio
 }
 
 pub fn r2o_system_measurement_worker_cap() -> usize {
-    r2o_measurement_worker_cap(None, None)
+    let max = r2o_measurement_worker_cap(None, None);
+    std::env::var("R2O_MEASUREMENT_LIMIT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|count| (1..=max).contains(count))
+        .unwrap_or(max)
 }
 
 struct R2oAdaptiveLimit {
@@ -361,7 +366,7 @@ fn r2o_limiter_text(limiter: u8) -> String {
 struct R2oGateState {
     adaptive: R2oAdaptiveLimit,
     active: usize,
-    pending_tcp_discovery: usize,
+    pending_tcp_discovery: [usize; 2],
     tcp_admission_sequence: u64,
     initial_start_limit: usize,
     initial_starts: usize,
@@ -460,6 +465,7 @@ struct R2oMeasurementWaiter {
     id: u64,
     kind: R2oMeasurementWaiterKind,
     tcp_target: bool,
+    ipv6: bool,
     quic_tcp_turn: u64,
     /// `Some` — при выдаче слота зарегистрировать живого worker'а этого типа.
     /// `None` — замена после yield: запись уже существует и переживает паузу.
@@ -470,14 +476,15 @@ fn r2o_queue_measurement_waiter(
     state: &mut R2oGateState,
     kind: R2oMeasurementWaiterKind,
     tcp_target: bool,
-    worker_type: Option<R2oWorkerType>,
+    worker: Option<(R2oWorkerType, bool)>,
 ) -> u64 {
     let waiter = R2oMeasurementWaiter {
         id: state.next_waiter,
         kind,
         tcp_target: tcp_target || kind == R2oMeasurementWaiterKind::Tcp,
+        ipv6: worker.is_some_and(|(_, ipv6)| ipv6),
         quic_tcp_turn: state.tcp_admission_sequence,
-        worker_type,
+        worker_type: worker.map(|(kind, _)| kind),
     };
     state.next_waiter = state.next_waiter.wrapping_add(1);
     state.waiters.push_back(waiter);
@@ -490,18 +497,20 @@ fn r2o_next_measurement_waiter(state: &R2oGateState) -> Option<u64> {
         .iter()
         .find(|waiter| waiter.kind == R2oMeasurementWaiterKind::QuicYield);
     if let Some(quic) = quic_parked {
-        let tcp_waiting =
-            state.pending_tcp_discovery > 0 || state.waiters.iter().any(|waiter| waiter.tcp_target);
+        let tcp_waiting = state.pending_tcp_discovery != [0; 2]
+            || state.waiters.iter().any(|waiter| waiter.tcp_target);
         if quic.quic_tcp_turn != state.tcp_admission_sequence || !tcp_waiting {
             return Some(quic.id);
         }
-        if state.pending_tcp_discovery > 0 {
+        if state.pending_tcp_discovery != [0; 2] {
             return state
                 .waiters
                 .iter()
                 .find(|waiter| {
                     waiter.id != quic.id
-                        && (waiter.kind == R2oMeasurementWaiterKind::Discovery || waiter.tcp_target)
+                        && (waiter.tcp_target
+                            || waiter.kind == R2oMeasurementWaiterKind::Discovery
+                                && state.pending_tcp_discovery[usize::from(waiter.ipv6)] != 0)
                 })
                 .map(|waiter| waiter.id);
         }
@@ -529,6 +538,7 @@ struct R2oGateShared {
 #[derive(Clone)]
 pub struct R2oMeasurementGate {
     shared: Arc<R2oGateShared>,
+    dual_stack_family: Option<bool>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -568,6 +578,17 @@ impl R2oMeasurementGate {
             max_slots,
             Some(Duration::from_millis(R2O_MEASUREMENT_START_GAP_MS)),
         )
+    }
+
+    pub fn r2o_dual_stack_family(&self, ipv6: bool) -> Self {
+        Self {
+            shared: Arc::clone(&self.shared),
+            dual_stack_family: Some(ipv6),
+        }
+    }
+
+    pub fn r2o_is_dual_stack(&self) -> bool {
+        self.dual_stack_family.is_some()
     }
 
     pub fn r2o_scheduler_tick(&self) {
@@ -663,7 +684,7 @@ impl R2oMeasurementGate {
                 state: Mutex::new(R2oGateState {
                     adaptive: R2oAdaptiveLimit::new(max_slots),
                     active: 0,
-                    pending_tcp_discovery: 0,
+                    pending_tcp_discovery: [0; 2],
                     tcp_admission_sequence: 0,
                     initial_start_limit: R2O_DEFAULT_MEASUREMENT_LIMIT.min(max_slots.max(1)),
                     initial_starts: 0,
@@ -679,6 +700,7 @@ impl R2oMeasurementGate {
                 started: Instant::now(),
                 minimum_start_gap,
             }),
+            dual_stack_family: None,
         }
     }
 
@@ -828,7 +850,7 @@ impl R2oMeasurementGate {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.pending_tcp_discovery = count;
+        state.pending_tcp_discovery[usize::from(self.dual_stack_family.unwrap_or(false))] = count;
         drop(state);
         self.shared.changed.notify_all();
     }
@@ -839,7 +861,7 @@ impl R2oMeasurementGate {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.pending_tcp_discovery > 0
+        state.pending_tcp_discovery != [0; 2]
             && state.waiters.iter().any(|waiter| {
                 waiter.kind == R2oMeasurementWaiterKind::QuicYield
                     && waiter.quic_tcp_turn == state.tcp_admission_sequence
@@ -881,7 +903,12 @@ impl R2oMeasurementGate {
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            r2o_queue_measurement_waiter(&mut state, kind, tcp_target, Some(worker_type))
+            r2o_queue_measurement_waiter(
+                &mut state,
+                kind,
+                tcp_target,
+                Some((worker_type, self.dual_stack_family.unwrap_or(false))),
+            )
         };
 
         self.r2o_wait_for_measurement_turn(waiter, cancel, deadline)
@@ -1071,8 +1098,8 @@ impl R2oMeasurementPermit {
             shared.changed.notify_all();
             return false;
         }
-        let tcp_waiting =
-            state.waiters.iter().any(|waiter| waiter.tcp_target) || state.pending_tcp_discovery > 0;
+        let tcp_waiting = state.waiters.iter().any(|waiter| waiter.tcp_target)
+            || state.pending_tcp_discovery != [0; 2];
         if !tcp_waiting || state.active < state.adaptive.limit() {
             return true;
         }
@@ -1080,6 +1107,7 @@ impl R2oMeasurementPermit {
         self.active = false;
         let gate = R2oMeasurementGate {
             shared: Arc::clone(&shared),
+            dual_stack_family: None,
         };
         let waiter = r2o_queue_measurement_waiter(
             &mut state,
@@ -1263,6 +1291,26 @@ mod tests {
         assert_eq!((active.active, active.limit, active.queued), (1, 2, 0));
         drop(permit);
         assert_eq!(gate.r2o_live_snapshot().active, 0);
+    }
+
+    #[test]
+    fn dual_stack_shares_permits_and_keeps_pending_counts_for_both_families() {
+        let gate = R2oMeasurementGate::new(1);
+        let ipv4 = gate.r2o_dual_stack_family(false);
+        let ipv6 = gate.r2o_dual_stack_family(true);
+        let permit = ipv4.r2o_try_acquire().unwrap();
+        assert_eq!(ipv6.r2o_live_snapshot().active, 1);
+        assert!(ipv6.r2o_try_acquire().is_none());
+        drop(permit);
+        assert!(ipv6.r2o_try_acquire().is_some());
+
+        ipv4.r2o_set_pending_tcp_discovery(1);
+        ipv6.r2o_set_pending_tcp_discovery(2);
+        ipv4.r2o_set_pending_tcp_discovery(0);
+        assert_eq!(
+            gate.shared.state.lock().unwrap().pending_tcp_discovery,
+            [0, 2]
+        );
     }
 
     #[test]
@@ -1962,7 +2010,7 @@ mod tests {
             let mut state = R2oGateState {
                 adaptive: R2oAdaptiveLimit::new(64),
                 active: 64,
-                pending_tcp_discovery: 0,
+                pending_tcp_discovery: [0; 2],
                 tcp_admission_sequence: 0,
                 initial_start_limit: 2,
                 initial_starts: 2,

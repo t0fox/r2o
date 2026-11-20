@@ -1067,13 +1067,17 @@ fn merge_live_snapshot(primary: &mut Value, extra: &Value) {
         .get_mut("measurements")
         .and_then(Value::as_object_mut)
     {
-        for key in ["active", "queued", "limit"] {
-            let sum = primary_measurements
-                .get(key)
-                .and_then(Value::as_u64)
-                .unwrap_or(0)
-                .saturating_add(extra["measurements"][key].as_u64().unwrap_or(0));
-            primary_measurements.insert(key.into(), Value::from(sum));
+        let shared = primary_measurements.get("shared").and_then(Value::as_bool) == Some(true)
+            && extra["measurements"]["shared"].as_bool() == Some(true);
+        if !shared {
+            for key in ["active", "queued", "limit"] {
+                let sum = primary_measurements
+                    .get(key)
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    .saturating_add(extra["measurements"][key].as_u64().unwrap_or(0));
+                primary_measurements.insert(key.into(), Value::from(sum));
+            }
         }
         merge_live_min(primary_measurements, extra, "free_pct");
         merge_live_min(primary_measurements, extra, "mem_avail_mb");

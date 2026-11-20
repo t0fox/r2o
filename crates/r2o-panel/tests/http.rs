@@ -1280,6 +1280,20 @@ fn status_merges_independent_controller_live_snapshots() {
     assert_eq!(cached["catalog_unchanged"], true);
     assert_eq!(cached["knowledge"]["boxes"], Value::Null);
     assert_eq!(cached["knowledge"]["searches"].as_array().unwrap().len(), 2);
+
+    for path in [&config.live_path, &config.live_extra_paths[0]] {
+        let mut snapshot: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        snapshot["measurements"]["shared"] = Value::Bool(true);
+        fs::write(path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+    }
+    let (_, _, body) = request(
+        &config,
+        "GET /api/status HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    let shared: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(shared["knowledge"]["measurements"]["active"], 2);
+    assert_eq!(shared["knowledge"]["measurements"]["limit"], 4);
+    assert_eq!(shared["knowledge"]["searches"].as_array().unwrap().len(), 2);
 }
 
 #[test]
