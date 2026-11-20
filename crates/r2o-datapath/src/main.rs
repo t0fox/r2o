@@ -56,7 +56,7 @@ mod app {
     use std::io;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     static STOP: AtomicBool = AtomicBool::new(false);
     static R2O_SEND_FAIL_BUSY_LINES: std::sync::atomic::AtomicU32 =
@@ -1050,6 +1050,67 @@ mod app {
         );
     }
 
+    struct NfqLatency {
+        samples: u64,
+        buckets: [u64; 33],
+    }
+
+    impl NfqLatency {
+        const fn new() -> Self {
+            Self {
+                samples: 0,
+                buckets: [0; 33],
+            }
+        }
+
+        fn observe(&mut self, elapsed: Duration) {
+            let Ok(micros) = u32::try_from(elapsed.as_nanos().div_ceil(1_000)) else {
+                return;
+            };
+            let bucket = u32::BITS - micros.leading_zeros();
+            self.buckets[bucket as usize] += 1;
+            self.samples += 1;
+        }
+
+        fn upper_micros(&self, tail_divisor: u64) -> Option<u64> {
+            if self.samples == 0 {
+                return None;
+            }
+            let rank = self.samples - self.samples / tail_divisor;
+            let mut seen = 0;
+            for (bucket, count) in self.buckets.iter().enumerate() {
+                seen += count;
+                if seen >= rank {
+                    return Some((1_u64 << bucket) - 1);
+                }
+            }
+            None
+        }
+
+        fn log_and_reset(&mut self, stage: &str, queue: u16, packets: u64) {
+            if let (Some(p95), Some(p99)) = (self.upper_micros(20), self.upper_micros(100)) {
+                eprintln!(
+                    "r2o-datapath: NFQUEUE {stage} q={queue} n={}/{} p95_le_us={p95} p99_le_us={p99}",
+                    self.samples, packets,
+                );
+            } else if packets != 0 {
+                eprintln!("r2o-datapath: NFQUEUE {stage} q={queue} n=0/{packets}");
+            }
+            *self = Self::new();
+        }
+    }
+
+    struct NfqPacketTimer<'a> {
+        started: Instant,
+        latency: &'a mut NfqLatency,
+    }
+
+    impl Drop for NfqPacketTimer<'_> {
+        fn drop(&mut self) {
+            self.latency.observe(self.started.elapsed());
+        }
+    }
+
     fn r2o_log_raw_stats(raw: Option<&RawSocket>) {
         if let Some(raw) = raw {
             let stats = raw.send_stats();
@@ -1688,6 +1749,8 @@ mod app {
         let mut next_stats = options
             .stats_interval
             .map(|interval| Instant::now() + interval);
+        let mut nfq_age = NfqLatency::new();
+        let mut nfq_processing = NfqLatency::new();
         let mut next_ctl_stats = Instant::now() + Duration::from_secs(1);
         let mut routed_flows = R2oRoutedFlows::default();
         let mut last_route_refresh = Instant::now();
@@ -1834,6 +1897,9 @@ mod app {
                 r2o_log_process_stats(&journal_origin, Instant::now());
                 eprintln!("r2o-datapath: потеряно ядром {}", socket.lost_packets());
                 r2o_log_queue_stats(&socket);
+                let processed = nfq_processing.samples;
+                nfq_age.log_and_reset("rx_age", queue, processed);
+                nfq_processing.log_and_reset("handler", queue, processed);
                 r2o_log_flow_table_stats(&tcp_sessions, &udp_sessions);
                 r2o_log_scheduler_stats(&scheduled);
                 r2o_log_session_stats(&tcp_sessions, &udp_sessions);
@@ -2046,6 +2112,12 @@ mod app {
                     None
                 }
             };
+            // NFQA_TIMESTAMP относится к skb, поэтому возраст включает участок до NFQUEUE.
+            let received_wall = if received.is_some() && next_stats.is_some() {
+                SystemTime::now().duration_since(UNIX_EPOCH).ok()
+            } else {
+                None
+            };
             let route_ready = r2o_poll_extra_ready(&extra_revents, route_poll_index);
             let control_wake = r2o_poll_extra_ready(&extra_revents, control_listen_index)
                 || r2o_poll_extra_ready(&extra_revents, control_peer_index);
@@ -2232,6 +2304,16 @@ mod app {
                         socket.record_missing_header();
                         continue;
                     };
+                    if let Some(age) = packet.timestamp_ns.and_then(|timestamp| {
+                        received_wall?.checked_sub(Duration::from_nanos(timestamp))
+                    }) {
+                        nfq_age.observe(age);
+                    }
+                    // По выходу из обработчика пакет может быть передан в отложенную очередь.
+                    let _timer = next_stats.is_some().then(|| NfqPacketTimer {
+                        started: Instant::now(),
+                        latency: &mut nfq_processing,
+                    });
                     socket.record_received_packet(
                         packet.payload.map(|bytes| bytes.len()),
                         packet.truncated,
@@ -6376,6 +6458,24 @@ mod app {
 
     #[cfg(test)]
     mod tests {
+        #[test]
+        fn nfq_latency_reports_upper_bounds_for_nearest_ranks() {
+            let mut latency = super::NfqLatency::new();
+            assert_eq!(latency.upper_micros(100), None);
+            latency.observe(std::time::Duration::from_nanos(250));
+            assert_eq!(latency.upper_micros(100), Some(1));
+            for _ in 0..94 {
+                latency.observe(std::time::Duration::from_micros(10));
+            }
+            for _ in 0..4 {
+                latency.observe(std::time::Duration::from_micros(50));
+            }
+            latency.observe(std::time::Duration::from_millis(5));
+            assert_eq!(latency.samples, 100);
+            assert_eq!(latency.upper_micros(20), Some(15));
+            assert_eq!(latency.upper_micros(100), Some(63));
+        }
+
         #[test]
         fn run_stats_lines_include_c_fields() {
             let plan = super::r2o_plan_stats_line(7, 5, 100, 20, 80, 20, 2, 3, 4);
