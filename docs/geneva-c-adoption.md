@@ -123,14 +123,19 @@ Geneva-форма `duplicate(,tamper{...})` выражается без пере
 `TCP:flags/dataofs/window/ack:corrupt/chksum:corrupt/options-md5header`,
 `IP:ttl/len` и `TCP:seq:add` в `REC_POISON_TCP`/`REC_POISON_FIELDS` и
 собирает `fake ... place=after`. Остальные формы отвергаются с текстовой
-причиной; входящий лес, `drop`, `fragment`, `sleep`, `trace`, правка
-оригинала и `chksum:replace` не эмулируются. Из 58 записей библиотеки
-сейчас компилируются 9, остальные 49 явно отвергаются; это исходная
+причиной; входящий лес, `drop`, `sleep`, `trace`, `fragment{ip:...}`,
+`fragment` с правками кусков/перекрытием, правка оригинала и
+`chksum:replace` не эмулируются. `fragment{tcp:N:True|False}` и
+`fragment{tcp:-1:...}` выражаются через `split payload_start +N` /
+`hello_middle` и `order forward|reverse`. Из 58 записей библиотеки
+сейчас компилируются 11, остальные 47 явно отвергаются; это исходная
 точка для расширения, а не заявка на полный паритет. Тесты:
 `duplicate_right_tamper_becomes_after_fake`,
 `duplicate_with_ttl_and_ack_corrupt_combines_in_one_poison`,
 `duplicate_with_dataofs_and_window_is_supported`,
 `md5_option_tamper_selects_detect_tcp_wire_profile`,
+`tcp_fragment_becomes_split_with_matching_order`,
+`fragment_with_children_or_ip_mode_is_rejected`,
 `library_has_compilable_subset_and_every_entry_is_classified`.
 Байтовый дифференциал с geneva_c: `tests/geneva_compile_differential.rs`
 берёт реальный ClientHello из `tests/golden/in.pcap`, применяет ту же
@@ -526,7 +531,7 @@ firewall. Более совместимый с r2o путь:
 Фактический статус на 2026-11-20: P1-a выполнен (парсер, каноникализатор,
 библиотека, 145/145 корпуса); P2-a выполнен (`dataofs`, `flags`, `ack`,
 `ip_len`, `tcp_window`, `place=after`); P1-b начат — компилятор
-поддерживает 9 из 58 записей библиотеки и явно отвергает остальные.
+поддерживает 11 из 58 записей библиотеки и явно отвергает остальные.
 P0-a/P0-b/P0-c (цензоры) ещё не начаты; следующий независимый шаг —
 P0-a, потому что он не меняет production и даёт тестовый oracle.
 

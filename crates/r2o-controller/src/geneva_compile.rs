@@ -49,11 +49,6 @@ pub fn compile_text(
     payload: &[u8],
     plan_id: [u8; 16],
 ) -> Result<String, GenevaCompileError> {
-    if payload.is_empty() {
-        return Err(GenevaCompileError::new(
-            "для duplicate нужна непустая нагрузка оригинала",
-        ));
-    }
     if !strategy.inbound.is_empty() {
         return Err(GenevaCompileError::new(
             "входящий лес Geneva не выражается TCP-планом R2OP",
@@ -78,11 +73,32 @@ pub fn compile_text(
     let Some(action) = tree.action.as_ref() else {
         return Err(GenevaCompileError::new("пустое дерево не даёт плана"));
     };
-    if !matches!(&action.kind, GenevaActionKind::Duplicate) {
-        return Err(GenevaCompileError::new(format!(
-            "корневое действие {} не выражается: нужен duplicate",
+    match &action.kind {
+        GenevaActionKind::Duplicate => compile_duplicate(action, payload, plan_id),
+        GenevaActionKind::Fragment {
+            segment,
+            fragsize,
+            overlap,
+            in_order,
+        } => compile_fragment(
+            action, *segment, *fragsize, *overlap, *in_order, payload, plan_id,
+        ),
+        _ => Err(GenevaCompileError::new(format!(
+            "корневое действие {} не выражается: нужен duplicate или fragment{{tcp:...}}",
             action_name(&action.kind)
-        )));
+        ))),
+    }
+}
+
+fn compile_duplicate(
+    action: &GenevaAction,
+    payload: &[u8],
+    plan_id: [u8; 16],
+) -> Result<String, GenevaCompileError> {
+    if payload.is_empty() {
+        return Err(GenevaCompileError::new(
+            "для duplicate нужна непустая нагрузка оригинала",
+        ));
     }
     if action.left.is_some() {
         return Err(GenevaCompileError::new(
@@ -109,6 +125,59 @@ pub fn compile_text(
     text.push_str(&format!("poison 1 {}\n", fields.join(" ")));
     text.push_str("fake payload=1 poison=1 repeats=1 gap_us=0 place=after\n");
     text.push_str("order forward\n");
+    Ok(text)
+}
+
+/// Geneva `fragment{tcp:N:True|False}`: два TCP-сегмента с общей
+/// последовательностью. R2OP выражает это `split` без фальшивок.
+fn compile_fragment(
+    action: &GenevaAction,
+    segment: bool,
+    fragsize: i32,
+    overlap: i32,
+    in_order: bool,
+    payload: &[u8],
+    plan_id: [u8; 16],
+) -> Result<String, GenevaCompileError> {
+    if !segment {
+        return Err(GenevaCompileError::new(
+            "fragment{ip:...} не выражается TCP-разрезом R2OP",
+        ));
+    }
+    if action.left.is_some() || action.right.is_some() {
+        return Err(GenevaCompileError::new(
+            "fragment с правками кусков не выражается: R2OP не даёт отдельный poison на кусок",
+        ));
+    }
+    if overlap != 0 {
+        return Err(GenevaCompileError::new(
+            "fragment с перекрытием не выражается: нужен seqovl, а не split",
+        ));
+    }
+    let split = if fragsize == -1 {
+        "hello_middle +0".to_owned()
+    } else if fragsize > 0 {
+        if !payload.is_empty() && fragsize as usize >= payload.len() {
+            return Err(GenevaCompileError::new(
+                "fragment{tcp:N} режет за концом нагрузки",
+            ));
+        }
+        format!("payload_start +{fragsize}")
+    } else {
+        return Err(GenevaCompileError::new(
+            "fragment{tcp:...} требует положительный размер или -1",
+        ));
+    };
+    let mut text = String::new();
+    text.push_str("r2o-plan 1 5\n");
+    text.push_str(&format!("id {}\n", hex(&plan_id)));
+    text.push_str("proto tcp tls\n");
+    text.push_str(&format!("split {split}\n"));
+    text.push_str(if in_order {
+        "order forward\n"
+    } else {
+        "order reverse\n"
+    });
     Ok(text)
 }
 
@@ -354,11 +423,40 @@ mod tests {
     }
 
     #[test]
+    fn tcp_fragment_becomes_split_with_matching_order() {
+        let bytes = compile("[TCP:flags:PA]-fragment{tcp:8:True}-").expect("fragment in order");
+        let plan = Plan::parse(&bytes).expect("parse");
+        assert_eq!(plan.splits.len(), 1);
+        assert_eq!(plan.splits[0].anchor, 0, "payload_start");
+        assert_eq!(plan.splits[0].offset, 8);
+        assert_eq!(plan.order, 0, "forward");
+
+        let bytes = compile("[TCP:flags:PA]-fragment{tcp:-1:False}-").expect("fragment reverse");
+        let plan = Plan::parse(&bytes).expect("parse");
+        assert_eq!(plan.splits[0].anchor, 3, "hello_middle");
+        assert_eq!(plan.splits[0].offset, 0);
+        assert_eq!(plan.order, 1, "reverse");
+    }
+
+    #[test]
+    fn fragment_with_children_or_ip_mode_is_rejected() {
+        for strategy in [
+            "[TCP:flags:PA]-fragment{tcp:8:True}(tamper{TCP:chksum:corrupt},)-",
+            "[TCP:flags:PA]-fragment{ip:8:True}-",
+            "[TCP:flags:PA]-fragment{tcp:10:True}-",
+        ] {
+            assert!(
+                compile(strategy).is_err(),
+                "должна быть отвергнута: {strategy}"
+            );
+        }
+    }
+
+    #[test]
     fn tampered_original_and_other_actions_are_rejected_explicitly() {
         for strategy in [
             "[TCP:flags:A]-duplicate(tamper{TCP:flags:replace:R},)-",
             "[TCP:flags:A]-drop-",
-            "[TCP:flags:PA]-fragment{tcp:8:True}-",
             "[TCP:flags:A]-duplicate(,tamper{TCP:chksum:replace:1})-",
             "[TCP:flags:A]-duplicate(,tamper{TCP:options-wscale:corrupt})-",
             "[TCP:flags:A]-duplicate(,tamper{TCP:dataofs:replace:0})-",
@@ -399,8 +497,8 @@ mod tests {
         }
         println!("geneva library: compiled={compiled} rejected={rejected}");
         assert!(
-            compiled > 0,
-            "подмножество библиотеки должно компилироваться"
+            compiled >= 11,
+            "поддерживаемое подмножество библиотеки не должно сокращаться"
         );
         assert!(
             rejected > 0,
