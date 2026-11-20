@@ -1864,7 +1864,7 @@ mod app {
                 if ct_up && control.as_ref().is_some_and(ControlServer::is_connected) {
                     for probe in tcp_sessions.tcp_stall_candidates() {
                         // C `tcp_watch`: поток с меткой маршрутизатора не цель.
-                        if routed_flows.r2o_is_routed_key(&probe.key) {
+                        if routed_flows.r2o_is_routed_key(&probe.wire_key()) {
                             continue;
                         }
                         let Some(info) = conntrack
@@ -1873,8 +1873,7 @@ mod app {
                         else {
                             continue;
                         };
-                        let Some(event) = tcp_sessions.update_tcp_stall(now, &probe.key, info)
-                        else {
+                        let Some(event) = tcp_sessions.update_tcp_stall(now, &probe, info) else {
                             continue;
                         };
                         if send_tcp_stall_event(

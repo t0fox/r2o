@@ -92,6 +92,29 @@ impl TcpFlowKey {
         key[37] = 6;
         key
     }
+
+    fn from_wire_key(key: &[u8; KEY_LEN]) -> Option<Self> {
+        if key[37] != 6 {
+            return None;
+        }
+        let endpoint = |bytes: &[u8], port: [u8; 2]| {
+            let address = match key[0] {
+                4 if bytes[4..] == [0; 12] => {
+                    std::net::IpAddr::from(<[u8; 4]>::try_from(&bytes[..4]).ok()?)
+                }
+                6 => std::net::IpAddr::from(<[u8; 16]>::try_from(bytes).ok()?),
+                _ => return None,
+            };
+            Some(TcpEndpoint {
+                address: address.into(),
+                port: u16::from_be_bytes(port),
+            })
+        };
+        Some(Self {
+            low: endpoint(&key[1..17], [key[33], key[34]])?,
+            high: endpoint(&key[17..33], [key[35], key[36]])?,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -567,11 +590,7 @@ impl TcpSessions {
 
     /// C `suspect_num` для TCP: учесть подозрение не более одного раза на поток.
     pub fn r2o_note_suspect(&mut self, key: &[u8; KEY_LEN]) -> bool {
-        let Some((_, session)) = self
-            .flows
-            .iter_mut()
-            .find(|(flow_key, _)| flow_key.wire_key() == *key)
-        else {
+        let Some(session) = self.session_from_wire_mut(key) else {
             return false;
         };
         // C `suspect_num`: зонд и уже подозревавшийся поток не учитываются.
@@ -587,20 +606,24 @@ impl TcpSessions {
         self.tcp_hello_capture.stats()
     }
 
+    fn session_from_wire(&self, key: &[u8; KEY_LEN]) -> Option<&TcpSession> {
+        self.flows.get(&TcpFlowKey::from_wire_key(key)?)
+    }
+
+    fn session_from_wire_mut(&mut self, key: &[u8; KEY_LEN]) -> Option<&mut TcpSession> {
+        self.flows.get_mut(&TcpFlowKey::from_wire_key(key)?)
+    }
+
     /// C `d2k_session_guards`: guards потока по ключу.
     pub fn session_guards(&self, key: &[u8; KEY_LEN]) -> u8 {
-        self.flows
-            .iter()
-            .find(|(flow_key, _)| flow_key.wire_key() == *key)
-            .map_or(0, |(_, session)| session.guards)
+        self.session_from_wire(key)
+            .map_or(0, |session| session.guards)
     }
 
     /// C `d2k_session_client_shape`: форма клиента потока.
     pub fn session_client_shape(&self, key: &[u8; KEY_LEN]) -> u8 {
-        self.flows
-            .iter()
-            .find(|(flow_key, _)| flow_key.wire_key() == *key)
-            .map_or(0, |(_, session)| session.client_shape)
+        self.session_from_wire(key)
+            .map_or(0, |session| session.client_shape)
     }
 
     /// C `fl->plan_done` для пакета: доступ для sequence-differential.
@@ -619,10 +642,8 @@ impl TcpSessions {
 
     /// C `d2k_session_damaged`: флаг повреждения потока.
     pub fn session_flow_damaged(&self, key: &[u8; KEY_LEN]) -> bool {
-        self.flows
-            .iter()
-            .find(|(flow_key, _)| flow_key.wire_key() == *key)
-            .is_some_and(|(_, session)| session.damaged)
+        self.session_from_wire(key)
+            .is_some_and(|session| session.damaged)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -653,9 +674,9 @@ impl TcpSessions {
 
     /// Возвращает счётчики активного потока по его ключу сетевого протокола.
     pub fn r2o_flow_metrics(&self, key: &[u8; KEY_LEN]) -> Option<R2oTcpFlowMetrics> {
-        self.flows.iter().find_map(|(flow_key, session)| {
-            (flow_key.wire_key() == *key && !session.controller_probe).then_some(session.metrics)
-        })
+        self.session_from_wire(key)
+            .filter(|session| !session.controller_probe)
+            .map(|session| session.metrics)
     }
 
     /// Вернуть признак TCP timestamp option из начального SYN клиентской стороны.
@@ -837,11 +858,7 @@ impl TcpSessions {
     }
 
     pub fn mark_plan_done(&mut self, key: &[u8; KEY_LEN]) {
-        if let Some((_, session)) = self
-            .flows
-            .iter_mut()
-            .find(|(flow_key, _)| flow_key.wire_key() == *key)
-        {
+        if let Some(session) = self.session_from_wire_mut(key) {
             session.r2o_execution_pending = false;
             session.plan_done = true;
         }
@@ -878,10 +895,8 @@ impl TcpSessions {
 
     /// C `fl->orig_taken` текущего поколения.
     pub fn r2o_orig_taken(&self, key: &[u8; KEY_LEN]) -> Option<bool> {
-        self.flows
-            .iter()
-            .find(|(flow_key, _)| flow_key.wire_key() == *key)
-            .map(|(_, session)| session.orig_taken)
+        self.session_from_wire(key)
+            .map(|session| session.orig_taken)
     }
 
     /// Проверить, испорчено ли текущее поколение TCP-потока.
@@ -896,15 +911,12 @@ impl TcpSessions {
     /// C `d2k_session_send_pending`: поток есть, поколение совпало,
     /// `sends_left != 0` и попытка ещё не помечена неудачной.
     pub fn r2o_send_pending(&self, key: &[u8; KEY_LEN], execution_id: u64) -> bool {
-        self.flows
-            .iter()
-            .find(|(flow_key, _)| flow_key.wire_key() == *key)
-            .is_some_and(|(_, session)| {
-                execution_id != 0
-                    && session.execution_id == execution_id
-                    && session.sends_left != 0
-                    && !session.sends_failed
-            })
+        self.session_from_wire(key).is_some_and(|session| {
+            execution_id != 0
+                && session.execution_id == execution_id
+                && session.sends_left != 0
+                && !session.sends_failed
+        })
     }
 
     /// Зачесть одну ушедшую посылку поколения.
@@ -914,11 +926,7 @@ impl TcpSessions {
     /// `sends_left == 0 && !sends_failed` завершает план. `true` — именно
     /// этот вызов опустошил счётчик и зачёл завершение.
     pub fn r2o_session_sent(&mut self, key: &[u8; KEY_LEN], execution_id: u64) -> bool {
-        let Some((_, session)) = self
-            .flows
-            .iter_mut()
-            .find(|(flow_key, _)| flow_key.wire_key() == *key)
-        else {
+        let Some(session) = self.session_from_wire_mut(key) else {
             return false;
         };
         if execution_id == 0 || session.execution_id != execution_id || session.sends_left == 0 {
@@ -948,11 +956,7 @@ impl TcpSessions {
         execution_id: u64,
     ) -> bool {
         let remaining = {
-            let Some((_, session)) = self
-                .flows
-                .iter()
-                .find(|(flow_key, _)| flow_key.wire_key() == *key)
-            else {
+            let Some(session) = self.session_from_wire(key) else {
                 return false;
             };
             // C: нет потока, чужое поколение или `sends_left == 0` → sent_lost.
@@ -968,11 +972,7 @@ impl TcpSessions {
                 completed = true;
             }
         }
-        if let Some((_, session)) = self
-            .flows
-            .iter_mut()
-            .find(|(flow_key, _)| flow_key.wire_key() == *key)
-        {
+        if let Some(session) = self.session_from_wire_mut(key) {
             session.r2o_execution_pending = false;
         }
         completed
@@ -987,11 +987,7 @@ impl TcpSessions {
         key: &[u8; KEY_LEN],
         execution_id: u64,
     ) -> bool {
-        let Some((_, session)) = self
-            .flows
-            .iter_mut()
-            .find(|(flow_key, _)| flow_key.wire_key() == *key)
-        else {
+        let Some(session) = self.session_from_wire_mut(key) else {
             return false;
         };
         if execution_id == 0 || session.execution_id != execution_id {
@@ -1015,11 +1011,7 @@ impl TcpSessions {
         key: &[u8; KEY_LEN],
         execution_id: u64,
     ) -> bool {
-        let Some((_, session)) = self
-            .flows
-            .iter_mut()
-            .find(|(flow_key, _)| flow_key.wire_key() == *key)
-        else {
+        let Some(session) = self.session_from_wire_mut(key) else {
             return false;
         };
         if execution_id == 0 || session.execution_id != execution_id {
@@ -1088,11 +1080,7 @@ impl TcpSessions {
 
     pub fn mark_fin_retry(&mut self, key: &[u8; KEY_LEN]) {
         self.fin_retry_events.retain(|event| event.key != *key);
-        if let Some((_, session)) = self
-            .flows
-            .iter_mut()
-            .find(|(flow_key, _)| flow_key.wire_key() == *key)
-        {
+        if let Some(session) = self.session_from_wire_mut(key) {
             session.fin_retry_queued = false;
             session.fin_retry_reported = true;
         }
@@ -1125,11 +1113,7 @@ impl TcpSessions {
     }
 
     pub fn mark_silent(&mut self, key: &[u8; KEY_LEN]) {
-        if let Some((_, session)) = self
-            .flows
-            .iter_mut()
-            .find(|(flow_key, _)| flow_key.wire_key() == *key)
-        {
+        if let Some(session) = self.session_from_wire_mut(key) {
             session.silence_reported = true;
         }
     }
@@ -1153,7 +1137,7 @@ impl TcpSessions {
                 );
                 let server_addr = SocketAddr::new(server.address.as_ip_addr(), server.port);
                 Some(R2oTcpStallProbe {
-                    key: key.wire_key(),
+                    key: *key,
                     tuple: tuple_from_socket_addrs(client_addr, server_addr)?,
                 })
             })
@@ -1164,13 +1148,11 @@ impl TcpSessions {
     pub fn update_tcp_stall(
         &mut self,
         now: Instant,
-        key: &[u8; KEY_LEN],
+        probe: &R2oTcpStallProbe,
         info: R2oConntrackInfo,
     ) -> Option<R2oTcpStallEvent> {
-        let (flow_key, session) = self
-            .flows
-            .iter_mut()
-            .find(|(flow_key, _)| flow_key.wire_key() == *key)?;
+        let flow_key = probe.key;
+        let session = self.flows.get_mut(&flow_key)?;
         if !session.r2o_tcp_watch() {
             return None;
         }
@@ -1232,11 +1214,7 @@ impl TcpSessions {
     }
 
     pub fn mark_tcp_stall(&mut self, key: &[u8; KEY_LEN]) {
-        if let Some((_, session)) = self
-            .flows
-            .iter_mut()
-            .find(|(flow_key, _)| flow_key.wire_key() == *key)
-        {
+        if let Some(session) = self.session_from_wire_mut(key) {
             session.stall_reported = true;
         }
     }
@@ -1786,8 +1764,15 @@ fn fin_retry_window(rtt: Option<Duration>) -> Duration {
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct R2oTcpStallProbe {
-    pub key: [u8; KEY_LEN],
+    key: TcpFlowKey,
     pub tuple: R2oConntrackTuple,
+}
+
+#[cfg(target_os = "linux")]
+impl R2oTcpStallProbe {
+    pub fn wire_key(&self) -> [u8; KEY_LEN] {
+        self.key.wire_key()
+    }
 }
 
 /// Применить план пакета с ограниченным состоянием TCP-потока для защит соединения.
@@ -3578,13 +3563,13 @@ mod tests {
             tcp_state: Some(3),
         };
         assert_eq!(
-            sessions.update_tcp_stall(start + Duration::from_secs(1), &probe.key, baseline),
+            sessions.update_tcp_stall(start + Duration::from_secs(1), &probe, baseline),
             None
         );
         assert_eq!(
             sessions.update_tcp_stall(
                 start + Duration::from_secs(3),
-                &probe.key,
+                &probe,
                 R2oConntrackInfo {
                     original_packets: 12,
                     ..baseline
@@ -3595,7 +3580,7 @@ mod tests {
         let event = sessions
             .update_tcp_stall(
                 start + Duration::from_millis(3100),
-                &probe.key,
+                &probe,
                 R2oConntrackInfo {
                     original_packets: 13,
                     ..baseline
@@ -3642,13 +3627,13 @@ mod tests {
             tcp_state: Some(3),
         };
         assert_eq!(
-            sessions.update_tcp_stall(start + Duration::from_secs(1), &probe.key, baseline),
+            sessions.update_tcp_stall(start + Duration::from_secs(1), &probe, baseline),
             None
         );
         let event = sessions
             .update_tcp_stall(
                 start + Duration::from_millis(3100),
-                &probe.key,
+                &probe,
                 R2oConntrackInfo {
                     original_packets: 13,
                     ..baseline
@@ -3714,6 +3699,32 @@ mod tests {
         let probe = sessions.tcp_stall_candidates().pop().unwrap();
         assert_eq!(probe.tuple.source_port, 41000);
         assert_eq!(probe.tuple.destination_port, 443);
+    }
+
+    #[test]
+    fn поиск_tcp_потока_принимает_только_точный_ключ() {
+        let mut sessions = TcpSessions::default();
+        let packet = ipv4_tcp_packet(
+            ([192, 0, 2, 10], 41000),
+            ([198, 51, 100, 20], 443),
+            0x02,
+            64,
+            700,
+            &[],
+        );
+        sessions.track_packet(&packet, Instant::now());
+        let key = sessions.r2o_begin_execution(&packet, 41, 1, false).unwrap();
+        assert!(sessions.r2o_send_pending(&key, 41));
+        assert!(!sessions.r2o_session_sent(&key, 40));
+
+        let mut udp = key;
+        udp[37] = 17;
+        assert!(!sessions.r2o_session_sent(&udp, 41));
+
+        let mut bad_padding = key;
+        bad_padding[16] = 1;
+        assert!(!sessions.r2o_session_sent(&bad_padding, 41));
+        assert!(sessions.r2o_send_pending(&key, 41));
     }
 
     #[test]
@@ -4537,7 +4548,7 @@ mod tests {
     #[test]
     #[ignore]
     fn d2o_ct_tcp_flow_trace() {
-        fn setup() -> (TcpSessions, [u8; KEY_LEN], Instant) {
+        fn setup() -> (TcpSessions, super::R2oTcpStallProbe, Instant) {
             let start = Instant::now();
             let mut sessions =
                 TcpSessions::try_with_capacity(R2oFlowCapacity::from_requested(64).unwrap())
@@ -4563,15 +4574,13 @@ mod tests {
                 &ipv4_tcp_packet(server, client, 0x18, 64, 900, &server_hello),
                 start + Duration::from_millis(200),
             );
-            let key = TcpFlowKey::from_packet(&ipv4_tcp_packet(client, server, 0x18, 64, 701, &[]))
-                .unwrap()
-                .wire_key();
-            (sessions, key, start)
+            let probe = sessions.tcp_stall_candidates().pop().unwrap();
+            (sessions, probe, start)
         }
         fn step(
             name: &str,
             sessions: &mut TcpSessions,
-            key: &[u8; KEY_LEN],
+            key: &super::R2oTcpStallProbe,
             now: Instant,
             info: R2oConntrackInfo,
             suspicions: &mut u64,
