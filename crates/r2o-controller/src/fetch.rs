@@ -3130,7 +3130,7 @@ const R2O_GATEWAY_BUFFER: usize = 4096;
 /// Голосовой шлюз Discord использует отдельный WebSocket на RTC-порту.
 pub fn r2o_is_discord_voice_websocket(name: &str, port: u16) -> bool {
     const SUFFIX: &[u8] = b".discord.media";
-    matches!(port, 2048..=2053)
+    matches!(port, 2048..=2053 | 2096)
         && name.len() > SUFFIX.len()
         && name.as_bytes()[name.len() - SUFFIX.len()..].eq_ignore_ascii_case(SUFFIX)
 }
@@ -7295,6 +7295,8 @@ mod tests {
         let name = "voice.discord.media";
         assert!(r2o_is_discord_voice_websocket("Voice.Discord.Media", 2053));
         assert!(r2o_is_discord_voice_websocket(name, 2048));
+        assert!(r2o_is_discord_voice_websocket(name, 2096));
+        assert!(!r2o_is_discord_voice_websocket("example.test", 2096));
         assert!(!r2o_is_discord_voice_websocket(name, 443));
         assert!(!r2o_is_discord_voice_websocket("notdiscord.media", 2053));
         assert!(!r2o_is_discord_voice_websocket("discord.media", 2053));
