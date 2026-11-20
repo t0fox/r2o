@@ -1064,15 +1064,17 @@ pub fn has_covering_binding(catalog: &Catalog, target: &DiscoveryTarget) -> bool
 }
 
 /// C `binding_covering` (`sched.c:8192-8218`): форма и TCP-профиль берутся
-/// из самого SUSPECT-события, а не из сохранённого HELLO цели. Датапат шлёт
-/// в `client_shape` базовую форму, поэтому профиль метки времени (TS/NO_TS)
-/// не должен скрывать уже подтверждённую привязку.
+/// из самого SUSPECT-события. Каталог R2O может хранить TCP-профиль
+/// в отдельном поле или внутри контекстной формы 8–13.
 pub fn has_covering_binding_for_shape(
     catalog: &Catalog,
     target: &DiscoveryTarget,
     shape: u8,
     tcp_profile: u8,
 ) -> bool {
+    use r2k_core::control::{r2k_link_shape_tcp_base, r2k_link_shape_tcp_profile};
+
+    let shape = r2k_link_shape_tcp_base(shape);
     catalog.boxes.iter().any(|box_record| {
         box_record.bindings.iter().any(|binding| {
             let family = if binding.family == 0 {
@@ -1085,6 +1087,11 @@ pub fn has_covering_binding_for_shape(
             } else {
                 binding.transport
             };
+            let binding_shape = r2k_link_shape_tcp_base(binding.shape);
+            let binding_profile = match r2k_link_shape_tcp_profile(binding.shape) {
+                0 => binding.tcp_profile,
+                profile => profile,
+            };
             binding.enabled
                 && binding.level >= 3
                 && binding.recheck_since.is_none()
@@ -1092,11 +1099,11 @@ pub fn has_covering_binding_for_shape(
                 && binding.target == target.host
                 && family == target.family
                 && transport == 6
-                && binding.tcp_profile == tcp_profile
-                && (binding.shape == 0
-                    || binding.shape == shape
-                    || binding.shape == SHAPE_MODERN && is_ech_shape(shape)
-                    || is_ech_shape(binding.shape) && is_ech_shape(shape))
+                && binding_profile == tcp_profile
+                && (binding.tcp_profile == 0 || binding.tcp_profile == tcp_profile)
+                && (binding_shape == 0
+                    || binding_shape == shape
+                    || binding_shape == SHAPE_MODERN && shape == SHAPE_ECH_TCP)
         })
     })
 }
@@ -2671,6 +2678,49 @@ mod tests {
             SHAPE_MODERN,
             r2k_core::control::TCP_PROFILE_UNKNOWN
         ));
+    }
+
+    #[test]
+    fn сохранённый_tcp_контекст_покрывает_базовую_форму_того_же_профиля() {
+        use crate::catalog::{Binding, BoxRecord, Catalog};
+        use r2k_core::control::{SHAPE_MODERN_TS, TCP_PROFILE_NO_TS, TCP_PROFILE_TS};
+
+        let mut target = DiscoveryTarget {
+            tcp_profile: TCP_PROFILE_TS,
+            host: "example.com".into(),
+            endpoint: "198.51.100.80:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        for stored_profile in [0, TCP_PROFILE_TS] {
+            let catalog = Catalog {
+                boxes: vec![BoxRecord {
+                    bindings: vec![Binding {
+                        kind: "name".into(),
+                        target: target.host.clone(),
+                        level: 3,
+                        enabled: true,
+                        transport: 6,
+                        family: 4,
+                        shape: SHAPE_MODERN_TS,
+                        tcp_profile: stored_profile,
+                        ..Binding::default()
+                    }],
+                    ..BoxRecord::default()
+                }],
+                ..Catalog::default()
+            };
+            assert!(super::has_covering_binding(&catalog, &target));
+            assert!(!super::has_covering_binding_for_shape(
+                &catalog,
+                &target,
+                SHAPE_MODERN,
+                TCP_PROFILE_NO_TS,
+            ));
+            target.shape = SHAPE_ECH_TCP;
+            assert!(super::has_covering_binding(&catalog, &target));
+            target.shape = SHAPE_MODERN;
+        }
     }
 
     #[test]
