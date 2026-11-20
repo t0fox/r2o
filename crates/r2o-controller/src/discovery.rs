@@ -1,8 +1,8 @@
 //! Разбор событий и постоянное хранение измеренных результатов TCP-поиска.
 
 use r2k_core::control::{
-    HelloEvent, HttpPortalEvent, HttpResponseEvent, SHAPE_ECH_TCP, SHAPE_GRANDFATHER, SHAPE_HTTP,
-    SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC,
+    HelloEvent, HttpPortalEvent, HttpResponseEvent, SHAPE_ECH_NO_TS, SHAPE_ECH_TCP, SHAPE_ECH_TS,
+    SHAPE_GRANDFATHER, SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC,
 };
 use r2k_core::plan::Plan as RuntimePlan;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -23,9 +23,14 @@ pub struct DiscoveryTarget {
     pub tcp_profile: u8,
 }
 
+/// ECH-форма в любом TCP-контексте: базовая 6 и измеренные 10/13.
+pub const fn is_ech_shape(shape: u8) -> bool {
+    matches!(shape, SHAPE_ECH_TCP | SHAPE_ECH_NO_TS | SHAPE_ECH_TS)
+}
+
 /// Перевести неподтверждённый ECH offer на обычный TLS-путь GREASE.
 pub fn regrade_ech_grease(target: &mut DiscoveryTarget) -> bool {
-    if target.shape != SHAPE_ECH_TCP {
+    if !is_ech_shape(target.shape) {
         return false;
     }
     target.shape = SHAPE_MODERN;
@@ -187,10 +192,15 @@ pub fn own_first_plans(
     const BATCH: usize = 8;
     const SEEN_CAP: usize = 256;
 
-    if target.shape == SHAPE_ECH_TCP && !ech_replay
+    if is_ech_shape(target.shape) && !ech_replay
         || !matches!(
             target.shape,
-            SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP | SHAPE_QUIC
+            SHAPE_MODERN
+                | SHAPE_LEGACY
+                | SHAPE_ECH_TCP
+                | SHAPE_ECH_NO_TS
+                | SHAPE_ECH_TS
+                | SHAPE_QUIC
         )
         || seen.len() >= SEEN_CAP
     {
@@ -238,7 +248,7 @@ pub fn own_first_plans(
                     binding.shape == SHAPE_QUIC && binding.ech_origin.is_empty()
                 } else if ech_replay {
                     binding.shape == want && binding.ech_origin.is_empty()
-                        || binding.shape == SHAPE_ECH_TCP
+                        || is_ech_shape(binding.shape)
                 } else {
                     (binding.shape == want || Some(binding.shape) == cross)
                         && binding.ech_origin.is_empty()
@@ -624,7 +634,10 @@ impl DiscoveryTarget {
             return None;
         }
         let shape = event.shape?;
-        if !matches!(shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP) {
+        if !matches!(
+            shape,
+            SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP | SHAPE_ECH_NO_TS | SHAPE_ECH_TS
+        ) {
             return None;
         }
         let host = String::from_utf8(event.host.clone()?).ok()?;
@@ -750,7 +763,7 @@ pub fn r2o_ech_witness_candidates(
     target: &DiscoveryTarget,
     recent_names: &[(String, bool)],
 ) -> Vec<String> {
-    if target.shape != SHAPE_ECH_TCP {
+    if !is_ech_shape(target.shape) {
         return Vec::new();
     }
 
@@ -1082,7 +1095,8 @@ pub fn has_covering_binding_for_shape(
                 && binding.tcp_profile == tcp_profile
                 && (binding.shape == 0
                     || binding.shape == shape
-                    || binding.shape == SHAPE_MODERN && shape == SHAPE_ECH_TCP)
+                    || binding.shape == SHAPE_MODERN && is_ech_shape(shape)
+                    || is_ech_shape(binding.shape) && is_ech_shape(shape))
         })
     })
 }
@@ -1128,7 +1142,9 @@ fn has_usable_binding_with_input(
                 || binding.target != target.host
                 || !(binding.family == target.family || binding.family == 0 && target.family == 4)
                 || !(binding.transport == 6 || binding.transport == 0)
-                || !(binding.shape == target.shape || binding.shape == 0)
+                || !(binding.shape == 0
+                    || binding.shape == target.shape
+                    || is_ech_shape(binding.shape) && is_ech_shape(target.shape))
                 || input.is_some_and(|expected| binding.input != expected)
             {
                 return false;
@@ -1222,7 +1238,12 @@ pub fn update_direct_clear_bindings(
         || !matches!(target.family, 4 | 6)
         || !matches!(
             target.shape,
-            SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP | SHAPE_QUIC
+            SHAPE_MODERN
+                | SHAPE_LEGACY
+                | SHAPE_ECH_TCP
+                | SHAPE_ECH_NO_TS
+                | SHAPE_ECH_TS
+                | SHAPE_QUIC
         )
     {
         return update;

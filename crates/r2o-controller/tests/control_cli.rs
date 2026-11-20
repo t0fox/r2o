@@ -597,8 +597,10 @@ fn serve_discover_remembers_hello_without_starting_a_search() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(!stdout.contains("поставлен в очередь классификации"));
     assert!(stdout.contains("форма=TLS 1.3"));
+    // После появления быстрого кандидата от соседнего узла молчание сначала
+    // проверяет совместимый план, а не сразу ставит имя в очередь.
     assert!(stdout.contains(
-        "молчание TCP без чистого рукопожатия поставило example.com в очередь классификации"
+        "молчание TCP: для example.com сначала проверяется план совместимого узла семейства"
     ));
     let _ = fs::remove_dir_all(&work);
 }

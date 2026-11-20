@@ -11,20 +11,21 @@ use r2k_core::control::{
     EVENT_R2O_TCP_FIN_RETRY, EVENT_R2O_TCP_REPEAT, EVENT_R2O_TCP_RST_AFTER_APP,
     EVENT_R2O_TCP_RST_CUT, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_PROOF,
     EVENT_R2O_VOICE_RTP_PROOF, EVENT_R2O_VOICE_STUN_PROOF, EVENT_R2O_VOICE_SUSPECT, EVENT_REFUSED,
-    Frame, HelloEvent, PROTOCOL_VERSION, RELEASE_ID, SHAPE_ECH_TCP, SHAPE_GRANDFATHER, SHAPE_HTTP,
-    SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, VOICE_ADDR_PROBE_LEASE_MAX_MS, decode_ack,
-    decode_applied, decode_client_shape, decode_greeting, decode_hello, decode_http_portal,
-    decode_http_response, decode_legacy_client_tcp, decode_legacy_exchange, decode_legacy_shape,
-    decode_legacy_suspect, decode_r2o_quic_stall, decode_r2o_quic_suspect,
-    decode_r2o_tcp_clean_handshake, decode_r2o_tcp_early_rst, decode_r2o_tcp_exchange,
-    decode_r2o_tcp_fin_retry, decode_r2o_tcp_repeat, decode_r2o_tcp_rst_after_app,
-    decode_r2o_tcp_rst_cut_signal, decode_r2o_tcp_silence, decode_r2o_tcp_stall,
-    decode_r2o_voice_proof, decode_r2o_voice_suspect, decode_refused, encode_arm_shape,
-    encode_delete_addr, encode_delete_addr_probe, encode_delete_name, encode_delete_name_bound,
-    encode_delete_name_probe, encode_delete_voice_addr_probe, encode_set_addr,
-    encode_set_addr_probe, encode_set_bypass, encode_set_https, encode_set_name,
-    encode_set_name_bound, encode_set_name_family, encode_set_name_probe, encode_set_suffix,
-    encode_set_tcp_stall_budgets, encode_set_voice_addr, encode_set_voice_addr_probe, read_frame,
+    Frame, HelloEvent, PROTOCOL_VERSION, RELEASE_ID, SHAPE_ECH_NO_TS, SHAPE_ECH_TCP, SHAPE_ECH_TS,
+    SHAPE_GRANDFATHER, SHAPE_HTTP, SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE,
+    VOICE_ADDR_PROBE_LEASE_MAX_MS, decode_ack, decode_applied, decode_client_shape,
+    decode_greeting, decode_hello, decode_http_portal, decode_http_response,
+    decode_legacy_client_tcp, decode_legacy_exchange, decode_legacy_shape, decode_legacy_suspect,
+    decode_r2o_quic_stall, decode_r2o_quic_suspect, decode_r2o_tcp_clean_handshake,
+    decode_r2o_tcp_early_rst, decode_r2o_tcp_exchange, decode_r2o_tcp_fin_retry,
+    decode_r2o_tcp_repeat, decode_r2o_tcp_rst_after_app, decode_r2o_tcp_rst_cut_signal,
+    decode_r2o_tcp_silence, decode_r2o_tcp_stall, decode_r2o_voice_proof, decode_r2o_voice_suspect,
+    decode_refused, encode_arm_shape, encode_delete_addr, encode_delete_addr_probe,
+    encode_delete_name, encode_delete_name_bound, encode_delete_name_probe,
+    encode_delete_voice_addr_probe, encode_set_addr, encode_set_addr_probe, encode_set_bypass,
+    encode_set_https, encode_set_name, encode_set_name_bound, encode_set_name_family,
+    encode_set_name_probe, encode_set_suffix, encode_set_tcp_stall_budgets, encode_set_voice_addr,
+    encode_set_voice_addr_probe, read_frame,
 };
 use r2k_core::plan::{PROTO_HTTP, PROTO_VOICE, Plan};
 use r2o_controller::ask::{
@@ -2004,12 +2005,18 @@ fn normalize_plan_target(target: &str, shape: u8) -> Result<String, String> {
     }
 }
 
+/// ECH-форма в любом TCP-контексте: базовая 6 и измеренные 8–13.
+/// События браузера часто несут контекст `SHAPE_ECH_NO_TS`/`SHAPE_ECH_TS`,
+/// а не базовую 6; проверки не должны терять ECH из-за одного этого отличия.
+fn r2o_is_ech_shape(shape: u8) -> bool {
+    matches!(shape, SHAPE_ECH_TCP | SHAPE_ECH_NO_TS | SHAPE_ECH_TS)
+}
+
 fn shape_matches_plan(shape: u8, plan: &Plan) -> bool {
     match shape {
         SHAPE_HTTP => plan.transport == 6 && plan.proto == PROTO_HTTP,
-        SHAPE_MODERN | SHAPE_LEGACY | SHAPE_GRANDFATHER | SHAPE_ECH_TCP => {
-            plan.transport == 6 && plan.proto == 1
-        }
+        SHAPE_MODERN | SHAPE_LEGACY | SHAPE_GRANDFATHER => plan.transport == 6 && plan.proto == 1,
+        shape if r2o_is_ech_shape(shape) => plan.transport == 6 && plan.proto == 1,
         SHAPE_QUIC => plan.r2k_is_quic_address_plan(),
         SHAPE_VOICE => plan.transport == 17 && plan.proto == PROTO_VOICE,
         _ => false,
@@ -2018,9 +2025,8 @@ fn shape_matches_plan(shape: u8, plan: &Plan) -> bool {
 
 fn binding_shape_transport(shape: u8, transport: u8) -> bool {
     match shape {
-        SHAPE_HTTP | SHAPE_MODERN | SHAPE_LEGACY | SHAPE_GRANDFATHER | SHAPE_ECH_TCP => {
-            transport == 6
-        }
+        SHAPE_HTTP | SHAPE_MODERN | SHAPE_LEGACY | SHAPE_GRANDFATHER => transport == 6,
+        shape if r2o_is_ech_shape(shape) => transport == 6,
         SHAPE_QUIC | SHAPE_VOICE => transport == 17,
         _ => false,
     }
@@ -3966,7 +3972,10 @@ fn r2o_catalog_binding_family(binding: &Binding) -> u8 {
 fn r2o_catalog_addr_binding_shape(binding: &Binding) -> u8 {
     match binding.shape {
         SHAPE_QUIC | SHAPE_VOICE if binding.transport == 17 => binding.shape,
-        SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP if matches!(binding.transport, 0 | 6) => {
+        shape
+            if (matches!(shape, SHAPE_MODERN | SHAPE_LEGACY) || r2o_is_ech_shape(shape))
+                && matches!(binding.transport, 0 | 6) =>
+        {
             binding.shape
         }
         0 if binding.transport == 17 && binding.verified_by == R2O_D2K_VERBY_STUN => SHAPE_VOICE,
@@ -4505,7 +4514,12 @@ fn has_confirmed_exact_binding(catalog: &Catalog, observation: &DomainObservatio
 #[cfg(unix)]
 fn group_shape_fits(saved: u8, observed: u8) -> bool {
     // C `d2k_cat_shape_fits`: ноль — «не измерено»; иначе только равенство.
-    saved == 0 || observed == 0 || saved == observed
+    // ECH-контексты 6/10/13 описывают одну и ту же базовую форму: различие
+    // лишь в наличии TCP timestamp, который уже учтён в `tcp_profile`.
+    saved == 0
+        || observed == 0
+        || saved == observed
+        || (r2o_is_ech_shape(saved) && r2o_is_ech_shape(observed))
 }
 
 #[cfg(unix)]
@@ -4552,7 +4566,7 @@ fn r2o_target_confirmed_probe_path(
         return None;
     }
     let (transport, shape) = match target.shape {
-        SHAPE_ECH_TCP => (6, SHAPE_MODERN),
+        shape if r2o_is_ech_shape(shape) => (6, SHAPE_MODERN),
         SHAPE_QUIC => (17, SHAPE_QUIC),
         shape => (6, shape),
     };
@@ -5177,7 +5191,7 @@ fn r2o_discovery_candidate_wire_len(
         .map(<[u8]>::len)
         .or_else(|| r2o_discovery_volume_wire_len(target, None))
         .or_else(|| {
-            if target.shape != SHAPE_ECH_TCP {
+            if !r2o_is_ech_shape(target.shape) {
                 return None;
             }
             let config = ech_config?;
@@ -5343,7 +5357,7 @@ fn matching_domain_group<'a>(
     let key = GroupKey {
         transport,
         family: target.family,
-        shape: if target.shape == SHAPE_ECH_TCP {
+        shape: if r2o_is_ech_shape(target.shape) {
             SHAPE_MODERN
         } else {
             target.shape
@@ -5606,6 +5620,22 @@ fn matching_saved_bootstrap_candidates(
 /// план, уже подтверждённый на соседнем узле того же суффикса. Возвращается
 /// только для голосового суффикса и только после сигнала молчания TCP, чтобы
 /// не вмешиваться в заведомо рабочие соединения.
+/// Один бренд в разных TLD: `discord.com` и `discord.gg` дают `discord`.
+/// План DPI-обхода привязан к форме ClientHello, а не к конкретному TLD,
+/// поэтому подтверждённый план бренда можно проверить на соседнем домене.
+#[cfg(unix)]
+fn r2o_same_service_brand(left: &str, right: &str) -> bool {
+    let Some(left) = r2o_controller::domain::registrable_domain(left) else {
+        return false;
+    };
+    let Some(right) = r2o_controller::domain::registrable_domain(right) else {
+        return false;
+    };
+    let left = left.split('.').next().unwrap_or("");
+    let right = right.split('.').next().unwrap_or("");
+    !left.is_empty() && left == right
+}
+
 #[cfg(unix)]
 fn matching_sibling_recovery_candidates(
     catalog: &Catalog,
@@ -5619,6 +5649,33 @@ fn matching_sibling_recovery_candidates(
     let suffix = r2o_controller::domain::registrable_domain(&target.host);
     let voice_suffix = suffix.as_deref() == Some("discord.media");
     let mut candidates = Vec::new();
+    // Для обычного TLS первыми пробуем проверенные generic-планы
+    // pad64+seqovl с разными длинами вставки: измеренный путь выбирает
+    // 77/114/172 в зависимости от цели, поэтому ждать полного перебора
+    // незачем. Каждый кандидат подтверждается end-to-end.
+    if matches!(target.shape, SHAPE_MODERN | SHAPE_LEGACY)
+        && !voice_suffix
+        && !target.host.contains("discord")
+    {
+        for (index, text) in
+            r2o_controller::r2o_fallback::r2o_pad64_seeds(r2o_discovery_plan_shape(target.shape), 0)
+                .into_iter()
+                .enumerate()
+        {
+            let plan_id = [0x77_u8.saturating_sub(index as u8); 16];
+            if let Ok(text) = r2o_controller::discovery::plan_text_for_trial(&text, plan_id) {
+                candidates.push(R2oFamilyRecoveryCandidate {
+                    plan_id,
+                    plan_text: text,
+                    group_plan: false,
+                    probe_path: "/".into(),
+                });
+            }
+            if candidates.len() == MAX_CANDIDATES {
+                break;
+            }
+        }
+    }
     for box_record in &catalog.boxes {
         for binding in &box_record.bindings {
             if !binding.enabled
@@ -5639,10 +5696,20 @@ fn matching_sibling_recovery_candidates(
                     continue;
                 }
             } else {
-                // Соседний узел — только для эфемерных голосовых имён.
-                if !voice_suffix
-                    || r2o_controller::domain::registrable_domain(&name).as_deref()
-                        != suffix.as_deref()
+                // Соседний узел берём только в той же регистрируемой зоне:
+                // для обычных имён это ускоряет повторное использование уже
+                // подтверждённого плана (например, accounts.youtube.com →
+                // www.youtube.com), а для эфемерных Discord-узлов остаётся
+                // единственным способом не ждать новой классификации.
+                let same_registrable = suffix.is_some()
+                    && r2o_controller::domain::registrable_domain(&name).as_deref()
+                        == suffix.as_deref();
+                // Холодный каталог: план, подтверждённый на discord.com,
+                // должен пробоваться для gateway.discord.gg, хотя это
+                // разные регистрируемые зоны. Сравниваем первый ярлык
+                // зоны (brand): discord.com/discord.gg -> discord.
+                let same_brand = r2o_same_service_brand(&name, &target.host);
+                if !(voice_suffix || same_registrable || same_brand)
                     || (binding.shape != 0 && !group_shape_fits(binding.shape, target.shape))
                 {
                     continue;
@@ -8504,7 +8571,7 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
                 client_hello.and_then(r2o_controller::r2o_tls::r2o_tls_client_hello_non_http_alpn)
             })
             .flatten();
-        let ech_snapshot_replay = (target.shape == SHAPE_ECH_TCP && ech.is_none())
+        let ech_snapshot_replay = (r2o_is_ech_shape(target.shape) && ech.is_none())
             .then_some(client_hello)
             .flatten();
         let fetch_result = match connected {
@@ -9045,7 +9112,7 @@ fn r2o_run_discovery_candidate_trial_with_progress(
         );
     }
     let ech_snapshot_is_trial_proof =
-        target.shape == SHAPE_ECH_TCP && ech_config.is_none() && client_hello.is_some();
+        r2o_is_ech_shape(target.shape) && ech_config.is_none() && client_hello.is_some();
     let proof_probe_reserve = usize::from(client_hello.is_some() && !ech_snapshot_is_trial_proof);
     let Some(max_retries) = r2o_discovery_candidate_retry_count(
         probe_budget_remaining.saturating_sub(proof_probe_reserve),
@@ -9090,7 +9157,7 @@ fn r2o_run_discovery_candidate_trial_with_progress(
         group_plan: false,
         probe_path: probe_path.into(),
     };
-    if target.shape == SHAPE_ECH_TCP && ech_config.is_none() && client_hello.is_none() {
+    if r2o_is_ech_shape(target.shape) && ech_config.is_none() && client_hello.is_none() {
         return (
             Err("кандидат ECH нельзя подтвердить без совместимой TLS-конфигурации".into()),
             false,
@@ -9542,7 +9609,7 @@ fn r2o_discovery_owned_fallback_needed(
 fn r2o_discovery_plan_shape(shape: u8) -> u8 {
     // C `question_shape`: ECH-приветствие даёт MODERN, неизвестная форма —
     // GRANDFATHER, иначе форма как есть (QUIC остаётся QUIC).
-    if shape == SHAPE_ECH_TCP {
+    if r2o_is_ech_shape(shape) {
         SHAPE_MODERN
     } else if shape == 0 {
         SHAPE_GRANDFATHER
@@ -9558,10 +9625,10 @@ fn r2o_cached_shape_fits(transport: u8, shape: u8, want: u8) -> bool {
     if transport != 6 {
         return true;
     }
-    if !matches!(want, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP) {
+    if !matches!(want, SHAPE_MODERN | SHAPE_LEGACY) && !r2o_is_ech_shape(want) {
         return true;
     }
-    shape == 0 || shape == want
+    shape == 0 || group_shape_fits(shape, want)
 }
 
 #[cfg(unix)]
@@ -14655,7 +14722,7 @@ fn r2o_handle_client_shape_event_with_catalog(
     if !worker.remember_client_snapshot(&target, &shape.client_hello, shape.tcp_has_timestamp) {
         return None;
     }
-    if shape.shape == SHAPE_ECH_TCP {
+    if r2o_is_ech_shape(shape.shape) {
         r2o_ech_input_note(
             &target.host,
             target.family,
@@ -15816,7 +15883,7 @@ impl DiscoveryWorker {
             let mut target = target;
             let prepare_ech = |target: &mut r2o_controller::discovery::DiscoveryTarget,
                                has_client_hello: bool| {
-                let discovered_witness_candidates = if target.shape == SHAPE_ECH_TCP {
+                let discovered_witness_candidates = if r2o_is_ech_shape(target.shape) {
                     candidate_catalog
                         .as_ref()
                         .map(|catalog| {
@@ -15835,7 +15902,7 @@ impl DiscoveryWorker {
                     Vec::new()
                 };
                 let now = std::time::Instant::now();
-                let cached_witness_candidates = if target.shape == SHAPE_ECH_TCP {
+                let cached_witness_candidates = if r2o_is_ech_shape(target.shape) {
                     runner_ech_witness_resolutions
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -15961,11 +16028,7 @@ impl DiscoveryWorker {
                         r2o_controller::discovery::own_first_bound_plan_id(
                             catalog,
                             &target,
-                            if ech_replay {
-                                SHAPE_ECH_TCP
-                            } else {
-                                target.shape
-                            },
+                            target.shape,
                         )
                     })
                 })
@@ -16669,14 +16732,19 @@ group_block_proven: false,
             if outcome.plan_text.is_none()
                 && r2o_discovery_trial_time_available(runner_started.elapsed())
             {
+                let plan_shape = r2o_discovery_plan_shape(target.shape);
+                let send_cap = runner_send_cap.load(Ordering::Relaxed);
                 let mut queue =
                     r2o_controller::r2o_fallback::FallbackQueue::new_owned_search_with_tried(
                         &discovery_tried,
                     );
-                if let Some(candidate) = queue.next(
-                    r2o_discovery_plan_shape(target.shape),
-                    runner_send_cap.load(Ordering::Relaxed),
-                ) {
+                // Сначала проверенный generic-кандидат pad64+seqovl: он
+                // закрывает SNI-блокировку без полного перебора d2o.
+                let seed = r2o_controller::r2o_fallback::r2o_pad64_seed(plan_shape, send_cap)
+                    .filter(|text| {
+                        !discovery_tried.contains(&r2o_controller::r2o_fallback::tried_key(text))
+                    });
+                if let Some(candidate) = seed.or_else(|| queue.next(plan_shape, send_cap)) {
                     outcome.plan_text = Some(candidate);
                     primary_from_owned_fallback = true;
                     owned_fallback_queue = Some(queue);
@@ -17397,7 +17465,7 @@ group_block_proven: false,
                     || fetch.http_outcome == r2o_controller::fetch::R2oFetchHttpOutcome::LegalDenial
             });
             let ech_witness_exhausted = !rejected_witnesses.is_empty()
-                && target.shape == SHAPE_ECH_TCP
+                && r2o_is_ech_shape(target.shape)
                 && !ech_replay
                 && result.as_ref().is_ok_and(|fetch| {
                     r2o_ech_witness_transport_proof(&target, &selected_config, fetch)
@@ -17437,7 +17505,7 @@ group_block_proven: false,
                     selected_config.origin_name
                 ));
             }
-            if target.shape == SHAPE_ECH_TCP
+            if r2o_is_ech_shape(target.shape)
                 && outcome.plan_text.is_some()
                 && !selected_config.origin_name.is_empty()
                 && selected_config.origin_name != target.host
@@ -19014,7 +19082,7 @@ group_block_proven: false,
             .map(|(shape, snapshot, timestamp)| (shape, snapshot.to_vec(), timestamp));
         // C `fill_hellos`: сначала ech_inputs[8] по имени/семейству (reuse
         // 10 мин), затем общий tcp_shape. Кеш снимков относится к TCP.
-        let ech_input = (r2o_discovery_transport(&target) == 6 && target.shape == SHAPE_ECH_TCP)
+        let ech_input = (r2o_discovery_transport(&target) == 6 && r2o_is_ech_shape(target.shape))
             .then(|| r2o_ech_input_find(&target.host, target.family, now))
             .flatten();
         let cached_client_hello = ech_input
@@ -19314,17 +19382,16 @@ group_block_proven: false,
         if !self.remember_client_snapshot(&target, &client_hello, tcp_has_timestamp) {
             return false;
         }
-        if target.shape == SHAPE_ECH_TCP && self.r2o_record_ech_input(&target) {
+        if r2o_is_ech_shape(target.shape) && self.r2o_record_ech_input(&target) {
             self.r2o_clear_ech_profile_failures(&target.host, target.family);
         }
         let task_key = r2o_discovery_task_key(&target);
         // C сохраняет параметры текущего опыта при новом наблюдении.
         if self.active.get(&task_key).is_some_and(|active_target| {
             active_target.endpoint != target.endpoint
-                || (matches!(
-                    active_target.shape,
-                    SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP
-                ) && active_target.shape != target.shape)
+                || ((matches!(active_target.shape, SHAPE_MODERN | SHAPE_LEGACY)
+                    || r2o_is_ech_shape(active_target.shape))
+                    && !group_shape_fits(active_target.shape, target.shape))
         }) {
             return false;
         }
@@ -19445,8 +19512,9 @@ group_block_proven: false,
         } else {
             SHAPE_LEGACY
         };
-        if !matches!(target.shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP)
-            || observed_shape != target.shape
+        if !matches!(target.shape, SHAPE_MODERN | SHAPE_LEGACY) && !r2o_is_ech_shape(target.shape)
+            || r2k_core::control::r2k_link_shape_tcp_base(observed_shape)
+                != r2k_core::control::r2k_link_shape_tcp_base(target.shape)
             || Trigger::tls_client_hello(&target.host, client_hello).is_err()
         {
             return false;
@@ -19960,7 +20028,7 @@ group_block_proven: false,
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains(&task_key)
             || work.requested_target != outcome.target
-                && work.requested_target.shape == SHAPE_ECH_TCP
+                && r2o_is_ech_shape(work.requested_target.shape)
                 && outcome.target.shape == SHAPE_MODERN
         {
             return false;
@@ -19984,10 +20052,10 @@ group_block_proven: false,
         else {
             return false;
         };
-        if matches!(
+        if (matches!(
             work.requested_target.shape,
-            SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP
-        ) && latest_shape != work.requested_target.shape
+            SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP | SHAPE_ECH_NO_TS | SHAPE_ECH_TS
+        )) && latest_shape != work.requested_target.shape
         {
             return false;
         }
@@ -20232,7 +20300,7 @@ group_block_proven: false,
         let ech_input_clearable = !outcome.queue_expired
             && outcome.plan_text.is_none()
             && !outcome.direct_clear
-            && outcome.target.shape != SHAPE_ECH_TCP
+            && !r2o_is_ech_shape(outcome.target.shape)
             && outcome.retry_after == Some(R2O_DISCOVERY_INCOMPLETE_RETRY);
         self.ech_input_clearable_failures.remove(&failure_key);
         if ech_input_clearable {
@@ -20576,7 +20644,7 @@ fn r2o_discovery_ech_config(
     target: &r2o_controller::discovery::DiscoveryTarget,
     mark: Option<u32>,
 ) -> Result<Option<r2o_controller::ech::R2oEchConfig>, String> {
-    if target.shape != SHAPE_ECH_TCP {
+    if !r2o_is_ech_shape(target.shape) {
         return Ok(None);
     }
     let config = r2o_controller::ech::resolve_ech_config(&target.host, mark)?;
@@ -20599,7 +20667,7 @@ fn r2o_discovery_refresh_ech_probe_config(
     let Some(current) = current else {
         return Ok(None);
     };
-    if target.shape != SHAPE_ECH_TCP {
+    if !r2o_is_ech_shape(target.shape) {
         return Ok(Some(current.clone()));
     }
     let config = resolve(&current.origin_name, mark)?;
@@ -20619,7 +20687,7 @@ fn r2o_discovery_ech_witness_config(
     mark: Option<u32>,
     cache: &std::sync::Mutex<R2oEchWitnessResolutionCache>,
 ) -> Result<Option<r2o_controller::ech::R2oEchConfig>, String> {
-    if target.shape != SHAPE_ECH_TCP || witness == target.host {
+    if !r2o_is_ech_shape(target.shape) || witness == target.host {
         return Ok(None);
     }
     let result = r2o_controller::ech::resolve_ech_config(witness, mark);
@@ -20700,7 +20768,7 @@ fn r2o_ech_witness_transport_proof(
     config: &r2o_controller::ech::R2oEchConfig,
     fetch: &r2o_controller::fetch::FetchResult,
 ) -> bool {
-    target.shape == SHAPE_ECH_TCP
+    r2o_is_ech_shape(target.shape)
         && config.origin_name != target.host
         && fetch.tls.is_some()
         && fetch.ech_accepted == Some(true)
@@ -20724,7 +20792,7 @@ fn r2o_ech_witness_rx_cut(
     replay: bool,
     fetch: &r2o_controller::fetch::FetchResult,
 ) -> bool {
-    target.shape == SHAPE_ECH_TCP
+    r2o_is_ech_shape(target.shape)
         && ech_accepted
         && !replay
         && !config.origin_name.is_empty()
@@ -21560,7 +21628,7 @@ fn r2o_discovery_ech_replay_required(
     ech_configuration_available: bool,
     captured_client_hello: bool,
 ) -> bool {
-    target.shape == SHAPE_ECH_TCP && (ech_configuration_available || captured_client_hello)
+    r2o_is_ech_shape(target.shape) && (ech_configuration_available || captured_client_hello)
 }
 
 #[cfg(unix)]
@@ -21574,7 +21642,7 @@ fn r2o_discovery_client_alpn_verification_allowed(
     // C client_alpn_nonhttp: рукопожатие доказывает план только там, где
     // клиент говорил не по HTTP. Браузерный ALPN h2/http/1.1 требует полного
     // HTTP-ответа; иначе обрыв после нескольких КиБ принимался за успех.
-    target.shape == SHAPE_MODERN
+    (target.shape == SHAPE_MODERN || r2o_is_ech_shape(target.shape))
         && probe_path == "/"
         && handshake_blocked
         && !volume_cut
@@ -21595,7 +21663,7 @@ fn r2o_discovery_trigger(
     match target.shape {
         SHAPE_MODERN => Trigger::tls13(&target.host).map_err(str::to_owned),
         SHAPE_LEGACY => Trigger::tls(&target.host).map_err(str::to_owned),
-        SHAPE_ECH_TCP => match ech_config {
+        shape if r2o_is_ech_shape(shape) => match ech_config {
             Some(config) => {
                 let origin_name = config.origin_name.clone();
                 r2o_controller::ech::r2o_ech_tls_config(config)
@@ -22411,8 +22479,8 @@ fn r2o_exclude_failed_group_with_policy(
                         && (binding.transport == 0 || binding.transport == 6)
                         && (binding.family == 0 || binding.family == target.family)
                         && (binding.shape == 0
-                            || binding.shape == target.shape
-                            || binding.shape == SHAPE_MODERN && target.shape == SHAPE_ECH_TCP)
+                            || group_shape_fits(binding.shape, target.shape)
+                            || binding.shape == SHAPE_MODERN && r2o_is_ech_shape(target.shape))
                 })?;
                 box_record
                     .plans
@@ -23921,14 +23989,10 @@ impl ControlClient {
                                     .err()
                                     .map(String::as_str)
                                     .unwrap_or("HTTPS/APPLIED не прошли проверку"),
-                                if bootstrap {
-                                    if queued {
-                                        "запускаю полный classifier"
-                                    } else {
-                                        "полный classifier уже выполняется или очередь занята"
-                                    }
+                                if queued {
+                                    "запускаю полный classifier"
                                 } else {
-                                    "повтор через 120 с, полную классификацию сразу не запускаю"
+                                    "полный classifier уже выполняется или очередь занята"
                                 }
                             );
                             std::io::stdout().flush()?;
@@ -26478,7 +26542,7 @@ impl ControlClient {
                 let shape_name = hello.shape.map_or("неизвестна", |shape| match shape {
                     SHAPE_MODERN => "TLS 1.3",
                     SHAPE_LEGACY => "TLS 1.2",
-                    SHAPE_ECH_TCP => "ECH/TLS 1.3",
+                    SHAPE_ECH_TCP | SHAPE_ECH_NO_TS | SHAPE_ECH_TS => "ECH/TLS 1.3",
                     SHAPE_QUIC => "QUIC",
                     SHAPE_HTTP => "HTTP-запрос",
                     _ => "неизвестна",
@@ -27121,7 +27185,7 @@ impl ControlClient {
         let now = std::time::Instant::now();
         let target = if matches!(
             event.client_shape,
-            SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP
+            SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP | SHAPE_ECH_NO_TS | SHAPE_ECH_TS
         ) || r2k_core::control::is_tcp_context_shape(event.client_shape)
         {
             tcp_hello_names.target_for_tcp_flow_with_shape(&event.key, event.client_shape, now)
@@ -27459,7 +27523,7 @@ impl ControlClient {
         &mut self,
         target: &r2o_controller::discovery::DiscoveryTarget,
     ) -> Result<Option<r2k_core::control::ClientShapeEvent>, String> {
-        if !matches!(target.shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP) {
+        if !matches!(target.shape, SHAPE_MODERN | SHAPE_LEGACY) && !r2o_is_ech_shape(target.shape) {
             return Ok(None);
         }
         self.arm_client_shape(&target.host, target.family)
@@ -38273,9 +38337,9 @@ mod tests {
         Ack, BindingContext, COMMAND_DEL_NAME_PROBE, COMMAND_DEL_VOICE_ADDR_PROBE,
         COMMAND_SET_NAME, COMMAND_SET_NAME_BOUND, COMMAND_SET_NAME_PROBE, COMMAND_SET_VOICE_ADDR,
         EVENT_APPLIED, EVENT_R2O_TCP_SILENT, EVENT_R2O_TCP_STALL, EVENT_R2O_VOICE_SUSPECT, Frame,
-        HelloEvent, HttpResponseEvent, KEY_LEN, SHAPE_ECH_TCP, SHAPE_HTTP, SHAPE_LEGACY,
-        SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, encode_ack, encode_ack_for_trial, encode_frame,
-        encode_greeting, read_frame,
+        HelloEvent, HttpResponseEvent, KEY_LEN, SHAPE_ECH_TCP, SHAPE_ECH_TS, SHAPE_HTTP,
+        SHAPE_LEGACY, SHAPE_MODERN, SHAPE_QUIC, SHAPE_VOICE, encode_ack, encode_ack_for_trial,
+        encode_frame, encode_greeting, read_frame,
     };
     use r2k_core::plan::{PLAN_MAGIC, Plan};
     use r2o_controller::catalog::{Binding, BoxRecord, Catalog, Fingerprint, Signal};
@@ -60703,9 +60767,133 @@ group_block_proven: false,
             shape: SHAPE_MODERN,
         };
         let cross = matching_sibling_recovery_candidates(&catalog, &cross_shape);
-        assert_eq!(cross.len(), 1);
-        assert_eq!(cross[0].plan_id, [0x11; 16]);
-        assert!(!cross[0].group_plan);
+        assert!(cross.iter().any(|candidate| {
+            candidate.plan_id == [0x11; 16]
+                && candidate.plan_text.contains("split sni_middle +0")
+                && !candidate.group_plan
+        }));
+        // Перед ECH-планом идут ранние generic-кандидаты pad64+seqovl.
+        assert!(
+            cross
+                .iter()
+                .any(|candidate| candidate.plan_text.contains("payload-pad64 2 172 15"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn modern_цель_сначала_получает_pad64_seed() {
+        let catalog = Catalog::default();
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 2,
+            host: "www.youtube.com".into(),
+            endpoint: "203.0.113.1:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        let candidates = matching_sibling_recovery_candidates(&catalog, &target);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].plan_id, [0x77; 16]);
+        assert!(candidates[0].plan_text.contains("payload-pad64 2 172 15"));
+        assert!(candidates[1].plan_text.contains("payload-pad64 2 77 15"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn соседний_узел_той_же_зоны_даёт_кандидата_для_ech() {
+        let catalog = Catalog::parse(
+            br#"{"boxes":[{"id":"box-1","created":"2026-10-18T00:00:00Z","updated":"2026-10-18T00:00:00Z","plans":[{"id":"22222222222222222222222222222222","proto":"tls","text":"r2o-plan 1 11\nid 22222222222222222222222222222222\nproto tcp tls\ninput tls-sni\nsplit sni_middle +0\n","added":"2026-10-18T00:00:00Z","successes":3,"enabled":true}],"bindings":[{"kind":"name","target":"accounts.youtube.com","plan_id":"22222222222222222222222222222222","level":3,"confirmed":"2026-10-18T00:00:00Z","successes":2,"enabled":true,"transport":6,"family":4,"shape":13,"tcp_profile":2,"verified_by":1,"input":1}]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            r2o_controller::domain::registrable_domain("www.youtube.com").as_deref(),
+            Some("youtube.com")
+        );
+        assert_eq!(
+            r2o_controller::domain::registrable_domain("accounts.youtube.com").as_deref(),
+            Some("youtube.com")
+        );
+        let binding = &catalog.boxes[0].bindings[0];
+        assert_eq!(binding.shape, SHAPE_ECH_TS);
+        assert_eq!(binding.tcp_profile, 2);
+        let bytes = compile_text(&catalog.boxes[0].plans[0].text).expect("plan text compiles");
+        let plan = Plan::parse(&bytes).expect("plan parses");
+        assert!(shape_matches_plan(SHAPE_ECH_TS, &plan));
+        assert!(r2o_datapath::engine::validate_runtime_plan(&plan).is_ok());
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 2,
+            host: "www.youtube.com".into(),
+            endpoint: "203.0.113.1:443".into(),
+            family: 4,
+            shape: SHAPE_ECH_TS,
+        };
+        let candidates = matching_sibling_recovery_candidates(&catalog, &target);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].plan_id, [0x22; 16]);
+
+        let other = r2o_controller::discovery::DiscoveryTarget {
+            host: "www.example.com".into(),
+            ..target
+        };
+        assert!(matching_sibling_recovery_candidates(&catalog, &other).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn холодный_каталог_пробует_план_discord_com_для_gateway_discord_gg() {
+        let catalog = Catalog::parse(
+            br#"{"boxes":[{"id":"box-1","created":"2026-10-18T00:00:00Z","updated":"2026-10-18T00:00:00Z","plans":[{"id":"44444444444444444444444444444444","proto":"tls","text":"r2o-plan 1 5\nid 44444444444444444444444444444444\nproto tcp tls\nwire detect-tcp-v1\ninput tls-sni\nsegment 1400\npayload-pad64 2 114 15\nseqovl payload=2 poison=0\norder forward\n","added":"2026-10-18T00:00:00Z","successes":3,"enabled":true}],"bindings":[{"kind":"name","target":"discord.com","plan_id":"44444444444444444444444444444444","level":3,"confirmed":"2026-10-18T00:00:00Z","successes":2,"enabled":true,"transport":6,"family":4,"shape":13,"tcp_profile":2,"verified_by":1,"input":1}]}]}"#,
+        )
+        .unwrap();
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 2,
+            host: "gateway.discord.gg".into(),
+            endpoint: "162.159.133.234:443".into(),
+            family: 4,
+            shape: SHAPE_ECH_TS,
+        };
+        let candidates = matching_sibling_recovery_candidates(&catalog, &target);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].plan_id, [0x44; 16]);
+        assert!(super::r2o_same_service_brand(
+            "discord.com",
+            "gateway.discord.gg"
+        ));
+        assert!(!super::r2o_same_service_brand(
+            "discord.com",
+            "gateway.notdiscord.com"
+        ));
+
+        let other = r2o_controller::discovery::DiscoveryTarget {
+            host: "api.example.com".into(),
+            ..target
+        };
+        assert!(matching_sibling_recovery_candidates(&catalog, &other).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ech_binding_does_not_claim_a_modern_tls_target() {
+        let catalog = Catalog::parse(
+            br#"{"boxes":[{"id":"box-1","created":"2026-10-18T00:00:00Z","updated":"2026-10-18T00:00:00Z","plans":[{"id":"33333333333333333333333333333333","proto":"tls","text":"r2o-plan 1 11\nid 33333333333333333333333333333333\nproto tcp tls\ninput tls-sni\nsplit sni_middle +0\n","added":"2026-10-18T00:00:00Z","successes":3,"enabled":true}],"bindings":[{"kind":"name","target":"www.youtube.com","plan_id":"33333333333333333333333333333333","level":3,"confirmed":"2026-10-18T00:00:00Z","successes":2,"enabled":true,"transport":6,"family":4,"shape":13,"tcp_profile":2,"verified_by":1,"input":2}]}]}"#,
+        )
+        .unwrap();
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            tcp_profile: 2,
+            host: "www.youtube.com".into(),
+            endpoint: "203.0.113.1:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+        };
+        assert!(!r2o_controller::discovery::has_usable_binding(
+            &catalog, &target
+        ));
+        assert!(!r2o_controller::discovery::has_covering_binding(
+            &catalog, &target
+        ));
+        assert!(!r2o_controller::discovery::has_usable_profile_binding(
+            &catalog, &target
+        ));
     }
 
     #[test]

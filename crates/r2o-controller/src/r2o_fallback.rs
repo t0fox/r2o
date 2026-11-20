@@ -179,6 +179,44 @@ pub fn plan(index: usize, shape: u8, send_cap: usize) -> Option<String> {
     plan_from_arm(&arm(index)?, shape, send_cap)
 }
 
+/// Проверенный на реальном роутере generic-кандидат: 64-байтовая
+/// непрозрачная вставка перед приветствием + seqovl. Не является частью
+/// C-порядка d2o; ставится первым, чтобы не платить полный перебор.
+/// Формы: MODERN=1, LEGACY=2, GRANDFATHER=4.
+pub fn r2o_pad64_seed(shape: u8, send_cap: usize) -> Option<String> {
+    r2o_pad64_seed_with_len(shape, send_cap, 77)
+}
+
+/// Несколько длин вставки: измеренный путь выбирает 77/114/172 в
+/// зависимости от цели, поэтому ранний перебор должен покрыть их сразу.
+pub fn r2o_pad64_seeds(shape: u8, send_cap: usize) -> Vec<String> {
+    // 172 чаще всего подтверждался на живом WhatsApp; 77 — следующий по
+    // частоте. Остальные длины измеренный путь перебирает сам.
+    [172_usize, 77]
+        .into_iter()
+        .filter_map(|length| r2o_pad64_seed_with_len(shape, send_cap, length))
+        .collect()
+}
+
+fn r2o_pad64_seed_with_len(shape: u8, send_cap: usize, length: usize) -> Option<String> {
+    if !matches!(shape, 1 | 2 | 4) {
+        return None;
+    }
+    let segment = if send_cap == 0 {
+        1400
+    } else {
+        send_cap.checked_sub(72)?.min(1400)
+    };
+    if segment == 0 {
+        return None;
+    }
+    Some(format!(
+        "r2o-plan 1 5\nid 00000000000000000000000000000000\nproto tcp tls\n\
+         wire detect-tcp-v1\ninput tls-sni\nsegment {segment}\n\
+         payload-pad64 2 {length} 15\nseqovl payload=2 poison=0\norder forward\n"
+    ))
+}
+
 /// Дословный порт `d2k_arm_plan` (`core/compose.c:1552-1751`) для любого
 /// набора полей `Poison`, а не только для фиксированного списка плеч.
 pub fn plan_from_arm(a: &Poison, shape: u8, send_cap: usize) -> Option<String> {
@@ -686,5 +724,16 @@ mod tests {
         if let Ok(path) = std::env::var("R2O_OWNED_FALLBACK_DIFF_OUTPUT") {
             std::fs::write(path, output).unwrap();
         }
+    }
+
+    #[test]
+    fn pad64_seed_compiles_for_tls_shapes_only() {
+        for shape in [1, 2, 4] {
+            let text = super::r2o_pad64_seed(shape, 1492).expect("tls seed");
+            let bytes = crate::plan_text::compile_text(&text).expect("compile");
+            r2k_core::plan::Plan::parse(&bytes).expect("parse");
+            assert!(text.contains("payload-pad64 2 77 15"));
+        }
+        assert!(super::r2o_pad64_seed(3, 1492).is_none(), "QUIC не TLS");
     }
 }
