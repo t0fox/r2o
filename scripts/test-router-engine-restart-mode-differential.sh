@@ -59,6 +59,26 @@ for file in c-engine-restart.sh c-restart.sh r-engine-restart.sh r-restart.sh \
     }
 done
 
+# NFQUEUE может уже быть занята, пока датапат ещё готовит control socket.
+sed -n '/^wait_queue() {/,/^}/p' "$R2O_SERVICE" | tr -d '\r' >"$TEMP/r-wait-queue.sh"
+(
+    . "$TEMP/r-wait-queue.sh"
+    queue_bound() { [ "$1" = 2000 ]; }
+    socket_dir=$(mktemp -d /dev/shm/r2o-ready.XXXXXX)
+    trap 'rm -f "$socket_dir/control.sock"; rmdir "$socket_dir"' EXIT
+    socket="$socket_dir/control.sock"
+    sleep() {
+        python3 - "$socket" <<'PY'
+import socket
+import sys
+with socket.socket(socket.AF_UNIX) as listener:
+    listener.bind(sys.argv[1])
+PY
+    }
+    wait_queue 2000 "$socket"
+    [ -S "$socket" ] || { echo "контроллер стартует до появления сокета" >&2; exit 1; }
+)
+
 run_branch() {
     impl=$1
     branch=$2

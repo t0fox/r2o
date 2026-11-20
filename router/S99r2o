@@ -462,9 +462,9 @@ engine_firewall_up() {
 start_engine_merged() {
     r2o_merged_mark=$1
     start_datapath_both || return 1
-    wait_queue "$QUEUE4" || return 1
+    wait_queue "$QUEUE4" "$SOCK4" || return 1
     if [ "$IPV6_ENABLED" = 1 ]; then
-        wait_queue "$QUEUE6" || return 1
+        wait_queue "$QUEUE6" "$SOCK6" || return 1
     fi
     engine_firewall_up || return 1
     start_controller_both "$r2o_merged_mark"
@@ -476,9 +476,9 @@ start_engine_split() {
     if [ "$IPV6_ENABLED" = 1 ]; then
         start_datapath "$QUEUE6" ipv6 "$DP6_PID" "$LOG/r2o-datapath6.log" "$SOCK6" || return 1
     fi
-    wait_queue "$QUEUE4" || return 1
+    wait_queue "$QUEUE4" "$SOCK4" || return 1
     if [ "$IPV6_ENABLED" = 1 ]; then
-        wait_queue "$QUEUE6" || return 1
+        wait_queue "$QUEUE6" "$SOCK6" || return 1
     fi
     engine_firewall_up || return 1
     spawn_component r2o-controller "$CT4_PID" "$LOG/r2o-controller4.log" \
@@ -523,7 +523,7 @@ wait_queue() {
     queue=$1
     attempt=0
     while [ "$attempt" -lt 50 ]; do
-        queue_bound "$queue" && return 0
+        queue_bound "$queue" && [ -S "$2" ] && return 0
         attempt=$((attempt + 1))
         sleep 0.1 2>/dev/null || sleep 1
     done
