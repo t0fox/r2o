@@ -1102,7 +1102,8 @@ pub fn has_covering_binding_for_shape(
     })
 }
 
-fn binding_matches_tcp_profile(binding: &Binding, tcp_profile: u8) -> bool {
+/// Проверить профиль привязки независимо от способа его хранения.
+pub fn binding_matches_tcp_profile(binding: &Binding, tcp_profile: u8) -> bool {
     match r2k_link_shape_tcp_profile(binding.shape) {
         0 => binding.tcp_profile == tcp_profile,
         profile => {

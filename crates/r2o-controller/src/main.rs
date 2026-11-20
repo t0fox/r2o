@@ -5648,37 +5648,9 @@ fn matching_sibling_recovery_candidates(
     }
     let suffix = r2o_controller::domain::registrable_domain(&target.host);
     let voice_suffix = suffix.as_deref() == Some("discord.media");
+    let target_shape = control::r2k_link_shape_tcp_base(target.shape);
+    let target_profile = target.tcp_profile();
     let mut candidates = Vec::new();
-    // Для обычного TLS первыми пробуем проверенные generic-планы
-    // pad64+seqovl с разными длинами вставки: измеренный путь выбирает
-    // 77/114/172 в зависимости от цели, поэтому ждать полного перебора
-    // незачем. Каждый кандидат подтверждается end-to-end.
-    if matches!(
-        r2o_discovery_plan_shape(target.shape),
-        SHAPE_MODERN | SHAPE_LEGACY
-    ) && !voice_suffix
-    {
-        let plan_shape = r2o_discovery_plan_shape(target.shape);
-        let seeds = if r2o_is_ech_shape(target.shape) {
-            r2o_controller::r2o_fallback::r2o_ech_pad64_seeds(plan_shape, 0)
-        } else {
-            r2o_controller::r2o_fallback::r2o_pad64_seeds(plan_shape, 0)
-        };
-        for (index, text) in seeds.into_iter().enumerate() {
-            let plan_id = [0x77_u8.saturating_sub(index as u8); 16];
-            if let Ok(text) = r2o_controller::discovery::plan_text_for_trial(&text, plan_id) {
-                candidates.push(R2oFamilyRecoveryCandidate {
-                    plan_id,
-                    plan_text: text,
-                    group_plan: false,
-                    probe_path: "/".into(),
-                });
-            }
-            if candidates.len() == MAX_CANDIDATES {
-                break;
-            }
-        }
-    }
     for box_record in &catalog.boxes {
         for binding in &box_record.bindings {
             if !binding.enabled
@@ -5692,10 +5664,11 @@ fn matching_sibling_recovery_candidates(
             let Ok(name) = normalize(&binding.target) else {
                 continue;
             };
+            let binding_shape = control::r2k_link_shape_tcp_base(binding.shape);
             if name == target.host {
                 // Тот же хост, но другая форма ClientHello: пробуем уже
                 // подтверждённый план, вместо повторной классификации.
-                if binding.shape == 0 || binding.shape == target.shape {
+                if binding_shape == 0 || binding_shape == target_shape {
                     continue;
                 }
             } else {
@@ -5713,7 +5686,7 @@ fn matching_sibling_recovery_candidates(
                 // зоны (brand): discord.com/discord.gg -> discord.
                 let same_brand = r2o_same_service_brand(&name, &target.host);
                 if !(voice_suffix || same_registrable || same_brand)
-                    || (binding.shape != 0 && !group_shape_fits(binding.shape, target.shape))
+                    || !group_shape_fits(binding_shape, target_shape)
                 {
                     continue;
                 }
@@ -5730,7 +5703,7 @@ fn matching_sibling_recovery_candidates(
             };
             if transport != 6
                 || family != target.family
-                || binding.tcp_profile != target.tcp_profile()
+                || !r2o_controller::discovery::binding_matches_tcp_profile(binding, target_profile)
                 || group_path(transport, &binding.probe_path) != "/"
             {
                 continue;
@@ -5751,7 +5724,7 @@ fn matching_sibling_recovery_candidates(
             let Ok(plan) = Plan::parse(&bytes) else {
                 continue;
             };
-            if !shape_matches_plan(target.shape, &plan)
+            if !shape_matches_plan(target_shape, &plan)
                 || r2o_datapath::engine::validate_runtime_plan(&plan).is_err()
                 || candidates
                     .iter()
@@ -5769,6 +5742,30 @@ fn matching_sibling_recovery_candidates(
             });
             if candidates.len() == MAX_CANDIDATES {
                 return candidates;
+            }
+        }
+    }
+    // Общие варианты заполняют свободные места после подтверждённых планов.
+    let plan_shape = r2o_discovery_plan_shape(target_shape);
+    if matches!(plan_shape, SHAPE_MODERN | SHAPE_LEGACY) && !voice_suffix {
+        let seeds = if r2o_is_ech_shape(target_shape) {
+            r2o_controller::r2o_fallback::r2o_ech_pad64_seeds(plan_shape, 0)
+        } else {
+            r2o_controller::r2o_fallback::r2o_pad64_seeds(plan_shape, 0)
+        };
+        for (index, text) in seeds
+            .into_iter()
+            .enumerate()
+            .take(MAX_CANDIDATES - candidates.len())
+        {
+            let plan_id = [0x77_u8.saturating_sub(index as u8); 16];
+            if let Ok(text) = r2o_controller::discovery::plan_text_for_trial(&text, plan_id) {
+                candidates.push(R2oFamilyRecoveryCandidate {
+                    plan_id,
+                    plan_text: text,
+                    group_plan: false,
+                    probe_path: "/".into(),
+                });
             }
         }
     }
@@ -60798,11 +60795,50 @@ group_block_proven: false,
                 && candidate.plan_text.contains("split sni_middle +0")
                 && !candidate.group_plan
         }));
-        // Перед ECH-планом идут ранние generic-кандидаты pad64+seqovl.
+        // Проверенный план того же хоста идёт первым, затем общие кандидаты.
+        assert_eq!(cross[0].plan_id, [0x11; 16]);
         assert!(
             cross
                 .iter()
                 .any(|candidate| candidate.plan_text.contains("payload-pad64 2 172 15"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tls_контекст_соседа_проверяется_до_общих_кандидатов() {
+        use r2k_core::control::{SHAPE_MODERN_TS, TCP_PROFILE_NO_TS, TCP_PROFILE_TS};
+
+        let mut catalog = Catalog::default();
+        let measured = DiscoveryTarget {
+            tcp_profile: TCP_PROFILE_TS,
+            host: "rutor.is".into(),
+            endpoint: "198.51.100.1:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN_TS,
+        };
+        let plan_id = r2o_controller::discovery::add_measured_binding(
+            &mut catalog,
+            &measured,
+            "r2o-plan 1 11\nid 00000000000000000000000000000000\nproto tcp tls\nsplit sni_middle +0\n",
+            100,
+        )
+        .unwrap();
+        catalog.boxes[0].bindings[0].tcp_profile = 0;
+        let mut target = DiscoveryTarget {
+            host: "rutor.info".into(),
+            endpoint: "198.51.100.2:443".into(),
+            shape: SHAPE_MODERN,
+            ..measured
+        };
+
+        let candidates = matching_sibling_recovery_candidates(&catalog, &target);
+        assert_eq!(candidates.len(), 3);
+        assert!(candidates[0].plan_text.contains(&format!("id {plan_id}")));
+        target.tcp_profile = TCP_PROFILE_NO_TS;
+        assert_eq!(
+            matching_sibling_recovery_candidates(&catalog, &target).len(),
+            2
         );
     }
 
