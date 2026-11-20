@@ -908,9 +908,8 @@ mod app {
     ) -> (u64, u64) {
         let cpu_ticks = stat.rfind(')').and_then(|end| {
             let mut fields = stat[end + 1..].split_ascii_whitespace();
-            // D2O's strtoul leaves the cursor on Linux's state letter; field counting
-            // continues there, so both CPU fields read as zero. Preserve that output.
-            fields.next()?.parse::<libc::c_ulong>().ok()?;
+            // После имени идёт буквенное состояние, utime и stime — поля 14 и 15.
+            fields.next()?;
             let user = fields.nth(10)?.parse::<libc::c_ulong>().ok()?;
             let system = fields.next()?.parse::<libc::c_ulong>().ok()?;
             Some(user.wrapping_add(system))
@@ -954,7 +953,7 @@ mod app {
             cpu_ms.wrapping_mul(10) / elapsed_secs
         };
         format!(
-            "--- r2o-datapath[{pid}], {elapsed_secs} с; процессор {cpu_ms} мс ({},{} %), RSS {rss_kb} КиБ ---",
+            "--- r2o-datapath[{pid}], {elapsed_secs} с; процессор {cpu_ms} мс ({},{:02} %), RSS {rss_kb} КиБ ---",
             cpu_percent_hundredths / 100,
             cpu_percent_hundredths % 100,
         )
@@ -6735,12 +6734,12 @@ mod app {
         }
 
         #[test]
-        fn process_cost_matches_d2o_proc_state_cursor_and_rss() {
+        fn process_cost_reads_linux_stat_ticks_and_rss() {
             let stat = "4242 (r2o worker (test)) S 0 0 0 0 0 0 0 0 0 0 123 45";
             let statm = "500 11 0 0 0 0 0";
             let cost = super::r2o_process_cost_from_proc(stat, statm, 100, 4096);
             println!("R2O_PROCESS_COST={},{}", cost.0, cost.1);
-            assert_eq!(cost, (0, 44));
+            assert_eq!(cost, (1680, 44));
         }
 
         #[test]
@@ -6748,6 +6747,10 @@ mod app {
             assert_eq!(
                 super::r2o_process_stats_line(4242, Duration::from_secs(2), 25, 44),
                 "--- r2o-datapath[4242], 2 с; процессор 25 мс (1,25 %), RSS 44 КиБ ---"
+            );
+            assert_eq!(
+                super::r2o_process_stats_line(4242, Duration::from_secs(20), 10, 44),
+                "--- r2o-datapath[4242], 20 с; процессор 10 мс (0,05 %), RSS 44 КиБ ---"
             );
         }
 
