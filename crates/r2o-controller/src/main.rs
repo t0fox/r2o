@@ -8297,9 +8297,22 @@ fn r2o_confirm_discovery_outcome(
             "; сервер вернул Cloudflare challenge: это не подтверждает обход и кандидат не сохранён",
         );
     } else {
-        outcome.detail.push_str(
-            "; кандидат не сохранён: временная проба не получила полный HTTPS-ответ и точное APPLIED",
-        );
+        let verified = r2o_family_recovery_decision(&result, true)
+            == R2oFamilyRecoveryDecision::Verified;
+        outcome.detail.push_str(if verified {
+            "; кандидат не сохранён, протокольное подтверждение=да"
+        } else {
+            "; кандидат не сохранён, протокольное подтверждение=нет"
+        });
+        outcome.detail.push_str(if applied {
+            ", точное APPLIED=да"
+        } else {
+            ", точное APPLIED=нет"
+        });
+        if let Err(error) = &result {
+            outcome.detail.push_str(", ошибка зонда: ");
+            outcome.detail.push_str(error);
+        }
     }
     outcome
 }
@@ -48321,11 +48334,13 @@ mod tests {
         let без_applied =
             super::r2o_confirm_discovery_outcome(outcome(), Ok(r2o_test_fetch_result()), false);
         assert!(без_applied.plan_text.is_none());
+        assert!(без_applied.detail.contains("протокольное подтверждение=да, точное APPLIED=нет"));
 
         let mut неполный = r2o_test_fetch_result();
         неполный.complete = false;
         let без_полного_https = super::r2o_confirm_discovery_outcome(outcome(), Ok(неполный), true);
         assert!(без_полного_https.plan_text.is_none());
+        assert!(без_полного_https.detail.contains("протокольное подтверждение=нет, точное APPLIED=да"));
 
         let подтверждённый =
             super::r2o_confirm_discovery_outcome(outcome(), Ok(r2o_test_fetch_result()), true);
