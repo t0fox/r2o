@@ -7990,7 +7990,7 @@ fn r2o_family_recovery_decision(
                     .is_none_or(|accepted| accepted && fetch.peer_name_ok == Some(true))
                 && fetch.complete
                 && fetch.application_verified
-                && (200..600).contains(&fetch.status)
+                && (fetch.status == 101 || (200..600).contains(&fetch.status))
                 && !fetch.cloudflare_challenge
                 && !matches!(
                     fetch.http_outcome,
@@ -25590,6 +25590,10 @@ impl ControlClient {
                         let now = std::time::Instant::now();
                         let mark = discovery.as_ref().and_then(|(_, _, _, mark)| *mark);
                         match r2o_late_rx_hellos.take_for_tcp_stall(&event, mark, now) {
+                            Some(input) if input.is_discord_voice_websocket() => println!(
+                                "Discord Voice {}: парная HTTP RX-проверка неприменима к WebSocket",
+                                input.options.name
+                            ),
                             Some(input)
                                 if r2o_late_rx_is_covered_by_catalog(
                                     &input,
@@ -25683,6 +25687,10 @@ impl ControlClient {
                         let now = std::time::Instant::now();
                         let mark = discovery.as_ref().and_then(|(_, _, _, mark)| *mark);
                         match r2o_late_rx_hellos.take_for_fin_retry(&event, mark, now) {
+                            Some(input) if input.is_discord_voice_websocket() => println!(
+                                "Discord Voice {}: парная HTTP RX-проверка неприменима к WebSocket",
+                                input.options.name
+                            ),
                             Some(input)
                                 if r2o_late_rx_is_covered_by_catalog(
                                     &input,
@@ -25752,6 +25760,10 @@ impl ControlClient {
                             None => (None, "точному ClientHello"),
                         };
                         match input {
+                            Some(input) if input.is_discord_voice_websocket() => println!(
+                                "Discord Voice {}: парная HTTP RX-проверка неприменима к WebSocket",
+                                input.options.name
+                            ),
                             Some(input)
                                 if r2o_late_rx_is_covered_by_catalog(
                                     &input,
@@ -47562,6 +47574,22 @@ mod tests {
         assert_eq!(
             r2o_family_recovery_decision(&Ok(fetch.clone()), true),
             R2oFamilyRecoveryDecision::Verified
+        );
+        let mut websocket = fetch.clone();
+        websocket.status = 101;
+        websocket.http_outcome = r2o_controller::fetch::R2oFetchHttpOutcome::Neutral;
+        assert_eq!(
+            r2o_family_recovery_decision(&Ok(websocket.clone()), true),
+            R2oFamilyRecoveryDecision::Verified
+        );
+        assert_eq!(
+            r2o_family_recovery_decision(&Ok(websocket.clone()), false),
+            R2oFamilyRecoveryDecision::Reclassify
+        );
+        websocket.application_verified = false;
+        assert_eq!(
+            r2o_family_recovery_decision(&Ok(websocket), true),
+            R2oFamilyRecoveryDecision::Reclassify
         );
         let mut replay_proof = fetch.clone();
         replay_proof.tls = None;

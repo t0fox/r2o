@@ -25,6 +25,12 @@ pub struct R2oLateRxInput {
     pub alternate_path: Option<String>,
 }
 
+impl R2oLateRxInput {
+    pub fn is_discord_voice_websocket(&self) -> bool {
+        crate::fetch::r2o_is_discord_voice_websocket(&self.options.name, self.options.port)
+    }
+}
+
 #[derive(Default)]
 pub struct R2oLateRxCache {
     entries: HashMap<[u8; r2k_core::control::KEY_LEN], (HelloEvent, Instant)>,

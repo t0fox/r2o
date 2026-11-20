@@ -1928,14 +1928,28 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
     // D2O различает корневой verifier-зонд (initial_path == NULL) и явный
     // ресурсный путь. В R2O корневой зонд представлен как "/", поэтому
     // Gateway-протокол проверяется для этого же пути.
-    if options.name.eq_ignore_ascii_case("gateway.discord.gg") && root_probe {
+    let voice_websocket = r2o_is_discord_voice_websocket(&options.name, options.port);
+    if root_probe && (options.name.eq_ignore_ascii_case("gateway.discord.gg") || voice_websocket) {
         let gateway_deadline = match phase_timeout {
             Some(timeout) => Instant::now()
                 .checked_add(timeout)
                 .ok_or_else(|| "срок HTTP-шага слишком велик".to_owned())?,
             None => deadline,
         };
-        let r2o_gateway = r2o_gateway_websocket_exchange(&mut stream, gateway_deadline);
+        let voice_request;
+        let (request, hello_op) = if voice_websocket {
+            voice_request = format!(
+                "GET /?v=8 HTTP/1.1\r\nHost: {}:{}\r\n\
+                 Origin: https://discord.com\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
+                 Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+                options.name, options.port,
+            );
+            (voice_request.as_bytes(), 8)
+        } else {
+            (R2O_GATEWAY_REQUEST, 10)
+        };
+        let r2o_gateway =
+            r2o_gateway_websocket_exchange(&mut stream, gateway_deadline, request, hello_op);
         let r2o_negotiated_tls = match tls {
             Some("1.3") => Some(0x0304),
             Some("1.2") => Some(0x0303),
@@ -1962,7 +1976,8 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
             chunked: false,
             gzip: false,
             complete: r2o_gateway.complete,
-            application_verified: r2o_gateway.complete,
+            application_verified: r2o_gateway.complete
+                && (!voice_websocket || peer_name_ok == Some(true)),
             handshake_verified: false,
             connection_close: false,
             doh_probe: false,
@@ -3112,6 +3127,14 @@ Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n";
 const R2O_GATEWAY_ACCEPT: &[u8] = b"s3pPLMBiTxaQ9kYGzzhZRbK+xOo=";
 const R2O_GATEWAY_BUFFER: usize = 4096;
 
+/// Голосовой шлюз Discord использует отдельный WebSocket на RTC-порту.
+pub fn r2o_is_discord_voice_websocket(name: &str, port: u16) -> bool {
+    const SUFFIX: &[u8] = b".discord.media";
+    matches!(port, 2048..=2053)
+        && name.len() > SUFFIX.len()
+        && name.as_bytes()[name.len() - SUFFIX.len()..].eq_ignore_ascii_case(SUFFIX)
+}
+
 #[derive(Debug, Eq, PartialEq)]
 struct R2oGatewayReply {
     status: u16,
@@ -3322,10 +3345,12 @@ fn r2o_gateway_fill(
 
 /// Перенести проверку D2O `request_gateway_websocket`: Upgrade/101,
 /// `Sec-WebSocket-Accept` и первый текстовый Hello-кадр с верхнеуровневым
-/// `op=10`. Обычный HTTP-ответ на `GET /` доказательством Gateway не является.
+/// `op=10` для Gateway или `op=8` для голосового шлюза.
 fn r2o_gateway_websocket_exchange(
     stream: &mut StreamOwned<rustls::ClientConnection, R2oTlsTcpStream>,
     deadline: Instant,
+    request: &[u8],
+    hello_op: u64,
 ) -> R2oGatewayReply {
     if let Err(error) = stream
         .sock
@@ -3335,7 +3360,7 @@ fn r2o_gateway_websocket_exchange(
                 .saturating_duration_since(Instant::now())
                 .max(Duration::from_millis(1)),
         ))
-        .and_then(|()| stream.write_all(R2O_GATEWAY_REQUEST))
+        .and_then(|()| stream.write_all(request))
         .and_then(|()| stream.flush())
     {
         return r2o_gateway_reply(0, false, format!("WebSocket-запрос не ушёл: {error}"));
@@ -3462,16 +3487,20 @@ fn r2o_gateway_websocket_exchange(
         return r2o_gateway_reply(101, false, "Gateway Hello превышает предел или неполон");
     }
     match r2o_gateway_json_op(&buffer[payload_start..payload_end]) {
-        Some(10) => r2o_gateway_reply(101, true, "Gateway WebSocket принят, получен Hello op=10"),
+        Some(opcode) if opcode == hello_op => r2o_gateway_reply(
+            101,
+            true,
+            format!("Gateway WebSocket принят, получен Hello op={hello_op}"),
+        ),
         Some(opcode) => r2o_gateway_reply(
             101,
             false,
-            format!("первый WebSocket frame Gateway op={opcode}, не Hello op=10"),
+            format!("первый WebSocket frame Gateway op={opcode}, не Hello op={hello_op}"),
         ),
         None => r2o_gateway_reply(
             101,
             false,
-            "первый WebSocket frame Gateway не содержит top-level op=10",
+            format!("первый WebSocket frame Gateway не содержит top-level op={hello_op}"),
         ),
     }
 }
@@ -7255,6 +7284,93 @@ mod tests {
 
         let record_len = usize::from(u16::from_be_bytes([bytes[3], bytes[4]]));
         assert_eq!(record_len + 5, 1275);
+    }
+
+    #[test]
+    fn discord_voice_websocket_checks_upgrade_and_hello() {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use std::net::TcpListener;
+        use std::sync::Arc;
+
+        let name = "voice.discord.media";
+        assert!(r2o_is_discord_voice_websocket("Voice.Discord.Media", 2053));
+        assert!(r2o_is_discord_voice_websocket(name, 2048));
+        assert!(!r2o_is_discord_voice_websocket(name, 443));
+        assert!(!r2o_is_discord_voice_websocket("notdiscord.media", 2053));
+        assert!(!r2o_is_discord_voice_websocket("discord.media", 2053));
+
+        let certificate = rcgen::generate_simple_self_signed(vec![name.into()]).unwrap();
+        let der = CertificateDer::from(certificate.serialize_der().unwrap());
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certificate.serialize_private_key_der(),
+        ));
+        let config = Arc::new(
+            rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(vec![der.clone()], key)
+                .unwrap(),
+        );
+        let mut roots = RootCertStore::empty();
+        roots.add(der).unwrap();
+        let options = FetchOptions {
+            name: name.into(),
+            ip: None,
+            port: 2053,
+            path: "/".into(),
+            deadline: Duration::from_secs(3),
+            tls12: false,
+            wire_len: None,
+            mark: None,
+        };
+        for (payload, verified) in [(b"{\"op\":8}".as_slice(), true), (b"{\"op\":10}", false)] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let config = Arc::clone(&config);
+            let server = std::thread::spawn(move || {
+                let (socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let connection = rustls::ServerConnection::new(config).unwrap();
+                let mut stream = StreamOwned::new(connection, socket);
+                let mut request = Vec::new();
+                loop {
+                    let mut buffer = [0; 256];
+                    let length = stream.read(&mut buffer).unwrap();
+                    assert!(length > 0);
+                    request.extend_from_slice(&buffer[..length]);
+                    if request.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                assert!(
+                    request
+                        .starts_with(b"GET /?v=8 HTTP/1.1\r\nHost: voice.discord.media:2053\r\n")
+                );
+                let mut response = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+                    Connection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n".to_vec();
+                response.extend_from_slice(&[0x81, payload.len() as u8]);
+                response.extend_from_slice(payload);
+                stream.write_all(&response).unwrap();
+            });
+            let socket = TcpStream::connect(address).unwrap();
+            let result = r2o_fetch_connected_stream_with_roots_and_encoding(
+                &options,
+                socket,
+                address,
+                Instant::now(),
+                R2oFetchEncoding::Identity,
+                roots.clone(),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            server.join().unwrap();
+            assert_eq!(result.status, 101);
+            assert_eq!(result.complete, verified);
+            assert_eq!(result.application_verified, verified);
+        }
     }
 
     #[test]
