@@ -28,7 +28,7 @@ mod app {
     use r2o_datapath::netlink::{
         MessageIter, NF_ACCEPT, NF_DROP, NFNL_SUBSYS_QUEUE, NFQNL_MSG_PACKET, QueuePacket,
     };
-    use r2o_datapath::nfqueue::{QueueSocket, ReceiveError};
+    use r2o_datapath::nfqueue::{QueueSocket, RECEIVE_CAPACITY, ReceiveError};
     use r2o_datapath::r2o_conntrack_gate::{R2oConntrackGate, guard_decision};
     use r2o_datapath::r2o_icmp_guard::R2oIcmpGuard;
     use r2o_datapath::r2o_quic::R2oQuicSessions;
@@ -1629,7 +1629,9 @@ mod app {
         );
 
         let packet_type = (NFNL_SUBSYS_QUEUE << 8) | NFQNL_MSG_PACKET as u16;
-        let mut batch = vec![0; 1 << 17];
+        let mut batch = vec![0; RECEIVE_CAPACITY];
+        let mut borrowed = Vec::with_capacity(3);
+        let mut extra_revents = [0; 3];
         let observe_plan = Plan::default();
         // C `s->plan == NULL`: в observe без явного --plan и в controller-only
         // общего плана нет.
@@ -1950,38 +1952,33 @@ mod app {
                 .min(stats_timeout);
             // C `d2kd.c:1523-1536`: один poll на NFQUEUE, route-watch и
             // control listen/peer. Набор — только реально открытые fd.
-            let mut extra_fds = Vec::with_capacity(3);
-            let route_poll_index = route_monitor.r2o_watch_fd().map(|fd| {
-                extra_fds.push(fd);
-                extra_fds.len() - 1
-            });
-            let control_listen_index = control.as_ref().map(|control| {
-                extra_fds.push(control.listen_fd());
-                extra_fds.len() - 1
-            });
-            let control_peer_index = control.as_ref().and_then(|control| {
-                (control.peer_fd() >= 0).then(|| {
-                    extra_fds.push(control.peer_fd());
-                    extra_fds.len() - 1
-                })
-            });
-            let borrowed: Vec<std::os::fd::BorrowedFd<'_>> = extra_fds
-                .iter()
-                .map(|fd| unsafe { std::os::fd::BorrowedFd::borrow_raw(*fd) })
-                .collect();
-            let mut extra_revents = vec![0 as libc::c_short; borrowed.len()];
+            borrowed.clear();
+            let mut register = |fd| {
+                let index = borrowed.len();
+                borrowed.push(unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) });
+                index
+            };
+            let route_poll_index = route_monitor.r2o_watch_fd().map(&mut register);
+            let control_listen_index = control
+                .as_ref()
+                .map(|control| register(control.listen_fd()));
+            let control_peer_index = control
+                .as_ref()
+                .map(ControlServer::peer_fd)
+                .filter(|fd| *fd >= 0)
+                .map(register);
             let received = match socket.receive_timeout_with_fds(
                 &mut batch,
                 timeout,
                 &borrowed,
-                &mut extra_revents,
+                &mut extra_revents[..borrowed.len()],
             ) {
                 Ok(ready) => ready,
                 Err(ReceiveError::Wait(_)) => {
                     socket.record_receive_error();
-                    false
+                    None
                 }
-                Err(error) if !receive_error_requires_flush(&error) => false,
+                Err(error) if !receive_error_requires_flush(&error) => None,
                 Err(error) => {
                     socket.record_receive_error();
                     match error {
@@ -2027,18 +2024,22 @@ mod app {
                         &mut socket,
                         &udp_deferred_resends.r2o_take_due_accept(failure_now),
                     );
-                    false
+                    None
                 }
             };
             let route_ready = r2o_poll_extra_ready(&extra_revents, route_poll_index);
             let control_wake = r2o_poll_extra_ready(&extra_revents, control_listen_index)
                 || r2o_poll_extra_ready(&extra_revents, control_peer_index);
-            if received {
+            if received.is_some() {
                 // C `d2k_udp_path_read`: голый `rseq++`, включая переход
                 // через 0; Rust повторяет это, а не подменяет 1.
                 udp_receive_seq = r2o_next_udp_receive_seq(udp_receive_seq);
             }
-            let follow_receive_seq = if received { udp_receive_seq } else { 0 };
+            let follow_receive_seq = if received.is_some() {
+                udp_receive_seq
+            } else {
+                0
+            };
             udp_follow.r2o_age(now, follow_receive_seq);
             if route_ready {
                 match route_monitor.r2o_drain_watch() {
@@ -2161,7 +2162,7 @@ mod app {
             // `timeout_ms == 0` заставляет `poll` крутиться вхолостую и
             // вытесняет TCP/control. При наличии пакета их снимает обычный
             // путь после обработки, чтобы поздний хвост мог быть отменён.
-            if !received {
+            if received.is_none() {
                 r2o_flush_deferred_udp(
                     &mut socket,
                     raw.as_ref(),
@@ -2184,8 +2185,8 @@ mod app {
             for event in holding.sweep_http_responses(Instant::now()) {
                 send_http_response_event(&mut control, &event);
             }
-            if received {
-                for message in MessageIter::new(&batch) {
+            if let Some(received_len) = received {
+                for message in MessageIter::new(&batch[..received_len]) {
                     if message.kind != packet_type {
                         continue;
                     }
@@ -5692,11 +5693,11 @@ mod app {
         }
     }
 
-    fn drain_queued(queue: &mut QueueSocket, batch: &mut Vec<u8>, packet_type: u16) {
+    fn drain_queued(queue: &mut QueueSocket, batch: &mut [u8], packet_type: u16) {
         loop {
             match queue.receive_timeout(batch, 0) {
-                Ok(true) => {
-                    for message in MessageIter::new(batch) {
+                Ok(Some(received_len)) => {
+                    for message in MessageIter::new(&batch[..received_len]) {
                         if message.kind != packet_type {
                             continue;
                         }
@@ -5711,7 +5712,7 @@ mod app {
                         }
                     }
                 }
-                Ok(false) => break,
+                Ok(None) => break,
                 Err(ReceiveError::LostPackets) => {
                     eprintln!("r2o-datapath: потеря пакетов при остановке очереди");
                     break;

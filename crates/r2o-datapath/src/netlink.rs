@@ -190,17 +190,21 @@ pub fn kernel_error(message: &NetlinkMessage<'_>) -> Option<i32> {
         .then(|| i32::from_ne_bytes(message.body[..4].try_into().expect("length checked")))
 }
 
-pub fn verdict(queue: u16, sequence: u32, packet_id: u32, action: u32) -> Vec<u8> {
-    let mut message = header(
+const VERDICT_LEN: usize = NLMSG_HEADER_LEN + NFGENMSG_LEN + NLA_HEADER_LEN + 8;
+
+pub fn verdict(queue: u16, sequence: u32, packet_id: u32, action: u32) -> [u8; VERDICT_LEN] {
+    let mut message = [0; VERDICT_LEN];
+    write_header(
+        &mut message,
         queue,
         message_type(NFQNL_MSG_VERDICT),
         NLM_F_REQUEST,
         sequence,
     );
-    let mut value = [0; 8];
-    value[..4].copy_from_slice(&action.to_be_bytes());
-    value[4..].copy_from_slice(&packet_id.to_be_bytes());
-    push_attr(&mut message, NFQA_VERDICT_HDR, &value);
+    message[20..22].copy_from_slice(&((NLA_HEADER_LEN + 8) as u16).to_ne_bytes());
+    message[22..24].copy_from_slice(&NFQA_VERDICT_HDR.to_ne_bytes());
+    message[24..28].copy_from_slice(&action.to_be_bytes());
+    message[28..32].copy_from_slice(&packet_id.to_be_bytes());
     finish(&mut message);
     message
 }
@@ -215,11 +219,16 @@ pub fn verdict_payload(
     if replacement.is_empty() || replacement.len() > u16::MAX as usize - NLA_HEADER_LEN {
         return None;
     }
-    let mut message = verdict(queue, sequence, packet_id, action);
+    let message_len = align4(VERDICT_LEN + NLA_HEADER_LEN + replacement.len())?;
+    // C `uint8_t msg[64 + 2048]`: замена обязана поместиться в 2112 байт.
+    if message_len > R2O_NFQ_VERDICT_PAYLOAD_MESSAGE_MAX {
+        return None;
+    }
+    let mut message = Vec::with_capacity(message_len);
+    message.extend_from_slice(&verdict(queue, sequence, packet_id, action));
     push_attr(&mut message, NFQA_PAYLOAD, replacement);
     finish(&mut message);
-    // C `uint8_t msg[64 + 2048]`: замена обязана поместиться в 2112 байт.
-    (message.len() <= R2O_NFQ_VERDICT_PAYLOAD_MESSAGE_MAX).then_some(message)
+    Some(message)
 }
 
 pub fn config_command(queue: u16, sequence: u32, command: u8, protocol_family: u16) -> Vec<u8> {
@@ -268,13 +277,17 @@ pub fn config_params(
 
 fn header(queue: u16, kind: u16, flags: u16, sequence: u32) -> Vec<u8> {
     let mut message = vec![0; NLMSG_HEADER_LEN + NFGENMSG_LEN];
+    write_header(&mut message, queue, kind, flags, sequence);
+    message
+}
+
+fn write_header(message: &mut [u8], queue: u16, kind: u16, flags: u16, sequence: u32) {
     message[4..6].copy_from_slice(&kind.to_ne_bytes());
     message[6..8].copy_from_slice(&flags.to_ne_bytes());
     message[8..12].copy_from_slice(&sequence.to_ne_bytes());
     message[16] = 0;
     message[17] = NFQNL_V0;
     message[18..20].copy_from_slice(&queue.to_be_bytes());
-    message
 }
 
 fn push_attr(message: &mut Vec<u8>, attr_type: u16, value: &[u8]) {

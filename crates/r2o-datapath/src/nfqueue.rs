@@ -8,7 +8,7 @@ use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 
 const ACK_TIMEOUT_MS: i32 = 1000;
 const ACK_ATTEMPTS: usize = 8;
-const RECEIVE_CAPACITY: usize = 1 << 17;
+pub const RECEIVE_CAPACITY: usize = 1 << 17;
 /// C-цикл daemon'а держит NFQUEUE + route-watch + control listen/peer.
 /// Больше 8 fd в одном `poll` датапату не нужно; API остаётся без аллокаций.
 const R2O_NFQ_MAX_EXTRA_FDS: usize = 7;
@@ -237,16 +237,16 @@ impl QueueSocket {
         Ok(socket)
     }
 
-    pub fn receive(&self, bytes: &mut Vec<u8>) -> Result<(), ReceiveError> {
-        self.receive_timeout(bytes, -1).map(|_| ())
+    pub fn receive(&self, bytes: &mut [u8]) -> Result<Option<usize>, ReceiveError> {
+        self.receive_timeout(bytes, -1)
     }
 
-    /// Ожидать одну дейтаграмму NFQUEUE; `false` означает, что истёк таймер.
+    /// Ожидать одну дейтаграмму NFQUEUE; `Some` содержит число прочитанных байтов.
     pub fn receive_timeout(
         &self,
-        bytes: &mut Vec<u8>,
+        bytes: &mut [u8],
         timeout_ms: i32,
-    ) -> Result<bool, ReceiveError> {
+    ) -> Result<Option<usize>, ReceiveError> {
         self.receive_timeout_with_fd(bytes, timeout_ms, None)
             .map(|(received, _)| received)
     }
@@ -254,10 +254,10 @@ impl QueueSocket {
     /// Совместно ожидает NFQUEUE и дополнительный дескриптор без лишнего таймера опроса.
     pub fn receive_timeout_with_fd(
         &self,
-        bytes: &mut Vec<u8>,
+        bytes: &mut [u8],
         timeout_ms: i32,
         extra_fd: Option<RawFd>,
-    ) -> Result<(bool, bool), ReceiveError> {
+    ) -> Result<(Option<usize>, bool), ReceiveError> {
         let Some(fd) = extra_fd else {
             let received = self.receive_timeout_with_fds(bytes, timeout_ms, &[], &mut [])?;
             return Ok((received, false));
@@ -276,17 +276,17 @@ impl QueueSocket {
     /// C `poll(pfd, nfd, timeout)` главного цикла daemon'а: NFQUEUE плюс
     /// произвольные route-watch/control-fd.
     ///
-    /// Возвращает `true`, если прочитана дейтаграмма NFQUEUE. `extra_revents`
+    /// Возвращает длину прочитанной дейтаграммы NFQUEUE. `extra_revents`
     /// заполняется `poll(2)`-маской каждого extra fd (POLLIN/POLLHUP/POLLERR),
     /// чтобы вызывающий мог обработать control/route без второго poll.
-    /// Таймаут и EINTR — `Ok(false)` с нулевыми масками; ошибки poll — `Wait`.
+    /// Таймаут и EINTR — `Ok(None)` с нулевыми масками; ошибки poll — `Wait`.
     pub fn receive_timeout_with_fds(
         &self,
-        bytes: &mut Vec<u8>,
+        bytes: &mut [u8],
         timeout_ms: i32,
         extra_fds: &[BorrowedFd<'_>],
         extra_revents: &mut [libc::c_short],
-    ) -> Result<bool, ReceiveError> {
+    ) -> Result<Option<usize>, ReceiveError> {
         if timeout_ms < -1 {
             return Err(ReceiveError::Io(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -302,7 +302,6 @@ impl QueueSocket {
         for revents in extra_revents.iter_mut() {
             *revents = 0;
         }
-        bytes.resize(RECEIVE_CAPACITY, 0);
         let mut descriptors = [libc::pollfd {
             fd: -1,
             events: 0,
@@ -323,14 +322,14 @@ impl QueueSocket {
         let count = (extra_fds.len() + 1) as libc::nfds_t;
         let ready = unsafe { libc::poll(descriptors.as_mut_ptr(), count, timeout_ms) };
         if ready == 0 {
-            return Ok(false);
+            return Ok(None);
         }
         if ready < 0 {
             let error = io::Error::last_os_error();
             // C main: `if (pr < 0 && errno != EINTR) st.recv_err++`; EINTR —
             // пустое ожидание, без сброса удержаний.
             if error.raw_os_error() == Some(libc::EINTR) {
-                return Ok(false);
+                return Ok(None);
             }
             return Err(ReceiveError::Wait(error));
         }
@@ -340,7 +339,7 @@ impl QueueSocket {
         // Как в D2O, recv снимает pending ENOBUFS даже без POLLIN.
         if descriptors[0].revents & (libc::POLLIN | libc::POLLERR) == 0 {
             if descriptors[0].revents & (libc::POLLHUP | libc::POLLNVAL) == 0 {
-                return Ok(false);
+                return Ok(None);
             }
             return Err(ReceiveError::Io(io::Error::other(
                 "NFQUEUE socket сообщил ошибку без готового пакета",
@@ -355,12 +354,11 @@ impl QueueSocket {
             )
         };
         if received >= 0 {
-            bytes.truncate(received as usize);
-            return Ok(true);
+            return Ok(Some(received as usize));
         }
         let error = io::Error::last_os_error();
         match r2o_nfq_recv_error_outcome(&error) {
-            R2oNfqRecvOutcome::Wait => Ok(false),
+            R2oNfqRecvOutcome::Wait => Ok(None),
             R2oNfqRecvOutcome::Lost => {
                 record_lost_packet(&self.lost_packets);
                 Err(ReceiveError::LostPackets)
@@ -675,11 +673,11 @@ mod tests {
         assert_eq!(poll.revents, libc::POLLERR);
 
         let socket = test_socket_with_fd(local.into());
-        let mut bytes = Vec::new();
+        let mut bytes = vec![0; super::RECEIVE_CAPACITY];
         let error = socket.receive_timeout(&mut bytes, 0).unwrap_err();
         assert!(matches!(error, super::ReceiveError::Io(ref error)
             if error.raw_os_error() == Some(libc::ECONNREFUSED)));
-        assert!(!socket.receive_timeout(&mut bytes, 0).unwrap());
+        assert_eq!(socket.receive_timeout(&mut bytes, 0).unwrap(), None);
     }
 
     #[test]
@@ -695,17 +693,20 @@ mod tests {
             unsafe { BorrowedFd::borrow_raw(extra2.as_raw_fd()) },
         ];
         let mut revents = [0 as libc::c_short; 2];
-        let mut bytes = Vec::new();
+        let mut bytes = vec![0x7f; super::RECEIVE_CAPACITY];
 
         // NFQUEUE и extra2 готовы: обе маски должны быть видны.
         send_byte(&nfq_peer, b'n');
         send_byte(&extra2_peer, b'e');
-        assert!(
+        assert_eq!(
             socket
                 .receive_timeout_with_fds(&mut bytes, 100, &borrowed, &mut revents)
-                .unwrap()
+                .unwrap(),
+            Some(1)
         );
-        assert_eq!(bytes, b"n");
+        assert_eq!(bytes[0], b'n');
+        assert_eq!(bytes.len(), super::RECEIVE_CAPACITY);
+        assert_eq!(bytes[1], 0x7f);
         assert_eq!(revents[0], 0);
         assert_eq!(revents[1], libc::POLLIN as libc::c_short);
         // Прочитать extra2, иначе он останется POLLIN на следующем poll.
@@ -717,10 +718,11 @@ mod tests {
 
         // Готов только extra1: poll не ошибка, NFQUEUE не читается.
         send_byte(&extra1_peer, b'x');
-        assert!(
-            !socket
+        assert_eq!(
+            socket
                 .receive_timeout_with_fds(&mut bytes, 100, &borrowed, &mut revents)
-                .unwrap()
+                .unwrap(),
+            None
         );
         assert_eq!(revents[0], libc::POLLIN as libc::c_short);
         assert_eq!(revents[1], 0);
@@ -731,10 +733,11 @@ mod tests {
 
         // Таймаут — нулевые маски.
         let timeout_bytes = &mut bytes;
-        assert!(
-            !socket
+        assert_eq!(
+            socket
                 .receive_timeout_with_fds(timeout_bytes, 20, &borrowed, &mut revents)
-                .unwrap()
+                .unwrap(),
+            None
         );
         assert_eq!(revents, [0, 0]);
     }
@@ -751,11 +754,12 @@ mod tests {
         let socket = test_socket_with_fd(nfq);
         let borrowed = [unsafe { BorrowedFd::borrow_raw(extra.as_raw_fd()) }];
         let mut revents = [0 as libc::c_short; 1];
-        let mut bytes = Vec::new();
-        assert!(
-            !socket
+        let mut bytes = vec![0; super::RECEIVE_CAPACITY];
+        assert_eq!(
+            socket
                 .receive_timeout_with_fds(&mut bytes, 100, &borrowed, &mut revents)
-                .unwrap()
+                .unwrap(),
+            None
         );
         assert_ne!(revents[0] & libc::POLLHUP as libc::c_short, 0);
 
@@ -797,10 +801,11 @@ mod tests {
             unsafe { BorrowedFd::borrow_raw(extra2.as_raw_fd()) },
         ];
         let mut revents = [0 as libc::c_short; 2];
-        let mut bytes = Vec::new();
+        let mut bytes = vec![0; super::RECEIVE_CAPACITY];
         let received = socket
             .receive_timeout_with_fds(&mut bytes, 100, &borrowed, &mut revents)
-            .unwrap();
+            .unwrap()
+            .is_some();
         let ready = received || revents != [0, 0];
         let payload = if received { char::from(bytes[0]) } else { '-' };
         let output = format!(
@@ -1061,7 +1066,7 @@ mod tests {
             let _ = udp.send_to(&payload, "127.0.0.1:9999");
         }
         std::thread::sleep(Duration::from_millis(300));
-        let mut bytes = Vec::new();
+        let mut bytes = vec![0; super::RECEIVE_CAPACITY];
         let mut received = 0_u32;
         let mut rc = 0_i32;
         for _ in 0..256 {
@@ -1070,8 +1075,8 @@ mod tests {
                     rc = -2;
                     break;
                 }
-                Ok(true) => received += 1,
-                Ok(false) => break,
+                Ok(Some(_)) => received += 1,
+                Ok(None) => break,
                 Err(_) => {
                     rc = -1;
                     break;

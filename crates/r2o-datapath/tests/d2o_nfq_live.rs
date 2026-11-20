@@ -38,10 +38,10 @@ fn nfqueue_live_open_recv_verdict_matches_c() {
         std::fs::write(path, &output).unwrap();
     }
 
-    let mut bytes = Vec::new();
-    match socket.receive_timeout(&mut bytes, 5000) {
-        Ok(true) => {}
-        Ok(false) => {
+    let mut bytes = vec![0; r2o_datapath::nfqueue::RECEIVE_CAPACITY];
+    let received_len = match socket.receive_timeout(&mut bytes, 5000) {
+        Ok(Some(received_len)) => received_len,
+        Ok(None) => {
             output.push_str("recv=0\n");
             write_output(&output);
             panic!("NFQUEUE не получил пакет");
@@ -56,9 +56,11 @@ fn nfqueue_live_open_recv_verdict_matches_c() {
             write_output(&output);
             panic!("NFQUEUE recv: {error}");
         }
-    }
+    };
 
-    let message = MessageIter::new(&bytes).next().expect("netlink message");
+    let message = MessageIter::new(&bytes[..received_len])
+        .next()
+        .expect("netlink message");
     let packet = QueuePacket::parse(&message).expect("NFQUEUE packet");
     let payload = packet.payload.expect("NFQUEUE payload");
     let ihl = if payload.is_empty() {
