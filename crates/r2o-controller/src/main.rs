@@ -7144,6 +7144,7 @@ enum HttpSearchCommand {
     CollectApplied {
         trial_id: [u8; 16],
         timeout: std::time::Duration,
+        deadline: std::time::Instant,
         reply: SyncSender<Result<Vec<r2k_core::control::AppliedEvent>, String>>,
     },
     R2oInstallQuicProbe {
@@ -26916,10 +26917,16 @@ impl ControlClient {
             HttpSearchCommand::CollectApplied {
                 trial_id,
                 timeout,
+                deadline,
                 reply,
             } => {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    let _ = reply.send(Ok(Vec::new()));
+                    return Ok(());
+                }
                 let result = self
-                    .collect_applied_events(trial_id, timeout)
+                    .collect_applied_events(trial_id, timeout.min(remaining))
                     .map_err(|error| error.to_string());
                 if let Err(error) = &result {
                     let _ = reply.send(Err(error.clone()));
@@ -31756,14 +31763,33 @@ fn r2o_collect_controller_applied_events_until_satisfied(
     let deadline = std::time::Instant::now() + timeout;
     let mut events = Vec::new();
     loop {
-        let batch = ask_http_controller(commands, |reply| HttpSearchCommand::CollectApplied {
+        if std::time::Instant::now() >= deadline {
+            return Ok(events);
+        }
+        let (reply, response) = mpsc::sync_channel(1);
+        match commands.try_send(HttpSearchCommand::CollectApplied {
             trial_id,
             timeout: std::time::Duration::ZERO,
+            deadline,
             reply,
-        })?;
-        events.extend(batch);
-        if requirement_met(&events) {
-            return Ok(events);
+        }) {
+            Ok(()) => {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                match response.recv_timeout(remaining) {
+                    Ok(batch) => events.extend(batch?),
+                    Err(mpsc::RecvTimeoutError::Timeout) => return Ok(events),
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        return Err("управляющий цикл HTTP-поиска закрыл ответ".into());
+                    }
+                }
+                if requirement_met(&events) {
+                    return Ok(events);
+                }
+            }
+            Err(mpsc::TrySendError::Full(_)) => {}
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                return Err("управляющий цикл HTTP-поиска остановлен".into());
+            }
         }
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
@@ -41109,6 +41135,31 @@ mod tests {
                 .as_ref()
                 .is_some_and(std::thread::JoinHandle::is_finished)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn applied_collection_deadline_includes_a_full_command_queue() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        for capacity in [0, 1] {
+            let (commands, receiver) = mpsc::sync_channel(capacity);
+            let (done, result) = mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let collect = super::r2o_collect_controller_applied_events_until(
+                    &commands,
+                    [1; 16],
+                    Duration::from_millis(20),
+                    |_| true,
+                );
+                done.send(collect.map(|events| events.len())).unwrap();
+            });
+            let observed = result.recv_timeout(Duration::from_secs(1));
+            drop(receiver);
+            worker.join().unwrap();
+            assert_eq!(observed.unwrap(), Ok(0));
+        }
     }
 
     #[cfg(unix)]
@@ -57555,6 +57606,8 @@ group_block_proven: false,
                             super::HttpSearchCommand::CollectApplied {
                                 trial_id,
                                 timeout: std::time::Duration::from_millis(50),
+                                deadline: std::time::Instant::now()
+                                    + std::time::Duration::from_secs(1),
                                 reply,
                             },
                             &mut catalog,
