@@ -4,6 +4,8 @@ const REC_ID: u16 = 0x0001;
 const REC_PROTO: u16 = 0x0002;
 const REC_PAYLOAD: u16 = 0x0010;
 const REC_POISON: u16 = 0x0011;
+const REC_POISON_FIELDS: u16 = 0x0012;
+const REC_POISON_TCP: u16 = 0x0013;
 const REC_SPLIT: u16 = 0x0100;
 const REC_FAKE: u16 = 0x0101;
 const REC_SEQOVL: u16 = 0x0102;
@@ -41,6 +43,8 @@ struct ParsedPlan {
     proto: u8,
     payloads: Vec<(u16, Vec<u8>)>,
     poisons: Vec<Vec<u8>>,
+    poison_fields: Vec<Vec<u8>>,
+    poison_tcp: Vec<Vec<u8>>,
     autottls: Vec<Vec<u8>>,
     splits: Vec<Vec<u8>>,
     fakes: Vec<Vec<u8>>,
@@ -281,6 +285,12 @@ pub fn compile_text(text: &str) -> Result<Vec<u8>, String> {
                 let mut flags = 0_u8;
                 let mut seq_shift = 0_i32;
                 let mut autottl = None;
+                let mut dataofs = None;
+                let mut tcp_flags = None;
+                let mut ack = None;
+                let mut ack_corrupt = false;
+                let mut ip_len = None;
+                let mut tcp_window = None;
                 for field in &fields[2..] {
                     if *field == "badsum" {
                         flags |= 1;
@@ -308,6 +318,58 @@ pub fn compile_text(text: &str) -> Result<Vec<u8>, String> {
                         seq_shift = value
                             .parse::<i32>()
                             .map_err(|_| parse_error("seqshift is outside int32"))?;
+                    } else if let Some(value) = field.strip_prefix("dataofs=") {
+                        if dataofs.is_some() {
+                            return Err(parse_error("dataofs may be specified only once"));
+                        }
+                        let value = number(value, 15)
+                            .map_err(|_| parse_error("dataofs must be 1..15"))?
+                            as u8;
+                        if value == 0 {
+                            return Err(parse_error(
+                                "dataofs=0 не выражается: R2OP использует 0 как «не менять»",
+                            ));
+                        }
+                        dataofs = Some(value);
+                    } else if let Some(value) = field.strip_prefix("tcp_flags=") {
+                        if tcp_flags.is_some() {
+                            return Err(parse_error("tcp_flags may be specified only once"));
+                        }
+                        tcp_flags =
+                            Some(crate::geneva::tcp_flags_parse(value).ok_or_else(|| {
+                                parse_error("tcp_flags must be letters or 0..511")
+                            })?);
+                    } else if let Some(value) = field.strip_prefix("ack=") {
+                        if ack.is_some() || ack_corrupt {
+                            return Err(parse_error("ack may be specified only once"));
+                        }
+                        if value == "corrupt" {
+                            ack_corrupt = true;
+                        } else {
+                            ack = Some(
+                                value
+                                    .parse::<u32>()
+                                    .map_err(|_| parse_error("ack is outside uint32"))?,
+                            );
+                        }
+                    } else if let Some(value) = field.strip_prefix("ip_len=") {
+                        if ip_len.is_some() {
+                            return Err(parse_error("ip_len may be specified only once"));
+                        }
+                        ip_len = Some(
+                            number(value, u16::MAX as u64)
+                                .map_err(|_| parse_error("ip_len is outside uint16"))?
+                                as u16,
+                        );
+                    } else if let Some(value) = field.strip_prefix("window=") {
+                        if tcp_window.is_some() {
+                            return Err(parse_error("window may be specified only once"));
+                        }
+                        tcp_window = Some(
+                            number(value, u16::MAX as u64)
+                                .map_err(|_| parse_error("window is outside uint16"))?
+                                as u16,
+                        );
                     } else {
                         return Err(parse_error("unknown poison flag"));
                     }
@@ -318,6 +380,48 @@ pub fn compile_text(text: &str) -> Result<Vec<u8>, String> {
                 value.push(flags);
                 push_u32(&mut value, seq_shift as u32);
                 plan.poisons.push(value);
+                if let Some(dataofs) = dataofs {
+                    if plan.minexec < 13 {
+                        return Err(parse_error("dataofs requires minexec=13"));
+                    }
+                    plan.poison_fields
+                        .push(vec![(id >> 8) as u8, id as u8, dataofs]);
+                }
+                if tcp_flags.is_some()
+                    || ack.is_some()
+                    || ack_corrupt
+                    || ip_len.is_some()
+                    || tcp_window.is_some()
+                {
+                    if plan.minexec < 14 {
+                        return Err(parse_error("поля TCP require minexec=14"));
+                    }
+                    let mut mask = 0_u8;
+                    let mut value = Vec::with_capacity(13);
+                    push_u16(&mut value, id);
+                    value.push(0);
+                    if let Some(flags) = tcp_flags {
+                        mask |= 1;
+                        push_u16(&mut value, flags);
+                    }
+                    if let Some(ack) = ack {
+                        mask |= 2;
+                        push_u32(&mut value, ack);
+                    }
+                    if ack_corrupt {
+                        mask |= 4;
+                    }
+                    if let Some(ip_len) = ip_len {
+                        mask |= 8;
+                        push_u16(&mut value, ip_len);
+                    }
+                    if let Some(window) = tcp_window {
+                        mask |= 16;
+                        push_u16(&mut value, window);
+                    }
+                    value[2] = mask;
+                    plan.poison_tcp.push(value);
+                }
                 if let Some([delta, min, max]) = autottl {
                     let mut value = Vec::with_capacity(5);
                     push_u16(&mut value, id);
@@ -386,8 +490,12 @@ pub fn compile_text(text: &str) -> Result<Vec<u8>, String> {
                 let placement = match fields[5] {
                     "place=before" => 0,
                     "place=between" => 1,
+                    "place=after" => 2,
                     _ => return Err(parse_error("unknown fake placement")),
                 };
+                if placement == 2 && plan.minexec < 14 {
+                    return Err(parse_error("place=after requires minexec=14"));
+                }
                 let tls_mod = if fields.len() == 7 {
                     if plan.minexec < 8 {
                         return Err(parse_error("tlsmod requires minexec=8"));
@@ -530,6 +638,8 @@ pub fn compile_text(text: &str) -> Result<Vec<u8>, String> {
         (REC_PAYLOAD, value)
     }));
     let mut autottls = plan.autottls;
+    let mut poison_fields = plan.poison_fields;
+    let mut poison_tcp = plan.poison_tcp;
     for poison in plan.poisons {
         let poison_id: [u8; 2] = poison
             .get(..2)
@@ -537,6 +647,18 @@ pub fn compile_text(text: &str) -> Result<Vec<u8>, String> {
             .try_into()
             .map_err(|_| "invalid poison record")?;
         records.push((REC_POISON, poison));
+        if let Some(index) = poison_fields
+            .iter()
+            .position(|fields| fields.get(..2) == Some(poison_id.as_slice()))
+        {
+            records.push((REC_POISON_FIELDS, poison_fields.remove(index)));
+        }
+        if let Some(index) = poison_tcp
+            .iter()
+            .position(|fields| fields.get(..2) == Some(poison_id.as_slice()))
+        {
+            records.push((REC_POISON_TCP, poison_tcp.remove(index)));
+        }
         if let Some(index) = autottls
             .iter()
             .position(|autottl| autottl.get(..2) == Some(poison_id.as_slice()))
@@ -821,5 +943,117 @@ mod hex_digit_tests {
         }
         std::fs::write(path, &output).unwrap();
         print!("{output}");
+    }
+}
+
+#[cfg(test)]
+mod dataofs_tests {
+    use super::compile_text;
+    use r2k_core::plan::Plan;
+
+    #[test]
+    fn dataofs_compiles_and_is_read_back() {
+        let text = "r2o-plan 1 13\n\
+                    id 00000000000000000000000000000000\n\
+                    proto tcp tls\n\
+                    payload 1 0f0f\n\
+                    poison 1 badsum dataofs=10\n\
+                    fake payload=1 poison=1 repeats=1 gap_us=0 place=before\n";
+        let bytes = compile_text(text).expect("compile");
+        let plan = Plan::parse(&bytes).expect("parse");
+        assert_eq!(plan.poisons[0].dataofs, Some(10));
+        assert_eq!(plan.poisons[0].flags, 1);
+    }
+
+    #[test]
+    fn dataofs_rejects_out_of_range_and_old_minexec() {
+        let bad_value = "r2o-plan 1 13\nid 00000000000000000000000000000000\nproto tcp tls\npoison 1 dataofs=16\n";
+        assert!(compile_text(bad_value).is_err());
+        let zero_is_not_a_noop = "r2o-plan 1 13\nid 00000000000000000000000000000000\nproto tcp tls\npoison 1 dataofs=0\n";
+        assert!(compile_text(zero_is_not_a_noop).is_err());
+
+        let old_exec = "r2o-plan 1 12\nid 00000000000000000000000000000000\nproto tcp tls\npoison 1 dataofs=10\n";
+        assert!(compile_text(old_exec).is_err());
+    }
+}
+
+#[cfg(test)]
+mod tcp_fields_tests {
+    use super::compile_text;
+    use r2k_core::plan::Plan;
+
+    fn text(poison: &str) -> String {
+        format!(
+            "r2o-plan 1 14\n\
+             id 00000000000000000000000000000000\n\
+             proto tcp tls\n\
+             payload 1 0f0f\n\
+             poison 1 badsum {poison}\n\
+             fake payload=1 poison=1 repeats=1 gap_us=0 place=before\n"
+        )
+    }
+
+    #[test]
+    fn flags_ack_ip_len_and_window_compile_and_are_read_back() {
+        let bytes = compile_text(&text(
+            "tcp_flags=FRAPUN ack=287454020 ip_len=4660 window=258",
+        ))
+        .expect("compile");
+        let plan = Plan::parse(&bytes).expect("parse");
+        let poison = plan.poisons[0];
+        assert_eq!(poison.tcp_flags, Some(0x013d));
+        assert_eq!(poison.ack, Some(0x1122_3344));
+        assert!(!poison.ack_corrupt);
+        assert_eq!(poison.ip_len, Some(0x1234));
+        assert_eq!(poison.tcp_window, Some(0x0102));
+    }
+
+    #[test]
+    fn ack_corrupt_is_read_as_corrupt() {
+        let bytes = compile_text(&text("ack=corrupt")).expect("compile");
+        let plan = Plan::parse(&bytes).expect("parse");
+        assert_eq!(plan.poisons[0].ack, None);
+        assert!(plan.poisons[0].ack_corrupt);
+    }
+
+    #[test]
+    fn tcp_fields_require_minexec_14_and_valid_values() {
+        let mut old_exec = text("tcp_flags=PA");
+        old_exec = old_exec.replacen("r2o-plan 1 14", "r2o-plan 1 13", 1);
+        assert!(compile_text(&old_exec).is_err());
+        assert!(compile_text(&text("tcp_flags=X")).is_err());
+        assert!(compile_text(&text("tcp_flags=512")).is_err());
+        assert!(compile_text(&text("ack=1 ack=2")).is_err());
+        assert!(compile_text(&text("window=65536")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod fake_placement_tests {
+    use super::compile_text;
+    use r2k_core::plan::Plan;
+
+    fn text(minexec: u16, placement: &str) -> String {
+        format!(
+            "r2o-plan 1 {minexec}\n\
+             id 00000000000000000000000000000000\n\
+             proto tcp tls\n\
+             payload 1 1603010005\n\
+             poison 1 badsum\n\
+             fake payload=1 poison=1 repeats=1 gap_us=0 place={placement}\n"
+        )
+    }
+
+    #[test]
+    fn place_after_compiles_with_minexec_14() {
+        let bytes = compile_text(&text(14, "after")).expect("compile");
+        let plan = Plan::parse(&bytes).expect("parse");
+        assert_eq!(plan.fakes[0].placement, 2);
+    }
+
+    #[test]
+    fn place_after_rejects_old_minexec() {
+        assert!(compile_text(&text(13, "after")).is_err());
+        assert!(compile_text(&text(14, "sideways")).is_err());
     }
 }

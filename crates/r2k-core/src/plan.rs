@@ -4,7 +4,7 @@ use std::fmt;
 mod apply;
 pub use apply::{Actions, ApplyError, Cancellation, Emission, EmitKind, OriginalFate, PacketInput};
 
-pub const EXEC_VERSION: u16 = 13;
+pub const EXEC_VERSION: u16 = 14;
 pub const SCHEMA_MAX: u16 = 1;
 /// Максимальное число пакетов в результате обработки потока.
 pub const WIRE_BATCH_MAX: usize = 26;
@@ -35,6 +35,11 @@ const REC_ID: u16 = 0x0001;
 const REC_PROTO: u16 = 0x0002;
 const REC_PAYLOAD: u16 = 0x0010;
 const REC_POISON: u16 = 0x0011;
+/// Дополнительные поля порчи (minexec=13): dataofs и зарезервированные байты.
+const REC_POISON_FIELDS: u16 = 0x0012;
+/// Поля заголовков TCP/IP для фальшивок (minexec=14): flags, ack, ip_len,
+/// window. Маска в третьем байте задаёт, какие значения идут следом.
+const REC_POISON_TCP: u16 = 0x0013;
 const REC_SPLIT: u16 = 0x0100;
 const REC_FAKE: u16 = 0x0101;
 const REC_SEQOVL: u16 = 0x0102;
@@ -57,6 +62,8 @@ const REC_AUTOTTL: u16 = 0x0111;
 const ANCHOR_SNI_MIDDLE: u16 = 5;
 const PLACE_BEFORE: u8 = 0;
 const PLACE_BETWEEN: u8 = 1;
+/// Фальшивка после оригинала: `duplicate(,tamper{...})` Geneva.
+const PLACE_AFTER: u8 = 2;
 const ORDER_FORWARD: u8 = 0;
 const ORDER_REVERSE: u8 = 1;
 const TLS_MOD_RND: u8 = 1 << 0;
@@ -101,6 +108,20 @@ pub struct Poison {
     pub flags: u8,
     pub seq_shift: i32,
     pub autottl: Option<AutoTtl>,
+    /// Подмена TCP data offset (0..15) в собранной посылке. `None` — не менять.
+    /// Это женевский `tamper{TCP:dataofs:replace:N}`: DPI разбирает заголовок
+    /// иначе, а сервер отбрасывает фальшивку по контрольной сумме.
+    pub dataofs: Option<u8>,
+    /// `tamper{TCP:flags:replace:...}`: девять бит TCP-флагов, включая NS.
+    pub tcp_flags: Option<u16>,
+    /// `tamper{TCP:ack:replace:N}`: подменить подтверждение целиком.
+    pub ack: Option<u32>,
+    /// `tamper{TCP:ack:corrupt}`: детерминированно испортить подтверждение.
+    pub ack_corrupt: bool,
+    /// `tamper{IP:len:replace:N}`: подменить IPv4 total length.
+    pub ip_len: Option<u16>,
+    /// `tamper{TCP:window:replace:N}`: подменить окно TCP.
+    pub tcp_window: Option<u16>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -261,7 +282,58 @@ impl Plan {
                     flags: value[3],
                     seq_shift: read_u32(value, 4)? as i32,
                     autottl: None,
+                    dataofs: None,
+                    tcp_flags: None,
+                    ack: None,
+                    ack_corrupt: false,
+                    ip_len: None,
+                    tcp_window: None,
                 }),
+                REC_POISON_FIELDS => {
+                    let id = read_u16(value, 0)?;
+                    let poison = plan
+                        .poisons
+                        .iter_mut()
+                        .find(|poison| poison.id == id)
+                        .ok_or_else(|| PlanError::new("dataofs ссылается на неизвестную порчу"))?;
+                    poison.dataofs = Some(value[2]);
+                }
+                REC_POISON_TCP => {
+                    let id = read_u16(value, 0)?;
+                    let mask = value[2];
+                    let mut offset = 3;
+                    let tcp_flags = (mask & 1 != 0)
+                        .then(|| read_u16(value, offset))
+                        .transpose()?;
+                    if mask & 1 != 0 {
+                        offset += 2;
+                    }
+                    let ack = (mask & 2 != 0)
+                        .then(|| read_u32(value, offset))
+                        .transpose()?;
+                    if mask & 2 != 0 {
+                        offset += 4;
+                    }
+                    let ip_len = (mask & 8 != 0)
+                        .then(|| read_u16(value, offset))
+                        .transpose()?;
+                    if mask & 8 != 0 {
+                        offset += 2;
+                    }
+                    let tcp_window = (mask & 16 != 0)
+                        .then(|| read_u16(value, offset))
+                        .transpose()?;
+                    let poison = plan
+                        .poisons
+                        .iter_mut()
+                        .find(|poison| poison.id == id)
+                        .ok_or_else(|| PlanError::new("поля TCP ссылаются на неизвестную порчу"))?;
+                    poison.tcp_flags = tcp_flags;
+                    poison.ack = ack;
+                    poison.ack_corrupt = mask & 4 != 0;
+                    poison.ip_len = ip_len;
+                    poison.tcp_window = tcp_window;
+                }
                 REC_AUTOTTL => {
                     // C-датапат ищет порчу среди уже разобранных записей
                     // (`plan_parse.c:473-486`): AUTOTTL обязана идти после
@@ -528,6 +600,22 @@ impl Plan {
                     "autottl требует minexec=13 и допустимый диапазон",
                 ));
             }
+            if let Some(dataofs) = poison.dataofs
+                && (self.minexec < 13 || self.transport != 6 || !(1..=15).contains(&dataofs))
+            {
+                return Err(PlanError::new(
+                    "dataofs требует minexec=13, TCP и значение 1..15",
+                ));
+            }
+            if (poison.tcp_flags.is_some()
+                || poison.ack.is_some()
+                || poison.ack_corrupt
+                || poison.ip_len.is_some()
+                || poison.tcp_window.is_some())
+                && (self.minexec < 14 || self.transport != 6)
+            {
+                return Err(PlanError::new("поля TCP требуют minexec=14 и TCP-плана"));
+            }
         }
 
         if self.ipfrag != 0
@@ -651,8 +739,11 @@ impl Plan {
             if fake.placement == PLACE_BETWEEN && self.splits.is_empty() {
                 return Err(PlanError::new("фальшивка между кусками, а разрезов нет"));
             }
-            if !matches!(fake.placement, PLACE_BEFORE | PLACE_BETWEEN) {
+            if !matches!(fake.placement, PLACE_BEFORE | PLACE_BETWEEN | PLACE_AFTER) {
                 return Err(PlanError::new("неизвестное размещение фальшивки"));
+            }
+            if fake.placement == PLACE_AFTER && self.minexec < 14 {
+                return Err(PlanError::new("place=after требует minexec=14"));
             }
         }
         for overlay in &self.seq_overlays {
@@ -762,6 +853,40 @@ fn scan(bytes: &[u8], minexec: u16) -> Result<(Counts, usize), PlanError> {
                     return Err(PlanError::new("md5 требует minexec=12"));
                 }
                 counts.poisons += 1;
+            }
+            REC_POISON_FIELDS => {
+                if minexec < 13 || value.len() != 3 || !(1..=15).contains(&value[2]) {
+                    return Err(PlanError::new(
+                        "dataofs требует minexec=13, 3 байта и значение 1..15",
+                    ));
+                }
+            }
+            REC_POISON_TCP => {
+                if minexec < 14 || value.len() < 3 {
+                    return Err(PlanError::new(
+                        "поля TCP требуют minexec=14 и минимум 3 байта",
+                    ));
+                }
+                let mask = value[2];
+                if mask == 0 || mask & !0x1f != 0 {
+                    return Err(PlanError::new("поля TCP: неизвестная маска"));
+                }
+                if mask & 2 != 0 && mask & 4 != 0 {
+                    return Err(PlanError::new(
+                        "поля TCP: ack и ack_corrupt взаимоисключимы",
+                    ));
+                }
+                let expected = 3
+                    + usize::from(mask & 1 != 0) * 2
+                    + usize::from(mask & 2 != 0) * 4
+                    + usize::from(mask & 8 != 0) * 2
+                    + usize::from(mask & 16 != 0) * 2;
+                if value.len() != expected {
+                    return Err(PlanError::new("поля TCP: неверная длина"));
+                }
+                if mask & 1 != 0 && read_u16(value, 3)? > 0x1ff {
+                    return Err(PlanError::new("поля TCP: flags больше 9 бит"));
+                }
             }
             REC_SPLIT => {
                 require_len(value, 4, "разрез не 4 байта")?;

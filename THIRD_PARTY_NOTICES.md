@@ -71,6 +71,34 @@ Rust-алгоритмы прокси и его тестовые сценарии
 - Для этих данных исходные файлы не задают отдельную лицензию. Назначение,
   происхождение и точные хеши сохранены, сами исходные файлы в `r2o` не копировались.
 
+## Библиотека и парсер стратегий Geneva
+
+- Источник: [`avatarDD/geneva_c`](https://github.com/avatarDD/geneva_c),
+  ревизия `bdb767d97e3af0f74de7db4d391bd38808e416cf`, файлы
+  `src/library_data.h`, `src/strategy.c`, `src/pkt_fields.c`,
+  `src/library.c`, `tests/geneva_strategies.h`.
+- Лицензия: BSD 3-Clause; Copyright (c) 2020, University of Maryland
+  College Park. Библиотека стратегий сгенерирована в geneva_c из Geneva
+  `library.py`; уведомление и условия BSD-3-Clause применяются к данным.
+- В Rust перенесены данные 58 стратегий
+  (`crates/r2o-controller/src/geneva_library.rs`) и поведение разбора,
+  канонической печати и фильтрации (`crates/r2o-controller/src/geneva.rs`).
+  Исходники C в Rust-крейт не включены.
+- Эталонные строки `crates/r2o-controller/src/geneva_corpus.rs` получены
+  прогоном geneva_c (`strategy_parse` + `strategy_print`) на 145 записях
+  корпуса и 58 записях библиотеки на ПК; они используются только в тестах.
+- Примитив `tamper{TCP:dataofs:replace:N}` реализован в R2OP независимо
+  по семантике Geneva `strategy.c`/`pkt_fields.c`; исходный C-код в
+  Rust-крейт не копировался.
+- Компилятор поддерживаемого подмножества
+  (`crates/r2o-controller/src/geneva_compile.rs`) и поля
+  `REC_POISON_TCP`/`place=after` реализованы независимо по семантике
+  `strategy.c`/`mutate.c`; исходный C-код не копировался.
+- Бинарные фикстуры `crates/r2o-controller/tests/fixtures/geneva/*.bin`
+  получены прогоном `geneva apply` на `tests/golden/in.pcap` из ревизии
+  `bdb767d` (команда и стратегия — в `README.md` рядом с фикстурами) и
+  используются только в дифференциальном тесте.
+
 ## Public Suffix List
 
 - `r2o-controller` использует crate `psl` версии `2.1.241` (MIT) для расчёта

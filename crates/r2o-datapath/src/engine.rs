@@ -2832,7 +2832,8 @@ mod tests {
     use proptest::prelude::*;
     use r2k_core::packet::PacketView;
     use r2k_core::plan::{
-        EmitKind, OriginalFate, POISON_TCPTS_BACK, PROTO_HTTP, Plan, WIRE_TCP_TEMPLATE,
+        EmitKind, Fake, OriginalFate, POISON_TCPTS_BACK, PROTO_HTTP, Payload, Plan,
+        WIRE_TCP_TEMPLATE,
     };
     use std::time::{Duration, Instant};
 
@@ -3230,6 +3231,95 @@ mod tests {
     }
 
     #[test]
+    fn guard_only_plan_arms_session_guard_without_emissions() {
+        let plan = Plan {
+            schema: 1,
+            transport: 6,
+            proto: 1,
+            guards: r2k_core::plan::GUARD_RST_ALIEN,
+            ..Plan::default()
+        };
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 2053);
+        let mut sessions = TcpSessions::default();
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+        );
+        let hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &client_hello_with_sni());
+        let decision = decide_with_session(&mut sessions, &plan, &hello);
+        assert!(
+            matches!(decision, PacketDecision::Accept),
+            "guard-only план не должен менять пакет: {decision:?}"
+        );
+        let key = TcpFlowKey::from_packet(&hello).unwrap().wire_key();
+        assert_eq!(
+            sessions.session_guards(&key),
+            r2k_core::plan::GUARD_RST_ALIEN,
+            "guard-only план обязан взвести session.guards"
+        );
+    }
+
+    #[test]
+    fn place_after_plan_transmits_original_before_fake() {
+        let plan = Plan {
+            schema: 1,
+            minexec: 14,
+            transport: 6,
+            proto: 1,
+            payloads: vec![Payload {
+                id: 1,
+                bytes: b"geneva-fake".to_vec(),
+            }],
+            fakes: vec![Fake {
+                payload_id: 1,
+                poison_id: 0,
+                repeats: 1,
+                placement: 2,
+                gap_us: 0,
+                tls_mod: 0,
+            }],
+            ..Plan::default()
+        };
+        let client = ([192, 0, 2, 10], 41000);
+        let server = ([198, 51, 100, 20], 443);
+        let mut sessions = TcpSessions::default();
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]),
+        );
+        decide_with_session(
+            &mut sessions,
+            &plan,
+            &ipv4_tcp_packet(server, client, 0x12, 124, 900, &[]),
+        );
+        let hello_payload = client_hello();
+        let hello = ipv4_tcp_packet(client, server, 0x18, 64, 701, &hello_payload);
+        let PacketDecision::Transmit { packets, fate } =
+            decide_with_session(&mut sessions, &plan, &hello)
+        else {
+            panic!("place=after план должен отправлять посылки");
+        };
+        assert_eq!(fate, OriginalFate::Drop);
+        assert_eq!(packets.len(), 2);
+        assert!(
+            packets[0].packet.ends_with(&hello_payload),
+            "первым уходит оригинал"
+        );
+        assert!(
+            packets[1].packet.ends_with(b"geneva-fake"),
+            "второй — фальшивка после оригинала"
+        );
+    }
+
+    #[test]
     fn session_hellos_and_with_sni_sum_tcp_and_udp() {
         let tcp = TcpSessions::default();
         let udp = crate::r2o_udp_sessions::R2oUdpSessions::new().unwrap();
@@ -3254,6 +3344,12 @@ mod tests {
                 ttl: 0,
                 flags: 0,
                 seq_shift: 0,
+                dataofs: None,
+                tcp_flags: None,
+                ack: None,
+                ack_corrupt: false,
+                ip_len: None,
+                tcp_window: None,
                 autottl: Some(r2k_core::plan::AutoTtl {
                     delta: 1,
                     min: 2,
@@ -3348,6 +3444,12 @@ mod tests {
                 ttl: 0,
                 flags: POISON_TCPTS_BACK,
                 seq_shift: 0,
+                dataofs: None,
+                tcp_flags: None,
+                ack: None,
+                ack_corrupt: false,
+                ip_len: None,
+                tcp_window: None,
                 autottl: None,
             }],
             fakes: vec![r2k_core::plan::Fake {
@@ -3412,6 +3514,12 @@ mod tests {
                 ttl: 0,
                 flags: POISON_TCPTS_BACK,
                 seq_shift: 0,
+                dataofs: None,
+                tcp_flags: None,
+                ack: None,
+                ack_corrupt: false,
+                ip_len: None,
+                tcp_window: None,
                 autottl: None,
             }],
             fakes: vec![r2k_core::plan::Fake {

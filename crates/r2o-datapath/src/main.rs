@@ -9865,6 +9865,12 @@ mod app {
                     ttl: 3,
                     flags: 0,
                     seq_shift: 0,
+                    dataofs: None,
+                    tcp_flags: None,
+                    ack: None,
+                    ack_corrupt: false,
+                    ip_len: None,
+                    tcp_window: None,
                     autottl: None,
                 }],
                 fakes: vec![r2k_core::plan::Fake {

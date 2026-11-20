@@ -14,6 +14,11 @@ pub mod dns_health;
 pub mod domain;
 pub mod ech;
 pub mod fetch;
+pub mod geneva;
+pub mod geneva_compile;
+#[cfg(test)]
+mod geneva_corpus;
+pub mod geneva_library;
 mod groups;
 pub mod hello;
 pub mod http_search;

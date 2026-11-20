@@ -118,6 +118,28 @@ fn own_after_fakes_emits_original_after_fakes_and_drops_queue_copy() {
 }
 
 #[test]
+fn place_after_emits_original_then_fake_and_owns_the_queue_copy() {
+    let plan = Plan::parse(&plan(
+        14,
+        2,
+        &[
+            tlv(0x0010, &[0, 7, b'x']),
+            tlv(0x0101, &[0, 7, 0, 0, 1, 2, 0, 0, 0, 0]),
+        ],
+    ))
+    .unwrap();
+    let actions = plan.apply(&PacketInput::new(b"original", 90)).unwrap();
+    assert_eq!(actions.fate, OriginalFate::Drop);
+    assert_eq!(actions.emits.len(), 2);
+    assert_eq!(actions.emits[0].kind, EmitKind::Payload);
+    assert_eq!(actions.emits[0].bytes, b"original");
+    assert_eq!(actions.emits[0].seq, 90);
+    assert_eq!(actions.emits[1].kind, EmitKind::Fake);
+    assert_eq!(actions.emits[1].bytes, b"x");
+    assert_eq!(actions.emits[1].seq, 90);
+}
+
+#[test]
 fn sni_middle_anchor_is_clamped_inside_short_payload_and_requires_sni() {
     let plan = Plan::parse(&plan(1, 1, &[tlv(0x0100, &[0, 5, 0, 0])])).unwrap();
     let mut input = PacketInput::new(b"0123456789", 600);

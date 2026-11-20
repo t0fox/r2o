@@ -1,6 +1,6 @@
 use super::{
-    Fake, ORDER_REVERSE, PLACE_BEFORE, PLACE_BETWEEN, POISON_MD5, PROTO_HTTP, Plan, Poison,
-    SeqOverlay, WIRE_BATCH_MAX, WIRE_TCP_TEMPLATE,
+    Fake, ORDER_REVERSE, PLACE_AFTER, PLACE_BEFORE, PLACE_BETWEEN, POISON_MD5, PROTO_HTTP, Plan,
+    Poison, SeqOverlay, WIRE_BATCH_MAX, WIRE_TCP_TEMPLATE,
 };
 use std::error::Error;
 use std::fmt;
@@ -65,6 +65,19 @@ pub struct Emission {
     pub ttl: u8,
     pub poison: u8,
     pub seq_shift: i32,
+    /// Подмена TCP data offset (0 — оставить вычисленный). Женевский
+    /// `tamper{TCP:dataofs:replace:N}` для фальшивок.
+    pub dataofs: u8,
+    /// Девять бит TCP-флагов (`tamper{TCP:flags:replace:...}`).
+    pub tcp_flags: Option<u16>,
+    /// Подмена TCP ack (`tamper{TCP:ack:replace:N}`).
+    pub ack: Option<u32>,
+    /// Испортить TCP ack детерминированным XOR (`tamper{TCP:ack:corrupt}`).
+    pub ack_corrupt: bool,
+    /// Подмена IPv4 total length (`tamper{IP:len:replace:N}`).
+    pub ip_len: Option<u16>,
+    /// Подмена TCP window (`tamper{TCP:window:replace:N}`).
+    pub tcp_window: Option<u16>,
     pub wire_profile: u8,
     pub ipfrag: u8,
     pub urgent: bool,
@@ -83,6 +96,12 @@ impl Emission {
             ttl: 0,
             poison: 0,
             seq_shift: 0,
+            dataofs: 0,
+            tcp_flags: None,
+            ack: None,
+            ack_corrupt: false,
+            ip_len: None,
+            tcp_window: None,
             wire_profile: 0,
             ipfrag: 0,
             urgent: false,
@@ -244,6 +263,13 @@ impl Plan {
                 self.append_fake_repeats(&mut emits, fake, input, input.seq)?;
             }
             emits.push(Emission::payload(input.seq, &bytes)?);
+            for fake in self
+                .fakes
+                .iter()
+                .filter(|fake| fake.placement == PLACE_AFTER)
+            {
+                self.append_fake_repeats(&mut emits, fake, input, input.seq)?;
+            }
             // C qsplit не возвращается из середины: он идёт в общий
             // `finalize`, где применяются timing, wire_profile и нарезка
             // (`plan_apply.c:645-666,785-812`).
@@ -314,6 +340,11 @@ impl Plan {
             || self.udplen != 0
             || self.qsplit != 0;
         if input.own_after_fakes && !self.fakes.is_empty() {
+            owns_payload = true;
+        }
+        // `place=after` требует отдать оригинал отдельной посылкой, иначе
+        // порядок «оригинал, затем фальшивка» не выразить.
+        if self.fakes.iter().any(|fake| fake.placement == PLACE_AFTER) {
             owns_payload = true;
         }
 
@@ -410,6 +441,13 @@ impl Plan {
             if self.order == ORDER_REVERSE {
                 reverse_payload_emissions(&mut emits);
             }
+        }
+        for fake in self
+            .fakes
+            .iter()
+            .filter(|fake| fake.placement == PLACE_AFTER)
+        {
+            self.append_fake_repeats(&mut emits, fake, input, input.seq)?;
         }
 
         self.apply_timing(&mut emits);
@@ -526,6 +564,12 @@ impl Plan {
             ttl: 0,
             poison: 0,
             seq_shift: 0,
+            dataofs: 0,
+            tcp_flags: None,
+            ack: None,
+            ack_corrupt: false,
+            ip_len: None,
+            tcp_window: None,
             wire_profile: self.wire_profile,
             ipfrag: 0,
             urgent: false,
@@ -537,6 +581,12 @@ impl Plan {
             emission.ttl = poison_ttl(poison, input.reference_ttl);
             emission.poison = poison.flags;
             emission.seq_shift = poison.seq_shift;
+            emission.dataofs = poison.dataofs.unwrap_or(0);
+            emission.tcp_flags = poison.tcp_flags;
+            emission.ack = poison.ack;
+            emission.ack_corrupt = poison.ack_corrupt;
+            emission.ip_len = poison.ip_len;
+            emission.tcp_window = poison.tcp_window;
         }
         Ok(emission)
     }
@@ -642,6 +692,12 @@ impl Plan {
             emission.ttl = poison_ttl(poison, input.reference_ttl);
             emission.poison = poison.flags;
             emission.seq_shift = poison.seq_shift;
+            emission.dataofs = poison.dataofs.unwrap_or(0);
+            emission.tcp_flags = poison.tcp_flags;
+            emission.ack = poison.ack;
+            emission.ack_corrupt = poison.ack_corrupt;
+            emission.ip_len = poison.ip_len;
+            emission.tcp_window = poison.tcp_window;
         }
         Ok(())
     }

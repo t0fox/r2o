@@ -62,6 +62,9 @@ pub fn build_tcp_packet_at(
             && (emission.urgent_ptr == 0
                 || usize::from(emission.urgent_ptr) > emission.bytes.len()))
         || (!emission.urgent && emission.urgent_ptr != 0)
+        || (view.family == 6 && emission.ip_len.is_some())
+        || emission.tcp_flags.is_some_and(|flags| flags > 0x1ff)
+        || (emission.ack.is_some() && emission.ack_corrupt)
         || emission.ipfrag != 0
         || !matches!(
             emission.wire_profile,
@@ -157,7 +160,10 @@ pub fn build_tcp_packet_at(
         out[24..40].copy_from_slice(&view.dst.bytes());
     } else {
         out[0] = 0x45;
-        write_u16(&mut out[2..4], total_len as u16);
+        // `tamper{IP:len:replace:N}` намеренно оставляет байты пакета как
+        // есть: DPI читает подменённую длину, а контрольная сумма IP
+        // считается уже по записанному полю.
+        write_u16(&mut out[2..4], emission.ip_len.unwrap_or(total_len as u16));
         let ip_id = if emission.poison & POISON_IPID_ZERO != 0 {
             0
         } else if measured {
@@ -192,15 +198,42 @@ pub fn build_tcp_packet_at(
         emission.seq.wrapping_add(emission.seq_shift as u32),
     );
     out[tcp_offset + 8..tcp_offset + 12].copy_from_slice(&tcp[8..12]);
-    out[tcp_offset + 12] = ((tcp_header_len / 4) as u8) << 4;
-    out[tcp_offset + 13] = 0x18 | if emission.urgent { 0x20 } else { 0 };
+    // `tamper{TCP:ack:replace:N}` и `corrupt`: подменяем только поле
+    // подтверждения, остальная часть заголовка остаётся прежней.
+    if let Some(ack) = emission.ack {
+        write_u32(&mut out[tcp_offset + 8..tcp_offset + 12], ack);
+    } else if emission.ack_corrupt {
+        let ack = u32::from_be_bytes([tcp[8], tcp[9], tcp[10], tcp[11]]) ^ 0x9e37_79b9;
+        write_u32(&mut out[tcp_offset + 8..tcp_offset + 12], ack);
+    }
+    // Женевский `tamper{TCP:dataofs:replace:N}`: подменяем только ниббл
+    // data offset, не меняя реальные байты заголовка. DPI разбирает поток
+    // со сдвигом, а сервер отбрасывает фальшивку (обычно с badsum).
+    let data_offset = if emission.dataofs == 0 {
+        (tcp_header_len / 4) as u8
+    } else {
+        emission.dataofs.min(15)
+    };
+    // NS — девятый бит TCP-флагов; физически он лежит в младшем бите
+    // зарезервированного полубайта рядом с data offset.
+    let ns = emission
+        .tcp_flags
+        .map(|flags| ((flags >> 8) & 1) as u8)
+        .unwrap_or(0);
+    out[tcp_offset + 12] = (data_offset << 4) | ns;
+    out[tcp_offset + 13] = emission
+        .tcp_flags
+        .map(|flags| flags as u8)
+        .unwrap_or(0x18 | if emission.urgent { 0x20 } else { 0 });
     write_u16(
         &mut out[tcp_offset + 14..tcp_offset + 16],
-        if measured {
-            u16::MAX
-        } else {
-            u16::from_be_bytes([tcp[14], tcp[15]])
-        },
+        emission.tcp_window.unwrap_or_else(|| {
+            if measured {
+                u16::MAX
+            } else {
+                u16::from_be_bytes([tcp[14], tcp[15]])
+            }
+        }),
     );
     if emission.urgent {
         write_u16(
@@ -750,7 +783,7 @@ mod tcp_checksum_tests {
         packet
     }
 
-    fn ipv6_tcp_packet(payload: &[u8]) -> Vec<u8> {
+    pub(super) fn ipv6_tcp_packet(payload: &[u8]) -> Vec<u8> {
         let source: Ipv6Addr = "2001:db8::1".parse().unwrap();
         let destination: Ipv6Addr = "2001:db8::2".parse().unwrap();
         let mut packet = vec![0u8; 60 + payload.len()];
@@ -791,5 +824,135 @@ mod tcp_checksum_tests {
         corrupt6[60] ^= 0xff;
         assert!(!tcp_checksum_ok(&corrupt6));
         assert!(!tcp_checksum_ok(&packet6[..40]));
+    }
+}
+
+#[cfg(test)]
+mod dataofs_tests {
+    use super::*;
+    use crate::plan::EmitKind;
+
+    fn input_packet(payload: &[u8]) -> Vec<u8> {
+        let total = 40 + payload.len();
+        let mut packet = vec![0u8; total];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(total as u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 6;
+        packet[12..16].copy_from_slice(&[192, 0, 2, 10]);
+        packet[16..20].copy_from_slice(&[198, 51, 100, 20]);
+        packet[20..22].copy_from_slice(&443u16.to_be_bytes());
+        packet[22..24].copy_from_slice(&50000u16.to_be_bytes());
+        packet[32] = 5 << 4;
+        packet[33] = 0x18;
+        packet[34..36].copy_from_slice(&65535u16.to_be_bytes());
+        packet[40..].copy_from_slice(payload);
+        packet
+    }
+
+    fn emission(payload: &[u8], dataofs: u8) -> Emission {
+        Emission {
+            kind: EmitKind::Payload,
+            delay_us: 0,
+            seq: 0,
+            ttl: 0,
+            poison: 0,
+            seq_shift: 0,
+            dataofs,
+            tcp_flags: None,
+            ack: None,
+            ack_corrupt: false,
+            ip_len: None,
+            tcp_window: None,
+            wire_profile: 0,
+            ipfrag: 0,
+            urgent: false,
+            urgent_ptr: 0,
+            prefix: Vec::new(),
+            bytes: payload.to_vec(),
+        }
+    }
+
+    #[test]
+    fn tcp_fields_override_header_and_keep_checksums_valid() {
+        let payload = b"hello";
+        let input = input_packet(payload);
+        let mut emission = emission(payload, 0);
+        emission.tcp_flags = Some(0x1ff);
+        emission.ack = Some(0x1122_3344);
+        emission.tcp_window = Some(0x0102);
+
+        let mut out = vec![0u8; 256];
+        let length = build_tcp_packet(&input, &emission, &mut out).expect("packet");
+        assert_eq!(&out[28..32], &0x1122_3344_u32.to_be_bytes());
+        assert_eq!(out[32], 0x51, "data offset 5 и NS в младшем бите");
+        assert_eq!(out[33], 0xff, "все девять TCP-флагов");
+        assert_eq!(&out[34..36], &0x0102_u16.to_be_bytes());
+        assert_eq!(checksum_value(sum16(&out[..20], 0)), 0);
+        assert!(tcp_checksum_ok(&out[..length]));
+        assert_eq!(&out[40..45], payload);
+    }
+
+    #[test]
+    fn ip_len_overrides_total_length_and_ip_checksum() {
+        let payload = b"hello";
+        let input = input_packet(payload);
+        let mut emission = emission(payload, 0);
+        emission.ip_len = Some(0x1234);
+
+        let mut out = vec![0u8; 256];
+        build_tcp_packet(&input, &emission, &mut out).expect("packet");
+        assert_eq!(&out[2..4], &0x1234_u16.to_be_bytes());
+        assert_eq!(
+            checksum_value(sum16(&out[..20], 0)),
+            0,
+            "IP-сумма считается по подменённой длине"
+        );
+        // TCP-сумма намеренно остаётся посчитанной по реальной длине:
+        // получатель отбросит фальшивку, а DPI увидит подменённый IP len.
+        assert!(!tcp_checksum_ok(&out[..45]));
+    }
+
+    #[test]
+    fn ack_corrupt_is_deterministic_and_not_the_original() {
+        let payload = b"hello";
+        let input = input_packet(payload);
+        let mut emission = emission(payload, 0);
+        emission.ack_corrupt = true;
+
+        let mut first = vec![0u8; 256];
+        let mut second = vec![0u8; 256];
+        let first_len = build_tcp_packet(&input, &emission, &mut first).expect("packet");
+        build_tcp_packet(&input, &emission, &mut second).expect("packet");
+        assert_eq!(&first[..first_len], &second[..first_len]);
+        assert_ne!(&first[28..32], &input[28..32]);
+        assert!(tcp_checksum_ok(&first[..first_len]));
+    }
+
+    #[test]
+    fn ip_len_is_rejected_for_ipv6() {
+        let payload = b"hello";
+        let input = super::tcp_checksum_tests::ipv6_tcp_packet(payload);
+        let mut emission = emission(payload, 0);
+        emission.ip_len = Some(0x1234);
+        let mut out = vec![0u8; 256];
+        assert!(build_tcp_packet(&input, &emission, &mut out).is_none());
+    }
+
+    #[test]
+    fn dataofs_overrides_only_the_tcp_nibble() {
+        let payload = b"hello";
+        let input = input_packet(payload);
+        let mut out = vec![0u8; 256];
+        let length = build_tcp_packet(&input, &emission(payload, 10), &mut out).expect("packet");
+        assert!(length >= 45);
+        assert_eq!(out[32] >> 4, 10);
+        assert_eq!(out[32] & 0x0f, 0);
+        assert_eq!(out[33], 0x18);
+        assert_eq!(&out[40..45], payload);
+
+        let mut plain = vec![0u8; 256];
+        build_tcp_packet(&input, &emission(payload, 0), &mut plain).expect("packet");
+        assert_eq!(plain[32] >> 4, 5);
     }
 }
