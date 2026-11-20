@@ -1569,6 +1569,23 @@ mod app {
         }
         let (_, route_status) = route_monitor.r2o_refresh_with_status(&mut route_gate);
         r2o_log_routes_refresh(&mut routes_log, &route_gate, &route_status, Instant::now());
+        let (request_route_refresh, route_refresh_requests) = std::sync::mpsc::channel();
+        let (send_route_snapshot, route_snapshots) = std::sync::mpsc::channel();
+        let mut worker_gate = route_gate.clone();
+        std::thread::Builder::new()
+            .name("r2o-rtnetlink".into())
+            .spawn(move || {
+                let mut monitor = R2oRouteMonitor::default();
+                while let Ok(()) = route_refresh_requests.recv() {
+                    let (_, status) = monitor.r2o_refresh_with_status(&mut worker_gate);
+                    if send_route_snapshot
+                        .send((worker_gate.clone(), status))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })?;
         if let (Some(raw), Some(ifindices)) = (raw.as_ref(), route_gate.r2o_egress_ifindices())
             && let Some(maxlen) = raw.r2o_adopt_egress(&ifindices)
         {
@@ -1675,6 +1692,7 @@ mod app {
         let mut routed_flows = R2oRoutedFlows::default();
         let mut last_route_refresh = Instant::now();
         let mut next_route_refresh = last_route_refresh + R2O_ROUTE_REFRESH_INTERVAL;
+        let mut route_refresh_pending = false;
         install_signal_handlers()?;
         loop {
             if let Some(path) = options.health_path.as_deref() {
@@ -1942,12 +1960,14 @@ mod app {
                 .min(udp_holds.timeout_ms(now, 200))
                 .min(udp_deferred_verdicts.timeout_ms(now, 200))
                 .min(udp_deferred_resends.timeout_ms(now, 200))
-                .min(
+                .min(if route_refresh_pending {
+                    200
+                } else {
                     next_route_refresh
                         .saturating_duration_since(now)
                         .as_millis()
-                        .min(200) as i32,
-                )
+                        .min(200) as i32
+                })
                 .min(stats_timeout);
             // C `d2kd.c:1523-1536`: один poll на NFQUEUE, route-watch и
             // control listen/peer. Набор — только реально открытые fd.
@@ -2055,8 +2075,25 @@ mod app {
                 }
             }
             let route_now = Instant::now();
-            if route_now >= next_route_refresh {
-                let (_, route_status) = route_monitor.r2o_refresh_with_status(&mut route_gate);
+            if !route_refresh_pending && route_now >= next_route_refresh {
+                route_refresh_pending = request_route_refresh.send(()).is_ok();
+                last_route_refresh = route_now;
+                next_route_refresh = last_route_refresh + R2O_ROUTE_REFRESH_INTERVAL;
+                if !route_refresh_pending {
+                    eprintln!("r2o-datapath: поток обновления маршрутов остановлен");
+                }
+            }
+            let route_snapshot = match route_snapshots.try_recv() {
+                Ok(snapshot) => Some(snapshot),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    route_refresh_pending = false;
+                    None
+                }
+            };
+            if let Some((snapshot, route_status)) = route_snapshot {
+                route_gate = snapshot;
+                route_refresh_pending = false;
                 r2o_log_routes_refresh(&mut routes_log, &route_gate, &route_status, Instant::now());
                 if let (Some(raw), Some(ifindices)) =
                     (raw.as_ref(), route_gate.r2o_egress_ifindices())
@@ -2084,8 +2121,6 @@ mod app {
                     }
                 }
                 r2o_ct_probe(&mut conntrack, &mut ct_up, &mut ct_told_off, false);
-                last_route_refresh = Instant::now();
-                next_route_refresh = last_route_refresh + R2O_ROUTE_REFRESH_INTERVAL;
             }
             if control_wake && let Some(control) = control.as_mut() {
                 for command in control.poll()? {
