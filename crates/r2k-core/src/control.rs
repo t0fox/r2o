@@ -2007,18 +2007,39 @@ pub fn encode_delete_name_probe(
     family: u8,
     source_port: u16,
 ) -> Result<Vec<u8>, &'static str> {
+    encode_delete_name_probe_with_trial(name, shape, family, source_port, None)
+}
+
+pub fn encode_delete_name_probe_with_trial(
+    name: &str,
+    shape: u8,
+    family: u8,
+    source_port: u16,
+    trial_id: Option<[u8; 16]>,
+) -> Result<Vec<u8>, &'static str> {
     if name.is_empty() || name.len() > u8::MAX as usize {
         return Err("имя должно занимать от 1 до 255 байт");
     }
     if !matches!(family, 4 | 6) || source_port == 0 {
         return Err("удаление временной TCP-пробы требует IP family и ненулевой source port");
     }
-    let mut body = Vec::with_capacity(5 + name.len());
+    if trial_id == Some([0; 16]) {
+        return Err("снятие временной TCP-пробы требует непустой trial ID");
+    }
+    let mut body = Vec::with_capacity(5 + name.len() + trial_id.map_or(0, |_| 16));
     body.push(name.len() as u8);
     body.extend_from_slice(name.as_bytes());
     body.extend_from_slice(&[shape, family]);
     body.extend_from_slice(&source_port.to_be_bytes());
+    if let Some(trial_id) = trial_id {
+        body.extend_from_slice(&trial_id);
+    }
     encode_frame(COMMAND_DEL_NAME_PROBE, &body)
+}
+
+pub fn name_probe_delete_trial_id(body: &[u8]) -> Option<[u8; 16]> {
+    let name_len = usize::from(*body.first()?);
+    body.get(5 + name_len..)?.try_into().ok()
 }
 
 pub fn encode_ack(command: u16, ok: bool, reason: u8) -> Result<Vec<u8>, &'static str> {
@@ -2085,6 +2106,7 @@ pub fn encode_ack_with_identifiers_profile(
                 | COMMAND_SET_ADDR_PROBE
                 | COMMAND_DEL_ADDR_PROBE
         )
+        && !(profile == WireProfile::V48 && command == COMMAND_DEL_NAME_PROBE)
     {
         return Err("trial ID ACK разрешён только для временной привязки");
     }
@@ -2152,7 +2174,6 @@ pub fn decode_ack(frame: &Frame) -> Result<Ack, &'static str> {
 }
 
 pub fn decode_ack_profile(profile: WireProfile, frame: &Frame) -> Result<Ack, &'static str> {
-    let _ = profile;
     if frame.kind != EVENT_ACK || frame.body.len() < KEY_LEN + 4 {
         return Err("неверное подтверждение команды");
     }
@@ -2175,7 +2196,7 @@ pub fn decode_ack_profile(profile: WireProfile, frame: &Frame) -> Result<Ack, &'
             | COMMAND_DEL_VOICE_ADDR_PROBE
             | COMMAND_SET_ADDR_PROBE
             | COMMAND_DEL_ADDR_PROBE
-    );
+    ) || profile == WireProfile::V48 && command == COMMAND_DEL_NAME_PROBE;
     let supports_area_id = matches!(
         command,
         COMMAND_SET_SUFFIX | COMMAND_DEL_SUFFIX | COMMAND_SET_BYPASS | COMMAND_DEL_BYPASS

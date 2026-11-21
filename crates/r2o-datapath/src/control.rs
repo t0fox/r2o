@@ -344,6 +344,8 @@ impl NamePlans {
                 .body
                 .get(control::KEY_LEN..control::KEY_LEN + 16)
                 .and_then(|bytes| bytes.try_into().ok())
+        } else if frame.kind == COMMAND_DEL_NAME_PROBE {
+            control::name_probe_delete_trial_id(&frame.body)
         } else if frame.kind == COMMAND_SET_NAME_BOUND {
             Some(
                 frame
@@ -402,7 +404,7 @@ impl NamePlans {
                 COMMAND_DEL_NAME => self.delete_name(body),
                 COMMAND_DEL_NAME_BOUND => self.delete_name_bound(body),
                 COMMAND_DEL_ADDR => self.delete_addr(body),
-                COMMAND_DEL_NAME_PROBE => self.delete_name_probe(body),
+                COMMAND_DEL_NAME_PROBE => self.delete_name_probe(body, trial_id),
                 COMMAND_SET_HTTPS => self.set_https(body),
                 COMMAND_CLEAR if frame.body.is_empty() => {
                     self.plans.clear();
@@ -1790,7 +1792,7 @@ impl NamePlans {
         (true, control::ACK_OK)
     }
 
-    fn delete_name_probe(&mut self, body: &[u8]) -> (bool, u8) {
+    fn delete_name_probe(&mut self, body: &[u8], trial_id: Option<[u8; 16]>) -> (bool, u8) {
         let Some(name_len) = body.first().copied().map(usize::from) else {
             return (false, control::ACK_BAD_ARGS);
         };
@@ -1805,17 +1807,20 @@ impl NamePlans {
         let source_port = u16::from_be_bytes([body[3 + name_len], body[4 + name_len]]);
         // C `d2k_plantab_del_name_probe_family` форму не проверяет: чужая
         // форма просто не совпадает и ACK остаётся OK (`plans.c:808-828`).
-        if !matches!(family, 4 | 6) || source_port == 0 {
+        if !matches!(family, 4 | 6) || source_port == 0 || trial_id == Some([0; 16]) {
             return (false, control::ACK_BAD_ARGS);
         }
-        self.probes.remove(&NameProbeKey {
+        let key = NameProbeKey {
             name: NamePlanKey {
                 host,
                 family,
                 shape,
             },
             source_port,
-        });
+        };
+        if trial_id.is_none_or(|trial| self.probes.get(&key).is_some_and(|p| p.trial_id == trial)) {
+            self.probes.remove(&key);
+        }
         (true, control::ACK_OK)
     }
 
@@ -6241,6 +6246,49 @@ mod tests {
         });
         assert!(ack.ok);
         assert_eq!(ack.reason, control::ACK_OK);
+    }
+
+    #[test]
+    fn cancelled_name_probe_cannot_remove_a_later_trial_on_the_same_port() {
+        let mut plans = NamePlans::default();
+        let key = NameProbeKey {
+            name: NamePlanKey {
+                host: "probe.example".into(),
+                family: 4,
+                shape: SHAPE_MODERN,
+            },
+            source_port: 40_000,
+        };
+        plans.probes.insert(
+            key.clone(),
+            ProbePlan {
+                plan: Plan::default(),
+                trial_id: [2; 16],
+                generation: 1,
+                last_used: std::cell::Cell::new(0),
+            },
+        );
+
+        let mut body = vec![b"probe.example".len() as u8];
+        body.extend_from_slice(b"probe.example");
+        body.extend_from_slice(&[SHAPE_MODERN, 4]);
+        body.extend_from_slice(&40_000_u16.to_be_bytes());
+        body.extend_from_slice(&[1; 16]);
+        let mut command = Frame {
+            kind: COMMAND_DEL_NAME_PROBE,
+            body,
+        };
+        let old = plans.handle(&command);
+        assert_eq!(old.trial_id, Some([1; 16]));
+        assert!(old.ok);
+        assert_eq!(plans.probes[&key].trial_id, [2; 16]);
+
+        let trial_offset = command.body.len() - 16;
+        command.body[trial_offset..].fill(2);
+        let current = plans.handle(&command);
+        assert_eq!(current.trial_id, Some([2; 16]));
+        assert!(current.ok);
+        assert!(!plans.probes.contains_key(&key));
     }
 
     #[test]
