@@ -8608,6 +8608,9 @@ fn r2o_family_recovery_decision(
     applied: bool,
 ) -> R2oFamilyRecoveryDecision {
     let response_complete = result.as_ref().is_ok_and(|fetch| {
+        if fetch.dns_probe.is_some() {
+            return fetch.verified_dns_reply();
+        }
         fetch.handshake_verified
             || (fetch.tls.is_some()
                 && fetch
@@ -9255,6 +9258,7 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
         Ok(None) => (None, None),
         Err(error) => return (Err(error.into()), false, false),
     };
+    let is_dns = doh_request.is_some() || dot_frame.is_some();
     r2o_controller::fetch::r2o_fetch_doh_query_set(
         doh_request.as_ref().map(|(_, query)| query.clone()),
     );
@@ -9271,7 +9275,7 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
         };
         let step_timeout = r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT;
         let probe_key = target.probe_key();
-        let address_alpn = if target.address_key().is_some() {
+        let address_alpn = if !is_dns && target.address_key().is_some() {
             let trigger = r2o_discovery_trigger(target, client_hello, None)?;
             Some(
                 r2o_controller::r2o_tls::r2o_tls_client_hello_alpn(&trigger.payload)
@@ -9342,12 +9346,12 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
         let connect_us = phase_elapsed_us();
         let mut transport_established = false;
         let mut socket_hold = None;
-        let captured_non_http_alpn = allow_non_http_alpn
+        let captured_non_http_alpn = (allow_non_http_alpn && !is_dns)
             .then(|| {
                 client_hello.and_then(r2o_controller::r2o_tls::r2o_tls_client_hello_non_http_alpn)
             })
             .flatten();
-        let ech_snapshot_replay = (r2o_is_ech_shape(target.shape) && ech.is_none())
+        let ech_snapshot_replay = (!is_dns && r2o_is_ech_shape(target.shape) && ech.is_none())
             .then_some(client_hello)
             .flatten();
         let fetch_result = match connected {
@@ -13673,8 +13677,9 @@ fn r2o_discovery_verify_snapshot(
 ) -> R2oDiscoveryVerify {
     match result {
         Ok(fetch) => {
-            let level = if fetch.doh_probe {
-                if fetch.dns_reply && fetch.peer_name_ok != Some(false) {
+            let dns_reply = fetch.verified_dns_reply();
+            let level = if fetch.dns_probe.is_some() {
+                if dns_reply {
                     r2o_controller::live::D2K_VER_APPLICATION
                 } else if fetch.handshake_verified || fetch.tls.is_some() {
                     r2o_controller::live::D2K_VER_HANDSHAKE
@@ -13690,10 +13695,10 @@ fn r2o_discovery_verify_snapshot(
             };
             R2oDiscoveryVerify {
                 applied,
-                verified,
+                verified: verified && (fetch.dns_probe.is_none() || dns_reply),
                 level,
                 status: i32::from(fetch.status),
-                dns_reply: fetch.dns_reply,
+                dns_reply,
                 reason: fetch.reason.clone().unwrap_or_else(|| {
                     format!(
                         "проба завершилась: прикладной ответ HTTP {} {}",
@@ -38701,7 +38706,8 @@ mod tests {
         assert!(!applied.dns_reply);
         assert!(!applied.reason.is_empty());
 
-        fetch.doh_probe = true;
+        fetch.dns_probe = Some(r2o_controller::fetch::DnsTcpProtocol::Doh);
+        fetch.peer_name_ok = Some(true);
         fetch.dns_reply = true;
         let doh = super::r2o_discovery_verify_snapshot(&Ok(fetch.clone()), true, true, true);
         assert_eq!(doh.level, r2o_controller::live::D2K_VER_APPLICATION);
@@ -38737,6 +38743,31 @@ mod tests {
             no_transport.level,
             r2o_controller::live::D2K_VER_NOT_MEASURED
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dns_discovery_confirmation_requires_authenticated_exchange_and_applied() {
+        use super::R2oFamilyRecoveryDecision::{Reclassify, Verified};
+        use r2o_controller::fetch::DnsTcpProtocol;
+
+        for (protocol, status) in [(DnsTcpProtocol::Doh, 200), (DnsTcpProtocol::Dot, 0)] {
+            let mut fetch = r2o_test_fetch_result();
+            fetch.dns_probe = Some(protocol);
+            fetch.status = status;
+            fetch.peer_name_ok = Some(true);
+            fetch.handshake_verified = true;
+            fetch.dns_reply = false;
+            let decision =
+                |fetch, applied| super::r2o_family_recovery_decision(&Ok(fetch), applied);
+            assert_eq!(decision(fetch.clone(), true), Reclassify);
+
+            fetch.dns_reply = true;
+            assert_eq!(decision(fetch.clone(), false), Reclassify);
+            assert_eq!(decision(fetch.clone(), true), Verified);
+            fetch.peer_name_ok = None;
+            assert_eq!(decision(fetch, true), Reclassify);
+        }
     }
 
     #[cfg(unix)]
@@ -39148,7 +39179,7 @@ mod tests {
                 "свой план каталога",
             );
             let mut fetch = r2o_test_fetch_result();
-            fetch.doh_probe = true;
+            fetch.dns_probe = Some(r2o_controller::fetch::DnsTcpProtocol::Doh);
             fetch.dns_reply = true;
             fetch.peer_name_ok = Some(true);
             searches.update_candidate_verify(&target, &Ok(fetch), true, false, true);
@@ -50989,7 +51020,7 @@ mod tests {
             application_verified: true,
             handshake_verified: false,
             connection_close: false,
-            doh_probe: false,
+            dns_probe: None,
             dns_reply: false,
             elapsed: std::time::Duration::from_millis(30),
             reason: None,
@@ -53388,7 +53419,7 @@ mod tests {
             application_verified: true,
             handshake_verified: false,
             connection_close: false,
-            doh_probe: false,
+            dns_probe: None,
             dns_reply: false,
             elapsed: std::time::Duration::from_millis(30),
             reason: None,

@@ -233,9 +233,8 @@ pub struct FetchResult {
     /// этот признак в гейте объёмной лестницы: без закрытия соединения
     /// непроверенный бюджет не считается обрывом.
     pub connection_close: bool,
-    /// Проба шла как DoH POST `application/dns-message`.
-    pub doh_probe: bool,
-    /// Тело DoH-ответа прошло `d2k_verify_doh_response_parse`/`dns_probe_reply`.
+    pub dns_probe: Option<DnsTcpProtocol>,
+    /// DNS-ответ соответствует отправленному запросу.
     pub dns_reply: bool,
     pub elapsed: Duration,
     pub reason: Option<String>,
@@ -243,6 +242,22 @@ pub struct FetchResult {
     /// C `budget_say`: заметка об исходе проверки бюджета пакетов.
     pub budget_note: Option<String>,
     pub r2o_resources: Vec<crate::r2o_resource::R2oResourceHint>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DnsTcpProtocol {
+    Doh,
+    Dot,
+}
+
+impl FetchResult {
+    pub fn verified_dns_reply(&self) -> bool {
+        self.dns_probe.is_some()
+            && self.tls.is_some()
+            && self.peer_name_ok == Some(true)
+            && self.complete
+            && self.dns_reply
+    }
 }
 
 /// C `d2k_http_read_response`: поля одного разобранного HTTP-ответа.
@@ -676,7 +691,7 @@ fn r2o_verify_tls_connected_stream_with_alpn_inner(
         application_verified: false,
         handshake_verified: true,
         connection_close: false,
-        doh_probe: false,
+        dns_probe: None,
         dns_reply: false,
         elapsed: started.elapsed(),
         reason: Some("TLS-рукопожатие с ALPN клиента завершено; приложение не измерялось".into()),
@@ -725,7 +740,7 @@ pub fn r2o_verify_tls_replayed_client_hello(
         application_verified: false,
         handshake_verified: proof,
         connection_close: false,
-        doh_probe: false,
+        dns_probe: None,
         dns_reply: false,
         elapsed: started.elapsed(),
         reason: Some(if proof {
@@ -1906,12 +1921,17 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
         Some(ProtocolVersion::TLSv1_2) => Some("1.2"),
         _ => None,
     };
-    let peer_name_ok = connection
-        .peer_certificates()
-        .and_then(|certificates| certificates.first())
-        .and_then(|certificate| {
-            crate::response::https_certificate_name_matches(certificate.as_ref(), &options.name)
-        });
+    let peer_name_ok = if dns_probe {
+        // Для DNS имя и цепочку уже проверил rustls при рукопожатии.
+        Some(true)
+    } else {
+        connection
+            .peer_certificates()
+            .and_then(|certificates| certificates.first())
+            .and_then(|certificate| {
+                crate::response::https_certificate_name_matches(certificate.as_ref(), &options.name)
+            })
+    };
 
     let mut stream = StreamOwned::new(connection, r2o_socket);
     let local_port = stream
@@ -1989,10 +2009,10 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
             chunked: false,
             gzip: false,
             complete: dns_reply,
-            application_verified: dns_reply && peer_name_ok != Some(false),
+            application_verified: dns_reply,
             handshake_verified: false,
             connection_close: false,
-            doh_probe: false,
+            dns_probe: Some(DnsTcpProtocol::Dot),
             dns_reply,
             elapsed: started.elapsed(),
             reason,
@@ -2071,7 +2091,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
                 && (!voice_websocket || peer_name_ok == Some(true)),
             handshake_verified: false,
             connection_close: false,
-            doh_probe: false,
+            dns_probe: None,
             dns_reply: false,
             elapsed: started.elapsed(),
             reason: Some(r2o_gateway.reason),
@@ -2366,7 +2386,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
             complete
                 && parser.status() == 200
                 && type_ok
-                && peer_name_ok != Some(false)
+                && peer_name_ok == Some(true)
                 && r2o_doh_body_tap
                     .as_ref()
                     .is_some_and(|tap| crate::dns_health::dns_probe_reply(tap.prefix(), id))
@@ -2496,7 +2516,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
             application_verified,
             handshake_verified: false,
             connection_close: r2o_http_connection_closes(parser.headers()),
-            doh_probe,
+            dns_probe: doh_probe.then_some(DnsTcpProtocol::Doh),
             dns_reply,
             elapsed: started.elapsed(),
             reason,
@@ -4978,7 +4998,7 @@ mod tests {
             application_verified,
             handshake_verified: false,
             connection_close: false,
-            doh_probe: false,
+            dns_probe: None,
             dns_reply: false,
             elapsed: Duration::ZERO,
             reason: None,
@@ -5297,7 +5317,7 @@ mod tests {
         let result = result.expect("DoH fetch должен завершиться");
         assert!(request.starts_with(b"POST /dns-query HTTP/1.1\r\n"));
         assert!(request.ends_with(&query));
-        assert!(result.doh_probe);
+        assert_eq!(result.dns_probe, Some(crate::fetch::DnsTcpProtocol::Doh));
         assert!(result.dns_reply, "{}", result.reason.unwrap_or_default());
         assert_eq!(result.status, 200);
         assert!(result.application_verified);
@@ -5345,7 +5365,7 @@ mod tests {
         r2o_fetch_doh_query_set(None);
         server.join().unwrap();
         let result = result.expect("DoH fetch с невалидным телом завершается");
-        assert!(result.doh_probe);
+        assert_eq!(result.dns_probe, Some(crate::fetch::DnsTcpProtocol::Doh));
         assert!(!result.dns_reply);
         assert!(!result.application_verified);
     }
@@ -5423,7 +5443,7 @@ mod tests {
         server.join().unwrap();
         let result = result.expect("DoT fetch должен завершиться");
         assert_eq!(received, query);
-        assert!(!result.doh_probe);
+        assert_eq!(result.dns_probe, Some(crate::fetch::DnsTcpProtocol::Dot));
         assert!(result.dns_reply, "{}", result.reason.unwrap_or_default());
         assert!(result.application_verified);
         assert_eq!(result.status, 0);
