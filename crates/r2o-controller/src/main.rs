@@ -2731,13 +2731,35 @@ fn r2o_update_network_whitelist(
 }
 
 #[cfg(unix)]
-fn r2o_read_dns_config_file(path: &str) -> Option<String> {
-    let metadata = std::fs::metadata(path).ok()?;
-    if metadata.len() > 65_536 {
-        return None;
+fn r2o_read_dns_config_file(path: &str) -> std::io::Result<Option<String>> {
+    use std::io::{Error, ErrorKind, Read};
+
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !file.metadata()?.is_file() {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "DNS: нужен обычный файл",
+        ));
     }
-    let bytes = std::fs::read(path).ok()?;
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+    let mut text = String::new();
+    file.take(65_537).read_to_string(&mut text)?;
+    if text.len() > 65_536 {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "DNS: файл больше 64 КиБ",
+        ));
+    }
+    Ok(Some(text))
 }
 
 /// C `ndmc_path`: первый исполняемый ndmc из четырёх путей.
@@ -2823,9 +2845,9 @@ fn r2o_read_system_dns_services() -> Option<Vec<r2k_core::dns_config::DnsService
     } else {
         None
     };
-    let https = r2o_read_dns_config_file("/etc/config/https-dns-proxy");
-    let dnsproxy = r2o_read_dns_config_file("/etc/config/dnsproxy");
-    let doqd = r2o_read_dns_config_file(doqd_path);
+    let https = r2o_read_dns_config_file("/etc/config/https-dns-proxy").ok()?;
+    let dnsproxy = r2o_read_dns_config_file("/etc/config/dnsproxy").ok()?;
+    let doqd = r2o_read_dns_config_file(doqd_path).ok()?;
     Some(r2k_core::dns_config::read_dns_services(
         https.as_deref(),
         dnsproxy.as_deref(),
@@ -3013,6 +3035,8 @@ impl R2oDnsServices {
             live.applied_plan_id.clear();
             live.plan_applied_at = None;
             live.checked_at = None;
+            live.check_elapsed_ms = None;
+            live.answer_rtt_ms = None;
             live.next_check_ms = mono_ms;
             live.reason.clear();
             live.router_seen = false;
@@ -3141,6 +3165,8 @@ impl R2oDnsServices {
                     live.plan_applied_at = None;
                 }
                 live.checked_at = Some(wall_now.max(1));
+                live.check_elapsed_ms = result.elapsed_ms;
+                live.answer_rtt_ms = result.answer_rtt_ms;
                 live.tcp_reachable = level >= r2o_controller::live::D2K_VER_TRANSPORT;
                 live.tls_handshake = level >= r2o_controller::live::D2K_VER_HANDSHAKE;
                 live.http_status = result.http_status;
@@ -35906,6 +35932,7 @@ mod tests {
                     http_status: 200,
                     dns_reply: true,
                     reason: "DoH: корректный RFC 8484 DNS-ответ".into(),
+                    ..Default::default()
                 },
                 2005,
                 5100,
@@ -35986,6 +36013,7 @@ mod tests {
                     http_status: 200,
                     dns_reply: true,
                     reason: "DoH: корректный RFC 8484 DNS-ответ".into(),
+                    ..Default::default()
                 },
                 2005,
                 5100,
@@ -36025,6 +36053,7 @@ mod tests {
                     http_status: 200,
                     dns_reply: true,
                     reason: "DoH: корректный RFC 8484 DNS-ответ".into(),
+                    ..Default::default()
                 },
                 2005,
                 5100,
@@ -36064,6 +36093,7 @@ mod tests {
                     http_status: 200,
                     dns_reply: true,
                     reason: "DoH: корректный RFC 8484 DNS-ответ".into(),
+                    ..Default::default()
                 },
                 2005,
                 5100,
@@ -38347,6 +38377,7 @@ mod tests {
                 http_status: 200,
                 dns_reply: true,
                 reason: "чужая generation".into(),
+                ..Default::default()
             },
             2005,
             0,
@@ -38378,6 +38409,7 @@ mod tests {
                 http_status: 200,
                 dns_reply: true,
                 reason: "DoH: получен корректный DNS-ответ".into(),
+                ..Default::default()
             },
             2005,
             0,
@@ -39072,6 +39104,7 @@ mod tests {
                     http_status: 200,
                     dns_reply: true,
                     reason: "DoH: получен корректный DNS-ответ".into(),
+                    ..Default::default()
                 },
             ))
             .unwrap();

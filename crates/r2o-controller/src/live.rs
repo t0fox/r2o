@@ -153,6 +153,8 @@ pub struct DnsServiceLive {
     pub attempts: u32,
     /// Стенные секунды для live.json; None — проверки ещё не было.
     pub checked_at: Option<i64>,
+    pub check_elapsed_ms: Option<u64>,
+    pub answer_rtt_ms: Option<u64>,
     /// C `dns_service_live.next_check_ms`: монотонные миллисекунды
     /// планировщика; 0 — срок не задан.
     pub next_check_ms: i64,
@@ -178,6 +180,8 @@ impl Default for DnsServiceLive {
             plan_applied: false,
             attempts: 0,
             checked_at: None,
+            check_elapsed_ms: None,
+            answer_rtt_ms: None,
             next_check_ms: 0,
             plan_applied_at: None,
             reason: String::new(),
@@ -710,7 +714,8 @@ fn r2o_live_dns_services(
             if let Some(task) = task {
                 candidate_plan_applied = task.ver_ok;
                 answered = answered || task.ver.dns_reply;
-                candidate_answer = candidate_plan_applied && answered;
+                candidate_answer = candidate_plan_applied && task.ver.dns_reply
+                    && task.ver.level == D2K_VER_APPLICATION;
                 tcp_reachable = task.ver.level >= D2K_VER_TRANSPORT;
                 tls_handshake = task.ver.level >= D2K_VER_HANDSHAKE;
                 http_status = task.ver.status;
@@ -774,7 +779,7 @@ fn r2o_live_dns_services(
                 ("detected", detected_reason.to_owned())
             };
             let path = service.path.split('?').next().unwrap_or("/").to_owned();
-            json!({
+            let mut row = json!({
                 "protocol": service.protocol,
                 "host": service.host,
                 "port": service.port,
@@ -796,7 +801,14 @@ fn r2o_live_dns_services(
                 "candidate_plan_applied": candidate_plan_applied,
                 "dns_answer_via_plan": candidate_answer,
                 "dns_answer_confirmed": answered,
-            })
+            });
+            if let Some(elapsed) = state.check_elapsed_ms {
+                row["check_elapsed_ms"] = json!(elapsed);
+            }
+            if let Some(rtt) = state.answer_rtt_ms {
+                row["answer_rtt_ms"] = json!(rtt);
+            }
+            row
         })
         .collect()
 }
@@ -2040,15 +2052,16 @@ mod tests {
             source: "https-dns-proxy".into(),
             port: 443,
         };
-        let live = DnsServiceLive {
+        let mut live = DnsServiceLive {
             generation: 1,
             plan_applied: true,
             applied_plan_id: "ab".repeat(16),
             dns_answer: false,
+            check_elapsed_ms: Some(18),
             plan_applied_at: Some(1000),
             ..DnsServiceLive::default()
         };
-        let task = DnsTask {
+        let mut task = DnsTask {
             state: DnsTaskState::Verify,
             name: "dns.example".into(),
             ip: "198.51.100.80".into(),
@@ -2084,6 +2097,15 @@ mod tests {
         assert_eq!(snapshot["dns_services"][0]["state"], "bypass_ok");
         assert_eq!(snapshot["dns_services"][0]["candidate_plan_applied"], true);
         assert_eq!(snapshot["dns_services"][0]["dns_answer_via_plan"], true);
+        assert_eq!(snapshot["dns_services"][0]["check_elapsed_ms"], 18);
+
+        live.dns_answer = true;
+        live.state = DnsServiceState::DirectOk;
+        task.ver.level = D2K_VER_HANDSHAKE;
+        task.ver.dns_reply = false;
+        let rows = super::r2o_live_dns_services(&Catalog::default(), &[service], &[live], &[task]);
+        assert_eq!(rows[0]["state"], "direct_ok");
+        assert_eq!(rows[0]["dns_answer_via_plan"], false);
     }
 
     #[test]

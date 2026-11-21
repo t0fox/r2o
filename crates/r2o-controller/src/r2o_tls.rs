@@ -575,6 +575,15 @@ pub fn r2o_tls_ech_client_connection(
     ech: rustls::client::EchConfig,
     wire_len: Option<usize>,
 ) -> Result<rustls::ClientConnection, String> {
+    r2o_tls_ech_connection(name, ech, wire_len, None)
+}
+
+pub(crate) fn r2o_tls_ech_connection(
+    name: &str,
+    ech: rustls::client::EchConfig,
+    wire_len: Option<usize>,
+    roots: Option<rustls::RootCertStore>,
+) -> Result<rustls::ClientConnection, String> {
     if name.is_empty() {
         return Err("ECH требует origin и конфигурацию".to_owned());
     }
@@ -585,12 +594,16 @@ pub fn r2o_tls_ech_client_connection(
     };
     provider.cipher_suites = vec![rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256];
     provider.kx_groups = vec![rustls::crypto::ring::kx_group::X25519];
-    let mut config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(provider))
+    let builder = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(provider))
         .with_ech(rustls::client::EchMode::Enable(ech))
-        .map_err(|error| format!("не удалось включить ECH: {error}"))?
-        .dangerous()
-        .with_custom_certificate_verifier(std::sync::Arc::new(verifier))
-        .with_no_client_auth();
+        .map_err(|error| format!("не удалось включить ECH: {error}"))?;
+    let mut config = match roots {
+        Some(roots) => builder.with_root_certificates(roots),
+        None => builder
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(verifier)),
+    }
+    .with_no_client_auth();
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     config.r2o_client_hello_wire_len = wire_len;
     let server_name = rustls::pki_types::ServerName::try_from(name.to_owned())

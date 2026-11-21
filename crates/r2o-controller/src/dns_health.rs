@@ -5,10 +5,11 @@
 //! нулевой ID, DoT — ID соединения. DoH — RFC 8484 POST на `path`.
 
 use r2k_core::dns_config::DnsService;
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::RootCertStore;
+use rustls::pki_types::ServerName;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::sync::{Arc, Mutex};
+use std::net::{SocketAddr, TcpStream};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 pub const DOH_HEADER_MAX: usize = 8192;
@@ -26,6 +27,8 @@ pub struct DnsHealthResult {
     pub tls_handshake: bool,
     pub http_status: i32,
     pub dns_reply: bool,
+    pub elapsed_ms: Option<u64>,
+    pub answer_rtt_ms: Option<u64>,
     pub reason: String,
 }
 
@@ -535,14 +538,9 @@ fn resolve_service(service: &DnsService) -> Result<SocketAddr, String> {
     } else {
         service.port
     };
-    if let Ok(address) = host.parse::<std::net::IpAddr>() {
-        return Ok(SocketAddr::new(address, port));
-    }
-    (host, port)
-        .to_socket_addrs()
-        .map_err(|error| format!("DNS: {error}"))?
-        .next()
-        .ok_or_else(|| "DNS: endpoint IP не получен".into())
+    host.parse::<std::net::IpAddr>()
+        .map(|address| SocketAddr::new(address, port))
+        .map_err(|_| "DNS: нужен наблюдённый IP endpoint или настроенный bootstrap".into())
 }
 
 fn deadline_from(timeout: Duration) -> Result<Instant, String> {
@@ -603,22 +601,40 @@ fn connect_tcp(
     TcpStream::connect_timeout(&address, timeout).map_err(|error| error.to_string())
 }
 
+pub(crate) fn trusted_dns_tls_connection(
+    name: &str,
+    tls12: bool,
+    wire_len: Option<usize>,
+    alpn: &[Vec<u8>],
+    roots: Arc<RootCertStore>,
+) -> Result<rustls::ClientConnection, String> {
+    let versions = if tls12 {
+        &[&rustls::version::TLS12][..]
+    } else {
+        &[&rustls::version::TLS13, &rustls::version::TLS12][..]
+    };
+    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_protocol_versions(versions)
+    .map_err(|error| format!("DNS: TLS config: {error}"))?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    config.alpn_protocols = alpn.to_vec();
+    config.r2o_client_hello_wire_len = wire_len;
+    let name = ServerName::try_from(name.to_owned()).map_err(|_| "DNS: недопустимое имя TLS")?;
+    rustls::ClientConnection::new(Arc::new(config), name)
+        .map_err(|error| format!("DNS: TLS config: {error}"))
+}
+
 fn tls_connect(
     stream: TcpStream,
     name: &str,
     alpn: &[Vec<u8>],
     deadline: Instant,
-) -> Result<
-    (
-        rustls::StreamOwned<rustls::ClientConnection, TcpStream>,
-        Option<bool>,
-        Option<Vec<u8>>,
-    ),
-    String,
-> {
-    let roots = rustls::RootCertStore::empty();
-    let mut connection =
-        crate::r2o_tls::r2o_tls_client_connection_with_alpn(name, false, None, roots, alpn)?;
+    roots: Arc<RootCertStore>,
+) -> Result<rustls::StreamOwned<rustls::ClientConnection, TcpStream>, String> {
+    let mut connection = trusted_dns_tls_connection(name, false, None, alpn, roots)?;
     let mut stream = stream;
     while connection.is_handshaking() {
         set_tcp_timeout(&stream, deadline)?;
@@ -639,18 +655,7 @@ fn tls_connect(
             Err(error) => return Err(format!("TLS: {error}")),
         }
     }
-    let peer_name = connection
-        .peer_certificates()
-        .and_then(|certificates| certificates.first())
-        .and_then(|certificate| {
-            crate::response::https_certificate_name_matches(certificate.as_ref(), name)
-        });
-    let alpn = connection.alpn_protocol().map(<[u8]>::to_vec);
-    Ok((
-        rustls::StreamOwned::new(connection, stream),
-        peer_name,
-        alpn,
-    ))
+    Ok(rustls::StreamOwned::new(connection, stream))
 }
 
 fn doh_validate(service: &DnsService) -> Result<(), String> {
@@ -702,7 +707,12 @@ fn doh_authority(service: &DnsService) -> Result<String, String> {
     })
 }
 
-fn probe_doh(service: &DnsService, mark: Option<u32>, deadline: Instant) -> DnsHealthResult {
+fn probe_doh(
+    service: &DnsService,
+    mark: Option<u32>,
+    deadline: Instant,
+    roots: Arc<RootCertStore>,
+) -> DnsHealthResult {
     let mut result = DnsHealthResult::default();
     if let Err(reason) = doh_validate(service) {
         result.reason = reason;
@@ -731,17 +741,16 @@ fn probe_doh(service: &DnsService, mark: Option<u32>, deadline: Instant) -> DnsH
     } else {
         service.sni.as_str()
     };
-    let (mut stream, peer_name, _) =
-        match tls_connect(stream, name, &[b"http/1.1".to_vec()], deadline) {
-            Ok(tls) => {
-                result.tls_handshake = true;
-                tls
-            }
-            Err(reason) => {
-                result.reason = format!("DoH: {reason}");
-                return result;
-            }
-        };
+    let mut stream = match tls_connect(stream, name, &[b"http/1.1".to_vec()], deadline, roots) {
+        Ok(tls) => {
+            result.tls_handshake = true;
+            tls
+        }
+        Err(reason) => {
+            result.reason = format!("DoH: {reason}");
+            return result;
+        }
+    };
     let authority = match doh_authority(service) {
         Ok(authority) => authority,
         Err(reason) => {
@@ -759,7 +768,9 @@ fn probe_doh(service: &DnsService, mark: Option<u32>, deadline: Instant) -> DnsH
         "POST {path} HTTP/1.1\r\nHost: {authority}\r\nAccept: application/dns-message\r\nContent-Type: application/dns-message\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         message.len()
     );
-    if stream.write_all(request.as_bytes()).is_err()
+    let sent = Instant::now();
+    if set_tcp_timeout(&stream.sock, deadline).is_err()
+        || stream.write_all(request.as_bytes()).is_err()
         || stream.write_all(&message).is_err()
         || stream.flush().is_err()
     {
@@ -779,7 +790,9 @@ fn probe_doh(service: &DnsService, mark: Option<u32>, deadline: Instant) -> DnsH
         {
             break parsed;
         }
-        set_tcp_timeout(&mut stream.sock, deadline).ok();
+        if set_tcp_timeout(&stream.sock, deadline).is_err() {
+            break parsed;
+        }
         let mut buffer = [0u8; 1024];
         match stream.read(&mut buffer) {
             Ok(0) => break parsed,
@@ -788,16 +801,18 @@ fn probe_doh(service: &DnsService, mark: Option<u32>, deadline: Instant) -> DnsH
         }
     };
     result.http_status = parsed.status;
-    result.dns_reply = parsed.dns_reply && peer_name != Some(false);
-    result.reason = if parsed.state == DohState::Complete && peer_name == Some(false) {
-        "DoH: имя TLS-сервера не совпало".into()
-    } else {
-        parsed.reason
-    };
+    result.dns_reply = parsed.dns_reply;
+    result.answer_rtt_ms = parsed.dns_reply.then(|| sent.elapsed().as_millis() as u64);
+    result.reason = parsed.reason;
     result
 }
 
-fn probe_dot(service: &DnsService, mark: Option<u32>, deadline: Instant) -> DnsHealthResult {
+fn probe_dot(
+    service: &DnsService,
+    mark: Option<u32>,
+    deadline: Instant,
+    roots: Arc<RootCertStore>,
+) -> DnsHealthResult {
     let mut result = DnsHealthResult::default();
     let address = match resolve_service(service) {
         Ok(address) => address,
@@ -822,7 +837,7 @@ fn probe_dot(service: &DnsService, mark: Option<u32>, deadline: Instant) -> DnsH
     } else {
         service.sni.as_str()
     };
-    let (mut stream, peer_name, _) = match tls_connect(stream, name, &[], deadline) {
+    let mut stream = match tls_connect(stream, name, &[b"dot".to_vec()], deadline, roots) {
         Ok(tls) => {
             result.tls_handshake = true;
             tls
@@ -833,14 +848,19 @@ fn probe_dot(service: &DnsService, mark: Option<u32>, deadline: Instant) -> DnsH
         }
     };
     let query = dns_query_frame(DNS_QUERY_ID_DOT);
-    if stream.write_all(&query).is_err() || stream.flush().is_err() {
+    let sent = Instant::now();
+    if set_tcp_timeout(&stream.sock, deadline).is_err()
+        || stream.write_all(&query).is_err()
+        || stream.flush().is_err()
+    {
         result.reason = "DoT: отправка не удалась".into();
         return result;
     }
     set_tcp_timeout(&mut stream.sock, deadline).ok();
     match read_dns_frame(&mut stream, DNS_QUERY_ID_DOT, deadline) {
         Ok(body) => {
-            result.dns_reply = dns_probe_reply(&body, DNS_QUERY_ID_DOT) && peer_name != Some(false);
+            result.dns_reply = dns_probe_reply(&body, DNS_QUERY_ID_DOT);
+            result.answer_rtt_ms = result.dns_reply.then(|| sent.elapsed().as_millis() as u64);
             result.reason = if result.dns_reply {
                 "DoT: получен корректный DNS-ответ".into()
             } else {
@@ -852,51 +872,12 @@ fn probe_dot(service: &DnsService, mark: Option<u32>, deadline: Instant) -> DnsH
     result
 }
 
-#[derive(Debug)]
-struct DnsQuicVerifier {
-    host: String,
-    name: Arc<Mutex<i8>>,
-    algorithms: rustls::crypto::WebPkiSupportedAlgorithms,
-}
-
-impl rustls::client::danger::ServerCertVerifier for DnsQuicVerifier {
-    fn verify_server_cert(
-        &self,
-        end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        *self.name.lock().unwrap() =
-            crate::r2o_quic_http3::r2o_quic_peer_name(end_entity.as_ref(), &self.host);
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.algorithms.supported_schemes()
-    }
-}
-
-fn probe_doq(service: &DnsService, mark: Option<u32>, deadline: Instant) -> DnsHealthResult {
+fn probe_doq(
+    service: &DnsService,
+    mark: Option<u32>,
+    deadline: Instant,
+    roots: Arc<RootCertStore>,
+) -> DnsHealthResult {
     let address = match resolve_service(service) {
         Ok(address) => address,
         Err(reason) => {
@@ -911,7 +892,6 @@ fn probe_doq(service: &DnsService, mark: Option<u32>, deadline: Instant) -> DnsH
     } else {
         service.sni.as_str()
     };
-    let timeout = deadline.saturating_duration_since(Instant::now());
     let socket = match crate::r2o_quic_http3::r2o_quic_http3_udp_socket_fresh(address, mark) {
         Ok((socket, _)) => socket,
         Err(error) => {
@@ -933,7 +913,10 @@ fn probe_doq(service: &DnsService, mark: Option<u32>, deadline: Instant) -> DnsH
             };
         }
     };
-    runtime.block_on(probe_doq_on(socket, address, host, timeout))
+    let timeout = deadline.saturating_duration_since(Instant::now());
+    runtime.block_on(probe_doq_on_with_roots(
+        socket, address, host, timeout, roots,
+    ))
 }
 
 /// C `d2k_verify_dns_on` для DoQ на уже занятом (и, при испытании, плановом)
@@ -944,21 +927,23 @@ pub async fn probe_doq_on(
     host: &str,
     timeout: Duration,
 ) -> DnsHealthResult {
+    probe_doq_on_with_roots(socket, address, host, timeout, dns_roots()).await
+}
+
+async fn probe_doq_on_with_roots(
+    socket: std::net::UdpSocket,
+    address: SocketAddr,
+    host: &str,
+    timeout: Duration,
+    roots: Arc<RootCertStore>,
+) -> DnsHealthResult {
+    let started = Instant::now();
     let mut result = DnsHealthResult::default();
     let provider = rustls::crypto::ring::default_provider();
-    let name = Arc::new(Mutex::new(-1_i8));
-    let verifier = Arc::new(DnsQuicVerifier {
-        host: host.to_owned(),
-        name: Arc::clone(&name),
-        algorithms: provider.signature_verification_algorithms.clone(),
-    });
     let mut tls = match rustls::ClientConfig::builder_with_provider(Arc::new(provider))
         .with_protocol_versions(&[&rustls::version::TLS13])
     {
-        Ok(builder) => builder
-            .dangerous()
-            .with_custom_certificate_verifier(verifier)
-            .with_no_client_auth(),
+        Ok(builder) => builder.with_root_certificates(roots).with_no_client_auth(),
         Err(error) => {
             result.reason = format!("DoQ: TLS config: {error}");
             return result;
@@ -989,19 +974,18 @@ pub async fn probe_doq_on(
     client_config.transport_config(Arc::new(quinn::TransportConfig::default()));
     endpoint.set_default_client_config(client_config);
     let query = dns_query_frame(0);
-    let result_from_runtime: Result<(Vec<u8>, i8), String> = async {
+    let result_from_runtime = tokio::time::timeout(timeout, async {
         let connecting = endpoint
             .connect(address, host)
             .map_err(|error| format!("DoQ: {error}"))?;
-        let connection = tokio::time::timeout(timeout, connecting)
-            .await
-            .map_err(|_| "DoQ: timeout".to_owned())?
-            .map_err(|error| format!("DoQ: {error}"))?;
-        let peer = *name.lock().unwrap();
+        let connection = connecting.await.map_err(|error| format!("DoQ: {error}"))?;
+        result.tcp_reachable = true;
+        result.tls_handshake = true;
         let (mut send, mut recv) = connection
             .open_bi()
             .await
             .map_err(|error| format!("DoQ: stream: {error}"))?;
+        let sent = Instant::now();
         send.write_all(&query)
             .await
             .map_err(|error| format!("DoQ: send: {error}"))?;
@@ -1019,28 +1003,44 @@ pub async fn probe_doq_on(
         recv.read_exact(&mut body)
             .await
             .map_err(|error| format!("DoQ: frame body: {error}"))?;
-        Ok::<(Vec<u8>, i8), String>((body, peer))
-    }
+        if recv
+            .read(&mut header[..1])
+            .await
+            .map_err(|error| format!("DoQ: frame: {error}"))?
+            .is_some()
+        {
+            return Err("DoQ: лишние данные после DNS-ответа".to_owned());
+        }
+        Ok::<_, String>((body, sent.elapsed()))
+    })
     .await;
     endpoint.close(quinn::VarInt::from_u32(0), b"");
     match result_from_runtime {
-        Ok((body, peer)) => {
-            // C `d2k_verify_dns_on` для DoQ ставит TRANSPORT/HANDSHAKE по
-            // факту QUIC-соединения, хотя TCP здесь нет.
-            result.tcp_reachable = true;
-            result.tls_handshake = true;
-            result.dns_reply = dns_probe_reply(&body, 0) && peer != 0;
+        Ok(Ok((body, roundtrip))) => {
+            result.dns_reply = dns_probe_reply(&body, 0);
+            result.answer_rtt_ms = result.dns_reply.then(|| roundtrip.as_millis() as u64);
             result.reason = if result.dns_reply {
                 "DoQ: получен корректный DNS-ответ".into()
             } else {
                 "DoQ: нет подтверждённого DNS-ответа".into()
             };
         }
-        Err(reason) => {
+        Ok(Err(reason)) => {
             result.reason = reason;
         }
+        Err(_) => result.reason = "DoQ: истёк срок проверки".into(),
     }
+    result.elapsed_ms = Some(started.elapsed().as_millis() as u64);
     result
+}
+
+fn dns_roots() -> Arc<RootCertStore> {
+    static ROOTS: OnceLock<Arc<RootCertStore>> = OnceLock::new();
+    Arc::clone(ROOTS.get_or_init(|| {
+        Arc::new(RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        })
+    }))
 }
 
 /// Проверить DNS endpoint из конфигурации `dns_services`.
@@ -1049,6 +1049,16 @@ pub fn probe_dns_health(
     mark: Option<u32>,
     timeout: Duration,
 ) -> DnsHealthResult {
+    probe_dns_health_with_roots(service, mark, timeout, dns_roots())
+}
+
+fn probe_dns_health_with_roots(
+    service: &DnsService,
+    mark: Option<u32>,
+    timeout: Duration,
+    roots: Arc<RootCertStore>,
+) -> DnsHealthResult {
+    let started = Instant::now();
     let deadline = match deadline_from(timeout) {
         Ok(deadline) => deadline,
         Err(reason) => {
@@ -1058,23 +1068,26 @@ pub fn probe_dns_health(
             };
         }
     };
-    if service.protocol.eq_ignore_ascii_case("doh") {
-        probe_doh(service, mark, deadline)
+    let mut result = if service.protocol.eq_ignore_ascii_case("doh") {
+        probe_doh(service, mark, deadline, roots)
     } else if service.protocol.eq_ignore_ascii_case("dot") {
-        probe_dot(service, mark, deadline)
+        probe_dot(service, mark, deadline, roots)
     } else if service.protocol.eq_ignore_ascii_case("doq") {
-        probe_doq(service, mark, deadline)
+        probe_doq(service, mark, deadline, roots)
     } else {
         DnsHealthResult {
             reason: format!("DNS: неподдерживаемый протокол {}", service.protocol),
             ..Default::default()
         }
-    }
+    };
+    result.elapsed_ms = Some(started.elapsed().as_millis() as u64);
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustls::pki_types::CertificateDer;
 
     fn response(flags: u16, answers: u16, answer_type: u16, rdlen: u16) -> Vec<u8> {
         let mut msg = vec![0u8; 12];
@@ -1313,10 +1326,51 @@ mod tests {
     }
 
     #[test]
+    fn dns_health_rejects_untrusted_tls_and_missing_bootstrap() {
+        let (config, _) = test_server_config();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let config = Arc::new(config);
+            for _ in 0..2 {
+                let (socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut stream = rustls::StreamOwned::new(
+                    rustls::ServerConnection::new(Arc::clone(&config)).unwrap(),
+                    socket,
+                );
+                assert!(stream.read(&mut [0u8; 1]).is_err());
+            }
+        });
+        let mut service = DnsService {
+            host: "127.0.0.1".into(),
+            sni: "localhost".into(),
+            path: "/dns-query".into(),
+            port,
+            ..Default::default()
+        };
+        for protocol in ["doh", "dot"] {
+            service.protocol = protocol.into();
+            let result = probe_dns_health(&service, None, Duration::from_secs(2));
+            assert!(result.tcp_reachable);
+            assert!(!result.tls_handshake);
+            assert!(!result.dns_reply);
+            assert!(result.reason.contains("UnknownIssuer"), "{}", result.reason);
+        }
+        server.join().unwrap();
+        service.host = "example.test".into();
+        let missing = probe_dns_health(&service, None, Duration::from_secs(2));
+        assert!(!missing.tcp_reachable);
+        assert!(missing.reason.contains("bootstrap"));
+    }
+
+    #[test]
     fn loopback_doh_health_returns_valid_dns_reply() {
         use std::io::{BufRead, BufReader};
         use std::net::TcpListener;
-        let (config, _) = test_server_config();
+        let (config, cert) = test_server_config();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
@@ -1358,7 +1412,10 @@ mod tests {
             source: "test".into(),
             port,
         };
-        let result = probe_dns_health(&service, None, Duration::from_secs(3));
+        let mut roots = RootCertStore::empty();
+        roots.add(cert).unwrap();
+        let result =
+            probe_dns_health_with_roots(&service, None, Duration::from_secs(3), Arc::new(roots));
         server.join().unwrap();
         assert!(result.tcp_reachable, "{}", result.reason);
         assert!(result.tls_handshake, "{}", result.reason);
@@ -1369,7 +1426,7 @@ mod tests {
     #[test]
     fn loopback_dot_health_returns_valid_length_prefixed_reply() {
         use std::net::TcpListener;
-        let (config, _) = test_server_config();
+        let (config, cert) = test_server_config();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
@@ -1397,7 +1454,10 @@ mod tests {
             source: "test".into(),
             port,
         };
-        let result = probe_dns_health(&service, None, Duration::from_secs(3));
+        let mut roots = RootCertStore::empty();
+        roots.add(cert).unwrap();
+        let result =
+            probe_dns_health_with_roots(&service, None, Duration::from_secs(3), Arc::new(roots));
         server.join().unwrap();
         assert!(result.tcp_reachable, "{}", result.reason);
         assert!(result.tls_handshake, "{}", result.reason);
@@ -1407,7 +1467,7 @@ mod tests {
     #[test]
     fn loopback_doq_health_uses_stream_zero_and_zero_id() {
         use std::net::UdpSocket;
-        let (mut rustls_config, _) = test_server_config();
+        let (mut rustls_config, cert) = test_server_config();
         rustls_config.alpn_protocols = vec![b"doq".to_vec()];
         let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(rustls_config).unwrap();
         let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
@@ -1456,7 +1516,10 @@ mod tests {
             source: "test".into(),
             port,
         };
-        let result = probe_dns_health(&service, None, Duration::from_secs(3));
+        let mut roots = RootCertStore::empty();
+        roots.add(cert).unwrap();
+        let result =
+            probe_dns_health_with_roots(&service, None, Duration::from_secs(3), Arc::new(roots));
         let _ = server.join();
         assert!(result.tcp_reachable, "{}", result.reason);
         assert!(result.tls_handshake, "{}", result.reason);

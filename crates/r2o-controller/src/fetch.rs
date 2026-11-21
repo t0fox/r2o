@@ -1825,12 +1825,28 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
         .set_nodelay(true)
         .map_err(|error| format!("не удалось настроить TCP-сокет: {error}"))?;
 
+    let dot_query = r2o_fetch_dot_query();
+    let doh_query = r2o_fetch_doh_query();
+    let dns_probe = dot_query.is_some() || doh_query.is_some();
     let mut connection = if let Some(ech) = ech {
-        crate::r2o_tls::r2o_tls_ech_client_connection(
+        crate::r2o_tls::r2o_tls_ech_connection(
             &options.name,
-            roots,
             ech.clone(),
             options.wire_len,
+            dns_probe.then_some(roots),
+        )?
+    } else if dns_probe {
+        let alpn = if dot_query.is_some() {
+            b"dot".as_slice()
+        } else {
+            b"http/1.1"
+        };
+        crate::dns_health::trusted_dns_tls_connection(
+            &options.name,
+            options.tls12,
+            options.wire_len,
+            &[alpn.to_vec()],
+            std::sync::Arc::new(roots),
         )?
     } else {
         crate::r2o_tls::r2o_tls_client_connection(
@@ -1906,7 +1922,6 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
         .port();
     // C `d2k_verify_dns_on` (DoT): не HTTP, а length-prefixed DNS-обмен через
     // уже установленный TLS. DoH идёт ниже обычным fetch с POST.
-    let dot_query = r2o_fetch_dot_query();
     if let Some(frame) = dot_query.as_ref() {
         let mut reason = None;
         let mut body_bytes = 0_u64;
@@ -2001,7 +2016,6 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
     let mut redirects = 0;
     // C `d2k_verify_doh_on`: DoH-запрос того же потока. Обычный GET его не
     // несёт; запрос ставится вызывающим до `fetch`.
-    let doh_query = r2o_fetch_doh_query();
     // D2O различает корневой verifier-зонд (initial_path == NULL) и явный
     // ресурсный путь. В R2O корневой зонд представлен как "/", поэтому
     // Gateway-протокол проверяется для этого же пути.
