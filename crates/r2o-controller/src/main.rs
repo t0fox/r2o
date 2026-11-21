@@ -2166,16 +2166,19 @@ fn apply_catalog(socket_path: PathBuf, catalog_path: PathBuf) -> Result<(), Box<
             continue;
         };
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if !wait_for_control_frame(&client.socket, remaining)? {
-            cursor.expire_area_ack(
-                std::time::Instant::now(),
-                &mut active_groups,
-                &mut installed_areas,
-            );
-            continue;
-        }
-        let Some(frame) = read_optional_frame(&mut client.socket)? else {
-            return Err("соединение с датапатом закрыто до подтверждения области".into());
+        let frame = match client.input.read(&mut client.socket, remaining)? {
+            ControlRead::Frame(frame) => frame,
+            ControlRead::Pending => {
+                cursor.expire_area_ack(
+                    std::time::Instant::now(),
+                    &mut active_groups,
+                    &mut installed_areas,
+                );
+                continue;
+            }
+            ControlRead::Closed => {
+                return Err("соединение с датапатом закрыто до подтверждения области".into());
+            }
         };
         if frame.kind == r2k_core::control::EVENT_ACK {
             let ack = decode_ack(&frame)
@@ -6461,11 +6464,16 @@ impl ControlClient {
         let deadline = std::time::Instant::now() + timeout;
         loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() || !wait_for_control_frame(&self.socket, remaining)? {
+            if remaining.is_zero() {
                 return Ok(None);
             }
-            let frame = read_optional_frame(&mut self.socket)?
-                .ok_or("соединение с датапатом закрыто до подтверждения команды")?;
+            let frame = match self.input.read(&mut self.socket, remaining)? {
+                ControlRead::Frame(frame) => frame,
+                ControlRead::Pending => return Ok(None),
+                ControlRead::Closed => {
+                    return Err("соединение с датапатом закрыто до подтверждения команды".into());
+                }
+            };
             if frame.kind == control::EVENT_ACK {
                 let ack = decode_ack(&frame)
                     .map_err(|error| format!("подтверждение датапата: {error}"))?;
@@ -10670,11 +10678,17 @@ fn print_flow_journal(socket_path: PathBuf) -> Result<(), Box<dyn Error>> {
     let mut received = 0_u32;
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() || !wait_for_control_frame(&client.socket, remaining)? {
+        if remaining.is_zero() {
             return Err("датапат не завершил снимок журнала за 3 секунды".into());
         }
-        let Some(frame) = read_optional_frame(&mut client.socket)? else {
-            return Err("датапат закрыл соединение до завершения снимка журнала".into());
+        let frame = match client.input.read(&mut client.socket, remaining)? {
+            ControlRead::Frame(frame) => frame,
+            ControlRead::Pending => {
+                return Err("датапат не завершил снимок журнала за 3 секунды".into());
+            }
+            ControlRead::Closed => {
+                return Err("датапат закрыл соединение до завершения снимка журнала".into());
+            }
         };
         if frame.kind == EVENT_R2O_JOURNAL_ENTRY {
             let entry = r2o_datapath::flow_journal::R2oFlowJournalEntry::from_event_frame(&frame)
@@ -22085,7 +22099,7 @@ fn r2o_discovery_white_trigger(name: &str) -> Option<Trigger> {
         })
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn read_optional_frame(stream: &mut impl std::io::Read) -> std::io::Result<Option<Frame>> {
     use std::io::{Error, ErrorKind};
 
@@ -22157,13 +22171,18 @@ fn wait_for_control_frame(
     if r2o_link_peer_closed(socket.as_raw_fd())? {
         return Ok(true);
     }
-    let millis = timeout.as_millis().min(i32::MAX as u128) as i32;
+    let started = std::time::Instant::now();
     let mut descriptor = libc::pollfd {
         fd: socket.as_raw_fd(),
         events: libc::POLLIN,
         revents: 0,
     };
     loop {
+        let millis = timeout
+            .saturating_sub(started.elapsed())
+            .as_nanos()
+            .div_ceil(1_000_000)
+            .min(i32::MAX as u128) as i32;
         let result = unsafe { libc::poll(&mut descriptor, 1, millis) };
         if result > 0 {
             if descriptor.revents & libc::POLLNVAL != 0 {
@@ -22182,21 +22201,78 @@ fn wait_for_control_frame(
 }
 
 #[cfg(unix)]
-fn r2o_read_control_batch(
-    socket: &mut std::os::unix::net::UnixStream,
-    first: Frame,
-    limit: usize,
-) -> std::io::Result<VecDeque<Frame>> {
-    let limit = limit.clamp(1, 256);
-    let mut frames = VecDeque::with_capacity(limit);
-    frames.push_back(first);
-    while frames.len() < limit && wait_for_control_frame(socket, std::time::Duration::ZERO)? {
-        let Some(frame) = read_optional_frame(socket)? else {
-            break;
-        };
-        frames.push_back(frame);
+enum ControlRead {
+    Frame(Frame),
+    Pending,
+    Closed,
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct ControlInput(bytes::BytesMut);
+
+#[cfg(unix)]
+impl ControlInput {
+    fn read(
+        &mut self,
+        socket: &mut std::os::unix::net::UnixStream,
+        timeout: std::time::Duration,
+    ) -> std::io::Result<ControlRead> {
+        use std::io::{Error, ErrorKind, Read};
+        let started = std::time::Instant::now();
+        loop {
+            if self.0.len() >= 4 {
+                let length = u32::from_be_bytes(self.0[..4].try_into().unwrap()) as usize;
+                if !(2..=control::FRAME_MAX).contains(&length) {
+                    return Err(Error::new(
+                        ErrorKind::InvalidData,
+                        "длина управляющего кадра вне допустимого диапазона",
+                    ));
+                }
+                if self.0.len() >= length + 4 {
+                    let packet = self.0.split_to(length + 4);
+                    return Ok(ControlRead::Frame(Frame {
+                        kind: u16::from_be_bytes([packet[4], packet[5]]),
+                        body: packet[6..].to_vec(),
+                    }));
+                }
+            }
+
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if !timeout.is_zero() && remaining.is_zero()
+                || !wait_for_control_frame(socket, remaining)?
+            {
+                return Ok(ControlRead::Pending);
+            }
+            // У соединения один читатель. После poll нужен только один read, чтобы не ждать хвост.
+            let mut incoming = [0; 4096];
+            match socket.read(&mut incoming) {
+                Ok(0) if self.0.is_empty() => return Ok(ControlRead::Closed),
+                Ok(0) => {
+                    return Err(Error::new(ErrorKind::UnexpectedEof, "неполный управляющий кадр"));
+                }
+                Ok(length) => self.0.extend_from_slice(&incoming[..length]),
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+        }
     }
-    Ok(frames)
+
+    fn read_batch(
+        &mut self,
+        socket: &mut std::os::unix::net::UnixStream,
+        first: Frame,
+    ) -> std::io::Result<VecDeque<Frame>> {
+        let mut frames = VecDeque::with_capacity(256);
+        frames.push_back(first);
+        while frames.len() < 256 {
+            let ControlRead::Frame(frame) = self.read(socket, std::time::Duration::ZERO)? else {
+                break;
+            };
+            frames.push_back(frame);
+        }
+        Ok(frames)
+    }
 }
 
 #[cfg(unix)]
@@ -22217,6 +22293,7 @@ enum HttpAcknowledgedBinding {
 #[cfg(unix)]
 struct ControlClient {
     socket: std::os::unix::net::UnixStream,
+    input: ControlInput,
     send_maxlen: u32,
     send_cap: Arc<AtomicUsize>,
     pending_events: VecDeque<Frame>,
@@ -22705,6 +22782,7 @@ impl ControlClient {
             socket,
             send_maxlen: greeting.send_maxlen,
             send_cap: Arc::new(AtomicUsize::new(greeting.send_maxlen as usize)),
+            input: Default::default(),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             dropped_events: Default::default(),
@@ -23642,21 +23720,19 @@ impl ControlClient {
                     });
                 }
                 if r2o_scheduler_tick_pending && self.pending_events.is_empty() {
-                    if wait_for_control_frame(&self.socket, std::time::Duration::ZERO)? {
-                        let Some(frame) = read_optional_frame(&mut self.socket)? else {
-                            return Ok(());
-                        };
-                        self.pending_events.extend(r2o_read_control_batch(
-                            &mut self.socket,
-                            frame,
-                            256,
-                        )?);
-                    } else {
-                        measurement_gate.r2o_scheduler_tick();
-                        if let Some((worker, _, _, _)) = discovery.as_mut() {
-                            worker.r2o_ensure_workers();
+                    match self.input.read(&mut self.socket, std::time::Duration::ZERO)? {
+                        ControlRead::Frame(frame) => {
+                            let batch = self.input.read_batch(&mut self.socket, frame)?;
+                            self.pending_events.extend(batch);
                         }
-                        r2o_scheduler_tick_pending = false;
+                        ControlRead::Pending => {
+                            measurement_gate.r2o_scheduler_tick();
+                            if let Some((worker, _, _, _)) = discovery.as_mut() {
+                                worker.r2o_ensure_workers();
+                            }
+                            r2o_scheduler_tick_pending = false;
+                        }
+                        ControlRead::Closed => return Ok(()),
                     }
                 }
                 if self.pending_events.is_empty() && catalog_sync.is_none() && catalog_sync_dirty {
@@ -24849,37 +24925,35 @@ impl ControlClient {
                         .chain(pending_quic_acks.values().map(|ack| ack.deadline))
                         .map(|deadline| deadline.saturating_duration_since(now))
                         .fold(wait, std::time::Duration::min);
-                    if !wait_for_control_frame(&self.socket, wait)? {
-                        measurement_gate.r2o_scheduler_tick();
-                        if let Some((worker, _, _, _)) = discovery.as_mut() {
-                            worker.r2o_ensure_workers();
-                        }
-                        if wait.is_zero()
-                            && let Some(cursor) = catalog_sync.as_mut()
-                        {
-                            let previous_groups = active_groups.clone();
-                            cursor.expire_area_ack(
-                                std::time::Instant::now(),
-                                &mut active_groups,
-                                &mut installed_areas,
-                            );
-                            if previous_groups != active_groups
-                                && let Some((worker, catalog, _, _)) = discovery.as_mut()
-                            {
-                                worker.r2o_set_installed_groups(&active_groups);
-                                worker.catalog_changed(catalog, &active_groups);
+                    let frame = match self.input.read(&mut self.socket, wait)? {
+                        ControlRead::Frame(frame) => frame,
+                        ControlRead::Pending => {
+                            measurement_gate.r2o_scheduler_tick();
+                            if let Some((worker, _, _, _)) = discovery.as_mut() {
+                                worker.r2o_ensure_workers();
                             }
+                            if wait.is_zero()
+                                && let Some(cursor) = catalog_sync.as_mut()
+                            {
+                                let previous_groups = active_groups.clone();
+                                cursor.expire_area_ack(
+                                    std::time::Instant::now(),
+                                    &mut active_groups,
+                                    &mut installed_areas,
+                                );
+                                if previous_groups != active_groups
+                                    && let Some((worker, catalog, _, _)) = discovery.as_mut()
+                                {
+                                    worker.r2o_set_installed_groups(&active_groups);
+                                    worker.catalog_changed(catalog, &active_groups);
+                                }
+                            }
+                            continue;
                         }
-                        continue;
-                    }
-                    let Some(frame) = read_optional_frame(&mut self.socket)? else {
-                        return Ok(());
+                        ControlRead::Closed => return Ok(()),
                     };
-                    self.pending_events.extend(r2o_read_control_batch(
-                        &mut self.socket,
-                        frame,
-                        256,
-                    )?);
+                    let batch = self.input.read_batch(&mut self.socket, frame)?;
+                    self.pending_events.extend(batch);
                     r2o_scheduler_tick_pending = true;
                     self.pending_events
                         .pop_front()
@@ -27478,11 +27552,12 @@ impl ControlClient {
                 return Ok(events);
             }
             let wait = remaining.min(std::time::Duration::from_millis(100));
-            if !wait_for_control_frame(&self.socket, wait)? {
-                continue;
-            }
-            let Some(frame) = read_optional_frame(&mut self.socket)? else {
-                return Err("соединение с датапатом закрыто во время проверки APPLIED".into());
+            let frame = match self.input.read(&mut self.socket, wait)? {
+                ControlRead::Frame(frame) => frame,
+                ControlRead::Pending => continue,
+                ControlRead::Closed => {
+                    return Err("соединение с датапатом закрыто во время проверки APPLIED".into());
+                }
             };
             if frame.kind == EVENT_APPLIED {
                 if let Ok(event) = decode_applied(&frame) {
@@ -27528,14 +27603,13 @@ impl ControlClient {
             if remaining.is_zero() {
                 return Ok(None);
             }
-            if !wait_for_control_frame(
-                &self.socket,
-                remaining.min(std::time::Duration::from_millis(100)),
-            )? {
-                continue;
-            }
-            let Some(frame) = read_optional_frame(&mut self.socket)? else {
-                return Err("соединение с датапатом закрыто во время захвата ClientHello".into());
+            let wait = remaining.min(std::time::Duration::from_millis(100));
+            let frame = match self.input.read(&mut self.socket, wait)? {
+                ControlRead::Frame(frame) => frame,
+                ControlRead::Pending => continue,
+                ControlRead::Closed => {
+                    return Err("соединение с датапатом закрыто во время захвата ClientHello".into());
+                }
             };
             if frame.kind == EVENT_CLIENT_SHAPE {
                 let event = decode_client_shape(&frame)
@@ -27989,11 +28063,12 @@ impl ControlClient {
                 return Ok(proof);
             }
             let wait = remaining.min(std::time::Duration::from_millis(100));
-            if !wait_for_control_frame(&self.socket, wait)? {
-                continue;
-            }
-            let Some(frame) = read_optional_frame(&mut self.socket)? else {
-                return Err("соединение с датапатом закрыто во время проверки TCP-обмена".into());
+            let frame = match self.input.read(&mut self.socket, wait)? {
+                ControlRead::Frame(frame) => frame,
+                ControlRead::Pending => continue,
+                ControlRead::Closed => {
+                    return Err("соединение с датапатом закрыто во время проверки TCP-обмена".into());
+                }
             };
             if !self.observe_ask_proof_frame(
                 &frame,
@@ -31195,6 +31270,7 @@ mod r2o_ask_proof_tests {
             socket,
             send_maxlen: 0,
             send_cap: Arc::new(AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: Default::default(),
             pending_applied_events: Default::default(),
             dropped_events: Default::default(),
@@ -34377,6 +34453,7 @@ mod tests {
             socket: client_stream,
             send_maxlen: 0,
             send_cap: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: std::collections::VecDeque::new(),
             pending_applied_events: std::collections::VecDeque::new(),
             dropped_events: Default::default(),
@@ -37400,6 +37477,7 @@ mod tests {
             socket: client_stream,
             send_maxlen: 0,
             send_cap: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: std::collections::VecDeque::new(),
             pending_applied_events: std::collections::VecDeque::new(),
             dropped_events: Default::default(),
@@ -37531,6 +37609,7 @@ mod tests {
             socket: client_stream,
             send_maxlen: 0,
             send_cap: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: std::collections::VecDeque::new(),
             pending_applied_events: std::collections::VecDeque::new(),
             dropped_events: Default::default(),
@@ -38158,6 +38237,7 @@ mod tests {
             socket: client_stream,
             send_maxlen: 0,
             send_cap: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: std::collections::VecDeque::new(),
             pending_applied_events: std::collections::VecDeque::new(),
             dropped_events: Default::default(),
@@ -39592,6 +39672,7 @@ mod tests {
             socket,
             send_maxlen: 1500,
             send_cap: Arc::new(std::sync::atomic::AtomicUsize::new(1500)),
+            input: Default::default(),
             pending_events: Default::default(),
             pending_applied_events: Default::default(),
             dropped_events: Arc::new(AtomicUsize::new(0)),
@@ -39688,6 +39769,7 @@ mod tests {
             socket,
             send_maxlen: 1500,
             send_cap: Arc::new(std::sync::atomic::AtomicUsize::new(1500)),
+            input: Default::default(),
             pending_events: Default::default(),
             pending_applied_events: Default::default(),
             dropped_events: Arc::new(AtomicUsize::new(0)),
@@ -39790,6 +39872,7 @@ mod tests {
                 socket,
                 send_maxlen: 1500,
                 send_cap: Arc::new(std::sync::atomic::AtomicUsize::new(1500)),
+                input: Default::default(),
                 pending_events: Default::default(),
                 pending_applied_events: Default::default(),
                 dropped_events: Arc::new(AtomicUsize::new(0)),
@@ -40344,6 +40427,7 @@ mod tests {
             socket,
             send_maxlen: 1500,
             send_cap: Arc::new(AtomicUsize::new(1500)),
+            input: Default::default(),
             pending_events: Default::default(),
             pending_applied_events: Default::default(),
             dropped_events: Arc::new(AtomicUsize::new(0)),
@@ -40575,6 +40659,7 @@ mod tests {
                 socket,
                 send_maxlen: 1500,
                 send_cap: Arc::new(AtomicUsize::new(1500)),
+                input: Default::default(),
                 pending_events: Default::default(),
                 pending_applied_events: Default::default(),
                 dropped_events: Arc::new(AtomicUsize::new(0)),
@@ -41337,6 +41422,7 @@ mod tests {
             socket,
             send_maxlen: 0,
             send_cap: Arc::new(AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: Default::default(),
             pending_applied_events: Default::default(),
             dropped_events: Default::default(),
@@ -46571,6 +46657,7 @@ mod tests {
             socket: client_stream,
             send_maxlen: 0,
             send_cap: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: std::collections::VecDeque::new(),
             pending_applied_events: std::collections::VecDeque::new(),
             dropped_events: Default::default(),
@@ -48606,6 +48693,7 @@ mod tests {
             socket,
             send_maxlen: 0,
             send_cap: Default::default(),
+            input: Default::default(),
             pending_events: Default::default(),
             pending_applied_events: Default::default(),
             dropped_events: Default::default(),
@@ -49033,6 +49121,7 @@ mod tests {
             socket,
             send_maxlen: 0,
             send_cap: std::sync::Arc::new(AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: std::collections::VecDeque::new(),
             pending_applied_events: std::collections::VecDeque::new(),
             dropped_events: Default::default(),
@@ -50290,6 +50379,7 @@ mod tests {
                 socket,
                 send_maxlen: 0,
                 send_cap: Arc::new(AtomicUsize::new(0)),
+                input: Default::default(),
                 pending_events: Default::default(),
                 pending_applied_events: Default::default(),
                 dropped_events: Default::default(),
@@ -50425,6 +50515,7 @@ mod tests {
             socket,
             send_maxlen: 0,
             send_cap: Arc::new(AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: Default::default(),
             pending_applied_events: Default::default(),
             dropped_events: Default::default(),
@@ -52358,6 +52449,7 @@ group_block_proven: false,
             socket,
             send_maxlen: 0,
             send_cap: Arc::new(AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             dropped_events: Default::default(),
@@ -53140,20 +53232,35 @@ group_block_proven: false,
         use std::os::unix::net::UnixStream;
 
         let (mut reader, mut writer) = UnixStream::pair().unwrap();
-        writer
-            .write_all(&encode_frame(1, &[0x11]).unwrap())
-            .unwrap();
+        let mut input = super::ControlInput::default();
+        let first = encode_frame(1, &[0x11]).unwrap();
+        let following = encode_frame(3, &[0x33]).unwrap();
+        let now = std::time::Duration::ZERO;
+        writer.write_all(&first[..3]).unwrap();
+        assert!(matches!(
+            input.read(&mut reader, now).unwrap(),
+            super::ControlRead::Pending
+        ));
+        writer.write_all(&first[3..]).unwrap();
         writer
             .write_all(&encode_frame(2, &[0x22]).unwrap())
             .unwrap();
-        let first = super::read_optional_frame(&mut reader).unwrap().unwrap();
-
-        let batch = super::r2o_read_control_batch(&mut reader, first, 256).unwrap();
+        writer.write_all(&following[..6]).unwrap();
+        let super::ControlRead::Frame(first) = input.read(&mut reader, now).unwrap() else {
+            panic!("первый кадр не получен");
+        };
+        let batch = input.read_batch(&mut reader, first).unwrap();
 
         assert_eq!(batch.len(), 2);
         assert_eq!(batch[0].kind, 1);
         assert_eq!(batch[1].kind, 2);
         assert_eq!(batch[1].body, [0x22]);
+        writer.write_all(&following[6..]).unwrap();
+        let super::ControlRead::Frame(last) = input.read(&mut reader, now).unwrap() else {
+            panic!("хвост кадра потерян");
+        };
+        assert_eq!(last.kind, 3);
+        assert_eq!(last.body, [0x33]);
     }
 
     #[cfg(unix)]
@@ -53534,6 +53641,7 @@ group_block_proven: false,
             socket,
             send_maxlen: 0,
             send_cap: Arc::new(AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             dropped_events: Default::default(),
@@ -53598,6 +53706,7 @@ group_block_proven: false,
             socket,
             send_maxlen: 0,
             send_cap: Arc::new(AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             dropped_events: Default::default(),
@@ -53717,6 +53826,7 @@ group_block_proven: false,
             socket,
             send_maxlen: 0,
             send_cap: Arc::new(AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             dropped_events: Default::default(),
@@ -53742,6 +53852,7 @@ group_block_proven: false,
             socket,
             send_maxlen: 1200,
             send_cap: Arc::clone(&send_cap),
+            input: Default::default(),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             dropped_events: Default::default(),
@@ -53767,6 +53878,7 @@ group_block_proven: false,
             socket,
             send_maxlen: 0,
             send_cap: Arc::new(AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             dropped_events: Default::default(),
@@ -53791,6 +53903,7 @@ group_block_proven: false,
             socket,
             send_maxlen: 0,
             send_cap: Arc::new(AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             dropped_events: Default::default(),
@@ -53815,6 +53928,7 @@ group_block_proven: false,
             socket,
             send_maxlen: 0,
             send_cap: Arc::new(AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             dropped_events: Default::default(),
@@ -53839,6 +53953,7 @@ group_block_proven: false,
             socket,
             send_maxlen: 0,
             send_cap: Arc::new(AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             dropped_events: Default::default(),
@@ -53863,6 +53978,7 @@ group_block_proven: false,
             socket,
             send_maxlen: 0,
             send_cap: Arc::new(AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             dropped_events: Default::default(),
@@ -54189,6 +54305,7 @@ group_block_proven: false,
             socket,
             send_maxlen: 0,
             send_cap: Arc::new(AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             dropped_events: Default::default(),
@@ -54578,6 +54695,7 @@ group_block_proven: false,
             socket,
             send_maxlen: 0,
             send_cap: Arc::new(AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             dropped_events: Default::default(),
@@ -54823,6 +54941,7 @@ group_block_proven: false,
             socket,
             send_maxlen: 0,
             send_cap: Arc::new(AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: Default::default(),
             pending_applied_events: Default::default(),
             dropped_events: Default::default(),
@@ -54864,6 +54983,7 @@ group_block_proven: false,
             socket,
             send_maxlen: 0,
             send_cap: Arc::new(AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: Default::default(),
             pending_applied_events: Default::default(),
             dropped_events: Default::default(),
@@ -55022,6 +55142,7 @@ group_block_proven: false,
             socket,
             send_maxlen: 0,
             send_cap: Arc::new(AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             dropped_events: Default::default(),
@@ -55070,6 +55191,7 @@ group_block_proven: false,
             socket,
             send_maxlen: 0,
             send_cap: Arc::new(AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             dropped_events: Default::default(),
@@ -55549,6 +55671,7 @@ group_block_proven: false,
             socket,
             send_maxlen: 0,
             send_cap: Arc::new(AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             dropped_events: Default::default(),
@@ -55586,6 +55709,7 @@ group_block_proven: false,
             socket,
             send_maxlen: 0,
             send_cap: Arc::new(AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             dropped_events: Default::default(),
@@ -55628,6 +55752,7 @@ group_block_proven: false,
             socket,
             send_maxlen: 0,
             send_cap: Arc::new(AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             dropped_events: Default::default(),
@@ -58207,6 +58332,7 @@ group_block_proven: false,
                 socket,
                 send_maxlen: 0,
                 send_cap: Arc::new(AtomicUsize::new(0)),
+                input: Default::default(),
                 pending_events: Default::default(),
                 pending_applied_events: Default::default(),
                 dropped_events: Default::default(),
@@ -58642,6 +58768,7 @@ group_block_proven: false,
                         socket,
                         send_maxlen: 0,
                         send_cap: Arc::new(AtomicUsize::new(0)),
+                        input: Default::default(),
                         pending_events: Default::default(),
                         pending_applied_events: Default::default(),
                         dropped_events: Default::default(),
@@ -58788,6 +58915,7 @@ group_block_proven: false,
             socket,
             send_maxlen: 0,
             send_cap: Arc::new(AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: Default::default(),
             pending_applied_events: Default::default(),
             dropped_events: Default::default(),
@@ -58868,6 +58996,7 @@ group_block_proven: false,
             socket,
             send_maxlen: 0,
             send_cap: Arc::new(AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: Default::default(),
             pending_applied_events: Default::default(),
             dropped_events: Default::default(),
@@ -60943,6 +61072,7 @@ group_block_proven: false,
             socket: client_stream,
             send_maxlen: 0,
             send_cap: Arc::new(AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             dropped_events: Default::default(),
@@ -61040,6 +61170,7 @@ group_block_proven: false,
             socket: client_stream,
             send_maxlen: 0,
             send_cap: Arc::new(AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             dropped_events: Default::default(),
@@ -62405,6 +62536,7 @@ group_block_proven: false,
             socket: client_stream,
             send_maxlen: 0,
             send_cap: Arc::new(AtomicUsize::new(0)),
+            input: Default::default(),
             pending_events: VecDeque::new(),
             pending_applied_events: VecDeque::new(),
             dropped_events: Default::default(),
@@ -62446,6 +62578,7 @@ group_block_proven: false,
                 socket: client_stream,
                 send_maxlen: 0,
                 send_cap: Arc::new(AtomicUsize::new(0)),
+                input: Default::default(),
                 pending_events: VecDeque::new(),
                 pending_applied_events: VecDeque::new(),
                 dropped_events: Default::default(),
@@ -62698,6 +62831,7 @@ group_block_proven: false,
                 socket: client_stream,
                 send_maxlen: 0,
                 send_cap: Arc::new(AtomicUsize::new(0)),
+                input: Default::default(),
                 pending_events: VecDeque::new(),
                 pending_applied_events: VecDeque::new(),
                 dropped_events: Default::default(),
