@@ -4129,6 +4129,7 @@ fn catalog_commands_with_send_cap(
         // C `box_injects_rst(b)`: примета коробки, не привязки.
         let box_injects_rst = r2o_box_injects_rst(box_record);
         let plans_by_id = r2o_index_enabled_plans(box_record.plans.iter());
+        let mut prepared_plans = HashMap::new();
         for (binding_index, binding) in box_record.bindings.iter_mut().enumerate() {
             let selection_binding = &selection_catalog.boxes[box_index].bindings[binding_index];
             if !binding.enabled
@@ -4168,19 +4169,20 @@ fn catalog_commands_with_send_cap(
                 };
                 // C `sync`: защита от вброшенного сброса дописывается в
                 // проводную копию плана известной коробки с приметой `rst`.
-                let guarded_text = if r2o_catalog_binding_transport(binding) == 6 && box_injects_rst
-                {
-                    r2o_plan_arm_rst_guard(&saved_plan.text)
-                } else {
-                    saved_plan.text.clone()
-                };
-                plan_compilations += 1;
-                let Some((bytes, plan)) = r2o_catalog_compile_plan(&guarded_text, &saved_plan.id)
+                let Some(plan) = prepared_plans
+                    .entry((
+                        saved_plan.id.as_str(),
+                        r2o_catalog_binding_transport(binding) == 6 && box_injects_rst,
+                    ))
+                    .or_insert_with_key(|&(_, arm_rst)| {
+                        plan_compilations += 1;
+                        r2o_catalog_prepare_binding_plan(saved_plan, arm_rst)
+                    })
                 else {
                     skipped += 1;
                     continue;
                 };
-                if r2o_catalog_plan_exceeds_send_cap(&plan, send_cap) {
+                if plan.exceeds_send_cap(send_cap) {
                     r2o_catalog_mark_unfit(
                         binding,
                         &mut selection_catalog.boxes[box_index].bindings[binding_index],
@@ -4190,7 +4192,11 @@ fn catalog_commands_with_send_cap(
                     skipped += 1;
                     continue;
                 }
-                let Ok(command) = r2o_catalog_encode_set_addr(address, shape, &bytes) else {
+                let Some(wire_records) = plan.wire_records.as_deref() else {
+                    skipped += 1;
+                    continue;
+                };
+                let Ok(command) = r2o_catalog_encode_set_addr(address, shape, wire_records) else {
                     skipped += 1;
                     continue;
                 };
@@ -4235,18 +4241,20 @@ fn catalog_commands_with_send_cap(
                 continue;
             };
             // C `sync`: та же защита для name-привязки известной коробки.
-            let guarded_text = if r2o_catalog_binding_transport(binding) == 6 && box_injects_rst {
-                r2o_plan_arm_rst_guard(&saved_plan.text)
-            } else {
-                saved_plan.text.clone()
-            };
-            plan_compilations += 1;
-            let Some((bytes, plan)) = r2o_catalog_compile_plan(&guarded_text, &saved_plan.id)
+            let Some(plan) = prepared_plans
+                .entry((
+                    saved_plan.id.as_str(),
+                    r2o_catalog_binding_transport(binding) == 6 && box_injects_rst,
+                ))
+                .or_insert_with_key(|&(_, arm_rst)| {
+                    plan_compilations += 1;
+                    r2o_catalog_prepare_binding_plan(saved_plan, arm_rst)
+                })
             else {
                 skipped += 1;
                 continue;
             };
-            if r2o_catalog_plan_exceeds_send_cap(&plan, send_cap) {
+            if plan.exceeds_send_cap(send_cap) {
                 r2o_catalog_mark_unfit(
                     binding,
                     &mut selection_catalog.boxes[box_index].bindings[binding_index],
@@ -4271,14 +4279,11 @@ fn catalog_commands_with_send_cap(
                 skipped += 1;
                 continue;
             }
-            let wire_bytes = match r2o_plan_records_for_wire(&bytes) {
-                Ok(bytes) => bytes,
-                Err(_) => {
-                    skipped += 1;
-                    continue;
-                }
+            let Some(wire_records) = plan.wire_records.as_deref() else {
+                skipped += 1;
+                continue;
             };
-            let Ok(command) = encode_set_name(&host, shape, family, &wire_bytes) else {
+            let Ok(command) = encode_set_name(&host, shape, family, wire_records) else {
                 skipped += 1;
                 continue;
             };
@@ -4467,8 +4472,39 @@ fn catalog_commands_with_send_cap(
 }
 
 #[cfg(unix)]
-fn r2o_catalog_plan_exceeds_send_cap(plan: &Plan, send_cap: usize) -> bool {
-    send_cap > 0 && plan.max_emit() > send_cap
+struct PreparedCatalogBindingPlan {
+    max_emit: usize,
+    wire_records: Option<Vec<u8>>,
+}
+
+#[cfg(unix)]
+impl PreparedCatalogBindingPlan {
+    fn exceeds_send_cap(&self, send_cap: usize) -> bool {
+        send_cap > 0 && self.max_emit > send_cap
+    }
+}
+
+#[cfg(unix)]
+fn r2o_catalog_prepare_binding_plan(
+    saved_plan: &r2o_controller::catalog::Plan,
+    arm_rst: bool,
+) -> Option<PreparedCatalogBindingPlan> {
+    let guarded = arm_rst
+        .then(|| r2o_plan_arm_rst_guard_cap(&saved_plan.text, 4096))
+        .flatten();
+    let (bytes, plan) = r2o_catalog_compile_plan(
+        guarded.as_deref().unwrap_or(&saved_plan.text),
+        &saved_plan.id,
+    )?;
+    let wire_records = if r2o_control_wire() == control::WireProfile::V22 {
+        r2o_plan_records_for_wire(&bytes).ok()
+    } else {
+        Some(bytes)
+    };
+    Some(PreparedCatalogBindingPlan {
+        max_emit: plan.max_emit(),
+        wire_records,
+    })
 }
 
 #[cfg(unix)]
@@ -4493,10 +4529,8 @@ fn r2o_catalog_compile_plan(text: &str, plan_id: &str) -> Option<(Vec<u8>, Plan)
 fn r2o_catalog_encode_set_addr(
     address: std::net::IpAddr,
     shape: u8,
-    plan_records: &[u8],
+    wire_records: &[u8],
 ) -> Result<Vec<u8>, &'static str> {
-    let wire_records = r2o_plan_records_for_wire(plan_records)
-        .map_err(|_| "план не перекодируется для control-wire")?;
     let mut body = Vec::with_capacity(18 + wire_records.len());
     match address {
         std::net::IpAddr::V4(address) => {
@@ -4510,7 +4544,7 @@ fn r2o_catalog_encode_set_addr(
         }
     }
     body.push(shape);
-    body.extend_from_slice(&wire_records);
+    body.extend_from_slice(wire_records);
     control::encode_frame(COMMAND_SET_ADDR, &body)
 }
 
@@ -44212,6 +44246,73 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(modern_ipv4_plan_ids, [expected_plan_id]);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_compiles_a_shared_plan_once_per_guard_context() {
+        let plan = r2o_controller::catalog::Plan {
+            id: "shared".into(),
+            text: format!(
+                "r2o-plan 1 11\nid {}\nproto tcp tls\ninput tls-sni\nsegment 8\nwire detect-tcp-v1\norder forward\n",
+                "01".repeat(16),
+            ),
+            enabled: true,
+            ..Default::default()
+        };
+        let binding = |host: &str, family| Binding {
+            kind: "name".into(),
+            target: host.into(),
+            plan_id: plan.id.clone(),
+            level: 3,
+            confirmed: 1,
+            enabled: true,
+            transport: 6,
+            family,
+            shape: SHAPE_MODERN,
+            verified_by: 1,
+            ..Binding::default()
+        };
+        let mut guarded = BoxRecord {
+            id: "guarded".into(),
+            plans: vec![plan.clone()],
+            bindings: vec![binding("guarded.test", 4), binding("guarded.test", 6)],
+            ..BoxRecord::default()
+        };
+        guarded
+            .fingerprint
+            .signals
+            .push(r2o_controller::catalog::Signal {
+                kind: "rst".into(),
+                ..Default::default()
+            });
+        let catalog = Catalog {
+            boxes: vec![
+                BoxRecord {
+                    id: "direct".into(),
+                    plans: vec![plan.clone()],
+                    bindings: vec![binding("first.test", 4), binding("second.test", 6)],
+                    ..BoxRecord::default()
+                },
+                guarded,
+            ],
+            ..Catalog::default()
+        };
+        let compiled = catalog_commands(&catalog).unwrap();
+        assert_eq!(compiled.commands.len(), 4);
+        let plain = compile_text(&plan.text).unwrap();
+        let guarded = compile_text(&super::r2o_plan_arm_rst_guard(&plan.text)).unwrap();
+        assert_ne!(plain, guarded);
+        for (i, (host, command)) in compiled.commands.iter().enumerate() {
+            let expected = if i < 2 { &plain } else { &guarded };
+            let expected = super::r2o_plan_records_for_wire(expected).unwrap();
+            let family = if i % 2 == 0 { 4 } else { 6 };
+            assert_eq!(
+                *command,
+                super::encode_set_name(host, SHAPE_MODERN, family, &expected).unwrap()
+            );
+        }
+        assert_eq!(compiled.preparation.plan_compilations, 2);
     }
 
     #[cfg(unix)]
