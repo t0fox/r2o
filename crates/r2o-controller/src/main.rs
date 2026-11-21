@@ -24893,6 +24893,9 @@ impl ControlClient {
                     continue;
                 } else if frame.kind == control::EVENT_STATS {
                     self.r2o_update_dropped_events(&frame)?;
+                    if let Some(stats) = control::NfqueueStats::decode(&frame) {
+                        measurement_gate.note_nfqueue_stats(stats);
+                    }
                     continue;
                 } else if frame.kind == control::EVENT_ACK {
                     let ack = decode_ack(&frame)
@@ -30708,7 +30711,13 @@ impl ControlClient {
 
     fn queue_async_frame(&mut self, frame: Frame) -> Result<(), Box<dyn Error>> {
         if frame.kind == control::EVENT_STATS {
-            return self.r2o_update_dropped_events(&frame);
+            self.r2o_update_dropped_events(&frame)?;
+            if self.pending_events.len() < MAX_PENDING_EVENTS
+                && control::NfqueueStats::decode(&frame).is_some()
+            {
+                self.pending_events.push_back(frame);
+            }
+            return Ok(());
         }
         if frame.kind == EVENT_PROTOCOL {
             self.r2o_update_send_cap(&frame)?;

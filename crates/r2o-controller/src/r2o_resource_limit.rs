@@ -1,3 +1,4 @@
+use r2k_core::control::{NfqueueStats, nfqueue_kernel_entry};
 use std::collections::VecDeque;
 use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,6 +20,62 @@ const R2O_MEASUREMENT_LIMIT_CPU: u8 = 1;
 const R2O_MEASUREMENT_LIMIT_MEMORY: u8 = 2;
 const R2O_MEASUREMENT_LIMIT_CONNTRACK: u8 = 4;
 const R2O_MEASUREMENT_LIMIT_SLOTS: u8 = 8;
+const R2O_MEASUREMENT_LIMIT_NFQUEUE: u8 = 16;
+const NFQUEUE_STATS_MAX_AGE_MS: u64 = 3_000;
+// Гистограмма сообщает верхнюю границу: 65 535 означает возраст выше 32 767 мкс.
+const NFQUEUE_BUSY_P95_US: u32 = 65_535;
+const NFQUEUE_MIN_TIMED_PACKETS: u32 = 20;
+
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+enum NfqueuePressure {
+    #[default]
+    Clear,
+    Busy,
+    Full,
+}
+
+#[derive(Clone, Copy)]
+struct NfqueueSample {
+    stats: NfqueueStats,
+    slow_windows: u8,
+}
+
+fn nfqueue_pressure(
+    queues: [Option<NfqueueSample>; 2],
+    proc_queues: &str,
+    now_ms: u64,
+) -> NfqueuePressure {
+    queues
+        .into_iter()
+        .flatten()
+        .map(|sample| {
+            let depth = nfqueue_kernel_entry(proc_queues, sample.stats.queue)
+                .filter(|(owner, _)| *owner == sample.stats.owner)
+                .map(|(_, depth)| depth);
+            let delayed = sample.slow_windows >= 2
+                && now_ms
+                    .checked_sub(sample.stats.sampled_at_ms)
+                    .is_some_and(|age| age <= NFQUEUE_STATS_MAX_AGE_MS);
+            if depth.is_some_and(|depth| depth >= sample.stats.capacity) {
+                NfqueuePressure::Full
+            } else if depth.is_some_and(|depth| depth >= sample.stats.capacity.div_ceil(2))
+                || delayed
+            {
+                NfqueuePressure::Busy
+            } else {
+                NfqueuePressure::Clear
+            }
+        })
+        .max()
+        .unwrap_or_default()
+}
+
+fn unix_time_ms() -> Option<u64> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    now.as_millis().try_into().ok()
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct R2oCpuCounters {
@@ -187,6 +244,7 @@ struct R2oAdaptiveLimit {
     cpu_try_ms: Option<u64>,
     memory: Option<R2oMemoryStats>,
     conntrack: Option<R2oConntrackStats>,
+    nfqueue: NfqueuePressure,
     limiter: u8,
     limit_since_ms: u64,
     logged_valid: bool,
@@ -210,6 +268,7 @@ impl R2oAdaptiveLimit {
             cpu_try_ms: None,
             memory: None,
             conntrack: None,
+            nfqueue: NfqueuePressure::Clear,
             limiter: 0,
             limit_since_ms: 0,
             logged_valid: false,
@@ -285,14 +344,22 @@ impl R2oAdaptiveLimit {
                 >= u128::from(stats.max) * u128::from(R2O_CONNTRACK_LIMIT_PERCENT)
         });
 
-        if !valid {
-            self.limit = R2O_DEFAULT_MEASUREMENT_LIMIT.min(self.max_slots);
-            self.grow_pending = false;
-        } else if cpu_shrink || memory_short || conntrack_short {
+        if self.nfqueue == NfqueuePressure::Full
+            || valid && (cpu_shrink || memory_short || conntrack_short)
+        {
             self.limit = (self.limit / 2).max(1);
+            self.grow_pending = false;
+        } else if !valid {
+            let fallback = R2O_DEFAULT_MEASUREMENT_LIMIT.min(self.max_slots);
+            self.limit = if self.nfqueue == NfqueuePressure::Busy {
+                self.limit.min(fallback)
+            } else {
+                fallback
+            };
             self.grow_pending = false;
         } else {
             if !cpu_hold
+                && self.nfqueue == NfqueuePressure::Clear
                 && (self.grow_pending || (active >= self.limit && queued > 0))
                 && self.limit < self.max_slots
             {
@@ -301,7 +368,11 @@ impl R2oAdaptiveLimit {
             self.grow_pending = false;
         }
 
-        let mut limiter = 0;
+        let mut limiter = if self.nfqueue == NfqueuePressure::Clear {
+            0
+        } else {
+            R2O_MEASUREMENT_LIMIT_NFQUEUE
+        };
         if valid {
             if cpu_shrink || cpu_hold {
                 limiter |= R2O_MEASUREMENT_LIMIT_CPU;
@@ -384,6 +455,7 @@ fn r2o_limiter_text(limiter: u8) -> String {
         (R2O_MEASUREMENT_LIMIT_MEMORY, "память"),
         (R2O_MEASUREMENT_LIMIT_CONNTRACK, "conntrack"),
         (R2O_MEASUREMENT_LIMIT_SLOTS, "слоты"),
+        (R2O_MEASUREMENT_LIMIT_NFQUEUE, "NFQUEUE"),
     ]
     .into_iter()
     .filter_map(|(bit, name)| (limiter & bit != 0).then_some(name))
@@ -393,6 +465,7 @@ fn r2o_limiter_text(limiter: u8) -> String {
 
 struct R2oGateState {
     adaptive: R2oAdaptiveLimit,
+    nfqueue: [Option<NfqueueSample>; 2],
     active: usize,
     pending_tcp_discovery: [usize; 2],
     tcp_admission_sequence: u64,
@@ -619,6 +692,43 @@ impl R2oMeasurementGate {
         self.dual_stack_family.is_some()
     }
 
+    pub fn note_nfqueue_stats(&self, stats: NfqueueStats) {
+        if !unix_time_ms()
+            .and_then(|now| now.checked_sub(stats.sampled_at_ms))
+            .is_some_and(|age| age <= NFQUEUE_STATS_MAX_AGE_MS)
+        {
+            return;
+        }
+        let mut state = self
+            .shared
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let slot = &mut state.nfqueue[usize::from(self.dual_stack_family == Some(true))];
+        if slot.is_some_and(|previous| previous.stats.sampled_at_ms >= stats.sampled_at_ms) {
+            return;
+        }
+        let consecutive = slot
+            .filter(|previous| {
+                previous.stats.queue == stats.queue
+                    && previous.stats.owner == stats.owner
+                    && previous.stats.capacity == stats.capacity
+                    && stats.sampled_at_ms - previous.stats.sampled_at_ms <= 2_000
+            })
+            .map_or(0, |previous| previous.slow_windows);
+        let slow_windows = if stats.timed_packets >= NFQUEUE_MIN_TIMED_PACKETS
+            && stats.p95_packet_age_us >= NFQUEUE_BUSY_P95_US
+        {
+            consecutive.saturating_add(1)
+        } else {
+            0
+        };
+        *slot = Some(NfqueueSample {
+            stats,
+            slow_windows,
+        });
+    }
+
     pub fn r2o_scheduler_tick(&self) {
         if self.shared.minimum_start_gap.is_none() {
             return;
@@ -711,6 +821,7 @@ impl R2oMeasurementGate {
             shared: Arc::new(R2oGateShared {
                 state: Mutex::new(R2oGateState {
                     adaptive: R2oAdaptiveLimit::new(max_slots),
+                    nfqueue: [None; 2],
                     active: 0,
                     pending_tcp_discovery: [0; 2],
                     tcp_admission_sequence: 0,
@@ -1051,7 +1162,7 @@ impl R2oMeasurementGate {
 
     fn r2o_refresh_if_due(&self) {
         let now = Instant::now();
-        {
+        let queues = {
             let mut state = self
                 .shared
                 .state
@@ -1064,9 +1175,19 @@ impl R2oMeasurementGate {
                 return;
             }
             state.last_sample = Some(now);
-        }
+            state.nfqueue
+        };
 
         let reading = R2oResourceReading::r2o_read_proc();
+        let pressure = if queues.iter().any(Option::is_some) {
+            let stats =
+                fs::read_to_string("/proc/net/netfilter/nfnetlink_queue").unwrap_or_default();
+            unix_time_ms().map_or(NfqueuePressure::Clear, |now| {
+                nfqueue_pressure(queues, &stats, now)
+            })
+        } else {
+            NfqueuePressure::Clear
+        };
         let now_ms = now
             .saturating_duration_since(self.shared.started)
             .as_millis()
@@ -1079,6 +1200,7 @@ impl R2oMeasurementGate {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let active = state.active;
             let queued = state.waiters.len();
+            state.adaptive.nfqueue = pressure;
             let status = state.adaptive.r2o_sample(now_ms, reading, active, queued);
             self.shared.changed.notify_all();
             status
@@ -1394,6 +1516,70 @@ mod tests {
             r2o_parse_cpu_stat("cpu 1 2 3 4 18446744073709551616\n"),
             None
         );
+    }
+
+    #[test]
+    fn nfqueue_pressure_is_shared_and_clears_after_recovery() {
+        use super::{NfqueuePressure, NfqueueStats, nfqueue_pressure, unix_time_ms};
+        let gate = R2oMeasurementGate::new(4);
+        let ipv4 = gate.r2o_dual_stack_family(false);
+        let ipv6 = gate.r2o_dual_stack_family(true);
+        let now = unix_time_ms().unwrap();
+        let mut sample = NfqueueStats {
+            queue: 2001,
+            owner: 43,
+            capacity: 64,
+            p95_packet_age_us: 65_535,
+            timed_packets: 24,
+            sampled_at_ms: now - 1_000,
+        };
+        ipv6.note_nfqueue_stats(sample);
+        ipv6.note_nfqueue_stats(sample);
+        ipv4.note_nfqueue_stats(NfqueueStats {
+            queue: 2000,
+            ..sample
+        });
+        let read =
+            |text, wall| nfqueue_pressure(gate.shared.state.lock().unwrap().nfqueue, text, wall);
+        assert_eq!(read("2001 42 24", now), NfqueuePressure::Clear);
+        assert_eq!(read("61234 42 64", now), NfqueuePressure::Clear);
+        sample.sampled_at_ms = now;
+        ipv6.note_nfqueue_stats(sample);
+        assert_eq!(read("2001 42 24", now), NfqueuePressure::Busy);
+        assert_eq!(
+            read("2000 42 0\n2001 43 64 2 1600 0 0", now),
+            NfqueuePressure::Full
+        );
+        assert_eq!(read("2001 42 64", now + 4_000), NfqueuePressure::Clear);
+        assert_eq!(read("2001 43 64", now + 4_000), NfqueuePressure::Full);
+
+        let reading = |t| R2oResourceReading {
+            cpu: Some(R2oCpuCounters {
+                busy: 10 * t,
+                total: 100 * t,
+            }),
+            memory: Some(R2oMemoryStats {
+                available_kb: 400_000,
+                total_kb: 512_000,
+            }),
+            ..R2oResourceReading::default()
+        };
+        let mut limit = R2oAdaptiveLimit::new(4);
+        limit.r2o_sample(0, reading(1_u64), 0, 0);
+        limit.nfqueue = NfqueuePressure::Busy;
+        limit.r2o_sample(1_000, reading(2), 2, 1);
+        assert_eq!(limit.limit(), 2);
+        limit.nfqueue = NfqueuePressure::Full;
+        limit.r2o_sample(2_000, reading(3), 2, 1);
+        assert_eq!(limit.limit(), 1);
+        limit.nfqueue = NfqueuePressure::Busy;
+        let mut missing_memory = reading(4);
+        missing_memory.memory = None;
+        limit.r2o_sample(3_000, missing_memory, 1, 1);
+        assert_eq!(limit.limit(), 1);
+        limit.nfqueue = NfqueuePressure::Clear;
+        limit.r2o_sample(4_000, reading(5), 1, 1);
+        assert_eq!(limit.limit(), 2);
     }
 
     #[test]
@@ -2107,6 +2293,7 @@ mod tests {
             assert_eq!(entries.len(), count, "fixture task count: {line}");
             let mut state = R2oGateState {
                 adaptive: R2oAdaptiveLimit::new(64),
+                nfqueue: [None; 2],
                 active: 64,
                 pending_tcp_discovery: [0; 2],
                 tcp_admission_sequence: 0,

@@ -1760,8 +1760,19 @@ mod app {
             .stats_interval
             .map(|interval| Instant::now() + interval);
         let mut nfq_age = NfqLatency::new();
+        let mut nfq_health_age = NfqLatency::new();
         let mut nfq_processing = NfqLatency::new();
         let mut next_ctl_stats = Instant::now() + Duration::from_secs(1);
+        let nfq_health_enabled =
+            control.is_some() && options.control_wire == r2k_core::control::WireProfile::V48;
+        let nfq_owner = if nfq_health_enabled {
+            std::fs::read_to_string("/proc/net/netfilter/nfnetlink_queue")
+                .ok()
+                .and_then(|text| r2k_core::control::nfqueue_kernel_entry(&text, queue))
+                .map_or(0, |(owner, _)| owner)
+        } else {
+            0
+        };
         let mut routed_flows = R2oRoutedFlows::default();
         let mut last_route_refresh = Instant::now();
         let mut next_route_refresh = last_route_refresh + R2O_ROUTE_REFRESH_INTERVAL;
@@ -1899,7 +1910,21 @@ mod app {
             if let Some(control) = control.as_mut()
                 && now >= next_ctl_stats
             {
-                let body = r2o_stats_event_body(control.dropped_events(), control.sent_events());
+                let mut body =
+                    r2o_stats_event_body(control.dropped_events(), control.sent_events());
+                if nfq_health_enabled && let Ok(wall) = SystemTime::now().duration_since(UNIX_EPOCH)
+                {
+                    r2k_core::control::NfqueueStats {
+                        queue,
+                        owner: nfq_owner,
+                        capacity: options.queue_len,
+                        p95_packet_age_us: nfq_health_age.upper_micros(20).unwrap_or(0) as u32,
+                        timed_packets: nfq_health_age.samples.min(u64::from(u32::MAX)) as u32,
+                        sampled_at_ms: wall.as_millis() as u64,
+                    }
+                    .append(&mut body);
+                }
+                nfq_health_age = NfqLatency::new();
                 let _ = control.send_event(EVENT_STATS, &body);
                 next_ctl_stats = now + Duration::from_secs(1);
             }
@@ -2123,11 +2148,12 @@ mod app {
                 }
             };
             // NFQA_TIMESTAMP относится к skb, поэтому возраст включает участок до NFQUEUE.
-            let received_wall = if received.is_some() && next_stats.is_some() {
-                SystemTime::now().duration_since(UNIX_EPOCH).ok()
-            } else {
-                None
-            };
+            let received_wall =
+                if received.is_some() && (next_stats.is_some() || nfq_health_enabled) {
+                    SystemTime::now().duration_since(UNIX_EPOCH).ok()
+                } else {
+                    None
+                };
             let route_ready = r2o_poll_extra_ready(&extra_revents, route_poll_index);
             let control_wake = r2o_poll_extra_ready(&extra_revents, control_listen_index)
                 || r2o_poll_extra_ready(&extra_revents, control_peer_index);
@@ -2317,7 +2343,12 @@ mod app {
                     if let Some(age) = packet.timestamp_ns.and_then(|timestamp| {
                         received_wall?.checked_sub(Duration::from_nanos(timestamp))
                     }) {
-                        nfq_age.observe(age);
+                        if nfq_health_enabled {
+                            nfq_health_age.observe(age);
+                        }
+                        if next_stats.is_some() {
+                            nfq_age.observe(age);
+                        }
                     }
                     // По выходу из обработчика пакет может быть передан в отложенную очередь.
                     let _timer = next_stats.is_some().then(|| NfqPacketTimer {

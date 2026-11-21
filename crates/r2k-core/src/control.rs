@@ -227,9 +227,90 @@ pub fn decode_stats(frame: &Frame) -> Result<(u32, u32), &'static str> {
     ))
 }
 
+/// Дополнительные счётчики NFQUEUE после обычного V48 STATS.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NfqueueStats {
+    pub queue: u16,
+    pub owner: u32,
+    pub capacity: u32,
+    pub p95_packet_age_us: u32,
+    pub timed_packets: u32,
+    pub sampled_at_ms: u64,
+}
+
+impl NfqueueStats {
+    const MAGIC: [u8; 4] = *b"R2NQ";
+
+    pub fn append(self, body: &mut Vec<u8>) {
+        body.extend_from_slice(&Self::MAGIC);
+        body.extend_from_slice(&self.queue.to_be_bytes());
+        body.extend_from_slice(&self.owner.to_be_bytes());
+        body.extend_from_slice(&self.capacity.to_be_bytes());
+        body.extend_from_slice(&self.p95_packet_age_us.to_be_bytes());
+        body.extend_from_slice(&self.timed_packets.to_be_bytes());
+        body.extend_from_slice(&self.sampled_at_ms.to_be_bytes());
+    }
+
+    pub fn decode(frame: &Frame) -> Option<Self> {
+        if frame.kind != EVENT_STATS {
+            return None;
+        }
+        let stats = frame.body.get(KEY_LEN + 8..)?.strip_prefix(&Self::MAGIC)?;
+        if stats.len() != 26 {
+            return None;
+        }
+        let capacity = u32::from_be_bytes(stats[6..10].try_into().ok()?);
+        (capacity != 0).then_some(Self {
+            queue: u16::from_be_bytes(stats[..2].try_into().ok()?),
+            owner: u32::from_be_bytes(stats[2..6].try_into().ok()?),
+            capacity,
+            p95_packet_age_us: u32::from_be_bytes(stats[10..14].try_into().ok()?),
+            timed_packets: u32::from_be_bytes(stats[14..18].try_into().ok()?),
+            sampled_at_ms: u64::from_be_bytes(stats[18..].try_into().ok()?),
+        })
+    }
+}
+
+/// Поля procfs для одной зарегистрированной NFQUEUE.
+pub fn nfqueue_kernel_entry(text: &str, queue: u16) -> Option<(u32, u32)> {
+    text.lines().find_map(|line| {
+        let mut fields = line.split_ascii_whitespace();
+        if fields.next()?.parse::<u16>().ok()? != queue {
+            return None;
+        }
+        let owner = fields.next()?.parse::<u32>().ok()?;
+        let depth = fields.next()?.parse::<u32>().ok()?;
+        (owner != 0).then_some((owner, depth))
+    })
+}
+
 #[cfg(test)]
 mod stats_tests {
     use super::*;
+
+    #[test]
+    fn nfqueue_stats_keep_the_legacy_counters() {
+        let mut frame = Frame {
+            kind: EVENT_STATS,
+            body: vec![0; KEY_LEN + 8],
+        };
+        frame.body[KEY_LEN + 3] = 7;
+        assert_eq!(NfqueueStats::decode(&frame), None);
+        let stats = NfqueueStats {
+            queue: 2001,
+            owner: 42,
+            capacity: 1024,
+            p95_packet_age_us: 63,
+            timed_packets: 112,
+            sampled_at_ms: 1000,
+        };
+        stats.append(&mut frame.body);
+        assert_eq!(decode_stats(&frame), Ok((7, 0)));
+        assert_eq!(NfqueueStats::decode(&frame), Some(stats));
+        frame.body.pop();
+        assert_eq!(NfqueueStats::decode(&frame), None);
+        assert_eq!(decode_stats(&frame), Ok((7, 0)));
+    }
 
     #[test]
     fn stats_wire_matches_donor_parser() {
