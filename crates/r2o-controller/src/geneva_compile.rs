@@ -5,10 +5,9 @@
 //! Компилятор намеренно узкий: он принимает только те деревья, для которых
 //! R2OP умеет выразить **тот же набор пакетов**.
 //!
-//! Сейчас поддержана форма `[TCP:flags:...]-duplicate(,tamper{...})`:
-//! Geneva отправляет оригинал, затем изменённую копию; R2OP выражает это
-//! как `fake ... place=after` (P2.2). Всё остальное отвергается с явной
-//! причиной, без «похожей» аппроксимации.
+//! Для сравнения пакетов на ПК поддерживаются `duplicate(,tamper{...})`
+//! и `fragment{tcp:...}` на одном ClientHello с точными флагами PA.
+//! Результат привязан к проверенному пакету.
 
 use std::fmt;
 
@@ -40,13 +39,10 @@ impl fmt::Display for GenevaCompileError {
 
 impl std::error::Error for GenevaCompileError {}
 
-/// Скомпилировать стратегию в текст R2OP для указанной нагрузки.
-///
-/// `payload` — транспортная нагрузка первого пакета потока (обычно
-/// ClientHello). `plan_id` — 16 байт идентификатора плана.
-pub fn compile_text(
+fn compile_text(
     strategy: &GenevaStrategy,
     payload: &[u8],
+    flags: u16,
     plan_id: [u8; 16],
 ) -> Result<String, GenevaCompileError> {
     if !strategy.inbound.is_empty() {
@@ -67,7 +63,19 @@ pub fn compile_text(
         || tree.trigger.gas.is_some()
     {
         return Err(GenevaCompileError::new(
-            "поддержан только простой триггер [TCP:flags:...]",
+            "поддержан только точный триггер [TCP:flags:PA]",
+        ));
+    }
+    // Geneva сравнивает каноническую строку из заголовка. AP и числовое
+    // значение 24 в исходной стратегии не совпадают с PA даже при той же маске.
+    if !matches!(&tree.trigger.value, GenevaValue::Text(value) if value == "PA") {
+        return Err(GenevaCompileError::new(
+            "TCP-стратегия R2OP поддерживает только триггер PA на ClientHello",
+        ));
+    }
+    if flags != 0x18 {
+        return Err(GenevaCompileError::new(
+            "TCP-флаги пакета не совпали с триггером PA",
         ));
     }
     let Some(action) = tree.action.as_ref() else {
@@ -154,14 +162,14 @@ fn compile_fragment(
             "fragment с перекрытием не выражается: нужен seqovl, а не split",
         ));
     }
-    let split = if fragsize == -1 {
+    if payload.len() < 2 {
+        return Err(GenevaCompileError::new(
+            "для разреза нужны минимум два байта нагрузки",
+        ));
+    }
+    let split = if fragsize == -1 || fragsize > 0 && fragsize as usize >= payload.len() {
         "hello_middle +0".to_owned()
     } else if fragsize > 0 {
-        if !payload.is_empty() && fragsize as usize >= payload.len() {
-            return Err(GenevaCompileError::new(
-                "fragment{tcp:N} режет за концом нагрузки",
-            ));
-        }
         format!("payload_start +{fragsize}")
     } else {
         return Err(GenevaCompileError::new(
@@ -181,13 +189,41 @@ fn compile_fragment(
     Ok(text)
 }
 
-/// Скомпилировать стратегию сразу в проверенные байты R2OP.
-pub fn compile_plan(
+/// Скомпилировать R2OP для офлайн-проверки конкретного IP-пакета с ClientHello.
+/// Повторное применение к другому пакету требует собственной проверки триггера.
+pub fn compile_plan_for_packet(
     strategy: &GenevaStrategy,
-    payload: &[u8],
+    packet: &[u8],
     plan_id: [u8; 16],
 ) -> Result<Vec<u8>, GenevaCompileError> {
-    let text = compile_text(strategy, payload, plan_id)?;
+    let view = r2k_core::packet::PacketView::parse(packet)
+        .ok_or_else(|| GenevaCompileError::new("неверный IP-пакет"))?;
+    if view.fragment & 0x3fff != 0 {
+        return Err(GenevaCompileError::new(
+            "фрагментированный IP-пакет не поддержан",
+        ));
+    }
+    let tcp = view
+        .tcp_segment(packet)
+        .ok_or_else(|| GenevaCompileError::new("Geneva требуется TCP-пакет"))?;
+    let payload = &packet[tcp.payload];
+    let tls = r2k_core::tls::parse(payload);
+    if !tls.is_client_hello || tls.extensions_truncated || tls.record_end != Some(payload.len()) {
+        return Err(GenevaCompileError::new(
+            "требуется полный ClientHello в одном TCP-пакете",
+        ));
+    }
+    let flags = u16::from(tcp.flags) | (u16::from(packet[view.l4_offset + 12] & 1) << 8);
+    compile_strategy(strategy, payload, flags, plan_id)
+}
+
+fn compile_strategy(
+    strategy: &GenevaStrategy,
+    payload: &[u8],
+    flags: u16,
+    plan_id: [u8; 16],
+) -> Result<Vec<u8>, GenevaCompileError> {
+    let text = compile_text(strategy, payload, flags, plan_id)?;
     let bytes = crate::plan_text::compile_text(&text)
         .map_err(|error| GenevaCompileError::new(format!("R2OP: {error}")))?;
     let plan = r2k_core::plan::Plan::parse(&bytes)
@@ -358,7 +394,7 @@ fn hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{compile_plan, compile_text};
+    use super::{compile_strategy, compile_text};
     use crate::geneva::parse_strategy;
     use crate::geneva_library::GENEVA_LIBRARY;
     use r2k_core::plan::Plan;
@@ -367,13 +403,13 @@ mod tests {
 
     fn compile(strategy: &str) -> Result<Vec<u8>, String> {
         let parsed = parse_strategy(strategy).map_err(|error| error.to_string())?;
-        compile_plan(&parsed, CLIENT_HELLO, [0x42; 16]).map_err(|error| error.to_string())
+        compile_strategy(&parsed, CLIENT_HELLO, 0x18, [0x42; 16]).map_err(|error| error.to_string())
     }
 
     #[test]
     fn duplicate_right_tamper_becomes_after_fake() {
         let bytes = compile(
-            "[TCP:flags:A]-duplicate(,tamper{TCP:flags:replace:R}(tamper{TCP:chksum:corrupt},))-",
+            "[TCP:flags:PA]-duplicate(,tamper{TCP:flags:replace:R}(tamper{TCP:chksum:corrupt},))-",
         )
         .expect("compile");
         let plan = Plan::parse(&bytes).expect("parse");
@@ -388,7 +424,7 @@ mod tests {
     #[test]
     fn duplicate_with_ttl_and_ack_corrupt_combines_in_one_poison() {
         let bytes = compile(
-            "[TCP:flags:A]-duplicate(,tamper{TCP:flags:replace:RA}(tamper{IP:ttl:replace:10}(tamper{TCP:ack:corrupt},),))-",
+            "[TCP:flags:PA]-duplicate(,tamper{TCP:flags:replace:RA}(tamper{IP:ttl:replace:10}(tamper{TCP:ack:corrupt},),))-",
         )
         .expect("compile");
         let plan = Plan::parse(&bytes).expect("parse");
@@ -400,7 +436,7 @@ mod tests {
     #[test]
     fn md5_option_tamper_selects_detect_tcp_wire_profile() {
         let bytes = compile(
-            "[TCP:flags:A]-duplicate(,tamper{TCP:flags:replace:FRAPUN}(tamper{TCP:options-md5header:corrupt},))-",
+            "[TCP:flags:PA]-duplicate(,tamper{TCP:flags:replace:FRAPUN}(tamper{TCP:options-md5header:corrupt},))-",
         )
         .expect("compile");
         let plan = Plan::parse(&bytes).expect("parse");
@@ -443,7 +479,7 @@ mod tests {
         for strategy in [
             "[TCP:flags:PA]-fragment{tcp:8:True}(tamper{TCP:chksum:corrupt},)-",
             "[TCP:flags:PA]-fragment{ip:8:True}-",
-            "[TCP:flags:PA]-fragment{tcp:10:True}-",
+            "[TCP:flags:PA]-fragment{tcp:0:True}-",
         ] {
             assert!(
                 compile(strategy).is_err(),
@@ -455,12 +491,12 @@ mod tests {
     #[test]
     fn tampered_original_and_other_actions_are_rejected_explicitly() {
         for strategy in [
-            "[TCP:flags:A]-duplicate(tamper{TCP:flags:replace:R},)-",
-            "[TCP:flags:A]-drop-",
-            "[TCP:flags:A]-duplicate(,tamper{TCP:chksum:replace:1})-",
-            "[TCP:flags:A]-duplicate(,tamper{TCP:options-wscale:corrupt})-",
-            "[TCP:flags:A]-duplicate(,tamper{TCP:dataofs:replace:0})-",
-            "[TCP:flags:A]-duplicate(,tamper{IP:ttl:replace:0})-",
+            "[TCP:flags:PA]-duplicate(tamper{TCP:flags:replace:R},)-",
+            "[TCP:flags:PA]-drop-",
+            "[TCP:flags:PA]-duplicate(,tamper{TCP:chksum:replace:1})-",
+            "[TCP:flags:PA]-duplicate(,tamper{TCP:options-wscale:corrupt})-",
+            "[TCP:flags:PA]-duplicate(,tamper{TCP:dataofs:replace:0})-",
+            "[TCP:flags:PA]-duplicate(,tamper{IP:ttl:replace:0})-",
         ] {
             assert!(
                 compile(strategy).is_err(),
@@ -472,10 +508,10 @@ mod tests {
     #[test]
     fn inbound_forest_is_rejected() {
         let strategy = parse_strategy(
-            "[TCP:flags:A]-duplicate(,tamper{TCP:flags:replace:R}(tamper{TCP:chksum:corrupt},))-| \\/ [TCP:flags:A]-drop-|",
+            "[TCP:flags:PA]-duplicate(,tamper{TCP:flags:replace:R}(tamper{TCP:chksum:corrupt},))-| \\/ [TCP:flags:PA]-drop-|",
         )
         .unwrap();
-        assert!(compile_plan(&strategy, CLIENT_HELLO, [1; 16]).is_err());
+        assert!(compile_strategy(&strategy, CLIENT_HELLO, 0x18, [1; 16]).is_err());
     }
 
     #[test]
@@ -487,7 +523,7 @@ mod tests {
                 rejected += 1;
                 continue;
             };
-            match compile_plan(&strategy, CLIENT_HELLO, [7; 16]) {
+            match compile_strategy(&strategy, CLIENT_HELLO, 0x18, [7; 16]) {
                 Ok(_) => compiled += 1,
                 Err(error) => {
                     assert!(!error.message().is_empty());
@@ -497,8 +533,8 @@ mod tests {
         }
         println!("geneva library: compiled={compiled} rejected={rejected}");
         assert!(
-            compiled >= 11,
-            "поддерживаемое подмножество библиотеки не должно сокращаться"
+            compiled == 2,
+            "остаются две записи с одним и тем же разрезом PA"
         );
         assert!(
             rejected > 0,
@@ -510,8 +546,8 @@ mod tests {
     #[test]
     fn compile_text_returns_r2op_text_without_panic() {
         let strategy =
-            parse_strategy("[TCP:flags:A]-duplicate(,tamper{TCP:flags:replace:R})-").unwrap();
-        let text = compile_text(&strategy, CLIENT_HELLO, [3; 16]).unwrap();
+            parse_strategy("[TCP:flags:PA]-duplicate(,tamper{TCP:flags:replace:R})-").unwrap();
+        let text = compile_text(&strategy, CLIENT_HELLO, 0x18, [3; 16]).unwrap();
         assert!(text.starts_with("r2o-plan 1 14\n"));
         assert!(text.contains("place=after"));
         assert!(text.contains("tcp_flags=4"));

@@ -15,11 +15,69 @@ use r2k_core::packet::PacketView;
 use r2k_core::plan::{PacketInput, Plan};
 use r2k_core::wire::build_tcp_packet;
 use r2o_controller::geneva::parse_strategy;
-use r2o_controller::geneva_compile::compile_plan;
+use r2o_controller::geneva_compile::compile_plan_for_packet;
 
 const INPUT: &[u8] = include_bytes!("fixtures/geneva/clienthello_in.bin");
 const EXPECTED_ORIGINAL: &[u8] = include_bytes!("fixtures/geneva/clienthello_original.bin");
 const EXPECTED_TAMPERED: &[u8] = include_bytes!("fixtures/geneva/clienthello_flags_rst.bin");
+
+#[test]
+fn trigger_rejects_other_flags_spellings_and_packet_contexts() {
+    let strategy = |trigger: &str| {
+        parse_strategy(&format!("[TCP:flags:{trigger}]-fragment{{tcp:-1:True}}-")).unwrap()
+    };
+    assert!(compile_plan_for_packet(&strategy("PA"), INPUT, [1; 16]).is_ok());
+    for trigger in ["A", "S", "AP", "24", "PA*", "PA:1"] {
+        assert!(
+            compile_plan_for_packet(&strategy(trigger), INPUT, [1; 16]).is_err(),
+            "{trigger}"
+        );
+    }
+    let view = PacketView::parse(INPUT).unwrap();
+    for flags in [0x10, 0x02, 0x58] {
+        let mut packet = INPUT.to_vec();
+        packet[view.l4_offset + 13] = flags;
+        assert!(compile_plan_for_packet(&strategy("PA"), &packet, [1; 16]).is_err());
+    }
+    let mut packet = INPUT.to_vec();
+    packet[view.l4_offset + 12] |= 1;
+    assert!(compile_plan_for_packet(&strategy("PA"), &packet, [1; 16]).is_err());
+    assert!(compile_plan_for_packet(&strategy("PA"), &INPUT[..INPUT.len() - 1], [1; 16]).is_err());
+}
+
+#[test]
+fn fragment_uses_geneva_payload_midpoint_in_both_orders() {
+    let view = PacketView::parse(INPUT).unwrap();
+    let tcp = view.tcp_segment(INPUT).unwrap();
+    let payload = &INPUT[tcp.payload];
+    let cut = payload.len() / 2;
+    for (size, order) in [(-1, "True"), (200, "True"), (-1, "False")] {
+        let strategy =
+            parse_strategy(&format!("[TCP:flags:PA]-fragment{{tcp:{size}:{order}}}-")).unwrap();
+        let plan =
+            Plan::parse(&compile_plan_for_packet(&strategy, INPUT, [1; 16]).unwrap()).unwrap();
+        let actions = plan
+            .apply(&PacketInput::new(payload, tcp.sequence))
+            .unwrap();
+        let expected = [
+            (tcp.sequence, &payload[..cut]),
+            (tcp.sequence.wrapping_add(cut as u32), &payload[cut..]),
+        ];
+        let expected = if order == "True" {
+            expected
+        } else {
+            [expected[1], expected[0]]
+        };
+        assert_eq!(
+            actions
+                .emits
+                .iter()
+                .map(|part| (part.seq, part.bytes.as_slice()))
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
 
 fn normalize(mut packet: Vec<u8>) -> Vec<u8> {
     let ip_header_len = usize::from(packet[0] & 0x0f) * 4;
@@ -40,7 +98,7 @@ fn compiled_duplicate_matches_geneva_bytes_after_normalization() {
         "[TCP:flags:PA]-duplicate(,tamper{TCP:flags:replace:R}(tamper{TCP:chksum:corrupt},))-",
     )
     .expect("strategy");
-    let bytes = compile_plan(&strategy, payload, [0x42; 16]).expect("compile");
+    let bytes = compile_plan_for_packet(&strategy, INPUT, [0x42; 16]).expect("compile");
     let plan = Plan::parse(&bytes).expect("plan");
     let actions = plan.apply(&input).expect("apply");
     assert_eq!(actions.emits.len(), 2, "оригинал и фальшивка");
