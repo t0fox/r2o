@@ -23196,6 +23196,9 @@ enum ControlRead {
 }
 
 #[cfg(unix)]
+const CONTROL_EVENT_BATCH_LIMIT: usize = 256;
+
+#[cfg(unix)]
 #[derive(Default)]
 struct ControlInput(bytes::BytesMut);
 
@@ -23262,16 +23265,17 @@ impl ControlInput {
         &mut self,
         socket: &mut std::os::unix::net::UnixStream,
         first: Frame,
-    ) -> std::io::Result<VecDeque<Frame>> {
-        let mut frames = VecDeque::with_capacity(256);
+        frames: &mut VecDeque<Frame>,
+    ) -> std::io::Result<()> {
+        debug_assert!(frames.is_empty());
         frames.push_back(first);
-        while frames.len() < 256 {
+        while frames.len() < CONTROL_EVENT_BATCH_LIMIT {
             let ControlRead::Frame(frame) = self.read(socket, std::time::Duration::ZERO)? else {
                 break;
             };
             frames.push_back(frame);
         }
-        Ok(frames)
+        Ok(())
     }
 }
 
@@ -24746,23 +24750,12 @@ impl ControlClient {
                     });
                 }
                 if r2o_scheduler_tick_pending && self.pending_events.is_empty() {
-                    match self
-                        .input
-                        .read(&mut self.socket, std::time::Duration::ZERO)?
-                    {
-                        ControlRead::Frame(frame) => {
-                            let batch = self.input.read_batch(&mut self.socket, frame)?;
-                            self.pending_events.extend(batch);
-                        }
-                        ControlRead::Pending => {
-                            measurement_gate.r2o_scheduler_tick();
-                            if let Some((worker, _, _, _)) = discovery.as_mut() {
-                                worker.r2o_ensure_workers();
-                            }
-                            r2o_scheduler_tick_pending = false;
-                        }
-                        ControlRead::Closed => return Ok(()),
+                    // Даём замерам ход до чтения следующей порции из сокета.
+                    measurement_gate.r2o_scheduler_tick();
+                    if let Some((worker, _, _, _)) = discovery.as_mut() {
+                        worker.r2o_ensure_workers();
                     }
+                    r2o_scheduler_tick_pending = false;
                 }
                 if catalog_sync.is_none()
                     && let Some(request) = pending_catalog_sync.take()
@@ -26043,8 +26036,8 @@ impl ControlClient {
                         }
                         ControlRead::Closed => return Ok(()),
                     };
-                    let batch = self.input.read_batch(&mut self.socket, frame)?;
-                    self.pending_events.extend(batch);
+                    self.input
+                        .read_batch(&mut self.socket, frame, &mut self.pending_events)?;
                     r2o_scheduler_tick_pending = true;
                     self.pending_events
                         .pop_front()
@@ -55478,7 +55471,8 @@ group_block_proven: false,
         let super::ControlRead::Frame(first) = input.read(&mut reader, now).unwrap() else {
             panic!("первый кадр не получен");
         };
-        let batch = input.read_batch(&mut reader, first).unwrap();
+        let mut batch = std::collections::VecDeque::new();
+        input.read_batch(&mut reader, first, &mut batch).unwrap();
 
         assert_eq!(batch.len(), 2);
         assert_eq!(batch[0].kind, 1);
@@ -63646,6 +63640,67 @@ group_block_proven: false,
         assert_eq!(
             super::control::read_frame(&mut peer).unwrap().kind,
             super::control::COMMAND_SET_TCP_STALL_BUDGETS,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scheduler_admits_queued_measurement_between_control_batches() {
+        const CHILD: &str = "R2O_TEST_CONTROL_BATCH_ADMISSION";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::scheduler_admits_queued_measurement_between_control_batches",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::r2o_with_start_gap(1);
+        drop(gate.r2o_try_acquire_queued().unwrap());
+        assert!(gate.r2o_try_acquire_queued().is_none());
+        let (socket, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        peer.write_all(&encode_greeting(65_535).unwrap()).unwrap();
+        let mut client = super::ControlClient::handshake(socket).unwrap();
+        let stats = super::control::encode_frame(
+            super::control::EVENT_STATS,
+            &[0; super::control::KEY_LEN + 8],
+        )
+        .unwrap();
+        let malformed = super::control::encode_frame(super::control::EVENT_ACK, &[]).unwrap();
+        // После заполненной порции сокет сразу отдаёт следующий кадр, без паузы.
+        let mut backlog = stats.repeat(super::CONTROL_EVENT_BATCH_LIMIT);
+        backlog.extend_from_slice(&malformed);
+        peer.write_all(&backlog).unwrap();
+
+        let error = client
+            .watch_events(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                std::collections::HashSet::new(),
+                None,
+                true,
+                gate.clone(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("подтверждение"), "{error}");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            gate.r2o_try_acquire_queued().is_some(),
+            "планировщик пропустил ход между порциями событий"
         );
     }
 
