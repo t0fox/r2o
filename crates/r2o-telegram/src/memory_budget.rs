@@ -96,6 +96,14 @@ impl BudgetReservation {
             bytes,
         })
     }
+
+    pub(crate) fn grow(&mut self, additional: usize) -> bool {
+        if !self.budget.reserve(additional) {
+            return false;
+        }
+        self.bytes += additional;
+        true
+    }
 }
 
 impl Drop for BudgetReservation {

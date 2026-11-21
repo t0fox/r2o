@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -9,7 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixListener;
+use tokio::net::{UnixListener, UnixStream};
 use tracing::info;
 
 const MAX_COUNTER_KEYS: usize = 96;
@@ -187,6 +188,14 @@ pub struct ActiveRouteSession {
     pub fallback_transport: Option<&'static str>,
     pub selected_transport: Option<&'static str>,
     pub telegram_response_seen: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edge_ip: Option<IpAddr>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wire: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_response_ms: Option<u64>,
     pub events: VecDeque<ActiveRouteEvent>,
 }
 
@@ -223,6 +232,10 @@ impl RouteSession {
                 fallback_transport: None,
                 selected_transport: None,
                 telegram_response_seen: false,
+                upstream_host: None,
+                edge_ip: None,
+                wire: None,
+                first_response_ms: None,
                 events: VecDeque::with_capacity(MAX_ROUTE_EVENTS),
             },
             next_event_sequence: 1,
@@ -339,6 +352,14 @@ pub struct D2oActiveSession {
     pub fallback_transport: Option<&'static str>,
     pub selected_transport: Option<&'static str>,
     pub telegram_response_seen: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edge_ip: Option<IpAddr>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wire: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_response_ms: Option<u64>,
     pub bytes_from_clients: u64,
     pub bytes_from_upstreams: u64,
     pub events: Vec<D2oRouteEvent>,
@@ -551,16 +572,17 @@ impl RuntimeStats {
         }
         drop(samples);
 
-        if let Some(transport_number) = wss_transport_number(transport) {
+        let wss = wss_transport_number(transport);
+        if let Some(transport_number) = wss.or_else(|| (transport == "cf-h2").then_some(3)) {
             let now = monotonic_ms();
-            self.wss_responses.fetch_add(1, Ordering::Relaxed);
-            if transport_number >= 2 {
-                self.cf_wss_responses.fetch_add(1, Ordering::Relaxed);
+            if let Some(wss) = wss {
+                self.wss_responses.fetch_add(1, Ordering::Relaxed);
+                if wss >= 2 {
+                    self.cf_wss_responses.fetch_add(1, Ordering::Relaxed);
+                }
+                self.clear_cooldown(dc, false, wss);
+                self.clear_cooldown(dc, true, wss);
             }
-            self.clear_cooldown(dc, false, transport_number);
-            // C route_health не различает cooldown по media-ключу при успехе;
-            // очищаем оба варианта, чтобы не оставлять ложный cooldown.
-            self.clear_cooldown(dc, true, transport_number);
             self.last_success_ms.store(now, Ordering::Release);
             self.last_success_dc.store(dc as usize, Ordering::Release);
             self.last_success_route
@@ -645,6 +667,10 @@ impl RuntimeStats {
                         fallback_transport: snapshot.fallback_transport,
                         selected_transport: snapshot.selected_transport,
                         telegram_response_seen: snapshot.telegram_response_seen,
+                        upstream_host: snapshot.upstream_host.clone(),
+                        edge_ip: snapshot.edge_ip,
+                        wire: snapshot.wire,
+                        first_response_ms: snapshot.first_response_ms,
                         bytes_from_clients: snapshot.bytes_from_clients,
                         bytes_from_upstreams: snapshot.bytes_from_upstreams,
                         events: snapshot
@@ -1017,6 +1043,7 @@ impl ConnectionTelemetry {
             session.snapshot.stage = "upstream_ready";
             session.snapshot.selected_transport = Some(transport);
             session.snapshot.telegram_response_seen = false;
+            session.snapshot.first_response_ms = None;
             if branch == "direct" {
                 session.snapshot.direct_state = "selected";
                 session.snapshot.direct_transport = Some(transport);
@@ -1028,7 +1055,29 @@ impl ConnectionTelemetry {
         }
     }
 
+    pub fn set_upstream(&self, host: Option<&str>, edge: IpAddr, wire: &'static str) {
+        if let Some(session) = self
+            .stats
+            .route_sessions
+            .lock()
+            .expect("маршруты заняты")
+            .get_mut(&self.id)
+        {
+            session.snapshot.upstream_host = host.map(str::to_owned);
+            session.snapshot.edge_ip = Some(edge);
+            session.snapshot.wire = Some(wire);
+        }
+    }
+
+    pub(crate) fn mark_mtproto_response(&self, latency: Duration) {
+        self.mark_first_response(Some(latency.as_millis() as u64));
+    }
+
     pub fn mark_first_wss_binary(&self) {
+        self.mark_first_response(None);
+    }
+
+    fn mark_first_response(&self, latency_ms: Option<u64>) {
         if !self.tracked {
             return;
         }
@@ -1047,6 +1096,7 @@ impl ConnectionTelemetry {
             };
             session.snapshot.stage = "first_wss_binary_response";
             session.snapshot.telegram_response_seen = true;
+            session.snapshot.first_response_ms = latency_ms;
             if branch == "direct" {
                 session.snapshot.direct_state = "first_binary_response";
             } else {
@@ -1146,6 +1196,15 @@ impl Drop for ConnectionGuard {
 
 #[cfg(unix)]
 pub async fn serve_unix(path: PathBuf, stats: Arc<RuntimeStats>) -> Result<(), String> {
+    serve_with_runtime(path, stats, None).await
+}
+
+#[cfg(unix)]
+pub(crate) async fn serve_with_runtime(
+    path: PathBuf,
+    stats: Arc<RuntimeStats>,
+    runtime: Option<Arc<crate::runtime::Runtime>>,
+) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| format!("создание каталога сокета: {error}"))?;
     }
@@ -1156,6 +1215,7 @@ pub async fn serve_unix(path: PathBuf, stats: Arc<RuntimeStats>) -> Result<(), S
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
         .map_err(|error| format!("ограничение доступа к Unix-сокету: {error}"))?;
     info!("Статистика Telegram доступна через локальный защищённый Unix-сокет");
+    let mut checks = tokio::task::JoinSet::new();
     loop {
         let (mut stream, _) = listener.accept().await.map_err(|error| error.to_string())?;
         let mut request = Vec::with_capacity(9);
@@ -1180,6 +1240,23 @@ pub async fn serve_unix(path: PathBuf, stats: Arc<RuntimeStats>) -> Result<(), S
         })
         .await;
         let request = read.unwrap_or_default();
+        if request == b"check\n"
+            && let Some(runtime) = runtime.as_ref()
+        {
+            while checks.try_join_next().is_some() {}
+            if checks.is_empty() {
+                let runtime = Arc::clone(runtime);
+                checks.spawn(async move {
+                    let report = crate::diagnostics::run_with_runtime(&runtime).await;
+                    if let Ok(response) = serde_json::to_vec(&report) {
+                        write_socket_response(&mut stream, &response).await;
+                    }
+                });
+            } else {
+                write_socket_response(&mut stream, b"{\"error\":\"diagnostics busy\"}").await;
+            }
+            continue;
+        }
         // D2O stats_socket отдаёт снимок сразу после connect, не ожидая
         // запроса. Таймаут не даёт молчащему клиенту заблокировать цикл.
         if !request.is_empty() && request != b"snapshot\n" {
@@ -1196,20 +1273,31 @@ pub async fn serve_unix(path: PathBuf, stats: Arc<RuntimeStats>) -> Result<(), S
         }
         let response = serde_json::to_vec(&stats.d2o_snapshot())
             .map_err(|error| format!("сериализация статистики: {error}"))?;
-        if tokio::time::timeout(Duration::from_millis(1250), stream.write_all(&response))
-            .await
-            .is_err()
-        {
-            tracing::debug!("не удалось передать статистику клиенту");
-            continue;
-        }
-        if tokio::time::timeout(Duration::from_millis(1250), stream.write_all(b"\n"))
-            .await
-            .is_err()
-        {
-            tracing::debug!("не удалось завершить ответ статистики");
-        }
+        write_socket_response(&mut stream, &response).await;
     }
+}
+
+#[cfg(unix)]
+async fn write_socket_response(stream: &mut UnixStream, response: &[u8]) {
+    if !matches!(
+        tokio::time::timeout(Duration::from_millis(1250), async {
+            stream.write_all(response).await?;
+            stream.write_all(b"\n").await
+        })
+        .await,
+        Ok(Ok(()))
+    ) {
+        tracing::debug!("не удалось передать ответ по локальному сокету Telegram");
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) async fn serve_with_runtime(
+    path: PathBuf,
+    stats: Arc<RuntimeStats>,
+    _runtime: Option<Arc<crate::runtime::Runtime>>,
+) -> Result<(), String> {
+    serve_unix(path, stats).await
 }
 
 #[cfg(not(unix))]
@@ -1243,32 +1331,51 @@ async fn remove_stale_socket(path: &Path) -> Result<(), String> {
 }
 
 pub async fn read_socket(path: &Path) -> Result<Vec<u8>, String> {
+    request_socket(path, b"snapshot\n", Duration::from_secs(1), 64 * 1024).await
+}
+
+pub async fn read_live_check(path: &Path) -> Result<Option<serde_json::Value>, String> {
+    let response = request_socket(path, b"check\n", Duration::from_secs(56), 256 * 1024).await?;
+    let report: serde_json::Value =
+        serde_json::from_slice(&response).map_err(|error| error.to_string())?;
+    match report.get("error").and_then(serde_json::Value::as_str) {
+        Some("unsupported request") => Ok(None),
+        Some(error) => Err(error.to_owned()),
+        None => Ok(Some(report)),
+    }
+}
+
+async fn request_socket(
+    path: &Path,
+    request: &[u8],
+    timeout: Duration,
+    limit: usize,
+) -> Result<Vec<u8>, String> {
     #[cfg(unix)]
     {
-        let mut stream = tokio::time::timeout(
-            Duration::from_secs(1),
-            tokio::net::UnixStream::connect(path),
-        )
-        .await
-        .map_err(|_| "истёк тайм-аут соединения со статистикой".to_string())?
-        .map_err(|error| format!("не удалось подключиться к статистике: {error}"))?;
-        stream
-            .write_all(b"snapshot\n")
+        let mut stream = tokio::time::timeout(Duration::from_secs(1), UnixStream::connect(path))
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|_| "истёк тайм-аут соединения с сокетом Telegram".to_owned())?
+            .map_err(|error| format!("не удалось подключиться к сокету Telegram: {error}"))?;
         let mut response = Vec::new();
-        tokio::time::timeout(Duration::from_secs(1), stream.read_to_end(&mut response))
-            .await
-            .map_err(|_| "истёк тайм-аут чтения статистики".to_string())?
-            .map_err(|error| error.to_string())?;
-        if response.len() > 64 * 1024 {
-            return Err("ответ статистики превышает допустимый размер".into());
+        tokio::time::timeout(timeout, async {
+            stream.write_all(request).await?;
+            stream
+                .take((limit + 1) as u64)
+                .read_to_end(&mut response)
+                .await
+        })
+        .await
+        .map_err(|_| "истёк тайм-аут сокета Telegram".to_owned())?
+        .map_err(|error| error.to_string())?;
+        if response.len() > limit {
+            return Err("ответ сокета Telegram превышает допустимый размер".into());
         }
         Ok(response)
     }
     #[cfg(not(unix))]
     {
-        let _ = path;
+        let _ = (path, request, timeout, limit);
         Err("локальный сокет статистики поддерживается только в Unix".into())
     }
 }
@@ -1294,7 +1401,7 @@ fn percentile_stats(samples: &VecDeque<u64>) -> Option<LatencyPercentiles> {
 fn bounded_failure_key(stage: &str) -> String {
     match stage {
         "dns" | "tcp" | "tls" | "websocket" | "http_429" | "http_503" | "mtproto" | "timeout"
-        | "fd_exhaustion" => stage.to_string(),
+        | "fd_exhaustion" | "http" => stage.to_string(),
         _ => "other".to_string(),
     }
 }
