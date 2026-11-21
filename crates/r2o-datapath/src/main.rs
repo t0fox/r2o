@@ -2593,18 +2593,23 @@ mod app {
                         name_plans.prune_expired_probes(now);
                         let packet_view = r2k_core::packet::PacketView::parse(bytes);
                         let family = packet_view.as_ref().map(|view| view.family);
-                        let tls_source_port = packet_view
+                        let (tls_source_port, tls_destination_port) = packet_view
                             .as_ref()
                             .and_then(|view| view.tcp_segment(bytes))
-                            .map(|tcp| tcp.source_port)
-                            .unwrap_or(0);
+                            .map(|tcp| (tcp.source_port, tcp.destination_port))
+                            .unwrap_or((0, 0));
                         let tls_host = tcp_hello_from_packet(bytes).and_then(|hello| hello.host);
                         let tls_address = packet_view.as_ref().map(|view| view.dst);
                         // Собираем ClientHello зонда только для уже принятой
                         // временной привязки этого порта, даже до появления SNI.
                         let installed_tls_probe = controller_probe
-                            && family.is_some_and(|family| {
-                                name_plans.has_tls_probe_on_port(family, tls_source_port)
+                            && family.zip(tls_address).is_some_and(|(family, address)| {
+                                name_plans.has_tls_probe_at_endpoint(
+                                    family,
+                                    tls_source_port,
+                                    address,
+                                    tls_destination_port,
+                                )
                             });
                         let allow_tls = r2o_inline_hold_allowed(
                             options.mode,
@@ -2613,11 +2618,12 @@ mod app {
                         ) && (controller_probe
                             || is_tls_plan(&plan)
                             || family.is_some_and(|family| match tls_host.as_deref() {
-                                Some(host) => name_plans.has_tls_candidate_target(
+                                Some(host) => name_plans.has_tls_candidate_target_endpoint(
                                     Some(host),
                                     tls_address,
                                     family,
                                     tls_source_port,
+                                    tls_destination_port,
                                 ),
                                 None => name_plans.has_tls_candidate(family),
                             }));

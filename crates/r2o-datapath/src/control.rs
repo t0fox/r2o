@@ -19,7 +19,7 @@ use r2k_core::plan::{PROTO_HTTP, PROTO_VOICE, Plan};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -695,6 +695,17 @@ impl NamePlans {
             _ => None,
         };
         let Some(sni) = sni else {
+            // Адресная TLS-проба использует служебный ключ IP:порт только
+            // в control-сокете. Проверяем оба порта и адрес, не подставляя SNI.
+            if let Some(plan) = self.find_tcp_endpoint_probe(
+                view.dst,
+                view.family,
+                shape,
+                tcp.source_port,
+                tcp.destination_port,
+            ) {
+                return Some(plan);
+            }
             if !tls.is_client_hello || tls.extensions_truncated {
                 return None;
             }
@@ -855,6 +866,34 @@ impl NamePlans {
             })
     }
 
+    /// Портовые пробы имени сохраняют прежний префильтр; служебный ключ
+    /// адресной пробы дополнительно ограничивает сервер и его порт.
+    pub fn has_tls_probe_at_endpoint(
+        &self,
+        family: u8,
+        source_port: u16,
+        address: Address,
+        destination_port: u16,
+    ) -> bool {
+        source_port != 0
+            && address.family() == family
+            && self.probes.iter().any(|(key, probe)| {
+                key.source_port == source_port
+                    && key.name.family == family
+                    && key.name.shape != SHAPE_HTTP
+                    && probe.plan.stream_input()
+                    && key
+                        .name
+                        .host
+                        .parse::<SocketAddr>()
+                        .ok()
+                        .is_none_or(|endpoint| {
+                            endpoint.ip() == address.as_ip_addr()
+                                && endpoint.port() == destination_port
+                        })
+            })
+    }
+
     pub fn has_tls_candidate(&self, family: u8) -> bool {
         self.plans.iter().any(|(key, entry)| {
             key.family == family && key.shape != SHAPE_HTTP && entry.plan.stream_input()
@@ -862,7 +901,10 @@ impl NamePlans {
             key.transport == 6 && key.family == family && entry.plan.stream_input()
         }) || self.addr_plans.iter().any(|(key, entry)| {
             key.address.family() == family
-                && matches!(key.shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP)
+                && matches!(
+                    r2k_link_shape_tcp_base(key.shape),
+                    SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP
+                )
                 && entry.plan.stream_input()
         })
     }
@@ -876,6 +918,19 @@ impl NamePlans {
         family: u8,
         source_port: u16,
     ) -> bool {
+        self.has_tls_candidate_target_endpoint(name, address, family, source_port, 0)
+    }
+
+    /// Для адресной пробы недостаточно одного локального порта: до сборки
+    /// SNI удерживаем только сегменты её точного сервера и порта.
+    pub fn has_tls_candidate_target_endpoint(
+        &self,
+        name: Option<&[u8]>,
+        address: Option<Address>,
+        family: u8,
+        source_port: u16,
+        destination_port: u16,
+    ) -> bool {
         let host = name.and_then(canonical_name);
         let exact = host.as_ref().is_some_and(|host| {
             self.plans.iter().any(|(key, entry)| {
@@ -885,15 +940,28 @@ impl NamePlans {
                     && entry.plan.stream_input()
             })
         });
-        let probes = host.as_ref().is_some_and(|host| {
-            self.probes.iter().any(|(key, probe)| {
-                key.name.family == family
-                    && key.name.shape != SHAPE_HTTP
-                    && key.name.host == *host
-                    && key.source_port == source_port
-                    && probe.plan.stream_input()
-            })
-        });
+        let endpoint_host = if source_port != 0
+            && !self.probes.is_empty()
+            && name.is_none_or(|name| name.is_empty())
+            && destination_port != 0
+        {
+            address
+                .filter(|address| address.family() == family)
+                .map(|address| SocketAddr::new(address.as_ip_addr(), destination_port).to_string())
+        } else {
+            None
+        };
+        let probe_host = host.as_ref().or(endpoint_host.as_ref());
+        let probes = source_port != 0
+            && probe_host.is_some_and(|host| {
+                self.probes.iter().any(|(key, probe)| {
+                    key.name.family == family
+                        && key.name.shape != SHAPE_HTTP
+                        && key.name.host == *host
+                        && key.source_port == source_port
+                        && probe.plan.stream_input()
+                })
+            });
         let suffix = host.as_ref().is_some_and(|host| {
             self.suffix_plans.iter().any(|(key, entry)| {
                 key.transport == 6
@@ -907,7 +975,10 @@ impl NamePlans {
             self.addr_plans.iter().any(|(key, entry)| {
                 key.address == address
                     && key.address.family() == family
-                    && matches!(key.shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP)
+                    && matches!(
+                        r2k_link_shape_tcp_base(key.shape),
+                        SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP
+                    )
                     && entry.plan.stream_input()
                     && host.as_ref().is_none_or(|host| {
                         !self.name_is_bypassed(host.as_bytes(), family, key.shape, 6)
@@ -1459,10 +1530,10 @@ impl NamePlans {
             return (false, control::ACK_BAD_ARGS);
         }
         let shape = body[1 + name_len];
-        let Some(host) = canonical_plan_name(&body[1..1 + name_len], shape) else {
+        let family = body[2 + name_len];
+        let Some(host) = canonical_probe_name(&body[1..1 + name_len], shape, family) else {
             return (false, control::ACK_BAD_ARGS);
         };
-        let family = body[2 + name_len];
         let source_port = u16::from_be_bytes([body[3 + name_len], body[4 + name_len]]);
         if !valid_tcp_probe_shape(shape) || !matches!(family, 4 | 6) || source_port == 0 {
             return (false, control::ACK_BAD_ARGS);
@@ -1810,10 +1881,10 @@ impl NamePlans {
             return (false, control::ACK_BAD_ARGS);
         }
         let shape = body[1 + name_len];
-        let Some(host) = canonical_plan_name(&body[1..1 + name_len], shape) else {
+        let family = body[2 + name_len];
+        let Some(host) = canonical_probe_name(&body[1..1 + name_len], shape, family) else {
             return (false, control::ACK_BAD_ARGS);
         };
-        let family = body[2 + name_len];
         let source_port = u16::from_be_bytes([body[3 + name_len], body[4 + name_len]]);
         // C `d2k_plantab_del_name_probe_family` форму не проверяет: чужая
         // форма просто не совпадает и ACK остаётся OK (`plans.c:808-828`).
@@ -2053,6 +2124,46 @@ impl NamePlans {
         Some(&entry.plan)
     }
 
+    fn find_tcp_endpoint_probe(
+        &self,
+        address: Address,
+        family: u8,
+        seen_shape: u8,
+        source_port: u16,
+        destination_port: u16,
+    ) -> Option<&Plan> {
+        // Как у именных проб, порт выделяет локальный сокет контроллера.
+        // Адрес клиента и метка не входят в этот ключ; это не полная пятёрка потока.
+        if self.probes.is_empty()
+            || source_port == 0
+            || destination_port == 0
+            || address.family() != family
+        {
+            return None;
+        }
+        let host = SocketAddr::new(address.as_ip_addr(), destination_port).to_string();
+        let bridge_shape = r2k_link_shape_tcp_base(seen_shape);
+        let mut found = None;
+        for (key, probe) in &self.probes {
+            if key.name.host == host
+                && key.name.family == family
+                && key.source_port == source_port
+                && key.name.shape != SHAPE_HTTP
+                && (seen_shape == 0
+                    || key.name.shape == seen_shape
+                    || key.name.shape == bridge_shape)
+            {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(probe);
+            }
+        }
+        let probe = found?;
+        Self::touch_probe(probe, self.next_plan_clock());
+        Some(&probe.plan)
+    }
+
     /// C `d2k_plantab_find`: IPv4, без порта.
     pub fn find(
         &self,
@@ -2111,6 +2222,8 @@ impl NamePlans {
             for (key, probe) in &self.probes {
                 if key.name.family == family
                     && key.source_port == source_port
+                    // Без порта сервера нельзя доказать адресную пробу.
+                    && key.name.host.parse::<SocketAddr>().is_err()
                     && r2o_shape_fits(key.name.shape, seen_shape)
                 {
                     if found.is_some() {
@@ -2677,6 +2790,26 @@ fn canonical_plan_name(bytes: &[u8], shape: u8) -> Option<String> {
     }
 }
 
+fn canonical_probe_name(bytes: &[u8], shape: u8, family: u8) -> Option<String> {
+    if let Some(host) = canonical_plan_name(bytes, shape) {
+        return Some(host);
+    }
+    if shape == SHAPE_HTTP {
+        return None;
+    }
+    let endpoint = std::str::from_utf8(bytes)
+        .ok()?
+        .parse::<SocketAddr>()
+        .ok()?;
+    if endpoint.port() == 0
+        || Address::new(endpoint.ip()).family() != family
+        || matches!(endpoint, SocketAddr::V6(address) if address.scope_id() != 0 || address.flowinfo() != 0)
+    {
+        return None;
+    }
+    Some(endpoint.to_string())
+}
+
 fn valid_tcp_shape(shape: u8) -> bool {
     is_tcp_plan_shape(shape) || shape == SHAPE_GRANDFATHER
 }
@@ -2769,7 +2902,95 @@ const CLIENT_SHAPE_CACHE_MAX: usize = 512;
 struct CachedClientShape {
     host: Vec<u8>,
     family: u8,
+    key: [u8; control::KEY_LEN],
     event_body: Vec<u8>,
+}
+
+impl CachedClientShape {
+    fn matches_request(&self, name: &[u8]) -> bool {
+        if name.is_empty() {
+            return true;
+        }
+        if let Some(endpoint) = std::str::from_utf8(name)
+            .ok()
+            .and_then(|name| name.parse::<SocketAddr>().ok())
+        {
+            if !self.host.is_empty()
+                || endpoint.port() == 0
+                || Address::new(endpoint.ip()).family() != self.family
+            {
+                return false;
+            }
+            // Ключ потока канонический, без направления ClientHello. Здесь
+            // доказываем принадлежность точного конца IP:порт; контроллер
+            // дополнительно сверяет наблюдённую цель со своим запросом.
+            let address = Address::new(endpoint.ip()).bytes();
+            return (self.key[1..17] == address
+                && self.key[33..35] == endpoint.port().to_be_bytes())
+                || (self.key[17..33] == address
+                    && self.key[35..37] == endpoint.port().to_be_bytes());
+        }
+        r2o_name_same(&self.host, name)
+    }
+}
+
+fn take_cached_client_shape(
+    cache: &mut VecDeque<CachedClientShape>,
+    family: u8,
+    name: &[u8],
+) -> Option<Vec<u8>> {
+    let matches =
+        |cached: &CachedClientShape| cached.family == family && cached.matches_request(name);
+    let by_endpoint = std::str::from_utf8(name)
+        .ok()
+        .is_some_and(|name| name.parse::<SocketAddr>().is_ok());
+    let position = if by_endpoint {
+        // У адреса могут быть снимки разных соединений и профилей клиента.
+        cache.iter().rposition(matches)
+    } else {
+        cache.iter().position(matches)
+    }?;
+    let cached = cache.remove(position)?;
+    let body = cached.event_body.clone();
+    cache.push_back(cached);
+    Some(body)
+}
+
+fn remember_client_shape(
+    cache: &mut VecDeque<CachedClientShape>,
+    armed: &mut Option<Vec<u8>>,
+    event: &control::ClientShapeEvent,
+    body: &[u8],
+) -> Option<Vec<u8>> {
+    if let Some(position) = cache.iter().position(|cached| {
+        cached.family == event.key[0]
+            && if event.host.is_empty() {
+                cached.host.is_empty() && cached.key == event.key
+            } else {
+                r2o_name_same(&cached.host, &event.host)
+            }
+    }) {
+        cache.remove(position);
+    }
+    let cached = CachedClientShape {
+        host: event.host.clone(),
+        family: event.key[0],
+        key: event.key,
+        event_body: body.to_vec(),
+    };
+    let matches = armed
+        .as_ref()
+        .is_some_and(|name| cached.matches_request(name));
+    cache.push_back(cached);
+    while cache.len() > CLIENT_SHAPE_CACHE_MAX {
+        cache.pop_front();
+    }
+    if matches {
+        *armed = None;
+        Some(body.to_vec())
+    } else {
+        None
+    }
 }
 
 #[derive(Clone)]
@@ -3077,17 +3298,11 @@ impl ControlServer {
         let slot = shape_slot(command.transport, command.family);
         match command.transport {
             6 => {
-                if let Some(position) = self.last_client_shapes.iter().position(|cached| {
-                    cached.family == command.family
-                        && (command.name.is_empty() || r2o_name_same(&cached.host, &command.name))
-                }) {
-                    let cached = self
-                        .last_client_shapes
-                        .remove(position)
-                        .expect("позиция кэша ClientHello только что найдена");
-                    // Свежий запрос продлевает жизнь снимка в LRU.
-                    let body = cached.event_body.clone();
-                    self.last_client_shapes.push_back(cached);
+                if let Some(body) = take_cached_client_shape(
+                    &mut self.last_client_shapes,
+                    command.family,
+                    &command.name,
+                ) {
                     return (
                         Self::arm_ack(true, control::ACK_OK),
                         Some((control::EVENT_CLIENT_SHAPE, body)),
@@ -3138,30 +3353,12 @@ impl ControlServer {
         })?;
         let family = event.key[0];
         let slot = shape_slot(6, family);
-        if let Some(position) = self
-            .last_client_shapes
-            .iter()
-            .position(|cached| cached.family == family && r2o_name_same(&cached.host, &event.host))
-        {
-            self.last_client_shapes.remove(position);
-        }
-        self.last_client_shapes.push_back(CachedClientShape {
-            host: event.host.clone(),
-            family,
-            event_body: body.to_vec(),
-        });
-        while self.last_client_shapes.len() > CLIENT_SHAPE_CACHE_MAX {
-            self.last_client_shapes.pop_front();
-        }
-        if self.armed_shapes[slot]
-            .as_ref()
-            .is_some_and(|host| host.is_empty() || r2o_name_same(host, &event.host))
-        {
-            self.armed_shapes[slot] = None;
-            Ok(Some(body.to_vec()))
-        } else {
-            Ok(None)
-        }
+        Ok(remember_client_shape(
+            &mut self.last_client_shapes,
+            &mut self.armed_shapes[slot],
+            &event,
+            body,
+        ))
     }
 
     /// Сохранить QUIC-снимок и, если он ждали, отдать событие немедленно.
@@ -3653,6 +3850,127 @@ mod tests {
 
         drop(server);
         std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn no_sni_shape_cache_and_armed_capture_require_exact_endpoint() {
+        for endpoint in [
+            "198.51.100.2:443",
+            "[2001:db8::2]:8443",
+            "192.0.1.2:443",
+            "[2001:db7::2]:8443",
+        ] {
+            let endpoint = endpoint.parse::<std::net::SocketAddr>().unwrap();
+            let family = super::Address::new(endpoint.ip()).family();
+            let request = endpoint.to_string().into_bytes();
+            let shape = |server| {
+                let body =
+                    crate::capture::tcp_hello_from_packet(&no_sni_tls_packet(server, 40_000))
+                        .unwrap()
+                        .shape_event_body()
+                        .unwrap();
+                let event = control::decode_client_shape(&Frame {
+                    kind: EVENT_CLIENT_SHAPE,
+                    body: body.clone(),
+                })
+                .unwrap();
+                (event, body)
+            };
+            let other = std::net::SocketAddr::new(endpoint.ip(), endpoint.port() + 1);
+            let (wanted, wanted_body) = shape(endpoint);
+            let (foreign, foreign_body) = shape(other);
+            let mut cache = std::collections::VecDeque::new();
+            let mut armed = Some(request.clone());
+            assert!(
+                super::remember_client_shape(&mut cache, &mut armed, &foreign, &foreign_body)
+                    .is_none()
+            );
+            assert_eq!(armed.as_ref(), Some(&request));
+            assert!(super::take_cached_client_shape(&mut cache, family, &request).is_none());
+            assert_eq!(
+                super::remember_client_shape(&mut cache, &mut armed, &wanted, &wanted_body),
+                Some(wanted_body.clone())
+            );
+            assert!(armed.is_none());
+            assert_eq!(
+                cache.len(),
+                2,
+                "снимки без SNI разных серверных портов независимы"
+            );
+            assert_eq!(
+                super::take_cached_client_shape(&mut cache, family, &request),
+                Some(wanted_body)
+            );
+            assert_eq!(
+                super::take_cached_client_shape(&mut cache, family, other.to_string().as_bytes()),
+                Some(foreign_body)
+            );
+            assert!(
+                super::take_cached_client_shape(
+                    &mut cache,
+                    if family == 4 { 6 } else { 4 },
+                    &request
+                )
+                .is_none()
+            );
+            assert!(
+                super::take_cached_client_shape(&mut cache, family, b"other.example").is_none()
+            );
+            let other_address = if family == 4 {
+                "198.51.100.3"
+            } else {
+                "2001:db8::3"
+            }
+            .parse()
+            .unwrap();
+            let other_server = std::net::SocketAddr::new(other_address, endpoint.port());
+            assert!(
+                super::take_cached_client_shape(
+                    &mut cache,
+                    family,
+                    other_server.to_string().as_bytes()
+                )
+                .is_none()
+            );
+
+            let mut newer = wanted;
+            let client_port_at = if newer.key[33..35] == 40_000_u16.to_be_bytes() {
+                33
+            } else {
+                35
+            };
+            newer.key[client_port_at..client_port_at + 2]
+                .copy_from_slice(&40_001_u16.to_be_bytes());
+            newer.tcp_has_timestamp = Some(true);
+            let newer_body = newer.event_body().unwrap();
+            assert!(
+                super::remember_client_shape(&mut cache, &mut armed, &newer, &newer_body).is_none()
+            );
+            assert_eq!(
+                super::take_cached_client_shape(&mut cache, family, &request),
+                Some(newer_body),
+                "адресный запрос получает свежий снимок другого соединения"
+            );
+        }
+
+        let body = crate::capture::tcp_hello_from_packet(&tcp_tls_packet("named.example"))
+            .unwrap()
+            .shape_event_body()
+            .unwrap();
+        let named = control::decode_client_shape(&Frame {
+            kind: EVENT_CLIENT_SHAPE,
+            body: body.clone(),
+        })
+        .unwrap();
+        let mut cache = std::collections::VecDeque::new();
+        let mut armed = Some(b"198.51.100.2:443".to_vec());
+        assert!(super::remember_client_shape(&mut cache, &mut armed, &named, &body).is_none());
+        assert!(armed.is_some());
+        assert!(super::take_cached_client_shape(&mut cache, 4, b"198.51.100.2:443").is_none());
+        assert_eq!(
+            super::take_cached_client_shape(&mut cache, 4, b"NAMED.example"),
+            Some(body)
+        );
     }
 
     #[test]
@@ -6219,6 +6537,330 @@ mod tests {
         assert!(!plans.has_tls_probe_on_port(4, 40_000));
     }
 
+    fn endpoint_tls_probe_frame(
+        endpoint: &str,
+        family: u8,
+        source_port: u16,
+        id: [u8; 16],
+        trial_id: [u8; 16],
+    ) -> Frame {
+        let mut records = tls_plan_records(id);
+        records[6..8].copy_from_slice(&5_u16.to_be_bytes());
+        records[10..12].copy_from_slice(&4_u16.to_be_bytes());
+        records.extend_from_slice(&[1, 9, 0, 1, 1, 1, 10, 0, 0]);
+        let command = control::encode_set_name_probe(
+            endpoint,
+            SHAPE_MODERN,
+            family,
+            source_port,
+            &records,
+            trial_id,
+        )
+        .unwrap();
+        control::read_frame(&mut std::io::Cursor::new(command)).unwrap()
+    }
+
+    fn no_sni_tls_packet(endpoint: std::net::SocketAddr, source_port: u16) -> Vec<u8> {
+        let mut packet = tcp_tls_packet("");
+        let tcp_offset = match endpoint.ip() {
+            IpAddr::V4(address) => {
+                packet[16..20].copy_from_slice(&address.octets());
+                20
+            }
+            IpAddr::V6(address) => {
+                let tcp = packet.split_off(20);
+                packet = vec![0; 40];
+                packet[0] = 0x60;
+                packet[4..6].copy_from_slice(&(tcp.len() as u16).to_be_bytes());
+                packet[6] = 6;
+                packet[7] = 64;
+                packet[8..24].copy_from_slice(
+                    &"2001:db8::1"
+                        .parse::<std::net::Ipv6Addr>()
+                        .unwrap()
+                        .octets(),
+                );
+                packet[24..40].copy_from_slice(&address.octets());
+                packet.extend_from_slice(&tcp);
+                40
+            }
+        };
+        packet[tcp_offset..tcp_offset + 2].copy_from_slice(&source_port.to_be_bytes());
+        packet[tcp_offset + 2..tcp_offset + 4].copy_from_slice(&endpoint.port().to_be_bytes());
+        let view = super::PacketView::parse(&packet).unwrap();
+        let tcp = view.tcp_segment(&packet).unwrap();
+        let hello = r2k_core::tls::parse(&packet[tcp.payload]);
+        assert!(hello.is_client_hello);
+        assert!(hello.sni_range.is_none());
+        assert!(!hello.extensions_truncated);
+        packet
+    }
+
+    #[test]
+    fn no_sni_tls_trial_requires_its_server_and_both_ports() {
+        for endpoint in ["198.51.100.2:443", "[2001:db8::2]:8443"] {
+            let endpoint = endpoint.parse::<std::net::SocketAddr>().unwrap();
+            let address = super::Address::new(endpoint.ip());
+            let family = address.family();
+            let source_port = 40_000;
+            let mut plans = NamePlans::default();
+            let ack = plans.handle(&endpoint_tls_probe_frame(
+                &endpoint.to_string(),
+                family,
+                source_port,
+                [0x61; 16],
+                [0x62; 16],
+            ));
+            assert!(ack.ok, "{endpoint}: reason={}", ack.reason);
+            assert_eq!(ack.trial_id, Some([0x62; 16]));
+            let packet = no_sni_tls_packet(endpoint, source_port);
+            assert_eq!(plans.select(&packet).map(|plan| plan.id), Some([0x61; 16]));
+            let applied = plans.applied_event_for_packet(&packet, 9).unwrap();
+            assert_eq!(applied.plan_id, [0x61; 16]);
+            assert_eq!(applied.trial_id, [0x62; 16]);
+            assert_eq!(applied.binding.family, family);
+            assert!(applied.binding.temporary);
+            assert_ne!(applied.binding.generation, 0);
+            assert_eq!(applied.key[33..35], source_port.to_be_bytes());
+            assert_eq!(applied.key[35..37], endpoint.port().to_be_bytes());
+
+            let other_address = match endpoint.ip() {
+                IpAddr::V4(_) => "198.51.100.3".parse().unwrap(),
+                IpAddr::V6(_) => "2001:db8::3".parse().unwrap(),
+            };
+            for (server, port) in [
+                (endpoint, source_port + 1),
+                (
+                    std::net::SocketAddr::new(other_address, endpoint.port()),
+                    source_port,
+                ),
+                (
+                    std::net::SocketAddr::new(endpoint.ip(), endpoint.port() + 1),
+                    source_port,
+                ),
+            ] {
+                let foreign = no_sni_tls_packet(server, port);
+                assert!(plans.select(&foreign).is_none(), "{server}, source={port}");
+                assert!(plans.applied_event_for_packet(&foreign, 10).is_none());
+                assert!(!plans.has_tls_probe_at_endpoint(
+                    family,
+                    port,
+                    super::Address::new(server.ip()),
+                    server.port(),
+                ));
+                assert!(!plans.has_tls_candidate_target_endpoint(
+                    None,
+                    Some(super::Address::new(server.ip())),
+                    family,
+                    port,
+                    server.port(),
+                ));
+            }
+            assert!(
+                plans
+                    .find_target(None, Some(address), family, SHAPE_MODERN, source_port)
+                    .is_none()
+            );
+            assert!(!plans.has_tls_candidate_target(None, Some(address), family, source_port));
+            assert!(plans.has_tls_probe_at_endpoint(family, source_port, address, endpoint.port()));
+            assert!(plans.has_tls_candidate_target_endpoint(
+                None,
+                Some(address),
+                family,
+                source_port,
+                endpoint.port()
+            ));
+            assert!(!plans.has_tls_candidate_target_endpoint(
+                Some(b"other.example"),
+                Some(address),
+                family,
+                source_port,
+                endpoint.port()
+            ));
+
+            // Первый сегмент ещё не содержит полного блока расширений.
+            let mut partial = packet;
+            partial.truncate(partial.len() - 2);
+            let length = if family == 4 {
+                partial.len()
+            } else {
+                partial.len() - 40
+            };
+            let length_offset = if family == 4 { 2 } else { 4 };
+            partial[length_offset..length_offset + 2]
+                .copy_from_slice(&(length as u16).to_be_bytes());
+            let view = super::PacketView::parse(&partial).unwrap();
+            let tcp = view.tcp_segment(&partial).unwrap();
+            let hello = r2k_core::tls::parse(&partial[tcp.payload]);
+            assert!(hello.is_client_hello && hello.extensions_truncated);
+            assert!(hello.sni_range.is_none());
+            assert_eq!(plans.select(&partial).map(|plan| plan.id), Some([0x61; 16]));
+        }
+    }
+
+    #[test]
+    fn no_sni_tls_trial_cleanup_preserves_other_trials_and_address_fallback() {
+        let endpoint = "198.51.100.2:443".parse::<std::net::SocketAddr>().unwrap();
+        let other_endpoint = "198.51.100.2:8443".parse::<std::net::SocketAddr>().unwrap();
+        let mut plans = NamePlans::default();
+        let permanent =
+            encode_set_addr(endpoint.ip(), SHAPE_MODERN, &tls_plan_records([0x70; 16])).unwrap();
+        assert!(
+            plans
+                .handle(&control::read_frame(&mut std::io::Cursor::new(permanent)).unwrap())
+                .ok
+        );
+        for (server, id, trial) in [
+            (endpoint, 0x71, 0x81),
+            (other_endpoint, 0x72, 0x82),
+            (endpoint, 0x73, 0x83),
+        ] {
+            assert!(
+                plans
+                    .handle(&endpoint_tls_probe_frame(
+                        &server.to_string(),
+                        4,
+                        40_000,
+                        [id; 16],
+                        [trial; 16]
+                    ))
+                    .ok
+            );
+        }
+        let packet = no_sni_tls_packet(endpoint, 40_000);
+        let other_packet = no_sni_tls_packet(other_endpoint, 40_000);
+        assert_eq!(plans.select(&packet).map(|plan| plan.id), Some([0x73; 16]));
+        assert_eq!(
+            plans.select(&other_packet).map(|plan| plan.id),
+            Some([0x72; 16])
+        );
+        assert_eq!(
+            plans
+                .select(&no_sni_tls_packet(endpoint, 40_001))
+                .map(|plan| plan.id),
+            Some([0x70; 16])
+        );
+        for (trial, expected) in [(0x81, 0x73), (0x83, 0x70)] {
+            let delete = control::encode_delete_name_probe_with_trial(
+                &endpoint.to_string(),
+                SHAPE_MODERN,
+                4,
+                40_000,
+                Some([trial; 16]),
+            )
+            .unwrap();
+            assert!(
+                plans
+                    .handle(&control::read_frame(&mut std::io::Cursor::new(delete)).unwrap())
+                    .ok
+            );
+            assert_eq!(
+                plans.select(&packet).map(|plan| plan.id),
+                Some([expected; 16])
+            );
+            assert_eq!(
+                plans.select(&other_packet).map(|plan| plan.id),
+                Some([0x72; 16])
+            );
+        }
+        plans.clear_probes();
+        assert_eq!(
+            plans.select(&other_packet).map(|plan| plan.id),
+            Some([0x70; 16])
+        );
+        assert!(
+            !plans
+                .applied_event_for_packet(&packet, 11)
+                .unwrap()
+                .binding
+                .temporary
+        );
+    }
+
+    #[test]
+    fn endpoint_tls_probe_keys_are_control_only_and_validate_family() {
+        let mut plans = NamePlans::default();
+        for (key, family) in [
+            ("198.51.100.2:0", 4),
+            ("198.51.100.2:443", 6),
+            ("[2001:db8::2]:443", 4),
+            ("198.51.100.2", 4),
+            ("example.test:443", 4),
+        ] {
+            assert!(
+                !plans
+                    .handle(&endpoint_tls_probe_frame(
+                        key, family, 40_000, [1; 16], [2; 16]
+                    ))
+                    .ok,
+                "{key}, family={family}"
+            );
+        }
+        let endpoint = "198.51.100.2:443";
+        assert!(
+            !plans
+                .handle(&set_name_shape(endpoint, SHAPE_MODERN, [3; 16]))
+                .ok
+        );
+        assert!(
+            plans
+                .handle(&endpoint_tls_probe_frame(
+                    endpoint, 4, 50_000, [4; 16], [5; 16]
+                ))
+                .ok
+        );
+        let named_packet = tcp_tls_packet("example.test");
+        assert!(plans.select(&named_packet).is_none());
+        assert!(
+            plans
+                .handle(&set_name_shape("example.test", SHAPE_MODERN, [6; 16]))
+                .ok
+        );
+        assert_eq!(
+            plans.select(&named_packet).map(|plan| plan.id),
+            Some([6; 16])
+        );
+        assert_eq!(
+            plans
+                .select(&no_sni_tls_packet(endpoint.parse().unwrap(), 50_000))
+                .map(|plan| plan.id),
+            Some([4; 16])
+        );
+
+        assert!(
+            plans
+                .handle(&endpoint_tls_probe_frame(
+                    "[2001:0DB8:0:0:0:0:0:2]:443",
+                    6,
+                    40_000,
+                    [7; 16],
+                    [8; 16]
+                ))
+                .ok
+        );
+        let delete = control::encode_delete_name_probe_with_trial(
+            "[2001:db8::2]:443",
+            SHAPE_MODERN,
+            6,
+            40_000,
+            Some([8; 16]),
+        )
+        .unwrap();
+        assert!(
+            plans
+                .handle(&control::read_frame(&mut std::io::Cursor::new(delete)).unwrap())
+                .ok
+        );
+        assert!(
+            plans
+                .select(&no_sni_tls_packet(
+                    "[2001:db8::2]:443".parse().unwrap(),
+                    40_000
+                ))
+                .is_none()
+        );
+    }
+
     #[test]
     fn http_candidate_respects_source_port_like_d2o() {
         let mut plans = NamePlans::default();
@@ -6525,9 +7167,12 @@ mod tests {
         server_name.extend_from_slice(&(host.len() as u16).to_be_bytes());
         server_name.extend_from_slice(host);
 
-        let mut extensions = vec![0x00, 0x00];
-        extensions.extend_from_slice(&(server_name.len() as u16).to_be_bytes());
-        extensions.extend_from_slice(&server_name);
+        let mut extensions = Vec::new();
+        if !host.is_empty() {
+            extensions.extend_from_slice(&[0x00, 0x00]);
+            extensions.extend_from_slice(&(server_name.len() as u16).to_be_bytes());
+            extensions.extend_from_slice(&server_name);
+        }
         extensions.extend_from_slice(&[0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04]);
 
         let mut hello = vec![0x03, 0x03];
@@ -7103,6 +7748,35 @@ mod tests {
             },
         );
         assert!(plans.has_tls_candidate_target(None, Some(address), 4, 0));
+    }
+
+    #[test]
+    fn tls_address_context_plans_allow_segmented_hello_capture() {
+        let address = "198.51.100.2".parse::<IpAddr>().unwrap().into();
+        for shape in [
+            control::SHAPE_MODERN_NO_TS,
+            control::SHAPE_MODERN_TS,
+            control::SHAPE_LEGACY_NO_TS,
+            control::SHAPE_LEGACY_TS,
+            control::SHAPE_ECH_NO_TS,
+            control::SHAPE_ECH_TS,
+        ] {
+            let mut plans = NamePlans::default();
+            plans.addr_plans.insert(
+                super::AddrPlanKey { address, shape },
+                InstalledPlan {
+                    plan: stream_input_tls_plan(),
+                    generation: 1,
+                    last_used: std::cell::Cell::new(0),
+                },
+            );
+            assert!(plans.has_tls_candidate(4), "shape={shape}");
+            assert!(
+                plans.has_tls_candidate_target(None, Some(address), 4, 0),
+                "shape={shape}"
+            );
+            assert!(!plans.has_tls_candidate(6));
+        }
     }
 
     #[test]

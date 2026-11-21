@@ -517,9 +517,54 @@ impl R2oBudgetTcpState {
 /// Этот путь намеренно не отправляет HTTP-запрос для MQTT и прочих протоколов.
 pub fn r2o_verify_tls_connected_stream_with_alpn(
     options: &FetchOptions,
+    socket: TcpStream,
+    alpn_protocols: &[Vec<u8>],
+    phase_timeout: Duration,
+) -> Result<FetchResult, String> {
+    r2o_verify_tls_connected_stream_with_alpn_inner(
+        options,
+        socket,
+        alpn_protocols,
+        phase_timeout,
+        None,
+    )
+}
+
+/// Подтвердить TLS по адресу без SNI и без предположения о HTTP. В отличие
+/// от диагностического клиента, финальная проба проверяет Finished сервера.
+pub fn r2o_verify_tls_address_connected_stream_with_alpn(
+    options: &FetchOptions,
+    socket: TcpStream,
+    alpn_protocols: &[Vec<u8>],
+    phase_timeout: Duration,
+) -> Result<FetchResult, String> {
+    let address = options
+        .name
+        .parse::<IpAddr>()
+        .map_err(|_| "адресная TLS-проба требует IP вместо имени".to_owned())?;
+    if options.ip != Some(address)
+        || socket
+            .peer_addr()
+            .map_err(|error| format!("не удалось получить адрес TLS-сервера: {error}"))?
+            != SocketAddr::new(address, options.port)
+    {
+        return Err("сокет адресной TLS-пробы не совпадает с целью".into());
+    }
+    r2o_verify_tls_connected_stream_with_alpn_inner(
+        options,
+        socket,
+        alpn_protocols,
+        phase_timeout,
+        Some(address),
+    )
+}
+
+fn r2o_verify_tls_connected_stream_with_alpn_inner(
+    options: &FetchOptions,
     mut socket: TcpStream,
     alpn_protocols: &[Vec<u8>],
     phase_timeout: Duration,
+    address_only: Option<IpAddr>,
 ) -> Result<FetchResult, String> {
     options.validate()?;
     if phase_timeout.is_zero() {
@@ -532,15 +577,25 @@ pub fn r2o_verify_tls_connected_stream_with_alpn(
     socket
         .set_nodelay(true)
         .map_err(|error| format!("не удалось настроить TCP-сокет: {error}"))?;
-    let mut roots = RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let mut connection = crate::r2o_tls::r2o_tls_client_connection_with_alpn(
-        &options.name,
-        options.tls12,
-        options.wire_len,
-        roots,
-        alpn_protocols,
-    )?;
+    let mut connection = match address_only {
+        Some(address) => crate::r2o_tls::r2o_tls_address_client_connection_with_alpn(
+            address,
+            options.tls12,
+            options.wire_len,
+            alpn_protocols,
+        ),
+        None => {
+            let mut roots = RootCertStore::empty();
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            crate::r2o_tls::r2o_tls_client_connection_with_alpn(
+                &options.name,
+                options.tls12,
+                options.wire_len,
+                roots,
+                alpn_protocols,
+            )
+        }
+    }?;
     while connection.is_handshaking() {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -588,12 +643,20 @@ pub fn r2o_verify_tls_connected_stream_with_alpn(
         Some(ProtocolVersion::TLSv1_2) => Some("1.2"),
         _ => None,
     };
-    let peer_name_ok = connection
-        .peer_certificates()
-        .and_then(|certificates| certificates.first())
-        .and_then(|certificate| {
-            crate::response::https_certificate_name_matches(certificate.as_ref(), &options.name)
-        });
+    let peer_name_ok = address_only
+        .is_none()
+        .then(|| {
+            connection
+                .peer_certificates()
+                .and_then(|certificates| certificates.first())
+                .and_then(|certificate| {
+                    crate::response::https_certificate_name_matches(
+                        certificate.as_ref(),
+                        &options.name,
+                    )
+                })
+        })
+        .flatten();
     Ok(FetchResult {
         address,
         local_port,
@@ -4774,6 +4837,86 @@ fn connect_socket(fd: libc::c_int, address: SocketAddr) -> io::Result<libc::c_in
                 )
             };
             Ok(result)
+        }
+    }
+}
+
+#[cfg(test)]
+mod address_verifier_tests {
+    use super::*;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use std::net::TcpListener;
+    use std::sync::Arc;
+
+    #[test]
+    fn адресный_verifier_завершает_tls_и_не_отправляет_http() {
+        for tls12 in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+            let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                certificate.serialize_private_key_der(),
+            ));
+            let versions = if tls12 {
+                &[&rustls::version::TLS12][..]
+            } else {
+                &[&rustls::version::TLS13][..]
+            };
+            let mut config = rustls::ServerConfig::builder_with_protocol_versions(versions)
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![CertificateDer::from(certificate.serialize_der().unwrap())],
+                    key,
+                )
+                .unwrap();
+            config.alpn_protocols = vec![b"h2".to_vec()];
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut connection = rustls::ServerConnection::new(Arc::new(config)).unwrap();
+                while connection.is_handshaking() {
+                    connection.complete_io(&mut socket).unwrap();
+                }
+                assert!(connection.server_name().is_none());
+                assert_eq!(connection.alpn_protocol(), Some(b"h2".as_slice()));
+                let mut stream = rustls::StreamOwned::new(connection, socket);
+                let mut byte = [0; 1];
+                match stream.read(&mut byte) {
+                    Ok(0) => {}
+                    Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {}
+                    other => panic!("адресная TLS-проба отправила прикладные байты: {other:?}"),
+                }
+            });
+            let options = FetchOptions {
+                name: address.ip().to_string(),
+                ip: Some(address.ip()),
+                port: address.port(),
+                path: "/".into(),
+                deadline: Duration::from_secs(2),
+                tls12,
+                wire_len: None,
+                mark: None,
+            };
+            let result = r2o_verify_tls_address_connected_stream_with_alpn(
+                &options,
+                TcpStream::connect(address).unwrap(),
+                &[b"h2".to_vec()],
+                Duration::from_secs(2),
+            )
+            .unwrap();
+            server.join().unwrap();
+            assert!(result.handshake_verified);
+            assert!(!result.application_verified);
+            assert!(!result.complete);
+            assert_eq!(result.status, 0);
+            assert_eq!(result.body_bytes, 0);
+            assert_eq!(result.peer_name_ok, None);
+            assert_eq!(result.tls, Some(if tls12 { "1.2" } else { "1.3" }));
         }
     }
 }

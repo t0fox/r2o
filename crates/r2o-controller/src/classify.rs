@@ -161,6 +161,13 @@ impl Trigger {
         })
     }
 
+    /// Адресный профиль без расширения SNI; тип TLS и остальные байты
+    /// штатного профиля сохраняются, внутренний адрес в приветствие не идёт.
+    pub fn tls_without_sni(tls12: bool) -> Result<Self, &'static str> {
+        let payload = crate::trigger::tls_profile_without_sni(tls12)?;
+        Self::tls_client_hello("", &payload)
+    }
+
     /// Собрать триггер из полного ClientHello, снятого с клиентского потока.
     pub fn tls_client_hello(sni: &str, client_hello: &[u8]) -> Result<Self, &'static str> {
         let tls = r2k_core::tls::parse(client_hello);
@@ -168,10 +175,15 @@ impl Trigger {
             .sni_range
             .as_ref()
             .and_then(|range| client_hello.get(range.clone()));
+        let sni_matches = if sni.is_empty() {
+            crate::r2o_tls::r2o_tls_client_hello_without_sni(client_hello)
+        } else {
+            captured_sni.is_some_and(|captured| captured.eq_ignore_ascii_case(sni.as_bytes()))
+        };
         if !tls.is_client_hello
             || tls.extensions_truncated
             || tls.record_end != Some(client_hello.len())
-            || captured_sni.is_none_or(|captured| !captured.eq_ignore_ascii_case(sni.as_bytes()))
+            || !sni_matches
         {
             return Err("снятый TLS ClientHello неполон или его SNI не совпадает с целью");
         }

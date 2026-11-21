@@ -521,6 +521,7 @@ pub struct HelloEvent {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientShapeEvent {
     pub key: [u8; KEY_LEN],
+    /// Пустое имя допустимо только для полного ClientHello без расширения SNI.
     pub host: Vec<u8>,
     pub shape: u8,
     pub client_hello: Vec<u8>,
@@ -533,7 +534,6 @@ impl ClientShapeEvent {
     pub fn event_body(&self) -> Option<Vec<u8>> {
         if !valid_flow_key(&self.key)
             || self.key[37] != 6
-            || self.host.is_empty()
             || self.host.len() > MAX_DNS_NAME_LEN
             || !matches!(self.shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP)
             || self.client_hello.len() > 4096
@@ -557,7 +557,11 @@ impl ClientShapeEvent {
             || tls.extensions_truncated
             || tls.record_end != Some(self.client_hello.len())
             || client_shape != self.shape
-            || sni.is_none_or(|name| !name.eq_ignore_ascii_case(&self.host))
+            || if self.host.is_empty() {
+                sni.is_some() || !valid_no_sni_client_hello(&self.client_hello)
+            } else {
+                sni.is_none_or(|name| !name.eq_ignore_ascii_case(&self.host))
+            }
         {
             return None;
         }
@@ -582,6 +586,65 @@ impl ClientShapeEvent {
         }
         Some(body)
     }
+}
+
+/// Отсутствие найденного имени ещё не доказывает отсутствие SNI: повреждённое
+/// расширение тоже даёт `None`. Для адресного снимка проверяем все границы
+/// ClientHello и отвергаем любое расширение server_name, даже пустое.
+pub fn valid_no_sni_client_hello(bytes: &[u8]) -> bool {
+    let tls = crate::tls::parse(bytes);
+    tls.is_client_hello
+        && !tls.extensions_truncated
+        && tls.record_end == Some(bytes.len())
+        && tls.sni_range.is_none()
+        && complete_client_hello_without_sni(bytes).is_some()
+}
+
+fn complete_client_hello_without_sni(bytes: &[u8]) -> Option<()> {
+    let handshake = bytes.get(5..)?;
+    if handshake.first().copied()? != 1 {
+        return None;
+    }
+    let length = (usize::from(*handshake.get(1)?) << 16)
+        | (usize::from(*handshake.get(2)?) << 8)
+        | usize::from(*handshake.get(3)?);
+    if length.checked_add(4)? != handshake.len() {
+        return None;
+    }
+    let mut rest = handshake.get(4 + 34..)?;
+    let session_len = usize::from(*rest.first()?);
+    if session_len > 32 {
+        return None;
+    }
+    rest = rest.get(1 + session_len..)?;
+    let cipher_len = usize::from(u16::from_be_bytes(rest.get(..2)?.try_into().ok()?));
+    if cipher_len < 2 || cipher_len % 2 != 0 {
+        return None;
+    }
+    rest = rest.get(2 + cipher_len..)?;
+    let compression_len = usize::from(*rest.first()?);
+    if compression_len == 0 {
+        return None;
+    }
+    rest = rest.get(1 + compression_len..)?;
+    if rest.is_empty() {
+        return Some(());
+    }
+    let extensions_len = usize::from(u16::from_be_bytes(rest.get(..2)?.try_into().ok()?));
+    rest = rest.get(2..)?;
+    if rest.len() != extensions_len {
+        return None;
+    }
+    while !rest.is_empty() {
+        let header = rest.get(..4)?;
+        let kind = u16::from_be_bytes([header[0], header[1]]);
+        let length = usize::from(u16::from_be_bytes([header[2], header[3]]));
+        if kind == 0 {
+            return None;
+        }
+        rest = rest.get(4 + length..)?;
+    }
+    Some(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2895,7 +2958,7 @@ pub fn decode_client_shape(frame: &Frame) -> Result<ClientShapeEvent, &'static s
         return Err("снимок ClientHello привязан не к TCP-потоку");
     }
     let host_len = usize::from(frame.body[KEY_LEN]);
-    if host_len == 0 || host_len > MAX_DNS_NAME_LEN {
+    if host_len > MAX_DNS_NAME_LEN {
         return Err("неверная длина имени полного ClientHello");
     }
     let shape_at = KEY_LEN + 1 + host_len;
@@ -2957,6 +3020,116 @@ fn valid_flow_key(key: &[u8; KEY_LEN]) -> bool {
         && (key[0] != 4
             || key[5..17].iter().all(|byte| *byte == 0)
                 && key[21..33].iter().all(|byte| *byte == 0))
+}
+
+#[cfg(test)]
+mod client_shape_no_sni_tests {
+    use super::{ClientShapeEvent, EVENT_CLIENT_SHAPE, Frame, KEY_LEN, SHAPE_MODERN};
+
+    fn hello(extensions: &[u8]) -> Vec<u8> {
+        let mut body = vec![3, 3];
+        body.extend_from_slice(&[0x42; 32]);
+        body.extend_from_slice(&[0, 0, 2, 0x13, 1, 1, 0]);
+        body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        body.extend_from_slice(extensions);
+        let mut record = vec![22, 3, 1];
+        record.extend_from_slice(&((body.len() + 4) as u16).to_be_bytes());
+        record.push(1);
+        record.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+        record.extend_from_slice(&body);
+        record
+    }
+
+    fn event(family: u8) -> ClientShapeEvent {
+        let mut key = [0; KEY_LEN];
+        key[0] = family;
+        if family == 4 {
+            key[1..5].copy_from_slice(&[192, 0, 2, 1]);
+            key[17..21].copy_from_slice(&[198, 51, 100, 2]);
+        } else {
+            key[1..17].copy_from_slice(
+                &"2001:db8::1"
+                    .parse::<std::net::Ipv6Addr>()
+                    .unwrap()
+                    .octets(),
+            );
+            key[17..33].copy_from_slice(
+                &"2001:db8::2"
+                    .parse::<std::net::Ipv6Addr>()
+                    .unwrap()
+                    .octets(),
+            );
+        }
+        key[33..35].copy_from_slice(&40_000_u16.to_be_bytes());
+        key[35..37].copy_from_slice(&8443_u16.to_be_bytes());
+        key[37] = 6;
+        ClientShapeEvent {
+            key,
+            host: Vec::new(),
+            shape: SHAPE_MODERN,
+            client_hello: hello(&[0, 43, 0, 3, 2, 3, 4, 0, 16, 0, 5, 0, 3, 2, b'h', b'2']),
+            tcp_has_timestamp: Some(family == 6),
+        }
+    }
+
+    #[test]
+    fn no_sni_client_shape_round_trip_preserves_alpn_and_wire_profiles() {
+        for family in [4, 6] {
+            let event = event(family);
+            let frame = Frame {
+                kind: EVENT_CLIENT_SHAPE,
+                body: event.event_body().unwrap(),
+            };
+            assert_eq!(frame.body[KEY_LEN], 0);
+            assert_eq!(super::decode_client_shape(&frame), Ok(event.clone()));
+            let legacy = super::translate_event_to_v22(frame.kind, &frame.body);
+            assert_eq!(legacy.len(), 2);
+            assert_eq!(legacy[0].0, super::EVENT_LEGACY_CLIENT_TCP);
+            assert_eq!(legacy[1].0, super::EVENT_LEGACY_SHAPE);
+            assert_eq!(&legacy[1].1[KEY_LEN..], event.client_hello);
+        }
+    }
+
+    #[test]
+    fn no_sni_client_shape_rejects_hidden_sni_and_malformed_complete_records() {
+        let valid = event(4);
+        let mut forged = Frame {
+            kind: EVENT_CLIENT_SHAPE,
+            body: valid.event_body().unwrap(),
+        };
+        // Превращаем supported_versions в повреждённый server_name, не меняя длин.
+        let snapshot_at = KEY_LEN + 6;
+        forged.body[snapshot_at + 53] = 0;
+        forged.body[KEY_LEN + 1] = super::SHAPE_LEGACY;
+        assert!(super::decode_client_shape(&forged).is_err());
+
+        for extensions in [
+            vec![0, 0, 0, 0],
+            vec![0, 43, 0, 3, 2, 3, 4, 0],
+            vec![0, 43, 0, 8, 2, 3, 4],
+        ] {
+            let mut bad = valid.clone();
+            bad.client_hello = hello(&extensions);
+            bad.shape = if crate::tls::parse(&bad.client_hello).is_tls13 {
+                SHAPE_MODERN
+            } else {
+                super::SHAPE_LEGACY
+            };
+            assert!(bad.event_body().is_none(), "{extensions:?}");
+        }
+        let mut truncated = valid.clone();
+        truncated.client_hello.pop();
+        assert!(truncated.event_body().is_none());
+        let mut invalid_vectors = valid.clone();
+        invalid_vectors.client_hello[43] = 255;
+        assert!(invalid_vectors.event_body().is_none());
+        let mut wrong_shape = valid.clone();
+        wrong_shape.shape = super::SHAPE_LEGACY;
+        assert!(wrong_shape.event_body().is_none());
+        let mut fake_name = valid;
+        fake_name.host = b"example.test".to_vec();
+        assert!(fake_name.event_body().is_none());
+    }
 }
 
 #[cfg(test)]

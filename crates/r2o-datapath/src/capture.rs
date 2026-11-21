@@ -103,7 +103,7 @@ impl TcpHello {
     pub fn shape_event_body(&self) -> Option<Vec<u8>> {
         let event = r2k_core::control::ClientShapeEvent {
             key: self.key.wire_key(),
-            host: self.host.clone()?,
+            host: self.host.clone().unwrap_or_default(),
             shape: self.shape,
             client_hello: self.client_hello.clone()?,
             tcp_has_timestamp: self.tcp_has_timestamp,
@@ -147,8 +147,16 @@ pub fn tcp_hello_from_bytes(key: TcpFlowKey, bytes: &[u8]) -> Option<TcpHello> {
     let host = tls
         .sni_range
         .and_then(|range| bytes.get(range))
-        .filter(|name| name.len() <= MAX_DNS_NAME_LEN)
+        .filter(|name| !name.is_empty() && name.len() <= MAX_DNS_NAME_LEN)
         .map(<[u8]>::to_vec);
+    // Полный, но повреждённый/слишком длинный SNI не превращает доменную
+    // цель в адресную. Неполные сегменты остаются доступны сборщику.
+    if host.is_none()
+        && tls.record_end == Some(bytes.len())
+        && !r2k_core::control::valid_no_sni_client_hello(bytes)
+    {
+        return None;
+    }
     let shape = if tls.ech_offer {
         r2k_core::control::SHAPE_ECH_TCP
     } else if tls.is_tls13 {
@@ -835,6 +843,86 @@ mod tests {
         packet[42..44].copy_from_slice(&dport.to_be_bytes());
         packet[52] = 5 << 4;
         packet
+    }
+
+    fn client_hello_with_extensions(extensions: &[u8]) -> Vec<u8> {
+        let mut body = vec![3, 3];
+        body.extend_from_slice(&[0; 32]);
+        body.extend_from_slice(&[0, 0, 2, 0x13, 1, 1, 0]);
+        body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        body.extend_from_slice(extensions);
+        let mut record = vec![22, 3, 1];
+        record.extend_from_slice(&((body.len() + 4) as u16).to_be_bytes());
+        record.push(1);
+        record.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
+        record.extend_from_slice(&body);
+        record
+    }
+
+    #[test]
+    fn no_sni_packet_capture_preserves_complete_hello_and_alpn() {
+        let mut extensions = Vec::new();
+        push_extension(&mut extensions, 43, &[2, 3, 4]);
+        push_extension(&mut extensions, 16, &[0, 3, 2, b'h', b'2']);
+        let record = client_hello_with_extensions(&extensions);
+
+        for mut packet in [
+            ipv4_tcp([192, 0, 2, 1], [198, 51, 100, 2], 40_000, 8443),
+            ipv6_tcp(
+                "2001:db8::1"
+                    .parse::<std::net::Ipv6Addr>()
+                    .unwrap()
+                    .octets(),
+                "2001:db8::2"
+                    .parse::<std::net::Ipv6Addr>()
+                    .unwrap()
+                    .octets(),
+                40_000,
+                8443,
+            ),
+        ] {
+            packet.extend_from_slice(&record);
+            let (offset, length) = if packet[0] >> 4 == 4 {
+                (2, packet.len())
+            } else {
+                (4, packet.len() - 40)
+            };
+            packet[offset..offset + 2].copy_from_slice(&(length as u16).to_be_bytes());
+            let captured = super::tcp_hello_from_packet(&packet).unwrap();
+            assert!(captured.host.is_none());
+            let frame = r2k_core::control::Frame {
+                kind: r2k_core::control::EVENT_CLIENT_SHAPE,
+                body: captured.shape_event_body().unwrap(),
+            };
+            let decoded = r2k_core::control::decode_client_shape(&frame).unwrap();
+            assert!(decoded.host.is_empty());
+            assert_eq!(decoded.client_hello, record);
+            assert_eq!(decoded.key, captured.key.wire_key());
+            assert_eq!(decoded.tcp_has_timestamp, captured.tcp_has_timestamp);
+            let partial =
+                super::tcp_hello_from_bytes(captured.key, &record[..record.len() - 2]).unwrap();
+            assert!(partial.shape_event_body().is_none());
+        }
+    }
+
+    #[test]
+    fn malformed_or_oversized_sni_is_not_captured_as_an_address_target() {
+        let length = r2k_core::control::MAX_DNS_NAME_LEN + 1;
+        let mut oversized = Vec::new();
+        oversized.extend_from_slice(&((length + 3) as u16).to_be_bytes());
+        oversized.push(0);
+        oversized.extend_from_slice(&(length as u16).to_be_bytes());
+        oversized.extend(std::iter::repeat_n(b'a', length));
+        for names in [Vec::new(), vec![0], oversized] {
+            let mut extensions = Vec::new();
+            push_extension(&mut extensions, 0, &names);
+            push_extension(&mut extensions, 43, &[2, 3, 4]);
+            let record = client_hello_with_extensions(&extensions);
+            assert!(super::tcp_hello_from_bytes(key(40_000), &record).is_none());
+            assert!(
+                super::tcp_hello_from_bytes(key(40_000), &record[..record.len() - 2]).is_some()
+            );
+        }
     }
 
     fn complete(result: CaptureResult, sequence: u32, expected: &[u8]) {

@@ -4006,10 +4006,17 @@ fn r2o_catalog_addr_binding_shape(binding: &Binding) -> u8 {
     match binding.shape {
         SHAPE_QUIC | SHAPE_VOICE if binding.transport == 17 => binding.shape,
         shape
-            if (matches!(shape, SHAPE_MODERN | SHAPE_LEGACY) || r2o_is_ech_shape(shape))
+            if (matches!(
+                r2k_core::control::r2k_link_shape_tcp_base(shape),
+                SHAPE_MODERN | SHAPE_LEGACY
+            ) || r2o_is_ech_shape(shape))
                 && matches!(binding.transport, 0 | 6) =>
         {
-            binding.shape
+            r2o_controller::discovery::r2o_binding_wire_shape(
+                binding.shape,
+                binding.transport,
+                binding.tcp_profile,
+            )
         }
         0 if binding.transport == 17 && binding.verified_by == R2O_D2K_VERBY_STUN => SHAPE_VOICE,
         0 if binding.transport == 17 && binding.verified_by == R2O_D2K_VERBY_PROBE => SHAPE_QUIC,
@@ -4028,7 +4035,7 @@ fn r2o_catalog_name_binding_index(catalog: &Catalog) -> HashMap<String, Vec<(usi
                 .or_insert(plan.enabled);
         }
         for (binding_index, binding) in box_record.bindings.iter().enumerate() {
-            if binding.kind != "name"
+            if !matches!(binding.kind.as_str(), "name" | "addr")
                 || !binding.enabled
                 || r2o_catalog_binding_is_weak(binding)
                 || (binding.transport == 17 && binding.verified_by == R2O_D2K_VERBY_CLIENT)
@@ -4053,7 +4060,7 @@ fn r2o_newer_name_binding(
     by_name: &HashMap<String, Vec<(usize, usize)>>,
     binding: &Binding,
 ) -> bool {
-    if binding.kind != "name" {
+    if !matches!(binding.kind.as_str(), "name" | "addr") {
         return false;
     }
     by_name
@@ -4064,6 +4071,7 @@ fn r2o_newer_name_binding(
                 other
                     .recheck_since
                     .is_none_or(|recheck_since| recheck_since == 0)
+                    && other.kind == binding.kind
                     && r2o_catalog_binding_beats(other, binding)
                     && r2o_catalog_binding_transport(other)
                         == r2o_catalog_binding_transport(binding)
@@ -4548,6 +4556,22 @@ fn r2o_catalog_encode_set_addr(
     control::encode_frame(COMMAND_SET_ADDR, &body)
 }
 
+/// Снять постоянную привязку того же типа, которым она устанавливалась.
+/// IP-цель не должна уходить в DEL_NAME и оставлять адресный план в datapath.
+#[cfg(unix)]
+fn r2o_target_delete_command(
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    transport: u8,
+    shape: u8,
+) -> Result<(Vec<u8>, u16), &'static str> {
+    if let Some(address) = target.address_key() {
+        encode_delete_addr(address, shape).map(|command| (command, control::COMMAND_DEL_ADDR))
+    } else {
+        encode_delete_name(&target.host, transport, shape, target.family)
+            .map(|command| (command, control::COMMAND_DEL_NAME))
+    }
+}
+
 #[cfg(unix)]
 fn r2o_catalog_mark_unfit(
     binding: &mut Binding,
@@ -4778,7 +4802,7 @@ fn r2o_store_confirmed_budget(
         return;
     }
     let transport = if target.shape == SHAPE_QUIC { 17 } else { 6 };
-    let kind = if target.shape == SHAPE_QUIC {
+    let kind = if target.shape == SHAPE_QUIC || target.address_key().is_some() {
         "addr"
     } else {
         "name"
@@ -4823,7 +4847,7 @@ fn r2o_store_confirmed_verified_by(
         return;
     }
     let transport = if target.shape == SHAPE_QUIC { 17 } else { 6 };
-    let kind = if target.shape == SHAPE_QUIC {
+    let kind = if target.shape == SHAPE_QUIC || target.address_key().is_some() {
         "addr"
     } else {
         "name"
@@ -5069,10 +5093,7 @@ fn r2o_discovery_volume_wire_len(
     client_hello
         .map(<[u8]>::len)
         .or_else(|| match target.shape {
-            SHAPE_MODERN => Trigger::tls13(&target.host)
-                .ok()
-                .map(|trigger| trigger.payload.len()),
-            SHAPE_LEGACY => Trigger::tls(&target.host)
+            SHAPE_MODERN | SHAPE_LEGACY => r2o_discovery_trigger(target, None, None)
                 .ok()
                 .map(|trigger| trigger.payload.len()),
             _ => None,
@@ -5086,6 +5107,11 @@ fn r2o_discovery_volume_fetch_options(
     mark: Option<u32>,
     wire_len: Option<usize>,
 ) -> Result<r2o_controller::fetch::FetchOptions, String> {
+    if target.address_key().is_some() {
+        return Err(
+            "для TLS без SNI прикладной протокол неизвестен: HTTP-объём не измеряется".into(),
+        );
+    }
     let endpoint = target
         .endpoint
         .parse::<std::net::SocketAddr>()
@@ -9125,6 +9151,16 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
             })
         };
         let step_timeout = r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT;
+        let probe_key = target.probe_key();
+        let address_alpn = if target.address_key().is_some() {
+            let trigger = r2o_discovery_trigger(target, client_hello, None)?;
+            Some(
+                r2o_controller::r2o_tls::r2o_tls_client_hello_alpn(&trigger.payload)
+                    .ok_or("ALPN адресного ClientHello повреждён")?,
+            )
+        } else {
+            None
+        };
         let ech_tls = ech
             .map(r2o_controller::ech::r2o_ech_tls_config)
             .transpose()?;
@@ -9135,7 +9171,7 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
         let local_port = bound.local_port;
         let trial_id = random_id().map_err(|error| error.to_string())?;
         let command = encode_set_name_probe(
-            &target.host,
+            &probe_key,
             wire_shape,
             target.family,
             local_port,
@@ -9147,7 +9183,7 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
             commands,
             remaining(CONTROL_ACK_TIMEOUT),
             |deadline, reply| HttpSearchCommand::InstallProbe {
-                host: target.host.clone(),
+                host: probe_key.clone(),
                 shape: wire_shape,
                 family: target.family,
                 port: local_port,
@@ -9161,7 +9197,7 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
         let install_us = phase_elapsed_us();
         if let Some(ack) = ack.filter(|ack| ack.trial_id != Some(trial_id) || !ack.ok) {
             ask_http_controller(commands, |deadline, reply| HttpSearchCommand::DeleteProbe {
-                host: target.host.clone(),
+                host: probe_key.clone(),
                 shape: wire_shape,
                 family: target.family,
                 port: local_port,
@@ -9203,9 +9239,12 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
                     Ok(held) => {
                         socket_hold = Some(held);
                         let options = r2o_controller::fetch::FetchOptions {
-                            name: ech
-                                .map(|config| config.origin_name.clone())
-                                .unwrap_or_else(|| target.host.clone()),
+                            name: if address_alpn.is_some() {
+                                target.host.clone()
+                            } else {
+                                ech.map(|config| config.origin_name.clone())
+                                    .unwrap_or_else(|| target.host.clone())
+                            },
                             ip: Some(destination.ip()),
                             port: destination.port(),
                             path: doh_request
@@ -9217,7 +9256,14 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
                             wire_len,
                             mark: confirmation_mark,
                         };
-                        if let Some(client_hello) = ech_snapshot_replay {
+                        if let Some(alpn) = address_alpn.as_deref() {
+                            r2o_controller::fetch::r2o_verify_tls_address_connected_stream_with_alpn(
+                                &options,
+                                stream,
+                                alpn,
+                                remaining(step_timeout),
+                            )
+                        } else if let Some(client_hello) = ech_snapshot_replay {
                             r2o_controller::fetch::r2o_verify_tls_replayed_client_hello(
                                 &options,
                                 stream,
@@ -9276,7 +9322,7 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
         let applied_us = phase_elapsed_us();
         let delete_result =
             ask_http_controller(commands, |deadline, reply| HttpSearchCommand::DeleteProbe {
-                host: target.host.clone(),
+                host: probe_key.clone(),
                 shape: wire_shape,
                 family: target.family,
                 port: local_port,
@@ -9534,6 +9580,7 @@ fn r2o_run_discovery_props_questions(
     use std::time::{Duration, Instant};
 
     let destination = target.endpoint.parse::<std::net::SocketAddr>().ok()?;
+    let probe_key = target.probe_key();
     let wire_shape = r2o_plan_wire_shape(target.shape, has_timestamp);
     for (question_index, question) in AskQuestion::ALL.into_iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
@@ -9559,19 +9606,31 @@ fn r2o_run_discovery_props_questions(
             continue;
         };
         let source_port = bound.local_port;
-        let Ok(command) = encode_set_name_family(
-            &target.host,
-            6,
-            wire_shape,
-            target.family,
-            source_port,
-            &wire_records,
-            trial_id,
-        ) else {
+        let command = if target.address_key().is_some() {
+            encode_set_name_probe(
+                &probe_key,
+                wire_shape,
+                target.family,
+                source_port,
+                &wire_records,
+                trial_id,
+            )
+        } else {
+            encode_set_name_family(
+                &target.host,
+                6,
+                wire_shape,
+                target.family,
+                source_port,
+                &wire_records,
+                trial_id,
+            )
+        };
+        let Ok(command) = command else {
             continue;
         };
         let delete_command = r2o_encode_owned_name_probe_delete(
-            &target.host,
+            &probe_key,
             wire_shape,
             target.family,
             source_port,
@@ -10324,6 +10383,10 @@ fn r2o_discovery_client_shape_trial(
     probe_deadline: Option<std::time::Instant>,
 ) -> Result<bool, String> {
     let remaining = |limit| r2o_probe_time_left(probe_deadline, limit);
+    if target.address_key().is_some() {
+        r2o_discovery_trigger(target, Some(client_hello), None)?;
+    }
+    let probe_key = target.probe_key();
     let destination = target
         .endpoint
         .parse::<std::net::SocketAddr>()
@@ -10333,7 +10396,7 @@ fn r2o_discovery_client_shape_trial(
     let local_port = bound.local_port;
     let trial_id = random_id().map_err(|error| error.to_string())?;
     let command = encode_set_name_probe(
-        &target.host,
+        &probe_key,
         target.shape,
         target.family,
         local_port,
@@ -10345,7 +10408,7 @@ fn r2o_discovery_client_shape_trial(
         commands,
         remaining(CONTROL_ACK_TIMEOUT),
         |deadline, reply| HttpSearchCommand::InstallProbe {
-            host: target.host.clone(),
+            host: probe_key.clone(),
             shape: target.shape,
             family: target.family,
             port: local_port,
@@ -10361,7 +10424,7 @@ fn r2o_discovery_client_shape_trial(
         .is_some_and(|ack| ack.trial_id != Some(trial_id))
     {
         let _ = ask_http_controller(commands, |deadline, reply| HttpSearchCommand::DeleteProbe {
-            host: target.host.clone(),
+            host: probe_key.clone(),
             shape: target.shape,
             family: target.family,
             port: local_port,
@@ -10374,7 +10437,7 @@ fn r2o_discovery_client_shape_trial(
     }
     if ack.as_ref().is_some_and(|ack| !ack.ok) {
         ask_http_controller(commands, |deadline, reply| HttpSearchCommand::DeleteProbe {
-            host: target.host.clone(),
+            host: probe_key.clone(),
             shape: target.shape,
             family: target.family,
             port: local_port,
@@ -10422,7 +10485,7 @@ fn r2o_discovery_client_shape_trial(
     );
     let delete_result =
         ask_http_controller(commands, |deadline, reply| HttpSearchCommand::DeleteProbe {
-            host: target.host.clone(),
+            host: probe_key.clone(),
             shape: target.shape,
             family: target.family,
             port: local_port,
@@ -14157,7 +14220,7 @@ fn r2o_discovery_task_key(
     target: &r2o_controller::discovery::DiscoveryTarget,
 ) -> R2oDiscoveryTaskKey {
     (
-        if target.shape == SHAPE_VOICE {
+        if target.shape == SHAPE_VOICE || target.address_key().is_some() {
             format!("{}@{}", target.host, target.endpoint)
         } else {
             target.host.clone()
@@ -14641,7 +14704,9 @@ impl R2oRecentClientShapeCache {
     fn get(&self, target: &r2o_controller::discovery::DiscoveryTarget) -> Option<&[u8]> {
         let index = r2o_client_shape_family_slot(target.family)?;
         let entry = self.entries[index].back()?;
-        (entry.host == target.host && entry.shape == target.shape)
+        (entry.host == target.host
+            && entry.shape == target.shape
+            && (target.address_key().is_none() || entry.endpoint == target.endpoint))
             .then_some(entry.client_hello.as_slice())
     }
 
@@ -14651,11 +14716,13 @@ impl R2oRecentClientShapeCache {
     ) -> Option<(u8, &[u8], Option<bool>)> {
         let index = r2o_client_shape_family_slot(target.family)?;
         let entry = self.entries[index].back()?;
-        (entry.host == target.host).then_some((
-            entry.shape,
-            entry.client_hello.as_slice(),
-            entry.tcp_has_timestamp,
-        ))
+        (entry.host == target.host
+            && (target.address_key().is_none() || entry.endpoint == target.endpoint))
+            .then_some((
+                entry.shape,
+                entry.client_hello.as_slice(),
+                entry.tcp_has_timestamp,
+            ))
     }
 }
 
@@ -15536,6 +15603,30 @@ fn r2o_voice_suspect_frame_is_udp(frame: &Frame) -> bool {
 ///
 /// C присылает сырой ClientHello и, отдельным событием перед ним, опции TCP.
 /// Форма и SNI восстанавливаются тем же TLS-разбором, что и в R2O-событии.
+fn r2o_client_shape_request_matches(
+    event: &r2k_core::control::ClientShapeEvent,
+    key: &str,
+    family: u8,
+    expected: Option<&r2o_controller::discovery::DiscoveryTarget>,
+) -> bool {
+    if event.key[0] != family {
+        return false;
+    }
+    let target = r2o_controller::discovery::DiscoveryTarget::from_client_shape(event);
+    let key_matches = if let Ok(endpoint) = key.parse::<std::net::SocketAddr>() {
+        event.host.is_empty()
+            && Trigger::tls_client_hello("", &event.client_hello).is_ok()
+            && target.as_ref().is_some_and(|target| {
+                target.address_key() == Some(endpoint.ip())
+                    && target.endpoint.parse::<std::net::SocketAddr>() == Ok(endpoint)
+            })
+    } else {
+        event.host.eq_ignore_ascii_case(key.as_bytes())
+    };
+    key_matches && expected.is_none_or(|expected| target.as_ref() == Some(expected))
+}
+
+#[cfg(unix)]
 fn r2o_client_shape_from_legacy(
     shape: &r2k_core::control::LegacyShapeEvent,
     tcp_options: Option<&[u8]>,
@@ -15550,9 +15641,10 @@ fn r2o_client_shape_from_legacy(
     let host = tls
         .sni_range
         .as_ref()
-        .and_then(|range| shape.client_hello.get(range.clone()))?
+        .and_then(|range| shape.client_hello.get(range.clone()))
+        .unwrap_or_default()
         .to_vec();
-    if host.is_empty() {
+    if host.is_empty() && Trigger::tls_client_hello("", &shape.client_hello).is_err() {
         return None;
     }
     let client_shape = if tls.ech_offer {
@@ -17221,6 +17313,12 @@ impl DiscoveryWorker {
                                     );
                                     break;
                                 }
+                                if target.address_key().is_some() {
+                                    r2o_confirmed_proof_set(
+                                        &target,
+                                        r2o_confirmed_verified_by(&result),
+                                    );
+                                }
                                 runner_searches
                                     .lock()
                                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -17228,7 +17326,11 @@ impl DiscoveryWorker {
                                         &target,
                                         base_probes.saturating_add(own_probes),
                                         "план подтверждён",
-                                        "полный HTTPS-ответ и точный APPLIED",
+                                        if target.address_key().is_some() {
+                                            "завершённое TLS-рукопожатие и точный APPLIED"
+                                        } else {
+                                            "полный HTTPS-ответ и точный APPLIED"
+                                        },
                                     );
                                 return DiscoveryOutcome {
                                     target: target.clone(),
@@ -17348,6 +17450,11 @@ group_block_proven: false,
                 r2o_full_search_probe_counts(base_probes, classifier_probes, own_probes);
             let classify_probes = full_counts.raw;
             drop(progress);
+            if r2o_discovery_address_direct_clear(&outcome) {
+                // Адресный TLS уже проходит. Прикладной протокол неизвестен:
+                // ни HTTP-объём, ни запасные кандидаты здесь не нужны.
+                return outcome;
+            }
             runner_searches
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -17445,6 +17552,12 @@ group_block_proven: false,
                                 "вопросы о свойствах прошли; план из свойств подтверждён (вариантов {})",
                                 plans.len()
                             );
+                            if target.address_key().is_some() {
+                                r2o_confirmed_proof_set(
+                                    &target,
+                                    r2o_confirmed_verified_by(&result),
+                                );
+                            }
                             return outcome;
                         }
                     }
@@ -17601,6 +17714,9 @@ group_block_proven: false,
                         &last_result,
                     );
                     if verified {
+                        if target.address_key().is_some() {
+                            r2o_confirmed_proof_set(&target, r2o_confirmed_verified_by(&result));
+                        }
                         return DiscoveryOutcome {
                             target: target.clone(),
                             plan_text: Some(candidate.text),
@@ -20502,7 +20618,7 @@ group_block_proven: false,
         if let Some(snapshot) = self.family_client_hello(target) {
             return Some(snapshot);
         }
-        if !r2o_is_ech_shape(target.shape) {
+        if !r2o_is_ech_shape(target.shape) && target.address_key().is_none() {
             return None;
         }
         let snapshot = capture()?;
@@ -20562,7 +20678,7 @@ group_block_proven: false,
         if !matches!(target.shape, SHAPE_MODERN | SHAPE_LEGACY) && !r2o_is_ech_shape(target.shape)
             || r2k_core::control::r2k_link_shape_tcp_base(observed_shape)
                 != r2k_core::control::r2k_link_shape_tcp_base(target.shape)
-            || Trigger::tls_client_hello(&target.host, client_hello).is_err()
+            || r2o_discovery_trigger(target, Some(client_hello), None).is_err()
         {
             return false;
         }
@@ -22653,10 +22769,16 @@ fn r2o_discovery_volume_recovery(
 }
 
 #[cfg(unix)]
+fn r2o_discovery_address_direct_clear(outcome: &DiscoveryOutcome) -> bool {
+    outcome.direct_clear && outcome.target.address_key().is_some()
+}
+
+#[cfg(unix)]
 fn r2o_discovery_volume_recovery_eligible(outcome: &DiscoveryOutcome) -> bool {
     // The C worker runs the ordinary volume probe only after a CLEAR verdict.
     !outcome.queue_expired
         && outcome.direct_clear
+        && outcome.target.address_key().is_none()
         && matches!(outcome.target.shape, SHAPE_MODERN | SHAPE_LEGACY)
 }
 
@@ -22819,6 +22941,29 @@ fn r2o_discovery_trigger(
     client_hello: Option<&[u8]>,
     ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
 ) -> Result<Trigger, String> {
+    if target.address_key().is_some() {
+        if r2o_is_ech_shape(target.shape)
+            || client_hello.is_some_and(|hello| r2k_core::tls::parse(hello).ech_offer)
+        {
+            return Err(
+                "TLS по IP с ECH без известного origin не поддерживает полное подтверждение".into(),
+            );
+        }
+        let shape = control::r2k_link_shape_tcp_base(target.shape);
+        if !matches!(shape, SHAPE_MODERN | SHAPE_LEGACY) {
+            return Err("адресная цель не содержит поддерживаемую форму TLS".into());
+        }
+        if let Some(client_hello) = client_hello {
+            if r2o_client_hello_shape(client_hello) != Some(shape) {
+                return Err("версия адресного ClientHello не совпадает с целью".into());
+            }
+            return Trigger::tls_client_hello("", client_hello).map_err(str::to_owned);
+        }
+        return Trigger::tls_without_sni(shape == SHAPE_LEGACY).map_err(str::to_owned);
+    }
+    if target.host.parse::<std::net::IpAddr>().is_ok() {
+        return Err("IP цели не совпадает с адресом TCP-сервера".into());
+    }
     if let Some(client_hello) = client_hello {
         return Trigger::tls_client_hello(&target.host, client_hello).map_err(str::to_owned);
     }
@@ -22881,12 +23026,16 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
     send_cap: usize,
     progress: &mut dyn FnMut(&str, usize, usize, usize),
 ) -> (DiscoveryOutcome, usize, bool, bool, bool, bool, bool, bool) {
-    let Ok(trigger) = r2o_discovery_trigger(&target, client_hello, ech_config) else {
+    let trigger_result = r2o_discovery_trigger(&target, client_hello, ech_config);
+    let Ok(trigger) = trigger_result else {
         return (
             DiscoveryOutcome {
                 target,
                 plan_text: None,
-                detail: "не удалось собрать профиль целевого TLS".into(),
+                detail: format!(
+                    "не удалось собрать профиль целевого TLS: {}",
+                    trigger_result.unwrap_err()
+                ),
                 queue_expired: false,
                 address_failure: false,
                 address_recheck_acknowledged: false,
@@ -26858,7 +27007,7 @@ impl ControlClient {
                             }
                         } else {
                             println!(
-                                "повторная классификация не запущена: нет свежего полного ClientHello с SNI того же потока"
+                                "повторная классификация не запущена: нет свежего полного TLS ClientHello того же потока"
                             );
                         }
                     } else {
@@ -29104,12 +29253,7 @@ impl ControlClient {
         expected: Option<&r2o_controller::discovery::DiscoveryTarget>,
     ) -> Result<Option<r2k_core::control::ClientShapeEvent>, Box<dyn Error>> {
         let matches = |event: &r2k_core::control::ClientShapeEvent| {
-            event.key[0] == family
-                && event.host.eq_ignore_ascii_case(host.as_bytes())
-                && expected.is_none_or(|target| {
-                    r2o_controller::discovery::DiscoveryTarget::from_client_shape(event).as_ref()
-                        == Some(target)
-                })
+            r2o_client_shape_request_matches(event, host, family, expected)
         };
         let deadline = std::time::Instant::now()
             .checked_add(timeout)
@@ -29285,7 +29429,7 @@ impl ControlClient {
                         (target.clone(), None, false),
                     );
                 }
-                if let Err(error) = self.arm_client_shape(&target.host, target.family) {
+                if let Err(error) = self.arm_client_shape(&target.probe_key(), target.family) {
                     println!(
                         "v22 SUSPECT {}: подтверждённая цель подозревается без плана, снимок формы не запрошен: {error}",
                         target.host
@@ -29525,11 +29669,12 @@ impl ControlClient {
         if !matches!(target.shape, SHAPE_MODERN | SHAPE_LEGACY) && !r2o_is_ech_shape(target.shape) {
             return Ok(None);
         }
-        self.arm_client_shape(&target.host, target.family)
+        let probe_key = target.probe_key();
+        self.arm_client_shape(&probe_key, target.family)
             .map_err(|error| format!("не удалось запросить ClientHello: {error}"))?;
         let Some(snapshot) = self
             .wait_for_client_shape(
-                &target.host,
+                &probe_key,
                 target.family,
                 std::time::Duration::from_millis(150),
                 Some(target),
@@ -32041,19 +32186,19 @@ impl ControlClient {
                 shapes
             };
             for shape in shapes {
-                let command = match encode_delete_name(&target.host, 6, shape, target.family) {
+                let (command, command_kind) = match r2o_target_delete_command(target, 6, shape) {
                     Ok(command) => command,
                     Err(error) => {
                         eprintln!(
-                            "не удалось собрать DEL_NAME для {} shape={shape}: {error}",
+                            "не удалось собрать команду снятия привязки для {} shape={shape}: {error}",
                             target.host
                         );
                         continue;
                     }
                 };
-                if let Err(error) = self.send_command(&command, control::COMMAND_DEL_NAME) {
+                if let Err(error) = self.send_command(&command, command_kind) {
                     eprintln!(
-                        "DEL_NAME для {} shape={shape} не подтверждён: {error}",
+                        "снятие привязки для {} shape={shape} не подтверждено: {error}",
                         target.host
                     );
                 }
@@ -32189,8 +32334,8 @@ impl ControlClient {
                 shapes
             };
             for shape in shapes {
-                let command = encode_delete_name(&target.host, transport, shape, target.family)?;
-                if let Err(delete_error) = self.send_command(&command, control::COMMAND_DEL_NAME) {
+                let (command, command_kind) = r2o_target_delete_command(target, transport, shape)?;
+                if let Err(delete_error) = self.send_command(&command, command_kind) {
                     *catalog = updated;
                     return Err(format!(
                         "прямая проверка {} сохранила пометку перепроверки, но runtime не подтвердил снятие привязки; каталог не восстановлен, чтобы не установить эту привязку повторно: {delete_error}",
@@ -44719,6 +44864,99 @@ mod tests {
         let plan = Plan::parse(&command.body[18..]).unwrap();
         assert_eq!(plan.transport, 17);
         assert_eq!(plan.proto, r2k_core::plan::PROTO_QUIC);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn address_tls_catalog_sync_preserves_profile_and_selects_newest_binding() {
+        let mut catalog = Catalog::default();
+        for (index, confirmed) in [(0, 100), (1, 200)] {
+            let plan_id = format!("address-plan-{index}");
+            catalog.boxes.push(BoxRecord {
+                id: format!("address-box-{index}"),
+                plans: vec![r2o_controller::catalog::Plan {
+                    id: plan_id.clone(),
+                    proto: "tls".into(),
+                    text: format!("r2o-plan 1 11\nid 0000000000000000000000000000000{index}\nproto tcp tls\nsplit payload_start +{}\n", index + 1),
+                    enabled: true,
+                    ..Default::default()
+                }],
+                bindings: vec![Binding {
+                    kind: "addr".into(),
+                    target: "198.51.100.20".into(),
+                    plan_id,
+                    level: 3,
+                    confirmed,
+                    enabled: true,
+                    transport: 6,
+                    family: 4,
+                    shape: SHAPE_MODERN,
+                    tcp_profile: r2k_core::control::TCP_PROFILE_TS,
+                    verified_by: super::R2O_D2K_VERBY_PROBE_HANDSHAKE,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        }
+        let compiled = catalog_commands(&catalog).unwrap();
+        assert_eq!(compiled.commands.len(), 1);
+        let frame = read_frame(&mut std::io::Cursor::new(&compiled.commands[0].1)).unwrap();
+        assert_eq!(frame.kind, r2k_core::control::COMMAND_SET_ADDR);
+        assert_eq!(frame.body[17], r2k_core::control::SHAPE_MODERN_TS);
+        let plan = r2k_core::plan::Plan::parse_wire(&frame.body[18..]).unwrap();
+        assert_eq!(plan.id[15], 1);
+
+        // Независимый TCP-профиль не вытесняется более свежим соседним.
+        catalog.boxes[0].bindings[0].tcp_profile = r2k_core::control::TCP_PROFILE_NO_TS;
+        let compiled = catalog_commands(&catalog).unwrap();
+        assert_eq!(compiled.commands.len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn address_tls_proof_and_cleanup_keep_the_address_binding_type() {
+        for (host, endpoint, family) in [
+            ("198.51.100.20", "198.51.100.20:8443", 4),
+            ("2001:db8::2", "[2001:db8::2]:8443", 6),
+        ] {
+            let target = r2o_controller::discovery::DiscoveryTarget {
+                host: host.into(),
+                endpoint: endpoint.into(),
+                family,
+                shape: SHAPE_MODERN,
+                tcp_profile: r2k_core::control::TCP_PROFILE_TS,
+            };
+            let mut catalog = Catalog {
+                boxes: vec![BoxRecord {
+                    bindings: vec![Binding {
+                        kind: "addr".into(),
+                        target: host.into(),
+                        plan_id: "plan".into(),
+                        transport: 6,
+                        family,
+                        shape: SHAPE_MODERN,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            super::r2o_store_confirmed_verified_by(
+                &mut catalog,
+                &target,
+                "plan",
+                super::R2O_D2K_VERBY_PROBE_HANDSHAKE,
+            );
+            assert_eq!(catalog.boxes[0].bindings[0].verified_by, 5);
+            let (bytes, command) =
+                super::r2o_target_delete_command(&target, 6, r2k_core::control::SHAPE_MODERN_TS)
+                    .unwrap();
+            let frame = read_frame(&mut std::io::Cursor::new(bytes)).unwrap();
+            assert_eq!(command, r2k_core::control::COMMAND_DEL_ADDR);
+            assert_eq!(frame.kind, command);
+            assert_eq!(frame.body[0], family);
+            assert_eq!(frame.body[17], r2k_core::control::SHAPE_MODERN_TS);
+        }
     }
 
     #[cfg(unix)]
@@ -66750,6 +66988,200 @@ group_block_proven: false,
         bytes.extend_from_slice(&[0, 2, 0, 2]);
         bytes.extend_from_slice(proto);
         Plan::parse(&bytes).unwrap()
+    }
+}
+
+#[cfg(all(test, unix))]
+mod r2o_address_discovery_tests {
+    use super::*;
+    use r2o_controller::discovery::DiscoveryTarget;
+
+    fn target(endpoint: &str, shape: u8) -> DiscoveryTarget {
+        let address = endpoint.parse::<std::net::SocketAddr>().unwrap();
+        DiscoveryTarget {
+            host: address.ip().to_string(),
+            endpoint: address.to_string(),
+            family: if address.is_ipv4() { 4 } else { 6 },
+            shape,
+            tcp_profile: 0,
+        }
+    }
+
+    fn flow(target: &DiscoveryTarget) -> [u8; r2k_core::control::KEY_LEN] {
+        let address = target.endpoint.parse::<std::net::SocketAddr>().unwrap();
+        let mut key = [0; r2k_core::control::KEY_LEN];
+        key[0] = target.family;
+        match address.ip() {
+            std::net::IpAddr::V4(ip) => {
+                key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+                key[17..21].copy_from_slice(&ip.octets());
+            }
+            std::net::IpAddr::V6(ip) => {
+                key[1..17].copy_from_slice(
+                    &"2001:db8::1"
+                        .parse::<std::net::Ipv6Addr>()
+                        .unwrap()
+                        .octets(),
+                );
+                key[17..33].copy_from_slice(&ip.octets());
+            }
+        }
+        key[33..35].copy_from_slice(&40000_u16.to_be_bytes());
+        key[35..37].copy_from_slice(&address.port().to_be_bytes());
+        key[37] = 6;
+        key
+    }
+
+    #[test]
+    fn адресные_профили_и_снимки_используют_пустой_sni() {
+        for endpoint in ["198.51.100.2:443", "[2001:db8::2]:8443"] {
+            for shape in [SHAPE_MODERN, SHAPE_LEGACY] {
+                let target = target(endpoint, shape);
+                let profile = r2o_discovery_trigger(&target, None, None).unwrap();
+                assert_eq!(profile.sni(), "");
+                assert_eq!(target.probe_key(), endpoint);
+                assert!(r2k_core::tls::parse(&profile.payload).sni_range.is_none());
+                assert_eq!(
+                    r2o_discovery_candidate_wire_len(&target, None, None),
+                    Some(profile.payload.len()),
+                );
+                let captured =
+                    r2o_discovery_trigger(&target, Some(&profile.payload), None).unwrap();
+                assert_eq!(captured.payload, profile.payload);
+                assert!(r2o_discovery_volume_fetch_options(&target, "/", None, None).is_err());
+                let named = Trigger::tls13("example.test").unwrap();
+                assert!(r2o_discovery_trigger(&target, Some(&named.payload), None).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn адресный_arm_shape_сопоставляет_endpoint_версию_и_профиль() {
+        for endpoint in ["198.51.100.2:443", "[2001:db8::2]:8443"] {
+            let target = target(endpoint, SHAPE_MODERN);
+            let snapshot = control::ClientShapeEvent {
+                key: flow(&target),
+                host: vec![],
+                shape: SHAPE_MODERN,
+                client_hello: Trigger::tls_without_sni(false).unwrap().payload,
+                tcp_has_timestamp: None,
+            };
+            let matches = |event: &control::ClientShapeEvent| {
+                r2o_client_shape_request_matches(
+                    event,
+                    &target.probe_key(),
+                    target.family,
+                    Some(&target),
+                )
+            };
+            assert!(matches(&snapshot));
+            let mut wrong = snapshot.clone();
+            wrong.key[35..37].copy_from_slice(&9443_u16.to_be_bytes());
+            assert!(!matches(&wrong));
+            wrong = snapshot.clone();
+            wrong.shape = SHAPE_LEGACY;
+            assert!(!matches(&wrong));
+            wrong = snapshot.clone();
+            wrong.tcp_has_timestamp = Some(true);
+            assert!(!matches(&wrong));
+            wrong = snapshot.clone();
+            wrong.client_hello.pop();
+            assert!(!matches(&wrong));
+            wrong = snapshot.clone();
+            wrong.host = b"example.test".to_vec();
+            assert!(!matches(&wrong));
+        }
+    }
+
+    #[test]
+    fn адресные_задачи_и_снимки_разделены_по_серверному_порту() {
+        let first = target("198.51.100.2:443", SHAPE_MODERN);
+        let other = target("198.51.100.2:8443", SHAPE_MODERN);
+        assert_ne!(
+            r2o_discovery_task_key(&first),
+            r2o_discovery_task_key(&other)
+        );
+        let hello = Trigger::tls_without_sni(false).unwrap().payload;
+        let mut cache = R2oRecentClientShapeCache::default();
+        cache.note(&first, &hello, None);
+        assert_eq!(cache.get(&first), Some(hello.as_slice()));
+        assert!(cache.get(&other).is_none());
+        assert!(cache.get_for_host(&other).is_none());
+    }
+
+    #[test]
+    fn legacy_shape_без_sni_передаёт_реальные_байты_клиента() {
+        for shape in [SHAPE_MODERN, SHAPE_LEGACY] {
+            let target = target("198.51.100.2:443", shape);
+            let hello = Trigger::tls_without_sni(shape == SHAPE_LEGACY)
+                .unwrap()
+                .payload;
+            let event = control::LegacyShapeEvent {
+                key: flow(&target),
+                client_hello: hello.clone(),
+            };
+            let captured = r2o_client_shape_from_legacy(&event, None).unwrap();
+            assert!(captured.host.is_empty());
+            assert_eq!(captured.client_hello, hello);
+            assert_eq!(DiscoveryTarget::from_client_shape(&captured), Some(target));
+        }
+    }
+
+    #[test]
+    fn адресное_подтверждение_не_принимает_чужой_applied() {
+        for endpoint in ["198.51.100.2:443", "[2001:db8::2]:8443"] {
+            let target = target(endpoint, SHAPE_MODERN);
+            let event = control::AppliedEvent {
+                key: flow(&target),
+                plan_id: [1; 16],
+                trial_id: [2; 16],
+                execution_id: 1,
+                binding: Default::default(),
+            };
+            let matches = |event: &control::AppliedEvent| {
+                r2o_family_applied_flow_matches(event, &target, 40000, [1; 16], [2; 16])
+            };
+            assert!(matches(&event));
+            let mut wrong = event.clone();
+            wrong.trial_id = [3; 16];
+            assert!(!matches(&wrong));
+            wrong = event.clone();
+            wrong.plan_id = [4; 16];
+            assert!(!matches(&wrong));
+            wrong = event.clone();
+            wrong.key[35..37].copy_from_slice(&9443_u16.to_be_bytes());
+            assert!(!matches(&wrong));
+        }
+    }
+
+    #[test]
+    fn адресный_ech_и_несовпадающий_ip_имеют_явную_ошибку() {
+        let ech = target("198.51.100.2:443", SHAPE_ECH_TCP);
+        assert!(
+            r2o_discovery_trigger(&ech, None, None)
+                .unwrap_err()
+                .contains("origin")
+        );
+        let mut mismatch = target("198.51.100.2:443", SHAPE_MODERN);
+        mismatch.host = "198.51.100.3".into();
+        assert!(r2o_discovery_trigger(&mismatch, None, None).is_err());
+    }
+
+    #[test]
+    fn чистая_адресная_цель_завершает_поиск_до_кандидатов_и_http_объёма() {
+        let mut outcome = r2o_own_first_exhausted_outcome(target("198.51.100.2:443", SHAPE_MODERN));
+        outcome.direct_clear = true;
+        outcome.retry_after = None;
+        assert!(r2o_discovery_address_direct_clear(&outcome));
+        assert!(outcome.plan_text.is_none());
+        assert!(!r2o_discovery_volume_recovery_eligible(&outcome));
+
+        outcome.direct_clear = false;
+        assert!(!r2o_discovery_address_direct_clear(&outcome));
+        outcome.direct_clear = true;
+        outcome.target.host = "example.test".into();
+        assert!(!r2o_discovery_address_direct_clear(&outcome));
+        assert!(r2o_discovery_volume_recovery_eligible(&outcome));
     }
 }
 

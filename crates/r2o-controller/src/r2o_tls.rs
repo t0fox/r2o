@@ -75,6 +75,34 @@ pub fn r2o_tls_client_connection_with_alpn(
     _roots: rustls::RootCertStore,
     alpn_protocols: &[Vec<u8>],
 ) -> Result<rustls::ClientConnection, String> {
+    r2o_tls_client_connection_with_alpn_mode(name, tls12, wire_len, alpn_protocols, false)
+}
+
+/// Финальная адресная проба: без SNI, с проверкой Finished. Legacy предлагает
+/// только TLS 1.2; modern допускает выбор сервером 1.2, как C tls12_resume.
+/// Имя сертификата не выдумывается.
+pub fn r2o_tls_address_client_connection_with_alpn(
+    address: std::net::IpAddr,
+    tls12: bool,
+    wire_len: Option<usize>,
+    alpn_protocols: &[Vec<u8>],
+) -> Result<rustls::ClientConnection, String> {
+    r2o_tls_client_connection_with_alpn_mode(
+        &address.to_string(),
+        tls12,
+        wire_len,
+        alpn_protocols,
+        true,
+    )
+}
+
+fn r2o_tls_client_connection_with_alpn_mode(
+    name: &str,
+    tls12: bool,
+    wire_len: Option<usize>,
+    alpn_protocols: &[Vec<u8>],
+    address_probe: bool,
+) -> Result<rustls::ClientConnection, String> {
     let versions = if tls12 {
         &[&rustls::version::TLS12][..]
     } else {
@@ -83,7 +111,7 @@ pub fn r2o_tls_client_connection_with_alpn(
     let mut provider = rustls::crypto::ring::default_provider();
     let verifier = R2oD2oServerCertVerifier {
         algorithms: provider.signature_verification_algorithms.clone(),
-        verify_finished: false,
+        verify_finished: address_probe,
     };
     provider.cipher_suites = if tls12 {
         vec![
@@ -132,6 +160,76 @@ fn alpn_is_http(name: &[u8]) -> bool {
 }
 
 pub fn r2o_tls_client_hello_non_http_alpn(client_hello: &[u8]) -> Option<Vec<Vec<u8>>> {
+    r2o_tls_client_hello_alpn_inner(client_hello, false)
+}
+
+/// ALPN полного ClientHello, включая HTTP. Адресная проба повторяет этот
+/// список, но не делает выводов о прикладном протоколе и не отправляет HTTP.
+pub fn r2o_tls_client_hello_alpn(client_hello: &[u8]) -> Option<Vec<Vec<u8>>> {
+    r2o_tls_client_hello_alpn_inner(client_hello, true)
+}
+
+fn r2o_tls_client_hello_alpn_inner(
+    client_hello: &[u8],
+    address_probe: bool,
+) -> Option<Vec<Vec<u8>>> {
+    let extensions = r2o_tls_client_hello_extensions(client_hello, address_probe)?;
+    let mut offset = 0;
+    let mut alpn = None;
+    while offset < extensions.len() {
+        let (kind, data) = r2o_tls_client_hello_extension(extensions, &mut offset)?;
+        if kind != 0x0010 {
+            continue;
+        }
+        if address_probe && alpn.is_some() {
+            return None;
+        }
+        let (list_length, mut protocol) = r2o_tls_u16(data, 0, data.len())?;
+        if list_length.checked_add(protocol)? != data.len() {
+            return None;
+        }
+        let mut protocols = Vec::new();
+        while protocol < data.len() {
+            let length = usize::from(*data.get(protocol)?);
+            protocol += 1;
+            if length == 0 {
+                return None;
+            }
+            let protocol_end = protocol.checked_add(length)?;
+            let name = data.get(protocol..protocol_end)?;
+            if !address_probe && alpn_is_http(name) {
+                return None;
+            }
+            protocols.push(name.to_vec());
+            protocol = protocol_end;
+        }
+        if protocols.is_empty() {
+            return None;
+        }
+        alpn = Some(protocols);
+    }
+    Some(alpn.unwrap_or_default())
+}
+
+/// Отсутствие SNI подтверждается обходом всех расширений: повреждённое
+/// server_name нельзя принять за адресный ClientHello.
+pub(crate) fn r2o_tls_client_hello_without_sni(client_hello: &[u8]) -> bool {
+    r2k_core::control::valid_no_sni_client_hello(client_hello)
+}
+
+fn r2o_tls_client_hello_extension<'a>(
+    extensions: &'a [u8],
+    offset: &mut usize,
+) -> Option<(usize, &'a [u8])> {
+    let (kind, value) = r2o_tls_u16(extensions, *offset, extensions.len())?;
+    let (length, data) = r2o_tls_u16(extensions, value, extensions.len())?;
+    let end = data.checked_add(length)?;
+    let bytes = extensions.get(data..end)?;
+    *offset = end;
+    Some((kind, bytes))
+}
+
+fn r2o_tls_client_hello_extensions(client_hello: &[u8], exact: bool) -> Option<&[u8]> {
     if client_hello.len() < 9
         || client_hello[0] != 22
         || client_hello[1] != 3
@@ -157,54 +255,14 @@ pub fn r2o_tls_client_hello_non_http_alpn(client_hello: &[u8]) -> Option<Vec<Vec
     offset = r2o_tls_skip_vector(client_hello, offset, end, 1)?;
     if offset == end {
         // C `d2k_hello_alpn`: расширений нет вовсе — rc 0, клиент без ALPN.
-        return Some(Vec::new());
+        return Some(&[]);
     }
     let (extensions_length, extensions_start) = r2o_tls_u16(client_hello, offset, end)?;
     let extensions_end = extensions_start.checked_add(extensions_length)?;
-    if extensions_end > end {
+    if extensions_end > end || exact && extensions_end != end {
         return None;
     }
-    let mut extension = extensions_start;
-    let mut alpn = None;
-    while extension < extensions_end {
-        let (kind, value) = r2o_tls_u16(client_hello, extension, extensions_end)?;
-        let (length, data) = r2o_tls_u16(client_hello, value, extensions_end)?;
-        let extension_end = data.checked_add(length)?;
-        if extension_end > extensions_end {
-            return None;
-        }
-        if kind == 0x0010 {
-            let (list_length, mut protocol) = r2o_tls_u16(client_hello, data, extension_end)?;
-            let list_end = protocol.checked_add(list_length)?;
-            if list_end != extension_end {
-                return None;
-            }
-            let mut protocols = Vec::new();
-            while protocol < list_end {
-                let length = usize::from(*client_hello.get(protocol)?);
-                protocol += 1;
-                if length == 0 {
-                    return None;
-                }
-                let protocol_end = protocol.checked_add(length)?;
-                if protocol_end > list_end {
-                    return None;
-                }
-                let name = &client_hello[protocol..protocol_end];
-                if alpn_is_http(name) {
-                    return None;
-                }
-                protocols.push(name.to_vec());
-                protocol = protocol_end;
-            }
-            if protocols.is_empty() {
-                return None;
-            }
-            alpn = Some(protocols);
-        }
-        extension = extension_end;
-    }
-    Some(alpn.unwrap_or_default())
+    client_hello.get(extensions_start..extensions_end)
 }
 
 /// Повторить сохранённый ClientHello и применить донорский критерий ServerHello.
@@ -1744,5 +1802,197 @@ mod server_hello_tests {
             None,
             Some([0x03, 0x04])
         )));
+    }
+}
+
+#[cfg(test)]
+mod address_tls_tests {
+    use super::{
+        r2o_tls_address_client_connection_with_alpn, r2o_tls_client_hello_alpn,
+        r2o_tls_client_hello_without_sni,
+    };
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use std::io::Cursor;
+    use std::sync::Arc;
+
+    fn server(tls12: bool, invalid_finished: bool) -> rustls::ServerConnection {
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            certificate.serialize_private_key_der(),
+        ));
+        let versions = if tls12 {
+            &[&rustls::version::TLS12][..]
+        } else {
+            &[&rustls::version::TLS13][..]
+        };
+        let mut config = rustls::ServerConfig::builder_with_protocol_versions(versions)
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![CertificateDer::from(certificate.serialize_der().unwrap())],
+                key,
+            )
+            .unwrap();
+        config.alpn_protocols = vec![b"h2".to_vec(), b"mqtt".to_vec()];
+        config.r2o_test_invalid_finished = invalid_finished;
+        rustls::ServerConnection::new(Arc::new(config)).unwrap()
+    }
+
+    /// Реальные TLS-записи проходят оба автомата без привилегий и OS-сокетов.
+    fn exchange(
+        client: &mut rustls::ClientConnection,
+        server: &mut rustls::ServerConnection,
+    ) -> Result<(), rustls::Error> {
+        for _ in 0..16 {
+            let mut bytes = Vec::new();
+            client.write_tls(&mut bytes).unwrap();
+            if !bytes.is_empty() {
+                server.read_tls(&mut Cursor::new(bytes)).unwrap();
+                server.process_new_packets()?;
+            }
+            let mut bytes = Vec::new();
+            server.write_tls(&mut bytes).unwrap();
+            if !bytes.is_empty() {
+                client.read_tls(&mut Cursor::new(bytes)).unwrap();
+                client.process_new_packets()?;
+            }
+            if !client.is_handshaking() && !server.is_handshaking() {
+                return Ok(());
+            }
+        }
+        panic!("TLS-автоматы не завершили рукопожатие");
+    }
+
+    #[test]
+    fn адресный_tls_не_шлёт_sni_для_ipv4_ipv6_и_сохраняет_alpn() {
+        for address in ["192.0.2.1", "2001:db8::1"] {
+            for tls12 in [false, true] {
+                for alpn in [
+                    vec![],
+                    vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+                    vec![b"mqtt".to_vec()],
+                ] {
+                    let mut client = r2o_tls_address_client_connection_with_alpn(
+                        address.parse().unwrap(),
+                        tls12,
+                        Some(1200),
+                        &alpn,
+                    )
+                    .unwrap();
+                    let mut wire = Vec::new();
+                    client.write_tls(&mut wire).unwrap();
+                    assert_eq!(wire.len(), 1200);
+                    assert!(r2o_tls_client_hello_without_sni(&wire));
+                    assert_eq!(r2o_tls_client_hello_alpn(&wire), Some(alpn));
+                    let parsed = r2k_core::tls::parse(&wire);
+                    assert_eq!(parsed.is_tls13, !tls12);
+                    assert!(parsed.sni_range.is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn адресное_подтверждение_завершает_tls12_tls13_с_alpn_клиента() {
+        for tls12 in [false, true] {
+            for alpn in [vec![], vec![b"h2".to_vec()], vec![b"mqtt".to_vec()]] {
+                let mut client = r2o_tls_address_client_connection_with_alpn(
+                    "192.0.2.1".parse().unwrap(),
+                    tls12,
+                    None,
+                    &alpn,
+                )
+                .unwrap();
+                let mut server = server(tls12, false);
+                exchange(&mut client, &mut server).unwrap();
+                assert!(server.server_name().is_none());
+                assert_eq!(client.alpn_protocol(), alpn.first().map(Vec::as_slice));
+                assert_eq!(
+                    client.protocol_version(),
+                    Some(if tls12 {
+                        rustls::ProtocolVersion::TLSv1_2
+                    } else {
+                        rustls::ProtocolVersion::TLSv1_3
+                    })
+                );
+                let mut application = [0_u8; 1];
+                assert!(matches!(
+                    std::io::Read::read(&mut server.reader(), &mut application),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn адресное_подтверждение_отвергает_неверный_finished_tls12_tls13() {
+        for tls12 in [false, true] {
+            let mut client = r2o_tls_address_client_connection_with_alpn(
+                "192.0.2.1".parse().unwrap(),
+                tls12,
+                None,
+                &[],
+            )
+            .unwrap();
+            let mut server = server(tls12, true);
+            assert!(exchange(&mut client, &mut server).is_err());
+            assert!(client.is_handshaking());
+        }
+    }
+
+    #[test]
+    fn один_server_hello_не_завершает_адресное_подтверждение() {
+        for tls12 in [false, true] {
+            let mut client = r2o_tls_address_client_connection_with_alpn(
+                "192.0.2.1".parse().unwrap(),
+                tls12,
+                None,
+                &[],
+            )
+            .unwrap();
+            let mut server = server(tls12, false);
+            let mut hello = Vec::new();
+            client.write_tls(&mut hello).unwrap();
+            server.read_tls(&mut Cursor::new(hello)).unwrap();
+            server.process_new_packets().unwrap();
+            let mut flight = Vec::new();
+            server.write_tls(&mut flight).unwrap();
+            let first_record = 5 + usize::from(u16::from_be_bytes([flight[3], flight[4]]));
+            client
+                .read_tls(&mut Cursor::new(&flight[..first_record]))
+                .unwrap();
+            client.process_new_packets().unwrap();
+            assert!(client.is_handshaking());
+        }
+    }
+
+    #[test]
+    fn адресная_современная_форма_принимает_выбор_tls12_как_donor_resume() {
+        let mut client = r2o_tls_address_client_connection_with_alpn(
+            "192.0.2.1".parse().unwrap(),
+            false,
+            None,
+            &[],
+        )
+        .unwrap();
+        let mut server = server(true, false);
+        exchange(&mut client, &mut server).unwrap();
+        assert!(server.server_name().is_none());
+        assert_eq!(
+            client.protocol_version(),
+            Some(rustls::ProtocolVersion::TLSv1_2)
+        );
+    }
+
+    #[test]
+    fn адресная_legacy_форма_не_подменяется_tls13() {
+        let mut client = r2o_tls_address_client_connection_with_alpn(
+            "192.0.2.1".parse().unwrap(),
+            true,
+            None,
+            &[],
+        )
+        .unwrap();
+        assert!(exchange(&mut client, &mut server(false, false)).is_err());
+        assert!(client.is_handshaking());
     }
 }

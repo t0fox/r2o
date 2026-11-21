@@ -83,7 +83,7 @@ pub fn own_first_bound_plan_id(
             if !binding.enabled
                 || binding.recheck_since.is_some_and(|since| since != 0)
                 || binding.level > 0 && binding.level < 3
-                || binding.kind != "name"
+                || binding.kind != target.binding_kind()
                 || binding.target != target.host
                 || normalized_transport(binding.transport) != target_transport
                 || normalized_family(binding.family) != target.family
@@ -127,7 +127,9 @@ fn binding_beats(left: &Binding, right: &Binding) -> bool {
 }
 
 fn newer_name_binding(catalog: &Catalog, binding: &Binding) -> bool {
-    if binding.kind != "name" {
+    if binding.kind != "name"
+        && !(binding.kind == "addr" && binding.target.parse::<IpAddr>().is_ok())
+    {
         return false;
     }
     catalog.boxes.iter().any(|box_record| {
@@ -137,7 +139,7 @@ fn newer_name_binding(catalog: &Catalog, binding: &Binding) -> bool {
                 && other.recheck_since.is_none_or(|since| since == 0)
                 && !(other.level > 0 && other.level < 3)
                 && binding_beats(other, binding)
-                && other.kind == "name"
+                && other.kind == binding.kind
                 && other.target == binding.target
                 && normalized_transport(other.transport) == normalized_transport(binding.transport)
                 && normalized_family(other.family) == normalized_family(binding.family)
@@ -255,7 +257,11 @@ pub fn own_first_plans(
             if !binding.enabled
                 || binding.level < 3
                 || binding.recheck_since.is_some()
-                || binding.kind != "name"
+                || (binding.kind != "name"
+                    && !(target.address_key().is_some()
+                        && binding.kind == "addr"
+                        && binding.target.parse::<IpAddr>().is_ok()
+                        && binding.verified_by == 5))
                 || transport != target_transport
                 || family != target.family
                 || (!quic && binding.tcp_profile != target.tcp_profile())
@@ -342,7 +348,12 @@ pub fn r2o_binding_for<'a>(
             };
             if binding_transport == transport
                 && binding_family == family
-                && binding.kind == "name"
+                && binding.kind
+                    == if name.parse::<IpAddr>().is_ok() {
+                        "addr"
+                    } else {
+                        "name"
+                    }
                 && binding.target == name
             {
                 return Some(binding);
@@ -620,6 +631,42 @@ pub fn resolve_unspecified_endpoint(target: &DiscoveryTarget) -> Result<Discover
 }
 
 impl DiscoveryTarget {
+    /// Адресный ключ существует только для канонического IP того же сервера.
+    /// Строка IP — внутренний идентификатор задачи, а не TLS SNI.
+    pub fn address_key(&self) -> Option<IpAddr> {
+        let address = self.host.parse::<IpAddr>().ok()?;
+        let endpoint = self.endpoint.parse::<std::net::SocketAddr>().ok()?;
+        (self.host == address.to_string()
+            && !address.is_unspecified()
+            && endpoint.ip() == address
+            && endpoint.port() != 0
+            && matches!(self.family, 4 | 6)
+            && address.is_ipv4() == (self.family == 4))
+            .then_some(address)
+    }
+
+    /// Тип постоянной привязки: отсутствие SNI не превращается в имя домена.
+    pub fn binding_kind(&self) -> &'static str {
+        if self.address_key().is_some() {
+            "addr"
+        } else {
+            "name"
+        }
+    }
+
+    /// Временный TCP-опыт по IP ограничен ещё и серверным портом.
+    /// Ключ передаётся только по control socket и никогда не идёт в SNI.
+    pub fn probe_key(&self) -> String {
+        if self.address_key().is_some() {
+            self.endpoint
+                .parse::<std::net::SocketAddr>()
+                .unwrap()
+                .to_string()
+        } else {
+            self.host.clone()
+        }
+    }
+
     /// TCP-профиль цели: измеренный `trigger_tcp_profile`, иначе контекст
     /// формы 8–13, иначе UNKNOWN (0), как C.
     pub const fn tcp_profile(&self) -> u8 {
@@ -630,7 +677,7 @@ impl DiscoveryTarget {
         }
     }
 
-    /// Выбирать только именованные потоки TLS на стандартном порту HTTPS.
+    /// Выбирать распознанный TLS; полный ClientHello без SNI даёт IP-цель.
     pub fn from_event(event: &HelloEvent) -> Option<Self> {
         if event.key[37] != 6 {
             return None;
@@ -642,10 +689,6 @@ impl DiscoveryTarget {
         ) {
             return None;
         }
-        let host = String::from_utf8(event.host.clone()?).ok()?;
-        let host = crate::domain::normalize(&host).ok()?;
-        crate::domain::registrable_domain(&host)?;
-
         let family = event.key[0];
         let low_port = u16::from_be_bytes([event.key[33], event.key[34]]);
         let high_port = u16::from_be_bytes([event.key[35], event.key[36]]);
@@ -654,6 +697,21 @@ impl DiscoveryTarget {
         // C `server_of`: серверный конец по эфемерности/величине портов, а не
         // по зашитому 443 — d2k охватывает весь IP-трафик на всех портах.
         let (address, port) = server_of(family, low_ip, low_port, high_ip, high_port)?;
+        let host = match event.host.as_deref().filter(|host| !host.is_empty()) {
+            Some(host) => {
+                let host = std::str::from_utf8(host).ok()?;
+                let host = crate::domain::normalize(host).ok()?;
+                crate::domain::registrable_domain(&host)?;
+                host
+            }
+            None if !address.is_unspecified()
+                && port != 0
+                && matches!(r2k_link_shape_tcp_base(shape), SHAPE_MODERN | SHAPE_LEGACY) =>
+            {
+                address.to_string()
+            }
+            None => return None,
+        };
         let endpoint = match address {
             IpAddr::V4(address) => format!("{address}:{port}"),
             IpAddr::V6(address) => format!("[{address}]:{port}"),
@@ -1091,7 +1149,7 @@ pub fn has_covering_binding_for_shape(
             binding.enabled
                 && binding.level >= 3
                 && binding.recheck_since.is_none()
-                && binding.kind == "name"
+                && binding.kind == target.binding_kind()
                 && binding.target == target.host
                 && family == target.family
                 && transport == 6
@@ -1156,7 +1214,7 @@ fn has_usable_binding_with_input(
             let legacy_remeasure = input == Some(2) && binding_matches_tcp_profile(binding, 0);
             if !binding.enabled
                 || binding.recheck_since.is_some()
-                || binding.kind != "name"
+                || binding.kind != target.binding_kind()
                 || binding.target != target.host
                 || !(binding.family == target.family || binding.family == 0 && target.family == 4)
                 || !(binding.transport == 6 || binding.transport == 0)
@@ -1206,8 +1264,11 @@ pub(crate) fn r2o_clear_binding_matches(
     } else {
         binding_transport
     };
-    kind == "name"
-        && binding_target == target_host
+    kind == if target_host.parse::<IpAddr>().is_ok() {
+        "addr"
+    } else {
+        "name"
+    } && binding_target == target_host
         && tr == transport
         && (if binding_family == 0 {
             4
@@ -1587,10 +1648,22 @@ fn add_measured_binding_with_fingerprint_in_box_learn(
     {
         return Err("discovery target or input source is unsupported".into());
     }
-    let normalized = crate::domain::normalize(&target.host)
-        .map_err(|_| "discovery target has an invalid hostname")?;
-    if normalized != target.host || crate::domain::registrable_domain(&normalized).is_none() {
-        return Err("discovery target hostname must be a canonical registrable name".into());
+    let address_target = target.address_key().is_some();
+    if !address_target {
+        let normalized = crate::domain::normalize(&target.host)
+            .map_err(|_| "discovery target has an invalid hostname or address")?;
+        if normalized != target.host || crate::domain::registrable_domain(&normalized).is_none() {
+            return Err(
+                "discovery target must have a canonical name or its observed IP address".into(),
+            );
+        }
+    } else if !matches!(
+        r2k_link_shape_tcp_base(target.shape),
+        SHAPE_MODERN | SHAPE_LEGACY
+    ) {
+        return Err(
+            "address discovery supports only observed TLS 1.2 or TLS 1.3 without ECH".into(),
+        );
     }
     let endpoint: std::net::SocketAddr = target
         .endpoint
@@ -1707,18 +1780,18 @@ fn add_measured_binding_with_fingerprint_in_box_learn(
             "tls"
         },
         &target.host,
-        "name",
+        target.binding_kind(),
         6,
         target.family,
         target.shape,
         target.tcp_profile(),
-        1,
+        if address_target { 5 } else { 1 },
         input,
         now,
         observed_fingerprint,
     )?;
 
-    if learn_group && target.shape != SHAPE_HTTP {
+    if learn_group && !address_target && target.shape != SHAPE_HTTP {
         let state = catalog
             .domain_state
             .get_or_insert_with(DomainState::default);
@@ -2026,6 +2099,187 @@ mod tests {
         key[35..37].copy_from_slice(&high_port.to_be_bytes());
         key[37] = 6;
         key
+    }
+
+    #[test]
+    fn unnamed_tls_uses_the_observed_address_without_inventing_a_domain() {
+        for (family, client, server, expected) in [
+            (
+                4,
+                vec![192, 0, 2, 10],
+                vec![198, 51, 100, 20],
+                "198.51.100.20:8443",
+            ),
+            (
+                6,
+                "2001:db8::1"
+                    .parse::<std::net::Ipv6Addr>()
+                    .unwrap()
+                    .octets()
+                    .to_vec(),
+                "2001:db8::2"
+                    .parse::<std::net::Ipv6Addr>()
+                    .unwrap()
+                    .octets()
+                    .to_vec(),
+                "[2001:db8::2]:8443",
+            ),
+        ] {
+            for host in [None, Some(Vec::new())] {
+                let event = r2k_core::control::HelloEvent {
+                    key: hello_key(family, &client, &server, 40_000, 8443),
+                    host,
+                    shape: Some(SHAPE_MODERN),
+                    r2o_wire_len: Some(512),
+                    quic_snapshot: None,
+                    tcp_has_timestamp: Some(true),
+                };
+                let target = DiscoveryTarget::from_event(&event)
+                    .expect("полный TLS ClientHello без SNI должен давать адресную цель");
+                let endpoint: std::net::SocketAddr = expected.parse().unwrap();
+                assert_eq!(target.host, endpoint.ip().to_string());
+                assert_eq!(target.endpoint, expected);
+                assert_eq!(target.family, family);
+                assert_eq!(target.tcp_profile(), r2k_core::control::TCP_PROFILE_TS);
+            }
+        }
+    }
+
+    #[test]
+    fn address_tls_confirmation_is_not_a_domain_or_application_proof() {
+        let target = DiscoveryTarget {
+            host: "198.51.100.20".into(),
+            endpoint: "198.51.100.20:8443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+            tcp_profile: r2k_core::control::TCP_PROFILE_TS,
+        };
+        let mut catalog = crate::catalog::Catalog::default();
+        super::add_measured_binding(
+            &mut catalog,
+            &target,
+            "r2o-plan 1 11\nid 00000000000000000000000000000000\nproto tcp tls\nsplit payload_start +1\n",
+            100,
+        )
+        .expect("подтверждённый безымянный TLS должен сохраняться по IP");
+        let binding = &catalog.boxes[0].bindings[0];
+        assert_eq!(binding.kind, "addr");
+        assert_eq!(binding.target, target.host);
+        assert_eq!(binding.verified_by, 5);
+        assert_eq!(binding.transport, 6);
+        assert_eq!(binding.tcp_profile, target.tcp_profile);
+        assert!(catalog.domain_state.is_none());
+        assert!(super::has_usable_binding(&catalog, &target));
+        assert!(super::has_covering_binding(&catalog, &target));
+
+        let mut wrong_target = target.clone();
+        wrong_target.host = "198.51.100.21".into();
+        wrong_target.endpoint = "198.51.100.21:8443".into();
+        assert!(!super::has_usable_binding(&catalog, &wrong_target));
+        assert!(!super::has_covering_binding(&catalog, &wrong_target));
+        wrong_target = target.clone();
+        wrong_target.tcp_profile = r2k_core::control::TCP_PROFILE_NO_TS;
+        assert!(!super::has_usable_binding(&catalog, &wrong_target));
+        assert!(!super::has_covering_binding(&catalog, &wrong_target));
+
+        let roundtrip =
+            crate::catalog::Catalog::parse(catalog.to_json_at(100).unwrap().as_bytes()).unwrap();
+        assert_eq!(roundtrip.boxes[0].bindings[0].kind, "addr");
+        assert_eq!(roundtrip.boxes[0].bindings[0].verified_by, 5);
+    }
+
+    #[test]
+    fn unnamed_target_requires_a_real_tls_shape_and_consistent_endpoint() {
+        let mut event = r2k_core::control::HelloEvent {
+            key: hello_key(4, &[192, 0, 2, 10], &[198, 51, 100, 20], 40_000, 443),
+            host: None,
+            shape: None,
+            r2o_wire_len: None,
+            quic_snapshot: None,
+            tcp_has_timestamp: None,
+        };
+        assert!(DiscoveryTarget::from_event(&event).is_none());
+        event.shape = Some(SHAPE_HTTP);
+        assert!(DiscoveryTarget::from_event(&event).is_none());
+        event.shape = Some(SHAPE_ECH_TCP);
+        assert!(DiscoveryTarget::from_event(&event).is_none());
+        event.shape = Some(SHAPE_MODERN);
+        event.key[37] = 17;
+        assert!(DiscoveryTarget::from_event(&event).is_none());
+        event.key[37] = 6;
+        event.host = Some(b"invalid name".to_vec());
+        assert!(DiscoveryTarget::from_event(&event).is_none());
+        event.host = None;
+        let target = DiscoveryTarget::from_event(&event).unwrap();
+        assert_eq!(target.binding_kind(), "addr");
+        assert_eq!(target.probe_key(), "198.51.100.20:443");
+        for bad_endpoint in ["198.51.100.21:443", "198.51.100.20:0", "[2001:db8::2]:443"] {
+            let mut invalid = target.clone();
+            invalid.endpoint = bad_endpoint.into();
+            assert!(invalid.address_key().is_none());
+            let mut catalog = crate::catalog::Catalog::default();
+            assert!(super::add_measured_binding(
+                &mut catalog, &invalid,
+                "r2o-plan 1 11\nid 00000000000000000000000000000000\nproto tcp tls\nsplit payload_start +1\n",
+                100,
+            ).is_err());
+            assert!(catalog.boxes.is_empty());
+        }
+        event.key[17..33].fill(0);
+        assert!(DiscoveryTarget::from_event(&event).is_none());
+    }
+
+    #[test]
+    fn address_tls_reuses_compatible_knowledge_and_retires_only_its_binding() {
+        let target = DiscoveryTarget {
+            host: "198.51.100.20".into(),
+            endpoint: "198.51.100.20:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+            tcp_profile: r2k_core::control::TCP_PROFILE_TS,
+        };
+        let mut catalog = crate::catalog::Catalog::default();
+        let plan_id = super::add_measured_binding(
+            &mut catalog, &target,
+            "r2o-plan 1 11\nid 00000000000000000000000000000000\nproto tcp tls\nsplit payload_start +1\n",
+            100,
+        ).unwrap();
+        assert_eq!(
+            super::own_first_bound_plan_id(&catalog, &target, SHAPE_MODERN),
+            Some(plan_id.clone())
+        );
+        let mut peer = target.clone();
+        peer.host = "198.51.100.21".into();
+        peer.endpoint = "198.51.100.21:443".into();
+        assert_eq!(
+            super::own_first_plans(&catalog, &peer, false, None, &[], &[]).len(),
+            1
+        );
+        peer.tcp_profile = r2k_core::control::TCP_PROFILE_NO_TS;
+        assert!(super::own_first_plans(&catalog, &peer, false, None, &[], &[]).is_empty());
+
+        // Другая цель с теми же байтами плана не принадлежит этой перепроверке.
+        let mut neighbor = catalog.boxes[0].bindings[0].clone();
+        neighbor.target = peer.host;
+        catalog.boxes[0].bindings.push(neighbor);
+        let now = std::time::Instant::now();
+        let update = super::update_direct_clear_bindings(&mut catalog, &target, 101, now);
+        assert_eq!(update.marked, 1);
+        assert!(update.delete_runtime);
+        assert_eq!(
+            update.delete_shapes().collect::<Vec<_>>(),
+            vec![r2k_core::control::SHAPE_MODERN_TS]
+        );
+        assert!(catalog.boxes[0].bindings[1].recheck_since.is_none());
+        let update = super::update_direct_clear_bindings(
+            &mut catalog,
+            &target,
+            162,
+            now + std::time::Duration::from_secs(61),
+        );
+        assert_eq!(update.removed, 1);
+        assert_eq!(catalog.boxes[0].bindings.len(), 1);
+        assert_eq!(catalog.boxes[0].bindings[0].target, "198.51.100.21");
     }
 
     #[test]
