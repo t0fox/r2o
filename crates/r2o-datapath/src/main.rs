@@ -425,6 +425,14 @@ mod app {
         }
     }
 
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    enum R2oUdpLateTail {
+        Unhandled,
+        Deferred,
+        Forwarded,
+        Failed,
+    }
+
     fn r2o_udp_handle_late_tail(
         queue: &mut QueueSocket,
         raw: Option<&RawSocket>,
@@ -439,12 +447,12 @@ mod app {
         now: Instant,
         receive_seq: u64,
         deferred_only: bool,
-    ) -> bool {
+    ) -> R2oUdpLateTail {
         let Some(matched) = follow.r2o_match(packet, now, receive_seq) else {
-            return false;
+            return R2oUdpLateTail::Unhandled;
         };
         if matched.failed || deferred_only && matched.at.is_none() {
-            return false;
+            return R2oUdpLateTail::Unhandled;
         }
         let neutral = r2o_udp_packet_is_neutral(route_gate, probe_mark, mark, packet);
         if let Some(due) = matched.at {
@@ -452,7 +460,7 @@ mod app {
                 match deferred_resends.r2o_enqueue_with_error(due, id, packet) {
                     Ok(()) => {
                         r2o_note_counter(&R2O_DEFERRED, 1);
-                        return true;
+                        return R2oUdpLateTail::Deferred;
                     }
                     Err(R2oUdpDeferredEnqueueError::Full) => {
                         follow.r2o_note_queue_full();
@@ -464,15 +472,15 @@ mod app {
                 }
             }
             if deferred_verdicts.r2o_enqueue(due, &[id], &[NF_ACCEPT], Some(packet)) {
-                return true;
+                return R2oUdpLateTail::Deferred;
             }
-            return false;
+            return R2oUdpLateTail::Unhandled;
         }
         if !neutral {
-            return false;
+            return R2oUdpLateTail::Unhandled;
         }
         let Some(raw) = raw else {
-            return false;
+            return R2oUdpLateTail::Unhandled;
         };
         match raw.send_packet(packet) {
             Ok(()) => {
@@ -482,6 +490,7 @@ mod app {
                         eprintln!("r2o-datapath: не выдан ACCEPT позднего UDP-хвоста: {fallback}");
                     }
                 }
+                R2oUdpLateTail::Forwarded
             }
             Err(error) => {
                 if r2o_udp_send_busy(&error) {
@@ -492,10 +501,12 @@ mod app {
                 eprintln!("r2o-datapath: поздний UDP-хвост принят ядром: {error}");
                 if let Err(verdict_error) = queue.send_verdict(id, NF_ACCEPT) {
                     eprintln!("r2o-datapath: не выдан ACCEPT позднего UDP-хвоста: {verdict_error}");
+                    R2oUdpLateTail::Failed
+                } else {
+                    R2oUdpLateTail::Forwarded
                 }
             }
         }
-        true
     }
 
     fn r2o_release_delayed_udp_batch(
@@ -2362,7 +2373,7 @@ mod app {
                             now,
                             follow_receive_seq,
                             true,
-                        )
+                        ) != R2oUdpLateTail::Unhandled
                     {
                         continue;
                     }
@@ -3334,69 +3345,14 @@ mod app {
                         }
                     } else {
                         match decision {
-                            PacketDecision::Accept | PacketDecision::SkippedUdp { .. } => {
-                                let late_tail_handled = udp_replay.is_none()
-                                    && original.is_some_and(|bytes| {
-                                        r2o_udp_handle_late_tail(
-                                            &mut socket,
-                                            raw.as_ref(),
-                                            &route_gate,
-                                            options.probe_mark,
-                                            &mut udp_follow,
-                                            &mut udp_deferred_verdicts,
-                                            &mut udp_deferred_resends,
-                                            packet_id,
-                                            packet.mark.unwrap_or(0),
-                                            bytes,
-                                            Instant::now(),
-                                            follow_receive_seq,
-                                            false,
-                                        )
-                                    });
-                                if !late_tail_handled {
-                                    send_verdicts(&mut socket, delivery_ids, NF_ACCEPT, false)?;
-                                    if let Some(originals) = batch_owned_originals.as_ref() {
-                                        r2o_resend_owned_originals(raw.as_ref(), originals);
-                                    }
-                                    if options.mode == RuntimeMode::Apply
-                                        && !controller_probe
-                                        && let Some(bytes) = original
-                                    {
-                                        observe_voice_trial_rtp_packet(
-                                            &mut voice_trial_proofs,
-                                            bytes,
-                                            now,
-                                            &mut control,
-                                            &mut flow_journal,
-                                            &journal_origin,
-                                        );
-                                    }
-                                    if options.mode == RuntimeMode::Apply
-                                        && !controller_probe
-                                        && udp_replay.is_none()
-                                        && let Some(bytes) = original
-                                    {
-                                        r2o_udp_mark_plain_pass(
-                                            &udp_sessions,
-                                            &mut udp_follow,
-                                            &route_gate,
-                                            options.probe_mark,
-                                            packet.mark.unwrap_or(0),
-                                            bytes,
-                                            queue_hook,
-                                            now,
-                                            udp_receive_seq,
-                                            raw.is_some(),
-                                        );
-                                    }
-                                }
-                                response_delivered = true;
-                            }
-                            PacketDecision::Refused { .. }
+                            PacketDecision::Accept
+                            | PacketDecision::SkippedUdp { .. }
+                            | PacketDecision::Refused { .. }
                             | PacketDecision::RefusedUdp { .. }
                             | PacketDecision::FlowUnfit { .. } => {
-                                let late_tail_handled = udp_replay.is_none()
-                                    && original.is_some_and(|bytes| {
+                                let late_tail = original
+                                    .filter(|_| udp_replay.is_none())
+                                    .map_or(R2oUdpLateTail::Unhandled, |bytes| {
                                         r2o_udp_handle_late_tail(
                                             &mut socket,
                                             raw.as_ref(),
@@ -3413,29 +3369,27 @@ mod app {
                                             false,
                                         )
                                     });
-                                if !late_tail_handled {
+                                let needs_verdict = late_tail == R2oUdpLateTail::Unhandled;
+                                if needs_verdict {
                                     send_verdicts(&mut socket, delivery_ids, NF_ACCEPT, false)?;
                                     if let Some(originals) = batch_owned_originals.as_ref() {
                                         r2o_resend_owned_originals(raw.as_ref(), originals);
                                     }
-                                    if options.mode == RuntimeMode::Apply
-                                        && !controller_probe
-                                        && let Some(bytes) = original
-                                    {
-                                        observe_voice_trial_rtp_packet(
-                                            &mut voice_trial_proofs,
-                                            bytes,
-                                            now,
-                                            &mut control,
-                                            &mut flow_journal,
-                                            &journal_origin,
-                                        );
-                                    }
-                                    if options.mode == RuntimeMode::Apply
-                                        && !controller_probe
-                                        && udp_replay.is_none()
-                                        && let Some(bytes) = original
-                                    {
+                                }
+                                if (needs_verdict || late_tail == R2oUdpLateTail::Forwarded)
+                                    && options.mode == RuntimeMode::Apply
+                                    && !controller_probe
+                                    && let Some(bytes) = original
+                                {
+                                    observe_voice_trial_rtp_packet(
+                                        &mut voice_trial_proofs,
+                                        bytes,
+                                        now,
+                                        &mut control,
+                                        &mut flow_journal,
+                                        &journal_origin,
+                                    );
+                                    if needs_verdict && udp_replay.is_none() {
                                         r2o_udp_mark_plain_pass(
                                             &udp_sessions,
                                             &mut udp_follow,
