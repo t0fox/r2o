@@ -4060,8 +4060,15 @@ fn r2o_newer_name_binding(
     by_name: &HashMap<String, Vec<(usize, usize)>>,
     binding: &Binding,
 ) -> bool {
-    if !matches!(binding.kind.as_str(), "name" | "addr") {
-        return false;
+    match binding.kind.as_str() {
+        "name" => {}
+        "addr"
+            if r2o_catalog_binding_transport(binding) == 6
+                && matches!(
+                    control::r2k_link_shape_tcp_base(binding.shape),
+                    SHAPE_MODERN | SHAPE_LEGACY
+                ) => {}
+        _ => return false,
     }
     by_name
         .get(binding.target.as_str())
