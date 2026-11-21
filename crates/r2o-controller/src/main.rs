@@ -3765,8 +3765,7 @@ impl R2oDnsHealth {
                 live.dns_answer = false;
                 live.attempts = live.attempts.saturating_add(1);
                 live.reason = if bootstrap {
-                    "Получается IP endpoint через настроенный bootstrap DNS перед проверкой RFC 8484."
-                        .into()
+                    "Получаем IP DNS-сервера через настроенный bootstrap-резолвер.".into()
                 } else {
                     "Автоматически проверяется корректный DNS-ответ endpoint.".into()
                 };
