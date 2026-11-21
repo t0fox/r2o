@@ -391,6 +391,22 @@ async function main() {
   await call("Page.navigate", { url: `http://localhost:${port}/` });
   await waitFor(() => evaluate("document.readyState === 'complete' && !!document.querySelector('#app')"), "загрузка страницы R2O");
   await evaluate("document.fonts.ready.then(() => true)");
+  await waitFor(() => evaluate("!!document.querySelector('#engine-state small')"), "состояние движка в верхней панели");
+  assert.match(await evaluate("document.querySelector('#engine-state .mast-state-text').textContent"), /^Движок работает /);
+  assert.equal(await evaluate("document.querySelectorAll('#engine-state[role=status]').length === 1 && !document.querySelector('#status-state, #rail-status')"), true);
+  assert.equal(await evaluate(`(() => {
+    document.querySelector('#engine-actions [data-control=restart]').click();
+    const status = document.querySelector('#engine-state');
+    return status.textContent.includes('Движок перезапускается') && status.querySelector('.lamp').dataset.tone === 'live';
+  })()`), true, "запрос перезапуска сразу меняет единственный статус");
+  await waitFor(() => evaluate("document.querySelector('#engine-state .mast-state-text').textContent.startsWith('Движок работает')"), "возврат к статусу движка после команды");
+  fs.unlinkSync(enginePidPath);
+  await waitFor(() => evaluate("document.querySelector('#engine-state .mast-state-text').textContent.startsWith('Движок остановлен')"), "опрос отражает фактическую остановку");
+  await waitFor(() => evaluate("document.querySelector('#now-title').textContent === 'Подбор приостановлен'"), "карточка обзора показывает состояние подбора");
+  assert.equal(await evaluate("document.querySelector('#nav-now').textContent"), "");
+  fs.writeFileSync(enginePidPath, String(process.pid));
+  fs.writeFileSync(livePath, JSON.stringify(liveState));
+  await waitFor(() => evaluate("document.querySelector('#engine-state .mast-state-text').textContent.startsWith('Движок работает')"), "опрос отражает возобновление работы");
   await waitFor(() => evaluate("!document.querySelector('#now').hidden && document.querySelector('#now #dns-protection-list').children.length === 3"), "карточки зашифрованного DNS на обзоре");
   assert.deepEqual(await evaluate("[...document.querySelectorAll('#dns-protection-list .meta-chip')].map(node => node.textContent)"), ["Доступен напрямую", "Подбор", "Устарело"]);
   assert.equal(await evaluate("!!document.querySelector('[data-nav=dns-protection]')"), false);

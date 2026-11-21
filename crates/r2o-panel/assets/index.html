@@ -57,11 +57,6 @@
       <span class="brand-text"><strong>r2o</strong><small>router console</small></span>
     </a>
 
-    <div class="rail-status" id="rail-status" aria-live="polite">
-      <span class="lamp" data-tone="idle"></span>
-      <span id="rail-status-text">Связь…</span>
-    </div>
-
     <nav class="index" aria-label="Разделы панели">
       <div class="index-group">
         <span class="index-label">Пульт</span>
@@ -130,8 +125,8 @@
         </div>
         <span class="mast-host" id="host"></span>
       </div>
-      <div class="mast-state" id="engine-state" aria-live="polite">
-        <span class="lamp" data-tone="idle"></span>
+      <div class="mast-state" id="engine-state" role="status">
+        <span class="lamp" data-tone="idle" aria-hidden="true"></span>
         <span class="mast-state-text">Получаем состояние…</span>
       </div>
       <div class="mast-actions" id="engine-actions" role="group" aria-label="Управление движком"></div>
@@ -160,10 +155,7 @@
       <section class="sheet screen-now" id="now" data-screen="now" data-title="Обзор" data-kicker="Пульт" aria-labelledby="now-title">
         <div class="overview-hero">
           <div class="status-panel" id="status-panel" data-tone="idle">
-            <div class="status-panel-top">
-              <span class="eyebrow">Состояние R2O</span>
-              <span class="status-live"><span class="lamp" id="status-lamp" data-tone="idle" aria-hidden="true"></span><span id="status-state">Получаем состояние…</span></span>
-            </div>
+            <span class="eyebrow">Подбор обходов</span>
             <h1 class="statement" id="now-title">Получаем состояние…</h1>
             <p class="lede" id="now-lede"></p>
             <div class="slots" id="slots"></div>

@@ -13,6 +13,11 @@
 
   var SHAPES = { 0: "", 1: "TLS 1.3", 2: "TLS 1.2", 3: "QUIC", 4: "любая форма", 5: "голос", 6: "TLS 1.3 + ECH" };
   var MODES = { apply: "применение", observe: "наблюдение", off: "выключен" };
+  var ENGINE_TRANSITIONS = {
+    start: "Движок запускается",
+    restart: "Движок перезапускается",
+    stop: "Движок останавливается"
+  };
 
   var TRACK = [
     { label: "Очередь", phases: ["ожидает безопасного слота замера", "заводим поиск"] },
@@ -275,21 +280,21 @@
 
     if (!engine) {
       m.tone = "bad"; m.lamp = "bad";
-      m.headline = ["Движок ", "остановлен"];
+      m.headline = ["Подбор ", "приостановлен"];
       m.state = "Движок остановлен";
       m.lede = m.snap.mode === "off"
         ? "В конфигурации задан режим MODE=off. Трафик не читается и обходы не применяются."
         : "Трафик не читается, подбор не идёт, сохранённые обходы не применяются. Каталог ниже — последнее сохранённое состояние.";
     } else if (!linked) {
       m.tone = "bad"; m.lamp = "warn";
-      m.headline = ["Нет связи ", "с датапатом"];
-      m.state = "Движок запущен, связи с датапатом нет";
+      m.headline = ["Данные о поисках ", "недоступны"];
+      m.state = "Нет связи с датапатом";
       m.lede = (k.link_note ? "Причина: " + k.link_note + ". " : "") +
         "Идут ли поиски и применяются ли обходы, отсюда не видно. Это не «ноль поисков», а отсутствие измерения.";
     } else if (m.hunting > 0) {
-      m.tone = "live"; m.lamp = "live";
+      m.tone = "live"; m.lamp = "ok";
       m.headline = ["Идёт ", count(m.hunting, "поиск", "поиска", "поисков")];
-      m.state = "Движок работает, идёт подбор";
+      m.state = "Движок работает";
       m.lede = "R2O подтвердил блокировку и сам подбирает обход в протоколе, где она встретилась. Делать ничего не нужно." +
         (m.queued.length ? " Замеряется " + (m.hunting - m.queued.length) + ", " + m.queued.length + " " +
           plural(m.queued.length, "ждёт", "ждут", "ждут") + " свободного слота замера." : "");
@@ -455,6 +460,7 @@
     this.lastOk = 0;
     this.failed = false;
     this.pending = null;
+    this.engineCommand = null;
     this.armed = null;
     this.filter = "";
     this.flash = null;
@@ -1138,13 +1144,6 @@
     var probes = num(m.k.probes_used) || 0;
     var unfit = num(m.k.client_unfit);
 
-    var panel = this.$("status-panel");
-    if (panel) panel.setAttribute("data-tone", m.tone);
-    var statusLamp = this.$("status-lamp");
-    if (statusLamp) statusLamp.setAttribute("data-tone", m.lamp);
-    var statusState = this.$("status-state");
-    if (statusState && statusState.textContent !== m.state) statusState.textContent = m.state;
-
     var metricKey = JSON.stringify([m.hunting, m.queued.length, activeMeasures, limitMeasures, freePct, confirms, probes, unfit, broken]);
     if (metrics.__r2oKey !== metricKey) {
       metrics.__r2oKey = metricKey;
@@ -1293,6 +1292,7 @@
   App.prototype.render = function () {
     var m = model(this.status, this.received, Date.now());
     var cs = str(m.snap.control_state);
+    if (cs !== "running") this.engineCommand = null;
     if (this.lastControl === "running" && CONTROL_RESULT[cs]) {
       this.flash = { tone: CONTROL_RESULT[cs].tone, text: CONTROL_RESULT[cs].text, what: this.lastAction || "", at: Date.now() };
     }
@@ -1325,27 +1325,23 @@
   /* ─── Мачта ─── */
 
   App.prototype.renderMast = function (m) {
-    var doc = this.doc;
     var host = this.$("host");
     host.textContent = str(m.snap.panel_listen);
-    var state = this.$("engine-state");
-    var lamp = state.querySelector(".lamp");
-    lamp.setAttribute("data-tone", m.lamp);
-    var text = state.querySelector(".mast-state-text");
-    /* Живой регион трогаем только при смене текста: иначе диктор повторяет его на каждом опросе. */
-    var stateKey = m.state + "|" + m.stateDetail;
-    if (text.__r2oKey !== stateKey) {
-      text.__r2oKey = stateKey;
-      text.replaceChildren(doc.createTextNode(m.state), el(doc, "small", "", m.stateDetail));
-    }
     this.updateTitle();
     this.renderActions();
-    var rail = this.$("rail-status");
-    if (rail) {
-      var railLamp = rail.querySelector(".lamp");
-      if (railLamp) railLamp.setAttribute("data-tone", m.lamp);
-      var railText = this.$("rail-status-text");
-      if (railText && railText.textContent !== m.state) railText.textContent = m.state;
+  };
+
+  App.prototype.renderEngineStatus = function (m) {
+    var state = this.$("engine-state");
+    var lamp = state.querySelector(".lamp");
+    var transition = ENGINE_TRANSITIONS[this.pending || this.engineCommand];
+    lamp.setAttribute("data-tone", transition ? "live" : m.lamp);
+    var text = state.querySelector(".mast-state-text");
+    var label = transition || m.state;
+    var stateKey = label + "|" + m.stateDetail;
+    if (text.__r2oKey !== stateKey) {
+      text.__r2oKey = stateKey;
+      text.replaceChildren(this.doc.createTextNode(label + " "), el(this.doc, "small", "", m.stateDetail));
     }
   };
 
@@ -1353,6 +1349,7 @@
     var doc = this.doc, m = this.m;
     var box = this.$("engine-actions");
     if (!m) return;
+    this.renderEngineStatus(m);
     var snap = m.snap;
     var busy = snap.control_state === "running" || !!this.pending;
     var key = JSON.stringify([snap.controls_enabled, m.engine, busy, this.pending, this.armed, snap.mode]);
@@ -1661,6 +1658,7 @@
       .then(function (r) {
         return r.json().catch(function () { return {}; }).then(function (body) {
           if (body.action) self.lastAction = str(body.action);
+          if (r.ok && ENGINE_TRANSITIONS[action]) self.engineCommand = action;
           if (!r.ok) self.shake(action);
           self.flash = {
             tone: r.ok ? "info" : "bad",
@@ -1676,6 +1674,7 @@
       })
       .then(function () {
         self.pending = null;
+        self.renderActions();
         self.renderNotice();
         self.poll();
         self.win.setTimeout(function () { self.poll(); }, 800);
@@ -1703,7 +1702,7 @@
     } else if (this.m && this.m.snap.preview) {
       tone = "info"; parts = [el(doc, "b", "", "Демонстрационные данные."), " Это локальный стенд, а не роутер."];
     } else if (this.m && this.m.engine && !this.m.fresh) {
-      tone = "warn"; parts = [el(doc, "b", "", "Снимок движка устарел."), " Движок давно не обновлял состояние; цифры ниже могут быть не текущими."];
+      tone = "warn"; parts = [el(doc, "span", "", "Цифры в обзоре показаны по последнему полученному снимку.")];
     }
     if (!parts) {
       if (n.hidden || n.__closing) return;
@@ -1768,10 +1767,6 @@
     this.$("now-lede").textContent = m.lede;
     var panel = this.$("status-panel");
     if (panel) panel.setAttribute("data-tone", m.tone);
-    var statusLamp = this.$("status-lamp");
-    if (statusLamp) statusLamp.setAttribute("data-tone", m.lamp);
-    var statusState = this.$("status-state");
-    if (statusState && statusState.textContent !== m.state) statusState.textContent = m.state;
 
     var slots = this.$("slots");
     var meas = m.k.measurements;
@@ -1852,7 +1847,7 @@
         var li = el(doc, "li", "quiet");
         add(li, el(doc, "b", "", "Поиски не измеряются."), m.engine
           ? " Контроллер не подключён к датапату, поэтому список поисков недоступен."
-          : " Движок остановлен.");
+          : " Список обновится после запуска.");
         return [li];
       });
       return;
@@ -3295,7 +3290,8 @@
         Motion.g.fromTo(n, { scale: 1.35, opacity: .5 }, { scale: 1, opacity: 1, duration: .35, ease: "back.out(2.6)", clearProps: "transform,opacity" });
       }
     };
-    set("nav-now", !m.engine ? "стоп" : !m.linked ? "нет связи" : m.hunting ? String(m.hunting) : "", m.hunting ? "live" : !m.engine || !m.linked ? "warn" : null);
+    var running = m.engine && m.linked && m.hunting;
+    set("nav-now", running ? String(m.hunting) : "", running ? "live" : null);
     set("nav-families", m.groups.length ? String(m.groups.length) : "");
     set("nav-boxes", m.boxes.length ? String(m.boxes.length) : "");
     var tg = this.telegramState(m);
