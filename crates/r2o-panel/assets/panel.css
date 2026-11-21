@@ -2380,6 +2380,7 @@ body[data-stale="true"] .lamp::after { opacity: 0; }
     pointer-events: none; color: var(--acc); user-select: none;
   }
   .decode-ink > span { position: absolute; white-space: pre; color: inherit; }
-  .decode-ink > span::before { content: attr(data-glyph); }
+  .decode-ink > span::before { content: attr(data-glyph); display: inline-block; transform-origin: left; }
+  .decode-ink > span:not([data-resolved])::before { scale: var(--glyph-scale) 1; }
   .decode-ink > [data-resolved] { color: var(--resolved-color); }
 }

@@ -14,9 +14,10 @@
     ".diag-card", ".diag-stat-strip > div", ".stages li"
   ].join(", ");
   var controls = "button, input, select, textarea, [role=slider], dialog, .table-scroll, canvas";
-  var interactiveText = "#update-check, #diagnostic-refresh, [data-action=telegram-check], .service-card";
+  var interactiveText = "#update-check, #diagnostic-refresh, [data-action=telegram-check], .service-card, .brand, .mast-brand";
   var decodeQueue = new Map(), decoding = new Map(), decoded = new WeakMap();
   var alphabet = "АБВГДЕЖЗКЛМНОПРСТУФХ░▒0123456789";
+  var measure = doc.createElement("canvas").getContext("2d");
   var hero = doc.getElementById("status-panel");
   var canvas = hero.querySelector(".pixel-trail"), painter, trail = [], lastPixel;
   var markTrail = [], lastMark;
@@ -63,10 +64,19 @@
     var ink = doc.createElement("span");
     ink.className = "decode-ink";
     ink.setAttribute("aria-hidden", "true");
+    var symbols = element.closest(".brand, .mast-brand") ? "r2o0A4X8▒" : alphabet;
+    var widths = new Map();
     var letters = [], walker = doc.createTreeWalker(element, NodeFilter.SHOW_TEXT);
     var range = doc.createRange();
     while (walker.nextNode()) {
       var node = walker.currentNode, style = win.getComputedStyle(node.parentElement);
+      var font = [style.fontStyle, style.fontWeight, style.fontSize, style.fontFamily].join(" ");
+      if (!widths.has(font)) {
+        if (measure) measure.font = font;
+        widths.set(font, measure ? Math.max.apply(null, Array.from(symbols, function (symbol) {
+          return measure.measureText(symbol).width;
+        })) : parseFloat(style.fontSize));
+      }
       var offset = 0;
       for (var char of node.textContent) {
         var start = offset;
@@ -81,7 +91,8 @@
         glyph.style.top = (rect.top - box.top - element.clientTop) + "px";
         glyph.style.font = [style.fontStyle, style.fontWeight, style.fontSize + "/1", style.fontFamily].join(" ");
         glyph.style.setProperty("--resolved-color", style.color);
-        glyph.dataset.glyph = alphabet[letters.length % alphabet.length];
+        glyph.style.setProperty("--glyph-scale", Math.min(1, rect.width / widths.get(font)));
+        glyph.dataset.glyph = symbols[letters.length % symbols.length];
         ink.append(glyph);
         letters.push({ glyph: glyph, char: char });
       }
@@ -90,7 +101,7 @@
     decoded.set(element, text);
     element.append(ink);
     element.setAttribute("data-decoding", "");
-    decoding.set(element, { ink: ink, letters: letters, from: now, text: text, beat: -1 });
+    decoding.set(element, { ink: ink, letters: letters, from: now, text: text, symbols: symbols, beat: -1 });
   }
 
   function paintText(now) {
@@ -112,7 +123,7 @@
           letter.glyph.dataset.glyph = letter.char;
           letter.glyph.setAttribute("data-resolved", "");
         } else {
-          letter.glyph.dataset.glyph = alphabet[(index * 11 + beat * 7) % alphabet.length];
+          letter.glyph.dataset.glyph = job.symbols[(index * 11 + beat * 7) % job.symbols.length];
         }
       });
     });

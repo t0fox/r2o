@@ -1,6 +1,8 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { spawn } = require("node:child_process");
+const { once } = require("node:events");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { chromium } = require("playwright");
@@ -16,12 +18,26 @@ async function visit(page, section) {
 }
 
 async function record(browser) {
-  const context = await browser.newContext({
-    viewport: { width: 1280, height: 900 }, recordVideo: { dir: capture, size: { width: 1280, height: 900 } }
-  });
+  const video = path.join(capture, "r2o-motion.webm");
+  const encoder = spawn(process.env.R2O_CAPTURE_FFMPEG || "ffmpeg", [
+    "-loglevel", "error", "-f", "image2pipe", "-framerate", "20", "-vcodec", "mjpeg",
+    "-i", "pipe:0", "-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8", "-y", video
+  ], { stdio: ["pipe", "ignore", "inherit"] });
+  await once(encoder, "spawn");
+  const finished = once(encoder, "close");
+  encoder.stdin.on("error", () => {});
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const page = await context.newPage();
+  let frame;
+  const frames = setInterval(() => {
+    if (frame && !encoder.stdin.destroyed && !encoder.stdin.writableNeedDrain) encoder.stdin.write(frame);
+  }, 50);
   try {
+    await page.screencast.start({ onFrame: next => { frame = next.data; } });
     await page.goto(url + "/?episode=live");
+    const mark = await page.locator(".brand-mark").boundingBox();
+    await page.mouse.move(mark.x + mark.width * .18, mark.y + mark.height * .63);
+    await page.mouse.move(mark.x + mark.width * .8, mark.y + mark.height * .63, { steps: 12 });
     await page.locator(".search .track-step").first().waitFor();
     await page.locator(".workload-card").scrollIntoViewIfNeeded();
     await page.locator(".search[data-outcome=saved]").waitFor();
@@ -30,14 +46,18 @@ async function record(browser) {
     await visit(page, "updates");
     await page.locator("#update-install").click();
     await page.getByRole("button", { name: "Установить", exact: true }).click();
-    await page.locator("#install-steps [aria-current=step]").waitFor();
+    await page.locator("#install-steps li:nth-child(3)[aria-current=step]").waitFor();
     await page.screenshot({ path: path.join(capture, "install-1280.png") });
     await page.waitForTimeout(950);
   } finally {
+    clearInterval(frames);
+    encoder.stdin.end();
     await context.close();
+    const [code] = await finished;
+    assert.equal(code, 0, "Код завершения FFmpeg");
   }
-  await page.video().saveAs(path.join(capture, "r2o-motion.webm"));
-  await page.video().delete();
+  assert.ok((await fs.stat(video)).size > 0);
+  console.log("Видео успешного поиска и запуска установки — OK");
 }
 
 async function main() {
@@ -78,8 +98,14 @@ async function main() {
         await page.mouse.move(markBox.x + markBox.width * .78, markY, { steps: 9 });
         await mark.locator(".brand-trail rect").first().waitFor({ state: "attached" });
         assert.ok(await mark.locator(".brand-trail rect").count() > 3);
+        const wordmark = page.locator(".brand .brand-text strong");
+        await wordmark.locator(".decode-ink > span").first().waitFor({ state: "attached" });
+        const glyphFont = await wordmark.locator(".decode-ink > span").first().evaluate(el => getComputedStyle(el).fontFamily);
+        assert.match(glyphFont, /Unbounded/);
+        assert.equal(await wordmark.textContent(), "r2o");
         await page.screenshot({ path: path.join(capture, "pixel-logo-1440.png"), clip: { x: 70, y: 5, width: 108, height: 100 } });
         await mark.locator(".brand-trail rect").first().waitFor({ state: "detached" });
+        await wordmark.locator(".decode-ink").waitFor({ state: "detached" });
         await page.evaluate(() => {
           for (const tab of ["families", "updates", "diagnostics", "now", "boxes"]) {
             document.querySelector('[data-nav="' + tab + '"]').click();
@@ -101,7 +127,15 @@ async function main() {
         await page.mouse.move(30, 20);
         await page.waitForFunction(() => !document.querySelector("[data-r2o-spot]"));
         const doneClock = await page.locator(".search[data-outcome=saved] .search-clock strong").textContent();
-        await page.waitForTimeout(2100);
+        await page.evaluate(() => {
+          const fetch = window.fetch;
+          window.fetch = async (...args) => {
+            const response = await fetch(...args);
+            if (String(args[0]).startsWith("/api/status")) document.documentElement.dataset.testPoll = "seen";
+            return response;
+          };
+        });
+        await page.waitForFunction(() => document.documentElement.dataset.testPoll === "seen", null, { timeout: 9000 });
         assert.equal(await page.locator(".search[data-outcome=saved] .search-clock strong").textContent(), doneClock);
         assert.equal(await page.locator("#now-title[data-decoding]").count(), 0);
         const telegram = page.locator('[data-nav="telegram"]');

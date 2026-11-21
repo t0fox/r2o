@@ -23,6 +23,8 @@ const fixtureTag='<script src="/assets/mock.js" defer></script>';
 const page=html.replace('<script src="/assets/gsap.js"',fixtureTag+'\n  <script src="/assets/gsap.js"');
 files.set('assets/mock.js',await readFile(join(root,'mock.js')));
 if(redesign){
+  // В демонстрации результат оставляем для изучения после окончания сценария.
+  files.set('assets/panel.js',files.get('assets/panel.js').toString().replace(/(var SEARCH_RESULT_MS = )\d+;/,'$1Infinity;'));
   files.set('index.html',page.replace('<html ','<html data-redesign-preview ')
     .replace('Панель работает локально на роутере и обращается только к его /api.', 'Демонстрационные данные. Действия выполняются только в этой вкладке.')
     .replace('</head>',`<style>
