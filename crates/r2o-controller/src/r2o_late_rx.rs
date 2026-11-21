@@ -145,6 +145,7 @@ impl R2oLateRxCache {
             r2o_wire_len: Some(wire_len),
             quic_snapshot: None,
             tcp_has_timestamp: hello.tcp_has_timestamp,
+            tcp_client_is_low: None,
         };
         if self.entries.len() >= R2O_LATE_RX_CACHE_CAPACITY
             && !self.entries.contains_key(&candidate.key)
@@ -451,6 +452,7 @@ mod tests {
             r2o_wire_len: wire_len,
             quic_snapshot: None,
             tcp_has_timestamp: None,
+            tcp_client_is_low: None,
         }
     }
 

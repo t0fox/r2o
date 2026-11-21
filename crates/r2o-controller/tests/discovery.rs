@@ -35,6 +35,7 @@ fn hello(host: Option<&str>, family: u8, shape: Option<u8>) -> HelloEvent {
         r2o_wire_len: None,
         quic_snapshot: None,
         tcp_has_timestamp: None,
+        tcp_client_is_low: None,
     }
 }
 

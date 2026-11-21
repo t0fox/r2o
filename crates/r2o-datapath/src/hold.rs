@@ -749,6 +749,7 @@ impl HoldTable {
                     self.syns[anchor_index].saw_hello = true;
                     self.capture.forget(&key);
                     if let Some(mut hello) = tcp_hello_from_bytes(key, &bytes) {
+                        hello.note_client_side(view.src, tcp.source_port);
                         hello.tcp_has_timestamp = r2k_core::packet::tcp_timestamp_metadata(
                             packet.get(tcp.options.clone()).unwrap_or_default(),
                         );
@@ -1829,9 +1830,12 @@ mod tests {
         server_name.extend_from_slice(&(host.len() as u16).to_be_bytes());
         server_name.extend_from_slice(host);
 
-        let mut extensions = vec![0, 0];
-        extensions.extend_from_slice(&(server_name.len() as u16).to_be_bytes());
-        extensions.extend_from_slice(&server_name);
+        let mut extensions = Vec::new();
+        if !host.is_empty() {
+            extensions.extend_from_slice(&[0, 0]);
+            extensions.extend_from_slice(&(server_name.len() as u16).to_be_bytes());
+            extensions.extend_from_slice(&server_name);
+        }
 
         let mut body = vec![3, 3];
         body.extend_from_slice(&[0; 32]);
@@ -2123,6 +2127,33 @@ mod tests {
             HoldOutcome::Pass,
             "retransmitted handshake must not emit a duplicate observation"
         );
+    }
+
+    #[test]
+    fn passive_no_sni_client_hello_preserves_direction_after_reassembly() {
+        let now = Instant::now();
+        let mut hold = HoldTable::default();
+        let hello = client_hello(b"");
+        let options = || HoldOptions {
+            observe_tls: true,
+            ..HoldOptions::default()
+        };
+        for (id, packet) in [
+            (1, tcp_packet(1000, 0x02, &[])),
+            (2, tcp_packet(1001, 0x18, &hello[..24])),
+        ] {
+            assert_eq!(
+                hold.feed_observing(id, &packet, now, options()).outcome,
+                HoldOutcome::Pass
+            );
+        }
+        let result = hold.feed_observing(3, &tcp_packet(1025, 0x18, &hello[24..]), now, options());
+        let HoldOutcome::Observed { hello: observed } = result.outcome else {
+            panic!("ожидался собранный ClientHello без SNI");
+        };
+        assert!(observed.host.is_none());
+        assert_eq!(observed.client_hello, Some(hello));
+        assert_eq!(observed.tcp_client_is_low, Some(true));
     }
 
     #[test]

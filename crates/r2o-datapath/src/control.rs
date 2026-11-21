@@ -2903,6 +2903,7 @@ struct CachedClientShape {
     host: Vec<u8>,
     family: u8,
     key: [u8; control::KEY_LEN],
+    tcp_client_is_low: Option<bool>,
     event_body: Vec<u8>,
 }
 
@@ -2921,13 +2922,12 @@ impl CachedClientShape {
             {
                 return false;
             }
-            // Ключ потока канонический, без направления ClientHello. Здесь
-            // доказываем принадлежность точного конца IP:порт; контроллер
-            // дополнительно сверяет наблюдённую цель со своим запросом.
             let address = Address::new(endpoint.ip()).bytes();
-            return (self.key[1..17] == address
+            return (self.tcp_client_is_low != Some(true)
+                && self.key[1..17] == address
                 && self.key[33..35] == endpoint.port().to_be_bytes())
-                || (self.key[17..33] == address
+                || (self.tcp_client_is_low != Some(false)
+                    && self.key[17..33] == address
                     && self.key[35..37] == endpoint.port().to_be_bytes());
         }
         r2o_name_same(&self.host, name)
@@ -2976,6 +2976,7 @@ fn remember_client_shape(
         host: event.host.clone(),
         family: event.key[0],
         key: event.key,
+        tcp_client_is_low: event.tcp_client_is_low,
         event_body: body.to_vec(),
     };
     let matches = armed
@@ -3892,6 +3893,15 @@ mod tests {
                 Some(wanted_body.clone())
             );
             assert!(armed.is_none());
+            let packet = no_sni_tls_packet(endpoint, 40_000);
+            let client = std::net::SocketAddr::new(
+                super::PacketView::parse(&packet).unwrap().src.into(),
+                40_000,
+            )
+            .to_string();
+            assert!(
+                super::take_cached_client_shape(&mut cache, family, client.as_bytes()).is_none()
+            );
             assert_eq!(
                 cache.len(),
                 2,

@@ -69,6 +69,7 @@ fn main() {
         shape: SHAPE_MODERN,
         client_hello: client_hello("example.com"),
         tcp_has_timestamp: Some(true),
+        tcp_client_is_low: None,
     };
     emit(EVENT_CLIENT_SHAPE, &shape.event_body().unwrap());
     emit(

@@ -69,11 +69,19 @@ pub struct TcpHello {
     pub client_hello: Option<Vec<u8>>,
     /// Есть ли TCP timestamp option на сегменте ClientHello; runtime заменяет значение на опции SYN.
     pub tcp_has_timestamp: Option<bool>,
+    pub tcp_client_is_low: Option<bool>,
     /// Полный набор TCP-опций клиента (C `shape_opts[k]`, не более 40 байт).
     pub tcp_options: Option<Vec<u8>>,
 }
 
 impl TcpHello {
+    pub(crate) fn note_client_side(&mut self, address: Address, port: u16) {
+        if self.host.is_none() && self.client_hello.is_some() {
+            self.tcp_client_is_low =
+                Some((address, port) == (self.key.low_address, self.key.low_port));
+        }
+    }
+
     /// Кодирует наблюдение TCP с формой и длиной TLS-записи.
     pub fn event_body(&self) -> Vec<u8> {
         let mut body = self.key.wire_key().to_vec();
@@ -91,10 +99,11 @@ impl TcpHello {
             .filter(|length| (5..=4096).contains(length))
         {
             body.extend_from_slice(&(r2o_wire_len as u16).to_be_bytes());
-            if let Some(tcp_has_timestamp) = self.tcp_has_timestamp {
-                body.push(r2k_core::control::TCP_TIMESTAMP_METADATA_MARKER);
-                body.push(u8::from(tcp_has_timestamp));
-            }
+            r2k_core::control::append_tcp_hello_metadata(
+                &mut body,
+                self.tcp_has_timestamp,
+                self.tcp_client_is_low,
+            );
         }
         body
     }
@@ -107,6 +116,7 @@ impl TcpHello {
             shape: self.shape,
             client_hello: self.client_hello.clone()?,
             tcp_has_timestamp: self.tcp_has_timestamp,
+            tcp_client_is_low: self.tcp_client_is_low,
         };
         event.event_body()
     }
@@ -122,6 +132,7 @@ pub fn tcp_http_hello_from_bytes(key: TcpFlowKey, bytes: &[u8]) -> Option<TcpHel
         r2o_wire_len: None,
         client_hello: None,
         tcp_has_timestamp: None,
+        tcp_client_is_low: None,
         tcp_options: None,
     })
 }
@@ -149,11 +160,11 @@ pub fn tcp_hello_from_bytes(key: TcpFlowKey, bytes: &[u8]) -> Option<TcpHello> {
         .and_then(|range| bytes.get(range))
         .filter(|name| !name.is_empty() && name.len() <= MAX_DNS_NAME_LEN)
         .map(<[u8]>::to_vec);
+    let record = tls.record_end.and_then(|end| bytes.get(..end));
     // Полный, но повреждённый/слишком длинный SNI не превращает доменную
     // цель в адресную. Неполные сегменты остаются доступны сборщику.
     if host.is_none()
-        && tls.record_end == Some(bytes.len())
-        && !r2k_core::control::valid_no_sni_client_hello(bytes)
+        && record.is_some_and(|record| !r2k_core::control::valid_no_sni_client_hello(record))
     {
         return None;
     }
@@ -164,17 +175,17 @@ pub fn tcp_hello_from_bytes(key: TcpFlowKey, bytes: &[u8]) -> Option<TcpHello> {
     } else {
         r2k_core::control::SHAPE_LEGACY
     };
+    let client_hello = record
+        .filter(|record| host.is_none() || record.len() == bytes.len())
+        .map(<[u8]>::to_vec);
     Some(TcpHello {
         key,
         host,
         shape,
         r2o_wire_len: tls.record_end,
-        client_hello: tls
-            .record_end
-            .filter(|length| *length == bytes.len())
-            .and_then(|length| bytes.get(..length))
-            .map(<[u8]>::to_vec),
+        client_hello,
         tcp_has_timestamp: None,
+        tcp_client_is_low: None,
         tcp_options: None,
     })
 }
@@ -187,6 +198,7 @@ pub fn tcp_hello_from_packet(packet: &[u8]) -> Option<TcpHello> {
     let tcp = view.tcp_segment(packet)?;
     let key = TcpFlowKey::from_packet(packet)?;
     let mut hello = tcp_hello_from_bytes(key, packet.get(tcp.payload)?)?;
+    hello.note_client_side(view.src, tcp.source_port);
     let options = packet.get(tcp.options)?;
     hello.tcp_has_timestamp = r2k_core::packet::tcp_timestamp_metadata(options);
     // C `shape_opts[4][40]`: набор опций ограничен 40 байтами.
@@ -890,6 +902,12 @@ mod tests {
             packet[offset..offset + 2].copy_from_slice(&(length as u16).to_be_bytes());
             let captured = super::tcp_hello_from_packet(&packet).unwrap();
             assert!(captured.host.is_none());
+            let hello = r2k_core::control::decode_hello(&r2k_core::control::Frame {
+                kind: r2k_core::control::EVENT_HELLO,
+                body: captured.event_body(),
+            })
+            .unwrap();
+            assert_eq!(hello.tcp_client_is_low, Some(true));
             let frame = r2k_core::control::Frame {
                 kind: r2k_core::control::EVENT_CLIENT_SHAPE,
                 body: captured.shape_event_body().unwrap(),
@@ -899,9 +917,14 @@ mod tests {
             assert_eq!(decoded.client_hello, record);
             assert_eq!(decoded.key, captured.key.wire_key());
             assert_eq!(decoded.tcp_has_timestamp, captured.tcp_has_timestamp);
+            assert_eq!(decoded.tcp_client_is_low, hello.tcp_client_is_low);
             let partial =
                 super::tcp_hello_from_bytes(captured.key, &record[..record.len() - 2]).unwrap();
             assert!(partial.shape_event_body().is_none());
+            let mut coalesced = record.clone();
+            coalesced.extend_from_slice(&[20, 3, 3, 0, 1, 1]);
+            let observed = super::tcp_hello_from_bytes(captured.key, &coalesced).unwrap();
+            assert_eq!(observed.client_hello.as_deref(), Some(record.as_slice()));
         }
     }
 

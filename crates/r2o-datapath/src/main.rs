@@ -8870,6 +8870,7 @@ mod app {
                 shape: r2k_core::control::SHAPE_MODERN,
                 client_hello: client_hello.clone(),
                 tcp_has_timestamp: Some(true),
+                tcp_client_is_low: None,
             }
             .event_body()
             .unwrap();

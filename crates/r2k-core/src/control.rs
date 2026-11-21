@@ -9,6 +9,36 @@ pub const FRAME_MAX: usize = 65_536;
 pub const KEY_LEN: usize = 38;
 pub const MAX_DNS_NAME_LEN: usize = 253;
 pub const TCP_TIMESTAMP_METADATA_MARKER: u8 = 0xa5;
+const TCP_CLIENT_SIDE_METADATA_MARKER: u8 = 0xa6;
+
+pub fn append_tcp_hello_metadata(
+    body: &mut Vec<u8>,
+    tcp_has_timestamp: Option<bool>,
+    tcp_client_is_low: Option<bool>,
+) {
+    if let Some(tcp_has_timestamp) = tcp_has_timestamp {
+        body.extend_from_slice(&[TCP_TIMESTAMP_METADATA_MARKER, u8::from(tcp_has_timestamp)]);
+    }
+    if let Some(tcp_client_is_low) = tcp_client_is_low {
+        body.extend_from_slice(&[TCP_CLIENT_SIDE_METADATA_MARKER, u8::from(tcp_client_is_low)]);
+    }
+}
+
+fn decode_tcp_hello_metadata(
+    mut bytes: &[u8],
+) -> Result<(Option<bool>, Option<bool>), &'static str> {
+    let mut tcp_has_timestamp = None;
+    if let [TCP_TIMESTAMP_METADATA_MARKER, value @ (0 | 1), tail @ ..] = bytes {
+        tcp_has_timestamp = Some(*value != 0);
+        bytes = tail;
+    }
+    let tcp_client_is_low = match bytes {
+        [] => None,
+        [TCP_CLIENT_SIDE_METADATA_MARKER, value @ (0 | 1)] => Some(*value != 0),
+        _ => return Err("неверные метаданные TCP ClientHello"),
+    };
+    Ok((tcp_has_timestamp, tcp_client_is_low))
+}
 pub const EVENT_HELLO: u16 = 0x0001;
 pub const EVENT_STATS: u16 = 0x0006;
 pub const EVENT_REFUSED: u16 = 0x0004;
@@ -516,6 +546,8 @@ pub struct HelloEvent {
     pub quic_snapshot: Option<Vec<u8>>,
     /// Есть ли TCP timestamp option в начальном SYN клиента; None — SYN не наблюдался.
     pub tcp_has_timestamp: Option<bool>,
+    /// Отправитель ClientHello занимает младший конец канонического ключа.
+    pub tcp_client_is_low: Option<bool>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -527,6 +559,8 @@ pub struct ClientShapeEvent {
     pub client_hello: Vec<u8>,
     /// Есть ли TCP timestamp option в начальном SYN клиента; None — SYN не наблюдался.
     pub tcp_has_timestamp: Option<bool>,
+    /// Отправитель ClientHello занимает младший конец канонического ключа.
+    pub tcp_client_is_low: Option<bool>,
 }
 
 impl ClientShapeEvent {
@@ -571,7 +605,8 @@ impl ClientShapeEvent {
                 + self.host.len()
                 + 5
                 + self.client_hello.len()
-                + 2 * usize::from(self.tcp_has_timestamp.is_some()),
+                + 2 * usize::from(self.tcp_has_timestamp.is_some())
+                + 2 * usize::from(self.tcp_client_is_low.is_some()),
         );
         body.extend_from_slice(&self.key);
         body.push(self.host.len() as u8);
@@ -580,10 +615,7 @@ impl ClientShapeEvent {
         body.extend_from_slice(&(self.client_hello.len() as u16).to_be_bytes());
         body.extend_from_slice(&(self.client_hello.len() as u16).to_be_bytes());
         body.extend_from_slice(&self.client_hello);
-        if let Some(tcp_has_timestamp) = self.tcp_has_timestamp {
-            body.push(TCP_TIMESTAMP_METADATA_MARKER);
-            body.push(u8::from(tcp_has_timestamp));
-        }
+        append_tcp_hello_metadata(&mut body, self.tcp_has_timestamp, self.tcp_client_is_low);
         Some(body)
     }
 }
@@ -2864,8 +2896,9 @@ pub fn decode_hello(frame: &Frame) -> Result<HelloEvent, &'static str> {
         return Err("неверная длина имени в событии ClientHello");
     }
     let host_end = KEY_LEN + 1 + host_len;
-    let (shape, r2o_wire_len, quic_snapshot, tcp_has_timestamp) = match frame.body.len() {
-        length if length == host_end && key[37] == 6 => (None, None, None, None),
+    let no_tcp_metadata = (None, None);
+    let (shape, r2o_wire_len, quic_snapshot, tcp_metadata) = match frame.body.len() {
+        length if length == host_end && key[37] == 6 => (None, None, None, no_tcp_metadata),
         length if length == host_end + 1 || length >= host_end + 3 => {
             let shape = frame.body[host_end];
             let valid_shape = match key[37] {
@@ -2880,11 +2913,8 @@ pub fn decode_hello(frame: &Frame) -> Result<HelloEvent, &'static str> {
                 return Err("событие ClientHello содержит неизвестную форму");
             }
             if length == host_end + 1 {
-                (Some(shape), None, None, None)
+                (Some(shape), None, None, no_tcp_metadata)
             } else if key[37] == 6 {
-                if length != host_end + 3 && length != host_end + 5 {
-                    return Err("неверная длина события TLS ClientHello");
-                }
                 if !matches!(shape, SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP) {
                     return Err("длина TLS разрешена только для ClientHello TCP");
                 }
@@ -2895,19 +2925,8 @@ pub fn decode_hello(frame: &Frame) -> Result<HelloEvent, &'static str> {
                 if !(5..=4096).contains(&r2o_wire_len) {
                     return Err("неверная длина TLS-записи в событии ClientHello");
                 }
-                let tcp_has_timestamp = if length == host_end + 5 {
-                    if frame.body[host_end + 3] != TCP_TIMESTAMP_METADATA_MARKER {
-                        return Err("неверная метка TCP timestamp metadata");
-                    }
-                    match frame.body[host_end + 4] {
-                        0 => Some(false),
-                        1 => Some(true),
-                        _ => return Err("неверный признак TCP timestamp option"),
-                    }
-                } else {
-                    None
-                };
-                (Some(shape), Some(r2o_wire_len), None, tcp_has_timestamp)
+                let tcp_metadata = decode_tcp_hello_metadata(&frame.body[host_end + 3..])?;
+                (Some(shape), Some(r2o_wire_len), None, tcp_metadata)
             } else {
                 if shape != SHAPE_QUIC {
                     return Err("снимок разрешён только для QUIC Initial");
@@ -2931,12 +2950,13 @@ pub fn decode_hello(frame: &Frame) -> Result<HelloEvent, &'static str> {
                 {
                     return Err("имя события не совпадает со снимком QUIC");
                 }
-                (Some(shape), None, Some(snapshot.to_vec()), None)
+                (Some(shape), None, Some(snapshot.to_vec()), no_tcp_metadata)
             }
         }
         _ => return Err("неверная длина события ClientHello"),
     };
     let host = (host_len != 0).then(|| frame.body[KEY_LEN + 1..host_end].to_vec());
+    let (tcp_has_timestamp, tcp_client_is_low) = tcp_metadata;
     Ok(HelloEvent {
         key,
         host,
@@ -2944,6 +2964,7 @@ pub fn decode_hello(frame: &Frame) -> Result<HelloEvent, &'static str> {
         r2o_wire_len,
         quic_snapshot,
         tcp_has_timestamp,
+        tcp_client_is_low,
     })
 }
 
@@ -2983,30 +3004,21 @@ pub fn decode_client_shape(frame: &Frame) -> Result<ClientShapeEvent, &'static s
     let snapshot_end = snapshot_at
         .checked_add(snapshot_len)
         .ok_or("переполнена длина полного ClientHello")?;
-    let has_tcp_timestamp = frame.body.len() == snapshot_end + 2;
     if !(5..=4096).contains(&snapshot_len)
         || wire_len != snapshot_len
-        || (frame.body.len() != snapshot_end && !has_tcp_timestamp)
+        || frame.body.len() < snapshot_end
     {
         return Err("неверная длина полного ClientHello");
     }
+    let (tcp_has_timestamp, tcp_client_is_low) =
+        decode_tcp_hello_metadata(&frame.body[snapshot_end..])?;
     let event = ClientShapeEvent {
         key,
         host: frame.body[KEY_LEN + 1..shape_at].to_vec(),
         shape,
         client_hello: frame.body[snapshot_at..snapshot_end].to_vec(),
-        tcp_has_timestamp: if has_tcp_timestamp {
-            if frame.body[snapshot_end] != TCP_TIMESTAMP_METADATA_MARKER {
-                return Err("неверная метка TCP timestamp metadata");
-            }
-            match frame.body[snapshot_end + 1] {
-                0 => Some(false),
-                1 => Some(true),
-                _ => return Err("неверный признак TCP timestamp option"),
-            }
-        } else {
-            None
-        },
+        tcp_has_timestamp,
+        tcp_client_is_low,
     };
     if event.event_body().is_none() {
         return Err("форма, SNI или TLS-запись не совпадает со снимком ClientHello");
@@ -3069,6 +3081,7 @@ mod client_shape_no_sni_tests {
             shape: SHAPE_MODERN,
             client_hello: hello(&[0, 43, 0, 3, 2, 3, 4, 0, 16, 0, 5, 0, 3, 2, b'h', b'2']),
             tcp_has_timestamp: Some(family == 6),
+            tcp_client_is_low: Some(family == 4),
         }
     }
 
@@ -3082,6 +3095,9 @@ mod client_shape_no_sni_tests {
             };
             assert_eq!(frame.body[KEY_LEN], 0);
             assert_eq!(super::decode_client_shape(&frame), Ok(event.clone()));
+            let mut invalid = frame.clone();
+            *invalid.body.last_mut().unwrap() = 2;
+            assert!(super::decode_client_shape(&invalid).is_err());
             let legacy = super::translate_event_to_v22(frame.kind, &frame.body);
             assert_eq!(legacy.len(), 2);
             assert_eq!(legacy[0].0, super::EVENT_LEGACY_CLIENT_TCP);
@@ -4239,6 +4255,7 @@ mod legacy_v22_wire_tests {
             shape: super::SHAPE_MODERN,
             client_hello: hello.clone(),
             tcp_has_timestamp: Some(true),
+            tcp_client_is_low: None,
         };
         let frames =
             translate_event_to_v22(super::EVENT_CLIENT_SHAPE, &event.event_body().unwrap());

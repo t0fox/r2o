@@ -565,14 +565,15 @@ pub fn server_of(
     } else {
         (high_ip, high_port)
     };
+    ip_from_flow_key(family, address).map(|ip| (ip, port))
+}
+
+fn ip_from_flow_key(family: u8, address: [u8; 16]) -> Option<IpAddr> {
     match family {
-        4 => Some((
-            IpAddr::V4(Ipv4Addr::new(
-                address[0], address[1], address[2], address[3],
-            )),
-            port,
-        )),
-        6 => Some((IpAddr::V6(Ipv6Addr::from(address)), port)),
+        4 => Some(IpAddr::V4(Ipv4Addr::new(
+            address[0], address[1], address[2], address[3],
+        ))),
+        6 => Some(IpAddr::V6(Ipv6Addr::from(address))),
         _ => None,
     }
 }
@@ -679,10 +680,18 @@ impl DiscoveryTarget {
 
     /// Выбирать распознанный TLS; полный ClientHello без SNI даёт IP-цель.
     pub fn from_event(event: &HelloEvent) -> Option<Self> {
+        Self::from_hello(event, event.shape?, false)
+    }
+
+    /// В v22 HELLO подтверждает наблюдение, а форма передаётся в SUSPECT.
+    pub fn from_legacy_suspect(event: &HelloEvent, shape: u8) -> Option<Self> {
+        Self::from_hello(event, r2k_link_shape_tcp_base(shape), true)
+    }
+
+    fn from_hello(event: &HelloEvent, shape: u8, legacy: bool) -> Option<Self> {
         if event.key[37] != 6 {
             return None;
         }
-        let shape = event.shape?;
         if !matches!(
             shape,
             SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP | SHAPE_ECH_NO_TS | SHAPE_ECH_TS
@@ -694,9 +703,12 @@ impl DiscoveryTarget {
         let high_port = u16::from_be_bytes([event.key[35], event.key[36]]);
         let low_ip: [u8; 16] = event.key[1..17].try_into().ok()?;
         let high_ip: [u8; 16] = event.key[17..33].try_into().ok()?;
-        // C `server_of`: серверный конец по эфемерности/величине портов, а не
-        // по зашитому 443 — d2k охватывает весь IP-трафик на всех портах.
-        let (address, port) = server_of(family, low_ip, low_port, high_ip, high_port)?;
+        // Старые события без направления используют эвристику портов D2K.
+        let (address, port) = match event.tcp_client_is_low {
+            Some(true) => (ip_from_flow_key(family, high_ip)?, high_port),
+            Some(false) => (ip_from_flow_key(family, low_ip)?, low_port),
+            None => server_of(family, low_ip, low_port, high_ip, high_port)?,
+        };
         let host = match event.host.as_deref().filter(|host| !host.is_empty()) {
             Some(host) => {
                 let host = std::str::from_utf8(host).ok()?;
@@ -706,6 +718,7 @@ impl DiscoveryTarget {
             }
             None if !address.is_unspecified()
                 && port != 0
+                && (legacy || event.r2o_wire_len.is_some())
                 && matches!(r2k_link_shape_tcp_base(shape), SHAPE_MODERN | SHAPE_LEGACY) =>
             {
                 address.to_string()
@@ -734,6 +747,7 @@ impl DiscoveryTarget {
             r2o_wire_len: Some(event.client_hello.len()),
             quic_snapshot: None,
             tcp_has_timestamp: event.tcp_has_timestamp,
+            tcp_client_is_low: event.tcp_client_is_low,
         })
     }
 
@@ -2133,6 +2147,7 @@ mod tests {
                     r2o_wire_len: Some(512),
                     quic_snapshot: None,
                     tcp_has_timestamp: Some(true),
+                    tcp_client_is_low: None,
                 };
                 let target = DiscoveryTarget::from_event(&event)
                     .expect("полный TLS ClientHello без SNI должен давать адресную цель");
@@ -2197,6 +2212,7 @@ mod tests {
             r2o_wire_len: None,
             quic_snapshot: None,
             tcp_has_timestamp: None,
+            tcp_client_is_low: None,
         };
         assert!(DiscoveryTarget::from_event(&event).is_none());
         event.shape = Some(SHAPE_HTTP);
@@ -2210,6 +2226,8 @@ mod tests {
         event.host = Some(b"invalid name".to_vec());
         assert!(DiscoveryTarget::from_event(&event).is_none());
         event.host = None;
+        assert!(DiscoveryTarget::from_event(&event).is_none());
+        event.r2o_wire_len = Some(512);
         let target = DiscoveryTarget::from_event(&event).unwrap();
         assert_eq!(target.binding_kind(), "addr");
         assert_eq!(target.probe_key(), "198.51.100.20:443");
@@ -2319,6 +2337,7 @@ mod tests {
             r2o_wire_len: None,
             quic_snapshot: None,
             tcp_has_timestamp: None,
+            tcp_client_is_low: None,
         };
         let target = DiscoveryTarget::from_event(&event).unwrap();
         assert_eq!(target.endpoint, "198.51.100.20:8443");
@@ -2331,6 +2350,7 @@ mod tests {
             r2o_wire_len: None,
             quic_snapshot: None,
             tcp_has_timestamp: None,
+            tcp_client_is_low: None,
         };
         let target = DiscoveryTarget::from_event(&event).unwrap();
         assert_eq!(target.endpoint, "192.0.2.10:8443");
@@ -2342,6 +2362,7 @@ mod tests {
             r2o_wire_len: None,
             quic_snapshot: None,
             tcp_has_timestamp: None,
+            tcp_client_is_low: None,
         };
         let target = DiscoveryTarget::from_event(&event).unwrap();
         assert_eq!(target.endpoint, "192.0.2.10:443");
@@ -2359,6 +2380,7 @@ mod tests {
             r2o_wire_len: None,
             quic_snapshot: None,
             tcp_has_timestamp: None,
+            tcp_client_is_low: None,
         };
         let target = DiscoveryTarget::from_event(&event).unwrap();
         assert_eq!(target.endpoint, "0.0.0.0:443");
@@ -2380,6 +2402,7 @@ mod tests {
             r2o_wire_len: None,
             quic_snapshot: None,
             tcp_has_timestamp: None,
+            tcp_client_is_low: None,
         };
         let target = DiscoveryTarget::from_event(&event).unwrap();
         assert_eq!(target.endpoint, "[::]:443");
@@ -2405,6 +2428,7 @@ mod tests {
             r2o_wire_len: None,
             quic_snapshot: None,
             tcp_has_timestamp: None,
+            tcp_client_is_low: None,
         })
         .unwrap();
         let untouched = resolve_unspecified_endpoint_with(&concrete, |_, _, _| {
@@ -4399,6 +4423,7 @@ mod tests {
             r2o_wire_len: None,
             quic_snapshot: None,
             tcp_has_timestamp: Some(true),
+            tcp_client_is_low: None,
         };
         let target = DiscoveryTarget::from_event(&event).unwrap();
         assert_eq!(target.tcp_profile(), TCP_PROFILE_TS);

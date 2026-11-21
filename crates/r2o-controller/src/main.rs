@@ -12655,9 +12655,7 @@ impl R2oTcpHelloCache {
         if now.saturating_duration_since(*seen) > R2O_CLEAN_HANDSHAKE_TTL {
             return None;
         }
-        let mut hello = hello.clone();
-        hello.shape = Some(r2k_core::control::r2k_link_shape_tcp_base(shape));
-        r2o_controller::discovery::DiscoveryTarget::from_event(&hello)
+        r2o_controller::discovery::DiscoveryTarget::from_legacy_suspect(hello, shape)
     }
 }
 
@@ -15672,6 +15670,7 @@ fn r2o_client_shape_from_legacy(
         shape: client_shape,
         client_hello: shape.client_hello.clone(),
         tcp_has_timestamp,
+        tcp_client_is_low: None,
     })
 }
 
@@ -34607,6 +34606,7 @@ mod tests {
                 shape: SHAPE_MODERN,
                 client_hello: server_other_hello,
                 tcp_has_timestamp: None,
+                tcp_client_is_low: None,
             };
             peer.write_all(
                 &super::encode_frame(EVENT_CLIENT_SHAPE, &wrong.event_body().unwrap()).unwrap(),
@@ -34618,9 +34618,11 @@ mod tests {
                 shape: SHAPE_MODERN,
                 client_hello: server_hello,
                 tcp_has_timestamp: Some(true),
+                tcp_client_is_low: None,
             };
             let different_profile = ClientShapeEvent {
                 tcp_has_timestamp: Some(false),
+                tcp_client_is_low: None,
                 ..right.clone()
             };
             peer.write_all(
@@ -41261,10 +41263,11 @@ mod tests {
             r2o_wire_len: None,
             quic_snapshot: None,
             tcp_has_timestamp: None,
+            tcp_client_is_low: None,
         };
         let mut cache = R2oTcpHelloCache::default();
         let now = std::time::Instant::now();
-        cache.note(hello, now);
+        cache.note(hello.clone(), now);
         assert!(
             cache.target_for_tcp_flow(&key, now).is_none(),
             "C HELLO без формы не должен давать цель"
@@ -41275,6 +41278,18 @@ mod tests {
         assert_eq!(target.host, "example.com");
         assert_eq!(target.shape, SHAPE_MODERN);
         assert_eq!(target.endpoint, "198.51.100.2:443");
+        cache.note(
+            HelloEvent {
+                host: None,
+                ..hello
+            },
+            now,
+        );
+        assert!(cache.target_for_tcp_flow(&key, now).is_none());
+        let target = cache
+            .target_for_tcp_flow_with_shape(&key, SHAPE_MODERN, now)
+            .unwrap();
+        assert_eq!(target.address_key().unwrap().to_string(), "198.51.100.2");
     }
 
     #[test]
@@ -42262,6 +42277,7 @@ mod tests {
                 r2o_wire_len: Some(512),
                 quic_snapshot: None,
                 tcp_has_timestamp: Some(true),
+                tcp_client_is_low: None,
             },
             now,
         );
@@ -42505,6 +42521,7 @@ mod tests {
                     r2o_wire_len: Some(512),
                     quic_snapshot: None,
                     tcp_has_timestamp: Some(true),
+                    tcp_client_is_low: None,
                 },
                 now,
             );
@@ -45521,6 +45538,7 @@ mod tests {
             shape: SHAPE_ECH_TCP,
             client_hello: r2o_test_tls_ech_client_hello(),
             tcp_has_timestamp: Some(true),
+            tcp_client_is_low: None,
         };
 
         let target = r2o_handle_client_shape_event(&mut worker, &shape).unwrap();
@@ -47709,6 +47727,7 @@ mod tests {
                         r2o_wire_len: None,
                         quic_snapshot: None,
                         tcp_has_timestamp: None,
+                        tcp_client_is_low: None,
                     },
                     std::time::Instant::now(),
                 );
@@ -48417,6 +48436,7 @@ mod tests {
             shape: SHAPE_MODERN,
             client_hello: hello.clone(),
             tcp_has_timestamp: Some(true),
+            tcp_client_is_low: None,
         };
         assert!(r2o_handle_client_shape_event(&mut worker, &shape).is_some());
         assert!(!worker.pending_rechecks.contains_key(&key));
@@ -49315,6 +49335,7 @@ mod tests {
             r2o_wire_len: Some(812),
             quic_snapshot: None,
             tcp_has_timestamp: None,
+            tcp_client_is_low: None,
         };
         let mut cache = super::R2oTcpHelloCache::default();
         cache.note(hello, now);
@@ -49369,6 +49390,7 @@ mod tests {
                 r2o_wire_len: None,
                 quic_snapshot: None,
                 tcp_has_timestamp: None,
+                tcp_client_is_low: None,
             }
         };
         let mut cache = super::R2oRecentTcpNameCache::default();
@@ -49409,6 +49431,7 @@ mod tests {
                 r2o_wire_len: None,
                 quic_snapshot: None,
                 tcp_has_timestamp: None,
+                tcp_client_is_low: None,
             }
         }
 
@@ -49569,6 +49592,7 @@ mod tests {
                 r2o_wire_len: None,
                 quic_snapshot: None,
                 tcp_has_timestamp: None,
+                tcp_client_is_low: None,
             }
         }
         let now = std::time::Instant::now();
@@ -53139,6 +53163,7 @@ mod tests {
             shape: SHAPE_ECH_TCP,
             client_hello: r2o_test_tls_ech_client_hello(),
             tcp_has_timestamp: Some(true),
+            tcp_client_is_low: None,
         };
         let target = r2o_controller::discovery::DiscoveryTarget::from_client_shape(&event).unwrap();
         let mut worker = r2o_test_discovery_worker_without_threads();
@@ -57151,6 +57176,7 @@ group_block_proven: false,
             r2o_wire_len: None,
             quic_snapshot: Some(snapshot),
             tcp_has_timestamp: None,
+            tcp_client_is_low: None,
         };
         let wait_for_run = |run| {
             let (state_lock, changed) = &*runner_state;
@@ -60031,6 +60057,7 @@ group_block_proven: false,
                     super::Trigger::tls(&target.host).unwrap().payload
                 },
                 tcp_has_timestamp: Some(true),
+                tcp_client_is_low: None,
             };
             assert!(
                 r2o_handle_client_shape_event(&mut worker, &shape).is_some(),
@@ -60076,6 +60103,7 @@ group_block_proven: false,
             shape: SHAPE_MODERN,
             client_hello: super::Trigger::tls13(&target.host).unwrap().payload,
             tcp_has_timestamp: Some(true),
+            tcp_client_is_low: None,
         };
         let catalog = |input: u8| Catalog {
             boxes: vec![BoxRecord {
@@ -60164,6 +60192,7 @@ group_block_proven: false,
                 shape: SHAPE_MODERN,
                 client_hello: super::Trigger::tls13(&target.host).unwrap().payload,
                 tcp_has_timestamp: Some(true),
+                tcp_client_is_low: None,
             };
             assert!(r2o_handle_client_shape_event(&mut worker, &event).is_some());
             if mode == 1 {
@@ -60307,6 +60336,7 @@ group_block_proven: false,
                 shape: SHAPE_MODERN,
                 client_hello: hello,
                 tcp_has_timestamp: Some(true),
+                tcp_client_is_low: None,
             };
             assert!(r2o_handle_client_shape_event(&mut worker, &event).is_some());
             assert!(cancel.load(Ordering::Relaxed));
@@ -60436,6 +60466,7 @@ group_block_proven: false,
                 shape,
                 client_hello: hello.clone(),
                 tcp_has_timestamp: Some(true),
+                tcp_client_is_low: None,
             };
             let mut owned = if mode & 1 != 0 {
                 let mut old = if let Ok(path) = std::env::var("R2O_OWN_MODERN_HELLO") {
@@ -67064,7 +67095,7 @@ mod r2o_address_discovery_tests {
 
     #[test]
     fn адресный_arm_shape_сопоставляет_endpoint_версию_и_профиль() {
-        for endpoint in ["198.51.100.2:443", "[2001:db8::2]:8443"] {
+        for endpoint in ["198.51.100.2:44443", "[2001:db8::2]:44443"] {
             let target = target(endpoint, SHAPE_MODERN);
             let snapshot = control::ClientShapeEvent {
                 key: flow(&target),
@@ -67072,6 +67103,7 @@ mod r2o_address_discovery_tests {
                 shape: SHAPE_MODERN,
                 client_hello: Trigger::tls_without_sni(false).unwrap().payload,
                 tcp_has_timestamp: None,
+                tcp_client_is_low: Some(true),
             };
             let matches = |event: &control::ClientShapeEvent| {
                 r2o_client_shape_request_matches(
@@ -67083,6 +67115,9 @@ mod r2o_address_discovery_tests {
             };
             assert!(matches(&snapshot));
             let mut wrong = snapshot.clone();
+            wrong.tcp_client_is_low = Some(false);
+            assert!(!matches(&wrong));
+            wrong = snapshot.clone();
             wrong.key[35..37].copy_from_slice(&9443_u16.to_be_bytes());
             assert!(!matches(&wrong));
             wrong = snapshot.clone();

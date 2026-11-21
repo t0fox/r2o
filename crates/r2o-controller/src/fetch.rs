@@ -4850,8 +4850,13 @@ mod address_verifier_tests {
 
     #[test]
     fn адресный_verifier_завершает_tls_и_не_отправляет_http() {
-        for tls12 in [false, true] {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        for (bind, tls12) in [
+            ("127.0.0.1:0", false),
+            ("127.0.0.1:0", true),
+            ("[::1]:0", false),
+            ("[::1]:0", true),
+        ] {
+            let listener = TcpListener::bind(bind).unwrap();
             let address = listener.local_addr().unwrap();
             let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
             let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
@@ -4870,6 +4875,7 @@ mod address_verifier_tests {
                 )
                 .unwrap();
             config.alpn_protocols = vec![b"h2".to_vec()];
+            config.send_tls13_tickets = 0;
             let server = std::thread::spawn(move || {
                 let (mut socket, _) = listener.accept().unwrap();
                 socket
