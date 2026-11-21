@@ -394,7 +394,7 @@
               <ol id="diagnostic-event-list" class="diag-event-list"></ol>
               <p id="diagnostic-event-empty" class="diag-history-note" hidden></p>
             </section>
-            <details class="diag-more">
+            <details class="diag-more" id="diagnostic-technical" hidden>
               <summary>Технические подробности</summary>
               <div class="diag-more-grid">
                 <section class="diag-card diag-subsystems-panel" aria-labelledby="diagnostic-subsystems-title">
@@ -420,7 +420,7 @@
                     <div><dt>Записи</dt><dd id="diagnostic-http-records">—</dd></div>
                     <div><dt>Очередь</dt><dd id="diagnostic-http-queue">—</dd></div>
                     <div><dt>Ошибки: всего / на сайт</dt><dd id="diagnostic-http-evidence">—</dd></div>
-                    <div><dt>Переполнения лимитов</dt><dd id="diagnostic-http-overflows">—</dd></div>
+                    <div><dt>Срабатывания лимитов и ошибки выделения</dt><dd id="diagnostic-http-overflows">—</dd></div>
                   </dl>
                   <p id="diagnostic-http-note" class="diag-history-note">Объём берётся из последнего снимка графика.</p>
                 </section>
@@ -428,7 +428,7 @@
                 <section class="diag-card diag-madvise-panel" aria-labelledby="diagnostic-madvise-title">
                   <h4 id="diagnostic-madvise-title">Возврат страниц</h4>
                   <dl class="diag-history-counts">
-                    <div><dt>madvise: успешно / ошибка</dt><dd id="diagnostic-madvise-results">—</dd></div>
+                    <div><dt>Вызовы madvise</dt><dd id="diagnostic-madvise-results">—</dd></div>
                     <div><dt>Запрошено к возврату</dt><dd id="diagnostic-madvise-bytes">—</dd></div>
                     <div><dt>Ошибки по errno</dt><dd id="diagnostic-madvise-errors">—</dd></div>
                   </dl>

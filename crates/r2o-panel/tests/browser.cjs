@@ -386,6 +386,13 @@ async function main() {
   const common = { processes: [{ name: "r2o-controller", pid: 7, rss_kib: 2048, anon_kib: 1024 }], workers_running: 1 };
   const diag = {
     enabled: true, sample_interval_ms: 60000, samples: [{...common, at: now - 60}, {...common, at: now}],
+    memory_tracking: { sites: [{ name: "Пустой участок", live_bytes: 0, peak_bytes: 0, created: 0 }] },
+    madvise: { successes: 0, failures: 0, requested_bytes: 0, errno: [] },
+    limit_transitions: [
+      { at: now - 60, measurement_limit: 2, measurement_slots: 64, limit_reason: ["no-current-resource-limit"] },
+      { at: now, measurement_limit: 2, measurement_slots: 64, limit_reason: ["no-current-resource-limit"], cpu_valid: true }
+    ],
+    memory_details: [{ name: "r2o-controller", latest: { pid: 7, smaps_rollup_status: "unsupported" } }],
     events: [
       { id: 2, at: now, target: "v.example", outcome: "inconclusive", reason: "истёк срок пробы", elapsed_ms: 2200 },
       { id: 1, at: now - 1, target: "ok.example", outcome: "plan-found" }
@@ -400,6 +407,19 @@ async function main() {
   await evaluate("document.querySelector('#diagnostic-event-list summary').click()");
   assert.equal(await evaluate("document.querySelector('#diagnostic-event-list details[open] p').textContent"), "истёк срок пробы");
   assert.equal(await evaluate("document.querySelector('#diagnostic-cursor-input').disabled"), false, "можно выбрать снимок");
+  assert.equal(await evaluate("document.querySelector('#diagnostic-technical').hidden"), true, "нет технических карточек без измерений");
+  assert.equal(await evaluate("document.querySelector('#diagnostic-warnings').textContent.includes('smaps_rollup')"), false, "отсутствие smaps_rollup не показывает подсказку");
+  diag.memory_tracking.sites.push({ name: "Измеренный участок", peak_bytes: 2048, created: 1, destroyed: 1 });
+  diag.madvise.failures = 1;
+  diag.limit_transitions.push({ at: now, measurement_limit: 1, measurement_slots: 64, limit_reason: ["cpu"] });
+  fs.writeFileSync(path.join(diagDir, "report.json"), JSON.stringify(diag));
+  await evaluate("document.querySelector('#diagnostic-refresh').click()");
+  await waitFor(() => evaluate("!document.querySelector('#diagnostic-technical').hidden"), "технические данные появились");
+  assert.equal(await evaluate("document.querySelector('#diagnostic-memory-sites').children.length"), 1);
+  assert.equal(await evaluate("document.querySelector('#diagnostic-aimd-history').children.length"), 1);
+  assert.equal(await evaluate("document.querySelector('#diagnostic-madvise-errors').parentElement.hidden"), true);
+  assert.equal(await evaluate("document.querySelector('#diagnostic-madvise-results').textContent"), "ошибок 1");
+
   await evaluate("document.querySelector('#diagnostic-toggle').click()");
   await waitFor(() => evaluate("document.querySelector('#diagnostic-state').dataset.enabled === 'false' && document.querySelector('#diagnostic-data').hidden"), "выключение диагностики с удалением истории");
   assert.equal(fs.existsSync(path.join(diagDir, "report.json")), false);

@@ -372,27 +372,39 @@
   function reasonText(values) {
     return list(values).map(function (value) { return reasons[value] || value; }).join(", ") || "причина не указана";
   }
+  function activeLimitReasons(item) {
+    return list(item && item.limit_reason).filter(function (reason) {
+      return reason !== "no-current-resource-limit" && reason !== "resource-data-unavailable";
+    }).sort();
+  }
   function renderAimd(doc, report, last) {
     var current = doc.getElementById("diagnostic-aimd-current"), history = doc.getElementById("diagnostic-aimd-history");
-    if (!current || !history) return;
-    if (last && number(last.measurement_limit) !== null && number(last.measurement_slots) !== null) {
-      current.textContent = "Текущий лимит " + last.measurement_limit + "/" + last.measurement_slots + " · " + reasonText(last.limit_reason) +
-        (last.grow_pending ? " · увеличение ожидает следующего измерения" : "");
-    } else current.textContent = "Текущий лимит не записан в этом отчёте.";
-    history.replaceChildren();
-    var transitions = list(report.limit_transitions).slice().reverse();
-    if (!transitions.length) {
-      var empty = doc.createElement("li"); empty.className = "diag-transition-empty";
-      empty.textContent = report.limit_transitions ? "Переходов за сохранённый период нет." : "История переходов отсутствует в старом отчёте.";
-      history.appendChild(empty); return;
+    var transitions = list(report.limit_transitions).filter(function (item, index, rows) {
+      var previous = rows[index - 1];
+      var limiting = activeLimitReasons(item);
+      if (!previous) return limiting.length > 0 || item.grow_pending === true;
+      return item.measurement_limit !== previous.measurement_limit ||
+        item.measurement_slots !== previous.measurement_slots || !!item.grow_pending !== !!previous.grow_pending ||
+        limiting.join(",") !== activeLimitReasons(previous).join(",");
+    }).reverse();
+    var active = activeLimitReasons(last);
+    current.closest(".diag-card").hidden = !transitions.length && !active.length && !(last && last.grow_pending);
+    current.hidden = !(last && number(last.measurement_limit) !== null && number(last.measurement_slots) !== null &&
+      (active.length || last.grow_pending || transitions.length));
+    if (!current.hidden) {
+      current.textContent = "Текущий лимит " + last.measurement_limit + " / " + last.measurement_slots +
+        (active.length ? " · " + reasonText(active) : "") +
+        (last.grow_pending ? " · ожидается увеличение" : "");
     }
-    transitions.forEach(function (item) {
-      var row = doc.createElement("li"), strong = doc.createElement("strong"), label = doc.createElement("span"), time = doc.createElement("small");
-      strong.textContent = pretty(number(item.measurement_limit)) + " / " + pretty(number(item.measurement_slots));
-      label.textContent = reasonText(item.limit_reason);
-      time.textContent = number(item.at) === null ? "" : new Date(item.at * 1000).toLocaleString();
-      row.appendChild(strong); row.appendChild(label); row.appendChild(time); history.appendChild(row);
-    });
+    history.replaceChildren(...transitions.map(function (item) {
+      var row = doc.createElement("li"), strong = doc.createElement("strong"), time = doc.createElement("small");
+      var state = activeLimitReasons(item);
+      strong.textContent = pretty(number(item.measurement_limit)) + " / " + pretty(number(item.measurement_slots)) +
+        (state.length ? " · " + reasonText(state) : "");
+      time.textContent = timeLabel(item.at);
+      row.append(strong, time);
+      return row;
+    }));
   }
   function renderWarnings(doc, report, chart, hours, processMismatch, storageMismatch) {
     var box = doc.getElementById("diagnostic-warnings");
@@ -426,39 +438,16 @@
         formatKib(number(growth.accounted_delta_kib));
       add("info", "Рост RSS", growthText + ". Рост сам по себе не подтверждает утечку.");
     }
-    var rows = memoryRows(report), unavailableRows = rows.filter(function (row) { return row.status === 1 && row.anonymous === null; });
+    var rows = memoryRows(report);
+    var unavailableRows = rows.filter(function (row) { return row.status === 1 && row.anonymous === null && row.errno !== 2; });
     var unavailable = unavailableRows.length;
-    var unsupported = rows.filter(function (row) { return row.status === 4; }).length;
     var parseErrors = rows.filter(function (row) { return row.status === 3 && row.anonymous === null; }).length;
     var detail = detailsFor(report), latest = detail && detail.latest;
-    var current = list(report.samples).slice(-1)[0];
-    var currentPid = list(current && current.processes).filter(function (proc) { return proc.name === PRIMARY; })[0];
-    var latestPid = number(latest && latest.pid);
-    var liveOptionalMissing = latestPid !== null && currentPid && number(currentPid.pid) === latestPid && (
-      (latest.smaps_rollup_errno === 2 && latest.smaps_rollup_status === "unavailable") ||
-      (latest.smaps_errno === 2 && latest.smaps_status === "unavailable"));
-    if (!unavailable && latest && latest.smaps_rollup_status === "unavailable" && latest.smaps_rollup_source !== "smaps-fallback" &&
-        !rows.some(function (row) { return row.anonymous !== null; }) && !liveOptionalMissing) unavailable = 1;
-    if (liveOptionalMissing && unavailableRows.every(function (row) { return row.errno === 2; })) {
-      unsupported = Math.max(unsupported, unavailableRows.length || 1);
-      unavailable = 0;
-    }
-    if (!unsupported && latest && latest.smaps_rollup_status === "unsupported") unsupported = 1;
+    if (!unavailable && latest && latest.smaps_rollup_status === "unavailable" && latest.smaps_rollup_errno !== 2 &&
+        latest.smaps_rollup_source !== "smaps-fallback" && !rows.some(function (row) { return row.anonymous !== null; })) unavailable = 1;
     if (!parseErrors && latest && latest.smaps_rollup_status === "parse-error") parseErrors = 1;
-    var fallback = latest && latest.smaps_rollup_source === "smaps-fallback";
-    var unsupportedWithoutFallback = fallback ? 0 : unsupported;
-    if (fallback && (unsupported || latest.smaps_rollup_status === "unsupported" || liveOptionalMissing)) {
-      add("info", "Подробная карта памяти недоступна на этом устройстве",
-        "Основные показатели доступны; Anonymous и Private_Dirty взяты из сохранённого отчёта.",
-        "smaps_rollup отсутствует; использованы значения из smaps. RssAnon читается из /proc/PID/status.");
-    }
-    var unavailableError = rows.filter(function (row) { return row.status === 1 && row.errno !== null; })[0];
-    unavailableError = unavailableError ? unavailableError.errno :
-      (latest && latest.smaps_rollup_status === "unavailable" ? number(latest.smaps_rollup_errno) : null);
-    if (unsupportedWithoutFallback) add("info", "Подробная карта памяти недоступна на этом устройстве",
-      "RSS, RssAnon, VmData и учтённые R2O объекты продолжают собираться.",
-      "В procfs отсутствует /proc/PID/smaps_rollup в " + unsupportedWithoutFallback + " " + sampleWord(unsupportedWithoutFallback) +
-        ". Для Anonymous и Private_Dirty нужна прошивка с KERNEL_PROC_PAGE_MONITOR и CONFIG_PROC_PAGE_MONITOR=y.");
+    var unavailableError = unavailableRows.find(function (row) { return row.errno !== null; });
+    unavailableError = unavailableError ? unavailableError.errno : number(latest && latest.smaps_rollup_errno);
     if (unavailable) add("warning", "Не удалось прочитать подробную карту памяти",
       "Проверьте доступ к procfs и наличие процесса во время снимка.",
       unavailable + " " + sampleWord(unavailable) + (unavailableError !== null ? "; errno " + unavailableError : "; errno отсутствует"));
@@ -495,7 +484,9 @@
   function overflowText(last) {
     var names = [
       ["http_record_limit_hits", "записи"], ["http_queue_limit_hits", "очередь"],
-      ["http_failure_limit_hits", "общие ошибки"], ["http_failure_record_limit_hits", "ошибки на сайт"]
+      ["http_failure_limit_hits", "общие ошибки"], ["http_failure_record_limit_hits", "ошибки на сайт"],
+      ["http_record_alloc_failures", "выделение записей"], ["http_queue_alloc_failures", "выделение очереди"],
+      ["http_failure_alloc_failures", "выделение записей об ошибках"]
     ];
     var known = 0, hits = [];
     names.forEach(function (entry) {
@@ -507,26 +498,53 @@
   function storageRow(used, limit) {
     return formatBytes(used) + (number(limit) !== null && limit > 0 ? " / " + formatBytes(limit) : "");
   }
-  function renderMemorySites(doc, report) {
-    var listNode = doc.getElementById("diagnostic-memory-sites"), note = doc.getElementById("diagnostic-memory-tracking-coverage");
-    if (!listNode || !note) return; listNode.replaceChildren();
-    var tracking = report.memory_tracking;
-    if (!tracking) { note.textContent = "Учёт подсистем отсутствует в старом формате отчёта."; return; }
-    note.textContent = tracking.coverage || "Учёт начинается с выделений после включения сбора.";
-    list(tracking.sites).forEach(function (site) {
-      var item = doc.createElement("li"), name = doc.createElement("strong"), location = doc.createElement("small");
-      name.textContent = (site.name || site.id || "Объект") + ": " + formatBytes(site.live_bytes) + " · " + pretty(number(site.live_objects)) + " объектов · пик " + formatBytes(site.peak_bytes);
-      location.textContent = (site.location || "") + " · выделено " + pretty(number(site.created)) + ", освобождено " + pretty(number(site.destroyed)) + ", ошибки выделения " + pretty(number(site.alloc_failures));
-      item.appendChild(name); item.appendChild(location); listNode.appendChild(item);
+  function hasMeasurements(item, keys) {
+    return !!item && keys.some(function (key) { return number(item[key]) > 0; });
+  }
+  function measuredSites(tracking) {
+    return list(tracking && tracking.sites).filter(function (site) {
+      return hasMeasurements(site, ["live_bytes", "live_objects", "peak_bytes", "created", "destroyed", "alloc_failures"]);
     });
   }
+  function renderMemorySites(doc, report) {
+    var listNode = doc.getElementById("diagnostic-memory-sites"), note = doc.getElementById("diagnostic-memory-tracking-coverage");
+    var tracking = report.memory_tracking, sites = measuredSites(tracking);
+    listNode.closest(".diag-card").hidden = !sites.length;
+    if (!sites.length) { listNode.replaceChildren(); return; }
+    note.textContent = tracking.coverage || "Учёт начинается с выделений после включения сбора.";
+    listNode.replaceChildren(...sites.map(function (site) {
+      var item = doc.createElement("li"), name = doc.createElement("strong"), facts = doc.createElement("small");
+      var usage = [
+        number(site.live_bytes) > 0 ? formatBytes(site.live_bytes) + " сейчас" : "",
+        number(site.live_objects) > 0 ? "объектов " + site.live_objects : "",
+        number(site.peak_bytes) > 0 ? "пик " + formatBytes(site.peak_bytes) : "",
+        number(site.created) > 0 ? "выделено " + site.created : "",
+        number(site.destroyed) > 0 ? "освобождено " + site.destroyed : "",
+        number(site.alloc_failures) > 0 ? "ошибок " + site.alloc_failures : ""
+      ].filter(Boolean);
+      name.textContent = site.name || site.id || "Объект";
+      facts.textContent = usage.join(" · ");
+      item.append(name, facts);
+      return item;
+    }));
+  }
+  function technicalFact(doc, id, value) {
+    var node = doc.getElementById(id);
+    node.parentElement.hidden = !value;
+    if (value) node.textContent = value;
+  }
   function renderMadvise(doc, report) {
-    var m = report.madvise;
-    setText(doc, "diagnostic-madvise-results", m ? pretty(number(m.successes)) + " / " + pretty(number(m.failures)) : "—");
-    setText(doc, "diagnostic-madvise-bytes", m ? formatBytes(m.requested_bytes) : "—");
-    var errors = list(m && m.errno).map(function (item) { return number(item.code) + " × " + number(item.count); }).filter(function (item) { return item.indexOf("null") < 0; });
-    if (m && number(m.other_errno_count) > 0) errors.push("прочие × " + m.other_errno_count);
-    setText(doc, "diagnostic-madvise-errors", !m ? "—" : errors.join(" · ") || "нет");
+    var m = report.madvise || {};
+    var counts = [number(m.successes) > 0 ? "успешно " + m.successes : "",
+      number(m.failures) > 0 ? "ошибок " + m.failures : ""].filter(Boolean).join(" · ");
+    var errors = list(m.errno).filter(function (item) { return number(item.code) > 0 && number(item.count) > 0; })
+      .map(function (item) { return item.code + " × " + item.count; });
+    if (number(m.other_errno_count) > 0) errors.push("прочие × " + m.other_errno_count);
+    doc.getElementById("diagnostic-madvise-results").closest(".diag-card").hidden =
+      !counts && !(number(m.requested_bytes) > 0) && !errors.length;
+    technicalFact(doc, "diagnostic-madvise-results", counts);
+    technicalFact(doc, "diagnostic-madvise-bytes", number(m.requested_bytes) > 0 ? formatBytes(m.requested_bytes) : "");
+    technicalFact(doc, "diagnostic-madvise-errors", errors.join(" · "));
   }
   var outcomeLabels = {
     "plan-found": "Найден план", "direct-clear": "Прямая проба прошла",
@@ -602,15 +620,30 @@
     var firstRow = allMemoryRows[0], lastRow = allMemoryRows[allMemoryRows.length - 1];
     setText(doc, "diagnostic-workers-trend", firstRow && lastRow && firstRow.tasks !== null && lastRow.tasks !== null && firstRow.workers_live !== null && lastRow.workers_live !== null ?
       "задачи " + pretty(firstRow.tasks) + "→" + pretty(lastRow.tasks) + " · workers " + pretty(firstRow.workers_live) + "→" + pretty(lastRow.workers_live) : "—");
-    setText(doc, "diagnostic-catalog-bytes", formatBytes(firstDefined([lastRow && lastRow.catalog, last && last.catalog_bytes])));
-    setText(doc, "diagnostic-snapshot-bytes", formatBytes(firstDefined([lastRow && lastRow.snapshot, last && last.snapshot_bytes])));
-    setText(doc, "diagnostic-catalog-counts", last ? [last.boxes, last.bindings, last.plans].map(function (value) { return number(value) === null ? "—" : value; }).join(" / ") : "—");
-    setText(doc, "diagnostic-http-bytes", formatBytes(firstDefined([lastRow && lastRow.http, last && last.http_bytes])));
-    setText(doc, "diagnostic-http-records", last ? storageRow(last.http_records_bytes, firstDefined([last.http_records_limit_bytes, httpLimits.records_bytes])) : "—");
-    setText(doc, "diagnostic-http-queue", last ? storageRow(last.http_queue_bytes, firstDefined([last.http_queue_limit_bytes, httpLimits.queue_bytes])) : "—");
-    setText(doc, "diagnostic-http-evidence", last ? storageRow(last.http_failure_bytes, firstDefined([last.http_failure_limit_bytes, httpLimits.failures_bytes])) +
-      (firstDefined([last.http_failure_record_limit_bytes, httpLimits.failure_record_bytes]) !== null ? " · до " + formatBytes(firstDefined([last.http_failure_record_limit_bytes, httpLimits.failure_record_bytes])) + " на сайт" : "") : "—");
-    setText(doc, "diagnostic-http-overflows", last ? overflowText(last) : "—");
+    var catalogBytes = firstDefined([lastRow && lastRow.catalog, last && last.catalog_bytes]);
+    var snapshotBytes = firstDefined([lastRow && lastRow.snapshot, last && last.snapshot_bytes]);
+    var haveCatalogCounts = hasMeasurements(last, ["boxes", "bindings", "plans"]);
+    doc.getElementById("diagnostic-catalog-bytes").closest(".diag-card").hidden =
+      !(catalogBytes > 0 || snapshotBytes > 0 || haveCatalogCounts);
+    technicalFact(doc, "diagnostic-catalog-bytes", catalogBytes > 0 ? formatBytes(catalogBytes) : "");
+    technicalFact(doc, "diagnostic-snapshot-bytes", snapshotBytes > 0 ? formatBytes(snapshotBytes) : "");
+    technicalFact(doc, "diagnostic-catalog-counts", haveCatalogCounts ? [last.boxes, last.bindings, last.plans].map(function (value) {
+      return pretty(number(value));
+    }).join(" / ") : "");
+
+    var haveRecords = hasMeasurements(last, ["http_records", "http_records_bytes"]);
+    var haveQueue = hasMeasurements(last, ["http_queued", "http_queue_bytes"]);
+    var haveFailures = hasMeasurements(last, ["http_failures", "http_failure_bytes"]);
+    var overflow = last ? overflowText(last) : "";
+    var haveOverflow = overflow && overflow !== "нет" && overflow !== "—";
+    var httpBytes = firstDefined([lastRow && lastRow.http, last && last.http_bytes]);
+    var haveHttp = haveRecords || haveQueue || haveFailures || haveOverflow;
+    doc.getElementById("diagnostic-http-bytes").closest(".diag-card").hidden = !haveHttp;
+    technicalFact(doc, "diagnostic-http-bytes", haveHttp && httpBytes > 0 ? formatBytes(httpBytes) : "");
+    technicalFact(doc, "diagnostic-http-records", haveRecords ? storageRow(last.http_records_bytes, firstDefined([last.http_records_limit_bytes, httpLimits.records_bytes])) : "");
+    technicalFact(doc, "diagnostic-http-queue", haveQueue ? storageRow(last.http_queue_bytes, firstDefined([last.http_queue_limit_bytes, httpLimits.queue_bytes])) : "");
+    technicalFact(doc, "diagnostic-http-evidence", haveFailures ? storageRow(last.http_failure_bytes, firstDefined([last.http_failure_limit_bytes, httpLimits.failures_bytes])) : "");
+    technicalFact(doc, "diagnostic-http-overflows", haveOverflow ? overflow : "");
     var matchingSample = lastRow && sampleForHistoryRow(report, lastRow.at, lastRow.time, lastRow.time_domain);
     var sharedSample = !!(matchingSample && matchingSample === last);
     var sampleMono = number(last && last.mono_ms), historyMono = lastRow && lastRow.time_domain === "mono" ? number(lastRow.time) * 1000 : null;
@@ -631,6 +664,8 @@
     setText(doc, "diagnostic-http-note", storageNote);
     renderMemorySites(doc, report); renderMadvise(doc, report);
     renderAimd(doc, report, last);
+    var technical = doc.getElementById("diagnostic-technical");
+    technical.hidden = !technical.querySelector(".diag-card:not([hidden])");
     var chart = drawMemory(doc, allMemoryRows, range, intervalMs);
     setText(doc, "diagnostic-memory-interval", intervalText(intervalMs, chart.axisUnit));
     setText(doc, "diagnostic-history-coverage", coverageText(chart.rows, range));
@@ -654,14 +689,13 @@
     var rssAnon = lastMemory && lastMemory.rss_anon !== null ? lastMemory.rss_anon / 1024 :
       number(list(last && last.processes).filter(function (p) { return p.name === PRIMARY; })[0] && list(last && last.processes).filter(function (p) { return p.name === PRIMARY; })[0].anon_kib);
     var catalogBytes = firstDefined([last && last.catalog_bytes, lastMemory && lastMemory.catalog]);
-    var tracker = report.memory_tracking || {}, sites = list(tracker.sites), madvise = report.madvise || {}, anomalies = list(report.anomalies);
+    var tracker = report.memory_tracking || {}, sites = measuredSites(tracker), madvise = report.madvise || {}, anomalies = list(report.anomalies);
     var extras = (rssAnon === null ? "" : " RssAnon: " + formatKib(rssAnon) + ".") +
       (catalogBytes !== null ? " Память каталога: " + formatBytes(catalogBytes) + "." : "") +
       (sites.length ? " Инструментированные подсистемы: " + sites.map(function (site) { return (site.name || site.id) + " " + formatBytes(site.live_bytes); }).join(", ") + "." : "") +
-      (report.madvise ? " madvise успешно / ошибка: " + pretty(number(madvise.successes)) + " / " + pretty(number(madvise.failures)) + "." : "") +
+      (hasMeasurements(madvise, ["successes", "failures", "requested_bytes"]) ? " madvise успешно / ошибка: " + pretty(number(madvise.successes)) + " / " + pretty(number(madvise.failures)) + "." : "") +
       (anomalies.some(function (item) { return item.kind === "unattributed-rss-growth"; }) ? " Зафиксирован устойчивый рост RSS без сопоставимого роста учтённых объектов; это не подтверждает утечку." : "");
     var latestDetail = detail && detail.latest;
-    if (latestDetail && latestDetail.smaps_rollup_status === "unsupported") extras += " В procfs отсутствует smaps_rollup; RssAnon читается из status.";
     if (latestDetail && latestDetail.smaps_rollup_source === "smaps-fallback") extras += " Anonymous и Private_Dirty получены из smaps.";
     return "Снимков: " + countWithCapacity(samples.length, report.sample_capacity) + "; завершений поиска: " + countWithCapacity(events.length, report.event_capacity) +
       ", без подтверждённого результата: " + failures + ". " + (rss ? "RSS контроллера: " + formatKib(rss.rss_kib) +

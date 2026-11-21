@@ -1835,8 +1835,7 @@ main { min-width: 0; }
 .diag-memory-sites { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
 .diag-memory-sites li { display: flex; justify-content: space-between; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--line-soft); color: var(--ink-2); font-family: var(--mono); font-size: .6rem; overflow-wrap: anywhere; }
 .diag-transition-list { display: flex; flex-direction: column; gap: 4px; margin-top: 7px; }
-.diag-transition-list li { padding: 4px 0; border-bottom: 1px solid var(--line-soft); color: var(--ink-2); font-family: var(--mono); font-size: .6rem; overflow-wrap: anywhere; }
-.diag-transition-empty { color: var(--ink-4) !important; }
+.diag-transition-list li { display: flex; justify-content: space-between; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--line-soft); color: var(--ink-2); font-family: var(--mono); font-size: .6rem; overflow-wrap: anywhere; }
 .diag-warning-list { display: flex; flex-direction: column; gap: 6px; }
 .diag-notice { padding: 9px 11px; border: 1px solid var(--warn-line); border-radius: 7px; background: var(--warn-wash); }
 .diag-notice--info { border-color: var(--info-line); background: var(--info-wash); }
