@@ -178,6 +178,7 @@ struct TcpSession {
     reverse_rst: bool,
     saw_reverse_rst: bool,
     hello_has_sni: bool,
+    discord_rtc: bool,
     forward_data_packets: u32,
     reverse_data_packets: u32,
     silence_reported: bool,
@@ -251,6 +252,7 @@ impl TcpSession {
             reverse_rst: false,
             saw_reverse_rst: false,
             hello_has_sni: false,
+            discord_rtc: false,
             forward_data_packets: 0,
             reverse_data_packets: 0,
             silence_reported: false,
@@ -1199,7 +1201,14 @@ impl TcpSessions {
             estimate.saturating_add(TCP_STALL_PACKET_SLACK) >= u64::from(*budget)
                 && estimate <= u64::from(*budget) + TCP_STALL_PACKET_SLACK
         });
-        if elapsed < rto || !inside_budget {
+        let early_discord_stall = session.discord_rtc
+            && !session.plan_done
+            && session.reverse_server_hello
+            && session.reverse_tls_app_data
+            && session.hello_at.is_some_and(|hello| {
+                now.saturating_duration_since(hello) < Duration::from_secs(15)
+            });
+        if elapsed < rto || (!inside_budget && !early_discord_stall) {
             return None;
         }
         Some(R2oTcpStallEvent {
@@ -1381,6 +1390,13 @@ impl TcpSessions {
             }
             session.hello_ack = ack.then_some(tcp.acknowledgment);
             session.hello_has_sni = hello.sni_range.is_some();
+            session.discord_rtc = hello
+                .sni_range
+                .as_ref()
+                .and_then(|range| payload.get(range.clone()))
+                .is_some_and(|host| {
+                    r2k_core::tls::is_discord_rtc_websocket(host, tcp.destination_port)
+                });
             session.client_shape = if session.hello_has_sni {
                 if hello.is_tls13 {
                     if hello.ech_offer {
@@ -1456,6 +1472,13 @@ impl TcpSessions {
                                 *r2o_tcp_hello_flows = (*r2o_tcp_hello_flows).wrapping_add(1);
                             }
                         }
+                        session.discord_rtc = complete_hello
+                            .sni_range
+                            .as_ref()
+                            .and_then(|range| bytes.get(range.clone()))
+                            .is_some_and(|host| {
+                                r2k_core::tls::is_discord_rtc_websocket(host, tcp.destination_port)
+                            });
                         if complete_hello.sni_range.is_some() && !session.hello_has_sni {
                             session.hello_has_sni = true;
                             if !controller_probe {
@@ -3590,6 +3613,62 @@ mod tests {
         assert_eq!(event.elapsed_ms, 2100);
         assert_eq!(event.estimated_packets, 25);
         assert!(!event.planned);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rtc_stall_uses_the_first_failed_flow_below_the_volume_band() {
+        let start = Instant::now();
+        let client = ([192, 0, 2, 10], 41000);
+        let baseline = R2oConntrackInfo {
+            original_packets: 15,
+            reply_packets: 9,
+            tcp_state: Some(3),
+        };
+        let check = |host: &[u8], port, planned, fresh_reply| {
+            let mut sessions = TcpSessions::default();
+            let server = ([198, 51, 100, 20], port);
+            let hello = client_hello_with_sni_and_large_extension_for(host);
+            sessions.track_packet(&ipv4_tcp_packet(client, server, 0x02, 64, 700, &[]), start);
+            sessions.track_packet(
+                &ipv4_tcp_packet(client, server, 0x18, 64, 701, &hello),
+                start + Duration::from_millis(100),
+            );
+            let response = [0x17, 3, 3, 0, 1, 0];
+            sessions.track_packet(
+                &ipv4_tcp_packet(server, client, 0x18, 64, 900, &response),
+                start + Duration::from_millis(200),
+            );
+            let probe = sessions.tcp_stall_candidates().pop().unwrap();
+            let session = sessions.session_from_wire_mut(&probe.wire_key()).unwrap();
+            session.reverse_server_hello = true;
+            session.plan_done = planned;
+            session.metrics.reverse_packets = 8;
+            session.forward_data_packets = 4;
+            session.reverse_data_packets = 4;
+            assert!(
+                sessions
+                    .update_tcp_stall(start + Duration::from_secs(1), &probe, baseline)
+                    .is_none()
+            );
+            let advanced_reply = if fresh_reply { 1 } else { 0 };
+            sessions.update_tcp_stall(
+                start + Duration::from_secs(3),
+                &probe,
+                R2oConntrackInfo {
+                    original_packets: 18,
+                    reply_packets: baseline.reply_packets + advanced_reply,
+                    ..baseline
+                },
+            )
+        };
+        let result = check(b"channel.discord.media", 2083, false, false).unwrap();
+        assert_eq!(result.estimated_packets, 9);
+        assert_eq!(result.elapsed_ms, 2_000);
+        assert!(check(b"channel.discord.media", 2083, false, true).is_none());
+        assert!(check(b"channel.discord.media", 2083, true, false).is_none());
+        assert!(check(b"channel.discord.media", 4443, false, false).is_none());
+        assert!(check(b"www.youtube.com", 443, false, false).is_none());
     }
 
     #[cfg(target_os = "linux")]
@@ -8720,7 +8799,10 @@ mod tests {
     }
 
     fn client_hello_with_sni_and_large_extension() -> Vec<u8> {
-        let host = b"example.test";
+        client_hello_with_sni_and_large_extension_for(b"example.test")
+    }
+
+    fn client_hello_with_sni_and_large_extension_for(host: &[u8]) -> Vec<u8> {
         let mut sni_data = Vec::new();
         sni_data.extend_from_slice(&((host.len() + 3) as u16).to_be_bytes());
         sni_data.push(0);

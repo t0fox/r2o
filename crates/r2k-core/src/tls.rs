@@ -13,6 +13,14 @@ const EXT_KEY_SHARE: u16 = 0x0033;
 const EXT_ENCRYPTED_CLIENT_HELLO: u16 = 0xfe0d;
 const SNI_HOST_NAME: u8 = 0;
 
+/// RTC signaling hosts are identified by both their TLS SNI and TCP port.
+pub fn is_discord_rtc_websocket(host: &[u8], port: u16) -> bool {
+    const SUFFIX: &[u8] = b".discord.media";
+    matches!(port, 443 | 2048..=2053 | 2083 | 2087 | 2096 | 8443)
+        && host.len() > SUFFIX.len()
+        && host[host.len() - SUFFIX.len()..].eq_ignore_ascii_case(SUFFIX)
+}
+
 /// Сведения, которые datapath может безопасно получить из уже доступных байтов.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TlsInfo {

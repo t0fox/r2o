@@ -5716,13 +5716,25 @@ fn matching_sibling_recovery_candidates(
     catalog: &Catalog,
     target: &r2o_controller::discovery::DiscoveryTarget,
 ) -> Vec<R2oFamilyRecoveryCandidate> {
-    const MAX_CANDIDATES: usize = 8;
+    select_sibling_recovery_candidates(catalog, target, false)
+}
+
+#[cfg(unix)]
+fn select_sibling_recovery_candidates(
+    catalog: &Catalog,
+    target: &r2o_controller::discovery::DiscoveryTarget,
+    early_rtc: bool,
+) -> Vec<R2oFamilyRecoveryCandidate> {
+    let max_candidates = if early_rtc { 1 } else { 8 };
 
     if target.shape == SHAPE_QUIC {
         return Vec::new();
     }
     let suffix = r2o_controller::domain::registrable_domain(&target.host);
     let voice_suffix = suffix.as_deref() == Some("discord.media");
+    if early_rtc && !voice_suffix {
+        return Vec::new();
+    }
     let target_shape = control::r2k_link_shape_tcp_base(target.shape);
     let target_profile = target.tcp_profile();
     let mut candidates = Vec::new();
@@ -5740,6 +5752,9 @@ fn matching_sibling_recovery_candidates(
                 continue;
             };
             let binding_shape = control::r2k_link_shape_tcp_base(binding.shape);
+            if early_rtc && (binding_shape != target_shape || !name.ends_with(".discord.media")) {
+                continue;
+            }
             if name == target.host {
                 // Тот же хост, но другая форма ClientHello: пробуем уже
                 // подтверждённый план, вместо повторной классификации.
@@ -5815,7 +5830,7 @@ fn matching_sibling_recovery_candidates(
                 group_plan: false,
                 probe_path: "/".into(),
             });
-            if candidates.len() == MAX_CANDIDATES {
+            if candidates.len() == max_candidates {
                 return candidates;
             }
         }
@@ -5831,7 +5846,7 @@ fn matching_sibling_recovery_candidates(
         for (index, text) in seeds
             .into_iter()
             .enumerate()
-            .take(MAX_CANDIDATES - candidates.len())
+            .take(max_candidates - candidates.len())
         {
             let plan_id = [0x77_u8.saturating_sub(index as u8); 16];
             if let Ok(text) = r2o_controller::discovery::plan_text_for_trial(&text, plan_id) {
@@ -8065,6 +8080,14 @@ fn r2o_late_rx_is_covered_by_catalog(
 const R2O_FAMILY_RECOVERY_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
 
 #[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum R2oFamilyRecoveryMode {
+    Discovery,
+    PlanNews(std::time::Instant),
+    EarlyRtc(std::time::Instant),
+}
+
+#[cfg(unix)]
 struct R2oFamilyRecoveryTask {
     target: r2o_controller::discovery::DiscoveryTarget,
     candidates: Vec<R2oFamilyRecoveryCandidate>,
@@ -8074,7 +8097,7 @@ struct R2oFamilyRecoveryTask {
     /// C `rx_saved_bootstrap`: после провала нужен полный classifier, а не
     /// семейный cooldown.
     bootstrap: bool,
-    plan_news: bool,
+    mode: R2oFamilyRecoveryMode,
     queued_at: std::time::Instant,
     deadline: std::time::Instant,
 }
@@ -8126,7 +8149,7 @@ struct R2oFamilyRecoveryOutcome {
     result: Result<r2o_controller::fetch::FetchResult, String>,
     applied: bool,
     bootstrap: bool,
-    plan_news: bool,
+    mode: R2oFamilyRecoveryMode,
     temporary_candidate: Option<R2oFamilyRecoveryCandidate>,
     client_input: bool,
 }
@@ -8222,7 +8245,14 @@ impl R2oFamilyRecoveryWorker {
         bootstrap: bool,
         client_hello: Option<Vec<u8>>,
     ) -> bool {
-        self.queue_task(target, candidates, mark, bootstrap, client_hello, None)
+        self.queue_task(
+            target,
+            candidates,
+            mark,
+            bootstrap,
+            client_hello,
+            R2oFamilyRecoveryMode::Discovery,
+        )
     }
 
     fn queue_task(
@@ -8232,7 +8262,7 @@ impl R2oFamilyRecoveryWorker {
         mark: Option<u32>,
         bootstrap: bool,
         client_hello: Option<Vec<u8>>,
-        plan_news_deadline: Option<std::time::Instant>,
+        mode: R2oFamilyRecoveryMode,
     ) -> bool {
         if r2o_is_ech_shape(target.shape) && client_hello.is_none() {
             candidates.retain(|candidate| candidate.group_plan);
@@ -8253,9 +8283,13 @@ impl R2oFamilyRecoveryWorker {
             confirm_mark: self.confirm_mark,
             bootstrap,
             client_hello,
-            plan_news: plan_news_deadline.is_some(),
+            mode,
             queued_at,
-            deadline: plan_news_deadline.unwrap_or(queued_at + R2O_FAMILY_RECOVERY_BUDGET),
+            deadline: match mode {
+                R2oFamilyRecoveryMode::Discovery => queued_at + R2O_FAMILY_RECOVERY_BUDGET,
+                R2oFamilyRecoveryMode::PlanNews(deadline)
+                | R2oFamilyRecoveryMode::EarlyRtc(deadline) => deadline,
+            },
         };
         match jobs.try_send(task) {
             Ok(()) => true,
@@ -8323,16 +8357,20 @@ enum R2oFamilyRecoveryDecision {
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum R2oFamilyRecoveryFailureAction {
-    /// После провала подтверждённого плана всегда запускается полный поиск.
     FullClassifier,
+    WaitForEvidence,
 }
 
 #[cfg(unix)]
-fn r2o_family_recovery_failure_action(_bootstrap: bool) -> R2oFamilyRecoveryFailureAction {
-    // Провал подтверждённого плана — не повод ждать: цель остаётся
-    // заблокированной, а запас знаний оказался неверным. Всегда даём
-    // полному поиску шанс найти другой обход.
-    R2oFamilyRecoveryFailureAction::FullClassifier
+fn r2o_family_recovery_failure_action(
+    mode: R2oFamilyRecoveryMode,
+) -> R2oFamilyRecoveryFailureAction {
+    match mode {
+        R2oFamilyRecoveryMode::Discovery => R2oFamilyRecoveryFailureAction::FullClassifier,
+        R2oFamilyRecoveryMode::PlanNews(_) | R2oFamilyRecoveryMode::EarlyRtc(_) => {
+            R2oFamilyRecoveryFailureAction::WaitForEvidence
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -8717,7 +8755,7 @@ fn r2o_family_recovery_run(
         result: Err("не найден подходящий план семейного восстановления".to_owned()),
         applied: false,
         bootstrap: task.bootstrap,
-        plan_news: task.plan_news,
+        mode: task.mode,
         temporary_candidate: None,
         client_input: false,
     };
@@ -8741,7 +8779,7 @@ fn r2o_family_recovery_run(
         }
     };
 
-    if task.plan_news {
+    if matches!(task.mode, R2oFamilyRecoveryMode::PlanNews(_)) {
         let blocked = r2o_discovery_trigger(&task.target, task.client_hello.as_deref(), None)
             .is_ok_and(|trigger| {
                 let mut options = r2o_discovery_classify_options(
@@ -20962,7 +21000,7 @@ group_block_proven: false,
                 mark,
                 false,
                 self.family_client_hello(&target),
-                Some(until.min(now + std::time::Duration::from_secs(15))),
+                R2oFamilyRecoveryMode::PlanNews(until.min(now + R2O_FAMILY_RECOVERY_BUDGET)),
             ) {
                 let mut searches = self
                     .searches
@@ -25098,27 +25136,24 @@ impl ControlClient {
                             if let Some(worker) = &mut family_recovery {
                                 worker.complete(&outcome.target);
                             }
-                            if outcome.plan_news {
+                            if r2o_family_recovery_failure_action(outcome.mode)
+                                == R2oFamilyRecoveryFailureAction::WaitForEvidence
+                            {
                                 println!(
-                                    "перепроверка {} по новому знанию завершилась: {}",
+                                    "перепроверка {} завершилась: {}",
                                     outcome.target.host,
                                     outcome
                                         .result
                                         .as_ref()
                                         .err()
-                                        .map_or("новые планы не подтверждены", String::as_str)
+                                        .map_or("план не подтверждён", String::as_str)
                                 );
                                 continue;
                             }
                             let bootstrap = outcome.bootstrap;
-                            let action = r2o_family_recovery_failure_action(bootstrap);
-                            let queued = match action {
-                                R2oFamilyRecoveryFailureAction::FullClassifier => {
-                                    discovery.as_mut().is_some_and(|(worker, _, _, _)| {
-                                        worker.queue_after_confirmed_failure(outcome.target.clone())
-                                    })
-                                }
-                            };
+                            let queued = discovery.as_mut().is_some_and(|(worker, _, _, _)| {
+                                worker.queue_after_confirmed_failure(outcome.target.clone())
+                            });
                             println!(
                                 "сохранённые планы {} не подтвердились для {}: {}; {}",
                                 if bootstrap {
@@ -26888,8 +26923,50 @@ impl ControlClient {
                         "наблюдение TCP: поток {client} -> {server} замер на оценке {} пакетов; ответ не виден {} мс; план применялся={}; это не подтверждает блокировку",
                         event.estimated_packets, event.elapsed_ms, event.planned
                     );
+                    let now = std::time::Instant::now();
+                    if let Some((hello, seen)) = tcp_hello_names.entries.get(&event.key)
+                        && hello.host.as_deref().is_some_and(|name| {
+                            r2k_core::tls::is_discord_rtc_websocket(name, server.port())
+                        })
+                        && let Some(target) =
+                            r2o_controller::discovery::DiscoveryTarget::from_event(hello)
+                        && target.endpoint.parse::<std::net::SocketAddr>().ok() == Some(server)
+                    {
+                        let deadline = *seen + R2O_FAMILY_RECOVERY_BUDGET;
+                        if !event.planned
+                            && event.server_hello
+                            && now < deadline
+                            && let Some((worker, catalog, _, mark)) = discovery.as_mut()
+                            && let Some(family) = family_recovery.as_mut()
+                            && !worker.is_active(&target)
+                            && !family.active.contains(&target)
+                            && !r2o_controller::discovery::has_usable_binding(catalog, &target)
+                        {
+                            let candidates =
+                                select_sibling_recovery_candidates(catalog, &target, true);
+                            if !candidates.is_empty()
+                                && family.queue_task(
+                                    target.clone(),
+                                    candidates,
+                                    *mark,
+                                    false,
+                                    worker.family_client_hello_or_capture(&target, || {
+                                        self.r2o_capture_client_shape(&target).ok().flatten()
+                                    }),
+                                    R2oFamilyRecoveryMode::EarlyRtc(deadline),
+                                )
+                            {
+                                println!(
+                                    "Discord RTC {}: после наблюдения зависания поставлена проверка известного плана",
+                                    target.host
+                                );
+                            }
+                        }
+                        // Сохраняем точный ClientHello для позднего сигнала RST.
+                        std::io::stdout().flush()?;
+                        continue;
+                    }
                     if let Some(worker) = &mut r2o_late_rx {
-                        let now = std::time::Instant::now();
                         let mark = discovery.as_ref().and_then(|(_, _, _, mark)| *mark);
                         match r2o_late_rx_hellos.take_for_tcp_stall(&event, mark, now) {
                             Some(input) if input.is_discord_voice_websocket() => println!(
@@ -51428,13 +51505,17 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn failed_confirmed_plan_requests_full_classifier() {
-        // Любой провал подтверждённого плана ведёт в полный поиск: держать
-        // цель в бесконечном отдыхе нельзя, пока приложение не работает.
-        for bootstrap in [true, false] {
+    fn only_confirmed_failure_enters_full_classifier_after_family_probe() {
+        use super::{R2oFamilyRecoveryFailureAction as Action, R2oFamilyRecoveryMode as Mode};
+        let now = std::time::Instant::now();
+        assert_eq!(
+            super::r2o_family_recovery_failure_action(Mode::Discovery),
+            Action::FullClassifier
+        );
+        for mode in [Mode::PlanNews(now), Mode::EarlyRtc(now)] {
             assert_eq!(
-                super::r2o_family_recovery_failure_action(bootstrap),
-                super::R2oFamilyRecoveryFailureAction::FullClassifier
+                super::r2o_family_recovery_failure_action(mode),
+                Action::WaitForEvidence
             );
         }
     }
@@ -51462,7 +51543,7 @@ mod tests {
                 measure_mark: None,
                 client_hello: None,
                 bootstrap: false,
-                plan_news: false,
+                mode: super::R2oFamilyRecoveryMode::Discovery,
                 confirm_mark: None,
                 queued_at: now - super::R2O_FAMILY_RECOVERY_BUDGET,
                 deadline: now,
@@ -51496,7 +51577,7 @@ mod tests {
                 measure_mark: Some(0),
                 client_hello: None,
                 bootstrap: false,
-                plan_news: true,
+                mode: super::R2oFamilyRecoveryMode::PlanNews(std::time::Instant::now()),
                 confirm_mark: Some(0),
                 queued_at: std::time::Instant::now(),
                 deadline: std::time::Instant::now() + super::R2O_FAMILY_RECOVERY_BUDGET,
@@ -52261,7 +52342,7 @@ mod tests {
             result: Ok(r2o_test_fetch_result()),
             applied: false,
             bootstrap: false,
-            plan_news: false,
+            mode: super::R2oFamilyRecoveryMode::Discovery,
             temporary_candidate: Some(candidate),
             client_input: false,
         };
@@ -52493,7 +52574,7 @@ mod tests {
                 measure_mark: Some(0x2f),
                 confirm_mark: Some(0),
                 bootstrap: false,
-                plan_news: false,
+                mode: super::R2oFamilyRecoveryMode::Discovery,
                 queued_at: std::time::Instant::now(),
                 deadline: std::time::Instant::now() + super::R2O_FAMILY_RECOVERY_BUDGET,
                 client_hello: Some(snapshot),
@@ -64196,6 +64277,18 @@ group_block_proven: false,
         assert_eq!(candidates[0].plan_id, [0x11; 16]);
         assert!(!candidates[0].group_plan);
         assert_eq!(candidates[0].probe_path, "/");
+
+        let early = super::select_sibling_recovery_candidates(&catalog, &target, true);
+        assert_eq!(early.len(), 1);
+        assert_eq!(early[0].plan_id, [0x11; 16]);
+
+        let mut other_service = catalog.clone();
+        other_service.boxes[0].bindings.remove(0);
+        other_service.boxes[0].bindings[0].shape = SHAPE_MODERN;
+        assert!(!matching_sibling_recovery_candidates(&other_service, &target).is_empty());
+        assert!(
+            super::select_sibling_recovery_candidates(&other_service, &target, true).is_empty()
+        );
 
         // Чужая зона и точное имя не должны получать чужой план.
         assert!(
