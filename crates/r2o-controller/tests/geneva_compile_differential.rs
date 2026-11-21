@@ -14,9 +14,9 @@
 use r2k_core::packet::PacketView;
 use r2k_core::plan::{PacketInput, Plan};
 use r2k_core::wire::build_tcp_packet;
+use r2o_controller::discovery::{plan_ident, plan_text_for_trial};
 use r2o_controller::geneva::parse_strategy;
 use r2o_controller::geneva_compile::{compile_plan_for_packet, discovery_midpoint_candidate};
-use r2o_controller::r2o_fallback::{FallbackQueue, tried_key};
 use r2o_datapath::engine::{PacketDecision, decide};
 
 const INPUT: &[u8] = include_bytes!("fixtures/geneva/clienthello_in.bin");
@@ -24,7 +24,7 @@ const EXPECTED_ORIGINAL: &[u8] = include_bytes!("fixtures/geneva/clienthello_ori
 const EXPECTED_TAMPERED: &[u8] = include_bytes!("fixtures/geneva/clienthello_flags_rst.bin");
 
 #[test]
-fn discovery_queues_one_guarded_midpoint_for_short_legacy_hello() {
+fn discovery_prepares_a_guarded_midpoint_for_short_legacy_hello() {
     let view = PacketView::parse(INPUT).unwrap();
     let payload = view.tcp_segment(INPUT).unwrap().payload;
     assert!(discovery_midpoint_candidate(&INPUT[payload.clone()], 1492).is_none());
@@ -36,22 +36,19 @@ fn discovery_queues_one_guarded_midpoint_for_short_legacy_hello() {
     let text = discovery_midpoint_candidate(&packet[payload.clone()], 1492).unwrap();
     assert!(discovery_midpoint_candidate(&packet[payload], 120).is_none());
 
-    let mut queue = FallbackQueue::new_owned_search();
-    queue.push_seed(text.clone());
-    queue.push_seed(text.clone());
-    assert_eq!(queue.next(2, 1492).as_deref(), Some(text.as_str()));
-    assert_ne!(queue.next(2, 1492).as_deref(), Some(text.as_str()));
-    let mut tried = FallbackQueue::new_owned_search_with_tried(&[tried_key(&text)]);
-    tried.push_seed(text.clone());
-    assert_ne!(tried.next(2, 1492).as_deref(), Some(text.as_str()));
-
-    let bytes = r2o_controller::plan_text::compile_text(&text).unwrap();
+    let (_, trial_plan_id) = plan_ident(&text).unwrap();
+    let trial_text = plan_text_for_trial(&text, trial_plan_id).unwrap();
+    let bytes = r2o_controller::plan_text::compile_text(&trial_text).unwrap();
     let plan = Plan::parse(&bytes).unwrap();
+    assert_eq!(plan.id, trial_plan_id);
     assert_eq!(plan.input_tcp_flags, Some(0x18));
     assert!(matches!(
         decide(&plan, &packet),
         PacketDecision::Transmit { packets, .. } if packets.len() == 2
     ));
+    packet[view.l4_offset + 12] |= 1;
+    assert_eq!(decide(&plan, &packet), PacketDecision::Accept);
+    packet[view.l4_offset + 12] &= !1;
     packet[view.l4_offset + 13] = 0x10;
     assert_eq!(decide(&plan, &packet), PacketDecision::Accept);
     assert!(r2o_controller::plan_text::compile_text(&text.replacen("1 15", "1 14", 1)).is_err());

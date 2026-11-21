@@ -17049,16 +17049,31 @@ impl DiscoveryWorker {
                 }
             }
             let mut own_probes = 0;
+            let geneva_midpoint = if !trigger_planned
+                && target.family == 4
+                && control::r2k_link_shape_tcp_base(target.shape) == SHAPE_LEGACY
+                && r2o_control_wire() == control::WireProfile::V48
+            {
+                client_hello.as_deref().and_then(|hello| {
+                    r2o_controller::geneva_compile::discovery_midpoint_candidate(
+                        hello,
+                        runner_send_cap.load(Ordering::Relaxed),
+                    )
+                })
+            } else {
+                None
+            };
             if let Some(catalog) = candidate_catalog.as_deref()
-                && !r2o_controller::discovery::own_first_plans(
-                    catalog,
-                    &target,
-                    ech_replay,
-                    own_bound_plan_id.as_deref(),
-                    &own_tried,
-                    &own_seen,
-                )
-                .is_empty()
+                && (geneva_midpoint.is_some()
+                    || !r2o_controller::discovery::own_first_plans(
+                        catalog,
+                        &target,
+                        ech_replay,
+                        own_bound_plan_id.as_deref(),
+                        &own_tried,
+                        &own_seen,
+                    )
+                    .is_empty())
                 && let Ok(trigger) =
                     r2o_discovery_trigger(&target, client_hello.as_deref(), ech_config.as_ref())
             {
@@ -17066,7 +17081,7 @@ impl DiscoveryWorker {
                     let mut searches = runner_searches
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    searches.update(&target, "базовый вопрос перед своими планами", 0, 0, "", "");
+                    searches.update(&target, "проверяем целое приветствие", 0, 0, "", "");
                 }
                 let base_options = r2o_discovery_classify_options(
                     mark,
@@ -17390,8 +17405,62 @@ group_block_proven: false,
                             }
                         }
                     }
+                    if let Some(candidate) = geneva_midpoint
+                        && !cancel.load(Ordering::Relaxed)
+                        && r2o_discovery_trial_time_available(runner_started.elapsed())
+                        && R2O_DISCOVERY_PROBE_CAP
+                            .saturating_sub(base_probes.saturating_add(own_probes))
+                            >= 2
+                    {
+                        r2o_discovery_record_plan_progress(
+                            &runner_searches,
+                            &target,
+                            &candidate,
+                            "Geneva",
+                            "проверяется на пробном потоке",
+                            "ожидается точное подтверждение datapath",
+                        );
+                        let (result, applied, attempts) =
+                            r2o_run_discovery_candidate_trial_with_retries(
+                                &target,
+                                &candidate,
+                                &probe_path,
+                                mark,
+                                confirm_mark,
+                                &commands,
+                                client_hello.as_deref(),
+                                client_has_tcp_timestamps,
+                                None,
+                                &runner_resource_memory,
+                                2,
+                                None,
+                                r2o_controller::fetch::r2o_d2o_verification_encoding(&probe_path),
+                                || !cancel.load(Ordering::Relaxed),
+                            );
+                        own_probes = own_probes.saturating_add(attempts);
+                        if r2o_family_recovery_decision(&result, applied)
+                            == R2oFamilyRecoveryDecision::Verified
+                            && r2o_budget_mark_from_result(&result) != R2O_D2K_CAT_BUDGET_CUT
+                        {
+                            let outcome = r2o_confirm_discovery_outcome_checked(
+                                DiscoveryOutcome {
+                                    plan_text: Some(candidate),
+                                    detail: "разрез Geneva подтверждён HTTPS и точным APPLIED"
+                                        .into(),
+                                    group_block_proven: true,
+                                    ..r2o_own_first_exhausted_outcome(target.clone())
+                                },
+                                result,
+                                applied,
+                                &runner_searches,
+                            );
+                            if outcome.plan_text.is_some() {
+                                return outcome;
+                            }
+                        }
+                    }
                 }
-                // Свои подтверждённые планы не подошли — это не повод
+                // Ранние кандидаты не подошли — это не повод
                 // возвращать отказ: цель остаётся заблокированной, а движку
                 // нужен настоящий замер. Уходим в полный классификатор.
                 if cancel.load(Ordering::Relaxed)
@@ -17400,7 +17469,7 @@ group_block_proven: false,
                     return r2o_own_first_exhausted_outcome(target);
                 }
                 println!(
-                    "свои планы не подошли для {}: запускаю полную классификацию",
+                    "ранняя проверка не дала плана для {}: запускаю полную классификацию",
                     target.host
                 );
             }
@@ -17808,19 +17877,6 @@ group_block_proven: false,
             }
             let mut owned_fallback_queue = None;
             let mut primary_from_owned_fallback = false;
-            let geneva_midpoint = if target.family == 4
-                && control::r2k_link_shape_tcp_base(target.shape) == SHAPE_LEGACY
-                && r2o_control_wire() == control::WireProfile::V48
-            {
-                client_hello.as_deref().and_then(|hello| {
-                    r2o_controller::geneva_compile::discovery_midpoint_candidate(
-                        hello,
-                        runner_send_cap.load(Ordering::Relaxed),
-                    )
-                })
-            } else {
-                None
-            };
             if outcome.plan_text.is_none()
                 && r2o_discovery_trial_time_available(runner_started.elapsed())
             {
@@ -17830,9 +17886,6 @@ group_block_proven: false,
                     r2o_controller::r2o_fallback::FallbackQueue::new_owned_search_with_tried(
                         &discovery_tried,
                     );
-                if let Some(seed) = geneva_midpoint.clone() {
-                    queue.push_seed(seed);
-                }
                 // Сначала проверенный generic-кандидат pad64+seqovl: он
                 // закрывает SNI-блокировку без полного перебора d2o.
                 let seed = r2o_controller::r2o_fallback::r2o_pad64_seed(plan_shape, send_cap)
@@ -18026,14 +18079,10 @@ group_block_proven: false,
                     .detail
                     .push_str(&format!("; {fallback_reason} — продолжаю запасной перебор"));
                 let mut fallback_queue = owned_fallback_queue.unwrap_or_else(|| {
-                    let mut queue = r2o_controller::r2o_fallback::FallbackQueue::new_with_tried(
+                    r2o_controller::r2o_fallback::FallbackQueue::new_with_tried(
                         plan_text,
                         &discovery_tried,
-                    );
-                    if let Some(seed) = geneva_midpoint {
-                        queue.push_seed(seed);
-                    }
-                    queue
+                    )
                 });
                 let mut last_trial = (result, applied);
                 let mut index = 0;
