@@ -10,6 +10,7 @@ const R2O_LATE_RX_CACHE_CAPACITY: usize = 128;
 /// Точный flow-ключ живёт минуту: именно столько D2O считает поздний RST
 /// связанным с исходным ClientHello.
 const R2O_LATE_RX_EXACT_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+const R2O_VOICE_RESET_HISTORY_CAPACITY: usize = 16;
 /// Связь «недавний SNI -> серверный IP» хранится дольше: она нужна только
 /// как безопасный fallback, когда точного ClientHello для потока нет.
 /// Совпадение проверяется и по IP, и по порту, поэтому смена адреса
@@ -34,9 +35,66 @@ impl R2oLateRxInput {
 #[derive(Default)]
 pub struct R2oLateRxCache {
     entries: HashMap<[u8; r2k_core::control::KEY_LEN], (HelloEvent, Instant)>,
+    voice_resets: HashMap<(DiscoveryTarget, IpAddr), VoiceReset>,
+}
+
+struct VoiceReset {
+    client_port: u16,
+    at: Instant,
+    checked: bool,
 }
 
 impl R2oLateRxCache {
+    /// Only called with the hello of the exact reset flow. A second failure is
+    /// grounds for a trial, not proof that the connection is blocked.
+    pub fn voice_recheck_due(
+        &mut self,
+        input: &R2oLateRxInput,
+        reset: &R2oTcpRstAfterAppEvent,
+        now: Instant,
+    ) -> bool {
+        if reset.planned || !input.is_discord_voice_websocket() {
+            return false;
+        }
+        let Some(target) = &input.discovery_target else {
+            return false;
+        };
+        let Some((_, client_ip, client_port)) =
+            r2o_server_endpoint(&reset.key, !reset.client_is_low)
+        else {
+            return false;
+        };
+
+        self.voice_resets.retain(|_, observation| {
+            now.saturating_duration_since(observation.at) < R2O_LATE_RX_EXACT_TTL
+        });
+        let key = (target.clone(), client_ip);
+        if let Some(observation) = self.voice_resets.get_mut(&key) {
+            if observation.checked || observation.client_port == client_port {
+                return false;
+            }
+            observation.checked = true;
+            observation.at = now;
+            return true;
+        }
+
+        if self.voice_resets.len() == R2O_VOICE_RESET_HISTORY_CAPACITY
+            && let Some(oldest) = self.voice_resets.iter().min_by_key(|(_, reset)| reset.at)
+        {
+            let oldest = oldest.0.clone();
+            self.voice_resets.remove(&oldest);
+        }
+        self.voice_resets.insert(
+            key,
+            VoiceReset {
+                client_port,
+                at: now,
+                checked: false,
+            },
+        );
+        false
+    }
+
     /// Сохранить только пригодное TCP ClientHello для короткой парной RX-проверки.
     pub fn capture(&mut self, hello: &HelloEvent, now: Instant) -> bool {
         self.expire(now);
@@ -394,6 +452,35 @@ mod tests {
             quic_snapshot: None,
             tcp_has_timestamp: None,
         }
+    }
+
+    #[test]
+    fn voice_recheck_requires_two_distinct_unplanned_resets_for_the_same_client_and_target() {
+        let now = Instant::now();
+        let mut cache = R2oLateRxCache::default();
+        let mut greeting = hello(SHAPE_ECH_TCP, true, Some(812));
+        greeting.host = Some(b"voice.discord.media".to_vec());
+        greeting.key[35..37].copy_from_slice(&2053u16.to_be_bytes());
+        let mut reset = R2oTcpRstAfterAppEvent {
+            key: greeting.key,
+            client_is_low: true,
+            planned: false,
+        };
+        assert!(cache.capture(&greeting, now));
+        let input = cache.take_for_rst(&reset, None, now).unwrap();
+        assert!(!cache.voice_recheck_due(&input, &reset, now));
+        assert!(!cache.voice_recheck_due(&input, &reset, now + Duration::from_secs(1)));
+
+        reset.key[1] += 1;
+        assert!(!cache.voice_recheck_due(&input, &reset, now + Duration::from_secs(5)));
+        reset.key[1] -= 1;
+        reset.key[34] += 1;
+        reset.planned = true;
+        assert!(!cache.voice_recheck_due(&input, &reset, now + Duration::from_secs(19)));
+        reset.planned = false;
+        assert!(cache.voice_recheck_due(&input, &reset, now + Duration::from_secs(20)));
+        reset.key[34] += 1;
+        assert!(!cache.voice_recheck_due(&input, &reset, now + Duration::from_secs(42)));
     }
 
     #[test]

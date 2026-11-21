@@ -26993,6 +26993,34 @@ impl ControlClient {
                         let now = std::time::Instant::now();
                         let mark = discovery.as_ref().and_then(|(_, _, _, mark)| *mark);
                         let exact = r2o_late_rx_hellos.take_for_rst(&event, mark, now);
+                        if let Some(input) = &exact
+                            && r2o_late_rx_hellos.voice_recheck_due(input, &event, now)
+                            && let Some(target) = &input.discovery_target
+                            && let Some((discovery_worker, catalog, _, _)) = discovery.as_mut()
+                            && let Some(family) = family_recovery.as_mut()
+                            && !r2o_controller::discovery::has_usable_binding(catalog, target)
+                            && !discovery_worker
+                                .active
+                                .contains_key(&r2o_discovery_task_key(target))
+                        {
+                            let candidates = matching_sibling_recovery_candidates(catalog, target);
+                            if !candidates.is_empty()
+                                && family.queue(
+                                    target.clone(),
+                                    candidates,
+                                    confirm_mark,
+                                    false,
+                                    discovery_worker.family_client_hello_or_capture(target, || {
+                                        self.r2o_capture_client_shape(target).ok().flatten()
+                                    }),
+                                )
+                            {
+                                println!(
+                                    "Discord Voice {}: после повторного сброса WebSocket поставлена семейная проверка",
+                                    target.host
+                                );
+                            }
+                        }
                         let (input, source) = match exact {
                             Some(input) => (Some(input), "точному ClientHello"),
                             None if event.planned => (
