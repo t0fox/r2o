@@ -258,8 +258,9 @@ button { color: inherit; }
   stroke-dasharray: 7 93; opacity: 0; pointer-events: none;
   filter: drop-shadow(0 0 2px var(--acc));
 }
-.brand-trail { pointer-events: none; filter: drop-shadow(0 0 1.5px var(--acc)); }
-.brand-trail rect { fill: color-mix(in srgb, var(--acc), var(--amber) var(--age, 0%)); }
+.brand-pixels { pointer-events: none; }
+.brand-pixels rect { fill: color-mix(in srgb, var(--acc), var(--amber) var(--pixel-tone)); }
+[data-mark-repel] > use { visibility: hidden; }
 @media (prefers-reduced-motion: no-preference) {
   .brand-flow { opacity: .88; animation: loop-flow 7.5s linear infinite; }
   @keyframes loop-flow { to { stroke-dashoffset: -100; } }
@@ -2377,10 +2378,9 @@ body[data-stale="true"] .lamp::after { opacity: 0; }
   [data-decoding], [data-decoding] > :not(.decode-ink) { color: transparent !important; }
   .decode-ink {
     position: absolute; inset: 0; z-index: 3;
-    pointer-events: none; color: var(--acc); user-select: none;
+    pointer-events: none; color: #fff; user-select: none;
   }
   .decode-ink > span { position: absolute; white-space: pre; color: inherit; }
   .decode-ink > span::before { content: attr(data-glyph); display: inline-block; transform-origin: left; }
   .decode-ink > span:not([data-resolved])::before { scale: var(--glyph-scale) 1; }
-  .decode-ink > [data-resolved] { color: var(--resolved-color); }
 }

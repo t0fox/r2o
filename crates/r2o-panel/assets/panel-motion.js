@@ -20,7 +20,7 @@
   var measure = doc.createElement("canvas").getContext("2d");
   var hero = doc.getElementById("status-panel");
   var canvas = hero.querySelector(".pixel-trail"), painter, trail = [], lastPixel;
-  var markTrail = [], lastMark;
+  var markMotion;
   var trailLimit = 40, trailLife = 510;
   var raf = 0;
   var pointer, surface, shadowDirty = true;
@@ -90,7 +90,6 @@
         glyph.style.left = (rect.left - box.left - element.clientLeft) + "px";
         glyph.style.top = (rect.top - box.top - element.clientTop) + "px";
         glyph.style.font = [style.fontStyle, style.fontWeight, style.fontSize + "/1", style.fontFamily].join(" ");
-        glyph.style.setProperty("--resolved-color", style.color);
         glyph.style.setProperty("--glyph-scale", Math.min(1, rect.width / widths.get(font)));
         glyph.dataset.glyph = symbols[letters.length % symbols.length];
         ink.append(glyph);
@@ -139,11 +138,10 @@
   function clearPointer(clearTrail) {
     pointer = null;
     lastPixel = null;
-    lastMark = null;
     dropSpotlight();
-    if (clearTrail) {
-      markTrail.forEach(function (pixel) { pixel.node.remove(); });
-      markTrail.length = 0;
+    if (markMotion) {
+      markMotion.point = null;
+      schedule();
     }
     if (clearTrail && trail.length) {
       trail.length = 0;
@@ -162,35 +160,79 @@
     return { x: x, y: y };
   }
 
-  function traceMark(sample, now) {
+  function clearMark() {
+    if (!markMotion) return;
+    markMotion.mark.removeAttribute("data-mark-repel");
+    markMotion.group.replaceChildren();
+    markMotion = null;
+  }
+
+  function repelMark(sample) {
     var mark = sample.target.closest(".brand-mark, .mast-mark");
-    if (!mark) { lastMark = null; return; }
+    if (markMotion) markMotion.point = null;
+    if (!mark) return;
     var rect = mark.getBoundingClientRect();
     var scale = Math.min(rect.width, rect.height) / 40;
     if (!scale) return;
     var x = 20 + (sample.x - rect.left - rect.width / 2) / scale;
     var y = 20 + (sample.y - rect.top - rect.height / 2) / scale;
-    if (x < 0 || x >= 40 || y < 5 || y >= 35) { lastMark = null; return; }
-    var group = mark.querySelector(".brand-trail");
-    var previous = lastMark && lastMark.mark === mark ? lastMark.cell : null;
-    var cell = tracePixels(previous, Math.floor(x / 2.5), Math.floor(y / 2.5), function (column, row) {
-      var node = doc.createElementNS("http://www.w3.org/2000/svg", "rect");
-      node.setAttribute("x", column * 2.5);
-      node.setAttribute("y", row * 2.5);
-      node.setAttribute("width", "2.15");
-      node.setAttribute("height", "2.15");
-      if (markTrail.length >= trailLimit) markTrail.shift().node.remove();
-      group.append(node);
-      markTrail.push({ node: node, at: now });
+    if (x < 0 || x > 40 || y < 0 || y > 40) return;
+    if (!markMotion || markMotion.mark !== mark) {
+      clearMark();
+      var group = mark.querySelector(".brand-pixels"), loop = doc.getElementById("r2o-loop");
+      var pixels = [], cells = new Set(), size = 2.5, length = loop.getTotalLength();
+      for (var offset = 0; offset < length; offset += size) {
+        var position = loop.getPointAtLength(offset);
+        var px = Math.round(position.x / size) * size, py = Math.round(position.y / size) * size;
+        var key = px + "," + py;
+        if (cells.has(key)) continue;
+        cells.add(key);
+        var node = doc.createElementNS(mark.namespaceURI, "rect");
+        node.setAttribute("x", px - size / 2);
+        node.setAttribute("y", py - size / 2);
+        node.setAttribute("width", size);
+        node.setAttribute("height", size);
+        node.style.setProperty("--pixel-tone", 100 * (px + py - 15) / 50 + "%");
+        group.append(node);
+        pixels.push({ node: node, x: px, y: py, dx: 0, dy: 0 });
+      }
+      mark.setAttribute("data-mark-repel", "");
+      markMotion = { mark: mark, group: group, pixels: pixels };
+    }
+    markMotion.point = { x: x, y: y };
+  }
+
+  function paintMark(now) {
+    if (!markMotion) return false;
+    var point = markMotion.point;
+    var elapsed = markMotion.at ? Math.min(32, now - markMotion.at) : 16;
+    var ease = 1 - Math.exp(-elapsed / (point ? 44 : 68));
+    var moving = false;
+    markMotion.pixels.forEach(function (pixel) {
+      var x = point ? pixel.x - point.x : 0, y = point ? pixel.y - point.y : 0;
+      var distance = Math.hypot(x, y);
+      var force = point ? 15 * Math.pow(Math.max(0, 1 - distance / 20), 1.35) : 0;
+      if (!distance) {
+        x = pixel.x < 20 ? -1 : 1;
+        distance = 1;
+      }
+      var tx = x / distance * force, ty = y / distance * force;
+      var active = Math.hypot(tx - pixel.dx, ty - pixel.dy) > .08;
+      pixel.dx = active ? pixel.dx + (tx - pixel.dx) * ease : tx;
+      pixel.dy = active ? pixel.dy + (ty - pixel.dy) * ease : ty;
+      pixel.node.setAttribute("transform", "translate(" + pixel.dx.toFixed(2) + " " + pixel.dy.toFixed(2) + ")");
+      moving = moving || active;
     });
-    lastMark = { mark: mark, cell: cell };
+    markMotion.at = moving ? now : 0;
+    if (!moving && !point) clearMark();
+    return moving;
   }
 
   function paintPointer(now) {
     if (!pointer) return;
     var sample = pointer;
     pointer = null;
-    traceMark(sample, now);
+    repelMark(sample);
     var next = sample.target.closest(surfaceSelector);
     if (next !== surface || !shown(next)) dropSpotlight();
     if (!next || !shown(next)) return;
@@ -341,23 +383,19 @@
     if (!motionAllowed()) return;
     paintPointer(now);
     paintText(now);
-    while (markTrail.length && now - markTrail[0].at >= trailLife) markTrail.shift().node.remove();
-    markTrail.forEach(function (pixel) {
-      var age = (now - pixel.at) / trailLife;
-      pixel.node.style.setProperty("--age", Math.round(age * 100) + "%");
-      pixel.node.style.opacity = .73 * (1 - age);
-    });
+    var markMoving = paintMark(now);
     if (trail.length) {
       while (trail.length && now - trail[0].at >= trailLife) trail.shift();
       painter.draw(trail, now);
     }
-    if (decoding.size || trail.length || markTrail.length) schedule();
+    if (decoding.size || trail.length || markMoving) schedule();
   }
   function schedule() {
     if (!raf) raf = win.requestAnimationFrame(update);
   }
   function scroll() { shadowDirty = true; clearPointer(true); schedule(); }
   function reset() {
+    clearMark();
     clearPointer(true);
     decodeQueue.clear();
     decoding.forEach(function (_, element) { stopDecode(element); });

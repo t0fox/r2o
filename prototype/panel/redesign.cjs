@@ -93,18 +93,47 @@ async function main() {
       if (width === 1440) {
         const mark = page.locator(".brand-mark");
         const markBox = await mark.boundingBox();
-        const markY = markBox.y + markBox.height * .65;
+        const markY = markBox.y + markBox.height * .56;
+        const markX = markBox.x + markBox.width * .72;
         await page.mouse.move(markBox.x + markBox.width * .18, markY);
-        await page.mouse.move(markBox.x + markBox.width * .78, markY, { steps: 9 });
-        await mark.locator(".brand-trail rect").first().waitFor({ state: "attached" });
-        assert.ok(await mark.locator(".brand-trail rect").count() > 3);
+        await page.mouse.move(markX, markY, { steps: 7 });
         const wordmark = page.locator(".brand .brand-text strong");
         await wordmark.locator(".decode-ink > span").first().waitFor({ state: "attached" });
-        const glyphFont = await wordmark.locator(".decode-ink > span").first().evaluate(el => getComputedStyle(el).fontFamily);
-        assert.match(glyphFont, /Unbounded/);
+        const glyph = await wordmark.locator(".decode-ink > span").first().evaluate(el => {
+          const style = getComputedStyle(el);
+          return { font: style.fontFamily, color: style.color };
+        });
+        assert.match(glyph.font, /Unbounded/);
+        assert.equal(glyph.color, "rgb(255, 255, 255)");
         assert.equal(await wordmark.textContent(), "r2o");
+        const spread = () => mark.locator(".brand-pixels rect").evaluateAll(pixels => Math.max(0, ...pixels.map(pixel => {
+          const shift = pixel.transform.baseVal.getItem(0).matrix;
+          return Math.hypot(shift.e, shift.f);
+        })));
+        await page.waitForFunction(() =>
+          [...document.querySelectorAll(".brand-mark .brand-pixels rect")].some(pixel =>
+            Math.abs(pixel.transform.baseVal.getItem(0).matrix.e) > 4));
+        const directions = await mark.evaluate((svg, { x, y }) => {
+          const cursor = new DOMPoint(x, y).matrixTransform(svg.getScreenCTM().inverse());
+          return [...svg.querySelectorAll(".brand-pixels rect")].map(pixel => {
+            const shift = pixel.transform.baseVal.getItem(0).matrix;
+            return (pixel.x.baseVal.value + 1.25 - cursor.x) * shift.e +
+              (pixel.y.baseVal.value + 1.25 - cursor.y) * shift.f;
+          });
+        }, { x: markX, y: markY });
+        assert.ok(directions.filter(dot => dot > 5).length > 8);
+        assert.ok(directions.every(dot => dot >= -.1));
         await page.screenshot({ path: path.join(capture, "pixel-logo-1440.png"), clip: { x: 70, y: 5, width: 108, height: 100 } });
-        await mark.locator(".brand-trail rect").first().waitFor({ state: "detached" });
+        const scattered = await spread();
+        await page.mouse.move(40, markY);
+        await page.waitForTimeout(95);
+        const returning = await spread();
+        assert.ok(returning > .1 && returning < scattered);
+        await page.mouse.move(markX, markY);
+        await page.waitForTimeout(150);
+        assert.ok(await spread() > returning);
+        await page.mouse.move(40, markY);
+        await page.locator(".brand-mark[data-mark-repel]").waitFor({ state: "detached" });
         await wordmark.locator(".decode-ink").waitFor({ state: "detached" });
         await page.evaluate(() => {
           for (const tab of ["families", "updates", "diagnostics", "now", "boxes"]) {
@@ -157,7 +186,7 @@ async function main() {
         assert.equal(await page.locator("[data-decoding], [data-nav-motion]").count(), 0);
         assert.equal(await page.locator(".brand-flow").first().evaluate(e => getComputedStyle(e).animationName), "none");
         await mark.hover();
-        assert.equal(await mark.locator(".brand-trail rect").count(), 0);
+        assert.equal(await mark.locator(".brand-pixels rect").count(), 0);
       }
       assert.deepEqual(errors, []);
       await page.close();
