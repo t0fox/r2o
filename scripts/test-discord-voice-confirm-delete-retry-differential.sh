@@ -144,7 +144,7 @@ fn main() {
     };
     let mut trials = HashMap::from([(trial.trial_id, trial.clone())]);
     let attempts = std::cell::Cell::new(1); // The DEL in voice confirmation failed.
-    r2o_finish_voice_trial_confirmation(&mut trials, trial, false);
+    r2o_finish_voice_trial_confirmation(&mut trials, trial);
     assert!(!r2o_voice_target_has_active_trial(&trials, &1));
     assert!(r2o_voice_trial_can_start_search(&trials));
     let errors = r2o_cleanup_voice_trials_on_shutdown(&mut trials, |_trial| {

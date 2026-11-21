@@ -15369,13 +15369,24 @@ fn r2o_hold_voice_trial_until_expiry(trial: &mut R2oVoiceTrialContext) {
 fn r2o_finish_voice_trial_confirmation(
     trials: &mut HashMap<[u8; 16], R2oVoiceTrialContext>,
     mut trial: R2oVoiceTrialContext,
-    deletion_succeeded: bool,
 ) {
-    if deletion_succeeded {
-        trials.remove(&trial.trial_id);
-    } else {
-        r2o_hold_voice_trial_until_expiry(&mut trial);
-        trials.insert(trial.trial_id, trial);
+    r2o_hold_voice_trial_until_expiry(&mut trial);
+    trials.insert(trial.trial_id, trial);
+}
+
+#[cfg(unix)]
+fn r2o_finish_voice_trial_removal(
+    trials: &mut HashMap<[u8; 16], R2oVoiceTrialContext>,
+    ack: r2k_core::control::Ack,
+) {
+    if let Some(trial_id) = ack.trial_id
+        && trials.get(&trial_id).is_some_and(|trial| trial.response_confirmed)
+    {
+        if ack.ok {
+            trials.remove(&trial_id);
+        } else {
+            eprintln!("датапат отказал в досрочном снятии voice-плана ({}); действует аренда", ack_reason_text(ack.reason));
+        }
     }
 }
 
@@ -23293,6 +23304,18 @@ impl ControlClient {
         Ok(())
     }
 
+    fn send_r2o_voice_trial_removal(
+        &mut self,
+        trial: &R2oVoiceTrialContext,
+    ) -> Result<(), Box<dyn Error>> {
+        let delete = encode_delete_voice_addr_probe(
+            trial.target.client,
+            trial.target.server,
+            trial.trial_id,
+        )?;
+        self.write_command(&delete)
+    }
+
     fn confirm_r2o_voice_trial(
         &mut self,
         trial: R2oVoiceTrialContext,
@@ -23300,7 +23323,7 @@ impl ControlClient {
         catalog: &mut Catalog,
         catalog_path: &std::path::Path,
         mut persistence: Option<&mut R2oCatalogPersistence>,
-    ) -> Result<bool, Box<dyn Error>> {
+    ) -> Result<(), Box<dyn Error>> {
         if !trial.response_confirmed {
             return Err("голосовой план не подтверждён без ответа Discovery/STUN".into());
         }
@@ -23347,16 +23370,10 @@ impl ControlClient {
         }
         .map_err(|error| format!("не удалось сохранить голосовую привязку: {error}"))?;
         let plan_records = compile_text(&trial.plan_text)?;
-        let (command, command_kind) = if address_scoped {
-            (
-                encode_set_voice_addr(*trial.target.server.ip(), &plan_records)?,
-                COMMAND_SET_VOICE_ADDR,
-            )
+        let command = if address_scoped {
+            encode_set_voice_addr(*trial.target.server.ip(), &plan_records)?
         } else {
-            (
-                encode_set_name("@discord-voice", SHAPE_VOICE, 4, &plan_records)?,
-                COMMAND_SET_NAME,
-            )
+            encode_set_name("@discord-voice", SHAPE_VOICE, 4, &plan_records)?
         };
         persist_catalog_update(&updated, catalog_path, now, persistence.as_deref_mut())?;
         if let Err(install_error) = self.write_command(&command) {
@@ -23377,34 +23394,9 @@ impl ControlClient {
             };
         }
         *catalog = updated;
-        match self.wait_for_sent_command_ack(
-            &command,
-            command_kind,
-            std::time::Instant::now() + CONTROL_ACK_TIMEOUT,
-        ) {
-            Ok(Some(ack)) => {
-                self.record_http_binding_acknowledgement(&command, command_kind, ack);
-                if !ack.ok {
-                    eprintln!(
-                        "датапат отказал в постоянном voice-плане ({}); привязка сохранена для повтора",
-                        ack_reason_text(ack.reason)
-                    );
-                }
-            }
-            Ok(None) => eprintln!(
-                "датапат не подтвердил постоянный voice-план; привязка сохранена для повтора"
-            ),
-            Err(error) => eprintln!(
-                "результат установки постоянного voice-плана неизвестен ({error}); привязка сохранена для повтора"
-            ),
+        if let Err(error) = self.send_r2o_voice_trial_removal(&trial) {
+            eprintln!("временный voice-план доживёт до конца аренды: {error}");
         }
-        let deletion_succeeded = match self.retire_r2o_voice_trial(&trial) {
-            Ok(()) => true,
-            Err(error) => {
-                eprintln!("временный voice-план доживёт до конца аренды: {error}");
-                false
-            }
-        };
         let proof_name = match proof.proof {
             r2k_core::control::R2oVoiceProofKind::StunBinding => "STUN",
             r2k_core::control::R2oVoiceProofKind::DiscordDiscovery { .. } => "Discord Discovery",
@@ -23420,7 +23412,7 @@ impl ControlClient {
                 "общий @discord-voice".into()
             },
         );
-        Ok(deletion_succeeded)
+        Ok(())
     }
 
     fn watch_events(
@@ -25139,6 +25131,13 @@ impl ControlClient {
                         }
                     }
                     self.record_http_bound_binding_acknowledgement(ack);
+                    if ack.command == COMMAND_DEL_VOICE_ADDR_PROBE {
+                        r2o_finish_voice_trial_removal(&mut r2o_voice_trials, ack);
+                        continue;
+                    }
+                    if ack.command == COMMAND_SET_VOICE_ADDR && !ack.ok {
+                        eprintln!("датапат отказал в постоянном адресном voice-плане ({}); привязка сохранена для повтора", ack_reason_text(ack.reason));
+                    }
                     if let Some(trial) = r2o_take_voice_trial_on_nak(&mut r2o_voice_trials, ack) {
                         if let Some(worker) = voice_discovery.as_mut() {
                             worker.r2o_seen.r2o_after_trial_install(
@@ -25285,14 +25284,13 @@ impl ControlClient {
                                 path,
                                 catalog_persistence.as_mut(),
                             ) {
-                                Ok(deletion_succeeded) => {
+                                Ok(()) => {
                                     // C `voice_confirm`: `s->confirms++` после
                                     // записи постоянной привязки.
                                     worker.record_confirmation();
                                     r2o_finish_voice_trial_confirmation(
                                         &mut r2o_voice_trials,
                                         confirmed_trial.clone(),
-                                        deletion_succeeded,
                                     );
                                     match proof.proof {
                                         r2k_core::control::R2oVoiceProofKind::StunBinding => {
@@ -25308,21 +25306,12 @@ impl ControlClient {
                                 }
                                 Err(error) => {
                                     eprintln!("voice-план не подтверждён: {error}");
-                                    let deletion_succeeded = match self
-                                        .retire_r2o_voice_trial(&confirmed_trial)
-                                    {
-                                        Ok(()) => true,
-                                        Err(retire_error) => {
-                                            eprintln!(
-                                                "временный voice-план истечёт по аренде; досрочное снятие не удалось: {retire_error}"
-                                            );
-                                            false
-                                        }
-                                    };
+                                    if let Err(retire_error) = self.send_r2o_voice_trial_removal(&confirmed_trial) {
+                                        eprintln!("временный voice-план истечёт по аренде; досрочное снятие не удалось: {retire_error}");
+                                    }
                                     r2o_finish_voice_trial_confirmation(
                                         &mut r2o_voice_trials,
                                         confirmed_trial.clone(),
-                                        deletion_succeeded,
                                     );
                                     "failed"
                                 }
@@ -64103,10 +64092,11 @@ group_block_proven: false,
             assert_eq!(&permanent.body[1..1 + name_len], b"@discord-voice");
             assert_eq!(permanent.body[1 + name_len], super::SHAPE_VOICE);
             assert_eq!(permanent.body[2 + name_len], 4);
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(1))).unwrap();
+            let remove = super::read_frame(&mut stream).unwrap();
             stream
                 .write_all(&encode_ack(permanent.kind, true, 0).unwrap())
                 .unwrap();
-            let remove = super::read_frame(&mut stream).unwrap();
             stream
                 .write_all(
                     &encode_ack_for_trial(remove.kind, true, 0, Some(fallback_trial_id)).unwrap(),
@@ -64159,7 +64149,7 @@ group_block_proven: false,
         let mut fallback_catalog = Catalog::load(&fallback_catalog_path).unwrap();
         fallback_client
             .confirm_r2o_voice_trial(
-                fallback_trial,
+                fallback_trial.clone(),
                 &fallback_proof,
                 &mut fallback_catalog,
                 &fallback_catalog_path,
@@ -64169,6 +64159,25 @@ group_block_proven: false,
         let (permanent_kind, remove_kind) = fallback_server.join().unwrap();
         assert_eq!(permanent_kind, super::COMMAND_SET_NAME);
         assert_eq!(remove_kind, super::COMMAND_DEL_VOICE_ADDR_PROBE);
+        let mut awaiting_removal = HashMap::new();
+        super::r2o_finish_voice_trial_confirmation(&mut awaiting_removal, fallback_trial);
+        let permanent_ack = super::decode_ack(&read_frame(&mut fallback_client.socket).unwrap()).unwrap();
+        assert_eq!(permanent_ack.command, permanent_kind);
+        let delete_ack = super::decode_ack(&read_frame(&mut fallback_client.socket).unwrap()).unwrap();
+        assert_eq!(delete_ack.command, remove_kind);
+        assert_eq!(delete_ack.trial_id, Some(fallback_trial_id));
+        super::r2o_finish_voice_trial_removal(&mut awaiting_removal, Ack {
+            trial_id: Some([0; 16]),
+            ..delete_ack
+        });
+        super::r2o_finish_voice_trial_removal(&mut awaiting_removal, Ack {
+            ok: false,
+            reason: r2k_core::control::ACK_BAD_ARGS,
+            ..delete_ack
+        });
+        assert!(awaiting_removal.contains_key(&fallback_trial_id));
+        super::r2o_finish_voice_trial_removal(&mut awaiting_removal, delete_ack);
+        assert!(!awaiting_removal.contains_key(&fallback_trial_id));
         let fallback_saved = Catalog::load(&fallback_catalog_path).unwrap();
         let fallback_binding = &fallback_saved.boxes[0].bindings[0];
         assert_eq!(fallback_binding.kind, "name");
