@@ -2600,21 +2600,27 @@ mod app {
                             .unwrap_or(0);
                         let tls_host = tcp_hello_from_packet(bytes).and_then(|hello| hello.host);
                         let tls_address = packet_view.as_ref().map(|view| view.dst);
-                        // Пробы контроллера (mark=probe_mark) уже несут
-                        // временный план: удерживать их в ожидании другого
-                        // плана нельзя — иначе собственный замер ждёт
-                        // собственный пакет и база перестаёт воспроизводиться.
-                        let allow_tls = r2o_inline_hold_allowed(options.mode, controller_probe)
-                            && (is_tls_plan(&plan)
-                                || family.is_some_and(|family| match tls_host.as_deref() {
-                                    Some(host) => name_plans.has_tls_candidate_target(
-                                        Some(host),
-                                        tls_address,
-                                        family,
-                                        tls_source_port,
-                                    ),
-                                    None => name_plans.has_tls_candidate(family),
-                                }));
+                        // Собираем ClientHello зонда только для уже принятой
+                        // временной привязки этого порта, даже до появления SNI.
+                        let installed_tls_probe = controller_probe
+                            && family.is_some_and(|family| {
+                                name_plans.has_tls_probe_on_port(family, tls_source_port)
+                            });
+                        let allow_tls = r2o_inline_hold_allowed(
+                            options.mode,
+                            controller_probe,
+                            installed_tls_probe,
+                        ) && (controller_probe
+                            || is_tls_plan(&plan)
+                            || family.is_some_and(|family| match tls_host.as_deref() {
+                                Some(host) => name_plans.has_tls_candidate_target(
+                                    Some(host),
+                                    tls_address,
+                                    family,
+                                    tls_source_port,
+                                ),
+                                None => name_plans.has_tls_candidate(family),
+                            }));
                         let http_source_port = if controller_probe {
                             packet_view
                                 .as_ref()
@@ -2624,10 +2630,11 @@ mod app {
                         } else {
                             0
                         };
-                        let allow_http = r2o_inline_hold_allowed(options.mode, controller_probe)
-                            && family.is_some_and(|family| {
-                                name_plans.has_http_candidate(family, http_source_port)
-                            });
+                        let allow_http =
+                            r2o_inline_hold_allowed(options.mode, controller_probe, false)
+                                && family.is_some_and(|family| {
+                                    name_plans.has_http_candidate(family, http_source_port)
+                                });
                         let observe_tls = !controller_probe
                             && (control.as_ref().is_some_and(ControlServer::is_connected)
                                 || r2o_snapshot_control
@@ -5399,10 +5406,12 @@ mod app {
         probe_mark != 0 && mark == Some(probe_mark)
     }
 
-    /// Удерживать ли пакет в ожидании плана. Пробы контроллера уже несут
-    /// временный план: удержание заставило бы замер ждать собственный пакет.
-    fn r2o_inline_hold_allowed(mode: RuntimeMode, controller_probe: bool) -> bool {
-        mode == RuntimeMode::Apply && !controller_probe
+    fn r2o_inline_hold_allowed(
+        mode: RuntimeMode,
+        controller_probe: bool,
+        installed_probe: bool,
+    ) -> bool {
+        mode == RuntimeMode::Apply && (!controller_probe || installed_probe)
     }
 
     fn r2o_packet_route_skip(
@@ -8241,17 +8250,34 @@ mod app {
         }
 
         #[test]
+        fn installed_tls_probe_can_reassemble_client_hello() {
+            assert!(super::r2o_inline_hold_allowed(
+                RuntimeMode::Apply,
+                true,
+                true
+            ));
+            assert!(!super::r2o_inline_hold_allowed(
+                RuntimeMode::Observe,
+                true,
+                true
+            ));
+        }
+
+        #[test]
         fn controller_probes_are_never_held_waiting_for_a_plan() {
             assert!(!super::r2o_inline_hold_allowed(
                 super::RuntimeMode::Apply,
-                true
+                true,
+                false
             ));
             assert!(super::r2o_inline_hold_allowed(
                 super::RuntimeMode::Apply,
+                false,
                 false
             ));
             assert!(!super::r2o_inline_hold_allowed(
                 super::RuntimeMode::Observe,
+                false,
                 false
             ));
         }

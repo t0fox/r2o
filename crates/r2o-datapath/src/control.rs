@@ -845,6 +845,16 @@ impl NamePlans {
         }
     }
 
+    pub fn has_tls_probe_on_port(&self, family: u8, source_port: u16) -> bool {
+        source_port != 0
+            && self.probes.iter().any(|(key, probe)| {
+                key.source_port == source_port
+                    && key.name.family == family
+                    && key.name.shape != SHAPE_HTTP
+                    && probe.plan.stream_input()
+            })
+    }
+
     pub fn has_tls_candidate(&self, family: u8) -> bool {
         self.plans.iter().any(|(key, entry)| {
             key.family == family && key.shape != SHAPE_HTTP && entry.plan.stream_input()
@@ -6180,6 +6190,33 @@ mod tests {
             plans.select(&packet).map(|selected| selected.id),
             Some(permanent_id)
         );
+    }
+
+    #[test]
+    fn tls_probe_reassembly_is_scoped_to_installed_family_and_port() {
+        let mut plans = NamePlans::default();
+        let mut records = tls_plan_records([0x51; 16]);
+        records[6..8].copy_from_slice(&5_u16.to_be_bytes());
+        records[10..12].copy_from_slice(&4_u16.to_be_bytes());
+        records.extend_from_slice(&[1, 9, 0, 1, 1, 1, 10, 0, 0]);
+        let command = r2k_core::control::encode_set_name_probe(
+            "stream.example",
+            r2k_core::control::SHAPE_ECH_TS,
+            4,
+            40_000,
+            &records,
+            [0x52; 16],
+        )
+        .unwrap();
+        let frame = r2k_core::control::read_frame(&mut std::io::Cursor::new(command)).unwrap();
+
+        assert!(!plans.has_tls_probe_on_port(4, 40_000));
+        assert!(plans.handle(&frame).ok);
+        assert!(plans.has_tls_probe_on_port(4, 40_000));
+        assert!(!plans.has_tls_probe_on_port(6, 40_000));
+        assert!(!plans.has_tls_probe_on_port(4, 40_001));
+        plans.clear_probes();
+        assert!(!plans.has_tls_probe_on_port(4, 40_000));
     }
 
     #[test]
