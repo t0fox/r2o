@@ -3381,9 +3381,9 @@ mod app {
                             | PacketDecision::Refused { .. }
                             | PacketDecision::RefusedUdp { .. }
                             | PacketDecision::FlowUnfit { .. } => {
-                                let late_tail = original
-                                    .filter(|_| udp_replay.is_none())
-                                    .map_or(R2oUdpLateTail::Unhandled, |bytes| {
+                                let late_tail = original.filter(|_| udp_replay.is_none()).map_or(
+                                    R2oUdpLateTail::Unhandled,
+                                    |bytes| {
                                         r2o_udp_handle_late_tail(
                                             &mut socket,
                                             raw.as_ref(),
@@ -3399,7 +3399,8 @@ mod app {
                                             follow_receive_seq,
                                             false,
                                         )
-                                    });
+                                    },
+                                );
                                 let needs_verdict = late_tail == R2oUdpLateTail::Unhandled;
                                 if needs_verdict {
                                     send_verdicts(&mut socket, delivery_ids, NF_ACCEPT, false)?;

@@ -8425,8 +8425,8 @@ fn r2o_confirm_discovery_outcome(
             "; сервер вернул Cloudflare challenge: это не подтверждает обход и кандидат не сохранён",
         );
     } else {
-        let verified = r2o_family_recovery_decision(&result, true)
-            == R2oFamilyRecoveryDecision::Verified;
+        let verified =
+            r2o_family_recovery_decision(&result, true) == R2oFamilyRecoveryDecision::Verified;
         outcome.detail.push_str(if verified {
             "; кандидат не сохранён, протокольное подтверждение=да"
         } else {
@@ -15380,12 +15380,17 @@ fn r2o_finish_voice_trial_removal(
     ack: r2k_core::control::Ack,
 ) {
     if let Some(trial_id) = ack.trial_id
-        && trials.get(&trial_id).is_some_and(|trial| trial.response_confirmed)
+        && trials
+            .get(&trial_id)
+            .is_some_and(|trial| trial.response_confirmed)
     {
         if ack.ok {
             trials.remove(&trial_id);
         } else {
-            eprintln!("датапат отказал в досрочном снятии voice-плана ({}); действует аренда", ack_reason_text(ack.reason));
+            eprintln!(
+                "датапат отказал в досрочном снятии voice-плана ({}); действует аренда",
+                ack_reason_text(ack.reason)
+            );
         }
     }
 }
@@ -16286,7 +16291,9 @@ impl DiscoveryWorker {
                     let mut searches = runner_searches
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    searches.asking_with_own_plan.insert(r2o_discovery_task_key(&target));
+                    searches
+                        .asking_with_own_plan
+                        .insert(r2o_discovery_task_key(&target));
                     searches.update(&target, "базовый вопрос перед своими планами", 0, 0, "", "");
                 }
                 let base_options = r2o_discovery_classify_options(
@@ -18202,7 +18209,9 @@ group_block_proven: false,
                                 let mut refreshes = worker_catalog_refreshes
                                     .lock()
                                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                                if refreshes.remove(&task_key) && !worker_cancel.load(Ordering::Relaxed) {
+                                if refreshes.remove(&task_key)
+                                    && !worker_cancel.load(Ordering::Relaxed)
+                                {
                                     task_cancel.store(false, Ordering::Relaxed);
                                     continue;
                                 }
@@ -20159,7 +20168,8 @@ group_block_proven: false,
         // Запрос мог прийти между окончанием замера и публикацией исхода.
         let catalog_recheck = !outcome.queue_expired
             && self.active.get(&task_key) == Some(&work.requested_target)
-            && self.catalog_refreshes
+            && self
+                .catalog_refreshes
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(&task_key);
@@ -22368,7 +22378,10 @@ impl ControlInput {
             match socket.read(&mut incoming) {
                 Ok(0) if self.0.is_empty() => return Ok(ControlRead::Closed),
                 Ok(0) => {
-                    return Err(Error::new(ErrorKind::UnexpectedEof, "неполный управляющий кадр"));
+                    return Err(Error::new(
+                        ErrorKind::UnexpectedEof,
+                        "неполный управляющий кадр",
+                    ));
                 }
                 Ok(length) => self.0.extend_from_slice(&incoming[..length]),
                 Err(error) if error.kind() == ErrorKind::Interrupted => continue,
@@ -23848,7 +23861,10 @@ impl ControlClient {
                     });
                 }
                 if r2o_scheduler_tick_pending && self.pending_events.is_empty() {
-                    match self.input.read(&mut self.socket, std::time::Duration::ZERO)? {
+                    match self
+                        .input
+                        .read(&mut self.socket, std::time::Duration::ZERO)?
+                    {
                         ControlRead::Frame(frame) => {
                             let batch = self.input.read_batch(&mut self.socket, frame)?;
                             self.pending_events.extend(batch);
@@ -25136,7 +25152,10 @@ impl ControlClient {
                         continue;
                     }
                     if ack.command == COMMAND_SET_VOICE_ADDR && !ack.ok {
-                        eprintln!("датапат отказал в постоянном адресном voice-плане ({}); привязка сохранена для повтора", ack_reason_text(ack.reason));
+                        eprintln!(
+                            "датапат отказал в постоянном адресном voice-плане ({}); привязка сохранена для повтора",
+                            ack_reason_text(ack.reason)
+                        );
                     }
                     if let Some(trial) = r2o_take_voice_trial_on_nak(&mut r2o_voice_trials, ack) {
                         if let Some(worker) = voice_discovery.as_mut() {
@@ -25306,8 +25325,12 @@ impl ControlClient {
                                 }
                                 Err(error) => {
                                     eprintln!("voice-план не подтверждён: {error}");
-                                    if let Err(retire_error) = self.send_r2o_voice_trial_removal(&confirmed_trial) {
-                                        eprintln!("временный voice-план истечёт по аренде; досрочное снятие не удалось: {retire_error}");
+                                    if let Err(retire_error) =
+                                        self.send_r2o_voice_trial_removal(&confirmed_trial)
+                                    {
+                                        eprintln!(
+                                            "временный voice-план истечёт по аренде; досрочное снятие не удалось: {retire_error}"
+                                        );
                                     }
                                     r2o_finish_voice_trial_confirmation(
                                         &mut r2o_voice_trials,
@@ -27271,7 +27294,8 @@ impl ControlClient {
             candidate_settle,
             deadline,
             reply,
-        } = command else {
+        } = command
+        else {
             return Ok(Some(command));
         };
         if r2o_http_command_expired(deadline, &reply) {
@@ -27281,7 +27305,9 @@ impl ControlClient {
             || control_command_trial_id(&command, control::COMMAND_SET_NAME_PROBE) != Some(trial_id)
             || pending.contains_key(&trial_id)
         {
-            let _ = reply.send(Err("недопустимый или повторный trial ID временной TCP-пробы".into()));
+            let _ = reply.send(Err(
+                "недопустимый или повторный trial ID временной TCP-пробы".into(),
+            ));
             return Ok(None);
         }
         let delete = r2o_encode_owned_name_probe_delete(&host, shape, family, port, trial_id)?;
@@ -27889,7 +27915,9 @@ impl ControlClient {
                 ControlRead::Frame(frame) => frame,
                 ControlRead::Pending => continue,
                 ControlRead::Closed => {
-                    return Err("соединение с датапатом закрыто во время захвата ClientHello".into());
+                    return Err(
+                        "соединение с датапатом закрыто во время захвата ClientHello".into(),
+                    );
                 }
             };
             if frame.kind == EVENT_CLIENT_SHAPE {
@@ -28348,7 +28376,9 @@ impl ControlClient {
                 ControlRead::Frame(frame) => frame,
                 ControlRead::Pending => continue,
                 ControlRead::Closed => {
-                    return Err("соединение с датапатом закрыто во время проверки TCP-обмена".into());
+                    return Err(
+                        "соединение с датапатом закрыто во время проверки TCP-обмена".into(),
+                    );
                 }
             };
             if !self.observe_ask_proof_frame(
@@ -37750,7 +37780,8 @@ mod tests {
             family: 4,
             shape: SHAPE_MODERN,
         };
-        let outcome = || super::DiscoveryOutcome {
+        let outcome = || {
+            super::DiscoveryOutcome {
             target: target.clone(),
             plan_text: Some(
                 "r2o-plan 1 11\nid 00000000000000000000000000000000\nproto tcp tls\nsplit sni_middle +0\n"
@@ -37771,6 +37802,7 @@ mod tests {
             volume_fingerprint: None,
             volume_box_id: None,
             retry_after: None,
+        }
         };
         let (client_stream, _server_stream) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut client = ControlClient {
@@ -49187,13 +49219,21 @@ mod tests {
         let без_applied =
             super::r2o_confirm_discovery_outcome(outcome(), Ok(r2o_test_fetch_result()), false);
         assert!(без_applied.plan_text.is_none());
-        assert!(без_applied.detail.contains("протокольное подтверждение=да, точное APPLIED=нет"));
+        assert!(
+            без_applied
+                .detail
+                .contains("протокольное подтверждение=да, точное APPLIED=нет")
+        );
 
         let mut неполный = r2o_test_fetch_result();
         неполный.complete = false;
         let без_полного_https = super::r2o_confirm_discovery_outcome(outcome(), Ok(неполный), true);
         assert!(без_полного_https.plan_text.is_none());
-        assert!(без_полного_https.detail.contains("протокольное подтверждение=нет, точное APPLIED=да"));
+        assert!(
+            без_полного_https
+                .detail
+                .contains("протокольное подтверждение=нет, точное APPLIED=да")
+        );
 
         let подтверждённый =
             super::r2o_confirm_discovery_outcome(outcome(), Ok(r2o_test_fetch_result()), true);
@@ -59308,10 +59348,9 @@ group_block_proven: false,
         )
         .unwrap();
         let trial_id = [1; 16];
-        let command = super::encode_set_name_probe(
-            "example.test", SHAPE_HTTP, 4, 41000, &plan, trial_id,
-        )
-        .unwrap();
+        let command =
+            super::encode_set_name_probe("example.test", SHAPE_HTTP, 4, 41000, &plan, trial_id)
+                .unwrap();
         let (reply, response) = mpsc::sync_channel(1);
         let mut pending = std::collections::HashMap::new();
         assert!(
@@ -59357,7 +59396,10 @@ group_block_proven: false,
                 matched
             );
             if !matched {
-                assert!(matches!(response.try_recv(), Err(mpsc::TryRecvError::Empty)));
+                assert!(matches!(
+                    response.try_recv(),
+                    Err(mpsc::TryRecvError::Empty)
+                ));
             }
         }
         assert_eq!(
@@ -64092,7 +64134,9 @@ group_block_proven: false,
             assert_eq!(&permanent.body[1..1 + name_len], b"@discord-voice");
             assert_eq!(permanent.body[1 + name_len], super::SHAPE_VOICE);
             assert_eq!(permanent.body[2 + name_len], 4);
-            stream.set_read_timeout(Some(std::time::Duration::from_secs(1))).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                .unwrap();
             let remove = super::read_frame(&mut stream).unwrap();
             stream
                 .write_all(&encode_ack(permanent.kind, true, 0).unwrap())
@@ -64161,20 +64205,28 @@ group_block_proven: false,
         assert_eq!(remove_kind, super::COMMAND_DEL_VOICE_ADDR_PROBE);
         let mut awaiting_removal = HashMap::new();
         super::r2o_finish_voice_trial_confirmation(&mut awaiting_removal, fallback_trial);
-        let permanent_ack = super::decode_ack(&read_frame(&mut fallback_client.socket).unwrap()).unwrap();
+        let permanent_ack =
+            super::decode_ack(&read_frame(&mut fallback_client.socket).unwrap()).unwrap();
         assert_eq!(permanent_ack.command, permanent_kind);
-        let delete_ack = super::decode_ack(&read_frame(&mut fallback_client.socket).unwrap()).unwrap();
+        let delete_ack =
+            super::decode_ack(&read_frame(&mut fallback_client.socket).unwrap()).unwrap();
         assert_eq!(delete_ack.command, remove_kind);
         assert_eq!(delete_ack.trial_id, Some(fallback_trial_id));
-        super::r2o_finish_voice_trial_removal(&mut awaiting_removal, Ack {
-            trial_id: Some([0; 16]),
-            ..delete_ack
-        });
-        super::r2o_finish_voice_trial_removal(&mut awaiting_removal, Ack {
-            ok: false,
-            reason: r2k_core::control::ACK_BAD_ARGS,
-            ..delete_ack
-        });
+        super::r2o_finish_voice_trial_removal(
+            &mut awaiting_removal,
+            Ack {
+                trial_id: Some([0; 16]),
+                ..delete_ack
+            },
+        );
+        super::r2o_finish_voice_trial_removal(
+            &mut awaiting_removal,
+            Ack {
+                ok: false,
+                reason: r2k_core::control::ACK_BAD_ARGS,
+                ..delete_ack
+            },
+        );
         assert!(awaiting_removal.contains_key(&fallback_trial_id));
         super::r2o_finish_voice_trial_removal(&mut awaiting_removal, delete_ack);
         assert!(!awaiting_removal.contains_key(&fallback_trial_id));
