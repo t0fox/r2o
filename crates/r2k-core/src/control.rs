@@ -84,6 +84,7 @@ pub const COMMAND_SET_NAME_BOUND: u16 = 0x0092;
 pub const COMMAND_DEL_NAME_BOUND: u16 = 0x0093;
 
 const DNS_TCP_PLAN_PREFIX: &str = "@dns-tcp/";
+pub const DNS_PLAN_LEASE: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Ключ TLS-привязки с адресом, портом и видимым SNI. Пустое имя обозначает TLS без SNI.
 pub fn dns_tcp_plan_key(endpoint: SocketAddr, sni: &[u8]) -> Option<String> {

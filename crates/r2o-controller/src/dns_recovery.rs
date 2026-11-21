@@ -17,6 +17,7 @@ const ROUTE_TTL: Duration = Duration::from_secs(300);
 const ROUTE_COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 const CHECK_TIMEOUT: Duration = Duration::from_secs(7);
+const RECHECK_INTERVAL: Duration = Duration::from_secs(90);
 const RETRY: Duration = Duration::from_secs(300);
 
 #[derive(Clone)]
@@ -113,7 +114,9 @@ impl Drop for RouteCommand {
 struct Binding {
     key: String,
     plan_id: [u8; 16],
+    records: Vec<u8>,
     context: control::BindingContext,
+    expires: Instant,
 }
 
 impl Binding {
@@ -129,15 +132,32 @@ impl Binding {
         if parsed.id != evidence.plan_id {
             return None;
         }
-        let trial = random_id().ok()?;
-        let frame = encode_set_name_bound(
+        let (context, expires) = Self::apply(
+            client,
             &key,
             wire_shape,
             request.target.family,
             &evidence.records,
-            trial,
-        )
-        .ok()?;
+        )?;
+        Some(Self {
+            key,
+            plan_id: evidence.plan_id,
+            records: evidence.records,
+            context,
+            expires,
+        })
+    }
+
+    fn apply(
+        client: &mut ControlClient,
+        key: &str,
+        shape: u8,
+        family: u8,
+        records: &[u8],
+    ) -> Option<(control::BindingContext, Instant)> {
+        let trial = random_id().ok()?;
+        let frame = encode_set_name_bound(key, shape, family, records, trial).ok()?;
+        let expires = Instant::now() + control::DNS_PLAN_LEASE;
         let ack = client
             .exchange_command_with_timeout(
                 &frame,
@@ -151,13 +171,24 @@ impl Binding {
             && context.is_known()
             && !context.temporary
             && context.kind == 1
-            && context.shape == wire_shape
-            && context.family == request.target.family)
-            .then_some(Self {
-                key,
-                plan_id: evidence.plan_id,
-                context,
-            })
+            && context.shape == shape
+            && context.family == family)
+            .then_some((context, expires))
+    }
+
+    fn renew(&mut self, client: &mut ControlClient) -> bool {
+        let Some((context, expires)) = Self::apply(
+            client,
+            &self.key,
+            self.context.shape,
+            self.context.family,
+            &self.records,
+        ) else {
+            return false;
+        };
+        self.context = context;
+        self.expires = expires;
+        true
     }
 
     fn remove(&self, client: &mut ControlClient) {
@@ -290,6 +321,7 @@ impl Recovery {
     }
 
     fn route(&self, endpoint: SocketAddr, add: bool, now: Instant) -> Option<RouteCommand> {
+        let seconds = if add { ROUTE_TTL.as_secs() } else { 0 };
         let child = Command::new(&self.firewall)
             .args([
                 "dns-route",
@@ -297,7 +329,7 @@ impl Recovery {
                 &endpoint.ip().to_string(),
                 "tcp",
                 &endpoint.port().to_string(),
-                if add { "300" } else { "0" },
+                &seconds.to_string(),
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -492,7 +524,19 @@ impl Recovery {
                     );
                     return;
                 };
-                if let Some(binding) = binding.take() {
+                if let Some(mut binding) = binding.take() {
+                    state.live[index].verified_recovery = None;
+                    if !binding.renew(client) {
+                        self.release(
+                            &attempt.request,
+                            Some(binding),
+                            client,
+                            state,
+                            now,
+                            Some("Не удалось продлить план DNS."),
+                        );
+                        return;
+                    }
                     attempt.phase = Phase::Recheck(Recheck::new(
                         binding,
                         &attempt.request,
@@ -510,6 +554,8 @@ impl Recovery {
                 self.attempt = Some(attempt);
             }
             Phase::Recheck(recheck) => {
+                let current =
+                    current.filter(|_| now < attempt.expires && now < recheck.binding.expires);
                 let ready = current.and_then(|_| recheck.poll(now));
                 if ready.is_none() && current.is_some() {
                     self.attempt = Some(attempt);
@@ -532,11 +578,12 @@ impl Recovery {
                         checked_at: wall,
                         rtt_ms: result.answer_rtt_ms,
                     });
+                    let expires = attempt.expires.min(recheck.binding.expires);
                     self.retained.push(Retained {
                         request: attempt.request,
                         binding: recheck.binding,
-                        expires: attempt.expires,
-                        renew_at: now + Duration::from_secs(90),
+                        expires,
+                        renew_at: (now + RECHECK_INTERVAL).min(expires - CHECK_TIMEOUT),
                     });
                 } else {
                     self.release(
@@ -692,7 +739,9 @@ mod tests {
             binding: Binding {
                 key: String::new(),
                 plan_id: [5; 16],
+                records: Vec::new(),
                 context,
+                expires: now + control::DNS_PLAN_LEASE,
             },
             receiver,
             result: None,
@@ -759,6 +808,7 @@ mod tests {
             let mut plans = r2o_datapath::control::NamePlans::default();
             for command in [
                 control::COMMAND_SET_NAME_BOUND,
+                control::COMMAND_SET_NAME_BOUND,
                 control::COMMAND_DEL_NAME_BOUND,
             ] {
                 let frame = control::read_frame(&mut peer).unwrap();
@@ -788,7 +838,7 @@ mod tests {
             sni: "resolver.example".into(),
             ..DnsService::default()
         };
-        let binding = Binding::install(
+        let mut binding = Binding::install(
             &mut client,
             &request,
             &service,
@@ -800,6 +850,11 @@ mod tests {
         )
         .unwrap();
         assert!(binding.context.is_known());
+        let old_context = binding.context;
+        let old_expires = binding.expires;
+        assert!(binding.renew(&mut client));
+        assert_ne!(binding.context.generation, old_context.generation);
+        assert!(binding.expires >= old_expires);
         binding.remove(&mut client);
         responder.join().unwrap();
     }

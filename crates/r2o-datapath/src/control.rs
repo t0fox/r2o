@@ -12,6 +12,7 @@ use r2k_core::control::{
     decode_client_shape, is_tcp_context_shape, is_tcp_plan_shape, r2k_link_shape_tcp_base,
     r2k_link_shape_tcp_context,
 };
+use r2k_core::dns_config::DNS_SERVICE_MAX;
 use r2k_core::packet::PacketView;
 #[cfg(test)]
 use r2k_core::plan::PLAN_MAGIC;
@@ -82,6 +83,7 @@ struct DomainBypassKey {
 
 pub struct NamePlans {
     plans: HashMap<NamePlanKey, InstalledPlan>,
+    dns_plans: HashMap<NamePlanKey, DnsBoundPlan>,
     addr_plans: HashMap<AddrPlanKey, InstalledPlan>,
     suffix_plans: HashMap<SuffixPlanKey, InstalledPlan>,
     domain_bypasses: HashSet<DomainBypassKey>,
@@ -104,6 +106,11 @@ struct InstalledPlan {
     plan: Plan,
     generation: u64,
     last_used: Cell<u64>,
+}
+
+struct DnsBoundPlan {
+    installed: InstalledPlan,
+    expires: Instant,
 }
 
 struct ProbePlan {
@@ -205,6 +212,7 @@ impl NamePlans {
         }
         Self {
             plans: HashMap::new(),
+            dns_plans: HashMap::new(),
             addr_plans: HashMap::new(),
             suffix_plans: HashMap::new(),
             domain_bypasses: HashSet::new(),
@@ -408,6 +416,7 @@ impl NamePlans {
                 COMMAND_SET_HTTPS => self.set_https(body),
                 COMMAND_CLEAR if frame.body.is_empty() => {
                     self.plans.clear();
+                    self.dns_plans.clear();
                     self.addr_plans.clear();
                     self.suffix_plans.clear();
                     self.domain_bypasses.clear();
@@ -475,11 +484,16 @@ impl NamePlans {
             dns_bound_name(name, family, shape)?
         };
         let plan = Plan::parse_wire(&body[fields_end..]).ok()?;
-        let installed = self.plans.get(&NamePlanKey {
+        let key = NamePlanKey {
             host,
             family,
             shape,
-        })?;
+        };
+        let installed = if shape == SHAPE_HTTP {
+            self.plans.get(&key)?
+        } else {
+            &self.dns_plans.get(&key)?.installed
+        };
         if installed.plan.id != plan.id {
             return None;
         }
@@ -851,13 +865,14 @@ impl NamePlans {
         })
     }
 
-    /// Удаляет временные испытания после отключения контроллера.
+    /// Удаляет временные испытания и адресные DNS-планы после отключения контроллера.
     ///
     /// C `d2k_plantab_clear_probes` снимает ещё и постоянные name-записи с
     /// `qdeny`: запрет QUIC — не знание каталога, и без контроллера снимать
     /// его некому (`plans.c:897-910`).
     pub fn clear_probes(&mut self) {
-        let mut cleared = false;
+        let mut cleared = !self.dns_plans.is_empty();
+        self.dns_plans.clear();
         self.plans.retain(|_, entry| {
             if entry.plan.quic_deny() {
                 cleared = true;
@@ -937,9 +952,14 @@ impl NamePlans {
     }
 
     pub fn has_dns_tcp_candidate(&self, address: Address, port: u16) -> bool {
+        if self.dns_plans.is_empty() {
+            return false;
+        }
+        let now = Instant::now();
         let endpoint = SocketAddr::new(address.as_ip_addr(), port);
-        self.plans.iter().any(|(key, entry)| {
-            entry.plan.stream_input()
+        self.dns_plans.iter().any(|(key, entry)| {
+            entry.expires > now
+                && entry.installed.plan.stream_input()
                 && control::dns_tcp_plan_endpoint(key.host.as_bytes()) == Some(endpoint)
         })
     }
@@ -1101,7 +1121,11 @@ impl NamePlans {
     }
 
     fn binding_for_plan(&self, plan: &Plan) -> Option<PlanBinding> {
-        for (key, installed) in &self.plans {
+        for (key, installed) in self.plans.iter().chain(
+            self.dns_plans
+                .iter()
+                .map(|(key, entry)| (key, &entry.installed)),
+        ) {
             if std::ptr::eq(&installed.plan, plan) {
                 return Some(PlanBinding {
                     trial_id: [0; 16],
@@ -1300,6 +1324,29 @@ impl NamePlans {
         };
         if !compatible || !self.r2o_plan_valid(&plan) {
             return (false, control::ACK_BAD_PLAN);
+        }
+        if dns_scope {
+            let now = Instant::now();
+            self.dns_plans.retain(|_, entry| entry.expires > now);
+            if !self.dns_plans.contains_key(&key)
+                && (self.dns_plans.len() >= DNS_SERVICE_MAX
+                    || self.dns_plans.try_reserve(1).is_err())
+            {
+                return (false, control::ACK_NO_ROOM);
+            }
+            let generation = self.next_generation();
+            self.dns_plans.insert(
+                key,
+                DnsBoundPlan {
+                    installed: InstalledPlan {
+                        plan,
+                        generation,
+                        last_used: Cell::new(0),
+                    },
+                    expires: now + control::DNS_PLAN_LEASE,
+                },
+            );
+            return (true, control::ACK_OK);
         }
         // C `set_name_family` для grandfather не заводит отдельную форму:
         // обновляет уже измеренную запись имени (HTTP и grandfather не в счёт).
@@ -2010,8 +2057,12 @@ impl NamePlans {
             family: binding.family,
             shape: binding.shape,
         };
+        let installed = self
+            .plans
+            .get(&key)
+            .or_else(|| self.dns_plans.get(&key).map(|entry| &entry.installed));
         if self.epoch == binding.epoch
-            && self.plans.get(&key).is_some_and(|installed| {
+            && installed.is_some_and(|installed| {
                 let current = BindingContext {
                     generation: installed.generation,
                     kind: 1,
@@ -2025,6 +2076,7 @@ impl NamePlans {
             })
         {
             self.plans.remove(&key);
+            self.dns_plans.remove(&key);
             self.revision = self.revision.wrapping_add(1);
         }
         (true, control::ACK_OK)
@@ -2169,17 +2221,24 @@ impl NamePlans {
     }
 
     fn find_dns_tcp_plan(&self, endpoint: SocketAddr, sni: &[u8], shape: u8) -> Option<&Plan> {
+        if self.dns_plans.is_empty() {
+            return None;
+        }
         let mut key = NamePlanKey {
             host: control::dns_tcp_plan_key(endpoint, sni)?,
             family: if endpoint.is_ipv4() { 4 } else { 6 },
             shape,
         };
-        let entry = self.plans.get(&key).or_else(|| {
-            key.shape = r2k_link_shape_tcp_base(shape);
-            self.plans.get(&key)
-        })?;
-        Self::touch(entry, self.next_plan_clock());
-        Some(&entry.plan)
+        let now = Instant::now();
+        let entry = self
+            .dns_plans
+            .get(&key)
+            .filter(|entry| entry.expires > now)
+            .or_else(|| {
+                key.shape = r2k_link_shape_tcp_base(shape);
+                self.dns_plans.get(&key).filter(|entry| entry.expires > now)
+            })?;
+        Some(&entry.installed.plan)
     }
 
     fn find_tcp_endpoint_probe(
@@ -6482,7 +6541,8 @@ mod tests {
         records.extend_from_slice(&plan_id);
         records.extend_from_slice(&[0x00, 0x02, 0x00, 0x02, 0x06, 1]);
         let local_out = Some(R2O_NF_INET_LOCAL_OUT);
-        let mut plans = NamePlans::default();
+        let mut plans = NamePlans::with_capacity(1);
+        assert!(plans.handle(&set_name("catalog.example")).ok);
 
         for endpoint in ["198.51.100.2:853", "[2001:db8::2]:853"] {
             let endpoint: std::net::SocketAddr = endpoint.parse().unwrap();
@@ -6624,6 +6684,37 @@ mod tests {
                     .select_with_quic_host_at_hook(&malformed, None, local_out)
                     .is_none()
             );
+            let lease = plans
+                .dns_plans
+                .get_mut(&super::NamePlanKey {
+                    host: ip_only,
+                    family,
+                    shape: SHAPE_MODERN,
+                })
+                .unwrap();
+            assert!(lease.expires > Instant::now());
+            lease.expires = Instant::now();
+            assert!(
+                plans
+                    .applied_event_for_packet_at_hook(&address_hello, 1, local_out)
+                    .is_none()
+            );
+            assert!(plans.handle(&install).ok);
+            assert_eq!(plans.dns_plans.len(), 1);
+            let hello = packet(sni, endpoint);
+            assert!(
+                plans
+                    .select_with_quic_host_at_hook(&hello, None, local_out)
+                    .is_some()
+            );
+            plans.clear_probes();
+            assert!(plans.dns_plans.is_empty());
+            assert!(
+                plans
+                    .select_with_quic_host_at_hook(&hello, None, local_out)
+                    .is_none()
+            );
+            assert!(plans.select(&tcp_tls_packet("catalog.example")).is_some());
         }
     }
 
