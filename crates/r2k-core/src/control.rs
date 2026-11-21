@@ -82,6 +82,55 @@ pub const COMMAND_SET_HTTPS: u16 = 0x0090;
 pub const COMMAND_SET_TCP_STALL_BUDGETS: u16 = 0x0091;
 pub const COMMAND_SET_NAME_BOUND: u16 = 0x0092;
 pub const COMMAND_DEL_NAME_BOUND: u16 = 0x0093;
+
+const DNS_TCP_PLAN_PREFIX: &str = "@dns-tcp/";
+
+/// Ключ TLS-привязки с адресом, портом и видимым SNI. Пустое имя обозначает TLS без SNI.
+pub fn dns_tcp_plan_key(endpoint: SocketAddr, sni: &[u8]) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+
+    if endpoint.port() == 0
+        || matches!(endpoint, SocketAddr::V6(addr) if addr.scope_id() != 0 || addr.flowinfo() != 0)
+    {
+        return None;
+    }
+    let mut digest = Sha256::new();
+    let name = sni.strip_suffix(b".").unwrap_or(sni);
+    if (name.is_empty() && !sni.is_empty())
+        || name.len() > 253
+        || !name
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+    {
+        return None;
+    }
+    for byte in name {
+        digest.update([byte.to_ascii_lowercase()]);
+    }
+    let mut key = format!("{DNS_TCP_PLAN_PREFIX}{endpoint}/");
+    for byte in digest.finalize() {
+        write!(key, "{byte:02x}").ok()?;
+    }
+    Some(key)
+}
+
+pub fn dns_tcp_plan_endpoint(key: &[u8]) -> Option<SocketAddr> {
+    let key = std::str::from_utf8(key)
+        .ok()?
+        .strip_prefix(DNS_TCP_PLAN_PREFIX)?;
+    let (address, name) = key.split_once('/')?;
+    let endpoint = address.parse::<SocketAddr>().ok()?;
+    if endpoint.port() == 0
+        || matches!(endpoint, SocketAddr::V6(addr) if addr.scope_id() != 0 || addr.flowinfo() != 0)
+        || endpoint.to_string() != address
+        || name.len() != 64
+        || !name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return None;
+    }
+    Some(endpoint)
+}
 pub const COMMAND_SET_VOICE_ADDR: u16 = 0x0094;
 pub const COMMAND_SET_VOICE_ADDR_PROBE: u16 = 0x0095;
 pub const COMMAND_DEL_VOICE_ADDR_PROBE: u16 = 0x0096;
@@ -2214,16 +2263,21 @@ pub fn encode_ack_with_identifiers_profile(
         return Err("area ID ACK разрешён только для команды области");
     }
     if let Some(binding) = binding_context {
-        let valid_http_binding = binding.is_known()
+        let valid_tcp_binding = binding.is_known()
             && binding.kind == 1
             && matches!(binding.family, 4 | 6)
-            && binding.shape == SHAPE_HTTP
+            && is_tcp_plan_shape(binding.shape)
             && !binding.temporary;
         if command == COMMAND_SET_NAME_BOUND {
-            if ok && !valid_http_binding || !ok && binding != BindingContext::default() {
+            if ok && !valid_tcp_binding || !ok && binding != BindingContext::default() {
                 return Err("SET_NAME_BOUND ACK содержит неверный контекст привязки");
             }
-        } else if !ok || trial_id.is_some() || command != COMMAND_SET_NAME || !valid_http_binding {
+        } else if !ok
+            || trial_id.is_some()
+            || command != COMMAND_SET_NAME
+            || !valid_tcp_binding
+            || binding.shape != SHAPE_HTTP
+        {
             return Err("контекст привязки ACK допустим только для постоянного HTTP-плана имени");
         }
     }
@@ -2352,16 +2406,16 @@ pub fn decode_ack_profile(profile: WireProfile, frame: &Frame) -> Result<Ack, &'
                 .try_into()
                 .map_err(|_| "неверная эпоха таблицы привязок ACK")?,
         };
-        let valid_http_binding = binding.is_known()
+        let valid_tcp_binding = binding.is_known()
             && binding.kind == 1
             && matches!(binding.family, 4 | 6)
-            && binding.shape == SHAPE_HTTP
+            && is_tcp_plan_shape(binding.shape)
             && !binding.temporary;
         if command == COMMAND_SET_NAME_BOUND {
-            if ok && !valid_http_binding || !ok && binding != BindingContext::default() {
+            if ok && !valid_tcp_binding || !ok && binding != BindingContext::default() {
                 return Err("ACK содержит неверный контекст SET_NAME_BOUND");
             }
-        } else if !valid_http_binding || !ok {
+        } else if !valid_tcp_binding || binding.shape != SHAPE_HTTP || !ok {
             return Err("ACK содержит неверный HTTP-контекст привязки");
         }
         Some(binding)

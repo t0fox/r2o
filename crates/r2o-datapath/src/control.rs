@@ -388,7 +388,7 @@ impl NamePlans {
             (false, control::ACK_BAD_ARGS)
         } else {
             match frame.kind {
-                COMMAND_SET_NAME => self.set_name(body),
+                COMMAND_SET_NAME => self.set_name(body, false),
                 COMMAND_SET_NAME_BOUND => self.set_name_bound(body),
                 COMMAND_SET_ADDR => self.set_addr(body),
                 COMMAND_SET_SUFFIX => self.set_suffix(body),
@@ -435,12 +435,12 @@ impl NamePlans {
             area_id,
             binding_context: if frame.kind == COMMAND_SET_NAME_BOUND {
                 Some(if ok {
-                    self.http_name_binding_context(body).unwrap_or_default()
+                    self.name_binding_context(body, true).unwrap_or_default()
                 } else {
                     Default::default()
                 })
             } else if ok && frame.kind == COMMAND_SET_NAME {
-                self.http_name_binding_context(body)
+                self.name_binding_context(body, false)
             } else {
                 None
             },
@@ -451,28 +451,34 @@ impl NamePlans {
         let Some(name_len) = body.first().copied().map(usize::from) else {
             return (false, control::ACK_BAD_ARGS);
         };
-        if body.get(1 + name_len).copied() != Some(SHAPE_HTTP) {
+        let Some(&shape) = body.get(1 + name_len) else {
             return (false, control::ACK_BAD_ARGS);
-        }
-        self.set_name(body)
+        };
+        self.set_name(body, shape != SHAPE_HTTP)
     }
 
-    fn http_name_binding_context(&self, body: &[u8]) -> Option<BindingContext> {
+    fn name_binding_context(&self, body: &[u8], bound: bool) -> Option<BindingContext> {
         let name_len = usize::from(*body.first()?);
         let fields_end = 3_usize.checked_add(name_len)?;
-        if body.len() <= fields_end || body.get(1 + name_len).copied()? != SHAPE_HTTP {
+        let shape = *body.get(1 + name_len)?;
+        if body.len() <= fields_end || shape != SHAPE_HTTP && !bound {
             return None;
         }
         let family = body.get(2 + name_len).copied()?;
         if !matches!(family, 4 | 6) {
             return None;
         }
-        let host = canonical_plan_name(&body[1..1 + name_len], SHAPE_HTTP)?;
+        let name = &body[1..1 + name_len];
+        let host = if shape == SHAPE_HTTP {
+            canonical_plan_name(name, shape)?
+        } else {
+            dns_bound_name(name, family, shape)?
+        };
         let plan = Plan::parse_wire(&body[fields_end..]).ok()?;
         let installed = self.plans.get(&NamePlanKey {
             host,
             family,
-            shape: SHAPE_HTTP,
+            shape,
         })?;
         if installed.plan.id != plan.id {
             return None;
@@ -481,7 +487,7 @@ impl NamePlans {
             generation: installed.generation,
             kind: 1,
             family,
-            shape: SHAPE_HTTP,
+            shape,
             temporary: false,
             epoch: self.epoch,
         })
@@ -694,6 +700,11 @@ impl NamePlans {
             SHAPE_ECH_TS => Some(SHAPE_MODERN_TS),
             _ => None,
         };
+        let scoped_dns_endpoint = (hook == Some(crate::netlink::R2O_NF_INET_LOCAL_OUT)
+            && tls.hello_middle.is_some()
+            && !tls.extensions_truncated
+            && !tls.ech_offer)
+            .then(|| SocketAddr::new(view.dst.as_ip_addr(), tcp.destination_port));
         let Some(sni) = sni else {
             // Адресная TLS-проба использует служебный ключ IP:порт только
             // в control-сокете. Проверяем оба порта и адрес, не подставляя SNI.
@@ -704,6 +715,14 @@ impl NamePlans {
                 tcp.source_port,
                 tcp.destination_port,
             ) {
+                return Some(plan);
+            }
+            if let Some(endpoint) = scoped_dns_endpoint
+                && tls
+                    .record_end
+                    .is_some_and(|end| control::valid_no_sni_client_hello(&payload[..end]))
+                && let Some(plan) = self.find_dns_tcp_plan(endpoint, b"", shape)
+            {
                 return Some(plan);
             }
             if !tls.is_client_hello || tls.extensions_truncated {
@@ -750,6 +769,11 @@ impl NamePlans {
         {
             Self::touch_probe(probe, self.next_plan_clock());
             return Some(&probe.plan);
+        }
+        if let Some(endpoint) = scoped_dns_endpoint
+            && let Some(plan) = self.find_dns_tcp_plan(endpoint, sni, shape)
+        {
+            return Some(plan);
         }
         let plan = self
             .find_exact(sni, view.family, shape)
@@ -896,7 +920,10 @@ impl NamePlans {
 
     pub fn has_tls_candidate(&self, family: u8) -> bool {
         self.plans.iter().any(|(key, entry)| {
-            key.family == family && key.shape != SHAPE_HTTP && entry.plan.stream_input()
+            key.family == family
+                && key.shape != SHAPE_HTTP
+                && !key.host.starts_with('@')
+                && entry.plan.stream_input()
         }) || self.suffix_plans.iter().any(|(key, entry)| {
             key.transport == 6 && key.family == family && entry.plan.stream_input()
         }) || self.addr_plans.iter().any(|(key, entry)| {
@@ -906,6 +933,14 @@ impl NamePlans {
                     SHAPE_MODERN | SHAPE_LEGACY | SHAPE_ECH_TCP
                 )
                 && entry.plan.stream_input()
+        })
+    }
+
+    pub fn has_dns_tcp_candidate(&self, address: Address, port: u16) -> bool {
+        let endpoint = SocketAddr::new(address.as_ip_addr(), port);
+        self.plans.iter().any(|(key, entry)| {
+            entry.plan.stream_input()
+                && control::dns_tcp_plan_endpoint(key.host.as_bytes()) == Some(endpoint)
         })
     }
 
@@ -1220,7 +1255,7 @@ impl NamePlans {
             .filter(|probe| probe.expires > Instant::now())
     }
 
-    fn set_name(&mut self, body: &[u8]) -> (bool, u8) {
+    fn set_name(&mut self, body: &[u8], dns_scope: bool) -> (bool, u8) {
         let Some(name_len) = body.first().copied().map(usize::from) else {
             return (false, control::ACK_BAD_ARGS);
         };
@@ -1231,13 +1266,19 @@ impl NamePlans {
             return (false, control::ACK_BAD_ARGS);
         }
         let shape = body[1 + name_len];
-        let Some(host) = canonical_plan_name(&body[1..1 + name_len], shape) else {
-            return (false, control::ACK_BAD_ARGS);
-        };
         let family = body[2 + name_len];
         if !matches!(family, 4 | 6) {
             return (false, control::ACK_BAD_ARGS);
         }
+        let name = &body[1..1 + name_len];
+        let host = if dns_scope {
+            dns_bound_name(name, family, shape)
+        } else {
+            canonical_plan_name(name, shape)
+        };
+        let Some(host) = host else {
+            return (false, control::ACK_BAD_ARGS);
+        };
         let key = NamePlanKey {
             host,
             family,
@@ -1950,7 +1991,10 @@ impl NamePlans {
         let Some(binding) = read_binding_context(&body[context_start..]) else {
             return (false, control::ACK_BAD_ARGS);
         };
-        let Some(host) = canonical_plan_name(&body[1..1 + name_len], binding.shape) else {
+        let name = &body[1..1 + name_len];
+        let Some(host) = canonical_plan_name(name, binding.shape)
+            .or_else(|| dns_bound_name(name, binding.family, binding.shape))
+        else {
             return (true, control::ACK_OK);
         };
         if !binding.is_known()
@@ -2119,6 +2163,20 @@ impl NamePlans {
             host,
             family,
             shape,
+        })?;
+        Self::touch(entry, self.next_plan_clock());
+        Some(&entry.plan)
+    }
+
+    fn find_dns_tcp_plan(&self, endpoint: SocketAddr, sni: &[u8], shape: u8) -> Option<&Plan> {
+        let mut key = NamePlanKey {
+            host: control::dns_tcp_plan_key(endpoint, sni)?,
+            family: if endpoint.is_ipv4() { 4 } else { 6 },
+            shape,
+        };
+        let entry = self.plans.get(&key).or_else(|| {
+            key.shape = r2k_link_shape_tcp_base(shape);
+            self.plans.get(&key)
         })?;
         Self::touch(entry, self.next_plan_clock());
         Some(&entry.plan)
@@ -2788,6 +2846,17 @@ fn canonical_plan_name(bytes: &[u8], shape: u8) -> Option<String> {
     } else {
         canonical_name(bytes)
     }
+}
+
+fn dns_bound_name(name: &[u8], family: u8, shape: u8) -> Option<String> {
+    let endpoint = control::dns_tcp_plan_endpoint(name)?;
+    if shape == SHAPE_HTTP
+        || !control::is_tcp_plan_shape(shape)
+        || (if endpoint.is_ipv4() { 4 } else { 6 }) != family
+    {
+        return None;
+    }
+    Some(std::str::from_utf8(name).ok()?.to_owned())
 }
 
 fn canonical_probe_name(bytes: &[u8], shape: u8, family: u8) -> Option<String> {
@@ -6397,6 +6466,165 @@ mod tests {
         assert!(current_ack.ok);
         assert_eq!(plans.revision(), installed_revision + 1);
         assert!(!plans.plans.contains_key(&key));
+    }
+
+    #[test]
+    fn dns_tcp_binding_applies_only_to_local_output_with_exact_endpoint_and_sni() {
+        use crate::netlink::{
+            R2O_NF_INET_FORWARD, R2O_NF_INET_LOCAL_OUT, R2O_NF_INET_POST_ROUTING,
+        };
+        use std::io::Cursor;
+
+        let sni = "resolver.example";
+        let plan_id = [0x53; 16];
+        let mut records = plan_header(11, 2);
+        records.extend_from_slice(&[0x00, 0x01, 0x00, 0x10]);
+        records.extend_from_slice(&plan_id);
+        records.extend_from_slice(&[0x00, 0x02, 0x00, 0x02, 0x06, 1]);
+        let local_out = Some(R2O_NF_INET_LOCAL_OUT);
+        let mut plans = NamePlans::default();
+
+        for endpoint in ["198.51.100.2:853", "[2001:db8::2]:853"] {
+            let endpoint: std::net::SocketAddr = endpoint.parse().unwrap();
+            let key = control::dns_tcp_plan_key(endpoint, b"Resolver.Example.").unwrap();
+            assert_eq!(
+                control::dns_tcp_plan_endpoint(key.as_bytes()),
+                Some(endpoint)
+            );
+            let family = if endpoint.is_ipv4() { 4 } else { 6 };
+            let install = control::read_frame(&mut Cursor::new(
+                control::encode_set_name_bound(&key, SHAPE_MODERN, family, &records, [5; 16])
+                    .unwrap(),
+            ))
+            .unwrap();
+            let ack = plans.handle(&install);
+            assert!(ack.ok);
+            let binding = ack.binding_context.unwrap();
+            let encoded = control::encode_ack_with_binding(
+                ack.command,
+                ack.ok,
+                ack.reason,
+                ack.trial_id,
+                ack.binding_context,
+            )
+            .unwrap();
+            let decoded =
+                control::decode_ack(&control::read_frame(&mut Cursor::new(encoded)).unwrap())
+                    .unwrap();
+            assert_eq!(decoded.binding_context, Some(binding));
+
+            let packet = |host: &str, destination: std::net::SocketAddr| {
+                let mut packet = tcp_tls_packet(host);
+                packet[22..24].copy_from_slice(&destination.port().to_be_bytes());
+                match destination.ip() {
+                    std::net::IpAddr::V4(ip) => {
+                        packet[16..20].copy_from_slice(&ip.octets());
+                        packet
+                    }
+                    std::net::IpAddr::V6(ip) => {
+                        let mut header = vec![0; 40];
+                        header[0] = 0x60;
+                        header[4..6].copy_from_slice(&((packet.len() - 20) as u16).to_be_bytes());
+                        header[6] = 6;
+                        header[7] = 64;
+                        header[8..24].copy_from_slice(
+                            &"2001:db8::1"
+                                .parse::<std::net::Ipv6Addr>()
+                                .unwrap()
+                                .octets(),
+                        );
+                        header[24..40].copy_from_slice(&ip.octets());
+                        header.extend_from_slice(&packet[20..]);
+                        header
+                    }
+                }
+            };
+            let original = packet(sni, endpoint);
+            let applied = plans
+                .applied_event_for_packet_at_hook(&original, 1, local_out)
+                .unwrap();
+            assert_eq!(applied.plan_id, plan_id);
+            assert_eq!(applied.binding, binding);
+            assert!(!plans.has_tls_candidate(family));
+            for hook in [
+                None,
+                Some(R2O_NF_INET_FORWARD),
+                Some(R2O_NF_INET_POST_ROUTING),
+            ] {
+                assert!(
+                    plans
+                        .select_with_quic_host_at_hook(&original, None, hook)
+                        .is_none()
+                );
+            }
+            for other in [
+                packet("healthy.example", endpoint),
+                packet("", endpoint),
+                packet(sni, std::net::SocketAddr::new(endpoint.ip(), 443)),
+                packet(sni, "198.51.100.3:853".parse().unwrap()),
+            ] {
+                assert!(
+                    plans
+                        .select_with_quic_host_at_hook(&other, None, local_out)
+                        .is_none()
+                );
+            }
+            let replacement = plans.handle(&install).binding_context.unwrap();
+            for binding in [binding, replacement] {
+                let remove = control::read_frame(&mut Cursor::new(
+                    control::encode_delete_name_bound(&key, 6, binding).unwrap(),
+                ))
+                .unwrap();
+                assert!(plans.handle(&remove).ok);
+                assert_eq!(
+                    plans
+                        .select_with_quic_host_at_hook(&original, None, local_out)
+                        .is_none(),
+                    binding == replacement
+                );
+            }
+
+            let ip_only = control::dns_tcp_plan_key(endpoint, b"").unwrap();
+            let request =
+                control::encode_set_name_bound(&ip_only, SHAPE_MODERN, family, &records, [6; 16])
+                    .unwrap();
+            assert!(
+                plans
+                    .handle(&control::read_frame(&mut Cursor::new(request)).unwrap())
+                    .ok
+            );
+            let address_hello = packet("", endpoint);
+            assert_eq!(
+                plans
+                    .select_with_quic_host_at_hook(&address_hello, None, local_out)
+                    .unwrap()
+                    .id,
+                plan_id
+            );
+            assert!(
+                plans
+                    .select_with_quic_host_at_hook(&original, None, local_out)
+                    .is_none()
+            );
+            let view = r2k_core::packet::PacketView::parse(&original).unwrap();
+            let payload = view.tcp_segment(&original).unwrap().payload;
+            let name = r2k_core::tls::parse(&original[payload.clone()])
+                .sni_range
+                .unwrap();
+            let mut malformed = original;
+            let name_list_length = payload.start + name.start - 5;
+            malformed[name_list_length..name_list_length + 2].copy_from_slice(&[0xff, 0xff]);
+            assert!(
+                r2k_core::tls::parse(&malformed[payload])
+                    .sni_range
+                    .is_none()
+            );
+            assert!(
+                plans
+                    .select_with_quic_host_at_hook(&malformed, None, local_out)
+                    .is_none()
+            );
+        }
     }
 
     #[test]

@@ -2600,6 +2600,12 @@ mod app {
                             .unwrap_or((0, 0));
                         let tls_host = tcp_hello_from_packet(bytes).and_then(|hello| hello.host);
                         let tls_address = packet_view.as_ref().map(|view| view.dst);
+                        let scoped_dns = queue_hook
+                            == Some(r2o_datapath::netlink::R2O_NF_INET_LOCAL_OUT)
+                            && tls_destination_port != 0
+                            && tls_address.is_some_and(|address| {
+                                name_plans.has_dns_tcp_candidate(address, tls_destination_port)
+                            });
                         // Собираем ClientHello зонда только для уже принятой
                         // временной привязки этого порта, даже до появления SNI.
                         let installed_tls_probe = controller_probe
@@ -2616,6 +2622,7 @@ mod app {
                             controller_probe,
                             installed_tls_probe,
                         ) && (controller_probe
+                            || scoped_dns
                             || is_tls_plan(&plan)
                             || family.is_some_and(|family| match tls_host.as_deref() {
                                 Some(host) => name_plans.has_tls_candidate_target_endpoint(
@@ -2944,9 +2951,10 @@ mod app {
                                 let decision = if options.mode == RuntimeMode::Observe {
                                     PacketDecision::Accept
                                 } else {
-                                    let selected = name_plans.select_with_quic_host_probe(
+                                    let selected = name_plans.select_with_quic_host_at_hook_probe(
                                         &packet,
                                         None,
+                                        queue_hook,
                                         controller_probe,
                                     );
                                     let selected_plan = selected.unwrap_or(&plan);
@@ -3052,9 +3060,10 @@ mod app {
                                 let decision = if options.mode == RuntimeMode::Observe {
                                     PacketDecision::Accept
                                 } else {
-                                    let selected = name_plans.select_with_quic_host_probe(
+                                    let selected = name_plans.select_with_quic_host_at_hook_probe(
                                         &packet,
                                         None,
+                                        queue_hook,
                                         controller_probe,
                                     );
                                     let selected_plan = selected.unwrap_or(&plan);
