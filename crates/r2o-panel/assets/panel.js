@@ -881,6 +881,7 @@
       .catch(function () {
         self.catalogRevision = null;
         self.failed = true;
+        self.renderEngineStatus(self.m);
         var staleBefore = bodyAttribute(self.doc, "data-stale");
         self.renderNotice();
         var staleAfter = bodyAttribute(self.doc, "data-stale");
@@ -1335,13 +1336,15 @@
     var state = this.$("engine-state");
     var lamp = state.querySelector(".lamp");
     var transition = ENGINE_TRANSITIONS[this.pending || this.engineCommand];
-    lamp.setAttribute("data-tone", transition ? "live" : m.lamp);
     var text = state.querySelector(".mast-state-text");
-    var label = transition || m.state;
-    var stateKey = label + "|" + m.stateDetail;
+    var label = this.failed ? "Статус движка неизвестен" : transition || m.state;
+    var detail = this.failed ? "" : m.stateDetail;
+    lamp.setAttribute("data-tone", this.failed ? "warn" : transition ? "live" : m.lamp);
+    var stateKey = label + "|" + detail;
     if (text.__r2oKey !== stateKey) {
       text.__r2oKey = stateKey;
-      text.replaceChildren(this.doc.createTextNode(label + " "), el(this.doc, "small", "", m.stateDetail));
+      if (detail) text.replaceChildren(this.doc.createTextNode(label + " "), el(this.doc, "small", "", detail));
+      else text.textContent = label;
     }
   };
 

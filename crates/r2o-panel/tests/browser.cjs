@@ -407,6 +407,21 @@ async function main() {
   fs.writeFileSync(enginePidPath, String(process.pid));
   fs.writeFileSync(livePath, JSON.stringify(liveState));
   await waitFor(() => evaluate("document.querySelector('#engine-state .mast-state-text').textContent.startsWith('Движок работает')"), "опрос отражает возобновление работы");
+  await evaluate(`(() => {
+    const fetchStatus = window.fetch;
+    window.restoreStatusFetch = () => { window.fetch = fetchStatus; };
+    window.fetch = (url, options) => String(url).startsWith("/api/status")
+      ? Promise.reject(new Error("Связь с панелью прервана"))
+      : fetchStatus.call(window, url, options);
+  })()`);
+  await waitFor(() => evaluate(`(() => {
+    const status = document.querySelector('#engine-state');
+    return status.textContent.trim() === 'Статус движка неизвестен'
+      && status.querySelector('.lamp').dataset.tone === 'warn'
+      && !status.querySelector('small');
+  })()`), "при недоступном API старый статус сменяется предупреждением");
+  await evaluate("window.restoreStatusFetch()");
+  await waitFor(() => evaluate("document.querySelector('#engine-state .mast-state-text').textContent.startsWith('Движок работает')"), "успешный запрос возвращает актуальный статус");
   await waitFor(() => evaluate("!document.querySelector('#now').hidden && document.querySelector('#now #dns-protection-list').children.length === 3"), "карточки зашифрованного DNS на обзоре");
   assert.deepEqual(await evaluate("[...document.querySelectorAll('#dns-protection-list .meta-chip')].map(node => node.textContent)"), ["Доступен напрямую", "Подбор", "Устарело"]);
   assert.equal(await evaluate("!!document.querySelector('[data-nav=dns-protection]')"), false);
