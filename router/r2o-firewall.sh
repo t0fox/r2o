@@ -226,6 +226,16 @@ nft_up() {
     cat >> "$rules" <<EOF
 table inet r2o {
     comment "r2o-managed"
+    set dns_route4 {
+        type ipv4_addr . inet_proto . inet_service
+        flags timeout
+        size 64
+    }
+    set dns_route6 {
+        type ipv6_addr . inet_proto . inet_service
+        flags timeout
+        size 64
+    }
     chain out {
         type filter hook postrouting priority mangle; policy accept;
         ip saddr 127.0.0.0/8 return
@@ -237,6 +247,8 @@ table inet r2o {
         ip6 daddr ff00::/8 return
         meta mark $MARK return
         ${MEASURE_MARK:+meta mark $MEASURE_MARK return}
+        oifname != "lo" ct status != dnat meta skuid 0-4294967294 meta l4proto { tcp, udp } ip daddr . meta l4proto . th dport @dns_route4 ct direction original ct original packets $nft_window counter queue num $QUEUE4 bypass
+        oifname != "lo" ct status != dnat meta skuid 0-4294967294 meta l4proto { tcp, udp } ip6 daddr . meta l4proto . th dport @dns_route6 ct direction original ct original packets $nft_window counter queue num $QUEUE6 bypass
         meta l4proto { tcp, udp } th dport { $nft_dns } return
         ct status dnat return
         $nft_gate_out
@@ -282,6 +294,8 @@ table inet r2o {
     }
     chain input {
         type filter hook input priority mangle; policy accept;
+        iifname != "lo" ct status != dnat meta l4proto { tcp, udp } ip saddr . meta l4proto . th sport @dns_route4 ct direction reply ct reply packets $nft_window counter queue num $QUEUE4 bypass
+        iifname != "lo" ct status != dnat meta l4proto { tcp, udp } ip6 saddr . meta l4proto . th sport @dns_route6 ct direction reply ct reply packets $nft_window counter queue num $QUEUE6 bypass
         jump in_rules
     }
     chain nat_post {
@@ -355,6 +369,50 @@ nft_down() {
     nft_main_down
 }
 
+# Срок записи ограничен на случай остановки контроллера или потери связи с ним.
+dns_route() {
+    [ "$#" -eq 5 ] || return 2
+    dns_action=$1
+    dns_address=$2
+    dns_protocol=$3
+    dns_port=$4
+    dns_seconds=$5
+    case "$dns_action" in add|del) ;; *) return 2 ;; esac
+    case "$dns_protocol" in tcp|udp) ;; *) return 2 ;; esac
+    number "$dns_port" 65535 && [ "$dns_port" -gt 0 ] && [ "$dns_port" -ne 53 ] || return 2
+    number "$dns_seconds" 300 || return 2
+    if [ "$dns_action" = add ] && [ "$dns_seconds" -eq 0 ]; then return 2; fi
+    case "$dns_address" in
+        *:*)
+            [ "$IPV6_ENABLED" = 1 ] || return 1
+            case "$dns_address" in *[!0-9A-Fa-f:.]*|::|::1|[Ff][Ff]*|::[Ff][Ff][Ff][Ff]:*) return 2 ;; esac
+            dns_family=6
+            ;;
+        *)
+            valid_ipv4 "$dns_address" || return 2
+            case "$dns_address" in 0.*|127.*|22[4-9].*|23[0-9].*|255.*) return 2 ;; esac
+            dns_family=4
+            ;;
+    esac
+    fw_lock_acquire || return 1
+    if [ "$BACKEND" = nft ]; then
+        if nft_dns_route; then dns_rc=0; else dns_rc=$?; fi
+    elif xt_dns_route; then dns_rc=0; else dns_rc=$?
+    fi
+    fw_lock_release || return 1
+    return "$dns_rc"
+}
+
+nft_dns_route() {
+    nft list table inet r2o 2>/dev/null | grep -F -q 'comment "r2o-managed"' || return 1
+    {
+        printf 'destroy element inet r2o dns_route%s { %s . %s . %s }\n' "$dns_family" "$dns_address" "$dns_protocol" "$dns_port"
+        if [ "$dns_action" = add ]; then
+            printf 'add element inet r2o dns_route%s { %s . %s . %s timeout %ss }\n' "$dns_family" "$dns_address" "$dns_protocol" "$dns_port" "$dns_seconds"
+        fi
+    } | nft -f -
+}
+
 firewall_rst_down() {
     fw_lock_acquire || return 1
     if nft_rst_down; then fw_rc=0; else fw_rc=$?; fi
@@ -369,6 +427,64 @@ xt() {
     rc=$?
     [ "$rc" = 2 ] || return "$rc"
     "$tool" "$@"
+}
+
+xt_dns_route_down() {
+    dns_xt=$1
+    case "$dns_xt" in ip6tables) dns_set=r2o_dns_route6 ;; *) dns_set=r2o_dns_route4 ;; esac
+    while xt "$dns_xt" -t mangle -D POSTROUTING -j R2O_DNS_OUT 2>/dev/null; do :; done
+    while xt "$dns_xt" -t mangle -D INPUT -j R2O_DNS_IN 2>/dev/null; do :; done
+    for dns_chain in R2O_DNS_OUT R2O_DNS_IN; do
+        xt "$dns_xt" -t mangle -F "$dns_chain" 2>/dev/null || true
+        xt "$dns_xt" -t mangle -X "$dns_chain" 2>/dev/null || true
+    done
+    command -v ipset >/dev/null 2>&1 && ipset -quiet destroy "$dns_set" || true
+}
+
+xt_dns_route_up() {
+    ipset -exist create "$dns_set" hash:ip,port family "$dns_inet" timeout 300 maxelem 64 || return 1
+    xt "$dns_xt" -t mangle -N R2O_DNS_OUT || return 1
+    xt "$dns_xt" -t mangle -N R2O_DNS_IN || return 1
+    xt "$dns_xt" -t mangle -A R2O_DNS_OUT -m mark --mark "$MARK" -j RETURN || return 1
+    if [ -n "$MEASURE_MARK" ]; then
+        xt "$dns_xt" -t mangle -A R2O_DNS_OUT -m mark --mark "$MEASURE_MARK" -j RETURN || return 1
+    fi
+    xt "$dns_xt" -t mangle -A R2O_DNS_OUT ! -o lo -m owner --socket-exists \
+        -m set --match-set "$dns_set" dst,dst -m conntrack --ctdir ORIGINAL ! --ctstate DNAT \
+        -m connbytes --connbytes "$CONNBYTES" --connbytes-dir original --connbytes-mode packets \
+        -j NFQUEUE --queue-num "$dns_queue" --queue-bypass || return 1
+    xt "$dns_xt" -t mangle -A R2O_DNS_IN ! -i lo -m set --match-set "$dns_set" src,src \
+        -m conntrack --ctdir REPLY ! --ctstate DNAT \
+        -m connbytes --connbytes "$CONNBYTES" --connbytes-dir reply --connbytes-mode packets \
+        -j NFQUEUE --queue-num "$dns_queue" --queue-bypass || return 1
+    xt "$dns_xt" -t mangle -I POSTROUTING 1 -j R2O_DNS_OUT || return 1
+    xt "$dns_xt" -t mangle -I INPUT 1 -j R2O_DNS_IN
+}
+
+xt_dns_route() {
+    case "$dns_family" in
+        6)
+            [ ! -f "$FW_V4ONLY" ] || return 1
+            dns_xt=ip6tables dns_inet=inet6 dns_queue=$QUEUE6
+            ;;
+        *) dns_xt=iptables dns_inet=inet dns_queue=$QUEUE4 ;;
+    esac
+    command -v ipset >/dev/null 2>&1 || return 1
+    dns_set=r2o_dns_route$dns_family
+    dns_element=$dns_address,$dns_protocol:$dns_port
+    if [ "$dns_action" = del ]; then
+        dns_sets=$(ipset list -name) || return 1
+        printf '%s\n' "$dns_sets" | grep -Fxq "$dns_set" || return 0
+        ipset -exist del "$dns_set" "$dns_element"
+        return $?
+    fi
+    xt "$dns_xt" -t mangle -C POSTROUTING -j R2O_OUT || return 1
+    if ! xt "$dns_xt" -t mangle -C POSTROUTING -j R2O_DNS_OUT 2>/dev/null ||
+       ! xt "$dns_xt" -t mangle -C INPUT -j R2O_DNS_IN 2>/dev/null; then
+        xt_dns_route_down "$dns_xt"
+        xt_dns_route_up || { xt_dns_route_down "$dns_xt"; return 1; }
+    fi
+    ipset -exist add "$dns_set" "$dns_element" timeout "$dns_seconds"
 }
 
 fw_lock_acquire() {
@@ -593,6 +709,7 @@ xt_broadcast_return() {
 
 xt_family_down() {
     tool=$1
+    xt_dns_route_down "$tool"
     for hook in POSTROUTING FORWARD INPUT; do
         while xt "$tool" -t mangle -D "$hook" -j R2O_OUT 2>/dev/null; do :; done
         while xt "$tool" -t mangle -D "$hook" -j R2O_IN 2>/dev/null; do :; done
@@ -903,12 +1020,16 @@ firewall_status_nft() {
     printf '%s\n' "$forward_chain" | grep -F -q 'jump in_rules' || return 1
     printf '%s\n' "$input_chain" | grep -F -q 'type filter hook input priority mangle;' || return 1
     printf '%s\n' "$input_chain" | grep -F -q 'jump in_rules' || return 1
+    for dns_family in 4 6; do
+        printf '%s\n' "$out_chain" | grep -F -q "@dns_route$dns_family" || return 1
+        printf '%s\n' "$input_chain" | grep -F -q "@dns_route$dns_family" || return 1
+    done
     printf '%s\n' "$nat_post_chain" | grep -F -q 'type nat hook postrouting priority srcnat - 1;' || return 1
     printf '%s\n' "$nat_post_chain" | grep -F -q masquerade || return 1
     nft list table inet r2o_rst >/dev/null 2>&1 || return 1
 
     out_queue_total=$(printf '%s\n' "$out_chain" | awk '/queue/ && /bypass/ { count++ } END { print count + 0 }')
-    [ "$out_queue_total" -eq 12 ] || return 1
+    [ "$out_queue_total" -eq 14 ] || return 1
     in_queue_total=$(printf '%s\n' "$in_rules_chain" | awk '/queue/ && /bypass/ { count++ } END { print count + 0 }')
     [ "$in_queue_total" -eq 14 ] || return 1
     out_queue4=$(printf '%s\n' "$out_chain" | awk -v queue="$QUEUE4" \
@@ -919,7 +1040,7 @@ firewall_status_nft() {
         '/queue/ && /bypass/ { for (i = 1; i <= NF; i++) if ($i == queue) { count++; break } } END { print count + 0 }')
     in_queue6=$(printf '%s\n' "$in_rules_chain" | awk -v queue="$QUEUE6" \
         '/queue/ && /bypass/ { for (i = 1; i <= NF; i++) if ($i == queue) { count++; break } } END { print count + 0 }')
-    [ "$out_queue4" -eq 6 ] && [ "$out_queue6" -eq 6 ] &&
+    [ "$out_queue4" -eq 7 ] && [ "$out_queue6" -eq 7 ] &&
         [ "$in_queue4" -eq 7 ] && [ "$in_queue6" -eq 7 ]
 }
 
@@ -963,5 +1084,9 @@ case "${1:-}" in
     dns-ensure)
         dns_excl_sync
         ;;
-    *) echo "использование: $0 {backend|ipv6-enabled|up|down|flowoffload-ensure|flowoffload-restore|ppe ensure|ppe remove|rst-down|status|dns-ensure}" >&2; exit 2 ;;
+    dns-route)
+        shift
+        dns_route "$@"
+        ;;
+    *) echo "использование: $0 {backend|ipv6-enabled|up|down|flowoffload-ensure|flowoffload-restore|ppe ensure|ppe remove|rst-down|status|dns-ensure|dns-route add|del адрес tcp|udp порт срок}" >&2; exit 2 ;;
 esac
