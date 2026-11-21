@@ -38,19 +38,28 @@ struct R2oConntrackStats {
     max: u64,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct R2oResourceReading {
     cpu: Option<R2oCpuCounters>,
+    cpu_cores: Vec<(u32, R2oCpuCounters)>,
     memory: Option<R2oMemoryStats>,
     conntrack: Option<R2oConntrackStats>,
 }
 
 fn r2o_parse_cpu_stat(line: &str) -> Option<R2oCpuCounters> {
-    let bytes = line.as_bytes();
-    if !bytes.starts_with(b"cpu ") {
-        return None;
-    }
-    let mut position = 4;
+    r2o_parse_cpu_counters(line.strip_prefix("cpu ")?.as_bytes(), true)
+}
+
+fn r2o_parse_cpu_core(line: &str) -> Option<(u32, R2oCpuCounters)> {
+    let (core, counters) = line.strip_prefix("cpu")?.split_once(' ')?;
+    Some((
+        core.parse().ok()?,
+        r2o_parse_cpu_counters(counters.as_bytes(), false)?,
+    ))
+}
+
+fn r2o_parse_cpu_counters(bytes: &[u8], include_nice: bool) -> Option<R2oCpuCounters> {
+    let mut position = 0;
     let mut values = [0_u64; 8];
     let mut count = 0;
     while count < values.len() {
@@ -77,11 +86,22 @@ fn r2o_parse_cpu_stat(line: &str) -> Option<R2oCpuCounters> {
     let total = values[..count]
         .iter()
         .fold(0_u64, |sum, value| sum.wrapping_add(*value));
-    let idle = values[3].wrapping_add(values.get(4).copied().unwrap_or_default());
+    let mut idle = values[3].wrapping_add(values[4]);
+    if !include_nice {
+        // Работу с пониженным приоритетом может вытеснить обработчик пакетов.
+        idle = idle.wrapping_add(values[1]);
+    }
     Some(R2oCpuCounters {
         busy: total.checked_sub(idle)?,
         total,
     })
+}
+
+fn r2o_cpu_free(previous: R2oCpuCounters, current: R2oCpuCounters) -> Option<u64> {
+    let total = current.total.checked_sub(previous.total)?;
+    let busy = current.busy.checked_sub(previous.busy)?;
+    (total != 0 && busy <= total)
+        .then(|| 1_000_000 - (u128::from(busy) * 1_000_000 / u128::from(total)) as u64)
 }
 
 fn r2o_meminfo_field(text: &str, key: &str) -> Option<u64> {
@@ -115,9 +135,17 @@ fn r2o_read_counter(path: &str) -> Option<u64> {
 
 impl R2oResourceReading {
     fn r2o_read_proc() -> Self {
-        let cpu = fs::read_to_string("/proc/stat")
-            .ok()
-            .and_then(|text| text.lines().next().and_then(r2o_parse_cpu_stat));
+        let (cpu, cpu_cores) = fs::read_to_string("/proc/stat")
+            .map(|text| {
+                let mut lines = text.lines();
+                let cpu = lines.next().and_then(r2o_parse_cpu_stat);
+                let cores = lines
+                    .take_while(|line| line.starts_with("cpu"))
+                    .filter_map(r2o_parse_cpu_core)
+                    .collect();
+                (cpu, cores)
+            })
+            .unwrap_or_default();
         let memory = fs::read_to_string("/proc/meminfo")
             .ok()
             .and_then(|text| r2o_parse_meminfo(&text));
@@ -127,6 +155,7 @@ impl R2oResourceReading {
             .map(|(count, max)| R2oConntrackStats { count, max });
         Self {
             cpu,
+            cpu_cores,
             memory,
             conntrack,
         }
@@ -153,6 +182,7 @@ struct R2oAdaptiveLimit {
     res_seq: u64,
     limit_seq: u64,
     cpu_previous: Option<R2oCpuCounters>,
+    cpu_cores_previous: Vec<(u32, R2oCpuCounters)>,
     cpu_free_u: Option<u64>,
     cpu_try_ms: Option<u64>,
     memory: Option<R2oMemoryStats>,
@@ -175,6 +205,7 @@ impl R2oAdaptiveLimit {
             res_seq: 0,
             limit_seq: 0,
             cpu_previous: None,
+            cpu_cores_previous: Vec::new(),
             cpu_free_u: None,
             cpu_try_ms: None,
             memory: None,
@@ -208,42 +239,34 @@ impl R2oAdaptiveLimit {
         self.memory = reading.memory.filter(|memory| memory.total_kb > 0);
         self.conntrack = reading.conntrack.filter(|stats| stats.max > 0);
 
-        match reading.cpu {
-            Some(current) => {
-                if let Some(previous) = self.cpu_previous {
-                    if current.total > previous.total && current.busy >= previous.busy {
-                        let busy_delta = current.busy - previous.busy;
-                        let total_delta = current.total - previous.total;
-                        if busy_delta <= total_delta {
-                            let instant_free = 1_000_000
-                                - (u128::from(busy_delta) * 1_000_000 / u128::from(total_delta))
-                                    as u64;
-                            self.cpu_free_u = Some(match self.cpu_free_u {
-                                None => instant_free,
-                                Some(previous_free) => {
-                                    let delta =
-                                        i128::from(instant_free) - i128::from(previous_free);
-                                    let change = delta * i128::from(elapsed_ms)
-                                        / i128::from(elapsed_ms + R2O_CPU_EWMA_INTERVAL_MS);
-                                    (i128::from(previous_free) + change) as u64
-                                }
-                            });
-                        } else {
-                            self.cpu_free_u = None;
-                        }
-                    } else {
-                        self.cpu_free_u = None;
-                    }
-                } else {
-                    self.cpu_free_u = None;
-                }
-                self.cpu_previous = Some(current);
+        // Linux перечисляет CPU по номерам; при hotplug сравниваем только тот же CPU.
+        let core_free = reading
+            .cpu_cores
+            .iter()
+            .filter_map(|&(id, current)| {
+                let index = self
+                    .cpu_cores_previous
+                    .binary_search_by_key(&id, |&(id, _)| id)
+                    .ok()?;
+                r2o_cpu_free(self.cpu_cores_previous[index].1, current)
+            })
+            .min();
+        let instant_free = self
+            .cpu_previous
+            .zip(reading.cpu)
+            .and_then(|(previous, current)| r2o_cpu_free(previous, current))
+            .map(|aggregate| core_free.map_or(aggregate, |core| aggregate.min(core)));
+        self.cpu_previous = reading.cpu;
+        self.cpu_cores_previous = reading.cpu_cores;
+        self.cpu_free_u = instant_free.map(|instant| match self.cpu_free_u {
+            None => instant,
+            Some(previous) => {
+                let delta = i128::from(instant) - i128::from(previous);
+                let change = delta * i128::from(elapsed_ms)
+                    / i128::from(elapsed_ms + R2O_CPU_EWMA_INTERVAL_MS);
+                (i128::from(previous) + change) as u64
             }
-            None => {
-                self.cpu_previous = None;
-                self.cpu_free_u = None;
-            }
-        }
+        });
 
         let valid = self.cpu_free_u.is_some() && self.memory.is_some();
         let cpu_free = self.cpu_free_u.unwrap_or_default();
@@ -321,8 +344,13 @@ impl R2oAdaptiveLimit {
             .conntrack
             .map(|stats| format!("{} %", r2o_conntrack_percent(stats)))
             .unwrap_or_else(|| "нет данных".into());
+        let cpu_label = if core_free.is_some() {
+            "запас CPU с учётом самого занятого ядра"
+        } else {
+            "процессор свободен"
+        };
         Some(format!(
-            "замеров {active} из {}, {}, процессор свободен {} %, память доступна {} МБ из {}, conntrack {conntrack}",
+            "замеров {active} из {}, {}, {cpu_label} {} %, память доступна {} МБ из {}, conntrack {conntrack}",
             self.limit,
             if reason.is_empty() {
                 "запас по всем ресурсам"
@@ -1214,6 +1242,7 @@ mod tests {
             (0, 0, false)
         );
         let reading = R2oResourceReading {
+            cpu_cores: Vec::new(),
             cpu: None,
             memory: None,
             conntrack: None,
@@ -1223,6 +1252,7 @@ mod tests {
         limit.r2o_mark_started(limit.limit());
         assert!(limit.grow_pending);
         let reading = R2oResourceReading {
+            cpu_cores: Vec::new(),
             cpu: None,
             memory: None,
             conntrack: None,
@@ -1367,6 +1397,63 @@ mod tests {
     }
 
     #[test]
+    fn saturated_core_reduces_the_shared_limit() {
+        let mut limit = R2oAdaptiveLimit::new(4);
+        let reading = |scale: u64| R2oResourceReading {
+            cpu: Some(R2oCpuCounters {
+                busy: 100 * scale,
+                total: 200 * scale,
+            }),
+            cpu_cores: vec![
+                (
+                    0,
+                    R2oCpuCounters {
+                        busy: 0,
+                        total: 100 * scale,
+                    },
+                ),
+                (
+                    1,
+                    R2oCpuCounters {
+                        busy: 100 * scale,
+                        total: 100 * scale,
+                    },
+                ),
+            ],
+            memory: Some(R2oMemoryStats {
+                available_kb: 400_000,
+                total_kb: 512_000,
+            }),
+            conntrack: None,
+        };
+        limit.r2o_sample(0, reading(1), 0, 0);
+        limit.r2o_sample(1_000, reading(2), 2, 1);
+        assert_eq!(limit.limit(), 1);
+        assert_eq!(limit.cpu_free_u, Some(0));
+
+        let mut hotplug = reading(3);
+        hotplug.cpu_cores = ["cpu1 0 0 10 15", "cpu7 0 0 30 45"]
+            .into_iter()
+            .map(|line| super::r2o_parse_cpu_core(line).unwrap())
+            .collect();
+        assert_eq!(hotplug.cpu_cores[0].0, 1);
+        assert_eq!(hotplug.cpu_cores[1].1.total, 75);
+        limit.r2o_sample(61_000, hotplug, 1, 1);
+        assert_eq!(limit.limit(), 2);
+
+        let background_only = |scale| {
+            let mut sample = reading(scale);
+            let nice = 100 * scale;
+            sample.cpu_cores[1] = super::r2o_parse_cpu_core(&format!("cpu1 0 {nice} 0 0")).unwrap();
+            sample
+        };
+        let mut limit = R2oAdaptiveLimit::new(4);
+        limit.r2o_sample(0, background_only(1), 0, 0);
+        limit.r2o_sample(1_000, background_only(2), 2, 1);
+        assert_eq!(limit.limit(), 3);
+    }
+
+    #[test]
     fn r2o_разбор_cpu_сохраняет_unsigned_арифметику_донора() {
         assert_eq!(
             r2o_parse_cpu_stat("cpu 18446744073709551615 1 1 0\n"),
@@ -1409,6 +1496,7 @@ mod tests {
         limit.r2o_sample(
             0,
             R2oResourceReading {
+                cpu_cores: Vec::new(),
                 cpu: Some(R2oCpuCounters {
                     busy: 100,
                     total: 1000,
@@ -1430,6 +1518,7 @@ mod tests {
         limit.r2o_sample(
             1000,
             R2oResourceReading {
+                cpu_cores: Vec::new(),
                 cpu: Some(R2oCpuCounters {
                     busy: 200,
                     total: 2000,
@@ -1451,6 +1540,7 @@ mod tests {
         limit.r2o_sample(
             2000,
             R2oResourceReading {
+                cpu_cores: Vec::new(),
                 cpu: Some(R2oCpuCounters {
                     busy: 300,
                     total: 3000,
@@ -1472,6 +1562,7 @@ mod tests {
         limit.r2o_sample(
             3000,
             R2oResourceReading {
+                cpu_cores: Vec::new(),
                 cpu: Some(R2oCpuCounters {
                     busy: 400,
                     total: 4000,
@@ -1497,6 +1588,7 @@ mod tests {
         limit.r2o_sample(
             0,
             R2oResourceReading {
+                cpu_cores: Vec::new(),
                 cpu: Some(R2oCpuCounters {
                     busy: 100,
                     total: 1000,
@@ -1516,6 +1608,7 @@ mod tests {
         limit.r2o_sample(
             1000,
             R2oResourceReading {
+                cpu_cores: Vec::new(),
                 cpu: Some(R2oCpuCounters {
                     busy: 900,
                     total: 2000,
@@ -1538,6 +1631,7 @@ mod tests {
         limit.r2o_sample(
             0,
             R2oResourceReading {
+                cpu_cores: Vec::new(),
                 cpu: Some(R2oCpuCounters {
                     busy: 100,
                     total: 1000,
@@ -1557,6 +1651,7 @@ mod tests {
         limit.r2o_sample(
             1000,
             R2oResourceReading {
+                cpu_cores: Vec::new(),
                 cpu: Some(R2oCpuCounters {
                     busy: 200,
                     total: 2000,
@@ -1580,6 +1675,7 @@ mod tests {
     fn r2o_полоса_cpu_от_двадцати_пяти_до_сорока_процентов_не_меняет_предел() {
         let mut limit = R2oAdaptiveLimit::new(4);
         let reading = |busy, total| R2oResourceReading {
+            cpu_cores: Vec::new(),
             cpu: Some(R2oCpuCounters { busy, total }),
             memory: Some(R2oMemoryStats {
                 available_kb: 400_000,
@@ -1598,6 +1694,7 @@ mod tests {
     fn r2o_conntrack_без_счётчика_не_ограничивает_замеры() {
         let mut limit = R2oAdaptiveLimit::new(4);
         let reading = |busy, total| R2oResourceReading {
+            cpu_cores: Vec::new(),
             cpu: Some(R2oCpuCounters { busy, total }),
             memory: Some(R2oMemoryStats {
                 available_kb: 400_000,
@@ -1614,6 +1711,7 @@ mod tests {
     fn r2o_причина_ограничения_журналируется_после_десяти_секунд_без_дребезга() {
         let mut limit = R2oAdaptiveLimit::new(4);
         let reading = |busy, total, available_kb| R2oResourceReading {
+            cpu_cores: Vec::new(),
             cpu: Some(R2oCpuCounters { busy, total }),
             memory: Some(R2oMemoryStats {
                 available_kb,
@@ -2324,6 +2422,7 @@ mod tests {
             limit.r2o_sample(
                 1000,
                 R2oResourceReading {
+                    cpu_cores: Vec::new(),
                     cpu,
                     memory,
                     conntrack,
