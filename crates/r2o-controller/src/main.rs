@@ -35347,6 +35347,41 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn dns_keenetic_profile_change_invalidates_previous_health() {
+        let services = |format| {
+            r2k_core::dns_config::parse_keenetic(&format!(
+                "proxy-https-filters:\n  server-https:\n    uri: https://192.0.2.1/dns-query\n    format: {format}\n"
+            ))
+        };
+        let mut state = super::R2oDnsServices {
+            services: Vec::new(),
+            live: Vec::new(),
+            tasks: dns_tasks(),
+            generation: 0,
+        };
+        state.set_services(services("dnsm"));
+        state.live[0].checked_at = Some(42);
+        state.live[0].state = r2o_controller::live::DnsServiceState::DirectOk;
+        let generation = state.live[0].generation;
+        state.set_services(services("dnsm"));
+        assert_eq!(state.live[0].checked_at, Some(42));
+        assert_eq!(state.live[0].generation, generation);
+
+        state.set_services(services("json"));
+        assert_ne!(state.live[0].generation, generation);
+        let mut health = super::R2oDnsHealth::new();
+        health.start_due(&mut state, None);
+        assert!(health.task_slot.is_none());
+        assert!(state.live[0].checked_at.is_none());
+        assert!(!state.live[0].dns_answer);
+        assert_eq!(
+            state.live[0].failure,
+            Some(r2o_controller::dns_health::DnsHealthFailure::Configuration)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn dns_keenetic_reader_drains_large_output_and_caps_it() {
         use std::process::{Command, Stdio};
 

@@ -666,7 +666,7 @@ pub fn parse_https_dns_proxy(text: &str) -> Vec<DnsService> {
 }
 
 /// C `dnsproxy_bootstrap_add`: numeric IP или `IP:53`/`[IPv6]:53`, дедуп.
-fn dnsproxy_bootstrap_add(out: &mut String, value: &str) {
+fn add_bootstrap_ip(out: &mut String, value: &str) {
     let host = if let Some(rest) = value.strip_prefix('[') {
         let Some(close) = rest.find(']') else {
             return;
@@ -691,7 +691,11 @@ fn dnsproxy_bootstrap_add(out: &mut String, value: &str) {
     if out.split(',').any(|known| known == host) {
         return;
     }
-    if !out.is_empty() {
+    let separator = usize::from(!out.is_empty());
+    if out.len() + separator + host.len() >= DNS_BOOTSTRAP_MAX {
+        return;
+    }
+    if separator != 0 {
         out.push(',');
     }
     out.push_str(host);
@@ -720,7 +724,7 @@ pub fn parse_dnsproxy(text: &str) -> Vec<DnsService> {
             continue;
         }
         if servers && let Some(value) = uci_value(line, "list", "bootstrap") {
-            dnsproxy_bootstrap_add(&mut bootstrap, &value);
+            add_bootstrap_ip(&mut bootstrap, &value);
         }
     }
     for line in text.lines() {
@@ -735,30 +739,30 @@ pub fn parse_dnsproxy(text: &str) -> Vec<DnsService> {
     items
 }
 
-/// C `read_doqd`: строки `upstream`/`fallback` + URI.
+/// Основные и резервные серверы doqd с настроенными адресами bootstrap.
 pub fn parse_doqd(text: &str, source: &str) -> Vec<DnsService> {
-    let mut items = Vec::new();
-    for line in text.lines() {
-        let rest = skip_space(line);
-        if !(rest.starts_with("upstream") || rest.starts_with("fallback")) {
-            continue;
-        }
-        if !matches!(rest.as_bytes().get(8), Some(b' ' | b'\t')) {
-            continue;
-        }
-        let rest = skip_space(&rest[8..]);
-        let end = rest
-            .find([' ', '\t', '\r', '\n', '#'])
-            .unwrap_or(rest.len());
-        let mut uri = &rest[..end];
-        if matches!(uri.as_bytes().first(), Some(b'\'' | b'"')) {
-            let quote = uri.as_bytes()[0] as char;
-            if uri.len() < 2 || !uri.ends_with(quote) {
-                continue;
+    let directives = || {
+        text.lines().filter_map(|line| {
+            let mut words = line.split('#').next()?.split_ascii_whitespace();
+            let key = words.next()?;
+            let mut value = words.next()?;
+            if let Some(quote @ ('\'' | '"')) = value.chars().next() {
+                value = value.strip_prefix(quote)?.strip_suffix(quote)?;
             }
-            uri = &uri[1..uri.len() - 1];
+            Some((key, value))
+        })
+    };
+    let mut bootstrap = String::new();
+    for (key, value) in directives() {
+        if key == "bootstrap" {
+            add_bootstrap_ip(&mut bootstrap, value);
         }
-        add_service(&mut items, uri, source, None);
+    }
+    let mut items = Vec::new();
+    for (key, value) in directives() {
+        if matches!(key, "upstream" | "fallback") {
+            add_service(&mut items, value, source, Some(&bootstrap));
+        }
     }
     items
 }
@@ -1167,6 +1171,10 @@ config dnsproxy 'global'
 upstream https://dns.example/dns-query
 fallback 'tls://dot.example'
 upstream "quic://[2001:db8::1]"
+bootstrap 192.0.2.53
+bootstrap '[2001:db8::53]:53' # IPv6
+bootstrap 192.0.2.53
+bootstrap invalid.example
 # upstream https://ignored.example/
 "#;
         let services = super::parse_doqd(text, "doqd");
@@ -1176,6 +1184,9 @@ upstream "quic://[2001:db8::1]"
         assert_eq!(services[2].protocol, "doq");
         assert_eq!(services[2].host, "2001:db8::1");
         assert_eq!(services[0].source, "doqd");
+        for service in services {
+            assert_eq!(service.bootstrap_dns, "192.0.2.53,2001:db8::53");
+        }
     }
 
     #[test]
