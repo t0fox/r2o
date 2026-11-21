@@ -3076,7 +3076,7 @@ impl R2oDnsServices {
         task.state = r2o_controller::live::DnsTaskState::DnsHealth;
         task.dns_health_probe = true;
         task.dns_service_generation = live.generation;
-        task.transport = if service.protocol == "doq" { 17 } else { 6 };
+        task.transport = service.transport();
         task.family = if !live.ip.is_empty() && live.ip.contains(':') {
             6
         } else {
@@ -3635,7 +3635,7 @@ impl R2oDnsHealth {
             }
             let bootstrap = !service.bootstrap_dns.is_empty()
                 && service.host.parse::<std::net::IpAddr>().is_err();
-            let transport = if service.protocol == "doq" { 17 } else { 6 };
+            let transport = service.transport();
             let family = if !live.ip.is_empty() && live.ip.contains(':') {
                 6
             } else {
@@ -13678,7 +13678,7 @@ fn r2o_dns_unique_service<'a>(
     let mut matching = services.iter().enumerate().filter(|(_, service)| {
         matches!(
             (transport, service.protocol.as_str()),
-            (6, "doh" | "dot") | (17, "doq")
+            (6, "doh" | "dot") | (17, "doq" | "doh3")
         ) && endpoint.port() == service.port
             && service
                 .host
@@ -13738,7 +13738,11 @@ fn r2o_dns_doq_service(
     server: std::net::SocketAddr,
     host: &str,
 ) -> Result<Option<r2k_core::dns_config::DnsService>, &'static str> {
-    Ok(r2o_dns_unique_service(services, server, host, 17)?.map(|(_, service)| service.clone()))
+    match r2o_dns_unique_service(services, server, host, 17)? {
+        Some((_, service)) if service.protocol == "doq" => Ok(Some(service.clone())),
+        Some(_) => Err("DNS: для DoH3 требуется проверка DNS-ответа по HTTP/3"),
+        None => Ok(None),
+    }
 }
 
 #[cfg(unix)]

@@ -677,7 +677,7 @@ fn r2o_live_dns_services(
             } else {
                 state.ip.clone()
             };
-            let transport = if service.protocol == "doq" { 17 } else { 6 };
+            let transport = service.transport();
             let family = if resolved_ip.contains(':') { 6 } else { 4 };
             let target = if service.sni.is_empty() {
                 &service.host
@@ -742,6 +742,7 @@ fn r2o_live_dns_services(
                     "doh" => "DoH",
                     "dot" => "DoT",
                     "doq" => "DoQ",
+                    "doh3" => "DoH3",
                     _ => "DNS",
                 };
                 (

@@ -16,7 +16,7 @@ pub const DNS_SOURCE_MAX: usize = 32;
 /// C `d2k_dns_service` (`runtime/d2k_dns_config.h`).
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DnsService {
-    /// `doh`, `dot` или `doq`.
+    /// `doh`, `dot`, `doq` или `doh3`.
     pub protocol: String,
     pub host: String,
     /// Пусто, если host — IP-литерал.
@@ -27,13 +27,24 @@ pub struct DnsService {
     pub port: u16,
 }
 
-/// C `d2k_dns_uri_parse`: разобрать `https://`, `tls://` или `quic://`
-/// без разрешения имени.
+impl DnsService {
+    pub fn transport(&self) -> u8 {
+        if matches!(self.protocol.as_str(), "doq" | "doh3") {
+            17
+        } else {
+            6
+        }
+    }
+}
+
+/// Разобрать URI без разрешения имени. DNSProxy также поддерживает явный `h3://`.
 pub fn dns_uri_parse(uri: &str, source: Option<&str>) -> Option<DnsService> {
     let separator = uri.find("://")?;
     let scheme = &uri[..separator];
     let (protocol, default_port) = if scheme.eq_ignore_ascii_case("https") {
         ("doh", 443)
+    } else if scheme.eq_ignore_ascii_case("h3") && source == Some("dnsproxy") {
+        ("doh3", 443)
     } else if scheme.eq_ignore_ascii_case("tls") {
         ("dot", 853)
     } else if scheme.eq_ignore_ascii_case("quic") {
@@ -108,7 +119,7 @@ pub fn dns_uri_parse(uri: &str, source: Option<&str>) -> Option<DnsService> {
     } else {
         host.clone()
     };
-    let path = if protocol == "doh" {
+    let path = if matches!(protocol, "doh" | "doh3") {
         doh_path(uri, end)?
     } else {
         "/".to_owned()
@@ -438,7 +449,7 @@ pub fn dns_resolve_bootstrap(host: &str, servers: &str, mark: u32) -> Option<std
 
 /// C `d2k_dns_service_match`: первый подходящий endpoint.
 ///
-/// `transport` — 6 (TCP: doh/dot) или 17 (UDP: doq). `name`/`ip` могут быть
+/// `transport` — 6 (TCP: doh/dot) или 17 (UDP: doq/doh3). `name`/`ip` могут быть
 /// пустыми; сравнение регистронезависимое.
 pub fn dns_service_match<'a>(
     items: &'a [DnsService],
@@ -453,11 +464,10 @@ pub fn dns_service_match<'a>(
     let name = name.filter(|value| !value.is_empty());
     let ip = ip.filter(|value| !value.is_empty());
     items.iter().find(|service| {
-        let protocol_ok = if transport == 17 {
-            service.protocol == "doq"
-        } else {
-            service.protocol == "doh" || service.protocol == "dot"
-        };
+        let protocol_ok = matches!(
+            (transport, service.protocol.as_str()),
+            (6, "doh" | "dot") | (17, "doq" | "doh3")
+        );
         if !protocol_ok || service.port != port {
             return false;
         }
@@ -996,6 +1006,30 @@ mod tests {
         ] {
             assert!(dns_uri_parse(uri, None).is_none(), "принят {uri}");
         }
+    }
+
+    #[test]
+    fn dnsproxy_h3_upstream_preserves_url_and_uses_udp() {
+        let configuration = "
+config dnsproxy 'global'
+  option enabled '1'
+  option http3 '1'
+config dnsproxy 'servers'
+  list upstream 'h3://DNS.Example:8443/query?profile=one'
+  list upstream 'https://dns.example/query'
+  list bootstrap '192.0.2.8'
+";
+        let services = super::parse_dnsproxy(configuration);
+        assert_eq!(services.len(), 2);
+        let h3 = &services[0];
+        assert_eq!(h3.protocol, "doh3");
+        assert_eq!(h3.transport(), 17);
+        assert_eq!(h3.sni, "dns.example");
+        assert_eq!(h3.port, 8443);
+        assert_eq!(h3.path, "/query?profile=one");
+        assert_eq!(h3.bootstrap_dns, "192.0.2.8");
+        assert_eq!(services[1].protocol, "doh");
+        assert_eq!(services[1].transport(), 6);
     }
 
     #[test]

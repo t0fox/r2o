@@ -1,4 +1,4 @@
-//! Health-пробы DoH/DoT/DoQ из `core/verify.c` current D2O main.
+//! Проверки DNS-обмена для DoH, DoT, DoQ и DoH3.
 //!
 //! DNS-запрос — публичный `example.com A`, без имени клиента. DoT/DoQ
 //! используют length-prefixed frame (RFC 7858/RFC 9250), DoQ — stream 0 и
@@ -955,12 +955,16 @@ fn probe_dot(
     result
 }
 
-fn probe_doq(
+fn probe_quic_dns(
     service: &DnsService,
     mark: Option<u32>,
     deadline: Instant,
     roots: Arc<RootCertStore>,
 ) -> DnsHealthResult {
+    let http3 = service.protocol.eq_ignore_ascii_case("doh3");
+    if http3 && let Err(reason) = doh_validate(service) {
+        return DnsHealthResult::default().fail(DnsHealthFailure::Configuration, reason);
+    }
     let address = match resolve_service(service) {
         Ok(address) => address,
         Err(reason) => {
@@ -980,7 +984,7 @@ fn probe_doq(
         Ok((socket, _)) => socket,
         Err(error) => {
             return DnsHealthResult {
-                reason: format!("DoQ: UDP: {}", error.source),
+                reason: format!("DNS: UDP: {}", error.source),
                 failure: Some(DnsHealthFailure::Local),
                 ..Default::default()
             };
@@ -993,16 +997,22 @@ fn probe_doq(
         Ok(runtime) => runtime,
         Err(error) => {
             return DnsHealthResult {
-                reason: format!("DoQ: нет Tokio runtime: {error}"),
+                reason: format!("DNS: нет Tokio runtime: {error}"),
                 failure: Some(DnsHealthFailure::Local),
                 ..Default::default()
             };
         }
     };
     let timeout = deadline.saturating_duration_since(Instant::now());
-    runtime.block_on(probe_doq_on_with_roots(
-        socket, address, host, timeout, roots,
-    ))
+    if http3 {
+        runtime.block_on(probe_doh3_on(
+            socket, address, host, service, timeout, roots,
+        ))
+    } else {
+        runtime.block_on(probe_doq_on_with_roots(
+            socket, address, host, timeout, roots,
+        ))
+    }
 }
 
 /// C `d2k_verify_dns_on` для DoQ на уже занятом (и, при испытании, плановом)
@@ -1016,6 +1026,63 @@ pub async fn probe_doq_on(
     probe_doq_on_with_roots(socket, address, host, timeout, dns_roots()).await
 }
 
+fn trusted_quic_dns_endpoint(
+    socket: std::net::UdpSocket,
+    alpn: &[u8],
+    roots: Arc<RootCertStore>,
+) -> Result<quinn::Endpoint, String> {
+    let provider = rustls::crypto::ring::default_provider();
+    let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|error| format!("TLS config: {error}"))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    tls.alpn_protocols = vec![alpn.to_vec()];
+    let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls)
+        .map_err(|error| format!("QUIC TLS: {error}"))?;
+    let mut endpoint = quinn::Endpoint::new(
+        quinn::EndpointConfig::default(),
+        None,
+        socket,
+        Arc::new(quinn::TokioRuntime),
+    )
+    .map_err(|error| format!("QUIC endpoint: {error}"))?;
+    let mut client_config = quinn::ClientConfig::new(Arc::new(crypto));
+    let mut transport = quinn::TransportConfig::default();
+    transport.stream_receive_window(quinn::VarInt::from_u32(16 * 1024));
+    transport.receive_window(quinn::VarInt::from_u32(32 * 1024));
+    transport.max_concurrent_bidi_streams(quinn::VarInt::from_u32(0));
+    transport.max_concurrent_uni_streams(quinn::VarInt::from_u32(4));
+    client_config.transport_config(Arc::new(transport));
+    endpoint.set_default_client_config(client_config);
+    Ok(endpoint)
+}
+
+async fn connect_quic_dns(
+    endpoint: &quinn::Endpoint,
+    address: SocketAddr,
+    name: &str,
+) -> Result<quinn::Connection, (DnsHealthFailure, String)> {
+    let connecting = endpoint
+        .connect(address, name)
+        .map_err(|error| (DnsHealthFailure::Configuration, error.to_string()))?;
+    connecting.await.map_err(|error| {
+        let kind = match &error {
+            quinn::ConnectionError::TimedOut | quinn::ConnectionError::Reset => {
+                DnsHealthFailure::Network
+            }
+            // RFC 9001 кодирует сообщение TLS как 0x100 + номер alert.
+            quinn::ConnectionError::TransportError(error)
+                if matches!(u64::from(error.code), 0x12a..=0x12e | 0x130 | 0x174) =>
+            {
+                DnsHealthFailure::Certificate
+            }
+            _ => DnsHealthFailure::Server,
+        };
+        (kind, error.to_string())
+    })
+}
+
 async fn probe_doq_on_with_roots(
     socket: std::net::UdpSocket,
     address: SocketAddr,
@@ -1025,57 +1092,15 @@ async fn probe_doq_on_with_roots(
 ) -> DnsHealthResult {
     let started = Instant::now();
     let mut result = DnsHealthResult::default();
-    let provider = rustls::crypto::ring::default_provider();
-    let mut tls = match rustls::ClientConfig::builder_with_provider(Arc::new(provider))
-        .with_protocol_versions(&[&rustls::version::TLS13])
-    {
-        Ok(builder) => builder.with_root_certificates(roots).with_no_client_auth(),
-        Err(error) => {
-            return result.fail(DnsHealthFailure::Local, format!("DoQ: TLS config: {error}"));
-        }
-    };
-    tls.alpn_protocols = vec![b"doq".to_vec()];
-    let crypto = match quinn::crypto::rustls::QuicClientConfig::try_from(tls) {
-        Ok(crypto) => crypto,
-        Err(error) => {
-            return result.fail(DnsHealthFailure::Local, format!("DoQ: QUIC TLS: {error}"));
-        }
-    };
-    let quinn_runtime: Arc<dyn quinn::Runtime> = Arc::new(quinn::TokioRuntime);
-    let mut endpoint = match quinn::Endpoint::new(
-        quinn::EndpointConfig::default(),
-        None,
-        socket,
-        quinn_runtime,
-    ) {
+    let endpoint = match trusted_quic_dns_endpoint(socket, b"doq", roots) {
         Ok(endpoint) => endpoint,
-        Err(error) => {
-            return result.fail(DnsHealthFailure::Local, format!("DoQ: endpoint: {error}"));
-        }
+        Err(error) => return result.fail(DnsHealthFailure::Local, format!("DoQ: {error}")),
     };
-    let mut client_config = quinn::ClientConfig::new(Arc::new(crypto));
-    client_config.transport_config(Arc::new(quinn::TransportConfig::default()));
-    endpoint.set_default_client_config(client_config);
     let query = dns_query_frame(0);
     let result_from_runtime = tokio::time::timeout(timeout, async {
-        let connecting = endpoint
-            .connect(address, host)
-            .map_err(|error| (DnsHealthFailure::Configuration, format!("DoQ: {error}")))?;
-        let connection = connecting.await.map_err(|error| {
-            let kind = match &error {
-                quinn::ConnectionError::TimedOut | quinn::ConnectionError::Reset => {
-                    DnsHealthFailure::Network
-                }
-                // RFC 9001 кодирует сообщение TLS как 0x100 + номер alert.
-                quinn::ConnectionError::TransportError(error)
-                    if matches!(u64::from(error.code), 0x12a..=0x12e | 0x130 | 0x174) =>
-                {
-                    DnsHealthFailure::Certificate
-                }
-                _ => DnsHealthFailure::Server,
-            };
-            (kind, format!("DoQ: {error}"))
-        })?;
+        let connection = connect_quic_dns(&endpoint, address, host)
+            .await
+            .map_err(|(kind, error)| (kind, format!("DoQ: {error}")))?;
         result.tcp_reachable = true;
         result.tls_handshake = true;
         let (mut send, mut recv) = connection
@@ -1147,6 +1172,126 @@ async fn probe_doq_on_with_roots(
     result
 }
 
+async fn probe_doh3_on(
+    socket: std::net::UdpSocket,
+    address: SocketAddr,
+    host: &str,
+    service: &DnsService,
+    timeout: Duration,
+    roots: Arc<RootCertStore>,
+) -> DnsHealthResult {
+    use bytes::{Buf, Bytes};
+
+    let mut result = DnsHealthResult::default();
+    let authority = match doh_authority(service) {
+        Ok(authority) => authority,
+        Err(error) => return result.fail(DnsHealthFailure::Configuration, error),
+    };
+    let path = if service.path.is_empty() {
+        "/"
+    } else {
+        &service.path
+    };
+    let uri = http::Uri::builder()
+        .scheme("https")
+        .authority(authority)
+        .path_and_query(path)
+        .build();
+    let request = match uri.and_then(|uri| {
+        http::Request::post(uri)
+            .header(http::header::ACCEPT, "application/dns-message")
+            .header(http::header::CONTENT_TYPE, "application/dns-message")
+            .body(())
+    }) {
+        Ok(request) => request,
+        Err(_) => return result.fail(DnsHealthFailure::Configuration, "DoH3: недопустимый URL"),
+    };
+    let endpoint = match trusted_quic_dns_endpoint(socket, b"h3", roots) {
+        Ok(endpoint) => endpoint,
+        Err(error) => return result.fail(DnsHealthFailure::Local, format!("DoH3: {error}")),
+    };
+    let mut drive = None;
+    let response = tokio::time::timeout(timeout, async {
+        let server = |error: h3::error::StreamError| (DnsHealthFailure::Server, error.to_string());
+        let connection = connect_quic_dns(&endpoint, address, host).await?;
+        result.tcp_reachable = true;
+        result.tls_handshake = true;
+        let (mut driver, mut sender) = h3::client::builder()
+            .max_field_section_size(DOH_HEADER_MAX as u64)
+            .build(h3_quinn::Connection::new(connection))
+            .await
+            .map_err(|error| (DnsHealthFailure::Server, error.to_string()))?;
+        drive = Some(tokio::spawn(async move {
+            std::future::poll_fn(|cx| driver.poll_close(cx)).await
+        }));
+        let sent = Instant::now();
+        let mut stream = sender.send_request(request).await.map_err(server)?;
+        stream
+            .send_data(Bytes::from(dns_query_message(DNS_QUERY_ID_DOH)))
+            .await
+            .map_err(server)?;
+        stream.finish().await.map_err(server)?;
+        let response = stream.recv_response().await.map_err(server)?;
+        result.http_status = i32::from(response.status().as_u16());
+        if response.status() != http::StatusCode::OK {
+            return Err((
+                DnsHealthFailure::Server,
+                format!("сервер вернул HTTP {}", response.status().as_u16()),
+            ));
+        }
+        let invalid = |reason: &str| (DnsHealthFailure::DnsResponse, reason.to_owned());
+        let media_type = response
+            .headers()
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next());
+        if !media_type
+            .is_some_and(|media| media.trim().eq_ignore_ascii_case("application/dns-message"))
+        {
+            return Err(invalid("неверный Content-Type"));
+        }
+        let mut body = Vec::new();
+        while let Some(mut chunk) = stream
+            .recv_data()
+            .await
+            .map_err(|_| invalid("обрыв DNS-ответа"))?
+        {
+            let size = chunk.remaining();
+            if body.len().saturating_add(size) > DOH_BODY_MAX {
+                return Err(invalid("слишком большой DNS-ответ"));
+            }
+            body.extend_from_slice(&chunk.copy_to_bytes(size));
+        }
+        let lengths = response.headers().get_all(http::header::CONTENT_LENGTH);
+        let mut lengths = lengths.iter();
+        if let Some(length) = lengths.next()
+            && (length.to_str().ok().and_then(|value| value.parse().ok()) != Some(body.len())
+                || lengths.next().is_some())
+        {
+            return Err(invalid("Content-Length не совпадает с DNS-ответом"));
+        }
+        if !dns_probe_reply(&body, DNS_QUERY_ID_DOH) {
+            return Err(invalid("некорректный DNS-ответ"));
+        }
+        Ok(sent.elapsed().as_millis() as u64)
+    })
+    .await;
+    endpoint.close(quinn::VarInt::from_u32(0), b"");
+    if let Some(driver) = drive {
+        driver.abort();
+    }
+    match response {
+        Ok(Ok(rtt)) => {
+            result.dns_reply = true;
+            result.answer_rtt_ms = Some(rtt);
+            result.reason = "DoH3: получен корректный DNS-ответ".into();
+            result
+        }
+        Ok(Err((kind, error))) => result.fail(kind, format!("DoH3: {error}")),
+        Err(_) => result.fail(DnsHealthFailure::Network, "DoH3: истёк срок проверки"),
+    }
+}
+
 fn dns_roots() -> Arc<RootCertStore> {
     static ROOTS: OnceLock<Arc<RootCertStore>> = OnceLock::new();
     Arc::clone(ROOTS.get_or_init(|| {
@@ -1186,8 +1331,10 @@ fn probe_dns_health_with_roots(
         probe_doh(service, mark, deadline, roots)
     } else if service.protocol.eq_ignore_ascii_case("dot") {
         probe_dot(service, mark, deadline, roots)
-    } else if service.protocol.eq_ignore_ascii_case("doq") {
-        probe_doq(service, mark, deadline, roots)
+    } else if service.protocol.eq_ignore_ascii_case("doq")
+        || service.protocol.eq_ignore_ascii_case("doh3")
+    {
+        probe_quic_dns(service, mark, deadline, roots)
     } else {
         DnsHealthResult {
             reason: format!("DNS: неподдерживаемый протокол {}", service.protocol),
@@ -1693,6 +1840,99 @@ mod tests {
         );
         assert!(!result.dns_reply);
         assert_eq!(result.answer_rtt_ms, None);
+    }
+
+    #[test]
+    fn loopback_doh3_requires_matching_dns_reply_on_http3() {
+        use bytes::{Buf, Bytes};
+        use std::net::UdpSocket;
+
+        let (mut tls, cert) = test_server_config();
+        tls.alpn_protocols = vec![b"h3".to_vec()];
+        let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls).unwrap();
+        let config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
+        let socket = UdpSocket::bind("[::1]:0").unwrap();
+        let port = socket.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let endpoint = quinn::Endpoint::new(
+                    quinn::EndpointConfig::default(),
+                    Some(config),
+                    socket,
+                    Arc::new(quinn::TokioRuntime),
+                )
+                .unwrap();
+                for id in [DNS_QUERY_ID_DOH, DNS_QUERY_ID_DOH + 1] {
+                    let connection = endpoint.accept().await.unwrap().await.unwrap();
+                    let mut h3 = h3::server::builder()
+                        .build(h3_quinn::Connection::new(connection.clone()))
+                        .await
+                        .unwrap();
+                    let (request, mut stream) = h3
+                        .accept()
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .resolve_request()
+                        .await
+                        .unwrap();
+                    assert_eq!(request.method(), http::Method::POST);
+                    assert_eq!(
+                        request.uri().path_and_query().unwrap().as_str(),
+                        "/dns-query?profile=1"
+                    );
+                    assert_eq!(request.headers()["content-type"], "application/dns-message");
+                    let mut body = Vec::new();
+                    while let Some(mut chunk) = stream.recv_data().await.unwrap() {
+                        let count = chunk.remaining();
+                        body.extend_from_slice(&chunk.copy_to_bytes(count));
+                    }
+                    assert_eq!(body, dns_query_message(DNS_QUERY_ID_DOH));
+                    let reply = reply_for(id);
+                    stream
+                        .send_response(
+                            http::Response::builder()
+                                .header("content-type", "application/dns-message")
+                                .header("content-length", reply.len())
+                                .body(())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    stream.send_data(Bytes::from(reply)).await.unwrap();
+                    stream.finish().await.unwrap();
+                    let _ = tokio::time::timeout(Duration::from_secs(1), connection.closed()).await;
+                }
+            });
+        });
+        let service = DnsService {
+            protocol: "doh3".into(),
+            host: "::1".into(),
+            sni: "localhost".into(),
+            path: "/dns-query?profile=1".into(),
+            port,
+            ..Default::default()
+        };
+        let mut roots = RootCertStore::empty();
+        roots.add(cert).unwrap();
+        let roots = Arc::new(roots);
+        let probe = || {
+            probe_dns_health_with_roots(&service, None, Duration::from_secs(3), Arc::clone(&roots))
+        };
+        let valid = probe();
+        let wrong = probe();
+        server.join().unwrap();
+        assert!(valid.tls_handshake && valid.dns_reply, "{}", valid.reason);
+        assert_eq!(valid.http_status, 200);
+        assert!(valid.answer_rtt_ms.is_some());
+        assert!(wrong.tls_handshake && !wrong.dns_reply);
+        assert_eq!(wrong.http_status, 200);
+        assert_eq!(wrong.failure, Some(DnsHealthFailure::DnsResponse));
+        assert_eq!(wrong.answer_rtt_ms, None);
     }
 
     #[test]
