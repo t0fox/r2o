@@ -712,6 +712,10 @@ mod tests {
         finish_probe(&mut state, DnsHealthFailure::Network);
         assert!(Request::from_failures(&state, 0, Some(6)).is_none());
         finish_probe(&mut state, DnsHealthFailure::Network);
+        finish_probe(&mut state, DnsHealthFailure::Local);
+        finish_probe(&mut state, DnsHealthFailure::Network);
+        assert!(Request::from_failures(&state, 0, Some(6)).is_none());
+        finish_probe(&mut state, DnsHealthFailure::Network);
 
         state.services.push(service);
         assert!(Request::from_failures(&state, 0, Some(6)).is_none());

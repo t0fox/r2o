@@ -78,7 +78,7 @@ fn socket_failure(error: &std::io::Error) -> DnsHealthFailure {
     }
     match error.kind() {
         TimedOut | WouldBlock | ConnectionReset | ConnectionAborted | BrokenPipe
-        | NetworkUnreachable | HostUnreachable => DnsHealthFailure::Network,
+        | HostUnreachable => DnsHealthFailure::Network,
         ConnectionRefused | UnexpectedEof | InvalidData => DnsHealthFailure::Server,
         _ => DnsHealthFailure::Local,
     }
@@ -1356,6 +1356,20 @@ fn probe_dns_health_with_roots(
 mod tests {
     use super::*;
     use rustls::pki_types::CertificateDer;
+
+    #[test]
+    fn missing_route_is_distinct_from_network_timeout() {
+        use std::io::{Error, ErrorKind};
+
+        assert_eq!(
+            socket_failure(&Error::from(ErrorKind::NetworkUnreachable)),
+            DnsHealthFailure::Local
+        );
+        assert_eq!(
+            socket_failure(&Error::from(ErrorKind::TimedOut)),
+            DnsHealthFailure::Network
+        );
+    }
 
     fn response(flags: u16, answers: u16, answer_type: u16, rdlen: u16) -> Vec<u8> {
         let mut msg = vec![0u8; 12];
