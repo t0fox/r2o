@@ -105,10 +105,27 @@ FW_TRACE="$TEMP/r2o.xt" PATH="$TEMP/bin:$PATH" \
     sh "$TEMP/r2o-xt-harness.sh" "$TEMP/r2o-number.sh" "$TEMP/r2o-late.sh" "$TEMP/r2o-xt.sh"
 
 printf 'FW_BACKEND=nft\nIPV6_ENABLED=0\nPORTS=443,8443\nCONNBYTES=0:3\n' > "$TEMP/config"
-R2O_DIR="$TEMP/root" R2O_CONFIG="$TEMP/config" R2O_RUN_DIR="$TEMP/root/run" \
-R2O_PROC_DIR="$TEMP/proc" R2O_SYS_MODULE_DIR="$TEMP/sys" R2O_MODULES_DIR="$TEMP/modules" \
-R2O_NFT_TRACE="$TEMP/r2o.nft" PATH="$TEMP/bin:$PATH" \
-    sh "$ROOT/router/r2o-firewall.sh" up > "$TEMP/r2o.log" 2>&1
+run_r2o_nft() {
+    R2O_DIR="$TEMP/root" R2O_CONFIG="$TEMP/config" R2O_RUN_DIR="$TEMP/root/run" \
+    R2O_PROC_DIR="$TEMP/proc" R2O_SYS_MODULE_DIR="$TEMP/sys" R2O_MODULES_DIR="$TEMP/modules" \
+    R2O_NFT_TRACE="$1" PATH="$TEMP/bin:$PATH" \
+        sh "$ROOT/router/r2o-firewall.sh" up > "$TEMP/r2o.log" 2>&1
+}
+run_r2o_nft "$TEMP/r2o.nft"
+
+# Нестандартная метка должна совпадать с меткой зондов; 0 не исключает обычный трафик.
+printf 'MEASURE_MARK=0x88\n' >> "$TEMP/config"
+run_r2o_nft "$TEMP/r2o-custom-mark.nft"
+grep -Fq 'meta mark 0x88 return' "$TEMP/r2o-custom-mark.nft"
+if grep -Fq 'meta mark 0x2f return' "$TEMP/r2o-custom-mark.nft"; then
+    echo "Вместе с заданной меткой установлено исключение для метки по умолчанию" >&2
+    exit 1
+fi
+
+printf 'MEASURE_MARK=0\n' >> "$TEMP/config"
+run_r2o_nft "$TEMP/r2o-no-measure-mark.nft"
+test "$(grep -c 'meta mark .* return' "$TEMP/r2o-no-measure-mark.nft")" -eq 1
+
 
 failures=0
 check_count() {
