@@ -26,9 +26,15 @@ details[data-open-motion] > .box-body {
   .index a[data-nav-motion]::after { display: none; }
 }
 /* Линия и маркер читают одну координату из таймлайна этапа. */
-.search .track-fill { left: 6.5px; top: 7px; transition: none; }
-.search .track::before { top: 7px; left: 6.5px; right: calc(100% / var(--steps, 7) - 6.5px); }
-.search .track-puck { top: 7.5px; left: calc(var(--at, 0) / var(--steps, 7) * 100% + 6.5px); }
+.search .track { --half-step: calc(50% / var(--steps, 7)); margin-top: 14px; }
+.search .track-fill { left: var(--half-step); top: 3px; transition: none; }
+.search .track::before { top: 3px; inset-inline: var(--half-step); }
+.search .track-puck {
+  top: 3.5px; left: calc((var(--at, 0) + .5) / var(--steps, 7) * 100%);
+  width: 5px; height: 5px; margin: -2.5px 0 0 -2.5px; background: var(--vis);
+}
+.search .track-step { padding: 35px 1px 0; text-align: center; font-size: .66rem; color: var(--ink-3); }
+.search .track-icon { top: 14px; left: 50%; transform: translateX(-50%); width: 15px; height: 15px; }
 .search .track-puck::after {
   content: ""; position: absolute; inset: -1px; border-radius: 50%;
   border: 1px solid var(--vis); opacity: var(--ring-alpha, 0);
@@ -58,3 +64,66 @@ details[data-open-motion] > .box-body {
 body[data-stale="true"] .lamp::after { opacity: 0; }
 [data-motion-paused] .lamp::after,
 [data-motion-paused] .search .search-phase::before { animation-play-state: paused !important; }
+
+.search-plan-details { min-width: 0; border-color: var(--line); }
+.search-plan-details summary { gap: 10px; padding: 9px 12px; color: var(--ink); font: inherit; font-size: .82rem; font-weight: 650; }
+.search-plan-details summary::before { content: attr(data-label); font: 600 .66rem var(--mono); }
+.search-plan-details[data-label="Применено"] summary::before { color: var(--ok); }
+.search-plan-details summary::after { content: ""; width: 6px; height: 6px; border: solid var(--ink-3); border-width: 0 1px 1px 0; transform: rotate(45deg); }
+.search-plan-details[open] summary::after { transform: rotate(225deg); }
+.search-plan-summary { white-space: normal; overflow-wrap: anywhere; }
+.search-plan-body { padding: 10px 12px; font-size: .72rem; white-space: normal; max-height: none; }
+.candidate-facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; }
+.candidate-facts dd { margin: 0; color: var(--ink); }
+.candidate-source { margin: 9px 0 0; padding-top: 8px; border-top: 1px solid var(--line-soft); font: inherit; white-space: pre-wrap; }
+.plan-explanation { padding: 12px; border-top: 1px solid var(--line-soft); color: var(--ink-2); font: .81rem/1.5 Manrope,sans-serif; }
+.plan-explanation strong { color: var(--ink); font-weight: 650; }
+.plan-explanation ul { margin: 5px 0 0; padding-inline-start: 17px; list-style: disc; }
+.plan-explanation li + li { margin-top: 3px; }
+.plan-explanation li::marker { color: var(--bronze); }
+.plan-proof { margin: 8px 0 0; color: var(--ok); font-size: .75rem; }
+.search-plan-body .plan-explanation { margin-top: 9px; padding: 8px 0 0; }
+.tg-hero { padding: 16px 18px; border-radius: 12px; }
+.tg-hero::after { content: none; }
+.tg-orb { width: 44px; height: 44px; }
+.tg-orb-ring { inset: 3px; background: none; border: 1px solid var(--line-strong); animation: none; }
+.tg-orb-core { width: 10px; height: 10px; }
+.tg-stats { gap: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--surface); }
+.tg-stat { margin: 0; border: 0; border-radius: 0; background: transparent; border-inline-end: 1px solid var(--line-soft); }
+.tg-stat:last-child { border: 0; }
+.tg-stat:hover { transform: none; border-color: var(--line-soft); }
+.tg-stat-label, .tg-flow-head span { color: var(--ink-2); }
+.tg-flow-caption { font-size: .74rem; }
+.tg-check-details { margin-top: 0; }
+.upd-knob { pointer-events: none; }
+.install-steps { list-style: none; display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 5px; padding: 0; margin: 12px 0 0; }
+.install-steps[hidden] { display: none; }
+.install-steps li { position: relative; padding: 8px 0 0; border-top: 2px solid var(--line); color: var(--ink-3); font: 600 .73rem/1.4 Manrope, sans-serif; }
+.install-steps li::before { content: ""; position: absolute; top: -2px; inset-inline: 0; height: 2px; transform: scaleX(0); transform-origin: left; background: var(--bronze); }
+.install-steps li[data-phase="active"] { color: var(--bronze); }
+.install-steps li[data-phase="active"]::before { transform: scaleX(.45); }
+.install-steps li[data-phase="done"]::before { transform: scaleX(1); background: var(--ok); }
+.install-steps li[data-phase="error"] { color: var(--bad); border-color: var(--bad); }
+.install-steps ~ progress { position: absolute; width: 1px; height: 1px; clip-path: inset(50%); }
+#updates-body[data-install="install"] .release-mark, #updates-body[data-install="check"] .release-mark { border-color: var(--bronze-line); }
+#updates-body[data-install="done"] .release-mark { border-color: var(--ok-line); }
+#update-progress-text { margin-top: 8px; color: var(--ink); font-variant-numeric: tabular-nums; }
+.update-transfer progress { margin-top: 12px; height: 4px; }
+#updates-body[data-install="done"] progress::-webkit-progress-value { background: var(--ok); }
+#updates-body[data-install="error"] progress::-webkit-progress-value { background: var(--bad); }
+@media (prefers-reduced-motion: no-preference) {
+  .install-steps li::before { transition: transform .4s var(--ease), background-color .18s; }
+  .update-transfer progress::-webkit-progress-value { transition: width .36s var(--ease), background-color .18s; }
+  #updates-body[data-install="install"] .release-wave, #updates-body[data-install="check"] .release-wave {
+    display: block; position: absolute; inset: 5px; border: 1px solid var(--bronze); border-radius: 50%; animation: signal-breathe 1.8s ease-in-out infinite;
+  }
+}
+@media (max-width: 720px) {
+  .box-main-col .bindings { min-width: 580px; }
+  .search .track-step { min-height: 32px; padding: 0; }
+  .search .track-label { display: none; }
+  .search .track-note { display: block; grid-column: 1/-1; margin-top: 4px; color: var(--ink-2); font: .72rem var(--mono); }
+  .tg-hero { grid-template-columns: auto minmax(0,1fr); gap: 10px; padding: 13px; }
+  .tg-actions { grid-column: 1/-1; }
+  .tg-stat { border-bottom: 1px solid var(--line-soft); }
+}

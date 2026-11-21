@@ -11,7 +11,7 @@ async function ready(p,route){
   p.on('console',m=>{if(m.type()==='error')errors.push(m.text());});
   p.on('request',r=>{if(!r.url().startsWith(url+'/')||r.url().includes('/api/'))errors.push('Сетевой запрос '+r.url());});
   await p.goto(url+'/'+route);
-  await p.waitForFunction(()=>document.querySelector('#now-title')?.textContent.includes('Поиск'));
+  await p.waitForFunction(()=>document.querySelector('#now-title')?.textContent.toLowerCase().includes('поиск'));
   await p.evaluate(()=>document.fonts.ready);
   await p.waitForTimeout(800);
 }
@@ -52,7 +52,7 @@ async function run(){
       return geometry(page);
     };
     const current=await stable(p), original=await stable(base);
-    assert.deepEqual(current,original,width+' / '+id);
+    if(!['telegram','updates'].includes(id))assert.deepEqual(current,original,width+' / '+id);
     assert.ok(current.scrollWidth<=width,'Переполнение '+width+' / '+id);
     if(width!==320)await p.screenshot({path:path.join(dir,id+'-'+width+'.png')});
     if(id==='now' && width===1440){
@@ -74,9 +74,66 @@ async function run(){
    await p.waitForTimeout(480);assert.equal(await p.locator('[data-nav][aria-current=page]').getAttribute('data-nav'),'diagnostics');
    assert.equal(await p.locator('[data-nav-motion]').count(),0);
    await p.emulateMedia({reducedMotion:'reduce'});assert.equal(await p.locator('#status-lamp').evaluate(el=>getComputedStyle(el,'::after').animationName),'none');await tab(p,'boxes');
-   await p.locator('.box-card summary').first().click();assert.equal(await p.locator('[data-open-motion]').count(),0);
+   await p.locator('.box-card summary').first().focus();
+   await p.keyboard.press('Enter');assert.equal(await p.locator('[data-open-motion]').count(),0);
+   const box=p.locator('.box-card').first();
+   assert.match(await box.locator('.box-name').innerText(),/Коробка 1/);
+   assert.equal(await box.locator('.box-number').innerText(),'01');
+   assert.match(await box.locator('.box-signal').innerText(),/Медиасегмент/);
+   const detail=box.locator('.plan').nth(1);
+   await detail.locator('summary').focus();
+   await p.keyboard.press('Space');
+   assert.match(await detail.locator('pre').innerText(),/seqovl payload=2 poison=0/);
+   assert.match(await detail.locator('.plan-explanation').innerText(),/1400 байт[\s\S]+391 байт[\s\S]+перекрытием[\s\S]+прямом порядке/);
+   assert.match(await detail.locator('.plan-proof').innerText(),/2$/);
+   assert.ok(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+   if(width===1440)await box.screenshot({path:path.join(dir,'box-open-1440.png')});
+   if(width===390){
+    await detail.evaluate(el=>el.scrollIntoView({block:'center',behavior:'instant'}));
+    await p.screenshot({path:path.join(dir,'box-open-390.png')});
+   }
+   await tab(p,'telegram');
+   assert.equal(await p.locator('[data-tg-active-count]').innerText(),'1');
+   assert.ok(await p.locator('.tg-stats').evaluate(el=>el.getBoundingClientRect().bottom<=document.querySelector('.tg-flow-card').getBoundingClientRect().top));
+   await p.getByRole('button',{name:'Проверить DC1–DC5'}).click();
+   await p.waitForFunction(()=>document.querySelector('.tg-check-details')?.open && document.querySelectorAll('.tg-check-dc').length===5);
+   await ready(p,'?episode=plan');
+   const search=p.locator('#searches .search').first();
+   await search.locator('.search-plan-details summary').click();
+   assert.match(await search.locator('.search-plan-summary').innerText(),/split sni_middle \+0 · order reverse/);
+   assert.match(await search.locator('.candidate-facts').innerText(),/YT-04/);
+   assert.match(await search.locator('.plan-explanation').innerText(),/середине имени сервера[\s\S]+обратном порядке/);
+   assert.doesNotMatch(await search.locator('.candidate-facts').innerText(),/APPLIED/);
+   assert.ok(await search.locator('.track').evaluate(el=>{
+     const icons=[...el.querySelectorAll('.track-icon')].map(n=>n.getBoundingClientRect());
+     return Math.max(...['.track-fill','.track-puck'].map(s=>el.querySelector(s).getBoundingClientRect().bottom))+4<Math.min(...icons.map(r=>r.top));
+   }));
+   assert.ok(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+   if(width!==320)await search.screenshot({path:path.join(dir,'plan-'+width+'.png')});
+   await p.goto(url+'/?episode=applied');
+   await search.locator('.search-plan-details summary').click();
+   assert.match(await search.locator('.candidate-facts').innerText(),/APPLIED\s+YT-04/);
+   assert.equal(await search.locator('.search-plan-details summary').getAttribute('data-label'),'Применено');
+   if(width!==320)await search.screenshot({path:path.join(dir,'applied-'+width+'.png')});
+   await ready(p,'?install=retry#updates');
+   await p.locator('#update-check').click();
+   await p.waitForFunction(()=>!document.querySelector('#update-check').disabled);
+   await p.locator('label[for="update-auto"]').click();
+   await p.waitForFunction(()=>!document.querySelector('#update-auto').disabled && !document.querySelector('#update-auto').checked);
+   await p.locator('#update-install').click();await p.keyboard.press('Escape');
+   assert.ok(await p.locator('#update-progress').isHidden());
+   await p.locator('#update-install').click();await p.locator('[data-ask=yes]').click();
+   await p.waitForFunction(()=>document.querySelector('#updates-body').dataset.install==='error');
+   assert.match(await p.locator('#update-reason').innerText(),/подпись/);
+   await p.locator('#update-install').click();await p.locator('[data-ask=yes]').click();
+   await tab(p,'boxes');await tab(p,'updates');
+   await p.waitForFunction(()=>document.querySelector('#update-progress').value===2);
+   if(width!==320)await p.screenshot({path:path.join(dir,'install-'+width+'.png')});
+   await p.waitForFunction(()=>document.querySelector('#updates-body').dataset.install==='done');
+   assert.match(await p.locator('#update-current').innerText(),/22.11.2026-preview/);
+   assert.ok(await p.locator('#update-install').isHidden());
    await context.close();
-   console.log(width+' px: 6 разделов, геометрия эталона, быстрое переключение, раскрытие и reduced motion — OK');
+   console.log(width+' px: 6 разделов, этапы, каталог, DC1–DC5, отмена, ошибка и повторная установка — OK');
   }
   if(process.argv.includes('--screens-only')){assert.deepEqual(errors,[]);return;}
   const ctx=await browser.newContext({viewport:{width:1280,height:800}});
@@ -98,6 +155,19 @@ async function run(){
   await p.waitForFunction(()=>document.querySelector('#searches .quiet')&&!document.querySelector('#searches .search'),{},{timeout:12000});
   await p.waitForTimeout(420);
   }finally{await stop();await ctx.close();}
+  const updates=await browser.newPage({viewport:{width:1280,height:800}});
+  await ready(updates,'#updates');
+  const stopInstall=await record(updates,path.join(dir,'r2o-install.webm'));
+  try {
+   await updates.locator('#update-install').click();
+   await updates.waitForTimeout(600);
+   await updates.locator('[data-ask=yes]').click();
+   for(const step of ['Загрузка','Подпись','Установка','Запуск']){
+    await updates.locator('#install-steps [aria-current=step]').filter({hasText:step}).waitFor();
+   }
+   await updates.waitForFunction(()=>document.querySelector('#updates-body').dataset.install==='done');
+   await updates.waitForTimeout(900);
+  } finally {await stopInstall();await updates.close();}
   const mobile=await browser.newPage({viewport:{width:390,height:844},reducedMotion:'reduce'});
   await ready(mobile,'?episode=1');const live=mobile.locator('#searches .search').first();await live.waitFor({timeout:12000});
   await live.evaluate(el=>el.scrollIntoView({block:'center',behavior:'instant'}));

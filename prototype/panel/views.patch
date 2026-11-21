@@ -1,0 +1,214 @@
+diff --git a/panel.js b/panel.js
+index 08cd9f98..198901b5 100644
+--- a/panel.js
++++ b/panel.js
+@@ -172,6 +172,46 @@
+     return parts.length > 1 ? first + " · ещё " + (parts.length - 1) : first;
+   }
+
++  function describePlan(text) {
++    var anchors = { sni_middle: "середины имени сервера (SNI)", sni_start: "начала имени сервера",
++      sni_end: "конца имени сервера", hello_middle: "середины приветствия", record_end: "конца записи", payload_start: "начала данных" };
++    return str(text).split(/\r?\n/).map(function (line) {
++      var parts = line.trim().split(/\s+/), op = parts[0], a = parts[1], b = parts[2];
++      switch (op) {
++        case "": case "r2o-plan": case "d2k-plan": case "id": case "proto": case "wire": case "input": case "payload": return "";
++        case "segment": return "Размер TCP-сегмента — " + a + " байт.";
++        case "split": return a === "sni_middle" && Number(b) === 0 ? "Разделяет TLS-приветствие в середине имени сервера (SNI)." :
++          "Разделяет данные относительно " + (anchors[a] || a) + " со смещением " + b + " байт.";
++        case "payload-pad64": case "payload-pad": return "Готовит блок №" + a + " длиной " + b + " байт.";
++        case "seqovl": return "Отправляет TCP-сегменты с перекрытием: часть их позиций в потоке совпадает.";
++        case "fake": return "Добавляет ложный пакет в поток.";
++        case "poison": return parts.includes("badsum") ? "Профиль №" + a + " задаёт неверную контрольную сумму пакета." : "Профиль №" + a + " меняет поля заголовка пакета.";
++        case "payload-slice": return "Берёт фрагмент блока №" + b + " для дополнительных данных.";
++        case "oob": return "Добавляет внеполосные данные TCP.";
++        case "ipfrag": return "Разбивает IP-пакет на фрагменты.";
++        case "quicsplit": return "Разделяет начальные данные QUIC.";
++        case "quicdeny": return "Блокирует попытку соединения по QUIC.";
++        case "udplen": return "Меняет длину UDP-пакета.";
++        case "guard": if (a === "rst_alien") return "Включает защиту от посторонних пакетов сброса TCP."; break;
++        case "order": if (a === "forward" || a === "reverse") return "Отправляет сегменты в " + (a === "forward" ? "прямом" : "обратном") + " порядке."; break;
++        case "pace": case "delay": case "settle":
++          if (/^\d+$/.test(a)) return ({ pace: "Пауза между отправками", delay: "Задержка отправки", settle: "Время ожидания" })[op] + " — " + (Number(a) / 1000).toLocaleString("ru-RU") + " мс.";
++          break;
++      }
++      return "Дополнительная директива «" + op + "». Параметры указаны в исходном плане.";
++    }).filter(Boolean);
++  }
++
++  function planExplanation(doc, text) {
++    var lines = describePlan(text);
++    if (!lines.length) return null;
++    var panel = el(doc, "div", "plan-explanation");
++    var steps = el(doc, "ul");
++    lines.forEach(function (line) { steps.appendChild(el(doc, "li", "", line)); });
++    add(panel, el(doc, "strong", "", "Как работает план"), steps);
++    return panel;
++  }
++
+   /* Предел одновременных замеров считает движок по нагрузке роутера:
+      от 1 на слабом до десятков на мощном. До 16 — клетками, больше — шкалой. */
+   function slotsView(meas) {
+@@ -851,7 +891,7 @@
+     this.$("update-check").addEventListener("click", function () { return self.checkUpdates(true); });
+     this.$("update-install").addEventListener("click", function () {
+       if (self.$("update-install").disabled) return;
+-      return self.updateCommand("install");
++      self.ask({ title: "Запустить демоустановку?", text: "В этой вкладке пройдут загрузка, проверка подписи, установка и запуск служб. Роутер продолжит работать в обычном режиме.", yes: "Запустить демо" }, function () { self.updateCommand("install"); });
+     });
+     this.$("update-auto").addEventListener("change", function () {
+       return self.updateCommand(self.$("update-auto").checked ? "auto-on" : "auto-off");
+@@ -877,7 +917,7 @@
+
+   var UPDATE_ACTIONS = {
+     check: "Проверяем обновления…",
+-    install: "Устанавливаем обновление. Службы перезапустятся, панель подключится сама…",
++    install: "Идёт демонстрационная установка",
+     "auto-on": "Включаем автообновление…", "auto-off": "Выключаем автообновление…"
+   };
+
+@@ -959,7 +999,7 @@
+     write("update-state", text);
+     if (state.parentElement) state.parentElement.setAttribute("data-tone", tone);
+     var lamp = this.$("update-lamp");
+-    if (lamp) lamp.setAttribute("data-tone", tone || (!absent && !action && s.check_ok === true && !newer ? "ok" : "idle"));
++    if (lamp) lamp.setAttribute("data-tone", tone || (action || newer ? "live" : !absent && s.check_ok === true ? "ok" : "idle"));
+     if (changed && !this.doc.hidden && Motion.on()) {
+       Motion.g.killTweensOf(state);
+       Motion.g.fromTo(state, { opacity: .55, y: 3 }, { opacity: 1, y: 0, duration: .2, clearProps: "opacity,transform" });
+@@ -979,12 +1019,39 @@
+     var install = this.$("update-install");
+     install.hidden = !newer;
+     install.disabled = !!action || absent;
+-    write("update-install", newer && str(latest.release_id) === str(s.bad_release) ? "Повторить установку вручную" : "Установить сейчас");
++    write("update-install", failedInstall ? "Повторить демоустановку" : "Установить в демо");
+     this.$("update-check").disabled = !!action || absent;
+     this.$("update-check").setAttribute("data-variant", "ghost");
+-    write("update-warning", newer ? "Службы кратковременно перезапустятся. Закрытие вкладки не отменяет установку." : "").hidden = !newer;
+-    this.$("update-progress").hidden = true;
+-    write("update-progress-text", "").hidden = true;
++    write("update-warning", "Деморежим · изменения действуют в этой вкладке.").hidden = false;
++    var stages = ["Загрузка выпуска", "Проверка подписи", "Установка пакета", "Запуск служб"];
++    var progress = this.$("update-progress");
++    var rail = this.$("install-steps");
++    if (!rail) {
++      rail = el(this.doc, "ol", "install-steps");
++      rail.id = "install-steps";
++      rail.setAttribute("aria-label", "Этапы демоустановки");
++      ["Загрузка", "Подпись", "Установка", "Запуск"].forEach(function (label) {
++        rail.appendChild(el(self.doc, "li", "", label));
++      });
++      progress.before(rail);
++      this.$("update-progress-text").setAttribute("role", "status");
++    }
++    var stage = s.demo_stage;
++    var showStage = Number.isInteger(stage) && stage >= 0 && stage <= stages.length;
++    progress.hidden = !showStage;
++    rail.hidden = !showStage;
++    Array.from(rail.children).forEach(function (item, index) {
++      item.dataset.phase = index < stage ? "done" : index === stage ? (failedInstall && !action ? "error" : "active") : "waiting";
++      if (showStage && index === stage) item.setAttribute("aria-current", "step");
++      else item.removeAttribute("aria-current");
++    });
++    progress.max = stages.length;
++    progress.value = showStage ? stage : 0;
++    progress.setAttribute("aria-label", "Завершено этапов установки");
++    body.dataset.install = failedInstall && !action ? "error" : action || (showStage ? "done" : "idle");
++    var stepText = !showStage ? "" : stage === stages.length ? "4 из 4 · Службы запущены" :
++      (stage + 1) + " из 4 · " + stages[stage] + (failedInstall && !action ? " · ошибка" : "");
++    write("update-progress-text", stepText).hidden = !showStage;
+     var auto = this.$("update-auto");
+     if (!(pending && /^auto-/.test(pending.action))) auto.checked = !absent && s.auto !== false;
+     auto.disabled = absent || !!action || !!pending;
+@@ -1946,7 +2013,7 @@
+       question: el(doc, "p", "search-question"),
+       plan: el(doc, "details", "search-plan-details"),
+       planSummary: el(doc, "span", "search-plan-summary"),
+-      planBody: el(doc, "p", "search-plan-body"),
++      planBody: el(doc, "div", "search-plan-body"),
+       track: el(doc, "div", "track"),
+       trackNote: el(doc, "p", "track-note")
+     };
+@@ -1999,15 +2066,37 @@
+         p.phase.textContent = phaseText;
+       }
+     }
+-    var candidate = str(s.candidate);
++    var candidate = str(s.candidate) || str(s.plan_id) || str(s.applied_plan_id);
+     p.plan.hidden = !candidate;
+     if (candidate) {
+-      var gist = candidateGist(candidate);
++      var planId = str(s.plan_id) || str(s.applied_plan_id) || candidate;
++      var owner = list(this.m && this.m.boxes).find(function (box) {
++        return list(box.plans).some(function (entry) { return entry.id === planId; });
++      });
++      var saved = owner && owner.plans.find(function (entry) { return entry.id === planId; });
++      var applied = !!s.applied_plan_id && s.applied_plan_id === planId;
++      var raw = candidate !== planId || (!s.plan_id && !s.applied_plan_id && !saved) ? candidate : saved && str(saved.text);
++      var gist = raw && (raw.includes("\n") ? planGist(raw) : candidateGist(raw)) || saved && saved.human || "Состав плана не получен";
++      var label = applied ? "Применено" : "Проверяем";
++      p.plan.dataset.label = label;
+       if (p.planSummary.textContent !== gist) p.planSummary.textContent = gist;
+-      if (p.planSummary.title !== candidate) p.planSummary.title = candidate;
+-      if (p.planBody.textContent !== candidate) p.planBody.textContent = candidate;
++      var planKey = JSON.stringify([candidate, s.plan_id, applied, s.transport, saved, owner && owner.id]);
++      if (p.planBody.__key !== planKey) {
++        p.planBody.__key = planKey;
++        var facts = el(doc, "dl", "candidate-facts");
++        function fact(label, value) { add(facts, el(doc, "dt", "", label), el(doc, "dd", "", value)); }
++        if (s.plan_id || applied || saved) fact(applied ? "APPLIED" : "Кандидат", planId);
++        fact("Транспорт", saved && saved.proto ? str(saved.proto).toUpperCase() : shapeLabel(s.shape, s.transport));
++        if (owner) fact("Коробка", str(owner.id));
++        p.planBody.replaceChildren(facts);
++        if (raw && raw.includes("\n")) add(p.planBody, planExplanation(doc, raw));
++        if (raw && raw !== gist) p.planBody.appendChild(el(doc, "pre", "candidate-source", raw));
++      }
+       var planHead = p.plan.querySelector("summary");
+-      if (planHead && planHead.getAttribute("aria-label") !== "План: " + gist) planHead.setAttribute("aria-label", "План: " + gist);
++      if (planHead) {
++        planHead.dataset.label = label;
++        planHead.setAttribute("aria-label", label + ": " + gist);
++      }
+     }
+     var classifying = s.phase === TRACK[2].phases[0] && !!str(s.question);
+     p.question.hidden = !classifying;
+@@ -2475,7 +2564,12 @@
+       var pre = el(doc, "pre", "", (p.id ? "# " + p.id + (p.enabled === false ? " (выключен)" : "") + "\n" : "") + planText);
+       pre.tabIndex = 0;
+       pre.setAttribute("aria-label", "Текст плана " + (str(p.id) || String(pi + 1)));
+-      add(d, sum, pre);
++      var explanation = planExplanation(doc, p.text);
++      var confirmed = list(b.bindings).filter(function (bd) { return p.id && bd.plan_id === p.id && parseTime(bd.confirmed); });
++      if (explanation && confirmed.length) {
++        explanation.appendChild(el(doc, "p", "plan-proof", "Цели с подтверждением: " + confirmed.length));
++      }
++      add(d, sum, explanation, pre);
+       plans.appendChild(d);
+     });
+     if (!list(b.plans).length) plans.appendChild(el(doc, "p", "box-dates", "Планов нет"));
+@@ -2666,7 +2760,7 @@
+     diagnosticCenters.setAttribute("data-tg-check-centers", "");
+     diagnostics.append(diagnosticSummary, diagnosticState, diagnosticTime, diagnosticCenters);
+
+-    root.append(hero, flowCard, stats, routes, diagnostics);
++    root.append(hero, stats, diagnostics, flowCard, routes);
+     if (global.R2oTelegramFlow && global.R2oTelegramFlow.mountTelegramFlow) {
+       root.__flow = global.R2oTelegramFlow.mountTelegramFlow(canvas);
+     }
+@@ -2753,6 +2847,7 @@
+     report = report && typeof report === "object" ? report : { state: "never" };
+     var key = JSON.stringify(report);
+     if (root.__r2oKey === key) return;
++    if (report.state === "running") root.open = true;
+     root.__r2oKey = key;
+     var status = root.querySelector("[data-tg-check-state]");
+     var checked = root.querySelector("[data-tg-check-time]");
+@@ -2881,7 +2976,7 @@
+       } else {
+         buttons.push(this.button("telegram-enable", "Запустить прокси", "send", "primary", busy || !snap.telegram_configured));
+       }
+-      buttons.push(this.button("telegram-check", "Проверить DC1–DC5", null, null, busy || !snap.telegram_configured));
++      buttons.push(this.button("telegram-check", "Проверить DC1–DC5", "check", "primary", busy || !snap.telegram_configured));
+     }
+     buttons.push(this.button("telegram-workers", "Мои Workers", null, null, busy));
+     ui.actions.replaceChildren.apply(ui.actions, buttons);

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 const root=fileURLToPath(new URL('.',import.meta.url));
 const dist=join(root,'dist/motion');
-const ref='533d9c31763e67f87302ecda158dc3d23b03c9b8';
+const ref='64cf01b018a81f1d6df91e912533ae1defe1c9dc';
 const source=ref+':crates/r2o-panel/assets/';
 const original=name=>execFileSync('git',['show',source+name],{cwd:root,maxBuffer:4*1024*1024});
 const html=original('index.html').toString();
@@ -28,6 +28,7 @@ const scratch=await mkdtemp(join(tmpdir(),'r2o-motion-'));
 try {
   await writeFile(join(scratch,'panel.js'),files.get('assets/panel.js'));
   execFileSync('git',['apply','--no-index',join(root,'motion.patch')],{cwd:scratch});
+  execFileSync('git',['apply','--no-index',join(root,'views.patch')],{cwd:scratch});
   files.set('assets/panel.js',await readFile(join(scratch,'panel.js')));
 } finally {await rm(scratch,{recursive:true,force:true});}
 await mkdir(join(dist,'assets'),{recursive:true});
