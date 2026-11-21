@@ -186,7 +186,7 @@ grep -Fq '|--queue6|2001|--control6|' "$r2o_temp/launches" || {
 grep -Fq '|--serve-both|--serve4|' "$r2o_temp/launches"
 grep -Fq '|--serve6|' "$r2o_temp/launches"
 grep -Fq "|--probe-mark|46|--only-mark|$r2o_mark/$r2o_mask" "$r2o_temp/launches"
-grep -Fq '|--discover|--mark|46|--live4|' "$r2o_temp/launches" || {
+grep -Fq '|--discover|--mark|46|--measure-mark|47|--live4|' "$r2o_temp/launches" || {
     cat "$r2o_temp/launches" >&2
     echo "R2O controller probe mark diverges from D2O PROBE_MARK" >&2
     exit 1
@@ -275,7 +275,7 @@ grep -Fq '|--probe-mark|46|' "$r2o_temp/launches" || {
     echo "service startup without PROBE_MARK must use the D2O default 46" >&2
     exit 1
 }
-grep -Fq '|--discover|--mark|46|--live4|' "$r2o_temp/launches" || {
+grep -Fq '|--discover|--mark|46|--measure-mark|47|--live4|' "$r2o_temp/launches" || {
     cat "$r2o_temp/launches" >&2
     echo "service startup without PROBE_MARK did not pass the D2O default to controller" >&2
     exit 1
@@ -295,7 +295,7 @@ grep -Fq 'r2o-panel|serve|' "$r2o_temp/launches" || {
     echo "панель не запустилась в тестовой конфигурации" >&2
     exit 1
 }
-grep -Fq '|--discover|--mark|45|--live4|' "$r2o_temp/launches" || {
+grep -Fq '|--discover|--mark|45|--measure-mark|47|--live4|' "$r2o_temp/launches" || {
     cat "$r2o_temp/launches" >&2
     echo "явный PROBE_MARK=0 должен сохранить MARK для controller probes" >&2
     exit 1
