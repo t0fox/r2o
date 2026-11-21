@@ -3095,7 +3095,9 @@
   App.prototype.renderDnsProtection = function (m) {
     var root = this.$("dns-protection-list");
     var summary = this.$("dns-protection-summary");
-    if (!root || !summary) return;
+    var more = this.$("dns-protection-more");
+    var extra = this.$("dns-protection-extra");
+    if (!root || !summary || !more || !extra) return;
     var rows = list(m.k.dns_services);
     var fresh = m.linked && m.snap.live_fresh === true;
     var now = this.serverNow();
@@ -3137,27 +3139,30 @@
         state = observed.stale ? state : states.checking;
       }
       var item = el(doc, "li", "card dns-service");
-      var head = el(doc, "div", "dns-service-head");
       var badge = el(doc, "span", "meta-chip", state[0]);
       badge.dataset.tone = state[1];
-      add(head, el(doc, "span", "dns-service-protocol", protocols[row.protocol] || str(row.protocol)), el(doc, "h3", "", str(row.sni || row.host)));
+      add(item, el(doc, "span", "dns-service-protocol", protocols[row.protocol] || str(row.protocol)),
+        badge, el(doc, "h3", "dns-service-host", str(row.sni || row.host)));
       var address = str(row.resolved_ip || row.host);
       if (address.indexOf(":") >= 0 && address[0] !== "[") address = "[" + address + "]";
       var endpoint = address + (row.port ? ":" + row.port : "");
       if ((row.protocol === "doh" || row.protocol === "doh3") && row.path && row.path !== "/") endpoint += str(row.path);
-      add(item, head, el(doc, "p", "dns-service-address", endpoint), badge);
+      item.appendChild(el(doc, "p", "dns-service-address", endpoint));
       var details = el(doc, "dl", "dns-service-details");
-      [
+      var fields = [
         ["Ответ DNS", typeof row.answer_rtt_ms === "number" ? row.answer_rtt_ms + " мс" : "—", ""],
-        ["Последняя проверка", observed.checked ? localTime(observed.checked) : "—", ""],
-        ["Применённый план", row.plan_applied === true && row.applied_plan_id ? str(row.applied_plan_id) : "—", "dns-service-plan"]
-      ].forEach(function (field) {
+        ["Проверка", observed.checked ? localTime(observed.checked) : "—", ""]
+      ];
+      if (row.plan_applied === true && row.applied_plan_id) {
+        fields.push(["Применённый план", str(row.applied_plan_id), "dns-service-plan"]);
+      }
+      fields.forEach(function (field) {
         var entry = el(doc, "div", "");
         add(entry, el(doc, "dt", "", field[0]), el(doc, "dd", field[2], field[1]));
         details.appendChild(entry);
       });
       item.appendChild(details);
-      if (row.status_reason) {
+      if (row.status_reason && (row.state !== "direct_ok" || row.failure)) {
         var reason = el(doc, "p", "dns-service-reason");
         if (failures[row.failure]) reason.appendChild(el(doc, "strong", "", failures[row.failure]));
         reason.appendChild(doc.createTextNode((failures[row.failure] ? " " : "") + str(row.status_reason)));
@@ -3165,7 +3170,19 @@
       }
       return item;
     });
-    root.replaceChildren.apply(root, items);
+    var visible = 3;
+    var extraCount = Math.max(0, items.length - visible);
+    more.hidden = extraCount === 0;
+    if (extraCount) {
+      var label = "Ещё " + count(extraCount, "сервер", "сервера", "серверов");
+      var failed = rows.slice(visible).filter(function (row, index) {
+        return !time[visible + index].stale && (row.state === "failed" || row.state === "no_bypass");
+      }).length;
+      if (failed) label += " · с ошибкой " + failed;
+      if (more.firstElementChild.textContent !== label) more.firstElementChild.textContent = label;
+    }
+    root.replaceChildren.apply(root, items.slice(0, visible));
+    extra.replaceChildren.apply(extra, items.slice(visible));
   };
 
   App.prototype.renderDiagnostics = function (m) {
