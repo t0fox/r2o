@@ -4634,8 +4634,8 @@ fn set_deadline(stream: &TcpStream, deadline: Instant) -> Result<(), String> {
 
 #[derive(Debug)]
 pub(crate) struct ConnectTargetError {
-    source: io::Error,
-    local_refusal: bool,
+    pub(crate) source: io::Error,
+    pub(crate) local_refusal: bool,
 }
 
 impl ConnectTargetError {

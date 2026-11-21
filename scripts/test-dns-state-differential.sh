@@ -45,8 +45,26 @@ import sys
 
 c = json.load(open(sys.argv[1], encoding="utf-8"))
 r = json.load(open(sys.argv[2], encoding="utf-8"))
+# В панели R2O используются свои формулировки для тех же состояний.
+reasons = {
+    "План применён к пробному соединению D2O; корректный DNS-ответ ещё не подтверждён.":
+        "План применён к пробному соединению. Корректный DNS-ответ ещё не подтверждён.",
+    "Проверяется кандидат штатным конвейером D2O.": "Проверяется кандидат.",
+    "Подозрение передано в штатный конвейер D2O.": "Подозрение передано на проверку.",
+}
 for item in c:
     item.pop("end", None)
+    for service in item["dns_services"]:
+        reason = service["status_reason"]
+        service["status_reason"] = reasons.get(reason, reason)
+# Прямой ответ не подтверждает пробу кандидата. Для этой ветки нужен
+# отдельный контракт, поскольку донор смешивает два источника ответа.
+case = "candidate_without_answer_live_answer"
+for snapshots, expected in [(c, ("bypass_ok", True)), (r, ("no_bypass", False))]:
+    service = next(item for item in snapshots if item["scenario"] == case)["dns_services"][0]
+    assert (service["state"], service["dns_answer_via_plan"]) == expected
+    assert service["candidate_plan_applied"] and service["dns_answer_confirmed"]
+    del service["state"], service["dns_answer_via_plan"], service["status_reason"]
 if c != r:
     for left, right in zip(c, r):
         if left != right:

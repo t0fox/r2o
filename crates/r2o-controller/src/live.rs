@@ -131,6 +131,13 @@ impl DnsTask {
         {
             return false;
         }
+        if self.dns_service_generation != 0
+            && (self.dns_host != service.host
+                || self.doh_path != service.path
+                || self.dns_bootstrap != service.bootstrap_dns)
+        {
+            return false;
+        }
         if !service.sni.is_empty() && self.name.eq_ignore_ascii_case(&service.sni) {
             return true;
         }
@@ -155,6 +162,7 @@ pub struct DnsServiceLive {
     pub checked_at: Option<i64>,
     pub check_elapsed_ms: Option<u64>,
     pub answer_rtt_ms: Option<u64>,
+    pub failure: Option<crate::dns_health::DnsHealthFailure>,
     /// C `dns_service_live.next_check_ms`: монотонные миллисекунды
     /// планировщика; 0 — срок не задан.
     pub next_check_ms: i64,
@@ -182,6 +190,7 @@ impl Default for DnsServiceLive {
             checked_at: None,
             check_elapsed_ms: None,
             answer_rtt_ms: None,
+            failure: None,
             next_check_ms: 0,
             plan_applied_at: None,
             reason: String::new(),
@@ -704,7 +713,12 @@ fn r2o_live_dns_services(
 
             let task = tasks
                 .iter()
-                .find(|candidate| candidate.matches_service(service));
+                .find(|candidate| {
+                    candidate.matches_service(service)
+                        && (candidate.dns_service_generation == 0
+                            || (candidate.dns_service_generation == state.generation
+                                && candidate.ip == state.ip))
+                });
             let mut candidate_plan_applied = false;
             let mut candidate_answer = false;
             let mut answered = state.dns_answer;
@@ -721,15 +735,21 @@ fn r2o_live_dns_services(
                 http_status = task.ver.status;
             }
 
-            let (state_name, reason) = if candidate_answer {
+            let (state_name, reason) = if state.state == DnsServiceState::DirectOk {
+                ("direct_ok", state.reason.clone())
+            } else if candidate_answer {
+                let probe = match service.protocol.as_str() {
+                    "doh" => "DoH",
+                    "dot" => "DoT",
+                    "doq" => "DoQ",
+                    _ => "DNS",
+                };
                 (
                     "bypass_ok",
-                    "Плановый DoH-зонд получил корректный DNS-ответ; применение к обычному потоку показывается отдельно.".to_owned(),
+                    format!("Плановый {probe}-зонд получил корректный DNS-ответ; применение к обычному потоку показывается отдельно."),
                 )
             } else if state.state == DnsServiceState::Checking {
                 ("checking", state.reason.clone())
-            } else if state.state == DnsServiceState::DirectOk {
-                ("direct_ok", state.reason.clone())
             } else if task.is_some_and(|task| {
                 matches!(
                     task.state,
@@ -807,6 +827,9 @@ fn r2o_live_dns_services(
             }
             if let Some(rtt) = state.answer_rtt_ms {
                 row["answer_rtt_ms"] = json!(rtt);
+            }
+            if let Some(failure) = state.failure {
+                row["failure"] = json!(failure.as_str());
             }
             row
         })
@@ -2054,6 +2077,7 @@ mod tests {
         };
         let mut live = DnsServiceLive {
             generation: 1,
+            ip: "198.51.100.80".into(),
             plan_applied: true,
             applied_plan_id: "ab".repeat(16),
             dns_answer: false,
@@ -2098,6 +2122,30 @@ mod tests {
         assert_eq!(snapshot["dns_services"][0]["candidate_plan_applied"], true);
         assert_eq!(snapshot["dns_services"][0]["dns_answer_via_plan"], true);
         assert_eq!(snapshot["dns_services"][0]["check_elapsed_ms"], 18);
+
+        for unrelated in [
+            DnsTask {
+                ip: "198.51.100.81".into(),
+                ..task.clone()
+            },
+            DnsTask {
+                dns_service_generation: 2,
+                ..task.clone()
+            },
+            DnsTask {
+                doh_path: "/dns-query?other=1".into(),
+                ..task.clone()
+            },
+        ] {
+            let rows = super::r2o_live_dns_services(
+                &Catalog::default(),
+                std::slice::from_ref(&service),
+                std::slice::from_ref(&live),
+                &[unrelated],
+            );
+            assert_eq!(rows[0]["state"], "plan_applied");
+            assert_eq!(rows[0]["dns_answer_via_plan"], false);
+        }
 
         live.dns_answer = true;
         live.state = DnsServiceState::DirectOk;

@@ -20,6 +20,29 @@ const DNS_FRAME_MAX: usize = 4096;
 pub const DNS_QUERY_ID_DOH: u16 = 0x5a71;
 const DNS_QUERY_ID_DOT: u16 = 1;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DnsHealthFailure {
+    Configuration,
+    Local,
+    Network,
+    Certificate,
+    Server,
+    DnsResponse,
+}
+
+impl DnsHealthFailure {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Configuration => "configuration",
+            Self::Local => "local",
+            Self::Network => "network",
+            Self::Certificate => "certificate",
+            Self::Server => "server",
+            Self::DnsResponse => "dns_response",
+        }
+    }
+}
+
 /// Результат health-пробы для controller/live.json.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DnsHealthResult {
@@ -29,7 +52,35 @@ pub struct DnsHealthResult {
     pub dns_reply: bool,
     pub elapsed_ms: Option<u64>,
     pub answer_rtt_ms: Option<u64>,
+    pub failure: Option<DnsHealthFailure>,
     pub reason: String,
+}
+
+impl DnsHealthResult {
+    fn fail(mut self, failure: DnsHealthFailure, reason: impl Into<String>) -> Self {
+        self.failure = Some(failure);
+        self.reason = reason.into();
+        self
+    }
+}
+
+fn socket_failure(error: &std::io::Error) -> DnsHealthFailure {
+    use std::io::ErrorKind::*;
+
+    if matches!(
+        error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<rustls::Error>()),
+        Some(rustls::Error::InvalidCertificate(_) | rustls::Error::NoCertificatesPresented)
+    ) {
+        return DnsHealthFailure::Certificate;
+    }
+    match error.kind() {
+        TimedOut | WouldBlock | ConnectionReset | ConnectionAborted | BrokenPipe
+        | NetworkUnreachable | HostUnreachable => DnsHealthFailure::Network,
+        ConnectionRefused | UnexpectedEof | InvalidData => DnsHealthFailure::Server,
+        _ => DnsHealthFailure::Local,
+    }
 }
 
 /// C `dns_query`: 29-байтный length-prefixed DNS-запрос `example.com A`.
@@ -554,31 +605,50 @@ fn deadline_from(timeout: Duration) -> Result<Instant, String> {
         .ok_or_else(|| "DNS: timeout слишком велик".into())
 }
 
-fn set_tcp_timeout(stream: &TcpStream, deadline: Instant) -> Result<(), String> {
+fn set_tcp_timeout(stream: &TcpStream, deadline: Instant) -> std::io::Result<()> {
     let left = deadline.saturating_duration_since(Instant::now());
     if left.is_zero() {
-        return Err("DNS: истёк срок".into());
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "DNS: истёк срок",
+        ));
     }
     stream
         .set_read_timeout(Some(left))
         .and_then(|()| stream.set_write_timeout(Some(left)))
-        .map_err(|error| format!("DNS: timeout: {error}"))
 }
 
-fn read_dns_frame(stream: &mut impl Read, _id: u16, deadline: Instant) -> Result<Vec<u8>, String> {
+type DnsTlsStream = rustls::StreamOwned<rustls::ClientConnection, TcpStream>;
+
+fn read_exact_before(
+    stream: &mut DnsTlsStream,
+    mut buffer: &mut [u8],
+    deadline: Instant,
+) -> std::io::Result<()> {
+    while !buffer.is_empty() {
+        set_tcp_timeout(&stream.sock, deadline)?;
+        match stream.read(buffer) {
+            Ok(0) => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+            Ok(length) => buffer = &mut buffer[length..],
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn read_dns_frame(stream: &mut DnsTlsStream, deadline: Instant) -> std::io::Result<Vec<u8>> {
     let mut header = [0u8; 2];
-    stream
-        .read_exact(&mut header)
-        .map_err(|error| format!("DNS: frame: {error}"))?;
+    read_exact_before(stream, &mut header, deadline)?;
     let length = usize::from(u16::from_be_bytes(header));
     if !(14..=DNS_FRAME_MAX).contains(&length) {
-        return Err("DNS: неверная длина frame".into());
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "DNS: неверная длина frame",
+        ));
     }
-    let _ = deadline;
     let mut body = vec![0u8; length];
-    stream
-        .read_exact(&mut body)
-        .map_err(|error| format!("DNS: frame body: {error}"))?;
+    read_exact_before(stream, &mut body, deadline)?;
     Ok(body)
 }
 
@@ -587,8 +657,15 @@ fn connect_tcp(
     address: SocketAddr,
     mark: Option<u32>,
     timeout: Duration,
-) -> Result<TcpStream, String> {
-    crate::fetch::connect_target(address, mark, timeout).map_err(|error| error.to_string())
+) -> Result<TcpStream, (DnsHealthFailure, String)> {
+    crate::fetch::connect_target(address, mark, timeout).map_err(|error| {
+        let kind = if error.local_refusal {
+            DnsHealthFailure::Local
+        } else {
+            socket_failure(&error.source)
+        };
+        (kind, error.to_string())
+    })
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -596,9 +673,10 @@ fn connect_tcp(
     address: SocketAddr,
     mark: Option<u32>,
     timeout: Duration,
-) -> Result<TcpStream, String> {
+) -> Result<TcpStream, (DnsHealthFailure, String)> {
     let _ = mark;
-    TcpStream::connect_timeout(&address, timeout).map_err(|error| error.to_string())
+    TcpStream::connect_timeout(&address, timeout)
+        .map_err(|error| (socket_failure(&error), error.to_string()))
 }
 
 pub(crate) fn trusted_dns_tls_connection(
@@ -633,11 +711,13 @@ fn tls_connect(
     alpn: &[Vec<u8>],
     deadline: Instant,
     roots: Arc<RootCertStore>,
-) -> Result<rustls::StreamOwned<rustls::ClientConnection, TcpStream>, String> {
-    let mut connection = trusted_dns_tls_connection(name, false, None, alpn, roots)?;
+) -> Result<DnsTlsStream, (DnsHealthFailure, String)> {
+    let mut connection = trusted_dns_tls_connection(name, false, None, alpn, roots)
+        .map_err(|error| (DnsHealthFailure::Configuration, error))?;
     let mut stream = stream;
     while connection.is_handshaking() {
-        set_tcp_timeout(&stream, deadline)?;
+        set_tcp_timeout(&stream, deadline)
+            .map_err(|error| (socket_failure(&error), error.to_string()))?;
         match connection.complete_io(&mut stream) {
             Ok(_) => {}
             Err(error)
@@ -649,10 +729,10 @@ fn tls_connect(
                 ) =>
             {
                 if Instant::now() >= deadline {
-                    return Err(format!("TLS: {error}"));
+                    return Err((socket_failure(&error), format!("TLS: {error}")));
                 }
             }
-            Err(error) => return Err(format!("TLS: {error}")),
+            Err(error) => return Err((socket_failure(&error), format!("TLS: {error}"))),
         }
     }
     Ok(rustls::StreamOwned::new(connection, stream))
@@ -715,15 +795,11 @@ fn probe_doh(
 ) -> DnsHealthResult {
     let mut result = DnsHealthResult::default();
     if let Err(reason) = doh_validate(service) {
-        result.reason = reason;
-        return result;
+        return result.fail(DnsHealthFailure::Configuration, reason);
     }
     let address = match resolve_service(service) {
         Ok(address) => address,
-        Err(reason) => {
-            result.reason = reason;
-            return result;
-        }
+        Err(reason) => return result.fail(DnsHealthFailure::Configuration, reason),
     };
     let timeout = deadline.saturating_duration_since(Instant::now());
     let stream = match connect_tcp(address, mark, timeout) {
@@ -731,9 +807,8 @@ fn probe_doh(
             result.tcp_reachable = true;
             stream
         }
-        Err(error) => {
-            result.reason = format!("DoH: TCP endpoint недоступен: {error}");
-            return result;
+        Err((kind, error)) => {
+            return result.fail(kind, format!("DoH: TCP endpoint недоступен: {error}"));
         }
     };
     let name = if service.sni.is_empty() {
@@ -746,17 +821,11 @@ fn probe_doh(
             result.tls_handshake = true;
             tls
         }
-        Err(reason) => {
-            result.reason = format!("DoH: {reason}");
-            return result;
-        }
+        Err((kind, reason)) => return result.fail(kind, format!("DoH: {reason}")),
     };
     let authority = match doh_authority(service) {
         Ok(authority) => authority,
-        Err(reason) => {
-            result.reason = reason;
-            return result;
-        }
+        Err(reason) => return result.fail(DnsHealthFailure::Configuration, reason),
     };
     let path = if service.path.is_empty() {
         "/"
@@ -769,13 +838,15 @@ fn probe_doh(
         message.len()
     );
     let sent = Instant::now();
-    if set_tcp_timeout(&stream.sock, deadline).is_err()
-        || stream.write_all(request.as_bytes()).is_err()
-        || stream.write_all(&message).is_err()
-        || stream.flush().is_err()
+    if let Err(error) = set_tcp_timeout(&stream.sock, deadline)
+        .and_then(|()| stream.write_all(request.as_bytes()))
+        .and_then(|()| stream.write_all(&message))
+        .and_then(|()| stream.flush())
     {
-        result.reason = "DoH: отправка запроса не удалась".into();
-        return result;
+        return result.fail(
+            socket_failure(&error),
+            format!("DoH: отправка запроса: {error}"),
+        );
     }
     let mut response = Vec::with_capacity(DOH_RESPONSE_MAX);
     let parsed = loop {
@@ -790,13 +861,20 @@ fn probe_doh(
         {
             break parsed;
         }
-        if set_tcp_timeout(&stream.sock, deadline).is_err() {
-            break parsed;
-        }
         let mut buffer = [0u8; 1024];
-        match stream.read(&mut buffer) {
+        let capacity = buffer.len().min(DOH_RESPONSE_MAX - response.len());
+        match set_tcp_timeout(&stream.sock, deadline)
+            .and_then(|()| stream.read(&mut buffer[..capacity]))
+        {
             Ok(0) => break parsed,
             Ok(length) => response.extend_from_slice(&buffer[..length]),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if response.is_empty() => {
+                return result.fail(
+                    socket_failure(&error),
+                    format!("DoH: чтение ответа: {error}"),
+                );
+            }
             Err(_) => break parsed,
         }
     };
@@ -804,6 +882,13 @@ fn probe_doh(
     result.dns_reply = parsed.dns_reply;
     result.answer_rtt_ms = parsed.dns_reply.then(|| sent.elapsed().as_millis() as u64);
     result.reason = parsed.reason;
+    if !result.dns_reply {
+        result.failure = Some(if result.http_status != 0 && result.http_status != 200 {
+            DnsHealthFailure::Server
+        } else {
+            DnsHealthFailure::DnsResponse
+        });
+    }
     result
 }
 
@@ -816,10 +901,7 @@ fn probe_dot(
     let mut result = DnsHealthResult::default();
     let address = match resolve_service(service) {
         Ok(address) => address,
-        Err(reason) => {
-            result.reason = reason;
-            return result;
-        }
+        Err(reason) => return result.fail(DnsHealthFailure::Configuration, reason),
     };
     let timeout = deadline.saturating_duration_since(Instant::now());
     let stream = match connect_tcp(address, mark, timeout) {
@@ -827,10 +909,7 @@ fn probe_dot(
             result.tcp_reachable = true;
             stream
         }
-        Err(error) => {
-            result.reason = format!("DoT: нет TCP: {error}");
-            return result;
-        }
+        Err((kind, error)) => return result.fail(kind, format!("DoT: нет TCP: {error}")),
     };
     let name = if service.sni.is_empty() {
         service.host.as_str()
@@ -842,32 +921,36 @@ fn probe_dot(
             result.tls_handshake = true;
             tls
         }
-        Err(reason) => {
-            result.reason = format!("DoT: {reason}");
-            return result;
-        }
+        Err((kind, reason)) => return result.fail(kind, format!("DoT: {reason}")),
     };
     let query = dns_query_frame(DNS_QUERY_ID_DOT);
     let sent = Instant::now();
-    if set_tcp_timeout(&stream.sock, deadline).is_err()
-        || stream.write_all(&query).is_err()
-        || stream.flush().is_err()
+    if let Err(error) = set_tcp_timeout(&stream.sock, deadline)
+        .and_then(|()| stream.write_all(&query))
+        .and_then(|()| stream.flush())
     {
-        result.reason = "DoT: отправка не удалась".into();
-        return result;
+        return result.fail(socket_failure(&error), format!("DoT: отправка: {error}"));
     }
-    set_tcp_timeout(&mut stream.sock, deadline).ok();
-    match read_dns_frame(&mut stream, DNS_QUERY_ID_DOT, deadline) {
+    match read_dns_frame(&mut stream, deadline) {
         Ok(body) => {
             result.dns_reply = dns_probe_reply(&body, DNS_QUERY_ID_DOT);
             result.answer_rtt_ms = result.dns_reply.then(|| sent.elapsed().as_millis() as u64);
             result.reason = if result.dns_reply {
                 "DoT: получен корректный DNS-ответ".into()
             } else {
+                result.failure = Some(DnsHealthFailure::DnsResponse);
                 "DoT: нет подтверждённого DNS-ответа".into()
             };
         }
-        Err(error) => result.reason = format!("DoT: {error}"),
+        Err(error) => {
+            let kind = match error.kind() {
+                std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof => {
+                    DnsHealthFailure::DnsResponse
+                }
+                _ => socket_failure(&error),
+            };
+            return result.fail(kind, format!("DoT: {error}"));
+        }
     }
     result
 }
@@ -883,6 +966,7 @@ fn probe_doq(
         Err(reason) => {
             return DnsHealthResult {
                 reason,
+                failure: Some(DnsHealthFailure::Configuration),
                 ..Default::default()
             };
         }
@@ -897,6 +981,7 @@ fn probe_doq(
         Err(error) => {
             return DnsHealthResult {
                 reason: format!("DoQ: UDP: {}", error.source),
+                failure: Some(DnsHealthFailure::Local),
                 ..Default::default()
             };
         }
@@ -909,6 +994,7 @@ fn probe_doq(
         Err(error) => {
             return DnsHealthResult {
                 reason: format!("DoQ: нет Tokio runtime: {error}"),
+                failure: Some(DnsHealthFailure::Local),
                 ..Default::default()
             };
         }
@@ -945,16 +1031,14 @@ async fn probe_doq_on_with_roots(
     {
         Ok(builder) => builder.with_root_certificates(roots).with_no_client_auth(),
         Err(error) => {
-            result.reason = format!("DoQ: TLS config: {error}");
-            return result;
+            return result.fail(DnsHealthFailure::Local, format!("DoQ: TLS config: {error}"));
         }
     };
     tls.alpn_protocols = vec![b"doq".to_vec()];
     let crypto = match quinn::crypto::rustls::QuicClientConfig::try_from(tls) {
         Ok(crypto) => crypto,
         Err(error) => {
-            result.reason = format!("DoQ: QUIC TLS: {error}");
-            return result;
+            return result.fail(DnsHealthFailure::Local, format!("DoQ: QUIC TLS: {error}"));
         }
     };
     let quinn_runtime: Arc<dyn quinn::Runtime> = Arc::new(quinn::TokioRuntime);
@@ -966,8 +1050,7 @@ async fn probe_doq_on_with_roots(
     ) {
         Ok(endpoint) => endpoint,
         Err(error) => {
-            result.reason = format!("DoQ: endpoint: {error}");
-            return result;
+            return result.fail(DnsHealthFailure::Local, format!("DoQ: endpoint: {error}"));
         }
     };
     let mut client_config = quinn::ClientConfig::new(Arc::new(crypto));
@@ -977,41 +1060,72 @@ async fn probe_doq_on_with_roots(
     let result_from_runtime = tokio::time::timeout(timeout, async {
         let connecting = endpoint
             .connect(address, host)
-            .map_err(|error| format!("DoQ: {error}"))?;
-        let connection = connecting.await.map_err(|error| format!("DoQ: {error}"))?;
+            .map_err(|error| (DnsHealthFailure::Configuration, format!("DoQ: {error}")))?;
+        let connection = connecting.await.map_err(|error| {
+            let kind = match &error {
+                quinn::ConnectionError::TimedOut | quinn::ConnectionError::Reset => {
+                    DnsHealthFailure::Network
+                }
+                // RFC 9001 кодирует сообщение TLS как 0x100 + номер alert.
+                quinn::ConnectionError::TransportError(error)
+                    if matches!(u64::from(error.code), 0x12a..=0x12e | 0x130 | 0x174) =>
+                {
+                    DnsHealthFailure::Certificate
+                }
+                _ => DnsHealthFailure::Server,
+            };
+            (kind, format!("DoQ: {error}"))
+        })?;
         result.tcp_reachable = true;
         result.tls_handshake = true;
         let (mut send, mut recv) = connection
             .open_bi()
             .await
-            .map_err(|error| format!("DoQ: stream: {error}"))?;
+            .map_err(|error| (DnsHealthFailure::Server, format!("DoQ: stream: {error}")))?;
         let sent = Instant::now();
         send.write_all(&query)
             .await
-            .map_err(|error| format!("DoQ: send: {error}"))?;
+            .map_err(|error| (DnsHealthFailure::Server, format!("DoQ: send: {error}")))?;
         send.finish()
-            .map_err(|error| format!("DoQ: finish: {error}"))?;
+            .map_err(|error| (DnsHealthFailure::Server, format!("DoQ: finish: {error}")))?;
         let mut header = [0u8; 2];
-        recv.read_exact(&mut header)
-            .await
-            .map_err(|error| format!("DoQ: frame: {error}"))?;
+        recv.read_exact(&mut header).await.map_err(|error| {
+            (
+                DnsHealthFailure::DnsResponse,
+                format!("DoQ: frame: {error}"),
+            )
+        })?;
         let length = usize::from(u16::from_be_bytes(header));
         if !(14..=DNS_FRAME_MAX).contains(&length) {
-            return Err("DoQ: неверная длина frame".to_owned());
+            return Err((
+                DnsHealthFailure::DnsResponse,
+                "DoQ: неверная длина frame".to_owned(),
+            ));
         }
         let mut body = vec![0u8; length];
-        recv.read_exact(&mut body)
-            .await
-            .map_err(|error| format!("DoQ: frame body: {error}"))?;
+        recv.read_exact(&mut body).await.map_err(|error| {
+            (
+                DnsHealthFailure::DnsResponse,
+                format!("DoQ: frame body: {error}"),
+            )
+        })?;
         if recv
             .read(&mut header[..1])
             .await
-            .map_err(|error| format!("DoQ: frame: {error}"))?
+            .map_err(|error| {
+                (
+                    DnsHealthFailure::DnsResponse,
+                    format!("DoQ: frame: {error}"),
+                )
+            })?
             .is_some()
         {
-            return Err("DoQ: лишние данные после DNS-ответа".to_owned());
+            return Err((
+                DnsHealthFailure::DnsResponse,
+                "DoQ: лишние данные после DNS-ответа".to_owned(),
+            ));
         }
-        Ok::<_, String>((body, sent.elapsed()))
+        Ok::<_, (DnsHealthFailure, String)>((body, sent.elapsed()))
     })
     .await;
     endpoint.close(quinn::VarInt::from_u32(0), b"");
@@ -1022,13 +1136,12 @@ async fn probe_doq_on_with_roots(
             result.reason = if result.dns_reply {
                 "DoQ: получен корректный DNS-ответ".into()
             } else {
+                result.failure = Some(DnsHealthFailure::DnsResponse);
                 "DoQ: нет подтверждённого DNS-ответа".into()
             };
         }
-        Ok(Err(reason)) => {
-            result.reason = reason;
-        }
-        Err(_) => result.reason = "DoQ: истёк срок проверки".into(),
+        Ok(Err((kind, reason))) => result = result.fail(kind, reason),
+        Err(_) => result = result.fail(DnsHealthFailure::Network, "DoQ: истёк срок проверки"),
     }
     result.elapsed_ms = Some(started.elapsed().as_millis() as u64);
     result
@@ -1064,6 +1177,7 @@ fn probe_dns_health_with_roots(
         Err(reason) => {
             return DnsHealthResult {
                 reason,
+                failure: Some(DnsHealthFailure::Configuration),
                 ..Default::default()
             };
         }
@@ -1077,6 +1191,7 @@ fn probe_dns_health_with_roots(
     } else {
         DnsHealthResult {
             reason: format!("DNS: неподдерживаемый протокол {}", service.protocol),
+            failure: Some(DnsHealthFailure::Configuration),
             ..Default::default()
         }
     };
@@ -1357,70 +1472,93 @@ mod tests {
             assert!(result.tcp_reachable);
             assert!(!result.tls_handshake);
             assert!(!result.dns_reply);
+            assert_eq!(result.failure, Some(DnsHealthFailure::Certificate));
             assert!(result.reason.contains("UnknownIssuer"), "{}", result.reason);
         }
         server.join().unwrap();
         service.host = "example.test".into();
         let missing = probe_dns_health(&service, None, Duration::from_secs(2));
         assert!(!missing.tcp_reachable);
+        assert_eq!(missing.failure, Some(DnsHealthFailure::Configuration));
         assert!(missing.reason.contains("bootstrap"));
     }
 
     #[test]
-    fn loopback_doh_health_returns_valid_dns_reply() {
+    fn loopback_doh_health_checks_query_and_distinguishes_server_errors() {
         use std::io::{BufRead, BufReader};
         use std::net::TcpListener;
         let (config, cert) = test_server_config();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
-            let (socket, _) = listener.accept().unwrap();
-            let mut stream = rustls::StreamOwned::new(
-                rustls::ServerConnection::new(Arc::new(config)).unwrap(),
-                socket,
-            );
-            let mut reader = BufReader::new(&mut stream);
-            let mut line = String::new();
-            let mut content_length = 0usize;
-            loop {
-                line.clear();
+            let config = Arc::new(config);
+            for (status, reply) in [
+                ("200 OK", reply_for(DNS_QUERY_ID_DOH)),
+                ("200 OK", reply_for(DNS_QUERY_ID_DOH + 1)),
+                ("403 Forbidden", Vec::new()),
+            ] {
+                let (socket, _) = listener.accept().unwrap();
+                let mut stream = rustls::StreamOwned::new(
+                    rustls::ServerConnection::new(Arc::clone(&config)).unwrap(),
+                    socket,
+                );
+                let mut reader = BufReader::new(&mut stream);
+                let mut line = String::new();
                 reader.read_line(&mut line).unwrap();
-                if line == "\r\n" {
-                    break;
+                assert_eq!(line, "POST /dns-query?route=one HTTP/1.1\r\n");
+                let mut content_length = 0usize;
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        content_length = value.trim().parse().unwrap();
+                    }
                 }
-                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                    content_length = value.trim().parse().unwrap();
-                }
+                let mut body = vec![0u8; content_length];
+                reader.read_exact(&mut body).unwrap();
+                assert_eq!(body, dns_query_message(DNS_QUERY_ID_DOH));
+                let head = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/dns-message\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    reply.len()
+                );
+                stream.write_all(head.as_bytes()).unwrap();
+                stream.write_all(&reply).unwrap();
+                stream.flush().unwrap();
             }
-            let mut body = vec![0u8; content_length];
-            reader.read_exact(&mut body).unwrap();
-            let reply = reply_for(DNS_QUERY_ID_DOH);
-            let head = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                reply.len()
-            );
-            stream.write_all(head.as_bytes()).unwrap();
-            stream.write_all(&reply).unwrap();
-            stream.flush().unwrap();
         });
         let service = DnsService {
             protocol: "doh".into(),
             host: "127.0.0.1".into(),
             sni: "localhost".into(),
-            path: "/dns-query".into(),
+            path: "/dns-query?route=one".into(),
             bootstrap_dns: String::new(),
             source: "test".into(),
             port,
         };
         let mut roots = RootCertStore::empty();
         roots.add(cert).unwrap();
-        let result =
-            probe_dns_health_with_roots(&service, None, Duration::from_secs(3), Arc::new(roots));
+        let roots = Arc::new(roots);
+        let probe = || {
+            probe_dns_health_with_roots(&service, None, Duration::from_secs(3), Arc::clone(&roots))
+        };
+        let result = probe();
+        let wrong_dns = probe();
+        let refused = probe();
         server.join().unwrap();
         assert!(result.tcp_reachable, "{}", result.reason);
         assert!(result.tls_handshake, "{}", result.reason);
         assert_eq!(result.http_status, 200);
         assert!(result.dns_reply, "{}", result.reason);
+        assert!(result.answer_rtt_ms.is_some());
+        assert_eq!(wrong_dns.http_status, 200);
+        assert_eq!(wrong_dns.failure, Some(DnsHealthFailure::DnsResponse));
+        assert_eq!(wrong_dns.answer_rtt_ms, None);
+        assert_eq!(refused.http_status, 403);
+        assert_eq!(refused.failure, Some(DnsHealthFailure::Server));
+        assert!(!refused.dns_reply);
     }
 
     #[test]
@@ -1490,6 +1628,8 @@ mod tests {
                 .unwrap()
             };
             runtime.block_on(async {
+                let untrusted = endpoint.accept().await.unwrap();
+                assert!(untrusted.await.is_err());
                 let incoming = endpoint.accept().await.unwrap();
                 let connection = incoming.await.unwrap();
                 let (mut send, mut recv) = connection.accept_bi().await.unwrap();
@@ -1518,12 +1658,41 @@ mod tests {
         };
         let mut roots = RootCertStore::empty();
         roots.add(cert).unwrap();
+        let untrusted = probe_dns_health(&service, None, Duration::from_secs(3));
+        assert_eq!(
+            untrusted.failure,
+            Some(DnsHealthFailure::Certificate),
+            "{}",
+            untrusted.reason
+        );
+        assert!(!untrusted.dns_reply);
         let result =
             probe_dns_health_with_roots(&service, None, Duration::from_secs(3), Arc::new(roots));
-        let _ = server.join();
+        server.join().unwrap();
         assert!(result.tcp_reachable, "{}", result.reason);
         assert!(result.tls_handshake, "{}", result.reason);
         assert!(result.dns_reply, "{}", result.reason);
+    }
+
+    #[test]
+    fn idle_doq_endpoint_hits_network_deadline() {
+        let listener = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let service = DnsService {
+            protocol: "doq".into(),
+            host: "127.0.0.1".into(),
+            sni: "localhost".into(),
+            port: listener.local_addr().unwrap().port(),
+            ..Default::default()
+        };
+        let result = probe_dns_health(&service, None, Duration::from_millis(50));
+        assert_eq!(
+            result.failure,
+            Some(DnsHealthFailure::Network),
+            "{}",
+            result.reason
+        );
+        assert!(!result.dns_reply);
+        assert_eq!(result.answer_rtt_ms, None);
     }
 
     #[test]

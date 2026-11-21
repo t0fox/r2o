@@ -2845,15 +2845,32 @@ fn r2o_read_system_dns_services() -> Option<Vec<r2k_core::dns_config::DnsService
     } else {
         None
     };
-    let https = r2o_read_dns_config_file("/etc/config/https-dns-proxy").ok()?;
-    let dnsproxy = r2o_read_dns_config_file("/etc/config/dnsproxy").ok()?;
-    let doqd = r2o_read_dns_config_file(doqd_path).ok()?;
+    r2o_read_dns_service_files(
+        [
+            "/etc/config/https-dns-proxy",
+            "/etc/config/dnsproxy",
+            doqd_path,
+        ],
+        doqd_source,
+        status.as_deref(),
+    )
+}
+
+#[cfg(unix)]
+fn r2o_read_dns_service_files(
+    [https, dnsproxy, doqd]: [&str; 3],
+    doqd_source: &str,
+    status: Option<&str>,
+) -> Option<Vec<r2k_core::dns_config::DnsService>> {
+    let https = r2o_read_dns_config_file(https).ok()?;
+    let dnsproxy = r2o_read_dns_config_file(dnsproxy).ok()?;
+    let doqd = r2o_read_dns_config_file(doqd).ok()?;
     Some(r2k_core::dns_config::read_dns_services(
         https.as_deref(),
         dnsproxy.as_deref(),
         doqd.as_deref(),
         doqd_source,
-        status.as_deref(),
+        status,
     ))
 }
 
@@ -2949,40 +2966,36 @@ impl R2oDnsServices {
         let mut services = Vec::with_capacity(next.len());
         let mut live = Vec::with_capacity(next.len());
         for service in next {
-            if let Some(old) = self.services.iter().position(|saved| {
-                saved.port == service.port
-                    && saved.protocol == service.protocol
-                    && saved.host == service.host
-                    && saved.sni == service.sni
-                    && saved.path == service.path
-                    && saved.source == service.source
-                    && saved.bootstrap_dns == service.bootstrap_dns
-            }) {
-                let preserved = self.live.get(old).cloned();
-                if let Some(entry) = preserved {
-                    services.push(service);
-                    live.push(entry);
-                } else {
-                    let mut entry = r2o_controller::live::DnsServiceLive::default();
-                    entry.generation = self.next_generation();
-                    if service.host.parse::<std::net::IpAddr>().is_ok() {
-                        entry.ip = service.host.clone();
-                    }
-                    services.push(service);
-                    live.push(entry);
-                }
+            let preserved = self
+                .services
+                .iter()
+                .position(|saved| saved == &service)
+                .and_then(|index| self.live.get(index).cloned());
+            let entry = if let Some(entry) = preserved {
+                entry
             } else {
                 let mut entry = r2o_controller::live::DnsServiceLive::default();
                 entry.generation = self.next_generation();
                 if service.host.parse::<std::net::IpAddr>().is_ok() {
                     entry.ip = service.host.clone();
                 }
-                services.push(service);
-                live.push(entry);
-            }
+                entry
+            };
+            services.push(service);
+            live.push(entry);
         }
         self.services = services;
         self.live = live;
+        for task in &mut self.tasks {
+            if !task.dns_health_probe
+                && !self
+                    .live
+                    .iter()
+                    .any(|live| live.generation == task.dns_service_generation)
+            {
+                task.reset();
+            }
+        }
     }
 
     fn next_generation(&mut self) -> u64 {
@@ -3007,14 +3020,8 @@ impl R2oDnsServices {
         }
         let (_, server) = flow_socket_addresses(key, !r2o_dns_server_is_low(key));
         let ip = server.ip().to_string();
-        let Some(index) = r2k_core::dns_config::dns_service_match(
-            &self.services,
-            Some(name),
-            Some(&ip),
-            server.port(),
-            transport,
-        )
-        .and_then(|service| self.services.iter().position(|saved| saved == service)) else {
+        let Ok(Some((index, _))) = r2o_dns_unique_service(&self.services, server, name, transport)
+        else {
             return;
         };
         let generation = if self.live[index].ip != ip {
@@ -3037,6 +3044,7 @@ impl R2oDnsServices {
             live.checked_at = None;
             live.check_elapsed_ms = None;
             live.answer_rtt_ms = None;
+            live.failure = None;
             live.next_check_ms = mono_ms;
             live.reason.clear();
             live.router_seen = false;
@@ -3167,6 +3175,7 @@ impl R2oDnsServices {
                 live.checked_at = Some(wall_now.max(1));
                 live.check_elapsed_ms = result.elapsed_ms;
                 live.answer_rtt_ms = result.answer_rtt_ms;
+                live.failure = result.failure;
                 live.tcp_reachable = level >= r2o_controller::live::D2K_VER_TRANSPORT;
                 live.tls_handshake = level >= r2o_controller::live::D2K_VER_HANDSHAKE;
                 live.http_status = result.http_status;
@@ -3233,7 +3242,15 @@ impl R2oDnsServices {
             )> = None;
             let watching_targets = worker.dns_watching.values().map(|(target, _)| target);
             for target in worker.seen.iter().chain(watching_targets) {
-                if !r2o_dns_service_matches_target(&service, target) {
+                let Ok(endpoint) = target.endpoint.parse::<std::net::SocketAddr>() else {
+                    continue;
+                };
+                if self.live[index].ip.parse::<std::net::IpAddr>() != Ok(endpoint.ip())
+                    || !matches!(
+                        r2o_dns_unique_service(&self.services, endpoint, &target.host, r2o_discovery_transport(target)),
+                        Ok(Some((matched, _))) if matched == index
+                    )
+                {
                     continue;
                 }
                 let key = r2o_discovery_task_key(target);
@@ -3318,8 +3335,7 @@ impl R2oDnsServices {
                 task.trial_installed = task.next_plan > 0;
                 task.trial_acked = task.trial_installed;
                 task.probes = search.probes.min(u32::MAX as usize) as u32;
-                task.ver_ok =
-                    search.verify.applied || state == r2o_controller::live::DnsTaskState::Watching;
+                task.ver_ok = search.verify.applied;
                 task.ver = r2o_controller::live::DnsTaskVerify {
                     level: search.verify.level,
                     status: search.verify.status,
@@ -3343,7 +3359,7 @@ impl R2oDnsServices {
                 task.trial_installed = false;
                 task.trial_acked = false;
                 task.probes = 0;
-                task.ver_ok = state == r2o_controller::live::DnsTaskState::Watching;
+                task.ver_ok = false;
                 task.ver = Default::default();
                 task.tcp_reachable = false;
                 task.tls_handshake = false;
@@ -3378,7 +3394,9 @@ impl R2oDnsServices {
                 }
                 continue;
             }
-            let Some(entry) = r2o_quic_dns_live_snapshot(&service) else {
+            let Some(entry) = live.ip.parse::<std::net::IpAddr>().ok().and_then(|ip| {
+                r2o_quic_dns_live_snapshot(&service, std::net::SocketAddr::new(ip, service.port))
+            }) else {
                 if let Some(slot) = self.task_of_service(&service)
                     && self.tasks[slot].state != r2o_controller::live::DnsTaskState::DnsHealth
                 {
@@ -3484,14 +3502,8 @@ impl R2oDnsServices {
         };
         let (_, server) = flow_socket_addresses(key, !r2o_dns_server_is_low(key));
         let ip = server.ip().to_string();
-        let Some(index) = r2k_core::dns_config::dns_service_match(
-            &self.services,
-            Some(name),
-            Some(&ip),
-            server.port(),
-            transport,
-        )
-        .and_then(|service| self.services.iter().position(|saved| saved == service)) else {
+        let Ok(Some((index, _))) = r2o_dns_unique_service(&self.services, server, name, transport)
+        else {
             return;
         };
         if self.live[index].ip != ip {
@@ -3621,7 +3633,8 @@ impl R2oDnsHealth {
             {
                 continue;
             }
-            let bootstrap = !service.bootstrap_dns.is_empty();
+            let bootstrap = !service.bootstrap_dns.is_empty()
+                && service.host.parse::<std::net::IpAddr>().is_err();
             let transport = if service.protocol == "doq" { 17 } else { 6 };
             let family = if !live.ip.is_empty() && live.ip.contains(':') {
                 6
@@ -3643,6 +3656,7 @@ impl R2oDnsHealth {
                             .as_secs() as i64,
                     );
                     live.next_check_ms = now_ms.saturating_add(60 * 1000);
+                    live.failure = Some(r2o_controller::dns_health::DnsHealthFailure::Local);
                     live.reason = r2o_dns_health_preflight_text(preflight).into();
                     continue;
                 }
@@ -3678,7 +3692,7 @@ impl R2oDnsHealth {
             std::thread::spawn(move || {
                 let mut resolved = None;
                 let mut probe = probe;
-                if !bootstrap_dns.is_empty() {
+                if bootstrap {
                     // C worker вызывает bootstrap ВСЕГДА, когда он настроен,
                     // даже если live.ip уже известен: так обновляется адрес.
                     match r2k_core::dns_config::dns_resolve_bootstrap(
@@ -3699,6 +3713,9 @@ impl R2oDnsHealth {
                                     reason:
                                         "DNS: endpoint IP не получен от настроенного bootstrap DNS"
                                             .into(),
+                                    failure: Some(
+                                        r2o_controller::dns_health::DnsHealthFailure::Configuration,
+                                    ),
                                     ..Default::default()
                                 },
                             ));
@@ -3709,8 +3726,9 @@ impl R2oDnsHealth {
                 }
                 // C worker: при bootstrap fd ещё не занят, локальный
                 // bind/mark выполняется здесь и даёт свой текст.
-                if !bootstrap_dns.is_empty()
-                    && r2o_dns_health_preflight(transport, family, mark)
+                let probe_family = if probe.host.contains(':') { 6 } else { 4 };
+                if bootstrap
+                    && r2o_dns_health_preflight(transport, probe_family, mark)
                         != R2oDnsHealthPreflight::Ok
                 {
                     let _ = sender.send((
@@ -3719,6 +3737,7 @@ impl R2oDnsHealth {
                         None,
                         r2o_controller::dns_health::DnsHealthResult {
                             reason: "DNS: локально не удалось подготовить сокет проверки".into(),
+                            failure: Some(r2o_controller::dns_health::DnsHealthFailure::Local),
                             ..Default::default()
                         },
                     ));
@@ -9167,8 +9186,20 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
     bool,
     bool,
 ) {
-    let doh_request = r2o_dns_doh_request_for_target(target);
-    let dot_frame = r2o_dns_dot_frame_for_target(target);
+    let dns_trial = r2o_dns_tcp_trial_for_target(target);
+    if matches!(&dns_trial, Ok(Some(_))) && target.endpoint.parse() != Ok(destination) {
+        return (
+            Err("DNS: адрес зонда не совпадает с endpoint сервиса".into()),
+            false,
+            false,
+        );
+    }
+    let (doh_request, dot_frame) = match dns_trial {
+        Ok(Some(R2oDnsTcpTrial::Doh(path, query))) => (Some((path, query)), None),
+        Ok(Some(R2oDnsTcpTrial::Dot(frame))) => (None, Some(frame)),
+        Ok(None) => (None, None),
+        Err(error) => return (Err(error.into()), false, false),
+    };
     r2o_controller::fetch::r2o_fetch_doh_query_set(
         doh_request.as_ref().map(|(_, query)| query.clone()),
     );
@@ -13636,48 +13667,68 @@ fn r2o_discovery_verify_snapshot(
     }
 }
 
-/// C `on_suspect` → `dns_service_observe` → `d2k_dns_service_match`: задача
-/// принадлежит DNS-endpoint, если совпали транспорт/порт и имя или IP.
+/// Путь и query DoH скрыты в TLS. Если сетевые признаки одинаковы, не угадываем сервис.
 #[cfg(unix)]
-fn r2o_dns_service_matches_target(
-    service: &r2k_core::dns_config::DnsService,
-    target: &r2o_controller::discovery::DiscoveryTarget,
-) -> bool {
-    let transport = if service.protocol == "doq" { 17 } else { 6 };
-    if r2o_discovery_transport(target) != transport {
-        return false;
+fn r2o_dns_unique_service<'a>(
+    services: &'a [r2k_core::dns_config::DnsService],
+    endpoint: std::net::SocketAddr,
+    name: &str,
+    transport: u8,
+) -> Result<Option<(usize, &'a r2k_core::dns_config::DnsService)>, &'static str> {
+    let mut matching = services.iter().enumerate().filter(|(_, service)| {
+        matches!(
+            (transport, service.protocol.as_str()),
+            (6, "doh" | "dot") | (17, "doq")
+        ) && endpoint.port() == service.port
+            && service
+                .host
+                .parse::<std::net::IpAddr>()
+                .map_or(true, |ip| ip == endpoint.ip())
+            && name.eq_ignore_ascii_case(if service.sni.is_empty() {
+                &service.host
+            } else {
+                &service.sni
+            })
+    });
+    let service = matching.next();
+    if matching.next().is_some() {
+        return Err("DNS: имя, адрес и порт подходят нескольким DNS-сервисам");
     }
-    let Ok(endpoint) = target.endpoint.parse::<std::net::SocketAddr>() else {
-        return false;
-    };
-    if endpoint.port() != service.port {
-        return false;
-    }
-    if !service.sni.is_empty() && target.host.eq_ignore_ascii_case(&service.sni) {
-        return true;
-    }
-    target.host.eq_ignore_ascii_case(&service.host)
-        || endpoint
-            .ip()
-            .to_string()
-            .eq_ignore_ascii_case(&service.host)
+    Ok(service)
 }
 
-/// C `d2k_verify_doh_on`: для DoH-endpoint пробный поток должен нести
-/// настоящий DNS-запрос на `doh_path`, а не обычный GET.
 #[cfg(unix)]
-fn r2o_dns_doh_request(
+#[derive(Debug, PartialEq, Eq)]
+enum R2oDnsTcpTrial {
+    Doh(String, Vec<u8>),
+    Dot(Vec<u8>),
+}
+
+/// Выбирать DNS-контракт только для однозначного назначения.
+#[cfg(unix)]
+fn r2o_dns_tcp_trial(
     services: &[r2k_core::dns_config::DnsService],
     target: &r2o_controller::discovery::DiscoveryTarget,
-) -> Option<(String, Vec<u8>)> {
-    let service = services.iter().find(|service| {
-        service.protocol.eq_ignore_ascii_case("doh")
-            && r2o_dns_service_matches_target(service, target)
-    })?;
-    Some((
-        service.path.clone(),
-        r2o_controller::dns_health::dns_query_message(r2o_controller::dns_health::DNS_QUERY_ID_DOH),
-    ))
+) -> Result<Option<R2oDnsTcpTrial>, &'static str> {
+    let Ok(endpoint) = target.endpoint.parse::<std::net::SocketAddr>() else {
+        return Ok(None);
+    };
+    if r2o_discovery_transport(target) != 6 {
+        return Ok(None);
+    }
+    let Some((_, service)) = r2o_dns_unique_service(services, endpoint, &target.host, 6)? else {
+        return Ok(None);
+    };
+    Ok(Some(if service.protocol == "doh" {
+        R2oDnsTcpTrial::Doh(
+            service.path.clone(),
+            r2o_controller::dns_health::dns_query_message(
+                r2o_controller::dns_health::DNS_QUERY_ID_DOH,
+            ),
+        )
+    } else {
+        R2oDnsTcpTrial::Dot(r2o_controller::dns_health::dns_query_frame(1))
+    }))
 }
 
 /// Найти DoQ-сервис по адресу и SNI/имени.
@@ -13686,24 +13737,15 @@ fn r2o_dns_doq_service(
     services: &[r2k_core::dns_config::DnsService],
     server: std::net::SocketAddr,
     host: &str,
-) -> Option<r2k_core::dns_config::DnsService> {
-    services
-        .iter()
-        .find(|service| {
-            service.protocol.eq_ignore_ascii_case("doq")
-                && service.port == server.port()
-                && ((!service.sni.is_empty() && host.eq_ignore_ascii_case(&service.sni))
-                    || host.eq_ignore_ascii_case(&service.host)
-                    || server.ip().to_string().eq_ignore_ascii_case(&service.host))
-        })
-        .cloned()
+) -> Result<Option<r2k_core::dns_config::DnsService>, &'static str> {
+    Ok(r2o_dns_unique_service(services, server, host, 17)?.map(|(_, service)| service.clone()))
 }
 
 #[cfg(unix)]
 fn r2o_dns_doq_service_for_server(
     server: std::net::SocketAddr,
     host: &str,
-) -> Option<r2k_core::dns_config::DnsService> {
+) -> Result<Option<r2k_core::dns_config::DnsService>, &'static str> {
     let services = r2o_dns_service_snapshot()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -13772,27 +13814,14 @@ fn r2o_quic_dns_live_clear(server: std::net::SocketAddr) {
 #[cfg(unix)]
 fn r2o_quic_dns_live_snapshot(
     service: &r2k_core::dns_config::DnsService,
+    server: std::net::SocketAddr,
 ) -> Option<R2oQuicDnsLive> {
     r2o_quic_dns_live()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .values()
-        .find(|live| live.service == *service)
+        .get(&server)
+        .filter(|live| live.service == *service)
         .cloned()
-}
-
-/// C `d2k_verify_dns_on` для DoT: length-prefixed DNS-запрос с ID 1.
-#[cfg(unix)]
-fn r2o_dns_dot_frame(
-    services: &[r2k_core::dns_config::DnsService],
-    target: &r2o_controller::discovery::DiscoveryTarget,
-) -> Option<Vec<u8>> {
-    services.iter().find(|service| {
-        service.protocol.eq_ignore_ascii_case("dot")
-            && r2o_discovery_transport(target) == 6
-            && r2o_dns_service_matches_target(service, target)
-    })?;
-    Some(r2o_controller::dns_health::dns_query_frame(1))
 }
 
 /// Снимок DNS-конфигурации для probe-потока Discovery. Обновляется при
@@ -13812,23 +13841,13 @@ fn r2o_publish_dns_services(services: &[r2k_core::dns_config::DnsService]) {
 }
 
 #[cfg(unix)]
-fn r2o_dns_doh_request_for_target(
+fn r2o_dns_tcp_trial_for_target(
     target: &r2o_controller::discovery::DiscoveryTarget,
-) -> Option<(String, Vec<u8>)> {
+) -> Result<Option<R2oDnsTcpTrial>, &'static str> {
     let services = r2o_dns_service_snapshot()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    r2o_dns_doh_request(&services, target)
-}
-
-#[cfg(unix)]
-fn r2o_dns_dot_frame_for_target(
-    target: &r2o_controller::discovery::DiscoveryTarget,
-) -> Option<Vec<u8>> {
-    let services = r2o_dns_service_snapshot()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    r2o_dns_dot_frame(&services, target)
+    r2o_dns_tcp_trial(&services, target)
 }
 
 /// Реальная фаза Discovery → состояние DNS-задачи. Это не вердикт: фазу
@@ -30331,14 +30350,24 @@ impl ControlClient {
         };
         // DoQ-endpoint: C `d2k_verify_dns_on` проверяет не HTTP/3, а DNS
         // stream 0 / zero ID на том же плановом QUIC-сокете.
-        let doq_service = r2o_dns_doq_service_for_server(server, &server_name);
+        let doq_service = match r2o_dns_doq_service_for_server(server, &server_name) {
+            Ok(service) => service,
+            Err(reason) => {
+                eprintln!("{reason}");
+                return Ok(None);
+            }
+        };
         #[cfg(not(test))]
         use std::net::ToSocketAddrs;
         #[cfg(not(test))]
-        let resolved_addresses = (server_name.as_str(), server.port())
-            .to_socket_addrs()
-            .map(|addresses| addresses.collect::<Vec<_>>())
-            .unwrap_or_default();
+        let resolved_addresses = if doq_service.is_some() {
+            Vec::new()
+        } else {
+            (server_name.as_str(), server.port())
+                .to_socket_addrs()
+                .map(|addresses| addresses.collect::<Vec<_>>())
+                .unwrap_or_default()
+        };
         #[cfg(test)]
         let resolved_addresses = Vec::new();
         let address_pool =
@@ -30367,7 +30396,7 @@ impl ControlClient {
                 0,
                 "Автоматически проверяется корректный DNS-ответ DoQ endpoint.".into(),
             );
-            let direct = (|| -> Result<r2o_controller::dns_health::DnsHealthResult, String> {
+            let check_direct = || -> Result<r2o_controller::dns_health::DnsHealthResult, String> {
                 let (socket, _) = r2o_controller::r2o_quic_http3::r2o_quic_http3_udp_socket_fresh(
                     server, r2o_mark,
                 )
@@ -30376,9 +30405,19 @@ impl ControlClient {
                     socket,
                     server,
                     host,
-                    r2o_quic_trial_remaining(started_at, measurement_permit),
+                    r2o_quic_trial_remaining(started_at, measurement_permit)
+                        .min(std::time::Duration::from_secs(4)),
                 )))
-            })();
+            };
+            use r2o_controller::dns_health::DnsHealthFailure;
+            let direct = check_direct();
+            let network_failure = |result: &r2o_controller::dns_health::DnsHealthResult| {
+                result.failure == Some(DnsHealthFailure::Network)
+            };
+            let repeated = direct.as_ref().is_ok_and(network_failure)
+                && !cancel.load(Ordering::Relaxed)
+                && !r2o_quic_trial_remaining(started_at, measurement_permit).is_zero();
+            let direct = if repeated { check_direct() } else { direct };
             match direct {
                 Ok(result) if result.dns_reply => {
                     r2o_quic_dns_live_clear(server);
@@ -30407,10 +30446,15 @@ impl ControlClient {
                     return Ok(None);
                 }
                 Ok(result) => {
+                    let try_plan = repeated && network_failure(&result);
                     r2o_quic_dns_live_set(
                         service,
                         server,
-                        r2o_controller::live::DnsTaskState::Verify,
+                        if try_plan {
+                            r2o_controller::live::DnsTaskState::Verify
+                        } else {
+                            r2o_controller::live::DnsTaskState::Resting
+                        },
                         false,
                         false,
                         if result.tls_handshake {
@@ -30423,6 +30467,9 @@ impl ControlClient {
                         0,
                         result.reason,
                     );
+                    if !try_plan {
+                        return Ok(None);
+                    }
                 }
                 Err(error) => {
                     r2o_quic_dns_live_set(
@@ -35169,17 +35216,70 @@ mod tests {
         assert!(!state.live[0].plan_applied);
         assert_eq!(state.live[0].ip, "198.51.100.80");
 
-        // Смена серверного IP при наблюдении сбрасывает health/plan.
         let changed = key([127, 0, 0, 1], [198, 51, 100, 81], 40_000, 8443, 6);
+        // Наблюдение не может заменить IP, закреплённый в настройках.
+        state.observe(&changed, "dns.example", 6, now_ms);
+        assert_eq!(state.live[0].ip, "198.51.100.80");
+        assert_eq!(state.live[0].generation, 2);
+
+        state.set_services(vec![service("dns.example", 8443)]);
         state.observe(&changed, "dns.example", 6, now_ms);
         assert_eq!(state.live[0].ip, "198.51.100.81");
-        assert_eq!(state.live[0].generation, 3);
+        assert_eq!(state.live[0].generation, 4);
         assert!(!state.live[0].plan_applied);
         assert_eq!(
             state.live[0].state,
             r2o_controller::live::DnsServiceState::Detected
         );
         assert!(state.live[0].checked_at.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dns_config_refresh_retains_state_on_read_error_and_tracks_changes() {
+        let dir = std::env::temp_dir().join(format!("r2o-dns-config-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("https-dns-proxy");
+        let absent = dir.join("absent");
+        let files = [
+            path.to_str().unwrap(),
+            absent.to_str().unwrap(),
+            absent.to_str().unwrap(),
+        ];
+        let config = |route: &str| {
+            format!(
+                "config https-dns-proxy\n option resolver_url 'https://dns.example:8443/dns-query?route={route}'\n option bootstrap_dns '192.0.2.8'\n"
+            )
+        };
+        let mut state = super::R2oDnsServices {
+            services: Vec::new(),
+            live: Vec::new(),
+            tasks: dns_tasks(),
+            generation: 0,
+        };
+        std::fs::write(&path, config("one")).unwrap();
+        state.set_services(super::r2o_read_dns_service_files(files, "doqd", None).unwrap());
+        assert_eq!(state.services[0].path, "/dns-query?route=one");
+        assert_eq!(state.services[0].bootstrap_dns, "192.0.2.8");
+        assert_eq!(state.services[0].port, 8443);
+        state.live[0].checked_at = Some(42);
+        let initial_generation = state.live[0].generation;
+
+        std::fs::write(&path, [0xff]).unwrap();
+        assert!(super::r2o_read_dns_service_files(files, "doqd", None).is_none());
+        assert_eq!(state.live[0].checked_at, Some(42));
+        assert_eq!(state.live[0].generation, initial_generation);
+
+        std::fs::write(&path, config("two")).unwrap();
+        state.set_services(super::r2o_read_dns_service_files(files, "doqd", None).unwrap());
+        assert_eq!(state.services[0].path, "/dns-query?route=two");
+        assert_ne!(state.live[0].generation, initial_generation);
+        assert_eq!(state.live[0].checked_at, None);
+
+        std::fs::remove_file(&path).unwrap();
+        state.set_services(super::r2o_read_dns_service_files(files, "doqd", None).unwrap());
+        assert!(state.services.is_empty());
+        std::fs::remove_dir(dir).unwrap();
     }
 
     #[cfg(unix)]
@@ -35203,7 +35303,7 @@ mod tests {
         let mut state = super::R2oDnsServices {
             services: vec![DnsService {
                 protocol: "doh".into(),
-                host: "198.51.100.80".into(),
+                host: "dns.example".into(),
                 sni: "dns.example".into(),
                 path: "/dns-query?x=1".into(),
                 bootstrap_dns: String::new(),
@@ -35216,7 +35316,7 @@ mod tests {
         };
         state.set_services(vec![DnsService {
             protocol: "doh".into(),
-            host: "198.51.100.80".into(),
+            host: "dns.example".into(),
             sni: "dns.example".into(),
             path: "/dns-query?x=1".into(),
             bootstrap_dns: String::new(),
@@ -35317,6 +35417,8 @@ mod tests {
                 port: 443,
                 transport: 6,
                 family: 4,
+                dns_host: state.services[0].host.clone(),
+                doh_path: state.services[0].path.clone(),
                 dns_service_generation: state.live[0].generation,
                 ver_ok,
                 ver: r2o_controller::live::DnsTaskVerify {
@@ -38511,6 +38613,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn dns_doh_request_uses_configured_path_and_real_query() {
+        use super::R2oDnsTcpTrial;
         use r2k_core::dns_config::DnsService;
 
         let services = [DnsService {
@@ -38529,7 +38632,11 @@ mod tests {
             family: 4,
             shape: SHAPE_MODERN,
         };
-        let (path, query) = super::r2o_dns_doh_request(&services, &target).unwrap();
+        let Some(R2oDnsTcpTrial::Doh(path, query)) =
+            super::r2o_dns_tcp_trial(&services, &target).unwrap()
+        else {
+            panic!("ожидался DoH-контракт");
+        };
         assert_eq!(path, "/dns-query?token=secret");
         assert_eq!(
             query,
@@ -38537,13 +38644,23 @@ mod tests {
                 r2o_controller::dns_health::DNS_QUERY_ID_DOH
             )
         );
+        let collision = DnsService {
+            path: "/dns-query?another=value".into(),
+            ..services[0].clone()
+        };
+        assert!(super::r2o_dns_tcp_trial(&[services[0].clone(), collision], &target).is_err());
+        let pinned = DnsService {
+            host: "198.51.100.81".into(),
+            ..services[0].clone()
+        };
+        assert_eq!(super::r2o_dns_tcp_trial(&[pinned], &target), Ok(None));
         // Не-DoH endpoint обычный GET.
         let dot = r2o_controller::discovery::DiscoveryTarget {
             tcp_profile: 0,
             endpoint: "198.51.100.80:853".into(),
             ..target
         };
-        assert!(super::r2o_dns_doh_request(&services, &dot).is_none());
+        assert_eq!(super::r2o_dns_tcp_trial(&services, &dot), Ok(None));
         let dot_services = [DnsService {
             protocol: "dot".into(),
             host: "1.1.1.1".into(),
@@ -38561,10 +38678,12 @@ mod tests {
             shape: SHAPE_MODERN,
         };
         assert_eq!(
-            super::r2o_dns_dot_frame(&dot_services, &dot_target),
-            Some(r2o_controller::dns_health::dns_query_frame(1))
+            super::r2o_dns_tcp_trial(&dot_services, &dot_target),
+            Ok(Some(R2oDnsTcpTrial::Dot(
+                r2o_controller::dns_health::dns_query_frame(1)
+            )))
         );
-        assert!(super::r2o_dns_dot_frame(&services, &dot_target).is_none());
+        assert_eq!(super::r2o_dns_tcp_trial(&services, &dot_target), Ok(None));
     }
 
     #[cfg(unix)]

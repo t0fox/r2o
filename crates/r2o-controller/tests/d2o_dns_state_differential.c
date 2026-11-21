@@ -60,7 +60,7 @@ int main(void) {
     d2k_dns_service service;
     memset(&service, 0, sizeof service);
     snprintf(service.protocol, sizeof service.protocol, "doh");
-    snprintf(service.host, sizeof service.host, "198.51.100.80");
+    snprintf(service.host, sizeof service.host, "dns.example");
     snprintf(service.sni, sizeof service.sni, "dns.example");
     snprintf(service.path, sizeof service.path, "/dns-query?x=1");
     snprintf(service.source, sizeof service.source, "https-dns-proxy");
