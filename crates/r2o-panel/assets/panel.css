@@ -589,16 +589,66 @@ main { min-width: 0; }
 .screen-head p { max-width: 720px; color: var(--ink-3); font-size: .88rem; line-height: 1.56; text-wrap: pretty; }
 .screen-head-meta { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 
-.dns-summary { margin: 0 0 12px; color: var(--ink-3); }
-.dns-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 12px; list-style: none; padding: 0; margin: 0; }
-.dns-service { min-width: 0; display: grid; align-content: start; gap: 15px; }
-.dns-service-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: start; gap: 8px; }
-.dns-service-identity { min-width: 0; overflow-wrap: anywhere; }
-.dns-service-identity h3 { margin: 3px 0 0; font-size: 1rem; }
-.dns-service-details { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 0; }
-.dns-service-details dt { color: var(--ink-3); font-size: .8rem; margin: 0 0 3px; }
+.dns-screen-head p, .dns-summary { color: var(--ink-2); }
+.dns-summary { margin: 0 0 12px; font-size: .9rem; }
+.dns-list { display: grid; gap: 12px; list-style: none; padding: 0; margin: 0; }
+.dns-service {
+  display: grid;
+  grid-template: "server details status" auto "address details status" auto "reason reason reason" auto
+    / minmax(0, 1.3fr) minmax(0, 1.8fr) 10rem;
+  align-items: center; gap: 4px 24px; padding: 16px 20px;
+}
+.dns-service-head {
+  grid-area: server; display: flex; align-items: baseline; gap: 8px; min-width: 0;
+}
+.dns-service-head h3 { margin: 0; min-width: 0; font-size: 1.05rem; overflow-wrap: anywhere; }
+.dns-service-protocol {
+  color: var(--acc); background: var(--acc-wash); border: 1px solid var(--acc-line); border-radius: 5px;
+  padding: 2px 6px; font: 600 .78rem/1.4 var(--mono);
+}
+.dns-service-address {
+  grid-area: address; min-width: 0; margin: 0; color: var(--ink-2);
+  font: .85rem/1.5 var(--mono); overflow-wrap: anywhere;
+}
+.dns-service .meta-chip {
+  grid-area: status; justify-self: end; min-height: 26px;
+  font: 650 .78rem/1.4 var(--sans); text-align: center;
+}
+.dns-service .meta-chip[data-tone="bad"] { color: var(--ink); }
+.dns-service-details {
+  grid-area: details; display: grid; grid-template-columns: minmax(0, .7fr) repeat(2, minmax(0, 1fr));
+  gap: 12px; min-width: 0; margin: 0;
+}
+.dns-service-details dt { color: var(--ink-2); font-size: .83rem; margin: 0 0 4px; }
 .dns-service-details dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
-.dns-service-reason { border-top: 1px solid var(--line-soft); padding-top: 10px; margin: 0; color: var(--ink-3); overflow-wrap: anywhere; }
+.dns-service-plan { font-family: var(--mono); font-size: .83rem; }
+.dns-service-reason {
+  grid-area: reason; border-top: 1px solid var(--line); padding-top: 8px;
+  margin: 8px 0 0; color: var(--ink-2); overflow-wrap: anywhere;
+}
+.dns-service-reason strong { color: var(--ink); margin-inline-end: 8px; }
+@media (max-width: 1024px) {
+  .dns-service {
+    grid-template: "server status" auto "address address" auto "details details" auto "reason reason" auto
+      / minmax(0, 1fr) auto;
+    gap: 6px 12px; padding: 14px 16px;
+  }
+  .dns-service-details { margin-top: 6px; }
+}
+@media (max-width: 480px) {
+  .dns-service-details { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dns-service-details > :last-child {
+    grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline;
+  }
+  .dns-service-details > :last-child dt { margin: 0; }
+}
+@media (max-width: 360px) {
+  .dns-service {
+    grid-template: "server" auto "address" auto "status" auto "details" auto "reason" auto
+      / minmax(0, 1fr);
+  }
+  .dns-service .meta-chip { justify-self: start; }
+}
 .meta-chip {
   display: inline-flex; align-items: center; gap: 7px;
   min-height: 28px; padding: 0 9px;
@@ -2163,6 +2213,7 @@ main { min-width: 0; }
 
 @media (max-width: 360px) {
   .family-status, .box-count { display: none; }
+  .rail { padding-inline: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {

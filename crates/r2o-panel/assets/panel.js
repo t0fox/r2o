@@ -3112,44 +3112,57 @@
     if (summary.textContent !== message) summary.textContent = message;
     var doc = this.doc;
     var protocols = { doh: "DoH", dot: "DoT", doq: "DoQ", doh3: "DoH3" };
+    var failures = {
+      configuration: "Настройки",
+      local: "Роутер",
+      network: "Сеть",
+      certificate: "Сертификат",
+      server: "Отказ сервера",
+      dns_response: "Некорректный ответ"
+    };
     var states = {
       detected: ["Не проверен", ""],
       checking: ["Проверка", "warn"],
-      direct_ok: ["Доступен напрямую", "live"],
+      direct_ok: ["Доступен напрямую", "ok"],
       plan_applied: ["Подбор", "warn"],
       bypass_ok: ["Подбор", "warn"],
-      recovered: ["Обход работает", "live"],
+      recovered: ["Обход работает", "ok"],
       failed: ["Ошибка", "bad"],
       no_bypass: ["Ошибка", "bad"]
     };
     var items = rows.map(function (row, index) {
       var observed = time[index];
       var state = observed.stale ? ["Устарело", "warn"] : states[row.state] || states.detected;
-      if (row.state === "recovered" && (row.dns_answer_via_plan !== true || !row.applied_plan_id || !observed.checked)) {
+      if (row.state === "recovered" && (row.dns_answer_via_plan !== true || row.plan_applied !== true || !row.applied_plan_id || !observed.checked)) {
         state = observed.stale ? state : states.checking;
       }
       var item = el(doc, "li", "card dns-service");
       var head = el(doc, "div", "dns-service-head");
-      var identity = el(doc, "div", "dns-service-identity");
       var badge = el(doc, "span", "meta-chip", state[0]);
       badge.dataset.tone = state[1];
-      add(identity, el(doc, "span", "eyebrow", protocols[row.protocol] || str(row.protocol)), el(doc, "h3", "", str(row.sni || row.host)));
-      add(head, identity, badge);
+      add(head, el(doc, "span", "dns-service-protocol", protocols[row.protocol] || str(row.protocol)), el(doc, "h3", "", str(row.sni || row.host)));
+      var address = str(row.resolved_ip || row.host);
+      if (address.indexOf(":") >= 0 && address[0] !== "[") address = "[" + address + "]";
+      var endpoint = address + (row.port ? ":" + row.port : "");
+      if ((row.protocol === "doh" || row.protocol === "doh3") && row.path && row.path !== "/") endpoint += str(row.path);
+      add(item, head, el(doc, "p", "dns-service-address", endpoint), badge);
       var details = el(doc, "dl", "dns-service-details");
-      var address = str(row.resolved_ip);
-      if (address.indexOf(":") >= 0) address = "[" + address + "]";
       [
-        ["Endpoint", (address || str(row.host)) + (row.port ? ":" + row.port : "")],
-        ["Последняя проверка", observed.checked ? localTime(observed.checked) : "—"],
-        ["Ответ DNS", typeof row.answer_rtt_ms === "number" ? row.answer_rtt_ms + " мс" : "—"],
-        ["Применённый план", row.plan_applied === true && row.applied_plan_id ? str(row.applied_plan_id) : "—"]
+        ["Ответ DNS", typeof row.answer_rtt_ms === "number" ? row.answer_rtt_ms + " мс" : "—", ""],
+        ["Последняя проверка", observed.checked ? localTime(observed.checked) : "—", ""],
+        ["Применённый план", row.plan_applied === true && row.applied_plan_id ? str(row.applied_plan_id) : "—", "dns-service-plan"]
       ].forEach(function (field) {
         var entry = el(doc, "div", "");
-        add(entry, el(doc, "dt", "", field[0]), el(doc, "dd", "", field[1]));
+        add(entry, el(doc, "dt", "", field[0]), el(doc, "dd", field[2], field[1]));
         details.appendChild(entry);
       });
-      add(item, head, details);
-      if (row.status_reason) item.appendChild(el(doc, "p", "dns-service-reason", str(row.status_reason)));
+      item.appendChild(details);
+      if (row.status_reason) {
+        var reason = el(doc, "p", "dns-service-reason");
+        if (failures[row.failure]) reason.appendChild(el(doc, "strong", "", failures[row.failure]));
+        reason.appendChild(doc.createTextNode((failures[row.failure] ? " " : "") + str(row.status_reason)));
+        item.appendChild(reason);
+      }
       return item;
     });
     root.replaceChildren.apply(root, items);

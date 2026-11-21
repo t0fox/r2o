@@ -160,7 +160,8 @@ async function main() {
     dns_services: [
       { protocol: "dot", host: "dns.example", port: 853, resolved_ip: "192.0.2.8", state: "direct_ok", checked_at: new Date().toISOString(), answer_rtt_ms: 17, status_reason: "DoT: получен корректный DNS-ответ" },
       { protocol: "doq", host: "quic.example", port: 853, resolved_ip: "2001:db8::9", state: "plan_applied", plan_applied: true, applied_plan_id: "example-plan", dns_answer_via_plan: false, status_reason: "DNS-ответ через план ещё проверяется" },
-      { protocol: "doh", host: "old.example", port: 443, state: "direct_ok", checked_at: new Date(Date.now() - 720000).toISOString() },
+      { protocol: "doh", host: "old.example", port: 443, path: "/dns-query", state: "direct_ok", checked_at: new Date(Date.now() - 720000).toISOString() },
+      { protocol: "doh", host: "refused.example", port: 443, path: "/dns-query", state: "failed", failure: "server", checked_at: new Date().toISOString(), status_reason: "HTTP 403: сервер отклонил запрос" },
     ],
     searches: [{
       target: "blocked.example",
@@ -391,16 +392,39 @@ async function main() {
   await waitFor(() => evaluate("document.readyState === 'complete' && !!document.querySelector('#app')"), "загрузка страницы R2O");
   await evaluate("document.fonts.ready.then(() => true)");
   await evaluate("location.hash = '#dns-protection'");
-  await waitFor(() => evaluate("!document.querySelector('#dns-protection').hidden && document.querySelector('#dns-protection-list').children.length === 3"), "вкладка DNS Protection");
-  assert.deepEqual(await evaluate("[...document.querySelectorAll('#dns-protection-list .meta-chip')].map(node => node.textContent)"), ["Доступен напрямую", "Подбор", "Устарело"]);
+  await waitFor(() => evaluate("!document.querySelector('#dns-protection').hidden && document.querySelector('#dns-protection-list').children.length === 4"), "вкладка DNS Protection");
+  assert.deepEqual(await evaluate("[...document.querySelectorAll('#dns-protection-list .meta-chip')].map(node => node.textContent)"), ["Доступен напрямую", "Подбор", "Устарело", "Ошибка"]);
+  assert.equal(await evaluate("document.querySelector('[data-nav=dns-protection]').getAttribute('aria-current')"), "page");
+  assert.equal(await evaluate("document.querySelector('#dns-protection-list').textContent.includes('[2001:db8::9]:853')"), true);
   assert.equal(await evaluate("document.querySelector('#dns-protection-list').textContent.includes('17 мс')"), true);
+  await call("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+  assert.equal(await evaluate(`(() => {
+    const row = document.querySelector('.dns-service');
+    const metrics = row.querySelector('.dns-service-details').getBoundingClientRect();
+    const status = row.querySelector('.meta-chip').getBoundingClientRect();
+    const labels = [...row.querySelectorAll('dt')].map(node => node.getBoundingClientRect().top);
+    return status.left > metrics.right && Math.max(...labels) - Math.min(...labels) <= 1;
+  })()`), true, "на широком экране статус справа, подписи метрик выровнены");
   if (captureDir) {
+    await delay(350);
     const screenshot = await call("Page.captureScreenshot", { format: "png" });
     fs.writeFileSync(path.join(captureDir, "dns-protection-fixture.png"), Buffer.from(screenshot.data, "base64"));
   }
+  for (const width of [320, 390, 768, 1024]) {
+    await call("Emulation.setDeviceMetricsOverride", { width, height: 844, deviceScaleFactor: 1, mobile: false });
+    assert.equal(await evaluate("document.documentElement.scrollWidth <= innerWidth && [...document.querySelectorAll('.index a')].every(el => { const rect = el.getBoundingClientRect(); return rect.width >= 44 && rect.right <= innerWidth && rect.bottom <= innerHeight; })"), true, `вкладка и навигация помещаются на экране ${width} px`);
+  }
   await call("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
-  assert.equal(await evaluate("document.documentElement.scrollWidth <= innerWidth && document.querySelector('[data-nav=dns-protection]').getBoundingClientRect().bottom <= innerHeight"), true, "вкладка и навигация помещаются на экране 390 px");
+  assert.equal(await evaluate(`(() => {
+    const row = document.querySelector('.dns-service');
+    const server = row.querySelector('.dns-service-head').getBoundingClientRect();
+    const address = row.querySelector('.dns-service-address').getBoundingClientRect();
+    const status = row.querySelector('.meta-chip').getBoundingClientRect();
+    const details = row.querySelector('.dns-service-details').getBoundingClientRect();
+    return status.left >= server.right && address.top > status.bottom && details.top > address.bottom;
+  })()`), true, "на телефоне адрес и метрики идут под строкой сервера");
   if (captureDir) {
+    await delay(350);
     const screenshot = await call("Page.captureScreenshot", { format: "png" });
     fs.writeFileSync(path.join(captureDir, "dns-protection-fixture-mobile.png"), Buffer.from(screenshot.data, "base64"));
   }
