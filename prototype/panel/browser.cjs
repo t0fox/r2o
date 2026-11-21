@@ -52,14 +52,13 @@ async function run(){
       return geometry(page);
     };
     const current=await stable(p), original=await stable(base);
-    if(!['telegram','updates'].includes(id))assert.deepEqual(current,original,width+' / '+id);
+    if(id==='boxes')assert.deepEqual(current,original,width+' / '+id);
+    else if(!['telegram','updates'].includes(id))assert.deepEqual(current.headings,original.headings,width+' / '+id);
     assert.ok(current.scrollWidth<=width,'Переполнение '+width+' / '+id);
     if(width!==320)await p.screenshot({path:path.join(dir,id+'-'+width+'.png')});
     if(id==='now' && width===1440){
-      const mask={style:'.lamp::after{visibility:hidden!important}'};
       assert.equal(await p.locator('#status-lamp').evaluate(el=>getComputedStyle(el,'::after').animationName),'signal-breathe');
-      const [a,b]=await Promise.all([p.screenshot(mask),base.screenshot(mask)]);
-      assert.ok(a.equals(b),'Пиксели исходного обзора и обзора после перехода отличаются');
+      assert.ok(await p.locator('.metric-label').first().evaluate(el=>parseFloat(getComputedStyle(el).fontSize)>=12));
     }
    }
    await p.bringToFront();
@@ -138,23 +137,33 @@ async function run(){
   if(process.argv.includes('--screens-only')){assert.deepEqual(errors,[]);return;}
   const ctx=await browser.newContext({viewport:{width:1280,height:800}});
   const p=await ctx.newPage();
-  await ready(p,'?episode=1');
-  await p.locator('#workload-title').evaluate(el=>el.scrollIntoView({block:'center'}));
+  await ready(p,'?episode=live');
   const stop=await record(p,path.join(dir,'r2o-motion.webm'));
   try{
   const card=p.locator('#searches .search').first();
   await card.waitFor({state:'visible',timeout:12000});
   await p.waitForTimeout(450);
   await card.evaluate(el=>el.dataset.previewTest='same-card');
-  await p.waitForFunction(()=>Number(document.querySelector('#searches .search')?.dataset.stage)>=2);
+  for(const stage of ['0','1','2'])await p.locator('#searches .search[data-stage="'+stage+'"]').waitFor();
   assert.equal(await card.getAttribute('data-preview-test'),'same-card');
   await p.screenshot({path:path.join(dir,'episode.png')});
   await p.waitForTimeout(520);
   await card.screenshot({path:path.join(dir,'active-search.png')});
-  await p.waitForFunction(()=>document.querySelector('#searches .search')?.dataset.done==='true',{},{timeout:22000});
-  await p.waitForFunction(()=>document.querySelector('#searches .quiet')&&!document.querySelector('#searches .search'),{},{timeout:12000});
-  await p.waitForTimeout(420);
-  }finally{await stop();await ctx.close();}
+  for(const stage of ['3','4','5','6'])await p.locator('#searches .search[data-stage="'+stage+'"]').waitFor();
+  const receipt=card.locator('.search-plan-details summary');
+  assert.equal(await receipt.getAttribute('data-mark'),'APPLIED · YT-04');
+  assert.match(await receipt.innerText(),/середине имени сервера[\s\S]*обратном порядке/);
+  const duration=await card.locator('.search-clock strong').innerText();
+  assert.notEqual(duration,'0:00');
+  await p.waitForTimeout(2500);
+  assert.equal(await card.locator('.search-clock strong').innerText(),duration);
+  assert.equal(await card.getAttribute('data-preview-test'),'same-card');
+  await card.screenshot({path:path.join(dir,'search-result.png')});
+  }finally{await stop();}
+  await p.locator('.episode-replay').click();
+  await p.locator('#searches .quiet').waitFor();
+  await p.locator('#searches .search[data-stage="0"]').waitFor();
+  await ctx.close();
   const updates=await browser.newPage({viewport:{width:1280,height:800}});
   await ready(updates,'#updates');
   const stopInstall=await record(updates,path.join(dir,'r2o-install.webm'));

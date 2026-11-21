@@ -67,7 +67,7 @@ body[data-stale="true"] .lamp::after { opacity: 0; }
 
 .search-plan-details { min-width: 0; border-color: var(--line); }
 .search-plan-details summary { gap: 10px; padding: 9px 12px; color: var(--ink); font: inherit; font-size: .82rem; font-weight: 650; }
-.search-plan-details summary::before { content: attr(data-label); font: 600 .66rem var(--mono); }
+.search-plan-details summary::before { content: attr(data-mark); font: 600 .72rem var(--mono); }
 .search-plan-details[data-label="Применено"] summary::before { color: var(--ok); }
 .search-plan-details summary::after { content: ""; width: 6px; height: 6px; border: solid var(--ink-3); border-width: 0 1px 1px 0; transform: rotate(45deg); }
 .search-plan-details[open] summary::after { transform: rotate(225deg); }
@@ -83,6 +83,35 @@ body[data-stale="true"] .lamp::after { opacity: 0; }
 .plan-explanation li::marker { color: var(--bronze); }
 .plan-proof { margin: 8px 0 0; color: var(--ok); font-size: .75rem; }
 .search-plan-body .plan-explanation { margin-top: 9px; padding: 8px 0 0; }
+.search-plan-details[data-label="Применено"] { background: var(--ok-wash); border-color: var(--ok-line); }
+.search-plan-details[data-label="Применено"] summary { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 4px 14px; }
+.search-plan-details[data-label="Применено"] summary::after { grid-column: 2; grid-row: 1/3; }
+.search-plan-details[data-label="Применено"] .search-plan-summary { grid-column: 1; }
+.search-plan-details[data-label="Применено"] .search-plan-body { background: var(--surface-deep); }
+.workload-card { scroll-margin-block-start: calc(var(--mast-offset) + 72px); }
+.workload-card:has(.episode-replay) .card-head { flex-wrap: wrap; }
+.episode-replay { font: 600 .8rem var(--sans); color: var(--ink-2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; background: var(--surface-deep); cursor: pointer; }
+.episode-replay:hover, .episode-replay:focus-visible { color: var(--ink); border-color: var(--bronze); }
+.metric-label, .family-stat, .tg-stat-label, .upd-meta, .diag-stat-strip dt { font: 500 .77rem/1.4 var(--sans); letter-spacing: 0; text-transform: none; color: var(--ink-2); }
+.metric-note, .tg-flow-caption { font: 400 .76rem/1.4 var(--sans); }
+.metric-value, .search-clock strong, .tg-stat-value { font-variant-numeric: tabular-nums; }
+.search-phase, .search-plan-summary { font: 650 .9rem/1.45 var(--sans); }
+.search-meta, .search-clock span, .workload-card .card-meta { font-size: .74rem; }
+.search .track-step { font: 500 .72rem/1.35 var(--sans); }
+.search .track-label { white-space: nowrap; }
+.searches { container-type: inline-size; }
+@container (max-width: 540px) {
+  .search .track-label { display: none; }
+  .search .track-step { min-height: 32px; padding: 0; }
+  .search .track-note { display: block; grid-column: 1/-1; color: var(--ink-2); font: .75rem/1.4 var(--sans); }
+}
+.search .track-step[data-state="now"] { font-weight: 700; }
+.search .track-step[data-state="now"] .track-icon { stroke-width: 1.8; }
+.search .search-stage-code { font: 500 .62rem/1.3 var(--mono); }
+@media (prefers-reduced-motion: no-preference) {
+  .search-plan-details[data-label="Применено"] { animation: result-arrives .36s var(--ease) both; }
+  @keyframes result-arrives { from { transform: translateY(3px); opacity: .65; } to { transform: none; opacity: 1; } }
+}
 .tg-hero { padding: 16px 18px; border-radius: 12px; }
 .tg-hero::after { content: none; }
 .tg-orb { width: 44px; height: 44px; }

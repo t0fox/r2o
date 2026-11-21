@@ -1,5 +1,5 @@
 diff --git a/panel.js b/panel.js
-index 08cd9f98..198901b5 100644
+index 08cd9f98..c0ab806e 100644
 --- a/panel.js
 +++ b/panel.js
 @@ -172,6 +172,46 @@
@@ -49,7 +49,24 @@ index 08cd9f98..198901b5 100644
    /* Предел одновременных замеров считает движок по нагрузке роутера:
       от 1 на слабом до десятков на мощном. До 16 — клетками, больше — шкалой. */
    function slotsView(meas) {
-@@ -851,7 +891,7 @@
+@@ -748,6 +788,7 @@
+   App.prototype.start = function () {
+     var self = this, doc = this.doc, win = this.win;
+     this.trackMastHeight();
++    win.addEventListener("r2o-demo-replay", function () { self.poll(); });
+     var input = this.$("filter");
+     var clear = this.$("filter-clear");
+     input.addEventListener("input", function () {
+@@ -807,7 +848,7 @@
+     var idle = this.m && !this.m.hunting &&
+       (!this.m.snap.engine_running || this.m.linked) &&
+       this.m.snap.control_state !== "running" && !this.pending && !this.failed;
+-    if (scheduled && idle && Date.now() - this.lastPoll < IDLE_POLL_MS) return;
++    if (scheduled && idle && !this.doc.querySelector(".episode-replay") && Date.now() - this.lastPoll < IDLE_POLL_MS) return;
+     this.lastPoll = Date.now();
+     this.inflight = true;
+     var ctrl = typeof AbortController === "function" ? new AbortController() : null;
+@@ -851,7 +892,7 @@
      this.$("update-check").addEventListener("click", function () { return self.checkUpdates(true); });
      this.$("update-install").addEventListener("click", function () {
        if (self.$("update-install").disabled) return;
@@ -58,7 +75,7 @@ index 08cd9f98..198901b5 100644
      });
      this.$("update-auto").addEventListener("change", function () {
        return self.updateCommand(self.$("update-auto").checked ? "auto-on" : "auto-off");
-@@ -877,7 +917,7 @@
+@@ -877,7 +918,7 @@
 
    var UPDATE_ACTIONS = {
      check: "Проверяем обновления…",
@@ -67,7 +84,7 @@ index 08cd9f98..198901b5 100644
      "auto-on": "Включаем автообновление…", "auto-off": "Выключаем автообновление…"
    };
 
-@@ -959,7 +999,7 @@
+@@ -959,7 +1000,7 @@
      write("update-state", text);
      if (state.parentElement) state.parentElement.setAttribute("data-tone", tone);
      var lamp = this.$("update-lamp");
@@ -76,7 +93,7 @@ index 08cd9f98..198901b5 100644
      if (changed && !this.doc.hidden && Motion.on()) {
        Motion.g.killTweensOf(state);
        Motion.g.fromTo(state, { opacity: .55, y: 3 }, { opacity: 1, y: 0, duration: .2, clearProps: "opacity,transform" });
-@@ -979,12 +1019,39 @@
+@@ -979,12 +1020,39 @@
      var install = this.$("update-install");
      install.hidden = !newer;
      install.disabled = !!action || absent;
@@ -120,7 +137,33 @@ index 08cd9f98..198901b5 100644
      var auto = this.$("update-auto");
      if (!(pending && /^auto-/.test(pending.action))) auto.checked = !absent && s.auto !== false;
      auto.disabled = absent || !!action || !!pending;
-@@ -1946,7 +2013,7 @@
+@@ -1161,6 +1229,7 @@
+     var workload = this.$("workload-meta");
+     if (workload) {
+       var text = m.hunting ? (m.hunting - m.queued.length) + " в работе" + (m.queued.length ? " · " + m.queued.length + " ждут" : "") : "очередь пуста";
++      if (!m.hunting && m.running.some(function (s) { return s.completed_at && s.applied_plan_id; })) text = "Поиск завершён";
+       if (workload.textContent !== text) workload.textContent = text;
+     }
+     var tm = this.$("telegram-meta");
+@@ -1851,10 +1920,13 @@
+     }
+     if (entered.length && listNode.offsetHeight) {
+       resizeList(idleHeight);
+-      Motion.track(Motion.g.fromTo(entered, { y: 7, opacity: .15 }, {
+-        y: 0, opacity: 1, duration: .32, stagger: { amount: .05 },
+-        ease: "power3.out", clearProps: "transform,opacity"
+-      }));
++      var arrival = Motion.g.timeline();
++      arrival.fromTo(entered, { y: 9, opacity: .08 }, {
++        y: 0, opacity: 1, duration: .36, ease: "power3.out", clearProps: "transform,opacity"
++      }).fromTo(entered.map(function (row) { return row.__parts.visual; }), { opacity: 0, scale: .92 }, {
++        opacity: 1, scale: 1, duration: .28, ease: "power2.out", clearProps: "transform,opacity"
++      }, .06);
++      Motion.track(arrival);
+     }
+   };
+
+@@ -1946,11 +2018,12 @@
        question: el(doc, "p", "search-question"),
        plan: el(doc, "details", "search-plan-details"),
        planSummary: el(doc, "span", "search-plan-summary"),
@@ -129,7 +172,20 @@ index 08cd9f98..198901b5 100644
        track: el(doc, "div", "track"),
        trackNote: el(doc, "p", "track-note")
      };
-@@ -1999,15 +2066,37 @@
+     li.__parts.plan.hidden = true;
++    li.__parts.phase.setAttribute("role", "status");
+     var planHead = el(doc, "summary");
+     planHead.appendChild(li.__parts.planSummary);
+     add(li.__parts.plan, planHead, li.__parts.planBody);
+@@ -1982,6 +2055,7 @@
+     }
+     var phase = str(s.phase) || "этап не указан";
+     li.__since = parseTime(s.since);
++    li.__finished = parseTime(s.completed_at);
+     var counters = [];
+     if (num(s.attempts)) counters.push(count(s.attempts, "план", "плана", "планов"));
+     if (num(s.probes)) counters.push(count(s.probes, "зонд", "зонда", "зондов"));
+@@ -1999,15 +2073,42 @@
          p.phase.textContent = phaseText;
        }
      }
@@ -147,6 +203,10 @@ index 08cd9f98..198901b5 100644
 +      var raw = candidate !== planId || (!s.plan_id && !s.applied_plan_id && !saved) ? candidate : saved && str(saved.text);
 +      var gist = raw && (raw.includes("\n") ? planGist(raw) : candidateGist(raw)) || saved && saved.human || "Состав плана не получен";
 +      var label = applied ? "Применено" : "Проверяем";
++      if (applied && raw && raw.includes("\n")) {
++        var methods = describePlan(raw);
++        if (methods.length) gist = methods.slice(0, 2).join(" ") + (methods.length > 2 ? " Ещё в подробностях." : "");
++      }
 +      p.plan.dataset.label = label;
        if (p.planSummary.textContent !== gist) p.planSummary.textContent = gist;
 -      if (p.planSummary.title !== candidate) p.planSummary.title = candidate;
@@ -160,19 +220,61 @@ index 08cd9f98..198901b5 100644
 +        fact("Транспорт", saved && saved.proto ? str(saved.proto).toUpperCase() : shapeLabel(s.shape, s.transport));
 +        if (owner) fact("Коробка", str(owner.id));
 +        p.planBody.replaceChildren(facts);
-+        if (raw && raw.includes("\n")) add(p.planBody, planExplanation(doc, raw));
++        if (raw && raw.includes("\n") && (!applied || methods.length > 2)) add(p.planBody, planExplanation(doc, raw));
 +        if (raw && raw !== gist) p.planBody.appendChild(el(doc, "pre", "candidate-source", raw));
 +      }
        var planHead = p.plan.querySelector("summary");
 -      if (planHead && planHead.getAttribute("aria-label") !== "План: " + gist) planHead.setAttribute("aria-label", "План: " + gist);
 +      if (planHead) {
 +        planHead.dataset.label = label;
-+        planHead.setAttribute("aria-label", label + ": " + gist);
++        planHead.dataset.mark = applied ? "APPLIED · " + planId : label;
++        planHead.setAttribute("aria-label", label + " " + planId + ". " + gist);
 +      }
      }
      var classifying = s.phase === TRACK[2].phases[0] && !!str(s.question);
      p.question.hidden = !classifying;
-@@ -2475,7 +2564,12 @@
+@@ -2041,11 +2142,13 @@
+           attr: { r: 28 }, opacity: 0, duration: .50, ease: "sine.out", clearProps: "opacity"
+         }));
+         if (codeChanged) Motion.g.fromTo(p.visual.__code, { y: 2, opacity: 0 }, { y: 0, opacity: 1, duration: 0.24, ease: "power2.out", clearProps: "transform,opacity" });
+-        var width = li.getBoundingClientRect().width || 640;
+-        if (p.sweepMotion) p.sweepMotion.kill();
+-        p.sweepMotion = Motion.track(Motion.g.timeline()
+-          .fromTo(p.sweepInner, { x: -width * .35, opacity: 0 }, { x: width * .1, opacity: .7, duration: .14, ease: "power2.out" })
+-          .to(p.sweepInner, { x: width * 1.1, opacity: 0, duration: .28, ease: "power2.in" }));
++        if (s.applied_plan_id && s.applied_plan_id === s.plan_id) {
++          var width = li.getBoundingClientRect().width || 640;
++          if (p.sweepMotion) p.sweepMotion.kill();
++          p.sweepMotion = Motion.track(Motion.g.timeline()
++            .fromTo(p.sweepInner, { x: -width * .35, opacity: 0 }, { x: width * .1, opacity: .7, duration: .14, ease: "power2.out" })
++            .to(p.sweepInner, { x: width * 1.1, opacity: 0, duration: .28, ease: "power2.in" }));
++        }
+       }
+     }
+     li.setAttribute("data-done", String(!!tr && !tr.voice && tr.at === TRACK.length - 1));
+@@ -2096,20 +2199,11 @@
+       p.track.style.setProperty("--at", String(tr.at));
+       paint(tr.at, tr.at);
+     }
+-    if (oldStage !== undefined && oldStage !== stageKey && Motion.on()) {
+-      var currentIcon = p.track.querySelector('.track-step[data-state="now"] .track-icon');
+-      if (currentIcon) {
+-        Motion.g.fromTo(currentIcon, { scale: .6, autoAlpha: .2 }, {
+-          scale: 1, autoAlpha: 1, duration: .38, ease: "back.out(2.2)",
+-          transformOrigin: "50% 50%", clearProps: "all"
+-        });
+-      }
+-    }
+   };
+
+   App.prototype.updateClock = function (li) {
+     var doc = this.doc, p = li.__parts;
+-    var text = li.__since ? clock(this.serverNow() - li.__since) : "—";
++    var text = li.__since ? clock((li.__finished || this.serverNow()) - li.__since) : "—";
+     if (!p.clock.firstChild) add(p.clock, el(doc, "strong"), el(doc, "span"));
+     p.clock.firstChild.textContent = text;
+     p.clock.firstChild.title = li.__since ? "С " + localTime(li.__since) : "";
+@@ -2475,7 +2569,12 @@
        var pre = el(doc, "pre", "", (p.id ? "# " + p.id + (p.enabled === false ? " (выключен)" : "") + "\n" : "") + planText);
        pre.tabIndex = 0;
        pre.setAttribute("aria-label", "Текст плана " + (str(p.id) || String(pi + 1)));
@@ -186,7 +288,7 @@ index 08cd9f98..198901b5 100644
        plans.appendChild(d);
      });
      if (!list(b.plans).length) plans.appendChild(el(doc, "p", "box-dates", "Планов нет"));
-@@ -2666,7 +2760,7 @@
+@@ -2666,7 +2765,7 @@
      diagnosticCenters.setAttribute("data-tg-check-centers", "");
      diagnostics.append(diagnosticSummary, diagnosticState, diagnosticTime, diagnosticCenters);
 
@@ -195,7 +297,7 @@ index 08cd9f98..198901b5 100644
      if (global.R2oTelegramFlow && global.R2oTelegramFlow.mountTelegramFlow) {
        root.__flow = global.R2oTelegramFlow.mountTelegramFlow(canvas);
      }
-@@ -2753,6 +2847,7 @@
+@@ -2753,6 +2852,7 @@
      report = report && typeof report === "object" ? report : { state: "never" };
      var key = JSON.stringify(report);
      if (root.__r2oKey === key) return;
@@ -203,7 +305,7 @@ index 08cd9f98..198901b5 100644
      root.__r2oKey = key;
      var status = root.querySelector("[data-tg-check-state]");
      var checked = root.querySelector("[data-tg-check-time]");
-@@ -2881,7 +2976,7 @@
+@@ -2881,7 +2981,7 @@
        } else {
          buttons.push(this.button("telegram-enable", "Запустить прокси", "send", "primary", busy || !snap.telegram_configured));
        }
