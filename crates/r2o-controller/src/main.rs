@@ -30132,7 +30132,6 @@ impl ControlClient {
         {
             eprintln!("группа для {} не записана: {error}", binding_target.host);
         }
-        *confirmed = true;
         let plan_text = updated
             .boxes
             .iter()
@@ -30156,6 +30155,7 @@ impl ControlClient {
             .collect();
         persist_catalog_update(&updated, catalog_path, now, persistence.take())?;
         *catalog = updated;
+        *confirmed = true;
         println!(
             "автопоиск подтвердил и сохранил план {}; синхронизация каталога поставлена в очередь для {} ({shape})",
             plan_id,
@@ -37135,7 +37135,7 @@ mod tests {
             family: 4,
             shape: SHAPE_MODERN,
         };
-        let outcome = super::DiscoveryOutcome {
+        let outcome = || super::DiscoveryOutcome {
             target: target.clone(),
             plan_text: Some(
                 "r2o-plan 1 11\nid 00000000000000000000000000000000\nproto tcp tls\nsplit sni_middle +0\n"
@@ -37170,9 +37170,27 @@ mod tests {
         };
         let mut catalog = Catalog::default();
         let mut confirmed = false;
+        let rejected_path = work.join("x".repeat(240)).join("catalog.json");
+        std::fs::create_dir(rejected_path.parent().unwrap()).unwrap();
+        let error = client
+            .apply_discovery_outcome_with_input_and_persistence(
+                outcome(),
+                &mut catalog,
+                &rejected_path,
+                2,
+                None,
+                None,
+                &mut confirmed,
+                None,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("catalog path exceeds 255 bytes"));
+        assert!(!confirmed);
+        assert!(catalog.boxes.is_empty());
+        assert!(!rejected_path.exists());
         client
             .apply_discovery_outcome_with_input_and_persistence(
-                outcome,
+                outcome(),
                 &mut catalog,
                 &catalog_path,
                 2,
