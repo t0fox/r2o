@@ -6455,6 +6455,9 @@ impl ControlClient {
         timeout: std::time::Duration,
     ) -> Result<Option<r2k_core::control::Ack>, Box<dyn Error>> {
         let expected_trial_id = control_command_trial_id(command, expected);
+        // D2O V22 подтверждает удаление адресной пробы без trial ID.
+        let allow_untagged_delete =
+            expected == COMMAND_DEL_ADDR_PROBE && r2o_control_wire() == control::WireProfile::V22;
         let deadline = std::time::Instant::now() + timeout;
         loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -6467,7 +6470,10 @@ impl ControlClient {
                 let ack = decode_ack(&frame)
                     .map_err(|error| format!("подтверждение датапата: {error}"))?;
                 if ack.command != expected
-                    || expected_trial_id.is_some_and(|trial_id| ack.trial_id != Some(trial_id))
+                    || expected_trial_id.is_some_and(|trial_id| {
+                        ack.trial_id != Some(trial_id)
+                            && !(allow_untagged_delete && ack.trial_id.is_none())
+                    })
                 {
                     self.queue_async_frame(frame)?;
                     continue;
@@ -7152,11 +7158,13 @@ enum HttpSearchCommand {
         command: Vec<u8>,
         delete: Vec<u8>,
         trial_id: [u8; 16],
+        deadline: std::time::Instant,
         reply: SyncSender<Result<r2k_core::control::Ack, String>>,
     },
     R2oDeleteQuicProbe {
         command: Vec<u8>,
-        reply: SyncSender<Result<(), String>>,
+        deadline: std::time::Instant,
+        reply: SyncSender<Result<r2k_core::control::Ack, String>>,
     },
     InstallCandidate {
         target: r2o_controller::discovery::DiscoveryTarget,
@@ -7181,6 +7189,36 @@ impl PendingTcpCandidateAck {
     ) -> Result<(), Box<dyn Error>> {
         if self.reply.send(Ok(ack)).is_err() {
             client.write_command(&self.delete)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+struct PendingQuicProbeAck {
+    deadline: std::time::Instant,
+    delete_on_failure: Option<Vec<u8>>,
+    reply: SyncSender<Result<r2k_core::control::Ack, String>>,
+}
+
+#[cfg(unix)]
+impl PendingQuicProbeAck {
+    fn finish(
+        self,
+        client: &mut ControlClient,
+        ack: Option<r2k_core::control::Ack>,
+    ) -> Result<(), Box<dyn Error>> {
+        let result = match ack.filter(|_| std::time::Instant::now() < self.deadline) {
+            Some(ack) if ack.ok => Ok(ack),
+            Some(ack) => Err(ack_reason_text(ack.reason).to_owned()),
+            None => Err("истёк срок ожидания ACK временной QUIC-пробы".into()),
+        };
+        let failed = result.is_err();
+        let abandoned = self.reply.send(result).is_err();
+        if let Some(delete) = self.delete_on_failure
+            && (failed || abandoned)
+        {
+            client.write_command(&delete)?;
         }
         Ok(())
     }
@@ -22139,7 +22177,7 @@ fn control_command_trial_id(command: &[u8], expected: u16) -> Option<[u8; 16]> {
         control::COMMAND_SET_NAME_BOUND | control::COMMAND_SET_NAME_PROBE => {
             body.get(body.len().checked_sub(16)?..)?
         }
-        COMMAND_SET_ADDR_PROBE => {
+        COMMAND_SET_ADDR_PROBE | COMMAND_DEL_ADDR_PROBE => {
             body.get(r2k_core::control::KEY_LEN..r2k_core::control::KEY_LEN + 16)?
         }
         _ => return None,
@@ -23316,13 +23354,18 @@ impl ControlClient {
         });
         let mut live_written_at = None;
         let mut pending_candidate_acks: HashMap<[u8; 16], PendingTcpCandidateAck> = HashMap::new();
+        let mut pending_quic_acks: HashMap<(u16, [u8; 16]), PendingQuicProbeAck> = HashMap::new();
         let run_result = (|| -> Result<(), Box<dyn Error>> {
             loop {
                 if R2O_CONTROLLER_STOP.load(Ordering::Relaxed) {
                     break Ok(());
                 }
                 let now = std::time::Instant::now();
-                for (_, pending) in pending_candidate_acks.extract_if(|_, ack| now >= ack.deadline) {
+                for (_, pending) in pending_candidate_acks.extract_if(|_, ack| now >= ack.deadline)
+                {
+                    pending.finish(self, None)?;
+                }
+                for (_, pending) in pending_quic_acks.extract_if(|_, ack| now >= ack.deadline) {
                     pending.finish(self, None)?;
                 }
                 let dns_wall_now = std::time::SystemTime::now()
@@ -24542,6 +24585,8 @@ impl ControlClient {
                     {
                         if let Some(command) =
                             self.start_tcp_candidate_ack(command, &mut pending_candidate_acks)?
+                            && let Some(command) =
+                                self.start_quic_probe_ack(command, &mut pending_quic_acks)?
                         {
                             self.service_http_search_command(
                                 command,
@@ -24687,7 +24732,9 @@ impl ControlClient {
                     let now = std::time::Instant::now();
                     let wait = pending_candidate_acks
                         .values()
-                        .map(|ack| ack.deadline.saturating_duration_since(now))
+                        .map(|ack| ack.deadline)
+                        .chain(pending_quic_acks.values().map(|ack| ack.deadline))
+                        .map(|deadline| deadline.saturating_duration_since(now))
                         .fold(wait, std::time::Duration::min);
                     if !wait_for_control_frame(&self.socket, wait)? {
                         measurement_gate.r2o_scheduler_tick();
@@ -24738,6 +24785,9 @@ impl ControlClient {
                     let ack = decode_ack(&frame)
                         .map_err(|error| format!("подтверждение датапата: {error}"))?;
                     if self.finish_tcp_candidate_ack(ack, &mut pending_candidate_acks)? {
+                        continue;
+                    }
+                    if self.finish_quic_probe_ack(ack, &mut pending_quic_acks)? {
                         continue;
                     }
                     if let Some(cursor) = catalog_sync.as_mut() {
@@ -26606,11 +26656,16 @@ impl ControlClient {
         })();
         for (_, pending) in pending_candidate_acks.drain() {
             let cleanup = self.write_command(&pending.delete);
-            let _ = pending
-                .reply
-                .send(Err("контроллер остановлен до подтверждения TCP-пробы".into()));
+            let _ = pending.reply.send(Err(
+                "контроллер остановлен до подтверждения TCP-пробы".into()
+            ));
             if let Err(error) = cleanup {
                 eprintln!("не удалось снять временную TCP-пробу при остановке: {error}");
+            }
+        }
+        for (_, pending) in pending_quic_acks.drain() {
+            if let Err(error) = pending.finish(self, None) {
+                eprintln!("не удалось снять временную QUIC-пробу при остановке: {error}");
             }
         }
         for error in r2o_cleanup_voice_trials_on_shutdown(&mut r2o_voice_trials, |trial| {
@@ -26914,6 +26969,95 @@ impl ControlClient {
         Ok(true)
     }
 
+    fn start_quic_probe_ack(
+        &mut self,
+        request: HttpSearchCommand,
+        pending: &mut HashMap<(u16, [u8; 16]), PendingQuicProbeAck>,
+    ) -> Result<Option<HttpSearchCommand>, Box<dyn Error>> {
+        if r2o_control_wire() == control::WireProfile::V22 {
+            return Ok(Some(request));
+        }
+        let (kind, command, ack) = match request {
+            HttpSearchCommand::R2oInstallQuicProbe {
+                command,
+                delete,
+                trial_id,
+                deadline,
+                reply,
+            } => {
+                if control_command_trial_id(&command, COMMAND_SET_ADDR_PROBE) != Some(trial_id)
+                    || control_command_trial_id(&delete, COMMAND_DEL_ADDR_PROBE) != Some(trial_id)
+                    || command[6..6 + control::KEY_LEN] != delete[6..6 + control::KEY_LEN]
+                    || !r2o_trial_present(&trial_id)
+                {
+                    let _ = reply.send(Err(
+                        "не совпадают ключи установки и снятия QUIC-пробы".into()
+                    ));
+                    return Ok(None);
+                }
+                (
+                    COMMAND_SET_ADDR_PROBE,
+                    command,
+                    PendingQuicProbeAck {
+                        deadline,
+                        delete_on_failure: Some(delete),
+                        reply,
+                    },
+                )
+            }
+            HttpSearchCommand::R2oDeleteQuicProbe {
+                command,
+                deadline,
+                reply,
+            } => (
+                COMMAND_DEL_ADDR_PROBE,
+                command,
+                PendingQuicProbeAck {
+                    deadline,
+                    delete_on_failure: None,
+                    reply,
+                },
+            ),
+            _ => return Ok(Some(request)),
+        };
+        let Some(trial_id) = control_command_trial_id(&command, kind).filter(r2o_trial_present)
+        else {
+            let _ = ack.reply.send(Err("неверный trial ID QUIC-пробы".into()));
+            return Ok(None);
+        };
+        let key = (kind, trial_id);
+        if pending.contains_key(&key) {
+            let _ = ack
+                .reply
+                .send(Err("команда QUIC-пробы уже ожидает подтверждения".into()));
+            return Ok(None);
+        }
+        if std::time::Instant::now() >= ack.deadline && kind == COMMAND_SET_ADDR_PROBE {
+            let _ = ack
+                .reply
+                .send(Err("истёк срок отправки команды QUIC-пробы".into()));
+            return Ok(None);
+        }
+        self.write_command(&command)?;
+        pending.insert(key, ack);
+        Ok(None)
+    }
+
+    fn finish_quic_probe_ack(
+        &mut self,
+        ack: r2k_core::control::Ack,
+        pending: &mut HashMap<(u16, [u8; 16]), PendingQuicProbeAck>,
+    ) -> Result<bool, Box<dyn Error>> {
+        let Some(request) = ack
+            .trial_id
+            .and_then(|trial_id| pending.remove(&(ack.command, trial_id)))
+        else {
+            return Ok(false);
+        };
+        request.finish(self, Some(ack))?;
+        Ok(true)
+    }
+
     fn service_http_search_command(
         &mut self,
         command: HttpSearchCommand,
@@ -27046,9 +27190,19 @@ impl ControlClient {
                 command,
                 delete,
                 trial_id,
+                deadline,
                 reply,
             } => {
-                let ack = match self.exchange_command(&command, COMMAND_SET_ADDR_PROBE) {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    let _ = reply.send(Err("истёк срок отправки команды QUIC-пробы".into()));
+                    return Ok(());
+                }
+                let ack = match self.exchange_command_with_timeout(
+                    &command,
+                    COMMAND_SET_ADDR_PROBE,
+                    remaining,
+                ) {
                     Ok(ack) => ack,
                     Err(error) => {
                         match self.send_command(&delete, COMMAND_DEL_ADDR_PROBE) {
@@ -27086,17 +27240,33 @@ impl ControlClient {
                     }
                     return Ok(());
                 }
-                let _ = reply.send(Ok(ack));
+                if reply.send(Ok(ack)).is_err() {
+                    self.write_command(&delete)?;
+                }
             }
-            HttpSearchCommand::R2oDeleteQuicProbe { command, reply } => {
+            HttpSearchCommand::R2oDeleteQuicProbe {
+                command,
+                deadline,
+                reply,
+            } => {
                 let result = self
-                    .send_command(&command, COMMAND_DEL_ADDR_PROBE)
+                    .exchange_command_with_timeout(
+                        &command,
+                        COMMAND_DEL_ADDR_PROBE,
+                        deadline.saturating_duration_since(std::time::Instant::now()),
+                    )
                     .map_err(|error| error.to_string());
                 if let Err(error) = result {
                     let _ = reply.send(Err(error.clone()));
                     return Err(error.into());
                 }
-                let _ = reply.send(Ok(()));
+                let ack = result.expect("проверен результат удаления временной QUIC-пробы");
+                if !ack.ok {
+                    let message = ack_reason_text(ack.reason);
+                    let _ = reply.send(Err(message.to_owned()));
+                    return Err(message.into());
+                }
+                let _ = reply.send(Ok(ack));
             }
             HttpSearchCommand::InstallCandidate { target, key, reply } => {
                 let result = self
@@ -27816,12 +27986,17 @@ impl ControlClient {
             trial_id,
         )?;
         let delete = encode_delete_addr_probe(local, server, trial_id)?;
-        let ack = ask_http_controller(commands, |reply| HttpSearchCommand::R2oInstallQuicProbe {
-            command: set.clone(),
-            delete: delete.clone(),
-            trial_id,
-            reply,
-        })?;
+        let ack = ask_http_controller_until(
+            commands,
+            CONTROL_ACK_TIMEOUT.min(r2o_quic_trial_remaining(started_at, measurement_permit)),
+            |deadline, reply| HttpSearchCommand::R2oInstallQuicProbe {
+                command: set,
+                delete: delete.clone(),
+                trial_id,
+                deadline,
+                reply,
+            },
+        )?;
         if !ack.ok || ack.trial_id != Some(trial_id) {
             println!(
                 "QUIC-кандидат «{}» не установлен: datapath не подтвердил его trial ID",
@@ -28005,9 +28180,12 @@ impl ControlClient {
         }
 
         let delete_result =
-            ask_http_controller(commands, |reply| HttpSearchCommand::R2oDeleteQuicProbe {
-                command: delete,
-                reply,
+            ask_http_controller_until(commands, CONTROL_ACK_TIMEOUT, |deadline, reply| {
+                HttpSearchCommand::R2oDeleteQuicProbe {
+                    command: delete,
+                    deadline,
+                    reply,
+                }
             });
         delete_result?;
         if let Some(Err(error)) = delayed_applied {
@@ -31847,6 +32025,39 @@ fn ask_http_controller<T: Send + 'static>(
     response
         .recv()
         .map_err(|_| "управляющий цикл HTTP-поиска закрыл ответ".to_owned())?
+}
+
+#[cfg(unix)]
+fn ask_http_controller_until<T: Send + 'static>(
+    commands: &SyncSender<HttpSearchCommand>,
+    timeout: std::time::Duration,
+    build: impl FnOnce(std::time::Instant, SyncSender<Result<T, String>>) -> HttpSearchCommand,
+) -> Result<T, String> {
+    let deadline = std::time::Instant::now() + timeout;
+    let (reply, response) = mpsc::sync_channel(1);
+    let mut command = build(deadline, reply);
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err("истёк срок отправки управляющей команды".into());
+        }
+        match commands.try_send(command) {
+            Ok(()) => break,
+            Err(mpsc::TrySendError::Full(waiting)) => command = waiting,
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                return Err("управляющий цикл HTTP-поиска остановлен".into());
+            }
+        }
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(5)));
+    }
+    response
+        .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+        .map_err(|error| match error {
+            mpsc::RecvTimeoutError::Timeout => "истёк срок ожидания управляющего ответа".to_owned(),
+            mpsc::RecvTimeoutError::Disconnected => {
+                "управляющий цикл HTTP-поиска закрыл ответ".to_owned()
+            }
+        })?
 }
 
 #[cfg(unix)]
@@ -53488,8 +53699,11 @@ group_block_proven: false,
                     break;
                 };
                 assert_eq!(delete.kind, super::COMMAND_DEL_ADDR_PROBE);
-                peer.write_all(&encode_ack(delete.kind, true, 0).unwrap())
-                    .unwrap();
+                let trial_id = delete.body[KEY_LEN..KEY_LEN + 16].try_into().unwrap();
+                peer.write_all(
+                    &encode_ack_for_trial(delete.kind, true, 0, Some(trial_id)).unwrap(),
+                )
+                .unwrap();
             }
             control_done_sender.store(true, Ordering::Relaxed);
             candidate_done_tx.send(()).unwrap();
@@ -53787,30 +54001,38 @@ group_block_proven: false,
                 .map_err(str::to_owned)?;
                 let delete = super::encode_delete_addr_probe(local, server, trial_id)
                     .map_err(str::to_owned)?;
-                let ack = super::ask_http_controller(&commands, |reply| {
-                    HttpSearchCommand::R2oInstallQuicProbe {
+                let ack = super::ask_http_controller_until(
+                    &commands,
+                    super::CONTROL_ACK_TIMEOUT,
+                    |deadline, reply| HttpSearchCommand::R2oInstallQuicProbe {
                         command: set,
                         delete: delete.clone(),
                         trial_id,
+                        deadline,
                         reply,
-                    }
-                })?;
+                    },
+                )?;
                 if !ack.ok || ack.trial_id != Some(trial_id) {
                     return Err("точная QUIC-проба не получила подтверждение".into());
                 }
                 runner_barrier.wait();
-                super::ask_http_controller(&commands, |reply| {
-                    HttpSearchCommand::R2oDeleteQuicProbe {
+                super::ask_http_controller_until(
+                    &commands,
+                    super::CONTROL_ACK_TIMEOUT,
+                    |deadline, reply| HttpSearchCommand::R2oDeleteQuicProbe {
                         command: delete,
+                        deadline,
                         reply,
-                    }
-                })?;
+                    },
+                )?;
                 Ok(None)
             },
         ));
 
         let (socket, mut peer) = UnixStream::pair().unwrap();
         let control_thread = std::thread::spawn(move || {
+            peer.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
             let mut active = HashSet::new();
             let mut probes = Vec::new();
             let mut maximum_active = 0;
@@ -53829,16 +54051,14 @@ group_block_proven: false,
                         assert!(active.insert((key, trial_id)));
                         maximum_active = maximum_active.max(active.len());
                         probes.push((key, trial_id));
-                        peer.write_all(
-                            &encode_ack_for_trial(
-                                super::COMMAND_SET_ADDR_PROBE,
-                                true,
-                                0,
-                                Some(trial_id),
-                            )
-                            .unwrap(),
-                        )
-                        .unwrap();
+                        if probes.len() == 2 {
+                            for (_, id) in probes.iter().rev() {
+                                peer.write_all(
+                                    &encode_ack_for_trial(frame.kind, true, 0, Some(*id)).unwrap(),
+                                )
+                                .unwrap();
+                            }
+                        }
                     }
                     super::COMMAND_DEL_ADDR_PROBE => {
                         let key: [u8; KEY_LEN] = frame.body[..KEY_LEN].try_into().unwrap();
@@ -53846,7 +54066,7 @@ group_block_proven: false,
                             frame.body[KEY_LEN..KEY_LEN + 16].try_into().unwrap();
                         assert!(active.remove(&(key, trial_id)));
                         peer.write_all(
-                            &encode_ack(super::COMMAND_DEL_ADDR_PROBE, true, 0).unwrap(),
+                            &encode_ack_for_trial(frame.kind, true, 0, Some(trial_id)).unwrap(),
                         )
                         .unwrap();
                     }
@@ -53914,8 +54134,11 @@ group_block_proven: false,
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         let mut completed = HashSet::new();
+        let mut pending = std::collections::HashMap::new();
         while completed.len() < 2 {
-            if let Some(command) = worker.try_command() {
+            if let Some(command) = worker.try_command()
+                && let Some(command) = client.start_quic_probe_ack(command, &mut pending).unwrap()
+            {
                 client
                     .service_http_search_command(
                         command,
@@ -53925,6 +54148,14 @@ group_block_proven: false,
                     )
                     .unwrap();
                 continue;
+            }
+            if super::wait_for_control_frame(&client.socket, std::time::Duration::from_millis(1))
+                .unwrap()
+                && !pending.is_empty()
+            {
+                let frame = read_frame(&mut client.socket).unwrap();
+                let ack = super::decode_ack(&frame).unwrap();
+                assert!(client.finish_quic_probe_ack(ack, &mut pending).unwrap());
             }
             if let Some(outcome) = worker.try_outcome() {
                 assert!(matches!(outcome.result, Ok(None)));
@@ -54107,6 +54338,158 @@ group_block_proven: false,
 
     #[cfg(unix)]
     #[test]
+    fn quic_probe_delete_ignores_other_acknowledgements() {
+        use std::os::unix::net::UnixStream;
+
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        let mut client = ControlClient {
+            socket,
+            send_maxlen: 0,
+            send_cap: Arc::new(AtomicUsize::new(0)),
+            pending_events: Default::default(),
+            pending_applied_events: Default::default(),
+            dropped_events: Default::default(),
+            http_search_started: Default::default(),
+            http_acknowledged_bindings: Default::default(),
+        };
+        let trial = [1; 16];
+        let delete = super::encode_delete_addr_probe(
+            "192.0.2.10:41000".parse().unwrap(),
+            "198.51.100.20:443".parse().unwrap(),
+            trial,
+        )
+        .unwrap();
+        let kind = super::COMMAND_DEL_ADDR_PROBE;
+        for id in [Some([2; 16]), None, Some(trial)] {
+            peer.write_all(&encode_ack_for_trial(kind, true, 0, id).unwrap())
+                .unwrap();
+        }
+        let ack = client
+            .exchange_command_with_timeout(&delete, kind, std::time::Duration::from_millis(100))
+            .unwrap();
+        assert_eq!(ack.trial_id, Some(trial));
+        assert_eq!(client.pending_events.len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quic_probe_ack_wait_preserves_events_and_cleans_up_expired_install() {
+        use std::{
+            collections::HashMap,
+            io::Write,
+            os::unix::net::UnixStream,
+            time::{Duration, Instant},
+        };
+
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        let mut client = ControlClient {
+            socket,
+            send_maxlen: 0,
+            send_cap: Arc::new(AtomicUsize::new(0)),
+            pending_events: Default::default(),
+            pending_applied_events: Default::default(),
+            dropped_events: Default::default(),
+            http_search_started: Default::default(),
+            http_acknowledged_bindings: Default::default(),
+        };
+        let trial = [1; 16];
+        let local = "192.0.2.10:41000".parse().unwrap();
+        let server = "198.51.100.20:443".parse().unwrap();
+        let plan = compile_text(
+            "r2o-plan 1 10\nid 01010101010101010101010101010101\nproto udp quic\nquicsplit 1\n",
+        )
+        .unwrap();
+        let set = super::encode_set_addr_probe(local, server, 1_000, &plan, trial).unwrap();
+        let delete = super::encode_delete_addr_probe(local, server, trial).unwrap();
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        let mut pending = HashMap::new();
+        assert!(
+            client
+                .start_quic_probe_ack(
+                    super::HttpSearchCommand::R2oInstallQuicProbe {
+                        command: set.clone(),
+                        delete: delete.clone(),
+                        trial_id: trial,
+                        deadline: Instant::now() + Duration::from_secs(5),
+                        reply,
+                    },
+                    &mut pending,
+                )
+                .unwrap()
+                .is_none()
+        );
+        let key = (super::COMMAND_SET_ADDR_PROBE, trial);
+        assert_eq!(read_frame(&mut peer).unwrap().kind, key.0);
+        peer.write_all(&encode_frame(super::EVENT_HELLO, &[]).unwrap())
+            .unwrap();
+        let event = read_frame(&mut client.socket).unwrap();
+        client.queue_async_frame(event).unwrap();
+        assert_eq!(
+            client.pending_events.pop_front().unwrap().kind,
+            super::EVENT_HELLO
+        );
+        assert!(matches!(
+            response.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        let foreign = encode_ack_for_trial(key.0, true, 0, Some([2; 16])).unwrap();
+        peer.write_all(&foreign).unwrap();
+        let foreign = super::decode_ack(&read_frame(&mut client.socket).unwrap()).unwrap();
+        assert!(!client.finish_quic_probe_ack(foreign, &mut pending).unwrap());
+
+        let mut waiting = pending.remove(&key).unwrap();
+        waiting.deadline = Instant::now();
+        waiting.finish(&mut client, None).unwrap();
+        assert!(response.recv().unwrap().is_err());
+        let cleanup = read_frame(&mut peer).unwrap();
+        assert_eq!(encode_frame(cleanup.kind, &cleanup.body).unwrap(), delete);
+
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        assert!(
+            client
+                .start_quic_probe_ack(
+                    super::HttpSearchCommand::R2oInstallQuicProbe {
+                        command: set,
+                        delete,
+                        trial_id: trial,
+                        deadline: Instant::now(),
+                        reply,
+                    },
+                    &mut pending,
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(response.recv().unwrap().is_err());
+        assert!(pending.is_empty());
+        peer.set_nonblocking(true).unwrap();
+        assert_eq!(
+            std::io::Read::read(&mut peer, &mut [0; 1])
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+
+        let (commands, receiver) = std::sync::mpsc::sync_channel(0);
+        let result = super::ask_http_controller_until(
+            &commands,
+            Duration::from_millis(10),
+            |deadline, reply| super::HttpSearchCommand::R2oDeleteQuicProbe {
+                command: Vec::new(),
+                deadline,
+                reply,
+            },
+        );
+        assert!(result.unwrap_err().contains("истёк срок отправки"));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn r2o_остановка_quic_worker_обслуживает_удаление_временной_пробы() {
         use super::{HttpSearchCommand, R2oQuicDiscoveryTask, R2oQuicDiscoveryWorker};
         use std::sync::mpsc;
@@ -54126,6 +54509,7 @@ group_block_proven: false,
                 commands
                     .send(HttpSearchCommand::R2oDeleteQuicProbe {
                         command: super::encode_delete_addr_probe(local, server, trial_id).unwrap(),
+                        deadline: std::time::Instant::now() + super::CONTROL_ACK_TIMEOUT,
                         reply,
                     })
                     .map_err(|error| error.to_string())?;
@@ -54154,7 +54538,7 @@ group_block_proven: false,
         let control_thread = std::thread::spawn(move || {
             let delete = read_frame(&mut peer).unwrap();
             assert_eq!(delete.kind, super::COMMAND_DEL_ADDR_PROBE);
-            peer.write_all(&encode_ack(delete.kind, true, 0).unwrap())
+            peer.write_all(&encode_ack_for_trial(delete.kind, true, 0, Some(trial_id)).unwrap())
                 .unwrap();
         });
         let mut client = super::ControlClient {
@@ -57821,6 +58205,8 @@ group_block_proven: false,
                                     command,
                                     delete: delete.unwrap(),
                                     trial_id,
+                                    deadline: std::time::Instant::now()
+                                        + super::CONTROL_ACK_TIMEOUT,
                                     reply,
                                 },
                                 &mut catalog,
