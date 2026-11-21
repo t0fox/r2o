@@ -1,0 +1,272 @@
+diff --git a/panel.js b/panel.js
+index aa1f2041..08cd9f98 100644
+--- a/panel.js
++++ b/panel.js
+@@ -288,14 +288,31 @@
+     function on() { return !!g && !(mq && mq.matches); }
+     /* Перестроения раскладки (Flip) при смене размера окна завершаются сразу:
+        иначе зафиксированные на время анимации размеры вылезают за новый край. */
+-    var live = [];
++    var live = new Set();
+     function track(anim) {
+-      if (anim) { live.push(anim); anim.eventCallback("onComplete", function () { live.splice(live.indexOf(anim), 1); }); }
++      if (!anim) return anim;
++      live.add(anim);
++      ["onComplete", "onInterrupt"].forEach(function (event) {
++        var previous = anim.eventCallback(event);
++        anim.eventCallback(event, function () {
++          live.delete(anim);
++          if (previous) previous.apply(this, arguments);
++        }, anim.vars[event + "Params"]);
++      });
+       return anim;
+     }
+-    if (g && global.addEventListener) global.addEventListener("resize", function () {
+-      live.splice(0).forEach(function (a) { a.progress(1); });
+-    });
++    function finishLive() {
++      Array.from(live).forEach(function (anim) { anim.progress(1); });
++    }
++    if (g && global.addEventListener) global.addEventListener("resize", finishLive);
++    if (mq && mq.addEventListener) mq.addEventListener("change", finishLive);
++    if (doc) {
++      var syncVisibility = function () {
++        doc.documentElement.toggleAttribute("data-motion-paused", doc.hidden);
++      };
++      doc.addEventListener("visibilitychange", syncVisibility);
++      syncVisibility();
++    }
+     return { g: g, on: on, Flip: global && global.Flip, track: track };
+   })();
+
+@@ -349,7 +366,10 @@
+     if (node.__r2oKey === key) return false;
+     var open = {};
+     var nodes = node.querySelectorAll("details[data-key]");
+-    for (var i = 0; i < nodes.length; i++) if (nodes[i].open) open[nodes[i].getAttribute("data-key")] = true;
++    for (var i = 0; i < nodes.length; i++) {
++      if (nodes[i].__foldMotion) nodes[i].__foldMotion.progress(1);
++      if (nodes[i].open) open[nodes[i].getAttribute("data-key")] = true;
++    }
+     var fresh = build();
+     if (Motion.g) {
+       /* Анимации уходящих узлов не должны доживать после перерисовки. */
+@@ -432,6 +452,30 @@
+     var valid = {};
+     this.screens.forEach(function (screen) { valid[screen.id] = screen; });
+     this.validScreens = valid;
++    doc.addEventListener("click", function (event) {
++      var summary = event.target.closest(".family-card > summary, .box-card > summary");
++      if (!summary || !Motion.on() || event.defaultPrevented || event.target.closest("a,button,input")) return;
++      event.preventDefault();
++      var card = summary.parentElement;
++      var start = card.getBoundingClientRect().height;
++      var opening = card.__foldMotion ? !card.__opening : !card.open;
++      if (card.__foldMotion) card.__foldMotion.kill();
++      card.__opening = opening;
++      card.style.removeProperty("height");
++      card.setAttribute("data-open-motion", "");
++      card.open = true;
++      var end = opening ? card.getBoundingClientRect().height : summary.offsetHeight + card.offsetHeight - card.clientHeight;
++      card.__foldMotion = Motion.track(Motion.g.fromTo(card, { height: start, overflow: "hidden" }, {
++        height: end, duration: .34, ease: "power3.out",
++        onComplete: function () {
++          card.open = opening;
++          card.removeAttribute("data-open-motion");
++          card.style.removeProperty("height");
++          card.style.removeProperty("overflow");
++          card.__foldMotion = null;
++        }
++      }));
++    });
+     var fromHash = function () {
+       var id = (win.location.hash || "").replace(/^#/, "");
+       return valid[id] ? id : "now";
+@@ -455,6 +499,12 @@
+     var screen = this.validScreens[id];
+     var previous = this.screen;
+     var changed = previous !== id || options.instant;
++    var oldLink = doc.querySelector(".index a[aria-current='page']");
++    var origin = oldLink && oldLink.getBoundingClientRect();
++    var navX = oldLink ? parseFloat(oldLink.style.getPropertyValue("--motion-x")) || 0 : 0;
++    var navY = oldLink ? parseFloat(oldLink.style.getPropertyValue("--motion-y")) || 0 : 0;
++    if (this.navMotion) this.navMotion.progress(1);
++    if (this.screenMotion) this.screenMotion.progress(1);
+     this.screen = id;
+     this.screenTitle = screen.getAttribute("data-title") || "Обзор";
+     this.screenKicker = screen.getAttribute("data-kicker") || "Пульт";
+@@ -487,13 +537,28 @@
+     }
+     if (Motion.on() && !options.instant) {
+       var g = Motion.g;
++      var link = doc.querySelector(".index a[aria-current='page']");
++      if (link && origin && oldLink !== link) {
++        var dest = link.getBoundingClientRect();
++        link.setAttribute("data-nav-motion", "");
++        this.navMotion = Motion.track(g.fromTo(link, {
++          "--motion-x": (origin.left + navX - dest.left) + "px",
++          "--motion-y": (origin.top + navY - dest.top) + "px"
++        }, { "--motion-x": "0px", "--motion-y": "0px", duration: .32, ease: "power3.out",
++          onComplete: function () {
++            link.removeAttribute("data-nav-motion");
++            link.style.removeProperty("--motion-x");
++            link.style.removeProperty("--motion-y");
++          }
++        }));
++      }
+       var parts = [].slice.call(screen.querySelectorAll(".screen-head, .status-panel, .overview-metric, .metric-card, .card, .family-card, .box-card, .diag-card, .tg-proxy, .release-hero, .diag-history"));
+       if (screen.id === "now") parts = [].slice.call(screen.querySelectorAll(".status-panel, .overview-metrics, .workload-card, .overview-side > *"));
+       g.killTweensOf(screen);
+       g.killTweensOf(parts);
+-      Motion.track(g.timeline({ defaults: { ease: "power3.out", clearProps: "all" } })
+-        .fromTo(screen, { autoAlpha: 0, y: 7 }, { autoAlpha: 1, y: 0, duration: 0.24 }, 0)
+-        .fromTo(parts, { y: 10, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.3, stagger: 0.02 }, 0.03));
++      this.screenMotion = Motion.track(g.timeline({ defaults: { ease: "power3.out", clearProps: "transform,opacity,visibility" } })
++        .fromTo(screen, { opacity: .65, y: 4 }, { opacity: 1, y: 0, duration: .2 }, 0)
++        .fromTo(parts, { y: 5 }, { y: 0, duration: .30, stagger: { amount: .06 } }, 0));
+     }
+   };
+
+@@ -1688,19 +1753,31 @@
+       });
+       return;
+     }
++    function resizeList(from) {
++      if (!from || !Motion.on() || !listNode.offsetHeight) return;
++      if (listNode.__heightMotion) listNode.__heightMotion.kill();
++      listNode.style.removeProperty("height");
++      var height = listNode.getBoundingClientRect().height;
++      if (Math.abs(from - height) < 1) return;
++      listNode.__heightMotion = Motion.track(Motion.g.fromTo(listNode, { height: from, overflow: "hidden" },
++        { height: height, duration: .34, ease: "power3.out", clearProps: "height,overflow" }));
++    }
+     if (!m.searches.length) {
++      var outgoing = listNode.__r2oKey === "live" ? listNode.getBoundingClientRect().height : 0;
+       section(listNode, "none", function () {
+         var li = el(doc, "li", "quiet");
+         add(li, el(doc, "b", "", "Рабочий прямой трафик подбор не запускает"),
+           " — он начинается только после подтверждённой блокировки, а найденное решение сохраняется в каталоге ниже.");
+         return [li];
+       });
++      resizeList(outgoing);
+       return;
+     }
++    var idleHeight = 0;
+     if (listNode.__r2oKey === "none" || (listNode.__r2oKey && listNode.__r2oKey.indexOf("absent:") === 0)) {
++      idleHeight = listNode.getBoundingClientRect().height;
+       listNode.replaceChildren();
+     }
+-    var firstLive = listNode.__r2oKey !== "live";
+     listNode.__r2oKey = "live";
+     var animate = Motion.on() && Motion.Flip;
+     var stable = [];
+@@ -1725,6 +1802,11 @@
+         row.__r2oKey = key;
+         entered.push(row);
+       }
++      if (row.__leaving) {
++        row.__exitMotion.kill();
++        row.__leaving = false;
++        Motion.g.set(row, { clearProps: "transform,opacity,visibility" });
++      }
+       self.updateSearch(row, s);
+       if (listNode.children[index] !== row) { listNode.insertBefore(row, listNode.children[index] || null); moved = true; }
+     });
+@@ -1748,14 +1830,14 @@
+     leaving.forEach(function (row) {
+       row.__leaving = true;
+       var done = row.getAttribute("data-done") === "true";
+-      Motion.g.timeline({ onComplete: function () {
++      row.__exitMotion = Motion.track(Motion.g.timeline({ onComplete: function () {
+         var rest = [];
+         for (var k = 0; k < listNode.children.length; k++) if (listNode.children[k] !== row && !listNode.children[k].__leaving) rest.push(listNode.children[k]);
+         var st = rest.length ? Motion.Flip.getState(rest) : null;
+         if (row.parentNode) row.parentNode.removeChild(row);
+         if (st) Motion.track(Motion.Flip.from(st, { duration: 0.3, ease: "power3.inOut", scale: true, simple: true }));
+       } })
+-        .to(row, { x: done ? 0 : 36, y: done ? 18 : 0, autoAlpha: 0, duration: 0.22, ease: "power2.in" });
++        .to(row, { y: done ? 3 : -3, autoAlpha: 0, duration: .16, ease: "power2.in" }));
+     });
+     if (flipState) {
+       /* Переставляемые строки «приподнимаются» и проезжают поверх соседних, не сквозь них. */
+@@ -1767,8 +1849,12 @@
+         onComplete: function () { movers.forEach(function (r) { r.classList.remove("is-moving"); r.style.zIndex = ""; }); }
+       }));
+     }
+-    if (entered.length && !firstLive) {
+-      Motion.g.fromTo(entered, { y: 18, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.34, stagger: 0.05, ease: "power4.out", clearProps: "transform,opacity,visibility" });
++    if (entered.length && listNode.offsetHeight) {
++      resizeList(idleHeight);
++      Motion.track(Motion.g.fromTo(entered, { y: 7, opacity: .15 }, {
++        y: 0, opacity: 1, duration: .32, stagger: { amount: .05 },
++        ease: "power3.out", clearProps: "transform,opacity"
++      }));
+     }
+   };
+
+@@ -1905,10 +1991,10 @@
+     var phaseText = phase.charAt(0).toUpperCase() + phase.slice(1);
+     if (p.phase.textContent !== phaseText) {
+       if (p.phase.textContent && Motion.on()) {
+-        Motion.g.timeline()
+-          .to(p.phase, { y: -8, autoAlpha: 0, duration: 0.16, ease: "power2.in" })
+-          .add(function () { p.phase.textContent = phaseText; })
+-          .fromTo(p.phase, { y: 8, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.3, ease: "power3.out", clearProps: "transform,opacity,visibility" });
++        if (p.phaseMotion) p.phaseMotion.kill();
++        p.phase.textContent = phaseText;
++        p.phaseMotion = Motion.track(Motion.g.fromTo(p.phase, { y: 2, opacity: .55 },
++          { y: 0, opacity: 1, duration: .16, ease: "power2.out", clearProps: "transform,opacity" }));
+       } else {
+         p.phase.textContent = phaseText;
+       }
+@@ -1950,14 +2036,16 @@
+         glyphs[gi].classList.toggle("is-on", on);
+       }
+       if (oldStage !== undefined && oldStage !== stageKey && Motion.on()) {
+-        Motion.g.fromTo(p.visual.__pulse, { scale: .62, opacity: .5 }, {
+-          scale: 1.55, opacity: 0, duration: 0.8, ease: "power2.out", svgOrigin: "32 32", clearProps: "opacity,transform"
+-        });
++        if (p.dialMotion) p.dialMotion.kill();
++        p.dialMotion = Motion.track(Motion.g.fromTo(p.visual.__pulse, { attr: { r: 16 }, opacity: .48 }, {
++          attr: { r: 28 }, opacity: 0, duration: .50, ease: "sine.out", clearProps: "opacity"
++        }));
+         if (codeChanged) Motion.g.fromTo(p.visual.__code, { y: 2, opacity: 0 }, { y: 0, opacity: 1, duration: 0.24, ease: "power2.out", clearProps: "transform,opacity" });
+         var width = li.getBoundingClientRect().width || 640;
+-        Motion.g.killTweensOf(p.sweepInner);
+-        Motion.g.fromTo(p.sweepInner, { x: -width * 0.35, opacity: 0 }, { x: width * 0.1, opacity: .7, duration: 0.2, ease: "power2.out" })
+-          .to(p.sweepInner, { x: width * 1.1, opacity: 0, duration: 0.5, ease: "power2.in" });
++        if (p.sweepMotion) p.sweepMotion.kill();
++        p.sweepMotion = Motion.track(Motion.g.timeline()
++          .fromTo(p.sweepInner, { x: -width * .35, opacity: 0 }, { x: width * .1, opacity: .7, duration: .14, ease: "power2.out" })
++          .to(p.sweepInner, { x: width * 1.1, opacity: 0, duration: .28, ease: "power2.in" }));
+       }
+     }
+     li.setAttribute("data-done", String(!!tr && !tr.voice && tr.at === TRACK.length - 1));
+@@ -1990,16 +2078,21 @@
+     };
+     var oldAt = p.track.__r2oAt;
+     p.track.__r2oAt = tr.at;
+-    if (p.track.__tween) p.track.__tween.kill();
++    if (p.track.__tween && (oldAt !== tr.at || !Motion.on())) p.track.__tween.kill();
+     if (oldAt !== undefined && oldAt !== tr.at && Motion.on()) {
+       /* Маркер переезжает к новому этапу; точки загораются, когда он их проходит. */
+-      var pos = { at: oldAt };
+-      p.track.__tween = Motion.g.to(pos, { at: tr.at, duration: 0.32, ease: "power3.inOut", onUpdate: function () {
++      var displayed = parseFloat(p.track.style.getPropertyValue("--at"));
++      var pos = { at: Number.isFinite(displayed) ? displayed : oldAt };
++      p.track.__tween = Motion.track(Motion.g.to(pos, { at: tr.at, duration: .46, ease: "power2.inOut", onUpdate: function () {
+         p.track.style.setProperty("--at", String(pos.at));
+         paint(pos.at, tr.at);
+-      } });
+-      Motion.g.fromTo(p.puck, { scale: 1 }, { scale: 1.7, duration: 0.22, delay: 0.75, yoyo: true, repeat: 1, ease: "power2.out" });
+-    } else {
++      } }));
++      if (p.arrival) p.arrival.kill();
++      p.arrival = Motion.track(Motion.g.fromTo(p.puck, { "--ring-scale": 1, "--ring-alpha": 0 },
++        { "--ring-scale": 1.72, "--ring-alpha": 0, duration: .38, delay: .39, ease: "sine.out",
++          keyframes: { "0%": { "--ring-alpha": .72 }, "100%": { "--ring-alpha": 0, "--ring-scale": 1.72 } },
++          clearProps: "--ring-scale,--ring-alpha" }));
++    } else if (!p.track.__tween || !p.track.__tween.isActive()) {
+       p.track.style.setProperty("--at", String(tr.at));
+       paint(tr.at, tr.at);
+     }

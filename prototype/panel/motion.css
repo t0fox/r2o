@@ -1,0 +1,60 @@
+/* Только на время перехода фон активной вкладки движется между исходными позициями. */
+.index a[data-nav-motion][aria-current="page"] {
+  background: transparent;
+  border-color: transparent;
+  isolation: isolate;
+}
+.index a[data-nav-motion]::after {
+  content: "";
+  pointer-events: none;
+  position: absolute;
+  inset: -1px;
+  z-index: -1;
+  border: 1px solid var(--line);
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(185,138,82,.12), rgba(185,138,82,.025));
+  transform: translate(var(--motion-x), var(--motion-y));
+}
+.index a[data-nav-motion]::before {
+  transform: translate(var(--motion-x), calc(-50% + var(--motion-y)));
+}
+details[data-open-motion] > .family-body,
+details[data-open-motion] > .box-body {
+  transition: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .index a[data-nav-motion]::after { display: none; }
+}
+/* Линия и маркер читают одну координату из таймлайна этапа. */
+.search .track-fill { left: 6.5px; top: 7px; transition: none; }
+.search .track::before { top: 7px; left: 6.5px; right: calc(100% / var(--steps, 7) - 6.5px); }
+.search .track-puck { top: 7.5px; left: calc(var(--at, 0) / var(--steps, 7) * 100% + 6.5px); }
+.search .track-puck::after {
+  content: ""; position: absolute; inset: -1px; border-radius: 50%;
+  border: 1px solid var(--vis); opacity: var(--ring-alpha, 0);
+  transform: scale(var(--ring-scale, 1)); pointer-events: none;
+}
+.lamp[data-tone="ok"] { --lamp-glow: var(--ok); }
+.lamp[data-tone="live"] { --lamp-glow: var(--bronze); }
+.lamp[data-tone="ok"]::after, .lamp[data-tone="live"]::after {
+  content: ""; position: absolute; inset: -2px; border-radius: 50%; pointer-events: none;
+  background: radial-gradient(circle, transparent 34%, color-mix(in srgb, var(--lamp-glow) 52%, transparent) 54%, transparent 76%);
+  box-shadow: 0 0 6px 2px color-mix(in srgb, var(--lamp-glow) 44%, transparent);
+  opacity: .58; transform: scale(.86);
+}
+@keyframes signal-breathe {
+  0%, 100% { opacity: .32; transform: scale(.83); }
+  50% { opacity: .85; transform: scale(1.17); }
+}
+@media (prefers-reduced-motion: no-preference) {
+  body:not([data-stale="true"]) .lamp:is([data-tone="ok"],[data-tone="live"])::after {
+    animation: signal-breathe 2.8s ease-in-out infinite;
+  }
+  .search:not([data-done="true"]) .search-phase::before {
+    animation: signal-breathe 2.8s ease-in-out infinite;
+    box-shadow: 0 0 6px 2px color-mix(in srgb, var(--vis) 54%, transparent);
+  }
+}
+body[data-stale="true"] .lamp::after { opacity: 0; }
+[data-motion-paused] .lamp::after,
+[data-motion-paused] .search .search-phase::before { animation-play-state: paused !important; }
