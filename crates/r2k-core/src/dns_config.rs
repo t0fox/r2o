@@ -7,7 +7,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-pub const DNS_SERVICE_MAX: usize = 32;
+pub const DNS_SERVICE_MAX: usize = 64;
 pub const DNS_HOST_MAX: usize = 256;
 pub const DNS_PATH_MAX: usize = 1024;
 pub const DNS_BOOTSTRAP_MAX: usize = 256;
@@ -25,6 +25,15 @@ pub struct DnsService {
     pub bootstrap_dns: String,
     pub source: String,
     pub port: u16,
+    pub keenetic: Option<Box<KeeneticDnsPolicy>>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct KeeneticDnsPolicy {
+    doh_format: String,
+    spki: String,
+    interface: String,
+    domain: String,
 }
 
 impl DnsService {
@@ -33,6 +42,21 @@ impl DnsService {
             17
         } else {
             6
+        }
+    }
+
+    pub fn verification_limitation(&self) -> Option<&'static str> {
+        let policy = self.keenetic.as_deref()?;
+        if !policy.doh_format.is_empty() && policy.doh_format != "dnsm" {
+            Some("Настроен другой формат DoH, для него нужна отдельная проверка DNS-ответа")
+        } else if !policy.spki.is_empty() {
+            Some("В настройках Keenetic задан SPKI, для проверки требуется сверка этого ключа")
+        } else if !policy.interface.is_empty() {
+            Some("Сервис привязан к интерфейсу Keenetic, проверка должна пройти по этому маршруту")
+        } else if !policy.domain.is_empty() {
+            Some("Сервис настроен для отдельного домена, нужен запрос в пределах этого домена")
+        } else {
+            None
         }
     }
 }
@@ -132,6 +156,7 @@ pub fn dns_uri_parse(uri: &str, source: Option<&str>) -> Option<DnsService> {
         bootstrap_dns: String::new(),
         source: source.map(truncate_source).unwrap_or_default(),
         port,
+        keenetic: None,
     })
 }
 
@@ -586,19 +611,7 @@ fn add_service(items: &mut Vec<DnsService>, uri: &str, source: &str, bootstrap: 
     if let Some(bootstrap) = bootstrap.filter(|value| value.len() < DNS_BOOTSTRAP_MAX) {
         candidate.bootstrap_dns = bootstrap.to_owned();
     }
-    if let Some(existing) = items.iter_mut().find(|item| {
-        item.protocol == candidate.protocol
-            && item.host == candidate.host
-            && item.port == candidate.port
-            && item.sni == candidate.sni
-            && item.path == candidate.path
-    }) {
-        if existing.bootstrap_dns.is_empty() && !candidate.bootstrap_dns.is_empty() {
-            existing.bootstrap_dns = candidate.bootstrap_dns;
-        }
-        return;
-    }
-    items.push(candidate);
+    merge_service(items, candidate);
 }
 
 /// C `add_candidate`: без разбора URI, только непустые host/port и дедуп.
@@ -606,18 +619,7 @@ fn add_candidate(items: &mut Vec<DnsService>, candidate: DnsService) {
     if candidate.host.is_empty() || candidate.port == 0 {
         return;
     }
-    if items.iter().any(|item| {
-        item.protocol == candidate.protocol
-            && item.host == candidate.host
-            && item.port == candidate.port
-            && item.sni == candidate.sni
-            && item.path == candidate.path
-    }) {
-        return;
-    }
-    if items.len() < DNS_SERVICE_MAX {
-        items.push(candidate);
-    }
+    merge_service(items, candidate);
 }
 
 /// C `read_https`: `/etc/config/https-dns-proxy`.
@@ -796,56 +798,92 @@ pub fn parse_keenetic(status: &str) -> Vec<DnsService> {
     let mut items = Vec::new();
     let mut section = Section::None;
     let mut server = Section::None;
+    let mut source = "keenetic-system";
     let mut current = DnsService::default();
-    let flush = |items: &mut Vec<DnsService>, current: &mut DnsService| {
-        add_candidate(items, std::mem::take(current));
-    };
+    let mut policy = KeeneticDnsPolicy::default();
+    let flush =
+        |items: &mut Vec<DnsService>, current: &mut DnsService, policy: &mut KeeneticDnsPolicy| {
+            let mut policy = std::mem::take(policy);
+            if policy.doh_format == "dnsm" {
+                policy.doh_format.clear();
+            }
+            if current.protocol == "dot"
+                && current.sni.is_empty()
+                && !current.host.is_empty()
+                && !host_is_ip(&current.host)
+            {
+                current.sni.clone_from(&current.host);
+            }
+            if policy != KeeneticDnsPolicy::default() {
+                current.keenetic = Some(Box::new(policy));
+            }
+            add_candidate(items, std::mem::take(current));
+        };
     for raw in status.lines() {
         let line = raw.trim_matches([' ', '\t', '\r']);
         match line {
-            "proxy-tls:" => {
-                flush(&mut items, &mut current);
+            "proxy-tls:" | "proxy-tls-filters:" => {
+                flush(&mut items, &mut current, &mut policy);
+                source = if line == "proxy-tls:" {
+                    "keenetic-system"
+                } else {
+                    "keenetic-filter"
+                };
                 section = Section::Tls;
                 server = Section::None;
             }
-            "proxy-https:" => {
-                flush(&mut items, &mut current);
+            "proxy-https:" | "proxy-https-filters:" => {
+                flush(&mut items, &mut current, &mut policy);
+                source = if line == "proxy-https:" {
+                    "keenetic-system"
+                } else {
+                    "keenetic-filter"
+                };
                 section = Section::Https;
                 server = Section::None;
             }
-            "proxy-tls-filters:" | "proxy-https-filters:" => {
-                flush(&mut items, &mut current);
+            "proxy-status:" | "proxy-config:" | "proxy-stat:" | "proxy-safe:" => {
+                flush(&mut items, &mut current, &mut policy);
                 section = Section::None;
                 server = Section::None;
             }
             "server-tls:" if section == Section::Tls => {
-                flush(&mut items, &mut current);
+                flush(&mut items, &mut current, &mut policy);
                 current.protocol = "dot".into();
                 current.port = 853;
                 current.path = "/".into();
-                current.source = "keenetic-system".into();
+                current.source = source.into();
                 server = Section::Tls;
             }
             "server-https:" if section == Section::Https => {
-                flush(&mut items, &mut current);
+                flush(&mut items, &mut current, &mut policy);
                 current.protocol = "doh".into();
                 current.port = 443;
                 current.path = "/".into();
-                current.source = "keenetic-system".into();
+                current.source = source.into();
                 server = Section::Https;
             }
             _ => {
                 if server == Section::None {
                     continue;
                 }
+                if let Some((key, value)) = line.split_once(':') {
+                    let value = value.trim();
+                    match key {
+                        "format" if server == Section::Https => {
+                            policy.doh_format = value.to_ascii_lowercase()
+                        }
+                        "spki" => policy.spki = value.to_owned(),
+                        "interface" => policy.interface = value.to_owned(),
+                        "domain" => policy.domain = value.to_owned(),
+                        _ => {}
+                    }
+                }
                 if server == Section::Tls {
                     if let Some(rest) = line.strip_prefix("address:") {
                         let value = rest.trim_start_matches([' ', '\t']);
                         let end = value.find([' ', '\t']).unwrap_or(value.len());
                         if let Some(host) = safe_host(&value[..end]) {
-                            if !host_is_ip(&host) {
-                                current.sni = host.clone();
-                            }
                             current.host = host;
                         }
                     } else if let Some(rest) = line.strip_prefix("port:") {
@@ -874,14 +912,16 @@ pub fn parse_keenetic(status: &str) -> Vec<DnsService> {
                         let end = value.find([' ', '\t', '\r']).unwrap_or(value.len());
                         &value[..end]
                     };
-                    if let Some(parsed) = dns_uri_parse(uri, Some("keenetic-system")) {
+                    if let Some(parsed) =
+                        dns_uri_parse(uri, Some(source)).filter(|entry| entry.protocol == "doh")
+                    {
                         current = parsed;
                     }
                 }
             }
         }
     }
-    flush(&mut items, &mut current);
+    flush(&mut items, &mut current, &mut policy);
     items
 }
 
@@ -893,6 +933,7 @@ fn merge_service(items: &mut Vec<DnsService>, candidate: DnsService) {
             && item.port == candidate.port
             && item.sni == candidate.sni
             && item.path == candidate.path
+            && item.keenetic == candidate.keenetic
     }) {
         if existing.bootstrap_dns.is_empty() && !candidate.bootstrap_dns.is_empty() {
             existing.bootstrap_dns = candidate.bootstrap_dns;
@@ -954,6 +995,7 @@ mod tests {
             bootstrap_dns: String::new(),
             source: "test".into(),
             port,
+            keenetic: None,
         }
     }
 
@@ -1139,6 +1181,9 @@ upstream "quic://[2001:db8::1]"
     #[test]
     fn parse_keenetic_читает_tls_https_и_фильтры() {
         let status = r#"
+proxy-status:
+  dns_server = 127.0.0.1:40500 .
+  dns_server = 192.0.2.1 .
 proxy-tls:
 server-tls:
   address: 1.1.1.1
@@ -1146,26 +1191,78 @@ server-tls:
   sni: dot.example
 server-tls:
   address: 2001:db8::1
+proxy-tls-filters:
+  server-tls:
+    sni: tls-filter.example
+    address: resolver-filter.example
+    port: 8853
+  server-tls:
+    address: 1.1.1.1
+    sni: dot.example
 proxy-https:
 server-https:
-  address: 9.9.9.9
-  uri: https://dns.example/dns-query
+  uri: 'https://dns.example/dns-query?profile=one'
+  format: dnsm
 proxy-https-filters:
 server-https:
-  address: ignored.example
-  uri: https://after-filter.example/dns-query
+  uri: https://filter.example:8443/dns-query?profile=two
+server-https:
+  uri: https://dns.example/dns-query?profile=one
+  format: json
+server-https:
+  uri: https://192.0.2.9/dns-query
+  spki: configured-key
+server-https:
+  uri: https://192.0.2.10/dns-query
+  interface: ISP2
+server-https:
+  uri: https://192.0.2.11/dns-query
+  domain: internal.example
+proxy-status:
+server-https:
+  uri: https://outside.example/dns-query
 "#;
-        let services = super::parse_keenetic(status);
-        assert_eq!(services.len(), 3);
+        let services = super::read_dns_services(
+            None,
+            None,
+            Some("upstream quic://[2001:db8::3]\n"),
+            "keenetic-doq-web",
+            Some(status),
+        );
+        assert_eq!(services[0].protocol, "doq");
+        assert_eq!(services[0].source, "keenetic-doq-web");
+        let services = &services[1..];
+        assert_eq!(services.len(), 9);
         assert_eq!(services[0].protocol, "dot");
         assert_eq!(services[0].host, "1.1.1.1");
         assert_eq!(services[0].sni, "dot.example");
         assert_eq!(services[1].protocol, "dot");
         assert_eq!(services[1].host, "2001:db8::1");
-        assert_eq!(services[2].protocol, "doh");
-        assert_eq!(services[2].host, "dns.example");
-        assert_eq!(services[2].path, "/dns-query");
-        assert_eq!(services[2].source, "keenetic-system");
+        assert_eq!(services[2].protocol, "dot");
+        assert_eq!(services[2].host, "resolver-filter.example");
+        assert_eq!(services[2].sni, "tls-filter.example");
+        assert_eq!(services[2].port, 8853);
+        assert_eq!(services[2].source, "keenetic-filter");
+        assert_eq!(services[3].host, "dns.example");
+        assert_eq!(services[3].path, "/dns-query?profile=one");
+        assert_eq!(services[3].source, "keenetic-system");
+        assert_eq!(services[3].verification_limitation(), None);
+        assert_eq!(services[4].port, 8443);
+        assert_eq!(services[4].path, "/dns-query?profile=two");
+        assert_eq!(services[4].source, "keenetic-filter");
+        assert_eq!(services[5].host, services[3].host);
+        for (service, explanation) in
+            services[5..]
+                .iter()
+                .zip(["формат", "SPKI", "интерфейсу", "домена"])
+        {
+            assert!(
+                service
+                    .verification_limitation()
+                    .unwrap()
+                    .contains(explanation)
+            );
+        }
     }
 
     #[test]
@@ -1229,9 +1326,6 @@ server-https:
   address: 9.9.9.9
   uri: https://keenetic.example/dns-query
 proxy-https-filters:
-server-https:
-  address: ignored.example
-  uri: https://after-filter.example/dns-query
 "#;
 
     fn print_services(prefix: char, items: &[super::DnsService]) {

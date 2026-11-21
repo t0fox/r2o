@@ -1638,6 +1638,7 @@ mod tests {
             bootstrap_dns: String::new(),
             source: "https-dns-proxy".into(),
             port: 443,
+            keenetic: None,
         };
         let base = DnsServiceLive {
             generation: 7,
@@ -1785,6 +1786,7 @@ mod tests {
                 bootstrap_dns: String::new(),
                 source: "https-dns-proxy".into(),
                 port: 443,
+                keenetic: None,
             },
             DnsService {
                 protocol: "dot".into(),
@@ -1794,6 +1796,7 @@ mod tests {
                 bootstrap_dns: String::new(),
                 source: "dnsproxy".into(),
                 port: 853,
+                keenetic: None,
             },
             DnsService {
                 protocol: "doq".into(),
@@ -1803,6 +1806,7 @@ mod tests {
                 bootstrap_dns: String::new(),
                 source: "doqd".into(),
                 port: 853,
+                keenetic: None,
             },
         ];
         let mut live = vec![DnsServiceLive::default(); 3];
@@ -2001,6 +2005,7 @@ mod tests {
                 bootstrap_dns: String::new(),
                 source: "https-dns-proxy".into(),
                 port: 443,
+                keenetic: None,
             },
             DnsService {
                 protocol: "dot".into(),
@@ -2010,6 +2015,7 @@ mod tests {
                 bootstrap_dns: String::new(),
                 source: "dnsproxy".into(),
                 port: 853,
+                keenetic: None,
             },
             DnsService {
                 protocol: "doq".into(),
@@ -2019,6 +2025,7 @@ mod tests {
                 bootstrap_dns: String::new(),
                 source: "doqd".into(),
                 port: 853,
+                keenetic: None,
             },
         ];
         let live = snapshot_with_areas_and_dns(
@@ -2075,6 +2082,7 @@ mod tests {
             bootstrap_dns: String::new(),
             source: "https-dns-proxy".into(),
             port: 443,
+            keenetic: None,
         };
         let mut live = DnsServiceLive {
             generation: 1,
@@ -2948,6 +2956,7 @@ mod tests {
             bootstrap_dns: String::new(),
             source: "https-dns-proxy".into(),
             port,
+            keenetic: None,
         };
         let mut dns_services = vec![
             DnsService {
@@ -3211,6 +3220,7 @@ mod tests {
             bootstrap_dns: String::new(),
             source: "https-dns-proxy".into(),
             port: 443,
+            keenetic: None,
         }];
         let watch_live = vec![DnsServiceLive {
             ip: "198.51.100.40".into(),

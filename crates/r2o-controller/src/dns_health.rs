@@ -1316,6 +1316,9 @@ fn probe_dns_health_with_roots(
     timeout: Duration,
     roots: Arc<RootCertStore>,
 ) -> DnsHealthResult {
+    if let Some(reason) = service.verification_limitation() {
+        return DnsHealthResult::default().fail(DnsHealthFailure::Configuration, reason);
+    }
     let started = Instant::now();
     let deadline = match deadline_from(timeout) {
         Ok(deadline) => deadline,
@@ -1684,6 +1687,7 @@ mod tests {
             bootstrap_dns: String::new(),
             source: "test".into(),
             port,
+            keenetic: None,
         };
         let mut roots = RootCertStore::empty();
         roots.add(cert).unwrap();
@@ -1738,6 +1742,7 @@ mod tests {
             bootstrap_dns: String::new(),
             source: "test".into(),
             port,
+            keenetic: None,
         };
         let mut roots = RootCertStore::empty();
         roots.add(cert).unwrap();
@@ -1802,6 +1807,7 @@ mod tests {
             bootstrap_dns: String::new(),
             source: "test".into(),
             port,
+            keenetic: None,
         };
         let mut roots = RootCertStore::empty();
         roots.add(cert).unwrap();

@@ -55,10 +55,7 @@ static const char KEENETIC_FIXTURE[] =
     "server-https:\n"
     "  address: 9.9.9.9\n"
     "  uri: https://keenetic.example/dns-query\n"
-    "proxy-https-filters:\n"
-    "server-https:\n"
-    "  address: ignored.example\n"
-    "  uri: https://after-filter.example/dns-query\n";
+    "proxy-https-filters:\n";
 
 static int write_file(const char *path, const char *text) {
     FILE *file = fopen(path, "w");

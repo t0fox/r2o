@@ -2786,8 +2786,7 @@ fn r2o_ndmc_path() -> Option<&'static str> {
 fn r2o_read_ndmc_status() -> Option<String> {
     use std::process::{Command, Stdio};
 
-    let path = r2o_ndmc_path()?;
-    let mut child = Command::new(path)
+    let child = Command::new(r2o_ndmc_path()?)
         .arg("-c")
         .arg("show dns-proxy")
         .env("LD_LIBRARY_PATH", "")
@@ -2795,31 +2794,71 @@ fn r2o_read_ndmc_status() -> Option<String> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
+    let status = r2o_read_ndmc_output(child)?;
+    status
+        .lines()
+        .any(|line| {
+            matches!(
+                line.trim(),
+                "proxy-status:"
+                    | "proxy-tls:"
+                    | "proxy-https:"
+                    | "proxy-tls-filters:"
+                    | "proxy-https-filters:"
+            )
+        })
+        .then_some(status)
+}
+
+#[cfg(unix)]
+fn r2o_read_ndmc_output(mut child: std::process::Child) -> Option<String> {
+    use std::io::{ErrorKind, Read};
+    use std::os::fd::AsRawFd;
+
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
+    let result = (|| {
+        let mut stdout = child.stdout.take()?;
+        let fd = stdout.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return None;
+        }
+        let mut output = Vec::new();
+        let mut buffer = [0; 4096];
+        let mut eof = false;
+        while std::time::Instant::now() < deadline {
+            if !eof {
+                match stdout.read(&mut buffer) {
+                    Ok(0) => eof = true,
+                    Ok(count) => {
+                        if output.len() + count > 65_536 {
+                            return None;
+                        }
+                        output.extend_from_slice(&buffer[..count]);
+                        continue;
+                    }
+                    Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+                    Err(_) => return None,
+                }
+            }
+            if let Some(status) = child.try_wait().ok()? {
                 if !status.success() {
                     return None;
                 }
-                break;
+                if eof {
+                    return String::from_utf8(output).ok();
+                }
             }
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-            Err(_) => return None,
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
+        None
+    })();
+    if result.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
     }
-    let output = child.wait_with_output().ok()?;
-    if output.stdout.is_empty() || output.stdout.len() >= 65_536 {
-        return None;
-    }
-    String::from_utf8(output.stdout).ok()
+    result
 }
 
 /// C `d2k_dns_services_read_system`: OpenWrt/doq-web пути, UCI/dnsproxy/doqd
@@ -3228,7 +3267,9 @@ impl R2oDnsServices {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for index in 0..self.services.len() {
             let service = self.services[index].clone();
-            if !self.live.get(index).is_some_and(|live| live.router_seen) {
+            if service.verification_limitation().is_some()
+                || !self.live.get(index).is_some_and(|live| live.router_seen)
+            {
                 if let Some(slot) = self.task_of_service(&service)
                     && self.tasks[slot].state != r2o_controller::live::DnsTaskState::DnsHealth
                 {
@@ -3502,10 +3543,14 @@ impl R2oDnsServices {
         };
         let (_, server) = flow_socket_addresses(key, !r2o_dns_server_is_low(key));
         let ip = server.ip().to_string();
-        let Ok(Some((index, _))) = r2o_dns_unique_service(&self.services, server, name, transport)
+        let Ok(Some((index, service))) =
+            r2o_dns_unique_service(&self.services, server, name, transport)
         else {
             return;
         };
+        if service.verification_limitation().is_some() {
+            return;
+        }
         if self.live[index].ip != ip {
             self.observe(key, name, transport, r2o_controller::now_ms::d2k_now_ms());
         }
@@ -3629,8 +3674,18 @@ impl R2oDnsHealth {
             let live = state.live.get(index).cloned().unwrap_or_default();
             if live.state == r2o_controller::live::DnsServiceState::Checking
                 || (live.next_check_ms != 0 && now_ms < live.next_check_ms)
-                || (live.ip.is_empty() && service.bootstrap_dns.is_empty())
             {
+                continue;
+            }
+            if let Some(reason) = service.verification_limitation() {
+                let live = &mut state.live[index];
+                live.state = r2o_controller::live::DnsServiceState::Failed;
+                live.failure = Some(r2o_controller::dns_health::DnsHealthFailure::Configuration);
+                live.reason = reason.into();
+                live.next_check_ms = now_ms.saturating_add(5 * 60 * 1000);
+                continue;
+            }
+            if live.ip.is_empty() && service.bootstrap_dns.is_empty() {
                 continue;
             }
             let bootstrap = !service.bootstrap_dns.is_empty()
@@ -13719,6 +13774,9 @@ fn r2o_dns_tcp_trial(
     let Some((_, service)) = r2o_dns_unique_service(services, endpoint, &target.host, 6)? else {
         return Ok(None);
     };
+    if let Some(reason) = service.verification_limitation() {
+        return Err(reason);
+    }
     Ok(Some(if service.protocol == "doh" {
         R2oDnsTcpTrial::Doh(
             service.path.clone(),
@@ -35158,6 +35216,7 @@ mod tests {
             bootstrap_dns: String::new(),
             source: "https-dns-proxy".into(),
             port,
+            keenetic: None,
         };
         let mut state = super::R2oDnsServices {
             services: Vec::new(),
@@ -35288,6 +35347,29 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn dns_keenetic_reader_drains_large_output_and_caps_it() {
+        use std::process::{Command, Stdio};
+
+        let output = |size| {
+            let child = Command::new("head")
+                .args(["-c", size, "/dev/zero"])
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            super::r2o_read_ndmc_output(child)
+        };
+        assert_eq!(output("49152").unwrap().len(), 49_152);
+        assert!(output("65537").is_none());
+        let child = Command::new("sh")
+            .args(["-c", "printf 'proxy-tls:\n'; exit 1"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        assert!(super::r2o_read_ndmc_output(child).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn dns_live_state_differential_matches_current_d2o() {
         use r2k_core::control::KEY_LEN;
         use r2k_core::dns_config::DnsService;
@@ -35313,6 +35395,7 @@ mod tests {
                 bootstrap_dns: String::new(),
                 source: "https-dns-proxy".into(),
                 port: 443,
+                keenetic: None,
             }],
             live: Vec::new(),
             tasks: dns_tasks(),
@@ -35326,6 +35409,7 @@ mod tests {
             bootstrap_dns: String::new(),
             source: "https-dns-proxy".into(),
             port: 443,
+            keenetic: None,
         }]);
         let mut scenarios = Vec::new();
         let mut snapshot = |state: &super::R2oDnsServices, name: &str| {
@@ -35752,6 +35836,7 @@ mod tests {
                 bootstrap_dns: bootstrap.into(),
                 source: "test".into(),
                 port,
+                keenetic: None,
             }
         }
 
@@ -36236,6 +36321,7 @@ mod tests {
             bootstrap_dns: String::new(),
             source: "doqd".into(),
             port: 853,
+            keenetic: None,
         };
         let mut state = super::R2oDnsServices {
             services: vec![service],
@@ -38396,6 +38482,7 @@ mod tests {
             bootstrap_dns: String::new(),
             source: "https-dns-proxy".into(),
             port: 443,
+            keenetic: None,
         };
         let mut task = r2o_controller::live::DnsTask {
             state: r2o_controller::live::DnsTaskState::Verify,
@@ -38428,6 +38515,7 @@ mod tests {
             bootstrap_dns: String::new(),
             source: "dnsproxy".into(),
             port: 853,
+            keenetic: None,
         };
         let literal_task = r2o_controller::live::DnsTask {
             state: r2o_controller::live::DnsTaskState::Watching,
@@ -38453,6 +38541,7 @@ mod tests {
             bootstrap_dns: String::new(),
             source: "https-dns-proxy".into(),
             port: 443,
+            keenetic: None,
         };
         let mut state = super::R2oDnsServices {
             services: vec![service],
@@ -38553,6 +38642,7 @@ mod tests {
             bootstrap_dns: String::new(),
             source: "https-dns-proxy".into(),
             port: 443,
+            keenetic: None,
         });
         state.live.push(r2o_controller::live::DnsServiceLive {
             generation: 1,
@@ -38628,6 +38718,7 @@ mod tests {
             bootstrap_dns: String::new(),
             source: "https-dns-proxy".into(),
             port: 443,
+            keenetic: None,
         }];
         let target = r2o_controller::discovery::DiscoveryTarget {
             tcp_profile: 0,
@@ -38673,6 +38764,7 @@ mod tests {
             bootstrap_dns: String::new(),
             source: "dnsproxy".into(),
             port: 853,
+            keenetic: None,
         }];
         let dot_target = r2o_controller::discovery::DiscoveryTarget {
             tcp_profile: 0,
@@ -38768,6 +38860,7 @@ mod tests {
             bootstrap_dns: String::new(),
             source: "doqd".into(),
             port: 853,
+            keenetic: None,
         };
         let server: std::net::SocketAddr = "[2001:db8::1]:853".parse().unwrap();
         let mut state = super::R2oDnsServices {
@@ -38890,6 +38983,7 @@ mod tests {
             bootstrap_dns: String::new(),
             source: "doqd".into(),
             port: 853,
+            keenetic: None,
         };
         let mut state = super::R2oDnsServices {
             services: vec![service.clone()],
@@ -39033,6 +39127,7 @@ mod tests {
                 bootstrap_dns: String::new(),
                 source: "https-dns-proxy".into(),
                 port: 443,
+                keenetic: None,
             }],
             live: vec![r2o_controller::live::DnsServiceLive {
                 generation: 1,
@@ -39129,6 +39224,7 @@ mod tests {
             bootstrap_dns: String::new(),
             source: "https-dns-proxy".into(),
             port: 443,
+            keenetic: None,
         };
         let mut state = super::R2oDnsServices {
             services: vec![service],
@@ -39182,6 +39278,7 @@ mod tests {
             bootstrap_dns: String::new(),
             source: "https-dns-proxy".into(),
             port: 443,
+            keenetic: None,
         };
         let mut state = super::R2oDnsServices {
             services: vec![service.clone()],
@@ -39297,6 +39394,7 @@ mod tests {
                 bootstrap_dns: String::new(),
                 source: "https-dns-proxy".into(),
                 port: 9,
+                keenetic: None,
             }],
             live: vec![r2o_controller::live::DnsServiceLive {
                 generation: 3,
@@ -39354,6 +39452,7 @@ mod tests {
             bootstrap_dns: String::new(),
             source: "https-dns-proxy".into(),
             port: 443,
+            keenetic: None,
         };
         let mut state = super::R2oDnsServices {
             services: vec![service],
