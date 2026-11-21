@@ -157,6 +157,11 @@ async function main() {
     catalog_at: new Date().toISOString(),
     boxes: [],
     groups: [],
+    dns_services: [
+      { protocol: "dot", host: "dns.example", port: 853, resolved_ip: "192.0.2.8", state: "direct_ok", checked_at: new Date().toISOString(), answer_rtt_ms: 17, status_reason: "DoT: получен корректный DNS-ответ" },
+      { protocol: "doq", host: "quic.example", port: 853, resolved_ip: "2001:db8::9", state: "plan_applied", plan_applied: true, applied_plan_id: "example-plan", dns_answer_via_plan: false, status_reason: "DNS-ответ через план ещё проверяется" },
+      { protocol: "doh", host: "old.example", port: 443, state: "direct_ok", checked_at: new Date(Date.now() - 720000).toISOString() },
+    ],
     searches: [{
       target: "blocked.example",
       family: 4,
@@ -385,6 +390,21 @@ async function main() {
   await call("Page.navigate", { url: `http://localhost:${port}/` });
   await waitFor(() => evaluate("document.readyState === 'complete' && !!document.querySelector('#app')"), "загрузка страницы R2O");
   await evaluate("document.fonts.ready.then(() => true)");
+  await evaluate("location.hash = '#dns-protection'");
+  await waitFor(() => evaluate("!document.querySelector('#dns-protection').hidden && document.querySelector('#dns-protection-list').children.length === 3"), "вкладка DNS Protection");
+  assert.deepEqual(await evaluate("[...document.querySelectorAll('#dns-protection-list .meta-chip')].map(node => node.textContent)"), ["Доступен напрямую", "Подбор", "Устарело"]);
+  assert.equal(await evaluate("document.querySelector('#dns-protection-list').textContent.includes('17 мс')"), true);
+  if (captureDir) {
+    const screenshot = await call("Page.captureScreenshot", { format: "png" });
+    fs.writeFileSync(path.join(captureDir, "dns-protection-fixture.png"), Buffer.from(screenshot.data, "base64"));
+  }
+  await call("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
+  assert.equal(await evaluate("document.documentElement.scrollWidth <= innerWidth && document.querySelector('[data-nav=dns-protection]').getBoundingClientRect().bottom <= innerHeight"), true, "вкладка и навигация помещаются на экране 390 px");
+  if (captureDir) {
+    const screenshot = await call("Page.captureScreenshot", { format: "png" });
+    fs.writeFileSync(path.join(captureDir, "dns-protection-fixture-mobile.png"), Buffer.from(screenshot.data, "base64"));
+  }
+  await call("Emulation.clearDeviceMetricsOverride");
   await evaluate("location.hash = '#diagnostics'");
   await waitFor(() => evaluate("document.querySelector('#diagnostic-state')?.dataset.phase === 'off'"), "загрузка управления диагностикой");
   assert.equal(await evaluate("(() => { const help = document.querySelector('#diagnostic-history-help'); return !!help && help.querySelector('summary')?.textContent.includes('Что сохраняется') && help.textContent.includes('120') && help.textContent.includes('64') && help.textContent.includes('домены и IP-адреса') && help.textContent.includes('никуда не отправляется'); })()"), true, "диагностика сообщает пределы истории и состав локального отчёта как d2o");
@@ -481,7 +501,7 @@ async function main() {
   await waitFor(() => evaluate("!document.querySelector('#now').hidden"), "возврат к обзору");
   assert.equal(await evaluate("document.title.includes('R2O')"), true, "заголовок страницы панели");
   assert.equal(await evaluate("document.querySelector('#r2o-settings') === null && ![...document.querySelectorAll('.index a')].some((link) => link.hash === '#r2o-settings')"), true, "в панели нет отдельного раздела настроек, которого нет в d2o");
-  assert.equal(await evaluate("document.querySelectorAll('#app > section').length"), 6, "все разделы панели отображаются");
+  assert.equal(await evaluate("document.querySelectorAll('#app > section').length"), 7, "все разделы панели отображаются");
   assert.equal(await evaluate("[...document.querySelectorAll('#app > section')].filter((section) => !section.hidden).length"), 1, "одновременно открыт ровно один экран");
   assert.equal(await evaluate("document.querySelector('#now').hidden === false"), true, "панель открывается на обзоре");
   assert.equal(await evaluate("!!document.querySelector('#overview-metrics .metric-card')"), true, "обзор содержит быстрые переходы к разделам");
