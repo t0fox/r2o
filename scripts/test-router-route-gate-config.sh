@@ -83,6 +83,9 @@ done
 printf '%s' "$component" >>"$R2O_LAUNCHES"
 for argument do printf '|%s' "$argument" >>"$R2O_LAUNCHES"; done
 printf '\n' >>"$R2O_LAUNCHES"
+if [ "$component" = r2o-datapath ]; then
+    python3 "$R2O_TEST_SOCKET_FIXTURE" "$@"
+fi
 exec "$root/releases/test/builds/$component-linux-test" 120
 EOF
 cat >"$r2o_temp/firewall" <<'EOF'
@@ -137,6 +140,7 @@ r2o_run_service() {
         R2O_IPV6_TEST_CAPABILITY="${R2O_IPV6_TEST_CAPABILITY:-}" \
         R2O_UP_RUNTIME_TRACE="$r2o_temp/up-runtime" \
         R2O_LAUNCHES="$r2o_temp/launches" \
+        R2O_TEST_SOCKET_FIXTURE="$r2o_root/scripts/fixtures/mock-datapath-sockets.py" \
         sh "$r2o_temp/S99r2o" "$@"
 }
 

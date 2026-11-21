@@ -308,7 +308,7 @@ fn donor_firewall_settings_reject_invalid_port_lists_and_connbytes_windows() {
 }
 
 #[test]
-fn shipped_openwrt_defaults_initialize_without_rejecting_advanced_mark_options() {
+fn shipped_openwrt_defaults_initialize() {
     let temp = TestDir::new();
     let root = temp.0.join("install");
     let defaults = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../router/config.default");
@@ -326,6 +326,7 @@ fn shipped_openwrt_defaults_initialize_without_rejecting_advanced_mark_options()
         String::from_utf8_lossy(&output.stderr)
     );
     let config = fs::read_to_string(root.join("config")).unwrap();
+    assert!(config.contains("R2O_MEASUREMENT_LIMIT=64\n"));
     assert!(config.contains("PROBE_MARK=46\n"));
     assert!(config.contains("MEASURE_MARK=47\n"));
     assert!(config.contains("ONLY_MARK=\n"));

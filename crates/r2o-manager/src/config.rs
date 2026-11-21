@@ -16,6 +16,7 @@ const DEFAULT_CONFIG_KEYS: &[&str] = &[
     "QUEUE_NUM",
     "QUEUE_NUM6",
     "R2O_FLOW_CAPACITY",
+    "R2O_MEASUREMENT_LIMIT",
     "IPV6_ENABLED",
     "MARK",
     "PROBE_MARK",
@@ -382,6 +383,9 @@ fn validate_value(key: &str, value: &str, donor: bool) -> io::Result<()> {
         "QUEUE_NUM" | "QUEUE_NUM6" => value.parse::<u16>().is_ok(),
         "TG_PORT" => value.parse::<u16>().is_ok_and(|port| port > 0),
         "R2O_FLOW_CAPACITY" => value.parse::<u32>().is_ok_and(|capacity| capacity > 0),
+        "R2O_MEASUREMENT_LIMIT" => value
+            .parse::<u8>()
+            .is_ok_and(|limit| (1..=64).contains(&limit)),
         "IPV6_ENABLED" | "AUTOUPDATE" | "TG_ENABLED" | "R2O_PPE_DEOFFLOAD" => {
             matches!(value, "0" | "1")
         }

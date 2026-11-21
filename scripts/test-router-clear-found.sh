@@ -28,10 +28,11 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 mkdir -p "$TEMP/root/state" "$TEMP/root/run" "$TEMP/root/releases/test/builds" \
     "$TEMP/proc/net/netfilter" "$TEMP/runtime"
-cp /bin/sleep "$TEMP/root/releases/test/builds/r2o-datapath-linux-test"
-cp /bin/sleep "$TEMP/root/releases/test/builds/r2o-controller-linux-test"
+component_bin=${R2O_TEST_COMPONENT_BIN:-/bin/sleep}
+cp "$component_bin" "$TEMP/root/releases/test/builds/r2o-datapath-linux-test"
+cp "$component_bin" "$TEMP/root/releases/test/builds/r2o-controller-linux-test"
 chmod 0755 "$TEMP/root/releases/test/builds/r2o-datapath-linux-test" "$TEMP/root/releases/test/builds/r2o-controller-linux-test"
-printf 'MODE=observe\nSTATE_DIR=%s\nFW_BACKEND=nft\n' "$TEMP/root/state" > "$TEMP/root/config"
+printf 'MODE=observe\nSTATE_DIR=%s\nFW_BACKEND=nft\nR2O_SPLIT_RUNTIME=1\n' "$TEMP/root/state" > "$TEMP/root/config"
 printf '{"schema":1,"boxes":[{"id":"found"}]}\n' > "$TEMP/root/state/catalog.json"
 printf '{"schema":1}\n' > "$TEMP/root/state/https-cache.json"
 printf '{"linked":true}\n' > "$TEMP/root/state/live.json"
@@ -62,6 +63,9 @@ case "$component" in r2o-datapath|r2o-controller) ;; *) exit 2 ;; esac
 case "${1:-}" in
     --clear-catalog) exec "$R2OC_TEST_BINARY" "$@" ;;
 esac
+if [ "$component" = r2o-datapath ]; then
+    python3 "$R2O_TEST_SOCKET_FIXTURE" "$@" || exit 1
+fi
 exec "$R2O_DIR/releases/test/builds/$component-linux-test" 30
 EOF
 cat > "$TEMP/firewall" <<'EOF'
@@ -73,6 +77,7 @@ chmod 0755 "$TEMP/manager" "$TEMP/firewall"
 
 env EVENTS="$TEMP/events" R2O_DIR="$TEMP/root" R2O_CONFIG="$TEMP/root/config" \
     R2O_MANAGER="$TEMP/manager" R2O_R2OC_TEST_BINARY="$R2OC_BIN" \
+    R2O_TEST_SOCKET_FIXTURE="$ROOT/scripts/fixtures/mock-datapath-sockets.py" \
     R2O_FIREWALL="$TEMP/firewall" R2O_PROC=/proc \
     R2O_NFQUEUE_STATUS="$TEMP/proc/net/netfilter/nfnetlink_queue" \
     R2O_RUNTIME_DIR="$TEMP/runtime" \
