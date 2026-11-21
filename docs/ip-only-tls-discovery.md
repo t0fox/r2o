@@ -5,8 +5,8 @@
 Источник поведения: D2K `e5ae90a6c371008db4db14051fd283c40071fcc4`,
 `core/sched.c` (`recall_noname`, `hello_profile_without_sni`, `fill_hellos`,
 `JOB_VERIFY`, `verify_confirm`) и `datapath/plans.c` (временная TCP-проба).
-Изменение подготовлено поверх R2O `98f36ad7b28ec5e7fee8e838be7e99d7422ad50b`,
-с сохранением поступивших параллельно изменений панели.
+Перенос адаптирован к R2O `d804bdfa7064f36e657e95e5ca781a7ba04a5f35`,
+включая поступившие параллельно изменения панели.
 
 Перенесён путь распознанного TLS 1.2/1.3 без SNI для IPv4 и IPv6.
 Неизвестный RAW TCP/UDP, ECH без известного имени и ранний YouTube preflight
@@ -55,7 +55,8 @@
   R2O v48 передаёт сторону отправителя ClientHello без SNI в HELLO и
   CLIENT_SHAPE. ARM сверяет серверные IP и порт по этому направлению,
   в том числе когда оба порта эфемерные. Для старых событий и v22 без
-  направления контроллер использует эвристику портов.
+  направления контроллер использует эвристику портов. При обновлении v48
+  контроллер и датапат устанавливаются из одного комплекта.
 - Handshake proof не подтверждает доверие сертификату, HTTP, воспроизведение
   YouTube или работу произвольного приложения. Измерительный verifier
   сохраняет существующую политику сертификатов; проверка Finished для
@@ -84,31 +85,19 @@
 - TCP loopback verifier с ALPN `h2`: SNI отсутствует, HTTP и прочие
   прикладные байты не отправляются, результат только handshake-level.
 
-Выполнены следующие проверки; обе проверки компиляции и адресные bin/lib
-тесты повторены после совмещения со свежим `main`:
+Проверки на Linux в WSL2 после адаптации к `main`:
 
-| Проверка с Rust 1.98.0 | Результат |
+| Проверка | Результат |
 | --- | --- |
-| `cargo check --locked -p r2o-controller -p r2o-datapath --all-targets` | Прошла |
-| `cargo check --locked --release -p r2o-controller -p r2o-datapath --bins` | Прошла, без тестовой конфигурации |
-| `cargo test --locked -p r2o-controller --bin r2o-controller address_` | 13 прошли |
-| `cargo test --locked -p r2o-controller --lib address_` | 13 прошли |
-| `cargo test --locked -p r2o-controller --lib discovery::tests::` | 80 прошли, 1 существующий raw-тест требует capabilities и помечен ignored |
-| `cargo test -p r2k-core --lib client_shape_no_sni_tests` | 2 прошли |
-| Целевые datapath-фильтры `no_sni`, `malformed_or_oversized_sni`, `endpoint_tls_probe`, `tls_address_context_plans` | 7 новых тестов прошли |
-| `rustfmt --check` для изменённых Rust-файлов, `git diff --check` | Прошли |
+| `cargo fmt --check`, `git diff --check` | Прошли |
+| `cargo check --locked --workspace --all-targets` | Прошла |
+| `cargo test --locked -p r2k-core -p r2o-controller -p r2o-datapath --all-targets` | 2272 прошли, 77 помечены `ignored` |
+| TCP loopback с rustls | Завершённые TLS 1.2 и 1.3 через IPv4 и IPv6, с ALPN и без SNI и HTTP |
+| NFQUEUE с OpenSSL на паре veth | Оба процесса R2O выбрали IP сервера для TLS без SNI на порту 44443 по IPv4 и IPv6 |
+| `scripts/test-nfq-netns.sh` | На базовом и изменённом деревьях падает один и тот же сценарий разделения неполного именного ClientHello на границе SNI |
+| `scripts/r2o-build-openwrt-aarch64-musl.sh`, локальная упаковка | Статический комплект из 7 бинарников и 17 файлов роутера, 18 385 372 байт в распакованном виде |
 
-Фильтры частично пересекаются; результаты не суммируются в число уникальных
-тестов. Проверка release-конфигурации — `cargo check`, не сборка или замер
-размера исполняемого файла для роутера.
-
-Часть полного набора control-server тестов использует UnixListener и
-останавливается в этой среде с `Operation not permitted`: 70 тестов
-прошли, 16 остановились на создании Unix-сокета. Это не зелёный полный
-набор. Целевые тесты нового пакетного пути и TCP loopback выполнены отдельно.
-
-Полевой NFQUEUE, NAT/марки на роутере, OpenWrt/musl cross-build, soak,
-CPU/RSS/размер установки и средние времена 60/15 секунд здесь не измерялись.
-Для приёмки нужны чистый штатный каталог, реальный клиент и независимые
-повторы с учётом неудач. TLS handshake и сохранение IP-привязки не должны
-останавливать таймер достижения прикладного результата.
+Пассивный тест NFQUEUE подтверждает захват и выбор цели. Подбор,
+проверку кандидата и сохранение привязки проверяют отдельные тесты.
+Полный цикл под блокировкой на рабочем роутере, фактическое место
+с каталогом и журналами, нагрузки и длительный прогон не измерялись.
