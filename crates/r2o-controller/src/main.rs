@@ -8095,6 +8095,10 @@ fn r2o_late_rx_is_covered_by_catalog(
 
 #[cfg(unix)]
 const R2O_FAMILY_RECOVERY_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+#[cfg(unix)]
+const R2O_FAMILY_RECOVERY_WORKERS: usize = 2;
+#[cfg(unix)]
+const R2O_FAMILY_RECOVERY_QUEUE: usize = 8;
 
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -8224,8 +8228,14 @@ impl HttpSearchCommandSink for FamilyCommandSender {
 }
 
 #[cfg(unix)]
+type R2oFamilyRecoveryJobs = (
+    std::sync::Mutex<VecDeque<R2oFamilyRecoveryTask>>,
+    std::sync::Condvar,
+);
+
+#[cfg(unix)]
 struct R2oFamilyRecoveryWorker {
-    jobs: Option<SyncSender<R2oFamilyRecoveryTask>>,
+    jobs: Arc<R2oFamilyRecoveryJobs>,
     outcome_sender: SyncSender<R2oFamilyRecoveryOutcome>,
     outcomes: Receiver<R2oFamilyRecoveryOutcome>,
     measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
@@ -8234,7 +8244,8 @@ struct R2oFamilyRecoveryWorker {
     confirm_mark: Option<u32>,
     cancel: Arc<AtomicBool>,
     active: HashSet<r2o_controller::discovery::DiscoveryTarget>,
-    thread: Option<JoinHandle<()>>,
+    worker_live: Arc<AtomicUsize>,
+    threads: Vec<JoinHandle<()>>,
 }
 
 #[cfg(unix)]
@@ -8245,9 +8256,10 @@ impl R2oFamilyRecoveryWorker {
         confirm_mark: Option<u32>,
         wake: Option<Arc<std::os::unix::net::UnixDatagram>>,
     ) -> Self {
-        let (outcome_sender, outcomes) = mpsc::sync_channel(8);
+        let (outcome_sender, outcomes) =
+            mpsc::sync_channel(R2O_FAMILY_RECOVERY_QUEUE + R2O_FAMILY_RECOVERY_WORKERS);
         let mut worker = Self {
-            jobs: None,
+            jobs: Arc::new(Default::default()),
             outcome_sender,
             outcomes,
             measurement_gate,
@@ -8256,24 +8268,24 @@ impl R2oFamilyRecoveryWorker {
             confirm_mark,
             cancel: Arc::new(AtomicBool::new(false)),
             active: HashSet::new(),
-            thread: None,
+            worker_live: Arc::new(AtomicUsize::new(0)),
+            threads: Vec::new(),
         };
-        worker.r2o_ensure_worker();
+        worker.r2o_ensure_workers(1);
         worker
     }
 
-    fn r2o_ensure_worker(&mut self) {
-        if self
-            .thread
-            .as_ref()
-            .is_some_and(|thread| !thread.is_finished())
-        {
-            return;
+    fn r2o_ensure_workers(&mut self, desired: usize) {
+        self.threads.retain(|thread| !thread.is_finished());
+        while self.worker_live.load(Ordering::Acquire) < desired {
+            self.spawn_worker();
         }
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-        let (jobs, job_receiver) = mpsc::sync_channel::<R2oFamilyRecoveryTask>(8);
+    }
+
+    fn spawn_worker(&mut self) {
+        let jobs = Arc::clone(&self.jobs);
+        let life = R2oDiscoveryWorkerLife::new(Arc::clone(&self.worker_live));
+        self.worker_live.fetch_add(1, Ordering::AcqRel);
         let outcome_sender = self.outcome_sender.clone();
         let worker_cancel = Arc::clone(&self.cancel);
         let worker_gate = self.measurement_gate.clone();
@@ -8283,10 +8295,22 @@ impl R2oFamilyRecoveryWorker {
         };
         let thread = std::thread::spawn(move || {
             loop {
-                let task = match job_receiver.recv_timeout(R2O_ON_DEMAND_WORKER_IDLE) {
-                    Ok(task) => task,
-                    Err(mpsc::RecvTimeoutError::Timeout)
-                    | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                let task = {
+                    let (pending, available) = &*jobs;
+                    let pending = pending
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let (mut pending, _) = available
+                        .wait_timeout_while(pending, R2O_ON_DEMAND_WORKER_IDLE, |pending| {
+                            pending.is_empty() && !worker_cancel.load(Ordering::Relaxed)
+                        })
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let Some(task) = pending.pop_front() else {
+                        // Постановка новой задачи увидит завершение под тем же mutex.
+                        life.finish();
+                        break;
+                    };
+                    task
                 };
                 if worker_cancel.load(Ordering::Relaxed) {
                     break;
@@ -8309,8 +8333,7 @@ impl R2oFamilyRecoveryWorker {
                 worker_commands.notify();
             }
         });
-        self.jobs = Some(jobs);
-        self.thread = Some(thread);
+        self.threads.push(thread);
     }
 
     fn queue(
@@ -8343,17 +8366,25 @@ impl R2oFamilyRecoveryWorker {
         if r2o_is_ech_shape(target.shape) && client_hello.is_none() {
             candidates.retain(|candidate| candidate.group_plan);
         }
-        if candidates.is_empty() || !self.active.insert(target.clone()) {
+        if candidates.is_empty()
+            || self.cancel.load(Ordering::Relaxed)
+            || self.active.len() >= R2O_FAMILY_RECOVERY_QUEUE + R2O_FAMILY_RECOVERY_WORKERS
+            || self.active.contains(&target)
+        {
             return false;
         }
-        self.r2o_ensure_worker();
-        let Some(jobs) = self.jobs.clone() else {
-            self.active.remove(&target);
+        let jobs = Arc::clone(&self.jobs);
+        let (pending, available) = &*jobs;
+        let mut pending = pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending.len() >= R2O_FAMILY_RECOVERY_QUEUE {
             return false;
-        };
+        }
         let queued_at = std::time::Instant::now();
-        let task = R2oFamilyRecoveryTask {
-            target: target.clone(),
+        self.active.insert(target.clone());
+        pending.push_back(R2oFamilyRecoveryTask {
+            target,
             candidates,
             measure_mark: mark,
             confirm_mark: self.confirm_mark,
@@ -8366,27 +8397,11 @@ impl R2oFamilyRecoveryWorker {
                 R2oFamilyRecoveryMode::PlanNews(deadline)
                 | R2oFamilyRecoveryMode::EarlyRtc(deadline) => deadline,
             },
-        };
-        match jobs.try_send(task) {
-            Ok(()) => true,
-            Err(mpsc::TrySendError::Full(_)) => {
-                self.active.remove(&target);
-                false
-            }
-            Err(mpsc::TrySendError::Disconnected(task)) => {
-                self.r2o_ensure_worker();
-                let Some(jobs) = self.jobs.clone() else {
-                    self.active.remove(&target);
-                    return false;
-                };
-                if jobs.try_send(task).is_ok() {
-                    true
-                } else {
-                    self.active.remove(&target);
-                    false
-                }
-            }
-        }
+        });
+        self.r2o_ensure_workers(self.active.len().min(R2O_FAMILY_RECOVERY_WORKERS));
+        drop(pending);
+        available.notify_one();
+        true
     }
 
     fn try_outcome(&self) -> Option<R2oFamilyRecoveryOutcome> {
@@ -8398,18 +8413,23 @@ impl R2oFamilyRecoveryWorker {
     }
 
     fn r2o_begin_shutdown(&mut self) {
+        let (pending, available) = &*self.jobs;
+        let mut pending = pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.cancel.store(true, Ordering::Relaxed);
-        self.jobs.take();
+        pending.clear();
+        available.notify_all();
     }
 
     fn r2o_all_finished(&self) -> bool {
-        self.thread
-            .as_ref()
-            .is_none_or(std::thread::JoinHandle::is_finished)
+        self.threads
+            .iter()
+            .all(std::thread::JoinHandle::is_finished)
     }
 
     fn r2o_join(&mut self) {
-        if let Some(thread) = self.thread.take() {
+        for thread in self.threads.drain(..) {
             let _ = thread.join();
         }
     }
@@ -43298,6 +43318,49 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn family_recovery_dispatches_an_independent_probe_while_an_ack_waits() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(2);
+        let (commands, receiver) = mpsc::sync_channel(2);
+        let mut worker = super::R2oFamilyRecoveryWorker::new(gate, commands, Some(0), None);
+        let target = |host: &str| DiscoveryTarget {
+            host: host.into(),
+            endpoint: "127.0.0.1:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+            tcp_profile: 0,
+        };
+        let candidates = || {
+            let plan_text = "r2o-plan 1 11\nid 11111111111111111111111111111111\nproto tcp tls\nwire detect-tcp-v1\ninput tls-sni\nsplit sni_middle +0\n";
+            vec![super::R2oFamilyRecoveryCandidate {
+                plan_id: [0x11; 16],
+                prepared: None,
+                plan_text: plan_text.into(),
+                group_plan: false,
+                probe_path: "/".into(),
+            }]
+        };
+        assert!(worker.queue(target("slow.test"), candidates(), None, false, None));
+        let first = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(worker.queue(target("next.test"), candidates(), None, false, None));
+        assert!(!worker.queue(target("next.test"), candidates(), None, false, None));
+        let next = receiver.recv_timeout(Duration::from_secs(1));
+        worker.r2o_begin_shutdown();
+        // Сохраняем ответ первой команды открытым, пока ждём вторую.
+        assert!(
+            matches!(first, super::HttpSearchCommand::InstallProbe { ref host, .. } if host == "slow.test")
+        );
+        drop(first);
+        assert!(
+            matches!(next, Ok(super::HttpSearchCommand::InstallProbe { ref host, .. }) if host == "next.test"),
+            "проверка другой цели ждала ACK первого зонда"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn family_recovery_worker_exits_idle() {
         use std::sync::mpsc;
         use std::time::{Duration, Instant};
@@ -43305,24 +43368,16 @@ mod tests {
         let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
         let (commands, _receiver) = mpsc::sync_channel(1);
         let worker = super::R2oFamilyRecoveryWorker::new(gate, commands, Some(0), None);
+        assert_eq!(worker.threads.len(), 1);
         let deadline = Instant::now() + Duration::from_secs(13);
-        while worker
-            .thread
-            .as_ref()
-            .is_some_and(|thread| !thread.is_finished())
-        {
+        while !worker.r2o_all_finished() {
             assert!(
                 Instant::now() < deadline,
                 "family-recovery worker не завершился по idle-timeout"
             );
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(
-            worker
-                .thread
-                .as_ref()
-                .is_some_and(std::thread::JoinHandle::is_finished)
-        );
+        assert_eq!(worker.worker_live.load(Ordering::Acquire), 0);
     }
 
     #[cfg(unix)]
