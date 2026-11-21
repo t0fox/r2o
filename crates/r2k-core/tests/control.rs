@@ -1476,3 +1476,41 @@ fn http_portal_and_response_bodies_match_donor_shapes() {
     assert_eq!(&tail[2..10], &4_u64.to_be_bytes());
     assert_eq!(&tail[10..18], &1_u64.to_be_bytes());
 }
+
+#[test]
+#[ignore = "запускается с C-оракулом через test-ip-udp-endpoint-differential.sh"]
+fn d2k_udp_endpoint_совпадает_по_ipv4_и_ipv6() {
+    use r2k_core::control::{
+        COMMAND_DEL_ENDPOINT, COMMAND_SET_ENDPOINT, ENDPOINT_KEY_LEN, SHAPE_QUIC, SHAPE_VOICE,
+        decode_endpoint_key, encode_delete_endpoint, encode_set_endpoint, read_frame,
+    };
+
+    let mut actual = String::new();
+    for endpoint in ["192.0.2.7:853", "[2001:db8::7]:854"] {
+        let endpoint: std::net::SocketAddr = endpoint.parse().unwrap();
+        let set = encode_set_endpoint(endpoint, SHAPE_QUIC, &[0xaa, 0xbb]).unwrap();
+        let del = encode_delete_endpoint(endpoint, SHAPE_VOICE).unwrap();
+        for (wire, command, shape) in [
+            (set, COMMAND_SET_ENDPOINT, SHAPE_QUIC),
+            (del, COMMAND_DEL_ENDPOINT, SHAPE_VOICE),
+        ] {
+            let frame = read_frame(&mut wire.as_slice()).unwrap();
+            assert_eq!(frame.kind, command);
+            assert_eq!(
+                decode_endpoint_key(&frame.body[..ENDPOINT_KEY_LEN]),
+                Some((endpoint, shape))
+            );
+            for byte in frame.body {
+                use std::fmt::Write;
+                write!(actual, "{byte:02x}").unwrap();
+            }
+            actual.push('\n');
+        }
+        let mut invalid = endpoint;
+        invalid.set_port(0);
+        assert!(encode_set_endpoint(invalid, SHAPE_QUIC, &[0xaa, 0xbb]).is_err());
+    }
+    let oracle =
+        std::fs::read_to_string(std::env::var_os("R2O_D2K_UDP_ENDPOINT_TRACE").unwrap()).unwrap();
+    assert_eq!(actual, oracle);
+}

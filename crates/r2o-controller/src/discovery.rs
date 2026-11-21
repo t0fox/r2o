@@ -1425,6 +1425,7 @@ pub fn bind_confirmed(
     verified_by: u8,
     input: u8,
     at: i64,
+    port: u16,
     fingerprint: Option<&Fingerprint>,
 ) -> Result<(), String> {
     if box_id.is_empty() || box_id.len() >= 40 {
@@ -1435,6 +1436,9 @@ pub fn bind_confirmed(
     }
     if kind.is_empty() || kind.len() >= 8 || target.is_empty() || target.len() > 255 {
         return Err("catalog binding kind or target is invalid".into());
+    }
+    if port != 0 && (kind != "addr" || transport != 17) {
+        return Err("порт поддерживается только адресными UDP-привязками".into());
     }
     if !matches!(family, 4 | 6) {
         return Err("catalog binding family is invalid".into());
@@ -1496,6 +1500,7 @@ pub fn bind_confirmed(
     }
     if let Some(saved) = selected.bindings.iter_mut().find(|binding| {
         binding.transport == transport
+            && binding.port == port
             && binding.target == target
             && binding.kind == kind
             && (if binding.family == 0 {
@@ -1537,6 +1542,7 @@ pub fn bind_confirmed(
         successes: 1,
         enabled: true,
         transport,
+        port,
         family,
         shape,
         tcp_profile,
@@ -1802,6 +1808,7 @@ fn add_measured_binding_with_fingerprint_in_box_learn(
         if address_target { 5 } else { 1 },
         input,
         now,
+        0,
         observed_fingerprint,
     )?;
 
@@ -1844,6 +1851,31 @@ pub fn add_confirmed_quic_address_binding(
         "addr",
         &address.to_string(),
         family,
+        0,
+        "",
+        source_text,
+        now,
+    )
+}
+
+pub fn add_confirmed_quic_endpoint_binding(
+    catalog: &mut Catalog,
+    endpoint: std::net::SocketAddr,
+    source_text: &str,
+    now: i64,
+) -> Result<String, String> {
+    // Валидируем полный ключ, который будет отправлен датапату.
+    r2k_core::control::encode_delete_endpoint(endpoint, SHAPE_QUIC)?;
+    if now < 0 {
+        return Err("недопустимое время подтверждения QUIC".into());
+    }
+    let family = if endpoint.is_ipv4() { 4 } else { 6 };
+    add_confirmed_quic_binding(
+        catalog,
+        "addr",
+        &endpoint.ip().to_string(),
+        family,
+        endpoint.port(),
         "",
         source_text,
         now,
@@ -1868,7 +1900,16 @@ pub fn add_confirmed_quic_name_binding(
     {
         return Err("QUIC-привязка имени имеет недопустимые имя, путь или семейство".into());
     }
-    add_confirmed_quic_binding(catalog, "name", &host, family, probe_path, source_text, now)
+    add_confirmed_quic_binding(
+        catalog,
+        "name",
+        &host,
+        family,
+        0,
+        probe_path,
+        source_text,
+        now,
+    )
 }
 
 fn add_confirmed_quic_binding(
@@ -1876,6 +1917,7 @@ fn add_confirmed_quic_binding(
     kind: &str,
     target: &str,
     family: u8,
+    port: u16,
     probe_path: &str,
     source_text: &str,
     now: i64,
@@ -1909,7 +1951,7 @@ fn add_confirmed_quic_binding(
     let box_id = catalog.boxes[box_index].id.clone();
     bind_confirmed(
         catalog, &box_id, &plan_id, &plan_text, "quic", target, kind, 17, family, SHAPE_QUIC, 0, 6,
-        1, now, None,
+        1, now, port, None,
     )?;
     // C `verify_confirm` (`sched.c:9475-9489`) переносит измеренный путь в
     // подтверждённую привязку уже после `bind_confirmed`; пустой путь
@@ -1923,6 +1965,7 @@ fn add_confirmed_quic_binding(
                 && binding.plan_id == plan_id
                 && binding.transport == 17
                 && binding.family == family
+                && binding.port == port
                 && binding.shape == SHAPE_QUIC
             {
                 binding.probe_path = probe_path.to_owned();
@@ -1939,6 +1982,7 @@ fn add_confirmed_quic_binding(
                 && binding.plan_id == plan_id
                 && binding.transport == 17
                 && binding.family == family
+                && binding.port == port
                 && binding.shape == SHAPE_QUIC
                 && binding.budget == 0
             {
@@ -1951,11 +1995,23 @@ fn add_confirmed_quic_binding(
 
 /// Проверить, что у адреса уже есть применимый QUIC-план с replay-доказательством.
 pub fn has_usable_quic_address_binding(catalog: &Catalog, address: std::net::IpAddr) -> bool {
+    has_usable_quic_binding(catalog, std::net::SocketAddr::new(address, 0))
+}
+
+pub fn has_usable_quic_endpoint_binding(catalog: &Catalog, endpoint: std::net::SocketAddr) -> bool {
+    endpoint.port() != 0 && has_usable_quic_binding(catalog, endpoint)
+}
+
+fn has_usable_quic_binding(catalog: &Catalog, endpoint: std::net::SocketAddr) -> bool {
+    let address = endpoint.ip();
     let family = if address.is_ipv4() { 4 } else { 6 };
     let target = address.to_string();
     catalog.boxes.iter().any(|record| {
         record.bindings.iter().any(|binding| {
             quic_binding_key(binding, &target, family)
+                && binding.port == endpoint.port()
+                && binding.enabled
+                && binding.recheck_since.unwrap_or(0) == 0
                 && binding.verified_by == 6
                 && binding.input == 1
                 && record
@@ -3638,6 +3694,7 @@ mod tests {
             1,
             2,
             40,
+            0,
             None,
         )
         .unwrap();
@@ -3683,6 +3740,7 @@ mod tests {
             1,
             2,
             50,
+            0,
             None,
         )
         .unwrap();
@@ -3734,6 +3792,7 @@ mod tests {
             1,
             2,
             60,
+            0,
             None,
         )
         .unwrap();
@@ -3778,6 +3837,7 @@ mod tests {
                 verified_by,
                 input,
                 at,
+                0,
                 fingerprint,
             )
             .unwrap();

@@ -49,6 +49,7 @@ struct NamePlanKey {
 struct AddrPlanKey {
     address: Address,
     shape: u8,
+    port: u16,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -391,6 +392,8 @@ impl NamePlans {
                 COMMAND_SET_NAME => self.set_name(body),
                 COMMAND_SET_NAME_BOUND => self.set_name_bound(body),
                 COMMAND_SET_ADDR => self.set_addr(body),
+                control::COMMAND_SET_ENDPOINT => self.set_endpoint(body),
+                control::COMMAND_DEL_ENDPOINT => self.delete_endpoint(body),
                 COMMAND_SET_SUFFIX => self.set_suffix(body),
                 COMMAND_DEL_SUFFIX => self.delete_domain_area(body, true),
                 COMMAND_SET_BYPASS => self.set_domain_bypass(body),
@@ -577,6 +580,11 @@ impl NamePlans {
                 .get(view.l4_offset + 2..view.l4_offset + 4)
                 .and_then(|bytes| bytes.try_into().ok())
                 .map(u16::from_be_bytes)?;
+            if r2k_core::stun::is_binding_request(payload)
+                && let Some(plan) = self.find_endpoint(view.dst, SHAPE_VOICE, destination_port)
+            {
+                return Some(plan);
+            }
             if r2k_core::stun::is_discord_voice_request(payload, destination_port) {
                 if let Some((r2o_plan, _, _, _)) = self.voice_address_binding(packet) {
                     return Some(r2o_plan);
@@ -622,6 +630,7 @@ impl NamePlans {
             {
                 return None;
             }
+            let quic_host = quic_host.filter(|host| !host.is_empty());
             let derived_quic_host = quic_host
                 .is_none()
                 .then(|| r2k_core::quic::initial_client_hello_sni(payload))
@@ -645,9 +654,15 @@ impl NamePlans {
                 }
                 plan
             } else {
-                let plan = r2k_core::quic::is_authenticated_initial(payload)
-                    .then(|| self.find_addr(view.dst, SHAPE_QUIC))
-                    .flatten();
+                let plan = self
+                    .find_endpoint(view.dst, SHAPE_QUIC, destination_port)
+                    .filter(|_| {
+                        matches!(
+                            r2k_core::quic::r2k_quic_initial_sni_result_from_datagrams(&[payload]),
+                            Ok(None)
+                        )
+                    })
+                    .or_else(|| self.find_addr(view.dst, SHAPE_QUIC));
                 if plan.is_none() {
                     self.note_shape_miss(None, view.dst, view.family, SHAPE_QUIC);
                 }
@@ -1312,7 +1327,55 @@ impl NamePlans {
         if !addr_plan_matches_shape(shape, &plan) || !self.r2o_plan_valid(&plan) {
             return (false, control::ACK_BAD_PLAN);
         }
-        let key = AddrPlanKey { address, shape };
+        self.install_addr(
+            AddrPlanKey {
+                address,
+                shape,
+                port: 0,
+            },
+            plan,
+        )
+    }
+
+    fn set_endpoint(&mut self, body: &[u8]) -> (bool, u8) {
+        let Some((key, records)) = body.split_at_checked(control::ENDPOINT_KEY_LEN) else {
+            return (false, control::ACK_BAD_ARGS);
+        };
+        let Some((endpoint, shape)) = control::decode_endpoint_key(key) else {
+            return (false, control::ACK_BAD_ARGS);
+        };
+        let Ok(plan) = Plan::parse_wire(records) else {
+            return (false, control::ACK_BAD_PLAN);
+        };
+        if plan.transport != 17
+            || !addr_plan_matches_shape(shape, &plan)
+            || !self.r2o_plan_valid(&plan)
+        {
+            return (false, control::ACK_BAD_PLAN);
+        }
+        self.install_addr(
+            AddrPlanKey {
+                address: endpoint.ip().into(),
+                shape,
+                port: endpoint.port(),
+            },
+            plan,
+        )
+    }
+
+    fn delete_endpoint(&mut self, body: &[u8]) -> (bool, u8) {
+        let Some((endpoint, shape)) = control::decode_endpoint_key(body) else {
+            return (false, control::ACK_BAD_ARGS);
+        };
+        self.addr_plans.remove(&AddrPlanKey {
+            address: endpoint.ip().into(),
+            shape,
+            port: endpoint.port(),
+        });
+        (true, control::ACK_OK)
+    }
+
+    fn install_addr(&mut self, key: AddrPlanKey, plan: Plan) -> (bool, u8) {
         if !self.addr_plans.contains_key(&key) && !self.make_room_exact() {
             return (false, control::ACK_NO_ROOM);
         }
@@ -1996,7 +2059,11 @@ impl NamePlans {
         if !valid_addr_shape(shape) {
             return (false, control::ACK_BAD_ARGS);
         }
-        self.addr_plans.remove(&AddrPlanKey { address, shape });
+        self.addr_plans.remove(&AddrPlanKey {
+            address,
+            shape,
+            port: 0,
+        });
         (true, control::ACK_OK)
     }
 
@@ -2089,7 +2156,9 @@ impl NamePlans {
         let entry = self
             .addr_plans
             .iter()
-            .find(|(key, _)| key.address == address && r2o_shape_fits(key.shape, seen_shape))
+            .find(|(key, _)| {
+                key.address == address && key.port == 0 && r2o_shape_fits(key.shape, seen_shape)
+            })
             .map(|(_, entry)| entry)?;
         Self::touch(entry, self.next_plan_clock());
         Some(&entry.plan)
@@ -2387,7 +2456,7 @@ impl NamePlans {
     pub fn find_addr_any(&self, address: Address) -> Option<&Plan> {
         self.addr_plans
             .iter()
-            .find(|(key, _)| key.address == address)
+            .find(|(key, _)| key.address == address && key.port == 0)
             .map(|(_, entry)| &entry.plan)
     }
 
@@ -2419,7 +2488,11 @@ impl NamePlans {
         {
             return false;
         }
-        let key = AddrPlanKey { address, shape };
+        let key = AddrPlanKey {
+            address,
+            shape,
+            port: 0,
+        };
         if !self.addr_plans.contains_key(&key) && !self.make_room_exact() {
             return false;
         }
@@ -2440,10 +2513,24 @@ impl NamePlans {
         true
     }
 
+    fn find_endpoint(&self, address: Address, shape: u8, port: u16) -> Option<&Plan> {
+        let entry = self.addr_plans.get(&AddrPlanKey {
+            address,
+            shape,
+            port,
+        })?;
+        Self::touch(entry, self.next_plan_clock());
+        Some(&entry.plan)
+    }
+
     fn find_addr(&self, address: Address, shape: u8) -> Option<&Plan> {
         let entry = self
             .addr_plans
-            .get(&AddrPlanKey { address, shape })
+            .get(&AddrPlanKey {
+                address,
+                shape,
+                port: 0,
+            })
             .or_else(|| {
                 // C `modern_shape_for_ech`: ECH_TCP→MODERN,
                 // ECH_NO_TS→MODERN_NO_TS, ECH_TS→MODERN_TS.
@@ -2456,6 +2543,7 @@ impl NamePlans {
                 self.addr_plans.get(&AddrPlanKey {
                     address,
                     shape: fallback,
+                    port: 0,
                 })
             })?;
         Self::touch(entry, self.next_plan_clock());
@@ -4340,10 +4428,12 @@ mod tests {
         assert!(!plans.addr_plans.contains_key(&super::AddrPlanKey {
             address: address_b.into(),
             shape: SHAPE_MODERN,
+            port: 0,
         }));
         assert!(plans.addr_plans.contains_key(&super::AddrPlanKey {
             address: address_c.into(),
             shape: SHAPE_MODERN,
+            port: 0,
         }));
     }
 
@@ -4544,6 +4634,7 @@ mod tests {
         assert!(plans.addr_plans.contains_key(&super::AddrPlanKey {
             address: address.into(),
             shape: SHAPE_LEGACY,
+            port: 0,
         }));
 
         let mut malformed = delete;
@@ -6099,6 +6190,126 @@ mod tests {
     }
 
     #[test]
+    fn адресный_endpoint_ограничивает_quic_портом_и_полным_client_hello_без_sni() {
+        use r2k_core::control::{
+            SHAPE_QUIC, SHAPE_VOICE, encode_delete_endpoint, encode_set_endpoint, read_frame,
+        };
+        let full = include_bytes!("../../r2k-core/tests/fixtures/quic_v1_initial_no_sni.bin");
+        let named = include_bytes!("../../r2k-core/tests/fixtures/quic_v1_initial.bin");
+        let partial = include_bytes!("../tests/fixtures/quic_v1_initial_first.bin");
+        let mut plans = NamePlans::default();
+
+        fn packet(endpoint: std::net::SocketAddr, payload: &[u8]) -> Vec<u8> {
+            let mut udp = vec![0; 8 + payload.len()];
+            udp[..2].copy_from_slice(&50001_u16.to_be_bytes());
+            udp[2..4].copy_from_slice(&endpoint.port().to_be_bytes());
+            let len = udp.len() as u16;
+            udp[4..6].copy_from_slice(&len.to_be_bytes());
+            udp[8..].copy_from_slice(payload);
+            let mut ip = match endpoint.ip() {
+                std::net::IpAddr::V4(address) => {
+                    let mut ip = vec![0; 20];
+                    ip[0] = 0x45;
+                    ip[2..4].copy_from_slice(&(20 + len).to_be_bytes());
+                    ip[8] = 64;
+                    ip[9] = 17;
+                    ip[12..16].copy_from_slice(&[192, 0, 2, 1]);
+                    ip[16..].copy_from_slice(&address.octets());
+                    ip
+                }
+                std::net::IpAddr::V6(address) => {
+                    let mut ip = vec![0; 40];
+                    ip[0] = 0x60;
+                    ip[4..6].copy_from_slice(&len.to_be_bytes());
+                    ip[6] = 17;
+                    ip[7] = 64;
+                    ip[8..24].copy_from_slice(
+                        &"2001:db8::1"
+                            .parse::<std::net::Ipv6Addr>()
+                            .unwrap()
+                            .octets(),
+                    );
+                    ip[24..].copy_from_slice(&address.octets());
+                    ip
+                }
+            };
+            ip.extend(udp);
+            ip
+        }
+
+        for (endpoint, other) in [
+            ("192.0.2.5:8443", "192.0.2.6:8443"),
+            ("[2001:db8::5]:8443", "[2001:db8::6]:8443"),
+        ] {
+            let endpoint: std::net::SocketAddr = endpoint.parse().unwrap();
+            let other: std::net::SocketAddr = other.parse().unwrap();
+            let mut wrong_port = endpoint;
+            wrong_port.set_port(443);
+            let records = quic_plan_records([1; 16]);
+            let wrong_shape = encode_set_endpoint(endpoint, SHAPE_VOICE, &records).unwrap();
+            assert!(
+                !plans
+                    .handle(&read_frame(&mut wrong_shape.as_slice()).unwrap())
+                    .ok
+            );
+            let set = encode_set_endpoint(endpoint, SHAPE_QUIC, &records).unwrap();
+            assert!(plans.handle(&read_frame(&mut set.as_slice()).unwrap()).ok);
+
+            let hook = Some(crate::netlink::R2O_NF_INET_POST_ROUTING);
+            let hit = packet(endpoint, full);
+            // Датапат передаёт пустое имя после захвата безымянного ClientHello.
+            assert_eq!(
+                plans
+                    .select_with_quic_host_at_hook(&hit, Some(b""), hook)
+                    .unwrap()
+                    .id,
+                [1; 16],
+            );
+            let applied = plans
+                .applied_event_for_packet_at_hook(&hit, 42, hook)
+                .unwrap();
+            assert_eq!(applied.plan_id, [1; 16]);
+            assert_eq!(applied.binding.shape, SHAPE_QUIC);
+            assert!(!applied.binding.temporary);
+            for miss in [
+                packet(wrong_port, full),
+                packet(other, full),
+                packet(endpoint, named),
+                packet(endpoint, partial),
+                packet(endpoint, b"unrecognized UDP"),
+            ] {
+                assert!(
+                    plans
+                        .applied_event_for_packet_at_hook(&miss, 42, hook)
+                        .is_none()
+                );
+            }
+            let wrong_delete = encode_delete_endpoint(wrong_port, SHAPE_QUIC).unwrap();
+            assert!(
+                plans
+                    .handle(&read_frame(&mut wrong_delete.as_slice()).unwrap())
+                    .ok
+            );
+            assert!(
+                plans
+                    .applied_event_for_packet_at_hook(&hit, 42, hook)
+                    .is_some()
+            );
+            let delete = encode_delete_endpoint(endpoint, SHAPE_QUIC).unwrap();
+            assert!(
+                plans
+                    .handle(&read_frame(&mut delete.as_slice()).unwrap())
+                    .ok
+            );
+            assert!(
+                plans
+                    .applied_event_for_packet_at_hook(&hit, 42, hook)
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
     fn quic_name_plan_selects_only_its_authenticated_initial_sni() {
         let mut plans = NamePlans::default();
         let ack = plans.handle(&set_quic_name("example.com"));
@@ -7600,7 +7811,11 @@ mod tests {
             r2k_core::control::SHAPE_LEGACY,
         ] {
             plans.addr_plans.insert(
-                super::AddrPlanKey { address, shape },
+                super::AddrPlanKey {
+                    address,
+                    shape,
+                    port: 0,
+                },
                 InstalledPlan {
                     plan: Plan::default(),
                     generation: 1,
@@ -7634,7 +7849,11 @@ mod tests {
             r2k_core::control::SHAPE_MODERN_TS,
         ] {
             plans.addr_plans.insert(
-                super::AddrPlanKey { address, shape },
+                super::AddrPlanKey {
+                    address,
+                    shape,
+                    port: 0,
+                },
                 InstalledPlan {
                     plan: Plan::default(),
                     generation: 1,
@@ -7750,6 +7969,7 @@ mod tests {
             super::AddrPlanKey {
                 address,
                 shape: r2k_core::control::SHAPE_MODERN,
+                port: 0,
             },
             InstalledPlan {
                 plan,
@@ -7773,7 +7993,11 @@ mod tests {
         ] {
             let mut plans = NamePlans::default();
             plans.addr_plans.insert(
-                super::AddrPlanKey { address, shape },
+                super::AddrPlanKey {
+                    address,
+                    shape,
+                    port: 0,
+                },
                 InstalledPlan {
                     plan: stream_input_tls_plan(),
                     generation: 1,
@@ -7957,6 +8181,7 @@ mod tests {
             super::AddrPlanKey {
                 address,
                 shape: SHAPE_QUIC,
+                port: 0,
             },
             InstalledPlan {
                 plan: Plan {
@@ -8017,6 +8242,7 @@ mod tests {
             super::AddrPlanKey {
                 address,
                 shape: r2k_core::control::SHAPE_MODERN,
+                port: 0,
             },
             InstalledPlan {
                 plan: Plan::default(),
@@ -8082,6 +8308,7 @@ mod tests {
             super::AddrPlanKey {
                 address,
                 shape: r2k_core::control::SHAPE_QUIC,
+                port: 0,
             },
             InstalledPlan {
                 plan: Plan::default(),
@@ -8102,6 +8329,7 @@ mod tests {
             super::AddrPlanKey {
                 address,
                 shape: r2k_core::control::SHAPE_MODERN,
+                port: 0,
             },
             InstalledPlan {
                 plan: Plan::default(),
@@ -8123,6 +8351,7 @@ mod tests {
             super::AddrPlanKey {
                 address,
                 shape: r2k_core::control::SHAPE_GRANDFATHER,
+                port: 0,
             },
             InstalledPlan {
                 plan: Plan::default(),
@@ -8244,6 +8473,7 @@ mod tests {
         assert!(plans.addr_plans.contains_key(&super::AddrPlanKey {
             address,
             shape: r2k_core::control::SHAPE_GRANDFATHER,
+            port: 0,
         }));
         assert!(plans.set_addr_family_legacy(address, 4, tcp.clone()));
         assert!(plans.set_addr_shaped_legacy(
@@ -8255,6 +8485,7 @@ mod tests {
         assert!(plans.addr_plans.contains_key(&super::AddrPlanKey {
             address,
             shape: r2k_core::control::SHAPE_MODERN,
+            port: 0,
         }));
         let http = Plan {
             proto: r2k_core::plan::PROTO_HTTP,
@@ -8284,6 +8515,7 @@ mod tests {
             super::AddrPlanKey {
                 address,
                 shape: r2k_core::control::SHAPE_QUIC,
+                port: 0,
             },
             InstalledPlan {
                 plan: Plan::default(),

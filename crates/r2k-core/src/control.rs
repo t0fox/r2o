@@ -85,6 +85,10 @@ pub const COMMAND_DEL_NAME_BOUND: u16 = 0x0093;
 pub const COMMAND_SET_VOICE_ADDR: u16 = 0x0094;
 pub const COMMAND_SET_VOICE_ADDR_PROBE: u16 = 0x0095;
 pub const COMMAND_DEL_VOICE_ADDR_PROBE: u16 = 0x0096;
+// Команды R2OP: номера D2K для endpoint пересекаются с уже занятыми voice-командами.
+pub const COMMAND_SET_ENDPOINT: u16 = 0x00a0;
+pub const COMMAND_DEL_ENDPOINT: u16 = 0x00a1;
+pub const ENDPOINT_KEY_LEN: usize = 20;
 pub const COMMAND_SET_ADDR_PROBE: u16 = 0x0089;
 pub const COMMAND_DEL_ADDR_PROBE: u16 = 0x008a;
 pub const MAX_TCP_STALL_BUDGETS: usize = 8;
@@ -1619,6 +1623,66 @@ pub fn encode_set_name_bound(
     body.extend_from_slice(plan_records);
     body.extend_from_slice(&trial_id);
     encode_frame(COMMAND_SET_NAME_BOUND, &body)
+}
+
+/// Ключ D2K endpoint: семейство, канонический адрес, форма, серверный порт.
+pub fn decode_endpoint_key(bytes: &[u8]) -> Option<(SocketAddr, u8)> {
+    let &[family, ip @ .., shape, port_hi, port_lo]: &[u8; ENDPOINT_KEY_LEN] =
+        bytes.try_into().ok()?;
+    let ip = match family {
+        4 if ip[4..].iter().all(|byte| *byte == 0) => {
+            IpAddr::from(<[u8; 4]>::try_from(&ip[..4]).ok()?)
+        }
+        6 => IpAddr::from(ip),
+        _ => return None,
+    };
+    let port = u16::from_be_bytes([port_hi, port_lo]);
+    (endpoint_shape_valid(shape) && port != 0 && !ip.is_unspecified() && !ip.is_multicast())
+        .then_some((SocketAddr::new(ip, port), shape))
+}
+
+const fn endpoint_shape_valid(shape: u8) -> bool {
+    matches!(shape, SHAPE_QUIC | SHAPE_VOICE)
+}
+
+fn endpoint_key(endpoint: SocketAddr, shape: u8) -> Result<[u8; ENDPOINT_KEY_LEN], &'static str> {
+    if !endpoint_shape_valid(shape)
+        || endpoint.port() == 0
+        || endpoint.ip().is_unspecified()
+        || endpoint.ip().is_multicast()
+        || matches!(endpoint, SocketAddr::V6(addr) if addr.scope_id() != 0 || addr.flowinfo() != 0)
+    {
+        return Err("неверный ключ адресной привязки UDP");
+    }
+    let mut key = [0; ENDPOINT_KEY_LEN];
+    match endpoint.ip() {
+        IpAddr::V4(ip) => {
+            key[0] = 4;
+            key[1..5].copy_from_slice(&ip.octets());
+        }
+        IpAddr::V6(ip) => {
+            key[0] = 6;
+            key[1..17].copy_from_slice(&ip.octets());
+        }
+    }
+    key[17] = shape;
+    key[18..20].copy_from_slice(&endpoint.port().to_be_bytes());
+    Ok(key)
+}
+
+pub fn encode_set_endpoint(
+    endpoint: SocketAddr,
+    shape: u8,
+    plan_records: &[u8],
+) -> Result<Vec<u8>, &'static str> {
+    let mut body = Vec::with_capacity(ENDPOINT_KEY_LEN + plan_records.len());
+    body.extend_from_slice(&endpoint_key(endpoint, shape)?);
+    body.extend_from_slice(plan_records);
+    encode_frame(COMMAND_SET_ENDPOINT, &body)
+}
+
+pub fn encode_delete_endpoint(endpoint: SocketAddr, shape: u8) -> Result<Vec<u8>, &'static str> {
+    encode_frame(COMMAND_DEL_ENDPOINT, &endpoint_key(endpoint, shape)?)
 }
 
 pub fn encode_set_addr(

@@ -4211,7 +4211,18 @@ fn catalog_commands_with_send_cap(
                     skipped += 1;
                     continue;
                 };
-                let Ok(command) = r2o_catalog_encode_set_addr(address, shape, wire_records) else {
+                let command = if binding.port == 0 {
+                    r2o_catalog_encode_set_addr(address, shape, wire_records)
+                } else if binding.transport == 17 {
+                    control::encode_set_endpoint(
+                        std::net::SocketAddr::new(address, binding.port),
+                        shape,
+                        wire_records,
+                    )
+                } else {
+                    Err("порт допустим только в адресной UDP-привязке")
+                };
+                let Ok(command) = command else {
                     skipped += 1;
                     continue;
                 };
@@ -26795,18 +26806,14 @@ impl ControlClient {
                         std::io::stdout().flush()?;
                         continue;
                     };
-                    if server.port() != 443 {
-                        println!(
-                            "QUIC-проба пропущена: временный план поддерживает только UDP/443"
-                        );
-                        std::io::stdout().flush()?;
-                        continue;
-                    }
                     let has_quic_binding =
-                        r2o_controller::discovery::has_usable_quic_address_binding(
-                            catalog,
-                            server.ip(),
-                        );
+                        r2o_controller::discovery::has_usable_quic_endpoint_binding(
+                            catalog, server,
+                        ) || (server.port() == 443
+                            && r2o_controller::discovery::has_usable_quic_address_binding(
+                                catalog,
+                                server.ip(),
+                            ));
                     if r2o_quic_binding_blocks_retry(has_quic_binding, event.planned) {
                         println!("QUIC-проба пропущена: для адреса уже сохранён проверенный план");
                         std::io::stdout().flush()?;
@@ -26953,6 +26960,16 @@ impl ControlClient {
                         std::io::stdout().flush()?;
                         continue;
                     };
+                    if server.port() != 443
+                        && (host.parse::<std::net::IpAddr>().is_err()
+                            || r2o_dns_doq_service_for_server(server, &host).is_none())
+                    {
+                        println!(
+                            "QUIC {server}: вне UDP/443 проверяется только адресный DoQ из конфигурации"
+                        );
+                        std::io::stdout().flush()?;
+                        continue;
+                    }
                     let cooldown_key =
                         r2o_quic_cooldown_key(server, host, *r2o_mark, event.planned);
                     if quic_discovery.as_ref().is_some_and(|worker| {
@@ -30026,7 +30043,9 @@ impl ControlClient {
                 if let Some(service) = doq {
                     // C `d2k_verify_dns_on` для DoQ: план уже стоит на
                     // local/server, зонд шлёт DNS на stream 0 с zero ID.
-                    let host = if service.sni.is_empty() {
+                    let host = if sni.parse::<std::net::IpAddr>().is_ok() {
+                        sni
+                    } else if service.sni.is_empty() {
                         service.host.as_str()
                     } else {
                         service.sni.as_str()
@@ -30306,6 +30325,7 @@ impl ControlClient {
         // DoQ-endpoint: C `d2k_verify_dns_on` проверяет не HTTP/3, а DNS
         // stream 0 / zero ID на том же плановом QUIC-сокете.
         let doq_service = r2o_dns_doq_service_for_server(server, &server_name);
+        let address_only = server_name.parse::<std::net::IpAddr>().is_ok();
         #[cfg(not(test))]
         use std::net::ToSocketAddrs;
         #[cfg(not(test))]
@@ -30326,7 +30346,9 @@ impl ControlClient {
             // Прямой DoQ-зонд без плана: работает — цель чистая, задача не
             // нужна. Не работает — перебираем плановые кандидаты и проверяем
             // каждый тем же DoQ DNS-обменом.
-            let host = if service.sni.is_empty() {
+            let host = if address_only {
+                server_name.as_str()
+            } else if service.sni.is_empty() {
                 service.host.as_str()
             } else {
                 service.sni.as_str()
@@ -30356,8 +30378,11 @@ impl ControlClient {
             match direct {
                 Ok(result) if result.dns_reply => {
                     r2o_quic_dns_live_clear(server);
-                    let host =
-                        r2o_controller::domain::normalize(host).unwrap_or_else(|_| host.to_owned());
+                    let host = if address_only {
+                        host.to_owned()
+                    } else {
+                        r2o_controller::domain::normalize(host).unwrap_or_else(|_| host.to_owned())
+                    };
                     let family = if server.is_ipv6() { 6 } else { 4 };
                     let target = r2o_controller::discovery::DiscoveryTarget {
                         tcp_profile: 0,
@@ -31516,15 +31541,32 @@ impl ControlClient {
             );
             return Ok(());
         }
-        let address_binding =
-            r2o_controller::quic_replay::r2o_qp_addr_parse(&host).is_some() || quic_ech;
+        let endpoint_binding = r2o_controller::quic_replay::r2o_qp_addr_parse(host).is_some();
+        let address_binding = endpoint_binding || quic_ech;
+        if endpoint_binding
+            && (!r2k_core::quic_snapshot::r2k_quic_snapshot_parse(snapshot).is_some_and(|parsed| {
+                matches!(
+                    r2k_core::quic::r2k_quic_initial_sni_result_from_datagrams(parsed.datagrams()),
+                    Ok(None)
+                )
+            }) || host.parse::<std::net::IpAddr>().ok() != Some(server.ip()))
+        {
+            return Err("адресная QUIC-привязка требует снимок того же endpoint без SNI".into());
+        }
         let (_lock, previous) =
             locked_catalog_for_persistence(catalog_path, catalog, persistence.as_deref())?;
-        if address_binding
-            && r2o_controller::discovery::has_usable_quic_address_binding(&previous, server.ip())
-        {
+        let already_confirmed = if endpoint_binding {
+            r2o_controller::discovery::has_usable_quic_endpoint_binding(&previous, server)
+        } else {
+            address_binding
+                && r2o_controller::discovery::has_usable_quic_address_binding(
+                    &previous,
+                    server.ip(),
+                )
+        };
+        if already_confirmed {
             *catalog = previous;
-            println!("QUIC-план не заменён: другой процесс уже сохранил адресную привязку");
+            println!("QUIC-план не заменён: адресная привязка уже подтверждена");
             return Ok(());
         }
         let now = std::time::SystemTime::now()
@@ -31532,7 +31574,14 @@ impl ControlClient {
             .as_secs() as i64;
         let mut updated = previous.clone();
         let saved_probe_path = if probe_path == "/" { "" } else { probe_path };
-        let saved_plan_id = if address_binding {
+        let saved_plan_id = if endpoint_binding {
+            r2o_controller::discovery::add_confirmed_quic_endpoint_binding(
+                &mut updated,
+                server,
+                plan_text,
+                now,
+            )
+        } else if address_binding {
             r2o_controller::discovery::add_confirmed_quic_address_binding(
                 &mut updated,
                 server.ip(),
@@ -31558,7 +31607,12 @@ impl ControlClient {
             .ok_or("сохранённый QUIC-план исчез из каталога")?;
         let saved_records = compile_text(&saved_plan.text)?;
         let wire_records = r2o_plan_records_for_wire(&saved_records)?;
-        let (command, command_kind) = if address_binding {
+        let (command, command_kind) = if endpoint_binding {
+            (
+                control::encode_set_endpoint(server, SHAPE_QUIC, &wire_records)?,
+                control::COMMAND_SET_ENDPOINT,
+            )
+        } else if address_binding {
             (
                 encode_set_addr(server.ip(), SHAPE_QUIC, &wire_records)?,
                 COMMAND_SET_ADDR,
@@ -31589,8 +31643,10 @@ impl ControlClient {
         }
         *catalog = updated;
         println!(
-            "HTTP/3 и точный APPLIED подтверждены кандидатом «{candidate_name}»; QUIC-план {saved_plan_id} сохранён для {}{}",
-            if address_binding {
+            "Прикладной ответ и точный APPLIED подтверждены кандидатом «{candidate_name}»; QUIC-план {saved_plan_id} сохранён для {}{}",
+            if endpoint_binding {
+                server.to_string()
+            } else if address_binding {
                 server.ip().to_string()
             } else {
                 host.to_owned()
@@ -32453,6 +32509,8 @@ impl ControlClient {
             COMMAND_CLEAR => "CLEAR",
             COMMAND_SET_ADDR => "SET_ADDR",
             COMMAND_DEL_ADDR => "DEL_ADDR",
+            control::COMMAND_SET_ENDPOINT => "SET_ENDPOINT",
+            control::COMMAND_DEL_ENDPOINT => "DEL_ENDPOINT",
             control::COMMAND_SET_SUFFIX => "SET_SUFFIX",
             control::COMMAND_DEL_SUFFIX => "DEL_SUFFIX",
             control::COMMAND_SET_BYPASS => "SET_BYPASS",
@@ -57923,6 +57981,44 @@ group_block_proven: false,
             .unwrap();
         control_thread.join().unwrap();
         assert!(worker.r2o_all_finished());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn синхронизация_каталога_сохраняет_порты_адресного_quic() {
+        use r2k_core::control::{COMMAND_SET_ENDPOINT, decode_endpoint_key};
+        use r2o_controller::discovery::{
+            add_confirmed_quic_endpoint_binding, has_usable_quic_endpoint_binding,
+        };
+        let mut catalog = Catalog::default();
+        let first = "192.0.2.6:443".parse().unwrap();
+        let second = "192.0.2.6:853".parse().unwrap();
+        let third = "[2001:db8::6]:853".parse().unwrap();
+        for endpoint in [first, second, third] {
+            add_confirmed_quic_endpoint_binding(
+                &mut catalog,
+                endpoint,
+                "r2o-plan 1 10\nid 00000000000000000000000000000000\nproto udp quic\nquicsplit 1\n",
+                1,
+            )
+            .unwrap();
+            assert!(has_usable_quic_endpoint_binding(&catalog, endpoint));
+        }
+        assert!(catalog.domain_state.is_none());
+        assert!(!has_usable_quic_endpoint_binding(
+            &catalog,
+            "192.0.2.6:8443".parse().unwrap()
+        ));
+        let sync = catalog_commands(&catalog).unwrap();
+        assert_eq!(sync.commands.len(), 3);
+        for ((_, bytes), expected) in sync.commands.iter().zip([first, second, third]) {
+            let frame = read_frame(&mut bytes.as_slice()).unwrap();
+            assert_eq!(frame.kind, COMMAND_SET_ENDPOINT);
+            assert_eq!(
+                decode_endpoint_key(&frame.body[..20]),
+                Some((expected, super::SHAPE_QUIC))
+            );
+        }
     }
 
     #[cfg(unix)]

@@ -2470,15 +2470,14 @@ mod app {
                                     // снимает и кольцо не чистит.
                                     prefetched_quic_hello = quic_sessions
                                         .r2o_capture_hello_prefetch_at_hook(bytes, queue_hook);
-                                    // C `handle_udp`: пока ClientHello не
-                                    // собран в имя, `udp_hold_wait` — пачка
-                                    // остаётся удержанной. Пустое имя — не
-                                    // повод выпускать оригинал: план по имени
-                                    // ещё не выбран.
+                                    // Для адресного QUIC достаточно полного ClientHello без SNI.
                                     if !r2o_udp_hold_ready(prefetched_quic_hello.as_ref()) {
                                         continue;
                                     }
-                                    udp_sessions.r2o_mark_hello_seen(bytes, true);
+                                    let named = prefetched_quic_hello
+                                        .as_ref()
+                                        .is_some_and(|hello| !hello.host.is_empty());
+                                    udp_sessions.r2o_mark_hello_seen(bytes, named);
                                     let Some(batch) = udp_holds.r2o_take(bytes) else {
                                         continue;
                                     };
@@ -5322,10 +5321,8 @@ mod app {
         }
     }
 
-    /// C `handle_udp`: удержанная пачка ждёт, пока `named` не станет true.
-    /// Пустой host — это `udp_hold_wait`, а не готовность к replay.
     fn r2o_udp_hold_ready(hello: Option<&r2o_datapath::capture::QuicHello>) -> bool {
-        hello.is_some_and(|hello| !hello.host.is_empty())
+        hello.is_some_and(|hello| !hello.host.is_empty() || hello.snapshot.is_some())
     }
 
     #[cfg(test)]
@@ -7019,7 +7016,7 @@ mod app {
         }
 
         #[test]
-        fn udp_hold_ready_требует_имя_а_не_пустой_снимок() {
+        fn udp_hold_ready_требует_имя_или_полный_снимок() {
             let key = [0; r2k_core::control::KEY_LEN];
             let empty = r2o_datapath::capture::QuicHello {
                 key,
@@ -7029,6 +7026,13 @@ mod app {
             };
             assert!(!r2o_udp_hold_ready(Some(&empty)));
             assert!(!r2o_udp_hold_ready(None));
+            let address_only = r2o_datapath::capture::QuicHello {
+                snapshot: r2k_core::quic_snapshot::r2k_quic_snapshot_pack(&[include_bytes!(
+                    "../../r2k-core/tests/fixtures/quic_v1_initial_no_sni.bin"
+                )]),
+                ..empty
+            };
+            assert!(r2o_udp_hold_ready(Some(&address_only)));
             let named = r2o_datapath::capture::QuicHello {
                 key,
                 host: b"example.test".to_vec(),
