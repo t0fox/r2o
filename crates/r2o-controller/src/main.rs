@@ -7131,7 +7131,8 @@ enum HttpSearchCommand {
         shape: u8,
         family: u8,
         port: u16,
-        reply: SyncSender<Result<(), String>>,
+        collect_trial: Option<[u8; 16]>,
+        reply: SyncSender<Result<Vec<r2k_core::control::AppliedEvent>, String>>,
     },
     PropsSend {
         command: Vec<u8>,
@@ -8562,6 +8563,7 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
                 shape: wire_shape,
                 family: target.family,
                 port: local_port,
+                collect_trial: None,
                 reply,
             })?;
             return Err("датапат отверг временный план семейной пробы".into());
@@ -8672,11 +8674,12 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
             shape: wire_shape,
             family: target.family,
             port: local_port,
+            collect_trial: (fetch_result.is_err() && transport_established).then_some(trial_id),
             reply,
         });
         drop(socket_hold);
-        let events = events?;
-        delete_result?;
+        let mut events = events?;
+        events.extend(delete_result?);
         // C `ver_unsent_early`: REFUSED мог прийти до того, как сетевой зонд
         // назвал свой ключ; он всё равно отменяет подтверждение кандидата.
         // Для QUIC/by_addr trial обязателен.
@@ -8719,7 +8722,9 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
         });
         // C `t->ver_flow` заполняется по ключу реального зонда; здесь тот же
         // ключ берётся из подтверждённого APPLIED и передаётся main loop.
-        if let Some(flow) = applied_flow {
+        if fetch_result.is_ok()
+            && let Some(flow) = applied_flow
+        {
             r2o_discovery_verified_flow_set(target, flow);
         }
         Ok((fetch_result, applied, transport_established))
@@ -9710,6 +9715,7 @@ fn r2o_discovery_client_shape_trial(
             shape: target.shape,
             family: target.family,
             port: local_port,
+            collect_trial: None,
             reply,
         });
         return Err("подтверждение пробы снимка содержит чужой trial ID".into());
@@ -9720,6 +9726,7 @@ fn r2o_discovery_client_shape_trial(
             shape: target.shape,
             family: target.family,
             port: local_port,
+            collect_trial: None,
             reply,
         })?;
         return Err("датапат отверг временный план снимка ClientHello".into());
@@ -9762,6 +9769,7 @@ fn r2o_discovery_client_shape_trial(
         shape: target.shape,
         family: target.family,
         port: local_port,
+        collect_trial: None,
         reply,
     });
     drop(socket_hold);
@@ -26982,16 +26990,25 @@ impl ControlClient {
                 shape,
                 family,
                 port,
+                collect_trial,
                 reply,
             } => {
                 let result = self
                     .delete_name_probe(&host, shape, family, port)
-                    .map_err(|error| error.to_string());
-                if let Err(error) = result {
+                    .and_then(|()| {
+                        // Чтение ACK удаления могло поставить APPLIED этой пробы в очередь.
+                        match collect_trial {
+                            Some(trial_id) => self
+                                .collect_applied_events(trial_id, std::time::Duration::ZERO)
+                                .map_err(|error| error.to_string()),
+                            None => Ok(Vec::new()),
+                        }
+                    });
+                if let Err(error) = &result {
                     let _ = reply.send(Err(error.clone()));
-                    return Err(error.into());
+                    return Err(error.clone().into());
                 }
-                let _ = reply.send(Ok(()));
+                let _ = reply.send(result);
             }
             HttpSearchCommand::PropsSend { command, reply } => {
                 let result = self
@@ -31710,6 +31727,7 @@ fn run_http_trial_task(
             shape: SHAPE_HTTP,
             family: target.family,
             port,
+            collect_trial: None,
             reply,
         });
         return Ok(HttpTrialResult {
@@ -31774,6 +31792,7 @@ fn run_http_trial_task(
         shape: SHAPE_HTTP,
         family: target.family,
         port,
+        collect_trial: None,
         reply,
     });
     drop(socket_hold);
@@ -49756,6 +49775,124 @@ mod tests {
             super::r2o_family_applied_grace(&Ok(r2o_test_fetch_result())),
             Duration::from_secs(5),
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_family_tls_trial_keeps_applied_from_probe_cleanup() {
+        use std::io::Read;
+        use std::net::TcpListener;
+        use std::os::unix::net::UnixStream;
+        use std::path::Path;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.read_exact(&mut [0; 1]).unwrap();
+        });
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "failed-family-tls.example.com".into(),
+            endpoint: endpoint.to_string(),
+            family: 4,
+            shape: SHAPE_MODERN,
+            tcp_profile: 0,
+        };
+        let plan_id = [0x42; 16];
+        let candidate = super::R2oFamilyRecoveryCandidate {
+            plan_id,
+            plan_text: "r2o-plan 1 1\nid 42424242424242424242424242424242\nproto tcp tls\nsplit sni_middle +0\n".into(),
+            group_plan: false,
+            probe_path: "/".into(),
+        };
+        let (commands, receiver) = std::sync::mpsc::sync_channel(1);
+        let controller = std::thread::spawn(move || {
+            let super::HttpSearchCommand::InstallProbe {
+                port,
+                trial_id,
+                reply,
+                ..
+            } = receiver.recv().unwrap()
+            else {
+                panic!("expected probe install");
+            };
+            reply.send(Ok(None)).unwrap();
+            let cleanup = receiver.recv().unwrap();
+            let (socket, mut peer) = UnixStream::pair().unwrap();
+            let mut client = ControlClient {
+                socket,
+                send_maxlen: 0,
+                send_cap: Arc::new(AtomicUsize::new(0)),
+                pending_events: Default::default(),
+                pending_applied_events: Default::default(),
+                dropped_events: Default::default(),
+                http_search_started: Default::default(),
+                http_acknowledged_bindings: Default::default(),
+            };
+            let mut applied = r2k_core::control::AppliedEvent {
+                key: super::r2o_ask_flow_key(endpoint.ip(), port, endpoint),
+                plan_id,
+                trial_id,
+                execution_id: 1,
+                binding: BindingContext {
+                    generation: 1,
+                    kind: 1,
+                    family: 4,
+                    shape: SHAPE_MODERN,
+                    temporary: true,
+                    epoch: [1; 16],
+                },
+            };
+            peer.write_all(&encode_frame(EVENT_APPLIED, &applied.event_body().unwrap()).unwrap())
+                .unwrap();
+            applied.trial_id[0] ^= 1;
+            let other_trial = applied.trial_id;
+            client.remember_applied_event(applied);
+            peer.write_all(&encode_ack(COMMAND_DEL_NAME_PROBE, true, 0).unwrap())
+                .unwrap();
+            client
+                .service_http_search_command(cleanup, &mut Catalog::default(), Path::new(""), None)
+                .unwrap();
+            assert_eq!(read_frame(&mut peer).unwrap().kind, COMMAND_DEL_NAME_PROBE);
+            assert_eq!(
+                client.pending_applied_events.front().unwrap().trial_id,
+                other_trial
+            );
+        });
+        let (fetch, applied, transport_established) =
+            super::r2o_family_recovery_sibling_trial_with_ech_state(
+                &target,
+                endpoint,
+                &candidate,
+                None,
+                Some(0),
+                &commands,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                r2o_controller::fetch::r2o_d2o_verification_encoding("/"),
+            );
+        assert!(fetch.is_err());
+        assert!(transport_established, "{fetch:?}");
+        server.join().unwrap();
+        controller.join().unwrap();
+        assert!(super::r2o_discovery_measured_fallback_allowed(
+            true,
+            &fetch,
+            applied,
+            super::R2oCandidateTrialEvidence {
+                transport_established,
+                ..Default::default()
+            },
+        ));
+        assert_eq!(
+            super::r2o_family_recovery_decision(&fetch, applied),
+            super::R2oFamilyRecoveryDecision::Reclassify,
+        );
+        assert!(super::r2o_discovery_verified_flow_take(&target).is_none());
     }
 
     fn r2o_test_fetch_result() -> FetchResult {
