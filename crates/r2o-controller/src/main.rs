@@ -8068,7 +8068,8 @@ const R2O_FAMILY_RECOVERY_BUDGET: std::time::Duration = std::time::Duration::fro
 struct R2oFamilyRecoveryTask {
     target: r2o_controller::discovery::DiscoveryTarget,
     candidates: Vec<R2oFamilyRecoveryCandidate>,
-    mark: Option<u32>,
+    measure_mark: Option<u32>,
+    confirm_mark: Option<u32>,
     client_hello: Option<Vec<u8>>,
     /// C `rx_saved_bootstrap`: после провала нужен полный classifier, а не
     /// семейный cooldown.
@@ -8137,6 +8138,7 @@ struct R2oFamilyRecoveryWorker {
     outcomes: Receiver<R2oFamilyRecoveryOutcome>,
     measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
     trial_commands: SyncSender<HttpSearchCommand>,
+    confirm_mark: Option<u32>,
     cancel: Arc<AtomicBool>,
     active: HashSet<r2o_controller::discovery::DiscoveryTarget>,
     thread: Option<JoinHandle<()>>,
@@ -8147,6 +8149,7 @@ impl R2oFamilyRecoveryWorker {
     fn new(
         measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
         trial_commands: SyncSender<HttpSearchCommand>,
+        confirm_mark: Option<u32>,
     ) -> Self {
         let (outcome_sender, outcomes) = mpsc::sync_channel(8);
         let mut worker = Self {
@@ -8155,6 +8158,7 @@ impl R2oFamilyRecoveryWorker {
             outcomes,
             measurement_gate,
             trial_commands,
+            confirm_mark,
             cancel: Arc::new(AtomicBool::new(false)),
             active: HashSet::new(),
             thread: None,
@@ -8245,7 +8249,8 @@ impl R2oFamilyRecoveryWorker {
         let task = R2oFamilyRecoveryTask {
             target: target.clone(),
             candidates,
-            mark,
+            measure_mark: mark,
+            confirm_mark: self.confirm_mark,
             bootstrap,
             client_hello,
             plan_news: plan_news_deadline.is_some(),
@@ -8368,6 +8373,17 @@ fn r2o_family_applied_grace(
         .is_ok_and(|fetch| fetch.handshake_verified || fetch.tls.is_some())
     {
         std::time::Duration::from_secs(5)
+    } else {
+        std::time::Duration::ZERO
+    }
+}
+
+#[cfg(unix)]
+fn r2o_family_transfer_applied_grace(
+    result: &Result<r2o_controller::fetch::FetchResult, String>,
+) -> std::time::Duration {
+    if r2o_family_recovery_decision(result, true) == R2oFamilyRecoveryDecision::Verified {
+        r2o_family_applied_grace(result)
     } else {
         std::time::Duration::ZERO
     }
@@ -8654,7 +8670,7 @@ fn r2o_confirm_discovery_outcome_checked(
 #[cfg(unix)]
 fn r2o_family_recovery_fetch(
     target: &r2o_controller::discovery::DiscoveryTarget,
-    mark: Option<u32>,
+    confirm_mark: Option<u32>,
     probe_path: &str,
     deadline: std::time::Instant,
 ) -> Result<r2o_controller::fetch::FetchResult, String> {
@@ -8670,9 +8686,7 @@ fn r2o_family_recovery_fetch(
         deadline: r2o_probe_time_left(Some(deadline), std::time::Duration::from_secs(8)),
         tls12: target.shape == SHAPE_LEGACY,
         wire_len: None,
-        // Семейное восстановление — измерение C (`s->measure_mark`), не
-        // verifier-сокет install_next.
-        mark,
+        mark: confirm_mark,
     };
     r2o_controller::fetch::r2o_fetch_with_encoding(
         &options,
@@ -8731,7 +8745,7 @@ fn r2o_family_recovery_run(
         let blocked = r2o_discovery_trigger(&task.target, task.client_hello.as_deref(), None)
             .is_ok_and(|trigger| {
                 let mut options = r2o_discovery_classify_options(
-                    task.mark,
+                    task.measure_mark,
                     None,
                     task.target.tcp_profile(),
                     Arc::clone(cancel),
@@ -8771,12 +8785,17 @@ fn r2o_family_recovery_run(
         outcome.plan_id = candidate.plan_id;
         let trial_started = std::time::Instant::now();
         let trial = if candidate.group_plan {
-            let result =
-                r2o_family_recovery_fetch(&task.target, task.mark, &candidate.probe_path, deadline);
+            let result = r2o_family_recovery_fetch(
+                &task.target,
+                task.confirm_mark,
+                &candidate.probe_path,
+                deadline,
+            );
+            let applied_started = std::time::Instant::now();
             let applied = r2o_collect_controller_applied_events_until(
                 commands,
                 [0; 16],
-                r2o_probe_time_left(Some(deadline), r2o_family_applied_grace(&result)),
+                r2o_probe_time_left(Some(deadline), r2o_family_transfer_applied_grace(&result)),
                 |event| {
                     result.as_ref().is_ok_and(|fetch| {
                         r2o_family_applied_flow_matches(
@@ -8800,6 +8819,13 @@ fn r2o_family_recovery_run(
                     )
                 })
             });
+            println!(
+                "этапы семейной пробы {}: план={:02x?}, сеть={} мкс, APPLIED={} мкс",
+                task.target.host,
+                candidate.plan_id,
+                applied_started.duration_since(trial_started).as_micros(),
+                applied_started.elapsed().as_micros(),
+            );
             match applied {
                 Ok(applied) => (result, applied),
                 Err(error) => (Err(error), false),
@@ -8809,7 +8835,7 @@ fn r2o_family_recovery_run(
                 &task.target,
                 destination,
                 &candidate,
-                task.mark,
+                task.confirm_mark,
                 commands,
                 task.client_hello.as_deref(),
                 Some(deadline),
@@ -8847,7 +8873,7 @@ fn r2o_family_recovery_sibling_trial(
     target: &r2o_controller::discovery::DiscoveryTarget,
     destination: std::net::SocketAddr,
     candidate: &R2oFamilyRecoveryCandidate,
-    mark: Option<u32>,
+    confirm_mark: Option<u32>,
     commands: &SyncSender<HttpSearchCommand>,
     client_hello: Option<&[u8]>,
     probe_deadline: Option<std::time::Instant>,
@@ -8875,9 +8901,7 @@ fn r2o_family_recovery_sibling_trial(
         destination,
         &prepared,
         &candidate.probe_path,
-        // Семейное восстановление — измерение C (`s->measure_mark`), не
-        // verifier-сокет install_next.
-        mark,
+        confirm_mark,
         commands,
         None,
         client_hello,
@@ -8903,7 +8927,7 @@ fn r2o_family_recovery_sibling_trial(
                 &wire_target,
                 &prepared,
                 client_hello,
-                mark,
+                confirm_mark,
                 commands,
                 probe_deadline,
             ) {
@@ -8950,6 +8974,14 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
     r2o_controller::fetch::r2o_fetch_dot_query_set(dot_frame);
     let result = (|| {
         let remaining = |limit| r2o_probe_time_left(probe_deadline, limit);
+        let mut phase_started = probe_deadline.map(|_| std::time::Instant::now());
+        let mut phase_elapsed_us = || {
+            phase_started.as_mut().map_or(0, |start| {
+                let now = std::time::Instant::now();
+                now.duration_since(std::mem::replace(start, now))
+                    .as_micros()
+            })
+        };
         let step_timeout = r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT;
         let ech_tls = ech
             .map(r2o_controller::ech::r2o_ech_tls_config)
@@ -8984,6 +9016,7 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
                 reply,
             },
         )?;
+        let install_us = phase_elapsed_us();
         if let Some(ack) = ack.filter(|ack| ack.trial_id != Some(trial_id) || !ack.ok) {
             ask_http_controller(commands, |deadline, reply| HttpSearchCommand::DeleteProbe {
                 host: target.host.clone(),
@@ -9009,6 +9042,7 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
         let connected = bound
             .connect(destination, remaining(step_timeout))
             .map_err(|error| format!("не удалось подключить семейную пробу: {error}"));
+        let connect_us = phase_elapsed_us();
         let mut transport_established = false;
         let mut socket_hold = None;
         let captured_non_http_alpn = allow_non_http_alpn
@@ -9077,7 +9111,12 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
             Ok((_stream, _, _, _)) => Err("TCP-зонд получил неожиданный локальный порт".into()),
             Err(error) => Err(error),
         };
-        let applied_grace = remaining(r2o_family_applied_grace(&fetch_result));
+        let exchange_us = phase_elapsed_us();
+        let applied_grace = remaining(if probe_deadline.is_some() {
+            r2o_family_transfer_applied_grace(&fetch_result)
+        } else {
+            r2o_family_applied_grace(&fetch_result)
+        });
         let events = r2o_collect_controller_applied_events_until(
             commands,
             trial_id,
@@ -9092,6 +9131,7 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
                 )
             },
         );
+        let applied_us = phase_elapsed_us();
         let delete_result =
             ask_http_controller(commands, |deadline, reply| HttpSearchCommand::DeleteProbe {
                 host: target.host.clone(),
@@ -9104,6 +9144,25 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
                 deadline,
                 reply,
             });
+        let delete_us = phase_elapsed_us();
+        if probe_deadline.is_some() {
+            let fetch = fetch_result.as_ref().ok();
+            println!(
+                "этапы семейной пробы {}: план={:02x?}, порт={}, подготовка={} мкс, установка={} мкс, TCP={} мкс, обмен={} мкс, APPLIED={} мкс, снятие={} мкс, ответ={:?}, ServerHello={}, полный={}",
+                target.host,
+                candidate.plan_id,
+                local_port,
+                candidate.preparation_elapsed.as_micros(),
+                install_us,
+                connect_us,
+                exchange_us,
+                applied_us,
+                delete_us,
+                fetch.map(|result| result.status),
+                fetch.is_some_and(|result| result.handshake_verified || result.tls.is_some()),
+                fetch.is_some_and(|result| result.complete),
+            );
+        }
         drop(socket_hold);
         let mut events = events?;
         events.extend(delete_result?);
@@ -24149,6 +24208,7 @@ impl ControlClient {
                     .as_ref()
                     .expect("HTTP worker существует при активном Discovery")
                     .command_sender(),
+                confirm_mark,
             )
         });
         let mut quic_discovery = discovery.as_ref().map(|(worker, _, _, _)| {
@@ -27008,7 +27068,7 @@ impl ControlClient {
                                 && family.queue(
                                     target.clone(),
                                     candidates,
-                                    confirm_mark,
+                                    mark,
                                     false,
                                     discovery_worker.family_client_hello_or_capture(target, || {
                                         self.r2o_capture_client_shape(target).ok().flatten()
@@ -42975,7 +43035,7 @@ mod tests {
 
         let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
         let (commands, _receiver) = mpsc::sync_channel(1);
-        let worker = super::R2oFamilyRecoveryWorker::new(gate, commands);
+        let worker = super::R2oFamilyRecoveryWorker::new(gate, commands, Some(0));
         let deadline = Instant::now() + Duration::from_secs(13);
         while worker
             .thread
@@ -51399,10 +51459,11 @@ mod tests {
                     group_plan: false,
                     probe_path: "/".into(),
                 }],
-                mark: None,
+                measure_mark: None,
                 client_hello: None,
                 bootstrap: false,
                 plan_news: false,
+                confirm_mark: None,
                 queued_at: now - super::R2O_FAMILY_RECOVERY_BUDGET,
                 deadline: now,
             },
@@ -51432,10 +51493,11 @@ mod tests {
                     group_plan: false,
                     probe_path: "/".into(),
                 }],
-                mark: Some(0),
+                measure_mark: Some(0),
                 client_hello: None,
                 bootstrap: false,
                 plan_news: true,
+                confirm_mark: Some(0),
                 queued_at: std::time::Instant::now(),
                 deadline: std::time::Instant::now() + super::R2O_FAMILY_RECOVERY_BUDGET,
             },
@@ -51917,6 +51979,24 @@ mod tests {
         assert_eq!(
             super::r2o_family_applied_grace(&Ok(replay)),
             Duration::from_secs(5)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn family_transfer_waits_for_applied_only_when_the_response_can_confirm() {
+        use std::time::Duration;
+        let complete = r2o_test_fetch_result();
+        assert!(complete.tls.is_some());
+        assert_eq!(
+            super::r2o_family_transfer_applied_grace(&Ok(complete.clone())),
+            Duration::from_secs(5),
+        );
+        let mut incomplete = complete;
+        incomplete.complete = false;
+        assert_eq!(
+            super::r2o_family_transfer_applied_grace(&Ok(incomplete)),
+            Duration::ZERO,
         );
     }
 
@@ -52410,7 +52490,8 @@ mod tests {
             super::R2oFamilyRecoveryTask {
                 target,
                 candidates: vec![candidate],
-                mark: Some(0),
+                measure_mark: Some(0x2f),
+                confirm_mark: Some(0),
                 bootstrap: false,
                 plan_news: false,
                 queued_at: std::time::Instant::now(),
