@@ -734,10 +734,10 @@ fn r2o_live_dns_services(
                 (
                     "checking",
                     if candidate_plan_applied {
-                        "План применён к пробному соединению D2O; корректный DNS-ответ ещё не подтверждён."
+                        "План применён к пробному соединению. Корректный DNS-ответ ещё не подтверждён."
                             .to_owned()
                     } else {
-                        "Проверяется кандидат штатным конвейером D2O.".to_owned()
+                        "Проверяется кандидат.".to_owned()
                     },
                 )
             } else if state.plan_applied {
@@ -768,7 +768,7 @@ fn r2o_live_dns_services(
             } else if task.is_some() {
                 (
                     "checking",
-                    "Подозрение передано в штатный конвейер D2O.".to_owned(),
+                    "Подозрение передано на проверку.".to_owned(),
                 )
             } else {
                 ("detected", detected_reason.to_owned())

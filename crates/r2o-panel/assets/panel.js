@@ -4,6 +4,7 @@
   "use strict";
 
   var POLL_MS = 2000;
+  var SEARCH_RESULT_MS = 5000;
   var IDLE_POLL_MS = 6000;
   var UPDATE_IDLE_POLL_MS = 60000;
   var STALE_MS = 9000;
@@ -1838,6 +1839,10 @@
     this.renderSearches(m);
   };
 
+  function searchResultTime(search) {
+    return search.outcome === "saved" || search.outcome === "partial" ? parseTime(search.completed_at) : null;
+  }
+
   App.prototype.renderSearches = function (m) {
     var doc = this.doc, self = this;
     var listNode = this.$("searches");
@@ -1860,8 +1865,7 @@
       listNode.__heightMotion = Motion.track(Motion.g.fromTo(listNode, { height: from, overflow: "hidden" },
         { height: height, duration: .34, ease: "power3.out", clearProps: "height,overflow" }));
     }
-    if (!m.searches.length) {
-      var outgoing = listNode.__r2oKey === "live" ? listNode.getBoundingClientRect().height : 0;
+    function showEmpty(outgoing) {
       section(listNode, "none", function () {
         var li = el(doc, "li", "quiet");
         add(li, el(doc, "b", "", "Рабочий прямой трафик подбор не запускает"),
@@ -1869,6 +1873,16 @@
         return [li];
       });
       resizeList(outgoing);
+    }
+    var now = this.serverNow();
+    var running = m.running.filter(function (s) {
+      var resultAt = searchResultTime(s);
+      return !resultAt || now - resultAt < SEARCH_RESULT_MS;
+    }).sort(function (a, b) { return (searchResultTime(b) || 0) - (searchResultTime(a) || 0); });
+    var empty = !running.length && !m.queued.length;
+    var outgoing = empty && listNode.__r2oKey === "live" ? listNode.getBoundingClientRect().height : 0;
+    if (empty && !outgoing) {
+      showEmpty(0);
       return;
     }
     var idleHeight = 0;
@@ -1880,17 +1894,23 @@
     var animate = Motion.on() && Motion.Flip;
     var stable = [];
     for (var si = 0; si < listNode.children.length; si++) if (!listNode.children[si].__leaving) stable.push(listNode.children[si]);
-    var wantKeys = m.running.map(function (x) { return JSON.stringify([x.target, x.family, x.transport, x.ip, x.port]); });
+    var wantKeys = running.map(function (x) { return JSON.stringify([x.target, x.family, x.transport, x.ip, x.port]); });
     if (m.queued.length) wantKeys.push("queue");
     var haveKeys = stable.map(function (r) { return r.__r2oKey; });
     var flipState = animate && stable.length && wantKeys.join("\n") !== haveKeys.join("\n") ? Motion.Flip.getState(stable) : null;
     if (flipState) stable.forEach(function (r) { r.__oldTop = r.getBoundingClientRect().top; });
     var entered = [], moved = false;
 
-    var keep = {};
-    m.running.forEach(function (s, index) {
-      var key = JSON.stringify([s.target, s.family, s.transport, s.ip, s.port]);
-      keep[key] = true;
+    var keep = new Set(wantKeys);
+    var anchor = listNode.firstChild;
+    function place(row) {
+      /* Уходящая карточка сохраняет позицию, пока гаснет. */
+      while (anchor && !keep.has(anchor.__r2oKey)) anchor = anchor.nextSibling;
+      if (row === anchor) anchor = anchor.nextSibling;
+      else { listNode.insertBefore(row, anchor); moved = true; }
+    }
+    running.forEach(function (s, index) {
+      var key = wantKeys[index];
       var row = null;
       for (var i = 0; i < listNode.children.length; i++) {
         if (listNode.children[i].__r2oKey === key) { row = listNode.children[i]; break; }
@@ -1906,36 +1926,40 @@
         Motion.g.set(row, { clearProps: "transform,opacity,visibility" });
       }
       self.updateSearch(row, s);
-      if (listNode.children[index] !== row) { listNode.insertBefore(row, listNode.children[index] || null); moved = true; }
+      place(row);
     });
     var queue = null;
     for (var q = 0; q < listNode.children.length; q++) if (listNode.children[q].__r2oKey === "queue") queue = listNode.children[q];
     if (m.queued.length) {
       if (!queue) { queue = el(doc, "li", "queue"); queue.__r2oKey = "queue"; }
-      keep.queue = true;
       this.updateQueue(queue, m.queued);
-      if (listNode.lastChild !== queue) { listNode.appendChild(queue); moved = true; }
+      place(queue);
     }
     var leaving = [];
     for (var j = listNode.children.length - 1; j >= 0; j--) {
       var gone = listNode.children[j];
-      if (keep[gone.__r2oKey] || gone.__leaving) continue;
+      if (keep.has(gone.__r2oKey) || gone.__leaving) continue;
       if (animate) leaving.push(gone); else listNode.removeChild(gone);
     }
-    if (!animate) return;
+    if (!animate) {
+      if (!listNode.children.length) showEmpty(outgoing);
+      return;
+    }
     if (!entered.length && !leaving.length && !moved) return;
     /* Ушедшая строка уезжает и гаснет; остальные плавно занимают её место. */
     leaving.forEach(function (row) {
       row.__leaving = true;
-      var done = row.getAttribute("data-done") === "true";
       row.__exitMotion = Motion.track(Motion.g.timeline({ onComplete: function () {
+        if (row.parentNode !== listNode) return;
         var rest = [];
         for (var k = 0; k < listNode.children.length; k++) if (listNode.children[k] !== row && !listNode.children[k].__leaving) rest.push(listNode.children[k]);
         var st = rest.length ? Motion.Flip.getState(rest) : null;
-        if (row.parentNode) row.parentNode.removeChild(row);
+        var height = listNode.getBoundingClientRect().height;
+        listNode.removeChild(row);
+        if (!listNode.children.length) showEmpty(height);
         if (st) Motion.track(Motion.Flip.from(st, { duration: 0.3, ease: "power3.inOut", scale: true, simple: true }));
       } })
-        .to(row, { y: done ? 3 : -3, autoAlpha: 0, duration: .16, ease: "power2.in" }));
+        .to(row, { y: row.__resultAt ? -12 : -3, autoAlpha: 0, duration: .24, ease: "power2.in" }));
     });
     if (flipState) {
       /* Переставляемые строки «приподнимаются» и проезжают поверх соседних, не сквозь них. */
@@ -2069,6 +2093,10 @@
     return li;
   };
 
+  function searchText(value) {
+    return str(value).replace(/(запасной перебор) d2o\b/gi, "$1").replace(/\bd2o\b/gi, "R2O");
+  }
+
   App.prototype.updateSearch = function (li, s) {
     var doc = this.doc, p = li.__parts;
     p.target.textContent = targetLabel(s.target);
@@ -2081,13 +2109,14 @@
         tag(doc, shapeLabel(s.shape, s.transport)),
         tag(doc, familyLabel(s.family)),
         addr ? el(doc, "span", "mono", addr) : null,
-        s.source ? el(doc, "span", "", s.source) : null);
+        s.source ? el(doc, "span", "", searchText(s.source)) : null);
     }
-    var phase = str(s.phase) || "этап не указан";
+    var phase = searchText(s.phase) || "этап не указан";
     var since = parseTime(s.since);
     if (li.dataset.outcome && !s.outcome) li.__since = since;
     else if (since) li.__since = li.__since ? Math.min(li.__since, since) : since;
     li.__finished = parseTime(s.completed_at);
+    li.__resultAt = searchResultTime(s);
     var counters = [];
     if (num(s.attempts)) counters.push(count(s.attempts, "план", "плана", "планов"));
     if (num(s.probes)) counters.push(count(s.probes, "зонд", "зонда", "зондов"));
@@ -2153,9 +2182,9 @@
     var tr = trackFor(s.phase);
     if (savedResult) tr = { steps: TRACK, at: TRACK.length - 1, voice: false };
     if (partialResult) tr = { steps: TRACK, at: TRACK.length - 2, voice: false };
-    var proof = exactApplied ? "Точный APPLIED получен для пробы." : str(s.application);
+    var proof = exactApplied ? "Точный APPLIED получен для пробы." : searchText(s.application);
     var level = ["", "Установлено транспортное соединение.", "Подтверждён ответ сервера.", "Получен прикладной ответ."];
-    var proofText = [proof, str(s.last_result) || (s.verified && level[num(s.verify_level)])]
+    var proofText = [proof, searchText(s.last_result) || (s.verified && level[num(s.verify_level)])]
       .filter(Boolean).map(function (line) { return line.replace(/\.$/, ""); }).join(" · ");
     if (p.proof.textContent !== proofText) p.proof.textContent = proofText;
     p.proof.hidden = !proofText;
@@ -2256,10 +2285,13 @@
 
   App.prototype.tick = function () {
     var rows = this.$("searches").children;
+    var now = this.serverNow(), expired = false;
     for (var i = 0; i < rows.length; i++) {
+      if (!rows[i].__leaving && rows[i].__resultAt && now - rows[i].__resultAt >= SEARCH_RESULT_MS) expired = true;
       if (rows[i].__parts) this.updateClock(rows[i]);
       else if (rows[i].__r2oKey === "queue") this.updateQueue(rows[i], this.m ? this.m.queued : []);
     }
+    if (expired && this.m) this.renderSearches(this.m);
     var staleBefore = bodyAttribute(this.doc, "data-stale");
     this.renderNotice();
     var staleAfter = bodyAttribute(this.doc, "data-stale");

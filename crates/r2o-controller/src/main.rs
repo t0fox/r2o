@@ -14370,7 +14370,7 @@ fn r2o_discovery_report_path(source: &str) -> &'static str {
         | "готовый план узнанной коробки"
         | "план узнанной коробки" => "own-plan",
         "ladder" | "ECH RX-лестница" | "объёмная лестница" => "ladder",
-        "fallback" | "запасной перебор d2o" => "fallback",
+        "fallback" | "запасной перебор" => "fallback",
         "property" | "выведен из замера" | "свойства коробки" => {
             "property"
         }
@@ -14395,7 +14395,7 @@ fn discovery_report_path_matches_c_candidate_path() {
     for source in ["ladder", "ECH RX-лестница", "объёмная лестница"] {
         assert_eq!(r2o_discovery_report_path(source), "ladder", "{source}");
     }
-    for source in ["fallback", "запасной перебор d2o"] {
+    for source in ["fallback", "запасной перебор"] {
         assert_eq!(r2o_discovery_report_path(source), "fallback", "{source}");
     }
     for source in ["property", "выведен из замера", "свойства коробки"]
@@ -17828,7 +17828,7 @@ group_block_proven: false,
                     primary_from_owned_fallback = true;
                     owned_fallback_queue = Some(queue);
                     outcome.detail.push_str(
-                        "; замер владеет поиском без выразимого плана — продолжаю запасной перебор d2o",
+                        "; замер владеет поиском без выразимого плана — продолжаю запасной перебор",
                     );
                 }
             }
@@ -17836,7 +17836,7 @@ group_block_proven: false,
                 return outcome;
             };
             let primary_source = if primary_from_owned_fallback {
-                "запасной перебор d2o"
+                "запасной перебор"
             } else {
                 "выведен из замера"
             };
@@ -18003,12 +18003,12 @@ group_block_proven: false,
                     "измеренный кандидат не подтвердился на применённом потоке"
                 };
                 eprintln!(
-                    "по {} {fallback_reason} — продолжаю запасной перебор d2o",
+                    "по {} {fallback_reason} — продолжаю запасной перебор",
                     target.host
                 );
-                outcome.detail.push_str(&format!(
-                    "; {fallback_reason} — продолжаю запасной перебор d2o"
-                ));
+                outcome
+                    .detail
+                    .push_str(&format!("; {fallback_reason} — продолжаю запасной перебор"));
                 let mut fallback_queue = owned_fallback_queue.unwrap_or_else(|| {
                     r2o_controller::r2o_fallback::FallbackQueue::new_with_tried(
                         plan_text,
@@ -18040,13 +18040,13 @@ group_block_proven: false,
                             index + 1,
                             probe_counts.total(),
                             &r2o_discovery_plan_candidate(&candidate),
-                            "запасной перебор d2o",
+                            "запасной перебор",
                         );
                     r2o_discovery_record_plan_progress(
                         &runner_searches,
                         &target,
                         &candidate,
-                        "запасной перебор d2o",
+                        "запасной перебор",
                         "проверяется на пробном потоке",
                         "ожидается точное подтверждение datapath",
                     );
@@ -18111,7 +18111,7 @@ group_block_proven: false,
                         &runner_searches,
                         &target,
                         &candidate,
-                        "запасной перебор d2o",
+                        "запасной перебор",
                         &application,
                         &last_result,
                     );
@@ -18429,13 +18429,13 @@ group_block_proven: false,
                             index,
                             classify_probes.saturating_add(probes_used),
                             &plan_candidate,
-                            "запасной перебор d2o",
+                            "запасной перебор",
                         );
                     r2o_discovery_record_plan_progress(
                         &runner_searches,
                         &target,
                         &candidate,
-                        "запасной перебор d2o",
+                        "запасной перебор",
                         "проверяется на пробном потоке",
                         "ожидается точное подтверждение datapath",
                     );
@@ -18518,7 +18518,7 @@ group_block_proven: false,
                         &runner_searches,
                         &target,
                         &candidate,
-                        "запасной перебор d2o",
+                        "запасной перебор",
                         &application,
                         &last_result,
                     );
@@ -18615,7 +18615,7 @@ group_block_proven: false,
                     if selected_rx_ladder {
                         "ECH RX-лестница"
                     } else if primary_from_owned_fallback {
-                        "запасной перебор d2o"
+                        "запасной перебор"
                     } else {
                         "выведен из замера"
                     },
@@ -18642,7 +18642,7 @@ group_block_proven: false,
                         "ECH RX-лестница"
                     } else if outcome.plan_text.is_some() {
                         if primary_from_owned_fallback {
-                            "запасной перебор d2o"
+                            "запасной перебор"
                         } else {
                             "выведен из замера"
                         }
@@ -26578,7 +26578,7 @@ impl ControlClient {
                             );
                         }
                         r2k_core::control::R2oVoiceProofKind::RtpMedia { .. } => println!(
-                            "RTP-наблюдение для {} не меняет критерий d2o: постоянный план подтверждается ответом STUN/Discovery",
+                            "RTP-наблюдение для {} не меняет критерий подтверждения: постоянный план подтверждается ответом STUN/Discovery",
                             trial.target.server
                         ),
                     }
@@ -30497,7 +30497,7 @@ impl ControlClient {
         if control.pass == 0 {
             if control.refused > 0 {
                 println!(
-                    "вердикт: {} — QUIC {server}: контрольный путь ответил сетевым отказом; исход d2o no_quic",
+                    "вердикт: {} — QUIC {server}: контрольный путь ответил сетевым отказом; исход no_quic",
                     r2o_controller::classify::r2o_sched_verdict_name_for(
                         r2o_controller::classify::Verdict::NoQuic
                     )
@@ -30528,7 +30528,7 @@ impl ControlClient {
                 );
             } else if version_negotiation.pass > 0 {
                 println!(
-                    "вердикт: {} — QUIC {server}: контроль молчит (0/3), путь жив по Version Negotiation ({}/3); исход d2o no_quic",
+                    "вердикт: {} — QUIC {server}: контроль молчит (0/3), путь жив по Version Negotiation ({}/3); исход no_quic",
                     r2o_controller::classify::r2o_sched_verdict_name_for(
                         r2o_controller::classify::Verdict::NoQuic
                     ),
@@ -30536,7 +30536,7 @@ impl ControlClient {
                 );
             } else {
                 println!(
-                    "вердикт: {} — QUIC {server}: молчит всё, включая Version Negotiation (0/3); исход d2o address",
+                    "вердикт: {} — QUIC {server}: молчит всё, включая Version Negotiation (0/3); исход address",
                     r2o_controller::classify::r2o_sched_verdict_name_for(
                         r2o_controller::classify::Verdict::Address
                     )
@@ -37879,7 +37879,7 @@ mod tests {
             6,
             3000,
             400,
-            "запасной перебор d2o",
+            "запасной перебор",
             "измерение без классификации",
             now,
         );

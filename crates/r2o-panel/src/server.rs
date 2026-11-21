@@ -2075,7 +2075,7 @@ fn read_asset(config: &Config, name: &str) -> std::io::Result<(Vec<u8>, Option<f
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            "asset exceeds D2O static file limit",
+            "asset exceeds static file limit",
         ));
     }
     read_regular_file_with_metadata(&path, STATIC_ASSET_MAX)

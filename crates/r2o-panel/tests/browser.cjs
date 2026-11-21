@@ -510,16 +510,23 @@ async function main() {
   liveSearch.question = "split";
   fs.writeFileSync(livePath, JSON.stringify(liveState));
   await waitFor(() => evaluate("[...document.querySelectorAll('.search-question')].some((row) => !row.hidden && row.textContent.includes('Вопрос коробке: split'))"), "автоматическое обновление вопроса и числа зондов");
-  const resolved = liveState.searches.find((search) => search.target === "blocked.example");
+  const resolved = liveState.searches.shift();
+  liveState.searches.push(resolved);
+  fs.writeFileSync(livePath, JSON.stringify(liveState));
+  await waitFor(() => evaluate("[...document.querySelectorAll('#searches .search-target')].at(-1)?.textContent === 'blocked.example'"), "проверяемый поиск находится внизу списка");
+  await call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
   Object.assign(resolved, {
     phase: "подбор завершён", outcome: "saved", completed_at: new Date().toISOString(),
     plan_id: "test-plan", probe_applied: true, verified: true, verify_level: 3,
+    source: "запасной перебор d2o",
+    last_result: "Продолжаю запасной перебор D2O. Получен полный HTTPS-ответ.",
   });
   liveState.boxes[0].plans.push({ id: "test-plan", text: "r2o-plan 1 5\nproto tcp tls\nsplit sni_middle +0\norder reverse" });
   fs.writeFileSync(livePath, JSON.stringify(liveState));
-  await waitFor(() => evaluate("document.querySelector('.search[data-outcome=saved] summary')?.dataset.mark === 'Сохранено · test-plan'"), "закреплённый результат подбора из HTTP-снимка");
+  await waitFor(() => evaluate("document.querySelector('#searches .search:first-child[data-outcome=saved] summary')?.dataset.mark === 'Сохранено · test-plan'"), "завершённый поиск поднялся наверх, хотя в снимке он последний");
   assert.equal(await evaluate("document.querySelector('.search[data-outcome=saved] .search-proof').textContent.includes('Точный APPLIED получен для пробы')"), true);
   assert.equal(await evaluate("document.querySelector('.search[data-outcome=saved] summary').textContent.includes('Разделяет TLS-приветствие')"), true);
+  assert.equal(await evaluate("document.querySelector('.search[data-outcome=saved]').textContent.toLowerCase().includes('d2o')"), false, "старые снимки отображаются без имени донора");
   if (captureDir) {
     await call("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
     await waitFor(() => evaluate("document.querySelector('.search[data-outcome=saved] .track-step:last-child').dataset.state === 'now'"), "маркер дошёл до итога");
@@ -527,6 +534,15 @@ async function main() {
     const screenshot = await call("Page.captureScreenshot", { format: "png" });
     fs.writeFileSync(path.join(captureDir, "discovery-result.png"), Buffer.from(screenshot.data, "base64"));
   }
+  await waitFor(() => evaluate(`(() => {
+    const row = document.querySelector('#searches .search:first-child[data-outcome=saved]');
+    if (!row) return false;
+    const style = getComputedStyle(row);
+    return +style.opacity > 0 && +style.opacity < 1 && new DOMMatrixReadOnly(style.transform).m42 < 0;
+  })()`), "готовый результат гаснет и уходит вверх с первой позиции");
+  await waitFor(() => evaluate("!document.querySelector('#searches .search[data-outcome=saved]')"), "завершённая карточка удалена из списка");
+  assert.equal(await evaluate("document.querySelectorAll('#searches .search').length"), 3, "оставшиеся активные карточки видны");
+  await call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
   for (const [name, width, height] of [
     ["телефон", 320, 740],
     ["широкий телефон", 390, 844],
@@ -558,9 +574,12 @@ async function main() {
     }
   }
 
-  liveState.searches = [];
+  assert.equal(await evaluate("document.querySelector('#searches .search[data-outcome=saved]')"), null, "старый результат из следующего снимка не появляется снова");
+  resolved.completed_at = new Date().toISOString();
+  liveState.searches = [resolved];
   fs.writeFileSync(livePath, JSON.stringify(liveState));
-  await waitFor(() => evaluate("document.querySelector('#searches .quiet') !== null"), "пустой список поисков");
+  await waitFor(() => evaluate("document.querySelectorAll('#searches .search[data-outcome=saved]').length === 1"), "финальная карточка показывается с уменьшенным движением");
+  await waitFor(() => evaluate("document.querySelector('#searches .quiet') !== null"), "после ухода последней карточки появляется пустой список");
   assert.equal(await evaluate("document.querySelector('#searches .quiet').textContent.includes('Рабочий прямой трафик подбор не запускает')"), true, "пустой список поисков отображается как в d2o, независимо от счётчика замеров");
   await waitFor(() => evaluate("!!document.querySelector('#telegram-body')?.dataset.state"), "обновление статуса Telegram");
   assert.equal(await evaluate("document.querySelector('#telegram-body').dataset.state"), "stopped", "неизвестный Telegram status использует fallback d2o");
