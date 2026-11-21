@@ -8172,10 +8172,6 @@ impl PreparedCandidate {
 #[cfg(unix)]
 struct R2oFamilyRecoveryOutcome {
     target: r2o_controller::discovery::DiscoveryTarget,
-    queued_at: std::time::Instant,
-    started_at: std::time::Instant,
-    attempts: usize,
-    last_probe: Option<R2oDiscoveryVerify>,
     plan_id: [u8; 16],
     result: Result<r2o_controller::fetch::FetchResult, String>,
     applied: bool,
@@ -8247,7 +8243,7 @@ struct R2oFamilyRecoveryWorker {
     wake: Option<Arc<std::os::unix::net::UnixDatagram>>,
     confirm_mark: Option<u32>,
     cancel: Arc<AtomicBool>,
-    active: HashMap<r2o_controller::discovery::DiscoveryTarget, std::time::Instant>,
+    active: HashSet<r2o_controller::discovery::DiscoveryTarget>,
     worker_live: Arc<AtomicUsize>,
     threads: Vec<JoinHandle<()>>,
 }
@@ -8271,7 +8267,7 @@ impl R2oFamilyRecoveryWorker {
             wake,
             confirm_mark,
             cancel: Arc::new(AtomicBool::new(false)),
-            active: HashMap::new(),
+            active: HashSet::new(),
             worker_live: Arc::new(AtomicUsize::new(0)),
             threads: Vec::new(),
         };
@@ -8373,7 +8369,7 @@ impl R2oFamilyRecoveryWorker {
         if candidates.is_empty()
             || self.cancel.load(Ordering::Relaxed)
             || self.active.len() >= R2O_FAMILY_RECOVERY_QUEUE + R2O_FAMILY_RECOVERY_WORKERS
-            || self.active.contains_key(&target)
+            || self.active.contains(&target)
         {
             return false;
         }
@@ -8386,7 +8382,7 @@ impl R2oFamilyRecoveryWorker {
             return false;
         }
         let queued_at = std::time::Instant::now();
-        self.active.insert(target.clone(), queued_at);
+        self.active.insert(target.clone());
         pending.push_back(R2oFamilyRecoveryTask {
             target,
             candidates,
@@ -8406,32 +8402,6 @@ impl R2oFamilyRecoveryWorker {
         drop(pending);
         available.notify_one();
         true
-    }
-
-    fn live_searches(&self, now: std::time::Instant) -> Vec<serde_json::Value> {
-        let wall_now = r2o_wall_now_unix();
-        let mut tasks = self.active.iter().collect::<Vec<_>>();
-        tasks.sort_unstable_by(|(a, a_since), (b, b_since)| {
-            a_since
-                .cmp(b_since)
-                .then_with(|| a.host.cmp(&b.host))
-                .then_with(|| a.endpoint.cmp(&b.endpoint))
-        });
-        tasks
-            .into_iter()
-            .map(|(target, queued_at)| {
-                let endpoint = target.endpoint.parse::<std::net::SocketAddr>().ok();
-                serde_json::json!({
-                    "target": target.host,
-                    "family": target.family,
-                    "transport": r2o_discovery_transport(target),
-                    "ip": endpoint.map(|address| address.ip().to_string()),
-                    "port": endpoint.map(|address| address.port()),
-                    "phase": "проверяем семейный план",
-                    "since": r2o_live_timestamp_at(*queued_at, now, wall_now)
-                })
-            })
-            .collect()
     }
 
     fn try_outcome(&self) -> Option<R2oFamilyRecoveryOutcome> {
@@ -8875,13 +8845,8 @@ fn r2o_family_recovery_run(
     commands: &dyn HttpSearchCommandSink,
     cancel: &Arc<AtomicBool>,
 ) -> R2oFamilyRecoveryOutcome {
-    let now = std::time::Instant::now();
     let mut outcome = R2oFamilyRecoveryOutcome {
         target: task.target.clone(),
-        queued_at: task.queued_at,
-        started_at: now,
-        attempts: 0,
-        last_probe: None,
         plan_id: task.candidates[0].plan_id,
         result: Err("не найден подходящий план семейного восстановления".to_owned()),
         applied: false,
@@ -8890,6 +8855,7 @@ fn r2o_family_recovery_run(
         temporary_candidate: None,
         client_input: false,
     };
+    let now = std::time::Instant::now();
     let deadline = task.deadline;
     if deadline <= now {
         outcome.result = Err("срок семейной проверки истёк в очереди".into());
@@ -9012,13 +8978,6 @@ fn r2o_family_recovery_run(
         outcome.result = trial.0;
         outcome.applied = trial.1;
         let decision = r2o_family_recovery_decision(&outcome.result, outcome.applied);
-        outcome.attempts = index + 1;
-        outcome.last_probe = Some(r2o_discovery_verify_snapshot(
-            &outcome.result,
-            outcome.applied,
-            decision == R2oFamilyRecoveryDecision::Verified,
-            false,
-        ));
         println!(
             "семейная проба {}: попытка={}, длительность={} мс, APPLIED={}, подтверждение={}",
             task.target.host,
@@ -12869,22 +12828,6 @@ struct R2oDiscoveryVerify {
 }
 
 #[cfg(unix)]
-impl R2oDiscoveryVerify {
-    fn diagnostic_probe(&self) -> Option<serde_json::Value> {
-        if self.reason.is_empty() {
-            return None;
-        }
-        Some(serde_json::json!({
-            "applied": self.applied,
-            "verified": self.verified,
-            "level": self.level,
-            "http_status": self.status,
-            "reason": self.reason
-        }))
-    }
-}
-
-#[cfg(unix)]
 struct R2oDiscoverySearch {
     target: r2o_controller::discovery::DiscoveryTarget,
     queued_at: std::time::Instant,
@@ -14600,7 +14543,7 @@ fn r2o_live_searches_from_state(
                 .parse::<std::net::SocketAddr>()
                 .map(|endpoint| (endpoint.ip().to_string(), endpoint.port()))
                 .unwrap_or_default();
-            // Базовый набор C `write_live` searches: shape/plan/
+            // Точный набор C `write_live` searches: shape/plan/
             // application/last_result панель не получает.
             // C `write_live`: probes = t->probes + ask_probes, question —
             // сырой ask_question и только в состоянии T_ASKING
@@ -14623,9 +14566,6 @@ fn r2o_live_searches_from_state(
                 r2o_live_timestamp_at(entry.started_at.unwrap_or(entry.queued_at), now, wall_now)
                     .unwrap_or_else(|| "0001-01-01T00:00:00Z".to_owned()),
             );
-            if let Some(probe) = entry.verify.diagnostic_probe() {
-                search["probe"] = probe;
-            }
             search
         })
         .collect()
@@ -19142,16 +19082,7 @@ group_block_proven: false,
             .searches
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut event =
-            r2o_discovery_diagnostic_event(&searches, target, std::time::Instant::now());
-        if let Some(probe) = searches
-            .entries
-            .get(&r2o_discovery_task_key(target))
-            .and_then(|entry| entry.verify.diagnostic_probe())
-        {
-            event["probe"] = probe;
-        }
-        event
+        r2o_discovery_diagnostic_event(&searches, target, std::time::Instant::now())
     }
 
     fn try_diagnostic_report(&self) -> Option<serde_json::Value> {
@@ -25047,15 +24978,7 @@ impl ControlClient {
                                 &dns_services.live,
                                 &dns_services.tasks,
                             )
-                            .and_then(|mut value| {
-                                if let Some(family) = &family_recovery {
-                                    let active = family.live_searches(r2o_now);
-                                    if !active.is_empty() {
-                                        value["family_searches"] = serde_json::Value::Array(active);
-                                    }
-                                }
-                                writer.publish(value)
-                            });
+                            .and_then(|value| writer.publish(value));
                             if let Err(error) = result {
                                 eprintln!("живое состояние панели не записано: {error}");
                             }
@@ -25350,28 +25273,6 @@ impl ControlClient {
                         if !installed {
                             decision = R2oFamilyRecoveryDecision::Reclassify;
                         }
-                    }
-                    if let Some(recorder) = diagnostics.as_mut() {
-                        let verified = decision == R2oFamilyRecoveryDecision::Verified;
-                        recorder.record(serde_json::json!({
-                            "target": outcome.target.host,
-                            "ip": outcome.target.endpoint.parse::<std::net::SocketAddr>()
-                                .ok().map(|address| address.ip().to_string()),
-                            "family": outcome.target.family,
-                            "protocol": "tcp",
-                            "kind": "name",
-                            "path": "family",
-                            "outcome": if verified { "family-probe-verified" } else { "family-probe-inconclusive" },
-                            "elapsed_ms": outcome.queued_at.elapsed().as_millis() as u64,
-                            "queue_ms": outcome.started_at.saturating_duration_since(outcome.queued_at).as_millis() as u64,
-                            "attempts": outcome.attempts,
-                            "probe": outcome.last_probe.as_ref().and_then(R2oDiscoveryVerify::diagnostic_probe),
-                            "reason": if verified {
-                                "Семейный план прошёл проверку"
-                            } else {
-                                outcome.result.as_ref().err().map_or("Семейная проверка не подтвердилась", String::as_str)
-                            }
-                        }));
                     }
                     match decision {
                         R2oFamilyRecoveryDecision::Verified => {
@@ -25914,7 +25815,7 @@ impl ControlClient {
                             && let Some(target) = discovery_target.as_ref()
                             && let Some((discovery, catalog, _, mark)) = discovery.as_mut()
                             && let Some(worker) = family_recovery.as_mut()
-                            && !worker.active.contains_key(target)
+                            && !worker.active.contains(target)
                         {
                             let candidates =
                                 matching_saved_bootstrap_candidates(catalog, target, false);
@@ -26772,7 +26673,7 @@ impl ControlClient {
                             let family_queued = has_family_candidates
                                 && family_recovery
                                     .as_ref()
-                                    .is_some_and(|worker| !worker.active.contains_key(&target))
+                                    .is_some_and(|worker| !worker.active.contains(&target))
                                 && {
                                     let mark = discovery.as_ref().and_then(|(_, _, _, mark)| *mark);
                                     let snapshot = family_candidates
@@ -26809,7 +26710,7 @@ impl ControlClient {
                             } else if has_family_candidates
                                 && family_recovery
                                     .as_ref()
-                                    .is_some_and(|worker| worker.active.contains_key(&target))
+                                    .is_some_and(|worker| worker.active.contains(&target))
                             {
                                 println!(
                                     "проверка семейного плана для {} уже выполняется",
@@ -26878,7 +26779,7 @@ impl ControlClient {
                                     );
                                 } else if family_recovery
                                     .as_ref()
-                                    .is_some_and(|family| family.active.contains_key(&target))
+                                    .is_some_and(|family| family.active.contains(&target))
                                 {
                                     println!(
                                         "семейная проверка для {} уже выполняется",
@@ -27143,7 +27044,7 @@ impl ControlClient {
                                 );
                             } else if family_recovery
                                 .as_ref()
-                                .is_some_and(|family| family.active.contains_key(&target))
+                                .is_some_and(|family| family.active.contains(&target))
                             {
                                 println!("семейная проверка для {} уже выполняется", target.host);
                             } else if self.r2o_queue_tcp_suspect(
@@ -27196,7 +27097,7 @@ impl ControlClient {
                             && let Some((worker, catalog, _, mark)) = discovery.as_mut()
                             && let Some(family) = family_recovery.as_mut()
                             && !worker.is_active(&target)
-                            && !family.active.contains_key(&target)
+                            && !family.active.contains(&target)
                             && !r2o_controller::discovery::has_usable_binding(catalog, &target)
                         {
                             let candidates =
@@ -42835,19 +42736,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn recovery_probe_distinguishes_applied_from_verified() {
-        let mut probe = super::R2oDiscoveryVerify::default();
-        assert!(probe.diagnostic_probe().is_none());
-        probe.applied = true;
-        probe.reason = "истёк таймаут ответа".into();
-        let report = probe.diagnostic_probe().unwrap();
-        assert_eq!(report["applied"], true);
-        assert_eq!(report["verified"], false);
-        assert_eq!(report["reason"], "истёк таймаут ответа");
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn discovery_live_status_tracks_each_probe_while_search_is_active() {
         let target = DiscoveryTarget {
             tcp_profile: 0,
@@ -52769,10 +52657,6 @@ mod tests {
         };
         let mut outcome = super::R2oFamilyRecoveryOutcome {
             target: target.clone(),
-            queued_at: std::time::Instant::now(),
-            started_at: std::time::Instant::now(),
-            attempts: 0,
-            last_probe: None,
             plan_id: candidate.plan_id,
             result: Ok(r2o_test_fetch_result()),
             applied: false,

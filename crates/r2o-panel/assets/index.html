@@ -294,60 +294,17 @@
           <div class="screen-head-copy">
             <span class="kicker">Система</span>
             <h2 id="diagnostics-title">Диагностика</h2>
-            <p>Состояние сервисов, ход восстановления и результат проверки на клиенте.</p>
+            <p>Что движок может подтвердить сам, чего не измеряет, и с какими настройками запущен.</p>
           </div>
           <div class="screen-head-meta" id="diagnostics-meta"></div>
         </header>
-        <div class="recovery-layout">
-          <aside class="recovery-services" aria-labelledby="recovery-services-title">
-            <h3 id="recovery-services-title">Сервисы</h3>
-            <div id="recovery-services" role="group" aria-labelledby="recovery-services-title"></div>
-          </aside>
-          <section class="recovery-main" aria-labelledby="recovery-title">
-            <header class="recovery-head">
-              <div>
-                <h3 id="recovery-title">YouTube</h3>
-                <p id="recovery-state" role="status">Ожидаем данные роутера</p>
-              </div>
-              <button type="button" class="btn" id="recovery-refresh">Обновить</button>
-            </header>
-            <ol id="recovery-progress" class="recovery-progress" aria-label="Этап восстановления" hidden></ol>
-            <div id="recovery-evidence" class="recovery-evidence"></div>
-            <details class="recovery-check" id="recovery-youtube-check">
-              <summary>Проверить воспроизведение YouTube</summary>
-              <p>На этом устройстве откройте ролик и проверьте, что видео продолжает играть после перемотки. Затем отметьте результат для этой вкладки.</p>
-              <div class="recovery-actions">
-                <a class="btn" href="https://www.youtube.com/" target="_blank" rel="noopener noreferrer">Открыть YouTube</a>
-                <button type="button" class="btn" id="recovery-playback-ok">Видео играет</button>
-                <button type="button" class="btn" id="recovery-playback-failed">Видео не играет</button>
-              </div>
-            </details>
-            <div class="recovery-journal">
-              <div class="recovery-journal-head">
-                <h4>Временная шкала</h4>
-                <label><span class="sr-only">Фильтр событий</span>
-                  <select id="recovery-filter">
-                    <option value="all">Все события</option>
-                    <option value="issues">Только проблемы</option>
-                  </select>
-                </label>
-              </div>
-              <ol id="recovery-timeline" class="recovery-timeline"></ol>
-              <p id="recovery-empty" class="recovery-empty">Ожидаем данные роутера.</p>
-              <p id="recovery-history-note" class="recovery-empty"></p>
-            </div>
-          </section>
-        </div>
-        <details class="recovery-disclosure">
-          <summary>Движок и конфигурация</summary>
-          <div id="diagnostics-body"></div>
-        </details>
+        <div id="diagnostics-body"></div>
 
-        <details class="recovery-disclosure diag-history" aria-labelledby="diagnostic-history-title">
-          <summary id="diagnostic-history-title">Локальная история и ресурсы</summary>
+        <section class="diag-history" aria-labelledby="diagnostic-history-title">
           <div class="diag-history-head">
             <div>
               <span class="kicker">Локально на роутере</span>
+              <h3 id="diagnostic-history-title">Память и подборы</h3>
               <p>Сбор выключен по умолчанию · данные остаются в закрытом каталоге</p>
             </div>
             <span class="diag-collection-state" id="diagnostic-state">Проверяем…</span>
@@ -468,10 +425,10 @@
             </div>
             <details class="diag-history-help" id="diagnostic-history-help">
               <summary>Что сохраняется</summary>
-              <p>На роутере сохраняются до 64 результатов подбора и 120 минутных снимков памяти, процессов и очередей. Отчёт содержит домены и IP-адреса и никуда не отправляется. Выключение сбора удаляет историю. Сбор выключается после перезагрузки.</p>
+              <p>Пока сбор включён, r2o-controller раз в указанный в отчёте интервал сохраняет ограниченную историю до указанной ёмкости: RSS, RssAnon, VmData, доступные показатели smaps_rollup, память каталога и HTTP-хранилища, задачи, workers и учтённые объекты TCP/QUIC/TLS. Отдельно сохраняются текущие счётчики madvise, аномалии, ошибки записи отчёта, переходы AIMD, исходы поиска и подробные снимки процессов. smaps_rollup необязателен и в OpenWrt может отсутствовать из-за конфигурации ядра; полный smaps не обходится. RssAnon читается из /proc/PID/status, дополнительных пакетов не требуется. Отсутствующий необязательный интерфейс отмечается как unsupported, а реальные ошибки чтения сохраняются в полном JSON. В отчёте видны вытесненные записи и доступность источников. Учёт объектов покрывает только перечисленные места выделения и не пересчитывает уже существующие объекты. Данные не отправляются автоматически. Полный отчёт содержит домены и IP-адреса: проверьте его перед отправкой в issue. Сбор по умолчанию выключен и отключается после перезагрузки; выключение удаляет историю. Последние 120 минутных снимков и 64 завершения поиска сохраняются локально. Полный отчёт содержит домены и IP-адреса; он остаётся локально и никуда не отправляется.</p>
             </details>
           </div>
-        </details>
+        </section>
       </section>
 
       <footer class="foot">

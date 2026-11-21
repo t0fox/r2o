@@ -117,25 +117,6 @@ async function main() {
   assert.deepEqual(ownPlanTrack?.steps.map((step) => step.label), ["Очередь", "Форма", "Распознаём", "Свойства", "Планы", "Проверка", "Подтверждено"]);
   assert.equal(panelUi.trackFor("неизвестная фаза новой сборки"), null, "неизвестная фаза не выдумывает этап");
   assert.equal(diagnosticsUi.summary({ samples: [{ at: 1, processes: [], bindings: 0, plans: 0 }], events: [{ outcome: "failed" }, { outcome: "queue-expired" }, { outcome: "plan-found" }] }).includes("без подтверждённого результата: 2"), true, "диагностика считает отказ и истёкшую очередь неподтверждёнными исходами");
-  assert.equal(diagnosticsUi.recoveryTarget("r1.googlevideo.com").id, "youtube");
-  assert.equal(diagnosticsUi.recoveryTarget("fake-youtube.com").id, "fake-youtube.com");
-  const recoverySearch = {
-    target: "r1.googlevideo.com", since: "2026-11-20T15:00:00Z",
-    phase: "проверяем выведенный план",
-    probe: { applied: true, verified: false, level: 2, http_status: 0 }
-  };
-  const recoveryModel = { linked: true, snap: { live_fresh: true }, searches: [recoverySearch] };
-  const youtubeFrom = (m, failed, report, marks) => diagnosticsUi.recoveryView(m, failed, report, marks).services.get("youtube");
-  const notice = youtubeFrom(recoveryModel, false);
-  assert.equal(notice.tone, "observe");
-  assert.equal(diagnosticsUi.recoveryProof(notice.probe).applied, "Получен для пробы");
-  assert.equal(diagnosticsUi.recoveryProof(notice.probe).response, "TLS-рукопожатие · проба не подтверждена");
-  assert.equal(youtubeFrom(recoveryModel, true).probe, null);
-  assert.equal(youtubeFrom(recoveryModel, false, null, { youtube: { ok: true, at: Date.parse("2026-11-20T14:59:00Z") } }).mark, null);
-  assert.equal(youtubeFrom(recoveryModel, false, null, { youtube: { ok: true, at: Date.parse("2026-11-20T15:01:00Z") } }).tone, "ok");
-  const history = { events: [{ at: 1000, target: "www.youtube.com", outcome: "plan-found" }] };
-  assert.equal(youtubeFrom({ ...recoveryModel, searches: [] }, false, history).tone, "observe");
-  assert.equal(youtubeFrom({ ...recoveryModel, searches: [] }, true, history).tone, "quiet");
   assert.ok(fs.existsSync(panelBinary), `Не найден исполняемый файл панели: ${panelBinary}`);
   fs.mkdirSync(chromeProfile, { recursive: true });
 
@@ -527,24 +508,6 @@ async function main() {
   await waitFor(() => evaluate("document.querySelector('#command').open === true"), "командная палитра открывается по Ctrl K");
   assert.equal(await evaluate("document.querySelectorAll('#command-list .command-item').length >= 6"), true, "палитра содержит навигацию по разделам");
   await evaluate("document.querySelector('#command').close()");
-  await evaluate("location.hash = '#diagnostics'");
-  await waitFor(() => evaluate("!document.querySelector('#diagnostics').hidden && document.querySelector('#recovery-services').childElementCount >= 4"), "открытие диагностики");
-  assert.ok((await evaluate("document.querySelector('#recovery-evidence').innerText")).includes("Воспроизведение не проверено"));
-  await evaluate("document.querySelector('#recovery-youtube-check summary').click(); document.querySelector('#recovery-playback-failed').click()");
-  assert.ok((await evaluate("document.querySelector('#recovery-state').innerText")).includes("Видео не играет"));
-  await evaluate("document.querySelector('#recovery-filter').value = 'issues'; document.querySelector('#recovery-filter').dispatchEvent(new Event('change'))");
-  assert.equal(await evaluate("document.querySelector('#recovery-timeline').childElementCount"), 1);
-  await evaluate("document.querySelector('#recovery-timeline summary').click()");
-  assert.equal(await evaluate("document.querySelector('#recovery-timeline details').open"), true);
-  await evaluate("document.querySelector('#recovery-playback-ok').click()");
-  assert.equal(await evaluate("document.querySelector('#recovery-timeline').childElementCount"), 0);
-  assert.ok((await evaluate("document.querySelector('#recovery-state').innerText")).includes("проверено вами"));
-  await evaluate("document.querySelector('#recovery-services button:nth-child(2)').click()");
-  assert.equal(await evaluate("document.querySelector('#recovery-title').textContent"), "Discord");
-  for (const width of [1280, 390, 320]) {
-    await call("Emulation.setDeviceMetricsOverride", { width, height: 840, deviceScaleFactor: 1, mobile: width < 500 });
-    assert.equal(await evaluate("document.documentElement.scrollWidth <= innerWidth"), true, "диагностика без горизонтальной прокрутки, ширина " + width);
-  }
   assert.deepEqual(runtimeErrors, [], `ошибки JavaScript в браузере: ${runtimeErrors.join("; ")}`);
   console.log("Проверка Chrome-панели R2O: ПРОЙДЕНА");
 }

@@ -1247,7 +1247,7 @@ fn status_merges_independent_controller_live_snapshots() {
     .unwrap();
     fs::write(
         &live6,
-        r#"{"linked":true,"catalog_at":"catalog.json","boxes":[{"id":"box6"}],"groups":[{"suffix":"ipv6.example"}],"searches":[{"target":"v6.example","family":6,"transport":6,"ip":"2001:db8::6","port":443,"phase":"кандидат"}],"family_searches":[{"target":"video.example","family":6,"transport":6,"ip":"2001:db8::7","port":443,"phase":"проверяем семейный план"}],"measurements":{"active":1,"queued":0,"limit":2,"cores":2,"free_pct":88},"autopick":{"datapath_events":8,"suspect_events":2,"target":"v6.example"},"targets":1,"confirms":1,"probes_used":5,"client_unfit":2}"#,
+        r#"{"linked":true,"catalog_at":"catalog.json","boxes":[{"id":"box6"}],"groups":[{"suffix":"ipv6.example"}],"searches":[{"target":"v6.example","family":6,"transport":6,"ip":"2001:db8::6","port":443,"phase":"кандидат"}],"measurements":{"active":1,"queued":0,"limit":2,"cores":2,"free_pct":88},"autopick":{"datapath_events":8,"suspect_events":2,"target":"v6.example"},"targets":1,"confirms":1,"probes_used":5,"client_unfit":2}"#,
     )
     .unwrap();
     let mut config = Config::default();
@@ -1264,7 +1264,6 @@ fn status_merges_independent_controller_live_snapshots() {
     let value: Value = serde_json::from_str(&body).unwrap();
     let knowledge = &value["knowledge"];
     assert_eq!(knowledge["searches"].as_array().unwrap().len(), 2);
-    assert_eq!(knowledge["family_searches"][0]["target"], "video.example");
     assert_eq!(knowledge["measurements"]["active"], 3);
     assert_eq!(knowledge["measurements"]["queued"], 1);
     assert_eq!(knowledge["measurements"]["limit"], 6);
@@ -1281,7 +1280,6 @@ fn status_merges_independent_controller_live_snapshots() {
     assert_eq!(cached["catalog_unchanged"], true);
     assert_eq!(cached["knowledge"]["boxes"], Value::Null);
     assert_eq!(cached["knowledge"]["searches"].as_array().unwrap().len(), 2);
-    assert_eq!(cached["knowledge"]["family_searches"][0]["target"], "video.example");
 
     for path in [&config.live_path, &config.live_extra_paths[0]] {
         let mut snapshot: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
