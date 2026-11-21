@@ -3064,30 +3064,50 @@ fn r2o_fetch_measure_tx_volume_with_roots(
             reason: format!("не удалось настроить срок отправки: {error}"),
         });
     }
-    let r2o_padding = r2o_volume_padding();
     let mut r2o_read_timeout = R2O_VOLUME_TX_INITIAL_READ;
+    let mut sent_bytes = 0;
     for r2o_step in 0..R2O_VOLUME_TX_STEPS {
-        let r2o_request = r2o_volume_head_request(&options.name, &r2o_padding, r2o_step != 0);
+        let padding = if r2o_step == 0 {
+            Vec::new()
+        } else {
+            r2o_volume_padding()
+        };
+        let r2o_request = r2o_volume_head_request(&options.name, &padding, r2o_step != 0);
         let r2o_request_started = Instant::now();
-        let r2o_result = r2o_stream
-            .write_all(&r2o_request)
-            .and_then(|()| r2o_stream.flush())
-            .and_then(|()| r2o_drain_head_response(&mut r2o_stream, r2o_read_timeout));
-        if let Err(error) = r2o_result {
-            let r2o_at_kb = (r2o_step * R2O_VOLUME_TX_CHUNK_BYTES / 1024) as u32;
-            let r2o_verdict = if r2o_step == 0 {
-                R2oFetchVolumeTxVerdict::Unreachable
-            } else if r2o_at_kb >= 12 {
-                R2oFetchVolumeTxVerdict::Cut
-            } else {
-                R2oFetchVolumeTxVerdict::Short
+        let failure = if r2o_step > 0 && r2o_stream.peer_sent_fin() {
+            Some((
+                false,
+                "сервер закрыл соединение (FIN) после предыдущего ответа".into(),
+            ))
+        } else {
+            match r2o_stream.send_head(&r2o_request, &mut sent_bytes) {
+                Err(error) => Some((false, format!("неполная отправка HEAD: {error}"))),
+                Ok(()) => r2o_drain_head_response(&mut r2o_stream, r2o_read_timeout)
+                    .err()
+                    .map(|error| {
+                        let transport = matches!(
+                            error.kind(),
+                            io::ErrorKind::ConnectionReset
+                                | io::ErrorKind::TimedOut
+                                | io::ErrorKind::WouldBlock
+                        ) && !r2o_stream.peer_sent_fin();
+                        (transport, error.to_string())
+                    }),
+            }
+        };
+        if let Some((transport, reason)) = failure {
+            let at_kb = (sent_bytes / 1024) as u32;
+            let verdict = match (transport, r2o_step, at_kb) {
+                (true, 0, _) => R2oFetchVolumeTxVerdict::Unreachable,
+                (true, _, 12..) => R2oFetchVolumeTxVerdict::Cut,
+                _ => R2oFetchVolumeTxVerdict::Short,
             };
             return Ok(R2oFetchVolumeTxResult {
                 address: r2o_address,
-                verdict: r2o_verdict,
-                at_kb: r2o_at_kb,
+                verdict,
+                at_kb,
                 elapsed: r2o_started.elapsed(),
-                reason: format!("HEAD-шаг {} не прошёл: {error}", r2o_step + 1),
+                reason: format!("HEAD-шаг {} не прошёл: {reason}", r2o_step + 1),
             });
         }
         if r2o_step == 0 {
@@ -3105,7 +3125,7 @@ fn r2o_fetch_measure_tx_volume_with_roots(
     Ok(R2oFetchVolumeTxResult {
         address: r2o_address,
         verdict: R2oFetchVolumeTxVerdict::Passed,
-        at_kb: (R2O_VOLUME_TX_STEPS * R2O_VOLUME_TX_CHUNK_BYTES / 1024) as u32,
+        at_kb: (sent_bytes / 1024) as u32,
         elapsed: r2o_started.elapsed(),
         reason: "лестница пройдена целиком".into(),
     })
@@ -3709,18 +3729,43 @@ enum R2oFetchVolumeStream {
 }
 
 impl R2oFetchVolumeStream {
-    fn r2o_set_read_timeout(&self, timeout: Duration) -> io::Result<()> {
+    fn socket(&self) -> &TcpStream {
         match self {
-            Self::Plain(stream) => stream.set_read_timeout(Some(timeout)),
-            Self::Tls(stream) => stream.sock.socket.set_read_timeout(Some(timeout)),
+            Self::Plain(stream) => stream,
+            Self::Tls(stream) => &stream.sock.socket,
         }
     }
 
+    fn r2o_set_read_timeout(&self, timeout: Duration) -> io::Result<()> {
+        self.socket().set_read_timeout(Some(timeout))
+    }
+
     fn r2o_set_write_timeout(&self, timeout: Duration) -> io::Result<()> {
+        self.socket().set_write_timeout(Some(timeout))
+    }
+
+    fn send_head(&mut self, request: &[u8], sent: &mut usize) -> io::Result<()> {
         match self {
-            Self::Plain(stream) => stream.set_write_timeout(Some(timeout)),
-            Self::Tls(stream) => stream.sock.socket.set_write_timeout(Some(timeout)),
+            Self::Plain(stream) => r2o_send_plain_head(stream, request, sent),
+            Self::Tls(stream) => {
+                stream.write_all(request)?;
+                stream.flush()?;
+                // rustls may buffer the plaintext before TCP accepts the record.
+                *sent += request.len();
+                Ok(())
+            }
         }
+    }
+
+    fn peer_sent_fin(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            const TCP_CLOSE_WAIT: u8 = 8;
+            r2o_tcp_info(self.socket().as_raw_fd())
+                .is_some_and(|(info, len)| len >= 1 && info.tcpi_state == TCP_CLOSE_WAIT)
+        }
+        #[cfg(not(target_os = "linux"))]
+        false
     }
 }
 
@@ -3733,20 +3778,23 @@ impl Read for R2oFetchVolumeStream {
     }
 }
 
-impl Write for R2oFetchVolumeStream {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        match self {
-            Self::Plain(stream) => stream.write(buffer),
-            Self::Tls(stream) => stream.write(buffer),
+fn r2o_send_plain_head(
+    stream: &mut impl Write,
+    mut request: &[u8],
+    sent: &mut usize,
+) -> io::Result<()> {
+    while !request.is_empty() {
+        match stream.write(request) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(written) => {
+                *sent += written;
+                request = &request[written..];
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
         }
     }
-
-    fn flush(&mut self) -> io::Result<()> {
-        match self {
-            Self::Plain(stream) => stream.flush(),
-            Self::Tls(stream) => stream.flush(),
-        }
-    }
+    Ok(())
 }
 
 fn r2o_volume_head_request(name: &str, padding: &[u8], padded: bool) -> Vec<u8> {
@@ -3784,11 +3832,35 @@ fn r2o_drain_head_response(stream: &mut R2oFetchVolumeStream, timeout: Duration)
     let deadline = Instant::now()
         .checked_add(timeout)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "слишком долгий срок ответа"))?;
-    let mut parser = HttpResponseParser::with_verify_header_capacity(true, 65_536);
+    let mut parser = HttpResponseParser::with_header_capacity(true, 65_536);
     let _r2o_http_buffer = R2oHttpResponseBufferTracking::new();
     let mut buffer = [0_u8; 4096];
     loop {
         if parser.is_complete() {
+            let status = parser.status();
+            if status >= 400 {
+                return Err(io::Error::other(format!(
+                    "сервер отклонил HEAD: HTTP {status}"
+                )));
+            }
+            let headers = parser.headers();
+            let mut keep_alive = headers.starts_with(b"HTTP/1.1 ");
+            for token in header_values(headers, b"Connection")
+                .flat_map(|value| value.split(|byte| *byte == b','))
+                .map(trim_ascii)
+            {
+                if token.eq_ignore_ascii_case(b"close") {
+                    return Err(io::Error::other(
+                        "сервер завершает обмен: Connection: close",
+                    ));
+                }
+                keep_alive |= token.eq_ignore_ascii_case(b"keep-alive");
+            }
+            if !keep_alive {
+                return Err(io::Error::other(
+                    "сервер ответил по HTTP/1.0 без keep-alive",
+                ));
+            }
             return Ok(());
         }
         if parser.is_invalid() {
@@ -3807,23 +3879,20 @@ fn r2o_drain_head_response(stream: &mut R2oFetchVolumeStream, timeout: Duration)
         stream.r2o_set_read_timeout(remaining)?;
         match stream.read(&mut buffer) {
             Ok(0) => {
-                parser.feed(&[], true);
-                if parser.is_complete() {
-                    return Ok(());
-                }
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
-                    "сервер закрыл ответ HEAD до конца заголовков",
+                    "сервер закрыл соединение (FIN) до конца заголовков HEAD",
                 ));
             }
             Ok(length) => parser.feed(&buffer[..length], false),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error),
         }
     }
 }
 
 #[cfg(target_os = "linux")]
-fn r2o_tcp_info_data_packets(fd: std::os::fd::RawFd) -> Option<u32> {
+fn r2o_tcp_info(fd: std::os::fd::RawFd) -> Option<(libc::tcp_info, usize)> {
     let mut r2o_info = std::mem::MaybeUninit::<libc::tcp_info>::zeroed();
     let mut r2o_length = std::mem::size_of::<libc::tcp_info>() as libc::socklen_t;
     let r2o_result = unsafe {
@@ -3838,8 +3907,12 @@ fn r2o_tcp_info_data_packets(fd: std::os::fd::RawFd) -> Option<u32> {
     if r2o_result != 0 {
         return None;
     }
-    let r2o_info = unsafe { r2o_info.assume_init() };
-    let r2o_length = r2o_length as usize;
+    Some((unsafe { r2o_info.assume_init() }, r2o_length as usize))
+}
+
+#[cfg(target_os = "linux")]
+fn r2o_tcp_info_data_packets(fd: std::os::fd::RawFd) -> Option<u32> {
+    let (r2o_info, r2o_length) = r2o_tcp_info(fd)?;
     let r2o_packets_end = std::mem::offset_of!(libc::tcp_info, tcpi_data_segs_out)
         + std::mem::size_of_val(&r2o_info.tcpi_data_segs_out);
     (r2o_length >= r2o_packets_end).then_some(
@@ -6707,7 +6780,7 @@ mod tests {
                 }
                 request_sender.send(request).unwrap();
                 stream
-                    .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
+                    .write_all(b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.0 204 No Content\r\nConnection: keep-alive\r\n\r\n")
                     .expect("ответить на HEAD-запрос");
             }
         });
@@ -6730,7 +6803,10 @@ mod tests {
         server.join().unwrap();
 
         assert_eq!(result.verdict, R2oFetchVolumeTxVerdict::Passed);
-        assert_eq!(result.at_kb, 39);
+        assert_eq!(
+            result.at_kb as usize,
+            requests.iter().map(String::len).sum::<usize>() / 1024
+        );
         assert_eq!(requests.len(), 10);
         assert!(requests[0].starts_with("HEAD / HTTP/1.1\r\n"));
         assert!(!requests[0].contains("X-Pad:"));
@@ -6743,10 +6819,13 @@ mod tests {
             assert_eq!(padding.len(), R2O_VOLUME_TX_CHUNK_BYTES);
             assert!(padding.bytes().all(|byte| byte.is_ascii_alphanumeric()));
         }
+        assert_ne!(requests[1], requests[2]);
     }
 
-    #[test]
-    fn исходящая_лестница_считает_обрыв_после_двенадцати_килобайт() {
+    fn tx_ladder_server_case(
+        reply: Option<&'static [u8]>,
+        keep_socket_open: bool,
+    ) -> (R2oFetchVolumeTxResult, Vec<usize>) {
         use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
         use rustls::{ServerConfig, ServerConnection};
         use std::net::TcpListener;
@@ -6781,12 +6860,22 @@ mod tests {
                     stream.read_exact(&mut byte).expect("прочитать HEAD-запрос");
                     request.push(byte[0]);
                 }
-                request_sender.send(request).unwrap();
+                request_sender.send(request.len()).unwrap();
                 if step != 4 {
                     stream
                         .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
                         .expect("ответить на HEAD-запрос");
+                } else if let Some(reply) = reply {
+                    stream.write_all(reply).unwrap();
+                    stream.flush().unwrap();
                 }
+            }
+            if keep_socket_open {
+                stream
+                    .sock
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let _ = stream.read(&mut [0]);
             }
         });
 
@@ -6801,12 +6890,45 @@ mod tests {
             mark: None,
         };
         let result = r2o_fetch_measure_tx_volume_with_roots(&options, roots).unwrap();
-        let requests = request_receiver.try_iter().count();
         server.join().unwrap();
+        (result, request_receiver.try_iter().collect())
+    }
 
-        assert_eq!(requests, 5);
-        assert_eq!(result.verdict, R2oFetchVolumeTxVerdict::Cut);
-        assert_eq!(result.at_kb, 15);
+    #[test]
+    fn tx_ladder_distinguishes_server_fin_refusal_and_connection_close() {
+        for reply in [
+            None,
+            Some(b"HTTP/1.1 431 Request Header Fields Too Large\r\n\r\n".as_slice()),
+            Some(b"HTTP/1.1 200 OK\r\nConnection: Keep-Alive, Close\r\n\r\n".as_slice()),
+            Some(b"HTTP/1.0 200 OK\r\n\r\n".as_slice()),
+            Some(b"HTTP/1.1 101 Switching Protocols\r\n\r\n".as_slice()),
+            Some(b"HTTP/1.1 2000 OK\r\n\r\n".as_slice()),
+        ] {
+            let (result, requests) = tx_ladder_server_case(reply, false);
+            assert_eq!(requests.len(), 5);
+            assert_eq!(result.verdict, R2oFetchVolumeTxVerdict::Short, "{result:?}");
+            assert_eq!(result.at_kb as usize, requests.iter().sum::<usize>() / 1024);
+        }
+    }
+
+    #[test]
+    fn tx_ladder_keeps_a_transport_cut_after_the_sent_threshold() {
+        let (result, requests) = tx_ladder_server_case(None, true);
+        assert_eq!(requests.len(), 5);
+        assert_eq!(result.verdict, R2oFetchVolumeTxVerdict::Cut, "{result:?}");
+        assert_eq!(result.at_kb as usize, requests.iter().sum::<usize>() / 1024);
+    }
+
+    #[test]
+    fn tx_ladder_counts_only_written_bytes_on_a_partial_plain_request() {
+        let mut buffer = [0; 5];
+        let mut writer = &mut buffer[..];
+        let mut sent = 1024;
+        let error =
+            super::r2o_send_plain_head(&mut writer, b"partial request", &mut sent).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WriteZero);
+        assert_eq!(sent, 1029);
+        assert_eq!(&buffer, b"parti");
     }
 
     #[cfg(target_os = "linux")]
