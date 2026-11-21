@@ -1,12 +1,15 @@
 use super::{
-    ControlClient, DiscoveryOutcome, DiscoveryWorker, Plan, R2oDnsServices, R2oDnsTrialEvidence,
-    SHAPE_MODERN, control, encode_delete_name_bound, encode_set_name_bound, flow_socket_addresses,
-    r2o_discovery_task_key, r2o_dns_unique_service, r2o_plan_wire_shape, random_id,
+    ControlClient, DiscoveryOutcome, DiscoveryWorker, Plan, PreparedCandidate, R2oDnsServices,
+    R2oDnsTrialEvidence, R2oQuicDiscoveryOutcome, R2oQuicDiscoveryTask, R2oQuicDiscoveryWorker,
+    SHAPE_MODERN, SHAPE_QUIC, control, encode_delete_name_bound, encode_set_name_bound,
+    flow_socket_addresses, r2o_discovery_task_key, r2o_dns_unique_service, r2o_plan_wire_shape,
+    random_id,
 };
 use r2k_core::dns_config::DnsService;
 use r2o_controller::discovery::DiscoveryTarget;
 use r2o_controller::dns_health::{DnsHealthResult, probe_dns_health};
 use r2o_controller::live::{DnsServiceState, DnsVerifiedRecovery};
+use r2o_controller::r2o_resource_limit::R2oMeasurementGate;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -27,13 +30,20 @@ struct Request {
     target: DiscoveryTarget,
 }
 
+#[derive(Clone)]
+pub(super) struct DoqDiscovery {
+    pub(super) generation: u64,
+    pub(super) service: DnsService,
+    pub(super) direct_mark: u32,
+}
+
 impl Request {
     fn from_failures(state: &R2oDnsServices, index: usize, family: Option<u8>) -> Option<Self> {
         let live = state.live.get(index)?;
         let service = state.services.get(index)?;
         if live.state != DnsServiceState::Failed
             || live.consecutive_network_failures < 2
-            || service.transport() != 6
+            || !matches!(service.protocol.as_str(), "doh" | "dot" | "doq")
             || service.verification_limitation().is_some()
         {
             return None;
@@ -49,7 +59,7 @@ impl Request {
             &service.sni
         };
         if !matches!(
-            r2o_dns_unique_service(&state.services, endpoint, host, 6),
+            r2o_dns_unique_service(&state.services, endpoint, host, service.transport()),
             Ok(Some((matched, _))) if matched == index
         ) {
             return None;
@@ -61,15 +71,32 @@ impl Request {
                 host: host.clone(),
                 endpoint: endpoint.to_string(),
                 family: endpoint_family,
-                shape: SHAPE_MODERN,
+                shape: if service.protocol == "doq" {
+                    SHAPE_QUIC
+                } else {
+                    SHAPE_MODERN
+                },
                 tcp_profile: 0,
             },
         })
     }
 
+    fn transport(&self) -> u8 {
+        if self.target.shape == SHAPE_QUIC {
+            17
+        } else {
+            6
+        }
+    }
+
     fn index(&self, state: &R2oDnsServices) -> Option<usize> {
-        let (index, _) =
-            r2o_dns_unique_service(&state.services, self.endpoint, &self.target.host, 6).ok()??;
+        let (index, _) = r2o_dns_unique_service(
+            &state.services,
+            self.endpoint,
+            &self.target.host,
+            self.transport(),
+        )
+        .ok()??;
         let live = state.live.get(index)?;
         (live.generation == self.generation
             && live.ip.parse::<std::net::IpAddr>() == Ok(self.endpoint.ip()))
@@ -127,9 +154,13 @@ impl Binding {
         wire_shape: u8,
         evidence: R2oDnsTrialEvidence,
     ) -> Option<Self> {
-        let key = control::dns_tcp_plan_key(request.endpoint, service.sni.as_bytes())?;
+        let key = if wire_shape == SHAPE_QUIC {
+            control::dns_doq_plan_key(request.endpoint, service.sni.as_bytes())?
+        } else {
+            control::dns_tcp_plan_key(request.endpoint, service.sni.as_bytes())?
+        };
         let parsed = Plan::parse(&evidence.records).ok()?;
-        if parsed.id != evidence.plan_id {
+        if parsed.id != evidence.plan_id || parsed.transport != request.transport() {
             return None;
         }
         let (context, expires) = Self::apply(
@@ -170,7 +201,7 @@ impl Binding {
             && ack.trial_id == Some(trial)
             && context.is_known()
             && !context.temporary
-            && context.kind == 1
+            && context.kind == if shape == SHAPE_QUIC { 2 } else { 1 }
             && context.shape == shape
             && context.family == family)
             .then_some((context, expires))
@@ -192,7 +223,7 @@ impl Binding {
     }
 
     fn remove(&self, client: &mut ControlClient) {
-        if let Ok(frame) = encode_delete_name_bound(&self.key, 6, self.context) {
+        if let Ok(frame) = encode_delete_name_bound(&self.key, self.transport(), self.context) {
             let _ = client.exchange_command_with_timeout(
                 &frame,
                 control::COMMAND_DEL_NAME_BOUND,
@@ -200,6 +231,42 @@ impl Binding {
             );
         }
     }
+
+    fn transport(&self) -> u8 {
+        if self.context.shape == SHAPE_QUIC {
+            17
+        } else {
+            6
+        }
+    }
+}
+
+fn start_doq_probe(request: &Request) -> std::io::Result<(SocketAddr, Receiver<DnsHealthResult>)> {
+    let endpoint = request.endpoint;
+    let (socket, _) =
+        r2o_controller::r2o_quic_http3::r2o_quic_http3_udp_socket_fresh(endpoint, None)
+            .map_err(|error| error.source)?;
+    socket.connect(endpoint)?;
+    let local = socket.local_addr()?;
+    let host = request.target.host.clone();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return;
+        };
+        let mut result = runtime.block_on(r2o_controller::dns_health::probe_doq_on(
+            socket,
+            endpoint,
+            &host,
+            PROBE_TIMEOUT,
+        ));
+        result.local_endpoint = Some(local);
+        let _ = sender.send(result);
+    });
+    Ok((local, receiver))
 }
 
 struct Recheck {
@@ -212,11 +279,18 @@ struct Recheck {
 
 impl Recheck {
     fn new(binding: Binding, request: &Request, mut service: DnsService, now: Instant) -> Self {
-        service.host = request.endpoint.ip().to_string();
-        let (sender, receiver) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = sender.send(probe_dns_health(&service, None, PROBE_TIMEOUT));
-        });
+        let receiver = if request.transport() == 17 {
+            start_doq_probe(request)
+                .map(|(_, receiver)| receiver)
+                .unwrap_or_else(|_| std::sync::mpsc::channel().1)
+        } else {
+            service.host = request.endpoint.ip().to_string();
+            let (sender, receiver) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = sender.send(probe_dns_health(&service, None, PROBE_TIMEOUT));
+            });
+            receiver
+        };
         Self {
             binding,
             receiver,
@@ -227,7 +301,7 @@ impl Recheck {
     }
 
     fn observe(&mut self, endpoint: SocketAddr, event: &control::AppliedEvent) {
-        if event.key[37] != 6
+        if event.key[37] != self.binding.transport()
             || event.trial_id != [0; 16]
             || event.binding != self.binding.context
             || event.plan_id != self.binding.plan_id
@@ -271,6 +345,12 @@ impl Recheck {
 enum Phase {
     Open(RouteCommand, Option<Binding>),
     Search,
+    QuicCapture {
+        local: SocketAddr,
+        snapshot: Option<Vec<u8>>,
+        deadline: Instant,
+    },
+    QuicSearch,
     Recheck(Recheck),
 }
 
@@ -290,6 +370,8 @@ struct Retained {
 pub(super) struct Recovery {
     firewall: PathBuf,
     family: Option<u8>,
+    doq_marks: Option<(u32, u32)>,
+    gate: R2oMeasurementGate,
     attempt: Option<Attempt>,
     retained: Vec<Retained>,
     cleanup: Vec<RouteCommand>,
@@ -298,7 +380,12 @@ pub(super) struct Recovery {
 }
 
 impl Recovery {
-    pub(super) fn from_environment(mark: Option<u32>, family: Option<u8>) -> Option<Self> {
+    pub(super) fn from_environment(
+        mark: Option<u32>,
+        confirm_mark: Option<u32>,
+        family: Option<u8>,
+        gate: R2oMeasurementGate,
+    ) -> Option<Self> {
         if mark.unwrap_or(0) == 0
             || super::r2o_control_wire() != control::WireProfile::V48
             || !matches!(std::env::var("R2O_DNS_MODE").as_deref(), Ok("apply"))
@@ -312,6 +399,10 @@ impl Recovery {
         Some(Self {
             firewall,
             family,
+            doq_marks: mark
+                .zip(confirm_mark)
+                .filter(|(direct, trial)| *trial != 0 && direct != trial),
+            gate,
             attempt: None,
             retained: Vec::new(),
             cleanup: Vec::new(),
@@ -320,15 +411,19 @@ impl Recovery {
         })
     }
 
-    fn route(&self, endpoint: SocketAddr, add: bool, now: Instant) -> Option<RouteCommand> {
+    fn route(&self, request: &Request, add: bool, now: Instant) -> Option<RouteCommand> {
         let seconds = if add { ROUTE_TTL.as_secs() } else { 0 };
         let child = Command::new(&self.firewall)
             .args([
                 "dns-route",
                 if add { "add" } else { "del" },
-                &endpoint.ip().to_string(),
-                "tcp",
-                &endpoint.port().to_string(),
+                &request.endpoint.ip().to_string(),
+                if request.transport() == 17 {
+                    "udp"
+                } else {
+                    "tcp"
+                },
+                &request.endpoint.port().to_string(),
                 &seconds.to_string(),
             ])
             .stdin(Stdio::null())
@@ -351,6 +446,9 @@ impl Recovery {
         now: Instant,
         reason: Option<&str>,
     ) {
+        if request.transport() == 17 {
+            super::r2o_quic_dns_live_clear(request.endpoint);
+        }
         if let Some(index) = request.index(state) {
             let live = &mut state.live[index];
             if binding.as_ref().is_some_and(|binding| {
@@ -376,7 +474,7 @@ impl Recovery {
             binding.remove(client);
         }
         if self.cleanup.len() < r2k_core::dns_config::DNS_SERVICE_MAX
-            && let Some(cleanup) = self.route(request.endpoint, false, now)
+            && let Some(cleanup) = self.route(request, false, now)
         {
             self.cleanup.push(cleanup);
         }
@@ -387,6 +485,7 @@ impl Recovery {
         client: &mut ControlClient,
         state: &mut R2oDnsServices,
         worker: &mut DiscoveryWorker,
+        quic: Option<&mut R2oQuicDiscoveryWorker>,
         now: Instant,
         wall: i64,
     ) {
@@ -413,7 +512,7 @@ impl Recovery {
         }
 
         if let Some(attempt) = self.attempt.take() {
-            self.advance(attempt, client, state, worker, now, wall);
+            self.advance(attempt, client, state, worker, quic, now, wall);
             return;
         }
         if now < self.next_scan || !self.cleanup.is_empty() {
@@ -430,15 +529,22 @@ impl Recovery {
             (state.live[index]
                 .recovery_retry_at
                 .is_none_or(|retry| now >= retry)
-                && !self
-                    .retained
-                    .iter()
-                    .any(|entry| entry.request.endpoint == request.endpoint)
-                && !worker.is_active(&request.target))
+                && !self.retained.iter().any(|entry| {
+                    entry.request.endpoint == request.endpoint
+                        && entry.request.transport() == request.transport()
+                })
+                && if request.transport() == 17 {
+                    self.doq_marks.is_some()
+                        && quic
+                            .as_ref()
+                            .is_some_and(|worker| !worker.active.contains_key(&request.endpoint))
+                } else {
+                    !worker.is_active(&request.target)
+                })
             .then_some(request)
         });
         if let Some(request) = request {
-            if worker.r2o_is_watching(&request.target) {
+            if request.transport() == 6 && worker.r2o_is_watching(&request.target) {
                 worker.r2o_forget_watching_task(&r2o_discovery_task_key(&request.target));
             }
             self.open(request, None, client, state, now);
@@ -453,7 +559,7 @@ impl Recovery {
         state: &mut R2oDnsServices,
         now: Instant,
     ) {
-        if let Some(command) = self.route(request.endpoint, true, now) {
+        if let Some(command) = self.route(&request, true, now) {
             if let Some(index) = request.index(state) {
                 state.live[index].recovery_in_progress = true;
             }
@@ -480,6 +586,7 @@ impl Recovery {
         client: &mut ControlClient,
         state: &mut R2oDnsServices,
         worker: &mut DiscoveryWorker,
+        quic: Option<&mut R2oQuicDiscoveryWorker>,
         now: Instant,
         wall: i64,
     ) {
@@ -503,6 +610,60 @@ impl Recovery {
                         .pending_rechecks
                         .contains_key(&r2o_discovery_task_key(&attempt.request.target))
                 {
+                    self.attempt = Some(attempt);
+                } else {
+                    self.release(&attempt.request, None, client, state, now, None);
+                }
+            }
+            Phase::QuicCapture {
+                snapshot, deadline, ..
+            } => {
+                if let Some(index) = current
+                    && now < *deadline
+                    && let Some((direct_mark, trial_mark)) = self.doq_marks
+                    && let Some(quic) = quic
+                {
+                    if snapshot.is_some()
+                        && quic.has_capacity()
+                        && let Some(permit) = self.gate.r2o_try_acquire_queued()
+                    {
+                        let queued = quic.queue(R2oQuicDiscoveryTask {
+                            server: attempt.request.endpoint,
+                            snapshot: snapshot.take().expect("снят QUIC Initial"),
+                            probe_path: "/".into(),
+                            r2o_mark: Some(trial_mark),
+                            permit,
+                            started_at: now,
+                            deny_recheck: false,
+                            stall_cut: false,
+                            cooldown_key: None,
+                            dns: Some(DoqDiscovery {
+                                generation: attempt.request.generation,
+                                service: state.services[index].clone(),
+                                direct_mark,
+                            }),
+                        });
+                        if queued {
+                            attempt.phase = Phase::QuicSearch;
+                            self.attempt = Some(attempt);
+                            return;
+                        }
+                    } else {
+                        self.attempt = Some(attempt);
+                        return;
+                    }
+                }
+                self.release(
+                    &attempt.request,
+                    None,
+                    client,
+                    state,
+                    now,
+                    Some("Не удалось подготовить QUIC Initial для DoQ Discovery."),
+                );
+            }
+            Phase::QuicSearch => {
+                if current.is_some() && now < attempt.expires {
                     self.attempt = Some(attempt);
                 } else {
                     self.release(&attempt.request, None, client, state, now, None);
@@ -543,6 +704,23 @@ impl Recovery {
                         state.services[index].clone(),
                         now,
                     ));
+                } else if attempt.request.transport() == 17 {
+                    let Ok((local, _)) = start_doq_probe(&attempt.request) else {
+                        self.release(
+                            &attempt.request,
+                            None,
+                            client,
+                            state,
+                            now,
+                            Some("Не удалось открыть UDP-сокет для DoQ Discovery."),
+                        );
+                        return;
+                    };
+                    attempt.phase = Phase::QuicCapture {
+                        local,
+                        snapshot: None,
+                        deadline: now + CHECK_TIMEOUT,
+                    };
                 } else if !worker.is_active(&attempt.request.target)
                     && worker.queue_with_planned(attempt.request.target.clone(), false)
                 {
@@ -612,6 +790,71 @@ impl Recovery {
         }
     }
 
+    pub(super) fn observe_quic_initial(&mut self, key: &[u8; control::KEY_LEN], captured: &[u8]) {
+        let Some(Attempt {
+            request,
+            phase: Phase::QuicCapture {
+                local, snapshot, ..
+            },
+            ..
+        }) = self.attempt.as_mut()
+        else {
+            return;
+        };
+        let (low, high) = flow_socket_addresses(key, true);
+        if snapshot.is_some()
+            || !((low == *local && high == request.endpoint)
+                || (high == *local && low == request.endpoint))
+        {
+            return;
+        }
+        let Some(parsed) = r2k_core::quic_snapshot::r2k_quic_snapshot_parse(captured) else {
+            return;
+        };
+        let Ok(sni) = r2k_core::quic::r2k_quic_doq_sni(parsed.datagrams()) else {
+            return;
+        };
+        if sni.as_ref().map_or_else(
+            || request.target.host.parse::<std::net::IpAddr>() == Ok(request.endpoint.ip()),
+            |sni| sni.eq_ignore_ascii_case(request.target.host.as_bytes()),
+        ) {
+            *snapshot = Some(captured.to_vec());
+        }
+    }
+
+    pub(super) fn finish_doq(
+        &mut self,
+        client: &mut ControlClient,
+        state: &mut R2oDnsServices,
+        outcome: R2oQuicDiscoveryOutcome,
+        now: Instant,
+    ) {
+        let Some(dns) = outcome.dns else {
+            return;
+        };
+        super::r2o_quic_dns_live_clear(outcome.server);
+        if !self.attempt.as_ref().is_some_and(|attempt| {
+            matches!(attempt.phase, Phase::QuicSearch)
+                && attempt.request.generation == dns.generation
+                && attempt.request.endpoint == outcome.server
+                && attempt
+                    .request
+                    .target
+                    .host
+                    .eq_ignore_ascii_case(&outcome.host)
+        }) {
+            return;
+        }
+        let proof = outcome.result.ok().flatten().and_then(|(text, _, _)| {
+            let plan = PreparedCandidate::new(&text).ok()?;
+            Some(R2oDnsTrialEvidence {
+                plan_id: plan.plan_id,
+                records: plan.wire_records,
+            })
+        });
+        self.finish_attempt(client, state, SHAPE_QUIC, proof, now);
+    }
+
     pub(super) fn finish(
         &mut self,
         client: &mut ControlClient,
@@ -626,6 +869,24 @@ impl Recovery {
         }) {
             return false;
         }
+        self.finish_attempt(
+            client,
+            state,
+            r2o_plan_wire_shape(outcome.target.shape, has_timestamp),
+            proof,
+            now,
+        );
+        true
+    }
+
+    fn finish_attempt(
+        &mut self,
+        client: &mut ControlClient,
+        state: &mut R2oDnsServices,
+        shape: u8,
+        proof: Option<R2oDnsTrialEvidence>,
+        now: Instant,
+    ) {
         let mut attempt = self.attempt.take().expect("найдена DNS-задача");
         if let Some(index) = attempt.request.needs_recovery(state)
             && now + CHECK_TIMEOUT < attempt.expires
@@ -634,7 +895,7 @@ impl Recovery {
                 client,
                 &attempt.request,
                 &state.services[index],
-                r2o_plan_wire_shape(outcome.target.shape, has_timestamp),
+                shape,
                 proof,
             )
         {
@@ -655,7 +916,6 @@ impl Recovery {
                 Some("Discovery не получил подтверждённого плана для этого DNS-сервиса."),
             );
         }
-        true
     }
 }
 
@@ -663,6 +923,42 @@ impl Recovery {
 mod tests {
     use super::*;
     use r2o_controller::live::DnsServiceLive;
+
+    #[test]
+    fn doq_recovery_refuses_a_shared_identity_with_doh3() {
+        let doq = DnsService {
+            protocol: "doq".into(),
+            host: "resolver.example".into(),
+            sni: "resolver.example".into(),
+            port: 853,
+            ..DnsService::default()
+        };
+        let doh3 = DnsService {
+            protocol: "doh3".into(),
+            path: "/dns-query".into(),
+            ..doq.clone()
+        };
+        let mut state = R2oDnsServices {
+            services: vec![doq],
+            live: vec![DnsServiceLive {
+                state: DnsServiceState::Failed,
+                ip: "192.0.2.2".into(),
+                generation: 1,
+                consecutive_network_failures: 2,
+                ..DnsServiceLive::default()
+            }],
+            tasks: Vec::new(),
+            generation: 1,
+        };
+        let job = Request::from_failures(&state, 0, Some(4)).unwrap();
+        assert_eq!(job.transport(), 17);
+        assert_eq!(job.target.shape, SHAPE_QUIC);
+        state.services.push(doh3);
+        state.live.push(state.live[0].clone());
+        assert!(job.index(&state).is_none());
+        assert!(Request::from_failures(&state, 0, Some(4)).is_none());
+        assert!(Request::from_failures(&state, 1, Some(4)).is_none());
+    }
 
     #[test]
     fn dns_recovery_requires_repeat_failures_for_the_same_endpoint() {

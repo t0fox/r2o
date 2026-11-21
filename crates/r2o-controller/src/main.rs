@@ -7723,6 +7723,7 @@ struct R2oQuicDiscoveryTask {
     deny_recheck: bool,
     stall_cut: bool,
     cooldown_key: Option<R2oQuicCooldownKey>,
+    dns: Option<dns_recovery::DoqDiscovery>,
 }
 
 /// Чем именно подтверждён QUIC-кандидат. C `t->ver.replay_proof` и
@@ -7744,6 +7745,7 @@ struct R2oQuicDiscoveryOutcome {
     probe_path: String,
     deny_recheck: bool,
     stall_cut: bool,
+    dns: Option<dns_recovery::DoqDiscovery>,
     result: Result<Option<(String, String, R2oQuicConfirmProof)>, String>,
 }
 
@@ -7965,7 +7967,7 @@ fn r2o_quic_direct_clear_map()
     CLEARS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn r2o_quic_direct_clear_enqueue(target: r2o_controller::discovery::DiscoveryTarget) {
     r2o_quic_direct_clear_map()
         .lock()
@@ -11213,6 +11215,7 @@ impl R2oQuicDiscoveryWorker {
                 task.r2o_mark,
                 task.deny_recheck,
                 &mut task.stall_cut,
+                task.dns.as_ref(),
                 &|question, sent| {
                     // C `qp_progress`: sent==0 не двигает live-вопрос.
                     let Some((question, sent)) =
@@ -11269,7 +11272,8 @@ impl R2oQuicDiscoveryWorker {
                         let mut snapshots = worker_snapshots
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        let replacement = if !worker_cancel.load(Ordering::Relaxed)
+                        let replacement = if job.task.dns.is_none()
+                            && !worker_cancel.load(Ordering::Relaxed)
                             && !job.remeasured.load(Ordering::Relaxed)
                         {
                             snapshots.remove(&server)
@@ -11303,6 +11307,7 @@ impl R2oQuicDiscoveryWorker {
                             probe_path: job.task.probe_path.clone(),
                             deny_recheck,
                             stall_cut: job.task.stall_cut,
+                            dns: job.task.dns,
                             result,
                         })
                         .is_err()
@@ -11339,11 +11344,13 @@ impl R2oQuicDiscoveryWorker {
         };
         // C `cooldown_record(kind=0)`/`clear_backoff_ms`: после прямого DoQ
         // CLEAR повторный поиск ждёт 10/30/60 минут.
-        if r2o_quic_clear_cooldown_active(
-            &host,
-            if server.is_ipv6() { 6 } else { 4 },
-            std::time::Instant::now(),
-        ) {
+        if task.dns.is_none()
+            && r2o_quic_clear_cooldown_active(
+                &host,
+                if server.is_ipv6() { 6 } else { 4 },
+                std::time::Instant::now(),
+            )
+        {
             return false;
         }
         let Some(jobs) = self.jobs.as_ref() else {
@@ -24835,9 +24842,14 @@ impl ControlClient {
                 .filter(|family| matches!(family, 4 | 6))
         });
         dns_health.family = dns_family;
-        let mut dns_recovery = discovery
-            .as_ref()
-            .and_then(|_| dns_recovery::Recovery::from_environment(https_probe_mark, dns_family));
+        let mut dns_recovery = discovery.as_ref().and_then(|_| {
+            dns_recovery::Recovery::from_environment(
+                https_probe_mark,
+                confirm_mark,
+                dns_family,
+                measurement_gate.clone(),
+            )
+        });
         let mut dns_services_refresh =
             std::time::Instant::now() + std::time::Duration::from_secs(30);
         let http_search = discovery.as_ref().map(|(catalog, _, _)| {
@@ -25061,7 +25073,14 @@ impl ControlClient {
                 if let (Some(recovery), Some((worker, _, _, _))) =
                     (&mut dns_recovery, &mut discovery)
                 {
-                    recovery.tick(self, &mut dns_services, worker, now, dns_wall_now);
+                    recovery.tick(
+                        self,
+                        &mut dns_services,
+                        worker,
+                        quic_discovery.as_mut(),
+                        now,
+                        dns_wall_now,
+                    );
                 }
                 dns_health.start_due(&mut dns_services, https_probe_mark);
                 if let Some((worker, _, _, _)) = &discovery {
@@ -26254,6 +26273,12 @@ impl ControlClient {
                     .as_mut()
                     .and_then(R2oQuicDiscoveryWorker::try_outcome)
                 {
+                    if outcome.dns.is_some() {
+                        if let Some(recovery) = dns_recovery.as_mut() {
+                            recovery.finish_doq(self, &mut dns_services, outcome, now);
+                        }
+                        continue;
+                    }
                     let family = if outcome.server.is_ipv4() { 4 } else { 6 };
                     if outcome.deny_recheck {
                         if outcome.stall_cut {
@@ -26561,6 +26586,7 @@ impl ControlClient {
                                 deny_recheck: pending.deny_recheck,
                                 stall_cut: false,
                                 cooldown_key: pending.cooldown_key,
+                                dns: None,
                             }) {
                                 if pending.deny_recheck {
                                     if let Some(host) = pending_host {
@@ -28471,6 +28497,9 @@ impl ControlClient {
                     && hello.shape == Some(SHAPE_QUIC)
                     && let Some(snapshot) = hello.quic_snapshot.as_ref()
                 {
+                    if let Some(recovery) = dns_recovery.as_mut() {
+                        recovery.observe_quic_initial(&hello.key, snapshot);
+                    }
                     let now = std::time::Instant::now();
                     quic_snapshots.retain(|_, (_, captured)| {
                         now.duration_since(*captured) < std::time::Duration::from_secs(60)
@@ -30210,6 +30239,50 @@ impl ControlClient {
                 if r2o_quic_trial_remaining(started_at, measurement_permit).is_zero() {
                     return Err("истёк срок QUIC-испытания".into());
                 }
+                if let Some(service) = doq {
+                    // C `d2k_verify_dns_on` для DoQ: план уже стоит на
+                    // local/server, зонд шлёт DNS на stream 0 с zero ID.
+                    let host = if service.sni.is_empty() {
+                        service.host.as_str()
+                    } else {
+                        service.sni.as_str()
+                    };
+                    let dns = runtime.block_on(r2o_controller::dns_health::probe_doq_on(
+                        probe.try_clone_socket()?,
+                        server,
+                        host,
+                        r2o_quic_trial_remaining(started_at, measurement_permit)
+                            .min(std::time::Duration::from_secs(4)),
+                    ));
+                    outcome.dns_reply = dns.dns_reply;
+                    outcome.dns_level = if dns.dns_reply {
+                        r2o_controller::live::D2K_VER_APPLICATION
+                    } else if dns.tls_handshake {
+                        r2o_controller::live::D2K_VER_HANDSHAKE
+                    } else if dns.tcp_reachable {
+                        r2o_controller::live::D2K_VER_TRANSPORT
+                    } else {
+                        r2o_controller::live::D2K_VER_NOT_MEASURED
+                    };
+                    outcome.dns_status = 0;
+                    outcome.dns_reason = dns.reason;
+                    let events = r2o_collect_controller_applied_events_until(
+                        commands,
+                        trial_id,
+                        std::time::Duration::from_millis(400),
+                        |event| applied_quic_trial_matches(event, trial_id, plan_id, local, server),
+                    )?;
+                    applied |= events.iter().any(|event| {
+                        applied_quic_trial_matches(event, trial_id, plan_id, local, server)
+                    });
+                    outcome.applied = applied;
+                    outcome.decision = if applied && outcome.dns_reply {
+                        R2oQuicFilterDecision::Pass
+                    } else {
+                        R2oQuicFilterDecision::Unknown
+                    };
+                    return Ok(outcome);
+                }
                 let filter = probe.r2o_quic_probe_filter_with_plan(&plan, request_timeout, attempt);
                 // C `sched_quic_progress`: после вопроса в live уходят
                 // вопрос и число фактически отправленных датаграмм.
@@ -30244,49 +30317,6 @@ impl ControlClient {
                     return Ok(outcome);
                 }
 
-                if let Some(service) = doq {
-                    // C `d2k_verify_dns_on` для DoQ: план уже стоит на
-                    // local/server, зонд шлёт DNS на stream 0 с zero ID.
-                    let host = if service.sni.is_empty() {
-                        service.host.as_str()
-                    } else {
-                        service.sni.as_str()
-                    };
-                    let dns = runtime.block_on(r2o_controller::dns_health::probe_doq_on(
-                        probe.try_clone_socket()?,
-                        server,
-                        host,
-                        r2o_quic_trial_remaining(started_at, measurement_permit),
-                    ));
-                    outcome.dns_reply = dns.dns_reply;
-                    outcome.dns_level = if dns.dns_reply {
-                        r2o_controller::live::D2K_VER_APPLICATION
-                    } else if dns.tls_handshake {
-                        r2o_controller::live::D2K_VER_HANDSHAKE
-                    } else if dns.tcp_reachable {
-                        r2o_controller::live::D2K_VER_TRANSPORT
-                    } else {
-                        r2o_controller::live::D2K_VER_NOT_MEASURED
-                    };
-                    outcome.dns_status = 0;
-                    outcome.dns_reason = dns.reason;
-                    let events = r2o_collect_controller_applied_events_until(
-                        commands,
-                        trial_id,
-                        std::time::Duration::from_millis(400),
-                        |event| applied_quic_trial_matches(event, trial_id, plan_id, local, server),
-                    )?;
-                    applied |= events.iter().any(|event| {
-                        applied_quic_trial_matches(event, trial_id, plan_id, local, server)
-                    });
-                    outcome.applied = applied;
-                    outcome.decision = if applied && outcome.dns_reply {
-                        R2oQuicFilterDecision::Pass
-                    } else {
-                        R2oQuicFilterDecision::Unknown
-                    };
-                    return Ok(outcome);
-                }
                 let data = runtime.block_on(
                     r2o_controller::r2o_quic_http3::r2o_quic_http3_measure_with_max_duration(
                         probe.try_clone_socket()?,
@@ -30382,13 +30412,14 @@ impl ControlClient {
         r2o_mark: Option<u32>,
         deny_recheck: bool,
         stall_cut: &mut bool,
+        scoped_dns: Option<&dns_recovery::DoqDiscovery>,
         progress: &dyn Fn(&str, usize),
     ) -> Result<Option<(String, String, R2oQuicConfirmProof)>, Box<dyn Error>> {
         use r2o_controller::quic_replay::{QuicReplayProbe, r2o_quic_address_is_local};
 
         // d2o's test harness explicitly enables local targets for loopback
         // fixtures; production keeps its default `allow_local = false`.
-        if !cfg!(test) && r2o_quic_address_is_local(server) {
+        if !cfg!(test) && scoped_dns.is_none() && r2o_quic_address_is_local(server) {
             eprintln!(
                 "вердикт: {} — QUIC HTTP/3-проба пропущена: адрес {} локальный или не является публичной целью",
                 r2o_controller::classify::r2o_sched_verdict_name_for(
@@ -30533,6 +30564,9 @@ impl ControlClient {
                 return Ok(None);
             }
         };
+        if doq_service.as_ref() != scoped_dns.map(|dns| &dns.service) {
+            return Ok(None);
+        }
         if doq_service.is_some()
             && let Err(reason) = r2k_core::quic::r2k_quic_doq_sni(parsed_snapshot.datagrams())
         {
@@ -30580,7 +30614,8 @@ impl ControlClient {
             );
             let check_direct = || -> Result<r2o_controller::dns_health::DnsHealthResult, String> {
                 let (socket, _) = r2o_controller::r2o_quic_http3::r2o_quic_http3_udp_socket_fresh(
-                    server, r2o_mark,
+                    server,
+                    scoped_dns.map(|dns| dns.direct_mark),
                 )
                 .map_err(|error| error.source.to_string())?;
                 Ok(runtime.block_on(r2o_controller::dns_health::probe_doq_on(
@@ -30603,28 +30638,10 @@ impl ControlClient {
             match direct {
                 Ok(result) if result.dns_reply => {
                     r2o_quic_dns_live_clear(server);
-                    let host =
-                        r2o_controller::domain::normalize(host).unwrap_or_else(|_| host.to_owned());
-                    let family = if server.is_ipv6() { 6 } else { 4 };
-                    let target = r2o_controller::discovery::DiscoveryTarget {
-                        tcp_profile: 0,
-                        host,
-                        endpoint: server.to_string(),
-                        family,
-                        shape: SHAPE_QUIC,
-                    };
-                    // C `T_ASKING`: DoQ-ответ не заполняет `t->vol`
-                    // (`rx_direct_complete` ставит только ECH baseline),
-                    // поэтому group_record(DIRECT_CLEAR) для DoQ НЕ пишется.
-                    // Закрытие привязок/cooldown/report — пишутся.
                     let gates = r2o_doq_direct_clear_gates();
                     debug_assert!(!gates.volume_proven && !gates.ech_trial);
                     debug_assert!(!gates.rx_partial && !gates.rx_direct_complete);
-                    r2o_discovery_meta_set(&target, gates.rx_direct_complete, SHAPE_QUIC);
-                    r2o_quic_direct_clear_enqueue(target);
-                    println!(
-                        "DoQ {server}: прямой DNS-ответ получен; план не требуется, прямой CLEAR закрывает привязки"
-                    );
+                    println!("DoQ {server}: прямой DNS-ответ получен, адресный план не требуется");
                     return Ok(None);
                 }
                 Ok(result) => {
@@ -57518,6 +57535,7 @@ group_block_proven: false,
             deny_recheck: false,
             stall_cut: false,
             cooldown_key: None,
+            dns: None,
         }));
         let mut saw_tcp_while_quic_active = false;
         let mut catalog = Catalog::default();
@@ -57652,6 +57670,7 @@ group_block_proven: false,
             deny_recheck: false,
             stall_cut: false,
             cooldown_key: None,
+            dns: None,
         }));
 
         let mut key = [0; r2k_core::control::KEY_LEN];
@@ -57905,6 +57924,7 @@ group_block_proven: false,
             deny_recheck: false,
             stall_cut: false,
             cooldown_key: None,
+            dns: None,
         };
         let second = R2oQuicDiscoveryTask {
             server: "198.51.100.20:443".parse().unwrap(),
@@ -57916,6 +57936,7 @@ group_block_proven: false,
             deny_recheck: false,
             stall_cut: false,
             cooldown_key: None,
+            dns: None,
         };
         assert!(worker.queue(first));
         assert!(worker.queue(second));
@@ -58006,6 +58027,7 @@ group_block_proven: false,
             deny_recheck: false,
             stall_cut: false,
             cooldown_key: None,
+            dns: None,
         };
         let second = R2oQuicDiscoveryTask {
             server: "198.51.100.20:443".parse().unwrap(),
@@ -58017,6 +58039,7 @@ group_block_proven: false,
             deny_recheck: false,
             stall_cut: false,
             cooldown_key: None,
+            dns: None,
         };
 
         assert!(worker.queue(first));
@@ -58064,6 +58087,7 @@ group_block_proven: false,
             deny_recheck: false,
             stall_cut: false,
             cooldown_key: None,
+            dns: None,
         }));
 
         assert_eq!(
@@ -58110,6 +58134,7 @@ group_block_proven: false,
             deny_recheck: false,
             stall_cut: false,
             cooldown_key: None,
+            dns: None,
         }));
 
         assert_eq!(
@@ -58325,6 +58350,7 @@ group_block_proven: false,
             deny_recheck: false,
             stall_cut: false,
             cooldown_key: None,
+            dns: None,
         }));
         started_receiver
             .recv_timeout(std::time::Duration::from_secs(2))
