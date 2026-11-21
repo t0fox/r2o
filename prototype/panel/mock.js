@@ -2,13 +2,14 @@
 (() => {
   'use strict';
   const params=new URLSearchParams(location.search);
+  const redesign=document.documentElement.hasAttribute('data-redesign-preview');
   const showcase=params.get('episode')==='live';
   let episodeStart;
   let shownStage=-1, shownAt=0, firstStageAt=0;
   if(showcase)document.addEventListener('DOMContentLoaded',()=>{
     const card=document.querySelector('.workload-card');
     const replay=document.createElement('button');
-    replay.type='button';replay.className='episode-replay';replay.textContent='Демо · Повторить поиск';
+    replay.type='button';replay.className=redesign?'btn episode-replay':'episode-replay';replay.textContent='Демо · Повторить поиск';
     card.querySelector('.card-head').append(replay);
     replay.addEventListener('click',()=>{
       episodeStart=Date.now()+2600;
@@ -33,7 +34,7 @@
   boxes[0].plans.push({id:'YT-07',proto:'tls',enabled:true,successes:2,
     text:'r2o-plan 1 5\nproto tcp tls\nsegment 1400\npayload-pad64 2 391 15\nseqovl payload=2 poison=0\norder forward'});
   ['i.ytimg.com','www.youtube.com'].forEach(target=>boxes[0].bindings.push({...boxes[0].bindings[0],target,plan_id:'YT-07',successes:1}));
-  let engine=true, proxy=true, recording=true, workers=['worker.example.invalid'], clear=false;
+  let engine=true, proxy=true, recording=true, paused=false, workers=['worker.example.invalid'], clear=false;
   const now=()=>Math.floor(Date.now()/1000);
   const update={current:'21.11.2026',check_ok:true,auto:true,checked_utc:now()-300,
     latest:{version:'22.11.2026 · preview',release_id:'22.11.2026-preview',notes:'Улучшена читаемость диагностики. Добавлена история этапов установки.'}};
@@ -54,7 +55,7 @@
         installStart=0;
       }
     }
-    return update;
+    return redesign?{...update,install_stage:update.demo_stage}:update;
   }
   function telegramDiagnostics(){
     if(!dcStart)return {state:'never'};
@@ -62,9 +63,9 @@
     return {state:'healthy',checked_at:Math.floor(dcStart/1000)+2,data_centers:[1,2,3,4,5].map(dc=>({dc,state:'healthy',
       routes:[{transport:'direct-wss',state:'healthy',dns_ms:3,tcp_ms:12+dc,tls_ms:21+dc,mtproto_ms:42+dc}]}))};
   }
-  const samples=Array.from({length:24},(_,i)=>({at:1795305600+i*60,processes:{controller:{pid:1581,rss_kib:13800+i*14}}}));
+  const samples=Array.from({length:24},(_,i)=>({at:now()-(23-i)*60,processes:[{name:'r2o-controller',pid:1581,rss_kib:13800+i*14,rss_anon_kib:9600+i*9}]}));
   const report=()=>({enabled:recording,samples,events:[],sample_interval_ms:60000,anomalies:[]});
-  const reply=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json'}});
+  const reply=(data,status=200,headers={})=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json',...headers}});
   function snapshot(){
     if(episodeStart===undefined)episodeStart=Date.now()+(showcase?2600:5500);
     const elapsed=Date.now()-episodeStart;
@@ -81,17 +82,18 @@
       direct_transport:'direct_wss',selected_transport:'direct_wss',fallback_state:'idle',telegram_response_seen:true,
       bytes_from_clients:18400,bytes_from_upstreams:76200}]:[];
     return {snapshot:{engine_running:engine,live_fresh:true,mode:'apply',controls_enabled:true,
-      panel_listen:'Демо · 127.0.0.1',version:'64cf01b0',build_id:'64cf01b0',catalog_available:true,
+      panel_listen:redesign?'Демо':'Демо · 127.0.0.1',version:'64cf01b0',build_id:'64cf01b0',catalog_available:true,
       telegram_status:proxy?(sessions.length?'connected':'local'):'stopped',telegram_configured:true,telegram_port:1443,
       telegram_diagnostics:telegramDiagnostics(),telegram_stats:{listener_ready:proxy,active_connections:sessions.length,active_sessions:sessions,
         accepted_connections:19,mtproto_success:18,mtproto_failure:1,last_success_dc:2,last_success_latency_ms:37,bytes_from_clients:18400,bytes_from_upstreams:76200,
         client_response_latency_samples:18,client_response_latency_p50_us:37000,client_response_latency_p95_us:62000},stages:[
-        {name:'Контроллер',built:true},{name:'Datapath',built:true},{name:'Панель',built:true}]},
+        {name:'Контроллер',title:'Контроллер',detail:'Снимок получен',built:true},{name:'Datapath',title:'Datapath',detail:'IPv4 и IPv6 готовы',built:true},{name:'Панель',title:'Панель',detail:'Отвечает локально',built:true}]},
       knowledge:{linked:engine,groups:clear?[]:groups,boxes:clear?[]:boxes,confirms:active && step===6?1:0,probes_used:active?step:0,
         measurements:{active:active && step<6?1:0,limit:2,queued:0,free_pct:95,cores:2},searches:active?[{
           target:'edge-a.googlevideo.com',ip:'192.0.2.42',family:4,transport:6,port:443,shape:1,
           phase:phases[step],plan_id:step>=5?groups[0].plan_id:'',applied_plan_id:step===6?groups[0].plan_id:'',
-          completed_at:showcase && step===6?new Date(shownAt).toISOString():null,
+          ...(redesign && step===6?{outcome:'saved',probe_applied:true,verified:true,verify_level:3,last_result:'Получен прикладной ответ'}:{}),
+          completed_at:step===6 && (showcase || (redesign && fixed))?new Date(showcase?shownAt:epoch).toISOString():null,
           since:new Date(showcase?firstStageAt:(typeof fixed==='number'?epoch:Date.now())-cycle).toISOString(),attempts:step>=4?1:0,probes:step>=5?1:0,candidate:step>=5?groups[0].plan_id:''}]:[]}};
   }
   window.fetch=async (input,init={})=>{
@@ -102,8 +104,12 @@
       case '/api/update':return reply(updateSnapshot());
       case '/api/diagnostics':
         if(u.search==='?disable')recording=false;
-        if(u.search==='?enable')recording=true;
-        return reply(report());
+        if(u.search==='?enable'){recording=true;paused=false;}
+        if(redesign && init.method==='POST'){
+          if(u.search==='?pause')paused=true;
+          if(u.search==='?clear')samples.length=0;
+        }
+        return reply(report(),200,{'X-R2O-Diagnostics-Paused':String(paused)});
       case '/api/telegram/workers':
         if(init.method==='POST')workers=JSON.parse(init.body).domains;
         return reply({domains:workers});

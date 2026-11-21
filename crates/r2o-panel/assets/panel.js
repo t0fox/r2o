@@ -576,6 +576,7 @@
       }
       if (this.m) this.renderTelegram(this.m, true);
     }
+    if (global.R2oPanelMotion && previous !== id) global.R2oPanelMotion.enter(screen);
     if (Motion.on() && !options.instant) {
       var g = Motion.g;
       var link = doc.querySelector(".index a[aria-current='page']");
@@ -1027,8 +1028,7 @@
     var lamp = this.$("update-lamp");
     if (lamp) lamp.setAttribute("data-tone", tone || (action || newer ? "live" : !absent && s.check_ok === true ? "ok" : "idle"));
     if (changed && !this.doc.hidden && Motion.on()) {
-      Motion.g.killTweensOf(state);
-      Motion.g.fromTo(state, { opacity: .55, y: 3 }, { opacity: 1, y: 0, duration: .2, clearProps: "opacity,transform" });
+      if (global.R2oPanelMotion) global.R2oPanelMotion.reveal(state);
     }
     write("update-reason", reason).hidden = !reason;
     write("update-checked", num(s.checked_utc) > 0 ? "проверено " + localTime(num(s.checked_utc) * 1000) : "проверки ещё не было");
@@ -1740,6 +1740,7 @@
       var from = prev && /^(\d+) /.exec(prev[1]), to = /^(\d+) /.exec(m.headline[1]);
       if (!prev || !Motion.on()) {
         apply();
+        if (global.R2oPanelMotion) global.R2oPanelMotion.reveal(title);
       } else if (from && to && prev[0] === m.headline[0]) {
         /* Тот же заголовок, другое число: число прокручивается. */
         apply();
@@ -1750,17 +1751,8 @@
         } });
         Motion.g.fromTo(em, { y: -5 }, { y: 0, duration: 0.32, ease: "back.out(3)" });
       } else {
-        /* Новая фраза собирается по буквам; разбиение снимается по окончании. */
-        Motion.g.timeline()
-          .to(title, { y: -14, autoAlpha: 0, duration: 0.18, ease: "power2.in" })
-          .add(function () {
-            apply();
-            Motion.g.set(title, { y: 0, autoAlpha: 1 });
-            if (!global.SplitText) { Motion.g.from(title, { y: 16, autoAlpha: 0, duration: 0.34, clearProps: "all" }); return; }
-            var split = new global.SplitText(title, { type: "words,chars" });
-            Motion.g.from(split.chars, { yPercent: 70, autoAlpha: 0, rotation: 4, duration: 0.4, stagger: 0.014, ease: "power4.out",
-              onComplete: function () { split.revert(); Motion.g.set(title, { clearProps: "all" }); } });
-          });
+        apply();
+        if (global.R2oPanelMotion) global.R2oPanelMotion.reveal(title);
       }
     }
     title.setAttribute("data-tone", m.tone);
@@ -3059,7 +3051,10 @@
         : st === "unavailable" ? "Нет маршрута"
           : st === "connecting" ? "Подключение"
             : info.on ? "Работает" : "Остановлен";
-      if (ui.badge.textContent !== badgeText) ui.badge.textContent = badgeText;
+      if (ui.badge.textContent !== badgeText) {
+        ui.badge.textContent = badgeText;
+        if (global.R2oPanelMotion) global.R2oPanelMotion.reveal(ui.badge);
+      }
       var badgeTone = !info.on ? "idle" : info.lamp === "bad" ? "bad" : info.lamp === "warn" ? "warn" : "ok";
       ui.badge.setAttribute("data-tone", badgeTone);
     }

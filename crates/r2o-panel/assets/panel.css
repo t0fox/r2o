@@ -242,20 +242,29 @@ button { color: inherit; }
 }
 .rail::-webkit-scrollbar { display: none; }
 .brand {
-  display: flex; align-items: center; gap: 11px;
-  min-width: 0; padding: 2px 8px 4px;
+  display: flex; flex-direction: column; align-items: center; gap: 0;
+  align-self: center; padding: 0 12px 5px;
   text-decoration: none;
 }
-.brand-mark, .mast-mark { width: 36px; height: 36px; }
+.brand-mark { width: 58px; height: 44px; }
+.mast-mark { width: 36px; height: 36px; }
 .brand-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.05; }
 .brand-text strong {
   font-family: var(--display); font-size: 1.18rem; font-weight: 700;
   letter-spacing: -.055em;
 }
-.brand-text small {
-  margin-top: 3px; color: var(--ink-3);
-  font-family: var(--mono); font-size: .55rem; letter-spacing: .15em; text-transform: uppercase;
+.brand-flow {
+  fill: none; stroke: var(--acc); stroke-width: 2.5;
+  stroke-dasharray: 7 93; opacity: 0; pointer-events: none;
+  filter: drop-shadow(0 0 2px var(--acc));
 }
+.brand-trail { pointer-events: none; filter: drop-shadow(0 0 1.5px var(--acc)); }
+.brand-trail rect { fill: color-mix(in srgb, var(--acc), var(--amber) var(--age, 0%)); }
+@media (prefers-reduced-motion: no-preference) {
+  .brand-flow { opacity: .88; animation: loop-flow 7.5s linear infinite; }
+  @keyframes loop-flow { to { stroke-dashoffset: -100; } }
+}
+[data-motion-paused] .brand-flow { animation-play-state: paused; }
 .rail-status {
   display: flex; align-items: center; gap: 9px;
   margin: 0 8px; padding: 8px 10px;
@@ -285,24 +294,13 @@ button { color: inherit; }
   font-size: .82rem; font-weight: 600;
   transition: color .15s, background-color .15s, border-color .15s;
 }
-.index a::before {
-  content: "";
-  position: absolute; left: -15px; top: 50%;
-  width: 2px; height: 0;
-  border-radius: 2px;
-  background: var(--bronze);
-  transform: translateY(-50%);
-  transition: height .2s var(--ease), opacity .15s;
-  opacity: 0;
-}
-.index a:hover { color: var(--ink); background: rgba(255, 255, 255, .035); }
+.index a:hover { color: var(--ink); }
 .index a:active { transform: scale(.992); }
 .index a[aria-current="page"] {
   color: var(--ink);
   border-color: var(--line);
   background: linear-gradient(90deg, rgba(185, 138, 82, .12), rgba(185, 138, 82, .025));
 }
-.index a[aria-current="page"]::before { height: 20px; opacity: 1; }
 .nav-icon {
   width: 17px; height: 17px; flex: none;
   fill: none; stroke: currentColor; stroke-width: 1.6;
@@ -1318,14 +1316,6 @@ main { min-width: 0; }
   box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, .03);
   animation: tg-rise .3s ease both;
 }
-.tg-hero::after {
-  content: ""; position: absolute; inset: -40% -20%; pointer-events: none;
-  background: linear-gradient(100deg, transparent 35%, rgba(255, 255, 255, .045) 50%, transparent 65%);
-  transform: translateX(-60%);
-  animation: tg-sweep 7s ease-in-out infinite;
-}
-.tg-proxy[data-state="stopped"] .tg-hero::after,
-.tg-proxy[data-state="not_configured"] .tg-hero::after { animation-play-state: paused; opacity: .25; }
 
 .tg-orb {
   position: relative; width: 64px; height: 64px; flex: none;
@@ -1979,7 +1969,9 @@ main { min-width: 0; }
   :root { --rail-w: 76px; }
   .rail { padding: 18px 10px; align-items: center; }
   .brand { padding: 0; justify-content: center; }
-  .brand-text, .rail-status span:last-child, .index-label, .nav-label, .rail-search span, .rail-search kbd, .rail-version { display: none; }
+  .rail-status span:last-child, .index-label, .nav-label, .rail-search span, .rail-search kbd, .rail-version { display: none; }
+  .brand-mark { width: 36px; height: 32px; }
+  .brand-text strong { font-size: .85rem; }
   .rail-status { width: 36px; height: 36px; justify-content: center; margin: 0; padding: 0; }
   .index { width: 100%; gap: 14px; }
   .index-group { gap: 4px; }
@@ -2056,9 +2048,9 @@ main { min-width: 0; }
     padding: 9px var(--gutter);
   }
   .mast-id { grid-column: 1; grid-row: 1; gap: 9px; }
-  .mast-brand { display: inline-flex; }
-  .mast-brand .mast-mark { width: 30px; height: 30px; }
-  .mast-brand span { font-size: .96rem; }
+  .mast-brand { display: inline-flex; flex-direction: column; gap: 0; }
+  .mast-brand .mast-mark { width: 32px; height: 23px; }
+  .mast-brand span { font-size: .68rem; line-height: 1; }
   .mast-context { flex-direction: column; align-items: flex-start; gap: 0; }
   .mast-kicker { display: none; }
   .mast-title { font-size: .86rem; }
@@ -2163,32 +2155,44 @@ main { min-width: 0; }
   }
 }
 
-/* Только на время перехода фон активной вкладки движется между исходными позициями. */
-.index a[data-nav-motion][aria-current="page"] {
-  background: transparent;
-  border-color: transparent;
+/* Один и тот же слой капсулы используется в покое и в существующем переходе GSAP. */
+.index a {
+  border-radius: 999px;
   isolation: isolate;
 }
-.index a[data-nav-motion]::after {
+.index a::before, .index a[aria-current="page"]::after {
   content: "";
   pointer-events: none;
   position: absolute;
   inset: -1px;
   z-index: -1;
-  border: 1px solid var(--line);
   border-radius: inherit;
-  background: linear-gradient(90deg, rgba(185,138,82,.12), rgba(185,138,82,.025));
-  transform: translate(var(--motion-x), var(--motion-y));
 }
-.index a[data-nav-motion]::before {
-  transform: translate(var(--motion-x), calc(-50% + var(--motion-y)));
+.index a::before {
+  background: linear-gradient(112deg, var(--acc-wash), transparent 92%);
+  opacity: 0; transform: translateX(-6px) scale(.95);
+  transition: transform .25s var(--ease), opacity .18s;
+}
+.index a:not([aria-current="page"]):is(:hover, :focus-visible)::before { opacity: 1; transform: none; }
+.index a[aria-current="page"] { background: transparent; border-color: transparent; }
+.index a[aria-current="page"]::after {
+  border: 1px solid var(--bronze-line);
+  background:
+    radial-gradient(circle at 5px 50%, var(--amber) 1.1px, transparent 1.7px),
+    linear-gradient(113deg, var(--bronze-wash), var(--surface-2) 52%, var(--acc-wash));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.06);
+  transform: translate(var(--motion-x, 0px), var(--motion-y, 0px));
+}
+@media (max-width: 760px) {
+  .index a[aria-current="page"]::after {
+    background:
+      radial-gradient(circle at 50% 3px, var(--amber) 1px, transparent 1.6px),
+      linear-gradient(135deg, var(--bronze-wash), var(--surface-2) 56%, var(--acc-wash));
+  }
 }
 details[data-open-motion] > .family-body,
 details[data-open-motion] > .box-body {
   transition: none;
-}
-@media (prefers-reduced-motion: reduce) {
-  .index a[data-nav-motion]::after { display: none; }
 }
 /* Линия и маркер читают одну координату из таймлайна этапа. */
 .search .track { --half-step: calc(50% / var(--steps, 7)); margin-top: 14px; }
@@ -2276,7 +2280,6 @@ body[data-stale="true"] .lamp::after { opacity: 0; }
   @keyframes result-arrives { from { transform: translateY(3px); opacity: .65; } to { transform: none; opacity: 1; } }
 }
 .tg-hero { padding: 16px 18px; border-radius: 12px; }
-.tg-hero::after { content: none; }
 .tg-orb { width: 44px; height: 44px; }
 .tg-orb-ring { inset: 3px; background: none; border: 1px solid var(--line-strong); animation: none; }
 .tg-orb-core { width: 10px; height: 10px; }
@@ -2330,4 +2333,53 @@ body[data-stale="true"] .lamp::after { opacity: 0; }
   .tg-hero { grid-template-columns: auto minmax(0,1fr); gap: 10px; padding: 13px; }
   .tg-actions { grid-column: 1/-1; }
   .tg-stat { border-bottom: 1px solid var(--line-soft); }
+}
+
+/* Поле остаётся под содержимым блока состояния и не участвует в hit-testing. */
+.status-panel { isolation: isolate; }
+.pixel-trail {
+  position: absolute; inset: 0; z-index: -1;
+  width: 100%; height: 100%; pointer-events: none;
+}
+.mast-mark, .brand-mark { overflow: visible; }
+.foot-mark { padding: 0 2px; }
+
+/* Одинаковый свет для существующих панелей, строк сервисов и карточек. */
+:where(.diag-card, .tg-route, .family-card, .box-card) {
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.027), 0 12px 22px -24px rgba(0,0,0,.8);
+}
+@media (any-hover: hover) and (any-pointer: fine) and (prefers-reduced-motion: no-preference) {
+  .r2o-motion-surface {
+    position: relative; isolation: isolate;
+    rotate: 0deg;
+    transition: rotate .22s var(--ease), background-color .18s, border-color .18s;
+  }
+  [data-r2o-spot] {
+    outline: 1px solid color-mix(in srgb, var(--acc) 24%, transparent);
+    outline-offset: -1px;
+  }
+  .r2o-motion-surface::after {
+    content: ""; position: absolute; inset: 0; z-index: -1;
+    pointer-events: none; border-radius: inherit; opacity: 0;
+    transition: opacity .18s;
+    background:
+      radial-gradient(155px 106px at var(--spot-x) var(--spot-y), var(--acc-wash), transparent 100%),
+      radial-gradient(240px 150px at var(--spot-x) var(--spot-y), var(--bronze-wash), transparent 100%);
+  }
+  [data-r2o-spot]::after { opacity: 1; }
+  [data-r2o-spot]:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  [data-r2o-spot="tilt"] {
+    rotate: var(--tilt);
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  [data-decoding] { position: relative; }
+  [data-decoding], [data-decoding] > :not(.decode-ink) { color: transparent !important; }
+  .decode-ink {
+    position: absolute; inset: 0; z-index: 3;
+    pointer-events: none; color: var(--acc); user-select: none;
+  }
+  .decode-ink > span { position: absolute; white-space: pre; color: inherit; }
+  .decode-ink > span::before { content: attr(data-glyph); }
+  .decode-ink > [data-resolved] { color: var(--resolved-color); }
 }
