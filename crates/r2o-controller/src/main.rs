@@ -11087,7 +11087,6 @@ fn r2o_budget_partial_finish(
 struct R2oDiscoveryWorkOutcome {
     requested_target: r2o_controller::discovery::DiscoveryTarget,
     outcome: DiscoveryOutcome,
-    catalog_generation: u64,
     trigger_planned: bool,
 }
 
@@ -12046,6 +12045,7 @@ impl R2oDiscoveryQueueEntry {
 struct R2oDiscoverySearches {
     entries: HashMap<R2oDiscoveryTaskKey, R2oDiscoverySearch>,
     asking: HashSet<R2oDiscoveryTaskKey>,
+    asking_with_own_plan: HashSet<R2oDiscoveryTaskKey>,
     order: VecDeque<R2oDiscoveryTaskKey>,
     pending_reports: VecDeque<serde_json::Value>,
     datapath_events: u64,
@@ -12467,6 +12467,7 @@ impl R2oDiscoverySearches {
 
     fn set_asking(&mut self, target: &r2o_controller::discovery::DiscoveryTarget, asking: bool) {
         let key = r2o_discovery_task_key(target);
+        self.asking_with_own_plan.remove(&key);
         if asking {
             self.asking.insert(key);
         } else {
@@ -16058,10 +16059,13 @@ impl DiscoveryWorker {
                 && let Ok(trigger) =
                     r2o_discovery_trigger(&target, client_hello.as_deref(), ech_config.as_ref())
             {
-                runner_searches
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .update(&target, "базовый вопрос перед своими планами", 0, 0, "", "");
+                {
+                    let mut searches = runner_searches
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    searches.asking_with_own_plan.insert(r2o_discovery_task_key(&target));
+                    searches.update(&target, "базовый вопрос перед своими планами", 0, 0, "", "");
+                }
                 let base_options = r2o_discovery_classify_options(
                     mark,
                     client_has_tcp_timestamps,
@@ -17825,7 +17829,7 @@ group_block_proven: false,
                         let outcome = {
                             let permit = worker_gate.r2o_acquire_discovery(&worker_cancel);
                             let prefer_tcp = worker_gate.r2o_quic_yield_waiting_for_tcp();
-                            let (expired, target, generation) = {
+                            let (expired, target) = {
                                 let (queue, _) = &*worker_jobs;
                                 let mut queue = queue
                                     .lock()
@@ -17836,7 +17840,7 @@ group_block_proven: false,
                                         queue.waiting_for_slot.saturating_sub(1);
                                 }
                                 if worker_cancel.load(Ordering::Relaxed) || permit.is_none() {
-                                    (Vec::new(), None, queue.catalog_generation)
+                                    (Vec::new(), None)
                                 } else {
                                     let (expired, target) = queue
                                         .pop_with_tcp_preference_and_planned(
@@ -17850,7 +17854,7 @@ group_block_proven: false,
                                     }) {
                                         worker_gate.r2o_mark_tcp_discovery_admitted();
                                     }
-                                    (expired, target, queue.catalog_generation)
+                                    (expired, target)
                                 }
                             };
                             let Some(mut permit) = permit else {
@@ -17880,7 +17884,6 @@ group_block_proven: false,
                                             volume_box_id: None,
                                             retry_after: None,
                                         },
-                                        catalog_generation: generation,
                                         trigger_planned: false,
                                     })
                                     .is_err()
@@ -17914,13 +17917,12 @@ group_block_proven: false,
                                 .unwrap_or_else(|| {
                                     Arc::new(AtomicBool::new(worker_cancel.load(Ordering::Relaxed)))
                                 });
-                            let mut run_generation = generation;
                             let outcome = loop {
                                 let outcome = if task_cancel.load(Ordering::Relaxed) {
                                     DiscoveryOutcome {
                                         target: target.clone(),
                                         plan_text: None,
-                                        detail: "задача заменена свежим ClientHello".into(),
+                                        detail: "замер отменён до запуска".into(),
                                         queue_expired: false,
                                         address_failure: false,
                                         address_recheck_acknowledged: false,
@@ -17974,43 +17976,23 @@ group_block_proven: false,
                                         }
                                     }
                                 };
-                                let latest_generation = worker_jobs
-                                    .0
+                                let mut refreshes = worker_catalog_refreshes
                                     .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .catalog_generation;
-                                if latest_generation != run_generation
-                                    && worker_catalog_refreshes
-                                        .lock()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                        .remove(&task_key)
-                                    && !worker_cancel.load(Ordering::Relaxed)
-                                {
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                if refreshes.remove(&task_key) && !worker_cancel.load(Ordering::Relaxed) {
                                     task_cancel.store(false, Ordering::Relaxed);
-                                    run_generation = latest_generation;
                                     continue;
                                 }
-                                if latest_generation == run_generation
-                                    || task_cancel.load(Ordering::Relaxed)
-                                    || worker_cancel.load(Ordering::Relaxed)
-                                {
-                                    break R2oDiscoveryWorkOutcome {
-                                        requested_target: target.clone(),
-                                        outcome,
-                                        catalog_generation: run_generation,
-                                        trigger_planned,
-                                    };
-                                }
-                                run_generation = latest_generation;
+                                break R2oDiscoveryWorkOutcome {
+                                    requested_target: target.clone(),
+                                    outcome,
+                                    trigger_planned,
+                                };
                             };
                             worker_searches
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                                 .set_asking(&target, false);
-                            worker_catalog_refreshes
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .remove(&task_key);
                             task_cancels
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -19809,10 +19791,12 @@ group_block_proven: false,
             self.active
                 .iter()
                 .filter(|(key, _)| {
-                    searches
-                        .entries
-                        .get(*key)
-                        .is_some_and(|search| search.phase == "распознаём поведение")
+                    !self.pending_rechecks.contains_key(*key)
+                        && !searches.asking_with_own_plan.contains(*key)
+                        && searches
+                            .entries
+                            .get(*key)
+                            .is_some_and(|search| search.phase == "распознаём поведение")
                 })
                 .map(|(key, target)| (key.clone(), target.clone()))
                 .collect()
@@ -19824,13 +19808,24 @@ group_block_proven: false,
             .active_cancels
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut refreshes = self
+            .catalog_refreshes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (key, target) in asking {
             if r2o_controller::discovery::own_first_plans(catalog, &target, false, None, &[], &[])
                 .is_empty()
             {
                 continue;
             }
-            if let Some(cancel) = cancels.get(&key) {
+            if let Some(cancel) = cancels.get(&key)
+                && refreshes.insert(key.clone())
+            {
+                self.searches
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .asking_with_own_plan
+                    .insert(key);
                 cancel.store(true, Ordering::Relaxed);
                 println!(
                     "по {} замер прерывается: в каталоге появился подтверждённый план — перехожу к его проверке",
@@ -19895,25 +19890,6 @@ group_block_proven: false,
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(&task_key);
         }
-        let pending = self
-            .pending_rechecks
-            .keys()
-            .cloned()
-            .collect::<HashSet<_>>();
-        let cancels = self
-            .active_cancels
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut refreshes = self
-            .catalog_refreshes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for (task_key, cancel) in cancels.iter() {
-            if !pending.contains(task_key) {
-                refreshes.insert(task_key.clone());
-                cancel.store(true, Ordering::Relaxed);
-            }
-        }
     }
 
     fn r2o_carry_proven_rx_for_snapshot(
@@ -19937,9 +19913,15 @@ group_block_proven: false,
     fn try_outcome(&mut self) -> Option<DiscoveryOutcome> {
         self.r2o_schedule_pending_rechecks();
         let work = self.outcomes.try_recv().ok()?;
-        let catalog_generation = work.catalog_generation;
         let outcome = &work.outcome;
         let task_key = r2o_discovery_task_key(&outcome.target);
+        // Запрос мог прийти между окончанием замера и публикацией исхода.
+        let catalog_recheck = !outcome.queue_expired
+            && self.active.get(&task_key) == Some(&work.requested_target)
+            && self.catalog_refreshes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&task_key);
         // C regrades GREASE in the same task; retain ownership across the shape change.
         if work.requested_target != outcome.target
             && self.active.get(&task_key) == Some(&work.requested_target)
@@ -19974,14 +19956,7 @@ group_block_proven: false,
             self.r2o_schedule_pending_rechecks();
             return None;
         }
-        let current_generation = self
-            .jobs
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .catalog_generation;
-        if catalog_generation != current_generation
-            && !outcome.queue_expired
+        if catalog_recheck
             && !outcome.direct_clear
             && !r2o_discovery_volume_challenge_outcome(&outcome)
         {
@@ -38081,7 +38056,7 @@ mod tests {
                 .active_cancels
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            cancels.insert(tcp_key, Arc::clone(&tcp_cancel));
+            cancels.insert(tcp_key.clone(), Arc::clone(&tcp_cancel));
             cancels.insert(quic_key, Arc::clone(&quic_cancel));
         }
         let catalog = Catalog {
@@ -38112,6 +38087,10 @@ mod tests {
         worker.r2o_yield_asking_to_own_plan(&catalog);
         assert!(tcp_cancel.load(Ordering::Relaxed));
         assert!(!quic_cancel.load(Ordering::Relaxed));
+        assert!(worker.catalog_refreshes.lock().unwrap().remove(&tcp_key));
+        tcp_cancel.store(false, Ordering::Relaxed);
+        worker.r2o_yield_asking_to_own_plan(&catalog);
+        assert!(!tcp_cancel.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -56439,7 +56418,6 @@ group_block_proven: false,
                             volume_box_id: None,
                             retry_after: None,
                         },
-                        catalog_generation: 0,
                         trigger_planned: true,
                     })
                     .unwrap();
@@ -56559,7 +56537,6 @@ group_block_proven: false,
                         volume_box_id: None,
                         retry_after: None,
                     },
-                    catalog_generation: 0,
                     trigger_planned: false,
                 })
                 .unwrap();
@@ -56766,7 +56743,6 @@ group_block_proven: false,
                 volume_box_id: None,
                 retry_after: None,
             },
-            catalog_generation: 0,
             trigger_planned: true,
         };
 
@@ -56821,7 +56797,6 @@ group_block_proven: false,
                 volume_box_id: None,
                 retry_after: None,
             },
-            catalog_generation: 0,
             trigger_planned: false,
         };
         assert!(!worker.r2o_recheck_changed_client_shape(&strict_work));
@@ -58649,6 +58624,8 @@ group_block_proven: false,
                 .get(&latest_target),
             Some(latest_hello.as_slice())
         );
+        worker.catalog_changed(&Catalog::default(), &std::collections::HashSet::new());
+        assert!(!cancel.load(Ordering::Relaxed));
         release.store(true, Ordering::Relaxed);
 
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -58670,7 +58647,7 @@ group_block_proven: false,
 
     #[cfg(unix)]
     #[test]
-    fn r2o_discovery_перезапускает_активный_поиск_после_обновления_каталога() {
+    fn r2o_discovery_перезапускает_только_адресно_отменённый_замер() {
         use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use std::sync::{Arc, Mutex, mpsc};
         use std::time::{Duration, Instant};
@@ -58697,7 +58674,9 @@ group_block_proven: false,
                 let attempt = runner_attempts.fetch_add(1, Ordering::Relaxed);
                 let captured = runner_snapshots.lock().unwrap().get(&key).cloned();
                 if attempt == 0 {
-                    first_started_sender.send(captured).unwrap();
+                    first_started_sender
+                        .send((captured, Arc::clone(&cancel)))
+                        .unwrap();
                     let deadline = Instant::now() + Duration::from_secs(2);
                     while !cancel.load(Ordering::Relaxed) && Instant::now() < deadline {
                         std::thread::sleep(Duration::from_millis(1));
@@ -58740,16 +58719,21 @@ group_block_proven: false,
         );
 
         assert!(worker.queue_client_snapshot(target.clone(), client_hello.clone()));
-        assert_eq!(
-            first_started_receiver
-                .recv_timeout(Duration::from_secs(2))
-                .unwrap(),
-            Some(client_hello.clone())
-        );
+        let (captured, cancel) = first_started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(captured, Some(client_hello.clone()));
         worker.catalog_changed(&Catalog::default(), &std::collections::HashSet::new());
+        assert!(!cancel.load(Ordering::Relaxed));
+        worker
+            .catalog_refreshes
+            .lock()
+            .unwrap()
+            .insert(super::r2o_discovery_task_key(&target));
+        cancel.store(true, Ordering::Relaxed);
         let (refreshed_hello, cancelled) = second_started_receiver
             .recv_timeout(Duration::from_secs(2))
-            .expect("поиск должен перезапуститься с новым поколением каталога");
+            .expect("поиск должен перезапуститься по запросу смены плана");
         assert_eq!(refreshed_hello, Some(client_hello));
         assert!(
             !cancelled,
