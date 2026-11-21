@@ -19101,7 +19101,10 @@ group_block_proven: false,
             r2o_panel_search_details(row, entry, now, wall);
         }
         rows.extend(
-            searches.panel_results.iter().rev()
+            searches
+                .panel_results
+                .iter()
+                .rev()
                 .filter(|(key, at, _)| {
                     !self.active.contains_key(key)
                         && now.saturating_duration_since(*at) < std::time::Duration::from_secs(90)
@@ -19150,7 +19153,9 @@ group_block_proven: false,
         if !reason.is_empty() {
             row["last_result"] = serde_json::json!(reason);
         }
-        searches.panel_results.retain(|(previous, _, _)| previous != &key);
+        searches
+            .panel_results
+            .retain(|(previous, _, _)| previous != &key);
         if searches.panel_results.len() >= 6 {
             searches.panel_results.pop_front();
         }
@@ -25268,16 +25273,22 @@ impl ControlClient {
                         }
                         let shape = r2o_plan_wire_shape(target.shape, has_timestamp.flatten());
                         let saved_plan = if confirmed {
-                            catalog.boxes.iter()
+                            catalog
+                                .boxes
+                                .iter()
                                 .flat_map(|record| &record.bindings)
                                 .find(|binding| {
-                                    binding.enabled && binding.target == target.host
+                                    binding.enabled
+                                        && binding.target == target.host
                                         && binding.family == target.family
                                         && binding.shape == shape
                                         && binding.transport == r2o_discovery_transport(&target)
                                 })
                                 .map(|binding| {
-                                    (binding.plan_id.as_str(), binding.budget == R2O_D2K_CAT_BUDGET_CUT)
+                                    (
+                                        binding.plan_id.as_str(),
+                                        binding.budget == R2O_D2K_CAT_BUDGET_CUT,
+                                    )
                                 })
                         } else {
                             None
@@ -42936,9 +42947,11 @@ mod tests {
         assert_eq!(finished[0]["plan_id"], "saved-test-plan");
         assert_eq!(finished[0]["probe_applied"], false);
         assert!(finished[0]["since"].is_string());
-        assert!(worker
-            .r2o_live_searches(now + std::time::Duration::from_secs(91))
-            .is_empty());
+        assert!(
+            worker
+                .r2o_live_searches(now + std::time::Duration::from_secs(91))
+                .is_empty()
+        );
     }
 
     #[cfg(unix)]
