@@ -117,6 +117,15 @@ async function main() {
   assert.deepEqual(ownPlanTrack?.steps.map((step) => step.label), ["Очередь", "Форма", "Распознаём", "Свойства", "Планы", "Проверка", "Подтверждено"]);
   assert.equal(panelUi.trackFor("неизвестная фаза новой сборки"), null, "неизвестная фаза не выдумывает этап");
   assert.equal(diagnosticsUi.summary({ samples: [{ at: 1, processes: [], bindings: 0, plans: 0 }], events: [{ outcome: "failed" }, { outcome: "queue-expired" }, { outcome: "plan-found" }] }).includes("без подтверждённого результата: 2"), true, "диагностика считает отказ и истёкшую очередь неподтверждёнными исходами");
+  for (const [base, step] of [[1, 60], [1000, 60000]]) {
+    const history = diagnosticsUi.memoryRows({
+      memory_history: { time_base: [1000, base], fields: ["at_delta_s", "mono_delta_s", "rss_kib"],
+        samples: [[0, 0, 100], [60, step, 200]] },
+      samples: [{ at: 1000, mono_ms: 1000 }, { at: 1060, mono_ms: 61000 }]
+    });
+    assert.equal(history[1].time - history[0].time, 60, "старые и новые отчёты дают одну минуту между точками");
+    assert.equal(diagnosticsUi.rowsInRange(history, 2).length, 2);
+  }
   assert.ok(fs.existsSync(panelBinary), `Не найден исполняемый файл панели: ${panelBinary}`);
   fs.mkdirSync(chromeProfile, { recursive: true });
 

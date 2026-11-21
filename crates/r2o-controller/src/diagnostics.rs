@@ -1075,15 +1075,17 @@ impl Recorder {
         let memory_base = self
             .memory_history
             .front()
-            .map(|(row_at, row_mono, _)| (*row_at, *row_mono));
+            .map(|(row_at, row_mono_ms, _)| (*row_at, *row_mono_ms / 1000));
         let memory_rows: Vec<Value> = self
             .memory_history
             .iter()
-            .map(|(row_at, row_mono, tail)| {
-                let (base_at, base_mono) = memory_base.unwrap_or((*row_at, *row_mono));
+            .map(|(row_at, row_mono_ms, tail)| {
+                // Компактная история и time_base используют секунды, подробные снимки — миллисекунды.
+                let row_mono_s = *row_mono_ms / 1000;
+                let (base_at, base_mono) = memory_base.unwrap_or((*row_at, row_mono_s));
                 let mut row = Vec::with_capacity(2 + tail.len());
                 row.push(json!(row_at.saturating_sub(base_at)));
-                row.push(json!(row_mono.saturating_sub(base_mono)));
+                row.push(json!(row_mono_s.saturating_sub(base_mono)));
                 row.extend(tail.iter().cloned());
                 Value::Array(row)
             })
@@ -2577,7 +2579,16 @@ mod tests {
         assert!(recorder.events.is_empty());
         assert_eq!(recorder.samples.len(), 1);
         assert!(marker.exists());
-        assert!(dir.join("report.json").is_file());
+        let report_path = dir.join("report.json");
+        assert!(report_path.is_file());
+        recorder.started -= Duration::from_secs(60);
+        recorder.checked = None;
+        recorder.sampled = None;
+        recorder.tick(Counts::default);
+        let report: serde_json::Value =
+            serde_json::from_slice(&fs::read(report_path).unwrap()).unwrap();
+        assert_eq!(report["memory_history"]["samples"][1][1], 60);
+        assert!(report["samples"][1]["mono_ms"].as_u64().unwrap() >= 60_000);
         drop(old);
         fs::remove_file(marker).unwrap();
         recorder.checked = None;

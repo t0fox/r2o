@@ -110,13 +110,24 @@
     var memory = report.memory_history, history = list(memory && memory.samples);
     if (history.length) {
       var base = list(memory.time_base), wallBase = number(base[0]), monoBase = number(base[1]);
+      var finalRow = Array.isArray(history[history.length - 1]) ? history[history.length - 1] : [];
+      var wallDelta = memoryField(memory, finalRow, "at_delta_s", 0);
+      var monoDelta = memoryField(memory, finalRow, "mono_delta_s", 1);
+      var finalTime = monoBase !== null && monoDelta !== null ? monoBase + monoDelta : null;
+      var finalAt = wallBase !== null && wallDelta !== null ? wallBase + wallDelta : null;
+      var source = list(report.samples).find(function (sample) { return sample.at === finalAt; });
+      var precise = number(source && source.mono_ms);
+      // Старые отчёты R2O хранили миллисекунды в полях, объявленных в секундах.
+      var divisor = finalTime !== null && precise !== null
+        ? (Math.abs(finalTime - precise) < Math.abs(finalTime * 1000 - precise) ? 1000 : 1)
+        : (wallDelta > 0 && monoDelta > wallDelta * 100 ? 1000 : 1);
       return history.map(function (row) {
         if (!Array.isArray(row)) return null;
         var atDelta = memoryField(memory, row, "at_delta_s", 0);
         var monoDelta = memoryField(memory, row, "mono_delta_s", 1);
         var at = wallBase === null || atDelta === null ? null : wallBase + atDelta;
         var timeDomain = monoBase !== null && monoDelta !== null ? "mono" : "wall";
-        var time = timeDomain === "mono" ? monoBase + monoDelta : at;
+        var time = timeDomain === "mono" ? (monoBase + monoDelta) / divisor : at;
         var rollupIndex = list(memory.fields).length ? list(memory.fields).indexOf("smaps_rollup_kib") : 7;
         var rollup = rollupIndex < 0 || !Array.isArray(row[rollupIndex]) ? [] : row[rollupIndex];
         var epoch = memoryField(memory, row, "d2kc_epoch", -1);
@@ -219,7 +230,7 @@
   }
   function timeLabel(seconds) {
     if (number(seconds) === null) return "—";
-    return new Date(seconds * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    return new Date(seconds * 1000).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   }
   function drawMemory(doc, allRows, hours, intervalMs) {
     var chart = doc.getElementById("diagnostic-memory-chart"), empty = doc.getElementById("diagnostic-memory-empty");
