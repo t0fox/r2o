@@ -62,7 +62,8 @@ rotate_one() {
 
 tick() {
     prepare_runtime || return 1
-    for name in r2o-datapath4.log r2o-datapath6.log \
+    for name in r2o-datapath.log r2o-controller.log \
+                r2o-datapath4.log r2o-datapath6.log \
                 r2o-controller4.log r2o-controller6.log \
                 panel.log telegram.log update-scheduler.log \
                 instagram-dns.log instagram-dns-scheduler.log; do
