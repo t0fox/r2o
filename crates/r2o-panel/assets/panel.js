@@ -727,6 +727,11 @@
     });
     this.initRouter();
     this.initCommand();
+    var recoveryRefresh = this.$("recovery-refresh");
+    if (recoveryRefresh) recoveryRefresh.addEventListener("click", function () {
+      self.poll();
+      if (self.win.R2ORecovery) self.win.R2ORecovery.refreshHistory();
+    });
     this.drawMark();
     this.poll();
     this.initUpdates();
@@ -772,6 +777,7 @@
         var staleBefore = bodyAttribute(self.doc, "data-stale");
         self.renderNotice();
         var staleAfter = bodyAttribute(self.doc, "data-stale");
+        if (self.win.R2ORecovery) self.win.R2ORecovery.update(self.m, true);
         if (self.m && staleBefore !== staleAfter) self.renderTelegram(self.m);
       })
       .then(function () { self.win.clearTimeout(timer); self.inflight = false; });
@@ -1139,6 +1145,7 @@
     this.renderNow(m);
     this.renderCatalog(false);
     this.renderTelegram(m);
+    if (this.win.R2ORecovery) this.win.R2ORecovery.update(m, false);
     this.renderDiagnostics(m);
     this.renderOverview(m);
     this.renderNav(m);
@@ -2806,22 +2813,6 @@
 
   /* ─── Диагностика ─── */
 
-  App.prototype.drawStages = function () {
-    var body = this.$("diagnostics-body"), win = global;
-    if (!Motion.on()) return;
-    var run = function () {
-      var paths = body.querySelectorAll(".stages svg path");
-      if (paths.length) Motion.g.fromTo(paths, { drawSVG: "0%" }, { drawSVG: "100%", duration: 0.35, stagger: 0.05, ease: "power2.out", clearProps: "strokeDasharray,strokeDashoffset" });
-    };
-    if (body.__seen) { run(); return; }
-    if (typeof win.IntersectionObserver !== "function" || body.__io) return;
-    body.__io = new win.IntersectionObserver(function (entries) {
-      if (!entries[entries.length - 1].isIntersecting) return;
-      body.__seen = true; body.__io.disconnect(); run();
-    }, { threshold: 0.2 });
-    body.__io.observe(body);
-  };
-
   App.prototype.renderDiagnostics = function (m) {
     var doc = this.doc;
     var snap = m.snap;
@@ -2831,7 +2822,7 @@
     var key = JSON.stringify([snap.stages, snap.absent, snap.config_path, snap.config_exists, snap.mode, snap.state_dir,
       snap.state_dir_note, snap.queue_num, snap.unknown_keys, snap.engine_running, snap.controller_running,
       snap.live_fresh, m.linked, m.k.catalog_at, m.k.client_unfit, meas.cores, snap.controls_enabled, snap.control_state]);
-    var redrawn = section(body, key, function () {
+    section(body, key, function () {
       var wrap = el(doc, "div", "diag");
 
       var left = el(doc, "div");
@@ -2884,7 +2875,6 @@
       add(wrap, left, right);
       return [wrap];
     });
-    if (redrawn) this.drawStages();
     col.replaceChildren();
     add(col,
       el(doc, "span", "", releaseLabel(snap.version) + (snap.dirty ? " (изменённая сборка)" : "")),
@@ -2898,21 +2888,14 @@
     }
     var meta = this.$("diagnostics-meta");
     if (meta) {
-      var metaKey = JSON.stringify([snap.version, snap.mode, m.linked, snap.live_fresh, list(snap.stages).filter(function (stage) { return !stage.built; }).length]);
-      if (meta.__r2oKey !== metaKey) {
-        meta.__r2oKey = metaKey;
-        meta.replaceChildren();
-        var versionChip = el(doc, "span", "meta-chip", "версия " + str(snap.version));
-        meta.appendChild(versionChip);
-        var modeChip = el(doc, "span", "meta-chip", "режим " + (MODES[snap.mode] || str(snap.mode) || "—"));
-        meta.appendChild(modeChip);
-        var bad = list(snap.stages).filter(function (stage) { return !stage.built; }).length;
-        var chainChip = el(doc, "span", "meta-chip", bad ? bad + " " + plural(bad, "звено", "звена", "звеньев") + " без подтверждения" : "цепочка собрана");
-        chainChip.setAttribute("data-tone", bad ? "warn" : "ok");
-        meta.appendChild(chainChip);
-        var linkChip = el(doc, "span", "meta-chip", m.linked ? "датапат на связи" : "нет связи с датапатом");
-        linkChip.setAttribute("data-tone", m.linked ? "live" : "bad");
-        meta.appendChild(linkChip);
+      var linkText = !snap.engine_running ? "Движок остановлен"
+        : !snap.controller_running ? "Контроллер остановлен"
+          : snap.live_fresh !== true ? "Нет свежего снимка"
+            : m.linked ? "Роутер передаёт данные" : "Нет связи с датапатом";
+      if (meta.textContent !== linkText) {
+        var linkChip = el(doc, "span", "meta-chip", linkText);
+        linkChip.setAttribute("data-tone", m.linked ? "" : "warn");
+        meta.replaceChildren(linkChip);
       }
     }
   };

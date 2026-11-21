@@ -466,7 +466,7 @@
     box.hidden = notices.length === 0;
   }
   function setText(doc, id, value) {
-    var node = doc.getElementById(id); if (node) node.textContent = value;
+    var node = doc.getElementById(id); if (node && node.textContent !== value) node.textContent = value;
   }
   function overflowText(last) {
     var names = [
@@ -523,7 +523,7 @@
         (number(report.sample_interval_ms) !== null ? " · интервал " + formatAge(report.sample_interval_ms) : "");
     }
     setText(doc, "diagnostic-events", countWithCapacity(events.length, report.event_capacity));
-    setText(doc, "diagnostic-unconfirmed", String(events.filter(function (event) { return ["failed", "inconclusive", "unknown", "local-abort", "queue-full", "queue-expired"].indexOf(event.outcome) >= 0; }).length));
+    setText(doc, "diagnostic-unconfirmed", String(events.filter(function (event) { return ["failed", "inconclusive", "unknown", "local-abort", "queue-full", "queue-expired", "family-probe-inconclusive"].indexOf(event.outcome) >= 0; }).length));
     setText(doc, "diagnostic-samples", countWithCapacity(samples.length, report.sample_capacity) + (memorySamples.length ? " · память: " + countWithCapacity(memorySamples.length, mem.capacity) : ""));
     setText(doc, "diagnostic-workers-running", pretty(number(last && last.workers_running)));
     setText(doc, "diagnostic-workers-result", pretty(number(last && last.workers_result_pending)));
@@ -579,7 +579,7 @@
       first = list(sample.processes).filter(function (p) { return p.name === rss.name && p.pid === rss.pid && number(p.rss_kib) !== null; })[0] || null;
       return !!first;
     });
-    var failures = events.filter(function (event) { return ["failed", "inconclusive", "unknown", "local-abort", "queue-full", "queue-expired"].indexOf(event.outcome) >= 0; }).length;
+    var failures = events.filter(function (event) { return ["failed", "inconclusive", "unknown", "local-abort", "queue-full", "queue-expired", "family-probe-inconclusive"].indexOf(event.outcome) >= 0; }).length;
     var memory = report.memory_history || {}, detail = detailsFor(report);
     var memoryRowsLatest = memoryRows(report), lastMemory = memoryRowsLatest[memoryRowsLatest.length - 1];
     var rssAnon = lastMemory && lastMemory.rss_anon !== null ? lastMemory.rss_anon / 1024 :
@@ -599,15 +599,333 @@
       (first ? " (" + ((rss.rss_kib - first.rss_kib) >= 0 ? "+" : "") + ((rss.rss_kib - first.rss_kib) / 1024).toFixed(1) + " за историю этого PID)" : "") + ". " : "") +
       "Снимков памяти: " + countWithCapacity(list(memory.samples).length, memory.capacity) + extras;
   }
+  var recoveryServices = [
+    { id: "youtube", name: "YouTube", domains: ["youtube.com", "youtu.be", "googlevideo.com", "ytimg.com", "ggpht.com", "youtubei.googleapis.com"] },
+    { id: "discord", name: "Discord", domains: ["discord.com", "discord.gg", "discord.media", "discordapp.com", "discordapp.net"] },
+    { id: "whatsapp", name: "WhatsApp", domains: ["whatsapp.com", "whatsapp.net"] },
+    { id: "rutor", name: "Rutor", domains: ["rutor.info", "rutor.is", "rutor.org"] }
+  ];
+  var recoveryStages = [
+    ["Очередь", ["ожидает безопасного слота замера", "заводим поиск"]],
+    ["Измерение", ["ждём форму приветствия", "распознаём поведение", "спрашиваем коробку о свойствах"]],
+    ["Подбор", ["выводим планы"]],
+    ["Проба", ["проверяем готовое узнанной коробки", "проверяем выведенный план", "проверяем свои планы", "проверяем семейный план"]],
+    ["Наблюдение", ["подтверждено, смотрим живой трафик"]]
+  ];
+  var recoveryOutcomes = {
+    "plan-found": ["Найден кандидат", "observe"],
+    "direct-clear": ["Прямая проба прошла", "observe"],
+    "family-probe-verified": ["Семейная проба прошла", "observe"],
+    "family-probe-inconclusive": ["Семейная проба не подтвердилась", "warn"],
+    "queue-expired": ["Истёк срок ожидания", "warn"],
+    "queue-full": ["Очередь заполнена", "warn"],
+    "inconclusive": ["Результат не подтверждён", "warn"],
+    "local-abort": ["Проверка прервана", "warn"],
+    "failed": ["Проверка завершилась ошибкой", "bad"],
+    "stun-confirmed": ["Получен STUN-ответ", "observe"],
+    "discovery-confirmed": ["Ответ на голосовую пробу", "observe"]
+  };
+
+  function recoveryTarget(target) {
+    var host = String(target || "").toLowerCase().replace(/\\.$/, "");
+    if (host === "@discord-voice") return recoveryServices[1];
+    return recoveryServices.find(function (service) {
+      return service.domains.some(function (domain) { return host === domain || host.endsWith("." + domain); });
+    }) || { id: host, name: host };
+  }
+
+  function recoveryRole(target) {
+    if (recoveryTarget(target).id !== "youtube") return "";
+    if (/(^|\\.)(googlevideo\\.com|c\\.youtube\\.com)$/i.test(target)) return "Видео CDN";
+    if (/^(www\\.|m\\.)?youtube\\.com$|^youtu\\.be$/i.test(target)) return "Сайт";
+    return "Ресурсы / API";
+  }
+
+  function recoveryTime(value) {
+    var time = typeof value === "number" ? value * 1000 : Date.parse(value);
+    return Number.isFinite(time) && time > 0 ? time : 0;
+  }
+
+  function recoveryProof(item) {
+    var probe = item && item.probe;
+    if (!probe || typeof probe.applied !== "boolean") return {
+      applied: "Нет данных", response: "Нет данных", tone: "quiet"
+    };
+    var response = probe.http_status > 0 ? "HTTP " + probe.http_status
+      : probe.level === 2 ? "TLS-рукопожатие" : probe.level === 1 ? "Транспортный ответ" : "Ответ не подтверждён";
+    return {
+      applied: probe.applied ? "Получен для пробы" : "Не получен для пробы",
+      response: response + (probe.verified ? " · проба прошла" : " · проба не подтверждена"),
+      tone: probe.verified ? "observe" : "warn"
+    };
+  }
+
+  function recoveryView(model, offline, report, marks) {
+    var services = new Map(recoveryServices.map(function (service) {
+      return [service.id, { id: service.id, name: service.name, searches: [], events: [], bindings: [] }];
+    }));
+    var live = !!(model && !offline && model.linked && model.snap.live_fresh === true);
+    function serviceFor(target) {
+      var service = recoveryTarget(target);
+      if (!service.id) return null;
+      if (!services.has(service.id)) services.set(service.id, {
+        id: service.id, name: service.name, searches: [], events: [], bindings: []
+      });
+      return services.get(service.id);
+    }
+    list(live && model.searches).concat(list(live && model.k && model.k.family_searches)).forEach(function (item) {
+      var service = serviceFor(item.target);
+      if (service) service.searches.push(item);
+    });
+    list(report && report.events).forEach(function (item) {
+      var service = serviceFor(item.target);
+      if (service) service.events.push(item);
+    });
+    list(model && model.boxes).forEach(function (box) {
+      list(box.bindings).forEach(function (item) {
+        if (!(item.enabled && item.plan_id)) return;
+        var service = services.get(recoveryTarget(item.target).id);
+        if (service) service.bindings.push(item);
+      });
+    });
+    services.forEach(function (service) {
+      service.events.sort(function (a, b) { return recoveryTime(b.at) - recoveryTime(a.at); });
+      service.bindings.sort(function (a, b) { return recoveryTime(b.confirmed) - recoveryTime(a.confirmed); });
+      var mark = marks && marks[service.id];
+      var latest = service.events[0];
+      var newest = Math.max(recoveryTime(latest && latest.at), ...service.searches.map(function (item) { return recoveryTime(item.since); }));
+      service.mark = mark && newest < mark.at ? mark : null;
+      var running = service.searches.find(function (item) { return item.phase !== "подтверждено, смотрим живой трафик"; });
+      service.probe = service.searches.find(function (item) { return item.probe; }) ||
+        (service.searches.length === 0 && latest && latest.probe ? latest : null) || null;
+      if (service.mark) {
+        service.state = service.mark.ok ? "Видео играет · проверено вами" : "Видео не играет · отмечено вами";
+        service.tone = service.mark.ok ? "ok" : "bad";
+      } else if (running) {
+        service.state = running.phase === "ожидает безопасного слота замера" ? "В очереди" : "Восстановление";
+        service.tone = "observe";
+      } else if (service.searches.length) {
+        service.state = "Наблюдение за трафиком"; service.tone = "observe";
+      } else if (live && latest && recoveryOutcomes[latest.outcome]) {
+        var outcome = recoveryOutcomes[latest.outcome];
+        service.state = outcome[0] + " · по журналу"; service.tone = outcome[1];
+      } else if (live && service.bindings.length) {
+        service.state = "Есть привязки в каталоге"; service.tone = "quiet";
+      } else {
+        service.state = live ? "Нет данных о сервисе" : "Нет актуальных данных роутера"; service.tone = "quiet";
+      }
+    });
+    return { live: live, services: services };
+  }
+
+  function recoveryNode(doc, tag, className, text) {
+    var node = doc.createElement(tag);
+    if (className) node.className = className;
+    if (text) node.textContent = text;
+    return node;
+  }
+
+  function bootRecovery(doc) {
+    var host = doc.getElementById("recovery-services");
+    if (!host) return null;
+    var model, offline = false, report, historyUnavailable = false, enabledHistory = false;
+    var selected = "youtube", marks = {}, observations = new Map(), selectorButtons = new Map();
+    var timeline = doc.getElementById("recovery-timeline");
+    var filter = doc.getElementById("recovery-filter");
+    var evidence = doc.getElementById("recovery-evidence");
+    var progress = doc.getElementById("recovery-progress");
+    var stamp = new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+    function capture(view) {
+      if (!view.live) return;
+      var at = recoveryTime(model.snap.taken);
+      if (!at) return;
+      view.services.forEach(function (service) {
+        service.searches.forEach(function (item) {
+          var targetKey = JSON.stringify([item.target, item.family, item.transport, item.ip, item.port, item.since]);
+          var key = targetKey + item.phase;
+          var previous = observations.get(key);
+          observations.set(key, { item: item, at: previous ? previous.at : at, key: key, service: service.id });
+        });
+      });
+      while (observations.size > 64) observations.delete(observations.keys().next().value);
+    }
+
+    function drawServices(view) {
+      var known = recoveryServices.map(function (service) { return service.id; });
+      var entries = Array.from(view.services.values()).filter(function (service) {
+        return known.includes(service.id) || service.searches.length || service.events.length || service.id === selected;
+      });
+      var ids = new Set(entries.map(function (service) { return service.id; }));
+      selectorButtons.forEach(function (button, id) {
+        if (!ids.has(id)) { button.remove(); selectorButtons.delete(id); }
+      });
+      entries.forEach(function (service) {
+        var button = selectorButtons.get(service.id);
+        if (!button) {
+          button = recoveryNode(doc, "button", "recovery-service");
+          button.type = "button";
+          button.append(recoveryNode(doc, "strong", "", service.name), recoveryNode(doc, "small"));
+          button.addEventListener("click", function () { selected = service.id; draw(); });
+          selectorButtons.set(service.id, button);
+          host.append(button);
+        }
+        button.setAttribute("aria-pressed", String(service.id === selected));
+        button.dataset.tone = service.tone;
+        if (button.lastElementChild.textContent !== service.state) button.lastElementChild.textContent = service.state;
+      });
+    }
+
+    function drawEvidence(service) {
+      var proof = recoveryProof(service.probe);
+      var proofTime = recoveryTime(service.probe && service.probe.at);
+      var active = service.searches[0];
+      var latest = service.events[0];
+      var binding = service.bindings[0];
+      var stageIndex = active ? recoveryStages.findIndex(function (stage) { return stage[1].includes(active.phase); }) : -1;
+      var progressKey = String(stageIndex);
+      if (progress.dataset.key !== progressKey) {
+        progress.dataset.key = progressKey;
+        progress.hidden = stageIndex < 0;
+        progress.replaceChildren(...(stageIndex < 0 ? [] : recoveryStages.map(function (stage, index) {
+          var step = recoveryNode(doc, "li", "", stage[0]);
+          if (index === stageIndex) step.setAttribute("aria-current", "step");
+          return step;
+        })));
+      }
+      var elapsed = active && recoveryTime(active.since) ? recoveryTime(model.snap.taken) - recoveryTime(active.since) : null;
+      var inspection = service.mark ? (service.mark.ok ? "Видео играет" : "Видео не играет")
+        : service.id === "youtube" ? "Воспроизведение не проверено" : "Работа приложения не проверена";
+      var cards = [
+        ["Этап", active ? active.phase : latest ? (recoveryOutcomes[latest.outcome] || ["Поиск завершён"])[0]
+          : binding ? "Привязка в каталоге" : "Нет измерения",
+          active ? [active.target, elapsed >= 0 && elapsed !== null ? formatAge(elapsed) : "", active.probes > 0 ? "Проб: " + active.probes : ""].filter(Boolean).join(" · ")
+            : latest ? latest.target : binding ? binding.target : ""],
+        ["APPLIED", proof.applied, service.probe ? service.probe.target + (proofTime ? " · " + stamp.format(proofTime) : " · последняя проба") : ""],
+        ["Ответ на пробу", proof.response, service.probe && service.probe.probe.reason || ""],
+        ["Проверка приложения", inspection, service.mark ? stamp.format(service.mark.at) : ""]
+      ];
+      var key = JSON.stringify(cards);
+      if (evidence.dataset.key === key) return;
+      evidence.dataset.key = key;
+      evidence.replaceChildren(...cards.map(function (card) {
+        var node = recoveryNode(doc, "div", "recovery-fact");
+        node.append(recoveryNode(doc, "span", "", card[0]), recoveryNode(doc, "strong", "", card[1]));
+        if (card[2]) node.append(recoveryNode(doc, "small", "", card[2]));
+        return node;
+      }));
+    }
+
+    function drawTimeline(service) {
+      var items = Array.from(observations.values()).filter(function (row) { return row.service === service.id; }).map(function (row) {
+        return { key: row.key, at: row.at, label: row.item.phase, tone: row.item.probe && !row.item.probe.verified ? "warn" : "observe", item: row.item };
+      });
+      service.events.forEach(function (item) {
+        var outcome = recoveryOutcomes[item.outcome] || ["Поиск завершён", "quiet"];
+        items.push({ key: JSON.stringify([item.id, item.at, item.target, item.ip, item.outcome]), at: recoveryTime(item.at), label: outcome[0], tone: outcome[1], item: item });
+      });
+      if (service.mark) items.push({ key: "client" + service.mark.at, at: service.mark.at, label: service.state, tone: service.tone, item: { target: service.name } });
+      items = items.filter(function (row) { return filter.value === "all" || row.tone === "bad" || row.tone === "warn"; })
+        .sort(function (a, b) { return b.at - a.at; });
+      var empty = doc.getElementById("recovery-empty");
+      empty.hidden = items.length > 0;
+      empty.textContent = filter.value === "issues" ? "В доступных данных нет записей о проблемах." : "Для этого сервиса ещё нет событий.";
+      var key = JSON.stringify(items);
+      if (timeline.dataset.key === key) return;
+      timeline.dataset.key = key;
+      var expanded = new Set(Array.from(timeline.querySelectorAll("details[open]")).map(function (item) { return item.dataset.key; }));
+      var focused = doc.activeElement && timeline.contains(doc.activeElement) ? doc.activeElement.parentElement.dataset.key : null;
+      var nextFocus;
+      timeline.replaceChildren(...items.map(function (row) {
+        var item = row.item;
+        var element = recoveryNode(doc, "li", "recovery-event");
+        element.dataset.tone = row.tone;
+        var details = recoveryNode(doc, "details"), head = recoveryNode(doc, "summary");
+        details.dataset.key = row.key;
+        details.open = expanded.has(row.key);
+        if (focused === row.key) nextFocus = head;
+        var body = recoveryNode(doc, "div", "recovery-event-detail");
+        var heading = recoveryNode(doc, "span");
+        var subtitle = [item.target, recoveryRole(item.target), item.protocol || (item.transport === 17 ? "UDP" : item.transport === 6 ? "TCP" : ""), item.family ? "IPv" + item.family : ""].filter(Boolean).join(" · ");
+        heading.append(recoveryNode(doc, "strong", "", row.label), recoveryNode(doc, "small", "", subtitle));
+        var time = recoveryNode(doc, "time", "", row.at ? stamp.format(row.at) : "Время неизвестно");
+        if (row.at) time.dateTime = new Date(row.at).toISOString();
+        head.append(heading, time);
+        if (item.since && recoveryTime(item.since)) body.append(recoveryNode(doc, "p", "", "Начало: " + stamp.format(recoveryTime(item.since))));
+        if (item.reason) body.append(recoveryNode(doc, "p", "", item.reason));
+        if (item.probe) {
+          var proof = recoveryProof(item);
+          body.append(recoveryNode(doc, "p", "", [proof.applied === "Нет данных" ? "" : "APPLIED: " + proof.applied, proof.response, item.probe.reason].filter(Boolean).join(" · ")));
+        }
+        var facts = [];
+        if (item.ip) facts.push(item.port && item.ip.includes(":") ? "[" + item.ip + "]:" + item.port : item.ip + (item.port ? ":" + item.port : ""));
+        if (number(item.elapsed_ms) !== null) facts.push("Всего " + formatAge(item.elapsed_ms));
+        if (number(item.queue_ms) !== null) facts.push("В очереди " + formatAge(item.queue_ms));
+        if (number(item.probe_units) !== null) facts.push("Проб: " + item.probe_units);
+        if (number(item.probes) !== null) facts.push("Проб: " + item.probes);
+        if (number(item.attempts) !== null) facts.push("Кандидатов: " + item.attempts);
+        if (item.path && item.path !== "none") facts.push("Путь: " + item.path);
+        if (facts.length) body.append(recoveryNode(doc, "p", "", facts.join(" · ")));
+        if (item.source || item.candidate || item.question) body.append(recoveryNode(doc, "p", "", [item.source, item.candidate, item.question].filter(Boolean).join(" · ")));
+        if (!body.childElementCount) body.append(recoveryNode(doc, "p", "", "Дополнительных данных для события нет."));
+        details.append(head, body);
+        element.append(details);
+        return element;
+      }));
+      if (nextFocus) nextFocus.focus({ preventScroll: true });
+    }
+
+    function draw() {
+      var view = recoveryView(model, offline, report, marks);
+      var service = view.services.get(selected);
+      if (!service) { selected = "youtube"; service = view.services.get(selected); }
+      drawServices(view);
+      setText(doc, "recovery-title", service.name);
+      var state = doc.getElementById("recovery-state");
+      if (state.textContent !== service.state) state.textContent = service.state;
+      state.dataset.tone = service.tone;
+      doc.getElementById("recovery-youtube-check").hidden = selected !== "youtube";
+      drawEvidence(service);
+      drawTimeline(service);
+      setText(doc, "recovery-history-note", !report && !historyUnavailable ? "Проверяем состояние истории…" : historyUnavailable ? "Журнал роутера недоступен. Видны события этой вкладки."
+        : report && report.enabled ? (report.pending ? "Ждём первый отчёт роутера." : "События из отчёта роутера и этой вкладки.")
+          : "Локальная история выключена. Видны события этой вкладки.");
+    }
+
+    filter.addEventListener("change", draw);
+    ["ok", "failed"].forEach(function (result) {
+      doc.getElementById("recovery-playback-" + result).addEventListener("click", function () {
+        marks.youtube = { at: Date.now(), ok: result === "ok" };
+        draw();
+      });
+    });
+    draw();
+    return {
+      update: function (next, failed) {
+        model = next; offline = failed;
+        var view = recoveryView(model, offline, report, marks);
+        capture(view); draw();
+      },
+      history: function (next, failed) {
+        report = next; historyUnavailable = failed;
+        if (next && next.enabled === false && enabledHistory) observations.clear();
+        enabledHistory = !!(next && next.enabled);
+        draw();
+      }
+    };
+  }
+
   if (typeof module === "object" && module.exports) module.exports = {
     summary: summary, memoryRows: memoryRows, rowsInRange: rowsInRange,
-    seriesEndpoints: seriesEndpoints, formatBytes: formatBytes, coverageText: coverageText
+    seriesEndpoints: seriesEndpoints, formatBytes: formatBytes, coverageText: coverageText,
+    recoveryTarget: recoveryTarget, recoveryProof: recoveryProof, recoveryView: recoveryView
   };
   if (!root.document || !root.fetch) return;
   function boot() {
     var doc = root.document, toggle = doc.getElementById("diagnostic-toggle"), status = doc.getElementById("diagnostic-status"), download = doc.getElementById("diagnostic-download");
     if (!toggle || !status || !download) return;
-    var enabled = false, busy = false, range = 2, currentReport = {};
+    var recovery = root.R2ORecovery = bootRecovery(doc);
+    var enabled = false, busy = false, refreshTask, range = 2, currentReport = {};
     function redraw() { render(currentReport, enabled, range); }
     doc.querySelectorAll("[data-memory-range]").forEach(function (button) {
       button.addEventListener("click", function () {
@@ -618,25 +936,43 @@
     });
     doc.querySelectorAll("[data-memory-series]").forEach(function (input) { input.addEventListener("change", redraw); });
     function refresh() {
-      return root.fetch("/api/diagnostics?report", { cache: "no-store" }).then(function (r) {
+      if (refreshTask) return refreshTask;
+      refreshTask = root.fetch("/api/diagnostics?report", { cache: "no-store" }).then(function (r) {
         if (!r.ok && r.status !== 503) throw new Error("Ошибка HTTP " + r.status);
         return r.json();
       }).then(function (r) {
         currentReport = r || {}; enabled = currentReport.enabled === true;
         toggle.textContent = enabled ? "Выключить и удалить историю" : "Включить сбор";
         download.hidden = !enabled || !!currentReport.pending;
+        if (recovery) recovery.history(currentReport, false);
         redraw();
-      }).catch(function () { status.textContent = "Не удалось прочитать состояние диагностики."; });
+      }).catch(function () {
+        status.textContent = "Не удалось прочитать состояние диагностики.";
+        if (recovery) recovery.history(undefined, true);
+      }).finally(function () { refreshTask = null; });
+      return refreshTask;
     }
+    if (recovery) recovery.refreshHistory = refresh;
     toggle.addEventListener("click", function () {
       if (busy) return; busy = true; toggle.disabled = true;
-      root.fetch("/api/diagnostics?" + (enabled ? "disable" : "enable"), { method: "POST", cache: "no-store" }).then(function (r) {
+      Promise.resolve(refreshTask).then(function () {
+        return root.fetch("/api/diagnostics?" + (enabled ? "disable" : "enable"), { method: "POST", cache: "no-store" });
+      }).then(function (r) {
         if (!r.ok) throw new Error("Ошибка HTTP " + r.status);
         return refresh();
       }).catch(function () { status.textContent = "Не удалось переключить сбор. Требуется доступ к управлению этой панелью."; })
         .finally(function () { busy = false; toggle.disabled = false; });
     });
-    refresh(); root.setInterval(function () { if (!busy && !doc.hidden) refresh(); }, 60000);
+    refresh();
+    root.setInterval(function () {
+      if (!busy && !doc.hidden && (enabled || root.location.hash === "#diagnostics")) refresh();
+    }, 60000);
+    root.setInterval(function () {
+      if (enabled && !busy && !doc.hidden && root.location.hash === "#diagnostics") refresh();
+    }, 5000);
+    root.addEventListener("hashchange", function () {
+      if (!busy && root.location.hash === "#diagnostics") refresh();
+    });
   }
   if (root.document.readyState === "loading") root.document.addEventListener("DOMContentLoaded", boot); else boot();
 })(typeof window !== "undefined" ? window : this);
