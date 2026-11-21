@@ -876,6 +876,12 @@ fn diagnostics_toggle(dir: &Path, enabled: bool) -> std::io::Result<()> {
             "каталог диагностики небезопасен",
         ));
     }
+    #[cfg(unix)]
+    let _guard = {
+        let dir = File::open(dir)?;
+        dir.lock()?;
+        dir
+    };
     let marker = dir.join("enabled");
     if enabled {
         if diagnostics_enabled(dir) {

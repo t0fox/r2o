@@ -365,13 +365,36 @@ async function main() {
   await call("Page.navigate", { url: `http://localhost:${port}/` });
   await waitFor(() => evaluate("document.readyState === 'complete' && !!document.querySelector('#app')"), "загрузка страницы R2O");
   await evaluate("document.fonts.ready.then(() => true)");
-  await waitFor(() => evaluate("!!document.querySelector('#diagnostic-toggle')"), "загрузка управления диагностикой");
+  await evaluate("location.hash = '#diagnostics'");
+  await waitFor(() => evaluate("document.querySelector('#diagnostic-state')?.dataset.phase === 'off'"), "загрузка управления диагностикой");
   assert.equal(await evaluate("(() => { const help = document.querySelector('#diagnostic-history-help'); return !!help && help.querySelector('summary')?.textContent.includes('Что сохраняется') && help.textContent.includes('120') && help.textContent.includes('64') && help.textContent.includes('домены и IP-адреса') && help.textContent.includes('никуда не отправляется'); })()"), true, "диагностика сообщает пределы истории и состав локального отчёта как d2o");
   await evaluate("document.querySelector('#diagnostic-toggle').click()");
   await waitFor(() => evaluate("document.querySelector('#diagnostic-state').dataset.enabled === 'true'"), "включение локальной диагностики");
   assert.equal(await evaluate("document.querySelector('#diagnostic-download').hidden"), true, "скачивание ждёт первого снимка контроллера");
+  assert.equal(await evaluate("document.querySelector('#diagnostic-data').hidden"), true, "пустые виджеты скрыты до первого снимка");
+  const diagDir = path.join(work, "diagnostics");
+  const now = Math.floor(Date.now() / 1000);
+  const common = { processes: [{ name: "r2o-controller", pid: 7, rss_kib: 2048, anon_kib: 1024 }], workers_running: 1 };
+  const diag = {
+    enabled: true, sample_interval_ms: 60000, samples: [{...common, at: now - 60}, {...common, at: now}],
+    events: [
+      { id: 2, at: now, target: "v.example", outcome: "inconclusive", reason: "истёк срок пробы", elapsed_ms: 2200 },
+      { id: 1, at: now - 1, target: "ok.example", outcome: "plan-found" }
+    ]
+  };
+  fs.writeFileSync(path.join(diagDir, "report.json"), JSON.stringify(diag), {mode: 0o600});
+  await waitFor(() => evaluate("document.querySelector('#diagnostic-state').dataset.phase === 'ready'"), "первый отчёт появляется после короткого опроса");
+  assert.equal(await evaluate("document.querySelector('#diagnostic-data').hidden"), false, "появились данные");
+  await evaluate("document.querySelector('#diagnostic-event-filter').value = 'unconfirmed'; document.querySelector('#diagnostic-event-filter').dispatchEvent(new Event('change'))");
+  assert.equal(await evaluate("document.querySelector('#diagnostic-event-list').childElementCount"), 1);
+  await evaluate("document.querySelector('#diagnostic-event-list summary').click()");
+  assert.equal(await evaluate("document.querySelector('#diagnostic-event-list details[open] p').textContent"), "истёк срок пробы");
+  assert.equal(await evaluate("document.querySelector('#diagnostic-cursor-input').disabled"), false, "можно выбрать снимок");
   await evaluate("document.querySelector('#diagnostic-toggle').click()");
-  await waitFor(() => evaluate("document.querySelector('#diagnostic-state').dataset.enabled === 'false'"), "выключение диагностики с удалением истории");
+  await waitFor(() => evaluate("document.querySelector('#diagnostic-state').dataset.enabled === 'false' && document.querySelector('#diagnostic-data').hidden"), "выключение диагностики с удалением истории");
+  assert.equal(fs.existsSync(path.join(diagDir, "report.json")), false);
+  await evaluate("location.hash = '#now'");
+  await waitFor(() => evaluate("!document.querySelector('#now').hidden"), "возврат к обзору");
   assert.equal(await evaluate("document.title.includes('R2O')"), true, "заголовок страницы панели");
   assert.equal(await evaluate("document.querySelector('#r2o-settings') === null && ![...document.querySelectorAll('.index a')].some((link) => link.hash === '#r2o-settings')"), true, "в панели нет отдельного раздела настроек, которого нет в d2o");
   assert.equal(await evaluate("document.querySelectorAll('#app > section').length"), 6, "все разделы панели отображаются");

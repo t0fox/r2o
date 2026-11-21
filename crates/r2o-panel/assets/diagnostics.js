@@ -253,7 +253,9 @@
       return { rows: rows, delta: null, axisUnit: null };
     }
     chart.hidden = false; empty.hidden = true;
-    var left = 68, right = 948, top = 16, bottom = 218;
+    var width = Math.max(270, Math.min(960, chart.parentElement.clientWidth - 24));
+    chart.setAttribute("viewBox", "0 0 " + width + " 204");
+    var left = 47, right = width - 12, top = 13, bottom = 174;
     var min = Math.min.apply(Math, all), max = Math.max.apply(Math, all);
     var scale = max >= 1048576 ? 1048576 : max >= 1024 ? 1024 : 1;
     var axisUnit = scale === 1048576 ? "МиБ" : scale === 1024 ? "КиБ" : "Б";
@@ -269,19 +271,27 @@
     chart.appendChild(svg(doc, "line", { x1: left, x2: right, y1: bottom, y2: bottom, "class": "diag-axis" }));
     var timedRows = rows.filter(function (row) { return number(row.time) !== null; });
     var firstTime = timedRows.length ? timedRows[0].time : null, lastTime = timedRows.length ? timedRows[timedRows.length - 1].time : null;
-    var xLabelStart = svg(doc, "text", { x: left, y: 248, "text-anchor": "start" });
-    var xLabelEnd = svg(doc, "text", { x: right, y: 248, "text-anchor": "end" });
+    function xFor(row, index) {
+      if (rows.length === 1) return (left + right) / 2;
+      if (number(row.time) !== null && firstTime !== null && lastTime > firstTime) {
+        return left + (right - left) * (row.time - firstTime) / (lastTime - firstTime);
+      }
+      return left + (right - left) * index / (rows.length - 1);
+    }
+    var xLabelStart = svg(doc, "text", { x: rows.length === 1 ? xFor(rows[0], 0) : left, y: 195, "text-anchor": rows.length === 1 ? "middle" : "start" });
     xLabelStart.textContent = timeLabel(rows[0].at);
-    xLabelEnd.textContent = timeLabel(rows[rows.length - 1].at);
-    chart.appendChild(xLabelStart); chart.appendChild(xLabelEnd);
+    chart.appendChild(xLabelStart);
+    if (rows.length > 1) {
+      var xLabelEnd = svg(doc, "text", { x: right, y: 195, "text-anchor": "end" });
+      xLabelEnd.textContent = timeLabel(rows[rows.length - 1].at);
+      chart.appendChild(xLabelEnd);
+    }
     active.forEach(function (metric) {
-      var commands = [], seen = 0, segment = false;
+      var commands = [], firstPoint, seen = 0, segment = false;
       rows.forEach(function (row, index) {
         var value = number(row[metric.key]);
         if (value === null) { segment = false; return; }
-        var x = number(row.time) !== null && firstTime !== null && lastTime !== null && lastTime > firstTime ?
-          left + (right - left) * (row.time - firstTime) / (lastTime - firstTime) :
-          rows.length < 2 ? (left + right) / 2 : left + (right - left) * index / (rows.length - 1);
+        var x = xFor(row, index);
         if (metric.key === "rss" && seen > 0 && row.generation !== null && number(row.generation) !== null) {
           var previous = rows[index - 1];
           if (previous && previous.generation !== row.generation) segment = false;
@@ -289,11 +299,13 @@
         var y = bottom - (bottom - top) * (value - min) / (max - min);
         commands.push((segment ? "L" : "M") + x.toFixed(1) + "," + y.toFixed(1));
         segment = true;
-        seen++;
+        if (seen++ === 0) firstPoint = { x: x, y: y };
       });
-      if (seen > 0) chart.appendChild(svg(doc, "path", { d: commands.join(" "), "class": "diag-line diag-line-" + metric.color, "data-series": metric.key }));
+      var seriesClass = "diag-line diag-line-" + metric.color;
+      if (seen === 1) chart.appendChild(svg(doc, "circle", { cx: firstPoint.x, cy: firstPoint.y, r: 3, "class": seriesClass }));
+      if (seen > 1) chart.appendChild(svg(doc, "path", { d: commands.join(" "), "class": seriesClass, "data-series": metric.key }));
     });
-    return { rows: rows, delta: seriesEndpoints(rows, "rss").delta, axisUnit: axisUnit };
+    return { rows: rows, delta: seriesEndpoints(rows, "rss").delta, axisUnit: axisUnit, xFor: xFor, top: top, bottom: bottom };
   }
   function processRows(doc, samples, memoryRowsInRange, latestMemory) {
     var body = doc.getElementById("diagnostic-processes");
@@ -466,7 +478,8 @@
     box.hidden = notices.length === 0;
   }
   function setText(doc, id, value) {
-    var node = doc.getElementById(id); if (node) node.textContent = value;
+    var node = doc.getElementById(id);
+    if (node && node.textContent !== value) node.textContent = value;
   }
   function overflowText(last) {
     var names = [
@@ -504,27 +517,71 @@
     if (m && number(m.other_errno_count) > 0) errors.push("прочие × " + m.other_errno_count);
     setText(doc, "diagnostic-madvise-errors", !m ? "—" : errors.join(" · ") || "нет");
   }
+  var outcomeLabels = {
+    "plan-found": "Найден план", "direct-clear": "Прямая проба прошла",
+    "stun-confirmed": "Получен STUN-ответ", "discovery-confirmed": "Получен ответ голосовой пробы",
+    "failed": "Поиск завершился ошибкой", "inconclusive": "Исход не подтверждён",
+    "unknown": "Исход неизвестен", "local-abort": "Поиск прерван",
+    "queue-full": "Очередь заполнена", "queue-expired": "Истекло ожидание в очереди"
+  };
+  function unconfirmedEvent(event) {
+    return ["failed", "inconclusive", "unknown", "local-abort", "queue-full", "queue-expired"].includes(event.outcome);
+  }
+  function renderEvents(doc, events) {
+    var target = doc.getElementById("diagnostic-event-list"), empty = doc.getElementById("diagnostic-event-empty");
+    var failures = events.filter(unconfirmedEvent);
+    var filtered = doc.getElementById("diagnostic-event-filter").value === "unconfirmed";
+    var rows = (filtered ? failures : events).slice().sort(function (a, b) { return b.at - a.at; });
+    setText(doc, "diagnostic-event-summary", "Записей " + events.length + " · без подтверждения " + failures.length);
+    empty.hidden = !!rows.length;
+    empty.textContent = filtered ? "В журнале нет неподтверждённых исходов." : "После включения сбора завершённых подборов пока нет.";
+    var key = JSON.stringify(rows);
+    if (target.dataset.events === key) return;
+    target.dataset.events = key;
+    var expanded = new Set(Array.from(target.querySelectorAll("details[open]")).map(function (row) { return row.dataset.event; }));
+    target.replaceChildren(...rows.map(function (event) {
+      var li = doc.createElement("li"), details = doc.createElement("details"), title = doc.createElement("summary");
+      var label = doc.createElement("strong"), outcome = doc.createElement("span"), time = doc.createElement("time");
+      var info = doc.createElement("div");
+      details.dataset.event = JSON.stringify([event.id, event.target, event.at, event.outcome]);
+      details.open = expanded.has(details.dataset.event);
+      li.dataset.unconfirmed = String(unconfirmedEvent(event));
+      label.textContent = event.target || "Цель не указана";
+      outcome.textContent = outcomeLabels[event.outcome] || event.outcome || "Без исхода";
+      time.textContent = timeLabel(event.at);
+      if (number(event.at) !== null) time.dateTime = new Date(event.at * 1000).toISOString();
+      title.append(label, outcome, time);
+      var facts = [];
+      if (event.protocol) facts.push(event.protocol.toUpperCase());
+      if (event.ip) facts.push(event.ip);
+      if (number(event.elapsed_ms) !== null) facts.push("Всего " + formatAge(event.elapsed_ms));
+      if (number(event.queue_ms) !== null) facts.push("В очереди " + formatAge(event.queue_ms));
+      if (number(event.probe_units) !== null) facts.push("Проб: " + event.probe_units);
+      [event.reason, facts.join(" · ")].filter(Boolean).forEach(function (text) {
+        var line = doc.createElement("p");
+        line.textContent = text;
+        info.append(line);
+      });
+      if (!info.childElementCount) info.textContent = "Дополнительных сведений нет.";
+      details.append(title, info);
+      li.append(details);
+      return li;
+    }));
+  }
+
   function render(report, enabled, range) {
     var doc = root.document, samples = list(report.samples), events = list(report.events), last = samples[samples.length - 1];
     var httpLimits = report.http_storage_limits || {};
-    var state = doc.getElementById("diagnostic-state"), data = doc.getElementById("diagnostic-data");
-    state.textContent = enabled ? "Сбор включён" : "Сбор выключен";
-    state.dataset.enabled = String(enabled);
-    data.hidden = !enabled;
-    if (!enabled) { doc.getElementById("diagnostic-status").textContent = "Сбор выключен. Включите его, чтобы записать память и исходы поиска."; return; }
+    var data = doc.getElementById("diagnostic-data");
     var mem = report.memory_history, memorySamples = list(mem && mem.samples);
+    data.hidden = !enabled || (!last && !memorySamples.length);
+    if (data.hidden) return null;
     var allMemoryRows = memoryRows(report), intervalMs = number(mem && mem.sample_interval_ms) || number(report.sample_interval_ms) || 60000;
-    if (!last && !memorySamples.length) {
-      doc.getElementById("diagnostic-status").textContent = report.pending ? "Отчёт формируется. Ожидаем первый снимок." : "Ожидаем первый снимок. Отчёт обновляется по мере работы контроллера.";
-    } else {
-      var latestAt = last && number(last.at);
-      if (latestAt === null && allMemoryRows.length) latestAt = allMemoryRows[allMemoryRows.length - 1].at;
-      doc.getElementById("diagnostic-status").textContent = latestAt === null ? "История диагностики загружена." : "Обновлено " + new Date(latestAt * 1000).toLocaleTimeString() +
-        (number(report.sample_interval_ms) !== null ? " · интервал " + formatAge(report.sample_interval_ms) : "");
-    }
-    setText(doc, "diagnostic-events", countWithCapacity(events.length, report.event_capacity));
-    setText(doc, "diagnostic-unconfirmed", String(events.filter(function (event) { return ["failed", "inconclusive", "unknown", "local-abort", "queue-full", "queue-expired"].indexOf(event.outcome) >= 0; }).length));
-    setText(doc, "diagnostic-samples", countWithCapacity(samples.length, report.sample_capacity) + (memorySamples.length ? " · память: " + countWithCapacity(memorySamples.length, mem.capacity) : ""));
+    var latest = allMemoryRows[allMemoryRows.length - 1];
+    setText(doc, "diagnostic-latest-rss", formatBytes(latest && latest.rss));
+    setText(doc, "diagnostic-latest-anon", formatBytes(latest && latest.rss_anon));
+    setText(doc, "diagnostic-latest-count", countWithCapacity(allMemoryRows.length, mem && mem.capacity));
+    renderEvents(doc, events);
     setText(doc, "diagnostic-workers-running", pretty(number(last && last.workers_running)));
     setText(doc, "diagnostic-workers-result", pretty(number(last && last.workers_result_pending)));
     setText(doc, "diagnostic-workers-join", pretty(number(last && last.workers_join_pending)));
@@ -569,6 +626,7 @@
     var latestMemory = allMemoryRows.length ? allMemoryRows[allMemoryRows.length - 1] : null;
     var processState = processRows(doc, samples, chart.rows, latestMemory);
     renderWarnings(doc, report, chart, range, processState.mismatch, storageMismatch);
+    return chart;
   }
   function summary(report) {
     var samples = list(report && report.samples), events = list(report && report.events), last = samples[samples.length - 1];
@@ -579,7 +637,7 @@
       first = list(sample.processes).filter(function (p) { return p.name === rss.name && p.pid === rss.pid && number(p.rss_kib) !== null; })[0] || null;
       return !!first;
     });
-    var failures = events.filter(function (event) { return ["failed", "inconclusive", "unknown", "local-abort", "queue-full", "queue-expired"].indexOf(event.outcome) >= 0; }).length;
+    var failures = events.filter(unconfirmedEvent).length;
     var memory = report.memory_history || {}, detail = detailsFor(report);
     var memoryRowsLatest = memoryRows(report), lastMemory = memoryRowsLatest[memoryRowsLatest.length - 1];
     var rssAnon = lastMemory && lastMemory.rss_anon !== null ? lastMemory.rss_anon / 1024 :
@@ -605,38 +663,164 @@
   };
   if (!root.document || !root.fetch) return;
   function boot() {
-    var doc = root.document, toggle = doc.getElementById("diagnostic-toggle"), status = doc.getElementById("diagnostic-status"), download = doc.getElementById("diagnostic-download");
+    var doc = root.document, toggle = doc.getElementById("diagnostic-toggle"), status = doc.getElementById("diagnostic-status");
+    var download = doc.getElementById("diagnostic-download"), state = doc.getElementById("diagnostic-state");
+    var refreshButton = doc.getElementById("diagnostic-refresh"), cursor = doc.getElementById("diagnostic-cursor");
+    var slider = doc.getElementById("diagnostic-cursor-input"), graph = doc.getElementById("diagnostic-memory-chart");
     if (!toggle || !status || !download) return;
-    var enabled = false, busy = false, range = 2, currentReport = {};
-    function redraw() { render(currentReport, enabled, range); }
+    var enabled, failed = false, busy = false, range = 2, currentReport = {}, chart, selectedAt;
+    var reportBytes = null, poll, request, pendingSince = 0, resizeFrame;
+
+    function cursorAt(index) {
+      if (!chart || !chart.xFor) return;
+      var row = chart.rows[index];
+      if (!row) return;
+      var old = graph.querySelector(".diag-cursor-line");
+      if (old) old.remove();
+      var x = chart.xFor(row, index);
+      graph.append(svg(doc, "line", { x1: x, x2: x, y1: chart.top, y2: chart.bottom, "class": "diag-cursor-line" }));
+      var label = timeLabel(row.at) + " · RSS " + formatBytes(row.rss) + " · анонимная " + formatBytes(row.rss_anon);
+      setText(doc, "diagnostic-cursor-value", label);
+      slider.setAttribute("aria-valuetext", label);
+    }
+
+    function redraw() {
+      chart = render(currentReport, enabled, range);
+      cursor.hidden = !chart || !chart.xFor;
+      setText(doc, "diagnostic-report-size", formatBytes(reportBytes));
+      if (cursor.hidden) return;
+      var index = selectedAt === undefined ? -1 : chart.rows.findIndex(function (row) { return row.at === selectedAt; });
+      if (index < 0) index = chart.rows.length - 1;
+      slider.max = String(chart.rows.length - 1);
+      slider.value = String(index);
+      slider.disabled = chart.rows.length < 2;
+      cursorAt(index);
+    }
+
+    function visible() { return !doc.hidden && !doc.getElementById("diagnostics").hidden; }
+
+    function renderState() {
+      var last = list(currentReport.samples).at(-1), at = last ? number(last.at) : null;
+      var interval = number(currentReport.sample_interval_ms) || 60000;
+      var waiting = pendingSince && Date.now() - pendingSince < 10000;
+      var stale = at !== null && Date.now() - at * 1000 > 2 * interval;
+      var phase = failed ? "error" : enabled === undefined ? "loading" : !enabled ? "off"
+        : at === null ? (waiting ? "pending" : "late") : stale ? "late" : "ready";
+      var labels = {
+        loading: ["Проверяем", "Читаем состояние сбора…"],
+        off: ["Выключен", "Минутные снимки памяти и исходы подбора сохраняются на роутере после включения."],
+        pending: ["Первый снимок", "Сбор включён. Ждём первый снимок контроллера…"],
+        late: ["Данные задерживаются", at === null ? "Первый снимок ещё недоступен. Проверьте состояние контроллера." : "Снимок за " + timeLabel(at) + " устарел. Показан последний доступный отчёт."],
+        ready: ["Сбор включён", "Последний снимок " + timeLabel(at) + " · интервал " + formatAge(interval)],
+        error: ["Ошибка связи", "Не удалось получить отчёт с роутера. Повторите запрос."]
+      };
+      setText(doc, "diagnostic-state", labels[phase][0]);
+      setText(doc, "diagnostic-status", labels[phase][1]);
+      state.dataset.enabled = String(enabled === true);
+      state.dataset.phase = phase;
+      toggle.disabled = busy || enabled === undefined;
+      toggle.textContent = enabled ? "Выключить и удалить историю" : "Включить сбор";
+      toggle.setAttribute("data-variant", enabled ? "secondary" : "primary");
+      download.hidden = !enabled || failed || at === null;
+      refreshButton.hidden = !enabled && !failed;
+      refreshButton.disabled = busy || !!request;
+    }
+
+    function schedule() {
+      root.clearTimeout(poll);
+      if (!visible() || busy) return;
+      var last = list(currentReport.samples).at(-1);
+      var interval = number(currentReport.sample_interval_ms) || 60000;
+      var untilNext = last && number(last.at) !== null ? last.at * 1000 + interval + 1200 - Date.now() : 0;
+      var delay = failed ? 5000 : !enabled ? 30000 : !last
+        ? (Date.now() - pendingSince < 10000 ? 900 : 5000)
+        : Math.min(interval, Math.max(untilNext > 0 ? 2000 : 8000, untilNext));
+      poll = root.setTimeout(refresh, delay);
+    }
+
+    function refresh() {
+      if (request) return request;
+      var controller = new AbortController();
+      var timeout = root.setTimeout(function () { controller.abort(); }, 6000);
+      request = root.fetch("/api/diagnostics?report", { cache: "no-store", signal: controller.signal }).then(function (response) {
+        if (!response.ok && response.status !== 503) throw new Error("HTTP " + response.status);
+        return response.json().then(function (report) {
+          failed = false;
+          enabled = report.enabled === true;
+          var pending = enabled && !list(report.samples).length;
+          if (pending && !pendingSince) pendingSince = Date.now();
+          if (!pending) pendingSince = 0;
+          var length = response.headers.get("Content-Length");
+          reportBytes = length === null ? null : Number(length);
+          currentReport = report;
+          if (!enabled) selectedAt = undefined;
+          redraw();
+        });
+      }).catch(function () { failed = true; }).finally(function () {
+        root.clearTimeout(timeout);
+        request = null;
+        renderState();
+        schedule();
+      });
+      renderState();
+      return request;
+    }
+
+    toggle.addEventListener("click", function () {
+      if (busy || enabled === undefined) return;
+      busy = true;
+      root.clearTimeout(poll);
+      renderState();
+      Promise.resolve(request).then(function () {
+        return root.fetch("/api/diagnostics?" + (enabled ? "disable" : "enable"), { method: "POST", cache: "no-store" });
+      }).then(function (response) {
+        if (!response.ok) throw new Error(String(response.status));
+        return response.json();
+      }).then(function (reply) {
+        enabled = reply.enabled === true;
+        pendingSince = enabled ? Date.now() : 0;
+        currentReport = {};
+        failed = false;
+        redraw();
+        return refresh();
+      }).catch(function (error) {
+        setText(doc, "diagnostic-status", error.message === "403" ? "Управление сбором недоступно в этой панели." : "Не удалось изменить состояние сбора.");
+      }).finally(function () {
+        busy = false;
+        toggle.disabled = enabled === undefined;
+        refreshButton.disabled = false;
+        schedule();
+      });
+    });
+
     doc.querySelectorAll("[data-memory-range]").forEach(function (button) {
       button.addEventListener("click", function () {
         range = Number(button.dataset.memoryRange);
+        selectedAt = undefined;
         doc.querySelectorAll("[data-memory-range]").forEach(function (item) { item.setAttribute("aria-pressed", String(item === button)); });
         redraw();
       });
     });
     doc.querySelectorAll("[data-memory-series]").forEach(function (input) { input.addEventListener("change", redraw); });
-    function refresh() {
-      return root.fetch("/api/diagnostics?report", { cache: "no-store" }).then(function (r) {
-        if (!r.ok && r.status !== 503) throw new Error("Ошибка HTTP " + r.status);
-        return r.json();
-      }).then(function (r) {
-        currentReport = r || {}; enabled = currentReport.enabled === true;
-        toggle.textContent = enabled ? "Выключить и удалить историю" : "Включить сбор";
-        download.hidden = !enabled || !!currentReport.pending;
-        redraw();
-      }).catch(function () { status.textContent = "Не удалось прочитать состояние диагностики."; });
-    }
-    toggle.addEventListener("click", function () {
-      if (busy) return; busy = true; toggle.disabled = true;
-      root.fetch("/api/diagnostics?" + (enabled ? "disable" : "enable"), { method: "POST", cache: "no-store" }).then(function (r) {
-        if (!r.ok) throw new Error("Ошибка HTTP " + r.status);
-        return refresh();
-      }).catch(function () { status.textContent = "Не удалось переключить сбор. Требуется доступ к управлению этой панелью."; })
-        .finally(function () { busy = false; toggle.disabled = false; });
+    doc.getElementById("diagnostic-event-filter").addEventListener("change", function () { renderEvents(doc, list(currentReport.events)); });
+    slider.addEventListener("input", function () {
+      var index = Number(slider.value);
+      if (!chart || !chart.rows[index]) return;
+      selectedAt = index === chart.rows.length - 1 ? undefined : chart.rows[index].at;
+      cursorAt(index);
     });
-    refresh(); root.setInterval(function () { if (!busy && !doc.hidden) refresh(); }, 60000);
+    refreshButton.addEventListener("click", refresh);
+    function wake() {
+      root.clearTimeout(poll);
+      if (visible() && !busy) refresh();
+    }
+    root.addEventListener("hashchange", function () { root.setTimeout(wake, 0); });
+    doc.addEventListener("visibilitychange", wake);
+    root.addEventListener("resize", function () {
+      if (!visible() || resizeFrame) return;
+      resizeFrame = root.requestAnimationFrame(function () { resizeFrame = null; redraw(); });
+    });
+    refresh();
   }
   if (root.document.readyState === "loading") root.document.addEventListener("DOMContentLoaded", boot); else boot();
 })(typeof window !== "undefined" ? window : this);
