@@ -25,11 +25,13 @@
   function list(value) { return Array.isArray(value) ? value : []; }
   function number(value) { return typeof value === "number" && isFinite(value) ? value : null; }
   function pretty(value) { return value === null ? "—" : String(value); }
+  var fractional = new Intl.NumberFormat("ru-RU", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  var integral = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 });
   function formatBytes(bytes) {
     if (number(bytes) === null || bytes < 0) return "—";
-    if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + " МиБ";
-    if (bytes >= 1024) return (bytes / 1024).toFixed(1) + " КиБ";
-    return Math.round(bytes) + " Б";
+    if (bytes >= 1048576) return fractional.format(bytes / 1048576) + "\u00a0МиБ";
+    if (bytes >= 1024) return fractional.format(bytes / 1024) + "\u00a0КиБ";
+    return integral.format(bytes) + "\u00a0Б";
   }
   function formatKib(kib) { return number(kib) === null ? "—" : formatBytes(kib * 1024); }
   function formatDeltaBytes(bytes) {
@@ -41,13 +43,14 @@
     if (number(ms) === null || ms < 0) return "—";
     if (ms < 1000) return Math.round(ms) + " мс";
     if (ms < 60000) return Math.floor(ms / 1000) + " с";
-    return Math.floor(ms / 60000) + " мин " + String(Math.floor(ms / 1000) % 60).padStart(2, "0") + " с";
+    var seconds = Math.floor(ms / 1000) % 60;
+    return Math.floor(ms / 60000) + "\u00a0мин" + (seconds ? " " + seconds + "\u00a0с" : "");
   }
   function intervalText(ms, axisUnit) {
     var interval = number(ms) === null || ms <= 0 ? "Интервал указан в отчёте" :
       ms % 60000 === 0 ? "Снимок раз в " + (ms / 60000) + " мин" :
       ms % 1000 === 0 ? "Снимок раз в " + (ms / 1000) + " с" : "Снимок раз в " + ms + " мс";
-    return interval + (axisUnit ? " · ось в " + axisUnit : " · значения подписаны своими единицами");
+    return axisUnit ? interval + " · " + axisUnit : interval;
   }
   function sampleWord(count) { return count % 10 === 1 && count % 100 !== 11 ? "снимке" : "снимках"; }
   function countWithCapacity(count, capacity) {
@@ -232,15 +235,14 @@
     if (number(seconds) === null) return "—";
     return new Date(seconds * 1000).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   }
-  function drawMemory(doc, allRows, hours, intervalMs) {
+  function drawMemory(doc, allRows, hours, intervalMs, size) {
     var chart = doc.getElementById("diagnostic-memory-chart"), empty = doc.getElementById("diagnostic-memory-empty");
     if (!chart || !empty) return { rows: [], delta: null, axisUnit: null };
     var rows = rowsInRange(allRows, hours, intervalMs);
     var options = {}, available = {};
     metrics.forEach(function (metric) {
       var input = doc.querySelector('[data-memory-series="' + metric.key + '"]');
-      var values = rows.map(function (row) { return row[metric.key]; }).filter(function (value) { return number(value) !== null; });
-      available[metric.key] = values.length > 0;
+      available[metric.key] = rows.some(function (row) { return number(row[metric.key]) !== null; });
       if (input) {
         input.parentNode.hidden = !available[metric.key];
         options[metric.key] = input.checked;
@@ -252,6 +254,16 @@
       }
     });
     var active = metrics.filter(function (metric) { return available[metric.key] && options[metric.key]; });
+    var legend = doc.getElementById("diagnostic-legend");
+    legend.replaceChildren(...active.map(function (metric) {
+      var item = doc.createElement("li");
+      var key = svg(doc, "svg", { width: 16, height: 8, viewBox: "0 0 16 8", "aria-hidden": "true" });
+      key.append(svg(doc, "path", { d: "M1 4h14", "class": "diag-line diag-line-" + metric.color }));
+      item.append(key, metric.label);
+      item.translate = false;
+      return item;
+    }));
+    doc.getElementById("diagnostic-series-options").hidden = !Object.values(available).some(Boolean);
     var all = [];
     active.forEach(function (metric) { rows.forEach(function (row) { if (number(row[metric.key]) !== null) all.push(row[metric.key]); }); });
     chart.replaceChildren();
@@ -264,9 +276,9 @@
       return { rows: rows, delta: null, axisUnit: null };
     }
     chart.removeAttribute("hidden"); empty.hidden = true;
-    var width = Math.max(270, Math.min(960, chart.parentElement.clientWidth - 24));
-    chart.setAttribute("viewBox", "0 0 " + width + " 204");
-    var left = 47, right = width - 12, top = 13, bottom = 174;
+    var width = size.width, height = size.height;
+    chart.setAttribute("viewBox", "0 0 " + width + " " + height);
+    var left = width < 400 ? 40 : 56, right = width - 10, top = 12, bottom = height - 30;
     var min = Math.min.apply(Math, all), max = Math.max.apply(Math, all);
     var scale = max >= 1048576 ? 1048576 : max >= 1024 ? 1024 : 1;
     var axisUnit = scale === 1048576 ? "МиБ" : scale === 1024 ? "КиБ" : "Б";
@@ -276,7 +288,7 @@
       var y = top + (bottom - top) * tick / 4;
       chart.appendChild(svg(doc, "line", { x1: left, x2: right, y1: y, y2: y, "class": "diag-gridline" }));
       var label = svg(doc, "text", { x: left - 8, y: y + 4, "text-anchor": "end" });
-      label.textContent = ((max - (max - min) * tick / 4) / scale).toFixed(scale === 1 ? 0 : 1);
+      label.textContent = (scale === 1 ? integral : fractional).format((max - (max - min) * tick / 4) / scale);
       chart.appendChild(label);
     }
     chart.appendChild(svg(doc, "line", { x1: left, x2: right, y1: bottom, y2: bottom, "class": "diag-axis" }));
@@ -289,34 +301,43 @@
       }
       return left + (right - left) * index / (rows.length - 1);
     }
-    var xLabelStart = svg(doc, "text", { x: rows.length === 1 ? xFor(rows[0], 0) : left, y: 195, "text-anchor": rows.length === 1 ? "middle" : "start" });
+    var xLabelStart = svg(doc, "text", { x: rows.length === 1 ? xFor(rows[0], 0) : left, y: height - 7, "text-anchor": rows.length === 1 ? "middle" : "start" });
     xLabelStart.textContent = timeLabel(rows[0].at);
     chart.appendChild(xLabelStart);
     if (rows.length > 1) {
-      var xLabelEnd = svg(doc, "text", { x: right, y: 195, "text-anchor": "end" });
+      var xLabelEnd = svg(doc, "text", { x: right, y: height - 7, "text-anchor": "end" });
       xLabelEnd.textContent = timeLabel(rows[rows.length - 1].at);
       chart.appendChild(xLabelEnd);
     }
+    function yFor(value) {
+      return bottom - (bottom - top) * (value - min) / (max - min);
+    }
     active.forEach(function (metric) {
-      var commands = [], firstPoint, seen = 0, segment = false;
+      var commands = [], points = [], segment = false;
       rows.forEach(function (row, index) {
         var value = number(row[metric.key]);
         if (value === null) { segment = false; return; }
         var x = xFor(row, index);
-        if (metric.key === "rss" && seen > 0 && row.generation !== null && number(row.generation) !== null) {
+        if (metric.key === "rss" && points.length > 0 && row.generation !== null && number(row.generation) !== null) {
           var previous = rows[index - 1];
           if (previous && previous.generation !== row.generation) segment = false;
         }
-        var y = bottom - (bottom - top) * (value - min) / (max - min);
+        var y = yFor(value);
         commands.push((segment ? "L" : "M") + x.toFixed(1) + "," + y.toFixed(1));
         segment = true;
-        if (seen++ === 0) firstPoint = { x: x, y: y };
+        points.push({ x: x, y: y });
       });
       var seriesClass = "diag-line diag-line-" + metric.color;
-      if (seen === 1) chart.appendChild(svg(doc, "circle", { cx: firstPoint.x, cy: firstPoint.y, r: 3, "class": seriesClass }));
-      if (seen > 1) chart.appendChild(svg(doc, "path", { d: commands.join(" "), "class": seriesClass, "data-series": metric.key }));
+      if (points.length < 4) {
+        points.forEach(function (point) {
+          chart.append(svg(doc, "circle", { cx: point.x, cy: point.y, r: 3, "class": seriesClass + " diag-point" }));
+        });
+      } else {
+        chart.append(svg(doc, "path", { d: commands.join(" "), "class": seriesClass, "data-series": metric.key }));
+      }
     });
-    return { rows: rows, delta: seriesEndpoints(rows, "rss").delta, axisUnit: axisUnit, xFor: xFor, top: top, bottom: bottom };
+    return { rows: rows, delta: seriesEndpoints(rows, "rss").delta, axisUnit: axisUnit, xFor: xFor, yFor: yFor,
+      active: active, top: top, bottom: bottom };
   }
   function processRows(doc, samples, memoryRowsInRange, latestMemory) {
     var body = doc.getElementById("diagnostic-processes");
@@ -406,11 +427,11 @@
       return row;
     }));
   }
-  function renderWarnings(doc, report, chart, hours, processMismatch, storageMismatch) {
+  function renderWarnings(doc, report, rows, processMismatch, storageMismatch) {
     var box = doc.getElementById("diagnostic-warnings");
     if (!box) return;
     box.replaceChildren();
-    var notices = [], delta = chart.delta, anomalies = list(report.anomalies);
+    var notices = [], anomalies = list(report.anomalies);
     function add(kind, title, message, technical) {
       notices.push({ kind: kind, title: title, message: message, technical: technical || "" });
     }
@@ -430,15 +451,11 @@
       "График и карточки показывают снимок истории памяти; общий отчёт содержит другие значения.", storageMismatch.join("; "));
     var growthAnomalies = anomalies.filter(function (item) { return item && item.kind === "unattributed-rss-growth"; });
     var growth = growthAnomalies[growthAnomalies.length - 1];
-    if ((number(delta) !== null && delta > 0) || growth) {
-      var growthText = number(delta) !== null && delta > 0 ? "RSS вырос на " + formatBytes(delta) + " за фактически доступную часть выбранных " + rangeText(hours) :
-        "За " + pretty(number(growth.window_samples)) + " снимков RSS вырос на " + formatKib(growth.rss_delta_kib);
-    if (growth) growthText += "; без сопоставимого роста учтённых объектов: за последние " +
-      pretty(number(growth.window_samples)) + " снимков учтённая память изменилась на " +
-        formatKib(number(growth.accounted_delta_kib));
-      add("info", "Рост RSS", growthText + ". Рост сам по себе не подтверждает утечку.");
+    if (growth) {
+      add("info", "Устойчивый рост RSS",
+        "За " + pretty(number(growth.window_samples)) + " снимков RSS вырос на " + formatKib(growth.rss_delta_kib) + ".",
+        "Изменение учтённой памяти " + formatKib(number(growth.accounted_delta_kib)) + ".");
     }
-    var rows = memoryRows(report);
     var unavailableRows = rows.filter(function (row) { return row.status === 1 && row.anonymous === null && row.errno !== 2; });
     var unavailable = unavailableRows.length;
     var parseErrors = rows.filter(function (row) { return row.status === 3 && row.anonymous === null; }).length;
@@ -598,7 +615,7 @@
     }));
   }
 
-  function render(report, enabled, range) {
+  function render(report, enabled, range, size) {
     var doc = root.document, samples = list(report.samples), events = list(report.events), last = samples[samples.length - 1];
     var httpLimits = report.http_storage_limits || {};
     var data = doc.getElementById("diagnostic-data");
@@ -666,12 +683,15 @@
     renderAimd(doc, report, last);
     var technical = doc.getElementById("diagnostic-technical");
     technical.hidden = !technical.querySelector(".diag-card:not([hidden])");
-    var chart = drawMemory(doc, allMemoryRows, range, intervalMs);
+    var chart = drawMemory(doc, allMemoryRows, range, intervalMs, size);
     setText(doc, "diagnostic-memory-interval", intervalText(intervalMs, chart.axisUnit));
     setText(doc, "diagnostic-history-coverage", coverageText(chart.rows, range));
+    var change = doc.getElementById("diagnostic-rss-change");
+    change.hidden = chart.delta === null;
+    if (!change.hidden) change.textContent = formatDeltaBytes(chart.delta) + " за период";
     var latestMemory = allMemoryRows.length ? allMemoryRows[allMemoryRows.length - 1] : null;
     var processState = processRows(doc, samples, chart.rows, latestMemory);
-    renderWarnings(doc, report, chart, range, processState.mismatch, storageMismatch);
+    renderWarnings(doc, report, allMemoryRows, processState.mismatch, storageMismatch);
     return chart;
   }
   function summary(report) {
@@ -713,26 +733,54 @@
     var refreshButton = doc.getElementById("diagnostic-refresh"), cursor = doc.getElementById("diagnostic-cursor");
     var slider = doc.getElementById("diagnostic-cursor-input"), graph = doc.getElementById("diagnostic-memory-chart");
     if (!toggle || !status || !download) return;
-    var enabled, failed = false, busy = false, range = 2, currentReport = {}, chart, selectedAt;
+    var stopDialog = doc.getElementById("diagnostic-stop-dialog"), eventFilter = doc.getElementById("diagnostic-event-filter");
+    var rangeButtons = doc.querySelectorAll("[data-memory-range]");
+    var params = new URL(root.location.href).searchParams;
+    var range = params.get("diag-period") === "24" ? 24 : 2;
+    eventFilter.value = params.get("diag-outcomes") === "unconfirmed" ? "unconfirmed" : "all";
+    var enabled, failed = false, busy = false, currentReport = {}, chart, selectedAt;
     var reportBytes = null, poll, request, pendingSince = 0, resizeFrame;
+    var plotSize = { width: 320, height: 240 };
+
+    function saveOption(key, value) {
+      var url = new URL(root.location.href);
+      if (value) url.searchParams.set(key, value); else url.searchParams.delete(key);
+      root.history.replaceState(root.history.state, "", url);
+    }
+    function markRange() {
+      rangeButtons.forEach(function (button) {
+        button.setAttribute("aria-pressed", String(Number(button.dataset.memoryRange) === range));
+      });
+    }
+    markRange();
 
     function cursorAt(index) {
       if (!chart || !chart.xFor) return;
       var row = chart.rows[index];
       if (!row) return;
-      var old = graph.querySelector(".diag-cursor-line");
+      var old = graph.querySelector(".diag-cursor-mark");
       if (old) old.remove();
       var x = chart.xFor(row, index);
-      graph.append(svg(doc, "line", { x1: x, x2: x, y1: chart.top, y2: chart.bottom, "class": "diag-cursor-line" }));
+      var marker = svg(doc, "g", { "class": "diag-cursor-mark", "aria-hidden": "true" });
+      marker.append(svg(doc, "line", { x1: x, x2: x, y1: chart.top, y2: chart.bottom, "class": "diag-cursor-line" }));
+      chart.active.forEach(function (metric) {
+        var value = number(row[metric.key]);
+        if (value !== null) marker.append(svg(doc, "circle", {
+          cx: x, cy: chart.yFor(value), r: 4, "class": "diag-point diag-line diag-line-" + metric.color
+        }));
+      });
+      graph.append(marker);
       var label = timeLabel(row.at) + " · RSS " + formatBytes(row.rss) + " · анонимная " + formatBytes(row.rss_anon);
       setText(doc, "diagnostic-cursor-value", label);
       slider.setAttribute("aria-valuetext", label);
     }
 
     function redraw() {
-      chart = render(currentReport, enabled, range);
-      cursor.hidden = !chart || !chart.xFor;
-      setText(doc, "diagnostic-report-size", formatBytes(reportBytes));
+      chart = render(currentReport, enabled, range, plotSize);
+      cursor.hidden = !chart || !chart.xFor || chart.rows.length < 2;
+      var reportSize = doc.getElementById("diagnostic-report-size");
+      reportSize.hidden = !chart || number(reportBytes) === null;
+      if (!reportSize.hidden) reportSize.textContent = "Размер JSON: " + formatBytes(reportBytes);
       if (cursor.hidden) return;
       var index = selectedAt === undefined ? -1 : chart.rows.findIndex(function (row) { return row.at === selectedAt; });
       if (index < 0) index = chart.rows.length - 1;
@@ -756,7 +804,7 @@
         off: ["Выключен", "Минутные снимки памяти и исходы подбора сохраняются на роутере после включения."],
         pending: ["Первый снимок", "Сбор включён. Ждём первый снимок контроллера…"],
         late: ["Данные задерживаются", at === null ? "Первый снимок ещё недоступен. Проверьте состояние контроллера." : "Снимок за " + timeLabel(at) + " устарел. Показан последний доступный отчёт."],
-        ready: ["Сбор включён", "Последний снимок " + timeLabel(at) + " · интервал " + formatAge(interval)],
+        ready: ["Включён", "Последний снимок " + timeLabel(at) + " · шаг " + formatAge(interval)],
         error: ["Ошибка связи", "Не удалось получить отчёт с роутера. Повторите запрос."]
       };
       setText(doc, "diagnostic-state", labels[phase][0]);
@@ -764,8 +812,8 @@
       state.dataset.enabled = String(enabled === true);
       state.dataset.phase = phase;
       toggle.disabled = busy || enabled === undefined;
-      toggle.textContent = enabled ? "Выключить и удалить историю" : "Включить сбор";
-      toggle.setAttribute("data-variant", enabled ? "secondary" : "primary");
+      toggle.textContent = enabled ? "Выключить…" : "Включить сбор";
+      toggle.setAttribute("data-variant", enabled ? "danger" : "primary");
       download.hidden = !enabled || failed || at === null;
       refreshButton.hidden = !enabled && !failed;
       refreshButton.disabled = busy || !!request;
@@ -811,7 +859,7 @@
       return request;
     }
 
-    toggle.addEventListener("click", function () {
+    function toggleCollection() {
       if (busy || enabled === undefined) return;
       busy = true;
       root.clearTimeout(poll);
@@ -836,23 +884,52 @@
         refreshButton.disabled = false;
         schedule();
       });
-    });
+    }
 
-    doc.querySelectorAll("[data-memory-range]").forEach(function (button) {
+    toggle.addEventListener("click", function () {
+      if (!enabled) { toggleCollection(); return; }
+      stopDialog.returnValue = "cancel";
+      stopDialog.showModal();
+    });
+    stopDialog.addEventListener("close", function () {
+      if (stopDialog.returnValue === "stop" && enabled) toggleCollection();
+    });
+    rangeButtons.forEach(function (button) {
       button.addEventListener("click", function () {
-        range = Number(button.dataset.memoryRange);
-        selectedAt = undefined;
-        doc.querySelectorAll("[data-memory-range]").forEach(function (item) { item.setAttribute("aria-pressed", String(item === button)); });
+        var nextRange = Number(button.dataset.memoryRange);
+        if (nextRange === range) return;
+        range = nextRange;
+        saveOption("diag-period", range === 24 ? "24" : "");
+        markRange();
         redraw();
+        if (!graph.hasAttribute("hidden") && !root.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+          graph.getAnimations().forEach(function (animation) { animation.cancel(); });
+          graph.animate([{ opacity: .68 }, { opacity: 1 }], { duration: 170, easing: "ease-out" });
+        }
       });
     });
     doc.querySelectorAll("[data-memory-series]").forEach(function (input) { input.addEventListener("change", redraw); });
-    doc.getElementById("diagnostic-event-filter").addEventListener("change", function () { renderEvents(doc, list(currentReport.events)); });
-    slider.addEventListener("input", function () {
-      var index = Number(slider.value);
+    eventFilter.addEventListener("change", function () {
+      saveOption("diag-outcomes", eventFilter.value === "unconfirmed" ? "unconfirmed" : "");
+      renderEvents(doc, list(currentReport.events));
+    });
+    function selectSnapshot(index) {
       if (!chart || !chart.rows[index]) return;
+      slider.value = String(index);
       selectedAt = index === chart.rows.length - 1 ? undefined : chart.rows[index].at;
       cursorAt(index);
+    }
+    slider.addEventListener("input", function () { selectSnapshot(Number(slider.value)); });
+    graph.addEventListener("click", function (event) {
+      if (cursor.hidden) return;
+      var rect = graph.getBoundingClientRect();
+      var x = (event.clientX - rect.left) / rect.width * plotSize.width;
+      var nearest = 0, distance = Infinity;
+      chart.rows.forEach(function (row, index) {
+        var offset = Math.abs(chart.xFor(row, index) - x);
+        if (offset < distance) { nearest = index; distance = offset; }
+      });
+      selectSnapshot(nearest);
     });
     refreshButton.addEventListener("click", refresh);
     function wake() {
@@ -861,10 +938,19 @@
     }
     root.addEventListener("hashchange", function () { root.setTimeout(wake, 0); });
     doc.addEventListener("visibilitychange", wake);
-    root.addEventListener("resize", function () {
-      if (!visible() || resizeFrame) return;
-      resizeFrame = root.requestAnimationFrame(function () { resizeFrame = null; redraw(); });
-    });
+    var plot = doc.getElementById("diagnostic-plot");
+    new root.ResizeObserver(function ([entry]) {
+      var width = Math.floor(entry.contentRect.width), height = Math.floor(entry.contentRect.height);
+      if (!width || !height || (width === plotSize.width && height === plotSize.height)) return;
+      plotSize = { width: width, height: height };
+      if (!resizeFrame) resizeFrame = root.requestAnimationFrame(function () {
+        resizeFrame = null;
+        if (visible()) {
+          redraw();
+          plot.dataset.measured = "true";
+        }
+      });
+    }).observe(plot);
     refresh();
   }
   if (root.document.readyState === "loading") root.document.addEventListener("DOMContentLoaded", boot); else boot();
