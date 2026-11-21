@@ -44,6 +44,8 @@ use r2o_controller::classify_json::result_json_value as classify_result_json_val
 #[cfg(unix)]
 use r2o_controller::compose_d2o::r2o_plan_tlv_stamp_ident;
 use r2o_controller::domain::normalize;
+#[cfg(unix)]
+use r2o_controller::ech::{R2oEchDnsAnswer, R2oEchDnsContext};
 use r2o_controller::http_search::{
     R2oHttpPlanRecord, candidate_key_from_plan_text, candidate_keys, candidate_program,
     candidate_text, http_plan_of, load_http_plans, save_http_plans, stable_id,
@@ -408,7 +410,12 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
     if trigger_bytes.is_none() {
         client.arm_client_shape(&options.sni, family)?;
         trigger_bytes = client
-            .wait_for_client_shape(&options.sni, family, options.arm_wait.unwrap_or(ASK_WAIT))?
+            .wait_for_client_shape(
+                &options.sni,
+                family,
+                options.arm_wait.unwrap_or(ASK_WAIT),
+                None,
+            )?
             .map(|event| event.client_hello);
         trigger_timed_out = trigger_bytes.is_none();
     }
@@ -417,7 +424,12 @@ fn run_r2o_ask(options: AskCliOptions) -> Result<i32, Box<dyn Error>> {
     if let Some(AskControlInput::Capture(control_sni)) = &options.control {
         client.arm_client_shape(control_sni, family)?;
         control_bytes = client
-            .wait_for_client_shape(control_sni, family, options.arm_wait.unwrap_or(ASK_WAIT))?
+            .wait_for_client_shape(
+                control_sni,
+                family,
+                options.arm_wait.unwrap_or(ASK_WAIT),
+                None,
+            )?
             .map(|event| event.client_hello);
         control_timed_out = control_bytes.is_none();
     }
@@ -2364,16 +2376,20 @@ struct CatalogLock(std::fs::File);
 const R2O_CATALOG_SAVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 #[cfg(unix)]
+type CatalogSnapshot = Arc<std::sync::Mutex<Arc<Catalog>>>;
+
+#[cfg(unix)]
 struct R2oCatalogPersistence {
     last_save: std::time::Instant,
     dirty: bool,
-    base_catalog: Catalog,
-    catalog_snapshot: Arc<std::sync::Mutex<Catalog>>,
+    generation: u64,
+    base_catalog: Arc<Catalog>,
+    catalog_snapshot: CatalogSnapshot,
 }
 
 #[cfg(unix)]
 impl R2oCatalogPersistence {
-    fn new(started: std::time::Instant, catalog_snapshot: Arc<std::sync::Mutex<Catalog>>) -> Self {
+    fn new(started: std::time::Instant, catalog_snapshot: CatalogSnapshot) -> Self {
         let base_catalog = catalog_snapshot
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2381,6 +2397,7 @@ impl R2oCatalogPersistence {
         Self {
             last_save: started,
             dirty: false,
+            generation: 0,
             base_catalog,
             catalog_snapshot,
         }
@@ -2388,6 +2405,7 @@ impl R2oCatalogPersistence {
 
     fn mark_dirty(&mut self) {
         self.dirty = true;
+        self.generation = self.generation.wrapping_add(1);
     }
 
     fn persist_due(
@@ -2430,12 +2448,16 @@ impl R2oCatalogPersistence {
         let (_lock, latest) = locked_catalog(path, catalog)?;
         let merged = Catalog::merge_concurrent_changes(&self.base_catalog, catalog, &latest)?;
         merged.save_atomic(path, wall_now)?;
+        if merged != *catalog {
+            self.generation = self.generation.wrapping_add(1);
+        }
         *catalog = merged;
-        self.base_catalog = catalog.clone();
+        let snapshot = Arc::new(catalog.clone());
+        self.base_catalog = Arc::clone(&snapshot);
         *self
             .catalog_snapshot
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = catalog.clone();
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot;
         self.dirty = false;
         Ok(())
     }
@@ -2557,10 +2579,11 @@ fn persist_catalog_update(
     r2o_write_http_plans(path, catalog, now);
     if let Some(persistence) = persistence {
         persistence.mark_dirty();
+        let snapshot = Arc::new(catalog.clone());
         *persistence
             .catalog_snapshot
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = catalog.clone();
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot;
         Ok(())
     } else {
         catalog.save_atomic(path, now)?;
@@ -3715,18 +3738,60 @@ fn clear_catalog(path: PathBuf) -> Result<(), Box<dyn Error>> {
 }
 
 #[cfg(unix)]
+#[derive(Debug)]
 enum CatalogInstallOp {
     Command(usize),
     CleanupName { host: String, command: Vec<u8> },
 }
 
 #[cfg(unix)]
+#[derive(Debug)]
 struct CompiledCatalog {
     commands: Vec<(String, Vec<u8>)>,
     install_order: Vec<CatalogInstallOp>,
     group_commands: Vec<(usize, r2o_controller::live::LiveGroupKey)>,
     skipped: usize,
     tcp_stall_budgets: Vec<u16>,
+    preparation: CatalogPreparation,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Default)]
+struct CatalogPreparation {
+    elapsed: std::time::Duration,
+    plan_compilations: usize,
+}
+
+#[cfg(unix)]
+enum CatalogSyncRequest {
+    Rebuild,
+    Prepared {
+        compiled: CompiledCatalog,
+        generation: u64,
+        send_cap: usize,
+        queued_at: std::time::Instant,
+    },
+}
+
+#[cfg(unix)]
+impl CatalogSyncRequest {
+    fn take_prepared(
+        self,
+        generation: u64,
+        send_cap: usize,
+    ) -> Option<(CompiledCatalog, std::time::Duration)> {
+        match self {
+            Self::Prepared {
+                compiled,
+                generation: prepared_generation,
+                send_cap: prepared_send_cap,
+                queued_at,
+            } if prepared_generation == generation && prepared_send_cap == send_cap => {
+                Some((compiled, queued_at.elapsed()))
+            }
+            _ => None,
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -3953,34 +4018,72 @@ fn r2o_catalog_addr_binding_shape(binding: &Binding) -> u8 {
 }
 
 #[cfg(unix)]
-fn r2o_newer_name_binding(catalog: &Catalog, binding: &Binding) -> bool {
+fn r2o_catalog_name_binding_index(catalog: &Catalog) -> HashMap<String, Vec<(usize, usize)>> {
+    let mut by_name = HashMap::<String, Vec<(usize, usize)>>::new();
+    for (box_index, box_record) in catalog.boxes.iter().enumerate() {
+        let mut first_plan_enabled = HashMap::new();
+        for plan in &box_record.plans {
+            first_plan_enabled
+                .entry(plan.id.as_str())
+                .or_insert(plan.enabled);
+        }
+        for (binding_index, binding) in box_record.bindings.iter().enumerate() {
+            if binding.kind != "name"
+                || !binding.enabled
+                || r2o_catalog_binding_is_weak(binding)
+                || (binding.transport == 17 && binding.verified_by == R2O_D2K_VERBY_CLIENT)
+                || first_plan_enabled.get(binding.plan_id.as_str()) != Some(&true)
+            {
+                continue;
+            }
+            let position = (box_index, binding_index);
+            if let Some(bindings) = by_name.get_mut(binding.target.as_str()) {
+                bindings.push(position);
+            } else {
+                by_name.insert(binding.target.clone(), vec![position]);
+            }
+        }
+    }
+    by_name
+}
+
+#[cfg(unix)]
+fn r2o_newer_name_binding(
+    catalog: &Catalog,
+    by_name: &HashMap<String, Vec<(usize, usize)>>,
+    binding: &Binding,
+) -> bool {
     if binding.kind != "name" {
         return false;
     }
-    catalog.boxes.iter().any(|box_record| {
-        box_record.bindings.iter().any(|other| {
-            !std::ptr::eq(other, binding)
-                && other.enabled
-                && other
+    by_name
+        .get(binding.target.as_str())
+        .is_some_and(|positions| {
+            positions.iter().any(|&(box_index, binding_index)| {
+                let other = &catalog.boxes[box_index].bindings[binding_index];
+                other
                     .recheck_since
                     .is_none_or(|recheck_since| recheck_since == 0)
-                && !r2o_catalog_binding_is_weak(other)
-                && r2o_catalog_binding_beats(other, binding)
-                && other.kind == "name"
-                && other.target == binding.target
-                && r2o_catalog_binding_transport(other) == r2o_catalog_binding_transport(binding)
-                && r2o_catalog_binding_family(other) == r2o_catalog_binding_family(binding)
-                && other.shape == binding.shape
-                && (r2o_catalog_binding_transport(other) != 6
-                    || other.tcp_profile == binding.tcp_profile)
-                && !(other.transport == 17 && other.verified_by == R2O_D2K_VERBY_CLIENT)
-                && box_record
-                    .plans
-                    .iter()
-                    .find(|plan| plan.id == other.plan_id)
-                    .is_some_and(|plan| plan.enabled)
+                    && r2o_catalog_binding_beats(other, binding)
+                    && r2o_catalog_binding_transport(other)
+                        == r2o_catalog_binding_transport(binding)
+                    && r2o_catalog_binding_family(other) == r2o_catalog_binding_family(binding)
+                    && other.shape == binding.shape
+                    && (r2o_catalog_binding_transport(other) != 6
+                        || other.tcp_profile == binding.tcp_profile)
+            })
         })
-    })
+}
+
+#[cfg(unix)]
+fn r2o_index_enabled_plans<'a>(
+    plans: impl Iterator<Item = &'a r2o_controller::catalog::Plan>,
+) -> HashMap<&'a str, &'a r2o_controller::catalog::Plan> {
+    let mut by_id = HashMap::new();
+    for plan in plans.filter(|plan| plan.enabled) {
+        by_id.entry(plan.id.as_str()).or_insert(plan);
+    }
+    by_id
 }
 
 #[cfg(unix)]
@@ -4014,14 +4117,18 @@ fn catalog_commands_with_send_cap(
     send_cap: usize,
     now: i64,
 ) -> Result<CompiledCatalog, Box<dyn Error>> {
+    let preparation_started = std::time::Instant::now();
+    let mut plan_compilations = 0;
     let mut commands = Vec::new();
     let mut install_order = Vec::new();
     let mut group_commands = Vec::new();
     let mut skipped = 0_usize;
     let mut selection_catalog = catalog.clone();
+    let name_bindings = r2o_catalog_name_binding_index(&selection_catalog);
     for (box_index, box_record) in catalog.boxes.iter_mut().enumerate() {
         // C `box_injects_rst(b)`: примета коробки, не привязки.
         let box_injects_rst = r2o_box_injects_rst(box_record);
+        let plans_by_id = r2o_index_enabled_plans(box_record.plans.iter());
         for (binding_index, binding) in box_record.bindings.iter_mut().enumerate() {
             let selection_binding = &selection_catalog.boxes[box_index].bindings[binding_index];
             if !binding.enabled
@@ -4031,7 +4138,7 @@ fn catalog_commands_with_send_cap(
             {
                 continue;
             }
-            if r2o_newer_name_binding(&selection_catalog, selection_binding) {
+            if r2o_newer_name_binding(&selection_catalog, &name_bindings, selection_binding) {
                 continue;
             }
             if r2o_catalog_binding_is_weak(binding)
@@ -4055,11 +4162,7 @@ fn catalog_commands_with_send_cap(
                     skipped += 1;
                     continue;
                 }
-                let Some(saved_plan) = box_record
-                    .plans
-                    .iter()
-                    .find(|plan| plan.id == binding.plan_id && plan.enabled)
-                else {
+                let Some(saved_plan) = plans_by_id.get(binding.plan_id.as_str()) else {
                     skipped += 1;
                     continue;
                 };
@@ -4071,6 +4174,7 @@ fn catalog_commands_with_send_cap(
                 } else {
                     saved_plan.text.clone()
                 };
+                plan_compilations += 1;
                 let Some((bytes, plan)) = r2o_catalog_compile_plan(&guarded_text, &saved_plan.id)
                 else {
                     skipped += 1;
@@ -4126,11 +4230,7 @@ fn catalog_commands_with_send_cap(
                 skipped += 1;
                 continue;
             };
-            let Some(saved_plan) = box_record
-                .plans
-                .iter()
-                .find(|plan| plan.id == binding.plan_id && plan.enabled)
-            else {
+            let Some(saved_plan) = plans_by_id.get(binding.plan_id.as_str()) else {
                 skipped += 1;
                 continue;
             };
@@ -4140,6 +4240,7 @@ fn catalog_commands_with_send_cap(
             } else {
                 saved_plan.text.clone()
             };
+            plan_compilations += 1;
             let Some((bytes, plan)) = r2o_catalog_compile_plan(&guarded_text, &saved_plan.id)
             else {
                 skipped += 1;
@@ -4186,6 +4287,12 @@ fn catalog_commands_with_send_cap(
         }
     }
     if let Some(domain_state) = &catalog.domain_state {
+        let plans_by_id = r2o_index_enabled_plans(
+            catalog
+                .boxes
+                .iter()
+                .flat_map(|box_record| &box_record.plans),
+        );
         let mut plans_by_wire_key: HashMap<(String, u8, u8, u8), HashSet<String>> = HashMap::new();
         for group in &domain_state.groups {
             plans_by_wire_key
@@ -4216,15 +4323,11 @@ fn catalog_commands_with_send_cap(
                 skipped += 1;
                 continue;
             }
-            let Some(saved_plan) = catalog
-                .boxes
-                .iter()
-                .flat_map(|box_record| &box_record.plans)
-                .find(|plan| plan.id == group.plan_id && plan.enabled)
-            else {
+            let Some(saved_plan) = plans_by_id.get(group.plan_id.as_str()) else {
                 skipped += 1;
                 continue;
             };
+            plan_compilations += 1;
             let bytes = compile_text(&saved_plan.text)
                 .map_err(|error| format!("план области {}: {error}", group.suffix))?;
             let plan = Plan::parse(&bytes)?;
@@ -4356,6 +4459,10 @@ fn catalog_commands_with_send_cap(
         group_commands,
         skipped,
         tcp_stall_budgets: r2o_tcp_stall_budgets(catalog),
+        preparation: CatalogPreparation {
+            elapsed: preparation_started.elapsed(),
+            plan_compilations,
+        },
     })
 }
 
@@ -5892,6 +5999,7 @@ struct CatalogSyncCursor {
     skipped: usize,
     areas_failed: bool,
     stall_budgets_sent: Vec<u16>,
+    started_at: std::time::Instant,
 }
 
 #[cfg(unix)]
@@ -6127,6 +6235,7 @@ impl CatalogSyncCursor {
         installed_areas: &mut [InstalledCatalogArea],
         stall_budgets_sent: &[u16],
     ) -> Result<Self, Box<dyn Error>> {
+        let started_at = std::time::Instant::now();
         let groups = compiled
             .group_commands
             .into_iter()
@@ -6241,6 +6350,7 @@ impl CatalogSyncCursor {
             skipped: compiled.skipped,
             areas_failed: false,
             stall_budgets_sent: stall_budgets_sent.to_vec(),
+            started_at,
         })
     }
 
@@ -7414,6 +7524,7 @@ struct R2oQuicDiscoveryTask {
     started_at: std::time::Instant,
     deny_recheck: bool,
     stall_cut: bool,
+    cooldown_key: Option<R2oQuicCooldownKey>,
 }
 
 /// Чем именно подтверждён QUIC-кандидат. C `t->ver.replay_proof` и
@@ -7951,6 +8062,9 @@ fn r2o_late_rx_is_covered_by_catalog(
 }
 
 #[cfg(unix)]
+const R2O_FAMILY_RECOVERY_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+
+#[cfg(unix)]
 struct R2oFamilyRecoveryTask {
     target: r2o_controller::discovery::DiscoveryTarget,
     candidates: Vec<R2oFamilyRecoveryCandidate>,
@@ -7959,6 +8073,9 @@ struct R2oFamilyRecoveryTask {
     /// C `rx_saved_bootstrap`: после провала нужен полный classifier, а не
     /// семейный cooldown.
     bootstrap: bool,
+    plan_news: bool,
+    queued_at: std::time::Instant,
+    deadline: std::time::Instant,
 }
 
 #[cfg(unix)]
@@ -7971,12 +8088,44 @@ struct R2oFamilyRecoveryCandidate {
 }
 
 #[cfg(unix)]
+#[derive(Debug)]
+struct PreparedCandidate {
+    plan_id: [u8; 16],
+    wire_records: Vec<u8>,
+    preparation_elapsed: std::time::Duration,
+}
+
+#[cfg(unix)]
+impl PreparedCandidate {
+    fn new(plan_text: &str) -> Result<Self, String> {
+        let started_at = std::time::Instant::now();
+        let records = compile_text(plan_text).map_err(|error| error.to_string())?;
+        let plan = Plan::parse(&records).map_err(|error| error.to_string())?;
+        let wire_records = match r2o_control_wire() {
+            control::WireProfile::V22 => {
+                r2o_plan_records_for_profile(control::WireProfile::V22, &records)?
+            }
+            control::WireProfile::V48 => {
+                r2o_datapath::engine::validate_runtime_plan(&plan).map_err(str::to_owned)?;
+                records
+            }
+        };
+        Ok(Self {
+            plan_id: plan.id,
+            wire_records,
+            preparation_elapsed: started_at.elapsed(),
+        })
+    }
+}
+
+#[cfg(unix)]
 struct R2oFamilyRecoveryOutcome {
     target: r2o_controller::discovery::DiscoveryTarget,
     plan_id: [u8; 16],
     result: Result<r2o_controller::fetch::FetchResult, String>,
     applied: bool,
     bootstrap: bool,
+    plan_news: bool,
     temporary_candidate: Option<R2oFamilyRecoveryCandidate>,
     client_input: bool,
 }
@@ -8042,11 +8191,14 @@ impl R2oFamilyRecoveryWorker {
                 }
                 let outcome = {
                     let tcp_target = r2o_discovery_transport(&task.target) == 6;
-                    let Some(_permit) =
-                        worker_gate.r2o_acquire_family_recovery(&worker_cancel, tcp_target)
-                    else {
+                    let _permit = worker_gate.r2o_acquire_family_recovery_until(
+                        &worker_cancel,
+                        tcp_target,
+                        task.deadline,
+                    );
+                    if worker_cancel.load(Ordering::Relaxed) {
                         break;
-                    };
+                    }
                     r2o_family_recovery_run(task, &worker_commands, &worker_cancel)
                 };
                 if outcome_sender.send(outcome).is_err() {
@@ -8066,6 +8218,21 @@ impl R2oFamilyRecoveryWorker {
         bootstrap: bool,
         client_hello: Option<Vec<u8>>,
     ) -> bool {
+        self.queue_task(target, candidates, mark, bootstrap, client_hello, None)
+    }
+
+    fn queue_task(
+        &mut self,
+        target: r2o_controller::discovery::DiscoveryTarget,
+        mut candidates: Vec<R2oFamilyRecoveryCandidate>,
+        mark: Option<u32>,
+        bootstrap: bool,
+        client_hello: Option<Vec<u8>>,
+        plan_news_deadline: Option<std::time::Instant>,
+    ) -> bool {
+        if r2o_is_ech_shape(target.shape) && client_hello.is_none() {
+            candidates.retain(|candidate| candidate.group_plan);
+        }
         if candidates.is_empty() || !self.active.insert(target.clone()) {
             return false;
         }
@@ -8074,12 +8241,16 @@ impl R2oFamilyRecoveryWorker {
             self.active.remove(&target);
             return false;
         };
+        let queued_at = std::time::Instant::now();
         let task = R2oFamilyRecoveryTask {
             target: target.clone(),
             candidates,
             mark,
             bootstrap,
             client_hello,
+            plan_news: plan_news_deadline.is_some(),
+            queued_at,
+            deadline: plan_news_deadline.unwrap_or(queued_at + R2O_FAMILY_RECOVERY_BUDGET),
         };
         match jobs.try_send(task) {
             Ok(()) => true,
@@ -8191,8 +8362,11 @@ fn r2o_family_recovery_decision(
 fn r2o_family_applied_grace(
     result: &Result<r2o_controller::fetch::FetchResult, String>,
 ) -> std::time::Duration {
-    // После ошибки запроса APPLIED не сможет подтвердить кандидат.
-    if result.is_ok() {
+    // APPLIED не добавит протокольного доказательства к неудачному повтору ClientHello.
+    if result
+        .as_ref()
+        .is_ok_and(|fetch| fetch.handshake_verified || fetch.tls.is_some())
+    {
         std::time::Duration::from_secs(5)
     } else {
         std::time::Duration::ZERO
@@ -8482,6 +8656,7 @@ fn r2o_family_recovery_fetch(
     target: &r2o_controller::discovery::DiscoveryTarget,
     mark: Option<u32>,
     probe_path: &str,
+    deadline: std::time::Instant,
 ) -> Result<r2o_controller::fetch::FetchResult, String> {
     let endpoint = target
         .endpoint
@@ -8492,22 +8667,35 @@ fn r2o_family_recovery_fetch(
         ip: Some(endpoint.ip()),
         port: endpoint.port(),
         path: probe_path.into(),
-        deadline: std::time::Duration::from_secs(8),
+        deadline: r2o_probe_time_left(Some(deadline), std::time::Duration::from_secs(8)),
         tls12: target.shape == SHAPE_LEGACY,
         wire_len: None,
         // Семейное восстановление — измерение C (`s->measure_mark`), не
         // verifier-сокет install_next.
         mark,
     };
-    r2o_controller::fetch::r2o_verify_probe(&options)
-        .map_err(|error| format!("проверка известного семейного плана не завершилась: {error}"))
+    r2o_controller::fetch::r2o_fetch_with_encoding(
+        &options,
+        r2o_controller::fetch::r2o_d2o_verification_encoding(probe_path),
+    )
+    .map_err(|error| format!("проверка известного семейного плана не завершилась: {error}"))
+}
+
+#[cfg(unix)]
+fn r2o_probe_time_left(
+    deadline: Option<std::time::Instant>,
+    ceiling: std::time::Duration,
+) -> std::time::Duration {
+    deadline.map_or(ceiling, |deadline| {
+        ceiling.min(deadline.saturating_duration_since(std::time::Instant::now()))
+    })
 }
 
 #[cfg(unix)]
 fn r2o_family_recovery_run(
     task: R2oFamilyRecoveryTask,
     commands: &SyncSender<HttpSearchCommand>,
-    cancel: &AtomicBool,
+    cancel: &Arc<AtomicBool>,
 ) -> R2oFamilyRecoveryOutcome {
     let mut outcome = R2oFamilyRecoveryOutcome {
         target: task.target.clone(),
@@ -8515,9 +8703,22 @@ fn r2o_family_recovery_run(
         result: Err("не найден подходящий план семейного восстановления".to_owned()),
         applied: false,
         bootstrap: task.bootstrap,
+        plan_news: task.plan_news,
         temporary_candidate: None,
         client_input: false,
     };
+    let now = std::time::Instant::now();
+    let deadline = task.deadline;
+    if deadline <= now {
+        outcome.result = Err("срок семейной проверки истёк в очереди".into());
+        return outcome;
+    }
+    println!(
+        "семейная проверка {}: очередь={} мс, кандидатов={}",
+        task.target.host,
+        now.saturating_duration_since(task.queued_at).as_millis(),
+        task.candidates.len()
+    );
     let destination = match task.target.endpoint.parse::<std::net::SocketAddr>() {
         Ok(destination) => destination,
         Err(error) => {
@@ -8526,18 +8727,56 @@ fn r2o_family_recovery_run(
         }
     };
 
-    for candidate in task.candidates {
+    if task.plan_news {
+        let blocked = r2o_discovery_trigger(&task.target, task.client_hello.as_deref(), None)
+            .is_ok_and(|trigger| {
+                let mut options = r2o_discovery_classify_options(
+                    task.mark,
+                    None,
+                    task.target.tcp_profile(),
+                    Arc::clone(cancel),
+                    None,
+                );
+                options.timeout =
+                    r2o_probe_time_left(Some(deadline), std::time::Duration::from_millis(7_500))
+                        / options.repeats as u32;
+                if options.timeout.is_zero() {
+                    return false;
+                }
+                r2o_controller::classify::run_base_with_backend_progress(
+                    &task.target.endpoint,
+                    &trigger,
+                    options,
+                    &mut TcpProbeBackend,
+                    &mut |_, _, _, _| {},
+                )
+                .blocked
+            });
+        if !blocked {
+            outcome.result = Err("базовый вопрос не подтвердил блокировку при перепроверке".into());
+            return outcome;
+        }
+    }
+
+    for (index, candidate) in task.candidates.into_iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             outcome.result = Err("проверка семейного плана отменена".to_owned());
             return outcome;
         }
+        if deadline <= std::time::Instant::now() {
+            outcome.result = Err("срок семейной проверки истёк".into());
+            outcome.applied = false;
+            return outcome;
+        }
         outcome.plan_id = candidate.plan_id;
+        let trial_started = std::time::Instant::now();
         let trial = if candidate.group_plan {
-            let result = r2o_family_recovery_fetch(&task.target, task.mark, &candidate.probe_path);
+            let result =
+                r2o_family_recovery_fetch(&task.target, task.mark, &candidate.probe_path, deadline);
             let applied = r2o_collect_controller_applied_events_until(
                 commands,
                 [0; 16],
-                r2o_family_applied_grace(&result),
+                r2o_probe_time_left(Some(deadline), r2o_family_applied_grace(&result)),
                 |event| {
                     result.as_ref().is_ok_and(|fetch| {
                         r2o_family_applied_flow_matches(
@@ -8573,13 +8812,26 @@ fn r2o_family_recovery_run(
                 task.mark,
                 commands,
                 task.client_hello.as_deref(),
+                Some(deadline),
             )
         };
         outcome.result = trial.0;
         outcome.applied = trial.1;
-        if r2o_family_recovery_decision(&outcome.result, outcome.applied)
-            == R2oFamilyRecoveryDecision::Verified
-        {
+        let decision = r2o_family_recovery_decision(&outcome.result, outcome.applied);
+        println!(
+            "семейная проба {}: попытка={}, длительность={} мс, APPLIED={}, подтверждение={}",
+            task.target.host,
+            index + 1,
+            trial_started.elapsed().as_millis(),
+            outcome.applied,
+            decision == R2oFamilyRecoveryDecision::Verified
+        );
+        if deadline <= std::time::Instant::now() {
+            outcome.result = Err("срок семейной проверки истёк".into());
+            outcome.applied = false;
+            return outcome;
+        }
+        if decision == R2oFamilyRecoveryDecision::Verified {
             if !candidate.group_plan {
                 outcome.temporary_candidate = Some(candidate);
                 outcome.client_input = task.client_hello.is_some();
@@ -8598,6 +8850,7 @@ fn r2o_family_recovery_sibling_trial(
     mark: Option<u32>,
     commands: &SyncSender<HttpSearchCommand>,
     client_hello: Option<&[u8]>,
+    probe_deadline: Option<std::time::Instant>,
 ) -> (Result<r2o_controller::fetch::FetchResult, String>, bool) {
     let ech = r2o_is_ech_shape(target.shape);
     if ech && client_hello.is_none() {
@@ -8606,6 +8859,11 @@ fn r2o_family_recovery_sibling_trial(
             false,
         );
     }
+    let prepared = match PreparedCandidate::new(&candidate.plan_text) {
+        Ok(prepared) if prepared.plan_id == candidate.plan_id => prepared,
+        Ok(_) => return (Err("идентификатор семейного плана не совпал".into()), false),
+        Err(error) => return (Err(error), false),
+    };
     let has_timestamp = match target.tcp_profile() {
         control::TCP_PROFILE_TS => Some(true),
         control::TCP_PROFILE_NO_TS => Some(false),
@@ -8615,8 +8873,8 @@ fn r2o_family_recovery_sibling_trial(
     let (mut result, applied, _) = r2o_family_recovery_sibling_trial_with_ech_state(
         target,
         destination,
-        candidate,
-        mark,
+        &prepared,
+        &candidate.probe_path,
         // Семейное восстановление — измерение C (`s->measure_mark`), не
         // verifier-сокет install_next.
         mark,
@@ -8628,6 +8886,7 @@ fn r2o_family_recovery_sibling_trial(
         wire_len,
         None,
         r2o_controller::fetch::r2o_d2o_verification_encoding(&candidate.probe_path),
+        probe_deadline,
     );
     if r2o_budget_mark_from_result(&result) == R2O_D2K_CAT_BUDGET_CUT {
         return (Err("семейная проба не прошла бюджет потока".into()), false);
@@ -8642,10 +8901,11 @@ fn r2o_family_recovery_sibling_trial(
             wire_target.shape = r2o_plan_wire_shape(target.shape, has_timestamp);
             match r2o_discovery_client_shape_trial(
                 &wire_target,
-                &candidate.plan_text,
+                &prepared,
                 client_hello,
                 mark,
                 commands,
+                probe_deadline,
             ) {
                 Ok(true) => {}
                 Ok(false) => {
@@ -8665,8 +8925,8 @@ fn r2o_family_recovery_sibling_trial(
 fn r2o_family_recovery_sibling_trial_with_ech_state(
     target: &r2o_controller::discovery::DiscoveryTarget,
     destination: std::net::SocketAddr,
-    candidate: &R2oFamilyRecoveryCandidate,
-    _mark: Option<u32>,
+    candidate: &PreparedCandidate,
+    probe_path: &str,
     confirm_mark: Option<u32>,
     commands: &SyncSender<HttpSearchCommand>,
     ech: Option<&r2o_controller::ech::R2oEchConfig>,
@@ -8676,6 +8936,7 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
     wire_len: Option<usize>,
     packet_budget: Option<u32>,
     request_encoding: r2o_controller::fetch::R2oFetchEncoding,
+    probe_deadline: Option<std::time::Instant>,
 ) -> (
     Result<r2o_controller::fetch::FetchResult, String>,
     bool,
@@ -8688,25 +8949,30 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
     );
     r2o_controller::fetch::r2o_fetch_dot_query_set(dot_frame);
     let result = (|| {
+        let remaining = |limit| r2o_probe_time_left(probe_deadline, limit);
+        let step_timeout = r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT;
+        let ech_tls = ech
+            .map(r2o_controller::ech::r2o_ech_tls_config)
+            .transpose()?;
         let wire_shape = r2o_plan_wire_shape(target.shape, has_timestamp);
         let confirmation_mark = r2o_candidate_confirmation_mark(confirm_mark);
         let bound = BoundTcpProbe::open(target.family, confirmation_mark)
             .map_err(|error| format!("не удалось открыть сокет семейной пробы: {error}"))?;
         let local_port = bound.local_port;
         let trial_id = random_id().map_err(|error| error.to_string())?;
-        let records = compile_text(&candidate.plan_text).map_err(|error| error.to_string())?;
-        let wire_records = r2o_plan_records_for_wire(&records)?;
         let command = encode_set_name_probe(
             &target.host,
             wire_shape,
             target.family,
             local_port,
-            &wire_records,
+            &candidate.wire_records,
             trial_id,
         )
         .map_err(|error| error.to_string())?;
-        let ack = ask_http_controller(commands, |deadline, reply| {
-            HttpSearchCommand::InstallProbe {
+        let ack = ask_http_controller_until(
+            commands,
+            remaining(CONTROL_ACK_TIMEOUT),
+            |deadline, reply| HttpSearchCommand::InstallProbe {
                 host: target.host.clone(),
                 shape: wire_shape,
                 family: target.family,
@@ -8716,15 +8982,9 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
                 candidate_settle: true,
                 deadline,
                 reply,
-            }
-        })?;
-        if ack
-            .as_ref()
-            .is_some_and(|ack| ack.trial_id != Some(trial_id))
-        {
-            return Err("подтверждение семейной пробы содержит чужой trial ID".into());
-        }
-        if ack.as_ref().is_some_and(|ack| !ack.ok) {
+            },
+        )?;
+        if let Some(ack) = ack.filter(|ack| ack.trial_id != Some(trial_id) || !ack.ok) {
             ask_http_controller(commands, |deadline, reply| HttpSearchCommand::DeleteProbe {
                 host: target.host.clone(),
                 shape: wire_shape,
@@ -8735,17 +8995,19 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
                 deadline,
                 reply,
             })?;
-            return Err("датапат отверг временный план семейной пробы".into());
+            let error = if ack.trial_id != Some(trial_id) {
+                "подтверждение семейной пробы содержит чужой trial ID"
+            } else {
+                "датапат отверг временный план семейной пробы"
+            };
+            return Err(error.into());
         }
 
         // C `T_TRIAL_SETTLE`: план уже записан/принят, сетевой зонд ещё не
         // вернулся. Guard снимает метку на любом выходе.
         let _trial_settle = R2oDnsTrialSettleGuard::new(target);
         let connected = bound
-            .connect(
-                destination,
-                r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT,
-            )
+            .connect(destination, remaining(step_timeout))
             .map_err(|error| format!("не удалось подключить семейную пробу: {error}"));
         let mut transport_established = false;
         let mut socket_hold = None;
@@ -8773,8 +9035,8 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
                             path: doh_request
                                 .as_ref()
                                 .map(|(path, _)| path.clone())
-                                .unwrap_or_else(|| candidate.probe_path.clone()),
-                            deadline: std::time::Duration::from_secs(8),
+                                .unwrap_or_else(|| probe_path.to_owned()),
+                            deadline: remaining(std::time::Duration::from_secs(8)),
                             tls12: control::r2k_link_shape_tcp_base(target.shape) == SHAPE_LEGACY,
                             wire_len,
                             mark: confirmation_mark,
@@ -8784,37 +9046,28 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
                                 &options,
                                 stream,
                                 client_hello,
-                                r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT,
+                                remaining(step_timeout),
                             )
                         } else if let Some(alpn) = captured_non_http_alpn.as_deref() {
                             r2o_controller::fetch::r2o_verify_tls_connected_stream_with_alpn(
                                 &options,
                                 stream,
                                 alpn,
-                                r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT,
+                                remaining(step_timeout),
                             )
-                        } else if let Some(ech) = ech {
-                            let config = r2o_controller::ech::r2o_ech_tls_config(ech)?;
+                        } else if let Some(config) = ech_tls.as_ref() {
                             r2o_controller::fetch::r2o_fetch_ech_connected_stream_with_phase_timeout(
                                 &options,
                                 stream,
-                                &config,
-                                r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT,
-                            )
-                        } else if packet_budget.is_some() {
-                            r2o_controller::fetch::r2o_fetch_connected_stream_with_packet_budget_phase_timeout_and_encoding(
-                                &options,
-                                stream,
-                                packet_budget,
-                                Some(r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT),
-                                request_encoding,
+                                config,
+                                remaining(step_timeout),
                             )
                         } else {
                             r2o_controller::fetch::r2o_fetch_connected_stream_with_packet_budget_phase_timeout_and_encoding(
                                 &options,
                                 stream,
-                                None,
-                                Some(r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT),
+                                packet_budget,
+                                probe_deadline.is_none().then_some(step_timeout),
                                 request_encoding,
                             )
                         }
@@ -8824,10 +9077,11 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
             Ok((_stream, _, _, _)) => Err("TCP-зонд получил неожиданный локальный порт".into()),
             Err(error) => Err(error),
         };
+        let applied_grace = remaining(r2o_family_applied_grace(&fetch_result));
         let events = r2o_collect_controller_applied_events_until(
             commands,
             trial_id,
-            r2o_family_applied_grace(&fetch_result),
+            applied_grace,
             |event| {
                 r2o_family_applied_flow_matches(
                     event,
@@ -8845,7 +9099,8 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
                 family: target.family,
                 port: local_port,
                 trial_id,
-                collect_trial: (fetch_result.is_err() && transport_established).then_some(trial_id),
+                collect_trial: (applied_grace.is_zero() && transport_established)
+                    .then_some(trial_id),
                 deadline,
                 reply,
             });
@@ -9250,10 +9505,10 @@ fn r2o_discovery_plan_untranslatable(
         .is_some_and(|error| error.starts_with(R2O_PLAN_UNTRANSLATABLE))
 }
 
-fn r2o_discovery_candidate_wire_plan(
+fn r2o_prepare_discovery_candidate(
     target: &r2o_controller::discovery::DiscoveryTarget,
     source_text: &str,
-) -> Result<(String, [u8; 16]), String> {
+) -> Result<PreparedCandidate, String> {
     // C `plan_ident`: id временного/каталожного кандидата — `plan-%08x` от
     // FNV-1a текста, на провод уходят ASCII-байты, добитые нулями.
     let (_plan_name, plan_id) = r2o_controller::discovery::plan_ident(source_text)
@@ -9269,11 +9524,8 @@ fn r2o_discovery_candidate_wire_plan(
     };
     // C `install_next`: непереводимый текст отвергается до bind и trial,
     // чтобы можно было перейти к следующему плану.
-    let bytes =
-        compile_text(&plan_text).map_err(|error| format!("{R2O_PLAN_UNTRANSLATABLE}: {error}"))?;
-    r2o_plan_records_for_wire(&bytes)
-        .map_err(|error| format!("{R2O_PLAN_UNTRANSLATABLE}: {error}"))?;
-    Ok((plan_text, plan_id))
+    PreparedCandidate::new(&plan_text)
+        .map_err(|error| format!("{R2O_PLAN_UNTRANSLATABLE}: {error}"))
 }
 
 fn r2o_run_discovery_candidate_trial_with_progress(
@@ -9335,7 +9587,7 @@ fn r2o_run_discovery_candidate_trial_with_progress(
     // C `install_next`: probe списывается до проверки текста плана, поэтому
     // негодный кандидат тоже расходует бюджет. Ошибка подготовки возвращает
     // attempts=1, а не 0.
-    let (plan_text, plan_id) = match r2o_discovery_candidate_wire_plan(target, source_text) {
+    let candidate = match r2o_prepare_discovery_candidate(target, source_text) {
         Ok(value) => value,
         Err(error) => return (Err(error), false, 1, Default::default()),
     };
@@ -9350,12 +9602,11 @@ fn r2o_run_discovery_candidate_trial_with_progress(
             );
         }
     };
-    let candidate = R2oFamilyRecoveryCandidate {
-        plan_id,
-        plan_text,
-        group_plan: false,
-        probe_path: probe_path.into(),
-    };
+    println!(
+        "кандидат для {}: подготовка={} мкс, компиляций=1",
+        target.host,
+        candidate.preparation_elapsed.as_micros()
+    );
     if r2o_is_ech_shape(target.shape) && ech_config.is_none() && client_hello.is_none() {
         return (
             Err("кандидат ECH нельзя подтвердить без совместимой TLS-конфигурации".into()),
@@ -9367,6 +9618,7 @@ fn r2o_run_discovery_candidate_trial_with_progress(
     let mut attempts = 0;
     let mut bare_retries = 0;
     let mut arm_retries = 0;
+    let mut ech_resolver = r2o_controller::ech::R2oEchProbeResolver::default();
     let retry_budget_available = std::cell::RefCell::new(retry_budget_available);
     let (result, applied, _, evidence) = r2o_repeat_candidate_trials(
         max_retries,
@@ -9387,7 +9639,7 @@ fn r2o_run_discovery_candidate_trial_with_progress(
                             target,
                             ech_config,
                             mark,
-                            |origin, mark| r2o_controller::ech::resolve_ech_config(origin, mark),
+                            |origin, mark| ech_resolver.resolve(origin, mark),
                         );
                         let trial = match trial_ech_config {
                             Ok(trial_ech_config) => {
@@ -9400,7 +9652,7 @@ fn r2o_run_discovery_candidate_trial_with_progress(
                                     target,
                                     destination,
                                     &candidate,
-                                    mark,
+                                    probe_path,
                                     confirm_mark,
                                     commands,
                                     trial_ech_config.as_ref(),
@@ -9410,10 +9662,16 @@ fn r2o_run_discovery_candidate_trial_with_progress(
                                     wire_len,
                                     packet_budget,
                                     encoding,
+                                    None,
                                 )
                             }
                             Err(error) => (Err(error), false, false),
                         };
+                        if trial.0.as_ref().err().map(String::as_str)
+                            == Some(r2o_controller::fetch::R2O_ECH_PEER_REJECTED)
+                        {
+                            ech_resolver.invalidate();
+                        }
                         if let Ok(fetch) = &trial.0
                             && r2o_controller::fetch::r2o_fetch_result_can_remember_resources(fetch)
                         {
@@ -9489,10 +9747,11 @@ fn r2o_run_discovery_candidate_trial_with_progress(
         );
         let snapshot_applied = r2o_discovery_client_shape_trial(
             target,
-            &candidate.plan_text,
+            &candidate,
             client_hello,
             confirm_mark,
             commands,
+            None,
         )
         .unwrap_or(false);
         attempts += 1;
@@ -9857,11 +10116,13 @@ fn r2o_plan_records_for_profile(
 #[cfg(unix)]
 fn r2o_discovery_client_shape_trial(
     target: &r2o_controller::discovery::DiscoveryTarget,
-    source_text: &str,
+    candidate: &PreparedCandidate,
     client_hello: &[u8],
     confirm_mark: Option<u32>,
     commands: &SyncSender<HttpSearchCommand>,
+    probe_deadline: Option<std::time::Instant>,
 ) -> Result<bool, String> {
+    let remaining = |limit| r2o_probe_time_left(probe_deadline, limit);
     let destination = target
         .endpoint
         .parse::<std::net::SocketAddr>()
@@ -9870,20 +10131,19 @@ fn r2o_discovery_client_shape_trial(
         .map_err(|error| format!("не удалось открыть сокет снимка ClientHello: {error}"))?;
     let local_port = bound.local_port;
     let trial_id = random_id().map_err(|error| error.to_string())?;
-    let records = compile_text(source_text).map_err(|error| error.to_string())?;
-    let plan = Plan::parse(&records).map_err(|error| error.to_string())?;
-    let wire_records = r2o_plan_records_for_wire(&records)?;
     let command = encode_set_name_probe(
         &target.host,
         target.shape,
         target.family,
         local_port,
-        &wire_records,
+        &candidate.wire_records,
         trial_id,
     )
     .map_err(|error| error.to_string())?;
-    let ack = ask_http_controller(commands, |deadline, reply| {
-        HttpSearchCommand::InstallProbe {
+    let ack = ask_http_controller_until(
+        commands,
+        remaining(CONTROL_ACK_TIMEOUT),
+        |deadline, reply| HttpSearchCommand::InstallProbe {
             host: target.host.clone(),
             shape: target.shape,
             family: target.family,
@@ -9893,8 +10153,8 @@ fn r2o_discovery_client_shape_trial(
             candidate_settle: true,
             deadline,
             reply,
-        }
-    })?;
+        },
+    )?;
     if ack
         .as_ref()
         .is_some_and(|ack| ack.trial_id != Some(trial_id))
@@ -9928,7 +10188,7 @@ fn r2o_discovery_client_shape_trial(
     let mut socket_hold = None;
     let send_result = match bound.connect(
         destination,
-        r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT,
+        remaining(r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT),
     ) {
         Ok((mut stream, _, connected_port, _)) if connected_port == local_port => {
             match stream.try_clone() {
@@ -9937,7 +10197,7 @@ fn r2o_discovery_client_shape_trial(
                     r2o_controller::r2o_tls::r2o_tls_replay_client_hello(
                         &mut stream,
                         client_hello,
-                        r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT,
+                        remaining(r2o_controller::fetch::R2O_D2O_VERIFY_STEP_TIMEOUT),
                     )
                     .map_err(|error| format!("не удалось повторить снимок ClientHello: {error}"))
                 }
@@ -9951,11 +10211,13 @@ fn r2o_discovery_client_shape_trial(
         commands,
         trial_id,
         if send_result.as_ref().is_ok_and(|proof| *proof) {
-            std::time::Duration::from_secs(5)
+            remaining(std::time::Duration::from_secs(5))
         } else {
             std::time::Duration::ZERO
         },
-        |event| r2o_family_applied_flow_matches(event, target, local_port, plan.id, trial_id),
+        |event| {
+            r2o_family_applied_flow_matches(event, target, local_port, candidate.plan_id, trial_id)
+        },
     );
     let delete_result =
         ask_http_controller(commands, |deadline, reply| HttpSearchCommand::DeleteProbe {
@@ -9974,7 +10236,7 @@ fn r2o_discovery_client_shape_trial(
     let events = events?;
     Ok(server_hello
         && events.iter().any(|event| {
-            r2o_family_applied_flow_matches(event, target, local_port, plan.id, trial_id)
+            r2o_family_applied_flow_matches(event, target, local_port, candidate.plan_id, trial_id)
         }))
 }
 
@@ -10484,6 +10746,7 @@ struct R2oQuicDiscoveryJob {
 struct R2oQuicActiveSnapshot {
     host: String,
     remeasured: Arc<AtomicBool>,
+    cooldown_key: Option<R2oQuicCooldownKey>,
 }
 
 #[cfg(unix)]
@@ -10493,6 +10756,7 @@ struct R2oQuicDiscoveryWorker {
     outcomes: Receiver<R2oQuicDiscoveryOutcome>,
     cancel: Arc<AtomicBool>,
     active: HashMap<std::net::SocketAddr, R2oQuicActiveSnapshot>,
+    trial_cooldowns: HashMap<R2oQuicCooldownKey, std::time::Instant>,
     pending_snapshots: Arc<std::sync::Mutex<HashMap<std::net::SocketAddr, (Vec<u8>, String)>>>,
     threads: Vec<JoinHandle<()>>,
 }
@@ -10626,17 +10890,23 @@ impl R2oQuicDiscoveryWorker {
             outcomes,
             cancel,
             active: HashMap::new(),
+            trial_cooldowns: HashMap::new(),
             pending_snapshots,
             threads,
         }
     }
 
-    fn queue(&mut self, task: R2oQuicDiscoveryTask) -> bool {
+    fn queue(&mut self, mut task: R2oQuicDiscoveryTask) -> bool {
         let server = task.server;
         if self.active.contains_key(&server) {
             return false;
         }
-        let Some(host) = r2o_quic_snapshot_server_name(&task.snapshot, server) else {
+        let cooldown_key = task.cooldown_key.take();
+        let Some(host) = cooldown_key
+            .as_ref()
+            .map(|key| key.host.clone())
+            .or_else(|| r2o_quic_snapshot_server_name(&task.snapshot, server))
+        else {
             return false;
         };
         // C `cooldown_record(kind=0)`/`clear_backoff_ms`: после прямого DoQ
@@ -10661,9 +10931,34 @@ impl R2oQuicDiscoveryWorker {
         {
             return false;
         }
-        self.active
-            .insert(server, R2oQuicActiveSnapshot { host, remeasured });
+        self.active.insert(
+            server,
+            R2oQuicActiveSnapshot {
+                host,
+                remeasured,
+                cooldown_key,
+            },
+        );
         true
+    }
+
+    fn r2o_trial_suppressed(
+        &self,
+        pending: &VecDeque<R2oPendingQuicDiscovery>,
+        key: &R2oQuicCooldownKey,
+        now: std::time::Instant,
+    ) -> bool {
+        self.trial_cooldowns
+            .get(key)
+            .is_some_and(|until| *until > now)
+            || self
+                .active
+                .get(&key.server)
+                .and_then(|entry| entry.cooldown_key.as_ref())
+                == Some(key)
+            || pending
+                .iter()
+                .any(|entry| entry.cooldown_key.as_ref() == Some(key))
     }
 
     fn queue_client_snapshot(
@@ -10725,7 +11020,25 @@ impl R2oQuicDiscoveryWorker {
 
     fn try_outcome(&mut self) -> Option<R2oQuicDiscoveryOutcome> {
         let outcome = self.outcomes.try_recv().ok()?;
-        self.active.remove(&outcome.server);
+        if let Some(key) = self
+            .active
+            .remove(&outcome.server)
+            .and_then(|entry| entry.cooldown_key)
+        {
+            let now = std::time::Instant::now();
+            self.trial_cooldowns.retain(|_, until| *until > now);
+            if self.trial_cooldowns.len() == R2O_DISCOVERY_COOLDOWN_CAPACITY
+                && let Some(oldest) = self
+                    .trial_cooldowns
+                    .iter()
+                    .min_by_key(|(_, until)| *until)
+                    .map(|(key, _)| key.clone())
+            {
+                self.trial_cooldowns.remove(&oldest);
+            }
+            self.trial_cooldowns
+                .insert(key, now + r2o_quic_discovery_cooldown(&outcome.result));
+        }
         self.pending_snapshots
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -11360,12 +11673,6 @@ const R2O_DISCOVERY_ECH_INPUT_CAPACITY: usize = 8;
 #[cfg(unix)]
 const R2O_DISCOVERY_ECH_RR_CAPACITY: usize = 256;
 #[cfg(unix)]
-const R2O_DISCOVERY_ECH_RR_POSITIVE_TTL: std::time::Duration =
-    std::time::Duration::from_secs(6 * 60 * 60);
-#[cfg(unix)]
-const R2O_DISCOVERY_ECH_RR_NEGATIVE_TTL: std::time::Duration =
-    std::time::Duration::from_secs(30 * 60);
-#[cfg(unix)]
 const R2O_DISCOVERY_RX_LADDER_BATCH: usize = 8;
 const R2O_ECH_RX_LADDER_BATCH: usize = R2O_DISCOVERY_RX_LADDER_BATCH;
 #[cfg(unix)]
@@ -11608,8 +11915,9 @@ const R2O_RECENT_TCP_NAME_TTL: std::time::Duration = std::time::Duration::from_s
 #[cfg(unix)]
 struct R2oEchWitnessResolution {
     name: String,
+    context: R2oEchDnsContext,
     config: Option<r2o_controller::ech::R2oEchConfig>,
-    checked_at: std::time::Instant,
+    expires_at: std::time::Instant,
 }
 
 #[cfg(unix)]
@@ -11685,6 +11993,7 @@ impl Default for R2oEchWitnessResolutionCache {
 impl R2oEchWitnessResolutionCache {
     fn lookup(
         &self,
+        context: R2oEchDnsContext,
         name: &str,
         now: std::time::Instant,
     ) -> Option<Option<r2o_controller::ech::R2oEchConfig>> {
@@ -11692,21 +12001,22 @@ impl R2oEchWitnessResolutionCache {
             .entries
             .iter()
             .flatten()
-            .find(|entry| entry.name == name)?;
-        let ttl = if entry.config.is_some() {
-            R2O_DISCOVERY_ECH_RR_POSITIVE_TTL
-        } else {
-            R2O_DISCOVERY_ECH_RR_NEGATIVE_TTL
-        };
-        (now.saturating_duration_since(entry.checked_at) <= ttl).then(|| entry.config.clone())
+            .find(|entry| entry.context == context && entry.name == name)?;
+        (now < entry.expires_at).then(|| entry.config.clone())
     }
 
-    fn cached_witness_names(&self, public_name: &str, now: std::time::Instant) -> Vec<String> {
+    fn cached_witness_names(
+        &self,
+        context: R2oEchDnsContext,
+        public_name: &str,
+        now: std::time::Instant,
+    ) -> Vec<String> {
         self.entries
             .iter()
             .flatten()
             .filter(|entry| {
-                now.saturating_duration_since(entry.checked_at) <= R2O_DISCOVERY_ECH_RR_POSITIVE_TTL
+                entry.context == context
+                    && now < entry.expires_at
                     && entry
                         .config
                         .as_ref()
@@ -11719,15 +12029,16 @@ impl R2oEchWitnessResolutionCache {
 
     fn store(
         &mut self,
-        name: &str,
+        context: R2oEchDnsContext,
+        name: String,
         config: Option<r2o_controller::ech::R2oEchConfig>,
-        now: std::time::Instant,
+        expires_at: std::time::Instant,
     ) {
-        let slot = if let Some(slot) = self
-            .entries
-            .iter()
-            .position(|entry| entry.as_ref().is_some_and(|entry| entry.name == name))
-        {
+        let slot = if let Some(slot) = self.entries.iter().position(|entry| {
+            entry
+                .as_ref()
+                .is_some_and(|entry| entry.context == context && entry.name == name)
+        }) {
             slot
         } else {
             self.next
@@ -11740,9 +12051,10 @@ impl R2oEchWitnessResolutionCache {
             self.next = (self.next + 1) % R2O_DISCOVERY_ECH_RR_CAPACITY;
         }
         self.entries[slot] = Some(R2oEchWitnessResolution {
-            name: name.to_owned(),
+            name,
+            context,
             config,
-            checked_at: now,
+            expires_at,
         });
     }
 }
@@ -12255,7 +12567,12 @@ impl R2oDiscoveryQueueEntry {
 struct R2oDiscoverySearches {
     entries: HashMap<R2oDiscoveryTaskKey, R2oDiscoverySearch>,
     asking: HashSet<R2oDiscoveryTaskKey>,
-    asking_with_own_plan: HashSet<R2oDiscoveryTaskKey>,
+    own_plan_history: HashMap<R2oDiscoveryTaskKey, R2oOwnPlanHistory>,
+    run_checkpoints: HashMap<
+        R2oDiscoveryTaskKey,
+        Arc<std::sync::Mutex<r2o_controller::classify::ClassifyCheckpoint>>,
+    >,
+    exhausted_tcp: VecDeque<R2oExhaustedTcp>,
     order: VecDeque<R2oDiscoveryTaskKey>,
     pending_reports: VecDeque<serde_json::Value>,
     datapath_events: u64,
@@ -12268,6 +12585,31 @@ struct R2oDiscoverySearches {
     unfit_plans: HashMap<R2oDiscoveryTaskKey, VecDeque<[u8; 16]>>,
     report_sequence: u64,
     last_suspect: Option<r2o_controller::discovery::DiscoveryTarget>,
+}
+
+#[cfg(unix)]
+struct R2oExhaustedTcp {
+    target: r2o_controller::discovery::DiscoveryTarget,
+    until: std::time::Instant,
+    checked_generation: u64,
+    tried: Vec<u64>,
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct R2oOwnPlanHistory {
+    offered: Vec<u64>,
+    failed: Vec<u64>,
+    measured_target: Option<r2o_controller::discovery::DiscoveryTarget>,
+}
+
+#[cfg(unix)]
+impl R2oOwnPlanHistory {
+    fn remember(keys: &mut Vec<u64>, key: u64) {
+        if keys.len() < 256 && !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
 }
 
 /// Структурированный итог последней пробы кандидата: то, что C `task.ver`
@@ -12677,12 +13019,30 @@ impl R2oDiscoverySearches {
 
     fn set_asking(&mut self, target: &r2o_controller::discovery::DiscoveryTarget, asking: bool) {
         let key = r2o_discovery_task_key(target);
-        self.asking_with_own_plan.remove(&key);
+        self.run_checkpoints.remove(&key);
         if asking {
+            self.own_plan_history.remove(&key);
             self.asking.insert(key);
         } else {
             self.asking.remove(&key);
         }
+    }
+
+    fn next_plan_news(
+        &mut self,
+        now: std::time::Instant,
+    ) -> Option<(
+        r2o_controller::discovery::DiscoveryTarget,
+        Vec<u64>,
+        std::time::Instant,
+    )> {
+        self.exhausted_tcp.retain(|entry| entry.until > now);
+        let entry = self
+            .exhausted_tcp
+            .iter_mut()
+            .find(|entry| entry.checked_generation < self.confirms)?;
+        entry.checked_generation = self.confirms;
+        Some((entry.target.clone(), entry.tried.clone(), entry.until))
     }
 
     /// C `on_refused_foreign` (`sched.c:9920-9939`): запомнить план, который
@@ -13213,6 +13573,13 @@ fn r2o_discovery_plan_result(
     };
     let last_result = match result {
         Err(error) => format!("проба не завершилась: {error}"),
+        Ok(fetch) if verified && fetch.handshake_verified && !fetch.application_verified => {
+            if fetch.tls.is_some() {
+                "План применён. TLS-рукопожатие завершено.".into()
+            } else {
+                "План применён. На повтор ClientHello получен ServerHello.".into()
+            }
+        }
         Ok(fetch) if verified => format!(
             "план применён; получен полный HTTPS-ответ HTTP {}",
             fetch.status
@@ -14006,7 +14373,7 @@ fn r2o_live_searches_from_state(
 #[cfg(unix)]
 #[derive(Default)]
 struct R2oRecentClientShapeCache {
-    entries: [Option<R2oCachedClientShape>; 2],
+    entries: [VecDeque<R2oCachedClientShape>; 2],
 }
 
 #[cfg(unix)]
@@ -14016,10 +14383,13 @@ struct R2oCachedClientShape {
     shape: u8,
     client_hello: Vec<u8>,
     tcp_has_timestamp: Option<bool>,
+    seen: std::time::Instant,
 }
 
 #[cfg(unix)]
 impl R2oRecentClientShapeCache {
+    const RECOVERY_SNAPSHOTS_PER_FAMILY: usize = 8;
+
     fn note(
         &mut self,
         target: &r2o_controller::discovery::DiscoveryTarget,
@@ -14029,18 +14399,29 @@ impl R2oRecentClientShapeCache {
         let Some(index) = r2o_client_shape_family_slot(target.family) else {
             return;
         };
-        self.entries[index] = Some(R2oCachedClientShape {
+        let entries = &mut self.entries[index];
+        entries.retain(|entry| {
+            entry.host != target.host
+                || entry.endpoint != target.endpoint
+                || entry.shape != target.shape
+                || entry.tcp_has_timestamp != tcp_has_timestamp
+        });
+        if entries.len() == Self::RECOVERY_SNAPSHOTS_PER_FAMILY {
+            entries.pop_front();
+        }
+        entries.push_back(R2oCachedClientShape {
             host: target.host.clone(),
             endpoint: target.endpoint.clone(),
             shape: target.shape,
             client_hello: client_hello.to_vec(),
             tcp_has_timestamp,
+            seen: std::time::Instant::now(),
         });
     }
 
     fn get(&self, target: &r2o_controller::discovery::DiscoveryTarget) -> Option<&[u8]> {
         let index = r2o_client_shape_family_slot(target.family)?;
-        let entry = self.entries[index].as_ref()?;
+        let entry = self.entries[index].back()?;
         (entry.host == target.host && entry.shape == target.shape)
             .then_some(entry.client_hello.as_slice())
     }
@@ -14050,7 +14431,7 @@ impl R2oRecentClientShapeCache {
         target: &r2o_controller::discovery::DiscoveryTarget,
     ) -> Option<(u8, &[u8], Option<bool>)> {
         let index = r2o_client_shape_family_slot(target.family)?;
-        let entry = self.entries[index].as_ref()?;
+        let entry = self.entries[index].back()?;
         (entry.host == target.host).then_some((
             entry.shape,
             entry.client_hello.as_slice(),
@@ -14450,6 +14831,31 @@ struct R2oPendingQuicDiscovery {
     r2o_mark: Option<u32>,
     permit: Option<r2o_controller::r2o_resource_limit::R2oMeasurementPermit>,
     deny_recheck: bool,
+    cooldown_key: Option<R2oQuicCooldownKey>,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct R2oQuicCooldownKey {
+    server: std::net::SocketAddr,
+    host: String,
+    mark: Option<u32>,
+    planned: bool,
+}
+
+#[cfg(unix)]
+fn r2o_quic_cooldown_key(
+    server: std::net::SocketAddr,
+    host: String,
+    mark: Option<u32>,
+    planned: bool,
+) -> R2oQuicCooldownKey {
+    R2oQuicCooldownKey {
+        server,
+        host,
+        mark,
+        planned,
+    }
 }
 
 /// C `T_SHAPE_WAIT`: QUIC-задача ждёт снимок приветствия своего имени.
@@ -14466,6 +14872,7 @@ struct R2oShapeWait {
     since: std::time::Instant,
     r2o_mark: Option<u32>,
     deny_recheck: bool,
+    planned: bool,
 }
 
 /// C `task.prop_*`: состояние вопроса о свойствах.
@@ -14647,14 +15054,28 @@ fn r2o_enqueue_quic_discovery(
     r2o_mark: Option<u32>,
     gate: &r2o_controller::r2o_resource_limit::R2oMeasurementGate,
     deny_recheck: bool,
+    endpoint_idle: bool,
+    cooldown_key: Option<R2oQuicCooldownKey>,
 ) -> usize {
+    let permit = if !endpoint_idle {
+        None
+    } else if let Some(earlier) = pending.iter_mut().find(|entry| entry.server == server) {
+        if deny_recheck {
+            earlier.permit.take()
+        } else {
+            None
+        }
+    } else {
+        gate.r2o_try_acquire()
+    };
     let pending_entry = R2oPendingQuicDiscovery {
         server,
         snapshot,
         captured,
         r2o_mark,
-        permit: gate.r2o_try_acquire(),
+        permit,
         deny_recheck,
+        cooldown_key,
     };
     if deny_recheck {
         pending.push_front(pending_entry);
@@ -14668,16 +15089,26 @@ fn r2o_enqueue_quic_discovery(
 fn r2o_take_ready_quic_discovery(
     pending: &mut VecDeque<R2oPendingQuicDiscovery>,
     gate: &r2o_controller::r2o_resource_limit::R2oMeasurementGate,
+    mut eligible: impl FnMut(std::net::SocketAddr) -> bool,
 ) -> Option<(
     R2oPendingQuicDiscovery,
     r2o_controller::r2o_resource_limit::R2oMeasurementPermit,
 )> {
-    let permit = pending
-        .front_mut()?
+    let mut index = pending.iter().position(|entry| eligible(entry.server))?;
+    let permit = match pending[index]
         .permit
         .take()
-        .or_else(|| gate.r2o_try_acquire_queued())?;
-    let entry = pending.pop_front()?;
+        .or_else(|| gate.r2o_try_acquire_queued())
+    {
+        Some(permit) => permit,
+        None => {
+            index = pending
+                .iter()
+                .position(|entry| entry.permit.is_some() && eligible(entry.server))?;
+            pending[index].permit.take()?
+        }
+    };
+    let entry = pending.remove(index)?;
     Some((entry, permit))
 }
 
@@ -16023,7 +16454,7 @@ impl DiscoveryWorker {
         commands: SyncSender<HttpSearchCommand>,
         recent_tcp_names: Arc<std::sync::Mutex<R2oRecentTcpNameCache>>,
         network_whitelist_updates: Arc<std::sync::Mutex<VecDeque<R2oNetworkWhitelistUpdate>>>,
-        catalog_snapshot: Arc<std::sync::Mutex<Catalog>>,
+        catalog_snapshot: CatalogSnapshot,
     ) -> Self {
         let searches = Arc::new(std::sync::Mutex::new(R2oDiscoverySearches::default()));
         let dead_addresses = Arc::new(std::sync::Mutex::new(R2oDeadAddressCache::default()));
@@ -16123,7 +16554,7 @@ impl DiscoveryWorker {
                                has_client_hello: bool| {
                 let discovered_witness_candidates = if r2o_is_ech_shape(target.shape) {
                     candidate_catalog
-                        .as_ref()
+                        .as_deref()
                         .map(|catalog| {
                             let recent_names = runner_recent_tcp_names
                                 .lock()
@@ -16140,14 +16571,15 @@ impl DiscoveryWorker {
                     Vec::new()
                 };
                 let now = std::time::Instant::now();
-                let cached_witness_candidates = if r2o_is_ech_shape(target.shape) {
+                let dns = r2o_is_ech_shape(target.shape)
+                    .then(|| R2oEchDnsContext::system(mark).ok())
+                    .flatten();
+                let cached_witness_candidates = dns.map_or_else(Vec::new, |context| {
                     runner_ech_witness_resolutions
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .cached_witness_names(&target.host, now)
-                } else {
-                    Vec::new()
-                };
+                        .cached_witness_names(context, &target.host, now)
+                });
                 let ech_witness_candidates = r2o_merge_ech_witness_candidates(
                     &target.host,
                     &cached_witness_candidates,
@@ -16165,7 +16597,7 @@ impl DiscoveryWorker {
                         &challenged,
                     );
                 let known_ech_origin = candidate_catalog
-                    .as_ref()
+                    .as_deref()
                     .and_then(|catalog| {
                         catalog
                             .boxes
@@ -16184,19 +16616,25 @@ impl DiscoveryWorker {
                             .map(|binding| binding.ech_origin.clone())
                     })
                     .filter(|witness| !challenged.contains(witness));
-                let known_origin_config = known_ech_origin.as_deref().and_then(|witness| {
-                    r2o_discovery_ech_witness_config(
-                        &target,
-                        witness,
-                        mark,
+                let resolve_for_target = |witness: &str| {
+                    let context = dns?;
+                    r2o_discovery_resolve_ech_witness_cached(
                         &runner_ech_witness_resolutions,
+                        context,
+                        witness,
+                        &target.host,
+                        |witness| context.query(witness),
                     )
                     .ok()
                     .flatten()
-                });
+                };
+                let known_origin_config = known_ech_origin
+                    .as_deref()
+                    .filter(|witness| *witness != target.host)
+                    .and_then(resolve_for_target);
                 let direct_ech_config = known_origin_config
                     .is_none()
-                    .then(|| r2o_discovery_ech_config(&target, mark).ok().flatten())
+                    .then(|| resolve_for_target(&target.host))
                     .flatten()
                     // D2O (core/sched.c, ветка «настоящий ECH без своего
                     // свидетеля»): если HTTPS RR имени несёт ECH-конфигурацию
@@ -16213,16 +16651,20 @@ impl DiscoveryWorker {
                 } else {
                     &ech_witness_candidates[..ech_witness_candidates.len().min(4)]
                 };
-                let (witness_config, next_witness) = r2o_discovery_first_ech_witness(
-                    &target,
-                    witness_search,
-                    0,
-                    mark,
-                    &runner_ech_witness_resolutions,
-                )
-                .map_or((None, witness_search.len()), |(config, next)| {
-                    (Some(config), next)
-                });
+                let (witness_config, next_witness) = dns
+                    .and_then(|context| {
+                        r2o_discovery_first_ech_witness(
+                            &target,
+                            witness_search,
+                            0,
+                            &runner_ech_witness_resolutions,
+                            context,
+                            |witness| context.query(witness),
+                        )
+                    })
+                    .map_or((None, witness_search.len()), |(config, next)| {
+                        (Some(config), next)
+                    });
                 let ech_config = witness_config.or(known_origin_config).or(direct_ech_config);
                 let ech_grease = r2o_discovery_ech_grease_fallback(
                     target,
@@ -16241,7 +16683,7 @@ impl DiscoveryWorker {
                 .unwrap_or_default();
             let white_name = r2o_rx_decoy_name(
                 candidate_catalog
-                    .as_ref()
+                    .as_deref()
                     .and_then(|catalog| catalog.network_whitelist.as_ref())
                     .map(|network| network.name.as_str()),
             );
@@ -16262,7 +16704,7 @@ impl DiscoveryWorker {
             );
             let own_bound_plan_id = trigger_planned
                 .then(|| {
-                    candidate_catalog.as_ref().and_then(|catalog| {
+                    candidate_catalog.as_deref().and_then(|catalog| {
                         r2o_controller::discovery::own_first_bound_plan_id(
                             catalog,
                             &target,
@@ -16273,8 +16715,24 @@ impl DiscoveryWorker {
                 .flatten();
             let mut own_seen = Vec::new();
             let mut own_tried = persisted_ech_tried;
+            let task_key = r2o_discovery_task_key(&target);
+            {
+                let mut searches = runner_searches
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let history = searches
+                    .own_plan_history
+                    .entry(task_key.clone())
+                    .or_default();
+                if history.measured_target.as_ref() == Some(&target) {
+                    own_tried.extend_from_slice(&history.failed);
+                } else {
+                    history.failed.clear();
+                    history.measured_target = Some(target.clone());
+                }
+            }
             let mut own_probes = 0;
-            if let Some(catalog) = candidate_catalog.as_ref()
+            if let Some(catalog) = candidate_catalog.as_deref()
                 && !r2o_controller::discovery::own_first_plans(
                     catalog,
                     &target,
@@ -16291,9 +16749,6 @@ impl DiscoveryWorker {
                     let mut searches = runner_searches
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    searches
-                        .asking_with_own_plan
-                        .insert(r2o_discovery_task_key(&target));
                     searches.update(&target, "базовый вопрос перед своими планами", 0, 0, "", "");
                 }
                 let base_options = r2o_discovery_classify_options(
@@ -16334,14 +16789,14 @@ impl DiscoveryWorker {
                         &runner_volume_searches,
                         &target,
                         client_hello.as_deref(),
-                        candidate_catalog.as_ref(),
+                        candidate_catalog.as_deref(),
                         &runner_send_cap,
                         &runner_resource_memory,
                         white_name,
                     );
                     let (probe_path, _) = r2o_discovery_resource_probe_paths(
                         &target,
-                        candidate_catalog.as_ref(),
+                        candidate_catalog.as_deref(),
                         &runner_resource_memory,
                     );
                     let network_probe = r2o_discovery_network_whitelist_probe(Some(catalog), false);
@@ -16368,9 +16823,20 @@ impl DiscoveryWorker {
                         if batch.is_empty() {
                             break;
                         }
-                        own_seen.extend(batch.iter().map(|candidate| {
-                            r2o_controller::r2o_fallback::tried_key(&candidate.text)
-                        }));
+                        {
+                            let mut searches = runner_searches
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let history = searches
+                                .own_plan_history
+                                .entry(task_key.clone())
+                                .or_default();
+                            for candidate in &batch {
+                                let key = r2o_controller::r2o_fallback::tried_key(&candidate.text);
+                                own_seen.push(key);
+                                R2oOwnPlanHistory::remember(&mut history.offered, key);
+                            }
+                        }
                         for candidate in batch {
                             if cancel.load(Ordering::Relaxed)
                                 || own_probes >= probe_cap
@@ -16459,6 +16925,26 @@ impl DiscoveryWorker {
                             let candidate_verified = !candidate_evidence.layered_rx_handled
                                 && r2o_family_recovery_decision(&result, applied)
                                     == R2oFamilyRecoveryDecision::Verified;
+                            if !candidate_verified
+                                && applied
+                                && attempts > 0
+                                && !candidate_evidence.local_limit
+                                && candidate_evidence.dropped_before
+                                    == candidate_evidence.dropped_after
+                                && !cancel.load(Ordering::Relaxed)
+                            {
+                                let mut searches = runner_searches
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                let history = searches
+                                    .own_plan_history
+                                    .entry(task_key.clone())
+                                    .or_default();
+                                R2oOwnPlanHistory::remember(
+                                    &mut history.failed,
+                                    r2o_controller::r2o_fallback::tried_key(&candidate.text),
+                                );
+                            }
                             let cloudflare_challenge = result
                                 .as_ref()
                                 .is_ok_and(|fetch| fetch.cloudflare_challenge);
@@ -16601,10 +17087,18 @@ group_block_proven: false,
                     .update_probe_progress(&progress_target, probe, probes, passed, failed);
             };
             // C `ask_settle`: старт полного прогона измерителя.
-            runner_searches
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .begin_ask_run(&target);
+            let run_checkpoint = {
+                let mut searches = runner_searches
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                searches.begin_ask_run(&target);
+                Arc::clone(
+                    searches
+                        .run_checkpoints
+                        .entry(r2o_discovery_task_key(&target))
+                        .or_default(),
+                )
+            };
             let (
                 outcome,
                 classifier_probes,
@@ -16623,6 +17117,7 @@ group_block_proven: false,
                 ech_config.as_ref(),
                 white_name,
                 seed_whole,
+                Some(run_checkpoint),
                 runner_send_cap.load(Ordering::Relaxed),
                 &mut progress,
             );
@@ -16691,7 +17186,7 @@ group_block_proven: false,
                     if let Some(plan) = plans.first() {
                         let (probe_path, _) = r2o_discovery_resource_probe_paths(
                             &target,
-                            candidate_catalog.as_ref(),
+                            candidate_catalog.as_deref(),
                             &runner_resource_memory,
                         );
                         let mut progress = |_: usize, _: usize, _: &str, _: &str| {};
@@ -16740,7 +17235,7 @@ group_block_proven: false,
                 &runner_volume_searches,
                 &target,
                 client_hello.as_deref(),
-                candidate_catalog.as_ref(),
+                candidate_catalog.as_deref(),
                 &runner_send_cap,
                 &runner_resource_memory,
                 white_name,
@@ -16764,7 +17259,7 @@ group_block_proven: false,
             if known_plans_allowed && !suspect_fingerprint.signals.is_empty() {
                 let known = r2o_controller::discovery::known_plans(
                     candidate_catalog
-                        .as_ref()
+                        .as_deref()
                         .expect("catalog snapshot is present"),
                     &target,
                     &suspect_fingerprint,
@@ -16777,11 +17272,11 @@ group_block_proven: false,
                 );
                 let (known_probe_path, _) = r2o_discovery_resource_probe_paths(
                     &target,
-                    candidate_catalog.as_ref(),
+                    candidate_catalog.as_deref(),
                     &runner_resource_memory,
                 );
                 let known_network_probe =
-                    r2o_discovery_network_whitelist_probe(candidate_catalog.as_ref(), false);
+                    r2o_discovery_network_whitelist_probe(candidate_catalog.as_deref(), false);
                 let known_probe_cap =
                     R2O_DISCOVERY_PROBE_CAP.saturating_add(if known_network_probe {
                         r2o_controller::r2o_rx_volume::r2o_rx_volume_name_count()
@@ -16933,7 +17428,7 @@ group_block_proven: false,
                 mark,
                 &commands,
                 &runner_network_whitelist_updates,
-                candidate_catalog.as_ref(),
+                candidate_catalog.as_deref(),
                 &suspect_fingerprint,
                 &discovery_tried,
                 discovery_candidate_probes,
@@ -17007,11 +17502,11 @@ group_block_proven: false,
             let plan_candidate = r2o_discovery_plan_candidate(plan_text);
             let (probe_path, _) = r2o_discovery_resource_probe_paths(
                 &target,
-                candidate_catalog.as_ref(),
+                candidate_catalog.as_deref(),
                 &runner_resource_memory,
             );
             let mut network_probe =
-                r2o_discovery_network_whitelist_probe(candidate_catalog.as_ref(), false);
+                r2o_discovery_network_whitelist_probe(candidate_catalog.as_deref(), false);
             let mut probe_cap = R2O_DISCOVERY_PROBE_CAP.saturating_add(if network_probe {
                 r2o_controller::r2o_rx_volume::r2o_rx_volume_name_count()
             } else {
@@ -17330,11 +17825,13 @@ group_block_proven: false,
                         })
                     },
                     |witness| {
+                        let context = R2oEchDnsContext::system(mark).ok()?;
                         r2o_discovery_resolve_ech_witness_cached(
                             &runner_ech_witness_resolutions,
+                            context,
                             witness,
                             &target.host,
-                            || r2o_controller::ech::resolve_ech_config(witness, mark),
+                            |witness| context.query(witness),
                         )
                         .ok()
                         .flatten()
@@ -17376,7 +17873,7 @@ group_block_proven: false,
             {
                 ech_rx_cut = true;
                 network_probe =
-                    r2o_discovery_network_whitelist_probe(candidate_catalog.as_ref(), true);
+                    r2o_discovery_network_whitelist_probe(candidate_catalog.as_deref(), true);
                 probe_cap = R2O_DISCOVERY_PROBE_CAP.saturating_add(if network_probe {
                     r2o_controller::r2o_rx_volume::r2o_rx_volume_name_count()
                 } else {
@@ -17629,11 +18126,13 @@ group_block_proven: false,
                                 })
                             },
                             |witness| {
+                                let context = R2oEchDnsContext::system(mark).ok()?;
                                 r2o_discovery_resolve_ech_witness_cached(
                                     &runner_ech_witness_resolutions,
+                                    context,
                                     witness,
                                     &target.host,
-                                    || r2o_controller::ech::resolve_ech_config(witness, mark),
+                                    |witness| context.query(witness),
                                 )
                                 .ok()
                                 .flatten()
@@ -19004,6 +19503,7 @@ group_block_proven: false,
         family: u8,
         r2o_mark: Option<u32>,
         deny_recheck: bool,
+        planned: bool,
         now: std::time::Instant,
     ) -> bool {
         let key = r2o_discovery_task_key(&target);
@@ -19026,6 +19526,7 @@ group_block_proven: false,
                 since: now,
                 r2o_mark,
                 deny_recheck,
+                planned,
             },
         );
         self.shape_wait_order.push_back(key.clone());
@@ -19297,48 +19798,39 @@ group_block_proven: false,
         let mut queue = queue
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let cached_shape = self
-            .recent_client_shapes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get_for_host(&target)
-            .map(|(shape, snapshot, timestamp)| (shape, snapshot.to_vec(), timestamp));
-        // C `fill_hellos`: сначала ech_inputs[8] по имени/семейству (reuse
-        // 10 мин), затем общий tcp_shape. Кеш снимков относится к TCP.
-        let ech_input = (r2o_discovery_transport(&target) == 6 && r2o_is_ech_shape(target.shape))
-            .then(|| r2o_ech_input_find(&target.host, target.family, now))
-            .flatten();
-        let cached_client_hello = ech_input
-            .as_ref()
-            .map(|(snapshot, _)| snapshot.clone())
-            .or_else(|| {
-                cached_shape
-                    .as_ref()
-                    .filter(|(shape, _, _)| r2o_cached_shape_fits(6, *shape, target.shape))
-                    .map(|(_, snapshot, _)| snapshot.clone())
-            });
-        if let Some(client_hello) = cached_client_hello.as_ref() {
-            self.client_hellos
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(task_key.clone(), client_hello.clone());
-            let mut client_tcp_timestamps = self
-                .client_tcp_timestamps
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let timestamp = ech_input
-                .as_ref()
-                .and_then(|(_, timestamp)| *timestamp)
-                .or_else(|| {
-                    cached_shape
-                        .as_ref()
-                        .and_then(|(_, _, timestamp)| *timestamp)
-                });
-            r2o_take_client_tcp_profile(&mut client_tcp_timestamps, &task_key, timestamp);
-        }
         let enqueued = queue.enqueue_with_planned(target.clone(), now, trigger_planned);
         let queue_full = !enqueued && queue.entries.len() >= R2O_DISCOVERY_TASK_CAPACITY;
         if enqueued {
+            if r2o_discovery_transport(&target) == 6
+                && !self
+                    .client_hellos
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .contains_key(&task_key)
+            {
+                let cached = r2o_is_ech_shape(target.shape)
+                    .then(|| r2o_ech_input_find(&target.host, target.family, now))
+                    .flatten()
+                    .or_else(|| {
+                        self.recent_client_shapes
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .get_for_host(&target)
+                            .filter(|(shape, _, _)| r2o_cached_shape_fits(6, *shape, target.shape))
+                            .map(|(_, snapshot, timestamp)| (snapshot.to_vec(), timestamp))
+                    });
+                if let Some((hello, timestamp)) = cached {
+                    self.client_hellos
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(task_key.clone(), hello);
+                    let mut profiles = self
+                        .client_tcp_timestamps
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    r2o_take_client_tcp_profile(&mut profiles, &task_key, timestamp);
+                }
+            }
             if bypass_direct_clear {
                 self.r2o_clear_seen_endpoint(&failure_key);
                 self.clear_bypass_pending.insert(failure_key.clone());
@@ -19406,12 +19898,6 @@ group_block_proven: false,
             true
         } else {
             drop(queue);
-            if cached_client_hello.is_some() {
-                self.client_hellos
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .remove(&task_key);
-            }
             if !bypass_direct_clear {
                 self.seen.remove(&target);
                 self.seen_order.retain(|seen| seen != &target);
@@ -19703,14 +20189,45 @@ group_block_proven: false,
             .recent_client_shapes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let entry = snapshots.entries[r2o_client_shape_family_slot(target.family)?].as_ref()?;
-        (entry.host == target.host
-            && entry.endpoint == target.endpoint
-            && control::r2k_link_shape_tcp_base(entry.shape)
-                == control::r2k_link_shape_tcp_base(target.shape)
-            && control::tcp_profile_from_has_timestamp(entry.tcp_has_timestamp)
-                == target.tcp_profile())
-        .then(|| entry.client_hello.clone())
+        let now = std::time::Instant::now();
+        snapshots.entries[r2o_client_shape_family_slot(target.family)?]
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.host == target.host
+                    && entry.endpoint == target.endpoint
+                    && control::r2k_link_shape_tcp_base(entry.shape)
+                        == control::r2k_link_shape_tcp_base(target.shape)
+                    && control::tcp_profile_from_has_timestamp(entry.tcp_has_timestamp)
+                        == target.tcp_profile()
+                    && now.saturating_duration_since(entry.seen) <= R2O_CLEAN_HANDSHAKE_TTL
+            })
+            .map(|entry| entry.client_hello.clone())
+    }
+
+    fn family_client_hello_or_capture(
+        &mut self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        capture: impl FnOnce() -> Option<r2k_core::control::ClientShapeEvent>,
+    ) -> Option<Vec<u8>> {
+        if let Some(snapshot) = self.family_client_hello(target) {
+            return Some(snapshot);
+        }
+        if !r2o_is_ech_shape(target.shape) {
+            return None;
+        }
+        let snapshot = capture()?;
+        if r2o_controller::discovery::DiscoveryTarget::from_client_shape(&snapshot).as_ref()
+            != Some(target)
+            || !self.remember_client_snapshot(
+                target,
+                &snapshot.client_hello,
+                snapshot.tcp_has_timestamp,
+            )
+        {
+            return None;
+        }
+        Some(snapshot.client_hello)
     }
 
     fn queue_client_snapshot_after_confirmed_failure_with_planned_and_trigger(
@@ -20042,11 +20559,12 @@ group_block_proven: false,
                 .iter()
                 .filter(|(key, _)| {
                     !self.pending_rechecks.contains_key(*key)
-                        && !searches.asking_with_own_plan.contains(*key)
-                        && searches
-                            .entries
-                            .get(*key)
-                            .is_some_and(|search| search.phase == "распознаём поведение")
+                        && searches.entries.get(*key).is_some_and(|search| {
+                            matches!(
+                                search.phase,
+                                "распознаём поведение" | "спрашиваем коробку о свойствах"
+                            )
+                        })
                 })
                 .map(|(key, target)| (key.clone(), target.clone()))
                 .collect()
@@ -20063,19 +20581,36 @@ group_block_proven: false,
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (key, target) in asking {
-            if r2o_controller::discovery::own_first_plans(catalog, &target, false, None, &[], &[])
-                .is_empty()
-            {
+            let Some(cancel) = cancels.get(&key) else {
+                continue;
+            };
+            if cancel.load(Ordering::Relaxed) || refreshes.contains(&key) {
                 continue;
             }
-            if let Some(cancel) = cancels.get(&key)
-                && refreshes.insert(key.clone())
-            {
-                self.searches
+            let (failed, offered) = self
+                .searches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .own_plan_history
+                .get(&key)
+                .map(|history| (history.failed.clone(), history.offered.clone()))
+                .unwrap_or_default();
+            let candidates = r2o_controller::discovery::own_first_plans(
+                catalog, &target, false, None, &failed, &offered,
+            );
+            if !candidates.is_empty() {
+                let mut searches = self
+                    .searches
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .asking_with_own_plan
-                    .insert(key);
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let history = searches.own_plan_history.entry(key.clone()).or_default();
+                for candidate in candidates {
+                    R2oOwnPlanHistory::remember(
+                        &mut history.offered,
+                        r2o_controller::r2o_fallback::tried_key(&candidate.text),
+                    );
+                }
+                refreshes.insert(key);
                 cancel.store(true, Ordering::Relaxed);
                 println!(
                     "по {} замер прерывается: в каталоге появился подтверждённый план — перехожу к его проверке",
@@ -20165,6 +20700,12 @@ group_block_proven: false,
         let work = self.outcomes.try_recv().ok()?;
         let outcome = &work.outcome;
         let task_key = r2o_discovery_task_key(&outcome.target);
+        let history = self
+            .searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .own_plan_history
+            .remove(&task_key);
         // Запрос мог прийти между окончанием замера и публикацией исхода.
         let catalog_recheck = !outcome.queue_expired
             && self.active.get(&task_key) == Some(&work.requested_target)
@@ -20251,7 +20792,139 @@ group_block_proven: false,
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .forget_carried_rx(&task_key);
-        Some(self.r2o_complete_outcome(work.outcome))
+        let outcome = self.r2o_complete_outcome(work.outcome);
+        self.r2o_note_exhausted_tcp(&outcome, history);
+        Some(outcome)
+    }
+
+    fn r2o_note_exhausted_tcp(
+        &self,
+        outcome: &DiscoveryOutcome,
+        history: Option<R2oOwnPlanHistory>,
+    ) {
+        let target = &outcome.target;
+        if !outcome.group_block_proven
+            || outcome.plan_text.is_some()
+            || outcome.direct_clear
+            || outcome.queue_expired
+            || outcome.address_failure
+            || !matches!(target.shape, SHAPE_MODERN | SHAPE_LEGACY)
+            || r2o_discovery_volume_challenge_outcome(outcome)
+        {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let failure_key = r2o_discovery_failure_key(target);
+        let Some((until, false)) = self.cooldown_ring.endpoint_state(&failure_key, now) else {
+            return;
+        };
+        let mut searches = self
+            .searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        searches
+            .exhausted_tcp
+            .retain(|entry| entry.until > now && &entry.target != target);
+        if searches.exhausted_tcp.len() >= R2O_DISCOVERY_TASK_CAPACITY {
+            searches.exhausted_tcp.pop_front();
+        }
+        let checked_generation = searches.confirms;
+        searches.exhausted_tcp.push_back(R2oExhaustedTcp {
+            target: target.clone(),
+            until,
+            checked_generation,
+            tried: history
+                .filter(|history| history.measured_target.as_ref() == Some(target))
+                .map_or_else(Vec::new, |mut history| {
+                    for key in history.failed {
+                        R2oOwnPlanHistory::remember(&mut history.offered, key);
+                    }
+                    history.offered
+                }),
+        });
+    }
+
+    fn r2o_schedule_plan_news(
+        &mut self,
+        catalog: &Catalog,
+        family: &mut R2oFamilyRecoveryWorker,
+        mark: Option<u32>,
+    ) {
+        if !family.active.is_empty() {
+            return;
+        }
+        loop {
+            let now = std::time::Instant::now();
+            let next = {
+                let mut searches = self
+                    .searches
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                searches.next_plan_news(now)
+            };
+            let Some((target, tried, until)) = next else {
+                return;
+            };
+            if self.is_active(&target)
+                || self.r2o_discovery_challenge_active(&target, now)
+                || r2o_controller::discovery::has_covering_binding(catalog, &target)
+                || r2o_controller::discovery::has_usable_binding(catalog, &target)
+                || self
+                    .cooldown_ring
+                    .endpoint_state(&r2o_discovery_failure_key(&target), now)
+                    .is_none()
+            {
+                continue;
+            }
+            let mut offered = Vec::new();
+            let candidates = r2o_controller::discovery::own_first_plans(
+                catalog,
+                &target,
+                false,
+                None,
+                &tried,
+                &[],
+            )
+            .into_iter()
+            .filter_map(|candidate| {
+                let plan_id = r2o_plan_wire_id(&candidate.text)?;
+                offered.push(r2o_controller::r2o_fallback::tried_key(&candidate.text));
+                Some(R2oFamilyRecoveryCandidate {
+                    plan_id,
+                    plan_text: candidate.text,
+                    group_plan: false,
+                    probe_path: "/".into(),
+                })
+            })
+            .collect();
+            if family.queue_task(
+                target.clone(),
+                candidates,
+                mark,
+                false,
+                self.family_client_hello(&target),
+                Some(until.min(now + std::time::Duration::from_secs(15))),
+            ) {
+                let mut searches = self
+                    .searches
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(entry) = searches
+                    .exhausted_tcp
+                    .iter_mut()
+                    .find(|entry| entry.target == target)
+                {
+                    for key in offered {
+                        R2oOwnPlanHistory::remember(&mut entry.tried, key);
+                    }
+                }
+                println!(
+                    "перепроверка {}: в каталоге появились новые совместимые планы",
+                    target.host
+                );
+                return;
+            }
+        }
     }
 
     fn r2o_recheck_changed_client_shape(&mut self, work: &R2oDiscoveryWorkOutcome) -> bool {
@@ -20876,24 +21549,6 @@ fn r2o_rx_decoy_name(name: Option<&str>) -> &str {
 }
 
 #[cfg(unix)]
-fn r2o_discovery_ech_config(
-    target: &r2o_controller::discovery::DiscoveryTarget,
-    mark: Option<u32>,
-) -> Result<Option<r2o_controller::ech::R2oEchConfig>, String> {
-    if !r2o_is_ech_shape(target.shape) {
-        return Ok(None);
-    }
-    let config = r2o_controller::ech::resolve_ech_config(&target.host, mark)?;
-    if config.public_name != target.host {
-        return Err(format!(
-            "ECH public_name {} не совпадает с внешним именем {}",
-            config.public_name, target.host
-        ));
-    }
-    Ok(Some(config))
-}
-
-#[cfg(unix)]
 fn r2o_discovery_refresh_ech_probe_config(
     target: &r2o_controller::discovery::DiscoveryTarget,
     current: Option<&r2o_controller::ech::R2oEchConfig>,
@@ -20917,62 +21572,37 @@ fn r2o_discovery_refresh_ech_probe_config(
 }
 
 #[cfg(unix)]
-fn r2o_discovery_ech_witness_config(
-    target: &r2o_controller::discovery::DiscoveryTarget,
-    witness: &str,
-    mark: Option<u32>,
-    cache: &std::sync::Mutex<R2oEchWitnessResolutionCache>,
-) -> Result<Option<r2o_controller::ech::R2oEchConfig>, String> {
-    if !r2o_is_ech_shape(target.shape) || witness == target.host {
-        return Ok(None);
-    }
-    let result = r2o_controller::ech::resolve_ech_config(witness, mark);
-    cache
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .store(
-            witness,
-            result.as_ref().ok().cloned(),
-            std::time::Instant::now(),
-        );
-    match result {
-        Ok(config) if config.public_name == target.host => Ok(Some(config)),
-        Ok(_) => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-#[cfg(unix)]
 fn r2o_discovery_resolve_ech_witness_cached(
     cache: &std::sync::Mutex<R2oEchWitnessResolutionCache>,
+    context: R2oEchDnsContext,
     witness: &str,
     public_name: &str,
-    resolve: impl FnOnce() -> Result<r2o_controller::ech::R2oEchConfig, String>,
+    resolve: impl FnOnce(&str) -> Result<R2oEchDnsAnswer, String>,
 ) -> Result<Option<r2o_controller::ech::R2oEchConfig>, String> {
+    let witness = r2o_controller::ech::r2o_ech_normalize_name(witness)?;
     let now = std::time::Instant::now();
     let cached = cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .lookup(witness, now);
-    let result = if let Some(cached) = cached {
-        Ok(cached)
+        .lookup(context, &witness, now);
+    let config = if let Some(cached) = cached {
+        cached
     } else {
-        let result = resolve();
-        cache
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .store(
-                witness,
-                result.as_ref().ok().cloned(),
-                std::time::Instant::now(),
-            );
-        result.map(Some)
+        let answer = resolve(&witness)?;
+        let expires = now.checked_add(answer.ttl());
+        let config = match answer {
+            R2oEchDnsAnswer::Config { config, .. } => Some(config),
+            R2oEchDnsAnswer::NoConfig { .. } => None,
+        };
+        if let Some(expires) = expires.filter(|expires| *expires > std::time::Instant::now()) {
+            cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .store(context, witness, config.clone(), expires);
+        }
+        config
     };
-    match result {
-        Ok(Some(config)) if config.public_name == public_name => Ok(Some(config)),
-        Ok(_) => Ok(None),
-        Err(error) => Err(error),
-    }
+    Ok(config.filter(|config| config.public_name == public_name))
 }
 
 #[cfg(unix)]
@@ -20980,17 +21610,22 @@ fn r2o_discovery_first_ech_witness(
     target: &r2o_controller::discovery::DiscoveryTarget,
     candidates: &[String],
     start: usize,
-    mark: Option<u32>,
     cache: &std::sync::Mutex<R2oEchWitnessResolutionCache>,
+    context: R2oEchDnsContext,
+    mut resolve: impl FnMut(&str) -> Result<R2oEchDnsAnswer, String>,
 ) -> Option<(r2o_controller::ech::R2oEchConfig, usize)> {
+    if !r2o_is_ech_shape(target.shape) {
+        return None;
+    }
     for (index, witness) in candidates.iter().enumerate().skip(start) {
-        let matches_target =
-            r2o_discovery_resolve_ech_witness_cached(cache, witness, &target.host, || {
-                r2o_controller::ech::resolve_ech_config(witness, mark)
-            })
-            .is_ok_and(|config| config.is_some());
-        if matches_target
-            && let Ok(Some(config)) = r2o_discovery_ech_witness_config(target, witness, mark, cache)
+        if witness != &target.host
+            && let Ok(Some(config)) = r2o_discovery_resolve_ech_witness_cached(
+                cache,
+                context,
+                witness,
+                &target.host,
+                &mut resolve,
+            )
         {
             return Some((config, index + 1));
         }
@@ -21829,6 +22464,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech(
             ech_config,
             white_name,
             None,
+            None,
             0,
             &mut |_, _, _, _| {},
         );
@@ -21951,6 +22587,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
     ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
     white_name: &str,
     seed_whole: Option<r2o_controller::classify::SeedWhole>,
+    run_checkpoint: Option<Arc<std::sync::Mutex<r2o_controller::classify::ClassifyCheckpoint>>>,
     send_cap: usize,
     progress: &mut dyn FnMut(&str, usize, usize, usize),
 ) -> (DiscoveryOutcome, usize, bool, bool, bool, bool, bool, bool) {
@@ -22099,6 +22736,7 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
             let mut options = bridge_options;
             options.cancel = Some(task_cancel);
             options.seed_whole = seed_whole;
+            options.run_checkpoint = run_checkpoint;
             classify_run_with_progress(
                 &bridge_addr,
                 &bridge_trigger,
@@ -22107,9 +22745,18 @@ fn r2o_classify_discovery_target_with_client_hello_and_ech_progress(
                 progress,
             )
         });
-    let raw_split_executed = r2o_discovery_split_raw_executed(result.verdict, result.raw_dials);
+    let raw_evidence = result
+        .raw_dials
+        .max(u64::from(result.checkpoint_raw_evidence));
+    if result.checkpoint_questions > 0 {
+        println!(
+            "Discovery: {} продолжен, повторно использовано вопросов {}, новых зондов {}",
+            target.host, result.checkpoint_questions, result.probes,
+        );
+    }
+    let raw_split_executed = r2o_discovery_split_raw_executed(result.verdict, raw_evidence);
     let (verdict, split_pos, socket_only_split) =
-        r2o_discovery_split_gate(result.verdict, result.split_pos, result.raw_dials);
+        r2o_discovery_split_gate(result.verdict, result.split_pos, raw_evidence);
     result.verdict = verdict;
     result.split_pos = split_pos;
     if socket_only_split {
@@ -23462,7 +24109,7 @@ impl ControlClient {
         let network_whitelist_updates = Arc::new(std::sync::Mutex::new(VecDeque::new()));
         let catalog_snapshot = discovery
             .as_ref()
-            .map(|(catalog, _, _)| Arc::new(std::sync::Mutex::new(catalog.clone())));
+            .map(|(catalog, _, _)| Arc::new(std::sync::Mutex::new(Arc::new(catalog.clone()))));
         let mut catalog_persistence =
             discovery
                 .as_ref()
@@ -23545,7 +24192,6 @@ impl ControlClient {
         let mut clean_handshakes = R2oCleanHandshakeCache::default();
         let mut legacy_client_tcp =
             HashMap::<[u8; r2k_core::control::KEY_LEN], (Vec<u8>, std::time::Instant)>::new();
-        let mut quic_trial_cooldowns = HashMap::<std::net::IpAddr, std::time::Instant>::new();
         let mut quic_deny = R2oQuicDenyCache::default();
         let mut r2o_pending_quic_discovery = VecDeque::<R2oPendingQuicDiscovery>::new();
         if let Some(path) = &https_cache_path {
@@ -23595,7 +24241,7 @@ impl ControlClient {
                 )
             })
             .transpose()?;
-        let mut catalog_sync_dirty = false;
+        let mut pending_catalog_sync = None;
         let mut groups_expired_at: Option<std::time::Instant> = None;
         let mut catalog_sync_refusals = 0;
         let mut catalog_sync_refusal_reason = control::ACK_OK;
@@ -23666,7 +24312,7 @@ impl ControlClient {
                         catalog_persistence.as_mut(),
                     )?;
                     if changed {
-                        catalog_sync_dirty = true;
+                        pending_catalog_sync = Some(CatalogSyncRequest::Rebuild);
                     }
                 }
                 // C `d2k_sched_tick`: отказы узлов семейства стареют раз в час
@@ -23685,7 +24331,7 @@ impl ControlClient {
                             .map(|state| state.expire_failures(dns_wall_now, 7 * 86400))
                             .unwrap_or(0);
                         if dropped > 0 {
-                            catalog_sync_dirty = true;
+                            pending_catalog_sync = Some(CatalogSyncRequest::Rebuild);
                             println!("семейства: убраны отказы узлов старше 7 суток ({dropped})");
                         }
                     }
@@ -23879,13 +24525,22 @@ impl ControlClient {
                         ControlRead::Closed => return Ok(()),
                     }
                 }
-                if self.pending_events.is_empty() && catalog_sync.is_none() && catalog_sync_dirty {
+                if catalog_sync.is_none()
+                    && let Some(request) = pending_catalog_sync.take()
+                {
                     let wall_now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs() as i64;
                     let send_cap = self.send_cap.load(Ordering::Relaxed);
-                    let compiled = if let Some((_, catalog, path, _)) = discovery.as_mut() {
+                    let generation = catalog_persistence
+                        .as_ref()
+                        .map_or(0, |persistence| persistence.generation);
+                    let prepared = request.take_prepared(generation, send_cap);
+                    let queued_for = prepared.as_ref().map(|(_, queued_for)| *queued_for);
+                    let compiled = if let Some((prepared, _)) = prepared {
+                        Some(prepared)
+                    } else if let Some((_, catalog, path, _)) = discovery.as_mut() {
                         let before = catalog.clone();
                         let compiled = catalog_commands_with_send_cap(catalog, send_cap, wall_now)?;
                         if *catalog != before {
@@ -23907,6 +24562,15 @@ impl ControlClient {
                     } else {
                         None
                     };
+                    if let Some(compiled) = &compiled {
+                        println!(
+                            "каталог подготовлен: поколение={generation}, повторное использование={}, подготовка={} мкс, компиляций={}, очередь={} мкс",
+                            queued_for.is_some(),
+                            compiled.preparation.elapsed.as_micros(),
+                            compiled.preparation.plan_compilations,
+                            queued_for.unwrap_or_default().as_micros()
+                        );
+                    }
                     catalog_sync = compiled
                         .map(|compiled| {
                             CatalogSyncCursor::from_compiled_after(
@@ -23917,15 +24581,28 @@ impl ControlClient {
                             )
                         })
                         .transpose()?;
-                    catalog_sync_dirty = false;
                 }
-                if self.pending_events.is_empty()
-                    && let Some(cursor) = catalog_sync.as_mut()
-                {
+                if let Some(cursor) = catalog_sync.as_mut() {
+                    if cursor
+                        .pending_area_ack
+                        .as_ref()
+                        .is_some_and(|ack| now >= ack.deadline)
+                    {
+                        let previous_groups = active_groups.clone();
+                        cursor.expire_area_ack(now, &mut active_groups, &mut installed_areas);
+                        if previous_groups != active_groups
+                            && let Some((worker, catalog, _, _)) = discovery.as_mut()
+                        {
+                            worker.r2o_set_installed_groups(&active_groups);
+                            worker.catalog_changed(catalog, &active_groups);
+                        }
+                    }
                     if !cursor.send_step(self, &mut active_groups, &mut installed_areas)? {
                         println!(
-                            "каталог синхронизирован: отправлено {}, пропущено {}",
-                            cursor.sent, cursor.skipped
+                            "каталог синхронизирован: отправлено {}, пропущено {}, публикация={} мкс",
+                            cursor.sent,
+                            cursor.skipped,
+                            cursor.started_at.elapsed().as_micros(),
                         );
                         if catalog_sync_refusals != 0 {
                             eprintln!(
@@ -24184,6 +24861,11 @@ impl ControlClient {
                     }
                     continue;
                 }
+                if let (Some((worker, catalog, _, mark)), Some(family)) =
+                    (&mut discovery, &mut family_recovery)
+                {
+                    worker.r2o_schedule_plan_news(catalog, family, *mark);
+                }
                 if let Some((worker, catalog, path, _)) = &mut discovery
                     && let Some(outcome) = worker.try_outcome()
                 {
@@ -24247,23 +24929,35 @@ impl ControlClient {
                             // T_ASKING, у которых появился свой план.
                             worker.r2o_yield_asking_to_own_plan(catalog);
                         }
-                        match apply_result {
-                            Ok(Some(_installed_groups)) => {}
+                        let prepared = match apply_result {
+                            Ok(Some(compiled)) => Some(compiled),
                             Ok(None) if has_candidate => {
                                 println!(
                                     "Discovery {}: новый план не нужен; сохранённая привязка уже покрывает цель",
                                     target.host
                                 );
+                                None
                             }
-                            Ok(None) => {}
+                            Ok(None) => None,
                             Err(error) => {
                                 let reason = error.to_string();
                                 worker.record_install_failure(&target);
                                 eprintln!("Discovery {}: {reason}", target.host);
+                                None
                             }
-                        }
+                        };
                         if catalog_changed {
-                            catalog_sync_dirty = true;
+                            pending_catalog_sync =
+                                Some(prepared.map_or(CatalogSyncRequest::Rebuild, |compiled| {
+                                    CatalogSyncRequest::Prepared {
+                                        compiled,
+                                        generation: catalog_persistence
+                                            .as_ref()
+                                            .map_or(0, |persistence| persistence.generation),
+                                        send_cap: self.send_cap.load(Ordering::Relaxed),
+                                        queued_at: std::time::Instant::now(),
+                                    }
+                                }));
                             worker.catalog_changed(catalog, &active_groups);
                         }
                     }
@@ -24298,14 +24992,21 @@ impl ControlClient {
                                 )
                             };
                             match publication {
-                                Ok(true) => {
-                                    catalog_sync_dirty = true;
+                                Ok(Some(compiled)) => {
+                                    pending_catalog_sync = Some(CatalogSyncRequest::Prepared {
+                                        compiled,
+                                        generation: catalog_persistence
+                                            .as_ref()
+                                            .map_or(0, |persistence| persistence.generation),
+                                        send_cap: self.send_cap.load(Ordering::Relaxed),
+                                        queued_at: std::time::Instant::now(),
+                                    });
                                     worker.record_confirmation();
                                     worker.r2o_yield_asking_to_own_plan(catalog);
                                     worker.catalog_changed(catalog, &active_groups);
                                     true
                                 }
-                                Ok(false) => false,
+                                Ok(None) => false,
                                 Err(error) => {
                                     eprintln!(
                                         "не удалось сохранить семейный план для {}: {error}",
@@ -24336,6 +25037,18 @@ impl ControlClient {
                         R2oFamilyRecoveryDecision::Reclassify => {
                             if let Some(worker) = &mut family_recovery {
                                 worker.complete(&outcome.target);
+                            }
+                            if outcome.plan_news {
+                                println!(
+                                    "перепроверка {} по новому знанию завершилась: {}",
+                                    outcome.target.host,
+                                    outcome
+                                        .result
+                                        .as_ref()
+                                        .err()
+                                        .map_or("новые планы не подтверждены", String::as_str)
+                                );
+                                continue;
                             }
                             let bootstrap = outcome.bootstrap;
                             let action = r2o_family_recovery_failure_action(bootstrap);
@@ -24733,13 +25446,6 @@ impl ControlClient {
                     .as_mut()
                     .and_then(R2oQuicDiscoveryWorker::try_outcome)
                 {
-                    let now = std::time::Instant::now();
-                    if !outcome.deny_recheck {
-                        quic_trial_cooldowns.insert(
-                            outcome.server.ip(),
-                            now + r2o_quic_discovery_cooldown(&outcome.result),
-                        );
-                    }
                     let family = if outcome.server.is_ipv4() { 4 } else { 6 };
                     if outcome.deny_recheck {
                         if outcome.stall_cut {
@@ -24858,8 +25564,9 @@ impl ControlClient {
                         let mut bootstrap_queued = false;
                         if outcome.result.rx_tls_unavailable
                             && let Some(target) = discovery_target.as_ref()
-                            && let Some((discovery, catalog, _, mark)) = discovery.as_ref()
+                            && let Some((discovery, catalog, _, mark)) = discovery.as_mut()
                             && let Some(worker) = family_recovery.as_mut()
+                            && !worker.active.contains(target)
                         {
                             let candidates =
                                 matching_saved_bootstrap_candidates(catalog, target, false);
@@ -24869,7 +25576,9 @@ impl ControlClient {
                                     candidates,
                                     *mark,
                                     true,
-                                    discovery.family_client_hello(target),
+                                    discovery.family_client_hello_or_capture(target, || {
+                                        self.r2o_capture_client_shape(target).ok().flatten()
+                                    }),
                                 );
                             }
                         }
@@ -24977,6 +25686,10 @@ impl ControlClient {
                                 *mark,
                                 &measurement_gate,
                                 true,
+                                quic_discovery.as_ref().is_some_and(|worker| {
+                                    !worker.active.contains_key(&entry.server)
+                                }),
+                                None,
                             );
                             println!(
                                 "по {} (QUIC) срок запрета вышел; собственная прямая HTTP/3-перепроверка поставлена в очередь",
@@ -24984,19 +25697,14 @@ impl ControlClient {
                             );
                         }
                     }
-                    if discovery.is_some()
-                        && let Some((pending_server, pending_captured)) = r2o_pending_quic_discovery
-                            .front()
-                            .map(|pending| (pending.server, pending.captured))
-                    {
-                        let now = std::time::Instant::now();
-                        if now.saturating_duration_since(pending_captured)
-                            > std::time::Duration::from_secs(60)
-                        {
+                    if discovery.is_some() && !r2o_pending_quic_discovery.is_empty() {
+                        if let Some(index) = r2o_pending_quic_discovery.iter().position(|entry| {
+                            now.saturating_duration_since(entry.captured)
+                                > std::time::Duration::from_secs(60)
+                        }) {
                             let expired = r2o_pending_quic_discovery
-                                .pop_front()
+                                .remove(index)
                                 .expect("проверенная очередь QUIC");
-                            quic_trial_cooldowns.remove(&expired.server.ip());
                             if expired.deny_recheck {
                                 if let Some(host) =
                                     r2o_quic_snapshot_server_name(&expired.snapshot, expired.server)
@@ -25009,7 +25717,7 @@ impl ControlClient {
                             }
                             println!(
                                 "QUIC-проба {} пропущена: снимок Initial устарел в очереди",
-                                pending_server
+                                expired.server
                             );
                             continue;
                         }
@@ -25018,6 +25726,7 @@ impl ControlClient {
                             && let Some((pending, permit)) = r2o_take_ready_quic_discovery(
                                 &mut r2o_pending_quic_discovery,
                                 &measurement_gate,
+                                |server| !worker.active.contains_key(&server),
                             )
                         {
                             let pending_host =
@@ -25043,8 +25752,8 @@ impl ControlClient {
                                 started_at: std::time::Instant::now(),
                                 deny_recheck: pending.deny_recheck,
                                 stall_cut: false,
+                                cooldown_key: pending.cooldown_key,
                             }) {
-                                quic_trial_cooldowns.remove(&pending.server.ip());
                                 if pending.deny_recheck {
                                     if let Some(host) = pending_host {
                                         quic_deny.r2o_recheck_retry(&host, pending_family);
@@ -25059,7 +25768,12 @@ impl ControlClient {
                             continue;
                         }
                     }
-                    let wait = if catalog_sync.is_some() || catalog_sync_dirty {
+                    let sync_can_send = catalog_sync
+                        .as_ref()
+                        .is_some_and(|cursor| cursor.pending_area_ack.is_none());
+                    let wait = if sync_can_send
+                        || (catalog_sync.is_none() && pending_catalog_sync.is_some())
+                    {
                         std::time::Duration::ZERO
                     } else {
                         std::time::Duration::from_millis(100)
@@ -25070,6 +25784,12 @@ impl ControlClient {
                         .map(|ack| ack.deadline)
                         .chain(pending_name_deletes.values().map(|ack| ack.deadline))
                         .chain(pending_quic_acks.values().map(|ack| ack.deadline))
+                        .chain(
+                            catalog_sync
+                                .as_ref()
+                                .and_then(|cursor| cursor.pending_area_ack.as_ref())
+                                .map(|ack| ack.deadline),
+                        )
                         .map(|deadline| deadline.saturating_duration_since(now))
                         .fold(wait, std::time::Duration::min);
                     let frame = match self.input.read(&mut self.socket, wait)? {
@@ -25078,22 +25798,6 @@ impl ControlClient {
                             measurement_gate.r2o_scheduler_tick();
                             if let Some((worker, _, _, _)) = discovery.as_mut() {
                                 worker.r2o_ensure_workers();
-                            }
-                            if wait.is_zero()
-                                && let Some(cursor) = catalog_sync.as_mut()
-                            {
-                                let previous_groups = active_groups.clone();
-                                cursor.expire_area_ack(
-                                    std::time::Instant::now(),
-                                    &mut active_groups,
-                                    &mut installed_areas,
-                                );
-                                if previous_groups != active_groups
-                                    && let Some((worker, catalog, _, _)) = discovery.as_mut()
-                                {
-                                    worker.r2o_set_installed_groups(&active_groups);
-                                    worker.catalog_changed(catalog, &active_groups);
-                                }
                             }
                             continue;
                         }
@@ -25520,17 +26224,6 @@ impl ControlClient {
                         );
                     }
                     let now = std::time::Instant::now();
-                    quic_trial_cooldowns.retain(|_, until| *until > now);
-                    if quic_trial_cooldowns
-                        .get(&server.ip())
-                        .is_some_and(|until| *until > now)
-                    {
-                        println!(
-                            "QUIC-проба пропущена: для адреса действует часовой интервал повтора"
-                        );
-                        std::io::stdout().flush()?;
-                        continue;
-                    }
                     if r2o_pending_quic_discovery.len() >= R2O_QUIC_TRIAL_QUEUE_CAPACITY {
                         println!(
                             "QUIC-проба {} не поставлена: общая очередь замеров заполнена",
@@ -25636,6 +26329,7 @@ impl ControlClient {
                                     family,
                                     *r2o_mark,
                                     false,
+                                    event.planned,
                                     now,
                                 ) {
                                     println!(
@@ -25660,8 +26354,23 @@ impl ControlClient {
                             (snapshot, now)
                         }
                     };
-                    quic_trial_cooldowns
-                        .insert(server.ip(), now + std::time::Duration::from_secs(60 * 60));
+                    let Some(host) = r2o_quic_snapshot_server_name(&snapshot, server) else {
+                        println!("QUIC-проба {server} пропущена: снимок Initial не разобран");
+                        std::io::stdout().flush()?;
+                        continue;
+                    };
+                    let cooldown_key =
+                        r2o_quic_cooldown_key(server, host, *r2o_mark, event.planned);
+                    if quic_discovery.as_ref().is_some_and(|worker| {
+                        worker.r2o_trial_suppressed(&r2o_pending_quic_discovery, &cooldown_key, now)
+                    }) {
+                        println!(
+                            "QUIC-проба {} {server} пропущена: измерение уже в очереди, идёт или действует интервал повтора",
+                            cooldown_key.host
+                        );
+                        std::io::stdout().flush()?;
+                        continue;
+                    }
                     let queued = r2o_enqueue_quic_discovery(
                         &mut r2o_pending_quic_discovery,
                         server,
@@ -25670,6 +26379,10 @@ impl ControlClient {
                         *r2o_mark,
                         &measurement_gate,
                         false,
+                        quic_discovery
+                            .as_ref()
+                            .is_some_and(|worker| !worker.active.contains_key(&server)),
+                        Some(cooldown_key),
                     );
                     println!(
                         "QUIC-проба {} поставлена в общую очередь замеров ({}/{})",
@@ -25704,21 +26417,38 @@ impl ControlClient {
                                 })
                                 .unwrap_or_default();
                             let has_family_candidates = !family_candidates.is_empty();
-                            let family_queued = has_family_candidates && {
-                                let mark = discovery.as_ref().and_then(|(_, _, _, mark)| *mark);
-                                let snapshot = discovery.as_ref().and_then(|(worker, _, _, _)| {
-                                    worker.family_client_hello(&target)
-                                });
-                                family_recovery.as_mut().is_some_and(|worker| {
-                                    worker.queue(
-                                        target.clone(),
-                                        family_candidates,
-                                        mark,
-                                        false,
-                                        snapshot,
-                                    )
-                                })
-                            };
+                            let family_queued = has_family_candidates
+                                && family_recovery
+                                    .as_ref()
+                                    .is_some_and(|worker| !worker.active.contains(&target))
+                                && {
+                                    let mark = discovery.as_ref().and_then(|(_, _, _, mark)| *mark);
+                                    let snapshot = family_candidates
+                                        .iter()
+                                        .any(|candidate| !candidate.group_plan)
+                                        .then(|| {
+                                            discovery.as_mut().and_then(|(worker, _, _, _)| {
+                                                worker.family_client_hello_or_capture(
+                                                    &target,
+                                                    || {
+                                                        self.r2o_capture_client_shape(&target)
+                                                            .ok()
+                                                            .flatten()
+                                                    },
+                                                )
+                                            })
+                                        })
+                                        .flatten();
+                                    family_recovery.as_mut().is_some_and(|worker| {
+                                        worker.queue(
+                                            target.clone(),
+                                            family_candidates,
+                                            mark,
+                                            false,
+                                            snapshot,
+                                        )
+                                    })
+                                };
                             if family_queued {
                                 println!(
                                     "плановый отказ {} сначала проверит сохранённый план семейства через HTTPS",
@@ -25794,22 +26524,40 @@ impl ControlClient {
                                         "молчание без плана для {} не создаёт повторную задачу: каталог уже содержит применимое решение",
                                         target.host
                                     );
+                                } else if family_recovery
+                                    .as_ref()
+                                    .is_some_and(|family| family.active.contains(&target))
+                                {
+                                    println!(
+                                        "семейная проверка для {} уже выполняется",
+                                        target.host
+                                    );
                                 } else {
                                     let candidates =
                                         matching_sibling_recovery_candidates(catalog, &target);
                                     let family_queued = !candidates.is_empty()
+                                        && !worker
+                                            .active
+                                            .contains_key(&r2o_discovery_task_key(&target))
                                         && family_recovery.as_mut().is_some_and(|family| {
                                             family.queue(
                                                 target.clone(),
                                                 candidates,
                                                 *mark,
                                                 false,
-                                                worker.family_client_hello(&target),
+                                                worker.family_client_hello_or_capture(
+                                                    &target,
+                                                    || {
+                                                        self.r2o_capture_client_shape(&target)
+                                                            .ok()
+                                                            .flatten()
+                                                    },
+                                                ),
                                             )
                                         });
                                     if family_queued {
                                         println!(
-                                            "молчание TCP: для {} сначала проверяется план совместимого узла семейства",
+                                            "молчание TCP: для {} поставлена семейная проверка",
                                             target.host
                                         );
                                     } else if self.r2o_queue_tcp_suspect(
@@ -26041,6 +26789,11 @@ impl ControlClient {
                                     "повтор ClientHello без плана для {} не создаёт задачу: каталог уже содержит применимое решение",
                                     target.host
                                 );
+                            } else if family_recovery
+                                .as_ref()
+                                .is_some_and(|family| family.active.contains(&target))
+                            {
+                                println!("семейная проверка для {} уже выполняется", target.host);
                             } else if self.r2o_queue_tcp_suspect(
                                 worker,
                                 target.clone(),
@@ -26923,16 +27676,39 @@ impl ControlClient {
                             std::io::stdout().flush()?;
                             continue;
                         }
-                        quic_trial_cooldowns
-                            .insert(server.ip(), now + std::time::Duration::from_secs(60 * 60));
+                        let r2o_mark = wait.r2o_mark.or(*mark);
+                        let cooldown_key = (!wait.deny_recheck).then(|| {
+                            r2o_quic_cooldown_key(
+                                server,
+                                wait.target.host.clone(),
+                                r2o_mark,
+                                wait.planned,
+                            )
+                        });
+                        if let Some(key) = &cooldown_key
+                            && quic_discovery.as_ref().is_some_and(|worker| {
+                                worker.r2o_trial_suppressed(&r2o_pending_quic_discovery, key, now)
+                            })
+                        {
+                            worker
+                                .searches
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .report_terminal(&wait.target, "cooldown", Some("none"), None, now);
+                            continue;
+                        }
                         let queued = r2o_enqueue_quic_discovery(
                             &mut r2o_pending_quic_discovery,
                             server,
                             snapshot.clone(),
                             now,
-                            wait.r2o_mark.or(*mark),
+                            r2o_mark,
                             &measurement_gate,
                             wait.deny_recheck,
+                            quic_discovery
+                                .as_ref()
+                                .is_some_and(|worker| !worker.active.contains_key(&server)),
+                            cooldown_key,
                         );
                         println!(
                             "по {} (QUIC) поймана форма приветствия: {} байт — проба поставлена в общую очередь ({}/{})",
@@ -27885,7 +28661,16 @@ impl ControlClient {
         host: &str,
         family: u8,
         timeout: std::time::Duration,
+        expected: Option<&r2o_controller::discovery::DiscoveryTarget>,
     ) -> Result<Option<r2k_core::control::ClientShapeEvent>, Box<dyn Error>> {
+        let matches = |event: &r2k_core::control::ClientShapeEvent| {
+            event.key[0] == family
+                && event.host.eq_ignore_ascii_case(host.as_bytes())
+                && expected.is_none_or(|target| {
+                    r2o_controller::discovery::DiscoveryTarget::from_client_shape(event).as_ref()
+                        == Some(target)
+                })
+        };
         let deadline = std::time::Instant::now()
             .checked_add(timeout)
             .ok_or("срок захвата ClientHello слишком велик")?;
@@ -27898,12 +28683,11 @@ impl ControlClient {
                 if frame.kind == EVENT_CLIENT_SHAPE {
                     let event = decode_client_shape(&frame)
                         .map_err(|error| format!("снимок ClientHello: {error}"))?;
-                    if event.key[0] == family && event.host.eq_ignore_ascii_case(host.as_bytes()) {
+                    if matches(&event) {
                         return Ok(Some(event));
                     }
-                } else {
-                    self.pending_events.push_back(frame);
                 }
+                self.pending_events.push_back(frame);
             }
 
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -27923,12 +28707,11 @@ impl ControlClient {
             if frame.kind == EVENT_CLIENT_SHAPE {
                 let event = decode_client_shape(&frame)
                     .map_err(|error| format!("снимок ClientHello: {error}"))?;
-                if event.key[0] == family && event.host.eq_ignore_ascii_case(host.as_bytes()) {
+                if matches(&event) {
                     return Ok(Some(event));
                 }
-            } else {
-                self.queue_async_frame(frame)?;
             }
+            self.queue_async_frame(frame)?;
         }
     }
 
@@ -28309,6 +29092,7 @@ impl ControlClient {
                 &target.host,
                 target.family,
                 std::time::Duration::from_millis(150),
+                Some(target),
             )
             .map_err(|error| format!("ошибка получения ClientHello: {error}"))?
         else {
@@ -28316,14 +29100,6 @@ impl ControlClient {
                 "датапат подтвердил ARM_SHAPE, но ClientHello не пришёл за 150 мс"
             ));
         };
-        if r2o_controller::discovery::DiscoveryTarget::from_client_shape(&snapshot).as_ref()
-            != Some(target)
-        {
-            return Err(format!(
-                "датапат вернул ClientHello для другой точки или формы, ожидается {} {}",
-                target.endpoint, target.host
-            ));
-        }
         Ok(Some(snapshot))
     }
 
@@ -30445,7 +31221,7 @@ impl ControlClient {
         catalog: &mut Catalog,
         catalog_path: &std::path::Path,
         input: u8,
-    ) -> Result<Option<Vec<r2o_controller::live::LiveGroupKey>>, Box<dyn Error>> {
+    ) -> Result<Option<CompiledCatalog>, Box<dyn Error>> {
         self.apply_discovery_outcome_with_input_and_persistence(
             outcome,
             catalog,
@@ -30464,14 +31240,14 @@ impl ControlClient {
         catalog: &mut Catalog,
         catalog_path: &Path,
         persistence: Option<&mut R2oCatalogPersistence>,
-    ) -> Result<bool, Box<dyn Error>> {
+    ) -> Result<Option<CompiledCatalog>, Box<dyn Error>> {
         let Some(candidate) = &outcome.temporary_candidate else {
-            return Ok(false);
+            return Ok(None);
         };
         if r2o_family_recovery_decision(&outcome.result, outcome.applied)
             != R2oFamilyRecoveryDecision::Verified
         {
-            return Ok(false);
+            return Ok(None);
         }
         let fetch = outcome
             .result
@@ -30489,7 +31265,7 @@ impl ControlClient {
             || budget_mark == R2O_D2K_CAT_BUDGET_CUT
             || target.endpoint.parse().ok() != Some(fetch.address)
         {
-            return Ok(false);
+            return Ok(None);
         }
         let has_timestamp = match target.tcp_profile() {
             control::TCP_PROFILE_TS => Some(true),
@@ -30530,8 +31306,7 @@ impl ControlClient {
             &mut confirmed,
             persistence,
             Some(r2o_confirmed_verified_by(&outcome.result)),
-        )?;
-        Ok(confirmed)
+        )
     }
 
     fn apply_discovery_outcome_with_input_and_persistence(
@@ -30544,7 +31319,7 @@ impl ControlClient {
         measured_probe_path: Option<&str>,
         confirmed: &mut bool,
         mut persistence: Option<&mut R2oCatalogPersistence>,
-    ) -> Result<Option<Vec<r2o_controller::live::LiveGroupKey>>, Box<dyn Error>> {
+    ) -> Result<Option<CompiledCatalog>, Box<dyn Error>> {
         // C `t->ver` живёт в ячейке задачи до записи привязки; здесь признак
         // доказательства переносится рядом с исходом (см. `r2o_confirmed_proof_map`).
         let verified_by = r2o_confirmed_proof_take(&outcome.target);
@@ -30642,7 +31417,7 @@ impl ControlClient {
         confirmed: &mut bool,
         persistence: Option<&mut R2oCatalogPersistence>,
         verified_by: Option<u8>,
-    ) -> Result<Option<Vec<r2o_controller::live::LiveGroupKey>>, Box<dyn Error>> {
+    ) -> Result<Option<CompiledCatalog>, Box<dyn Error>> {
         let group_block_proven = outcome.group_block_proven;
         let budget_mark = outcome.budget_mark;
         let transferred_own_plan = outcome.transferred_own_plan;
@@ -30766,11 +31541,6 @@ impl ControlClient {
             now,
         )?;
 
-        let active_groups = compiled
-            .group_commands
-            .into_iter()
-            .map(|(_, key)| key)
-            .collect();
         persist_catalog_update(&updated, catalog_path, now, persistence)?;
         *catalog = updated;
         *confirmed = true;
@@ -30784,7 +31554,7 @@ impl ControlClient {
                 "TLS 1.2"
             }
         );
-        Ok(Some(active_groups))
+        Ok(Some(compiled))
     }
 
     /// Пометить устаревшую exact-привязку на перепроверку и сразу снять её
@@ -33224,8 +33994,8 @@ mod tests {
             std::process::id()
         ));
         let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
-        let hello = r2o_controller::hello::modern_client_hello("target.example").unwrap();
-        let other_hello = r2o_controller::hello::modern_client_hello("other.example").unwrap();
+        let hello = r2o_controller::hello::modern_client_hello("target.example.com").unwrap();
+        let other_hello = r2o_controller::hello::modern_client_hello("other.example.com").unwrap();
         let server_hello = hello.clone();
         let server_other_hello = other_hello;
         let server = std::thread::spawn(move || {
@@ -33241,7 +34011,7 @@ mod tests {
             key[37] = 6;
             let wrong = ClientShapeEvent {
                 key,
-                host: b"other.example".to_vec(),
+                host: b"other.example.com".to_vec(),
                 shape: SHAPE_MODERN,
                 client_hello: server_other_hello,
                 tcp_has_timestamp: None,
@@ -33252,11 +34022,20 @@ mod tests {
             .unwrap();
             let right = ClientShapeEvent {
                 key,
-                host: b"target.example".to_vec(),
+                host: b"target.example.com".to_vec(),
                 shape: SHAPE_MODERN,
                 client_hello: server_hello,
-                tcp_has_timestamp: None,
+                tcp_has_timestamp: Some(true),
             };
+            let different_profile = ClientShapeEvent {
+                tcp_has_timestamp: Some(false),
+                ..right.clone()
+            };
+            peer.write_all(
+                &super::encode_frame(EVENT_CLIENT_SHAPE, &different_profile.event_body().unwrap())
+                    .unwrap(),
+            )
+            .unwrap();
             peer.write_all(
                 &super::encode_frame(EVENT_CLIENT_SHAPE, &right.event_body().unwrap()).unwrap(),
             )
@@ -33264,20 +34043,43 @@ mod tests {
             std::thread::sleep(Duration::from_millis(300));
         });
 
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "target.example.com".into(),
+            endpoint: "192.0.2.1:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+            tcp_profile: r2k_core::control::TCP_PROFILE_TS,
+        };
         let mut client = super::ControlClient::connect(socket_path.clone()).unwrap();
         let event = client
-            .wait_for_client_shape("target.example", 4, Duration::from_secs(1))
+            .wait_for_client_shape(
+                "target.example.com",
+                4,
+                Duration::from_secs(1),
+                Some(&target),
+            )
             .unwrap()
             .expect("форма цели должна быть получена");
-        assert_eq!(event.host, b"target.example");
+        assert_eq!(event.host, b"target.example.com");
         assert_eq!(event.shape, SHAPE_MODERN);
         assert_eq!(event.client_hello, hello);
+        assert_eq!(event.tcp_has_timestamp, Some(true));
 
-        // Чужое имя пропущено, а после него форма цели уже получена.
+        let foreign = client
+            .wait_for_client_shape("other.example.com", 4, Duration::ZERO, None)
+            .unwrap()
+            .expect("снимок другой цели сохранён в очереди");
+        assert_eq!(foreign.host, b"other.example.com");
+        let different_profile = client
+            .wait_for_client_shape("target.example.com", 4, Duration::ZERO, None)
+            .unwrap()
+            .expect("снимок того же имени с другим профилем сохранён в очереди");
+        assert_eq!(different_profile.tcp_has_timestamp, Some(false));
+        // После получения сохранённых снимков повторный запрос ожидает новую форму.
         let started = Instant::now();
         assert!(
             client
-                .wait_for_client_shape("target.example", 4, Duration::from_millis(50))
+                .wait_for_client_shape("target.example.com", 4, Duration::from_millis(50), None)
                 .unwrap()
                 .is_none()
         );
@@ -38989,6 +39791,18 @@ mod tests {
         tcp_cancel.store(false, Ordering::Relaxed);
         worker.r2o_yield_asking_to_own_plan(&catalog);
         assert!(!tcp_cancel.load(Ordering::Relaxed));
+
+        let mut updated = catalog;
+        let record = &mut updated.boxes[0];
+        let mut plan = record.plans[0].clone();
+        plan.id = "second-plan".into();
+        plan.text = plan.text.replace("sni_middle +0", "sni_middle +1");
+        let mut binding = record.bindings[0].clone();
+        binding.plan_id = plan.id.clone();
+        record.plans.push(plan);
+        record.bindings.push(binding);
+        worker.r2o_yield_asking_to_own_plan(&updated);
+        assert!(tcp_cancel.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -40113,7 +40927,7 @@ mod tests {
             assert_eq!(frame.kind, COMMAND_SET_NAME_BOUND);
         });
         let started = Instant::now();
-        let snapshot = Arc::new(std::sync::Mutex::new(catalog.clone()));
+        let snapshot = Arc::new(std::sync::Mutex::new(Arc::new(catalog.clone())));
         let mut persistence = R2oCatalogPersistence::new(started, snapshot);
 
         client
@@ -40190,7 +41004,7 @@ mod tests {
             let catalog_path = work.join("catalog.json");
             Catalog::default().save_atomic(&catalog_path, 1).unwrap();
             let mut catalog = Catalog::load(&catalog_path).unwrap();
-            let snapshot = Arc::new(std::sync::Mutex::new(catalog.clone()));
+            let snapshot = Arc::new(std::sync::Mutex::new(Arc::new(catalog.clone())));
             let mut persistence = super::R2oCatalogPersistence::new(Instant::now(), snapshot);
             let target = DiscoveryTarget {
                 tcp_profile: 0,
@@ -40733,6 +41547,24 @@ mod tests {
         assert_eq!(
             search.last_result,
             "план применён; получен полный HTTPS-ответ HTTP 200"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_reports_client_hello_replay_as_handshake_proof() {
+        let mut replay = r2o_test_fetch_result();
+        replay.tls = None;
+        replay.status = 0;
+        replay.complete = false;
+        replay.application_verified = false;
+        replay.handshake_verified = true;
+        assert_eq!(
+            super::r2o_discovery_plan_result(&Ok(replay), true, true),
+            (
+                "точный APPLIED получен".into(),
+                "План применён. На повтор ClientHello получен ServerHello.".into(),
+            ),
         );
     }
 
@@ -43449,6 +44281,7 @@ mod tests {
             group_commands: vec![(1, group.clone())],
             skipped: 0,
             tcp_stall_budgets: Vec::new(),
+            preparation: Default::default(),
         };
         let mut client = ControlClient::connect(socket_path.clone()).unwrap();
         let mut area_sequence = 0;
@@ -43875,7 +44708,16 @@ mod tests {
             };
 
         // Своё имя+транспорт+семейство: ожидание снято, снимок получен.
-        assert!(worker.r2o_begin_shape_wait(target.clone(), name.clone(), 17, 4, None, false, now));
+        assert!(worker.r2o_begin_shape_wait(
+            target.clone(),
+            name.clone(),
+            17,
+            4,
+            None,
+            false,
+            false,
+            now
+        ));
         let taken = worker.r2o_take_shape_wait(&name, 17, 4);
         let matched = taken.is_some();
         emit("own_quic", matched, matched, matched, false, false);
@@ -43892,6 +44734,7 @@ mod tests {
                 17,
                 4,
                 None,
+                false,
                 false,
                 now
             ));
@@ -43916,6 +44759,7 @@ mod tests {
                 17,
                 4,
                 None,
+                false,
                 false,
                 now.checked_sub(R2O_DISCOVERY_TASK_LIFETIME + Duration::from_secs(1))
                     .unwrap()
@@ -46811,6 +47655,45 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn tcp_queue_preserves_current_client_hello_and_its_timestamp_profile() {
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        let target = DiscoveryTarget {
+            tcp_profile: 0,
+            host: "capture.net".into(),
+            endpoint: "198.51.100.93:443".into(),
+            family: 4,
+            shape: SHAPE_ECH_TCP,
+        };
+        let mut current = r2o_test_tls_ech_client_hello();
+        let name = current
+            .windows(11)
+            .position(|s| s == b"example.com")
+            .unwrap();
+        current[name..name + 11].copy_from_slice(target.host.as_bytes());
+        let mut earlier = current.clone();
+        earlier[11] ^= 1; // ClientHello.random
+        super::r2o_ech_input_note(
+            &target.host,
+            target.family,
+            &earlier,
+            Some(false),
+            std::time::Instant::now(),
+        );
+        let key = super::r2o_discovery_task_key(&target);
+        assert!(worker.queue_client_snapshot_with_tcp_timestamp(
+            target,
+            current.clone(),
+            Some(true)
+        ));
+        assert!(worker.client_hellos.lock().unwrap().get(&key) == Some(&current));
+        assert_eq!(
+            worker.client_tcp_timestamps.lock().unwrap().get(&key),
+            Some(&true)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn tcp_queue_adopts_ech_input_cache_like_fill_hellos() {
         let mut worker = r2o_test_discovery_worker_without_threads();
         let target = r2o_controller::discovery::DiscoveryTarget {
@@ -47881,6 +48764,19 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn ech_witness_dns_context() -> super::R2oEchDnsContext {
+        super::R2oEchDnsContext::new("192.0.2.53:53".parse().unwrap(), None)
+    }
+
+    #[cfg(unix)]
+    fn ech_witness_dns_answer(config: r2o_controller::ech::R2oEchConfig) -> super::R2oEchDnsAnswer {
+        super::R2oEchDnsAnswer::Config {
+            config,
+            ttl: std::time::Duration::from_secs(60),
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn d2o_ech_rr_cache_matches_c() {
         let now = std::time::Instant::now();
@@ -47893,7 +48789,7 @@ mod tests {
                      name: &str,
                      public_name: &str,
                      at: std::time::Instant| {
-            match cache.lookup(name, at) {
+            match cache.lookup(ech_witness_dns_context(), name, at) {
                 None => -1,
                 Some(Some(config)) if config.public_name == public_name => 1,
                 Some(_) => 0,
@@ -47905,7 +48801,12 @@ mod tests {
             "before={}\n",
             known(&cache, "positive.example", "public.example", now)
         ));
-        cache.store("positive.example", Some(config), now);
+        cache.store(
+            ech_witness_dns_context(),
+            "positive.example".into(),
+            Some(config),
+            now + std::time::Duration::from_secs(6 * 60 * 60),
+        );
         output.push_str(&format!(
             "positive_match={}\n",
             known(&cache, "positive.example", "public.example", now)
@@ -47914,7 +48815,12 @@ mod tests {
             "positive_other={}\n",
             known(&cache, "positive.example", "other.example", now)
         ));
-        cache.store("negative.example", None, now);
+        cache.store(
+            ech_witness_dns_context(),
+            "negative.example".into(),
+            None,
+            now + std::time::Duration::from_secs(30 * 60),
+        );
         output.push_str(&format!(
             "negative_empty={}\n",
             known(&cache, "negative.example", "", now)
@@ -47956,32 +48862,35 @@ mod tests {
         let mut ring = super::R2oEchWitnessResolutionCache::default();
         for index in 0..super::R2O_DISCOVERY_ECH_RR_CAPACITY {
             ring.store(
-                &format!("rr-{index:03}.example"),
+                ech_witness_dns_context(),
+                format!("rr-{index:03}.example"),
                 Some(r2o_controller::ech::R2oEchConfig {
                     public_name: "public.example".into(),
                     origin_name: "witness.example".into(),
                     config_list: vec![1],
                 }),
-                now,
+                now + std::time::Duration::from_secs(60),
             );
         }
         ring.store(
-            "rr-000.example",
+            ech_witness_dns_context(),
+            "rr-000.example".into(),
             Some(r2o_controller::ech::R2oEchConfig {
                 public_name: "public.example".into(),
                 origin_name: "witness.example".into(),
                 config_list: vec![1],
             }),
-            now,
+            now + std::time::Duration::from_secs(60),
         );
         ring.store(
-            "new.example",
+            ech_witness_dns_context(),
+            "new.example".into(),
             Some(r2o_controller::ech::R2oEchConfig {
                 public_name: "public.example".into(),
                 origin_name: "witness.example".into(),
                 config_list: vec![1],
             }),
-            now,
+            now + std::time::Duration::from_secs(60),
         );
         output.push_str(&format!(
             "ring_update_keeps_000={}\n",
@@ -48004,48 +48913,59 @@ mod tests {
     #[test]
     fn ech_rr_сохраняет_положительный_и_отрицательный_ответ_до_срока() {
         let now = std::time::Instant::now();
-        let mut cache = super::R2oEchWitnessResolutionCache::default();
+        let context = ech_witness_dns_context();
+        let cache = std::sync::Mutex::new(super::R2oEchWitnessResolutionCache::default());
         let config = r2o_controller::ech::R2oEchConfig {
             public_name: "public.example".into(),
-            origin_name: "witness.example".into(),
-            config_list: vec![1, 2, 3],
+            origin_name: "positive.example".into(),
+            config_list: vec![1],
         };
-
-        cache.store("positive.example", Some(config.clone()), now);
-        cache.store("negative.example", None, now);
-
-        assert_eq!(
-            cache.lookup(
+        for (name, answer, expected) in [
+            (
                 "positive.example",
-                now + std::time::Duration::from_secs(6 * 60 * 60)
+                super::R2oEchDnsAnswer::Config {
+                    config: config.clone(),
+                    ttl: std::time::Duration::from_secs(15),
+                },
+                Some(config),
             ),
-            Some(Some(config))
-        );
-        assert!(
-            cache
-                .lookup(
-                    "positive.example",
-                    now + std::time::Duration::from_secs(6 * 60 * 60)
-                        + std::time::Duration::from_nanos(1)
-                )
-                .is_none()
-        );
-        assert_eq!(
-            cache.lookup(
+            (
                 "negative.example",
-                now + std::time::Duration::from_secs(11 * 60)
+                super::R2oEchDnsAnswer::NoConfig {
+                    ttl: std::time::Duration::from_secs(3),
+                },
+                None,
             ),
-            Some(None)
-        );
-        assert!(
-            cache
-                .lookup(
-                    "negative.example",
-                    now + std::time::Duration::from_secs(30 * 60)
-                        + std::time::Duration::from_nanos(1)
-                )
-                .is_none()
-        );
+        ] {
+            let ttl = answer.ttl();
+            assert_eq!(
+                super::r2o_discovery_resolve_ech_witness_cached(
+                    &cache,
+                    context,
+                    name,
+                    "public.example",
+                    |_| Ok(answer),
+                ),
+                Ok(expected.clone())
+            );
+            let cache = cache.lock().unwrap();
+            assert_eq!(cache.lookup(context, name, now), Some(expected));
+            let expiry = cache
+                .entries
+                .iter()
+                .flatten()
+                .find(|entry| entry.name == name)
+                .unwrap()
+                .expires_at;
+            assert!(expiry >= now + ttl);
+            assert!(expiry <= std::time::Instant::now() + ttl);
+            assert!(cache.lookup(context, name, expiry).is_none());
+            assert!(
+                cache
+                    .lookup(context, name, expiry - std::time::Duration::from_nanos(1))
+                    .is_some()
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -48058,17 +48978,38 @@ mod tests {
             origin_name: "witness.example".into(),
             config_list: vec![1],
         };
-        cache.store("known-one.example", Some(config("public.example")), now);
-        cache.store("known-two.example", Some(config("public.example")), now);
-        cache.store("wrong.example", Some(config("other.example")), now);
-        cache.store("negative.example", None, now);
         cache.store(
-            "expired.example",
+            ech_witness_dns_context(),
+            "known-one.example".into(),
             Some(config("public.example")),
-            now - super::R2O_DISCOVERY_ECH_RR_POSITIVE_TTL - std::time::Duration::from_nanos(1),
+            now + std::time::Duration::from_secs(60),
+        );
+        cache.store(
+            ech_witness_dns_context(),
+            "known-two.example".into(),
+            Some(config("public.example")),
+            now + std::time::Duration::from_secs(60),
+        );
+        cache.store(
+            ech_witness_dns_context(),
+            "wrong.example".into(),
+            Some(config("other.example")),
+            now + std::time::Duration::from_secs(60),
+        );
+        cache.store(
+            ech_witness_dns_context(),
+            "negative.example".into(),
+            None,
+            now + std::time::Duration::from_secs(60),
+        );
+        cache.store(
+            ech_witness_dns_context(),
+            "expired.example".into(),
+            Some(config("public.example")),
+            now,
         );
 
-        let cached = cache.cached_witness_names("public.example", now);
+        let cached = cache.cached_witness_names(ech_witness_dns_context(), "public.example", now);
         let mut discovered = vec!["known-one.example".into(), "public.example".into()];
         discovered.extend((0..40).map(|index| format!("catalog-{index}.example")));
         let candidates =
@@ -48096,6 +49037,70 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn ech_witness_selection_queries_a_matching_name_once() {
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "public.example".into(),
+            endpoint: "192.0.2.1:443".into(),
+            family: 4,
+            shape: SHAPE_ECH_TS,
+            tcp_profile: 0,
+        };
+        let cache = std::sync::Mutex::new(super::R2oEchWitnessResolutionCache::default());
+        let mut requests = 0;
+        let witness = "witness.example";
+        let config = r2o_controller::ech::R2oEchConfig {
+            public_name: target.host.clone(),
+            origin_name: witness.into(),
+            config_list: vec![1],
+        };
+        let found = super::r2o_discovery_first_ech_witness(
+            &target,
+            &[witness.into()],
+            0,
+            &cache,
+            ech_witness_dns_context(),
+            |_| {
+                requests += 1;
+                Ok(ech_witness_dns_answer(config.clone()))
+            },
+        );
+        assert_eq!(found, Some((config, 1)));
+        assert_eq!(requests, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ech_witness_retries_after_a_dns_transport_failure() {
+        let cache = std::sync::Mutex::new(super::R2oEchWitnessResolutionCache::default());
+        let config = r2o_controller::ech::R2oEchConfig {
+            public_name: "public.example".into(),
+            origin_name: "witness.example".into(),
+            config_list: vec![1],
+        };
+        assert!(
+            super::r2o_discovery_resolve_ech_witness_cached(
+                &cache,
+                ech_witness_dns_context(),
+                &config.origin_name,
+                &config.public_name,
+                |_| Err("DNS timeout".into()),
+            )
+            .is_err()
+        );
+        assert_eq!(
+            super::r2o_discovery_resolve_ech_witness_cached(
+                &cache,
+                ech_witness_dns_context(),
+                &config.origin_name,
+                &config.public_name,
+                |_| Ok(ech_witness_dns_answer(config.clone())),
+            ),
+            Ok(Some(config.clone()))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn ech_rr_переиспользует_разрешение_и_сверяет_public_name() {
         let cache = std::sync::Mutex::new(super::R2oEchWitnessResolutionCache::default());
         let calls = std::cell::Cell::new(0);
@@ -48104,14 +49109,15 @@ mod tests {
             origin_name: "witness.example".into(),
             config_list: vec![1, 2, 3],
         };
-        let mut resolve = || {
+        let mut resolve = |_: &str| {
             calls.set(calls.get() + 1);
-            Ok(config.clone())
+            Ok(ech_witness_dns_answer(config.clone()))
         };
 
         assert_eq!(
             super::r2o_discovery_resolve_ech_witness_cached(
                 &cache,
+                ech_witness_dns_context(),
                 "witness.example",
                 "public.example",
                 &mut resolve,
@@ -48121,22 +49127,69 @@ mod tests {
         assert_eq!(
             super::r2o_discovery_resolve_ech_witness_cached(
                 &cache,
+                ech_witness_dns_context(),
                 "witness.example",
                 "other-public.example",
-                || panic!("свежую HTTPS RR-запись не запрашиваем повторно"),
+                |_| panic!("свежую HTTPS RR-запись не запрашиваем повторно"),
             ),
             Ok(None)
         );
         assert_eq!(
             super::r2o_discovery_resolve_ech_witness_cached(
                 &cache,
-                "witness.example",
+                ech_witness_dns_context(),
+                "WITNESS.example.",
                 "public.example",
-                || panic!("положительный HTTPS RR уже кэширован"),
+                |_| panic!("положительный HTTPS RR уже кэширован"),
             ),
             Ok(Some(config))
         );
         assert_eq!(calls.get(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ech_rr_requeries_on_resolver_or_socket_mark_change() {
+        let cache = std::sync::Mutex::new(super::R2oEchWitnessResolutionCache::default());
+        let name = "witness.example";
+        let public_name = "public.example";
+        let config = r2o_controller::ech::R2oEchConfig {
+            public_name: public_name.into(),
+            origin_name: name.into(),
+            config_list: vec![1],
+        };
+        let original = ech_witness_dns_context();
+        let contexts = [
+            original,
+            super::R2oEchDnsContext::new("192.0.2.54:53".parse().unwrap(), None),
+            super::R2oEchDnsContext::new("192.0.2.53:53".parse().unwrap(), Some(42)),
+        ];
+        for (index, context) in contexts.into_iter().enumerate() {
+            let mut updated = config.clone();
+            updated.config_list[0] = (index + 1) as u8;
+            assert_eq!(
+                super::r2o_discovery_resolve_ech_witness_cached(
+                    &cache,
+                    context,
+                    name,
+                    public_name,
+                    |_| { Ok(ech_witness_dns_answer(updated.clone())) }
+                ),
+                Ok(Some(updated)),
+            );
+        }
+        assert_eq!(
+            super::r2o_discovery_resolve_ech_witness_cached(
+                &cache,
+                original,
+                name,
+                public_name,
+                |_| {
+                    panic!("действующая запись первого резолвера сохранена")
+                }
+            ),
+            Ok(Some(config)),
+        );
     }
 
     #[cfg(unix)]
@@ -48214,26 +49267,30 @@ mod tests {
     fn ech_rr_отрицательное_разрешение_не_повторяет_dns_запрос() {
         let cache = std::sync::Mutex::new(super::R2oEchWitnessResolutionCache::default());
         let calls = std::cell::Cell::new(0);
-        let mut resolve = || {
+        let mut resolve = |_: &str| {
             calls.set(calls.get() + 1);
-            Err("HTTPS RR не содержит подходящей ECH-конфигурации".to_owned())
+            Ok(super::R2oEchDnsAnswer::NoConfig {
+                ttl: std::time::Duration::from_secs(60),
+            })
         };
 
         assert_eq!(
             super::r2o_discovery_resolve_ech_witness_cached(
                 &cache,
+                ech_witness_dns_context(),
                 "negative.example",
                 "public.example",
                 &mut resolve,
             ),
-            Err("HTTPS RR не содержит подходящей ECH-конфигурации".into())
+            Ok(None)
         );
         assert_eq!(
             super::r2o_discovery_resolve_ech_witness_cached(
                 &cache,
+                ech_witness_dns_context(),
                 "negative.example",
                 "public.example",
-                || panic!("отрицательный HTTPS RR уже кэширован"),
+                |_| panic!("отрицательный HTTPS RR уже кэширован"),
             ),
             Ok(None)
         );
@@ -48252,19 +49309,58 @@ mod tests {
         };
 
         for index in 0..256 {
-            cache.store(&format!("witness-{index}.example"), Some(config()), now);
+            cache.store(
+                ech_witness_dns_context(),
+                format!("witness-{index}.example"),
+                Some(config()),
+                now + std::time::Duration::from_secs(60),
+            );
         }
-        cache.store("witness-256.example", Some(config()), now);
-        cache.store("witness-256.example", None, now);
-        cache.store("witness-new.example", Some(config()), now);
+        cache.store(
+            ech_witness_dns_context(),
+            "witness-256.example".into(),
+            Some(config()),
+            now + std::time::Duration::from_secs(60),
+        );
+        cache.store(
+            ech_witness_dns_context(),
+            "witness-256.example".into(),
+            None,
+            now + std::time::Duration::from_secs(60),
+        );
+        cache.store(
+            ech_witness_dns_context(),
+            "witness-new.example".into(),
+            Some(config()),
+            now + std::time::Duration::from_secs(60),
+        );
 
-        assert!(cache.lookup("witness-0.example", now).is_none());
+        assert!(
+            cache
+                .lookup(ech_witness_dns_context(), "witness-0.example", now)
+                .is_none()
+        );
         // Обновление существующего имени в слоте 0 при next=1 не двигает
         // курсор: следующее новое имя вытесняет witness-1, как в C.
-        assert!(cache.lookup("witness-1.example", now).is_none());
-        assert!(cache.lookup("witness-2.example", now).is_some());
-        assert_eq!(cache.lookup("witness-256.example", now), Some(None));
-        assert!(cache.lookup("witness-new.example", now).is_some());
+        assert!(
+            cache
+                .lookup(ech_witness_dns_context(), "witness-1.example", now)
+                .is_none()
+        );
+        assert!(
+            cache
+                .lookup(ech_witness_dns_context(), "witness-2.example", now)
+                .is_some()
+        );
+        assert_eq!(
+            cache.lookup(ech_witness_dns_context(), "witness-256.example", now),
+            Some(None)
+        );
+        assert!(
+            cache
+                .lookup(ech_witness_dns_context(), "witness-new.example", now)
+                .is_some()
+        );
     }
 
     #[cfg(unix)]
@@ -50257,6 +51353,104 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn family_task_expired_in_queue_does_not_install_a_probe() {
+        let (commands, pending) = std::sync::mpsc::sync_channel(1);
+        let now = std::time::Instant::now();
+        let outcome = super::r2o_family_recovery_run(
+            super::R2oFamilyRecoveryTask {
+                target: r2o_controller::discovery::DiscoveryTarget {
+                    host: "recent.example".into(),
+                    endpoint: "127.0.0.1:443".into(),
+                    family: 4,
+                    shape: SHAPE_MODERN,
+                    tcp_profile: 0,
+                },
+                candidates: vec![super::R2oFamilyRecoveryCandidate {
+                    plan_id: [3; 16],
+                    plan_text: "не должен компилироваться".into(),
+                    group_plan: false,
+                    probe_path: "/".into(),
+                }],
+                mark: None,
+                client_hello: None,
+                bootstrap: false,
+                plan_news: false,
+                queued_at: now - super::R2O_FAMILY_RECOVERY_BUDGET,
+                deadline: now,
+            },
+            &commands,
+            &Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        assert!(outcome.result.unwrap_err().contains("истёк в очереди"));
+        assert!(pending.try_recv().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plan_news_does_not_try_a_plan_when_baseline_is_unavailable() {
+        let (commands, pending) = std::sync::mpsc::sync_channel(1);
+        let result = super::r2o_family_recovery_run(
+            super::R2oFamilyRecoveryTask {
+                target: r2o_controller::discovery::DiscoveryTarget {
+                    host: "recent.example".into(),
+                    endpoint: "127.0.0.1:443".into(),
+                    family: 4,
+                    shape: SHAPE_MODERN,
+                    tcp_profile: 0,
+                },
+                candidates: vec![super::R2oFamilyRecoveryCandidate {
+                    plan_id: [3; 16],
+                    plan_text: "не должен компилироваться".into(),
+                    group_plan: false,
+                    probe_path: "/".into(),
+                }],
+                mark: Some(0),
+                client_hello: None,
+                bootstrap: false,
+                plan_news: true,
+                queued_at: std::time::Instant::now(),
+                deadline: std::time::Instant::now() + super::R2O_FAMILY_RECOVERY_BUDGET,
+            },
+            &commands,
+            &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        assert!(result.result.unwrap_err().contains("базовый вопрос"));
+        assert!(pending.try_recv().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plan_news_waits_for_new_knowledge_and_keeps_failed_keys() {
+        let now = std::time::Instant::now();
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "exhausted.example".into(),
+            endpoint: "192.0.2.4:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+            tcp_profile: 0,
+        };
+        let until = now + std::time::Duration::from_secs(15);
+        let mut searches = super::R2oDiscoverySearches::default();
+        searches.exhausted_tcp.push_back(super::R2oExhaustedTcp {
+            target: target.clone(),
+            until,
+            checked_generation: 0,
+            tried: vec![7, 9],
+        });
+        assert!(searches.next_plan_news(now).is_none());
+        searches.confirms += 1;
+        assert_eq!(
+            searches.next_plan_news(now),
+            Some((target, vec![7, 9], until))
+        );
+        assert!(searches.next_plan_news(now).is_none());
+        searches.confirms += 1;
+        assert!(searches.next_plan_news(until).is_none());
+        assert!(searches.exhausted_tcp.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn candidate_retire_del_name_probe_matches_c() {
         let mut output = String::new();
         for (family, shape, b, sport, installed) in [
@@ -50464,14 +51658,15 @@ mod tests {
             source_text: &str,
             mark: u32,
         ) -> (String, bool, bool, u32) {
-            let (wire_text, plan_id) =
-                super::r2o_discovery_candidate_wire_plan(target, source_text).unwrap();
-            let records = compile_text(&wire_text).unwrap();
+            let prepared = super::r2o_prepare_discovery_candidate(target, source_text).unwrap();
+            let plan_id = prepared.plan_id;
             // C install_next всегда конвертирует текст в D2KP; профиль V22
             // выбирает тот же провод, что у C-оракула.
-            let wire_records =
-                super::r2o_plan_records_for_profile(r2k_core::control::WireProfile::V22, &records)
-                    .unwrap();
+            let wire_records = super::r2o_plan_records_for_profile(
+                r2k_core::control::WireProfile::V22,
+                &prepared.wire_records,
+            )
+            .unwrap();
             // SO_MARK в непривилегированном differential-окружении недоступен;
             // значение метки проверяется через production-хелпер, кадр и bind
             // проверяются реальным сокетом. C-оракул применяет метку заглушкой.
@@ -50500,12 +51695,13 @@ mod tests {
         fn quic_addr_frame(target: &DiscoveryTarget, mark: u32) -> (String, bool, bool, u32) {
             let text = "d2k-plan 1 9\nid 00000000000000000000000000000000\n\
                         proto udp quic\nudplen 100\n";
-            let (wire_text, plan_id) =
-                super::r2o_discovery_candidate_wire_plan(target, text).unwrap();
-            let records = compile_text(&wire_text).unwrap();
-            let wire_records =
-                super::r2o_plan_records_for_profile(r2k_core::control::WireProfile::V22, &records)
-                    .unwrap();
+            let prepared = super::r2o_prepare_discovery_candidate(target, text).unwrap();
+            let plan_id = prepared.plan_id;
+            let wire_records = super::r2o_plan_records_for_profile(
+                r2k_core::control::WireProfile::V22,
+                &prepared.wire_records,
+            )
+            .unwrap();
             let (fd, _sport) = super::r2o_props_bind_udp_family(target.family).unwrap();
             let socket = std::net::UdpSocket::from(fd);
             let destination: std::net::SocketAddr = target.endpoint.parse().unwrap();
@@ -50591,7 +51787,7 @@ mod tests {
                     let t = target("install.example", 4, SHAPE_MODERN);
                     let bad = "d2k-plan 1 3\nid 00000000000000000000000000000000\n\
                                proto tcp tls\nunknown 1\n";
-                    let error = super::r2o_discovery_candidate_wire_plan(&t, bad).unwrap_err();
+                    let error = super::r2o_prepare_discovery_candidate(&t, bad).unwrap_err();
                     assert!(super::r2o_discovery_plan_untranslatable(&Err::<
                         r2o_controller::fetch::FetchResult,
                         String,
@@ -50671,6 +51867,112 @@ mod tests {
             super::r2o_family_applied_grace(&Ok(r2o_test_fetch_result())),
             Duration::from_secs(5),
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn family_recovery_does_not_wait_for_applied_after_a_replay_without_server_hello() {
+        use std::time::Duration;
+
+        let mut replay = r2o_test_fetch_result();
+        replay.tls = None;
+        replay.status = 0;
+        replay.http_outcome = r2o_controller::fetch::R2oFetchHttpOutcome::Neutral;
+        replay.complete = false;
+        replay.application_verified = false;
+        assert!(!replay.handshake_verified);
+        assert_eq!(
+            super::r2o_family_applied_grace(&Ok(replay.clone())),
+            Duration::ZERO
+        );
+        replay.handshake_verified = true;
+        assert_eq!(
+            super::r2o_family_applied_grace(&Ok(replay)),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn family_probe_with_foreign_ack_removes_only_its_own_trial() {
+        let (commands, receiver) = std::sync::mpsc::sync_channel(1);
+        let controller = std::thread::spawn(move || {
+            let super::HttpSearchCommand::InstallProbe {
+                host,
+                shape,
+                family,
+                port,
+                trial_id,
+                reply,
+                ..
+            } = receiver
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap()
+            else {
+                panic!("expected probe install")
+            };
+            let mut other_trial = trial_id;
+            other_trial[0] ^= 1;
+            reply
+                .send(Ok(Some(r2k_core::control::Ack {
+                    command: r2k_core::control::COMMAND_SET_NAME_PROBE,
+                    ok: true,
+                    reason: 0,
+                    trial_id: Some(other_trial),
+                    area_id: None,
+                    binding_context: None,
+                })))
+                .unwrap();
+            let super::HttpSearchCommand::DeleteProbe {
+                host: deleted_host,
+                shape: deleted_shape,
+                family: deleted_family,
+                port: deleted_port,
+                trial_id: deleted_id,
+                reply,
+                ..
+            } = receiver
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .expect("temporary probe leaked")
+            else {
+                panic!("expected probe removal")
+            };
+            assert_eq!(
+                (
+                    deleted_host,
+                    deleted_shape,
+                    deleted_family,
+                    deleted_port,
+                    deleted_id
+                ),
+                (host, shape, family, port, trial_id)
+            );
+            reply.send(Ok(Vec::new())).unwrap();
+        });
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "family-ack.example".into(),
+            endpoint: "127.0.0.1:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+            tcp_profile: 0,
+        };
+        let candidate = super::R2oFamilyRecoveryCandidate {
+            plan_id: [0x42; 16],
+            plan_text: "r2o-plan 1 1\nid 42424242424242424242424242424242\nproto tcp tls\nsplit sni_middle +0\n".into(),
+            group_plan: false, probe_path: "/".into(),
+        };
+        let (result, applied) = super::r2o_family_recovery_sibling_trial(
+            &target,
+            target.endpoint.parse().unwrap(),
+            &candidate,
+            Some(0),
+            &commands,
+            None,
+            None,
+        );
+        assert!(!applied);
+        assert!(result.unwrap_err().contains("чужой trial ID"));
+        controller.join().unwrap();
     }
 
     #[cfg(unix)]
@@ -50758,12 +52060,13 @@ mod tests {
                 other_trial
             );
         });
+        let prepared = super::PreparedCandidate::new(&candidate.plan_text).unwrap();
         let (fetch, applied, transport_established) =
             super::r2o_family_recovery_sibling_trial_with_ech_state(
                 &target,
                 endpoint,
-                &candidate,
-                None,
+                &prepared,
+                &candidate.probe_path,
                 Some(0),
                 &commands,
                 None,
@@ -50773,6 +52076,7 @@ mod tests {
                 None,
                 None,
                 r2o_controller::fetch::r2o_d2o_verification_encoding("/"),
+                None,
             );
         assert!(fetch.is_err());
         assert!(transport_established, "{fetch:?}");
@@ -50849,6 +52153,7 @@ mod tests {
             result: Ok(r2o_test_fetch_result()),
             applied: false,
             bootstrap: false,
+            plan_news: false,
             temporary_candidate: Some(candidate),
             client_input: false,
         };
@@ -50866,30 +52171,34 @@ mod tests {
         };
         let mut catalog = Catalog::default();
         assert!(
-            !client
+            client
                 .apply_family_recovery_candidate(&outcome, &mut catalog, &path, None)
                 .unwrap()
+                .is_none()
         );
         assert!(!path.exists());
         outcome.applied = true;
         outcome.target.shape = SHAPE_ECH_TCP;
         assert!(
-            !client
+            client
                 .apply_family_recovery_candidate(&outcome, &mut catalog, &path, None)
                 .unwrap()
+                .is_none()
         );
         outcome.target.shape = SHAPE_MODERN;
         outcome.target.endpoint = "198.51.100.21:443".into();
         assert!(
-            !client
+            client
                 .apply_family_recovery_candidate(&outcome, &mut catalog, &path, None)
                 .unwrap()
+                .is_none()
         );
         outcome.target.endpoint = target.endpoint.clone();
         assert!(
             client
                 .apply_family_recovery_candidate(&outcome, &mut catalog, &path, None)
                 .unwrap()
+                .is_some()
         );
         let mut saved = Catalog::load(&path).unwrap();
         let binding = &saved.boxes[0].bindings[0];
@@ -50926,6 +52235,43 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn family_ech_admission_captures_client_hello_when_only_metadata_is_known() {
+        use r2k_core::control;
+
+        let mut key = [0_u8; control::KEY_LEN];
+        key[0] = 4;
+        key[1..5].copy_from_slice(&[192, 0, 2, 10]);
+        key[17..21].copy_from_slice(&[198, 51, 100, 3]);
+        key[33..35].copy_from_slice(&40_000_u16.to_be_bytes());
+        key[35..37].copy_from_slice(&443_u16.to_be_bytes());
+        key[37] = 6;
+        let event = control::ClientShapeEvent {
+            key,
+            host: b"example.com".to_vec(),
+            shape: SHAPE_ECH_TCP,
+            client_hello: r2o_test_tls_ech_client_hello(),
+            tcp_has_timestamp: Some(true),
+        };
+        let target = r2o_controller::discovery::DiscoveryTarget::from_client_shape(&event).unwrap();
+        let mut worker = r2o_test_discovery_worker_without_threads();
+        assert!(worker.family_client_hello(&target).is_none());
+        let mut wrong = event.clone();
+        wrong.tcp_has_timestamp = Some(false);
+        assert!(
+            worker
+                .family_client_hello_or_capture(&target, || Some(wrong))
+                .is_none()
+        );
+        let got = worker.family_client_hello_or_capture(&target, || Some(event.clone()));
+        assert_eq!(got.as_deref(), Some(event.client_hello.as_slice()));
+        assert_eq!(
+            worker.family_client_hello_or_capture(&target, || panic!("снимок уже получен")),
+            got
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn family_ech_trial_checks_captured_hello_before_returning_temporary_plan() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
@@ -50949,19 +52295,26 @@ mod tests {
         };
         let snapshot = r2o_test_tls_ech_client_hello();
         let worker = r2o_test_discovery_worker_without_threads();
+        let other_endpoint = r2o_controller::discovery::DiscoveryTarget {
+            endpoint: "192.0.2.55:443".into(),
+            ..target.clone()
+        };
+        assert!(worker.family_client_hello(&other_endpoint).is_none());
         worker
             .recent_client_shapes
             .lock()
             .unwrap()
             .note(&target, &snapshot, Some(true));
-        assert_eq!(
-            worker.family_client_hello(&target).as_deref(),
-            Some(snapshot.as_slice())
-        );
-        let other_endpoint = r2o_controller::discovery::DiscoveryTarget {
-            endpoint: "192.0.2.55:443".into(),
-            ..target.clone()
+        let parallel_flow = r2o_controller::discovery::DiscoveryTarget {
+            host: "parallel-ech.example.com".into(),
+            ..other_endpoint.clone()
         };
+        worker
+            .recent_client_shapes
+            .lock()
+            .unwrap()
+            .note(&parallel_flow, &snapshot, Some(true));
+        assert!(worker.family_client_hello(&target).as_deref() == Some(snapshot.as_slice()));
         assert!(worker.family_client_hello(&other_endpoint).is_none());
         let original = snapshot.clone();
         let server = std::thread::spawn(move || {
@@ -51031,10 +52384,13 @@ mod tests {
                 candidates: vec![candidate],
                 mark: Some(0),
                 bootstrap: false,
+                plan_news: false,
+                queued_at: std::time::Instant::now(),
+                deadline: std::time::Instant::now() + super::R2O_FAMILY_RECOVERY_BUDGET,
                 client_hello: Some(snapshot),
             },
             &commands,
-            &std::sync::atomic::AtomicBool::new(false),
+            &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         );
         assert!(result.applied, "{:?}", result.result);
         assert!(result.client_input);
@@ -53496,11 +54852,14 @@ group_block_proven: false,
                 Some(77),
                 &gate,
                 false,
+                true,
+                None,
             ),
             1
         );
         gate.r2o_scheduler_tick();
-        let (entry, permit) = super::r2o_take_ready_quic_discovery(&mut pending, &gate).unwrap();
+        let (entry, permit) =
+            super::r2o_take_ready_quic_discovery(&mut pending, &gate, |_| true).unwrap();
         assert_eq!(entry.snapshot, [1, 2, 3]);
         assert_eq!(entry.r2o_mark, Some(77));
         drop(permit);
@@ -53518,13 +54877,79 @@ group_block_proven: false,
                 None,
                 &full_gate,
                 false,
+                true,
+                None,
             ),
             1
         );
         full_gate.r2o_scheduler_tick();
         drop(held);
-        assert!(super::r2o_take_ready_quic_discovery(&mut queued, &full_gate).is_none());
+        assert!(super::r2o_take_ready_quic_discovery(&mut queued, &full_gate, |_| true).is_none());
         assert_eq!(queued.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quic_cooldown_does_not_inherit_other_target_or_network_context() {
+        use super::r2o_quic_cooldown_key as key;
+
+        let server = "198.51.100.1:443".parse().unwrap();
+        let now = std::time::Instant::now();
+        let first = key(server, "video-a.example".into(), None, false);
+        let mut worker = super::R2oQuicDiscoveryWorker::new();
+        let pending = VecDeque::new();
+        let until = now + std::time::Duration::from_secs(600);
+        worker.trial_cooldowns.insert(first.clone(), until);
+        assert!(worker.r2o_trial_suppressed(&pending, &first, now));
+        for other in [
+            key(server, "video-b.example".into(), None, false),
+            key(server, "video-a.example".into(), Some(42), false),
+            key(server, "video-a.example".into(), None, true),
+        ] {
+            assert!(!worker.r2o_trial_suppressed(&pending, &other, now));
+        }
+        assert!(!worker.r2o_trial_suppressed(&pending, &first, until));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quic_dispatch_preserves_pending_work_at_busy_endpoint() {
+        let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::r2o_with_start_gap(2);
+        let busy = "198.51.100.1:443".parse().unwrap();
+        let ready = "198.51.100.2:443".parse().unwrap();
+        let now = std::time::Instant::now();
+        let mut pending = VecDeque::new();
+        super::r2o_enqueue_quic_discovery(
+            &mut pending,
+            busy,
+            vec![1],
+            now,
+            None,
+            &gate,
+            false,
+            false,
+            None,
+        );
+        assert!(pending.front().unwrap().permit.is_none());
+        super::r2o_enqueue_quic_discovery(
+            &mut pending,
+            ready,
+            vec![2],
+            now,
+            None,
+            &gate,
+            false,
+            true,
+            None,
+        );
+        gate.r2o_scheduler_tick();
+        let (task, permit) =
+            super::r2o_take_ready_quic_discovery(&mut pending, &gate, |server| server != busy)
+                .unwrap();
+        assert_eq!(task.server, ready);
+        assert_eq!(pending.front().unwrap().server, busy);
+        assert!(super::r2o_take_ready_quic_discovery(&mut pending, &gate, |_| false).is_none());
+        drop(permit);
     }
 
     #[cfg(unix)]
@@ -54670,6 +56095,7 @@ group_block_proven: false,
             started_at: std::time::Instant::now(),
             deny_recheck: false,
             stall_cut: false,
+            cooldown_key: None,
         }));
         let mut saw_tcp_while_quic_active = false;
         let mut catalog = Catalog::default();
@@ -54803,6 +56229,7 @@ group_block_proven: false,
             started_at: std::time::Instant::now(),
             deny_recheck: false,
             stall_cut: false,
+            cooldown_key: None,
         }));
 
         let mut key = [0; r2k_core::control::KEY_LEN];
@@ -55054,6 +56481,7 @@ group_block_proven: false,
             started_at: std::time::Instant::now(),
             deny_recheck: false,
             stall_cut: false,
+            cooldown_key: None,
         };
         let second = R2oQuicDiscoveryTask {
             server: "198.51.100.20:443".parse().unwrap(),
@@ -55064,6 +56492,7 @@ group_block_proven: false,
             started_at: std::time::Instant::now(),
             deny_recheck: false,
             stall_cut: false,
+            cooldown_key: None,
         };
         assert!(worker.queue(first));
         assert!(worker.queue(second));
@@ -55153,6 +56582,7 @@ group_block_proven: false,
             started_at: std::time::Instant::now(),
             deny_recheck: false,
             stall_cut: false,
+            cooldown_key: None,
         };
         let second = R2oQuicDiscoveryTask {
             server: "198.51.100.20:443".parse().unwrap(),
@@ -55163,6 +56593,7 @@ group_block_proven: false,
             started_at: std::time::Instant::now(),
             deny_recheck: false,
             stall_cut: false,
+            cooldown_key: None,
         };
 
         assert!(worker.queue(first));
@@ -55209,6 +56640,7 @@ group_block_proven: false,
             started_at: std::time::Instant::now(),
             deny_recheck: false,
             stall_cut: false,
+            cooldown_key: None,
         }));
 
         assert_eq!(
@@ -55254,6 +56686,7 @@ group_block_proven: false,
             started_at: std::time::Instant::now(),
             deny_recheck: false,
             stall_cut: false,
+            cooldown_key: None,
         }));
 
         assert_eq!(
@@ -55468,6 +56901,7 @@ group_block_proven: false,
             started_at: std::time::Instant::now(),
             deny_recheck: false,
             stall_cut: false,
+            cooldown_key: None,
         }));
         started_receiver
             .recv_timeout(std::time::Duration::from_secs(2))
@@ -55746,6 +57180,7 @@ group_block_proven: false,
             group_commands: Vec::new(),
             skipped: 0,
             tcp_stall_budgets: vec![25, 32],
+            preparation: Default::default(),
         };
         let mut area_sequence = 0;
         let mut installed_areas = Vec::new();
@@ -58918,7 +60353,7 @@ group_block_proven: false,
         Catalog::default().save_atomic(&catalog_path, 1).unwrap();
         let mut catalog = Catalog::load(&catalog_path).unwrap();
         let save_started = std::time::Instant::now();
-        let catalog_snapshot = std::sync::Arc::new(std::sync::Mutex::new(catalog.clone()));
+        let catalog_snapshot = Arc::new(std::sync::Mutex::new(Arc::new(catalog.clone())));
         let mut persistence = super::R2oCatalogPersistence::new(save_started, catalog_snapshot);
         client
             .apply_discovery_outcome_with_input_and_persistence(
@@ -61689,9 +63124,88 @@ group_block_proven: false,
 
     #[cfg(unix)]
     #[test]
+    fn catalog_sync_advances_before_draining_pending_events() {
+        const CHILD: &str = "R2O_TEST_CATALOG_SYNC_BACKLOG";
+        if std::env::var_os(CHILD).is_none() {
+            // Завершение watch_events останавливает измерители всего процесса.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::catalog_sync_advances_before_draining_pending_events",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let (client_socket, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        peer.write_all(&encode_greeting(65_535).unwrap()).unwrap();
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let mut client = super::ControlClient::handshake(client_socket).unwrap();
+        client.pending_events.push_back(super::Frame {
+            kind: super::control::EVENT_STATS,
+            body: vec![0; super::control::KEY_LEN + 8],
+        });
+        // Ошибка в конце очереди гарантирует, что до её опустошения был ход синхронизации.
+        client.pending_events.push_back(super::Frame {
+            kind: super::control::EVENT_ACK,
+            body: Vec::new(),
+        });
+        let compiled = super::CompiledCatalog {
+            commands: Vec::new(),
+            install_order: Vec::new(),
+            group_commands: Vec::new(),
+            skipped: 0,
+            tcp_stall_budgets: vec![25, 32],
+            preparation: Default::default(),
+        };
+        let error = client
+            .watch_events(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                std::collections::HashSet::new(),
+                Some(compiled),
+                true,
+                super::r2o_new_measurement_gate(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("подтверждение"));
+        assert_eq!(
+            super::control::read_frame(&mut peer).unwrap().kind,
+            super::control::COMMAND_SET_TCP_STALL_BUDGETS,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn catalog_sync_rejects_prepared_commands_from_changed_context() {
+        let request = || super::CatalogSyncRequest::Prepared {
+            compiled: super::catalog_commands(&Catalog::default()).unwrap(),
+            generation: 2,
+            send_cap: 1280,
+            queued_at: std::time::Instant::now(),
+        };
+        assert!(request().take_prepared(2, 1280).is_some());
+        assert!(request().take_prepared(3, 1280).is_none());
+        assert!(request().take_prepared(2, 1200).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn discovery_persists_verified_catalog_before_background_sync() {
         use std::io::Read;
-        fn run_case() -> (bool, Catalog) {
+        fn run_case() -> Catalog {
             let work = std::env::temp_dir().join(format!(
                 "r2o-discovery-{}-{}",
                 std::process::id(),
@@ -61763,18 +63277,36 @@ group_block_proven: false,
             let outcome =
                 super::r2o_confirm_discovery_outcome(outcome, Ok(r2o_test_fetch_result()), true);
             let save_started = std::time::Instant::now();
-            let catalog_snapshot = std::sync::Arc::new(std::sync::Mutex::new(catalog.clone()));
+            let catalog_snapshot = Arc::new(std::sync::Mutex::new(Arc::new(catalog.clone())));
             let mut persistence =
                 super::R2oCatalogPersistence::new(save_started, Arc::clone(&catalog_snapshot));
-            let result = client.apply_discovery_outcome_with_input_and_persistence(
-                outcome,
-                &mut catalog,
-                &catalog_path,
-                2,
-                None,
-                None,
-                &mut false,
-                Some(&mut persistence),
+            let compiled = client
+                .apply_discovery_outcome_with_input_and_persistence(
+                    outcome,
+                    &mut catalog,
+                    &catalog_path,
+                    2,
+                    None,
+                    None,
+                    &mut false,
+                    Some(&mut persistence),
+                )
+                .unwrap()
+                .unwrap();
+            let generation = persistence.generation;
+            assert_ne!(generation, 0);
+            let prepared = super::CatalogSyncRequest::Prepared {
+                compiled,
+                generation,
+                send_cap: 65_535,
+                queued_at: std::time::Instant::now(),
+            };
+            let (compiled, _) = prepared.take_prepared(generation, 65_535).unwrap();
+            assert!(
+                compiled
+                    .commands
+                    .iter()
+                    .any(|(host, _)| host == &target.host)
             );
             let mut server_stream = server.join().unwrap();
             server_stream.set_nonblocking(true).unwrap();
@@ -61815,11 +63347,10 @@ group_block_proven: false,
             );
             let persisted = Catalog::load(&catalog_path).unwrap();
             std::fs::remove_dir_all(work).unwrap();
-            (result.is_ok(), persisted)
+            persisted
         }
 
-        let (accepted, saved) = run_case();
-        assert!(accepted);
+        let saved = run_case();
         assert!(r2o_controller::discovery::has_usable_binding(
             &saved,
             &r2o_controller::discovery::DiscoveryTarget {
@@ -61862,7 +63393,7 @@ group_block_proven: false,
             id: "shutdown-persisted".into(),
             ..BoxRecord::default()
         });
-        let catalog_snapshot = std::sync::Arc::new(std::sync::Mutex::new(initial_catalog.clone()));
+        let catalog_snapshot = Arc::new(std::sync::Mutex::new(Arc::new(initial_catalog.clone())));
         let mut persistence =
             super::R2oCatalogPersistence::new(std::time::Instant::now(), catalog_snapshot);
         persistence.mark_dirty();
@@ -61900,7 +63431,7 @@ group_block_proven: false,
         Catalog::default().save_atomic(&path, 1).unwrap();
         let mut catalog = Catalog::default();
         let started = std::time::Instant::now();
-        let catalog_snapshot = std::sync::Arc::new(std::sync::Mutex::new(catalog.clone()));
+        let catalog_snapshot = Arc::new(std::sync::Mutex::new(Arc::new(catalog.clone())));
         let mut persistence =
             super::R2oCatalogPersistence::new(started, Arc::clone(&catalog_snapshot));
 
@@ -62037,7 +63568,7 @@ group_block_proven: false,
         let started = std::time::Instant::now();
         let mut local = base.clone();
         local.boxes[0].bindings[0].recheck_mono = Some(started);
-        let snapshot = std::sync::Arc::new(std::sync::Mutex::new(base.clone()));
+        let snapshot = Arc::new(std::sync::Mutex::new(Arc::new(base.clone())));
         let mut persistence = super::R2oCatalogPersistence::new(started, snapshot);
         super::persist_catalog_update(&local, &path, 2, Some(&mut persistence)).unwrap();
 
@@ -62171,11 +63702,11 @@ group_block_proven: false,
         let mut ipv6 = base.clone();
         let mut ipv4_persistence = super::R2oCatalogPersistence::new(
             started,
-            std::sync::Arc::new(std::sync::Mutex::new(base.clone())),
+            Arc::new(std::sync::Mutex::new(Arc::new(base.clone()))),
         );
         let mut ipv6_persistence = super::R2oCatalogPersistence::new(
             started,
-            std::sync::Arc::new(std::sync::Mutex::new(base.clone())),
+            Arc::new(std::sync::Mutex::new(Arc::new(base.clone()))),
         );
 
         {
@@ -64643,12 +66174,14 @@ mod tcp_profile_tests {
         };
         assert!(!r2o_newer_name_binding(
             &catalog,
+            &super::r2o_catalog_name_binding_index(&catalog),
             &catalog.boxes[0].bindings[0]
         ));
         let mut same_profile = catalog.clone();
         same_profile.boxes[0].bindings[1].tcp_profile = 1;
         assert!(r2o_newer_name_binding(
             &same_profile,
+            &super::r2o_catalog_name_binding_index(&same_profile),
             &same_profile.boxes[0].bindings[0]
         ));
     }

@@ -1269,8 +1269,97 @@ pub struct ClassifyOptions {
     pub mark: Option<u32>,
     pub cancel: Option<Arc<AtomicBool>>,
     pub seed_whole: Option<SeedWhole>,
+    pub run_checkpoint: Option<Arc<std::sync::Mutex<ClassifyCheckpoint>>>,
     /// C `d2k_opts.cross_check_tls12`: режим both, ещё не перенесённый.
     pub cross_check_tls12: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct ClassifyCheckpoint {
+    context: Option<CheckpointContext>,
+    questions: Vec<CheckpointQuestion>,
+    previous_questions: usize,
+    bytes: usize,
+}
+
+#[derive(Debug)]
+struct CheckpointContext {
+    target: ProbeTarget,
+    trigger: Trigger,
+    control: Option<Trigger>,
+    white: Option<Trigger>,
+    route: (Option<u32>, Option<bool>, bool, bool),
+}
+
+#[derive(Debug)]
+struct CheckpointQuestion {
+    name: String,
+    alternate_trigger: Option<Trigger>,
+    cuts: Vec<usize>,
+    gap: Duration,
+    timeout: Duration,
+    repeats: usize,
+    until_pass: bool,
+    pass: usize,
+    fail: usize,
+    raw_evidence: bool,
+}
+
+impl ClassifyCheckpoint {
+    const MAX_BYTES: usize = 32 * 1024;
+    const MAX_QUESTIONS: usize = 32;
+
+    fn start(&mut self, target: &ProbeTarget, trigger: &Trigger, options: &ClassifyOptions) {
+        let route = (
+            options.mark,
+            options.client_tcp_has_timestamps,
+            options.no_raw,
+            options.trigger_snapped,
+        );
+        if self.context.as_ref().is_some_and(|context| {
+            context.target == *target
+                && context.trigger == *trigger
+                && context.control == options.control
+                && context.white == options.white
+                && context.route == route
+        }) {
+            self.previous_questions = self.questions.len();
+            return;
+        }
+        *self = Self::default();
+        let bytes = target.host.len()
+            + [
+                Some(trigger),
+                options.control.as_ref(),
+                options.white.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .map(|input| input.name.len() + input.payload.len())
+            .sum::<usize>();
+        if target.host.parse::<IpAddr>().is_ok() && bytes <= Self::MAX_BYTES {
+            self.context = Some(CheckpointContext {
+                target: target.clone(),
+                trigger: trigger.clone(),
+                control: options.control.clone(),
+                white: options.white.clone(),
+                route,
+            });
+            self.bytes = bytes;
+        }
+    }
+
+    fn alternate_trigger<'a>(
+        &self,
+        target: &ProbeTarget,
+        trigger: &'a Trigger,
+    ) -> Option<Option<&'a Trigger>> {
+        let context = self
+            .context
+            .as_ref()
+            .filter(|context| &context.target == target)?;
+        Some((trigger != &context.trigger).then_some(trigger))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1317,6 +1406,7 @@ impl Default for ClassifyOptions {
             mark: None,
             cancel: None,
             seed_whole: None,
+            run_checkpoint: None,
             cross_check_tls12: false,
         }
     }
@@ -1467,6 +1557,8 @@ pub struct ClassifyResult {
     pub raw_usable: bool,
     pub rst_rule_failures: usize,
     pub raw_dials: u64,
+    pub checkpoint_raw_evidence: bool,
+    pub checkpoint_questions: usize,
     pub trace: Vec<Observation>,
     /// C `d2k_vres.qtrace`: ответы вопросов «свойство:*» для планировщика.
     pub qtrace: Vec<QuestionTrace>,
@@ -1505,6 +1597,8 @@ impl ClassifyResult {
             raw_usable: false,
             rst_rule_failures: 0,
             raw_dials: 0,
+            checkpoint_raw_evidence: false,
+            checkpoint_questions: 0,
             trace: Vec::new(),
             qtrace: Vec::new(),
             notes: Vec::new(),
@@ -1745,7 +1839,40 @@ fn measure<B: ProbeBackend>(
         return tally;
     }
 
+    let cached = options.run_checkpoint.as_ref().and_then(|checkpoint| {
+        let checkpoint = checkpoint
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let alternate = checkpoint.alternate_trigger(target, trigger)?;
+        checkpoint.questions[..checkpoint.previous_questions]
+            .iter()
+            .find_map(|question| {
+                (question.name == spec.name
+                    && question.alternate_trigger.as_ref() == alternate
+                    && question.cuts == spec.cuts
+                    && question.gap == spec.gap
+                    && question.timeout == options.timeout
+                    && question.repeats == options.repeats
+                    && question.until_pass == spec.until_pass)
+                    .then_some((question.pass, question.fail, question.raw_evidence))
+            })
+    });
+    if let Some((pass, fail, raw_evidence)) = cached {
+        result.trace[index].pass = pass;
+        result.trace[index].fail = fail;
+        result.checkpoint_raw_evidence |= raw_evidence;
+        result.checkpoint_questions += 1;
+        progress(spec.name, result.probes, 0, 0);
+        return Tally {
+            pass,
+            fail,
+            ..Tally::default()
+        };
+    }
+
     let mut tally = Tally::default();
+    let raw_before = current_raw_dial_count();
+    let failures_before = result.rst_rule_failures_since_start();
     let (note_probes, note_pass, note_fail) =
         r2o_progress_seen_args(false, spec.name, result.probes, tally.pass, tally.fail);
     progress(spec.name, note_probes, note_pass, note_fail);
@@ -1879,6 +2006,40 @@ fn measure<B: ProbeBackend>(
     observation.pass = tally.pass;
     observation.fail = tally.fail;
     observation.error = tally.error.as_ref().map(|error| error.message().to_owned());
+    let completed = tally.pass + tally.fail == options.repeats || spec.until_pass && tally.pass > 0;
+    if completed
+        && tally.errors == 0
+        && tally.unproven == 0
+        && !tally.unmarked
+        && failures_before == result.rst_rule_failures_since_start()
+        && let Some(checkpoint) = &options.run_checkpoint
+    {
+        let mut checkpoint = checkpoint
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(alternate) = checkpoint.alternate_trigger(target, trigger) {
+            let bytes = spec.name.len()
+                + std::mem::size_of_val(spec.cuts)
+                + alternate.map_or(0, |input| input.name.len() + input.payload.len());
+            if checkpoint.questions.len() < ClassifyCheckpoint::MAX_QUESTIONS
+                && checkpoint.bytes + bytes <= ClassifyCheckpoint::MAX_BYTES
+            {
+                checkpoint.bytes += bytes;
+                checkpoint.questions.push(CheckpointQuestion {
+                    name: spec.name.to_owned(),
+                    alternate_trigger: alternate.cloned(),
+                    cuts: spec.cuts.to_vec(),
+                    gap: spec.gap,
+                    timeout: options.timeout,
+                    repeats: options.repeats,
+                    until_pass: spec.until_pass,
+                    pass: tally.pass,
+                    fail: tally.fail,
+                    raw_evidence: current_raw_dial_count() > raw_before,
+                });
+            }
+        }
+    }
     tally
 }
 
@@ -1982,6 +2143,12 @@ pub fn run_with_backend_progress<B: ProbeBackend>(
         return result;
     }
 
+    if let Some(checkpoint) = &options.run_checkpoint {
+        checkpoint
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .start(&target, trigger, &options);
+    }
     let mut base = measure_baseline(backend, &target, trigger, &options, &mut result, progress);
     if stopped(&options) {
         finish_cancelled(&mut result, &options, start);
@@ -2512,6 +2679,7 @@ pub fn run_base_with_backend_progress<B: ProbeBackend>(
     crate::raw_probe::flush_pending_rst_releases();
     options = configured_options(options);
     options.seed_whole = None;
+    options.run_checkpoint = None;
     let target = match parse_target(address) {
         Ok(target) => target,
         Err(_) => return BaseProbe::default(),
@@ -2774,6 +2942,85 @@ mod raw_connect_fallback_tests {
         targets: Vec<(String, u16)>,
         controls: Vec<(SocketAddr, Duration, Option<u32>)>,
         cancel_after: Option<(Arc<AtomicBool>, usize)>,
+    }
+
+    #[test]
+    fn resumed_classifier_reuses_completed_question_only_for_the_same_context() {
+        let (mut backend, _, trigger, mut options, _) = fixture(
+            &[
+                Ok(ProbeOutcome::Accepted),
+                Ok(ProbeOutcome::Accepted),
+                Ok(ProbeOutcome::Accepted),
+            ],
+            &[],
+        );
+        let cancel = Arc::new(AtomicBool::new(false));
+        options.cancel = Some(Arc::clone(&cancel));
+        options.confirm_clear = false;
+        options.run_checkpoint = Some(Arc::new(std::sync::Mutex::new(Default::default())));
+        let endpoint = "192.0.2.20:443";
+        let yielded = super::run_with_backend_progress(
+            endpoint,
+            &trigger,
+            options.clone(),
+            &mut backend,
+            &mut |question, _, pass, _| {
+                if question == "whole" && pass == 1 {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            },
+        );
+        assert!(yielded.stopped);
+        assert_eq!(yielded.probes, 1);
+
+        cancel.store(false, Ordering::Relaxed);
+        let resumed = super::run_with_backend(endpoint, &trigger, options.clone(), &mut backend);
+        assert_eq!(resumed.verdict, Verdict::Clear);
+        assert_eq!(resumed.probes, 0);
+        assert_eq!(resumed.checkpoint_questions, 1);
+
+        options.mark = Some(0x2e);
+        let changed = super::run_with_backend(endpoint, &trigger, options, &mut backend);
+        assert_eq!(changed.verdict, Verdict::Clear);
+        assert_eq!(changed.probes, 1);
+        assert_eq!(changed.checkpoint_questions, 0);
+    }
+
+    #[test]
+    fn checkpoint_excludes_incomplete_unmarked_and_local_error_results() {
+        let address = "192.0.2.20:443";
+        let target = super::parse_target(address).unwrap();
+        for (outcome, repeats) in [
+            (Ok(ProbeOutcome::Accepted), 2),
+            (Ok(ProbeOutcome::Unproven), 1),
+            (Ok(ProbeOutcome::RejectedUnmarked), 1),
+            (
+                Err(ProbeError::Unsupported("local raw setup failed".into())),
+                1,
+            ),
+        ] {
+            let (mut backend, _, trigger, mut options, mut result) = fixture(&[outcome], &[]);
+            options.repeats = repeats;
+            let cancel = Arc::new(AtomicBool::new(false));
+            options.cancel = Some(Arc::clone(&cancel));
+            backend.cancel_after = Some((cancel, 1));
+            let checkpoint = Arc::new(std::sync::Mutex::new(super::ClassifyCheckpoint::default()));
+            checkpoint
+                .lock()
+                .unwrap()
+                .start(&target, &trigger, &options);
+            options.run_checkpoint = Some(Arc::clone(&checkpoint));
+            run_measure_with_progress(
+                &mut backend,
+                &target,
+                &trigger,
+                &options,
+                &mut result,
+                &mut |_, _, _, _| {},
+            );
+            assert_eq!(result.probes, 1);
+            assert!(checkpoint.lock().unwrap().questions.is_empty());
+        }
     }
 
     impl ProbeBackend for ScriptedBackend {

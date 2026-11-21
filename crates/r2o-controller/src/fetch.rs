@@ -18,6 +18,8 @@ const R2O_VOLUME_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 const R2O_VOLUME_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
 const R2O_VOLUME_TX_STEPS: usize = 10;
 const R2O_VOLUME_TX_CHUNK_BYTES: usize = 4000;
+pub const R2O_ECH_PEER_REJECTED: &str =
+    "ECH не принят сервером: публичное имя не подтверждает origin";
 const R2O_VOLUME_TX_INITIAL_READ: Duration = Duration::from_secs(12);
 const R2O_VOLUME_TX_READ_MIN: Duration = Duration::from_millis(1500);
 const R2O_VOLUME_TX_READ_MAX: Duration = Duration::from_secs(12);
@@ -1796,6 +1798,18 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
                 continue;
             }
             Err(error) => {
+                if ech.is_some()
+                    && matches!(
+                        error
+                            .get_ref()
+                            .and_then(|error| error.downcast_ref::<rustls::Error>()),
+                        Some(rustls::Error::PeerIncompatible(
+                            rustls::PeerIncompatible::ServerRejectedEncryptedClientHello(_)
+                        ))
+                    )
+                {
+                    return Err(R2O_ECH_PEER_REJECTED.into());
+                }
                 return Err(format!("TLS-рукопожатие не завершилось: {error}"));
             }
         }
@@ -1803,7 +1817,7 @@ fn r2o_fetch_connected_stream_with_roots_and_encoding_and_counter(
     if ech.is_some() && !crate::r2o_tls::r2o_tls_ech_accepted(Some(connection.ech_status())) {
         // C `d2k_tls_connect_ech`: отвергнутый ECH — ошибка рукопожатия ровно
         // с этим текстом, а не продолжение обычной внешней сессии.
-        return Err("ECH не принят сервером: публичное имя не подтверждает origin".into());
+        return Err(R2O_ECH_PEER_REJECTED.into());
     }
     let ech_accepted =
         ech.map(|_| crate::r2o_tls::r2o_tls_ech_accepted(Some(connection.ech_status())));

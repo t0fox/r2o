@@ -6,6 +6,7 @@ use r2k_core::control::{
     r2k_link_shape_tcp_profile,
 };
 use r2k_core::plan::Plan as RuntimePlan;
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::catalog::{
@@ -228,53 +229,54 @@ pub fn own_first_plans(
     let plan_proto = if quic { "quic" } else { "tls" };
     let target_transport = if quic { 17 } else { 6 };
     let mut ranked = Vec::<RankedOwnPlan>::new();
+    let mut ranked_by_text = HashMap::new();
     for box_record in &catalog.boxes {
+        let mut best_by_plan = HashMap::<&str, (u8, i64)>::new();
+        for binding in &box_record.bindings {
+            let transport = if binding.transport == 0 {
+                6
+            } else {
+                binding.transport
+            };
+            let family = if binding.family == 0 {
+                4
+            } else {
+                binding.family
+            };
+            let shape_matches = if quic {
+                binding.shape == SHAPE_QUIC && binding.ech_origin.is_empty()
+            } else if ech_replay {
+                binding.shape == want && binding.ech_origin.is_empty()
+                    || is_ech_shape(binding.shape)
+            } else {
+                (binding.shape == want || Some(binding.shape) == cross)
+                    && binding.ech_origin.is_empty()
+            };
+            if !binding.enabled
+                || binding.level < 3
+                || binding.recheck_since.is_some()
+                || binding.kind != "name"
+                || transport != target_transport
+                || family != target.family
+                || (!quic && binding.tcp_profile != target.tcp_profile())
+                || (quic && binding.verified_by != 1)
+                || !shape_matches
+            {
+                continue;
+            }
+            let tier = u8::from(binding.shape != want);
+            let best = best_by_plan
+                .entry(binding.plan_id.as_str())
+                .or_insert((tier, binding.confirmed));
+            if tier < best.0 || tier == best.0 && binding.confirmed > best.1 {
+                *best = (tier, binding.confirmed);
+            }
+        }
         for plan in &box_record.plans {
             if !plan.enabled || plan.proto != plan_proto || plan.text.len() >= 4096 {
                 continue;
             }
-            let mut best_binding: Option<(u8, i64)> = None;
-            for binding in &box_record.bindings {
-                let transport = if binding.transport == 0 {
-                    6
-                } else {
-                    binding.transport
-                };
-                let family = if binding.family == 0 {
-                    4
-                } else {
-                    binding.family
-                };
-                let shape_matches = if quic {
-                    binding.shape == SHAPE_QUIC && binding.ech_origin.is_empty()
-                } else if ech_replay {
-                    binding.shape == want && binding.ech_origin.is_empty()
-                        || is_ech_shape(binding.shape)
-                } else {
-                    (binding.shape == want || Some(binding.shape) == cross)
-                        && binding.ech_origin.is_empty()
-                };
-                if binding.plan_id != plan.id
-                    || !binding.enabled
-                    || binding.level < 3
-                    || binding.recheck_since.is_some()
-                    || binding.kind != "name"
-                    || transport != target_transport
-                    || family != target.family
-                    || (!quic && binding.tcp_profile != target.tcp_profile())
-                    || (quic && binding.verified_by != 1)
-                    || !shape_matches
-                {
-                    continue;
-                }
-                let tier = u8::from(binding.shape != want);
-                if best_binding.is_none_or(|(best_tier, newest)| {
-                    tier < best_tier || tier == best_tier && binding.confirmed > newest
-                }) {
-                    best_binding = Some((tier, binding.confirmed));
-                }
-            }
-            let Some((tier, confirmed)) = best_binding else {
+            let Some(&(tier, confirmed)) = best_by_plan.get(plan.id.as_str()) else {
                 continue;
             };
             let hash = crate::r2o_fallback::tried_key(&plan.text);
@@ -292,14 +294,13 @@ pub fn own_first_plans(
                 successes: plan.successes,
                 confirmed,
             };
-            if let Some(duplicate) = ranked
-                .iter_mut()
-                .find(|saved| saved.candidate.text == plan.text)
-            {
+            if let Some(&index) = ranked_by_text.get(plan.text.as_str()) {
+                let duplicate = &mut ranked[index];
                 if own_rank_before(&candidate, duplicate) {
                     *duplicate = candidate;
                 }
             } else {
+                ranked_by_text.insert(plan.text.as_str(), ranked.len());
                 ranked.push(candidate);
             }
         }

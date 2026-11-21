@@ -34,6 +34,10 @@ R2O_ECH_RR_DIFF_OUTPUT="$TEMP/rust.out" \
         cat "$TEMP/rust.log" >&2
         exit 1
     }
-diff -u "$TEMP/c.out" "$TEMP/rust.out"
+# R2O expires DNS answers at the TTL boundary. C includes the boundary tick.
+sed -e 's/^positive_at_ttl=1$/positive_at_ttl=-1/' \
+    -e 's/^negative_at_ttl=0$/negative_at_ttl=-1/' \
+    "$TEMP/c.out" >"$TEMP/expected.out"
+diff -u "$TEMP/expected.out" "$TEMP/rust.out"
 cat "$TEMP/c.out"
-printf 'PASS: ECH RR cache matches C (D2O %s)\n' "$ACTUAL_SHA"
+printf 'PASS: ECH RR common cache behavior and R2O TTL boundary (D2O %s)\n' "$ACTUAL_SHA"

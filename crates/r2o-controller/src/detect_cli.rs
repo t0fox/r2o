@@ -820,6 +820,7 @@ pub fn run(
         mark: Some(options.mark),
         cancel: None,
         seed_whole: None,
+        run_checkpoint: None,
         cross_check_tls12: false,
     };
     let result = run_with_backend_progress(

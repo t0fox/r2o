@@ -2,7 +2,7 @@
 
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::os::fd::AsRawFd;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hpke::aead::{AeadCtxR, AeadCtxS, AesGcm128};
 use hpke::kdf::HkdfSha256;
@@ -27,6 +27,92 @@ pub struct R2oEchConfig {
     pub public_name: String,
     pub origin_name: String,
     pub config_list: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum R2oEchDnsAnswer {
+    Config { config: R2oEchConfig, ttl: Duration },
+    NoConfig { ttl: Duration },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct R2oEchDnsContext {
+    resolver: SocketAddr,
+    mark: Option<u32>,
+}
+
+impl R2oEchDnsContext {
+    pub fn new(resolver: SocketAddr, mark: Option<u32>) -> Self {
+        Self {
+            resolver,
+            mark: mark.filter(|mark| *mark != 0),
+        }
+    }
+
+    pub fn system(mark: Option<u32>) -> Result<Self, String> {
+        Ok(Self::new(r2o_ech_system_resolver()?, mark))
+    }
+
+    pub fn query(self, name: &str) -> Result<R2oEchDnsAnswer, String> {
+        r2o_ech_query_resolver(name, self.resolver, self.mark)
+    }
+}
+
+#[derive(Default)]
+pub struct R2oEchProbeResolver {
+    answer: Option<CachedEchAnswer>,
+}
+
+struct CachedEchAnswer {
+    name: String,
+    context: R2oEchDnsContext,
+    expires: Instant,
+    answer: R2oEchDnsAnswer,
+}
+
+impl R2oEchProbeResolver {
+    pub fn resolve(&mut self, name: &str, mark: Option<u32>) -> Result<R2oEchConfig, String> {
+        let name = r2o_ech_normalize_name(name)?;
+        let resolver = r2o_ech_system_resolver()?;
+        self.resolve_with(name, resolver, mark, Instant::now(), r2o_ech_query_resolver)?
+            .into_config()
+    }
+
+    pub fn invalidate(&mut self) {
+        self.answer = None;
+    }
+
+    fn resolve_with(
+        &mut self,
+        name: String,
+        resolver: SocketAddr,
+        mark: Option<u32>,
+        started: Instant,
+        lookup: impl FnOnce(&str, SocketAddr, Option<u32>) -> Result<R2oEchDnsAnswer, String>,
+    ) -> Result<R2oEchDnsAnswer, String> {
+        let context = R2oEchDnsContext::new(resolver, mark);
+        if let Some(cached) = &self.answer
+            && cached.name == name
+            && cached.context == context
+            && started < cached.expires
+        {
+            return Ok(cached.answer.clone());
+        }
+        self.invalidate();
+        let answer = lookup(&name, resolver, context.mark)?;
+        let ttl = answer.ttl();
+        if !ttl.is_zero()
+            && let Some(expires) = started.checked_add(ttl)
+        {
+            self.answer = Some(CachedEchAnswer {
+                name,
+                context,
+                expires,
+                answer: answer.clone(),
+            });
+        }
+        Ok(answer)
+    }
 }
 
 #[derive(Debug)]
@@ -223,9 +309,29 @@ pub fn r2o_ech_tls_config(config: &R2oEchConfig) -> Result<rustls::client::EchCo
 
 /// Найти в HTTPS RR конфигурацию, совместимую с TLS-клиентом донора.
 pub fn resolve_ech_config(name: &str, mark: Option<u32>) -> Result<R2oEchConfig, String> {
+    resolve_ech_dns(name, mark)?.into_config()
+}
+
+impl R2oEchDnsAnswer {
+    pub fn ttl(&self) -> Duration {
+        match self {
+            Self::Config { ttl, .. } | Self::NoConfig { ttl } => *ttl,
+        }
+    }
+
+    fn into_config(self) -> Result<R2oEchConfig, String> {
+        match self {
+            Self::Config { config, .. } => Ok(config),
+            Self::NoConfig { .. } => {
+                Err("HTTPS RR не содержит совместимой ECH-конфигурации".into())
+            }
+        }
+    }
+}
+
+pub fn resolve_ech_dns(name: &str, mark: Option<u32>) -> Result<R2oEchDnsAnswer, String> {
     let name = r2o_ech_normalize_name(name)?;
-    let resolver = r2o_ech_system_resolver()?;
-    r2o_ech_query_resolver(&name, resolver, mark)
+    R2oEchDnsContext::system(mark)?.query(&name)
 }
 
 fn r2o_ech_system_resolver() -> Result<SocketAddr, String> {
@@ -250,7 +356,7 @@ fn r2o_ech_query_resolver(
     name: &str,
     resolver: SocketAddr,
     mark: Option<u32>,
-) -> Result<R2oEchConfig, String> {
+) -> Result<R2oEchDnsAnswer, String> {
     let mut transaction_id = [0_u8; 2];
     rustls::crypto::ring::default_provider()
         .secure_random
@@ -299,7 +405,7 @@ fn r2o_ech_query_resolver(
     r2o_ech_parse_https_reply(name, transaction_id, &reply[..length])
 }
 
-fn r2o_ech_normalize_name(name: &str) -> Result<String, String> {
+pub fn r2o_ech_normalize_name(name: &str) -> Result<String, String> {
     if name.is_empty() || name.len() > 253 || !name.is_ascii() {
         return Err("имя ECH должно быть ASCII-именем длиной до 253 байт".into());
     }
@@ -337,7 +443,7 @@ fn r2o_ech_parse_https_reply(
     expected_name: &str,
     transaction_id: [u8; 2],
     reply: &[u8],
-) -> Result<R2oEchConfig, String> {
+) -> Result<R2oEchDnsAnswer, String> {
     if reply.len() < 12
         || reply[..2] != transaction_id
         || reply[2] & 0x80 == 0
@@ -362,6 +468,8 @@ fn r2o_ech_parse_https_reply(
     if answers > 64 {
         return Err("ответ HTTPS DNS превышает предел в 64 записи".into());
     }
+    let mut no_ech_ttl = None::<Duration>;
+    let mut ambiguous = false;
     for _ in 0..answers {
         let (owner, next) = r2o_ech_dns_name(reply, cursor)?;
         cursor = next;
@@ -373,12 +481,22 @@ fn r2o_ech_parse_https_reply(
             .ok_or_else(|| "запись HTTPS выходит за границы DNS-ответа".to_owned())?;
         let record_type = r2o_ech_u16(reply, cursor)?;
         let class = r2o_ech_u16(reply, cursor + 2)?;
+        let ttl = Duration::from_secs(
+            u32::from_be_bytes(
+                reply[cursor + 4..cursor + 8]
+                    .try_into()
+                    .expect("размер заголовка RR проверен"),
+            )
+            .into(),
+        );
         cursor += 10;
         if record_type != 65 || class != 1 || owner != expected_name {
+            ambiguous |= owner == expected_name && class == 1 && record_type == 5;
             cursor = record_end;
             continue;
         }
         if data_length < 3 || r2o_ech_u16(reply, cursor)? == 0 {
+            ambiguous = true;
             cursor = record_end;
             continue;
         }
@@ -389,12 +507,14 @@ fn r2o_ech_parse_https_reply(
             return Err("имя цели HTTPS выходит за границы записи".into());
         }
         if !target.is_empty() && target != expected_name {
+            ambiguous = true;
             cursor = record_end;
             continue;
         }
         let mut last_key = None;
         let mut compatible_port = true;
         let mut config = None;
+        let mut ech_param_seen = false;
         while cursor < record_end {
             if record_end - cursor < 4 {
                 return Err("параметр HTTPS обрезан".into());
@@ -414,6 +534,7 @@ fn r2o_ech_parse_https_reply(
                 compatible_port = false;
             }
             if key == 5 {
+                ech_param_seen = true;
                 config = r2o_ech_select_config(&reply[cursor..end]);
             }
             cursor = end;
@@ -421,9 +542,17 @@ fn r2o_ech_parse_https_reply(
         if compatible_port {
             if let Some(mut config) = config {
                 config.origin_name = expected_name.clone();
-                return Ok(config);
+                return Ok(R2oEchDnsAnswer::Config { config, ttl });
+            }
+            if ech_param_seen {
+                ambiguous = true;
+            } else {
+                no_ech_ttl = Some(no_ech_ttl.map_or(ttl, |prior| prior.min(ttl)));
             }
         }
+    }
+    if let Some(ttl) = no_ech_ttl.filter(|_| !ambiguous) {
+        return Ok(R2oEchDnsAnswer::NoConfig { ttl });
     }
     Err("HTTPS RR не содержит совместимой ECH-конфигурации".into())
 }
@@ -607,9 +736,10 @@ fn r2o_ech_u16(bytes: &[u8], offset: usize) -> Result<u16, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Hpke, R2O_ECH_HPKE, R2oEchConfig, r2o_ech_dns_name, r2o_ech_hpke, r2o_ech_https_query,
-        r2o_ech_parse_https_reply, r2o_ech_public_name, r2o_ech_query_resolver,
-        r2o_ech_select_config, r2o_ech_u16, r2o_hpke_expand, r2o_hpke_extract,
+        Hpke, R2O_ECH_HPKE, R2oEchConfig, R2oEchDnsAnswer, r2o_ech_dns_name, r2o_ech_hpke,
+        r2o_ech_https_query, r2o_ech_parse_https_reply, r2o_ech_public_name,
+        r2o_ech_query_resolver, r2o_ech_select_config, r2o_ech_u16, r2o_hpke_expand,
+        r2o_hpke_extract,
     };
     use std::net::UdpSocket;
     use std::thread;
@@ -804,14 +934,37 @@ mod tests {
         let result = r2o_ech_parse_https_reply("witness.example", [0x12, 0x34], &reply).unwrap();
         assert_eq!(
             result,
-            R2oEchConfig {
-                public_name: "cloudflare-ech.com".into(),
-                origin_name: "witness.example".into(),
-                config_list: config,
+            R2oEchDnsAnswer::Config {
+                config: R2oEchConfig {
+                    public_name: "cloudflare-ech.com".into(),
+                    origin_name: "witness.example".into(),
+                    config_list: config,
+                },
+                ttl: Duration::from_secs(60),
             }
         );
         assert!(r2o_ech_parse_https_reply("other.example", [0x12, 0x34], &reply).is_err());
         assert!(r2o_ech_parse_https_reply("witness.example", [0, 1], &reply).is_err());
+    }
+
+    #[test]
+    fn dns_ответ_без_ech_отличается_от_алиаса_и_неподдерживаемого_ech() {
+        let name = "test.example";
+        let id = [0x12, 0x34];
+        let query = r2o_ech_https_query(name, id).unwrap();
+        let rr_start = query.len();
+        let with_ech = r2o_dns_reply(&query, &[]);
+        assert!(r2o_ech_parse_https_reply(name, id, &with_ech).is_err());
+        let mut without_ech = with_ech[..with_ech.len() - 4].to_vec();
+        without_ech[rr_start + 10..rr_start + 12].copy_from_slice(&3_u16.to_be_bytes());
+        assert_eq!(
+            r2o_ech_parse_https_reply(name, id, &without_ech).unwrap(),
+            R2oEchDnsAnswer::NoConfig {
+                ttl: Duration::from_secs(60)
+            }
+        );
+        without_ech[rr_start + 13] = 0;
+        assert!(r2o_ech_parse_https_reply(name, id, &without_ech).is_err());
     }
 
     #[test]
@@ -848,6 +1001,49 @@ mod tests {
         });
         let result = r2o_ech_query_resolver("witness.example", resolver, None).unwrap();
         worker.join().unwrap();
-        assert_eq!(result.public_name, "cloudflare-ech.com");
+        let R2oEchDnsAnswer::Config { config, ttl } = result else {
+            panic!("ожидалась ECH-конфигурация");
+        };
+        assert_eq!(config.public_name, "cloudflare-ech.com");
+        assert_eq!(ttl, Duration::from_secs(60));
+    }
+    #[test]
+    fn probe_resolver_reuses_until_ttl_and_refreshes_on_mark_change_or_rejection() {
+        let mut cache = super::R2oEchProbeResolver::default();
+        let resolver = "192.0.2.53:53".parse().unwrap();
+        let now = std::time::Instant::now();
+        let ttl = Duration::from_secs(2);
+        let calls = std::cell::Cell::new(0);
+        let query = |_: &str, _, _| {
+            calls.set(calls.get() + 1);
+            Ok(R2oEchDnsAnswer::NoConfig { ttl })
+        };
+        for (offset, mark, expected_calls) in [(0, 45, 1), (1, 45, 1), (2, 45, 2), (2, 46, 3)] {
+            assert_eq!(
+                cache.resolve_with(
+                    "one.example".into(),
+                    resolver,
+                    Some(mark),
+                    now + Duration::from_secs(offset),
+                    query
+                ),
+                Ok(R2oEchDnsAnswer::NoConfig { ttl })
+            );
+            assert_eq!(calls.get(), expected_calls);
+        }
+        cache.invalidate();
+        let ask_at = now + ttl;
+        let timeout = cache.resolve_with(
+            "one.example".into(),
+            resolver,
+            Some(46),
+            ask_at,
+            |_, _, _| Err("DNS timeout".into()),
+        );
+        assert_eq!(timeout, Err("DNS timeout".into()));
+        cache
+            .resolve_with("one.example".into(), resolver, Some(46), ask_at, query)
+            .unwrap();
+        assert_eq!(calls.get(), 4);
     }
 }

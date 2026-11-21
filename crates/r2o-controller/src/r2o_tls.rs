@@ -213,21 +213,16 @@ pub fn r2o_tls_replay_client_hello(
     client_hello: &[u8],
     timeout: std::time::Duration,
 ) -> std::io::Result<bool> {
-    if client_hello.len() < 6 {
-        return Ok(false);
-    }
-    let timeout = if timeout.is_zero() {
-        std::time::Duration::from_secs(3)
-    } else {
-        timeout
-    };
-    stream.set_write_timeout(Some(timeout))?;
-    if crate::tls12::r2o_tls12_write_all(stream, client_hello).is_err() {
+    if client_hello.len() < 6 || timeout.is_zero() {
         return Ok(false);
     }
     let deadline = std::time::Instant::now()
         .checked_add(timeout)
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "timeout overflow"))?;
+    stream.set_write_timeout(Some(timeout))?;
+    if crate::tls12::r2o_tls12_write_all(stream, client_hello).is_err() {
+        return Ok(false);
+    }
     // C `d2k_verify_replay_on` (`core/verify.c:1530-1549`): ServerHello
     // узнаётся по шести байтам записи (`22 03 03 00 01 02`), а не разбором
     // TLS1.3-расширений. Закрытого ключа клиента нет, поэтому глубже
@@ -1677,6 +1672,22 @@ mod server_hello_tests {
                 .unwrap();
         server.join().unwrap();
         result
+    }
+
+    #[test]
+    fn expired_replay_does_not_write_a_client_hello() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        server.set_nonblocking(true).unwrap();
+        assert!(
+            !r2o_tls_replay_client_hello(&mut client, &[22, 3, 1, 0, 1, 0], Duration::ZERO)
+                .unwrap()
+        );
+        assert_eq!(
+            server.read(&mut [0]).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 
     #[test]

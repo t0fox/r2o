@@ -974,6 +974,21 @@ impl R2oMeasurementGate {
         )
     }
 
+    pub fn r2o_acquire_family_recovery_until(
+        &self,
+        cancel: &AtomicBool,
+        tcp_target: bool,
+        deadline: Instant,
+    ) -> Option<R2oMeasurementPermit> {
+        self.r2o_acquire_with_kind_until(
+            cancel,
+            R2oMeasurementWaiterKind::FamilyRecovery,
+            tcp_target,
+            R2oWorkerType::Verify,
+            Some(deadline),
+        )
+    }
+
     pub fn r2o_acquire_discovery(&self, cancel: &AtomicBool) -> Option<R2oMeasurementPermit> {
         self.r2o_acquire_with_kind(
             cancel,
