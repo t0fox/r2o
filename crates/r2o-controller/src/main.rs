@@ -12776,6 +12776,7 @@ struct R2oDiscoverySearches {
     exhausted_tcp: VecDeque<R2oExhaustedTcp>,
     order: VecDeque<R2oDiscoveryTaskKey>,
     pending_reports: VecDeque<serde_json::Value>,
+    panel_results: VecDeque<(R2oDiscoveryTaskKey, std::time::Instant, serde_json::Value)>,
     datapath_events: u64,
     suspect_events: u64,
     probes_used: u64,
@@ -14569,6 +14570,23 @@ fn r2o_live_searches_from_state(
             search
         })
         .collect()
+}
+
+#[cfg(unix)]
+fn r2o_panel_search_details(
+    row: &mut serde_json::Value,
+    entry: &R2oDiscoverySearch,
+    now: std::time::Instant,
+    wall: Option<i64>,
+) {
+    row["since"] = serde_json::json!(r2o_live_timestamp_at(entry.queued_at, now, wall));
+    row["shape"] = serde_json::json!(entry.target.shape);
+    row["plan"] = serde_json::json!(entry.plan);
+    row["application"] = serde_json::json!(entry.application);
+    row["last_result"] = serde_json::json!(entry.last_result);
+    row["probe_applied"] = serde_json::json!(entry.verify.applied);
+    row["verified"] = serde_json::json!(entry.verify.verified);
+    row["verify_level"] = serde_json::json!(entry.verify.level);
 }
 
 #[cfg(unix)]
@@ -19071,7 +19089,72 @@ group_block_proven: false,
             .searches
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        r2o_live_searches_from_state(&searches, &self.active, now, r2o_wall_now_unix())
+        let wall = r2o_wall_now_unix();
+        let mut rows = r2o_live_searches_from_state(&searches, &self.active, now, wall);
+        for (row, entry) in rows.iter_mut().zip(
+            searches
+                .order
+                .iter()
+                .filter(|key| self.active.contains_key(*key))
+                .filter_map(|key| searches.entries.get(key)),
+        ) {
+            r2o_panel_search_details(row, entry, now, wall);
+        }
+        rows.extend(
+            searches.panel_results.iter().rev()
+                .filter(|(key, at, _)| {
+                    !self.active.contains_key(key)
+                        && now.saturating_duration_since(*at) < std::time::Duration::from_secs(90)
+                })
+                .map(|(_, _, row)| row.clone()),
+        );
+        rows
+    }
+
+    fn record_panel_search_result(
+        &self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+        saved_plan: Option<(&str, bool)>,
+        reason: &str,
+    ) {
+        let now = std::time::Instant::now();
+        let wall = r2o_wall_now_unix();
+        let key = r2o_discovery_task_key(target);
+        let mut searches = self
+            .searches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(entry) = searches.entries.get(&key) else {
+            return;
+        };
+        let (ip, port) = target
+            .endpoint
+            .parse::<std::net::SocketAddr>()
+            .map(|endpoint| (endpoint.ip().to_string(), endpoint.port()))
+            .unwrap_or_default();
+        let (phase, outcome) = match saved_plan {
+            Some((_, true)) => ("сохранён частичный обход", "partial"),
+            Some((_, false)) => ("подбор завершён", "saved"),
+            None => ("подбор завершился без сохранения плана", "closed"),
+        };
+        let mut row = serde_json::json!({
+            "target": target.host, "family": target.family, "ip": ip, "port": port,
+            "transport": r2o_discovery_transport(target),
+            "phase": phase,
+            "attempts": entry.attempts, "probes": entry.candidate_probes.saturating_add(entry.ask_probes),
+            "candidate": entry.candidate, "source": entry.source,
+            "plan_id": saved_plan.map(|(id, _)| id), "completed_at": r2o_live_timestamp_at(now, now, wall),
+            "outcome": outcome,
+        });
+        r2o_panel_search_details(&mut row, entry, now, wall);
+        if !reason.is_empty() {
+            row["last_result"] = serde_json::json!(reason);
+        }
+        searches.panel_results.retain(|(previous, _, _)| previous != &key);
+        if searches.panel_results.len() >= 6 {
+            searches.panel_results.pop_front();
+        }
+        searches.panel_results.push_back((key, now, row));
     }
 
     fn r2o_diagnostic_event(
@@ -25122,6 +25205,7 @@ impl ControlClient {
                     && let Some(outcome) = worker.try_outcome()
                 {
                     let target = outcome.target.clone();
+                    let outcome_reason = outcome.detail.clone();
                     if let Some(diagnostics) = diagnostics.as_mut() {
                         let mut diagnostic = worker.r2o_diagnostic_event(&target);
                         diagnostic["outcome"] = serde_json::Value::String(
@@ -25157,6 +25241,7 @@ impl ControlClient {
                         (measured_probe_path != "/").then_some(measured_probe_path);
                     let mut confirmed = false;
                     if outcome.queue_expired {
+                        worker.record_panel_search_result(&target, None, &outcome_reason);
                         println!(
                             "подозрение {} устарело в очереди Discovery; сетевой замер не запускался",
                             outcome.target.host
@@ -25181,6 +25266,27 @@ impl ControlClient {
                             // T_ASKING, у которых появился свой план.
                             worker.r2o_yield_asking_to_own_plan(catalog);
                         }
+                        let shape = r2o_plan_wire_shape(target.shape, has_timestamp.flatten());
+                        let saved_plan = if confirmed {
+                            catalog.boxes.iter()
+                                .flat_map(|record| &record.bindings)
+                                .find(|binding| {
+                                    binding.enabled && binding.target == target.host
+                                        && binding.family == target.family
+                                        && binding.shape == shape
+                                        && binding.transport == r2o_discovery_transport(&target)
+                                })
+                                .map(|binding| {
+                                    (binding.plan_id.as_str(), binding.budget == R2O_D2K_CAT_BUDGET_CUT)
+                                })
+                        } else {
+                            None
+                        };
+                        let reason = apply_result
+                            .as_ref()
+                            .err()
+                            .map_or(outcome_reason, ToString::to_string);
+                        worker.record_panel_search_result(&target, saved_plan, &reason);
                         let prepared = match apply_result {
                             Ok(Some(compiled)) => Some(compiled),
                             Ok(None) if has_candidate => {
@@ -42774,8 +42880,7 @@ mod tests {
         let now = std::time::Instant::now();
         let live = worker.r2o_live_searches(now);
         assert_eq!(live.len(), 1);
-        // Точный набор C `write_live` searches: никаких plan/application/
-        // last_result/shape сверх схемы панели.
+        // Рабочая панель получает дополнительные доказательства поверх схемы C.
         let mut keys = live[0]
             .as_object()
             .unwrap()
@@ -42796,6 +42901,13 @@ mod tests {
             "question",
             "candidate",
             "source",
+            "shape",
+            "plan",
+            "application",
+            "last_result",
+            "probe_applied",
+            "verified",
+            "verify_level",
         ]
         .map(str::to_owned)
         .to_vec();
@@ -42817,6 +42929,16 @@ mod tests {
         assert_eq!(live[0]["question"], "whole");
         worker.active.remove(&task_key);
         assert!(worker.r2o_live_searches(now).is_empty());
+        worker.record_panel_search_result(&target, Some(("saved-test-plan", false)), "");
+        let now = std::time::Instant::now();
+        let finished = worker.r2o_live_searches(now);
+        assert_eq!(finished[0]["outcome"], "saved");
+        assert_eq!(finished[0]["plan_id"], "saved-test-plan");
+        assert_eq!(finished[0]["probe_applied"], false);
+        assert!(finished[0]["since"].is_string());
+        assert!(worker
+            .r2o_live_searches(now + std::time::Duration::from_secs(91))
+            .is_empty());
     }
 
     #[cfg(unix)]

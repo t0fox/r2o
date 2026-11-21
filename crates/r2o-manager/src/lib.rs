@@ -250,8 +250,9 @@ pub use install::{
     read_install_slots, rollback,
 };
 pub use update::{
-    UpdateError, activate_staged_update, check_update, install_update, install_update_auto,
-    mark_bad_previous_release, set_auto_update, stage_update, stage_update_auto,
+    UpdateError, activate_staged_update, check_update, finish_router_update, install_update,
+    install_update_auto, mark_bad_previous_release, set_auto_update, stage_update,
+    stage_update_auto,
 };
 
 /// Принять сырые байты Ed25519, 64 шестнадцатеричных символа или PEM Ed25519 SPKI.

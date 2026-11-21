@@ -699,7 +699,7 @@ impl Recorder {
     }
 
     pub fn record(&mut self, mut event: Value) {
-        if !self.enabled {
+        if !self.enabled || self.dir.join("paused").is_file() {
             return;
         }
         let Some(object) = event.as_object_mut() else {
@@ -766,12 +766,15 @@ impl Recorder {
             self.first_details.clear();
             self.sampled = None;
             self.session = session;
-            self.enabled = session.is_some();
-            if self.enabled {
-                memory_enable(true);
-            } else {
+            self.enabled = false;
+            if session.is_none() {
                 self.remove_disabled_report();
             }
+        }
+        let recording = session.is_some() && !self.dir.join("paused").is_file();
+        if self.enabled != recording {
+            self.enabled = recording;
+            memory_enable(recording);
         }
         if !self.enabled {
             return;
@@ -1202,7 +1205,10 @@ impl Recorder {
             }
         };
         let current = diagnostics_session(&self.dir);
-        if current.is_none() || self.session.is_some_and(|session| Some(session) != current) {
+        if current.is_none()
+            || self.dir.join("paused").is_file()
+            || self.session.is_some_and(|session| Some(session) != current)
+        {
             return;
         }
         if bytes.len() > REPORT_MAX {

@@ -694,4 +694,4 @@ run_router_install "$BUNDLE" "$TARGET_RELEASE" || die 'установщик вы
 CURRENT_RELEASE=$(sed -n '2p' "$ROOT/release-slots" 2>/dev/null || true)
 [ "$CURRENT_RELEASE" = "$TARGET_RELEASE" ] || die 'менеджер не активировал проверенный выпуск'
 INSTALL_STARTED=0
-say "установлен подписанный выпуск $TARGET_RELEASE; службы R2O, Telegram и Lava запущены"
+say "установлен подписанный выпуск $TARGET_RELEASE; службы R2O, Telegram и веб-панель запущены"

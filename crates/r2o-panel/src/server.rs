@@ -421,11 +421,6 @@ pub fn handle_request(config: &Config, raw: &[u8]) -> Response {
             "panel-motion.js",
             "application/javascript; charset=utf-8",
         ),
-        (
-            "/assets/panel-lava.js",
-            "panel-lava.js",
-            "application/javascript; charset=utf-8",
-        ),
         ("/assets/onest.woff2", "fonts/onest.woff2", "font/woff2"),
         ("/assets/jbmono.woff2", "fonts/jbmono.woff2", "font/woff2"),
         (
@@ -436,11 +431,6 @@ pub fn handle_request(config: &Config, raw: &[u8]) -> Response {
         (
             "/assets/nunito-latin.woff2",
             "fonts/nunito-latin.woff2",
-            "font/woff2",
-        ),
-        (
-            "/assets/jetbrains-mono-lava.woff2",
-            "fonts/jetbrains-mono-lava.woff2",
             "font/woff2",
         ),
         (
@@ -729,10 +719,10 @@ fn api_diagnostics(config: &Config, request: &Request<'_>) -> Response {
                     .to_vec(),
             );
         }
-        if !matches!(request.query, "enable" | "disable") {
+        if !matches!(request.query, "enable" | "disable" | "pause" | "clear") {
             return diagnostic_response(400, b"{}".to_vec());
         }
-        if diagnostics_toggle(&dir, request.query == "enable").is_err() {
+        if diagnostics_control(&dir, request.query).is_err() {
             return diagnostic_response(
                 500,
                 "{\"error\":\"не удалось изменить состояние диагностики\"}"
@@ -747,13 +737,15 @@ fn api_diagnostics(config: &Config, request: &Request<'_>) -> Response {
             } else {
                 b"{\"enabled\":false}".to_vec()
             },
-        );
+        )
+        .header("X-R2O-Diagnostics-Paused", diagnostics_paused(&dir));
     }
     if !diagnostics_enabled(&dir) {
         return diagnostic_response(200, b"{\"enabled\":false}".to_vec());
     }
     if !request.query_present || request.query == "status" {
-        return diagnostic_response(200, b"{\"enabled\":true}".to_vec());
+        return diagnostic_response(200, b"{\"enabled\":true}".to_vec())
+            .header("X-R2O-Diagnostics-Paused", diagnostics_paused(&dir));
     }
     let path = dir.join("report.json");
     #[cfg(unix)]
@@ -766,7 +758,8 @@ fn api_diagnostics(config: &Config, request: &Request<'_>) -> Response {
         {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return diagnostic_response(503, b"{\"enabled\":true,\"pending\":true}".to_vec());
+                return diagnostic_response(503, b"{\"enabled\":true,\"pending\":true}".to_vec())
+                    .header("X-R2O-Diagnostics-Paused", diagnostics_paused(&dir));
             }
             Err(_) => {
                 return Response::new(500, "text/plain; charset=utf-8", Vec::new())
@@ -778,7 +771,8 @@ fn api_diagnostics(config: &Config, request: &Request<'_>) -> Response {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return diagnostic_response(503, b"{\"enabled\":true,\"pending\":true}".to_vec());
+            return diagnostic_response(503, b"{\"enabled\":true,\"pending\":true}".to_vec())
+                .header("X-R2O-Diagnostics-Paused", diagnostics_paused(&dir));
         }
         Err(_) => {
             return Response::new(500, "text/plain; charset=utf-8", Vec::new())
@@ -804,7 +798,8 @@ fn api_diagnostics(config: &Config, request: &Request<'_>) -> Response {
             .header("Cache-Control", "no-store");
     }
     let response = Response::new(200, "application/json; charset=utf-8", body)
-        .header("Cache-Control", "no-store");
+        .header("Cache-Control", "no-store")
+        .header("X-R2O-Diagnostics-Paused", diagnostics_paused(&dir));
     if request.query == "download" {
         response.header(
             "Content-Disposition",
@@ -869,7 +864,15 @@ fn diagnostics_enabled(dir: &Path) -> bool {
     }
 }
 
-fn diagnostics_toggle(dir: &Path, enabled: bool) -> std::io::Result<()> {
+fn diagnostics_paused(dir: &Path) -> &'static str {
+    if dir.join("paused").is_file() {
+        "true"
+    } else {
+        "false"
+    }
+}
+
+fn diagnostics_control(dir: &Path, action: &str) -> std::io::Result<()> {
     if !diagnostics_dir_valid(dir, true) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
@@ -882,11 +885,7 @@ fn diagnostics_toggle(dir: &Path, enabled: bool) -> std::io::Result<()> {
         dir.lock()?;
         dir
     };
-    let marker = dir.join("enabled");
-    if enabled {
-        if diagnostics_enabled(dir) {
-            return Ok(());
-        }
+    fn create(path: &Path) -> std::io::Result<()> {
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -894,9 +893,10 @@ fn diagnostics_toggle(dir: &Path, enabled: bool) -> std::io::Result<()> {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        options.open(marker)?.sync_all()
-    } else {
-        for name in ["enabled", "report.json", "report.new"] {
+        options.open(path)?.sync_all()
+    }
+    fn remove(dir: &Path, names: &[&str]) -> std::io::Result<()> {
+        for name in names {
             match fs::remove_file(dir.join(name)) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -904,6 +904,33 @@ fn diagnostics_toggle(dir: &Path, enabled: bool) -> std::io::Result<()> {
             }
         }
         Ok(())
+    }
+    let enabled = diagnostics_enabled(dir);
+    match action {
+        "pause" if enabled && diagnostics_paused(dir) == "false" => create(&dir.join("paused")),
+        "enable" => {
+            if !enabled {
+                create(&dir.join("enabled"))?;
+            }
+            remove(dir, &["paused"])
+        }
+        "clear" if enabled => {
+            remove(dir, &["enabled.next"])?;
+            create(&dir.join("enabled.next"))?;
+            fs::rename(dir.join("enabled.next"), dir.join("enabled"))?;
+            remove(dir, &["report.json", "report.new"])
+        }
+        "disable" => remove(
+            dir,
+            &[
+                "enabled",
+                "paused",
+                "report.json",
+                "report.new",
+                "enabled.next",
+            ],
+        ),
+        _ => Ok(()),
     }
 }
 
@@ -2079,14 +2106,10 @@ fn embedded_asset(name: &str) -> Option<&'static [u8]> {
         "telegram-flow-prototype.js" => include_bytes!("../assets/telegram-flow-prototype.js"),
         "gsap.js" => include_bytes!("../assets/gsap.js"),
         "panel-motion.js" => include_bytes!("../assets/panel-motion.js"),
-        "panel-lava.js" => include_bytes!("../assets/panel-lava.js"),
         "fonts/onest.woff2" => include_bytes!("../assets/fonts/onest.woff2"),
         "fonts/jbmono.woff2" => include_bytes!("../assets/fonts/jbmono.woff2"),
         "fonts/nunito-cyrillic.woff2" => include_bytes!("../assets/fonts/nunito-cyrillic.woff2"),
         "fonts/nunito-latin.woff2" => include_bytes!("../assets/fonts/nunito-latin.woff2"),
-        "fonts/jetbrains-mono-lava.woff2" => {
-            include_bytes!("../assets/fonts/jetbrains-mono-lava.woff2")
-        }
         "fonts/manrope-cyrillic.woff2" => include_bytes!("../assets/fonts/manrope-cyrillic.woff2"),
         "fonts/manrope-latin.woff2" => include_bytes!("../assets/fonts/manrope-latin.woff2"),
         "fonts/unbounded-cyrillic.woff2" => {

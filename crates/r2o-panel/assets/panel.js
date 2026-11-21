@@ -172,6 +172,46 @@
     return parts.length > 1 ? first + " · ещё " + (parts.length - 1) : first;
   }
 
+  function describePlan(text) {
+    var anchors = { sni_middle: "середины имени сервера (SNI)", sni_start: "начала имени сервера",
+      sni_end: "конца имени сервера", hello_middle: "середины приветствия", record_end: "конца записи", payload_start: "начала данных" };
+    return str(text).split(/\r?\n/).map(function (line) {
+      var parts = line.trim().split(/\s+/), op = parts[0], a = parts[1], b = parts[2];
+      switch (op) {
+        case "": case "r2o-plan": case "d2k-plan": case "id": case "proto": case "wire": case "input": case "payload": return "";
+        case "segment": return "Размер TCP-сегмента — " + a + " байт.";
+        case "split": return a === "sni_middle" && Number(b) === 0 ? "Разделяет TLS-приветствие в середине имени сервера (SNI)." :
+          "Разделяет данные относительно " + (anchors[a] || a) + " со смещением " + b + " байт.";
+        case "payload-pad64": case "payload-pad": return "Готовит блок №" + a + " длиной " + b + " байт.";
+        case "seqovl": return "Отправляет TCP-сегменты с перекрытием: часть их позиций в потоке совпадает.";
+        case "fake": return "Добавляет ложный пакет в поток.";
+        case "poison": return parts.includes("badsum") ? "Профиль №" + a + " задаёт неверную контрольную сумму пакета." : "Профиль №" + a + " меняет поля заголовка пакета.";
+        case "payload-slice": return "Берёт фрагмент блока №" + b + " для дополнительных данных.";
+        case "oob": return "Добавляет внеполосные данные TCP.";
+        case "ipfrag": return "Разбивает IP-пакет на фрагменты.";
+        case "quicsplit": return "Разделяет начальные данные QUIC.";
+        case "quicdeny": return "Блокирует попытку соединения по QUIC.";
+        case "udplen": return "Меняет длину UDP-пакета.";
+        case "guard": if (a === "rst_alien") return "Включает защиту от посторонних пакетов сброса TCP."; break;
+        case "order": if (a === "forward" || a === "reverse") return "Отправляет сегменты в " + (a === "forward" ? "прямом" : "обратном") + " порядке."; break;
+        case "pace": case "delay": case "settle":
+          if (/^\d+$/.test(a)) return ({ pace: "Пауза между отправками", delay: "Задержка отправки", settle: "Время ожидания" })[op] + " — " + (Number(a) / 1000).toLocaleString("ru-RU") + " мс.";
+          break;
+      }
+      return "Дополнительная директива «" + op + "». Параметры указаны в исходном плане.";
+    }).filter(Boolean);
+  }
+
+  function planExplanation(doc, text) {
+    var lines = describePlan(text);
+    if (!lines.length) return null;
+    var panel = el(doc, "div", "plan-explanation");
+    var steps = el(doc, "ul");
+    lines.forEach(function (line) { steps.appendChild(el(doc, "li", "", line)); });
+    add(panel, el(doc, "strong", "", "Как работает план"), steps);
+    return panel;
+  }
+
   /* Предел одновременных замеров считает движок по нагрузке роутера:
      от 1 на слабом до десятков на мощном. До 16 — клетками, больше — шкалой. */
   function slotsView(meas) {
@@ -221,7 +261,7 @@
     var engine = !!snap.engine_running;
     var searches = linked ? list(k.searches) : [];
     var QUEUED = "ожидает безопасного слота замера";
-    var active = searches.filter(function (s) { return s.phase !== "подтверждено, смотрим живой трафик"; });
+    var active = searches.filter(function (s) { return !s.completed_at && s.phase !== "подтверждено, смотрим живой трафик"; });
     var m = {
       snap: snap, k: k, linked: linked, engine: engine,
       fresh: snap.live_fresh !== false,
@@ -288,14 +328,31 @@
     function on() { return !!g && !(mq && mq.matches); }
     /* Перестроения раскладки (Flip) при смене размера окна завершаются сразу:
        иначе зафиксированные на время анимации размеры вылезают за новый край. */
-    var live = [];
+    var live = new Set();
     function track(anim) {
-      if (anim) { live.push(anim); anim.eventCallback("onComplete", function () { live.splice(live.indexOf(anim), 1); }); }
+      if (!anim) return anim;
+      live.add(anim);
+      ["onComplete", "onInterrupt"].forEach(function (event) {
+        var previous = anim.eventCallback(event);
+        anim.eventCallback(event, function () {
+          live.delete(anim);
+          if (previous) previous.apply(this, arguments);
+        }, anim.vars[event + "Params"]);
+      });
       return anim;
     }
-    if (g && global.addEventListener) global.addEventListener("resize", function () {
-      live.splice(0).forEach(function (a) { a.progress(1); });
-    });
+    function finishLive() {
+      Array.from(live).forEach(function (anim) { anim.progress(1); });
+    }
+    if (g && global.addEventListener) global.addEventListener("resize", finishLive);
+    if (mq && mq.addEventListener) mq.addEventListener("change", finishLive);
+    if (doc) {
+      var syncVisibility = function () {
+        doc.documentElement.toggleAttribute("data-motion-paused", doc.hidden);
+      };
+      doc.addEventListener("visibilitychange", syncVisibility);
+      syncVisibility();
+    }
     return { g: g, on: on, Flip: global && global.Flip, track: track };
   })();
 
@@ -349,7 +406,10 @@
     if (node.__r2oKey === key) return false;
     var open = {};
     var nodes = node.querySelectorAll("details[data-key]");
-    for (var i = 0; i < nodes.length; i++) if (nodes[i].open) open[nodes[i].getAttribute("data-key")] = true;
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].__foldMotion) nodes[i].__foldMotion.progress(1);
+      if (nodes[i].open) open[nodes[i].getAttribute("data-key")] = true;
+    }
     var fresh = build();
     if (Motion.g) {
       /* Анимации уходящих узлов не должны доживать после перерисовки. */
@@ -432,6 +492,30 @@
     var valid = {};
     this.screens.forEach(function (screen) { valid[screen.id] = screen; });
     this.validScreens = valid;
+    doc.addEventListener("click", function (event) {
+      var summary = event.target.closest(".family-card > summary, .box-card > summary");
+      if (!summary || !Motion.on() || event.defaultPrevented || event.target.closest("a,button,input")) return;
+      event.preventDefault();
+      var card = summary.parentElement;
+      var start = card.getBoundingClientRect().height;
+      var opening = card.__foldMotion ? !card.__opening : !card.open;
+      if (card.__foldMotion) card.__foldMotion.kill();
+      card.__opening = opening;
+      card.style.removeProperty("height");
+      card.setAttribute("data-open-motion", "");
+      card.open = true;
+      var end = opening ? card.getBoundingClientRect().height : summary.offsetHeight + card.offsetHeight - card.clientHeight;
+      card.__foldMotion = Motion.track(Motion.g.fromTo(card, { height: start, overflow: "hidden" }, {
+        height: end, duration: .34, ease: "power3.out",
+        onComplete: function () {
+          card.open = opening;
+          card.removeAttribute("data-open-motion");
+          card.style.removeProperty("height");
+          card.style.removeProperty("overflow");
+          card.__foldMotion = null;
+        }
+      }));
+    });
     var fromHash = function () {
       var id = (win.location.hash || "").replace(/^#/, "");
       return valid[id] ? id : "now";
@@ -455,6 +539,12 @@
     var screen = this.validScreens[id];
     var previous = this.screen;
     var changed = previous !== id || options.instant;
+    var oldLink = doc.querySelector(".index a[aria-current='page']");
+    var origin = oldLink && oldLink.getBoundingClientRect();
+    var navX = oldLink ? parseFloat(oldLink.style.getPropertyValue("--motion-x")) || 0 : 0;
+    var navY = oldLink ? parseFloat(oldLink.style.getPropertyValue("--motion-y")) || 0 : 0;
+    if (this.navMotion) this.navMotion.progress(1);
+    if (this.screenMotion) this.screenMotion.progress(1);
     this.screen = id;
     this.screenTitle = screen.getAttribute("data-title") || "Обзор";
     this.screenKicker = screen.getAttribute("data-kicker") || "Пульт";
@@ -487,13 +577,28 @@
     }
     if (Motion.on() && !options.instant) {
       var g = Motion.g;
+      var link = doc.querySelector(".index a[aria-current='page']");
+      if (link && origin && oldLink !== link) {
+        var dest = link.getBoundingClientRect();
+        link.setAttribute("data-nav-motion", "");
+        this.navMotion = Motion.track(g.fromTo(link, {
+          "--motion-x": (origin.left + navX - dest.left) + "px",
+          "--motion-y": (origin.top + navY - dest.top) + "px"
+        }, { "--motion-x": "0px", "--motion-y": "0px", duration: .32, ease: "power3.out",
+          onComplete: function () {
+            link.removeAttribute("data-nav-motion");
+            link.style.removeProperty("--motion-x");
+            link.style.removeProperty("--motion-y");
+          }
+        }));
+      }
       var parts = [].slice.call(screen.querySelectorAll(".screen-head, .status-panel, .overview-metric, .metric-card, .card, .family-card, .box-card, .diag-card, .tg-proxy, .release-hero, .diag-history"));
       if (screen.id === "now") parts = [].slice.call(screen.querySelectorAll(".status-panel, .overview-metrics, .workload-card, .overview-side > *"));
       g.killTweensOf(screen);
       g.killTweensOf(parts);
-      Motion.track(g.timeline({ defaults: { ease: "power3.out", clearProps: "all" } })
-        .fromTo(screen, { autoAlpha: 0, y: 7 }, { autoAlpha: 1, y: 0, duration: 0.24 }, 0)
-        .fromTo(parts, { y: 10, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.3, stagger: 0.02 }, 0.03));
+      this.screenMotion = Motion.track(g.timeline({ defaults: { ease: "power3.out", clearProps: "transform,opacity,visibility" } })
+        .fromTo(screen, { opacity: .65, y: 4 }, { opacity: 1, y: 0, duration: .2 }, 0)
+        .fromTo(parts, { y: 5 }, { y: 0, duration: .30, stagger: { amount: .06 } }, 0));
     }
   };
 
@@ -786,7 +891,7 @@
     this.$("update-check").addEventListener("click", function () { return self.checkUpdates(true); });
     this.$("update-install").addEventListener("click", function () {
       if (self.$("update-install").disabled) return;
-      return self.updateCommand("install");
+      self.ask({ title: "Установить обновление R2O?", text: "Роутер загрузит и проверит выпуск. Службы R2O кратковременно перезапустятся.", yes: "Установить" }, function () { self.updateCommand("install"); });
     });
     this.$("update-auto").addEventListener("change", function () {
       return self.updateCommand(self.$("update-auto").checked ? "auto-on" : "auto-off");
@@ -812,7 +917,7 @@
 
   var UPDATE_ACTIONS = {
     check: "Проверяем обновления…",
-    install: "Устанавливаем обновление. Службы перезапустятся, панель подключится сама…",
+    install: "Идёт установка обновления",
     "auto-on": "Включаем автообновление…", "auto-off": "Выключаем автообновление…"
   };
 
@@ -845,7 +950,8 @@
   App.prototype.pollUpdates = function (scheduled) {
     var self = this;
     if (this.doc.hidden || this.updateInflight || !this.$("updates-body")) return Promise.resolve();
-    var idle = !this.updatePending && !this.updateFailed && !(this.updateStatus && this.updateStatus.busy);
+    var idle = !this.updatePending && !this.updateFailed &&
+      !(this.updateStatus && (this.updateStatus.busy || updateApplying(this.updateStatus)));
     if (scheduled && idle && this.lastUpdatePoll !== null && Date.now() - this.lastUpdatePoll < UPDATE_IDLE_POLL_MS) return Promise.resolve();
     this.lastUpdatePoll = Date.now();
     this.updateInflight = true;
@@ -856,7 +962,7 @@
       self.updateStatus = s;
       /* Команда завершена, когда служба снова свободна и состояние новее нажатия
          (установка — когда записан её итог). Тумблер завершается сразу. */
-      if (pending && !s.busy) {
+      if (pending && !s.busy && !updateApplying(s)) {
         var since = Math.floor(pending.at / 1000) - 5;
         var done = pending.action === "install" ? num(s.last_utc) >= since :
           pending.action === "check" ? num(s.checked_utc) >= since : true;
@@ -869,17 +975,27 @@
     }).finally(function () { self.updateInflight = false; });
   };
 
+  function updateApplying(s) {
+    return s.busy === "installing" || s.busy === "staging" ||
+      ((s.install_stage === 2 || s.install_stage === 3) && s.last_ok === true &&
+        Math.abs(Date.now() / 1000 - num(s.last_utc)) < 900);
+  }
+
   App.prototype.renderUpdates = function (status) {
     if (!this.$("updates-body")) return;
     if (status) this.updateStatus = status;
     var self = this, s = status || {}, pending = this.updatePending;
     var absent = !!s.absent, latest = s.latest || null, current = str(s.current);
-    var busy = str(s.busy), action = busy === "installing" ? "install" : busy === "checking" ? "check" : pending && pending.action;
+    var busy = str(s.busy), action = updateApplying(s) ? "install" : busy === "checking" ? "check" : pending && pending.action;
     var newer = latest && latest.release_id && latest.release_id !== current;
-    var failedInstall = s.last_ok === false && num(s.last_utc) > 0 && str(s.last_release) && num(s.last_utc) >= num(s.checked_utc) - 5;
+    var failedInstall = s.last_ok === false && num(s.last_utc) > 0 &&
+      (Number.isInteger(s.install_stage) || str(s.last_release)) && num(s.last_utc) >= num(s.checked_utc) - 5;
     var tone = "", reason = "", text;
     if (absent) { text = "Автообновление не подключено"; reason = "Эта установка обновляется командой установки."; }
-    else if (action === "install" || action === "check") text = UPDATE_ACTIONS[action];
+    else if (action === "install" || action === "check") {
+      text = UPDATE_ACTIONS[action];
+      if (this.updateFailed) reason = "Связь с панелью прервалась. Ждём нового ответа роутера.";
+    }
     else if (this.updateFailed && !s.current && !s.never && !latest) { text = "Нет связи с панелью"; tone = "warn"; }
     else if (s.never) text = "Обновления ещё не проверялись";
     else if (failedInstall) { text = "Не удалось установить обновление"; tone = "warn"; reason = str(s.last_message); }
@@ -894,7 +1010,7 @@
     write("update-state", text);
     if (state.parentElement) state.parentElement.setAttribute("data-tone", tone);
     var lamp = this.$("update-lamp");
-    if (lamp) lamp.setAttribute("data-tone", tone || (!absent && !action && s.check_ok === true && !newer ? "ok" : "idle"));
+    if (lamp) lamp.setAttribute("data-tone", tone || (action || newer ? "live" : !absent && s.check_ok === true ? "ok" : "idle"));
     if (changed && !this.doc.hidden && Motion.on()) {
       Motion.g.killTweensOf(state);
       Motion.g.fromTo(state, { opacity: .55, y: 3 }, { opacity: 1, y: 0, duration: .2, clearProps: "opacity,transform" });
@@ -904,7 +1020,7 @@
     this.$("update-release").hidden = !newer;
     var empty = this.$("update-empty");
     if (empty) {
-      empty.hidden = !!newer;
+      empty.hidden = !!newer || action === "install";
       empty.textContent = absent ? "Автообновление не подключено. Эта установка обновляется командой установки."
         : s.never ? "Проверьте обновления, чтобы увидеть описание нового выпуска."
           : "Новых выпусков нет. Установленная версия актуальна.";
@@ -914,12 +1030,39 @@
     var install = this.$("update-install");
     install.hidden = !newer;
     install.disabled = !!action || absent;
-    write("update-install", newer && str(latest.release_id) === str(s.bad_release) ? "Повторить установку вручную" : "Установить сейчас");
+    write("update-install", failedInstall ? "Повторить установку" : "Установить сейчас");
     this.$("update-check").disabled = !!action || absent;
     this.$("update-check").setAttribute("data-variant", "ghost");
-    write("update-warning", newer ? "Службы кратковременно перезапустятся. Закрытие вкладки не отменяет установку." : "").hidden = !newer;
-    this.$("update-progress").hidden = true;
-    write("update-progress-text", "").hidden = true;
+    write("update-warning", "Службы кратковременно перезапустятся. Закрытие вкладки не отменяет установку.").hidden = !newer;
+    var stages = ["Загрузка и проверка выпуска", "Проверка пакета", "Активация версии", "Запуск и проверка служб"];
+    var progress = this.$("update-progress");
+    var rail = this.$("install-steps");
+    if (!rail) {
+      rail = el(this.doc, "ol", "install-steps");
+      rail.id = "install-steps";
+      rail.setAttribute("aria-label", "Этапы установки");
+      ["Загрузка", "Пакет", "Активация", "Запуск"].forEach(function (label) {
+        rail.appendChild(el(self.doc, "li", "", label));
+      });
+      progress.before(rail);
+      this.$("update-progress-text").setAttribute("role", "status");
+    }
+    var stage = s.install_stage;
+    var showStage = Number.isInteger(stage) && stage >= 0 && stage <= stages.length;
+    progress.hidden = !showStage;
+    rail.hidden = !showStage;
+    Array.from(rail.children).forEach(function (item, index) {
+      item.dataset.phase = index < stage ? "done" : index === stage ? (failedInstall && !action ? "error" : "active") : "waiting";
+      if (showStage && index === stage) item.setAttribute("aria-current", "step");
+      else item.removeAttribute("aria-current");
+    });
+    progress.max = stages.length;
+    progress.value = showStage ? stage : 0;
+    progress.setAttribute("aria-label", "Завершено этапов установки");
+    body.dataset.install = failedInstall && !action ? "error" : action || (stage === stages.length ? "done" : "idle");
+    var stepText = !showStage ? "" : stage === stages.length ? "4 из 4 · Службы запущены" :
+      (stage + 1) + " из 4 · " + stages[stage] + (failedInstall && !action ? " · ошибка" : "");
+    write("update-progress-text", stepText).hidden = !showStage;
     var auto = this.$("update-auto");
     if (!(pending && /^auto-/.test(pending.action))) auto.checked = !absent && s.auto !== false;
     auto.disabled = absent || !!action || !!pending;
@@ -1096,6 +1239,7 @@
     var workload = this.$("workload-meta");
     if (workload) {
       var text = m.hunting ? (m.hunting - m.queued.length) + " в работе" + (m.queued.length ? " · " + m.queued.length + " ждут" : "") : "очередь пуста";
+      if (!m.hunting && m.running.some(function (s) { return s.completed_at; })) text = "Последние результаты";
       if (workload.textContent !== text) workload.textContent = text;
     }
     var tm = this.$("telegram-meta");
@@ -1688,19 +1832,31 @@
       });
       return;
     }
+    function resizeList(from) {
+      if (!from || !Motion.on() || !listNode.offsetHeight) return;
+      if (listNode.__heightMotion) listNode.__heightMotion.kill();
+      listNode.style.removeProperty("height");
+      var height = listNode.getBoundingClientRect().height;
+      if (Math.abs(from - height) < 1) return;
+      listNode.__heightMotion = Motion.track(Motion.g.fromTo(listNode, { height: from, overflow: "hidden" },
+        { height: height, duration: .34, ease: "power3.out", clearProps: "height,overflow" }));
+    }
     if (!m.searches.length) {
+      var outgoing = listNode.__r2oKey === "live" ? listNode.getBoundingClientRect().height : 0;
       section(listNode, "none", function () {
         var li = el(doc, "li", "quiet");
         add(li, el(doc, "b", "", "Рабочий прямой трафик подбор не запускает"),
           " — он начинается только после подтверждённой блокировки, а найденное решение сохраняется в каталоге ниже.");
         return [li];
       });
+      resizeList(outgoing);
       return;
     }
+    var idleHeight = 0;
     if (listNode.__r2oKey === "none" || (listNode.__r2oKey && listNode.__r2oKey.indexOf("absent:") === 0)) {
+      idleHeight = listNode.getBoundingClientRect().height;
       listNode.replaceChildren();
     }
-    var firstLive = listNode.__r2oKey !== "live";
     listNode.__r2oKey = "live";
     var animate = Motion.on() && Motion.Flip;
     var stable = [];
@@ -1725,6 +1881,11 @@
         row.__r2oKey = key;
         entered.push(row);
       }
+      if (row.__leaving) {
+        row.__exitMotion.kill();
+        row.__leaving = false;
+        Motion.g.set(row, { clearProps: "transform,opacity,visibility" });
+      }
       self.updateSearch(row, s);
       if (listNode.children[index] !== row) { listNode.insertBefore(row, listNode.children[index] || null); moved = true; }
     });
@@ -1748,14 +1909,14 @@
     leaving.forEach(function (row) {
       row.__leaving = true;
       var done = row.getAttribute("data-done") === "true";
-      Motion.g.timeline({ onComplete: function () {
+      row.__exitMotion = Motion.track(Motion.g.timeline({ onComplete: function () {
         var rest = [];
         for (var k = 0; k < listNode.children.length; k++) if (listNode.children[k] !== row && !listNode.children[k].__leaving) rest.push(listNode.children[k]);
         var st = rest.length ? Motion.Flip.getState(rest) : null;
         if (row.parentNode) row.parentNode.removeChild(row);
         if (st) Motion.track(Motion.Flip.from(st, { duration: 0.3, ease: "power3.inOut", scale: true, simple: true }));
       } })
-        .to(row, { x: done ? 0 : 36, y: done ? 18 : 0, autoAlpha: 0, duration: 0.22, ease: "power2.in" });
+        .to(row, { y: done ? 3 : -3, autoAlpha: 0, duration: .16, ease: "power2.in" }));
     });
     if (flipState) {
       /* Переставляемые строки «приподнимаются» и проезжают поверх соседних, не сквозь них. */
@@ -1767,8 +1928,15 @@
         onComplete: function () { movers.forEach(function (r) { r.classList.remove("is-moving"); r.style.zIndex = ""; }); }
       }));
     }
-    if (entered.length && !firstLive) {
-      Motion.g.fromTo(entered, { y: 18, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.34, stagger: 0.05, ease: "power4.out", clearProps: "transform,opacity,visibility" });
+    if (entered.length && listNode.offsetHeight) {
+      resizeList(idleHeight);
+      var arrival = Motion.g.timeline();
+      arrival.fromTo(entered, { y: 9, opacity: .08 }, {
+        y: 0, opacity: 1, duration: .36, ease: "power3.out", clearProps: "transform,opacity"
+      }).fromTo(entered.map(function (row) { return row.__parts.visual; }), { opacity: 0, scale: .92 }, {
+        opacity: 1, scale: 1, duration: .28, ease: "power2.out", clearProps: "transform,opacity"
+      }, .06);
+      Motion.track(arrival);
     }
   };
 
@@ -1860,11 +2028,13 @@
       question: el(doc, "p", "search-question"),
       plan: el(doc, "details", "search-plan-details"),
       planSummary: el(doc, "span", "search-plan-summary"),
-      planBody: el(doc, "p", "search-plan-body"),
+      planBody: el(doc, "div", "search-plan-body"),
+      proof: el(doc, "p", "search-proof"),
       track: el(doc, "div", "track"),
       trackNote: el(doc, "p", "track-note")
     };
     li.__parts.plan.hidden = true;
+    li.__parts.phase.setAttribute("role", "status");
     var planHead = el(doc, "summary");
     planHead.appendChild(li.__parts.planSummary);
     add(li.__parts.plan, planHead, li.__parts.planBody);
@@ -1875,7 +2045,7 @@
     li.__parts.sweepInner = el(doc, "span", "");
     li.__parts.sweep.appendChild(li.__parts.sweepInner);
     li.__parts.question.hidden = true;
-    add(li, li.__parts.visual, li.__parts.target, li.__parts.clock, li.__parts.meta, li.__parts.phase, li.__parts.question, li.__parts.plan, li.__parts.sweep, li.__parts.track, li.__parts.trackNote);
+    add(li, li.__parts.visual, li.__parts.target, li.__parts.clock, li.__parts.meta, li.__parts.phase, li.__parts.question, li.__parts.plan, li.__parts.proof, li.__parts.sweep, li.__parts.track, li.__parts.trackNote);
     void s;
     return li;
   };
@@ -1895,7 +2065,10 @@
         s.source ? el(doc, "span", "", s.source) : null);
     }
     var phase = str(s.phase) || "этап не указан";
-    li.__since = parseTime(s.since);
+    var since = parseTime(s.since);
+    if (li.dataset.outcome && !s.outcome) li.__since = since;
+    else if (since) li.__since = li.__since ? Math.min(li.__since, since) : since;
+    li.__finished = parseTime(s.completed_at);
     var counters = [];
     if (num(s.attempts)) counters.push(count(s.attempts, "план", "плана", "планов"));
     if (num(s.probes)) counters.push(count(s.probes, "зонд", "зонда", "зондов"));
@@ -1905,29 +2078,68 @@
     var phaseText = phase.charAt(0).toUpperCase() + phase.slice(1);
     if (p.phase.textContent !== phaseText) {
       if (p.phase.textContent && Motion.on()) {
-        Motion.g.timeline()
-          .to(p.phase, { y: -8, autoAlpha: 0, duration: 0.16, ease: "power2.in" })
-          .add(function () { p.phase.textContent = phaseText; })
-          .fromTo(p.phase, { y: 8, autoAlpha: 0 }, { y: 0, autoAlpha: 1, duration: 0.3, ease: "power3.out", clearProps: "transform,opacity,visibility" });
+        if (p.phaseMotion) p.phaseMotion.kill();
+        p.phase.textContent = phaseText;
+        p.phaseMotion = Motion.track(Motion.g.fromTo(p.phase, { y: 2, opacity: .55 },
+          { y: 0, opacity: 1, duration: .16, ease: "power2.out", clearProps: "transform,opacity" }));
       } else {
         p.phase.textContent = phaseText;
       }
     }
-    var candidate = str(s.candidate);
+    var savedId = str(s.plan_id);
+    var candidate = str(s.plan) || str(s.candidate) || savedId;
+    var savedResult = s.outcome === "saved", partialResult = s.outcome === "partial";
+    var exactApplied = s.probe_applied === true;
+    li.dataset.outcome = str(s.outcome);
     p.plan.hidden = !candidate;
     if (candidate) {
-      var gist = candidateGist(candidate);
+      var planId = savedId;
+      var owner = list(this.m && this.m.boxes).find(function (box) {
+        return list(box.plans).some(function (entry) { return entry.id === planId; });
+      });
+      var saved = owner && owner.plans.find(function (entry) { return entry.id === planId; });
+      var applied = savedResult || partialResult || exactApplied;
+      var raw = saved ? str(saved.text) : candidate === planId ? "" : candidate;
+      var gist = raw && (raw.includes("\n") ? planGist(raw) : candidateGist(raw)) || saved && saved.human || "Состав плана не получен";
+      var label = savedResult ? "Сохранено" : partialResult ? "Частичный обход" : exactApplied ? "APPLIED · проба" : s.completed_at ? "Кандидат" : "Проверяем";
+      if (applied && raw && raw.includes("\n")) {
+        var methods = describePlan(raw);
+        if (methods.length) gist = methods.slice(0, 2).join(" ") + (methods.length > 2 ? " Ещё в подробностях." : "");
+      }
+      p.plan.dataset.label = applied && !partialResult ? "Применено" : label;
       if (p.planSummary.textContent !== gist) p.planSummary.textContent = gist;
-      if (p.planSummary.title !== candidate) p.planSummary.title = candidate;
-      if (p.planBody.textContent !== candidate) p.planBody.textContent = candidate;
+      var planKey = JSON.stringify([candidate, planId, label, s.transport, saved, owner && owner.id]);
+      if (p.planBody.__key !== planKey) {
+        p.planBody.__key = planKey;
+        var facts = el(doc, "dl", "candidate-facts");
+        function fact(label, value) { add(facts, el(doc, "dt", "", label), el(doc, "dd", "", value)); }
+        if (planId) fact("План каталога", planId);
+        fact("Транспорт", saved && saved.proto ? str(saved.proto).toUpperCase() : shapeLabel(s.shape, s.transport));
+        if (owner) fact("Коробка", str(owner.id));
+        p.planBody.replaceChildren(facts);
+        if (raw && raw.includes("\n") && (!applied || methods.length > 2)) add(p.planBody, planExplanation(doc, raw));
+        if (raw && raw !== gist) p.planBody.appendChild(el(doc, "pre", "candidate-source", raw));
+      }
       var planHead = p.plan.querySelector("summary");
-      if (planHead && planHead.getAttribute("aria-label") !== "План: " + gist) planHead.setAttribute("aria-label", "План: " + gist);
+      if (planHead) {
+        planHead.dataset.label = label;
+        planHead.dataset.mark = planId ? label + " · " + planId : label;
+        planHead.setAttribute("aria-label", planHead.dataset.mark + ". " + gist);
+      }
     }
     var classifying = s.phase === TRACK[2].phases[0] && !!str(s.question);
     p.question.hidden = !classifying;
     var qText = classifying ? "Вопрос коробке: " + str(s.question) : "";
     if (p.question.textContent !== qText) p.question.textContent = qText;
     var tr = trackFor(s.phase);
+    if (savedResult) tr = { steps: TRACK, at: TRACK.length - 1, voice: false };
+    if (partialResult) tr = { steps: TRACK, at: TRACK.length - 2, voice: false };
+    var proof = exactApplied ? "Точный APPLIED получен для пробы." : str(s.application);
+    var level = ["", "Установлено транспортное соединение.", "Подтверждён ответ сервера.", "Получен прикладной ответ."];
+    var proofText = [proof, str(s.last_result) || (s.verified && level[num(s.verify_level)])]
+      .filter(Boolean).map(function (line) { return line.replace(/\.$/, ""); }).join(" · ");
+    if (p.proof.textContent !== proofText) p.proof.textContent = proofText;
+    p.proof.hidden = !proofText;
     var stageKey = tr ? (tr.voice ? "voice" : String(tr.at)) : "idle";
     var oldStage = li.__stage;
     li.__stage = stageKey;
@@ -1950,14 +2162,18 @@
         glyphs[gi].classList.toggle("is-on", on);
       }
       if (oldStage !== undefined && oldStage !== stageKey && Motion.on()) {
-        Motion.g.fromTo(p.visual.__pulse, { scale: .62, opacity: .5 }, {
-          scale: 1.55, opacity: 0, duration: 0.8, ease: "power2.out", svgOrigin: "32 32", clearProps: "opacity,transform"
-        });
+        if (p.dialMotion) p.dialMotion.kill();
+        p.dialMotion = Motion.track(Motion.g.fromTo(p.visual.__pulse, { attr: { r: 16 }, opacity: .48 }, {
+          attr: { r: 28 }, opacity: 0, duration: .50, ease: "sine.out", clearProps: "opacity"
+        }));
         if (codeChanged) Motion.g.fromTo(p.visual.__code, { y: 2, opacity: 0 }, { y: 0, opacity: 1, duration: 0.24, ease: "power2.out", clearProps: "transform,opacity" });
-        var width = li.getBoundingClientRect().width || 640;
-        Motion.g.killTweensOf(p.sweepInner);
-        Motion.g.fromTo(p.sweepInner, { x: -width * 0.35, opacity: 0 }, { x: width * 0.1, opacity: .7, duration: 0.2, ease: "power2.out" })
-          .to(p.sweepInner, { x: width * 1.1, opacity: 0, duration: 0.5, ease: "power2.in" });
+        if (savedResult) {
+          var width = li.getBoundingClientRect().width || 640;
+          if (p.sweepMotion) p.sweepMotion.kill();
+          p.sweepMotion = Motion.track(Motion.g.timeline()
+            .fromTo(p.sweepInner, { x: -width * .35, opacity: 0 }, { x: width * .1, opacity: .7, duration: .14, ease: "power2.out" })
+            .to(p.sweepInner, { x: width * 1.1, opacity: 0, duration: .28, ease: "power2.in" }));
+        }
       }
     }
     li.setAttribute("data-done", String(!!tr && !tr.voice && tr.at === TRACK.length - 1));
@@ -1990,33 +2206,29 @@
     };
     var oldAt = p.track.__r2oAt;
     p.track.__r2oAt = tr.at;
-    if (p.track.__tween) p.track.__tween.kill();
+    if (p.track.__tween && (oldAt !== tr.at || !Motion.on())) p.track.__tween.kill();
     if (oldAt !== undefined && oldAt !== tr.at && Motion.on()) {
       /* Маркер переезжает к новому этапу; точки загораются, когда он их проходит. */
-      var pos = { at: oldAt };
-      p.track.__tween = Motion.g.to(pos, { at: tr.at, duration: 0.32, ease: "power3.inOut", onUpdate: function () {
+      var displayed = parseFloat(p.track.style.getPropertyValue("--at"));
+      var pos = { at: Number.isFinite(displayed) ? displayed : oldAt };
+      p.track.__tween = Motion.track(Motion.g.to(pos, { at: tr.at, duration: .46, ease: "power2.inOut", onUpdate: function () {
         p.track.style.setProperty("--at", String(pos.at));
         paint(pos.at, tr.at);
-      } });
-      Motion.g.fromTo(p.puck, { scale: 1 }, { scale: 1.7, duration: 0.22, delay: 0.75, yoyo: true, repeat: 1, ease: "power2.out" });
-    } else {
+      } }));
+      if (p.arrival) p.arrival.kill();
+      p.arrival = Motion.track(Motion.g.fromTo(p.puck, { "--ring-scale": 1, "--ring-alpha": 0 },
+        { "--ring-scale": 1.72, "--ring-alpha": 0, duration: .38, delay: .39, ease: "sine.out",
+          keyframes: { "0%": { "--ring-alpha": .72 }, "100%": { "--ring-alpha": 0, "--ring-scale": 1.72 } },
+          clearProps: "--ring-scale,--ring-alpha" }));
+    } else if (!p.track.__tween || !p.track.__tween.isActive()) {
       p.track.style.setProperty("--at", String(tr.at));
       paint(tr.at, tr.at);
-    }
-    if (oldStage !== undefined && oldStage !== stageKey && Motion.on()) {
-      var currentIcon = p.track.querySelector('.track-step[data-state="now"] .track-icon');
-      if (currentIcon) {
-        Motion.g.fromTo(currentIcon, { scale: .6, autoAlpha: .2 }, {
-          scale: 1, autoAlpha: 1, duration: .38, ease: "back.out(2.2)",
-          transformOrigin: "50% 50%", clearProps: "all"
-        });
-      }
     }
   };
 
   App.prototype.updateClock = function (li) {
     var doc = this.doc, p = li.__parts;
-    var text = li.__since ? clock(this.serverNow() - li.__since) : "—";
+    var text = li.__since ? clock((li.__finished || this.serverNow()) - li.__since) : "—";
     if (!p.clock.firstChild) add(p.clock, el(doc, "strong"), el(doc, "span"));
     p.clock.firstChild.textContent = text;
     p.clock.firstChild.title = li.__since ? "С " + localTime(li.__since) : "";
@@ -2382,7 +2594,12 @@
       var pre = el(doc, "pre", "", (p.id ? "# " + p.id + (p.enabled === false ? " (выключен)" : "") + "\n" : "") + planText);
       pre.tabIndex = 0;
       pre.setAttribute("aria-label", "Текст плана " + (str(p.id) || String(pi + 1)));
-      add(d, sum, pre);
+      var explanation = planExplanation(doc, p.text);
+      var confirmed = list(b.bindings).filter(function (bd) { return p.id && bd.plan_id === p.id && parseTime(bd.confirmed); });
+      if (explanation && confirmed.length) {
+        explanation.appendChild(el(doc, "p", "plan-proof", "Цели с подтверждением: " + confirmed.length));
+      }
+      add(d, sum, explanation, pre);
       plans.appendChild(d);
     });
     if (!list(b.plans).length) plans.appendChild(el(doc, "p", "box-dates", "Планов нет"));
@@ -2573,7 +2790,7 @@
     diagnosticCenters.setAttribute("data-tg-check-centers", "");
     diagnostics.append(diagnosticSummary, diagnosticState, diagnosticTime, diagnosticCenters);
 
-    root.append(hero, flowCard, stats, routes, diagnostics);
+    root.append(hero, stats, diagnostics, flowCard, routes);
     if (global.R2oTelegramFlow && global.R2oTelegramFlow.mountTelegramFlow) {
       root.__flow = global.R2oTelegramFlow.mountTelegramFlow(canvas);
     }
@@ -2660,6 +2877,7 @@
     report = report && typeof report === "object" ? report : { state: "never" };
     var key = JSON.stringify(report);
     if (root.__r2oKey === key) return;
+    if (report.state === "running") root.open = true;
     root.__r2oKey = key;
     var status = root.querySelector("[data-tg-check-state]");
     var checked = root.querySelector("[data-tg-check-time]");
@@ -2788,7 +3006,7 @@
       } else {
         buttons.push(this.button("telegram-enable", "Запустить прокси", "send", "primary", busy || !snap.telegram_configured));
       }
-      buttons.push(this.button("telegram-check", "Проверить DC1–DC5", null, null, busy || !snap.telegram_configured));
+      buttons.push(this.button("telegram-check", "Проверить DC1–DC5", "check", "primary", busy || !snap.telegram_configured));
     }
     buttons.push(this.button("telegram-workers", "Мои Workers", null, null, busy));
     ui.actions.replaceChildren.apply(ui.actions, buttons);

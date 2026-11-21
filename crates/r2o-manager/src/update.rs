@@ -305,11 +305,12 @@ fn stage_update_with_policy(
     let mut state = read_state(root);
     state["auto"] = json!(auto_update_enabled(&state));
     state["busy"] = json!("staging");
+    state["install_stage"] = json!(0);
     write_state(root, &state)?;
 
     let result = (|| {
         let work = create_work_dir(root)?;
-        let result = stage_update_in(&work, root, architecture, automatic);
+        let result = stage_update_in(&work, root, architecture, automatic, &mut state);
         let _ = fs::remove_dir_all(work);
         result
     })();
@@ -327,6 +328,9 @@ fn stage_update_with_policy(
             state["last_ok"] = json!(true);
             state["last_release"] = json!(manifest.release_id);
             state["last_message"] = json!("Уже установлен последний релиз");
+            if let Some(object) = state.as_object_mut() {
+                object.remove("install_stage");
+            }
             state["bad_release"] = json!("");
             if let Some(object) = state.as_object_mut() {
                 object.remove("never");
@@ -351,6 +355,7 @@ fn stage_update_with_policy(
             state["last_ok"] = json!(true);
             state["last_release"] = json!(manifest.release_id);
             state["last_message"] = json!("Релиз подготовлен; runtime ещё не изменён");
+            state["install_stage"] = json!(2);
             if let Some(object) = state.as_object_mut() {
                 object.remove("never");
             }
@@ -381,6 +386,7 @@ fn stage_update_in(
     root: &Path,
     architecture: &str,
     automatic: bool,
+    state: &mut Value,
 ) -> Result<StagedOutcome, UpdateError> {
     let manifest_path = work.join("latest.json");
     let signature_path = work.join("latest.json.sig");
@@ -435,6 +441,8 @@ fn stage_update_in(
         ARCHIVE_MAX_BYTES,
         DOWNLOAD_TIMEOUT_SECONDS,
     )?;
+    state["install_stage"] = json!(1);
+    write_state(root, state)?;
     let prepared = prepare_archive(
         root,
         &archive_path,
@@ -522,6 +530,7 @@ pub fn activate_staged_update(root: &Path) -> Result<Value, UpdateError> {
     state["last_utc"] = json!(now_epoch());
     state["last_ok"] = json!(true);
     state["last_release"] = json!(release_id);
+    state["install_stage"] = json!(3);
     state["last_message"] =
         json!("Релиз активирован; для проверки и перезапуска вызовите адаптер роутера");
     state["bad_release"] = json!("");
@@ -554,6 +563,7 @@ pub fn mark_bad_previous_release(root: &Path) -> Result<Value, UpdateError> {
     state["bad_release"] = json!(bad_release);
     state["last_utc"] = json!(now_epoch());
     state["last_ok"] = json!(false);
+    state["install_stage"] = json!(3);
     state["last_release"] = json!(bad_release);
     state["last_message"] =
         json!("Релиз не прошёл runtime-проверку; предыдущая версия восстановлена");
@@ -561,6 +571,29 @@ pub fn mark_bad_previous_release(root: &Path) -> Result<Value, UpdateError> {
     Ok(json!({"current":slots.current,"bad_release":bad_release}))
 }
 
+/// Результат перезапуска записывает адаптер после runtime-проверки.
+pub fn finish_router_update(root: &Path, healthy: bool) -> Result<(), UpdateError> {
+    let _lock = UpdateLock::acquire(root)?;
+    let mut state = read_state(root);
+    let stage = state["install_stage"].as_u64();
+    if healthy && (stage != Some(3) || state["last_ok"].as_bool() != Some(true)) {
+        return Ok(());
+    }
+    if !healthy && !matches!(stage, Some(2 | 3)) {
+        return Ok(());
+    }
+    state["last_utc"] = json!(now_epoch());
+    state["last_ok"] = json!(healthy);
+    if healthy {
+        state["install_stage"] = json!(4);
+    }
+    state["last_message"] = json!(if healthy {
+        "Обновление запущено и прошло проверку служб"
+    } else {
+        "Адаптер не завершил установку обновления"
+    });
+    write_state(root, &state)
+}
 /// Сохранить настройку автоустановки роутера, не сбрасывая историю обновлений.
 pub fn set_auto_update(root: &Path, enabled: bool) -> Result<Value, UpdateError> {
     let _lock = UpdateLock::acquire(root)?;
@@ -1811,6 +1844,10 @@ mod tests {
         assert!(!staged_file(root).exists());
         assert!(!work.exists());
         assert_eq!(read_state(root)["current"], "r2o-stage-1");
+        assert_eq!(read_state(root)["install_stage"], 3);
+        finish_router_update(root, true).unwrap();
+        assert_eq!(read_state(root)["install_stage"], 4);
+        assert_eq!(read_state(root)["last_ok"], true);
     }
 
     #[test]

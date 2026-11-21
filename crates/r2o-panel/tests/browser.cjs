@@ -280,12 +280,22 @@ async function main() {
   fs.writeFileSync(livePath, JSON.stringify(liveState));
   fs.writeFileSync(servicePath, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${serviceLog}'\n`);
   fs.chmodSync(servicePath, 0o700);
+  const managerRoot = path.join(work, "manager");
+  const updateFile = path.join(managerRoot, "state/update.json");
+  const updateState = { current: "test-1", latest: { release_id: "test-2", version: "R2O 2" }, check_ok: true };
+  fs.mkdirSync(path.dirname(updateFile), { recursive: true });
+  const writeUpdate = (state) => fs.writeFileSync(updateFile, JSON.stringify({
+    ...updateState, checked_utc: Math.floor(Date.now() / 1000), ...state,
+  }));
+  writeUpdate({});
   panel = spawn(panelBinary, [
     "serve",
     "--listen", `localhost:${port}`,
     "--config", configPath,
     "--service", servicePath,
-    "--assets", assets,
+    "--manager", servicePath,
+    "--manager-root", managerRoot,
+    "--assets", path.join(work, "embedded-only"),
     "--state-dir", work,
     "--live", livePath,
     "--engine-pid", enginePidPath,
@@ -456,12 +466,15 @@ async function main() {
   assert.equal(await evaluate("document.querySelector('#diagnostic-madvise-results').textContent"), "ошибок 1");
 
   await evaluate("document.querySelector('#diagnostic-toggle').click()");
+  await waitFor(() => evaluate("document.querySelector('#diagnostic-state').dataset.phase === 'paused'"), "остановка записи");
+  assert.equal(fs.existsSync(path.join(diagDir, "report.json")), true, "остановка сохраняет отчёт");
+  await evaluate("document.querySelector('#diagnostic-clear').click()");
   assert.equal(await evaluate("document.querySelector('#diagnostic-stop-dialog').open"), true);
   await evaluate("document.querySelector('#diagnostic-stop-dialog button[value=cancel]').click()");
   assert.equal(await evaluate("document.querySelector('#diagnostic-stop-dialog').open"), false);
   assert.equal(fs.existsSync(path.join(diagDir, "report.json")), true, "отмена сохраняет историю");
-  await evaluate("document.querySelector('#diagnostic-toggle').click(); document.querySelector('#diagnostic-stop-dialog button[value=stop]').click()");
-  await waitFor(() => evaluate("document.querySelector('#diagnostic-state').dataset.enabled === 'false' && document.querySelector('#diagnostic-data').hidden"), "выключение диагностики с удалением истории");
+  await evaluate("document.querySelector('#diagnostic-clear').click(); document.querySelector('#diagnostic-stop-dialog button[value=clear]').click()");
+  await waitFor(() => evaluate("document.querySelector('#diagnostic-state').dataset.phase === 'paused' && document.querySelector('#diagnostic-data').hidden"), "очистка истории при остановленном сборе");
   assert.equal(fs.existsSync(path.join(diagDir, "report.json")), false);
   await evaluate("location.hash = '#now'");
   await waitFor(() => evaluate("!document.querySelector('#now').hidden"), "возврат к обзору");
@@ -481,7 +494,7 @@ async function main() {
   assert.equal(await evaluate("document.querySelector('#overview-metrics').textContent.includes('CPU роутера свободен на 96%')"), true, "сводка показывает свободный CPU всего роутера");
   await waitFor(() => evaluate("document.querySelector('.bindings tr[data-enabled] .t')?.textContent === 'Голос Discord'"), "голосовая привязка в коробке");
   assert.equal(await evaluate("document.querySelectorAll('.bindings .proof-note').length"), 0, "голосовая привязка не добавляет заметку о RTP, которой нет в d2o");
-  assert.equal(await evaluate("document.querySelector('.search-plan') === null && document.querySelector('.search-plan-result') === null"), true, "карточка Discovery показывает тот же набор статусов, что и d2o");
+  assert.equal(await evaluate("[...document.querySelectorAll('.search-plan-details')].some(plan => !plan.hidden)"), true, "карточка Discovery раскрывает сведения о плане");
   await waitFor(() => evaluate("[...document.querySelectorAll('.search-question')].some((row) => !row.hidden && row.textContent.includes('Вопрос коробке: whole'))"), "текущий вопрос классификатора в карточке Discovery");
   assert.equal(await evaluate("document.querySelectorAll('#searches .search').length"), 4, "активные стадии представлены карточками, очередь выделена отдельно");
   assert.equal(await evaluate("document.querySelectorAll('#searches .search-visual').length"), 4, "у каждой карточки поиска есть сцена текущего этапа");
@@ -489,13 +502,30 @@ async function main() {
   assert.equal(await evaluate("document.querySelectorAll('#searches .queue-list .queue-target').length"), 1, "ожидающие замера собраны в список D2O");
   assert.equal(await evaluate("document.querySelector('#workload-meta').textContent"), "4 в работе · 1 ждут", "ожидающая задача не входит в число работающих");
   assert.equal(await evaluate("(() => { const row = [...document.querySelectorAll('#searches .search')].find((item) => item.querySelector('.search-target')?.textContent === 'starting.example'); return row?.querySelector('.search-phase')?.textContent === 'Заводим поиск' && row.querySelector('.search-clock').textContent.includes('идёт') && !row.querySelector('.search-clock').textContent.includes('в очереди'); })()"), true, "фаза запуска совпадает с D2O и не дублирует отдельную очередь");
-  assert.equal(await evaluate("(() => { const row = [...document.querySelectorAll('.search')].find((item) => item.querySelector('.search-target')?.textContent === 'failed.example'); return row?.querySelector('.search-phase')?.textContent.startsWith('Проверяем выведенный план'); })()"), true, "отказный поиск отображает исходную фазу d2o без дополнительной строки результата");
+  assert.equal(await evaluate("(() => { const row = [...document.querySelectorAll('.search')].find((item) => item.querySelector('.search-target')?.textContent === 'failed.example'); return row?.querySelector('.search-phase')?.textContent.startsWith('Проверяем выведенный план') && !row.querySelector('.search-proof').hidden; })()"), true, "карточка сохраняет текущую фазу и показывает причину отказа");
   assert.equal(await evaluate("[...document.querySelectorAll('.search .track')].every((track) => track.querySelectorAll('.track-step').length === 7 && track.querySelector('.track-step:last-child').textContent === 'Подтверждено')"), true, "карточка использует исходные семь этапов d2o");
   const liveSearch = liveState.searches.find((search) => search.target === "classifying.example");
   liveSearch.probes = 2;
   liveSearch.question = "split";
   fs.writeFileSync(livePath, JSON.stringify(liveState));
   await waitFor(() => evaluate("[...document.querySelectorAll('.search-question')].some((row) => !row.hidden && row.textContent.includes('Вопрос коробке: split'))"), "автоматическое обновление вопроса и числа зондов");
+  const resolved = liveState.searches.find((search) => search.target === "blocked.example");
+  Object.assign(resolved, {
+    phase: "подбор завершён", outcome: "saved", completed_at: new Date().toISOString(),
+    plan_id: "test-plan", probe_applied: true, verified: true, verify_level: 3,
+  });
+  liveState.boxes[0].plans.push({ id: "test-plan", text: "r2o-plan 1 5\nproto tcp tls\nsplit sni_middle +0\norder reverse" });
+  fs.writeFileSync(livePath, JSON.stringify(liveState));
+  await waitFor(() => evaluate("document.querySelector('.search[data-outcome=saved] summary')?.dataset.mark === 'Сохранено · test-plan'"), "закреплённый результат подбора из HTTP-снимка");
+  assert.equal(await evaluate("document.querySelector('.search[data-outcome=saved] .search-proof').textContent.includes('Точный APPLIED получен для пробы')"), true);
+  assert.equal(await evaluate("document.querySelector('.search[data-outcome=saved] summary').textContent.includes('Разделяет TLS-приветствие')"), true);
+  if (captureDir) {
+    await call("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await waitFor(() => evaluate("document.querySelector('.search[data-outcome=saved] .track-step:last-child').dataset.state === 'now'"), "маркер дошёл до итога");
+    await evaluate("document.querySelector('.search[data-outcome=saved]').scrollIntoView({block:'center'})");
+    const screenshot = await call("Page.captureScreenshot", { format: "png" });
+    fs.writeFileSync(path.join(captureDir, "discovery-result.png"), Buffer.from(screenshot.data, "base64"));
+  }
   for (const [name, width, height] of [
     ["телефон", 320, 740],
     ["широкий телефон", 390, 844],
@@ -601,6 +631,27 @@ async function main() {
   await waitFor(() => evaluate("document.querySelector('#command').open === true"), "командная палитра открывается по Ctrl K");
   assert.equal(await evaluate("document.querySelectorAll('#command-list .command-item').length >= 6"), true, "палитра содержит навигацию по разделам");
   await evaluate("document.querySelector('#command').close()");
+  await evaluate("location.hash = '#updates'");
+  await waitFor(() => evaluate("!document.querySelector('#update-install').hidden"), "доступный выпуск в панели");
+  await evaluate("document.querySelector('#update-install').click()");
+  assert.equal(await evaluate("document.querySelector('#ask').open"), true);
+  await evaluate("document.querySelector('[data-ask=no]').click()");
+  assert.equal(fs.existsSync(serviceLog) && fs.readFileSync(serviceLog, "utf8").includes("update-install"), false);
+  await evaluate("document.querySelector('#update-install').click(); document.querySelector('[data-ask=yes]').click()");
+  await waitFor(() => fs.existsSync(serviceLog) && fs.readFileSync(serviceLog, "utf8").includes("update-install"), "штатный HTTP-запуск установки");
+  for (const stage of [0, 1, 2, 3, 4]) {
+    writeUpdate({
+      busy: stage < 2 ? "staging" : "", install_stage: stage,
+      last_ok: stage >= 2, last_utc: Math.floor(Date.now() / 1000), current: stage >= 3 ? "test-2" : "test-1",
+    });
+    await waitFor(() => evaluate(`document.querySelector('#update-progress').value === ${stage} && !document.querySelector('#update-progress').hidden`), "этап установки " + stage);
+    if (stage === 3 && captureDir) {
+      assert.equal(await evaluate("document.querySelector('#update-empty').hidden"), true);
+      const screenshot = await call("Page.captureScreenshot", { format: "png" });
+      fs.writeFileSync(path.join(captureDir, "update-startup.png"), Buffer.from(screenshot.data, "base64"));
+    }
+  }
+  assert.equal(await evaluate("document.querySelector('#updates-body').dataset.install"), "done");
   assert.deepEqual(runtimeErrors, [], `ошибки JavaScript в браузере: ${runtimeErrors.join("; ")}`);
   console.log("Проверка Chrome-панели R2O: ПРОЙДЕНА");
 }

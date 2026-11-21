@@ -734,11 +734,12 @@
     var slider = doc.getElementById("diagnostic-cursor-input"), graph = doc.getElementById("diagnostic-memory-chart");
     if (!toggle || !status || !download) return;
     var stopDialog = doc.getElementById("diagnostic-stop-dialog"), eventFilter = doc.getElementById("diagnostic-event-filter");
+    var clearHistory = doc.getElementById("diagnostic-clear");
     var rangeButtons = doc.querySelectorAll("[data-memory-range]");
     var params = new URL(root.location.href).searchParams;
     var range = params.get("diag-period") === "24" ? 24 : 2;
     eventFilter.value = params.get("diag-outcomes") === "unconfirmed" ? "unconfirmed" : "all";
-    var enabled, failed = false, busy = false, currentReport = {}, chart, selectedAt;
+    var enabled, paused = false, failed = false, busy = false, currentReport = {}, chart, selectedAt;
     var reportBytes = null, poll, request, pendingSince = 0, resizeFrame;
     var plotSize = { width: 320, height: 240 };
 
@@ -797,11 +798,12 @@
       var interval = number(currentReport.sample_interval_ms) || 60000;
       var waiting = pendingSince && Date.now() - pendingSince < 10000;
       var stale = at !== null && Date.now() - at * 1000 > 2 * interval;
-      var phase = failed ? "error" : enabled === undefined ? "loading" : !enabled ? "off"
+      var phase = failed ? "error" : enabled === undefined ? "loading" : !enabled ? "off" : paused ? "paused"
         : at === null ? (waiting ? "pending" : "late") : stale ? "late" : "ready";
       var labels = {
         loading: ["Проверяем", "Читаем состояние сбора…"],
         off: ["Выключен", "Минутные снимки памяти и исходы подбора сохраняются на роутере после включения."],
+        paused: ["Остановлен", at === null ? "Запись приостановлена." : "Запись приостановлена. Последний снимок " + timeLabel(at)],
         pending: ["Первый снимок", "Сбор включён. Ждём первый снимок контроллера…"],
         late: ["Данные задерживаются", at === null ? "Первый снимок ещё недоступен. Проверьте состояние контроллера." : "Снимок за " + timeLabel(at) + " устарел. Показан последний доступный отчёт."],
         ready: ["Включён", "Последний снимок " + timeLabel(at) + " · шаг " + formatAge(interval)],
@@ -812,8 +814,10 @@
       state.dataset.enabled = String(enabled === true);
       state.dataset.phase = phase;
       toggle.disabled = busy || enabled === undefined;
-      toggle.textContent = enabled ? "Выключить…" : "Включить сбор";
-      toggle.setAttribute("data-variant", enabled ? "danger" : "primary");
+      toggle.textContent = paused ? "Возобновить сбор" : enabled ? "Остановить сбор" : "Включить сбор";
+      toggle.setAttribute("data-variant", enabled && !paused ? "ghost" : "primary");
+      clearHistory.hidden = !enabled;
+      clearHistory.disabled = busy;
       download.hidden = !enabled || failed || at === null;
       refreshButton.hidden = !enabled && !failed;
       refreshButton.disabled = busy || !!request;
@@ -825,7 +829,7 @@
       var last = list(currentReport.samples).at(-1);
       var interval = number(currentReport.sample_interval_ms) || 60000;
       var untilNext = last && number(last.at) !== null ? last.at * 1000 + interval + 1200 - Date.now() : 0;
-      var delay = failed ? 5000 : !enabled ? 30000 : !last
+      var delay = failed ? 5000 : !enabled || paused ? 30000 : !last
         ? (Date.now() - pendingSince < 10000 ? 900 : 5000)
         : Math.min(interval, Math.max(untilNext > 0 ? 2000 : 8000, untilNext));
       poll = root.setTimeout(refresh, delay);
@@ -840,6 +844,7 @@
         return response.json().then(function (report) {
           failed = false;
           enabled = report.enabled === true;
+          paused = enabled && response.headers.get("X-R2O-Diagnostics-Paused") === "true";
           var pending = enabled && !list(report.samples).length;
           if (pending && !pendingSince) pendingSince = Date.now();
           if (!pending) pendingSince = 0;
@@ -859,20 +864,23 @@
       return request;
     }
 
-    function toggleCollection() {
+    function controlCollection(action) {
       if (busy || enabled === undefined) return;
       busy = true;
       root.clearTimeout(poll);
       renderState();
       Promise.resolve(request).then(function () {
-        return root.fetch("/api/diagnostics?" + (enabled ? "disable" : "enable"), { method: "POST", cache: "no-store" });
+        return root.fetch("/api/diagnostics?" + action, { method: "POST", cache: "no-store" });
       }).then(function (response) {
         if (!response.ok) throw new Error(String(response.status));
         return response.json();
       }).then(function (reply) {
         enabled = reply.enabled === true;
         pendingSince = enabled ? Date.now() : 0;
-        currentReport = {};
+        if (action === "clear") {
+          selectedAt = undefined;
+          currentReport = {};
+        }
         failed = false;
         redraw();
         return refresh();
@@ -880,19 +888,20 @@
         setText(doc, "diagnostic-status", error.message === "403" ? "Управление сбором недоступно в этой панели." : "Не удалось изменить состояние сбора.");
       }).finally(function () {
         busy = false;
-        toggle.disabled = enabled === undefined;
-        refreshButton.disabled = false;
+        renderState();
         schedule();
       });
     }
 
     toggle.addEventListener("click", function () {
-      if (!enabled) { toggleCollection(); return; }
+      controlCollection(enabled && !paused ? "pause" : "enable");
+    });
+    clearHistory.addEventListener("click", function () {
       stopDialog.returnValue = "cancel";
       stopDialog.showModal();
     });
     stopDialog.addEventListener("close", function () {
-      if (stopDialog.returnValue === "stop" && enabled) toggleCollection();
+      if (stopDialog.returnValue === "clear" && enabled) controlCollection("clear");
     });
     rangeButtons.forEach(function (button) {
       button.addEventListener("click", function () {

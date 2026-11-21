@@ -1514,11 +1514,13 @@ update_install() {
     if ! stop; then
         say "не удалось остановить runtime перед активацией; запускаю прежний release"
         "$INIT" start || true
+        "$MANAGER" update-runtime-error --root "$ROOT" || true
         return 1
     fi
     activate_result=$("$MANAGER" update-activate --root "$ROOT") || {
         say "не удалось активировать подготовленный release; запускаю прежний"
         "$INIT" start || true
+        "$MANAGER" update-runtime-error --root "$ROOT" || true
         return 1
     }
     printf '%s\n' "$activate_result"
@@ -1527,14 +1529,17 @@ update_install() {
         *)
             say "менеджер обновления не подтвердил активацию release"
             "$INIT" start || true
+            "$MANAGER" update-runtime-error --root "$ROOT" || true
             return 1
             ;;
     esac
     if "$INIT" start && wait_health; then
+        "$MANAGER" update-runtime-ok --root "$ROOT" || true
         say "обновление запущено и прошло runtime-проверку"
         return 0
     fi
     say "новый release не прошёл runtime-проверку; выполняю rollback"
+    "$MANAGER" update-runtime-error --root "$ROOT" || true
     update_rollback
     return 1
 }

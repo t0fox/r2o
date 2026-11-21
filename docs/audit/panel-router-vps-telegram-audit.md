@@ -37,7 +37,7 @@
 | Контракт | C D2O | Rust R2O | Ветви/коды | Тест | Статус |
 |---|---|---|---|---|---|
 | `GET /` | `server.c:1449`, `static_file:1314` | `server.rs:287`, `static_asset:1780` | 200/304/404; `index.html` | `test-panel-static-etag-differential.sh`; browser.cjs | ДИФ |
-| `GET /assets/favicon.svg`, `panel.css`, `panel.js`, `diagnostics.js`, `telegram-flow.js`, `telegram-flow-prototype.js`, `gsap.js`, `onest.woff2`, `jbmono.woff2` | `server.c:1452-1477` | `server.rs:290-349`; R2O дополнительно `refresh-mask.svg`, `panel-motion.js`, `panel-lava.js`, `nunito-*.woff2`, `jetbrains-mono-lava.woff2` | 200/304/404; тип по маршруту | `static-etag`, `static-asset-size`; browser.cjs | ДИФ + EXT |
+| `GET /assets/favicon.svg`, `panel.css`, `panel.js`, `diagnostics.js`, `telegram-flow.js`, `telegram-flow-prototype.js`, `gsap.js`, `onest.woff2`, `jbmono.woff2` | `server.c:1452-1477` | `server.rs:290-349`; R2O дополнительно `refresh-mask.svg`, `panel-motion.js`, `nunito-*.woff2` | 200/304/404; тип по маршруту | `static-etag`, `static-asset-size`; browser.cjs | ДИФ + EXT |
 | `GET /api/status` | `api_status:1249` | `api_status:754` | 200; live/ unavailable; revision/unchanged | `status-unavailable`, `live-status-size`, `catalog-revision` | ДИФ |
 | `POST /api/control/{start,stop,restart,reapply,clear-found,telegram-enable,telegram-disable,update-check,update-install,update-auto-on,update-auto-off}` | `api_control:895`, таблица `897-913` | `api_control:1124`, таблица `1125-1173` | 202/403/404/409/400/500 | `control-response`, `control-timeout`, `telegram-config-gate` | ДИФ |
 | `POST /api/control/telegram-check` | нет | `server.rs:1150`, `start_telegram_check:1284` | 202/409 | Rust `telegram_check_runs_as_an_authenticated_async_service_action` | EXT |

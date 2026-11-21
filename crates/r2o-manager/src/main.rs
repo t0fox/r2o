@@ -1,8 +1,8 @@
 use r2o_manager::{
     activate_bundle, activate_staged_update, active_component_path, check_update,
-    config::initialize_config, decode_public_key, install_archive, install_update,
-    install_update_auto, mark_bad_previous_release, read_install_architecture, rollback,
-    set_auto_update, stage_update, stage_update_auto, verify_release_archive,
+    config::initialize_config, decode_public_key, finish_router_update, install_archive,
+    install_update, install_update_auto, mark_bad_previous_release, read_install_architecture,
+    rollback, set_auto_update, stage_update, stage_update_auto, verify_release_archive,
 };
 use serde_json::json;
 use std::error::Error;
@@ -41,6 +41,8 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some("update-stage") => stage_command(args, false),
         Some("update-stage-auto") => stage_command(args, true),
         Some("update-activate") => activate_command(args),
+        Some("update-runtime-ok") => finish_command(args, true),
+        Some("update-runtime-error") => finish_command(args, false),
         Some("update-auto") => update_auto_command(args),
         Some("update-mark-bad-previous") => update_mark_bad_previous_command(args),
         Some("exec") => exec_command(args),
@@ -212,6 +214,21 @@ fn update_auto_command(
     let enabled = enabled.ok_or("missing required option --enabled")?;
     let result = set_auto_update(&root, enabled)?;
     println!("{}", serde_json::to_string(&result)?);
+    Ok(())
+}
+
+fn finish_command(
+    mut args: impl Iterator<Item = std::ffi::OsString>,
+    healthy: bool,
+) -> Result<(), Box<dyn Error>> {
+    if args.next().as_deref().and_then(std::ffi::OsStr::to_str) != Some("--root") {
+        return Err(usage_error());
+    }
+    let root = PathBuf::from(args.next().ok_or("missing --root directory")?);
+    if args.next().is_some() {
+        return Err(usage_error());
+    }
+    finish_router_update(&root, healthy)?;
     Ok(())
 }
 
