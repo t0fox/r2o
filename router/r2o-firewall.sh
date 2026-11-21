@@ -236,6 +236,15 @@ table inet r2o {
         flags timeout
         size 64
     }
+    chain dns_output {
+        type filter hook output priority dstnat + 10; policy accept;
+        meta mark $MARK return
+        ${MEASURE_MARK:+meta mark $MEASURE_MARK return}
+        oifname "lo" return
+        ct status dnat return
+        meta l4proto { tcp, udp } ip daddr . meta l4proto . th dport @dns_route4 ct direction original ct original packets $nft_window counter queue num $QUEUE4 bypass
+        meta l4proto { tcp, udp } ip6 daddr . meta l4proto . th dport @dns_route6 ct direction original ct original packets $nft_window counter queue num $QUEUE6 bypass
+    }
     chain out {
         type filter hook postrouting priority mangle; policy accept;
         ip saddr 127.0.0.0/8 return
@@ -247,8 +256,8 @@ table inet r2o {
         ip6 daddr ff00::/8 return
         meta mark $MARK return
         ${MEASURE_MARK:+meta mark $MEASURE_MARK return}
-        oifname != "lo" ct status != dnat meta skuid 0-4294967294 meta l4proto { tcp, udp } ip daddr . meta l4proto . th dport @dns_route4 ct direction original ct original packets $nft_window counter queue num $QUEUE4 bypass
-        oifname != "lo" ct status != dnat meta skuid 0-4294967294 meta l4proto { tcp, udp } ip6 daddr . meta l4proto . th dport @dns_route6 ct direction original ct original packets $nft_window counter queue num $QUEUE6 bypass
+        ct status != dnat meta skuid 0-4294967294 meta l4proto { tcp, udp } ip daddr . meta l4proto . th dport @dns_route4 return
+        ct status != dnat meta skuid 0-4294967294 meta l4proto { tcp, udp } ip6 daddr . meta l4proto . th dport @dns_route6 return
         meta l4proto { tcp, udp } th dport { $nft_dns } return
         ct status dnat return
         $nft_gate_out
@@ -432,13 +441,19 @@ xt() {
 xt_dns_route_down() {
     dns_xt=$1
     case "$dns_xt" in ip6tables) dns_set=r2o_dns_route6 ;; *) dns_set=r2o_dns_route4 ;; esac
-    while xt "$dns_xt" -t mangle -D POSTROUTING -j R2O_DNS_OUT 2>/dev/null; do :; done
+    while xt "$dns_xt" -t mangle -D OUTPUT -j R2O_DNS_OUT 2>/dev/null; do :; done
     while xt "$dns_xt" -t mangle -D INPUT -j R2O_DNS_IN 2>/dev/null; do :; done
+    while xt_dns_postrouting_skip -D 2>/dev/null; do :; done
     for dns_chain in R2O_DNS_OUT R2O_DNS_IN; do
         xt "$dns_xt" -t mangle -F "$dns_chain" 2>/dev/null || true
         xt "$dns_xt" -t mangle -X "$dns_chain" 2>/dev/null || true
     done
     command -v ipset >/dev/null 2>&1 && ipset -quiet destroy "$dns_set" || true
+}
+
+xt_dns_postrouting_skip() {
+    xt "$dns_xt" -t mangle "$1" R2O_OUT -m owner --socket-exists \
+        -m set --match-set "$dns_set" dst,dst -m conntrack ! --ctstate DNAT -j RETURN
 }
 
 xt_dns_route_up() {
@@ -457,7 +472,8 @@ xt_dns_route_up() {
         -m conntrack --ctdir REPLY ! --ctstate DNAT \
         -m connbytes --connbytes "$CONNBYTES" --connbytes-dir reply --connbytes-mode packets \
         -j NFQUEUE --queue-num "$dns_queue" --queue-bypass || return 1
-    xt "$dns_xt" -t mangle -I POSTROUTING 1 -j R2O_DNS_OUT || return 1
+    xt_dns_postrouting_skip -I || return 1
+    xt "$dns_xt" -t mangle -I OUTPUT 1 -j R2O_DNS_OUT || return 1
     xt "$dns_xt" -t mangle -I INPUT 1 -j R2O_DNS_IN
 }
 
@@ -479,8 +495,9 @@ xt_dns_route() {
         return $?
     fi
     xt "$dns_xt" -t mangle -C POSTROUTING -j R2O_OUT || return 1
-    if ! xt "$dns_xt" -t mangle -C POSTROUTING -j R2O_DNS_OUT 2>/dev/null ||
-       ! xt "$dns_xt" -t mangle -C INPUT -j R2O_DNS_IN 2>/dev/null; then
+    if ! xt "$dns_xt" -t mangle -C OUTPUT -j R2O_DNS_OUT 2>/dev/null ||
+       ! xt "$dns_xt" -t mangle -C INPUT -j R2O_DNS_IN 2>/dev/null ||
+       ! xt_dns_postrouting_skip -C 2>/dev/null; then
         xt_dns_route_down "$dns_xt"
         xt_dns_route_up || { xt_dns_route_down "$dns_xt"; return 1; }
     fi
@@ -1014,14 +1031,17 @@ firewall_status_nft() {
     in_rules_chain=$(nft list chain inet r2o in_rules 2>/dev/null) || return 1
     forward_chain=$(nft list chain inet r2o forward 2>/dev/null) || return 1
     input_chain=$(nft list chain inet r2o input 2>/dev/null) || return 1
+    dns_output_chain=$(nft list chain inet r2o dns_output 2>/dev/null) || return 1
     nat_post_chain=$(nft list chain inet r2o nat_post 2>/dev/null) || return 1
     printf '%s\n' "$out_chain" | grep -F -q 'type filter hook postrouting priority mangle;' || return 1
     printf '%s\n' "$forward_chain" | grep -F -q 'type filter hook forward priority mangle;' || return 1
     printf '%s\n' "$forward_chain" | grep -F -q 'jump in_rules' || return 1
     printf '%s\n' "$input_chain" | grep -F -q 'type filter hook input priority mangle;' || return 1
     printf '%s\n' "$input_chain" | grep -F -q 'jump in_rules' || return 1
+    printf '%s\n' "$dns_output_chain" | grep -F -q 'type filter hook output priority dstnat + 10;' || return 1
     for dns_family in 4 6; do
         printf '%s\n' "$out_chain" | grep -F -q "@dns_route$dns_family" || return 1
+        printf '%s\n' "$dns_output_chain" | grep -F -q "@dns_route$dns_family" || return 1
         printf '%s\n' "$input_chain" | grep -F -q "@dns_route$dns_family" || return 1
     done
     printf '%s\n' "$nat_post_chain" | grep -F -q 'type nat hook postrouting priority srcnat - 1;' || return 1
@@ -1029,7 +1049,7 @@ firewall_status_nft() {
     nft list table inet r2o_rst >/dev/null 2>&1 || return 1
 
     out_queue_total=$(printf '%s\n' "$out_chain" | awk '/queue/ && /bypass/ { count++ } END { print count + 0 }')
-    [ "$out_queue_total" -eq 14 ] || return 1
+    [ "$out_queue_total" -eq 12 ] || return 1
     in_queue_total=$(printf '%s\n' "$in_rules_chain" | awk '/queue/ && /bypass/ { count++ } END { print count + 0 }')
     [ "$in_queue_total" -eq 14 ] || return 1
     out_queue4=$(printf '%s\n' "$out_chain" | awk -v queue="$QUEUE4" \
@@ -1040,7 +1060,7 @@ firewall_status_nft() {
         '/queue/ && /bypass/ { for (i = 1; i <= NF; i++) if ($i == queue) { count++; break } } END { print count + 0 }')
     in_queue6=$(printf '%s\n' "$in_rules_chain" | awk -v queue="$QUEUE6" \
         '/queue/ && /bypass/ { for (i = 1; i <= NF; i++) if ($i == queue) { count++; break } } END { print count + 0 }')
-    [ "$out_queue4" -eq 7 ] && [ "$out_queue6" -eq 7 ] &&
+    [ "$out_queue4" -eq 6 ] && [ "$out_queue6" -eq 6 ] &&
         [ "$in_queue4" -eq 7 ] && [ "$in_queue6" -eq 7 ]
 }
 

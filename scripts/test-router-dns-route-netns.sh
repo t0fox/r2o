@@ -9,15 +9,20 @@ fi
 
 WORK=$(mktemp -d)
 peer=
+queue_listener=
 cleanup() {
     if [ -n "$peer" ]; then kill "$peer" 2>/dev/null || :; wait "$peer" 2>/dev/null || :; fi
+    if [ -n "$queue_listener" ]; then
+        kill "$queue_listener" 2>/dev/null || :
+        wait "$queue_listener" 2>/dev/null || :
+    fi
     rm -rf -- "$WORK"
 }
 trap cleanup EXIT HUP INT TERM
 
 export R2O_DIR="$WORK" R2O_CONFIG=/dev/null R2O_RUN_DIR="$WORK/run"
 export FW_BACKEND=${FW_BACKEND:-nft} QUEUE_NUM=34000 QUEUE_NUM6=34001 MEASURE_MARK=47
-export R2O_PPE_DEOFFLOAD=0
+export R2O_PPE_DEOFFLOAD=0 PORTS=853 DNS_PORTS=53
 FIREWALL="$ROOT/router/r2o-firewall.sh"
 
 ip link set lo up
@@ -45,6 +50,63 @@ sh "$FIREWALL" dns-route add 2001:db8::2 udp 853 20
 sh "$FIREWALL" dns-route add 2001:db8::2 udp 853 40
 if sh "$FIREWALL" dns-route add 192.0.2.2 udp 53 20; then exit 1; fi
 if sh "$FIREWALL" dns-route add ::1 tcp 853 20; then exit 1; fi
+
+if [ "$FW_BACKEND" = nft ]; then
+    nft list chain inet r2o dns_output | grep -Fq 'hook output'
+else
+    iptables -t mangle -C OUTPUT -j R2O_DNS_OUT
+    ip6tables -t mangle -C OUTPUT -j R2O_DNS_OUT
+fi
+
+python3 - "$WORK/queue" <<'PY' &
+from collections import Counter
+from pathlib import Path
+import socket
+import struct
+import sys
+
+with socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 12) as control:
+    control.bind((0, 0))
+    control.settimeout(6)
+
+    def send(command, queue, attr, value, confirm=False):
+        body = struct.pack("!BBH", 0, 0, queue)
+        body += struct.pack("=HH", 4 + len(value), attr) + value
+        body += bytes(-len(body) % 4)
+        control.sendto(struct.pack("=IHHII", 16 + len(body), 0x300 | command,
+                                   5 if confirm else 1, 1, 0) + body, (0, 0))
+        if confirm:
+            reply = control.recv(1024)
+            assert struct.unpack_from("=i", reply, 16)[0] == 0
+
+    for queue in (34000, 34001):
+        send(2, queue, 1, struct.pack("!BBH", 1, 0, 0), confirm=True)
+        send(2, queue, 2, struct.pack("!IB", 0, 1), confirm=True)
+    Path(sys.argv[1]).touch()
+    hooks = Counter()
+    for _ in range(6):
+        packet = control.recv(4096)
+        queue = struct.unpack_from("!H", packet, 18)[0]
+        at = 20
+        while at + 4 <= len(packet):
+            length, kind = struct.unpack_from("=HH", packet, at)
+            assert length >= 4
+            if kind == 1:
+                packet_id, _, hook = struct.unpack_from("!IHB", packet, at + 4)
+                hooks[queue, hook] += 1
+                send(1, queue, 2, struct.pack("!II", 1, packet_id))
+                break
+            at += (length + 3) & ~3
+        else:
+            raise AssertionError("В NFQUEUE отсутствует заголовок пакета")
+    assert hooks == {(34000, 3): 1, (34000, 1): 2, (34001, 3): 1, (34001, 1): 2}, hooks
+PY
+queue_listener=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ ! -e "$WORK/queue" ] || break
+    sleep 0.05
+done
+test -e "$WORK/queue"
 
 nsenter -n -t "$peer" python3 - "$WORK/server" <<'PY' &
 import pathlib
@@ -86,10 +148,12 @@ for family, address in [(socket.AF_INET, "192.0.2.2"), (socket.AF_INET6, "2001:d
             assert client.recv(256) == b"route-check"
 PY
 wait "$server"
+wait "$queue_listener"
+queue_listener=
 
 packets() {
     if [ "$FW_BACKEND" = nft ]; then
-        case "$1" in out) chain=out ;; in) chain=input ;; esac
+        case "$1" in out) chain=dns_output ;; in) chain=input ;; esac
         nft list chain inet r2o "$chain" |
             awk -v set="@dns_route$2" '$0 ~ set {for(i=1;i<NF-1;i++) if($i=="counter" && $(i+1)=="packets"){print $(i+2); exit}}'
     else
