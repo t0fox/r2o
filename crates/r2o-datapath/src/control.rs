@@ -499,7 +499,7 @@ impl NamePlans {
         }
         Some(BindingContext {
             generation: installed.generation,
-            kind: 1,
+            kind: if shape == SHAPE_QUIC { 2 } else { 1 },
             family,
             shape,
             temporary: false,
@@ -587,6 +587,25 @@ impl NamePlans {
         hook: Option<u8>,
         controller_probe: bool,
     ) -> Option<&Plan> {
+        self.select_with_quic_snapshot_at_hook_probe(
+            packet,
+            quic_host,
+            hook,
+            controller_probe,
+            hook == Some(crate::netlink::R2O_NF_INET_LOCAL_OUT),
+            None,
+        )
+    }
+
+    pub fn select_with_quic_snapshot_at_hook_probe(
+        &self,
+        packet: &[u8],
+        quic_host: Option<&[u8]>,
+        hook: Option<u8>,
+        controller_probe: bool,
+        local_output: bool,
+        snapshot: Option<&[u8]>,
+    ) -> Option<&Plan> {
         let view = PacketView::parse(packet)?;
         if view.protocol == 17 {
             if let Some(probe) = self.addr_probe_binding_at_hook(packet, hook) {
@@ -641,6 +660,16 @@ impl NamePlans {
                 || !r2k_core::quic::is_authenticated_initial(payload)
             {
                 return None;
+            }
+            if local_output
+                && !controller_probe
+                && let Some(plan) = self.find_dns_doq_plan(
+                    SocketAddr::new(view.dst.as_ip_addr(), destination_port),
+                    payload,
+                    snapshot,
+                )
+            {
+                return Some(plan);
             }
             let derived_quic_host = quic_host
                 .is_none()
@@ -1088,6 +1117,16 @@ impl NamePlans {
         execution_id: u64,
         hook: Option<u8>,
     ) -> Option<AppliedEvent> {
+        let plan = self.select_with_quic_host_at_hook(packet, None, hook)?;
+        self.applied_event_for_plan(packet, execution_id, plan)
+    }
+
+    pub fn applied_event_for_plan(
+        &self,
+        packet: &[u8],
+        execution_id: u64,
+        plan: &Plan,
+    ) -> Option<AppliedEvent> {
         if execution_id == 0 {
             return None;
         }
@@ -1097,7 +1136,6 @@ impl NamePlans {
             17 => 2,
             _ => return None,
         };
-        let plan = self.select_with_quic_host_at_hook(packet, None, hook)?;
         let binding = self.binding_for_plan(plan)?;
         let key = if view.protocol == 6 {
             crate::capture::TcpFlowKey::from_packet(packet)?.wire_key()
@@ -2044,14 +2082,19 @@ impl NamePlans {
         else {
             return (true, control::ACK_OK);
         };
+        let transport = body[1 + name_len];
+        let kind = if control::dns_doq_plan_endpoint(host.as_bytes()).is_some() {
+            2
+        } else {
+            1
+        };
         if !binding.is_known()
-            || binding.kind != 1
+            || binding.kind != kind
             || binding.temporary
             || !matches!(binding.family, 4 | 6)
         {
             return (true, control::ACK_OK);
         }
-        let transport = body[1 + name_len];
         let key = NamePlanKey {
             host,
             family: binding.family,
@@ -2065,7 +2108,7 @@ impl NamePlans {
             && installed.is_some_and(|installed| {
                 let current = BindingContext {
                     generation: installed.generation,
-                    kind: 1,
+                    kind,
                     family: binding.family,
                     shape: binding.shape,
                     temporary: false,
@@ -2238,6 +2281,41 @@ impl NamePlans {
                 key.shape = r2k_link_shape_tcp_base(shape);
                 self.dns_plans.get(&key).filter(|entry| entry.expires > now)
             })?;
+        Some(&entry.installed.plan)
+    }
+
+    fn find_dns_doq_plan(
+        &self,
+        endpoint: SocketAddr,
+        payload: &[u8],
+        snapshot: Option<&[u8]>,
+    ) -> Option<&Plan> {
+        if self.dns_plans.is_empty() {
+            return None;
+        }
+        let now = Instant::now();
+        if !self.dns_plans.iter().any(|(key, entry)| {
+            key.shape == SHAPE_QUIC
+                && entry.expires > now
+                && control::dns_doq_plan_endpoint(key.host.as_bytes()) == Some(endpoint)
+        }) {
+            return None;
+        }
+        let batch = snapshot.and_then(r2k_core::quic_snapshot::r2k_quic_snapshot_parse);
+        let single = [payload];
+        let datagrams = batch
+            .as_ref()
+            .map_or(single.as_slice(), |batch| batch.datagrams());
+        let sni = r2k_core::quic::r2k_quic_doq_sni(datagrams).ok()?;
+        let key = NamePlanKey {
+            host: control::dns_doq_plan_key(endpoint, sni.as_deref().unwrap_or_default())?,
+            family: if endpoint.is_ipv4() { 4 } else { 6 },
+            shape: SHAPE_QUIC,
+        };
+        let entry = self
+            .dns_plans
+            .get(&key)
+            .filter(|entry| entry.expires > now)?;
         Some(&entry.installed.plan)
     }
 
@@ -2908,11 +2986,14 @@ fn canonical_plan_name(bytes: &[u8], shape: u8) -> Option<String> {
 }
 
 fn dns_bound_name(name: &[u8], family: u8, shape: u8) -> Option<String> {
-    let endpoint = control::dns_tcp_plan_endpoint(name)?;
-    if shape == SHAPE_HTTP
-        || !control::is_tcp_plan_shape(shape)
-        || (if endpoint.is_ipv4() { 4 } else { 6 }) != family
-    {
+    let endpoint = if shape == SHAPE_QUIC {
+        control::dns_doq_plan_endpoint(name)?
+    } else if shape != SHAPE_HTTP && control::is_tcp_plan_shape(shape) {
+        control::dns_tcp_plan_endpoint(name)?
+    } else {
+        return None;
+    };
+    if (if endpoint.is_ipv4() { 4 } else { 6 }) != family {
         return None;
     }
     Some(std::str::from_utf8(name).ok()?.to_owned())
@@ -6716,6 +6797,187 @@ mod tests {
             );
             assert!(plans.select(&tcp_tls_packet("catalog.example")).is_some());
         }
+    }
+
+    #[test]
+    fn doq_binding_requires_exact_local_endpoint_and_unambiguous_alpn() {
+        use crate::netlink::{
+            R2O_NF_INET_LOCAL_IN, R2O_NF_INET_LOCAL_OUT, R2O_NF_INET_POST_ROUTING,
+        };
+        use std::io::Cursor;
+
+        let host = "resolver.example";
+        let endpoint = "198.51.100.2:853".parse().unwrap();
+        let key = control::dns_doq_plan_key(endpoint, host.as_bytes()).unwrap();
+        let plan = set_quic_name(host);
+        let records = &plan.body[3 + host.len()..];
+        let set = |key: &str, family| {
+            control::read_frame(&mut Cursor::new(
+                control::encode_set_name_bound(key, SHAPE_QUIC, family, records, [7; 16]).unwrap(),
+            ))
+            .unwrap()
+        };
+        let mut plans = NamePlans::default();
+        assert!(!plans.handle(&set(&key, 6)).ok);
+        assert!(
+            !plans
+                .handle(&set(
+                    &control::dns_tcp_plan_key(endpoint, host.as_bytes()).unwrap(),
+                    4
+                ))
+                .ok
+        );
+        let ack = plans.handle(&set(&key, 4));
+        assert!(ack.ok);
+        let binding = ack.binding_context.unwrap();
+        assert_eq!(binding.kind, 2);
+        let wire = control::encode_ack_with_binding(
+            ack.command,
+            ack.ok,
+            ack.reason,
+            ack.trial_id,
+            ack.binding_context,
+        )
+        .unwrap();
+        let wire = control::read_frame(&mut Cursor::new(wire)).unwrap();
+        assert_eq!(
+            control::decode_ack(&wire).unwrap().binding_context,
+            Some(binding)
+        );
+
+        let initial = |name, alpn: &[u8], port| {
+            let tcp = tcp_tls_packet(name);
+            let payload = r2k_core::packet::PacketView::parse(&tcp)
+                .unwrap()
+                .tcp_segment(&tcp)
+                .unwrap()
+                .payload;
+            let mut hello = tcp[payload.start + 5..payload.end].to_vec();
+            let extensions_at = 4 + 34 + 7;
+            hello.extend_from_slice(&[0, 16]);
+            hello.extend_from_slice(&((alpn.len() + 2) as u16).to_be_bytes());
+            hello.extend_from_slice(&(alpn.len() as u16).to_be_bytes());
+            hello.extend_from_slice(alpn);
+            let extensions_len = (hello.len() - extensions_at - 2) as u16;
+            hello[extensions_at..extensions_at + 2].copy_from_slice(&extensions_len.to_be_bytes());
+            let handshake_len = (hello.len() - 4) as u32;
+            hello[1..4].copy_from_slice(&handshake_len.to_be_bytes()[1..]);
+            let initial = r2k_core::quic::r2k_quic_initial_build(&hello, &[4; 8], 1200).unwrap();
+            udp_packet(&initial, port)
+        };
+        let out = Some(R2O_NF_INET_LOCAL_OUT);
+        let addressed = initial(host, b"\x03doq", 853);
+        let applied = plans
+            .applied_event_for_packet_at_hook(&addressed, 1, out)
+            .unwrap();
+        assert_eq!(applied.binding, binding);
+        assert_eq!(applied.trial_id, [0; 16]);
+        let (head, tail) = r2k_core::quic::r2k_quic_hello_split(&addressed[28..], host).unwrap();
+        let split = udp_packet(&head, 853);
+        let snapshot = r2k_core::quic_snapshot::r2k_quic_snapshot_pack(&[&head, &tail]).unwrap();
+        assert!(
+            plans
+                .select_with_quic_host_at_hook(&split, None, out)
+                .is_none()
+        );
+        let plan = plans
+            .select_with_quic_snapshot_at_hook_probe(
+                &split,
+                Some(host.as_bytes()),
+                out,
+                false,
+                true,
+                Some(&snapshot),
+            )
+            .unwrap();
+        let applied = plans.applied_event_for_plan(&split, 2, plan).unwrap();
+        assert_eq!(applied.binding, binding);
+        assert!(
+            plans
+                .select_with_quic_snapshot_at_hook_probe(
+                    &split,
+                    Some(host.as_bytes()),
+                    out,
+                    false,
+                    false,
+                    Some(&snapshot)
+                )
+                .is_none()
+        );
+        for other in [
+            initial("healthy.example", b"\x03doq", 853),
+            initial(host, b"\x03doq", 8853),
+            initial(host, b"\x02h3", 853),
+            initial(host, b"\x03doq\x02h3", 853),
+        ] {
+            assert!(
+                plans
+                    .select_with_quic_host_at_hook(&other, None, out)
+                    .is_none()
+            );
+        }
+        for hook in [
+            None,
+            Some(R2O_NF_INET_LOCAL_IN),
+            Some(R2O_NF_INET_POST_ROUTING),
+        ] {
+            assert!(
+                plans
+                    .select_with_quic_host_at_hook(&addressed, None, hook)
+                    .is_none()
+            );
+        }
+        assert!(
+            plans
+                .select_with_quic_host_at_hook_probe(&addressed, None, out, true)
+                .is_none()
+        );
+
+        let replace = plans.handle(&set(&key, 4)).binding_context.unwrap();
+        for context in [binding, replace] {
+            let del = control::encode_delete_name_bound(&key, 17, context).unwrap();
+            assert!(
+                plans
+                    .handle(&control::read_frame(&mut Cursor::new(del)).unwrap())
+                    .ok
+            );
+            assert_eq!(
+                plans
+                    .select_with_quic_host_at_hook(&addressed, None, out)
+                    .is_none(),
+                context == replace
+            );
+        }
+
+        let ipv6: std::net::SocketAddr = "[2001:db8::2]:853".parse().unwrap();
+        let key6 = control::dns_doq_plan_key(ipv6, host.as_bytes()).unwrap();
+        let installed = plans.handle(&set(&key6, 6)).binding_context.unwrap();
+        let mut packet6 = vec![0; 40];
+        packet6[0] = 0x60;
+        packet6[4..6].copy_from_slice(&((addressed.len() - 20) as u16).to_be_bytes());
+        packet6[6] = 17;
+        packet6[7] = 64;
+        packet6[8..24].copy_from_slice(
+            &"2001:db8::1"
+                .parse::<std::net::Ipv6Addr>()
+                .unwrap()
+                .octets(),
+        );
+        let IpAddr::V6(ip) = ipv6.ip() else {
+            unreachable!()
+        };
+        packet6[24..40].copy_from_slice(&ip.octets());
+        packet6.extend_from_slice(&addressed[20..]);
+        let applied = plans
+            .applied_event_for_packet_at_hook(&packet6, 3, out)
+            .unwrap();
+        assert_eq!(applied.binding, installed);
+        plans.clear_probes();
+        assert!(
+            plans
+                .select_with_quic_host_at_hook(&packet6, None, out)
+                .is_none()
+        );
     }
 
     #[test]

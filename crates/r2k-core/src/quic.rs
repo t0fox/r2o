@@ -1592,19 +1592,25 @@ fn retry_integrity_valid(version: u32, original_dcid: &[u8], retry: &[u8]) -> bo
 pub fn r2k_quic_initial_sni_result_from_datagrams(
     datagrams: &[&[u8]],
 ) -> Result<Option<Vec<u8>>, &'static str> {
+    r2k_quic_initial_sni(datagrams, false)
+}
+
+/// Возвращает SNI только для полного ClientHello с единственным ALPN doq.
+pub fn r2k_quic_doq_sni(datagrams: &[&[u8]]) -> Result<Option<Vec<u8>>, &'static str> {
+    r2k_quic_initial_sni(datagrams, true)
+}
+
+fn r2k_quic_initial_sni(
+    datagrams: &[&[u8]],
+    require_doq: bool,
+) -> Result<Option<Vec<u8>>, &'static str> {
     let client_hello = r2k_quic_initial_client_hello_from_datagrams(datagrams)
         .ok_or("полный ClientHello QUIC Initial не найден")?;
-    let Some((offset, length)) = find_client_hello_sni_result(&client_hello)? else {
+    let Some(details) = find_client_hello_sni_details(&client_hello, require_doq)? else {
         return Ok(None);
     };
-    let end = offset
-        .checked_add(length)
-        .ok_or("неверная длина имени SNI в ClientHello")?;
     Ok(Some(
-        client_hello
-            .get(offset..end)
-            .ok_or("имя SNI выходит за границы ClientHello")?
-            .to_vec(),
+        client_hello[details.name_offset..details.name_offset + details.name_len].to_vec(),
     ))
 }
 
@@ -2147,7 +2153,7 @@ pub fn r2k_quic_client_hello_rename_sni(
     if bytes.len() != handshake_len.checked_add(4)? {
         return None;
     }
-    let details = find_client_hello_sni_details(bytes).ok().flatten();
+    let details = find_client_hello_sni_details(bytes, false).ok().flatten();
     let Some(details) = details else {
         return server_name.is_none().then(|| bytes.to_vec());
     };
@@ -2188,10 +2194,8 @@ pub fn r2k_quic_client_hello_rename_sni(
 }
 
 fn find_client_hello_sni_result(bytes: &[u8]) -> Result<Option<(usize, usize)>, &'static str> {
-    Ok(
-        find_client_hello_sni_details(bytes)?
-            .map(|details| (details.name_offset, details.name_len)),
-    )
+    Ok(find_client_hello_sni_details(bytes, false)?
+        .map(|details| (details.name_offset, details.name_len)))
 }
 
 #[derive(Clone, Copy)]
@@ -2208,6 +2212,7 @@ struct ClientHelloSniDetails {
 
 fn find_client_hello_sni_details(
     bytes: &[u8],
+    require_doq: bool,
 ) -> Result<Option<ClientHelloSniDetails>, &'static str> {
     if bytes.len() < 4 || bytes[0] != 1 {
         return Err("неверный заголовок TLS ClientHello");
@@ -2242,6 +2247,7 @@ fn find_client_hello_sni_details(
         .filter(|extension_end| *extension_end == end)
         .ok_or("неверная длина расширений ClientHello")?;
     let mut sni_seen = false;
+    let mut doq_seen = false;
     let mut sni = None;
     while offset < extensions_end {
         if offset
@@ -2262,6 +2268,12 @@ fn find_client_hello_sni_details(
             .checked_add(extension_len)
             .filter(|extension_end| *extension_end <= extensions_end)
             .ok_or("расширение ClientHello выходит за границы списка")?;
+        if require_doq && extension_type == 16 {
+            if doq_seen || &bytes[offset..extension_end] != b"\0\x04\x03doq" {
+                return Err("QUIC ClientHello не содержит однозначный ALPN doq");
+            }
+            doq_seen = true;
+        }
         if extension_type == 0 {
             if sni_seen {
                 return Err("расширение SNI повторяется в ClientHello");
@@ -2309,6 +2321,9 @@ fn find_client_hello_sni_details(
             }
         }
         offset = extension_end;
+    }
+    if require_doq && !doq_seen {
+        return Err("QUIC ClientHello не содержит ALPN doq");
     }
     Ok(sni)
 }

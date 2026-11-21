@@ -2558,6 +2558,8 @@ mod app {
                     let mut redirect_candidate = None;
                     let mut http80_log_candidate = None;
                     let mut udp_quic_deny = false;
+                    // Для UDP сохраняем именно выбор по собранному Initial, в том числе отсутствие плана.
+                    let mut udp_selected_plan = None;
                     let decision = if let Some(bytes) = original.filter(|_| udp_admitted) {
                         if options.mode == RuntimeMode::Apply {
                             if !controller_probe {
@@ -2698,13 +2700,20 @@ mod app {
                         let selected = if quic_second_hello_skip.is_some() || quic_deny_skip {
                             None
                         } else {
-                            name_plans.select_with_quic_host_at_hook_probe(
+                            name_plans.select_with_quic_snapshot_at_hook_probe(
                                 bytes,
                                 quic_hello.as_ref().map(|hello| hello.host.as_slice()),
                                 quic_hook,
                                 controller_probe,
+                                queue_hook == Some(r2o_datapath::netlink::R2O_NF_INET_LOCAL_OUT),
+                                quic_hello
+                                    .as_ref()
+                                    .and_then(|hello| hello.snapshot.as_deref()),
                             )
                         };
+                        if packet_view.as_ref().is_some_and(|view| view.protocol == 17) {
+                            udp_selected_plan = Some(selected);
+                        }
                         let selected_plan = selected.unwrap_or(&plan);
                         // Текст C `plan_done` считается по состоянию ДО
                         // отметки текущего приветствия: именованный Initial,
@@ -3347,6 +3356,13 @@ mod app {
                             });
                     let mut applied_candidate = decision_execution_id.and_then(|execution_id| {
                         tx_original.and_then(|bytes| {
+                            if let Some(selected) = udp_selected_plan {
+                                return name_plans.applied_event_for_plan(
+                                    bytes,
+                                    execution_id,
+                                    selected?,
+                                );
+                            }
                             name_plans.applied_event_for_packet_at_hook(
                                 bytes,
                                 execution_id,

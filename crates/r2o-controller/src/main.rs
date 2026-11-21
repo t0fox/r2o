@@ -30533,6 +30533,12 @@ impl ControlClient {
                 return Ok(None);
             }
         };
+        if doq_service.is_some()
+            && let Err(reason) = r2k_core::quic::r2k_quic_doq_sni(parsed_snapshot.datagrams())
+        {
+            eprintln!("DoQ-проба пропущена: {reason}");
+            return Ok(None);
+        }
         #[cfg(not(test))]
         use std::net::ToSocketAddrs;
         #[cfg(not(test))]

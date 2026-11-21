@@ -84,10 +84,19 @@ pub const COMMAND_SET_NAME_BOUND: u16 = 0x0092;
 pub const COMMAND_DEL_NAME_BOUND: u16 = 0x0093;
 
 const DNS_TCP_PLAN_PREFIX: &str = "@dns-tcp/";
+const DNS_DOQ_PLAN_PREFIX: &str = "@dns-doq/";
 pub const DNS_PLAN_LEASE: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Ключ TLS-привязки с адресом, портом и видимым SNI. Пустое имя обозначает TLS без SNI.
 pub fn dns_tcp_plan_key(endpoint: SocketAddr, sni: &[u8]) -> Option<String> {
+    dns_plan_key(DNS_TCP_PLAN_PREFIX, endpoint, sni)
+}
+
+pub fn dns_doq_plan_key(endpoint: SocketAddr, sni: &[u8]) -> Option<String> {
+    dns_plan_key(DNS_DOQ_PLAN_PREFIX, endpoint, sni)
+}
+
+fn dns_plan_key(prefix: &str, endpoint: SocketAddr, sni: &[u8]) -> Option<String> {
     use sha2::{Digest, Sha256};
     use std::fmt::Write;
 
@@ -109,7 +118,7 @@ pub fn dns_tcp_plan_key(endpoint: SocketAddr, sni: &[u8]) -> Option<String> {
     for byte in name {
         digest.update([byte.to_ascii_lowercase()]);
     }
-    let mut key = format!("{DNS_TCP_PLAN_PREFIX}{endpoint}/");
+    let mut key = format!("{prefix}{endpoint}/");
     for byte in digest.finalize() {
         write!(key, "{byte:02x}").ok()?;
     }
@@ -117,9 +126,15 @@ pub fn dns_tcp_plan_key(endpoint: SocketAddr, sni: &[u8]) -> Option<String> {
 }
 
 pub fn dns_tcp_plan_endpoint(key: &[u8]) -> Option<SocketAddr> {
-    let key = std::str::from_utf8(key)
-        .ok()?
-        .strip_prefix(DNS_TCP_PLAN_PREFIX)?;
+    dns_plan_endpoint(DNS_TCP_PLAN_PREFIX, key)
+}
+
+pub fn dns_doq_plan_endpoint(key: &[u8]) -> Option<SocketAddr> {
+    dns_plan_endpoint(DNS_DOQ_PLAN_PREFIX, key)
+}
+
+fn dns_plan_endpoint(prefix: &str, key: &[u8]) -> Option<SocketAddr> {
+    let key = std::str::from_utf8(key).ok()?.strip_prefix(prefix)?;
     let (address, name) = key.split_once('/')?;
     let endpoint = address.parse::<SocketAddr>().ok()?;
     if endpoint.port() == 0
@@ -2127,7 +2142,14 @@ pub fn encode_delete_name_bound(
     if name.is_empty() || name.len() > u8::MAX as usize {
         return Err("имя должно занимать от 1 до 255 байт");
     }
-    if !matches!(transport, 6 | 17) || !binding.is_known() || binding.kind != 1 || binding.temporary
+    let doq = transport == 17
+        && binding.kind == 2
+        && binding.shape == SHAPE_QUIC
+        && dns_doq_plan_endpoint(name.as_bytes()).is_some();
+    if !matches!(transport, 6 | 17)
+        || !binding.is_known()
+        || binding.kind != 1 && !doq
+        || binding.temporary
     {
         return Err("DEL_NAME_BOUND требует известную постоянную привязку имени");
     }
@@ -2264,19 +2286,15 @@ pub fn encode_ack_with_identifiers_profile(
         return Err("area ID ACK разрешён только для команды области");
     }
     if let Some(binding) = binding_context {
-        let valid_tcp_binding = binding.is_known()
-            && binding.kind == 1
-            && matches!(binding.family, 4 | 6)
-            && is_tcp_plan_shape(binding.shape)
-            && !binding.temporary;
+        let valid_binding = valid_ack_name_binding(binding);
         if command == COMMAND_SET_NAME_BOUND {
-            if ok && !valid_tcp_binding || !ok && binding != BindingContext::default() {
+            if ok && !valid_binding || !ok && binding != BindingContext::default() {
                 return Err("SET_NAME_BOUND ACK содержит неверный контекст привязки");
             }
         } else if !ok
             || trial_id.is_some()
             || command != COMMAND_SET_NAME
-            || !valid_tcp_binding
+            || !valid_binding
             || binding.shape != SHAPE_HTTP
         {
             return Err("контекст привязки ACK допустим только для постоянного HTTP-плана имени");
@@ -2317,6 +2335,14 @@ pub fn encode_ack_with_identifiers_profile(
         body.extend_from_slice(&binding.epoch);
     }
     encode_frame(EVENT_ACK, &body)
+}
+
+fn valid_ack_name_binding(binding: BindingContext) -> bool {
+    binding.is_known()
+        && matches!(binding.family, 4 | 6)
+        && !binding.temporary
+        && (binding.kind == 1 && is_tcp_plan_shape(binding.shape)
+            || binding.kind == 2 && binding.shape == SHAPE_QUIC)
 }
 
 pub fn decode_ack(frame: &Frame) -> Result<Ack, &'static str> {
@@ -2407,16 +2433,12 @@ pub fn decode_ack_profile(profile: WireProfile, frame: &Frame) -> Result<Ack, &'
                 .try_into()
                 .map_err(|_| "неверная эпоха таблицы привязок ACK")?,
         };
-        let valid_tcp_binding = binding.is_known()
-            && binding.kind == 1
-            && matches!(binding.family, 4 | 6)
-            && is_tcp_plan_shape(binding.shape)
-            && !binding.temporary;
+        let valid_binding = valid_ack_name_binding(binding);
         if command == COMMAND_SET_NAME_BOUND {
-            if ok && !valid_tcp_binding || !ok && binding != BindingContext::default() {
+            if ok && !valid_binding || !ok && binding != BindingContext::default() {
                 return Err("ACK содержит неверный контекст SET_NAME_BOUND");
             }
-        } else if !valid_tcp_binding || binding.shape != SHAPE_HTTP || !ok {
+        } else if !valid_binding || binding.shape != SHAPE_HTTP || !ok {
             return Err("ACK содержит неверный HTTP-контекст привязки");
         }
         Some(binding)
