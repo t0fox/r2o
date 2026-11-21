@@ -80,9 +80,9 @@ Rust-алгоритмы прокси и его тестовые сценарии
 - Лицензия: BSD 3-Clause; Copyright (c) 2020, University of Maryland
   College Park. Библиотека стратегий сгенерирована в geneva_c из Geneva
   `library.py`; уведомление и условия BSD-3-Clause применяются к данным.
-- В Rust перенесены данные 58 стратегий
-  (`crates/r2o-controller/src/geneva_library.rs`) и поведение разбора,
-  канонической печати и фильтрации (`crates/r2o-controller/src/geneva.rs`).
+- В Rust перенесены 58 строк стратегий для тестов
+  (`crates/r2o-controller/src/geneva_library.rs`) и поведение разбора
+  и канонической печати (`crates/r2o-controller/src/geneva.rs`).
   Исходники C в Rust-крейт не включены.
 - Эталонные строки `crates/r2o-controller/src/geneva_corpus.rs` получены
   прогоном geneva_c (`strategy_parse` + `strategy_print`) на 145 записях

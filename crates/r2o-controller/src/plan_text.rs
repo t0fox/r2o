@@ -17,6 +17,7 @@ const REC_SETTLE: u16 = 0x0107;
 const REC_SEGMENT: u16 = 0x0108;
 const REC_WIRE: u16 = 0x0109;
 const REC_INPUT_TLS: u16 = 0x010a;
+const REC_INPUT_TCP_FLAGS: u16 = 0x0112;
 const REC_DELAY: u16 = 0x010b;
 const REC_IPFRAG: u16 = 0x010c;
 const REC_OOB: u16 = 0x010d;
@@ -54,6 +55,7 @@ struct ParsedPlan {
     pace_us: u32,
     input: Option<Vec<u8>>,
     input_tls: bool,
+    input_tcp_flags: Option<u16>,
     settle_us: u32,
     segment_size: u32,
     wire_profile: u8,
@@ -229,6 +231,12 @@ pub fn compile_text(text: &str) -> Result<Vec<u8>, String> {
             "input" => {
                 if fields.len() == 2 && fields[1] == "tls-sni" {
                     plan.input_tls = true;
+                } else if fields.len() == 3 && fields[1] == "tcp-flags" {
+                    let flags = crate::geneva::tcp_flags_parse(fields[2])
+                        .ok_or_else(|| parse_error("неверные флаги TCP"))?;
+                    if plan.input_tcp_flags.replace(flags).is_some() {
+                        return Err(parse_error("повторное условие TCP-флагов"));
+                    }
                 } else {
                     require_fields(
                         &fields,
@@ -684,6 +692,9 @@ pub fn compile_text(text: &str) -> Result<Vec<u8>, String> {
     }
     if plan.input_tls {
         records.push((REC_INPUT_TLS, Vec::new()));
+    }
+    if let Some(flags) = plan.input_tcp_flags {
+        records.push((REC_INPUT_TCP_FLAGS, flags.to_be_bytes().to_vec()));
     }
     if plan.delay_us != 0 {
         records.push((REC_DELAY, plan.delay_us.to_be_bytes().to_vec()));

@@ -4,7 +4,7 @@ use std::fmt;
 mod apply;
 pub use apply::{Actions, ApplyError, Cancellation, Emission, EmitKind, OriginalFate, PacketInput};
 
-pub const EXEC_VERSION: u16 = 14;
+pub const EXEC_VERSION: u16 = 15;
 pub const SCHEMA_MAX: u16 = 1;
 /// Максимальное число пакетов в результате обработки потока.
 pub const WIRE_BATCH_MAX: usize = 26;
@@ -58,6 +58,7 @@ const REC_UDPLEN: u16 = 0x010e;
 const REC_QSPLIT: u16 = 0x010f;
 const REC_QDENY: u16 = 0x0110;
 const REC_AUTOTTL: u16 = 0x0111;
+const REC_INPUT_TCP_FLAGS: u16 = 0x0112;
 
 const ANCHOR_SNI_MIDDLE: u16 = 5;
 const PLACE_BEFORE: u8 = 0;
@@ -170,6 +171,7 @@ pub struct Plan {
     pub segment_size: u32,
     pub wire_profile: u8,
     pub input_tls: bool,
+    pub input_tcp_flags: Option<u16>,
     pub ipfrag: u8,
     pub oob_enabled: bool,
     pub oob_anchor: u16,
@@ -377,6 +379,11 @@ impl Plan {
                     plan.input_sni_len = read_u32(value, 8)?;
                 }
                 REC_INPUT_TLS => plan.input_tls = true,
+                REC_INPUT_TCP_FLAGS => {
+                    if plan.input_tcp_flags.replace(read_u16(value, 0)?).is_some() {
+                        return Err(PlanError::new("повторное условие TCP-флагов"));
+                    }
+                }
                 REC_WIRE => plan.wire_profile = value[0],
                 REC_SETTLE => plan.settle_us = read_u32(value, 0)?,
                 REC_SEGMENT => plan.segment_size = read_u32(value, 0)?,
@@ -583,6 +590,13 @@ impl Plan {
     }
 
     fn check_references(&self) -> Result<(), PlanError> {
+        if let Some(flags) = self.input_tcp_flags
+            && (self.minexec < 15 || self.transport != 6 || self.proto != 1 || flags > 0x1ff)
+        {
+            return Err(PlanError::new(
+                "условие TCP-флагов требует minexec=15 и TLS-плана",
+            ));
+        }
         for poison in &self.poisons {
             if poison.flags & POISON_MD5 != 0
                 && (self.minexec < 12
@@ -946,6 +960,7 @@ fn scan(bytes: &[u8], minexec: u16) -> Result<(Counts, usize), PlanError> {
                     ));
                 }
             }
+            REC_INPUT_TCP_FLAGS => require_len(value, 2, "условие TCP-флагов не 2 байта")?,
             REC_SETTLE => {
                 if value.len() != 4 || read_u32(value, 0)? == 0 {
                     return Err(PlanError::new("недопустимая пауза перед правдой"));

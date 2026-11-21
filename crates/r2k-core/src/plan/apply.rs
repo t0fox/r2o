@@ -38,6 +38,7 @@ pub struct PacketInput<'a> {
     pub reference_ttl: u8,
     pub own_after_fakes: bool,
     pub is_http: bool,
+    pub tcp_flags: Option<u16>,
 }
 
 impl<'a> PacketInput<'a> {
@@ -53,6 +54,7 @@ impl<'a> PacketInput<'a> {
             reference_ttl: 0,
             own_after_fakes: false,
             is_http: false,
+            tcp_flags: None,
         }
     }
 }
@@ -175,6 +177,12 @@ impl Plan {
         self.check_references().map_err(|_| {
             ApplyError::new("invalid-plan", "план изменён после проверки и несовместим")
         })?;
+        if self.input_tcp_flags.is_some() && self.input_tcp_flags != input.tcp_flags {
+            return Err(ApplyError::new(
+                "tcp-flags-mismatch",
+                "флаги исходного TCP-пакета не совпали с условием плана",
+            ));
+        }
         if input.payload.is_empty() {
             return Err(ApplyError::new(
                 "empty-input",

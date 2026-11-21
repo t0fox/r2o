@@ -2952,7 +2952,9 @@ mod app {
                                     let selected_plan = selected.unwrap_or(&plan);
                                     let tcp_syn_ack_seen =
                                         tcp_sessions.r2o_syn_ack_seen_for_packet(&packet);
-                                    if !conntrack_gate.r2o_preflight(
+                                    if selected_plan.input_tcp_flags.is_some() {
+                                        PacketDecision::Accept
+                                    } else if !conntrack_gate.r2o_preflight(
                                         &packet,
                                         selected.is_some() || global_plan_present,
                                         false,
@@ -3058,7 +3060,9 @@ mod app {
                                     let selected_plan = selected.unwrap_or(&plan);
                                     let tcp_syn_ack_seen =
                                         tcp_sessions.r2o_syn_ack_seen_for_packet(&packet);
-                                    if !conntrack_gate.r2o_preflight(
+                                    if selected_plan.input_tcp_flags.is_some() {
+                                        PacketDecision::Accept
+                                    } else if !conntrack_gate.r2o_preflight(
                                         &packet,
                                         selected.is_some() || global_plan_present,
                                         false,

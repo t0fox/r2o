@@ -17808,6 +17808,19 @@ group_block_proven: false,
             }
             let mut owned_fallback_queue = None;
             let mut primary_from_owned_fallback = false;
+            let geneva_midpoint = if target.family == 4
+                && control::r2k_link_shape_tcp_base(target.shape) == SHAPE_LEGACY
+                && r2o_control_wire() == control::WireProfile::V48
+            {
+                client_hello.as_deref().and_then(|hello| {
+                    r2o_controller::geneva_compile::discovery_midpoint_candidate(
+                        hello,
+                        runner_send_cap.load(Ordering::Relaxed),
+                    )
+                })
+            } else {
+                None
+            };
             if outcome.plan_text.is_none()
                 && r2o_discovery_trial_time_available(runner_started.elapsed())
             {
@@ -17817,6 +17830,9 @@ group_block_proven: false,
                     r2o_controller::r2o_fallback::FallbackQueue::new_owned_search_with_tried(
                         &discovery_tried,
                     );
+                if let Some(seed) = geneva_midpoint.clone() {
+                    queue.push_seed(seed);
+                }
                 // Сначала проверенный generic-кандидат pad64+seqovl: он
                 // закрывает SNI-блокировку без полного перебора d2o.
                 let seed = r2o_controller::r2o_fallback::r2o_pad64_seed(plan_shape, send_cap)
@@ -18010,10 +18026,14 @@ group_block_proven: false,
                     .detail
                     .push_str(&format!("; {fallback_reason} — продолжаю запасной перебор"));
                 let mut fallback_queue = owned_fallback_queue.unwrap_or_else(|| {
-                    r2o_controller::r2o_fallback::FallbackQueue::new_with_tried(
+                    let mut queue = r2o_controller::r2o_fallback::FallbackQueue::new_with_tried(
                         plan_text,
                         &discovery_tried,
-                    )
+                    );
+                    if let Some(seed) = geneva_midpoint {
+                        queue.push_seed(seed);
+                    }
+                    queue
                 });
                 let mut last_trial = (result, applied);
                 let mut index = 0;

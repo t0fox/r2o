@@ -2049,6 +2049,13 @@ fn tcp_plan_input<'a>(
         .filter(|bytes| !bytes.is_empty())?;
 
     let tls = r2k_core::tls::parse(payload);
+    if let Some(flags) = plan.input_tcp_flags
+        && (tcp.wire_flags != flags
+            || tls.extensions_truncated
+            || tls.record_end != Some(payload.len()))
+    {
+        return None;
+    }
     let http_host = r2k_core::httpup::request_host_range(payload);
     let is_http = http_host.is_some();
     if (plan.proto == PROTO_HTTP && !is_http) || (plan.proto != PROTO_HTTP && !tls.is_client_hello)
@@ -2068,6 +2075,7 @@ fn tcp_plan_input<'a>(
     input.segment_cap = tcp_segment_cap;
     input.reference_ttl = reference_ttl;
     input.is_http = is_http;
+    input.tcp_flags = Some(tcp.wire_flags);
     Some(input)
 }
 

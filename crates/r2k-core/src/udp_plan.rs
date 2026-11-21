@@ -159,6 +159,7 @@ pub fn r2o_udp_plan_batch(
         reference_ttl: 0,
         own_after_fakes: true,
         is_http: false,
+        tcp_flags: None,
     };
     let actions = plan.apply(&packet_input).map_err(|_| -1_i32)?;
     if actions.fate == OriginalFate::Hold {

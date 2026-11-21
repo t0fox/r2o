@@ -15,11 +15,47 @@ use r2k_core::packet::PacketView;
 use r2k_core::plan::{PacketInput, Plan};
 use r2k_core::wire::build_tcp_packet;
 use r2o_controller::geneva::parse_strategy;
-use r2o_controller::geneva_compile::compile_plan_for_packet;
+use r2o_controller::geneva_compile::{compile_plan_for_packet, discovery_midpoint_candidate};
+use r2o_controller::r2o_fallback::{FallbackQueue, tried_key};
+use r2o_datapath::engine::{PacketDecision, decide};
 
 const INPUT: &[u8] = include_bytes!("fixtures/geneva/clienthello_in.bin");
 const EXPECTED_ORIGINAL: &[u8] = include_bytes!("fixtures/geneva/clienthello_original.bin");
 const EXPECTED_TAMPERED: &[u8] = include_bytes!("fixtures/geneva/clienthello_flags_rst.bin");
+
+#[test]
+fn discovery_queues_one_guarded_midpoint_for_short_legacy_hello() {
+    let view = PacketView::parse(INPUT).unwrap();
+    let payload = view.tcp_segment(INPUT).unwrap().payload;
+    assert!(discovery_midpoint_candidate(&INPUT[payload.clone()], 1492).is_none());
+
+    let mut packet = INPUT.to_vec();
+    // Подменяем TLS 1.3 на TLS 1.2 в единственной версии supported_versions.
+    assert_eq!(&packet[packet.len() - 7..], &[0, 43, 0, 3, 2, 3, 4]);
+    *packet.last_mut().unwrap() = 3;
+    let text = discovery_midpoint_candidate(&packet[payload.clone()], 1492).unwrap();
+    assert!(discovery_midpoint_candidate(&packet[payload], 120).is_none());
+
+    let mut queue = FallbackQueue::new_owned_search();
+    queue.push_seed(text.clone());
+    queue.push_seed(text.clone());
+    assert_eq!(queue.next(2, 1492).as_deref(), Some(text.as_str()));
+    assert_ne!(queue.next(2, 1492).as_deref(), Some(text.as_str()));
+    let mut tried = FallbackQueue::new_owned_search_with_tried(&[tried_key(&text)]);
+    tried.push_seed(text.clone());
+    assert_ne!(tried.next(2, 1492).as_deref(), Some(text.as_str()));
+
+    let bytes = r2o_controller::plan_text::compile_text(&text).unwrap();
+    let plan = Plan::parse(&bytes).unwrap();
+    assert_eq!(plan.input_tcp_flags, Some(0x18));
+    assert!(matches!(
+        decide(&plan, &packet),
+        PacketDecision::Transmit { packets, .. } if packets.len() == 2
+    ));
+    packet[view.l4_offset + 13] = 0x10;
+    assert_eq!(decide(&plan, &packet), PacketDecision::Accept);
+    assert!(r2o_controller::plan_text::compile_text(&text.replacen("1 15", "1 14", 1)).is_err());
+}
 
 #[test]
 fn trigger_rejects_other_flags_spellings_and_packet_contexts() {
@@ -56,9 +92,9 @@ fn fragment_uses_geneva_payload_midpoint_in_both_orders() {
             parse_strategy(&format!("[TCP:flags:PA]-fragment{{tcp:{size}:{order}}}-")).unwrap();
         let plan =
             Plan::parse(&compile_plan_for_packet(&strategy, INPUT, [1; 16]).unwrap()).unwrap();
-        let actions = plan
-            .apply(&PacketInput::new(payload, tcp.sequence))
-            .unwrap();
+        let mut input = PacketInput::new(payload, tcp.sequence);
+        input.tcp_flags = Some(tcp.wire_flags);
+        let actions = plan.apply(&input).unwrap();
         let expected = [
             (tcp.sequence, &payload[..cut]),
             (tcp.sequence.wrapping_add(cut as u32), &payload[cut..]),
@@ -92,7 +128,8 @@ fn compiled_duplicate_matches_geneva_bytes_after_normalization() {
     let view = PacketView::parse(INPUT).expect("input packet");
     let tcp = view.tcp_segment(INPUT).expect("tcp");
     let payload = &INPUT[tcp.payload.clone()];
-    let input = PacketInput::new(payload, tcp.sequence);
+    let mut input = PacketInput::new(payload, tcp.sequence);
+    input.tcp_flags = Some(tcp.wire_flags);
 
     let strategy = parse_strategy(
         "[TCP:flags:PA]-duplicate(,tamper{TCP:flags:replace:R}(tamper{TCP:chksum:corrupt},))-",

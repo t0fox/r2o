@@ -3,13 +3,11 @@
 //! Это P1 из `docs/geneva-c-adoption.md`: перенос корпуса и парсера
 //! `strategy.c` без второго исполнителя стратегий. Модуль не участвует в
 //! production-datapath; его задача — проверяемый импорт Geneva-стратегий,
-//! фикстуры и будущая компиляция поддерживаемого подмножества в R2OP.
+//! фикстуры и компиляция поддерживаемого подмножества в R2OP.
 //!
 //! Поведение и тексты канонической печати сверены с geneva_c
 //! (`strategy_parse` + `strategy_print`) на 145 записях
 //! `tests/geneva_strategies.h` и 58 записях `src/library_data.h`.
-
-use crate::geneva_library::{GENEVA_LIBRARY, GenevaLibraryEntry, GenevaLibraryFilter};
 
 /// Предел вложенности деревьев действий, как `MAX_DEPTH` в geneva_c.
 const MAX_DEPTH: usize = 200;
@@ -1047,24 +1045,11 @@ fn strip_dup(text: &str) -> &str {
     &text[start..end]
 }
 
-/// Возвращает библиотеку Geneva и проверяет, что все записи разбираются.
-pub fn library() -> &'static [GenevaLibraryEntry] {
-    GENEVA_LIBRARY
-}
-
-/// Фильтрует библиотеку по правилам `library.c`.
-pub fn library_filtered(filter: &GenevaLibraryFilter<'_>) -> Vec<&'static GenevaLibraryEntry> {
-    GENEVA_LIBRARY
-        .iter()
-        .filter(|entry| filter.matches(entry))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::geneva_corpus::{CORPUS, LIBRARY_CANONICAL};
-    use crate::geneva_library::{GENEVA_LIBRARY, GenevaLibraryFilter};
+    use crate::geneva_library::GENEVA_LIBRARY;
 
     #[test]
     fn корпус_geneva_совпадает_с_c() {
@@ -1094,9 +1079,9 @@ mod tests {
         assert_eq!(GENEVA_LIBRARY.len(), 58);
         assert_eq!(GENEVA_LIBRARY.len(), LIBRARY_CANONICAL.len());
         for (entry, expected) in GENEVA_LIBRARY.iter().zip(LIBRARY_CANONICAL) {
-            let strategy = parse_strategy(entry.strategy)
-                .unwrap_or_else(|error| panic!("{}: {error}", entry.strategy));
-            assert_eq!(&strategy.canonical(), expected, "{}", entry.strategy);
+            let strategy =
+                parse_strategy(entry).unwrap_or_else(|error| panic!("{}: {error}", entry));
+            assert_eq!(&strategy.canonical(), expected, "{}", entry);
         }
     }
 
@@ -1110,90 +1095,12 @@ mod tests {
             assert_eq!(first, second);
         }
         for entry in GENEVA_LIBRARY {
-            let first = parse_strategy(entry.strategy)
-                .expect(entry.strategy)
-                .canonical();
+            let first = parse_strategy(entry).expect(entry).canonical();
             let second = parse_strategy(&first)
                 .unwrap_or_else(|error| panic!("{first}: {error}"))
                 .canonical();
             assert_eq!(first, second);
         }
-    }
-
-    #[test]
-    fn фильтр_библиотеки_повторяет_c() {
-        // Без страны lab-записи скрыты, если не запрошены явно.
-        let all = library_filtered(&GenevaLibraryFilter::default());
-        assert_eq!(all.len(), 48);
-        assert!(all.iter().all(|entry| entry.country != "lab"));
-
-        let lab = library_filtered(&GenevaLibraryFilter {
-            country: Some("lab"),
-            ..Default::default()
-        });
-        assert_eq!(lab.len(), 10);
-        assert!(lab.iter().all(|entry| entry.country == "lab"));
-
-        let china = library_filtered(&GenevaLibraryFilter {
-            country: Some("china"),
-            ..Default::default()
-        });
-        assert_eq!(china.len(), 38);
-        assert!(china.iter().all(|entry| entry.country == "china"));
-
-        let india = library_filtered(&GenevaLibraryFilter {
-            country: Some("india"),
-            ..Default::default()
-        });
-        assert_eq!(india.len(), 6);
-
-        let kazakhstan = library_filtered(&GenevaLibraryFilter {
-            country: Some("kazakhstan"),
-            ..Default::default()
-        });
-        assert_eq!(kazakhstan.len(), 4);
-
-        let clients = library_filtered(&GenevaLibraryFilter {
-            side: 1,
-            ..Default::default()
-        });
-        assert!(clients.iter().all(|entry| !entry.server_side));
-
-        let servers = library_filtered(&GenevaLibraryFilter {
-            side: 2,
-            ..Default::default()
-        });
-        assert!(servers.iter().all(|entry| entry.server_side));
-        assert_eq!(servers.len(), 2);
-
-        let rate = library_filtered(&GenevaLibraryFilter {
-            min_rate: 100,
-            ..Default::default()
-        });
-        assert!(rate.iter().all(|entry| entry.rate == 100));
-
-        // Префикс `censor` отбрасывается; список цензоров — через пробел.
-        let by_censor = library_filtered(&GenevaLibraryFilter {
-            censor: Some("8"),
-            ..Default::default()
-        });
-        let by_prefixed = library_filtered(&GenevaLibraryFilter {
-            censor: Some("censor8"),
-            ..Default::default()
-        });
-        assert_eq!(by_censor.len(), by_prefixed.len());
-        assert!(!by_censor.is_empty());
-        assert!(by_censor.iter().all(|entry| {
-            entry
-                .censors
-                .is_some_and(|list| list.split(' ').any(|w| w == "8"))
-        }));
-
-        let with_lab = library_filtered(&GenevaLibraryFilter {
-            with_lab: true,
-            ..Default::default()
-        });
-        assert_eq!(with_lab.len(), 58);
     }
 
     #[test]

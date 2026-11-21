@@ -7,7 +7,7 @@
 //!
 //! Для сравнения пакетов на ПК поддерживаются `duplicate(,tamper{...})`
 //! и `fragment{tcp:...}` на одном ClientHello с точными флагами PA.
-//! Результат привязан к проверенному пакету.
+//! R2OP сохраняет условие на исходный TCP-пакет.
 
 use std::fmt;
 
@@ -123,9 +123,10 @@ fn compile_duplicate(
 
     let fields = plan_poison_fields(&tampers)?;
     let mut text = String::new();
-    text.push_str("r2o-plan 1 14\n");
+    text.push_str("r2o-plan 1 15\n");
     text.push_str(&format!("id {}\n", hex(&plan_id)));
     text.push_str("proto tcp tls\n");
+    text.push_str("input tcp-flags PA\n");
     if fields.iter().any(|field| field == "md5") {
         text.push_str("wire detect-tcp-v1\n");
     }
@@ -176,21 +177,37 @@ fn compile_fragment(
             "fragment{tcp:...} требует положительный размер или -1",
         ));
     };
-    let mut text = String::new();
-    text.push_str("r2o-plan 1 5\n");
-    text.push_str(&format!("id {}\n", hex(&plan_id)));
-    text.push_str("proto tcp tls\n");
-    text.push_str(&format!("split {split}\n"));
-    text.push_str(if in_order {
-        "order forward\n"
-    } else {
-        "order reverse\n"
-    });
-    Ok(text)
+    Ok(fragment_plan(&split, in_order, plan_id))
+}
+
+fn fragment_plan(split: &str, in_order: bool, plan_id: [u8; 16]) -> String {
+    let order = if in_order { "forward" } else { "reverse" };
+    format!(
+        "r2o-plan 1 15\nid {}\nproto tcp tls\ninput tcp-flags PA\nsplit {split}\norder {order}\n",
+        hex(&plan_id)
+    )
+}
+
+/// Один проверенный разрез для короткого именного TLS 1.2 ClientHello.
+pub fn discovery_midpoint_candidate(client_hello: &[u8], send_cap: usize) -> Option<String> {
+    // Первый штатный кусочный план режет на 178 байтах и для такого
+    // приветствия оставляет пакет целым.
+    if !(5..=178).contains(&client_hello.len())
+        || (send_cap != 0 && client_hello.len().div_ceil(2) + 100 > send_cap)
+    {
+        return None;
+    }
+    let tls = r2k_core::tls::parse(client_hello);
+    (tls.is_client_hello
+        && !tls.is_tls13
+        && !tls.ech_offer
+        && !tls.extensions_truncated
+        && tls.sni_range.is_some()
+        && tls.record_end == Some(client_hello.len()))
+    .then(|| fragment_plan("hello_middle +0", true, [0; 16]))
 }
 
 /// Скомпилировать R2OP для офлайн-проверки конкретного IP-пакета с ClientHello.
-/// Повторное применение к другому пакету требует собственной проверки триггера.
 pub fn compile_plan_for_packet(
     strategy: &GenevaStrategy,
     packet: &[u8],
@@ -213,8 +230,7 @@ pub fn compile_plan_for_packet(
             "требуется полный ClientHello в одном TCP-пакете",
         ));
     }
-    let flags = u16::from(tcp.flags) | (u16::from(packet[view.l4_offset + 12] & 1) << 8);
-    compile_strategy(strategy, payload, flags, plan_id)
+    compile_strategy(strategy, payload, tcp.wire_flags, plan_id)
 }
 
 fn compile_strategy(
@@ -516,15 +532,19 @@ mod tests {
 
     #[test]
     fn library_has_compilable_subset_and_every_entry_is_classified() {
+        let mut unique_plans = std::collections::BTreeSet::new();
         let mut compiled = 0;
         let mut rejected = 0;
         for entry in GENEVA_LIBRARY {
-            let Ok(strategy) = parse_strategy(entry.strategy) else {
+            let Ok(strategy) = parse_strategy(entry) else {
                 rejected += 1;
                 continue;
             };
             match compile_strategy(&strategy, CLIENT_HELLO, 0x18, [7; 16]) {
-                Ok(_) => compiled += 1,
+                Ok(bytes) => {
+                    compiled += 1;
+                    unique_plans.insert(bytes);
+                }
                 Err(error) => {
                     assert!(!error.message().is_empty());
                     rejected += 1;
@@ -532,14 +552,9 @@ mod tests {
             }
         }
         println!("geneva library: compiled={compiled} rejected={rejected}");
-        assert!(
-            compiled == 2,
-            "остаются две записи с одним и тем же разрезом PA"
-        );
-        assert!(
-            rejected > 0,
-            "неподдерживаемые стратегии должны быть явно отвергнуты"
-        );
+        assert_eq!(compiled, 2);
+        assert_eq!(unique_plans.len(), 1, "остается один разрез PA");
+        assert_eq!(rejected, 56);
         assert_eq!(compiled + rejected, GENEVA_LIBRARY.len());
     }
 
@@ -548,7 +563,7 @@ mod tests {
         let strategy =
             parse_strategy("[TCP:flags:PA]-duplicate(,tamper{TCP:flags:replace:R})-").unwrap();
         let text = compile_text(&strategy, CLIENT_HELLO, 0x18, [3; 16]).unwrap();
-        assert!(text.starts_with("r2o-plan 1 14\n"));
+        assert!(text.starts_with("r2o-plan 1 15\n"));
         assert!(text.contains("place=after"));
         assert!(text.contains("tcp_flags=4"));
     }

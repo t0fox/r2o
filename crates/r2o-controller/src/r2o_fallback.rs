@@ -90,6 +90,14 @@ impl FallbackQueue {
         }
     }
 
+    pub fn push_seed(&mut self, text: String) {
+        let key = tried_key(&text);
+        if !self.tried.contains(&key) {
+            self.tried.push(key);
+            self.pending.push_back(text);
+        }
+    }
+
     pub fn next(&mut self, shape: u8, send_cap: usize) -> Option<String> {
         // refill_from_fallback snapshots send_cap for each SCHED_MAX_PLANS batch.
         if self.pending.is_empty() {
