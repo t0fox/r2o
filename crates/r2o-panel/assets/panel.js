@@ -882,6 +882,7 @@
         self.catalogRevision = null;
         self.failed = true;
         self.renderEngineStatus(self.m);
+        self.renderDnsProtection(self.m);
         var staleBefore = bodyAttribute(self.doc, "data-stale");
         self.renderNotice();
         var staleAfter = bodyAttribute(self.doc, "data-stale");
@@ -3096,8 +3097,8 @@
     var more = this.$("dns-protection-more");
     var extra = this.$("dns-protection-extra");
     if (!root || !summary || !more || !extra) return;
-    var rows = list(m.k.dns_services);
-    var fresh = m.linked && m.snap.live_fresh === true;
+    var rows = list(m && m.k.dns_services);
+    var fresh = !this.failed && m && m.engine && m.linked && m.snap.live_fresh === true;
     var now = this.serverNow();
     var time = rows.map(function (row) {
       var checked = parseTime(row.checked_at);
@@ -3133,7 +3134,7 @@
     var items = rows.map(function (row, index) {
       var observed = time[index];
       var state = observed.stale ? ["Устарело", "warn"] : states[row.state] || states.detected;
-      if (row.state === "recovered" && (row.dns_answer_via_plan !== true || row.plan_applied !== true || !row.applied_plan_id || !observed.checked)) {
+      if (row.state === "recovered" && (row.dns_answer_confirmed !== true || row.dns_answer_via_plan !== true || row.plan_applied !== true || !row.applied_plan_id || !observed.checked)) {
         state = observed.stale ? state : states.checking;
       }
       var item = el(doc, "li", "card dns-service");
@@ -3152,7 +3153,7 @@
         ["Проверка", observed.checked ? localTime(observed.checked) : "—", ""]
       ];
       if (row.plan_applied === true && row.applied_plan_id) {
-        fields.push(["Применённый план", str(row.applied_plan_id), "dns-service-plan"]);
+        fields.push([observed.stale ? "Последний план" : "Применённый план", str(row.applied_plan_id), "dns-service-plan"]);
       }
       fields.forEach(function (field) {
         var entry = el(doc, "div", "");

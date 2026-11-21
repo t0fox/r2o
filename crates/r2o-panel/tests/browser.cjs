@@ -403,6 +403,7 @@ async function main() {
   fs.unlinkSync(enginePidPath);
   await waitFor(() => evaluate("document.querySelector('#engine-state .mast-state-text').textContent.startsWith('Движок остановлен')"), "опрос отражает фактическую остановку");
   await waitFor(() => evaluate("document.querySelector('#now-title').textContent === 'Подбор приостановлен'"), "карточка обзора показывает состояние подбора");
+  assert.equal(await evaluate("document.querySelector('#dns-protection-list .meta-chip').textContent"), "Устарело");
   assert.equal(await evaluate("document.querySelector('#nav-now').textContent"), "");
   fs.writeFileSync(enginePidPath, String(process.pid));
   fs.writeFileSync(livePath, JSON.stringify(liveState));
@@ -420,6 +421,8 @@ async function main() {
       && status.querySelector('.lamp').dataset.tone === 'warn'
       && !status.querySelector('small');
   })()`), "при недоступном API старый статус сменяется предупреждением");
+  assert.deepEqual(await evaluate("[...document.querySelectorAll('#dns-protection-list .meta-chip, #dns-protection-extra .meta-chip')].map(node => node.textContent)"), ["Устарело", "Устарело", "Устарело", "Устарело"]);
+  assert.equal(await evaluate("document.querySelector('#dns-protection-list').textContent.includes('Последний план')"), true);
   await evaluate("window.restoreStatusFetch()");
   await waitFor(() => evaluate("document.querySelector('#engine-state .mast-state-text').textContent.startsWith('Движок работает')"), "успешный запрос возвращает актуальный статус");
   await waitFor(() => evaluate("!document.querySelector('#now').hidden && document.querySelector('#now #dns-protection-list').children.length === 3"), "карточки зашифрованного DNS на обзоре");
@@ -464,6 +467,22 @@ async function main() {
     const screenshot = await call("Page.captureScreenshot", { format: "png" });
     fs.writeFileSync(path.join(captureDir, "dns-overview-mobile.png"), Buffer.from(screenshot.data, "base64"));
   }
+  const previousDnsService = liveState.dns_services[1];
+  liveState.dns_services[1] = {
+    ...previousDnsService,
+    state: "recovered",
+    checked_at: new Date().toISOString(),
+    dns_answer_via_plan: true,
+    dns_answer_confirmed: false,
+  };
+  fs.writeFileSync(livePath, JSON.stringify(liveState));
+  const doqBadge = "document.querySelectorAll('#dns-protection-list .meta-chip')[1].textContent";
+  await waitFor(async () => await evaluate(doqBadge) === "Проверка", "статус восстановления требует подтверждённого DNS-ответа");
+  liveState.dns_services[1].dns_answer_confirmed = true;
+  fs.writeFileSync(livePath, JSON.stringify(liveState));
+  await waitFor(async () => await evaluate(doqBadge) === "Обход работает", "подтверждённый DNS-ответ отображает восстановление");
+  liveState.dns_services[1] = previousDnsService;
+  fs.writeFileSync(livePath, JSON.stringify(liveState));
   await call("Emulation.clearDeviceMetricsOverride");
   await evaluate("location.hash = '#diagnostics'");
   await waitFor(() => evaluate("document.querySelector('#diagnostic-state')?.dataset.phase === 'off'"), "загрузка управления диагностикой");
