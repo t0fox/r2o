@@ -1326,8 +1326,12 @@ telegram_check() {
     tg_check_report=$STATE/telegram-diagnostics.json
     tg_check_temporary=$tg_check_report.new.$$
     rm -f "$tg_check_temporary"
+    set -- --check
+    if component_running r2o-telegram "$TG_PID" && [ -S "$TG_STATS_SOCKET" ]; then
+        set -- "$@" --check-live --stats-socket-path "$TG_STATS_SOCKET"
+    fi
     if "$MANAGER" exec --root "$ROOT" --component r2o-telegram -- \
-        --check --dc-map-path "$STATE/telegram-dc-map.json" \
+        "$@" --dc-map-path "$STATE/telegram-dc-map.json" \
         --dc-map-endpoints-path "$STATE/telegram-dc-endpoints.tsv" --default-domains \
         >"$tg_check_temporary" 2>>"$LOG/telegram.log"; then
         tg_check_result=0

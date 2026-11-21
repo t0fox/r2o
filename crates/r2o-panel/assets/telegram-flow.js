@@ -33,6 +33,7 @@ const TRANSPORT_TO_LANE = new Map([
   ["direct_wss", 0],
   ["cloudflare_worker", 1],
   ["cloudflare_proxy", 2],
+  ["cloudflare_h2", 2],
   ["tcp_passthrough", 3],
   ["tcp_fallback", 3],
 ]);
@@ -153,7 +154,8 @@ function eventState(value) {
 
 function routeDescription(transport, lane) {
   if (transport === "tcp_passthrough" || transport === "tcp_fallback") return "Прямой TCP · диагностика";
-  return ROUTES[lane]?.label || "WSS-транспорт не определён";
+  if (transport === "cloudflare_h2") return "Прокси Cloudflare по HTTP/2";
+  return ROUTES[lane]?.label || "Транспорт не определён";
 }
 
 function latestRouteFailure(snapshot) {

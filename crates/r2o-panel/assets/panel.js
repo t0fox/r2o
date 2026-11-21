@@ -2755,7 +2755,7 @@
     portChip.append(el(doc, "span", "", "Порт"), el(doc, "b", "", "1443"));
     portChip.lastChild.setAttribute("data-tg-port", "");
     var modeChip = el(doc, "span", "tg-chip");
-    modeChip.append(el(doc, "span", "", "Режим"), el(doc, "b", "", "MTProto → WSS"));
+    modeChip.append(el(doc, "span", "", "Режим"), el(doc, "b", "", "MTProto → WS / HTTP/2"));
     var routeChip = el(doc, "span", "tg-chip");
     routeChip.append(el(doc, "span", "", "Маршрут"), el(doc, "b", "", "—"));
     routeChip.lastChild.setAttribute("data-tg-route", "");
@@ -2919,6 +2919,20 @@
     }
     if (ui.flowCaption) {
       var caption = flow ? flow.caption : "Маршруты обновляются по живому трафику.";
+      var sessions = Array.isArray(stats && stats.active_sessions) ? stats.active_sessions : [];
+      [false, true].forEach(function (media) {
+        var session = sessions.slice().reverse().find(function (entry) {
+          return entry && entry.is_media === media && entry.wire;
+        });
+        if (!session) return;
+        var parts = ["DC" + session.dc, media ? "медиа" : "чат", session.wire,
+          session.upstream_host, session.edge_ip].filter(Boolean);
+        parts.push(session.telegram_response_seen ? "MTProto подтверждён" : "транспорт подключён");
+        if (Number.isFinite(session.first_response_ms)) {
+          parts.push("первый MTProto " + telegramMilliseconds(session.first_response_ms));
+        }
+        caption += " " + parts.join(" · ") + ".";
+      });
       if (ui.flowCaption.textContent !== caption) ui.flowCaption.textContent = caption;
     }
   }
@@ -2934,8 +2948,8 @@
     var checked = root.querySelector("[data-tg-check-time]");
     var centers = root.querySelector("[data-tg-check-centers]");
     var states = {
-      healthy: "Все пять DC подтвердили обмен MTProto resPQ.",
-      partial: "resPQ подтверждён не для всех дата-центров.",
+      healthy: "Для чатов и медиа подтверждён обмен MTProto resPQ во всех пяти DC.",
+      partial: "resPQ подтверждён для части DC или типов трафика.",
       unavailable: "Маршрут с подтверждённым resPQ не найден.",
       unverified: "Ответ resPQ не подтверждён ни для одного дата-центра.",
       running: "Проверяются маршруты; успех засчитывается только после resPQ.",
@@ -2960,7 +2974,8 @@
     };
     var transports = {
       "direct-wss": "Прямой WSS", "cloudflare-worker": "Cloudflare Worker",
-      "cloudflare-proxy": "Прокси Cloudflare", "tcp-fallback": "Резервный TCP"
+      "cloudflare-proxy": "Прокси Cloudflare", "cf-worker": "Cloudflare Worker",
+      "cf-proxy": "Прокси Cloudflare", "cf-h2": "Cloudflare /api", "tcp-fallback": "Резервный TCP"
     };
     var timings = [["dns_ms", "DNS"], ["tcp_ms", "TCP"], ["tls_ms", "TLS"],
       ["websocket_ms", "WebSocket"], ["mtproto_ms", "resPQ"]];
@@ -2975,7 +2990,10 @@
         var item = el(root.ownerDocument, "li", "tg-check-route");
         var name = transports[route.transport] || str(route.transport) || "Маршрут";
         var parts = [name, routeStates[route.state] || "статус неизвестен"];
+        if (typeof route.is_media === "boolean") parts.push(route.is_media ? "медиа" : "чат");
+        if (route.wire) parts.push(str(route.wire));
         if (route.domain) parts.push(str(route.domain));
+        if (route.sni && route.sni !== route.domain) parts.push("SNI " + str(route.sni));
         if (route.selected_ip) parts.push(str(route.selected_ip));
         if (route.failed_stage) parts.push("сбой: " + str(route.failed_stage));
         if (route.http_status !== null && route.http_status !== undefined && Number.isFinite(Number(route.http_status))) {
