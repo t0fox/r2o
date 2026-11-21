@@ -385,6 +385,7 @@ async function main() {
   fs.writeFileSync(path.join(diagDir, "report.json"), JSON.stringify(diag), {mode: 0o600});
   await waitFor(() => evaluate("document.querySelector('#diagnostic-state').dataset.phase === 'ready'"), "первый отчёт появляется после короткого опроса");
   assert.equal(await evaluate("document.querySelector('#diagnostic-data').hidden"), false, "появились данные");
+  assert.equal(await evaluate("document.querySelector('#diagnostic-memory-chart').getBoundingClientRect().height > 0"), true, "график виден после первого отчёта");
   await evaluate("document.querySelector('#diagnostic-event-filter').value = 'unconfirmed'; document.querySelector('#diagnostic-event-filter').dispatchEvent(new Event('change'))");
   assert.equal(await evaluate("document.querySelector('#diagnostic-event-list').childElementCount"), 1);
   await evaluate("document.querySelector('#diagnostic-event-list summary').click()");

@@ -247,12 +247,12 @@
     chart.dataset.points = String(rows.length);
     chart.setAttribute("aria-label", "Память контроллера, период " + hours + " часа, точек: " + rows.length);
     if (!rows.length || !active.length || !all.length) {
-      chart.hidden = true;
+      chart.setAttribute("hidden", "");
       empty.hidden = false;
       empty.textContent = !active.length && rows.length ? "Выберите доступный показатель памяти." : "Для выбранного периода нет доступных снимков памяти.";
       return { rows: rows, delta: null, axisUnit: null };
     }
-    chart.hidden = false; empty.hidden = true;
+    chart.removeAttribute("hidden"); empty.hidden = true;
     var width = Math.max(270, Math.min(960, chart.parentElement.clientWidth - 24));
     chart.setAttribute("viewBox", "0 0 " + width + " 204");
     var left = 47, right = width - 12, top = 13, bottom = 174;
