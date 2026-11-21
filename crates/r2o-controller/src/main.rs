@@ -5584,17 +5584,7 @@ fn matching_domain_recovery_candidates(
                             == group_path(observation.key.transport, &observation.key.probe_path)
                         && binding.ech_origin == observation.key.ech_origin
                 });
-                if !confirmed {
-                    continue;
-                }
-                let Ok(bytes) = compile_text(&saved_plan.text) else {
-                    continue;
-                };
-                let Ok(plan) = Plan::parse(&bytes) else {
-                    continue;
-                };
-                if !shape_matches_plan(target.shape, &plan)
-                    || r2o_datapath::engine::validate_runtime_plan(&plan).is_err()
+                if !confirmed
                     || candidates
                         .iter()
                         .any(|candidate: &R2oFamilyRecoveryCandidate| {
@@ -5603,8 +5593,13 @@ fn matching_domain_recovery_candidates(
                 {
                     continue;
                 }
+                let Ok(prepared) = PreparedCandidate::prepare(&saved_plan.text, Some(target.shape))
+                else {
+                    continue;
+                };
                 candidates.push(R2oFamilyRecoveryCandidate {
-                    plan_id: plan.id,
+                    plan_id: prepared.plan_id,
+                    prepared: (!group_pass).then_some(prepared),
                     plan_text: saved_plan.text.clone(),
                     group_plan: group_pass,
                     probe_path: group_path(group.key.transport, &group.key.probe_path).into(),
@@ -5631,7 +5626,7 @@ fn matching_saved_bootstrap_candidates(
     if target.shape != SHAPE_MODERN {
         return Vec::new();
     }
-    let mut best: Option<(&Binding, &r2o_controller::catalog::Plan, [u8; 16])> = None;
+    let mut best: Option<(&Binding, &r2o_controller::catalog::Plan, PreparedCandidate)> = None;
     for box_record in &catalog.boxes {
         for binding in &box_record.bindings {
             let family = r2o_catalog_binding_family(binding);
@@ -5656,33 +5651,23 @@ fn matching_saved_bootstrap_candidates(
             if saved_plan.proto != "tls" || saved_plan.text.len() >= 4096 {
                 continue;
             }
-            let Ok(bytes) = compile_text(&saved_plan.text) else {
-                continue;
-            };
-            let Ok(plan) = Plan::parse(&bytes) else {
-                continue;
-            };
-            if !shape_matches_plan(target.shape, &plan)
-                || r2o_datapath::engine::validate_runtime_plan(&plan).is_err()
-            {
-                continue;
-            }
             let exact = family == target.family;
-            let best_exact = best.is_some_and(|(binding, _, _)| {
-                r2o_catalog_binding_family(binding) == target.family
+            let outranks_best = best.as_ref().is_none_or(|(current, _, _)| {
+                let best_exact = r2o_catalog_binding_family(current) == target.family;
+                exact && !best_exact
+                    || exact == best_exact && r2o_catalog_binding_beats(binding, current)
             });
-            if best.is_none()
-                || exact && !best_exact
-                || exact == best_exact
-                    && best
-                        .is_some_and(|(current, _, _)| r2o_catalog_binding_beats(binding, current))
+            if outranks_best
+                && let Ok(prepared) =
+                    PreparedCandidate::prepare(&saved_plan.text, Some(target.shape))
             {
-                best = Some((binding, saved_plan, plan.id));
+                best = Some((binding, saved_plan, prepared));
             }
         }
     }
-    best.map(|(_, plan, plan_id)| R2oFamilyRecoveryCandidate {
-        plan_id,
+    best.map(|(_, plan, prepared)| R2oFamilyRecoveryCandidate {
+        plan_id: prepared.plan_id,
+        prepared: Some(prepared),
         plan_text: plan.text.clone(),
         group_plan: false,
         probe_path: "/".into(),
@@ -5808,24 +5793,21 @@ fn select_sibling_recovery_candidates(
             if saved_plan.proto != "tls" || saved_plan.text.len() >= 4096 {
                 continue;
             }
-            let Ok(bytes) = compile_text(&saved_plan.text) else {
-                continue;
-            };
-            let Ok(plan) = Plan::parse(&bytes) else {
-                continue;
-            };
-            if !shape_matches_plan(target_shape, &plan)
-                || r2o_datapath::engine::validate_runtime_plan(&plan).is_err()
-                || candidates
-                    .iter()
-                    .any(|candidate: &R2oFamilyRecoveryCandidate| {
-                        candidate.plan_text == saved_plan.text
-                    })
+            if candidates
+                .iter()
+                .any(|candidate: &R2oFamilyRecoveryCandidate| {
+                    candidate.plan_text == saved_plan.text
+                })
             {
                 continue;
             }
+            let Ok(prepared) = PreparedCandidate::prepare(&saved_plan.text, Some(target_shape))
+            else {
+                continue;
+            };
             candidates.push(R2oFamilyRecoveryCandidate {
-                plan_id: plan.id,
+                plan_id: prepared.plan_id,
+                prepared: Some(prepared),
                 plan_text: saved_plan.text.clone(),
                 group_plan: false,
                 probe_path: "/".into(),
@@ -5851,6 +5833,7 @@ fn select_sibling_recovery_candidates(
             let plan_id = [0x77_u8.saturating_sub(index as u8); 16];
             if let Ok(text) = r2o_controller::discovery::plan_text_for_trial(&text, plan_id) {
                 candidates.push(R2oFamilyRecoveryCandidate {
+                    prepared: None,
                     plan_id,
                     plan_text: text,
                     group_plan: false,
@@ -8103,8 +8086,8 @@ struct R2oFamilyRecoveryTask {
 }
 
 #[cfg(unix)]
-#[derive(Clone)]
 struct R2oFamilyRecoveryCandidate {
+    prepared: Option<PreparedCandidate>,
     plan_id: [u8; 16],
     plan_text: String,
     group_plan: bool,
@@ -8122,17 +8105,23 @@ struct PreparedCandidate {
 #[cfg(unix)]
 impl PreparedCandidate {
     fn new(plan_text: &str) -> Result<Self, String> {
+        Self::prepare(plan_text, None)
+    }
+
+    fn prepare(plan_text: &str, shape: Option<u8>) -> Result<Self, String> {
         let started_at = std::time::Instant::now();
         let records = compile_text(plan_text).map_err(|error| error.to_string())?;
         let plan = Plan::parse(&records).map_err(|error| error.to_string())?;
-        let wire_records = match r2o_control_wire() {
-            control::WireProfile::V22 => {
-                r2o_plan_records_for_profile(control::WireProfile::V22, &records)?
-            }
-            control::WireProfile::V48 => {
-                r2o_datapath::engine::validate_runtime_plan(&plan).map_err(str::to_owned)?;
-                records
-            }
+        if shape.is_some_and(|shape| !shape_matches_plan(shape, &plan)) {
+            return Err("форма семейного плана несовместима с потоком".into());
+        }
+        let profile = r2o_control_wire();
+        if shape.is_some() || profile == control::WireProfile::V48 {
+            r2o_datapath::engine::validate_runtime_plan(&plan).map_err(str::to_owned)?;
+        }
+        let wire_records = match profile {
+            control::WireProfile::V22 => r2o_plan_records_for_profile(profile, &records)?,
+            control::WireProfile::V48 => records,
         };
         Ok(Self {
             plan_id: plan.id,
@@ -8923,11 +8912,19 @@ fn r2o_family_recovery_sibling_trial(
             false,
         );
     }
-    let prepared = match PreparedCandidate::new(&candidate.plan_text) {
-        Ok(prepared) if prepared.plan_id == candidate.plan_id => prepared,
-        Ok(_) => return (Err("идентификатор семейного плана не совпал".into()), false),
-        Err(error) => return (Err(error), false),
+    let local_preparation;
+    let prepared = if let Some(prepared) = &candidate.prepared {
+        prepared
+    } else {
+        local_preparation = match PreparedCandidate::new(&candidate.plan_text) {
+            Ok(prepared) => prepared,
+            Err(error) => return (Err(error), false),
+        };
+        &local_preparation
     };
+    if prepared.plan_id != candidate.plan_id {
+        return (Err("идентификатор семейного плана не совпал".into()), false);
+    }
     let has_timestamp = match target.tcp_profile() {
         control::TCP_PROFILE_TS => Some(true),
         control::TCP_PROFILE_NO_TS => Some(false),
@@ -8937,7 +8934,7 @@ fn r2o_family_recovery_sibling_trial(
     let (mut result, applied, _) = r2o_family_recovery_sibling_trial_with_ech_state(
         target,
         destination,
-        &prepared,
+        prepared,
         &candidate.probe_path,
         confirm_mark,
         commands,
@@ -8963,7 +8960,7 @@ fn r2o_family_recovery_sibling_trial(
             wire_target.shape = r2o_plan_wire_shape(target.shape, has_timestamp);
             match r2o_discovery_client_shape_trial(
                 &wire_target,
-                &prepared,
+                prepared,
                 client_hello,
                 confirm_mark,
                 commands,
@@ -20987,6 +20984,7 @@ group_block_proven: false,
                 let plan_id = r2o_plan_wire_id(&candidate.text)?;
                 offered.push(r2o_controller::r2o_fallback::tried_key(&candidate.text));
                 Some(R2oFamilyRecoveryCandidate {
+                    prepared: None,
                     plan_id,
                     plan_text: candidate.text,
                     group_plan: false,
@@ -51535,6 +51533,7 @@ mod tests {
                     tcp_profile: 0,
                 },
                 candidates: vec![super::R2oFamilyRecoveryCandidate {
+                    prepared: None,
                     plan_id: [3; 16],
                     plan_text: "не должен компилироваться".into(),
                     group_plan: false,
@@ -51569,6 +51568,7 @@ mod tests {
                     tcp_profile: 0,
                 },
                 candidates: vec![super::R2oFamilyRecoveryCandidate {
+                    prepared: None,
                     plan_id: [3; 16],
                     plan_text: "не должен компилироваться".into(),
                     group_plan: false,
@@ -52146,6 +52146,7 @@ mod tests {
             tcp_profile: 0,
         };
         let candidate = super::R2oFamilyRecoveryCandidate {
+            prepared: None,
             plan_id: [0x42; 16],
             plan_text: "r2o-plan 1 1\nid 42424242424242424242424242424242\nproto tcp tls\nsplit sni_middle +0\n".into(),
             group_plan: false, probe_path: "/".into(),
@@ -52187,6 +52188,7 @@ mod tests {
         };
         let plan_id = [0x42; 16];
         let candidate = super::R2oFamilyRecoveryCandidate {
+            prepared: None,
             plan_id,
             plan_text: "r2o-plan 1 1\nid 42424242424242424242424242424242\nproto tcp tls\nsplit sni_middle +0\n".into(),
             group_plan: false,
@@ -52331,6 +52333,7 @@ mod tests {
             tcp_profile: r2k_core::control::TCP_PROFILE_TS,
         };
         let candidate = super::R2oFamilyRecoveryCandidate {
+            prepared: None,
             plan_id: [0x42; 16],
             plan_text: "r2o-plan 1 1\nid 42424242424242424242424242424242\nproto tcp tls\nsplit sni_middle +0\n".into(),
             group_plan: false,
@@ -52477,6 +52480,7 @@ mod tests {
         };
         let plan_id = [0x42; 16];
         let candidate = super::R2oFamilyRecoveryCandidate {
+            prepared: None,
             plan_id,
             plan_text: "r2o-plan 1 1\nid 42424242424242424242424242424242\nproto tcp tls\nsplit sni_middle +0\n".into(),
             group_plan: false,
@@ -64281,6 +64285,10 @@ group_block_proven: false,
         let early = super::select_sibling_recovery_candidates(&catalog, &target, true);
         assert_eq!(early.len(), 1);
         assert_eq!(early[0].plan_id, [0x11; 16]);
+        assert!(
+            early[0].prepared.is_some(),
+            "prepare the selected saved plan before queueing"
+        );
 
         let mut other_service = catalog.clone();
         other_service.boxes[0].bindings.remove(0);
