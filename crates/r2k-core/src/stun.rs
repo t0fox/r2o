@@ -114,9 +114,15 @@ fn exact_binding_reply(packet: &[u8], txid: &[u8; TXID_LEN], kind: u16) -> bool 
             return false;
         };
         let padded_len = (usize::from(length) + 3) & !3;
-        let Some(rest) = attributes.get(4 + padded_len..) else {
+        let Some((current, rest)) = attributes.split_at_checked(4 + padded_len) else {
             return false;
         };
+        if kind == BINDING_RESPONSE
+            && read_u16(current, 0) == Ok(XOR_MAPPED_ADDRESS)
+            && !matches!((length, current.get(5)), (8, Some(1)) | (20, Some(2)))
+        {
+            return false;
+        }
         attributes = rest;
     }
     true

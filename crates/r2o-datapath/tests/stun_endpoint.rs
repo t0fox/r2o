@@ -1,7 +1,8 @@
 #![cfg(target_os = "linux")]
 
 use r2k_core::control::{
-    KEY_LEN, SHAPE_VOICE, encode_delete_addr_probe, encode_set_addr_probe, read_frame,
+    EVENT_R2O_STUN_EXCHANGE, Frame, KEY_LEN, SHAPE_VOICE, decode_stun_exchange,
+    encode_delete_addr_probe, encode_set_addr_probe, read_frame,
 };
 use r2o_datapath::control::NamePlans;
 use r2o_datapath::engine::{PacketDecision, decide};
@@ -76,6 +77,13 @@ fn stun_endpoint_применяет_точную_пробу_и_сохраняе�
         assert_eq!(applied.binding.shape, SHAPE_VOICE);
         assert!(applied.binding.temporary);
         assert_eq!(applied.key.len(), KEY_LEN);
+        let mut proof = Frame {
+            kind: EVENT_R2O_STUN_EXCHANGE,
+            body: applied.event_body().unwrap(),
+        };
+        assert_eq!(decode_stun_exchange(&proof), Ok(applied));
+        proof.body.truncate(KEY_LEN + 32);
+        assert!(decode_stun_exchange(&proof).is_err());
         let PacketDecision::Transmit { packets, fate } = decide(plan, &request) else {
             panic!("STUN ipfrag 1 должен собрать два IP-фрагмента");
         };

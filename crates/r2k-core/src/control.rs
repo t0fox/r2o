@@ -63,6 +63,8 @@ pub const EVENT_R2O_TCP_RST_CUT: u16 = 0x001b;
 pub const EVENT_R2O_TCP_EXCHANGE: u16 = 0x001c;
 pub const EVENT_R2O_VOICE_STUN_PROOF: u16 = 0x001d;
 pub const EVENT_R2O_VOICE_RTP_PROOF: u16 = 0x001e;
+pub const EVENT_R2O_STUN_SUSPECT: u16 = 0x001f;
+pub const EVENT_R2O_STUN_EXCHANGE: u16 = 0x0020;
 pub const EVENT_R2O_JOURNAL_ENTRY: u16 = 0x0014;
 pub const EVENT_R2O_JOURNAL_END: u16 = 0x0015;
 pub const COMMAND_SET_NAME: u16 = 0x0081;
@@ -462,6 +464,18 @@ pub struct AppliedEvent {
 }
 
 impl AppliedEvent {
+    pub fn is_stun_trial_execution(&self) -> bool {
+        self.key[37] == 17
+            && self.binding.is_known()
+            && self.binding.kind == 2
+            && self.binding.family == self.key[0]
+            && self.binding.shape == SHAPE_VOICE
+            && self.binding.temporary
+            && self.execution_id != 0
+            && self.trial_id != [0; 16]
+            && self.plan_id != [0; 16]
+    }
+
     pub fn event_body(&self) -> Option<Vec<u8>> {
         if !valid_flow_key(&self.key) || !valid_binding(&self.binding) {
             return None;
@@ -690,11 +704,13 @@ pub struct R2oVoiceSuspectEvent {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct R2oQuicSuspectEvent {
+pub struct R2oUdpSuspectEvent {
     pub key: [u8; KEY_LEN],
     pub client_is_low: bool,
     pub planned: bool,
 }
+
+pub type R2oQuicSuspectEvent = R2oUdpSuspectEvent;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct R2oTcpSilenceEvent {
@@ -908,7 +924,7 @@ impl R2oTcpSilenceEvent {
     }
 }
 
-impl R2oQuicSuspectEvent {
+impl R2oUdpSuspectEvent {
     pub fn event_body(&self) -> Option<Vec<u8>> {
         if !valid_flow_key(&self.key) || self.key[37] != 17 {
             return None;
@@ -2646,25 +2662,42 @@ mod ack_binding_context_tests {
 }
 
 pub fn decode_applied(frame: &Frame) -> Result<AppliedEvent, &'static str> {
+    if frame.kind != EVENT_APPLIED {
+        return Err("неверный тип события APPLIED");
+    }
+    decode_applied_body(&frame.body)
+}
+
+/// Binding-ответ клиента с контекстом фактически выполненного временного плана.
+pub fn decode_stun_exchange(frame: &Frame) -> Result<AppliedEvent, &'static str> {
+    if frame.kind != EVENT_R2O_STUN_EXCHANGE {
+        return Err("неверный тип события STUN-обмена");
+    }
+    let event = decode_applied_body(&frame.body)?;
+    if !event.is_stun_trial_execution() {
+        return Err("STUN-обмен не связан с исполнением временной UDP-пробы");
+    }
+    Ok(event)
+}
+
+fn decode_applied_body(body: &[u8]) -> Result<AppliedEvent, &'static str> {
     let base_len = KEY_LEN + 16 + 16;
-    if frame.kind != EVENT_APPLIED
-        || (frame.body.len() != base_len && frame.body.len() != base_len + EXECUTION_CONTEXT_LEN)
-    {
+    if body.len() != base_len && body.len() != base_len + EXECUTION_CONTEXT_LEN {
         return Err("неверный размер события APPLIED");
     }
-    let key: [u8; KEY_LEN] = frame.body[..KEY_LEN]
+    let key: [u8; KEY_LEN] = body[..KEY_LEN]
         .try_into()
         .map_err(|_| "неверный ключ события APPLIED")?;
     if !valid_flow_key(&key) {
         return Err("событие APPLIED содержит неверный ключ потока");
     }
-    let plan_id = frame.body[KEY_LEN..KEY_LEN + 16]
+    let plan_id = body[KEY_LEN..KEY_LEN + 16]
         .try_into()
         .map_err(|_| "неверный идентификатор плана в событии APPLIED")?;
-    let trial_id = frame.body[KEY_LEN + 16..KEY_LEN + 32]
+    let trial_id = body[KEY_LEN + 16..KEY_LEN + 32]
         .try_into()
         .map_err(|_| "неверный идентификатор испытания в событии APPLIED")?;
-    let context = &frame.body[base_len..];
+    let context = &body[base_len..];
     let (execution_id, binding) = if context.is_empty() {
         // d2k_link_next accepts the pre-context APPLIED form; zeroes mean
         // unknown, matching the zero-initialized C event.
@@ -3276,44 +3309,40 @@ pub fn decode_r2o_voice_suspect(frame: &Frame) -> Result<R2oVoiceSuspectEvent, &
 }
 
 pub fn decode_r2o_quic_suspect(frame: &Frame) -> Result<R2oQuicSuspectEvent, &'static str> {
-    if frame.kind != EVENT_R2O_QUIC_SUSPECT || frame.body.len() != KEY_LEN + 2 {
+    if frame.kind != EVENT_R2O_QUIC_SUSPECT {
         return Err("неверное событие подозрения молчания QUIC");
     }
-    let key: [u8; KEY_LEN] = frame.body[..KEY_LEN]
-        .try_into()
-        .map_err(|_| "неверный ключ UDP-потока QUIC")?;
-    if !valid_flow_key(&key)
-        || key[37] != 17
-        || frame.body[KEY_LEN] > 1
-        || frame.body[KEY_LEN + 1] > 1
-    {
-        return Err("подозрение содержит неверный UDP-поток или направление клиента");
-    }
-    Ok(R2oQuicSuspectEvent {
-        key,
-        client_is_low: frame.body[KEY_LEN] == 1,
-        planned: frame.body[KEY_LEN + 1] == 1,
-    })
+    decode_udp_suspect(&frame.body)
 }
 
 pub fn decode_r2o_quic_stall(frame: &Frame) -> Result<R2oQuicSuspectEvent, &'static str> {
-    if frame.kind != EVENT_R2O_QUIC_STALL || frame.body.len() != KEY_LEN + 2 {
+    if frame.kind != EVENT_R2O_QUIC_STALL {
         return Err("неверное событие зависания QUIC после ответа");
     }
-    let key: [u8; KEY_LEN] = frame.body[..KEY_LEN]
-        .try_into()
-        .map_err(|_| "неверный ключ зависшего UDP-потока QUIC")?;
-    if !valid_flow_key(&key)
-        || key[37] != 17
-        || frame.body[KEY_LEN] > 1
-        || frame.body[KEY_LEN + 1] > 1
-    {
-        return Err("зависание содержит неверный UDP-поток или направление клиента");
+    decode_udp_suspect(&frame.body)
+}
+
+pub fn decode_stun_suspect(frame: &Frame) -> Result<R2oUdpSuspectEvent, &'static str> {
+    if frame.kind != EVENT_R2O_STUN_SUSPECT {
+        return Err("неверное событие молчания STUN");
     }
-    Ok(R2oQuicSuspectEvent {
+    decode_udp_suspect(&frame.body)
+}
+
+fn decode_udp_suspect(body: &[u8]) -> Result<R2oUdpSuspectEvent, &'static str> {
+    if body.len() != KEY_LEN + 2 {
+        return Err("неверная длина события молчания UDP");
+    }
+    let key: [u8; KEY_LEN] = body[..KEY_LEN]
+        .try_into()
+        .map_err(|_| "неверный ключ UDP-потока")?;
+    if !valid_flow_key(&key) || key[37] != 17 || body[KEY_LEN] > 1 || body[KEY_LEN + 1] > 1 {
+        return Err("подозрение содержит неверный UDP-поток или направление клиента");
+    }
+    Ok(R2oUdpSuspectEvent {
         key,
-        client_is_low: frame.body[KEY_LEN] == 1,
-        planned: frame.body[KEY_LEN + 1] == 1,
+        client_is_low: body[KEY_LEN] == 1,
+        planned: body[KEY_LEN + 1] == 1,
     })
 }
 

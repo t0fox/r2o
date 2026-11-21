@@ -2049,6 +2049,19 @@ mod app {
                         quic_sessions.mark_suspected(&event.key);
                     }
                 }
+                if reverse_queue_visible && let Some(control) = control.as_mut() {
+                    udp_sessions.sweep_stun_suspects(now, |event| {
+                        event.event_body().is_some_and(|body| {
+                            matches!(
+                                control.try_send_event(
+                                    r2k_core::control::EVENT_R2O_STUN_SUSPECT,
+                                    &body
+                                ),
+                                Ok(true)
+                            )
+                        })
+                    });
+                }
                 udp_sessions.expire(now);
                 next_session_sweep = now + Duration::from_secs(1);
             }
@@ -2270,6 +2283,25 @@ mod app {
                         &proof,
                     ) {
                         voice_trial_proofs.acknowledge_proof_event(&proof);
+                    }
+                }
+                if let Some(control) = control.as_mut() {
+                    let exchanges: Vec<_> = voice_trial_proofs
+                        .pending_stun_exchanges()
+                        .cloned()
+                        .collect();
+                    for exchange in exchanges {
+                        let Some(body) = exchange.event_body() else {
+                            continue;
+                        };
+                        if !matches!(
+                            control
+                                .try_send_event(r2k_core::control::EVENT_R2O_STUN_EXCHANGE, &body),
+                            Ok(true)
+                        ) {
+                            break;
+                        }
+                        voice_trial_proofs.acknowledge_stun_exchange(&exchange);
                     }
                 }
             }
