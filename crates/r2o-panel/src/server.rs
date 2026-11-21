@@ -1020,17 +1020,19 @@ fn merge_live_snapshot(primary: &mut Value, extra: &Value) {
     let take_extra_autopick = extra_has_searches && !primary_has_searches
         || (extra_has_searches == primary_has_searches && extra_events > primary_events);
 
-    let mut seen = HashSet::new();
-    if let Some(searches) = primary.get("searches").and_then(Value::as_array) {
-        for search in searches {
-            seen.insert(live_search_key(search));
-        }
-    }
-    if let Some(searches) = primary.get_mut("searches").and_then(Value::as_array_mut) {
-        if let Some(extra_searches) = extra_searches {
-            for search in extra_searches {
-                if seen.insert(live_search_key(search)) {
-                    searches.push(search.clone());
+    for key in ["searches", "family_searches"] {
+        if let Some(extra_rows) = extra.get(key).and_then(Value::as_array) {
+            if key == "family_searches"
+                && !primary.as_object().is_some_and(|obj| obj.contains_key(key))
+            {
+                primary[key] = json!([]);
+            }
+            if let Some(rows) = primary.get_mut(key).and_then(Value::as_array_mut) {
+                let mut seen: HashSet<_> = rows.iter().map(live_search_key).collect();
+                for row in extra_rows {
+                    if seen.insert(live_search_key(row)) {
+                        rows.push(row.clone());
+                    }
                 }
             }
         }
