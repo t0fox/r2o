@@ -7871,6 +7871,7 @@ struct R2oFamilyRecoveryTask {
     target: r2o_controller::discovery::DiscoveryTarget,
     candidates: Vec<R2oFamilyRecoveryCandidate>,
     mark: Option<u32>,
+    client_hello: Option<Vec<u8>>,
     /// C `rx_saved_bootstrap`: после провала нужен полный classifier, а не
     /// семейный cooldown.
     bootstrap: bool,
@@ -7892,6 +7893,8 @@ struct R2oFamilyRecoveryOutcome {
     result: Result<r2o_controller::fetch::FetchResult, String>,
     applied: bool,
     bootstrap: bool,
+    temporary_candidate: Option<R2oFamilyRecoveryCandidate>,
+    client_input: bool,
 }
 
 #[cfg(unix)]
@@ -7977,6 +7980,7 @@ impl R2oFamilyRecoveryWorker {
         candidates: Vec<R2oFamilyRecoveryCandidate>,
         mark: Option<u32>,
         bootstrap: bool,
+        client_hello: Option<Vec<u8>>,
     ) -> bool {
         if candidates.is_empty() || !self.active.insert(target.clone()) {
             return false;
@@ -7991,6 +7995,7 @@ impl R2oFamilyRecoveryWorker {
             candidates,
             mark,
             bootstrap,
+            client_hello,
         };
         match jobs.try_send(task) {
             Ok(()) => true,
@@ -8426,6 +8431,8 @@ fn r2o_family_recovery_run(
         result: Err("не найден подходящий план семейного восстановления".to_owned()),
         applied: false,
         bootstrap: task.bootstrap,
+        temporary_candidate: None,
+        client_input: false,
     };
     let destination = match task.target.endpoint.parse::<std::net::SocketAddr>() {
         Ok(destination) => destination,
@@ -8481,6 +8488,7 @@ fn r2o_family_recovery_run(
                 &candidate,
                 task.mark,
                 commands,
+                task.client_hello.as_deref(),
             )
         };
         outcome.result = trial.0;
@@ -8488,6 +8496,10 @@ fn r2o_family_recovery_run(
         if r2o_family_recovery_decision(&outcome.result, outcome.applied)
             == R2oFamilyRecoveryDecision::Verified
         {
+            if !candidate.group_plan {
+                outcome.temporary_candidate = Some(candidate);
+                outcome.client_input = task.client_hello.is_some();
+            }
             return outcome;
         }
     }
@@ -8501,21 +8513,22 @@ fn r2o_family_recovery_sibling_trial(
     candidate: &R2oFamilyRecoveryCandidate,
     mark: Option<u32>,
     commands: &SyncSender<HttpSearchCommand>,
+    client_hello: Option<&[u8]>,
 ) -> (Result<r2o_controller::fetch::FetchResult, String>, bool) {
-    r2o_family_recovery_sibling_trial_with_ech(target, destination, candidate, mark, commands, None)
-}
-
-#[cfg(unix)]
-fn r2o_family_recovery_sibling_trial_with_ech(
-    target: &r2o_controller::discovery::DiscoveryTarget,
-    destination: std::net::SocketAddr,
-    candidate: &R2oFamilyRecoveryCandidate,
-    mark: Option<u32>,
-    commands: &SyncSender<HttpSearchCommand>,
-    ech: Option<&r2o_controller::ech::R2oEchConfig>,
-) -> (Result<r2o_controller::fetch::FetchResult, String>, bool) {
-    let wire_len = r2o_discovery_candidate_wire_len(target, None, ech);
-    let (result, applied, _) = r2o_family_recovery_sibling_trial_with_ech_state(
+    let ech = r2o_is_ech_shape(target.shape);
+    if ech && client_hello.is_none() {
+        return (
+            Err("нет снимка ClientHello для семейной пробы ECH".into()),
+            false,
+        );
+    }
+    let has_timestamp = match target.tcp_profile() {
+        control::TCP_PROFILE_TS => Some(true),
+        control::TCP_PROFILE_NO_TS => Some(false),
+        _ => None,
+    };
+    let wire_len = r2o_discovery_candidate_wire_len(target, client_hello, None);
+    let (mut result, applied, _) = r2o_family_recovery_sibling_trial_with_ech_state(
         target,
         destination,
         candidate,
@@ -8524,14 +8537,43 @@ fn r2o_family_recovery_sibling_trial_with_ech(
         // verifier-сокет install_next.
         mark,
         commands,
-        ech,
         None,
-        None,
+        client_hello,
+        has_timestamp,
         false,
         wire_len,
         None,
         r2o_controller::fetch::r2o_d2o_verification_encoding(&candidate.probe_path),
     );
+    if r2o_budget_mark_from_result(&result) == R2O_D2K_CAT_BUDGET_CUT {
+        return (Err("семейная проба не прошла бюджет потока".into()), false);
+    }
+    if r2o_family_recovery_decision(&result, applied) == R2oFamilyRecoveryDecision::Verified {
+        if ech {
+            if let Ok(fetch) = &mut result {
+                fetch.r2o_volume_observation.replay_proof = fetch.handshake_verified;
+            }
+        } else if let Some(client_hello) = client_hello {
+            let mut wire_target = target.clone();
+            wire_target.shape = r2o_plan_wire_shape(target.shape, has_timestamp);
+            match r2o_discovery_client_shape_trial(
+                &wire_target,
+                &candidate.plan_text,
+                client_hello,
+                mark,
+                commands,
+            ) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return (
+                        Err("семейный план не прошёл повтор ClientHello".into()),
+                        false,
+                    );
+                }
+                Err(error) => return (Err(error), false),
+            }
+        }
+    }
     (result, applied)
 }
 
@@ -8644,7 +8686,7 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
                                 .map(|(path, _)| path.clone())
                                 .unwrap_or_else(|| candidate.probe_path.clone()),
                             deadline: std::time::Duration::from_secs(8),
-                            tls12: target.shape == SHAPE_LEGACY,
+                            tls12: control::r2k_link_shape_tcp_base(target.shape) == SHAPE_LEGACY,
                             wire_len,
                             mark: confirmation_mark,
                         };
@@ -13848,6 +13890,7 @@ struct R2oRecentClientShapeCache {
 #[cfg(unix)]
 struct R2oCachedClientShape {
     host: String,
+    endpoint: String,
     shape: u8,
     client_hello: Vec<u8>,
     tcp_has_timestamp: Option<bool>,
@@ -13866,6 +13909,7 @@ impl R2oRecentClientShapeCache {
         };
         self.entries[index] = Some(R2oCachedClientShape {
             host: target.host.clone(),
+            endpoint: target.endpoint.clone(),
             shape: target.shape,
             client_hello: client_hello.to_vec(),
             tcp_has_timestamp,
@@ -19509,6 +19553,24 @@ group_block_proven: false,
             .is_some()
     }
 
+    fn family_client_hello(
+        &self,
+        target: &r2o_controller::discovery::DiscoveryTarget,
+    ) -> Option<Vec<u8>> {
+        let snapshots = self
+            .recent_client_shapes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = snapshots.entries[r2o_client_shape_family_slot(target.family)?].as_ref()?;
+        (entry.host == target.host
+            && entry.endpoint == target.endpoint
+            && control::r2k_link_shape_tcp_base(entry.shape)
+                == control::r2k_link_shape_tcp_base(target.shape)
+            && control::tcp_profile_from_has_timestamp(entry.tcp_has_timestamp)
+                == target.tcp_profile())
+        .then(|| entry.client_hello.clone())
+    }
+
     fn queue_client_snapshot_after_confirmed_failure_with_planned_and_trigger(
         &mut self,
         target: r2o_controller::discovery::DiscoveryTarget,
@@ -23992,14 +24054,60 @@ impl ControlClient {
                     .as_ref()
                     .and_then(R2oFamilyRecoveryWorker::try_outcome)
                 {
-                    let decision = r2o_family_recovery_decision(&outcome.result, outcome.applied);
+                    let mut decision =
+                        r2o_family_recovery_decision(&outcome.result, outcome.applied);
+                    if decision == R2oFamilyRecoveryDecision::Verified
+                        && let Some(candidate) = &outcome.temporary_candidate
+                    {
+                        let installed = if let Some((worker, catalog, path, _)) = &mut discovery {
+                            let unfit = r2o_plan_wire_id(&candidate.plan_text).is_some_and(|id| {
+                                worker
+                                    .searches
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .plan_unfit(&outcome.target, &id)
+                            });
+                            let publication = if unfit {
+                                Err("этот семейный план уже не подошёл потоку клиента".into())
+                            } else {
+                                self.apply_family_recovery_candidate(
+                                    &outcome,
+                                    catalog,
+                                    path,
+                                    catalog_persistence.as_mut(),
+                                )
+                            };
+                            match publication {
+                                Ok(true) => {
+                                    catalog_sync_dirty = true;
+                                    worker.record_confirmation();
+                                    worker.r2o_yield_asking_to_own_plan(catalog);
+                                    worker.catalog_changed(catalog, &active_groups);
+                                    true
+                                }
+                                Ok(false) => false,
+                                Err(error) => {
+                                    eprintln!(
+                                        "не удалось сохранить семейный план для {}: {error}",
+                                        outcome.target.host
+                                    );
+                                    false
+                                }
+                            }
+                        } else {
+                            false
+                        };
+                        if !installed {
+                            decision = R2oFamilyRecoveryDecision::Reclassify;
+                        }
+                    }
                     match decision {
                         R2oFamilyRecoveryDecision::Verified => {
                             if let Some(worker) = &mut family_recovery {
                                 worker.complete(&outcome.target);
                             }
                             println!(
-                                "план семейного восстановления {:02x?} прошёл HTTPS и получил точный APPLIED для {}; полный поиск не потребовался",
+                                "план семейного восстановления {:02x?} прошёл проверку протокола и получил точный APPLIED для {}",
                                 outcome.plan_id, outcome.target.host
                             );
                             std::io::stdout().flush()?;
@@ -24530,14 +24638,19 @@ impl ControlClient {
                         let mut bootstrap_queued = false;
                         if outcome.result.rx_tls_unavailable
                             && let Some(target) = discovery_target.as_ref()
-                            && let Some((_, catalog, _, mark)) = discovery.as_ref()
+                            && let Some((discovery, catalog, _, mark)) = discovery.as_ref()
                             && let Some(worker) = family_recovery.as_mut()
                         {
                             let candidates =
                                 matching_saved_bootstrap_candidates(catalog, target, false);
                             if !candidates.is_empty() {
-                                bootstrap_queued =
-                                    worker.queue(target.clone(), candidates, *mark, true);
+                                bootstrap_queued = worker.queue(
+                                    target.clone(),
+                                    candidates,
+                                    *mark,
+                                    true,
+                                    discovery.family_client_hello(target),
+                                );
                             }
                         }
                         if bootstrap_queued {
@@ -25358,8 +25471,17 @@ impl ControlClient {
                             let has_family_candidates = !family_candidates.is_empty();
                             let family_queued = has_family_candidates && {
                                 let mark = discovery.as_ref().and_then(|(_, _, _, mark)| *mark);
+                                let snapshot = discovery.as_ref().and_then(|(worker, _, _, _)| {
+                                    worker.family_client_hello(&target)
+                                });
                                 family_recovery.as_mut().is_some_and(|worker| {
-                                    worker.queue(target.clone(), family_candidates, mark, false)
+                                    worker.queue(
+                                        target.clone(),
+                                        family_candidates,
+                                        mark,
+                                        false,
+                                        snapshot,
+                                    )
                                 })
                             };
                             if family_queued {
@@ -25441,8 +25563,14 @@ impl ControlClient {
                                     let candidates =
                                         matching_sibling_recovery_candidates(catalog, &target);
                                     let family_queued = !candidates.is_empty()
-                                        && family_recovery.as_mut().is_some_and(|worker| {
-                                            worker.queue(target.clone(), candidates, *mark, false)
+                                        && family_recovery.as_mut().is_some_and(|family| {
+                                            family.queue(
+                                                target.clone(),
+                                                candidates,
+                                                *mark,
+                                                false,
+                                                worker.family_client_hello(&target),
+                                            )
                                         });
                                     if family_queued {
                                         println!(
@@ -29941,6 +30069,82 @@ impl ControlClient {
         )
     }
 
+    fn apply_family_recovery_candidate(
+        &mut self,
+        outcome: &R2oFamilyRecoveryOutcome,
+        catalog: &mut Catalog,
+        catalog_path: &Path,
+        persistence: Option<&mut R2oCatalogPersistence>,
+    ) -> Result<bool, Box<dyn Error>> {
+        let Some(candidate) = &outcome.temporary_candidate else {
+            return Ok(false);
+        };
+        if r2o_family_recovery_decision(&outcome.result, outcome.applied)
+            != R2oFamilyRecoveryDecision::Verified
+        {
+            return Ok(false);
+        }
+        let fetch = outcome
+            .result
+            .as_ref()
+            .expect("проверен исход семейной пробы");
+        let target = &outcome.target;
+        let budget_mark = r2o_budget_mark_from_result(&outcome.result);
+        let protocol_verified = match control::r2k_link_shape_tcp_base(target.shape) {
+            SHAPE_MODERN => fetch.tls == Some("1.3"),
+            SHAPE_LEGACY => fetch.tls == Some("1.2"),
+            SHAPE_ECH_TCP => fetch.r2o_volume_observation.replay_proof,
+            _ => false,
+        };
+        if !protocol_verified
+            || budget_mark == R2O_D2K_CAT_BUDGET_CUT
+            || target.endpoint.parse().ok() != Some(fetch.address)
+        {
+            return Ok(false);
+        }
+        let has_timestamp = match target.tcp_profile() {
+            control::TCP_PROFILE_TS => Some(true),
+            control::TCP_PROFILE_NO_TS => Some(false),
+            _ => None,
+        };
+        let mut confirmed = false;
+        self.apply_confirmed_discovery_outcome(
+            DiscoveryOutcome {
+                target: target.clone(),
+                plan_text: Some(candidate.plan_text.clone()),
+                detail: String::new(),
+                queue_expired: false,
+                address_failure: false,
+                address_recheck_acknowledged: false,
+                address_recheck_probes: 0,
+                direct_clear: false,
+                volume_recovery: false,
+                budget_mark,
+                group_block_proven: false,
+                transferred_own_plan: false,
+                bound_plan_id: None,
+                ech_origin: None,
+                volume_fingerprint: None,
+                volume_box_id: None,
+                retry_after: None,
+            },
+            catalog,
+            catalog_path,
+            if outcome.client_input {
+                r2o_controller::discovery::R2O_D2K_INPUT_CLIENT
+            } else {
+                r2o_controller::discovery::R2O_D2K_INPUT_PROFILE
+            },
+            has_timestamp,
+            (fetch.application_verified && candidate.probe_path != "/")
+                .then_some(candidate.probe_path.as_str()),
+            &mut confirmed,
+            persistence,
+            Some(r2o_confirmed_verified_by(&outcome.result)),
+        )?;
+        Ok(confirmed)
+    }
+
     fn apply_discovery_outcome_with_input_and_persistence(
         &mut self,
         mut outcome: DiscoveryOutcome,
@@ -30025,6 +30229,31 @@ impl ControlClient {
             }
             *catalog = updated;
         }
+        self.apply_confirmed_discovery_outcome(
+            outcome,
+            catalog,
+            catalog_path,
+            input,
+            has_timestamp,
+            measured_probe_path,
+            confirmed,
+            persistence,
+            verified_by,
+        )
+    }
+
+    fn apply_confirmed_discovery_outcome(
+        &mut self,
+        outcome: DiscoveryOutcome,
+        catalog: &mut Catalog,
+        catalog_path: &Path,
+        input: u8,
+        has_timestamp: Option<bool>,
+        measured_probe_path: Option<&str>,
+        confirmed: &mut bool,
+        persistence: Option<&mut R2oCatalogPersistence>,
+        verified_by: Option<u8>,
+    ) -> Result<Option<Vec<r2o_controller::live::LiveGroupKey>>, Box<dyn Error>> {
         let group_block_proven = outcome.group_block_proven;
         let budget_mark = outcome.budget_mark;
         let transferred_own_plan = outcome.transferred_own_plan;
@@ -30153,7 +30382,7 @@ impl ControlClient {
             .into_iter()
             .map(|(_, key)| key)
             .collect();
-        persist_catalog_update(&updated, catalog_path, now, persistence.take())?;
+        persist_catalog_update(&updated, catalog_path, now, persistence)?;
         *catalog = updated;
         *confirmed = true;
         println!(
@@ -50152,6 +50381,227 @@ mod tests {
             budget_note: None,
             r2o_resources: Vec::new(),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verified_family_trial_publishes_plan_for_next_flow() {
+        let work = std::env::temp_dir().join(format!("r2o-family-publish-{}", std::process::id()));
+        std::fs::create_dir_all(&work).unwrap();
+        let path = work.join("catalog.json");
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "family-publish.example.com".into(),
+            endpoint: "198.51.100.20:443".into(),
+            family: 4,
+            shape: SHAPE_MODERN,
+            tcp_profile: r2k_core::control::TCP_PROFILE_TS,
+        };
+        let candidate = super::R2oFamilyRecoveryCandidate {
+            plan_id: [0x42; 16],
+            plan_text: "r2o-plan 1 1\nid 42424242424242424242424242424242\nproto tcp tls\nsplit sni_middle +0\n".into(),
+            group_plan: false,
+            probe_path: "/main.css".into(),
+        };
+        let mut outcome = super::R2oFamilyRecoveryOutcome {
+            target: target.clone(),
+            plan_id: candidate.plan_id,
+            result: Ok(r2o_test_fetch_result()),
+            applied: false,
+            bootstrap: false,
+            temporary_candidate: Some(candidate),
+            client_input: false,
+        };
+        let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut client = ControlClient {
+            socket,
+            send_maxlen: 0,
+            send_cap: Arc::new(AtomicUsize::new(0)),
+            pending_events: Default::default(),
+            pending_applied_events: Default::default(),
+            dropped_events: Default::default(),
+            http_search_started: Default::default(),
+            http_acknowledged_bindings: Default::default(),
+        };
+        let mut catalog = Catalog::default();
+        assert!(
+            !client
+                .apply_family_recovery_candidate(&outcome, &mut catalog, &path, None)
+                .unwrap()
+        );
+        assert!(!path.exists());
+        outcome.applied = true;
+        outcome.target.shape = SHAPE_ECH_TCP;
+        assert!(
+            !client
+                .apply_family_recovery_candidate(&outcome, &mut catalog, &path, None)
+                .unwrap()
+        );
+        outcome.target.shape = SHAPE_MODERN;
+        outcome.target.endpoint = "198.51.100.21:443".into();
+        assert!(
+            !client
+                .apply_family_recovery_candidate(&outcome, &mut catalog, &path, None)
+                .unwrap()
+        );
+        outcome.target.endpoint = target.endpoint.clone();
+        assert!(
+            client
+                .apply_family_recovery_candidate(&outcome, &mut catalog, &path, None)
+                .unwrap()
+        );
+        let mut saved = Catalog::load(&path).unwrap();
+        let binding = &saved.boxes[0].bindings[0];
+        assert_eq!(binding.verified_by, super::R2O_D2K_VERBY_PROBE);
+        assert_eq!(binding.probe_path, "/main.css");
+        let commands = super::catalog_commands_with_send_cap(&mut saved, 0, 0).unwrap();
+        let mut plans = r2o_datapath::control::NamePlans::default();
+        for (_, bytes) in commands.commands {
+            let frame = read_frame(&mut std::io::Cursor::new(bytes)).unwrap();
+            assert!(plans.handle(&frame).ok);
+        }
+        assert!(
+            plans
+                .find_sport(
+                    Some(target.host.as_bytes()),
+                    None,
+                    r2k_core::control::SHAPE_MODERN_TS,
+                    41_001
+                )
+                .is_some()
+        );
+        assert!(
+            plans
+                .find_sport(
+                    Some(target.host.as_bytes()),
+                    None,
+                    r2k_core::control::SHAPE_MODERN_NO_TS,
+                    41_001
+                )
+                .is_none()
+        );
+        std::fs::remove_dir_all(work).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn family_ech_trial_checks_captured_hello_before_returning_temporary_plan() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let target = r2o_controller::discovery::DiscoveryTarget {
+            host: "family-ech.example.com".into(),
+            endpoint: endpoint.to_string(),
+            family: 4,
+            shape: SHAPE_ECH_TCP,
+            tcp_profile: r2k_core::control::TCP_PROFILE_TS,
+        };
+        let plan_id = [0x42; 16];
+        let candidate = super::R2oFamilyRecoveryCandidate {
+            plan_id,
+            plan_text: "r2o-plan 1 1\nid 42424242424242424242424242424242\nproto tcp tls\nsplit sni_middle +0\n".into(),
+            group_plan: false,
+            probe_path: "/".into(),
+        };
+        let snapshot = r2o_test_tls_ech_client_hello();
+        let worker = r2o_test_discovery_worker_without_threads();
+        worker
+            .recent_client_shapes
+            .lock()
+            .unwrap()
+            .note(&target, &snapshot, Some(true));
+        assert_eq!(
+            worker.family_client_hello(&target).as_deref(),
+            Some(snapshot.as_slice())
+        );
+        let other_endpoint = r2o_controller::discovery::DiscoveryTarget {
+            endpoint: "192.0.2.55:443".into(),
+            ..target.clone()
+        };
+        assert!(worker.family_client_hello(&other_endpoint).is_none());
+        let original = snapshot.clone();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut received = vec![0; original.len()];
+            stream.read_exact(&mut received).unwrap();
+            assert_eq!(received, original);
+            stream.write_all(&[22, 3, 3, 0, 1, 2]).unwrap();
+        });
+        let (commands, receiver) = std::sync::mpsc::sync_channel(1);
+        let controller = std::thread::spawn(move || {
+            let super::HttpSearchCommand::InstallProbe {
+                port,
+                shape,
+                trial_id,
+                reply,
+                ..
+            } = receiver.recv_timeout(Duration::from_secs(2)).unwrap()
+            else {
+                panic!("ожидалась установка временной пробы");
+            };
+            assert_eq!(shape, super::SHAPE_ECH_TS);
+            reply.send(Ok(None)).unwrap();
+            let super::HttpSearchCommand::CollectApplied {
+                trial_id: requested,
+                reply,
+                ..
+            } = receiver.recv_timeout(Duration::from_secs(2)).unwrap()
+            else {
+                panic!("ожидался запрос APPLIED");
+            };
+            assert_eq!(requested, trial_id);
+            reply
+                .send(Ok(vec![r2k_core::control::AppliedEvent {
+                    key: super::r2o_ask_flow_key(endpoint.ip(), port, endpoint),
+                    trial_id,
+                    plan_id,
+                    execution_id: 1,
+                    binding: BindingContext {
+                        generation: 1,
+                        kind: 1,
+                        family: 4,
+                        shape,
+                        temporary: true,
+                        epoch: [1; 16],
+                    },
+                }]))
+                .unwrap();
+            let super::HttpSearchCommand::DeleteProbe {
+                port: removed,
+                shape: removed_shape,
+                reply,
+                ..
+            } = receiver.recv_timeout(Duration::from_secs(2)).unwrap()
+            else {
+                panic!("ожидалось снятие временной пробы");
+            };
+            assert_eq!((removed, removed_shape), (port, shape));
+            reply.send(Ok(Vec::new())).unwrap();
+        });
+        let result = super::r2o_family_recovery_run(
+            super::R2oFamilyRecoveryTask {
+                target,
+                candidates: vec![candidate],
+                mark: Some(0),
+                bootstrap: false,
+                client_hello: Some(snapshot),
+            },
+            &commands,
+            &std::sync::atomic::AtomicBool::new(false),
+        );
+        assert!(result.applied, "{:?}", result.result);
+        assert!(result.client_input);
+        let fetch = result.result.unwrap();
+        assert!(fetch.r2o_volume_observation.replay_proof);
+        assert!(!fetch.application_verified);
+        assert_eq!(result.temporary_candidate.unwrap().plan_id, plan_id);
+        controller.join().unwrap();
+        server.join().unwrap();
     }
 
     #[cfg(unix)]
