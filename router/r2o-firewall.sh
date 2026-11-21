@@ -9,8 +9,8 @@ CONF=${R2O_CONFIG:-$ROOT/config}
 QUEUE4=${QUEUE_NUM:-2000}
 QUEUE6=${QUEUE_NUM6:-2001}
 MARK=${MARK:-45}
-# D2O controller measurements use this fixed mark to avoid observing their own probes.
-MEASURE_MARK=0x2f
+# Исключаем из очереди пробы контроллера с меткой из конфигурации.
+MEASURE_MARK=${MEASURE_MARK:-0x2f}
 PROBE_MARK=${PROBE_MARK:-46}
 BACKEND=${FW_BACKEND:-auto}
 IPV6_ENABLED_CONFIG=${IPV6_ENABLED:-1}
@@ -106,13 +106,24 @@ case "$MARK" in
     0x*|0X*) MARK=$(printf '%d' "$MARK") || exit 2 ;;
 esac
 number "$MARK" 4294967295 || { echo "неверная MARK" >&2; exit 2; }
-measure_mark_value=$(printf '%d' "$MEASURE_MARK") || exit 2
+measure_mark_value=$MEASURE_MARK
+case "$measure_mark_value" in
+    0x*|0X*) measure_mark_value=$(printf '%d' "$measure_mark_value") || exit 2 ;;
+esac
+number "$measure_mark_value" 4294967295 || { echo "неверная MEASURE_MARK" >&2; exit 2; }
 case "$PROBE_MARK" in
     0x*|0X*) PROBE_MARK=$(printf '%d' "$PROBE_MARK") || exit 2 ;;
 esac
 number "$PROBE_MARK" 4294967295 || { echo "неверная PROBE_MARK" >&2; exit 2; }
-[ "$MARK" != "$measure_mark_value" ] || { echo "MARK должен отличаться от MEASURE_MARK" >&2; exit 2; }
-[ "$PROBE_MARK" != "$measure_mark_value" ] || { echo "PROBE_MARK должен отличаться от MEASURE_MARK" >&2; exit 2; }
+if [ "$measure_mark_value" -eq 0 ]; then
+    # Метка 0 отключает исключение. Обычный трафик с нулевой меткой остаётся в очереди.
+    MEASURE_MARK=
+else
+    [ "$MARK" -ne "$measure_mark_value" ] || { echo "MARK должен отличаться от MEASURE_MARK" >&2; exit 2; }
+    [ "$PROBE_MARK" -ne "$measure_mark_value" ] || { echo "PROBE_MARK должен отличаться от MEASURE_MARK" >&2; exit 2; }
+    measure_mark_value=$(printf '%s' "$measure_mark_value" | sed 's/^0*//')
+    MEASURE_MARK=$(printf '0x%x' "$measure_mark_value") || exit 2
+fi
 
 case "$BACKEND" in
     nft|iptables) ;;
@@ -225,7 +236,7 @@ table inet r2o {
         ip daddr 224.0.0.0/4 return
         ip6 daddr ff00::/8 return
         meta mark $MARK return
-        meta mark $MEASURE_MARK return
+        ${MEASURE_MARK:+meta mark $MEASURE_MARK return}
         meta l4proto { tcp, udp } th dport { $nft_dns } return
         ct status dnat return
         $nft_gate_out
@@ -652,7 +663,9 @@ xt_family_up() {
         xt "$tool" -t mangle -A R2O_OUT -d ff00::/8 -j RETURN || return 1
     fi
     xt "$tool" -t mangle -A R2O_OUT -m mark --mark "$MARK" -j RETURN || return 1
-    xt "$tool" -t mangle -A R2O_OUT -m mark --mark "$MEASURE_MARK" -j RETURN || return 1
+    if [ -n "$MEASURE_MARK" ]; then
+        xt "$tool" -t mangle -A R2O_OUT -m mark --mark "$MEASURE_MARK" -j RETURN || return 1
+    fi
     for proto in tcp udp; do
         xt "$tool" -t mangle -A R2O_OUT -p "$proto" -m multiport --dports "$DNS_PORTS" -j RETURN || return 1
         xt "$tool" -t mangle -A R2O_IN -p "$proto" -m multiport --sports "$DNS_PORTS" -j RETURN || return 1
@@ -730,7 +743,9 @@ xt_family_installed() {
         xt "$fw_tool" -t mangle -C R2O_OUT -d ff00::/8 -j RETURN || return 1
     fi
     xt "$fw_tool" -t mangle -C R2O_OUT -m mark --mark "$MARK" -j RETURN || return 1
-    xt "$fw_tool" -t mangle -C R2O_OUT -m mark --mark "$MEASURE_MARK" -j RETURN || return 1
+    if [ -n "$MEASURE_MARK" ]; then
+        xt "$fw_tool" -t mangle -C R2O_OUT -m mark --mark "$MEASURE_MARK" -j RETURN || return 1
+    fi
     for proto in tcp udp; do
         xt "$fw_tool" -t mangle -C R2O_OUT -p "$proto" -m multiport --dports "$DNS_PORTS" -j RETURN || return 1
         xt "$fw_tool" -t mangle -C R2O_IN -p "$proto" -m multiport --sports "$DNS_PORTS" -j RETURN || return 1

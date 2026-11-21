@@ -117,6 +117,15 @@ async function main() {
   assert.deepEqual(ownPlanTrack?.steps.map((step) => step.label), ["Очередь", "Форма", "Распознаём", "Свойства", "Планы", "Проверка", "Подтверждено"]);
   assert.equal(panelUi.trackFor("неизвестная фаза новой сборки"), null, "неизвестная фаза не выдумывает этап");
   assert.equal(diagnosticsUi.summary({ samples: [{ at: 1, processes: [], bindings: 0, plans: 0 }], events: [{ outcome: "failed" }, { outcome: "queue-expired" }, { outcome: "plan-found" }] }).includes("без подтверждённого результата: 2"), true, "диагностика считает отказ и истёкшую очередь неподтверждёнными исходами");
+  for (const [base, step] of [[1, 60], [1000, 60000]]) {
+    const history = diagnosticsUi.memoryRows({
+      memory_history: { time_base: [1000, base], fields: ["at_delta_s", "mono_delta_s", "rss_kib"],
+        samples: [[0, 0, 100], [60, step, 200]] },
+      samples: [{ at: 1000, mono_ms: 1000 }, { at: 1060, mono_ms: 61000 }]
+    });
+    assert.equal(history[1].time - history[0].time, 60, "старые и новые отчёты дают одну минуту между точками");
+    assert.equal(diagnosticsUi.rowsInRange(history, 2).length, 2);
+  }
   assert.ok(fs.existsSync(panelBinary), `Не найден исполняемый файл панели: ${panelBinary}`);
   fs.mkdirSync(chromeProfile, { recursive: true });
 
@@ -365,13 +374,97 @@ async function main() {
   await call("Page.navigate", { url: `http://localhost:${port}/` });
   await waitFor(() => evaluate("document.readyState === 'complete' && !!document.querySelector('#app')"), "загрузка страницы R2O");
   await evaluate("document.fonts.ready.then(() => true)");
-  await waitFor(() => evaluate("!!document.querySelector('#diagnostic-toggle')"), "загрузка управления диагностикой");
+  await evaluate("location.hash = '#diagnostics'");
+  await waitFor(() => evaluate("document.querySelector('#diagnostic-state')?.dataset.phase === 'off'"), "загрузка управления диагностикой");
   assert.equal(await evaluate("(() => { const help = document.querySelector('#diagnostic-history-help'); return !!help && help.querySelector('summary')?.textContent.includes('Что сохраняется') && help.textContent.includes('120') && help.textContent.includes('64') && help.textContent.includes('домены и IP-адреса') && help.textContent.includes('никуда не отправляется'); })()"), true, "диагностика сообщает пределы истории и состав локального отчёта как d2o");
   await evaluate("document.querySelector('#diagnostic-toggle').click()");
   await waitFor(() => evaluate("document.querySelector('#diagnostic-state').dataset.enabled === 'true'"), "включение локальной диагностики");
   assert.equal(await evaluate("document.querySelector('#diagnostic-download').hidden"), true, "скачивание ждёт первого снимка контроллера");
+  assert.equal(await evaluate("document.querySelector('#diagnostic-data').hidden"), true, "пустые виджеты скрыты до первого снимка");
+  const diagDir = path.join(work, "diagnostics");
+  const now = Math.floor(Date.now() / 1000);
+  const common = { processes: [{ name: "r2o-controller", pid: 7, rss_kib: 2048, anon_kib: 1024 }], workers_running: 1 };
+  const diag = {
+    enabled: true, sample_interval_ms: 60000,
+    samples: Array.from({ length: 18 }, (_, i) => ({
+      ...common, at: now - (17 - i) * 60,
+      processes: [{ ...common.processes[0], rss_kib: 4879 + [0, 35, 13, 126, 109, 153][i % 6] + i * 23,
+        anon_kib: 1120 + i * 7 }]
+    })),
+    memory_tracking: { sites: [{ name: "Пустой участок", live_bytes: 0, peak_bytes: 0, created: 0 }] },
+    madvise: { successes: 0, failures: 0, requested_bytes: 0, errno: [] },
+    limit_transitions: [
+      { at: now - 60, measurement_limit: 2, measurement_slots: 64, limit_reason: ["no-current-resource-limit"] },
+      { at: now, measurement_limit: 2, measurement_slots: 64, limit_reason: ["no-current-resource-limit"], cpu_valid: true }
+    ],
+    memory_details: [{ name: "r2o-controller", latest: { pid: 7, smaps_rollup_status: "unsupported" } }],
+    events: [
+      { id: 2, at: now, target: "v.example", outcome: "inconclusive", reason: "истёк срок пробы", elapsed_ms: 2200 },
+      { id: 1, at: now - 1, target: "ok.example", outcome: "plan-found" }
+    ]
+  };
+  fs.writeFileSync(path.join(diagDir, "report.json"), JSON.stringify(diag), {mode: 0o600});
+  await waitFor(() => evaluate("document.querySelector('#diagnostic-state').dataset.phase === 'ready'"), "первый отчёт появляется после короткого опроса");
+  assert.equal(await evaluate("document.querySelector('#diagnostic-data').hidden"), false, "появились данные");
+  assert.equal(await evaluate("document.querySelector('#diagnostic-memory-chart').getBoundingClientRect().height > 0"), true, "график виден после первого отчёта");
+  for (const [width, height] of [[1440, 1050], [1024, 900], [768, 1024], [390, 1020], [320, 900]]) {
+    await call("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: width < 600 });
+    await waitFor(() => evaluate("(() => {const svg = document.querySelector('#diagnostic-memory-chart'); return getComputedStyle(svg).visibility === 'visible' && Math.abs(svg.viewBox.baseVal.width - svg.clientWidth) <= 2})()"), "график занимает доступную ширину " + width);
+    assert.equal(await evaluate("document.documentElement.scrollWidth <= innerWidth"), true, "без горизонтальной прокрутки на " + width);
+    if (captureDir && (width === 1440 || width === 390)) {
+      await evaluate("scrollTo(0, 0)");
+      const screenshot = await call("Page.captureScreenshot", { format: "png" });
+      fs.writeFileSync(path.join(captureDir, "diagnostics-" + width + ".png"), Buffer.from(screenshot.data, "base64"));
+    }
+  }
+  await call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
+  await evaluate("document.querySelector('[data-memory-range=\\\"24\\\"]').click()");
+  assert.equal(await evaluate("new URLSearchParams(location.search).get('diag-period')"), "24");
+  assert.equal(await evaluate("document.querySelector('#diagnostic-memory-chart').getAnimations().length"), 0, "уменьшение движения отключает анимацию графика");
+  await evaluate("document.querySelector('[data-memory-range=\\\"2\\\"]').click()");
+  await call("Emulation.setEmulatedMedia", { features: [] });
+  await call("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1050, deviceScaleFactor: 1, mobile: false });
+  await evaluate("document.querySelector('#diagnostic-event-filter').value = 'unconfirmed'; document.querySelector('#diagnostic-event-filter').dispatchEvent(new Event('change'))");
+  assert.equal(await evaluate("document.querySelector('#diagnostic-event-list').childElementCount"), 1);
+  await evaluate("document.querySelector('#diagnostic-event-list summary').click()");
+  assert.equal(await evaluate("document.querySelector('#diagnostic-event-list details[open] p').textContent"), "истёк срок пробы");
+  assert.equal(await evaluate("document.querySelector('#diagnostic-cursor-input').disabled"), false, "можно выбрать снимок");
+  await evaluate("(() => { const graph = document.querySelector('#diagnostic-memory-chart'); graph.dispatchEvent(new MouseEvent('click', { clientX: graph.getBoundingClientRect().left + 40 })); })()");
+  assert.equal(await evaluate("document.querySelector('#diagnostic-cursor-input').value"), "0", "нажатие по графику выбирает ближайший снимок");
+  await evaluate("document.querySelector('#diagnostic-cursor-input').focus()");
+  await call("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "ArrowRight", code: "ArrowRight", windowsVirtualKeyCode: 39 });
+  await call("Input.dispatchKeyEvent", { type: "keyUp", key: "ArrowRight", code: "ArrowRight", windowsVirtualKeyCode: 39 });
+  assert.equal(await evaluate("document.querySelector('#diagnostic-cursor-input').value"), "1", "ползунок переключает снимок с клавиатуры");
+  assert.equal(await evaluate("document.querySelector('#diagnostic-technical').hidden"), true, "нет технических карточек без измерений");
+  assert.equal(await evaluate("document.querySelector('#diagnostic-warnings').textContent.includes('smaps_rollup')"), false, "отсутствие smaps_rollup не показывает подсказку");
+  const fullSamples = diag.samples;
+  diag.samples = fullSamples.slice(-2);
+  fs.writeFileSync(path.join(diagDir, "report.json"), JSON.stringify(diag));
+  await evaluate("document.querySelector('#diagnostic-refresh').click()");
+  await waitFor(() => evaluate("document.querySelector('#diagnostic-memory-chart').dataset.points === '2'"), "короткий ряд доступен");
+  assert.equal(await evaluate("document.querySelectorAll('#diagnostic-memory-chart path[data-series]').length"), 0, "два снимка показаны точками");
+  diag.samples = fullSamples;
+  diag.memory_tracking.sites.push({ name: "Измеренный участок", peak_bytes: 2048, created: 1, destroyed: 1 });
+  diag.madvise.failures = 1;
+  diag.limit_transitions.push({ at: now, measurement_limit: 1, measurement_slots: 64, limit_reason: ["cpu"] });
+  fs.writeFileSync(path.join(diagDir, "report.json"), JSON.stringify(diag));
+  await evaluate("document.querySelector('#diagnostic-refresh').click()");
+  await waitFor(() => evaluate("!document.querySelector('#diagnostic-technical').hidden"), "технические данные появились");
+  assert.equal(await evaluate("document.querySelector('#diagnostic-memory-sites').children.length"), 1);
+  assert.equal(await evaluate("document.querySelector('#diagnostic-aimd-history').children.length"), 1);
+  assert.equal(await evaluate("document.querySelector('#diagnostic-madvise-errors').parentElement.hidden"), true);
+  assert.equal(await evaluate("document.querySelector('#diagnostic-madvise-results').textContent"), "ошибок 1");
+
   await evaluate("document.querySelector('#diagnostic-toggle').click()");
-  await waitFor(() => evaluate("document.querySelector('#diagnostic-state').dataset.enabled === 'false'"), "выключение диагностики с удалением истории");
+  assert.equal(await evaluate("document.querySelector('#diagnostic-stop-dialog').open"), true);
+  await evaluate("document.querySelector('#diagnostic-stop-dialog button[value=cancel]').click()");
+  assert.equal(await evaluate("document.querySelector('#diagnostic-stop-dialog').open"), false);
+  assert.equal(fs.existsSync(path.join(diagDir, "report.json")), true, "отмена сохраняет историю");
+  await evaluate("document.querySelector('#diagnostic-toggle').click(); document.querySelector('#diagnostic-stop-dialog button[value=stop]').click()");
+  await waitFor(() => evaluate("document.querySelector('#diagnostic-state').dataset.enabled === 'false' && document.querySelector('#diagnostic-data').hidden"), "выключение диагностики с удалением истории");
+  assert.equal(fs.existsSync(path.join(diagDir, "report.json")), false);
+  await evaluate("location.hash = '#now'");
+  await waitFor(() => evaluate("!document.querySelector('#now').hidden"), "возврат к обзору");
   assert.equal(await evaluate("document.title.includes('R2O')"), true, "заголовок страницы панели");
   assert.equal(await evaluate("document.querySelector('#r2o-settings') === null && ![...document.querySelectorAll('.index a')].some((link) => link.hash === '#r2o-settings')"), true, "в панели нет отдельного раздела настроек, которого нет в d2o");
   assert.equal(await evaluate("document.querySelectorAll('#app > section').length"), 6, "все разделы панели отображаются");

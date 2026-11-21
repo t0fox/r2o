@@ -876,6 +876,12 @@ fn diagnostics_toggle(dir: &Path, enabled: bool) -> std::io::Result<()> {
             "каталог диагностики небезопасен",
         ));
     }
+    #[cfg(unix)]
+    let _guard = {
+        let dir = File::open(dir)?;
+        dir.lock()?;
+        dir
+    };
     let marker = dir.join("enabled");
     if enabled {
         if diagnostics_enabled(dir) {
@@ -3195,11 +3201,13 @@ pub fn parse_config(
         "QUEUE_NUM",
         "QUEUE_NUM6",
         "R2O_FLOW_CAPACITY",
+        "R2O_MEASUREMENT_LIMIT",
         "IPV6_ENABLED",
         "CONTROL_SOCKET",
         "DECOY_SNI",
         "MARK",
         "PROBE_MARK",
+        "MEASURE_MARK",
         "ONLY_MARK",
         "FLOWS",
         "STATS_SEC",

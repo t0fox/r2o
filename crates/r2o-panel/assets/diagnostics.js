@@ -25,11 +25,13 @@
   function list(value) { return Array.isArray(value) ? value : []; }
   function number(value) { return typeof value === "number" && isFinite(value) ? value : null; }
   function pretty(value) { return value === null ? "—" : String(value); }
+  var fractional = new Intl.NumberFormat("ru-RU", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  var integral = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 });
   function formatBytes(bytes) {
     if (number(bytes) === null || bytes < 0) return "—";
-    if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + " МиБ";
-    if (bytes >= 1024) return (bytes / 1024).toFixed(1) + " КиБ";
-    return Math.round(bytes) + " Б";
+    if (bytes >= 1048576) return fractional.format(bytes / 1048576) + "\u00a0МиБ";
+    if (bytes >= 1024) return fractional.format(bytes / 1024) + "\u00a0КиБ";
+    return integral.format(bytes) + "\u00a0Б";
   }
   function formatKib(kib) { return number(kib) === null ? "—" : formatBytes(kib * 1024); }
   function formatDeltaBytes(bytes) {
@@ -41,13 +43,14 @@
     if (number(ms) === null || ms < 0) return "—";
     if (ms < 1000) return Math.round(ms) + " мс";
     if (ms < 60000) return Math.floor(ms / 1000) + " с";
-    return Math.floor(ms / 60000) + " мин " + String(Math.floor(ms / 1000) % 60).padStart(2, "0") + " с";
+    var seconds = Math.floor(ms / 1000) % 60;
+    return Math.floor(ms / 60000) + "\u00a0мин" + (seconds ? " " + seconds + "\u00a0с" : "");
   }
   function intervalText(ms, axisUnit) {
     var interval = number(ms) === null || ms <= 0 ? "Интервал указан в отчёте" :
       ms % 60000 === 0 ? "Снимок раз в " + (ms / 60000) + " мин" :
       ms % 1000 === 0 ? "Снимок раз в " + (ms / 1000) + " с" : "Снимок раз в " + ms + " мс";
-    return interval + (axisUnit ? " · ось в " + axisUnit : " · значения подписаны своими единицами");
+    return axisUnit ? interval + " · " + axisUnit : interval;
   }
   function sampleWord(count) { return count % 10 === 1 && count % 100 !== 11 ? "снимке" : "снимках"; }
   function countWithCapacity(count, capacity) {
@@ -110,13 +113,24 @@
     var memory = report.memory_history, history = list(memory && memory.samples);
     if (history.length) {
       var base = list(memory.time_base), wallBase = number(base[0]), monoBase = number(base[1]);
+      var finalRow = Array.isArray(history[history.length - 1]) ? history[history.length - 1] : [];
+      var wallDelta = memoryField(memory, finalRow, "at_delta_s", 0);
+      var monoDelta = memoryField(memory, finalRow, "mono_delta_s", 1);
+      var finalTime = monoBase !== null && monoDelta !== null ? monoBase + monoDelta : null;
+      var finalAt = wallBase !== null && wallDelta !== null ? wallBase + wallDelta : null;
+      var source = list(report.samples).find(function (sample) { return sample.at === finalAt; });
+      var precise = number(source && source.mono_ms);
+      // Старые отчёты R2O хранили миллисекунды в полях, объявленных в секундах.
+      var divisor = finalTime !== null && precise !== null
+        ? (Math.abs(finalTime - precise) < Math.abs(finalTime * 1000 - precise) ? 1000 : 1)
+        : (wallDelta > 0 && monoDelta > wallDelta * 100 ? 1000 : 1);
       return history.map(function (row) {
         if (!Array.isArray(row)) return null;
         var atDelta = memoryField(memory, row, "at_delta_s", 0);
         var monoDelta = memoryField(memory, row, "mono_delta_s", 1);
         var at = wallBase === null || atDelta === null ? null : wallBase + atDelta;
         var timeDomain = monoBase !== null && monoDelta !== null ? "mono" : "wall";
-        var time = timeDomain === "mono" ? monoBase + monoDelta : at;
+        var time = timeDomain === "mono" ? (monoBase + monoDelta) / divisor : at;
         var rollupIndex = list(memory.fields).length ? list(memory.fields).indexOf("smaps_rollup_kib") : 7;
         var rollup = rollupIndex < 0 || !Array.isArray(row[rollupIndex]) ? [] : row[rollupIndex];
         var epoch = memoryField(memory, row, "d2kc_epoch", -1);
@@ -219,17 +233,16 @@
   }
   function timeLabel(seconds) {
     if (number(seconds) === null) return "—";
-    return new Date(seconds * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    return new Date(seconds * 1000).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   }
-  function drawMemory(doc, allRows, hours, intervalMs) {
+  function drawMemory(doc, allRows, hours, intervalMs, size) {
     var chart = doc.getElementById("diagnostic-memory-chart"), empty = doc.getElementById("diagnostic-memory-empty");
     if (!chart || !empty) return { rows: [], delta: null, axisUnit: null };
     var rows = rowsInRange(allRows, hours, intervalMs);
     var options = {}, available = {};
     metrics.forEach(function (metric) {
       var input = doc.querySelector('[data-memory-series="' + metric.key + '"]');
-      var values = rows.map(function (row) { return row[metric.key]; }).filter(function (value) { return number(value) !== null; });
-      available[metric.key] = values.length > 0;
+      available[metric.key] = rows.some(function (row) { return number(row[metric.key]) !== null; });
       if (input) {
         input.parentNode.hidden = !available[metric.key];
         options[metric.key] = input.checked;
@@ -241,19 +254,31 @@
       }
     });
     var active = metrics.filter(function (metric) { return available[metric.key] && options[metric.key]; });
+    var legend = doc.getElementById("diagnostic-legend");
+    legend.replaceChildren(...active.map(function (metric) {
+      var item = doc.createElement("li");
+      var key = svg(doc, "svg", { width: 16, height: 8, viewBox: "0 0 16 8", "aria-hidden": "true" });
+      key.append(svg(doc, "path", { d: "M1 4h14", "class": "diag-line diag-line-" + metric.color }));
+      item.append(key, metric.label);
+      item.translate = false;
+      return item;
+    }));
+    doc.getElementById("diagnostic-series-options").hidden = !Object.values(available).some(Boolean);
     var all = [];
     active.forEach(function (metric) { rows.forEach(function (row) { if (number(row[metric.key]) !== null) all.push(row[metric.key]); }); });
     chart.replaceChildren();
     chart.dataset.points = String(rows.length);
     chart.setAttribute("aria-label", "Память контроллера, период " + hours + " часа, точек: " + rows.length);
     if (!rows.length || !active.length || !all.length) {
-      chart.hidden = true;
+      chart.setAttribute("hidden", "");
       empty.hidden = false;
       empty.textContent = !active.length && rows.length ? "Выберите доступный показатель памяти." : "Для выбранного периода нет доступных снимков памяти.";
       return { rows: rows, delta: null, axisUnit: null };
     }
-    chart.hidden = false; empty.hidden = true;
-    var left = 68, right = 948, top = 16, bottom = 218;
+    chart.removeAttribute("hidden"); empty.hidden = true;
+    var width = size.width, height = size.height;
+    chart.setAttribute("viewBox", "0 0 " + width + " " + height);
+    var left = width < 400 ? 40 : 56, right = width - 10, top = 12, bottom = height - 30;
     var min = Math.min.apply(Math, all), max = Math.max.apply(Math, all);
     var scale = max >= 1048576 ? 1048576 : max >= 1024 ? 1024 : 1;
     var axisUnit = scale === 1048576 ? "МиБ" : scale === 1024 ? "КиБ" : "Б";
@@ -263,37 +288,56 @@
       var y = top + (bottom - top) * tick / 4;
       chart.appendChild(svg(doc, "line", { x1: left, x2: right, y1: y, y2: y, "class": "diag-gridline" }));
       var label = svg(doc, "text", { x: left - 8, y: y + 4, "text-anchor": "end" });
-      label.textContent = ((max - (max - min) * tick / 4) / scale).toFixed(scale === 1 ? 0 : 1);
+      label.textContent = (scale === 1 ? integral : fractional).format((max - (max - min) * tick / 4) / scale);
       chart.appendChild(label);
     }
     chart.appendChild(svg(doc, "line", { x1: left, x2: right, y1: bottom, y2: bottom, "class": "diag-axis" }));
     var timedRows = rows.filter(function (row) { return number(row.time) !== null; });
     var firstTime = timedRows.length ? timedRows[0].time : null, lastTime = timedRows.length ? timedRows[timedRows.length - 1].time : null;
-    var xLabelStart = svg(doc, "text", { x: left, y: 248, "text-anchor": "start" });
-    var xLabelEnd = svg(doc, "text", { x: right, y: 248, "text-anchor": "end" });
+    function xFor(row, index) {
+      if (rows.length === 1) return (left + right) / 2;
+      if (number(row.time) !== null && firstTime !== null && lastTime > firstTime) {
+        return left + (right - left) * (row.time - firstTime) / (lastTime - firstTime);
+      }
+      return left + (right - left) * index / (rows.length - 1);
+    }
+    var xLabelStart = svg(doc, "text", { x: rows.length === 1 ? xFor(rows[0], 0) : left, y: height - 7, "text-anchor": rows.length === 1 ? "middle" : "start" });
     xLabelStart.textContent = timeLabel(rows[0].at);
-    xLabelEnd.textContent = timeLabel(rows[rows.length - 1].at);
-    chart.appendChild(xLabelStart); chart.appendChild(xLabelEnd);
+    chart.appendChild(xLabelStart);
+    if (rows.length > 1) {
+      var xLabelEnd = svg(doc, "text", { x: right, y: height - 7, "text-anchor": "end" });
+      xLabelEnd.textContent = timeLabel(rows[rows.length - 1].at);
+      chart.appendChild(xLabelEnd);
+    }
+    function yFor(value) {
+      return bottom - (bottom - top) * (value - min) / (max - min);
+    }
     active.forEach(function (metric) {
-      var commands = [], seen = 0, segment = false;
+      var commands = [], points = [], segment = false;
       rows.forEach(function (row, index) {
         var value = number(row[metric.key]);
         if (value === null) { segment = false; return; }
-        var x = number(row.time) !== null && firstTime !== null && lastTime !== null && lastTime > firstTime ?
-          left + (right - left) * (row.time - firstTime) / (lastTime - firstTime) :
-          rows.length < 2 ? (left + right) / 2 : left + (right - left) * index / (rows.length - 1);
-        if (metric.key === "rss" && seen > 0 && row.generation !== null && number(row.generation) !== null) {
+        var x = xFor(row, index);
+        if (metric.key === "rss" && points.length > 0 && row.generation !== null && number(row.generation) !== null) {
           var previous = rows[index - 1];
           if (previous && previous.generation !== row.generation) segment = false;
         }
-        var y = bottom - (bottom - top) * (value - min) / (max - min);
+        var y = yFor(value);
         commands.push((segment ? "L" : "M") + x.toFixed(1) + "," + y.toFixed(1));
         segment = true;
-        seen++;
+        points.push({ x: x, y: y });
       });
-      if (seen > 0) chart.appendChild(svg(doc, "path", { d: commands.join(" "), "class": "diag-line diag-line-" + metric.color, "data-series": metric.key }));
+      var seriesClass = "diag-line diag-line-" + metric.color;
+      if (points.length < 4) {
+        points.forEach(function (point) {
+          chart.append(svg(doc, "circle", { cx: point.x, cy: point.y, r: 3, "class": seriesClass + " diag-point" }));
+        });
+      } else {
+        chart.append(svg(doc, "path", { d: commands.join(" "), "class": seriesClass, "data-series": metric.key }));
+      }
     });
-    return { rows: rows, delta: seriesEndpoints(rows, "rss").delta, axisUnit: axisUnit };
+    return { rows: rows, delta: seriesEndpoints(rows, "rss").delta, axisUnit: axisUnit, xFor: xFor, yFor: yFor,
+      active: active, top: top, bottom: bottom };
   }
   function processRows(doc, samples, memoryRowsInRange, latestMemory) {
     var body = doc.getElementById("diagnostic-processes");
@@ -349,33 +393,45 @@
   function reasonText(values) {
     return list(values).map(function (value) { return reasons[value] || value; }).join(", ") || "причина не указана";
   }
+  function activeLimitReasons(item) {
+    return list(item && item.limit_reason).filter(function (reason) {
+      return reason !== "no-current-resource-limit" && reason !== "resource-data-unavailable";
+    }).sort();
+  }
   function renderAimd(doc, report, last) {
     var current = doc.getElementById("diagnostic-aimd-current"), history = doc.getElementById("diagnostic-aimd-history");
-    if (!current || !history) return;
-    if (last && number(last.measurement_limit) !== null && number(last.measurement_slots) !== null) {
-      current.textContent = "Текущий лимит " + last.measurement_limit + "/" + last.measurement_slots + " · " + reasonText(last.limit_reason) +
-        (last.grow_pending ? " · увеличение ожидает следующего измерения" : "");
-    } else current.textContent = "Текущий лимит не записан в этом отчёте.";
-    history.replaceChildren();
-    var transitions = list(report.limit_transitions).slice().reverse();
-    if (!transitions.length) {
-      var empty = doc.createElement("li"); empty.className = "diag-transition-empty";
-      empty.textContent = report.limit_transitions ? "Переходов за сохранённый период нет." : "История переходов отсутствует в старом отчёте.";
-      history.appendChild(empty); return;
+    var transitions = list(report.limit_transitions).filter(function (item, index, rows) {
+      var previous = rows[index - 1];
+      var limiting = activeLimitReasons(item);
+      if (!previous) return limiting.length > 0 || item.grow_pending === true;
+      return item.measurement_limit !== previous.measurement_limit ||
+        item.measurement_slots !== previous.measurement_slots || !!item.grow_pending !== !!previous.grow_pending ||
+        limiting.join(",") !== activeLimitReasons(previous).join(",");
+    }).reverse();
+    var active = activeLimitReasons(last);
+    current.closest(".diag-card").hidden = !transitions.length && !active.length && !(last && last.grow_pending);
+    current.hidden = !(last && number(last.measurement_limit) !== null && number(last.measurement_slots) !== null &&
+      (active.length || last.grow_pending || transitions.length));
+    if (!current.hidden) {
+      current.textContent = "Текущий лимит " + last.measurement_limit + " / " + last.measurement_slots +
+        (active.length ? " · " + reasonText(active) : "") +
+        (last.grow_pending ? " · ожидается увеличение" : "");
     }
-    transitions.forEach(function (item) {
-      var row = doc.createElement("li"), strong = doc.createElement("strong"), label = doc.createElement("span"), time = doc.createElement("small");
-      strong.textContent = pretty(number(item.measurement_limit)) + " / " + pretty(number(item.measurement_slots));
-      label.textContent = reasonText(item.limit_reason);
-      time.textContent = number(item.at) === null ? "" : new Date(item.at * 1000).toLocaleString();
-      row.appendChild(strong); row.appendChild(label); row.appendChild(time); history.appendChild(row);
-    });
+    history.replaceChildren(...transitions.map(function (item) {
+      var row = doc.createElement("li"), strong = doc.createElement("strong"), time = doc.createElement("small");
+      var state = activeLimitReasons(item);
+      strong.textContent = pretty(number(item.measurement_limit)) + " / " + pretty(number(item.measurement_slots)) +
+        (state.length ? " · " + reasonText(state) : "");
+      time.textContent = timeLabel(item.at);
+      row.append(strong, time);
+      return row;
+    }));
   }
-  function renderWarnings(doc, report, chart, hours, processMismatch, storageMismatch) {
+  function renderWarnings(doc, report, rows, processMismatch, storageMismatch) {
     var box = doc.getElementById("diagnostic-warnings");
     if (!box) return;
     box.replaceChildren();
-    var notices = [], delta = chart.delta, anomalies = list(report.anomalies);
+    var notices = [], anomalies = list(report.anomalies);
     function add(kind, title, message, technical) {
       notices.push({ kind: kind, title: title, message: message, technical: technical || "" });
     }
@@ -395,47 +451,20 @@
       "График и карточки показывают снимок истории памяти; общий отчёт содержит другие значения.", storageMismatch.join("; "));
     var growthAnomalies = anomalies.filter(function (item) { return item && item.kind === "unattributed-rss-growth"; });
     var growth = growthAnomalies[growthAnomalies.length - 1];
-    if ((number(delta) !== null && delta > 0) || growth) {
-      var growthText = number(delta) !== null && delta > 0 ? "RSS вырос на " + formatBytes(delta) + " за фактически доступную часть выбранных " + rangeText(hours) :
-        "За " + pretty(number(growth.window_samples)) + " снимков RSS вырос на " + formatKib(growth.rss_delta_kib);
-    if (growth) growthText += "; без сопоставимого роста учтённых объектов: за последние " +
-      pretty(number(growth.window_samples)) + " снимков учтённая память изменилась на " +
-        formatKib(number(growth.accounted_delta_kib));
-      add("info", "Рост RSS", growthText + ". Рост сам по себе не подтверждает утечку.");
+    if (growth) {
+      add("info", "Устойчивый рост RSS",
+        "За " + pretty(number(growth.window_samples)) + " снимков RSS вырос на " + formatKib(growth.rss_delta_kib) + ".",
+        "Изменение учтённой памяти " + formatKib(number(growth.accounted_delta_kib)) + ".");
     }
-    var rows = memoryRows(report), unavailableRows = rows.filter(function (row) { return row.status === 1 && row.anonymous === null; });
+    var unavailableRows = rows.filter(function (row) { return row.status === 1 && row.anonymous === null && row.errno !== 2; });
     var unavailable = unavailableRows.length;
-    var unsupported = rows.filter(function (row) { return row.status === 4; }).length;
     var parseErrors = rows.filter(function (row) { return row.status === 3 && row.anonymous === null; }).length;
     var detail = detailsFor(report), latest = detail && detail.latest;
-    var current = list(report.samples).slice(-1)[0];
-    var currentPid = list(current && current.processes).filter(function (proc) { return proc.name === PRIMARY; })[0];
-    var latestPid = number(latest && latest.pid);
-    var liveOptionalMissing = latestPid !== null && currentPid && number(currentPid.pid) === latestPid && (
-      (latest.smaps_rollup_errno === 2 && latest.smaps_rollup_status === "unavailable") ||
-      (latest.smaps_errno === 2 && latest.smaps_status === "unavailable"));
-    if (!unavailable && latest && latest.smaps_rollup_status === "unavailable" && latest.smaps_rollup_source !== "smaps-fallback" &&
-        !rows.some(function (row) { return row.anonymous !== null; }) && !liveOptionalMissing) unavailable = 1;
-    if (liveOptionalMissing && unavailableRows.every(function (row) { return row.errno === 2; })) {
-      unsupported = Math.max(unsupported, unavailableRows.length || 1);
-      unavailable = 0;
-    }
-    if (!unsupported && latest && latest.smaps_rollup_status === "unsupported") unsupported = 1;
+    if (!unavailable && latest && latest.smaps_rollup_status === "unavailable" && latest.smaps_rollup_errno !== 2 &&
+        latest.smaps_rollup_source !== "smaps-fallback" && !rows.some(function (row) { return row.anonymous !== null; })) unavailable = 1;
     if (!parseErrors && latest && latest.smaps_rollup_status === "parse-error") parseErrors = 1;
-    var fallback = latest && latest.smaps_rollup_source === "smaps-fallback";
-    var unsupportedWithoutFallback = fallback ? 0 : unsupported;
-    if (fallback && (unsupported || latest.smaps_rollup_status === "unsupported" || liveOptionalMissing)) {
-      add("info", "Подробная карта памяти недоступна на этом устройстве",
-        "Основные показатели доступны; Anonymous и Private_Dirty взяты из сохранённого отчёта.",
-        "smaps_rollup отсутствует; использованы значения из smaps. RssAnon читается из /proc/PID/status.");
-    }
-    var unavailableError = rows.filter(function (row) { return row.status === 1 && row.errno !== null; })[0];
-    unavailableError = unavailableError ? unavailableError.errno :
-      (latest && latest.smaps_rollup_status === "unavailable" ? number(latest.smaps_rollup_errno) : null);
-    if (unsupportedWithoutFallback) add("info", "Подробная карта памяти недоступна на этом устройстве",
-      "RSS, RssAnon, VmData и учтённые R2O объекты продолжают собираться.",
-      "В procfs отсутствует /proc/PID/smaps_rollup в " + unsupportedWithoutFallback + " " + sampleWord(unsupportedWithoutFallback) +
-        ". Для Anonymous и Private_Dirty нужна прошивка с KERNEL_PROC_PAGE_MONITOR и CONFIG_PROC_PAGE_MONITOR=y.");
+    var unavailableError = unavailableRows.find(function (row) { return row.errno !== null; });
+    unavailableError = unavailableError ? unavailableError.errno : number(latest && latest.smaps_rollup_errno);
     if (unavailable) add("warning", "Не удалось прочитать подробную карту памяти",
       "Проверьте доступ к procfs и наличие процесса во время снимка.",
       unavailable + " " + sampleWord(unavailable) + (unavailableError !== null ? "; errno " + unavailableError : "; errno отсутствует"));
@@ -466,12 +495,15 @@
     box.hidden = notices.length === 0;
   }
   function setText(doc, id, value) {
-    var node = doc.getElementById(id); if (node) node.textContent = value;
+    var node = doc.getElementById(id);
+    if (node && node.textContent !== value) node.textContent = value;
   }
   function overflowText(last) {
     var names = [
       ["http_record_limit_hits", "записи"], ["http_queue_limit_hits", "очередь"],
-      ["http_failure_limit_hits", "общие ошибки"], ["http_failure_record_limit_hits", "ошибки на сайт"]
+      ["http_failure_limit_hits", "общие ошибки"], ["http_failure_record_limit_hits", "ошибки на сайт"],
+      ["http_record_alloc_failures", "выделение записей"], ["http_queue_alloc_failures", "выделение очереди"],
+      ["http_failure_alloc_failures", "выделение записей об ошибках"]
     ];
     var known = 0, hits = [];
     names.forEach(function (entry) {
@@ -483,48 +515,119 @@
   function storageRow(used, limit) {
     return formatBytes(used) + (number(limit) !== null && limit > 0 ? " / " + formatBytes(limit) : "");
   }
-  function renderMemorySites(doc, report) {
-    var listNode = doc.getElementById("diagnostic-memory-sites"), note = doc.getElementById("diagnostic-memory-tracking-coverage");
-    if (!listNode || !note) return; listNode.replaceChildren();
-    var tracking = report.memory_tracking;
-    if (!tracking) { note.textContent = "Учёт подсистем отсутствует в старом формате отчёта."; return; }
-    note.textContent = tracking.coverage || "Учёт начинается с выделений после включения сбора.";
-    list(tracking.sites).forEach(function (site) {
-      var item = doc.createElement("li"), name = doc.createElement("strong"), location = doc.createElement("small");
-      name.textContent = (site.name || site.id || "Объект") + ": " + formatBytes(site.live_bytes) + " · " + pretty(number(site.live_objects)) + " объектов · пик " + formatBytes(site.peak_bytes);
-      location.textContent = (site.location || "") + " · выделено " + pretty(number(site.created)) + ", освобождено " + pretty(number(site.destroyed)) + ", ошибки выделения " + pretty(number(site.alloc_failures));
-      item.appendChild(name); item.appendChild(location); listNode.appendChild(item);
+  function hasMeasurements(item, keys) {
+    return !!item && keys.some(function (key) { return number(item[key]) > 0; });
+  }
+  function measuredSites(tracking) {
+    return list(tracking && tracking.sites).filter(function (site) {
+      return hasMeasurements(site, ["live_bytes", "live_objects", "peak_bytes", "created", "destroyed", "alloc_failures"]);
     });
   }
-  function renderMadvise(doc, report) {
-    var m = report.madvise;
-    setText(doc, "diagnostic-madvise-results", m ? pretty(number(m.successes)) + " / " + pretty(number(m.failures)) : "—");
-    setText(doc, "diagnostic-madvise-bytes", m ? formatBytes(m.requested_bytes) : "—");
-    var errors = list(m && m.errno).map(function (item) { return number(item.code) + " × " + number(item.count); }).filter(function (item) { return item.indexOf("null") < 0; });
-    if (m && number(m.other_errno_count) > 0) errors.push("прочие × " + m.other_errno_count);
-    setText(doc, "diagnostic-madvise-errors", !m ? "—" : errors.join(" · ") || "нет");
+  function renderMemorySites(doc, report) {
+    var listNode = doc.getElementById("diagnostic-memory-sites"), note = doc.getElementById("diagnostic-memory-tracking-coverage");
+    var tracking = report.memory_tracking, sites = measuredSites(tracking);
+    listNode.closest(".diag-card").hidden = !sites.length;
+    if (!sites.length) { listNode.replaceChildren(); return; }
+    note.textContent = tracking.coverage || "Учёт начинается с выделений после включения сбора.";
+    listNode.replaceChildren(...sites.map(function (site) {
+      var item = doc.createElement("li"), name = doc.createElement("strong"), facts = doc.createElement("small");
+      var usage = [
+        number(site.live_bytes) > 0 ? formatBytes(site.live_bytes) + " сейчас" : "",
+        number(site.live_objects) > 0 ? "объектов " + site.live_objects : "",
+        number(site.peak_bytes) > 0 ? "пик " + formatBytes(site.peak_bytes) : "",
+        number(site.created) > 0 ? "выделено " + site.created : "",
+        number(site.destroyed) > 0 ? "освобождено " + site.destroyed : "",
+        number(site.alloc_failures) > 0 ? "ошибок " + site.alloc_failures : ""
+      ].filter(Boolean);
+      name.textContent = site.name || site.id || "Объект";
+      facts.textContent = usage.join(" · ");
+      item.append(name, facts);
+      return item;
+    }));
   }
-  function render(report, enabled, range) {
+  function technicalFact(doc, id, value) {
+    var node = doc.getElementById(id);
+    node.parentElement.hidden = !value;
+    if (value) node.textContent = value;
+  }
+  function renderMadvise(doc, report) {
+    var m = report.madvise || {};
+    var counts = [number(m.successes) > 0 ? "успешно " + m.successes : "",
+      number(m.failures) > 0 ? "ошибок " + m.failures : ""].filter(Boolean).join(" · ");
+    var errors = list(m.errno).filter(function (item) { return number(item.code) > 0 && number(item.count) > 0; })
+      .map(function (item) { return item.code + " × " + item.count; });
+    if (number(m.other_errno_count) > 0) errors.push("прочие × " + m.other_errno_count);
+    doc.getElementById("diagnostic-madvise-results").closest(".diag-card").hidden =
+      !counts && !(number(m.requested_bytes) > 0) && !errors.length;
+    technicalFact(doc, "diagnostic-madvise-results", counts);
+    technicalFact(doc, "diagnostic-madvise-bytes", number(m.requested_bytes) > 0 ? formatBytes(m.requested_bytes) : "");
+    technicalFact(doc, "diagnostic-madvise-errors", errors.join(" · "));
+  }
+  var outcomeLabels = {
+    "plan-found": "Найден план", "direct-clear": "Прямая проба прошла",
+    "stun-confirmed": "Получен STUN-ответ", "discovery-confirmed": "Получен ответ голосовой пробы",
+    "failed": "Поиск завершился ошибкой", "inconclusive": "Исход не подтверждён",
+    "unknown": "Исход неизвестен", "local-abort": "Поиск прерван",
+    "queue-full": "Очередь заполнена", "queue-expired": "Истекло ожидание в очереди"
+  };
+  function unconfirmedEvent(event) {
+    return ["failed", "inconclusive", "unknown", "local-abort", "queue-full", "queue-expired"].includes(event.outcome);
+  }
+  function renderEvents(doc, events) {
+    var target = doc.getElementById("diagnostic-event-list"), empty = doc.getElementById("diagnostic-event-empty");
+    var failures = events.filter(unconfirmedEvent);
+    var filtered = doc.getElementById("diagnostic-event-filter").value === "unconfirmed";
+    var rows = (filtered ? failures : events).slice().sort(function (a, b) { return b.at - a.at; });
+    setText(doc, "diagnostic-event-summary", "Записей " + events.length + " · без подтверждения " + failures.length);
+    empty.hidden = !!rows.length;
+    empty.textContent = filtered ? "В журнале нет неподтверждённых исходов." : "После включения сбора завершённых подборов пока нет.";
+    var key = JSON.stringify(rows);
+    if (target.dataset.events === key) return;
+    target.dataset.events = key;
+    var expanded = new Set(Array.from(target.querySelectorAll("details[open]")).map(function (row) { return row.dataset.event; }));
+    target.replaceChildren(...rows.map(function (event) {
+      var li = doc.createElement("li"), details = doc.createElement("details"), title = doc.createElement("summary");
+      var label = doc.createElement("strong"), outcome = doc.createElement("span"), time = doc.createElement("time");
+      var info = doc.createElement("div");
+      details.dataset.event = JSON.stringify([event.id, event.target, event.at, event.outcome]);
+      details.open = expanded.has(details.dataset.event);
+      li.dataset.unconfirmed = String(unconfirmedEvent(event));
+      label.textContent = event.target || "Цель не указана";
+      outcome.textContent = outcomeLabels[event.outcome] || event.outcome || "Без исхода";
+      time.textContent = timeLabel(event.at);
+      if (number(event.at) !== null) time.dateTime = new Date(event.at * 1000).toISOString();
+      title.append(label, outcome, time);
+      var facts = [];
+      if (event.protocol) facts.push(event.protocol.toUpperCase());
+      if (event.ip) facts.push(event.ip);
+      if (number(event.elapsed_ms) !== null) facts.push("Всего " + formatAge(event.elapsed_ms));
+      if (number(event.queue_ms) !== null) facts.push("В очереди " + formatAge(event.queue_ms));
+      if (number(event.probe_units) !== null) facts.push("Проб: " + event.probe_units);
+      [event.reason, facts.join(" · ")].filter(Boolean).forEach(function (text) {
+        var line = doc.createElement("p");
+        line.textContent = text;
+        info.append(line);
+      });
+      if (!info.childElementCount) info.textContent = "Дополнительных сведений нет.";
+      details.append(title, info);
+      li.append(details);
+      return li;
+    }));
+  }
+
+  function render(report, enabled, range, size) {
     var doc = root.document, samples = list(report.samples), events = list(report.events), last = samples[samples.length - 1];
     var httpLimits = report.http_storage_limits || {};
-    var state = doc.getElementById("diagnostic-state"), data = doc.getElementById("diagnostic-data");
-    state.textContent = enabled ? "Сбор включён" : "Сбор выключен";
-    state.dataset.enabled = String(enabled);
-    data.hidden = !enabled;
-    if (!enabled) { doc.getElementById("diagnostic-status").textContent = "Сбор выключен. Включите его, чтобы записать память и исходы поиска."; return; }
+    var data = doc.getElementById("diagnostic-data");
     var mem = report.memory_history, memorySamples = list(mem && mem.samples);
+    data.hidden = !enabled || (!last && !memorySamples.length);
+    if (data.hidden) return null;
     var allMemoryRows = memoryRows(report), intervalMs = number(mem && mem.sample_interval_ms) || number(report.sample_interval_ms) || 60000;
-    if (!last && !memorySamples.length) {
-      doc.getElementById("diagnostic-status").textContent = report.pending ? "Отчёт формируется. Ожидаем первый снимок." : "Ожидаем первый снимок. Отчёт обновляется по мере работы контроллера.";
-    } else {
-      var latestAt = last && number(last.at);
-      if (latestAt === null && allMemoryRows.length) latestAt = allMemoryRows[allMemoryRows.length - 1].at;
-      doc.getElementById("diagnostic-status").textContent = latestAt === null ? "История диагностики загружена." : "Обновлено " + new Date(latestAt * 1000).toLocaleTimeString() +
-        (number(report.sample_interval_ms) !== null ? " · интервал " + formatAge(report.sample_interval_ms) : "");
-    }
-    setText(doc, "diagnostic-events", countWithCapacity(events.length, report.event_capacity));
-    setText(doc, "diagnostic-unconfirmed", String(events.filter(function (event) { return ["failed", "inconclusive", "unknown", "local-abort", "queue-full", "queue-expired"].indexOf(event.outcome) >= 0; }).length));
-    setText(doc, "diagnostic-samples", countWithCapacity(samples.length, report.sample_capacity) + (memorySamples.length ? " · память: " + countWithCapacity(memorySamples.length, mem.capacity) : ""));
+    var latest = allMemoryRows[allMemoryRows.length - 1];
+    setText(doc, "diagnostic-latest-rss", formatBytes(latest && latest.rss));
+    setText(doc, "diagnostic-latest-anon", formatBytes(latest && latest.rss_anon));
+    setText(doc, "diagnostic-latest-count", countWithCapacity(allMemoryRows.length, mem && mem.capacity));
+    renderEvents(doc, events);
     setText(doc, "diagnostic-workers-running", pretty(number(last && last.workers_running)));
     setText(doc, "diagnostic-workers-result", pretty(number(last && last.workers_result_pending)));
     setText(doc, "diagnostic-workers-join", pretty(number(last && last.workers_join_pending)));
@@ -534,15 +637,30 @@
     var firstRow = allMemoryRows[0], lastRow = allMemoryRows[allMemoryRows.length - 1];
     setText(doc, "diagnostic-workers-trend", firstRow && lastRow && firstRow.tasks !== null && lastRow.tasks !== null && firstRow.workers_live !== null && lastRow.workers_live !== null ?
       "задачи " + pretty(firstRow.tasks) + "→" + pretty(lastRow.tasks) + " · workers " + pretty(firstRow.workers_live) + "→" + pretty(lastRow.workers_live) : "—");
-    setText(doc, "diagnostic-catalog-bytes", formatBytes(firstDefined([lastRow && lastRow.catalog, last && last.catalog_bytes])));
-    setText(doc, "diagnostic-snapshot-bytes", formatBytes(firstDefined([lastRow && lastRow.snapshot, last && last.snapshot_bytes])));
-    setText(doc, "diagnostic-catalog-counts", last ? [last.boxes, last.bindings, last.plans].map(function (value) { return number(value) === null ? "—" : value; }).join(" / ") : "—");
-    setText(doc, "diagnostic-http-bytes", formatBytes(firstDefined([lastRow && lastRow.http, last && last.http_bytes])));
-    setText(doc, "diagnostic-http-records", last ? storageRow(last.http_records_bytes, firstDefined([last.http_records_limit_bytes, httpLimits.records_bytes])) : "—");
-    setText(doc, "diagnostic-http-queue", last ? storageRow(last.http_queue_bytes, firstDefined([last.http_queue_limit_bytes, httpLimits.queue_bytes])) : "—");
-    setText(doc, "diagnostic-http-evidence", last ? storageRow(last.http_failure_bytes, firstDefined([last.http_failure_limit_bytes, httpLimits.failures_bytes])) +
-      (firstDefined([last.http_failure_record_limit_bytes, httpLimits.failure_record_bytes]) !== null ? " · до " + formatBytes(firstDefined([last.http_failure_record_limit_bytes, httpLimits.failure_record_bytes])) + " на сайт" : "") : "—");
-    setText(doc, "diagnostic-http-overflows", last ? overflowText(last) : "—");
+    var catalogBytes = firstDefined([lastRow && lastRow.catalog, last && last.catalog_bytes]);
+    var snapshotBytes = firstDefined([lastRow && lastRow.snapshot, last && last.snapshot_bytes]);
+    var haveCatalogCounts = hasMeasurements(last, ["boxes", "bindings", "plans"]);
+    doc.getElementById("diagnostic-catalog-bytes").closest(".diag-card").hidden =
+      !(catalogBytes > 0 || snapshotBytes > 0 || haveCatalogCounts);
+    technicalFact(doc, "diagnostic-catalog-bytes", catalogBytes > 0 ? formatBytes(catalogBytes) : "");
+    technicalFact(doc, "diagnostic-snapshot-bytes", snapshotBytes > 0 ? formatBytes(snapshotBytes) : "");
+    technicalFact(doc, "diagnostic-catalog-counts", haveCatalogCounts ? [last.boxes, last.bindings, last.plans].map(function (value) {
+      return pretty(number(value));
+    }).join(" / ") : "");
+
+    var haveRecords = hasMeasurements(last, ["http_records", "http_records_bytes"]);
+    var haveQueue = hasMeasurements(last, ["http_queued", "http_queue_bytes"]);
+    var haveFailures = hasMeasurements(last, ["http_failures", "http_failure_bytes"]);
+    var overflow = last ? overflowText(last) : "";
+    var haveOverflow = overflow && overflow !== "нет" && overflow !== "—";
+    var httpBytes = firstDefined([lastRow && lastRow.http, last && last.http_bytes]);
+    var haveHttp = haveRecords || haveQueue || haveFailures || haveOverflow;
+    doc.getElementById("diagnostic-http-bytes").closest(".diag-card").hidden = !haveHttp;
+    technicalFact(doc, "diagnostic-http-bytes", haveHttp && httpBytes > 0 ? formatBytes(httpBytes) : "");
+    technicalFact(doc, "diagnostic-http-records", haveRecords ? storageRow(last.http_records_bytes, firstDefined([last.http_records_limit_bytes, httpLimits.records_bytes])) : "");
+    technicalFact(doc, "diagnostic-http-queue", haveQueue ? storageRow(last.http_queue_bytes, firstDefined([last.http_queue_limit_bytes, httpLimits.queue_bytes])) : "");
+    technicalFact(doc, "diagnostic-http-evidence", haveFailures ? storageRow(last.http_failure_bytes, firstDefined([last.http_failure_limit_bytes, httpLimits.failures_bytes])) : "");
+    technicalFact(doc, "diagnostic-http-overflows", haveOverflow ? overflow : "");
     var matchingSample = lastRow && sampleForHistoryRow(report, lastRow.at, lastRow.time, lastRow.time_domain);
     var sharedSample = !!(matchingSample && matchingSample === last);
     var sampleMono = number(last && last.mono_ms), historyMono = lastRow && lastRow.time_domain === "mono" ? number(lastRow.time) * 1000 : null;
@@ -563,12 +681,18 @@
     setText(doc, "diagnostic-http-note", storageNote);
     renderMemorySites(doc, report); renderMadvise(doc, report);
     renderAimd(doc, report, last);
-    var chart = drawMemory(doc, allMemoryRows, range, intervalMs);
+    var technical = doc.getElementById("diagnostic-technical");
+    technical.hidden = !technical.querySelector(".diag-card:not([hidden])");
+    var chart = drawMemory(doc, allMemoryRows, range, intervalMs, size);
     setText(doc, "diagnostic-memory-interval", intervalText(intervalMs, chart.axisUnit));
     setText(doc, "diagnostic-history-coverage", coverageText(chart.rows, range));
+    var change = doc.getElementById("diagnostic-rss-change");
+    change.hidden = chart.delta === null;
+    if (!change.hidden) change.textContent = formatDeltaBytes(chart.delta) + " за период";
     var latestMemory = allMemoryRows.length ? allMemoryRows[allMemoryRows.length - 1] : null;
     var processState = processRows(doc, samples, chart.rows, latestMemory);
-    renderWarnings(doc, report, chart, range, processState.mismatch, storageMismatch);
+    renderWarnings(doc, report, allMemoryRows, processState.mismatch, storageMismatch);
+    return chart;
   }
   function summary(report) {
     var samples = list(report && report.samples), events = list(report && report.events), last = samples[samples.length - 1];
@@ -579,20 +703,19 @@
       first = list(sample.processes).filter(function (p) { return p.name === rss.name && p.pid === rss.pid && number(p.rss_kib) !== null; })[0] || null;
       return !!first;
     });
-    var failures = events.filter(function (event) { return ["failed", "inconclusive", "unknown", "local-abort", "queue-full", "queue-expired"].indexOf(event.outcome) >= 0; }).length;
+    var failures = events.filter(unconfirmedEvent).length;
     var memory = report.memory_history || {}, detail = detailsFor(report);
     var memoryRowsLatest = memoryRows(report), lastMemory = memoryRowsLatest[memoryRowsLatest.length - 1];
     var rssAnon = lastMemory && lastMemory.rss_anon !== null ? lastMemory.rss_anon / 1024 :
       number(list(last && last.processes).filter(function (p) { return p.name === PRIMARY; })[0] && list(last && last.processes).filter(function (p) { return p.name === PRIMARY; })[0].anon_kib);
     var catalogBytes = firstDefined([last && last.catalog_bytes, lastMemory && lastMemory.catalog]);
-    var tracker = report.memory_tracking || {}, sites = list(tracker.sites), madvise = report.madvise || {}, anomalies = list(report.anomalies);
+    var tracker = report.memory_tracking || {}, sites = measuredSites(tracker), madvise = report.madvise || {}, anomalies = list(report.anomalies);
     var extras = (rssAnon === null ? "" : " RssAnon: " + formatKib(rssAnon) + ".") +
       (catalogBytes !== null ? " Память каталога: " + formatBytes(catalogBytes) + "." : "") +
       (sites.length ? " Инструментированные подсистемы: " + sites.map(function (site) { return (site.name || site.id) + " " + formatBytes(site.live_bytes); }).join(", ") + "." : "") +
-      (report.madvise ? " madvise успешно / ошибка: " + pretty(number(madvise.successes)) + " / " + pretty(number(madvise.failures)) + "." : "") +
+      (hasMeasurements(madvise, ["successes", "failures", "requested_bytes"]) ? " madvise успешно / ошибка: " + pretty(number(madvise.successes)) + " / " + pretty(number(madvise.failures)) + "." : "") +
       (anomalies.some(function (item) { return item.kind === "unattributed-rss-growth"; }) ? " Зафиксирован устойчивый рост RSS без сопоставимого роста учтённых объектов; это не подтверждает утечку." : "");
     var latestDetail = detail && detail.latest;
-    if (latestDetail && latestDetail.smaps_rollup_status === "unsupported") extras += " В procfs отсутствует smaps_rollup; RssAnon читается из status.";
     if (latestDetail && latestDetail.smaps_rollup_source === "smaps-fallback") extras += " Anonymous и Private_Dirty получены из smaps.";
     return "Снимков: " + countWithCapacity(samples.length, report.sample_capacity) + "; завершений поиска: " + countWithCapacity(events.length, report.event_capacity) +
       ", без подтверждённого результата: " + failures + ". " + (rss ? "RSS контроллера: " + formatKib(rss.rss_kib) +
@@ -605,38 +728,230 @@
   };
   if (!root.document || !root.fetch) return;
   function boot() {
-    var doc = root.document, toggle = doc.getElementById("diagnostic-toggle"), status = doc.getElementById("diagnostic-status"), download = doc.getElementById("diagnostic-download");
+    var doc = root.document, toggle = doc.getElementById("diagnostic-toggle"), status = doc.getElementById("diagnostic-status");
+    var download = doc.getElementById("diagnostic-download"), state = doc.getElementById("diagnostic-state");
+    var refreshButton = doc.getElementById("diagnostic-refresh"), cursor = doc.getElementById("diagnostic-cursor");
+    var slider = doc.getElementById("diagnostic-cursor-input"), graph = doc.getElementById("diagnostic-memory-chart");
     if (!toggle || !status || !download) return;
-    var enabled = false, busy = false, range = 2, currentReport = {};
-    function redraw() { render(currentReport, enabled, range); }
-    doc.querySelectorAll("[data-memory-range]").forEach(function (button) {
-      button.addEventListener("click", function () {
-        range = Number(button.dataset.memoryRange);
-        doc.querySelectorAll("[data-memory-range]").forEach(function (item) { item.setAttribute("aria-pressed", String(item === button)); });
+    var stopDialog = doc.getElementById("diagnostic-stop-dialog"), eventFilter = doc.getElementById("diagnostic-event-filter");
+    var rangeButtons = doc.querySelectorAll("[data-memory-range]");
+    var params = new URL(root.location.href).searchParams;
+    var range = params.get("diag-period") === "24" ? 24 : 2;
+    eventFilter.value = params.get("diag-outcomes") === "unconfirmed" ? "unconfirmed" : "all";
+    var enabled, failed = false, busy = false, currentReport = {}, chart, selectedAt;
+    var reportBytes = null, poll, request, pendingSince = 0, resizeFrame;
+    var plotSize = { width: 320, height: 240 };
+
+    function saveOption(key, value) {
+      var url = new URL(root.location.href);
+      if (value) url.searchParams.set(key, value); else url.searchParams.delete(key);
+      root.history.replaceState(root.history.state, "", url);
+    }
+    function markRange() {
+      rangeButtons.forEach(function (button) {
+        button.setAttribute("aria-pressed", String(Number(button.dataset.memoryRange) === range));
+      });
+    }
+    markRange();
+
+    function cursorAt(index) {
+      if (!chart || !chart.xFor) return;
+      var row = chart.rows[index];
+      if (!row) return;
+      var old = graph.querySelector(".diag-cursor-mark");
+      if (old) old.remove();
+      var x = chart.xFor(row, index);
+      var marker = svg(doc, "g", { "class": "diag-cursor-mark", "aria-hidden": "true" });
+      marker.append(svg(doc, "line", { x1: x, x2: x, y1: chart.top, y2: chart.bottom, "class": "diag-cursor-line" }));
+      chart.active.forEach(function (metric) {
+        var value = number(row[metric.key]);
+        if (value !== null) marker.append(svg(doc, "circle", {
+          cx: x, cy: chart.yFor(value), r: 4, "class": "diag-point diag-line diag-line-" + metric.color
+        }));
+      });
+      graph.append(marker);
+      var label = timeLabel(row.at) + " · RSS " + formatBytes(row.rss) + " · анонимная " + formatBytes(row.rss_anon);
+      setText(doc, "diagnostic-cursor-value", label);
+      slider.setAttribute("aria-valuetext", label);
+    }
+
+    function redraw() {
+      chart = render(currentReport, enabled, range, plotSize);
+      cursor.hidden = !chart || !chart.xFor || chart.rows.length < 2;
+      var reportSize = doc.getElementById("diagnostic-report-size");
+      reportSize.hidden = !chart || number(reportBytes) === null;
+      if (!reportSize.hidden) reportSize.textContent = "Размер JSON: " + formatBytes(reportBytes);
+      if (cursor.hidden) return;
+      var index = selectedAt === undefined ? -1 : chart.rows.findIndex(function (row) { return row.at === selectedAt; });
+      if (index < 0) index = chart.rows.length - 1;
+      slider.max = String(chart.rows.length - 1);
+      slider.value = String(index);
+      slider.disabled = chart.rows.length < 2;
+      cursorAt(index);
+    }
+
+    function visible() { return !doc.hidden && !doc.getElementById("diagnostics").hidden; }
+
+    function renderState() {
+      var last = list(currentReport.samples).at(-1), at = last ? number(last.at) : null;
+      var interval = number(currentReport.sample_interval_ms) || 60000;
+      var waiting = pendingSince && Date.now() - pendingSince < 10000;
+      var stale = at !== null && Date.now() - at * 1000 > 2 * interval;
+      var phase = failed ? "error" : enabled === undefined ? "loading" : !enabled ? "off"
+        : at === null ? (waiting ? "pending" : "late") : stale ? "late" : "ready";
+      var labels = {
+        loading: ["Проверяем", "Читаем состояние сбора…"],
+        off: ["Выключен", "Минутные снимки памяти и исходы подбора сохраняются на роутере после включения."],
+        pending: ["Первый снимок", "Сбор включён. Ждём первый снимок контроллера…"],
+        late: ["Данные задерживаются", at === null ? "Первый снимок ещё недоступен. Проверьте состояние контроллера." : "Снимок за " + timeLabel(at) + " устарел. Показан последний доступный отчёт."],
+        ready: ["Включён", "Последний снимок " + timeLabel(at) + " · шаг " + formatAge(interval)],
+        error: ["Ошибка связи", "Не удалось получить отчёт с роутера. Повторите запрос."]
+      };
+      setText(doc, "diagnostic-state", labels[phase][0]);
+      setText(doc, "diagnostic-status", labels[phase][1]);
+      state.dataset.enabled = String(enabled === true);
+      state.dataset.phase = phase;
+      toggle.disabled = busy || enabled === undefined;
+      toggle.textContent = enabled ? "Выключить…" : "Включить сбор";
+      toggle.setAttribute("data-variant", enabled ? "danger" : "primary");
+      download.hidden = !enabled || failed || at === null;
+      refreshButton.hidden = !enabled && !failed;
+      refreshButton.disabled = busy || !!request;
+    }
+
+    function schedule() {
+      root.clearTimeout(poll);
+      if (!visible() || busy) return;
+      var last = list(currentReport.samples).at(-1);
+      var interval = number(currentReport.sample_interval_ms) || 60000;
+      var untilNext = last && number(last.at) !== null ? last.at * 1000 + interval + 1200 - Date.now() : 0;
+      var delay = failed ? 5000 : !enabled ? 30000 : !last
+        ? (Date.now() - pendingSince < 10000 ? 900 : 5000)
+        : Math.min(interval, Math.max(untilNext > 0 ? 2000 : 8000, untilNext));
+      poll = root.setTimeout(refresh, delay);
+    }
+
+    function refresh() {
+      if (request) return request;
+      var controller = new AbortController();
+      var timeout = root.setTimeout(function () { controller.abort(); }, 6000);
+      request = root.fetch("/api/diagnostics?report", { cache: "no-store", signal: controller.signal }).then(function (response) {
+        if (!response.ok && response.status !== 503) throw new Error("HTTP " + response.status);
+        return response.json().then(function (report) {
+          failed = false;
+          enabled = report.enabled === true;
+          var pending = enabled && !list(report.samples).length;
+          if (pending && !pendingSince) pendingSince = Date.now();
+          if (!pending) pendingSince = 0;
+          var length = response.headers.get("Content-Length");
+          reportBytes = length === null ? null : Number(length);
+          currentReport = report;
+          if (!enabled) selectedAt = undefined;
+          redraw();
+        });
+      }).catch(function () { failed = true; }).finally(function () {
+        root.clearTimeout(timeout);
+        request = null;
+        renderState();
+        schedule();
+      });
+      renderState();
+      return request;
+    }
+
+    function toggleCollection() {
+      if (busy || enabled === undefined) return;
+      busy = true;
+      root.clearTimeout(poll);
+      renderState();
+      Promise.resolve(request).then(function () {
+        return root.fetch("/api/diagnostics?" + (enabled ? "disable" : "enable"), { method: "POST", cache: "no-store" });
+      }).then(function (response) {
+        if (!response.ok) throw new Error(String(response.status));
+        return response.json();
+      }).then(function (reply) {
+        enabled = reply.enabled === true;
+        pendingSince = enabled ? Date.now() : 0;
+        currentReport = {};
+        failed = false;
         redraw();
+        return refresh();
+      }).catch(function (error) {
+        setText(doc, "diagnostic-status", error.message === "403" ? "Управление сбором недоступно в этой панели." : "Не удалось изменить состояние сбора.");
+      }).finally(function () {
+        busy = false;
+        toggle.disabled = enabled === undefined;
+        refreshButton.disabled = false;
+        schedule();
+      });
+    }
+
+    toggle.addEventListener("click", function () {
+      if (!enabled) { toggleCollection(); return; }
+      stopDialog.returnValue = "cancel";
+      stopDialog.showModal();
+    });
+    stopDialog.addEventListener("close", function () {
+      if (stopDialog.returnValue === "stop" && enabled) toggleCollection();
+    });
+    rangeButtons.forEach(function (button) {
+      button.addEventListener("click", function () {
+        var nextRange = Number(button.dataset.memoryRange);
+        if (nextRange === range) return;
+        range = nextRange;
+        saveOption("diag-period", range === 24 ? "24" : "");
+        markRange();
+        redraw();
+        if (!graph.hasAttribute("hidden") && !root.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+          graph.getAnimations().forEach(function (animation) { animation.cancel(); });
+          graph.animate([{ opacity: .68 }, { opacity: 1 }], { duration: 170, easing: "ease-out" });
+        }
       });
     });
     doc.querySelectorAll("[data-memory-series]").forEach(function (input) { input.addEventListener("change", redraw); });
-    function refresh() {
-      return root.fetch("/api/diagnostics?report", { cache: "no-store" }).then(function (r) {
-        if (!r.ok && r.status !== 503) throw new Error("Ошибка HTTP " + r.status);
-        return r.json();
-      }).then(function (r) {
-        currentReport = r || {}; enabled = currentReport.enabled === true;
-        toggle.textContent = enabled ? "Выключить и удалить историю" : "Включить сбор";
-        download.hidden = !enabled || !!currentReport.pending;
-        redraw();
-      }).catch(function () { status.textContent = "Не удалось прочитать состояние диагностики."; });
-    }
-    toggle.addEventListener("click", function () {
-      if (busy) return; busy = true; toggle.disabled = true;
-      root.fetch("/api/diagnostics?" + (enabled ? "disable" : "enable"), { method: "POST", cache: "no-store" }).then(function (r) {
-        if (!r.ok) throw new Error("Ошибка HTTP " + r.status);
-        return refresh();
-      }).catch(function () { status.textContent = "Не удалось переключить сбор. Требуется доступ к управлению этой панелью."; })
-        .finally(function () { busy = false; toggle.disabled = false; });
+    eventFilter.addEventListener("change", function () {
+      saveOption("diag-outcomes", eventFilter.value === "unconfirmed" ? "unconfirmed" : "");
+      renderEvents(doc, list(currentReport.events));
     });
-    refresh(); root.setInterval(function () { if (!busy && !doc.hidden) refresh(); }, 60000);
+    function selectSnapshot(index) {
+      if (!chart || !chart.rows[index]) return;
+      slider.value = String(index);
+      selectedAt = index === chart.rows.length - 1 ? undefined : chart.rows[index].at;
+      cursorAt(index);
+    }
+    slider.addEventListener("input", function () { selectSnapshot(Number(slider.value)); });
+    graph.addEventListener("click", function (event) {
+      if (cursor.hidden) return;
+      var rect = graph.getBoundingClientRect();
+      var x = (event.clientX - rect.left) / rect.width * plotSize.width;
+      var nearest = 0, distance = Infinity;
+      chart.rows.forEach(function (row, index) {
+        var offset = Math.abs(chart.xFor(row, index) - x);
+        if (offset < distance) { nearest = index; distance = offset; }
+      });
+      selectSnapshot(nearest);
+    });
+    refreshButton.addEventListener("click", refresh);
+    function wake() {
+      root.clearTimeout(poll);
+      if (visible() && !busy) refresh();
+    }
+    root.addEventListener("hashchange", function () { root.setTimeout(wake, 0); });
+    doc.addEventListener("visibilitychange", wake);
+    var plot = doc.getElementById("diagnostic-plot");
+    new root.ResizeObserver(function ([entry]) {
+      var width = Math.floor(entry.contentRect.width), height = Math.floor(entry.contentRect.height);
+      if (!width || !height || (width === plotSize.width && height === plotSize.height)) return;
+      plotSize = { width: width, height: height };
+      if (!resizeFrame) resizeFrame = root.requestAnimationFrame(function () {
+        resizeFrame = null;
+        if (visible()) {
+          redraw();
+          plot.dataset.measured = "true";
+        }
+      });
+    }).observe(plot);
+    refresh();
   }
   if (root.document.readyState === "loading") root.document.addEventListener("DOMContentLoaded", boot); else boot();
 })(typeof window !== "undefined" ? window : this);

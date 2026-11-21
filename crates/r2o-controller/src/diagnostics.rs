@@ -4,6 +4,8 @@ use crate::portable_atomic::R2oAtomicU64;
 use serde_json::{Value, json};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{c_int, c_long};
+#[cfg(unix)]
+use std::fs::File;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::mem::size_of;
@@ -623,6 +625,7 @@ pub struct Recorder {
     run_dir: PathBuf,
     proc_dir: PathBuf,
     enabled: bool,
+    session: Option<(u64, u64, SystemTime)>,
     started: Instant,
     checked: Option<Instant>,
     sampled: Option<Instant>,
@@ -656,6 +659,7 @@ impl Recorder {
             run_dir,
             proc_dir: PathBuf::from("/proc"),
             enabled: false,
+            session: None,
             started: Instant::now(),
             checked: None,
             sampled: None,
@@ -738,43 +742,39 @@ impl Recorder {
             return;
         }
         self.checked = Some(now);
-        let enabled = diagnostics_enabled(&self.dir);
-        if !enabled {
+        let session = diagnostics_session(&self.dir);
+        if session != self.session {
             memory_enable(false);
-            if self.enabled {
-                self.events.clear();
-                self.samples.clear();
-                self.limits.clear();
-                self.memory_history.clear();
-                self.anomalies.clear();
-                self.growth.clear();
-                self.event_total = 0;
-                self.sample_total = 0;
-                self.limit_total = 0;
-                self.memory_total = 0;
-                self.anomaly_total = 0;
-                self.write_failures = 0;
-                self.last_counts = None;
-                self.last_limit_change = None;
-                self.last_unattributed = None;
-                self.memory_pid = None;
-                self.memory_start_ticks = None;
-                self.memory_epoch = 0;
-                self.first_details.clear();
-                if ensure_diagnostics_dir(&self.dir, true) {
-                    for name in ["enabled", "report.json", "report.new"] {
-                        let _ = fs::remove_file(self.dir.join(name));
-                    }
-                }
-            }
-            self.enabled = false;
+            self.events.clear();
+            self.samples.clear();
+            self.limits.clear();
+            self.memory_history.clear();
+            self.anomalies.clear();
+            self.growth.clear();
+            self.event_total = 0;
+            self.sample_total = 0;
+            self.limit_total = 0;
+            self.memory_total = 0;
+            self.anomaly_total = 0;
+            self.write_failures = 0;
+            self.last_counts = None;
+            self.last_limit_change = None;
+            self.last_unattributed = None;
+            self.memory_pid = None;
+            self.memory_start_ticks = None;
+            self.memory_epoch = 0;
+            self.first_details.clear();
             self.sampled = None;
-            return;
+            self.session = session;
+            self.enabled = session.is_some();
+            if self.enabled {
+                memory_enable(true);
+            } else {
+                self.remove_disabled_report();
+            }
         }
         if !self.enabled {
-            self.enabled = true;
-            self.sampled = None;
-            memory_enable(true);
+            return;
         }
         if self
             .sampled
@@ -1075,15 +1075,17 @@ impl Recorder {
         let memory_base = self
             .memory_history
             .front()
-            .map(|(row_at, row_mono, _)| (*row_at, *row_mono));
+            .map(|(row_at, row_mono_ms, _)| (*row_at, *row_mono_ms / 1000));
         let memory_rows: Vec<Value> = self
             .memory_history
             .iter()
-            .map(|(row_at, row_mono, tail)| {
-                let (base_at, base_mono) = memory_base.unwrap_or((*row_at, *row_mono));
+            .map(|(row_at, row_mono_ms, tail)| {
+                // Компактная история и time_base используют секунды, подробные снимки — миллисекунды.
+                let row_mono_s = *row_mono_ms / 1000;
+                let (base_at, base_mono) = memory_base.unwrap_or((*row_at, row_mono_s));
                 let mut row = Vec::with_capacity(2 + tail.len());
                 row.push(json!(row_at.saturating_sub(base_at)));
-                row.push(json!(row_mono.saturating_sub(base_mono)));
+                row.push(json!(row_mono_s.saturating_sub(base_mono)));
                 row.extend(tail.iter().cloned());
                 Value::Array(row)
             })
@@ -1134,6 +1136,21 @@ impl Recorder {
         self.write_report(&report);
     }
 
+    fn remove_disabled_report(&self) {
+        if !ensure_diagnostics_dir(&self.dir, false) {
+            return;
+        }
+        #[cfg(unix)]
+        let Ok(_guard) = lock_diagnostics_dir(&self.dir) else {
+            return;
+        };
+        if diagnostics_session(&self.dir).is_none() {
+            for name in ["report.json", "report.new"] {
+                let _ = fs::remove_file(self.dir.join(name));
+            }
+        }
+    }
+
     fn record_anomaly(&mut self, anomaly: Value) {
         self.anomaly_total = self.anomaly_total.saturating_add(1);
         if self.anomalies.len() == ANOMALY_CAPACITY {
@@ -1173,7 +1190,19 @@ impl Recorder {
                 return;
             }
         };
-        if bytes.is_empty() || !diagnostics_enabled(&self.dir) {
+        if bytes.is_empty() {
+            return;
+        }
+        #[cfg(unix)]
+        let _guard = match lock_diagnostics_dir(&self.dir) {
+            Ok(guard) => guard,
+            Err(error) => {
+                self.record_write_error("lock", error.raw_os_error().unwrap_or(0));
+                return;
+            }
+        };
+        let current = diagnostics_session(&self.dir);
+        if current.is_none() || self.session.is_some_and(|session| Some(session) != current) {
             return;
         }
         if bytes.len() > REPORT_MAX {
@@ -1208,7 +1237,7 @@ impl Recorder {
         let write_failed = write_result.is_err();
         if write_failed
             || fs::metadata(&tmp).map_or(true, |metadata| metadata.len() as usize > REPORT_MAX)
-            || !diagnostics_enabled(&self.dir)
+            || diagnostics_session(&self.dir) != current
         {
             let _ = fs::remove_file(&tmp);
             if write_failed {
@@ -1388,25 +1417,34 @@ fn ensure_diagnostics_dir(dir: &Path, create: bool) -> bool {
     }
 }
 
-fn diagnostics_enabled(dir: &Path) -> bool {
+#[cfg(unix)]
+fn lock_diagnostics_dir(dir: &Path) -> std::io::Result<File> {
+    let file = File::open(dir)?;
+    file.lock()?;
+    Ok(file)
+}
+
+fn diagnostics_session(dir: &Path) -> Option<(u64, u64, SystemTime)> {
     if !ensure_diagnostics_dir(dir, false) {
-        return false;
+        return None;
     }
-    let marker = dir.join("enabled");
-    let Ok(metadata) = fs::symlink_metadata(marker) else {
-        return false;
-    };
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return false;
+    let metadata = fs::symlink_metadata(dir.join("enabled")).ok()?;
+    if !metadata.is_file() {
+        return None;
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        metadata.uid() == unsafe { libc::geteuid() } && metadata.permissions().mode() & 0o077 == 0
+        if metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.permissions().mode() & 0o077 != 0
+        {
+            return None;
+        }
+        Some((metadata.dev(), metadata.ino(), metadata.modified().ok()?))
     }
     #[cfg(not(unix))]
     {
-        true
+        Some((0, 0, metadata.modified().ok()?))
     }
 }
 
@@ -2506,6 +2544,57 @@ mod tests {
         assert_eq!(process["pid"], 321);
         assert_eq!(process["rss_kib"], 2048);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn diagnostic_restart_between_ticks_discards_the_previous_collection() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let _guard = MEMORY_TEST_LOCK.lock().unwrap();
+        let dir =
+            std::env::temp_dir().join(format!("r2o-diagnostics-restart-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let marker = dir.join("enabled");
+        let enable = || {
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&marker)
+                .unwrap()
+        };
+        let old = enable();
+        let mut recorder = Recorder::new(dir.clone(), dir.join("run"));
+        recorder.tick(Counts::default);
+        recorder.record(json!({ "target": "old.example" }));
+        assert_eq!(recorder.events.len(), 1);
+
+        fs::remove_file(&marker).unwrap();
+        let _new = enable();
+        recorder.checked = None;
+        recorder.tick(Counts::default);
+        assert!(recorder.events.is_empty());
+        assert_eq!(recorder.samples.len(), 1);
+        assert!(marker.exists());
+        let report_path = dir.join("report.json");
+        assert!(report_path.is_file());
+        recorder.started -= Duration::from_secs(60);
+        recorder.checked = None;
+        recorder.sampled = None;
+        recorder.tick(Counts::default);
+        let report: serde_json::Value =
+            serde_json::from_slice(&fs::read(report_path).unwrap()).unwrap();
+        assert_eq!(report["memory_history"]["samples"][1][1], 60);
+        assert!(report["samples"][1]["mono_ms"].as_u64().unwrap() >= 60_000);
+        drop(old);
+        fs::remove_file(marker).unwrap();
+        recorder.checked = None;
+        recorder.tick(Counts::default);
+        assert!(!dir.join("report.json").exists());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(unix)]
