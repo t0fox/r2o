@@ -2305,6 +2305,17 @@ body[data-stale="true"] .lamp::after { opacity: 0; }
 #updates-body[data-install="error"] progress::-webkit-progress-value { background: var(--bad); }
 @media (prefers-reduced-motion: no-preference) {
   .install-steps li::before { transition: transform .4s var(--ease), background-color .18s; }
+  #updates-body[data-install="install"] .install-steps li[data-phase="active"]::after {
+    content: ""; position: absolute; top: -2px; inset-inline-start: 0; height: 2px; width: 26%;
+    background: linear-gradient(90deg, transparent, var(--amber), transparent);
+    animation: install-progress-signal 1.65s ease-in-out infinite;
+  }
+  [data-motion-paused] .install-steps li::after { animation-play-state: paused !important; }
+  @keyframes install-progress-signal {
+    0% { transform: translateX(0); opacity: 0; }
+    35%, 65% { opacity: 1; }
+    100% { transform: translateX(265%); opacity: 0; }
+  }
   .update-transfer progress::-webkit-progress-value { transition: width .36s var(--ease), background-color .18s; }
   #updates-body[data-install="install"] .release-wave, #updates-body[data-install="check"] .release-wave {
     display: block; position: absolute; inset: 5px; border: 1px solid var(--bronze); border-radius: 50%; animation: signal-breathe 1.8s ease-in-out infinite;

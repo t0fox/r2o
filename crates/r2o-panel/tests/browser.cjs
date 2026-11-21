@@ -278,7 +278,8 @@ async function main() {
     }],
   });
   fs.writeFileSync(livePath, JSON.stringify(liveState));
-  fs.writeFileSync(servicePath, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${serviceLog}'\n`);
+  const updateTimeout = path.join(work, "update-timeout");
+  fs.writeFileSync(servicePath, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${serviceLog}'\nif [ "$1" = update-install ] && [ -f '${updateTimeout}' ]; then exit 124; fi\n`);
   fs.chmodSync(servicePath, 0o700);
   const managerRoot = path.join(work, "manager");
   const updateFile = path.join(managerRoot, "state/update.json");
@@ -639,12 +640,24 @@ async function main() {
   assert.equal(fs.existsSync(serviceLog) && fs.readFileSync(serviceLog, "utf8").includes("update-install"), false);
   await evaluate("document.querySelector('#update-install').click(); document.querySelector('[data-ask=yes]').click()");
   await waitFor(() => fs.existsSync(serviceLog) && fs.readFileSync(serviceLog, "utf8").includes("update-install"), "штатный HTTP-запуск установки");
+  await call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
   for (const stage of [0, 1, 2, 3, 4]) {
     writeUpdate({
       busy: stage < 2 ? "staging" : "", install_stage: stage,
       last_ok: stage >= 2, last_utc: Math.floor(Date.now() / 1000), current: stage >= 3 ? "test-2" : "test-1",
     });
     await waitFor(() => evaluate(`document.querySelector('#update-progress').value === ${stage} && !document.querySelector('#update-progress').hidden`), "этап установки " + stage);
+    if (stage < 4) {
+      assert.equal(await evaluate("getComputedStyle(document.querySelector('#install-steps [aria-current=step]'), '::after').animationName"), "install-progress-signal");
+    }
+    if (stage === 3) {
+      await call("Network.enable");
+      await call("Network.setBlockedURLs", { urls: [`http://localhost:${port}/api/update`] });
+      await waitFor(() => evaluate("document.querySelector('#update-progress-text').textContent.includes('ждём связи')"), "потеря связи во время перезапуска");
+      assert.equal(await evaluate("document.querySelector('#update-progress').value"), 3);
+      assert.equal(await evaluate("getComputedStyle(document.querySelector('#install-steps [aria-current=step]'), '::after').animationName"), "install-progress-signal");
+      await call("Network.setBlockedURLs", { urls: [] });
+    }
     if (stage === 3 && captureDir) {
       assert.equal(await evaluate("document.querySelector('#update-empty').hidden"), true);
       const screenshot = await call("Page.captureScreenshot", { format: "png" });
@@ -652,6 +665,14 @@ async function main() {
     }
   }
   assert.equal(await evaluate("document.querySelector('#updates-body').dataset.install"), "done");
+  assert.equal(await evaluate("document.querySelector('#install-steps [aria-current=step]')"), null);
+  fs.writeFileSync(updateTimeout, "");
+  writeUpdate({ busy: "", install_stage: 2, last_utc: Math.floor(Date.now() / 1000), last_ok: true });
+  assert.equal(await evaluate("fetch('/api/control/update-install', {method:'POST'}).then(r => r.status)"), 202);
+  await call("Page.reload");
+  await waitFor(() => evaluate("document.querySelector('#updates-body').dataset.install === 'error'"), "таймаут активации показан как ошибка");
+  assert.equal(await evaluate("document.querySelector('#update-install').disabled"), false);
+  assert.match(await evaluate("document.querySelector('#update-reason').textContent"), /Активация не завершилась вовремя/);
   assert.deepEqual(runtimeErrors, [], `ошибки JavaScript в браузере: ${runtimeErrors.join("; ")}`);
   console.log("Проверка Chrome-панели R2O: ПРОЙДЕНА");
 }

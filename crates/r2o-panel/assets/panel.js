@@ -949,9 +949,12 @@
 
   App.prototype.pollUpdates = function (scheduled) {
     var self = this;
-    if (this.doc.hidden || this.updateInflight || !this.$("updates-body")) return Promise.resolve();
+    var body = this.$("updates-body");
+    if (this.doc.hidden || this.updateInflight || !body) return Promise.resolve();
+    var controlState = this.m && this.m.snap.control_state;
+    var showingInstall = body.dataset && body.dataset.install === "install";
     var idle = !this.updatePending && !this.updateFailed &&
-      !(this.updateStatus && (this.updateStatus.busy || updateApplying(this.updateStatus)));
+      !showingInstall && !(this.updateStatus && (this.updateStatus.busy || updateApplying(this.updateStatus, controlState)));
     if (scheduled && idle && this.lastUpdatePoll !== null && Date.now() - this.lastUpdatePoll < UPDATE_IDLE_POLL_MS) return Promise.resolve();
     this.lastUpdatePoll = Date.now();
     this.updateInflight = true;
@@ -962,11 +965,12 @@
       self.updateStatus = s;
       /* Команда завершена, когда служба снова свободна и состояние новее нажатия
          (установка — когда записан её итог). Тумблер завершается сразу. */
-      if (pending && !s.busy && !updateApplying(s)) {
+      if (pending && !s.busy && !updateApplying(s, controlState)) {
         var since = Math.floor(pending.at / 1000) - 5;
         var done = pending.action === "install" ? num(s.last_utc) >= since :
           pending.action === "check" ? num(s.checked_utc) >= since : true;
-        if (done || Date.now() - pending.at > 15 * 60000) self.updatePending = null;
+        var timeout = pending.action === "install" ? 30 * 60000 : 5 * 60000;
+        if (done || Date.now() - pending.at > timeout) self.updatePending = null;
       }
       self.renderUpdates(s);
     }).catch(function () {
@@ -975,10 +979,14 @@
     }).finally(function () { self.updateInflight = false; });
   };
 
-  function updateApplying(s) {
+  function activationTimedOut(s, controlState) {
+    return !s.busy && s.install_stage === 2 && s.last_ok === true && controlState === "timeout";
+  }
+
+  function updateApplying(s, controlState) {
     return s.busy === "installing" || s.busy === "staging" ||
       ((s.install_stage === 2 || s.install_stage === 3) && s.last_ok === true &&
-        Math.abs(Date.now() / 1000 - num(s.last_utc)) < 900);
+        !activationTimedOut(s, controlState) && Math.abs(Date.now() / 1000 - num(s.last_utc)) < 900);
   }
 
   App.prototype.renderUpdates = function (status) {
@@ -986,10 +994,12 @@
     if (status) this.updateStatus = status;
     var self = this, s = status || {}, pending = this.updatePending;
     var absent = !!s.absent, latest = s.latest || null, current = str(s.current);
-    var busy = str(s.busy), action = updateApplying(s) ? "install" : busy === "checking" ? "check" : pending && pending.action;
+    var controlState = this.m && this.m.snap.control_state;
+    var interrupted = activationTimedOut(s, controlState);
+    var busy = str(s.busy), action = updateApplying(s, controlState) ? "install" : busy === "checking" ? "check" : pending && pending.action;
     var newer = latest && latest.release_id && latest.release_id !== current;
-    var failedInstall = s.last_ok === false && num(s.last_utc) > 0 &&
-      (Number.isInteger(s.install_stage) || str(s.last_release)) && num(s.last_utc) >= num(s.checked_utc) - 5;
+    var failedInstall = interrupted || (s.last_ok === false && num(s.last_utc) > 0 &&
+      (Number.isInteger(s.install_stage) || str(s.last_release)) && num(s.last_utc) >= num(s.checked_utc) - 5);
     var tone = "", reason = "", text;
     if (absent) { text = "Автообновление не подключено"; reason = "Эта установка обновляется командой установки."; }
     else if (action === "install" || action === "check") {
@@ -998,7 +1008,11 @@
     }
     else if (this.updateFailed && !s.current && !s.never && !latest) { text = "Нет связи с панелью"; tone = "warn"; }
     else if (s.never) text = "Обновления ещё не проверялись";
-    else if (failedInstall) { text = "Не удалось установить обновление"; tone = "warn"; reason = str(s.last_message); }
+    else if (failedInstall) {
+      text = "Не удалось установить обновление";
+      tone = "warn";
+      reason = interrupted ? "Пакет подготовлен. Активация не завершилась вовремя. Повторите установку." : str(s.last_message);
+    }
     else if (s.check_ok === false) { text = "Не удалось проверить обновления"; tone = "warn"; reason = str(s.check_error); }
     else if (newer) text = "Доступна версия " + (str(latest.version) || latest.release_id);
     else text = "Установлена последняя версия";
@@ -1048,12 +1062,16 @@
       this.$("update-progress-text").setAttribute("role", "status");
     }
     var stage = s.install_stage;
+    if (action === "install" && pending && num(s.last_utc) < Math.floor(pending.at / 1000) - 5 &&
+        busy !== "installing" && busy !== "staging") stage = 0;
+    if (action === "install" && !Number.isInteger(stage)) stage = 0;
     var showStage = Number.isInteger(stage) && stage >= 0 && stage <= stages.length;
     progress.hidden = !showStage;
     rail.hidden = !showStage;
     Array.from(rail.children).forEach(function (item, index) {
-      item.dataset.phase = index < stage ? "done" : index === stage ? (failedInstall && !action ? "error" : "active") : "waiting";
-      if (showStage && index === stage) item.setAttribute("aria-current", "step");
+      item.dataset.phase = index < stage ? "done" : index === stage ?
+        (action === "install" ? "active" : "error") : "waiting";
+      if (showStage && index === stage && action === "install") item.setAttribute("aria-current", "step");
       else item.removeAttribute("aria-current");
     });
     progress.max = stages.length;
@@ -1061,7 +1079,8 @@
     progress.setAttribute("aria-label", "Завершено этапов установки");
     body.dataset.install = failedInstall && !action ? "error" : action || (stage === stages.length ? "done" : "idle");
     var stepText = !showStage ? "" : stage === stages.length ? "4 из 4 · Службы запущены" :
-      (stage + 1) + " из 4 · " + stages[stage] + (failedInstall && !action ? " · ошибка" : "");
+      (stage + 1) + " из 4 · " + stages[stage] +
+        (this.updateFailed && action === "install" ? " · ждём связи с роутером" : !action ? " · не завершён" : "");
     write("update-progress-text", stepText).hidden = !showStage;
     var auto = this.$("update-auto");
     if (!(pending && /^auto-/.test(pending.action))) auto.checked = !absent && s.auto !== false;

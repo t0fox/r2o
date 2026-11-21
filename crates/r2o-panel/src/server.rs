@@ -1472,7 +1472,12 @@ fn start_service_action(config: &Config, command: &str) -> Result<(), ActionErro
     }
     let mut child_command = Command::new(config.service_path.clone());
     child_command.arg(command);
-    start_action_command(config, child_command, CONTROL_TIMEOUT)
+    let timeout = if command == "update-install" {
+        UPDATE_INSTALL_TIMEOUT
+    } else {
+        CONTROL_TIMEOUT
+    };
+    start_action_command(config, child_command, timeout)
 }
 
 fn start_telegram_check(config: &Config) -> Result<(), ActionError> {
