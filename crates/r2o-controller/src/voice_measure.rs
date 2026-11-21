@@ -896,6 +896,131 @@ fn r2o_ask_voice_with_arm(
     }
 }
 
+/// Провести один STUN Binding-обмен на уже подключённом UDP-сокете.
+#[cfg(unix)]
+pub fn probe_stun_on(
+    socket: &UdpSocket,
+    timeout: Duration,
+) -> std::io::Result<Option<r2k_core::stun::MappedAddress>> {
+    use std::io::{Error, ErrorKind};
+
+    if timeout.is_zero() {
+        return Err(Error::new(ErrorKind::TimedOut, "исчерпан срок STUN-зонда"));
+    }
+    let request = r2k_core::stun::random_binding_request()
+        .ok_or_else(|| Error::other("не получен случайный STUN ID"))?;
+    let txid: [u8; 12] = request[8..].try_into().unwrap();
+    let started = Instant::now();
+    if socket.send(&request)? != request.len() {
+        return Err(Error::new(ErrorKind::WriteZero, "неполная STUN-датаграмма"));
+    }
+    let mut response = [0; 2049];
+    loop {
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        socket.set_read_timeout(Some(remaining))?;
+        match socket.recv(&mut response) {
+            Ok(size) if size < response.len() => {
+                let packet = &response[..size];
+                if let Some(mapped) = r2k_core::stun::verified_binding_address(packet, &txid) {
+                    return Ok(Some(mapped));
+                }
+                if r2k_core::stun::is_binding_error_for(packet, &txid) {
+                    return Err(Error::new(
+                        ErrorKind::InvalidData,
+                        "получен STUN Binding Error",
+                    ));
+                }
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn адресный_stun_ждёт_полный_binding_response_своей_транзакции() {
+    for address in ["127.0.0.1:0", "[::1]:0"] {
+        let receiver = UdpSocket::bind(address).unwrap();
+        let sender = UdpSocket::bind(address).unwrap();
+        sender.connect(receiver.local_addr().unwrap()).unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let responder = std::thread::spawn(move || {
+            let mut request = [0; 20];
+            let (size, client) = receiver.recv_from(&mut request).unwrap();
+            assert_eq!(size, request.len());
+            assert!(r2k_core::stun::is_binding_request(&request));
+            receiver.send_to(b"raw UDP", client).unwrap();
+            let mut response = request.to_vec();
+            response[..2].copy_from_slice(&[1, 1]);
+            receiver.send_to(&response, client).unwrap();
+            let mapped = match client.ip() {
+                std::net::IpAddr::V4(ip) => ip.octets().to_vec(),
+                std::net::IpAddr::V6(ip) => ip.octets().to_vec(),
+            };
+            let family = if client.is_ipv4() { 1 } else { 2 };
+            let attribute_len = (4 + mapped.len()) as u16;
+            response[2..4].copy_from_slice(&(attribute_len + 4).to_be_bytes());
+            response.extend_from_slice(&[0, 0x20]);
+            response.extend_from_slice(&attribute_len.to_be_bytes());
+            response.extend_from_slice(&[0, family]);
+            response.extend_from_slice(&(client.port() ^ 0x2112).to_be_bytes());
+            response.extend(
+                mapped
+                    .iter()
+                    .zip(&request[4..])
+                    .map(|(byte, key)| byte ^ key),
+            );
+
+            let mut foreign = response.clone();
+            foreign[8] ^= 1;
+            assert!(
+                r2k_core::stun::verified_binding_address(
+                    &foreign,
+                    request[8..].try_into().unwrap()
+                )
+                .is_none()
+            );
+            receiver.send_to(&foreign, client).unwrap();
+            let mut malformed = response.clone();
+            malformed[2..4].copy_from_slice(&(attribute_len + 8).to_be_bytes());
+            malformed.extend_from_slice(&[0x80, 0x01, 0, 16]);
+            assert!(
+                r2k_core::stun::verified_binding_address(
+                    &malformed,
+                    request[8..].try_into().unwrap()
+                )
+                .is_none()
+            );
+            receiver.send_to(&malformed, client).unwrap();
+            receiver.send_to(&response, client).unwrap();
+        });
+        let actual = probe_stun_on(&sender, Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        let local = sender.local_addr().unwrap();
+        match (actual, local.ip()) {
+            (r2k_core::stun::MappedAddress::V4 { address, port }, std::net::IpAddr::V4(ip)) => {
+                assert_eq!((address, port), (ip.octets(), local.port()));
+            }
+            (r2k_core::stun::MappedAddress::V6 { address, port }, std::net::IpAddr::V6(ip)) => {
+                assert_eq!((address, port), (ip.octets(), local.port()));
+            }
+            _ => panic!("STUN вернул другое семейство"),
+        }
+        responder.join().unwrap();
+    }
+}
+
 fn r2o_voice_option_value<'a>(
     r2o_arguments: &'a [std::ffi::OsString],
     r2o_index: &mut usize,

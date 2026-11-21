@@ -6,8 +6,18 @@ target=${CARGO_TARGET_DIR:-"$root/target"}
 datapath=${R2OD_BIN:-"$target/release/r2o-datapath"}
 [ -x "$datapath" ] || { echo "соберите r2o-datapath или задайте R2OD_BIN" >&2; exit 2; }
 if [ "${1:-}" != --netns ]; then
-    exec unshare -Urn sh "$0" --netns
+    if [ "$(id -u)" = 0 ]; then
+        exec unshare -n sh "$0" --netns "$@"
+    fi
+    if [ "${1:-}" = --stun ]; then
+        echo "режим --stun требует root для чтения /proc/net/nf_conntrack" >&2
+        exit 2
+    fi
+    exec unshare -Urn sh "$0" --netns "$@"
 fi
+shift
+stun=0
+if [ "${1:-}" = --stun ]; then stun=1; fi
 
 temp=$(mktemp -d)
 pid4=
@@ -26,22 +36,27 @@ nft -f - <<'NFT'
 add table inet r2o_endpoint
 add chain inet r2o_endpoint out { type filter hook output priority 0; policy accept; }
 add rule inet r2o_endpoint out meta mark 19051 return
-add rule inet r2o_endpoint out ip daddr 127.0.0.1 udp dport { 8443, 8543 } counter queue num 65121
-add rule inet r2o_endpoint out ip6 daddr ::1 udp dport { 8443, 8543 } counter queue num 65122
+add rule inet r2o_endpoint out ip daddr 127.0.0.1 udp dport { 3478, 3479, 8443, 8543 } counter queue num 65121
+add rule inet r2o_endpoint out ip6 daddr ::1 udp dport { 3478, 3479, 8443, 8543 } counter queue num 65122
 NFT
-"$datapath" --mode apply --controller-only --mark 19051 --family ipv4 --queue 65121 --control "$temp/v4.sock" >"$temp/v4.log" 2>&1 &
+if [ "$stun" = 1 ]; then
+    nft insert rule inet r2o_endpoint out udp dport 3478 ct state '{ new, established }' counter
+    [ -r /proc/net/nf_conntrack ] || { echo "нет доступа к /proc/net/nf_conntrack" >&2; exit 2; }
+fi
+"$datapath" --mode apply --controller-only --mark 19051 --probe-mark 19052 --family ipv4 --queue 65121 --control "$temp/v4.sock" >"$temp/v4.log" 2>&1 &
 pid4=$!
-"$datapath" --mode apply --controller-only --mark 19051 --family ipv6 --queue 65122 --control "$temp/v6.sock" >"$temp/v6.log" 2>&1 &
+"$datapath" --mode apply --controller-only --mark 19051 --probe-mark 19052 --family ipv6 --queue 65122 --control "$temp/v6.sock" >"$temp/v6.log" 2>&1 &
 pid6=$!
 
-if ! python3 - "$temp" "$root/crates/r2k-core/tests/fixtures" <<'PY'
+if ! python3 - "$temp" "$root/crates/r2k-core/tests/fixtures" "$stun" <<'PY'
 import pathlib
 import socket
 import struct
 import sys
 import time
 
-work, fixtures = map(pathlib.Path, sys.argv[1:])
+work, fixtures = map(pathlib.Path, sys.argv[1:3])
+test_stun = sys.argv[3] == "1"
 anonymous = (fixtures / "quic_v1_initial_no_sni.bin").read_bytes()
 named = (fixtures / "quic_v1_initial.bin").read_bytes()
 
@@ -59,15 +74,17 @@ def frame(stream):
     p = exact(stream, size)
     return int.from_bytes(p[:2], "big"), p[2:]
 
-def command(stream, opcode, data):
+def command(stream, opcode, data, trial=None):
     stream.sendall(struct.pack("!IH", len(data) + 2, opcode) + data)
     while True:
         kind, body = frame(stream)
         if kind == 8 and body[38:40] == opcode.to_bytes(2, "big"):
             assert body[40:42] == b"\x01\x00", (opcode, body.hex())
+            if trial is not None:
+                assert body[42:58] == trial, body.hex()
             return
 
-def wait_apply(stream, plan, want):
+def wait_apply(stream, plan, want, port=8443, trial=None):
     deadline = time.monotonic() + (3 if want else .3)
     seen = []
     while time.monotonic() < deadline:
@@ -81,7 +98,11 @@ def wait_apply(stream, plan, want):
             assert want, "привязка сработала на чужом порту, форме или после DEL"
             assert body[37] == 17
             ports = {int.from_bytes(body[33:35], "big"), int.from_bytes(body[35:37], "big")}
-            assert 8443 in ports, body.hex()
+            assert port in ports, body.hex()
+            if trial is not None:
+                assert body[54:70] == trial, body.hex()
+                assert int.from_bytes(body[70:78], "big") > 0, body.hex()
+                assert body[86:90] == bytes([2, body[0], 5, 1]), body.hex()
             stream.settimeout(3)
             return
     stream.settimeout(3)
@@ -115,9 +136,53 @@ for family, af, address in [(4, socket.AF_INET, "127.0.0.1"), (6, socket.AF_INET
             udp.sendto(anonymous, (address, 8443))
             wait_apply(ctl, plan, False)
         print(f"IPv{family}: точный APPLIED через NFQUEUE, изоляция порта и SNI, DEL")
+
+        if not test_stun:
+            continue
+        with socket.socket(af, socket.SOCK_DGRAM) as server, socket.socket(af, socket.SOCK_DGRAM) as client:
+            server.bind((address, 3478))
+            server.settimeout(3)
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_MARK, 19052)
+            client.connect((address, 3478))
+            client.settimeout(3)
+            local_port = client.getsockname()[1]
+            # Первая контрольная датаграмма подтверждает кортеж conntrack до IP-фрагментации.
+            client.send(b"conntrack")
+            assert server.recv(64) == b"conntrack"
+            ip = socket.inet_pton(af, address).ljust(16, b"\0")
+            flow = bytes([family]) + ip + ip + struct.pack("!HHB", local_port, 3478, 17)
+            trial = bytes([17 + family]) * 16
+            plan = bytes([33 + family]) * 16
+            tlv = b"R2OP" + struct.pack("!4H", 1, 7, 0, 3)
+            tlv += b"\0\x01\0\x10" + plan + b"\0\x02\0\x02\x11\x03\x01\x0c\0\x01\x01"
+            command(ctl, 0x0089, flow + trial + struct.pack("!I", 10000) + tlv, trial)
+
+            request = b"\0\x01\0\0\x21\x12\xa4\x42" + bytes(range(12))
+            with socket.socket(af, socket.SOCK_DGRAM) as foreign:
+                foreign.sendto(request, (address, 3478))
+                assert server.recv(64) == request
+                wait_apply(ctl, plan, False, 3478, trial)
+            client.send(b"generic UDP")
+            assert server.recv(64) == b"generic UDP"
+            wait_apply(ctl, plan, False, 3478, trial)
+
+            client.send(request)
+            wait_apply(ctl, plan, True, 3478, trial)
+            recovered, peer = server.recvfrom(64)
+            assert recovered == request and peer[1] == local_port, (recovered, peer)
+            mapped_ip = socket.inet_pton(af, address)
+            encoded_ip = bytes(a ^ b for a, b in zip(mapped_ip, request[4:]))
+            mapped = struct.pack("!BBH", 0, 1 if family == 4 else 2, local_port ^ 0x2112) + encoded_ip
+            reply = struct.pack("!HH", 0x0101, 4 + len(mapped)) + request[4:]
+            reply += struct.pack("!HH", 0x20, len(mapped)) + mapped
+            server.sendto(reply, peer)
+            assert client.recv(64) == reply
+            command(ctl, 0x008a, flow + trial, trial)
+            print(f"IPv{family}: точный STUN APPLIED через NFQUEUE, сборка фрагментов, Binding Response, DEL")
 PY
 then
     nft list table inet r2o_endpoint >&2
+    if [ "$stun" = 1 ]; then cat /proc/net/nf_conntrack >&2 || true; fi
     cat "$temp/v4.log" "$temp/v6.log" >&2
     exit 1
 fi

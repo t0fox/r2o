@@ -2442,8 +2442,10 @@ fn decide_voice(plan: &Plan, packet: &[u8], view: &PacketView, payload: &[u8]) -
     else {
         return PacketDecision::Accept;
     };
-    if !r2k_core::stun::is_discord_voice_request(payload, destination_port)
-        && !r2k_core::stun::is_binding_request(payload)
+    let stun = r2k_core::stun::is_binding_request(payload);
+    if !stun
+        && (plan.ipfrag != 0
+            || !r2k_core::stun::is_discord_voice_request(payload, destination_port))
     {
         return PacketDecision::Accept;
     }
@@ -2460,6 +2462,22 @@ fn decide_voice(plan: &Plan, packet: &[u8], view: &PacketView, payload: &[u8]) -
         }
         Err(_) => return PacketDecision::Refused { plan_id: plan.id },
     };
+    if plan.ipfrag == 1 {
+        let Some(payload_range) = view.udp_payload_range(packet) else {
+            return PacketDecision::Accept;
+        };
+        return decide_udp_after_apply(
+            plan,
+            packet,
+            view,
+            &payload_range,
+            actions,
+            false,
+            false,
+            false,
+            true,
+        );
+    }
     // C `handle_udp` режет по этому признаку и голосовой путь: датаграмма
     // Voice/STUN атомарна так же, как QUIC Initial.
     if actions
@@ -2707,7 +2725,9 @@ pub fn validate_runtime_plan(plan: &Plan) -> Result<(), &'static str> {
     if plan.transport == 17 && plan.proto == PROTO_VOICE {
         if plan.qsplit != 0
             || plan.qdeny != 0
-            || plan.ipfrag != 0
+            || plan.ipfrag > 1
+            || (plan.ipfrag == 1
+                && (!plan.fakes.is_empty() || plan.pace_us != 0 || plan.delay_us != 0))
             || plan.udplen != 0
             || !plan.splits.is_empty()
             || !plan.seq_overlays.is_empty()
@@ -2727,9 +2747,7 @@ pub fn validate_runtime_plan(plan: &Plan) -> Result<(), &'static str> {
                 .iter()
                 .any(|fake| fake.placement != 0 || fake.tls_mod != 0)
         {
-            return Err(
-                "runtime исполняет только UDP voice fake-before планы без неподдерживаемых операций",
-            );
+            return Err("runtime поддерживает UDP voice fake-before и STUN с ipfrag 1");
         }
         return Ok(());
     }

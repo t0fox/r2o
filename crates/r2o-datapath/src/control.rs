@@ -1184,6 +1184,7 @@ impl NamePlans {
         if let Some(key) = r2o_udp_addr_probe_flow_key(packet)
             && let Some(r2o_probe) = self.addr_probes.get(&key)
             && r2o_probe.expires > r2o_now
+            && !(r2o_probe.plan.proto == PROTO_VOICE && r2o_probe.plan.ipfrag != 0)
         {
             return Some((
                 &r2o_probe.plan,
@@ -1212,27 +1213,38 @@ impl NamePlans {
         packet: &[u8],
         hook: Option<u8>,
     ) -> Option<&AddrProbePlan> {
+        if self.addr_probes.is_empty() {
+            return None;
+        }
         let view = PacketView::parse(packet)?;
         if view.protocol != 17 || view.fragment & 0x3fff != 0 {
             return None;
         }
         let udp = packet.get(view.l4_offset..view.total_len)?;
-        if udp.len() < 8
-            || !crate::r2o_quic::r2o_quic_client_direction(
-                u16::from_be_bytes([udp[0], udp[1]]),
-                u16::from_be_bytes([udp[2], udp[3]]),
-                hook,
-            )
-            || !r2k_core::quic::is_authenticated_initial(
-                packet.get(view.udp_payload_range(packet)?)?,
-            )
-        {
+        if udp.len() < 8 {
             return None;
         }
         let key = r2o_udp_addr_probe_flow_key(packet)?;
-        self.addr_probes
-            .get(&key)
-            .filter(|probe| probe.expires > Instant::now())
+        let probe = self.addr_probes.get(&key)?;
+        if probe.expires <= Instant::now() {
+            return None;
+        }
+        let payload = packet.get(view.udp_payload_range(packet)?)?;
+        let matches = if probe.plan.proto == PROTO_VOICE {
+            !matches!(
+                hook,
+                Some(
+                    crate::netlink::R2O_NF_INET_LOCAL_IN | crate::netlink::R2O_NF_INET_PRE_ROUTING
+                )
+            ) && r2k_core::stun::is_binding_request(payload)
+        } else {
+            crate::r2o_quic::r2o_quic_client_direction(
+                u16::from_be_bytes([udp[0], udp[1]]),
+                u16::from_be_bytes([udp[2], udp[3]]),
+                hook,
+            ) && r2k_core::quic::is_authenticated_initial(payload)
+        };
+        matches.then_some(probe)
     }
 
     fn set_name(&mut self, body: &[u8]) -> (bool, u8) {
@@ -1798,6 +1810,9 @@ impl NamePlans {
             Err(_) => return (false, control::ACK_BAD_PLAN),
         };
         if voice_wildcard {
+            if plan.proto == PROTO_VOICE && plan.ipfrag != 0 {
+                return (false, control::ACK_BAD_PLAN);
+            }
             // C принимает любой разобранный план: shape выводится из proto
             // (2→QUIC, 3→VOICE, иначе ANY), отказа по proto здесь нет.
             let voice_key = VoiceProbeKey {
@@ -1834,6 +1849,9 @@ impl NamePlans {
                 },
             );
             return (true, control::ACK_OK);
+        }
+        if plan.proto == PROTO_VOICE && (plan.transport != 17 || !self.r2o_plan_valid(&plan)) {
+            return (false, control::ACK_BAD_PLAN);
         }
         // C не требует QUIC-плана: shape ANY допустим, прочие proto тоже.
         let now = Instant::now();
