@@ -3130,7 +3130,7 @@ const R2O_GATEWAY_BUFFER: usize = 4096;
 /// Голосовой шлюз Discord наблюдался на стандартном HTTPS и отдельных RTC-портах.
 pub fn r2o_is_discord_voice_websocket(name: &str, port: u16) -> bool {
     const SUFFIX: &[u8] = b".discord.media";
-    matches!(port, 443 | 2048..=2053 | 2096)
+    matches!(port, 443 | 2048..=2053 | 2083 | 2087 | 2096 | 8443)
         && name.len() > SUFFIX.len()
         && name.as_bytes()[name.len() - SUFFIX.len()..].eq_ignore_ascii_case(SUFFIX)
 }
@@ -7298,7 +7298,11 @@ mod tests {
         assert!(r2o_is_discord_voice_websocket(name, 2096));
         assert!(!r2o_is_discord_voice_websocket("example.test", 2096));
         assert!(r2o_is_discord_voice_websocket(name, 443));
-        assert!(!r2o_is_discord_voice_websocket(name, 8443));
+        for port in [2083, 2087, 8443] {
+            assert!(r2o_is_discord_voice_websocket(name, port), "port {port}");
+            assert!(!r2o_is_discord_voice_websocket("example.test", port));
+        }
+        assert!(!r2o_is_discord_voice_websocket(name, 8444));
         assert!(!r2o_is_discord_voice_websocket("notdiscord.media", 2053));
         assert!(!r2o_is_discord_voice_websocket("discord.media", 2053));
 
