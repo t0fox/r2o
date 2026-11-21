@@ -8144,12 +8144,59 @@ struct R2oFamilyRecoveryOutcome {
 }
 
 #[cfg(unix)]
+trait HttpSearchCommandSink {
+    fn try_send(
+        &self,
+        command: HttpSearchCommand,
+    ) -> Result<(), mpsc::TrySendError<HttpSearchCommand>>;
+}
+
+#[cfg(unix)]
+impl HttpSearchCommandSink for SyncSender<HttpSearchCommand> {
+    fn try_send(
+        &self,
+        command: HttpSearchCommand,
+    ) -> Result<(), mpsc::TrySendError<HttpSearchCommand>> {
+        SyncSender::try_send(self, command)
+    }
+}
+
+#[cfg(unix)]
+struct FamilyCommandSender {
+    queue: SyncSender<HttpSearchCommand>,
+    wake: Option<Arc<std::os::unix::net::UnixDatagram>>,
+}
+
+#[cfg(unix)]
+impl FamilyCommandSender {
+    fn notify(&self) {
+        if let Some(wake) = &self.wake {
+            // A full send buffer already has a notification waiting.
+            let _ = wake.send(&[1]);
+        }
+    }
+}
+
+#[cfg(unix)]
+impl HttpSearchCommandSink for FamilyCommandSender {
+    fn try_send(
+        &self,
+        command: HttpSearchCommand,
+    ) -> Result<(), mpsc::TrySendError<HttpSearchCommand>> {
+        self.queue.try_send(command)?;
+        self.notify();
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
 struct R2oFamilyRecoveryWorker {
     jobs: Option<SyncSender<R2oFamilyRecoveryTask>>,
     outcome_sender: SyncSender<R2oFamilyRecoveryOutcome>,
     outcomes: Receiver<R2oFamilyRecoveryOutcome>,
     measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
     trial_commands: SyncSender<HttpSearchCommand>,
+    wake: Option<Arc<std::os::unix::net::UnixDatagram>>,
     confirm_mark: Option<u32>,
     cancel: Arc<AtomicBool>,
     active: HashSet<r2o_controller::discovery::DiscoveryTarget>,
@@ -8162,6 +8209,7 @@ impl R2oFamilyRecoveryWorker {
         measurement_gate: r2o_controller::r2o_resource_limit::R2oMeasurementGate,
         trial_commands: SyncSender<HttpSearchCommand>,
         confirm_mark: Option<u32>,
+        wake: Option<Arc<std::os::unix::net::UnixDatagram>>,
     ) -> Self {
         let (outcome_sender, outcomes) = mpsc::sync_channel(8);
         let mut worker = Self {
@@ -8170,6 +8218,7 @@ impl R2oFamilyRecoveryWorker {
             outcomes,
             measurement_gate,
             trial_commands,
+            wake,
             confirm_mark,
             cancel: Arc::new(AtomicBool::new(false)),
             active: HashSet::new(),
@@ -8194,7 +8243,10 @@ impl R2oFamilyRecoveryWorker {
         let outcome_sender = self.outcome_sender.clone();
         let worker_cancel = Arc::clone(&self.cancel);
         let worker_gate = self.measurement_gate.clone();
-        let worker_commands = self.trial_commands.clone();
+        let worker_commands = FamilyCommandSender {
+            queue: self.trial_commands.clone(),
+            wake: self.wake.clone(),
+        };
         let thread = std::thread::spawn(move || {
             loop {
                 let task = match job_receiver.recv_timeout(R2O_ON_DEMAND_WORKER_IDLE) {
@@ -8220,6 +8272,7 @@ impl R2oFamilyRecoveryWorker {
                 if outcome_sender.send(outcome).is_err() {
                     break;
                 }
+                worker_commands.notify();
             }
         });
         self.jobs = Some(jobs);
@@ -8735,7 +8788,7 @@ fn r2o_probe_time_left(
 #[cfg(unix)]
 fn r2o_family_recovery_run(
     task: R2oFamilyRecoveryTask,
-    commands: &SyncSender<HttpSearchCommand>,
+    commands: &dyn HttpSearchCommandSink,
     cancel: &Arc<AtomicBool>,
 ) -> R2oFamilyRecoveryOutcome {
     let mut outcome = R2oFamilyRecoveryOutcome {
@@ -8901,7 +8954,7 @@ fn r2o_family_recovery_sibling_trial(
     destination: std::net::SocketAddr,
     candidate: &R2oFamilyRecoveryCandidate,
     confirm_mark: Option<u32>,
-    commands: &SyncSender<HttpSearchCommand>,
+    commands: &dyn HttpSearchCommandSink,
     client_hello: Option<&[u8]>,
     probe_deadline: Option<std::time::Instant>,
 ) -> (Result<r2o_controller::fetch::FetchResult, String>, bool) {
@@ -8987,7 +9040,7 @@ fn r2o_family_recovery_sibling_trial_with_ech_state(
     candidate: &PreparedCandidate,
     probe_path: &str,
     confirm_mark: Option<u32>,
-    commands: &SyncSender<HttpSearchCommand>,
+    commands: &dyn HttpSearchCommandSink,
     ech: Option<&r2o_controller::ech::R2oEchConfig>,
     client_hello: Option<&[u8]>,
     has_timestamp: Option<bool>,
@@ -9265,7 +9318,7 @@ fn r2o_run_discovery_candidate_trial(
     probe_path: &str,
     mark: Option<u32>,
     confirm_mark: Option<u32>,
-    commands: &SyncSender<HttpSearchCommand>,
+    commands: &dyn HttpSearchCommandSink,
     client_hello: Option<&[u8]>,
     has_timestamp: Option<bool>,
     ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
@@ -9299,7 +9352,7 @@ fn r2o_run_discovery_candidate_trial_with_encoding(
     probe_path: &str,
     mark: Option<u32>,
     confirm_mark: Option<u32>,
-    commands: &SyncSender<HttpSearchCommand>,
+    commands: &dyn HttpSearchCommandSink,
     client_hello: Option<&[u8]>,
     has_timestamp: Option<bool>,
     ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
@@ -9337,7 +9390,7 @@ fn r2o_run_discovery_candidate_trial_with_retries(
     probe_path: &str,
     mark: Option<u32>,
     confirm_mark: Option<u32>,
-    commands: &SyncSender<HttpSearchCommand>,
+    commands: &dyn HttpSearchCommandSink,
     client_hello: Option<&[u8]>,
     has_timestamp: Option<bool>,
     ech_config: Option<&r2o_controller::ech::R2oEchConfig>,
@@ -9388,7 +9441,7 @@ struct R2oCandidateTrialEvidence {
 
 #[cfg(unix)]
 fn r2o_props_send_command(
-    commands: &SyncSender<HttpSearchCommand>,
+    commands: &dyn HttpSearchCommandSink,
     command: Vec<u8>,
     delete: bool,
 ) -> Result<(), String> {
@@ -9418,7 +9471,7 @@ fn r2o_run_discovery_props_questions(
     target: &r2o_controller::discovery::DiscoveryTarget,
     trigger: &Trigger,
     control: &[u8],
-    commands: &SyncSender<HttpSearchCommand>,
+    commands: &dyn HttpSearchCommandSink,
     mark: Option<u32>,
     has_timestamp: Option<bool>,
     searches: &Arc<std::sync::Mutex<R2oDiscoverySearches>>,
@@ -9628,7 +9681,7 @@ fn r2o_run_discovery_candidate_trial_with_progress(
     probe_path: &str,
     mark: Option<u32>,
     confirm_mark: Option<u32>,
-    commands: &SyncSender<HttpSearchCommand>,
+    commands: &dyn HttpSearchCommandSink,
     client_hello: Option<&[u8]>,
     has_timestamp: Option<bool>,
     allow_non_http_alpn: bool,
@@ -10213,7 +10266,7 @@ fn r2o_discovery_client_shape_trial(
     candidate: &PreparedCandidate,
     client_hello: &[u8],
     confirm_mark: Option<u32>,
-    commands: &SyncSender<HttpSearchCommand>,
+    commands: &dyn HttpSearchCommandSink,
     probe_deadline: Option<std::time::Instant>,
 ) -> Result<bool, String> {
     let remaining = |limit| r2o_probe_time_left(probe_deadline, limit);
@@ -21848,7 +21901,7 @@ fn r2o_discovery_volume_recovery(
     client_hello: Option<&[u8]>,
     client_has_tcp_timestamps: bool,
     mark: Option<u32>,
-    commands: &SyncSender<HttpSearchCommand>,
+    commands: &dyn HttpSearchCommandSink,
     network_whitelist_updates: &std::sync::Mutex<VecDeque<R2oNetworkWhitelistUpdate>>,
     candidate_catalog: Option<&Catalog>,
     suspect_fingerprint: &r2o_controller::catalog::Fingerprint,
@@ -23031,10 +23084,19 @@ fn r2o_link_peer_closed(fd: libc::c_int) -> std::io::Result<bool> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn wait_for_control_frame(
     socket: &std::os::unix::net::UnixStream,
     timeout: std::time::Duration,
+) -> std::io::Result<bool> {
+    wait_for_control_or_worker(socket, timeout, None)
+}
+
+#[cfg(unix)]
+fn wait_for_control_or_worker(
+    socket: &std::os::unix::net::UnixStream,
+    timeout: std::time::Duration,
+    wake: Option<&std::os::unix::net::UnixDatagram>,
 ) -> std::io::Result<bool> {
     use std::os::fd::AsRawFd;
 
@@ -23043,23 +23105,44 @@ fn wait_for_control_frame(
         return Ok(true);
     }
     let started = std::time::Instant::now();
-    let mut descriptor = libc::pollfd {
-        fd: socket.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
+    let mut descriptors = [
+        libc::pollfd {
+            fd: socket.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: wake.map_or(-1, AsRawFd::as_raw_fd),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
     loop {
         let millis = timeout
             .saturating_sub(started.elapsed())
             .as_nanos()
             .div_ceil(1_000_000)
             .min(i32::MAX as u128) as i32;
-        let result = unsafe { libc::poll(&mut descriptor, 1, millis) };
+        let result = unsafe {
+            libc::poll(
+                descriptors.as_mut_ptr(),
+                if wake.is_some() { 2 } else { 1 },
+                millis,
+            )
+        };
         if result > 0 {
-            if descriptor.revents & libc::POLLNVAL != 0 {
+            if descriptors[0].revents & libc::POLLNVAL != 0 {
                 return Err(std::io::Error::from_raw_os_error(libc::EBADF));
             }
-            return Ok(descriptor.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0);
+            if descriptors[1].revents & libc::POLLIN != 0
+                && let Some(wake) = wake
+            {
+                let _ = wake.recv(&mut [0]);
+                return Ok(false);
+            }
+            return Ok(
+                descriptors[0].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0,
+            );
         }
         if result == 0 {
             return Ok(false);
@@ -23089,6 +23172,15 @@ impl ControlInput {
         socket: &mut std::os::unix::net::UnixStream,
         timeout: std::time::Duration,
     ) -> std::io::Result<ControlRead> {
+        self.read_with_worker(socket, timeout, None)
+    }
+
+    fn read_with_worker(
+        &mut self,
+        socket: &mut std::os::unix::net::UnixStream,
+        timeout: std::time::Duration,
+        wake: Option<&std::os::unix::net::UnixDatagram>,
+    ) -> std::io::Result<ControlRead> {
         use std::io::{Error, ErrorKind, Read};
         let started = std::time::Instant::now();
         loop {
@@ -23111,7 +23203,7 @@ impl ControlInput {
 
             let remaining = timeout.saturating_sub(started.elapsed());
             if !timeout.is_zero() && remaining.is_zero()
-                || !wait_for_control_frame(socket, remaining)?
+                || !wait_for_control_or_worker(socket, remaining, wake)?
             {
                 return Ok(ControlRead::Pending);
             }
@@ -24237,6 +24329,22 @@ impl ControlClient {
                 Arc::clone(&worker.searches),
             )
         });
+        let (family_wake, family_notify) = if discovery.is_some() {
+            let sockets = std::os::unix::net::UnixDatagram::pair().and_then(|(rx, tx)| {
+                rx.set_nonblocking(true)?;
+                tx.set_nonblocking(true)?;
+                Ok((rx, tx))
+            });
+            match sockets {
+                Ok((rx, tx)) => (Some(rx), Some(Arc::new(tx))),
+                Err(error) => {
+                    eprintln!("не удалось подключить уведомления семейной проверки: {error}");
+                    (None, None)
+                }
+            }
+        } else {
+            (None, None)
+        };
         let mut family_recovery = discovery.as_ref().map(|_| {
             R2oFamilyRecoveryWorker::new(
                 measurement_gate.clone(),
@@ -24245,6 +24353,7 @@ impl ControlClient {
                     .expect("HTTP worker существует при активном Discovery")
                     .command_sender(),
                 confirm_mark,
+                family_notify,
             )
         });
         let mut quic_discovery = discovery.as_ref().map(|(worker, _, _, _)| {
@@ -25885,7 +25994,11 @@ impl ControlClient {
                         )
                         .map(|deadline| deadline.saturating_duration_since(now))
                         .fold(wait, std::time::Duration::min);
-                    let frame = match self.input.read(&mut self.socket, wait)? {
+                    let frame = match self.input.read_with_worker(
+                        &mut self.socket,
+                        wait,
+                        family_wake.as_ref(),
+                    )? {
                         ControlRead::Frame(frame) => frame,
                         ControlRead::Pending => {
                             measurement_gate.r2o_scheduler_tick();
@@ -29376,7 +29489,7 @@ impl ControlClient {
     }
 
     fn run_quic_discovery_candidate(
-        commands: &SyncSender<HttpSearchCommand>,
+        commands: &dyn HttpSearchCommandSink,
         cancel: &AtomicBool,
         server: std::net::SocketAddr,
         local: std::net::SocketAddr,
@@ -29657,7 +29770,7 @@ impl ControlClient {
         server: std::net::SocketAddr,
         snapshot: &[u8],
         probe_path: &str,
-        commands: &SyncSender<HttpSearchCommand>,
+        commands: &dyn HttpSearchCommandSink,
         cancel: &AtomicBool,
         started_at: std::time::Instant,
         measurement_permit: &mut r2o_controller::r2o_resource_limit::R2oMeasurementPermit,
@@ -33137,7 +33250,7 @@ impl std::fmt::Display for HttpBaselineError {
 #[cfg(unix)]
 fn run_http_search_task(
     task: HttpSearchTask,
-    commands: &SyncSender<HttpSearchCommand>,
+    commands: &dyn HttpSearchCommandSink,
     cancel: &AtomicBool,
     records: &std::sync::Mutex<HttpSearchRecordCache>,
 ) -> Result<HttpSearchCompletion, HttpSearchFailure> {
@@ -33399,7 +33512,7 @@ fn run_http_trial_task(
     mark: Option<u32>,
     request_path: &[u8],
     cut: bool,
-    commands: &SyncSender<HttpSearchCommand>,
+    commands: &dyn HttpSearchCommandSink,
 ) -> Result<HttpTrialResult, HttpSearchFailure> {
     let bound = match BoundTcpProbe::open(target.family, r2o_candidate_confirmation_mark(mark)) {
         Ok(bound) => bound,
@@ -33586,7 +33699,7 @@ fn run_http_trial_task(
 
 #[cfg(unix)]
 fn ask_http_controller<T: Send + 'static>(
-    commands: &SyncSender<HttpSearchCommand>,
+    commands: &dyn HttpSearchCommandSink,
     build: impl FnOnce(std::time::Instant, SyncSender<Result<T, String>>) -> HttpSearchCommand,
 ) -> Result<T, String> {
     ask_http_controller_until(commands, CONTROL_ACK_TIMEOUT, build)
@@ -33606,7 +33719,7 @@ fn r2o_http_command_expired<T>(
 
 #[cfg(unix)]
 fn ask_http_controller_until<T: Send + 'static>(
-    commands: &SyncSender<HttpSearchCommand>,
+    commands: &dyn HttpSearchCommandSink,
     timeout: std::time::Duration,
     build: impl FnOnce(std::time::Instant, SyncSender<Result<T, String>>) -> HttpSearchCommand,
 ) -> Result<T, String> {
@@ -33639,7 +33752,7 @@ fn ask_http_controller_until<T: Send + 'static>(
 
 #[cfg(unix)]
 fn r2o_collect_controller_applied_events_until(
-    commands: &SyncSender<HttpSearchCommand>,
+    commands: &dyn HttpSearchCommandSink,
     trial_id: [u8; 16],
     timeout: std::time::Duration,
     is_exact_match: impl Fn(&r2k_core::control::AppliedEvent) -> bool,
@@ -33653,7 +33766,7 @@ fn r2o_collect_controller_applied_events_until(
 
 #[cfg(unix)]
 fn r2o_collect_controller_applied_events_until_satisfied(
-    commands: &SyncSender<HttpSearchCommand>,
+    commands: &dyn HttpSearchCommandSink,
     trial_id: [u8; 16],
     timeout: std::time::Duration,
     requirement_met: impl Fn(&[r2k_core::control::AppliedEvent]) -> bool,
@@ -40642,6 +40755,60 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn queued_family_command_wakes_control_without_consuming_a_socket_frame() {
+        use super::{
+            ControlInput, ControlRead, FamilyCommandSender, HttpSearchCommand,
+            HttpSearchCommandSink,
+        };
+        use std::io::Write as _;
+        use std::os::unix::net::{UnixDatagram, UnixStream};
+        use std::time::{Duration, Instant};
+
+        let (wake_rx, wake_tx) = UnixDatagram::pair().unwrap();
+        wake_rx.set_nonblocking(true).unwrap();
+        wake_tx.set_nonblocking(true).unwrap();
+        let (queue, commands) = std::sync::mpsc::sync_channel(1);
+        let sender = FamilyCommandSender {
+            queue,
+            wake: Some(Arc::new(wake_tx)),
+        };
+        let (reply, _) = std::sync::mpsc::sync_channel(1);
+        assert!(
+            sender
+                .try_send(HttpSearchCommand::PropsSend {
+                    command: vec![1, 2],
+                    deadline: Instant::now() + Duration::from_secs(1),
+                    reply,
+                })
+                .is_ok()
+        );
+
+        let (mut socket, mut peer) = UnixStream::pair().unwrap();
+        peer.write_all(&r2k_core::control::encode_frame(0x9000, b"kept").unwrap())
+            .unwrap();
+        let mut input = ControlInput::default();
+        assert!(matches!(
+            input
+                .read_with_worker(&mut socket, Duration::ZERO, Some(&wake_rx))
+                .unwrap(),
+            ControlRead::Pending
+        ));
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            HttpSearchCommand::PropsSend { .. }
+        ));
+        let ControlRead::Frame(frame) = input
+            .read_with_worker(&mut socket, Duration::ZERO, Some(&wake_rx))
+            .unwrap()
+        else {
+            panic!("expected the original datapath frame");
+        };
+        assert_eq!(frame.kind, 0x9000);
+        assert_eq!(frame.body, b"kept");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn link_wait_readable_matches_c() {
         use std::io::Write as _;
         use std::os::unix::net::UnixStream;
@@ -43110,7 +43277,7 @@ mod tests {
 
         let gate = r2o_controller::r2o_resource_limit::R2oMeasurementGate::new(1);
         let (commands, _receiver) = mpsc::sync_channel(1);
-        let worker = super::R2oFamilyRecoveryWorker::new(gate, commands, Some(0));
+        let worker = super::R2oFamilyRecoveryWorker::new(gate, commands, Some(0), None);
         let deadline = Instant::now() + Duration::from_secs(13);
         while worker
             .thread
